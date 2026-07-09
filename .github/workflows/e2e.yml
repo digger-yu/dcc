@@ -46,6 +46,13 @@ jobs:
           chmod +x arith
           echo "=== arith hex dump ==="
           xxd arith | head -30
+          echo "=== arith objdump ==="
+          objdump -D -b binary -m i386:x86-64 arith 2>&1 | head -60
+          echo "=== arith readelf ==="
+          readelf -h arith 2>&1
+          readelf -l arith 2>&1
+          echo "=== arith strace ==="
+          strace -e trace=exit ./arith 2>&1 || true
           echo "=== arith file info ==="
           file arith
           rc=0; ./arith || rc=$?
