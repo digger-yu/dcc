@@ -413,38 +413,24 @@ impl Codegen {
     }
     fn store_stack(&mut self, reg: u8, off: i32) {
         // mov [rbp+off], reg
-        // x86-64: [rbp+disp] 永远需要 SIB byte (base=RBP → SIB base=101)
-        // SIB=0x65: SS=00(scale×1), index=100(no index), base=101(RBP)
         let mut rex = 0x48u8;
         if reg >= 8 { rex |= 0x44; }
         self.emit(&[rex, 0x89]);
-        if off.unsigned_abs() < 128 {
-            // mod=01 (8-bit disp), reg field, r/m=100 (SIB follows)
-            self.emit(&[0x45 | ((reg & 7) << 3)]);
-            self.emit(&[0x65]); // SIB: no index, base=RBP
-            self.emit(&[off as i8 as u8]);
+        if (off as i32).abs() < 128 {
+            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
         } else {
-            // mod=10 (32-bit disp), reg field, r/m=100 (SIB follows)
             self.emit(&[0x85 | ((reg & 7) << 3)]);
-            self.emit(&[0x65]); // SIB: no index, base=RBP
             self.emit(&off.to_le_bytes());
         }
     }
     fn load_stack(&mut self, reg: u8, off: i32) {
-        // mov reg, [rbp+off]
-        // x86-64: [rbp+disp] 永远需要 SIB byte
         let mut rex = 0x48u8;
         if reg >= 8 { rex |= 0x44; }
         self.emit(&[rex, 0x8B]);
-        if off.unsigned_abs() < 128 {
-            // mod=01 (8-bit disp), reg field, r/m=100 (SIB follows)
-            self.emit(&[0x45 | ((reg & 7) << 3)]);
-            self.emit(&[0x65]); // SIB: no index, base=RBP
-            self.emit(&[off as i8 as u8]);
+        if (off as i32).abs() < 128 {
+            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
         } else {
-            // mod=10 (32-bit disp), reg field, r/m=100 (SIB follows)
             self.emit(&[0x85 | ((reg & 7) << 3)]);
-            self.emit(&[0x65]); // SIB: no index, base=RBP
             self.emit(&off.to_le_bytes());
         }
     }

@@ -44,18 +44,9 @@ jobs:
         run: |
           ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
           chmod +x arith
-          echo "=== ELF header ==="
-          readelf -h arith 2>&1
-          echo "=== ELF program headers ==="
-          readelf -l arith 2>&1
-          echo "=== Full code hex dump (from 0x78 = entry) ==="
-          xxd -s 0x78 -l 160 arith
-          echo "=== Code at entry 0x78 ==="
-          readelf -x .data arith 2>&1 || true
-          echo "=== Try to run with timeout ==="
-          timeout 1 ./arith; echo "exit: $?"
-          echo "=== Check binary size ==="
-          ls -l arith
+          rc=0; ./arith || rc=$?
+          echo "arith exit: $rc"
+          test $rc -eq 23
 
       - name: Compile control.c
         run: |
