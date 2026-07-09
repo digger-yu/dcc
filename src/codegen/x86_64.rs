@@ -27,6 +27,9 @@ pub struct Codegen {
     next_label: u32,
     /// 变量名 -> [rbp+off] 偏移
     var_map: HashMap<String, i32>,
+    /// while 循环的跳转目标
+    loop_continue: Option<String>,
+    loop_break: Option<String>,
 }
 
 struct PendingJump {
@@ -47,6 +50,8 @@ impl Codegen {
             pending: vec![],
             next_label: 0,
             var_map: HashMap::new(),
+            loop_continue: None,
+            loop_break: None,
         }
     }
 
@@ -176,15 +181,6 @@ impl Codegen {
         }
 
         self.resolve();
-
-        eprintln!("=== codegen ({} bytes) ===", self.code.len());
-        for (i, chunk) in self.code.chunks(16).enumerate() {
-            eprint!("  {:04x}: ", i * 16);
-            for b in chunk { eprint!("{:02x} ", b); }
-            eprintln!();
-        }
-        eprintln!("=== var_map: {:?} ===", self.var_map);
-        eprintln!("=== labels: {:?} ===", self.labels);
     }
 
     fn call_label(&mut self, l: &str) {
@@ -219,6 +215,11 @@ impl Codegen {
             Stmt::While { cond, body, .. } => {
                 let l_start = self.fresh_label();
                 let l_end   = self.fresh_label();
+                // Save and set loop context
+                let saved_continue = self.loop_continue.clone();
+                let saved_break = self.loop_break.clone();
+                self.loop_continue = Some(l_start.clone());
+                self.loop_break = Some(l_end.clone());
                 self.label(&l_start);
                 self.gen_expr(cond, 0);
                 self.emit(&[0x85, 0xc0]);
@@ -226,6 +227,9 @@ impl Codegen {
                 self.gen_stmt(body);
                 self.jmp_rel32(&l_start, JumpKind::Jmp);
                 self.label(&l_end);
+                // Restore loop context
+                self.loop_continue = saved_continue;
+                self.loop_break = saved_break;
             }
             Stmt::Block { b, .. } => {
                 for it in &b.items {
@@ -241,8 +245,16 @@ impl Codegen {
                     }
                 }
             }
-            Stmt::Break { .. } => { /* M0 简化:while 内的 break 假定唯一 - 不实现 */ }
-            Stmt::Continue { .. } => {}
+            Stmt::Break { .. } => {
+                if let Some(l) = self.loop_break.clone() {
+                    self.jmp_rel32(&l, JumpKind::Jmp);
+                }
+            }
+            Stmt::Continue { .. } => {
+                if let Some(l) = self.loop_continue.clone() {
+                    self.jmp_rel32(&l, JumpKind::Jmp);
+                }
+            }
             _ => panic!("unsupported stmt in M0: {:?}", s),
         }
     }
@@ -414,12 +426,10 @@ impl Codegen {
     // 借用,避免递归可变借用
     fn mov_to_stack(&mut self, reg: u8, name: &str) {
         let off = self.var_offset(name);
-        eprintln!("DEBUG: store {} to rbp{:+}(reg={})", name, off, reg);
         self.store_stack(reg, off);
     }
     fn mov_from_stack(&mut self, reg: u8, name: &str) {
         let off = self.var_offset(name);
-        eprintln!("DEBUG: load {} from rbp{:+}(reg={})", name, off, reg);
         self.load_stack(reg, off);
     }
     fn store_stack(&mut self, reg: u8, off: i32) {
