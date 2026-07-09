@@ -25,7 +25,7 @@ pub struct Codegen {
     /// 尚未解析的跳转
     pending: Vec<PendingJump>,
     next_label: u32,
-    /// 变量名 -> [rbp+off] 偏移
+    /// 变量名 -> [r13+off] 偏移
     var_map: HashMap<String, i32>,
     /// while 循环的跳转目标
     loop_continue: Option<String>,
@@ -139,8 +139,8 @@ impl Codegen {
                 self.var_map.clear();
 
                 self.label(&f.name.name);
-                self.emit(&[0x55]);                 // push rbp
-                self.emit(&[0x48, 0x89, 0xe5]);     // mov rbp, rsp
+                self.emit(&[0x41, 0x55]);             // push r13
+                self.emit(&[0x49, 0x89, 0xe5]);       // mov r13, rsp
 
                 // 非 main 函数: 把寄存器参数存入栈槽
                 if f.name.name != "main" {
@@ -150,7 +150,7 @@ impl Codegen {
                                 // 预分配栈槽并记录偏移
                                 let off = -(self.var_map.len() as i32 * 8 + 8);
                                 self.var_map.insert(name.name.clone(), off);
-                                // 从参数寄存器存到 [rbp+off]
+                                // 从参数寄存器存到 [r13+off]
                                 self.store_stack(arg_regs[i], off);
                             }
                         }
@@ -175,7 +175,7 @@ impl Codegen {
 
                 // 默认返回 0
                 self.emit(&[0x31, 0xc0]);             // xor eax, eax
-                self.emit(&[0xc9]);                   // leave
+                self.emit(&[0x41, 0x5d]);             // pop r13
                 self.emit(&[0xc3]);                   // ret
             }
         }
@@ -197,7 +197,8 @@ impl Codegen {
             Stmt::Return { val, .. } => {
                 if let Some(e) = val { self.gen_expr(e, 0 /* eax */); }
                 else { self.emit(&[0x31, 0xc0]); /* xor eax, eax */ }
-                self.emit(&[0xc9, 0xc3]);   // leave; ret
+                self.emit(&[0x41, 0x5d]);           // pop r13
+                self.emit(&[0xc3]);                 // ret
             }
             Stmt::Expr { e, .. } => { self.gen_expr(e, 0); }
             Stmt::If { cond, then_, else_, .. } => {
@@ -414,7 +415,7 @@ impl Codegen {
         }
     }
 
-    // 变量存储 - M0 简化:所有局部变量共享 [rbp-8], [rbp-16]..栈
+    // 变量存储 - M0 简化:所有局部变量共享 [r13-8], [r13-16]..栈
     fn var_offset(&mut self, name: &str) -> i32 {
         if let Some(&off) = self.var_map.get(name) {
             return off;
@@ -433,25 +434,28 @@ impl Codegen {
         self.load_stack(reg, off);
     }
     fn store_stack(&mut self, reg: u8, off: i32) {
-        // mov [rbp+off], reg
+        // mov [r13+off], reg  (R13 frame pointer, no SIB byte needed)
         let mut rex = 0x48u8;
-        if reg >= 8 { rex |= 0x44; }
+        if reg >= 8 { rex |= 0x44; }   // REX.R for high reg
+        rex |= 0x01;                    // REX.B for R13 base
         self.emit(&[rex, 0x89]);
         if (off as i32).abs() < 128 {
-            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
+            self.emit(&[0x4D | ((reg & 7) << 3), off as i8 as u8]);
         } else {
-            self.emit(&[0x85 | ((reg & 7) << 3)]);
+            self.emit(&[0x8D | ((reg & 7) << 3)]);
             self.emit(&off.to_le_bytes());
         }
     }
     fn load_stack(&mut self, reg: u8, off: i32) {
+        // mov reg, [r13+off]  (R13 frame pointer, no SIB byte needed)
         let mut rex = 0x48u8;
-        if reg >= 8 { rex |= 0x44; }
+        if reg >= 8 { rex |= 0x44; }   // REX.R for high reg
+        rex |= 0x01;                    // REX.B for R13 base
         self.emit(&[rex, 0x8B]);
         if (off as i32).abs() < 128 {
-            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
+            self.emit(&[0x4D | ((reg & 7) << 3), off as i8 as u8]);
         } else {
-            self.emit(&[0x85 | ((reg & 7) << 3)]);
+            self.emit(&[0x8D | ((reg & 7) << 3)]);
             self.emit(&off.to_le_bytes());
         }
     }
