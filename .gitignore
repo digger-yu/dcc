@@ -20,6 +20,7 @@ Thumbs.db
 bin/
 *.o
 *.s
+*.exe
 a.out
 core
 core.*
