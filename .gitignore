@@ -1,0 +1,25 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WorkBuddy
+.workbuddy/
+
+# DCC artifacts
+bin/
+*.o
+*.s
+a.out
+core
+core.*
