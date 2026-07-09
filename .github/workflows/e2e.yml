@@ -42,9 +42,13 @@ jobs:
 
       - name: Compile arith.c
         run: |
+          sudo apt-get install -y strace 2>&1 | tail -3
           ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
           chmod +x arith
           xxd arith | head -20
+          echo "=== strace ==="
+          strace -f ./arith 2>&1 | tail -30
+          echo "=== arith exit ==="
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
           test $rc -eq 23
