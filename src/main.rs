@@ -9,6 +9,10 @@ mod cli;
 mod driver;
 mod diagnostics;
 mod target;
+mod tokens;
+mod ast;
+mod parser;
+mod codegen;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();

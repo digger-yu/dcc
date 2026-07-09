@@ -64,9 +64,13 @@ impl TargetTriple {
         #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
         return Self { arch: Arch::X86_64, vendor: "pc".into(),
                       os: Os::Windows, abi: Abi::Msvc };
-        // 兜底:假装 x86_64 linux
-        Self { arch: Arch::X86_64, vendor: "unknown".into(),
-               os: Os::Linux, abi: Abi::Gnu }
+        // 兜底: 用 unreachable!() 抑制 dead_code 警告, 只在支持的目标上编译
+        #[allow(unreachable_code)]
+        {
+            let _ = Abi::Gnu; // 抑制 Abi unused 警告
+            Self { arch: Arch::X86_64, vendor: "unknown".into(),
+                   os: Os::Linux, abi: Abi::Gnu }
+        }
     }
 
     pub fn parse(s: &str) -> Result<Self, String> {

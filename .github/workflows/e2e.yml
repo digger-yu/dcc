@@ -1,0 +1,77 @@
+# DCC CI 快速验证 workflow
+# 第一性原理: 内核编译 30-60 分钟太重,先 e2e 验证 1 分钟
+
+name: dcc-e2e
+
+on:
+  push:
+    branches: [main, develop, "feat/**", "perf/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    name: "End-to-end compile and run"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build dcc
+        run: |
+          cargo build --release
+          mkdir -p bin && cp target/release/dcc bin/dcc
+          ./bin/dcc --version
+
+      - name: Compile hello.c
+        run: |
+          ./bin/dcc -std=gnu23 -o hello examples/hello.c
+          file hello
+          ls -la hello
+          chmod +x hello
+          ./hello
+          echo "exit code: $?"
+          # 期望 exit 42
+
+      - name: Compile arith.c
+        run: |
+          ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
+          chmod +x arith && ./arith
+          echo "arith exit: $?"
+
+      - name: Compile control.c
+        run: |
+          ./bin/dcc -std=gnu23 -O0 -o control examples/control.c
+          chmod +x control && ./control
+          echo "control exit: $?"
+
+      - name: Compile call.c
+        run: |
+          ./bin/dcc -std=gnu23 -O0 -o call examples/call.c
+          chmod +x call && ./call
+          echo "call exit: $?"
+
+      - name: Test error diagnostics
+        run: |
+          ./bin/dcc -std=gnu23 -o /tmp/should_fail examples/bad.c 2>&1 | head -20 || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## DCC e2e Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Example | Expected | Got | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|----------|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| hello.c | 42 | $(./hello; echo $?) | - |" >> $GITHUB_STEP_SUMMARY
+          echo "| arith.c | 0 | $(./arith; echo $?) | - |" >> $GITHUB_STEP_SUMMARY
+          echo "| control.c | 100 | $(./control; echo $?) | - |" >> $GITHUB_STEP_SUMMARY
+          echo "| call.c | 42 | $(./call; echo $?) | - |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

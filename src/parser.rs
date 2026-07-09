@@ -74,6 +74,8 @@ impl<'a> Parser<'a> {
         let ty = self.parse_type()?;
         let (is_static, is_extern) = (false, false);
         let name = self.parse_ident()?;
+        let name_span = name.span.clone();
+        let name_for_decl = name.clone();
         // 区分变量 vs 函数
         if self.cur.kind == TokKind::LParen {
             self.advance();
@@ -90,14 +92,14 @@ impl<'a> Parser<'a> {
             };
             Some(Decl::Func(FuncDecl {
                 ret_ty: ty, name, params, body,
-                span: self.lex.pos as u32, // M0 简化:不存准确 span
+                span: name_span, // M0 简化:用名字的 span 当函数 span
                 is_static, is_extern,
             }))
         } else if self.cur.kind == TokKind::Semi {
             self.advance();
             Some(Decl::Var(VarDecl {
-                ty, name, init: None,
-                span: name.span,
+                ty, name: name_for_decl, init: None,
+                span: name_span,
                 is_static, is_extern,
             }))
         } else {
@@ -154,7 +156,7 @@ impl<'a> Parser<'a> {
 
     // block: { (decl | stmt)* }
     fn parse_block(&mut self) -> Block {
-        let start = self.cur.span.line;
+        let _start = self.cur.span.line;
         let mut items = vec![];
         loop {
             if self.cur.kind == TokKind::RBrace || self.cur.kind == TokKind::Eof { break; }
@@ -307,7 +309,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if !self.expect(TokKind::RParen, "')'") { return None; }
-                e = Expr::Call { callee: name.clone(), args, span, ty: int_t() };
+                e = Expr::Call { callee: name.clone(), args, span: span.clone(), ty: int_t() };
             } else {
                 self.err_here("E0005", "only identifier() can be called");
                 return None;

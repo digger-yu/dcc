@@ -4,7 +4,9 @@
 // 标识符 Span 完整保留——错误信息、debug 都需要它。
 
 use crate::diagnostics::Span;
+use crate::tokens::Tok;
 
+// Ident: 标识符,含名字+位置。Clone 是显式语义(代码里我们会显式 clone)
 #[derive(Debug, Clone)]
 pub struct Ident { pub name: String, pub span: Span }
 

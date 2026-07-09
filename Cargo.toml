@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["DCC Contributors"]
 description = "DCC: A suckless C compiler. Faster than GCC for the same job."
-license = "MIT"
+license    = "Apache-2.0"
 
 [profile.release]
 opt-level = 3

@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::Path;
 use crate::cli::Config;
 use crate::diagnostics::Diagnostic;
 use crate::target::Target;
@@ -24,7 +23,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // 解析
     let file = cfg.input.display().to_string();
-    let (prog, mut diags) = parser::parse(&src, &file);
+    let (prog, diags) = parser::parse(&src, &file);
     if !diags.is_empty() { return Err(diags); }
 
     // dump AST?

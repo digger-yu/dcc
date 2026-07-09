@@ -34,6 +34,7 @@ struct PendingJump {
     target: String,
     kind: JumpKind,
 }
+#[derive(PartialEq)]
 enum JumpKind { Jmp, Je, Jne, Jl, Jle, Jg, Jge }
 
 impl Codegen {
@@ -62,28 +63,41 @@ impl Codegen {
 
     fn jmp_rel32(&mut self, target: &str, kind: JumpKind) {
         let at = self.pos();
-        // 占位 6 字节
-        let op = match kind {
-            JumpKind::Jmp => 0xE9, JumpKind::Je => 0x0F84, JumpKind::Jne => 0x0F85,
-            JumpKind::Jl  => 0x0F8C, JumpKind::Jle => 0x0F8E,
-            JumpKind::Jg  => 0x0F8F, JumpKind::Jge => 0x0F8D,
-        };
-        if kind == JumpKind::Jmp { self.emit(&op.to_le_bytes()); self.emit(&0i32.to_le_bytes()); }
-        else { self.emit(&op.to_le_bytes()); self.emit(&0i32.to_le_bytes()); }
+        // 第一性原理: 统一 6 字节布局,方便 patch
+        //   短 jmp:  E9 + rel32           (5 字节) + 1 字节 NOP pad
+        //   长 jcc:  0F 8x + rel32       (6 字节)
+        // PendingJump.at 指向 6 字节起点,resolve() 时统一 patch rel32
+        if kind == JumpKind::Jmp {
+            self.emit(&[0xE9, 0, 0, 0, 0, 0x90]);   // E9 + rel32 + NOP
+        } else {
+            let cc: u8 = match kind {
+                JumpKind::Je  => 0x84,
+                JumpKind::Jne => 0x85,
+                JumpKind::Jl  => 0x8C,
+                JumpKind::Jle => 0x8E,
+                JumpKind::Jg  => 0x8F,
+                JumpKind::Jge => 0x8D,
+                _ => unreachable!(),
+            };
+            self.emit(&[0x0F, cc, 0, 0, 0, 0]);
+        }
         self.pending.push(PendingJump { at, target: target.into(), kind });
     }
 
     pub fn resolve(&mut self) {
         for p in self.pending.drain(..) {
             let dst = *self.labels.get(&p.target).expect("unresolved label");
-            let rel = (dst as i64) - ((p.at + 6) as i64);
             let off = p.at as usize;
-            // 修改 32 位偏移
+            // rel32 起点不同:
+            //   短 jmp: E9 之后 1 字节起, 指向 at+5
+            //   长 jcc: 0F 8x 之后 2 字节起, 指向 at+6
+            let (rel_from, rel_off) = match p.kind {
+                JumpKind::Jmp => (p.at + 5, off + 1),
+                _             => (p.at + 6, off + 2),
+            };
+            let rel = (dst as i64) - (rel_from as i64);
             let bytes = (rel as i32).to_le_bytes();
-            match p.kind {
-                JumpKind::Jmp => self.code[off+1..off+5].copy_from_slice(&bytes),
-                _             => self.code[off+2..off+6].copy_from_slice(&bytes),
-            }
+            self.code[rel_off..rel_off + 4].copy_from_slice(&bytes);
         }
     }
 

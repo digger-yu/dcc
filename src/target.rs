@@ -2,7 +2,7 @@
 // 第一性原理: 后端是"数据驱动"——不同架构共享一套 IR,只换指令编码表。
 // suckless 准则: 不为每种架构写一个 codegen.rs;而是 codegen 跑在 target 描述之上。
 
-use crate::cli::{Arch, Os, Abi, TargetTriple};
+use crate::cli::{Arch, Os, TargetTriple};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endian { Little, Big }
@@ -10,6 +10,7 @@ pub enum Endian { Little, Big }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalleeSave { SysV, Win64, AAPCS64, AAPCS }
 
+#[derive(Clone)]
 pub struct Target {
     pub triple:     TargetTriple,
     pub arch:       Arch,
