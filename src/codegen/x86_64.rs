@@ -269,8 +269,7 @@ impl Codegen {
                 self.mov_imm(dst, *v);
             }
             Expr::Ident { name, .. } => {
-                // M0: 标识符视为已绑定到 [rbp-8] 局部 - 未实现存储位置,M0 不支持 var 读取
-                // 允许 main 内 a=1 后读 a:我们存到 [rbp-8]
+                // 从 [r13+off] 加载变量值到 dst
                 self.mov_from_stack(dst, &name.name);
             }
             Expr::Binop { op, l, r, .. } => {
@@ -398,10 +397,14 @@ impl Codegen {
             }
             BinOp::Shl => {
                 // shift amount already in cl (low byte of rcx from gen_expr(r, 1))
-                self.emit(&[0xD3, 0xE0 | m]); // shl dst, cl
+                let mut rex = 0x48u8; // REX.W for 64-bit
+                if dst >= 8 { rex |= 0x41; } // REX.B for r/m field (dst)
+                self.emit(&[rex, 0xD3, 0xE0 | m]); // shl dst, cl
             }
             BinOp::Shr => {
-                self.emit(&[0xD3, 0xE8 | m]); // shr dst, cl
+                let mut rex = 0x48u8;
+                if dst >= 8 { rex |= 0x41; }
+                self.emit(&[rex, 0xD3, 0xE8 | m]); // shr dst, cl
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
                 // cmp dst, src  →  computes dst - src (x86: cmp r/m, reg = r/m - reg)
