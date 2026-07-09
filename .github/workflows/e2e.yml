@@ -48,6 +48,10 @@ jobs:
           xxd arith | head -20
           echo "=== strace ==="
           strace -f ./arith 2>&1 | tail -30
+          echo "=== objdump at 0x4000bb ==="
+          objdump -D -b binary -m i386:x86-64 --start-address=0xbb --stop-address=0xc5 arith 2>&1
+          echo "=== objdump full ==="
+          objdump -D -b binary -m i386:x86-64 arith 2>&1 | head -80
           echo "=== arith exit ==="
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
