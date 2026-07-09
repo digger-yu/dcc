@@ -44,6 +44,7 @@ jobs:
         run: |
           ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
           chmod +x arith
+          xxd arith | head -20
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
           test $rc -eq 23
