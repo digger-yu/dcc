@@ -158,7 +158,7 @@ impl Codegen {
                 }
 
                 // 编译函数体
-                if let Some(body) = &f.body {
+                let ends_with_return = if let Some(body) = &f.body {
                     for item in &body.items {
                         match item {
                             BlockItem::Stmt(s) => self.gen_stmt(s),
@@ -171,12 +171,15 @@ impl Codegen {
                             _ => {}
                         }
                     }
-                }
+                    Self::stmt_ends_with_return(&body.items)
+                } else { false };
 
-                // 默认返回 0
-                self.emit(&[0x31, 0xc0]);             // xor eax, eax
-                self.emit(&[0x41, 0x5d]);             // pop r13
-                self.emit(&[0xc3]);                   // ret
+                // 默认返回 0 (仅当函数体不以 return 结尾时)
+                if !ends_with_return {
+                    self.emit(&[0x31, 0xc0]);             // xor eax, eax
+                    self.emit(&[0x41, 0x5d]);             // pop r13
+                    self.emit(&[0xc3]);                   // ret
+                }
             }
         }
 
@@ -472,6 +475,21 @@ impl Codegen {
         } else {
             self.emit(&[0x8D | ((reg & 7) << 3)]);
             self.emit(&off.to_le_bytes());
+        }
+    }
+
+    // 检查函数体是否以 return 语句结尾 (用于决定是否发射默认 return 0)
+    fn stmt_ends_with_return(items: &[BlockItem]) -> bool {
+        match items.last() {
+            Some(BlockItem::Stmt(Stmt::Return { .. })) => true,
+            Some(BlockItem::Stmt(Stmt::Block { b, .. })) => Self::stmt_ends_with_return(&b.items),
+            Some(BlockItem::Stmt(Stmt::If { then_, else_, .. })) => {
+                Self::stmt_ends_with_return(&[BlockItem::Stmt(*then_.clone())])
+                    && else_.as_ref().map_or(false, |e| {
+                        Self::stmt_ends_with_return(&[BlockItem::Stmt(*e.clone())])
+                    })
+            }
+            _ => false,
         }
     }
 }
