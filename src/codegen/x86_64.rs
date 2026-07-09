@@ -364,33 +364,45 @@ impl Codegen {
 
     fn binop(&mut self, op: BinOp, dst: u8, src: u8) {
         // dst = dst OP src
-        // 比较指令自行处理 REX (因为 cmp 的 reg/rm 角色互换)
+        // x86: OP r/m64, r64 → result in r/m.  We need r/m=dst, reg=src.
         let is_cmp = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne);
-        if !is_cmp {
+        if !is_cmp && !matches!(op, BinOp::Div | BinOp::Mod) {
             let mut rex = 0x48u8;
-            if dst >= 8 { rex |= 0x44; }
-            if src >= 8 { rex |= 0x41; }
+            if src >= 8 { rex |= 0x44; }   // REX.R for reg field (src)
+            if dst >= 8 { rex |= 0x41; }   // REX.B for r/m field (dst)
             self.emit(&[rex]);
         }
-        let d = (dst & 7) << 3;
-        let s = src & 7;
+        // reg field = src, r/m field = dst  (result → r/m = dst)
+        let r = (src & 7) << 3;
+        let m = dst & 7;
         match op {
-            BinOp::Add => { self.emit(&[0x01, 0xC0 | d | s]); }
-            BinOp::Sub => { self.emit(&[0x29, 0xC0 | d | s]); }
-            BinOp::And => { self.emit(&[0x21, 0xC0 | d | s]); }
-            BinOp::Or  => { self.emit(&[0x09, 0xC0 | d | s]); }
-            BinOp::Xor => { self.emit(&[0x31, 0xC0 | d | s]); }
-            BinOp::Mul => { self.emit(&[0x0F, 0xAF, 0xC0 | d | s]); }
+            BinOp::Add => { self.emit(&[0x01, 0xC0 | r | m]); }
+            BinOp::Sub => { self.emit(&[0x29, 0xC0 | r | m]); }
+            BinOp::And => { self.emit(&[0x21, 0xC0 | r | m]); }
+            BinOp::Or  => { self.emit(&[0x09, 0xC0 | r | m]); }
+            BinOp::Xor => { self.emit(&[0x31, 0xC0 | r | m]); }
+            BinOp::Mul => {
+                // imul reg, r/m → result in reg.  Need reg=dst, r/m=src.
+                let d = (dst & 7) << 3;
+                let s = src & 7;
+                self.emit(&[0x0F, 0xAF, 0xC0 | d | s]);
+            }
             BinOp::Div | BinOp::Mod => {
-                // cqto (sign-extend rax -> rdx:rax) + idiv r/m64 (ModR/M = 0xF8 | s)
+                // idiv r/m64: rdx:rax / r/m → quotient rax, remainder rdx
+                // We need: dividend in rax (dst), divisor in src
                 self.emit(&[0x48, 0x99]); // cqto
                 let mut rex = 0x48u8;
                 if src >= 8 { rex |= 0x41; }
                 self.emit(&[rex, 0xF7, 0xF8 | (src & 7)]);
                 if matches!(op, BinOp::Mod) { self.mov(dst, 2); /* rdx -> dst */ }
             }
-            BinOp::Shl => { self.emit(&[0xD3, 0xE0 | d]); /* shift by cl */ }
-            BinOp::Shr => { self.emit(&[0xD3, 0xE8 | d]); }
+            BinOp::Shl => {
+                // shift amount already in cl (low byte of rcx from gen_expr(r, 1))
+                self.emit(&[0xD3, 0xE0 | m]); // shl dst, cl
+            }
+            BinOp::Shr => {
+                self.emit(&[0xD3, 0xE8 | m]); // shr dst, cl
+            }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
                 // cmp dst, src  →  computes dst - src (x86: cmp r/m, reg = r/m - reg)
                 // r/m=dst, reg=src
