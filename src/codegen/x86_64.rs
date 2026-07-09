@@ -176,6 +176,15 @@ impl Codegen {
         }
 
         self.resolve();
+
+        eprintln!("=== codegen ({} bytes) ===", self.code.len());
+        for (i, chunk) in self.code.chunks(16).enumerate() {
+            eprint!("  {:04x}: ", i * 16);
+            for b in chunk { eprint!("{:02x} ", b); }
+            eprintln!();
+        }
+        eprintln!("=== var_map: {:?} ===", self.var_map);
+        eprintln!("=== labels: {:?} ===", self.labels);
     }
 
     fn call_label(&mut self, l: &str) {
@@ -405,10 +414,12 @@ impl Codegen {
     // 借用,避免递归可变借用
     fn mov_to_stack(&mut self, reg: u8, name: &str) {
         let off = self.var_offset(name);
+        eprintln!("DEBUG: store {} to rbp{:+}(reg={})", name, off, reg);
         self.store_stack(reg, off);
     }
     fn mov_from_stack(&mut self, reg: u8, name: &str) {
         let off = self.var_offset(name);
+        eprintln!("DEBUG: load {} from rbp{:+}(reg={})", name, off, reg);
         self.load_stack(reg, off);
     }
     fn store_stack(&mut self, reg: u8, off: i32) {
