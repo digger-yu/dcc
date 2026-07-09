@@ -50,11 +50,6 @@ concurrency:
   group: bench-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  KERNEL_VERSION_DEFAULT: "6.6.3"
-  OPT_LEVEL_DEFAULT: "O2"
-  PARALLEL_JOBS_DEFAULT: "4"
-
 jobs:
   # ------------------------------------------------------------
   # Job 1: 自举验证 - 用 dcc 编译 dcc
@@ -126,9 +121,9 @@ jobs:
     runs-on: ${{ inputs.use_paid_runner == 'true' && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
     timeout-minutes: 90
     env:
-      KVER: ${{ inputs.kernel_version || env.KERNEL_VERSION_DEFAULT }}
-      OPT:  ${{ inputs.optimization_level || env.OPT_LEVEL_DEFAULT }}
-      JOBS: ${{ inputs.parallel_jobs || env.PARALLEL_JOBS_DEFAULT }}
+      KVER: ${{ inputs.kernel_version }}
+      OPT:  ${{ inputs.optimization_level }}
+      JOBS: ${{ inputs.parallel_jobs }}
     steps:
       - name: Record system info
         run: |
