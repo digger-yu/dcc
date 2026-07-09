@@ -107,49 +107,73 @@ impl Codegen {
     pub fn compile(&mut self, prog: &Program) {
         // _start 入口 - Linux 加载器跳转到这里
         self.entry = 0x400000 + 64 + 56;  // header + phdr
-        // 1. 寻找 main 函数
-        let main = prog.decls.iter().find_map(|d| match d {
+
+        // 1. 确认 main 存在
+        let _main = prog.decls.iter().find_map(|d| match d {
             Decl::Func(f) if f.name.name == "main" => Some(f),
             _ => None,
         }).expect("no main() defined");
 
-        // 2. 编译 main
+        // 2. 发射 _start 桩
         self.label("_start");
-        // 保护:栈对齐
         self.emit(&[0x55]);                 // push rbp
         self.emit(&[0x48, 0x89, 0xe5]);     // mov rbp, rsp
-        // 调用 main
         self.emit(&[0x48, 0x31, 0xc0]);     // xor rax, rax
         self.call_label("main");
-        // main 返回值 -> exit 的第一个参数
         self.emit(&[0x89, 0xc7]);           // mov edi, eax
-        // 触发 exit 系统调用 (syscall #60)
         self.emit(&[0xb8, 0x3c, 0x00, 0x00, 0x00]); // mov eax, 60
         self.emit(&[0x0f, 0x05]);           // syscall
-        // 永远不会到这 - 给内核一个安全的 trap
         self.emit(&[0xeb, 0xfe]);           // jmp $ (死循环)
 
-        // 3. 编译 main 函数体
-        self.label("main");
-        self.emit(&[0x55]);                 // push rbp
-        self.emit(&[0x48, 0x89, 0xe5]);     // mov rbp, rsp
-        if let Some(body) = &main.body {
-            for item in &body.items {
-                match item {
-                    BlockItem::Stmt(s) => self.gen_stmt(s),
-                    BlockItem::Decl(Decl::Var(v)) => {
-                        if let Some(init) = &v.init {
-                            self.gen_expr(init, 0);
-                            self.mov_to_stack(0, &v.name.name);
+        // 3. 编译所有函数
+        // SysV ABI 参数寄存器顺序: rdi, rsi, rdx, rcx, r8, r9
+        let arg_regs: [u8; 6] = [7, 6, 2, 1, 8, 9];
+
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                self.var_map.clear();
+
+                self.label(&f.name.name);
+                self.emit(&[0x55]);                 // push rbp
+                self.emit(&[0x48, 0x89, 0xe5]);     // mov rbp, rsp
+
+                // 非 main 函数: 把寄存器参数存入栈槽
+                if f.name.name != "main" {
+                    for (i, p) in f.params.iter().enumerate() {
+                        if let Some(name) = &p.name {
+                            if i < 6 {
+                                // 预分配栈槽并记录偏移
+                                let off = -(self.var_map.len() as i32 * 8 + 8);
+                                self.var_map.insert(name.name.clone(), off);
+                                // 从参数寄存器存到 [rbp+off]
+                                self.store_stack(arg_regs[i], off);
+                            }
                         }
                     }
-                    _ => {}
                 }
+
+                // 编译函数体
+                if let Some(body) = &f.body {
+                    for item in &body.items {
+                        match item {
+                            BlockItem::Stmt(s) => self.gen_stmt(s),
+                            BlockItem::Decl(Decl::Var(v)) => {
+                                if let Some(init) = &v.init {
+                                    self.gen_expr(init, 0);
+                                    self.mov_to_stack(0, &v.name.name);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // 默认返回 0
+                self.emit(&[0x31, 0xc0]);             // xor eax, eax
+                self.emit(&[0xc9]);                   // leave
+                self.emit(&[0xc3]);                   // ret
             }
         }
-        // 函数返回
-        self.emit(&[0xc9]);                 // leave
-        self.emit(&[0xc3]);                 // ret
 
         self.resolve();
     }
@@ -318,10 +342,14 @@ impl Codegen {
 
     fn binop(&mut self, op: BinOp, dst: u8, src: u8) {
         // dst = dst OP src
-        let mut rex = 0x48u8;
-        if dst >= 8 { rex |= 0x44; }
-        if src >= 8 { rex |= 0x41; }
-        self.emit(&[rex]);
+        // 比较指令自行处理 REX (因为 cmp 的 reg/rm 角色互换)
+        let is_cmp = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne);
+        if !is_cmp {
+            let mut rex = 0x48u8;
+            if dst >= 8 { rex |= 0x44; }
+            if src >= 8 { rex |= 0x41; }
+            self.emit(&[rex]);
+        }
         let d = (dst & 7) << 3;
         let s = src & 7;
         match op {
@@ -342,7 +370,14 @@ impl Codegen {
             BinOp::Shl => { self.emit(&[0xD3, 0xE0 | d]); /* shift by cl */ }
             BinOp::Shr => { self.emit(&[0xD3, 0xE8 | d]); }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
-                self.emit(&[0x39, 0xC0 | d | s]);  // cmp dst, src
+                // cmp dst, src  →  computes dst - src (x86: cmp r/m, reg = r/m - reg)
+                // r/m=dst, reg=src
+                let mut rex = 0x48u8;
+                if src >= 8 { rex |= 0x44; }   // REX.R for reg field (src)
+                if dst >= 8 { rex |= 0x41; }   // REX.B for r/m field (dst)
+                let d = (src & 7) << 3;        // reg field = src
+                let s = dst & 7;               // r/m field = dst
+                self.emit(&[rex, 0x39, 0xC0 | d | s]);
                 // setXX al
                 let cc = match op {
                     BinOp::Lt => 0x9C, BinOp::Le => 0x9E,
