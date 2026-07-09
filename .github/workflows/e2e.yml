@@ -42,13 +42,8 @@ jobs:
 
       - name: Compile arith.c
         run: |
-          sudo apt-get update && sudo apt-get install -y gdb 2>&1 | tail -3
-          DCC_DUMP_CODE=1 ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
+          ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
           chmod +x arith
-          echo "=== gdb trace ==="
-          printf 'set pagination off\nset disassembly-flavor intel\nset environment TERM=dumb\nbreak *0x40008f\nrun\nx/20i 0x40008f\ninfo registers rax rcx
-quit\n' | gdb ./arith 2>&1 | head -50
-          echo "=== arith exit code ==="
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
           test $rc -eq 23
