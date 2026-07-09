@@ -42,8 +42,12 @@ jobs:
 
       - name: Compile arith.c
         run: |
-          ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
+          DCC_DUMP_CODE=1 ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
           chmod +x arith
+          echo "=== arith hex dump ==="
+          xxd arith | head -30
+          echo "=== arith file info ==="
+          file arith
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
           test $rc -eq 23

@@ -176,6 +176,18 @@ impl Codegen {
         }
 
         self.resolve();
+
+        // Debug: dump generated code (after resolve, so jumps are patched)
+        if std::env::var("DCC_DUMP_CODE").is_ok() {
+            eprintln!("=== codegen output ({} bytes) ===", self.code.len());
+            for (i, chunk) in self.code.chunks(16).enumerate() {
+                eprint!("  {:04x}: ", i * 16);
+                for b in chunk { eprint!("{:02x} ", b); }
+                eprintln!();
+            }
+            eprintln!("=== var_map: {:?} ===", self.var_map);
+            eprintln!("=== labels: {:?} ===", self.labels);
+        }
     }
 
     fn call_label(&mut self, l: &str) {
