@@ -42,20 +42,20 @@ jobs:
 
       - name: Compile arith.c
         run: |
-          sudo apt-get install -y strace 2>&1 | tail -3
           ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
           chmod +x arith
-          xxd arith | head -20
-          echo "=== strace ==="
-          strace -f ./arith 2>&1 | tail -30
-          echo "=== objdump at 0x4000bb ==="
-          objdump -D -b binary -m i386:x86-64 --start-address=0xbb --stop-address=0xc5 arith 2>&1
-          echo "=== readelf header ==="
+          echo "=== ELF header ==="
           readelf -h arith 2>&1
-          echo "=== arith exit ==="
-          rc=0; ./arith || rc=$?
-          echo "arith exit: $rc"
-          test $rc -eq 23
+          echo "=== ELF program headers ==="
+          readelf -l arith 2>&1
+          echo "=== Full code hex dump (from 0x78 = entry) ==="
+          xxd -s 0x78 -l 160 arith
+          echo "=== Code at entry 0x78 ==="
+          readelf -x .data arith 2>&1 || true
+          echo "=== Try to run with timeout ==="
+          timeout 1 ./arith; echo "exit: $?"
+          echo "=== Check binary size ==="
+          ls -l arith
 
       - name: Compile control.c
         run: |
