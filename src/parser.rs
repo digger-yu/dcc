@@ -95,6 +95,15 @@ impl<'a> Parser<'a> {
                 span: name_span, // M0 简化:用名字的 span 当函数 span
                 is_static, is_extern,
             }))
+        } else if self.cur.kind == TokKind::Assign {
+            self.advance();
+            let init = self.parse_expr()?;
+            if !self.expect(TokKind::Semi, "';'") { return None; }
+            Some(Decl::Var(VarDecl {
+                ty, name: name_for_decl, init: Some(init),
+                span: name_span,
+                is_static, is_extern,
+            }))
         } else if self.cur.kind == TokKind::Semi {
             self.advance();
             Some(Decl::Var(VarDecl {
@@ -103,7 +112,7 @@ impl<'a> Parser<'a> {
                 is_static, is_extern,
             }))
         } else {
-            self.err_here("E0002", format!("expected ';' or '(', got {:?}", self.cur.kind));
+            self.err_here("E0002", format!("expected ';', '=', or '(', got {:?}", self.cur.kind));
             None
         }
     }

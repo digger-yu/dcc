@@ -135,8 +135,15 @@ impl Codegen {
         self.emit(&[0x48, 0x89, 0xe5]);     // mov rbp, rsp
         if let Some(body) = &main.body {
             for item in &body.items {
-                if let BlockItem::Stmt(s) = item {
-                    self.gen_stmt(s);
+                match item {
+                    BlockItem::Stmt(s) => self.gen_stmt(s),
+                    BlockItem::Decl(Decl::Var(v)) => {
+                        if let Some(init) = &v.init {
+                            self.gen_expr(init, 0);
+                            self.mov_to_stack(0, &v.name.name);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -189,7 +196,16 @@ impl Codegen {
             }
             Stmt::Block { b, .. } => {
                 for it in &b.items {
-                    if let BlockItem::Stmt(s) = it { self.gen_stmt(s); }
+                    match it {
+                        BlockItem::Stmt(s) => self.gen_stmt(s),
+                        BlockItem::Decl(Decl::Var(v)) => {
+                            if let Some(init) = &v.init {
+                                self.gen_expr(init, 0);
+                                self.mov_to_stack(0, &v.name.name);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             Stmt::Break { .. } => { /* M0 简化:while 内的 break 假定唯一 - 不实现 */ }
@@ -344,8 +360,10 @@ impl Codegen {
 
     // 变量存储 - M0 简化:所有局部变量共享 [rbp-8], [rbp-16]..栈
     fn var_offset(&mut self, name: &str) -> i32 {
-        // 简易命名 -> 偏移
-        let off = self.var_map.len() as i32 * 8 + 8;
+        if let Some(&off) = self.var_map.get(name) {
+            return off;
+        }
+        let off = -(self.var_map.len() as i32 * 8 + 8);
         self.var_map.insert(name.to_string(), off);
         off
     }

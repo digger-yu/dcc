@@ -36,27 +36,33 @@ jobs:
           file hello
           ls -la hello
           chmod +x hello
-          ./hello
-          echo "exit code: $?"
-          # 期望 exit 42
+          rc=0; ./hello || rc=$?
+          echo "exit code: $rc"
+          test $rc -eq 42
 
       - name: Compile arith.c
         run: |
           ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
-          chmod +x arith && ./arith
-          echo "arith exit: $?"
+          chmod +x arith
+          rc=0; ./arith || rc=$?
+          echo "arith exit: $rc"
+          test $rc -eq 23
 
       - name: Compile control.c
         run: |
           ./bin/dcc -std=gnu23 -O0 -o control examples/control.c
-          chmod +x control && ./control
-          echo "control exit: $?"
+          chmod +x control
+          rc=0; ./control || rc=$?
+          echo "control exit: $rc"
+          test $rc -eq 100
 
       - name: Compile call.c
         run: |
           ./bin/dcc -std=gnu23 -O0 -o call examples/call.c
-          chmod +x call && ./call
-          echo "call exit: $?"
+          chmod +x call
+          rc=0; ./call || rc=$?
+          echo "call exit: $rc"
+          test $rc -eq 42
 
       - name: Test error diagnostics
         run: |
@@ -69,9 +75,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Example | Expected | Got | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|----------|-----|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| hello.c | 42 | $(./hello; echo $?) | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| arith.c | 0 | $(./arith; echo $?) | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| control.c | 100 | $(./control; echo $?) | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| call.c | 42 | $(./call; echo $?) | - |" >> $GITHUB_STEP_SUMMARY
+          hello_rc=0; ./hello || hello_rc=$?  || true
+          arith_rc=0; ./arith || arith_rc=$?   || true
+          control_rc=0; ./control || control_rc=$? || true
+          call_rc=0; ./call || call_rc=$?      || true
+          echo "| hello.c | 42 | $hello_rc | $([ $hello_rc -eq 42 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| arith.c | 23 | $arith_rc | $([ $arith_rc -eq 23 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| control.c | 100 | $control_rc | $([ $control_rc -eq 100 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| call.c | 42 | $call_rc | $([ $call_rc -eq 42 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
