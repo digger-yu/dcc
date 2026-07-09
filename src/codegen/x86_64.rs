@@ -458,9 +458,11 @@ impl Codegen {
         rex |= 0x01;                    // REX.B for R13 base
         self.emit(&[rex, 0x89]);
         if (off as i32).abs() < 128 {
-            self.emit(&[0x4D | ((reg & 7) << 3), off as i8 as u8]);
+            // ModR/M: 01_reg_101 (disp8 + r13). Base 0x45 has reg=000.
+            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
         } else {
-            self.emit(&[0x8D | ((reg & 7) << 3)]);
+            // ModR/M: 10_reg_101 (disp32 + r13). Base 0x85 has reg=000.
+            self.emit(&[0x85 | ((reg & 7) << 3)]);
             self.emit(&off.to_le_bytes());
         }
     }
@@ -471,9 +473,11 @@ impl Codegen {
         rex |= 0x01;                    // REX.B for R13 base
         self.emit(&[rex, 0x8B]);
         if (off as i32).abs() < 128 {
-            self.emit(&[0x4D | ((reg & 7) << 3), off as i8 as u8]);
+            // ModR/M: 01_reg_101 (disp8 + r13). Base 0x45 has reg=000.
+            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
         } else {
-            self.emit(&[0x8D | ((reg & 7) << 3)]);
+            // ModR/M: 10_reg_101 (disp32 + r13). Base 0x85 has reg=000.
+            self.emit(&[0x85 | ((reg & 7) << 3)]);
             self.emit(&off.to_le_bytes());
         }
     }
