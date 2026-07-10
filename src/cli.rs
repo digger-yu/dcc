@@ -14,6 +14,7 @@ pub struct Config {
     pub std:      StdMode,
     pub target:   TargetTriple,
     pub freestanding: bool,
+    pub include_paths: Vec<PathBuf>,
     pub dump_ast: bool,
     pub verbose:  bool,
 }
@@ -135,6 +136,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut std = StdMode::Gnu23;   // 第一性原理:默认 gnu23,跟现代 GCC 行为一致
     let mut target = TargetTriple::host();
     let mut freestanding = false;
+    let mut include_paths: Vec<PathBuf> = vec![];
     let mut dump_ast = false;
     let mut verbose = false;
 
@@ -170,6 +172,24 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-std=gnu17" => std = StdMode::Gnu17,
             "-std=gnu23" => std = StdMode::Gnu23,
             "-ffreestanding" => freestanding = true,
+            "-I" => {
+                i += 1;
+                include_paths.push(PathBuf::from(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -I"))?));
+            }
+            a if a.starts_with("-I") => {
+                include_paths.push(PathBuf::from(&a[2..]));
+            }
+            "-D" => {
+                i += 1;
+                let _define = args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -D"))?;
+                // TODO: 传递给预处理器
+            }
+            a if a.starts_with("-D") => {
+                let _define = &a[2..];
+                // TODO: 传递给预处理器
+            }
             "-fno-builtin"   => {}
             "-dump-ast"  => dump_ast = true,
             "-v" | "--verbose" => verbose = true,
@@ -193,7 +213,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         i += 1;
     }
     let input = input.ok_or_else(|| CliError::new("no input file"))?;
-    Ok(Config { input, output, opt, std, target, freestanding, dump_ast, verbose })
+    Ok(Config { input, output, opt, std, target, freestanding, include_paths, dump_ast, verbose })
 }
 
 fn print_help() {

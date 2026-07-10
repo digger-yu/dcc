@@ -1,11 +1,12 @@
-// src/driver.rs - 驱动: 读文件 -> 解析 -> codegen -> 写文件
-// 第一性原理: 编译器是"输入/输出"的胶水;所有业务在 lex/parse/codegen 内部完成。
+// src/driver.rs - 驱动: 读文件 -> 预处理 -> 解析 -> codegen -> 写文件
+// 第一性原理: 编译器是"输入/输出"的胶水;所有业务在 preproc/parse/codegen 内部完成。
 
 use std::fs;
 use std::io::Write;
 use crate::cli::Config;
 use crate::diagnostics::Diagnostic;
 use crate::target::Target;
+use crate::preproc;
 use crate::parser;
 use crate::codegen;
 
@@ -21,9 +22,18 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", cfg.input.display(), e),
             crate::diagnostics::Span::point(&cfg.input.display().to_string(), 0, 0))])?;
 
-    // 解析
+    // 预处理
     let file = cfg.input.display().to_string();
-    let (prog, diags) = parser::parse(&src, &file);
+    let (preprocessed, pp_diags) = preproc::preprocess(&src, &file, &cfg.include_paths);
+    if !pp_diags.is_empty() {
+        for d in &pp_diags { d.print(); }
+        if pp_diags.iter().any(|d| matches!(d.sev, crate::diagnostics::Severity::Error)) {
+            return Err(pp_diags);
+        }
+    }
+
+    // 解析
+    let (prog, diags) = parser::parse(preprocessed.as_bytes(), &file);
     if !diags.is_empty() { return Err(diags); }
 
     // dump AST?

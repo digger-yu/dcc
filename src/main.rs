@@ -13,6 +13,7 @@ mod tokens;
 mod ast;
 mod parser;
 mod codegen;
+mod preproc;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
