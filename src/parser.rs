@@ -72,6 +72,7 @@ impl<'a> Parser<'a> {
             let ty = self.parse_type()?;
             let name = self.parse_ident()?;
             let sp = name.span.clone();
+            let ty = self.try_parse_vector_attr(ty);
             if !self.expect(TokKind::Semi, "';'") { return None; }
             self.typedefs.insert(name.name.clone(), ty.clone());
             return Some(vec![Decl::Typedef { name, ty, span: sp }]);
@@ -145,11 +146,22 @@ impl<'a> Parser<'a> {
     fn parse_type(&mut self) -> Option<Type> {
         let mut is_unsigned = false; let mut is_long = 0u8; let mut is_short = false;
         let mut base: Option<Type> = None;
-        // 跳过存储类/const/volatile
+        // 跳过存储类/const/volatile/_Atomic
         loop {
             match self.cur.kind {
                 TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
                 | TokKind::KwInline | TokKind::KwRestrict | TokKind::KwRegister | TokKind::KwAuto => { self.advance(); }
+                TokKind::KwAtomic => {
+                    self.advance();
+                    // _Atomic(type) 形式: 解析内部类型
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        let inner = self.parse_type();
+                        if self.cur.kind == TokKind::RParen { self.advance(); }
+                        return Some(self.parse_ptr_suffix(inner?));
+                    }
+                    // 否则作为限定符跳过
+                }
                 _ => break,
             }
         }
@@ -203,6 +215,8 @@ impl<'a> Parser<'a> {
                 TokKind::KwVoid => { base = Some(Type::Void); self.advance(); }
                 TokKind::KwFloat => { base = Some(Type::Float); self.advance(); }
                 TokKind::KwDouble => { base = Some(Type::Double); self.advance(); }
+                TokKind::KwFract => { base = Some(Type::Fract); self.advance(); }
+                TokKind::KwAccum => { base = Some(Type::Accum); self.advance(); }
                 TokKind::KwSigned => { self.advance(); }
                 TokKind::KwUnsigned => { is_unsigned = true; self.advance(); }
                 _ => break,
@@ -210,6 +224,7 @@ impl<'a> Parser<'a> {
         }
         if base.is_some() || is_unsigned || is_long > 0 || is_short {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
+            let ty = self.try_parse_vector_attr(ty);
             Some(self.parse_ptr_suffix(ty))
         } else {
             self.err_here("E0003", format!("expected type, got {:?}", self.cur.kind)); None
@@ -220,6 +235,8 @@ impl<'a> Parser<'a> {
         match (base, uns, long, short) {
             (Some(Type::Void), ..) => Type::Void,
             (Some(Type::Float), ..) => Type::Float,
+            (Some(Type::Fract), ..) => Type::Fract,
+            (Some(Type::Accum), ..) => Type::Accum,
             (Some(Type::Double), _, 0, _) => Type::Double,
             (Some(Type::Double), _, _, _) => Type::LongDouble,
             (Some(Type::Char), false, ..) => Type::SChar,
@@ -239,8 +256,45 @@ impl<'a> Parser<'a> {
     fn parse_ptr_suffix(&mut self, mut ty: Type) -> Type {
         while self.cur.kind == TokKind::Star {
             self.advance();
-            while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile) { self.advance(); }
+            while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwAtomic) { self.advance(); }
             ty = Type::Ptr(Box::new(ty));
+        }
+        ty
+    }
+
+    /// 解析 __attribute__((vector_size(N))) 等属性, 返回可能包装为 Vector 的类型
+    fn try_parse_vector_attr(&mut self, ty: Type) -> Type {
+        if self.cur.kind != TokKind::Ident || self.cur.text != "__attribute__" { return ty; }
+        self.advance(); // __attribute__
+        if self.cur.kind != TokKind::LParen { return ty; }
+        self.advance(); // (
+        if self.cur.kind != TokKind::LParen { return ty; }
+        self.advance(); // (
+        // 解析 vector_size(N)
+        if self.cur.kind == TokKind::Ident && self.cur.text == "vector_size" {
+            self.advance(); // vector_size
+            if self.cur.kind == TokKind::LParen {
+                self.advance(); // (
+                let size = if self.cur.kind == TokKind::Number {
+                    let v: usize = self.cur.text.parse().unwrap_or(16);
+                    self.advance();
+                    v
+                } else { 16 };
+                if self.cur.kind == TokKind::RParen { self.advance(); } // )
+                let elem_size = ty.size().max(1);
+                let count = size / elem_size;
+                // 消耗 ))
+                if self.cur.kind == TokKind::RParen { self.advance(); }
+                if self.cur.kind == TokKind::RParen { self.advance(); }
+                return Type::Vector(Box::new(ty), count);
+            }
+        }
+        // 其他属性: 跳过直到 ))
+        let mut depth = 2i32; // 已在两层括号内
+        while depth > 0 && self.cur.kind != TokKind::Eof {
+            if self.cur.kind == TokKind::LParen { depth += 1; }
+            if self.cur.kind == TokKind::RParen { depth -= 1; }
+            self.advance();
         }
         ty
     }
@@ -267,7 +321,7 @@ impl<'a> Parser<'a> {
                 let _ = self.expect(TokKind::RBracket, "']'");
                 Type::Array(Box::new(ty), arr_size)
             } else { ty };
-            fs.push(Field { name: nm, ty, offset: 0, bit_width: bw });
+            fs.push(Field { name: nm, ty, offset: 0, bit_width: bw, bit_offset: 0 });
             if self.cur.kind == TokKind::Semi { self.advance(); } else if self.cur.kind == TokKind::Comma { self.advance(); }
         }
         fs
@@ -328,8 +382,19 @@ impl<'a> Parser<'a> {
             | TokKind::KwShort | TokKind::KwUnsigned | TokKind::KwSigned | TokKind::KwFloat
             | TokKind::KwDouble | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
             | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
-            | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef)
+            | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef
+            | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum)
             || (self.cur.kind == TokKind::Ident && self.typedefs.contains_key(&self.cur.text))
+    }
+
+    fn is_peek_type_start(&self) -> bool {
+        matches!(self.peek.kind, TokKind::KwInt | TokKind::KwChar | TokKind::KwLong | TokKind::KwVoid
+            | TokKind::KwShort | TokKind::KwUnsigned | TokKind::KwSigned | TokKind::KwFloat
+            | TokKind::KwDouble | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
+            | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef
+            | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum)
+            || (self.peek.kind == TokKind::Ident && self.typedefs.contains_key(&self.peek.text))
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
@@ -502,7 +567,7 @@ impl<'a> Parser<'a> {
             TokKind::MinusMinus => { self.advance(); let e = self.parse_unary()?; let ty = e.ty(); Some(Expr::PreDec { e: Box::new(e), span: sp, ty }) }
             TokKind::KwSizeof => {
                 self.advance();
-                if self.cur.kind == TokKind::LParen && self.is_type_start() {
+                if self.cur.kind == TokKind::LParen && self.is_peek_type_start() {
                     self.advance(); let ty = self.parse_type()?;
                     if !self.expect(TokKind::RParen, "')'") { return None; }
                     Some(Expr::SizeofTy { ty, span: sp })
@@ -523,7 +588,8 @@ impl<'a> Parser<'a> {
             TokKind::KwInt | TokKind::KwChar | TokKind::KwLong | TokKind::KwVoid
             | TokKind::KwShort | TokKind::KwUnsigned | TokKind::KwSigned
             | TokKind::KwFloat | TokKind::KwDouble | TokKind::KwStruct
-            | TokKind::KwUnion | TokKind::KwEnum | TokKind::KwConst | TokKind::KwVolatile)
+            | TokKind::KwUnion | TokKind::KwEnum | TokKind::KwConst | TokKind::KwVolatile
+            | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum)
             || (self.peek.kind == TokKind::Ident && self.typedefs.contains_key(&self.peek.text))
     }
 

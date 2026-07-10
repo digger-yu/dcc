@@ -139,8 +139,10 @@ pub enum Type {
     Long, ULong,
     LongLong, ULongLong,
     Float, Double, LongDouble,
+    Fract, Accum,  // 定点数: _Fract (1.31格式), _Accum (16.16格式)
     Ptr(Box<Type>),
     Array(Box<Type>, ArraySize),
+    Vector(Box<Type>, usize),  // SIMD 向量: (元素类型, 元素个数)
     Struct(String, Vec<Field>),
     Union(String, Vec<Field>),
     Enum(String, Vec<(String, i64)>),
@@ -152,8 +154,9 @@ pub enum Type {
 pub struct Field {
     pub name: String,
     pub ty: Type,
-    pub offset: usize,
-    pub bit_width: Option<u32>,
+    pub offset: usize,      // 字节偏移 (位域: 存储单元起始字节)
+    pub bit_width: Option<u32>,  // 位域宽度 (None = 普通字段)
+    pub bit_offset: u32,    // 位域: 存储单元内位偏移 (非位域=0)
 }
 
 #[derive(Debug, Clone)]
@@ -173,11 +176,12 @@ impl Type {
             Type::Void => 0,
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
-            Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) => 4,
+            Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) | Type::Fract | Type::Accum => 4,
             Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
             Type::Array(elem, ArraySize::Const(n)) => elem.size() * n,
             Type::Array(_, ArraySize::Var(_)) => 8,  // VLA 退化为指针
+            Type::Vector(elem, n) => elem.size() * n,
             Type::LongDouble => 16,
             Type::Struct(_, fields) => {
                 fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0)
@@ -194,11 +198,12 @@ impl Type {
             Type::Void => 1,
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
-            Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) => 4,
+            Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) | Type::Fract | Type::Accum => 4,
             Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
             Type::Array(elem, ArraySize::Const(_)) => elem.align(),
             Type::Array(elem, ArraySize::Var(_)) => elem.align(),
+            Type::Vector(_, _) => 16, // SIMD 向量 16 字节对齐
             Type::LongDouble => 16,
             Type::Struct(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
             Type::Union(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
@@ -212,19 +217,65 @@ impl Type {
             | Type::Short | Type::UShort | Type::Int | Type::UInt
             | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong)
     }
-    pub fn is_arith(&self) -> bool { self.is_int() || matches!(self, Type::Float | Type::Double | Type::LongDouble) }
+    pub fn is_arith(&self) -> bool { self.is_int() || matches!(self, Type::Float | Type::Double | Type::LongDouble | Type::Fract | Type::Accum) }
 
     pub fn layout_struct(fields: &mut Vec<Field>, is_union: bool) {
         if is_union {
             for f in fields.iter_mut() { f.offset = 0; }
         } else {
-            let mut off = 0usize;
+            let mut off = 0usize;           // 当前字节偏移
+            let mut bit_pos: u32 = 0;       // 当前存储单元内已用位数
+            let mut container_bits: u32 = 0; // 当前存储单元总位数
+
             for f in fields.iter_mut() {
-                let a = f.ty.align();
-                off = (off + a - 1) & !(a - 1);
-                f.offset = off;
-                off += f.ty.size();
+                if let Some(bw) = f.bit_width {
+                    // 位域字段
+                    let field_bits = bw;
+                    let container_ty_bits = (f.ty.size() * 8) as u32;
+
+                    // 第一个位域或容器类型变化: 开始新存储单元
+                    if container_bits == 0 || container_ty_bits != container_bits {
+                        // 对齐到容器类型边界
+                        let align = f.ty.align();
+                        off = (off + align - 1) & !(align - 1);
+                        container_bits = container_ty_bits;
+                        bit_pos = 0;
+                    }
+
+                    // 当前单元放不下: 推进到下一单元
+                    if bit_pos + field_bits > container_bits {
+                        off += (container_bits / 8) as usize;
+                        let align = f.ty.align();
+                        off = (off + align - 1) & !(align - 1);
+                        bit_pos = 0;
+                    }
+
+                    f.offset = off;
+                    f.bit_offset = bit_pos;
+                    bit_pos += field_bits;
+                } else {
+                    // 非位域字段: 刷新未用完的位域存储单元
+                    if container_bits > 0 {
+                        off += (container_bits / 8) as usize;
+                        container_bits = 0;
+                        bit_pos = 0;
+                    }
+                    // 柔性数组 (零长数组): 不贡献大小
+                    if let Type::Array(_, ArraySize::Const(0)) = &f.ty {
+                        let align = f.ty.align();
+                        off = (off + align - 1) & !(align - 1);
+                        f.offset = off;
+                        continue;
+                    }
+                    let a = f.ty.align();
+                    off = (off + a - 1) & !(a - 1);
+                    f.offset = off;
+                    off += f.ty.size();
+                }
             }
+            // 刷新末尾未用完的位域存储单元
+            // (size 由 size() 计算, 此处不需要额外处理)
+            let _ = (off, bit_pos, container_bits);
         }
     }
 }

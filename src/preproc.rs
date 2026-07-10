@@ -128,10 +128,21 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("__UINT8_TYPE__", "unsigned char");
     pp.define_builtin("__ELF__", "1");
     pp.define_builtin("__unix__", "1");
-    // __attribute__ 透传: 定义为空, 让预处理器剥离属性标注
-    pp.macros.insert("__attribute__".to_string(), MacroDef {
-        params: Some(vec!["args".to_string()]), body: "".to_string(), variadic: true,
-    });
+    // 原子内存序常量 (GCC __atomic 内置函数用)
+    pp.define_builtin("__ATOMIC_RELAXED", "0");
+    pp.define_builtin("__ATOMIC_CONSUME", "1");
+    pp.define_builtin("__ATOMIC_ACQUIRE", "2");
+    pp.define_builtin("__ATOMIC_RELEASE", "3");
+    pp.define_builtin("__ATOMIC_ACQ_REL", "4");
+    pp.define_builtin("__ATOMIC_SEQ_CST", "5");
+    pp.define_builtin("memory_order_relaxed", "0");
+    pp.define_builtin("memory_order_consume", "1");
+    pp.define_builtin("memory_order_acquire", "2");
+    pp.define_builtin("memory_order_release", "3");
+    pp.define_builtin("memory_order_acq_rel", "4");
+    pp.define_builtin("memory_order_seq_cst", "5");
+    // __attribute__: 不定义为宏, 让 token 透传到解析器处理
+    // 解析器会识别 __attribute__ 并处理 vector_size 等属性
     // __has_attribute / __has_builtin / __has_feature (函数式宏, 返回 0)
     // 注意: __has_include 不在宏表中, 在 #if 求值时特殊处理 (需要文件系统访问)
     pp.macros.insert("__has_attribute".to_string(), MacroDef {
