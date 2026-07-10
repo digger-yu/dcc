@@ -42,6 +42,8 @@ jobs:
         run: |
           ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
           chmod +x arith
+          echo "=== arith code dump (offset 120, code section) ==="
+          xxd -s 120 -l 128 arith || od -A x -t x1z -j 120 -N 128 arith
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
           test $rc -eq 23
