@@ -48,7 +48,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 - [x] **M4** 全局数据段 + 字符串字面量
 - [x] **M5** 错误诊断增强 (源码引用 + 修复建议)
 - [ ] **M6** 代码生成补全 — struct 成员访问、switch/case、VLA 栈分配
-- [ ] **M7** 语义分析 — 类型检查、隐式转换、指针运算缩放、sizeof 精确化
+- [ ] **M7** 语义分析 — 类型检查、隐式转换、sizeof 精确化 (指针运算缩放已完成)
 - [ ] **M8** C99/C11 特性 — 复合字面量、指定初始化、柔性数组、逗号运算符
 - [ ] **M9** 可重定位 ELF — 输出 .o 文件、符号表、重定位段
 - [ ] **M10** GNU 扩展 — `__asm__` 内联汇编、`__builtin_*` 内建函数、`__attribute__` 语义
@@ -73,6 +73,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | 基础类型 | void/char/short/int/long/long long + 指针 + 数组 |
 | typedef / enum | 完整支持，枚举常量内联替换 |
 | 复合赋值 | `+=` `-=` `*=` 等 10 种，展开为 `target = target op expr` |
+| 指针运算缩放 | `ptr ± n` 按 `sizeof(*ptr)` 步进，`ptr++`/`ptr--` 同理，`ptr - ptr` 返回元素数 |
 | 字符串池 | .rodata 去重 + RIP-relative 寻址 |
 | 全局变量 | 整数初始化 + 零填充 |
 | ELF 输出 | 手写 ELF64 ET_EXEC + .text/.rodata |
@@ -91,7 +92,6 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 
 | 功能 | 已有 | 缺失 |
 |------|------|------|
-| **指针运算** | 数组索引 `arr[i]` ✅ | 指针 `++`/`--` 未按类型大小缩放，`ptr + n` 按整数加 |
 | **void*** | 类型可声明 ✅ | 无隐式转换逻辑 |
 | **sizeof** | `sizeof(type)` ✅ | `sizeof expr` 硬编码返回 8，未实际求类型大小 |
 | **类型转换 (cast)** | `(type)expr` 语法 ✅ | 无截断/扩展/浮点转换指令，仅改类型标注 |
@@ -106,7 +106,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | **P0** | **可重定位 ELF (.o)** | 每次编译 | 内核是数百万个 .o 最终链接；当前只能输出 ET_EXEC |
 | **P0** | **struct 成员访问 codegen** | 极高频 | 内核大量 struct list_head / task_struct 等 |
 | **P0** | **switch/case codegen** | 高频 | 系统调用分发、状态机等 |
-| **P0** | **指针运算缩放** | 极高频 | `ptr++` 必须按 `sizeof(*ptr)` 步进 |
+| ~~**P0**~~ | ~~**指针运算缩放**~~ | ~~极高频~~ | ✅ 已实现：`ptr++` 按 `sizeof(*ptr)` 步进，`ptr + n` 缩放，`ptr - ptr` 返回元素数 |
 | **P1** | **内联汇编 `__asm__`** | 高频 | 原子操作、上下文切换、中断处理依赖大量 asm |
 | **P1** | **`__builtin_*` 实现** | 高频 | `__builtin_expect`/`__builtin_memcpy`/`__builtin_offsetof` 等 |
 | **P1** | **`__attribute__` 语义** | 高频 | `packed`/`aligned`/`noreturn`/`unused` 影响布局和警告 |
@@ -126,7 +126,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
   □ 可重定位 ELF (.o 输出)     ← 当前: 仅 ET_EXEC
   □ struct 成员读写            ← 当前: 前端完成,后端空
   □ switch/case                ← 当前: 前端完成,后端空
-  □ 指针运算缩放               ← 当前: 整数加法,未按类型步进
+  ☑ 指针运算缩放               ← 已完成: ptr±n 按 sizeof(*ptr) 缩放, ptr-ptr 返回元素数
   □ __asm__ 内联汇编透传       ← 当前: 不支持
   □ __builtin_expect           ← 当前: 不支持 (likely/unlikely 宏依赖)
   □ __attribute__ 语义         ← 当前: 仅预处理剥离
