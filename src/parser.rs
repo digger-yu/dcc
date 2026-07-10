@@ -559,6 +559,15 @@ impl<'a> Parser<'a> {
                 let ty = if s.ends_with('L') || s.ends_with('l') { Type::Long } else { Type::Int };
                 self.advance(); Some(Expr::Int { v, span: sp, ty })
             }
+            TokKind::FloatLit => {
+                let s = &self.cur.text;
+                let s_clean = s.trim_end_matches(|c| c == 'f' || c == 'F' || c == 'l' || c == 'L');
+                let v: f64 = s_clean.parse().unwrap_or(0.0);
+                let ty = if s.ends_with('f') || s.ends_with('F') { Type::Float }
+                    else if s.ends_with('l') || s.ends_with('L') { Type::LongDouble }
+                    else { Type::Double };
+                self.advance(); Some(Expr::Float { v, span: sp, ty })
+            }
             TokKind::StringLit => {
                 let mut data = parse_str(&self.cur.text); self.advance();
                 while self.cur.kind == TokKind::StringLit { data.extend(parse_str(&self.cur.text)); self.advance(); }

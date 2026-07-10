@@ -16,6 +16,7 @@ pub struct Tok {
 pub enum TokKind {
     // 字面量
     Number,        // 123 0x7b 0b101 0o17
+    FloatLit,      // 1.5 2.0f 3.14L
     StringLit,     // "abc"
     CharLit,       // 'a'
     Ident,         // foo _x
@@ -130,7 +131,8 @@ impl<'a> Lexer<'a> {
             return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
         }
         // 数字
-        if b.is_ascii_digit() {
+        if b.is_ascii_digit() || (b == b'.' && self.peek_at(1).map_or(false, |c| c.is_ascii_digit())) {
+            let mut is_float = b == b'.';
             if b == b'0' && matches!(self.peek_at(1), Some(b'x') | Some(b'X')) {
                 self.bump(); self.bump();
                 while let Some(c) = self.peek() {
@@ -143,11 +145,26 @@ impl<'a> Lexer<'a> {
                 }
             } else {
                 while let Some(c) = self.peek() {
-                    if c.is_ascii_digit() { self.bump(); } else { break; }
+                    if c.is_ascii_digit() { self.bump(); }
+                    else if c == b'.' && !is_float { is_float = true; self.bump(); }
+                    else { break; }
+                }
+                // 科学计数法
+                if let Some(b'e') | Some(b'E') = self.peek() {
+                    is_float = true; self.bump();
+                    if let Some(b'+') | Some(b'-') = self.peek() { self.bump(); }
+                    while let Some(c) = self.peek() {
+                        if c.is_ascii_digit() { self.bump(); } else { break; }
+                    }
                 }
             }
+            // 浮点后缀
+            if let Some(b'f') | Some(b'F') | Some(b'l') | Some(b'L') = self.peek() {
+                is_float = true; self.bump();
+            }
             let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
-            return Tok { kind: TokKind::Number, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            let kind = if is_float { TokKind::FloatLit } else { TokKind::Number };
+            return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
         }
         // 字符串
         if b == b'"' {

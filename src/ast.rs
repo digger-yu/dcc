@@ -69,6 +69,7 @@ pub struct Case {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int       { v: i128, span: Span, ty: Type },
+    Float     { v: f64, span: Span, ty: Type },
     String    { data: Vec<u8>, span: Span, ty: Type },
     Char      { v: u8, span: Span, ty: Type },
     Ident     { name: Ident, span: Span, ty: Type },
@@ -216,7 +217,7 @@ pub fn char_t() -> Type { Type::Char }
 impl Expr {
     pub fn ty(&self) -> Type {
         match self {
-            Expr::Int { ty, .. } | Expr::String { ty, .. } | Expr::Char { ty, .. }
+            Expr::Int { ty, .. } | Expr::Float { ty, .. } | Expr::String { ty, .. } | Expr::Char { ty, .. }
             | Expr::Ident { ty, .. } | Expr::Binop { ty, .. } | Expr::Unary { ty, .. }
             | Expr::Call { ty, .. } | Expr::Assign { ty, .. } | Expr::Cond { ty, .. }
             | Expr::Index { ty, .. } | Expr::Member { ty, .. }
