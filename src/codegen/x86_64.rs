@@ -466,6 +466,54 @@ impl Codegen {
                 }
             }
             Expr::Binop { op, l, r, .. } => {
+                // 逻辑与/或: 短路求值
+                if matches!(op, BinOp::AndAnd | BinOp::OrOr) {
+                    let l_false = self.fresh_label();
+                    let l_end = self.fresh_label();
+                    self.gen_expr_decay(l, dst);
+                    // test dst, dst
+                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                    self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                    match op {
+                        BinOp::AndAnd => {
+                            // 如果 dst == 0, 跳到 false
+                            self.jmp_rel32(&l_false, JumpKind::Je);
+                            self.gen_expr_decay(r, dst);
+                            // test dst, dst
+                            self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                            // sete al
+                            self.emit(&[0x0F, 0x94, 0xC0]);
+                            // movzx dst, al
+                            let rex2 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                            self.emit(&[rex2, 0x0F, 0xB6, 0xC0 | (dst & 7)]);
+                            self.jmp_rel32(&l_end, JumpKind::Jmp);
+                            self.label(&l_false);
+                            // xor dst, dst (dst = 0)
+                            let rex3 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                            self.emit(&[rex3, 0x31, 0xC0 | (dst & 7)]);
+                            self.label(&l_end);
+                        }
+                        BinOp::OrOr => {
+                            // 如果 dst != 0, 跳到 true
+                            self.jmp_rel32(&l_false, JumpKind::Jne);
+                            self.gen_expr_decay(r, dst);
+                            // test dst, dst
+                            self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                            // sete al
+                            self.emit(&[0x0F, 0x94, 0xC0]);
+                            // movzx dst, al
+                            let rex2 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                            self.emit(&[rex2, 0x0F, 0xB6, 0xC0 | (dst & 7)]);
+                            self.jmp_rel32(&l_end, JumpKind::Jmp);
+                            self.label(&l_false);
+                            // mov dst, 1
+                            self.mov_imm(dst, 1);
+                            self.label(&l_end);
+                        }
+                        _ => unreachable!(),
+                    }
+                    return;
+                }
                 // 指针/数组运算缩放: ptr ± n 步进 sizeof(*ptr), ptr - ptr 返回元素数
                 // 数组衰减为指针: Array(T,_) 视为 Ptr(T)
                 let l_inner = match l.ty() { Type::Ptr(ref t) | Type::Array(ref t, _) => Some(t.size()), _ => None };
@@ -542,9 +590,22 @@ impl Codegen {
             }
             Expr::Unary { op, e, .. } => {
                 self.gen_expr(e, dst);
-                match op { UnOp::Neg => { self.emit(&[0xf7, 0xd8 | (dst << 3)]); }
-                    UnOp::Not | UnOp::BitNot => { self.emit(&[0xf7, 0xd0 | (dst << 3)]); }
-                    UnOp::Plus => {} }
+                match op {
+                    UnOp::Neg => { self.emit(&[0xf7, 0xd8 | (dst << 3)]); }
+                    UnOp::Not => {
+                        // 逻辑非: !x = (x == 0) ? 1 : 0
+                        // test dst, dst
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                        // sete al (0F 94 C0)
+                        self.emit(&[0x0F, 0x94, 0xC0]);
+                        // movzx dst, al (48 0F B6 C0)
+                        let rex2 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                        self.emit(&[rex2, 0x0F, 0xB6, 0xC0 | (dst & 7)]);
+                    }
+                    UnOp::BitNot => { self.emit(&[0xf7, 0xd0 | (dst << 3)]); }
+                    UnOp::Plus => {}
+                }
             }
             Expr::Call { callee, args, .. } => {
                 let ar = [7u8, 6, 2, 1, 8, 9];
