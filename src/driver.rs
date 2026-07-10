@@ -46,9 +46,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // codegen
     let target = Target::resolve(&cfg.target);
-    let (bytes, entry) = codegen::emit(&prog, &target);
+    let bytes = codegen::emit(&prog, &target, cfg.relocatable);
     if cfg.verbose {
-        eprintln!("dcc: entry  = 0x{:x}", entry);
         eprintln!("dcc: size   = {} bytes", bytes.len());
     }
 
@@ -58,12 +57,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write {}: {}", out.display(), e),
             crate::diagnostics::Span::point(&out.display().to_string(), 0, 0))])?;
     f.write_all(&bytes).unwrap();
-    // chmod +x
-    #[cfg(unix)] {
-        use std::os::unix::fs::PermissionsExt;
-        let mut p = f.metadata().unwrap().permissions();
-        p.set_mode(0o755);
-        f.set_permissions(p).unwrap();
+    // chmod +x (仅在非 relocatable 模式下)
+    if !cfg.relocatable {
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = f.metadata().unwrap().permissions();
+            p.set_mode(0o755);
+            f.set_permissions(p).unwrap();
+        }
     }
     eprintln!("dcc: wrote {}", out.display());
     Ok(())

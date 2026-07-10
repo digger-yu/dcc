@@ -19,6 +19,7 @@ pub struct Config {
     pub defines:  Vec<(String, Option<String>)>,  // -D NAME=VALUE
     pub dump_ast: bool,
     pub verbose:  bool,
+    pub relocatable: bool,  // -c: 输出可重定位 .o
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +144,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut defines: Vec<(String, Option<String>)> = vec![];
     let mut dump_ast = false;
     let mut verbose = false;
+    let mut relocatable = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -158,7 +160,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 output = PathBuf::from(args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -o"))?);
             }
-            "-c" => { /* 编译不链接 - M0 暂忽略 */ }
+            "-c" => { relocatable = true; }
             "--target" => {
                 i += 1;
                 target = TargetTriple::parse(args.get(i)
@@ -249,7 +251,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         i += 1;
     }
     let input = input.ok_or_else(|| CliError::new("no input file"))?;
-    Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose })
+    // -c 模式默认输出名为源文件名去后缀加 .o
+    if relocatable && output == PathBuf::from("a.out") {
+        let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+        output = PathBuf::from(format!("{}.o", stem));
+    }
+    Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable })
 }
 
 fn print_help() {

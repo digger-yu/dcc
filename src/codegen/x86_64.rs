@@ -4,6 +4,8 @@
 
 use crate::ast::*;
 use crate::target::Target;
+use crate::codegen::elf::{ElfSym, ElfRela, R_X86_64_PC32, R_X86_64_PLT32,
+    STB_LOCAL, STB_GLOBAL, STT_NOTYPE, STT_FUNC, STT_OBJECT, STT_SECTION, SHN_UNDEF};
 use std::collections::HashMap;
 use crate::ast::ArraySize;
 
@@ -18,14 +20,24 @@ pub struct Codegen {
     loop_continue: Option<String>,
     loop_break: Option<String>,
     // .rodata: 字符串池 + 待修补引用
-    rodata: Vec<u8>,
+    pub rodata: Vec<u8>,
     string_pool: HashMap<Vec<u8>, u64>,   // data -> offset in rodata
     string_refs: Vec<(u64, Vec<u8>)>,     // (code_pos, data)
     // 全局变量
     globals: HashMap<String, GlobalVar>,
-    frame_size: i32,  // 当前函数栈帧大小（字节）
-    vla_offsets: HashMap<String, i32>,  // VLA 变量名 → 距 r13 的偏移
-    vla_total_size: i32,  // 当前函数所有 VLA 总大小
+    frame_size: i32,
+    vla_offsets: HashMap<String, i32>,
+    vla_total_size: i32,
+    // 可重定位模式 (.o)
+    pub relocatable: bool,
+    pub symbols: Vec<ElfSym>,
+    sym_index: HashMap<String, u32>,
+    pub relocations: Vec<ElfRela>,
+    pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
+    pending_data_rels: Vec<(u64, String)>,  // (disp32_pos, var_name) - 全局变量重定位
+    pub data_section: Vec<u8>,    // .data 节 (已初始化全局变量)
+    pub bss_size: u64,            // .bss 大小
+    func_sizes: HashMap<String, u64>, // 函数名 → 代码大小 (用于符号 size)
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -41,7 +53,11 @@ impl Codegen {
                loop_continue: None, loop_break: None,
                rodata: vec![], string_pool: HashMap::new(), string_refs: vec![],
                globals: HashMap::new(), frame_size: 0, vla_offsets: HashMap::new(),
-               vla_total_size: 0 }
+               vla_total_size: 0,
+               relocatable: false, symbols: vec![], sym_index: HashMap::new(),
+               relocations: vec![], pending_func_rels: vec![], pending_data_rels: vec![],
+               data_section: vec![], bss_size: 0,
+               func_sizes: HashMap::new() }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -80,13 +96,21 @@ impl Codegen {
     }
 
     pub fn compile(&mut self, prog: &Program) {
+        if self.relocatable {
+            self.compile_rel(prog);
+        } else {
+            self.compile_exec(prog);
+        }
+    }
+
+    /// ET_EXEC 模式: 生成可直接执行的 ELF
+    fn compile_exec(&mut self, prog: &Program) {
         self.entry = 0x400000 + 64 + 56;
-        // 收集全局变量
+        // 收集全局变量到 rodata
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
                 let sz = v.ty.size().max(1);
                 let align = v.ty.align().max(1);
-                // 对齐 rodata
                 let off = (self.rodata.len() + align - 1) & !(align - 1);
                 while self.rodata.len() < off { self.rodata.push(0); }
                 let offset = self.rodata.len() as u64;
@@ -95,14 +119,12 @@ impl Codegen {
                         Some(v.to_le_bytes()[..sz].to_vec())
                     } else { None }
                 } else { None };
-                // 预留空间
                 for _ in 0..sz { self.rodata.push(0); }
                 self.globals.insert(v.name.name.clone(), GlobalVar { offset, size: sz, init: init_data });
             }
         }
         let globals_init: Vec<(String, Option<Vec<u8>>)> = self.globals.iter()
             .map(|(n, g)| (n.clone(), g.init.clone())).collect();
-        // 写入全局初始值
         for (name, init) in &globals_init {
             if let Some(data) = init {
                 let g = self.globals[name].clone();
@@ -114,22 +136,186 @@ impl Codegen {
         }
         let rodata_size = self.rodata.len();
         let _main = prog.decls.iter().find_map(|d| match d { Decl::Func(f) if f.name.name == "main" => Some(f), _ => None }).expect("no main()");
-        // _start
         self.label("_start");
         self.emit(&[0x55, 0x48, 0x89, 0xe5, 0x48, 0x31, 0xc0]);
         self.call_label("main");
         self.emit(&[0x89, 0xc7, 0xb8, 0x3c, 0x00, 0x00, 0x00, 0x0f, 0x05, 0xeb, 0xfe]);
+        self.emit_functions(prog);
+        self.code.extend_from_slice(&self.rodata);
+        let rodata_start = self.entry + (self.code.len() as u64 - rodata_size as u64);
+        self.resolve(rodata_start);
+    }
 
+    /// ET_REL 模式: 生成可重定位 .o 文件
+    fn compile_rel(&mut self, prog: &Program) {
+        // Phase 1: 生成代码, 收集数据
+        // 收集全局变量 → .data / .bss
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                let sz = v.ty.size().max(1);
+                let align = v.ty.align().max(1);
+                let off = (self.data_section.len() + align - 1) & !(align - 1);
+                while self.data_section.len() < off { self.data_section.push(0); }
+                let offset = self.data_section.len() as u64;
+                let has_init = if let Some(init) = &v.init {
+                    if let Expr::Int { v: iv, .. } = init {
+                        let bytes = iv.to_le_bytes()[..sz].to_vec();
+                        self.data_section.extend_from_slice(&bytes);
+                        true
+                    } else { false }
+                } else { false };
+                if !has_init {
+                    for _ in 0..sz { self.data_section.push(0); }
+                    self.bss_size += sz as u64;
+                }
+                self.globals.insert(v.name.name.clone(), GlobalVar { offset, size: sz, init: None });
+            }
+        }
+
+        // 生成函数代码 (无 _start)
+        self.emit_functions(prog);
+
+        // 处理字符串引用 → 确保所有字符串在 rodata 中
+        let string_data_list: Vec<Vec<u8>> = self.string_refs.iter().map(|(_, d)| d.clone()).collect();
+        for data in &string_data_list {
+            if !self.string_pool.contains_key(data) {
+                let off = self.rodata.len() as u64;
+                self.rodata.extend_from_slice(data);
+                self.string_pool.insert(data.clone(), off);
+            }
+        }
+
+        // Phase 2: 收集所有符号 (正确顺序: STN_UNDEF → LOCAL → GLOBAL)
+        // 先收集到临时 vec, 然后排序构建最终 symtab
+        let mut local_syms: Vec<ElfSym> = vec![];
+        let mut global_syms: Vec<ElfSym> = vec![];
+
+        // 全局变量符号
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                let g = self.globals[&v.name.name].clone();
+                let sym = ElfSym {
+                    name: v.name.name.clone(), section: 3, value: g.offset,
+                    size: g.size as u64,
+                    bind: if v.is_static { STB_LOCAL } else { STB_GLOBAL },
+                    ty: STT_OBJECT,
+                };
+                if v.is_static { local_syms.push(sym); } else { global_syms.push(sym); }
+            }
+        }
+
+        // extern 函数声明 (无函数体 = 外部引用)
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_none() {
+                    global_syms.push(ElfSym {
+                        name: f.name.name.clone(), section: SHN_UNDEF, value: 0, size: 0,
+                        bind: STB_GLOBAL, ty: STT_FUNC,
+                    });
+                }
+            }
+        }
+
+        // 函数定义符号
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_some() {
+                    if let Some(&func_start) = self.labels.get(&f.name.name) {
+                        let func_size = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                        let sym = ElfSym {
+                            name: f.name.name.clone(), section: 1, value: func_start,
+                            size: func_size,
+                            bind: if f.is_static { STB_LOCAL } else { STB_GLOBAL },
+                            ty: STT_FUNC,
+                        };
+                        if f.is_static { local_syms.push(sym); } else { global_syms.push(sym); }
+                    }
+                }
+            }
+        }
+
+        // .rodata section 符号 (LOCAL)
+        if !self.rodata.is_empty() {
+            local_syms.push(ElfSym {
+                name: ".rodata".to_string(), section: 2, value: 0,
+                size: self.rodata.len() as u64,
+                bind: STB_LOCAL, ty: STT_SECTION,
+            });
+        }
+
+        // 构建最终符号表: STN_UNDEF + locals + globals
+        self.symbols.clear();
+        self.sym_index.clear();
+        // [0] STN_UNDEF
+        self.symbols.push(ElfSym {
+            name: String::new(), section: SHN_UNDEF, value: 0, size: 0,
+            bind: STB_LOCAL, ty: STT_NOTYPE,
+        });
+        for sym in &local_syms {
+            let idx = self.symbols.len() as u32;
+            self.symbols.push(sym.clone());
+            self.sym_index.insert(sym.name.clone(), idx);
+        }
+        for sym in &global_syms {
+            let idx = self.symbols.len() as u32;
+            self.symbols.push(sym.clone());
+            self.sym_index.insert(sym.name.clone(), idx);
+        }
+
+        // Phase 3: 构建重定位 (使用正确的符号索引)
+        // 查找 .rodata section 符号索引
+        let rodata_sym_idx = self.sym_index.get(".rodata").copied();
+
+        for (code_pos, data) in self.string_refs.drain(..) {
+            let str_off = self.string_pool[&data] as i64;
+            self.relocations.push(ElfRela {
+                offset: code_pos + 3,
+                sym_index: rodata_sym_idx.unwrap_or(0),
+                rel_type: R_X86_64_PC32,
+                addend: str_off - 7,
+            });
+        }
+
+        // 解析函数调用重定位 (使用最终符号表, 用 PLT32 以兼容 PIE)
+        for (code_off, func_name) in self.pending_func_rels.drain(..) {
+            let sym_idx = self.sym_index.get(&func_name).copied().unwrap_or(0);
+            self.relocations.push(ElfRela {
+                offset: code_off,
+                sym_index: sym_idx,
+                rel_type: R_X86_64_PLT32,
+                addend: -4,
+            });
+        }
+
+        // 解析全局变量重定位 (使用最终符号表)
+        for (disp32_pos, var_name) in self.pending_data_rels.drain(..) {
+            let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
+            self.relocations.push(ElfRela {
+                offset: disp32_pos,
+                sym_index: sym_idx,
+                rel_type: R_X86_64_PC32,
+                addend: -4,
+            });
+        }
+
+        // 解析内部跳转 (本地标签)
+        self.resolve(0);
+    }
+
+    /// 生成所有函数代码 (共用逻辑)
+    fn emit_functions(&mut self, prog: &Program) {
         let arg_regs: [u8; 6] = [7, 6, 2, 1, 8, 9];
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
+                // 跳过 extern 声明 (无函数体)
+                if f.body.is_none() { continue; }
                 self.var_map.clear();
                 self.vla_offsets.clear();
                 self.vla_total_size = 0;
+                let func_start = self.pos();
                 self.label(&f.name.name);
-                // 序言: push r13(帧指针)
-                self.emit(&[0x41, 0x55, 0x49, 0x89, 0xe5]); // push r13; mov r13, rsp
-                if f.name.name != "main" {
+                self.emit(&[0x41, 0x55, 0x49, 0x89, 0xe5]);
+                if f.name.name != "main" || !self.relocatable {
                     for (i, p) in f.params.iter().enumerate() {
                         if let Some(nm) = &p.name {
                             if i < 6 { let off = -(self.var_map.len() as i32 * 8 + 16);
@@ -138,23 +324,18 @@ impl Codegen {
                         }
                     }
                 }
-                // 预留栈空间: 先预注册所有局部变量 (数组分配多槽), 再计算帧大小
                 if let Some(body) = &f.body { Self::pre_register_vars(&mut self.var_map, &body.items); }
-                // 预注册后 var_map 已包含参数+局部变量+数组填充, 不再加 nlocals
                 self.frame_size = (self.var_map.len() as i32 + 3) * 8;
                 if self.frame_size > 0 {
-                    self.emit(&[0x48, 0x81, 0xec]); // sub rsp, imm32
+                    self.emit(&[0x48, 0x81, 0xec]);
                     self.emit(&(self.frame_size as i32).to_le_bytes());
                 }
-                // r12 初始化为帧底部 (VLA 基址等用途)
-                // 求值栈使用硬件 push/pop (rsp), 变量用 r13-relative, 互不干扰
-                self.emit(&[0x4d, 0x8d, 0xa5]); // lea r12, [r13 + imm32]
+                self.emit(&[0x4d, 0x8d, 0xa5]);
                 self.emit(&(-(self.frame_size) as i32).to_le_bytes());
                 let ends_ret = if let Some(body) = &f.body {
                     for item in &body.items { match item {
                         BlockItem::Stmt(s) => self.gen_stmt(s),
                         BlockItem::Decl(Decl::Var(v)) => {
-                            // 预注册变量 (数组分配多槽)
                             self.register_var(&v.name.name, &v.ty);
                             if matches!(&v.ty, Type::Array(_, ArraySize::Var(_))) {
                                 self.gen_vla_alloc(v);
@@ -168,17 +349,21 @@ impl Codegen {
                     Self::ends_with_return(&body.items)
                 } else { false };
                 if !ends_ret { self.emit_func_epilogue(); }
+                // 记录函数大小
+                let func_end = self.pos();
+                self.func_sizes.insert(f.name.name.clone(), func_end - func_start);
             }
         }
-        // 追加 .rodata 到代码段末尾
-        self.code.extend_from_slice(&self.rodata);
-        let rodata_start = self.entry + (self.code.len() as u64 - rodata_size as u64);
-        self.resolve(rodata_start);
     }
 
     fn call_label(&mut self, l: &str) {
         let at = self.pos(); self.emit(&[0xe8, 0, 0, 0, 0]);
-        self.pending.push(PendingJump { at, target: l.into(), kind: JumpKind::Jmp });
+        if self.relocatable {
+            // 延迟到 Phase 3 符号表构建后再解析
+            self.pending_func_rels.push((at + 1, l.to_string()));
+        } else {
+            self.pending.push(PendingJump { at, target: l.into(), kind: JumpKind::Jmp });
+        }
     }
 
     // 生成表达式值, 数组标识符衰减为指针 (arr → &arr[0])
@@ -272,7 +457,14 @@ impl Codegen {
         match e {
             Expr::Int { v, .. } => self.mov_imm(dst, *v),
             Expr::Char { v, .. } => self.mov_imm(dst, *v as i128),
-            Expr::Ident { name, .. } => self.mov_from_stack(dst, &name.name),
+            Expr::Ident { name, .. } => {
+                if self.relocatable && self.globals.contains_key(&name.name) {
+                    // 可重定位模式: 全局变量用 RIP-relative 加载
+                    self.emit_global_load(dst, &name.name);
+                } else {
+                    self.mov_from_stack(dst, &name.name);
+                }
+            }
             Expr::Binop { op, l, r, .. } => {
                 // 指针/数组运算缩放: ptr ± n 步进 sizeof(*ptr), ptr - ptr 返回元素数
                 // 数组衰减为指针: Array(T,_) 视为 Ptr(T)
@@ -305,7 +497,12 @@ impl Codegen {
             Expr::Assign { l, r, .. } => {
                 if let Expr::Ident { name, .. } = l.as_ref() {
                     self.gen_expr_decay(r, dst); // 数组衰减: int *p = arr
-                    self.mov_to_stack(dst, &name.name);
+                    if self.relocatable && self.globals.contains_key(&name.name) {
+                        // 可重定位模式: 全局变量用 RIP-relative 存储
+                        self.emit_global_store(dst, &name.name);
+                    } else {
+                        self.mov_to_stack(dst, &name.name);
+                    }
                 } else if let Expr::Index { arr, idx, ty: elem_ty, .. } = l.as_ref() {
                     // arr[i] = val
                     let es = elem_ty.size() as i32;
@@ -544,6 +741,29 @@ impl Codegen {
         if let Some(&(off, _)) = self.var_map.get(name) { return off; }
         let off = -(self.var_map.len() as i32 * 8 + 16);
         self.var_map.insert(name.to_string(), (off, Type::Int)); off
+    }
+
+    /// 全局变量 RIP-relative 加载: reg = [global_var]
+    /// 编码: REX.W 8B 05|reg<<3 disp32
+    fn emit_global_load(&mut self, reg: u8, name: &str) {
+        let disp32_pos = self.pos() + 3; // REX + opcode + ModRM = 3 bytes
+        let rex = if reg >= 8 { 0x4C } else { 0x48 }; // REX.W (+ REX.B if reg>=8)
+        self.emit(&[rex, 0x8B, 0x05 | ((reg & 7) << 3), 0, 0, 0, 0]);
+        if self.relocatable {
+            // 延迟到 Phase 3 符号表构建后再解析
+            self.pending_data_rels.push((disp32_pos, name.to_string()));
+        }
+    }
+
+    /// 全局变量 RIP-relative 存储: [global_var] = reg
+    /// 编码: REX.W 89 05|reg<<3 disp32
+    fn emit_global_store(&mut self, reg: u8, name: &str) {
+        let disp32_pos = self.pos() + 3;
+        let rex = if reg >= 8 { 0x4C } else { 0x48 };
+        self.emit(&[rex, 0x89, 0x05 | ((reg & 7) << 3), 0, 0, 0, 0]);
+        if self.relocatable {
+            self.pending_data_rels.push((disp32_pos, name.to_string()));
+        }
     }
 
     // 注册变量偏移 (数组按实际大小分配多个槽)
