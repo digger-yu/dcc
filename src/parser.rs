@@ -14,6 +14,7 @@ pub struct Parser<'a> {
     struct_defs: HashMap<String, (Vec<Field>, bool)>,
     enum_defs: HashMap<String, Vec<(String, i64)>>,
     enum_consts: HashMap<String, i64>,
+    locals: HashMap<String, Type>, // 变量名 → 类型
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -27,7 +28,8 @@ impl<'a> Parser<'a> {
         let cur = lex.next(); let peek = lex.next();
         Self { lex, cur, peek, diags: vec![], finished: false,
                typedefs: HashMap::new(), struct_defs: HashMap::new(),
-               enum_defs: HashMap::new(), enum_consts: HashMap::new() }
+               enum_defs: HashMap::new(), enum_consts: HashMap::new(),
+               locals: HashMap::new() }
     }
     fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
     fn err_here(&mut self, code: &'static str, msg: impl Into<String>) {
@@ -90,6 +92,11 @@ impl<'a> Parser<'a> {
             self.advance();
             let params = self.parse_params()?;
             if !self.expect(TokKind::RParen, "')'") { return None; }
+            // 进入函数: 清空局部变量表, 注册参数
+            self.locals.clear();
+            for p in &params {
+                if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
+            }
             let body = if self.cur.kind == TokKind::LBrace {
                 self.advance();
                 let b = self.parse_block();
@@ -109,15 +116,18 @@ impl<'a> Parser<'a> {
             } else { ArraySize::Const(0) };
             if !self.expect(TokKind::RBracket, "']'") { return None; }
             let arr_ty = Type::Array(Box::new(ty), arr_size);
+            self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::Assign {
+            self.locals.insert(name_for_decl.name.clone(), ty.clone());
             self.advance();
             let init = self.parse_expr()?;
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: Some(init), span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::Semi {
+            self.locals.insert(name_for_decl.name.clone(), ty.clone());
             self.advance();
             Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: false, is_static: false })])
         } else {
@@ -408,8 +418,12 @@ impl<'a> Parser<'a> {
                     // 提取赋值目标 (如果 lhs 已是 Assign, 提取其目标)
                     let target = Self::assign_target(&lhs);
                     let read = Box::new(lhs.clone()); // 读取当前值
-                    let expanded = Expr::Binop { op, l: read, r: Box::new(r), span: self.cur.span.clone(), ty: int_t() };
-                    lhs = Expr::Assign { op: BinOp::Add, l: Box::new(target), r: Box::new(expanded), span: self.cur.span.clone(), ty: int_t() }; continue; }
+                    let binop_ty = if matches!(target.ty(), Type::Ptr(_)) && matches!(op, BinOp::Add | BinOp::Sub) {
+                        target.ty()
+                    } else { int_t() };
+                    let expanded = Expr::Binop { op, l: read, r: Box::new(r), span: self.cur.span.clone(), ty: binop_ty };
+                    let assign_ty = target.ty();
+                    lhs = Expr::Assign { op: BinOp::Add, l: Box::new(target), r: Box::new(expanded), span: self.cur.span.clone(), ty: assign_ty }; continue; }
             }
             if self.cur.kind == TokKind::Question && min_bp == 0 {
                 self.advance(); let t = self.parse_expr()?;
@@ -432,7 +446,16 @@ impl<'a> Parser<'a> {
             };
             if lbp < min_bp { break; }
             self.advance(); let r = self.parse_expr_bp(rbp)?;
-            lhs = Expr::Binop { op, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: int_t() };
+            // 指针运算类型: ptr±int→ptr, int+ptr→ptr, ptr-ptr→int, 其余→int
+            let binop_ty = match (lhs.ty(), r.ty()) {
+                (ref lt, ref rt) if matches!(op, BinOp::Add | BinOp::Sub) => {
+                    if matches!(lt, Type::Ptr(_)) { lt.clone() }
+                    else if matches!(op, BinOp::Add) && matches!(rt, Type::Ptr(_)) { rt.clone() }
+                    else { int_t() }
+                }
+                _ => int_t(),
+            };
+            lhs = Expr::Binop { op, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: binop_ty };
         }
         Some(lhs)
     }
@@ -546,7 +569,8 @@ impl<'a> Parser<'a> {
                 let t = self.cur.text.clone();
                 if let Some(&val) = self.enum_consts.get(&t) { self.advance(); return Some(Expr::Int { v: val as i128, span: sp, ty: Type::Int }); }
                 let id = Ident { name: t, span: sp.clone() }; self.advance();
-                Some(Expr::Ident { name: id, span: sp, ty: int_t() })
+                let id_ty = self.locals.get(&id.name).cloned().unwrap_or_else(int_t);
+                Some(Expr::Ident { name: id, span: sp, ty: id_ty })
             }
             TokKind::LParen => { self.advance(); let e = self.parse_expr()?; if !self.expect(TokKind::RParen, "')'") { return None; } Some(e) }
             _ => { self.err_here("E0006", format!("expected expression, got {:?}", self.cur.kind)); None }

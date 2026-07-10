@@ -1,9 +1,8 @@
 #!/bin/bash
 # DCC 全量回归测试 — 在 Linux 上运行
-set -e
 export PATH=/home/ds/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 cd ~/dcc-debug
-cargo build 2>/dev/null
+cargo build 2>/dev/null || { echo "构建失败"; exit 1; }
 
 PASS=0; FAIL=0
 run_test() {
@@ -35,6 +34,9 @@ run_test examples/pp_attr_test.c 30 pp_attr
 # 函数调用 + 求值栈测试
 run_test examples/call_assign_test.c 20 call_assign
 run_test examples/bar_test.c 20 bar_test
+
+# 指针运算缩放测试
+run_test examples/ptr_arith_test.c 64 ptr_arith
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="

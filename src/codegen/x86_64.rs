@@ -138,9 +138,10 @@ impl Codegen {
                         }
                     }
                 }
-                // 预留栈空间 (+3: saved_r13 + 对齐余量 + 安全间距)
-                let nlocals = if let Some(body) = &f.body { Self::count_locals(&body.items) } else { 0 };
-                self.frame_size = ((self.var_map.len() + nlocals) as i32 + 3) * 8;
+                // 预留栈空间: 先预注册所有局部变量 (数组分配多槽), 再计算帧大小
+                if let Some(body) = &f.body { Self::pre_register_vars(&mut self.var_map, &body.items); }
+                // 预注册后 var_map 已包含参数+局部变量+数组填充, 不再加 nlocals
+                self.frame_size = (self.var_map.len() as i32 + 3) * 8;
                 if self.frame_size > 0 {
                     self.emit(&[0x48, 0x81, 0xec]); // sub rsp, imm32
                     self.emit(&(self.frame_size as i32).to_le_bytes());
@@ -153,8 +154,9 @@ impl Codegen {
                     for item in &body.items { match item {
                         BlockItem::Stmt(s) => self.gen_stmt(s),
                         BlockItem::Decl(Decl::Var(v)) => {
+                            // 预注册变量 (数组分配多槽)
+                            self.register_var(&v.name.name, &v.ty);
                             if matches!(&v.ty, Type::Array(_, ArraySize::Var(_))) {
-                                // VLA: 运行时分配栈空间
                                 self.gen_vla_alloc(v);
                             } else if let Some(init) = &v.init {
                                 self.gen_expr(init, 0);
@@ -177,6 +179,25 @@ impl Codegen {
     fn call_label(&mut self, l: &str) {
         let at = self.pos(); self.emit(&[0xe8, 0, 0, 0, 0]);
         self.pending.push(PendingJump { at, target: l.into(), kind: JumpKind::Jmp });
+    }
+
+    // 生成表达式值, 数组标识符衰减为指针 (arr → &arr[0])
+    fn gen_expr_decay(&mut self, e: &Expr, dst: u8) {
+        if let Expr::Ident { name, ty, .. } = e {
+            if matches!(ty, Type::Array(_, _)) {
+                let off = self.var_offset(&name.name);
+                let rex = 0x49u8; // REX.W + REX.B (r13)
+                self.emit(&[rex, 0x8D]);
+                if off.abs() < 128 {
+                    self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                } else {
+                    self.emit(&[0x85 | ((dst & 7) << 3)]);
+                    self.emit(&off.to_le_bytes());
+                }
+                return;
+            }
+        }
+        self.gen_expr(e, dst);
     }
 
     fn gen_stmt(&mut self, s: &Stmt) {
@@ -228,6 +249,7 @@ impl Codegen {
                 for it in &b.items { match it {
                     BlockItem::Stmt(s) => self.gen_stmt(s),
                     BlockItem::Decl(Decl::Var(v)) => {
+                        self.register_var(&v.name.name, &v.ty);
                         if matches!(&v.ty, Type::Array(_, ArraySize::Var(_))) {
                             self.gen_vla_alloc(v);
                         } else if let Some(init) = &v.init {
@@ -252,23 +274,51 @@ impl Codegen {
             Expr::Char { v, .. } => self.mov_imm(dst, *v as i128),
             Expr::Ident { name, .. } => self.mov_from_stack(dst, &name.name),
             Expr::Binop { op, l, r, .. } => {
+                // 指针/数组运算缩放: ptr ± n 步进 sizeof(*ptr), ptr - ptr 返回元素数
+                // 数组衰减为指针: Array(T,_) 视为 Ptr(T)
+                let l_inner = match l.ty() { Type::Ptr(ref t) | Type::Array(ref t, _) => Some(t.size()), _ => None };
+                let r_inner = match r.ty() { Type::Ptr(ref t) | Type::Array(ref t, _) => Some(t.size()), _ => None };
+                let is_ptr_sub = matches!(op, BinOp::Sub) && l_inner.is_some() && r_inner.is_some();
+                let needs_scale = matches!(op, BinOp::Add | BinOp::Sub) && !is_ptr_sub;
+                let scale = if needs_scale {
+                    if let Some(s) = l_inner { s } else if let Some(s) = r_inner { s } else { 1 }
+                } else { 1 };
+                let elem_size = if is_ptr_sub { l_inner.unwrap_or(1) } else { 1 };
                 // 统一路径: 硬件 push/pop 求值栈, rsp 在 call 前后 save/restore
-                self.gen_expr(l, dst); self.push(dst);
-                self.gen_expr(r, 1); self.pop(dst);
+                // 使用 gen_expr_decay: 数组标识符在运算中衰减为指针
+                self.gen_expr_decay(l, dst); self.push(dst);
+                self.gen_expr_decay(r, 1);
+                // 对整数操作数乘以指针所指类型大小 (跳过 char* 和 ptr-ptr)
+                if scale > 1 {
+                    self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
+                    self.emit(&(scale as i32).to_le_bytes());
+                }
+                self.pop(dst);
                 self.binop(*op, dst, 1);
+                // ptr - ptr: 字节差 ÷ 元素大小 = 元素数
+                if is_ptr_sub && elem_size > 1 {
+                    self.mov_imm(1, elem_size as i128); // rcx = elem_size
+                    self.emit(&[0x48, 0x99]); // cqo (符号扩展 rax→rdx:rax)
+                    self.emit(&[0x48, 0xf7, 0xf9]); // idiv rcx
+                }
             }
             Expr::Assign { l, r, .. } => {
                 if let Expr::Ident { name, .. } = l.as_ref() {
-                    self.gen_expr(r, dst);
+                    self.gen_expr_decay(r, dst); // 数组衰减: int *p = arr
                     self.mov_to_stack(dst, &name.name);
                 } else if let Expr::Index { arr, idx, ty: elem_ty, .. } = l.as_ref() {
                     // arr[i] = val
                     let es = elem_ty.size() as i32;
-                    if let Expr::Ident { name: arr_name, .. } = arr.as_ref() {
+                    if let Expr::Ident { name: arr_name, ty: arr_ty, .. } = arr.as_ref() {
                         if self.vla_offsets.contains_key(&arr_name.name) {
                             // VLA: 基址在 r12
                             self.emit(&[0x41, 0x54, 0x58]); // push r12; pop rax
+                        } else if matches!(arr_ty, Type::Array(_, _)) {
+                            // 静态数组: LEA 取基址
+                            let off = self.var_offset(&arr_name.name);
+                            self.emit_lea_r13(0, off);
                         } else {
+                            // 指针: 加载指针值
                             let off = self.var_offset(&arr_name.name);
                             self.load_stack(0, off);
                         }
@@ -284,6 +334,13 @@ impl Codegen {
                         // mov [rcx], rax: 48 89 01
                         self.emit(&[0x48, 0x89, 0x01]);
                     }
+                } else if let Expr::Deref { e: ptr_e, .. } = l.as_ref() {
+                    // *ptr = val
+                    self.gen_expr(ptr_e, 0); // rax = address
+                    self.push(0);             // save addr
+                    self.gen_expr(r, 0);      // rax = val
+                    self.pop(1);              // rcx = addr
+                    self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
                 }
             }
             Expr::Unary { op, e, .. } => {
@@ -328,11 +385,16 @@ impl Codegen {
             }
             Expr::Index { arr, idx, ty: elem_ty, .. } => {
                 let es = elem_ty.size() as i32;
-                if let Expr::Ident { name: arr_name, .. } = arr.as_ref() {
+                if let Expr::Ident { name: arr_name, ty: arr_ty, .. } = arr.as_ref() {
                     if self.vla_offsets.contains_key(&arr_name.name) {
                         // VLA: 基址在 r12, 用 push r12; pop rax
                         self.emit(&[0x41, 0x54, 0x58]); // push r12; pop rax
+                    } else if matches!(arr_ty, Type::Array(_, _)) {
+                        // 静态数组: LEA 取基址
+                        let off = self.var_offset(&arr_name.name);
+                        self.emit_lea_r13(0, off);
                     } else {
+                        // 指针: 加载指针值
                         let off = self.var_offset(&arr_name.name);
                         self.load_stack(0, off);
                     }
@@ -346,7 +408,56 @@ impl Codegen {
                     if dst != 0 { self.mov(dst, 0); }
                 }
             }
+            Expr::PostInc { e, .. } => self.gen_inc_dec(e, dst, false, true),
+            Expr::PostDec { e, .. } => self.gen_inc_dec(e, dst, false, false),
+            Expr::PreInc  { e, .. } => self.gen_inc_dec(e, dst, true, true),
+            Expr::PreDec  { e, .. } => self.gen_inc_dec(e, dst, true, false),
+            Expr::Deref { e, .. } => {
+                // *e: 求值内部表达式得到地址, 然后读取该地址的值
+                self.gen_expr(e, 0);
+                self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                if dst != 0 { self.mov(dst, 0); }
+            }
+            Expr::AddrOf { e, .. } => {
+                // &x: 计算变量地址加载到 dst
+                if let Expr::Ident { name, .. } = e.as_ref() {
+                    let off = self.var_offset(&name.name);
+                    let rex = 0x49u8; // REX.W + REX.B (r13)
+                    self.emit(&[rex, 0x8D]);
+                    if off.abs() < 128 {
+                        self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                    } else {
+                        self.emit(&[0x85 | ((dst & 7) << 3)]);
+                        self.emit(&off.to_le_bytes());
+                    }
+                }
+            }
             _ => { /* M0: 其他表达式暂不处理 */ }
+        }
+    }
+
+    // 指针/整数自增自减: step = sizeof(*ptr) 或 1
+    fn gen_inc_dec(&mut self, e: &Expr, dst: u8, is_pre: bool, is_inc: bool) {
+        let inner_ty = e.ty();
+        let step = if inner_ty.is_ptr() {
+            if let Type::Ptr(ref inner) = inner_ty { inner.size() as i32 } else { 1 }
+        } else { 1 };
+        if let Expr::Ident { name, .. } = e {
+            let off = self.var_offset(&name.name);
+            self.load_stack(dst, off);
+            if !is_pre { self.push(dst); } // 后缀: 保存旧值
+            // add/sub imm32 (0x81 /0 for add, 0x81 /5 for sub)
+            let opcode = if is_inc { 0x81u8 } else { 0x81u8 };
+            let modrm_base = if is_inc { 0xC0u8 | ((dst & 7) << 3) } else { 0xE8u8 | ((dst & 7) << 3) };
+            if dst < 8 {
+                self.emit(&[0x48, opcode, modrm_base]);
+                self.emit(&(step as i32).to_le_bytes());
+            } else {
+                self.emit(&[0x49, opcode, modrm_base]);
+                self.emit(&(step as i32).to_le_bytes());
+            }
+            self.store_stack(dst, off);
+            if !is_pre { self.pop(dst); } // 后缀: 恢复旧值到 dst
         }
     }
 
@@ -434,6 +545,22 @@ impl Codegen {
         let off = -(self.var_map.len() as i32 * 8 + 16);
         self.var_map.insert(name.to_string(), (off, Type::Int)); off
     }
+
+    // 注册变量偏移 (数组按实际大小分配多个槽)
+    fn register_var(&mut self, name: &str, ty: &Type) -> i32 {
+        if let Some(&(off, _)) = self.var_map.get(name) { return off; }
+        let slots = (ty.size() + 7) / 8; // 向上对齐到 8 字节
+        let slots = slots.max(1) as i32;
+        let off = -(self.var_map.len() as i32 * 8 + 16);
+        self.var_map.insert(name.to_string(), (off, ty.clone()));
+        // 为数组预留额外槽位 (空插入占位)
+        for i in 1..slots {
+            let placeholder_name = format!("__pad_{}_{}", name, i);
+            let pad_off = -(self.var_map.len() as i32 * 8 + 16);
+            self.var_map.insert(placeholder_name, (pad_off, Type::Int));
+        }
+        off
+    }
     fn mov_to_stack(&mut self, reg: u8, name: &str) { let off = self.var_offset(name); self.store_stack(reg, off); }
     fn mov_from_stack(&mut self, reg: u8, name: &str) { let off = self.var_offset(name); self.load_stack(reg, off); }
 
@@ -451,6 +578,18 @@ impl Codegen {
         else { self.emit(&[0x85 | ((reg & 7) << 3)]); self.emit(&off.to_le_bytes()); }
     }
 
+    // LEA reg, [r13 + off] — 取栈变量地址 (与 gen_expr_decay 编码一致)
+    fn emit_lea_r13(&mut self, reg: u8, off: i32) {
+        let rex = 0x49u8; // REX.W + REX.B (r13)
+        self.emit(&[rex, 0x8D]);
+        if off.abs() < 128 {
+            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((reg & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
     // VLA 运行时分配: TODO - 当前架构无法解决 VLA 与固定帧的栈空间重叠问题
     // 需要重新设计栈帧布局 (如使用两个帧指针或堆分配) 才能正确支持
     fn gen_vla_alloc(&mut self, _v: &VarDecl) {
@@ -464,17 +603,52 @@ impl Codegen {
         self.emit(&[0x41, 0x5d, 0xc3]); // pop r13; ret
     }
 
-    // 预扫描: 统计函数体中局部变量声明数
+    // 预扫描: 统计函数体中局部变量所需栈槽数 (数组按实际大小)
     fn count_locals(items: &[BlockItem]) -> usize {
         let mut n = 0;
         for item in items {
             match item {
-                BlockItem::Decl(Decl::Var(_)) => n += 1,
+                BlockItem::Decl(Decl::Var(v)) => {
+                    n += (v.ty.size() + 7) / 8; // 数组占多个槽
+                }
                 BlockItem::Stmt(s) => n += Self::count_locals_stmt(s),
                 _ => {}
             }
         }
         n
+    }
+
+    // 预注册所有局部变量到 var_map (数组分配多槽, 保证帧大小计算正确)
+    fn pre_register_vars(var_map: &mut HashMap<String, (i32, Type)>, items: &[BlockItem]) {
+        for item in items {
+            match item {
+                BlockItem::Decl(Decl::Var(v)) => {
+                    let slots = ((v.ty.size() + 7) / 8).max(1) as i32;
+                    let off = -(var_map.len() as i32 * 8 + 16);
+                    var_map.entry(v.name.name.clone()).or_insert((off, v.ty.clone()));
+                    for j in 1..slots {
+                        let pad = format!("__pad_{}_{}", v.name.name, j);
+                        let pad_off = -(var_map.len() as i32 * 8 + 16);
+                        var_map.entry(pad).or_insert((pad_off, Type::Int));
+                    }
+                }
+                BlockItem::Stmt(s) => Self::pre_register_stmt(var_map, s),
+                _ => {}
+            }
+        }
+    }
+    fn pre_register_stmt(var_map: &mut HashMap<String, (i32, Type)>, s: &Stmt) {
+        match s {
+            Stmt::Block { b, .. } => Self::pre_register_vars(var_map, &b.items),
+            Stmt::If { then_, else_, .. } => {
+                Self::pre_register_stmt(var_map, then_);
+                if let Some(e) = else_ { Self::pre_register_stmt(var_map, e); }
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
+                Self::pre_register_stmt(var_map, body);
+            }
+            _ => {}
+        }
     }
     fn count_locals_stmt(s: &Stmt) -> usize {
         match s {
