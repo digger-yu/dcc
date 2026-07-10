@@ -1,0 +1,58 @@
+# .gitattributes - 行尾符号规范
+# 第一性原理: 本项目目标平台是 Linux, 所有文本文件统一 LF
+
+# 默认: 所有文本文件 LF
+* text=auto eol=lf
+
+# Rust 源码
+*.rs text eol=lf
+
+# C 源码 (测试用例)
+*.c text eol=lf
+*.h text eol=lf
+
+# 构建配置
+Cargo.toml text eol=lf
+Cargo.lock text eol=lf
+*.toml text eol=lf
+
+# 文档
+*.md text eol=lf
+*.txt text eol=lf
+LICENSE text eol=lf
+
+# CI/CD
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# 脚本 (必须 LF, 否则 bash 无法执行)
+*.sh text eol=lf
+
+# Git 自身
+.gitattributes text eol=lf
+.gitignore text eol=lf
+.gitmodules text eol=lf
+
+# 二进制文件 - 不做行尾转换
+*.exe binary
+*.o binary
+*.a binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.pdb binary
+*.elf binary
+*.bin binary
+
+# 归档
+*.tar binary
+*.tar.gz binary
+*.tar.xz binary
+*.zip binary
+
+# 图片
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.svg text eol=lf
