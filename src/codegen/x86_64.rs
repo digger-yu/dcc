@@ -5,6 +5,7 @@
 use crate::ast::*;
 use crate::target::Target;
 use std::collections::HashMap;
+use crate::ast::ArraySize;
 
 pub struct Codegen {
     pub code: Vec<u8>,
@@ -23,6 +24,8 @@ pub struct Codegen {
     // 全局变量
     globals: HashMap<String, GlobalVar>,
     frame_size: i32,  // 当前函数栈帧大小（字节）
+    vla_offsets: HashMap<String, i32>,  // VLA 变量名 → 距 r13 的偏移
+    vla_total_size: i32,  // 当前函数所有 VLA 总大小
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -37,7 +40,8 @@ impl Codegen {
                pending: vec![], next_label: 0, var_map: HashMap::new(),
                loop_continue: None, loop_break: None,
                rodata: vec![], string_pool: HashMap::new(), string_refs: vec![],
-               globals: HashMap::new(), frame_size: 0 }
+               globals: HashMap::new(), frame_size: 0, vla_offsets: HashMap::new(),
+               vla_total_size: 0 }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -120,6 +124,8 @@ impl Codegen {
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 self.var_map.clear();
+                self.vla_offsets.clear();
+                self.vla_total_size = 0;
                 self.label(&f.name.name);
                 self.emit(&[0x41, 0x55, 0x49, 0x89, 0xe5]); // push r13; mov r13, rsp
                 if f.name.name != "main" {
@@ -141,7 +147,15 @@ impl Codegen {
                 let ends_ret = if let Some(body) = &f.body {
                     for item in &body.items { match item {
                         BlockItem::Stmt(s) => self.gen_stmt(s),
-                        BlockItem::Decl(Decl::Var(v)) => { if let Some(init) = &v.init { self.gen_expr(init, 0); self.mov_to_stack(0, &v.name.name); } }
+                        BlockItem::Decl(Decl::Var(v)) => {
+                            if matches!(&v.ty, Type::Array(_, ArraySize::Var(_))) {
+                                // VLA: 运行时分配栈空间
+                                self.gen_vla_alloc(v);
+                            } else if let Some(init) = &v.init {
+                                self.gen_expr(init, 0);
+                                self.mov_to_stack(0, &v.name.name);
+                            }
+                        }
                         _ => {}
                     }}
                     Self::ends_with_return(&body.items)
@@ -208,7 +222,14 @@ impl Codegen {
             Stmt::Block { b, .. } => {
                 for it in &b.items { match it {
                     BlockItem::Stmt(s) => self.gen_stmt(s),
-                    BlockItem::Decl(Decl::Var(v)) => { if let Some(init) = &v.init { self.gen_expr(init, 0); self.mov_to_stack(0, &v.name.name); } }
+                    BlockItem::Decl(Decl::Var(v)) => {
+                        if matches!(&v.ty, Type::Array(_, ArraySize::Var(_))) {
+                            self.gen_vla_alloc(v);
+                        } else if let Some(init) = &v.init {
+                            self.gen_expr(init, 0);
+                            self.mov_to_stack(0, &v.name.name);
+                        }
+                    }
                     _ => {}
                 }}
             }
@@ -231,7 +252,33 @@ impl Codegen {
                 self.binop(*op, dst, 1);
             }
             Expr::Assign { l, r, .. } => {
-                if let Expr::Ident { name, .. } = l.as_ref() { self.gen_expr(r, dst); self.mov_to_stack(dst, &name.name); }
+                if let Expr::Ident { name, .. } = l.as_ref() {
+                    self.gen_expr(r, dst);
+                    self.mov_to_stack(dst, &name.name);
+                } else if let Expr::Index { arr, idx, ty: elem_ty, .. } = l.as_ref() {
+                    // arr[i] = val
+                    let es = elem_ty.size() as i32;
+                    if let Expr::Ident { name: arr_name, .. } = arr.as_ref() {
+                        if self.vla_offsets.contains_key(&arr_name.name) {
+                            // VLA: 基址在 r12
+                            self.emit(&[0x41, 0x54, 0x58]); // push r12; pop rax
+                        } else {
+                            let off = self.var_offset(&arr_name.name);
+                            self.load_stack(0, off);
+                        }
+                        self.gen_expr(idx, 1); // rcx = index
+                        if es != 1 {
+                            self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
+                            self.emit(&es.to_le_bytes());
+                        }
+                        self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx (addr in rax)
+                        self.push(0); // save addr
+                        self.gen_expr(r, 0); // rax = val
+                        self.pop(1); // rcx = addr
+                        // mov [rcx], rax: 48 89 01
+                        self.emit(&[0x48, 0x89, 0x01]);
+                    }
+                }
             }
             Expr::Unary { op, e, .. } => {
                 self.gen_expr(e, dst);
@@ -267,6 +314,26 @@ impl Codegen {
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                 self.emit(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]);
                 self.string_refs.push((at, data));
+            }
+            Expr::Index { arr, idx, ty: elem_ty, .. } => {
+                let es = elem_ty.size() as i32;
+                if let Expr::Ident { name: arr_name, .. } = arr.as_ref() {
+                    if self.vla_offsets.contains_key(&arr_name.name) {
+                        // VLA: 基址在 r12, 用 push r12; pop rax
+                        self.emit(&[0x41, 0x54, 0x58]); // push r12; pop rax
+                    } else {
+                        let off = self.var_offset(&arr_name.name);
+                        self.load_stack(0, off);
+                    }
+                    self.gen_expr(idx, 1); // rcx = index
+                    if es != 1 {
+                        self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
+                        self.emit(&es.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
+                    self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                    if dst != 0 { self.mov(dst, 0); }
+                }
             }
             _ => { /* M0: 其他表达式暂不处理 */ }
         }
@@ -340,11 +407,16 @@ impl Codegen {
         else { self.emit(&[0x85 | ((reg & 7) << 3)]); self.emit(&off.to_le_bytes()); }
     }
 
+    // VLA 运行时分配: TODO - 当前架构无法解决 VLA 与固定帧的栈空间重叠问题
+    // 需要重新设计栈帧布局 (如使用两个帧指针或堆分配) 才能正确支持
+    fn gen_vla_alloc(&mut self, _v: &VarDecl) {
+        // TODO: VLA 代码生成
+    }
+
     // 函数尾声: 恢复栈指针 + 恢复 r13 + 返回
     fn emit_func_epilogue(&mut self) {
         if self.frame_size > 0 {
-            // add rsp, frame_size: 48 81 C4 imm32
-            self.emit(&[0x48, 0x81, 0xc4]);
+            self.emit(&[0x48, 0x81, 0xc4]); // add rsp, frame_size
             self.emit(&(self.frame_size as i32).to_le_bytes());
         }
         self.emit(&[0x41, 0x5d, 0xc3]); // pop r13; ret

@@ -17,10 +17,15 @@ pub struct Preprocessor {
     cond_stack: Vec<CondState>,
     /// 输出缓冲
     out: String,
-    /// 当前文件名 (用于诊断)
+    /// 当前文件名 (用于诊断 + __FILE__)
     file: String,
     /// 搜索路径基准目录
     base_dir: PathBuf,
+    /// 当前行号 (用于 __LINE__)
+    cur_line: u32,
+    /// 编译日期/时间 (用于 __DATE__ / __TIME__)
+    compile_date: String,
+    compile_time: String,
 }
 
 struct CondState {
@@ -36,12 +41,16 @@ struct CondState {
 struct MacroDef {
     params: Option<Vec<String>>,  // None = object-like, Some = function-like
     body: String,
+    /// 可变参数: true 表示末尾有 ...
+    variadic: bool,
 }
 
 pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                   defines: &[(String, Option<String>)]) -> (String, Vec<Diagnostic>) {
     let text = String::from_utf8_lossy(src);
     let base = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
+    // 编译日期/时间
+    let (compile_date, compile_time) = Preprocessor::compile_datetime();
     let mut pp = Preprocessor {
         macros: HashMap::new(),
         include_paths: include_paths.to_vec(),
@@ -51,6 +60,9 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         out: String::with_capacity(text.len()),
         file: file.to_string(),
         base_dir: base,
+        cur_line: 0,
+        compile_date,
+        compile_time,
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -78,16 +90,27 @@ impl Preprocessor {
 
     fn define_builtin(&mut self, name: &str, val: &str) {
         self.macros.insert(name.to_string(), MacroDef {
-            params: None, body: val.to_string(),
+            params: None, body: val.to_string(), variadic: false,
         });
+    }
+
+    fn compile_datetime() -> (String, String) {
+        // 简化: 使用固定格式, 实际项目可用 chrono
+        let date = "Jul  9 2026";
+        let time = "00:00:00";
+        (date.to_string(), time.to_string())
     }
 
     fn process_text(&mut self, text: &str, file: &str) {
         let saved_file = self.file.clone();
         self.file = file.to_string();
 
-        for (line_no, line) in text.lines().enumerate() {
+        // 行续接: 合并以 \ 结尾的行
+        let joined = Self::join_continued_lines(text);
+
+        for (line_no, line) in joined.lines().enumerate() {
             let line_no = (line_no + 1) as u32;
+            self.cur_line = line_no;
             let trimmed = line.trim();
 
             if trimmed.starts_with('#') {
@@ -105,6 +128,30 @@ impl Preprocessor {
         }
 
         self.file = saved_file;
+    }
+
+    /// 行续接: 将行尾 \ 与下一行合并
+    fn join_continued_lines(text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        let mut continued = String::new();
+        for line in text.lines() {
+            if line.ends_with('\\') {
+                continued.push_str(&line[..line.len()-1]);
+                continued.push(' '); // \ 替换为空格
+            } else {
+                if !continued.is_empty() {
+                    continued.push_str(line);
+                    result.push_str(&continued);
+                    result.push('\n');
+                    continued.clear();
+                } else {
+                    result.push_str(line);
+                    result.push('\n');
+                }
+            }
+        }
+        if !continued.is_empty() { result.push_str(&continued); result.push('\n'); }
+        result
     }
 
     fn process_directive(&mut self, line: &str, line_no: u32) {
@@ -207,7 +254,7 @@ impl Preprocessor {
     }
 
     fn do_define(&mut self, rest: &str) {
-        // #define NAME body  或  #define NAME(args) body
+        // #define NAME body  或  #define NAME(args, ...) body
         let rest = rest.trim_start();
         // 提取宏名
         let name_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_')
@@ -220,19 +267,33 @@ impl Preprocessor {
             // function-like macro
             let paren_end = after_name.find(')').unwrap_or(after_name.len());
             let params_str = &after_name[1..paren_end];
-            let params: Vec<String> = params_str.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let mut params: Vec<String> = vec![];
+            let mut variadic = false;
+            for s in params_str.split(',') {
+                let s = s.trim();
+                if s == "..." { variadic = true; }
+                else if s.starts_with("...") {
+                    // ...name 形式
+                    variadic = true;
+                    let va_name = &s[3..];
+                    if !va_name.is_empty() { params.push(va_name.to_string()); }
+                } else if !s.is_empty() {
+                    params.push(s.to_string());
+                }
+            }
+            // 可变参数宏自动添加 __VA_ARGS__ 参数名
+            if variadic && !params.iter().any(|p| p == "__VA_ARGS__") {
+                params.push("__VA_ARGS__".to_string());
+            }
             let body = after_name[paren_end+1..].trim().to_string();
             self.macros.insert(name.to_string(), MacroDef {
-                params: Some(params), body,
+                params: Some(params), body, variadic,
             });
         } else {
             // object-like macro
             let body = after_name.trim().to_string();
             self.macros.insert(name.to_string(), MacroDef {
-                params: None, body,
+                params: None, body, variadic: false,
             });
         }
     }
@@ -352,6 +413,24 @@ impl Preprocessor {
                 while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
                 let ident: String = chars[start..i].iter().collect();
 
+                // 特殊内建宏: __FILE__ / __LINE__ / __DATE__ / __TIME__
+                if ident == "__FILE__" {
+                    out.push_str(&format!("\"{}\"", self.file));
+                    continue;
+                }
+                if ident == "__LINE__" {
+                    out.push_str(&self.cur_line.to_string());
+                    continue;
+                }
+                if ident == "__DATE__" {
+                    out.push_str(&format!("\"{}\"", self.compile_date));
+                    continue;
+                }
+                if ident == "__TIME__" {
+                    out.push_str(&format!("\"{}\"", self.compile_time));
+                    continue;
+                }
+
                 if let Some(def) = self.macros.get(&ident) {
                     if let Some(ref params) = def.params {
                         // function-like: 需要后跟 (
@@ -361,7 +440,22 @@ impl Preprocessor {
                             // 解析参数
                             j += 1; // skip (
                             let args = self.parse_macro_args(&chars, &mut j);
-                            if args.len() == params.len() {
+                            // 可变参数: 多余参数合并为 __VA_ARGS__
+                            let mut final_args = args.clone();
+                            if def.variadic && args.len() >= params.len().saturating_sub(1) {
+                                // 固定参数 + 可变参数
+                                let fixed = params.len() - 1; // 减去 __VA_ARGS__
+                                if args.len() > fixed {
+                                    let va_args: Vec<String> = args[fixed..].to_vec();
+                                    let mut normal = args[..fixed].to_vec();
+                                    normal.push(va_args.join(", "));
+                                    final_args = normal;
+                                }
+                            }
+                            if final_args.len() == params.len() {
+                                let expanded = self.substitute_params(&def.body, params, &final_args);
+                                out.push_str(&expanded);
+                            } else if args.len() == params.len() {
                                 let expanded = self.substitute_params(&def.body, params, &args);
                                 out.push_str(&expanded);
                             } else {
@@ -390,14 +484,14 @@ impl Preprocessor {
         let mut args = vec![];
         let mut current = String::new();
         let mut depth = 1;
+        let mut closed = false;
         while *pos < chars.len() && depth > 0 {
             let c = chars[*pos];
             if c == '(' { depth += 1; current.push(c); }
             else if c == ')' {
                 depth -= 1;
-                if depth == 0 {
-                    args.push(current.trim().to_string());
-                } else { current.push(c); }
+                if depth == 0 { closed = true; args.push(current.trim().to_string()); }
+                else { current.push(c); }
             }
             else if c == ',' && depth == 1 {
                 args.push(current.trim().to_string());
@@ -406,19 +500,96 @@ impl Preprocessor {
             else { current.push(c); }
             *pos += 1;
         }
-        if !current.trim().is_empty() { args.push(current.trim().to_string()); }
+        if !closed && !current.trim().is_empty() { args.push(current.trim().to_string()); }
         args
     }
 
     fn substitute_params(&self, body: &str, params: &[String], args: &[String]) -> String {
+        // 第一步: 处理 # (字符串化) — 必须在 ## 之前, 否则参数名被替换后 # 找不到模式
+        let result = self.handle_stringify(body, params, args);
+        // 第二步: 处理 ## (令牌拼接)
+        let result = self.handle_paste(&result, params, args);
+        // 第三步: 普通参数替换
+        let mut result = result;
+        for (i, param) in params.iter().enumerate() {
+            if i >= args.len() { continue; }
+            // 替换独立的参数名 (不拆分单词, 避免破坏 ## 结果)
+            result = Self::replace_ident(&result, param, &args[i]);
+        }
+        result
+    }
+
+    /// ## 令牌拼接: 替换参数后直接拼接文本
+    fn handle_paste(&self, body: &str, params: &[String], args: &[String]) -> String {
+        // 先替换参数名, 然后处理 ##
+        let mut result = body.to_string();
+        // 替换参数名 (用于 ## 上下文)
+        for (i, param) in params.iter().enumerate() {
+            if i >= args.len() { continue; }
+            result = Self::replace_ident(&result, param, &args[i]);
+        }
+        // 处理 ##: 拼接两侧 token
+        while let Some(pos) = result.find("##") {
+            let before = result[..pos].trim_end();
+            let after = result[pos+2..].trim_start();
+            // 取 before 最后一个 token
+            let left_start = before.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                .map(|p| p + 1).unwrap_or(0);
+            let left = &before[left_start..];
+            // 取 after 第一个 token
+            let right_end = after.find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(after.len());
+            let right = &after[..right_end];
+            let pasted = format!("{}{}", left, right);
+            result = format!("{} {} {}", &before[..left_start], pasted, &after[right_end..]);
+        }
+        result
+    }
+
+    /// # 字符串化: # param → "param_value"
+    fn handle_stringify(&self, body: &str, params: &[String], args: &[String]) -> String {
         let mut result = body.to_string();
         for (i, param) in params.iter().enumerate() {
-            // 简单替换: 参数名 → 实参
-            // TODO: 处理 # 和 ## 操作符
-            let words: Vec<&str> = result.split_whitespace().collect();
-            result = words.iter().map(|w| {
-                if w == param { args[i].as_str() } else { *w }
-            }).collect::<Vec<_>>().join(" ");
+            if i >= args.len() { continue; }
+            // 查找 # param (注意不是 ##)
+            let pattern = format!("# {}", param);
+            let pattern2 = format!("#{}", param);
+            for pat in &[pattern, pattern2] {
+                while let Some(pos) = result.find(pat.as_str()) {
+                    // 确保不是 ##
+                    if pos > 0 && result.as_bytes()[pos-1] == b'#' { break; }
+                    let stringified = Self::stringify_arg(&args[i]);
+                    let end = pos + pat.len();
+                    result = format!("{}{}{}", &result[..pos], stringified, &result[end..]);
+                }
+            }
+        }
+        result
+    }
+
+    /// 将参数值转为字符串字面量 (转义 " 和 \)
+    fn stringify_arg(arg: &str) -> String {
+        let escaped = arg.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{}\"", escaped)
+    }
+
+    /// 替换文本中的独立标识符
+    fn replace_ident(text: &str, from: &str, to: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        while i < len {
+            if chars[i].is_alphabetic() || chars[i] == '_' {
+                let start = i;
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
+                let ident: String = chars[start..i].iter().collect();
+                if ident == from { result.push_str(to); }
+                else { result.push_str(&ident); }
+            } else {
+                result.push(chars[i]);
+                i += 1;
+            }
         }
         result
     }

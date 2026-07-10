@@ -99,11 +99,16 @@ impl<'a> Parser<'a> {
             Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::LBracket {
             self.advance();
-            let sz = if self.cur.kind != TokKind::RBracket {
-                if let Expr::Int { v, .. } = self.parse_expr()? { v as usize } else { 0 }
-            } else { 0 };
+            let arr_size = if self.cur.kind != TokKind::RBracket {
+                let e = self.parse_expr()?;
+                match &e {
+                    Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                    Expr::Ident { name, .. } => ArraySize::Var(name.name.clone()),
+                    _ => ArraySize::Const(0), // 复杂表达式暂不支持
+                }
+            } else { ArraySize::Const(0) };
             if !self.expect(TokKind::RBracket, "']'") { return None; }
-            let arr_ty = Type::Array(Box::new(ty), sz);
+            let arr_ty = Type::Array(Box::new(ty), arr_size);
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false })])
@@ -235,11 +240,16 @@ impl<'a> Parser<'a> {
             } else { None };
             let ty = if self.cur.kind == TokKind::LBracket {
                 self.advance();
-                let sz = if self.cur.kind != TokKind::RBracket {
-                    if let Expr::Int { v, .. } = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int }) { v as usize } else { 0 }
-                } else { 0 };
+                let arr_size = if self.cur.kind != TokKind::RBracket {
+                    let e = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int });
+                    match &e {
+                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                        Expr::Ident { name, .. } => ArraySize::Var(name.name.clone()),
+                        _ => ArraySize::Const(0),
+                    }
+                } else { ArraySize::Const(0) };
                 let _ = self.expect(TokKind::RBracket, "']'");
-                Type::Array(Box::new(ty), sz)
+                Type::Array(Box::new(ty), arr_size)
             } else { ty };
             fs.push(Field { name: nm, ty, offset: 0, bit_width: bw });
             if self.cur.kind == TokKind::Semi { self.advance(); } else if self.cur.kind == TokKind::Comma { self.advance(); }

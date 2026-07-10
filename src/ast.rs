@@ -102,6 +102,13 @@ pub enum BinOp {
 pub enum UnOp { Neg, Not, BitNot, Plus }
 
 // ===== 类型系统 =====
+/// 数组大小: 编译期常量 或 运行时表达式 (VLA)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArraySize {
+    Const(usize),
+    Var(String),  // 变量名 (运行时求值)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Void, Bool,
@@ -112,7 +119,7 @@ pub enum Type {
     LongLong, ULongLong,
     Float, Double, LongDouble,
     Ptr(Box<Type>),
-    Array(Box<Type>, usize),
+    Array(Box<Type>, ArraySize),
     Struct(String, Vec<Field>),
     Union(String, Vec<Field>),
     Enum(String, Vec<(String, i64)>),
@@ -146,8 +153,10 @@ impl Type {
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) => 4,
-            Type::Long | Type::ULong | Type::Ptr(_) | Type::Array(_, _)
+            Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
+            Type::Array(elem, ArraySize::Const(n)) => elem.size() * n,
+            Type::Array(_, ArraySize::Var(_)) => 8,  // VLA 退化为指针
             Type::LongDouble => 16,
             Type::Struct(_, fields) => {
                 fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0)
@@ -165,8 +174,10 @@ impl Type {
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) => 4,
-            Type::Long | Type::ULong | Type::Ptr(_) | Type::Array(_, _)
+            Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
+            Type::Array(elem, ArraySize::Const(_)) => elem.align(),
+            Type::Array(elem, ArraySize::Var(_)) => elem.align(),
             Type::LongDouble => 16,
             Type::Struct(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
             Type::Union(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
