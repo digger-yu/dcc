@@ -1,5 +1,4 @@
-# DCC CI 快速验证 workflow
-# 第一性原理: 内核编译 30-60 分钟太重,先 e2e 验证 1 分钟
+# 第一性原理: e2e 验证——每个 example 编译+运行，验证退出码
 
 name: dcc-e2e
 
@@ -40,20 +39,15 @@ jobs:
 
       - name: Compile arith.c
         run: |
-          echo "git SHA: $(git rev-parse HEAD)"
-          ./bin/dcc -std=gnu23 -O0 -o arith examples/arith.c
+          ./bin/dcc -std=gnu23 -o arith examples/arith.c
           chmod +x arith
-          echo "=== arith binary size ==="
-          ls -la arith
-          echo "=== arith code dump ==="
-          xxd -s 120 arith
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
           test $rc -eq 23
 
       - name: Compile control.c
         run: |
-          ./bin/dcc -std=gnu23 -O0 -o control examples/control.c
+          ./bin/dcc -std=gnu23 -o control examples/control.c
           chmod +x control
           rc=0; ./control || rc=$?
           echo "control exit: $rc"
@@ -61,7 +55,7 @@ jobs:
 
       - name: Compile call.c
         run: |
-          ./bin/dcc -std=gnu23 -O0 -o call examples/call.c
+          ./bin/dcc -std=gnu23 -o call examples/call.c
           chmod +x call
           rc=0; ./call || rc=$?
           echo "call exit: $rc"
@@ -86,5 +80,3 @@ jobs:
           echo "| arith.c | 23 | $arith_rc | $([ $arith_rc -eq 23 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
           echo "| control.c | 100 | $control_rc | $([ $control_rc -eq 100 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
           echo "| call.c | 42 | $call_rc | $([ $call_rc -eq 42 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

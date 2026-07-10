@@ -24,3 +24,9 @@ bin/
 a.out
 core
 core.*
+hello
+arith
+control
+call
+fib
+bad
