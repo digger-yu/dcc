@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::Write;
 use crate::cli::Config;
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, enrich_diags};
 use crate::target::Target;
 use crate::preproc;
 use crate::parser;
@@ -24,7 +24,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // 预处理
     let file = cfg.input.display().to_string();
-    let (preprocessed, pp_diags) = preproc::preprocess(&src, &file, &cfg.include_paths);
+    let (preprocessed, mut pp_diags) = preproc::preprocess(&src, &file, &cfg.include_paths, &cfg.defines);
+    enrich_diags(&mut pp_diags, &src);
     if !pp_diags.is_empty() {
         for d in &pp_diags { d.print(); }
         if pp_diags.iter().any(|d| matches!(d.sev, crate::diagnostics::Severity::Error)) {
@@ -33,7 +34,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // 解析
-    let (prog, diags) = parser::parse(preprocessed.as_bytes(), &file);
+    let (prog, mut diags) = parser::parse(preprocessed.as_bytes(), &file);
+    enrich_diags(&mut diags, &src);
     if !diags.is_empty() { return Err(diags); }
 
     // dump AST?

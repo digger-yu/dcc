@@ -15,6 +15,7 @@ pub struct Config {
     pub target:   TargetTriple,
     pub freestanding: bool,
     pub include_paths: Vec<PathBuf>,
+    pub defines:  Vec<(String, Option<String>)>,  // -D NAME=VALUE
     pub dump_ast: bool,
     pub verbose:  bool,
 }
@@ -137,6 +138,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut target = TargetTriple::host();
     let mut freestanding = false;
     let mut include_paths: Vec<PathBuf> = vec![];
+    let mut defines: Vec<(String, Option<String>)> = vec![];
     let mut dump_ast = false;
     let mut verbose = false;
 
@@ -182,15 +184,42 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "-D" => {
                 i += 1;
-                let _define = args.get(i)
+                let def = args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -D"))?;
-                // TODO: 传递给预处理器
+                if let Some(eq) = def.find('=') {
+                    defines.push((def[..eq].to_string(), Some(def[eq+1..].to_string())));
+                } else {
+                    defines.push((def.clone(), Some("1".to_string())));
+                }
             }
             a if a.starts_with("-D") => {
-                let _define = &a[2..];
-                // TODO: 传递给预处理器
+                let def = &a[2..];
+                if let Some(eq) = def.find('=') {
+                    defines.push((def[..eq].to_string(), Some(def[eq+1..].to_string())));
+                } else {
+                    defines.push((def.to_string(), Some("1".to_string())));
+                }
             }
             "-fno-builtin"   => {}
+            // Linux 内核编译常用的 GCC flags - 忽略但接受
+            "-mno-red-zone" | "-fno-pic" | "-fno-stack-protector" | "-fno-strict-aliasing"
+            | "-fno-common" | "-fno-delete-null-pointer-checks" | "-fno-strict-overflow"
+            | "-fno-merge-all-constants" | "-fno-omit-frame-pointer"
+            | "-mno-sse" | "-mno-mmx" | "-mno-sse2" | "-mno-80387" | "-mno-fp-ret-in-387"
+            | "-mno-3dnow" | "-mno-3dnowa" => {}
+            // -W* 警告选项 - 忽略
+            a if a.starts_with("-W") => {}
+            // -m* 机器选项 - 忽略
+            a if a.starts_with("-m") => {}
+            // -f* 其他选项 - 忽略
+            a if a.starts_with("-f") => {}
+            // -std=* 已经处理过了
+            // -include, -isystem 等
+            "-include" | "-isystem" => { i += 1; }  // 跳过参数
+            a if a.starts_with("-include") => {}
+            a if a.starts_with("-isystem") => { include_paths.push(PathBuf::from(&a[8..])); }
+            // -MF, -MP, -MD 等依赖生成选项
+            "-MF" | "-MT" | "-MP" | "-MD" | "-MMD" => { if a != "-MP" && a != "-MD" && a != "-MMD" { i += 1; } }
             "-dump-ast"  => dump_ast = true,
             "-v" | "--verbose" => verbose = true,
             "--version" => {
@@ -213,7 +242,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         i += 1;
     }
     let input = input.ok_or_else(|| CliError::new("no input file"))?;
-    Ok(Config { input, output, opt, std, target, freestanding, include_paths, dump_ast, verbose })
+    Ok(Config { input, output, opt, std, target, freestanding, include_paths, defines, dump_ast, verbose })
 }
 
 fn print_help() {

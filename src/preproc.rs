@@ -38,7 +38,8 @@ struct MacroDef {
     body: String,
 }
 
-pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf]) -> (String, Vec<Diagnostic>) {
+pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
+                  defines: &[(String, Option<String>)]) -> (String, Vec<Diagnostic>) {
     let text = String::from_utf8_lossy(src);
     let base = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut pp = Preprocessor {
@@ -60,6 +61,11 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf]) -> (String,
     pp.define_builtin("__STDC_VERSION__", "202311L");
     pp.define_builtin("__STDC_HOSTED__", "1");
     pp.define_builtin("NULL", "((void*)0)");
+    // 用户 -D 定义
+    for (name, val) in defines {
+        let v = val.as_deref().unwrap_or("1");
+        pp.define_builtin(name, v);
+    }
 
     pp.process_text(&text, file);
     (pp.out, pp.diags)

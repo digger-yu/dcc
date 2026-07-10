@@ -78,24 +78,36 @@ impl Diagnostic {
             Severity::Warning => "\x1b[1;33m",  // 黄
             Severity::Note    => "\x1b[1;36m",  // 青
         };
+        let bold = "\x1b[1m";
         let reset = "\x1b[0m";
-        eprintln!("{}{}: {}{}: {}",
-            sev_color,
-            match self.sev { Severity::Error=>"error", Severity::Warning=>"warning", Severity::Note=>"note" },
-            reset, self.code, self.msg);
-        eprintln!("  --> {}:{}:{}", self.span.file, self.span.line, self.span.col);
+        let sev_str = match self.sev { Severity::Error=>"error", Severity::Warning=>"warning", Severity::Note=>"note" };
+        eprintln!("{}{}{}{}: {}", sev_color, bold, sev_str, reset, self.msg);
+        eprintln!("  {}-->{} {}:{}:{}", "\x1b[1;36m", reset, self.span.file, self.span.line, self.span.col);
         if let Some(src) = &self.source_line {
             let line_no = format!("{}", self.span.line);
-            eprintln!("   {:>4} | {}", line_no, src);
-            // 指针
+            let gutter_w = line_no.len().max(3);
+            eprintln!("   {}\x1b[1;36m{:>width$} |{}\x1b[0m {}", bold, self.span.line, reset, src, width=gutter_w);
             let mut caret = String::new();
-            caret.push_str(&" ".repeat(7 + line_no.len())); // "  NNNN | "
+            caret.push_str(&" ".repeat(gutter_w + 4)); // "  NNN | "
             caret.push_str(&" ".repeat((self.span.col as usize).saturating_sub(1)));
             caret.push_str(&"^".repeat(self.span.len.max(1) as usize));
-            eprintln!("{}{}{}", sev_color, caret, reset);
+            eprintln!("   {}{}{}", sev_color, caret, reset);
         }
         if let Some(h) = &self.hint {
-            eprintln!("   {}hint{}: {}", sev_color, reset, h);
+            eprintln!("   {}\x1b[1;36mhint{}: {}", sev_color, reset, h);
+        }
+    }
+}
+
+/// 填充诊断信息的 source_line 字段
+pub fn enrich_diags(diags: &mut [Diagnostic], src: &[u8]) {
+    let lines: Vec<&[u8]> = src.split(|&b| b == b'\n').collect();
+    for d in diags.iter_mut() {
+        if d.source_line.is_none() && d.span.line > 0 {
+            let idx = (d.span.line as usize).saturating_sub(1);
+            if let Some(line_bytes) = lines.get(idx) {
+                d.source_line = Some(String::from_utf8_lossy(line_bytes).to_string());
+            }
         }
     }
 }

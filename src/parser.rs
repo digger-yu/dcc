@@ -31,7 +31,18 @@ impl<'a> Parser<'a> {
     }
     fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
     fn err_here(&mut self, code: &'static str, msg: impl Into<String>) {
-        self.diags.push(Diagnostic::err(code, msg, self.cur.span.clone()));
+        let mut d = Diagnostic::err(code, msg, self.cur.span.clone());
+        // 自动添加修复建议
+        d.hint = match code {
+            "E0001" => Some(format!("check syntax near '{:?}'", self.cur.kind)),
+            "E0002" => Some("expected ';', '=', or '(' after declaration".into()),
+            "E0003" => Some("did you mean 'int'? or use a typedef/struct/enum".into()),
+            "E0004" => Some("identifiers must start with a letter or '_'".into()),
+            "E0005" => Some("only function names can be called directly".into()),
+            "E0006" => Some("expected a value, variable, or expression here".into()),
+            _ => None,
+        };
+        self.diags.push(d);
     }
     fn expect(&mut self, k: TokKind, what: &str) -> bool {
         if self.cur.kind == k { self.advance(); return true; }

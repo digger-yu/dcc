@@ -16,18 +16,27 @@ pub struct Codegen {
     var_map: HashMap<String, (i32, Type)>,
     loop_continue: Option<String>,
     loop_break: Option<String>,
-    pub rodata: Vec<u8>,
+    // .rodata: 字符串池 + 待修补引用
+    rodata: Vec<u8>,
+    string_pool: HashMap<Vec<u8>, u64>,   // data -> offset in rodata
+    string_refs: Vec<(u64, Vec<u8>)>,     // (code_pos, data)
+    // 全局变量
+    globals: HashMap<String, GlobalVar>,
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
 #[derive(PartialEq)]
 enum JumpKind { Jmp, Je, Jne, Jl, Jle, Jg, Jge }
+#[derive(Clone)]
+struct GlobalVar { offset: u64, size: usize, init: Option<Vec<u8>> }
 
 impl Codegen {
     pub fn new(target: Target) -> Self {
         Self { code: vec![], entry: 0, target, labels: Default::default(),
                pending: vec![], next_label: 0, var_map: HashMap::new(),
-               loop_continue: None, loop_break: None, rodata: vec![] }
+               loop_continue: None, loop_break: None,
+               rodata: vec![], string_pool: HashMap::new(), string_refs: vec![],
+               globals: HashMap::new() }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -45,18 +54,60 @@ impl Codegen {
         self.pending.push(PendingJump { at, target: target.into(), kind });
     }
 
-    pub fn resolve(&mut self) {
+    pub fn resolve(&mut self, rodata_start: u64) {
+        // 修补跳转
         for p in self.pending.drain(..) {
-            let dst = *self.labels.get(&p.target).expect("unresolved label");
+            let dst = *self.labels.get(&p.target).expect(&format!("unresolved label: {}", p.target));
             let off = p.at as usize;
             let (rel_from, rel_off) = match p.kind { JumpKind::Jmp => (p.at+5, off+1), _ => (p.at+6, off+2) };
             let rel = (dst as i64) - (rel_from as i64);
             self.code[rel_off..rel_off+4].copy_from_slice(&(rel as i32).to_le_bytes());
         }
+        // 修补 RIP-relative 字符串引用 (LEA dst, [RIP+disp32])
+        for (code_pos, data) in self.string_refs.drain(..) {
+            let str_off = self.string_pool[&data];
+            let str_vaddr = rodata_start + str_off;
+            let rip = self.entry + code_pos + 7; // LEA is 7 bytes
+            let rel = (str_vaddr as i64) - (rip as i64);
+            let p = code_pos as usize + 3; // disp32 starts at byte 3
+            self.code[p..p+4].copy_from_slice(&(rel as i32).to_le_bytes());
+        }
     }
 
     pub fn compile(&mut self, prog: &Program) {
         self.entry = 0x400000 + 64 + 56;
+        // 收集全局变量
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                let sz = v.ty.size().max(1);
+                let align = v.ty.align().max(1);
+                // 对齐 rodata
+                let off = (self.rodata.len() + align - 1) & !(align - 1);
+                while self.rodata.len() < off { self.rodata.push(0); }
+                let offset = self.rodata.len() as u64;
+                let init_data = if let Some(init) = &v.init {
+                    if let Expr::Int { v, .. } = init {
+                        Some(v.to_le_bytes()[..sz].to_vec())
+                    } else { None }
+                } else { None };
+                // 预留空间
+                for _ in 0..sz { self.rodata.push(0); }
+                self.globals.insert(v.name.name.clone(), GlobalVar { offset, size: sz, init: init_data });
+            }
+        }
+        let globals_init: Vec<(String, Option<Vec<u8>>)> = self.globals.iter()
+            .map(|(n, g)| (n.clone(), g.init.clone())).collect();
+        // 写入全局初始值
+        for (name, init) in &globals_init {
+            if let Some(data) = init {
+                let g = self.globals[name].clone();
+                let start = g.offset as usize;
+                for (i, &b) in data.iter().enumerate() {
+                    self.rodata[start + i] = b;
+                }
+            }
+        }
+        let rodata_size = self.rodata.len();
         let _main = prog.decls.iter().find_map(|d| match d { Decl::Func(f) if f.name.name == "main" => Some(f), _ => None }).expect("no main()");
         // _start
         self.label("_start");
@@ -90,7 +141,10 @@ impl Codegen {
                 if !ends_ret { self.emit(&[0x31, 0xc0, 0x41, 0x5d, 0xc3]); }
             }
         }
-        self.resolve();
+        // 追加 .rodata 到代码段末尾
+        self.code.extend_from_slice(&self.rodata);
+        let rodata_start = self.entry + (self.code.len() as u64 - rodata_size as u64);
+        self.resolve(rodata_start);
     }
 
     fn call_label(&mut self, l: &str) {
@@ -193,8 +247,18 @@ impl Codegen {
                 self.label(&le); self.gen_expr(else_, dst); self.label(&lend);
             }
             Expr::String { data, .. } => {
-                // TODO: 正确实现字符串 (需要 .rodata + RIP-relative 寻址)
-                self.mov_imm(dst, 0);
+                // 将字符串加入 .rodata 池, 生成 RIP-relative LEA
+                let data = data.clone();
+                if !self.string_pool.contains_key(&data) {
+                    let o = self.rodata.len() as u64;
+                    self.rodata.extend_from_slice(&data);
+                    self.string_pool.insert(data.clone(), o);
+                }
+                let at = self.pos();
+                // LEA dst, [RIP + disp32]  (7 bytes, disp32 = placeholder 0)
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                self.emit(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]);
+                self.string_refs.push((at, data));
             }
             _ => { /* M0: 其他表达式暂不处理 */ }
         }
