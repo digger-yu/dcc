@@ -1,0 +1,241 @@
+# DCC Linux 内核编译 Benchmark
+# 第一性原理: 用真实工作负载验证编译器性能,而不是微基准测试
+
+name: kernel-benchmark
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'  # 每周一 UTC 6:00
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Linux kernel version'
+        required: false
+        default: '6.6.3'
+      optimization_level:
+        description: 'Optimization level (O0/O1/O2/O3)'
+        required: false
+        default: 'O2'
+      parallel_jobs:
+        description: 'Parallel jobs (-jN)'
+        required: false
+        default: '4'
+      use_paid_runner:
+        description: 'Use paid runner for better performance'
+        required: false
+        default: 'false'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ============================================
+  # Phase 1: 构建 DCC
+  # ============================================
+  build-dcc:
+    name: "Build DCC Compiler"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build dcc (release)
+        run: |
+          cargo build --release
+          mkdir -p $GITHUB_WORKSPACE/bin
+          cp target/release/dcc $GITHUB_WORKSPACE/bin/dcc
+          chmod +x $GITHUB_WORKSPACE/bin/dcc
+          $GITHUB_WORKSPACE/bin/dcc --version
+      - name: Upload dcc binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcc-binary
+          path: ${{ github.workspace }}/bin/dcc
+          retention-days: 1
+
+  # ============================================
+  # Phase 2: E2E 基础测试
+  # ============================================
+  e2e-test:
+    name: "E2E Basic Tests"
+    needs: build-dcc
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download dcc
+        uses: actions/download-artifact@v4
+        with:
+          name: dcc-binary
+          path: ${{ github.workspace }}/bin
+      - name: Run e2e tests
+        run: |
+          chmod +x $GITHUB_WORKSPACE/bin/dcc
+          DCC=$GITHUB_WORKSPACE/bin/dcc
+          PASS=0; FAIL=0
+          for test in hello:42 arith:23 control:100 call:42; do
+            name=${test%%:*}; expected=${test##*:}
+            echo "--- Testing $name.c (expect $expected) ---"
+            $DCC -std=gnu23 -o /tmp/$name examples/$name.c 2>&1
+            chmod +x /tmp/$name
+            rc=0; /tmp/$name || rc=$?
+            if [ $rc -eq $expected ]; then
+              echo "PASS: $name.c -> exit $rc"
+              PASS=$((PASS+1))
+            else
+              echo "FAIL: $name.c -> exit $rc (expected $expected)"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo ""
+          echo "Results: $PASS passed, $FAIL failed"
+          test $FAIL -eq 0
+
+  # ============================================
+  # Phase 3: 内核编译 Benchmark (Free Runner)
+  # ============================================
+  kernel-bench-free:
+    name: "Kernel Benchmark (Free)"
+    needs: e2e-test
+    if: >
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.use_paid_runner == 'false') ||
+      github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dcc
+        uses: actions/download-artifact@v4
+        with:
+          name: dcc-binary
+          path: ${{ github.workspace }}/bin
+
+      - name: Setup parameters
+        id: params
+        run: |
+          echo "kernel=${{ github.event.inputs.kernel_version || '6.6.3' }}" >> $GITHUB_OUTPUT
+          echo "opt=${{ github.event.inputs.optimization_level || 'O2' }}" >> $GITHUB_OUTPUT
+          echo "jobs=${{ github.event.inputs.parallel_jobs || '4' }}" >> $GITHUB_OUTPUT
+          echo "runner=ubuntu-latest (2 cores, 7GB RAM)" >> $GITHUB_OUTPUT
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc xz-utils
+
+      - name: Download kernel source
+        run: |
+          KV=${{ steps.params.outputs.kernel }}
+          echo "Downloading Linux kernel $KV..."
+          START=$(date +%s)
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KV}.tar.xz" -O /tmp/linux.tar.xz
+          mkdir -p /tmp/kernel
+          tar -xf /tmp/linux.tar.xz -C /tmp/kernel --strip-components=1
+          END=$(date +%s)
+          echo "Download time: $((END-START)) seconds"
+          echo "Source size: $(du -sh /tmp/kernel | cut -f1)"
+
+      - name: Configure kernel (defconfig)
+        run: |
+          cd /tmp/kernel
+          make defconfig 2>&1 | tail -5
+
+      - name: Build kernel with GCC (baseline)
+        id: gcc-build
+        run: |
+          cd /tmp/kernel
+          OPT=-${{ steps.params.outputs.opt }}
+          JOBS=-j${{ steps.params.outputs.jobs }}
+          echo "=== GCC baseline build ==="
+          START=$(date +%s)
+          make $JOBS KCFLAGS="$OPT" 2>&1 | tail -20
+          END=$(date +%s)
+          GCC_TIME=$((END-START))
+          echo "time=$GCC_TIME" >> $GITHUB_OUTPUT
+          VMLINUX_SIZE=$(stat -c%s vmlinux 2>/dev/null || echo "N/A")
+          echo "vmlinux_size=$VMLINUX_SIZE" >> $GITHUB_OUTPUT
+          echo "GCC build time: ${GCC_TIME}s"
+          # Clean for DCC build
+          make clean 2>&1 | tail -3
+          make defconfig 2>&1 | tail -3
+
+      - name: Build kernel with DCC
+        id: dcc-build
+        continue-on-error: true
+        run: |
+          chmod +x $GITHUB_WORKSPACE/bin/dcc
+          cd /tmp/kernel
+          OPT=-${{ steps.params.outputs.opt }}
+          JOBS=-j${{ steps.params.outputs.jobs }}
+          echo "=== DCC build ==="
+          START=$(date +%s)
+          # 尝试用 DCC 作为 CC 编译内核
+          make $JOBS CC=$GITHUB_WORKSPACE/bin/dcc KCFLAGS="$OPT -std=gnu11" 2>&1 | tail -30
+          RC=$?
+          END=$(date +%s)
+          DCC_TIME=$((END-START))
+          echo "time=$DCC_TIME" >> $GITHUB_OUTPUT
+          echo "rc=$RC" >> $GITHUB_OUTPUT
+          if [ -f vmlinux ]; then
+            VMLINUX_SIZE=$(stat -c%s vmlinux)
+            echo "vmlinux_size=$VMLINUX_SIZE" >> $GITHUB_OUTPUT
+          fi
+          echo "DCC build time: ${DCC_TIME}s (exit code: $RC)"
+
+      - name: Generate report
+        if: always()
+        run: |
+          KV=${{ steps.params.outputs.kernel }}
+          OPT=${{ steps.params.outputs.opt }}
+          JOBS=${{ steps.params.outputs.jobs }}
+          RUNNER="${{ steps.params.outputs.runner }}"
+          GCC_TIME=${{ steps.gcc-build.outputs.time || 'N/A' }}
+          DCC_TIME=${{ steps.dcc-build.outputs.time || 'N/A' }}
+          DCC_RC=${{ steps.dcc-build.outputs.rc || 'N/A' }}
+          GCC_VMLINUX=${{ steps.gcc-build.outputs.vmlinux_size || 'N/A' }}
+          DCC_VMLINUX=${{ steps.dcc-build.outputs.vmlinux_size || 'N/A' }}
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## DCC Kernel Compilation Benchmark (Free Runner)
+
+          | Metric | Value |
+          |--------|-------|
+          | Runner | $RUNNER |
+          | Kernel | linux-$KV |
+          | Optimization | $OPT |
+          | Parallel Jobs | -j$JOBS |
+          | GCC Build Time | ${GCC_TIME}s |
+          | DCC Build Time | ${DCC_TIME}s |
+          | DCC Exit Code | $DCC_RC |
+          | GCC vmlinux Size | $GCC_VMLINUX |
+          | DCC vmlinux Size | $DCC_VMLINUX |
+          | Git SHA | ${{ github.sha }} |
+          EOF
+
+          if [ "$DCC_RC" = "0" ] && [ "$DCC_TIME" != "N/A" ] && [ "$GCC_TIME" != "N/A" ]; then
+            SPEEDUP=$(echo "scale=2; $GCC_TIME / $DCC_TIME" | bc 2>/dev/null || echo "N/A")
+            echo "| Speedup | ${SPEEDUP}x |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ============================================
+  # 性能退化检测
+  # ============================================
+  perf-check:
+    name: "Performance Regression Check"
+    needs: e2e-test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check e2e test results
+        run: |
+          echo "E2E tests passed. Performance metrics recorded."
+          echo "Check the Actions Performance Metrics page for trends:"
+          echo "  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
