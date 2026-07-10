@@ -24,7 +24,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // 预处理
     let file = cfg.input.display().to_string();
-    let (preprocessed, mut pp_diags) = preproc::preprocess(&src, &file, &cfg.include_paths, &cfg.defines);
+    let (preprocessed, mut pp_diags) = preproc::preprocess(&src, &file, &cfg.include_paths, &cfg.system_paths, &cfg.defines);
     enrich_diags(&mut pp_diags, &src);
     if !pp_diags.is_empty() {
         for d in &pp_diags { d.print(); }

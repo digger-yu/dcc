@@ -15,6 +15,7 @@ pub struct Config {
     pub target:   TargetTriple,
     pub freestanding: bool,
     pub include_paths: Vec<PathBuf>,
+    pub system_paths: Vec<PathBuf>,
     pub defines:  Vec<(String, Option<String>)>,  // -D NAME=VALUE
     pub dump_ast: bool,
     pub verbose:  bool,
@@ -138,6 +139,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut target = TargetTriple::host();
     let mut freestanding = false;
     let mut include_paths: Vec<PathBuf> = vec![];
+    let mut system_paths: Vec<PathBuf> = vec![];
     let mut defines: Vec<(String, Option<String>)> = vec![];
     let mut dump_ast = false;
     let mut verbose = false;
@@ -215,9 +217,14 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-f") => {}
             // -std=* 已经处理过了
             // -include, -isystem 等
-            "-include" | "-isystem" => { i += 1; }  // 跳过参数
+            "-include" => { i += 1; }  // 跳过参数
+            "-isystem" => {
+                i += 1;
+                system_paths.push(PathBuf::from(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -isystem"))?));
+            }
             a if a.starts_with("-include") => {}
-            a if a.starts_with("-isystem") => { include_paths.push(PathBuf::from(&a[8..])); }
+            a if a.starts_with("-isystem") => { system_paths.push(PathBuf::from(&a[8..])); }
             // -MF, -MP, -MD 等依赖生成选项
             "-MF" | "-MT" | "-MP" | "-MD" | "-MMD" => { if a != "-MP" && a != "-MD" && a != "-MMD" { i += 1; } }
             "-dump-ast"  => dump_ast = true,
@@ -242,7 +249,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         i += 1;
     }
     let input = input.ok_or_else(|| CliError::new("no input file"))?;
-    Ok(Config { input, output, opt, std, target, freestanding, include_paths, defines, dump_ast, verbose })
+    Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose })
 }
 
 fn print_help() {

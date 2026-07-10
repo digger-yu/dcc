@@ -404,7 +404,12 @@ impl<'a> Parser<'a> {
             }
             if let Some(op) = self.compound_op() {
                 if min_bp <= 1 { self.advance(); let r = self.parse_expr_bp(1)?;
-                    lhs = Expr::Assign { op, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: int_t() }; continue; }
+                    // 展开 lhs += e → target = lhs + e
+                    // 提取赋值目标 (如果 lhs 已是 Assign, 提取其目标)
+                    let target = Self::assign_target(&lhs);
+                    let read = Box::new(lhs.clone()); // 读取当前值
+                    let expanded = Expr::Binop { op, l: read, r: Box::new(r), span: self.cur.span.clone(), ty: int_t() };
+                    lhs = Expr::Assign { op: BinOp::Add, l: Box::new(target), r: Box::new(expanded), span: self.cur.span.clone(), ty: int_t() }; continue; }
             }
             if self.cur.kind == TokKind::Question && min_bp == 0 {
                 self.advance(); let t = self.parse_expr()?;
@@ -440,6 +445,14 @@ impl<'a> Parser<'a> {
             TokKind::PipeEq => Some(BinOp::Or), TokKind::CaretEq => Some(BinOp::Xor),
             TokKind::ShlEq => Some(BinOp::Shl), TokKind::ShrEq => Some(BinOp::Shr),
             _ => None,
+        }
+    }
+
+    // 提取赋值目标: 如果 expr 是 Assign, 递归提取其目标; 否则克隆 expr
+    fn assign_target(expr: &Expr) -> Expr {
+        match expr {
+            Expr::Assign { l, .. } => Self::assign_target(l),
+            _ => expr.clone(),
         }
     }
 

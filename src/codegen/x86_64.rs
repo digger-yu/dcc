@@ -127,23 +127,28 @@ impl Codegen {
                 self.vla_offsets.clear();
                 self.vla_total_size = 0;
                 self.label(&f.name.name);
+                // 序言: push r13(帧指针)
                 self.emit(&[0x41, 0x55, 0x49, 0x89, 0xe5]); // push r13; mov r13, rsp
                 if f.name.name != "main" {
                     for (i, p) in f.params.iter().enumerate() {
                         if let Some(nm) = &p.name {
-                            if i < 6 { let off = -(self.var_map.len() as i32 * 8 + 8);
+                            if i < 6 { let off = -(self.var_map.len() as i32 * 8 + 16);
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                                 self.store_stack(arg_regs[i], off); }
                         }
                     }
                 }
-                // 预留栈空间: push 临时值不会覆盖局部变量
+                // 预留栈空间 (+3: saved_r13 + 对齐余量 + 安全间距)
                 let nlocals = if let Some(body) = &f.body { Self::count_locals(&body.items) } else { 0 };
-                self.frame_size = (self.var_map.len() as i32 + nlocals as i32) * 8;
+                self.frame_size = ((self.var_map.len() + nlocals) as i32 + 3) * 8;
                 if self.frame_size > 0 {
                     self.emit(&[0x48, 0x81, 0xec]); // sub rsp, imm32
                     self.emit(&(self.frame_size as i32).to_le_bytes());
                 }
+                // r12 初始化为帧底部 (VLA 基址等用途)
+                // 求值栈使用硬件 push/pop (rsp), 变量用 r13-relative, 互不干扰
+                self.emit(&[0x4d, 0x8d, 0xa5]); // lea r12, [r13 + imm32]
+                self.emit(&(-(self.frame_size) as i32).to_le_bytes());
                 let ends_ret = if let Some(body) = &f.body {
                     for item in &body.items { match item {
                         BlockItem::Stmt(s) => self.gen_stmt(s),
@@ -247,6 +252,7 @@ impl Codegen {
             Expr::Char { v, .. } => self.mov_imm(dst, *v as i128),
             Expr::Ident { name, .. } => self.mov_from_stack(dst, &name.name),
             Expr::Binop { op, l, r, .. } => {
+                // 统一路径: 硬件 push/pop 求值栈, rsp 在 call 前后 save/restore
                 self.gen_expr(l, dst); self.push(dst);
                 self.gen_expr(r, 1); self.pop(dst);
                 self.binop(*op, dst, 1);
@@ -289,7 +295,12 @@ impl Codegen {
             Expr::Call { callee, args, .. } => {
                 let ar = [7u8, 6, 2, 1, 8, 9];
                 for (i, a) in args.iter().enumerate() { self.gen_expr(a, ar[i]); }
+                // 保存 rsp (保护求值栈上的硬件 push 值不被 callee 覆盖)
+                self.emit(&[0x54]); // push rsp
                 self.call_label(&callee.name);
+                self.emit(&[0x5c]); // pop rsp (恢复 rsp, 丢弃 callee 的 push r13)
+                // 调用约定: 返回值在 rax(0), 移至请求的目标寄存器
+                if dst != 0 { self.mov(dst, 0); }
             }
             Expr::SizeofTy { ty, .. } => self.mov_imm(dst, ty.size() as i128),
             Expr::SizeofExpr { .. } => self.mov_imm(dst, 8),
@@ -350,11 +361,41 @@ impl Codegen {
         }
     }
     fn mov(&mut self, dst: u8, src: u8) {
-        let mut rex = 0x48u8; if dst >= 8 { rex |= 0x44; } if src >= 8 { rex |= 0x41; }
-        self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
+        // mov dst, src: 使用 0x8B (mov r64, r/m64) 使 dst 在 reg 字段, src 在 r/m 字段
+        let mut rex = 0x48u8; if dst >= 8 { rex |= 0x04; } if src >= 8 { rex |= 0x01; }
+        self.emit(&[rex, 0x8B, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
     }
-    fn push(&mut self, reg: u8) { if reg < 8 { self.emit(&[0x50 + reg]); } else { self.emit(&[0x41, 0x50 + (reg - 8)]); } }
-    fn pop(&mut self, reg: u8) { if reg < 8 { self.emit(&[0x58 + reg]); } else { self.emit(&[0x41, 0x58 + (reg - 8)]); } }
+    fn push(&mut self, reg: u8) {
+        // 硬件 push: 用 rsp, 变量用 r13, 互不干扰
+        if reg == 0 { self.emit(&[0x50]); }       // push rax
+        else if reg == 1 { self.emit(&[0x51]); }   // push rcx
+        else if reg == 2 { self.emit(&[0x52]); }   // push rdx
+        else if reg == 3 { self.emit(&[0x53]); }   // push rbx
+        else if reg == 7 { self.emit(&[0x57]); }   // push rdi
+        else if reg == 6 { self.emit(&[0x56]); }   // push rsi
+        else if reg == 8 { self.emit(&[0x41, 0x50]); } // push r8
+        else if reg == 9 { self.emit(&[0x41, 0x51]); } // push r9
+        else if reg == 12 { self.emit(&[0x41, 0x54]); } // push r12
+        else if reg == 13 { self.emit(&[0x41, 0x55]); } // push r13
+        else if reg == 14 { self.emit(&[0x41, 0x56]); } // push r14
+        else if reg == 15 { self.emit(&[0x41, 0x57]); } // push r15
+        else { panic!("push: unsupported reg {}", reg); }
+    }
+    fn pop(&mut self, reg: u8) {
+        if reg == 0 { self.emit(&[0x58]); }       // pop rax
+        else if reg == 1 { self.emit(&[0x59]); }   // pop rcx
+        else if reg == 2 { self.emit(&[0x5a]); }   // pop rdx
+        else if reg == 3 { self.emit(&[0x5b]); }   // pop rbx
+        else if reg == 7 { self.emit(&[0x5f]); }   // pop rdi
+        else if reg == 6 { self.emit(&[0x5e]); }   // pop rsi
+        else if reg == 8 { self.emit(&[0x41, 0x58]); } // pop r8
+        else if reg == 9 { self.emit(&[0x41, 0x59]); } // pop r9
+        else if reg == 12 { self.emit(&[0x41, 0x5c]); } // pop r12
+        else if reg == 13 { self.emit(&[0x41, 0x5d]); } // pop r13
+        else if reg == 14 { self.emit(&[0x41, 0x5e]); } // pop r14
+        else if reg == 15 { self.emit(&[0x41, 0x5f]); } // pop r15
+        else { panic!("pop: unsupported reg {}", reg); }
+    }
 
     fn binop(&mut self, op: BinOp, dst: u8, src: u8) {
         let is_cmp = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne);
@@ -390,19 +431,22 @@ impl Codegen {
 
     fn var_offset(&mut self, name: &str) -> i32 {
         if let Some(&(off, _)) = self.var_map.get(name) { return off; }
-        let off = -(self.var_map.len() as i32 * 8 + 8);
+        let off = -(self.var_map.len() as i32 * 8 + 16);
         self.var_map.insert(name.to_string(), (off, Type::Int)); off
     }
     fn mov_to_stack(&mut self, reg: u8, name: &str) { let off = self.var_offset(name); self.store_stack(reg, off); }
     fn mov_from_stack(&mut self, reg: u8, name: &str) { let off = self.var_offset(name); self.load_stack(reg, off); }
 
     fn store_stack(&mut self, reg: u8, off: i32) {
-        let mut rex = 0x48u8; if reg >= 8 { rex |= 0x44; } rex |= 0x01; self.emit(&[rex, 0x89]);
+        // r13 基址: REX.W + REX.B(=1 for r13) + r/m=5 → [r13+disp8]
+        let mut rex = 0x49u8; if reg >= 8 { rex |= 0x04; } // REX.R for reg>=8
+        self.emit(&[rex, 0x89]);
         if off.abs() < 128 { self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]); }
         else { self.emit(&[0x85 | ((reg & 7) << 3)]); self.emit(&off.to_le_bytes()); }
     }
     fn load_stack(&mut self, reg: u8, off: i32) {
-        let mut rex = 0x48u8; if reg >= 8 { rex |= 0x44; } rex |= 0x01; self.emit(&[rex, 0x8B]);
+        let mut rex = 0x49u8; if reg >= 8 { rex |= 0x04; }
+        self.emit(&[rex, 0x8B]);
         if off.abs() < 128 { self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]); }
         else { self.emit(&[0x85 | ((reg & 7) << 3)]); self.emit(&off.to_le_bytes()); }
     }
@@ -413,12 +457,10 @@ impl Codegen {
         // TODO: VLA 代码生成
     }
 
-    // 函数尾声: 恢复栈指针 + 恢复 r13 + 返回
+    // 函数尾声: 恢复 r13 + 返回
     fn emit_func_epilogue(&mut self) {
-        if self.frame_size > 0 {
-            self.emit(&[0x48, 0x81, 0xc4]); // add rsp, frame_size
-            self.emit(&(self.frame_size as i32).to_le_bytes());
-        }
+        // mov rsp, r13: 恢复栈指针
+        self.emit(&[0x49, 0x8b, 0xe5]);
         self.emit(&[0x41, 0x5d, 0xc3]); // pop r13; ret
     }
 
@@ -458,4 +500,5 @@ impl Codegen {
             _ => false,
         }
     }
+
 }
