@@ -22,6 +22,7 @@ pub struct Codegen {
     string_refs: Vec<(u64, Vec<u8>)>,     // (code_pos, data)
     // 全局变量
     globals: HashMap<String, GlobalVar>,
+    frame_size: i32,  // 当前函数栈帧大小（字节）
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -36,7 +37,7 @@ impl Codegen {
                pending: vec![], next_label: 0, var_map: HashMap::new(),
                loop_continue: None, loop_break: None,
                rodata: vec![], string_pool: HashMap::new(), string_refs: vec![],
-               globals: HashMap::new() }
+               globals: HashMap::new(), frame_size: 0 }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -130,6 +131,13 @@ impl Codegen {
                         }
                     }
                 }
+                // 预留栈空间: push 临时值不会覆盖局部变量
+                let nlocals = if let Some(body) = &f.body { Self::count_locals(&body.items) } else { 0 };
+                self.frame_size = (self.var_map.len() as i32 + nlocals as i32) * 8;
+                if self.frame_size > 0 {
+                    self.emit(&[0x48, 0x81, 0xec]); // sub rsp, imm32
+                    self.emit(&(self.frame_size as i32).to_le_bytes());
+                }
                 let ends_ret = if let Some(body) = &f.body {
                     for item in &body.items { match item {
                         BlockItem::Stmt(s) => self.gen_stmt(s),
@@ -138,7 +146,7 @@ impl Codegen {
                     }}
                     Self::ends_with_return(&body.items)
                 } else { false };
-                if !ends_ret { self.emit(&[0x31, 0xc0, 0x41, 0x5d, 0xc3]); }
+                if !ends_ret { self.emit_func_epilogue(); }
             }
         }
         // 追加 .rodata 到代码段末尾
@@ -156,7 +164,7 @@ impl Codegen {
         match s {
             Stmt::Return { val, .. } => {
                 if let Some(e) = val { self.gen_expr(e, 0); } else { self.emit(&[0x31, 0xc0]); }
-                self.emit(&[0x41, 0x5d, 0xc3]);
+                self.emit_func_epilogue();
             }
             Stmt::Expr { e, .. } => { self.gen_expr(e, 0); }
             Stmt::If { cond, then_, else_, .. } => {
@@ -330,6 +338,42 @@ impl Codegen {
         let mut rex = 0x48u8; if reg >= 8 { rex |= 0x44; } rex |= 0x01; self.emit(&[rex, 0x8B]);
         if off.abs() < 128 { self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]); }
         else { self.emit(&[0x85 | ((reg & 7) << 3)]); self.emit(&off.to_le_bytes()); }
+    }
+
+    // 函数尾声: 恢复栈指针 + 恢复 r13 + 返回
+    fn emit_func_epilogue(&mut self) {
+        if self.frame_size > 0 {
+            // add rsp, frame_size: 48 81 C4 imm32
+            self.emit(&[0x48, 0x81, 0xc4]);
+            self.emit(&(self.frame_size as i32).to_le_bytes());
+        }
+        self.emit(&[0x41, 0x5d, 0xc3]); // pop r13; ret
+    }
+
+    // 预扫描: 统计函数体中局部变量声明数
+    fn count_locals(items: &[BlockItem]) -> usize {
+        let mut n = 0;
+        for item in items {
+            match item {
+                BlockItem::Decl(Decl::Var(_)) => n += 1,
+                BlockItem::Stmt(s) => n += Self::count_locals_stmt(s),
+                _ => {}
+            }
+        }
+        n
+    }
+    fn count_locals_stmt(s: &Stmt) -> usize {
+        match s {
+            Stmt::Block { b, .. } => Self::count_locals(&b.items),
+            Stmt::If { then_, else_, .. } => {
+                Self::count_locals_stmt(then_)
+                    + else_.as_ref().map_or(0, |e| Self::count_locals_stmt(e))
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
+                Self::count_locals_stmt(body)
+            }
+            _ => 0,
+        }
     }
 
     fn ends_with_return(items: &[BlockItem]) -> bool {
