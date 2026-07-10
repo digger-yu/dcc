@@ -14,7 +14,9 @@ pub struct Parser<'a> {
     struct_defs: HashMap<String, (Vec<Field>, bool)>,
     enum_defs: HashMap<String, Vec<(String, i64)>>,
     enum_consts: HashMap<String, i64>,
-    locals: HashMap<String, Type>, // 变量名 → 类型
+    locals: HashMap<String, Type>, // 变量名 → 类型 (函数内会清除)
+    globals: HashMap<String, Type>, // 全局变量名 → 类型 (永不清除)
+    in_function: bool,              // 是否在函数体内
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -29,7 +31,7 @@ impl<'a> Parser<'a> {
         Self { lex, cur, peek, diags: vec![], finished: false,
                typedefs: HashMap::new(), struct_defs: HashMap::new(),
                enum_defs: HashMap::new(), enum_consts: HashMap::new(),
-               locals: HashMap::new() }
+               locals: HashMap::new(), globals: HashMap::new(), in_function: false }
     }
     fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
     fn err_here(&mut self, code: &'static str, msg: impl Into<String>) {
@@ -92,8 +94,9 @@ impl<'a> Parser<'a> {
             self.advance();
             let params = self.parse_params()?;
             if !self.expect(TokKind::RParen, "')'") { return None; }
-            // 进入函数: 清空局部变量表, 注册参数
-            self.locals.clear();
+            // 进入函数: 从全局变量表恢复, 清除局部变量
+            self.locals = self.globals.clone();
+            self.in_function = true;
             for p in &params {
                 if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
             }
@@ -117,17 +120,20 @@ impl<'a> Parser<'a> {
             if !self.expect(TokKind::RBracket, "']'") { return None; }
             let arr_ty = Type::Array(Box::new(ty), arr_size);
             self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
+            if !self.in_function { self.globals.insert(name_for_decl.name.clone(), arr_ty.clone()); }
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::Assign {
             self.locals.insert(name_for_decl.name.clone(), ty.clone());
+            if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
             self.advance();
             let init = self.parse_expr()?;
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: Some(init), span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::Semi {
             self.locals.insert(name_for_decl.name.clone(), ty.clone());
+            if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
             self.advance();
             Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: false, is_static: false })])
         } else {
@@ -581,7 +587,76 @@ impl<'a> Parser<'a> {
                 let id_ty = self.locals.get(&id.name).cloned().unwrap_or_else(int_t);
                 Some(Expr::Ident { name: id, span: sp, ty: id_ty })
             }
-            TokKind::LParen => { self.advance(); let e = self.parse_expr()?; if !self.expect(TokKind::RParen, "')'") { return None; } Some(e) }
+            TokKind::LParen => {
+                self.advance();
+                // 检查是否是复合字面量: (type){...}
+                if self.is_type_start() {
+                    // 尝试解析类型
+                    let saved_pos = self.cur.clone();
+                    let saved_peek = self.peek.clone();
+                    if let Some(ty) = self.parse_type() {
+                        if self.cur.kind == TokKind::RParen && self.peek.kind == TokKind::LBrace {
+                            // 复合字面量: (type){...}
+                            self.advance(); // 跳过 )
+                            self.advance(); // 跳过 {
+                            let mut inits = Vec::new();
+                            while self.cur.kind != TokKind::RBrace {
+                                let item = if self.cur.kind == TokKind::Dot {
+                                    self.advance();
+                                    let field = self.parse_ident()?;
+                                    if !self.expect(TokKind::Assign, "'='") { return None; }
+                                    let value = self.parse_expr()?;
+                                    InitItem::Designated { designator: Designator::Field(field), value }
+                                } else {
+                                    let e = self.parse_expr()?;
+                                    InitItem::Expr(e)
+                                };
+                                inits.push(item);
+                                if self.cur.kind == TokKind::Comma { self.advance(); } else { break; }
+                            }
+                            if !self.expect(TokKind::RBrace, "'}'") { return None; }
+                            return Some(Expr::CompoundLit { ty, inits, span: sp });
+                        }
+                    }
+                    // 不是复合字面量，恢复状态
+                    self.cur = saved_pos;
+                    self.peek = saved_peek;
+                }
+                let e = self.parse_expr()?;
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                Some(e)
+            }
+            TokKind::LBrace => {
+                // 初始化列表: {1, 2, 3} 或 {.x = 1, .y = 2}
+                self.advance();
+                let mut inits = Vec::new();
+                while self.cur.kind != TokKind::RBrace {
+                    let item = if self.cur.kind == TokKind::Dot {
+                        // 指定初始化器: .field = value
+                        self.advance();
+                        let field = self.parse_ident()?;
+                        if !self.expect(TokKind::Assign, "'='") { return None; }
+                        let value = self.parse_expr()?;
+                        InitItem::Designated { designator: Designator::Field(field), value }
+                    } else if self.cur.kind == TokKind::LBracket {
+                        // 数组指定初始化器: [idx] = value
+                        self.advance();
+                        let idx = self.parse_expr()?;
+                        if !self.expect(TokKind::RBracket, "']'") { return None; }
+                        if !self.expect(TokKind::Assign, "'='") { return None; }
+                        let value = self.parse_expr()?;
+                        InitItem::Designated { designator: Designator::Index(idx), value }
+                    } else {
+                        // 普通初始化值
+                        let e = self.parse_expr()?;
+                        InitItem::Expr(e)
+                    };
+                    inits.push(item);
+                    if self.cur.kind == TokKind::Comma { self.advance(); } else { break; }
+                }
+                if !self.expect(TokKind::RBrace, "'}'") { return None; }
+                Some(Expr::InitList { inits, span: sp, ty: Type::Int }) // 类型稍后由上下文确定
+            }
             _ => { self.err_here("E0006", format!("expected expression, got {:?}", self.cur.kind)); None }
         }
     }

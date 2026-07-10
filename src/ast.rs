@@ -89,7 +89,27 @@ pub enum Expr {
     PostDec   { e: Box<Expr>, span: Span, ty: Type },
     PreInc    { e: Box<Expr>, span: Span, ty: Type },
     PreDec    { e: Box<Expr>, span: Span, ty: Type },
-    CompoundLit { ty: Type, inits: Vec<Expr>, span: Span },
+    CompoundLit { ty: Type, inits: Vec<InitItem>, span: Span },
+    /// 初始化列表: {1, 2, 3} 或 {.x = 1, .y = 2}
+    InitList  { inits: Vec<InitItem>, span: Span, ty: Type },
+}
+
+/// 初始化项: 普通值 或 指定初始化器
+#[derive(Debug, Clone)]
+pub enum InitItem {
+    /// 普通初始化值
+    Expr(Expr),
+    /// 指定初始化器: .field = expr 或 [idx] = expr
+    Designated { designator: Designator, value: Expr },
+}
+
+/// 指定符
+#[derive(Debug, Clone)]
+pub enum Designator {
+    /// .field
+    Field(Ident),
+    /// [index]
+    Index(Expr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +245,7 @@ impl Expr {
             | Expr::PostInc { ty, .. } | Expr::PostDec { ty, .. }
             | Expr::PreInc { ty, .. } | Expr::PreDec { ty, .. } => ty.clone(),
             Expr::Cast { ty, .. } => ty.clone(),
+            Expr::InitList { ty, .. } => ty.clone(),
             Expr::SizeofTy { .. } | Expr::SizeofExpr { .. } | Expr::CompoundLit { .. } => Type::Int,
         }
     }
