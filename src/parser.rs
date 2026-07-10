@@ -1,21 +1,19 @@
 // src/parser.rs - 语法分析
-// 第一性原理: 解析器把 token 流构造成 AST;不计算值,不检查类型(那是语义层)。
-// suckless 准则: 用递归下降,每种语法一个 fn,出错时 panic-free 收集诊断后继续。
-//
-// M0 范围: 仅支持 int main() { return <int>; }
-//         已实现:基础算术、变量声明(无初始化)、if/while、函数调用
-//         推迟到 M1: for/do/switch/字符串/字符/结构体等
+// 第一性原理: 解析器把 token 流构造成 AST。
+// suckless: 递归下降 + Pratt 表达式解析。
 
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::{Lexer, Tok, TokKind};
 use crate::ast::*;
+use std::collections::HashMap;
 
 pub struct Parser<'a> {
-    lex:    Lexer<'a>,
-    cur:    Tok,
-    peek:   Tok,
-    diags:  Vec<Diagnostic>,
-    finished: bool,
+    lex: Lexer<'a>, cur: Tok, peek: Tok,
+    diags: Vec<Diagnostic>, finished: bool,
+    typedefs: HashMap<String, Type>,
+    struct_defs: HashMap<String, (Vec<Field>, bool)>,
+    enum_defs: HashMap<String, Vec<(String, i64)>>,
+    enum_consts: HashMap<String, i64>,
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -26,57 +24,57 @@ pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
 impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8], file: &str) -> Self {
         let mut lex = Lexer::new(src, file);
-        let cur  = lex.next();
-        let peek = lex.next();
-        Self { lex, cur, peek, diags: vec![], finished: false }
+        let cur = lex.next(); let peek = lex.next();
+        Self { lex, cur, peek, diags: vec![], finished: false,
+               typedefs: HashMap::new(), struct_defs: HashMap::new(),
+               enum_defs: HashMap::new(), enum_consts: HashMap::new() }
     }
-
-    fn advance(&mut self) {
-        self.cur = std::mem::replace(&mut self.peek, self.lex.next());
-    }
-
-    fn err_at(&self, span: Span, code: &'static str, msg: impl Into<String>) -> Diagnostic {
-        Diagnostic::err(code, msg, span)
-    }
-
+    fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
     fn err_here(&mut self, code: &'static str, msg: impl Into<String>) {
         self.diags.push(Diagnostic::err(code, msg, self.cur.span.clone()));
     }
-
     fn expect(&mut self, k: TokKind, what: &str) -> bool {
         if self.cur.kind == k { self.advance(); return true; }
-        self.err_here("E0001", format!("expected {}, got {:?}", what, self.cur.kind));
-        false
+        self.err_here("E0001", format!("expected {}, got {:?}", what, self.cur.kind)); false
     }
 
-    // 解析顶层: program -> decl*
     pub fn program(&mut self) -> (Program, Vec<Diagnostic>) {
         let mut decls = vec![];
         while self.cur.kind != TokKind::Eof {
-            // 跳过前导 ; (如 dcc 自身的某些空语句)
             if self.cur.kind == TokKind::Semi { self.advance(); continue; }
             match self.parse_decl() {
-                Some(d) => decls.push(d),
-                None    => {
-                    if !self.finished {
-                        // 恢复:吃一个 token
-                        self.advance();
-                    } else { break; }
-                }
+                Some(d) => decls.extend(d),
+                None => { if !self.finished { self.advance(); } else { break; } }
             }
         }
         (Program { decls }, std::mem::take(&mut self.diags))
     }
 
-    // decl: int|char|long|void [static|extern] IDENT ('(' params ')') ( ';' | '{' block '}' )
-    // M0: 仅 int/void 函数, int 变量 (无初始化), static/extern 略
-    fn parse_decl(&mut self) -> Option<Decl> {
+    fn parse_decl(&mut self) -> Option<Vec<Decl>> {
+        // typedef
+        if self.cur.kind == TokKind::KwTypedef {
+            self.advance();
+            let ty = self.parse_type()?;
+            let name = self.parse_ident()?;
+            let sp = name.span.clone();
+            if !self.expect(TokKind::Semi, "';'") { return None; }
+            self.typedefs.insert(name.name.clone(), ty.clone());
+            return Some(vec![Decl::Typedef { name, ty, span: sp }]);
+        }
+        // struct/union/enum 定义或声明
+        if matches!(self.cur.kind, TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum) {
+            let ty = self.parse_type()?;
+            if self.cur.kind == TokKind::Semi { self.advance(); return Some(vec![]); }
+            return self.parse_var_or_func(ty);
+        }
         let ty = self.parse_type()?;
-        let (is_static, is_extern) = (false, false);
+        self.parse_var_or_func(ty)
+    }
+
+    fn parse_var_or_func(&mut self, ty: Type) -> Option<Vec<Decl>> {
         let name = self.parse_ident()?;
-        let name_span = name.span.clone();
+        let sp = name.span.clone();
         let name_for_decl = name.clone();
-        // 区分变量 vs 函数
         if self.cur.kind == TokKind::LParen {
             self.advance();
             let params = self.parse_params()?;
@@ -86,283 +84,461 @@ impl<'a> Parser<'a> {
                 let b = self.parse_block();
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 Some(b)
-            } else {
-                if !self.expect(TokKind::Semi, "';' or '{'") { return None; }
-                None
-            };
-            Some(Decl::Func(FuncDecl {
-                ret_ty: ty, name, params, body,
-                span: name_span, // M0 简化:用名字的 span 当函数 span
-                is_static, is_extern,
-            }))
+            } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
+            Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: false, is_static: false })])
+        } else if self.cur.kind == TokKind::LBracket {
+            self.advance();
+            let sz = if self.cur.kind != TokKind::RBracket {
+                if let Expr::Int { v, .. } = self.parse_expr()? { v as usize } else { 0 }
+            } else { 0 };
+            if !self.expect(TokKind::RBracket, "']'") { return None; }
+            let arr_ty = Type::Array(Box::new(ty), sz);
+            let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
+            if !self.expect(TokKind::Semi, "';'") { return None; }
+            Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::Assign {
             self.advance();
             let init = self.parse_expr()?;
             if !self.expect(TokKind::Semi, "';'") { return None; }
-            Some(Decl::Var(VarDecl {
-                ty, name: name_for_decl, init: Some(init),
-                span: name_span,
-                is_static, is_extern,
-            }))
+            Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: Some(init), span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::Semi {
             self.advance();
-            Some(Decl::Var(VarDecl {
-                ty, name: name_for_decl, init: None,
-                span: name_span,
-                is_static, is_extern,
-            }))
+            Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: false, is_static: false })])
         } else {
-            self.err_here("E0002", format!("expected ';', '=', or '(', got {:?}", self.cur.kind));
+            self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind));
             None
         }
     }
 
-    fn parse_type(&mut self) -> Option<TypeRef> {
-        // 极简:int / void / char / long
-        let k = self.cur.kind;
-        let t = match k {
-            TokKind::KwInt    => int_t(),
-            TokKind::KwVoid   => void_t(),
-            TokKind::KwChar   => char_t(),
-            TokKind::KwLong   => long_t(),
-            TokKind::KwShort  => int_t(),
-            TokKind::KwUnsigned => int_t(),
-            _ => {
-                self.err_here("E0003", format!("expected type, got {:?}", k));
-                return None;
+    fn parse_type(&mut self) -> Option<Type> {
+        let mut is_unsigned = false; let mut is_long = 0u8; let mut is_short = false;
+        let mut base: Option<Type> = None;
+        // 跳过存储类/const/volatile
+        loop {
+            match self.cur.kind {
+                TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
+                | TokKind::KwInline | TokKind::KwRestrict | TokKind::KwRegister | TokKind::KwAuto => { self.advance(); }
+                _ => break,
             }
-        };
-        self.advance();
-        Some(t)
+        }
+        // struct/union/enum
+        if self.cur.kind == TokKind::KwStruct || self.cur.kind == TokKind::KwUnion {
+            let is_u = self.cur.kind == TokKind::KwUnion; self.advance();
+            let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
+            if self.cur.kind == TokKind::LBrace {
+                self.advance(); let fields = self.parse_fields();
+                if !self.expect(TokKind::RBrace, "'}'") { return None; }
+                let mut fields = fields; Type::layout_struct(&mut fields, is_u);
+                self.struct_defs.insert(nm.clone(), (fields.clone(), is_u));
+                let ty = if is_u { Type::Union(nm, fields) } else { Type::Struct(nm, fields) };
+                return Some(self.parse_ptr_suffix(ty));
+            } else if !nm.is_empty() {
+                if let Some((f, _)) = self.struct_defs.get(&nm) {
+                    let ty = if is_u { Type::Union(nm, f.clone()) } else { Type::Struct(nm, f.clone()) };
+                    return Some(self.parse_ptr_suffix(ty));
+                }
+                return Some(self.parse_ptr_suffix(Type::Struct(nm, vec![])));
+            }
+            self.err_here("E0003", "expected struct name or '{'"); return None;
+        }
+        if self.cur.kind == TokKind::KwEnum {
+            self.advance();
+            let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
+            if self.cur.kind == TokKind::LBrace {
+                self.advance(); let vs = self.parse_enum_body();
+                if !self.expect(TokKind::RBrace, "'}'") { return None; }
+                let vals: Vec<(String, i64)> = vs.iter().map(|(id, v)| (id.name.clone(), v.unwrap_or(0))).collect();
+                self.enum_defs.insert(nm.clone(), vals.clone());
+                let mut nv = 0i64;
+                for (id, v) in &vs { let val = v.unwrap_or(nv); self.enum_consts.insert(id.name.clone(), val); nv = val + 1; }
+                return Some(self.parse_ptr_suffix(Type::Enum(nm, vals)));
+            } else if !nm.is_empty() {
+                if let Some(v) = self.enum_defs.get(&nm) { return Some(self.parse_ptr_suffix(Type::Enum(nm, v.clone()))); }
+                return Some(self.parse_ptr_suffix(Type::Enum(nm, vec![])));
+            }
+        }
+        // typedef 引用
+        if self.cur.kind == TokKind::Ident {
+            if let Some(ty) = self.typedefs.get(&self.cur.text).cloned() { self.advance(); return Some(self.parse_ptr_suffix(ty)); }
+        }
+        // 基本类型
+        loop {
+            match self.cur.kind {
+                TokKind::KwInt => { base = Some(Type::Int); self.advance(); }
+                TokKind::KwChar => { base = Some(Type::Char); self.advance(); }
+                TokKind::KwShort => { is_short = true; self.advance(); }
+                TokKind::KwLong => { is_long += 1; self.advance(); }
+                TokKind::KwVoid => { base = Some(Type::Void); self.advance(); }
+                TokKind::KwFloat => { base = Some(Type::Float); self.advance(); }
+                TokKind::KwDouble => { base = Some(Type::Double); self.advance(); }
+                TokKind::KwSigned => { self.advance(); }
+                TokKind::KwUnsigned => { is_unsigned = true; self.advance(); }
+                _ => break,
+            }
+        }
+        if base.is_some() || is_unsigned || is_long > 0 || is_short {
+            let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
+            Some(self.parse_ptr_suffix(ty))
+        } else {
+            self.err_here("E0003", format!("expected type, got {:?}", self.cur.kind)); None
+        }
+    }
+
+    fn resolve_base(&self, base: Option<Type>, uns: bool, long: u8, short: bool) -> Type {
+        match (base, uns, long, short) {
+            (Some(Type::Void), ..) => Type::Void,
+            (Some(Type::Float), ..) => Type::Float,
+            (Some(Type::Double), _, 0, _) => Type::Double,
+            (Some(Type::Double), _, _, _) => Type::LongDouble,
+            (Some(Type::Char), false, ..) => Type::SChar,
+            (Some(Type::Char), true, ..) => Type::UChar,
+            (_, _, _, true) if uns => Type::UShort,
+            (_, _, _, true) => Type::Short,
+            (_, true, 0, _) => Type::UInt,
+            (_, true, 1, _) => Type::ULong,
+            (_, true, _, _) => Type::ULongLong,
+            (_, false, 0, false) => Type::Int,
+            (_, false, 1, _) => Type::Long,
+            (_, false, _, _) => Type::LongLong,
+            _ => Type::Int,
+        }
+    }
+
+    fn parse_ptr_suffix(&mut self, mut ty: Type) -> Type {
+        while self.cur.kind == TokKind::Star {
+            self.advance();
+            while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile) { self.advance(); }
+            ty = Type::Ptr(Box::new(ty));
+        }
+        ty
+    }
+
+    fn parse_fields(&mut self) -> Vec<Field> {
+        let mut fs = vec![];
+        while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
+            let ty = match self.parse_type() { Some(t) => t, None => { self.advance(); continue; } };
+            let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
+            let bw = if self.cur.kind == TokKind::Colon {
+                self.advance();
+                if let Expr::Int { v, .. } = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int }) { Some(v as u32) } else { None }
+            } else { None };
+            let ty = if self.cur.kind == TokKind::LBracket {
+                self.advance();
+                let sz = if self.cur.kind != TokKind::RBracket {
+                    if let Expr::Int { v, .. } = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int }) { v as usize } else { 0 }
+                } else { 0 };
+                let _ = self.expect(TokKind::RBracket, "']'");
+                Type::Array(Box::new(ty), sz)
+            } else { ty };
+            fs.push(Field { name: nm, ty, offset: 0, bit_width: bw });
+            if self.cur.kind == TokKind::Semi { self.advance(); } else if self.cur.kind == TokKind::Comma { self.advance(); }
+        }
+        fs
+    }
+
+    fn parse_enum_body(&mut self) -> Vec<(Ident, Option<i64>)> {
+        let mut vs = vec![];
+        while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
+            if self.cur.kind == TokKind::Comma { self.advance(); continue; }
+            let nm = match self.parse_ident() { Some(id) => id, None => { self.advance(); continue; } };
+            let val = if self.cur.kind == TokKind::Assign {
+                self.advance();
+                if let Expr::Int { v, .. } = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int }) { Some(v as i64) } else { None }
+            } else { None };
+            vs.push((nm, val));
+            if self.cur.kind == TokKind::Comma { self.advance(); }
+        }
+        vs
     }
 
     fn parse_ident(&mut self) -> Option<Ident> {
-        if self.cur.kind != TokKind::Ident {
-            self.err_here("E0004", format!("expected identifier, got {:?}", self.cur.kind));
-            return None;
-        }
-        let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() };
-        self.advance();
-        Some(id)
+        if self.cur.kind != TokKind::Ident { self.err_here("E0004", format!("expected identifier, got {:?}", self.cur.kind)); return None; }
+        let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id)
     }
 
     fn parse_params(&mut self) -> Option<Vec<Param>> {
         let mut ps = vec![];
+        if self.cur.kind == TokKind::KwVoid && self.peek.kind == TokKind::RParen { self.advance(); return Some(ps); }
         if self.cur.kind == TokKind::RParen { return Some(ps); }
+        if self.cur.kind == TokKind::Ellipsis { self.advance(); return Some(ps); }
         loop {
             let ty = self.parse_type()?;
-            let name = if self.cur.kind == TokKind::Ident {
-                let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() };
-                self.advance();
-                Some(id)
-            } else { None };
-            ps.push(Param { ty, name, span: self.cur.span.clone() });
+            let nm = if self.cur.kind == TokKind::Ident { let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id) } else { None };
+            let ty = match ty { Type::Array(e, _) => Type::Ptr(e), o => o };
+            ps.push(Param { ty, name: nm, span: self.cur.span.clone() });
             if self.cur.kind == TokKind::Comma { self.advance(); continue; }
+            if self.cur.kind == TokKind::Ellipsis { self.advance(); }
             break;
         }
         Some(ps)
     }
 
-    // block: { (decl | stmt)* }
     fn parse_block(&mut self) -> Block {
-        let _start = self.cur.span.line;
         let mut items = vec![];
         loop {
             if self.cur.kind == TokKind::RBrace || self.cur.kind == TokKind::Eof { break; }
-            // decl: 永远是 type 开头
             if self.is_type_start() {
-                if let Some(d) = self.parse_decl() { items.push(BlockItem::Decl(d)); }
-                else { self.advance(); }
+                match self.parse_decl() { Some(ds) => { for d in ds { items.push(BlockItem::Decl(d)); } } None => { self.advance(); } }
             } else {
-                if let Some(s) = self.parse_stmt() { items.push(BlockItem::Stmt(s)); }
-                else { self.advance(); }
+                match self.parse_stmt() { Some(s) => items.push(BlockItem::Stmt(s)), None => { self.advance(); } }
             }
         }
         Block { items, span: self.cur.span.clone() }
     }
 
     fn is_type_start(&self) -> bool {
-        matches!(self.cur.kind,
-            TokKind::KwInt | TokKind::KwChar | TokKind::KwLong |
-            TokKind::KwVoid | TokKind::KwShort | TokKind::KwUnsigned)
+        matches!(self.cur.kind, TokKind::KwInt | TokKind::KwChar | TokKind::KwLong | TokKind::KwVoid
+            | TokKind::KwShort | TokKind::KwUnsigned | TokKind::KwSigned | TokKind::KwFloat
+            | TokKind::KwDouble | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
+            | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef)
+            || (self.cur.kind == TokKind::Ident && self.typedefs.contains_key(&self.cur.text))
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
-        let span = self.cur.span.clone();
+        let sp = self.cur.span.clone();
         match self.cur.kind {
             TokKind::KwReturn => {
                 self.advance();
                 let val = if self.cur.kind != TokKind::Semi { Some(self.parse_expr()?) } else { None };
                 if !self.expect(TokKind::Semi, "';'") { return None; }
-                Some(Stmt::Return { val, span })
+                Some(Stmt::Return { val, span: sp })
             }
-            TokKind::Semi => { self.advance(); Some(Stmt::Expr { e: Expr::Int { v: 0, span: span.clone(), ty: int_t() }, span }) }
-            TokKind::LBrace => {
-                self.advance();
-                let b = self.parse_block();
-                if !self.expect(TokKind::RBrace, "'}'") { return None; }
-                Some(Stmt::Block { b, span })
-            }
+            TokKind::Semi => { self.advance(); Some(Stmt::Expr { e: Expr::Int { v: 0, span: sp.clone(), ty: int_t() }, span: sp }) }
+            TokKind::LBrace => { self.advance(); let b = self.parse_block(); if !self.expect(TokKind::RBrace, "'}'") { return None; } Some(Stmt::Block { b, span: sp }) }
             TokKind::KwIf => {
-                self.advance();
-                if !self.expect(TokKind::LParen, "'('") { return None; }
-                let cond = self.parse_expr()?;
-                if !self.expect(TokKind::RParen, "')'") { return None; }
+                self.advance(); if !self.expect(TokKind::LParen, "'('") { return None; }
+                let cond = self.parse_expr()?; if !self.expect(TokKind::RParen, "')'") { return None; }
                 let then_ = Box::new(self.parse_stmt()?);
-                let else_ = if self.cur.kind == TokKind::KwElse {
-                    self.advance();
-                    Some(Box::new(self.parse_stmt()?))
-                } else { None };
-                Some(Stmt::If { cond, then_, else_, span })
+                let else_ = if self.cur.kind == TokKind::KwElse { self.advance(); Some(Box::new(self.parse_stmt()?)) } else { None };
+                Some(Stmt::If { cond, then_, else_, span: sp })
             }
             TokKind::KwWhile => {
-                self.advance();
+                self.advance(); if !self.expect(TokKind::LParen, "'('") { return None; }
+                let cond = self.parse_expr()?; if !self.expect(TokKind::RParen, "')'") { return None; }
+                Some(Stmt::While { cond, body: Box::new(self.parse_stmt()?), span: sp })
+            }
+            TokKind::KwDo => {
+                self.advance(); let body = Box::new(self.parse_stmt()?);
+                if !self.expect(TokKind::KwWhile, "'while'") { return None; }
                 if !self.expect(TokKind::LParen, "'('") { return None; }
-                let cond = self.parse_expr()?;
+                let cond = self.parse_expr()?; if !self.expect(TokKind::RParen, "')'") { return None; }
+                if !self.expect(TokKind::Semi, "';'") { return None; }
+                Some(Stmt::Do { body, cond, span: sp })
+            }
+            TokKind::KwFor => {
+                self.advance(); if !self.expect(TokKind::LParen, "'('") { return None; }
+                let init = if self.cur.kind == TokKind::Semi { self.advance(); None } else { Some(Box::new(self.parse_stmt()?)) };
+                let cond = if self.cur.kind == TokKind::Semi { None } else { Some(self.parse_expr()?) };
+                if !self.expect(TokKind::Semi, "';'") { return None; }
+                let step = if self.cur.kind == TokKind::RParen { None } else { Some(self.parse_expr()?) };
                 if !self.expect(TokKind::RParen, "')'") { return None; }
-                let body = Box::new(self.parse_stmt()?);
-                Some(Stmt::While { cond, body, span })
+                Some(Stmt::For { init, cond, step, body: Box::new(self.parse_stmt()?), span: sp })
             }
-            TokKind::KwBreak => { self.advance();
-                if !self.expect(TokKind::Semi, "';'") { return None; }
-                Some(Stmt::Break { span })
+            TokKind::KwBreak => { self.advance(); if !self.expect(TokKind::Semi, "';'") { return None; } Some(Stmt::Break { span: sp }) }
+            TokKind::KwContinue => { self.advance(); if !self.expect(TokKind::Semi, "';'") { return None; } Some(Stmt::Continue { span: sp }) }
+            TokKind::KwSwitch => {
+                self.advance(); if !self.expect(TokKind::LParen, "'('") { return None; }
+                let expr = self.parse_expr()?; if !self.expect(TokKind::RParen, "')'") { return None; }
+                if !self.expect(TokKind::LBrace, "'{'") { return None; }
+                let cases = self.parse_cases();
+                if !self.expect(TokKind::RBrace, "'}'") { return None; }
+                Some(Stmt::Switch { expr, cases, span: sp })
             }
-            TokKind::KwContinue => { self.advance();
-                if !self.expect(TokKind::Semi, "';'") { return None; }
-                Some(Stmt::Continue { span })
+            TokKind::KwGoto => { self.advance(); let t = self.parse_ident()?; if !self.expect(TokKind::Semi, "';'") { return None; } Some(Stmt::Goto { target: t, span: sp }) }
+            TokKind::Ident if self.peek.kind == TokKind::Colon => {
+                let nm = self.parse_ident()?; self.advance();
+                Some(Stmt::Label { name: nm, stmt: Box::new(self.parse_stmt()?), span: sp })
             }
-            _ => {
-                let e = self.parse_expr()?;
-                if !self.expect(TokKind::Semi, "';'") { return None; }
-                Some(Stmt::Expr { e, span })
-            }
+            _ => { let e = self.parse_expr()?; if !self.expect(TokKind::Semi, "';'") { return None; } Some(Stmt::Expr { e, span: sp }) }
         }
     }
 
-    // 表达式 - 优先级爬升 (Pratt parser)
-    fn parse_expr(&mut self) -> Option<Expr> {
-        self.parse_expr_bp(0)
+    fn parse_cases(&mut self) -> Vec<Case> {
+        let mut cases = vec![];
+        while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
+            let sp = self.cur.span.clone();
+            let val = if self.cur.kind == TokKind::KwCase { self.advance(); let e = self.parse_expr(); let _ = self.expect(TokKind::Colon, "':'"); e }
+                else if self.cur.kind == TokKind::KwDefault { self.advance(); let _ = self.expect(TokKind::Colon, "':'"); None }
+                else { self.advance(); continue; };
+            let mut items = vec![];
+            while !matches!(self.cur.kind, TokKind::KwCase | TokKind::KwDefault | TokKind::RBrace | TokKind::Eof) {
+                if self.is_type_start() { match self.parse_decl() { Some(ds) => { for d in ds { items.push(BlockItem::Decl(d)); } } None => { self.advance(); } } }
+                else { match self.parse_stmt() { Some(s) => items.push(BlockItem::Stmt(s)), None => { self.advance(); } } }
+            }
+            cases.push(Case { val, body: Block { items, span: sp.clone() }, span: sp });
+        }
+        cases
     }
 
+    // ===== Pratt 表达式 =====
+    fn parse_expr(&mut self) -> Option<Expr> { self.parse_expr_bp(0) }
+
     fn parse_expr_bp(&mut self, min_bp: u8) -> Option<Expr> {
-        // 前缀
         let mut lhs = self.parse_unary()?;
         loop {
-            // 赋值是右结合, 优先级最低
-            if self.cur.kind == TokKind::Assign {
-                if min_bp > 1 { break; }
-                self.advance();
-                let r = self.parse_expr_bp(1)?;  // 右结合
-                lhs = Expr::Assign { op: BinOp::Add, l: Box::new(lhs), r: Box::new(r),
-                                      span: self.cur.span.clone(), ty: int_t() };
-                continue;
+            if self.cur.kind == TokKind::Assign && min_bp <= 1 {
+                self.advance(); let r = self.parse_expr_bp(1)?;
+                lhs = Expr::Assign { op: BinOp::Add, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: int_t() }; continue;
+            }
+            if let Some(op) = self.compound_op() {
+                if min_bp <= 1 { self.advance(); let r = self.parse_expr_bp(1)?;
+                    lhs = Expr::Assign { op, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: int_t() }; continue; }
+            }
+            if self.cur.kind == TokKind::Question && min_bp == 0 {
+                self.advance(); let t = self.parse_expr()?;
+                if !self.expect(TokKind::Colon, "':'") { return None; }
+                let e = self.parse_expr_bp(0)?;
+                lhs = Expr::Cond { cond: Box::new(lhs), then_: Box::new(t), else_: Box::new(e), span: self.cur.span.clone(), ty: int_t() }; continue;
             }
             let (op, lbp, rbp) = match self.cur.kind {
-                TokKind::Plus    => (BinOp::Add, 1u8, 2u8),
-                TokKind::Minus   => (BinOp::Sub, 1, 2),
-                TokKind::Star    => (BinOp::Mul, 3, 4),
-                TokKind::Slash   => (BinOp::Div, 3, 4),
+                TokKind::Plus => (BinOp::Add, 1u8, 2), TokKind::Minus => (BinOp::Sub, 1, 2),
+                TokKind::Star => (BinOp::Mul, 3, 4), TokKind::Slash => (BinOp::Div, 3, 4),
                 TokKind::Percent => (BinOp::Mod, 3, 4),
-                TokKind::Lt      => (BinOp::Lt,  5, 6),
-                TokKind::Gt      => (BinOp::Gt,  5, 6),
-                TokKind::Le      => (BinOp::Le,  5, 6),
-                TokKind::Ge      => (BinOp::Ge,  5, 6),
-                TokKind::EqEq    => (BinOp::EqEq,5, 6),
-                TokKind::Ne      => (BinOp::Ne,  5, 6),
-                TokKind::Amp     => (BinOp::And, 7, 8),
-                TokKind::Caret   => (BinOp::Xor, 9, 10),
-                TokKind::Pipe    => (BinOp::Or,  11, 12),
-                TokKind::AndAnd  => (BinOp::AndAnd, 13, 14),
-                TokKind::OrOr    => (BinOp::OrOr,   13, 14),
-                TokKind::Shl     => (BinOp::Shl, 5, 6),
-                TokKind::Shr     => (BinOp::Shr, 5, 6),
+                TokKind::Lt => (BinOp::Lt, 5, 6), TokKind::Gt => (BinOp::Gt, 5, 6),
+                TokKind::Le => (BinOp::Le, 5, 6), TokKind::Ge => (BinOp::Ge, 5, 6),
+                TokKind::EqEq => (BinOp::EqEq, 5, 6), TokKind::Ne => (BinOp::Ne, 5, 6),
+                TokKind::Amp => (BinOp::And, 7, 8), TokKind::Caret => (BinOp::Xor, 9, 10),
+                TokKind::Pipe => (BinOp::Or, 11, 12),
+                TokKind::AndAnd => (BinOp::AndAnd, 13, 14), TokKind::OrOr => (BinOp::OrOr, 13, 14),
+                TokKind::Shl => (BinOp::Shl, 5, 6), TokKind::Shr => (BinOp::Shr, 5, 6),
                 _ => break,
             };
             if lbp < min_bp { break; }
-            self.advance();
-            let r = self.parse_expr_bp(rbp)?;
-            lhs = Expr::Binop { op, l: Box::new(lhs), r: Box::new(r),
-                                span: self.cur.span.clone(), ty: int_t() };
+            self.advance(); let r = self.parse_expr_bp(rbp)?;
+            lhs = Expr::Binop { op, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: int_t() };
         }
         Some(lhs)
     }
 
-    fn parse_unary(&mut self) -> Option<Expr> {
-        let span = self.cur.span.clone();
+    fn compound_op(&self) -> Option<BinOp> {
         match self.cur.kind {
-            TokKind::Plus => { self.advance(); let e = self.parse_unary()?;
-                Some(Expr::Unary { op: UnOp::Plus, e: Box::new(e), span, ty: int_t() }) }
-            TokKind::Minus => { self.advance(); let e = self.parse_unary()?;
-                Some(Expr::Unary { op: UnOp::Neg, e: Box::new(e), span, ty: int_t() }) }
-            TokKind::Not  => { self.advance(); let e = self.parse_unary()?;
-                Some(Expr::Unary { op: UnOp::Not, e: Box::new(e), span, ty: int_t() }) }
-            TokKind::Tilde => { self.advance(); let e = self.parse_unary()?;
-                Some(Expr::Unary { op: UnOp::BitNot, e: Box::new(e), span, ty: int_t() }) }
-            _ => self.parse_postfix()
+            TokKind::PlusEq => Some(BinOp::Add), TokKind::MinusEq => Some(BinOp::Sub),
+            TokKind::StarEq => Some(BinOp::Mul), TokKind::SlashEq => Some(BinOp::Div),
+            TokKind::PercentEq => Some(BinOp::Mod), TokKind::AmpEq => Some(BinOp::And),
+            TokKind::PipeEq => Some(BinOp::Or), TokKind::CaretEq => Some(BinOp::Xor),
+            TokKind::ShlEq => Some(BinOp::Shl), TokKind::ShrEq => Some(BinOp::Shr),
+            _ => None,
         }
     }
 
-    fn parse_postfix(&mut self) -> Option<Expr> {
-        let span = self.cur.span.clone();
-        let mut e = self.parse_primary()?;
-        while self.cur.kind == TokKind::LParen {
-            // 函数调用
-            if let Expr::Ident { name, .. } = &e {
+    fn parse_unary(&mut self) -> Option<Expr> {
+        let sp = self.cur.span.clone();
+        match self.cur.kind {
+            TokKind::Plus => { self.advance(); let e = self.parse_unary()?; Some(Expr::Unary { op: UnOp::Plus, e: Box::new(e), span: sp, ty: int_t() }) }
+            TokKind::Minus => { self.advance(); let e = self.parse_unary()?; Some(Expr::Unary { op: UnOp::Neg, e: Box::new(e), span: sp, ty: int_t() }) }
+            TokKind::Not => { self.advance(); let e = self.parse_unary()?; Some(Expr::Unary { op: UnOp::Not, e: Box::new(e), span: sp, ty: int_t() }) }
+            TokKind::Tilde => { self.advance(); let e = self.parse_unary()?; Some(Expr::Unary { op: UnOp::BitNot, e: Box::new(e), span: sp, ty: int_t() }) }
+            TokKind::Star => { self.advance(); let e = self.parse_unary()?;
+                let ty = if let Type::Ptr(inner) = &e.ty() { *inner.clone() } else { int_t() };
+                Some(Expr::Deref { e: Box::new(e), span: sp, ty }) }
+            TokKind::Amp => { self.advance(); let e = self.parse_unary()?;
+                let ty = Type::Ptr(Box::new(e.ty()));
+                Some(Expr::AddrOf { e: Box::new(e), span: sp, ty }) }
+            TokKind::PlusPlus => { self.advance(); let e = self.parse_unary()?; let ty = e.ty(); Some(Expr::PreInc { e: Box::new(e), span: sp, ty }) }
+            TokKind::MinusMinus => { self.advance(); let e = self.parse_unary()?; let ty = e.ty(); Some(Expr::PreDec { e: Box::new(e), span: sp, ty }) }
+            TokKind::KwSizeof => {
                 self.advance();
-                let mut args = vec![];
-                if self.cur.kind != TokKind::RParen {
-                    loop {
-                        args.push(self.parse_expr()?);
-                        if self.cur.kind == TokKind::Comma { self.advance(); continue; }
-                        break;
-                    }
-                }
+                if self.cur.kind == TokKind::LParen && self.is_type_start() {
+                    self.advance(); let ty = self.parse_type()?;
+                    if !self.expect(TokKind::RParen, "')'") { return None; }
+                    Some(Expr::SizeofTy { ty, span: sp })
+                } else { let e = self.parse_unary()?; Some(Expr::SizeofExpr { e: Box::new(e), span: sp }) }
+            }
+            TokKind::LParen if self.is_cast() => {
+                self.advance(); let ty = self.parse_type()?;
                 if !self.expect(TokKind::RParen, "')'") { return None; }
-                e = Expr::Call { callee: name.clone(), args, span: span.clone(), ty: int_t() };
-            } else {
-                self.err_here("E0005", "only identifier() can be called");
-                return None;
+                let e = self.parse_unary()?;
+                Some(Expr::Cast { ty, e: Box::new(e), span: sp })
+            }
+            _ => self.parse_postfix(),
+        }
+    }
+
+    fn is_cast(&self) -> bool {
+        self.cur.kind == TokKind::LParen && matches!(self.peek.kind,
+            TokKind::KwInt | TokKind::KwChar | TokKind::KwLong | TokKind::KwVoid
+            | TokKind::KwShort | TokKind::KwUnsigned | TokKind::KwSigned
+            | TokKind::KwFloat | TokKind::KwDouble | TokKind::KwStruct
+            | TokKind::KwUnion | TokKind::KwEnum | TokKind::KwConst | TokKind::KwVolatile)
+            || (self.peek.kind == TokKind::Ident && self.typedefs.contains_key(&self.peek.text))
+    }
+
+    fn parse_postfix(&mut self) -> Option<Expr> {
+        let sp = self.cur.span.clone();
+        let mut e = self.parse_primary()?;
+        loop {
+            match self.cur.kind {
+                TokKind::LParen => {
+                    if let Expr::Ident { name, .. } = &e {
+                        let callee = name.clone(); self.advance();
+                        let mut args = vec![];
+                        if self.cur.kind != TokKind::RParen { loop { args.push(self.parse_expr()?); if self.cur.kind == TokKind::Comma { self.advance(); continue; } break; } }
+                        if !self.expect(TokKind::RParen, "')'") { return None; }
+                        e = Expr::Call { callee, args, span: sp.clone(), ty: int_t() };
+                    } else { self.err_here("E0005", "only identifier() callable in M0"); return None; }
+                }
+                TokKind::LBracket => {
+                    self.advance(); let idx = self.parse_expr()?;
+                    if !self.expect(TokKind::RBracket, "']'") { return None; }
+                    let ty = match &e.ty() { Type::Ptr(inner) | Type::Array(inner, _) => *inner.clone(), _ => int_t() };
+                    e = Expr::Index { arr: Box::new(e), idx: Box::new(idx), span: sp.clone(), ty };
+                }
+                TokKind::Dot => { self.advance(); let f = self.parse_ident()?; e = Expr::Member { expr: Box::new(e), field: f, span: sp.clone(), ty: int_t(), is_arrow: false }; }
+                TokKind::Arrow => { self.advance(); let f = self.parse_ident()?; e = Expr::Member { expr: Box::new(e), field: f, span: sp.clone(), ty: int_t(), is_arrow: true }; }
+                TokKind::PlusPlus => { self.advance(); let ty = e.ty(); e = Expr::PostInc { e: Box::new(e), span: sp.clone(), ty }; }
+                TokKind::MinusMinus => { self.advance(); let ty = e.ty(); e = Expr::PostDec { e: Box::new(e), span: sp.clone(), ty }; }
+                _ => break,
             }
         }
         Some(e)
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
-        let span = self.cur.span.clone();
+        let sp = self.cur.span.clone();
         match self.cur.kind {
             TokKind::Number => {
-                let s = &self.cur.text;
-                let v = parse_int_lit(s);
-                self.advance();
-                Some(Expr::Int { v, span, ty: int_t() })
+                let s = &self.cur.text; let v = parse_int_lit(s);
+                let ty = if s.ends_with('L') || s.ends_with('l') { Type::Long } else { Type::Int };
+                self.advance(); Some(Expr::Int { v, span: sp, ty })
             }
+            TokKind::StringLit => {
+                let mut data = parse_str(&self.cur.text); self.advance();
+                while self.cur.kind == TokKind::StringLit { data.extend(parse_str(&self.cur.text)); self.advance(); }
+                Some(Expr::String { data, span: sp, ty: Type::Ptr(Box::new(Type::Char)) })
+            }
+            TokKind::CharLit => { let v = parse_chr(&self.cur.text); self.advance(); Some(Expr::Char { v, span: sp, ty: Type::Int }) }
             TokKind::Ident => {
-                let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() };
-                self.advance();
-                Some(Expr::Ident { name: id, span, ty: int_t() })
+                let t = self.cur.text.clone();
+                if let Some(&val) = self.enum_consts.get(&t) { self.advance(); return Some(Expr::Int { v: val as i128, span: sp, ty: Type::Int }); }
+                let id = Ident { name: t, span: sp.clone() }; self.advance();
+                Some(Expr::Ident { name: id, span: sp, ty: int_t() })
             }
-            TokKind::LParen => {
-                self.advance();
-                let e = self.parse_expr()?;
-                if !self.expect(TokKind::RParen, "')'") { return None; }
-                Some(e)
-            }
-            _ => {
-                self.err_here("E0006", format!("expected expression, got {:?}", self.cur.kind));
-                None
-            }
+            TokKind::LParen => { self.advance(); let e = self.parse_expr()?; if !self.expect(TokKind::RParen, "')'") { return None; } Some(e) }
+            _ => { self.err_here("E0006", format!("expected expression, got {:?}", self.cur.kind)); None }
         }
     }
 }
 
 fn parse_int_lit(s: &str) -> i128 {
-    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        i128::from_str_radix(rest, 16).unwrap_or(0)
-    } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
-        i128::from_str_radix(rest, 2).unwrap_or(0)
-    } else if let Some(rest) = s.strip_prefix("0").filter(|r| r.len() > 0 && r.chars().all(|c| c.is_ascii_digit())) {
-        i128::from_str_radix(rest, 8).unwrap_or(0)
-    } else {
-        s.parse::<i128>().unwrap_or(0)
+    let s = s.trim_end_matches(|c: char| "lLuU".contains(c));
+    if let Some(r) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) { i128::from_str_radix(r, 16).unwrap_or(0) }
+    else if let Some(r) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) { i128::from_str_radix(r, 2).unwrap_or(0) }
+    else if let Some(r) = s.strip_prefix("0").filter(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit())) { i128::from_str_radix(r, 8).unwrap_or(0) }
+    else { s.parse::<i128>().unwrap_or(0) }
+}
+
+fn parse_str(raw: &str) -> Vec<u8> {
+    let inner = &raw[1..raw.len()-1]; let mut d = vec![]; let mut it = inner.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' { match it.next() { Some('n') => d.push(b'\n'), Some('t') => d.push(b'\t'), Some('r') => d.push(b'\r'), Some('0') => d.push(0), Some('\\') => d.push(b'\\'), Some('"') => d.push(b'"'), Some('\'') => d.push(b'\''), Some(c) => { d.push(b'\\'); d.push(c as u8); } None => d.push(b'\\'), } }
+        else { d.extend_from_slice(c.to_string().as_bytes()); }
     }
+    d.push(0); d
+}
+
+fn parse_chr(raw: &str) -> u8 {
+    let inner = &raw[1..raw.len()-1];
+    if inner.starts_with('\\') { match inner.chars().nth(1) { Some('n') => b'\n', Some('t') => b'\t', Some('r') => b'\r', Some('0') => 0, Some('\\') => b'\\', Some('\'') => b'\'', _ => inner.as_bytes().get(1).copied().unwrap_or(0) } }
+    else { inner.as_bytes().first().copied().unwrap_or(0) }
 }
