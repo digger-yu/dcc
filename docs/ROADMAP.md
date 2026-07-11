@@ -33,6 +33,11 @@
 | typeof 运算符 | P3 | ✅ typeof(expr/type) 推导类型 | ✅ | ✅ builtins.c |
 | __extension__ | P3 | ✅ 解析器直接跳过 | ✅ | ✅ builtins.c |
 | 语句表达式 | P3 | ✅ ({...}) 块内最后表达式值 | ✅ | ✅ builtins.c |
+| 函数指针调用 | P1 | ✅ 表达式 callee (Box<Expr>) | ✅ 间接调用 call *r11 | ✅ runtime_features.c |
+| 逗号运算符 | P2 | ✅ Pratt bp=1 最低优先级 | ✅ 求值 lhs 丢弃返回 rhs | ✅ runtime_features.c |
+| VLA 可变长数组 | P2 | ✅ ArraySize::Var(Box<Expr>) | ✅ 动态栈分配+16字节对齐 | ✅ runtime_features.c |
+| 整数提升 | P2 | ✅ char/short 隐式提升 | ✅ movsx/movzx 符号/零扩展 | ✅ runtime_features.c |
+| 内联汇编 __asm__ | P1 | ✅ __asm__/volatile 解析 | ✅ no-op 透传 | ✅ runtime_features.c |
 
 ### 第一性原理设计决策
 
@@ -46,6 +51,11 @@
 - **__attribute__**: 解析器静默剥离 packed/aligned/noreturn/unused, 不影响 codegen
 - **typeof**: 解析期推导类型, typeof(expr)→expr.ty(), typeof(type)→type
 - **语句表达式**: 执行块内语句, 最后表达式值作为结果留在目标寄存器
+- **函数指针调用**: callee 从 Ident 改为 Box<Expr>, 直接调用走 call_label, 间接调用求值到 r11 后 call *r11 (49 FF D3)
+- **逗号运算符**: Pratt 解析 bp=1 最低优先级, 调用参数用 parse_expr_bp(2) 排除逗号, 初始化列表同理
+- **VLA**: ArraySize::Var 存储运行时表达式, 分配策略: 求值大小→imul元素大小→16字节对齐→sub rsp→保存基址到变量槽
+- **整数提升**: gen_int_promote() — char/SChar/Bool→movsx, Short→movsx, UChar→movzx, UShort→movzx
+- **内联汇编**: 识别 __asm__/__asm, 跳过 volatile/const, 收集字符串, 跳过冒号分隔列表, codegen 为 no-op
 
 ## 每个里程碑的第一性原理复盘
 

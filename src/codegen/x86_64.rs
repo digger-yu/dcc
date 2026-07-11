@@ -617,6 +617,8 @@ impl Codegen {
                 } else {
                     self.mov_from_stack(dst, &name.name);
                 }
+                // 整数提升: char/short → int
+                if ty.is_int() { self.gen_int_promote(dst, ty); }
             }
             Expr::Binop { op, l, r, .. } => {
                 // 浮点运算: 使用 SSE 指令
@@ -706,14 +708,29 @@ impl Codegen {
                     self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
                     self.emit(&(scale as i32).to_le_bytes());
                 }
-                // 恢复左操作数: mov dst, [r13+slot_off]
-                {
-                    let mut rex = 0x49u8; if dst >= 8 { rex |= 0x04; }
-                    self.emit(&[rex, 0x8B]);
-                    if slot_off.abs() < 128 { self.emit(&[0x45 | ((dst & 7) << 3), slot_off as i8 as u8]); }
-                    else { self.emit(&[0x85 | ((dst & 7) << 3)]); self.emit(&slot_off.to_le_bytes()); }
+                // 当 dst == 1 (rcx) 时, 恢复左操作数会覆盖右操作数
+                // 解决: 先将右操作数 push 到栈, 恢复左操作数后 pop 到 rdx(2)
+                if dst == 1 {
+                    self.push(1); // push rcx (右操作数)
+                    // 恢复左操作数到 dst
+                    {
+                        let mut rex = 0x49u8; if dst >= 8 { rex |= 0x04; }
+                        self.emit(&[rex, 0x8B]);
+                        if slot_off.abs() < 128 { self.emit(&[0x45 | ((dst & 7) << 3), slot_off as i8 as u8]); }
+                        else { self.emit(&[0x85 | ((dst & 7) << 3)]); self.emit(&slot_off.to_le_bytes()); }
+                    }
+                    self.pop(2); // pop rdx (右操作数)
+                    self.binop(*op, dst, 2);
+                } else {
+                    // 恢复左操作数: mov dst, [r13+slot_off]
+                    {
+                        let mut rex = 0x49u8; if dst >= 8 { rex |= 0x04; }
+                        self.emit(&[rex, 0x8B]);
+                        if slot_off.abs() < 128 { self.emit(&[0x45 | ((dst & 7) << 3), slot_off as i8 as u8]); }
+                        else { self.emit(&[0x85 | ((dst & 7) << 3)]); self.emit(&slot_off.to_le_bytes()); }
+                    }
+                    self.binop(*op, dst, 1);
                 }
-                self.binop(*op, dst, 1);
                 // ptr - ptr: 字节差 ÷ 元素大小 = 元素数
                 if is_ptr_sub && elem_size > 1 {
                     self.mov_imm(1, elem_size as i128); // rcx = elem_size
@@ -736,8 +753,9 @@ impl Codegen {
                     let es = elem_ty.size() as i32;
                     if let Expr::Ident { name: arr_name, ty: arr_ty, .. } = arr.as_ref() {
                         if self.vla_offsets.contains_key(&arr_name.name) {
-                            // VLA: 基址在 r12
-                            self.emit(&[0x41, 0x54, 0x58]); // push r12; pop rax
+                            // VLA: 基址存储在变量栈槽中
+                            let off = self.var_offset(&arr_name.name);
+                            self.load_stack(0, off); // rax = VLA 基址
                         } else if matches!(arr_ty, Type::Array(_, _)) {
                             // 静态数组: LEA 取基址
                             if self.globals.contains_key(&arr_name.name) {
@@ -757,7 +775,9 @@ impl Codegen {
                                 self.load_stack(0, off);
                             }
                         }
+                        self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
                         self.gen_expr(idx, 1); // rcx = index
+                        self.pop(0); // 恢复基址到 rax
                         if es != 1 {
                             self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
                             self.emit(&es.to_le_bytes());
@@ -900,19 +920,33 @@ impl Codegen {
                 }
             }
             Expr::Call { callee, args, .. } => {
-                // __atomic_* 内置函数特殊处理 (生成 lock 前缀指令)
-                if callee.name.starts_with("__atomic_") && self.gen_atomic_builtin(&callee.name, args, dst) {
-                    // 已成功生成原子指令
-                } else if self.gen_builtin(&callee.name, args, dst) {
-                    // 已成功处理 __builtin_* 函数
+                // 检查是否为直接调用 (callee 是 Ident)
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    // __atomic_* 内置函数特殊处理 (生成 lock 前缀指令)
+                    if name.name.starts_with("__atomic_") && self.gen_atomic_builtin(&name.name, args, dst) {
+                        // 已成功生成原子指令
+                    } else if self.gen_builtin(&name.name, args, dst) {
+                        // 已成功处理 __builtin_* 函数
+                    } else {
+                        let ar = [7u8, 6, 2, 1, 8, 9];
+                        for (i, a) in args.iter().enumerate() { self.gen_expr(a, ar[i]); }
+                        self.emit(&[0x54]); // push rsp
+                        self.call_label(&name.name);
+                        self.emit(&[0x5c]); // pop rsp
+                        if dst != 0 { self.mov(dst, 0); }
+                    }
                 } else {
+                    // 间接调用: 通过函数指针
+                    // 1. 求值 callee 表达式得到函数地址, 保存到 r11 (不在 arg 寄存器列表中)
+                    self.gen_expr(callee, 11); // r11 = 函数指针
+                    // 2. 求值参数到 SysV ABI 寄存器
                     let ar = [7u8, 6, 2, 1, 8, 9];
                     for (i, a) in args.iter().enumerate() { self.gen_expr(a, ar[i]); }
-                    // 保存 rsp (保护求值栈上的硬件 push 值不被 callee 覆盖)
+                    // 3. push rsp 保护
                     self.emit(&[0x54]); // push rsp
-                    self.call_label(&callee.name);
-                    self.emit(&[0x5c]); // pop rsp (恢复 rsp, 丢弃 callee 的 push r13)
-                    // 调用约定: 返回值在 rax(0), 移至请求的目标寄存器
+                    // 4. call *r11: 49 FF D3
+                    self.emit(&[0x49, 0xFF, 0xD3]);
+                    self.emit(&[0x5c]); // pop rsp
                     if dst != 0 { self.mov(dst, 0); }
                 }
             }
@@ -920,6 +954,15 @@ impl Codegen {
             Expr::SizeofExpr { e, .. } => self.mov_imm(dst, e.ty().size() as i128),
             Expr::AlignofTy { ty, .. } => self.mov_imm(dst, ty.align() as i128),
             Expr::AlignofExpr { e, .. } => self.mov_imm(dst, e.ty().align() as i128),
+            Expr::Comma { l, r, .. } => {
+                // 逗号运算符: 求值 lhs 丢弃, 求值 rhs 结果放入 dst
+                self.gen_expr(l, 0);
+                self.gen_expr(r, dst);
+            }
+            Expr::AsmExpr { .. } => {
+                // 内联汇编: no-op, 结果为 0
+                self.mov_imm(dst, 0);
+            }
             Expr::StmtExpr { block, .. } => {
                 // 语句表达式 ({...}): 执行块内语句, 最后表达式值留在 dst
                 let items = &block.items;
@@ -1032,8 +1075,9 @@ impl Codegen {
                 let es = elem_ty.size() as i32;
                 if let Expr::Ident { name: arr_name, ty: arr_ty, .. } = arr.as_ref() {
                     if self.vla_offsets.contains_key(&arr_name.name) {
-                        // VLA: 基址在 r12, 用 push r12; pop rax
-                        self.emit(&[0x41, 0x54, 0x58]); // push r12; pop rax
+                        // VLA: 基址存储在变量栈槽中
+                        let off = self.var_offset(&arr_name.name);
+                        self.load_stack(0, off); // rax = VLA 基址
                     } else if matches!(arr_ty, Type::Array(_, _)) {
                         // 静态数组: LEA 取基址
                         if self.globals.contains_key(&arr_name.name) {
@@ -1053,7 +1097,9 @@ impl Codegen {
                             self.load_stack(0, off);
                         }
                     }
+                    self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
                     self.gen_expr(idx, 1); // rcx = index
+                    self.pop(0); // 恢复基址到 rax
                     if es != 1 {
                         self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
                         self.emit(&es.to_le_bytes());
@@ -1638,6 +1684,31 @@ impl Codegen {
         let mut rex = 0x48u8; if dst >= 8 { rex |= 0x04; } if src >= 8 { rex |= 0x01; }
         self.emit(&[rex, 0x8B, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
     }
+
+    /// 整数提升: 将小于 int 的整数类型提升到 64 位
+    /// char/short → 符号扩展; uchar/ushort/bool → 零扩展
+    fn gen_int_promote(&mut self, dst: u8, ty: &Type) {
+        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+        match ty {
+            Type::Char | Type::SChar | Type::Bool => {
+                // movsx dst, dst_low8: 48 0F BE C0+dst,dst
+                self.emit(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+            }
+            Type::Short => {
+                // movsx dst, dst_low16: 48 0F BF C0+dst,dst
+                self.emit(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+            }
+            Type::UChar => {
+                // movzx dst, dst_low8: 48 0F B6 C0+dst,dst
+                self.emit(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+            }
+            Type::UShort => {
+                // movzx dst, dst_low16: 48 0F B7 C0+dst,dst
+                self.emit(&[rex, 0x0F, 0xB7, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+            }
+            _ => {} // int/long/ptr 等不需要提升
+        }
+    }
     fn push(&mut self, reg: u8) {
         // 硬件 push: 用 rsp, 变量用 r13, 互不干扰
         if reg == 0 { self.emit(&[0x50]); }       // push rax
@@ -1801,10 +1872,42 @@ impl Codegen {
         }
     }
 
-    // VLA 运行时分配: TODO - 当前架构无法解决 VLA 与固定帧的栈空间重叠问题
-    // 需要重新设计栈帧布局 (如使用两个帧指针或堆分配) 才能正确支持
-    fn gen_vla_alloc(&mut self, _v: &VarDecl) {
-        // TODO: VLA 代码生成
+    // VLA 运行时分配: 动态栈分配
+    // 策略: 计算大小 → 对齐 → sub rsp → 保存基址到变量槽
+    fn gen_vla_alloc(&mut self, v: &VarDecl) {
+        // VLA 变量类型: Array(elem, Var(expr))
+        // 大小表达式在变量的 ArraySize::Var 中
+        if let Type::Array(elem_ty, ArraySize::Var(ref size_expr)) = &v.ty {
+            // 求值大小表达式到 rax
+            self.gen_expr(size_expr, 0);
+            // rax = 元素数量, 乘以元素大小
+            let es = elem_ty.size() as i32;
+            if es != 1 {
+                self.emit(&[0x48, 0x69, 0xc0]); // imul rax, rax, imm32
+                self.emit(&es.to_le_bytes());
+            }
+            // 对齐到 16 字节: (rax + 15) & ~15
+            self.emit(&[0x48, 0x83, 0xc0, 0x0f]); // add rax, 15
+            self.emit(&[0x48, 0x83, 0xe0, 0xf0]); // and rax, -16
+            // 保存 VLA 大小到 vla_offsets
+            let off = self.var_offset(&v.name.name);
+            self.vla_offsets.insert(v.name.name.clone(), off);
+            // 保存当前 rsp (VLA 基址)
+            // sub rsp, rax: 48 29 C4
+            self.emit(&[0x48, 0x29, 0xC4]);
+            // mov [r13 + var_off], rsp: 保存 VLA 指针到变量槽
+            let rex = 0x49u8; // REX.W + REX.B (r13 base)
+            self.emit(&[rex, 0x89]);
+            if off.abs() < 128 {
+                // mod=01, reg=rsp(4), r/m=r13(5) → 0x65
+                self.emit(&[0x65, off as i8 as u8]);
+            } else {
+                // mod=10, reg=rsp(4), r/m=r13(5) → 0x85
+                self.emit(&[0x85]);
+                self.emit(&off.to_le_bytes());
+            }
+            // 对齐 rsp 到 16 字节 (已经是 16 对齐的, 因为 rax 是 16 对齐的)
+        }
     }
 
     // 函数尾声: 恢复 r13 + 返回
@@ -1922,8 +2025,12 @@ impl Codegen {
             Expr::Binop { l, r, .. } => {
                 1 + Self::max_expr_depth_expr(l).max(Self::max_expr_depth_expr(r))
             }
-            Expr::Call { args, .. } => {
-                1 + args.iter().map(|a| Self::max_expr_depth_expr(a)).max().unwrap_or(0)
+            Expr::Call { callee, args, .. } => {
+                1 + Self::max_expr_depth_expr(callee).max(
+                    args.iter().map(|a| Self::max_expr_depth_expr(a)).max().unwrap_or(0))
+            }
+            Expr::Comma { l, r, .. } => {
+                Self::max_expr_depth_expr(l).max(Self::max_expr_depth_expr(r))
             }
             Expr::Assign { l, r, .. } => {
                 1 + Self::max_expr_depth_expr(l).max(Self::max_expr_depth_expr(r))

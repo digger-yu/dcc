@@ -130,8 +130,7 @@ impl<'a> Parser<'a> {
                 let e = self.parse_expr()?;
                 match &e {
                     Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                    Expr::Ident { name, .. } => ArraySize::Var(name.name.clone()),
-                    _ => ArraySize::Const(0), // 复杂表达式暂不支持
+                    _ => ArraySize::Var(Box::new(e)),
                 }
             } else { ArraySize::Const(0) };
             if !self.expect(TokKind::RBracket, "']'") { return None; }
@@ -380,8 +379,7 @@ impl<'a> Parser<'a> {
                     let e = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int });
                     match &e {
                         Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                        Expr::Ident { name, .. } => ArraySize::Var(name.name.clone()),
-                        _ => ArraySize::Const(0),
+                        _ => ArraySize::Var(Box::new(e)),
                     }
                 } else { ArraySize::Const(0) };
                 let _ = self.expect(TokKind::RBracket, "']'");
@@ -423,7 +421,10 @@ impl<'a> Parser<'a> {
             let nm = if self.cur.kind == TokKind::Ident { let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id) } else { None };
             let ty = match ty { Type::Array(e, _) => Type::Ptr(e), o => o };
             ps.push(Param { ty, name: nm, span: self.cur.span.clone() });
-            if self.cur.kind == TokKind::Comma { self.advance(); continue; }
+            if self.cur.kind == TokKind::Comma { self.advance();
+                if self.cur.kind == TokKind::Ellipsis { self.advance(); break; }
+                continue;
+            }
             if self.cur.kind == TokKind::Ellipsis { self.advance(); }
             break;
         }
@@ -551,12 +552,21 @@ impl<'a> Parser<'a> {
     fn parse_expr_bp(&mut self, min_bp: u8) -> Option<Expr> {
         let mut lhs = self.parse_unary()?;
         loop {
-            if self.cur.kind == TokKind::Assign && min_bp <= 1 {
-                self.advance(); let r = self.parse_expr_bp(1)?;
+            // 逗号运算符: bp=1, 最低优先级
+            if self.cur.kind == TokKind::Comma && min_bp <= 1 {
+                let sp = self.cur.span.clone();
+                self.advance();
+                let r = self.parse_expr_bp(1)?;
+                let ty = r.ty();
+                lhs = Expr::Comma { l: Box::new(lhs), r: Box::new(r), span: sp, ty };
+                continue;
+            }
+            if self.cur.kind == TokKind::Assign && min_bp <= 2 {
+                self.advance(); let r = self.parse_expr_bp(2)?;
                 lhs = Expr::Assign { op: BinOp::Add, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: int_t() }; continue;
             }
             if let Some(op) = self.compound_op() {
-                if min_bp <= 1 { self.advance(); let r = self.parse_expr_bp(1)?;
+                if min_bp <= 2 { self.advance(); let r = self.parse_expr_bp(2)?;
                     // 展开 lhs += e → target = lhs + e
                     // 提取赋值目标 (如果 lhs 已是 Assign, 提取其目标)
                     let target = Self::assign_target(&lhs);
@@ -568,23 +578,23 @@ impl<'a> Parser<'a> {
                     let assign_ty = target.ty();
                     lhs = Expr::Assign { op: BinOp::Add, l: Box::new(target), r: Box::new(expanded), span: self.cur.span.clone(), ty: assign_ty }; continue; }
             }
-            if self.cur.kind == TokKind::Question && min_bp == 0 {
+            if self.cur.kind == TokKind::Question {
                 self.advance(); let t = self.parse_expr()?;
                 if !self.expect(TokKind::Colon, "':'") { return None; }
                 let e = self.parse_expr_bp(0)?;
                 lhs = Expr::Cond { cond: Box::new(lhs), then_: Box::new(t), else_: Box::new(e), span: self.cur.span.clone(), ty: int_t() }; continue;
             }
             let (op, lbp, rbp) = match self.cur.kind {
-                TokKind::Plus => (BinOp::Add, 1u8, 2), TokKind::Minus => (BinOp::Sub, 1, 2),
-                TokKind::Star => (BinOp::Mul, 3, 4), TokKind::Slash => (BinOp::Div, 3, 4),
-                TokKind::Percent => (BinOp::Mod, 3, 4),
-                TokKind::Lt => (BinOp::Lt, 5, 6), TokKind::Gt => (BinOp::Gt, 5, 6),
-                TokKind::Le => (BinOp::Le, 5, 6), TokKind::Ge => (BinOp::Ge, 5, 6),
-                TokKind::EqEq => (BinOp::EqEq, 5, 6), TokKind::Ne => (BinOp::Ne, 5, 6),
-                TokKind::Amp => (BinOp::And, 7, 8), TokKind::Caret => (BinOp::Xor, 9, 10),
-                TokKind::Pipe => (BinOp::Or, 11, 12),
-                TokKind::AndAnd => (BinOp::AndAnd, 13, 14), TokKind::OrOr => (BinOp::OrOr, 13, 14),
-                TokKind::Shl => (BinOp::Shl, 5, 6), TokKind::Shr => (BinOp::Shr, 5, 6),
+                TokKind::Plus => (BinOp::Add, 3u8, 4), TokKind::Minus => (BinOp::Sub, 3, 4),
+                TokKind::Star => (BinOp::Mul, 5, 6), TokKind::Slash => (BinOp::Div, 5, 6),
+                TokKind::Percent => (BinOp::Mod, 5, 6),
+                TokKind::Lt => (BinOp::Lt, 7, 8), TokKind::Gt => (BinOp::Gt, 7, 8),
+                TokKind::Le => (BinOp::Le, 7, 8), TokKind::Ge => (BinOp::Ge, 7, 8),
+                TokKind::EqEq => (BinOp::EqEq, 7, 8), TokKind::Ne => (BinOp::Ne, 7, 8),
+                TokKind::Amp => (BinOp::And, 9, 10), TokKind::Caret => (BinOp::Xor, 11, 12),
+                TokKind::Pipe => (BinOp::Or, 13, 14),
+                TokKind::AndAnd => (BinOp::AndAnd, 15, 16), TokKind::OrOr => (BinOp::OrOr, 15, 16),
+                TokKind::Shl => (BinOp::Shl, 7, 8), TokKind::Shr => (BinOp::Shr, 7, 8),
                 _ => break,
             };
             if lbp < min_bp { break; }
@@ -666,6 +676,38 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_unary()
             }
+            // __asm__("..."): 内联汇编, 解析为 no-op 表达式
+            TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" => {
+                self.advance();
+                // 可选的 volatile/const/__volatile__
+                while matches!(self.cur.kind, TokKind::KwVolatile | TokKind::KwConst)
+                    || (self.cur.kind == TokKind::Ident && (self.cur.text == "__volatile__" || self.cur.text == "__const__")) {
+                    self.advance();
+                }
+                if self.cur.kind == TokKind::LParen {
+                    self.advance();
+                    // 收集所有字符串
+                    let mut asm_str = String::new();
+                    while self.cur.kind == TokKind::StringLit {
+                        let s = self.cur.text.clone();
+                        // 去掉引号
+                        let inner = if s.len() >= 2 { &s[1..s.len()-1] } else { &s };
+                        asm_str.push_str(inner);
+                        self.advance();
+                    }
+                    // 跳过冒号分隔的输出/输入/clobber列表
+                    let mut depth = 1i32;
+                    while depth > 0 && self.cur.kind != TokKind::Eof {
+                        if self.cur.kind == TokKind::LParen { depth += 1; }
+                        if self.cur.kind == TokKind::RParen { depth -= 1; if depth == 0 { break; } }
+                        self.advance();
+                    }
+                    if self.cur.kind == TokKind::RParen { self.advance(); }
+                    Some(Expr::AsmExpr { asm_str, span: sp, ty: Type::Void })
+                } else {
+                    self.err_here("E0001", "expected '(' after __asm__"); None
+                }
+            }
             // 语句表达式: ({...})
             TokKind::LParen if self.peek.kind == TokKind::LBrace => {
                 self.advance(); // (
@@ -707,13 +749,14 @@ impl<'a> Parser<'a> {
         loop {
             match self.cur.kind {
                 TokKind::LParen => {
-                    if let Expr::Ident { name, .. } = &e {
-                        let callee = name.clone(); self.advance();
-                        let mut args = vec![];
-                        if self.cur.kind != TokKind::RParen { loop { args.push(self.parse_expr()?); if self.cur.kind == TokKind::Comma { self.advance(); continue; } break; } }
-                        if !self.expect(TokKind::RParen, "')'") { return None; }
-                        e = Expr::Call { callee, args, span: sp.clone(), ty: int_t() };
-                    } else { self.err_here("E0005", "only identifier() callable in M0"); return None; }
+                    // 函数调用: 支持标识符和函数指针表达式
+                    let callee_expr = e.clone();
+                    self.advance();
+                    let mut args = vec![];
+                    if self.cur.kind != TokKind::RParen { loop { args.push(self.parse_expr_bp(2)?); if self.cur.kind == TokKind::Comma { self.advance(); continue; } break; } }
+                    if !self.expect(TokKind::RParen, "')'") { return None; }
+                    let call_ty = int_t(); // 默认 int, 实际类型由函数签名决定
+                    e = Expr::Call { callee: Box::new(callee_expr), args, span: sp.clone(), ty: call_ty };
                 }
                 TokKind::LBracket => {
                     self.advance(); let idx = self.parse_expr()?;
@@ -779,10 +822,10 @@ impl<'a> Parser<'a> {
                                     self.advance();
                                     let field = self.parse_ident()?;
                                     if !self.expect(TokKind::Assign, "'='") { return None; }
-                                    let value = self.parse_expr()?;
+                                    let value = self.parse_expr_bp(2)?;
                                     InitItem::Designated { designator: Designator::Field(field), value }
                                 } else {
-                                    let e = self.parse_expr()?;
+                                    let e = self.parse_expr_bp(2)?;
                                     InitItem::Expr(e)
                                 };
                                 inits.push(item);
@@ -810,7 +853,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                         let field = self.parse_ident()?;
                         if !self.expect(TokKind::Assign, "'='") { return None; }
-                        let value = self.parse_expr()?;
+                        let value = self.parse_expr_bp(2)?;
                         InitItem::Designated { designator: Designator::Field(field), value }
                     } else if self.cur.kind == TokKind::LBracket {
                         // 数组指定初始化器: [idx] = value
@@ -818,11 +861,11 @@ impl<'a> Parser<'a> {
                         let idx = self.parse_expr()?;
                         if !self.expect(TokKind::RBracket, "']'") { return None; }
                         if !self.expect(TokKind::Assign, "'='") { return None; }
-                        let value = self.parse_expr()?;
+                        let value = self.parse_expr_bp(2)?;
                         InitItem::Designated { designator: Designator::Index(idx), value }
                     } else {
                         // 普通初始化值
-                        let e = self.parse_expr()?;
+                        let e = self.parse_expr_bp(2)?;
                         InitItem::Expr(e)
                     };
                     inits.push(item);

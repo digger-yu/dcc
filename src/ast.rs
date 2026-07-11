@@ -75,7 +75,7 @@ pub enum Expr {
     Ident     { name: Ident, span: Span, ty: Type },
     Binop     { op: BinOp, l: Box<Expr>, r: Box<Expr>, span: Span, ty: Type },
     Unary     { op: UnOp,  e: Box<Expr>, span: Span, ty: Type },
-    Call      { callee: Ident, args: Vec<Expr>, span: Span, ty: Type },
+    Call      { callee: Box<Expr>, args: Vec<Expr>, span: Span, ty: Type },
     Assign    { op: BinOp, l: Box<Expr>, r: Box<Expr>, span: Span, ty: Type },
     Cond      { cond: Box<Expr>, then_: Box<Expr>, else_: Box<Expr>, span: Span, ty: Type },
     Cast      { ty: Type, e: Box<Expr>, span: Span },
@@ -98,6 +98,10 @@ pub enum Expr {
     AlignofExpr{ e: Box<Expr>, span: Span },
     /// 语句表达式 ({...})
     StmtExpr   { block: Box<Block>, span: Span, ty: Type },
+    /// 逗号运算符: (lhs, rhs) → 求值 lhs 丢弃, 返回 rhs
+    Comma      { l: Box<Expr>, r: Box<Expr>, span: Span, ty: Type },
+    /// 内联汇编 __asm__: 字符串列表, 结果类型
+    AsmExpr    { asm_str: String, span: Span, ty: Type },
 }
 
 /// 初始化项: 普通值 或 指定初始化器
@@ -130,11 +134,21 @@ pub enum UnOp { Neg, Not, BitNot, Plus }
 
 // ===== 类型系统 =====
 /// 数组大小: 编译期常量 或 运行时表达式 (VLA)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ArraySize {
     Const(usize),
-    Var(String),  // 变量名 (运行时求值)
+    Var(Box<Expr>),  // 运行时表达式 (VLA)
 }
+
+impl PartialEq for ArraySize {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ArraySize::Const(a), ArraySize::Const(b)) => a == b,
+            _ => false, // Var 不参与相等比较
+        }
+    }
+}
+impl Eq for ArraySize {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -319,7 +333,9 @@ impl Expr {
             | Expr::Index { ty, .. } | Expr::Member { ty, .. }
             | Expr::AddrOf { ty, .. } | Expr::Deref { ty, .. }
             | Expr::PostInc { ty, .. } | Expr::PostDec { ty, .. }
-            | Expr::PreInc { ty, .. } | Expr::PreDec { ty, .. } => ty.clone(),
+            | Expr::PreInc { ty, .. } | Expr::PreDec { ty, .. }
+            | Expr::Comma { ty, .. } => ty.clone(),
+            Expr::AsmExpr { ty, .. } => ty.clone(),
             Expr::Cast { ty, .. } => ty.clone(),
             Expr::InitList { ty, .. } => ty.clone(),
             Expr::SizeofTy { .. } | Expr::SizeofExpr { .. } | Expr::CompoundLit { .. }
