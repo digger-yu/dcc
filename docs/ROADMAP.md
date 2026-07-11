@@ -38,6 +38,11 @@
 | VLA 可变长数组 | P2 | ✅ ArraySize::Var(Box<Expr>) | ✅ 动态栈分配+16字节对齐 | ✅ runtime_features.c |
 | 整数提升 | P2 | ✅ char/short 隐式提升 | ✅ movsx/movzx 符号/零扩展 | ✅ runtime_features.c |
 | 内联汇编 __asm__ | P1 | ✅ __asm__/volatile 解析 | ✅ no-op 透传 | ✅ runtime_features.c |
+| struct 整体赋值 | P1 | ✅ 聚合初始化 | ✅ memcpy 整体拷贝 | ✅ Linux 验证 |
+| struct 传参/返回 | P2 | ✅ 函数参数/返回值 | ✅ SysV ABI 寄存器拆分 (<=16B) | ✅ Linux 验证 |
+| long double 16B | P3 | ✅ sizeof=16 | ✅ 16字节存储 + SSE 运算 | ✅ Linux 验证 |
+| _Complex 复数 | P3 | ✅ _Complex float/double | ✅ sizeof+变量声明 | ✅ Linux 验证 |
+| _Decimal 十进制 | P3 | ✅ _Decimal32/64/128 | ✅ 映射到等效 IEEE 浮点 | ✅ Linux 验证 |
 
 ### 第一性原理设计决策
 
@@ -56,6 +61,10 @@
 - **VLA**: ArraySize::Var 存储运行时表达式, 分配策略: 求值大小→imul元素大小→16字节对齐→sub rsp→保存基址到变量槽
 - **整数提升**: gen_int_promote() — char/SChar/Bool→movsx, Short→movsx, UChar→movzx, UShort→movzx
 - **内联汇编**: 识别 __asm__/__asm, 跳过 volatile/const, 收集字符串, 跳过冒号分隔列表, codegen 为 no-op
+- **struct 传参**: SysV ABI 简化版, <=8B 单寄存器, <=16B 拆双寄存器(rax:rdx), >16B 隐藏指针; 被调端从寄存器恢复到变量槽
+- **long double 16B**: 占 16 字节栈空间(低 8 字节 double + 高 8 字节零), 运算用 SSE double 近似, movq 加载低 8 字节
+- **_Complex**: Type::Complex(Box<Type>) 包装内部类型, size=inner*2, 仅支持解析+sizeof+变量声明, 不支持复数运算
+- **_Decimal**: 解析期直接映射到等效类型 (_Decimal32→float, _Decimal64→double, _Decimal128→long double), 无需独立 codegen
 
 ## 每个里程碑的第一性原理复盘
 

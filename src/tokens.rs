@@ -28,6 +28,8 @@ pub enum TokKind {
     KwStatic, KwExtern, KwConst, KwVolatile, KwInline, KwRestrict, KwAuto, KwRegister,
     KwAtomic,                    // _Atomic
     KwFract, KwAccum,              // _Fract, _Accum (定点数)
+    KwComplex,                     // _Complex
+    KwDecimal32, KwDecimal64, KwDecimal128,  // _Decimal32/64/128
     KwSizeof, KwAlignof,
     // 符号
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
@@ -130,6 +132,10 @@ impl<'a> Lexer<'a> {
                 "sizeof" => TokKind::KwSizeof, "_Alignof" => TokKind::KwAlignof,
                 "_Atomic" => TokKind::KwAtomic,
                 "_Fract" => TokKind::KwFract, "_Accum" => TokKind::KwAccum,
+                "_Complex" => TokKind::KwComplex,
+                "_Decimal32" => TokKind::KwDecimal32,
+                "_Decimal64" => TokKind::KwDecimal64,
+                "_Decimal128" => TokKind::KwDecimal128,
                 _ => TokKind::Ident,
             };
             return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };

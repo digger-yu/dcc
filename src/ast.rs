@@ -160,6 +160,7 @@ pub enum Type {
     LongLong, ULongLong,
     Float, Double, LongDouble,
     Fract, Accum,  // 定点数: _Fract (1.31格式), _Accum (16.16格式)
+    Complex(Box<Type>),  // _Complex float/double: (real, imag) 两部分
     Ptr(Box<Type>),
     Array(Box<Type>, ArraySize),
     Vector(Box<Type>, usize),  // SIMD 向量: (元素类型, 元素个数)
@@ -203,6 +204,7 @@ impl Type {
             Type::Array(_, ArraySize::Var(_)) => 8,  // VLA 退化为指针
             Type::Vector(elem, n) => elem.size() * n,
             Type::LongDouble => 16,
+            Type::Complex(inner) => inner.size() * 2,
             Type::Struct(_, fields) => {
                 fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0)
             }
@@ -225,6 +227,7 @@ impl Type {
             Type::Array(elem, ArraySize::Var(_)) => elem.align(),
             Type::Vector(_, _) => 16, // SIMD 向量 16 字节对齐
             Type::LongDouble => 16,
+            Type::Complex(inner) => inner.align(),
             Type::Struct(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
             Type::Union(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
             _ => 8,
@@ -237,7 +240,7 @@ impl Type {
             | Type::Short | Type::UShort | Type::Int | Type::UInt
             | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong)
     }
-    pub fn is_arith(&self) -> bool { self.is_int() || matches!(self, Type::Float | Type::Double | Type::LongDouble | Type::Fract | Type::Accum) }
+    pub fn is_arith(&self) -> bool { self.is_int() || matches!(self, Type::Float | Type::Double | Type::LongDouble | Type::Fract | Type::Accum | Type::Complex(_)) }
 
     pub fn layout_struct(fields: &mut Vec<Field>, is_union: bool) {
         if is_union {

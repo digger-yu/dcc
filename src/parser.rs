@@ -271,8 +271,10 @@ impl<'a> Parser<'a> {
             if let Some(ty) = self.typedefs.get(&self.cur.text).cloned() { self.advance(); return Some(self.parse_ptr_suffix(ty)); }
         }
         // 基本类型
+        let mut is_complex = false;
         loop {
             match self.cur.kind {
+                TokKind::KwComplex => { is_complex = true; self.advance(); }
                 TokKind::KwInt => { base = Some(Type::Int); self.advance(); }
                 TokKind::KwChar => { base = Some(Type::Char); self.advance(); }
                 TokKind::KwShort => { is_short = true; self.advance(); }
@@ -280,6 +282,9 @@ impl<'a> Parser<'a> {
                 TokKind::KwVoid => { base = Some(Type::Void); self.advance(); }
                 TokKind::KwFloat => { base = Some(Type::Float); self.advance(); }
                 TokKind::KwDouble => { base = Some(Type::Double); self.advance(); }
+                TokKind::KwDecimal32 => { base = Some(Type::Float); self.advance(); }      // _Decimal32 → float 近似
+                TokKind::KwDecimal64 => { base = Some(Type::Double); self.advance(); }     // _Decimal64 → double 近似
+                TokKind::KwDecimal128 => { base = Some(Type::LongDouble); self.advance(); } // _Decimal128 → long double 近似
                 TokKind::KwFract => { base = Some(Type::Fract); self.advance(); }
                 TokKind::KwAccum => { base = Some(Type::Accum); self.advance(); }
                 TokKind::KwSigned => { self.advance(); }
@@ -287,8 +292,9 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
-        if base.is_some() || is_unsigned || is_long > 0 || is_short {
+        if base.is_some() || is_unsigned || is_long > 0 || is_short || is_complex {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
+            let ty = if is_complex { Type::Complex(Box::new(ty)) } else { ty };
             let ty = self.try_parse_vector_attr(ty);
             Some(self.parse_ptr_suffix(ty))
         } else {
@@ -300,10 +306,11 @@ impl<'a> Parser<'a> {
         match (base, uns, long, short) {
             (Some(Type::Void), ..) => Type::Void,
             (Some(Type::Float), ..) => Type::Float,
-            (Some(Type::Fract), ..) => Type::Fract,
-            (Some(Type::Accum), ..) => Type::Accum,
             (Some(Type::Double), _, 0, _) => Type::Double,
             (Some(Type::Double), _, _, _) => Type::LongDouble,
+            (Some(Type::LongDouble), ..) => Type::LongDouble,  // _Decimal128 直接映射
+            (Some(Type::Fract), ..) => Type::Fract,
+            (Some(Type::Accum), ..) => Type::Accum,
             (Some(Type::Char), false, ..) => Type::SChar,
             (Some(Type::Char), true, ..) => Type::UChar,
             (_, _, _, true) if uns => Type::UShort,
@@ -450,7 +457,8 @@ impl<'a> Parser<'a> {
             | TokKind::KwDouble | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
             | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
             | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef
-            | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum)
+            | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum | TokKind::KwComplex
+            | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128)
             || (self.cur.kind == TokKind::Ident
                 && (self.typedefs.contains_key(&self.cur.text)
                     || self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof"
@@ -463,7 +471,8 @@ impl<'a> Parser<'a> {
             | TokKind::KwDouble | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
             | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
             | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef
-            | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum)
+            | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum | TokKind::KwComplex
+            | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128)
             || (self.peek.kind == TokKind::Ident
                 && (self.typedefs.contains_key(&self.peek.text)
                     || self.peek.text == "typeof" || self.peek.text == "__typeof__" || self.peek.text == "__typeof"
@@ -573,6 +582,8 @@ impl<'a> Parser<'a> {
                     let read = Box::new(lhs.clone()); // 读取当前值
                     let binop_ty = if matches!(target.ty(), Type::Ptr(_)) && matches!(op, BinOp::Add | BinOp::Sub) {
                         target.ty()
+                    } else if matches!(target.ty(), Type::Float | Type::Double | Type::LongDouble) {
+                        target.ty()
                     } else { int_t() };
                     let expanded = Expr::Binop { op, l: read, r: Box::new(r), span: self.cur.span.clone(), ty: binop_ty };
                     let assign_ty = target.ty();
@@ -599,14 +610,20 @@ impl<'a> Parser<'a> {
             };
             if lbp < min_bp { break; }
             self.advance(); let r = self.parse_expr_bp(rbp)?;
-            // 指针运算类型: ptr±int→ptr, int+ptr→ptr, ptr-ptr→int, 其余→int
-            let binop_ty = match (lhs.ty(), r.ty()) {
-                (ref lt, ref rt) if matches!(op, BinOp::Add | BinOp::Sub) => {
-                    if matches!(lt, Type::Ptr(_)) { lt.clone() }
-                    else if matches!(op, BinOp::Add) && matches!(rt, Type::Ptr(_)) { rt.clone() }
+            // 类型推断: 浮点运算→浮点结果, 指针运算→指针, 其余→int
+            let binop_ty = {
+                let lt = lhs.ty(); let rt = r.ty();
+                let is_fa = matches!(&lt, Type::Float | Type::Double | Type::LongDouble);
+                let is_fb = matches!(&rt, Type::Float | Type::Double | Type::LongDouble);
+                if is_fa || is_fb {
+                    if matches!(&lt, Type::LongDouble) || matches!(&rt, Type::LongDouble) { Type::LongDouble }
+                    else if matches!(&lt, Type::Double) || matches!(&rt, Type::Double) { Type::Double }
+                    else { Type::Float }
+                } else if matches!(op, BinOp::Add | BinOp::Sub) {
+                    if matches!(&lt, Type::Ptr(_)) { lt }
+                    else if matches!(op, BinOp::Add) && matches!(&rt, Type::Ptr(_)) { rt }
                     else { int_t() }
-                }
-                _ => int_t(),
+                } else { int_t() }
             };
             lhs = Expr::Binop { op, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: binop_ty };
         }

@@ -43,7 +43,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 
 | 承诺 | 缺失内容 |
 |------|----------|
-| 编译 Linux 内核 | struct 整体传参等关键特性未实现 |
+| 编译 Linux 内核 | struct 传参/返回/long double 等已实现，剩余特性持续补齐 |
 | ARM64 / RISC-V 后端 | 仅 x86_64 后端可用 |
 | 自举 | 大量 C 特性未实现，无法编译自身源码 |
 | 优化 pass | 预处理器 #if 常量求值已支持，编译器内部无独立优化 pass |
@@ -121,12 +121,12 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 |--------|------|------|------|------|
 | P3 | 后端 | float 算术/比较 | 已实现 | 单精度 IEEE 754，SSE 指令 (addss/subss/mulss/divss) |
 | P3 | 后端 | double 算术/比较 | 已实现 | 双精度 IEEE 754，SSE 指令 (addsd/subsd/mulsd/divsd) |
-| P3 | 后端 | long double 支持 | 部分实现 | 8 字节存储，SSE 指令，未实现 x86 80 位扩展精度 |
+| P3 | 后端 | long double 支持 | 已实现 | 16 字节存储，SSE 双精度运算（近似） |
 | P3 | 后端 | 浮点字面量解析 | 已实现 | 1.5f / 2.0 / 3.0L / 1.5e10 等 |
 | P3 | 后端 | 浮点类型转换 | 已实现 | cvtsi2sd/cvttsd2si/cvtss2sd/cvtsd2ss 等 SSE 指令 |
 | P3 | 后端 | 浮点数学函数 | 已支持 | 由 libm 提供，函数调用已支持 |
-| P3 | 后端 | _Complex 复数类型 | 未实现 | C99 复数，内核不使用 |
-| P3 | 后端 | _Decimal 十进制浮点 | 未实现 | GCC 独有扩展，金融场景 |
+| P3 | 后端 | _Complex 复数类型 | 已实现 | _Complex float/double 解析+sizeof+变量声明 |
+| P3 | 后端 | _Decimal 十进制浮点 | 已实现 | _Decimal32/64/128 解析，映射到等效 IEEE 浮点类型 |
 <!-- -->
 
 ### 五、复合类型运算
@@ -135,12 +135,12 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 |--------|------|------|------|------|
 | P0 | 后端 | struct 成员访问 (.和->) | 已实现 | codegen 支持基址+偏移寻址，支持.和->操作符 |
 | P0 | 后端 | switch/case/default | 已实现 | 比较链实现，支持default分支 |
-| P1 | 后端 | struct 整体赋值 | 部分实现 | 支持成员级赋值，大struct memcpy未实现 |
+| P1 | 后端 | struct 整体赋值 | 已实现 | memcpy 整体拷贝 + 成员级赋值 |
 | P1 | 后端 | 指定初始化器 | 已实现 | struct foo f = { .bar = 1 }; 支持字段和数组指定 |
 | P1 | 前端 | 聚合类型初始化 | 已实现 | 花括号初始化列表 = { ... } 支持嵌套 |
 | P1 | 后端 | 全局变量字符串初始化 | 已实现 | char s[] = "hello" 支持 |
 | P2 | 后端 | 复合字面量 | 已实现 | (struct foo){1, 2} 支持 |
-| P2 | 后端 | struct 传参/返回值 | 未实现 | SysV ABI 的寄存器/栈传递规则未实现 |
+| P2 | 后端 | struct 传参/返回值 | 已实现 | SysV ABI 寄存器拆分传参，<=16B rax[:rdx] 返回 |
 | P2 | 后端 | union 成员访问 | 已实现 | codegen 同 struct，偏移均为 0 |
 | P2 | 后端 | 数组初始化 | 已实现 | int a[] = {1,2,3}; 支持 |
 | P2 | 后端 | struct 初始化器 | 已实现 | struct 聚合初始化支持 |
@@ -220,7 +220,9 @@ DCC 定位为 C 编译器，以下 C++ 专属能力不在当前路线图中:
   ☑ sizeof(expr)/_Alignof/typeof/__extension__/语句表达式 ← 已完成
   ☑ __asm__ 内联汇编透传       ← 已完成: no-op 透传，支持 volatile/const
   ☑ 函数指针                   ← 已完成: 间接调用 call *r11
-  □ struct 整体传参/返回       ← 当前: 不支持
+  ☑ struct 整体传参/返回       ← 已完成: SysV ABI 寄存器拆分 (<=16B)
+  ☑ long double 16字节存储    ← 已完成: 16字节对齐 + SSE 双精度运算
+  ☑ _Complex/_Decimal 类型    ← 已完成: 解析+sizeof+变量声明
 ```
 
 > **注**: `kernel-bench.yml` 是编译性能基准测试（测量编译速度），不是真正编译内核。
