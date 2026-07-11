@@ -35,16 +35,17 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | 多文件编译 (.o 输出) | 已实现 — dcc -c 生成标准 .o，gcc 可链接，多文件链接验证通过 |
 | 浮点运算 | 已实现 — float/double SSE 指令 + 类型转换 + 比较 |
 | 位域/柔性数组/原子/SIMD/定点数 | 已实现 — 6 大后端模块全部通过 Linux 验证 |
+| 编译期运算 (__builtin/attribute/typeof/alignof) | 已实现 — 9 大编译期模块全部实现+Linux 验证 |
 <!-- -->
 
 ### 核心承诺 — 未实现部分
 
 | 承诺 | 缺失内容 |
 |------|----------|
-| 编译 Linux 内核 | 内联汇编、__builtin_expect、函数指针、struct 整体传参等关键特性未实现 |
+| 编译 Linux 内核 | 内联汇编、函数指针、struct 整体传参等关键特性未实现 |
 | ARM64 / RISC-V 后端 | 仅 x86_64 后端可用 |
 | 自举 | 大量 C 特性未实现，无法编译自身源码 |
-| 优化 pass | 无常量折叠/死代码消除/内联优化 |
+| 优化 pass | 预处理器 #if 常量求值已支持，编译器内部无独立优化 pass |
 <!-- -->
 
 ## 里程碑
@@ -161,16 +162,16 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 
 | <nobr>优先级</nobr> | <nobr>模块</nobr> | 功能 | 状态 | 说明 |
 |--------|------|------|------|------|
-| P1 | 后端 | __builtin__ 语义 | 未实现 | __builtin_expect/offsetof/memcpy 等，预处理层仅支持 __has_builtin 查询 |
-| P1 | 后端 | __attribute__ 语义 | 未实现 | packed/aligned/noreturn/unused 等，预处理层仅做静默剥离 |
+| P1 | 后端 | __builtin__ 语义 | 已实现 | __builtin_expect/constant_p/memcpy/memset/abs/trap 等 codegen，__has_builtin 查询 |
+| P1 | 后端 | __attribute__ 语义 | 已实现 | packed/aligned/noreturn/unused 等解析器静默剥离，__has_attribute 查询 |
 | P2 | 后端 | sizeof(type) | 已实现 | 编译期返回类型大小 |
-| P2 | 后端 | sizeof(expr) | 部分实现 | 硬编码返回 8，未计算实际表达式类型大小 |
-| P2 | 后端 | _Alignof 对齐查询 | 未实现 | C11 获取类型对齐要求 |
-| P3 | 后端 | typeof 运算符 | 未实现 | GNU 扩展，推导表达式类型，内核广泛使用 |
-| P3 | 后端 | __builtin_constant_p | 未实现 | 判断是否为编译期常量 |
-| P3 | 后端 | 常量表达式折叠 | 部分实现 | 预处理器 #if 支持，编译器内部无优化 pass |
-| P3 | 后端 | __extension__ | 未实现 | GNU 扩展，抑制 pedantic 警告 |
-| P3 | 后端 | 语句表达式 ({...}) | 未实现 | GNU 扩展，内核宏常用 |
+| P2 | 后端 | sizeof(expr) | 已实现 | 计算实际表达式类型大小 |
+| P2 | 后端 | _Alignof 对齐查询 | 已实现 | C11 _Alignof(type)/_Alignof(expr) 返回对齐值 |
+| P3 | 后端 | typeof 运算符 | 已实现 | GNU 扩展 typeof(expr/type) 推导类型，内核广泛使用 |
+| P3 | 后端 | __builtin_constant_p | 已实现 | 判断是否为编译期常量 (当前返回 0) |
+| P3 | 后端 | 常量表达式折叠 | 部分实现 | 预处理器 #if 支持，编译器内部无独立优化 pass |
+| P3 | 后端 | __extension__ | 已实现 | GNU 扩展，解析器直接跳过抑制警告 |
+| P3 | 后端 | 语句表达式 ({...}) | 已实现 | GNU 扩展，块内最后表达式值作为结果 |
 <!-- -->
 
 ### 八、函数与调用
@@ -213,9 +214,10 @@ DCC 定位为 C 编译器，以下 C++ 专属能力不在当前路线图中:
   ☑ switch/case                ← 已完成: 比较链实现，支持 default 分支
   ☑ 指定初始化器               ← 已完成: .field = expr 语法
   ☑ 位域/柔性数组/原子/SIMD/定点数 ← 已完成: 6 大后端模块全部实现
+  ☑ __builtin_expect/constant_p/memcpy ← 已完成: codegen 层内建函数处理
+  ☑ __attribute__ 语义         ← 已完成: packed/aligned/noreturn/unused 解析+剥离
+  ☑ sizeof(expr)/_Alignof/typeof/__extension__/语句表达式 ← 已完成
   □ __asm__ 内联汇编透传       ← 当前: 不支持
-  □ __builtin_expect           ← 当前: 不支持 (likely/unlikely 宏依赖)
-  □ __attribute__ 语义         ← 当前: 仅预处理剥离
   □ 函数指针                   ← 当前: 不支持
   □ struct 整体传参/返回       ← 当前: 不支持
 ```

@@ -26,6 +26,13 @@
 | 定点数类型 | P3 | ✅ `_Fract`/`_Accum` | ✅ 作为整数运算(1.31/16.16) | ✅ fixedpt_test.c |
 | 原子操作 | P3 | ✅ `__atomic_*` 内建函数 | ✅ lock前缀+xchg+cmpxchg | ✅ atomic_test.c |
 | 原子内存序 | P3 | ✅ `__ATOMIC_*` 宏定义 | ✅ mfence(seq_cst) | ✅ atomic_test.c |
+| __builtin__ 语义 | P1 | ✅ expect/constant_p/memcpy 等 | ✅ codegen 层内建函数处理 | ✅ builtins.c |
+| __attribute__ 语义 | P1 | ✅ packed/aligned/noreturn/unused | ✅ 解析器静默剥离 | ✅ builtins.c |
+| sizeof(expr) 修复 | P2 | ✅ 计算实际表达式类型大小 | ✅ | ✅ builtins.c |
+| _Alignof 对齐查询 | P2 | ✅ _Alignof(type)/_Alignof(expr) | ✅ 返回对齐值 | ✅ builtins.c |
+| typeof 运算符 | P3 | ✅ typeof(expr/type) 推导类型 | ✅ | ✅ builtins.c |
+| __extension__ | P3 | ✅ 解析器直接跳过 | ✅ | ✅ builtins.c |
+| 语句表达式 | P3 | ✅ ({...}) 块内最后表达式值 | ✅ | ✅ builtins.c |
 
 ### 第一性原理设计决策
 
@@ -35,6 +42,10 @@
 - **定点数**: ISO/IEC DTR 18037 嵌入式扩展, _Fract=1.31位 _Accum=16.16位, 复用整数路径
 - **原子操作**: x86 TSO 架构下, lock前缀保证原子性, fetch_add用xadd, 其余用cmpxchg循环
 - **内存序**: x86 天然 TSO, relaxed=裸操作, acquire/release=编译器屏障, seq_cst=mfence
+- **__builtin__**: expect=透传expr, constant_p=返回0, memcpy/memset=转发libc, abs=test+jns+neg
+- **__attribute__**: 解析器静默剥离 packed/aligned/noreturn/unused, 不影响 codegen
+- **typeof**: 解析期推导类型, typeof(expr)→expr.ty(), typeof(type)→type
+- **语句表达式**: 执行块内语句, 最后表达式值作为结果留在目标寄存器
 
 ## 每个里程碑的第一性原理复盘
 

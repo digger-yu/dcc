@@ -30,3 +30,8 @@ control
 call
 fib
 bad
+
+# Temp scripts
+_*.py
+_*.txt
+examples/simd_debug.c

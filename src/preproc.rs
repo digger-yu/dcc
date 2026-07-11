@@ -1283,22 +1283,35 @@ impl Preprocessor {
         false
     }
 
-    fn is_known_attribute(_attr: &str) -> bool {
-        // 我们不声称支持任何 GCC 属性, 始终返回 0
-        false
+    fn is_known_attribute(attr: &str) -> bool {
+        matches!(attr,
+            "packed" | "aligned" | "noreturn" | "unused" | "used"
+            | "section" | "visibility" | "always_inline" | "noinline"
+            | "format" | "nonnull" | "cleanup" | "deprecated"
+            | "fallthrough" | "weak" | "constructor" | "destructor"
+            | "vector_size" | "may_alias" | "transparent_union"
+            | "malloc" | "returns_twice" | "pure" | "const"
+            | "warn_unused_result" | "sentinel" | "format_arg"
+        )
     }
 
     fn is_known_builtin(name: &str) -> bool {
         let name = name.trim();
         matches!(name,
             "__builtin_expect" | "__builtin_memcpy" | "__builtin_memset"
-            | "__builtin_memmove" | "__builtin_malloc" | "__builtin_free"
+            | "__builtin_memmove" | "__builtin_memcmp"
+            | "__builtin_malloc" | "__builtin_free"
             | "__builtin_offsetof" | "__builtin_va_start" | "__builtin_va_end"
             | "__builtin_va_arg" | "__builtin_va_copy"
             | "__builtin_add_overflow" | "__builtin_sub_overflow"
             | "__builtin_mul_overflow"
             | "__builtin_types_compatible_p"
             | "__builtin_choose_expr" | "__builtin_constant_p"
+            | "__builtin_abs" | "__builtin_unreachable" | "__builtin_trap"
+            | "__builtin_strcpy" | "__builtin_strncpy"
+            | "__builtin_strcmp" | "__builtin_strlen"
+            | "__builtin_expect" | "__builtin_prefetch"
+            | "__builtin_clz" | "__builtin_ctz" | "__builtin_popcount"
         )
     }
 }

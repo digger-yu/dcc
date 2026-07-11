@@ -52,6 +52,20 @@ impl<'a> Parser<'a> {
         if self.cur.kind == k { self.advance(); return true; }
         self.err_here("E0001", format!("expected {}, got {:?}", what, self.cur.kind)); false
     }
+    /// 静默剥离 __attribute__((...)): GNU 扩展属性不影响代码生成
+    fn skip_attributes(&mut self) {
+        while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+            self.advance(); // __attribute__
+            if self.cur.kind == TokKind::LParen { self.advance(); } // (
+            if self.cur.kind == TokKind::LParen { self.advance(); } // (
+            let mut depth = 2i32;
+            while depth > 0 && self.cur.kind != TokKind::Eof {
+                if self.cur.kind == TokKind::LParen { depth += 1; }
+                if self.cur.kind == TokKind::RParen { depth -= 1; }
+                self.advance();
+            }
+        }
+    }
 
     pub fn program(&mut self) -> (Program, Vec<Diagnostic>) {
         let mut decls = vec![];
@@ -107,6 +121,8 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 Some(b)
             } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
+            // 函数声明后可能有 __attribute__((noreturn/unused/...))
+            self.skip_attributes();
             Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::LBracket {
             self.advance();
@@ -122,31 +138,36 @@ impl<'a> Parser<'a> {
             let arr_ty = Type::Array(Box::new(ty), arr_size);
             self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
             if !self.in_function { self.globals.insert(name_for_decl.name.clone(), arr_ty.clone()); }
+            self.skip_attributes(); // 变量属性
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false })])
-        } else if self.cur.kind == TokKind::Assign {
-            self.locals.insert(name_for_decl.name.clone(), ty.clone());
-            if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
-            self.advance();
-            let init = self.parse_expr()?;
-            if !self.expect(TokKind::Semi, "';'") { return None; }
-            Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: Some(init), span: sp, is_extern: false, is_static: false })])
-        } else if self.cur.kind == TokKind::Semi {
-            self.locals.insert(name_for_decl.name.clone(), ty.clone());
-            if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
-            self.advance();
-            Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: false, is_static: false })])
         } else {
-            self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind));
-            None
+            // 变量名后可能有 __attribute__((unused)) 等
+            self.skip_attributes();
+            if self.cur.kind == TokKind::Assign {
+                self.locals.insert(name_for_decl.name.clone(), ty.clone());
+                if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
+                self.advance();
+                let init = self.parse_expr()?;
+                if !self.expect(TokKind::Semi, "';'") { return None; }
+                Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: Some(init), span: sp, is_extern: false, is_static: false })])
+            } else if self.cur.kind == TokKind::Semi {
+                self.locals.insert(name_for_decl.name.clone(), ty.clone());
+                if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
+                self.advance();
+                Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: false, is_static: false })])
+            } else {
+                self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind));
+                None
+            }
         }
     }
 
     fn parse_type(&mut self) -> Option<Type> {
         let mut is_unsigned = false; let mut is_long = 0u8; let mut is_short = false;
         let mut base: Option<Type> = None;
-        // 跳过存储类/const/volatile/_Atomic
+        // 跳过存储类/const/volatile/_Atomic/__extension__
         loop {
             match self.cur.kind {
                 TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
@@ -162,6 +183,24 @@ impl<'a> Parser<'a> {
                     }
                     // 否则作为限定符跳过
                 }
+                // __extension__: GNU 扩展, 抑制警告, 直接跳过
+                TokKind::Ident if self.cur.text == "__extension__" => { self.advance(); }
+                // typeof(expr/type): GNU 扩展, 推导类型
+                TokKind::Ident if self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof" => {
+                    self.advance();
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        if self.is_peek_type_start() {
+                            let ty = self.parse_type()?;
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                            return Some(self.parse_ptr_suffix(ty));
+                        } else {
+                            let e = self.parse_expr()?;
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                            return Some(self.parse_ptr_suffix(e.ty()));
+                        }
+                    }
+                }
                 _ => break,
             }
         }
@@ -172,7 +211,34 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::LBrace {
                 self.advance(); let fields = self.parse_fields();
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
-                let mut fields = fields; Type::layout_struct(&mut fields, is_u);
+                let mut fields = fields;
+                // 检查 struct 后的 __attribute__((packed/aligned(N)))
+                let mut pack = false; let mut align_n: Option<usize> = None;
+                if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                    self.advance(); // __attribute__
+                    if self.cur.kind == TokKind::LParen { self.advance(); } // (
+                    if self.cur.kind == TokKind::LParen { self.advance(); } // (
+                    loop {
+                        if self.cur.kind == TokKind::Ident && self.cur.text == "packed" {
+                            pack = true; self.advance();
+                        } else if self.cur.kind == TokKind::Ident && self.cur.text == "aligned" {
+                            self.advance(); // aligned
+                            if self.cur.kind == TokKind::LParen { self.advance(); }
+                            if self.cur.kind == TokKind::Number {
+                                align_n = self.cur.text.parse().ok();
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        } else if self.cur.kind == TokKind::Ident || self.cur.kind == TokKind::Comma {
+                            self.advance(); // 跳过未知属性
+                        } else { break; }
+                    }
+                    if self.cur.kind == TokKind::RParen { self.advance(); } // )
+                    if self.cur.kind == TokKind::RParen { self.advance(); } // )
+                }
+                if pack { Type::layout_struct_packed(&mut fields, is_u); }
+                else { Type::layout_struct(&mut fields, is_u); }
+                if let Some(a) = align_n { for f in fields.iter_mut() { f.offset = (f.offset + a - 1) & !(a - 1); } }
                 self.struct_defs.insert(nm.clone(), (fields.clone(), is_u));
                 let ty = if is_u { Type::Union(nm, fields) } else { Type::Struct(nm, fields) };
                 return Some(self.parse_ptr_suffix(ty));
@@ -384,7 +450,10 @@ impl<'a> Parser<'a> {
             | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
             | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef
             | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum)
-            || (self.cur.kind == TokKind::Ident && self.typedefs.contains_key(&self.cur.text))
+            || (self.cur.kind == TokKind::Ident
+                && (self.typedefs.contains_key(&self.cur.text)
+                    || self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof"
+                    || self.cur.text == "__extension__"))
     }
 
     fn is_peek_type_start(&self) -> bool {
@@ -394,7 +463,10 @@ impl<'a> Parser<'a> {
             | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
             | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef
             | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum)
-            || (self.peek.kind == TokKind::Ident && self.typedefs.contains_key(&self.peek.text))
+            || (self.peek.kind == TokKind::Ident
+                && (self.typedefs.contains_key(&self.peek.text)
+                    || self.peek.text == "typeof" || self.peek.text == "__typeof__" || self.peek.text == "__typeof"
+                    || self.peek.text == "__extension__"))
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
@@ -572,6 +644,42 @@ impl<'a> Parser<'a> {
                     if !self.expect(TokKind::RParen, "')'") { return None; }
                     Some(Expr::SizeofTy { ty, span: sp })
                 } else { let e = self.parse_unary()?; Some(Expr::SizeofExpr { e: Box::new(e), span: sp }) }
+            }
+            // _Alignof(type) 或 _Alignof(expr)
+            TokKind::KwAlignof => {
+                self.advance();
+                if self.cur.kind == TokKind::LParen {
+                    self.advance();
+                    if self.is_type_start() {
+                        let ty = self.parse_type()?;
+                        if !self.expect(TokKind::RParen, "')'") { return None; }
+                        Some(Expr::AlignofTy { ty, span: sp })
+                    } else {
+                        let e = self.parse_expr()?;
+                        if !self.expect(TokKind::RParen, "')'") { return None; }
+                        Some(Expr::AlignofExpr { e: Box::new(e), span: sp })
+                    }
+                } else { self.err_here("E0001", "expected '(' after _Alignof"); None }
+            }
+            // __extension__: 跳过, 继续解析下一个一元表达式
+            TokKind::Ident if self.cur.text == "__extension__" => {
+                self.advance();
+                self.parse_unary()
+            }
+            // 语句表达式: ({...})
+            TokKind::LParen if self.peek.kind == TokKind::LBrace => {
+                self.advance(); // (
+                self.advance(); // {
+                let b = self.parse_block();
+                if !self.expect(TokKind::RBrace, "'}'") { return None; }
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                // 类型取最后一个表达式语句的类型
+                let ty = b.items.last().map_or(Type::Void, |item| {
+                    if let BlockItem::Stmt(Stmt::Expr { e, .. }) = item { e.ty() }
+                    else if let BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) = item { e.ty() }
+                    else { Type::Void }
+                });
+                Some(Expr::StmtExpr { block: Box::new(b), span: sp, ty })
             }
             TokKind::LParen if self.is_cast() => {
                 self.advance(); let ty = self.parse_type()?;

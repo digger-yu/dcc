@@ -92,6 +92,12 @@ pub enum Expr {
     CompoundLit { ty: Type, inits: Vec<InitItem>, span: Span },
     /// 初始化列表: {1, 2, 3} 或 {.x = 1, .y = 2}
     InitList  { inits: Vec<InitItem>, span: Span, ty: Type },
+    /// _Alignof(type)
+    AlignofTy  { ty: Type, span: Span },
+    /// _Alignof(expr)
+    AlignofExpr{ e: Box<Expr>, span: Span },
+    /// 语句表达式 ({...})
+    StmtExpr   { block: Box<Block>, span: Span, ty: Type },
 }
 
 /// 初始化项: 普通值 或 指定初始化器
@@ -278,6 +284,25 @@ impl Type {
             let _ = (off, bit_pos, container_bits);
         }
     }
+
+    /// packed 结构体布局: 所有字段对齐为 1, 无填充
+    pub fn layout_struct_packed(fields: &mut Vec<Field>, is_union: bool) {
+        if is_union {
+            for f in fields.iter_mut() { f.offset = 0; }
+        } else {
+            let mut off = 0usize;
+            for f in fields.iter_mut() {
+                if let Some(bw) = f.bit_width {
+                    f.offset = off;
+                    f.bit_offset = 0; // 简化: packed 下位域从字节边界开始
+                    off += (bw as usize + 7) / 8;
+                } else {
+                    f.offset = off;
+                    off += f.ty.size();
+                }
+            }
+        }
+    }
 }
 
 pub fn int_t()  -> Type { Type::Int }
@@ -297,7 +322,9 @@ impl Expr {
             | Expr::PreInc { ty, .. } | Expr::PreDec { ty, .. } => ty.clone(),
             Expr::Cast { ty, .. } => ty.clone(),
             Expr::InitList { ty, .. } => ty.clone(),
-            Expr::SizeofTy { .. } | Expr::SizeofExpr { .. } | Expr::CompoundLit { .. } => Type::Int,
+            Expr::SizeofTy { .. } | Expr::SizeofExpr { .. } | Expr::CompoundLit { .. }
+            | Expr::AlignofTy { .. } | Expr::AlignofExpr { .. } => Type::Int,
+            Expr::StmtExpr { ty, .. } => ty.clone(),
         }
     }
 }

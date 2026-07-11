@@ -903,6 +903,8 @@ impl Codegen {
                 // __atomic_* 内置函数特殊处理 (生成 lock 前缀指令)
                 if callee.name.starts_with("__atomic_") && self.gen_atomic_builtin(&callee.name, args, dst) {
                     // 已成功生成原子指令
+                } else if self.gen_builtin(&callee.name, args, dst) {
+                    // 已成功处理 __builtin_* 函数
                 } else {
                     let ar = [7u8, 6, 2, 1, 8, 9];
                     for (i, a) in args.iter().enumerate() { self.gen_expr(a, ar[i]); }
@@ -915,7 +917,34 @@ impl Codegen {
                 }
             }
             Expr::SizeofTy { ty, .. } => self.mov_imm(dst, ty.size() as i128),
-            Expr::SizeofExpr { .. } => self.mov_imm(dst, 8),
+            Expr::SizeofExpr { e, .. } => self.mov_imm(dst, e.ty().size() as i128),
+            Expr::AlignofTy { ty, .. } => self.mov_imm(dst, ty.align() as i128),
+            Expr::AlignofExpr { e, .. } => self.mov_imm(dst, e.ty().align() as i128),
+            Expr::StmtExpr { block, .. } => {
+                // 语句表达式 ({...}): 执行块内语句, 最后表达式值留在 dst
+                let items = &block.items;
+                let last_idx = items.len().saturating_sub(1);
+                for (i, item) in items.iter().enumerate() {
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr { e, .. }) if i == last_idx => {
+                            // 最后一条表达式语句: 结果放入 dst
+                            self.gen_expr(e, dst);
+                        }
+                        BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) if i == last_idx => {
+                            self.gen_expr(e, dst);
+                        }
+                        BlockItem::Stmt(s) => self.gen_stmt(s),
+                        BlockItem::Decl(Decl::Var(v)) => {
+                            self.register_var(&v.name.name, &v.ty);
+                            if let Some(init) = &v.init {
+                                self.gen_expr(init, 0);
+                                self.mov_to_stack(0, &v.name.name);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Expr::Cast { ty, e, .. } => {
                 let src_ty = e.ty();
                 self.gen_expr(e, dst);
@@ -1913,6 +1942,66 @@ impl Codegen {
                     .max(Self::max_expr_depth_expr(else_))
             }
             _ => 0,
+        }
+    }
+
+    /// __builtin_* 系列内置函数 codegen: 返回 true 表示已处理
+    fn gen_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
+        match name {
+            // __builtin_expect(expr, val): 分支预测提示, 直接返回 expr
+            "__builtin_expect" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], dst);
+                true
+            }
+            // __builtin_constant_p(expr): 编译期常量判断, 始终返回 0
+            "__builtin_constant_p" => {
+                self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_memcpy/__builtin_memset/__builtin_memmove: 转发到 libc
+            "__builtin_memcpy" | "__builtin_memset" | "__builtin_memmove" | "__builtin_memcmp" => {
+                let libc_name = name.strip_prefix("__builtin_").unwrap();
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() { self.gen_expr(a, ar[i]); }
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_strcpy/__builtin_strncpy/__builtin_strcmp 等
+            "__builtin_strcpy" | "__builtin_strncpy" | "__builtin_strcmp" | "__builtin_strlen" => {
+                let libc_name = name.strip_prefix("__builtin_").unwrap();
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() { self.gen_expr(a, ar[i]); }
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_abs: 绝对值
+            "__builtin_abs" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], dst);
+                // abs: test dst, dst; jns skip; neg dst; skip:
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]); // test dst, dst
+                self.emit(&[0x79, 0x04]); // jns +4
+                self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]); // neg dst
+                true
+            }
+            // __builtin_unreachable: 不可达, 生成 ud2
+            "__builtin_unreachable" | "__builtin_trap" => {
+                self.emit(&[0x0F, 0x0B]); // ud2
+                true
+            }
+            // __builtin_unwind_init / __builtin_va_start 等: 忽略
+            "__builtin_va_start" | "__builtin_va_end" | "__builtin_va_arg" => {
+                true
+            }
+            _ => false,
         }
     }
 
