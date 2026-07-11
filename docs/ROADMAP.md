@@ -7,7 +7,7 @@
 | **M0** | 最小 hello world | ✅ 完成 | `int main(){return 42;}` -> a.out, exit 42 |
 | **M1** | C89/99 子集 + 控制流 | ✅ 完成 | examples/fib.c -> fib(10)=55 |
 | **M2** | struct/union/enum + 指针 | ✅ 完成 | examples/struct_test.c |
-| **M3** | 全局类型注册表 | ⏳ | 二次编译时间 -50% |
+| **M3** | 全局类型注册表 | ✅ 完成 | 头文件缓存 (~/.dcc/cache/)，内容哈希失效 |
 | **M4** | 预处理 + builtin | ✅ 完成 | linux/init/main.c 解析成功 |
 | **M5** | **自举 (dcc 编 dcc)** | ⏳ | dcc1 == dcc2 |
 | **M6** | Linux 内核 benchmark | ⏳ | < GCC 时间, vmlinux 可启动 |
@@ -65,6 +65,7 @@
 - **long double 16B**: 占 16 字节栈空间(低 8 字节 double + 高 8 字节零), 运算用 SSE double 近似, movq 加载低 8 字节
 - **_Complex**: Type::Complex(Box<Type>) 包装内部类型, size=inner*2, 仅支持解析+sizeof+变量声明, 不支持复数运算
 - **_Decimal**: 解析期直接映射到等效类型 (_Decimal32→float, _Decimal64→double, _Decimal128→long double), 无需独立 codegen
+- **全局类型注册表**: 头文件缓存到 ~/.dcc/cache/, 键=文件路径哈希+内容哈希(FNV-1a), 值=预处理输出+宏状态, 内容变化时自动失效
 
 ## 每个里程碑的第一性原理复盘
 

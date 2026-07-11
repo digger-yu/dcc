@@ -34,6 +34,8 @@ pub struct Preprocessor {
     diag_stack: Vec<DiagState>,
     /// 当前诊断设置
     diag_state: DiagState,
+    /// 全局类型注册表: 头文件缓存目录
+    cache_dir: Option<PathBuf>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -85,6 +87,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         compile_time,
         diag_stack: vec![],
         diag_state: DiagState::default(),
+        cache_dir: Preprocessor::init_cache_dir(),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -422,16 +425,39 @@ impl Preprocessor {
                 let key = canonical.to_string_lossy().to_string();
                 if self.seen.contains(&key) { return; } // include guard
                 if self.pragma_once.contains(&key) { return; } // pragma once
-                self.seen.insert(key);
+                self.seen.insert(key.clone());
                 match fs::read_to_string(&full_path) {
                     Ok(text) => {
-                        // 输出 #line 标记 (保持行号对齐)
+                        // 全局类型注册表: 检查缓存
+                        let content_hash = Self::hash_content(&text);
+                        let cache_path = self.get_cache_path(&canonical, content_hash);
+
+                        if let Some(ref cp) = cache_path {
+                            if let Some((cached_output, cached_macros)) = self.load_from_cache(cp) {
+                                // 缓存命中: 直接使用缓存的预处理输出和宏
+                                self.out.push_str(&format!("/* #include \"{}\" (cached) */\n", path));
+                                self.out.push_str(&cached_output);
+                                for (name, def) in cached_macros {
+                                    self.macros.insert(name, def);
+                                }
+                                return;
+                            }
+                        }
+
+                        // 缓存未命中: 正常处理
                         self.out.push_str(&format!("/* #include \"{}\" */\n", path));
                         let saved_base = self.base_dir.clone();
+                        let saved_out_len = self.out.len();
                         self.base_dir = full_path.parent()
                             .unwrap_or(Path::new(".")).to_path_buf();
                         self.process_text(&text, &full_path.to_string_lossy());
                         self.base_dir = saved_base;
+
+                        // 保存到缓存
+                        if let Some(ref cp) = cache_path {
+                            let new_output = self.out[saved_out_len..].to_string();
+                            self.save_to_cache(cp, &new_output, &self.macros);
+                        }
                     }
                     Err(e) => {
                         self.diags.push(Diagnostic::err("E0205",
@@ -1313,5 +1339,97 @@ impl Preprocessor {
             | "__builtin_expect" | "__builtin_prefetch"
             | "__builtin_clz" | "__builtin_ctz" | "__builtin_popcount"
         )
+    }
+
+    // ===== 全局类型注册表: 头文件缓存 =====
+    // 设计: 缓存已处理头文件的输出和宏状态, 避免重复解析
+    // 缓存键: 文件路径 + 内容哈希
+    // 缓存值: 预处理输出 + 宏定义
+
+    fn init_cache_dir() -> Option<PathBuf> {
+        // 尝试创建 ~/.dcc/cache/
+        if let Ok(home) = std::env::var("HOME") {
+            let cache = PathBuf::from(home).join(".dcc").join("cache");
+            if fs::create_dir_all(&cache).is_ok() {
+                return Some(cache);
+            }
+        }
+        None
+    }
+
+    fn hash_content(content: &str) -> u64 {
+        // FNV-1a 哈希 (简单高效, 零依赖)
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for b in content.bytes() {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b7);
+        }
+        hash
+    }
+
+    fn get_cache_path(&self, file_path: &Path, content_hash: u64) -> Option<PathBuf> {
+        let cache_dir = self.cache_dir.as_ref()?;
+        let file_hash = Self::hash_content(&file_path.to_string_lossy());
+        let cache_name = format!("{:x}_{:x}", file_hash, content_hash);
+        Some(cache_dir.join(cache_name))
+    }
+
+    fn load_from_cache(&self, cache_path: &Path) -> Option<(String, Vec<(String, MacroDef)>)> {
+        let content = fs::read_to_string(cache_path).ok()?;
+        let mut lines = content.lines();
+
+        // 第一行: 标记
+        if lines.next()? != "DCC_CACHE_V1" {
+            return None;
+        }
+
+        // 读取预处理输出 (直到 END_OUTPUT 标记)
+        let mut output = String::new();
+        for line in lines.by_ref() {
+            if line == "END_OUTPUT" {
+                break;
+            }
+            output.push_str(line);
+            output.push('\n');
+        }
+
+        // 读取宏定义
+        let mut macros = Vec::new();
+        for line in lines {
+            if line.is_empty() { continue; }
+            // 格式: NAME\tPARAMS\tVARIADIC\tBODY
+            let parts: Vec<&str> = line.splitn(4, '\t').collect();
+            if parts.len() >= 4 {
+                let name = parts[0].to_string();
+                let params = if parts[1] == "-" {
+                    None
+                } else {
+                    Some(parts[1].split(',').map(|s| s.to_string()).collect())
+                };
+                let variadic = parts[2] == "1";
+                let body = parts[3].to_string();
+                macros.push((name, MacroDef { params, body, variadic }));
+            }
+        }
+
+        Some((output, macros))
+    }
+
+    fn save_to_cache(&self, cache_path: &Path, output: &str, macros: &HashMap<String, MacroDef>) {
+        let mut content = String::from("DCC_CACHE_V1\n");
+        content.push_str(output);
+        content.push_str("END_OUTPUT\n");
+
+        for (name, def) in macros {
+            // 格式: NAME\tPARAMS\tVARIADIC\tBODY
+            let params_str = match &def.params {
+                None => "-".to_string(),
+                Some(p) => p.join(","),
+            };
+            let variadic_str = if def.variadic { "1" } else { "0" };
+            content.push_str(&format!("{}\t{}\t{}\t{}\n", name, params_str, variadic_str, def.body));
+        }
+
+        let _ = fs::write(cache_path, content);
     }
 }

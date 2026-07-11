@@ -29,7 +29,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | 编译 C 子集并生成可执行文件 | 已实现 — 支持整数运算、逻辑运算、控制流、函数调用、指针/数组、全局变量 |
 | 字符级错误诊断 | 已实现 — 精确到行号+列号，源码引用，修复建议，彩色输出 |
 | 手写 ELF64 输出 | 已实现 — ET_EXEC (可直接执行) + ET_REL (可重定位 .o) |
-| 预处理器 | 基本实现 — #include/#define/#if 全家族 + 函数宏 + __has_include，但 __has_attribute 始终返回 0，__attribute__ 仅静默剥离 |
+| 预处理器 | 已实现 — #include/#define/#if 全家族 + 函数宏 + __has_include/__has_attribute/__has_builtin + 全局类型注册表（头文件缓存） |
 | 交叉编译框架 | 已实现 — TargetTriple 解析，多架构数据布局，后端分发 |
 | CLI 兼容 GCC 参数 | 已实现 — -O0~O3, -std=c89~gnu23, --target, -ffreestanding, -I, -D, -c |
 | 多文件编译 (.o 输出) | 已实现 — dcc -c 生成标准 .o，gcc 可链接，多文件链接验证通过 |
