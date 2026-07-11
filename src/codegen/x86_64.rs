@@ -2106,10 +2106,10 @@ impl Codegen {
         let got_src = match r {
             Expr::Ident { name: src_name, .. } => {
                 if self.globals.contains_key(&src_name.name) {
-                    self.emit_global_addr(2, &src_name.name); // rsi = 全局变量地址
+                    self.emit_global_addr(6, &src_name.name); // rsi = 全局变量地址
                 } else {
                     let src_off = self.var_offset(&src_name.name);
-                    self.emit_lea_r13(2, src_off); // rsi = 源地址
+                    self.emit_lea_r13(6, src_off); // rsi = 源地址 (reg 6 = rsi)
                 }
                 true
             }
@@ -2124,7 +2124,7 @@ impl Codegen {
             if sz > 8 {
                 self.store_stack(2, temp_off + 8); // rdx = 第二部分
             }
-            self.emit_lea_r13(2, temp_off); // rsi = 源
+            self.emit_lea_r13(6, temp_off); // rsi = 源 (reg 6 = rsi)
         }
         // 2. 取目标地址到 rdi
         self.emit_lea_r13(7, dst_off); // rdi = 目标地址
