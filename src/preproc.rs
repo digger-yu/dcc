@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::fs;
 use crate::diagnostics::{Diagnostic, Span};
+use crate::cli::StdMode;
 
 pub struct Preprocessor {
     macros: HashMap<String, MacroDef>,
@@ -66,7 +67,8 @@ struct MacroDef {
 
 pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                   system_paths: &[PathBuf],
-                  defines: &[(String, Option<String>)]) -> (String, Vec<Diagnostic>) {
+                  defines: &[(String, Option<String>)],
+                  std_mode: StdMode) -> (String, Vec<Diagnostic>) {
     let text = String::from_utf8_lossy(src);
     let base = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
     // 编译日期/时间
@@ -95,7 +97,17 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("__linux__", "1");
     pp.define_builtin("__LP64__", "1");
     pp.define_builtin("__STDC__", "1");
-    pp.define_builtin("__STDC_VERSION__", "202311L");
+    // __STDC_VERSION__ 根据选择的 C 标准设置
+    let stc_version = match std_mode {
+        StdMode::C89 | StdMode::Gnu89 => None,  // C89/C90 不定义 __STDC_VERSION__
+        StdMode::C99 | StdMode::Gnu99 => Some("199901"),
+        StdMode::C11 | StdMode::Gnu11 => Some("201112"),
+        StdMode::C17 | StdMode::Gnu17 => Some("201710"),
+        StdMode::C23 | StdMode::Gnu23 => Some("202311"),
+    };
+    if let Some(v) = stc_version {
+        pp.define_builtin("__STDC_VERSION__", v);
+    }
     pp.define_builtin("__STDC_HOSTED__", "1");
     pp.define_builtin("NULL", "((void*)0)");
     // GCC 兼容宏 (Linux 内核头文件大量使用)

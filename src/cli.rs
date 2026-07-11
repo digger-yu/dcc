@@ -168,14 +168,26 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     .map_err(|e| CliError::new(&e))?;
             }
             "-std=c89"   => std = StdMode::C89,
+            "-std=c90"   => std = StdMode::C89,   // c90 = c89 别名
+            "-std=iso9899:1990" => std = StdMode::C89,
             "-std=c99"   => std = StdMode::C99,
+            "-std=c9x"   => std = StdMode::C99,   // c9x = c99 别名
+            "-std=iso9899:1999" => std = StdMode::C99,
             "-std=c11"   => std = StdMode::C11,
+            "-std=c1x"   => std = StdMode::C11,   // c1x = c11 别名
+            "-std=iso9899:2011" => std = StdMode::C11,
             "-std=c17"   => std = StdMode::C17,
+            "-std=c18"   => std = StdMode::C17,   // c18 = c17 别名
+            "-std=iso9899:2017" => std = StdMode::C17,
             "-std=c23"   => std = StdMode::C23,
+            "-std=c2x"   => std = StdMode::C23,   // c2x = c23 别名
+            "-std=iso9899:2024" => std = StdMode::C23,
             "-std=gnu89" => std = StdMode::Gnu89,
+            "-std=gnu90" => std = StdMode::Gnu89, // gnu90 = gnu89 别名
             "-std=gnu99" => std = StdMode::Gnu99,
             "-std=gnu11" => std = StdMode::Gnu11,
             "-std=gnu17" => std = StdMode::Gnu17,
+            "-std=gnu18" => std = StdMode::Gnu17, // gnu18 = gnu17 别名
             "-std=gnu23" => std = StdMode::Gnu23,
             "-ffreestanding" => freestanding = true,
             "-I" => {

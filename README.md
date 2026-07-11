@@ -31,7 +31,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | 手写 ELF64 输出 | 已实现 — ET_EXEC (可直接执行) + ET_REL (可重定位 .o) |
 | 预处理器 | 已实现 — #include/#define/#if 全家族 + 函数宏 + __has_include/__has_attribute/__has_builtin + 全局类型注册表（头文件缓存） |
 | 交叉编译框架 | 已实现 — TargetTriple 解析，多架构数据布局，后端分发 |
-| CLI 兼容 GCC 参数 | 已实现 — -O0~O3, -std=c89~gnu23, --target, -ffreestanding, -I, -D, -c |
+| CLI 兼容 GCC 参数 | 已实现 — -O0~O3, -std=c89/c90/c99/c11/c17/c18/c23 + gnu 变体 + iso9899 别名, --target, -ffreestanding, -I, -D, -c |
 | 多文件编译 (.o 输出) | 已实现 — dcc -c 生成标准 .o，gcc 可链接，多文件链接验证通过 |
 | 浮点运算 | 已实现 — float/double SSE 指令 + 类型转换 + 比较 |
 | 位域/柔性数组/原子/SIMD/定点数 | 已实现 — 6 大后端模块全部通过 Linux 验证 |
