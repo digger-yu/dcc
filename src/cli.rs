@@ -161,6 +161,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     .ok_or_else(|| CliError::new("missing arg after -o"))?);
             }
             "-c" => { relocatable = true; }
+            "-x" => {
+                i += 1;
+                args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -x"))?;
+            }
             "--target" => {
                 i += 1;
                 target = TargetTriple::parse(args.get(i)
@@ -222,7 +227,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-fno-common" | "-fno-delete-null-pointer-checks" | "-fno-strict-overflow"
             | "-fno-merge-all-constants" | "-fno-omit-frame-pointer"
             | "-mno-sse" | "-mno-mmx" | "-mno-sse2" | "-mno-80387" | "-mno-fp-ret-in-387"
-            | "-mno-3dnow" | "-mno-3dnowa" => {}
+            | "-mno-3dnow" | "-mno-3dnowa" | "-nostdinc" | "-nostdlib" | "-nodefaultlibs"
+            | "-static" | "-shared" | "-pie" | "-no-pie"
+            | "-pg" | "-pthread" => {}
             // -W* 警告选项 - 忽略
             a if a.starts_with("-W") => {}
             // -m* 机器选项 - 忽略
@@ -240,9 +247,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-include") => {}
             a if a.starts_with("-isystem") => { system_paths.push(PathBuf::from(&a[8..])); }
             // -MF, -MP, -MD 等依赖生成选项
-            "-MF" | "-MT" | "-MP" | "-MD" | "-MMD" => { if a != "-MP" && a != "-MD" && a != "-MMD" { i += 1; } }
+            "-MF" | "-MT" | "-MQ" | "-MP" | "-MD" | "-MMD" => { if a != "-MP" && a != "-MD" && a != "-MMD" { i += 1; } }
             "-dump-ast"  => dump_ast = true,
             "-v" | "--verbose" => verbose = true,
+            "-dumpversion" => {
+                println!("{}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "-dumpmachine" => {
+                println!("{}", target.as_str());
+                std::process::exit(0);
+            }
             "--version" => {
                 println!("dcc {}", env!("CARGO_PKG_VERSION"));
                 println!("A suckless C compiler.");
