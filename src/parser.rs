@@ -35,23 +35,16 @@ impl<'a> Parser<'a> {
                locals: HashMap::new(), globals: HashMap::new(), in_function: false }
     }
     fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
-    fn err_here(&mut self, code: &'static str, msg: impl Into<String>) {
+    fn err_here(&mut self, code: &'static str, msg: impl Into<String>, hint: Option<&str>) {
         let mut d = Diagnostic::err(code, msg, self.cur.span.clone());
-        // 自动添加修复建议
-        d.hint = match code {
-            "E0001" => Some(format!("check syntax near '{:?}'", self.cur.kind)),
-            "E0002" => Some("expected ';', '=', or '(' after declaration".into()),
-            "E0003" => Some("did you mean 'int'? or use a typedef/struct/enum".into()),
-            "E0004" => Some("identifiers must start with a letter or '_'".into()),
-            "E0005" => Some("only function names can be called directly".into()),
-            "E0006" => Some("expected a value, variable, or expression here".into()),
-            _ => None,
-        };
+        if let Some(h) = hint {
+            d.hint = Some(h.into());
+        }
         self.diags.push(d);
     }
     fn expect(&mut self, k: TokKind, what: &str) -> bool {
         if self.cur.kind == k { self.advance(); return true; }
-        self.err_here("E0001", format!("expected {}, got {:?}", what, self.cur.kind)); false
+        self.err_here("E0001", format!("expected {}, got {:?}", what, self.cur.kind), Some("check the syntax near this position")); false
     }
     /// 静默剥离 __attribute__((...)): GNU 扩展属性不影响代码生成
     fn skip_attributes(&mut self) {
@@ -90,7 +83,7 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::LParen {
             self.advance();
         } else {
-            self.err_here("E0001", "expected '(' after asm");
+            self.err_here("E0001", "expected '(' after asm", Some("asm requires parentheses: asm(\"instructions\" : ...)"));
             return None;
         }
         let mut asm_str = String::new();
@@ -147,7 +140,7 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::Semi, "';'") { return None; }
                 return Some(vec![]); // 文件级 asm 转翻译单元级声明
             } else {
-                self.err_here("E0001", "expected '(' after asm");
+                self.err_here("E0001", "expected '(' after asm", Some("asm requires parentheses: asm(\"instructions\" : ...)"));
                 return None;
             }
         }
@@ -291,7 +284,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: false, is_static: false })])
             } else {
-                self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind));
+                self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind), Some("declaration must end with ';' or have an initializer"));
                 None
             }
         }
@@ -385,7 +378,7 @@ impl<'a> Parser<'a> {
                 }
                 return Some(self.parse_ptr_suffix(Type::Struct(nm, Rc::new(vec![]))));
             }
-            self.err_here("E0003", "expected struct name or '{'"); return None;
+            self.err_here("E0003", "expected struct name or '{'", Some("struct/union definition needs a name or body: struct Name { ... }")); return None;
         }
         if self.cur.kind == TokKind::KwEnum {
             self.advance();
@@ -449,7 +442,7 @@ impl<'a> Parser<'a> {
             let ty = self.try_parse_vector_attr(ty);
             Some(self.parse_ptr_suffix(ty))
         } else {
-            self.err_here("E0003", format!("expected type, got {:?}", self.cur.kind)); None
+            self.err_here("E0003", format!("expected type, got {:?}", self.cur.kind), Some("use a known type like int, void, or a typedef/struct/enum")); None
         }
     }
 
@@ -566,7 +559,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_ident(&mut self) -> Option<Ident> {
-        if self.cur.kind != TokKind::Ident { self.err_here("E0004", format!("expected identifier, got {:?}", self.cur.kind)); return None; }
+        if self.cur.kind != TokKind::Ident { self.err_here("E0004", format!("expected identifier, got {:?}", self.cur.kind), Some("identifiers must start with a letter or '_'")); return None; }
         let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id)
     }
 
@@ -877,7 +870,7 @@ impl<'a> Parser<'a> {
                         if !self.expect(TokKind::RParen, "')'") { return None; }
                         Some(Expr::AlignofExpr { e: Box::new(e), span: sp })
                     }
-                } else { self.err_here("E0001", "expected '(' after _Alignof"); None }
+                } else { self.err_here("E0001", "expected '(' after _Alignof", Some("_Alignof requires parentheses: _Alignof(type)")); None }
             }
             // __extension__: 跳过, 继续解析下一个一元表达式
             TokKind::Ident if self.cur.text == "__extension__" => {
@@ -1117,7 +1110,7 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 Some(Expr::InitList { inits, span: sp, ty: Type::Int }) // 类型稍后由上下文确定
             }
-            _ => { self.err_here("E0006", format!("expected expression, got {:?}", self.cur.kind)); None }
+            _ => { self.err_here("E0006", format!("expected expression, got {:?}", self.cur.kind), Some("expected a value, variable, or expression here")); None }
         }
     }
 }
