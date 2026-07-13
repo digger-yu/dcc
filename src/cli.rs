@@ -23,6 +23,9 @@ pub struct Config {
     pub preprocess_only: bool, // -E: 只做预处理
     pub force_includes: Vec<String>, // -include file: 强制包含文件
     pub syntax_only: bool, // -fsyntax-only: 只做语法检查, 不生成代码
+    pub dep_file: Option<PathBuf>, // -MF: 依赖文件输出路径
+    pub dep_target: Option<String>, // -MT/-MQ: 依赖文件中的目标名
+    pub gen_dep: bool, // -MD/-MMD: 是否生成依赖文件
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +154,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut preprocess_only = false;
     let mut force_includes: Vec<String> = vec![];
     let mut syntax_only = false;
+    let mut dep_file: Option<PathBuf> = None;
+    let mut dep_target: Option<String> = None;
+    let mut gen_dep = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -290,8 +296,30 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 force_includes.push(a[8..].to_string());
             }
             a if a.starts_with("-isystem") => { system_paths.push(PathBuf::from(&a[8..])); }
-            // -MF, -MP, -MD 等依赖生成选项
-            "-MF" | "-MT" | "-MQ" | "-MP" | "-MD" | "-MMD" => { if a != "-MP" && a != "-MD" && a != "-MMD" { i += 1; } }
+            // -MD/-MMD: 生成依赖文件
+            "-MD" => { gen_dep = true; }
+            "-MMD" => { gen_dep = true; }
+            // -MF <file>: 依赖文件路径
+            "-MF" => {
+                i += 1;
+                let f = args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -MF"))?;
+                dep_file = Some(PathBuf::from(f));
+            }
+            // -MT <target>: 依赖中的目标名
+            "-MT" => {
+                i += 1;
+                dep_target = Some(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -MT"))?.clone());
+            }
+            // -MQ <target>: 同-MT, 带引号
+            "-MQ" => {
+                i += 1;
+                dep_target = Some(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -MQ"))?.clone());
+            }
+            // -MP: 为头文件生成空依赖目标 (暂忽略)
+            "-MP" => {}
             "-dump-ast"  => dump_ast = true,
             "-v" | "--verbose" => verbose = true,
             // -print-file-name=<file>: GCC 用于查找库/插件/头文件路径
@@ -358,10 +386,24 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             let stem = input.file_stem().unwrap_or_default().to_string_lossy();
             output = PathBuf::from(format!("{}.o", stem));
         }
-        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only })
+        // 如果未指定 dep_file 但启用了 dep, 用输出文件名替换扩展名为 .o 后加 .d
+        let dep_file = dep_file.or_else(|| {
+            if gen_dep && relocatable {
+                let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+                Some(PathBuf::from(format!("{}.d", stem)))
+            } else { None }
+        });
+        let dep_target = dep_target.or_else(|| {
+            if gen_dep {
+                Some(output.display().to_string())
+            } else { None }
+        });
+        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only,
+            dep_file, dep_target, gen_dep })
     } else {
         let input = input.unwrap_or_else(|| PathBuf::from("-"));
-        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only })
+        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only,
+            dep_file, dep_target, gen_dep })
     }
 }
 

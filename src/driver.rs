@@ -87,5 +87,31 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
     eprintln!("dcc: wrote {}", out.display());
+
+    // 生成依赖文件 (.d) — 用于内核构建系统的 make 依赖跟踪
+    // 第一性原理: 按需生成最小依赖文件即可满足内核构建, 不必追踪每个头文件
+    if cfg.gen_dep {
+        let dep_path = cfg.dep_file.as_ref().unwrap_or(out);
+        let target = cfg.dep_target.as_deref().unwrap_or_else(|| out.to_str().unwrap_or("unknown"));
+        let mut dep_out: Box<dyn Write> = if dep_path.to_str() == Some("-") {
+            Box::new(io::stdout())
+        } else {
+            // 确保依赖目录存在
+            if let Some(parent) = dep_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            Box::new(fs::File::create(dep_path)
+                .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write {}: {}", dep_path.display(), e),
+                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?)
+        };
+        // 写一个最小依赖: 目标只依赖自身 (内核 fixdep 工具需要至少存在这个文件)
+        // 格式: target.o: target.c
+        writeln!(dep_out, "{}: {}", target, cfg.input.display())
+            .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
+                crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
+    }
+
     Ok(())
 }

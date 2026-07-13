@@ -10,7 +10,7 @@
 | **M3** | 全局类型注册表 | ✅ 完成 | 头文件缓存 (~/.dcc/cache/)，内容哈希失效 |
 | **M4** | 预处理 + builtin | ✅ 完成 | linux/init/main.c 解析成功; Linux 6.1 内核头文件预处理无错误, 输出体积接近 GCC (1.7-1.9x) |
 | **M5** | **自举 (dcc 编 dcc)** | ⏳ | dcc1 == dcc2 |
-| **M6** | Linux 内核 benchmark | 🔄 进行中 | 预处理+解析均通过 (init/main.c, kernel/panic.c, kernel/sys_ni.c 零错误); 支持 COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造 |
+| **M6** | Linux 内核 benchmark | 🔄 进行中 | init/main.c 解析+代码生成通过; -MD/-MF 依赖文件生成支持; 文件级/函数内 asm volatile 带约束支持; COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造 |
 | **M7** | ARM64 + RISC-V | ⏳ | hello.c 交叉编译,运行 |
 | **M8** | C11/17/23 + GNU 扩展 | ✅ 完成 | 位域/原子/SIMD/定点数/柔性数组/内存序 后端已实现+Linux验证; C标准全家族别名支持(c89/c90/c99/c9x/c11/c1x/c17/c18/c23/c2x+gnu变体+iso9899) |
 | **M9** | 精准错误诊断 | ⏳ | 错误精确到字符+列+建议 |
@@ -37,7 +37,7 @@
 | 逗号运算符 | P2 | ✅ Pratt bp=1 最低优先级 | ✅ 求值 lhs 丢弃返回 rhs | ✅ runtime_features.c |
 | VLA 可变长数组 | P2 | ✅ ArraySize::Var(Box<Expr>) | ✅ 动态栈分配+16字节对齐 | ✅ runtime_features.c |
 | 整数提升 | P2 | ✅ char/short 隐式提升 | ✅ movsx/movzx 符号/零扩展 | ✅ runtime_features.c |
-| 内联汇编 __asm__ | P1 | ✅ __asm__/volatile 解析 | ✅ no-op 透传 | ✅ runtime_features.c |
+| 内联汇编 __asm__ | P1 | ✅ __asm__/__asm/asm + volatile/const, 带冒号约束列表 | ✅ no-op 透传 | ✅ runtime_features.c, Linux 内核 devicetable-offsets.c |
 | struct 整体赋值 | P1 | ✅ 聚合初始化 | ✅ memcpy 整体拷贝 | ✅ Linux 验证 |
 | struct 传参/返回 | P2 | ✅ 函数参数/返回值 | ✅ SysV ABI 寄存器拆分 (<=16B) | ✅ Linux 验证 |
 | long double 16B | P3 | ✅ sizeof=16 | ✅ 16字节存储 + SSE 运算 | ✅ Linux 验证 |
@@ -62,7 +62,8 @@
 - **逗号运算符**: Pratt 解析 bp=1 最低优先级, 调用参数用 parse_expr_bp(2) 排除逗号, 初始化列表同理
 - **VLA**: ArraySize::Var 存储运行时表达式, 分配策略: 求值大小→imul元素大小→16字节对齐→sub rsp→保存基址到变量槽
 - **整数提升**: gen_int_promote() — char/SChar/Bool→movsx, Short→movsx, UChar→movzx, UShort→movzx
-- **内联汇编**: 识别 __asm__/__asm, 跳过 volatile/const, 收集字符串, 跳过冒号分隔列表, codegen 为 no-op
+- **内联汇编**: 识别 __asm__/__asm/asm, 跳过 volatile/const, 收集字符串, 跳过冒号分隔输出/输入/clobber 列表, codegen 为 no-op; 支持文件级 asm 声明和函数内 asm 表达式
+- **-MD/-MF 依赖文件**: 内核构建系统需要编译器生成 .d 依赖文件, 格式为目标:源; 支持 -MD(启用)/-MF(指定路径)/-MT-MQ(目标名), 无 -MF 时默认输出 <stem>.d
 - **struct 传参**: SysV ABI 简化版, <=8B 单寄存器, <=16B 拆双寄存器(rax:rdx), >16B 隐藏指针; 被调端从寄存器恢复到变量槽
 - **long double 16B**: 占 16 字节栈空间(低 8 字节 double + 高 8 字节零), 运算用 SSE double 近似, movq 加载低 8 字节
 - **_Complex**: Type::Complex(Box<Type>) 包装内部类型, size=inner*2, 仅支持解析+sizeof+变量声明, 不支持复数运算

@@ -84,6 +84,32 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 解析内联汇编表达式: 从 '(' 开始到 ')' 结束, 跳过约束列表
+    fn parse_asm_expr(&mut self, sp: Span) -> Option<Expr> {
+        if self.cur.kind == TokKind::LParen {
+            self.advance();
+        } else {
+            self.err_here("E0001", "expected '(' after asm");
+            return None;
+        }
+        let mut asm_str = String::new();
+        while self.cur.kind == TokKind::StringLit {
+            let s = self.cur.text.clone();
+            let inner = if s.len() >= 2 { &s[1..s.len()-1] } else { &s };
+            asm_str.push_str(inner);
+            self.advance();
+        }
+        // 跳过冒号分隔的输出/输入/clobber列表
+        let mut depth = 1i32;
+        while depth > 0 && self.cur.kind != TokKind::Eof {
+            if self.cur.kind == TokKind::LParen { depth += 1; }
+            if self.cur.kind == TokKind::RParen { depth -= 1; if depth == 0 { break; } }
+            self.advance();
+        }
+        if self.cur.kind == TokKind::RParen { self.advance(); }
+        Some(Expr::AsmExpr { asm_str, span: sp, ty: Type::Void })
+    }
+
     pub fn program(&mut self) -> (Program, Vec<Diagnostic>) {
         let mut decls = vec![];
         while self.cur.kind != TokKind::Eof {
@@ -105,6 +131,25 @@ impl<'a> Parser<'a> {
         self.skip_attributes();
         // 跳过声明开头的 __asm__("label")
         self.skip_asm_label();
+        // 文件级 asm: asm [volatile]("..." [: ...]);
+        if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "asm") {
+            let sp = self.cur.span.clone();
+            self.advance();
+            // 可选的 volatile/const
+            while matches!(self.cur.kind, TokKind::KwVolatile | TokKind::KwConst)
+                || (self.cur.kind == TokKind::Ident && (self.cur.text == "__volatile__" || self.cur.text == "__const__")) {
+                self.advance();
+            }
+            // 解析带约束的内联汇编表达式
+            if self.cur.kind == TokKind::LParen {
+                let _expr = self.parse_asm_expr(sp.clone())?;
+                if !self.expect(TokKind::Semi, "';'") { return None; }
+                return Some(vec![]); // 文件级 asm 转翻译单元级声明
+            } else {
+                self.err_here("E0001", "expected '(' after asm");
+                return None;
+            }
+        }
         // typedef
         if self.cur.kind == TokKind::KwTypedef {
             self.advance();
@@ -831,36 +876,14 @@ impl<'a> Parser<'a> {
                 self.parse_unary()
             }
             // __asm__("..."): 内联汇编, 解析为 no-op 表达式
-            TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" => {
+            TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" || self.cur.text == "asm" => {
                 self.advance();
                 // 可选的 volatile/const/__volatile__
                 while matches!(self.cur.kind, TokKind::KwVolatile | TokKind::KwConst)
                     || (self.cur.kind == TokKind::Ident && (self.cur.text == "__volatile__" || self.cur.text == "__const__")) {
                     self.advance();
                 }
-                if self.cur.kind == TokKind::LParen {
-                    self.advance();
-                    // 收集所有字符串
-                    let mut asm_str = String::new();
-                    while self.cur.kind == TokKind::StringLit {
-                        let s = self.cur.text.clone();
-                        // 去掉引号
-                        let inner = if s.len() >= 2 { &s[1..s.len()-1] } else { &s };
-                        asm_str.push_str(inner);
-                        self.advance();
-                    }
-                    // 跳过冒号分隔的输出/输入/clobber列表
-                    let mut depth = 1i32;
-                    while depth > 0 && self.cur.kind != TokKind::Eof {
-                        if self.cur.kind == TokKind::LParen { depth += 1; }
-                        if self.cur.kind == TokKind::RParen { depth -= 1; if depth == 0 { break; } }
-                        self.advance();
-                    }
-                    if self.cur.kind == TokKind::RParen { self.advance(); }
-                    Some(Expr::AsmExpr { asm_str, span: sp, ty: Type::Void })
-                } else {
-                    self.err_here("E0001", "expected '(' after __asm__"); None
-                }
+                self.parse_asm_expr(sp)
             }
             // 语句表达式: ({...})
             TokKind::LParen if self.peek.kind == TokKind::LBrace => {
