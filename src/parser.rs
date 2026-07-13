@@ -4,6 +4,7 @@
 
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::{Lexer, Tok, TokKind};
+use std::rc::Rc;
 use crate::ast::*;
 use std::collections::HashMap;
 
@@ -11,7 +12,7 @@ pub struct Parser<'a> {
     lex: Lexer<'a>, cur: Tok, peek: Tok,
     diags: Vec<Diagnostic>, finished: bool,
     typedefs: HashMap<String, Type>,
-    struct_defs: HashMap<String, (Vec<Field>, bool)>,
+    struct_defs: HashMap<String, (Rc<Vec<Field>>, bool)>,
     enum_defs: HashMap<String, Vec<(String, i64)>>,
     enum_consts: HashMap<String, i64>,
     locals: HashMap<String, Type>, // 变量名 → 类型 (函数内会清除)
@@ -349,41 +350,40 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 let mut fields = fields;
                 // 检查 struct 后的 __attribute__((packed/aligned(N)))
-                let mut pack = false; let mut align_n: Option<usize> = None;
+                // 注意: 使用 skip_attributes 正确处理嵌套括号, 如 section(".init.text")
+                let mut pack = false; let align_n: Option<usize> = None;
                 if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                    self.advance(); // __attribute__
-                    if self.cur.kind == TokKind::LParen { self.advance(); } // (
-                    if self.cur.kind == TokKind::LParen { self.advance(); } // (
-                    loop {
-                        if self.cur.kind == TokKind::Ident && self.cur.text == "packed" {
-                            pack = true; self.advance();
-                        } else if self.cur.kind == TokKind::Ident && self.cur.text == "aligned" {
-                            self.advance(); // aligned
-                            if self.cur.kind == TokKind::LParen { self.advance(); }
-                            if self.cur.kind == TokKind::Number {
-                                align_n = self.cur.text.parse().ok();
-                                self.advance();
+                    // 先跳过所有 __attribute__((...))，用深度计数支持嵌套括号
+                    while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                        self.advance(); // __attribute__
+                        if self.cur.kind == TokKind::LParen { self.advance(); } // (
+                        if self.cur.kind == TokKind::LParen { self.advance(); } // (
+                        let mut depth = 2i32;
+                        while depth > 0 && self.cur.kind != TokKind::Eof {
+                            // 识别属性名 (仅在 depth==2 时, 否则在嵌套括号内部)
+                            if depth == 2 && self.cur.kind == TokKind::Ident && self.cur.text == "packed" {
+                                pack = true;
                             }
-                            if self.cur.kind == TokKind::RParen { self.advance(); }
-                        } else if self.cur.kind == TokKind::Ident || self.cur.kind == TokKind::Comma {
-                            self.advance(); // 跳过未知属性
-                        } else { break; }
+                            if self.cur.kind == TokKind::LParen { depth += 1; }
+                            if self.cur.kind == TokKind::RParen { depth -= 1; if depth == 0 { break; } }
+                            self.advance();
+                        }
+                        if self.cur.kind == TokKind::RParen { self.advance(); } // 消耗外层的 )
                     }
-                    if self.cur.kind == TokKind::RParen { self.advance(); } // )
-                    if self.cur.kind == TokKind::RParen { self.advance(); } // )
                 }
                 if pack { Type::layout_struct_packed(&mut fields, is_u); }
                 else { Type::layout_struct(&mut fields, is_u); }
                 if let Some(a) = align_n { for f in fields.iter_mut() { f.offset = (f.offset + a - 1) & !(a - 1); } }
-                self.struct_defs.insert(nm.clone(), (fields.clone(), is_u));
-                let ty = if is_u { Type::Union(nm, fields) } else { Type::Struct(nm, fields) };
+                let fields_rc = Rc::new(fields);
+                self.struct_defs.insert(nm.clone(), (Rc::clone(&fields_rc), is_u));
+                let ty = if is_u { Type::Union(nm, fields_rc) } else { Type::Struct(nm, fields_rc) };
                 return Some(self.parse_ptr_suffix(ty));
             } else if !nm.is_empty() {
                 if let Some((f, _)) = self.struct_defs.get(&nm) {
-                    let ty = if is_u { Type::Union(nm, f.clone()) } else { Type::Struct(nm, f.clone()) };
+                    let ty = if is_u { Type::Union(nm, Rc::clone(f)) } else { Type::Struct(nm, Rc::clone(f)) };
                     return Some(self.parse_ptr_suffix(ty));
                 }
-                return Some(self.parse_ptr_suffix(Type::Struct(nm, vec![])));
+                return Some(self.parse_ptr_suffix(Type::Struct(nm, Rc::new(vec![]))));
             }
             self.err_here("E0003", "expected struct name or '{'"); return None;
         }

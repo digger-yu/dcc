@@ -2,6 +2,7 @@
 // 第一性原理: AST = 程序的"结构骨架"。类型系统必须能表达 C 的全部类型。
 // suckless 准则: 节点种类尽量少;一个节点表示"一个语义概念"。
 
+use std::rc::Rc;
 use crate::diagnostics::Span;
 
 #[derive(Debug, Clone)]
@@ -164,8 +165,8 @@ pub enum Type {
     Ptr(Box<Type>),
     Array(Box<Type>, ArraySize),
     Vector(Box<Type>, usize),  // SIMD 向量: (元素类型, 元素个数)
-    Struct(String, Vec<Field>),
-    Union(String, Vec<Field>),
+    Struct(String, Rc<Vec<Field>>),
+    Union(String, Rc<Vec<Field>>),
     Enum(String, Vec<(String, i64)>),
     Func(Box<Type>, Vec<Type>),
     Named(String),
