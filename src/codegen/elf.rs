@@ -105,7 +105,7 @@ pub fn build_elf_x86_64(code: &[u8], entry: u64) -> Vec<u8> {
     let p_vaddr  = 0x400000u64;
     let p_filesz = (64 + 56) as u64 + code.len() as u64;
     out.extend_from_slice(&PT_LOAD.to_le_bytes());
-    out.extend_from_slice(&5u32.to_le_bytes());     // p_flags
+    out.extend_from_slice(&7u32.to_le_bytes());     // p_flags (PF_R|PF_W|PF_X)
     out.extend_from_slice(&0u64.to_le_bytes());     // p_offset
     out.extend_from_slice(&p_vaddr.to_le_bytes());
     out.extend_from_slice(&p_vaddr.to_le_bytes());  // p_paddr

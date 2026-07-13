@@ -384,7 +384,8 @@ impl Codegen {
                     let mut arg_idx = 0usize;
                     for p in f.params.iter() {
                         if let Some(nm) = &p.name {
-                            let is_agg_param = matches!(&p.ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_)))
+                            let is_agg_param = matches!(&p.ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
+                                | Type::Atomic(_))
                                 && p.ty.size() > 8;
                             if is_agg_param {
                                 let chunks = (p.ty.size() + 7) / 8;
@@ -456,7 +457,8 @@ impl Codegen {
                                     self.gen_init_list(&v.name.name, &v.ty, inits);
                                 } else {
                                     let is_vec_init = matches!(&v.ty, Type::Vector(_, _));
-                                    let is_agg = matches!(&v.ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_)))
+                                    let is_agg = matches!(&v.ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
+                                        | Type::Atomic(_))
                                         && v.ty.size() > 8;
                                     if is_vec_init {
                                         self.gen_expr(init, 0);
@@ -530,7 +532,8 @@ impl Codegen {
                 if let Some(e) = val {
                     let ret_ty = e.ty();
                     let ret_sz = ret_ty.size();
-                    let is_agg_ret = matches!(&ret_ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_)) | Type::Complex(_))
+                    let is_agg_ret = matches!(&ret_ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
+                        | Type::Complex(_) | Type::Atomic(_))
                         && ret_sz > 8;
                     if is_agg_ret {
                         // struct 返回: 加载到 rax[:rdx]
@@ -599,7 +602,8 @@ impl Codegen {
                             if let Expr::InitList { inits, .. } = init {
                                 self.gen_init_list(&v.name.name, &v.ty, inits);
                             } else {
-                                let is_agg = matches!(&v.ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_)))
+                                let is_agg = matches!(&v.ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
+                                    | Type::Atomic(_))
                                     && v.ty.size() > 8;
                                 if matches!(&v.ty, Type::Vector(_, _)) {
                                     self.gen_expr(init, 0);
@@ -826,7 +830,8 @@ impl Codegen {
             Expr::Assign { l, r, .. } => {
                 if let Expr::Ident { name, ty: l_ty, .. } = l.as_ref() {
                     let sz = l_ty.size();
-                    let is_aggregate = matches!(l_ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_)))
+                    let is_aggregate = matches!(l_ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
+                        | Type::Atomic(_))
                         && sz > 8;
                     if is_aggregate {
                         // struct/array 整体赋值: 逐块拷贝
@@ -901,9 +906,13 @@ impl Codegen {
                     self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
                 } else if let Expr::Member { expr, field, is_arrow, .. } = l.as_ref() {
                     // struct.field = val 或 ptr->field = val
-                    // 1. 查找字段信息
+                    // 1. 查找字段信息 (支持匿名 struct/union)
                     let field_info = if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty() {
-                        fields.iter().find(|f| f.name == field.name).cloned()
+                        find_field(fields, &field.name).map(|(f, extra)| {
+                            let mut fc = f.clone();
+                            fc.offset += extra;
+                            fc
+                        })
                     } else { None };
                     let is_bitfield = field_info.as_ref().map_or(false, |f| f.bit_width.is_some());
                     // 2. 计算目标地址
@@ -985,7 +994,7 @@ impl Codegen {
                         self.push(0); // 保存目标地址
                         self.gen_expr(r, 0); // rax = 值
                         self.pop(1); // rcx = 目标地址
-                        let size = l.ty().size();
+                        let size = field_info.as_ref().map_or(4, |f| f.ty.size());
                         match size {
                             1 => self.emit(&[0x88, 0x01]),
                             2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -1260,7 +1269,7 @@ impl Codegen {
                 if dst != 0 { self.mov(dst, 0); }
             }
             Expr::AddrOf { e, .. } => {
-                // &x: 计算变量地址加载到 dst
+                // &var / &struct.field / &ptr->field / *ptr: 计算地址到 dst
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     if self.globals.contains_key(&name.name) {
                         self.emit_global_addr(dst, &name.name);
@@ -1275,6 +1284,68 @@ impl Codegen {
                             self.emit(&off.to_le_bytes());
                         }
                     }
+                } else if let Expr::Member { expr, field, is_arrow, .. } = e.as_ref() {
+                    // &struct.field: 基址 + 字段偏移 (不加载值)
+                    if *is_arrow {
+                        self.gen_expr(expr, dst);
+                    } else if let Expr::Ident { name, .. } = expr.as_ref() {
+                        if self.globals.contains_key(&name.name) {
+                            self.emit_global_addr(dst, &name.name);
+                        } else {
+                            let off = self.var_offset(&name.name);
+                            let rex = 0x49u8;
+                            self.emit(&[rex, 0x8D]);
+                            if off.abs() < 128 {
+                                self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                            } else {
+                                self.emit(&[0x85 | ((dst & 7) << 3)]);
+                                self.emit(&off.to_le_bytes());
+                            }
+                        }
+                    } else {
+                        self.gen_expr(expr, dst);
+                    }
+                    let field_info = if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty() {
+                        find_field(fields, &field.name).map(|(f, extra)| {
+                            let mut fc = f.clone();
+                            fc.offset += extra;
+                            fc
+                        })
+                    } else { None };
+                    if let Some(ref f) = field_info {
+                        let field_off = f.offset as i32;
+                        if field_off != 0 {
+                            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                            self.emit(&field_off.to_le_bytes());
+                        }
+                    }
+                } else if let Expr::Deref { e: inner, .. } = e.as_ref() {
+                    // *ptr: 地址就是指针值
+                    self.gen_expr(inner, dst);
+                } else if let Expr::Index { arr, idx, ty: elem_ty, .. } = e.as_ref() {
+                    // &arr[i]: 基址 + i * elem_size
+                    let es = elem_ty.size() as i32;
+                    if let Expr::Ident { name: arr_name, .. } = arr.as_ref() {
+                        if self.globals.contains_key(&arr_name.name) {
+                            self.emit_global_addr(0, &arr_name.name);
+                        } else if self.vla_offsets.contains_key(&arr_name.name) {
+                            let off = self.var_offset(&arr_name.name);
+                            self.load_stack(0, off);
+                        } else {
+                            let off = self.var_offset(&arr_name.name);
+                            self.emit_lea_r13(0, off);
+                        }
+                    }
+                    self.push(0);
+                    self.gen_expr(idx, 1);
+                    self.pop(0);
+                    if es != 1 {
+                        self.emit(&[0x48, 0x69, 0xC9]); // imul rcx, rcx, es
+                        self.emit(&es.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
+                    if dst != 0 { self.mov(dst, 0); }
                 }
             }
             Expr::Member { expr, field, is_arrow, ty, .. } => {
@@ -1301,9 +1372,13 @@ impl Codegen {
                         self.gen_expr(expr, dst);
                     }
                 }
-                // 2. 查找字段信息, 加上字段偏移
+                // 2. 查找字段信息 (支持匿名 struct/union), 加上字段偏移
                 let field_info = if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty() {
-                    fields.iter().find(|f| f.name == field.name).cloned()
+                    find_field(fields, &field.name).map(|(f, extra)| {
+                        let mut fc = f.clone();
+                        fc.offset += extra;
+                        fc
+                    })
                 } else { None };
                 if let Some(ref f) = field_info {
                     let field_off = f.offset as i32;
@@ -1356,7 +1431,7 @@ impl Codegen {
                         }
                     } else {
                         // 普通字段: 直接加载
-                        let size = ty.size();
+                        let size = f.ty.size();
                         match size {
                             1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00 | ((dst & 7) << 3) | (dst & 7)]),
                             2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00 | ((dst & 7) << 3) | (dst & 7)]),
@@ -1950,21 +2025,86 @@ impl Codegen {
     }
 
     /// 全局变量 RIP-relative 加载: reg = [global_var]
-    /// 编码: REX.W 8B 05|reg<<3 disp32
+    /// 根据变量实际大小选择操作数尺寸 (1/2/4/8 字节)
     fn emit_global_load(&mut self, reg: u8, name: &str) {
-        let disp32_pos = self.pos() + 3; // REX + opcode + ModRM = 3 bytes
-        let rex = if reg >= 8 { 0x4C } else { 0x48 }; // REX.W (+ REX.B if reg>=8)
-        self.emit(&[rex, 0x8B, 0x05 | ((reg & 7) << 3), 0, 0, 0, 0]);
-        self.pending_data_rels.push((disp32_pos, name.to_string()));
+        let sz = self.globals.get(name).map_or(8, |g| g.size);
+        let pref = if reg >= 8 { 0x41 } else { 0x00 }; // REX.R for high reg
+        match sz {
+            1 => {
+                // movzx reg32, byte [rip+disp32]: 0F B6 /r [disp32]
+                let pos = self.pos() + 3 + if pref != 0 { 1 } else { 0 };
+                let modrm = 0x05 | ((reg & 7) << 3);
+                let mut b = if pref != 0 { vec![pref] } else { vec![] };
+                b.extend_from_slice(&[0x0F, 0xB6, modrm, 0,0,0,0]);
+                self.emit(&b);
+                self.pending_data_rels.push((pos, name.to_string()));
+            }
+            2 => {
+                // movzx reg32, word [rip+disp32]: 0F B7 /r [disp32]
+                let pos = self.pos() + 3 + if pref != 0 { 1 } else { 0 };
+                let modrm = 0x05 | ((reg & 7) << 3);
+                let mut b = if pref != 0 { vec![pref] } else { vec![] };
+                b.extend_from_slice(&[0x0F, 0xB7, modrm, 0,0,0,0]);
+                self.emit(&b);
+                self.pending_data_rels.push((pos, name.to_string()));
+            }
+            4 => {
+                // 32-bit load (zero-extends to 64-bit): 8B /r [disp32]
+                let pos = self.pos() + 2 + if pref != 0 { 1 } else { 0 };
+                let modrm = 0x05 | ((reg & 7) << 3);
+                let mut b = if pref != 0 { vec![pref] } else { vec![] };
+                b.extend_from_slice(&[0x8B, modrm, 0,0,0,0]);
+                self.emit(&b);
+                self.pending_data_rels.push((pos, name.to_string()));
+            }
+            _ => {
+                // 64-bit load: REX.W 8B /r [disp32]
+                let pos = self.pos() + 3;
+                let rex = if reg >= 8 { 0x4C } else { 0x48 };
+                let modrm = 0x05 | ((reg & 7) << 3);
+                self.emit(&[rex, 0x8B, modrm, 0,0,0,0]);
+                self.pending_data_rels.push((pos, name.to_string()));
+            }
+        }
     }
 
     /// 全局变量 RIP-relative 存储: [global_var] = reg
-    /// 编码: REX.W 89 05|reg<<3 disp32
+    /// 根据变量实际大小选择操作数尺寸 (1/2/4/8 字节)
     fn emit_global_store(&mut self, reg: u8, name: &str) {
-        let disp32_pos = self.pos() + 3;
-        let rex = if reg >= 8 { 0x4C } else { 0x48 };
-        self.emit(&[rex, 0x89, 0x05 | ((reg & 7) << 3), 0, 0, 0, 0]);
-        self.pending_data_rels.push((disp32_pos, name.to_string()));
+        let sz = self.globals.get(name).map_or(8, |g| g.size);
+        let modrm = 0x05 | ((reg & 7) << 3);
+        match sz {
+            1 => {
+                // byte store: 88 /r [disp32]
+                // REX needed for registers 4-7 (spl/bpl/sil/dil)
+                let pos = self.pos() + 2 + if reg >= 4 { 1 } else { 0 };
+                if reg >= 4 {
+                    self.emit(&[0x40, 0x88, modrm, 0,0,0,0]);
+                } else {
+                    self.emit(&[0x88, modrm, 0,0,0,0]);
+                }
+                self.pending_data_rels.push((pos, name.to_string()));
+            }
+            2 => {
+                // word store: 66 89 /r [disp32]
+                let pos = self.pos() + 3;
+                self.emit(&[0x66, 0x89, modrm, 0,0,0,0]);
+                self.pending_data_rels.push((pos, name.to_string()));
+            }
+            4 => {
+                // 32-bit store: 89 /r [disp32]
+                let pos = self.pos() + 2;
+                self.emit(&[0x89, modrm, 0,0,0,0]);
+                self.pending_data_rels.push((pos, name.to_string()));
+            }
+            _ => {
+                // 64-bit store: REX.W 89 /r [disp32]
+                let pos = self.pos() + 3;
+                let rex = if reg >= 8 { 0x4C } else { 0x48 };
+                self.emit(&[rex, 0x89, modrm, 0,0,0,0]);
+                self.pending_data_rels.push((pos, name.to_string()));
+            }
+        }
     }
 
     /// 全局变量 RIP-relative 取地址: reg = &global_var
@@ -2442,91 +2582,71 @@ impl Codegen {
         }
     }
 
+    /// 获取指针参数所指元素的大小
+    fn atomic_elem_size(&self, args: &[Expr], idx: usize) -> usize {
+        if idx >= args.len() { return 8; }
+        match args[idx].ty() {
+            Type::Ptr(ref inner) => inner.size(),
+            Type::Array(ref inner, _) => inner.size(),
+            _ => 8,
+        }
+    }
+
     /// 原子内置函数 codegen: 返回 true 表示已处理
     fn gen_atomic_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
         match name {
             "__atomic_fetch_add" => {
                 // args: (ptr, val, order)
                 if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], 6); // rsi = val
-                // lock xadd [rdi], esi: F0 48 0F C1 37
-                self.emit(&[0xF0, 0x48, 0x0F, 0xC1, 0x37]);
-                // rsi = old value
+                // lock xadd [rdi], rsi (按 sz 选操作数尺寸)
+                self.emit_atomic_xadd(sz);
                 if dst != 6 { self.mov(dst, 6); }
                 true
             }
             "__atomic_fetch_sub" => {
                 if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], 6); // rsi = val
-                // neg rsi
-                self.emit(&[0x48, 0xF7, 0xDE]);
-                // lock xadd [rdi], esi
-                self.emit(&[0xF0, 0x48, 0x0F, 0xC1, 0x37]);
+                // neg rsi (按 sz 选操作数尺寸)
+                self.emit_neg(sz);
+                self.emit_atomic_xadd(sz);
                 if dst != 6 { self.mov(dst, 6); }
                 true
             }
             "__atomic_fetch_and" => {
                 if args.len() < 3 { return false; }
-                self.gen_expr(&args[0], 7); // rdi = ptr
-                self.gen_expr(&args[1], 6); // rsi = val
-                // CAS 循环: 读旧值, 计算新值, cmpxchg
-                // mov rax, [rdi] (old)
-                self.emit(&[0x48, 0x8B, 0x07]);
-                let l_retry = self.fresh_label();
-                self.label(&l_retry);
-                // rcx = rax (保存 old)
-                self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-                // rdx = rax & rsi (new)
-                self.emit(&[0x48, 0x89, 0xC2]); // mov rdx, rax
-                self.emit(&[0x48, 0x21, 0xF2]); // and rdx, rsi
-                // lock cmpxchg [rdi], rdx
-                self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x17]);
-                // jne retry (ZF=0 means failed)
-                let l_done = self.fresh_label();
-                self.jmp_rel32(&l_done, JumpKind::Je);
-                self.jmp_rel32(&l_retry, JumpKind::Jmp);
-                self.label(&l_done);
-                // rax = old value (was in rcx, but cmpxchg overwrote rax)
-                // 实际上 cmpxchg 失败时 rax = 当前值, 成功时 rax = old
-                // 成功时 rcx 保存了 old value
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0], 7);
+                self.gen_expr(&args[1], 6);
+                self.emit_cas_loop(sz, |cg| {
+                    cg.emit_and_rsi();
+                });
                 if dst != 1 { self.mov(dst, 1); }
                 true
             }
             "__atomic_fetch_or" => {
                 if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7);
                 self.gen_expr(&args[1], 6);
-                self.emit(&[0x48, 0x8B, 0x07]); // mov rax, [rdi]
-                let l_retry = self.fresh_label();
-                self.label(&l_retry);
-                self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax (old)
-                self.emit(&[0x48, 0x89, 0xC2]); // mov rdx, rax
-                self.emit(&[0x48, 0x09, 0xF2]); // or rdx, rsi
-                self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x17]); // lock cmpxchg [rdi], rdx
-                let l_done = self.fresh_label();
-                self.jmp_rel32(&l_done, JumpKind::Je);
-                self.jmp_rel32(&l_retry, JumpKind::Jmp);
-                self.label(&l_done);
+                self.emit_cas_loop(sz, |cg| {
+                    cg.emit_or_rsi();
+                });
                 if dst != 1 { self.mov(dst, 1); }
                 true
             }
             "__atomic_fetch_xor" => {
                 if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7);
                 self.gen_expr(&args[1], 6);
-                self.emit(&[0x48, 0x8B, 0x07]);
-                let l_retry = self.fresh_label();
-                self.label(&l_retry);
-                self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-                self.emit(&[0x48, 0x89, 0xC2]); // mov rdx, rax
-                self.emit(&[0x48, 0x31, 0xF2]); // xor rdx, rsi
-                self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x17]);
-                let l_done = self.fresh_label();
-                self.jmp_rel32(&l_done, JumpKind::Je);
-                self.jmp_rel32(&l_retry, JumpKind::Jmp);
-                self.label(&l_done);
+                self.emit_cas_loop(sz, |cg| {
+                    cg.emit_xor_rsi();
+                });
                 if dst != 1 { self.mov(dst, 1); }
                 true
             }
@@ -2543,68 +2663,154 @@ impl Codegen {
                     if slot.abs() < 128 { self.emit(&[0x45, slot as i8 as u8]); }
                     else { self.emit(&[0x85]); self.emit(&slot.to_le_bytes()); }
                 }
+                // 解引用 expected 指针, rax = *expected (实际期望值)
+                self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
                 self.gen_expr(&args[2], 6); // rsi = desired
-                // lock cmpxchg [rdi], rsi: F0 48 0F B1 37
-                self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x37]);
+                // lock cmpxchg [rdi], rsi: 按 sz 选尺寸
+                let sz = self.atomic_elem_size(args, 0);
+                if sz == 8 {
+                    self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x37]);
+                } else {
+                    self.emit(&[0xF0, 0x0F, 0xB1, 0x37]);
+                }
                 // ZF=1 成功(rax=old), ZF=0 失败(rax=old)
-                // sete dl (成功标志)
                 self.emit(&[0x0F, 0x94, 0xC2]); // sete dl
-                // 如果成功, 将旧值写入 *expected
-                // jz skip_load_expected
                 let l_skip = self.fresh_label();
                 self.jmp_rel32(&l_skip, JumpKind::Je);
                 // 失败: 将 rax (当前值) 写入 [expected_ptr]
-                // 恢复 expected_ptr
+                // 把 expected 指针加载到 rsi (而非 rax, rax 保留当前值)
                 {
                     let rex = 0x49u8;
                     self.emit(&[rex, 0x8B]);
-                    if slot.abs() < 128 { self.emit(&[0x45, slot as i8 as u8]); }
-                    else { self.emit(&[0x85]); self.emit(&slot.to_le_bytes()); }
+                    if slot.abs() < 128 {
+                        self.emit(&[0x75, slot as i8 as u8]); // modrm: [r13+disp8], reg=rsi
+                    } else {
+                        self.emit(&[0xB5]); // modrm: [r13+disp32], reg=rsi
+                        self.emit(&slot.to_le_bytes());
+                    }
                 }
-                // mov [rsi_expected], rax
-                self.emit(&[0x48, 0x89, 0x06]); // mov [rsi], rax (rsi still has expected ptr from gen_expr? No, rsi was overwritten)
-                // 实际上 rsi 已被 cmpxchg 修改. 需要重新设计.
-                // 简化: 直接将结果 (成功=1, 失败=0) 放入 dst
+                self.emit(&[0x48, 0x89, 0x06]); // mov [rsi], rax
                 self.label(&l_skip);
-                // dst = dl (0 or 1)
                 self.emit(&[0x48, 0x0F, 0xB6, 0xC2]); // movzx rax, dl
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
             "__atomic_store_n" => {
-                // args: (ptr, val, order)
                 if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], 6); // rsi = val
-                // mov [rdi], rsi
-                self.emit(&[0x48, 0x89, 0x37]);
-                // seq_cst 需要 mfence
-                // 简化: 总是发 mfence (对 x86 TSO 影响很小)
+                self.emit_mov_to_mem(sz);   // mov [rdi], rsi (按 sz 选尺寸)
                 self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
                 true
             }
             "__atomic_load_n" => {
-                // args: (ptr, order)
                 if args.len() < 2 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
-                // mov rax, [rdi]
-                self.emit(&[0x48, 0x8B, 0x07]);
-                if dst != 0 { self.mov(dst, 0); }
+                self.emit_mov_from_mem(sz, dst); // mov reg, [rdi] (按 sz 选尺寸)
                 true
             }
             "__atomic_exchange_n" => {
-                // args: (ptr, val, order)
                 if args.len() < 3 { return false; }
+                let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], 6); // rsi = val
-                // lock xchg [rdi], rsi: F0 48 87 37
-                self.emit(&[0xF0, 0x48, 0x87, 0x37]);
-                // rsi = old value
+                // lock xchg [rdi], rsi: 按 sz 选尺寸
+                if sz == 8 {
+                    self.emit(&[0xF0, 0x48, 0x87, 0x37]);
+                } else {
+                    self.emit(&[0xF0, 0x87, 0x37]);
+                }
                 if dst != 6 { self.mov(dst, 6); }
                 true
             }
             _ => false, // 未识别的 __atomic_ 函数, 走普通调用路径
         }
+    }
+
+    // ===== 原子操作辅助指令 =====
+
+    /// lock xadd [rdi], rsi — 按 sz 选 32/64 位
+    fn emit_atomic_xadd(&mut self, sz: usize) {
+        match sz {
+            4 => self.emit(&[0xF0, 0x0F, 0xC1, 0x37]),        // lock xadd [rdi], esi
+            _ => self.emit(&[0xF0, 0x48, 0x0F, 0xC1, 0x37]),  // lock xadd [rdi], rsi
+        }
+    }
+
+    /// neg rsi — 按 sz 选 32/64 位
+    fn emit_neg(&mut self, sz: usize) {
+        match sz {
+            4 => self.emit(&[0xF7, 0xDE]),        // neg esi
+            _ => self.emit(&[0x48, 0xF7, 0xDE]),  // neg rsi
+        }
+    }
+
+    /// mov [rdi], rsi — 按 sz 选操作数尺寸
+    fn emit_mov_to_mem(&mut self, sz: usize) {
+        match sz {
+            1 => self.emit(&[0x40, 0x88, 0x37]),  // mov [rdi], sil
+            2 => self.emit(&[0x66, 0x89, 0x37]),  // mov [rdi], si
+            4 => self.emit(&[0x89, 0x37]),         // mov [rdi], esi
+            _ => self.emit(&[0x48, 0x89, 0x37]),  // mov [rdi], rsi
+        }
+    }
+
+    /// mov reg, [rdi] — 按 sz 选操作数尺寸, 结果放入 dst
+    fn emit_mov_from_mem(&mut self, sz: usize, dst: u8) {
+        match sz {
+            1 => self.emit(&[0x0F, 0xB6, 0x07]),  // movzx eax, byte [rdi]
+            2 => self.emit(&[0x0F, 0xB7, 0x07]),  // movzx eax, word [rdi]
+            4 => self.emit(&[0x8B, 0x07]),         // mov eax, [rdi] (zero-extends)
+            _ => self.emit(&[0x48, 0x8B, 0x07]),  // mov rax, [rdi]
+        }
+        if dst != 0 { self.mov(dst, 0); }
+    }
+
+    /// CAS 循环: 读旧值, 计算新值, lock cmpxchg, 循环直到成功
+    fn emit_cas_loop<F: Fn(&mut Self)>(&mut self, sz: usize, compute_new: F) {
+        if sz == 8 {
+            // 64-bit
+            self.emit(&[0x48, 0x8B, 0x07]); // mov rax, [rdi]
+            let l_retry = self.fresh_label();
+            self.label(&l_retry);
+            self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax (save old)
+            self.emit(&[0x48, 0x89, 0xC2]); // mov rdx, rax
+            compute_new(self);                 // and/or/xor rdx, rsi
+            self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x17]); // lock cmpxchg [rdi], rdx
+            let l_done = self.fresh_label();
+            self.jmp_rel32(&l_done, JumpKind::Je);
+            self.jmp_rel32(&l_retry, JumpKind::Jmp);
+            self.label(&l_done);
+            // After successful cmpxchg: RAX = old value, RCX = old value (from mov rcx,rax before cmpxchg)
+        } else {
+            // 32-bit (zero-extends to 64-bit)
+            self.emit(&[0x8B, 0x07]); // mov eax, [rdi]
+            let l_retry = self.fresh_label();
+            self.label(&l_retry);
+            self.emit(&[0x89, 0xC1]); // mov ecx, eax
+            self.emit(&[0x89, 0xC2]); // mov edx, eax
+            compute_new(self);
+            self.emit(&[0xF0, 0x0F, 0xB1, 0x17]); // lock cmpxchg [rdi], edx
+            let l_done = self.fresh_label();
+            self.jmp_rel32(&l_done, JumpKind::Je);
+            self.jmp_rel32(&l_retry, JumpKind::Jmp);
+            self.label(&l_done);
+        }
+    }
+
+    /// and rdx, rsi (32-bit: 21 F2, 64-bit: 48 21 F2)
+    /// 由 emit_cas_loop 的 compute_new 回调使用
+    fn emit_and_rsi(&mut self) {
+        // 32-bit and (rdx = rdx & rsi)
+        self.emit(&[0x21, 0xF2]); // and edx, esi
+    }
+    fn emit_or_rsi(&mut self) {
+        self.emit(&[0x09, 0xF2]); // or edx, esi
+    }
+    fn emit_xor_rsi(&mut self) {
+        self.emit(&[0x31, 0xF2]); // xor edx, esi
     }
 
 }

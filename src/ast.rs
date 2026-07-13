@@ -170,6 +170,7 @@ pub enum Type {
     Enum(String, Rc<Vec<(String, i64)>>),
     Func(Box<Type>, Vec<Type>),
     Named(String),
+    Atomic(Box<Type>),     // _Atomic(T): 原子类型, 大小/对齐同 T
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +207,7 @@ impl Type {
             Type::Vector(elem, n) => elem.size() * n,
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.size() * 2,
+            Type::Atomic(inner) => inner.size(),
             Type::Struct(_, fields) => {
                 fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0)
             }
@@ -229,6 +231,7 @@ impl Type {
             Type::Vector(_, _) => 16, // SIMD 向量 16 字节对齐
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.align(),
+            Type::Atomic(inner) => inner.align(),
             Type::Struct(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
             Type::Union(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
             _ => 8,
@@ -327,6 +330,26 @@ pub fn int_t()  -> Type { Type::Int }
 pub fn long_t() -> Type { Type::Long }
 pub fn void_t() -> Type { Type::Void }
 pub fn char_t() -> Type { Type::Char }
+
+/// 在字段列表中递归查找字段 (支持匿名 struct/union 透明穿透)
+/// 返回 (找到的 Field, 累计偏移)
+pub fn find_field<'a>(fields: &'a [Field], name: &str) -> Option<(&'a Field, usize)> {
+    // 1. 直接查找
+    if let Some(f) = fields.iter().find(|f| f.name == name) {
+        return Some((f, 0));
+    }
+    // 2. 递归查找匿名 struct/union 字段
+    for f in fields.iter() {
+        if f.name.is_empty() {
+            if let Type::Struct(_, inner) | Type::Union(_, inner) = &f.ty {
+                if let Some((found, inner_off)) = find_field(inner, name) {
+                    return Some((found, f.offset + inner_off));
+                }
+            }
+        }
+    }
+    None
+}
 
 impl Expr {
     pub fn ty(&self) -> Type {

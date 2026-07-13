@@ -121,6 +121,19 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::Ident && self.cur.text == "__extension__" {
             self.advance();
         }
+        // _Static_assert(expr, msg): C11 编译期断言, 静默跳过
+        if self.cur.kind == TokKind::Ident && self.cur.text == "_Static_assert" {
+            self.advance();
+            if self.cur.kind == TokKind::LParen { self.advance(); }
+            let mut depth = 1i32;
+            while depth > 0 && self.cur.kind != TokKind::Eof {
+                if self.cur.kind == TokKind::LParen { depth += 1; }
+                if self.cur.kind == TokKind::RParen { depth -= 1; }
+                self.advance();
+            }
+            if self.cur.kind == TokKind::Semi { self.advance(); }
+            return Some(vec![]);
+        }
         // 跳过声明开头的 __attribute__: GCC 扩展, 如 __attribute__((unused)) static int foo()
         self.skip_attributes();
         // 文件级 asm: 必须在 skip_asm_label 之前, 因为 __asm__("...") 与 asm 标签共享相同 token 模式
@@ -335,14 +348,19 @@ impl<'a> Parser<'a> {
                 | TokKind::KwInline | TokKind::KwRestrict | TokKind::KwRegister | TokKind::KwAuto => { self.advance(); }
                 TokKind::KwAtomic => {
                     self.advance();
-                    // _Atomic(type) 形式: 解析内部类型
+                    // _Atomic(type) 形式: 解析内部类型并包装为 Atomic
                     if self.cur.kind == TokKind::LParen {
                         self.advance();
                         let inner = self.parse_type();
                         if self.cur.kind == TokKind::RParen { self.advance(); }
-                        return Some(self.parse_ptr_suffix(inner?));
+                        let ty = Type::Atomic(Box::new(inner?));
+                        return Some(self.parse_ptr_suffix(ty));
                     }
-                    // 否则作为限定符跳过
+                    // _Atomic 作为类型限定符: 设置 is_atomic 标志
+            // 注意: 不做类型包装, 让后续解析决定具体的类型上下文
+            // 在 parse_ptr_suffix 中也会处理 _Atomic 限定符
+            // 当前简化: 作为 qualifier 跳过, 不生成 Type::Atomic 包装
+            // (详细的类型包装在 _Atomic(type) 语法中已完成)
                 }
                 // __extension__: GNU 扩展, 抑制警告, 直接跳过
                 TokKind::Ident if self.cur.text == "__extension__" => { self.advance(); }

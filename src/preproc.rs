@@ -160,6 +160,74 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("memory_order_release", "3");
     pp.define_builtin("memory_order_acq_rel", "4");
     pp.define_builtin("memory_order_seq_cst", "5");
+    // <stdatomic.h> 内建宏定义 (C11)
+    // 原子类型 (简化: 展开为等价非原子类型, _Atomic 由类型系统处理)
+    pp.define_builtin("atomic_int", "int");
+    pp.define_builtin("atomic_uint", "unsigned int");
+    pp.define_builtin("atomic_long", "long");
+    pp.define_builtin("atomic_ulong", "unsigned long");
+    pp.define_builtin("atomic_llong", "long long");
+    pp.define_builtin("atomic_ullong", "unsigned long long");
+    pp.define_builtin("atomic_short", "short");
+    pp.define_builtin("atomic_ushort", "unsigned short");
+    pp.define_builtin("atomic_char", "char");
+    pp.define_builtin("atomic_schar", "signed char");
+    pp.define_builtin("atomic_uchar", "unsigned char");
+    pp.define_builtin("atomic_bool", "_Bool");
+    pp.define_builtin("atomic_intptr", "long");
+    pp.define_builtin("atomic_uintptr", "unsigned long");
+    pp.define_builtin("atomic_size_t", "unsigned long");
+    pp.define_builtin("atomic_ptrdiff_t", "long");
+    pp.define_builtin("atomic_wchar_t", "int");
+    pp.define_builtin("atomic_float", "float");
+    pp.define_builtin("atomic_double", "double");
+    pp.define_builtin("atomic_long_double", "long double");
+    // kill_dependency: 返回参数
+    pp.macros.insert("kill_dependency".to_string(), MacroDef {
+        params: Some(vec!["y".to_string()]), body: "(y)".to_string(), variadic: false,
+    });
+    // atomic_thread_fence / atomic_signal_fence: 编译屏障 (代码生成忽略)
+    pp.macros.insert("atomic_thread_fence".to_string(), MacroDef {
+        params: Some(vec!["order".to_string()]), body: "".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_signal_fence".to_string(), MacroDef {
+        params: Some(vec!["order".to_string()]), body: "".to_string(), variadic: false,
+    });
+    // 原子操作宏: 映射到 __atomic_* 内建函数
+    pp.macros.insert("atomic_init".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string(), "desired".to_string()]), body: "__atomic_store_n(obj, desired, __ATOMIC_RELAXED)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_store".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string(), "desired".to_string()]), body: "__atomic_store_n(obj, desired, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_load".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string()]), body: "__atomic_load_n(obj, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_exchange".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string(), "desired".to_string()]), body: "__atomic_exchange_n(obj, desired, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_fetch_add".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_add(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_fetch_sub".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_sub(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_fetch_and".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_and(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_fetch_or".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_or(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_fetch_xor".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_xor(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_flag_test_and_set".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string()]), body: "__atomic_exchange_n(obj, 1, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    pp.macros.insert("atomic_flag_clear".to_string(), MacroDef {
+        params: Some(vec!["obj".to_string()]), body: "__atomic_store_n(obj, 0, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
+    });
+    // 内存序别名 (memory_order_xxx 已在上面定义)
     // __attribute__: 不定义为宏, 让 token 透传到解析器处理
     // 解析器会识别 __attribute__ 并处理 vector_size 等属性
     // __has_attribute / __has_builtin / __has_feature (函数式宏, 返回 0)
