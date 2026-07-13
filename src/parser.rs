@@ -123,9 +123,7 @@ impl<'a> Parser<'a> {
         }
         // 跳过声明开头的 __attribute__: GCC 扩展, 如 __attribute__((unused)) static int foo()
         self.skip_attributes();
-        // 跳过声明开头的 __asm__("label")
-        self.skip_asm_label();
-        // 文件级 asm: asm [volatile]("..." [: ...]);
+        // 文件级 asm: 必须在 skip_asm_label 之前, 因为 __asm__("...") 与 asm 标签共享相同 token 模式
         if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "asm") {
             let sp = self.cur.span.clone();
             self.advance();
@@ -144,6 +142,8 @@ impl<'a> Parser<'a> {
                 return None;
             }
         }
+        // 跳过声明开头的 __asm__("label") (在文件级 asm 之后, 避免误吞)
+        self.skip_asm_label();
         // typedef
         if self.cur.kind == TokKind::KwTypedef {
             self.advance();
@@ -195,8 +195,41 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
             let name = self.parse_ident()?;
+            // 函数返回函数指针: type (*name(params1))(params2)
+            if self.cur.kind == TokKind::LParen {
+                self.advance();
+                let inner_params = self.parse_params()?;
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                // 关闭 (*...) 分组
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                // 外层函数参数列表 (params2)
+                if self.cur.kind == TokKind::LParen {
+                    self.advance();
+                    let outer_params = self.parse_params()?;
+                    if !self.expect(TokKind::RParen, "')'") { return None; }
+                    let inner_func = Type::Func(Box::new(ty), inner_params.iter().map(|p| p.ty.clone()).collect());
+                    let ptr_ty = Type::Ptr(Box::new(inner_func));
+                    let outer_func = Type::Func(Box::new(ptr_ty), outer_params.iter().map(|p| p.ty.clone()).collect());
+                    self.skip_attributes();
+                    self.skip_asm_label();
+                    self.locals = self.globals.clone();
+                    self.in_function = true;
+                    for p in &outer_params {
+                        if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
+                    }
+                    let body = if self.cur.kind == TokKind::LBrace {
+                        self.advance();
+                        let b = self.parse_block();
+                        if !self.expect(TokKind::RBrace, "'}'" ) { return None; }
+                        Some(b)
+                    } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
+                    self.skip_attributes();
+                    let sp = name.span.clone();
+                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: false, is_static: false })]);
+                }
+            }
+            // 标准函数指针变量: type (*name)(params)
             if !self.expect(TokKind::RParen, "')'") { return None; }
-            // 函数指针的参数列表
             if self.cur.kind == TokKind::LParen {
                 self.advance();
                 let params = self.parse_params()?;
@@ -265,12 +298,14 @@ impl<'a> Parser<'a> {
             self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
             if !self.in_function { self.globals.insert(name_for_decl.name.clone(), arr_ty.clone()); }
             self.skip_attributes(); // 变量属性
+            self.skip_asm_label(); // asm 标签
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false })])
         } else {
-            // 变量名后可能有 __attribute__((unused)) 等
+            // 变量名后可能有 __attribute__((unused)) 和 __asm__("label") 等
             self.skip_attributes();
+            self.skip_asm_label();
             if self.cur.kind == TokKind::Assign {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
@@ -331,6 +366,13 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
+                // __const__/__volatile__/__restrict__: GNU 扩展拼写, 同 const/volatile/restrict
+                TokKind::Ident if self.cur.text == "__const__" || self.cur.text == "__volatile__"
+                    || self.cur.text == "__restrict__" => { self.advance(); }
+                // 内核属性宏 (__weak, __init 等): 仅在后面是标识符或指针时跳过
+                TokKind::Ident if self.cur.text.starts_with("__")
+                    && !self.typedefs.contains_key(&self.cur.text)
+                    && matches!(self.peek.kind, TokKind::Ident | TokKind::Star) => { self.advance(); }
                 _ => break,
             }
         }
@@ -436,6 +478,13 @@ impl<'a> Parser<'a> {
                 TokKind::KwUnsigned => { is_unsigned = true; self.advance(); }
                 _ => break,
             }
+        }
+        // 消耗类型后的内核属性宏 (仅在后面是标识符或指针时, 避免误吞函数名)
+        while self.cur.kind == TokKind::Ident && self.cur.text.starts_with("__")
+            && !self.typedefs.contains_key(&self.cur.text)
+            && self.cur.text != "__attribute__" && self.cur.text != "__asm__" && self.cur.text != "__asm"
+            && matches!(self.peek.kind, TokKind::Ident | TokKind::Star) {
+            self.advance();
         }
         if base.is_some() || is_unsigned || is_long > 0 || is_short || is_complex {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
@@ -647,7 +696,9 @@ impl<'a> Parser<'a> {
             || (self.cur.kind == TokKind::Ident
                 && (self.typedefs.contains_key(&self.cur.text)
                     || self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof"
-                    || self.cur.text == "__extension__"))
+                    || self.cur.text == "__extension__"
+                    // 未知 ident 作类型: 降级在 parse_type() 处理
+                    || matches!(self.peek.kind, TokKind::Ident | TokKind::Star)))
     }
 
     fn is_peek_type_start(&self) -> bool {

@@ -37,6 +37,8 @@ pub struct Preprocessor {
     diag_state: DiagState,
     /// 全局类型注册表: 头文件缓存目录
     cache_dir: Option<PathBuf>,
+    /// 跨行注释状态: true = 当前在多行注释 /* ... 中
+    in_comment: bool,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -91,6 +93,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         diag_stack: vec![],
         diag_state: DiagState::default(),
         cache_dir: Preprocessor::init_cache_dir(),
+        in_comment: false,
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -269,7 +272,7 @@ impl Preprocessor {
                 let expanded = self.expand_macros(line);
                 // 去除注释 (替换为空格): C 标准翻译阶段 3 要求, 预处理输出不含注释
                 // 第一性原理: 注释在阶段 3 已移除, 不应出现在阶段 4 输出中
-                let stripped = Self::strip_comments(&expanded);
+                let stripped = self.strip_comments_line(&expanded);
                 // 跳过空行: C 语言中空行无语义, 只增加预处理输出体积
                 // 第一性原理: 移除所有空行不影响编译结果, 但可减少 ~36% 输出
                 if !stripped.trim().is_empty() {
@@ -283,8 +286,8 @@ impl Preprocessor {
         self.file = saved_file;
     }
 
-    /// 去除 C 风格注释 /* ... */ 和 // ...，替换为空格
-    fn strip_comments(text: &str) -> String {
+    /// 去除单行中的 C 风格注释 (跨行注释由 in_comment 状态跟踪)
+    fn strip_comments_line(&mut self, text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
@@ -312,15 +315,81 @@ impl Preprocessor {
                 if i < len { out.push('\''); i += 1; }
                 continue;
             }
-            // /* ... */ 注释
+            // /* ... */ 注释 (支持跨行)
+            if i + 1 < len && chars[i] == '/' && chars[i+1] == '*' {
+                out.push(' ');
+                i += 2;
+                self.in_comment = true;
+                while i + 1 < len {
+                    if chars[i] == '*' && chars[i+1] == '/' {
+                        i += 2;
+                        self.in_comment = false;
+                        break;
+                    }
+                    i += 1;
+                }
+                if self.in_comment {
+                    // 跨行: 当前行剩余部分全部忽略
+                    break;
+                }
+                continue;
+            }
+            // 在跨行注释中: 寻找 */
+            if self.in_comment {
+                if chars[i] == '*' && i + 1 < len && chars[i+1] == '/' {
+                    i += 2;
+                    self.in_comment = false;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            // // ... 注释
+            if i + 1 < len && chars[i] == '/' && chars[i+1] == '/' {
+                out.push(' ');
+                while i < len && chars[i] != '\n' { i += 1; }
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// 去除单行文本中的注释 (静态版本, 用于指令/表达式处理)
+    fn strip_comments(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        while i < len {
+            if chars[i] == '"' {
+                out.push('"');
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
+                    out.push(chars[i]); i += 1;
+                }
+                if i < len { out.push('"'); i += 1; }
+                continue;
+            }
+            if chars[i] == '\'' {
+                out.push('\'');
+                i += 1;
+                while i < len && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
+                    out.push(chars[i]); i += 1;
+                }
+                if i < len { out.push('\''); i += 1; }
+                continue;
+            }
             if i + 1 < len && chars[i] == '/' && chars[i+1] == '*' {
                 out.push(' ');
                 i += 2;
                 while i + 1 < len && !(chars[i] == '*' && chars[i+1] == '/') { i += 1; }
-                if i + 1 < len { i += 2; } // skip */
+                if i + 1 < len { i += 2; }
                 continue;
             }
-            // // ... 注释
             if i + 1 < len && chars[i] == '/' && chars[i+1] == '/' {
                 out.push(' ');
                 while i < len && chars[i] != '\n' { i += 1; }
