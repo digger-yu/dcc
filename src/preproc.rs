@@ -629,15 +629,21 @@ impl Preprocessor {
                         self.out.push_str(&format!("/* #include \"{}\" */\n", path));
                         let saved_base = self.base_dir.clone();
                         let saved_out_len = self.out.len();
+                        // 记录当前宏表快照, 用于后续提取该头文件新增的宏
+                        let saved_macros: std::collections::HashSet<String> = self.macros.keys().cloned().collect();
                         self.base_dir = full_path.parent()
                             .unwrap_or(Path::new(".")).to_path_buf();
                         self.process_text(&text, &full_path.to_string_lossy());
                         self.base_dir = saved_base;
 
-                        // 保存到缓存
+                        // 保存到缓存 (仅保存该头文件新增的宏, 避免冗余和状态污染)
                         if let Some(ref cp) = cache_path {
                             let new_output = self.out[saved_out_len..].to_string();
-                            self.save_to_cache(cp, &new_output, &self.macros);
+                            let header_macros: HashMap<String, MacroDef> = self.macros.iter()
+                                .filter(|(k, _)| !saved_macros.contains(*k))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            self.save_to_cache(cp, &new_output, &header_macros);
                         }
                     }
                     Err(e) => {
