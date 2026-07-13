@@ -13,7 +13,7 @@ pub struct Parser<'a> {
     diags: Vec<Diagnostic>, finished: bool,
     typedefs: HashMap<String, Type>,
     struct_defs: HashMap<String, (Rc<Vec<Field>>, bool)>,
-    enum_defs: HashMap<String, Vec<(String, i64)>>,
+    enum_defs: HashMap<String, Rc<Vec<(String, i64)>>>,
     enum_consts: HashMap<String, i64>,
     locals: HashMap<String, Type>, // 变量名 → 类型 (函数内会清除)
     globals: HashMap<String, Type>, // 全局变量名 → 类型 (永不清除)
@@ -387,13 +387,14 @@ impl<'a> Parser<'a> {
                 self.advance(); let vs = self.parse_enum_body();
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 let vals: Vec<(String, i64)> = vs.iter().map(|(id, v)| (id.name.clone(), v.unwrap_or(0))).collect();
-                self.enum_defs.insert(nm.clone(), vals.clone());
+                let vals_rc = Rc::new(vals);
+                self.enum_defs.insert(nm.clone(), Rc::clone(&vals_rc));
                 let mut nv = 0i64;
                 for (id, v) in &vs { let val = v.unwrap_or(nv); self.enum_consts.insert(id.name.clone(), val); nv = val + 1; }
-                return Some(self.parse_ptr_suffix(Type::Enum(nm, vals)));
+                return Some(self.parse_ptr_suffix(Type::Enum(nm, vals_rc)));
             } else if !nm.is_empty() {
-                if let Some(v) = self.enum_defs.get(&nm) { return Some(self.parse_ptr_suffix(Type::Enum(nm, v.clone()))); }
-                return Some(self.parse_ptr_suffix(Type::Enum(nm, vec![])));
+                if let Some(v) = self.enum_defs.get(&nm) { return Some(self.parse_ptr_suffix(Type::Enum(nm, Rc::clone(v)))); }
+                return Some(self.parse_ptr_suffix(Type::Enum(nm, Rc::new(vec![]))));
             }
         }
         // typedef 引用

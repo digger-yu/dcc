@@ -167,7 +167,7 @@ pub enum Type {
     Vector(Box<Type>, usize),  // SIMD 向量: (元素类型, 元素个数)
     Struct(String, Rc<Vec<Field>>),
     Union(String, Rc<Vec<Field>>),
-    Enum(String, Vec<(String, i64)>),
+    Enum(String, Rc<Vec<(String, i64)>>),
     Func(Box<Type>, Vec<Type>),
     Named(String),
 }

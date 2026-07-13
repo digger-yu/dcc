@@ -155,7 +155,7 @@ impl Codegen {
                 self.globals.insert(v.name.name.clone(), GlobalVar { offset, size: sz, ty: v.ty.clone(), init: init_data });
             }
         }
-        let rodata_size = self.rodata.len();
+        let _rodata_size = self.rodata.len();
         let _main = prog.decls.iter().find_map(|d| match d { Decl::Func(f) if f.name.name == "main" => Some(f), _ => None }).expect("no main()");
         self.label("_start");
         self.emit(&[0x49, 0x89, 0xe4]); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
