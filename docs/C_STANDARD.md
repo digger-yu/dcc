@@ -21,37 +21,41 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 - `for (int i = 0; ...)` 声明
 - `inline` 关键字
 
-## C11
+## C11 (按需实装)
 
-- `_Generic`
-- `_Static_assert`
-- `_Atomic` (基础实装)
-- `_Thread_local`
+- `_Static_assert` (解析器静默跳过)
+- `_Atomic` (基础类型表支持)
 - 匿名 struct/union
-- `<threads.h>`, `<stdatomic.h>`
+- `<stdatomic.h>` 内建宏定义
+
+> 注: `_Generic` (泛型选择) 和 `_Thread_local` 尚未实装。
 
 ## C17
 
 - C11 修正版, DCC 完全复用 C11 路径
 
-## C23
+## C23 (部分实装)
 
-- `typeof` (GCC 扩展标准化)
-- `constexpr`
-- `[[attributes]]`
-- `_BitInt(N)`
-- 数字分隔符 `1'000'000`
-- 改进的 #embed
+- `typeof` (GCC 扩展标准化) ✅
+- `constexpr` — ❌ 未实装
+- `[[attributes]]` — ❌ 未实装
+- `_BitInt(N)` — ❌ 未实装
+- 数字分隔符 `1'000'000` — ❌ 未实装
+- `#embed` — ❌ 未实装
 
 ## GNU 扩展
 
-- `__attribute__((...))`
-- `__asm__ __volatile__`
-- `__builtin_*` (offsetof, va_list, expect, constant_p)
+- `__attribute__((...))` 多位置属性
+- `__asm__ __volatile__` 带约束内联汇编
+- `__builtin_*` (expect, constant_p, memcpy, memset, abs, unreachable, trap, clz, ctz, popcount, strcpy, strlen 等)
 - 语句表达式 `({...})`
-- 零长度数组
-- `__VA_ARGS__`
-- 复合语句宏
+- 零长度数组 / 柔性数组成员
+- `__VA_ARGS__` 可变参数宏
+- `__extension__` 解析器直接跳过
+- `_Alignof` 对齐查询
+- `__complex__` / `_Complex` 复数类型
+- `_Decimal32/64/128` 十进制浮点
+- `_Fract` / `_Accum` 定点数类型
 
 ## 重要选项
 

@@ -20,12 +20,12 @@ git push origin main
 
 **两个 workflow 会自动跑**:
 - `dcc-e2e` (本 commit 新增): 5-8 分钟, hello/arith/control/call 4 个 e2e + 错误诊断
-- `DCC Kernel Compilation Benchmark` (M0 已写): 60+ 分钟, 编 Linux 内核 (M5 之前 GCC baseline 有意义, DCC 还在跑不动)
+- `DCC Kernel Compilation Benchmark`: 60+ 分钟, 编 Linux 内核 (M6 已完成, 内核基本构造可解析+代码生成)
 
 ## 3. 第一性原理: 跑哪一个先看
 
 `dcc-e2e` 是**核心验证**——5 分钟告诉你 dcc 能不能编出能跑的二进制。
-内核 bench 在 DCC 还不能编真实代码时**没有意义**——会被 DCC 自身的 TODO panic 阻塞。
+内核 bench 在 DCC 完成 M6 后已可运行, 但仍有大量 TODO panic 待攻克。
 
 ## 4. e2e 失败怎么办
 
