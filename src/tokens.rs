@@ -132,7 +132,7 @@ impl<'a> Lexer<'a> {
                 "sizeof" => TokKind::KwSizeof, "_Alignof" => TokKind::KwAlignof,
                 "_Atomic" => TokKind::KwAtomic,
                 "_Fract" => TokKind::KwFract, "_Accum" => TokKind::KwAccum,
-                "_Complex" => TokKind::KwComplex,
+                "_Complex" | "__complex__" | "__complex" => TokKind::KwComplex,
                 "_Decimal32" => TokKind::KwDecimal32,
                 "_Decimal64" => TokKind::KwDecimal64,
                 "_Decimal128" => TokKind::KwDecimal128,

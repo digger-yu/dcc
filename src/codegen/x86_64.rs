@@ -465,8 +465,9 @@ impl Codegen {
                                         // struct/array 初始化: 整体拷贝
                                         let dst_ty = v.ty.clone();
                                         let dst_name = v.name.name.clone();
-                                        // 复用 gen_aggregate_assign 逻辑
                                         self.gen_aggregate_assign(&dst_name, &dst_ty, init);
+                                    } else if let Type::Complex(inner) = &v.ty {
+                                        self.gen_complex_init(&v.name.name, inner, init);
                                     } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
                                         self.gen_expr(init, 0);
                                         self.gen_float_store(&v.name.name, &v.ty);
@@ -529,7 +530,7 @@ impl Codegen {
                 if let Some(e) = val {
                     let ret_ty = e.ty();
                     let ret_sz = ret_ty.size();
-                    let is_agg_ret = matches!(&ret_ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_)))
+                    let is_agg_ret = matches!(&ret_ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_)) | Type::Complex(_))
                         && ret_sz > 8;
                     if is_agg_ret {
                         // struct 返回: 加载到 rax[:rdx]
@@ -607,6 +608,8 @@ impl Codegen {
                                     let dst_ty = v.ty.clone();
                                     let dst_name = v.name.name.clone();
                                     self.gen_aggregate_assign(&dst_name, &dst_ty, init);
+                                } else if let Type::Complex(inner) = &v.ty {
+                                    self.gen_complex_init(&v.name.name, inner, init);
                                 } else {
                                     self.gen_expr(init, 0);
                                     self.mov_to_stack(0, &v.name.name);
@@ -828,6 +831,14 @@ impl Codegen {
                     if is_aggregate {
                         // struct/array 整体赋值: 逐块拷贝
                         self.gen_aggregate_assign(&name.name, l_ty, r);
+                    } else if matches!(l_ty, Type::Complex(_)) {
+                        if sz > 8 {
+                            // Complex > 8B: use aggregate assign
+                            self.gen_aggregate_assign(&name.name, l_ty, r);
+                        } else {
+                            self.gen_expr_decay(r, dst);
+                            self.mov_to_stack(dst, &name.name);
+                        }
                     } else {
                         self.gen_expr_decay(r, dst); // 数组衰减: int *p = arr
                         if self.globals.contains_key(&name.name) {
@@ -2035,21 +2046,69 @@ impl Codegen {
         let is_float = matches!(ty, Type::Float);
         let is_ld = matches!(ty, Type::LongDouble);
         if is_ld {
-            // long double: movq xmm0, [r13+off] (只加载低 8 字节)
-            // F3 0F 7E = movq mem→xmm (load); 注意 66 0F 7E = movq xmm→mem (store)
             self.emit(&[0xF3, 0x49, 0x0F, 0x7E]);
             if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
             else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
         } else if is_float {
-            // float: movss xmm0, [r13+off] → F3 49 0F 10 45 off
             self.emit(&[0xF3, 0x49, 0x0F, 0x10]);
             if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
             else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
         } else {
-            // double: movsd xmm0, [r13+off] → F2 49 0F 10 45 off
             self.emit(&[0xF2, 0x49, 0x0F, 0x10]);
             if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
             else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+        }
+    }
+
+    // 浮点值按偏移存储: xmm0 → [r13+off]
+    fn gen_float_store_at(&mut self, off: i32, ty: &Type) {
+        let is_float = matches!(ty, Type::Float);
+        let is_ld = matches!(ty, Type::LongDouble);
+        if is_ld {
+            self.emit(&[0x66, 0x49, 0x0F, 0xD6]);
+            if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
+            else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+            let off2 = off - 8;
+            self.emit(&[0x49, 0xC7, 0x45]);
+            if off2.abs() < 128 { self.emit(&[off2 as i8 as u8]); }
+            else { self.emit(&[0x85]); self.emit(&off2.to_le_bytes()); }
+            self.emit(&0u32.to_le_bytes());
+        } else if is_float {
+            self.emit(&[0xF3, 0x49, 0x0F, 0x11]);
+            if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
+            else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+        } else {
+            self.emit(&[0xF2, 0x49, 0x0F, 0x11]);
+            if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
+            else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+        }
+    }
+
+    // Complex 变量标量初始化: 存实部、虚部清零
+    fn gen_complex_init(&mut self, name: &str, inner: &Type, init: &Expr) {
+        let off = self.var_offset(name);
+        let inner_sz = inner.size() as i32;
+        self.gen_expr(init, 0);
+        // 存实部
+        if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
+            self.gen_float_store_at(off, inner);
+        } else {
+            let sz = inner.size();
+            self.store_stack(0, off);
+            if sz > 8 {
+                self.store_stack(2, off + 8);
+            }
+        }
+        // 虚部清零: LongDouble 实部占 [off-8, off+8), 虚部应在 [off-8-inner_sz, off-8)
+        let imag_base = if matches!(inner, Type::LongDouble) {
+            off - 8 - inner_sz  // LongDouble 向后占 16B
+        } else {
+            off + inner_sz
+        };
+        let imag_bytes = inner_sz as usize;
+        for o in (0..imag_bytes).step_by(8) {
+            self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax
+            self.store_stack(0, imag_base + o as i32);
         }
     }
 

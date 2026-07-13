@@ -13,7 +13,7 @@
 | **M6** | Linux 内核 benchmark | 🔄 进行中 | init/main.c 解析+代码生成通过; -MD/-MF 依赖文件生成支持; 文件级/函数内 asm volatile 带约束支持; COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造; 未知 typedef 降级为 int; 预处理输出注释/空行剥离 |
 | **M7** | ARM64 + RISC-V | ⏳ | hello.c 交叉编译,运行 |
 | **M8** | C11/17/23 + GNU 扩展 | ✅ 完成 | 位域/原子/SIMD/定点数/柔性数组/内存序 后端已实现+Linux验证; C标准全家族别名支持(c89/c90/c99/c9x/c11/c1x/c17/c18/c23/c2x+gnu变体+iso9899) |
-| **M9** | 精准错误诊断 | ⏳ | 错误精确到字符+列+建议 |
+| **M9** | 精准错误诊断 | ✅ 完成 | 错误精确到字符+列+修复建议, GitHub-style 行+指针+下划线格式; 支持 E0001-E0006+W0001 (parser), E0100-E0101 (driver), E0200-E0206+W0200 (preprocessor) |
 | **M10** | 跨平台交叉编译 | ⏳ | riscv64-linux-gnu-dcc 命名 |
 
 ## 后端能力矩阵 (M8 细分)
@@ -41,7 +41,7 @@
 | struct 整体赋值 | P1 | ✅ 聚合初始化 | ✅ memcpy 整体拷贝 | ✅ Linux 验证 |
 | struct 传参/返回 | P2 | ✅ 函数参数/返回值 | ✅ SysV ABI 寄存器拆分 (<=16B) | ✅ Linux 验证 |
 | long double 16B | P3 | ✅ sizeof=16 | ✅ 16字节存储 + SSE 运算 | ✅ Linux 验证 |
-| _Complex 复数 | P3 | ✅ _Complex float/double | ✅ sizeof+变量声明 | ✅ Linux 验证 |
+| _Complex 复数 | P3 | ✅ _Complex float/double/long double + __complex__/__complex | ✅ sizeof+变量声明+初始化+赋值+返回; 实部存储+虚部清零; >8B 聚合拷贝 | ✅ Linux 验证, 本地测试套 |
 | _Decimal 十进制 | P3 | ✅ _Decimal32/64/128 | ✅ 映射到等效 IEEE 浮点 | ✅ Linux 验证 |
 
 ### 第一性原理设计决策
@@ -66,7 +66,7 @@
 - **-MD/-MF 依赖文件**: 内核构建系统需要编译器生成 .d 依赖文件, 格式为目标:源; 支持 -MD(启用)/-MF(指定路径)/-MT-MQ(目标名), 无 -MF 时默认输出 <stem>.d
 - **struct 传参**: SysV ABI 简化版, <=8B 单寄存器, <=16B 拆双寄存器(rax:rdx), >16B 隐藏指针; 被调端从寄存器恢复到变量槽
 - **long double 16B**: 占 16 字节栈空间(低 8 字节 double + 高 8 字节零), 运算用 SSE double 近似, movq 加载低 8 字节
-- **_Complex**: Type::Complex(Box<Type>) 包装内部类型, size=inner*2, 仅支持解析+sizeof+变量声明, 不支持复数运算
+- **_Complex**: Type::Complex(Box<Type>) 包装内部类型, size=inner*2, 支持 __complex__/__complex/_Complex 关键字, 代码生成实部存储+虚部清零, >8B 使用聚合拷贝路径; 标量初始化复杂类型时虚部自动清零
 - **_Decimal**: 解析期直接映射到等效类型 (_Decimal32→float, _Decimal64→double, _Decimal128→long double), 无需独立 codegen
 - **全局类型注册表**: 头文件缓存到 ~/.dcc/cache/, 键=文件路径哈希+内容哈希(FNV-1a), 值=预处理输出+宏状态, 内容变化时自动失效
 
