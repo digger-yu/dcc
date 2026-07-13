@@ -66,6 +66,23 @@ impl<'a> Parser<'a> {
             }
         }
     }
+    /// 剥离 __asm__("label"): GNU asm 标签, 不影响代码生成
+    fn skip_asm_label(&mut self) {
+        if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "__asm") {
+            if self.peek.kind == TokKind::LParen {
+                let saved_cur = self.cur.clone();
+                self.advance(); // __asm__
+                self.advance(); // (
+                if self.cur.kind == TokKind::StringLit {
+                    self.advance(); // "label"
+                    if self.cur.kind == TokKind::RParen { self.advance(); } // )
+                } else {
+                    // 不是 asm 标签, 恢复
+                    self.cur = saved_cur;
+                }
+            }
+        }
+    }
 
     pub fn program(&mut self) -> (Program, Vec<Diagnostic>) {
         let mut decls = vec![];
@@ -84,10 +101,33 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::Ident && self.cur.text == "__extension__" {
             self.advance();
         }
+        // 跳过声明开头的 __attribute__: GCC 扩展, 如 __attribute__((unused)) static int foo()
+        self.skip_attributes();
+        // 跳过声明开头的 __asm__("label")
+        self.skip_asm_label();
         // typedef
         if self.cur.kind == TokKind::KwTypedef {
             self.advance();
             let ty = self.parse_type()?;
+            // 函数指针 typedef: typedef ret_type (*name)(params)
+            if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                self.advance(); // (
+                self.advance(); // *
+                while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) { self.advance(); }
+                let name = self.parse_ident()?;
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                if self.cur.kind == TokKind::LParen {
+                    self.advance();
+                    let params = self.parse_params()?;
+                    if !self.expect(TokKind::RParen, "')'") { return None; }
+                    let func_ty = Type::Func(Box::new(ty), params.iter().map(|p| p.ty.clone()).collect());
+                    let ptr_ty = Type::Ptr(Box::new(func_ty));
+                    let sp = name.span.clone();
+                    if !self.expect(TokKind::Semi, "';'") { return None; }
+                    self.typedefs.insert(name.name.clone(), ptr_ty.clone());
+                    return Some(vec![Decl::Typedef { name, ty: ptr_ty, span: sp }]);
+                }
+            }
             let name = self.parse_ident()?;
             let sp = name.span.clone();
             let ty = self.try_parse_vector_attr(ty);
@@ -106,6 +146,47 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_var_or_func(&mut self, ty: Type) -> Option<Vec<Decl>> {
+        // 函数指针声明/定义: type (*name)(params)
+        // 第一性原理: (* 表示这不是普通变量名, 而是函数指针声明
+        if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+            self.advance(); // (
+            self.advance(); // *
+            // 可选的 const/volatile/restrict 限定符
+            while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) {
+                self.advance();
+            }
+            let name = self.parse_ident()?;
+            if !self.expect(TokKind::RParen, "')'") { return None; }
+            // 函数指针的参数列表
+            if self.cur.kind == TokKind::LParen {
+                self.advance();
+                let params = self.parse_params()?;
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                let func_ty = Type::Func(Box::new(ty.clone()), params.iter().map(|p| p.ty.clone()).collect());
+                let ptr_ty = Type::Ptr(Box::new(func_ty));
+                self.skip_attributes();
+                self.skip_asm_label();
+                // 注册到变量表
+                self.locals.insert(name.name.clone(), ptr_ty.clone());
+                if !self.in_function { self.globals.insert(name.name.clone(), ptr_ty.clone()); }
+                // 可选初始化器
+                let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
+                if !self.expect(TokKind::Semi, "';'") { return None; }
+                let sp = name.span.clone();
+                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: false, is_static: false })]);
+            }
+            // 不是函数指针, 只是带括号的指针变量 (罕见)
+            self.skip_attributes();
+            self.skip_asm_label();
+            let ptr_ty = Type::Ptr(Box::new(ty));
+            let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
+            if !self.expect(TokKind::Semi, "';'") { return None; }
+            let sp = name.span.clone();
+            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: false, is_static: false })]);
+        }
+        // 跳过变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
+        self.skip_attributes();
+        self.skip_asm_label();
         let name = self.parse_ident()?;
         let sp = name.span.clone();
         let name_for_decl = name.clone();
@@ -113,6 +194,9 @@ impl<'a> Parser<'a> {
             self.advance();
             let params = self.parse_params()?;
             if !self.expect(TokKind::RParen, "')'") { return None; }
+            // 函数声明后: 跳过 __attribute__ 和 __asm__ 标签
+            self.skip_attributes();
+            self.skip_asm_label();
             // 进入函数: 从全局变量表恢复, 清除局部变量
             self.locals = self.globals.clone();
             self.in_function = true;
@@ -125,7 +209,7 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 Some(b)
             } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
-            // 函数声明后可能有 __attribute__((noreturn/unused/...))
+            // 函数声明后可能还有额外的 __attribute__
             self.skip_attributes();
             Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: false, is_static: false })])
         } else if self.cur.kind == TokKind::LBracket {
@@ -170,7 +254,7 @@ impl<'a> Parser<'a> {
     fn parse_type(&mut self) -> Option<Type> {
         let mut is_unsigned = false; let mut is_long = 0u8; let mut is_short = false;
         let mut base: Option<Type> = None;
-        // 跳过存储类/const/volatile/_Atomic/__extension__
+        // 跳过存储类/const/volatile/_Atomic/__extension__/__attribute__
         loop {
             match self.cur.kind {
                 TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
@@ -188,6 +272,10 @@ impl<'a> Parser<'a> {
                 }
                 // __extension__: GNU 扩展, 抑制警告, 直接跳过
                 TokKind::Ident if self.cur.text == "__extension__" => { self.advance(); }
+                // __attribute__: 在类型限定符之间出现, 跳过
+                TokKind::Ident if self.cur.text == "__attribute__" => { self.skip_attributes(); }
+                // __asm__("label"): 在类型限定符之间出现, 跳过
+                TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" => { self.skip_asm_label(); }
                 // typeof(expr/type): GNU 扩展, 推导类型
                 TokKind::Ident if self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof" => {
                     self.advance();
@@ -272,7 +360,12 @@ impl<'a> Parser<'a> {
         }
         // typedef 引用
         if self.cur.kind == TokKind::Ident {
-            if let Some(ty) = self.typedefs.get(&self.cur.text).cloned() { self.advance(); return Some(self.parse_ptr_suffix(ty)); }
+            if let Some(ty) = self.typedefs.get(&self.cur.text).cloned() {
+                self.advance();
+                // 跳过 typedef 名后的 __attribute__: 如 asmlinkage = __attribute__((aligned(4)))
+                self.skip_attributes();
+                return Some(self.parse_ptr_suffix(ty));
+            }
         }
         // 基本类型
         let mut is_complex = false;
@@ -325,6 +418,7 @@ impl<'a> Parser<'a> {
             (_, false, 0, false) => Type::Int,
             (_, false, 1, _) => Type::Long,
             (_, false, _, _) => Type::LongLong,
+            // 仅有修饰符无基类型时, 默认基类型为 int (C 标准隐式 int 规则)
             _ => Type::Int,
         }
     }
@@ -428,6 +522,45 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::RParen { return Some(ps); }
         if self.cur.kind == TokKind::Ellipsis { self.advance(); return Some(ps); }
         loop {
+            // 函数指针参数: ret_type (*name)(params)
+            // 第一性原理: 当类型后跟 (* 时, 这是函数指针参数而非普通参数
+            if self.is_type_start() && self.peek.kind == TokKind::LParen {
+                // 检查是否是函数指针参数模式: type (* ...)
+                let saved_cur = self.cur.clone();
+                let saved_peek = self.peek.clone();
+                if let Some(ret_ty) = self.parse_type() {
+                    if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                        self.advance(); // (
+                        self.advance(); // *
+                        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) { self.advance(); }
+                        let nm = if self.cur.kind == TokKind::Ident {
+                            let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() };
+                            self.advance(); Some(id)
+                        } else { None };
+                        if !self.expect(TokKind::RParen, "')'") { return None; }
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            let inner_params = self.parse_params()?;
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            let func_ty = Type::Func(Box::new(ret_ty), inner_params.iter().map(|p| p.ty.clone()).collect());
+                            let ptr_ty = Type::Ptr(Box::new(func_ty));
+                            ps.push(Param { ty: ptr_ty, name: nm, span: saved_cur.span.clone() });
+                            if self.cur.kind == TokKind::Comma { self.advance();
+                                if self.cur.kind == TokKind::Ellipsis { self.advance(); break; }
+                                continue;
+                            }
+                            if self.cur.kind == TokKind::Ellipsis { self.advance(); }
+                            break;
+                        }
+                    }
+                    // 不是函数指针参数, 恢复并走普通路径
+                    self.cur = saved_cur;
+                    self.peek = saved_peek;
+                } else {
+                    self.cur = saved_cur;
+                    self.peek = saved_peek;
+                }
+            }
             let ty = self.parse_type()?;
             let nm = if self.cur.kind == TokKind::Ident { let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id) } else { None };
             let ty = match ty { Type::Array(e, _) => Type::Ptr(e), o => o };
@@ -746,9 +879,66 @@ impl<'a> Parser<'a> {
             }
             TokKind::LParen if self.is_cast() => {
                 self.advance(); let ty = self.parse_type()?;
+                // 函数指针强制转换: (type (*)(params))expr
+                // 解析完类型后, 检查是否是 (* 模式
+                if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                    self.advance(); // (
+                    self.advance(); // *
+                    while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) { self.advance(); }
+                    if !self.expect(TokKind::RParen, "')'") { return None; }
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        let _params = self.parse_params()?;
+                        if !self.expect(TokKind::RParen, "')'") { return None; }
+                    }
+                    let ty = Type::Ptr(Box::new(ty));
+                    if !self.expect(TokKind::RParen, "')'") { return None; }
+                    let e = self.parse_unary()?;
+                    return Some(Expr::Cast { ty, e: Box::new(e), span: sp });
+                }
                 if !self.expect(TokKind::RParen, "')'") { return None; }
                 let e = self.parse_unary()?;
                 Some(Expr::Cast { ty, e: Box::new(e), span: sp })
+            }
+            // 函数指针强制转换: 当 is_cast() 未检测到时, 尝试解析 (type (*...))expr
+            TokKind::LParen if matches!(self.peek.kind,
+                TokKind::KwInt | TokKind::KwChar | TokKind::KwLong | TokKind::KwVoid
+                | TokKind::KwShort | TokKind::KwUnsigned | TokKind::KwSigned
+                | TokKind::KwFloat | TokKind::KwDouble | TokKind::KwStruct
+                | TokKind::KwUnion | TokKind::KwEnum) => {
+                // 推测性解析: 保存状态, 尝试解析为函数指针cast
+                let saved_cur = self.cur.clone();
+                let saved_peek = self.peek.clone();
+                self.advance(); // (
+                if let Some(ty) = self.parse_type() {
+                    if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                        self.advance(); // (
+                        self.advance(); // *
+                        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) { self.advance(); }
+                        if self.cur.kind == TokKind::RParen {
+                            self.advance(); // )
+                            if self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                let _params = self.parse_params();
+                                if self.cur.kind == TokKind::RParen {
+                                    self.advance();
+                                    if self.cur.kind == TokKind::RParen {
+                                        self.advance();
+                                        let ty = Type::Ptr(Box::new(ty));
+                                        let e = self.parse_unary()?;
+                                        return Some(Expr::Cast { ty, e: Box::new(e), span: sp });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 不是函数指针cast, 恢复并作为普通括号表达式
+                self.cur = saved_cur;
+                self.peek = saved_peek;
+                let e = self.parse_expr()?;
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                Some(e)
             }
             _ => self.parse_postfix(),
         }

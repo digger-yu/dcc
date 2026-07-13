@@ -59,6 +59,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return Ok(());
     }
 
+    // -fsyntax-only: 解析成功后直接返回, 不生成代码
+    if cfg.syntax_only {
+        return Ok(());
+    }
+
     // codegen
     let target = Target::resolve(&cfg.target);
     let bytes = codegen::emit(&prog, &target, cfg.relocatable);

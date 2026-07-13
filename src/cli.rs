@@ -22,6 +22,7 @@ pub struct Config {
     pub relocatable: bool,  // -c: 输出可重定位 .o
     pub preprocess_only: bool, // -E: 只做预处理
     pub force_includes: Vec<String>, // -include file: 强制包含文件
+    pub syntax_only: bool, // -fsyntax-only: 只做语法检查, 不生成代码
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +150,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut relocatable = false;
     let mut preprocess_only = false;
     let mut force_includes: Vec<String> = vec![];
+    let mut syntax_only = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -237,6 +239,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 }
             }
             "-fno-builtin"   => {}
+            "-fsyntax-only"  => { syntax_only = true; }
             // -Wa,* : 传递给汇编器的选项
             a if a.starts_with("-Wa,") => {
                 let as_opts = &a[4..];
@@ -355,10 +358,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             let stem = input.file_stem().unwrap_or_default().to_string_lossy();
             output = PathBuf::from(format!("{}.o", stem));
         }
-        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes })
+        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only })
     } else {
         let input = input.unwrap_or_else(|| PathBuf::from("-"));
-        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes })
+        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only })
     }
 }
 

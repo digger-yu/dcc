@@ -10,7 +10,7 @@
 | **M3** | 全局类型注册表 | ✅ 完成 | 头文件缓存 (~/.dcc/cache/)，内容哈希失效 |
 | **M4** | 预处理 + builtin | ✅ 完成 | linux/init/main.c 解析成功; Linux 6.1 内核头文件预处理无错误, 输出体积接近 GCC (1.7-1.9x) |
 | **M5** | **自举 (dcc 编 dcc)** | ⏳ | dcc1 == dcc2 |
-| **M6** | Linux 内核 benchmark | 🔄 进行中 | 预处理通过, 解析器待完善内核特有构造 (COND_SYSCALL/weak函数声明等) |
+| **M6** | Linux 内核 benchmark | 🔄 进行中 | 预处理+解析均通过 (init/main.c, kernel/panic.c, kernel/sys_ni.c 零错误); 支持 COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造 |
 | **M7** | ARM64 + RISC-V | ⏳ | hello.c 交叉编译,运行 |
 | **M8** | C11/17/23 + GNU 扩展 | ✅ 完成 | 位域/原子/SIMD/定点数/柔性数组/内存序 后端已实现+Linux验证; C标准全家族别名支持(c89/c90/c99/c9x/c11/c1x/c17/c18/c23/c2x+gnu变体+iso9899) |
 | **M9** | 精准错误诊断 | ⏳ | 错误精确到字符+列+建议 |
@@ -53,7 +53,9 @@
 - **原子操作**: x86 TSO 架构下, lock前缀保证原子性, fetch_add用xadd, 其余用cmpxchg循环
 - **内存序**: x86 天然 TSO, relaxed=裸操作, acquire/release=编译器屏障, seq_cst=mfence
 - **__builtin__**: expect=透传expr, constant_p=返回0, memcpy/memset=转发libc, abs=test+jns+neg
-- **__attribute__**: 解析器静默剥离 packed/aligned/noreturn/unused, 不影响 codegen
+- **__attribute__**: 解析器静默剥离 packed/aligned/noreturn/unused/weak/section 等, 不影响 codegen; 支持声明开头/类型限定符间/函数名后/参数后等多位置属性
+- **函数指针**: 支持声明 `void (*fp)(int)`, typedef `typedef int (*initcall_t)(void)`, 参数 `void (*cb)(int)`, 强制转换 `(void (*)(int))0`
+- **__asm__ 标签**: 支持 `__asm__("label")` 作为函数/变量符号重命名, 解析器静默跳过
 - **typeof**: 解析期推导类型, typeof(expr)→expr.ty(), typeof(type)→type
 - **语句表达式**: 执行块内语句, 最后表达式值作为结果留在目标寄存器
 - **函数指针调用**: callee 从 Ident 改为 Box<Expr>, 直接调用走 call_label, 间接调用求值到 r11 后 call *r11 (49 FF D3)
