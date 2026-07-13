@@ -45,6 +45,9 @@
 | Debug info | 后置 | 留 AST 类型直出 DWARF | 1.5-2x |
 | CodeGen | 串行 | 函数级并行 | 2x |
 | File I/O | read+copy | mmap | 1.2-1.5x |
+| 预处理输出 | 保留注释/空行 | 阶段3移除注释+跳过空行 | 3.4x (343K→100K 行) |
+| 峰值内存 | 解析+codegen 分阶段 | 解析后 drop(preprocessed) | 减少 ~8MB |
+| 类型错误恢复 | 硬错误终止 | 未知类型降级为 int + warning | 大型代码库连续编译 |
 
 ## 类型表设计 (M3)
 

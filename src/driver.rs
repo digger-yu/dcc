@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use crate::cli::Config;
-use crate::diagnostics::{Diagnostic, enrich_diags};
+use crate::diagnostics::{Diagnostic, Severity, enrich_diags};
 use crate::target::Target;
 use crate::preproc;
 use crate::parser;
@@ -50,8 +50,12 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // 解析
     let (prog, mut diags) = parser::parse(preprocessed.as_bytes(), &file_name);
+    // 解析完成后立即释放预处理字符串 — 减少 codegen 阶段的峰值内存
+    // 第一性原理: 不再需要的数据应尽快归还给操作系统
+    drop(preprocessed);
     enrich_diags(&mut diags, &src);
-    if !diags.is_empty() { return Err(diags); }
+    // 仅错误级别的诊断终止编译, warnings/notes 不影响代码生成
+    if diags.iter().any(|d| matches!(d.sev, Severity::Error)) { return Err(diags); }
 
     // dump AST?
     if cfg.dump_ast {

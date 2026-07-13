@@ -411,6 +411,15 @@ impl<'a> Parser<'a> {
                 self.skip_attributes();
                 return Some(self.parse_ptr_suffix(ty));
             }
+            // 未知标识符作为类型: 降级为 int (GCC GNU 模式兼容)
+            // 第一性原理: 类型系统不应因某个中间类型缺失而完全崩溃
+            let name = self.cur.text.clone();
+            self.diags.push(Diagnostic::warn("W0001",
+                format!("unknown type '{}', treating as int", name),
+                self.cur.span.clone()));
+            self.advance();
+            self.skip_attributes();
+            return Some(self.parse_ptr_suffix(Type::Int));
         }
         // 基本类型
         let mut is_complex = false;

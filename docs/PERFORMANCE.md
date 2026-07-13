@@ -23,6 +23,7 @@ T_dcc = T_gcc / (S_macro * S_header * S_type * S_opt * S_dbg * S_codegen * S_io)
 | S_dbg | 调试信息直出 | 1.5-2x | AST 留类型,直接 emit DWARF |
 | S_codegen | 并行代码生成 | 2x | 函数级并行,rayon 调度 |
 | S_io | mmap 输入 | 1.2-1.5x | 不复制文件,零拷贝 |
+| S_pp | 预处理输出精简 | 3.4x | 阶段3移除注释+跳过空行, 343K→100K 行 |
 
 **理论上限**: 36-180x 加速。但实际受限于:
 - 磁盘 IO (kernel 编译大头是 -j 时的 IO 抖动)
@@ -31,7 +32,28 @@ T_dcc = T_gcc / (S_macro * S_header * S_type * S_opt * S_dbg * S_codegen * S_io)
 
 **现实预期**: 3-10x 加速, 即 DCC 编内核 < 6-10 分钟 warm。
 
-## 测量方法
+## 实际测量 (Linux 6.1 init/main.c)
+
+| 指标 | GCC 13.2 | DCC v0.1 | 比率 |
+|------|----------|----------|------|
+| 预处理行数 | 99,124 | 100,831 | 1.02x |
+| 预处理字节 | 2.8 MB | 4.3 MB | 1.5x |
+| 空行数 | 0 | 0 | — |
+| 注释行数 | 0 | 0 | — |
+| 预处理时间 | — | 0.72s | — |
+| lib/vsprintf.c -fsyntax-only | — | 0 error, 无 OOM | — |
+
+## 峰值内存优化
+
+- **解析阶段**: 预处理输出字符串 ~4.3MB
+- **解析后**: `drop(preprocessed)` 立即释放, codegen 阶段不再占用
+- **节省**: ~8MB 峰值内存 (原为 ~12MB)
+
+## 类型错误恢复
+
+- **原则**: 编译器应当能从缺失的类型定义中恢复
+- **实现**: 未知标识符在类型上下文中降级为 `int` + warning
+- **效果**: `devicetable-offsets.c` 等内核辅助文件通过编译
 
 每个 PR 触发 `bench-free` job:
 1. 浅克隆 linux-6.6

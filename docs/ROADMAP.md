@@ -8,9 +8,9 @@
 | **M1** | C89/99 子集 + 控制流 | ✅ 完成 | examples/fib.c -> fib(10)=55 |
 | **M2** | struct/union/enum + 指针 | ✅ 完成 | examples/struct_test.c |
 | **M3** | 全局类型注册表 | ✅ 完成 | 头文件缓存 (~/.dcc/cache/)，内容哈希失效 |
-| **M4** | 预处理 + builtin | ✅ 完成 | linux/init/main.c 解析成功; Linux 6.1 内核头文件预处理无错误, 输出体积接近 GCC (1.7-1.9x) |
+| **M4** | 预处理 + builtin | ✅ 完成 | linux/init/main.c 解析成功; Linux 6.1 内核头文件预处理无错误, 输出体积接近 GCC (~1.5x, 100K vs 99K 行) |
 | **M5** | **自举 (dcc 编 dcc)** | ⏳ | dcc1 == dcc2 |
-| **M6** | Linux 内核 benchmark | 🔄 进行中 | init/main.c 解析+代码生成通过; -MD/-MF 依赖文件生成支持; 文件级/函数内 asm volatile 带约束支持; COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造 |
+| **M6** | Linux 内核 benchmark | 🔄 进行中 | init/main.c 解析+代码生成通过; -MD/-MF 依赖文件生成支持; 文件级/函数内 asm volatile 带约束支持; COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造; 未知 typedef 降级为 int; 预处理输出注释/空行剥离 |
 | **M7** | ARM64 + RISC-V | ⏳ | hello.c 交叉编译,运行 |
 | **M8** | C11/17/23 + GNU 扩展 | ✅ 完成 | 位域/原子/SIMD/定点数/柔性数组/内存序 后端已实现+Linux验证; C标准全家族别名支持(c89/c90/c99/c9x/c11/c1x/c17/c18/c23/c2x+gnu变体+iso9899) |
 | **M9** | 精准错误诊断 | ⏳ | 错误精确到字符+列+建议 |
