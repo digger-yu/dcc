@@ -2,7 +2,7 @@
 // 第一性原理: 编译器是"输入/输出"的胶水;所有业务在 preproc/parse/codegen 内部完成。
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Read, Write};
 use crate::cli::Config;
 use crate::diagnostics::{Diagnostic, enrich_diags};
 use crate::target::Target;
@@ -17,14 +17,23 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         eprintln!("dcc: std    = {}", cfg.std.as_str());
         eprintln!("dcc: -O{}", cfg.opt);
     }
-    // 读源
-    let src = fs::read(&cfg.input)
-        .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", cfg.input.display(), e),
-            crate::diagnostics::Span::point(&cfg.input.display().to_string(), 0, 0))])?;
+
+    // 读源：支持文件和 stdin（`-`）
+    let (src, file_name) = if cfg.input.as_os_str() == "-" {
+        let mut buf = Vec::new();
+        io::stdin().read_to_end(&mut buf)
+            .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read stdin: {}", e),
+                crate::diagnostics::Span::point("-", 0, 0))])?;
+        (buf, "-".to_string())
+    } else {
+        let s = fs::read(&cfg.input)
+            .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", cfg.input.display(), e),
+                crate::diagnostics::Span::point(&cfg.input.display().to_string(), 0, 0))])?;
+        (s, cfg.input.display().to_string())
+    };
 
     // 预处理
-    let file = cfg.input.display().to_string();
-    let (preprocessed, mut pp_diags) = preproc::preprocess(&src, &file, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std);
+    let (preprocessed, mut pp_diags) = preproc::preprocess(&src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes);
     enrich_diags(&mut pp_diags, &src);
     if !pp_diags.is_empty() {
         for d in &pp_diags { d.print(); }
@@ -33,8 +42,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
 
+    // -E 模式：只做预处理，输出到 stdout
+    if cfg.preprocess_only {
+        print!("{}", preprocessed);
+        return Ok(());
+    }
+
     // 解析
-    let (prog, mut diags) = parser::parse(preprocessed.as_bytes(), &file);
+    let (prog, mut diags) = parser::parse(preprocessed.as_bytes(), &file_name);
     enrich_diags(&mut diags, &src);
     if !diags.is_empty() { return Err(diags); }
 

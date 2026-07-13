@@ -68,7 +68,8 @@ struct MacroDef {
 pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                   system_paths: &[PathBuf],
                   defines: &[(String, Option<String>)],
-                  std_mode: StdMode) -> (String, Vec<Diagnostic>) {
+                  std_mode: StdMode,
+                  force_includes: &[String]) -> (String, Vec<Diagnostic>) {
     let text = String::from_utf8_lossy(src);
     let base = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
     // 编译日期/时间
@@ -186,11 +187,49 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         pp.define_builtin(name, v);
     }
 
+    // 处理 -include 强制包含文件
+    for fi in force_includes {
+        pp.force_include(fi);
+    }
+
     pp.process_text(&text, file);
     (pp.out, pp.diags)
 }
 
 impl Preprocessor {
+    /// 强制包含文件 (GCC -include 语义)
+    fn force_include(&mut self, file_path: &str) {
+        let path = PathBuf::from(file_path);
+        let resolved = if path.exists() {
+            path
+        } else {
+            let mut found = None;
+            for dir in &self.include_paths {
+                let p = dir.join(file_path);
+                if p.exists() { found = Some(p); break; }
+            }
+            if found.is_none() {
+                for dir in &self.system_paths {
+                    let p = dir.join(file_path);
+                    if p.exists() { found = Some(p); break; }
+                }
+            }
+            found.unwrap_or(path)
+        };
+        match std::fs::read_to_string(&resolved) {
+            Ok(content) => {
+                let saved_file = self.file.clone();
+                let saved_dir = self.base_dir.clone();
+                self.file = resolved.display().to_string();
+                self.base_dir = resolved.parent().unwrap_or(Path::new(".")).to_path_buf();
+                self.process_text(&content, &self.file.clone());
+                self.file = saved_file;
+                self.base_dir = saved_dir;
+            }
+            Err(_) => {}
+        }
+    }
+
     fn is_active(&self) -> bool {
         self.cond_stack.iter().all(|c| c.active)
     }
@@ -222,19 +261,69 @@ impl Preprocessor {
 
             if trimmed.starts_with('#') {
                 self.process_directive(trimmed, line_no);
-                // 输出空行保持行号对齐
-                self.out.push('\n');
+                // 只在活跃分支中输出空行保持行号对齐
+                if self.is_active() {
+                    self.out.push('\n');
+                }
             } else if self.is_active() {
                 // 宏展开
                 let expanded = self.expand_macros(line);
                 self.out.push_str(&expanded);
                 self.out.push('\n');
-            } else {
-                self.out.push('\n');
             }
+            // 不活跃分支: 不输出任何内容 (与 GCC 行为一致)
         }
 
         self.file = saved_file;
+    }
+
+    /// 去除 C 风格注释 /* ... */ 和 // ...，替换为空格
+    fn strip_comments(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        while i < len {
+            // 字符串字面量
+            if chars[i] == '"' {
+                out.push('"');
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
+                    out.push(chars[i]); i += 1;
+                }
+                if i < len { out.push('"'); i += 1; }
+                continue;
+            }
+            // 字符字面量
+            if chars[i] == '\'' {
+                out.push('\'');
+                i += 1;
+                while i < len && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
+                    out.push(chars[i]); i += 1;
+                }
+                if i < len { out.push('\''); i += 1; }
+                continue;
+            }
+            // /* ... */ 注释
+            if i + 1 < len && chars[i] == '/' && chars[i+1] == '*' {
+                out.push(' ');
+                i += 2;
+                while i + 1 < len && !(chars[i] == '*' && chars[i+1] == '/') { i += 1; }
+                if i + 1 < len { i += 2; } // skip */
+                continue;
+            }
+            // // ... 注释
+            if i + 1 < len && chars[i] == '/' && chars[i+1] == '/' {
+                out.push(' ');
+                while i < len && chars[i] != '\n' { i += 1; }
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
     }
 
     /// 行续接: 将行尾 \ 与下一行合并
@@ -265,6 +354,9 @@ impl Preprocessor {
         let after_hash = line[1..].trim_start();
         // 处理行续接 (\ at end)
         let directive = after_hash;
+        // C 标准: 在预处理之前移除注释，替换为单个空格
+        let directive = Self::strip_comments(&directive);
+        let directive = directive.as_str();
 
         if directive.starts_with("include") {
             if self.is_active() {
@@ -435,8 +527,10 @@ impl Preprocessor {
                 let canonical = full_path.canonicalize()
                     .unwrap_or(full_path.clone());
                 let key = canonical.to_string_lossy().to_string();
-                if self.seen.contains(&key) { return; } // include guard
-                if self.pragma_once.contains(&key) { return; } // pragma once
+                if self.seen.contains(&key) {
+                    return;
+                }
+                if self.pragma_once.contains(&key) { return; }
                 self.seen.insert(key.clone());
                 match fs::read_to_string(&full_path) {
                     Ok(text) => {
@@ -848,6 +942,8 @@ impl Preprocessor {
         let expr = self.replace_has_macros(&expr);
         // 替换已知宏
         let expr = self.expand_macros(&expr);
+        // 宏展开后去除残留注释 (内核宏体可能含注释)
+        let expr = Self::strip_comments(&expr);
         // 简单求值: 非零 = true
         self.eval_int_expr(&expr) != 0
     }

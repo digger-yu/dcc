@@ -80,6 +80,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_decl(&mut self) -> Option<Vec<Decl>> {
+        // __extension__: GNU 扩展前缀，直接跳过
+        if self.cur.kind == TokKind::Ident && self.cur.text == "__extension__" {
+            self.advance();
+        }
         // typedef
         if self.cur.kind == TokKind::KwTypedef {
             self.advance();

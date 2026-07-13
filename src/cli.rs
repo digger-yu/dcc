@@ -20,6 +20,8 @@ pub struct Config {
     pub dump_ast: bool,
     pub verbose:  bool,
     pub relocatable: bool,  // -c: 输出可重定位 .o
+    pub preprocess_only: bool, // -E: 只做预处理
+    pub force_includes: Vec<String>, // -include file: 强制包含文件
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +147,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut dump_ast = false;
     let mut verbose = false;
     let mut relocatable = false;
+    let mut preprocess_only = false;
+    let mut force_includes: Vec<String> = vec![];
 
     let mut i = 0;
     while i < args.len() {
@@ -160,7 +164,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 output = PathBuf::from(args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -o"))?);
             }
-            "-c" => { relocatable = true; }
+            "-c" | "-S" => { relocatable = true; } // -S: 汇编输出，DCC 直接生成 ELF
+            "-E" => { preprocess_only = true; }
+            "-pipe" => {} // GCC -pipe: 使用管道代替临时文件，DCC 忽略
+            "-g" | "-g0" | "-g1" | "-g2" | "-g3" => {} // 调试信息: 忽略
+            "-r" => { relocatable = true; } // -r: 可重定位链接
+            // -L, -l, -T 等链接器选项
+            "-L" | "-l" | "-T" => { i += 1; } // 跳过参数
+            a if a.starts_with("-L") || a.starts_with("-l") || a.starts_with("-T") => {} // 内联形式
+            // -Wl,* : 传递给链接器的选项
+            a if a.starts_with("-Wl,") => {} // 忽略
+            // -Wp,* : 传递给预处理器的选项
+            a if a.starts_with("-Wp,") => {} // 忽略
             "-x" => {
                 i += 1;
                 args.get(i)
@@ -222,6 +237,24 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 }
             }
             "-fno-builtin"   => {}
+            // -Wa,* : 传递给汇编器的选项
+            a if a.starts_with("-Wa,") => {
+                let as_opts = &a[4..];
+                // 特殊处理 -Wa,--version : 调用系统汇编器并输出版本信息
+                if as_opts.contains("--version") {
+                    if let Ok(out) = std::process::Command::new("as")
+                        .arg("--version")
+                        .output() {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        print!("{}", stdout);
+                    } else {
+                        // 回退: 假装是 GNU as
+                        println!("GNU assembler 2.38");
+                    }
+                    std::process::exit(0);
+                }
+                // 其他 -Wa, 选项暂时忽略
+            }
             // Linux 内核编译常用的 GCC flags - 忽略但接受
             "-mno-red-zone" | "-fno-pic" | "-fno-stack-protector" | "-fno-strict-aliasing"
             | "-fno-common" | "-fno-delete-null-pointer-checks" | "-fno-strict-overflow"
@@ -230,6 +263,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-mno-3dnow" | "-mno-3dnowa" | "-nostdinc" | "-nostdlib" | "-nodefaultlibs"
             | "-static" | "-shared" | "-pie" | "-no-pie"
             | "-pg" | "-pthread" => {}
+            "-P" => {} // 抑制 #line 指令，DCC 预处理器本身就不输出它们
             // -W* 警告选项 - 忽略
             a if a.starts_with("-W") => {}
             // -m* 机器选项 - 忽略
@@ -238,18 +272,48 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-f") => {}
             // -std=* 已经处理过了
             // -include, -isystem 等
-            "-include" => { i += 1; }  // 跳过参数
+            "-include" => {
+                i += 1;
+                let f = args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -include"))?;
+                force_includes.push(f.clone());
+            }
             "-isystem" => {
                 i += 1;
                 system_paths.push(PathBuf::from(args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -isystem"))?));
             }
-            a if a.starts_with("-include") => {}
+            a if a.starts_with("-include") => {
+                force_includes.push(a[8..].to_string());
+            }
             a if a.starts_with("-isystem") => { system_paths.push(PathBuf::from(&a[8..])); }
             // -MF, -MP, -MD 等依赖生成选项
             "-MF" | "-MT" | "-MQ" | "-MP" | "-MD" | "-MMD" => { if a != "-MP" && a != "-MD" && a != "-MMD" { i += 1; } }
             "-dump-ast"  => dump_ast = true,
             "-v" | "--verbose" => verbose = true,
+            // -print-file-name=<file>: GCC 用于查找库/插件/头文件路径
+            a if a.starts_with("-print-file-name=") => {
+                let filename = &a[17..];
+                // 对于 include, 返回 GCC 的 include 目录
+                if filename == "include" {
+                    if let Ok(out) = std::process::Command::new("gcc")
+                        .arg("-print-file-name=include").output() {
+                        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        println!("{}", path);
+                    } else {
+                        println!("/usr/lib/gcc/x86_64-linux-gnu/include");
+                    }
+                } else {
+                    // 其他文件: 返回文件名本身 (表示找不到)
+                    println!("{}", filename);
+                }
+                std::process::exit(0);
+            }
+            // -print-search-dirs: 输出搜索目录
+            "-print-search-dirs" => {
+                println!("");
+                std::process::exit(0);
+            }
             "-dumpversion" => {
                 println!("{}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -269,21 +333,33 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 print_help();
                 std::process::exit(0);
             }
+            "-" => {
+                input = Some(PathBuf::from("-"));
+            }
             a if a.starts_with('-') => return Err(CliError::new(&format!("unknown flag: {}", a))),
             _ => {
-                if input.is_some() { return Err(CliError::new("only one input file supported in M0")); }
-                input = Some(PathBuf::from(a));
+                // 多文件支持: 只编译第一个文件，其余忽略 (内核构建通常一次一个文件)
+                if input.is_some() && !relocatable { return Err(CliError::new("only one input file supported in M0")); }
+                if input.is_none() {
+                    input = Some(PathBuf::from(a));
+                }
             }
         }
         i += 1;
     }
-    let input = input.ok_or_else(|| CliError::new("no input file"))?;
-    // -c 模式默认输出名为源文件名去后缀加 .o
-    if relocatable && output == PathBuf::from("a.out") {
-        let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-        output = PathBuf::from(format!("{}.o", stem));
+    // -E 模式允许没有输入文件 (从 stdin 读取)
+    if !preprocess_only {
+        let input = input.ok_or_else(|| CliError::new("no input file"))?;
+        // -c 模式默认输出名为源文件名去后缀加 .o
+        if relocatable && output == PathBuf::from("a.out") {
+            let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+            output = PathBuf::from(format!("{}.o", stem));
+        }
+        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes })
+    } else {
+        let input = input.unwrap_or_else(|| PathBuf::from("-"));
+        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes })
     }
-    Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable })
 }
 
 fn print_help() {
