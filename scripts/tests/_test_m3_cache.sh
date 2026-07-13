@@ -1,7 +1,7 @@
 #!/bin/bash
 # M3 全局类型注册表: 头文件缓存功能测试
 cd /tmp
-DCC=/home/ds/dcc/target/release/dcc
+DCC=${DCC:-./target/release/dcc}
 PASS=0
 FAIL=0
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # M6 综合测试脚本
 cd /tmp
-DCC=/home/ds/dcc/target/release/dcc
+DCC=${DCC:-./target/release/dcc}
 PASS=0
 FAIL=0
 

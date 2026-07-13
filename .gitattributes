@@ -27,6 +27,7 @@ LICENSE text eol=lf
 
 # 脚本 (必须 LF, 否则 bash 无法执行)
 *.sh text eol=lf
+*.py text eol=lf
 
 # Git 自身
 .gitattributes text eol=lf
