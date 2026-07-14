@@ -2964,6 +2964,81 @@ impl Codegen {
                 self.mov_imm(dst, 0);
                 true
             }
+            // __builtin_add_overflow(a, b, &result): 溢出检测
+            // 策略: 计算 64 位结果, 截断到操作数类型, 比较检测溢出
+            "__builtin_add_overflow" | "__builtin_sub_overflow" | "__builtin_mul_overflow" => {
+                if args.len() < 3 { self.mov_imm(dst, 0); return true; }
+                let op_size = args[0].ty().size().max(args[1].ty().size()).max(4); // 至少 32 位
+                // 1. 求值 ptr → r10
+                self.gen_expr(&args[2], 0);
+                self.emit(&[0x49, 0x89, 0xc2]); // mov r10, rax
+                // 2. 求值 a → push
+                self.gen_expr(&args[0], 0);
+                self.push(0);
+                // 3. 求值 b → rax
+                self.gen_expr(&args[1], 0);
+                // 4. pop a → rcx
+                self.pop(1);
+                // rax = b, rcx = a, r10 = ptr
+                // 5. 计算 64 位结果
+                match name {
+                    "__builtin_add_overflow" => {
+                        self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
+                    }
+                    "__builtin_sub_overflow" => {
+                        self.emit(&[0x48, 0x89, 0xc2]); // mov rdx, rax
+                        self.emit(&[0x48, 0x89, 0xc8]); // mov rax, rcx
+                        self.emit(&[0x48, 0x29, 0xd0]); // sub rax, rdx
+                    }
+                    "__builtin_mul_overflow" => {
+                        self.emit(&[0x48, 0x0f, 0xaf, 0xc1]); // imul rax, rcx
+                    }
+                    _ => unreachable!(),
+                }
+                // rax = 64 位结果
+                // 6. 截断到操作数类型, 检测溢出
+                // 保存完整结果到 rcx
+                self.emit(&[0x48, 0x89, 0xc1]); // mov rcx, rax
+                match op_size {
+                    4 => {
+                        // 32 位: 截断到 eax, 符号扩展到 rdx
+                        self.emit(&[0x89, 0xc0]); // mov eax, eax (截断到 32 位)
+                        self.emit(&[0x48, 0x63, 0xd0]); // movsxd rdx, eax (符号扩展)
+                    }
+                    2 => {
+                        // 16 位: movsx rdx, ax
+                        self.emit(&[0x48, 0x0f, 0xbf, 0xd0]); // movsx rdx, ax
+                    }
+                    1 => {
+                        // 8 位: movsx rdx, al
+                        self.emit(&[0x48, 0x0f, 0xbe, 0xd0]); // movsx rdx, al
+                    }
+                    _ => {
+                        // 64 位: 无截断, 用 seto
+                        self.emit(&[0x0f, 0x90, 0xc2]); // seto dl
+                        self.emit(&[0x49, 0x89, 0x02]); // mov [r10], rax
+                        self.emit(&[0x0f, 0xb6, 0xc2]); // movzx eax, dl
+                        if dst != 0 { self.mov(dst, 0); }
+                        return true;
+                    }
+                }
+                // rdx = 截断后符号扩展的结果, rcx = 64 位结果
+                // 比较 rdx 和 rcx: 如果不等则溢出
+                self.emit(&[0x48, 0x39, 0xd1]); // cmp rcx, rdx
+                self.emit(&[0x0f, 0x94, 0xc2]); // sete dl (相等=无溢出=1)
+                self.emit(&[0x80, 0xf2, 0x01]); // xor dl, 1 (反转: 溢出=1)
+                // 7. 存储截断结果到 *ptr
+                match op_size {
+                    4 => { self.emit(&[0x49, 0x89, 0x02]); } // mov [r10], eax
+                    2 => { self.emit(&[0x49, 0x89, 0x02]); } // mov [r10], eax (低 16 位)
+                    1 => { self.emit(&[0x49, 0x89, 0x02]); } // mov [r10], eax (低 8 位)
+                    _ => { self.emit(&[0x49, 0x89, 0x02]); } // mov [r10], rax
+                }
+                // 8. dst = 溢出标志
+                self.emit(&[0x0f, 0xb6, 0xc2]); // movzx eax, dl
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
             _ => false,
         }
     }

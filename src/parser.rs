@@ -1494,6 +1494,32 @@ impl<'a> Parser<'a> {
                             e = Expr::VaArg { ap: Box::new(ap), ty: arg_ty, span: sp.clone() };
                             continue;
                         }
+                        // __builtin_types_compatible_p(type1, type2): 编译期类型比较
+                        if name.name == "__builtin_types_compatible_p" {
+                            let ty1 = self.parse_type()?;
+                            if !self.expect(TokKind::Comma, "','") { return None; }
+                            let ty2 = self.parse_type()?;
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            let v = if Self::types_compatible(&ty1, &ty2) { 1 } else { 0 };
+                            e = Expr::Int { v: v as i128, span: sp.clone(), ty: int_t() };
+                            continue;
+                        }
+                        // __builtin_choose_expr(cond, expr1, expr2): 编译期条件选择
+                        if name.name == "__builtin_choose_expr" {
+                            let cond = self.parse_expr_bp(2)?;
+                            if !self.expect(TokKind::Comma, "','") { return None; }
+                            let expr1 = self.parse_expr_bp(2)?;
+                            if !self.expect(TokKind::Comma, "','") { return None; }
+                            let expr2 = self.parse_expr_bp(2)?;
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            let chosen = if Self::const_eval_bool(&cond) {
+                                expr1
+                            } else {
+                                expr2
+                            };
+                            e = chosen;
+                            continue;
+                        }
                     }
                     let mut args = vec![];
                     if self.cur.kind != TokKind::RParen { loop { args.push(self.parse_expr_bp(2)?); if self.cur.kind == TokKind::Comma { self.advance(); continue; } break; } }
@@ -1646,6 +1672,63 @@ impl<'a> Parser<'a> {
             (Type::Union(na, _), Type::Union(nb, _)) => na == nb,
             (Type::Enum(na, _), Type::Enum(nb, _)) => na == nb,
             _ => a == b,
+        }
+    }
+
+    /// 编译期常量求值 (用于 __builtin_choose_expr 条件)
+    /// 返回 Some(true/false) 如果能求值, None 如果不能
+    fn const_eval_bool(expr: &Expr) -> bool {
+        match Self::const_eval(expr) {
+            Some(v) => v != 0,
+            None => false, // 默认选择 expr2
+        }
+    }
+    fn const_eval(expr: &Expr) -> Option<i128> {
+        match expr {
+            Expr::Int { v, .. } => Some(*v),
+            Expr::Char { v, .. } => Some(*v as i128),
+            Expr::SizeofTy { ty, .. } => Some(ty.size() as i128),
+            Expr::SizeofExpr { e, .. } => Some(e.ty().size() as i128),
+            Expr::Binop { op, l, r, .. } => {
+                let lv = Self::const_eval(l)?;
+                let rv = Self::const_eval(r)?;
+                Some(match op {
+                    BinOp::Add => lv.wrapping_add(rv),
+                    BinOp::Sub => lv.wrapping_sub(rv),
+                    BinOp::Mul => lv.wrapping_mul(rv),
+                    BinOp::Div => if rv != 0 { lv / rv } else { 0 },
+                    BinOp::Mod => if rv != 0 { lv % rv } else { 0 },
+                    BinOp::EqEq => (lv == rv) as i128,
+                    BinOp::Ne => (lv != rv) as i128,
+                    BinOp::Lt => (lv < rv) as i128,
+                    BinOp::Le => (lv <= rv) as i128,
+                    BinOp::Gt => (lv > rv) as i128,
+                    BinOp::Ge => (lv >= rv) as i128,
+                    BinOp::AndAnd => (lv != 0 && rv != 0) as i128,
+                    BinOp::OrOr => (lv != 0 || rv != 0) as i128,
+                    BinOp::Shl => lv << rv,
+                    BinOp::Shr => lv >> rv,
+                    BinOp::And => lv & rv,
+                    BinOp::Or => lv | rv,
+                    BinOp::Xor => lv ^ rv,
+                    _ => return None,
+                })
+            }
+            Expr::Unary { op, e, .. } => {
+                let v = Self::const_eval(e)?;
+                Some(match op {
+                    UnOp::Neg => -v,
+                    UnOp::BitNot => (!v) as i128,
+                    UnOp::Not => (v == 0) as i128,
+                    _ => return None,
+                })
+            }
+            Expr::Cast { e, .. } => Self::const_eval(e),
+            Expr::Cond { cond, then_, else_, .. } => {
+                let cv = Self::const_eval(cond)?;
+                if cv != 0 { Self::const_eval(then_) } else { Self::const_eval(else_) }
+            }
+            _ => None,
         }
     }
 }

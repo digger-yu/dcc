@@ -60,6 +60,8 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 - `_Decimal32/64/128` 十进制浮点
 - `_Fract` / `_Accum` 定点数类型
 - `__builtin_va_list` / `__builtin_va_start` / `__builtin_va_arg` / `__builtin_va_end` 可变参数支持
+- `__builtin_choose_expr` / `__builtin_types_compatible_p` 编译期类型选择与判断
+- `__builtin_add_overflow` / `__builtin_sub_overflow` / `__builtin_mul_overflow` 溢出检测算术
 - 嵌套函数定义 (GCC 扩展, 不含静态链外层变量访问)
 
 ## 重要选项
