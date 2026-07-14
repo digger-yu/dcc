@@ -1752,6 +1752,8 @@ impl Preprocessor {
             | "__builtin_strcpy" | "__builtin_strncpy"
             | "__builtin_strcmp" | "__builtin_strlen"
             | "__builtin_prefetch"
+            | "__builtin_object_size"
+            | "__builtin_expect_with_probability"
             | "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll"
             | "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll"
             | "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll"

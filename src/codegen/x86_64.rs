@@ -2845,7 +2845,7 @@ impl Codegen {
     fn gen_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
         match name {
             // __builtin_expect(expr, val): 分支预测提示, 直接返回 expr
-            "__builtin_expect" => {
+            "__builtin_expect" | "__builtin_expect_with_probability" => {
                 if args.is_empty() { self.mov_imm(dst, 0); return true; }
                 self.gen_expr(&args[0], dst);
                 true
@@ -2855,13 +2855,52 @@ impl Codegen {
                 self.mov_imm(dst, 0);
                 true
             }
-            // __builtin_memcpy/__builtin_memset/__builtin_memmove: 转发到 libc
-            "__builtin_memcpy" | "__builtin_memset" | "__builtin_memmove" | "__builtin_memcmp" => {
-                let libc_name = name.strip_prefix("__builtin_").unwrap();
+            // __builtin_object_size(ptr, type): 安全检测, 返回 (size_t)-1 表示未知
+            "__builtin_object_size" => {
+                self.mov_imm(dst, -1i128); // (size_t)-1
+                true
+            }
+            // __builtin_memcpy/__builtin_memmove: 内联 rep movsb (freestanding 无 libc)
+            "__builtin_memcpy" | "__builtin_memmove" => {
+                if args.len() < 3 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // 参数: dst(rdi), src(rsi), n(rcx)
+                self.gen_expr(&args[1], 6); // rsi = src
+                self.gen_expr(&args[0], 7); // rdi = dst
+                self.gen_expr(&args[2], 1); // rcx = n
+                // 保存 rdi 作为返回值 (memcpy/memmove 返回 dst)
+                self.emit(&[0x57]);             // push rdi
+                self.emit(&[0xfc]);             // cld (清除方向标志)
+                self.emit(&[0xf3, 0x48, 0xa4]); // rep movsb
+                self.emit(&[0x5f]);             // pop rax (返回值 = dst)
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_memset: 内联 rep stosb (freestanding 无 libc)
+            "__builtin_memset" => {
+                if args.len() < 3 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // 参数: dst(rdi), val(rax), n(rcx)
+                self.gen_expr(&args[0], 7); // rdi = dst
+                self.gen_expr(&args[1], 0); // rax = val
+                self.gen_expr(&args[2], 1); // rcx = n
+                self.emit(&[0x57]);             // push rdi
+                self.emit(&[0xfc]);             // cld
+                self.emit(&[0xf3, 0xaa]);       // rep stosb
+                self.emit(&[0x5f]);             // pop rax (返回值 = dst)
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_memcmp: 转发到 libc ( memcmp 不适合简单内联)
+            "__builtin_memcmp" => {
                 let ar = [7u8, 6, 2, 1, 8, 9];
                 for (i, a) in args.iter().enumerate() { self.gen_expr(a, ar[i]); }
                 self.emit(&[0x54]); // push rsp
-                self.call_label(libc_name);
+                self.call_label("memcmp");
                 self.emit(&[0x5c]); // pop rsp
                 if dst != 0 { self.mov(dst, 0); }
                 true

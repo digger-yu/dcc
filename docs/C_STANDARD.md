@@ -50,7 +50,7 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 
 - `__attribute__((...))` 多位置属性
 - `__asm__ __volatile__` 带约束内联汇编
-- `__builtin_*` (expect, constant_p, memcpy, memset, abs, unreachable, trap, clz, ctz, popcount, strcpy, strlen, bswap, parity, frame_address, return_address 等)
+- `__builtin_*` (expect, expect_with_probability, constant_p, memcpy, memset, memmove, object_size, abs, unreachable, trap, clz, ctz, popcount, strcpy, strlen, bswap, parity, frame_address, return_address 等)
 - 语句表达式 `({...})`
 - 零长度数组 / 柔性数组成员
 - `__VA_ARGS__` 可变参数宏
@@ -66,6 +66,11 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 - `MODULE_LICENSE` / `MODULE_AUTHOR` / `MODULE_DESCRIPTION` 等内核模块宏
 - `DEFINE_PER_CPU` / `DECLARE_PER_CPU` percpu 变量支持
 - 嵌套函数定义 (GCC 扩展, 含静态链外层变量访问)
+- `__builtin_memcpy` / `__builtin_memset` / `__builtin_memmove` 内联实现 (rep movsb/stosb, freestanding 无需 libc)
+- `__builtin_object_size` 安全检测 (返回 `(size_t)-1` 表示未知)
+- `__builtin_expect_with_probability` 降级为 `__builtin_expect`
+- `address_space(N)` sparse 注解 (静默跳过)
+- `__attribute__((format))` printf/scanf 格式检查 (静默跳过)
 
 ## 重要选项
 

@@ -843,7 +843,11 @@ impl<'a> Parser<'a> {
     fn parse_ptr_suffix(&mut self, mut ty: Type) -> Type {
         while self.cur.kind == TokKind::Star {
             self.advance();
-            while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwAtomic) { self.advance(); }
+            while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwAtomic)
+                || (self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__") {
+                if self.cur.text == "__attribute__" { self.skip_attributes(); }
+                else { self.advance(); }
+            }
             ty = Type::Ptr(Box::new(ty));
         }
         ty
