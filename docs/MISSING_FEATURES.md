@@ -42,7 +42,7 @@
 | `__builtin_memcpy` 内联 | freestanding 无 libc | `rep movsb` 内联 | ✅ |
 | `__builtin_memset` 内联 | freestanding 无 libc | `rep stosb` 内联 | ✅ |
 | `__builtin_memmove` 内联 | freestanding 无 libc | `rep movsb` 内联 | ✅ |
-| 复杂 inline asm 约束 | `arch/` 层大量使用 | 深度计数跳过约束列表 | ✅ |
+| 复杂 inline asm 约束 | `arch/` 层大量使用 | Mini x86 汇编器实际发射指令 | ✅ |
 | `__attribute__((format))` | printf/scanf 格式检查 | `skip_attributes` 静默跳过 | ✅ |
 | `address_space(N)` | sparse 注解 | `skip_attributes` 静默跳过 | ✅ |
 | `__builtin_object_size` | 安全检测 | 返回 `(size_t)-1` | ✅ |

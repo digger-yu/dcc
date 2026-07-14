@@ -49,7 +49,7 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 ## GNU 扩展
 
 - `__attribute__((...))` 多位置属性
-- `__asm__ __volatile__` 带约束内联汇编
+- `__asm__ __volatile__` 带约束内联汇编 (Mini x86 汇编器实际发射指令, 支持 100+ 常见指令)
 - `__builtin_*` (expect, expect_with_probability, constant_p, memcpy, memset, memmove, object_size, abs, unreachable, trap, clz, ctz, popcount, strcpy, strlen, bswap, parity, frame_address, return_address 等)
 - 语句表达式 `({...})`
 - 零长度数组 / 柔性数组成员
@@ -71,6 +71,8 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 - `__builtin_expect_with_probability` 降级为 `__builtin_expect`
 - `address_space(N)` sparse 注解 (静默跳过)
 - `__attribute__((format))` printf/scanf 格式检查 (静默跳过)
+- `&&label` 标签地址 (GNU 扩展, 通过 RIP-relative LEA 实现)
+- `asm goto` 实际发射 (支持标签跳转)
 
 ## 重要选项
 

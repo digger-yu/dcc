@@ -54,6 +54,8 @@ pub struct Codegen {
     current_func_is_nested: bool,  // 当前编译的函数是否是嵌套函数
     static_chain_offset: i32,      // 静态链在当前帧中的偏移
     upvar_offsets: HashMap<String, i32>, // upvar 名称 → 在父帧中的偏移
+    // &&label 地址引用: (disp32_pos, label_name)
+    label_addr_refs: Vec<(u64, String)>,
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -61,6 +63,15 @@ struct PendingJump { at: u64, target: String, kind: JumpKind }
 enum JumpKind { Jmp, Je, Jne, Jl, Jle, Jg, Jge }
 #[derive(Clone)]
 struct GlobalVar { offset: u64, size: usize, ty: Type, init: Option<Vec<u8>> }
+
+/// 内联汇编操作数
+enum AsmOperand {
+    None,
+    Reg(u8, u8),           // (reg_index, size_bits)
+    Imm(i64),              // 立即数
+    Mem { disp: i32, base: u8, index: Option<u8>, scale: u8 },
+    Sym(String),           // 符号/标签名
+}
 
 impl Codegen {
     pub fn new(target: Target) -> Self {
@@ -80,7 +91,8 @@ impl Codegen {
                nested_funcs: HashMap::new(),
                current_func_is_nested: false,
                static_chain_offset: 0,
-               upvar_offsets: HashMap::new() }
+               upvar_offsets: HashMap::new(),
+               label_addr_refs: vec![] }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -167,6 +179,16 @@ impl Codegen {
                 let var_vaddr = rodata_start + g.offset;
                 let rip = self.entry + disp32_pos + 4; // disp32 后紧跟 4 字节
                 let rel = (var_vaddr as i64) - (rip as i64);
+                let p = disp32_pos as usize;
+                self.code[p..p+4].copy_from_slice(&(rel as i32).to_le_bytes());
+            }
+        }
+        // 修补 &&label 地址引用 (LEA reg, [RIP+disp32])
+        for (disp32_pos, label_name) in self.label_addr_refs.drain(..) {
+            if let Some(&label_off) = self.labels.get(&label_name) {
+                let label_vaddr = self.entry + label_off;
+                let rip = self.entry + disp32_pos + 4;
+                let rel = (label_vaddr as i64) - (rip as i64);
                 let p = disp32_pos as usize;
                 self.code[p..p+4].copy_from_slice(&(rel as i32).to_le_bytes());
             }
@@ -913,9 +935,12 @@ impl Codegen {
                 self.gen_expr(expr, 0); // rax = 目标地址
                 self.emit(&[0xFF, 0xE0]); // jmp rax
             }
-            Stmt::AsmGoto { .. } => {
-                // asm goto: 简化处理, 生成 nop 占位 (完整实现需要解析 asm 模板)
-                self.emit(&[0x90]); // nop
+            Stmt::AsmGoto { asm_str, outputs, inputs, clobbers, goto_labels, .. } => {
+                // asm goto: 实际发射汇编指令
+                let op_map = self.build_asm_operand_map(outputs, inputs);
+                self.emit_inline_asm(asm_str, &op_map);
+                // asm goto 标签已在 emit_inline_asm 中处理
+                let _ = (clobbers, goto_labels);
             }
         }
     }
@@ -1391,9 +1416,21 @@ impl Codegen {
                 self.gen_expr(l, 0);
                 self.gen_expr(r, dst);
             }
-            Expr::AsmExpr { .. } => {
-                // 内联汇编: no-op, 结果为 0
-                self.mov_imm(dst, 0);
+            Expr::AsmExpr { asm_str, .. } => {
+                // 内联汇编表达式: 实际发射汇编指令, 结果在 rax
+                let op_map: HashMap<String, String> = HashMap::new();
+                self.emit_inline_asm(asm_str, &op_map);
+                if dst != 0 { self.mov(dst, 0); }
+            }
+            Expr::LabelAddr { label, .. } => {
+                // &&label: 加载标签地址到 dst (GNU 扩展)
+                // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
+                let label_name = label.name.clone();
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                let modrm = 0x05 | ((dst & 7) << 3);
+                self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
+                let disp32_pos = self.pos() - 4;
+                self.label_addr_refs.push((disp32_pos, label_name));
             }
             Expr::StmtExpr { block, .. } => {
                 // 语句表达式 ({...}): 执行块内语句, 最后表达式值留在 dst
@@ -3407,6 +3444,789 @@ impl Codegen {
     }
     fn emit_xor_rsi(&mut self) {
         self.emit(&[0x31, 0xF2]); // xor edx, esi
+    }
+
+    // ===== Inline Asm Mini-Assembler (AT&T syntax) =====
+
+    /// 构建 asm 操作数映射: %N → 寄存器名
+    fn build_asm_operand_map(&mut self, outputs: &[Expr], inputs: &[Expr]) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        // SysV 调用约定可用寄存器 (caller-saved 优先)
+        let alloc_regs = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
+        let mut idx = 0usize;
+        // 输出操作数: 分配到具体寄存器
+        for _op in outputs.iter() {
+            if idx < alloc_regs.len() {
+                map.insert(format!("%{}", idx), alloc_regs[idx].to_string());
+                idx += 1;
+            }
+        }
+        // 输入操作数
+        for _op in inputs.iter() {
+            if idx < alloc_regs.len() {
+                map.insert(format!("%{}", idx), alloc_regs[idx].to_string());
+                idx += 1;
+            }
+        }
+        map
+    }
+
+    /// 发射内联汇编模板
+    fn emit_inline_asm(&mut self, asm_str: &str, op_map: &HashMap<String, String>) {
+        // 清理字符串: 去除引号包裹
+        let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
+            &asm_str[1..asm_str.len()-1]
+        } else { asm_str };
+        // 按换行和分号分割指令
+        for line in s.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            // 替换操作数引用 %N → 寄存器名
+            let mut resolved = line.to_string();
+            // 按数字降序替换, 避免 %1 匹配 %10 的前缀
+            let mut keys: Vec<_> = op_map.keys().collect();
+            keys.sort_by(|a, b| {
+                let na: usize = a[1..].parse().unwrap_or(0);
+                let nb: usize = b[1..].parse().unwrap_or(0);
+                nb.cmp(&na)
+            });
+            for k in keys {
+                if let Some(reg) = op_map.get(k) {
+                    resolved = resolved.replace(k, reg);
+                }
+            }
+            // 处理标签引用: %lN → 标签地址 (asm goto)
+            // 简化: 跳过 %lN 替换
+            self.emit_asm_line(&resolved);
+        }
+    }
+
+    /// 解析 AT&T 寄存器名 → (reg_index, size_bits)
+    fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
+        let n = name.strip_prefix('%').unwrap_or(name);
+        match n {
+            "rax" => Some((0, 64)), "eax" => Some((0, 32)), "ax" => Some((0, 16)), "al" => Some((0, 8)), "ah" => Some((0, 8)),
+            "rbx" => Some((3, 64)), "ebx" => Some((3, 32)), "bx" => Some((3, 16)), "bl" => Some((3, 8)), "bh" => Some((3, 8)),
+            "rcx" => Some((1, 64)), "ecx" => Some((1, 32)), "cx" => Some((1, 16)), "cl" => Some((1, 8)), "ch" => Some((1, 8)),
+            "rdx" => Some((2, 64)), "edx" => Some((2, 32)), "dx" => Some((2, 16)), "dl" => Some((2, 8)), "dh" => Some((2, 8)),
+            "rsi" => Some((6, 64)), "esi" => Some((6, 32)), "si" => Some((6, 16)), "sil" => Some((6, 8)),
+            "rdi" => Some((7, 64)), "edi" => Some((7, 32)), "di" => Some((7, 16)), "dil" => Some((7, 8)),
+            "rsp" => Some((4, 64)), "esp" => Some((4, 32)), "sp" => Some((4, 16)), "spl" => Some((4, 8)),
+            "rbp" => Some((5, 64)), "ebp" => Some((5, 32)), "bp" => Some((5, 16)), "bpl" => Some((5, 8)),
+            "r8" => Some((8, 64)), "r8d" => Some((8, 32)), "r8w" => Some((8, 16)), "r8b" => Some((8, 8)),
+            "r9" => Some((9, 64)), "r9d" => Some((9, 32)), "r9w" => Some((9, 16)), "r9b" => Some((9, 8)),
+            "r10" => Some((10, 64)), "r10d" => Some((10, 32)), "r10w" => Some((10, 16)), "r10b" => Some((10, 8)),
+            "r11" => Some((11, 64)), "r11d" => Some((11, 32)), "r11w" => Some((11, 16)), "r11b" => Some((11, 8)),
+            "r12" => Some((12, 64)), "r12d" => Some((12, 32)), "r12w" => Some((12, 16)), "r12b" => Some((12, 8)),
+            "r13" => Some((13, 64)), "r13d" => Some((13, 32)), "r13w" => Some((13, 16)), "r13b" => Some((13, 8)),
+            "r14" => Some((14, 64)), "r14d" => Some((14, 32)), "r14w" => Some((14, 16)), "r14b" => Some((14, 8)),
+            "r15" => Some((15, 64)), "r15d" => Some((15, 32)), "r15w" => Some((15, 16)), "r15b" => Some((15, 8)),
+            _ => None,
+        }
+    }
+
+    /// 解析 AT&T 操作数 → AsmOperand
+    fn parse_asm_operand_str(s: &str) -> AsmOperand {
+        let s = s.trim();
+        if s.is_empty() { return AsmOperand::None; }
+        // 立即数: $N
+        if let Some(rest) = s.strip_prefix('$') {
+            let rest = rest.trim();
+            if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+                if let Ok(v) = i64::from_str_radix(hex, 16) { return AsmOperand::Imm(v); }
+            } else if let Ok(v) = rest.parse::<i64>() {
+                return AsmOperand::Imm(v);
+            }
+            return AsmOperand::None;
+        }
+        // 寄存器: %reg
+        if s.starts_with('%') {
+            if let Some((idx, sz)) = Self::parse_asm_reg(s) {
+                return AsmOperand::Reg(idx, sz);
+            }
+            // 可能是标签引用 %label 或 %lN, 跳过
+            return AsmOperand::None;
+        }
+        // 内存: disp(%base,%idx,scale) 或 (%reg) 或 symbol(%rip)
+        if s.contains('(') {
+            return Self::parse_asm_mem(s);
+        }
+        // 符号名 (全局标签引用)
+        AsmOperand::Sym(s.to_string())
+    }
+
+    /// 解析 AT&T 内存操作数
+    fn parse_asm_mem(s: &str) -> AsmOperand {
+        // 格式: [disp](%base[,%idx[,scale]])
+        let paren_pos = s.find('(').unwrap_or(s.len());
+        let disp_str = s[..paren_pos].trim();
+        let rest = &s[paren_pos..];
+        let mut disp: i32 = 0;
+        if !disp_str.is_empty() {
+            if let Some(hex) = disp_str.strip_prefix("0x").or_else(|| disp_str.strip_prefix("0X")) {
+                disp = i32::from_str_radix(hex, 16).unwrap_or(0);
+            } else {
+                disp = disp_str.parse::<i32>().unwrap_or(0);
+            }
+        }
+        // 提取括号内的内容
+        let inner = if rest.starts_with('(') && rest.ends_with(')') {
+            &rest[1..rest.len()-1]
+        } else { return AsmOperand::None; };
+        let parts: Vec<&str> = inner.split(',').collect();
+        let base_str = parts.first().map(|s| s.trim()).unwrap_or("");
+        let (base, _bsz) = Self::parse_asm_reg(base_str).unwrap_or((5, 64)); // 默认 rbp
+        let mut idx: Option<u8> = None;
+        let mut scale: u8 = 1;
+        if parts.len() > 1 {
+            let idx_str = parts[1].trim();
+            if !idx_str.is_empty() {
+                idx = Self::parse_asm_reg(idx_str).map(|(r, _)| r);
+            }
+        }
+        if parts.len() > 2 {
+            scale = parts[2].trim().parse::<u8>().unwrap_or(1);
+        }
+        AsmOperand::Mem { disp, base, index: idx, scale }
+    }
+
+    /// 发射单条 AT&T 汇编指令
+    fn emit_asm_line(&mut self, line: &str) {
+        // 处理前缀: lock, rep, repz, repnz
+        let (prefix, rest) = if line.starts_with("lock ") || line.starts_with("lock\t") {
+            (Some(0xF0u8), line[5..].trim())
+        } else if line.starts_with("rep ") || line.starts_with("rep\t") || line.starts_with("repz ") || line.starts_with("repz\t") {
+            (Some(0xF3u8), line[4..].trim())
+        } else if line.starts_with("repnz ") || line.starts_with("repnz\t") || line.starts_with("repe ") {
+            (Some(0xF2u8), line[6..].trim())
+        } else {
+            (None, line)
+        };
+        // 分割助记符和操作数
+        let (mnemonic, operands_str) = if let Some(pos) = rest.find(|c: char| c == ' ' || c == '\t') {
+            (&rest[..pos], rest[pos..].trim())
+        } else {
+            (rest, "")
+        };
+        let operands: Vec<&str> = if operands_str.is_empty() { vec![] }
+        else { operands_str.split(',').collect() };
+        let ops: Vec<AsmOperand> = operands.iter().map(|s| Self::parse_asm_operand_str(s)).collect();
+        if let Some(pfx) = prefix { self.emit(&[pfx]); }
+        self.emit_asm_instr(mnemonic, &ops);
+    }
+
+    /// 编码单条指令
+    fn emit_asm_instr(&mut self, mnemonic: &str, ops: &[AsmOperand]) {
+        match mnemonic {
+            // 无操作数指令
+            "nop" => self.emit(&[0x90]),
+            "ret" | "retq" => self.emit(&[0xC3]),
+            "leave" | "leaveq" => self.emit(&[0xC9]),
+            "cdq" => self.emit(&[0x99]),
+            "cdqe" => self.emit(&[0x48, 0x98]),
+            "cqo" => self.emit(&[0x48, 0x99]),
+            "cbtw" => self.emit(&[0x66, 0x98]),
+            "cwtl" => self.emit(&[0x98]),
+            "cltd" => self.emit(&[0x99]),
+            "clac" => self.emit(&[0x0F, 0x01, 0xCA]),
+            "stac" => self.emit(&[0x0F, 0x01, 0xCB]),
+            "cli" => self.emit(&[0xFA]),
+            "sti" => self.emit(&[0xFB]),
+            "cld" => self.emit(&[0xFC]),
+            "std" => self.emit(&[0xFD]),
+            "hlt" => self.emit(&[0xF4]),
+            "pause" => self.emit(&[0xF3, 0x90]),
+            "mfence" => self.emit(&[0x0F, 0xAE, 0xF0]),
+            "lfence" => self.emit(&[0x0F, 0xAE, 0xE8]),
+            "sfence" => self.emit(&[0x0F, 0xAE, 0xF8]),
+            "syscall" => self.emit(&[0x0F, 0x05]),
+            "sysenter" => self.emit(&[0x0F, 0x34]),
+            "sysexit" => self.emit(&[0x0F, 0x35]),
+            "rdtsc" => self.emit(&[0x0F, 0x31]),
+            "rdpmc" => self.emit(&[0x0F, 0x33]),
+            "xchg%eax,%eax" | "xchg %eax,%eax" => self.emit(&[0x90]), // nop alias
+            "ud2" => self.emit(&[0x0F, 0x0B]),
+            "clc" => self.emit(&[0xF8]),
+            "stc" => self.emit(&[0xF9]),
+            "cmc" => self.emit(&[0xF5]),
+            "sahf" => self.emit(&[0x9E]),
+            "lahf" => self.emit(&[0x9F]),
+
+            // cpuid
+            "cpuid" => self.emit(&[0x0F, 0xA2]),
+
+            // 字符串操作
+            "movsb" => self.emit(&[0xA4]),
+            "movsw" => self.emit(&[0x66, 0xA5]),
+            "movsl" | "movsd" => self.emit(&[0xA5]),
+            "movsq" => self.emit(&[0x48, 0xA5]),
+            "stosb" => self.emit(&[0xAA]),
+            "stosw" => self.emit(&[0x66, 0xAB]),
+            "stosl" | "stosd" => self.emit(&[0xAB]),
+            "stosq" => self.emit(&[0x48, 0xAB]),
+            "scasb" => self.emit(&[0xAE]),
+            "cmpsb" => self.emit(&[0xA6]),
+
+            // push/pop 寄存器
+            "push" if ops.len() == 1 => self.emit_asm_push(&ops[0]),
+            "pop" if ops.len() == 1 => self.emit_asm_pop(&ops[0]),
+
+            // 数据移动
+            "mov" | "movq" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 64),
+            "movl" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 32),
+            "movw" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 16),
+            "movb" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 8),
+            "movzbl" if ops.len() == 2 => self.emit_asm_movzx(&ops[0], &ops[1], 8, 32),
+            "movzbq" if ops.len() == 2 => self.emit_asm_movzx(&ops[0], &ops[1], 8, 64),
+            "movzwl" if ops.len() == 2 => self.emit_asm_movzx(&ops[0], &ops[1], 16, 32),
+            "movzwq" if ops.len() == 2 => self.emit_asm_movzx(&ops[0], &ops[1], 16, 64),
+            "movslq" if ops.len() == 2 => self.emit_asm_movsx(&ops[0], &ops[1], 32, 64),
+            "movsbl" if ops.len() == 2 => self.emit_asm_movsx(&ops[0], &ops[1], 8, 32),
+            "movsbq" if ops.len() == 2 => self.emit_asm_movsx(&ops[0], &ops[1], 8, 64),
+            "movswl" if ops.len() == 2 => self.emit_asm_movsx(&ops[0], &ops[1], 16, 32),
+            "lea" | "leaq" if ops.len() == 2 => self.emit_asm_lea(&ops[0], &ops[1], 64),
+            "leal" if ops.len() == 2 => self.emit_asm_lea(&ops[0], &ops[1], 32),
+            "xchg" if ops.len() == 2 => self.emit_asm_xchg(&ops[0], &ops[1]),
+            "cmovz" | "cmovze" | "cmove" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x44),
+            "cmovnz" | "cmovne" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x45),
+            "cmovl" | "cmovnge" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4C),
+            "cmovg" | "cmovnle" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4F),
+            "cmovle" | "cmovng" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4E),
+            "cmovge" | "cmovnl" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4D),
+
+            // 算术
+            "add" | "addq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 64),
+            "addl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 32),
+            "addw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 16),
+            "addb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 8),
+            "sub" | "subq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 64),
+            "subl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 32),
+            "subw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 16),
+            "subb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 8),
+            "and" | "andq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 64),
+            "andl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 32),
+            "or" | "orq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 64),
+            "orl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 32),
+            "xor" | "xorq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 64),
+            "xorl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 32),
+            "cmp" | "cmpq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 64),
+            "cmpl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 32),
+            "cmpw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 16),
+            "cmpb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 8),
+            "test" | "testq" if ops.len() == 2 => self.emit_asm_test(&ops[0], &ops[1], 64),
+            "testl" if ops.len() == 2 => self.emit_asm_test(&ops[0], &ops[1], 32),
+            "testb" if ops.len() == 2 => self.emit_asm_test(&ops[0], &ops[1], 8),
+            "imul" if ops.len() == 2 => self.emit_asm_imul2(&ops[0], &ops[1]),
+            "imul" if ops.len() == 3 => self.emit_asm_imul3(&ops[0], &ops[1], &ops[2]),
+            "mul" | "mulq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 4, 64),
+            "div" | "divq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 6, 64),
+            "idiv" | "idivq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 7, 64),
+            "neg" | "negq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 3, 64),
+            "not" | "notq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 2, 64),
+            "inc" | "incq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 64),
+            "dec" | "decq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 1, 64),
+
+            // 移位
+            "shl" | "sal" | "shlq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 64),
+            "shll" | "sall" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 32),
+            "shr" | "shrq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 5, 64),
+            "shrl" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 5, 32),
+            "sar" | "sarq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 64),
+            "sarl" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 32),
+
+            // 跳转
+            "jmp" if ops.len() == 1 => self.emit_asm_jmp(&ops[0]),
+            "je" | "jz" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x84),
+            "jne" | "jnz" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x85),
+            "jl" | "jnge" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x8C),
+            "jle" | "jng" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x8E),
+            "jg" | "jnle" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x8F),
+            "jge" | "jnl" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x8D),
+            "ja" | "jnbe" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x87),
+            "jae" | "jnb" | "jnc" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x83),
+            "jb" | "jnae" | "jc" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x82),
+            "jbe" | "jna" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x86),
+            "js" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x88),
+            "jns" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x89),
+            "jo" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x80),
+            "jno" if ops.len() == 1 => self.emit_asm_jcc(&ops[0], 0x81),
+
+            // 调用
+            "call" if ops.len() == 1 => self.emit_asm_call(&ops[0]),
+
+            // 设置字节 (setcc)
+            "sete" | "setz" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x94),
+            "setne" | "setnz" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x95),
+            "setl" | "setnge" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x9C),
+            "setg" | "setnle" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x9F),
+            "setle" | "setng" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x9E),
+            "setge" | "setnl" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x9D),
+            "setb" | "setc" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x92),
+            "seta" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x97),
+
+            // 原子操作
+            "cmpxchg" | "cmpxchgl" if ops.len() == 2 => self.emit_asm_cmpxchg(&ops[0], &ops[1]),
+            "xadd" | "xaddl" if ops.len() == 2 => self.emit_asm_xadd(&ops[0], &ops[1]),
+
+            // 特殊寄存器
+            "rdmsr" => self.emit(&[0x0F, 0x32]),
+            "wrmsr" => self.emit(&[0x0F, 0x30]),
+            "movq" if ops.len() == 2 && mnemonic == "movq" => self.emit_asm_mov(&ops[0], &ops[1], 64),
+
+            // 未识别指令: 发射 nop 占位 (避免编译失败)
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    // --- 辅助编码方法 ---
+
+    fn rex(w: bool, r: u8, x: u8, b: u8) -> u8 {
+        let mut v = 0x40u8;
+        if w { v |= 0x08; }
+        if r >= 8 { v |= 0x04; }
+        if x >= 8 { v |= 0x02; }
+        if b >= 8 { v |= 0x01; }
+        v
+    }
+
+    fn modrm_reg_reg(reg: u8, rm: u8) -> u8 {
+        0xC0 | ((reg & 7) << 3) | (rm & 7)
+    }
+
+    fn emit_asm_push(&mut self, op: &AsmOperand) {
+        match op {
+            AsmOperand::Reg(r, _) => {
+                if *r >= 8 { self.emit(&[0x41]); }
+                self.emit(&[0x50 + (r & 7)]);
+            }
+            AsmOperand::Imm(v) => {
+                if *v >= -128 && *v <= 127 {
+                    self.emit(&[0x6A, *v as u8]);
+                } else {
+                    self.emit(&[0x68]); self.emit(&(*v as i32).to_le_bytes());
+                }
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_pop(&mut self, op: &AsmOperand) {
+        match op {
+            AsmOperand::Reg(r, _) => {
+                if *r >= 8 { self.emit(&[0x41]); }
+                self.emit(&[0x58 + (r & 7)]);
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_mov(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        let w = bits == 64;
+        match (src, dst) {
+            // reg → reg
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                if bits == 8 {
+                    // mov r8, r8: 88 /r
+                    if *s >= 4 || *d >= 4 { self.emit(&[Self::rex(false, *s, 0, *d)]); }
+                    self.emit(&[0x88, Self::modrm_reg_reg(*s, *d)]);
+                } else {
+                    if bits == 16 { self.emit(&[0x66]); }
+                    self.emit(&[Self::rex(w, *s, 0, *d), 0x89, Self::modrm_reg_reg(*s, *d)]);
+                }
+            }
+            // imm → reg
+            (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
+                if bits == 8 {
+                    self.emit(&[0xB0 + (d & 7), *v as u8]);
+                } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
+                    if *d >= 8 { self.emit(&[0x41]); }
+                    if bits == 16 { self.emit(&[0x66]); }
+                    self.emit(&[0xB8 + (d & 7)]); self.emit(&(*v as i32).to_le_bytes());
+                } else {
+                    // movabs reg, imm64
+                    if *d >= 8 { self.emit(&[0x49]); } else { self.emit(&[0x48]); }
+                    self.emit(&[0xB8 + (d & 7)]); self.emit(&v.to_le_bytes());
+                }
+            }
+            // mem → reg
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) => {
+                self.emit_asm_load(*d, *disp, *base, *index, *scale, bits);
+            }
+            // reg → mem
+            (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
+                self.emit_asm_store(*s, *disp, *base, *index, *scale, bits);
+            }
+            // imm → mem
+            (AsmOperand::Imm(v), AsmOperand::Mem { disp, base, index, scale }) => {
+                // mov [mem], imm: C7 /0 id (32-bit) or C6 /0 ib (8-bit)
+                if bits == 8 {
+                    self.emit_asm_modrm_mem(0xC6, 0, *disp, *base, *index, *scale, false);
+                    self.emit(&[*v as u8]);
+                } else {
+                    if bits != 16 && bits != 8 { self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base)]); }
+                    self.emit_asm_modrm_mem(0xC7, 0, *disp, *base, *index, *scale, false);
+                    self.emit(&(*v as i32).to_le_bytes());
+                }
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_load(&mut self, dst: u8, disp: i32, base: u8, index: Option<u8>, scale: u8, bits: u8) {
+        let w = bits == 64;
+        let has_sib = index.is_some() || (base & 7) == 4; // rsp/r12 需要 SIB
+        let need_disp = disp != 0 || (base & 7) == 5; // rbp/r13 强制 disp8
+        if bits == 16 { self.emit(&[0x66]); }
+        self.emit(&[Self::rex(w, dst, index.unwrap_or(0), base)]);
+        self.emit(&[0x8B]);
+        let mut modrm = (dst & 7) << 3;
+        if !need_disp && disp == 0 { modrm |= 0x00; } // mod=00
+        else if disp >= -128 && disp <= 127 { modrm |= 0x40; } // mod=01
+        else { modrm |= 0x80; } // mod=10
+        if has_sib {
+            self.emit(&[modrm | 0x04]); // rm=100 (SIB follows)
+            let mut sib = ((base & 7));
+            if let Some(idx) = index {
+                sib |= ((idx & 7) << 3);
+                let sc = match scale { 2 => 1, 4 => 2, 8 => 3, _ => 0 };
+                sib |= (sc << 6);
+            } else {
+                sib |= (4 << 3); // idx=100 (no index)
+            }
+            self.emit(&[sib]);
+        } else {
+            self.emit(&[modrm | (base & 7)]);
+        }
+        if need_disp {
+            if disp >= -128 && disp <= 127 { self.emit(&[disp as u8]); }
+            else { self.emit(&disp.to_le_bytes()); }
+        }
+    }
+
+    fn emit_asm_store(&mut self, src: u8, disp: i32, base: u8, index: Option<u8>, scale: u8, bits: u8) {
+        let w = bits == 64;
+        let has_sib = index.is_some() || (base & 7) == 4;
+        let need_disp = disp != 0 || (base & 7) == 5;
+        if bits == 16 { self.emit(&[0x66]); }
+        self.emit(&[Self::rex(w, src, index.unwrap_or(0), base)]);
+        self.emit(&[0x89]);
+        let mut modrm = (src & 7) << 3;
+        if !need_disp && disp == 0 { modrm |= 0x00; }
+        else if disp >= -128 && disp <= 127 { modrm |= 0x40; }
+        else { modrm |= 0x80; }
+        if has_sib {
+            self.emit(&[modrm | 0x04]);
+            let mut sib = (base & 7);
+            if let Some(idx) = index {
+                sib |= ((idx & 7) << 3);
+                let sc = match scale { 2 => 1, 4 => 2, 8 => 3, _ => 0 };
+                sib |= (sc << 6);
+            } else {
+                sib |= (4 << 3);
+            }
+            self.emit(&[sib]);
+        } else {
+            self.emit(&[modrm | (base & 7)]);
+        }
+        if need_disp {
+            if disp >= -128 && disp <= 127 { self.emit(&[disp as u8]); }
+            else { self.emit(&disp.to_le_bytes()); }
+        }
+    }
+
+    fn emit_asm_modrm_mem(&mut self, opcode: u8, reg: u8, disp: i32, base: u8, index: Option<u8>, scale: u8, need_rex: bool) {
+        let has_sib = index.is_some() || (base & 7) == 4;
+        let need_disp = disp != 0 || (base & 7) == 5;
+        if need_rex { self.emit(&[Self::rex(false, reg, index.unwrap_or(0), base)]); }
+        self.emit(&[opcode]);
+        let mut modrm = (reg & 7) << 3;
+        if !need_disp && disp == 0 { modrm |= 0x00; }
+        else if disp >= -128 && disp <= 127 { modrm |= 0x40; }
+        else { modrm |= 0x80; }
+        if has_sib {
+            self.emit(&[modrm | 0x04]);
+            let mut sib = (base & 7);
+            if let Some(idx) = index { sib |= ((idx & 7) << 3); let sc = match scale { 2=>1,4=>2,8=>3,_=>0 }; sib |= (sc<<6); }
+            else { sib |= (4 << 3); }
+            self.emit(&[sib]);
+        } else {
+            self.emit(&[modrm | (base & 7)]);
+        }
+        if need_disp {
+            if disp >= -128 && disp <= 127 { self.emit(&[disp as u8]); }
+            else { self.emit(&disp.to_le_bytes()); }
+        }
+    }
+
+    fn emit_asm_lea(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        if let (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) = (src, dst) {
+            let w = bits == 64;
+            self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x8D]);
+            let has_sib = index.is_some() || (base & 7) == 4;
+            let need_disp = *disp != 0 || (base & 7) == 5;
+            let mut modrm = (d & 7) << 3;
+            if !need_disp && *disp == 0 { modrm |= 0x00; }
+            else if *disp >= -128 && *disp <= 127 { modrm |= 0x40; }
+            else { modrm |= 0x80; }
+            if has_sib {
+                self.emit(&[modrm | 0x04]);
+                let mut sib = (*base & 7);
+                if let Some(idx) = index { sib |= ((idx & 7) << 3); let sc = match scale { 2=>1,4=>2,8=>3,_=>0 }; sib |= (sc<<6); }
+                else { sib |= (4 << 3); }
+                self.emit(&[sib]);
+            } else {
+                self.emit(&[modrm | (base & 7)]);
+            }
+            if need_disp {
+                if *disp >= -128 && *disp <= 127 { self.emit(&[*disp as u8]); }
+                else { self.emit(&disp.to_le_bytes()); }
+            }
+        } else { self.emit(&[0x90]); }
+    }
+
+    fn emit_asm_alu(&mut self, src: &AsmOperand, dst: &AsmOperand, op: u8, bits: u8) {
+        let w = bits == 64;
+        match (src, dst) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                if bits == 8 {
+                    if *s >= 4 || *d >= 4 { self.emit(&[Self::rex(false, *s, 0, *d)]); }
+                    self.emit(&[0x00 + op * 8, Self::modrm_reg_reg(*s, *d)]);
+                } else {
+                    if bits == 16 { self.emit(&[0x66]); }
+                    self.emit(&[Self::rex(w, *s, 0, *d), 0x01 + op * 8, Self::modrm_reg_reg(*s, *d)]);
+                }
+            }
+            (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
+                if bits == 16 { self.emit(&[0x66]); }
+                if bits != 8 { self.emit(&[Self::rex(w, 0, 0, *d)]); }
+                if *v >= -128 && *v <= 127 {
+                    self.emit(&[0x83, Self::modrm_reg_reg(op, *d), *v as u8]);
+                } else if bits == 8 {
+                    self.emit(&[0x80 + op * 8, Self::modrm_reg_reg(op, *d), *v as u8]);
+                } else {
+                    self.emit(&[0x81, Self::modrm_reg_reg(op, *d)]);
+                    self.emit(&(*v as i32).to_le_bytes());
+                }
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base)]);
+                self.emit(&[0x03 + op * 8]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base)]);
+                self.emit(&[0x01 + op * 8]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_modrm_mem_only(&mut self, reg: u8, disp: i32, base: u8, index: Option<u8>, scale: u8) {
+        let has_sib = index.is_some() || (base & 7) == 4;
+        let need_disp = disp != 0 || (base & 7) == 5;
+        let mut modrm = (reg & 7) << 3;
+        if !need_disp && disp == 0 { modrm |= 0x00; }
+        else if disp >= -128 && disp <= 127 { modrm |= 0x40; }
+        else { modrm |= 0x80; }
+        if has_sib {
+            self.emit(&[modrm | 0x04]);
+            let mut sib = (base & 7);
+            if let Some(idx) = index { sib |= ((idx & 7) << 3); let sc = match scale { 2=>1,4=>2,8=>3,_=>0 }; sib |= (sc<<6); }
+            else { sib |= (4 << 3); }
+            self.emit(&[sib]);
+        } else {
+            self.emit(&[modrm | (base & 7)]);
+        }
+        if need_disp {
+            if disp >= -128 && disp <= 127 { self.emit(&[disp as u8]); }
+            else { self.emit(&disp.to_le_bytes()); }
+        }
+    }
+
+    fn emit_asm_test(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        let w = bits == 64;
+        match (src, dst) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, *s, 0, *d), 0x85, Self::modrm_reg_reg(*s, *d)]);
+            }
+            (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, 0, 0, *d)]);
+                if bits == 8 { self.emit(&[0xF6, Self::modrm_reg_reg(0, *d), *v as u8]); }
+                else { self.emit(&[0xF7, Self::modrm_reg_reg(0, *d)]); self.emit(&(*v as i32).to_le_bytes()); }
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_shift(&mut self, src: &AsmOperand, dst: &AsmOperand, op: u8, bits: u8) {
+        let w = bits == 64;
+        match (src, dst) {
+            (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, 0, 0, *d)]);
+                if *v == 1 { self.emit(&[0xD1, Self::modrm_reg_reg(op, *d)]); }
+                else { self.emit(&[0xC1, Self::modrm_reg_reg(op, *d), *v as u8]); }
+            }
+            (AsmOperand::Reg(c, _), AsmOperand::Reg(d, _)) if *c == 1 => { // cl
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, 0, 0, *d), 0xD3, Self::modrm_reg_reg(op, *d)]);
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_imul2(&mut self, src: &AsmOperand, dst: &AsmOperand) {
+        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            self.emit(&[Self::rex(true, *d, 0, *s), 0x0F, 0xAF, Self::modrm_reg_reg(*d, *s)]);
+        } else { self.emit(&[0x90]); }
+    }
+
+    fn emit_asm_imul3(&mut self, src1: &AsmOperand, src2: &AsmOperand, dst: &AsmOperand) {
+        if let (AsmOperand::Reg(s, _), AsmOperand::Imm(v), AsmOperand::Reg(d, _)) = (src2, src1, dst) {
+            if *v >= -128 && *v <= 127 {
+                self.emit(&[Self::rex(true, *d, 0, *s), 0x6B, Self::modrm_reg_reg(*d, *s), *v as u8]);
+            } else {
+                self.emit(&[Self::rex(true, *d, 0, *s), 0x69, Self::modrm_reg_reg(*d, *s)]);
+                self.emit(&(*v as i32).to_le_bytes());
+            }
+        } else { self.emit(&[0x90]); }
+    }
+
+    fn emit_asm_unary_rm(&mut self, op: &AsmOperand, ext: u8, bits: u8) {
+        let w = bits == 64;
+        match op {
+            AsmOperand::Reg(r, _) => {
+                self.emit(&[Self::rex(w, 0, 0, *r), 0xF7, Self::modrm_reg_reg(ext, *r)]);
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_jmp(&mut self, op: &AsmOperand) {
+        match op {
+            AsmOperand::Sym(label) => {
+                self.jmp_rel32(label, JumpKind::Jmp);
+            }
+            AsmOperand::Reg(r, _) => {
+                // jmp reg: FF /4
+                if *r >= 8 { self.emit(&[0x41]); }
+                self.emit(&[0xFF, 0xE0 | (r & 7)]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                // jmp [mem]: FF /4
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base)]);
+                self.emit_asm_modrm_mem(0xFF, 4, *disp, *base, *index, *scale, false);
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_jcc(&mut self, op: &AsmOperand, cc: u8) {
+        match op {
+            AsmOperand::Sym(label) => {
+                // 发射条件跳转: 0F 8x disp32 (6 bytes)
+                let at = self.pos();
+                self.emit(&[0x0F, cc, 0, 0, 0, 0]);
+                // 映射 AT&T cc 字节到 JumpKind
+                let kind = match cc {
+                    0x84 => JumpKind::Je, 0x85 => JumpKind::Jne,
+                    0x8C => JumpKind::Jl, 0x8E => JumpKind::Jle,
+                    0x8F => JumpKind::Jg, 0x8D => JumpKind::Jge,
+                    _ => JumpKind::Jne, // fallback
+                };
+                self.pending.push(PendingJump { at, target: label.clone(), kind });
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_call(&mut self, op: &AsmOperand) {
+        match op {
+            AsmOperand::Sym(label) => {
+                self.call_label(label);
+            }
+            AsmOperand::Reg(r, _) => {
+                if *r >= 8 { self.emit(&[0x41]); }
+                self.emit(&[0xFF, 0xD0 | (r & 7)]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base)]);
+                self.emit_asm_modrm_mem(0xFF, 2, *disp, *base, *index, *scale, false);
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_movzx(&mut self, src: &AsmOperand, dst: &AsmOperand, src_bits: u8, dst_bits: u8) {
+        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            let w = dst_bits == 64;
+            self.emit(&[Self::rex(w, *d, 0, *s)]);
+            match src_bits {
+                8 => self.emit(&[0x0F, 0xB6, Self::modrm_reg_reg(*d, *s)]),
+                16 => self.emit(&[0x0F, 0xB7, Self::modrm_reg_reg(*d, *s)]),
+                _ => self.emit(&[0x90]),
+            };
+        } else { self.emit(&[0x90]); }
+    }
+
+    fn emit_asm_movsx(&mut self, src: &AsmOperand, dst: &AsmOperand, src_bits: u8, dst_bits: u8) {
+        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            let w = dst_bits == 64;
+            self.emit(&[Self::rex(w, *d, 0, *s)]);
+            match src_bits {
+                8 => self.emit(&[0x0F, 0xBE, Self::modrm_reg_reg(*d, *s)]),
+                16 => self.emit(&[0x0F, 0xBF, Self::modrm_reg_reg(*d, *s)]),
+                32 => self.emit(&[0x63, Self::modrm_reg_reg(*d, *s)]),
+                _ => self.emit(&[0x90]),
+            };
+        } else { self.emit(&[0x90]); }
+    }
+
+    fn emit_asm_xchg(&mut self, src: &AsmOperand, dst: &AsmOperand) {
+        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            if *s == 0 { // xchg eax, reg
+                if *d >= 8 { self.emit(&[0x41]); }
+                self.emit(&[0x90 + (d & 7)]);
+            } else if *d == 0 {
+                if *s >= 8 { self.emit(&[0x41]); }
+                self.emit(&[0x90 + (s & 7)]);
+            } else {
+                self.emit(&[Self::rex(true, *s, 0, *d), 0x87, Self::modrm_reg_reg(*s, *d)]);
+            }
+        } else { self.emit(&[0x90]); }
+    }
+
+    fn emit_asm_cmov(&mut self, src: &AsmOperand, dst: &AsmOperand, cc: u8) {
+        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            self.emit(&[Self::rex(true, *d, 0, *s), 0x0F, cc, Self::modrm_reg_reg(*d, *s)]);
+        } else { self.emit(&[0x90]); }
+    }
+
+    fn emit_asm_setcc(&mut self, op: &AsmOperand, cc: u8) {
+        match op {
+            AsmOperand::Reg(r, _) => {
+                if *r >= 8 { self.emit(&[0x41]); }
+                self.emit(&[0x0F, cc, 0xC0 | (r & 7)]);
+            }
+            _ => { self.emit(&[0x90]); }
+        }
+    }
+
+    fn emit_asm_cmpxchg(&mut self, src: &AsmOperand, dst: &AsmOperand) {
+        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            self.emit(&[Self::rex(true, *s, 0, *d), 0x0F, 0xB1, Self::modrm_reg_reg(*s, *d)]);
+        } else { self.emit(&[0x90]); }
+    }
+
+    fn emit_asm_xadd(&mut self, src: &AsmOperand, dst: &AsmOperand) {
+        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            self.emit(&[Self::rex(true, *s, 0, *d), 0x0F, 0xC1, Self::modrm_reg_reg(*s, *d)]);
+        } else { self.emit(&[0x90]); }
     }
 
 }
