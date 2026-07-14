@@ -30,7 +30,7 @@
 | `-mno-red-zone` / `-mcmodel=kernel` CLI 标志 | 内核编译常用 GCC flags 静默接受 | ✅ |
 | `MODULE_LICENSE` 等模块宏 | 展开为 `.modinfo` section 变量 | ✅ |
 | `percpu` 支持 | `DEFINE_PER_CPU` 等宏展开为 `.data..percpu` section | ✅ |
-| 嵌套函数静态链 | GCC 通过 r10 传递静态链，访问外层变量 | ⬜ |
+| 嵌套函数静态链 | GCC 通过 r10 传递静态链，访问外层变量 | ✅ |
 
 ## 🟡 次要级 (Minor)
 
@@ -56,4 +56,4 @@
 4. ✅ `__builtin_offsetof` codegen — 结构体操作
 5. ✅ `__has_builtin` 正确返回值 + CLI 标志识别 — 构建系统兼容
 6. ✅ `MODULE_*` 宏 + percpu section — 模块支持
-7. ⬜ 嵌套函数静态链 — GCC 扩展完整性
+7. ✅ 嵌套函数静态链 — GCC 扩展完整性

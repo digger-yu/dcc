@@ -403,7 +403,7 @@ impl<'a> Parser<'a> {
                     } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
                     self.skip_attributes();
                     let sp = name.span.clone();
-                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic })]);
+                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_nested: false, upvars: vec![] })]);
                 }
             }
             // 标准函数指针变量: type (*name)(params)
@@ -475,6 +475,9 @@ impl<'a> Parser<'a> {
             let post_attrs = self.parse_attributes();
             let attrs = Self::merge_attrs(pre_attrs, post_attrs);
             self.skip_asm_label();
+            // 检测是否是嵌套函数 (在外层函数体内)
+            let is_nested_func = self.in_function;
+            let parent_locals = if is_nested_func { self.locals.clone() } else { HashMap::new() };
             // 进入函数: 从全局变量表恢复, 清除局部变量
             self.locals = self.globals.clone();
             self.in_function = true;
@@ -487,13 +490,27 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 Some(b)
             } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
+            // 恢复外层函数的 in_function 状态
+            if is_nested_func {
+                self.locals = parent_locals.clone();
+            }
+            // 检测嵌套函数捕获的外层变量
+            let upvars = if is_nested_func {
+                let mut captured = Vec::new();
+                if let Some(ref b) = body {
+                    Self::collect_upvars(&b.items, &self.locals, &parent_locals, &mut captured);
+                }
+                captured
+            } else {
+                vec![]
+            };
             // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
             let attrs = attrs;
             Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: false, is_static: false,
                 section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
                 visibility: attrs.visibility, is_unused: attrs.is_unused,
                 is_cold: attrs.is_cold, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
-                is_variadic: self.last_variadic })])
+                is_variadic: self.last_variadic, is_nested: is_nested_func, upvars })])
         } else if self.cur.kind == TokKind::LBracket {
             self.advance();
             let arr_size = if self.cur.kind != TokKind::RBracket {
@@ -1676,6 +1693,98 @@ impl<'a> Parser<'a> {
                 Some(Expr::InitList { inits, span: sp, ty: Type::Int }) // 类型稍后由上下文确定
             }
             _ => { self.err_here("E0006", format!("expected expression, got {:?}", self.cur.kind), Some("expected a value, variable, or expression here")); None }
+        }
+    }
+
+    /// 收集嵌套函数捕获的外层变量
+    fn collect_upvars(items: &[BlockItem], local_vars: &HashMap<String, Type>, parent_locals: &HashMap<String, Type>, out: &mut Vec<(String, i32)>) {
+        for item in items {
+            match item {
+                BlockItem::Stmt(s) => Self::collect_upvars_stmt(s, local_vars, parent_locals, out),
+                BlockItem::Decl(Decl::Var(v)) => {
+                    // 检查初始化表达式中的外层变量引用
+                    if let Some(init) = &v.init {
+                        Self::collect_upvars_expr(init, local_vars, parent_locals, out);
+                    }
+                    // 新声明的局部变量加入 local_vars (不修改原始 map, 只在递归时传递)
+                }
+                BlockItem::Decl(Decl::Func(f)) => {
+                    // 递归检查嵌套函数体
+                    if let Some(body) = &f.body {
+                        Self::collect_upvars(&body.items, local_vars, parent_locals, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn collect_upvars_stmt(s: &Stmt, local_vars: &HashMap<String, Type>, parent_locals: &HashMap<String, Type>, out: &mut Vec<(String, i32)>) {
+        match s {
+            Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => Self::collect_upvars_expr(e, local_vars, parent_locals, out),
+            Stmt::Return { val: None, .. } => {}
+            Stmt::Block { b, .. } => Self::collect_upvars(&b.items, local_vars, parent_locals, out),
+            Stmt::If { cond, then_, else_, .. } => {
+                Self::collect_upvars_expr(cond, local_vars, parent_locals, out);
+                Self::collect_upvars_stmt(then_, local_vars, parent_locals, out);
+                if let Some(e) = else_ { Self::collect_upvars_stmt(e, local_vars, parent_locals, out); }
+            }
+            Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
+                Self::collect_upvars_expr(cond, local_vars, parent_locals, out);
+                Self::collect_upvars_stmt(body, local_vars, parent_locals, out);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                if let Some(i) = init { Self::collect_upvars_stmt(i, local_vars, parent_locals, out); }
+                if let Some(c) = cond { Self::collect_upvars_expr(c, local_vars, parent_locals, out); }
+                if let Some(s) = step { Self::collect_upvars_expr(s, local_vars, parent_locals, out); }
+                Self::collect_upvars_stmt(body, local_vars, parent_locals, out);
+            }
+            Stmt::Switch { expr, cases, .. } => {
+                Self::collect_upvars_expr(expr, local_vars, parent_locals, out);
+                for c in cases { Self::collect_upvars(&c.body.items, local_vars, parent_locals, out); }
+            }
+            _ => {}
+        }
+    }
+    fn collect_upvars_expr(e: &Expr, local_vars: &HashMap<String, Type>, parent_locals: &HashMap<String, Type>, out: &mut Vec<(String, i32)>) {
+        match e {
+            Expr::Ident { name, .. } => {
+                let n = &name.name;
+                // 如果变量不在当前局部变量表中, 但在父级局部变量表中, 则是捕获的 upvar
+                if !local_vars.contains_key(n) && parent_locals.contains_key(n) {
+                    if !out.iter().any(|(name, _)| name == n) {
+                        // 偏移占位符 0, 实际偏移在 codegen 中计算
+                        out.push((n.clone(), 0));
+                    }
+                }
+            }
+            Expr::Binop { l, r, .. } => {
+                Self::collect_upvars_expr(l, local_vars, parent_locals, out);
+                Self::collect_upvars_expr(r, local_vars, parent_locals, out);
+            }
+            Expr::Unary { e, .. } => Self::collect_upvars_expr(e, local_vars, parent_locals, out),
+            Expr::Assign { l, r, .. } => {
+                Self::collect_upvars_expr(l, local_vars, parent_locals, out);
+                Self::collect_upvars_expr(r, local_vars, parent_locals, out);
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::collect_upvars_expr(callee, local_vars, parent_locals, out);
+                for a in args { Self::collect_upvars_expr(a, local_vars, parent_locals, out); }
+            }
+            Expr::Member { expr, .. } => Self::collect_upvars_expr(expr, local_vars, parent_locals, out),
+            Expr::Index { arr, idx, .. } => {
+                Self::collect_upvars_expr(arr, local_vars, parent_locals, out);
+                Self::collect_upvars_expr(idx, local_vars, parent_locals, out);
+            }
+            Expr::Cond { cond, then_, else_, .. } => {
+                Self::collect_upvars_expr(cond, local_vars, parent_locals, out);
+                Self::collect_upvars_expr(then_, local_vars, parent_locals, out);
+                Self::collect_upvars_expr(else_, local_vars, parent_locals, out);
+            }
+            Expr::Cast { e, .. } | Expr::AddrOf { e, .. } | Expr::Deref { e, .. } => {
+                Self::collect_upvars_expr(e, local_vars, parent_locals, out);
+            }
+            Expr::StmtExpr { block, .. } => Self::collect_upvars(&block.items, local_vars, parent_locals, out),
+            _ => {}
         }
     }
 

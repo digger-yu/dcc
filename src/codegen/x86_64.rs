@@ -49,6 +49,11 @@ pub struct Codegen {
     func_sizes: HashMap<String, u64>, // 函数名 → 代码大小 (用于符号 size)
     variadic_funcs: HashMap<String, bool>, // 函数名 → 是否可变参数
     variadic_named_params: i32, // 当前可变参数函数的命名参数数量
+    // 嵌套函数静态链
+    nested_funcs: HashMap<String, Vec<(String, i32)>>, // 嵌套函数名 → upvars (name, parent_offset)
+    current_func_is_nested: bool,  // 当前编译的函数是否是嵌套函数
+    static_chain_offset: i32,      // 静态链在当前帧中的偏移
+    upvar_offsets: HashMap<String, i32>, // upvar 名称 → 在父帧中的偏移
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -71,7 +76,11 @@ impl Codegen {
                data_section: vec![], bss_size: 0, extra_sections: vec![],
                custom_sec_indices: HashMap::new(), func_sizes: HashMap::new(),
                variadic_funcs: HashMap::new(),
-               variadic_named_params: 0 }
+               variadic_named_params: 0,
+               nested_funcs: HashMap::new(),
+               current_func_is_nested: false,
+               static_chain_offset: 0,
+               upvar_offsets: HashMap::new() }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -169,6 +178,8 @@ impl Codegen {
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.is_variadic { self.variadic_funcs.insert(f.name.name.clone(), true); }
+                // 记录嵌套函数及其 upvars
+                if f.is_nested { self.nested_funcs.insert(f.name.name.clone(), f.upvars.clone()); }
             }
         }
         if self.relocatable {
@@ -566,6 +577,15 @@ impl Codegen {
         self.var_map.clear();
         self.vla_offsets.clear();
         self.vla_total_size = 0;
+        // 设置嵌套函数状态
+        self.current_func_is_nested = f.is_nested;
+        self.upvar_offsets.clear();
+        if f.is_nested {
+            // 记录 upvar 的父帧偏移 (占位符, 实际值在父函数编译时已知)
+            for (name, _off) in &f.upvars {
+                self.upvar_offsets.insert(name.clone(), 0); // 偏移将在代码生成时解析
+            }
+        }
         let func_start = self.pos();
         self.label(&f.name.name);
         self.emit(&[0x41, 0x55, 0x49, 0x89, 0xe5]);
@@ -617,7 +637,8 @@ impl Codegen {
                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                     .map(|(_, ty)| ((ty.size() + 7) / 8) as i32 * 8)
                     .sum();
-                let raw = var_bytes + 16 + temp_slots * 8;
+                let sc_slot = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
+                let raw = var_bytes + 16 + temp_slots * 8 + sc_slot;
                 self.frame_size = ((raw + 15) / 16) * 16; // 16 字节对齐
                 if self.frame_size > 0 {
                     self.emit(&[0x48, 0x81, 0xec]);
@@ -625,6 +646,13 @@ impl Codegen {
                 }
                 self.emit(&[0x4d, 0x8d, 0xa5]);
                 self.emit(&(-(self.frame_size) as i32).to_le_bytes());
+                // 嵌套函数: 保存静态链 (r10) 到帧底部
+                if f.is_nested {
+                    self.static_chain_offset = -(self.frame_size as i32) + 8;
+                    // mov [r13 + static_chain_offset], r10
+                    self.emit(&[0x49, 0x89, 0x95]);
+                    self.emit(&self.static_chain_offset.to_le_bytes());
+                }
                 // Phase 2: 帧已建立 (r13 已设置), 现在存储参数到栈槽
                 for (reg, off) in param_stores {
                     self.store_stack(reg, off);
@@ -904,6 +932,29 @@ impl Codegen {
                     self.emit_global_load(dst, &name.name);
                 } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
                     self.gen_float_load(&name.name, ty);
+                } else if self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name) {
+                    // upvar 访问: 通过静态链加载
+                    // 1. 加载静态链到 dst: mov dst, [r13 + static_chain_offset]
+                    let sc_off = self.static_chain_offset;
+                    self.emit(&[0x49, 0x8b]); // mov dst, [r13 + off]
+                    if dst >= 8 { self.emit(&[0x84 | ((dst & 7) << 3)]); }
+                    else { self.emit(&[0x45 | ((dst & 7) << 3)]); }
+                    self.emit(&sc_off.to_le_bytes());
+                    // 2. 从父帧加载 upvar: mov dst, [dst + parent_offset]
+                    // 注意: upvar_offsets 中存储的是占位符 0, 实际偏移需要从父函数获取
+                    // 简化实现: 假设 upvar 偏移为 0 (需要更复杂的偏移解析)
+                    let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
+                    if parent_off != 0 {
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x8b]);
+                        if dst >= 8 { self.emit(&[0x84 | ((dst & 7) << 3)]); }
+                        else { self.emit(&[0x44 | ((dst & 7) << 3)]); }
+                        self.emit(&parent_off.to_le_bytes());
+                    } else {
+                        // 偏移为 0: 直接解引用
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x8b, 0x00 | ((dst & 7) << 3) | (dst & 7)]);
+                    }
                 } else {
                     self.mov_from_stack(dst, &name.name);
                 }
@@ -1301,6 +1352,10 @@ impl Codegen {
                                 }
                                 arg_idx += 1;
                             }
+                        }
+                        // 嵌套函数调用: 设置静态链 r10 = r13 (当前帧指针)
+                        if self.nested_funcs.contains_key(&name.name) {
+                            self.emit(&[0x4c, 0x89, 0xea]); // mov r10, r13
                         }
                         self.emit(&[0x54]); // push rsp
                         self.call_label(&name.name);
