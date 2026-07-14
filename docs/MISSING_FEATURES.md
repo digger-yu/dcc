@@ -2,7 +2,7 @@
 
 本文档记录 DCC 编译 Linux 内核时尚未实现的特性，按优先级分类。
 
-> 最后更新: Phase 5 完成后
+> 最后更新: 重要级特性实现完成后
 
 ---
 
@@ -25,20 +25,20 @@
 
 | 特性 | 说明 | 状态 |
 |------|------|------|
+| `__builtin_offsetof` codegen | `offsetof()` 宏核心, 支持结构体/嵌套结构体/union | ✅ |
+| `__has_builtin` 返回正确值 | `#if` 上下文中正确识别已实现的 builtin | ✅ |
+| `-mno-red-zone` / `-mcmodel=kernel` CLI 标志 | 内核编译常用 GCC flags 静默接受 | ✅ |
+| `MODULE_LICENSE` 等模块宏 | 展开为 `.modinfo` section 变量 | ✅ |
+| `percpu` 支持 | `DEFINE_PER_CPU` 等宏展开为 `.data..percpu` section | ✅ |
 | 嵌套函数静态链 | GCC 通过 r10 传递静态链，访问外层变量 | ⬜ |
-| `__builtin_offsetof` codegen | `offsetof()` 宏核心 | ⬜ |
-| `percpu` 支持 | `.data..percpu` section + `__percpu` 地址空间 | ⬜ |
-| `__has_builtin` 返回正确值 | 当前始终返回 0，导致跳过已实现的 builtin | ⬜ |
-| `-mno-red-zone` / `-mcmodel=kernel` CLI 标志 | 内核编译必须，至少需静默接受 | ⬜ |
-| `MODULE_LICENSE` 等模块宏 | 生成 `.modinfo` section | ⬜ |
 
 ## 🟡 次要级 (Minor)
 
 影响特定子系统或可降级处理。
 
 | 特性 | 说明 | 降级方案 |
-|------|------|---------|
-| `__builtin_prefetch` | 性能关键代码 | 降级为 no-op |
+|------|------|--------|
+| `__builtin_prefetch` | 性能关键代码 | 已实现 |
 | `__builtin_memcpy` 内联 | freestanding 无 libc | 需 `rep movsb` 内联 |
 | 复杂 inline asm 约束 | `arch/` 层大量使用 | 需更完整约束解析 |
 | `__attribute__((format))` | printf/scanf 格式检查 | 可静默跳过 |
@@ -50,10 +50,10 @@
 
 ## 实现优先级建议
 
-1. `__builtin_choose_expr` + `__builtin_types_compatible_p` — 编译器宏基础设施
-2. `_Atomic` 完整支持 + 函数属性识别 — 解析器兼容性
-3. `__builtin_add/sub/mul_overflow` — 溢出检测
-4. `__builtin_offsetof` codegen — 结构体操作
-5. `__has_builtin` 正确返回值 + CLI 标志识别 — 构建系统兼容
-6. `MODULE_*` 宏 + percpu section — 模块支持
-7. 嵌套函数静态链 — GCC 扩展完整性
+1. ✅ `__builtin_choose_expr` + `__builtin_types_compatible_p` — 编译器宏基础设施
+2. ✅ `_Atomic` 完整支持 + 函数属性识别 — 解析器兼容性
+3. ✅ `__builtin_add/sub/mul_overflow` — 溢出检测
+4. ✅ `__builtin_offsetof` codegen — 结构体操作
+5. ✅ `__has_builtin` 正确返回值 + CLI 标志识别 — 构建系统兼容
+6. ✅ `MODULE_*` 宏 + percpu section — 模块支持
+7. ⬜ 嵌套函数静态链 — GCC 扩展完整性

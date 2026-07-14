@@ -127,6 +127,8 @@ pub enum Expr {
     LabelAddr  { label: Ident, span: Span, ty: Type },
     /// __builtin_va_arg(ap, type): 可变参数读取
     VaArg      { ap: Box<Expr>, ty: Type, span: Span },
+    /// __builtin_offsetof(type, member)
+    Offsetof   { ty: Type, member: String, span: Span, result_ty: Type },
 }
 
 /// 初始化项: 普通值 或 指定初始化器
@@ -395,7 +397,8 @@ impl Expr {
             Expr::Cast { ty, .. } => ty.clone(),
             Expr::InitList { ty, .. } => ty.clone(),
             Expr::SizeofTy { .. } | Expr::SizeofExpr { .. } | Expr::CompoundLit { .. }
-            | Expr::AlignofTy { .. } | Expr::AlignofExpr { .. } => Type::Int,
+            | Expr::AlignofTy { .. } | Expr::AlignofExpr { .. }
+            | Expr::Offsetof { .. } => Type::Int,
             Expr::StmtExpr { ty, .. } => ty.clone(),
         }
     }

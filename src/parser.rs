@@ -1520,6 +1520,38 @@ impl<'a> Parser<'a> {
                             e = chosen;
                             continue;
                         }
+                        // __builtin_offsetof(type, member): 结构体成员偏移
+                        if name.name == "__builtin_offsetof" {
+                            let base_ty = self.parse_type()?;
+                            if !self.expect(TokKind::Comma, "','") { return None; }
+                            // 解析成员设计器: field, field.sub, field[idx].sub 等
+                            let mut member = String::new();
+                            if self.cur.kind == TokKind::Ident {
+                                member = self.cur.text.clone();
+                                self.advance();
+                            }
+                            // 支持 .field 和 [expr] 后缀
+                            loop {
+                                if self.cur.kind == TokKind::Dot {
+                                    self.advance();
+                                    if self.cur.kind == TokKind::Ident {
+                                        member.push('.');
+                                        member.push_str(&self.cur.text);
+                                        self.advance();
+                                    }
+                                } else if self.cur.kind == TokKind::LBracket {
+                                    self.advance();
+                                    let _idx = self.parse_expr_bp(2);
+                                    if self.cur.kind == TokKind::RBracket { self.advance(); }
+                                    member.push_str("[]");
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            e = Expr::Offsetof { ty: base_ty, member, span: sp.clone(), result_ty: int_t() };
+                            continue;
+                        }
                     }
                     let mut args = vec![];
                     if self.cur.kind != TokKind::RParen { loop { args.push(self.parse_expr_bp(2)?); if self.cur.kind == TokKind::Comma { self.advance(); continue; } break; } }

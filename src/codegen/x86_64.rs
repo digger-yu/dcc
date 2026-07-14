@@ -1327,6 +1327,10 @@ impl Codegen {
             Expr::SizeofExpr { e, .. } => self.mov_imm(dst, e.ty().size() as i128),
             Expr::AlignofTy { ty, .. } => self.mov_imm(dst, ty.align() as i128),
             Expr::AlignofExpr { e, .. } => self.mov_imm(dst, e.ty().align() as i128),
+            Expr::Offsetof { ty, ref member, .. } => {
+                let off = Self::compute_offset(ty, member);
+                self.mov_imm(dst, off as i128);
+            }
             Expr::Comma { l, r, .. } => {
                 // 逗号运算符: 求值 lhs 丢弃, 求值 rhs 结果放入 dst
                 self.gen_expr(l, 0);
@@ -3041,6 +3045,43 @@ impl Codegen {
             }
             _ => false,
         }
+    }
+
+    /// 计算结构体成员偏移 (用于 __builtin_offsetof)
+    fn compute_offset(ty: &Type, member: &str) -> usize {
+        let fields = match ty {
+            Type::Struct(_, fields) => fields,
+            Type::Union(_, _fields) => {
+                // union: 所有成员偏移都是 0
+                return 0;
+            }
+            _ => return 0,
+        };
+        let parts: Vec<&str> = member.split('.').collect();
+        let mut offset = 0usize;
+        let mut current_fields = fields.as_ref();
+        for (i, part) in parts.iter().enumerate() {
+            let part = if part.contains('[') { &part[..part.find('[').unwrap()] } else { part };
+            let mut found = false;
+            for field in current_fields.iter() {
+                if field.name == *part {
+                    offset += field.offset;
+                    if i < parts.len() - 1 {
+                        // 嵌套: 进入子结构
+                        match &field.ty {
+                            Type::Struct(_, sub_fields) => {
+                                current_fields = sub_fields.as_ref();
+                            }
+                            _ => {}
+                        }
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if !found { break; }
+        }
+        offset
     }
 
     /// 获取指针参数所指元素的大小

@@ -62,6 +62,9 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 - `__builtin_va_list` / `__builtin_va_start` / `__builtin_va_arg` / `__builtin_va_end` 可变参数支持
 - `__builtin_choose_expr` / `__builtin_types_compatible_p` 编译期类型选择与判断
 - `__builtin_add_overflow` / `__builtin_sub_overflow` / `__builtin_mul_overflow` 溢出检测算术
+- `__builtin_offsetof` 结构体成员偏移计算 (支持嵌套结构体)
+- `MODULE_LICENSE` / `MODULE_AUTHOR` / `MODULE_DESCRIPTION` 等内核模块宏
+- `DEFINE_PER_CPU` / `DECLARE_PER_CPU` percpu 变量支持
 - 嵌套函数定义 (GCC 扩展, 不含静态链外层变量访问)
 
 ## 重要选项

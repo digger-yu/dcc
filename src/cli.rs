@@ -271,7 +271,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-mno-sse" | "-mno-mmx" | "-mno-sse2" | "-mno-80387" | "-mno-fp-ret-in-387"
             | "-mno-3dnow" | "-mno-3dnowa" | "-nostdinc" | "-nostdlib" | "-nodefaultlibs"
             | "-static" | "-shared" | "-pie" | "-no-pie"
-            | "-pg" | "-pthread" => {}
+            | "-pg" | "-pthread"
+            | "-mcmodel=kernel" | "-mindirect-branch=thunk-extern"
+            | "-mrecord-mcount" | "-mpreferred-stack-boundary=2"
+            | "-fno-asynchronous-unwind-tables" | "-fno-unwind-tables"
+            | "-fno-plt" | "-fno-strict-overflow" | "-ftrivial-auto-var-init=zero"
+            | "-falign-jumps=1" | "-falign-loops=1" | "-fshort-wchar" => {}
             "-P" => {} // 抑制 #line 指令，DCC 预处理器本身就不输出它们
             // -W* 警告选项 - 忽略
             a if a.starts_with("-W") => {}

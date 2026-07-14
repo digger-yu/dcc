@@ -252,6 +252,49 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.macros.insert("barrier".to_string(), MacroDef {
         params: Some(vec![]), body: "".to_string(), variadic: false,
     });
+    // MODULE_LICENSE/AUTHOR/DESCRIPTION/ALIAS 等模块宏
+    // 展开为 .modinfo section 的字符串变量
+    pp.macros.insert("MODULE_LICENSE".to_string(), MacroDef {
+        params: Some(vec!["x".to_string()]),
+        body: "static const char __module_license[] __attribute__((section(\".modinfo\"))) = \"license=\" x;".to_string(),
+        variadic: false,
+    });
+    pp.macros.insert("MODULE_AUTHOR".to_string(), MacroDef {
+        params: Some(vec!["x".to_string()]),
+        body: "static const char __module_author[] __attribute__((section(\".modinfo\"))) = \"author=\" x;".to_string(),
+        variadic: false,
+    });
+    pp.macros.insert("MODULE_DESCRIPTION".to_string(), MacroDef {
+        params: Some(vec!["x".to_string()]),
+        body: "static const char __module_description[] __attribute__((section(\".modinfo\"))) = \"description=\" x;".to_string(),
+        variadic: false,
+    });
+    pp.macros.insert("MODULE_ALIAS".to_string(), MacroDef {
+        params: Some(vec!["x".to_string()]),
+        body: "static const char __module_alias[] __attribute__((section(\".modinfo\"))) = \"alias=\" x;".to_string(),
+        variadic: false,
+    });
+    pp.macros.insert("MODULE_INFO".to_string(), MacroDef {
+        params: Some(vec!["tag".to_string(), "info".to_string()]),
+        body: "static const char __module_info[] __attribute__((section(\".modinfo\"))) = tag \"=\" info;".to_string(),
+        variadic: false,
+    });
+    // percpu 支持: DEFINE_PER_CPU(type, name) 展开为 .data..percpu section 的变量
+    pp.macros.insert("DEFINE_PER_CPU".to_string(), MacroDef {
+        params: Some(vec!["type".to_string(), "name".to_string()]),
+        body: "__attribute__((section(\".data..percpu\"))) type name".to_string(),
+        variadic: false,
+    });
+    pp.macros.insert("DEFINE_PER_CPU_SHARED_ALIGNED".to_string(), MacroDef {
+        params: Some(vec!["type".to_string(), "name".to_string()]),
+        body: "__attribute__((section(\".data..percpu\"), __aligned__(64))) type name".to_string(),
+        variadic: false,
+    });
+    pp.macros.insert("DECLARE_PER_CPU".to_string(), MacroDef {
+        params: Some(vec!["type".to_string(), "name".to_string()]),
+        body: "extern __attribute__((section(\".data..percpu\"))) type name".to_string(),
+        variadic: false,
+    });
     // 用户 -D 定义
     for (name, val) in defines {
         let v = val.as_deref().unwrap_or("1");
