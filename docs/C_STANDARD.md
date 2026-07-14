@@ -50,7 +50,7 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 
 - `__attribute__((...))` 多位置属性
 - `__asm__ __volatile__` 带约束内联汇编
-- `__builtin_*` (expect, constant_p, memcpy, memset, abs, unreachable, trap, clz, ctz, popcount, strcpy, strlen 等)
+- `__builtin_*` (expect, constant_p, memcpy, memset, abs, unreachable, trap, clz, ctz, popcount, strcpy, strlen, bswap, parity, frame_address, return_address 等)
 - 语句表达式 `({...})`
 - 零长度数组 / 柔性数组成员
 - `__VA_ARGS__` 可变参数宏
@@ -59,6 +59,8 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 - `__complex__` / `_Complex` 复数类型
 - `_Decimal32/64/128` 十进制浮点
 - `_Fract` / `_Accum` 定点数类型
+- `__builtin_va_list` / `__builtin_va_start` / `__builtin_va_arg` / `__builtin_va_end` 可变参数支持
+- 嵌套函数定义 (GCC 扩展, 不含静态链外层变量访问)
 
 ## 重要选项
 

@@ -38,6 +38,12 @@ pub const SHF_INFO_LINK: u32 = 0x40;
 // 符号绑定
 pub const STB_LOCAL: u8 = 0;
 pub const STB_GLOBAL: u8 = 1;
+pub const STB_WEAK: u8 = 2;
+
+// 符号 visibility
+pub const STV_DEFAULT: u8 = 0;
+pub const STV_HIDDEN: u8 = 1;
+pub const STV_PROTECTED: u8 = 2;
 
 // 符号类型
 pub const STT_NOTYPE: u8 = 0;
@@ -53,6 +59,8 @@ pub const R_X86_64_PC32: u32 = 2;
 pub const R_X86_64_PLT32: u32 = 4;  // 用于函数调用 (PIE 兼容)
 pub const R_X86_64_32: u32 = 10;
 pub const R_X86_64_32S: u32 = 11;
+pub const R_X86_64_64: u32 = 1;
+pub const R_X86_64_GOTPCREL: u32 = 9;
 
 // ===== 数据结构 =====
 
@@ -63,8 +71,9 @@ pub struct ElfSym {
     pub section: u16,   // 节索引 (0=SHN_UNDEF)
     pub value: u64,     // 节内偏移
     pub size: u64,
-    pub bind: u8,       // STB_LOCAL / STB_GLOBAL
+    pub bind: u8,       // STB_LOCAL / STB_GLOBAL / STB_WEAK
     pub ty: u8,         // STT_NOTYPE / STT_FUNC / STT_OBJECT
+    pub visibility: u8, // STV_DEFAULT / STV_HIDDEN / STV_PROTECTED
 }
 
 /// 重定位条目 (供 .rela.text 使用)
@@ -74,6 +83,16 @@ pub struct ElfRela {
     pub sym_index: u32, // .symtab 中的符号索引
     pub rel_type: u32,  // R_X86_64_PC32 等
     pub addend: i64,
+}
+
+/// 自定义 ELF 节 (用于 section 属性)
+#[derive(Clone, Debug)]
+pub struct ElfSection {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub ty: u32,      // SHT_PROGBITS / SHT_NOBITS
+    pub flags: u32,   // SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR
+    pub align: u64,
 }
 
 // ===== ET_EXEC 构建 (现有逻辑) =====
@@ -139,6 +158,7 @@ pub fn build_elf_rel_x86_64(
     bss_size: u64,
     symbols: &[ElfSym],
     relocations: &[ElfRela],
+    extra_sections: &[ElfSection],
 ) -> Vec<u8> {
     // 节索引:
     // [0] SHT_NULL
@@ -146,22 +166,20 @@ pub fn build_elf_rel_x86_64(
     // [2] .rodata
     // [3] .data
     // [4] .bss
-    // [5] .rela.text
-    // [6] .symtab
-    // [7] .strtab
-    // [8] .shstrtab
-    const SH_TEXT: u16 = 1;
-    const SH_RODATA: u16 = 2;
-    const SH_DATA: u16 = 3;
-    const SH_BSS: u16 = 4;
-    const SH_RELA: u16 = 5;
-    const SH_SYMTAB: u16 = 6;
-    const SH_STRTAB: u16 = 7;
-    const SH_SHSTRTAB: u16 = 8;
-    const SHNUM: u16 = 9;
+    // [5..5+N] extra sections
+    // [5+N] .rela.text
+    // [6+N] .symtab
+    // [7+N] .strtab
+    // [8+N] .shstrtab
+    let n_extra = extra_sections.len() as u16;
+    let _sh_rela: u16 = 5 + n_extra;
+    let sh_symtab: u16 = 6 + n_extra;
+    let sh_strtab: u16 = 7 + n_extra;
+    let sh_shstrtab: u16 = 8 + n_extra;
+    let shnum: u16 = 9 + n_extra;
 
     // 构建 .shstrtab (节名字符串表)
-    let shstrtab = build_shstrtab();
+    let shstrtab = build_shstrtab(extra_sections);
 
     // 构建 .strtab (符号名字符串表)
     let (strtab, sym_name_offsets) = build_strtab(symbols);
@@ -191,6 +209,16 @@ pub fn build_elf_rel_x86_64(
     // .bss 不占文件空间
     let bss_off = offset;
 
+    // 自定义节
+    let mut extra_offsets = Vec::with_capacity(extra_sections.len());
+    for sec in extra_sections {
+        offset = align(offset, sec.align.max(1) as u64);
+        extra_offsets.push(offset);
+        if sec.ty != SHT_NOBITS {
+            offset += sec.data.len() as u64;
+        }
+    }
+
     offset = align(offset, 8);
     let rela_off = offset;
     offset += rela_data.len() as u64;
@@ -213,7 +241,7 @@ pub fn build_elf_rel_x86_64(
     let n_locals = symbols.iter().filter(|s| s.bind == STB_LOCAL).count() as u32;
 
     // 开始组装输出
-    let mut out = Vec::with_capacity(offset as usize + SHNUM as usize * 64);
+    let mut out = Vec::with_capacity(offset as usize + shnum as usize * 64);
 
     // ===== ELF Header (64 bytes) =====
     out.extend_from_slice(&ELFMAG);
@@ -233,8 +261,8 @@ pub fn build_elf_rel_x86_64(
     out.extend_from_slice(&0u16.to_le_bytes());   // e_phentsize
     out.extend_from_slice(&0u16.to_le_bytes());   // e_phnum
     out.extend_from_slice(&64u16.to_le_bytes());  // e_shentsize
-    out.extend_from_slice(&(SHNUM as u16).to_le_bytes()); // e_shnum
-    out.extend_from_slice(&(SH_SHSTRTAB as u16).to_le_bytes()); // e_shstrndx
+    out.extend_from_slice(&(shnum as u16).to_le_bytes()); // e_shnum
+    out.extend_from_slice(&(sh_shstrtab as u16).to_le_bytes()); // e_shstrndx
 
     // ===== .text =====
     pad_to(&mut out, text_off as usize);
@@ -247,6 +275,13 @@ pub fn build_elf_rel_x86_64(
     // ===== .data =====
     pad_to(&mut out, data_off as usize);
     out.extend_from_slice(data);
+
+    // ===== 自定义节 =====
+    for (i, sec) in extra_sections.iter().enumerate() {
+        if sec.ty == SHT_NOBITS { continue; }
+        pad_to(&mut out, extra_offsets[i] as usize);
+        out.extend_from_slice(&sec.data);
+    }
 
     // ===== .rela.text =====
     pad_to(&mut out, rela_off as usize);
@@ -289,25 +324,40 @@ pub fn build_elf_rel_x86_64(
         0, bss_off, bss_size, 0, 0, 8, 0,
     );
 
-    // [5] .rela.text
-    write_section_header(&mut out, 26, SHT_RELA, SHF_INFO_LINK,
+    // [5..5+N] 自定义节
+    for (i, sec) in extra_sections.iter().enumerate() {
+        let name_off = shstrtab_name_offset(extra_sections, i);
+        write_section_header(&mut out, name_off, sec.ty, sec.flags,
+            0, extra_offsets[i], sec.data.len() as u64, 0, 0, sec.align, 0,
+        );
+    }
+
+    // [.rela.text]
+    // 动态计算节名在 .shstrtab 中的偏移
+    let extra_names_len: u32 = extra_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
+    let base_off: u32 = 26 + extra_names_len; // 偏移 after \0+base names+extra names
+    let rela_text_name_off = base_off;
+    let symtab_name_off = rela_text_name_off + ".rela.text".len() as u32 + 1;
+    let strtab_name_off = symtab_name_off + ".symtab".len() as u32 + 1;
+    let shstrtab_name_off_val = strtab_name_off + ".strtab".len() as u32 + 1;
+    write_section_header(&mut out, rela_text_name_off, SHT_RELA, SHF_INFO_LINK,
         0, rela_off, rela_data.len() as u64,
-        SH_SYMTAB as u32, SH_TEXT as u32, 8, 24,
+        sh_symtab as u32, 1, 8, 24,
     );
 
-    // [6] .symtab
-    write_section_header(&mut out, 37, SHT_SYMTAB, 0,
+    // [.symtab]
+    write_section_header(&mut out, symtab_name_off, SHT_SYMTAB, 0,
         0, symtab_off, symtab_data.len() as u64,
-        SH_STRTAB as u32, n_locals, 8, 24,
+        sh_strtab as u32, n_locals, 8, 24,
     );
 
-    // [7] .strtab
-    write_section_header(&mut out, 45, SHT_STRTAB, 0,
+    // [.strtab]
+    write_section_header(&mut out, strtab_name_off, SHT_STRTAB, 0,
         0, strtab_off, strtab.len() as u64, 0, 0, 1, 0,
     );
 
-    // [8] .shstrtab
-    write_section_header(&mut out, 53, SHT_STRTAB, 0,
+    // [.shstrtab]
+    write_section_header(&mut out, shstrtab_name_off_val, SHT_STRTAB, 0,
         0, shstrtab_off, shstrtab.len() as u64, 0, 0, 1, 0,
     );
 
@@ -325,18 +375,33 @@ fn pad_to(out: &mut Vec<u8>, target: usize) {
 }
 
 /// 构建 .shstrtab: 所有节名的字符串表
-fn build_shstrtab() -> Vec<u8> {
-    // 布局: \0 .text \0 .rodata \0 .data \0 .bss \0 .rela.text \0 .symtab \0 .strtab \0 .shstrtab \0
-    // 偏移: 0  1     7      15    21   26         37      45      53
+fn build_shstrtab(extra_sections: &[ElfSection]) -> Vec<u8> {
+    // 布局: \0 .text \0 .rodata \0 .data \0 .bss \0 [extra names...] .rela.text \0 .symtab \0 .strtab \0 .shstrtab \0
     let mut s = vec![0u8]; // 初始 \0
-    for name in &[
-        ".text", ".rodata", ".data", ".bss",
-        ".rela.text", ".symtab", ".strtab", ".shstrtab",
-    ] {
+    for name in &[".text", ".rodata", ".data", ".bss"] {
+        s.extend_from_slice(name.as_bytes());
+        s.push(0);
+    }
+    // 自定义节名
+    for sec in extra_sections {
+        s.extend_from_slice(sec.name.as_bytes());
+        s.push(0);
+    }
+    for name in &[".rela.text", ".symtab", ".strtab", ".shstrtab"] {
         s.extend_from_slice(name.as_bytes());
         s.push(0);
     }
     s
+}
+
+/// 计算自定义节名在 .shstrtab 中的偏移
+fn shstrtab_name_offset(extra_sections: &[ElfSection], idx: usize) -> u32 {
+    // 偏移计算: \0(1) + .text\0(6) + .rodata\0(8) + .data\0(6) + .bss\0(5) = 26
+    let mut off = 26u32;
+    for i in 0..idx {
+        off += extra_sections[i].name.len() as u32 + 1;
+    }
+    off
 }
 
 /// 构建 .strtab (符号名字符串表)
@@ -364,7 +429,7 @@ fn build_symtab(symbols: &[ElfSym], name_offsets: &[u32]) -> Vec<u8> {
     for (i, sym) in symbols.iter().enumerate() {
         let st_name = name_offsets[i];
         let st_info = (sym.bind << 4) | sym.ty;
-        let st_other = 0u8;
+        let st_other = sym.visibility;
         let st_shndx = sym.section;
         data.extend_from_slice(&st_name.to_le_bytes());
         data.push(st_info);

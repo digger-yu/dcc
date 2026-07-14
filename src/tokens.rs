@@ -31,6 +31,8 @@ pub enum TokKind {
     KwFract, KwAccum,              // _Fract, _Accum (定点数)
     KwComplex,                     // _Complex
     KwDecimal32, KwDecimal64, KwDecimal128,  // _Decimal32/64/128
+    KwInt128,                      // __int128 / __int128_t
+    KwUInt128,                     // __uint128_t
     KwSizeof, KwAlignof,
     // 符号
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
@@ -138,6 +140,8 @@ impl<'a> Lexer<'a> {
                 "_Decimal32" => TokKind::KwDecimal32,
                 "_Decimal64" => TokKind::KwDecimal64,
                 "_Decimal128" => TokKind::KwDecimal128,
+                "__int128" | "__int128_t" => TokKind::KwInt128,
+                "__uint128_t" => TokKind::KwUInt128,
                 _ => TokKind::Ident,
             };
             return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };

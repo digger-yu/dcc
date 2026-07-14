@@ -4,8 +4,11 @@
 
 use crate::ast::*;
 use crate::target::Target;
-use crate::codegen::elf::{ElfSym, ElfRela, R_X86_64_PC32, R_X86_64_PLT32,
-    STB_LOCAL, STB_GLOBAL, STT_NOTYPE, STT_FUNC, STT_OBJECT, STT_SECTION, SHN_UNDEF};
+use crate::codegen::elf::{ElfSym, ElfRela, ElfSection, R_X86_64_PC32, R_X86_64_PLT32,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_NOTYPE, STT_FUNC, STT_OBJECT, STT_SECTION, SHN_UNDEF,
+    STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
+    SHT_PROGBITS, SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR};
+use crate::codegen::elf;
 use std::collections::HashMap;
 use crate::ast::ArraySize;
 
@@ -41,7 +44,11 @@ pub struct Codegen {
     pending_data_rels: Vec<(u64, String)>,  // (disp32_pos, var_name) - 全局变量重定位
     pub data_section: Vec<u8>,    // .data 节 (已初始化全局变量)
     pub bss_size: u64,            // .bss 大小
+    pub extra_sections: Vec<elf::ElfSection>, // 自定义节 (section 属性)
+    custom_sec_indices: HashMap<String, usize>, // section name → index in extra_sections
     func_sizes: HashMap<String, u64>, // 函数名 → 代码大小 (用于符号 size)
+    variadic_funcs: HashMap<String, bool>, // 函数名 → 是否可变参数
+    variadic_named_params: i32, // 当前可变参数函数的命名参数数量
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -61,13 +68,52 @@ impl Codegen {
                vla_total_size: 0,
                relocatable: false, symbols: vec![], sym_index: HashMap::new(),
                relocations: vec![], pending_func_rels: vec![], pending_data_rels: vec![],
-               data_section: vec![], bss_size: 0,
-               func_sizes: HashMap::new() }
+               data_section: vec![], bss_size: 0, extra_sections: vec![],
+               custom_sec_indices: HashMap::new(), func_sizes: HashMap::new(),
+               variadic_funcs: HashMap::new(),
+               variadic_named_params: 0 }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
     pub fn label(&mut self, name: &str) { self.labels.insert(name.to_string(), self.pos()); }
     pub fn fresh_label(&mut self) -> String { let n = self.next_label; self.next_label += 1; format!(".L{}", n) }
+
+    /// 解析 visibility 字符串为 ELF 常量
+    fn parse_visibility(vis: &Option<String>) -> u8 {
+        match vis.as_deref() {
+            Some("hidden") => STV_HIDDEN,
+            Some("protected") => STV_PROTECTED,
+            _ => STV_DEFAULT,
+        }
+    }
+
+    /// 判断函数是否需要放入自定义 section
+    fn is_custom_section_func(f: &FuncDecl) -> bool {
+        f.section.as_ref().map_or(false, |s| !s.is_empty())
+    }
+    /// 判断变量是否需要放入自定义 section
+    fn is_custom_section_var(v: &VarDecl) -> bool {
+        v.section.as_ref().map_or(false, |s| !s.is_empty())
+    }
+    /// 确保自定义 section 存在于 extra_sections 中，返回其在 vec 中的索引
+    fn ensure_custom_section(&mut self, name: &str, is_exec: bool, is_writable: bool) -> usize {
+        if let Some(&idx) = self.custom_sec_indices.get(name) {
+            return idx;
+        }
+        let idx = self.extra_sections.len();
+        let mut flags = SHF_ALLOC;
+        if is_writable { flags |= SHF_WRITE; }
+        if is_exec { flags |= SHF_EXECINSTR; }
+        self.extra_sections.push(ElfSection {
+            name: name.to_string(),
+            data: Vec::new(),
+            ty: SHT_PROGBITS,
+            flags,
+            align: if is_exec { 16 } else { 8 },
+        });
+        self.custom_sec_indices.insert(name.to_string(), idx);
+        idx
+    }
 
     fn jmp_rel32(&mut self, target: &str, kind: JumpKind) {
         let at = self.pos();
@@ -119,6 +165,12 @@ impl Codegen {
     }
 
     pub fn compile(&mut self, prog: &Program) {
+        // 预扫描: 记录哪些函数是可变参数的
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.is_variadic { self.variadic_funcs.insert(f.name.name.clone(), true); }
+            }
+        }
         if self.relocatable {
             self.compile_rel(prog);
         } else {
@@ -179,11 +231,49 @@ impl Codegen {
     /// ET_REL 模式: 生成可重定位 .o 文件
     fn compile_rel(&mut self, prog: &Program) {
         // Phase 1: 生成代码, 收集数据
-        // 收集全局变量 → .data / .bss
+        // 收集全局变量 → .data / .bss (或自定义 section)
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
                 let sz = v.ty.size().max(1);
                 let align = v.ty.align().max(1);
+                // 自定义 section 变量: 路由到 extra_sections
+                if Self::is_custom_section_var(v) {
+                    let sec_name = v.section.as_ref().unwrap().clone();
+                    let is_writable = !matches!(&v.init, Some(Expr::String { .. }));
+                    let sec_idx = self.ensure_custom_section(&sec_name, false, is_writable);
+                    let sec = &mut self.extra_sections[sec_idx];
+                    let off = (sec.data.len() + align - 1) & !(align - 1);
+                    while sec.data.len() < off { sec.data.push(0); }
+                    let offset = sec.data.len() as u64;
+                    let mut has_init = false;
+                    if let Some(init) = &v.init {
+                        match init {
+                            Expr::Int { v: iv, .. } => {
+                                let bytes = iv.to_le_bytes()[..sz].to_vec();
+                                self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
+                                has_init = true;
+                            }
+                            Expr::String { data, .. } => {
+                                self.extra_sections[sec_idx].data.extend_from_slice(data);
+                                for _ in data.len()..sz { self.extra_sections[sec_idx].data.push(0); }
+                                has_init = true;
+                            }
+                            Expr::InitList { inits, .. } => {
+                                if let Some(init_data) = self.gen_global_init_list(&v.ty, inits) {
+                                    self.extra_sections[sec_idx].data.extend_from_slice(&init_data);
+                                    for _ in init_data.len()..sz { self.extra_sections[sec_idx].data.push(0); }
+                                    has_init = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !has_init {
+                        for _ in 0..sz { self.extra_sections[sec_idx].data.push(0); }
+                    }
+                    self.globals.insert(v.name.name.clone(), GlobalVar { offset, size: sz, ty: v.ty.clone(), init: None });
+                    continue;
+                }
                 let off = (self.data_section.len() + align - 1) & !(align - 1);
                 while self.data_section.len() < off { self.data_section.push(0); }
                 let offset = self.data_section.len() as u64;
@@ -196,7 +286,6 @@ impl Codegen {
                         }
                         Expr::String { data, .. } => {
                             self.data_section.extend_from_slice(data);
-                            // 填充到变量大小
                             for _ in data.len()..sz { self.data_section.push(0); }
                             true
                         }
@@ -221,6 +310,32 @@ impl Codegen {
         // 生成函数代码 (无 _start)
         self.emit_functions(prog);
 
+        // 后处理: 将自定义 section 函数的代码从 .text 提取到 extra_sections
+        // 记录函数在自定义 section 内的偏移 (用于符号表)
+        let mut custom_func_offsets: HashMap<String, (u16, u64)> = HashMap::new(); // func_name → (section_idx+5, offset_in_section)
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_none() { continue; }
+                if let Some(sec_name) = &f.section {
+                    if sec_name.is_empty() { continue; }
+                    if let Some(&func_start) = self.labels.get(&f.name.name) {
+                        let func_size = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                        if func_size == 0 { continue; }
+                        let sec_idx = self.ensure_custom_section(sec_name, true, false);
+                        let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                        // 从 .text 拷贝代码到自定义节
+                        let code_slice = self.code[func_start as usize..(func_start + func_size) as usize].to_vec();
+                        self.extra_sections[sec_idx].data.extend_from_slice(&code_slice);
+                        // 在 .text 中填零 (保持其他函数偏移不变)
+                        for i in func_start as usize..(func_start + func_size) as usize {
+                            self.code[i] = 0;
+                        }
+                        custom_func_offsets.insert(f.name.name.clone(), ((sec_idx + 5) as u16, sec_off));
+                    }
+                }
+            }
+        }
+
         // 处理字符串引用 → 确保所有字符串在 rodata 中
         let string_data_list: Vec<Vec<u8>> = self.string_refs.iter().map(|(_, d)| d.clone()).collect();
         for data in &string_data_list {
@@ -240,11 +355,16 @@ impl Codegen {
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
                 let g = self.globals[&v.name.name].clone();
+                // 确定 section 索引: 自定义 section 或默认 .data(3)
+                let sec_idx = if Self::is_custom_section_var(v) {
+                    self.custom_sec_indices.get(v.section.as_ref().unwrap()).copied().unwrap_or(3) + 5
+                } else { 3 };
                 let sym = ElfSym {
-                    name: v.name.name.clone(), section: 3, value: g.offset,
+                    name: v.name.name.clone(), section: sec_idx as u16, value: g.offset,
                     size: g.size as u64,
-                    bind: if v.is_static { STB_LOCAL } else { STB_GLOBAL },
+                    bind: if v.is_weak { STB_WEAK } else if v.is_static { STB_LOCAL } else { STB_GLOBAL },
                     ty: STT_OBJECT,
+                    visibility: Self::parse_visibility(&v.visibility),
                 };
                 if v.is_static { local_syms.push(sym); } else { global_syms.push(sym); }
             }
@@ -256,25 +376,56 @@ impl Codegen {
                 if f.body.is_none() {
                     global_syms.push(ElfSym {
                         name: f.name.name.clone(), section: SHN_UNDEF, value: 0, size: 0,
-                        bind: STB_GLOBAL, ty: STT_FUNC,
+                        bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
                     });
                 }
             }
         }
 
-        // 函数定义符号
+        // 函数定义符号 (包括嵌套函数)
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_some() {
+                    // 收集此函数的嵌套函数 (递归, 不含自身)
+                    let mut nested = vec![];
+                    if let Some(body) = &f.body {
+                        Self::collect_nested_funcs(&body.items, &mut nested);
+                    }
+                    // 先处理顶层函数自身
                     if let Some(&func_start) = self.labels.get(&f.name.name) {
                         let func_size = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                        let (sec_idx, sym_value) = if let Some(&(si, off)) = custom_func_offsets.get(&f.name.name) {
+                            (si, off)
+                        } else {
+                            (1u16, func_start)
+                        };
                         let sym = ElfSym {
-                            name: f.name.name.clone(), section: 1, value: func_start,
+                            name: f.name.name.clone(), section: sec_idx as u16, value: sym_value,
                             size: func_size,
-                            bind: if f.is_static { STB_LOCAL } else { STB_GLOBAL },
+                            bind: if f.is_weak { STB_WEAK } else if f.is_static { STB_LOCAL } else { STB_GLOBAL },
                             ty: STT_FUNC,
+                            visibility: Self::parse_visibility(&f.visibility),
                         };
                         if f.is_static { local_syms.push(sym); } else { global_syms.push(sym); }
+                    }
+                    // 再处理嵌套函数
+                    for func in &nested {
+                        if let Some(&func_start) = self.labels.get(&func.name.name) {
+                            let func_size = self.func_sizes.get(&func.name.name).copied().unwrap_or(0);
+                            let (sec_idx, sym_value) = if let Some(&(si, off)) = custom_func_offsets.get(&func.name.name) {
+                                (si, off)
+                            } else {
+                                (1u16, func_start)
+                            };
+                            let sym = ElfSym {
+                                name: func.name.name.clone(), section: sec_idx as u16, value: sym_value,
+                                size: func_size,
+                                bind: if func.is_weak { STB_WEAK } else if func.is_static { STB_LOCAL } else { STB_GLOBAL },
+                                ty: STT_FUNC,
+                                visibility: Self::parse_visibility(&func.visibility),
+                            };
+                            if func.is_static { local_syms.push(sym); } else { global_syms.push(sym); }
+                        }
                     }
                 }
             }
@@ -285,7 +436,7 @@ impl Codegen {
             local_syms.push(ElfSym {
                 name: ".rodata".to_string(), section: 2, value: 0,
                 size: self.rodata.len() as u64,
-                bind: STB_LOCAL, ty: STT_SECTION,
+                bind: STB_LOCAL, ty: STT_SECTION, visibility: STV_DEFAULT,
             });
         }
 
@@ -295,7 +446,7 @@ impl Codegen {
         // [0] STN_UNDEF
         self.symbols.push(ElfSym {
             name: String::new(), section: SHN_UNDEF, value: 0, size: 0,
-            bind: STB_LOCAL, ty: STT_NOTYPE,
+            bind: STB_LOCAL, ty: STT_NOTYPE, visibility: STV_DEFAULT,
         });
         for sym in &local_syms {
             let idx = self.symbols.len() as u32;
@@ -358,28 +509,76 @@ impl Codegen {
         self.resolve(0);
     }
 
-    /// 生成所有函数代码 (共用逻辑)
+    /// 生成所有函数代码 (单 pass, 所有函数进入 .text)
     fn emit_functions(&mut self, prog: &Program) {
+        // 收集顶层函数 (owned, 避免借用冲突)
+        let top_funcs: Vec<FuncDecl> = prog.decls.iter().filter_map(|d| {
+            if let Decl::Func(f) = d { if f.body.is_some() { Some(f.clone()) } else { None } } else { None }
+        }).collect();
+        for f in &top_funcs {
+            self.compile_func(f, prog);
+        }
+    }
+
+    /// 递归收集块中的嵌套函数声明
+    fn collect_nested_funcs(items: &[BlockItem], out: &mut Vec<FuncDecl>) {
+        for item in items {
+            if let BlockItem::Decl(Decl::Func(f)) = item {
+                out.push(f.clone());
+                if let Some(body) = &f.body {
+                    Self::collect_nested_funcs(&body.items, out);
+                }
+            }
+            // 也扫描嵌套块 (if/for/while 等)
+            if let BlockItem::Stmt(s) = item {
+                Self::collect_nested_funcs_stmt(s, out);
+            }
+        }
+    }
+    fn collect_nested_funcs_stmt(s: &Stmt, out: &mut Vec<FuncDecl>) {
+        match s {
+            Stmt::Block { b, .. } => Self::collect_nested_funcs(&b.items, out),
+            Stmt::If { then_, else_, .. } => {
+                if let Stmt::Block { b, .. } = then_.as_ref() { Self::collect_nested_funcs(&b.items, out); }
+                if let Some(e) = else_ { if let Stmt::Block { b, .. } = e.as_ref() { Self::collect_nested_funcs(&b.items, out); } }
+            }
+            Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
+                if let Stmt::Block { b, .. } = body.as_ref() { Self::collect_nested_funcs(&b.items, out); }
+            }
+            _ => {}
+        }
+    }
+
+    /// 编译单个函数 (支持嵌套函数递归调用)
+    fn compile_func(&mut self, f: &FuncDecl, prog: &Program) {
+        // 先编译嵌套函数 (在父函数标签之前)
+        if let Some(body) = &f.body {
+            let nested: Vec<FuncDecl> = {
+                let mut nf = Vec::new();
+                Self::collect_nested_funcs(&body.items, &mut nf);
+                nf
+            };
+            for nf_decl in &nested {
+                self.compile_func(nf_decl, prog);
+            }
+        }
         let arg_regs: [u8; 6] = [7, 6, 2, 1, 8, 9];
-        for decl in &prog.decls {
-            if let Decl::Func(f) = decl {
-                // 跳过 extern 声明 (无函数体)
-                if f.body.is_none() { continue; }
-                self.var_map.clear();
-                self.vla_offsets.clear();
-                self.vla_total_size = 0;
-                let func_start = self.pos();
-                self.label(&f.name.name);
-                self.emit(&[0x41, 0x55, 0x49, 0x89, 0xe5]);
-                self.expr_depth = 0; self.max_expr_depth = 0; self.temp_slots = 0;
-                // 先扫描最大表达式深度以确定临时槽数
-                if let Some(body) = &f.body { self.max_expr_depth = Self::max_expr_depth_stmt(&body.items); }
-                let temp_slots = (self.max_expr_depth as i32 + 1).max(2); // 至少 2 个临时槽, +1 防止嵌套 binop 槽冲突
-                self.temp_slots = temp_slots;
-                if f.name.name != "main" || !self.relocatable {
+        self.var_map.clear();
+        self.vla_offsets.clear();
+        self.vla_total_size = 0;
+        let func_start = self.pos();
+        self.label(&f.name.name);
+        self.emit(&[0x41, 0x55, 0x49, 0x89, 0xe5]);
+        self.expr_depth = 0; self.max_expr_depth = 0; self.temp_slots = 0;
+        if let Some(body) = &f.body { self.max_expr_depth = Self::max_expr_depth_stmt(&body.items); }
+        let temp_slots = (self.max_expr_depth as i32 + 1).max(2);
+        self.temp_slots = temp_slots;
+        if f.name.name != "main" || !self.relocatable {
                     // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方)
                     if let Some(body) = &f.body { Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots); }
                     // 注册参数到 var_map (偏移公式自动避开已注册的局部变量)
+                    // 记录命名参数数量 (va_start 需要)
+                    self.variadic_named_params = f.params.iter().filter(|p| p.name.is_some()).count() as i32;
                     let mut param_stores: Vec<(u8, i32)> = Vec::new(); // (reg, offset)
                     let mut arg_idx = 0usize;
                     for p in f.params.iter() {
@@ -488,8 +687,6 @@ impl Codegen {
                 // 记录函数大小
                 let func_end = self.pos();
                 self.func_sizes.insert(f.name.name.clone(), func_end - func_start);
-            }
-        }
     }
 
     fn call_label(&mut self, l: &str) {
@@ -682,6 +879,15 @@ impl Codegen {
                 }
                 self.label(&l_end);
                 self.emit(&[0x48, 0x83, 0xC4, 0x08]); // add rsp, 8 (清理switch值)
+            }
+            Stmt::GotoIndirect { expr, .. } => {
+                // goto *expr: 计算目标地址并跳转
+                self.gen_expr(expr, 0); // rax = 目标地址
+                self.emit(&[0xFF, 0xE0]); // jmp rax
+            }
+            Stmt::AsmGoto { .. } => {
+                // asm goto: 简化处理, 生成 nop 占位 (完整实现需要解析 asm 模板)
+                self.emit(&[0x90]); // nop
             }
         }
     }
@@ -1040,7 +1246,30 @@ impl Codegen {
                     } else if self.gen_builtin(&name.name, args, dst) {
                         // 已成功处理 __builtin_* 函数
                     } else {
-                        // 直接调用: 处理 struct 参数
+                        // 直接调用: 检查是否为可变参数函数
+                        let is_va_call = self.variadic_funcs.contains_key(&name.name);
+                        if is_va_call {
+                            // 可变参数函数: 先压栈 (反向), 再设寄存器
+                            // 这样 push 循环不会 clobber 寄存器值
+                            for a in args.iter().rev() {
+                                self.gen_expr(a, 0);
+                                self.emit(&[0x50]); // push rax
+                            }
+                            // 命名参数放入寄存器 (重新求值, 简单参数无副作用)
+                            let ar = [7u8, 6, 2, 1, 8, 9];
+                            for (i, a) in args.iter().enumerate() {
+                                if i < 6 { self.gen_expr_decay(a, ar[i]); }
+                            }
+                            self.call_label(&name.name);
+                            // 清理压栈的参数
+                            let nargs = args.len() as i32 * 8;
+                            if nargs > 0 {
+                                self.emit(&[0x48, 0x81, 0xc4]); // add rsp, nargs
+                                self.emit(&nargs.to_le_bytes());
+                            }
+                            if dst != 0 { self.mov(dst, 0); }
+                        } else {
+                        // 普通函数: 使用寄存器传参
                         let ar = [7u8, 6, 2, 1, 8, 9];
                         let mut arg_idx = 0usize;
                         for a in args.iter() {
@@ -1077,6 +1306,7 @@ impl Codegen {
                         self.call_label(&name.name);
                         self.emit(&[0x5c]); // pop rsp
                         if dst != 0 { self.mov(dst, 0); }
+                        } // end of non-variadic call
                     }
                 } else {
                     // 间接调用: 通过函数指针
@@ -1468,6 +1698,36 @@ impl Codegen {
                 self.emit(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]);
                 // 记录引用, 在 resolve 阶段修补
                 self.float_refs.push((code_pos + 3, off));
+            }
+            Expr::VaArg { ap, ty: arg_ty, .. } => {
+                // va_arg(ap, type): 从 ap 指向的地址读取值, 然后 ap += 8
+                // 使用 push/pop 保存中间值, 避免寄存器冲突
+                if let Expr::Ident { name, .. } = ap.as_ref() {
+                    let ap_off = self.var_offset(&name.name);
+                    // 1. 加载 ap 指针到 rcx
+                    self.load_stack(1, ap_off);           // rcx = 当前参数指针
+                    // 2. 从 [rcx] 读取值到 rax
+                    let sz = arg_ty.size();
+                    match sz {
+                        1 => { self.emit(&[0x48, 0x0F, 0xB6, 0x01]); }  // movzbl (%rcx),%eax
+                        2 => { self.emit(&[0x48, 0x0F, 0xB7, 0x01]); }  // movzwl (%rcx),%eax
+                        4 => { self.emit(&[0x8B, 0x01]); }               // mov (%rcx),%eax
+                        _ => { self.emit(&[0x48, 0x8B, 0x01]); }         // mov (%rcx),%rax
+                    }
+                    // 3. 保存指针和值到栈
+                    self.push(1);                         // push 指针 (rcx)
+                    self.push(0);                         // push 值 (rax)
+                    // 4. 更新 ap 指针: 从栈加载原始指针, +8, 存回
+                    self.load_stack(1, ap_off);           // rcx = 原始指针 (重新加载)
+                    self.emit(&[0x48, 0x83, 0xC1, 8]);   // add $0x8,%rcx
+                    self.store_stack(1, ap_off);          // *ap = rcx
+                    // 5. 恢复值到 dst
+                    self.pop(0);                          // rax = 值
+                    if dst != 0 { self.mov(dst, 0); }    // dst = rax
+                    self.pop(1);                          // rcx = 恢复指针 (清理栈)
+                } else {
+                    self.mov_imm(dst, 0);
+                }
             }
             _ => { /* M0: 其他表达式暂不处理 */ }
         }
@@ -2574,8 +2834,134 @@ impl Codegen {
                 self.emit(&[0x0F, 0x0B]); // ud2
                 true
             }
-            // __builtin_unwind_init / __builtin_va_start 等: 忽略
-            "__builtin_va_start" | "__builtin_va_end" | "__builtin_va_arg" => {
+            // __builtin_va_start(ap, last): ap = 第一个可变参数地址 (运行时计算)
+            "__builtin_va_start" => {
+                if args.len() >= 1 {
+                    if let Expr::Ident { name, .. } = &args[0] {
+                        let ap_off = self.var_offset(&name.name);
+                        // r13 指向 saved r13 (帧顶), 不随 sub rsp 调整
+                        // 栈布局: [saved_r13]=r13+0, [ret_addr]=r13+8, [arg_i]=r13+16+8*i
+                        // 第一个 variadic arg (索引 K) 在 r13 + 16 + 8*K
+                        let va_off = 16 + 8 * self.variadic_named_params;
+                        self.emit_lea_r13(dst, va_off); // dst = r13 + va_off
+                        // *ap = dst
+                        self.store_stack(dst, ap_off);
+                    }
+                }
+                true
+            }
+            // __builtin_va_end(ap): no-op
+            "__builtin_va_end" => {
+                true
+            }
+            // __builtin_va_arg 已通过 Expr::VaArg 处理, 此处不会到达
+            "__builtin_va_arg" => {
+                true
+            }
+            // __builtin_va_copy(dest, src): *dest = *src
+            "__builtin_va_copy" => {
+                if args.len() >= 2 {
+                    if let (Expr::Ident { name: dest_name, .. }, Expr::Ident { name: src_name, .. }) = (&args[0], &args[1]) {
+                        let dest_off = self.var_offset(&dest_name.name);
+                        let src_off = self.var_offset(&src_name.name);
+                        self.load_stack(dst, src_off);
+                        self.store_stack(dst, dest_off);
+                    }
+                }
+                true
+            }
+            // __builtin_bswap16/32/64: 字节序反转
+            "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], dst);
+                if name == "__builtin_bswap64" {
+                    // 64 位: REX.W bswap dst
+                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                    self.emit(&[rex, 0x0F, 0xC8 | (dst & 7)]);
+                } else {
+                    // 32/16 位: 无 REX.W, 操作 32 位寄存器 (高 32 位自动清零)
+                    self.emit(&[0x0F, 0xC8 | (dst & 7)]);
+                    if name == "__builtin_bswap16" {
+                        // bswap16: 结果在低 16 位，用 movzx 扩展到 64 位
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x0F, 0xB7, 0xC0 | ((dst & 7) << 3) | (dst & 7)]); // movzx dst, dst(16)
+                    }
+                }
+                true
+            }
+            // __builtin_clz/clzl/clzll: 前导零计数
+            "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], dst);
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                // 根据参数类型大小确定位宽
+                let bits = args[0].ty().size() as i32 * 8;
+                // bsr dst, dst → dst = 最高位位置
+                self.emit(&[rex, 0x0F, 0xBD, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                // clz = (bits - 1) - dst
+                self.emit(&[rex, 0xF7, 0xD8 | (dst & 7)]); // neg dst
+                self.emit(&[rex, 0x83, 0xC0 | ((dst & 7) << 3) | (dst & 7), (bits - 1) as u8]); // add dst, bits-1
+                true
+            }
+            // __builtin_ctz/ctzl/ctzll: 尾随零计数
+            "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], dst);
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                // bsf dst, dst → dst = 最低位位置
+                self.emit(&[rex, 0x0F, 0xBC, 0xC0 | ((dst & 7) << 3) | (dst & 7)]); // bsf dst, dst
+                true
+            }
+            // __builtin_popcount/popcountl/popcountll: 位计数
+            "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], dst);
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                // popcnt dst, dst: F3 0F B8 /r
+                self.emit(&[rex, 0xF3, 0x0F, 0xB8, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                true
+            }
+            // __builtin_parity/parityl/parityll: 奇偶校验 (popcount & 1)
+            "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], dst);
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                // popcnt dst, dst
+                self.emit(&[rex, 0xF3, 0x0F, 0xB8, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                // and dst, 1
+                self.emit(&[rex, 0x83, 0xE0 | ((dst & 7) << 3) | (dst & 7), 1]);
+                true
+            }
+            // __builtin_bitreverse8/16/32/64: 位反转 (转发到 libcall)
+            "__builtin_bitreverse8" | "__builtin_bitreverse16"
+            | "__builtin_bitreverse32" | "__builtin_bitreverse64" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                // 简化实现: 转发到 __dcc_bitreverse libcall
+                self.gen_expr(&args[0], 7);
+                self.emit(&[0x54]); // push rsp
+                self.call_label("__dcc_bitreverse");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_frame_address(level): 帧指针
+            "__builtin_frame_address" => {
+                // 简化: level=0 时返回 rbp
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                // mov dst, rbp: REX.W 8B /r (rm=5=rbp)
+                self.emit(&[rex, 0x8B, 0xC0 | ((dst & 7) << 3) | 5]);
+                true
+            }
+            // __builtin_return_address(level): 返回地址
+            "__builtin_return_address" => {
+                // 简化: level=0 时返回 [rsp] (函数调用后栈顶是返回地址)
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                self.emit(&[rex, 0x8B, 0x04, 0x24]); // mov dst, [rsp]
+                true
+            }
+            // __builtin_overflow_p: 溢出检测 (简化为 0)
+            "__builtin_overflow_p" => {
+                self.mov_imm(dst, 0);
                 true
             }
             _ => false,

@@ -25,6 +25,13 @@ pub enum Decl {
 pub struct VarDecl {
     pub ty: Type, pub name: Ident, pub init: Option<Expr>,
     pub span: Span, pub is_extern: bool, pub is_static: bool,
+    // Linux 内核属性
+    pub section: Option<String>,
+    pub alignment: Option<usize>,
+    pub is_weak: bool,
+    pub visibility: Option<String>,
+    pub is_unused: bool,
+    pub register_name: Option<String>,  // register asm("rN")
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +39,16 @@ pub struct FuncDecl {
     pub ret_ty: Type, pub name: Ident, pub params: Vec<Param>,
     pub body: Option<Block>, pub span: Span,
     pub is_extern: bool, pub is_static: bool,
+    // Linux 内核属性
+    pub section: Option<String>,
+    pub alignment: Option<usize>,
+    pub is_weak: bool,
+    pub visibility: Option<String>,
+    pub is_unused: bool,
+    pub is_cold: bool,
+    pub is_noinline: bool,
+    pub is_always_inline: bool,
+    pub is_variadic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,8 +73,11 @@ pub enum Stmt {
     Break   { span: Span },
     Continue{ span: Span },
     Goto    { target: Ident, span: Span },
+    GotoIndirect { expr: Box<Expr>, span: Span },  // goto *expr
     Label   { name: Ident, stmt: Box<Stmt>, span: Span },
     Switch  { expr: Expr, cases: Vec<Case>, span: Span },
+    AsmGoto { asm_str: String, outputs: Vec<Expr>, inputs: Vec<Expr>,
+              clobbers: Vec<String>, goto_labels: Vec<Ident>, span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +123,10 @@ pub enum Expr {
     Comma      { l: Box<Expr>, r: Box<Expr>, span: Span, ty: Type },
     /// 内联汇编 __asm__: 字符串列表, 结果类型
     AsmExpr    { asm_str: String, span: Span, ty: Type },
+    /// &&label: label 地址 (GNU 扩展)
+    LabelAddr  { label: Ident, span: Span, ty: Type },
+    /// __builtin_va_arg(ap, type): 可变参数读取
+    VaArg      { ap: Box<Expr>, ty: Type, span: Span },
 }
 
 /// 初始化项: 普通值 或 指定初始化器
@@ -159,6 +183,7 @@ pub enum Type {
     Int, UInt,
     Long, ULong,
     LongLong, ULongLong,
+    Int128, UInt128,          // __int128 / __uint128_t
     Float, Double, LongDouble,
     Fract, Accum,  // 定点数: _Fract (1.31格式), _Accum (16.16格式)
     Complex(Box<Type>),  // _Complex float/double: (real, imag) 两部分
@@ -202,6 +227,7 @@ impl Type {
             Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) | Type::Fract | Type::Accum => 4,
             Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
+            Type::Int128 | Type::UInt128 => 16,
             Type::Array(elem, ArraySize::Const(n)) => elem.size() * n,
             Type::Array(_, ArraySize::Var(_)) => 8,  // VLA 退化为指针
             Type::Vector(elem, n) => elem.size() * n,
@@ -226,6 +252,7 @@ impl Type {
             Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) | Type::Fract | Type::Accum => 4,
             Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
+            Type::Int128 | Type::UInt128 => 16,
             Type::Array(elem, ArraySize::Const(_)) => elem.align(),
             Type::Array(elem, ArraySize::Var(_)) => elem.align(),
             Type::Vector(_, _) => 16, // SIMD 向量 16 字节对齐
@@ -242,7 +269,8 @@ impl Type {
     pub fn is_int(&self) -> bool {
         matches!(self, Type::Bool | Type::Char | Type::SChar | Type::UChar
             | Type::Short | Type::UShort | Type::Int | Type::UInt
-            | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong)
+            | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+            | Type::Int128 | Type::UInt128)
     }
     pub fn is_arith(&self) -> bool { self.is_int() || matches!(self, Type::Float | Type::Double | Type::LongDouble | Type::Fract | Type::Accum | Type::Complex(_)) }
 
@@ -361,8 +389,9 @@ impl Expr {
             | Expr::AddrOf { ty, .. } | Expr::Deref { ty, .. }
             | Expr::PostInc { ty, .. } | Expr::PostDec { ty, .. }
             | Expr::PreInc { ty, .. } | Expr::PreDec { ty, .. }
-            | Expr::Comma { ty, .. } => ty.clone(),
+            | Expr::Comma { ty, .. } | Expr::LabelAddr { ty, .. } => ty.clone(),
             Expr::AsmExpr { ty, .. } => ty.clone(),
+            Expr::VaArg { ty, .. } => ty.clone(),
             Expr::Cast { ty, .. } => ty.clone(),
             Expr::InitList { ty, .. } => ty.clone(),
             Expr::SizeofTy { .. } | Expr::SizeofExpr { .. } | Expr::CompoundLit { .. }

@@ -1708,8 +1708,16 @@ impl Preprocessor {
             | "__builtin_abs" | "__builtin_unreachable" | "__builtin_trap"
             | "__builtin_strcpy" | "__builtin_strncpy"
             | "__builtin_strcmp" | "__builtin_strlen"
-            | "__builtin_expect" | "__builtin_prefetch"
-            | "__builtin_clz" | "__builtin_ctz" | "__builtin_popcount"
+            | "__builtin_prefetch"
+            | "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll"
+            | "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll"
+            | "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll"
+            | "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll"
+            | "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
+            | "__builtin_bitreverse8" | "__builtin_bitreverse16"
+            | "__builtin_bitreverse32" | "__builtin_bitreverse64"
+            | "__builtin_frame_address" | "__builtin_return_address"
+            | "__builtin_overflow_p"
         )
     }
 
