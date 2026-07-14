@@ -147,6 +147,7 @@ pub fn build_elf_x86_64(code: &[u8], entry: u64) -> Vec<u8> {
 ///   .rodata (对齐 8)
 ///   .data (对齐 8)
 ///   .rela.text (对齐 8)
+///   .rela.data (对齐 8)
 ///   .symtab (对齐 8)
 ///   .strtab
 ///   .shstrtab
@@ -159,6 +160,7 @@ pub fn build_elf_rel_x86_64(
     symbols: &[ElfSym],
     relocations: &[ElfRela],
     extra_sections: &[ElfSection],
+    data_relocations: &[ElfRela],
 ) -> Vec<u8> {
     // 节索引:
     // [0] SHT_NULL
@@ -168,15 +170,17 @@ pub fn build_elf_rel_x86_64(
     // [4] .bss
     // [5..5+N] extra sections
     // [5+N] .rela.text
-    // [6+N] .symtab
-    // [7+N] .strtab
-    // [8+N] .shstrtab
+    // [6+N] .rela.data
+    // [7+N] .symtab
+    // [8+N] .strtab
+    // [9+N] .shstrtab
     let n_extra = extra_sections.len() as u16;
     let _sh_rela: u16 = 5 + n_extra;
-    let sh_symtab: u16 = 6 + n_extra;
-    let sh_strtab: u16 = 7 + n_extra;
-    let sh_shstrtab: u16 = 8 + n_extra;
-    let shnum: u16 = 9 + n_extra;
+    let _sh_rela_data: u16 = 6 + n_extra;
+    let sh_symtab: u16 = 7 + n_extra;
+    let sh_strtab: u16 = 8 + n_extra;
+    let sh_shstrtab: u16 = 9 + n_extra;
+    let shnum: u16 = 10 + n_extra;
 
     // 构建 .shstrtab (节名字符串表)
     let shstrtab = build_shstrtab(extra_sections);
@@ -190,6 +194,8 @@ pub fn build_elf_rel_x86_64(
 
     // 构建 .rela.text
     let rela_data = build_rela(relocations);
+    // 构建 .rela.data
+    let rela_data_data = build_rela(data_relocations);
 
     // 计算各节偏移
     let mut offset: u64 = 64; // ELF header 后
@@ -222,6 +228,10 @@ pub fn build_elf_rel_x86_64(
     offset = align(offset, 8);
     let rela_off = offset;
     offset += rela_data.len() as u64;
+
+    offset = align(offset, 8);
+    let rela_data_off = offset;
+    offset += rela_data_data.len() as u64;
 
     offset = align(offset, 8);
     let symtab_off = offset;
@@ -287,6 +297,10 @@ pub fn build_elf_rel_x86_64(
     pad_to(&mut out, rela_off as usize);
     out.extend_from_slice(&rela_data);
 
+    // ===== .rela.data =====
+    pad_to(&mut out, rela_data_off as usize);
+    out.extend_from_slice(&rela_data_data);
+
     // ===== .symtab =====
     pad_to(&mut out, symtab_off as usize);
     out.extend_from_slice(&symtab_data);
@@ -333,16 +347,22 @@ pub fn build_elf_rel_x86_64(
     }
 
     // [.rela.text]
-    // 动态计算节名在 .shstrtab 中的偏移
     let extra_names_len: u32 = extra_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
     let base_off: u32 = 26 + extra_names_len; // 偏移 after \0+base names+extra names
     let rela_text_name_off = base_off;
-    let symtab_name_off = rela_text_name_off + ".rela.text".len() as u32 + 1;
+    let rela_data_name_off = rela_text_name_off + ".rela.text".len() as u32 + 1;
+    let symtab_name_off = rela_data_name_off + ".rela.data".len() as u32 + 1;
     let strtab_name_off = symtab_name_off + ".symtab".len() as u32 + 1;
     let shstrtab_name_off_val = strtab_name_off + ".strtab".len() as u32 + 1;
     write_section_header(&mut out, rela_text_name_off, SHT_RELA, SHF_INFO_LINK,
         0, rela_off, rela_data.len() as u64,
         sh_symtab as u32, 1, 8, 24,
+    );
+
+    // [.rela.data]
+    write_section_header(&mut out, rela_data_name_off, SHT_RELA, SHF_INFO_LINK,
+        0, rela_data_off, rela_data_data.len() as u64,
+        sh_symtab as u32, 3, 8, 24,  // sh_info=3 → .data 节索引
     );
 
     // [.symtab]
@@ -376,7 +396,7 @@ fn pad_to(out: &mut Vec<u8>, target: usize) {
 
 /// 构建 .shstrtab: 所有节名的字符串表
 fn build_shstrtab(extra_sections: &[ElfSection]) -> Vec<u8> {
-    // 布局: \0 .text \0 .rodata \0 .data \0 .bss \0 [extra names...] .rela.text \0 .symtab \0 .strtab \0 .shstrtab \0
+    // 布局: \0 .text \0 .rodata \0 .data \0 .bss \0 [extra names...] .rela.text \0 .rela.data \0 .symtab \0 .strtab \0 .shstrtab \0
     let mut s = vec![0u8]; // 初始 \0
     for name in &[".text", ".rodata", ".data", ".bss"] {
         s.extend_from_slice(name.as_bytes());
@@ -387,7 +407,7 @@ fn build_shstrtab(extra_sections: &[ElfSection]) -> Vec<u8> {
         s.extend_from_slice(sec.name.as_bytes());
         s.push(0);
     }
-    for name in &[".rela.text", ".symtab", ".strtab", ".shstrtab"] {
+    for name in &[".rela.text", ".rela.data", ".symtab", ".strtab", ".shstrtab"] {
         s.extend_from_slice(name.as_bytes());
         s.push(0);
     }
