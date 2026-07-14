@@ -797,6 +797,16 @@ impl Codegen {
                                     } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
                                         self.gen_expr(init, 0);
                                         self.gen_float_store(&v.name.name, &v.ty);
+                                    } else if matches!(&v.ty, Type::Int128 | Type::UInt128) {
+                                        // P1-4 fix: __int128 变量初始化 (rax=low, rdx=high)
+                                        self.gen_expr(init, 0);
+                                        // 如果初始化器不是 int128 类型，需要符号扩展
+                                        if !matches!(init.ty(), Type::Int128 | Type::UInt128) {
+                                            self.emit(&[0x48, 0x99]); // cqo: rdx = sign_extend(rax)
+                                        }
+                                        let off = self.var_offset(&v.name.name);
+                                        self.store_stack(0, off);      // low → [r13+off]
+                                        self.store_stack(2, off + 8);  // high → [r13+off+8]
                                     } else {
                                         self.gen_expr(init, 0);
                                         self.mov_to_stack(0, &v.name.name);
@@ -2169,45 +2179,45 @@ impl Codegen {
         // 现在: rcx=left_low, r8=left_high, r9=right_low, r11=right_high
         match op {
             BinOp::Add => {
-                // add rcx, r9 (low): REX.R(r9=9→R=1) = 0x44
-                self.emit(&[0x44, 0x01, 0xC9]); // add rcx, r9
-                // adc r8, r11 (high): REX.R(r11=11→R=1) + REX.B(r8=8→B=1) = 0x45
-                self.emit(&[0x45, 0x11, 0xD8]); // adc r8, r11
+                // add rcx, r9 (low): REX.W+R(r9=9) = 0x4C
+                self.emit(&[0x4C, 0x01, 0xC9]); // add rcx, r9
+                // adc r8, r11 (high): REX.W+R(r11)+B(r8) = 0x4D
+                self.emit(&[0x4D, 0x11, 0xD8]); // adc r8, r11
                 self.mov(0, 1);  // rax = result_low
                 self.mov(2, 8);  // rdx = result_high
             }
             BinOp::Sub => {
-                // sub rcx, r9 (low): REX.R(r9→R=1) = 0x44
-                self.emit(&[0x44, 0x29, 0xC9]); // sub rcx, r9
-                // sbb r8, r11 (high): REX.R(r11→R=1) + REX.B(r8→B=1) = 0x45
-                self.emit(&[0x45, 0x19, 0xD8]); // sbb r8, r11
+                // sub rcx, r9 (low): REX.W+R(r9) = 0x4C
+                self.emit(&[0x4C, 0x29, 0xC9]); // sub rcx, r9
+                // sbb r8, r11 (high): REX.W+R(r11)+B(r8) = 0x4D
+                self.emit(&[0x4D, 0x19, 0xD8]); // sbb r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
             }
             BinOp::And => {
-                self.emit(&[0x44, 0x21, 0xC9]); // and rcx, r9
-                self.emit(&[0x45, 0x21, 0xC0]); // and r8, r11
+                self.emit(&[0x4C, 0x21, 0xC9]); // and rcx, r9
+                self.emit(&[0x4D, 0x21, 0xC0]); // and r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
             }
             BinOp::Or => {
-                self.emit(&[0x44, 0x09, 0xC9]); // or rcx, r9
-                self.emit(&[0x45, 0x09, 0xC0]); // or r8, r11
+                self.emit(&[0x4C, 0x09, 0xC9]); // or rcx, r9
+                self.emit(&[0x4D, 0x09, 0xC0]); // or r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
             }
             BinOp::Xor => {
-                self.emit(&[0x44, 0x31, 0xC9]); // xor rcx, r9
-                self.emit(&[0x45, 0x31, 0xC0]); // xor r8, r11
+                self.emit(&[0x4C, 0x31, 0xC9]); // xor rcx, r9
+                self.emit(&[0x4D, 0x31, 0xC0]); // xor r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
             }
             BinOp::EqEq => {
                 self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax
-                self.emit(&[0x44, 0x39, 0xC9]); // cmp rcx, r9 (low)
+                self.emit(&[0x4C, 0x39, 0xC9]); // cmp rcx, r9 (low)
                 let lne = self.fresh_label();
                 self.jmp_rel32(&lne, JumpKind::Jne);
-                self.emit(&[0x45, 0x39, 0xC0]); // cmp r8, r11 (high)
+                self.emit(&[0x4D, 0x39, 0xC0]); // cmp r8, r11 (high)
                 self.jmp_rel32(&lne, JumpKind::Jne);
                 self.mov_imm(0, 1);
                 self.label(&lne);
@@ -2217,9 +2227,9 @@ impl Codegen {
                 self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax
                 self.mov_imm(0, 1);
                 let leq = self.fresh_label();
-                self.emit(&[0x44, 0x39, 0xC9]); // cmp rcx, r9 (low)
+                self.emit(&[0x4C, 0x39, 0xC9]); // cmp rcx, r9 (low)
                 self.jmp_rel32(&leq, JumpKind::Jne);
-                self.emit(&[0x45, 0x39, 0xC0]); // cmp r8, r11 (high)
+                self.emit(&[0x4D, 0x39, 0xC0]); // cmp r8, r11 (high)
                 self.jmp_rel32(&leq, JumpKind::Jne);
                 self.mov_imm(0, 0);
                 self.label(&leq);
