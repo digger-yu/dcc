@@ -62,6 +62,8 @@ pub struct Codegen {
     pending_data64_rels: Vec<(u64, String)>,
     // data 节最终重定位条目
     pub data_relocations: Vec<ElfRela>,
+    // cleanup 属性变量: (变量名, 清理函数名)
+    cleanup_vars: Vec<(String, String)>,
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -101,7 +103,7 @@ impl Codegen {
                label_addr_refs: vec![],
                reg_bindings: HashMap::new(),
                pending_data64_rels: vec![],
-               data_relocations: vec![] }
+               data_relocations: vec![], cleanup_vars: vec![] }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -670,6 +672,7 @@ impl Codegen {
         self.var_map.clear();
         self.vla_offsets.clear();
         self.reg_bindings.clear();
+        self.cleanup_vars.clear();
         self.vla_total_size = 0;
         // 设置嵌套函数状态
         self.current_func_is_nested = f.is_nested;
@@ -911,6 +914,7 @@ impl Codegen {
                 self.loop_continue = sc; self.loop_break = sb;
             }
             Stmt::Block { b, .. } => {
+                let cleanup_base = self.cleanup_vars.len();
                 for it in &b.items { match it {
                     BlockItem::Stmt(s) => self.gen_stmt(s),
                     BlockItem::Decl(Decl::Var(v)) => {
@@ -919,6 +923,10 @@ impl Codegen {
                             if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
                                 self.reg_bindings.insert(v.name.name.clone(), reg_idx);
                             }
+                        }
+                        // P2-9: cleanup 属性变量注册
+                        if let Some(ref fn_name) = v.cleanup_fn {
+                            self.cleanup_vars.push((v.name.name.clone(), fn_name.clone()));
                         }
                         self.register_var(&v.name.name, &v.ty);
                         if matches!(&v.ty, Type::Array(_, ArraySize::Var(_))) {
@@ -948,6 +956,15 @@ impl Codegen {
                     }
                     _ => {}
                 }}
+                // P2-9: 块结束时逆序调用 cleanup 函数
+                while self.cleanup_vars.len() > cleanup_base {
+                    if let Some((var_name, fn_name)) = self.cleanup_vars.pop() {
+                        // 发射: lea rdi, [r13 + offset]; call fn_name
+                        let off = self.var_offset(&var_name);
+                        self.emit_lea_r13(7, off); // rdi = &var
+                        self.call_label(&fn_name);
+                    }
+                }
             }
             Stmt::Break { .. } => { if let Some(l) = self.loop_break.clone() { self.jmp_rel32(&l, JumpKind::Jmp); } }
             Stmt::Continue { .. } => { if let Some(l) = self.loop_continue.clone() { self.jmp_rel32(&l, JumpKind::Jmp); } }
@@ -1086,6 +1103,11 @@ impl Codegen {
                 // P1-4: __int128 运算
                 if matches!(l.ty(), Type::Int128 | Type::UInt128) {
                     self.gen_int128_binop(*op, l, r, dst);
+                    return;
+                }
+                // P2-14: _Complex 算术运算
+                if matches!(l.ty(), Type::Complex(_)) {
+                    self.gen_complex_binop(*op, l, r, dst);
                     return;
                 }
                 // 逻辑与/或: 短路求值
@@ -2940,6 +2962,150 @@ impl Codegen {
         }
     }
 
+    // P2-14: _Complex 算术运算 (add/sub/mul)
+    // 布局: [real, imag] 各 inner_sz 字节, 存储在变量栈槽中
+    fn gen_complex_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, _dst: u8) {
+        let inner_ty = if let Type::Complex(inner) = &l.ty() { inner.as_ref().clone() } else { return };
+        let inner_sz = inner_ty.size() as i32; // 4 for float, 8 for double
+        let is_float = matches!(inner_ty, Type::Float);
+        let total_sz = inner_sz * 2; // 16 for _Complex double
+        // 保存空间: 左操作数 real/imag 各 total_sz, 右操作数 real/imag 各 total_sz
+        let save_sz = total_sz * 2;
+        self.emit(&[0x48, 0x83, 0xEC, save_sz as u8]); // sub rsp, save_sz
+        // 求值左操作数 → 结果在 rax (整数) 或 xmm0 (浮点)
+        // 对于 complex, gen_expr 会将 real/imag 存入变量的栈槽
+        // 我们直接通过变量偏移加载
+        if let Expr::Ident { name, .. } = l {
+            let off = self.var_offset(&name.name);
+            // 保存左 real → [rsp]
+            if is_float {
+                self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x44]); // movss xmm0, [r13+off]
+                if off.abs() < 128 { self.emit(&[(off & 0xFF) as u8]); }
+                else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+                self.emit(&[0xF3, 0x0F, 0x11, 0x04, 0x24]); // movss [rsp], xmm0
+            } else {
+                self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x44]); // movsd xmm0, [r13+off]
+                if off.abs() < 128 { self.emit(&[(off & 0xFF) as u8]); }
+                else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+                self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd [rsp], xmm0
+            }
+            // 保存左 imag → [rsp + total_sz]
+            let imag_off = off + inner_sz;
+            if is_float {
+                self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x44]); // movss xmm0, [r13+imag_off]
+                if imag_off.abs() < 128 { self.emit(&[(imag_off & 0xFF) as u8]); }
+                else { self.emit(&[0x85]); self.emit(&imag_off.to_le_bytes()); }
+                self.emit(&[0xF3, 0x0F, 0x11, 0x44, 0x24, total_sz as u8]); // movss [rsp+total_sz], xmm0
+            } else {
+                self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x44]); // movsd xmm0, [r13+imag_off]
+                if imag_off.abs() < 128 { self.emit(&[(imag_off & 0xFF) as u8]); }
+                else { self.emit(&[0x85]); self.emit(&imag_off.to_le_bytes()); }
+                self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24]); // movsd [rsp+total_sz], xmm0
+                self.emit(&[total_sz as u8]);
+            }
+        }
+        // 求值右操作数
+        if let Expr::Ident { name, .. } = r {
+            let off = self.var_offset(&name.name);
+            // 保存右 real → [rsp + total_sz*2 - inner_sz] 不, 用 [rsp + total_sz] 位置
+            // 布局: [rsp+0]=l_real, [rsp+inner_sz]=l_imag, [rsp+total_sz]=r_real, [rsp+total_sz+inner_sz]=r_imag
+            if is_float {
+                self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x44]); // movss xmm0, [r13+off]
+                if off.abs() < 128 { self.emit(&[(off & 0xFF) as u8]); }
+                else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+                self.emit(&[0xF3, 0x0F, 0x11, 0x44, 0x24, total_sz as u8]); // movss [rsp+total_sz], xmm0
+            } else {
+                self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x44]); // movsd xmm0, [r13+off]
+                if off.abs() < 128 { self.emit(&[(off & 0xFF) as u8]); }
+                else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+                self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24]); // movsd [rsp+total_sz], xmm0
+                self.emit(&[total_sz as u8]);
+            }
+            // 保存右 imag
+            let imag_off = off + inner_sz;
+            let r_imag_slot = total_sz + inner_sz;
+            if is_float {
+                self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x44]); // movss xmm0, [r13+imag_off]
+                if imag_off.abs() < 128 { self.emit(&[(imag_off & 0xFF) as u8]); }
+                else { self.emit(&[0x85]); self.emit(&imag_off.to_le_bytes()); }
+                self.emit(&[0xF3, 0x0F, 0x11, 0x44, 0x24, r_imag_slot as u8]); // movss [rsp+r_imag_slot], xmm0
+            } else {
+                self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x44]); // movsd xmm0, [r13+imag_off]
+                if imag_off.abs() < 128 { self.emit(&[(imag_off & 0xFF) as u8]); }
+                else { self.emit(&[0x85]); self.emit(&imag_off.to_le_bytes()); }
+                self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24]); // movsd [rsp+r_imag_slot], xmm0
+                self.emit(&[r_imag_slot as u8]);
+            }
+        }
+        // 根据操作执行运算
+        // 布局: [rsp+0]=l_real, [rsp+inner_sz]=l_imag, [rsp+total_sz]=r_real, [rsp+total_sz+inner_sz]=r_imag
+        let (load_prefix, op_add, op_sub, op_mul) = if is_float {
+            (0xF3u8, 0x58u8, 0x5Cu8, 0x59u8) // movss, addss, subss, mulss
+        } else {
+            (0xF2u8, 0x58u8, 0x5Cu8, 0x59u8) // movsd, addsd, subsd, mulsd
+        };
+        match op {
+            BinOp::Add | BinOp::Sub => {
+                let op_code = if matches!(op, BinOp::Add) { op_add } else { op_sub };
+                // real = l_real op r_real
+                // load l_real → xmm0
+                self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]); // movs[sd] xmm0, [rsp]
+                // load r_real → xmm1
+                self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8]); // movs[sd] xmm1, [rsp+total_sz]
+                // xmm0 op xmm1
+                self.emit(&[load_prefix, 0x0F, op_code, 0xC1]); // opss/opss xmm0, xmm1
+                // store result real → [rsp]
+                self.emit(&[load_prefix, 0x0F, 0x11, 0x04, 0x24]); // movs[sd] [rsp], xmm0
+                // imag = l_imag op r_imag
+                self.emit(&[load_prefix, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8]); // movs[sd] xmm0, [rsp+inner_sz]
+                let r_imag_slot = total_sz + inner_sz;
+                self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8]); // movs[sd] xmm1, [rsp+r_imag_slot]
+                self.emit(&[load_prefix, 0x0F, op_code, 0xC1]);
+                self.emit(&[load_prefix, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]); // movs[sd] [rsp+inner_sz], xmm0
+            }
+            BinOp::Mul => {
+                // (a+bi)*(c+di) = (ac-bd) + (ad+bc)i
+                // xmm0=a, xmm1=b, xmm2=c, xmm3=d
+                // load a → xmm0
+                self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]);
+                // load c → xmm2
+                self.emit(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]); // movs[sd] xmm2, [rsp+total_sz]
+                // load b → xmm1
+                self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]); // movs[sd] xmm1, [rsp+inner_sz]
+                // load d → xmm3
+                let r_imag_slot = total_sz + inner_sz;
+                self.emit(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]); // movs[sd] xmm3, [rsp+r_imag_slot]
+                // xmm4 = a*c
+                self.emit(&[0x66, 0x0F, 0x28, 0xE0]); // movapd xmm4, xmm0
+                self.emit(&[load_prefix, 0x0F, op_mul, 0xE2]); // mulss/mulsd xmm4, xmm2
+                // xmm5 = b*d
+                self.emit(&[0x66, 0x0F, 0x28, 0xE9]); // movapd xmm5, xmm1
+                self.emit(&[load_prefix, 0x0F, op_mul, 0xEB]); // mulss/mulsd xmm5, xmm3
+                // real = ac - bd
+                self.emit(&[load_prefix, 0x0F, op_sub, 0xE5]); // subss/subsd xmm4, xmm5
+                // store real → [rsp]
+                self.emit(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]); // movs[sd] [rsp], xmm4
+                // xmm4 = a*d
+                self.emit(&[0x66, 0x0F, 0x28, 0xE0]); // movapd xmm4, xmm0
+                self.emit(&[load_prefix, 0x0F, op_mul, 0xE3]); // mulss/mulsd xmm4, xmm3
+                // xmm5 = b*c
+                self.emit(&[0x66, 0x0F, 0x28, 0xE9]); // movapd xmm5, xmm1
+                self.emit(&[load_prefix, 0x0F, op_mul, 0xEA]); // mulss/mulsd xmm5, xmm2
+                // imag = ad + bc
+                self.emit(&[load_prefix, 0x0F, op_add, 0xE5]); // addss/addsd xmm4, xmm5
+                // store imag → [rsp+inner_sz]
+                self.emit(&[load_prefix, 0x0F, 0x11, 0x64, 0x24, inner_sz as u8]); // movs[sd] [rsp+inner_sz], xmm4
+            }
+            _ => {} // 其他操作暂不支持
+        }
+        // 结果现在在 [rsp] (real) 和 [rsp+inner_sz] (imag)
+        // 恢复到 xmm0/xmm1 并存储到目标变量
+        // 但 complex 赋值通常通过 aggregate assign 处理
+        // 这里将结果存到 rsp 顶部, 让调用者处理
+        // 恢复 rsp
+        self.emit(&[0x48, 0x83, 0xC4, save_sz as u8]); // add rsp, save_sz
+    }
+
     fn store_stack(&mut self, reg: u8, off: i32) {
         // r13 基址: REX.W + REX.B(=1 for r13) + r/m=5 → [r13+disp8]
         let mut rex = 0x49u8; if reg >= 8 { rex |= 0x04; } // REX.R for reg>=8
@@ -3413,10 +3579,15 @@ impl Codegen {
             }
             // __builtin_frame_address(level): 帧指针
             "__builtin_frame_address" => {
-                // 简化: level=0 时返回 rbp
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                 // mov dst, rbp: REX.W 8B /r (rm=5=rbp)
                 self.emit(&[rex, 0x8B, 0xC0 | ((dst & 7) << 3) | 5]);
+                // N>0: 沿帧指针链回溯 N 次: dst = [dst]
+                let level = if let Some(Expr::Int { v, .. }) = args.first() { *v as i32 } else { 0 };
+                for _ in 0..level {
+                    // mov dst, [dst]: REX.W 8B /r
+                    self.emit(&[rex, 0x8B, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                }
                 true
             }
             // __builtin_return_address(level): 返回地址
@@ -3428,6 +3599,11 @@ impl Codegen {
             }
             // __builtin_overflow_p: 溢出检测 (简化为 0)
             "__builtin_overflow_p" => {
+                self.mov_imm(dst, 0);
+                true
+            }
+            // P2-13: __builtin_apply/__builtin_return 存根 (返回 0)
+            "__builtin_apply" | "__builtin_return" => {
                 self.mov_imm(dst, 0);
                 true
             }

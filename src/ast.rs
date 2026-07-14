@@ -32,6 +32,7 @@ pub struct VarDecl {
     pub visibility: Option<String>,
     pub is_unused: bool,
     pub register_name: Option<String>,  // register asm("rN")
+    pub cleanup_fn: Option<String>,     // __attribute__((cleanup(fn)))
 }
 
 #[derive(Debug, Clone)]

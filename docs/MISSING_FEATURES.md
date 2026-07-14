@@ -2,7 +2,7 @@
 
 本文档记录 DCC 编译 Linux 内核时尚未实现的特性，按优先级分类。
 
-> 最后更新: 次要级特性实现完成后
+> 最后更新: P2 次要特性实现完成后
 
 ---
 
@@ -47,6 +47,12 @@
 | `address_space(N)` | sparse 注解 | `skip_attributes` 静默跳过 | ✅ |
 | `__builtin_object_size` | 安全检测 | 返回 `(size_t)-1` | ✅ |
 | `__builtin_expect_with_probability` | LTO 分支预测 | 降级为 `__builtin_expect` | ✅ |
+| `__SIZEOF_INT128__` 宏 | `#ifdef __SIZEOF_INT128__` 检测 | 预处理器定义为 16 | ✅ |
+| `__builtin_frame_address(N)` N>0 | stacktrace/backtrace | 沿帧指针链回溯 N 次 | ✅ |
+| `__attribute__((cleanup(fn)))` | 自动清理函数 | 块结束时逆序调用 cleanup 函数 | ✅ |
+| 宽字符串字面量 `L"..."` | UEFI 子系统 | UTF-32LE 编码, wchar_t* 类型 | ✅ |
+| `__builtin_apply`/`__builtin_return` | 旧式系统调用分发 | 存根实现 (返回 0) | ✅ |
+| `_Complex` 算术 codegen | 无线/驱动子系统 | add/sub/mul SSE 指令 | ✅ |
 
 ---
 

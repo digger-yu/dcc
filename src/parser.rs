@@ -20,6 +20,7 @@ struct ParsedAttrs {
     is_noinline: bool,
     is_always_inline: bool,
     register_name: Option<String>,
+    cleanup_fn: Option<String>,
 }
 
 impl ParsedAttrs {
@@ -33,6 +34,7 @@ impl ParsedAttrs {
         if other.is_noinline { self.is_noinline = true; }
         if other.is_always_inline { self.is_always_inline = true; }
         if other.register_name.is_some() { self.register_name = other.register_name; }
+        if other.cleanup_fn.is_some() { self.cleanup_fn = other.cleanup_fn; }
     }
 }
 
@@ -148,6 +150,17 @@ impl<'a> Parser<'a> {
                     "cold" => { attrs.is_cold = true; self.advance(); }
                     "noinline" => { attrs.is_noinline = true; self.advance(); }
                     "always_inline" => { attrs.is_always_inline = true; self.advance(); }
+                    "cleanup" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if self.cur.kind == TokKind::Ident {
+                                attrs.cleanup_fn = Some(self.cur.text.clone());
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
                     _ => { self.advance(); } // 跳过未知属性
                 }
                 if self.cur.kind == TokKind::Comma { self.advance(); }
@@ -423,7 +436,7 @@ impl<'a> Parser<'a> {
                 let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
                 if !self.expect(TokKind::Semi, "';'") { return None; }
                 let sp = name.span.clone();
-                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None })]);
+                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None })]);
             }
             // 不是函数指针, 只是带括号的指针变量 (罕见)
             self.skip_attributes();
@@ -432,7 +445,7 @@ impl<'a> Parser<'a> {
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             let sp = name.span.clone();
-            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None })]);
+            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None })]);
         }
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
         let pre_attrs = Self::merge_attrs(leading_attrs, self.parse_attributes());
@@ -535,7 +548,7 @@ impl<'a> Parser<'a> {
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false,
                 section: arr_attrs.section, alignment: arr_attrs.alignment, is_weak: arr_attrs.is_weak,
-                visibility: arr_attrs.visibility, is_unused: arr_attrs.is_unused, register_name: arr_attrs.register_name })])
+                visibility: arr_attrs.visibility, is_unused: arr_attrs.is_unused, register_name: arr_attrs.register_name, cleanup_fn: arr_attrs.cleanup_fn })])
         } else {
             // 变量名后可能有 __attribute__((unused)) 和 __asm__("label") 等
             let var_attrs = self.parse_attributes();
@@ -554,14 +567,14 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::Semi, "';'") { return None; }
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: Some(init), span: sp, is_extern: false, is_static: false,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
-                    visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name })])
+                    visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
                 self.advance();
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: false, is_static: false,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
-                    visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name })])
+                    visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn })])
             } else {
                 self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind), Some("declaration must end with ';' or have an initializer"));
                 None
@@ -1618,6 +1631,12 @@ impl<'a> Parser<'a> {
                 while self.cur.kind == TokKind::StringLit { data.extend(parse_str(&self.cur.text)); self.advance(); }
                 Some(Expr::String { data, span: sp, ty: Type::Ptr(Box::new(Type::Char)) })
             }
+            TokKind::WideStringLit => {
+                let mut data = parse_wide_str(&self.cur.text); self.advance();
+                while self.cur.kind == TokKind::WideStringLit { data.extend(parse_wide_str(&self.cur.text)); self.advance(); }
+                // wchar_t = int (4 bytes) on Linux, pointer to wchar_t
+                Some(Expr::String { data, span: sp, ty: Type::Ptr(Box::new(Type::Int)) })
+            }
             TokKind::CharLit => { let v = parse_chr(&self.cur.text); self.advance(); Some(Expr::Char { v, span: sp, ty: Type::Int }) }
             TokKind::Ident => {
                 let t = self.cur.text.clone();
@@ -1893,6 +1912,48 @@ fn parse_str(raw: &str) -> Vec<u8> {
         else { d.extend_from_slice(c.to_string().as_bytes()); }
     }
     d.push(0); d
+}
+
+/// Parse wide string literal L"..." to UTF-32LE bytes (4 bytes per wchar_t)
+fn parse_wide_str(raw: &str) -> Vec<u8> {
+    // Strip L prefix and quotes: L"..." -> ...
+    let inner = if raw.starts_with("L\"") || raw.starts_with("L'") {
+        &raw[2..raw.len()-1]
+    } else {
+        &raw[1..raw.len()-1]
+    };
+    let mut d = vec![];
+    let mut it = inner.chars();
+    while let Some(c) = it.next() {
+        let cp = if c == '\\' {
+            match it.next() {
+                Some('n') => '\n' as u32,
+                Some('t') => '\t' as u32,
+                Some('r') => '\r' as u32,
+                Some('0') => 0,
+                Some('\\') => '\\' as u32,
+                Some('"') => '"' as u32,
+                Some('\'') => '\'' as u32,
+                Some('x') => {
+                    let mut val = 0u32;
+                    for _ in 0..2 {
+                        if let Some(h) = it.next() {
+                            val = val * 16 + h.to_digit(16).unwrap_or(0);
+                        }
+                    }
+                    val
+                }
+                Some(c) => c as u32,
+                None => '\\' as u32,
+            }
+        } else {
+            c as u32
+        };
+        d.extend_from_slice(&cp.to_le_bytes());
+    }
+    // null terminator (4 bytes of zero)
+    d.extend_from_slice(&0u32.to_le_bytes());
+    d
 }
 
 fn parse_chr(raw: &str) -> u8 {

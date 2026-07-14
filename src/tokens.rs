@@ -18,6 +18,7 @@ pub enum TokKind {
     Number,        // 123 0x7b 0b101 0o17
     FloatLit,      // 1.5 2.0f 3.14L
     StringLit,     // "abc"
+    WideStringLit, // L"abc" (wchar_t string, UTF-32 on Linux)
     CharLit,       // 'a'
     Ident,         // foo _x
     // 关键字
@@ -144,6 +145,17 @@ impl<'a> Lexer<'a> {
                 "__uint128_t" => TokKind::KwUInt128,
                 _ => TokKind::Ident,
             };
+            // L"..." wide string literal
+            if text == "L" && self.peek() == Some(b'"') {
+                self.bump(); // consume opening '"'
+                while let Some(c) = self.peek() {
+                    if c == b'"' { self.bump(); break; }
+                    if c == b'\\' { self.bump(); self.bump(); continue; }
+                    self.bump();
+                }
+                let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
+                return Tok { kind: TokKind::WideStringLit, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            }
             return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
         }
         // 数字

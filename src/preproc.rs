@@ -131,6 +131,10 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("__SIZEOF_LONG_LONG__", "8");
     pp.define_builtin("__SIZEOF_SIZE_T__", "8");
     pp.define_builtin("__SIZEOF_PTRDIFF_T__", "8");
+    pp.define_builtin("__SIZEOF_INT128__", "16");
+    pp.define_builtin("__SIZEOF_FLOAT128__", "16");
+    pp.define_builtin("__INT128_TYPE__", "__int128");
+    pp.define_builtin("__UINT128_TYPE__", "__uint128_t");
     pp.define_builtin("__SIZE_TYPE__", "long unsigned int");
     pp.define_builtin("__PTRDIFF_TYPE__", "long int");
     pp.define_builtin("__WCHAR_TYPE__", "int");
@@ -1763,6 +1767,7 @@ impl Preprocessor {
             | "__builtin_bitreverse32" | "__builtin_bitreverse64"
             | "__builtin_frame_address" | "__builtin_return_address"
             | "__builtin_overflow_p"
+            | "__builtin_apply" | "__builtin_return"
         )
     }
 
