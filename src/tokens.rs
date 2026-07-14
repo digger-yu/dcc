@@ -27,6 +27,7 @@ pub enum TokKind {
     KwReturn, KwGoto, KwIfDefFake,        // 后者用于 #ifdef 兼容 (M0 不解析)
     KwStatic, KwExtern, KwConst, KwVolatile, KwInline, KwRestrict, KwAuto, KwRegister,
     KwAtomic,                    // _Atomic
+    KwBool,                      // _Bool (C99)
     KwFract, KwAccum,              // _Fract, _Accum (定点数)
     KwComplex,                     // _Complex
     KwDecimal32, KwDecimal64, KwDecimal128,  // _Decimal32/64/128
@@ -131,6 +132,7 @@ impl<'a> Lexer<'a> {
                 "auto" => TokKind::KwAuto, "register" => TokKind::KwRegister,
                 "sizeof" => TokKind::KwSizeof, "_Alignof" => TokKind::KwAlignof,
                 "_Atomic" => TokKind::KwAtomic,
+                "_Bool" => TokKind::KwBool,
                 "_Fract" => TokKind::KwFract, "_Accum" => TokKind::KwAccum,
                 "_Complex" | "__complex__" | "__complex" => TokKind::KwComplex,
                 "_Decimal32" => TokKind::KwDecimal32,

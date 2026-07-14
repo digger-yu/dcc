@@ -557,6 +557,52 @@ impl Preprocessor {
                     state.active = val;
                 }
             }
+        } else if directive.starts_with("elifdef ") || directive.starts_with("elifdef\t") {
+            let name = directive[8..].trim();
+            let len = self.cond_stack.len();
+            if len > 0 {
+                let parent_active = if len <= 1 { true }
+                    else { self.cond_stack[..len-1].iter().all(|c| c.active) };
+                let saw_else = self.cond_stack[len - 1].saw_else;
+                let any_true = self.cond_stack[len - 1].any_true;
+                if saw_else {
+                    self.diags.push(Diagnostic::err("E0200", "#elifdef after #else",
+                        Span::point(&self.file, line_no, 1)));
+                    return;
+                }
+                let state = &mut self.cond_stack[len - 1];
+                if any_true {
+                    state.active = false;
+                } else {
+                    let val = parent_active && self.macros.contains_key(name);
+                    let state = &mut self.cond_stack[len - 1];
+                    if val { state.any_true = true; }
+                    state.active = val;
+                }
+            }
+        } else if directive.starts_with("elifndef ") || directive.starts_with("elifndef\t") {
+            let name = directive[9..].trim();
+            let len = self.cond_stack.len();
+            if len > 0 {
+                let parent_active = if len <= 1 { true }
+                    else { self.cond_stack[..len-1].iter().all(|c| c.active) };
+                let saw_else = self.cond_stack[len - 1].saw_else;
+                let any_true = self.cond_stack[len - 1].any_true;
+                if saw_else {
+                    self.diags.push(Diagnostic::err("E0200", "#elifndef after #else",
+                        Span::point(&self.file, line_no, 1)));
+                    return;
+                }
+                let state = &mut self.cond_stack[len - 1];
+                if any_true {
+                    state.active = false;
+                } else {
+                    let val = parent_active && !self.macros.contains_key(name);
+                    let state = &mut self.cond_stack[len - 1];
+                    if val { state.any_true = true; }
+                    state.active = val;
+                }
+            }
         } else if directive.starts_with("else") {
             let len = self.cond_stack.len();
             if len > 0 {

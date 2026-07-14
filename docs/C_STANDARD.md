@@ -27,8 +27,9 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 - `_Atomic` (基础类型表支持)
 - 匿名 struct/union
 - `<stdatomic.h>` 内建宏定义
-
-> 注: `_Generic` (泛型选择) 和 `_Thread_local` 尚未实装。
+- `_Generic` 泛型选择表达式
+- `_Thread_local` 线程存储类 (解析器静默跳过, freestanding 下无需特殊处理)
+- `_Noreturn` 函数限定符 (解析器静默跳过)
 
 ## C17
 
@@ -42,6 +43,8 @@ DCC 默认 `-std=gnu23` (与 GCC 15 一致)，完整支持以下标准及对应 
 - `_BitInt(N)` — ✅ 已实装 (按宽度映射到标准整数类型 8/16/32/64)
 - 数字分隔符 `1'000'000` — ✅ 已实装 (词法分析器跳过 `'`)
 - `#embed` — ✅ 已实装 (预处理器嵌入文件内容为字节数组，支持 `limit`/`prefix` 参数)
+- `nullptr` — ✅ 已实装 (解析为 `(void*)0`)
+- `#elifdef` / `#elifndef` — ✅ 已实装 (预处理器条件编译)
 
 ## GNU 扩展
 

@@ -312,6 +312,31 @@ impl<'a> Parser<'a> {
             self.advance();
             let params = self.parse_params()?;
             if !self.expect(TokKind::RParen, "')'") { return None; }
+            // K&R 风格函数: 参数后跟类型声明, 然后是函数体
+            // 检测: 参数都是 int 类型 (K&R 默认) 且后面是类型声明而非函数体
+            let params = if !params.is_empty() && params.iter().all(|p| p.ty == Type::Int)
+                && self.cur.kind != TokKind::LBrace && self.cur.kind != TokKind::Semi
+                && self.is_type_start() {
+                // 解析 K&R 参数类型声明
+                let mut kr_params = params;
+                while self.is_type_start() && self.cur.kind != TokKind::LBrace {
+                    let ty = self.parse_type()?;
+                    // 可能有多个参数名共享同一类型
+                    while self.cur.kind == TokKind::Ident {
+                        let name = self.cur.text.clone();
+                        self.advance();
+                        // 更新对应参数的类型
+                        for p in &mut kr_params {
+                            if let Some(n) = &p.name {
+                                if n.name == name { p.ty = ty.clone(); }
+                            }
+                        }
+                        if self.cur.kind == TokKind::Comma { self.advance(); }
+                    }
+                    if self.cur.kind == TokKind::Semi { self.advance(); }
+                }
+                kr_params
+            } else { params };
             // 函数声明后: 跳过 __attribute__ 和 __asm__ 标签
             self.skip_attributes();
             self.skip_asm_label();
@@ -388,6 +413,10 @@ impl<'a> Parser<'a> {
             match self.cur.kind {
                 TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
                 | TokKind::KwInline | TokKind::KwRestrict | TokKind::KwRegister | TokKind::KwAuto => { self.advance(); }
+                // _Noreturn: C11 函数限定符, 不影响代码生成, 静默跳过
+                TokKind::Ident if self.cur.text == "_Noreturn" => { self.advance(); }
+                // _Thread_local: C11 线程存储类, freestanding 下无需特殊处理, 静默跳过
+                TokKind::Ident if self.cur.text == "_Thread_local" || self.cur.text == "__thread" => { self.advance(); }
                 TokKind::KwAtomic => {
                     self.advance();
                     // _Atomic(type) 形式: 解析内部类型并包装为 Atomic
@@ -557,6 +586,7 @@ impl<'a> Parser<'a> {
                 TokKind::KwShort => { is_short = true; self.advance(); }
                 TokKind::KwLong => { is_long += 1; self.advance(); }
                 TokKind::KwVoid => { base = Some(Type::Void); self.advance(); }
+                TokKind::KwBool => { base = Some(Type::Bool); self.advance(); }
                 TokKind::KwFloat => { base = Some(Type::Float); self.advance(); }
                 TokKind::KwDouble => { base = Some(Type::Double); self.advance(); }
                 TokKind::KwDecimal32 => { base = Some(Type::Float); self.advance(); }      // _Decimal32 → float 近似
@@ -610,6 +640,7 @@ impl<'a> Parser<'a> {
     fn resolve_base(&self, base: Option<Type>, uns: bool, long: u8, short: bool) -> Type {
         match (base, uns, long, short) {
             (Some(Type::Void), ..) => Type::Void,
+            (Some(Type::Bool), ..) => Type::Bool,
             (Some(Type::Float), ..) => Type::Float,
             (Some(Type::Double), _, 0, _) => Type::Double,
             (Some(Type::Double), _, _, _) => Type::LongDouble,
@@ -729,6 +760,22 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::KwVoid && self.peek.kind == TokKind::RParen { self.advance(); return Some(ps); }
         if self.cur.kind == TokKind::RParen { return Some(ps); }
         if self.cur.kind == TokKind::Ellipsis { self.advance(); return Some(ps); }
+        // K&R 风格函数: 参数只有标识符, 没有类型 (如 func(a, b, c))
+        // 检测: 当前是 Ident 且不是类型起始 (不是 typedef/typeof 等)
+        if self.cur.kind == TokKind::Ident && !self.is_type_start() {
+            let mut kr_names = vec![];
+            while self.cur.kind == TokKind::Ident {
+                kr_names.push(self.cur.text.clone());
+                self.advance();
+                if self.cur.kind == TokKind::Comma { self.advance(); }
+            }
+            // 返回特殊标记: 参数名列表, 类型默认为 int
+            for name in &kr_names {
+                ps.push(Param { ty: Type::Int, name: Some(Ident { name: name.clone(), span: Span::point("", 0, 0) }), span: Span::point("", 0, 0) });
+            }
+            // 设置 is_kr 标志 (通过返回特殊 Param, 后续在 parse_var_or_func 中处理)
+            return Some(ps);
+        }
         loop {
             // 函数指针参数: ret_type (*name)(params)
             // 第一性原理: 当类型后跟 (* 时, 这是函数指针参数而非普通参数
@@ -810,13 +857,16 @@ impl<'a> Parser<'a> {
             | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
             | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef
             | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum | TokKind::KwComplex
-            | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128)
+            | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128 | TokKind::KwBool)
             || (self.cur.kind == TokKind::Ident
                 && (self.typedefs.contains_key(&self.cur.text)
                     || self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof"
                     || self.cur.text == "__extension__" || self.cur.text == "constexpr" || self.cur.text == "_BitInt"
-                    // 未知 ident 作类型: 降级在 parse_type() 处理
-                    || matches!(self.peek.kind, TokKind::Ident | TokKind::Star)))
+                    || self.cur.text == "_Noreturn" || self.cur.text == "_Thread_local" || self.cur.text == "__thread"
+                    // 排除表达式关键字: _Generic/nullptr 不是类型
+                    || (self.cur.text != "_Generic" && self.cur.text != "nullptr"
+                        // 未知 ident 作类型: 降级在 parse_type() 处理
+                        && matches!(self.peek.kind, TokKind::Ident | TokKind::Star))))
     }
 
     fn is_peek_type_start(&self) -> bool {
@@ -826,11 +876,12 @@ impl<'a> Parser<'a> {
             | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
             | TokKind::KwInline | TokKind::KwRegister | TokKind::KwAuto | TokKind::KwTypedef
             | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum | TokKind::KwComplex
-            | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128)
+            | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128 | TokKind::KwBool)
             || (self.peek.kind == TokKind::Ident
                 && (self.typedefs.contains_key(&self.peek.text)
                     || self.peek.text == "typeof" || self.peek.text == "__typeof__" || self.peek.text == "__typeof"
-                    || self.peek.text == "__extension__" || self.peek.text == "constexpr" || self.peek.text == "_BitInt"))
+                    || self.peek.text == "__extension__" || self.peek.text == "constexpr" || self.peek.text == "_BitInt"
+                    || self.peek.text == "_Noreturn" || self.peek.text == "_Thread_local" || self.peek.text == "__thread"))
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
@@ -1048,6 +1099,55 @@ impl<'a> Parser<'a> {
             TokKind::Ident if self.cur.text == "__extension__" => {
                 self.advance();
                 self.parse_unary()
+            }
+            // _Generic(controlling_expr, type: expr, ..., default: expr): C11 泛型选择
+            TokKind::Ident if self.cur.text == "_Generic" => {
+                self.advance();
+                if !self.expect(TokKind::LParen, "'('") { return None; }
+                // 控制表达式: 不能用 parse_expr() (会消费逗号为逗号运算符)
+                // 用 bp=2 跳过逗号运算符 (bp=1), 让逗号留给 association list
+                let controlling = self.parse_expr_bp(2)?;
+                if !self.expect(TokKind::Comma, "','") { return None; }
+                let ctrl_ty = controlling.ty();
+                let mut result: Option<Expr> = None;
+                let mut default_result: Option<Expr> = None;
+                // 解析 association-list: type-name: expr 或 default: expr
+                loop {
+                    if self.cur.kind == TokKind::RParen { break; }
+                    // default: expr
+                    if (self.cur.kind == TokKind::Ident && self.cur.text == "default")
+                        || self.cur.kind == TokKind::KwDefault {
+                        self.advance();
+                        if !self.expect(TokKind::Colon, "':'") { return None; }
+                        default_result = Some(self.parse_expr_bp(2)?);
+                    } else {
+                        // type-name: expr
+                        let assoc_ty = self.parse_type()?;
+                        if !self.expect(TokKind::Colon, "':'") { return None; }
+                        let assoc_expr = self.parse_expr_bp(2)?;
+                        // 类型匹配: 简化比较 (忽略 const/volatile 限定符)
+                        if result.is_none() && Self::types_compatible(&ctrl_ty, &assoc_ty) {
+                            result = Some(assoc_expr);
+                        }
+                    }
+                    if self.cur.kind == TokKind::Comma { self.advance(); }
+                }
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                // 优先使用精确匹配, 否则使用 default
+                let chosen = result.or(default_result);
+                match chosen {
+                    Some(e) => Some(e),
+                    None => {
+                        self.err_here("E0001", "no matching generic selection", Some("add a 'default' association to _Generic"));
+                        None
+                    }
+                }
+            }
+            // nullptr: C23 空指针常量, 等价于 (void*)0
+            TokKind::Ident if self.cur.text == "nullptr" => {
+                self.advance();
+                let ptr_ty = Type::Ptr(Box::new(Type::Void));
+                Some(Expr::Int { v: 0, span: sp, ty: ptr_ty })
             }
             // __asm__("..."): 内联汇编, 解析为 no-op 表达式
             TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" || self.cur.text == "asm" => {
@@ -1283,6 +1383,34 @@ impl<'a> Parser<'a> {
                 Some(Expr::InitList { inits, span: sp, ty: Type::Int }) // 类型稍后由上下文确定
             }
             _ => { self.err_here("E0006", format!("expected expression, got {:?}", self.cur.kind), Some("expected a value, variable, or expression here")); None }
+        }
+    }
+
+    /// _Generic 类型兼容性检查: 简化比较, 忽略 const/volatile 限定符
+    fn types_compatible(a: &Type, b: &Type) -> bool {
+        // 剥离 Atomic 包装进行比较
+        let a = match a { Type::Atomic(inner) => inner.as_ref(), _ => a };
+        let b = match b { Type::Atomic(inner) => inner.as_ref(), _ => b };
+        // 整数类型族: char/schar/uchar 互兼容, short/ushort 互兼容, 等等
+        match (a, b) {
+            (Type::Bool, Type::Bool) => true,
+            (Type::Char | Type::SChar | Type::UChar, Type::Char | Type::SChar | Type::UChar) => true,
+            (Type::Short | Type::UShort, Type::Short | Type::UShort) => true,
+            (Type::Int | Type::UInt, Type::Int | Type::UInt) => true,
+            (Type::Long | Type::ULong, Type::Long | Type::ULong) => true,
+            (Type::LongLong | Type::ULongLong, Type::LongLong | Type::ULongLong) => true,
+            (Type::Float, Type::Float) => true,
+            (Type::Double, Type::Double) => true,
+            (Type::LongDouble, Type::LongDouble) => true,
+            (Type::Ptr(_), Type::Ptr(_)) => true, // 指针间互兼容 (简化)
+            (Type::Void, Type::Void) => true,
+            (Type::Fract, Type::Fract) => true,
+            (Type::Accum, Type::Accum) => true,
+            // struct/union/enum: 按名称比较
+            (Type::Struct(na, _), Type::Struct(nb, _)) => na == nb,
+            (Type::Union(na, _), Type::Union(nb, _)) => na == nb,
+            (Type::Enum(na, _), Type::Enum(nb, _)) => na == nb,
+            _ => a == b,
         }
     }
 }
