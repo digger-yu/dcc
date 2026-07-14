@@ -146,15 +146,24 @@ impl<'a> Lexer<'a> {
             if b == b'0' && matches!(self.peek_at(1), Some(b'x') | Some(b'X')) {
                 self.bump(); self.bump();
                 while let Some(c) = self.peek() {
+                    if c == b'\'' && self.peek_at(1).map_or(false, |n| n.is_ascii_hexdigit()) {
+                        self.bump(); continue;
+                    }
                     if c.is_ascii_hexdigit() { self.bump(); } else { break; }
                 }
             } else if b == b'0' && matches!(self.peek_at(1), Some(b'b') | Some(b'B')) {
                 self.bump(); self.bump();
                 while let Some(c) = self.peek() {
+                    if c == b'\'' && self.peek_at(1).map_or(false, |n| n == b'0' || n == b'1') {
+                        self.bump(); continue;
+                    }
                     if c == b'0' || c == b'1' { self.bump(); } else { break; }
                 }
             } else {
                 while let Some(c) = self.peek() {
+                    if c == b'\'' && self.peek_at(1).map_or(false, |n| n.is_ascii_digit()) {
+                        self.bump(); continue;
+                    }
                     if c.is_ascii_digit() { self.bump(); }
                     else if c == b'.' && !is_float { is_float = true; self.bump(); }
                     else { break; }
@@ -172,7 +181,9 @@ impl<'a> Lexer<'a> {
             if let Some(b'f') | Some(b'F') | Some(b'l') | Some(b'L') = self.peek() {
                 is_float = true; self.bump();
             }
-            let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
+            // C23 数字分隔符: 移除 ' 字符
+            let raw = &self.src[start..self.pos];
+            let text: String = raw.iter().filter(|&&b| b != b'\'').map(|&b| b as char).collect();
             let kind = if is_float { TokKind::FloatLit } else { TokKind::Number };
             return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
         }

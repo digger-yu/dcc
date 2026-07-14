@@ -600,6 +600,10 @@ impl Preprocessor {
                 self.diags.push(Diagnostic::warn("W0200", format!("#warning {}", msg),
                     Span::point(&self.file, line_no, 1)));
             }
+        } else if directive.starts_with("embed") {
+            if self.is_active() {
+                self.do_embed(&directive[5..].trim(), line_no);
+            }
         }
         // 忽略未知指令 (line markers 等)
     }
@@ -762,6 +766,71 @@ impl Preprocessor {
             if p.exists() { return Some(p); }
         }
         None
+    }
+
+    /// C23 #embed: 嵌入文件内容为逗号分隔的整数字节值
+    fn do_embed(&mut self, args: &str, line_no: u32) {
+        let args = args.trim();
+        // 提取文件名: 以 "file" 或 <file> 开头
+        let (path, rest) = if args.starts_with('"') {
+            let end = args[1..].find('"').map(|i| i + 1).unwrap_or(args.len());
+            (&args[1..end], args[end+1..].trim())
+        } else if args.starts_with('<') {
+            let end = args[1..].find('>').map(|i| i + 1).unwrap_or(args.len());
+            (&args[1..end], args[end+1..].trim())
+        } else {
+            self.diags.push(Diagnostic::err("E0207", "expected \"file\" or <file> for #embed",
+                Span::point(&self.file, line_no, 1)));
+            return;
+        };
+        // 解析可选参数: 支持标准 (limit(N)) 和裸 limit(N) 两种形式
+        let mut limit = None;
+        let mut rest = rest;
+        while !rest.is_empty() {
+            // 跳过前导括号
+            if rest.starts_with('(') { rest = rest[1..].trim(); }
+            // 检查 limit(N)
+            if let Some(lim_str) = rest.strip_prefix("limit(") {
+                if let Some(lim_end) = lim_str.find(')') {
+                    limit = lim_str[..lim_end].trim().parse::<usize>().ok();
+                    rest = lim_str[lim_end+1..].trim();
+                    // 跳过结尾括号
+                    if rest.starts_with(')') { rest = rest[1..].trim(); }
+                    continue;
+                }
+            }
+            // 其他参数 (prefix, suffix, if-empty) 或非参数内容: 跳过
+            if rest.starts_with('(') {
+                let end = rest[1..].find(')').map(|i| i + 2).unwrap_or(rest.len());
+                rest = rest[end..].trim();
+            } else {
+                break;
+            }
+        }
+        // 搜索文件 (与 #include 相同逻辑)
+        match self.find_include(path, args.starts_with('<')) {
+            Some(full_path) => {
+                match std::fs::read(&full_path) {
+                    Ok(bytes) => {
+                        let max = limit.unwrap_or(bytes.len()).min(bytes.len());
+                        for (i, &b) in bytes[..max].iter().enumerate() {
+                            if i > 0 { self.out.push_str(", "); }
+                            self.out.push_str(&b.to_string());
+                        }
+                    }
+                    Err(_) => {
+                        // #embed 空文件或无文件: 不输出任何内容
+                    }
+                }
+            }
+            None => {
+                // 找不到文件: 输出空 (C23 标准中 #embed 找不到文件为未定义行为)
+                // #embed "file" limit(0) 总是有效
+                self.diags.push(Diagnostic::err("E0208",
+                    format!("embed file not found: {}", path),
+                    Span::point(&self.file, line_no, 1)));
+            }
+        }
     }
 
     /// 处理 #pragma GCC diagnostic

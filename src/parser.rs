@@ -60,6 +60,30 @@ impl<'a> Parser<'a> {
             }
         }
     }
+    /// 跳过 C23 标准属性 [[attr]]: 不影响代码生成，静默跳过
+    fn skip_std_attributes(&mut self) {
+        while self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
+            self.advance(); // [
+            self.advance(); // [
+            let mut depth = 2i32;
+            while depth > 0 && self.cur.kind != TokKind::Eof {
+                if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
+                    depth += 2;
+                    self.advance(); self.advance();
+                    continue;
+                }
+                if self.cur.kind == TokKind::RBracket && self.peek.kind == TokKind::RBracket {
+                    depth -= 2;
+                    if depth == 0 { self.advance(); break; }
+                    self.advance(); self.advance();
+                    continue;
+                }
+                self.advance();
+            }
+            if self.cur.kind == TokKind::RBracket { self.advance(); } // ]
+        }
+    }
+
     /// 剥离 __asm__("label"): GNU asm 标签, 不影响代码生成
     fn skip_asm_label(&mut self) {
         if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "__asm") {
@@ -120,6 +144,13 @@ impl<'a> Parser<'a> {
         // __extension__: GNU 扩展前缀，直接跳过
         if self.cur.kind == TokKind::Ident && self.cur.text == "__extension__" {
             self.advance();
+        }
+        // C23 [[attributes]]: 静默跳过
+        self.skip_std_attributes();
+        // constexpr: C23 编译期常量, 不影响代码生成, 静默跳过
+        while self.cur.kind == TokKind::Ident && self.cur.text == "constexpr" {
+            self.advance();
+            self.skip_std_attributes();
         }
         // _Static_assert(expr, msg): C11 编译期断言, 静默跳过
         if self.cur.kind == TokKind::Ident && self.cur.text == "_Static_assert" {
@@ -273,6 +304,8 @@ impl<'a> Parser<'a> {
         self.skip_attributes();
         self.skip_asm_label();
         let name = self.parse_ident()?;
+        // C23 [[attributes]]: 在变量/函数名后出现，静默跳过
+        self.skip_std_attributes();
         let sp = name.span.clone();
         let name_for_decl = name.clone();
         if self.cur.kind == TokKind::LParen {
@@ -307,12 +340,16 @@ impl<'a> Parser<'a> {
                 }
             } else { ArraySize::Const(0) };
             if !self.expect(TokKind::RBracket, "']'") { return None; }
-            let arr_ty = Type::Array(Box::new(ty), arr_size);
-            self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
-            if !self.in_function { self.globals.insert(name_for_decl.name.clone(), arr_ty.clone()); }
+            let mut arr_ty = Type::Array(Box::new(ty), arr_size);
             self.skip_attributes(); // 变量属性
             self.skip_asm_label(); // asm 标签
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
+            // 从 InitList 推断数组大小: data[] = {1,2,3} → data[3]
+            if let (Type::Array(elem, ArraySize::Const(0)), Some(Expr::InitList { inits, .. })) = (&arr_ty, &init) {
+                arr_ty = Type::Array(elem.clone(), ArraySize::Const(inits.len()));
+            }
+            self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
+            if !self.in_function { self.globals.insert(name_for_decl.name.clone(), arr_ty.clone()); }
             if !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false })])
         } else {
@@ -343,6 +380,11 @@ impl<'a> Parser<'a> {
         let mut base: Option<Type> = None;
         // 跳过存储类/const/volatile/_Atomic/__extension__/__attribute__
         loop {
+            // C23 [[attributes]]: 在类型限定符之间出现，在 match 之前检查
+            if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
+                self.skip_std_attributes();
+                continue;
+            }
             match self.cur.kind {
                 TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
                 | TokKind::KwInline | TokKind::KwRestrict | TokKind::KwRegister | TokKind::KwAuto => { self.advance(); }
@@ -387,12 +429,42 @@ impl<'a> Parser<'a> {
                 // __const__/__volatile__/__restrict__: GNU 扩展拼写, 同 const/volatile/restrict
                 TokKind::Ident if self.cur.text == "__const__" || self.cur.text == "__volatile__"
                     || self.cur.text == "__restrict__" => { self.advance(); }
+                // constexpr: C23 编译期常量, 静默跳过
+                TokKind::Ident if self.cur.text == "constexpr" => { self.advance(); }
+                // _BitInt(N): C23 定宽整数类型
+                // 用 base 类型 + 标志位, 让 resolve_base 统一处理 signed/unsigned
+                TokKind::Ident if self.cur.text == "_BitInt" => {
+                    self.advance();
+                    let width = if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        let w = if self.cur.kind == TokKind::Number {
+                            self.cur.text.parse::<u32>().unwrap_or(32)
+                        } else { 32 };
+                        if matches!(self.cur.kind, TokKind::Number) { self.advance(); }
+                        if self.cur.kind == TokKind::RParen { self.advance(); }
+                        w
+                    } else { 32 };
+                    // 映射到基础类型, signed/unsigned 由 is_unsigned 标志决定
+                    match width {
+                        0..=8  => { base = Some(Type::Char); }
+                        9..=16 => { is_short = true; }
+                        17..=32 => { base = Some(Type::Int); }
+                        _ => { is_long = 2; }
+                    }
+                }
                 // 内核属性宏 (__weak, __init 等): 仅在后面是标识符或指针时跳过
                 TokKind::Ident if self.cur.text.starts_with("__")
                     && !self.typedefs.contains_key(&self.cur.text)
                     && matches!(self.peek.kind, TokKind::Ident | TokKind::Star) => { self.advance(); }
                 _ => break,
             }
+        }
+        // 如果已从 _BitInt(typeof 等确定了 base 类型,立即解析避免后续 ident 误判
+        // 注意: 必须放在 struct/union/enum/ident 检查之前
+        if base.is_some() || is_unsigned || is_long > 0 || is_short {
+            let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
+            let ty = self.try_parse_vector_attr(ty);
+            return Some(self.parse_ptr_suffix(ty));
         }
         // struct/union/enum
         if self.cur.kind == TokKind::KwStruct || self.cur.kind == TokKind::KwUnion {
@@ -494,6 +566,27 @@ impl<'a> Parser<'a> {
                 TokKind::KwAccum => { base = Some(Type::Accum); self.advance(); }
                 TokKind::KwSigned => { self.advance(); }
                 TokKind::KwUnsigned => { is_unsigned = true; self.advance(); }
+                // _BitInt(N): C23 定宽整数类型 (也在第一个 loop 中处理,但 unsigned 在第二个 loop)
+                TokKind::Ident if self.cur.text == "_BitInt" => {
+                    self.advance();
+                    let width = if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        let w = if self.cur.kind == TokKind::Number {
+                            self.cur.text.parse::<u32>().unwrap_or(32)
+                        } else { 32 };
+                        if matches!(self.cur.kind, TokKind::Number) { self.advance(); }
+                        if self.cur.kind == TokKind::RParen { self.advance(); }
+                        w
+                    } else { 32 };
+                    match width {
+                        0..=8  => { base = Some(Type::Char); }
+                        9..=16 => { is_short = true; }
+                        17..=32 => { base = Some(Type::Int); }
+                        _ => { is_long = 2; }
+                    }
+                }
+                // constexpr: 在第二个 loop 中也可能出现 (如 unsigned constexpr _BitInt)
+                TokKind::Ident if self.cur.text == "constexpr" => { self.advance(); }
                 _ => break,
             }
         }
@@ -639,7 +732,10 @@ impl<'a> Parser<'a> {
         loop {
             // 函数指针参数: ret_type (*name)(params)
             // 第一性原理: 当类型后跟 (* 时, 这是函数指针参数而非普通参数
-            if self.is_type_start() && self.peek.kind == TokKind::LParen {
+            // 注意: _BitInt(N) 和 constexpr 的 ( 不是函数指针指示符, 跳过前瞻
+            if self.is_type_start() && self.peek.kind == TokKind::LParen
+                && !(self.cur.kind == TokKind::Ident && self.cur.text == "_BitInt")
+                && !(self.cur.kind == TokKind::Ident && self.cur.text == "constexpr") {
                 // 检查是否是函数指针参数模式: type (* ...)
                 let saved_cur = self.cur.clone();
                 let saved_peek = self.peek.clone();
@@ -694,6 +790,10 @@ impl<'a> Parser<'a> {
         let mut items = vec![];
         loop {
             if self.cur.kind == TokKind::RBrace || self.cur.kind == TokKind::Eof { break; }
+            // C23 [[attributes]]: 在块级作用域中出现，静默跳过
+            if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
+                self.skip_std_attributes();
+            }
             if self.is_type_start() {
                 match self.parse_decl() { Some(ds) => { for d in ds { items.push(BlockItem::Decl(d)); } } None => { self.advance(); } }
             } else {
@@ -714,7 +814,7 @@ impl<'a> Parser<'a> {
             || (self.cur.kind == TokKind::Ident
                 && (self.typedefs.contains_key(&self.cur.text)
                     || self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof"
-                    || self.cur.text == "__extension__"
+                    || self.cur.text == "__extension__" || self.cur.text == "constexpr" || self.cur.text == "_BitInt"
                     // 未知 ident 作类型: 降级在 parse_type() 处理
                     || matches!(self.peek.kind, TokKind::Ident | TokKind::Star)))
     }
@@ -730,7 +830,7 @@ impl<'a> Parser<'a> {
             || (self.peek.kind == TokKind::Ident
                 && (self.typedefs.contains_key(&self.peek.text)
                     || self.peek.text == "typeof" || self.peek.text == "__typeof__" || self.peek.text == "__typeof"
-                    || self.peek.text == "__extension__"))
+                    || self.peek.text == "__extension__" || self.peek.text == "constexpr" || self.peek.text == "_BitInt"))
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
@@ -850,16 +950,18 @@ impl<'a> Parser<'a> {
                 lhs = Expr::Cond { cond: Box::new(lhs), then_: Box::new(t), else_: Box::new(e), span: self.cur.span.clone(), ty: int_t() }; continue;
             }
             let (op, lbp, rbp) = match self.cur.kind {
-                TokKind::Plus => (BinOp::Add, 3u8, 4), TokKind::Minus => (BinOp::Sub, 3, 4),
-                TokKind::Star => (BinOp::Mul, 5, 6), TokKind::Slash => (BinOp::Div, 5, 6),
-                TokKind::Percent => (BinOp::Mod, 5, 6),
-                TokKind::Lt => (BinOp::Lt, 7, 8), TokKind::Gt => (BinOp::Gt, 7, 8),
-                TokKind::Le => (BinOp::Le, 7, 8), TokKind::Ge => (BinOp::Ge, 7, 8),
-                TokKind::EqEq => (BinOp::EqEq, 7, 8), TokKind::Ne => (BinOp::Ne, 7, 8),
-                TokKind::Amp => (BinOp::And, 9, 10), TokKind::Caret => (BinOp::Xor, 11, 12),
-                TokKind::Pipe => (BinOp::Or, 13, 14),
-                TokKind::AndAnd => (BinOp::AndAnd, 15, 16), TokKind::OrOr => (BinOp::OrOr, 15, 16),
-                TokKind::Shl => (BinOp::Shl, 7, 8), TokKind::Shr => (BinOp::Shr, 7, 8),
+                TokKind::OrOr => (BinOp::OrOr, 4u8, 5),
+                TokKind::AndAnd => (BinOp::AndAnd, 5, 6),
+                TokKind::Pipe => (BinOp::Or, 6, 7),
+                TokKind::Caret => (BinOp::Xor, 7, 8),
+                TokKind::Amp => (BinOp::And, 8, 9),
+                TokKind::EqEq => (BinOp::EqEq, 9, 10), TokKind::Ne => (BinOp::Ne, 9, 10),
+                TokKind::Lt => (BinOp::Lt, 10, 11), TokKind::Gt => (BinOp::Gt, 10, 11),
+                TokKind::Le => (BinOp::Le, 10, 11), TokKind::Ge => (BinOp::Ge, 10, 11),
+                TokKind::Shl => (BinOp::Shl, 11, 12), TokKind::Shr => (BinOp::Shr, 11, 12),
+                TokKind::Plus => (BinOp::Add, 12u8, 13), TokKind::Minus => (BinOp::Sub, 12, 13),
+                TokKind::Star => (BinOp::Mul, 13, 14), TokKind::Slash => (BinOp::Div, 13, 14),
+                TokKind::Percent => (BinOp::Mod, 13, 14),
                 _ => break,
             };
             if lbp < min_bp { break; }

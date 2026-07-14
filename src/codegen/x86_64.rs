@@ -1625,7 +1625,7 @@ impl Codegen {
         match size {
             1 => {
                 // mov [r13 + disp], src_reg (byte) - 不需要 REX.W
-                let rex_byte = 0x40u8 | if src_reg >= 8 { 0x04 } else { 0 }; // REX.B only
+                let rex_byte = 0x41u8 | if src_reg >= 8 { 0x04 } else { 0 }; // REX.B for r13
                 self.emit(&[rex_byte, 0x88]);
                 if offset.abs() < 128 {
                     self.emit(&[0x45 | ((src_reg & 7) << 3), offset as i8 as u8]);
@@ -1637,7 +1637,7 @@ impl Codegen {
             2 => {
                 // mov [r13 + disp], src_reg (word)
                 self.emit(&[0x66]); // operand size override
-                let rex_byte = 0x40u8 | if src_reg >= 8 { 0x04 } else { 0 };
+                let rex_byte = 0x41u8 | if src_reg >= 8 { 0x04 } else { 0 }; // REX.B for r13
                 self.emit(&[rex_byte, 0x89]);
                 if offset.abs() < 128 {
                     self.emit(&[0x45 | ((src_reg & 7) << 3), offset as i8 as u8]);
