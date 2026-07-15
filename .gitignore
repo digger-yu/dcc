@@ -6,6 +6,7 @@ Cargo.lock
 # Editor
 .vscode/
 .idea/
+.cursorrules
 *.swp
 *.swo
 
