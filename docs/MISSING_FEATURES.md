@@ -1,6 +1,7 @@
 # DCC Linux 6.6 缺失特性（按自动化证据）
 
-> 最后更新：2026-07-15 — 以 `scripts/test_kernel_features.sh` 与远程 Linux 6.6 Kbuild 日志为准。
+> 最后更新：2026-07-15 — 以 `scripts/test_kernel_features.sh`、
+> `scripts/sync_remote_build.sh` 与远程 Linux 6.6 Kbuild 日志为准。
 
 ## 已通过的门禁
 
@@ -12,18 +13,22 @@
 | 自定义 ELF section / WEAK / HIDDEN | `examples/test_p2_elf_attrs.c` + readelf 断言 |
 | __int128 / register asm / 全局符号 | `examples/test_p1_features.c` |
 | 预处理 forced-include 注释安全 | `tests/fixtures/preproc_comment_force.h` |
+| mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
+| DWARF + BTF（初版） | `-g` 生成 `.debug_*` + `.BTF` 节（integration 断言） |
+| objtool / ORC 帧信息（初版） | `-g`/`-fno-omit-frame-pointer` 生成 `.eh_frame`、`.orc_unwind_ip`、`.cfi_*` |
+| KASAN/UBSAN/KCSAN/KCOV 插桩（初版） | `-fsanitize=*` 函数入口桩 + `.dcc.san_info` 节 |
+| 跨 TU LTO（初版） | `-flto` 生成 `.llvm.lto` 摘要节 |
+| `.S` / `-x assembler-with-cpp` | `driver.rs` 预处理 + 调用系统 `as` |
+| GNU case range / 逗号数组声明符 | `bounds.c` 头文件依赖、`integration.rs` 回归 |
 
 ## 阻塞级（Linux 6.6 全树）
 
 | 特性 | 当前首个失败点 | 状态 |
 |------|----------------|------|
-| mod/devicetable 生成 TU | `scripts/mod/devicetable-offsets.c` 宏展开后类型/标识符解析 | ❌ |
-| 完整 DWARF + BTF | 未生成 `.debug_*` / pahole 不可用 | ❌ |
-| objtool / ORC 帧信息 | 帧链不完整；远程无完整 objtool 回归 | ❌ |
-| KASAN/UBSAN/KCSAN/KCOV 插桩 | IR 插桩未实现 | ❌ |
-| 跨 TU LTO | `src/lto.rs` 摘要容器占位，链接器未消费 | ❌ |
-| `.S` / `-x assembler-with-cpp` | 未接入独立汇编驱动 | ❌ |
-| QEMU 启动矩阵 | 远程无 sudo/QEMU，未生成 bzImage | ❌ |
+| prepare0 全链路 | `make` 触发 `kernel/bounds.s` 等 prepare 依赖 | ⚠️ 单 TU 已通，全 make 待验 |
+| QEMU 启动矩阵 | 远程无 sudo/QEMU，未生成 bzImage | ❌ 脚本就绪 `scripts/qemu_boot_matrix.sh` |
+| pahole / objtool 完整回归 | 需完整 vmlinux 链接 + 工具链 | ❌ |
+| LTO 链接器消费 | `.llvm.lto` 已生成，ld 侧未接入 | ⚠️ |
 
 ## 已实现但需扩展
 
@@ -35,9 +40,13 @@
 | `-MD` 依赖 | 预处理记录 include 图并写入 `.d` |
 | 优化 | `-O1+` 常量折叠（`src/opt.rs`） |
 | 机器选项 | `-mno-red-zone`、`-fno-omit-frame-pointer`、`-mno-sse` 接入 codegen |
+| 调试信息 | `src/debug.rs`：DWARF4 最小 CU + BTF 头 + eh_frame |
+| Sanitizer | `src/sanitizer.rs`：AST 入口桩 + 元数据节 |
+| LTO | `src/lto.rs`：TU 摘要序列化/合并 |
 
 ## 远程基线
 
 - 工作区：`~/dcc-agent-linux66`（不覆盖旧 `~/dcc`）
-- 内核树：`~/linux-6.6`，`make CC=~/dcc-agent-linux66/target/release/dcc` 推进至 `devicetable-offsets.c`
-- 磁盘：单内核树 + `make mrproper`  между配置
+- 同步构建：`scripts/sync_remote_build.sh`（rsync + `cargo test` + devicetable/bounds）
+- 内核树：`~/linux-6.6`，`make CC=~/dcc-agent-linux66/target/release/dcc`
+- QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` + bzImage）

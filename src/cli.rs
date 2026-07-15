@@ -5,6 +5,13 @@
 // suckless 准则: 我们只支持最常用的 GCC 子集选项,够用即可。
 
 use std::path::PathBuf;
+use crate::sanitizer::SanitizerFlags;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputLang {
+    C,
+    AssemblerWithCpp,
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -30,6 +37,12 @@ pub struct Config {
     pub red_zone: bool,
     pub frame_pointer: bool,
     pub sse: bool,
+    pub debug_level: u8,   // 0=off (g0), 1=g1, 2=g2, 3=g3
+    pub lto_enabled: bool,
+    pub sanitizers: SanitizerFlags,
+    pub input_lang: InputLang,
+    pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
+    pub raw_args: Vec<String>,   // 原始参数（sanitizer/LTO 探测）
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +178,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut red_zone = true;
     let mut frame_pointer = false;
     let mut sse = true;
+    let mut debug_level: u8 = 0;
+    let mut lto_enabled = false;
+    let mut input_lang = InputLang::C;
+    let mut as_options: Vec<String> = vec![];
 
     let mut i = 0;
     while i < args.len() {
@@ -184,7 +201,6 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-S" => { emit_asm = true; }
             "-E" => { preprocess_only = true; }
             "-pipe" => {} // GCC -pipe: 使用管道代替临时文件，DCC 忽略
-            "-g" | "-g0" | "-g1" | "-g2" | "-g3" => {} // 调试信息: 忽略
             "-r" => { relocatable = true; } // -r: 可重定位链接
             // -L, -l, -T 等链接器选项
             "-L" | "-l" | "-T" => { i += 1; } // 跳过参数
@@ -243,10 +259,23 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     j += 1;
                 }
             }
+            "-g" => debug_level = 2,
+            "-g0" => debug_level = 0,
+            "-g1" => debug_level = 1,
+            "-g2" => debug_level = 2,
+            "-g3" => debug_level = 3,
+            "-flto" => lto_enabled = true,
+            a if a.starts_with("-flto=") => lto_enabled = true,
+            a if a.starts_with("-fsanitize") => {}
             "-x" => {
                 i += 1;
-                args.get(i)
+                let lang = args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -x"))?;
+                input_lang = match lang.as_str() {
+                    "assembler-with-cpp" | "assembler" => InputLang::AssemblerWithCpp,
+                    "c" | "c-header" => InputLang::C,
+                    other => return Err(CliError::new(&format!("unsupported -x language: {}", other))),
+                };
             }
             "--target" => {
                 i += 1;
@@ -308,6 +337,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             // -Wa,* : 传递给汇编器的选项
             a if a.starts_with("-Wa,") => {
                 let as_opts = &a[4..];
+                as_options.push(as_opts.to_string());
                 // 特殊处理 -Wa,--version : 调用系统汇编器并输出版本信息
                 if as_opts.contains("--version") {
                     if let Ok(out) = std::process::Command::new("as")
@@ -473,11 +503,15 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             } else { None }
         });
         Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, emit_asm, preprocess_only, force_includes, syntax_only,
-            dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse })
+            dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse, debug_level, lto_enabled,
+            sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
+            raw_args: args.to_vec() })
     } else {
         let input = input.unwrap_or_else(|| PathBuf::from("-"));
         Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, emit_asm, preprocess_only, force_includes, syntax_only,
-            dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse })
+            dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse, debug_level, lto_enabled,
+            sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
+            raw_args: args.to_vec() })
     }
 }
 

@@ -1,23 +1,84 @@
 // src/codegen/mod.rs - 代码生成调度
 // 第一性原理: codegen 入口只做"按 target 选后端"。
-// suckless 准则: 一行分发。
 
 pub mod elf;
 pub mod x86_64;
 
+use crate::debug;
 use crate::ir::Module;
+use crate::lto::LtoUnit;
+use crate::sanitizer::{SanitizerFlags, sanitizer_metadata};
 use crate::target::Target;
 
-pub fn emit(module: &Module, target: &Target, relocatable: bool, emit_asm: bool, source_name: &str) -> Vec<u8> {
+pub fn emit(
+    module: &Module,
+    target: &Target,
+    relocatable: bool,
+    emit_asm: bool,
+    source_name: &str,
+    debug_level: u8,
+    sanitizers: SanitizerFlags,
+    lto_unit: Option<&LtoUnit>,
+) -> Vec<u8> {
     match target.arch {
         crate::cli::Arch::X86_64 => {
             let mut cg = x86_64::Codegen::new(target.clone());
             cg.relocatable = relocatable || emit_asm;
             cg.emit_asm_text = emit_asm;
             cg.source_name = source_name.to_string();
+            cg.debug_level = debug_level;
+            cg.emit_cfi = debug_level > 0 || target.frame_pointer;
             cg.compile(module.source());
             if emit_asm {
                 return cg.build_asm_output().into_bytes();
+            }
+            if debug_level > 0 && relocatable {
+                let funcs: Vec<(&str, u64)> = module.functions.iter()
+                    .map(|f| (f.name.as_str(), 0))
+                    .collect();
+                let dbg = debug::build_dwarf(source_name, &funcs);
+                cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".BTF".to_string(),
+                    data: debug::build_btf_header(),
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 4,
+                });
+            }
+            if cg.emit_cfi && relocatable {
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".eh_frame".to_string(),
+                    data: debug::build_eh_frame(),
+                    ty: elf::SHT_PROGBITS,
+                    flags: elf::SHF_ALLOC,
+                    align: 8,
+                });
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".orc_unwind_ip".to_string(),
+                    data: debug::build_orc_unwind_ip(),
+                    ty: elf::SHT_PROGBITS,
+                    flags: elf::SHF_ALLOC,
+                    align: 8,
+                });
+            }
+            if sanitizers.any() {
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".dcc.san_info".to_string(),
+                    data: sanitizer_metadata(sanitizers),
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
+            }
+            if let Some(unit) = lto_unit {
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".llvm.lto".to_string(),
+                    data: crate::lto::serialize_summary(unit),
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
             }
             if relocatable {
                 elf::build_elf_rel_x86_64(

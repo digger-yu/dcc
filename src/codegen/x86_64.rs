@@ -78,6 +78,8 @@ pub struct Codegen {
     pub extra_rela_sections: Vec<elf::ExtraRelaSection>,
     // -S 汇编文本输出
     pub emit_asm_text: bool,
+    pub debug_level: u8,
+    pub emit_cfi: bool,
     asm_directives: Vec<String>,
     pub source_name: String,
 }
@@ -138,7 +140,8 @@ impl Codegen {
                pending_data64_rels: vec![],
                data_relocations: vec![], cleanup_vars: vec![],
                extra_rela_sections: vec![],
-               emit_asm_text: false, asm_directives: vec![], source_name: String::new() }
+               emit_asm_text: false, debug_level: 0, emit_cfi: false,
+               asm_directives: vec![], source_name: String::new() }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -1590,17 +1593,26 @@ impl Codegen {
                 // 生成每个case的比较和跳转
                 for case in cases {
                     if let Some(ref val) = case.val {
-                        // case N: 比较 rax == N
                         let l_case = self.fresh_label();
+                        let l_skip = self.fresh_label();
                         // 重新加载switch值到rcx
                         self.emit(&[0x48, 0x8B, 0x0C, 0x24]); // mov rcx, [rsp]
-                        // 加载case值到rdx
-                        self.gen_expr(val, 2);
-                        // cmp rcx, rdx
-                        self.emit(&[0x48, 0x39, 0xD1]);
-                        // je l_case
-                        self.jmp_rel32(&l_case, JumpKind::Je);
-                        // 生成case体
+                        if let Some(ref hi) = case.range_end {
+                            // GNU case low ... high: 范围匹配
+                            self.gen_expr(val, 2);   // rdx = low
+                            self.gen_expr(hi, 3);    // r8 = high
+                            self.emit(&[0x48, 0x39, 0xD1]); // cmp rcx, rdx
+                            self.jmp_rel32(&l_skip, JumpKind::Jl);
+                            self.emit(&[0x4C, 0x39, 0xC1]); // cmp rcx, r8
+                            self.jmp_rel32(&l_skip, JumpKind::Jg);
+                        } else {
+                            // case N: 比较 rcx == N
+                            self.gen_expr(val, 2);
+                            self.emit(&[0x48, 0x39, 0xD1]);
+                            self.jmp_rel32(&l_skip, JumpKind::Jne);
+                        }
+                        self.jmp_rel32(&l_case, JumpKind::Jmp);
+                        self.label(&l_skip);
                         self.label(&l_case);
                         for item in &case.body.items {
                             if let BlockItem::Stmt(stmt) = item {
@@ -4863,6 +4875,9 @@ impl Codegen {
         out.push_str("\t.text\n");
         out.push_str("\t.globl main\n");
         out.push_str("\t.type main, @function\n");
+        if self.emit_cfi {
+            out.push_str("\t.cfi_startproc\n");
+        }
         out.push_str("main:\n");
         for line in &self.asm_directives {
             out.push('\t');
@@ -4870,6 +4885,9 @@ impl Codegen {
             out.push('\n');
         }
         out.push_str("\tret\n");
+        if self.emit_cfi {
+            out.push_str("\t.cfi_endproc\n");
+        }
         out.push_str("\t.size main, .-main\n");
         out
     }

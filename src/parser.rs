@@ -701,7 +701,7 @@ impl<'a> Parser<'a> {
             }
             self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
             if !self.in_function { self.globals.insert(name_for_decl.name.clone(), arr_ty.clone()); }
-            if !self.expect(TokKind::Semi, "';'") { return None; }
+            if self.cur.kind != TokKind::Comma && !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                 section: arr_attrs.section, alignment: arr_attrs.alignment, is_weak: arr_attrs.is_weak,
                 visibility: arr_attrs.visibility, is_unused: arr_attrs.is_unused, register_name: arr_attrs.register_name, cleanup_fn: arr_attrs.cleanup_fn })])
@@ -1478,15 +1478,30 @@ impl<'a> Parser<'a> {
         let mut cases = vec![];
         while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
             let sp = self.cur.span.clone();
-            let val = if self.cur.kind == TokKind::KwCase { self.advance(); let e = self.parse_expr(); let _ = self.expect(TokKind::Colon, "':'"); e }
-                else if self.cur.kind == TokKind::KwDefault { self.advance(); let _ = self.expect(TokKind::Colon, "':'"); None }
-                else { self.advance(); continue; };
+            let (val, range_end) = if self.cur.kind == TokKind::KwCase {
+                self.advance();
+                let low = self.parse_expr();
+                let mut hi = None;
+                if self.cur.kind == TokKind::Ellipsis {
+                    self.advance();
+                    hi = self.parse_expr();
+                }
+                let _ = self.expect(TokKind::Colon, "':'");
+                (low, hi)
+            } else if self.cur.kind == TokKind::KwDefault {
+                self.advance();
+                let _ = self.expect(TokKind::Colon, "':'");
+                (None, None)
+            } else {
+                self.advance();
+                continue;
+            };
             let mut items = vec![];
             while !matches!(self.cur.kind, TokKind::KwCase | TokKind::KwDefault | TokKind::RBrace | TokKind::Eof) {
                 if self.is_decl_start() { match self.parse_decl() { Some(ds) => { for d in ds { items.push(BlockItem::Decl(d)); } } None => { self.advance(); } } }
                 else { match self.parse_stmt() { Some(s) => items.push(BlockItem::Stmt(s)), None => { self.advance(); } } }
             }
-            cases.push(Case { val, body: Block { items, span: sp.clone() }, span: sp });
+            cases.push(Case { val, range_end, body: Block { items, span: sp.clone() }, span: sp });
         }
         cases
     }

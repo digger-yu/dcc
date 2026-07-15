@@ -92,6 +92,8 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub struct Case {
     pub val: Option<Expr>,
+    /// GNU `case low ... high:` 的上界（仅当 val 为下界时有效）
+    pub range_end: Option<Expr>,
     pub body: Block,
     pub span: Span,
 }

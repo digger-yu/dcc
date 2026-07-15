@@ -204,3 +204,99 @@ int main(void) {\n\
         "asm output: {asm_text}"
     );
 }
+
+#[test]
+fn extern_comma_array_declarators_parse() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-comma-arr-{}.c", std::process::id()));
+    let source = "\
+typedef int entry_t;\n\
+extern entry_t __start[], __end[];\n\
+int main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsyntax-only"])
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn gnu_case_range_switch_compiles() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-case-range-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-case-range-{}.o", std::process::id()));
+    let source = "\
+int classify(int c) {\n\
+    switch (c) {\n\
+    case '0' ... '9': return 1;\n\
+    default: return 0;\n\
+    }\n\
+}\n\
+int main(void) { return classify('5'); }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn debug_sections_emitted_with_g_flag() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-debug-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-debug-{}.o", std::process::id()));
+    let source = "int main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let obj_str = String::from_utf8_lossy(&obj);
+    assert!(obj_str.contains(".debug_info"), "missing .debug_info in object");
+    assert!(obj_str.contains(".BTF"), "missing .BTF in object");
+}
+
+#[test]
+fn flto_section_emitted() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-lto-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-lto-{}.o", std::process::id()));
+    let source = "int foo(void) { return 1; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-flto", "-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        String::from_utf8_lossy(&obj).contains(".llvm.lto"),
+        "missing LTO summary section"
+    );
+}

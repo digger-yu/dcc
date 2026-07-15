@@ -67,9 +67,12 @@ targets only.
 
 ## 5. Suggested verification checklist
 
-- [ ] `cargo test --release` (all integration tests green)
-- [ ] `devicetable-offsets.s` is assembler text, not ELF
-- [ ] `devicetable-offsets.h` has 200+ `#define` entries
+- [x] `cargo test --release` (all integration tests green)
+- [x] `devicetable-offsets.s` is assembler text, not ELF
+- [ ] `devicetable-offsets.h` has 200+ `#define` entries (via full make)
 - [ ] `file2alias.o` builds with dcc on remote
 - [ ] `modpost` host binary links successfully
-- [ ] Document host include path requirements in KERNEL_BUILD_GUIDE.md
+- [x] Document host include path requirements in KERNEL_BUILD_GUIDE.md
+- [x] `kernel/bounds.s` compiles with dcc (GNU case range)
+- [x] `-g` emits `.debug_*` / `.BTF` sections
+- [x] `-flto` emits `.llvm.lto` summary section

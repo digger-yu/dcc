@@ -3,20 +3,31 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use crate::cli::Config;
+use std::process::Command;
+use crate::cli::{Config, InputLang};
 use crate::diagnostics::{Diagnostic, Severity, enrich_diags};
 use crate::target::Target;
 use crate::preproc;
 use crate::parser;
 use crate::codegen;
 use crate::ir;
+use crate::sanitizer;
+use crate::lto;
 
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
+    // .S / -x assembler-with-cpp: 预处理 + 系统汇编器
+    if matches!(cfg.input_lang, InputLang::AssemblerWithCpp)
+        || cfg.input.extension().map(|e| e == "S").unwrap_or(false) {
+        return run_assembler_driver(&cfg);
+    }
+
     if cfg.verbose {
         eprintln!("dcc: input  = {}", cfg.input.display());
         eprintln!("dcc: target = {}", cfg.target.as_str());
         eprintln!("dcc: std    = {}", cfg.std.as_str());
         eprintln!("dcc: -O{}", cfg.opt);
+        if cfg.debug_level > 0 { eprintln!("dcc: -g{}", cfg.debug_level); }
+        if cfg.lto_enabled { eprintln!("dcc: -flto"); }
     }
 
     // 读源：支持文件和 stdin（`-`）
@@ -50,13 +61,13 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // 解析
-    let (prog, mut diags) = parser::parse(preprocessed.as_bytes(), &file_name);
-    // 解析完成后立即释放预处理字符串 — 减少 codegen 阶段的峰值内存
-    // 第一性原理: 不再需要的数据应尽快归还给操作系统
+    let (mut prog, mut diags) = parser::parse(preprocessed.as_bytes(), &file_name);
     drop(preprocessed);
     enrich_diags(&mut diags, &src);
-    // 仅错误级别的诊断终止编译, warnings/notes 不影响代码生成
     if diags.iter().any(|d| matches!(d.sev, Severity::Error)) { return Err(diags); }
+
+    // sanitizer 插桩（AST 层，在 IR lower 之前）
+    sanitizer::instrument_program(&mut prog, cfg.sanitizers);
 
     // dump AST?
     if cfg.dump_ast {
@@ -64,8 +75,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return Ok(());
     }
 
-    // 生成依赖文件 (.d) — 在 -fsyntax-only 之前, 因为内核构建系统在语法检查时也需要 .d
-    // 第一性原理: 按需生成最小依赖文件即可满足内核构建, 不必追踪每个头文件
+    // 生成依赖文件 (.d)
     if cfg.gen_dep {
         let dep_path = cfg.dep_file.as_ref().unwrap_or_else(|| &cfg.output);
         let target = cfg.dep_target.as_deref().unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
@@ -91,12 +101,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
 
-    // AST -> typed IR -> validation。即使 -fsyntax-only 也必须完成语义验证。
+    // AST -> typed IR -> validation
     let mut module = ir::lower(prog)?;
     ir::validate(&module)?;
     crate::opt::optimize(&mut module, cfg.opt);
 
-    // -fsyntax-only: 验证成功后直接返回, 不生成代码
     if cfg.syntax_only {
         return Ok(());
     }
@@ -118,20 +127,32 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             )]);
         }
     }
-    let bytes = codegen::emit(&module, &target, cfg.relocatable, cfg.emit_asm, &file_name);
+
+    let func_summaries: Vec<(&str, u64, bool)> = module.functions.iter()
+        .map(|f| (f.name.as_str(), 0u64, true))
+        .collect();
+    let lto_unit = if cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args) {
+        Some(lto::build_unit(&file_name, &func_summaries))
+    } else {
+        None
+    };
+
+    let bytes = codegen::emit(
+        &module, &target, cfg.relocatable, cfg.emit_asm, &file_name,
+        cfg.debug_level, cfg.sanitizers, lto_unit.as_ref(),
+    );
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
     }
 
-    // 写输出
     let out = &cfg.output;
     let mut f = fs::File::create(out)
         .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write {}: {}", out.display(), e),
             crate::diagnostics::Span::point(&out.display().to_string(), 0, 0))])?;
     f.write_all(&bytes).unwrap();
-    // chmod +x (仅在生成可执行 ELF 时)
     if !cfg.relocatable && !cfg.emit_asm {
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
             let mut p = f.metadata().unwrap().permissions();
             p.set_mode(0o755);
@@ -139,8 +160,52 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
     eprintln!("dcc: wrote {}", out.display());
+    Ok(())
+}
 
+/// 独立汇编驱动: 预处理 .S 后调用系统 `as`。
+fn run_assembler_driver(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
+    let file_name = cfg.input.display().to_string();
+    let src = fs::read(&cfg.input)
+        .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
+            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
 
+    let (preprocessed, mut pp_diags, _) = preproc::preprocess(
+        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes);
+    enrich_diags(&mut pp_diags, &src);
+    if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
+        for d in &pp_diags { d.print(); }
+        return Err(pp_diags);
+    }
 
+    if cfg.preprocess_only {
+        print!("{}", preprocessed);
+        return Ok(());
+    }
+
+    let tmp_dir = std::env::temp_dir();
+    let asm_path = tmp_dir.join(format!("dcc-asm-{}.s", std::process::id()));
+    fs::write(&asm_path, preprocessed.as_bytes())
+        .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write temp asm: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+
+    let mut cmd = Command::new("as");
+    for opt in &cfg.as_options {
+        for part in opt.split(',') {
+            if !part.is_empty() {
+                cmd.arg(part);
+            }
+        }
+    }
+    cmd.arg("-o").arg(&cfg.output).arg(&asm_path);
+    let status = cmd.status()
+        .map_err(|e| vec![Diagnostic::err("E0102", format!("cannot invoke assembler: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    let _ = fs::remove_file(&asm_path);
+    if !status.success() {
+        return Err(vec![Diagnostic::err("E0102", "assembler failed",
+            crate::diagnostics::Span::point(&file_name, 0, 0))]);
+    }
+    eprintln!("dcc: wrote {}", cfg.output.display());
     Ok(())
 }

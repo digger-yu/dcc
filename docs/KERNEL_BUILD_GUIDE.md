@@ -8,9 +8,22 @@
 |------|------|
 | DCC release 构建 + `cargo test` | ✅ 远程通过 |
 | `scripts/test_kernel_features.sh` | ✅ 7/7 |
+| `scripts/sync_remote_build.sh` | ✅ rsync + 远程测试 |
 | Kbuild `prepare0` → mod/empty.c | ✅ |
-| Kbuild `devicetable-offsets.c` | ❌ 解析/宏 TU |
-| 全树 vmlinux / bzImage / QEMU | ❌ 待依赖与后续修复 |
+| Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行 |
+| Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ GNU case range + 逗号数组 |
+| `-g` DWARF/BTF、`-flto`、sanitizer、`.S` 驱动 | ✅ 初版 |
+| 全树 `make` / vmlinux / bzImage / QEMU | ⚠️ 待完整链接与 QEMU 环境 |
+
+### 远程同步构建
+
+```bash
+# 从开发机（含 Windows Git Bash / WSL）执行
+bash scripts/sync_remote_build.sh
+```
+
+默认同步到 `ds@192.168.148.128:~/dcc-agent-linux66` 并运行
+`cargo test` + devicetable/bounds 单 TU 验证。
 
 ## 1. 环境要求
 
