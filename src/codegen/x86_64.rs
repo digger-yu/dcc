@@ -85,7 +85,15 @@ pub struct Codegen {
     disasm_calls: HashMap<u64, String>,
     disasm_data: HashMap<u64, String>,
     global_asm_exports: HashSet<String>,
+    func_asm_layout: HashMap<String, FuncAsmLayout>,
     pub source_name: String,
+}
+
+/// Per-function layout captured after resolve (for -S disassembly).
+struct FuncAsmLayout {
+    section: String,
+    bytes: Vec<u8>,
+    text_start: u64,
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -148,6 +156,7 @@ impl Codegen {
                asm_directives: vec![], asm_directives_at: vec![],
                disasm_calls: HashMap::new(), disasm_data: HashMap::new(),
                global_asm_exports: HashSet::new(),
+               func_asm_layout: HashMap::new(),
                source_name: String::new() }
     }
 
@@ -1005,12 +1014,52 @@ impl Codegen {
 
         // 解析内部跳转 (本地标签)，再把最终机器码覆盖到自定义节副本。
         self.resolve(0);
-        for (start, size, sec_idx, sec_off) in custom_func_ranges {
-            let src = self.code[start as usize..(start + size) as usize].to_vec();
-            let dst_start = sec_off as usize;
-            let dst_end = dst_start + size as usize;
-            self.extra_sections[sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[start as usize..(start + size) as usize].fill(0);
+        for (start, size, sec_idx, sec_off) in &custom_func_ranges {
+            let src = self.code[*start as usize..(*start + *size) as usize].to_vec();
+            let dst_start = *sec_off as usize;
+            let dst_end = dst_start + *size as usize;
+            self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
+            self.code[*start as usize..(*start + *size) as usize].fill(0);
+        }
+        self.finalize_func_asm_layout(prog, &custom_func_ranges);
+    }
+
+    /// 在 resolve 后捕获每个函数的最终机器码与所属节。
+    fn finalize_func_asm_layout(
+        &mut self,
+        prog: &Program,
+        custom: &[(u64, u64, usize, u64)],
+    ) {
+        let mut custom_by_start: HashMap<u64, (String, usize, u64)> = HashMap::new();
+        for (start, _size, sec_idx, sec_off) in custom {
+            let sec_name = self.extra_sections[*sec_idx].name.clone();
+            custom_by_start.insert(*start, (sec_name, *sec_idx, *sec_off));
+        }
+        let mut names = Vec::new();
+        Self::collect_all_funcs(prog, &mut names);
+        for name in names {
+            let start = match self.labels.get(&name) {
+                Some(s) => *s,
+                None => continue,
+            };
+            let size = self.func_sizes.get(&name).copied().unwrap_or(0);
+            if size == 0 {
+                continue;
+            }
+            let section;
+            let bytes;
+            if let Some((sec_name, sec_idx, sec_off)) = custom_by_start.get(&start) {
+                section = sec_name.clone();
+                let off = *sec_off as usize;
+                bytes = self.extra_sections[*sec_idx].data[off..off + size as usize].to_vec();
+            } else {
+                section = ".text".to_string();
+                bytes = self.code[start as usize..(start + size) as usize].to_vec();
+            }
+            self.func_asm_layout.insert(
+                name,
+                FuncAsmLayout { section, bytes, text_start: start },
+            );
         }
     }
 
@@ -4939,12 +4988,11 @@ impl Codegen {
         map
     }
 
-    /// 构建 asm 输出文件 (-S 模式)：反汇编全部函数机器码。
+    /// 构建 asm 输出文件 (-S 模式)：按节分组反汇编全部函数机器码。
     pub fn build_asm_output(&self, prog: &Program) -> String {
         use crate::codegen::disasm;
         let mut out = String::new();
         out.push_str(&format!("\t.file \"{}\"\n", self.source_name));
-        out.push_str("\t.text\n");
 
         let labels = disasm::label_map(self.labels.iter().map(|(n, o)| (o, n.as_str())));
         let directives = disasm::directive_map(
@@ -4955,57 +5003,107 @@ impl Codegen {
         Self::collect_all_funcs(prog, &mut funcs);
         funcs.sort_by_key(|name| self.labels.get(name).copied().unwrap_or(u64::MAX));
 
-        let first_start = funcs.iter()
-            .filter_map(|n| self.labels.get(n).copied())
-            .min()
-            .unwrap_or(self.code.len() as u64);
-
-        if first_start > 0 {
-            out.push_str(&disasm::disassemble_range(
-                &self.code,
-                0,
-                first_start as usize,
-                &labels,
-                &directives,
-                &self.disasm_calls,
-                &self.disasm_data,
-            ));
+        let mut sections: Vec<String> = vec![".text".to_string()];
+        for name in &funcs {
+            if let Some(layout) = self.func_asm_layout.get(name) {
+                if layout.section != ".text" && !sections.contains(&layout.section) {
+                    sections.push(layout.section.clone());
+                }
+            }
         }
 
-        for name in &funcs {
-            let start = match self.labels.get(name) {
-                Some(s) => *s,
-                None => continue,
-            };
-            let size = self.func_sizes.get(name).copied().unwrap_or(0);
-            if size == 0 {
-                continue;
+        for sec_name in &sections {
+            if sec_name == ".text" {
+                out.push_str("\t.text\n");
+            } else {
+                let flags = self.gas_section_flags(sec_name);
+                out.push_str(&format!("\t.section {sec_name},\"{flags}\"\n"));
             }
-            let is_static = prog.decls.iter().any(|d| {
-                matches!(d, Decl::Func(f) if f.name.name == *name && f.is_static)
-            });
-            if !is_static {
-                out.push_str(&format!("\t.globl {name}\n"));
+
+            if sec_name == ".text" {
+                let custom_starts: std::collections::HashSet<u64> = self
+                    .func_asm_layout
+                    .values()
+                    .filter(|l| l.section != ".text")
+                    .map(|l| l.text_start)
+                    .collect();
+                let prologue_labels: std::collections::BTreeMap<u64, Vec<&str>> = labels
+                    .iter()
+                    .filter(|(off, _)| !custom_starts.contains(off))
+                    .map(|(off, names)| (*off, names.clone()))
+                    .collect();
+                let first_text = funcs
+                    .iter()
+                    .filter_map(|n| self.func_asm_layout.get(n))
+                    .filter(|l| l.section == ".text")
+                    .map(|l| l.text_start)
+                    .min()
+                    .unwrap_or(self.code.len() as u64);
+                if first_text > 0 {
+                    out.push_str(&disasm::disassemble_range(
+                        &self.code,
+                        0,
+                        first_text as usize,
+                        0,
+                        &prologue_labels,
+                        &directives,
+                        &self.disasm_calls,
+                        &self.disasm_data,
+                    ));
+                }
             }
-            out.push_str(&format!("\t.type {name}, @function\n"));
-            if self.emit_cfi {
-                out.push_str("\t.cfi_startproc\n");
+
+            for name in &funcs {
+                let layout = match self.func_asm_layout.get(name) {
+                    Some(l) => l,
+                    None => continue,
+                };
+                if layout.section != *sec_name {
+                    continue;
+                }
+                let is_static = prog.decls.iter().any(|d| {
+                    matches!(d, Decl::Func(f) if f.name.name == *name && f.is_static)
+                });
+                if !is_static {
+                    out.push_str(&format!("\t.globl {name}\n"));
+                }
+                out.push_str(&format!("\t.type {name}, @function\n"));
+                if self.emit_cfi {
+                    out.push_str("\t.cfi_startproc\n");
+                }
+                out.push_str(&disasm::disassemble_range(
+                    &layout.bytes,
+                    0,
+                    layout.bytes.len(),
+                    layout.text_start,
+                    &labels,
+                    &directives,
+                    &self.disasm_calls,
+                    &self.disasm_data,
+                ));
+                if self.emit_cfi {
+                    out.push_str("\t.cfi_endproc\n");
+                }
+                out.push_str(&format!("\t.size {name}, .-{name}\n"));
             }
-            out.push_str(&disasm::disassemble_range(
-                &self.code,
-                start as usize,
-                (start + size) as usize,
-                &labels,
-                &directives,
-                &self.disasm_calls,
-                &self.disasm_data,
-            ));
-            if self.emit_cfi {
-                out.push_str("\t.cfi_endproc\n");
-            }
-            out.push_str(&format!("\t.size {name}, .-{name}\n"));
         }
         out
+    }
+
+    fn gas_section_flags(&self, name: &str) -> &'static str {
+        self.extra_sections
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| {
+                if s.flags & SHF_EXECINSTR != 0 {
+                    "ax"
+                } else if s.flags & SHF_WRITE != 0 {
+                    "aw"
+                } else {
+                    "a"
+                }
+            })
+            .unwrap_or("ax")
     }
 
     fn collect_all_funcs(prog: &Program, out: &mut Vec<String>) {

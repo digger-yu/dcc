@@ -197,6 +197,81 @@ fn s_output_disassembles_function_body() {
 }
 
 #[test]
+fn s_output_emits_custom_section_functions() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-s-custom-sec-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-s-custom-sec-{}.s", std::process::id()));
+    let source = "\
+int global_value = 7;\n\
+int *custom_pointer __attribute__((section(\".data.custom\"))) = &global_value;\n\
+int custom_function(void) __attribute__((section(\".init.text\"))) {\n\
+    return *custom_pointer;\n\
+}\n\
+int main(void) { return custom_function() == 7 ? 0 : 1; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        asm_text.contains(".section .init.text"),
+        "expected custom section directive: {asm_text}"
+    );
+    assert!(
+        asm_text.contains("custom_function:"),
+        "expected custom_function label: {asm_text}"
+    );
+    let init_pos = asm_text.find(".section .init.text").expect("init.text section");
+    let custom_pos = asm_text.find("custom_function:").expect("custom_function label");
+    assert!(
+        custom_pos > init_pos,
+        "custom_function should appear after .section .init.text: {asm_text}"
+    );
+}
+
+#[test]
+fn s_output_disassembles_lock_cmpxchg() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-s-lock-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-s-lock-{}.s", std::process::id()));
+    let source = "\
+int value = 1;\n\
+int main(void) {\n\
+    int expected = 1;\n\
+    int desired = 2;\n\
+    __atomic_compare_exchange_n(\n\
+        &value, &expected, desired, 0,\n\
+        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);\n\
+    return value == 2 ? 0 : 1;\n\
+}\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        asm_text.contains("lock cmpxchg") || asm_text.contains("lock; cmpxchg"),
+        "expected lock cmpxchg in disasm, got: {asm_text}"
+    );
+    assert!(
+        !asm_text.contains(".byte 0xf0"),
+        "lock prefix should not fall back to .byte: {asm_text}"
+    );
+}
+
+#[test]
 fn kbuild_define_emits_ascii_in_asm_output() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-kbuild-define-{}.c", std::process::id()));
