@@ -81,6 +81,9 @@ pub struct Codegen {
     pub debug_level: u8,
     pub emit_cfi: bool,
     asm_directives: Vec<String>,
+    asm_directives_at: Vec<(u64, String)>,
+    disasm_calls: HashMap<u64, String>,
+    disasm_data: HashMap<u64, String>,
     global_asm_exports: HashSet<String>,
     pub source_name: String,
 }
@@ -142,7 +145,9 @@ impl Codegen {
                data_relocations: vec![], cleanup_vars: vec![],
                extra_rela_sections: vec![],
                emit_asm_text: false, debug_level: 0, emit_cfi: false,
-               asm_directives: vec![], global_asm_exports: HashSet::new(),
+               asm_directives: vec![], asm_directives_at: vec![],
+               disasm_calls: HashMap::new(), disasm_data: HashMap::new(),
+               global_asm_exports: HashSet::new(),
                source_name: String::new() }
     }
 
@@ -329,6 +334,9 @@ impl Codegen {
     }
 
     pub fn resolve(&mut self, rodata_start: u64) {
+        for (p, name) in &self.pending_data_rels {
+            self.disasm_data.insert(*p, name.clone());
+        }
         // 修补跳转
         for p in self.pending.drain(..) {
             let dst = *self.labels.get(&p.target).expect(&format!("unresolved label: {}", p.target));
@@ -1299,6 +1307,7 @@ impl Codegen {
 
     fn call_label(&mut self, l: &str) {
         let at = self.pos(); self.emit(&[0xe8, 0, 0, 0, 0]);
+        self.disasm_calls.insert(at + 1, l.to_string());
         if self.relocatable {
             // 延迟到 Phase 3 符号表构建后再解析
             self.pending_func_rels.push((at + 1, l.to_string()));
@@ -4930,28 +4939,124 @@ impl Codegen {
         map
     }
 
-    /// 构建 asm 输出文件 (-S 模式)
-    pub fn build_asm_output(&self) -> String {
+    /// 构建 asm 输出文件 (-S 模式)：反汇编全部函数机器码。
+    pub fn build_asm_output(&self, prog: &Program) -> String {
+        use crate::codegen::disasm;
         let mut out = String::new();
         out.push_str(&format!("\t.file \"{}\"\n", self.source_name));
         out.push_str("\t.text\n");
-        out.push_str("\t.globl main\n");
-        out.push_str("\t.type main, @function\n");
-        if self.emit_cfi {
-            out.push_str("\t.cfi_startproc\n");
+
+        let labels = disasm::label_map(self.labels.iter().map(|(n, o)| (o, n.as_str())));
+        let directives = disasm::directive_map(
+            self.asm_directives_at.iter().map(|(o, l)| (o, l.as_str())),
+        );
+
+        let mut funcs = Vec::new();
+        Self::collect_all_funcs(prog, &mut funcs);
+        funcs.sort_by_key(|name| self.labels.get(name).copied().unwrap_or(u64::MAX));
+
+        let first_start = funcs.iter()
+            .filter_map(|n| self.labels.get(n).copied())
+            .min()
+            .unwrap_or(self.code.len() as u64);
+
+        if first_start > 0 {
+            out.push_str(&disasm::disassemble_range(
+                &self.code,
+                0,
+                first_start as usize,
+                &labels,
+                &directives,
+                &self.disasm_calls,
+                &self.disasm_data,
+            ));
         }
-        out.push_str("main:\n");
-        for line in &self.asm_directives {
-            out.push('\t');
-            out.push_str(line);
-            out.push('\n');
+
+        for name in &funcs {
+            let start = match self.labels.get(name) {
+                Some(s) => *s,
+                None => continue,
+            };
+            let size = self.func_sizes.get(name).copied().unwrap_or(0);
+            if size == 0 {
+                continue;
+            }
+            let is_static = prog.decls.iter().any(|d| {
+                matches!(d, Decl::Func(f) if f.name.name == *name && f.is_static)
+            });
+            if !is_static {
+                out.push_str(&format!("\t.globl {name}\n"));
+            }
+            out.push_str(&format!("\t.type {name}, @function\n"));
+            if self.emit_cfi {
+                out.push_str("\t.cfi_startproc\n");
+            }
+            out.push_str(&disasm::disassemble_range(
+                &self.code,
+                start as usize,
+                (start + size) as usize,
+                &labels,
+                &directives,
+                &self.disasm_calls,
+                &self.disasm_data,
+            ));
+            if self.emit_cfi {
+                out.push_str("\t.cfi_endproc\n");
+            }
+            out.push_str(&format!("\t.size {name}, .-{name}\n"));
         }
-        out.push_str("\tret\n");
-        if self.emit_cfi {
-            out.push_str("\t.cfi_endproc\n");
-        }
-        out.push_str("\t.size main, .-main\n");
         out
+    }
+
+    fn collect_all_funcs(prog: &Program, out: &mut Vec<String>) {
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_some() {
+                    out.push(f.name.name.clone());
+                    if let Some(body) = &f.body {
+                        Self::collect_nested_func_names(&body.items, out);
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_nested_func_names(items: &[BlockItem], out: &mut Vec<String>) {
+        for item in items {
+            if let BlockItem::Decl(Decl::Func(f)) = item {
+                if f.body.is_some() {
+                    out.push(f.name.name.clone());
+                    if let Some(body) = &f.body {
+                        Self::collect_nested_func_names(&body.items, out);
+                    }
+                }
+            }
+            if let BlockItem::Stmt(s) = item {
+                Self::collect_nested_func_names_stmt(s, out);
+            }
+        }
+    }
+
+    fn collect_nested_func_names_stmt(s: &Stmt, out: &mut Vec<String>) {
+        match s {
+            Stmt::Block { b, .. } => Self::collect_nested_func_names(&b.items, out),
+            Stmt::If { then_, else_, .. } => {
+                Self::collect_nested_func_names_stmt(then_, out);
+                if let Some(e) = else_ {
+                    Self::collect_nested_func_names_stmt(e, out);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+                Self::collect_nested_func_names_stmt(body, out);
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(i) = init {
+                    Self::collect_nested_func_names_stmt(i, out);
+                }
+                Self::collect_nested_func_names_stmt(body, out);
+            }
+            _ => {}
+        }
     }
 
     /// 求值 asm 操作数 (用于 "i" 约束的立即数替换)
@@ -5000,6 +5105,7 @@ impl Codegen {
             let trimmed = resolved.trim();
             if self.emit_asm_text {
                 if trimmed.starts_with('.') || trimmed.ends_with(':') {
+                    self.asm_directives_at.push((self.pos(), trimmed.to_string()));
                     self.asm_directives.push(trimmed.to_string());
                     continue;
                 }
@@ -5037,6 +5143,7 @@ impl Codegen {
             if self.emit_asm_text {
                 let trimmed = resolved.trim();
                 if trimmed.starts_with('.') {
+                    self.asm_directives_at.push((self.pos(), trimmed.to_string()));
                     self.asm_directives.push(trimmed.to_string());
                     continue;
                 }

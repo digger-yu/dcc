@@ -1,6 +1,7 @@
 // src/codegen/mod.rs - 代码生成调度
 // 第一性原理: codegen 入口只做"按 target 选后端"。
 
+pub mod disasm;
 pub mod elf;
 pub mod x86_64;
 
@@ -30,7 +31,7 @@ pub fn emit(
             cg.emit_cfi = debug_level > 0 || target.frame_pointer;
             cg.compile(module.source());
             if emit_asm {
-                return cg.build_asm_output().into_bytes();
+                return cg.build_asm_output(module.source()).into_bytes();
             }
             if debug_level > 0 && relocatable {
                 let funcs: Vec<(&str, u64)> = module.functions.iter()

@@ -172,6 +172,31 @@ fn struct_function_pointer_field_parses() {
 }
 
 #[test]
+fn s_output_disassembles_function_body() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-s-disasm-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-s-disasm-{}.s", std::process::id()));
+    let source = "int main(void) { return 2 + 3; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O1", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(asm_text.contains("main:"), "asm output: {asm_text}");
+    assert!(
+        asm_text.contains("mov") && (asm_text.contains("$5") || asm_text.contains("$0x5")),
+        "expected folded return in disasm: {asm_text}"
+    );
+    assert!(asm_text.contains("ret"), "asm output: {asm_text}");
+}
+
+#[test]
 fn kbuild_define_emits_ascii_in_asm_output() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-kbuild-define-{}.c", std::process::id()));

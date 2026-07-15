@@ -18,7 +18,7 @@
 | objtool / ORC 帧信息（初版） | `-g`/`-fno-omit-frame-pointer` 生成 `.eh_frame`、`.orc_unwind_ip`、`.cfi_*` |
 | KASAN/UBSAN/KCSAN/KCOV 插桩（初版） | `-fsanitize=*` 函数入口桩 + `.dcc.san_info` 节 |
 | 跨 TU LTO（初版） | `-flto` 生成 `.llvm.lto` 摘要节 |
-| `.S` / `-x assembler-with-cpp` | `driver.rs` 预处理 + 调用系统 `as` |
+| `-S` 汇编输出 | 完整 C 函数机器码反汇编 + 内联 asm 指令（`src/codegen/disasm.rs`） |
 | GNU case range / 逗号数组声明符 | `bounds.c` 头文件依赖、`integration.rs` 回归 |
 
 ## 阻塞级（Linux 6.6 全树）
