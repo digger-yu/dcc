@@ -39,6 +39,8 @@ pub struct Preprocessor {
     cache_dir: Option<PathBuf>,
     /// 跨行注释状态: true = 当前在多行注释 /* ... 中
     in_comment: bool,
+    /// 成功打开过的 include 路径 (供 -MD/-MMD)
+    deps: Vec<String>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -71,8 +73,17 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                   system_paths: &[PathBuf],
                   defines: &[(String, Option<String>)],
                   std_mode: StdMode,
-                  force_includes: &[String]) -> (String, Vec<Diagnostic>) {
-    let text = String::from_utf8_lossy(src);
+                  force_includes: &[String]) -> (String, Vec<Diagnostic>, Vec<String>) {
+    let text = match std::str::from_utf8(src) {
+        Ok(text) => text,
+        Err(e) => {
+            return (String::new(), vec![Diagnostic::err(
+                "E0208",
+                format!("source is not valid UTF-8: {}", e),
+                Span::point(file, 1, 1),
+            )], Vec::new());
+        }
+    };
     let base = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
     // 编译日期/时间
     let (compile_date, compile_time) = Preprocessor::compile_datetime();
@@ -94,6 +105,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         diag_state: DiagState::default(),
         cache_dir: Preprocessor::init_cache_dir(),
         in_comment: false,
+        deps: Vec::new(),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -302,7 +314,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     }
 
     pp.process_text(&text, file);
-    (pp.out, pp.diags)
+    (pp.out, pp.diags, pp.deps)
 }
 
 impl Preprocessor {
@@ -335,7 +347,13 @@ impl Preprocessor {
                 self.file = saved_file;
                 self.base_dir = saved_dir;
             }
-            Err(_) => {}
+            Err(e) => {
+                self.diags.push(Diagnostic::err(
+                    "E0209",
+                    format!("cannot read forced include {}: {}", resolved.display(), e),
+                    Span::point(file_path, 1, 1),
+                ));
+            }
         }
     }
 
@@ -358,7 +376,11 @@ impl Preprocessor {
 
     fn process_text(&mut self, text: &str, file: &str) {
         let saved_file = self.file.clone();
+        let saved_in_comment = self.in_comment;
         self.file = file.to_string();
+        // Each included source file undergoes translation phase 3 independently.
+        // A malformed comment must not consume text from its includer.
+        self.in_comment = false;
 
         // 行续接: 合并以 \ 结尾的行
         let joined = Self::join_continued_lines(text);
@@ -366,7 +388,11 @@ impl Preprocessor {
         for (line_no, line) in joined.lines().enumerate() {
             let line_no = (line_no + 1) as u32;
             self.cur_line = line_no;
-            let trimmed = line.trim();
+            // C translation phase 3 removes comments before preprocessing
+            // directives are recognized and before macro expansion.  Doing
+            // this afterwards lets quotes in comments alter lexical state.
+            let phase3 = self.strip_comments_line(line);
+            let trimmed = phase3.trim();
 
             if trimmed.starts_with('#') {
                 self.process_directive(trimmed, line_no);
@@ -375,20 +401,25 @@ impl Preprocessor {
                 // 空行在解析器中无语义价值, 只增加内存占用
             } else if self.is_active() {
                 // 宏展开
-                let expanded = self.expand_macros(line);
-                // 去除注释 (替换为空格): C 标准翻译阶段 3 要求, 预处理输出不含注释
-                // 第一性原理: 注释在阶段 3 已移除, 不应出现在阶段 4 输出中
-                let stripped = self.strip_comments_line(&expanded);
+                let expanded = self.expand_macros(&phase3);
                 // 跳过空行: C 语言中空行无语义, 只增加预处理输出体积
                 // 第一性原理: 移除所有空行不影响编译结果, 但可减少 ~36% 输出
-                if !stripped.trim().is_empty() {
-                    self.out.push_str(&stripped);
+                if !expanded.trim().is_empty() {
+                    self.out.push_str(&expanded);
                     self.out.push('\n');
                 }
             }
             // 不活跃分支: 不输出任何内容 (与 GCC 行为一致)
         }
 
+        if self.in_comment {
+            self.diags.push(Diagnostic::err(
+                "E0207",
+                "unterminated block comment",
+                Span::point(&self.file, self.cur_line.max(1), 1),
+            ));
+        }
+        self.in_comment = saved_in_comment;
         self.file = saved_file;
     }
 
@@ -399,6 +430,17 @@ impl Preprocessor {
         let len = chars.len();
         let mut i = 0;
         while i < len {
+            // This check must precede quote handling: quotes have no lexical
+            // meaning while a block comment is active.
+            if self.in_comment {
+                if chars[i] == '*' && i + 1 < len && chars[i+1] == '/' {
+                    i += 2;
+                    self.in_comment = false;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
             // 字符串字面量
             if chars[i] == '"' {
                 out.push('"');
@@ -437,16 +479,6 @@ impl Preprocessor {
                 if self.in_comment {
                     // 跨行: 当前行剩余部分全部忽略
                     break;
-                }
-                continue;
-            }
-            // 在跨行注释中: 寻找 */
-            if self.in_comment {
-                if chars[i] == '*' && i + 1 < len && chars[i+1] == '/' {
-                    i += 2;
-                    self.in_comment = false;
-                } else {
-                    i += 1;
                 }
                 continue;
             }
@@ -535,9 +567,6 @@ impl Preprocessor {
         let after_hash = line[1..].trim_start();
         // 处理行续接 (\ at end)
         let directive = after_hash;
-        // C 标准: 在预处理之前移除注释，替换为单个空格
-        let directive = Self::strip_comments(&directive);
-        let directive = directive.as_str();
 
         if directive.starts_with("include") {
             if self.is_active() {
@@ -763,16 +792,19 @@ impl Preprocessor {
                 }
                 if self.pragma_once.contains(&key) { return; }
                 self.seen.insert(key.clone());
+                self.deps.push(full_path.to_string_lossy().into_owned());
                 match fs::read_to_string(&full_path) {
                     Ok(text) => {
                         // 全局类型注册表: 检查缓存
                         let content_hash = Self::hash_content(&text);
-                        let cache_path = self.get_cache_path(&canonical, content_hash);
+                        let macro_hash = self.hash_macro_state();
+                        let cache_path = self.get_cache_path(&canonical, content_hash, macro_hash);
 
                         if let Some(ref cp) = cache_path {
                             if let Some((cached_output, cached_macros)) = self.load_from_cache(cp) {
                                 // 缓存命中: 直接使用缓存的预处理输出和宏
                                 self.out.push_str(&format!("/* #include \"{}\" (cached) */\n", path));
+                                self.deps.push(full_path.to_string_lossy().into_owned());
                                 self.out.push_str(&cached_output);
                                 for (name, def) in cached_macros {
                                     self.macros.insert(name, def);
@@ -1816,10 +1848,32 @@ impl Preprocessor {
         hash
     }
 
-    fn get_cache_path(&self, file_path: &Path, content_hash: u64) -> Option<PathBuf> {
+    fn hash_macro_state(&self) -> u64 {
+        let mut names: Vec<&String> = self.macros.keys().collect();
+        names.sort();
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V2");
+        for name in names {
+            let def = &self.macros[name];
+            hash ^= Self::hash_content(name);
+            hash = hash.wrapping_mul(0x100000001b3);
+            if let Some(params) = &def.params {
+                for param in params {
+                    hash ^= Self::hash_content(param);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+            }
+            hash ^= Self::hash_content(&def.body);
+            hash = hash.wrapping_mul(0x100000001b3);
+            hash ^= u64::from(def.variadic);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    fn get_cache_path(&self, file_path: &Path, content_hash: u64, macro_hash: u64) -> Option<PathBuf> {
         let cache_dir = self.cache_dir.as_ref()?;
         let file_hash = Self::hash_content(&file_path.to_string_lossy());
-        let cache_name = format!("{:x}_{:x}", file_hash, content_hash);
+        let cache_name = format!("v2_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
         Some(cache_dir.join(cache_name))
     }
 
@@ -1828,7 +1882,7 @@ impl Preprocessor {
         let mut lines = content.lines();
 
         // 第一行: 标记
-        if lines.next()? != "DCC_CACHE_V1" {
+        if lines.next()? != "DCC_CACHE_V2" {
             return None;
         }
 
@@ -1865,7 +1919,7 @@ impl Preprocessor {
     }
 
     fn save_to_cache(&self, cache_path: &Path, output: &str, macros: &HashMap<String, MacroDef>) {
-        let mut content = String::from("DCC_CACHE_V1\n");
+        let mut content = String::from("DCC_CACHE_V2\n");
         content.push_str(output);
         content.push_str("END_OUTPUT\n");
 
@@ -1880,5 +1934,49 @@ impl Preprocessor {
         }
 
         let _ = fs::write(cache_path, content);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preprocess;
+    use crate::cli::StdMode;
+    use std::path::PathBuf;
+
+    #[test]
+    fn forced_include_comments_cannot_leak_literals_or_words() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/preproc_comment_force.h");
+        let force_includes = vec![fixture.to_string_lossy().into_owned()];
+        let (output, diags, _) = preprocess(
+            b"int value = FORCED_VALUE;\n",
+            "comment-regression.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &force_includes,
+        );
+
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(output.trim(), "int value = 7;");
+        assert!(!output.contains("Don't"));
+        assert!(!output.contains("quoted text"));
+        assert!(!output.contains("COMMENT_WORD"));
+    }
+
+    #[test]
+    fn unterminated_block_comment_is_an_error() {
+        let (_, diags, _) = preprocess(
+            b"int value;\n/* never closed\n",
+            "unterminated.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+
+        assert!(diags.iter().any(|d| d.code == "E0207"));
     }
 }

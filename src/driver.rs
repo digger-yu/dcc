@@ -9,6 +9,7 @@ use crate::target::Target;
 use crate::preproc;
 use crate::parser;
 use crate::codegen;
+use crate::ir;
 
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.verbose {
@@ -33,7 +34,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     };
 
     // 预处理
-    let (preprocessed, mut pp_diags) = preproc::preprocess(&src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes);
+    let (preprocessed, mut pp_diags, include_deps) = preproc::preprocess(&src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes);
     enrich_diags(&mut pp_diags, &src);
     if !pp_diags.is_empty() {
         for d in &pp_diags { d.print(); }
@@ -83,16 +84,41 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         writeln!(dep_out, "{}: {}", target, cfg.input.display())
             .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
                 crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
+        for dep in include_deps {
+            writeln!(dep_out, " {}", dep)
+                .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
+                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
+        }
     }
 
-    // -fsyntax-only: 解析成功后直接返回, 不生成代码
+    // AST -> typed IR -> validation。即使 -fsyntax-only 也必须完成语义验证。
+    let mut module = ir::lower(prog)?;
+    ir::validate(&module)?;
+    crate::opt::optimize(&mut module, cfg.opt);
+
+    // -fsyntax-only: 验证成功后直接返回, 不生成代码
     if cfg.syntax_only {
         return Ok(());
     }
 
     // codegen
-    let target = Target::resolve(&cfg.target);
-    let bytes = codegen::emit(&prog, &target, cfg.relocatable);
+    let mut target = Target::resolve(&cfg.target);
+    target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
+    if !target.sse {
+        let uses_sse = module.functions.iter().any(|f| {
+            format!("{:?}", f).contains("Float") || format!("{:?}", f).contains("Double")
+        }) || module.globals.iter().any(|g| {
+            format!("{:?}", g).contains("Float") || format!("{:?}", g).contains("Double")
+        });
+        if uses_sse {
+            return Err(vec![Diagnostic::err(
+                "E0300",
+                "floating-point code requires SSE on the SysV AMD64 target; remove -mno-sse",
+                crate::diagnostics::Span::point(&file_name, 1, 1),
+            )]);
+        }
+    }
+    let bytes = codegen::emit(&module, &target, cfg.relocatable);
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
     }

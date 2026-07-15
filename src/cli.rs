@@ -26,6 +26,9 @@ pub struct Config {
     pub dep_file: Option<PathBuf>, // -MF: 依赖文件输出路径
     pub dep_target: Option<String>, // -MT/-MQ: 依赖文件中的目标名
     pub gen_dep: bool, // -MD/-MMD: 是否生成依赖文件
+    pub red_zone: bool,
+    pub frame_pointer: bool,
+    pub sse: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +160,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut dep_file: Option<PathBuf> = None;
     let mut dep_target: Option<String> = None;
     let mut gen_dep = false;
+    let mut red_zone = true;
+    let mut frame_pointer = false;
+    let mut sse = true;
 
     let mut i = 0;
     while i < args.len() {
@@ -183,7 +189,57 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             // -Wl,* : 传递给链接器的选项
             a if a.starts_with("-Wl,") => {} // 忽略
             // -Wp,* : 传递给预处理器的选项
-            a if a.starts_with("-Wp,") => {} // 忽略
+            a if a.starts_with("-Wp,") => {
+                let opts: Vec<&str> = a[4..].split(',').collect();
+                if opts.is_empty() || opts[0].is_empty() {
+                    return Err(CliError::new("empty -Wp option"));
+                }
+                let mut j = 0;
+                while j < opts.len() {
+                    match opts[j] {
+                        "-MD" | "-MMD" => {
+                            gen_dep = true;
+                            // GCC accepts the Kbuild form -Wp,-MMD,<depfile>.
+                            if j + 1 < opts.len() && !opts[j + 1].starts_with('-') {
+                                j += 1;
+                                dep_file = Some(PathBuf::from(opts[j]));
+                            }
+                        }
+                        "-MF" => {
+                            j += 1;
+                            let value = opts.get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-MF"))?;
+                            dep_file = Some(PathBuf::from(value));
+                        }
+                        "-MT" | "-MQ" => {
+                            let option = opts[j];
+                            j += 1;
+                            let value = opts.get(j)
+                                .ok_or_else(|| CliError::new(&format!("missing arg after -Wp,{}", option)))?;
+                            dep_target = Some((*value).to_string());
+                        }
+                        "-MP" => {}
+                        option if option.starts_with("-D") && option.len() > 2 => {
+                            let def = &option[2..];
+                            if let Some(eq) = def.find('=') {
+                                defines.push((def[..eq].to_string(), Some(def[eq+1..].to_string())));
+                            } else {
+                                defines.push((def.to_string(), Some("1".to_string())));
+                            }
+                        }
+                        option if option.starts_with("-I") && option.len() > 2 => {
+                            include_paths.push(PathBuf::from(&option[2..]));
+                        }
+                        option => {
+                            return Err(CliError::new(&format!(
+                                "unsupported preprocessor option in -Wp: {}",
+                                option
+                            )));
+                        }
+                    }
+                    j += 1;
+                }
+            }
             "-x" => {
                 i += 1;
                 args.get(i)
@@ -264,11 +320,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 }
                 // 其他 -Wa, 选项暂时忽略
             }
+            "-mno-red-zone" => red_zone = false,
+            "-mred-zone" => red_zone = true,
+            "-fno-omit-frame-pointer" => frame_pointer = true,
+            "-fomit-frame-pointer" => frame_pointer = false,
+            "-mno-sse" | "-mno-sse2" => sse = false,
+            "-msse" | "-msse2" => sse = true,
             // Linux 内核编译常用的 GCC flags - 忽略但接受
-            "-mno-red-zone" | "-fno-pic" | "-fno-stack-protector" | "-fno-strict-aliasing"
+            "-fno-pic" | "-fno-stack-protector" | "-fno-strict-aliasing"
             | "-fno-common" | "-fno-delete-null-pointer-checks" | "-fno-strict-overflow"
-            | "-fno-merge-all-constants" | "-fno-omit-frame-pointer"
-            | "-mno-sse" | "-mno-mmx" | "-mno-sse2" | "-mno-80387" | "-mno-fp-ret-in-387"
+            | "-fno-merge-all-constants"
+            | "-mno-mmx" | "-mno-80387" | "-mno-fp-ret-in-387"
             | "-mno-3dnow" | "-mno-3dnowa" | "-nostdinc" | "-nostdlib" | "-nodefaultlibs"
             | "-static" | "-shared" | "-pie" | "-no-pie"
             | "-pg" | "-pthread"
@@ -404,11 +466,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             } else { None }
         });
         Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only,
-            dep_file, dep_target, gen_dep })
+            dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse })
     } else {
         let input = input.unwrap_or_else(|| PathBuf::from("-"));
         Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only,
-            dep_file, dep_target, gen_dep })
+            dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse })
     }
 }
 
@@ -436,5 +498,37 @@ impl CliError {
     pub fn new(m: &str) -> Self { Self { msg: m.into() } }
     pub fn print(&self) {
         eprintln!("dcc: error: {}", self.msg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+    use std::path::PathBuf;
+
+    #[test]
+    fn wp_kbuild_dependency_form_is_forwarded() {
+        let args = vec![
+            "-Wp,-MMD,scripts/mod/.empty.o.d".to_string(),
+            "-c".to_string(),
+            "scripts/mod/empty.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("Kbuild -Wp dependency options should parse");
+
+        assert!(cfg.gen_dep);
+        assert_eq!(
+            cfg.dep_file,
+            Some(PathBuf::from("scripts/mod/.empty.o.d"))
+        );
+    }
+
+    #[test]
+    fn unsupported_wp_option_is_rejected() {
+        let args = vec![
+            "-Wp,--silently-lost".to_string(),
+            "input.c".to_string(),
+        ];
+        let err = parse(&args).expect_err("unsupported -Wp options must not be ignored");
+        assert!(err.msg.contains("unsupported preprocessor option"));
     }
 }

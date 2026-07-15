@@ -52,6 +52,7 @@ pub enum TokKind {
     Ellipsis,                 // ...
     Hash,                     // #
     // 特殊
+    Invalid,
     Eof,
 }
 
@@ -148,13 +149,16 @@ impl<'a> Lexer<'a> {
             // L"..." wide string literal
             if text == "L" && self.peek() == Some(b'"') {
                 self.bump(); // consume opening '"'
+                let mut terminated = false;
                 while let Some(c) = self.peek() {
-                    if c == b'"' { self.bump(); break; }
+                    if c == b'"' { self.bump(); terminated = true; break; }
+                    if c == b'\n' || c == b'\r' { break; }
                     if c == b'\\' { self.bump(); self.bump(); continue; }
                     self.bump();
                 }
                 let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
-                return Tok { kind: TokKind::WideStringLit, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+                let kind = if terminated { TokKind::WideStringLit } else { TokKind::Invalid };
+                return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
             }
             return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
         }
@@ -195,9 +199,15 @@ impl<'a> Lexer<'a> {
                     }
                 }
             }
-            // 浮点后缀
-            if let Some(b'f') | Some(b'F') | Some(b'l') | Some(b'L') = self.peek() {
-                is_float = true; self.bump();
+            // 数字后缀。整数允许 U/L/LL 的任意标准顺序组合；浮点只允许 F/L。
+            if is_float {
+                if matches!(self.peek(), Some(b'f' | b'F' | b'l' | b'L')) {
+                    self.bump();
+                }
+            } else {
+                while matches!(self.peek(), Some(b'u' | b'U' | b'l' | b'L')) {
+                    self.bump();
+                }
             }
             // C23 数字分隔符: 移除 ' 字符
             let raw = &self.src[start..self.pos];
@@ -208,23 +218,29 @@ impl<'a> Lexer<'a> {
         // 字符串
         if b == b'"' {
             self.bump();
+            let mut terminated = false;
             while let Some(c) = self.peek() {
-                if c == b'"' { self.bump(); break; }
+                if c == b'"' { self.bump(); terminated = true; break; }
+                if c == b'\n' || c == b'\r' { break; }
                 if c == b'\\' { self.bump(); self.bump(); continue; }
                 self.bump();
             }
             let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
-            return Tok { kind: TokKind::StringLit, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            let kind = if terminated { TokKind::StringLit } else { TokKind::Invalid };
+            return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
         }
         if b == b'\'' {
             self.bump();
+            let mut terminated = false;
             while let Some(c) = self.peek() {
-                if c == b'\'' { self.bump(); break; }
+                if c == b'\'' { self.bump(); terminated = true; break; }
+                if c == b'\n' || c == b'\r' { break; }
                 if c == b'\\' { self.bump(); self.bump(); continue; }
                 self.bump();
             }
             let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
-            return Tok { kind: TokKind::CharLit, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            let kind = if terminated { TokKind::CharLit } else { TokKind::Invalid };
+            return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
         }
         // 符号
         self.bump();
@@ -268,10 +284,32 @@ impl<'a> Lexer<'a> {
             b'.' => if self.peek() == Some(b'.') && self.peek_at(1) == Some(b'.') {
                 self.bump(); self.bump(); (TokKind::Ellipsis, 3)
             } else { (TokKind::Dot, 1) },
-            _ => { return Tok { kind: TokKind::Eof, span: self.span_here(1),
+            _ => { return Tok { kind: TokKind::Invalid, span: self.span_here(1),
                                 text: std::str::from_utf8(&[b]).unwrap().to_string() }; }
         };
         let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
         Tok { kind, span: Span { file: self.file.clone(), line, col, len }, text }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Lexer, TokKind};
+
+    #[test]
+    fn malformed_literals_and_unknown_bytes_are_not_eof() {
+        for source in [b"\"unterminated\n".as_slice(), b"'unterminated\n", b"@"] {
+            let mut lexer = Lexer::new(source, "invalid-token.c");
+            assert_eq!(lexer.next().kind, TokKind::Invalid);
+        }
+    }
+
+    #[test]
+    fn integer_suffixes_are_part_of_the_number_token() {
+        for source in ["1U", "1UL", "1LU", "1ULL", "0xffUL", "0X10llu"] {
+            let mut lexer = Lexer::new(source.as_bytes(), "integer-suffix.c");
+            assert_eq!(lexer.next().kind, TokKind::Number, "{source}");
+            assert_eq!(lexer.next().kind, TokKind::Eof, "{source}");
+        }
     }
 }
