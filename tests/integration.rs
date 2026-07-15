@@ -722,3 +722,94 @@ int main(void) { return devtable[0].id_size == 24 ? 0 : 1; }\n";
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn btf_section_contains_struct_kind() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-btf-struct-{}", std::process::id()));
+    let out_path = dir.join(format!("dcc-btf-struct-{}.o", std::process::id()));
+    let source = "int main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        obj.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            (info & 0x1f) == 4
+        }),
+        "BTF missing STRUCT type encoding"
+    );
+}
+
+#[test]
+fn eh_frame_larger_than_cie_only() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-eh-fde-{}", std::process::id()));
+    let out_path = dir.join(format!("dcc-eh-fde-{}.o", std::process::id()));
+    let source = "int foo(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-fno-omit-frame-pointer", "-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let obj_str = String::from_utf8_lossy(&obj);
+    let start = obj_str.find(".eh_frame").expect(".eh_frame name");
+    let tail = &obj_str[start..start.saturating_add(256).min(obj_str.len())];
+    assert!(tail.len() > 64, "eh_frame section likely missing FDE");
+}
+
+#[test]
+#[cfg(unix)]
+fn flto_relocatable_link_merges_section() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let a_src = dir.join(format!("dcc-lto-a-{pid}.c"));
+    let b_src = dir.join(format!("dcc-lto-b-{pid}.c"));
+    let a_o = dir.join(format!("dcc-lto-a-{pid}.o"));
+    let b_o = dir.join(format!("dcc-lto-b-{pid}.o"));
+    let out_o = dir.join(format!("dcc-lto-merged-{pid}.o"));
+    fs::write(&a_src, "int foo(void) { return 1; }\n").unwrap();
+    fs::write(&b_src, "int bar(void) { return 2; }\n").unwrap();
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    for (src, obj) in [(&a_src, &a_o), (&b_src, &b_o)] {
+        let out = Command::new(dcc)
+            .args(["-flto", "-c", "-o"])
+            .arg(obj)
+            .arg(src)
+            .output()
+            .expect("compile lto object");
+        assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let link = Command::new(dcc)
+        .args(["-r", "-flto", "-o"])
+        .arg(&out_o)
+        .arg(&a_o)
+        .arg(&b_o)
+        .output()
+        .expect("link lto objects");
+    let merged = fs::read(&out_o).unwrap_or_default();
+    let _ = fs::remove_file(&a_src);
+    let _ = fs::remove_file(&b_src);
+    let _ = fs::remove_file(&a_o);
+    let _ = fs::remove_file(&b_o);
+    let _ = fs::remove_file(&out_o);
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    assert!(
+        String::from_utf8_lossy(&merged).contains(".llvm.lto"),
+        "linked object missing merged .llvm.lto"
+    );
+}

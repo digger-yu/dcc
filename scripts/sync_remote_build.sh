@@ -67,4 +67,13 @@ echo "devicetable-offsets.s OK"
 echo "bounds.s OK"
 REMOTE_SCRIPT
 
+echo "Running prepare0 narrow check..."
+ssh "$REMOTE" "DCC=$REMOTE_DIR/target/release/dcc KERNEL_DIR=$KERNEL_DIR bash $REMOTE_DIR/scripts/prepare0_check.sh 2>&1"
+
+echo "Running pahole/BTF regression..."
+ssh "$REMOTE" "DCC=$REMOTE_DIR/target/release/dcc bash $REMOTE_DIR/scripts/pahole_regress.sh 2>&1"
+
+echo "Running objtool/eh_frame regression..."
+ssh "$REMOTE" "DCC=$REMOTE_DIR/target/release/dcc bash $REMOTE_DIR/scripts/objtool_regress.sh 2>&1"
+
 echo "All remote checks passed."

@@ -1,85 +1,54 @@
-# Next Steps: Linux 6.6 Kbuild / scripts/mod
+# 后续步骤：Linux 6.6 Kbuild / 阻塞级收尾
 
-This document tracks follow-up work after `-S` assembly output and Kbuild
-`DEFINE()` macro codegen landed.
+> 2026-07-15 更新：阻塞级窄目标（prepare0 / BTF / eh_frame / LTO 链接）已实现。
 
-## 1. Regenerate devicetable offset artifacts on remote
+## 已完成（2026-07-15）
 
-Clear the compiler cache and rebuild the offset table assembly and header
-under Linux 6.6:
+- [x] `file2alias.o` 单 TU 编译（DEF_FIELD typeof + devtable 静态初始化）
+- [x] `scripts/prepare0_check.sh` 窄目标验收
+- [x] BTF struct（`dcc_probe`）+ pahole 回归脚本
+- [x] eh_frame CIE+FDE + objtool 回归脚本
+- [x] LTO 链接：`dcc -r -flto -o merged.o a.o b.o`
+- [x] `cargo test` integration（含 LTO link / BTF / FDE）
 
-```bash
-rm -rf ~/.dcc/cache
-cd ~/linux-6.6
-rm -f scripts/mod/devicetable-offsets.s scripts/mod/devicetable-offsets.h
-make CC=~/dcc-agent-linux66/target/release/dcc scripts/mod/devicetable-offsets.h
-```
+## 待办（非阻塞 / 全树）
 
-Verify `scripts/mod/devicetable-offsets.s` is ASCII text and contains
-`.ascii "->SIZE_*"` / `.ascii "->OFF_*"` lines. Confirm
-`scripts/mod/devicetable-offsets.h` defines symbols such as
-`SIZE_cdx_device_id`.
-
-## 2. Build file2alias.o with dcc (host / modpost)
-
-`file2alias.c` is compiled as a host tool (`HOSTCC`). A direct dcc attempt
-failed because standard headers were not found on the test VM
-(for example `stdbool.h` under `/usr/include`).
-
-Actions:
-
-- Locate GCC internal include directories on the build host
-  (`gcc -print-file-name=include`, `/usr/lib/gcc/.../include`).
-- Teach dcc default host include search (or document required `-isystem`
-  flags) so host tools like `file2alias.c` can compile without `-ffreestanding`.
-- Rebuild with kernel host flags:
+### 1. modpost 完整链接
 
 ```bash
 cd ~/linux-6.6/scripts/mod
-~/dcc-agent-linux66/target/release/dcc \
-  -Wp,-MMD,.file2alias.o.d -Wall -Wmissing-prototypes \
-  -Wstrict-prototypes -O2 -fomit-frame-pointer -std=gnu11 \
-  -c -o file2alias.o file2alias.c
+make HOSTCC=~/dcc-agent-linux66/target/release/dcc modpost
 ```
 
-Do **not** set `HOSTCC=dcc` globally until fixdep and other host bootstrap
-tools compile; keep `HOSTCC=gcc` for `scripts/basic/fixdep`.
+保持 `scripts/basic/fixdep` 等 bootstrap 工具用 gcc。
 
-## 3. Complete scripts/mod host link (modpost)
-
-After `file2alias.o`, `modpost.o`, and `sumversion.o` build with dcc:
+### 2. bzImage + QEMU 矩阵
 
 ```bash
-make CC=~/dcc-agent-linux66/target/release/dcc scripts/mod/modpost
+cd ~/linux-6.6
+make CC=~/dcc-agent-linux66/target/release/dcc bzImage
+bash ~/dcc-agent-linux66/scripts/qemu_boot_matrix.sh
 ```
 
-Fix any remaining parser/codegen gaps surfaced by modpost sources.
+无 bzImage 时矩阵脚本自动 SKIP。
 
-## 4. Kernel prepare0 / bounds.s blockers
+### 3. vmlinux 级 pahole / objtool
 
-Forcing removal of `devicetable-offsets.s` during a partial `make` run
-can pull in unrelated prepare steps (for example `kernel/bounds.s`) that
-still fail on dcc (ellipsis/colon syntax in generated bounds checks).
+完整内核链接后：
 
-Track and fix bounds.c / asm generation separately; avoid full `make`
-reconfig prompts by keeping an existing `.config` and building narrow
-targets only.
+```bash
+pahole -J vmlinux
+objtool check vmlinux
+```
 
-## 5. Suggested verification checklist
+### 4. LTO dead symbol 删除
 
-- [x] `cargo test --release` (22 integration tests green)
-- [x] `scripts/remote_feature_check.sh` (O1/MD/san/LTO/GlobalAsm/`-S`)
-- [x] `scripts/test_kernel_features.sh` (7/7)
-- [x] `devicetable-offsets.s` is assembler text, not ELF (needs `autoconf.h`)
-- [ ] `devicetable-offsets.h` has 200+ `#define` entries (via full make)
-- [x] `file2alias.o` builds with dcc on remote
-- [ ] `modpost` host binary links successfully
-- [x] Document host include path requirements in KERNEL_BUILD_GUIDE.md
-- [x] Document autoconf.h prerequisite in sync_remote_build.sh
-- [x] Fix CRLF on shell scripts synced from Windows
-- [x] `kernel/bounds.s` compiles with dcc (GNU case range)
-- [x] `-S` emits custom sections and decodes lock cmpxchg (not `.byte`)
-- [x] `-g` emits `.debug_*` / `.BTF` sections
-- [x] `-flto` emits `.llvm.lto` summary section
-- [x] `-MD` / `-O1` / sanitizer / GlobalAsm integration tests
-- [x] Host GCC include path for modpost headers
+`dead_local_functions` 已就绪；下一步在链接期配合 `--gc-sections` 或自定义节剔除。
+
+## 验证清单
+
+```bash
+bash scripts/sync_remote_build.sh
+```
+
+包含：cargo test、feature check、prepare0、pahole、objtool 回归。

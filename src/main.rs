@@ -16,6 +16,7 @@ mod const_eval;
 mod ir;
 mod opt;
 mod lto;
+mod link;
 mod debug;
 mod sanitizer;
 mod parser;

@@ -14,14 +14,24 @@ use crate::ir;
 use crate::sanitizer;
 use crate::lto;
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
+    // -r 多 .o 可重定位链接
+    if cfg.link_mode {
+        let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
+        return crate::link::link_relocatable(&cfg.inputs, &cfg.output, lto_enabled, cfg.verbose);
+    }
+
+    let input = cfg.inputs.first().ok_or_else(|| {
+        vec![Diagnostic::err("E0100", "no input file", crate::diagnostics::Span::point("", 0, 0))]
+    })?;
+
     // .S / -x assembler-with-cpp: 预处理 + 系统汇编器
     if matches!(cfg.input_lang, InputLang::AssemblerWithCpp)
-        || cfg.input.extension().map(|e| e == "S").unwrap_or(false) {
-        return run_assembler_driver(&cfg);
+        || input.extension().map(|e| e == "S").unwrap_or(false) {
+        return run_assembler_driver(&cfg, input);
     }
 
     if cfg.verbose {
-        eprintln!("dcc: input  = {}", cfg.input.display());
+        eprintln!("dcc: input  = {}", input.display());
         eprintln!("dcc: target = {}", cfg.target.as_str());
         eprintln!("dcc: std    = {}", cfg.std.as_str());
         eprintln!("dcc: -O{}", cfg.opt);
@@ -30,17 +40,17 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // 读源：支持文件和 stdin（`-`）
-    let (src, file_name) = if cfg.input.as_os_str() == "-" {
+    let (src, file_name) = if input.as_os_str() == "-" {
         let mut buf = Vec::new();
         io::stdin().read_to_end(&mut buf)
             .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read stdin: {}", e),
                 crate::diagnostics::Span::point("-", 0, 0))])?;
         (buf, "-".to_string())
     } else {
-        let s = fs::read(&cfg.input)
-            .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", cfg.input.display(), e),
-                crate::diagnostics::Span::point(&cfg.input.display().to_string(), 0, 0))])?;
-        (s, cfg.input.display().to_string())
+        let s = fs::read(input)
+            .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", input.display(), e),
+                crate::diagnostics::Span::point(&input.display().to_string(), 0, 0))])?;
+        (s, input.display().to_string())
     };
 
     // 预处理
@@ -95,7 +105,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write {}: {}", dep_path.display(), e),
                     crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?)
         };
-        writeln!(dep_out, "{}: {}", target, cfg.input.display())
+        writeln!(dep_out, "{}: {}", target, input.display())
             .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
                 crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
         for dep in &deps {
@@ -179,9 +189,9 @@ fn filter_user_deps(deps: Vec<String>, system_paths: &[std::path::PathBuf]) -> V
 }
 
 /// 独立汇编驱动: 预处理 .S 后调用系统 `as`。
-fn run_assembler_driver(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
-    let file_name = cfg.input.display().to_string();
-    let src = fs::read(&cfg.input)
+fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagnostic>> {
+    let file_name = input.display().to_string();
+    let src = fs::read(input)
         .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
             crate::diagnostics::Span::point(&file_name, 0, 0))])?;
 

@@ -6,19 +6,17 @@
 
 | 阶段 | 状态 |
 |------|------|
-| DCC release 构建 + `cargo test`（22 integration） | ✅ 远程通过 |
+| DCC release 构建 + `cargo test`（integration） | ✅ 远程通过 |
 | `scripts/test_kernel_features.sh` | ✅ 7/7 |
-| `scripts/remote_feature_check.sh` | ✅ 15/15（含 MMD/MP/LTO size/va_list/`-mno-red-zone`） |
+| `scripts/remote_feature_check.sh` | ✅ 15/15 |
+| `scripts/prepare0_check.sh` | ✅ devicetable / bounds / file2alias 窄目标 |
+| `scripts/pahole_regress.sh` / `objtool_regress.sh` | ✅ BTF struct + eh_frame FDE |
 | `scripts/sync_remote_build.sh` | ✅ rsync + 全量远程测试 + autoconf 自愈 |
-| Kbuild `prepare0` → mod/empty.c | ✅ |
-| Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行（需 `autoconf.h`） |
-| Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ GNU case range + 逗号数组 |
-| `-S` lock/SSE 反汇编 + 自定义节分组 | ✅ `src/codegen/disasm.rs` + integration |
-| `-g` DWARF/BTF、`-flto`、sanitizer、`.S` 驱动 | ✅ 初版 |
-| `-MD` 依赖、`-O1` 常量折叠、GlobalAsm、`-mno-red-zone` | ✅ integration 覆盖 |
-| Host GCC include（modpost `stdbool.h`） | ✅ `gcc -print-file-name=include` 探测 |
-| modpost `file2alias.c` 单 TU | ❌ parser 缺口，待修 |
-| 全树 `make` / vmlinux / bzImage / QEMU | ⚠️ 待完整链接与 QEMU 环境 |
+| Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行 |
+| Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ |
+| modpost `file2alias.c` 单 TU | ✅ |
+| LTO 链接 `-r` 多 `.o` | ✅ `ld -r` + `.llvm.lto` 注入 |
+| 全树 `make` / vmlinux / bzImage / QEMU | ⚠️ 需完整链接；QEMU 脚本在无 bzImage 时 SKIP |
 
 ### 远程同步构建
 

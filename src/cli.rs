@@ -15,7 +15,7 @@ pub enum InputLang {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub input:    PathBuf,
+    pub inputs:   Vec<PathBuf>,
     pub output:   PathBuf,         // 默认 a.out
     pub opt:      u8,              // 0..3
     pub std:      StdMode,
@@ -26,7 +26,8 @@ pub struct Config {
     pub defines:  Vec<(String, Option<String>)>,  // -D NAME=VALUE
     pub dump_ast: bool,
     pub verbose:  bool,
-    pub relocatable: bool,  // -c: 输出可重定位 .o
+    pub relocatable: bool,  // -c / -r
+    pub link_mode: bool,    // -r 多 .o 可重定位链接
     pub emit_asm: bool,     // -S: 输出汇编文本 .s
     pub preprocess_only: bool, // -E: 只做预处理
     pub force_includes: Vec<String>, // -include file: 强制包含文件
@@ -158,7 +159,7 @@ pub fn abi_name(a: Abi) -> &'static str {
 }
 
 pub fn parse(args: &[String]) -> Result<Config, CliError> {
-    let mut input: Option<PathBuf> = None;
+    let mut inputs: Vec<PathBuf> = vec![];
     let mut output = PathBuf::from("a.out");
     let mut opt: u8 = 0;
     let mut std = StdMode::Gnu23;   // 第一性原理:默认 gnu23,跟现代 GCC 行为一致
@@ -477,25 +478,39 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 std::process::exit(0);
             }
             "-" => {
-                input = Some(PathBuf::from("-"));
+                inputs.push(PathBuf::from("-"));
             }
             a if a.starts_with('-') => return Err(CliError::new(&format!("unknown flag: {}", a))),
             _ => {
-                // 多文件支持: 只编译第一个文件，其余忽略 (内核构建通常一次一个文件)
-                if input.is_some() && !relocatable { return Err(CliError::new("only one input file supported in M0")); }
-                if input.is_none() {
-                    input = Some(PathBuf::from(a));
-                }
+                inputs.push(PathBuf::from(a));
             }
         }
         i += 1;
     }
+
+    let link_mode = relocatable
+        && inputs.len() >= 2
+        && inputs.iter().all(|p| {
+            p.extension().map(|e| e == "o").unwrap_or(false)
+        });
+
+    if link_mode && (emit_asm || preprocess_only || syntax_only || dump_ast) {
+        return Err(CliError::new("link mode (-r) cannot combine with -S/-E/-fsyntax-only"));
+    }
+
+    if !link_mode && inputs.len() > 1 {
+        return Err(CliError::new("multiple input files require -r link mode with .o files"));
+    }
+
     // -E 模式允许没有输入文件 (从 stdin 读取)
     if !preprocess_only {
-        let input = input.ok_or_else(|| CliError::new("no input file"))?;
-        // -c / -S 模式默认输出扩展名
-        if output == PathBuf::from("a.out") {
-            let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+        if inputs.is_empty() && !link_mode {
+            return Err(CliError::new("no input file"));
+        }
+        let first = inputs.first().cloned().unwrap_or_else(|| PathBuf::from("-"));
+        // -c / -S 模式默认输出扩展名（单 TU 编译）
+        if !link_mode && output == PathBuf::from("a.out") {
+            let stem = first.file_stem().unwrap_or_default().to_string_lossy();
             if emit_asm {
                 output = PathBuf::from(format!("{}.s", stem));
             } else if relocatable {
@@ -504,8 +519,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         }
         // 如果未指定 dep_file 但启用了 dep, 用输出文件名替换扩展名为 .o 后加 .d
         let dep_file = dep_file.or_else(|| {
-            if gen_dep && (relocatable || emit_asm) {
-                let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+            if gen_dep && !link_mode && (relocatable || emit_asm) {
+                let stem = first.file_stem().unwrap_or_default().to_string_lossy();
                 Some(PathBuf::from(format!("{}.d", stem)))
             } else { None }
         });
@@ -514,13 +529,15 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 Some(output.display().to_string())
             } else { None }
         });
-        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, emit_asm, preprocess_only, force_includes, syntax_only,
+        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, force_includes, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             raw_args: args.to_vec() })
     } else {
-        let input = input.unwrap_or_else(|| PathBuf::from("-"));
-        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, emit_asm, preprocess_only, force_includes, syntax_only,
+        if inputs.is_empty() {
+            inputs.push(PathBuf::from("-"));
+        }
+        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode: false, emit_asm, preprocess_only, force_includes, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             raw_args: args.to_vec() })

@@ -43,23 +43,35 @@ pub fn emit(
                 cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".BTF".to_string(),
-                    data: debug::build_btf_header(),
+                    data: debug::build_btf_probe(),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 4,
                 });
             }
             if cg.emit_cfi && relocatable {
+                let frames: Vec<debug::FuncFrame> = module
+                    .functions
+                    .iter()
+                    .filter_map(|f| {
+                        cg.labels.get(&f.name).and_then(|&pc| {
+                            cg.func_sizes.get(&f.name).map(|&sz| debug::FuncFrame {
+                                pc,
+                                size: sz as u32,
+                            })
+                        })
+                    })
+                    .collect();
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".eh_frame".to_string(),
-                    data: debug::build_eh_frame(),
+                    data: debug::build_eh_frame(&frames),
                     ty: elf::SHT_PROGBITS,
                     flags: elf::SHF_ALLOC,
                     align: 8,
                 });
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".orc_unwind_ip".to_string(),
-                    data: debug::build_orc_unwind_ip(),
+                    data: debug::build_orc_unwind_ip(&frames),
                     ty: elf::SHT_PROGBITS,
                     flags: elf::SHF_ALLOC,
                     align: 8,
