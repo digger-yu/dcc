@@ -85,7 +85,6 @@ const BTF_KIND_STRUCT: u32 = 4;
 /// 生成含 int + dcc_probe 结构体的 BTF（供 pahole/llvm-btf 探测）。
 pub fn build_btf_probe() -> Vec<u8> {
     let strings = b"\0int\0dcc_probe\0val\0";
-    let str_off = 24u32;
     let type_off = 24u32;
 
     // type 1: int (32-bit signed)

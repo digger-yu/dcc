@@ -527,13 +527,14 @@ impl<'a> Parser<'a> {
         // typedef
         if self.cur.kind == TokKind::KwTypedef {
             self.advance();
-            let ty = self.parse_type()?;
+            let mut ty = self.parse_type_mode(true)?;
+            ty = self.parse_ptr_suffix(ty);
             // 函数指针 typedef: typedef ret_type (*name)(params)
             if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
                 self.advance(); // (
                 self.advance(); // *
                 while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) { self.advance(); }
-                let name = self.parse_ident()?;
+                let name = self.parse_typedef_name()?;
                 if !self.expect(TokKind::RParen, "')'") { return None; }
                 if self.cur.kind == TokKind::LParen {
                     self.advance();
@@ -547,14 +548,14 @@ impl<'a> Parser<'a> {
                     return Some(vec![Decl::Typedef { name, ty: ptr_ty, span: sp }]);
                 }
             }
-            let name = self.parse_ident()?;
+            let name = self.parse_typedef_name()?;
             let sp = name.span.clone();
             // 函数 typedef: typedef ret_type name(params)
             if self.cur.kind == TokKind::LParen {
                 self.advance();
                 let params = self.parse_params()?;
                 if !self.expect(TokKind::RParen, "')'") { return None; }
-                let func_ty = Type::Func(Box::new(ty), params.iter().map(|p| p.ty.clone()).collect());
+                let func_ty = Type::Func(Box::new(ty.clone()), params.iter().map(|p| p.ty.clone()).collect());
                 if !self.expect(TokKind::Semi, "';'") { return None; }
                 self.typedefs.insert(name.name.clone(), func_ty.clone());
                 return Some(vec![Decl::Typedef { name, ty: func_ty, span: sp }]);
@@ -1074,17 +1075,17 @@ impl<'a> Parser<'a> {
                 TokKind::KwChar => { base = Some(Type::Char); self.advance(); }
                 TokKind::KwShort => { is_short = true; self.advance(); }
                 TokKind::KwLong => { is_long += 1; self.advance(); }
-                TokKind::KwVoid => { base = Some(Type::Void); self.advance(); }
-                TokKind::KwBool => { base = Some(Type::Bool); self.advance(); }
-                TokKind::KwFloat => { base = Some(Type::Float); self.advance(); }
-                TokKind::KwDouble => { base = Some(Type::Double); self.advance(); }
-                TokKind::KwDecimal32 => { base = Some(Type::Float); self.advance(); }      // _Decimal32 → float 近似
-                TokKind::KwDecimal64 => { base = Some(Type::Double); self.advance(); }     // _Decimal64 → double 近似
-                TokKind::KwDecimal128 => { base = Some(Type::LongDouble); self.advance(); } // _Decimal128 → long double 近似
-                TokKind::KwInt128 => { base = Some(Type::Int128); self.advance(); }
-                TokKind::KwUInt128 => { base = Some(Type::UInt128); self.advance(); }
-                TokKind::KwFract => { base = Some(Type::Fract); self.advance(); }
-                TokKind::KwAccum => { base = Some(Type::Accum); self.advance(); }
+                TokKind::KwVoid => { base = Some(Type::Void); self.advance(); break; }
+                TokKind::KwBool => { base = Some(Type::Bool); self.advance(); break; }
+                TokKind::KwFloat => { base = Some(Type::Float); self.advance(); break; }
+                TokKind::KwDouble => { base = Some(Type::Double); self.advance(); break; }
+                TokKind::KwDecimal32 => { base = Some(Type::Float); self.advance(); break; }
+                TokKind::KwDecimal64 => { base = Some(Type::Double); self.advance(); break; }
+                TokKind::KwDecimal128 => { base = Some(Type::LongDouble); self.advance(); break; }
+                TokKind::KwInt128 => { base = Some(Type::Int128); self.advance(); break; }
+                TokKind::KwUInt128 => { base = Some(Type::UInt128); self.advance(); break; }
+                TokKind::KwFract => { base = Some(Type::Fract); self.advance(); break; }
+                TokKind::KwAccum => { base = Some(Type::Accum); self.advance(); break; }
                 TokKind::KwSigned => { self.advance(); }
                 TokKind::KwUnsigned => { is_unsigned = true; self.advance(); }
                 // _BitInt(N): C23 定宽整数类型 (也在第一个 loop 中处理,但 unsigned 在第二个 loop)
@@ -1326,6 +1327,24 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::Comma { self.advance(); }
         }
         vs
+    }
+
+    fn parse_typedef_name(&mut self) -> Option<Ident> {
+        match self.cur.kind {
+            TokKind::Ident | TokKind::KwBool => {
+                let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() };
+                self.advance();
+                Some(id)
+            }
+            _ => {
+                self.err_here(
+                    "E0004",
+                    format!("expected identifier, got {:?}", self.cur.kind),
+                    Some("identifiers must start with a letter or '_'"),
+                );
+                None
+            }
+        }
     }
 
     fn parse_ident(&mut self) -> Option<Ident> {

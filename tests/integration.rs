@@ -724,6 +724,39 @@ int main(void) { return devtable[0].id_size == 24 ? 0 : 1; }\n";
 }
 
 #[test]
+fn stdbool_before_linux_stddef_enum_parses() {
+    let dir = std::env::temp_dir();
+    let hdr_dir = dir.join(format!("dcc-stddef-{}", std::process::id()));
+    let linux_dir = hdr_dir.join("linux");
+    fs::create_dir_all(&linux_dir).expect("create linux include dir");
+    fs::write(
+        linux_dir.join("stddef.h"),
+        "enum {\n\tfalse = 0,\n\ttrue = 1\n};\n",
+    )
+    .expect("write stddef stub");
+    let source_path = dir.join(format!("dcc-stdbool-std-{}.c", std::process::id()));
+    fs::write(
+        &source_path,
+        "#include <stdbool.h>\n#include \"linux/stddef.h\"\ntypedef _Bool _Bool;\nint main(void) { return false; }\n",
+    )
+    .expect("write source");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-I"])
+        .arg(&hdr_dir)
+        .args(["-fsyntax-only"])
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_dir_all(hdr_dir);
+    let _ = fs::remove_file(source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn btf_section_contains_struct_kind() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-btf-struct-{}", std::process::id()));

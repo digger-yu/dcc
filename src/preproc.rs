@@ -827,6 +827,10 @@ impl Preprocessor {
         }
     }
 
+    fn needs_linux_stddef_bool_fixup(path: &str) -> bool {
+        path.ends_with("linux/stddef.h")
+    }
+
     fn do_include(&mut self, rest: &str, line_no: u32) {
         let rest = rest.trim();
         let (path, is_system) = if rest.starts_with('"') {
@@ -857,7 +861,14 @@ impl Preprocessor {
                         let macro_hash = self.hash_macro_state();
                         let cache_path = self.get_cache_path(&canonical, content_hash, macro_hash);
 
+                        let bool_fixup = Self::needs_linux_stddef_bool_fixup(path);
+                        // linux/stddef.h 定义 enum { false = 0, true = 1 }；若 stdbool.h
+                        // 已将 false/true 宏化，预处理会把它变成非法的 0 = 0。
+                        let skip_cache = bool_fixup
+                            && (self.macros.contains_key("false") || self.macros.contains_key("true"));
+
                         if let Some(ref cp) = cache_path {
+                            if !skip_cache {
                             if let Some((cached_output, cached_macros)) = self.load_from_cache(cp) {
                                 // 缓存命中: 直接使用缓存的预处理输出和宏
                                 self.out.push_str(&format!("/* #include \"{}\" (cached) */\n", path));
@@ -868,6 +879,7 @@ impl Preprocessor {
                                 }
                                 return;
                             }
+                            }
                         }
 
                         // 缓存未命中: 正常处理
@@ -876,19 +888,29 @@ impl Preprocessor {
                         let saved_out_len = self.out.len();
                         // 记录当前宏表快照, 用于后续提取该头文件新增的宏
                         let saved_macros: std::collections::HashSet<String> = self.macros.keys().cloned().collect();
+                        let saved_false = if bool_fixup { self.macros.remove("false") } else { None };
+                        let saved_true = if bool_fixup { self.macros.remove("true") } else { None };
                         self.base_dir = full_path.parent()
                             .unwrap_or(Path::new(".")).to_path_buf();
                         self.process_text(&text, &full_path.to_string_lossy());
+                        if let Some(def) = saved_false {
+                            self.macros.insert("false".to_string(), def);
+                        }
+                        if let Some(def) = saved_true {
+                            self.macros.insert("true".to_string(), def);
+                        }
                         self.base_dir = saved_base;
 
                         // 保存到缓存 (仅保存该头文件新增的宏, 避免冗余和状态污染)
                         if let Some(ref cp) = cache_path {
+                            if !skip_cache {
                             let new_output = self.out[saved_out_len..].to_string();
                             let header_macros: HashMap<String, MacroDef> = self.macros.iter()
                                 .filter(|(k, _)| !saved_macros.contains(*k))
                                 .map(|(k, v)| (k.clone(), v.clone()))
                                 .collect();
                             self.save_to_cache(cp, &new_output, &header_macros);
+                            }
                         }
                     }
                     Err(e) => {

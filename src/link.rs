@@ -26,14 +26,14 @@ pub fn link_relocatable(
         .iter()
         .map(|p| {
             fs::read(p).map_err(|e| {
-                Diagnostic::err(
+                vec![Diagnostic::err(
                     "E0201",
                     format!("cannot read {}: {}", p.display(), e),
                     Span::point(&p.display().to_string(), 0, 0),
-                )
+                )]
             })
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
     let refs: Vec<&[u8]> = object_bytes.iter().map(|b| b.as_slice()).collect();
 
     let lto_unit = if lto_enabled {
@@ -94,7 +94,7 @@ fn inject_lto_section(output: &Path, payload: &[u8]) -> Result<(), Vec<Diagnosti
     })?;
     let tmp_str = tmp.to_string_lossy();
     let status = Command::new("objcopy")
-        .arg("--add-section")
+        .arg("--update-section")
         .arg(format!(".llvm.lto={}", tmp_str))
         .arg(output)
         .status()

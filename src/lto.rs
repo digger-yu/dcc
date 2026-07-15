@@ -41,7 +41,16 @@ pub fn merge_units(mut units: Vec<LtoUnit>) -> LtoUnit {
     let mut merged = LtoUnit::default();
     for unit in units.drain(..) {
         for (name, summary) in unit.functions {
-            merged.functions.entry(name).or_insert(summary);
+            merged.functions
+                .entry(name)
+                .and_modify(|existing| {
+                    existing.defined |= summary.defined;
+                    existing.referenced |= summary.referenced;
+                    if summary.size_hint > existing.size_hint {
+                        existing.size_hint = summary.size_hint;
+                    }
+                })
+                .or_insert(summary);
         }
     }
     merged
