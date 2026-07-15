@@ -276,18 +276,32 @@ impl<'a> Parser<'a> {
     fn skip_asm_label(&mut self) -> Option<String> {
         if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "__asm" || self.cur.text == "asm") {
             if self.peek.kind == TokKind::LParen {
-                let saved_cur = self.cur.clone();
-                self.advance(); // __asm__
+                self.advance(); // asm
                 self.advance(); // (
-                if self.cur.kind == TokKind::StringLit {
-                    let label = Self::strip_quotes(&self.cur.text);
-                    self.advance(); // "label"
-                    if self.cur.kind == TokKind::RParen { self.advance(); } // )
-                    return Some(label);
+                let label = if self.cur.kind == TokKind::StringLit {
+                    let s = Self::strip_quotes(&self.cur.text);
+                    self.advance();
+                    Some(s)
+                } else if self.cur.kind == TokKind::Ident {
+                    // 宏尚未展开为字符串: asm(__ASM_FORM_RAW) / asm(rsp)
+                    let s = self.cur.text.clone();
+                    self.advance();
+                    Some(s)
                 } else {
-                    // 不是 asm 标签, 恢复
-                    self.cur = saved_cur;
-                }
+                    // 复杂实参 (如 __stringify(rsp)): 跳过平衡括号
+                    let mut depth = 1i32;
+                    while depth > 0 && self.cur.kind != TokKind::Eof {
+                        if self.cur.kind == TokKind::LParen { depth += 1; }
+                        if self.cur.kind == TokKind::RParen {
+                            depth -= 1;
+                            if depth == 0 { self.advance(); break; }
+                        }
+                        self.advance();
+                    }
+                    Some(String::new())
+                };
+                if self.cur.kind == TokKind::RParen { self.advance(); }
+                return label;
             }
         }
         None
@@ -319,11 +333,15 @@ impl<'a> Parser<'a> {
     fn parse_asm_operand_list(&mut self) -> Vec<Expr> {
         let mut ops = vec![];
         while self.cur.kind != TokKind::Colon && self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
-            // 可选的符号操作数名: [name]
+            // 可选的符号操作数名: [name]（允许空格/下划线等任意 token）
             if self.cur.kind == TokKind::LBracket {
                 self.advance();
-                if self.cur.kind == TokKind::Ident { self.advance(); }
-                if self.cur.kind == TokKind::RBracket { self.advance(); }
+                while self.cur.kind != TokKind::RBracket && self.cur.kind != TokKind::Eof {
+                    self.advance();
+                }
+                if self.cur.kind == TokKind::RBracket {
+                    self.advance();
+                }
             }
             // GCC 约束字符串，实际表达式位于随后的括号中。
             if self.cur.kind == TokKind::StringLit { self.advance(); }
@@ -458,7 +476,19 @@ impl<'a> Parser<'a> {
         let ty = self.parse_type()?;
         let storage = self.decl_storage;
         let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));
-        self.parse_var_or_func(ty, attrs, storage)
+        let mut decls = vec![];
+        loop {
+            match self.parse_var_or_func(ty.clone(), attrs.clone(), storage) {
+                Some(ds) => decls.extend(ds),
+                None => break,
+            }
+            if self.cur.kind == TokKind::Comma {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        if decls.is_empty() { None } else { Some(decls) }
     }
 
     fn parse_static_assert(&mut self) -> Option<()> {
@@ -701,6 +731,12 @@ impl<'a> Parser<'a> {
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
                     visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn })])
+            } else if self.cur.kind == TokKind::Comma {
+                self.locals.insert(name_for_decl.name.clone(), ty.clone());
+                if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
+                Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
+                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
+                    visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn })])
             } else {
                 self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind), Some("declaration must end with ';' or have an initializer"));
                 None
@@ -708,7 +744,32 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 判断 peek 是否像声明符起始（指针/标识符），但排除 __attribute__ 等后缀属性。
+    fn peek_declarator_start(&self) -> bool {
+        match self.peek.kind {
+            TokKind::Star => true,
+            TokKind::Ident => !matches!(
+                self.peek.text.as_str(),
+                "__attribute__" | "__asm__" | "__asm" | "__volatile__" | "__const__"
+            ),
+            _ => false,
+        }
+    }
+
+    fn parse_decl_specifiers(&mut self) -> Option<Type> {
+        self.parse_type_mode(true)
+    }
+
     fn parse_type(&mut self) -> Option<Type> {
+        self.parse_type_mode(false)
+    }
+
+    fn finish_type(&mut self, ty: Type, specifiers_only: bool) -> Type {
+        let ty = self.try_parse_vector_attr(ty);
+        if specifiers_only { ty } else { self.parse_ptr_suffix(ty) }
+    }
+
+    fn parse_type_mode(&mut self, specifiers_only: bool) -> Option<Type> {
         let mut is_unsigned = false; let mut is_long = 0u8; let mut is_short = false;
         let mut base: Option<Type> = None;
         // 跳过存储类/const/volatile/_Atomic/__extension__/__attribute__
@@ -736,7 +797,7 @@ impl<'a> Parser<'a> {
                         let inner = self.parse_type();
                         if self.cur.kind == TokKind::RParen { self.advance(); }
                         let ty = Type::Atomic(Box::new(inner?));
-                        return Some(self.parse_ptr_suffix(ty));
+                        return Some(self.finish_type(ty, specifiers_only));
                     }
                     // _Atomic 作为类型限定符: 设置 is_atomic 标志
             // 注意: 不做类型包装, 让后续解析决定具体的类型上下文
@@ -761,11 +822,11 @@ impl<'a> Parser<'a> {
                         if self.is_peek_type_start() {
                             let ty = self.parse_type()?;
                             if self.cur.kind == TokKind::RParen { self.advance(); }
-                            return Some(self.parse_ptr_suffix(ty));
+                            return Some(self.finish_type(ty, specifiers_only));
                         } else {
                             let e = self.parse_expr()?;
                             if self.cur.kind == TokKind::RParen { self.advance(); }
-                            return Some(self.parse_ptr_suffix(e.ty()));
+                            return Some(self.finish_type(e.ty(), specifiers_only));
                         }
                     }
                 }
@@ -810,7 +871,7 @@ impl<'a> Parser<'a> {
                 // 内核属性宏 (__weak, __init 等): 仅在后面是标识符或指针时跳过
                 TokKind::Ident if self.cur.text.starts_with("__")
                     && !self.typedefs.contains_key(&self.cur.text)
-                    && matches!(self.peek.kind, TokKind::Ident | TokKind::Star) => { self.advance(); }
+                    && self.peek_declarator_start() => { self.advance(); }
                 _ => break,
             }
         }
@@ -818,8 +879,7 @@ impl<'a> Parser<'a> {
         // 注意: 必须放在 struct/union/enum/ident 检查之前
         if base.is_some() || is_unsigned || is_long > 0 || is_short {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
-            let ty = self.try_parse_vector_attr(ty);
-            return Some(self.parse_ptr_suffix(ty));
+            return Some(self.finish_type(ty, specifiers_only));
         }
         // struct/union/enum
         if self.cur.kind == TokKind::KwStruct || self.cur.kind == TokKind::KwUnion {
@@ -857,13 +917,13 @@ impl<'a> Parser<'a> {
                 let fields_rc = Rc::new(fields);
                 self.struct_defs.insert(nm.clone(), (Rc::clone(&fields_rc), is_u));
                 let ty = if is_u { Type::Union(nm, fields_rc) } else { Type::Struct(nm, fields_rc) };
-                return Some(self.parse_ptr_suffix(ty));
+                return Some(self.finish_type(ty, specifiers_only));
             } else if !nm.is_empty() {
                 if let Some((f, _)) = self.struct_defs.get(&nm) {
                     let ty = if is_u { Type::Union(nm, Rc::clone(f)) } else { Type::Struct(nm, Rc::clone(f)) };
-                    return Some(self.parse_ptr_suffix(ty));
+                    return Some(self.finish_type(ty, specifiers_only));
                 }
-                return Some(self.parse_ptr_suffix(Type::Struct(nm, Rc::new(vec![]))));
+                return Some(self.finish_type(Type::Struct(nm, Rc::new(vec![])), specifiers_only));
             }
             self.err_here("E0003", "expected struct name or '{'", Some("struct/union definition needs a name or body: struct Name { ... }")); return None;
         }
@@ -878,10 +938,10 @@ impl<'a> Parser<'a> {
                 self.enum_defs.insert(nm.clone(), Rc::clone(&vals_rc));
                 let mut nv = 0i64;
                 for (id, v) in &vs { let val = v.unwrap_or(nv); self.enum_consts.insert(id.name.clone(), val); nv = val + 1; }
-                return Some(self.parse_ptr_suffix(Type::Enum(nm, vals_rc)));
+                return Some(self.finish_type(Type::Enum(nm, vals_rc), specifiers_only));
             } else if !nm.is_empty() {
-                if let Some(v) = self.enum_defs.get(&nm) { return Some(self.parse_ptr_suffix(Type::Enum(nm, Rc::clone(v)))); }
-                return Some(self.parse_ptr_suffix(Type::Enum(nm, Rc::new(vec![]))));
+                if let Some(v) = self.enum_defs.get(&nm) { return Some(self.finish_type(Type::Enum(nm, Rc::clone(v)), specifiers_only)); }
+                return Some(self.finish_type(Type::Enum(nm, Rc::new(vec![])), specifiers_only));
             }
         }
         // typedef 引用
@@ -890,7 +950,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 // 跳过 typedef 名后的 __attribute__: 如 asmlinkage = __attribute__((aligned(4)))
                 self.skip_attributes();
-                return Some(self.parse_ptr_suffix(ty));
+                return Some(self.finish_type(ty, specifiers_only));
             }
             let name = self.cur.text.clone();
             self.diags.push(Diagnostic::err("E0009",
@@ -949,14 +1009,13 @@ impl<'a> Parser<'a> {
         while self.cur.kind == TokKind::Ident && self.cur.text.starts_with("__")
             && !self.typedefs.contains_key(&self.cur.text)
             && self.cur.text != "__attribute__" && self.cur.text != "__asm__" && self.cur.text != "__asm"
-            && matches!(self.peek.kind, TokKind::Ident | TokKind::Star) {
+            && self.peek_declarator_start() {
             self.advance();
         }
         if base.is_some() || is_unsigned || is_long > 0 || is_short || is_complex {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
             let ty = if is_complex { Type::Complex(Box::new(ty)) } else { ty };
-            let ty = self.try_parse_vector_attr(ty);
-            Some(self.parse_ptr_suffix(ty))
+            Some(self.finish_type(ty, specifiers_only))
         } else {
             self.err_here("E0003", format!("expected type, got {:?}", self.cur.kind), Some("use a known type like int, void, or a typedef/struct/enum")); None
         }
@@ -1043,29 +1102,100 @@ impl<'a> Parser<'a> {
         ty
     }
 
+    fn parse_field_declarator(&mut self, spec: Type) -> (Type, String) {
+        // 函数指针字段: type (*name)(params)
+        if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+            self.advance(); // (
+            self.advance(); // *
+            while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) {
+                self.advance();
+            }
+            let nm = if self.cur.kind == TokKind::Ident {
+                let n = self.cur.text.clone();
+                self.advance();
+                n
+            } else {
+                String::new()
+            };
+            if self.cur.kind == TokKind::RParen {
+                self.advance();
+            }
+            let ty = if self.cur.kind == TokKind::LParen {
+                self.advance();
+                let params = self.parse_params().unwrap_or_default();
+                if self.cur.kind == TokKind::RParen {
+                    self.advance();
+                }
+                let func_ty = Type::Func(
+                    Box::new(spec),
+                    params.iter().map(|p| p.ty.clone()).collect(),
+                );
+                Type::Ptr(Box::new(func_ty))
+            } else {
+                Type::Ptr(Box::new(spec))
+            };
+            (ty, nm)
+        } else {
+            let ty = self.parse_ptr_suffix(spec);
+            self.skip_attributes();
+            let nm = if self.cur.kind == TokKind::Ident {
+                let n = self.cur.text.clone();
+                self.advance();
+                n
+            } else {
+                String::new()
+            };
+            (ty, nm)
+        }
+    }
+
     fn parse_fields(&mut self) -> Vec<Field> {
         let mut fs = vec![];
         while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
-            let ty = match self.parse_type() { Some(t) => t, None => { self.advance(); continue; } };
-            let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
-            let bw = if self.cur.kind == TokKind::Colon {
-                self.advance();
-                if let Expr::Int { v, .. } = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int }) { Some(v as u32) } else { None }
-            } else { None };
-            let ty = if self.cur.kind == TokKind::LBracket {
-                self.advance();
-                let arr_size = if self.cur.kind != TokKind::RBracket {
-                    let e = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int });
-                    match &e {
-                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                        _ => ArraySize::Var(Box::new(e)),
+            let spec = match self.parse_decl_specifiers() {
+                Some(t) => t,
+                None => { self.advance(); continue; }
+            };
+            // 同一声明说明符后可用逗号分隔多个声明符: *next, *prev / a, b
+            loop {
+                let (mut ty, nm) = self.parse_field_declarator(spec.clone());
+                self.skip_attributes();
+                let bw = if self.cur.kind == TokKind::Colon {
+                    self.advance();
+                    if let Expr::Int { v, .. } = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int }) {
+                        Some(v as u32)
+                    } else {
+                        None
                     }
-                } else { ArraySize::Const(0) };
-                let _ = self.expect(TokKind::RBracket, "']'");
-                Type::Array(Box::new(ty), arr_size)
-            } else { ty };
-            fs.push(Field { name: nm, ty, offset: 0, bit_width: bw, bit_offset: 0 });
-            if self.cur.kind == TokKind::Semi { self.advance(); } else if self.cur.kind == TokKind::Comma { self.advance(); }
+                } else {
+                    None
+                };
+                ty = if self.cur.kind == TokKind::LBracket {
+                    self.advance();
+                    let arr_size = if self.cur.kind != TokKind::RBracket {
+                        let e = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int });
+                        match &e {
+                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                            _ => ArraySize::Var(Box::new(e)),
+                        }
+                    } else {
+                        ArraySize::Const(0)
+                    };
+                    let _ = self.expect(TokKind::RBracket, "']'");
+                    Type::Array(Box::new(ty), arr_size)
+                } else {
+                    ty
+                };
+                fs.push(Field { name: nm, ty, offset: 0, bit_width: bw, bit_offset: 0 });
+                if self.cur.kind == TokKind::Comma {
+                    self.advance();
+                    continue;
+                }
+                if self.cur.kind == TokKind::Semi {
+                    self.advance();
+                }
+                break;
+            }
         }
         fs
     }
@@ -1077,7 +1207,8 @@ impl<'a> Parser<'a> {
             let nm = match self.parse_ident() { Some(id) => id, None => { self.advance(); continue; } };
             let val = if self.cur.kind == TokKind::Assign {
                 self.advance();
-                if let Expr::Int { v, .. } = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: Span::point("", 0, 0), ty: Type::Int }) { Some(v as i64) } else { None }
+                // 枚举值必须是整型常量表达式，不能含逗号运算符 (A = 0, B 会误吞后续成员)
+                if let Some(Expr::Int { v, .. }) = self.parse_expr_bp(2) { Some(v as i64) } else { None }
             } else { None };
             vs.push((nm, val));
             if self.cur.kind == TokKind::Comma { self.advance(); }
@@ -1157,6 +1288,21 @@ impl<'a> Parser<'a> {
             }
             let ty = self.parse_type()?;
             let nm = if self.cur.kind == TokKind::Ident { let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id) } else { None };
+            let mut ty = ty;
+            if self.cur.kind == TokKind::LBracket {
+                self.advance();
+                let arr_size = if self.cur.kind != TokKind::RBracket {
+                    let e = self.parse_expr()?;
+                    match &e {
+                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                        _ => ArraySize::Var(Box::new(e)),
+                    }
+                } else {
+                    ArraySize::Const(0)
+                };
+                if !self.expect(TokKind::RBracket, "']'") { return None; }
+                ty = Type::Array(Box::new(ty), arr_size);
+            }
             let ty = match ty { Type::Array(e, _) => Type::Ptr(e), o => o };
             ps.push(Param { ty, name: nm, span: self.cur.span.clone() });
             if self.cur.kind == TokKind::Comma { self.advance();
@@ -1198,11 +1344,7 @@ impl<'a> Parser<'a> {
             | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128 | TokKind::KwBool
             | TokKind::KwInt128 | TokKind::KwUInt128)
             || (self.cur.kind == TokKind::Ident
-                && (self.typedefs.contains_key(&self.cur.text)
-                    || self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof"
-                    || self.cur.text == "__extension__" || self.cur.text == "constexpr" || self.cur.text == "_BitInt"
-                    || self.cur.text == "_Noreturn" || self.cur.text == "_Thread_local" || self.cur.text == "__thread"
-                    || self.cur.text == "__builtin_va_list"))
+                && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs))
     }
 
     /// 声明上下文允许把 `unknown_type value` 交给 parse_type 产生精确诊断，
@@ -1225,11 +1367,7 @@ impl<'a> Parser<'a> {
             | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128 | TokKind::KwBool
             | TokKind::KwInt128 | TokKind::KwUInt128)
             || (self.peek.kind == TokKind::Ident
-                && (self.typedefs.contains_key(&self.peek.text)
-                    || self.peek.text == "typeof" || self.peek.text == "__typeof__" || self.peek.text == "__typeof"
-                    || self.peek.text == "__extension__" || self.peek.text == "constexpr" || self.peek.text == "_BitInt"
-                    || self.peek.text == "_Noreturn" || self.peek.text == "_Thread_local" || self.peek.text == "__thread"
-                    || self.peek.text == "__builtin_va_list"))
+                && Self::is_type_specifier_ident(&self.peek.text, &self.typedefs))
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
@@ -1662,15 +1800,45 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// GNU/标准类型说明符起始（用于 is_cast / typeof 等）
+    fn is_type_specifier_ident(text: &str, typedefs: &std::collections::HashMap<String, Type>) -> bool {
+        typedefs.contains_key(text)
+            || matches!(
+                text,
+                "typeof" | "__typeof__" | "__typeof" | "_Atomic" | "__extension__"
+                    | "constexpr" | "_BitInt" | "_Noreturn" | "_Thread_local" | "__thread"
+                    | "__builtin_va_list"
+            )
+    }
+
     fn is_cast(&self) -> bool {
-        self.cur.kind == TokKind::LParen && matches!(self.peek.kind,
-            TokKind::KwInt | TokKind::KwChar | TokKind::KwLong | TokKind::KwVoid
-            | TokKind::KwShort | TokKind::KwUnsigned | TokKind::KwSigned
-            | TokKind::KwFloat | TokKind::KwDouble | TokKind::KwStruct
-            | TokKind::KwUnion | TokKind::KwEnum | TokKind::KwConst | TokKind::KwVolatile
-            | TokKind::KwAtomic | TokKind::KwFract | TokKind::KwAccum
-            | TokKind::KwInt128 | TokKind::KwUInt128)
-            || (self.peek.kind == TokKind::Ident && self.typedefs.contains_key(&self.peek.text))
+        if self.cur.kind != TokKind::LParen {
+            return false;
+        }
+        matches!(
+            self.peek.kind,
+            TokKind::KwInt
+                | TokKind::KwChar
+                | TokKind::KwLong
+                | TokKind::KwVoid
+                | TokKind::KwShort
+                | TokKind::KwUnsigned
+                | TokKind::KwSigned
+                | TokKind::KwFloat
+                | TokKind::KwDouble
+                | TokKind::KwStruct
+                | TokKind::KwUnion
+                | TokKind::KwEnum
+                | TokKind::KwConst
+                | TokKind::KwVolatile
+                | TokKind::KwAtomic
+                | TokKind::KwFract
+                | TokKind::KwAccum
+                | TokKind::KwBool
+                | TokKind::KwInt128
+                | TokKind::KwUInt128
+        ) || (self.peek.kind == TokKind::Ident
+            && Self::is_type_specifier_ident(&self.peek.text, &self.typedefs))
     }
 
     fn parse_postfix(&mut self) -> Option<Expr> {

@@ -118,7 +118,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             )]);
         }
     }
-    let bytes = codegen::emit(&module, &target, cfg.relocatable);
+    let bytes = codegen::emit(&module, &target, cfg.relocatable, cfg.emit_asm, &file_name);
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
     }
@@ -129,8 +129,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write {}: {}", out.display(), e),
             crate::diagnostics::Span::point(&out.display().to_string(), 0, 0))])?;
     f.write_all(&bytes).unwrap();
-    // chmod +x (仅在非 relocatable 模式下)
-    if !cfg.relocatable {
+    // chmod +x (仅在生成可执行 ELF 时)
+    if !cfg.relocatable && !cfg.emit_asm {
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
             let mut p = f.metadata().unwrap().permissions();

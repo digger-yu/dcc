@@ -76,6 +76,10 @@ pub struct Codegen {
     cleanup_vars: Vec<(String, String)>,
     // 额外 .rela 节 (用于 .init_array/.fini_array 等)
     pub extra_rela_sections: Vec<elf::ExtraRelaSection>,
+    // -S 汇编文本输出
+    pub emit_asm_text: bool,
+    asm_directives: Vec<String>,
+    pub source_name: String,
 }
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
@@ -133,7 +137,8 @@ impl Codegen {
                reg_bindings: HashMap::new(),
                pending_data64_rels: vec![],
                data_relocations: vec![], cleanup_vars: vec![],
-               extra_rela_sections: vec![] }
+               extra_rela_sections: vec![],
+               emit_asm_text: false, asm_directives: vec![], source_name: String::new() }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -617,8 +622,7 @@ impl Codegen {
         // 文件级 asm 先发射到 .text
         for decl in &prog.decls {
             if let Decl::GlobalAsm { asm_str, outputs, inputs, .. } = decl {
-                let op_map = self.build_asm_operand_map(outputs, inputs);
-                self.emit_inline_asm(asm_str, &op_map);
+                self.emit_inline_asm(asm_str, outputs, inputs);
             }
         }
 
@@ -1646,8 +1650,7 @@ impl Codegen {
                     resolved_asm = resolved_asm.replace(
                         &format!("%l[{}]", label.name), &label.name);
                 }
-                let op_map = self.build_asm_operand_map(outputs, inputs);
-                self.emit_inline_asm(&resolved_asm, &op_map);
+                self.emit_inline_asm(&resolved_asm, outputs, inputs);
                 let _ = clobbers;
             }
         }
@@ -2102,8 +2105,7 @@ impl Codegen {
                 self.gen_expr(r, dst);
             }
             Expr::AsmExpr { asm_str, outputs, inputs, .. } => {
-                let op_map = self.build_asm_operand_map(outputs, inputs);
-                self.emit_inline_asm(asm_str, &op_map);
+                self.emit_inline_asm(asm_str, outputs, inputs);
                 if dst != 0 { self.mov(dst, 0); }
             }
             Expr::LabelAddr { label, .. } => {
@@ -4854,8 +4856,60 @@ impl Codegen {
         map
     }
 
+    /// 构建 asm 输出文件 (-S 模式)
+    pub fn build_asm_output(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("\t.file \"{}\"\n", self.source_name));
+        out.push_str("\t.text\n");
+        out.push_str("\t.globl main\n");
+        out.push_str("\t.type main, @function\n");
+        out.push_str("main:\n");
+        for line in &self.asm_directives {
+            out.push('\t');
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("\tret\n");
+        out.push_str("\t.size main, .-main\n");
+        out
+    }
+
+    /// 求值 asm 操作数 (用于 "i" 约束的立即数替换)
+    fn eval_asm_operand(expr: &Expr) -> Option<String> {
+        if let Ok(v) = const_eval::eval(expr) {
+            return Some(v.to_string());
+        }
+        if let Expr::Offsetof { ty, member, .. } = expr {
+            return Some(Self::compute_offset(ty, member).to_string());
+        }
+        None
+    }
+
+    /// 替换 asm 模板中的 %N 占位符
+    fn resolve_asm_template(
+        &self,
+        line: &str,
+        outputs: &[Expr],
+        inputs: &[Expr],
+        op_map: &HashMap<String, String>,
+    ) -> String {
+        let mut resolved = line.to_string();
+        let mut idx = 0usize;
+        for op in outputs.iter().chain(inputs.iter()) {
+            let key = format!("%{}", idx);
+            if let Some(val) = Self::eval_asm_operand(op) {
+                resolved = resolved.replace(&key, &val);
+            } else if let Some(reg) = op_map.get(&key) {
+                resolved = resolved.replace(&key, reg);
+            }
+            idx += 1;
+        }
+        resolved
+    }
+
     /// 发射内联汇编模板
-    fn emit_inline_asm(&mut self, asm_str: &str, op_map: &HashMap<String, String>) {
+    fn emit_inline_asm(&mut self, asm_str: &str, outputs: &[Expr], inputs: &[Expr]) {
+        let op_map = self.build_asm_operand_map(outputs, inputs);
         // 清理字符串: 去除引号包裹
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
@@ -4864,22 +4918,15 @@ impl Codegen {
         for line in s.split(|c| c == '\n' || c == ';') {
             let line = line.trim();
             if line.is_empty() { continue; }
-            // 替换操作数引用 %N → 寄存器名
-            let mut resolved = line.to_string();
-            // 按数字降序替换, 避免 %1 匹配 %10 的前缀
-            let mut keys: Vec<_> = op_map.keys().collect();
-            keys.sort_by(|a, b| {
-                let na: usize = a[1..].parse().unwrap_or(0);
-                let nb: usize = b[1..].parse().unwrap_or(0);
-                nb.cmp(&na)
-            });
-            for k in keys {
-                if let Some(reg) = op_map.get(k) {
-                    resolved = resolved.replace(k, reg);
+            let resolved = self.resolve_asm_template(line, outputs, inputs, &op_map);
+            // -S 模式: 保留汇编器指令 (.ascii 等) 供 Kbuild filechk 解析
+            if self.emit_asm_text {
+                let trimmed = resolved.trim();
+                if trimmed.starts_with('.') {
+                    self.asm_directives.push(trimmed.to_string());
+                    continue;
                 }
             }
-            // 处理标签引用: %lN → 标签地址 (asm goto)
-            // 简化: 跳过 %lN 替换
             self.emit_asm_line(&resolved);
         }
     }

@@ -385,6 +385,7 @@ impl Preprocessor {
         // 行续接: 合并以 \ 结尾的行
         let joined = Self::join_continued_lines(text);
 
+        let mut active_source = String::new();
         for (line_no, line) in joined.lines().enumerate() {
             let line_no = (line_no + 1) as u32;
             self.cur_line = line_no;
@@ -395,21 +396,17 @@ impl Preprocessor {
             let trimmed = phase3.trim();
 
             if trimmed.starts_with('#') {
-                self.process_directive(trimmed, line_no);
-                // 不活跃分支中的指令仅用于维持 cond_stack, 不输出
-                // 第一性原理: 预处理输出应仅包含实际代码和宏展开,
-                // 空行在解析器中无语义价值, 只增加内存占用
-            } else if self.is_active() {
-                // 宏展开
-                let expanded = self.expand_macros(&phase3);
-                // 跳过空行: C 语言中空行无语义, 只增加预处理输出体积
-                // 第一性原理: 移除所有空行不影响编译结果, 但可减少 ~36% 输出
-                if !expanded.trim().is_empty() {
-                    self.out.push_str(&expanded);
-                    self.out.push('\n');
+                if !active_source.is_empty() {
+                    self.flush_active_source(&mut active_source);
                 }
+                self.process_directive(trimmed, line_no);
+            } else if self.is_active() {
+                active_source.push_str(&phase3);
+                active_source.push('\n');
             }
-            // 不活跃分支: 不输出任何内容 (与 GCC 行为一致)
+        }
+        if !active_source.is_empty() {
+            self.flush_active_source(&mut active_source);
         }
 
         if self.in_comment {
@@ -421,6 +418,18 @@ impl Preprocessor {
         }
         self.in_comment = saved_in_comment;
         self.file = saved_file;
+    }
+
+    /// 对累积的活跃源码块做宏展开并写入输出
+    fn flush_active_source(&mut self, src: &mut String) {
+        let expanded = self.expand_macros(src);
+        if !expanded.trim().is_empty() {
+            self.out.push_str(&expanded);
+            if !expanded.ends_with('\n') {
+                self.out.push('\n');
+            }
+        }
+        src.clear();
     }
 
     /// 去除单行中的 C 风格注释 (跨行注释由 in_comment 状态跟踪)
@@ -737,6 +746,7 @@ impl Preprocessor {
             let params_str = &after_name[1..paren_end];
             let mut params: Vec<String> = vec![];
             let mut variadic = false;
+            let mut gnu_named_variadic = false;
             for s in params_str.split(',') {
                 let s = s.trim();
                 if s == "..." { variadic = true; }
@@ -745,12 +755,17 @@ impl Preprocessor {
                     variadic = true;
                     let va_name = &s[3..];
                     if !va_name.is_empty() { params.push(va_name.to_string()); }
+                } else if s.ends_with("...") && s.len() > 3 {
+                    // name... 形式 (GNU): #define F(x...) body(x)
+                    variadic = true;
+                    gnu_named_variadic = true;
+                    params.push(s[..s.len() - 3].trim().to_string());
                 } else if !s.is_empty() {
                     params.push(s.to_string());
                 }
             }
-            // 可变参数宏自动添加 __VA_ARGS__ 参数名
-            if variadic && !params.iter().any(|p| p == "__VA_ARGS__") {
+            // ISO 可变参数 (a, b, ...) 自动映射 __VA_ARGS__；GNU x... 在 body 中直接用参数名
+            if variadic && !gnu_named_variadic && !params.iter().any(|p| p == "__VA_ARGS__") {
                 params.push("__VA_ARGS__".to_string());
             }
             let body = after_name[paren_end+1..].trim().to_string();
@@ -1096,18 +1111,35 @@ impl Preprocessor {
                             }
                             // 可变参数处理
                             let mut final_args = expanded_args.clone();
-                            if def.variadic && raw_args.len() >= params.len().saturating_sub(1) {
-                                let fixed = params.len() - 1;
-                                if raw_args.len() > fixed {
-                                    let va_args: Vec<String> = raw_args[fixed..].to_vec();
-                                    let mut normal = raw_args[..fixed].to_vec();
-                                    // 可变参数部分也要展开
-                                    let va_expanded: Vec<String> = va_args.iter().map(|a| {
-                                        let d = HashSet::new();
-                                        self.expand_with_disabled(a, &d)
-                                    }).collect();
-                                    normal.push(va_expanded.join(", "));
-                                    final_args = normal;
+                            if def.variadic {
+                                let has_va_ident = params.last().map(|p| p == "__VA_ARGS__").unwrap_or(false);
+                                let fixed = if has_va_ident {
+                                    params.len().saturating_sub(1)
+                                } else {
+                                    0
+                                };
+                                if raw_args.len() >= fixed {
+                                    if has_va_ident {
+                                        let mut normal = expanded_args[..fixed].to_vec();
+                                        let va_text = if raw_args.len() > fixed {
+                                            raw_args[fixed..].iter().map(|a| {
+                                                let d = HashSet::new();
+                                                self.expand_with_disabled(a, &d)
+                                            }).collect::<Vec<_>>().join(", ")
+                                        } else {
+                                            String::new()
+                                        };
+                                        normal.push(va_text);
+                                        final_args = normal;
+                                    } else if !raw_args.is_empty() {
+                                        let va_text = raw_args.iter().map(|a| {
+                                            let d = HashSet::new();
+                                            self.expand_with_disabled(a, &d)
+                                        }).collect::<Vec<_>>().join(", ");
+                                        final_args = vec![va_text];
+                                    } else {
+                                        final_args = vec![String::new()];
+                                    }
                                 }
                             }
                             if final_args.len() == params.len() {
@@ -1185,28 +1217,83 @@ impl Preprocessor {
         let mut current = String::new();
         let mut depth = 1;
         let mut closed = false;
+        let mut in_string = false;
+        let mut in_char = false;
+        let mut escape = false;
         while *pos < chars.len() && depth > 0 {
             let c = chars[*pos];
-            if c == '(' { depth += 1; current.push(c); }
-            else if c == ')' {
-                depth -= 1;
-                if depth == 0 { closed = true; args.push(current.trim().to_string()); }
-                else { current.push(c); }
+            if in_string {
+                current.push(c);
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                *pos += 1;
+                continue;
             }
-            else if c == ',' && depth == 1 {
-                args.push(current.trim().to_string());
-                current = String::new();
+            if in_char {
+                current.push(c);
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '\'' {
+                    in_char = false;
+                }
+                *pos += 1;
+                continue;
             }
-            else { current.push(c); }
+            match c {
+                '"' => {
+                    in_string = true;
+                    current.push(c);
+                }
+                '\'' => {
+                    in_char = true;
+                    current.push(c);
+                }
+                '(' => {
+                    depth += 1;
+                    current.push(c);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closed = true;
+                        args.push(current.trim().to_string());
+                    } else {
+                        current.push(c);
+                    }
+                }
+                ',' if depth == 1 => {
+                    args.push(current.trim().to_string());
+                    current = String::new();
+                }
+                _ => current.push(c),
+            }
             *pos += 1;
         }
-        if !closed && !current.trim().is_empty() { args.push(current.trim().to_string()); }
+        if !closed && !current.trim().is_empty() {
+            args.push(current.trim().to_string());
+        }
         args
     }
 
     fn substitute_params(&self, body: &str, params: &[String], args: &[String]) -> String {
+        // 空 __VA_ARGS__ 时移除 GCC 扩展 ", ## __VA_ARGS__"
+        let mut body = body.to_string();
+        if let Some(va_idx) = params.iter().position(|p| p == "__VA_ARGS__") {
+            if args.get(va_idx).map(|s| s.is_empty()).unwrap_or(false) {
+                for pat in &[", ## __VA_ARGS__", ",## __VA_ARGS__", ", ##__VA_ARGS__", ",##__VA_ARGS__"] {
+                    body = body.replace(pat, "");
+                }
+            }
+        }
         // 第一步: 处理 # (字符串化) — 必须在 ## 之前, 否则参数名被替换后 # 找不到模式
-        let result = self.handle_stringify(body, params, args);
+        let result = self.handle_stringify(&body, params, args);
         // 第二步: 处理 ## (令牌拼接)
         let result = self.handle_paste(&result, params, args);
         // 第三步: 普通参数替换
@@ -1963,6 +2050,66 @@ mod tests {
         assert!(!output.contains("Don't"));
         assert!(!output.contains("quoted text"));
         assert!(!output.contains("COMMENT_WORD"));
+    }
+
+    #[test]
+    fn gnu_variadic_preserves_multiline_asm_goto_args() {
+        let (output, diags, _) = preprocess(
+            b"#define asm_volatile_goto(x...) asm goto(x)\n\
+              void f(void) {\n\
+              asm_volatile_goto(\"1:\"\n\
+                  \"jmp\\n\"\n\
+                  : : \"i\" (0) : : lbl);\n\
+              lbl: ; }\n",
+            "asm-goto-expand.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("asm goto(\"1:\""), "output: {output}");
+        assert!(output.contains("\"jmp\\n\""), "output: {output}");
+        assert!(output.contains(": : \"i\" (0) : : lbl)"), "output: {output}");
+        assert!(!output.contains("asm goto(\"1:\")"), "output: {output}");
+    }
+
+    #[test]
+    fn iso_variadic_macro_allows_empty_va_args() {
+        let (output, diags, _) = preprocess(
+            b"#define __stringify_1(x...) #x\n\
+              #define __stringify(x...) __stringify_1(x)\n\
+              #define __ASM_FORM(x, ...) \" \" __stringify(x,##__VA_ARGS__) \" \"\n\
+              #define __ASM_SEL(a,b) __ASM_FORM(b)\n\
+              const char *s = __ASM_SEL(1, 2);\n",
+            "iso-variadic.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("\"2\""), "output: {output}");
+        assert!(!output.contains("__ASM_FORM"), "output: {output}");
+    }
+
+    #[test]
+    fn gnu_named_variadic_macro_expands() {
+        let (output, diags, _) = preprocess(
+            b"#define asm_volatile_goto(x...) asm goto(x)\n\
+              void f(void) { asm_volatile_goto(\"jmp\" : : : : lbl); lbl: ; }\n",
+            "gnu-variadic.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("asm goto(\"jmp\""), "output: {output}");
+        assert!(!output.contains("asm goto(x)"), "output: {output}");
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub struct Config {
     pub dump_ast: bool,
     pub verbose:  bool,
     pub relocatable: bool,  // -c: 输出可重定位 .o
+    pub emit_asm: bool,     // -S: 输出汇编文本 .s
     pub preprocess_only: bool, // -E: 只做预处理
     pub force_includes: Vec<String>, // -include file: 强制包含文件
     pub syntax_only: bool, // -fsyntax-only: 只做语法检查, 不生成代码
@@ -154,6 +155,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut dump_ast = false;
     let mut verbose = false;
     let mut relocatable = false;
+    let mut emit_asm = false;
     let mut preprocess_only = false;
     let mut force_includes: Vec<String> = vec![];
     let mut syntax_only = false;
@@ -178,7 +180,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 output = PathBuf::from(args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -o"))?);
             }
-            "-c" | "-S" => { relocatable = true; } // -S: 汇编输出，DCC 直接生成 ELF
+            "-c" => { relocatable = true; }
+            "-S" => { emit_asm = true; }
             "-E" => { preprocess_only = true; }
             "-pipe" => {} // GCC -pipe: 使用管道代替临时文件，DCC 忽略
             "-g" | "-g0" | "-g1" | "-g2" | "-g3" => {} // 调试信息: 忽略
@@ -448,14 +451,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     // -E 模式允许没有输入文件 (从 stdin 读取)
     if !preprocess_only {
         let input = input.ok_or_else(|| CliError::new("no input file"))?;
-        // -c 模式默认输出名为源文件名去后缀加 .o
-        if relocatable && output == PathBuf::from("a.out") {
+        // -c / -S 模式默认输出扩展名
+        if output == PathBuf::from("a.out") {
             let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-            output = PathBuf::from(format!("{}.o", stem));
+            if emit_asm {
+                output = PathBuf::from(format!("{}.s", stem));
+            } else if relocatable {
+                output = PathBuf::from(format!("{}.o", stem));
+            }
         }
         // 如果未指定 dep_file 但启用了 dep, 用输出文件名替换扩展名为 .o 后加 .d
         let dep_file = dep_file.or_else(|| {
-            if gen_dep && relocatable {
+            if gen_dep && (relocatable || emit_asm) {
                 let stem = input.file_stem().unwrap_or_default().to_string_lossy();
                 Some(PathBuf::from(format!("{}.d", stem)))
             } else { None }
@@ -465,11 +472,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 Some(output.display().to_string())
             } else { None }
         });
-        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only,
+        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, emit_asm, preprocess_only, force_includes, syntax_only,
             dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse })
     } else {
         let input = input.unwrap_or_else(|| PathBuf::from("-"));
-        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, preprocess_only, force_includes, syntax_only,
+        Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, emit_asm, preprocess_only, force_includes, syntax_only,
             dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse })
     }
 }
