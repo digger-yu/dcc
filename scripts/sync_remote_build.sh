@@ -13,10 +13,10 @@ rsync -avz --delete \
     "$LOCAL_DIR/" "$REMOTE:$REMOTE_DIR/"
 
 echo "Building on remote..."
-ssh "$REMOTE" "cd $REMOTE_DIR && cargo build --release 2>&1"
+ssh "$REMOTE" "source ~/.cargo/env && cd $REMOTE_DIR && cargo build --release 2>&1"
 
 echo "Running integration tests..."
-ssh "$REMOTE" "cd $REMOTE_DIR && cargo test --release 2>&1"
+ssh "$REMOTE" "source ~/.cargo/env && cd $REMOTE_DIR && cargo test --release 2>&1"
 
 echo "Testing devicetable-offsets.s (direct dcc, no prepare0)..."
 ssh "$REMOTE" bash -s <<'REMOTE_SCRIPT'

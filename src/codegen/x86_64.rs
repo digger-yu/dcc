@@ -11,7 +11,7 @@ use crate::codegen::elf::{ElfSym, ElfRela, ElfSection, R_X86_64_PC32, R_X86_64_P
     SHT_PROGBITS, SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR};
 use crate::codegen::elf;
 use crate::const_eval;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::ast::ArraySize;
 
 pub struct Codegen {
@@ -81,6 +81,7 @@ pub struct Codegen {
     pub debug_level: u8,
     pub emit_cfi: bool,
     asm_directives: Vec<String>,
+    global_asm_exports: HashSet<String>,
     pub source_name: String,
 }
 
@@ -141,7 +142,13 @@ impl Codegen {
                data_relocations: vec![], cleanup_vars: vec![],
                extra_rela_sections: vec![],
                emit_asm_text: false, debug_level: 0, emit_cfi: false,
-               asm_directives: vec![], source_name: String::new() }
+               asm_directives: vec![], global_asm_exports: HashSet::new(),
+               source_name: String::new() }
+    }
+
+    /// -mno-red-zone 时禁止使用红区，帧上额外保留 128 字节。
+    fn stack_reserve_bytes(&self) -> i32 {
+        if self.target.red_zone { 0 } else { 128 }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
@@ -625,7 +632,7 @@ impl Codegen {
         // 文件级 asm 先发射到 .text
         for decl in &prog.decls {
             if let Decl::GlobalAsm { asm_str, outputs, inputs, .. } = decl {
-                self.emit_inline_asm(asm_str, outputs, inputs);
+                self.emit_global_asm(asm_str, outputs, inputs);
             }
         }
 
@@ -708,6 +715,14 @@ impl Codegen {
         }
 
         // 函数定义符号 (包括嵌套函数)
+        for name in &self.global_asm_exports {
+            if let Some(&off) = self.labels.get(name) {
+                global_syms.push(ElfSym {
+                    name: name.clone(), section: 1, value: off, size: 0,
+                    bind: STB_GLOBAL, ty: STT_NOTYPE, visibility: STV_DEFAULT,
+                });
+            }
+        }
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_some() {
@@ -1157,7 +1172,8 @@ impl Codegen {
                     .sum();
                 let sc_slot = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
                 let va_slots = if f.is_variadic { 6 * 8 } else { 0 };
-                let raw = var_bytes + 16 + temp_slots * 8 + sc_slot + va_slots;
+                let raw = var_bytes + 16 + temp_slots * 8 + sc_slot + va_slots
+                    + self.stack_reserve_bytes();
                 self.frame_size = ((raw + 15) / 16) * 16; // 16 字节对齐
                 if self.frame_size > 0 {
                     self.emit(&[0x48, 0x81, 0xec]);
@@ -1192,7 +1208,7 @@ impl Codegen {
                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                     .map(|(_, ty)| ((ty.size() + 7) / 8) as i32 * 8)
                     .sum();
-                let raw = var_bytes + 16 + temp_slots * 8;
+                let raw = var_bytes + 16 + temp_slots * 8 + self.stack_reserve_bytes();
                 self.frame_size = ((raw + 15) / 16) * 16;
                 if self.frame_size > 0 {
                     self.emit(&[0x48, 0x81, 0xec]);
@@ -4029,8 +4045,12 @@ impl Codegen {
         self.emit(&val.to_le_bytes());
     }
 
-    /// SysV va_arg: 按 gp_offset/overflow_arg_area 读取 GP 参数。
+    /// SysV va_arg: 按 gp_offset/fp_offset 与 overflow_arg_area 读取参数。
     fn gen_va_arg(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
+        if matches!(arg_ty, Type::Float | Type::Double) && self.target.sse {
+            self.gen_va_arg_fp(ap_name, arg_ty, dst);
+            return;
+        }
         let ap_off = self.var_offset(ap_name);
         let step = ((arg_ty.size() + 7) / 8 * 8) as i32;
         let overflow = self.fresh_label();
@@ -4073,6 +4093,48 @@ impl Codegen {
         self.pop(0);
         self.label(&done);
         if dst != 0 { self.mov(dst, 0); }
+    }
+
+    /// SysV va_arg 浮点路径：fp_offset + reg_save_area XMM 槽。
+    fn gen_va_arg_fp(&mut self, ap_name: &str, arg_ty: &Type, _dst: u8) {
+        let ap_off = self.var_offset(ap_name);
+        let step = 16i32;
+        let overflow = self.fresh_label();
+        let done = self.fresh_label();
+        // eax = fp_offset (va_list + 4)
+        self.emit(&[0x41, 0x8B, 0x85]);
+        self.emit(&(ap_off + 4).to_le_bytes());
+        self.emit(&[0x83, 0xF8, 0xB0]); // cmp $176, %eax  (48 + 8*16)
+        self.jmp_rel32(&overflow, JumpKind::Jge);
+        // reg_save_area + fp_offset
+        self.emit(&[0x49, 0x8B, 0x8D]);
+        self.emit(&(ap_off + 16).to_le_bytes());
+        if matches!(arg_ty, Type::Float) {
+            self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x01]); // movss (%rcx,%rax), xmm0
+        } else {
+            self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x01]); // movsd (%rcx,%rax), xmm0
+        }
+        self.emit(&[0x41, 0x83, 0x85]);
+        self.emit(&(ap_off + 4).to_le_bytes());
+        self.emit(&step.to_le_bytes()[..1]);
+        self.jmp_rel32(&done, JumpKind::Jmp);
+        self.label(&overflow);
+        self.emit(&[0x49, 0x8B, 0x8D]);
+        self.emit(&(ap_off + 8).to_le_bytes());
+        if matches!(arg_ty, Type::Float) {
+            self.emit(&[0xF3, 0x0F, 0x10, 0x01]);
+        } else {
+            self.emit(&[0xF2, 0x0F, 0x10, 0x01]);
+        }
+        self.push(0);
+        self.emit(&[0x49, 0x8B, 0x8D]);
+        self.emit(&(ap_off + 8).to_le_bytes());
+        self.emit(&[0x48, 0x83, 0xC1]);
+        self.emit(&step.to_le_bytes()[..1]);
+        self.emit(&[0x49, 0x89, 0x8D]);
+        self.emit(&(ap_off + 8).to_le_bytes());
+        self.pop(0);
+        self.label(&done);
     }
 
     // 预扫描: 统计函数体中局部变量所需栈槽数 (数组按实际大小)
@@ -4923,6 +4985,40 @@ impl Codegen {
             idx += 1;
         }
         resolved
+    }
+
+    /// 发射文件级 asm（Decl::GlobalAsm）：-S 保留汇编器指令，-c 解析标签与 .globl。
+    fn emit_global_asm(&mut self, asm_str: &str, outputs: &[Expr], inputs: &[Expr]) {
+        let op_map = self.build_asm_operand_map(outputs, inputs);
+        let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
+            &asm_str[1..asm_str.len()-1]
+        } else { asm_str };
+        for line in s.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let resolved = self.resolve_asm_template(line, outputs, inputs, &op_map);
+            let trimmed = resolved.trim();
+            if self.emit_asm_text {
+                if trimmed.starts_with('.') || trimmed.ends_with(':') {
+                    self.asm_directives.push(trimmed.to_string());
+                    continue;
+                }
+            } else if trimmed.starts_with(".globl ") || trimmed.starts_with(".global ") {
+                if let Some(sym) = trimmed.split_whitespace().nth(1) {
+                    self.global_asm_exports.insert(sym.trim_end_matches(':').to_string());
+                }
+                continue;
+            } else if let Some(label) = trimmed.strip_suffix(':') {
+                let label = label.trim();
+                if !label.is_empty() && !label.starts_with('.') {
+                    self.label(label);
+                    continue;
+                }
+            } else if trimmed.starts_with('.') {
+                continue;
+            }
+            self.emit_asm_line(&resolved);
+        }
     }
 
     /// 发射内联汇编模板

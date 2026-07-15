@@ -76,3 +76,5 @@ targets only.
 - [x] `kernel/bounds.s` compiles with dcc (GNU case range)
 - [x] `-g` emits `.debug_*` / `.BTF` sections
 - [x] `-flto` emits `.llvm.lto` summary section
+- [x] `-MD` / `-O1` / sanitizer / GlobalAsm integration tests
+- [x] Host GCC include path for modpost headers

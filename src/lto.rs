@@ -88,3 +88,28 @@ pub fn parse_summary(data: &[u8]) -> Option<LtoUnit> {
     }
     Some(unit)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_and_parse_roundtrip() {
+        let unit = build_unit("foo.c", &[("bar", 64, true), ("baz", 0, false)]);
+        let data = serialize_summary(&unit);
+        let parsed = parse_summary(&data).expect("parse LTO summary");
+        assert_eq!(parsed.path, "foo.c");
+        assert!(parsed.functions["bar"].defined);
+        assert!(!parsed.functions["baz"].defined);
+    }
+
+    #[test]
+    fn merge_units_unions_functions() {
+        let a = build_unit("a.c", &[("f", 10, true)]);
+        let b = build_unit("b.c", &[("g", 20, true)]);
+        let merged = merge_units(vec![a, b]);
+        assert_eq!(merged.functions.len(), 2);
+        assert!(merged.functions.contains_key("f"));
+        assert!(merged.functions.contains_key("g"));
+    }
+}

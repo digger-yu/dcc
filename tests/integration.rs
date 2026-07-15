@@ -279,6 +279,128 @@ fn debug_sections_emitted_with_g_flag() {
 }
 
 #[test]
+fn o1_constant_folding_emits_immediate() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-o1-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-o1-{}.o", std::process::id()));
+    let source = "int main(void) { return 2 + 3; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O1", "-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        obj.windows(5).any(|w| w == [0xB8, 0x05, 0x00, 0x00, 0x00]),
+        "expected mov $5, %eax after constant fold"
+    );
+}
+
+#[test]
+fn md_dependency_file_lists_includes() {
+    let dir = std::env::temp_dir();
+    let hdr_name = format!("dcc-md-hdr-{}.h", std::process::id());
+    let hdr_path = dir.join(&hdr_name);
+    let source_path = dir.join(format!("dcc-md-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-md-{}.o", std::process::id()));
+    let dep_path = dir.join(format!("dcc-md-{}.d", std::process::id()));
+    fs::write(&hdr_path, "int hdr_var;\n").expect("write header");
+    fs::write(
+        &source_path,
+        format!("#include \"{hdr_name}\"\nint main(void) {{ return hdr_var; }}\n"),
+    )
+    .expect("write source");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-MD", "-MF"])
+        .arg(&dep_path)
+        .args(["-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let dep_text = fs::read_to_string(&dep_path).unwrap_or_default();
+    let _ = fs::remove_file(&hdr_path);
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&out_path);
+    let _ = fs::remove_file(&dep_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(dep_text.contains(&hdr_name), "dep file missing header: {dep_text}");
+}
+
+#[test]
+fn sanitizer_metadata_section_emitted() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-san-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-san-{}.o", std::process::id()));
+    let source = "int f(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=address", "-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        String::from_utf8_lossy(&obj).contains(".dcc.san_info"),
+        "missing sanitizer metadata section"
+    );
+}
+
+#[test]
+fn eh_frame_with_frame_pointer() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-fp-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-fp-{}.o", std::process::id()));
+    let source = "int f(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-fno-omit-frame-pointer", "-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let obj_str = String::from_utf8_lossy(&obj);
+    assert!(obj_str.contains(".eh_frame"), "missing .eh_frame");
+    assert!(obj_str.contains(".orc_unwind_ip"), "missing .orc_unwind_ip");
+}
+
+#[test]
+fn global_asm_exports_symbol() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-gasm-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-gasm-{}.o", std::process::id()));
+    let source = "asm(\".globl global_marker\\nglobal_marker:\\n\");\nint main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        String::from_utf8_lossy(&obj).contains("global_marker"),
+        "global asm symbol not exported"
+    );
+}
+
+#[test]
 fn flto_section_emitted() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-lto-{}.c", std::process::id()));

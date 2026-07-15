@@ -5,6 +5,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::process::Command;
+use std::sync::OnceLock;
 use crate::diagnostics::{Diagnostic, Span};
 use crate::cli::StdMode;
 
@@ -315,6 +317,53 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
 
     pp.process_text(&text, file);
     (pp.out, pp.diags, pp.deps)
+}
+
+/// 探测 GCC 内建头文件目录（`gcc -print-file-name=include` 及常见路径）。
+fn host_gcc_include_dirs() -> &'static [PathBuf] {
+    static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    DIRS.get_or_init(|| {
+        let mut dirs = Vec::new();
+        if let Ok(out) = Command::new("gcc").arg("-print-file-name=include").output() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() && p != "include" && Path::new(&p).is_dir() {
+                dirs.push(PathBuf::from(p));
+            }
+        }
+        for pattern in [
+            "/usr/lib/gcc/x86_64-linux-gnu/*/include",
+            "/usr/lib/gcc/aarch64-linux-gnu/*/include",
+        ] {
+            if let Ok(entries) = glob_gcc_include_paths(pattern) {
+                for p in entries {
+                    if p.is_dir() { dirs.push(p); }
+                }
+            }
+        }
+        dirs
+    })
+}
+
+fn glob_gcc_include_paths(pattern: &str) -> Result<Vec<PathBuf>, ()> {
+    let mut out = Vec::new();
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() != 2 {
+        return Err(());
+    }
+    let parent = Path::new(parts[0].trim_end_matches('/'));
+    let suffix = parts[1].trim_start_matches('/');
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let candidate = p.join(suffix);
+                if candidate.is_dir() {
+                    out.push(candidate);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 impl Preprocessor {
@@ -894,6 +943,11 @@ impl Preprocessor {
         ];
         for dir in &system_dirs {
             let p = Path::new(dir).join(name);
+            if p.exists() { return Some(p); }
+        }
+        // 5. GCC 内建 include（stdbool.h 等 host 工具依赖）
+        for dir in host_gcc_include_dirs() {
+            let p = dir.join(name);
             if p.exists() { return Some(p); }
         }
         None

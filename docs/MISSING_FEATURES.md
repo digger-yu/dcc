@@ -32,17 +32,21 @@
 
 ## 已实现但需扩展
 
+以下模块已有初版实现，本轮扩展后远程 `cargo test --release` 与
+`scripts/test_kernel_features.sh` 均通过：
+
 | 特性 | 说明 |
 |------|------|
 | SysV AMD64 调用 | `emit_sysv_call`：寄存器/栈/sret、AL=vector 计数 |
-| va_list | 24 字节 struct + `va_start`/`va_arg`/`va_copy` |
-| 内联 asm | 约束解析 + AT&T 编码器；文件级 `asm()` → `Decl::GlobalAsm` |
+| va_list | 24 字节 struct + GP/FP `va_start`/`va_arg`/`va_copy` |
+| 内联 asm | 约束解析 + AT&T 编码；文件级 `asm()` → `Decl::GlobalAsm`（-c 导出 `.globl`） |
 | `-MD` 依赖 | 预处理记录 include 图并写入 `.d` |
-| 优化 | `-O1+` 常量折叠（`src/opt.rs`） |
-| 机器选项 | `-mno-red-zone`、`-fno-omit-frame-pointer`、`-mno-sse` 接入 codegen |
-| 调试信息 | `src/debug.rs`：DWARF4 最小 CU + BTF 头 + eh_frame |
-| Sanitizer | `src/sanitizer.rs`：AST 入口桩 + 元数据节 |
-| LTO | `src/lto.rs`：TU 摘要序列化/合并 |
+| 优化 | `-O1+` AST 常量折叠（`src/opt.rs`） |
+| 机器选项 | `-mno-red-zone` 帧保留 128B、`-fno-omit-frame-pointer`、`-mno-sse` |
+| 调试信息 | `src/debug.rs`：DWARF4 最小 CU + BTF 头 + eh_frame + ORC |
+| Sanitizer | `src/sanitizer.rs`：AST 入口桩 + `.dcc.san_info` 节 |
+| LTO | `src/lto.rs`：TU 摘要序列化/合并 + 单元测试 |
+| Host include | GCC 内建 include 路径探测（`stdbool.h` 等 modpost 依赖） |
 
 ## 远程基线
 

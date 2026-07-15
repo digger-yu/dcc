@@ -13,6 +13,8 @@
 | Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行 |
 | Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ GNU case range + 逗号数组 |
 | `-g` DWARF/BTF、`-flto`、sanitizer、`.S` 驱动 | ✅ 初版 |
+| `-MD` 依赖、`-O1` 常量折叠、GlobalAsm、`-mno-red-zone` | ✅ integration 覆盖 |
+| Host GCC include（modpost `stdbool.h`） | ✅ `gcc -print-file-name=include` 探测 |
 | 全树 `make` / vmlinux / bzImage / QEMU | ⚠️ 待完整链接与 QEMU 环境 |
 
 ### 远程同步构建
