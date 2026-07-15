@@ -47,12 +47,19 @@ if "$DCC" -r examples/test_p2_elf_attrs.c -o "$attrs_object"; then
 
     if [[ "$sections" == *".init.text"* &&
           "$sections" == *".data.custom"* &&
-          "$symbols" == *"WEAK"*"weak_function"* &&
-          "$symbols" == *"HIDDEN"*"hidden_bss"* &&
           "$relocs" == *".rela.init.text"* &&
           "$relocs" == *".rela.data.custom"* ]]; then
-        echo "PASS elf_metadata"
-        pass=$((pass + 1))
+        if echo "$symbols" | grep -q "weak_function" &&
+           echo "$symbols" | grep "weak_function" | grep -q "WEAK" &&
+           echo "$symbols" | grep -q "hidden_bss" &&
+           echo "$symbols" | grep "hidden_bss" | grep -qE "HIDDEN|Vis.*HIDDEN"; then
+            echo "PASS elf_metadata"
+            pass=$((pass + 1))
+        else
+            echo "FAIL elf_metadata"
+            fail=$((fail + 1))
+            readelf -SWsWr "$attrs_object"
+        fi
     else
         echo "FAIL elf_metadata"
         fail=$((fail + 1))

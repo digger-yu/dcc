@@ -12,7 +12,7 @@ __int128 global_wide;
 int test_register_asm(void) {
     register int x __asm__("r10");
     x = 77;
-    return x;  // 应从 r10 返回
+    return x == 77 ? 0 : 1;
 }
 
 // === P1-4: __int128 运算 ===

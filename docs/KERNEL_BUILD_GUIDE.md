@@ -1,6 +1,16 @@
 # DCC 手工编译 Linux 内核指南
 
-> 本文档描述如何在 Linux x86_64 环境上，使用 DCC 编译器手工编译 Linux 6.1 内核。
+> 目标版本：**Linux 6.6 / x86_64**。远程验收目录：`~/dcc-agent-linux66`（独立同步，不覆盖旧仓库）。
+
+## 当前进度（2026-07-15）
+
+| 阶段 | 状态 |
+|------|------|
+| DCC release 构建 + `cargo test` | ✅ 远程通过 |
+| `scripts/test_kernel_features.sh` | ✅ 7/7 |
+| Kbuild `prepare0` → mod/empty.c | ✅ |
+| Kbuild `devicetable-offsets.c` | ❌ 解析/宏 TU |
+| 全树 vmlinux / bzImage / QEMU | ❌ 待依赖与后续修复 |
 
 ## 1. 环境要求
 
