@@ -137,6 +137,60 @@ fn eval_unary(op: crate::ast::UnOp, v: i128) -> Option<i128> {
     })
 }
 
-fn prune_dead_stores(_module: &mut Module) {
-    // O2+: 占位 pass，后续接 SSA DCE。
+fn prune_dead_stores(module: &mut Module) {
+    let prog = module.source_mut();
+    for decl in &mut prog.decls {
+        if let Decl::Func(f) = decl {
+            if let Some(body) = &mut f.body {
+                prune_block(&mut body.items);
+            }
+        }
+    }
+}
+
+fn prune_block(items: &mut Vec<BlockItem>) {
+    items.retain(|item| !matches!(item, BlockItem::Stmt(Stmt::Expr { e, .. }) if is_side_effect_free(e)));
+    for item in items.iter_mut() {
+        match item {
+            BlockItem::Stmt(s) => prune_stmt(s),
+            BlockItem::Decl(Decl::Func(f)) => {
+                if let Some(body) = &mut f.body {
+                    prune_block(&mut body.items);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn prune_stmt(s: &mut Stmt) {
+    match s {
+        Stmt::If { then_, else_, .. } => {
+            prune_stmt(then_);
+            if let Some(e) = else_ {
+                prune_stmt(e);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => prune_stmt(body),
+        Stmt::For { init, body, .. } => {
+            if let Some(i) = init {
+                prune_stmt(i);
+            }
+            prune_stmt(body);
+        }
+        Stmt::Block { b, .. } => prune_block(&mut b.items),
+        _ => {}
+    }
+}
+
+fn is_side_effect_free(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Int { .. }
+            | Expr::SizeofTy { .. }
+            | Expr::SizeofExpr { .. }
+            | Expr::AlignofTy { .. }
+            | Expr::AlignofExpr { .. }
+            | Expr::Offsetof { .. }
+    )
 }

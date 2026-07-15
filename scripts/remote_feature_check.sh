@@ -79,5 +79,28 @@ EOF
 check "S_lock_cmpxchg" grep -q 'lock cmpxchg' "$TMP/lock.s"
 check "S_no_lock_byte" bash -c "! grep -q '.byte 0xf0' '$TMP/lock.s'"
 
+cat > "$TMP/sys.h" <<'EOF'
+#define SYS_MARKER 1
+EOF
+cat > "$TMP/mmd.c" <<'EOF'
+#include "sys.h"
+int main(void) { return SYS_MARKER; }
+EOF
+"$DCC" -MMD -MF "$TMP/mmd.d" -isystem "$TMP" -c -o "$TMP/mmd.o" "$TMP/mmd.c"
+check "MMD_skips_system" bash -c "! grep -q 'sys.h' '$TMP/mmd.d'"
+check "MMD_keeps_source" grep -q 'mmd.c' "$TMP/mmd.d"
+
+"$DCC" -MD -MP -MF "$TMP/phony.d" -c -o "$TMP/main.o" "$TMP/main.c"
+check "MP_phony" bash -c "grep -q '^$TMP/hdr.h:' '$TMP/phony.d'"
+
+"$DCC" -flto -c -o "$TMP/lto2.o" "$TMP/san.c"
+check "LTO_size_hint" bash -c "strings '$TMP/lto2.o' | grep -q ':.*:1'"
+
+"$DCC" -mno-red-zone -c -o "$TMP/nrz.o" "$TMP/san.c"
+check "mno_red_zone" test -f "$TMP/nrz.o"
+
+"$DCC" -c -o "$TMP/p4.o" examples/test_p4_va_list.c
+check "va_list_gp" test -f "$TMP/p4.o"
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

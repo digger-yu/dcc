@@ -13,7 +13,6 @@ use crate::codegen;
 use crate::ir;
 use crate::sanitizer;
 use crate::lto;
-
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // .S / -x assembler-with-cpp: 预处理 + 系统汇编器
     if matches!(cfg.input_lang, InputLang::AssemblerWithCpp)
@@ -79,6 +78,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.gen_dep {
         let dep_path = cfg.dep_file.as_ref().unwrap_or_else(|| &cfg.output);
         let target = cfg.dep_target.as_deref().unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+        let deps: Vec<String> = if cfg.dep_mmd_only {
+            filter_user_deps(include_deps, &cfg.system_paths)
+        } else {
+            include_deps
+        };
         let mut dep_out: Box<dyn Write> = if dep_path.to_str() == Some("-") {
             Box::new(io::stdout())
         } else {
@@ -94,10 +98,17 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         writeln!(dep_out, "{}: {}", target, cfg.input.display())
             .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
                 crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
-        for dep in include_deps {
+        for dep in &deps {
             writeln!(dep_out, " {}", dep)
                 .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
                     crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
+        }
+        if cfg.dep_phony {
+            for dep in &deps {
+                writeln!(dep_out, "\n{}:", dep)
+                    .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
+                        crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
+            }
         }
     }
 
@@ -128,18 +139,10 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
 
-    let func_summaries: Vec<(&str, u64, bool)> = module.functions.iter()
-        .map(|f| (f.name.as_str(), 0u64, true))
-        .collect();
-    let lto_unit = if cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args) {
-        Some(lto::build_unit(&file_name, &func_summaries))
-    } else {
-        None
-    };
-
+    let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
     let bytes = codegen::emit(
         &module, &target, cfg.relocatable, cfg.emit_asm, &file_name,
-        cfg.debug_level, cfg.sanitizers, lto_unit.as_ref(),
+        cfg.debug_level, cfg.sanitizers, lto_enabled,
     );
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
@@ -161,6 +164,18 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
     eprintln!("dcc: wrote {}", out.display());
     Ok(())
+}
+
+/// 过滤 -MMD 模式下的系统头文件依赖。
+fn filter_user_deps(deps: Vec<String>, system_paths: &[std::path::PathBuf]) -> Vec<String> {
+    deps.into_iter()
+        .filter(|dep| {
+            let path = std::path::Path::new(dep);
+            !system_paths.iter().any(|sys| path.starts_with(sys))
+                && !dep.starts_with("/usr/include")
+                && !dep.starts_with("/usr/lib/gcc")
+        })
+        .collect()
 }
 
 /// 独立汇编驱动: 预处理 .S 后调用系统 `as`。

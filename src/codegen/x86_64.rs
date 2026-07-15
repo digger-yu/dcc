@@ -18,7 +18,7 @@ pub struct Codegen {
     pub code: Vec<u8>,
     pub entry: u64,
     pub target: Target,
-    labels: HashMap<String, u64>,
+    pub labels: HashMap<String, u64>,
     pending: Vec<PendingJump>,
     next_label: u32,
     var_map: HashMap<String, (i32, Type)>,
@@ -51,7 +51,7 @@ pub struct Codegen {
     pub bss_align: u64,
     pub extra_sections: Vec<elf::ElfSection>, // 自定义节 (section 属性)
     custom_sec_indices: HashMap<String, usize>, // section name → index in extra_sections
-    func_sizes: HashMap<String, u64>, // 函数名 → 代码大小 (用于符号 size)
+    pub func_sizes: HashMap<String, u64>, // 函数名 → 代码大小 (用于符号 size)
     variadic_funcs: HashMap<String, bool>, // 函数名 → 是否可变参数
     variadic_named_params: i32, // 当前可变参数函数的命名参数数量
     variadic_named_gp: i32,
@@ -59,6 +59,7 @@ pub struct Codegen {
     variadic_overflow_offset: i32,
     variadic_reg_save_offset: i32,
     current_sret_offset: Option<i32>,
+    sret_depth: i32,
     // 嵌套函数静态链
     nested_funcs: HashMap<String, Vec<(String, i32)>>, // 嵌套函数名 → upvars (name, parent_offset)
     current_func_is_nested: bool,  // 当前编译的函数是否是嵌套函数
@@ -143,6 +144,7 @@ impl Codegen {
                variadic_overflow_offset: 16,
                variadic_reg_save_offset: 0,
                current_sret_offset: None,
+               sret_depth: 0,
                nested_funcs: HashMap::new(),
                current_func_is_nested: false,
                static_chain_offset: 0,
@@ -165,6 +167,42 @@ impl Codegen {
         if self.target.red_zone { 0 } else { 128 }
     }
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
+    fn needs_memory_return(ty: &Type) -> bool {
+        Self::abi_classes(ty) == vec![AbiClass::Memory]
+    }
+
+    fn alloc_sret_slot(&mut self, size: usize) -> i32 {
+        self.sret_depth += 1;
+        -8 - (self.expr_depth as i32 * 8) - (self.sret_depth * ((size as i32 + 15) & !15))
+    }
+
+    fn store_xmm128_stack(&mut self, xmm: u8, off: i32) {
+        let mut prefix = vec![0x41u8];
+        if xmm >= 8 {
+            prefix.push(0x44);
+        }
+        self.emit(&prefix);
+        self.emit(&[0x0F, 0x11]);
+        if off.abs() < 128 {
+            self.emit(&[0x45 | ((xmm & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((xmm & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
+    fn mov_xmm(&mut self, dst: u8, src: u8) {
+        if dst == src {
+            return;
+        }
+        let mut prefix = vec![0x41u8];
+        if dst >= 8 || src >= 8 {
+            prefix.push(0x44 | if dst >= 8 { 0x01 } else { 0 } | if src >= 8 { 0x04 } else { 0 });
+        }
+        self.emit(&prefix);
+        self.emit(&[0x0F, 0x28, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
+    }
+
     pub fn pos(&self) -> u64 { self.code.len() as u64 }
     pub fn label(&mut self, name: &str) { self.labels.insert(name.to_string(), self.pos()); }
     pub fn fresh_label(&mut self) -> String { let n = self.next_label; self.next_label += 1; format!(".L{}", n) }
@@ -648,8 +686,8 @@ impl Codegen {
 
         // 文件级 asm 先发射到 .text
         for decl in &prog.decls {
-            if let Decl::GlobalAsm { asm_str, outputs, inputs, .. } = decl {
-                self.emit_global_asm(asm_str, outputs, inputs);
+            if let Decl::GlobalAsm { asm_str, outputs, output_names, inputs, input_names, .. } = decl {
+                self.emit_global_asm(asm_str, outputs, output_names, inputs, input_names);
             }
         }
 
@@ -1135,6 +1173,7 @@ impl Codegen {
         self.vla_offsets.clear();
         self.reg_bindings.clear();
         self.cleanup_vars.clear();
+        self.sret_depth = 0;
         self.vla_total_size = 0;
         // 设置嵌套函数状态
         self.current_func_is_nested = f.is_nested;
@@ -1228,7 +1267,11 @@ impl Codegen {
                     .map(|(_, ty)| ((ty.size() + 7) / 8) as i32 * 8)
                     .sum();
                 let sc_slot = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
-                let va_slots = if f.is_variadic { 6 * 8 } else { 0 };
+                let va_slots = if f.is_variadic {
+                    if self.target.sse { 48 + 128 } else { 48 }
+                } else {
+                    0
+                };
                 let raw = var_bytes + 16 + temp_slots * 8 + sc_slot + va_slots
                     + self.stack_reserve_bytes();
                 self.frame_size = ((raw + 15) / 16) * 16; // 16 字节对齐
@@ -1241,6 +1284,14 @@ impl Codegen {
                 if f.is_variadic {
                     for (i, reg) in arg_regs.iter().enumerate() {
                         self.store_stack(*reg, self.variadic_reg_save_offset + i as i32 * 8);
+                    }
+                    if self.target.sse {
+                        for i in 0..8u8 {
+                            self.store_xmm128_stack(
+                                i,
+                                self.variadic_reg_save_offset + 48 + i as i32 * 16,
+                            );
+                        }
                     }
                 }
                 // 嵌套函数: 保存静态链 (r10)
@@ -1725,7 +1776,7 @@ impl Codegen {
                 self.gen_expr(expr, 0); // rax = 目标地址
                 self.emit(&[0xFF, 0xE0]); // jmp rax
             }
-            Stmt::AsmGoto { asm_str, outputs, inputs, clobbers, goto_labels, .. } => {
+            Stmt::AsmGoto { asm_str, outputs, output_names, inputs, input_names, clobbers, goto_labels, .. } => {
                 // 将 GCC 的 %lN / %l[name] 占位符解析为 C 标签名。
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
@@ -1736,7 +1787,7 @@ impl Codegen {
                     resolved_asm = resolved_asm.replace(
                         &format!("%l[{}]", label.name), &label.name);
                 }
-                self.emit_inline_asm(&resolved_asm, outputs, inputs);
+                self.emit_inline_asm(&resolved_asm, outputs, output_names, inputs, input_names);
                 let _ = clobbers;
             }
         }
@@ -2160,7 +2211,12 @@ impl Codegen {
                     UnOp::Plus => {}
                 }
             }
-            Expr::Call { callee, args, .. } => {
+            Expr::Call { callee, args, ty, .. } => {
+                let sret_off = if Self::needs_memory_return(ty) {
+                    Some(self.alloc_sret_slot(ty.size()))
+                } else {
+                    None
+                };
                 // 检查是否为直接调用 (callee 是 Ident)
                 if let Expr::Ident { name, .. } = callee.as_ref() {
                     // __atomic_* 内置函数特殊处理 (生成 lock 前缀指令)
@@ -2169,12 +2225,24 @@ impl Codegen {
                     } else if self.gen_builtin(&name.name, args, dst) {
                         // 已成功处理 __builtin_* 函数
                     } else {
-                        self.emit_sysv_call(Some(&name.name), None, args, None);
-                        if dst != 0 { self.mov(dst, 0); }
+                        self.emit_sysv_call(Some(&name.name), None, args, sret_off);
+                        if sret_off.is_some() {
+                            if dst != 0 {
+                                self.emit_lea_r13(dst, sret_off.unwrap());
+                            }
+                        } else if dst != 0 {
+                            self.mov(dst, 0);
+                        }
                     }
                 } else {
-                    self.emit_sysv_call(None, Some(callee), args, None);
-                    if dst != 0 { self.mov(dst, 0); }
+                    self.emit_sysv_call(None, Some(callee), args, sret_off);
+                    if sret_off.is_some() {
+                        if dst != 0 {
+                            self.emit_lea_r13(dst, sret_off.unwrap());
+                        }
+                    } else if dst != 0 {
+                        self.mov(dst, 0);
+                    }
                 }
             }
             Expr::SizeofTy { ty, .. } => self.mov_imm(dst, ty.size() as i128),
@@ -2190,8 +2258,8 @@ impl Codegen {
                 self.gen_expr(l, 0);
                 self.gen_expr(r, dst);
             }
-            Expr::AsmExpr { asm_str, outputs, inputs, .. } => {
-                self.emit_inline_asm(asm_str, outputs, inputs);
+            Expr::AsmExpr { asm_str, outputs, output_names, inputs, input_names, .. } => {
+                self.emit_inline_asm(asm_str, outputs, output_names, inputs, input_names);
                 if dst != 0 { self.mov(dst, 0); }
             }
             Expr::LabelAddr { label, .. } => {
@@ -4154,7 +4222,7 @@ impl Codegen {
     }
 
     /// SysV va_arg 浮点路径：fp_offset + reg_save_area XMM 槽。
-    fn gen_va_arg_fp(&mut self, ap_name: &str, arg_ty: &Type, _dst: u8) {
+    fn gen_va_arg_fp(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
         let ap_off = self.var_offset(ap_name);
         let step = 16i32;
         let overflow = self.fresh_label();
@@ -4193,6 +4261,9 @@ impl Codegen {
         self.emit(&(ap_off + 8).to_le_bytes());
         self.pop(0);
         self.label(&done);
+        if dst != 0 {
+            self.mov_xmm(dst, 0);
+        }
     }
 
     // 预扫描: 统计函数体中局部变量所需栈槽数 (数组按实际大小)
@@ -4965,27 +5036,55 @@ impl Codegen {
 
     // ===== Inline Asm Mini-Assembler (AT&T syntax) =====
 
-    /// 构建 asm 操作数映射: %N → 寄存器名
-    fn build_asm_operand_map(&mut self, outputs: &[Expr], inputs: &[Expr]) -> HashMap<String, String> {
+    /// 构建 asm 操作数映射: %N / %[name] → 寄存器名
+    fn build_asm_operand_map(
+        &mut self,
+        outputs: &[Expr],
+        output_names: &[Option<String>],
+        inputs: &[Expr],
+        input_names: &[Option<String>],
+    ) -> HashMap<String, String> {
         let mut map = HashMap::new();
-        // SysV 调用约定可用寄存器 (caller-saved 优先)
         let alloc_regs = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
         let mut idx = 0usize;
-        // 输出操作数: 分配到具体寄存器
-        for _op in outputs.iter() {
-            if idx < alloc_regs.len() {
-                map.insert(format!("%{}", idx), alloc_regs[idx].to_string());
-                idx += 1;
+        for op in outputs.iter().chain(inputs.iter()) {
+            if idx >= alloc_regs.len() {
+                break;
+            }
+            self.prepare_asm_binding(op, idx as u8);
+            map.insert(format!("%{}", idx), alloc_regs[idx].to_string());
+            idx += 1;
+        }
+        for (i, name) in output_names.iter().enumerate() {
+            if let Some(n) = name {
+                if let Some(reg) = map.get(&format!("%{}", i)) {
+                    map.insert(format!("%[{n}]"), reg.clone());
+                }
             }
         }
-        // 输入操作数
-        for _op in inputs.iter() {
-            if idx < alloc_regs.len() {
-                map.insert(format!("%{}", idx), alloc_regs[idx].to_string());
-                idx += 1;
+        for (i, name) in input_names.iter().enumerate() {
+            if let Some(n) = name {
+                let key = format!("%{}", outputs.len() + i);
+                if let Some(reg) = map.get(&key) {
+                    map.insert(format!("%[{n}]"), reg.clone());
+                }
             }
         }
         map
+    }
+
+    /// 将 asm 约束表达式加载到指定寄存器（Ident 取地址，其余求值）。
+    fn prepare_asm_binding(&mut self, expr: &Expr, reg: u8) {
+        if let Expr::Ident { name, .. } = expr {
+            if self.globals.contains_key(&name.name) {
+                self.emit_global_addr(reg, &name.name);
+            } else {
+                let off = self.var_offset(&name.name);
+                self.emit_lea_r13(reg, off);
+            }
+        } else {
+            self.gen_expr(expr, reg);
+        }
     }
 
     /// 构建 asm 输出文件 (-S 模式)：按节分组反汇编全部函数机器码。
@@ -5173,7 +5272,9 @@ impl Codegen {
         &self,
         line: &str,
         outputs: &[Expr],
+        output_names: &[Option<String>],
         inputs: &[Expr],
+        input_names: &[Option<String>],
         op_map: &HashMap<String, String>,
     ) -> String {
         let mut resolved = line.to_string();
@@ -5187,19 +5288,46 @@ impl Codegen {
             }
             idx += 1;
         }
+        for (i, name) in output_names.iter().chain(input_names.iter()).enumerate() {
+            if let Some(n) = name {
+                let key = format!("%[{n}]");
+                let num_key = if i < output_names.len() {
+                    format!("%{}", i)
+                } else {
+                    format!("%{}", i)
+                };
+                if let Some(reg) = op_map.get(&num_key).or_else(|| op_map.get(&key)) {
+                    resolved = resolved.replace(&key, reg);
+                }
+            }
+        }
+        for (key, reg) in op_map {
+            if key.starts_with("%[") {
+                resolved = resolved.replace(key, reg);
+            }
+        }
         resolved
     }
 
     /// 发射文件级 asm（Decl::GlobalAsm）：-S 保留汇编器指令，-c 解析标签与 .globl。
-    fn emit_global_asm(&mut self, asm_str: &str, outputs: &[Expr], inputs: &[Expr]) {
-        let op_map = self.build_asm_operand_map(outputs, inputs);
+    fn emit_global_asm(
+        &mut self,
+        asm_str: &str,
+        outputs: &[Expr],
+        output_names: &[Option<String>],
+        inputs: &[Expr],
+        input_names: &[Option<String>],
+    ) {
+        let op_map = self.build_asm_operand_map(outputs, output_names, inputs, input_names);
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
         } else { asm_str };
         for line in s.split(|c| c == '\n' || c == ';') {
             let line = line.trim();
             if line.is_empty() { continue; }
-            let resolved = self.resolve_asm_template(line, outputs, inputs, &op_map);
+            let resolved = self.resolve_asm_template(
+                line, outputs, output_names, inputs, input_names, &op_map,
+            );
             let trimmed = resolved.trim();
             if self.emit_asm_text {
                 if trimmed.starts_with('.') || trimmed.ends_with(':') {
@@ -5226,8 +5354,15 @@ impl Codegen {
     }
 
     /// 发射内联汇编模板
-    fn emit_inline_asm(&mut self, asm_str: &str, outputs: &[Expr], inputs: &[Expr]) {
-        let op_map = self.build_asm_operand_map(outputs, inputs);
+    fn emit_inline_asm(
+        &mut self,
+        asm_str: &str,
+        outputs: &[Expr],
+        output_names: &[Option<String>],
+        inputs: &[Expr],
+        input_names: &[Option<String>],
+    ) {
+        let op_map = self.build_asm_operand_map(outputs, output_names, inputs, input_names);
         // 清理字符串: 去除引号包裹
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
@@ -5236,7 +5371,9 @@ impl Codegen {
         for line in s.split(|c| c == '\n' || c == ';') {
             let line = line.trim();
             if line.is_empty() { continue; }
-            let resolved = self.resolve_asm_template(line, outputs, inputs, &op_map);
+            let resolved = self.resolve_asm_template(
+                line, outputs, output_names, inputs, input_names, &op_map,
+            );
             // -S 模式: 保留汇编器指令 (.ascii 等) 供 Kbuild filechk 解析
             if self.emit_asm_text {
                 let trimmed = resolved.trim();

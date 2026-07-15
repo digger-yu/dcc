@@ -20,7 +20,8 @@
 | KASAN/UBSAN/KCSAN/KCOV 插桩（初版） | `-fsanitize=*` 函数入口桩 + `.dcc.san_info` 节 |
 | 跨 TU LTO（初版） | `-flto` 生成 `.llvm.lto` 摘要节 |
 | `-S` 汇编输出 | 完整 C 函数机器码反汇编；lock/SSE 前缀指令；自定义节按 `.section` 分组（与 `.o` 布局一致） |
-| `-S` 回归 | `integration.rs` + `scripts/remote_feature_check.sh`（custom section / lock cmpxchg） |
+| `-S` 回归 | `integration.rs` + `scripts/remote_feature_check.sh`（14 项特性探测） |
+| 模块扩展回归 | SysV sret、va_list XMM、asm `%[name]`、`-MMD`/`-MP`、LTO size、`-mno-red-zone` |
 | GNU case range / 逗号数组声明符 | `bounds.c` 头文件依赖、`integration.rs` 回归 |
 
 ## 阻塞级（Linux 6.6 全树）
@@ -41,28 +42,25 @@
 | `devicetable-offsets.c` 缺 `generated/autoconf.h` | 内核树未跑 `syncconfig` | `sync_remote_build.sh` 自动 `make include/generated/autoconf.h` |
 | `file2alias.c` 编译失败 | modpost 源码 parser 缺口 | 跟踪中，勿全局设 `HOSTCC=dcc` |
 
-## 已实现但需扩展
-
-以下模块已有初版实现，本轮扩展后远程 `cargo test --release` 与
-`scripts/test_kernel_features.sh` 均通过：
+## 已实现模块（2026-07-15 扩展）
 
 | 特性 | 说明 |
 |------|------|
-| SysV AMD64 调用 | `emit_sysv_call`：寄存器/栈/sret、AL=vector 计数 |
-| va_list | 24 字节 struct + GP/FP `va_start`/`va_arg`/`va_copy` |
-| 内联 asm | 约束解析 + AT&T 编码；文件级 `asm()` → `Decl::GlobalAsm`（-c 导出 `.globl`） |
-| `-MD` 依赖 | 预处理记录 include 图并写入 `.d` |
-| 优化 | `-O1+` AST 常量折叠（`src/opt.rs`） |
-| 机器选项 | `-mno-red-zone` 帧保留 128B、`-fno-omit-frame-pointer`、`-mno-sse` |
-| 调试信息 | `src/debug.rs`：DWARF4 最小 CU + BTF 头 + eh_frame + ORC |
-| Sanitizer | `src/sanitizer.rs`：AST 入口桩 + `.dcc.san_info` 节 |
-| LTO | `src/lto.rs`：TU 摘要序列化/合并 + 单元测试 |
-| Host include | GCC 内建 include 路径探测（`stdbool.h` 等 modpost 依赖） |
+| SysV AMD64 调用 | `emit_sysv_call`：寄存器/栈/XMM、Memory 类 sret、AL=vector 计数 |
+| va_list | 24B struct；GP+XMM reg_save_area（176B）；`va_start`/`va_arg`/`va_copy` |
+| 内联 asm | AT&T 编码；`%[name]` 命名操作数；Ident LEA；GlobalAsm |
+| `-MD`/`-MMD`/`-MP` | include 图 → `.d`；`-MMD` 过滤系统头；`-MP` phony 规则 |
+| 优化 | `-O1+` 常量折叠；`-O2+` 纯表达式语句 DCE |
+| 机器选项 | `-mno-red-zone` 128B 保留；`-fno-omit-frame-pointer`；`-mno-sse` |
+| 调试信息 | DWARF4 真实 `low_pc`；BTF 头；eh_frame/ORC 占位 |
+| Sanitizer | TU 级一次 init 桩 + `.dcc.san_info` |
+| LTO | codegen 后 `.llvm.lto` 含真实 `func_sizes` |
+| Host include | GCC 内建 include 路径探测 |
 
 ## 远程基线
 
 - 工作区：`~/dcc-agent-linux66`（不覆盖旧 `~/dcc`）
 - 同步构建：`scripts/sync_remote_build.sh`（rsync + `cargo test` + feature check + devicetable/bounds）
-- 快速验收：`scripts/remote_feature_check.sh`（O1/MD/sanitizer/LTO/GlobalAsm/`-S`）
+- 快速验收：`scripts/remote_feature_check.sh`（14 项：O1/MD/MMD/MP/san/LTO/asm/`-S`/va_list 等）
 - 内核树：`~/linux-6.6`，需已有 `.config`；首次缺 `autoconf.h` 时脚本会 `make olddefconfig` + 生成头文件
 - QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` + bzImage）

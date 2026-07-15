@@ -19,7 +19,9 @@ pub enum Decl {
     UnionDef(StructDef),
     EnumDef(EnumDef),
     Typedef { name: Ident, ty: Type, span: Span },
-    GlobalAsm { asm_str: String, outputs: Vec<Expr>, inputs: Vec<Expr>, clobbers: Vec<String>, span: Span },
+    GlobalAsm { asm_str: String, outputs: Vec<Expr>, output_names: Vec<Option<String>>,
+              inputs: Vec<Expr>, input_names: Vec<Option<String>>,
+              clobbers: Vec<String>, span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +87,8 @@ pub enum Stmt {
     GotoIndirect { expr: Box<Expr>, span: Span },  // goto *expr
     Label   { name: Ident, stmt: Box<Stmt>, span: Span },
     Switch  { expr: Expr, cases: Vec<Case>, span: Span },
-    AsmGoto { asm_str: String, outputs: Vec<Expr>, inputs: Vec<Expr>,
+    AsmGoto { asm_str: String, outputs: Vec<Expr>, output_names: Vec<Option<String>>,
+              inputs: Vec<Expr>, input_names: Vec<Option<String>>,
               clobbers: Vec<String>, goto_labels: Vec<Ident>, span: Span },
 }
 
@@ -133,7 +136,9 @@ pub enum Expr {
     /// 逗号运算符: (lhs, rhs) → 求值 lhs 丢弃, 返回 rhs
     Comma      { l: Box<Expr>, r: Box<Expr>, span: Span, ty: Type },
     /// 内联汇编 __asm__: 字符串列表, 结果类型
-    AsmExpr    { asm_str: String, outputs: Vec<Expr>, inputs: Vec<Expr>, clobbers: Vec<String>, span: Span, ty: Type },
+    AsmExpr    { asm_str: String, outputs: Vec<Expr>, output_names: Vec<Option<String>>,
+                 inputs: Vec<Expr>, input_names: Vec<Option<String>>,
+                 clobbers: Vec<String>, span: Span, ty: Type },
     /// &&label: label 地址 (GNU 扩展)
     LabelAddr  { label: Ident, span: Span, ty: Type },
     /// __builtin_va_arg(ap, type): 可变参数读取

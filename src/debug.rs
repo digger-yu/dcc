@@ -41,14 +41,13 @@ pub fn build_dwarf(source: &str, functions: &[(&str, u64)]) -> DebugSections {
     info.extend_from_slice(&src_off.to_le_bytes());
     info.extend_from_slice(&cu_name.to_le_bytes());
     info.extend_from_slice(&1u32.to_le_bytes()); // line base
-    for (name, size) in functions {
+    for (name, pc) in functions {
         let name_off = add_str(name);
         info.push(2); // abbrev #2 subprogram
         info.extend_from_slice(&name_off.to_le_bytes());
         info.push(0x01); // DW_AT_low_pc
-        info.extend_from_slice(&0u64.to_le_bytes());
+        info.extend_from_slice(&(*pc).to_le_bytes());
         info.push(0); // children none
-        let _ = size;
     }
     info.push(0); // end CU children
     let cu_len = (info.len() - cu_start - 4) as u32;

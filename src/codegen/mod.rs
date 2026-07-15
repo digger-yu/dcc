@@ -7,7 +7,7 @@ pub mod x86_64;
 
 use crate::debug;
 use crate::ir::Module;
-use crate::lto::LtoUnit;
+use crate::lto;
 use crate::sanitizer::{SanitizerFlags, sanitizer_metadata};
 use crate::target::Target;
 
@@ -19,7 +19,7 @@ pub fn emit(
     source_name: &str,
     debug_level: u8,
     sanitizers: SanitizerFlags,
-    lto_unit: Option<&LtoUnit>,
+    lto_enabled: bool,
 ) -> Vec<u8> {
     match target.arch {
         crate::cli::Arch::X86_64 => {
@@ -34,8 +34,10 @@ pub fn emit(
                 return cg.build_asm_output(module.source()).into_bytes();
             }
             if debug_level > 0 && relocatable {
-                let funcs: Vec<(&str, u64)> = module.functions.iter()
-                    .map(|f| (f.name.as_str(), 0))
+                let funcs: Vec<(&str, u64)> = module
+                    .functions
+                    .iter()
+                    .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
                     .collect();
                 let dbg = debug::build_dwarf(source_name, &funcs);
                 cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
@@ -72,10 +74,16 @@ pub fn emit(
                     align: 1,
                 });
             }
-            if let Some(unit) = lto_unit {
+            if lto_enabled {
+                let summaries: Vec<(&str, u64, bool)> = cg
+                    .func_sizes
+                    .iter()
+                    .map(|(name, size)| (name.as_str(), *size as u64, true))
+                    .collect();
+                let unit = lto::build_unit(source_name, &summaries);
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".llvm.lto".to_string(),
-                    data: crate::lto::serialize_summary(unit),
+                    data: lto::serialize_summary(&unit),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,
@@ -83,10 +91,17 @@ pub fn emit(
             }
             if relocatable {
                 elf::build_elf_rel_x86_64(
-                    &cg.code, &cg.rodata, &cg.data_section,
-                    cg.bss_size, cg.text_align, cg.data_align, cg.bss_align,
-                    &cg.symbols, &cg.relocations,
-                    &cg.extra_sections, &cg.data_relocations,
+                    &cg.code,
+                    &cg.rodata,
+                    &cg.data_section,
+                    cg.bss_size,
+                    cg.text_align,
+                    cg.data_align,
+                    cg.bss_align,
+                    &cg.symbols,
+                    &cg.relocations,
+                    &cg.extra_sections,
+                    &cg.data_relocations,
                     &cg.extra_rela_sections,
                 )
             } else {

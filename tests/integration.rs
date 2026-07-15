@@ -306,6 +306,56 @@ int main(void) {\n\
 }
 
 #[test]
+fn mmd_excludes_isystem_headers_from_depfile() {
+    let dir = std::env::temp_dir();
+    let inc = dir.join(format!("dcc-mmd-inc-{}", std::process::id()));
+    let src = dir.join(format!("dcc-mmd-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-mmd-{}.o", std::process::id()));
+    let dep = dir.join(format!("dcc-mmd-{}.d", std::process::id()));
+    fs::create_dir_all(&inc).expect("mkdir inc");
+    fs::write(inc.join("sys.h"), "#define X 1\n").expect("write sys.h");
+    fs::write(&src, "#include <sys.h>\nint main(void) { return X; }\n").expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-MMD", "-MF"])
+        .arg(&dep)
+        .args(["-isystem"])
+        .arg(&inc)
+        .args(["-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let dep_text = fs::read_to_string(&dep).unwrap_or_default();
+    let _ = fs::remove_dir_all(inc);
+    let _ = fs::remove_file(src);
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(dep);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(!dep_text.contains("sys.h"), "MMD should skip system header: {dep_text}");
+}
+
+#[test]
+fn flto_summary_includes_function_size() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-lto-size-{}.c", std::process::id()));
+    let obj_path = dir.join(format!("dcc-lto-size-{}.o", std::process::id()));
+    fs::write(&source_path, "int helper(void) { return 1; }\nint main(void) { return helper(); }\n")
+        .expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-flto", "-c", "-o"])
+        .arg(&obj_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let obj_bytes = fs::read(&obj_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(obj_path);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let text = String::from_utf8_lossy(&obj_bytes);
+    assert!(text.contains("helper:"), "LTO summary missing helper: {text}");
+}
+
+#[test]
 fn extern_comma_array_declarators_parse() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-comma-arr-{}.c", std::process::id()));

@@ -38,34 +38,47 @@ impl SanitizerFlags {
     }
 }
 
-/// 在 AST 层为每个函数注入 sanitizer 入口桩。
+/// 在 AST 层为翻译单元注入一次 sanitizer 入口桩（首个有体函数）。
 pub fn instrument_program(prog: &mut Program, flags: SanitizerFlags) {
     if !flags.any() {
         return;
     }
+    let prologue = tu_init_calls(flags);
+    let mut inserted = false;
     for decl in prog.decls.iter_mut() {
+        if inserted {
+            break;
+        }
         if let Decl::Func(f) = decl {
-            inject_func_prologue(f, flags);
+            if f.body.is_some() {
+                inject_func_prologue(f, &prologue);
+                inserted = true;
+            }
         }
     }
 }
 
-fn inject_func_prologue(func: &mut FuncDecl, flags: SanitizerFlags) {
+fn tu_init_calls(flags: SanitizerFlags) -> Vec<BlockItem> {
+    let span = Span::point("<sanitizer>", 0, 0);
+    let mut out = Vec::new();
+    if flags.kasan {
+        out.push(sanitizer_call("__asan_init", &span));
+    }
+    if flags.ubsan {
+        out.push(sanitizer_call("__ubsan_init", &span));
+    }
+    if flags.kcsan {
+        out.push(sanitizer_call("__kcsan_init", &span));
+    }
+    if flags.kcov {
+        out.push(sanitizer_call("__sanitizer_cov_trace_pc", &span));
+    }
+    out
+}
+
+fn inject_func_prologue(func: &mut FuncDecl, prologue: &[BlockItem]) {
     if let Some(body) = &mut func.body {
-        let mut prologue = Vec::new();
-        if flags.kasan {
-            prologue.push(sanitizer_call("__asan_init", &func.span));
-        }
-        if flags.ubsan {
-            prologue.push(sanitizer_call("__ubsan_init", &func.span));
-        }
-        if flags.kcsan {
-            prologue.push(sanitizer_call("__kcsan_init", &func.span));
-        }
-        if flags.kcov {
-            prologue.push(sanitizer_call("__sanitizer_cov_trace_pc", &func.span));
-        }
-        let mut items = prologue;
+        let mut items = prologue.to_vec();
         items.append(&mut body.items);
         body.items = items;
     }

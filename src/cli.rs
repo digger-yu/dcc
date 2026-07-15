@@ -34,6 +34,8 @@ pub struct Config {
     pub dep_file: Option<PathBuf>, // -MF: 依赖文件输出路径
     pub dep_target: Option<String>, // -MT/-MQ: 依赖文件中的目标名
     pub gen_dep: bool, // -MD/-MMD: 是否生成依赖文件
+    pub dep_mmd_only: bool, // -MMD: 排除系统头文件
+    pub dep_phony: bool, // -MP: 为每个头文件生成 phony 目标
     pub red_zone: bool,
     pub frame_pointer: bool,
     pub sse: bool,
@@ -175,6 +177,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut dep_file: Option<PathBuf> = None;
     let mut dep_target: Option<String> = None;
     let mut gen_dep = false;
+    let mut dep_mmd_only = false;
+    let mut dep_phony = false;
     let mut red_zone = true;
     let mut frame_pointer = false;
     let mut sse = true;
@@ -216,9 +220,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 let mut j = 0;
                 while j < opts.len() {
                     match opts[j] {
-                        "-MD" | "-MMD" => {
+                        "-MD" => {
                             gen_dep = true;
-                            // GCC accepts the Kbuild form -Wp,-MMD,<depfile>.
+                            dep_mmd_only = false;
+                            if j + 1 < opts.len() && !opts[j + 1].starts_with('-') {
+                                j += 1;
+                                dep_file = Some(PathBuf::from(opts[j]));
+                            }
+                        }
+                        "-MMD" => {
+                            gen_dep = true;
+                            dep_mmd_only = true;
                             if j + 1 < opts.len() && !opts[j + 1].starts_with('-') {
                                 j += 1;
                                 dep_file = Some(PathBuf::from(opts[j]));
@@ -237,7 +249,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                                 .ok_or_else(|| CliError::new(&format!("missing arg after -Wp,{}", option)))?;
                             dep_target = Some((*value).to_string());
                         }
-                        "-MP" => {}
+                        "-MP" => { dep_phony = true; }
                         option if option.starts_with("-D") && option.len() > 2 => {
                             let def = &option[2..];
                             if let Some(eq) = def.find('=') {
@@ -397,8 +409,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             a if a.starts_with("-isystem") => { system_paths.push(PathBuf::from(&a[8..])); }
             // -MD/-MMD: 生成依赖文件
-            "-MD" => { gen_dep = true; }
-            "-MMD" => { gen_dep = true; }
+            "-MD" => { gen_dep = true; dep_mmd_only = false; }
+            "-MMD" => { gen_dep = true; dep_mmd_only = true; }
             // -MF <file>: 依赖文件路径
             "-MF" => {
                 i += 1;
@@ -419,7 +431,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     .ok_or_else(|| CliError::new("missing arg after -MQ"))?.clone());
             }
             // -MP: 为头文件生成空依赖目标 (暂忽略)
-            "-MP" => {}
+            "-MP" => { dep_phony = true; }
             "-dump-ast"  => dump_ast = true,
             "-v" | "--verbose" => verbose = true,
             // -print-file-name=<file>: GCC 用于查找库/插件/头文件路径
@@ -503,13 +515,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             } else { None }
         });
         Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, emit_asm, preprocess_only, force_includes, syntax_only,
-            dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse, debug_level, lto_enabled,
+            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             raw_args: args.to_vec() })
     } else {
         let input = input.unwrap_or_else(|| PathBuf::from("-"));
         Ok(Config { input, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, emit_asm, preprocess_only, force_includes, syntax_only,
-            dep_file, dep_target, gen_dep, red_zone, frame_pointer, sse, debug_level, lto_enabled,
+            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             raw_args: args.to_vec() })
     }

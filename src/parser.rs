@@ -321,28 +321,51 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         let mut outputs = vec![];
+        let mut output_names = vec![];
         let mut inputs = vec![];
+        let mut input_names = vec![];
         let mut clobbers = vec![];
-        if self.cur.kind == TokKind::Colon { self.advance(); outputs = self.parse_asm_operand_list(); }
-        if self.cur.kind == TokKind::Colon { self.advance(); inputs = self.parse_asm_operand_list(); }
+        if self.cur.kind == TokKind::Colon {
+            self.advance();
+            let (o, n) = self.parse_asm_operand_list();
+            outputs = o;
+            output_names = n;
+        }
+        if self.cur.kind == TokKind::Colon {
+            self.advance();
+            let (o, n) = self.parse_asm_operand_list();
+            inputs = o;
+            input_names = n;
+        }
         if self.cur.kind == TokKind::Colon { self.advance(); clobbers = self.parse_asm_clobber_list(); }
         if self.cur.kind == TokKind::RParen { self.advance(); }
-        Some(Expr::AsmExpr { asm_str, outputs, inputs, clobbers, span: sp, ty: Type::Void })
+        Some(Expr::AsmExpr {
+            asm_str, outputs, output_names, inputs, input_names, clobbers, span: sp, ty: Type::Void,
+        })
     }
     /// 解析 asm 操作数列表 (逗号分隔的表达式, 到冒号或右括号结束)
-    fn parse_asm_operand_list(&mut self) -> Vec<Expr> {
+    fn parse_asm_operand_list(&mut self) -> (Vec<Expr>, Vec<Option<String>>) {
         let mut ops = vec![];
+        let mut names = vec![];
         while self.cur.kind != TokKind::Colon && self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
-            // 可选的符号操作数名: [name]（允许空格/下划线等任意 token）
-            if self.cur.kind == TokKind::LBracket {
+            let name = if self.cur.kind == TokKind::LBracket {
                 self.advance();
+                let mut n = String::new();
                 while self.cur.kind != TokKind::RBracket && self.cur.kind != TokKind::Eof {
+                    if !n.is_empty() {
+                        n.push(' ');
+                    }
+                    n.push_str(&self.cur.text);
                     self.advance();
                 }
                 if self.cur.kind == TokKind::RBracket {
                     self.advance();
                 }
-            }
+                Some(n.trim().to_string())
+            } else {
+                None
+            };
+            names.push(name);
             // GCC 约束字符串，实际表达式位于随后的括号中。
             if self.cur.kind == TokKind::StringLit { self.advance(); }
             let expr = if self.cur.kind == TokKind::LParen {
@@ -356,7 +379,7 @@ impl<'a> Parser<'a> {
             if let Some(e) = expr { ops.push(e); } else { break; }
             if self.cur.kind == TokKind::Comma { self.advance(); }
         }
-        ops
+        (ops, names)
     }
     /// 解析 asm clobber 列表 (逗号分隔的字符串)
     fn parse_asm_clobber_list(&mut self) -> Vec<String> {
@@ -422,9 +445,11 @@ impl<'a> Parser<'a> {
             // 解析带约束的内联汇编表达式
             if self.cur.kind == TokKind::LParen {
                 if let Some(expr) = self.parse_asm_expr(sp.clone()) {
-                    if let Expr::AsmExpr { asm_str, outputs, inputs, clobbers, span, .. } = expr {
+                    if let Expr::AsmExpr { asm_str, outputs, output_names, inputs, input_names, clobbers, span, .. } = expr {
                         if !self.expect(TokKind::Semi, "';'") { return None; }
-                        return Some(vec![Decl::GlobalAsm { asm_str, outputs, inputs, clobbers, span }]);
+                        return Some(vec![Decl::GlobalAsm {
+                            asm_str, outputs, output_names, inputs, input_names, clobbers, span,
+                        }]);
                     }
                 }
                 return None;
@@ -1455,16 +1480,30 @@ impl<'a> Parser<'a> {
                 }
                 // 解析 : outputs : inputs : clobbers : goto_labels
                 let mut outputs = vec![];
+                let mut output_names = vec![];
                 let mut inputs = vec![];
+                let mut input_names = vec![];
                 let mut clobbers = vec![];
                 let mut goto_labels = vec![];
-                if self.cur.kind == TokKind::Colon { self.advance(); outputs = self.parse_asm_operand_list(); }
-                if self.cur.kind == TokKind::Colon { self.advance(); inputs = self.parse_asm_operand_list(); }
+                if self.cur.kind == TokKind::Colon {
+                    self.advance();
+                    let (o, n) = self.parse_asm_operand_list();
+                    outputs = o;
+                    output_names = n;
+                }
+                if self.cur.kind == TokKind::Colon {
+                    self.advance();
+                    let (o, n) = self.parse_asm_operand_list();
+                    inputs = o;
+                    input_names = n;
+                }
                 if self.cur.kind == TokKind::Colon { self.advance(); clobbers = self.parse_asm_clobber_list(); }
                 if self.cur.kind == TokKind::Colon { self.advance(); goto_labels = self.parse_asm_label_list(); }
                 if self.cur.kind == TokKind::RParen { self.advance(); }
                 if self.cur.kind == TokKind::Semi { self.advance(); }
-                Some(Stmt::AsmGoto { asm_str, outputs, inputs, clobbers, goto_labels, span: sp })
+                Some(Stmt::AsmGoto {
+                    asm_str, outputs, output_names, inputs, input_names, clobbers, goto_labels, span: sp,
+                })
             }
             TokKind::Ident if self.peek.kind == TokKind::Colon => {
                 let nm = self.parse_ident()?; self.advance();

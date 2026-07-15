@@ -8,7 +8,7 @@
 |------|------|
 | DCC release 构建 + `cargo test`（22 integration） | ✅ 远程通过 |
 | `scripts/test_kernel_features.sh` | ✅ 7/7 |
-| `scripts/remote_feature_check.sh` | ✅ 含 `-S` custom section / lock cmpxchg |
+| `scripts/remote_feature_check.sh` | ✅ 15/15（含 MMD/MP/LTO size/va_list/`-mno-red-zone`） |
 | `scripts/sync_remote_build.sh` | ✅ rsync + 全量远程测试 + autoconf 自愈 |
 | Kbuild `prepare0` → mod/empty.c | ✅ |
 | Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行（需 `autoconf.h`） |
