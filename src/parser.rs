@@ -21,6 +21,9 @@ struct ParsedAttrs {
     is_always_inline: bool,
     register_name: Option<String>,
     cleanup_fn: Option<String>,
+    is_constructor: bool,
+    is_destructor: bool,
+    alias_name: Option<String>,
 }
 
 impl ParsedAttrs {
@@ -35,7 +38,17 @@ impl ParsedAttrs {
         if other.is_always_inline { self.is_always_inline = true; }
         if other.register_name.is_some() { self.register_name = other.register_name; }
         if other.cleanup_fn.is_some() { self.cleanup_fn = other.cleanup_fn; }
+        if other.is_constructor { self.is_constructor = true; }
+        if other.is_destructor { self.is_destructor = true; }
+        if other.alias_name.is_some() { self.alias_name = other.alias_name; }
     }
+}
+
+#[derive(Default, Clone, Copy)]
+struct StorageClass {
+    is_extern: bool,
+    is_static: bool,
+    is_register: bool,
 }
 
 pub struct Parser<'a> {
@@ -49,6 +62,8 @@ pub struct Parser<'a> {
     globals: HashMap<String, Type>, // 全局变量名 → 类型 (永不清除)
     in_function: bool,              // 是否在函数体内
     pub last_variadic: bool,        // parse_params 是否遇到 ...
+    decl_storage: StorageClass,     // 最近一次声明说明符中的存储类
+    decl_attrs: ParsedAttrs,        // 类型说明符之间出现的 GNU 属性
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -64,7 +79,8 @@ impl<'a> Parser<'a> {
                typedefs: HashMap::new(), struct_defs: HashMap::new(),
                enum_defs: HashMap::new(), enum_consts: HashMap::new(),
                locals: HashMap::new(), globals: HashMap::new(), in_function: false,
-               last_variadic: false }
+               last_variadic: false, decl_storage: StorageClass::default(),
+               decl_attrs: ParsedAttrs::default() }
     }
     fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
     fn err_here(&mut self, code: &'static str, msg: impl Into<String>, hint: Option<&str>) {
@@ -99,6 +115,11 @@ impl<'a> Parser<'a> {
             s[1..s.len()-1].to_string()
         } else { s.to_string() }
     }
+    fn decode_string_literal(s: &str) -> String {
+        let mut bytes = parse_str(s);
+        if bytes.last() == Some(&0) { bytes.pop(); }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
     /// 解析 __attribute__((...)) 并提取属性信息
     fn parse_attributes(&mut self) -> ParsedAttrs {
         let mut attrs = ParsedAttrs::default();
@@ -108,7 +129,7 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::LParen { self.advance(); } // (
             // 解析内部属性列表
             while self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
-                let name = self.cur.text.clone();
+                let name = self.cur.text.trim_matches('_').to_string();
                 match name.as_str() {
                     "section" => {
                         self.advance();
@@ -126,7 +147,8 @@ impl<'a> Parser<'a> {
                         if self.cur.kind == TokKind::LParen {
                             self.advance();
                             if self.cur.kind == TokKind::Number {
-                                attrs.alignment = self.cur.text.parse().ok();
+                                let value = parse_int_lit(&self.cur.text);
+                                if value > 0 { attrs.alignment = Some(value as usize); }
                                 self.advance();
                             }
                             if self.cur.kind == TokKind::RParen { self.advance(); }
@@ -161,7 +183,56 @@ impl<'a> Parser<'a> {
                             if self.cur.kind == TokKind::RParen { self.advance(); }
                         }
                     }
-                    _ => { self.advance(); } // 跳过未知属性
+                    "constructor" => {
+                        attrs.is_constructor = true;
+                        self.advance();
+                        // optional priority: __attribute__((constructor(100)))
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            // skip priority number
+                            if self.cur.kind == TokKind::Number { self.advance(); }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "destructor" => {
+                        attrs.is_destructor = true;
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if self.cur.kind == TokKind::Number { self.advance(); }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "alias" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if self.cur.kind == TokKind::StringLit {
+                                attrs.alias_name = Some(Self::strip_quotes(&self.cur.text));
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    _ => {
+                        self.advance();
+                        // 跳过未知属性的完整参数列表，不能把其内部右括号
+                        // 误当成 __attribute__((...)) 的结束。
+                        if self.cur.kind == TokKind::LParen {
+                            let mut depth = 0i32;
+                            loop {
+                                if self.cur.kind == TokKind::LParen { depth += 1; }
+                                else if self.cur.kind == TokKind::RParen {
+                                    depth -= 1;
+                                    self.advance();
+                                    if depth == 0 { break; }
+                                    continue;
+                                }
+                                self.advance();
+                                if self.cur.kind == TokKind::Eof { break; }
+                            }
+                        }
+                    }
                 }
                 if self.cur.kind == TokKind::Comma { self.advance(); }
             }
@@ -208,7 +279,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // __asm__
                 self.advance(); // (
                 if self.cur.kind == TokKind::StringLit {
-                    let label = self.cur.text.clone();
+                    let label = Self::strip_quotes(&self.cur.text);
                     self.advance(); // "label"
                     if self.cur.kind == TokKind::RParen { self.advance(); } // )
                     return Some(label);
@@ -231,9 +302,7 @@ impl<'a> Parser<'a> {
         }
         let mut asm_str = String::new();
         while self.cur.kind == TokKind::StringLit {
-            let s = self.cur.text.clone();
-            let inner = if s.len() >= 2 { &s[1..s.len()-1] } else { &s };
-            asm_str.push_str(inner);
+            asm_str.push_str(&Self::decode_string_literal(&self.cur.text));
             self.advance();
         }
         // 跳过冒号分隔的输出/输入/clobber列表
@@ -250,7 +319,23 @@ impl<'a> Parser<'a> {
     fn parse_asm_operand_list(&mut self) -> Vec<Expr> {
         let mut ops = vec![];
         while self.cur.kind != TokKind::Colon && self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
-            if let Some(e) = self.parse_expr() { ops.push(e); }
+            // 可选的符号操作数名: [name]
+            if self.cur.kind == TokKind::LBracket {
+                self.advance();
+                if self.cur.kind == TokKind::Ident { self.advance(); }
+                if self.cur.kind == TokKind::RBracket { self.advance(); }
+            }
+            // GCC 约束字符串，实际表达式位于随后的括号中。
+            if self.cur.kind == TokKind::StringLit { self.advance(); }
+            let expr = if self.cur.kind == TokKind::LParen {
+                self.advance();
+                let e = self.parse_expr_bp(2);
+                if self.cur.kind == TokKind::RParen { self.advance(); }
+                e
+            } else {
+                self.parse_expr_bp(2)
+            };
+            if let Some(e) = expr { ops.push(e); } else { break; }
             if self.cur.kind == TokKind::Comma { self.advance(); }
         }
         ops
@@ -259,7 +344,7 @@ impl<'a> Parser<'a> {
     fn parse_asm_clobber_list(&mut self) -> Vec<String> {
         let mut clobbers = vec![];
         while self.cur.kind != TokKind::Colon && self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
-            clobbers.push(self.cur.text.clone());
+            clobbers.push(Self::strip_quotes(&self.cur.text));
             self.advance();
             if self.cur.kind == TokKind::Comma { self.advance(); }
         }
@@ -314,6 +399,8 @@ impl<'a> Parser<'a> {
         }
         // 解析声明开头的 __attribute__: GCC 扩展, 如 __attribute__((section(".init.text"))) int foo()
         let leading_attrs = self.parse_attributes();
+        self.decl_storage = StorageClass::default();
+        self.decl_attrs = ParsedAttrs::default();
         // 文件级 asm: 必须在 skip_asm_label 之前, 因为 __asm__("...") 与 asm 标签共享相同 token 模式
         if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "asm") {
             let sp = self.cur.span.clone();
@@ -368,14 +455,18 @@ impl<'a> Parser<'a> {
         // struct/union/enum 定义或声明
         if matches!(self.cur.kind, TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum) {
             let ty = self.parse_type()?;
+            let storage = self.decl_storage;
+            let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));
             if self.cur.kind == TokKind::Semi { self.advance(); return Some(vec![]); }
-            return self.parse_var_or_func(ty, leading_attrs);
+            return self.parse_var_or_func(ty, attrs, storage);
         }
         let ty = self.parse_type()?;
-        self.parse_var_or_func(ty, leading_attrs)
+        let storage = self.decl_storage;
+        let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));
+        self.parse_var_or_func(ty, attrs, storage)
     }
 
-    fn parse_var_or_func(&mut self, ty: Type, leading_attrs: ParsedAttrs) -> Option<Vec<Decl>> {
+    fn parse_var_or_func(&mut self, ty: Type, leading_attrs: ParsedAttrs, storage: StorageClass) -> Option<Vec<Decl>> {
         // 函数指针声明/定义: type (*name)(params)
         // 第一性原理: (* 表示这不是普通变量名, 而是函数指针声明
         if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
@@ -415,8 +506,10 @@ impl<'a> Parser<'a> {
                         Some(b)
                     } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
                     self.skip_attributes();
+                    self.locals = self.globals.clone();
+                    self.in_function = false;
                     let sp = name.span.clone();
-                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_nested: false, upvars: vec![] })]);
+                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![] })]);
                 }
             }
             // 标准函数指针变量: type (*name)(params)
@@ -436,7 +529,7 @@ impl<'a> Parser<'a> {
                 let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
                 if !self.expect(TokKind::Semi, "';'") { return None; }
                 let sp = name.span.clone();
-                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None })]);
+                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None })]);
             }
             // 不是函数指针, 只是带括号的指针变量 (罕见)
             self.skip_attributes();
@@ -445,7 +538,7 @@ impl<'a> Parser<'a> {
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr()?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             let sp = name.span.clone();
-            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: false, is_static: false, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None })]);
+            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None })]);
         }
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
         let pre_attrs = Self::merge_attrs(leading_attrs, self.parse_attributes());
@@ -503,15 +596,20 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 Some(b)
             } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
+            let child_locals = self.locals.clone();
             // 恢复外层函数的 in_function 状态
             if is_nested_func {
                 self.locals = parent_locals.clone();
+                self.in_function = true;
+            } else {
+                self.locals = self.globals.clone();
+                self.in_function = false;
             }
             // 检测嵌套函数捕获的外层变量
             let upvars = if is_nested_func {
                 let mut captured = Vec::new();
                 if let Some(ref b) = body {
-                    Self::collect_upvars(&b.items, &self.locals, &parent_locals, &mut captured);
+                    Self::collect_upvars(&b.items, &child_locals, &parent_locals, &mut captured);
                 }
                 captured
             } else {
@@ -519,11 +617,13 @@ impl<'a> Parser<'a> {
             };
             // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
             let attrs = attrs;
-            Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: false, is_static: false,
+            Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                 section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
                 visibility: attrs.visibility, is_unused: attrs.is_unused,
                 is_cold: attrs.is_cold, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
-                is_variadic: self.last_variadic, is_nested: is_nested_func, upvars })])
+                is_variadic: self.last_variadic, is_constructor: attrs.is_constructor,
+                is_destructor: attrs.is_destructor, alias_name: attrs.alias_name,
+                is_nested: is_nested_func, upvars })])
         } else if self.cur.kind == TokKind::LBracket {
             self.advance();
             let arr_size = if self.cur.kind != TokKind::RBracket {
@@ -546,7 +646,7 @@ impl<'a> Parser<'a> {
             self.locals.insert(name_for_decl.name.clone(), arr_ty.clone());
             if !self.in_function { self.globals.insert(name_for_decl.name.clone(), arr_ty.clone()); }
             if !self.expect(TokKind::Semi, "';'") { return None; }
-            Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: false, is_static: false,
+            Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                 section: arr_attrs.section, alignment: arr_attrs.alignment, is_weak: arr_attrs.is_weak,
                 visibility: arr_attrs.visibility, is_unused: arr_attrs.is_unused, register_name: arr_attrs.register_name, cleanup_fn: arr_attrs.cleanup_fn })])
         } else {
@@ -555,7 +655,7 @@ impl<'a> Parser<'a> {
             let mut attrs = Self::merge_attrs(pre_attrs, var_attrs);
             // __asm__("label"): 可能是 asm 标签或 register asm("rN")
             if let Some(asm_label) = self.skip_asm_label() {
-                if attrs.register_name.is_none() {
+                if storage.is_register && attrs.register_name.is_none() {
                     attrs.register_name = Some(asm_label);
                 }
             }
@@ -565,14 +665,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let init = self.parse_expr()?;
                 if !self.expect(TokKind::Semi, "';'") { return None; }
-                Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: Some(init), span: sp, is_extern: false, is_static: false,
+                Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: Some(init), span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
                     visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
                 self.advance();
-                Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: false, is_static: false,
+                Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
                     visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn })])
             } else {
@@ -593,8 +693,11 @@ impl<'a> Parser<'a> {
                 continue;
             }
             match self.cur.kind {
-                TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic | TokKind::KwExtern
-                | TokKind::KwInline | TokKind::KwRestrict | TokKind::KwRegister | TokKind::KwAuto => { self.advance(); }
+                TokKind::KwStatic => { self.decl_storage.is_static = true; self.advance(); }
+                TokKind::KwExtern => { self.decl_storage.is_extern = true; self.advance(); }
+                TokKind::KwRegister => { self.decl_storage.is_register = true; self.advance(); }
+                TokKind::KwConst | TokKind::KwVolatile | TokKind::KwInline
+                | TokKind::KwRestrict | TokKind::KwAuto => { self.advance(); }
                 // _Noreturn: C11 函数限定符, 不影响代码生成, 静默跳过
                 TokKind::Ident if self.cur.text == "_Noreturn" => { self.advance(); }
                 // _Thread_local: C11 线程存储类, freestanding 下无需特殊处理, 静默跳过
@@ -618,7 +721,10 @@ impl<'a> Parser<'a> {
                 // __extension__: GNU 扩展, 抑制警告, 直接跳过
                 TokKind::Ident if self.cur.text == "__extension__" => { self.advance(); }
                 // __attribute__: 在类型限定符之间出现, 跳过
-                TokKind::Ident if self.cur.text == "__attribute__" => { self.skip_attributes(); }
+                TokKind::Ident if self.cur.text == "__attribute__" => {
+                    let attrs = self.parse_attributes();
+                    self.decl_attrs.merge(attrs);
+                }
                 // __asm__("label"): 在类型限定符之间出现, 跳过
                 TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" => { self.skip_asm_label(); }
                 // typeof(expr/type): GNU 扩展, 推导类型
@@ -830,7 +936,8 @@ impl<'a> Parser<'a> {
         match (base, uns, long, short) {
             (Some(Type::Void), ..) => Type::Void,
             (Some(Type::Bool), ..) => Type::Bool,
-            (Some(Type::Int128), ..) => Type::Int128,
+            (Some(Type::Int128), true, ..) => Type::UInt128,
+            (Some(Type::Int128), false, ..) => Type::Int128,
             (Some(Type::UInt128), ..) => Type::UInt128,
             (Some(Type::Float), ..) => Type::Float,
             (Some(Type::Double), _, 0, _) => Type::Double,
@@ -1163,7 +1270,7 @@ impl<'a> Parser<'a> {
                 // 解析汇编字符串
                 let mut asm_str = String::new();
                 while self.cur.kind == TokKind::StringLit {
-                    asm_str.push_str(&self.cur.text);
+                    asm_str.push_str(&Self::decode_string_literal(&self.cur.text));
                     self.advance();
                 }
                 // 解析 : outputs : inputs : clobbers : goto_labels
@@ -1614,7 +1721,18 @@ impl<'a> Parser<'a> {
         match self.cur.kind {
             TokKind::Number => {
                 let s = &self.cur.text; let v = parse_int_lit(s);
-                let ty = if s.ends_with('L') || s.ends_with('l') { Type::Long } else { Type::Int };
+                let suffix = s.trim_start_matches(|c: char| c.is_ascii_hexdigit()
+                    || c == 'x' || c == 'X' || c == 'b' || c == 'B');
+                let has_unsigned = suffix.chars().any(|c| c == 'u' || c == 'U');
+                let long_count = suffix.chars().filter(|c| *c == 'l' || *c == 'L').count();
+                let ty = match (has_unsigned, long_count) {
+                    (true, 2..) => Type::ULongLong,
+                    (true, 1) => Type::ULong,
+                    (true, 0) => Type::UInt,
+                    (false, 2..) => Type::LongLong,
+                    (false, 1) => Type::Long,
+                    (false, 0) => Type::Int,
+                };
                 self.advance(); Some(Expr::Int { v, span: sp, ty })
             }
             TokKind::FloatLit => {

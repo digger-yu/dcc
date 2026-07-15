@@ -95,6 +95,14 @@ pub struct ElfSection {
     pub align: u64,
 }
 
+/// 额外 .rela 节 (用于 .init_array 等自定义节的重定位)
+#[derive(Clone, Debug)]
+pub struct ExtraRelaSection {
+    pub name: String,         // e.g. ".rela.init_array"
+    pub relocations: Vec<ElfRela>,
+    pub target_sec_index: u32, // sh_info: 目标节索引
+}
+
 // ===== ET_EXEC 构建 (现有逻辑) =====
 
 pub fn build_elf_x86_64(code: &[u8], entry: u64) -> Vec<u8> {
@@ -157,10 +165,14 @@ pub fn build_elf_rel_x86_64(
     rodata: &[u8],
     data: &[u8],
     bss_size: u64,
+    text_align: u64,
+    data_align: u64,
+    bss_align: u64,
     symbols: &[ElfSym],
     relocations: &[ElfRela],
     extra_sections: &[ElfSection],
     data_relocations: &[ElfRela],
+    extra_rela_sections: &[ExtraRelaSection],
 ) -> Vec<u8> {
     // 节索引:
     // [0] SHT_NULL
@@ -169,21 +181,23 @@ pub fn build_elf_rel_x86_64(
     // [3] .data
     // [4] .bss
     // [5..5+N] extra sections
-    // [5+N] .rela.text
-    // [6+N] .rela.data
-    // [7+N] .symtab
-    // [8+N] .strtab
-    // [9+N] .shstrtab
+    // [5+N..5+N+M] extra rela sections (.rela.init_array etc.)
+    // [5+N+M] .rela.text
+    // [6+N+M] .rela.data
+    // [7+N+M] .symtab
+    // [8+N+M] .strtab
+    // [9+N+M] .shstrtab
     let n_extra = extra_sections.len() as u16;
-    let _sh_rela: u16 = 5 + n_extra;
-    let _sh_rela_data: u16 = 6 + n_extra;
-    let sh_symtab: u16 = 7 + n_extra;
-    let sh_strtab: u16 = 8 + n_extra;
-    let sh_shstrtab: u16 = 9 + n_extra;
-    let shnum: u16 = 10 + n_extra;
+    let n_extra_rela = extra_rela_sections.len() as u16;
+    let _sh_rela: u16 = 5 + n_extra + n_extra_rela;
+    let _sh_rela_data: u16 = 6 + n_extra + n_extra_rela;
+    let sh_symtab: u16 = 7 + n_extra + n_extra_rela;
+    let sh_strtab: u16 = 8 + n_extra + n_extra_rela;
+    let sh_shstrtab: u16 = 9 + n_extra + n_extra_rela;
+    let shnum: u16 = 10 + n_extra + n_extra_rela;
 
     // 构建 .shstrtab (节名字符串表)
-    let shstrtab = build_shstrtab(extra_sections);
+    let shstrtab = build_shstrtab(extra_sections, extra_rela_sections);
 
     // 构建 .strtab (符号名字符串表)
     let (strtab, sym_name_offsets) = build_strtab(symbols);
@@ -196,10 +210,14 @@ pub fn build_elf_rel_x86_64(
     let rela_data = build_rela(relocations);
     // 构建 .rela.data
     let rela_data_data = build_rela(data_relocations);
+    // 构建额外 .rela 节
+    let extra_rela_data: Vec<Vec<u8>> = extra_rela_sections.iter()
+        .map(|ers| build_rela(&ers.relocations)).collect();
 
     // 计算各节偏移
     let mut offset: u64 = 64; // ELF header 后
 
+    offset = align(offset, text_align.max(1));
     let text_off = offset;
     offset += text.len() as u64;
 
@@ -208,12 +226,12 @@ pub fn build_elf_rel_x86_64(
     let rodata_off = offset;
     offset += rodata.len() as u64;
 
-    offset = align(offset, 8);
+    offset = align(offset, data_align.max(1));
     let data_off = offset;
     offset += data.len() as u64;
 
     // .bss 不占文件空间
-    let bss_off = offset;
+    let bss_off = align(offset, bss_align.max(1));
 
     // 自定义节
     let mut extra_offsets = Vec::with_capacity(extra_sections.len());
@@ -223,6 +241,14 @@ pub fn build_elf_rel_x86_64(
         if sec.ty != SHT_NOBITS {
             offset += sec.data.len() as u64;
         }
+    }
+
+    // 额外 .rela 节
+    let mut extra_rela_offsets = Vec::with_capacity(extra_rela_sections.len());
+    for (i, _ers) in extra_rela_sections.iter().enumerate() {
+        offset = align(offset, 8);
+        extra_rela_offsets.push(offset);
+        offset += extra_rela_data[i].len() as u64;
     }
 
     offset = align(offset, 8);
@@ -293,6 +319,12 @@ pub fn build_elf_rel_x86_64(
         out.extend_from_slice(&sec.data);
     }
 
+    // ===== 额外 .rela 节 =====
+    for (i, _ers) in extra_rela_sections.iter().enumerate() {
+        pad_to(&mut out, extra_rela_offsets[i] as usize);
+        out.extend_from_slice(&extra_rela_data[i]);
+    }
+
     // ===== .rela.text =====
     pad_to(&mut out, rela_off as usize);
     out.extend_from_slice(&rela_data);
@@ -320,7 +352,7 @@ pub fn build_elf_rel_x86_64(
     // [1] .text
     write_section_header(&mut out,
         1, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
-        0, text_off, text.len() as u64, 0, 0, 16, 0,
+        0, text_off, text.len() as u64, 0, 0, text_align.max(1), 0,
     );
 
     // [2] .rodata
@@ -330,12 +362,12 @@ pub fn build_elf_rel_x86_64(
 
     // [3] .data
     write_section_header(&mut out, 15, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE,
-        0, data_off, data.len() as u64, 0, 0, 8, 0,
+        0, data_off, data.len() as u64, 0, 0, data_align.max(1), 0,
     );
 
     // [4] .bss
     write_section_header(&mut out, 21, SHT_NOBITS, SHF_ALLOC | SHF_WRITE,
-        0, bss_off, bss_size, 0, 0, 8, 0,
+        0, bss_off, bss_size, 0, 0, bss_align.max(1), 0,
     );
 
     // [5..5+N] 自定义节
@@ -346,9 +378,19 @@ pub fn build_elf_rel_x86_64(
         );
     }
 
+    // [5+N..5+N+M] 额外 .rela 节
+    for (i, ers) in extra_rela_sections.iter().enumerate() {
+        let name_off = shstrtab_extra_rela_name_offset(extra_sections, extra_rela_sections, i);
+        write_section_header(&mut out, name_off, SHT_RELA, SHF_INFO_LINK,
+            0, extra_rela_offsets[i], extra_rela_data[i].len() as u64,
+            sh_symtab as u32, ers.target_sec_index, 8, 24,
+        );
+    }
+
     // [.rela.text]
     let extra_names_len: u32 = extra_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
-    let base_off: u32 = 26 + extra_names_len; // 偏移 after \0+base names+extra names
+    let extra_rela_names_len: u32 = extra_rela_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
+    let base_off: u32 = 26 + extra_names_len + extra_rela_names_len;
     let rela_text_name_off = base_off;
     let rela_data_name_off = rela_text_name_off + ".rela.text".len() as u32 + 1;
     let symtab_name_off = rela_data_name_off + ".rela.data".len() as u32 + 1;
@@ -395,8 +437,8 @@ fn pad_to(out: &mut Vec<u8>, target: usize) {
 }
 
 /// 构建 .shstrtab: 所有节名的字符串表
-fn build_shstrtab(extra_sections: &[ElfSection]) -> Vec<u8> {
-    // 布局: \0 .text \0 .rodata \0 .data \0 .bss \0 [extra names...] .rela.text \0 .rela.data \0 .symtab \0 .strtab \0 .shstrtab \0
+fn build_shstrtab(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection]) -> Vec<u8> {
+    // 布局: \0 .text \0 .rodata \0 .data \0 .bss \0 [extra names...] [extra rela names...] .rela.text \0 .rela.data \0 .symtab \0 .strtab \0 .shstrtab \0
     let mut s = vec![0u8]; // 初始 \0
     for name in &[".text", ".rodata", ".data", ".bss"] {
         s.extend_from_slice(name.as_bytes());
@@ -404,6 +446,11 @@ fn build_shstrtab(extra_sections: &[ElfSection]) -> Vec<u8> {
     }
     // 自定义节名
     for sec in extra_sections {
+        s.extend_from_slice(sec.name.as_bytes());
+        s.push(0);
+    }
+    // 额外 .rela 节名 (放在标准 .rela 名之前)
+    for sec in extra_rela_sections {
         s.extend_from_slice(sec.name.as_bytes());
         s.push(0);
     }
@@ -420,6 +467,19 @@ fn shstrtab_name_offset(extra_sections: &[ElfSection], idx: usize) -> u32 {
     let mut off = 26u32;
     for i in 0..idx {
         off += extra_sections[i].name.len() as u32 + 1;
+    }
+    off
+}
+
+/// 计算额外 .rela 节名在 .shstrtab 中的偏移
+fn shstrtab_extra_rela_name_offset(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection], idx: usize) -> u32 {
+    // 偏移: 26 (base) + extra section names + preceding extra rela names
+    let mut off = 26u32;
+    for sec in extra_sections {
+        off += sec.name.len() as u32 + 1;
+    }
+    for i in 0..idx {
+        off += extra_rela_sections[i].name.len() as u32 + 1;
     }
     off
 }

@@ -6,6 +6,7 @@ static int __attribute__((aligned(64))) aligned_var = 42;
 // === P1-6: 全局符号引用 ===
 int global_a = 100;
 int *global_ptr = &global_a;
+__int128 global_wide;
 
 // === P1-5: register asm 变量 ===
 int test_register_asm(void) {
@@ -83,6 +84,31 @@ int test_int128_shr(void) {
     return (int)(b == 16 ? 0 : 9);
 }
 
+int test_int128_carry(void) {
+    unsigned __int128 a = 0xffffffffffffffffUL;
+    unsigned __int128 b = a + 1;
+    unsigned __int128 expected = (unsigned __int128)1 << 64;
+    return b == expected ? 0 : 12;
+}
+
+int test_int128_signed_cmp(void) {
+    __int128 negative = -1;
+    __int128 positive = 1;
+    if (!(negative < positive)) return 13;
+    if (negative >= positive) return 13;
+    return 0;
+}
+
+int test_int128_signed_shr(void) {
+    __int128 value = -8;
+    return (value >> 2) == -2 ? 0 : 15;
+}
+
+int test_global_int128(void) {
+    global_wide = (__int128)1 << 64;
+    return global_wide == ((__int128)1 << 64) ? 0 : 14;
+}
+
 // === P1-7: 检查对齐 ===
 int test_aligned(void) {
     unsigned long addr = (unsigned long)&aligned_var;
@@ -106,6 +132,10 @@ int main(void) {
     r |= test_int128_cmp();
     r |= test_int128_shl();
     r |= test_int128_shr();
+    r |= test_int128_carry();
+    r |= test_int128_signed_cmp();
+    r |= test_int128_signed_shr();
+    r |= test_global_int128();
     r |= test_aligned();
     r |= test_symbol_ref();
     return r;

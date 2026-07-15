@@ -86,6 +86,37 @@ error[E0001]: expected ';', got '{'
 - arm-linux-gnueabi
 - 自由扩展
 
+## x86-64 可重定位代码生成
+
+`-c` / `-r` 使用三个阶段生成 ET_REL：
+
+1. `x86_64.rs` 发射函数机器码，收集 `.rodata`、`.data`、`.bss` 和
+   `section` 属性产生的动态节，同时记录尚未绑定的符号引用。
+2. 按 ELF 规则构造 `STN_UNDEF → LOCAL → GLOBAL/WEAK` 符号表，并把
+   declaration 的 weak/visibility/alignment 信息传递到符号和节布局。
+3. 符号索引稳定后生成 `.rela.text`、`.rela.data` 及动态
+   `.rela.<section>`，最后由 `elf.rs` 动态构造 `.shstrtab` 和节头表。
+
+自定义代码节中的重定位会从 `.rela.text` 迁移到对应 relocation section；
+未初始化的普通全局对象进入 `.bss`，不占目标文件数据空间。
+
+## x86-64 后端 ABI 约定
+
+- 普通标量值使用 `rax`，`__int128` 使用 `rax:rdx`（低 64 位在 `rax`）。
+- 后端以 `r13` 作为稳定帧基址。嵌套函数调用通过 `r10` 传递静态链，
+  被调函数保存父级 `r13` 后按已解析的父帧偏移访问捕获变量。
+- 简化 `va_list` 会在可变参数函数序言中按
+  `rdi,rsi,rdx,rcx,r8,r9` 保存 GP 参数；当前不包含完整的 SysV SSE
+  save area 和所有跨边界分类规则。
+- `register asm("reg")` 变量直接映射到指定物理寄存器；调用者仍需遵守
+  目标寄存器的 SysV caller/callee-saved 约束。
+
+## GNU 控制流扩展
+
+Parser 直接表示 `&&label`、`goto *expr` 和 `asm goto`。标签地址使用
+RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
+汇编器之前将 `%lN` / `%l[name]` 解析到函数内标签。
+
 ## 自举 (M5)
 
 ```bash

@@ -17,8 +17,10 @@ pub fn emit(prog: &Program, target: &Target, relocatable: bool) -> Vec<u8> {
             if relocatable {
                 elf::build_elf_rel_x86_64(
                     &cg.code, &cg.rodata, &cg.data_section,
-                    cg.bss_size, &cg.symbols, &cg.relocations,
+                    cg.bss_size, cg.text_align, cg.data_align, cg.bss_align,
+                    &cg.symbols, &cg.relocations,
                     &cg.extra_sections, &cg.data_relocations,
+                    &cg.extra_rela_sections,
                 )
             } else {
                 elf::build_elf_x86_64(&cg.code, cg.entry)

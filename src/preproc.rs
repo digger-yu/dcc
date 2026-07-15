@@ -234,17 +234,8 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     // 内存序别名 (memory_order_xxx 已在上面定义)
     // __attribute__: 不定义为宏, 让 token 透传到解析器处理
     // 解析器会识别 __attribute__ 并处理 vector_size 等属性
-    // __has_attribute / __has_builtin / __has_feature (函数式宏, 返回 0)
-    // 注意: __has_include 不在宏表中, 在 #if 求值时特殊处理 (需要文件系统访问)
-    pp.macros.insert("__has_attribute".to_string(), MacroDef {
-        params: Some(vec!["x".to_string()]), body: "0".to_string(), variadic: false,
-    });
-    pp.macros.insert("__has_builtin".to_string(), MacroDef {
-        params: Some(vec!["x".to_string()]), body: "0".to_string(), variadic: false,
-    });
-    pp.macros.insert("__has_feature".to_string(), MacroDef {
-        params: Some(vec!["x".to_string()]), body: "0".to_string(), variadic: false,
-    });
+    // __has_attribute / __has_builtin / __has_feature: 不在宏表中定义, 在展开时特殊处理
+    // 这样可以在宏展开路径和 #if 路径都返回正确值
     // likely/unlikely 分支提示
     pp.macros.insert("likely".to_string(), MacroDef {
         params: Some(vec!["x".to_string()]), body: "(x)".to_string(), variadic: false,
@@ -1018,6 +1009,33 @@ impl Preprocessor {
                     continue;
                 }
 
+                // __has_attribute(xxx) / __has_builtin(xxx) / __has_feature(xxx)
+                if ident == "__has_attribute" || ident == "__has_builtin" || ident == "__has_feature" {
+                    let mut j = i;
+                    while j < len && chars[j].is_whitespace() { j += 1; }
+                    if j < len && chars[j] == '(' {
+                        j += 1;
+                        let mut depth = 1;
+                        let arg_start = j;
+                        while j < len && depth > 0 {
+                            if chars[j] == '(' { depth += 1; }
+                            else if chars[j] == ')' { depth -= 1; }
+                            if depth > 0 { j += 1; }
+                        }
+                        let arg: String = chars[arg_start..j].iter().collect();
+                        let arg = arg.trim().to_string();
+                        let val = if ident == "__has_attribute" {
+                            if Self::is_known_attribute(&arg) { "1" } else { "0" }
+                        } else if ident == "__has_builtin" {
+                            if Self::is_known_builtin(&arg) { "1" } else { "0" }
+                        } else { "0" }; // __has_feature: always 0 for now
+                        out.push_str(val);
+                        if j < len { j += 1; } // skip )
+                        i = j;
+                        continue;
+                    }
+                }
+
                 // 检查是否在禁用集中 (paint blue)
                 if disabled.contains(&ident) {
                     out.push_str(&ident);
@@ -1766,7 +1784,8 @@ impl Preprocessor {
             | "__builtin_bitreverse8" | "__builtin_bitreverse16"
             | "__builtin_bitreverse32" | "__builtin_bitreverse64"
             | "__builtin_frame_address" | "__builtin_return_address"
-            | "__builtin_overflow_p"
+            | "__builtin_overflow_p" | "__builtin_add_overflow_p"
+            | "__builtin_sub_overflow_p" | "__builtin_mul_overflow_p"
             | "__builtin_apply" | "__builtin_return"
         )
     }

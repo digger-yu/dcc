@@ -50,6 +50,10 @@ pub struct FuncDecl {
     pub is_noinline: bool,
     pub is_always_inline: bool,
     pub is_variadic: bool,
+    // constructor/destructor/alias
+    pub is_constructor: bool,
+    pub is_destructor: bool,
+    pub alias_name: Option<String>,
     // 嵌套函数静态链
     pub is_nested: bool,              // 是否是嵌套函数
     pub upvars: Vec<(String, i32)>,   // 从外层捕获的变量: (name, offset_in_parent_frame)
