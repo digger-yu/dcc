@@ -467,7 +467,10 @@ impl Codegen {
                     match init {
                         Expr::Int { v, .. } => Some(v.to_le_bytes()[..sz].to_vec()),
                         Expr::String { data, .. } => Some(data.clone()),
-                        Expr::InitList { inits, .. } => self.gen_global_init_list(&v.ty, inits),
+                        Expr::InitList { inits, .. } => {
+                            let base = self.data_section.len() as u64;
+                            self.gen_global_init_list(&v.ty, inits, Some((base, None)))
+                        },
                         Expr::AddrOf { e, .. } => {
                             // P1-6: 全局变量初始化中的符号引用 (&other_var)
                             if let Expr::Ident { name: ref_name, .. } = e.as_ref() {
@@ -579,7 +582,10 @@ impl Codegen {
                                 has_init = true;
                             }
                             Expr::InitList { inits, .. } => {
-                                if let Some(init_data) = self.gen_global_init_list(&v.ty, inits) {
+                                let base = self.extra_sections[sec_idx].data.len() as u64;
+                                if let Some(init_data) = self.gen_global_init_list(
+                                    &v.ty, inits, Some((base, Some(sec_idx))),
+                                ) {
                                     self.extra_sections[sec_idx].data.extend_from_slice(&init_data);
                                     for _ in init_data.len()..sz { self.extra_sections[sec_idx].data.push(0); }
                                     has_init = true;
@@ -642,7 +648,10 @@ impl Codegen {
                             true
                         }
                         Expr::InitList { inits, .. } => {
-                            if let Some(init_data) = self.gen_global_init_list(&v.ty, inits) {
+                            let base = self.data_section.len() as u64;
+                            if let Some(init_data) = self.gen_global_init_list(
+                                &v.ty, inits, Some((base, None)),
+                            ) {
                                 self.data_section.extend_from_slice(&init_data);
                                 for _ in init_data.len()..sz { self.data_section.push(0); }
                                 true
@@ -2631,7 +2640,8 @@ impl Codegen {
             Expr::CompoundLit { ty, inits, .. } => {
                 // 复合字面量: (type){...} - 在 rodata 中存储初始化数据, 加载地址
                 let size = ty.size();
-                let data = self.gen_global_init_list(ty, inits).unwrap_or_else(|| vec![0; size]);
+                let data = self.gen_global_init_list(ty, inits, None)
+                    .unwrap_or_else(|| vec![0; size]);
                 // 使用 string_pool 存储
                 if !self.string_pool.contains_key(&data) {
                     let off = self.rodata.len() as u64;
@@ -2729,7 +2739,12 @@ impl Codegen {
     }
 
     // 全局变量初始化列表: 生成初始化数据字节
-    fn gen_global_init_list(&self, ty: &Type, inits: &[InitItem]) -> Option<Vec<u8>> {
+    fn gen_global_init_list(
+        &mut self,
+        ty: &Type,
+        inits: &[InitItem],
+        rel: Option<(u64, Option<usize>)>,
+    ) -> Option<Vec<u8>> {
         let mut data = Vec::new();
         match ty {
             Type::Array(elem_ty, _) => {
@@ -2739,16 +2754,23 @@ impl Codegen {
                         InitItem::Expr(e) => e,
                         InitItem::Designated { designator: Designator::Index(idx_expr), value } => {
                             if let Expr::Int { v, .. } = idx_expr {
-                                // 填充前面的零
                                 while data.len() < (*v as usize) * elem_size { data.push(0); }
                                 value
                             } else { continue; }
                         }
                         _ => continue,
                     };
-                    let elem_data = self.eval_const_expr(value);
-                    data.extend_from_slice(&elem_data);
-                    // 填充到元素大小
+                    if let Expr::InitList { inits: nested, ty: nested_ty, .. } = value {
+                        let nested_ty = if matches!(nested_ty, Type::Int) { elem_ty.as_ref() } else { nested_ty };
+                        let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
+                        if let Some(elem_data) = self.gen_global_init_list(nested_ty, nested, elem_rel) {
+                            data.extend_from_slice(&elem_data);
+                        }
+                    } else {
+                        let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
+                        let elem_data = self.eval_const_expr(value, elem_rel, elem_size);
+                        data.extend_from_slice(&elem_data);
+                    }
                     while data.len() < (i + 1) * elem_size { data.push(0); }
                 }
             }
@@ -2772,7 +2794,8 @@ impl Codegen {
                         }
                         _ => continue,
                     };
-                    let field_data = self.eval_const_expr(value);
+                    let field_rel = rel.map(|(base, sec)| (base + field.offset as u64, sec));
+                    let field_data = self.eval_const_expr(value, field_rel, field.ty.size());
                     let off = field.offset;
                     for (j, &b) in field_data.iter().enumerate() {
                         if off + j < data.len() { data[off + j] = b; }
@@ -2781,22 +2804,37 @@ impl Codegen {
             }
             _ => {
                 if let Some(InitItem::Expr(e)) = inits.first() {
-                    data = self.eval_const_expr(e);
+                    data = self.eval_const_expr(e, rel, ty.size());
                 }
             }
         }
         if data.is_empty() { None } else { Some(data) }
     }
 
-    // 计算常量表达式的字节表示
-    fn eval_const_expr(&self, e: &Expr) -> Vec<u8> {
+    // 计算常量表达式的字节表示；符号引用写入 pending_data64_rels。
+    fn eval_const_expr(
+        &mut self,
+        e: &Expr,
+        rel: Option<(u64, Option<usize>)>,
+        width: usize,
+    ) -> Vec<u8> {
         if let Ok(value) = const_eval::eval(e) {
-            let size = e.ty().size();
+            let size = e.ty().size().max(width);
             return value.to_le_bytes()[..size].to_vec();
         }
         match e {
             Expr::String { data, .. } => data.clone(),
-            _ => unreachable!("typed IR validation rejected non-constant global initializer"),
+            Expr::Ident { name, .. } => {
+                if let Some((off, sec)) = rel {
+                    let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
+                    self.pending_data64_rels.push((off, name.name.clone(), sec, rel_type));
+                }
+                vec![0u8; width.max(8)]
+            }
+            Expr::AddrOf { e: inner, .. } if matches!(inner.as_ref(), Expr::Ident { .. }) => {
+                self.eval_const_expr(inner, rel, width)
+            }
+            _ => vec![0u8; width.max(e.ty().size())],
         }
     }
 

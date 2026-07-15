@@ -404,6 +404,7 @@ fn is_static_initializer(expr: &Expr) -> bool {
     if const_eval::eval(expr).is_ok() { return true; }
     match expr {
         Expr::String { .. } | Expr::LabelAddr { .. } => true,
+        Expr::Ident { .. } => true,
         Expr::AddrOf { e, .. } => matches!(e.as_ref(), Expr::Ident { .. } | Expr::String { .. }),
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => inits.iter().all(|item| {
             match item {

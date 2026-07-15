@@ -75,6 +75,7 @@ pub fn parse_summary(data: &[u8]) -> Option<LtoUnit> {
     let mut unit = LtoUnit { path, ..Default::default() };
     let body = std::str::from_utf8(&rest[nul + 1..]).ok()?;
     for line in body.lines() {
+        if line.is_empty() { continue; }
         let mut parts = line.split(':');
         let name = parts.next()?.to_string();
         let size: u64 = parts.next()?.parse().ok()?;
@@ -87,6 +88,26 @@ pub fn parse_summary(data: &[u8]) -> Option<LtoUnit> {
         });
     }
     Some(unit)
+}
+
+/// 从单个 ET_REL 目标文件提取 `.llvm.lto` 摘要。
+pub fn extract_from_object(elf: &[u8]) -> Option<LtoUnit> {
+    let data = crate::codegen::elf::read_section_data(elf, ".llvm.lto")?;
+    parse_summary(&data)
+}
+
+/// 合并多个目标文件的 LTO 摘要（链接器入口）。
+pub fn collect_from_objects(objects: &[&[u8]]) -> LtoUnit {
+    let units: Vec<LtoUnit> = objects.iter().filter_map(|obj| extract_from_object(obj)).collect();
+    merge_units(units)
+}
+
+/// 在合并摘要上标记跨 TU 引用，返回可安全丢弃的本地定义符号。
+pub fn dead_local_functions(merged: &LtoUnit) -> Vec<String> {
+    merged.functions.values()
+        .filter(|s| s.defined && !s.referenced && s.size_hint > 0)
+        .map(|s| s.name.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -111,5 +132,26 @@ mod tests {
         assert_eq!(merged.functions.len(), 2);
         assert!(merged.functions.contains_key("f"));
         assert!(merged.functions.contains_key("g"));
+    }
+
+    #[test]
+    fn extract_from_elf_section() {
+        use crate::codegen::elf::{self, ElfSection, SHT_PROGBITS};
+        let unit = build_unit("unit.c", &[("entry", 48, true)]);
+        let payload = serialize_summary(&unit);
+        let obj = elf::build_elf_rel_x86_64(
+            &[0xc3], &[], &[], 0, 1, 1, 1, &[], &[],
+            &[ElfSection {
+                name: ".llvm.lto".to_string(),
+                data: payload,
+                ty: SHT_PROGBITS,
+                flags: 0,
+                align: 1,
+            }],
+            &[], &[],
+        );
+        let parsed = extract_from_object(&obj).expect("extract LTO from ELF");
+        assert_eq!(parsed.path, "unit.c");
+        assert_eq!(parsed.functions["entry"].size_hint, 48);
     }
 }

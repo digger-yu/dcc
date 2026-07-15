@@ -566,3 +566,51 @@ fn write_section_header(
     out.extend_from_slice(&sh_entsize.to_le_bytes());     // 8
     // Total: 4+4+8+8+8+8+4+4+8+8 = 64 bytes
 }
+
+/// 从 ET_REL ELF64 目标文件中按节名读取载荷（供 LTO 摘要提取等）。
+pub fn read_section_data(elf: &[u8], section_name: &str) -> Option<Vec<u8>> {
+    if elf.len() < 64 || elf.get(0..4)? != &ELFMAG || elf[4] != ELFCLASS64 {
+        return None;
+    }
+    let shoff = u64::from_le_bytes(elf.get(40..48)?.try_into().ok()?);
+    let shentsize = u16::from_le_bytes(elf.get(58..60)?.try_into().ok()?) as u64;
+    let shnum = u16::from_le_bytes(elf.get(60..62)?.try_into().ok()?) as usize;
+    let shstrndx = u16::from_le_bytes(elf.get(62..64)?.try_into().ok()?) as usize;
+    if shnum == 0 || shstrndx >= shnum || shentsize < 64 {
+        return None;
+    }
+    let shstr_hdr = shoff as usize + shstrndx * shentsize as usize;
+    if shstr_hdr + 64 > elf.len() {
+        return None;
+    }
+    let shstr_off = u64::from_le_bytes(elf[shstr_hdr + 24..shstr_hdr + 32].try_into().ok()?) as usize;
+    let shstr_size = u64::from_le_bytes(elf[shstr_hdr + 32..shstr_hdr + 40].try_into().ok()?) as usize;
+    if shstr_off + shstr_size > elf.len() {
+        return None;
+    }
+    let shstrtab = &elf[shstr_off..shstr_off + shstr_size];
+
+    for i in 0..shnum {
+        let base = shoff as usize + i * shentsize as usize;
+        if base + 64 > elf.len() {
+            break;
+        }
+        let name_idx = u32::from_le_bytes(elf[base..base + 4].try_into().ok()?) as usize;
+        let name = read_cstr(shstrtab, name_idx)?;
+        if name != section_name {
+            continue;
+        }
+        let data_off = u64::from_le_bytes(elf[base + 24..base + 32].try_into().ok()?) as usize;
+        let data_size = u64::from_le_bytes(elf[base + 32..base + 40].try_into().ok()?) as usize;
+        if data_off + data_size > elf.len() {
+            return None;
+        }
+        return Some(elf[data_off..data_off + data_size].to_vec());
+    }
+    None
+}
+
+fn read_cstr(data: &[u8], off: usize) -> Option<&str> {
+    let end = data.get(off..)?.iter().position(|&b| b == 0)?;
+    std::str::from_utf8(&data[off..off + end]).ok()
+}

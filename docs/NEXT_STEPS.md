@@ -72,7 +72,7 @@ targets only.
 - [x] `scripts/test_kernel_features.sh` (7/7)
 - [x] `devicetable-offsets.s` is assembler text, not ELF (needs `autoconf.h`)
 - [ ] `devicetable-offsets.h` has 200+ `#define` entries (via full make)
-- [ ] `file2alias.o` builds with dcc on remote (parser gaps remain)
+- [x] `file2alias.o` builds with dcc on remote
 - [ ] `modpost` host binary links successfully
 - [x] Document host include path requirements in KERNEL_BUILD_GUIDE.md
 - [x] Document autoconf.h prerequisite in sync_remote_build.sh

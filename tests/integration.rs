@@ -572,3 +572,153 @@ fn flto_section_emitted() {
         "missing LTO summary section"
     );
 }
+
+#[test]
+fn function_typedef_parses() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-fn-typedef-{}.c", std::process::id()));
+    let source = "\
+typedef int handler_t (void);\n\
+typedef handler_t *handler_ptr;\n\
+int main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsyntax-only"])
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn restrict_parameter_parses() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-restrict-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-restrict-{}.o", std::process::id()));
+    let source = "\
+void copy(char * __restrict dst, const char * __restrict src) {\n\
+    dst[0] = src[0];\n\
+}\n\
+int main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn hosted_stdio_header_parses() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-stdio-{}.c", std::process::id()));
+    let source = "#include <stdio.h>\nint main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsyntax-only"])
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn comma_pointer_declarators_parse() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-comma-ptr-{}.c", std::process::id()));
+    let source = "\
+void f(void) {\n\
+    const char *name, *identifier;\n\
+    (void)name;\n\
+    (void)identifier;\n\
+}\n\
+int main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsyntax-only"])
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn typeof_struct_member_and_def_field_pattern() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-def-field-{}.c", std::process::id()));
+    let source = "\
+struct node { unsigned char b[16]; };\n\
+struct id { struct node uuid; };\n\
+static int use_uuid(void *symval) {\n\
+    typeof(((struct id *)0)->uuid) uuid = *(typeof(uuid) *)((char *)symval);\n\
+    return uuid.b[0];\n\
+}\n\
+int main(void) { return use_uuid((void *)0); }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsyntax-only"])
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn devtable_static_init_with_function_pointer() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-devtable-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-devtable-{}.o", std::process::id()));
+    let source = "\
+struct devtable {\n\
+    const char *device_id;\n\
+    unsigned long id_size;\n\
+    int (*do_entry)(const char *, void *, char *);\n\
+};\n\
+static int helper(const char *f, void *s, char *a) { (void)f; (void)s; (void)a; return 0; }\n\
+static const struct devtable devtable[] = {\n\
+    {\"hid\", 24, helper},\n\
+};\n\
+int main(void) { return devtable[0].id_size == 24 ? 0 : 1; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(out_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

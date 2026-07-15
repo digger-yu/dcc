@@ -15,8 +15,6 @@ pub struct Preprocessor {
     include_paths: Vec<PathBuf>,
     /// 系统搜索路径 (-isystem, 在用户路径之后、标准路径之前)
     system_paths: Vec<PathBuf>,
-    /// 已处理的文件 (防递归 include)
-    seen: HashSet<String>,
     /// #pragma once 文件
     pragma_once: HashSet<String>,
     diags: Vec<Diagnostic>,
@@ -93,7 +91,6 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         macros: HashMap::new(),
         include_paths: include_paths.to_vec(),
         system_paths: system_paths.to_vec(),
-        seen: HashSet::new(),
         pragma_once: HashSet::new(),
         diags: vec![],
         cond_stack: vec![],
@@ -851,11 +848,7 @@ impl Preprocessor {
                 let canonical = full_path.canonicalize()
                     .unwrap_or(full_path.clone());
                 let key = canonical.to_string_lossy().to_string();
-                if self.seen.contains(&key) {
-                    return;
-                }
                 if self.pragma_once.contains(&key) { return; }
-                self.seen.insert(key.clone());
                 self.deps.push(full_path.to_string_lossy().into_owned());
                 match fs::read_to_string(&full_path) {
                     Ok(text) => {
@@ -936,18 +929,24 @@ impl Preprocessor {
             // Debian/Ubuntu 多架构路径
             "/usr/include/x86_64-linux-gnu",
             "/usr/include/aarch64-linux-gnu",
-            // Linux 内核头文件
-            "/usr/include/linux",
-            "/usr/include/asm",
-            "/usr/include/asm-generic",
         ];
         for dir in &system_dirs {
             let p = Path::new(dir).join(name);
             if p.exists() { return Some(p); }
         }
-        // 5. GCC 内建 include（stdbool.h 等 host 工具依赖）
+        // 5. GCC 内建 include（stddef.h/stdbool.h 等；优先于 linux UAPI 同名头）
         for dir in host_gcc_include_dirs() {
             let p = dir.join(name);
+            if p.exists() { return Some(p); }
+        }
+        // 6. Linux 内核 UAPI 路径（仅当标准/GCC 头不存在时）
+        let kernel_dirs = [
+            "/usr/include/linux",
+            "/usr/include/asm",
+            "/usr/include/asm-generic",
+        ];
+        for dir in &kernel_dirs {
+            let p = Path::new(dir).join(name);
             if p.exists() { return Some(p); }
         }
         None

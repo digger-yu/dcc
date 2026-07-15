@@ -102,5 +102,19 @@ check "mno_red_zone" test -f "$TMP/nrz.o"
 "$DCC" -c -o "$TMP/p4.o" examples/test_p4_va_list.c
 check "va_list_gp" test -f "$TMP/p4.o"
 
+cat > "$TMP/fntypedef.c" <<'EOF'
+typedef int handler_t (void);
+typedef handler_t *handler_ptr;
+int main(void) { return 0; }
+EOF
+check "fn_typedef" "$DCC" -fsyntax-only "$TMP/fntypedef.c"
+
+cat > "$TMP/restrict.c" <<'EOF'
+void touch(char * __restrict p) { p[0] = 0; }
+int main(void) { return 0; }
+EOF
+"$DCC" -c -o "$TMP/restrict.o" "$TMP/restrict.c"
+check "restrict_param" test -f "$TMP/restrict.o"
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

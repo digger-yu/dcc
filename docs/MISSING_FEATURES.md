@@ -31,8 +31,8 @@
 | prepare0 全链路 | `make` 触发 `kernel/bounds.s` 等 prepare 依赖 | ⚠️ 单 TU 已通，全 make 待验 |
 | QEMU 启动矩阵 | 远程无 sudo/QEMU，未生成 bzImage | ❌ 脚本就绪 `scripts/qemu_boot_matrix.sh` |
 | pahole / objtool 完整回归 | 需完整 vmlinux 链接 + 工具链 | ❌ |
-| modpost `file2alias.c` | host 工具源码体量大，parser 仍有缺口 | ❌ 单 TU 编译失败 |
-| LTO 链接器消费 | `.llvm.lto` 已生成，ld 侧未接入 | ⚠️ |
+| modpost `file2alias.c` | 单 TU `-c` 生成 `file2alias.o`（2026-07-15） | ✅ |
+| LTO 链接器消费 | `.llvm.lto` 可自 ELF 提取/合并；ld 侧 dead symbol 探测已就绪 | ⚠️ |
 
 ## 远程 debug 记录（2026-07-15）
 
@@ -40,7 +40,7 @@
 |------|------|------|
 | `remote_feature_check.sh` 报 `pipefail: invalid option` | Windows 同步后脚本为 CRLF | `.gitattributes` 强制 `*.sh` LF；提交前 `git ls-files --eol` 确认 `w/lf` |
 | `devicetable-offsets.c` 缺 `generated/autoconf.h` | 内核树未跑 `syncconfig` | `sync_remote_build.sh` 自动 `make include/generated/autoconf.h` |
-| `file2alias.c` 编译失败 | modpost 源码 parser 缺口 | 跟踪中，勿全局设 `HOSTCC=dcc` |
+| `file2alias.c` 编译失败 | 1) `seen` 阻止 stddef 重入 2) `<stddef.h>` 误解析为 linux/stddef.h | 移除 include-once；GCC include 优先于 linux UAPI |
 
 ## 已实现模块（2026-07-15 扩展）
 
@@ -49,6 +49,8 @@
 | SysV AMD64 调用 | `emit_sysv_call`：寄存器/栈/XMM、Memory 类 sret、AL=vector 计数 |
 | va_list | 24B struct；GP+XMM reg_save_area（176B）；`va_start`/`va_arg`/`va_copy` |
 | 内联 asm | AT&T 编码；`%[name]` 命名操作数；Ident LEA；GlobalAsm |
+| Host stdio/modpost 前端 | 函数 typedef、`restrict`、GCC include 路径、逗号指针声明符、`__asm__` 字符串拼接 |
+| LTO 链接探测 | `elf::read_section_data` + `lto::extract_from_object` / `collect_from_objects` / `dead_local_functions` |
 | `-MD`/`-MMD`/`-MP` | include 图 → `.d`；`-MMD` 过滤系统头；`-MP` phony 规则 |
 | 优化 | `-O1+` 常量折叠；`-O2+` 纯表达式语句 DCE |
 | 机器选项 | `-mno-red-zone` 128B 保留；`-fno-omit-frame-pointer`；`-mno-sse` |
