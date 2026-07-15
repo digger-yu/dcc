@@ -42,8 +42,9 @@ pub const STB_WEAK: u8 = 2;
 
 // 符号 visibility
 pub const STV_DEFAULT: u8 = 0;
-pub const STV_HIDDEN: u8 = 1;
-pub const STV_PROTECTED: u8 = 2;
+pub const STV_INTERNAL: u8 = 1;
+pub const STV_HIDDEN: u8 = 2;
+pub const STV_PROTECTED: u8 = 3;
 
 // 符号类型
 pub const STT_NOTYPE: u8 = 0;

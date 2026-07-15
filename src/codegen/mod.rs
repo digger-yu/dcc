@@ -5,15 +5,17 @@
 pub mod elf;
 pub mod x86_64;
 
-use crate::ast::Program;
+use crate::ir::Module;
 use crate::target::Target;
 
-pub fn emit(prog: &Program, target: &Target, relocatable: bool) -> Vec<u8> {
+pub fn emit(module: &Module, target: &Target, relocatable: bool) -> Vec<u8> {
     match target.arch {
         crate::cli::Arch::X86_64 => {
             let mut cg = x86_64::Codegen::new(target.clone());
             cg.relocatable = relocatable;
-            cg.compile(prog);
+            // `Module` 只能由 lowering + validation 路径构造；AST 载荷在后端
+            // 迁移期间仍用于现有指令选择。
+            cg.compile(module.source());
             if relocatable {
                 elf::build_elf_rel_x86_64(
                     &cg.code, &cg.rodata, &cg.data_section,

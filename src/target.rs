@@ -21,6 +21,9 @@ pub struct Target {
     pub endian:     Endian,
     pub callee_save: CalleeSave,
     pub is_linux:   bool,
+    pub red_zone:   bool,
+    pub frame_pointer: bool,
+    pub sse: bool,
 }
 
 impl Target {
@@ -39,6 +42,15 @@ impl Target {
             ptr_size, int_size, long_size, llong_size, endian,
             callee_save,
             is_linux: matches!(t.os, Os::Linux | Os::Freestanding),
+            red_zone: true,
+            frame_pointer: false,
+            sse: true,
         }
+    }
+
+    pub fn apply_codegen_options(&mut self, red_zone: bool, frame_pointer: bool, sse: bool) {
+        self.red_zone = red_zone;
+        self.frame_pointer = frame_pointer;
+        self.sse = sse;
     }
 }
