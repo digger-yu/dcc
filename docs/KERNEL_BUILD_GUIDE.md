@@ -2,19 +2,22 @@
 
 > 目标版本：**Linux 6.6 / x86_64**。远程验收目录：`~/dcc-agent-linux66`（独立同步，不覆盖旧仓库）。
 
-## 当前进度（2026-07-15）
+## 当前进度（2026-07-15 远程 debug）
 
 | 阶段 | 状态 |
 |------|------|
-| DCC release 构建 + `cargo test` | ✅ 远程通过 |
+| DCC release 构建 + `cargo test`（22 integration） | ✅ 远程通过 |
 | `scripts/test_kernel_features.sh` | ✅ 7/7 |
-| `scripts/sync_remote_build.sh` | ✅ rsync + 远程测试 |
+| `scripts/remote_feature_check.sh` | ✅ 含 `-S` custom section / lock cmpxchg |
+| `scripts/sync_remote_build.sh` | ✅ rsync + 全量远程测试 + autoconf 自愈 |
 | Kbuild `prepare0` → mod/empty.c | ✅ |
-| Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行 |
+| Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行（需 `autoconf.h`） |
 | Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ GNU case range + 逗号数组 |
+| `-S` lock/SSE 反汇编 + 自定义节分组 | ✅ `src/codegen/disasm.rs` + integration |
 | `-g` DWARF/BTF、`-flto`、sanitizer、`.S` 驱动 | ✅ 初版 |
 | `-MD` 依赖、`-O1` 常量折叠、GlobalAsm、`-mno-red-zone` | ✅ integration 覆盖 |
 | Host GCC include（modpost `stdbool.h`） | ✅ `gcc -print-file-name=include` 探测 |
+| modpost `file2alias.c` 单 TU | ❌ parser 缺口，待修 |
 | 全树 `make` / vmlinux / bzImage / QEMU | ⚠️ 待完整链接与 QEMU 环境 |
 
 ### 远程同步构建
@@ -24,8 +27,19 @@
 bash scripts/sync_remote_build.sh
 ```
 
-默认同步到 `ds@192.168.148.128:~/dcc-agent-linux66` 并运行
-`cargo test` + devicetable/bounds 单 TU 验证。
+默认同步到 `ds@192.168.148.128:~/dcc-agent-linux66` 并依次运行：
+
+1. `cargo build --release` + `cargo test --release`
+2. `scripts/remote_feature_check.sh`（含 `-S` 自定义节 / lock cmpxchg）
+3. `scripts/test_kernel_features.sh`
+4. 内核单 TU：`devicetable-offsets.s`、`bounds.s`
+
+**Windows 注意**：`*.sh` 必须为 LF 行尾。若远程报 `pipefail: invalid option`，
+在本地执行 `git ls-files --eol scripts/*.sh` 确认工作区为 `w/lf`，再重新同步。
+
+**内核头文件**：`devicetable-offsets.c` 依赖 `include/generated/autoconf.h`。
+若内核树仅有 `.config` 而无该头文件，同步脚本会自动执行
+`make olddefconfig`（如需）与 `make include/generated/autoconf.h`（使用系统 gcc）。
 
 ## 1. 环境要求
 

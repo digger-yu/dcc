@@ -67,13 +67,18 @@ targets only.
 
 ## 5. Suggested verification checklist
 
-- [x] `cargo test --release` (all integration tests green)
-- [x] `devicetable-offsets.s` is assembler text, not ELF
+- [x] `cargo test --release` (22 integration tests green)
+- [x] `scripts/remote_feature_check.sh` (O1/MD/san/LTO/GlobalAsm/`-S`)
+- [x] `scripts/test_kernel_features.sh` (7/7)
+- [x] `devicetable-offsets.s` is assembler text, not ELF (needs `autoconf.h`)
 - [ ] `devicetable-offsets.h` has 200+ `#define` entries (via full make)
-- [ ] `file2alias.o` builds with dcc on remote
+- [ ] `file2alias.o` builds with dcc on remote (parser gaps remain)
 - [ ] `modpost` host binary links successfully
 - [x] Document host include path requirements in KERNEL_BUILD_GUIDE.md
+- [x] Document autoconf.h prerequisite in sync_remote_build.sh
+- [x] Fix CRLF on shell scripts synced from Windows
 - [x] `kernel/bounds.s` compiles with dcc (GNU case range)
+- [x] `-S` emits custom sections and decodes lock cmpxchg (not `.byte`)
 - [x] `-g` emits `.debug_*` / `.BTF` sections
 - [x] `-flto` emits `.llvm.lto` summary section
 - [x] `-MD` / `-O1` / sanitizer / GlobalAsm integration tests

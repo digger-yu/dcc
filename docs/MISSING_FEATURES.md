@@ -1,7 +1,8 @@
 # DCC Linux 6.6 缺失特性（按自动化证据）
 
-> 最后更新：2026-07-15 — 以 `scripts/test_kernel_features.sh`、
-> `scripts/sync_remote_build.sh` 与远程 Linux 6.6 Kbuild 日志为准。
+> 最后更新：2026-07-15（远程 debug）— 以 `scripts/test_kernel_features.sh`、
+> `scripts/remote_feature_check.sh`、`scripts/sync_remote_build.sh` 与
+> 远程 Linux 6.6 Kbuild 日志为准。
 
 ## 已通过的门禁
 
@@ -18,7 +19,8 @@
 | objtool / ORC 帧信息（初版） | `-g`/`-fno-omit-frame-pointer` 生成 `.eh_frame`、`.orc_unwind_ip`、`.cfi_*` |
 | KASAN/UBSAN/KCSAN/KCOV 插桩（初版） | `-fsanitize=*` 函数入口桩 + `.dcc.san_info` 节 |
 | 跨 TU LTO（初版） | `-flto` 生成 `.llvm.lto` 摘要节 |
-| `-S` 汇编输出 | 完整 C 函数机器码反汇编 + 内联 asm 指令（`src/codegen/disasm.rs`） |
+| `-S` 汇编输出 | 完整 C 函数机器码反汇编；lock/SSE 前缀指令；自定义节按 `.section` 分组（与 `.o` 布局一致） |
+| `-S` 回归 | `integration.rs` + `scripts/remote_feature_check.sh`（custom section / lock cmpxchg） |
 | GNU case range / 逗号数组声明符 | `bounds.c` 头文件依赖、`integration.rs` 回归 |
 
 ## 阻塞级（Linux 6.6 全树）
@@ -28,7 +30,16 @@
 | prepare0 全链路 | `make` 触发 `kernel/bounds.s` 等 prepare 依赖 | ⚠️ 单 TU 已通，全 make 待验 |
 | QEMU 启动矩阵 | 远程无 sudo/QEMU，未生成 bzImage | ❌ 脚本就绪 `scripts/qemu_boot_matrix.sh` |
 | pahole / objtool 完整回归 | 需完整 vmlinux 链接 + 工具链 | ❌ |
+| modpost `file2alias.c` | host 工具源码体量大，parser 仍有缺口 | ❌ 单 TU 编译失败 |
 | LTO 链接器消费 | `.llvm.lto` 已生成，ld 侧未接入 | ⚠️ |
+
+## 远程 debug 记录（2026-07-15）
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| `remote_feature_check.sh` 报 `pipefail: invalid option` | Windows 同步后脚本为 CRLF | `.gitattributes` 强制 `*.sh` LF；提交前 `git ls-files --eol` 确认 `w/lf` |
+| `devicetable-offsets.c` 缺 `generated/autoconf.h` | 内核树未跑 `syncconfig` | `sync_remote_build.sh` 自动 `make include/generated/autoconf.h` |
+| `file2alias.c` 编译失败 | modpost 源码 parser 缺口 | 跟踪中，勿全局设 `HOSTCC=dcc` |
 
 ## 已实现但需扩展
 
@@ -51,6 +62,7 @@
 ## 远程基线
 
 - 工作区：`~/dcc-agent-linux66`（不覆盖旧 `~/dcc`）
-- 同步构建：`scripts/sync_remote_build.sh`（rsync + `cargo test` + devicetable/bounds）
-- 内核树：`~/linux-6.6`，`make CC=~/dcc-agent-linux66/target/release/dcc`
+- 同步构建：`scripts/sync_remote_build.sh`（rsync + `cargo test` + feature check + devicetable/bounds）
+- 快速验收：`scripts/remote_feature_check.sh`（O1/MD/sanitizer/LTO/GlobalAsm/`-S`）
+- 内核树：`~/linux-6.6`，需已有 `.config`；首次缺 `autoconf.h` 时脚本会 `make olddefconfig` + 生成头文件
 - QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` + bzImage）
