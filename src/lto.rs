@@ -119,6 +119,24 @@ pub fn dead_local_functions(merged: &LtoUnit) -> Vec<String> {
         .collect()
 }
 
+/// 根据输入目标文件的重定位表，将引用的符号标记为 referenced。
+pub fn mark_references_from_objects(merged: &mut LtoUnit, objects: &[&[u8]]) {
+    for obj in objects {
+        for name in crate::codegen::elf::referenced_symbol_names(obj) {
+            if let Some(summary) = merged.functions.get_mut(&name) {
+                summary.referenced = true;
+            } else {
+                merged.functions.insert(name.clone(), FunctionSummary {
+                    name: name.clone(),
+                    defined: false,
+                    referenced: true,
+                    size_hint: 0,
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +180,13 @@ mod tests {
         let parsed = extract_from_object(&obj).expect("extract LTO from ELF");
         assert_eq!(parsed.path, "unit.c");
         assert_eq!(parsed.functions["entry"].size_hint, 48);
+    }
+
+    #[test]
+    fn dead_local_excludes_referenced() {
+        let mut merged = build_unit("a.c", &[("used", 10, true), ("unused", 20, true)]);
+        merged.functions.get_mut("used").unwrap().referenced = true;
+        let dead = dead_local_functions(&merged);
+        assert_eq!(dead, vec!["unused".to_string()]);
     }
 }

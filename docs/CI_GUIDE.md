@@ -37,3 +37,10 @@ CI 会在日志中显示 dcc 的真实报错位置。看:
 3. `./hello` exit code 是否 42 (运行时错误)
 
 任何一个失败,把日志贴给我,我立刻修。
+
+## 5. 远程 Linux 内核回归（可选）
+
+在已配置 SSH 的开发机上，可用 `scripts/sync_remote_build.sh` 同步
+源码到 Linux 并跑 cargo test、feature check、prepare0、pahole、
+objtool 与 `kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物
+时 SKIP）。详见 `docs/KERNEL_BUILD_GUIDE.md`。

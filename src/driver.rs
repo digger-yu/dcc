@@ -150,9 +150,10 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
+    let function_sections = cfg.function_sections || lto_enabled;
     let bytes = codegen::emit(
         &module, &target, cfg.relocatable, cfg.emit_asm, &file_name,
-        cfg.debug_level, cfg.sanitizers, lto_enabled,
+        cfg.debug_level, cfg.sanitizers, lto_enabled, function_sections,
     );
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());

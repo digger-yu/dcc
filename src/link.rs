@@ -36,11 +36,17 @@ pub fn link_relocatable(
         .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
     let refs: Vec<&[u8]> = object_bytes.iter().map(|b| b.as_slice()).collect();
 
-    let lto_unit = if lto_enabled {
+    let mut lto_unit = if lto_enabled {
         Some(lto::collect_from_objects(&refs))
     } else {
         None
     };
+
+    let mut dead_syms: Vec<String> = vec![];
+    if let Some(ref mut unit) = lto_unit {
+        lto::mark_references_from_objects(unit, &refs);
+        dead_syms = lto::dead_local_functions(unit);
+    }
 
     if verbose {
         if let Some(ref unit) = lto_unit {
@@ -49,7 +55,7 @@ pub fn link_relocatable(
                 unit.functions.len(),
                 inputs.len()
             );
-            for name in lto::dead_local_functions(unit) {
+            for name in &dead_syms {
                 eprintln!("dcc: LTO dead local: {}", name);
             }
         }
@@ -57,6 +63,9 @@ pub fn link_relocatable(
 
     let mut ld = Command::new("ld");
     ld.arg("-r").arg("-o").arg(output);
+    if lto_enabled {
+        ld.arg("--gc-sections");
+    }
     for input in inputs {
         ld.arg(input);
     }
@@ -79,6 +88,34 @@ pub fn link_relocatable(
         inject_lto_section(output, &lto::serialize_summary(&unit))?;
     }
 
+    if lto_enabled && !dead_syms.is_empty() {
+        strip_dead_symbols(output, &dead_syms)?;
+    }
+
+    Ok(())
+}
+
+/// 用 objcopy 剔除 LTO 探测到的 dead local 符号（--gc-sections 的补充）。
+fn strip_dead_symbols(output: &Path, names: &[String]) -> Result<(), Vec<Diagnostic>> {
+    let mut cmd = Command::new("objcopy");
+    for name in names {
+        cmd.arg(format!("--strip-symbol={}", name));
+    }
+    cmd.arg(output);
+    let status = cmd.status().map_err(|e| {
+        vec![Diagnostic::err(
+            "E0204",
+            format!("cannot invoke objcopy for dead symbol strip: {}", e),
+            Span::point("", 0, 0),
+        )]
+    })?;
+    if !status.success() {
+        return Err(vec![Diagnostic::err(
+            "E0204",
+            "objcopy failed to strip dead LTO symbols",
+            Span::point("", 0, 0),
+        )]);
+    }
     Ok(())
 }
 

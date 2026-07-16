@@ -100,6 +100,19 @@ error[E0001]: expected ';', got '{'
 自定义代码节中的重定位会从 `.rela.text` 迁移到对应 relocation section；
 未初始化的普通全局对象进入 `.bss`，不占目标文件数据空间。
 
+## 链接与 LTO（`-r` / `-flto`）
+
+多 `.o` 可重定位链接由 `driver.rs` 派发到 `link.rs`：
+
+1. 读取各 TU 的 `.llvm.lto` 摘要（`lto.rs`），合并函数定义/引用。
+2. 扫描输入 ELF 的 `.rela.*` 表标记跨 TU 引用（`elf.rs`）。
+3. 调用 `ld -r --gc-sections` 合并目标文件；`-flto` 时默认
+   `-ffunction-sections`，每函数位于 `.text.<name>` 节。
+4. 用 `objcopy` 注入合并后的 `.llvm.lto`，并对 dead local 符号
+   执行 `--strip-symbol` 补充剔除。
+
+远程验收：`scripts/sync_remote_build.sh` → `kernel_full_check.sh`。
+
 ## x86-64 后端 ABI 约定
 
 - 普通标量值使用 `rax`，`__int128` 使用 `rax:rdx`（低 64 位在 `rax`）。

@@ -39,6 +39,7 @@ pub struct Codegen {
     vla_total_size: i32,
     // 可重定位模式 (.o)
     pub relocatable: bool,
+    pub function_sections: bool, // -ffunction-sections：每函数独立 .text.<name> 节
     pub symbols: Vec<ElfSym>,
     sym_index: HashMap<String, u32>,
     pub relocations: Vec<ElfRela>,
@@ -132,7 +133,7 @@ impl Codegen {
                globals: HashMap::new(), frame_size: 0, expr_depth: 0, max_expr_depth: 0, temp_slots: 0,
                vla_offsets: HashMap::new(),
                vla_total_size: 0,
-               relocatable: false, symbols: vec![], sym_index: HashMap::new(),
+               relocatable: false, function_sections: false, symbols: vec![], sym_index: HashMap::new(),
                relocations: vec![], pending_func_rels: vec![], pending_data_rels: vec![],
                data_section: vec![], bss_size: 0,
                text_align: 16, data_align: 8, bss_align: 8,
@@ -777,6 +778,48 @@ impl Codegen {
                         custom_func_ranges.push((func_start, func_size, sec_idx, sec_off));
                         custom_func_offsets.insert(f.name.name.clone(), ((sec_idx + 5) as u16, sec_off));
                     }
+                }
+            }
+        }
+
+        // -ffunction-sections：将普通函数拆到 .text.<name>，供链接期 --gc-sections 剔除
+        if self.function_sections {
+            let mut per_func: Vec<FuncDecl> = vec![];
+            for decl in &prog.decls {
+                if let Decl::Func(f) = decl {
+                    if f.body.is_some() && f.section.is_none() && !f.is_cold {
+                        per_func.push(f.clone());
+                    }
+                    if let Some(body) = &f.body {
+                        Self::collect_nested_funcs(&body.items, &mut per_func);
+                    }
+                }
+            }
+            for f in &per_func {
+                if custom_func_offsets.contains_key(&f.name.name) {
+                    continue;
+                }
+                if f.section.is_some() || f.is_cold {
+                    continue;
+                }
+                if let Some(&func_start) = self.labels.get(&f.name.name) {
+                    let func_size = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                    if func_size == 0 {
+                        continue;
+                    }
+                    let sec_name = format!(".text.{}", f.name.name);
+                    let sec_idx = self.ensure_custom_section(&sec_name, true, false);
+                    let func_align = f.alignment.unwrap_or(16).max(1);
+                    self.extra_sections[sec_idx].align =
+                        self.extra_sections[sec_idx].align.max(func_align as u64);
+                    let aligned = (self.extra_sections[sec_idx].data.len() + func_align - 1)
+                        & !(func_align - 1);
+                    self.extra_sections[sec_idx].data.resize(aligned, 0);
+                    let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                    let code_slice = self.code[func_start as usize..(func_start + func_size) as usize].to_vec();
+                    self.extra_sections[sec_idx].data.extend_from_slice(&code_slice);
+                    custom_func_ranges.push((func_start, func_size, sec_idx, sec_off));
+                    custom_func_offsets.insert(f.name.name.clone(), ((sec_idx + 5) as u16, sec_off));
                 }
             }
         }

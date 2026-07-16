@@ -2,21 +2,22 @@
 
 > 目标版本：**Linux 6.6 / x86_64**。远程验收目录：`~/dcc-agent-linux66`（独立同步，不覆盖旧仓库）。
 
-## 当前进度（2026-07-15 远程 debug）
+## 当前进度（2026-07-16）
 
 | 阶段 | 状态 |
 |------|------|
 | DCC release 构建 + `cargo test`（integration） | ✅ 远程通过 |
 | `scripts/test_kernel_features.sh` | ✅ 7/7 |
-| `scripts/remote_feature_check.sh` | ✅ 15/15 |
+| `scripts/remote_feature_check.sh` | ✅ 17/17（含 LTO per-function section） |
 | `scripts/prepare0_check.sh` | ✅ devicetable / bounds / file2alias 窄目标 |
 | `scripts/pahole_regress.sh` / `objtool_regress.sh` | ✅ BTF struct + eh_frame FDE |
 | `scripts/sync_remote_build.sh` | ✅ rsync + 全量远程测试 + autoconf 自愈 |
 | Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行 |
 | Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ |
 | modpost `file2alias.c` 单 TU | ✅ |
-| LTO 链接 `-r` 多 `.o` | ✅ `ld -r` + `.llvm.lto` 注入 |
-| 全树 `make` / vmlinux / bzImage / QEMU | ⚠️ 需完整链接；QEMU 脚本在无 bzImage 时 SKIP |
+| LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
+| `scripts/modpost_link.sh` | ⚠️ 脚本就绪（HOSTCC=dcc，fixdep 用 gcc） |
+| 全树 `make` / vmlinux / bzImage / QEMU | ⚠️ 脚本就绪 | `kernel_full_check.sh` 编排；缺产物 SKIP |
 
 ### 远程同步构建
 
@@ -31,6 +32,32 @@ bash scripts/sync_remote_build.sh
 2. `scripts/remote_feature_check.sh`（含 `-S` 自定义节 / lock cmpxchg）
 3. `scripts/test_kernel_features.sh`
 4. 内核单 TU：`devicetable-offsets.s`、`bounds.s`
+5. `prepare0_check.sh`、`pahole_regress.sh`、`objtool_regress.sh`
+6. `kernel_full_check.sh`（modpost 链接 / QEMU 矩阵 / vmlinux 工具链，缺产物时 SKIP）
+
+### 验收脚本一览
+
+| 脚本 | 用途 |
+|------|------|
+| `sync_remote_build.sh` | rsync + cargo test + 全量远程回归 |
+| `prepare0_check.sh` | devicetable / bounds / file2alias 窄目标 |
+| `modpost_link.sh` | HOSTCC=dcc 完整链接 modpost |
+| `pahole_regress.sh` / `objtool_regress.sh` | 单 TU BTF / eh_frame 回归 |
+| `qemu_boot_matrix.sh` | QEMU 加载 bzImage（无镜像 SKIP） |
+| `vmlinux_regress.sh` | pahole -J / objtool check vmlinux |
+| `kernel_full_check.sh` | 编排 modpost + QEMU + vmlinux（非阻塞） |
+| `remote_libiberty_probe.sh` | GCC libiberty 纯 C 子集探测 |
+
+### LTO 与 dead symbol 剔除
+
+```bash
+# 编译：-flto 默认开启 -ffunction-sections（.text.<func> 节）
+dcc -flto -c -o a.o a.c
+dcc -flto -c -o b.o b.c
+
+# 链接：合并 .llvm.lto 摘要，ld --gc-sections 剔除无引用节
+dcc -r -flto -o merged.o a.o b.o
+```
 
 **Windows 注意**：`*.sh` 必须为 LF 行尾。若远程报 `pipefail: invalid option`，
 在本地执行 `git ls-files --eol scripts/*.sh` 确认工作区为 `w/lf`，再重新同步。

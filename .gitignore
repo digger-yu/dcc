@@ -35,4 +35,5 @@ bad
 # Temp scripts
 _*.py
 _*.txt
+_*.sh
 examples/simd_debug.c

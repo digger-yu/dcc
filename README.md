@@ -255,10 +255,15 @@ dcc input.c -o output
 # 生成可重定位目标文件 (.o)
 dcc -c input.c -o input.o
 
-# 多文件链接 (通过 gcc)
+# 多文件链接 (通过 gcc 或 dcc -r)
 dcc -c a.c -o a.o
 dcc -c b.c -o b.o
 gcc a.o b.o -o program
+
+# LTO 可重定位链接（需 Linux ld/objcopy）
+dcc -flto -c a.c -o a.o
+dcc -flto -c b.c -o b.o
+dcc -r -flto -o merged.o a.o b.o
 
 # 指定标准
 dcc -std=gnu23 input.c
@@ -279,6 +284,16 @@ dcc -dump-ast input.c
 dcc -v input.c
 ```
 
+## 远程内核验收
+
+```bash
+bash scripts/sync_remote_build.sh          # rsync + 全量远程测试
+bash scripts/kernel_full_check.sh          # modpost / QEMU / vmlinux（非阻塞）
+BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh  # 可选构建 bzImage
+```
+
+详见 `docs/KERNEL_BUILD_GUIDE.md`。
+
 ## 项目结构
 
 ```
@@ -286,6 +301,8 @@ src/
 ├── main.rs          # 入口: 参数 → 配置 → driver
 ├── cli.rs           # CLI 解析: GCC 兼容的命令行选项
 ├── driver.rs        # 驱动: 读 → 预处理 → 解析 → codegen → 写
+├── link.rs          # 可重定位链接 (-r) + LTO gc-sections
+├── lto.rs           # 跨 TU LTO 摘要与 dead symbol 探测
 ├── preproc.rs       # 预处理器: #include/#define/#if/宏展开
 ├── tokens.rs        # 词法分析: 字符流 → token 流
 ├── parser.rs        # 语法分析: token 流 → AST (递归下降 + Pratt)

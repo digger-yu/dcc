@@ -76,4 +76,7 @@ ssh "$REMOTE" "DCC=$REMOTE_DIR/target/release/dcc bash $REMOTE_DIR/scripts/pahol
 echo "Running objtool/eh_frame regression..."
 ssh "$REMOTE" "DCC=$REMOTE_DIR/target/release/dcc bash $REMOTE_DIR/scripts/objtool_regress.sh 2>&1"
 
+echo "Running kernel full-tree check (modpost / QEMU / vmlinux)..."
+ssh "$REMOTE" "DCC=$REMOTE_DIR/target/release/dcc KERNEL_DIR=$KERNEL_DIR bash $REMOTE_DIR/scripts/kernel_full_check.sh 2>&1"
+
 echo "All remote checks passed."

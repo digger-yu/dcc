@@ -20,11 +20,13 @@ pub fn emit(
     debug_level: u8,
     sanitizers: SanitizerFlags,
     lto_enabled: bool,
+    function_sections: bool,
 ) -> Vec<u8> {
     match target.arch {
         crate::cli::Arch::X86_64 => {
             let mut cg = x86_64::Codegen::new(target.clone());
             cg.relocatable = relocatable || emit_asm;
+            cg.function_sections = function_sections || lto_enabled;
             cg.emit_asm_text = emit_asm;
             cg.source_name = source_name.to_string();
             cg.debug_level = debug_level;

@@ -47,13 +47,7 @@ echo "-- scripts/mod/file2alias.c (-c)"
 "$DCC" "${INC[@]}" -c -o "$WORK/file2alias.o" scripts/mod/file2alias.c
 [[ -s "$WORK/file2alias.o" ]]
 
-echo "-- scripts/mod/empty.c (-c) for modpost link smoke"
-"$DCC" "${INC[@]}" -c -o "$WORK/empty.o" scripts/mod/empty.c
-
-if command -v ld >/dev/null 2>&1; then
-    echo "-- ld -r modpost objects"
-    ld -r -o "$WORK/modpost.o" "$WORK/empty.o" 2>/dev/null || true
-fi
+echo "NOTE: modpost full link → scripts/modpost_link.sh"
 
 echo "PASS: prepare0 narrow targets OK"
 rm -rf "$WORK"

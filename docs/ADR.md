@@ -68,3 +68,15 @@
   - 后端是数据驱动 (target.rs 抽离)
   - 跨编译本质是"换一份 target 数据", 不需要新写代码
 - **决策**: 现在就支持 --target=xxx, 实际只实装 x86_64; 其他后端 M7 补
+
+## ADR-008: LTO 摘要 + `--gc-sections` 剔除 dead symbol
+
+- **问题**: 跨 TU LTO 如何在不引入 LLVM bitcode 的情况下去掉 dead local？
+- **第一性原理**:
+  - 每函数独立节（`-ffunction-sections`）+ 链接期 `--gc-sections`
+    是 binutils 原生路径，无需自写 ELF 编辑器删代码。
+  - 轻量 `.llvm.lto` 文本摘要记录 defined/referenced/size，供
+    verbose 诊断与 objcopy strip 补充。
+- **决策**: `-flto` 默认开启 per-function section；`link.rs` 用
+  `ld -r --gc-sections`，并从 `.rela.*` 标记引用。
+- **代价**: 依赖 host `ld`/`objcopy`；Windows 本地无法完整验证链接路径。

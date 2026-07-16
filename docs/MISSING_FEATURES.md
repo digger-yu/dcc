@@ -1,8 +1,10 @@
 # DCC Linux 6.6 缺失特性（按自动化证据）
 
 > 最后更新：2026-07-16 — 以 `scripts/sync_remote_build.sh`、
-> `scripts/prepare0_check.sh`、`scripts/pahole_regress.sh`、
-> `scripts/objtool_regress.sh`、`scripts/remote_libiberty_probe.sh`
+> `scripts/kernel_full_check.sh`、`scripts/prepare0_check.sh`、
+> `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh`、
+> `scripts/modpost_link.sh`、`scripts/vmlinux_regress.sh`、
+> `scripts/remote_libiberty_probe.sh`
 > 与远程 Linux 6.6 / GCC libiberty 日志为准。
 
 ## 已通过的门禁
@@ -20,10 +22,14 @@
 | objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`、`.orc_unwind_ip` |
 | KASAN/UBSAN/KCSAN/KCOV 插桩（初版） | `-fsanitize=*` 函数入口桩 + `.dcc.san_info` 节 |
 | 跨 TU LTO | `-flto` 生成 `.llvm.lto`；`-r` 多 `.o` 经 `ld -r` + objcopy 合并摘要 |
+| LTO dead symbol 剔除 | `-ffunction-sections`（`-flto` 默认）+ `ld --gc-sections` + objcopy strip |
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
 | modpost `file2alias.c` | 单 TU `-c` 生成 `file2alias.o` |
-| prepare0 窄目标 | `scripts/prepare0_check.sh`（devicetable / bounds / file2alias / empty.o） |
-| pahole / objtool 回归脚本 | `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh` |
+| prepare0 窄目标 | `scripts/prepare0_check.sh`（devicetable / bounds / file2alias） |
+| pahole / objtool 单 TU 回归 | `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh` |
+| modpost 链接脚本 | `scripts/modpost_link.sh`（HOSTCC=dcc，fixdep 用 gcc） |
+| QEMU / vmlinux 回归脚本 | `scripts/qemu_boot_matrix.sh`、`scripts/vmlinux_regress.sh` |
+| 内核全树编排 | `scripts/kernel_full_check.sh`（缺产物时 SKIP） |
 | `#if` 十六进制字面量 | `preproc` 单测 `if_hex_*`（原 `0x41` 被拆坏） |
 | `#include_next` | `preproc` 单测 + glibc `<limits.h>` |
 | 宏展开涂蓝 / 防栈溢出 | `nested_function_macro_*`；远程 `argv.c` 不再 abort |
@@ -34,9 +40,9 @@
 | 特性 | 当前状态 | 说明 |
 |------|----------|------|
 | prepare0 全链路 `make prepare0` | ⚠️ 窄目标已通过 | 完整 make 仍可能触发无关 prepare 步骤；用窄脚本验收 |
-| QEMU 启动矩阵 | ⚠️ 脚本就绪 | `scripts/qemu_boot_matrix.sh` 在无 bzImage 时 SKIP；需 `make CC=dcc bzImage` |
-| pahole / objtool 完整回归 | ⚠️ 单 TU 已通过 | 完整 vmlinux 链接后 objtool 全树扫描仍待验 |
-| LTO 链接器 dead symbol | ⚠️ 摘要已合并 | `dead_local_functions` 探测就绪；未接入 `--gc-sections` 删除 |
+| 全树 `make CC=dcc` | ⏳ 待远程首跑 | 脚本与 LTO/gc 已就绪；需真实 vmlinux/bzImage 日志 |
+| QEMU 启动矩阵 | ⚠️ 脚本就绪 | 无 bzImage 时 SKIP；`kernel_full_check.sh` 编排 |
+| vmlinux pahole / objtool | ⚠️ 脚本就绪 | 无 vmlinux 时 SKIP；单 TU 回归已通过 |
 
 ## 短期：GCC libiberty（纯 C）
 
@@ -73,20 +79,23 @@
 | 全局 `&arr[i]` | 初值校验过严 | 静态初值 + rela addend |
 | 前向 struct 成员 | 空 fields | 空时查 `struct_defs` |
 
-## 已实现模块（2026-07-15 扩展）
+## 已实现模块（2026-07-16 扩展）
 
 | 特性 | 说明 |
 |------|------|
 | BTF struct 探测 | `build_btf_probe()`：int + `dcc_probe` 结构体 |
 | eh_frame FDE | 每函数 PC+size 生成 FDE；ORC 节写入 PC 列表 |
-| LTO 链接 | `src/link.rs`：`ld -r` + `objcopy --add-section .llvm.lto` |
+| LTO 链接 + gc | `src/link.rs`：`ld -r --gc-sections` + `.llvm.lto` 注入 + dead strip |
+| per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |
+| rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |
 | CLI 多输入 | `-r a.o b.o -o merged.o` 链接模式 |
-| 验收脚本 | prepare0 / pahole / objtool 三路回归 |
+| 验收脚本 | prepare0 / pahole / objtool / modpost / vmlinux / kernel_full_check |
 
 ## 远程基线
 
 - 工作区：`~/dcc`（亦见历史 `~/dcc-agent-linux66`）
-- 同步构建：`scripts/sync_remote_build.sh`（含 prepare0/pahole/objtool 回归）
+- 同步构建：`scripts/sync_remote_build.sh`（含 prepare0/pahole/objtool/kernel_full_check）
 - 内核树：`~/linux-6.6`，需已有 `.config`
 - GCC 子集：`~/gcc-src` + `scripts/remote_libiberty_probe.sh`
+- 内核全树：`scripts/kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物 SKIP）
 - QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` + bzImage）

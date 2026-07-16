@@ -96,6 +96,14 @@ check "MP_phony" bash -c "grep -q '^$TMP/hdr.h:' '$TMP/phony.d'"
 "$DCC" -flto -c -o "$TMP/lto2.o" "$TMP/san.c"
 check "LTO_size_hint" bash -c "strings '$TMP/lto2.o' | grep -q ':.*:1'"
 
+cat > "$TMP/dead.c" <<'EOF'
+static int dead_fn(void) { return 99; }
+int live_fn(void) { return dead_fn() + 1; }
+EOF
+"$DCC" -flto -c -o "$TMP/dead.o" "$TMP/dead.c"
+check "LTO_function_sections" bash -c "readelf -SW '$TMP/dead.o' | grep -q '\\.text\\.live_fn'"
+check "LTO_per_func_section" bash -c "readelf -SW '$TMP/dead.o' | grep -q '\\.text\\.dead_fn'"
+
 "$DCC" -mno-red-zone -c -o "$TMP/nrz.o" "$TMP/san.c"
 check "mno_red_zone" test -f "$TMP/nrz.o"
 

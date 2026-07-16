@@ -42,6 +42,7 @@ pub struct Config {
     pub sse: bool,
     pub debug_level: u8,   // 0=off (g0), 1=g1, 2=g2, 3=g3
     pub lto_enabled: bool,
+    pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
     pub sanitizers: SanitizerFlags,
     pub input_lang: InputLang,
     pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
@@ -185,6 +186,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut sse = true;
     let mut debug_level: u8 = 0;
     let mut lto_enabled = false;
+    let mut function_sections = false;
+    let mut no_function_sections = false;
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
 
@@ -279,6 +282,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-g3" => debug_level = 3,
             "-flto" => lto_enabled = true,
             a if a.starts_with("-flto=") => lto_enabled = true,
+            "-ffunction-sections" => function_sections = true,
+            "-fno-function-sections" => no_function_sections = true,
             a if a.starts_with("-fsanitize") => {}
             "-x" => {
                 i += 1;
@@ -488,6 +493,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         i += 1;
     }
 
+    // -flto 默认开启 per-function section，便于链接期 --gc-sections
+    if lto_enabled && !no_function_sections {
+        function_sections = true;
+    }
+
     let link_mode = relocatable
         && inputs.len() >= 2
         && inputs.iter().all(|p| {
@@ -530,7 +540,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             } else { None }
         });
         Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, force_includes, syntax_only,
-            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled,
+            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             raw_args: args.to_vec() })
     } else {
@@ -538,7 +548,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             inputs.push(PathBuf::from("-"));
         }
         Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode: false, emit_asm, preprocess_only, force_includes, syntax_only,
-            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled,
+            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             raw_args: args.to_vec() })
     }
