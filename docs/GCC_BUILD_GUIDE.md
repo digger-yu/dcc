@@ -33,8 +33,8 @@ DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
 
 | 指标 | 数值 |
 |------|------|
-| 可编译 `.c` | **124** |
-| 失败 | **1**（`regex.c`） |
+| 可编译 `.c` | **125** |
+| 失败 | **0** |
 | 跳过 | **4**（`msdos` / `pex-djgpp` / `pex-msdos` / `pex-win32`） |
 | 基线（本轮初） | 约 90 OK / 39 FAIL |
 
@@ -60,19 +60,14 @@ DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
 | 前向 struct 成员访问 | 空字段 Rc 不更新 | 空字段时查 `struct_defs` |
 | `pid_t` / md5_uint32 | 缺 sys/types、stdint 路径 | config.h 补全 + `__INT_MAX__` 等 |
 | 无参函数宏 `PREFETCH()` | `()` 被解析成一个空实参 | 空 `()` → 零个实参 |
+| `regex.c` 完整文件仍 `(**d)` | V2 include 缓存复用修复前展开 | 预处理缓存 bump 至 **V3** |
 
-### 仍失败
-
-| 文件 | 现象 | 说明 |
-|------|------|------|
-| `regex.c` | 完整文件中仍见 `(**d)`、`PREFETCH` 残留 | 最小例 `scripts/t_tr2.c` 已验证 `(*d)` 正确；完整文件疑与 `#include "regex.c"`（`INSIDE_RECURSION`）及大块 flush 时序有关 |
-
-### 宏展开复现（TRANSLATE）
+### 宏展开回归
 
 ```bash
-# 远程
-bash scripts/test_tr2.sh          # 期望：无 **d，含 translate[(unsigned char) (*d)]
-python3 scripts/rootcause_sim.py    # 本地：OLD→(**d)，NEW→(*d)
+bash scripts/test_tr2.sh            # 最小例
+bash scripts/test_v3_cache.sh       # 旧 V2 缓存存在时 regex.c 仍正确
+python3 scripts/rootcause_sim.py
 ```
 
 ## 与内核路径的关系

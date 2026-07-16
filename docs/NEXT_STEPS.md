@@ -21,26 +21,18 @@
 - [x] 远程 libiberty 基线：**90 OK / 39 FAIL**
 - [x] 浮点 AndAnd/OrOr、宏参/字符串、括号函数名、嵌套 fptr、restrict 数组
 - [x] `##` 二次替换、多声明符/`&arr[i]`、前向 struct、config.h 补全
-- [x] 远程 libiberty 当前：**124 OK / 1 FAIL**（剩 `regex.c`）
+- [x] 远程 libiberty 当前：**125 OK / 0 FAIL**（含 `regex.c`）
 
 ## 待办（短期：GCC 纯 C 子集）
 
-### 1. 修完 `regex.c`（完整文件上下文）
+### 1. libiberty 后续（非阻塞）
 
-`substitute_params` 已修：`handle_paste` 在无 `##` 时不替参，第三步用
-`replace_all_params` 单次不透明扫描（同根因类：`&&di`）。
-
-最小复现 `scripts/t_tr2.c` 远程 `-E` 已输出 `(*d)` 而非 `(**d)`：
+`regex.c` 已通过：`substitute_params` 修复 + include 缓存 V3。
+回归：
 
 ```bash
 bash scripts/test_tr2.sh
-python3 scripts/rootcause_sim.py
-```
-
-完整 `regex.c` 仍失败：疑 `#include "regex.c"` / `INSIDE_RECURSION` 递归与
-`PREFETCH()` 在大块 `flush_active_source` 中的展开时序。
-
-```bash
+bash scripts/test_v3_cache.sh
 DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
   bash scripts/remote_libiberty_probe.sh
 ```

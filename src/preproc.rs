@@ -829,9 +829,6 @@ impl Preprocessor {
                 params.push("__VA_ARGS__".to_string());
             }
             let body = after_name[paren_end+1..].trim().to_string();
-            if name == "TRANSLATE" || name == "PREFETCH" {
-                eprintln!("dcc-debug #define {}({:?}) body={:?}", name, params, body);
-            }
             self.macros.insert(name.to_string(), MacroDef {
                 params: Some(params), body, variadic,
             });
@@ -2318,7 +2315,8 @@ impl Preprocessor {
     fn hash_macro_state(&self) -> u64 {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V2");
+        // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V3");
         for name in names {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
@@ -2340,7 +2338,7 @@ impl Preprocessor {
     fn get_cache_path(&self, file_path: &Path, content_hash: u64, macro_hash: u64) -> Option<PathBuf> {
         let cache_dir = self.cache_dir.as_ref()?;
         let file_hash = Self::hash_content(&file_path.to_string_lossy());
-        let cache_name = format!("v2_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
+        let cache_name = format!("v3_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
         Some(cache_dir.join(cache_name))
     }
 
@@ -2349,7 +2347,7 @@ impl Preprocessor {
         let mut lines = content.lines();
 
         // 第一行: 标记
-        if lines.next()? != "DCC_CACHE_V2" {
+        if lines.next()? != "DCC_CACHE_V3" {
             return None;
         }
 
@@ -2386,7 +2384,7 @@ impl Preprocessor {
     }
 
     fn save_to_cache(&self, cache_path: &Path, output: &str, macros: &HashMap<String, MacroDef>) {
-        let mut content = String::from("DCC_CACHE_V2\n");
+        let mut content = String::from("DCC_CACHE_V3\n");
         content.push_str(output);
         content.push_str("END_OUTPUT\n");
 
