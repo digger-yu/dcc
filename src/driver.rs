@@ -2,7 +2,8 @@
 // 第一性原理: 编译器是"输入/输出"的胶水;所有业务在 preproc/parse/codegen 内部完成。
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+use crate::mmap_io::MappedInput;
 use std::process::Command;
 use crate::cli::{Config, InputLang};
 use crate::diagnostics::{Diagnostic, Severity, enrich_diags};
@@ -39,19 +40,19 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         if cfg.lto_enabled { eprintln!("dcc: -flto"); }
     }
 
-    // 读源：支持文件和 stdin（`-`）
-    let (src, file_name) = if input.as_os_str() == "-" {
-        let mut buf = Vec::new();
-        io::stdin().read_to_end(&mut buf)
+    // 读源：mmap（ADR-006）或 stdin
+    let (mapped, file_name) = if input.as_os_str() == "-" {
+        let mapped = MappedInput::from_stdin(io::stdin())
             .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read stdin: {}", e),
                 crate::diagnostics::Span::point("-", 0, 0))])?;
-        (buf, "-".to_string())
+        (mapped, "-".to_string())
     } else {
-        let s = fs::read(input)
+        let mapped = MappedInput::open(input)
             .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", input.display(), e),
                 crate::diagnostics::Span::point(&input.display().to_string(), 0, 0))])?;
-        (s, input.display().to_string())
+        (mapped, input.display().to_string())
     };
+    let src = mapped.as_slice();
 
     // 预处理
     let (preprocessed, mut pp_diags, include_deps) = preproc::preprocess(&src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes);
@@ -154,6 +155,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let bytes = codegen::emit(
         &module, &target, cfg.relocatable, cfg.emit_asm, &file_name,
         cfg.debug_level, cfg.sanitizers, lto_enabled, function_sections,
+        cfg.parallel_codegen,
     );
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());

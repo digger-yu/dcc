@@ -21,8 +21,8 @@ T_dcc = T_gcc / (S_macro * S_header * S_type * S_opt * S_dbg * S_codegen * S_io)
 | S_type | 跨 TU 类型共享 | 2-4x | typedef/struct 全局一致,无需重复定义 |
 | S_opt | 按需优化 | 2-3x | 只跑已知收益高的 pass,跳过 LLVM 风格的多 pass |
 | S_dbg | 调试信息直出 | 1.5-2x | AST 留类型,直接 emit DWARF |
-| S_codegen | 并行代码生成 | 2x | 函数级并行,rayon 调度 |
-| S_io | mmap 输入 | 1.2-1.5x | 不复制文件,零拷贝 |
+| S_codegen | 并行代码生成 | 2x | 函数级分块 emit/merge（`-O2+`）；真·多线程待 Arc 化 |
+| S_io | mmap 输入 | 1.2-1.5x | `src/mmap_io.rs` 零拷贝读源（ADR-006） |
 | S_pp | 预处理输出精简 | 3.4x | 阶段3移除注释+跳过空行, 343K→100K 行 |
 
 **理论上限**: 36-180x 加速。但实际受限于:

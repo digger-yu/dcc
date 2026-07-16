@@ -4,6 +4,7 @@
 pub mod disasm;
 pub mod elf;
 pub mod x86_64;
+pub mod aarch64;
 
 use crate::debug;
 use crate::ir::Module;
@@ -21,6 +22,7 @@ pub fn emit(
     sanitizers: SanitizerFlags,
     lto_enabled: bool,
     function_sections: bool,
+    parallel_codegen: bool,
 ) -> Vec<u8> {
     match target.arch {
         crate::cli::Arch::X86_64 => {
@@ -28,6 +30,7 @@ pub fn emit(
             cg.relocatable = relocatable || emit_asm;
             cg.function_sections = function_sections || lto_enabled;
             cg.emit_asm_text = emit_asm;
+            cg.parallel_codegen = parallel_codegen && !emit_asm;
             cg.source_name = source_name.to_string();
             cg.debug_level = debug_level;
             cg.emit_cfi = debug_level > 0 || target.frame_pointer;
@@ -121,6 +124,11 @@ pub fn emit(
             } else {
                 elf::build_elf_x86_64(&cg.code, cg.entry)
             }
+        }
+        crate::cli::Arch::AArch64 => {
+            let mut cg = aarch64::Aarch64Codegen::new(target.clone(), relocatable || emit_asm);
+            cg.compile(module.source());
+            cg.build_output()
         }
         a => panic!("arch {:?} not yet implemented (M0: x86_64 only)", a),
     }

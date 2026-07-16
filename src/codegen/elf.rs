@@ -63,6 +63,10 @@ pub const R_X86_64_32S: u32 = 11;
 pub const R_X86_64_64: u32 = 1;
 pub const R_X86_64_GOTPCREL: u32 = 9;
 
+// AArch64 重定位类型
+pub const R_AARCH64_CALL26: u32 = 283;
+pub const R_AARCH64_JUMP26: u32 = 282;
+
 // ===== 数据结构 =====
 
 /// 符号表条目 (供 .o 使用)
@@ -144,6 +148,154 @@ pub fn build_elf_x86_64(code: &[u8], entry: u64) -> Vec<u8> {
     // ===== Code =====
     out.extend_from_slice(code);
     out
+}
+
+/// AArch64 ET_EXEC（M7 hello world）
+pub fn build_elf_aarch64(code: &[u8], entry: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(code.len() + 256);
+    out.extend_from_slice(&ELFMAG);
+    out.push(ELFCLASS64);
+    out.push(ELFDATA2LSB);
+    out.push(EV_CURRENT);
+    out.push(0);
+    out.extend_from_slice(&[0u8; 8]);
+    out.extend_from_slice(&ET_EXEC.to_le_bytes());
+    out.extend_from_slice(&EM_AARCH64.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&entry.to_le_bytes());
+    out.extend_from_slice(&64u64.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&64u16.to_le_bytes());
+    out.extend_from_slice(&56u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+
+    let p_vaddr = 0x400000u64;
+    let p_filesz = (64 + 56) as u64 + code.len() as u64;
+    out.extend_from_slice(&PT_LOAD.to_le_bytes());
+    out.extend_from_slice(&7u32.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    out.extend_from_slice(&p_vaddr.to_le_bytes());
+    out.extend_from_slice(&p_vaddr.to_le_bytes());
+    out.extend_from_slice(&p_filesz.to_le_bytes());
+    out.extend_from_slice(&p_filesz.to_le_bytes());
+    out.extend_from_slice(&0x1000u64.to_le_bytes());
+    out.extend_from_slice(code);
+    out
+}
+
+/// AArch64 ET_REL 最小 .o（仅 .text + symtab）
+pub fn build_elf_rel_aarch64(
+    text: &[u8],
+    symbols: &[ElfSym],
+    relocations: &[ElfRela],
+) -> Vec<u8> {
+    let mut shstr = vec![0u8];
+    let mut strtab = vec![0u8];
+    let sec_name_off = |buf: &mut Vec<u8>, name: &str| -> u32 {
+        let off = buf.len() as u32;
+        buf.extend_from_slice(name.as_bytes());
+        buf.push(0);
+        off
+    };
+    let text_name = sec_name_off(&mut shstr, ".text");
+    let symtab_name = sec_name_off(&mut shstr, ".symtab");
+    let strtab_name = sec_name_off(&mut shstr, ".strtab");
+    let shstrtab_name = sec_name_off(&mut shstr, ".shstrtab");
+    let rela_name = sec_name_off(&mut shstr, ".rela.text");
+
+    let mut sym_name_off = vec![0u32];
+    for sym in symbols {
+        sym_name_off.push(strtab.len() as u32);
+        strtab.extend_from_slice(sym.name.as_bytes());
+        strtab.push(0);
+    }
+
+    let mut symtab = Vec::new();
+    symtab.extend_from_slice(&0u32.to_le_bytes());
+    symtab.extend_from_slice(&[0u8; 13]);
+    symtab.extend_from_slice(&0u64.to_le_bytes());
+    for (i, sym) in symbols.iter().enumerate() {
+        symtab.extend_from_slice(&sym_name_off[i + 1].to_le_bytes());
+        symtab.push(sym.ty);
+        symtab.push(sym.bind | (sym.visibility << 4));
+        symtab.extend_from_slice(&sym.section.to_le_bytes());
+        symtab.extend_from_slice(&sym.value.to_le_bytes());
+        symtab.extend_from_slice(&sym.size.to_le_bytes());
+    }
+
+    let mut rela = Vec::new();
+    for rel in relocations {
+        rela.extend_from_slice(&rel.offset.to_le_bytes());
+        let info = ((rel.sym_index as u64) << 32) | (rel.rel_type as u64);
+        rela.extend_from_slice(&info.to_le_bytes());
+        rela.extend_from_slice(&rel.addend.to_le_bytes());
+    }
+
+    let header_size = 64usize;
+    let text_off = header_size;
+    let symtab_off = align_up(text_off + text.len(), 8);
+    let strtab_off = symtab_off + symtab.len();
+    let shstrtab_off = strtab_off + strtab.len();
+    let rela_off = align_up(shstrtab_off + shstr.len(), 8);
+    let shoff = align_up(rela_off + rela.len(), 8);
+
+    let mut out = Vec::with_capacity(shoff + 6 * 64);
+    out.extend_from_slice(&ELFMAG);
+    out.push(ELFCLASS64);
+    out.push(ELFDATA2LSB);
+    out.push(EV_CURRENT);
+    out.push(0);
+    out.extend_from_slice(&[0u8; 8]);
+    out.extend_from_slice(&ET_REL.to_le_bytes());
+    out.extend_from_slice(&EM_AARCH64.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    out.extend_from_slice(&(shoff as u64).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&64u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&6u16.to_le_bytes());
+    out.extend_from_slice(&64u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+
+    pad_to(&mut out, text_off);
+    out.extend_from_slice(text);
+    pad_to(&mut out, symtab_off);
+    out.extend_from_slice(&symtab);
+    pad_to(&mut out, strtab_off);
+    out.extend_from_slice(&strtab);
+    pad_to(&mut out, shstrtab_off);
+    out.extend_from_slice(&shstr);
+    pad_to(&mut out, rela_off);
+    out.extend_from_slice(&rela);
+    pad_to(&mut out, shoff);
+
+    write_section_header(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    write_section_header(&mut out, text_name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
+        0, text_off as u64, text.len() as u64, 0, 0, 4, 0);
+    write_section_header(&mut out, symtab_name, SHT_SYMTAB, 0,
+        0, symtab_off as u64, symtab.len() as u64, 3, 1, 8, 24);
+    write_section_header(&mut out, strtab_name, SHT_STRTAB, 0,
+        0, strtab_off as u64, strtab.len() as u64, 0, 0, 1, 0);
+    write_section_header(&mut out, shstrtab_name, SHT_STRTAB, 0,
+        0, shstrtab_off as u64, shstr.len() as u64, 0, 0, 1, 0);
+    write_section_header(&mut out, rela_name, SHT_RELA, SHF_INFO_LINK,
+        0, rela_off as u64, rela.len() as u64, 2, 1, 8, 24);
+    out
+}
+
+fn align_up(v: usize, align: usize) -> usize {
+    (v + align - 1) & !(align - 1)
+}
+
+fn pad_to(buf: &mut Vec<u8>, target: usize) {
+    while buf.len() < target {
+        buf.push(0);
+    }
 }
 
 // ===== ET_REL 构建 (.o 文件) =====
@@ -431,10 +583,6 @@ pub fn build_elf_rel_x86_64(
 
 fn align(v: u64, a: u64) -> u64 {
     (v + a - 1) & !(a - 1)
-}
-
-fn pad_to(out: &mut Vec<u8>, target: usize) {
-    while out.len() < target { out.push(0); }
 }
 
 /// 构建 .shstrtab: 所有节名的字符串表

@@ -46,6 +46,7 @@ pub struct Config {
     pub sanitizers: SanitizerFlags,
     pub input_lang: InputLang,
     pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
+    pub parallel_codegen: bool, // -O2+ 默认开启函数级并行 emit（可用 DCC_NO_PARALLEL=1 关闭）
     pub raw_args: Vec<String>,   // 原始参数（sanitizer/LTO 探测）
 }
 
@@ -539,17 +540,25 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 Some(output.display().to_string())
             } else { None }
         });
+        let parallel_codegen = opt >= 2
+            && std::env::var("DCC_NO_PARALLEL").is_err()
+            && cfg!(unix);
         Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, force_includes, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
+            parallel_codegen,
             raw_args: args.to_vec() })
     } else {
         if inputs.is_empty() {
             inputs.push(PathBuf::from("-"));
         }
+        let parallel_codegen = opt >= 2
+            && std::env::var("DCC_NO_PARALLEL").is_err()
+            && cfg!(unix);
         Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode: false, emit_asm, preprocess_only, force_includes, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
+            parallel_codegen,
             raw_args: args.to_vec() })
     }
 }

@@ -59,7 +59,7 @@
 - **第一性原理**:
   - M0 阶段 read+copy 足够, 文件小
   - M3+ 处理 Linux 内核 (单文件 5K 行), mmap 减少 1.2-1.5x 时间
-- **决策**: M0 走 read, M3 重构为 mmap
+- **决策**: M0 走 read, M3 重构为 mmap → **2026-07-16 已在 `src/mmap_io.rs` 实装（Unix mmap + Windows read 回退）**
 
 ## ADR-007: 一开始就做跨平台, 暂以 host 为默认 target
 

@@ -26,6 +26,15 @@ EOF
 "$DCC" -O1 -c -o "$TMP/fold.o" "$TMP/fold.c"
 check "O1_fold" bash -c "objdump -d '$TMP/fold.o' | grep -q 'mov.*\\\$0x5'"
 
+cat > "$TMP/o2fold.c" <<'EOF'
+int main(void) { if (1) return 42; return 0; }
+EOF
+"$DCC" -O2 -c -o "$TMP/o2fold.o" "$TMP/o2fold.c"
+check "O2_branch_fold" bash -c "objdump -d '$TMP/o2fold.o' | grep -qE 'mov.*\\\$0x2a|mov.*\\\$0x42'"
+
+"$DCC" --target aarch64-linux-gnu -c -o "$TMP/a64.o" examples/hello.c
+check "aarch64_hello" bash -c "readelf -h '$TMP/a64.o' | grep -q AArch64"
+
 cat > "$TMP/hdr.h" <<'EOF'
 int hdr_var;
 EOF

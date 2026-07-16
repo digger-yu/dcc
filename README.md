@@ -44,12 +44,12 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | 承诺 | 缺失内容 |
 |------|----------|
 | 编译 Linux 内核 | struct 传参/返回/long double 等已实现，剩余特性持续补齐 |
-| ARM64 / RISC-V 后端 | 仅 x86_64 后端可用 |
-| 自举 | 大量 C 特性未实现，无法编译自身源码（M5 未开始） |
+| ARM64 / RISC-V 后端 | aarch64 hello `.o` 已实现（M7）；RISC-V 待补 |
+| 自举 | M5 未开始；阶段 E 选定 M7 多架构优先于自举 |
 | 内联 asm | 已实现 — 常用约束 `"r"`/`"m"`/`"=r"`、`memory` clobber、文件级 asm |
 | va_list (SysV) | 已实现 — GP 参数区 + XMM0–7 SSE 保存区，float/double/long double |
 | _Generic 指针 | 已实现 — 按 pointee 精确匹配，void* 与对象指针兼容 |
-| 优化 pass | 预处理器 #if 常量求值已支持，编译器内部无独立优化 pass |
+| 优化 pass | `-O1` 常量折叠；`-O2` DCE/分支折叠；`-O3` 小 static 函数内联 |
 <!-- -->
 
 ## 里程碑
@@ -63,7 +63,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | M4 | 预处理 + builtin | 已完成 |
 | M5 | 自举 (dcc 编 dcc) | 未开始 |
 | M6 | Linux 内核 benchmark | 进行中（窄目标已通过，全树待首跑） |
-| M7 | ARM64 + RISC-V | 未开始 |
+| M7 | ARM64 + RISC-V | 进行中（aarch64 hello 已通） |
 | M8 | C11/17/23 + GNU 扩展 | 已完成 |
 | M9 | 精准错误诊断 | 已完成 |
 | M10 | 跨平台交叉编译 | 未开始 |

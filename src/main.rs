@@ -22,6 +22,7 @@ mod sanitizer;
 mod parser;
 mod codegen;
 mod preproc;
+mod mmap_io;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();

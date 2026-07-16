@@ -90,6 +90,7 @@ pub struct Codegen {
     global_asm_exports: HashSet<String>,
     func_asm_layout: HashMap<String, FuncAsmLayout>,
     pub source_name: String,
+    pub parallel_codegen: bool,
 }
 
 /// Per-function layout captured after resolve (for -S disassembly).
@@ -134,6 +135,43 @@ struct AsmOpBinding {
     is_mem: bool,
 }
 
+#[derive(Clone)]
+struct ParallelGlobalSnap {
+    offset: u64,
+    size: usize,
+    section: u16,
+}
+
+#[derive(Clone)]
+struct ParallelEmitCtx {
+    target: Target,
+    relocatable: bool,
+    function_sections: bool,
+    emit_asm_text: bool,
+    debug_level: u8,
+    emit_cfi: bool,
+    source_name: String,
+    globals: HashMap<String, ParallelGlobalSnap>,
+    variadic_funcs: HashMap<String, bool>,
+    nested_funcs: HashMap<String, Vec<(String, i32)>>,
+    rodata: Vec<u8>,
+    string_pool: HashMap<Vec<u8>, u64>,
+    text_align: u64,
+}
+
+#[derive(Clone)]
+struct FuncEmitChunk {
+    name: String,
+    code: Vec<u8>,
+    size: u64,
+    string_refs: Vec<(u64, Vec<u8>)>,
+    float_refs: Vec<(u64, u64)>,
+    pending_func_rels: Vec<(u64, String)>,
+    pending_data_rels: Vec<(u64, String)>,
+    label_addr_refs: Vec<(u64, String)>,
+    disasm_calls: HashMap<u64, String>,
+}
+
 impl Codegen {
     pub fn new(target: Target) -> Self {
         Self { code: vec![], entry: 0, target, labels: Default::default(),
@@ -171,7 +209,8 @@ impl Codegen {
                disasm_calls: HashMap::new(), disasm_data: HashMap::new(),
                global_asm_exports: HashSet::new(),
                func_asm_layout: HashMap::new(),
-               source_name: String::new() }
+               source_name: String::new(),
+               parallel_codegen: false }
     }
 
     /// -mno-red-zone 时禁止使用红区，帧上额外保留 128 字节。
@@ -1229,14 +1268,141 @@ impl Codegen {
         }
     }
 
-    /// 生成所有函数代码 (单 pass, 所有函数进入 .text)
+    /// 生成所有函数代码；`-O2+` 且 relocatable 时走函数级并行 emit。
     fn emit_functions(&mut self, prog: &Program) {
-        // 收集顶层函数 (owned, 避免借用冲突)
         let top_funcs: Vec<FuncDecl> = prog.decls.iter().filter_map(|d| {
             if let Decl::Func(f) = d { if f.body.is_some() { Some(f.clone()) } else { None } } else { None }
         }).collect();
+        if self.parallel_codegen && self.relocatable && top_funcs.len() >= 2 {
+            self.emit_functions_parallel(&top_funcs, prog);
+            return;
+        }
         for f in &top_funcs {
             self.compile_func(f, prog);
+        }
+    }
+
+    fn parallel_emit_ctx(&self) -> ParallelEmitCtx {
+        ParallelEmitCtx {
+            target: self.target.clone(),
+            relocatable: self.relocatable,
+            function_sections: self.function_sections,
+            emit_asm_text: self.emit_asm_text,
+            debug_level: self.debug_level,
+            emit_cfi: self.emit_cfi,
+            source_name: self.source_name.clone(),
+            globals: self.globals.iter().map(|(k, v)| {
+                (k.clone(), ParallelGlobalSnap {
+                    offset: v.offset,
+                    size: v.size,
+                    section: v.section,
+                })
+            }).collect(),
+            variadic_funcs: self.variadic_funcs.clone(),
+            nested_funcs: self.nested_funcs.clone(),
+            rodata: self.rodata.clone(),
+            string_pool: self.string_pool.clone(),
+            text_align: self.text_align,
+        }
+    }
+
+    fn codegen_from_parallel(ctx: ParallelEmitCtx) -> Self {
+        let mut cg = Self::new(ctx.target);
+        cg.relocatable = ctx.relocatable;
+        cg.function_sections = ctx.function_sections;
+        cg.emit_asm_text = ctx.emit_asm_text;
+        cg.debug_level = ctx.debug_level;
+        cg.emit_cfi = ctx.emit_cfi;
+        cg.source_name = ctx.source_name;
+        for (name, snap) in ctx.globals {
+            cg.globals.insert(name, GlobalVar {
+                offset: snap.offset,
+                size: snap.size,
+                ty: Type::Int,
+                init: None,
+                section: snap.section,
+            });
+        }
+        cg.variadic_funcs = ctx.variadic_funcs;
+        cg.nested_funcs = ctx.nested_funcs;
+        cg.rodata = ctx.rodata;
+        cg.string_pool = ctx.string_pool;
+        cg.text_align = ctx.text_align;
+        cg
+    }
+
+    fn patch_local_jumps(&mut self) {
+        for p in self.pending.drain(..) {
+            let dst = *self.labels.get(&p.target)
+                .unwrap_or_else(|| panic!("unresolved label: {}", p.target));
+            let off = p.at as usize;
+            let (rel_from, rel_off) = match p.kind {
+                JumpKind::Jmp => (p.at + 5, off + 1),
+                _ => (p.at + 6, off + 2),
+            };
+            let rel = (dst as i64) - (rel_from as i64);
+            self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+        }
+    }
+
+    fn emit_func_chunk(ctx: ParallelEmitCtx, f: FuncDecl, prog: &Program) -> FuncEmitChunk {
+        let mut cg = Self::codegen_from_parallel(ctx);
+        cg.compile_func(&f, prog);
+        cg.patch_local_jumps();
+        let size = cg.func_sizes.get(&f.name.name).copied().unwrap_or(cg.code.len() as u64);
+        FuncEmitChunk {
+            name: f.name.name.clone(),
+            code: cg.code,
+            size,
+            string_refs: cg.string_refs,
+            float_refs: cg.float_refs,
+            pending_func_rels: cg.pending_func_rels,
+            pending_data_rels: cg.pending_data_rels,
+            label_addr_refs: cg.label_addr_refs,
+            disasm_calls: cg.disasm_calls,
+        }
+    }
+
+    fn merge_func_chunk(&mut self, chunk: FuncEmitChunk) {
+        let align = 16usize;
+        while self.code.len() % align != 0 {
+            self.code.push(0x90);
+        }
+        let base = self.pos();
+        self.labels.insert(chunk.name.clone(), base);
+        self.func_sizes.insert(chunk.name.clone(), chunk.size);
+        self.code.extend_from_slice(&chunk.code);
+        for (pos, data) in chunk.string_refs {
+            self.string_refs.push((base + pos, data));
+        }
+        for (pos, off) in chunk.float_refs {
+            self.float_refs.push((base + pos, off));
+        }
+        for (pos, sym) in chunk.pending_func_rels {
+            self.pending_func_rels.push((base + pos, sym));
+        }
+        for (pos, sym) in chunk.pending_data_rels {
+            self.pending_data_rels.push((base + pos, sym));
+        }
+        for (pos, lbl) in chunk.label_addr_refs {
+            self.label_addr_refs.push((base + pos, lbl));
+        }
+        for (pos, name) in chunk.disasm_calls {
+            self.disasm_calls.insert(base + pos, name);
+        }
+    }
+
+    /// 函数级分块 emit 与合并（默认串行；分块架构为后续真并行预留）。
+    fn emit_functions_parallel(&mut self, top_funcs: &[FuncDecl], prog: &Program) {
+        let ctx = self.parallel_emit_ctx();
+        let chunks: Vec<FuncEmitChunk> = top_funcs
+            .iter()
+            .map(|f| Self::emit_func_chunk(ctx.clone(), f.clone(), prog))
+            .collect();
+        for f in top_funcs {
+            if let Some(chunk) = chunks.iter().find(|c| c.name == f.name.name) {
+                self.merge_func_chunk(chunk.clone());
+            }
         }
     }
 
