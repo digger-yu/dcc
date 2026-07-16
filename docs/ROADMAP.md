@@ -60,7 +60,13 @@
 - **函数指针**: 支持声明 `void (*fp)(int)`, typedef `typedef int (*initcall_t)(void)`, 参数 `void (*cb)(int)`, 强制转换 `(void (*)(int))0`
 - **__asm__ 标签**: 支持 `__asm__("label")` 作为函数/变量符号重命名, 解析器静默跳过
 - **typeof**: 解析期推导类型, typeof(expr)→expr.ty(), typeof(type)→type
-- **语句表达式**: 执行块内语句, 最后表达式值作为结果留在目标寄存器
+- **语句表达式**: 执行块内语句, 最后表达式值作为结果留在目标寄存器; 支持后缀 `()` 调用链
+- **GNU 省略三元**: `x ?: y` 等价于 `x ? x : y`（内核 `ret ?: -errno` 等）
+- **__builtin_offsetof**: 编译期偏移; `_Static_assert` 与 const_eval 共享求值规则
+- **__auto_type**: 声明类型由初始化表达式推导（语句表达式/block 内局部声明）
+- **多维数组字段**: 结构体成员 `T a[N][M]` 连续 `[...]` 解析
+- **for-init 声明**: `for (enum E (v) = 0; ...)` 等 GNU 扩展
+- **object-like→function-like 宏**: `DIV_ROUND_UP`→`__KERNEL_DIV_ROUND_UP(...)` 链式展开; include 缓存 V5
 - **函数指针调用**: callee 从 Ident 改为 Box<Expr>, 直接调用走 call_label, 间接调用求值到 r11 后 call *r11 (49 FF D3)
 - **逗号运算符**: Pratt 解析 bp=1 最低优先级, 调用参数用 parse_expr_bp(2) 排除逗号, 初始化列表同理
 - **VLA**: ArraySize::Var 存储运行时表达式, 分配策略: 求值大小→imul元素大小→16字节对齐→sub rsp→保存基址到变量槽

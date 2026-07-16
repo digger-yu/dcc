@@ -14,6 +14,7 @@
 | `scripts/sync_remote_build.sh` | ✅ rsync + 全量远程测试 + autoconf 自愈 |
 | Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行 |
 | Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ |
+| `arch/x86/kernel/asm-offsets.c` 预处理 + 解析 | ✅ 2026-07-16：867→0 解析错误；剩 6 语义错误 |
 | modpost `file2alias.c` 单 TU | ✅ |
 | LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
 | `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc file2alias/empty（modpost/sumversion 待补） |
@@ -78,6 +79,38 @@ dcc 宿主 C 尚未覆盖。请用 `scripts/prepare0_full.sh` 验收等价窄目
 
 **全树 smoke**：`make CC=dcc HOSTCC=gcc bzImage` 为当前推荐混合模式（内核 TU 用 dcc，
 kconfig/fixdep 等宿主工具用 gcc 或 Rust fixdep）。步骤 7/10 需先产出 vmlinux/bzImage。
+
+### asm-offsets 验收（prepare0 步骤 4–5）
+
+Linux 6.6 x86_64 在 `prepare0` 中会编译 `arch/x86/kernel/asm-offsets.c` 生成
+`asm-offsets.s`（供后续提取结构体偏移常量）。
+
+```bash
+# 远程（内核树 ~/linux-6.6，dcc ~/dcc-agent-linux66/target/release/dcc）
+python3 scripts/test_asm_offsets.py
+
+# 或手动：读取 .asm-offsets.s.cmd 中的 gcc 命令，将 gcc 替换为 dcc 后执行
+cd ~/linux-6.6
+dcc -Wp,-MMD,... -S -o arch/x86/kernel/asm-offsets.s arch/x86/kernel/asm-offsets.c
+```
+
+**2026-07-16 进展**：
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| 解析错误（E0xxx） | ~867 | **0** |
+| 语义错误（E1xxx） | — | 6（percpu / thread_info 成员类型） |
+| `asm-offsets.s` | 未生成 | 仍 blocked（语义阶段） |
+
+主要修复类别：语句表达式后缀调用、typeof(struct)、section 相邻字符串、
+asm goto 试探解析、位域逗号分隔、结构体空字段、__auto_type、typedef 函数括号、
+`__builtin_offsetof` 常量求值、object-like→function-like 宏链、多维数组字段、
+for-init 枚举声明、属性后指针函数声明、GNU `?:` 省略中间操作数等。
+
+辅助脚本：`scripts/test_asm_offsets.py`（一键替换 gcc 为 dcc 并统计错误）、
+`scripts/summarize_err.py`（解析/语义错误分类）。
+
+**Windows 同步注意**：scp 后须 `perl -pi -e 's/\x0d//g'` 去 CR；勿用 `sed 's/\r//g'`。
 
 **内核头文件**：`devicetable-offsets.c` 依赖 `include/generated/autoconf.h`。
 若内核树仅有 `.config` 而无该头文件，同步脚本会自动执行
@@ -298,7 +331,8 @@ DCC 目前处于开发阶段，完整内核编译可能遇到以下问题：
 
 | 问题 | 原因 | 状态 |
 |------|------|------|
-| 解析器错误 | 某些复杂宏展开后的构造 | 持续改进中 |
+| 解析器错误 | 复杂宏展开后的 GNU 构造 | asm-offsets **解析已通过**（2026-07-16） |
+| 语义/类型检查 | percpu、thread_info 等内联宏展开类型不完整 | asm-offsets 剩 6 项，持续改进 |
 | codegen 不完整 | 部分 x86_64 指令尚未实现 | 持续改进中 |
 | 链接失败 | 缺少完整的链接器支持 | 计划中 |
 
@@ -374,7 +408,9 @@ A: 通常是因为宏定义体中包含注释（如 `HZ CONFIG_HZ /* comment */`
 
 ### Q: 解析器报 "expected type" 错误
 
-A: 可能是遇到了 DCC 尚未支持的内核构造。使用 `-dump-ast` 查看已解析的部分，定位错误位置。
+A: 可能是遇到了 DCC 尚未支持的内核构造。使用 `-dump-ast` 查看已解析的部分，
+定位错误位置。`asm-offsets.c` 的典型问题已收敛至语义阶段（E1004/E1010），
+可用 `scripts/summarize_err.py` 区分解析与语义错误。
 
 ## 8. 性能对比
 

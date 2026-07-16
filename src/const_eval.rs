@@ -3,7 +3,7 @@
 //! parser、typed IR 验证和后端必须共享同一套规则，避免某个阶段把
 //! “无法求值”误当成数值 0。
 
-use crate::ast::{BinOp, Expr, UnOp};
+use crate::ast::{find_field, BinOp, Expr, Type, UnOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstEvalError {
@@ -80,7 +80,41 @@ pub fn eval(expr: &Expr) -> ConstEvalResult {
             eval(l)?;
             eval(r)
         }
+        Expr::Offsetof { ty, member, .. } => {
+            Ok(offsetof_member(ty, member) as i128)
+        }
         _ => Err(ConstEvalError::NotConstant),
+    }
+}
+
+/// __builtin_offsetof(type, member) 编译期偏移
+fn offsetof_member(ty: &Type, member: &str) -> usize {
+    match ty {
+        Type::Union(_, _) => 0,
+        Type::Struct(_, fields) => {
+            let parts: Vec<&str> = member.split('.').collect();
+            let mut offset = 0usize;
+            let mut current_fields = fields.as_ref();
+            for (i, part) in parts.iter().enumerate() {
+                let name = if part.contains('[') {
+                    &part[..part.find('[').unwrap()]
+                } else {
+                    part
+                };
+                if let Some((field, inner_off)) = find_field(current_fields, name) {
+                    offset += field.offset + inner_off;
+                    if i < parts.len() - 1 {
+                        if let Type::Struct(_, sub) | Type::Union(_, sub) = &field.ty {
+                            current_fields = sub.as_ref();
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            offset
+        }
+        _ => 0,
     }
 }
 

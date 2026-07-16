@@ -97,6 +97,30 @@
 | 全局 `&arr[i]` | 初值校验过严 | 静态初值 + rela addend |
 | 前向 struct 成员 | 空 fields | 空时查 `struct_defs` |
 
+## 远程 debug 记录（2026-07-16，asm-offsets / prepare0）
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| stmt_expr 后 `()` 未解析 | 语句表达式缺后缀链 | `parse_postfix_suffix()` |
+| `__typeof__(struct T)` | `(` 后误用 `is_peek_type_start` | 改为 `is_type_start()` |
+| `section("a" "b")` | 属性只读一个 StringLit | `parse_concatenated_string_lit()` |
+| `__aligned__((expr))` | 只支持纯数字 | 括号深度跳过完整参数 |
+| asm 试探 skip 未恢复 lexer | bookmark/restore + 仅 asm goto 试探 | `probe_asm_goto()` |
+| 位域 `a:8, b:4` | `parse_expr()` 吞逗号 | `parse_expr_bp(2)` |
+| struct `{ lock; ; }` | 空字段非法 | `parse_fields` 跳过 lone `;` |
+| `__auto_type` / typedef `(fn)(...)` | 未支持 GNU 分支 | 新增解析路径 |
+| C11 atomic 预置宏 | 与内核 atomic-instrumented 冲突 | 删除 preproc 预置宏 |
+| `_Static_assert(offsetof(...))` | const_eval 无 Offsetof | `offsetof_member()` + find_field |
+| `DIV_ROUND_UP` 未展开 | object-like 别名后 `(args)` 未重扫描 | preproc 条件 tail_call 重扫描; 缓存 V5 |
+| `tags[3][EXPR]` | 结构体字段只解析一维 `[...]` | while LBracket + const_eval 数组界 |
+| `void __attr__ *fn()` | void 后属性残留 | `skip_attributes` 后再 `parse_ptr_suffix` |
+| 语句表达式 `q * n_` | `is_decl_start` 误判 | ident 须为类型名；补 `__auto_type` |
+| `_DECLARE_STATIC_KEY_0(x)` | 预处理二次宏残留 | parse_decl 跳过 + 待语义补全 |
+| `ret ?: -7` | 未实现 GNU 省略三元 | 中间缺省则 then_=cond |
+
+**当前 asm-offsets 状态**：解析 **0** 错误；语义 **6** 错误（percpu 解引用、
+`current_thread_info->*` 成员类型）。验收脚本：`scripts/test_asm_offsets.py`。
+
 ## 已实现模块（2026-07-16 扩展）
 
 | 特性 | 说明 |

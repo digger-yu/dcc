@@ -217,40 +217,10 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.macros.insert("atomic_signal_fence".to_string(), MacroDef {
         params: Some(vec!["order".to_string()]), body: "".to_string(), variadic: false,
     });
-    // 原子操作宏: 映射到 __atomic_* 内建函数
-    pp.macros.insert("atomic_init".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string(), "desired".to_string()]), body: "__atomic_store_n(obj, desired, __ATOMIC_RELAXED)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_store".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string(), "desired".to_string()]), body: "__atomic_store_n(obj, desired, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_load".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string()]), body: "__atomic_load_n(obj, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_exchange".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string(), "desired".to_string()]), body: "__atomic_exchange_n(obj, desired, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_fetch_add".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_add(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_fetch_sub".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_sub(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_fetch_and".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_and(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_fetch_or".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_or(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_fetch_xor".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string(), "arg".to_string()]), body: "__atomic_fetch_xor(obj, arg, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_flag_test_and_set".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string()]), body: "__atomic_exchange_n(obj, 1, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
-    pp.macros.insert("atomic_flag_clear".to_string(), MacroDef {
-        params: Some(vec!["obj".to_string()]), body: "__atomic_store_n(obj, 0, __ATOMIC_SEQ_CST)".to_string(), variadic: false,
-    });
+    // 注意: 不预置 atomic_store/atomic_fetch_add 等 C11 stdatomic 宏。
+    // Linux 内核 atomic-instrumented.h 等同名 inline 函数会被误展开
+    // （如 atomic_fetch_add(i,v) → __atomic_fetch_add(i,v,5) 破坏声明）。
+    // __atomic_* 内建与 __ATOMIC_* 常量仍保留，供显式调用。
     // 内存序别名 (memory_order_xxx 已在上面定义)
     // __attribute__: 不定义为宏, 让 token 透传到解析器处理
     // 解析器会识别 __attribute__ 并处理 vector_size 等属性
@@ -1385,11 +1355,26 @@ impl Preprocessor {
                             out.push_str(&ident);
                         }
                     } else {
-                        // object-like: 替换后重新扫描
+                        // object-like 别名后接 (args) 时须与替换体一起重扫描，
+                        // 例如 #define DIV_ROUND_UP __KERNEL_DIV_ROUND_UP
                         let mut new_disabled = disabled.clone();
                         new_disabled.insert(ident.clone());
-                        let rescanned = self.expand_with_disabled(&def.body, &new_disabled);
+                        let mut j = i;
+                        while j < len && chars[j].is_whitespace() { j += 1; }
+                        let tail_call = j < len && chars[j] == '(';
+                        let rescanned = if tail_call {
+                            let remainder: String = chars[i..].iter().collect();
+                            self.expand_with_disabled(
+                                &format!("{}{}", def.body, remainder),
+                                &new_disabled,
+                            )
+                        } else {
+                            self.expand_with_disabled(&def.body, &new_disabled)
+                        };
                         out.push_str(&rescanned);
+                        if tail_call {
+                            i = len;
+                        }
                     }
                 } else {
                     out.push_str(&ident);
@@ -2316,7 +2301,7 @@ impl Preprocessor {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
         // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V3");
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V5");
         for name in names {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
@@ -2338,7 +2323,7 @@ impl Preprocessor {
     fn get_cache_path(&self, file_path: &Path, content_hash: u64, macro_hash: u64) -> Option<PathBuf> {
         let cache_dir = self.cache_dir.as_ref()?;
         let file_hash = Self::hash_content(&file_path.to_string_lossy());
-        let cache_name = format!("v3_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
+        let cache_name = format!("v5_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
         Some(cache_dir.join(cache_name))
     }
 
@@ -2564,6 +2549,28 @@ mod tests {
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    #[test]
+    fn object_like_alias_expands_function_like_tail() {
+        let (output, diags, _) = preprocess(
+            b"#define __KERNEL_DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))\n\
+              #define DIV_ROUND_UP __KERNEL_DIV_ROUND_UP\n\
+              #define XA_MARK_LONGS DIV_ROUND_UP((1UL << 6), 64)\n\
+              unsigned long tags[3][XA_MARK_LONGS];\n",
+            "div-round.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            !output.contains("__KERNEL_DIV_ROUND_UP"),
+            "output: {output}"
+        );
+        assert!(output.contains("unsigned long tags[3]["), "output: {output}");
     }
 
     /// 嵌套函数宏参数预展开须继承涂蓝集，避免 F(F(1)) 类无限递归

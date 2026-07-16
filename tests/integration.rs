@@ -950,3 +950,192 @@ fn aarch64_hello_cross_compile() {
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
 }
+
+/// static_call 语句表达式 + 尾随调用: ({ ... ;; expr })()
+#[test]
+fn stmt_expr_trailing_call_compiles() {
+    let source = include_str!("fixtures/stmt_expr_call.c");
+    let (output, obj) = run_object_test("stmt-expr-call", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// __typeof__(struct T) 类型推导
+#[test]
+fn typeof_struct_compiles() {
+    let source = include_str!("fixtures/typeof_struct.c");
+    let (output, obj) = run_object_test("typeof-struct", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// percpu 声明: section 字符串拼接 + __aligned__((expr))
+#[test]
+fn percpu_decl_compiles() {
+    let source = include_str!("fixtures/percpu_decl.c");
+    let (output, obj) = run_object_test("percpu-decl", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// __attribute__((section("a" "b"))) 相邻字符串拼接
+#[test]
+fn section_concat_attribute_compiles() {
+    let source = include_str!("fixtures/section_concat.c");
+    let (output, obj) = run_object_test("section-concat", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 指定初始化器 + asm inline（内核 GDT/jump_label 常见模式）
+#[test]
+fn gdt_designated_init_and_asm_inline_compiles() {
+    let source = include_str!("fixtures/gdt_designated_init.c");
+    let (output, obj) = run_object_test("gdt-designated-init", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 逗号分隔位域: u16 a:8, b:4, c:1（desc_struct 模式）
+#[test]
+fn bitfield_comma_separated_compiles() {
+    let source = include_str!("fixtures/bitfield_comma.c");
+    let (output, obj) = run_object_test("bitfield-comma", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// asm __inline volatile(...) 限定符
+#[test]
+fn asm_inline_qualifier_compiles() {
+    let source = include_str!("fixtures/asm_inline_qual.c");
+    let (output, obj) = run_object_test("asm-inline-qual", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 结构体空字段: struct { int a; ; }（lockdep class 宏）
+#[test]
+fn struct_empty_field_compiles() {
+    let source = include_str!("fixtures/struct_empty_field.c");
+    let (output, obj) = run_object_test("struct-empty-field", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// GNU __auto_type 类型推导
+#[test]
+fn auto_type_decl_compiles() {
+    let source = include_str!("fixtures/auto_type.c");
+    let (output, obj) = run_object_test("auto-type", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// _Static_assert + __builtin_offsetof 编译期求值
+#[test]
+fn static_assert_offsetof_compiles() {
+    let source = include_str!("fixtures/static_assert_offsetof.c");
+    let output = run_syntax_test("static-assert-offsetof", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// object-like 宏别名 + 函数式宏链式展开
+#[test]
+fn div_round_up_macro_expands() {
+    let source = include_str!("fixtures/div_round_up_macro.c");
+    let output = run_syntax_test("div-round-up", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 结构体多维数组字段
+#[test]
+fn multidim_array_field_compiles() {
+    let source = include_str!("fixtures/multidim_array_field.c");
+    let output = run_syntax_test("multidim-array-field", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// void __attribute__(...) *fn(): 属性在返回类型与指针声明符之间
+#[test]
+fn attr_ptr_func_decl_compiles() {
+    let source = include_str!("fixtures/attr_ptr_func_decl.c");
+    let output = run_syntax_test("attr-ptr-func", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 语句表达式内 typeof 局部声明
+#[test]
+fn vfs_pressure_stmt_expr_compiles() {
+    let source = include_str!("fixtures/vfs_pressure_stmt_expr.c");
+    let output = run_syntax_test("vfs-pressure", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// GNU 省略中间操作数的三元运算符 x ?: y
+#[test]
+fn gnu_elvis_operator_compiles() {
+    let source = include_str!("fixtures/gnu_elvis_op.c");
+    let output = run_syntax_test("gnu-elvis", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
