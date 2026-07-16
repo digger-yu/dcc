@@ -4,12 +4,8 @@
 name: kernel-benchmark
 
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
-  schedule:
-    - cron: '0 6 * * 1'  # 每周一 UTC 6:00
+  # 仅手动触发，避免每次 push 消耗 Actions 额度
+  # 定时跑后续按需再开: schedule: - cron: '0 6 * * 1'
   workflow_dispatch:
     inputs:
       kernel_version:

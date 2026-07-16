@@ -319,7 +319,7 @@ src/
 - 多文件 .o 生成 + gcc 链接 → exit 42
 
 ### 内核编译 Benchmark
-每周一 + 手动触发，在 GitHub Actions 上编译 Linux 内核:
+仅手动触发（Actions → kernel-benchmark → Run workflow），在 GitHub Actions 上编译 Linux 内核:
 - GCC 基线对比
 - 自动生成 Markdown 性能报告
 - 支持自定义内核版本/优化级别/并行数

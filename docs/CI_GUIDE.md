@@ -18,14 +18,16 @@ git push origin main
 
 打开: https://github.com/digger-yu/dcc/actions
 
-**两个 workflow 会自动跑**:
-- `dcc-e2e` (本 commit 新增): 5-8 分钟, hello/arith/control/call 4 个 e2e + 错误诊断
-- `DCC Kernel Compilation Benchmark`: 60+ 分钟, 编 Linux 内核 (M6 已完成, 内核基本构造可解析+代码生成)
+**push/PR 自动跑**:
+- `dcc-e2e`: ~0.5–1 分钟, hello/arith/control/call 等 e2e + 错误诊断
+
+**仅手动触发**（不自动跑，节省 Actions 额度）:
+- `kernel-benchmark`: 约 15–20 分钟, 编 Linux 内核 (Actions → kernel-benchmark → Run workflow)
 
 ## 3. 第一性原理: 跑哪一个先看
 
-`dcc-e2e` 是**核心验证**——5 分钟告诉你 dcc 能不能编出能跑的二进制。
-内核 bench 在 DCC 完成 M6 后已可运行, 但仍有大量 TODO panic 待攻克。
+`dcc-e2e` 是**核心验证**——1 分钟内告诉你 dcc 能不能编出能跑的二进制。
+内核 bench 需要时手动跑即可。
 
 ## 4. e2e 失败怎么办
 
