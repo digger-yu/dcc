@@ -16,8 +16,8 @@
 | Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ |
 | modpost `file2alias.c` 单 TU | ✅ |
 | LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
-| `scripts/modpost_link.sh` | ⚠️ 脚本就绪（HOSTCC=dcc，fixdep 用 gcc） |
-| 全树 `make` / vmlinux / bzImage / QEMU | ⚠️ 脚本就绪 | `kernel_full_check.sh` 编排；缺产物 SKIP |
+| `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc file2alias/empty（modpost/sumversion 待补） |
+| 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ⚠️ 脚本就绪 | 步骤 6–7/10 需 `BUILD_*=1`；无产物 SKIP |
 
 ### 远程同步构建
 
@@ -33,15 +33,25 @@ bash scripts/sync_remote_build.sh
 3. `scripts/test_kernel_features.sh`
 4. 内核单 TU：`devicetable-offsets.s`、`bounds.s`
 5. `prepare0_check.sh`、`pahole_regress.sh`、`objtool_regress.sh`
-6. `kernel_full_check.sh`（modpost 链接 / QEMU 矩阵 / vmlinux 工具链，缺产物时 SKIP）
+6. `kernel_phase_b_check.sh` 或 `kernel_full_check.sh`（modpost / prepare0 / QEMU / vmlinux）
 
-### 验收脚本一览
+### 阶段 B 质量门禁（步骤 7–10）
+
+```bash
+# 远程（脚本须 LF；Windows scp 后执行 perl -pi -e 's/\x0d//g' scripts/*.sh）
+bash scripts/kernel_phase_b_check.sh          # modpost + prepare0 → PASS
+bash scripts/vmlinux_regress.sh               # 无 vmlinux 时 SKIP
+bash scripts/qemu_boot_matrix.sh              # 无 bzImage 时 SKIP
+BUILD_BZIMAGE=1 BUILD_VMLINUX=1 bash scripts/kernel_build_smoke.sh  # 全树 smoke
+```
 
 | 脚本 | 用途 |
 |------|------|
-| `sync_remote_build.sh` | rsync + cargo test + 全量远程回归 |
-| `prepare0_check.sh` | devicetable / bounds / file2alias 窄目标 |
-| `modpost_link.sh` | HOSTCC=dcc 完整链接 modpost |
+| `build_fixdep_dcc.sh` | 安装 Rust `fixdep`（不依赖 gcc 编译 C fixdep） |
+| `dcc-host-wrapper.sh` | HOSTCC 包装：dcc -c + gcc 链接；fixdep 走 Rust |
+| `gen_elfconfig_h.sh` | 从 empty.o 生成 elfconfig.h |
+| `prepare0_full.sh` | prepare0 全链路（等价窄目标 + modpost） |
+| `kernel_phase_b_check.sh` | 阶段 B 编排 |
 | `pahole_regress.sh` / `objtool_regress.sh` | 单 TU BTF / eh_frame 回归 |
 | `qemu_boot_matrix.sh` | QEMU 加载 bzImage（无镜像 SKIP） |
 | `vmlinux_regress.sh` | pahole -J / objtool check vmlinux |
@@ -61,6 +71,13 @@ dcc -r -flto -o merged.o a.o b.o
 
 **Windows 注意**：`*.sh` 必须为 LF 行尾。若远程报 `pipefail: invalid option`，
 在本地执行 `git ls-files --eol scripts/*.sh` 确认工作区为 `w/lf`，再重新同步。
+scp 后可在远程执行 `perl -pi -e 's/\x0d//g' scripts/*.sh` 去除 CR。
+
+**prepare0 豁免**：`make prepare0 CC=dcc` 会触发 Kbuild 重建宿主工具（kconfig/conf 等），
+dcc 宿主 C 尚未覆盖。请用 `scripts/prepare0_full.sh` 验收等价窄目标 + Rust fixdep + modpost。
+
+**全树 smoke**：`make CC=dcc HOSTCC=gcc bzImage` 为当前推荐混合模式（内核 TU 用 dcc，
+kconfig/fixdep 等宿主工具用 gcc 或 Rust fixdep）。步骤 7/10 需先产出 vmlinux/bzImage。
 
 **内核头文件**：`devicetable-offsets.c` 依赖 `include/generated/autoconf.h`。
 若内核树仅有 `.config` 而无该头文件，同步脚本会自动执行

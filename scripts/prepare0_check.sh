@@ -19,8 +19,9 @@ fi
 cd "$KERNEL_DIR"
 
 if [[ ! -f include/generated/autoconf.h ]]; then
-    echo "Generating include/generated/autoconf.h..."
-    make -s include/generated/autoconf.h
+    echo "Regenerating autoconf.h..."
+    make olddefconfig
+    make include/generated/autoconf.h
 fi
 
 INC=(

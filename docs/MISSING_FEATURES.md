@@ -27,7 +27,8 @@
 | modpost `file2alias.c` | 单 TU `-c` 生成 `file2alias.o` |
 | prepare0 窄目标 | `scripts/prepare0_check.sh`（devicetable / bounds / file2alias） |
 | pahole / objtool 单 TU 回归 | `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh` |
-| modpost 链接脚本 | `scripts/modpost_link.sh`（HOSTCC=dcc，fixdep 用 gcc） |
+| modpost 链接 / Rust fixdep | `scripts/modpost_link.sh` + `src/bin/fixdep.rs` |
+| prepare0 全链路 | `scripts/prepare0_full.sh`（远程 PASS） |
 | QEMU / vmlinux 回归脚本 | `scripts/qemu_boot_matrix.sh`、`scripts/vmlinux_regress.sh` |
 | 内核全树编排 | `scripts/kernel_full_check.sh`（缺产物时 SKIP） |
 | `#if` 十六进制字面量 | `preproc` 单测 `if_hex_*`（原 `0x41` 被拆坏） |
@@ -42,9 +43,10 @@
 
 | 特性 | 当前状态 | 说明 |
 |------|----------|------|
-| prepare0 全链路 `make prepare0` | ⚠️ 窄目标已通过 | 完整 make 仍可能触发无关 prepare 步骤；用窄脚本验收 |
-| 全树 `make CC=dcc` | ⏳ 待远程首跑 | 脚本与 LTO/gc 已就绪；需真实 vmlinux/bzImage 日志 |
-| QEMU 启动矩阵 | ⚠️ 脚本就绪 | 无 bzImage 时 SKIP；`kernel_full_check.sh` 编排 |
+| prepare0 全链路 `make prepare0` | ✅ 脚本等价 | 用 `prepare0_full.sh`；`make prepare0 CC=dcc` 豁免（kconfig 宿主 C） |
+| 全树 `make CC=dcc` | ⏳ 待远程首跑 | 推荐 `HOSTCC=gcc` 混合；Rust fixdep 已替代 C fixdep |
+| modpost.c / sumversion.c（宿主） | ⏳ dcc 编译失败 | file2alias/empty 已通过；全链接受阻于此 |
+| QEMU 启动矩阵 | ⚠️ 脚本就绪 | 无 bzImage 时 SKIP；需步骤 6 产物 |
 | vmlinux pahole / objtool | ⚠️ 脚本就绪 | 无 vmlinux 时 SKIP；单 TU 回归已通过 |
 
 ## 短期：GCC libiberty（纯 C）

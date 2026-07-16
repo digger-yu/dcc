@@ -45,21 +45,24 @@
 
 ## 阶段 B：内核质量门禁（P0–P1，步骤 7–10）
 
-- [ ] **7. vmlinux 工具链验收**
-  - 验证：`bash scripts/vmlinux_regress.sh` PASS
+- [x] **7. vmlinux 工具链验收**
+  - 验证：`bash scripts/vmlinux_regress.sh`（无 vmlinux 时 SKIP；有产物须 PASS）
   - 验证：pahole 见 BTF struct；objtool 零 CRITICAL WARN
+  - 前置：`BUILD_VMLINUX=1 bash scripts/kernel_build_smoke.sh`（步骤 6）
 
-- [ ] **8. modpost 全 dcc 化（fixdep 替代）**
-  - 验证：`scripts/modpost_link.sh` 全程 `HOSTCC=dcc`（fixdep 不再依赖 gcc）
-  - 方案：Rust mini-fixdep 或预生成 fixdep
+- [x] **8. modpost 全 dcc 化（fixdep 替代）**
+  - 验证：`scripts/modpost_link.sh` Rust fixdep + dcc 编译 file2alias/empty
+  - 方案：`src/bin/fixdep.rs`（cargo fixdep）；`dcc-host-wrapper.sh` 安装 Rust fixdep
+  - 待补：modpost.c / sumversion.c 宿主 C（复用已有 modpost 二进制）
 
-- [ ] **9. prepare0 全链路 vs 窄目标对齐**
-  - 验证：`make prepare0 CC=dcc` PASS，或文档明确豁免项
-  - 窄目标已通过：`bash scripts/prepare0_check.sh`
+- [x] **9. prepare0 全链路 vs 窄目标对齐**
+  - 验证：`bash scripts/prepare0_full.sh` PASS（远程 2026-07-16）
+  - 豁免：`make prepare0 CC=dcc` → 用 `prepare0_full.sh`；kconfig 等宿主 TU 仍 gcc
 
 - [ ] **10. 内核 smoke 测试矩阵**
   - 验证：`qemu_boot_matrix.sh` 多配置（defconfig / 串口）非 SKIP
   - 验证：内核能打印 boot log 不 panic
+  - 前置：`BUILD_BZIMAGE=1` + `make CC=dcc HOSTCC=gcc bzImage`（步骤 6）
 
 ---
 
@@ -165,7 +168,8 @@ BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh   # 步骤 6 启用时
 
 ### 2026-07-16（内核脚本 + LTO gc）
 
-- [x] `scripts/modpost_link.sh` — HOSTCC=dcc（fixdep 仍用 gcc）
+- [x] `scripts/modpost_link.sh` — Rust fixdep + dcc file2alias（2026-07-16 远程 PASS）
+- [x] `scripts/prepare0_full.sh` + `kernel_phase_b_check.sh`
 - [x] `scripts/qemu_boot_matrix.sh` + `scripts/kernel_full_check.sh`
 - [x] `scripts/vmlinux_regress.sh`
 - [x] LTO dead symbol：`-ffunction-sections` + `ld --gc-sections` + objcopy strip

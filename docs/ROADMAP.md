@@ -12,7 +12,7 @@
 | **M5** | **自举 (dcc 编 dcc)** | ⏳ | dcc1 == dcc2 |
 | **M6** | Linux 内核 benchmark | ✅ 完成 | init/main.c 解析+代码生成通过; -MD/-MF 依赖文件生成支持; 文件级/函数内 asm volatile 带约束支持; COND_SYSCALL/weak/函数指针/asm标签/属性等内核构造; 未知 typedef 降级为 int; 预处理输出注释/空行剥离 |
 | **M6b** | GCC libiberty（短期） | ✅ 完成 | 远程 125/129 OK；见 `docs/GCC_BUILD_GUIDE.md` |
-| **M6c** | 内核全树验收脚本 | ✅ 完成 | modpost_link / kernel_full_check / vmlinux_regress / qemu_boot_matrix；LTO gc-sections |
+| **M6c** | 内核全树验收脚本 | ✅ 完成 | Rust fixdep；modpost_link / prepare0_full / kernel_phase_b_check |
 | **M7** | ARM64 + RISC-V | ⏳ 进行中 | aarch64 hello `.o` 已通；RISC-V 待补 |
 | **M8** | C11/17/23 + GNU 扩展 | ✅ 完成 | 位域/原子/SIMD/定点数/柔性数组/内存序 后端已实现+Linux验证; C标准全家族别名支持(c89/c90/c99/c9x/c11/c1x/c17/c18/c23/c2x+gnu变体+iso9899) |
 | **M9** | 精准错误诊断 | ✅ 完成 | 错误精确到字符+列+修复建议, GitHub-style 行+指针+下划线格式; 支持 E0001-E0006+W0001 (parser), E0100-E0101 (driver), E0200-E0206+W0200 (preprocessor) |

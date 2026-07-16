@@ -24,4 +24,8 @@ debug     = true
 name = "dcc"
 path = "src/main.rs"
 
+[[bin]]
+name = "fixdep"
+path = "src/fixdep.rs"
+
 [workspace]
