@@ -1,4 +1,4 @@
-/* examples/builtins.c - 编译期内建函数与扩展测试 */
+/* examples/dev/builtins.c - 编译期内建函数与扩展测试 */
 
 /* __attribute__((packed)): 无填充结构体 */
 struct packed_s {
@@ -30,7 +30,7 @@ int main() {
     int cond = 1;
     int val = __builtin_expect(cond, 1);
 
-    /* __builtin_constant_p: 编译期常量判断 (返回 0) */
+    /* __builtin_constant_p: 编译期常量判断 (42 返回 1) */
     int is_const = __builtin_constant_p(42);
 
     /* typeof: 类型推导 */

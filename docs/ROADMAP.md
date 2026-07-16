@@ -26,13 +26,13 @@
 | 定点数类型 | P3 | ✅ `_Fract`/`_Accum` | ✅ 作为整数运算(1.31/16.16) | ✅ fixedpt_test.c |
 | 原子操作 | P3 | ✅ `__atomic_*` 内建函数 | ✅ lock前缀+xchg+cmpxchg | ✅ atomic_test.c |
 | 原子内存序 | P3 | ✅ `__ATOMIC_*` 宏定义 | ✅ mfence(seq_cst) | ✅ atomic_test.c |
-| __builtin__ 语义 | P1 | ✅ expect/constant_p/memcpy 等 | ✅ codegen 层内建函数处理 | ✅ builtins.c |
-| __attribute__ 语义 | P1 | ✅ packed/aligned/noreturn/unused | ✅ 解析器静默剥离 | ✅ builtins.c |
-| sizeof(expr) 修复 | P2 | ✅ 计算实际表达式类型大小 | ✅ | ✅ builtins.c |
-| _Alignof 对齐查询 | P2 | ✅ _Alignof(type)/_Alignof(expr) | ✅ 返回对齐值 | ✅ builtins.c |
-| typeof 运算符 | P3 | ✅ typeof(expr/type) 推导类型 | ✅ | ✅ builtins.c |
-| __extension__ | P3 | ✅ 解析器直接跳过 | ✅ | ✅ builtins.c |
-| 语句表达式 | P3 | ✅ ({...}) 块内最后表达式值 | ✅ | ✅ builtins.c |
+| __builtin__ 语义 | P1 | ✅ expect/constant_p/memcpy 等 | ✅ codegen 层内建函数处理 | ✅ examples/dev/builtins.c |
+| __attribute__ 语义 | P1 | ✅ packed/aligned/noreturn/unused | ✅ 解析器静默剥离 | ✅ examples/dev/builtins.c |
+| sizeof(expr) 修复 | P2 | ✅ 计算实际表达式类型大小 | ✅ | ✅ examples/dev/builtins.c |
+| _Alignof 对齐查询 | P2 | ✅ _Alignof(type)/_Alignof(expr) | ✅ 返回对齐值 | ✅ examples/dev/builtins.c |
+| typeof 运算符 | P3 | ✅ typeof(expr/type) 推导类型 | ✅ | ✅ examples/dev/builtins.c |
+| __extension__ | P3 | ✅ 解析器直接跳过 | ✅ | ✅ examples/dev/builtins.c |
+| 语句表达式 | P3 | ✅ ({...}) 块内最后表达式值 | ✅ | ✅ examples/dev/builtins.c |
 | 函数指针调用 | P1 | ✅ 表达式 callee (Box<Expr>) | ✅ 间接调用 call *r11 | ✅ runtime_features.c |
 | 逗号运算符 | P2 | ✅ Pratt bp=1 最低优先级 | ✅ 求值 lhs 丢弃返回 rhs | ✅ runtime_features.c |
 | VLA 可变长数组 | P2 | ✅ ArraySize::Var(Box<Expr>) | ✅ 动态栈分配+16字节对齐 | ✅ runtime_features.c |
