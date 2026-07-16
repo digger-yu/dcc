@@ -50,6 +50,7 @@ DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
 | `[__restrict]` | 数组限定符当表达式 | 跳过 restrict/static/const |
 | `&randtbl[i]` 全局初值 | 非常量 | `is_static_initializer` + rela addend |
 | `&&di` 宏展开 | `##` 路径全局替换后再替换 | `handle_paste` 只替换 ## 两侧 |
+| `TRANSLATE(*d)`→`(**d)` | `handle_paste` 无 `##` 仍全局替参 + 第三步逐参再扫 | 无 `##` 时 `handle_paste` 早退；第三步改 `replace_all_params` 单次不透明替换 |
 | `struct T *a, *b` | `parse_type` 吃掉第一个 `*` | 说明符不含 `*`；多声明符循环 |
 | `struct T *a, *b` 初值 | `parse_expr` 吞逗号 | 初值用 `parse_expr_bp(2)` |
 | `(*f())` / `(*fns[N])()` | 返回指针的函数、函数指针数组 | 声明符路径补全 |
@@ -64,7 +65,15 @@ DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
 
 | 文件 | 现象 | 说明 |
 |------|------|------|
-| `regex.c` | `TRANSLATE(*d)` 展开成 `(**d)`；`PREFETCH()` 未展开 | 仅在完整 `regex.c` 上下文复现；独立最小例可过。待查宏表/条件编译交互 |
+| `regex.c` | 完整文件中仍见 `(**d)`、`PREFETCH` 残留 | 最小例 `scripts/t_tr2.c` 已验证 `(*d)` 正确；完整文件疑与 `#include "regex.c"`（`INSIDE_RECURSION`）及大块 flush 时序有关 |
+
+### 宏展开复现（TRANSLATE）
+
+```bash
+# 远程
+bash scripts/test_tr2.sh          # 期望：无 **d，含 translate[(unsigned char) (*d)]
+python3 scripts/rootcause_sim.py    # 本地：OLD→(**d)，NEW→(*d)
+```
 
 ## 与内核路径的关系
 

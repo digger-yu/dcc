@@ -25,10 +25,20 @@
 
 ## 待办（短期：GCC 纯 C 子集）
 
-### 1. 修完 `regex.c`
+### 1. 修完 `regex.c`（完整文件上下文）
 
-完整文件中 `TRANSLATE(*d)` 被展成 `(**d)`，`PREFETCH()` 未展开；独立最小例可过。
-需对照宏表与条件编译交互。
+`substitute_params` 已修：`handle_paste` 在无 `##` 时不替参，第三步用
+`replace_all_params` 单次不透明扫描（同根因类：`&&di`）。
+
+最小复现 `scripts/t_tr2.c` 远程 `-E` 已输出 `(*d)` 而非 `(**d)`：
+
+```bash
+bash scripts/test_tr2.sh
+python3 scripts/rootcause_sim.py
+```
+
+完整 `regex.c` 仍失败：疑 `#include "regex.c"` / `INSIDE_RECURSION` 递归与
+`PREFETCH()` 在大块 `flush_active_source` 中的展开时序。
 
 ```bash
 DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \

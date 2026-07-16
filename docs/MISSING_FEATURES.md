@@ -45,7 +45,7 @@
 | 缺口 | 影响 |
 |------|------|
 | 无 C++ | 无法编 GCC 主体 / 完整 bootstrap |
-| `regex.c` 宏展开 | 完整文件中 `TRANSLATE(*d)`→`(**d)`，`PREFETCH()` 未展开 |
+| `regex.c` 宏展开（完整文件） | 最小例 `scripts/t_tr2.c` 已 OK；完整 `regex.c` 仍 `(**d)` / `PREFETCH` 未展开（递归 include） |
 | `_Generic` 指针精确匹配 | 当前指针一律兼容，可能选错 association |
 
 ## 远程 debug 记录（2026-07-15）
@@ -68,6 +68,7 @@
 | 浮点比较/`&&`/`\|\|` | 结果类型标成 float | 比较与逻辑结果恒为 int |
 | 宏参替换破坏字符串 | `replace_ident` 进字面量 | 跳过 `"`/`'` |
 | `##` 后再替换 → `&&di` | paste 全局替换 | 只替换 ## 两侧 token |
+| `TRANSLATE(*d)` → `(**d)` | 无 `##` 的 `handle_paste` 仍替参 + 第三步多遍扫描 | 无 `##` 早退 + `replace_all_params` 单次不透明替换 |
 | `struct T *a, *b` 变 `T**` | 说明符吃掉 `*` | `parse_decl_specifiers` + 多声明符 |
 | 全局 `&arr[i]` | 初值校验过严 | 静态初值 + rela addend |
 | 前向 struct 成员 | 空 fields | 空时查 `struct_defs` |
