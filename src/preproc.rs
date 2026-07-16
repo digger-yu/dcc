@@ -623,7 +623,12 @@ impl Preprocessor {
         // 处理行续接 (\ at end)
         let directive = after_hash;
 
-        if directive.starts_with("include") {
+        if directive.starts_with("include_next") {
+            // 必须在 "include" 之前匹配，否则 include_next 会被当成 include
+            if self.is_active() {
+                self.do_include_next(&directive["include_next".len()..].trim(), line_no);
+            }
+        } else if directive.starts_with("include") {
             if self.is_active() {
                 self.do_include(&directive[7..].trim(), line_no);
             }
@@ -865,7 +870,44 @@ impl Preprocessor {
         // 搜索文件
         let found = self.find_include(path, is_system);
         match found {
-            Some(full_path) => {
+            Some(full_path) => self.include_resolved_file(full_path, path, line_no),
+            None => {
+                self.diags.push(Diagnostic::err("E0206",
+                    format!("include file not found: {}", path),
+                    Span::point(&self.file, line_no, 1)));
+            }
+        }
+    }
+
+    /// `#include_next`：从当前头文件所在目录之后继续搜索。
+    fn do_include_next(&mut self, rest: &str, line_no: u32) {
+        let rest = rest.trim();
+        let (path, is_system) = if rest.starts_with('"') {
+            let end = rest[1..].find('"').map(|i| i + 1).unwrap_or(rest.len());
+            (&rest[1..end], false)
+        } else if rest.starts_with('<') {
+            let end = rest[1..].find('>').map(|i| i + 1).unwrap_or(rest.len());
+            (&rest[1..end], true)
+        } else if Self::is_absolute_include_path(rest) {
+            (Self::parse_include_path_token(rest), false)
+        } else {
+            self.diags.push(Diagnostic::err("E0204", "expected \"file\" or <file>",
+                Span::point(&self.file, line_no, 1)));
+            return;
+        };
+
+        match self.find_include_next(path, is_system) {
+            Some(full_path) => self.include_resolved_file(full_path, path, line_no),
+            None => {
+                self.diags.push(Diagnostic::err("E0206",
+                    format!("include_next file not found: {}", path),
+                    Span::point(&self.file, line_no, 1)));
+            }
+        }
+    }
+
+    /// 将已解析到的头文件内容并入预处理输出。
+    fn include_resolved_file(&mut self, full_path: PathBuf, path: &str, line_no: u32) {
                 let canonical = full_path.canonicalize()
                     .unwrap_or(full_path.clone());
                 let key = canonical.to_string_lossy().to_string();
@@ -936,13 +978,58 @@ impl Preprocessor {
                             Span::point(&self.file, line_no, 1)));
                     }
                 }
-            }
-            None => {
-                self.diags.push(Diagnostic::err("E0206",
-                    format!("include file not found: {}", path),
-                    Span::point(&self.file, line_no, 1)));
+    }
+
+    /// 构造与 `find_include` 一致的搜索目录序列。
+    fn include_search_dirs(&self, is_system: bool) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if !is_system {
+            dirs.push(self.base_dir.clone());
+        }
+        dirs.extend(self.include_paths.iter().cloned());
+        dirs.extend(self.system_paths.iter().cloned());
+        for d in [
+            "/usr/local/include",
+            "/usr/include",
+            "/usr/include/x86_64-linux-gnu",
+            "/usr/include/aarch64-linux-gnu",
+        ] {
+            dirs.push(PathBuf::from(d));
+        }
+        dirs.extend(host_gcc_include_dirs().iter().cloned());
+        for d in ["/usr/include/linux", "/usr/include/asm", "/usr/include/asm-generic"] {
+            dirs.push(PathBuf::from(d));
+        }
+        dirs
+    }
+
+    /// `#include_next`：跳过当前文件所在目录及之前的搜索路径。
+    fn find_include_next(&self, name: &str, is_system: bool) -> Option<PathBuf> {
+        let name = name.trim();
+        let dirs = self.include_search_dirs(is_system);
+        let cur = self.base_dir.canonicalize().unwrap_or_else(|_| self.base_dir.clone());
+
+        // 找到当前头文件目录在搜索列表中的位置，从其之后开始找
+        let mut start = 0;
+        for (i, dir) in dirs.iter().enumerate() {
+            let d = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if d == cur {
+                start = i + 1;
+                break;
             }
         }
+        // 若当前目录不在列表中，仍从列表头部找，但跳过等于 cur 的目录
+        for dir in dirs.iter().skip(start) {
+            let d = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if d == cur {
+                continue;
+            }
+            let p = dir.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
     }
 
     fn find_include(&self, name: &str, is_system: bool) -> Option<PathBuf> {
@@ -1105,6 +1192,25 @@ impl Preprocessor {
 
     /// 用禁用集展开文本
     fn expand_with_disabled(&self, text: &str, disabled: &HashSet<String>) -> String {
+        // 递归深度保护：宏互相引用时避免栈溢出
+        thread_local! {
+            static EXPAND_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        let depth = EXPAND_DEPTH.with(|d| {
+            let v = d.get();
+            d.set(v + 1);
+            v
+        });
+        if depth > 256 {
+            EXPAND_DEPTH.with(|d| d.set(depth));
+            return text.to_string();
+        }
+        let result = self.expand_with_disabled_inner(text, disabled);
+        EXPAND_DEPTH.with(|d| d.set(depth));
+        result
+    }
+
+    fn expand_with_disabled_inner(&self, text: &str, disabled: &HashSet<String>) -> String {
         let mut out = String::with_capacity(text.len());
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
@@ -1200,14 +1306,15 @@ impl Preprocessor {
                             let raw_args = self.parse_macro_args(&chars, &mut j);
                             // 确定哪些参数被 # 或 ## 操作 (这些参数不预展开)
                             let (stringify_params, paste_params) = self.find_special_params(&def.body, params);
-                            // 参数预展开: 未被 # / ## 引用的参数先展开
+                            // 参数预展开: 未被 # / ## 引用的参数先展开。
+                            // 必须继承当前 disabled（涂蓝）集，否则 F(F(1))
+                            // 这类嵌套会在参数预展开时丢掉外层禁令而无限递归。
                             let mut expanded_args: Vec<String> = Vec::with_capacity(raw_args.len());
                             for (idx, arg) in raw_args.iter().enumerate() {
                                 if stringify_params.contains(&idx) || paste_params.contains(&idx) {
                                     expanded_args.push(arg.clone());
                                 } else {
-                                    let arg_disabled = HashSet::new();
-                                    expanded_args.push(self.expand_with_disabled(arg, &arg_disabled));
+                                    expanded_args.push(self.expand_with_disabled(arg, disabled));
                                 }
                             }
                             // 可变参数处理
@@ -1224,8 +1331,7 @@ impl Preprocessor {
                                         let mut normal = expanded_args[..fixed].to_vec();
                                         let va_text = if raw_args.len() > fixed {
                                             raw_args[fixed..].iter().map(|a| {
-                                                let d = HashSet::new();
-                                                self.expand_with_disabled(a, &d)
+                                                self.expand_with_disabled(a, disabled)
                                             }).collect::<Vec<_>>().join(", ")
                                         } else {
                                             String::new()
@@ -1234,8 +1340,7 @@ impl Preprocessor {
                                         final_args = normal;
                                     } else if !raw_args.is_empty() {
                                         let va_text = raw_args.iter().map(|a| {
-                                            let d = HashSet::new();
-                                            self.expand_with_disabled(a, &d)
+                                            self.expand_with_disabled(a, disabled)
                                         }).collect::<Vec<_>>().join(", ");
                                         final_args = vec![va_text];
                                     } else {
@@ -1551,6 +1656,43 @@ impl Preprocessor {
                     result.push(chars[i]); i += 1;
                 }
                 if i < chars.len() { result.push('\''); i += 1; }
+                continue;
+            }
+            // 数字字面量（含 0x/0b 与数字分隔符）须整段保留，
+            // 否则 0x41 会被拆成 '0' + 标识符 x41 → 变成 00
+            if chars[i].is_ascii_digit() {
+                let start = i;
+                i += 1;
+                if start + 1 < chars.len()
+                    && chars[start] == '0'
+                    && (chars[start + 1] == 'x'
+                        || chars[start + 1] == 'X'
+                        || chars[start + 1] == 'b'
+                        || chars[start + 1] == 'B')
+                {
+                    i += 1; // 吃掉 x/X/b/B
+                    while i < chars.len()
+                        && (chars[i].is_ascii_hexdigit() || chars[i] == '\'')
+                    {
+                        i += 1;
+                    }
+                } else {
+                    while i < chars.len()
+                        && (chars[i].is_ascii_digit() || chars[i] == '\'')
+                    {
+                        i += 1;
+                    }
+                }
+                // 保留整型后缀 U/L/ull 等
+                while i < chars.len()
+                    && (chars[i] == 'u'
+                        || chars[i] == 'U'
+                        || chars[i] == 'l'
+                        || chars[i] == 'L')
+                {
+                    i += 1;
+                }
+                result.extend(chars[start..i].iter().copied());
                 continue;
             }
             if chars[i].is_alphabetic() || chars[i] == '_' {
@@ -2255,5 +2397,94 @@ mod tests {
         );
 
         assert!(diags.iter().any(|d| d.code == "E0207"));
+    }
+
+    /// #if 中 0x 十六进制不得被 replace_unknown_idents 拆坏（GCC safe-ctype.h）
+    #[test]
+    fn if_hex_and_char_const_compare() {
+        let (output, diags, _) = preprocess(
+            b"#if '\\n' == 0x0A && ' ' == 0x20 && '0' == 0x30 \\\n\
+               && 'A' == 0x41 && 'a' == 0x61 && '!' == 0x21\n\
+              #define HOST_CHARSET 1\n\
+              #else\n\
+              #define HOST_CHARSET 0\n\
+              #endif\n\
+              int x = HOST_CHARSET;\n",
+            "charset.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    #[test]
+    fn if_hex_literal_equals_decimal() {
+        let (output, diags, _) = preprocess(
+            b"#if 0x41 == 65\n#define OK 1\n#else\n#define OK 0\n#endif\nint x = OK;\n",
+            "hex-if.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    /// 嵌套函数宏参数预展开须继承涂蓝集，避免 F(F(1)) 类无限递归
+    #[test]
+    fn nested_function_macro_does_not_recurse_forever() {
+        let (output, diags, _) = preprocess(
+            b"#define F(x) G(x)\n\
+              #define G(x) F(x)\n\
+              int v = F(F(1));\n",
+            "nested-macro.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        // 展开后应留下涂蓝的 F(...) 调用，而非栈溢出
+        assert!(output.contains("int v ="), "output: {output}");
+        assert!(!output.contains("G(G("), "output: {output}");
+    }
+
+    #[test]
+    fn include_next_is_recognized() {
+        use std::fs;
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("dcc_inc_next_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        // a/foo.h 通过 include_next 拉到 b/foo.h
+        fs::write(
+            dir.join("a/foo.h"),
+            "#ifndef A_FOO\n#define A_FOO 1\n#include_next <foo.h>\n#endif\n",
+        )
+        .unwrap();
+        fs::write(dir.join("b/foo.h"), "#define FROM_B 42\n").unwrap();
+        let src = dir.join("t.c");
+        let mut f = fs::File::create(&src).unwrap();
+        writeln!(f, "#include <foo.h>\nint x = FROM_B;").unwrap();
+        let (output, diags, _) = preprocess(
+            &fs::read(&src).unwrap(),
+            src.to_str().unwrap(),
+            &[],
+            &[dir.join("a"), dir.join("b")],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        let _ = fs::remove_dir_all(&dir);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 42;"), "output: {output}");
     }
 }

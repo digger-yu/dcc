@@ -1688,9 +1688,12 @@ impl<'a> Parser<'a> {
                     lhs = Expr::Assign { op: BinOp::Add, l: Box::new(target), r: Box::new(expanded), span: self.cur.span.clone(), ty: assign_ty }; continue; }
             }
             if self.cur.kind == TokKind::Question {
+                // 三元优先级高于逗号(bp=1)。else 分支是 conditional-expression，
+                // 不得用 bp=0，否则会吞掉 `_Generic(a?b:c, type: x)` 中的逗号。
+                if 2 < min_bp { break; }
                 self.advance(); let t = self.parse_expr()?;
                 if !self.expect(TokKind::Colon, "':'") { return None; }
-                let e = self.parse_expr_bp(0)?;
+                let e = self.parse_expr_bp(2)?;
                 lhs = Expr::Cond { cond: Box::new(lhs), then_: Box::new(t), else_: Box::new(e), span: self.cur.span.clone(), ty: int_t() }; continue;
             }
             let (op, lbp, rbp) = match self.cur.kind {

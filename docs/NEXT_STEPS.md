@@ -1,6 +1,6 @@
-# 后续步骤：Linux 6.6 Kbuild / 阻塞级收尾
+# 后续步骤：Linux 6.6 Kbuild / GCC libiberty / 阻塞级收尾
 
-> 2026-07-15 更新：阻塞级窄目标（prepare0 / BTF / eh_frame / LTO 链接）已实现。
+> 2026-07-16 更新：内核窄目标已通过；新增 GCC `libiberty` 短期探测路径。
 
 ## 已完成（2026-07-15）
 
@@ -11,13 +11,37 @@
 - [x] LTO 链接：`dcc -r -flto -o merged.o a.o b.o`
 - [x] `cargo test` integration（含 LTO link / BTF / FDE）
 
-## 待办（非阻塞 / 全树）
+## 已完成（2026-07-16）
+
+- [x] `#if` 十六进制字面量（`0x41` 不被拆成 ident）
+- [x] `#include_next`（glibc `limits.h` → GCC `limits.h`）
+- [x] 宏展开涂蓝继承（消除 `argv.c` 栈溢出）
+- [x] `_Generic` + 三元控制表达式逗号边界
+- [x] `scripts/remote_libiberty_probe.sh` + `docs/GCC_BUILD_GUIDE.md`
+- [x] 远程 libiberty 基线：**90 OK / 39 FAIL**
+
+## 待办（短期：GCC 纯 C 子集）
+
+### 1. 提升 libiberty 通过率
+
+```bash
+DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
+  bash scripts/remote_libiberty_probe.sh
+```
+
+优先：浮点 `AndAnd`/`OrOr`、texinfo 文档块、`obstack`/`regex`/`simple-object*`。
+
+### 2. 明确不做完整 GCC bootstrap
+
+GCC 主体为 C++；在具备 `dcc++` 之前，短期目标止于 **C 主机库 / gen\* 工具**。
+
+## 待办（非阻塞 / 内核全树）
 
 ### 1. modpost 完整链接
 
 ```bash
 cd ~/linux-6.6/scripts/mod
-make HOSTCC=~/dcc-agent-linux66/target/release/dcc modpost
+make HOSTCC=~/dcc/target/release/dcc modpost
 ```
 
 保持 `scripts/basic/fixdep` 等 bootstrap 工具用 gcc。
@@ -26,8 +50,8 @@ make HOSTCC=~/dcc-agent-linux66/target/release/dcc modpost
 
 ```bash
 cd ~/linux-6.6
-make CC=~/dcc-agent-linux66/target/release/dcc bzImage
-bash ~/dcc-agent-linux66/scripts/qemu_boot_matrix.sh
+make CC=~/dcc/target/release/dcc bzImage
+bash ~/dcc/scripts/qemu_boot_matrix.sh
 ```
 
 无 bzImage 时矩阵脚本自动 SKIP。
@@ -49,6 +73,7 @@ objtool check vmlinux
 
 ```bash
 bash scripts/sync_remote_build.sh
+bash scripts/remote_libiberty_probe.sh   # 需已有 ~/gcc-src
 ```
 
-包含：cargo test、feature check、prepare0、pahole、objtool 回归。
+包含：cargo test、feature check、prepare0、pahole、objtool；以及可选的 libiberty 探测。

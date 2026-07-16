@@ -846,3 +846,17 @@ fn flto_relocatable_link_merges_section() {
         "linked object missing merged .llvm.lto"
     );
 }
+
+/// glibc string.h：`_Generic(0 ? ... : ..., const void *: ..., default: ...)`
+/// 三元 else 不得吞掉 association 列表的逗号。
+#[test]
+fn generic_with_ternary_controlling_expr_compiles() {
+    let source = include_str!("fixtures/generic_ternary.c");
+    let (output, obj) = run_object_test("generic-ternary", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
