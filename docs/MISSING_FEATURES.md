@@ -34,6 +34,9 @@
 | `#include_next` | `preproc` 单测 + glibc `<limits.h>` |
 | 宏展开涂蓝 / 防栈溢出 | `nested_function_macro_*`；远程 `argv.c` 不再 abort |
 | `_Generic` + 三元控制表达式 | `tests/fixtures/generic_ternary.c`；远程 `libiberty/argv.c` |
+| `_Generic` 指针精确匹配 | `tests/fixtures/generic_pointer.c` |
+| 内联 asm 约束 | `examples/test_asm_constraints.c` |
+| SysV va_list SSE | `examples/test_p4_va_list.c`（GP + float/double） |
 
 ## 阻塞级（Linux 6.6 全树）
 
@@ -58,8 +61,10 @@
 | 缺口 | 影响 |
 |------|------|
 | 无 C++ | 无法编 GCC 主体 / 完整 bootstrap |
-| `_Generic` 指针精确匹配 | 当前指针一律兼容，可能选错 association |
+| `_Generic` 指针精确匹配 | ✅ 按 pointee 匹配；void* 与对象指针兼容 |
 | libdecnumber 组合编译 | 需 DECPMAX 宏驱动的多文件 include，未纳入 probe |
+| 内联 asm 约束 | ✅ `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber |
+| SysV va_list SSE | ✅ GP + XMM0–7 保存区；float/double/long double va_arg |
 
 ## 远程 debug 记录（2026-07-15）
 

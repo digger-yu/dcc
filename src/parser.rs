@@ -393,31 +393,37 @@ impl<'a> Parser<'a> {
         }
         let mut outputs = vec![];
         let mut output_names = vec![];
+        let mut output_constraints = vec![];
         let mut inputs = vec![];
         let mut input_names = vec![];
+        let mut input_constraints = vec![];
         let mut clobbers = vec![];
         if self.cur.kind == TokKind::Colon {
             self.advance();
-            let (o, n) = self.parse_asm_operand_list();
+            let (o, n, c) = self.parse_asm_operand_list();
             outputs = o;
             output_names = n;
+            output_constraints = c;
         }
         if self.cur.kind == TokKind::Colon {
             self.advance();
-            let (o, n) = self.parse_asm_operand_list();
+            let (o, n, c) = self.parse_asm_operand_list();
             inputs = o;
             input_names = n;
+            input_constraints = c;
         }
         if self.cur.kind == TokKind::Colon { self.advance(); clobbers = self.parse_asm_clobber_list(); }
         if self.cur.kind == TokKind::RParen { self.advance(); }
         Some(Expr::AsmExpr {
-            asm_str, outputs, output_names, inputs, input_names, clobbers, span: sp, ty: Type::Void,
+            asm_str, outputs, output_names, output_constraints, inputs, input_names,
+            input_constraints, clobbers, span: sp, ty: Type::Void,
         })
     }
     /// 解析 asm 操作数列表 (逗号分隔的表达式, 到冒号或右括号结束)
-    fn parse_asm_operand_list(&mut self) -> (Vec<Expr>, Vec<Option<String>>) {
+    fn parse_asm_operand_list(&mut self) -> (Vec<Expr>, Vec<Option<String>>, Vec<String>) {
         let mut ops = vec![];
         let mut names = vec![];
+        let mut constraints = vec![];
         while self.cur.kind != TokKind::Colon && self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
             let name = if self.cur.kind == TokKind::LBracket {
                 self.advance();
@@ -438,7 +444,14 @@ impl<'a> Parser<'a> {
             };
             names.push(name);
             // GCC 约束字符串，实际表达式位于随后的括号中。
-            if self.cur.kind == TokKind::StringLit { self.advance(); }
+            let constraint = if self.cur.kind == TokKind::StringLit {
+                let c = Self::decode_string_literal(&self.cur.text);
+                self.advance();
+                c
+            } else {
+                String::new()
+            };
+            constraints.push(constraint);
             let expr = if self.cur.kind == TokKind::LParen {
                 self.advance();
                 let e = self.parse_expr_bp(2);
@@ -450,7 +463,7 @@ impl<'a> Parser<'a> {
             if let Some(e) = expr { ops.push(e); } else { break; }
             if self.cur.kind == TokKind::Comma { self.advance(); }
         }
-        (ops, names)
+        (ops, names, constraints)
     }
     /// 解析 asm clobber 列表 (逗号分隔的字符串)
     fn parse_asm_clobber_list(&mut self) -> Vec<String> {
@@ -516,10 +529,12 @@ impl<'a> Parser<'a> {
             // 解析带约束的内联汇编表达式
             if self.cur.kind == TokKind::LParen {
                 if let Some(expr) = self.parse_asm_expr(sp.clone()) {
-                    if let Expr::AsmExpr { asm_str, outputs, output_names, inputs, input_names, clobbers, span, .. } = expr {
+                    if let Expr::AsmExpr { asm_str, outputs, output_names, output_constraints,
+                        inputs, input_names, input_constraints, clobbers, span, .. } = expr {
                         if !self.expect(TokKind::Semi, "';'") { return None; }
                         return Some(vec![Decl::GlobalAsm {
-                            asm_str, outputs, output_names, inputs, input_names, clobbers, span,
+                            asm_str, outputs, output_names, output_constraints,
+                            inputs, input_names, input_constraints, clobbers, span,
                         }]);
                     }
                 }
@@ -1843,28 +1858,33 @@ impl<'a> Parser<'a> {
                 // 解析 : outputs : inputs : clobbers : goto_labels
                 let mut outputs = vec![];
                 let mut output_names = vec![];
+                let mut output_constraints = vec![];
                 let mut inputs = vec![];
                 let mut input_names = vec![];
+                let mut input_constraints = vec![];
                 let mut clobbers = vec![];
                 let mut goto_labels = vec![];
                 if self.cur.kind == TokKind::Colon {
                     self.advance();
-                    let (o, n) = self.parse_asm_operand_list();
+                    let (o, n, c) = self.parse_asm_operand_list();
                     outputs = o;
                     output_names = n;
+                    output_constraints = c;
                 }
                 if self.cur.kind == TokKind::Colon {
                     self.advance();
-                    let (o, n) = self.parse_asm_operand_list();
+                    let (o, n, c) = self.parse_asm_operand_list();
                     inputs = o;
                     input_names = n;
+                    input_constraints = c;
                 }
                 if self.cur.kind == TokKind::Colon { self.advance(); clobbers = self.parse_asm_clobber_list(); }
                 if self.cur.kind == TokKind::Colon { self.advance(); goto_labels = self.parse_asm_label_list(); }
                 if self.cur.kind == TokKind::RParen { self.advance(); }
                 if self.cur.kind == TokKind::Semi { self.advance(); }
                 Some(Stmt::AsmGoto {
-                    asm_str, outputs, output_names, inputs, input_names, clobbers, goto_labels, span: sp,
+                    asm_str, outputs, output_names, output_constraints, inputs, input_names,
+                    input_constraints, clobbers, goto_labels, span: sp,
                 })
             }
             TokKind::Ident if self.peek.kind == TokKind::Colon => {
@@ -2141,7 +2161,7 @@ impl<'a> Parser<'a> {
                 let ptr_ty = Type::Ptr(Box::new(Type::Void));
                 Some(Expr::Int { v: 0, span: sp, ty: ptr_ty })
             }
-            // __asm__("..."): 内联汇编, 解析为 no-op 表达式
+            // __asm__("..."): 内联汇编表达式
             TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" || self.cur.text == "asm" => {
                 self.advance();
                 // 可选的 volatile/const/__volatile__
@@ -2617,12 +2637,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// _Generic 类型兼容性检查: 简化比较, 忽略 const/volatile 限定符
+    /// _Generic 类型兼容性检查 (C11 6.2.7): 指针按 pointee 匹配，void* 与任意对象指针兼容
     fn types_compatible(a: &Type, b: &Type) -> bool {
-        // 剥离 Atomic 包装进行比较
-        let a = match a { Type::Atomic(inner) => inner.as_ref(), _ => a };
-        let b = match b { Type::Atomic(inner) => inner.as_ref(), _ => b };
-        // 整数类型族: char/schar/uchar 互兼容, short/ushort 互兼容, 等等
+        let a = match a { Type::Atomic(inner) => inner.as_ref(), other => other };
+        let b = match b { Type::Atomic(inner) => inner.as_ref(), other => other };
         match (a, b) {
             (Type::Bool, Type::Bool) => true,
             (Type::Char | Type::SChar | Type::UChar, Type::Char | Type::SChar | Type::UChar) => true,
@@ -2633,11 +2651,15 @@ impl<'a> Parser<'a> {
             (Type::Float, Type::Float) => true,
             (Type::Double, Type::Double) => true,
             (Type::LongDouble, Type::LongDouble) => true,
-            (Type::Ptr(_), Type::Ptr(_)) => true, // 指针间互兼容 (简化)
+            (Type::Ptr(pa), Type::Ptr(pb)) => {
+                if matches!(pa.as_ref(), Type::Void) || matches!(pb.as_ref(), Type::Void) {
+                    return true;
+                }
+                Self::types_compatible(pa, pb)
+            }
             (Type::Void, Type::Void) => true,
             (Type::Fract, Type::Fract) => true,
             (Type::Accum, Type::Accum) => true,
-            // struct/union/enum: 按名称比较
             (Type::Struct(na, _), Type::Struct(nb, _)) => na == nb,
             (Type::Union(na, _), Type::Union(nb, _)) => na == nb,
             (Type::Enum(na, _), Type::Enum(nb, _)) => na == nb,

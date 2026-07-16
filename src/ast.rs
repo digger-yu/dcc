@@ -20,8 +20,8 @@ pub enum Decl {
     EnumDef(EnumDef),
     Typedef { name: Ident, ty: Type, span: Span },
     GlobalAsm { asm_str: String, outputs: Vec<Expr>, output_names: Vec<Option<String>>,
-              inputs: Vec<Expr>, input_names: Vec<Option<String>>,
-              clobbers: Vec<String>, span: Span },
+              output_constraints: Vec<String>, inputs: Vec<Expr>, input_names: Vec<Option<String>>,
+              input_constraints: Vec<String>, clobbers: Vec<String>, span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -88,8 +88,8 @@ pub enum Stmt {
     Label   { name: Ident, stmt: Box<Stmt>, span: Span },
     Switch  { expr: Expr, cases: Vec<Case>, span: Span },
     AsmGoto { asm_str: String, outputs: Vec<Expr>, output_names: Vec<Option<String>>,
-              inputs: Vec<Expr>, input_names: Vec<Option<String>>,
-              clobbers: Vec<String>, goto_labels: Vec<Ident>, span: Span },
+              output_constraints: Vec<String>, inputs: Vec<Expr>, input_names: Vec<Option<String>>,
+              input_constraints: Vec<String>, clobbers: Vec<String>, goto_labels: Vec<Ident>, span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -137,8 +137,8 @@ pub enum Expr {
     Comma      { l: Box<Expr>, r: Box<Expr>, span: Span, ty: Type },
     /// 内联汇编 __asm__: 字符串列表, 结果类型
     AsmExpr    { asm_str: String, outputs: Vec<Expr>, output_names: Vec<Option<String>>,
-                 inputs: Vec<Expr>, input_names: Vec<Option<String>>,
-                 clobbers: Vec<String>, span: Span, ty: Type },
+                 output_constraints: Vec<String>, inputs: Vec<Expr>, input_names: Vec<Option<String>>,
+                 input_constraints: Vec<String>, clobbers: Vec<String>, span: Span, ty: Type },
     /// &&label: label 地址 (GNU 扩展)
     LabelAddr  { label: Ident, span: Span, ty: Type },
     /// __builtin_va_arg(ap, type): 可变参数读取

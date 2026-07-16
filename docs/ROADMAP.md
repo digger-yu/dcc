@@ -39,7 +39,7 @@
 | 逗号运算符 | P2 | ✅ Pratt bp=1 最低优先级 | ✅ 求值 lhs 丢弃返回 rhs | ✅ runtime_features.c |
 | VLA 可变长数组 | P2 | ✅ ArraySize::Var(Box<Expr>) | ✅ 动态栈分配+16字节对齐 | ✅ runtime_features.c |
 | 整数提升 | P2 | ✅ char/short 隐式提升 | ✅ movsx/movzx 符号/零扩展 | ✅ runtime_features.c |
-| 内联汇编 __asm__ | P1 | ✅ __asm__/__asm/asm + volatile/const, 带冒号约束列表 | ✅ no-op 透传 | ✅ runtime_features.c, Linux 内核 devicetable-offsets.c |
+| 内联汇编 __asm__ | P1 | ✅ __asm__/__asm/asm + volatile/const, 带冒号约束列表 | ✅ 约束 `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber | ✅ runtime_features.c, test_asm_constraints.c |
 | LTO + dead symbol gc | P2 | ✅ `-flto` / `-ffunction-sections` | ✅ `.llvm.lto` + `ld --gc-sections` + objcopy strip | ✅ `cargo test` + remote_feature_check |
 | struct 整体赋值 | P1 | ✅ 聚合初始化 | ✅ memcpy 整体拷贝 | ✅ Linux 验证 |
 | struct 传参/返回 | P2 | ✅ 函数参数/返回值 | ✅ SysV ABI 寄存器拆分 (<=16B) | ✅ Linux 验证 |

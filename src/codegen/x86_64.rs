@@ -124,6 +124,16 @@ enum AsmOperand {
     Sym(String),           // 符号/标签名
 }
 
+/// 内联 asm 约束绑定结果
+struct AsmOpBinding {
+    /// 分配到的物理寄存器索引 (rax=0 …)
+    reg: u8,
+    /// 是否为输出/读写操作数
+    is_output: bool,
+    /// 模板替换为内存操作数
+    is_mem: bool,
+}
+
 impl Codegen {
     pub fn new(target: Target) -> Self {
         Self { code: vec![], entry: 0, target, labels: Default::default(),
@@ -741,8 +751,12 @@ impl Codegen {
 
         // 文件级 asm 先发射到 .text
         for decl in &prog.decls {
-            if let Decl::GlobalAsm { asm_str, outputs, output_names, inputs, input_names, .. } = decl {
-                self.emit_global_asm(asm_str, outputs, output_names, inputs, input_names);
+            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints,
+                inputs, input_names, input_constraints, clobbers, .. } = decl {
+                self.emit_global_asm(
+                    asm_str, outputs, output_names, output_constraints,
+                    inputs, input_names, input_constraints, clobbers,
+                );
             }
         }
 
@@ -1321,9 +1335,12 @@ impl Codegen {
                     self.variadic_named_params = f.params.iter().filter(|p| p.name.is_some()).count() as i32;
                     self.variadic_named_gp = 0;
                     self.variadic_named_fp = 0;
-                    let mut param_stores: Vec<(u8, i32)> = Vec::new(); // (reg, offset)
-                    let mut stack_param_stores: Vec<(usize, i32)> = Vec::new(); // (arg_index, var offset)
-                    let mut arg_idx = 0usize;
+                    let mut param_stores: Vec<(u8, i32)> = Vec::new(); // (gp reg, offset)
+                    let mut xmm_param_stores: Vec<(u8, i32, Type)> = Vec::new(); // (xmm reg, offset, ty)
+                    let mut stack_param_stores: Vec<(usize, i32)> = Vec::new(); // (stack arg index, var offset)
+                    let mut gp_idx = 0usize;
+                    let mut fp_idx = 0usize;
+                    let mut stack_arg_idx = 0usize;
                     for p in f.params.iter() {
                         if let Some(nm) = &p.name {
                             let is_agg_param = matches!(&p.ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
@@ -1338,26 +1355,41 @@ impl Codegen {
                                 let off = -(used + 16);
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                                 for c in 0..chunks as usize {
-                                    if arg_idx + c < 6 {
-                                        param_stores.push((arg_regs[arg_idx + c], off + (c as i32 * 8)));
+                                    if gp_idx + c < 6 {
+                                        param_stores.push((arg_regs[gp_idx + c], off + (c as i32 * 8)));
                                     }
                                 }
-                                arg_idx += chunks as usize;
+                                if gp_idx + chunks > 6 {
+                                    stack_arg_idx += chunks;
+                                }
+                                gp_idx += chunks as usize;
                                 self.variadic_named_gp += chunks as i32;
-                            } else if arg_idx < 6 {
+                            } else if matches!(&p.ty, Type::Float | Type::Double | Type::LongDouble) && self.target.sse {
                                 let used: i32 = self.var_map.values()
                                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                                     .map(|(_, ty)| ((ty.size() + 7) / 8) as i32 * 8)
                                     .sum();
                                 let off = -(used + 16);
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                                param_stores.push((arg_regs[arg_idx], off));
-                                if matches!(&p.ty, Type::Float | Type::Double) {
+                                if fp_idx < 8 {
+                                    xmm_param_stores.push((fp_idx as u8, off, p.ty.clone()));
+                                    fp_idx += 1;
                                     self.variadic_named_fp += 1;
                                 } else {
-                                    self.variadic_named_gp += 1;
+                                    stack_param_stores.push((stack_arg_idx, off));
+                                    stack_arg_idx += 1;
+                                    self.variadic_named_fp += 1;
                                 }
-                                arg_idx += 1;
+                            } else if gp_idx < 6 {
+                                let used: i32 = self.var_map.values()
+                                    .filter(|(_, ty)| !matches!(ty, Type::Void))
+                                    .map(|(_, ty)| ((ty.size() + 7) / 8) as i32 * 8)
+                                    .sum();
+                                let off = -(used + 16);
+                                self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                                param_stores.push((arg_regs[gp_idx], off));
+                                gp_idx += 1;
+                                self.variadic_named_gp += 1;
                             } else {
                                 let used: i32 = self.var_map.values()
                                     .filter(|(_, ty)| !matches!(ty, Type::Void))
@@ -1365,13 +1397,9 @@ impl Codegen {
                                     .sum();
                                 let off = -(used + 16);
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                                stack_param_stores.push((arg_idx, off));
-                                if matches!(&p.ty, Type::Float | Type::Double) {
-                                    self.variadic_named_fp += 1;
-                                } else {
-                                    self.variadic_named_gp += 1;
-                                }
-                                arg_idx += 1;
+                                stack_param_stores.push((stack_arg_idx, off));
+                                stack_arg_idx += 1;
+                                self.variadic_named_gp += 1;
                             }
                         }
                     }
@@ -1419,8 +1447,15 @@ impl Codegen {
                 for (reg, off) in param_stores {
                     self.store_stack(reg, off);
                 }
+                for (xmm, off, ty) in xmm_param_stores {
+                    if matches!(ty, Type::Float) {
+                        self.store_xmm32_stack(xmm, off);
+                    } else {
+                        self.store_xmm64_stack(xmm, off);
+                    }
+                }
                 for (arg_index, off) in stack_param_stores {
-                    let incoming = self.frame_size + 16 + 8 * (arg_index - 6) as i32;
+                    let incoming = self.frame_size + 16 + 8 * arg_index as i32;
                     self.load_stack(0, incoming);
                     self.store_stack(0, off);
                 }
@@ -1890,7 +1925,8 @@ impl Codegen {
                 self.gen_expr(expr, 0); // rax = 目标地址
                 self.emit(&[0xFF, 0xE0]); // jmp rax
             }
-            Stmt::AsmGoto { asm_str, outputs, output_names, inputs, input_names, clobbers, goto_labels, .. } => {
+            Stmt::AsmGoto { asm_str, outputs, output_names, output_constraints,
+                inputs, input_names, input_constraints, clobbers, goto_labels, .. } => {
                 // 将 GCC 的 %lN / %l[name] 占位符解析为 C 标签名。
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
@@ -1901,8 +1937,10 @@ impl Codegen {
                     resolved_asm = resolved_asm.replace(
                         &format!("%l[{}]", label.name), &label.name);
                 }
-                self.emit_inline_asm(&resolved_asm, outputs, output_names, inputs, input_names);
-                let _ = clobbers;
+                self.emit_inline_asm(
+                    &resolved_asm, outputs, output_names, output_constraints,
+                    inputs, input_names, input_constraints, clobbers,
+                );
             }
         }
     }
@@ -2361,8 +2399,12 @@ impl Codegen {
                 self.gen_expr(l, 0);
                 self.gen_expr(r, dst);
             }
-            Expr::AsmExpr { asm_str, outputs, output_names, inputs, input_names, .. } => {
-                self.emit_inline_asm(asm_str, outputs, output_names, inputs, input_names);
+            Expr::AsmExpr { asm_str, outputs, output_names, output_constraints,
+                inputs, input_names, input_constraints, clobbers, .. } => {
+                self.emit_inline_asm(
+                    asm_str, outputs, output_names, output_constraints,
+                    inputs, input_names, input_constraints, clobbers,
+                );
                 if dst != 0 { self.mov(dst, 0); }
             }
             Expr::LabelAddr { label, .. } => {
@@ -4307,7 +4349,8 @@ impl Codegen {
     fn emit_va_start(&mut self, ap_name: &str) {
         let ap_off = self.var_offset(ap_name);
         let gp_init = (self.variadic_named_gp.min(6) * 8) as i32;
-        let fp_init = 48 + self.variadic_named_fp * 8;
+        // SSE 命名参数各占 reg_save_area 中 16 字节槽
+        let fp_init = 48 + self.variadic_named_fp * 16;
         self.store_stack_imm32(ap_off, gp_init);
         self.store_stack_imm32(ap_off + 4, fp_init);
         let overflow_off = self.frame_size + 16;
@@ -4330,7 +4373,7 @@ impl Codegen {
 
     /// SysV va_arg: 按 gp_offset/fp_offset 与 overflow_arg_area 读取参数。
     fn gen_va_arg(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
-        if matches!(arg_ty, Type::Float | Type::Double) && self.target.sse {
+        if matches!(arg_ty, Type::Float | Type::Double | Type::LongDouble) && self.target.sse {
             self.gen_va_arg_fp(ap_name, arg_ty, dst);
             return;
         }
@@ -4387,13 +4430,17 @@ impl Codegen {
         // eax = fp_offset (va_list + 4)
         self.emit(&[0x41, 0x8B, 0x85]);
         self.emit(&(ap_off + 4).to_le_bytes());
-        self.emit(&[0x83, 0xF8, 0xB0]); // cmp $176, %eax  (48 + 8*16)
+        // cmp $176, %eax — 176 超出 imm8 范围，须用 32 位立即数
+        self.emit(&[0x3D, 0xB0, 0x00, 0x00, 0x00]);
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // reg_save_area + fp_offset
         self.emit(&[0x49, 0x8B, 0x8D]);
         self.emit(&(ap_off + 16).to_le_bytes());
         if matches!(arg_ty, Type::Float) {
             self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x01]); // movss (%rcx,%rax), xmm0
+        } else if matches!(arg_ty, Type::LongDouble) {
+            // long double: 16 字节，取低 8 字节 double 部分
+            self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x01]); // movsd
         } else {
             self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x01]); // movsd (%rcx,%rax), xmm0
         }
@@ -4406,6 +4453,8 @@ impl Codegen {
         self.emit(&(ap_off + 8).to_le_bytes());
         if matches!(arg_ty, Type::Float) {
             self.emit(&[0xF3, 0x0F, 0x10, 0x01]);
+        } else if matches!(arg_ty, Type::LongDouble) {
+            self.emit(&[0xF2, 0x0F, 0x10, 0x01]);
         } else {
             self.emit(&[0xF2, 0x0F, 0x10, 0x01]);
         }
@@ -5193,23 +5242,140 @@ impl Codegen {
 
     // ===== Inline Asm Mini-Assembler (AT&T syntax) =====
 
-    /// 构建 asm 操作数映射: %N / %[name] → 寄存器名
+    /// 解析 GCC asm 约束前缀 (= 输出, + 读写)
+    fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool) {
+        let mut is_output = false;
+        let mut is_inout = false;
+        let mut s = constraint.trim();
+        while !s.is_empty() {
+            match s.chars().next() {
+                Some('=') => { is_output = true; s = &s[1..]; }
+                Some('+') => { is_output = true; is_inout = true; s = &s[1..]; }
+                Some('&') => { s = &s[1..]; }
+                _ => break,
+            }
+        }
+        (is_output, is_inout)
+    }
+
+    /// 约束是否优先使用内存操作数
+    fn asm_constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
+        if constraint.is_empty() {
+            return false;
+        }
+        let letters: Vec<char> = constraint.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        let has_m = letters.contains(&'m');
+        let has_r = letters.iter().any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'));
+        if has_m && (!has_r || is_inout) {
+            return true;
+        }
+        letters == vec!['m']
+    }
+
+    /// 约束是否使用立即数
+    fn asm_constraint_is_immediate(constraint: &str) -> bool {
+        constraint.chars().any(|c| matches!(c, 'i' | 'n' | 'I' | 'N' | 'M'))
+    }
+
+    /// 为 asm 操作数生成 AT&T 内存操作数字符串 (基于 r13 帧指针)
+    fn asm_memory_operand_str(&mut self, expr: &Expr) -> Option<String> {
+        if let Expr::Ident { name, .. } = expr {
+            if self.globals.contains_key(&name.name) {
+                return Some(format!("{}(%rip)", name.name));
+            }
+            let off = self.var_offset(&name.name);
+            return Some(format!("{off}(%r13)"));
+        }
+        None
+    }
+
+    /// 按约束为特定字母选择寄存器名
+    fn asm_reg_for_constraint(constraint: &str, idx: usize) -> &'static str {
+        let letters: Vec<char> = constraint.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        if letters.contains(&'a') { return "rax"; }
+        if letters.contains(&'b') { return "rbx"; }
+        if letters.contains(&'c') { return "rcx"; }
+        if letters.contains(&'d') { return "rdx"; }
+        if letters.contains(&'S') { return "rsi"; }
+        if letters.contains(&'D') { return "rdi"; }
+        if letters.contains(&'q') || letters.contains(&'Q') {
+            return ["rax", "rbx", "rcx", "rdx"][idx % 4];
+        }
+        ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"][idx % 9]
+    }
+
+    fn asm_name_to_reg_index(name: &str) -> u8 {
+        match name {
+            "rax" => 0, "rcx" => 1, "rdx" => 2, "rbx" => 3,
+            "rsp" => 4, "rbp" => 5, "rsi" => 6, "rdi" => 7,
+            "r8" => 8, "r9" => 9, "r10" => 10, "r11" => 11,
+            _ => 0,
+        }
+    }
+
+    /// 构建 asm 操作数映射: %N / %[name] → 寄存器名或内存操作数
     fn build_asm_operand_map(
         &mut self,
         outputs: &[Expr],
         output_names: &[Option<String>],
+        output_constraints: &[String],
         inputs: &[Expr],
         input_names: &[Option<String>],
+        input_constraints: &[String],
+        bindings: &mut Vec<AsmOpBinding>,
     ) -> HashMap<String, String> {
         let mut map = HashMap::new();
-        let alloc_regs = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
         let mut idx = 0usize;
-        for op in outputs.iter().chain(inputs.iter()) {
-            if idx >= alloc_regs.len() {
-                break;
+        for (op_idx, op) in outputs.iter().enumerate() {
+            let constraint = output_constraints.get(op_idx).map(String::as_str).unwrap_or("");
+            let (is_output, is_inout) = Self::parse_asm_constraint_flags(constraint);
+            if Self::asm_constraint_is_immediate(constraint) {
+                if let Some(val) = Self::eval_asm_operand(op) {
+                    map.insert(format!("%{idx}"), val);
+                    bindings.push(AsmOpBinding { reg: 0, is_output: false, is_mem: false });
+                    idx += 1;
+                    continue;
+                }
             }
-            self.prepare_asm_binding(op, idx as u8);
-            map.insert(format!("%{}", idx), alloc_regs[idx].to_string());
+            if Self::asm_constraint_prefers_memory(constraint, is_inout) {
+                if let Some(mem) = self.asm_memory_operand_str(op) {
+                    map.insert(format!("%{idx}"), mem);
+                    bindings.push(AsmOpBinding { reg: 0, is_output, is_mem: true });
+                    idx += 1;
+                    continue;
+                }
+            }
+            let reg_name = Self::asm_reg_for_constraint(constraint, idx);
+            let reg_idx = Self::asm_name_to_reg_index(reg_name);
+            self.prepare_asm_binding(op, reg_idx);
+            map.insert(format!("%{idx}"), reg_name.to_string());
+            bindings.push(AsmOpBinding { reg: reg_idx, is_output, is_mem: false });
+            idx += 1;
+        }
+        for (op_idx, op) in inputs.iter().enumerate() {
+            let constraint = input_constraints.get(op_idx).map(String::as_str).unwrap_or("r");
+            let (is_output, is_inout) = Self::parse_asm_constraint_flags(constraint);
+            if Self::asm_constraint_is_immediate(constraint) {
+                if let Some(val) = Self::eval_asm_operand(op) {
+                    map.insert(format!("%{idx}"), val);
+                    bindings.push(AsmOpBinding { reg: 0, is_output: false, is_mem: false });
+                    idx += 1;
+                    continue;
+                }
+            }
+            if Self::asm_constraint_prefers_memory(constraint, is_inout) {
+                if let Some(mem) = self.asm_memory_operand_str(op) {
+                    map.insert(format!("%{idx}"), mem);
+                    bindings.push(AsmOpBinding { reg: 0, is_output: is_output || is_inout, is_mem: true });
+                    idx += 1;
+                    continue;
+                }
+            }
+            let reg_name = Self::asm_reg_for_constraint(constraint, idx);
+            let reg_idx = Self::asm_name_to_reg_index(reg_name);
+            self.prepare_asm_binding(op, reg_idx);
+            map.insert(format!("%{idx}"), reg_name.to_string());
+            bindings.push(AsmOpBinding { reg: reg_idx, is_output: is_output || is_inout, is_mem: false });
             idx += 1;
         }
         for (i, name) in output_names.iter().enumerate() {
@@ -5228,6 +5394,66 @@ impl Codegen {
             }
         }
         map
+    }
+
+    /// asm 输出操作数写回 C 变量
+    fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8) {
+        let Expr::Ident { name, ty, .. } = expr else { return };
+        if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+            let off = self.var_offset(&name.name);
+            if matches!(ty, Type::Float) {
+                self.store_xmm32_stack(reg.min(8), off);
+            } else {
+                self.store_xmm64_stack(reg.min(8), off);
+            }
+            return;
+        }
+        let off = self.var_offset(&name.name);
+        let sz = ty.size();
+        if sz <= 1 {
+            self.emit(&[0x41, 0x88, 0x85 | ((reg & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        } else if sz <= 2 {
+            self.emit(&[0x66, 0x41, 0x89, 0x85 | ((reg & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        } else if sz <= 4 {
+            self.emit(&[0x41, 0x89, 0x85 | ((reg & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        } else {
+            self.store_stack(reg, off);
+        }
+    }
+
+    fn store_xmm32_stack(&mut self, xmm: u8, off: i32) {
+        self.emit(&[0xF3]);
+        if xmm >= 8 {
+            self.emit(&[0x44, 0x41]);
+        } else {
+            self.emit(&[0x41]);
+        }
+        self.emit(&[0x0F, 0x11]);
+        if off.abs() < 128 {
+            self.emit(&[0x45 | ((xmm & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((xmm & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
+    fn store_xmm64_stack(&mut self, xmm: u8, off: i32) {
+        self.emit(&[0xF2]);
+        if xmm >= 8 {
+            self.emit(&[0x44, 0x41]);
+        } else {
+            self.emit(&[0x41]);
+        }
+        self.emit(&[0x0F, 0x11]);
+        if off.abs() < 128 {
+            self.emit(&[0x45 | ((xmm & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((xmm & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
     }
 
     /// 将 asm 约束表达式加载到指定寄存器（Ident 取地址，其余求值）。
@@ -5424,6 +5650,15 @@ impl Codegen {
         None
     }
 
+    /// 将 op_map 值格式化为 AT&T 操作数字符串
+    fn asm_format_subst(val: &str) -> String {
+        if val.contains('(') || val.starts_with('-') || val.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            val.to_string()
+        } else {
+            format!("%{val}")
+        }
+    }
+
     /// 替换 asm 模板中的 %N 占位符
     fn resolve_asm_template(
         &self,
@@ -5441,26 +5676,22 @@ impl Codegen {
             if let Some(val) = Self::eval_asm_operand(op) {
                 resolved = resolved.replace(&key, &val);
             } else if let Some(reg) = op_map.get(&key) {
-                resolved = resolved.replace(&key, reg);
+                resolved = resolved.replace(&key, &Self::asm_format_subst(reg));
             }
             idx += 1;
         }
         for (i, name) in output_names.iter().chain(input_names.iter()).enumerate() {
             if let Some(n) = name {
                 let key = format!("%[{n}]");
-                let num_key = if i < output_names.len() {
-                    format!("%{}", i)
-                } else {
-                    format!("%{}", i)
-                };
+                let num_key = format!("%{}", i);
                 if let Some(reg) = op_map.get(&num_key).or_else(|| op_map.get(&key)) {
-                    resolved = resolved.replace(&key, reg);
+                    resolved = resolved.replace(&key, &Self::asm_format_subst(reg));
                 }
             }
         }
         for (key, reg) in op_map {
             if key.starts_with("%[") {
-                resolved = resolved.replace(key, reg);
+                resolved = resolved.replace(key, &Self::asm_format_subst(reg));
             }
         }
         resolved
@@ -5472,10 +5703,17 @@ impl Codegen {
         asm_str: &str,
         outputs: &[Expr],
         output_names: &[Option<String>],
+        output_constraints: &[String],
         inputs: &[Expr],
         input_names: &[Option<String>],
+        input_constraints: &[String],
+        clobbers: &[String],
     ) {
-        let op_map = self.build_asm_operand_map(outputs, output_names, inputs, input_names);
+        let mut bindings = Vec::new();
+        let op_map = self.build_asm_operand_map(
+            outputs, output_names, output_constraints,
+            inputs, input_names, input_constraints, &mut bindings,
+        );
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
         } else { asm_str };
@@ -5508,6 +5746,12 @@ impl Codegen {
             }
             self.emit_asm_line(&resolved);
         }
+        for (i, binding) in bindings.iter().enumerate() {
+            if binding.is_output && !binding.is_mem && i < outputs.len() {
+                self.writeback_asm_operand(&outputs[i], binding.reg);
+            }
+        }
+        let _ = clobbers;
     }
 
     /// 发射内联汇编模板
@@ -5516,10 +5760,17 @@ impl Codegen {
         asm_str: &str,
         outputs: &[Expr],
         output_names: &[Option<String>],
+        output_constraints: &[String],
         inputs: &[Expr],
         input_names: &[Option<String>],
+        input_constraints: &[String],
+        clobbers: &[String],
     ) {
-        let op_map = self.build_asm_operand_map(outputs, output_names, inputs, input_names);
+        let mut bindings = Vec::new();
+        let op_map = self.build_asm_operand_map(
+            outputs, output_names, output_constraints,
+            inputs, input_names, input_constraints, &mut bindings,
+        );
         // 清理字符串: 去除引号包裹
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
@@ -5541,6 +5792,15 @@ impl Codegen {
                 }
             }
             self.emit_asm_line(&resolved);
+        }
+        for (i, binding) in bindings.iter().enumerate() {
+            if binding.is_output && !binding.is_mem && i < outputs.len() {
+                self.writeback_asm_operand(&outputs[i], binding.reg);
+            }
+        }
+        if clobbers.iter().any(|c| c == "memory") {
+            // memory clobber: 编译器屏障，防止指令重排越过 asm
+            self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
         }
     }
 
@@ -5582,13 +5842,15 @@ impl Codegen {
             }
             return AsmOperand::None;
         }
-        // 寄存器: %reg
+        // 寄存器: %reg 或裸 rax/rbx 等
         if s.starts_with('%') {
             if let Some((idx, sz)) = Self::parse_asm_reg(s) {
                 return AsmOperand::Reg(idx, sz);
             }
-            // 可能是标签引用 %label 或 %lN, 跳过
             return AsmOperand::None;
+        }
+        if let Some((idx, sz)) = Self::parse_asm_reg(&format!("%{s}")) {
+            return AsmOperand::Reg(idx, sz);
         }
         // 内存: disp(%base,%idx,scale) 或 (%reg) 或 symbol(%rip)
         if s.contains('(') {

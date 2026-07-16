@@ -860,3 +860,42 @@ fn generic_with_ternary_controlling_expr_compiles() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// `_Generic` 指针按 pointee 精确匹配，char* 与 int* 不得互匹配。
+#[test]
+fn generic_pointer_precise_match_compiles() {
+    let source = include_str!("fixtures/generic_pointer.c");
+    let (output, obj) = run_object_test("generic-pointer", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 内联 asm 约束 (=r / +m / memory clobber) 编译通过。
+#[test]
+fn asm_constraints_compile() {
+    let source = include_str!("../examples/test_asm_constraints.c");
+    let (output, obj) = run_object_test("asm-constraints", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// SysV va_list GP + SSE 浮点路径编译通过。
+#[test]
+fn va_list_sse_compiles() {
+    let source = include_str!("../examples/test_p4_va_list.c");
+    let (output, obj) = run_object_test("va-list-sse", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

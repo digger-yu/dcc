@@ -46,10 +46,10 @@ bash scripts/test_tr2.sh
 bash scripts/test_v3_cache.sh
 ```
 
-### 2. libdecnumber / gen\* 工具（可选）
+### 2. libdecnumber / gen\* 工具（可选，非阻塞）
 
-`libdecnumber` 为宏驱动的 include 单元；下一步可仿 GCC Makefile
-用 `dcc -c` 编译组合后的翻译单元。完整 GCC bootstrap 仍受阻于无 C++。
+`libdecnumber` 为宏驱动的 include 单元；完整 GCC bootstrap 仍受阻于无 C++。
+**阶段 D（编译器能力补洞）已完成**：`_Generic` 指针精确匹配、内联 asm 约束、SysV va_list SSE。
 
 ### 3. 明确不做完整 GCC bootstrap
 

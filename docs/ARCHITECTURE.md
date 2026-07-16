@@ -119,8 +119,8 @@ error[E0001]: expected ';', got '{'
 - 后端以 `r13` 作为稳定帧基址。嵌套函数调用通过 `r10` 传递静态链，
   被调函数保存父级 `r13` 后按已解析的父帧偏移访问捕获变量。
 - 简化 `va_list` 会在可变参数函数序言中按
-  `rdi,rsi,rdx,rcx,r8,r9` 保存 GP 参数；当前不包含完整的 SysV SSE
-  save area 和所有跨边界分类规则。
+  `rdi,rsi,rdx,rcx,r8,r9` 保存 GP 参数，并按 `xmm0`–`xmm7` 保存 SSE
+  参数；`va_arg` 支持 float/double/long double。
 - `register asm("reg")` 变量直接映射到指定物理寄存器；调用者仍需遵守
   目标寄存器的 SysV caller/callee-saved 约束。
 
