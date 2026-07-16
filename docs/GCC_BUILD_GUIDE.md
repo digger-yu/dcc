@@ -26,35 +26,45 @@ DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
   bash scripts/remote_libiberty_probe.sh
 ```
 
-脚本会写入最小 `libiberty/config.h`（未跑 autoconf 时），并汇总 OK/FAIL。
+脚本会写入/刷新最小 `libiberty/config.h`（含 `HAVE_SYS_TYPES_H`、`#include <sys/types.h>`），
+跳过非 Linux 平台桩，并汇总 OK/FAIL/SKIP。
 
-## 2026-07-16 远程结果（基线）
+## 2026-07-16 远程结果（当前）
 
 | 指标 | 数值 |
 |------|------|
-| 可编译 `.c` | **90** |
-| 失败 | **39** |
-| 此前阻塞 | 栈溢出 / `#include_next` / `#if 0x..` / `_Generic`+三元 |
+| 可编译 `.c` | **124** |
+| 失败 | **1**（`regex.c`） |
+| 跳过 | **4**（`msdos` / `pex-djgpp` / `pex-msdos` / `pex-win32`） |
+| 基线（本轮初） | 约 90 OK / 39 FAIL |
 
-### 本轮已修（为编 GCC/glibc 头所触发）
+### 本轮已修（相对基线）
 
 | 问题 | 根因 | 修复 |
 |------|------|------|
-| `#if 'A' == 0x41` 恒假 | `replace_unknown_idents` 把 `0x41` 拆成 `0`+`x41`→`00` | 数字字面量整段保留 |
-| `safe-ctype.h` HOST_CHARSET | 同上 | 同上 |
-| 编译 `argv.c` 栈溢出 | 函数宏参数预展开用空 disabled 集，嵌套宏无限递归 | 参数展开继承涂蓝集 + 深度保护 |
-| `<limits.h>` E0204 | `#include_next` 被当成 `#include` | 实现 `#include_next` |
-| glibc `_Generic(a?b:c, …)` | 三元 else 用 `parse_expr_bp(0)` 吞掉逗号 | else 用 bp=2，并尊重 min_bp |
+| 浮点 `&&`/`\|\|` | 比较结果被标成 float，IR 拒 AndAnd | 比较/`&&`/`\|\|` 结果恒为 int |
+| texinfo `@deftypefn` | 多被误判；实为缺 `HAVE_CONFIG_H` | 探测脚本加 `-DHAVE_CONFIG_H` |
+| `strerror` ENTRY 宏 | 参数替换进字符串字面量 | `replace_ident` 跳过字符串/字符常量 |
+| `htab_size` | `size_t (name)(params)` 括号防宏 | 支持括号包函数名 |
+| 嵌套函数指针参数 | `char *(*pfn)(...)` | `parse_params` 指针后再认 `(*` |
+| `[__restrict]` | 数组限定符当表达式 | 跳过 restrict/static/const |
+| `&randtbl[i]` 全局初值 | 非常量 | `is_static_initializer` + rela addend |
+| `&&di` 宏展开 | `##` 路径全局替换后再替换 | `handle_paste` 只替换 ## 两侧 |
+| `struct T *a, *b` | `parse_type` 吃掉第一个 `*` | 说明符不含 `*`；多声明符循环 |
+| `struct T *a, *b` 初值 | `parse_expr` 吞逗号 | 初值用 `parse_expr_bp(2)` |
+| `(*f())` / `(*fns[N])()` | 返回指针的函数、函数指针数组 | 声明符路径补全 |
+| `operators[][2]` | 只认一维数组 | 多维 `[]` 循环 |
+| `__alignof__` | 未作 KwAlignof | token 识别 |
+| `label: case` | label 后不能直接 case | 空语句标签 |
+| 前向 struct 成员访问 | 空字段 Rc 不更新 | 空字段时查 `struct_defs` |
+| `pid_t` / md5_uint32 | 缺 sys/types、stdint 路径 | config.h 补全 + `__INT_MAX__` 等 |
+| 无参函数宏 `PREFETCH()` | `()` 被解析成一个空实参 | 空 `()` → 零个实参 |
 
-### 仍失败的典型类别（后续）
+### 仍失败
 
-| 类别 | 示例文件 | 说明 |
-|------|----------|------|
-| 浮点逻辑 | `copysign.c` | SSE 路径缺 `AndAnd`/`OrOr` |
-| C++ demangle | `cp-demangle.c` 等 | 复杂 GNU C / 设计器语法 |
-| 平台桩 | `pex-djgpp.c` / `msdos.c` | 非 Linux 头，可跳过 |
-| texinfo 注释泄漏 | `filename_cmp.c` 等 | `@deftypefn` 块被当代码 |
-| 其余 | `obstack` / `regex` / `simple-object*` | 宏与类型尚未对齐 |
+| 文件 | 现象 | 说明 |
+|------|------|------|
+| `regex.c` | `TRANSLATE(*d)` 展开成 `(**d)`；`PREFETCH()` 未展开 | 仅在完整 `regex.c` 上下文复现；独立最小例可过。待查宏表/条件编译交互 |
 
 ## 与内核路径的关系
 

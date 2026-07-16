@@ -19,17 +19,21 @@
 - [x] `_Generic` + 三元控制表达式逗号边界
 - [x] `scripts/remote_libiberty_probe.sh` + `docs/GCC_BUILD_GUIDE.md`
 - [x] 远程 libiberty 基线：**90 OK / 39 FAIL**
+- [x] 浮点 AndAnd/OrOr、宏参/字符串、括号函数名、嵌套 fptr、restrict 数组
+- [x] `##` 二次替换、多声明符/`&arr[i]`、前向 struct、config.h 补全
+- [x] 远程 libiberty 当前：**124 OK / 1 FAIL**（剩 `regex.c`）
 
 ## 待办（短期：GCC 纯 C 子集）
 
-### 1. 提升 libiberty 通过率
+### 1. 修完 `regex.c`
+
+完整文件中 `TRANSLATE(*d)` 被展成 `(**d)`，`PREFETCH()` 未展开；独立最小例可过。
+需对照宏表与条件编译交互。
 
 ```bash
 DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
   bash scripts/remote_libiberty_probe.sh
 ```
-
-优先：浮点 `AndAnd`/`OrOr`、texinfo 文档块、`obstack`/`regex`/`simple-object*`。
 
 ### 2. 明确不做完整 GCC bootstrap
 

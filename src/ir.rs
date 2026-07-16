@@ -154,7 +154,8 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
         let vector = expr.children.iter().any(|e| matches!(e.ty, ValueType::Vector(_, _)));
         let complex = expr.children.iter().any(|e| matches!(e.ty, ValueType::Complex(_)));
         if float && !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
-            | BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+            | BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            | BinOp::AndAnd | BinOp::OrOr) {
             diagnostics.push(Diagnostic::err(
                 "E1003",
                 format!("unsupported floating-point operation {:?}", op),
@@ -405,7 +406,19 @@ fn is_static_initializer(expr: &Expr) -> bool {
     match expr {
         Expr::String { .. } | Expr::LabelAddr { .. } => true,
         Expr::Ident { .. } => true,
-        Expr::AddrOf { e, .. } => matches!(e.as_ref(), Expr::Ident { .. } | Expr::String { .. }),
+        // &ident / &arr[const]：链接期可重定位常量
+        Expr::AddrOf { e, .. } => match e.as_ref() {
+            Expr::Ident { .. } | Expr::String { .. } => true,
+            Expr::Index { arr, idx, .. } => {
+                matches!(arr.as_ref(), Expr::Ident { .. }) && const_eval::eval(idx).is_ok()
+            }
+            _ => false,
+        },
+        // 数组到指针衰减: arr + const / &arr[i] 的等价形式
+        Expr::Binop { op: BinOp::Add, l, r, .. } => {
+            (matches!(l.as_ref(), Expr::Ident { .. }) && const_eval::eval(r).is_ok())
+                || (matches!(r.as_ref(), Expr::Ident { .. }) && const_eval::eval(l).is_ok())
+        }
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => inits.iter().all(|item| {
             match item {
                 InitItem::Expr(e) => is_static_initializer(e),

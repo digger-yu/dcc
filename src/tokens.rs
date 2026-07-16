@@ -85,7 +85,8 @@ impl<'a> Lexer<'a> {
     fn skip_ws_and_comments(&mut self) {
         loop {
             match self.peek() {
-                Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') => { self.bump(); }
+                Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+                | Some(b'\x0c') | Some(b'\x0b') => { self.bump(); }
                 Some(b'/') if self.peek_at(1) == Some(b'/') => {
                     while self.peek().is_some() && self.peek() != Some(b'\n') { self.bump(); }
                 }
@@ -134,7 +135,7 @@ impl<'a> Lexer<'a> {
                 "const" | "__const__" => TokKind::KwConst, "volatile" | "__volatile__" => TokKind::KwVolatile,
                 "inline" | "__inline__" | "__inline" => TokKind::KwInline, "restrict" | "__restrict__" | "__restrict" => TokKind::KwRestrict,
                 "auto" => TokKind::KwAuto, "register" => TokKind::KwRegister,
-                "sizeof" => TokKind::KwSizeof, "_Alignof" => TokKind::KwAlignof,
+                "sizeof" => TokKind::KwSizeof, "_Alignof" | "alignof" | "__alignof" | "__alignof__" => TokKind::KwAlignof,
                 "_Atomic" => TokKind::KwAtomic,
                 "_Bool" => TokKind::KwBool,
                 "_Fract" => TokKind::KwFract, "_Accum" => TokKind::KwAccum,

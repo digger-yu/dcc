@@ -40,15 +40,13 @@
 
 ## 短期：GCC libiberty（纯 C）
 
-详见 `docs/GCC_BUILD_GUIDE.md`。远程基线（2026-07-16）：**90 OK / 39 FAIL**。
+详见 `docs/GCC_BUILD_GUIDE.md`。远程当前（2026-07-16）：**124 OK / 1 FAIL / 4 SKIP**。
 
 | 缺口 | 影响 |
 |------|------|
 | 无 C++ | 无法编 GCC 主体 / 完整 bootstrap |
-| 浮点 `AndAnd`/`OrOr` | `copysign.c` 等 |
-| texinfo `@deftypefn` 注释 | 部分 libiberty 文件把文档当代码 |
+| `regex.c` 宏展开 | 完整文件中 `TRANSLATE(*d)`→`(**d)`，`PREFETCH()` 未展开 |
 | `_Generic` 指针精确匹配 | 当前指针一律兼容，可能选错 association |
-| 复杂 demangle / regex / obstack | 仍有解析或类型错误 |
 
 ## 远程 debug 记录（2026-07-15）
 
@@ -67,6 +65,12 @@
 | `argv.c` 栈溢出 | 宏参数展开丢涂蓝集 | 继承 disabled + 深度上限 |
 | `limits.h` / `lrealpath` | 无 `#include_next` | 实现并优先匹配指令名 |
 | `argv.c` `_Generic` 解析失败 | 三元 else bp=0 吞逗号 | else 改为 `parse_expr_bp(2)` |
+| 浮点比较/`&&`/`\|\|` | 结果类型标成 float | 比较与逻辑结果恒为 int |
+| 宏参替换破坏字符串 | `replace_ident` 进字面量 | 跳过 `"`/`'` |
+| `##` 后再替换 → `&&di` | paste 全局替换 | 只替换 ## 两侧 token |
+| `struct T *a, *b` 变 `T**` | 说明符吃掉 `*` | `parse_decl_specifiers` + 多声明符 |
+| 全局 `&arr[i]` | 初值校验过严 | 静态初值 + rela addend |
+| 前向 struct 成员 | 空 fields | 空时查 `struct_defs` |
 
 ## 已实现模块（2026-07-15 扩展）
 

@@ -132,6 +132,15 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("__GNUC_STDC_INLINE__", "1");
     pp.define_builtin("__GXX_ABI_VERSION", "1017");
     pp.define_builtin("__CHAR_BIT__", "8");
+    pp.define_builtin("__SCHAR_MAX__", "127");
+    pp.define_builtin("__SHRT_MAX__", "32767");
+    pp.define_builtin("__INT_MAX__", "2147483647");
+    pp.define_builtin("__LONG_MAX__", "9223372036854775807L");
+    pp.define_builtin("__LONG_LONG_MAX__", "9223372036854775807LL");
+    pp.define_builtin("__UINT_MAX__", "4294967295U");
+    pp.define_builtin("__ULONG_MAX__", "18446744073709551615UL");
+    pp.define_builtin("__SIZE_MAX__", "18446744073709551615UL");
+    pp.define_builtin("__PTRDIFF_MAX__", "9223372036854775807L");
     pp.define_builtin("__ORDER_LITTLE_ENDIAN__", "1234");
     pp.define_builtin("__ORDER_BIG_ENDIAN__", "4321");
     pp.define_builtin("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
@@ -820,6 +829,9 @@ impl Preprocessor {
                 params.push("__VA_ARGS__".to_string());
             }
             let body = after_name[paren_end+1..].trim().to_string();
+            if name == "TRANSLATE" || name == "PREFETCH" {
+                eprintln!("dcc-debug #define {}({:?}) body={:?}", name, params, body);
+            }
             self.macros.insert(name.to_string(), MacroDef {
                 params: Some(params), body, variadic,
             });
@@ -1362,6 +1374,12 @@ impl Preprocessor {
                                 new_disabled.insert(ident.clone());
                                 let rescanned = self.expand_with_disabled(&substituted, &new_disabled);
                                 out.push_str(&rescanned);
+                            } else if params.is_empty() && raw_args.is_empty() {
+                                // PREFETCH() 这类无参函数宏
+                                let mut new_disabled = disabled.clone();
+                                new_disabled.insert(ident.clone());
+                                let rescanned = self.expand_with_disabled(&def.body, &new_disabled);
+                                out.push_str(&rescanned);
                             } else {
                                 out.push_str(&ident);
                             }
@@ -1469,7 +1487,11 @@ impl Preprocessor {
                     depth -= 1;
                     if depth == 0 {
                         closed = true;
-                        args.push(current.trim().to_string());
+                        // FOO() → 零个实参；FOO(a,) → 最后空实参仍保留
+                        let trimmed = current.trim().to_string();
+                        if !trimmed.is_empty() || !args.is_empty() {
+                            args.push(trimmed);
+                        }
                     } else {
                         current.push(c);
                     }
@@ -1502,39 +1524,113 @@ impl Preprocessor {
         let result = self.handle_stringify(&body, params, args);
         // 第二步: 处理 ## (令牌拼接)
         let result = self.handle_paste(&result, params, args);
-        // 第三步: 普通参数替换
+        // 第三步: 普通参数替换（单次扫描，实参视为不透明，避免 *d 被二次替换成 **d）
         let mut result = result;
-        for (i, param) in params.iter().enumerate() {
-            if i >= args.len() { continue; }
-            // 替换独立的参数名 (不拆分单词, 避免破坏 ## 结果)
-            result = Self::replace_ident(&result, param, &args[i]);
+        result = Self::replace_all_params(&result, params, args);
+        result
+    }
+
+    /// 一次扫描替换所有宏参数；写入的实参文本不再参与参数名匹配
+    fn replace_all_params(text: &str, params: &[String], args: &[String]) -> String {
+        if params.is_empty() {
+            return text.to_string();
+        }
+        let mut result = String::with_capacity(text.len());
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        while i < len {
+            if chars[i] == '"' {
+                result.push('"');
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                if i < len {
+                    result.push('"');
+                    i += 1;
+                }
+                continue;
+            }
+            if chars[i] == '\'' {
+                result.push('\'');
+                i += 1;
+                while i < len && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                if i < len {
+                    result.push('\'');
+                    i += 1;
+                }
+                continue;
+            }
+            if chars[i].is_alphabetic() || chars[i] == '_' {
+                let start = i;
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let ident: String = chars[start..i].iter().collect();
+                if let Some(idx) = params.iter().position(|p| p == &ident) {
+                    if let Some(arg) = args.get(idx) {
+                        result.push_str(arg);
+                        continue;
+                    }
+                }
+                result.push_str(&ident);
+            } else {
+                result.push(chars[i]);
+                i += 1;
+            }
         }
         result
     }
 
-    /// ## 令牌拼接: 替换参数后直接拼接文本
+    /// ## 令牌拼接: 仅替换 ## 两侧的参数名后拼接（勿全局替换，否则会与后续
+    /// substitute_params 二次替换把 `&di` 弄成 `&&di`）
     fn handle_paste(&self, body: &str, params: &[String], args: &[String]) -> String {
-        // 先替换参数名, 然后处理 ##
-        let mut result = body.to_string();
-        // 替换参数名 (用于 ## 上下文)
-        for (i, param) in params.iter().enumerate() {
-            if i >= args.len() { continue; }
-            result = Self::replace_ident(&result, param, &args[i]);
+        if !body.contains("##") {
+            return body.to_string();
         }
-        // 处理 ##: 拼接两侧 token
+        let mut result = body.to_string();
         while let Some(pos) = result.find("##") {
             let before = result[..pos].trim_end();
-            let after = result[pos+2..].trim_start();
+            let after = result[pos + 2..].trim_start();
             // 取 before 最后一个 token
-            let left_start = before.rfind(|c: char| !c.is_alphanumeric() && c != '_')
-                .map(|p| p + 1).unwrap_or(0);
+            let left_start = before
+                .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                .map(|p| p + 1)
+                .unwrap_or(0);
             let left = &before[left_start..];
             // 取 after 第一个 token
-            let right_end = after.find(|c: char| !c.is_alphanumeric() && c != '_')
+            let right_end = after
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
                 .unwrap_or(after.len());
             let right = &after[..right_end];
-            let pasted = format!("{}{}", left, right);
-            result = format!("{} {} {}", &before[..left_start], pasted, &after[right_end..]);
+            // 若侧为宏参数名则换为实参，否则原样保留
+            let left_sub = params
+                .iter()
+                .position(|p| p == left)
+                .and_then(|i| args.get(i))
+                .map(|s| s.as_str())
+                .unwrap_or(left);
+            let right_sub = params
+                .iter()
+                .position(|p| p == right)
+                .and_then(|i| args.get(i))
+                .map(|s| s.as_str())
+                .unwrap_or(right);
+            let pasted = format!("{}{}", left_sub, right_sub);
+            result = format!("{}{}{}", &before[..left_start], pasted, &after[right_end..]);
         }
         result
     }
@@ -1566,13 +1662,49 @@ impl Preprocessor {
         format!("\"{}\"", escaped)
     }
 
-    /// 替换文本中的独立标识符
+    /// 替换文本中的独立标识符（跳过字符串/字符常量，避免 ENTRY 类宏破坏字面量）
     fn replace_ident(text: &str, from: &str, to: &str) -> String {
         let mut result = String::with_capacity(text.len());
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
         let mut i = 0;
         while i < len {
+            // 跳过字符串字面量
+            if chars[i] == '"' {
+                result.push('"');
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                if i < len {
+                    result.push('"');
+                    i += 1;
+                }
+                continue;
+            }
+            // 跳过字符常量
+            if chars[i] == '\'' {
+                result.push('\'');
+                i += 1;
+                while i < len && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                if i < len {
+                    result.push('\'');
+                    i += 1;
+                }
+                continue;
+            }
             if chars[i].is_alphabetic() || chars[i] == '_' {
                 let start = i;
                 while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }

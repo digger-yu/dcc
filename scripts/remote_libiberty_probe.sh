@@ -6,10 +6,12 @@ GCCSRC="${GCCSRC:-/home/ds/gcc-src}"
 OUT="${OUT:-/tmp/dcc-gcc-build}"
 rm -rf "$OUT" && mkdir -p "$OUT"
 
-if [ ! -f "$GCCSRC/libiberty/config.h" ]; then
+if [ ! -f "$GCCSRC/libiberty/config.h" ] || ! grep -q 'HAVE_SYS_TYPES_H' "$GCCSRC/libiberty/config.h" 2>/dev/null; then
   cat > "$GCCSRC/libiberty/config.h" << 'EOF'
 #ifndef LIBIBERTY_CONFIG_H
 #define LIBIBERTY_CONFIG_H
+/* 保证 pid_t 等在 pex-common.h 之前可见 */
+#include <sys/types.h>
 #define HAVE_STDLIB_H 1
 #define HAVE_STRING_H 1
 #define HAVE_STRINGS_H 1
@@ -22,6 +24,7 @@ if [ ! -f "$GCCSRC/libiberty/config.h" ]; then
 #define HAVE_SYS_RESOURCE_H 1
 #define HAVE_SYS_WAIT_H 1
 #define HAVE_SYS_MMAN_H 1
+#define HAVE_SYS_TYPES_H 1
 #define HAVE_TIME_H 1
 #define HAVE_LIMITS_H 1
 #define HAVE_STDINT_H 1
@@ -86,11 +89,22 @@ fi
 
 OK=0
 FAIL=0
+SKIP=0
 FAILLIST=""
+SKIPLIST=""
 for src in "$GCCSRC"/libiberty/*.c; do
   f=$(basename "$src" .c)
-  case "$f" in soft-fp*|test*) continue ;; esac
-  if "$DCC" -c -I"$GCCSRC/include" -I"$GCCSRC/libiberty" \
+  # soft-fp / 测试 / 非 Linux 平台桩
+  case "$f" in
+    soft-fp*|test*|msdos|pex-djgpp|pex-msdos|pex-win32)
+      SKIP=$((SKIP + 1))
+      SKIPLIST="$SKIPLIST $f"
+      echo "SKIP $f"
+      continue
+      ;;
+  esac
+  if "$DCC" -c -DHAVE_CONFIG_H \
+      -I"$GCCSRC/include" -I"$GCCSRC/libiberty" \
       -o "$OUT/${f}.o" "$src" 2>"$OUT/${f}.err"; then
     OK=$((OK + 1))
     echo "OK $f"
@@ -102,5 +116,6 @@ for src in "$GCCSRC"/libiberty/*.c; do
     echo
   fi
 done
-echo "==== SUMMARY ok=$OK fail=$FAIL ===="
+echo "==== SUMMARY ok=$OK fail=$FAIL skip=$SKIP ===="
 echo "Failed:$FAILLIST"
+echo "Skipped:$SKIPLIST"
