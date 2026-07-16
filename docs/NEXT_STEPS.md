@@ -62,7 +62,8 @@
 - [ ] **10. 内核 smoke 测试矩阵**
   - 验证：`qemu_boot_matrix.sh` 多配置（defconfig / 串口）非 SKIP
   - 验证：内核能打印 boot log 不 panic
-  - 前置：`BUILD_BZIMAGE=1` + `make CC=dcc HOSTCC=gcc bzImage`（步骤 6）
+  - 进展：脚本已用系统 vmlinuz 冒烟 **PASS**（2/2 配置）；dcc 自编译 bzImage 待步骤 6
+  - 阻塞：`make CC=dcc` 在 `asm-offsets.c:77595` 解析失败；远程 gcc-15 亦无法完成 6.6 全树
 
 ---
 

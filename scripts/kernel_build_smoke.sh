@@ -28,6 +28,12 @@ if [[ ! -f .config ]]; then
     make allnoconfig
 fi
 
+# 避免 syncconfig 交互（如 CONFIG_CFI_CLANG NEW）
+if [[ -f scripts/config ]]; then
+    scripts/config --set-val CONFIG_CFI_CLANG n 2>/dev/null || true
+    make olddefconfig
+fi
+
 if [[ ! -f include/generated/autoconf.h ]]; then
     make olddefconfig
     make -s include/generated/autoconf.h
