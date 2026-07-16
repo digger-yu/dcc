@@ -831,6 +831,21 @@ impl Preprocessor {
         path.ends_with("linux/stddef.h")
     }
 
+    /// GCC 扩展：`#include /absolute/path`（无引号）。
+    fn is_absolute_include_path(s: &str) -> bool {
+        let s = s.trim();
+        s.starts_with('/')
+            || s.starts_with('\\')
+            || (s.len() >= 2 && s.as_bytes()[1] == b':')
+    }
+
+    /// 从 `#include` 行剩余部分提取路径（截断空白与 `//` 注释）。
+    fn parse_include_path_token(rest: &str) -> &str {
+        let rest = rest.trim();
+        let end = rest.find("//").unwrap_or(rest.len());
+        rest[..end].trim().split_whitespace().next().unwrap_or(rest)
+    }
+
     fn do_include(&mut self, rest: &str, line_no: u32) {
         let rest = rest.trim();
         let (path, is_system) = if rest.starts_with('"') {
@@ -839,6 +854,8 @@ impl Preprocessor {
         } else if rest.starts_with('<') {
             let end = rest[1..].find('>').map(|i| i + 1).unwrap_or(rest.len());
             (&rest[1..end], true)
+        } else if Self::is_absolute_include_path(rest) {
+            (Self::parse_include_path_token(rest), false)
         } else {
             self.diags.push(Diagnostic::err("E0204", "expected \"file\" or <file>",
                 Span::point(&self.file, line_no, 1)));
@@ -929,6 +946,15 @@ impl Preprocessor {
     }
 
     fn find_include(&self, name: &str, is_system: bool) -> Option<PathBuf> {
+        let name = name.trim();
+        // 0. 绝对路径（GCC: #include /path/to/header）
+        let abs = Path::new(name);
+        if abs.is_absolute() {
+            if abs.exists() {
+                return Some(abs.to_path_buf());
+            }
+            return None;
+        }
         // 1. 相对当前文件 (仅 "file" 形式)
         if !is_system {
             let p = self.base_dir.join(name);
@@ -1917,6 +1943,11 @@ impl Preprocessor {
     }
 
     fn find_has_include(&self, path: &str) -> bool {
+        let path = path.trim();
+        let abs = Path::new(path);
+        if abs.is_absolute() {
+            return abs.exists();
+        }
         // 相对当前文件
         let p = self.base_dir.join(path);
         if p.exists() { return true; }
@@ -2104,6 +2135,30 @@ mod tests {
     use super::preprocess;
     use crate::cli::StdMode;
     use std::path::PathBuf;
+
+    #[test]
+    fn include_unquoted_absolute_path() {
+        use std::fs;
+        let dir = std::env::temp_dir();
+        let hdr = dir.join(format!("dcc-abs-inc-{}.h", std::process::id()));
+        fs::write(&hdr, "#define ABS_INCLUDE_MARKER 42\n").expect("write hdr");
+        let src = format!("#include {}\nint x = ABS_INCLUDE_MARKER;\n", hdr.display());
+        let (output, diags, _) = preprocess(
+            src.as_bytes(),
+            "abs-include.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        let _ = fs::remove_file(hdr);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            output.contains("int x = ABS_INCLUDE_MARKER") || output.contains("int x = 42"),
+            "output: {output}"
+        );
+    }
 
     #[test]
     fn forced_include_comments_cannot_leak_literals_or_words() {
