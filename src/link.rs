@@ -65,6 +65,12 @@ pub fn link_relocatable(
     ld.arg("-r").arg("-o").arg(output);
     if lto_enabled {
         ld.arg("--gc-sections");
+        // bfd ld 要求 gc 根：-u 保留至少一个已定义符号
+        if let Some(ref unit) = lto_unit {
+            if let Some(root) = lto::gc_sections_root(unit, &dead_syms) {
+                ld.arg("-u").arg(&root);
+            }
+        }
     }
     for input in inputs {
         ld.arg(input);

@@ -46,12 +46,20 @@
 
 ## 短期：GCC libiberty（纯 C）
 
-详见 `docs/GCC_BUILD_GUIDE.md`。远程当前（2026-07-16）：**125 OK / 0 FAIL / 4 SKIP**（`regex.c` 已通过）。
+详见 `docs/GCC_BUILD_GUIDE.md`。远程当前（2026-07-16）：
+
+| 组件 | 结果 |
+|------|------|
+| libiberty 单 TU | **125 OK / 0 FAIL / 4 SKIP** |
+| libiberty `dcc -r` 链接 | ✅ ~1MB 合并 `.o` |
+| fixincludes | **6 OK / 0 FAIL / 1 SKIP** |
+| libdecnumber | 11 SKIP（include 单元） |
 
 | 缺口 | 影响 |
 |------|------|
 | 无 C++ | 无法编 GCC 主体 / 完整 bootstrap |
 | `_Generic` 指针精确匹配 | 当前指针一律兼容，可能选错 association |
+| libdecnumber 组合编译 | 需 DECPMAX 宏驱动的多文件 include，未纳入 probe |
 
 ## 远程 debug 记录（2026-07-15）
 
@@ -75,6 +83,9 @@
 | `##` 后再替换 → `&&di` | paste 全局替换 | 只替换 ## 两侧 token |
 | `TRANSLATE(*d)` → `(**d)` | 无 `##` 的 `handle_paste` 仍替参 + 第三步多遍扫描 | 无 `##` 早退 + `replace_all_params` 单次不透明替换 |
 | `regex.c` 完整文件仍 `(**d)` | V2 include 缓存保留旧展开 | 缓存 bump V3；远程 **125/0** |
+| `char const *` / `char const **` | `const` 在 `*` 前未跳过 | `finish_type` 限定符顺序 |
+| libiberty 链接 multiple definition | extern 声明 + 定义双份 symtab | 符号收集去重 |
+| `ld -r --gc-sections` | bfd 缺 `-u` 根符号 | `gc_sections_root` + `-u` |
 | `struct T *a, *b` 变 `T**` | 说明符吃掉 `*` | `parse_decl_specifiers` + 多声明符 |
 | 全局 `&arr[i]` | 初值校验过严 | 静态初值 + rela addend |
 | 前向 struct 成员 | 空 fields | 空时查 `struct_defs` |

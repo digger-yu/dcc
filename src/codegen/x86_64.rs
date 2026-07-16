@@ -839,14 +839,31 @@ impl Codegen {
         let mut local_syms: Vec<ElfSym> = vec![];
         let mut global_syms: Vec<ElfSym> = vec![];
 
-        // 全局变量符号
+        // 全局变量符号（extern 声明 + 同 TU 定义会重复出现在 prog.decls）
+        let mut emitted_var_syms: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let var_has_definition = |name: &str| -> bool {
+            prog.decls.iter().any(|d| {
+                matches!(d, Decl::Var(v) if v.name.name == name && (!v.is_extern || v.init.is_some()))
+            })
+        };
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
+                if v.is_extern && v.init.is_none() && var_has_definition(&v.name.name) {
+                    continue;
+                }
+                if !emitted_var_syms.insert(v.name.name.clone()) {
+                    continue;
+                }
                 let g = self.globals[&v.name.name].clone();
+                let (section, bind) = if v.is_extern && v.init.is_none() && g.section == SHN_UNDEF {
+                    (SHN_UNDEF, STB_GLOBAL)
+                } else {
+                    (g.section, if v.is_weak { STB_WEAK } else if v.is_static { STB_LOCAL } else { STB_GLOBAL })
+                };
                 let sym = ElfSym {
-                    name: v.name.name.clone(), section: g.section, value: g.offset,
+                    name: v.name.name.clone(), section, value: g.offset,
                     size: g.size as u64,
-                    bind: if v.is_weak { STB_WEAK } else if v.is_static { STB_LOCAL } else { STB_GLOBAL },
+                    bind,
                     ty: STT_OBJECT,
                     visibility: Self::parse_visibility(&v.visibility),
                 };

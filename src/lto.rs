@@ -111,6 +111,17 @@ pub fn collect_from_objects(objects: &[&[u8]]) -> LtoUnit {
     merge_units(units)
 }
 
+/// 为 `ld -r --gc-sections` 选取保留根符号（须为已定义；优先 referenced）。
+pub fn gc_sections_root(merged: &LtoUnit, dead: &[String]) -> Option<String> {
+    let is_dead = |name: &str| dead.iter().any(|d| d == name);
+    merged.functions.values()
+        .find(|s| s.defined && s.referenced && !is_dead(&s.name))
+        .or_else(|| merged.functions.values().find(|s| s.defined && s.referenced))
+        .or_else(|| merged.functions.values().find(|s| s.defined && !is_dead(&s.name)))
+        .or_else(|| merged.functions.values().find(|s| s.defined))
+        .map(|s| s.name.clone())
+}
+
 /// 在合并摘要上标记跨 TU 引用，返回可安全丢弃的本地定义符号。
 pub fn dead_local_functions(merged: &LtoUnit) -> Vec<String> {
     merged.functions.values()
@@ -188,5 +199,21 @@ mod tests {
         merged.functions.get_mut("used").unwrap().referenced = true;
         let dead = dead_local_functions(&merged);
         assert_eq!(dead, vec!["unused".to_string()]);
+    }
+
+    #[test]
+    fn gc_sections_root_prefers_referenced() {
+        let mut merged = build_unit("a.c", &[("used", 10, true), ("unused", 20, true)]);
+        merged.functions.get_mut("used").unwrap().referenced = true;
+        let dead = dead_local_functions(&merged);
+        assert_eq!(gc_sections_root(&merged, &dead).as_deref(), Some("used"));
+    }
+
+    #[test]
+    fn gc_sections_root_fallback_when_all_dead() {
+        let merged = build_unit("a.c", &[("foo", 10, true), ("bar", 20, true)]);
+        let dead = dead_local_functions(&merged);
+        assert!(dead.contains(&"foo".to_string()));
+        assert!(gc_sections_root(&merged, &dead).is_some());
     }
 }

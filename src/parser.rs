@@ -791,14 +791,14 @@ impl<'a> Parser<'a> {
             let sp = name.span.clone();
             return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None })]);
         }
-        let ty = self.parse_ptr_suffix(ty);
-        // 声明符前的类型限定符: `struct foo const name` / `int volatile x`
+        // `char const *p`：const 在基类型之后、* 之前，须先于 parse_ptr_suffix 跳过
         while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
             || (self.cur.kind == TokKind::Ident
                 && matches!(self.cur.text.as_str(), "__const__" | "__volatile__" | "__restrict__"))
         {
             self.advance();
         }
+        let ty = self.parse_ptr_suffix(ty);
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
         let pre_attrs = Self::merge_attrs(leading_attrs, self.parse_attributes());
         self.skip_asm_label();
@@ -987,7 +987,17 @@ impl<'a> Parser<'a> {
 
     fn finish_type(&mut self, ty: Type, specifiers_only: bool) -> Type {
         let ty = self.try_parse_vector_attr(ty);
-        if specifiers_only { ty } else { self.parse_ptr_suffix(ty) }
+        if specifiers_only {
+            return ty;
+        }
+        // `char const *p`：限定符可在基类型与 * 之间（C 声明符语法）
+        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
+            || (self.cur.kind == TokKind::Ident
+                && matches!(self.cur.text.as_str(), "__const__" | "__volatile__" | "__restrict__"))
+        {
+            self.advance();
+        }
+        self.parse_ptr_suffix(ty)
     }
 
     fn parse_type_mode(&mut self, specifiers_only: bool) -> Option<Type> {

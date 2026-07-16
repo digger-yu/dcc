@@ -1,7 +1,8 @@
 # GCC 源码编译（短期目标）
 
-> 最终目标仍是 Linux 内核；短期用 GCC 树中的**纯 C**子集（`libiberty`）
-> 暴露 dcc 与现代 glibc/GNU C 的差距。最后更新：2026-07-16。
+> 最终目标仍是 Linux 内核；短期用 GCC 树中的**纯 C**子集（`libiberty`、
+> `fixincludes` 等）暴露 dcc 与现代 glibc/GNU C 的差距。
+> 最后更新：2026-07-16。
 
 ## 范围说明
 
@@ -9,7 +10,9 @@
 |----|------|
 | 目标 | 用 `dcc -c` 编译 GCC 源码树中仍以 C 为主的组件 |
 | 首选子集 | `libiberty/*.c`（主机工具库，纯 C） |
+| 扩展子集 | `fixincludes/*.c`（fixinc 工具链，纯 C） |
 | 非目标（现阶段） | 完整 GCC bootstrap；GCC 主体为 **C++**，dcc 无 C++ 前端 |
+| `libdecnumber` | 源文件为 **include 单元**，须按 DECPMAX 宏组合，单文件 `-c` 跳过 |
 | 远程 | `ssh ds@192.168.148.128`，源码稀疏克隆于 `~/gcc-src` |
 
 ## 远程探测
@@ -18,49 +21,37 @@
 # 稀疏克隆（约数十 MB，勿拉全树）
 git clone --depth 1 --filter=blob:none --sparse \
   https://github.com/gcc-mirror/gcc.git ~/gcc-src
-cd ~/gcc-src && git sparse-checkout set libiberty include
+cd ~/gcc-src && git sparse-checkout set libiberty include fixincludes libdecnumber
 
 # 构建 dcc 并探测
 cd ~/dcc && cargo build --release
+bash scripts/remote_gcc_c_probe.sh
+# 或仅 libiberty：
 DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
   bash scripts/remote_libiberty_probe.sh
 ```
 
-脚本会写入/刷新最小 `libiberty/config.h`（含 `HAVE_SYS_TYPES_H`、`#include <sys/types.h>`），
-跳过非 Linux 平台桩，并汇总 OK/FAIL/SKIP。
+`remote_gcc_c_probe.sh` 会写入/刷新最小 `libiberty/config.h`，汇总
+libiberty 单文件编译、**整库 `dcc -r` 链接**、fixincludes 与 libdecnumber
+（include-only 模块 SKIP）。
 
 ## 2026-07-16 远程结果（当前）
 
-| 指标 | 数值 |
-|------|------|
-| 可编译 `.c` | **125** |
-| 失败 | **0** |
-| 跳过 | **4**（`msdos` / `pex-djgpp` / `pex-msdos` / `pex-win32`） |
-| 基线（本轮初） | 约 90 OK / 39 FAIL |
+| 组件 | OK | FAIL | SKIP | 说明 |
+|------|-----|------|------|------|
+| libiberty | **125** | **0** | 4 | 非 Linux 平台桩 |
+| libiberty 链接 | ✅ | — | — | `dcc -r` 合并 ~1MB `.o` |
+| fixincludes | **6** | **0** | 1 | `fixtests` 为测试 harness |
+| libdecnumber | 0 | 0 | 11 | include 单元，非单 TU |
 
-### 本轮已修（相对基线）
+### 本轮已修（2026-07-16 晚）
 
 | 问题 | 根因 | 修复 |
 |------|------|------|
-| 浮点 `&&`/`\|\|` | 比较结果被标成 float，IR 拒 AndAnd | 比较/`&&`/`\|\|` 结果恒为 int |
-| texinfo `@deftypefn` | 多被误判；实为缺 `HAVE_CONFIG_H` | 探测脚本加 `-DHAVE_CONFIG_H` |
-| `strerror` ENTRY 宏 | 参数替换进字符串字面量 | `replace_ident` 跳过字符串/字符常量 |
-| `htab_size` | `size_t (name)(params)` 括号防宏 | 支持括号包函数名 |
-| 嵌套函数指针参数 | `char *(*pfn)(...)` | `parse_params` 指针后再认 `(*` |
-| `[__restrict]` | 数组限定符当表达式 | 跳过 restrict/static/const |
-| `&randtbl[i]` 全局初值 | 非常量 | `is_static_initializer` + rela addend |
-| `&&di` 宏展开 | `##` 路径全局替换后再替换 | `handle_paste` 只替换 ## 两侧 |
-| `TRANSLATE(*d)`→`(**d)` | `handle_paste` 无 `##` 仍全局替参 + 第三步逐参再扫 | 无 `##` 时 `handle_paste` 早退；第三步改 `replace_all_params` 单次不透明替换 |
-| `struct T *a, *b` | `parse_type` 吃掉第一个 `*` | 说明符不含 `*`；多声明符循环 |
-| `struct T *a, *b` 初值 | `parse_expr` 吞逗号 | 初值用 `parse_expr_bp(2)` |
-| `(*f())` / `(*fns[N])()` | 返回指针的函数、函数指针数组 | 声明符路径补全 |
-| `operators[][2]` | 只认一维数组 | 多维 `[]` 循环 |
-| `__alignof__` | 未作 KwAlignof | token 识别 |
-| `label: case` | label 后不能直接 case | 空语句标签 |
-| 前向 struct 成员访问 | 空字段 Rc 不更新 | 空字段时查 `struct_defs` |
-| `pid_t` / md5_uint32 | 缺 sys/types、stdint 路径 | config.h 补全 + `__INT_MAX__` 等 |
-| 无参函数宏 `PREFETCH()` | `()` 被解析成一个空实参 | 空 `()` → 零个实参 |
-| `regex.c` 完整文件仍 `(**d)` | V2 include 缓存复用修复前展开 | 预处理缓存 bump 至 **V3** |
+| `char const *p` 解析失败 | `const` 在 `*` 前未跳过 | `finish_type` / 声明符路径先跳过限定符再 `parse_ptr_suffix` |
+| fixincludes `fixincl`/`fixopts` | 同上 + `char const **` | 同上 |
+| libiberty 链接 multiple definition | header `extern` + TU 定义重复进 symtab | 符号收集跳过 extern+定义重复 |
+| `ld -r --gc-sections` 失败 | bfd 要求 `-u` 根符号 | `lto::gc_sections_root` + `link.rs -u` |
 
 ### 宏展开回归
 

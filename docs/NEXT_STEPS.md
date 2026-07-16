@@ -22,6 +22,8 @@
 - [x] 浮点 AndAnd/OrOr、宏参/字符串、括号函数名、嵌套 fptr、restrict 数组
 - [x] `##` 二次替换、多声明符/`&arr[i]`、前向 struct、config.h 补全
 - [x] 远程 libiberty 当前：**125 OK / 0 FAIL**（含 `regex.c`）
+- [x] libiberty 整库 `dcc -r` 链接 + fixincludes **6/6**（`remote_gcc_c_probe.sh`）
+- [x] `char const *` 声明符、`ld -r --gc-sections -u` 根符号、symtab 去重
 
 ## 已完成（2026-07-16，内核全树脚本 + LTO gc）
 
@@ -34,19 +36,22 @@
 
 ## 待办（短期：GCC 纯 C 子集）
 
-### 1. libiberty 后续（非阻塞）
+### 1. libiberty / fixincludes（非阻塞）
 
-`regex.c` 已通过：`substitute_params` 修复 + include 缓存 V3。
-回归：
+单 TU 与整库链接已通过。回归：
 
 ```bash
+bash scripts/remote_gcc_c_probe.sh
 bash scripts/test_tr2.sh
 bash scripts/test_v3_cache.sh
-DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
-  bash scripts/remote_libiberty_probe.sh
 ```
 
-### 2. 明确不做完整 GCC bootstrap
+### 2. libdecnumber / gen\* 工具（可选）
+
+`libdecnumber` 为宏驱动的 include 单元；下一步可仿 GCC Makefile
+用 `dcc -c` 编译组合后的翻译单元。完整 GCC bootstrap 仍受阻于无 C++。
+
+### 3. 明确不做完整 GCC bootstrap
 
 GCC 主体为 C++；在具备 `dcc++` 之前，短期目标止于 **C 主机库 / gen\* 工具**。
 
@@ -63,7 +68,7 @@ GCC 主体为 C++；在具备 `dcc++` 之前，短期目标止于 **C 主机库 
 
 ```bash
 bash scripts/sync_remote_build.sh
-bash scripts/remote_libiberty_probe.sh   # 需已有 ~/gcc-src
+bash scripts/remote_gcc_c_probe.sh      # libiberty + fixincludes + 链接
 bash scripts/kernel_full_check.sh      # modpost / QEMU / vmlinux（非阻塞）
 ```
 
