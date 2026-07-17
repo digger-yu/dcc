@@ -1514,6 +1514,20 @@ fn vector_global_run_returns_zero() {
     assert_eq!(rc, 0, "vector_global_run should return 0, got {rc}");
 }
 
+/// 向量 InitList rvalue（复合字面量运算）
+#[test]
+fn vector_init_rvalue_run_returns_zero() {
+    let source = include_str!("fixtures/vector_init_rvalue.c");
+    let (output, exe) = run_compile_and_run("vector-init-rvalue", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "vector_init_rvalue should return 0, got {rc}");
+}
+
 /// _Complex 除法 codegen
 #[test]
 fn complex_div_run_returns_zero() {

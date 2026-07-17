@@ -139,6 +139,8 @@ error[E0006]: expected expression, got Semi
 
 AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整编译，非 `-fsyntax-only`）。
 
+`validate` 覆盖：二元/一元运算、赋值、条件表达式、向量聚合初值、向量/复数类型转换。
+
 | 码 | 消息（典型） | 含义 | 触发条件 | Snapshot |
 |----|--------------|------|----------|----------|
 | **E1001** | `unresolved type '…' reached typed IR` | 未解析类型进入 IR | `__typeof__(orphan_type) x;` 等产生 `Type::Named` | `e1001.c` |

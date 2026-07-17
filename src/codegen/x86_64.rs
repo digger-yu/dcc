@@ -608,7 +608,8 @@ impl Codegen {
         }
     }
 
-    pub fn compile(&mut self, prog: &Program) {
+    pub fn compile(&mut self, module: &crate::ir::Module) {
+        let prog = module.source();
         // 预扫描: 记录哪些函数是可变参数的
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
@@ -2782,6 +2783,11 @@ impl Codegen {
                 }
             }
             Expr::Cast { ty, e, .. } => {
+                // (v4si){...} 复合字面量：parser 降级为 Cast + InitList
+                if let (Type::Vector(elem_ty, n), Expr::InitList { inits, .. }) = (ty, e.as_ref()) {
+                    self.gen_vector_init_rvalue(inits, elem_ty, *n, 0);
+                    return;
+                }
                 let src_ty = e.ty();
                 self.gen_expr(e, dst);
                 // 类型转换
@@ -3180,16 +3186,51 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                 }
             }
-            Expr::InitList { .. } => {
-                eprintln!("dcc: codegen unsupported InitList rvalue (ud2)");
-                self.emit(&[0x0F, 0x0B]); // ud2
-                self.mov_imm(dst, 0);
+            Expr::InitList { inits, .. } => {
+                if let Type::Vector(elem_ty, n) = e.ty() {
+                    self.gen_vector_init_rvalue(inits, &elem_ty, n, 0);
+                } else {
+                    eprintln!("dcc: codegen unsupported InitList rvalue for {:?}", e.ty());
+                    self.emit(&[0x0F, 0x0B]); // ud2
+                    self.mov_imm(dst, 0);
+                }
             }
             _ => {
                 eprintln!("dcc: codegen skip unsupported expr (ud2)");
                 self.emit(&[0x0F, 0x0B]); // ud2
                 self.mov_imm(dst, 0);
             }
+        }
+    }
+
+    // 向量 rvalue 初始化列表: 结果写入帧临时区 (与 gen_vector_load/store 一致)
+    fn vector_temp_base(&self, slot: usize, vec_size: usize) -> i32 {
+        let slot_bytes = ((vec_size + 7) / 8) as i32 * 8;
+        -(self.frame_size as i32) + 8 + (slot as i32 * slot_bytes)
+    }
+
+    fn gen_vector_init_rvalue(
+        &mut self,
+        inits: &[InitItem],
+        elem_ty: &Type,
+        count: usize,
+        temp_slot: usize,
+    ) {
+        let elem_size = elem_ty.size();
+        let vec_size = elem_size * count;
+        let temp_off = self.vector_temp_base(temp_slot, vec_size);
+        for i in 0..count {
+            let value = inits.get(i).and_then(|item| match item {
+                InitItem::Expr(e) => Some(e),
+                _ => None,
+            });
+            if let Some(v) = value {
+                self.gen_expr(v, 0);
+            } else {
+                self.mov_imm(0, 0);
+            }
+            let off = temp_off + (i * elem_size) as i32;
+            self.emit_store(0, off, elem_size);
         }
     }
 
@@ -3909,8 +3950,9 @@ impl Codegen {
             _ => return,
         };
         let elem_size = elem_ty.size();
-        // 使用帧底部临时区域保存结果 (完全不用 XMM 寄存器)
-        let result_off = -(self.frame_size as i32) + 8;
+        let vec_size = elem_size * count;
+        // 使用帧底部 slot 0 临时区域保存结果 (完全不用 XMM 寄存器)
+        let result_off = self.vector_temp_base(0, vec_size);
         for i in 0..count {
             // 加载左操作数第 i 个元素到 rax
             self.gen_scalar_vector_load(l, i, elem_size);
@@ -3975,8 +4017,32 @@ impl Codegen {
         }
     }
 
+    /// 向量 compound literal / Cast+InitList 的初始化列表
+    fn vector_init_from_expr<'a>(e: &'a Expr) -> Option<(&'a Type, usize, &'a [InitItem])> {
+        match e {
+            Expr::CompoundLit { ty: Type::Vector(elem, n), inits, .. } => {
+                Some((elem.as_ref(), *n, inits.as_slice()))
+            }
+            Expr::Cast { ty: Type::Vector(elem, n), e: inner, .. } => {
+                if let Expr::InitList { inits, .. } = inner.as_ref() {
+                    Some((elem.as_ref(), *n, inits.as_slice()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// 加载向量变量的第 i 个元素到 rax (标量)
     fn gen_scalar_vector_load(&mut self, e: &Expr, elem_idx: usize, elem_size: usize) {
+        if let Some((elem_ty, n, inits)) = Self::vector_init_from_expr(e) {
+            let vec_size = elem_size * n;
+            self.gen_vector_init_rvalue(inits, elem_ty, n, 1);
+            let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i32;
+            self.load_stack(0, temp_off);
+            return;
+        }
         match e {
             Expr::Ident { name, .. } => {
                 if self.globals.contains_key(&name.name) {
@@ -4009,7 +4075,8 @@ impl Codegen {
             _ => return,
         };
         let elem_size = elem_ty.size();
-        let temp_off = -(self.frame_size as i32) + 8;
+        let vec_size = elem_size * count;
+        let temp_off = self.vector_temp_base(0, vec_size);
         match e {
             Expr::Ident { name, .. } => {
                 if self.globals.contains_key(&name.name) {
@@ -4060,7 +4127,8 @@ impl Codegen {
             _ => return,
         };
         let elem_size = elem_ty.size();
-        let temp_off = -(self.frame_size as i32) + 8;
+        let vec_size = elem_size * count;
+        let temp_off = self.vector_temp_base(0, vec_size);
         let is_global = self.globals.contains_key(name);
         for i in 0..count {
             let src_off = temp_off + (i * elem_size) as i32;

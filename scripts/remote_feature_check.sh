@@ -163,5 +163,23 @@ EOF
 "$DCC" -c -o "$TMP/restrict.o" "$TMP/restrict.c"
 check "restrict_param" test -f "$TMP/restrict.o"
 
+cat > "$TMP/vecinit.c" <<'EOF'
+typedef int v4si __attribute__((vector_size(16)));
+int main(void) {
+    v4si a = {1, 2, 3, 4};
+    v4si b = a + (v4si){10, 20, 30, 40};
+    int *p = (int *)&b;
+    return p[0] + p[1] + p[2] + p[3] == 110 ? 0 : 1;
+}
+EOF
+"$DCC" -c -o "$TMP/vecinit.o" "$TMP/vecinit.c"
+check "vector_init_rvalue" test -f "$TMP/vecinit.o"
+
+cat > "$TMP/irfold.c" <<'EOF'
+int main(void) { return 2 + 3; }
+EOF
+"$DCC" -O1 -c -o "$TMP/irfold.o" "$TMP/irfold.c"
+check "ir_resync_o1" bash -c "objdump -d '$TMP/irfold.o' | grep -q 'mov.*\\\$0x5'"
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

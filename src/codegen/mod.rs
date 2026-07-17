@@ -35,7 +35,7 @@ pub fn emit(
             cg.source_name = source_name.to_string();
             cg.debug_level = debug_level;
             cg.emit_cfi = debug_level > 0 || target.frame_pointer;
-            cg.compile(module.source());
+            cg.compile(module);
             if emit_asm {
                 return cg.build_asm_output(module.source()).into_bytes();
             }

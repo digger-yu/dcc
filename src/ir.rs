@@ -152,6 +152,14 @@ pub fn validate(module: &Module) -> Result<(), Vec<Diagnostic>> {
     if diagnostics.is_empty() { Ok(()) } else { Err(diagnostics) }
 }
 
+/// opt 改写 AST 后，从 `Module::source` 重新 lower 函数/全局 IR 图。
+pub fn resync(module: &mut Module) -> Result<(), Vec<Diagnostic>> {
+    let fresh = lower(module.source().clone())?;
+    module.functions = fresh.functions;
+    module.globals = fresh.globals;
+    Ok(())
+}
+
 fn validate_stmt(stmt: &TypedStmt, diagnostics: &mut Vec<Diagnostic>) {
     for expr in &stmt.expressions { validate_expr(expr, diagnostics); }
     for nested in &stmt.nested { validate_stmt(nested, diagnostics); }
@@ -230,6 +238,81 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                     diagnostics.push(Diagnostic::err(
                         "E1008",
                         format!("unsupported complex unary operation {:?}", op),
+                        expr.span.clone(),
+                    ));
+                }
+            }
+        }
+        ExprKind::Assign if expr.children.len() >= 2 => {
+            let lhs = &expr.children[0];
+            let rhs = &expr.children[1];
+            if is_vector_ty(&lhs.ty) && !is_vector_ty(&rhs.ty)
+                && !matches!(rhs.kind, ExprKind::Aggregate | ExprKind::Cast)
+            {
+                diagnostics.push(Diagnostic::err(
+                    "E1007",
+                    "vector assignment requires a vector initializer or compatible cast",
+                    expr.span.clone(),
+                ));
+            }
+            if is_complex_ty(&lhs.ty) && !is_complex_ty(&rhs.ty)
+                && !matches!(rhs.kind, ExprKind::Cast | ExprKind::Binary(_))
+            {
+                diagnostics.push(Diagnostic::err(
+                    "E1008",
+                    "complex assignment requires a complex expression or cast",
+                    expr.span.clone(),
+                ));
+            }
+        }
+        ExprKind::Conditional if expr.children.len() >= 3 => {
+            let then_e = &expr.children[1];
+            let else_e = &expr.children[2];
+            if is_vector_ty(&expr.ty)
+                && (!is_vector_ty(&then_e.ty) || !is_vector_ty(&else_e.ty))
+            {
+                diagnostics.push(Diagnostic::err(
+                    "E1007",
+                    "vector conditional requires vector branches",
+                    expr.span.clone(),
+                ));
+            }
+            if is_complex_ty(&expr.ty)
+                && (!is_complex_ty(&then_e.ty) || !is_complex_ty(&else_e.ty))
+            {
+                diagnostics.push(Diagnostic::err(
+                    "E1008",
+                    "complex conditional requires complex branches",
+                    expr.span.clone(),
+                ));
+            }
+        }
+        ExprKind::Cast if let Some(src) = expr.children.first() => {
+            if is_vector_ty(&src.ty) && !is_vector_ty(&expr.ty) {
+                diagnostics.push(Diagnostic::err(
+                    "E1007",
+                    "unsupported cast from vector type",
+                    expr.span.clone(),
+                ));
+            }
+            if is_complex_ty(&src.ty) && is_vector_ty(&expr.ty) {
+                diagnostics.push(Diagnostic::err(
+                    "E1008",
+                    "unsupported cast from complex to vector",
+                    expr.span.clone(),
+                ));
+            }
+        }
+        ExprKind::Aggregate => {
+            if let ValueType::Vector(_, max) = &expr.ty {
+                if expr.children.len() > *max {
+                    diagnostics.push(Diagnostic::err(
+                        "E1007",
+                        format!(
+                            "vector initializer has {} elements but type holds {}",
+                            expr.children.len(),
+                            max
+                        ),
                         expr.span.clone(),
                     ));
                 }
@@ -542,7 +625,7 @@ fn expr_span(expr: &Expr) -> Span {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Decl;
+    use crate::ast::{BlockItem, Decl, Stmt};
 
     #[test]
     fn lowers_functions_and_typed_expressions() {
@@ -629,5 +712,46 @@ mod tests {
         let module = lower(program).expect("lower despite vector or");
         let err = validate(&module).expect_err("vector or must fail validation");
         assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+    }
+
+    #[test]
+    fn vector_cast_to_int_reports_e1007() {
+        let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
+                     int main(void) { v4si v = {1,2,3,4}; return (int)v; }\n";
+        let (program, _) = crate::parser::parse(src, "vector-cast.c");
+        let module = lower(program).expect("lower despite vector cast");
+        let err = validate(&module).expect_err("vector cast must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+    }
+
+    #[test]
+    fn resync_rebuilds_ir_after_ast_change() {
+        let src = b"int main(void) { return 2 + 3; }\n";
+        let (program, _) = crate::parser::parse(src, "resync.c");
+        let mut module = lower(program).expect("lower");
+        validate(&module).expect("initial validate");
+        assert!(matches!(
+            module.functions[0].body[0].expressions[0].kind,
+            ExprKind::Binary(BinOp::Add)
+        ));
+        if let Some(body) = module.source_mut().decls.iter_mut().find_map(|d| {
+            if let Decl::Func(f) = d { f.body.as_mut() } else { None }
+        }) {
+            if let BlockItem::Stmt(Stmt::Return { val: Some(e), span, .. }) =
+                &mut body.items[0]
+            {
+                *e = Expr::Int {
+                    v: 5,
+                    span: span.clone(),
+                    ty: Type::Int,
+                };
+            }
+        }
+        resync(&mut module).expect("resync");
+        validate(&module).expect("validate after resync");
+        assert_eq!(
+            module.functions[0].body[0].expressions[0].literal,
+            Some(ExprLiteral::Int(5))
+        );
     }
 }

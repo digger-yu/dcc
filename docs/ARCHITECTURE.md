@@ -226,13 +226,18 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 
 ## Typed IR 与语义校验（`ir.rs`）
 
-Driver 在 codegen 前执行 `lower → validate → opt`：
+Driver 在 codegen 前执行 `lower → validate → opt → resync → validate`：
 
 | 阶段 | 职责 |
 |------|------|
 | `lower` | AST 降级为带 `ValueType` 的函数/全局图；全局初值过 `is_static_initializer`，违例报 **E1006** |
-| `validate` | 校验 float/vector/complex 二元/一元运算是否与 codegen 能力一致（**E1003/E1007/E1008**） |
-| `opt` | 常量折叠、DCE、小函数内联（`-O1` 起） |
+| `validate` | 校验 float/vector/complex 二元/一元/赋值/条件/聚合/转换是否与 codegen 能力一致（**E1003/E1007/E1008**） |
+| `opt` | 常量折叠（含 float 四则）、DCE、分支折叠、小函数内联（`-O1` 起）；改写 AST |
+| `resync` | opt 后从 AST 重新 lower，使 IR 图与优化结果一致 |
+| `validate`（二次） | resync 后再次语义校验 |
+
+x86_64 后端 `compile(&Module)` 与 AArch64/RISC-V 一致：从 `Module::source()` 读 AST，
+同时 IR 图供 debug/LTO/并行 codegen 元数据使用。
 
 Linux jump_label 预处理残留 `_DECLARE_STATIC_KEY_*` 在 parser 层由
 `parse_static_key_decl()` 补全为 `extern struct static_key_{false,true}`，

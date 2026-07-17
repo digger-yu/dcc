@@ -97,6 +97,11 @@ fn fold_expr(e: Expr) -> Expr {
                     return Expr::Int { v, span, ty };
                 }
             }
+            if let (Expr::Float { v: lv, .. }, Expr::Float { v: rv, .. }) = (l.as_ref(), r.as_ref()) {
+                if let Some(v) = eval_float_binop(op, *lv, *rv) {
+                    return Expr::Float { v, span, ty };
+                }
+            }
             Expr::Binop { op, l, r, span, ty }
         }
         Expr::Unary { op, e, span, ty } => {
@@ -139,6 +144,16 @@ fn eval_unary(op: crate::ast::UnOp, v: i128) -> Option<i128> {
         crate::ast::UnOp::Neg => v.checked_neg()?,
         crate::ast::UnOp::Not => if v == 0 { 1 } else { 0 },
         crate::ast::UnOp::BitNot => !v,
+        _ => return None,
+    })
+}
+
+fn eval_float_binop(op: BinOp, l: f64, r: f64) -> Option<f64> {
+    Some(match op {
+        BinOp::Add => l + r,
+        BinOp::Sub => l - r,
+        BinOp::Mul => l * r,
+        BinOp::Div => if r == 0.0 { return None; } else { l / r },
         _ => return None,
     })
 }

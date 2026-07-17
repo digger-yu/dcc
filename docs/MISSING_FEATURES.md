@@ -41,7 +41,7 @@
 | Mini x86 asm 局部/C 标签 | `tests/fixtures/asm_local_label.c`、`asm_label_insn.c`（`N:`/`N:insn`/`found:`） |
 | Mini x86 asm 位操作 / 双精度移位 | codegen `btl/bts/btr`、`shld/shrd`（内核 paravirt 等） |
 | 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；全局 init + 间接 load + 逐元素 store |
-| x86_64 codegen 扩展 | 向量全局 init、复数四则/Cast、object_size fold、apply/return 子集、asm mem 操作数 |
+| x86_64 codegen 扩展 | ✅ 向量全局/rvalue init、复数四则/Cast、object_size fold、apply/return 子集；mini-asm 仍部分 nop |
 | aarch64 typed IR | hello/控制流/调用/浮点/向量/rodata；见 `aarch64_*_cross_compile` |
 | riscv64 typed IR | hello/控制流/调用/rodata；见 `riscv64_*_cross_compile` |
 | 诊断 snapshot 格式锁定 | `tests/errors.rs` schema + `diagnostic_format.stderr.snap`（V1） |
@@ -144,7 +144,7 @@
 | 特性 | 说明 |
 |------|------|
 | jump_label 静态 key 声明 | `parse_static_key_decl()`：`_DECLARE_STATIC_KEY_0/1` 及 `IS_ENABLED` 残留 → `extern struct static_key_{false,true}` |
-| Typed IR 语义校验 | `ir.rs`：`is_static_initializer` 扩展；float/vector/complex 二元/一元运算与 codegen 对齐 |
+| Typed IR 语义校验 | ✅ `ir.rs`：`lower`/`validate`/`resync`；float/vector/complex 二元/一元/赋值/条件/聚合/转换与 codegen 对齐 |
 | BTF struct 探测 | `build_btf_probe()`：int + `dcc_probe` 结构体 |
 | eh_frame FDE | 每函数 PC+size 生成 FDE；ORC 节写入 PC 列表 |
 | LTO 链接 + gc | `src/link.rs`：`ld -r --gc-sections` + `.llvm.lto` 注入 + dead strip |

@@ -132,6 +132,10 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let mut module = ir::lower(prog)?;
     ir::validate(&module)?;
     crate::opt::optimize(&mut module, cfg.opt);
+    if cfg.opt > 0 {
+        ir::resync(&mut module)?;
+        ir::validate(&module)?;
+    }
 
     if cfg.syntax_only {
         return Ok(());
