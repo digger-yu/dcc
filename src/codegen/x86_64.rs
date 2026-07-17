@@ -65,6 +65,8 @@ pub struct Codegen {
     sret_depth: i32,
     // 嵌套函数静态链
     nested_funcs: HashMap<String, Vec<(String, i32)>>, // 嵌套函数名 → upvars (name, parent_offset)
+    /// 函数形参类型表（SysV 实参按形参类型分类）
+    func_param_types: HashMap<String, Vec<Type>>,
     current_func_is_nested: bool,  // 当前编译的函数是否是嵌套函数
     static_chain_offset: i32,      // 静态链在当前帧中的偏移
     upvar_offsets: HashMap<String, i32>, // upvar 名称 → 在父帧中的偏移
@@ -283,6 +285,7 @@ struct ParallelEmitCtx {
     globals: HashMap<String, ParallelGlobalSnap>,
     variadic_funcs: HashMap<String, bool>,
     nested_funcs: HashMap<String, Vec<(String, i32)>>,
+    func_param_types: HashMap<String, Vec<Type>>,
     rodata: Vec<u8>,
     string_pool: HashMap<Vec<u8>, u64>,
     text_align: u64,
@@ -325,6 +328,7 @@ impl Codegen {
                current_sret_offset: None,
                sret_depth: 0,
                nested_funcs: HashMap::new(),
+               func_param_types: HashMap::new(),
                current_func_is_nested: false,
                static_chain_offset: 0,
                upvar_offsets: HashMap::new(),
@@ -621,11 +625,13 @@ impl Codegen {
         // 预扫描: 记录哪些函数是可变参数的
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
+                Self::register_func_sig(f, &mut self.func_param_types);
                 if f.is_variadic { self.variadic_funcs.insert(f.name.name.clone(), true); }
                 if let Some(body) = &f.body {
                     let mut nested = Vec::new();
                     Self::collect_nested_funcs(&body.items, &mut nested);
                     for nf in nested {
+                        Self::register_func_sig(&nf, &mut self.func_param_types);
                         self.nested_funcs.insert(nf.name.name.clone(), nf.upvars.clone());
                     }
                 }
@@ -1435,6 +1441,7 @@ impl Codegen {
             }).collect(),
             variadic_funcs: self.variadic_funcs.clone(),
             nested_funcs: self.nested_funcs.clone(),
+            func_param_types: self.func_param_types.clone(),
             rodata: self.rodata.clone(),
             string_pool: self.string_pool.clone(),
             text_align: self.text_align,
@@ -1460,6 +1467,7 @@ impl Codegen {
         }
         cg.variadic_funcs = ctx.variadic_funcs;
         cg.nested_funcs = ctx.nested_funcs;
+        cg.func_param_types = ctx.func_param_types;
         cg.rodata = ctx.rodata;
         cg.string_pool = ctx.string_pool;
         cg.text_align = ctx.text_align;
@@ -1638,6 +1646,11 @@ impl Codegen {
         }
     }
 
+    fn register_func_sig(f: &FuncDecl, map: &mut HashMap<String, Vec<Type>>) {
+        let params: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
+        map.insert(f.name.name.clone(), params);
+    }
+
     /// 编译单个函数 (支持嵌套函数递归调用)
     fn compile_func(&mut self, f: &FuncDecl, prog: &Program) {
         let arg_regs: [u8; 6] = [7, 6, 2, 1, 8, 9];
@@ -1687,9 +1700,11 @@ impl Codegen {
                     let mut stack_arg_idx = 0usize;
                     for p in f.params.iter() {
                         if let Some(nm) = &p.name {
-                            let is_agg_param = matches!(&p.ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
-                                | Type::Atomic(_))
-                                && p.ty.size() > 8;
+                            // __int128 / 大聚合体按 8 字节块占用 GP 寄存器或栈槽
+                            let is_agg_param = matches!(&p.ty, Type::Int128 | Type::UInt128)
+                                || (matches!(&p.ty, Type::Struct(_,_) | Type::Union(_,_)
+                                    | Type::Array(_,ArraySize::Const(_)) | Type::Atomic(_))
+                                    && p.ty.size() > 8);
                             if is_agg_param {
                                 let chunks = (p.ty.size() + 7) / 8;
                                 let used: i32 = self.var_map.values()
@@ -1925,15 +1940,20 @@ impl Codegen {
         let mut stack = 0usize;
         let mut locs: Vec<Vec<ArgLoc>> = Vec::with_capacity(args.len());
 
-        for arg in args {
-            let classes = Self::abi_classes(&arg.ty());
+        for (arg_idx, arg) in args.iter().enumerate() {
+            let param_ty = direct
+                .and_then(|name| self.func_param_types.get(name))
+                .and_then(|ps| ps.get(arg_idx))
+                .cloned();
+            let effective_ty = param_ty.unwrap_or_else(|| arg.ty());
+            let classes = Self::abi_classes(&effective_ty);
             let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
             let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
             let force_mem = classes == [AbiClass::Memory]
                 || gp + need_gp > gp_regs.len() || fp + need_fp > 8;
             if force_mem {
                 stack = (stack + 7) & !7;
-                let size = arg.ty().size().max(8);
+                let size = effective_ty.size().max(8);
                 let chunks = (size + 7) / 8;
                 locs.push((0..chunks).map(|i| ArgLoc::Stack(stack + i * 8)).collect());
                 stack += chunks * 8;
@@ -1980,10 +2000,15 @@ impl Codegen {
         } else { None };
 
         let mut staged: Vec<(ArgLoc, usize)> = Vec::new();
-        for (arg, arg_locs) in args.iter().zip(locs.iter()) {
-            let ty = arg.ty();
-            let aggregate = matches!(ty, Type::Struct(_, _) | Type::Union(_, _)
-                | Type::Array(_, ArraySize::Const(_)) | Type::Atomic(_));
+        for (arg_idx, (arg, arg_locs)) in args.iter().zip(locs.iter()).enumerate() {
+            let param_ty = direct
+                .and_then(|name| self.func_param_types.get(name))
+                .and_then(|ps| ps.get(arg_idx))
+                .cloned();
+            let effective_ty = param_ty.unwrap_or_else(|| arg.ty());
+            let aggregate = matches!(effective_ty, Type::Int128 | Type::UInt128)
+                || matches!(effective_ty, Type::Struct(_, _) | Type::Union(_, _)
+                    | Type::Array(_, ArraySize::Const(_)) | Type::Atomic(_));
             if aggregate {
                 for (chunk, loc) in arg_locs.iter().enumerate() {
                     if let Expr::Ident { name, .. } = arg {
@@ -2008,7 +2033,7 @@ impl Codegen {
                         }
                     }
                 }
-            } else if matches!(ty, Type::Float | Type::Double) {
+            } else if matches!(effective_ty, Type::Float | Type::Double) {
                 self.gen_expr(arg, 0);
                 match arg_locs[0] {
                     ArgLoc::Stack(off) => self.store_rsp_xmm(0, off),
@@ -2016,6 +2041,30 @@ impl Codegen {
                         self.store_rsp_xmm(0, stage);
                         staged.push((loc, stage));
                         stage += 8;
+                    }
+                }
+            } else if matches!(effective_ty, Type::Int128 | Type::UInt128) {
+                // SysV：16 字节整数占两个 GP 槽（低 rax / 高 rdx）
+                self.gen_expr(arg, 0);
+                if !matches!(arg.ty(), Type::Int128 | Type::UInt128) {
+                    if matches!(effective_ty, Type::UInt128)
+                        || matches!(arg.ty(), Type::Bool | Type::UChar | Type::UShort
+                            | Type::UInt | Type::ULong | Type::ULongLong)
+                    {
+                        self.emit(&[0x48, 0x31, 0xD2]);
+                    } else {
+                        self.emit(&[0x48, 0x99]);
+                    }
+                }
+                for (chunk, loc) in arg_locs.iter().enumerate() {
+                    let reg = if chunk == 0 { 0u8 } else { 2u8 };
+                    match *loc {
+                        ArgLoc::Stack(off) => self.store_rsp_qword(reg, off),
+                        loc => {
+                            self.store_rsp_qword(reg, stage);
+                            staged.push((loc, stage));
+                            stage += 8;
+                        }
                     }
                 }
             } else {
@@ -2973,23 +3022,25 @@ impl Codegen {
                         self.emit(&es.to_le_bytes());
                     }
                     self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
-                    self.emit_load_mem(es as usize); // 按元素大小加载
-                    if dst != 0 { self.mov(dst, 0); }
+                    self.emit_load_mem_typed(es as usize, elem_ty); // 按元素类型加载
+                    if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
+                        self.mov(dst, 0);
+                    }
                 }
             }
             Expr::PostInc { e, .. } => self.gen_inc_dec(e, dst, false, true),
             Expr::PostDec { e, .. } => self.gen_inc_dec(e, dst, false, false),
             Expr::PreInc  { e, .. } => self.gen_inc_dec(e, dst, true, true),
             Expr::PreDec  { e, .. } => self.gen_inc_dec(e, dst, true, false),
-            Expr::Deref { e, .. } => {
+            Expr::Deref { e, ty, .. } => {
                 // *e: 求值内部表达式得到地址, 然后按结果类型大小加载
-                let load_size = match e.ty() {
-                    Type::Ptr(inner) | Type::Array(inner, _) => inner.size().max(1),
-                    other => other.size().max(1),
-                };
+                let load_ty = ty.clone();
+                let load_size = load_ty.size().max(1);
                 self.gen_expr(e, 0);
-                self.emit_load_mem(load_size);
-                if dst != 0 { self.mov(dst, 0); }
+                self.emit_load_mem_typed(load_size, &load_ty);
+                if dst != 0 && !matches!(load_ty, Type::Float | Type::Double) {
+                    self.mov(dst, 0);
+                }
             }
             Expr::AddrOf { e, .. } => {
                 // &var / &struct.field / &ptr->field / *ptr: 计算地址到 dst
@@ -3227,6 +3278,21 @@ impl Codegen {
         -(self.frame_size as i32) + 8 + (slot as i32 * slot_bytes)
     }
 
+    /// 标量整型表达式写入浮点向量元素前，将 rax 转为 xmm0
+    fn emit_scalar_to_xmm0_if_needed(&mut self, expr: &Expr, elem_ty: &Type) {
+        if !matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+            return;
+        }
+        if matches!(expr.ty(), Type::Float | Type::Double | Type::LongDouble | Type::Complex(_)) {
+            return;
+        }
+        if matches!(elem_ty, Type::Float) {
+            self.emit(&[0xF3, 0x0F, 0x2A, 0xC0]); // cvtsi2ss xmm0, eax
+        } else {
+            self.emit(&[0xF2, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, eax
+        }
+    }
+
     fn gen_vector_init_rvalue(
         &mut self,
         inits: &[InitItem],
@@ -3242,13 +3308,24 @@ impl Codegen {
                 InitItem::Expr(e) => Some(e),
                 _ => None,
             });
+            let off = temp_off + (i * elem_size) as i32;
             if let Some(v) = value {
                 self.gen_expr(v, 0);
+                self.emit_scalar_to_xmm0_if_needed(v, elem_ty);
             } else {
-                self.mov_imm(0, 0);
+                if matches!(elem_ty, Type::Float | Type::Double) {
+                    self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                } else {
+                    self.mov_imm(0, 0);
+                }
             }
-            let off = temp_off + (i * elem_size) as i32;
-            self.emit_store(0, off, elem_size);
+            if matches!(elem_ty, Type::Float) {
+                self.store_xmm32_stack(0, off);
+            } else if matches!(elem_ty, Type::Double) {
+                self.store_xmm64_stack(0, off);
+            } else {
+                self.emit_store(0, off, elem_size);
+            }
         }
     }
 
@@ -3285,8 +3362,15 @@ impl Codegen {
                         _ => continue,
                     };
                     self.gen_expr(value, 0);
+                    self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
                     let off = var_off + (i * elem_size) as i32;
-                    self.emit_store(0, off, elem_size);
+                    if matches!(**elem_ty, Type::Float) {
+                        self.store_xmm32_stack(0, off);
+                    } else if matches!(**elem_ty, Type::Double) {
+                        self.store_xmm64_stack(0, off);
+                    } else {
+                        self.emit_store(0, off, elem_size);
+                    }
                 }
             }
             Type::Struct(_, fields) | Type::Union(_, fields) => {
@@ -3961,7 +4045,7 @@ impl Codegen {
         self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
     }
 
-    // SIMD 向量运算: 标量逐元素操作 (不用 XMM 寄存器)
+    // SIMD 向量运算: 标量逐元素操作（整数用 GP，浮点用标量 SSE，不用向量 XMM 指令）
     fn gen_vector_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, result_slot: usize) {
         let (elem_ty, count) = match l.ty() {
             Type::Vector(ref elem, n) => { let et = (**elem).clone(); (et, n) }
@@ -3970,6 +4054,40 @@ impl Codegen {
         let elem_size = elem_ty.size();
         let vec_size = elem_size * count;
         let result_off = self.vector_temp_base(result_slot, vec_size);
+        let is_float = matches!(elem_ty, Type::Float);
+        let is_double = matches!(elem_ty, Type::Double);
+        if is_float || is_double {
+            let (prefix, opcode) = match op {
+                BinOp::Add => (if is_float { 0xF3 } else { 0xF2 }, 0x58),
+                BinOp::Sub => (if is_float { 0xF3 } else { 0xF2 }, 0x5C),
+                BinOp::Mul => (if is_float { 0xF3 } else { 0xF2 }, 0x59),
+                _ => return,
+            };
+            for i in 0..count {
+                self.gen_scalar_vector_load_sse(l, i, elem_size, is_float);
+                self.emit_sub_rsp(8);
+                if is_float {
+                    self.emit(&[0xF3, 0x0F, 0x11, 0x04, 0x24]);
+                } else {
+                    self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]);
+                }
+                self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
+                if is_float {
+                    self.emit(&[0xF3, 0x0F, 0x10, 0xC8]); // movss xmm1, xmm0
+                } else {
+                    self.emit(&[0xF2, 0x0F, 0x10, 0xC8]); // movsd xmm1, xmm0
+                }
+                if is_float {
+                    self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x24]);
+                } else {
+                    self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x24]);
+                }
+                self.emit_add_rsp(8);
+                self.emit(&[prefix, 0x0F, opcode, 0xC1]); // xmm0 = left op right
+                self.store_vector_elem_xmm(0, result_off + (i * elem_size) as i32, elem_size, is_float);
+            }
+            return;
+        }
         for i in 0..count {
             self.gen_scalar_vector_load(l, i, elem_size);
             self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
@@ -3981,13 +4099,86 @@ impl Codegen {
                 _ => { self.emit(&[0x48, 0x01, 0xC1]); }
             }
             let off = result_off + (i * elem_size) as i32;
-            self.emit(&[0x41, 0x89]); // REX.B + mov r/m32, r32
-            if off.abs() < 128 {
-                self.emit(&[0x4D, off as i8 as u8]);
-            } else {
-                self.emit(&[0x8D]);
-                self.emit(&off.to_le_bytes());
+            // add/sub/imul 结果在 rcx，按元素宽度写入临时区
+            self.emit_store(1, off, elem_size);
+        }
+    }
+
+    /// 加载向量元素到 xmm0（标量 SSE 路径）
+    fn gen_scalar_vector_load_sse(&mut self, e: &Expr, elem_idx: usize, elem_size: usize, is_float: bool) {
+        if let Some((elem_ty, n, inits)) = Self::vector_init_from_expr(e) {
+            let vec_size = elem_size * n;
+            self.gen_vector_init_rvalue(inits, elem_ty, n, 1);
+            let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i32;
+            self.load_stack_xmm(0, temp_off, elem_size, is_float);
+            return;
+        }
+        match e {
+            Expr::Ident { name, .. } => {
+                if self.globals.contains_key(&name.name) {
+                    self.emit_global_addr(0, &name.name);
+                    let byte_off = (elem_idx * elem_size) as i32;
+                    if byte_off != 0 {
+                        if byte_off >= -128 && byte_off <= 127 {
+                            self.emit(&[0x48, 0x83, 0xC0, byte_off as u8]);
+                        } else {
+                            self.emit(&[0x48, 0x05]);
+                            self.emit(&byte_off.to_le_bytes());
+                        }
+                    }
+                    self.load_mem_xmm(0, elem_size, is_float);
+                } else {
+                    let off = self.var_offset(&name.name) + (elem_idx * elem_size) as i32;
+                    self.load_stack_xmm(0, off, elem_size, is_float);
+                }
             }
+            _ if matches!(e.ty(), Type::Vector(_, _)) => {
+                let count = match e.ty() {
+                    Type::Vector(_, n) => n,
+                    _ => 0,
+                };
+                let vec_size = elem_size * count;
+                self.gen_vector_to_temp(e, 1);
+                let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i32;
+                self.load_stack_xmm(0, temp_off, elem_size, is_float);
+            }
+            _ => {
+                self.gen_expr(e, 0);
+            }
+        }
+    }
+
+    fn load_stack_xmm(&mut self, xmm: u8, off: i32, _elem_size: usize, is_float: bool) {
+        if is_float {
+            self.emit(&[0xF3, 0x41, 0x0F, 0x10]);
+        } else {
+            self.emit(&[0xF2, 0x41, 0x0F, 0x10]);
+        }
+        if off.abs() < 128 {
+            self.emit(&[0x45 | ((xmm & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((xmm & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
+    fn load_mem_xmm(&mut self, xmm: u8, elem_size: usize, is_float: bool) {
+        if is_float {
+            self.emit(&[0xF3, 0x0F, 0x10, 0x00 | ((xmm & 7) << 3)]);
+        } else if elem_size == 8 {
+            self.emit(&[0xF2, 0x0F, 0x10, 0x00 | ((xmm & 7) << 3)]);
+        } else {
+            self.emit(&[0xF3, 0x0F, 0x10, 0x00 | ((xmm & 7) << 3)]);
+        }
+    }
+
+    fn store_vector_elem_xmm(&mut self, xmm: u8, off: i32, elem_size: usize, is_float: bool) {
+        if is_float {
+            self.store_xmm32_stack(xmm, off);
+        } else if elem_size == 8 {
+            self.store_xmm64_stack(xmm, off);
+        } else {
+            self.store_xmm32_stack(xmm, off);
         }
     }
 
@@ -4063,13 +4254,18 @@ impl Codegen {
         }
     }
 
-    /// 加载向量变量的第 i 个元素到 rax (标量)
+    /// 加载向量变量的第 i 个元素到 rax（整数）或 xmm0（浮点）
     fn gen_scalar_vector_load(&mut self, e: &Expr, elem_idx: usize, elem_size: usize) {
+        let is_float = matches!(e.ty(), Type::Vector(ref inner, _) if matches!(**inner, Type::Float | Type::Double));
+        if is_float {
+            self.gen_scalar_vector_load_sse(e, elem_idx, elem_size, matches!(e.ty(), Type::Vector(ref inner, _) if matches!(**inner, Type::Float)));
+            return;
+        }
         if let Some((elem_ty, n, inits)) = Self::vector_init_from_expr(e) {
             let vec_size = elem_size * n;
             self.gen_vector_init_rvalue(inits, elem_ty, n, 1);
             let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i32;
-            self.load_stack(0, temp_off);
+            self.load_stack_sized(0, temp_off, elem_size);
             return;
         }
         match e {
@@ -4078,7 +4274,7 @@ impl Codegen {
                     self.emit_global_vector_elem_load(&name.name, elem_idx, elem_size);
                 } else {
                     let off = self.var_offset(&name.name) + (elem_idx * elem_size) as i32;
-                    self.load_stack(0, off);
+                    self.load_stack_sized(0, off, elem_size);
                 }
             }
             _ if matches!(e.ty(), Type::Vector(_, _)) => {
@@ -4089,7 +4285,7 @@ impl Codegen {
                 let vec_size = elem_size * count;
                 self.gen_vector_to_temp(e, 1);
                 let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i32;
-                self.load_stack(0, temp_off);
+                self.load_stack_sized(0, temp_off, elem_size);
             }
             _ => {
                 self.gen_expr(e, 0);
@@ -4135,18 +4331,30 @@ impl Codegen {
                     return;
                 }
                 let var_off = self.var_offset(&name.name);
+                let is_float_elem = matches!(elem_ty, Type::Float);
+                let is_double_elem = matches!(elem_ty, Type::Double);
                 for i in 0..count {
                     let src_off = var_off + (i * elem_size) as i32;
-                    self.emit(&[0x49, 0x8D]);
-                    if src_off.abs() < 128 {
-                        self.emit(&[0x45, src_off as i8 as u8]);
+                    if is_float_elem || is_double_elem {
+                        self.load_stack_xmm(0, src_off, elem_size, is_float_elem);
                     } else {
-                        self.emit(&[0x85]);
-                        self.emit(&src_off.to_le_bytes());
+                        self.emit(&[0x49, 0x8D]);
+                        if src_off.abs() < 128 {
+                            self.emit(&[0x45, src_off as i8 as u8]);
+                        } else {
+                            self.emit(&[0x85]);
+                            self.emit(&src_off.to_le_bytes());
+                        }
+                        self.emit_load_mem(elem_size);
                     }
-                    self.emit_load_mem(elem_size);
                     let dst_off = temp_off + (i * elem_size) as i32;
-                    self.emit_store(0, dst_off, elem_size);
+                    if is_float_elem {
+                        self.store_xmm32_stack(0, dst_off);
+                    } else if is_double_elem {
+                        self.store_xmm64_stack(0, dst_off);
+                    } else {
+                        self.emit_store(0, dst_off, elem_size);
+                    }
                 }
             }
             Expr::Binop { op, l, r, .. } => {
@@ -4180,22 +4388,34 @@ impl Codegen {
         let vec_size = elem_size * count;
         let temp_off = self.vector_temp_base(0, vec_size);
         let is_global = self.globals.contains_key(name);
+        let is_float_elem = matches!(elem_ty, Type::Float);
+        let is_double_elem = matches!(elem_ty, Type::Double);
         for i in 0..count {
             let src_off = temp_off + (i * elem_size) as i32;
-            self.emit(&[0x49, 0x8D]); // lea rax, [r13 + src_off]
-            if src_off.abs() < 128 {
-                self.emit(&[0x45, src_off as i8 as u8]);
+            if is_float_elem || is_double_elem {
+                self.load_stack_xmm(0, src_off, elem_size, is_float_elem);
             } else {
-                self.emit(&[0x85]);
-                self.emit(&src_off.to_le_bytes());
+                self.emit(&[0x49, 0x8D]); // lea rax, [r13 + src_off]
+                if src_off.abs() < 128 {
+                    self.emit(&[0x45, src_off as i8 as u8]);
+                } else {
+                    self.emit(&[0x85]);
+                    self.emit(&src_off.to_le_bytes());
+                }
+                self.emit_load_mem(elem_size);
             }
-            self.emit_load_mem(elem_size);
             if is_global {
                 self.emit_global_vector_elem_store(name, i, elem_size);
             } else {
                 let var_off = self.var_offset(name);
                 let dst_off = var_off + (i * elem_size) as i32;
-                self.emit_store(0, dst_off, elem_size);
+                if is_float_elem {
+                    self.store_xmm32_stack(0, dst_off);
+                } else if is_double_elem {
+                    self.store_xmm64_stack(0, dst_off);
+                } else {
+                    self.emit_store(0, dst_off, elem_size);
+                }
             }
         }
     }
@@ -4410,6 +4630,15 @@ impl Codegen {
         let rex = if reg >= 8 { 0x4C } else { 0x48 };
         self.emit(&[rex, 0x8D, 0x05 | ((reg & 7) << 3), 0, 0, 0, 0]);
         self.pending_data_rels.push((disp32_pos, name.to_string()));
+    }
+
+    // 根据大小从内存加载到 rax（整数）或 xmm0（浮点）
+    fn emit_load_mem_typed(&mut self, size: usize, ty: &Type) {
+        match ty {
+            Type::Float => self.emit(&[0xF3, 0x0F, 0x10, 0x00]),
+            Type::Double => self.emit(&[0xF2, 0x0F, 0x10, 0x00]),
+            _ => self.emit_load_mem(size),
+        }
     }
 
     // 根据大小从内存加载到 rax (零扩展)
@@ -4799,10 +5028,32 @@ impl Codegen {
         else { self.emit(&[0x85 | ((reg & 7) << 3)]); self.emit(&off.to_le_bytes()); }
     }
     fn load_stack(&mut self, reg: u8, off: i32) {
-        let mut rex = 0x49u8; if reg >= 8 { rex |= 0x04; }
-        self.emit(&[rex, 0x8B]);
-        if off.abs() < 128 { self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]); }
-        else { self.emit(&[0x85 | ((reg & 7) << 3)]); self.emit(&off.to_le_bytes()); }
+        self.load_stack_sized(reg, off, 8);
+    }
+
+    /// 从 r13 帧按元素宽度加载（向量逐元素路径避免 8 字节读穿邻元素）
+    fn load_stack_sized(&mut self, reg: u8, off: i32, size: usize) {
+        let rex_r = if reg >= 8 { 0x04 } else { 0 };
+        match size {
+            1 => {
+                self.emit(&[0x41 | rex_r, 0x0F, 0xB6]);
+            }
+            2 => {
+                self.emit(&[0x41 | rex_r, 0x0F, 0xB7]);
+            }
+            4 => {
+                self.emit(&[0x41 | rex_r, 0x8B]);
+            }
+            _ => {
+                self.emit(&[0x49 | rex_r, 0x8B]);
+            }
+        }
+        if off.abs() < 128 {
+            self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((reg & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
     }
     fn store_stack_xmm(&mut self, xmm: u8, off: i32) {
         self.emit(&[0xF2, 0x41, 0x0F, 0x11]);
@@ -6525,6 +6776,10 @@ impl Codegen {
             "r14" => Some((14, 64)), "r14d" => Some((14, 32)), "r14w" => Some((14, 16)), "r14b" => Some((14, 8)),
             "r15" => Some((15, 64)), "r15d" => Some((15, 32)), "r15w" => Some((15, 16)), "r15b" => Some((15, 8)),
             "rip" => Some((ASM_BASE_RIP, 64)),
+            "xmm0" => Some((0, 128)), "xmm1" => Some((1, 128)), "xmm2" => Some((2, 128)), "xmm3" => Some((3, 128)),
+            "xmm4" => Some((4, 128)), "xmm5" => Some((5, 128)), "xmm6" => Some((6, 128)), "xmm7" => Some((7, 128)),
+            "xmm8" => Some((8, 128)), "xmm9" => Some((9, 128)), "xmm10" => Some((10, 128)), "xmm11" => Some((11, 128)),
+            "xmm12" => Some((12, 128)), "xmm13" => Some((13, 128)), "xmm14" => Some((14, 128)), "xmm15" => Some((15, 128)),
             _ => None,
         }
     }
@@ -6820,6 +7075,42 @@ impl Codegen {
             "dec" | "decq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 1, 64),
             "decl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 1, 32),
 
+            // 旋转
+            "rol" | "rolq" if ops.len() == 2 => self.emit_asm_rotate(&ops[0], &ops[1], 0, 64),
+            "roll" if ops.len() == 2 => self.emit_asm_rotate(&ops[0], &ops[1], 0, 32),
+            "rolb" if ops.len() == 2 => self.emit_asm_rotate(&ops[0], &ops[1], 0, 8),
+            "ror" | "rorq" if ops.len() == 2 => self.emit_asm_rotate(&ops[0], &ops[1], 1, 64),
+            "rorl" if ops.len() == 2 => self.emit_asm_rotate(&ops[0], &ops[1], 1, 32),
+            "rorb" if ops.len() == 2 => self.emit_asm_rotate(&ops[0], &ops[1], 1, 8),
+
+            // 预取 / 系统
+            "prefetcht0" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x18),
+            "prefetcht1" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x19),
+            "prefetcht2" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x1A),
+            "prefetchnta" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x1B),
+            "prefetchw" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x0D),
+            "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
+            "swapgs" => self.emit(&[0x0F, 0x01, 0xF8]),
+            "int3" => self.emit(&[0xCC]),
+            "int" if ops.len() == 1 => self.emit_asm_int(&ops[0]),
+
+            // 标量 SSE（内联 asm 约束常用）
+            "movss" if ops.len() == 2 => self.emit_asm_sse_mov(&ops[0], &ops[1], true, false),
+            "movsd" if ops.len() == 2 => self.emit_asm_sse_mov(&ops[0], &ops[1], false, false),
+            "movssq" if ops.len() == 2 => self.emit_asm_sse_mov(&ops[0], &ops[1], true, true),
+            "addss" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF3, 0x58),
+            "subss" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF3, 0x5C),
+            "mulss" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF3, 0x59),
+            "divss" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF3, 0x5E),
+            "addsd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF2, 0x58),
+            "subsd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF2, 0x5C),
+            "mulsd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF2, 0x59),
+            "divsd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF2, 0x5E),
+            "xorps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x57),
+            "xorpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x57),
+            "ucomiss" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x2E),
+            "ucomisd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x2E),
+
             // 移位
             "shl" | "sal" | "shlq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 64),
             "shll" | "sall" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 32),
@@ -6890,6 +7181,12 @@ impl Codegen {
             "setge" | "setnl" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x9D),
             "setb" | "setc" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x92),
             "seta" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x97),
+            "setae" | "setnb" | "setnc" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x93),
+            "setbe" | "setna" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x96),
+            "setns" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x99),
+            "setno" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x91),
+            "setp" | "setpe" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x9A),
+            "setnp" | "setpo" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x9B),
 
             // 原子操作
             "cmpxchg" | "cmpxchgl" | "cmpxchgq" if ops.len() == 2 => {
@@ -7311,6 +7608,134 @@ impl Codegen {
             }
             _ => {
                 eprintln!("warning: unsupported shift operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// rol/ror：与 shift 相同的操作数模式
+    fn emit_asm_rotate(&mut self, src: &AsmOperand, dst: &AsmOperand, op: u8, bits: u8) {
+        self.emit_asm_shift(src, dst, op, bits);
+    }
+
+    /// prefetch* mem
+    fn emit_asm_prefetch(&mut self, op: &AsmOperand, hint: u8) {
+        if let AsmOperand::Mem { disp, base, index, scale } = op {
+            self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x18]);
+            self.emit_asm_modrm_mem_only(hint, *disp, *base, *index, *scale);
+        } else {
+            eprintln!("warning: unsupported prefetch operand pattern, emitted as nop");
+            self.emit(&[0x90]);
+        }
+    }
+
+    /// 0F 01 /m 系统指令（invlpg 等）
+    fn emit_asm_sys_mem(&mut self, op: &AsmOperand, grp: u8, ext: u8) {
+        if let AsmOperand::Mem { disp, base, index, scale } = op {
+            self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x01]);
+            self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+        } else {
+            eprintln!("warning: unsupported sys mem operand pattern, emitted as nop");
+            self.emit(&[0x90]);
+        }
+        let _ = grp;
+    }
+
+    fn emit_asm_int(&mut self, op: &AsmOperand) {
+        if let AsmOperand::Imm(v) = op {
+            self.emit(&[0xCD, *v as u8]);
+        } else {
+            eprintln!("warning: unsupported int operand pattern, emitted as nop");
+            self.emit(&[0x90]);
+        }
+    }
+
+    /// movss/movsd：AT&T src, dst
+    fn emit_asm_sse_mov(&mut self, src: &AsmOperand, dst: &AsmOperand, single: bool, to_xmm64: bool) {
+        let prefix = if single && !to_xmm64 { 0xF3u8 } else { 0xF2u8 };
+        let is_xmm = |_r: u8, sz: u8| sz == 128;
+        match (src, dst) {
+            (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) if is_xmm(*s, *ss) && is_xmm(*d, *ds) => {
+                let mut rex = 0u8;
+                if *d >= 8 { rex |= 0x04; }
+                if *s >= 8 { rex |= 0x01; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                self.emit(&[prefix, 0x0F, 0x10, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds)) if is_xmm(*d, *ds) => {
+                let mut rex = 0u8;
+                if *d >= 8 { rex |= 0x04; }
+                if *base >= 8 { rex |= 0x01; }
+                if index.unwrap_or(0) >= 8 { rex |= 0x02; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                self.emit(&[prefix, 0x0F, 0x10]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Reg(s, ss), AsmOperand::Mem { disp, base, index, scale }) if is_xmm(*s, *ss) => {
+                let mut rex = 0u8;
+                if *s >= 8 { rex |= 0x04; }
+                if *base >= 8 { rex |= 0x01; }
+                if index.unwrap_or(0) >= 8 { rex |= 0x02; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                self.emit(&[prefix, 0x0F, 0x11]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported sse mov operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// 标量 SSE 算术：prefix 可为 0x0F / 0xF2 / 0xF3 / 0x66
+    fn emit_asm_sse_arith(&mut self, src: &AsmOperand, dst: &AsmOperand, prefix: u8, opcode: u8) {
+        let is_xmm = |_r: u8, sz: u8| sz == 128;
+        match (src, dst) {
+            (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) if is_xmm(*s, *ss) && is_xmm(*d, *ds) => {
+                let mut rex = 0u8;
+                if *d >= 8 { rex |= 0x04; }
+                if *s >= 8 { rex |= 0x01; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                if prefix == 0x66 {
+                    self.emit(&[0x66, 0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
+                } else if prefix == 0x0F {
+                    self.emit(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
+                } else {
+                    self.emit(&[prefix, 0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
+                }
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds)) if is_xmm(*d, *ds) => {
+                let mut rex = 0u8;
+                if *d >= 8 { rex |= 0x04; }
+                if *base >= 8 { rex |= 0x01; }
+                if index.unwrap_or(0) >= 8 { rex |= 0x02; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                if prefix == 0x66 {
+                    self.emit(&[0x66, 0x0F, opcode]);
+                } else if prefix == 0x0F {
+                    self.emit(&[0x0F, opcode]);
+                } else {
+                    self.emit(&[prefix, 0x0F, opcode]);
+                }
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Reg(s, ss), AsmOperand::Mem { disp, base, index, scale }) if is_xmm(*s, *ss) => {
+                let mut rex = 0u8;
+                if *s >= 8 { rex |= 0x04; }
+                if *base >= 8 { rex |= 0x01; }
+                if index.unwrap_or(0) >= 8 { rex |= 0x02; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                if prefix == 0x66 {
+                    self.emit(&[0x66, 0x0F, opcode]);
+                } else if prefix == 0x0F {
+                    self.emit(&[0x0F, opcode]);
+                } else {
+                    self.emit(&[prefix, 0x0F, opcode]);
+                }
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported sse arith operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }

@@ -44,6 +44,9 @@
 | Mini x86 asm GAS 伪指令 / 前缀 | `.pushsection`/`.balign`/`.long`/`.quad`/`.popsection`；`lock`/`rep` |
 | GCC Builtin 完整化 | object_size FORTIFY、apply/return、prefetch no-op、未知 builtin warning |
 | 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；`.data` 逐元素静态 init + 运行时 binop |
+| 浮点 SIMD 标量逐元素 | `tests/fixtures/vector_float_scalar.c`；v4f/v2d +/-/× 标量 SSE |
+| __int128 SysV 传参/乘除模 | `tests/fixtures/int128_call_abi.c`、`int128_mul_div_mod.c` |
+| mini-asm 内核扩展 | `tests/fixtures/asm_kernel_extra.c`；rol/prefetch/movss/addss |
 | 非 Ident 向量 rvalue | `tests/fixtures/vector_binop_non_ident.c`；`(a+b)+c`、`v=v+w` |
 | x86_64 codegen 扩展 | ✅ 向量/SIMD、复数、mini-asm、object_size FORTIFY、apply/return、prefetch |
 | aarch64 typed IR | hello/控制流/调用/浮点/向量/rodata；见 `aarch64_*_cross_compile` |

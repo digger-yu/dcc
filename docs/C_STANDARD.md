@@ -50,13 +50,15 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 ## GNU 扩展
 
 - `__int128` / `unsigned __int128` / `__int128_t` / `__uint128_t`
-  （16 字节大小和对齐；整数加减、位运算、比较和移位使用 `rax:rdx`）
+  （16 字节大小和对齐；整数加减、位运算、比较、移位、乘/除/取模；
+  SysV 传参与返回值占两个 GP 寄存器 `rax:rdx`）
 - 声明属性 `section`、`aligned`、`weak`、`visibility`、`unused`、
   `cold`、`noinline`、`always_inline`；ET_REL 输出会传递节、对齐、
   弱绑定和 ELF visibility，`cold` 默认进入 `.text.unlikely`
 - `register TYPE name asm("reg")` 固定寄存器变量
 - `__attribute__((...))` 多位置属性
-- `__asm__ __volatile__` 带约束内联汇编 (Mini x86 汇编器实际发射指令, 支持 100+ 常见指令)
+- `__asm__ __volatile__` 带约束内联汇编 (Mini x86 汇编器实际发射指令,
+  支持 100+ 常见指令；rol/prefetch/movss/addss 等内核常用扩展)
 - `__builtin_*` (expect, expect_with_probability, constant_p, memcpy, memset, memmove, object_size, abs, unreachable, trap, clz, ctz, popcount, strcpy, strlen, bswap, parity, frame_address, return_address 等)
 - 语句表达式 `({...})`
 - 零长度数组 / 柔性数组成员
@@ -93,7 +95,6 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
   栈参数边界、超过 8 字节的 `va_arg` 尚不等价于完整 SysV ABI。
 - `noinline` / `always_inline` 当前只保留在 AST 中。后端尚无通用内联
   优化 pass，因此二者不会改变机器码。
-- `__int128` 乘法、除法、取模和完整 SysV 参数分类仍在完善中。
 - ELF 的 section/weak/visibility 属性作用于 `-c`/`-r` 可重定位输出；
   直接 ET_EXEC 模式不提供完整符号表语义。
 

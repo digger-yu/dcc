@@ -226,6 +226,27 @@ EOF
 "$DCC" -o "$TMP/simd" "$TMP/simd.c" && "$TMP/simd"
 check "vector_simd_scalar" test $? -eq 0
 
+cat > "$TMP/int128_abi.c" <<'EOF'
+static __int128 passthrough(__int128 v) { return v; }
+int main(void) {
+    __int128 a = ((__int128)10 << 64) | 3;
+    return passthrough(a) == a ? 0 : 1;
+}
+EOF
+"$DCC" -o "$TMP/int128_abi" "$TMP/int128_abi.c" && "$TMP/int128_abi"
+check "int128_sysv_call" test $? -eq 0
+
+cat > "$TMP/vecfloat.c" <<'EOF'
+typedef float v4f __attribute__((vector_size(16)));
+int main(void) {
+    v4f a = {1,2,3,4}, b = {10,20,30,40}, c = a + b;
+    float *p = (float *)&c;
+    return p[0] == 11.0f && p[3] == 44.0f ? 0 : 1;
+}
+EOF
+"$DCC" -o "$TMP/vecfloat" "$TMP/vecfloat.c" && "$TMP/vecfloat"
+check "vector_float_scalar" test $? -eq 0
+
 cat > "$TMP/asm_ext.c" <<'EOF'
 int g[4] = {1, 2, 3, 4};
 __asm__(".pushsection .t,\"a\"\n.balign 4\n.long 1\n.popsection\n");

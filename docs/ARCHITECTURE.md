@@ -155,6 +155,8 @@ dcc -r [-flto] -o all.o a.o b.o
 ## x86-64 后端 ABI 约定
 
 - 普通标量值使用 `rax`，`__int128` 使用 `rax:rdx`（低 64 位在 `rax`）。
+  16 字节整数按 SysV ABI 分类为两个 `INTEGER` 类，函数调用占两个 GP
+  参数槽（`rdi/rsi/...` 或栈），返回值同样在 `rax:rdx`。
 - 后端以 `r13` 作为稳定帧基址。嵌套函数调用通过 `r10` 传递静态链，
   被调函数保存父级 `r13` 后按已解析的父帧偏移访问捕获变量。
 - 简化 `va_list` 会在可变参数函数序言中按
@@ -197,10 +199,13 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   `cmpxchg`/`xadd`/`cmov` 内存操作数、`movzbl` 内存源、`setcc` 内存目标、
   `push`/`pop` 内存操作数、`lea symbol(%rip)`、GAS 伪指令
   （`.pushsection`/`.balign`/`.long`/`.quad`/`.popsection` 等，`-c` 静默填充）、
-  `lock`/`rep` 前缀；`cmp`/`test`/shift/imul/unary 内存操作数等；
+  `lock`/`rep` 前缀；`cmp`/`test`/shift/imul/unary 内存操作数、
+  `rol`/`ror`、`prefetcht0/t1/t2/nta`、`movss`/`movsd`/`addss`/`addsd`、
+  `xorps`/`xorpd`、`swapgs`/`invlpg`/`int3` 等；
   未识别指令 warning + nop 占位。
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
-  局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（不用 XMM 向量指令）；
+  局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（整数用 GP，
+  浮点用标量 SSE，不用 XMM 向量指令）；
   非 Ident 向量（binop、compound literal、InitList）经 `gen_vector_to_temp` 物化；
   `_Complex` add/sub/mul/div（SSE 标量）；`parser` 对复数二元结果保留 `Type::Complex` 以便
   `(int)(a+b)` 等 Cast 正确发射 `cvttss2si`；虚部清零用 `movss` 避免 64 位

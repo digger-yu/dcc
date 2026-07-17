@@ -1686,6 +1686,64 @@ fn asm_extended_compiles_without_nop_fallback() {
     );
 }
 
+/// __int128 SysV 双寄存器传参与返回值
+#[test]
+fn int128_call_abi_run_returns_zero() {
+    let source = include_str!("fixtures/int128_call_abi.c");
+    let (output, exe) = run_compile_and_run("int128-call-abi", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "int128_call_abi should return 0, got {rc}");
+}
+
+/// __int128 乘/除/取模运行时正确性
+#[test]
+fn int128_mul_div_mod_run_returns_zero() {
+    let source = include_str!("fixtures/int128_mul_div_mod.c");
+    let (output, exe) = run_compile_and_run("int128-mul-div-mod", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "int128_mul_div_mod should return 0, got {rc}");
+}
+
+/// SIMD 浮点向量：标量 SSE 逐元素 +/-/×
+#[test]
+fn vector_float_scalar_run_returns_zero() {
+    let source = include_str!("fixtures/vector_float_scalar.c");
+    let (output, exe) = run_compile_and_run("vector-float-scalar", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "vector_float_scalar should return 0, got {rc}");
+}
+
+/// mini-asm 内核扩展：rol/prefetch/movss/addss
+#[test]
+fn asm_kernel_extra_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/asm_kernel_extra.c");
+    let (output, _obj) = run_object_test("asm-kernel-extra", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// 预处理残留的 _DECLARE_STATIC_KEY_0 → extern struct static_key_false
 #[test]
 fn static_key_maybe_compiles() {
