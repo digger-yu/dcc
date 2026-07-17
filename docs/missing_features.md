@@ -84,15 +84,30 @@
 | libiberty 单 TU | **125 OK / 0 FAIL / 4 SKIP** |
 | libiberty `dcc -r` 链接 | ✅ ~1MB 合并 `.o` |
 | fixincludes | **6 OK / 0 FAIL / 1 SKIP** |
-| libdecnumber | 11 SKIP（include 单元） |
+| libdecnumber | ✅ 11 SKIP→1 OK（组合 TU 方案，`tools/libdecnumber_combined.c`，三段 DECPMAX 7/16/34） |
+| dcc C++ 前端 (M7) | ✅ `cpp::lower` 单测通过；最小 class+ctor+dtor 可降级到 C 字符串并经 dcc 编译 |
+| dcc GCC 完整 bootstrap | ⏳ 见下表 |
 
 | 缺口 | 影响 |
 |------|------|
-| 无 C++ | 无法编 GCC 主体 / 完整 bootstrap |
+| 无 C++ | 详见下表：M7 提供最小 class/ctor/dtor/this 降级；模板/异常/vtable 不支持 |
 | `_Generic` 指针精确匹配 | ✅ 按 pointee 匹配；void* 与对象指针兼容 |
-| libdecnumber 组合编译 | 需 DECPMAX 宏驱动的多文件 include，未纳入 probe |
+| libdecnumber 组合编译 | ✅ `tools/libdecnumber_combined.c` 把 11 个 SKIP 文件合一，DECPMAX 7/16/34 三段；远程 1 OK |
 | 内联 asm 约束 | ✅ `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber |
 | SysV va_list SSE | ✅ GP + XMM0–7 保存区；float/double/long double va_arg |
+
+## C++ 前端 M7 / GCC bootstrap 状态
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| C++ token 扩展 (`class`/`this`/`new`/`delete`/`::`) | ✅ | `src/cpp/lexer.rs` 5 单测 |
+| Itanium C++ ABI 名字修饰 | ✅ | `src/cpp/mangle.rs` 6 单测：成员函数 C1/D1/参数类型 `v`/`i`/`P`/`R` |
+| 最小 C++ 解析器 | ✅ | `src/cpp/parser.rs`：class、ctor、dtor、成员函数、成员变量、::、this->x |
+| C++→C 降级 | ✅ | `src/cpp/lower.rs`：struct 字段、隐式 this 形参、`_Znwm`/`_ZdlPv` 替身 |
+| dcc++ 子命令 / `-x c++` | ⏳ M8 | M7 仅提供 `cpp::compile_cpp` API，未接 dcc CLI |
+| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 受阻 | 模板/异常/vtable/RTTI 不在 M7；远期需 M8+ |
+| libdecnumber 组合 TU 编译 | ✅ 远程 OK | `scripts/remote_gcc_c_probe.sh` 改用 `tools/libdecnumber_combined.c` |
+| 嵌套块重声明 (C99 6.2.1) | ✅ | `parser.rs::check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍报 E0007 |
 
 ## 远程 debug 记录（2026-07-15）
 

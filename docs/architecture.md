@@ -192,6 +192,36 @@ AArch64 / RISC-V 后端的 ELF 输出（沿用 host 链接器）。
 
 远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（12 用例）。
 
+## C++ 前端 M7（`src/cpp/`）
+
+DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计原则：
+**不另起 IR**，而是把 C++ AST 降级（lower）到 DCC 现有的 C 风格声明，
+复用 C 前端 + 链接器整条链路。
+
+| 文件 | 职责 |
+|------|------|
+| `src/cpp/lexer.rs` | C++ token 流：扩展关键字 + `::` 标点 |
+| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 |
+| `src/cpp/mangle.rs` | Itanium C++ ABI 名字修饰（`_ZN…C1E…` / `D1E`） |
+| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身） |
+| `src/cpp/driver.rs` | 顶层入口：`compile_cpp(cpp_src, obj, dcc_bin, includes, opt)` |
+
+**降级映射表**（C++ → C）：
+- `class Foo { int x; }` → `struct Foo { int x; };`
+- `Foo::Foo(int v) { this->x = v; }` → `void _ZN3FooC1Ei(struct Foo* this, int v) { this->x = v; }`
+- `Foo::~Foo()` → `void _ZN3FooD1Ev(struct Foo* this) { }`
+- `T& ref` → `T* ref`（引用降级为指针）
+- `new Foo(...)` → `((struct Foo*)_Znwm(sizeof(struct Foo))); _ZN3FooC1E…(...)`
+- `delete p` → `_ZdlPv(p);`
+
+**M7 范围**：class、ctor、dtor、成员变量、成员函数、`this->x`、`::`、
+引用（→指针）、new/delete、MangleType 基本类型。
+**不在 M7 范围**：模板、异常、虚函数/vtable、多继承、命名空间嵌套、
+运算符重载（new/delete 除外）、lambda。
+**限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M7 阶段仅提供 `cpp::compile_cpp`
+API，未接到 dcc CLI 主入口（计划在 M8 完成）；GCC 完整 bootstrap 仍受阻，
+原因见 `docs/missing_features.md` 的 C++ 前端状态表。
+
 ## x86-64 后端 ABI 约定
 
 - 普通标量值使用 `rax`，`__int128` 使用 `rax:rdx`（低 64 位在 `rax`）。

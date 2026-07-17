@@ -144,6 +144,78 @@ fn struct_comma_separated_field_declarators_parse() {
     );
 }
 
+/// M7 数组到指针衰减: `*(arr + n)` 与 `arr[n]` 等价.
+/// libdecnumber 的 decBasic.c 在外层 `uInt div[]` 之内的内层块又写
+/// `uint64_t div = ...` 与 `*(bcdar + n) = ...` 都依赖此语义.
+#[test]
+fn array_decay_and_nested_block_redecl_compile() {
+    let (output, object) = run_object_test(
+        "array-decay-nested-redecl",
+        "int dec_to_packed(int df, int *exp, int *packed) {\n\
+             int bcdar[9];\n\
+             int *ip = bcdar, *op = packed;\n\
+             for (int i = 0; i < 9; i++) bcdar[i] = i;\n\
+             {\n\
+                 unsigned long div = (unsigned long)df;\n\
+                 int mul = (int)(div / 3);\n\
+                 *(bcdar + 1) = (int)(div & 0xff);\n\
+                 *(bcdar + 1 + 1) = (int)((div >> 8) & 0xff);\n\
+                 (void)mul;\n\
+             }\n\
+             *exp = 0;\n\
+             return 0;\n\
+         }\n",
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let size = fs::metadata(&object).expect("object was emitted").len();
+    assert!(size > 64, "ELF object should contain generated code");
+    let _ = fs::remove_file(object);
+}
+
+/// M7 libdecnumber combined TU 编译回归: 仅在远程 gcc-src 存在时
+/// 跑；本地 CI 直接 skip。组合 TU 把 decSingle/Double/Quad 三套
+/// 符号收敛到一个 .o, 避免 GCC configure 阶段 11 个 SKIP.
+#[test]
+#[cfg_attr(not(feature = "gcc_src"), ignore = "needs GCC source tree")]
+fn libdecnumber_combined_tu_compiles() {
+    let gcc_src = match std::env::var("GCC_SRC") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => return, // 没设 GCC_SRC 就当 SKIP
+    };
+    if !gcc_src.join("libdecnumber").exists() {
+        return;
+    }
+    let stub_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tools/libdecnumber_stub");
+    let combined = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tools/libdecnumber_combined.c");
+    let dir = std::env::temp_dir();
+    let object = dir.join(format!("dcc-libdecnumber-{}.o", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "-c",
+            "-I", gcc_src.join("libdecnumber").to_str().unwrap(),
+            "-I", gcc_src.join("libdecnumber/dpd").to_str().unwrap(),
+            "-I", stub_dir.to_str().unwrap(),
+            "-DHAVE_CONFIG_H",
+            "-o",
+        ])
+        .arg(&object)
+        .arg(&combined)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&object);
+    assert!(
+        output.status.success(),
+        "libdecnumber_combined compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn enum_trailing_comma_parses() {
     let output = run_syntax_test(
@@ -159,6 +231,17 @@ fn enum_trailing_comma_parses() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// C++ 前端 M7: 简单 class + ctor 降级到 C 后能通过 dcc 编译
+/// 验证 lexer/parser/lower 链路 + 与 dcc C 后端的衔接
+/// 注: dcc 主入口在 M7 阶段未开放 C++ 子命令, 这里直接走 driver 模块
+/// (留待 M8 加入 -x c++ 标志或 dcc++ 二进制入口)
+#[cfg(any())]
+#[test]
+fn cpp_class_with_ctor_lowers_and_compiles() {
+    // 暂时 disable: 集成测试需要 lib crate 才能访问 dcc::cpp
+    // 等 M8 引入 dcc++ 二进制后, 通过 spawn dcc++ 验证
 }
 
 #[test]

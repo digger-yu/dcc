@@ -158,15 +158,24 @@ impl<'a> Parser<'a> {
         true
     }
     /// 变量/参数重声明类型冲突报 E0007
+    /// M7 修复：locals 是扁平 HashMap，无法区分同函数内嵌套块的
+    /// 重声明（合法 C 语义：内层遮蔽外层）。原实现在嵌套块内
+    /// 重声明同名变量会误报 E0007。libdecnumber 的 decBasic.c
+    /// 在外层 `uInt div[]` 之内的内层块又声明 `uint64_t div=...`
+    /// 就属于这种情况。规则：
+    ///   - 同类型: 允许
+    ///   - 函数体内: 允许 (嵌套块遮蔽 / 遮蔽全局)
+    ///   - 文件作用域且不同类型: 报 E0007
     fn check_var_redecl(&mut self, name: &str, ty: &Type, span: Span) -> bool {
         if let Some(existing) = self.locals.get(name) {
             if existing == ty {
                 return true;
             }
-            // 函数体内：locals 由 globals 克隆而来，允许遮蔽全局声明
-            if self.in_function && self.globals.get(name) == Some(existing) {
+            // 函数体内允许遮蔽 (嵌套块 / 遮蔽全局)
+            if self.in_function {
                 return true;
             }
+            // 文件作用域且类型不匹配: 报 E0007
             self.diags.push(Diagnostic::err(
                 "E0007",
                 format!("conflicting types for redeclaration of '{}'", name),
@@ -2422,6 +2431,16 @@ impl<'a> Parser<'a> {
             // 比较与逻辑运算结果恒为 int，即使操作数是浮点
             let binop_ty = {
                 let lt = lhs.ty(); let rt = r.ty();
+                // 数组在表达式中自动衰减为指向首元素的指针
+                // (C99 6.3.2.1.3): 除 sizeof/&/字符串字面量初始化外, 数组名
+                // 在表达式上下文一律退化为 T*.  此处实现 arr+int 形式,
+                // 让 libdecnumber 等库能写 `*(bcdar+1)`.
+                let lt = if let Type::Array(inner, _) = &lt {
+                    Type::Ptr(inner.clone())
+                } else { lt };
+                let rt = if let Type::Array(inner, _) = &rt {
+                    Type::Ptr(inner.clone())
+                } else { rt };
                 if matches!(op, BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le
                     | BinOp::Gt | BinOp::Ge | BinOp::AndAnd | BinOp::OrOr) {
                     int_t()

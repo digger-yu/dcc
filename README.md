@@ -332,6 +332,13 @@ src/
 ├── tokens.rs        # 词法分析: 字符流 → token 流
 ├── parser.rs        # 语法分析: token 流 → AST (递归下降 + Pratt)
 ├── ast.rs           # AST 定义: Type/Expr/Stmt/Decl
+├── cpp/             # C++ 前端 M7 (降级到 C, 复用 C 后端)
+│   ├── mod.rs       # CppOptions / CppError / Display
+│   ├── lexer.rs     # C++ token 流 + CppKw 扩展
+│   ├── parser.rs    # class/ctor/dtor/this/:: 解析
+│   ├── mangle.rs    # Itanium C++ ABI 名字修饰
+│   ├── lower.rs     # C++ AST → C 字符串
+│   └── driver.rs    # compile_cpp(cpp_src, obj, dcc_bin, ...)
 ├── diagnostics.rs   # 错误诊断: 精确到字符 + 源码引用 + 修复建议
 ├── target.rs        # 目标平台: 数据布局/调用约定/字节序
 └── codegen/

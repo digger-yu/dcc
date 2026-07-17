@@ -1,0 +1,93 @@
+//! C++ 前端 (M7 最小可编译子集)
+//!
+//! 目标: 实现 GCC 编译 C++ 子集所必需的最小特性, 满足
+//! GCC bootstrap 阶段 1 (cc1plus) 编译时不会立刻触雷。
+//!
+//! 设计选择: C++ 源码经 cpp 前端解析后, 降级 (lower) 到 dcc 现有
+//! 的 C IR / C 风格声明, 复用 codegen + link 链路。
+//! 不另起一套 IR, 避免 4 倍维护负担。
+//!
+//! M7 范围 (本模块):
+//!   - C++ token 扩展: `class`, `public`, `private`, `protected`,
+//!     `this`, `new`, `delete`, `::`, `operator`
+//!   - class 声明: 成员变量 + 成员函数
+//!   - this->member 访问 (隐式 this 形参)
+//!   - :: 作用域解析 (命名空间 / 类作用域)
+//!   - T& 引用类型 (降级为指针)
+//!   - 构造 / 析构函数 (Itanium 名字修饰 _ZN* C1 / D1)
+//!   - new T / delete p (调用 ::operator new / ::operator delete)
+//!   - Itanium C++ ABI 名字修饰 (mangle.rs)
+//!
+//! 不在 M7 范围:
+//!   - 模板 (templates)
+//!   - 异常 (try/catch/throw)
+//!   - 虚函数 / vtable
+//!   - 多继承 / 虚继承
+//!   - 命名空间嵌套
+//!   - 运算符重载 (除 new/delete)
+//!   - lambda
+//!
+//! 文件:
+//!   - lexer.rs:  C++ token 流 (基于 C tokens, 扩展关键字)
+//!   - parser.rs: 类 / 成员函数 / this / :: / 引用 解析
+//!   - mangle.rs: Itanium C++ ABI 名字修饰
+//!   - lower.rs:  C++ AST → dcc C 风格声明 / 函数
+//!   - driver.rs: 顶层入口, 串 lexer→parser→lower→dcc driver
+//!
+//! 限制: C++ 前端在 M7 阶段只支持 dcc 既有的 C 子集能直接
+//! 表达的特性 (struct-as-class, 成员函数, this 隐式形参化,
+//! 引用→指针退化). GCC 真实 bootstrap 会因模板/异常/虚函数
+//! 失败, 已在 docs/missing_features.md 与 docs/gcc_build_guide.md
+//! 中列明.
+#![allow(dead_code, unused_imports)]
+
+pub mod lexer;
+pub mod parser;
+pub mod mangle;
+pub mod lower;
+pub mod driver;
+
+use std::path::PathBuf;
+use crate::diagnostics::Diagnostic;
+
+/// C++ 编译选项 (M7 最小)
+#[derive(Debug, Clone)]
+pub struct CppOptions {
+    /// 输入文件 (.cpp / .cc / .cxx)
+    pub input: PathBuf,
+    /// 输出文件 (-o)
+    pub output: PathBuf,
+    /// 头文件搜索路径
+    pub include_paths: Vec<PathBuf>,
+    /// 系统头文件搜索路径
+    pub system_paths: Vec<PathBuf>,
+    /// -D 宏定义
+    pub defines: Vec<(String, Option<String>)>,
+    /// 仅做语法检查
+    pub syntax_only: bool,
+    /// 优化级别 0..3
+    pub opt_level: u8,
+}
+
+/// C++ 编译错误
+#[derive(Debug)]
+pub enum CppError {
+    Diagnostics(Vec<Diagnostic>),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for CppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CppError::Diagnostics(ds) => {
+                for d in ds { writeln!(f, "{}", d)?; }
+                Ok(())
+            }
+            CppError::Io(e) => write!(f, "I/O error: {}", e),
+        }
+    }
+}
+
+impl From<std::io::Error> for CppError {
+    fn from(e: std::io::Error) -> Self { CppError::Io(e) }
+}
