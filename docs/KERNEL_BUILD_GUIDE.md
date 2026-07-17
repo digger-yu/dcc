@@ -6,7 +6,7 @@
 
 | 阶段 | 状态 |
 |------|------|
-| DCC release 构建 + `cargo test`（integration） | ✅ 远程通过 |
+| DCC release 构建 + `cargo test`（integration + errors snapshot） | ✅ 远程通过 |
 | `scripts/test_kernel_features.sh` | ✅ 7/7 |
 | `scripts/remote_feature_check.sh` | ✅ 17/17（含 LTO per-function section） |
 | `scripts/prepare0_check.sh` | ✅ devicetable / bounds / file2alias 窄目标 |

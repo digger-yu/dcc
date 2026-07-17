@@ -1,0 +1,5 @@
+error[E0009]: unknown type or typedef 'missing_t'
+  --> <file>:1:1
+   1 |missing_t x;
+     | ^^^^^^^^^
+  hint: declare the typedef before using it

@@ -324,6 +324,10 @@ fn dce_block(items: &mut Vec<BlockItem>) {
     let mut stopped = false;
     items.retain(|item| {
         if stopped {
+            // goto 仍可跳入 return 之后的标签，不能当不可达代码删除
+            if matches!(item, BlockItem::Stmt(Stmt::Label { .. })) {
+                return true;
+            }
             return false;
         }
         if let BlockItem::Stmt(Stmt::Return { .. }) = item {
@@ -571,6 +575,78 @@ mod tests {
             assert!(matches!(
                 f.body.as_ref().unwrap().items[0],
                 BlockItem::Stmt(Stmt::Return { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn o2_preserves_goto_label_after_return() {
+        let prog = Program {
+            decls: vec![Decl::Func(FuncDecl {
+                ret_ty: int_ty(),
+                name: Ident { name: "f".into(), span: Span::point("t.c", 1, 1) },
+                params: vec![],
+                body: Some(Block {
+                    items: vec![
+                        BlockItem::Stmt(Stmt::If {
+                            cond: Expr::Ident {
+                                name: Ident { name: "x".into(), span: Span::point("t.c", 2, 1) },
+                                span: Span::point("t.c", 2, 1),
+                                ty: int_ty(),
+                            },
+                            then_: Box::new(Stmt::Goto {
+                                target: Ident { name: "found".into(), span: Span::point("t.c", 3, 1) },
+                                span: Span::point("t.c", 3, 1),
+                            }),
+                            else_: None,
+                            span: Span::point("t.c", 2, 1),
+                        }),
+                        BlockItem::Stmt(Stmt::Return {
+                            val: Some(Expr::Int { v: 0, span: Span::point("t.c", 4, 1), ty: int_ty() }),
+                            span: Span::point("t.c", 4, 1),
+                        }),
+                        BlockItem::Stmt(Stmt::Label {
+                            name: Ident { name: "found".into(), span: Span::point("t.c", 5, 1) },
+                            stmt: Box::new(Stmt::Return {
+                                val: Some(Expr::Int { v: 1, span: Span::point("t.c", 6, 1), ty: int_ty() }),
+                                span: Span::point("t.c", 6, 1),
+                            }),
+                            span: Span::point("t.c", 5, 1),
+                        }),
+                    ],
+                    span: Span::point("t.c", 1, 1),
+                }),
+                span: Span::point("t.c", 1, 1),
+                is_static: true,
+                is_extern: false,
+                is_variadic: false,
+                is_weak: false,
+                is_constructor: false,
+                is_destructor: false,
+                is_nested: false,
+                is_cold: false,
+                section: None,
+                alignment: None,
+                visibility: None,
+                alias_name: None,
+                upvars: vec![],
+                is_unused: false,
+                is_noinline: false,
+                is_always_inline: false,
+            })],
+        };
+        let mut module = ir::lower(prog).expect("lower");
+        optimize(&mut module, 2);
+        let body = &module.source().decls[0];
+        if let Decl::Func(f) = body {
+            assert_eq!(
+                f.body.as_ref().unwrap().items.len(),
+                3,
+                "label after return must survive DCE"
+            );
+            assert!(matches!(
+                f.body.as_ref().unwrap().items[2],
+                BlockItem::Stmt(Stmt::Label { .. })
             ));
         }
     }

@@ -1,0 +1,2 @@
+error[E1004]: cannot dereference a non-pointer expression
+  --> <file>:1:36

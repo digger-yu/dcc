@@ -29,6 +29,9 @@ jobs:
           mkdir -p bin && cp target/release/dcc bin/dcc
           ./bin/dcc --version
 
+      - name: Run cargo tests (unit + integration + error snapshots)
+        run: cargo test --release
+
       - name: Compile hello.c
         run: |
           ./bin/dcc -std=gnu23 -o hello examples/hello.c
@@ -63,7 +66,10 @@ jobs:
 
       - name: Test error diagnostics
         run: |
-          ./bin/dcc -std=gnu23 -o /tmp/should_fail examples/bad.c 2>&1 | head -20 || true
+          out=$(./bin/dcc -std=gnu23 -o /tmp/should_fail examples/bad.c 2>&1 || true)
+          echo "$out" | head -20
+          echo "$out" | grep -q 'error\[E0006\]'
+          echo "$out" | grep -q 'hint:'
 
       - name: Summary
         if: always()

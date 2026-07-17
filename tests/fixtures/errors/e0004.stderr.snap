@@ -1,0 +1,5 @@
+error[E0004]: expected identifier, got Number
+  --> <file>:1:5
+   1 |int 123;
+     |     ^^^
+  hint: identifiers must start with a letter or '_'

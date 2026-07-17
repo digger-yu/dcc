@@ -923,6 +923,37 @@ fn o2_constant_branch_fold() {
     let _ = fs::remove_file(object_path);
 }
 
+/// -O2 DCE 须保留 return 之后的 goto 目标标签（radix_tree_next_slot 模式）。
+#[test]
+fn o2_goto_label_after_return() {
+    let source = r#"
+static void **slot_after_return(void **slot, int flags) {
+    if (flags) { goto found; }
+    return 0;
+ found:
+    return slot;
+}
+void use_it(void) { (void)slot_after_return(0, 1); }
+"#;
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-o2-goto-label-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-o2-goto-label-{}.s", std::process::id()));
+    fs::write(&source_path, source).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(asm_path);
+}
+
 /// M7: aarch64-linux-gnu 交叉编译 hello.o。
 #[test]
 fn aarch64_hello_cross_compile() {

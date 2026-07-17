@@ -1,6 +1,6 @@
 # 后续步骤：20 步路线图 Checklist
 
-> 最后更新：2026-07-16 — 以 `docs/ROADMAP.md`、`docs/MISSING_FEATURES.md`
+> 最后更新：2026-07-17 — 以 `docs/ROADMAP.md`、`docs/MISSING_FEATURES.md`
 > 与远程 `ds@192.168.148.128` 自动化日志为准。
 > 勾选 `[x]` 表示已有 PASS 证据；`[ ]` 表示待完成或待首跑验证。
 
@@ -71,9 +71,10 @@
 
 ## 阶段 C：CI 与回归体系（P1，步骤 11–14）
 
-- [ ] **11. 扩展 GitHub CI：`cargo test` + integration**
-  - 验证：`.github/workflows/e2e.yml` 增加 `cargo test --release`（当前仅 4 个 example）
-  - 目标：PR 自动跑 38 项 integration
+- [x] **11. 扩展 GitHub CI：`cargo test` + integration**
+  - 验证：`.github/workflows/e2e.yml` 已增加 `cargo test --release`
+  - 验证：`tests/errors.rs` snapshot 回归（24 用例, 4 tests）
+  - 目标：PR 自动跑 59 项 integration + errors snapshot
 
 - [ ] **12. 远程回归纳入 CI 或 scheduled workflow**
   - 验证：self-hosted runner 或 SSH action 定期跑 `sync_remote_build.sh`

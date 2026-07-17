@@ -1,0 +1,4 @@
+error[E0011]: division by zero in static assertion
+  --> <file>:1:1
+   1 |_Static_assert(1 / 0, "x");
+     | ^^^^^^^^^^^^^^

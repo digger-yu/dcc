@@ -1,0 +1,5 @@
+error[E0003]: expected struct name or '{'
+  --> <file>:1:7
+   1 |struct;
+     |       ^
+  hint: struct/union definition needs a name or body: struct Name { ... }

@@ -1,0 +1,5 @@
+error[E0002]: expected ';', '=', '(', got Eof
+  --> <file>:2:1
+   2 |
+     | ^
+  hint: declaration must end with ';' or have an initializer

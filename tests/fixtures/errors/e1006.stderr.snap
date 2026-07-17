@@ -1,0 +1,2 @@
+error[E1006]: global initializer for 'g' is not a supported constant expression
+  --> <file>:1:5

@@ -1,0 +1,10 @@
+error[E0012]: expected string literal in _Static_assert
+  --> <file>:1:19
+   1 |_Static_assert(1, 123);
+     |                   ^^^
+  hint: the second argument must be a diagnostic string
+error[E0003]: expected type, got RParen
+  --> <file>:1:22
+   1 |_Static_assert(1, 123);
+     |                      ^
+  hint: use a known type like int, void, or a typedef/struct/enum

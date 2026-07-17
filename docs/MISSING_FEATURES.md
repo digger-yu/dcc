@@ -11,7 +11,7 @@
 
 | 门禁 | 证据 |
 |------|------|
-| typed IR + 严格语义 | `cargo test` integration（static_assert / unknown typedef / int128） |
+| typed IR + 严格语义 | `cargo test` integration（static_assert / unknown typedef / int128）+ `tests/errors.rs` snapshot（E1003–E1008 等） |
 | SysV va_list（GP） | `examples/test_p4_va_list.c` |
 | asm goto + computed goto | `examples/test_asm_goto.c` |
 | 自定义 ELF section / WEAK / HIDDEN | `examples/test_p2_elf_attrs.c` + readelf 断言 |

@@ -1,0 +1,5 @@
+error[E0001]: expected '(' after _Alignof
+  --> <file>:1:18
+   1 |int x = _Alignof int;
+     |                  ^^^
+  hint: _Alignof requires parentheses: _Alignof(type)

@@ -19,7 +19,10 @@ git push origin main
 打开: https://github.com/digger-yu/dcc/actions
 
 **push/PR 自动跑**:
-- `dcc-e2e`: ~0.5–1 分钟, hello/arith/control/call 等 e2e + 错误诊断
+- `dcc-e2e`: ~1–2 分钟
+  - `cargo test --release`（单元 + integration + errors snapshot）
+  - hello/arith/control/call 等 example 编译运行
+  - `examples/bad.c` 错误诊断断言（`error[E0006]` + `hint:`）
 
 **仅手动触发**（不自动跑，节省 Actions 额度）:
 - `kernel-benchmark`: 约 15–20 分钟, 编 Linux 内核 (Actions → kernel-benchmark → Run workflow)
@@ -33,8 +36,19 @@ git push origin main
 
 CI 会在日志中显示 dcc 的真实报错位置。看:
 1. `cargo build --release` 是否过 (语法/类型错误)
-2. `Compile hello.c` 是否过 (codegen 错误)
-3. `./hello` exit code 是否 42 (运行时错误)
+2. `cargo test --release` 是否过 (integration + errors snapshot)
+3. `Compile hello.c` 是否过 (codegen 错误)
+4. `./hello` exit code 是否 42 (运行时错误)
+
+### errors snapshot 不匹配
+
+诊断格式或列号变更后，snapshot 可能失败。在 Linux 上更新:
+
+```bash
+DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors --release
+# 或
+bash scripts/update_error_snapshots.sh
+```
 
 任何一个失败,把日志贴给我,我立刻修。
 

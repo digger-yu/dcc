@@ -1,0 +1,2 @@
+error[E1003]: unsupported floating-point operation Mod
+  --> <file>:1:56

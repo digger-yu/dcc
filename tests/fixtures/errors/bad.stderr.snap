@@ -1,0 +1,15 @@
+error[E0006]: expected expression, got Semi
+  --> <file>:2:13
+   2 |    int x = ;
+     |             ^
+  hint: expected a value, variable, or expression here
+error[E0001]: expected ';', got RBrace
+  --> <file>:4:1
+   4 |}
+     | ^
+  hint: check the syntax near this position
+error[E0001]: expected '}', got Eof
+  --> <file>:5:1
+   5 |
+     | ^
+  hint: check the syntax near this position

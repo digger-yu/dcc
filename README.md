@@ -49,7 +49,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | 内联 asm | 已实现 — 常用约束 `"r"`/`"m"`/`"=r"`、`memory` clobber、文件级 asm |
 | va_list (SysV) | 已实现 — GP 参数区 + XMM0–7 SSE 保存区，float/double/long double |
 | _Generic 指针 | 已实现 — 按 pointee 精确匹配，void* 与对象指针兼容 |
-| 优化 pass | `-O1` 常量折叠；`-O2` DCE/分支折叠；`-O3` 小 static 函数内联 |
+| 优化 pass | `-O1` 常量折叠；`-O2` DCE/分支折叠（保留 goto 目标标签）；`-O3` 小 static 函数内联 |
 <!-- -->
 
 ## 里程碑
@@ -320,8 +320,24 @@ src/
 
 ## CI/CD
 
-### E2E 测试
-每次 push/PR 自动验证基础测试用例:
+### Rust 测试（dcc-e2e workflow）
+
+每次 push/PR 自动运行 `cargo test --release`，包含:
+
+| 套件 | 数量 | 说明 |
+|------|------|------|
+| 单元测试 | `src/` 内 `#[test]` | parser/preproc/opt 等 |
+| integration | 59 项 | 成功路径语法/codegen 回归 |
+| errors | 4 项 | 失败路径诊断 snapshot（24 用例） |
+
+错误 snapshot 位于 `tests/fixtures/errors/`；更新命令:
+
+```bash
+DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors --release
+```
+
+### E2E 编译运行
+每次 push/PR 另验证 example 编译运行:
 - `hello.c` → exit 42
 - `arith.c` → exit 23
 - `control.c` → exit 100
