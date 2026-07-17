@@ -4,7 +4,7 @@
 
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::{Lexer, Tok, TokKind};
-use std::rc::Rc;
+use std::sync::Arc;
 use crate::ast::*;
 use crate::const_eval::{self, ConstEvalError};
 use std::collections::HashMap;
@@ -56,8 +56,8 @@ pub struct Parser<'a> {
     lex: Lexer<'a>, cur: Tok, peek: Tok,
     diags: Vec<Diagnostic>, finished: bool,
     typedefs: HashMap<String, Type>,
-    struct_defs: HashMap<String, (Rc<Vec<Field>>, bool)>,
-    enum_defs: HashMap<String, Rc<Vec<(String, i64)>>>,
+    struct_defs: HashMap<String, (Arc<Vec<Field>>, bool)>,
+    enum_defs: HashMap<String, Arc<Vec<(String, i64)>>>,
     enum_consts: HashMap<String, i64>,
     locals: HashMap<String, Type>, // 变量名 → 类型 (函数内会清除)
     globals: HashMap<String, Type>, // 全局变量名 → 类型 (永不清除)
@@ -864,7 +864,7 @@ impl<'a> Parser<'a> {
         if !self.struct_defs.contains_key(struct_name) {
             self.struct_defs.insert(
                 struct_name.to_string(),
-                (Rc::new(vec![]), false),
+                (Arc::new(vec![]), false),
             );
         }
         if !self.expect(TokKind::LParen, "'('") { return None; }
@@ -881,7 +881,7 @@ impl<'a> Parser<'a> {
         };
         if !self.expect(TokKind::RParen, "')'") { return None; }
         if !self.expect(TokKind::Semi, "';'") { return None; }
-        let ty = Type::Struct(struct_name.to_string(), Rc::new(vec![]));
+        let ty = Type::Struct(struct_name.to_string(), Arc::new(vec![]));
         self.globals.insert(name.name.clone(), ty.clone());
         Some(vec![Decl::Var(VarDecl {
             ty,
@@ -1340,7 +1340,7 @@ impl<'a> Parser<'a> {
                 // AST 内保留等价的 24 字节对象，builtin 操作直接取得其地址。
                 TokKind::Ident if self.cur.text == "__builtin_va_list" => {
                     self.advance();
-                    base = Some(Type::Struct("__dcc_sysv_va_list".into(), std::rc::Rc::new(vec![
+                    base = Some(Type::Struct("__dcc_sysv_va_list".into(), Arc::new(vec![
                         Field { name: "gp_offset".into(), ty: Type::UInt, offset: 0, bit_width: None, bit_offset: 0 },
                         Field { name: "fp_offset".into(), ty: Type::UInt, offset: 4, bit_width: None, bit_offset: 0 },
                         Field { name: "overflow_arg_area".into(), ty: Type::Ptr(Box::new(Type::Void)), offset: 8, bit_width: None, bit_offset: 0 },
@@ -1440,18 +1440,18 @@ impl<'a> Parser<'a> {
                 if pack { Type::layout_struct_packed(&mut fields, is_u); }
                 else { Type::layout_struct(&mut fields, is_u); }
                 if let Some(a) = align_n { for f in fields.iter_mut() { f.offset = (f.offset + a - 1) & !(a - 1); } }
-                let fields_rc = Rc::new(fields);
-                self.struct_defs.insert(nm.clone(), (Rc::clone(&fields_rc), is_u));
+                let fields_rc = Arc::new(fields);
+                self.struct_defs.insert(nm.clone(), (Arc::clone(&fields_rc), is_u));
                 let ty = if is_u { Type::Union(nm, fields_rc) } else { Type::Struct(nm, fields_rc) };
                 return Some(self.finish_type(ty, specifiers_only));
             } else if !nm.is_empty() {
                 if let Some((f, _)) = self.struct_defs.get(&nm) {
-                    let ty = if is_u { Type::Union(nm, Rc::clone(f)) } else { Type::Struct(nm, Rc::clone(f)) };
+                    let ty = if is_u { Type::Union(nm, Arc::clone(f)) } else { Type::Struct(nm, Arc::clone(f)) };
                     return Some(self.finish_type(ty, specifiers_only));
                 }
                 // 不完整类型: 登记占位，待后续定义补全字段
-                let empty = Rc::new(vec![]);
-                self.struct_defs.insert(nm.clone(), (Rc::clone(&empty), is_u));
+                let empty = Arc::new(vec![]);
+                self.struct_defs.insert(nm.clone(), (Arc::clone(&empty), is_u));
                 let ty = if is_u { Type::Union(nm, empty) } else { Type::Struct(nm, empty) };
                 return Some(self.finish_type(ty, specifiers_only));
             }
@@ -1465,14 +1465,14 @@ impl<'a> Parser<'a> {
                 self.advance(); let vs = self.parse_enum_body();
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 let vals: Vec<(String, i64)> = vs.iter().map(|(id, v)| (id.name.clone(), v.unwrap_or(0))).collect();
-                let vals_rc = Rc::new(vals);
-                self.enum_defs.insert(nm.clone(), Rc::clone(&vals_rc));
+                let vals_rc = Arc::new(vals);
+                self.enum_defs.insert(nm.clone(), Arc::clone(&vals_rc));
                 let mut nv = 0i64;
                 for (id, v) in &vs { let val = v.unwrap_or(nv); self.enum_consts.insert(id.name.clone(), val); nv = val + 1; }
                 return Some(self.finish_type(Type::Enum(nm, vals_rc), specifiers_only));
             } else if !nm.is_empty() {
-                if let Some(v) = self.enum_defs.get(&nm) { return Some(self.finish_type(Type::Enum(nm, Rc::clone(v)), specifiers_only)); }
-                return Some(self.finish_type(Type::Enum(nm, Rc::new(vec![])), specifiers_only));
+                if let Some(v) = self.enum_defs.get(&nm) { return Some(self.finish_type(Type::Enum(nm, Arc::clone(v)), specifiers_only)); }
+                return Some(self.finish_type(Type::Enum(nm, Arc::new(vec![])), specifiers_only));
             }
         }
         // typedef 引用

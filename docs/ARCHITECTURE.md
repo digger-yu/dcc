@@ -163,6 +163,19 @@ dcc -r [-flto] -o all.o a.o b.o
 - `register asm("reg")` 变量直接映射到指定物理寄存器；调用者仍需遵守
   目标寄存器的 SysV caller/callee-saved 约束。
 
+## 函数级并行 Codegen（`codegen/x86_64.rs`）
+
+- **触发**：`-O2`/`-O3` 且 relocatable `.o`、TU 内 ≥2 个有体顶层函数；可用
+  `DCC_NO_PARALLEL=1` 关闭（`-O0`/`-O1` 或 `-S` 始终串行）。
+- **机制**：`parallel_emit_ctx()` 快照 rodata/全局/嵌套元数据；worker 线程各自
+  `emit_func_chunk()` 生成独立机器码块，主线程 `merge_func_chunk()` 按原函数序
+  拼接并修正重定位偏移。
+- **线程模型**：`std::thread::scope` + 原子 job 索引；worker 数 =
+  `available_parallelism().min(n_funcs)`；AST 聚合类型已 `Arc` 化以跨线程共享
+  `Program`。
+- **回归**：`parallel_codegen_o2_multi_function` 断言并行/串行 `.o` 字节一致；
+  `remote_feature_check` **parallel_codegen**。
+
 ## GNU 控制流扩展
 
 Parser 直接表示 `&&label`、`goto *expr` 和 `asm goto`。标签地址使用

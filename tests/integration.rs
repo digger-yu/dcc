@@ -1070,6 +1070,64 @@ fn aarch64_ir_add_cross_compile() {
     assert!(bytes.len() > 64);
 }
 
+/// 阶段 E：-O2 函数级并行 codegen（多 worker 线程 + 按序 merge）。
+#[test]
+fn parallel_codegen_o2_multi_function() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let source_path = dir.join(format!("dcc-par-{pid}.c"));
+    let parallel_path = dir.join(format!("dcc-par-o-{pid}.o"));
+    let serial_path = dir.join(format!("dcc-par-s-{pid}.o"));
+    fs::write(
+        &source_path,
+        "static int helper(void) { return 3; }\n\
+         int foo(void) { return helper() + 1; }\n\
+         int bar(void) { return helper() + 2; }\n\
+         int main(void) { return foo() + bar(); }\n",
+    )
+    .expect("write");
+
+    let run = |path: &std::path::Path, serial: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+        if serial {
+            cmd.env("DCC_NO_PARALLEL", "1");
+        } else {
+            cmd.env_remove("DCC_NO_PARALLEL");
+        }
+        cmd.args([
+            "-O2",
+            "-c",
+            "-o",
+            path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc")
+    };
+
+    let par = run(&parallel_path, false);
+    let ser = run(&serial_path, true);
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        par.status.success(),
+        "parallel stderr: {}",
+        String::from_utf8_lossy(&par.stderr)
+    );
+    assert!(
+        ser.status.success(),
+        "serial stderr: {}",
+        String::from_utf8_lossy(&ser.stderr)
+    );
+    let par_bytes = fs::read(&parallel_path).expect("read parallel");
+    let ser_bytes = fs::read(&serial_path).expect("read serial");
+    let _ = fs::remove_file(&parallel_path);
+    let _ = fs::remove_file(&serial_path);
+    assert_eq!(&par_bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(&ser_bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(par_bytes.len(), ser_bytes.len(), "parallel/serial .text size mismatch");
+    assert_eq!(par_bytes, ser_bytes, "parallel and serial objects must match");
+}
+
 /// M7: aarch64 if/while 控制流交叉编译。
 #[test]
 fn aarch64_if_while_cross_compile() {

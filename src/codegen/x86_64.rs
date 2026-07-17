@@ -12,6 +12,8 @@ use crate::codegen::elf::{ElfSym, ElfRela, ElfSection, R_X86_64_PC32, R_X86_64_P
 use crate::codegen::elf;
 use crate::const_eval;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::ast::ArraySize;
 
 pub struct Codegen {
@@ -1487,9 +1489,8 @@ impl Codegen {
         }
     }
 
-    fn merge_func_chunk(&mut self, chunk: FuncEmitChunk) {
-        let align = 16usize;
-        while self.code.len() % align != 0 {
+    fn merge_func_chunk(&mut self, chunk: FuncEmitChunk, func_align: usize) {
+        while self.code.len() % func_align != 0 {
             self.code.push(0x90);
         }
         let base = self.pos();
@@ -1516,18 +1517,62 @@ impl Codegen {
         }
     }
 
-    /// 函数级分块 emit 与合并（默认串行；分块架构为后续真并行预留）。
+    /// 函数级并行 emit：`-O2+` 多函数 TU 在 worker 线程中分块生成后按序合并。
     fn emit_functions_parallel(&mut self, top_funcs: &[FuncDecl], prog: &Program) {
-        let ctx = self.parallel_emit_ctx();
-        let chunks: Vec<FuncEmitChunk> = top_funcs
-            .iter()
-            .map(|f| Self::emit_func_chunk(ctx.clone(), f.clone(), prog))
-            .collect();
-        for f in top_funcs {
-            if let Some(chunk) = chunks.iter().find(|c| c.name == f.name.name) {
-                self.merge_func_chunk(chunk.clone());
-            }
+        let ctx = Arc::new(self.parallel_emit_ctx());
+        let n = top_funcs.len();
+        let degree = Self::parallel_worker_count(n);
+
+        let chunks: Vec<FuncEmitChunk> = if degree <= 1 {
+            top_funcs
+                .iter()
+                .map(|f| Self::emit_func_chunk(ctx.as_ref().clone(), f.clone(), prog))
+                .collect()
+        } else {
+            let next_job = AtomicUsize::new(0);
+            let slots = Mutex::new(vec![None; n]);
+            std::thread::scope(|scope| {
+                for _ in 0..degree {
+                    scope.spawn(|| {
+                        loop {
+                            let i = next_job.fetch_add(1, Ordering::Relaxed);
+                            if i >= n {
+                                break;
+                            }
+                            let chunk = Self::emit_func_chunk(
+                                ctx.as_ref().clone(),
+                                top_funcs[i].clone(),
+                                prog,
+                            );
+                            slots.lock().unwrap()[i] = Some(chunk);
+                        }
+                    });
+                }
+            });
+            slots
+                .into_inner()
+                .expect("parallel codegen mutex poisoned")
+                .into_iter()
+                .map(|c| c.expect("parallel codegen dropped a function chunk"))
+                .collect()
+        };
+
+        for (f, chunk) in top_funcs.iter().zip(chunks.iter()) {
+            debug_assert_eq!(f.name.name, chunk.name);
+            let func_align = f.alignment.unwrap_or(1).max(1);
+            self.merge_func_chunk(chunk.clone(), func_align);
         }
+    }
+
+    /// 并行 worker 数量：逻辑核心数与函数数取较小值，至少 1。
+    fn parallel_worker_count(n_funcs: usize) -> usize {
+        if n_funcs <= 1 {
+            return 1;
+        }
+        std::thread::available_parallelism()
+            .map(|p| p.get().min(n_funcs))
+            .unwrap_or(4)
+            .max(1)
     }
 
     /// 递归收集块中的嵌套函数声明

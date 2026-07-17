@@ -21,7 +21,7 @@ echo "[1] serial (-O2 -c, DCC_NO_PARALLEL=1)"
 export DCC_NO_PARALLEL=1
 { time "$DCC" -O2 -c -o "$TMP/serial.o" "$TMP/multi.c"; } 2>&1 | tee "$TMP/serial.time"
 
-echo "[2] batched (-O2 -c, default chunk emit)"
+echo "[2] parallel (-O2 -c, std::thread worker pool)"
 unset DCC_NO_PARALLEL
 { time "$DCC" -O2 -c -o "$TMP/batch.o" "$TMP/multi.c"; } 2>&1 | tee "$TMP/batch.time"
 

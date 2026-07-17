@@ -134,6 +134,15 @@ EOF
 check "LTO_function_sections" bash -c "readelf -SW '$TMP/dead.o' | grep -q '\\.text\\.live_fn'"
 check "LTO_per_func_section" bash -c "readelf -SW '$TMP/dead.o' | grep -q '\\.text\\.dead_fn'"
 
+cat > "$TMP/parallel.c" <<'EOF'
+static int helper(void) { return 3; }
+int foo(void) { return helper() + 1; }
+int bar(void) { return helper() + 2; }
+int main(void) { return foo() + bar(); }
+EOF
+"$DCC" -O2 -c -o "$TMP/parallel.o" "$TMP/parallel.c"
+check "parallel_codegen" bash -c "readelf -s '$TMP/parallel.o' | grep -q ' main'"
+
 "$DCC" -mno-red-zone -c -o "$TMP/nrz.o" "$TMP/san.c"
 check "mno_red_zone" test -f "$TMP/nrz.o"
 

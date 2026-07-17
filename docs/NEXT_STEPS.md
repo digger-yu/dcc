@@ -109,10 +109,13 @@
 
 ## 阶段 E：性能与架构扩展（P3，步骤 18–20）✅
 
-- [x] **18. 性能基础设施：mmap + 函数级分块 codegen**
-  - 实现：`src/mmap_io.rs` ADR-006 零拷贝读源；`-O2+` 多函数 TU 走分块 emit/merge
-  - 说明：真·多线程并行待 AST `Rc`→`Arc` 迁移；可用 `DCC_NO_PARALLEL=1` 关闭分块路径
-  - 验证：`bash scripts/bench_phase_e.sh`；`remote_feature_check` 仍 PASS
+- [x] **18. 性能基础设施：mmap + 函数级并行 codegen**
+  - 实现：`src/mmap_io.rs` ADR-006 零拷贝读源；`-O2+` 多函数 TU 走
+    `std::thread` worker 池并行 emit + 按序 merge
+  - AST 聚合类型字段 `Rc`→`Arc`，跨平台启用（移除 `cfg!(unix)` 门控）
+  - 可用 `DCC_NO_PARALLEL=1` 强制串行；`parallel_codegen_o2_multi_function` 断言
+    并行/串行产物字节一致
+  - 验证：`bash scripts/bench_phase_e.sh`；`remote_feature_check` **parallel_codegen**
 
 - [x] **19. 编译期优化 pass 扩展**
   - 实现：`-O2` 常量分支 DCE + return 后不可达删除；`-O3` 小 static 函数内联
