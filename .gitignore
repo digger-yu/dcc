@@ -36,4 +36,7 @@ bad
 _*.py
 _*.txt
 _*.sh
+scripts/dump_*.py
+scripts/grep_pp.py
+scripts/compare_pp_ti.py
 examples/simd_debug.c
