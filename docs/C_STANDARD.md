@@ -74,7 +74,11 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `DEFINE_PER_CPU` / `DECLARE_PER_CPU` percpu 变量支持
 - 嵌套函数定义 (GCC 扩展, 含静态链外层变量访问)
 - `__builtin_memcpy` / `__builtin_memset` / `__builtin_memmove` 内联实现 (rep movsb/stosb, freestanding 无需 libc)
-- `__builtin_object_size` 编译期对象大小（`&var`、数组、常量下标/成员）；未知时 `(size_t)-1`
+- `__builtin_object_size` 编译期对象大小（`&var`、数组 decay、常量下标/成员、
+  模式 0–3）；未知时 `(size_t)-1`（parser/codegen 双路径折叠）
+- `__builtin_apply` / `__builtin_return` SysV 子集（常量 size、`void (*)(void)` 回调）
+- `__builtin_prefetch` 及 `__builtin_prefetch_*` 变体：void 编译期 no-op
+- 未知 `__builtin_*`：warning + 零值/ud2，不静默链接不存在的 libc 符号
 - `__builtin_expect_with_probability` 降级为 `__builtin_expect`
 - `address_space(N)` sparse 注解 (静默跳过)
 - `__attribute__((format))` printf/scanf 格式检查 (静默跳过)

@@ -206,8 +206,9 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   `(int)(a+b)` 等 Cast 正确发射 `cvttss2si`；虚部清零用 `movss` 避免 64 位
   store 覆盖相邻实部；`mov_xmm` 仅在 xmm≥8 时加 REX。不支持表达式路径发射
   **ud2** 而非静默 `mov 0`。
-- **Builtins**：`__builtin_object_size` 常量折叠；`__builtin_apply`/`return`
-  SysV ≤6 GP 参数子集。
+- **Builtins**：`__builtin_object_size` 编译期折叠（`&var`/数组/成员/模式 0–3）；
+  `__builtin_apply`/`return` SysV 子集；`__builtin_prefetch*` void no-op；
+  未知 `__builtin_*` warning + 零值，不再静默走外部 call。
 
 ## AArch64 后端（`codegen/aarch64.rs`，M7）
 

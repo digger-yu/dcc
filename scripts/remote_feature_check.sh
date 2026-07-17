@@ -238,5 +238,31 @@ EOF
 "$DCC" -c -o "$TMP/asm_ext.o" "$TMP/asm_ext.c" 2>"$TMP/asm_ext.err"
 check "asm_extended_no_nop" bash -c "! grep -q 'emitted as nop' '$TMP/asm_ext.err' && test -f '$TMP/asm_ext.o'"
 
+cat > "$TMP/builtin_os.c" <<'EOF'
+struct S { char a[8]; int b; } s;
+char buf[16];
+int main(void) {
+	if (__builtin_object_size(buf, 1) != 1) return 1;
+	if (__builtin_object_size(s.a, 0) != 8) return 2;
+	return 0;
+}
+EOF
+"$DCC" -o "$TMP/builtin_os" "$TMP/builtin_os.c" && "$TMP/builtin_os"
+check "builtin_object_size_fortify" test $? -eq 0
+
+cat > "$TMP/builtin_apply.c" <<'EOF'
+static int callee(void *d) { return *(int *)d + 1; }
+static int t(void) {
+	int x = 41;
+	void *b = __builtin_apply((void (*)(void))callee, &x, 8);
+	if (!b) return 1;
+	__builtin_return(b);
+	return 99;
+}
+int main(void) { return t() == 42 ? 0 : 2; }
+EOF
+"$DCC" -o "$TMP/builtin_apply" "$TMP/builtin_apply.c" && "$TMP/builtin_apply"
+check "builtin_apply_return" test $? -eq 0
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

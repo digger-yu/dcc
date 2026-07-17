@@ -2713,6 +2713,12 @@ impl Codegen {
                         // 已成功生成原子指令
                     } else if self.gen_builtin(&name.name, args, dst) {
                         // 已成功处理 __builtin_* 函数
+                    } else if name.name.starts_with("__builtin_") {
+                        eprintln!(
+                            "warning: unsupported __builtin__ function '{}', emitted as zero",
+                            name.name
+                        );
+                        self.mov_imm(dst, 0);
                     } else {
                         self.emit_sysv_call(Some(&name.name), None, args, sret_off);
                         if sret_off.is_some() {
@@ -5501,25 +5507,46 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.emit(&[0x48, 0x83, 0xEC, 0x20]); // 结果 + 对齐
-                self.gen_expr(&args[1], 6); // rsi = data
-                for (i, reg) in [7u8, 6, 2, 1, 8, 9].iter().enumerate() {
-                    self.emit_asm_load(*reg, (i * 8) as i32, 6, None, 1, 64);
+                let size = args
+                    .get(2)
+                    .and_then(|e| const_eval::eval(e).ok())
+                    .filter(|s| *s > 0)
+                    .unwrap_or(-1);
+                if size <= 0 {
+                    self.mov_imm(dst, 0);
+                    return true;
                 }
-                self.gen_expr(&args[0], 10); // r10 = fn
+                let size = size as i32;
+                let frame = ((size + 8 + 15) / 16) * 16;
+                self.gen_builtin_fn_ptr(&args[0], 10); // r10 = fn
+                self.gen_expr(&args[1], 6);  // rsi = data
+                self.emit(&[0x48, 0x81, 0xEC]);
+                self.emit(&frame.to_le_bytes());
+                self.emit(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
+                self.emit(&[0x48, 0xC7, 0xC1]);
+                self.emit(&size.to_le_bytes());
+                self.emit(&[0xFC, 0xF3, 0x48, 0xA4]); // cld; rep movsb
+                self.emit(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
                 self.emit(&[0x41, 0xFF, 0xD2]); // call r10
-                self.emit(&[0x48, 0x89, 0x04, 0x24]); // mov [rsp], rax
-                self.emit(&[0x48, 0x8D, 0x04, 0x24]); // lea rax, [rsp]
-                if dst != 0 { self.mov(dst, 0); }
+                self.emit(&[0x48, 0x89, 0x84, 0x24]);
+                self.emit(&size.to_le_bytes()); // mov [rsp+size], rax
+                self.emit(&[0x48, 0x8D, 0x84, 0x24]);
+                self.emit(&size.to_le_bytes()); // lea rax, [rsp+size]
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
                 true
             }
             "__builtin_return" => {
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 6); // rsi = retval ptr
+                    self.gen_expr(&args[0], 6); // rsi = result block
                     self.emit(&[0x48, 0x8B, 0x06]); // mov rax, [rsi]
                 }
+                self.emit_func_epilogue();
                 true
             }
+            // __builtin_prefetch 及变体：void 提示，编译为 no-op
+            n if n.starts_with("__builtin_prefetch") => true,
             // __builtin_add_overflow(a, b, &result): 溢出检测
             // 策略: 计算 64 位结果, 截断到操作数类型, 比较检测溢出
             "__builtin_add_overflow" | "__builtin_sub_overflow" | "__builtin_mul_overflow" => {
@@ -5597,6 +5624,25 @@ impl Codegen {
             }
             _ => false,
         }
+    }
+
+    /// 加载函数指针（Ident / cast，用于 __builtin_apply 等）
+    fn gen_builtin_fn_ptr(&mut self, e: &Expr, dst: u8) {
+        let inner = match e {
+            Expr::Cast { e, .. } | Expr::AddrOf { e, .. } => e.as_ref(),
+            other => other,
+        };
+        if let Expr::Ident { name, .. } = inner {
+            if self.labels.contains_key(&name.name) || self.globals.contains_key(&name.name) {
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                let modrm = 0x05 | ((dst & 7) << 3);
+                self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
+                let disp32_pos = self.pos() - 4;
+                self.label_addr_refs.push((disp32_pos, name.name.clone()));
+                return;
+            }
+        }
+        self.gen_expr(e, dst);
     }
 
     /// 计算结构体成员偏移 (用于 __builtin_offsetof)

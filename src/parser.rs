@@ -2728,6 +2728,17 @@ impl<'a> Parser<'a> {
                             };
                             continue;
                         }
+                        // __builtin_object_size(ptr, type): 编译期对象大小
+                        if name.name == "__builtin_object_size" {
+                            let ptr = self.parse_expr_bp(2)?;
+                            if !self.expect(TokKind::Comma, "','") { return None; }
+                            let type_arg = self.parse_expr_bp(2)?;
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            let mode = const_eval::eval(&type_arg).unwrap_or(0);
+                            let size = const_eval::object_size(&ptr, mode).unwrap_or(-1);
+                            e = Expr::Int { v: size, span: sp.clone(), ty: int_t() };
+                            continue;
+                        }
                         // __builtin_offsetof(type, member): 结构体成员偏移
                         if name.name == "__builtin_offsetof" {
                             let base_ty = self.parse_type()?;

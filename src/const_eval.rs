@@ -3,7 +3,7 @@
 //! parser、typed IR 验证和后端必须共享同一套规则，避免某个阶段把
 //! “无法求值”误当成数值 0。
 
-use crate::ast::{find_field, BinOp, Expr, Type, UnOp};
+use crate::ast::{find_field, ArraySize, BinOp, Expr, Type, UnOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstEvalError {
@@ -135,7 +135,19 @@ pub fn object_size(ptr: &Expr, type_arg: i128) -> Option<i128> {
 
 fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
     match expr {
-        Expr::Ident { ty, .. } => Some(ty.size() as i128),
+        Expr::Ident { ty, .. } => {
+            match ty {
+                Type::Array(elem, ArraySize::Const(n)) => {
+                    let total = (elem.size() * n) as i128;
+                    if mode == 1 || mode == 3 {
+                        Some(elem.size() as i128)
+                    } else {
+                        Some(total)
+                    }
+                }
+                _ => Some(ty.size() as i128),
+            }
+        }
         Expr::Index { arr, idx, ty: elem_ty, .. } => {
             let parent = object_size_of(arr, mode)?;
             if let Ok(i) = eval(idx) {
@@ -149,26 +161,24 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
             }
         }
         Expr::Member { expr, field, is_arrow, .. } => {
-            let lookup = |container: i128, fields: &[crate::ast::Field]| -> Option<i128> {
-                let (f, extra) = find_field(fields, &field.name)?;
+            let lookup = |fields: &[crate::ast::Field]| -> Option<i128> {
+                let (f, _extra) = find_field(fields, &field.name)?;
                 let field_sz = f.ty.size() as i128;
                 Some(if mode == 1 || mode == 3 {
-                    field_sz
+                    match &f.ty {
+                        Type::Array(elem, _) => elem.size() as i128,
+                        _ => field_sz,
+                    }
                 } else {
-                    let off = (f.offset + extra) as i128;
-                    container.saturating_sub(off).max(field_sz)
+                    field_sz
                 })
             };
             match (*is_arrow, expr.ty()) {
                 (true, Type::Ptr(inner)) => match inner.as_ref() {
-                    Type::Struct(_, f) | Type::Union(_, f) => {
-                        lookup(inner.size() as i128, f.as_ref())
-                    }
+                    Type::Struct(_, f) | Type::Union(_, f) => lookup(f.as_ref()),
                     _ => None,
                 },
-                (false, Type::Struct(_, f) | Type::Union(_, f)) => {
-                    lookup(expr.ty().size() as i128, f.as_ref())
-                }
+                (false, Type::Struct(_, f) | Type::Union(_, f)) => lookup(f.as_ref()),
                 _ => None,
             }
         }
@@ -181,7 +191,7 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Type;
+    use crate::ast::{ArraySize, Type};
     use crate::diagnostics::Span;
 
     fn int(v: i128) -> Expr {
@@ -223,5 +233,16 @@ mod tests {
             ty: Type::Ptr(Box::new(Type::Int)),
         };
         assert_eq!(object_size(&addr, 0), Some(4));
+    }
+
+    #[test]
+    fn object_size_array_mode1() {
+        let buf = Expr::Ident {
+            name: crate::ast::Ident { name: "buf".into(), span: Span::point("t.c", 1, 1) },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Array(Box::new(Type::Char), ArraySize::Const(16)),
+        };
+        assert_eq!(object_size(&buf, 0), Some(16));
+        assert_eq!(object_size(&buf, 1), Some(1));
     }
 }

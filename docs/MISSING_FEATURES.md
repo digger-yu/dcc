@@ -42,9 +42,10 @@
 | Mini x86 asm 位操作 / 双精度移位 | codegen `bt/bts/btr/btc`、`shld/shrd`（内核 paravirt 等） |
 | Mini x86 asm 扩展位/字节/NT/虚拟化 | `bsf/bsr/popcnt/bswap/movnt*`、`vmcall/vmmcall`、RIP-relative、`push/pop` mem |
 | Mini x86 asm GAS 伪指令 / 前缀 | `.pushsection`/`.balign`/`.long`/`.quad`/`.popsection`；`lock`/`rep` |
+| GCC Builtin 完整化 | object_size FORTIFY、apply/return、prefetch no-op、未知 builtin warning |
 | 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；`.data` 逐元素静态 init + 运行时 binop |
 | 非 Ident 向量 rvalue | `tests/fixtures/vector_binop_non_ident.c`；`(a+b)+c`、`v=v+w` |
-| x86_64 codegen 扩展 | ✅ 向量全局/rvalue init、复数四则/Cast、object_size fold、apply/return 子集；mini-asm 大幅扩展，极少数 exotic 仍 nop |
+| x86_64 codegen 扩展 | ✅ 向量/SIMD、复数、mini-asm、object_size FORTIFY、apply/return、prefetch |
 | aarch64 typed IR | hello/控制流/调用/浮点/向量/rodata；见 `aarch64_*_cross_compile` |
 | riscv64 typed IR | hello/控制流/调用/rodata；见 `riscv64_*_cross_compile` |
 | 诊断 snapshot 格式锁定 | `tests/errors.rs` schema + `diagnostic_format.stderr.snap`（V1） |

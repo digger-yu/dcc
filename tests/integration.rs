@@ -1620,6 +1620,44 @@ fn object_size_builtin_run_returns_zero() {
     assert_eq!(rc, 0, "object_size_builtin should return 0, got {rc}");
 }
 
+/// __builtin_object_size FORTIFY 模式（数组/成员）
+#[test]
+fn builtin_object_size_fortify_run_returns_zero() {
+    let source = include_str!("fixtures/builtin_object_size_fortify.c");
+    let (output, exe) = run_compile_and_run("builtin-os-fortify", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0);
+}
+
+/// __builtin_apply / __builtin_return
+#[test]
+fn builtin_apply_return_run_returns_zero() {
+    let source = include_str!("fixtures/builtin_apply_return.c");
+    let (output, exe) = run_compile_and_run("builtin-apply-return", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0);
+}
+
+/// __builtin_prefetch void no-op
+#[test]
+fn builtin_prefetch_compiles() {
+    let source = include_str!("fixtures/builtin_prefetch.c");
+    let (output, _obj) = run_object_test("builtin-prefetch", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// inline asm: lock cmpxchg 内存操作数
 #[test]
 fn asm_cmpxchg_mem_compiles() {
