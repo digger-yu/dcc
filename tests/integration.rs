@@ -505,6 +505,35 @@ fn sanitizer_metadata_section_emitted() {
     );
 }
 
+/// TU init 一次 + 每个函数入口 coverage 桩
+#[test]
+fn sanitizer_prologue_in_all_functions() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-san-multi-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-san-multi-{}.s", std::process::id()));
+    let source = "int a(void) { return 1; }\nint b(void) { return 2; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=address", "-fsanitize-coverage", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(asm.matches("__asan_init").count(), 1, "TU init once: {asm}");
+    assert!(
+        asm.matches("__sanitizer_cov_trace_pc").count() >= 2,
+        "per-function coverage stub: {asm}"
+    );
+}
+
 #[test]
 fn eh_frame_with_frame_pointer() {
     let dir = std::env::temp_dir();

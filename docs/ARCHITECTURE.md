@@ -196,6 +196,22 @@ Linux jump_label 预处理残留 `_DECLARE_STATIC_KEY_*` 在 parser 层由
 `parse_static_key_decl()` 补全为 `extern struct static_key_{false,true}`，
 再进入上述 IR 管线。回归：`tests/fixtures/static_key_*.c`、`ir::tests`。
 
+## Sanitizer 初版桩（`sanitizer.rs`）
+
+Driver 在 parse 之后、IR lower 之前调用 `instrument_program()`：
+
+| 层级 | 行为 | 明确不做 |
+|------|------|----------|
+| TU init | 首个有体函数前插入 `__asan_init` / `__ubsan_init` / `__kcsan_init` 各一次 | 重复 init |
+| 函数入口 | 每个有体函数（含嵌套函数）前插入 `__sanitizer_cov_trace_pc`（KCOV）、`__kcsan_func_entry`（KCSAN） | 每函数 KASAN/UBSAN 内存/UB 检查 |
+| 元数据 | codegen 写 `.dcc.san_info`（`DCC_SAN` v1 + 4 标志位） | 运行时库内置 |
+
+CLI：`-fsanitize=address|undefined|thread`、`-fsanitize=a,b` 组合、
+`-fsanitize-coverage` / `fuzzer`。完整 KASAN/UBSAN 需后续 IR 指令级插桩。
+
+回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
+`scripts/remote_feature_check.sh`（sanitizer 节）。
+
 ## 自举 (M5)
 
 ```bash
