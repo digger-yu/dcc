@@ -129,7 +129,7 @@ error[E0006]: expected expression, got Semi
 |----|--------------|------|----------|
 | **E0200** | `no input files for link` | 链接无输入 | `dcc -r` 无 `.o` 输入 |
 | **E0201** | `cannot read …` | 无法读取 `.o` | 输入目标文件打开失败 |
-| **E0202** | `cannot invoke ld` / `ld -r failed` | `ld` 失败 | 调 `ld -r` 失败或非零退出 |
+| **E0202** | `cannot invoke ld` / `ld -r failed` | `ld` 失败 | 未安装 binutils 或 `LD=` 路径无效 |
 | **E0203** | `cannot write LTO temp` / `objcopy failed…` | LTO 节注入失败 | 写临时文件或 `objcopy --update-section` 失败 |
 | **E0204** | `cannot invoke objcopy` / `objcopy failed to strip…` | dead symbol 剥离失败 | LTO `--strip-symbol` 路径失败 |
 
@@ -170,7 +170,9 @@ dcc: error: <message>
 | `unknown flag: …` | 无法识别的命令行选项 |
 | `missing arg after …` | 选项缺少参数（`-o`、`-I`、`-include` 等） |
 | `link mode (-r) cannot combine with …` | `-r` 与 `-S`/`-E`/`-fsyntax-only` 冲突 |
-| `multiple input files require -r link mode…` | 多输入未使用链接模式 |
+| `multiple source files cannot produce a single executable…` | 多 `.c` 直链 `a.out`；须 `-c` 后用 gcc 或 `dcc -r` |
+| `multiple input files require -r link mode…` | 多输入既非全 `.c` 也非 `-r` 合并 `.o` |
+| `relocatable link (-r) requires object (.o) inputs…` | `-r` 误用于 `.c` 源文件 |
 | `unsupported -x language: …` | 不支持的语言 |
 
 退出码：**2**（与 Diagnostic 错误的 exit 1 区分）。

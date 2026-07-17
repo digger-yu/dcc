@@ -120,9 +120,25 @@ error[E0001]: expected ';', got '{'
 自定义代码节中的重定位会从 `.rela.text` 迁移到对应 relocation section；
 未初始化的普通全局对象进入 `.bss`，不占目标文件数据空间。
 
-## 链接与 LTO（`-r` / `-flto`）
+## 链接与 LTO（`-r` / `-flto`，非自研链接器）
 
-多 `.o` 可重定位链接由 `driver.rs` 派发到 `link.rs`：
+DCC **不包含**内置可执行文件链接器，也 **不做** IR/bitcode 级跨 TU 内联或
+常量传播。多文件产物标准工作流：
+
+```text
+dcc -c a.c -o a.o && dcc -c b.c -o b.o
+gcc a.o b.o -o prog          # 最终可执行文件
+# 或仅合并可重定位对象：
+dcc -r [-flto] -o all.o a.o b.o
+```
+
+| 组件 | 职责 | 依赖 |
+|------|------|------|
+| `cli.rs` | 区分 `-c`（单 TU 出 `.o`）与 `-r`（仅接受 `.o` 输入）；多 `.c` 直链 `a.out` 报错并提示工作流 | — |
+| `lto.rs` | 编译期写 `.llvm.lto` 文本摘要（函数 defined/referenced/size）；链接期合并摘要 | — |
+| `link.rs` | `ld -r [--gc-sections]` 合并；`objcopy` 注入/更新 `.llvm.lto` 与 `--strip-symbol` dead local | host `ld`、`objcopy`（`LD`/`OBJCOPY` 可覆盖） |
+
+管线（`driver.rs` → `link.rs`）：
 
 1. 读取各 TU 的 `.llvm.lto` 摘要（`lto.rs`），合并函数定义/引用。
 2. 扫描输入 ELF 的 `.rela.*` 表标记跨 TU 引用（`elf.rs`）。
@@ -131,7 +147,10 @@ error[E0001]: expected ';', got '{'
 4. 用 `objcopy` 注入合并后的 `.llvm.lto`，并对 dead local 符号
    执行 `--strip-symbol` 补充剔除。
 
-远程验收：`scripts/sync_remote_build.sh` → `kernel_full_check.sh`。
+**明确不做**：ELF 可执行链接（`ET_EXEC`）、跨 TU IR 内联、LLVM bitcode LTO。
+
+远程验收：`scripts/sync_remote_build.sh` → `remote_feature_check.sh`（LTO 节）；
+`cargo test flto_relocatable_link` / `lto_link_strips_unreferenced_static`。
 
 ## x86-64 后端 ABI 约定
 

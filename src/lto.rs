@@ -1,5 +1,8 @@
 // src/lto.rs - 跨翻译单元 LTO 摘要容器
-// 第一性原理: LTO 在链接期读取可重定位 IR 摘要，而非依赖外部 bitcode。
+//
+// 设计边界：仅维护 `.llvm.lto` 文本摘要（defined/referenced/size），供
+// `link.rs` 在 `ld -r --gc-sections` 后做 dead symbol 诊断与 objcopy strip。
+// 不做 IR/bitcode 级跨 TU 内联、常量传播或全局 DCE。
 
 use std::collections::HashMap;
 
@@ -215,5 +218,51 @@ mod tests {
         let dead = dead_local_functions(&merged);
         assert!(dead.contains(&"foo".to_string()));
         assert!(gc_sections_root(&merged, &dead).is_some());
+    }
+
+    #[test]
+    fn mark_references_from_rela_marks_cross_tu() {
+        use crate::codegen::elf::{self, ElfRela, ElfSection, ElfSym, SHT_PROGBITS};
+        let caller_obj = elf::build_elf_rel_x86_64(
+            &[0xe8, 0, 0, 0, 0, 0xc3], // call rel32 + ret
+            &[],
+            &[],
+            0,
+            1,
+            1,
+            1,
+            &[
+                ElfSym {
+                    name: "caller".to_string(),
+                    section: 1,
+                    value: 0,
+                    size: 6,
+                    bind: 0,
+                    ty: 2,
+                    visibility: 0,
+                },
+                ElfSym {
+                    name: "helper".to_string(),
+                    section: 0,
+                    value: 0,
+                    size: 0,
+                    bind: 1,
+                    ty: 2,
+                    visibility: 0,
+                },
+            ],
+            &[ElfRela {
+                offset: 1,
+                sym_index: 1,
+                rel_type: 4,
+                addend: -4,
+            }],
+            &[],
+            &[],
+            &[],
+        );
+        let mut merged = build_unit("caller.c", &[("caller", 16, true)]);
+        mark_references_from_objects(&mut merged, &[&caller_obj]);
+        assert!(merged.functions["helper"].referenced);
     }
 }

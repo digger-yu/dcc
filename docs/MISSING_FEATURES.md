@@ -147,7 +147,8 @@
 | LTO 链接 + gc | `src/link.rs`：`ld -r --gc-sections` + `.llvm.lto` 注入 + dead strip |
 | per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |
 | rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |
-| CLI 多输入 | `-r a.o b.o -o merged.o` 链接模式 |
+| CLI 多输入 | `-r a.o [b.o…] -o merged.o` 链接模式；多 `.c` 须 `-c` 后用 gcc 或 `-r` |
+| 链接/LTO 模块（非自研） | `link.rs`+`lto.rs`：host `ld/objcopy`、`.llvm.lto` 摘要 + gc-sections；无 IR 跨 TU 优化 |
 | 验收脚本 | prepare0 / pahole / objtool / modpost / vmlinux / kernel_full_check |
 
 ## 远程基线

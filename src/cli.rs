@@ -27,7 +27,7 @@ pub struct Config {
     pub dump_ast: bool,
     pub verbose:  bool,
     pub relocatable: bool,  // -c / -r
-    pub link_mode: bool,    // -r 多 .o 可重定位链接
+    pub link_mode: bool,    // -r 合并 .o（依赖 host ld/objcopy，非内置链接器）
     pub emit_asm: bool,     // -S: 输出汇编文本 .s
     pub preprocess_only: bool, // -E: 只做预处理
     pub force_includes: Vec<String>, // -include file: 强制包含文件
@@ -191,6 +191,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut no_function_sections = false;
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
+    let mut relocatable_link = false; // 仅 -r 置位；-c 只产出 .o 不进入 link.rs
 
     let mut i = 0;
     while i < args.len() {
@@ -210,7 +211,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-S" => { emit_asm = true; }
             "-E" => { preprocess_only = true; }
             "-pipe" => {} // GCC -pipe: 使用管道代替临时文件，DCC 忽略
-            "-r" => { relocatable = true; } // -r: 可重定位链接
+            "-r" => { relocatable = true; relocatable_link = true; } // -r: 可重定位 .o 合并
             // -L, -l, -T 等链接器选项
             "-L" | "-l" | "-T" => { i += 1; } // 跳过参数
             a if a.starts_with("-L") || a.starts_with("-l") || a.starts_with("-T") => {} // 内联形式
@@ -499,18 +500,39 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         function_sections = true;
     }
 
-    let link_mode = relocatable
-        && inputs.len() >= 2
+    let link_mode = relocatable_link
+        && !inputs.is_empty()
         && inputs.iter().all(|p| {
             p.extension().map(|e| e == "o").unwrap_or(false)
         });
+
+    if relocatable_link && !inputs.is_empty()
+        && inputs.iter().any(|p| p.extension().map(|e| e == "o").unwrap_or(false) == false)
+    {
+        return Err(CliError::new(
+            "relocatable link (-r) requires object (.o) inputs; \
+             compile sources with -c first",
+        ));
+    }
 
     if link_mode && (emit_asm || preprocess_only || syntax_only || dump_ast) {
         return Err(CliError::new("link mode (-r) cannot combine with -S/-E/-fsyntax-only"));
     }
 
     if !link_mode && inputs.len() > 1 {
-        return Err(CliError::new("multiple input files require -r link mode with .o files"));
+        let all_sources = inputs.iter().all(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("c") | Some("C") | Some("S") | Some("s")
+            )
+        });
+        let msg = if all_sources {
+            "multiple source files cannot produce a single executable; \
+             compile each with -c, then link with gcc(1) or dcc -r to merge .o files"
+        } else {
+            "multiple input files require -r link mode with .o files"
+        };
+        return Err(CliError::new(msg));
     }
 
     // -E 模式允许没有输入文件 (从 stdin 读取)
@@ -567,9 +589,20 @@ fn print_help() {
     println!("dcc - suckless C compiler");
     println!();
     println!("USAGE:");
-    println!("    dcc [options] <input.c>");
+    println!("    dcc [options] <input.c>              compile / assemble one TU");
+    println!("    dcc -c -o out.o input.c            emit relocatable object");
+    println!("    dcc -r -o merged.o a.o b.o         merge .o via host ld(1)");
+    println!("    dcc -r -flto -o merged.o a.o b.o   merge + .llvm.lto + gc-sections");
+    println!();
+    println!("LINKING NOTE:");
+    println!("    dcc is not a full linker. Multi-file executables:");
+    println!("      dcc -c a.c -o a.o && dcc -c b.c -o b.o");
+    println!("      gcc a.o b.o -o prog    # or: dcc -r -o all.o a.o b.o");
     println!();
     println!("OPTIONS:");
+    println!("    -c                  emit relocatable object (.o), do not link");
+    println!("    -r                  merge .o files (requires host ld, objcopy)");
+    println!("    -flto               per-function sections + .llvm.lto summary");
     println!("    -O0|-O1|-O2|-O3     optimization level (default O0)");
     println!("    -o <file>           output file (default a.out)");
     println!("    --target <triple>   target triple (e.g. aarch64-linux-gnu)");
@@ -619,5 +652,57 @@ mod tests {
         ];
         let err = parse(&args).expect_err("unsupported -Wp options must not be ignored");
         assert!(err.msg.contains("unsupported preprocessor option"));
+    }
+
+    #[test]
+    fn multiple_c_sources_cannot_link_to_exe() {
+        let args = vec![
+            "-o".to_string(),
+            "prog".to_string(),
+            "a.c".to_string(),
+            "b.c".to_string(),
+        ];
+        let err = parse(&args).expect_err("multi .c must be rejected");
+        assert!(err.msg.contains("compile each with -c"));
+    }
+
+    #[test]
+    fn r_link_mode_accepts_single_object() {
+        let args = vec![
+            "-r".to_string(),
+            "-o".to_string(),
+            "merged.o".to_string(),
+            "a.o".to_string(),
+        ];
+        let cfg = parse(&args).expect("single .o -r link");
+        assert!(cfg.link_mode);
+        assert!(cfg.relocatable);
+    }
+
+    #[test]
+    fn r_link_mode_requires_object_inputs() {
+        let args = vec![
+            "-r".to_string(),
+            "-o".to_string(),
+            "out.o".to_string(),
+            "foo.c".to_string(),
+        ];
+        let err = parse(&args).expect_err(".c with -r must fail");
+        assert!(err.msg.contains("requires object (.o) inputs"));
+    }
+
+    #[test]
+    fn two_object_r_link_mode() {
+        let args = vec![
+            "-r".to_string(),
+            "-flto".to_string(),
+            "-o".to_string(),
+            "merged.o".to_string(),
+            "a.o".to_string(),
+            "b.o".to_string(),
+        ];
+        let cfg = parse(&args).expect("two .o -r link");
+        assert!(cfg.link_mode);
+        assert!(cfg.lto_enabled);
     }
 }

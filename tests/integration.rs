@@ -1288,3 +1288,97 @@ fn static_key_decl_compiles() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// 跨 TU LTO 链接后 dead static 函数从合并 .o 剔除
+#[test]
+#[cfg(unix)]
+fn lto_link_strips_unreferenced_static() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let a_src = dir.join(format!("dcc-lto-dead-a-{pid}.c"));
+    let b_src = dir.join(format!("dcc-lto-dead-b-{pid}.c"));
+    let a_o = dir.join(format!("dcc-lto-dead-a-{pid}.o"));
+    let b_o = dir.join(format!("dcc-lto-dead-b-{pid}.o"));
+    let out_o = dir.join(format!("dcc-lto-dead-merged-{pid}.o"));
+    fs::write(
+        &a_src,
+        "static int dead_fn(void) { return 99; }\n\
+         int exported(void) { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        &b_src,
+        "extern int exported(void);\n\
+         int user(void) { return exported(); }\n",
+    )
+    .unwrap();
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    for (src, obj) in [(&a_src, &a_o), (&b_src, &b_o)] {
+        let out = Command::new(dcc)
+            .args(["-flto", "-c", "-o"])
+            .arg(obj)
+            .arg(src)
+            .output()
+            .expect("compile");
+        assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let link = Command::new(dcc)
+        .args(["-r", "-flto", "-o"])
+        .arg(&out_o)
+        .arg(&a_o)
+        .arg(&b_o)
+        .output()
+        .expect("link");
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    let readelf = Command::new("readelf")
+        .args(["-s"])
+        .arg(&out_o)
+        .output()
+        .expect("readelf");
+    let symtab = String::from_utf8_lossy(&readelf.stdout);
+    let _ = fs::remove_file(&a_src);
+    let _ = fs::remove_file(&b_src);
+    let _ = fs::remove_file(&a_o);
+    let _ = fs::remove_file(&b_o);
+    let _ = fs::remove_file(&out_o);
+    assert!(symtab.contains("exported"), "exported must survive link: {symtab}");
+    assert!(
+        !symtab.contains("dead_fn"),
+        "dead_fn should be stripped: {symtab}"
+    );
+}
+
+/// 单输入 -r 仍可注入合并 .llvm.lto（单 .o 重打包）
+#[test]
+#[cfg(unix)]
+fn lto_single_object_relocatable_link() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-lto-single-{pid}.c"));
+    let obj = dir.join(format!("dcc-lto-single-{pid}.o"));
+    let out = dir.join(format!("dcc-lto-single-out-{pid}.o"));
+    fs::write(&src, "int solo(void) { return 0; }\n").unwrap();
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    let compile = Command::new(dcc)
+        .args(["-flto", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("compile");
+    assert!(compile.status.success());
+    let link = Command::new(dcc)
+        .args(["-r", "-flto", "-o"])
+        .arg(&out)
+        .arg(&obj)
+        .output()
+        .expect("link");
+    let merged = fs::read(&out).unwrap_or_default();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&out);
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    assert!(
+        String::from_utf8_lossy(&merged).contains(".llvm.lto"),
+        "single-object -r must preserve .llvm.lto"
+    );
+}
