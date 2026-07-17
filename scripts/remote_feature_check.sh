@@ -35,6 +35,27 @@ check "O2_branch_fold" bash -c "objdump -d '$TMP/o2fold.o' | grep -qE 'mov.*\\\$
 "$DCC" --target aarch64-linux-gnu -c -o "$TMP/a64.o" examples/hello.c
 check "aarch64_hello" bash -c "readelf -h '$TMP/a64.o' | grep -q AArch64"
 
+"$DCC" --target riscv64-linux-gnu -c -o "$TMP/rv.o" examples/hello.c
+check "riscv64_hello" bash -c "readelf -h '$TMP/rv.o' | grep -q RISC-V"
+
+cat > "$TMP/a64call.c" <<'EOF'
+int bump(int x) { return x + 1; }
+int main(void) {
+    int v = 0;
+    if (1) v = bump(v);
+    return v;
+}
+EOF
+"$DCC" --target aarch64-linux-gnu -c -o "$TMP/a64call.o" "$TMP/a64call.c"
+check "aarch64_call" test -f "$TMP/a64call.o"
+
+cat > "$TMP/rvg.c" <<'EOF'
+int g = 5;
+int main(void) { return g + 1; }
+EOF
+"$DCC" --target riscv64-linux-gnu -c -o "$TMP/rvg.o" "$TMP/rvg.c"
+check "riscv64_rodata" bash -c "readelf -SW '$TMP/rvg.o' | grep -q '\\.rodata'"
+
 cat > "$TMP/hdr.h" <<'EOF'
 int hdr_var;
 EOF

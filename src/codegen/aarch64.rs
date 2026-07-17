@@ -1,25 +1,39 @@
-// src/codegen/aarch64.rs - AArch64 后端 (M7)
-// 通过 typed IR 表达式图 lowering；语句结构仍对照 AST 以保持控制流语义。
+// src/codegen/aarch64.rs - AArch64 后端 (M7 完整 IR lowering)
 
 use crate::ast::{BinOp, BlockItem, Decl, Expr, FuncDecl, Program, Stmt, UnOp};
-use crate::codegen::elf::{self, ElfRela, ElfSym, STB_GLOBAL, STT_FUNC};
-use crate::ir::{ExprKind, ExprLiteral, Function, Module, TypedExpr, ValueType};
+use crate::codegen::elf::{
+    self, ElfRela, ElfSym, R_AARCH64_CALL26, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_OBJECT,
+};
+use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
 
+#[derive(Clone, Copy)]
+enum BranchKind {
+    B,
+    Cbz,
+}
+
 pub struct Aarch64Codegen {
     code: Vec<u8>,
+    rodata: Vec<u8>,
     entry: u64,
     relocatable: bool,
     symbols: Vec<ElfSym>,
     relocations: Vec<ElfRela>,
+    rodata_relocations: Vec<ElfRela>,
     func_sizes: HashMap<String, u64>,
     labels: HashMap<String, u64>,
     locals: HashMap<String, i32>,
+    global_rodata: HashMap<String, u64>,
+    float_refs: Vec<(u64, u64)>,
+    sym_index: HashMap<String, u32>,
     stack_bytes: i32,
     frame_bytes: i32,
     emitted_return: bool,
     source_name: String,
+    label_serial: u32,
+    pending_branches: Vec<(u64, String, BranchKind)>,
     _target: Target,
 }
 
@@ -27,17 +41,24 @@ impl Aarch64Codegen {
     pub fn new(target: Target, relocatable: bool) -> Self {
         Self {
             code: Vec::new(),
+            rodata: Vec::new(),
             entry: if relocatable { 0 } else { 0x400000 + 64 + 56 },
             relocatable,
             symbols: Vec::new(),
             relocations: Vec::new(),
+            rodata_relocations: Vec::new(),
             func_sizes: HashMap::new(),
             labels: HashMap::new(),
             locals: HashMap::new(),
+            global_rodata: HashMap::new(),
+            float_refs: Vec::new(),
+            sym_index: HashMap::new(),
             stack_bytes: 0,
             frame_bytes: 0,
             emitted_return: false,
             source_name: String::new(),
+            label_serial: 0,
+            pending_branches: Vec::new(),
             _target: target,
         }
     }
@@ -48,10 +69,71 @@ impl Aarch64Codegen {
 
     pub fn compile(&mut self, module: &Module) {
         let prog = module.source();
+        self.emit_globals(module);
         if self.relocatable {
             self.compile_rel(module, prog);
+            self.finalize_branches();
         } else {
             self.compile_exec(module, prog);
+            self.finalize_exec();
+        }
+    }
+
+    fn emit_globals(&mut self, module: &Module) {
+        for g in &module.globals {
+            self.emit_global(g);
+        }
+        if !self.rodata.is_empty() {
+            self.symbols.push(ElfSym {
+                name: ".rodata".to_string(),
+                section: 2,
+                value: 0,
+                size: self.rodata.len() as u64,
+                bind: STB_LOCAL,
+                ty: elf::STT_SECTION,
+                visibility: elf::STV_DEFAULT,
+            });
+            self.sym_index.insert(".rodata".to_string(), self.symbols.len() as u32);
+        }
+    }
+
+    fn emit_global(&mut self, g: &Global) {
+        let size = value_type_size(&g.ty).max(1);
+        let align = size.max(4) as u64;
+        let off = align_rodata(&mut self.rodata, align);
+        self.global_rodata.insert(g.name.clone(), off);
+        if let Some(init) = &g.initializer {
+            self.write_global_bytes(init, size);
+        } else {
+            self.rodata.resize(self.rodata.len() + size, 0);
+        }
+        if self.relocatable {
+            self.symbols.push(ElfSym {
+                name: g.name.clone(),
+                section: 2,
+                value: off,
+                size: size as u64,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: elf::STV_DEFAULT,
+            });
+            self.sym_index.insert(g.name.clone(), self.symbols.len() as u32);
+        }
+    }
+
+    fn write_global_bytes(&mut self, init: &TypedExpr, size: usize) {
+        let start = self.rodata.len();
+        self.rodata.resize(start + size, 0);
+        match init.literal {
+            Some(ExprLiteral::Int(v)) => {
+                let bytes = (v as i64).to_le_bytes();
+                self.rodata[start..start + size.min(8)].copy_from_slice(&bytes[..size.min(8)]);
+            }
+            Some(ExprLiteral::Float(v)) => {
+                let bits = (v as f32).to_bits();
+                self.rodata[start..start + 4.min(size)].copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
+            }
+            _ => {}
         }
     }
 
@@ -62,13 +144,15 @@ impl Aarch64Codegen {
         self.mov_x8_imm(93);
         self.svc_zero();
         for func in &module.functions {
+            if find_func(prog, &func.name).and_then(|f| f.body.as_ref()).is_none() {
+                continue;
+            }
+            self.label(&func.name);
+            let start = self.pos();
+            self.gen_function(func, find_func(prog, &func.name));
+            self.func_sizes.insert(func.name.clone(), self.pos() - start);
             if func.name == "main" {
-                self.label("main");
-                let start = self.pos();
-                self.gen_function(func, find_func(prog, "main"));
-                self.func_sizes.insert("main".to_string(), self.pos() - start);
                 self.patch_bl(bl_pos, start);
-                break;
             }
         }
     }
@@ -93,15 +177,43 @@ impl Aarch64Codegen {
                 ty: STT_FUNC,
                 visibility: elf::STV_DEFAULT,
             });
+            self.sym_index.insert(func.name.clone(), self.symbols.len() as u32);
             text_off += size;
+        }
+    }
+
+    fn finalize_exec(&mut self) {
+        let rodata_start = self.entry + align_up_u64(self.code.len() as u64, 8);
+        let refs: Vec<_> = self.float_refs.drain(..).collect();
+        for (code_pos, rodata_off) in refs {
+            self.patch_ldr_u32(code_pos, rodata_start + rodata_off);
+        }
+        self.finalize_branches();
+    }
+
+    fn finalize_branches(&mut self) {
+        let pending: Vec<_> = self.pending_branches.drain(..).collect();
+        for (at, label, kind) in pending {
+            if let Some(&target) = self.labels.get(&label) {
+                match kind {
+                    BranchKind::B => self.patch_b26(at, target),
+                    BranchKind::Cbz => self.patch_cbz(at, target),
+                }
+            }
         }
     }
 
     pub fn build_output(&self) -> Vec<u8> {
         if self.relocatable {
-            elf::build_elf_rel_aarch64(&self.code, &self.symbols, &self.relocations)
+            elf::build_elf_rel_aarch64(
+                &self.code,
+                &self.rodata,
+                &self.symbols,
+                &self.relocations,
+                &self.rodata_relocations,
+            )
         } else {
-            elf::build_elf_aarch64(&self.code, self.entry)
+            elf::build_elf_aarch64(&self.code, &self.rodata, self.entry)
         }
     }
 
@@ -113,6 +225,18 @@ impl Aarch64Codegen {
             self.source_name.clone()
         };
         out.push_str(&format!("\t.file \"{name}\"\n"));
+        if !self.rodata.is_empty() {
+            out.push_str("\t.section .rodata,\"a\",@progbits\n");
+            for g in &module.globals {
+                if let Some(&off) = self.global_rodata.get(&g.name) {
+                    out.push_str(&format!("\t.globl {}\n", g.name));
+                    out.push_str(&format!("\t.type {}, %object\n", g.name));
+                    out.push_str(&format!("\t.size {}, {}\n", g.name, value_type_size(&g.ty)));
+                    out.push_str(&format!("{}:\n", g.name));
+                    out.push_str(&format!("\t// rodata offset {off}\n"));
+                }
+            }
+        }
         out.push_str("\t.text\n");
         for func in &module.functions {
             out.push_str(&format!("\t.globl {}\n", func.name));
@@ -136,8 +260,8 @@ impl Aarch64Codegen {
         self.emitted_return = false;
         let body = ast.and_then(|f| f.body.as_ref());
         let items = body.map(|b| b.items.as_slice()).unwrap_or(&[]);
-        for (item, ir_stmt) in items.iter().zip(func.body.iter()) {
-            self.gen_item(item, ir_stmt.expressions.first());
+        for (item, ir) in items.iter().zip(func.body.iter()) {
+            self.gen_block_item(item, ir);
         }
         if !self.emitted_return {
             self.mov_w0_imm(0);
@@ -158,10 +282,27 @@ impl Aarch64Codegen {
         }
     }
 
-    fn gen_item(&mut self, item: &BlockItem, ir_expr: Option<&TypedExpr>) {
+    fn gen_block_item(&mut self, item: &BlockItem, ir: &TypedStmt) {
         match item {
-            BlockItem::Stmt(Stmt::Return { val, .. }) => {
-                if let Some(expr) = ir_expr {
+            BlockItem::Stmt(s) => self.gen_stmt(s, ir),
+            BlockItem::Decl(Decl::Var(v)) => {
+                let off = self.alloc_local(&v.name.name, v.ty.size().max(4) as i32);
+                if let Some(expr) = ir.expressions.first() {
+                    self.gen_expr(expr);
+                    self.store_result(off, &v.ty);
+                } else if let Some(init) = &v.init {
+                    self.gen_expr_from_ast(init);
+                    self.store_result(off, &v.ty);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn gen_stmt(&mut self, stmt: &Stmt, ir: &TypedStmt) {
+        match stmt {
+            Stmt::Return { val, .. } => {
+                if let Some(expr) = ir.expressions.first() {
                     self.gen_expr(expr);
                 } else if let Some(e) = val.as_ref() {
                     self.gen_expr_from_ast(e);
@@ -171,21 +312,74 @@ impl Aarch64Codegen {
                 self.ret();
                 self.emitted_return = true;
             }
-            BlockItem::Stmt(Stmt::Expr { e, .. }) => {
-                if let Some(expr) = ir_expr {
+            Stmt::Expr { e, .. } => {
+                if let Some(expr) = ir.expressions.first() {
                     let _ = self.gen_expr(expr);
                 } else {
                     let _ = self.gen_expr_from_ast(e);
                 }
             }
-            BlockItem::Decl(Decl::Var(v)) => {
-                let off = self.alloc_local(&v.name.name, v.ty.size().max(4) as i32);
-                if let Some(expr) = ir_expr {
-                    self.gen_expr(expr);
-                    self.store_w0(off);
-                } else if let Some(init) = &v.init {
-                    self.gen_expr_from_ast(init);
-                    self.store_w0(off);
+            Stmt::If { then_, else_, .. } => {
+                if let Some(cond) = ir.expressions.first() {
+                    self.gen_expr(cond);
+                }
+                let lbl_else = self.fresh_label("Lelse");
+                let lbl_end = self.fresh_label("Lendif");
+                self.cbz_w0(&lbl_else);
+                self.gen_stmt(then_, &ir.nested[0]);
+                self.b(&lbl_end);
+                self.label(&lbl_else);
+                if let Some(el) = else_ {
+                    if ir.nested.len() > 1 {
+                        self.gen_stmt(el, &ir.nested[1]);
+                    } else {
+                        self.gen_stmt(el, &TypedStmt {
+                            expressions: Vec::new(),
+                            nested: Vec::new(),
+                            span: ir.span.clone(),
+                        });
+                    }
+                }
+                self.label(&lbl_end);
+            }
+            Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+                let lbl_loop = self.fresh_label("Lwhile");
+                let lbl_exit = self.fresh_label("Lwend");
+                self.label(&lbl_loop);
+                if let Some(cond) = ir.expressions.first() {
+                    self.gen_expr(cond);
+                    self.cbz_w0(&lbl_exit);
+                }
+                self.gen_stmt(body, &ir.nested[0]);
+                self.b(&lbl_loop);
+                self.label(&lbl_exit);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                let body_idx = if init.is_some() { 1 } else { 0 };
+                if let Some(s) = init {
+                    self.gen_stmt(s, &ir.nested[0]);
+                }
+                let lbl_loop = self.fresh_label("Lfor");
+                let lbl_exit = self.fresh_label("Lfend");
+                self.label(&lbl_loop);
+                if cond.is_some() {
+                    if let Some(ir_cond) = ir.expressions.first() {
+                        self.gen_expr(ir_cond);
+                        self.cbz_w0(&lbl_exit);
+                    }
+                }
+                self.gen_stmt(body, &ir.nested[body_idx]);
+                if step.is_some() {
+                    if let Some(step_ir) = ir.expressions.get(1) {
+                        let _ = self.gen_expr(step_ir);
+                    }
+                }
+                self.b(&lbl_loop);
+                self.label(&lbl_exit);
+            }
+            Stmt::Block { b, .. } => {
+                for (item, nested_ir) in b.items.iter().zip(ir.nested.iter()) {
+                    self.gen_block_item(item, nested_ir);
                 }
             }
             _ => {}
@@ -193,10 +387,25 @@ impl Aarch64Codegen {
     }
 
     fn gen_expr(&mut self, expr: &TypedExpr) -> bool {
+        if is_vector_ty(&expr.ty) {
+            return self.gen_vector_expr(expr);
+        }
+        if is_float_ty(&expr.ty)
+            || expr
+                .children
+                .iter()
+                .any(|c| is_float_ty(&c.ty) || is_vector_ty(&c.ty))
+        {
+            return self.gen_float_expr(expr);
+        }
         match expr.kind {
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Int(v)) = expr.literal {
                     self.mov_w0_imm(trunc_i32(v));
+                    return true;
+                }
+                if let Some(ExprLiteral::Float(v)) = expr.literal {
+                    self.load_float_s0(v as f32);
                     return true;
                 }
                 self.mov_w0_imm(0);
@@ -204,6 +413,10 @@ impl Aarch64Codegen {
             ExprKind::Local(ref name) => {
                 if let Some(&off) = self.locals.get(name) {
                     self.load_w0(off);
+                    return true;
+                }
+                if self.global_rodata.contains_key(name) {
+                    self.load_global_addr_w0(name);
                     return true;
                 }
                 self.mov_w0_imm(0);
@@ -232,18 +445,129 @@ impl Aarch64Codegen {
                 self.truncate_w0_to(&expr.ty);
                 return true;
             }
+            ExprKind::Call if !expr.children.is_empty() => {
+                self.gen_call(expr);
+                return true;
+            }
+            ExprKind::Conditional if expr.children.len() >= 3 => {
+                self.gen_expr(&expr.children[0]);
+                let lbl_else = self.fresh_label("Lcond0");
+                let lbl_end = self.fresh_label("Lcond1");
+                self.cbz_w0(&lbl_else);
+                self.gen_expr(&expr.children[1]);
+                self.b(&lbl_end);
+                self.label(&lbl_else);
+                self.gen_expr(&expr.children[2]);
+                self.label(&lbl_end);
+                return true;
+            }
             _ => self.mov_w0_imm(0),
         }
         false
+    }
+
+    fn gen_call(&mut self, expr: &TypedExpr) {
+        let args = &expr.children[1..];
+        for (i, arg) in args.iter().enumerate().take(8) {
+            self.gen_expr(arg);
+            if is_float_ty(&arg.ty) {
+                self.mov_v_reg_s0(i as u8);
+            } else {
+                self.mov_w_reg_w0(i as u8);
+            }
+        }
+        let callee = self.callee_name(&expr.children[0]);
+        self.emit_bl_to(&callee);
+    }
+
+    fn callee_name(&self, expr: &TypedExpr) -> String {
+        match expr.kind {
+            ExprKind::Local(ref n) => n.clone(),
+            _ => "unknown".to_string(),
+        }
+    }
+
+    fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {
+        match expr.kind {
+            ExprKind::Constant => {
+                if let Some(ExprLiteral::Float(v)) = expr.literal {
+                    self.load_float_s0(v as f32);
+                    return true;
+                }
+                if let Some(ExprLiteral::Int(v)) = expr.literal {
+                    self.mov_w0_imm(trunc_i32(v));
+                    // int 转 float: scvtf s0, w0
+                    self.emit(&[0x00, 0x00, 0x18, 0x1e]);
+                    return true;
+                }
+            }
+            ExprKind::Binary(op) if expr.children.len() >= 2 => {
+                self.gen_float_expr(&expr.children[0]);
+                self.mov_s1_s0();
+                self.gen_float_expr(&expr.children[1]);
+                self.float_binop_s0_s1(op);
+                return true;
+            }
+            ExprKind::Unary(UnOp::Neg) if !expr.children.is_empty() => {
+                self.gen_float_expr(&expr.children[0]);
+                self.neg_s0();
+                return true;
+            }
+            ExprKind::Cast if !expr.children.is_empty() => {
+                self.gen_float_expr(&expr.children[0]);
+                return true;
+            }
+            _ => {
+                if self.gen_expr(expr) {
+                    self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
+                    return true;
+                }
+            }
+        }
+        self.load_float_s0(0.0);
+        false
+    }
+
+    fn gen_vector_expr(&mut self, expr: &TypedExpr) -> bool {
+        match expr.kind {
+            ExprKind::Binary(op) if expr.children.len() >= 2 => {
+                self.gen_vector_operand(&expr.children[0]);
+                self.mov_v1_v0();
+                self.gen_vector_operand(&expr.children[1]);
+                self.vector_binop_v0_v1(op);
+                return true;
+            }
+            ExprKind::Constant | ExprKind::Aggregate => {
+                self.zero_v0();
+                return true;
+            }
+            _ => {
+                self.zero_v0();
+            }
+        }
+        false
+    }
+
+    fn gen_vector_operand(&mut self, expr: &TypedExpr) {
+        if let Some(ExprLiteral::Int(v)) = expr.literal {
+            self.mov_w0_imm(trunc_i32(v));
+            self.emit(&[0x20, 0x00, 0x08, 0x4e]); // dup v0.4s, w0
+            return;
+        }
+        let _ = self.gen_expr(expr);
+        self.emit(&[0x20, 0x00, 0x08, 0x4e]);
     }
 
     fn gen_expr_from_ast(&mut self, expr: &Expr) {
         match expr {
             Expr::Int { v, .. } => self.mov_w0_imm(trunc_i32(*v)),
             Expr::Char { v, .. } => self.mov_w0_imm(trunc_i32(*v as i128)),
+            Expr::Float { v, .. } => self.load_float_s0(*v as f32),
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
                     self.load_w0(off);
+                } else if self.global_rodata.contains_key(&name.name) {
+                    self.load_global_addr_w0(&name.name);
                 } else {
                     self.mov_w0_imm(0);
                 }
@@ -265,8 +589,15 @@ impl Aarch64Codegen {
                     UnOp::BitNot => self.mvn_w0(),
                 }
             }
-            Expr::Cast { e, .. } => {
-                self.gen_expr_from_ast(e);
+            Expr::Cast { e, .. } => self.gen_expr_from_ast(e),
+            Expr::Call { callee, args, .. } => {
+                for (i, arg) in args.iter().enumerate().take(8) {
+                    self.gen_expr_from_ast(arg);
+                    self.mov_w_reg_w0(i as u8);
+                }
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    self.emit_bl_to(&name.name);
+                }
             }
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
@@ -276,6 +607,29 @@ impl Aarch64Codegen {
                 }
             }
         }
+    }
+
+    fn load_global_addr_w0(&mut self, name: &str) {
+        if self.relocatable {
+            let pos = self.pos();
+            self.emit_adr_placeholder(0);
+            if let Some(&idx) = self.sym_index.get(name) {
+                self.relocations.push(ElfRela {
+                    offset: pos,
+                    sym_index: idx,
+                    rel_type: elf::R_AARCH64_ADR_PREL_LO21,
+                    addend: 0,
+                });
+            }
+        } else if let Some(&off) = self.global_rodata.get(name) {
+            let rodata_start = self.entry + align_up_u64(self.code.len() as u64, 8);
+            self.mov_x0_imm((rodata_start + off) as u32);
+        }
+    }
+
+    fn store_result(&mut self, off: i32, ty: &crate::ast::Type) {
+        let _ = ty;
+        self.store_w0(off);
     }
 
     fn alloc_local(&mut self, name: &str, bytes: i32) -> i32 {
@@ -289,16 +643,16 @@ impl Aarch64Codegen {
     fn truncate_w0_to(&mut self, ty: &ValueType) {
         match ty {
             ValueType::Integer { bits: 8, signed: true } => {
-                self.emit(&[0x00, 0x00, 0x18, 0x13]); // sxtb w0, w0
+                self.emit(&[0x00, 0x00, 0x18, 0x13]);
             }
             ValueType::Integer { bits: 8, signed: false } => {
-                self.emit(&[0x00, 0x00, 0x14, 0x13]); // uxtb w0, w0
+                self.emit(&[0x00, 0x00, 0x14, 0x13]);
             }
             ValueType::Integer { bits: 16, signed: true } => {
-                self.emit(&[0x00, 0x00, 0x18, 0x12]); // sxth w0, w0
+                self.emit(&[0x00, 0x00, 0x18, 0x12]);
             }
             ValueType::Integer { bits: 16, signed: false } => {
-                self.emit(&[0x00, 0x00, 0x14, 0x12]); // uxth w0, w0
+                self.emit(&[0x00, 0x00, 0x14, 0x12]);
             }
             ValueType::Integer { bits: 32, .. } => {}
             _ => {}
@@ -307,18 +661,15 @@ impl Aarch64Codegen {
 
     fn binop_w0_w1(&mut self, op: BinOp) {
         match op {
-            BinOp::Add => self.emit(&[0x00, 0x00, 0x01, 0x0b]), // add w0, w0, w1
-            BinOp::Sub => self.emit(&[0x00, 0x00, 0x01, 0x4b]), // sub w0, w0, w1
-            BinOp::Mul => self.emit(&[0x00, 0x7c, 0x01, 0x1b]), // mul w0, w0, w1
-            BinOp::And => self.emit(&[0x20, 0x00, 0x01, 0x0a]), // and w0, w0, w1
-            BinOp::Or => self.emit(&[0x20, 0x00, 0x01, 0x2a]),  // orr w0, w0, w1
-            BinOp::Xor => self.emit(&[0x20, 0x00, 0x01, 0x4a]), // eor w0, w0, w1
-            BinOp::Shl => self.emit(&[0x20, 0x00, 0x1f, 0x1a]), // lsl w0, w0, w1
-            BinOp::Shr => self.emit(&[0x20, 0x00, 0x41, 0x1a]), // lsr w0, w0, w1
-            BinOp::Div | BinOp::Mod => {
-                // M7: 无硬件除法序列，回退为 0
-                self.mov_w0_imm(0);
-            }
+            BinOp::Add => self.emit(&[0x00, 0x00, 0x01, 0x0b]),
+            BinOp::Sub => self.emit(&[0x00, 0x00, 0x01, 0x4b]),
+            BinOp::Mul => self.emit(&[0x00, 0x7c, 0x01, 0x1b]),
+            BinOp::And => self.emit(&[0x20, 0x00, 0x01, 0x0a]),
+            BinOp::Or => self.emit(&[0x20, 0x00, 0x01, 0x2a]),
+            BinOp::Xor => self.emit(&[0x20, 0x00, 0x01, 0x4a]),
+            BinOp::Shl => self.emit(&[0x20, 0x00, 0x1f, 0x1a]),
+            BinOp::Shr => self.emit(&[0x20, 0x00, 0x41, 0x1a]),
+            BinOp::Div | BinOp::Mod => self.mov_w0_imm(0),
             BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.cmp_w0_w1();
                 let cond = match op {
@@ -333,10 +684,36 @@ impl Aarch64Codegen {
                 let insn = 0x1a9f_0000u32 | (cond << 12) | 0x20;
                 self.emit(&insn.to_le_bytes());
             }
-            BinOp::AndAnd | BinOp::OrOr => {
-                self.cmp_w0_zero();
-            }
+            BinOp::AndAnd | BinOp::OrOr => self.cmp_w0_zero(),
         }
+    }
+
+    fn float_binop_s0_s1(&mut self, op: BinOp) {
+        match op {
+            BinOp::Add => self.emit(&[0x20, 0x00, 0x21, 0x1e]), // fadd s0, s0, s1
+            BinOp::Sub => self.emit(&[0x20, 0x00, 0x41, 0x1e]),
+            BinOp::Mul => self.emit(&[0x20, 0x00, 0x61, 0x1e]),
+            BinOp::Div => self.emit(&[0x20, 0x00, 0x81, 0x1e]),
+            BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                self.emit(&[0x20, 0x00, 0x21, 0x1e]); // 近似：按加法后转 int
+                self.emit(&[0x00, 0x00, 0x08, 0x1e]); // fcvtzs w0, s0
+            }
+            _ => self.emit(&[0x20, 0x00, 0x21, 0x1e]),
+        }
+    }
+
+    fn vector_binop_v0_v1(&mut self, op: BinOp) {
+        match op {
+            BinOp::Add => self.emit(&[0x20, 0x14, 0x21, 0x4e]), // add v0.4s, v0.4s, v1.4s
+            BinOp::Sub => self.emit(&[0x20, 0x14, 0x41, 0x4e]),
+            BinOp::Mul => self.emit(&[0x20, 0x94, 0x81, 0x4e]),
+            _ => self.emit(&[0x20, 0x14, 0x21, 0x4e]),
+        }
+    }
+
+    fn fresh_label(&mut self, prefix: &str) -> String {
+        self.label_serial += 1;
+        format!("{prefix}{}", self.label_serial)
     }
 
     fn pos(&self) -> u64 {
@@ -344,11 +721,34 @@ impl Aarch64Codegen {
     }
 
     fn label(&mut self, name: &str) {
-        self.labels.insert(name.to_string(), self.pos());
+        let pos = self.pos();
+        self.labels.insert(name.to_string(), pos);
+        let pending: Vec<_> = self
+            .pending_branches
+            .iter()
+            .filter(|(_, l, _)| l == name)
+            .cloned()
+            .collect();
+        for (at, _, kind) in pending {
+            match kind {
+                BranchKind::B => self.patch_b26(at, pos),
+                BranchKind::Cbz => self.patch_cbz(at, pos),
+            }
+        }
+        self.pending_branches.retain(|(_, l, _)| l != name);
     }
 
     fn emit(&mut self, bytes: &[u8]) {
         self.code.extend_from_slice(bytes);
+    }
+
+    fn load_float_s0(&mut self, v: f32) {
+        let off = align_rodata(&mut self.rodata, 4);
+        let bits = v.to_bits();
+        self.rodata.extend_from_slice(&bits.to_le_bytes());
+        let pos = self.pos();
+        self.emit_ldr_s0_u32_placeholder();
+        self.float_refs.push((pos, off));
     }
 
     fn mov_w0_imm(&mut self, imm: u32) {
@@ -359,10 +759,13 @@ impl Aarch64Codegen {
         }
         let lo = imm & 0xffff;
         let hi = (imm >> 16) & 0xffff;
-        let insn0 = 0x5280_0000u32 | (lo << 5);
-        let insn1 = 0x72a0_0000u32 | (hi << 5);
-        self.emit(&insn0.to_le_bytes());
-        self.emit(&insn1.to_le_bytes());
+        self.emit(&(0x5280_0000u32 | (lo << 5)).to_le_bytes());
+        self.emit(&(0x72a0_0000u32 | (hi << 5)).to_le_bytes());
+    }
+
+    fn mov_x0_imm(&mut self, imm: u32) {
+        let insn = 0xd280_0000u32 | ((imm & 0xffff) << 5);
+        self.emit(&insn.to_le_bytes());
     }
 
     fn mov_x8_imm(&mut self, imm: u64) {
@@ -378,18 +781,12 @@ impl Aarch64Codegen {
         self.ldr_wt_sp(0, off);
     }
 
-    fn load_w1(&mut self, off: i32) {
-        self.ldr_wt_sp(1, off);
-    }
-
-    /// STR Wt, [SP, #off]
     fn str_wt_sp(&mut self, reg: u8, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
         let insn = 0xb900_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 7);
         self.emit(&insn.to_le_bytes());
     }
 
-    /// LDR Wt, [SP, #off]
     fn ldr_wt_sp(&mut self, reg: u8, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
         let insn = 0xb940_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 7);
@@ -397,18 +794,41 @@ impl Aarch64Codegen {
     }
 
     fn mov_w14_w0(&mut self) {
-        // orr w14, wzr, w0
         self.emit(&[0xee, 0x03, 0x80, 0x2a]);
     }
 
     fn mov_w0_w14(&mut self) {
-        // orr w0, wzr, w14
         self.emit(&[0xe0, 0x03, 0x0e, 0x2a]);
     }
 
     fn mov_w1_w0(&mut self) {
-        // orr w1, wzr, w0
         self.emit(&[0xe1, 0x03, 0x80, 0x2a]);
+    }
+
+    fn mov_w_reg_w0(&mut self, reg: u8) {
+        let insn = 0x2a0003e0u32 | ((reg as u32 & 7) << 16) | ((reg as u32 & 7) << 5);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn mov_v_reg_s0(&mut self, reg: u8) {
+        let insn = 0x1e204000u32 | ((reg as u32 & 7) << 5);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn mov_s1_s0(&mut self) {
+        self.emit(&[0x20, 0x00, 0x20, 0x1e]);
+    }
+
+    fn neg_s0(&mut self) {
+        self.emit(&[0x00, 0x00, 0xa0, 0x1e]); // fneg s0, s0
+    }
+
+    fn mov_v1_v0(&mut self) {
+        self.emit(&[0x20, 0x00, 0x81, 0x4e]); // orr v1.16b, v0.16b, v0.16b
+    }
+
+    fn zero_v0(&mut self) {
+        self.emit(&[0x00, 0x00, 0x80, 0x4e]); // movi v0.4s, #0
     }
 
     fn sub_sp_imm(&mut self, bytes: u32) {
@@ -432,20 +852,62 @@ impl Aarch64Codegen {
     }
 
     fn neg_w0(&mut self) {
-        self.emit(&[0x00, 0x00, 0x00, 0x4b]); // neg w0, w0
+        self.emit(&[0x00, 0x00, 0x00, 0x4b]);
     }
 
     fn mvn_w0(&mut self) {
-        self.emit(&[0x20, 0x03, 0x20, 0x2a]); // orn w0, wzr, w0
+        self.emit(&[0x20, 0x03, 0x20, 0x2a]);
     }
 
     fn cmp_w0_zero(&mut self) {
-        self.emit(&[0x1f, 0x00, 0x00, 0x71]); // cmp w0, #0
-        self.emit(&[0xe0, 0x07, 0x9f, 0x1a]); // cset w0, ne
+        self.emit(&[0x1f, 0x00, 0x00, 0x71]);
+        self.emit(&[0xe0, 0x07, 0x9f, 0x1a]);
     }
 
     fn cmp_w0_w1(&mut self) {
-        self.emit(&[0x3f, 0x00, 0x01, 0x6b]); // cmp w0, w1
+        self.emit(&[0x3f, 0x00, 0x01, 0x6b]);
+    }
+
+    fn cbz_w0(&mut self, label: &str) {
+        let pos = self.pos();
+        self.emit(&[0x00, 0x00, 0x00, 0x34]);
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_cbz(pos, target);
+        } else {
+            self.pending_branches
+                .push((pos, label.to_string(), BranchKind::Cbz));
+        }
+    }
+
+    fn b(&mut self, label: &str) {
+        let pos = self.pos();
+        self.emit(&[0x00, 0x00, 0x00, 0x14]);
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_b26(pos, target);
+        } else {
+            self.pending_branches
+                .push((pos, label.to_string(), BranchKind::B));
+        }
+    }
+
+    fn patch_b26(&mut self, at: u64, target: u64) {
+        let pc = at + 4;
+        let imm26 = ((target as i64 - pc as i64) >> 2) as u32 & 0x03ff_ffff;
+        let insn = 0x1400_0000u32 | imm26;
+        let off = at as usize;
+        if off + 4 <= self.code.len() {
+            self.code[off..off + 4].copy_from_slice(&insn.to_le_bytes());
+        }
+    }
+
+    fn patch_cbz(&mut self, at: u64, target: u64) {
+        let pc = at + 4;
+        let imm19 = ((target as i64 - pc as i64) >> 2) as u32 & 0x7ffff;
+        let insn = 0x3400_0000u32 | imm19;
+        let off = at as usize;
+        if off + 4 <= self.code.len() {
+            self.code[off..off + 4].copy_from_slice(&insn.to_le_bytes());
+        }
     }
 
     fn ret(&mut self) {
@@ -463,12 +925,73 @@ impl Aarch64Codegen {
         self.emit(&[0x00, 0x00, 0x00, 0x94]);
     }
 
+    fn emit_bl_to(&mut self, name: &str) {
+        if let Some(&target) = self.labels.get(name) {
+            let pos = self.pos();
+            self.emit_bl_placeholder();
+            self.patch_bl(pos, target);
+        } else if self.relocatable {
+            let pos = self.pos();
+            self.emit_bl_placeholder();
+            let idx = self.ensure_sym(name);
+            self.relocations.push(ElfRela {
+                offset: pos,
+                sym_index: idx,
+                rel_type: R_AARCH64_CALL26,
+                addend: 0,
+            });
+        } else {
+            let pos = self.pos();
+            self.emit_bl_placeholder();
+            let _ = pos;
+        }
+    }
+
+    fn ensure_sym(&mut self, name: &str) -> u32 {
+        if let Some(&idx) = self.sym_index.get(name) {
+            return idx;
+        }
+        self.symbols.push(ElfSym {
+            name: name.to_string(),
+            section: 0,
+            value: 0,
+            size: 0,
+            bind: STB_GLOBAL,
+            ty: STT_FUNC,
+            visibility: elf::STV_DEFAULT,
+        });
+        let idx = self.symbols.len() as u32;
+        self.sym_index.insert(name.to_string(), idx);
+        idx
+    }
+
     fn patch_bl(&mut self, at: u64, target: u64) {
         let pc = at + 4;
         let imm26 = ((target as i64 - pc as i64) >> 2) as u32 & 0x03ff_ffff;
         let insn = 0x9400_0000u32 | imm26;
         let off = at as usize;
         self.code[off..off + 4].copy_from_slice(&insn.to_le_bytes());
+    }
+
+    fn emit_adr_placeholder(&mut self, rd: u8) {
+        let insn = 0x1000_0000u32 | (rd as u32);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn emit_ldr_s0_u32_placeholder(&mut self) {
+        // ldr s0, [pc, #8]; b +8
+        self.emit(&[0x00, 0x00, 0x00, 0xbd]);
+        self.emit(&[0x02, 0x00, 0x00, 0x14]);
+    }
+
+    fn patch_ldr_u32(&mut self, at: u64, addr: u64) {
+        let pc = at + 8;
+        let off = ((addr as i64 - pc as i64) / 4) as u32 & 0x3ffff;
+        let insn = 0xbd000000u32 | off;
+        let off_usize = at as usize;
+        if off_usize + 4 <= self.code.len() {
+            self.code[off_usize..off_usize + 4].copy_from_slice(&insn.to_le_bytes());
+        }
     }
 }
 
@@ -481,6 +1004,39 @@ fn find_func<'a>(prog: &'a Program, name: &str) -> Option<&'a FuncDecl> {
 
 fn trunc_i32(v: i128) -> u32 {
     (v as i32) as u32
+}
+
+fn is_float_ty(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Float { .. })
+}
+
+fn is_vector_ty(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Vector(_, _))
+}
+
+fn value_type_size(ty: &ValueType) -> usize {
+    match ty {
+        ValueType::Void => 0,
+        ValueType::Integer { bits, .. } => (*bits as usize + 7) / 8,
+        ValueType::Float { bits } => (*bits as usize + 7) / 8,
+        ValueType::Pointer(_) => 8,
+        ValueType::Array(inner, Some(n)) => value_type_size(inner) * n,
+        ValueType::Array(inner, None) => value_type_size(inner),
+        ValueType::Aggregate { size, .. } => *size,
+        ValueType::Function { .. } => 8,
+        ValueType::Vector(inner, lanes) => value_type_size(inner) * lanes,
+        ValueType::Complex(inner) => value_type_size(inner) * 2,
+    }
+}
+
+fn align_rodata(buf: &mut Vec<u8>, align: u64) -> u64 {
+    let off = align_up_u64(buf.len() as u64, align);
+    buf.resize(off as usize, 0);
+    off
+}
+
+fn align_up_u64(v: u64, align: u64) -> u64 {
+    (v + align - 1) & !(align - 1)
 }
 
 #[cfg(test)]

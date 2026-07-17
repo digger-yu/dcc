@@ -5,6 +5,7 @@ pub mod disasm;
 pub mod elf;
 pub mod x86_64;
 pub mod aarch64;
+pub mod riscv64;
 
 use crate::debug;
 use crate::ir::Module;
@@ -135,8 +136,18 @@ pub fn emit(
             cg.compile(module);
             cg.build_output()
         }
+        crate::cli::Arch::RiscV64 => {
+            let mut cg = riscv64::Riscv64Codegen::new(target.clone(), relocatable || emit_asm);
+            cg.set_source_name(source_name);
+            if emit_asm {
+                cg.compile(module);
+                return cg.build_asm_output(module).into_bytes();
+            }
+            cg.compile(module);
+            cg.build_output()
+        }
         a => panic!(
-            "target arch {:?} is not yet implemented (supported: x86_64, aarch64)",
+            "target arch {:?} is not yet implemented (supported: x86_64, aarch64, riscv64)",
             a
         ),
     }

@@ -120,8 +120,8 @@
 
 - [x] **20. 决策点：M7 多架构 vs M5 自举 → 选定 M7**
   - 路径：**M7**（内核+速度优先）；M5 自举维持 backlog
-  - 实现：`src/codegen/aarch64.rs` typed IR lowering；`TypedExpr.literal`；`build_elf_*`
-  - 验证：`aarch64_hello_cross_compile` / `aarch64_ir_add_cross_compile`；`remote_feature_check`
+  - 实现：`aarch64.rs` / `riscv64.rs` typed IR lowering；`.rodata`；`build_elf_*`
+  - 验证：`aarch64_*` / `riscv64_*` cross_compile；`remote_feature_check`（23 项）
   - 脚本：活跃脚本 `scripts/README.md`；历史探针归档 `scripts/archive/`
 
 ---

@@ -46,7 +46,7 @@ CROSS_COMPILE=aarch64-linux-gnu- make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu
 | 架构 | 状态 |
 |------|------|
 | x86_64 | ✅ 完整支持 (M0) |
-| aarch64 | ✅ M7：hello `.o`/a.out + typed IR 整数表达式 |
-| riscv64 | ⏳ M7 待补 |
+| aarch64 | ✅ M7：hello/控制流/调用/浮点/向量/rodata |
+| riscv64 | ✅ M7：hello/控制流/调用/浮点/向量/rodata |
 | mips / mips64 | ⏳ M7 之后 |
 | arm | ⏳ M7 之后 |

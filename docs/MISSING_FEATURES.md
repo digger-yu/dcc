@@ -42,7 +42,8 @@
 | Mini x86 asm 位操作 / 双精度移位 | codegen `btl/bts/btr`、`shld/shrd`（内核 paravirt 等） |
 | 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；全局 init + 间接 load + 逐元素 store |
 | x86_64 codegen 扩展 | 向量全局 init、复数四则/Cast、object_size fold、apply/return 子集、asm mem 操作数 |
-| aarch64 typed IR | hello `.o`、整数 return/二元表达式；见 `aarch64_ir_add_cross_compile` |
+| aarch64 typed IR | hello/控制流/调用/浮点/向量/rodata；见 `aarch64_*_cross_compile` |
+| riscv64 typed IR | hello/控制流/调用/rodata；见 `riscv64_*_cross_compile` |
 | 诊断 snapshot 格式锁定 | `tests/errors.rs` schema + `diagnostic_format.stderr.snap`（V1） |
 | `struct __attribute__((__may_alias__))` | `tests/fixtures/may_alias_struct.c` |
 | 宏 `#` 字符串化换行折叠 | `preproc` 单测 `stringify_collapses_*`；`NOFAIL`/`modpost.c` |

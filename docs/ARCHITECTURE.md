@@ -22,7 +22,7 @@
    │ (tokens.rs │    │ (codegen/)     │
    │  ast.rs    │    │  ├ x86_64.rs   │
    │  parser.rs)│    │  ├ aarch64.rs  │ ← M7 typed IR lowering
-   └─────┬──────┘    │  ├ riscv.rs    │ ← 未来
+   └─────┬──────┘    │  ├ riscv64.rs  │ ← M7 typed IR lowering
          │           │  └ elf.rs      │
          ▼           └────────────────┘
    ┌────────────┐
@@ -190,12 +190,19 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 ## AArch64 后端（`codegen/aarch64.rs`，M7）
 
 - **入口**：`codegen::emit` 在 `--target aarch64-linux-gnu` 时选用 `Aarch64Codegen`。
-- **IR lowering**：遍历 `Module.functions` 与 `TypedExpr`（`Constant`/`Local`/`Binary`/…）；
-  语句结构（`return`/局部声明）仍对照 AST `BlockItem` 以保持控制流语义。
-- **已实现**：`return` 常量与整数二元 `+/-/*`、局部变量、`ET_REL` `.o` 与 `ET_EXEC` hello
-  （`_start` → `bl main` → `svc #0`）；`-S` 输出占位 GNU 汇编骨架。
-- **待扩展**：调用约定、浮点/向量、全局 `.rodata`、完整控制流；RISC-V 仍走
-  `emit()` 未实现分支。
+- **IR lowering**：遍历 `Module.functions` 与 `TypedExpr`；语句（`if`/`while`/`for`/`return`）
+  对照 AST 与 `TypedStmt.nested` 保持控制流语义。
+- **已实现**：AAPCS64 整数/浮点/向量（基础 NEON `v0.4s`）表达式、`bl` 函数调用（
+  `R_AARCH64_CALL26`）、全局 `.rodata`、`ET_REL` `.o` 与 `ET_EXEC` hello
+  （`_start` → `bl main` → `svc #0`）；`-S` 输出 GNU 汇编骨架。
+- **限制**：无 varargs/结构体传参、除法/取模回退为 0、向量仅常量广播与加减乘。
+
+## RISC-V 64 后端（`codegen/riscv64.rs`，M7）
+
+- **入口**：`codegen::emit` 在 `--target riscv64-linux-gnu` 时选用 `Riscv64Codegen`。
+- **能力与 AArch64 对齐**：整数/浮点/向量表达式、控制流、函数调用（`R_RISCV_JAL`）、
+  全局 `.rodata`、`build_elf_riscv64` / `build_elf_rel_riscv64`。
+- **限制**：同上；大立即数通过 `lui`+`addi` 序列；浮点运算为 RV64GC `f` 扩展子集。
 
 ## 测试脚本布局
 
