@@ -63,7 +63,7 @@
   - 验证：`qemu_boot_matrix.sh` 多配置（defconfig / 串口）非 SKIP
   - 验证：内核能打印 boot log 不 panic
   - 进展：脚本已用系统 vmlinuz 冒烟 **PASS**（2/2 配置）；dcc 自编译 bzImage 待步骤 6
-  - 进展：`asm-offsets.c` 解析错误 **867→0**（2026-07-16）；剩 6 语义错误阻塞 `.s` 生成
+  - 进展：`asm-offsets.c` **867→0 解析、0 语义、`.s` 已生成**（2026-07-17）
   - 验收：`python3 scripts/test_asm_offsets.py`（远程 `~/linux-6.6` + dcc release）
   - 阻塞：全树 `make CC=dcc` 仍待步骤 4–6；远程 gcc-15 亦无法完成 6.6 全树
 

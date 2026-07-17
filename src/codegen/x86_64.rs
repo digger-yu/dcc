@@ -135,6 +135,99 @@ struct AsmOpBinding {
     is_mem: bool,
 }
 
+/// GNU as 局部数字标签：同一块 asm 内 `6:` 定义，`6f`/`6b` 引用。
+struct AsmLocalLabels {
+    /// (行号, 标签号, 唯一内部名)
+    defs: Vec<(usize, u32, String)>,
+}
+
+impl AsmLocalLabels {
+    fn scan(lines: &[String]) -> Self {
+        let mut defs = Vec::new();
+        let mut serial: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            if let Some(num) = Self::parse_numeric_label(t) {
+                let n = serial.entry(num).or_insert(0);
+                let name = format!(".Lasm_local_{num}_{n}");
+                *n += 1;
+                defs.push((i, num, name));
+            }
+        }
+        Self { defs }
+    }
+
+    fn parse_numeric_label(s: &str) -> Option<u32> {
+        let s = s.strip_suffix(':')?;
+        let s = s.trim();
+        if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    }
+
+    fn name_at(&self, line_idx: usize) -> Option<&str> {
+        self.defs
+            .iter()
+            .find(|(i, _, _)| *i == line_idx)
+            .map(|(_, _, n)| n.as_str())
+    }
+
+    fn resolve(&self, num: u32, dir: char, at_line: usize) -> Option<&str> {
+        match dir {
+            'f' => self
+                .defs
+                .iter()
+                .find(|(i, n, _)| *i > at_line && *n == num)
+                .map(|(_, _, name)| name.as_str()),
+            'b' => self
+                .defs
+                .iter()
+                .filter(|(i, n, _)| *i < at_line && *n == num)
+                .last()
+                .map(|(_, _, name)| name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// 将 `6f` / `6b` 替换为内部标签名
+    fn substitute(&self, line: &str, at_line: usize) -> String {
+        let chars: Vec<char> = line.chars().collect();
+        let len = chars.len();
+        let mut out = String::with_capacity(line.len());
+        let mut i = 0;
+        while i < len {
+            if chars[i].is_ascii_digit() {
+                let start = i;
+                while i < len && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i < len && (chars[i] == 'f' || chars[i] == 'b') {
+                    let before_ok = start == 0
+                        || !(chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '_');
+                    let after_ok = i + 1 >= len
+                        || !(chars[i + 1].is_ascii_alphanumeric() || chars[i + 1] == '_');
+                    if before_ok && after_ok {
+                        let num: u32 = chars[start..i].iter().collect::<String>().parse().unwrap_or(0);
+                        if let Some(name) = self.resolve(num, chars[i], at_line) {
+                            out.push_str(name);
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+                for c in &chars[start..i] {
+                    out.push(*c);
+                }
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+}
+
 #[derive(Clone)]
 struct ParallelGlobalSnap {
     offset: u64,
@@ -5863,6 +5956,59 @@ impl Codegen {
         resolved
     }
 
+    /// 发射已替换操作数后的 asm 模板行（含 GNU 局部数字标签）
+    fn emit_resolved_asm_lines(&mut self, resolved_lines: &[String], is_global: bool) {
+        let locals = AsmLocalLabels::scan(resolved_lines);
+        for (i, resolved) in resolved_lines.iter().enumerate() {
+            let trimmed = resolved.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // 数字局部标签 N:
+            if let Some(name) = locals.name_at(i) {
+                self.label(name);
+                if self.emit_asm_text && (is_global || trimmed.ends_with(':')) {
+                    self.asm_directives_at.push((self.pos(), trimmed.to_string()));
+                    self.asm_directives.push(trimmed.to_string());
+                }
+                continue;
+            }
+            if self.emit_asm_text {
+                if trimmed.starts_with('.') || trimmed.ends_with(':') {
+                    self.asm_directives_at.push((self.pos(), trimmed.to_string()));
+                    self.asm_directives.push(trimmed.to_string());
+                    if !trimmed.ends_with(':') {
+                        continue;
+                    }
+                }
+            }
+            if is_global && !self.emit_asm_text {
+                if trimmed.starts_with(".globl ") || trimmed.starts_with(".global ") {
+                    if let Some(sym) = trimmed.split_whitespace().nth(1) {
+                        self.global_asm_exports.insert(sym.trim_end_matches(':').to_string());
+                    }
+                    continue;
+                }
+            }
+            // 命名标签 foo:（非纯数字）
+            if let Some(label) = trimmed.strip_suffix(':') {
+                let label = label.trim();
+                if !label.is_empty()
+                    && !label.starts_with('.')
+                    && !label.chars().all(|c| c.is_ascii_digit())
+                {
+                    self.label(label);
+                    continue;
+                }
+            }
+            if self.emit_asm_text && trimmed.starts_with('.') {
+                continue;
+            }
+            let subbed = locals.substitute(trimmed, i);
+            self.emit_asm_line(&subbed);
+        }
+    }
+
     /// 发射文件级 asm（Decl::GlobalAsm）：-S 保留汇编器指令，-c 解析标签与 .globl。
     fn emit_global_asm(
         &mut self,
@@ -5883,35 +6029,16 @@ impl Codegen {
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
         } else { asm_str };
-        for line in s.split(|c| c == '\n' || c == ';') {
-            let line = line.trim();
-            if line.is_empty() { continue; }
-            let resolved = self.resolve_asm_template(
-                line, outputs, output_names, inputs, input_names, &op_map,
-            );
-            let trimmed = resolved.trim();
-            if self.emit_asm_text {
-                if trimmed.starts_with('.') || trimmed.ends_with(':') {
-                    self.asm_directives_at.push((self.pos(), trimmed.to_string()));
-                    self.asm_directives.push(trimmed.to_string());
-                    continue;
-                }
-            } else if trimmed.starts_with(".globl ") || trimmed.starts_with(".global ") {
-                if let Some(sym) = trimmed.split_whitespace().nth(1) {
-                    self.global_asm_exports.insert(sym.trim_end_matches(':').to_string());
-                }
-                continue;
-            } else if let Some(label) = trimmed.strip_suffix(':') {
-                let label = label.trim();
-                if !label.is_empty() && !label.starts_with('.') {
-                    self.label(label);
-                    continue;
-                }
-            } else if trimmed.starts_with('.') {
-                continue;
-            }
-            self.emit_asm_line(&resolved);
-        }
+        let resolved_lines: Vec<String> = s
+            .split(|c| c == '\n' || c == ';')
+            .map(|line| {
+                self.resolve_asm_template(
+                    line.trim(), outputs, output_names, inputs, input_names, &op_map,
+                )
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        self.emit_resolved_asm_lines(&resolved_lines, true);
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
                 self.writeback_asm_operand(&outputs[i], binding.reg);
@@ -5937,28 +6064,19 @@ impl Codegen {
             outputs, output_names, output_constraints,
             inputs, input_names, input_constraints, &mut bindings,
         );
-        // 清理字符串: 去除引号包裹
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
         } else { asm_str };
-        // 按换行和分号分割指令
-        for line in s.split(|c| c == '\n' || c == ';') {
-            let line = line.trim();
-            if line.is_empty() { continue; }
-            let resolved = self.resolve_asm_template(
-                line, outputs, output_names, inputs, input_names, &op_map,
-            );
-            // -S 模式: 保留汇编器指令 (.ascii 等) 供 Kbuild filechk 解析
-            if self.emit_asm_text {
-                let trimmed = resolved.trim();
-                if trimmed.starts_with('.') {
-                    self.asm_directives_at.push((self.pos(), trimmed.to_string()));
-                    self.asm_directives.push(trimmed.to_string());
-                    continue;
-                }
-            }
-            self.emit_asm_line(&resolved);
-        }
+        let resolved_lines: Vec<String> = s
+            .split(|c| c == '\n' || c == ';')
+            .map(|line| {
+                self.resolve_asm_template(
+                    line.trim(), outputs, output_names, inputs, input_names, &op_map,
+                )
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        self.emit_resolved_asm_lines(&resolved_lines, false);
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
                 self.writeback_asm_operand(&outputs[i], binding.reg);

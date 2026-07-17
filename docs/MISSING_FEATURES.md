@@ -117,9 +117,13 @@
 | 语句表达式 `q * n_` | `is_decl_start` 误判 | ident 须为类型名；补 `__auto_type` |
 | `_DECLARE_STATIC_KEY_0(x)` | 预处理二次宏残留 | parse_decl 跳过 + 待语义补全 |
 | `ret ?: -7` | 未实现 GNU 省略三元 | 中间缺省则 then_=cond |
+| `current_thread_info()` 未展开 | include 缓存零参宏误读为 `[""]` | load 过滤空 param；缓存 V6 |
+| percpu 三元 `*` 解引用 E1004 | `Cond` 固定 int 类型 | 分支为指针时保留指针类型 |
+| codegen panic `6f` | 内联 asm 缺 GNU 局部数字标签 | `AsmLocalLabels` N:/Nf/Nb |
 
-**当前 asm-offsets 状态**：解析 **0** 错误；语义 **6** 错误（percpu 解引用、
-`current_thread_info->*` 成员类型）。验收脚本：`scripts/test_asm_offsets.py`。
+**当前 asm-offsets 状态**：解析 **0**、语义 **0**；`asm-offsets.s` **已生成**
+（2026-07-17，远程 `test_asm_offsets.py` exit 0）。验收脚本：
+`scripts/test_asm_offsets.py`。
 
 ## 已实现模块（2026-07-16 扩展）
 

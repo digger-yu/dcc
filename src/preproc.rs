@@ -2301,7 +2301,7 @@ impl Preprocessor {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
         // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V5");
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V6");
         for name in names {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
@@ -2323,7 +2323,7 @@ impl Preprocessor {
     fn get_cache_path(&self, file_path: &Path, content_hash: u64, macro_hash: u64) -> Option<PathBuf> {
         let cache_dir = self.cache_dir.as_ref()?;
         let file_hash = Self::hash_content(&file_path.to_string_lossy());
-        let cache_name = format!("v5_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
+        let cache_name = format!("v6_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
         Some(cache_dir.join(cache_name))
     }
 
@@ -2357,7 +2357,13 @@ impl Preprocessor {
                 let params = if parts[1] == "-" {
                     None
                 } else {
-                    Some(parts[1].split(',').map(|s| s.to_string()).collect())
+                    // 零参 function-like 宏缓存为 ""；旧版 split 会误读成 [""]
+                    let p: Vec<String> = parts[1]
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect();
+                    Some(p)
                 };
                 let variadic = parts[2] == "1";
                 let body = parts[3].to_string();
@@ -2623,5 +2629,47 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 42;"), "output: {output}");
+    }
+
+    /// 零参 function-like 宏经缓存往返后仍须匹配 F() 而非误读成 F("")
+    #[test]
+    fn zero_arg_function_macro_roundtrip() {
+        let (output, diags, _) = preprocess(
+            b"#define F() 42\nint x = F();\n",
+            "zero-arg-fn.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 42;"), "output: {output}");
+        assert!(!output.contains("F()"), "macro should expand: {output}");
+    }
+
+    #[test]
+    fn current_thread_info_zero_arg_expands() {
+        let (output, diags, _) = preprocess(
+            b"#define current ((void*)0)\n\
+              #define current_thread_info() ((struct thread_info *)current)\n\
+              struct thread_info { unsigned long syscall_work; };\n\
+              void *p = &current_thread_info()->syscall_work;\n",
+            "cti.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            output.contains("((struct thread_info *)"),
+            "output: {output}"
+        );
+        assert!(
+            !output.contains("current_thread_info->"),
+            "output: {output}"
+        );
     }
 }

@@ -2123,12 +2123,23 @@ impl<'a> Parser<'a> {
                 };
                 if !self.expect(TokKind::Colon, "':'") { return None; }
                 let else_ = self.parse_expr_bp(2)?;
+                let then_ty = then_.ty();
+                let else_ty = else_.ty();
+                let cond_ty = if then_ty == else_ty {
+                    then_ty
+                } else if matches!(then_ty, Type::Ptr(_)) {
+                    then_ty
+                } else if matches!(else_ty, Type::Ptr(_)) {
+                    else_ty
+                } else {
+                    int_t()
+                };
                 lhs = Expr::Cond {
                     cond: Box::new(cond),
                     then_: Box::new(then_),
                     else_: Box::new(else_),
                     span: self.cur.span.clone(),
-                    ty: int_t(),
+                    ty: cond_ty,
                 };
                 continue;
             }

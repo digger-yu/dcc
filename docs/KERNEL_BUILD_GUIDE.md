@@ -14,7 +14,7 @@
 | `scripts/sync_remote_build.sh` | ✅ rsync + 全量远程测试 + autoconf 自愈 |
 | Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行 |
 | Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ |
-| `arch/x86/kernel/asm-offsets.c` 预处理 + 解析 | ✅ 2026-07-16：867→0 解析错误；剩 6 语义错误 |
+| `arch/x86/kernel/asm-offsets.c` 预处理 + 解析 + 代码生成 | ✅ 2026-07-17：867→0 解析；0 语义；`.s` 已生成 |
 | modpost `file2alias.c` 单 TU | ✅ |
 | LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
 | `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc file2alias/empty（modpost/sumversion 待补） |
@@ -94,18 +94,21 @@ cd ~/linux-6.6
 dcc -Wp,-MMD,... -S -o arch/x86/kernel/asm-offsets.s arch/x86/kernel/asm-offsets.c
 ```
 
-**2026-07-16 进展**：
+**2026-07-17 进展**：
 
 | 指标 | 修复前 | 修复后 |
 |------|--------|--------|
 | 解析错误（E0xxx） | ~867 | **0** |
-| 语义错误（E1xxx） | — | 6（percpu / thread_info 成员类型） |
-| `asm-offsets.s` | 未生成 | 仍 blocked（语义阶段） |
+| 语义错误（E1xxx） | 6 | **0** |
+| `asm-offsets.s` | 未生成 | **已生成**（~5 MB） |
 
-主要修复类别：语句表达式后缀调用、typeof(struct)、section 相邻字符串、
+**2026-07-16** 主要修复：语句表达式后缀调用、typeof(struct)、section 相邻字符串、
 asm goto 试探解析、位域逗号分隔、结构体空字段、__auto_type、typedef 函数括号、
 `__builtin_offsetof` 常量求值、object-like→function-like 宏链、多维数组字段、
 for-init 枚举声明、属性后指针函数声明、GNU `?:` 省略中间操作数等。
+
+**2026-07-17** 补充：include 缓存零参 function-like 宏（V6）、三元指针类型、
+内联 asm GNU 局部数字标签（`6:`/`6f`/`6b`）。
 
 辅助脚本：`scripts/test_asm_offsets.py`（一键替换 gcc 为 dcc 并统计错误）、
 `scripts/summarize_err.py`（解析/语义错误分类）。
@@ -332,7 +335,7 @@ DCC 目前处于开发阶段，完整内核编译可能遇到以下问题：
 | 问题 | 原因 | 状态 |
 |------|------|------|
 | 解析器错误 | 复杂宏展开后的 GNU 构造 | asm-offsets **解析已通过**（2026-07-16） |
-| 语义/类型检查 | percpu、thread_info 等内联宏展开类型不完整 | asm-offsets 剩 6 项，持续改进 |
+| 语义/类型检查 | percpu、thread_info 等内联宏展开类型不完整 | asm-offsets **已通过**（2026-07-17） |
 | codegen 不完整 | 部分 x86_64 指令尚未实现 | 持续改进中 |
 | 链接失败 | 缺少完整的链接器支持 | 计划中 |
 
@@ -409,8 +412,8 @@ A: 通常是因为宏定义体中包含注释（如 `HZ CONFIG_HZ /* comment */`
 ### Q: 解析器报 "expected type" 错误
 
 A: 可能是遇到了 DCC 尚未支持的内核构造。使用 `-dump-ast` 查看已解析的部分，
-定位错误位置。`asm-offsets.c` 的典型问题已收敛至语义阶段（E1004/E1010），
-可用 `scripts/summarize_err.py` 区分解析与语义错误。
+定位错误位置。`asm-offsets.c` 已于 2026-07-17 全链路通过；历史问题可用
+`scripts/summarize_err.py` 区分解析与语义错误。
 
 ## 8. 性能对比
 

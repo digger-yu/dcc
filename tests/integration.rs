@@ -1139,3 +1139,39 @@ fn gnu_elvis_operator_compiles() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// 零参 function-like 宏 current_thread_info() + bitop 链
+#[test]
+fn current_thread_info_macro_compiles() {
+    let source = include_str!("fixtures/current_thread_info_macro.c");
+    let output = run_syntax_test("current-thread-info", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 三元表达式指针分支可被解引用
+#[test]
+fn ternary_ptr_deref_compiles() {
+    let source = include_str!("fixtures/ternary_ptr_deref.c");
+    let output = run_syntax_test("ternary-ptr-deref", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// GNU 局部数字标签 6: / 6f / 6b
+#[test]
+fn asm_local_label_compiles() {
+    let source = include_str!("fixtures/asm_local_label.c");
+    let (output, _obj) = run_object_test("asm-local-label", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
