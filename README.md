@@ -198,13 +198,41 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | P3 | 后端 | 定点数运算 | 已实现 | _Fract/_Accum 加减，复用整数 codegen |
 <!-- -->
 
-### 十、C++ 专属 (不适用)
+### 十、C++ 专属
 
-DCC 定位为 C 编译器，以下 C++ 专属能力不在当前路线图中:
-- 运算符重载、Lambda 表达式、RTTI (typeid/dynamic_cast)
-- constexpr/consteval、模板元编程
-- 类/继承/虚函数、命名空间
-- std::complex、std::atomic
+DCC 在 M7 阶段引入最小 C++ 前端（`src/cpp/`），通过 Itanium ABI 名字
+修饰 + C 风格降级复用现有 C 后端。`class` / ctor / dtor / 成员函数
+/ 成员变量 / `this->x` / `::` / new / delete / 引用（→指针）可降级到
+C 字符串并经 dcc 编译，详细映射见 `docs/architecture.md` 的 C++ 前端
+M7 章节。
+
+**M7 已实现**：
+
+- `class` / 成员变量 → struct 字段
+- ctor / dtor（声明 + 定义）
+- 成员函数（隐式 this 形参 + Itanium 修饰）
+- `this->member` 访问
+- `::` 作用域解析
+- `new T(...)` / `delete p`（降级到 `_Znwm` / `_ZdlPv`）
+- `T&` 引用降级为 `T*`
+- 基础 Itanium ABI 名字修饰（成员函数 / ctor / dtor / 指针 / 引用）
+
+**M7 暂不支持**（`docs/missing_features.md` 有详细状态表）：
+
+- 运算符重载（除 new/delete 外）
+- Lambda 表达式
+- RTTI（`typeid` / `dynamic_cast`）
+- `constexpr` / `consteval`
+- 模板与模板元编程
+- 继承 / 虚函数 / vtable
+- 命名空间
+- `std::complex` / `std::atomic` 等标准库组件
+- 异常（`try` / `catch` / `throw`）
+- 多继承 / 钻石继承
+
+完整 GCC bootstrap 仍受阻：M7 仅能编译 libiberty/fixincludes/libdecnumber
+等纯 C 子集，cc1/cc1plus 需模板、异常、vtable、RTTI 至少其中之一
+（计划 M8+ 完成）。
 
 ### Linux 内核编译硬性门槛
 
