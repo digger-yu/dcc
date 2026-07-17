@@ -127,6 +127,9 @@ enum AsmOperand {
     Sym(String),           // 符号/标签名
 }
 
+/// parse_asm_mem 中 %rip 相对寻址的 base 哨兵值
+const ASM_BASE_RIP: u8 = 255;
+
 /// 内联 asm 约束绑定结果
 struct AsmOpBinding {
     /// 分配到的物理寄存器索引 (rax=0 …)
@@ -6297,10 +6300,10 @@ impl Codegen {
         let mut idx = 0usize;
         for op in outputs.iter().chain(inputs.iter()) {
             let key = format!("%{}", idx);
-            if let Some(val) = Self::eval_asm_operand(op) {
+            if let Some(val) = op_map.get(&key) {
+                resolved = resolved.replace(&key, &Self::asm_format_subst(val));
+            } else if let Some(val) = Self::eval_asm_operand(op) {
                 resolved = resolved.replace(&key, &val);
-            } else if let Some(reg) = op_map.get(&key) {
-                resolved = resolved.replace(&key, &Self::asm_format_subst(reg));
             }
             idx += 1;
         }
@@ -6318,7 +6321,7 @@ impl Codegen {
                 resolved = resolved.replace(key, &Self::asm_format_subst(reg));
             }
         }
-        resolved
+        Self::unescape_asm_template(&resolved)
     }
 
     /// 发射已替换操作数后的 asm 模板行（含 GNU 局部数字标签）
@@ -6475,6 +6478,7 @@ impl Codegen {
             "r13" => Some((13, 64)), "r13d" => Some((13, 32)), "r13w" => Some((13, 16)), "r13b" => Some((13, 8)),
             "r14" => Some((14, 64)), "r14d" => Some((14, 32)), "r14w" => Some((14, 16)), "r14b" => Some((14, 8)),
             "r15" => Some((15, 64)), "r15d" => Some((15, 32)), "r15w" => Some((15, 16)), "r15b" => Some((15, 8)),
+            "rip" => Some((ASM_BASE_RIP, 64)),
             _ => None,
         }
     }
@@ -6531,6 +6535,9 @@ impl Codegen {
         } else { return AsmOperand::None; };
         let parts: Vec<&str> = inner.split(',').collect();
         let base_str = parts.first().map(|s| s.trim()).unwrap_or("");
+        if base_str == "%rip" || base_str == "rip" {
+            return AsmOperand::Mem { disp, base: ASM_BASE_RIP, index: None, scale: 1 };
+        }
         let (base, _bsz) = Self::parse_asm_reg(base_str).unwrap_or((5, 64)); // 默认 rbp
         let mut idx: Option<u8> = None;
         let mut scale: u8 = 1;
@@ -6546,10 +6553,82 @@ impl Codegen {
         AsmOperand::Mem { disp, base, index: idx, scale }
     }
 
+    /// 处理 GAS 伪指令（-c 模式下静默跳过或填充，避免降级为 nop 警告）
+    fn emit_asm_directive(&mut self, line: &str) -> bool {
+        let t = line.trim();
+        if !t.starts_with('.') {
+            return false;
+        }
+        let parts: Vec<&str> = t.split_whitespace().collect();
+        if parts.is_empty() {
+            return true;
+        }
+        match parts[0] {
+            ".pushsection" | ".popsection" | ".section" | ".previous"
+            | ".type" | ".size" | ".ident" | ".globl" | ".global"
+            | ".weak" | ".hidden" | ".protected" => true,
+            ".balign" | ".p2align" | ".align" => {
+                if let Some(n) = parts.get(1).and_then(|s| s.trim_end_matches(',').parse::<usize>().ok()) {
+                    let align = if parts[0] == ".p2align" {
+                        1usize << n.min(12)
+                    } else {
+                        n.max(1)
+                    };
+                    while !self.code.is_empty() && self.code.len() % align != 0 {
+                        self.emit(&[0x90]);
+                    }
+                }
+                true
+            }
+            ".long" => {
+                self.emit(&[0u8; 4]);
+                true
+            }
+            ".quad" => {
+                self.emit(&[0u8; 8]);
+                true
+            }
+            ".byte" => {
+                if let Some(v) = parts.get(1).and_then(|s| Self::parse_asm_imm_token(s)) {
+                    self.emit(&[(v & 0xFF) as u8]);
+                }
+                true
+            }
+            ".asciz" | ".string" => {
+                if let Some(s) = parts.get(1) {
+                    let s = s.trim_matches('"');
+                    for b in s.bytes() {
+                        self.emit(&[b]);
+                    }
+                    self.emit(&[0]);
+                }
+                true
+            }
+            _ => t.starts_with('.'),
+        }
+    }
+
+    fn parse_asm_imm_token(s: &str) -> Option<i64> {
+        let s = s.trim().trim_end_matches(',');
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            i64::from_str_radix(hex, 16).ok()
+        } else {
+            s.parse().ok()
+        }
+    }
+
+    /// GNU 内联 asm 模板：`%%` 折叠为字面量 `%`（在 `%N` 占位符替换之后调用）
+    fn unescape_asm_template(s: &str) -> String {
+        s.replace("%%", "%")
+    }
+
     /// 发射单条 AT&T 汇编指令
     fn emit_asm_line(&mut self, line: &str) {
-        let line = AsmLocalLabels::strip_asm_comment(line).trim();
+        let line = Self::unescape_asm_template(AsmLocalLabels::strip_asm_comment(line).trim());
         if line.is_empty() {
+            return;
+        }
+        if self.emit_asm_directive(&line) {
             return;
         }
         // 处理前缀: lock, rep, repz, repnz
@@ -6560,7 +6639,7 @@ impl Codegen {
         } else if line.starts_with("repnz ") || line.starts_with("repnz\t") || line.starts_with("repe ") {
             (Some(0xF2u8), line[6..].trim())
         } else {
-            (None, line)
+            (None, line.as_str())
         };
         // 分割助记符和操作数
         let (mnemonic, operands_str) = if let Some(pos) = rest.find(|c: char| c == ' ' || c == '\t') {
@@ -6690,7 +6769,10 @@ impl Codegen {
             "neg" | "negq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 3, 64),
             "not" | "notq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 2, 64),
             "inc" | "incq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 64),
+            "incl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 32),
+            "incw" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 16),
             "dec" | "decq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 1, 64),
+            "decl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 1, 32),
 
             // 移位
             "shl" | "sal" | "shlq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 64),
@@ -6712,6 +6794,26 @@ impl Codegen {
             "btsl" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xAB, 32),
             "btr" | "btrq" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xB3, 64),
             "btrl" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xB3, 32),
+            "btrw" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xB3, 16),
+            "btc" | "btcq" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xBB, 64),
+            "btcl" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xBB, 32),
+            "btcw" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xBB, 16),
+
+            // 位扫描 / popcnt / bswap
+            "bsf" | "bsfq" if ops.len() == 2 => self.emit_asm_scan(&ops[0], &ops[1], 0xBC, 64),
+            "bsfl" if ops.len() == 2 => self.emit_asm_scan(&ops[0], &ops[1], 0xBC, 32),
+            "bsr" | "bsrq" if ops.len() == 2 => self.emit_asm_scan(&ops[0], &ops[1], 0xBD, 64),
+            "bsrl" if ops.len() == 2 => self.emit_asm_scan(&ops[0], &ops[1], 0xBD, 32),
+            "popcnt" | "popcntq" if ops.len() == 2 => self.emit_asm_popcnt(&ops[0], &ops[1], 64),
+            "popcntl" if ops.len() == 2 => self.emit_asm_popcnt(&ops[0], &ops[1], 32),
+            "bswap" | "bswapq" if ops.len() == 1 => self.emit_asm_bswap(&ops[0], 64),
+            "bswapl" if ops.len() == 1 => self.emit_asm_bswap(&ops[0], 32),
+
+            // 非 temporal store / 虚拟化
+            "movnti" | "movntil" if ops.len() == 2 => self.emit_asm_movnt(&ops[0], &ops[1], 32),
+            "movntiq" if ops.len() == 2 => self.emit_asm_movnt(&ops[0], &ops[1], 64),
+            "vmcall" => self.emit(&[0x0F, 0x01, 0xC1]),
+            "vmmcall" => self.emit(&[0x0F, 0x01, 0xD9]),
 
             // 跳转
             "jmp" if ops.len() == 1 => self.emit_asm_jmp(&ops[0]),
@@ -6794,6 +6896,10 @@ impl Codegen {
                     self.emit(&[0x68]); self.emit(&(*v as i32).to_le_bytes());
                 }
             }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xFF]);
+                self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
+            }
             _ => {
                 eprintln!("warning: unsupported push operand pattern, emitted as nop");
                 self.emit(&[0x90]);
@@ -6806,6 +6912,10 @@ impl Codegen {
             AsmOperand::Reg(r, _) => {
                 if *r >= 8 { self.emit(&[0x41]); }
                 self.emit(&[0x58 + (r & 7)]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x8F]);
+                self.emit_asm_modrm_mem_only(0, *disp, *base, *index, *scale);
             }
             _ => {
                 eprintln!("warning: unsupported pop operand pattern, emitted as nop");
@@ -6871,6 +6981,12 @@ impl Codegen {
 
     fn emit_asm_load(&mut self, dst: u8, disp: i32, base: u8, index: Option<u8>, scale: u8, bits: u8) {
         let w = bits == 64;
+        if base == ASM_BASE_RIP {
+            if bits == 16 { self.emit(&[0x66]); }
+            self.emit(&[Self::rex(w, dst, 0, 0), 0x8B]);
+            self.emit_asm_modrm_mem_only(dst, disp, ASM_BASE_RIP, None, 1);
+            return;
+        }
         let has_sib = index.is_some() || (base & 7) == 4; // rsp/r12 需要 SIB
         let need_disp = disp != 0 || (base & 7) == 5; // rbp/r13 强制 disp8
         if bits == 16 { self.emit(&[0x66]); }
@@ -6902,6 +7018,12 @@ impl Codegen {
 
     fn emit_asm_store(&mut self, src: u8, disp: i32, base: u8, index: Option<u8>, scale: u8, bits: u8) {
         let w = bits == 64;
+        if base == ASM_BASE_RIP {
+            if bits == 16 { self.emit(&[0x66]); }
+            self.emit(&[Self::rex(w, src, 0, 0), 0x89]);
+            self.emit_asm_modrm_mem_only(src, disp, ASM_BASE_RIP, None, 1);
+            return;
+        }
         let has_sib = index.is_some() || (base & 7) == 4;
         let need_disp = disp != 0 || (base & 7) == 5;
         if bits == 16 { self.emit(&[0x66]); }
@@ -6958,6 +7080,12 @@ impl Codegen {
     fn emit_asm_lea(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
         if let (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) = (src, dst) {
             let w = bits == 64;
+            if *base == ASM_BASE_RIP {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, *d, 0, 0), 0x8D]);
+                self.emit_asm_modrm_mem_only(*d, *disp, ASM_BASE_RIP, None, 1);
+                return;
+            }
             self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x8D]);
             let has_sib = index.is_some() || (base & 7) == 4;
             let need_disp = *disp != 0 || (base & 7) == 5;
@@ -7045,6 +7173,15 @@ impl Codegen {
     }
 
     fn emit_asm_modrm_mem_only(&mut self, reg: u8, disp: i32, base: u8, index: Option<u8>, scale: u8) {
+        if base == ASM_BASE_RIP {
+            let mut modrm = ((reg & 7) << 3) | 0x05;
+            if disp != 0 {
+                modrm = ((reg & 7) << 3) | 0x85;
+            }
+            self.emit(&[modrm]);
+            self.emit(&disp.to_le_bytes());
+            return;
+        }
         let has_sib = index.is_some() || (base & 7) == 4;
         let need_disp = disp != 0 || (base & 7) == 5;
         let mut modrm = (reg & 7) << 3;
@@ -7121,6 +7258,11 @@ impl Codegen {
                     self.emit(&[*v as u8]);
                 }
             }
+            (AsmOperand::Reg(c, _), AsmOperand::Mem { disp, base, index, scale }) if *c == 1 => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, 0, index.unwrap_or(0), *base), 0xD3]);
+                self.emit_asm_modrm_mem_only(op, *disp, *base, *index, *scale);
+            }
             _ => {
                 eprintln!("warning: unsupported shift operand pattern, emitted as nop");
                 self.emit(&[0x90]);
@@ -7172,9 +7314,22 @@ impl Codegen {
                     0xA3 => 4,
                     0xAB => 5,
                     0xB3 => 6,
+                    0xBB => 7,
                     _ => 4,
                 };
                 self.emit(&[Self::rex(w, 0, 0, *d), 0x0F, 0xBA, Self::modrm_reg_reg(ext, *d), *v as u8]);
+            }
+            (AsmOperand::Imm(v), AsmOperand::Mem { disp, base, index, scale }) => {
+                let ext = match opcode {
+                    0xA3 => 4,
+                    0xAB => 5,
+                    0xB3 => 6,
+                    0xBB => 7,
+                    _ => 4,
+                };
+                self.emit(&[Self::rex(w, 0, index.unwrap_or(0), *base), 0x0F, 0xBA]);
+                self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+                self.emit(&[*v as u8]);
             }
             (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
                 self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
@@ -7188,11 +7343,22 @@ impl Codegen {
     }
 
     fn emit_asm_imul2(&mut self, src: &AsmOperand, dst: &AsmOperand) {
-        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
-            self.emit(&[Self::rex(true, *d, 0, *s), 0x0F, 0xAF, Self::modrm_reg_reg(*d, *s)]);
-        } else {
-            eprintln!("warning: unsupported imul2 operand pattern, emitted as nop");
-            self.emit(&[0x90]);
+        match (src, dst) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                self.emit(&[Self::rex(true, *d, 0, *s), 0x0F, 0xAF, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) => {
+                self.emit(&[Self::rex(true, *d, index.unwrap_or(0), *base), 0x0F, 0xAF]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
+                self.emit(&[Self::rex(true, *s, index.unwrap_or(0), *base), 0x0F, 0xAF]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported imul2 operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
         }
     }
 
@@ -7215,6 +7381,11 @@ impl Codegen {
         match op {
             AsmOperand::Reg(r, _) => {
                 self.emit(&[Self::rex(w, 0, 0, *r), 0xF7, Self::modrm_reg_reg(ext, *r)]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, 0, index.unwrap_or(0), *base), 0xF7]);
+                self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             }
             _ => {
                 eprintln!("warning: unsupported unary operand pattern, emitted as nop");
@@ -7345,9 +7516,20 @@ impl Codegen {
     }
 
     fn emit_asm_cmov(&mut self, src: &AsmOperand, dst: &AsmOperand, cc: u8) {
-        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
-            self.emit(&[Self::rex(true, *d, 0, *s), 0x0F, cc, Self::modrm_reg_reg(*d, *s)]);
-        } else { self.emit(&[0x90]); }
+        match (src, dst) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                self.emit(&[Self::rex(true, *d, 0, *s), 0x0F, cc, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) => {
+                self.emit(&[Self::rex(true, *d, index.unwrap_or(0), *base), 0x0F, cc]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
+                self.emit(&[Self::rex(true, *s, index.unwrap_or(0), *base), 0x0F, cc]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            _ => self.emit(&[0x90]),
+        }
     }
 
     fn emit_asm_setcc(&mut self, op: &AsmOperand, cc: u8) {
@@ -7400,6 +7582,72 @@ impl Codegen {
                 eprintln!("warning: unsupported xadd operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
+        }
+    }
+
+    /// bsf/bsr: AT&T src, dst（dst 接收位索引）
+    fn emit_asm_scan(&mut self, src: &AsmOperand, dst: &AsmOperand, opcode: u8, bits: u8) {
+        let w = bits == 64;
+        match (src, dst) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                self.emit(&[Self::rex(w, *d, 0, *s), 0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, opcode]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported scan operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    fn emit_asm_popcnt(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        let w = bits == 64;
+        match (src, dst) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                self.emit(&[Self::rex(w, *d, 0, *s), 0xF3, 0x0F, 0xB8, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) => {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xB8]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported popcnt operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    fn emit_asm_bswap(&mut self, op: &AsmOperand, bits: u8) {
+        if let AsmOperand::Reg(r, _) = op {
+            if bits == 64 {
+                if *r >= 8 { self.emit(&[0x49]); } else { self.emit(&[0x48]); }
+                self.emit(&[0x0F, 0xC8 + (r & 7)]);
+            } else {
+                if *r >= 8 { self.emit(&[0x41]); }
+                self.emit(&[0x0F, 0xC8 + (r & 7)]);
+            }
+        } else {
+            eprintln!("warning: unsupported bswap operand pattern, emitted as nop");
+            self.emit(&[0x90]);
+        }
+    }
+
+    /// movnti: AT&T src(reg), dst(mem)
+    fn emit_asm_movnt(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        let w = bits == 64;
+        let opcode = if bits == 64 { 0xC7 } else { 0xC3 };
+        if let (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) = (src, dst) {
+            if bits == 16 { self.emit(&[0x66]); }
+            self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
+            self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+        } else {
+            eprintln!("warning: unsupported movnt operand pattern, emitted as nop");
+            self.emit(&[0x90]);
         }
     }
 

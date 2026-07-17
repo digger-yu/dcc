@@ -109,7 +109,8 @@ for-init 枚举声明、属性后指针函数声明、GNU `?:` 省略中间操�
 
 **2026-07-17** 补充：include 缓存零参 function-like 宏（V6）、三元指针类型、
 内联 asm GNU 局部数字标签（`6:`/`6f`/`6b`）、**`-O2` 保留 `goto` 目标 C 标签**、
-**同行标签拆分**（`1:jmp` / `found: ret`）、**mini-asm 位测试与 shld/shrd**。
+**同行标签拆分**（`1:jmp` / `found: ret`）、**mini-asm 位测试/shld/shrd/bsf/popcnt/bswap/movnt**、
+**GAS 伪指令**（`.pushsection`/`.balign`/`.long`/`.quad`）、**lock/rep 前缀**。
 
 **modpost 宿主 C（2026-07-17）**：
 

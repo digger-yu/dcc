@@ -226,5 +226,17 @@ EOF
 "$DCC" -o "$TMP/simd" "$TMP/simd.c" && "$TMP/simd"
 check "vector_simd_scalar" test $? -eq 0
 
+cat > "$TMP/asm_ext.c" <<'EOF'
+int g[4] = {1, 2, 3, 4};
+__asm__(".pushsection .t,\"a\"\n.balign 4\n.long 1\n.popsection\n");
+unsigned long f(unsigned long x) {
+	asm volatile("btsq $5, %0\n\tpopcntq %0, %0\n\tbswapq %0" : "+r"(x) :: "cc");
+	return x;
+}
+int main(void) { return (int)(f(0x100) & 0xff); }
+EOF
+"$DCC" -c -o "$TMP/asm_ext.o" "$TMP/asm_ext.c" 2>"$TMP/asm_ext.err"
+check "asm_extended_no_nop" bash -c "! grep -q 'emitted as nop' '$TMP/asm_ext.err' && test -f '$TMP/asm_ext.o'"
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

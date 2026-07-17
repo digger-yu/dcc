@@ -191,9 +191,14 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 - **局部数字标签**：`6:` / `6f` / `6b` 映射为内部符号（`AsmLocalLabels`）。
 - **AT&T 行内注释**：`strip_asm_comment` 剥离 `#` 后注释，避免 asm goto
   `jmp %l[x] # objtool NOPs this` 将注释误当作标签名。
-- **指令子集**：除 mov/alu/jcc 外，含 `btl/bts/btr`、`shld/shrd`、`adc/sbb`、
-  `cmpxchg`/`xadd` 内存操作数、`movzbl` 内存源、`setcc` 内存目标、
-  `cmp`/`test` 内存操作数等；未识别指令 warning + nop 占位。
+- **模板转义**：`%%` 在 `%N` 占位符替换后折叠为 `%`（GNU 内联 asm 寄存器字面量）。
+- **指令子集**：除 mov/alu/jcc 外，含 `bt/bts/btr/btc`、`bsf/bsr/popcnt`、`bswap`、
+  `movnti(l/q)`、`vmcall/vmmcall`、`shld/shrd`、`adc/sbb`、
+  `cmpxchg`/`xadd`/`cmov` 内存操作数、`movzbl` 内存源、`setcc` 内存目标、
+  `push`/`pop` 内存操作数、`lea symbol(%rip)`、GAS 伪指令
+  （`.pushsection`/`.balign`/`.long`/`.quad`/`.popsection` 等，`-c` 静默填充）、
+  `lock`/`rep` 前缀；`cmp`/`test`/shift/imul/unary 内存操作数等；
+  未识别指令 warning + nop 占位。
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
   局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（不用 XMM 向量指令）；
   非 Ident 向量（binop、compound literal、InitList）经 `gen_vector_to_temp` 物化；

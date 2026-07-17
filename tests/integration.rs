@@ -1632,6 +1632,22 @@ fn asm_cmpxchg_mem_compiles() {
     );
 }
 
+/// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
+#[test]
+fn asm_extended_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/asm_extended.c");
+    let (output, _obj) = run_object_test("asm-extended", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// 预处理残留的 _DECLARE_STATIC_KEY_0 → extern struct static_key_false
 #[test]
 fn static_key_maybe_compiles() {

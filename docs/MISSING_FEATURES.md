@@ -39,10 +39,12 @@
 | 内联 asm 约束 | `examples/test_asm_constraints.c` |
 | SysV va_list SSE | `examples/test_p4_va_list.c`（GP + float/double） |
 | Mini x86 asm 局部/C 标签 | `tests/fixtures/asm_local_label.c`、`asm_label_insn.c`（`N:`/`N:insn`/`found:`） |
-| Mini x86 asm 位操作 / 双精度移位 | codegen `btl/bts/btr`、`shld/shrd`（内核 paravirt 等） |
+| Mini x86 asm 位操作 / 双精度移位 | codegen `bt/bts/btr/btc`、`shld/shrd`（内核 paravirt 等） |
+| Mini x86 asm 扩展位/字节/NT/虚拟化 | `bsf/bsr/popcnt/bswap/movnt*`、`vmcall/vmmcall`、RIP-relative、`push/pop` mem |
+| Mini x86 asm GAS 伪指令 / 前缀 | `.pushsection`/`.balign`/`.long`/`.quad`/`.popsection`；`lock`/`rep` |
 | 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；`.data` 逐元素静态 init + 运行时 binop |
 | 非 Ident 向量 rvalue | `tests/fixtures/vector_binop_non_ident.c`；`(a+b)+c`、`v=v+w` |
-| x86_64 codegen 扩展 | ✅ 向量全局/rvalue init、复数四则/Cast、object_size fold、apply/return 子集；mini-asm 仍部分 nop |
+| x86_64 codegen 扩展 | ✅ 向量全局/rvalue init、复数四则/Cast、object_size fold、apply/return 子集；mini-asm 大幅扩展，极少数 exotic 仍 nop |
 | aarch64 typed IR | hello/控制流/调用/浮点/向量/rodata；见 `aarch64_*_cross_compile` |
 | riscv64 typed IR | hello/控制流/调用/rodata；见 `riscv64_*_cross_compile` |
 | 诊断 snapshot 格式锁定 | `tests/errors.rs` schema + `diagnostic_format.stderr.snap`（V1） |
@@ -134,6 +136,9 @@
 | `-O2` 后 `goto found` panic | DCE 删除 `return` 后 C 标签 | `opt.rs` 保留 `Stmt::Label` |
 | 同行 `1:jmp` / `found: ret` | 整行当助记符 `1:jmp` | `expand_label_insn_lines` 拆分 |
 | `btl`/`shld` 等 nop 降级 | mini-asm 缺编码 | `emit_asm_bit` / `emit_asm_shld_shrd` |
+| `btsq`/`bsf`/`popcnt`/`bswap`/`movnt*` nop | mini-asm 缺编码 | `emit_asm_scan`/`popcnt`/`bswap`/`movnt` |
+| GAS 伪指令 `.long`/`.balign` nop | 未识别 `.` 行 | `emit_asm_directive` 静默填充 |
+| `push`/`pop`/`cmov` 内存操作数 nop | 操作数模式不全 | 扩展 `emit_asm_*` mem/RIP 分支 |
 | duplicate typedef（modpost 宿主头） | 多 TU 重复 `#include` 相同 typedef | `register_typedef` 允许 `types_compatible` 重定义 |
 | `index`/`basename` E0007 | 局部变量与 libc 函数原型同名 | 函数体内局部声明不查 `globals` |
 | `typeof(_Generic(...))` | `_Generic` 被当作类型名 | `typeof_operand_is_type_form` 排除 `_Generic` |
@@ -143,6 +148,7 @@
 | 向量 binop 非 Ident 操作数 | `gen_scalar_vector_load` 从 rax 误读 | `gen_vector_to_temp` 物化到 slot |
 
 **当前 asm-offsets 状态**：解析 **0**、语义 **0**；`-O2` 不再 panic `unresolved label: found`；
+mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`tests/fixtures/asm_extended.c`）；
 全树 `-O2 -c` 仍可能遇 paravirt 类型冲突等后续阻塞。验收脚本：
 `scripts/test_asm_offsets.py`。
 
