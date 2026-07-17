@@ -66,6 +66,7 @@ pub struct Parser<'a> {
     decl_storage: StorageClass,     // 最近一次声明说明符中的存储类
     decl_attrs: ParsedAttrs,        // 类型说明符之间出现的 GNU 属性
     decl_auto_type: bool,           // __auto_type：类型由初始化表达式推导
+    allow_named_type: bool,         // typeof 等上下文允许 Type::Named
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -82,7 +83,8 @@ impl<'a> Parser<'a> {
                enum_defs: HashMap::new(), enum_consts: HashMap::new(),
                locals: HashMap::new(), globals: HashMap::new(), in_function: false,
                last_variadic: false, decl_storage: StorageClass::default(),
-               decl_attrs: ParsedAttrs::default(), decl_auto_type: false }
+               decl_attrs: ParsedAttrs::default(), decl_auto_type: false,
+               allow_named_type: false }
     }
     fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
 
@@ -104,6 +106,70 @@ impl<'a> Parser<'a> {
             d.hint = Some(h.into());
         }
         self.diags.push(d);
+    }
+    fn warn_here(&mut self, code: &'static str, msg: impl Into<String>, hint: Option<&str>) {
+        let mut d = Diagnostic::warn(code, msg, self.cur.span.clone());
+        if let Some(h) = hint {
+            d.hint = Some(h.into());
+        }
+        self.diags.push(d);
+    }
+    /// 登记 typedef，重复名称报 E0005
+    fn register_typedef(&mut self, name: &Ident, ty: Type) -> bool {
+        if self.typedefs.contains_key(&name.name) {
+            self.diags.push(Diagnostic::err(
+                "E0005",
+                format!("duplicate typedef '{}'", name.name),
+                name.span.clone(),
+            ).with_hint("each typedef name may only be defined once"));
+            return false;
+        }
+        self.typedefs.insert(name.name.clone(), ty);
+        true
+    }
+    /// 变量/参数重声明类型冲突报 E0007
+    fn check_var_redecl(&mut self, name: &str, ty: &Type, span: Span) -> bool {
+        let existing = self
+            .locals
+            .get(name)
+            .or_else(|| self.globals.get(name));
+        if let Some(existing) = existing {
+            if existing != ty {
+                self.diags.push(Diagnostic::err(
+                    "E0007",
+                    format!("conflicting types for redeclaration of '{}'", name),
+                    span,
+                ).with_hint("use the same type as the previous declaration"));
+                return false;
+            }
+        }
+        true
+    }
+    /// 声明说明符后是否像声明符（非类型名）
+    fn peek_decl_context(&self) -> bool {
+        matches!(
+            self.peek.kind,
+            TokKind::Semi | TokKind::Comma | TokKind::Assign | TokKind::LParen | TokKind::Star
+        )
+    }
+    /// typeof 括号内是类型形式还是表达式形式
+    fn typeof_operand_is_type_form(&self) -> bool {
+        if self.is_type_start() {
+            return true;
+        }
+        if self.cur.kind == TokKind::Ident {
+            let n = self.cur.text.clone();
+            return !self.typedefs.contains_key(&n)
+                && !self.locals.contains_key(&n)
+                && !self.globals.contains_key(&n);
+        }
+        false
+    }
+    fn has_storage_without_base(&self, base: &Option<Type>) -> bool {
+        base.is_none()
+            && (self.decl_storage.is_static
+                || self.decl_storage.is_extern
+                || self.decl_storage.is_register)
     }
     fn expect(&mut self, k: TokKind, what: &str) -> bool {
         if self.cur.kind == k { self.advance(); return true; }
@@ -645,7 +711,7 @@ impl<'a> Parser<'a> {
                     let func_ty = Type::Func(Box::new(ty), params.iter().map(|p| p.ty.clone()).collect());
                     let sp = name.span.clone();
                     if !self.expect(TokKind::Semi, "';'") { return None; }
-                    self.typedefs.insert(name.name.clone(), func_ty.clone());
+                    if !self.register_typedef(&name, func_ty.clone()) { return None; }
                     return Some(vec![Decl::Typedef { name, ty: func_ty, span: sp }]);
                 }
             }
@@ -664,7 +730,7 @@ impl<'a> Parser<'a> {
                     let ptr_ty = Type::Ptr(Box::new(func_ty));
                     let sp = name.span.clone();
                     if !self.expect(TokKind::Semi, "';'") { return None; }
-                    self.typedefs.insert(name.name.clone(), ptr_ty.clone());
+                    if !self.register_typedef(&name, ptr_ty.clone()) { return None; }
                     return Some(vec![Decl::Typedef { name, ty: ptr_ty, span: sp }]);
                 }
             }
@@ -677,7 +743,7 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RParen, "')'") { return None; }
                 let func_ty = Type::Func(Box::new(ty.clone()), params.iter().map(|p| p.ty.clone()).collect());
                 if !self.expect(TokKind::Semi, "';'") { return None; }
-                self.typedefs.insert(name.name.clone(), func_ty.clone());
+                if !self.register_typedef(&name, func_ty.clone()) { return None; }
                 return Some(vec![Decl::Typedef { name, ty: func_ty, span: sp }]);
             }
             // 数组 typedef: typedef T name[N] / name[]
@@ -698,7 +764,7 @@ impl<'a> Parser<'a> {
             }
             let ty = self.try_parse_vector_attr(ty);
             if !self.expect(TokKind::Semi, "';'") { return None; }
-            self.typedefs.insert(name.name.clone(), ty.clone());
+            if !self.register_typedef(&name, ty.clone()) { return None; }
             return Some(vec![Decl::Typedef { name, ty, span: sp }]);
         }
         // struct/union/enum 定义或声明
@@ -923,6 +989,9 @@ impl<'a> Parser<'a> {
             let id = self.parse_ident()?;
             if !self.expect(TokKind::RParen, "')'") { return None; }
             id
+        } else if self.cur.kind == TokKind::LParen && self.peek.kind != TokKind::Star {
+            // 无名函数定义: int () { ... } — IR 阶段报 E1002
+            Ident { name: String::new(), span: self.cur.span.clone() }
         } else {
             self.parse_ident()?
         };
@@ -1041,6 +1110,19 @@ impl<'a> Parser<'a> {
                 section: arr_attrs.section, alignment: arr_attrs.alignment, is_weak: arr_attrs.is_weak,
                 visibility: arr_attrs.visibility, is_unused: arr_attrs.is_unused, register_name: arr_attrs.register_name, cleanup_fn: arr_attrs.cleanup_fn })])
         } else {
+            if matches!(ty, Type::Void) {
+                self.err_here(
+                    "E0008",
+                    "variable declared with void type",
+                    Some("variables must have a complete object type; use 'void *' for generic pointers"),
+                );
+                return None;
+            }
+            if !name_for_decl.name.is_empty()
+                && !self.check_var_redecl(&name_for_decl.name, &ty, sp.clone())
+            {
+                return None;
+            }
             // 变量名后可能有 __attribute__((unused)) 和 __asm__("label") 等
             let var_attrs = self.parse_attributes();
             let mut attrs = Self::merge_attrs(pre_attrs, var_attrs);
@@ -1177,8 +1259,10 @@ impl<'a> Parser<'a> {
                     self.advance();
                     if self.cur.kind == TokKind::LParen {
                         self.advance();
-                        if self.is_type_start() {
+                        if self.typeof_operand_is_type_form() {
+                            self.allow_named_type = true;
                             let ty = self.parse_type()?;
+                            self.allow_named_type = false;
                             if self.cur.kind == TokKind::RParen { self.advance(); }
                             return Some(self.finish_type(ty, specifiers_only));
                         } else {
@@ -1336,12 +1420,26 @@ impl<'a> Parser<'a> {
                 self.skip_attributes();
                 return Some(self.finish_type(ty, specifiers_only));
             }
+            if self.allow_named_type {
+                let name = self.cur.text.clone();
+                self.advance();
+                return Some(self.finish_type(Type::Named(name), specifiers_only));
+            }
+            if specifiers_only && self.has_storage_without_base(&base) && self.peek_decl_context() {
+                self.warn_here(
+                    "W0001",
+                    "type defaults to 'int' in declaration without a type specifier",
+                    Some("add an explicit type such as 'int'"),
+                );
+                base = Some(Type::Int);
+            } else {
             let name = self.cur.text.clone();
             self.diags.push(Diagnostic::err("E0009",
                 format!("unknown type or typedef '{}'", name),
                 self.cur.span.clone()).with_hint("declare the typedef before using it"));
             self.advance();
             return None;
+            }
         }
         // 基本类型
         let mut is_complex = false;
@@ -1667,9 +1765,17 @@ impl<'a> Parser<'a> {
 
     fn parse_enum_body(&mut self) -> Vec<(Ident, Option<i64>)> {
         let mut vs = vec![];
+        let mut seen = std::collections::HashSet::new();
         while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
             if self.cur.kind == TokKind::Comma { self.advance(); continue; }
             let nm = match self.parse_ident() { Some(id) => id, None => { self.advance(); continue; } };
+            if !seen.insert(nm.name.clone()) {
+                self.err_here(
+                    "E0005",
+                    format!("duplicate enum member '{}'", nm.name),
+                    Some("each enumerator name must be unique"),
+                );
+            }
             let val = if self.cur.kind == TokKind::Assign {
                 self.advance();
                 // 枚举值必须是整型常量表达式，不能含逗号运算符 (A = 0, B 会误吞后续成员)

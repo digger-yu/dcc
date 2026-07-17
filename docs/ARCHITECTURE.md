@@ -78,17 +78,16 @@ error[E0001]: expected ';', got '{'
 
 ### Snapshot 回归（tests/errors.rs）
 
-失败路径的诊断格式由 snapshot 锁定，与 59 项 integration 成功路径互补:
+失败路径的诊断格式由 snapshot 锁定，与 59 项 integration 成功路径互补。  
+**完整错误码说明见 [DIAGNOSTICS.md](./DIAGNOSTICS.md)。**
 
 | 目录 | 内容 |
 |------|------|
-| `tests/fixtures/errors/*.c` | 24 个触发 fixture |
-| `tests/fixtures/errors/*.stderr.snap` | 归一化 stderr 黄金文件 |
+| `tests/fixtures/errors/*.c` | 触发 fixture |
+| `tests/fixtures/errors/*.stderr.snap` | 归一化 stderr 黄金文件（34 个） |
 | `scripts/update_error_snapshots.sh` | Linux 上一键刷新 snapshot |
 
-覆盖 **E0001–E0013**（parser）、**E0100**（driver）、**E0200–E0207**
-（preprocessor）、**E1003–E1008**（typed IR）。路径归一化为 `<file>`，
-剥离 ANSI 颜色。更新: `DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors`。
+更新 snapshot：`DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors`。
 
 ## 跨平台
 

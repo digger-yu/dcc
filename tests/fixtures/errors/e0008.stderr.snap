@@ -1,0 +1,5 @@
+error[E0008]: variable declared with void type
+  --> <file>:1:7
+   1 |void v;
+     |       ^
+  hint: variables must have a complete object type; use 'void *' for generic pointers

@@ -1,0 +1,5 @@
+warning[W0001]: type defaults to 'int' in declaration without a type specifier
+  --> <file>:1:8
+   1 |static x;
+     |        ^
+  hint: add an explicit type such as 'int'

@@ -1,0 +1,5 @@
+error[E0005]: duplicate typedef 'T'
+  --> <file>:2:15
+   2 |typedef float T;
+     |               ^
+  hint: each typedef name may only be defined once

@@ -1,0 +1,8 @@
+error[E0209]: cannot read forced include /home/ds/dcc-agent-linux66/tests/fixtures/errors/<secret.h>: Permission denied (os error 13)
+  --> /home/ds/dcc-agent-linux66/tests/fixtures/errors/<secret.h>:1:1
+   1 |int main(void) { return 0; }
+     | ^
+error[E0209]: cannot read forced include /home/ds/dcc-agent-linux66/tests/fixtures/errors/<secret.h>: Permission denied (os error 13)
+  --> /home/ds/dcc-agent-linux66/tests/fixtures/errors/<secret.h>:1:1
+   1 |int main(void) { return 0; }
+     | ^

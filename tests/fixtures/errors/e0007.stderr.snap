@@ -1,0 +1,5 @@
+error[E0007]: conflicting types for redeclaration of 'x'
+  --> <file>:2:7
+   2 |float x;
+     |       ^
+  hint: use the same type as the previous declaration

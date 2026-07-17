@@ -42,7 +42,7 @@ CI 会在日志中显示 dcc 的真实报错位置。看:
 
 ### errors snapshot 不匹配
 
-诊断格式或列号变更后，snapshot 可能失败。在 Linux 上更新:
+诊断格式或列号变更后，snapshot 可能失败。详见 [DIAGNOSTICS.md](./DIAGNOSTICS.md) 第 9 节。在 Linux 上更新:
 
 ```bash
 DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors --release

@@ -1,0 +1,8 @@
+error[E0205]: cannot read <secret.h>: Permission denied (os error 13)
+  --> <file>:1:1
+   1 |#include "<secret.h>"
+     | ^
+error[E0205]: cannot read <secret.h>: Permission denied (os error 13)
+  --> <file>:1:1
+   1 |#include "<secret.h>"
+     | ^

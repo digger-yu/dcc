@@ -74,6 +74,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let (mut prog, mut diags) = parser::parse(preprocessed.as_bytes(), &file_name);
     drop(preprocessed);
     enrich_diags(&mut diags, &src);
+    for d in &diags {
+        if matches!(d.sev, Severity::Warning) {
+            d.print();
+        }
+    }
     if diags.iter().any(|d| matches!(d.sev, Severity::Error)) { return Err(diags); }
 
     // sanitizer 插桩（AST 层，在 IR lower 之前）

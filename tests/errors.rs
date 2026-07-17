@@ -1,5 +1,6 @@
-// tests/errors.rs - 错误诊断 snapshot 回归（E0001–E1008）
+// tests/errors.rs - 错误诊断 snapshot 回归
 //
+// 错误码详细说明: docs/DIAGNOSTICS.md
 // 每个用例：tests/fixtures/errors/<name>.c + <name>.stderr.snap
 // 更新 snapshot：DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors
 
@@ -27,7 +28,10 @@ const CASES: &[ErrorCase] = &[
     ErrorCase { name: "e0002", code: "E0002", mode: Mode::SyntaxOnly },
     ErrorCase { name: "e0003", code: "E0003", mode: Mode::SyntaxOnly },
     ErrorCase { name: "e0004", code: "E0004", mode: Mode::SyntaxOnly },
+    ErrorCase { name: "e0005", code: "E0005", mode: Mode::SyntaxOnly },
     ErrorCase { name: "e0006", code: "E0006", mode: Mode::SyntaxOnly },
+    ErrorCase { name: "e0007", code: "E0007", mode: Mode::SyntaxOnly },
+    ErrorCase { name: "e0008", code: "E0008", mode: Mode::SyntaxOnly },
     ErrorCase { name: "e0009", code: "E0009", mode: Mode::SyntaxOnly },
     ErrorCase { name: "e0010", code: "E0010", mode: Mode::SyntaxOnly },
     ErrorCase { name: "e0011", code: "E0011", mode: Mode::SyntaxOnly },
@@ -40,6 +44,9 @@ const CASES: &[ErrorCase] = &[
     ErrorCase { name: "e0204", code: "E0204", mode: Mode::SyntaxOnly },
     ErrorCase { name: "e0206", code: "E0206", mode: Mode::SyntaxOnly },
     ErrorCase { name: "e0207", code: "E0207", mode: Mode::SyntaxOnly },
+    ErrorCase { name: "e0208_embed", code: "E0208", mode: Mode::SyntaxOnly },
+    ErrorCase { name: "e1001", code: "E1001", mode: Mode::CompileObject },
+    ErrorCase { name: "e1002", code: "E1002", mode: Mode::CompileObject },
     ErrorCase { name: "e1003", code: "E1003", mode: Mode::CompileObject },
     ErrorCase { name: "e1004", code: "E1004", mode: Mode::CompileObject },
     ErrorCase { name: "e1005", code: "E1005", mode: Mode::CompileObject },
@@ -84,6 +91,7 @@ fn normalize_stderr(raw: &str, file_path: &Path) -> String {
     if cfg!(windows) {
         normalized = normalized.replace(&canonical_str.replace('\\', "/"), "<file>");
     }
+    normalized = normalized.replace("secret.h", "<secret.h>");
     // 兜底：按文件名替换 ` --> …/name.c:line:col`
     if !normalized.contains("<file>") {
         if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
@@ -160,6 +168,10 @@ fn dcc_args_for(case: &ErrorCase) -> Vec<String> {
     args
 }
 
+fn stderr_text(output: &str) -> String {
+    strip_ansi(output)
+}
+
 #[test]
 fn diagnostic_error_snapshots() {
     let dir = fixtures_dir();
@@ -170,14 +182,15 @@ fn diagnostic_error_snapshots() {
         let arg_strings = dcc_args_for(case);
         let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
         let (stderr, status) = run_dcc(&args, &source);
+        let plain = stderr_text(&stderr);
         assert!(
             status != 0,
             "用例 {} 应编译失败 (exit={status})",
             case.name
         );
         assert!(
-            stderr.contains(&format!("error[{}]", case.code)),
-            "用例 {} 应包含 error[{}]，stderr:\n{stderr}",
+            plain.contains(&format!("error[{}]", case.code)),
+            "用例 {} 应包含 error[{}]，stderr:\n{plain}",
             case.name,
             case.code
         );
@@ -208,6 +221,88 @@ fn e0100_cannot_read_file() {
     let normalized = normalize_stderr(&stderr, &missing);
     assert!(normalized.contains("error[E0100]:"));
     assert!(normalized.contains("cannot read"));
+}
+
+#[test]
+fn w0001_implicit_int_warning_snapshot() {
+    let source = fixtures_dir().join("w0001.c");
+    let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
+    let plain = stderr_text(&stderr);
+    assert!(
+        status == 0,
+        "W0001 隐式 int 仅警告，应编译成功，stderr:\n{plain}"
+    );
+    assert!(plain.contains("warning[W0001]:"), "stderr:\n{plain}");
+    let normalized = normalize_stderr(&stderr, &source);
+    assert_snapshot("w0001", &normalized);
+}
+
+#[cfg(unix)]
+#[test]
+fn e0205_unreadable_include_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = fixtures_dir();
+    let secret = dir.join("secret.h");
+    fs::write(&secret, "int secret;\n").expect("write secret.h");
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let source = dir.join("e0205.c");
+    let (stderr, status) = run_dcc(
+        &["-std=gnu23", "-fsyntax-only", "-I", dir.to_str().unwrap()],
+        &source,
+    );
+
+    let _ = fs::remove_file(&secret);
+    assert!(status != 0);
+    assert!(stderr_text(&stderr).contains("error[E0205]:"), "stderr:\n{stderr}");
+    let normalized = normalize_stderr(&stderr, &source);
+    assert_snapshot("e0205", &normalized);
+}
+
+#[cfg(unix)]
+#[test]
+fn e0209_force_include_unreadable_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = fixtures_dir();
+    let secret = dir.join("secret.h");
+    fs::write(&secret, "int secret;\n").expect("write secret.h");
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let source = dir.join("e0209.c");
+    let (stderr, status) = run_dcc(
+        &[
+            "-std=gnu23",
+            "-fsyntax-only",
+            "-include",
+            secret.to_str().unwrap(),
+        ],
+        &source,
+    );
+
+    let _ = fs::remove_file(&secret);
+    assert!(status != 0);
+    assert!(stderr_text(&stderr).contains("error[E0209]:"), "stderr:\n{stderr}");
+    let normalized = normalize_stderr(&stderr, &source);
+    assert_snapshot("e0209", &normalized);
+}
+
+#[test]
+fn e0208_invalid_utf8_snapshot() {
+    let dir = fixtures_dir();
+    let invalid = dir.join(format!("e0208_utf8_{}.c", std::process::id()));
+    fs::write(&invalid, b"int x;\n\xFF\n").expect("write invalid utf8 source");
+
+    let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &invalid);
+    let plain = stderr_text(&stderr);
+    let normalized = normalize_stderr(&stderr, &invalid);
+    let _ = fs::remove_file(&invalid);
+
+    assert!(status != 0);
+    assert!(plain.contains("error[E0208]:"), "stderr:\n{plain}");
+    assert!(plain.contains("UTF-8"), "stderr:\n{plain}");
+    assert_snapshot("e0208_utf8", &normalized);
 }
 
 #[test]

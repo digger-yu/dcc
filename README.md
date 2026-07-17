@@ -328,7 +328,7 @@ src/
 |------|------|------|
 | 单元测试 | `src/` 内 `#[test]` | parser/preproc/opt 等 |
 | integration | 59 项 | 成功路径语法/codegen 回归 |
-| errors | 4 项 | 失败路径诊断 snapshot（24 用例） |
+| errors | 4 项测试 / 34 snapshot | 失败路径诊断，见 [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) |
 
 错误 snapshot 位于 `tests/fixtures/errors/`；更新命令:
 
