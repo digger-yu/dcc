@@ -97,6 +97,32 @@ pub struct TargetTriple {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arch  { X86_64, AArch64, RiscV64, Mips64, Mips, Arm }
+
+impl Arch {
+    /// 第一性原理: 三类语义
+    ///   * has_backend == true  : 该 arch 有完整 codegen 后端,emit() 会成功
+    ///   * has_backend == false : 仅解析 triple (在 --target / 交叉编译场景
+    ///                            中合法),emit() 会 panic 报清楚
+    /// 之所以区分而不是直接拒绝 mips/arm triple: Linux kernel 编译链
+    /// 经常在 host 端用 --target 探测远端架构,只解析不解码能避免误伤。
+    pub fn has_backend(self) -> bool {
+        match self {
+            Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 => true,
+            // mips / mips64 / arm 仅有 triple 解析,无 codegen 后端
+            Arch::Mips64 | Arch::Mips | Arch::Arm => false,
+        }
+    }
+
+    /// 在 has_backend() == false 时的统一报错文本
+    pub fn backend_missing_msg(self) -> String {
+        format!(
+            "target arch {:?} is parsed but has no codegen backend \
+             (supported backends: x86_64, aarch64, riscv64; \
+             parse-only triples: mips, mips64, arm)",
+            self
+        )
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os    { Linux, Freestanding, Windows, Macos }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,12 +171,14 @@ impl TargetTriple {
             other => return Err(format!("unknown os: {}", other)),
         };
         let abi = match parts[parts.len()-1] {
-            "gnu" | "gnuabi99" => Abi::Gnu,
+            "gnu" | "gnuabi99" | "gnuabi64" | "gnuabin32" | "gnueabi" | "gnueabihf" => Abi::Gnu,
             "musl"            => Abi::Musl,
             "eabi"            => Abi::Eabi,
             "eabihf"          => Abi::Eabihf,
             "msvc"            => Abi::Msvc,
             "darwin"          => Abi::Darwin,
+            // mips/o32/o64/n32 等扁平 abi 也归到 Gnu 桶里 (只解析不解码)
+            o32_or_o64 if o32_or_o64.starts_with("o") => Abi::Gnu,
             other => return Err(format!("unknown abi: {}", other)),
         };
         let vendor = if parts.len() == 4 { parts[1].to_string() } else { "unknown".into() };
@@ -760,5 +788,97 @@ mod tests {
         let cfg = parse(&args).expect("two .o -r link");
         assert!(cfg.link_mode);
         assert!(cfg.lto_enabled);
+    }
+
+    // ----- Triple 解析覆盖测试 (mips / mips64 / arm 仅解析, 无 codegen 后端) -----
+
+    use super::{Arch, TargetTriple};
+
+    #[test]
+    fn target_triple_parses_mips_linux_gnu() {
+        let t = TargetTriple::parse("mips-linux-gnu").expect("mips must parse");
+        assert_eq!(t.arch, Arch::Mips);
+        assert_eq!(t.vendor, "unknown");
+        assert_eq!(t.os, super::Os::Linux);
+        assert_eq!(t.abi, super::Abi::Gnu);
+        assert!(!t.arch.has_backend());
+    }
+
+    #[test]
+    fn target_triple_parses_mips_unknown_linux_gnu() {
+        let t = TargetTriple::parse("mips-unknown-linux-gnu").expect("mips w/ vendor must parse");
+        assert_eq!(t.arch, Arch::Mips);
+        assert_eq!(t.vendor, "unknown");
+        assert!(!t.arch.has_backend());
+    }
+
+    #[test]
+    fn target_triple_parses_mips64_linux_gnuabi64() {
+        let t = TargetTriple::parse("mips64-linux-gnuabi64").expect("mips64 must parse");
+        assert_eq!(t.arch, Arch::Mips64);
+        assert!(!t.arch.has_backend());
+    }
+
+    #[test]
+    fn target_triple_parses_arm_linux_gnueabihf() {
+        // "gnueabihf" 视为 Gnu 桶 (扁平 abi 解析不解码),
+        // 实际 abi 选择 (Eabihf vs Eabi) 在 codegen 后端判断;
+        // 这里我们没有 arm 后端,所以只要求解析通过。
+        let t = TargetTriple::parse("arm-linux-gnueabihf").expect("armhf must parse");
+        assert_eq!(t.arch, Arch::Arm);
+        assert_eq!(t.abi, super::Abi::Gnu);
+        assert!(!t.arch.has_backend());
+    }
+
+    #[test]
+    fn target_triple_parses_armv7_alias() {
+        let t = TargetTriple::parse("armv7-unknown-linux-gnueabihf").expect("armv7 alias must parse");
+        assert_eq!(t.arch, Arch::Arm);
+        assert_eq!(t.vendor, "unknown");
+    }
+
+    #[test]
+    fn has_backend_distinguishes_implemented_vs_parse_only() {
+        assert!(Arch::X86_64.has_backend());
+        assert!(Arch::AArch64.has_backend());
+        assert!(Arch::RiscV64.has_backend());
+        assert!(!Arch::Mips.has_backend());
+        assert!(!Arch::Mips64.has_backend());
+        assert!(!Arch::Arm.has_backend());
+    }
+
+    #[test]
+    fn backend_missing_msg_mentions_arch_and_parse_only() {
+        let msg = Arch::Mips.backend_missing_msg();
+        assert!(msg.contains("Mips"));
+        assert!(msg.contains("parse-only"));
+        assert!(msg.contains("mips") || msg.contains("mips64") || msg.contains("arm"));
+    }
+
+    #[test]
+    fn unknown_arch_is_still_rejected() {
+        let err = TargetTriple::parse("powerpc-linux-gnu").expect_err("powerpc is not in our list");
+        assert!(err.contains("unknown arch"));
+        assert!(err.contains("powerpc"));
+    }
+
+    #[test]
+    fn too_few_dash_components_is_rejected() {
+        let err = TargetTriple::parse("mips").expect_err("single component is invalid");
+        assert!(err.contains("bad target"));
+    }
+
+    #[test]
+    fn dashdash_target_mips_passes_cli_parse() {
+        // --target 走通 cli::parse, Arch 字段正确, 但 cfg.target.arch.has_backend() = false
+        let args = vec![
+            "--target".to_string(),
+            "mips-linux-gnu".to_string(),
+            "-c".to_string(),
+            "foo.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("--target mips must parse at cli level");
+        assert_eq!(cfg.target.arch, Arch::Mips);
+        assert!(!cfg.target.arch.has_backend());
     }
 }

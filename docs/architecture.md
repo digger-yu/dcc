@@ -98,13 +98,24 @@ error[E0001]: expected ';', got '{'
 
 ## 跨平台
 
-`--target=<triple>` 完整支持:
-- x86_64-unknown-linux-gnu
-- aarch64-linux-gnu
-- riscv64-linux-gnu
-- mips-linux-gnu
-- arm-linux-gnueabi
-- 自由扩展
+`--target=<triple>` 分两类:
+
+| 类别 | Triple | 含义 |
+|------|--------|------|
+| 完整后端 (has_backend == true) | `x86_64-unknown-linux-gnu` / `aarch64-linux-gnu` / `riscv64-linux-gnu` | `codegen::emit` 真正产出机器码,ET_EXEC/ET_REL 正常写出 |
+| 仅 Triple 解析 (has_backend == false) | `mips-linux-gnu` / `mips64-linux-gnuabi64` / `arm-linux-gnueabihf` (及 `armv7-…` 别名) | `target.rs::resolve()` 给出正确几何参数 (指针大小 / 字节序 / 调用约定),`cli::parse()` 完整通过;`codegen::emit()` 会 `panic!` 并通过 `Arch::backend_missing_msg()` 输出明确诊断 |
+
+设计动机: Linux kernel 编译链常在 host 端用 `--target=...` 探测远端架构,
+只解析不解码能避免误伤;同时也明确告诉用户 "我们解析了,只是没后端"。
+
+第一性原理:
+- `Arch::has_backend()` (src/cli.rs) 是单一真相点,所有调用者通过它判定
+  是否能 emit。
+- `Target::resolve()` 不管后端实现 — 它只负责 "几何" (指针/字节序/调用约定),
+  即便后端是 parse-only 也要正确填字段,这样上层预处理、宏展开、IR
+  lowering 等阶段可以无差别地基于 target 做选择,无需 `match arch`。
+- `codegen::emit()` 的兜底分支直接 panic,文本来自 `backend_missing_msg()`,
+  列出 "supported backends / parse-only triples" 双类清单。
 
 ## x86-64 可重定位代码生成
 

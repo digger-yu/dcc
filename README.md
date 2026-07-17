@@ -281,6 +281,13 @@ dcc -std=c11 input.c
 dcc --target aarch64-linux-gnu input.c
 dcc --target riscv64-linux-gnu input.c
 
+# 仅 Triple 解析 (parse-only, 无后端):
+#   --target= 字符串解析通过,Target::resolve() 给出几何参数,
+#   codegen::emit() 会 panic 并提示 "parse-only"。
+dcc --target mips-linux-gnu      input.c   # parse-only
+dcc --target mips64-linux-gnuabi64 input.c # parse-only
+dcc --target arm-linux-gnueabihf input.c   # parse-only (armv7 也接受)
+
 # 独立环境 (内核编译)
 dcc -ffreestanding -nostdinc kernel.c
 

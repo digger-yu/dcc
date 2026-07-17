@@ -167,9 +167,10 @@ pub fn emit(
             cg.compile(module);
             cg.build_output()
         }
-        a => panic!(
-            "target arch {:?} is not yet implemented (supported: x86_64, aarch64, riscv64)",
-            a
-        ),
+        a => {
+            // parse-only triple: mips / mips64 / arm 仅有 triple 解析,
+            // 无 codegen 后端,显式 panic 并给出准确诊断
+            panic!("{}", a.backend_missing_msg());
+        }
     }
 }

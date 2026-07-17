@@ -23,6 +23,7 @@
 | KASAN/UBSAN/KCSAN/KCOV 插桩（初版） | `-fsanitize=*`：TU init 一次 + 每函数入口桩 + `.dcc.san_info` v1 |
 | 跨 TU LTO | `-flto` 生成 `.llvm.lto`；`-r` 多 `.o` 经 `ld -r` + objcopy 合并摘要 |
 | LTO dead symbol 剔除 | `-ffunction-sections`（`-flto` 默认）+ `ld --gc-sections` + objcopy strip |
+| 跨平台 Triple 解析 (parse-only) | `cli.rs` + `target.rs` 接受 `mips / mips64 / arm (armv7)` 的 `--target` 字符串,`Target::resolve()` 给出正确几何参数;`codegen::emit()` 通过 `Arch::has_backend()` 显式 panic,文本经 `Arch::backend_missing_msg()` 输出 |
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
 | modpost `file2alias.c` | 单 TU `-c` 生成 `file2alias.o` |
 | prepare0 窄目标 | `scripts/prepare0_check.sh`（devicetable / bounds / file2alias） |
