@@ -1,0 +1,2 @@
+error[E1010]: member access requires a struct or union
+  --> <file>:3:11

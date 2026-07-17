@@ -1,0 +1,2 @@
+error[E1009]: unknown aggregate member 'b'
+  --> <file>:7:13

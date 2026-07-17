@@ -56,6 +56,8 @@ const CASES: &[ErrorCase] = &[
     ErrorCase { name: "e1006", code: "E1006", mode: Mode::CompileObject },
     ErrorCase { name: "e1007", code: "E1007", mode: Mode::CompileObject },
     ErrorCase { name: "e1008", code: "E1008", mode: Mode::CompileObject },
+    ErrorCase { name: "e1009", code: "E1009", mode: Mode::CompileObject },
+    ErrorCase { name: "e1010", code: "E1010", mode: Mode::CompileObject },
     ErrorCase { name: "bad", code: "E0006", mode: Mode::SyntaxOnly },
 ];
 
@@ -371,6 +373,63 @@ fn all_snapshots_match_locked_schema() {
         validate_diagnostic_snapshot(&text, &name)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
+}
+
+#[test]
+fn cases_have_matching_fixtures_and_snapshots() {
+    let dir = fixtures_dir();
+    for case in CASES {
+        let source = dir.join(format!("{}.c", case.name));
+        assert!(source.is_file(), "CASES 缺少 fixture {}", source.display());
+        let snap = snap_path(case.name);
+        if std::env::var("DCC_UPDATE_SNAPSHOTS").is_err() {
+            assert!(
+                snap.is_file(),
+                "CASES 缺少 snapshot {}（运行 DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors 生成）",
+                snap.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn cli_multiple_sources_error() {
+    let dir = fixtures_dir();
+    let a = dir.join("e0004.c");
+    let b = dir.join("e0006.c");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-o", "a.out", a.to_str().unwrap(), b.to_str().unwrap()])
+        .output()
+        .expect("运行 dcc");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+    assert!(
+        stderr.contains("dcc: error: multiple source files cannot produce a single executable"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn cli_relocatable_requires_object_inputs() {
+    let source = fixtures_dir().join("e0004.c");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "-std=gnu23",
+            "-r",
+            "-o",
+            "merged.o",
+            source.to_str().unwrap(),
+        ])
+        .output()
+        .expect("运行 dcc");
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+    assert!(
+        stderr.contains("dcc: error: relocatable link (-r) requires object (.o) inputs"),
+        "stderr:\n{stderr}"
+    );
 }
 
 #[test]
