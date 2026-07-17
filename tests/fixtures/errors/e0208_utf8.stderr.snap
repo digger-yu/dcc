@@ -1,8 +1,4 @@
 error[E0208]: source is not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 7
   --> <file>:1:1
-   1 |int x;
-     | ^
 error[E0208]: source is not valid UTF-8: invalid utf-8 sequence of 1 bytes from index 7
   --> <file>:1:1
-   1 |int x;
-     | ^

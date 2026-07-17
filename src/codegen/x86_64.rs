@@ -2426,7 +2426,11 @@ impl Codegen {
                                 self.store_stack(2, off + 8);
                             }
                         } else if self.globals.contains_key(&name.name) {
-                            self.emit_global_store(dst, &name.name);
+                            if matches!(l_ty, Type::Vector(_, _)) {
+                                self.gen_vector_store(&name.name);
+                            } else {
+                                self.emit_global_store(dst, &name.name);
+                            }
                         } else if self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name) {
                             let parent_off = self.upvar_offsets.get(&name.name).copied().unwrap_or(0);
                             self.store_upvar(dst, parent_off, l_ty.size());
@@ -3828,22 +3832,48 @@ impl Codegen {
         // 结果在临时区域, gen_vector_store 会从该区域读取
     }
 
+    /// 从全局向量对象加载第 elem_idx 个元素到 rax（标量路径）
+    fn emit_global_vector_elem_load(&mut self, name: &str, elem_idx: usize, elem_size: usize) {
+        self.emit_global_addr(0, name);
+        let byte_off = (elem_idx * elem_size) as i32;
+        if byte_off != 0 {
+            if byte_off >= -128 && byte_off <= 127 {
+                self.emit(&[0x48, 0x83, 0xC0, byte_off as u8]);
+            } else {
+                self.emit(&[0x48, 0x05]);
+                self.emit(&byte_off.to_le_bytes());
+            }
+        }
+        self.emit_load_mem(elem_size);
+    }
+
+    /// 将 rax 中元素写入全局向量的第 elem_idx 个槽
+    fn emit_global_vector_elem_store(&mut self, name: &str, elem_idx: usize, elem_size: usize) {
+        self.emit_global_addr(1, name); // rcx = &global
+        let byte_off = (elem_idx * elem_size) as i32;
+        if byte_off != 0 {
+            if byte_off >= -128 && byte_off <= 127 {
+                self.emit(&[0x48, 0x83, 0xC1, byte_off as u8]);
+            } else {
+                self.emit(&[0x48, 0x81, 0xC1]);
+                self.emit(&byte_off.to_le_bytes());
+            }
+        }
+        // mov [rcx], rax (按元素宽度)
+        match elem_size {
+            1 => self.emit(&[0x88, 0x01]),
+            2 => self.emit(&[0x66, 0x89, 0x01]),
+            4 => self.emit(&[0x89, 0x01]),
+            _ => self.emit(&[0x48, 0x89, 0x01]),
+        }
+    }
+
     /// 加载向量变量的第 i 个元素到 rax (标量)
     fn gen_scalar_vector_load(&mut self, e: &Expr, elem_idx: usize, elem_size: usize) {
         match e {
             Expr::Ident { name, .. } => {
                 if self.globals.contains_key(&name.name) {
-                    // 全局向量: 加载基地址然后偏移
-                    let disp32_pos = self.pos() + 3;
-                    self.emit(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]); // lea rax, [RIP+disp32]
-                    self.pending_data_rels.push((disp32_pos, name.name.clone()));
-                    let off = (elem_idx * elem_size) as i32;
-                    if off != 0 {
-                        self.emit(&[0x48, 0x01]); // add rax, off (简化)
-                        // 用更简洁的方式
-                    }
-                    // 加载元素
-                    self.emit_load_mem(elem_size);
+                    self.emit_global_vector_elem_load(&name.name, elem_idx, elem_size);
                 } else {
                     let off = self.var_offset(&name.name) + (elem_idx * elem_size) as i32;
                     self.load_stack(0, off);
@@ -3853,8 +3883,12 @@ impl Codegen {
                 self.gen_expr(e, 0);
                 let off = (elem_idx * elem_size) as i32;
                 if off != 0 {
-                    self.emit(&[0x48, 0x83, 0xC0]); // add rax, off
-                    self.emit(&[off as i8 as u8]);
+                    if off >= -128 && off <= 127 {
+                        self.emit(&[0x48, 0x83, 0xC0, off as u8]);
+                    } else {
+                        self.emit(&[0x48, 0x05]);
+                        self.emit(&off.to_le_bytes());
+                    }
                 }
                 self.emit_load_mem(elem_size);
             }
@@ -3872,7 +3906,11 @@ impl Codegen {
         match e {
             Expr::Ident { name, .. } => {
                 if self.globals.contains_key(&name.name) {
-                    // TODO: 全局向量复制
+                    for i in 0..count {
+                        self.emit_global_vector_elem_load(&name.name, i, elem_size);
+                        let dst_off = temp_off + (i * elem_size) as i32;
+                        self.emit_store(0, dst_off, elem_size);
+                    }
                     return;
                 }
                 let var_off = self.var_offset(&name.name);
@@ -3902,16 +3940,17 @@ impl Codegen {
 
     // 从临时区域存储到向量变量 (完全标量, 不用 XMM)
     fn gen_vector_store(&mut self, name: &str) {
-        let var_off = self.var_offset(name);
-        let ty = self.var_map.get(name).map(|(_, ty)| ty.clone()).unwrap_or(Type::Int);
+        let ty = self.var_map.get(name).map(|(_, ty)| ty.clone())
+            .or_else(|| self.globals.get(name).map(|g| g.ty.clone()))
+            .unwrap_or(Type::Int);
         let (elem_ty, count) = match ty {
             Type::Vector(ref elem, n) => { let et = (**elem).clone(); (et, n) }
             _ => return,
         };
         let elem_size = elem_ty.size();
         let temp_off = -(self.frame_size as i32) + 8;
+        let is_global = self.globals.contains_key(name);
         for i in 0..count {
-            // 从临时区域加载: 使用 emit_load_mem 按元素大小加载
             let src_off = temp_off + (i * elem_size) as i32;
             self.emit(&[0x49, 0x8D]); // lea rax, [r13 + src_off]
             if src_off.abs() < 128 {
@@ -3920,10 +3959,14 @@ impl Codegen {
                 self.emit(&[0x85]);
                 self.emit(&src_off.to_le_bytes());
             }
-            self.emit_load_mem(elem_size); // 按元素大小加载到 rax
-            // 存储到目标变量: 使用 emit_store 按元素大小存储
-            let dst_off = var_off + (i * elem_size) as i32;
-            self.emit_store(0, dst_off, elem_size);
+            self.emit_load_mem(elem_size);
+            if is_global {
+                self.emit_global_vector_elem_store(name, i, elem_size);
+            } else {
+                let var_off = self.var_offset(name);
+                let dst_off = var_off + (i * elem_size) as i32;
+                self.emit_store(0, dst_off, elem_size);
+            }
         }
     }
 

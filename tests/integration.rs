@@ -1242,3 +1242,15 @@ fn nofail_stringify_compiles() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// 全局 SIMD 向量复制与逐元素运算
+#[test]
+fn vector_global_copy_compiles() {
+    let source = include_str!("fixtures/vector_global.c");
+    let (output, _obj) = run_object_test("vector-global", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

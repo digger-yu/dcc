@@ -40,6 +40,8 @@
 | SysV va_list SSE | `examples/test_p4_va_list.c`（GP + float/double） |
 | Mini x86 asm 局部/C 标签 | `tests/fixtures/asm_local_label.c`、`asm_label_insn.c`（`N:`/`N:insn`/`found:`） |
 | Mini x86 asm 位操作 / 双精度移位 | codegen `btl/bts/btr`、`shld/shrd`（内核 paravirt 等） |
+| 全局 SIMD 向量复制 | `tests/fixtures/vector_global.c`；`emit_global_vector_elem_*` |
+| 诊断 snapshot 格式锁定 | `tests/errors.rs` schema + `diagnostic_format.stderr.snap`（V1） |
 | `struct __attribute__((__may_alias__))` | `tests/fixtures/may_alias_struct.c` |
 | 宏 `#` 字符串化换行折叠 | `preproc` 单测 `stringify_collapses_*`；`NOFAIL`/`modpost.c` |
 

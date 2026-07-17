@@ -84,8 +84,11 @@ error[E0001]: expected ';', got '{'
 | 目录 | 内容 |
 |------|------|
 | `tests/fixtures/errors/*.c` | 触发 fixture |
-| `tests/fixtures/errors/*.stderr.snap` | 归一化 stderr 黄金文件（34 个） |
+| `tests/fixtures/errors/*.stderr.snap` | 归一化 stderr 黄金文件（35 个，含 `diagnostic_format`） |
 | `scripts/update_error_snapshots.sh` | Linux 上一键刷新 snapshot |
+
+`validate_diagnostic_snapshot()` 锁定 GitHub 四段式结构；变更
+`diagnostics.rs` 布局时递增 `DIAGNOSTIC_FORMAT_VERSION` 并全量刷新。
 
 更新 snapshot：`DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors`。
 

@@ -3,6 +3,9 @@
 // 错误码详细说明: docs/DIAGNOSTICS.md
 // 每个用例：tests/fixtures/errors/<name>.c + <name>.stderr.snap
 // 更新 snapshot：DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors
+//
+// 诊断格式版本：变更 GitHub 风格四段式布局时递增并全量刷新 snapshot
+const DIAGNOSTIC_FORMAT_VERSION: u32 = 1;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,7 +87,7 @@ fn strip_ansi(raw: &str) -> String {
 
 /// 将 stderr 中的绝对路径替换为稳定占位符 `<file>`
 fn normalize_stderr(raw: &str, file_path: &Path) -> String {
-    let stripped = strip_ansi(raw);
+    let stripped = strip_ansi(raw).replace("\r\n", "\n").replace('\r', "\n");
     let canonical = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
     let canonical_str = canonical.to_string_lossy().into_owned();
     let mut normalized = stripped.replace(&canonical_str, "<file>");
@@ -112,6 +115,11 @@ fn normalize_stderr(raw: &str, file_path: &Path) -> String {
             }
         }
     }
+    let normalized: String = normalized
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!("{}\n", normalized.trim_end())
 }
 
@@ -130,18 +138,45 @@ fn snap_path(name: &str) -> PathBuf {
     fixtures_dir().join(format!("{name}.stderr.snap"))
 }
 
+/// 校验 snapshot 是否符合锁定的 GitHub 风格诊断格式
+fn validate_diagnostic_snapshot(text: &str, name: &str) -> Result<(), String> {
+    let body = text.trim_end();
+    if body.is_empty() {
+        return Err(format!("{name}: snapshot 为空"));
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    let head = lines[0];
+    let head_ok = head.starts_with("error[")
+        || head.starts_with("warning[")
+        || head.starts_with("note[")
+        || head.starts_with("dcc: error:");
+    if !head_ok {
+        return Err(format!("{name}: 首行应为 error[…]/warning[…]/dcc: error:"));
+    }
+    if head.starts_with("error[") || head.starts_with("warning[") || head.starts_with("note[") {
+        if !lines.iter().any(|l| l.contains(" --> ") && l.matches(':').count() >= 2) {
+            return Err(format!("{name}: 缺少位置行 ` --> file:line:col`"));
+        }
+    }
+    Ok(())
+}
+
 fn assert_snapshot(name: &str, actual: &str) {
-    let path = snap_path(name);
     if std::env::var("DCC_UPDATE_SNAPSHOTS").is_ok() {
-        fs::write(&path, actual).expect("写入 snapshot");
+        fs::write(snap_path(name), actual).expect("写入 snapshot");
         return;
     }
+    validate_diagnostic_snapshot(actual, name)
+        .unwrap_or_else(|e| panic!("snapshot 格式校验失败: {e}"));
+    let path = snap_path(name);
     let expected = fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "缺少 snapshot {}: {e}\n运行 DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors 生成",
             path.display()
         );
     });
+    validate_diagnostic_snapshot(&expected, name)
+        .unwrap_or_else(|e| panic!("已存 snapshot 格式损坏 ({}): {e}", path.display()));
     assert_eq!(
         expected,
         actual,
@@ -303,6 +338,39 @@ fn e0208_invalid_utf8_snapshot() {
     assert!(plain.contains("error[E0208]:"), "stderr:\n{plain}");
     assert!(plain.contains("UTF-8"), "stderr:\n{plain}");
     assert_snapshot("e0208_utf8", &normalized);
+}
+
+#[test]
+fn diagnostic_format_locked_snapshot() {
+    let source = fixtures_dir().join("e0004.c");
+    let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
+    assert!(status != 0);
+    let normalized = normalize_stderr(&stderr, &source);
+    assert_snapshot("diagnostic_format", &normalized);
+}
+
+#[test]
+fn diagnostic_format_version_is_current() {
+    // 变更 diagnostics.rs 输出布局时：递增 DIAGNOSTIC_FORMAT_VERSION 并刷新全部 snapshot
+    assert_eq!(DIAGNOSTIC_FORMAT_VERSION, 1);
+}
+
+#[test]
+fn all_snapshots_match_locked_schema() {
+    if std::env::var("DCC_UPDATE_SNAPSHOTS").is_ok() {
+        return;
+    }
+    let dir = fixtures_dir();
+    for entry in fs::read_dir(&dir).expect("read fixtures/errors") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("snap") {
+            continue;
+        }
+        let text = fs::read_to_string(&path).expect("read snap");
+        let name = path.file_stem().expect("stem").to_string_lossy();
+        validate_diagnostic_snapshot(&text, &name)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
 }
 
 #[test]

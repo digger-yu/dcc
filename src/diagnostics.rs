@@ -156,12 +156,13 @@ impl Diagnostic {
 
 /// 填充诊断信息的 source_line 字段
 pub fn enrich_diags(diags: &mut [Diagnostic], src: &[u8]) {
-    let lines: Vec<&[u8]> = src.split(|&b| b == b'\n').collect();
+    let text = std::str::from_utf8(src).unwrap_or("");
+    let lines: Vec<&str> = text.lines().collect();
     for d in diags.iter_mut() {
         if d.source_line.is_none() && d.span.line > 0 {
             let idx = (d.span.line as usize).saturating_sub(1);
-            if let Some(line_bytes) = lines.get(idx) {
-                d.source_line = Some(String::from_utf8_lossy(line_bytes).to_string());
+            if let Some(line) = lines.get(idx) {
+                d.source_line = Some(line.to_string());
             }
         }
     }

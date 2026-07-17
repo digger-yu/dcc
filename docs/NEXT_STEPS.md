@@ -74,7 +74,7 @@
 
 - [x] **11. 扩展 GitHub CI：`cargo test` + integration**
   - 验证：`.github/workflows/e2e.yml` 已增加 `cargo test --release`
-  - 验证：`tests/errors.rs` snapshot 回归（24 用例, 4 tests）
+  - 验证：`tests/errors.rs` snapshot 回归（35 用例 snap + 格式 schema 锁定, 7 tests）
   - 目标：PR 自动跑 59 项 integration + errors snapshot
 
 - [ ] **12. 远程回归纳入 CI 或 scheduled workflow**

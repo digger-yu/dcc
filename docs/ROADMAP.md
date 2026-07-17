@@ -24,7 +24,7 @@
 |------|--------|----------|------------|----------|
 | 位域 bitfields | P2 | ✅ `int x : 3` 语法 | ✅ 位偏移+掩码+移位+有符号扩展 | ✅ bitfield_test.c |
 | 柔性数组成员 | P2 | ✅ `char data[]` | ✅ sizeof不贡献+偏移正确 | ✅ flex_arr_test.c |
-| 向量类型 SIMD | P3 | ✅ `__attribute__((vector_size))` | ✅ 标量逐元素加减乘 | ✅ simd_test.c |
+| 向量类型 SIMD | P3 | ✅ `__attribute__((vector_size))` | ✅ 标量逐元素加减乘；全局向量复制 | ✅ simd_test.c, vector_global.c |
 | 定点数类型 | P3 | ✅ `_Fract`/`_Accum` | ✅ 作为整数运算(1.31/16.16) | ✅ fixedpt_test.c |
 | 原子操作 | P3 | ✅ `__atomic_*` 内建函数 | ✅ lock前缀+xchg+cmpxchg | ✅ atomic_test.c |
 | 原子内存序 | P3 | ✅ `__ATOMIC_*` 宏定义 | ✅ mfence(seq_cst) | ✅ atomic_test.c |
@@ -52,7 +52,8 @@
 
 - **位域**: 读=加载容器→右移→掩码, 写=读-改-写(CAS风格), 容器类型决定存储单元大小
 - **柔性数组**: 零长数组不贡献 struct 大小, 偏移紧跟前一字段, 运行时需配合 malloc
-- **SIMD**: 不用 XMM 寄存器, 纯标量逐元素运算, 通过帧底临时区传递结果
+- **SIMD**: 不用 XMM 寄存器, 纯标量逐元素运算, 通过帧底临时区传递结果;
+  全局向量对象支持 RIP-relative 逐元素 load/store（`emit_global_vector_elem_*`）
 - **定点数**: ISO/IEC DTR 18037 嵌入式扩展, _Fract=1.31位 _Accum=16.16位, 复用整数路径
 - **原子操作**: x86 TSO 架构下, lock前缀保证原子性, fetch_add用xadd, 其余用cmpxchg循环
 - **内存序**: x86 天然 TSO, relaxed=裸操作, acquire/release=编译器屏障, seq_cst=mfence

@@ -194,7 +194,16 @@ dcc: error: <message>
 - `e0205` / `e0209`：依赖 Unix 文件权限（`chmod 000`），Windows 上跳过
 - `e0208_utf8`：运行时写入含 `0xFF` 的临时源文件
 
-**当前覆盖**：34 个 `.stderr.snap`（含 `w0001`、`e0208_utf8`、`e0205`、`e0209` 等）；未覆盖码见上表「Snapshot」列为 — 的条目。
+**当前覆盖**：35 个 `.stderr.snap`（含 `diagnostic_format`、`w0001`、`e0208_utf8`、`e0205`、`e0209` 等）；未覆盖码见上表「Snapshot」列为 — 的条目。
+
+**格式锁定**：
+
+| 项目 | 说明 |
+|------|------|
+| 版本常量 | `tests/errors.rs` 中 `DIAGNOSTIC_FORMAT_VERSION`（当前 **1**） |
+| 结构校验 | `validate_diagnostic_snapshot()`：首行码、` --> <file>:`、gutter、caret |
+| 黄金样例 | `diagnostic_format.stderr.snap`（E0004 canonical 格式） |
+| 全量 schema | `all_snapshots_match_locked_schema` 扫描全部 `.snap` |
 
 ---
 
