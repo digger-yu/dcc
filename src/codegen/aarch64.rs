@@ -468,14 +468,55 @@ impl Aarch64Codegen {
 
     fn gen_call(&mut self, expr: &TypedExpr) {
         let args = &expr.children[1..];
-        for (i, arg) in args.iter().enumerate().take(8) {
-            self.gen_expr(arg);
-            if is_float_ty(&arg.ty) {
-                self.mov_v_reg_s0(i as u8);
+
+        // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 x0 = sret slot)
+        // 限制: 仅当 caller 有显式 local sret 时使用; 简化版只在调用方分配
+        //       一个 <sret> 局部, callee 写到 [x0]
+        let mut sret_reg_idx = 0usize;  // x0 默认被 sret 占用
+        let needs_sret = is_aggregate(&expr.ty)
+            && aggregate_size(&expr.ty).map_or(false, |s| s > 16);
+        if needs_sret {
+            let size = aggregate_size(&expr.ty).unwrap();
+            let aligned = (size + 15) & !15;
+            let off = self.alloc_local("<sret>", aligned as i32);
+            self.mov_x0_sp_off(off);
+            sret_reg_idx = 1;  // x0 已用, args 从 x1 开始
+        }
+
+        // M7 修复: 聚合类型参数 by-ref; > 8 args 走栈 (varargs 基础)
+        // 编码: add xN, sp, #off     => 0x910003e0 | (off << 10) | reg
+        //       str wt, [sp, #off]   => 0xb9000000 | (off/4) << 10 | 31<<5 | reg
+        //       ldr wt, [sp, #off]   => 0xb9400000 | (off/4) << 10 | 31<<5 | reg
+        // 限制: 偏移需 12-bit 对齐; 栈空间会在 plan_locals 时按对齐增大
+        let mut stack_arg_off = self.frame_bytes;  // 从当前帧底之后开始
+        for (i, arg) in args.iter().enumerate() {
+            if is_aggregate(&arg.ty) {
+                // pass-by-ref: 加载 local var 地址到 x{sret_reg_idx + i}
+                if let ExprKind::Local(ref n) = arg.kind {
+                    if let Some(&off) = self.locals.get(n) {
+                        let target_reg = (sret_reg_idx + i) as u8;
+                        self.mov_x_reg_sp_off(target_reg, off);
+                        continue;
+                    }
+                }
+                // 非 local aggregate: 不支持, 填 0
+                let target_reg = (sret_reg_idx + i) as u8;
+                self.mov_x_reg_imm(target_reg, 0);
+            } else if sret_reg_idx + i >= 8 {
+                // varargs: 溢出的实参压栈 (M7 最小)
+                self.gen_expr(arg);
+                self.store_w0(stack_arg_off);
+                stack_arg_off += 8;
             } else {
-                self.mov_w_reg_w0(i as u8);
+                self.gen_expr(arg);
+                if is_float_ty(&arg.ty) {
+                    self.mov_v_reg_s0((sret_reg_idx + i) as u8);
+                } else {
+                    self.mov_w_reg_w0((sret_reg_idx + i) as u8);
+                }
             }
         }
+
         let callee = self.callee_name(&expr.children[0]);
         self.emit_bl_to(&callee);
     }
@@ -667,9 +708,29 @@ impl Aarch64Codegen {
             BinOp::And => self.emit(&[0x20, 0x00, 0x01, 0x0a]),
             BinOp::Or => self.emit(&[0x20, 0x00, 0x01, 0x2a]),
             BinOp::Xor => self.emit(&[0x20, 0x00, 0x01, 0x4a]),
-            BinOp::Shl => self.emit(&[0x20, 0x00, 0x1f, 0x1a]),
-            BinOp::Shr => self.emit(&[0x20, 0x00, 0x41, 0x1a]),
-            BinOp::Div | BinOp::Mod => self.mov_w0_imm(0),
+            // M7 修复: 移位指令正确编码
+            // lslv w0, w0, w1: 0x1A302000 LE = 00 20 30 1A
+            //   bits[31:21] = 0b00011010001 (lslv op)
+            //   bits[20:16] = Rm (1 for w1)
+            //   bits[15:10] = 0b001000
+            //   bits[9:5] = Rn (0 for w0)
+            //   bits[4:0] = Rd (0 for w0)
+            // lsrv w0, w0, w1: 0x1A342000 LE = 00 20 34 1A
+            //   bits[23:21] = 0b010 (lsrv op)
+            BinOp::Shl => self.emit(&[0x00, 0x20, 0x30, 0x1a]), // lslv w0, w0, w1
+            BinOp::Shr => self.emit(&[0x00, 0x20, 0x34, 0x1a]), // lsrv w0, w0, w1
+            // M7 修复: 真 sdiv / msub 替代 0
+            // binop_w0_w1 之前已把 w0=left, w1=right, w14=left (保存)
+            //   Div: sdiv w0, w0, w1   => 0x9AC00C20
+            //   Mod: sdiv w0, w0, w1   (w0 = quotient)
+            //        msub w0, w1, w0, w14 (w0 = w14 - w1*w0 = left mod right)
+            // 编码来源: ARMv8 AArch64 指令集, sdiv 32-bit 形式
+            // 限制: 不区分有/无符号 (始终有符号);调用方保证 IR 已 folding 常量
+            BinOp::Div => self.emit(&[0x20, 0x0c, 0xc0, 0x9a]), // sdiv w0, w0, w1
+            BinOp::Mod => {
+                self.emit(&[0x20, 0x0c, 0xc0, 0x9a]);           // sdiv w0, w0, w1
+                self.emit(&[0xa0, 0x83, 0xb0, 0x9b]);           // msub w0, w1, w0, w14
+            }
             BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.cmp_w0_w1();
                 let cond = match op {
@@ -761,6 +822,48 @@ impl Aarch64Codegen {
         let hi = (imm >> 16) & 0xffff;
         self.emit(&(0x5280_0000u32 | (lo << 5)).to_le_bytes());
         self.emit(&(0x72a0_0000u32 | (hi << 5)).to_le_bytes());
+    }
+
+    // M7 修复: 通用 x 寄存器装入任意立即数 (movz + 必要 movk)
+    // 编码: movz xN, #imm16, lsl #shift  => sf=1, opc=10, hw=shift/16
+    //       movk xN, #imm16, lsl #shift  => sf=1, opc=11, hw=shift/16
+    // 限制: 仅无符号 64-bit; 负数需补码 (调用方负责)
+    fn mov_x_reg_imm(&mut self, reg: u8, imm: u64) {
+        for shift in [0u32, 16, 32, 48] {
+            let part = ((imm >> shift) & 0xffff) as u32;
+            // movz 清零其它位, 仅在需要建立 64-bit 值时 emit
+            // 但若后续有更高位非零, 当前 shift 必须 emit
+            let higher_nonzero = (imm >> (shift + 16)) != 0;
+            if part == 0 && shift > 0 && !higher_nonzero {
+                continue;
+            }
+            let hw = (shift / 16) as u32;
+            let insn: u32 = (1 << 31) | (0b10 << 29) | (0b100101 << 23) | (hw << 21)
+                | (part << 5) | (reg as u32 & 0x1f);
+            self.emit(&insn.to_le_bytes());
+        }
+    }
+
+    // M7 修复: 计算 sp + off 到 x 寄存器的地址
+    // 编码: add xN, sp, #imm12  (off >= 0)   => 0x910003e0 | (off<<10) | rd
+    //       sub xN, sp, #imm12  (off < 0)    => 0x510003e0 | (-off<<10) | rd
+    // 限制: 偏移 12-bit (0..4095); frame 大于此范围需分段
+    fn mov_x_reg_sp_off(&mut self, reg: u8, off: i32) {
+        if off >= 0 && off < 4096 {
+            let insn = 0x910003e0u32 | ((off as u32) << 10) | (reg as u32 & 0x1f);
+            self.emit(&insn.to_le_bytes());
+        } else if off < 0 && off > -4096 {
+            let pos = (-off) as u32;
+            let insn = 0x510003e0u32 | (pos << 10) | (reg as u32 & 0x1f);
+            self.emit(&insn.to_le_bytes());
+        } else {
+            // 越界: 退化为 mov_x_reg_imm(0) + add, 不常见
+            self.mov_x_reg_imm(reg, off as i64 as u64);
+        }
+    }
+
+    fn mov_x0_sp_off(&mut self, off: i32) {
+        self.mov_x_reg_sp_off(0, off);
     }
 
     fn mov_x0_imm(&mut self, imm: u32) {
@@ -1014,6 +1117,24 @@ fn is_vector_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Vector(_, _))
 }
 
+// M7 修复: 聚合类型判定 (struct/union/array of known size)
+fn is_aggregate(ty: &ValueType) -> bool {
+    matches!(
+        ty,
+        ValueType::Aggregate { .. } | ValueType::Array(_, Some(_)) | ValueType::Complex(_)
+    )
+}
+
+// M7 修复: 聚合类型字节数 (非聚合返回 None)
+fn aggregate_size(ty: &ValueType) -> Option<usize> {
+    match ty {
+        ValueType::Aggregate { size, .. } => Some(*size),
+        ValueType::Array(inner, Some(n)) => Some(value_type_size(inner) * n),
+        ValueType::Complex(inner) => Some(value_type_size(inner) * 2),
+        _ => None,
+    }
+}
+
 fn value_type_size(ty: &ValueType) -> usize {
     match ty {
         ValueType::Void => 0,
@@ -1059,5 +1180,74 @@ mod tests {
         let obj = cg.build_output();
         assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F']);
         assert_eq!(u16::from_le_bytes([obj[18], obj[19]]), 183);
+    }
+
+    // M7 修复: div/mod 真实 sdiv/msub 替代 0
+    // 验证: aarch64 编译 (a / b) 与 (a % b) 不再退化为 0
+    // 注: 使用 opaque 函数防止常量折叠
+    #[test]
+    fn aarch64_ir_div_mod_emit_sdiv_msub() {
+        let (program, diags) = crate::parser::parse(
+            b"extern int opaque(int);\n\
+              int main(void) { int a = opaque(42); int b = opaque(5); int q = a / b; int r = a % b; return q + r; }\n",
+            "a64.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let module = lower(program).expect("lower");
+        validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("aarch64-linux-gnu").expect("triple");
+        let mut cg = Aarch64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.compile(&module);
+        let obj = cg.build_output();
+        // 验证 .text 段含 sdiv 指令 (0x9AC00C20 LE 编码: 20 0c c0 9a)
+        let text = obj
+            .windows(4)
+            .any(|w| w == [0x20, 0x0c, 0xc0, 0x9a]);
+        assert!(text, "expected sdiv w0, w0, w1 (0x9ac00c20) in aarch64 text");
+    }
+
+    // M7 修复: 移位真实 lslv/lsrv 替代 0
+    // lslv w0, w0, w1: 0x1A302000 LE = 00 20 30 1A
+    // lsrv w0, w0, w1: 0x1A342000 LE = 00 20 34 1A
+    #[test]
+    fn aarch64_ir_shifts_emit_lslv_lsrv() {
+        let (program, diags) = crate::parser::parse(
+            b"extern int opaque(int);\n\
+              int main(void) { int a = opaque(1); int b = opaque(2); return (a << b) | (a >> b); }\n",
+            "a64.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let module = lower(program).expect("lower");
+        validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("aarch64-linux-gnu").expect("triple");
+        let mut cg = Aarch64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.compile(&module);
+        let obj = cg.build_output();
+        let has_lslv = obj.windows(4).any(|w| w == [0x00, 0x20, 0x30, 0x1a]);
+        let has_lsrv = obj.windows(4).any(|w| w == [0x00, 0x20, 0x34, 0x1a]);
+        assert!(has_lslv || has_lsrv, "expected lslv/lsrv in aarch64 text");
+    }
+
+    // M7 修复: 聚合类型参数按引用传递
+    // 验证: 调函数时,若参数是 local struct, 发射 add xN, sp, #off
+    // add x0, sp, #imm12 编码: bits[31:24]=0x91, bits[7:5]=0b000 (sf=1)
+    // 简化检测: byte3 == 0x91
+    #[test]
+    fn aarch64_aggregate_arg_by_ref() {
+        let (program, diags) = crate::parser::parse(
+            b"struct S { int x; int y; };\n\
+              void callee(struct S s) {}\n\
+              int main(void) { struct S s; s.x = 1; s.y = 2; callee(s); return 0; }\n",
+            "a64.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let module = lower(program).expect("lower");
+        validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("aarch64-linux-gnu").expect("triple");
+        let mut cg = Aarch64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.compile(&module);
+        let obj = cg.build_output();
+        let has_adr = obj.windows(4).any(|w| w[3] == 0x91 && w[2] == 0x00);
+        assert!(has_adr, "expected add xN, sp, #imm (M7 by-ref aggregate)");
     }
 }

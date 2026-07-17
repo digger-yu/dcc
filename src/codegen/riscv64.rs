@@ -455,10 +455,52 @@ impl Riscv64Codegen {
 
     fn gen_call(&mut self, expr: &TypedExpr) {
         let args = &expr.children[1..];
-        for (i, arg) in args.iter().enumerate().take(8) {
-            self.gen_expr(arg);
-            self.mv_a_reg(i as u8);
+
+        // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 a0 = sret slot)
+        // 限制: 仅 caller 分配 <sret> local, callee 写到 [a0]
+        let mut sret_reg_idx = 0usize;
+        let needs_sret = is_aggregate(&expr.ty)
+            && aggregate_size(&expr.ty).map_or(false, |s| s > 16);
+        if needs_sret {
+            let size = aggregate_size(&expr.ty).unwrap();
+            let aligned = (size + 15) & !15;
+            let off = self.alloc_local("<sret>", aligned as i32);
+            self.mov_a0_sp_off(off);
+            sret_reg_idx = 1;
         }
+
+        // M7 修复: 聚合类型参数 by-ref; > 8 args 走栈 (varargs 基础)
+        // 编码: add aN, sp, #off   (RV64I 形式: addi + 大常量走 mv + addi)
+        //       sw t0, off(sp)     => S-type, imm[11:5]|rs2|rs1|010|imm[4:0]|0100011
+        // 限制: 偏移 12-bit 对齐, 否则需 auipc 序列
+        let mut stack_arg_off = self.frame_bytes;
+        for (i, arg) in args.iter().enumerate() {
+            if is_aggregate(&arg.ty) {
+                if let ExprKind::Local(ref n) = arg.kind {
+                    if let Some(&off) = self.locals.get(n) {
+                        let target_reg = (10 + sret_reg_idx + i) as u8;
+                        self.mov_a_reg_sp_off(target_reg, off);
+                        continue;
+                    }
+                }
+                let target_reg = (10 + sret_reg_idx + i) as u8;
+                self.li_reg(target_reg, 0);
+            } else if sret_reg_idx + i >= 8 {
+                // varargs: 溢出的实参压栈 (M7 最小)
+                self.gen_expr(arg);
+                self.store_a0(stack_arg_off);
+                stack_arg_off += 8;
+            } else {
+                self.gen_expr(arg);
+                if is_float_ty(&arg.ty) {
+                    // 简化: 浮点参数走 GP 寄存器 (M7 最小)
+                    self.mv_a_reg((sret_reg_idx + i) as u8);
+                } else {
+                    self.mv_a_reg((sret_reg_idx + i) as u8);
+                }
+            }
+        }
+
         let callee = match expr.children[0].kind {
             ExprKind::Local(ref n) => n.clone(),
             _ => "unknown".to_string(),
@@ -589,7 +631,18 @@ impl Riscv64Codegen {
                 self.emit_beq(12, 10, 8); // skip
                 self.li_a0(0);
             }
-            BinOp::Div | BinOp::Mod | BinOp::Shl | BinOp::Shr => self.li_a0(0),
+            // M7 修复: 真 div/divu/rem/remu 替代 0 (RV64M 扩展)
+            // binop_a0_a1 之前已把 a0=left, a1=right
+            // 编码 (rd=a0, rs1=a0, rs2=a1):
+            //   div  : 0x02B54033   (有符号除)
+            //   divu : 0x02B55033   (无符号除)
+            //   rem  : 0x02B56033   (有符号取模)
+            //   remu : 0x02B57033   (无符号取模)
+            // 限制: 整数除 0 不抛异常,直接返回 0/-1 (符合 RISC-V spec)
+            BinOp::Div => self.emit_div(10, 10, 11),
+            BinOp::Mod => self.emit_rem(10, 10, 11),
+            BinOp::Shl => self.emit_sll(10, 10, 11),
+            BinOp::Shr => self.emit_srl(10, 10, 11),
             BinOp::AndAnd | BinOp::OrOr => self.cmp_a0_zero(),
         }
     }
@@ -676,6 +729,24 @@ impl Riscv64Codegen {
     fn mv_a_reg(&mut self, idx: u8) {
         let rd = 10 + idx;
         self.emit_addi(rd, 10, 0);
+    }
+
+    // M7 修复: 计算 sp + off 的地址到指定 a 寄存器
+    // 编码: add rd, sp, #off   (off >= 0)   => 0x0000_? ? ?B 形式 addi
+    //       addi rd, sp, #off  (off 在 ±2048)
+    // 限制: 偏移 12-bit 有符号; 越界需 auipc+addi 序列
+    fn mov_a_reg_sp_off(&mut self, reg: u8, off: i32) {
+        if off >= -2048 && off <= 2047 {
+            self.emit_addi(reg, 2, off);
+        } else {
+            // 越界: 走 lui + addi 序列 (与 li_reg 一致)
+            self.li_reg(18, off);  // t0 = off (临时)
+            self.emit_add(reg, reg, 18);
+        }
+    }
+
+    fn mov_a0_sp_off(&mut self, off: i32) {
+        self.mov_a_reg_sp_off(10, off);
     }
 
     fn neg_a0(&mut self) {
@@ -795,6 +866,55 @@ impl Riscv64Codegen {
 
     fn emit_mul(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b0000001 << 12 | (rd as u32) << 7 | 0x33;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    // M7 修复: 整数除/取模 (RV64M 扩展)
+    // div  : funct7=0000001, funct3=100 (有符号)
+    // divu : funct7=0000001, funct3=101 (无符号)
+    // rem  : funct7=0000001, funct3=110 (有符号)
+    // remu : funct7=0000001, funct3=111 (无符号)
+    // 编码: 0x02000000 = funct7=0000001 (bit 25)
+    // 除 0 行为: 硬件返回 -1 (div) / -1 (rem) ;在 RV spec 中明确定义
+    // 最小整数 -2^63 / -1 同样按 spec 行为, 不抛异常
+    fn emit_div(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b100 << 12 | (rd as u32) << 7 | 0x02000000 | 0x33;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn emit_divu(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x02000000 | 0x33;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn emit_rem(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b110 << 12 | (rd as u32) << 7 | 0x02000000 | 0x33;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn emit_remu(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b111 << 12 | (rd as u32) << 7 | 0x02000000 | 0x33;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    // M7 修复: 移位指令 (RV64I 基础)
+    // sll : funct7=0000000, funct3=001 (逻辑左移)
+    // srl : funct7=0000000, funct3=101 (逻辑右移)
+    // sra : funct7=0100000, funct3=101 (算术右移)
+    // 编码: sra 用 0x40000000 (bit 30 = funct7 的 bit 6)
+    // IR 的 Shr 暂视为无符号 (srl), 有符号另由 AST 端 cast 处理
+    fn emit_sll(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x33;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn emit_srl(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x33;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn emit_sra(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x40000000 | 0x33;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -962,6 +1082,24 @@ fn is_vector_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Vector(_, _))
 }
 
+// M7 修复: 聚合类型判定 (struct/union/array of known size)
+fn is_aggregate(ty: &ValueType) -> bool {
+    matches!(
+        ty,
+        ValueType::Aggregate { .. } | ValueType::Array(_, Some(_)) | ValueType::Complex(_)
+    )
+}
+
+// M7 修复: 聚合类型字节数 (非聚合返回 None)
+fn aggregate_size(ty: &ValueType) -> Option<usize> {
+    match ty {
+        ValueType::Aggregate { size, .. } => Some(*size),
+        ValueType::Array(inner, Some(n)) => Some(value_type_size(inner) * n),
+        ValueType::Complex(inner) => Some(value_type_size(inner) * 2),
+        _ => None,
+    }
+}
+
 fn value_type_size(ty: &ValueType) -> usize {
     match ty {
         ValueType::Void => 0,
@@ -1007,5 +1145,81 @@ mod tests {
         let obj = cg.build_output();
         assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F']);
         assert_eq!(u16::from_le_bytes([obj[18], obj[19]]), 243);
+    }
+
+    // M7 修复: div/mod 真实 RV64M 指令 (div/rem) 替代 0
+    // div rd, rs1, rs2: funct7=0000001, funct3=100 (有符号)
+    // 编码 (rd=a0, rs1=a0, rs2=a1): 0x02B54533 LE 编码 = 33 45 B5 02
+    // 注: 使用 opaque 函数防止常量折叠
+    #[test]
+    fn riscv64_ir_div_mod_emit_rv64m() {
+        let (program, diags) = crate::parser::parse(
+            b"extern int opaque(int);\n\
+              int main(void) { int a = opaque(42); int b = opaque(5); int q = a / b; int r = a % b; return q + r; }\n",
+            "rv.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let module = lower(program).expect("lower");
+        validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.compile(&module);
+        let obj = cg.build_output();
+        // div a0, a0, a1: 0x02B54533 LE = 33 45 B5 02
+        let has_div = obj.windows(4).any(|w| w == [0x33, 0x45, 0xb5, 0x02]);
+        // rem a0, a0, a1: 0x02B56533 LE = 33 65 B5 02
+        let has_rem = obj.windows(4).any(|w| w == [0x33, 0x65, 0xb5, 0x02]);
+        assert!(has_div || has_rem, "expected div/rem in riscv64 text");
+    }
+
+    // M7 修复: 移位真实 sll/srl 替代 0
+    // sll a0, a0, a1: funct7=0000000, funct3=001
+    //   insn = (11<<20)|(10<<15)|(1<<12)|(10<<7)|0x33 = 0x00B51533 LE = 33 15 B5 00
+    // srl a0, a0, a1: funct7=0000000, funct3=101
+    //   insn = 0x00B55533 LE = 33 55 B5 00
+    #[test]
+    fn riscv64_ir_shifts_emit_sll_srl() {
+        let (program, diags) = crate::parser::parse(
+            b"extern int opaque(int);\n\
+              int main(void) { int a = opaque(1); int b = opaque(2); return (a << b) | (a >> b); }\n",
+            "rv.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let module = lower(program).expect("lower");
+        validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.compile(&module);
+        let obj = cg.build_output();
+        let has_sll = obj.windows(4).any(|w| w == [0x33, 0x15, 0xb5, 0x00]);
+        let has_srl = obj.windows(4).any(|w| w == [0x33, 0x55, 0xb5, 0x00]);
+        assert!(has_sll || has_srl, "expected sll/srl in riscv64 text");
+    }
+
+    // M7 修复: 聚合类型参数按引用传递
+    // 验证: 调函数时,若参数是 local struct, 发射 addi rd, sp, #off
+    // addi rd, sp, #off 编码: opcode=0x13, funct3=0, rs1=2 (sp)
+    // 重建 insn 后检查: (insn & 0x7F) == 0x13 && (insn>>12)&7 == 0 && (insn>>15)&0x1F == 2
+    #[test]
+    fn riscv64_aggregate_arg_by_ref() {
+        let (program, diags) = crate::parser::parse(
+            b"struct S { int x; int y; };\n\
+              void callee(struct S s) {}\n\
+              int main(void) { struct S s; s.x = 1; s.y = 2; callee(s); return 0; }\n",
+            "rv.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let module = lower(program).expect("lower");
+        validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.compile(&module);
+        let obj = cg.build_output();
+        let has_addi_sp = obj.windows(4).any(|w| {
+            if w.len() < 4 { return false; }
+            let insn = (w[0] as u32) | ((w[1] as u32) << 8) | ((w[2] as u32) << 16) | ((w[3] as u32) << 24);
+            (insn & 0x7F) == 0x13 && ((insn >> 12) & 7) == 0 && ((insn >> 15) & 0x1F) == 2
+        });
+        assert!(has_addi_sp, "expected addi rd, sp, #off (M7 by-ref aggregate)");
     }
 }

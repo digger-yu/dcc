@@ -60,6 +60,10 @@
 | `struct __attribute__((__may_alias__))` | `tests/fixtures/may_alias_struct.c` |
 | 宏 `#` 字符串化换行折叠 | `preproc` 单测 `stringify_collapses_*`；`NOFAIL`/`modpost.c` |
 | asm goto 行内 `#` 注释 | `tests/fixtures/asm_goto_hash_comment.c`；`jump_label.h` objtool 标注 |
+| aarch64/riscv64 整数除/取模 (M7) | `codegen/aarch64.rs` 走 `sdiv`+`msub`，`codegen/riscv64.rs` 走 RV64M `div/rem`；不再退化为 0；`aarch64_ir_div_mod_emit_sdiv_msub` + `riscv64_ir_div_mod_emit_rv64m` |
+| aarch64/riscv64 移位 (M7) | `lslv`/`lsrv` (aarch64) 修复 Rm bit 错位；`sll`/`srl`/`sra` (riscv64) 替代 0；`aarch64_ir_shifts_emit_lslv_lsrv` + `riscv64_ir_shifts_emit_sll_srl` |
+| 聚合类型 by-ref (M7) | aarch64/riscv64 `gen_call` 检测 `ValueType::Aggregate`/`Array`/`Complex`，local 参数通过 `add xN, sp, #off` / `addi aN, sp, #off` 传地址；`aarch64_aggregate_arg_by_ref` + `riscv64_aggregate_arg_by_ref` |
+| 聚合类型 sret 返回 (M7) | 返回 > 16 字节时 caller 分配 `<sret>` local，x0/a0 指向 sret 槽 |
 
 ## 阻塞级（Linux 6.6 全树）
 

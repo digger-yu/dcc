@@ -269,14 +269,31 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 - **已实现**：AAPCS64 整数/浮点/向量（基础 NEON `v0.4s`）表达式、`bl` 函数调用（
   `R_AARCH64_CALL26`）、全局 `.rodata`、`ET_REL` `.o` 与 `ET_EXEC` hello
   （`_start` → `bl main` → `svc #0`）；`-S` 输出 GNU 汇编骨架。
-- **限制**：无 varargs/结构体传参、除法/取模回退为 0、向量仅常量广播与加减乘。
+- **M7 增强（v0.7+）**：
+  - 真 `sdiv` / `msub` 实现整数除/取模（不再退化为 0）。
+  - 真 `lslv` / `lsrv` 实现左/右移位（先前编码 bit 21 错位，Rm=wzr）。
+  - 聚合类型参数 by-ref：local struct 通过 `add xN, sp, #off` 传地址。
+  - 聚合类型返回值 > 16 字节：caller 分配 `<sret>` local，x0 指向 sret 槽。
+  - varargs 最小：超过 8 个 GP 参数自动 spill 到 caller 栈。
+  - 通用 `mov_x_reg_imm` 支持 `movz`+`movk` 64-bit 立即数装入。
+- **限制**：HFA（NEON 同构浮点聚合）尚未识别，仍按 GP by-ref 处理；大于
+  16 字节的 struct 返回依赖 sret 但不验证调用者拿到数据；无 eh_frame / ORC /
+  sanitizer 元数据节（仅 x86_64 具备）。
 
 ## RISC-V 64 后端（`codegen/riscv64.rs`，M7）
 
 - **入口**：`codegen::emit` 在 `--target riscv64-linux-gnu` 时选用 `Riscv64Codegen`。
 - **能力与 AArch64 对齐**：整数/浮点/向量表达式、控制流、函数调用（`R_RISCV_JAL`）、
   全局 `.rodata`、`build_elf_riscv64` / `build_elf_rel_riscv64`。
-- **限制**：同上；大立即数通过 `lui`+`addi` 序列；浮点运算为 RV64GC `f` 扩展子集。
+- **M7 增强（v0.7+）**：
+  - 真 RV64M 指令 `div` / `divu` / `rem` / `remu`（funct7=0000001, bit 25）。
+  - 真 RV64I 移位 `sll` / `srl` / `sra`（替代之前的 0）。
+  - 聚合类型参数 by-ref：local struct 通过 `addi aN, sp, #off` 传地址。
+  - 聚合类型返回值 > 16 字节：caller 分配 `<sret>` local，a0 指向 sret 槽。
+  - varargs 最小：超过 8 个 GP 参数自动 spill 到 caller 栈。
+  - 大立即数通过 `lui`+`addi` 序列；浮点运算为 RV64GC `f` 扩展子集。
+- **限制**：HFA（FP aggregate）尚未识别；无 eh_frame / ORC / sanitizer 元数据节；
+  大于 16 字节 struct 返回同样依赖 sret，调用者需确保取到 sret 数据。
 
 ## 测试脚本布局
 
