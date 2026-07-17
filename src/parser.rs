@@ -646,20 +646,9 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::Ident && self.cur.text == "_Static_assert" {
             return self.parse_static_assert().map(|_| vec![]);
         }
-        // 预处理未完全展开的静态分支 key 声明（asm-offsets 仅需 offsetof）
+        // 预处理未完全展开的静态分支 key 声明 → 语义补全为 extern struct static_key_{false,true}
         if self.cur.kind == TokKind::Ident && self.cur.text.starts_with("_DECLARE_STATIC_KEY_") {
-            self.advance();
-            if self.cur.kind == TokKind::LParen {
-                self.advance();
-                let mut depth = 1i32;
-                while depth > 0 && self.cur.kind != TokKind::Eof {
-                    if self.cur.kind == TokKind::LParen { depth += 1; }
-                    if self.cur.kind == TokKind::RParen { depth -= 1; }
-                    self.advance();
-                }
-            }
-            if self.cur.kind == TokKind::Semi { self.advance(); }
-            return Some(vec![]);
+            return self.parse_static_key_decl();
         }
         // 解析声明开头的 __attribute__: GCC 扩展, 如 __attribute__((section(".init.text"))) int foo()
         let leading_attrs = self.parse_attributes();
@@ -838,6 +827,77 @@ impl<'a> Parser<'a> {
                 "E0011", "_Static_assert condition is not an integer constant expression", span)),
         }
         Some(())
+    }
+
+    /// 将 `_DECLARE_STATIC_KEY_0(name)` / `_1(name)` 及
+    /// `_DECLARE_STATIC_KEY_IS_ENABLED(cfg)(name)` 补全为 Linux jump_label 外部声明。
+    fn parse_static_key_decl(&mut self) -> Option<Vec<Decl>> {
+        let span = self.cur.span.clone();
+        let macro_name = self.cur.text.clone();
+        self.advance();
+        // __PASTE 未完全展开时残留 _DECLARE_STATIC_KEY_IS_ENABLED(cfg)(name)
+        let enabled = if macro_name == "_DECLARE_STATIC_KEY_IS_ENABLED" {
+            if self.cur.kind == TokKind::LParen {
+                self.advance();
+                while self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
+                    self.advance();
+                }
+                if self.cur.kind == TokKind::RParen { self.advance(); }
+            }
+            false
+        } else {
+            let suffix = macro_name.strip_prefix("_DECLARE_STATIC_KEY_")?;
+            match suffix {
+                "0" => false,
+                "1" => true,
+                _ => {
+                    self.err_here(
+                        "E0001",
+                        format!("unknown static key macro '{macro_name}'"),
+                        Some("expected _DECLARE_STATIC_KEY_0 or _DECLARE_STATIC_KEY_1"),
+                    );
+                    return None;
+                }
+            }
+        };
+        let struct_name = if enabled { "static_key_true" } else { "static_key_false" };
+        if !self.struct_defs.contains_key(struct_name) {
+            self.struct_defs.insert(
+                struct_name.to_string(),
+                (Rc::new(vec![]), false),
+            );
+        }
+        if !self.expect(TokKind::LParen, "'('") { return None; }
+        let name = if self.cur.kind == TokKind::Ident {
+            let ident = Ident {
+                name: self.cur.text.clone(),
+                span: self.cur.span.clone(),
+            };
+            self.advance();
+            ident
+        } else {
+            self.err_here("E0001", "expected identifier in static key declaration", None);
+            return None;
+        };
+        if !self.expect(TokKind::RParen, "')'") { return None; }
+        if !self.expect(TokKind::Semi, "';'") { return None; }
+        let ty = Type::Struct(struct_name.to_string(), Rc::new(vec![]));
+        self.globals.insert(name.name.clone(), ty.clone());
+        Some(vec![Decl::Var(VarDecl {
+            ty,
+            name,
+            init: None,
+            span,
+            is_extern: true,
+            is_static: false,
+            section: None,
+            alignment: None,
+            is_weak: false,
+            visibility: None,
+            is_unused: false,
+            register_name: None,
+            cleanup_fn: None,
+        })])
     }
 
     fn parse_var_or_func(&mut self, ty: Type, leading_attrs: ParsedAttrs, storage: StorageClass) -> Option<Vec<Decl>> {

@@ -143,11 +143,11 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 |----|--------------|------|----------|----------|
 | **E1001** | `unresolved type '…' reached typed IR` | 未解析类型进入 IR | `__typeof__(orphan_type) x;` 等产生 `Type::Named` | `e1001.c` |
 | **E1002** | `IR function has no name` | 函数名为空 | `int () { return 0; }` 无名函数定义 | `e1002.c` |
-| **E1003** | `unsupported floating-point operation …` | 不支持的 float 运算 | 如 `float` 的 `%` | `e1003.c` |
+| **E1003** | `unsupported floating-point operation …` | 不支持的 float 运算 | 如 `float` 的 `%`、一元 `!`/`~`；支持 `+ - * /` 比较与 `&& \|\|` | `e1003.c` |
 | **E1004** | `cannot dereference a non-pointer expression` | 非法解引用 | `*x` 其中 `x` 非指针 | `e1004.c` |
 | **E1005** | `va_arg currently requires a va_list object` | `va_arg`  operand 非法 | 对非 `va_list` 对象做 `va_arg` | `e1005.c` |
-| **E1006** | `global initializer for '…' is not a supported constant expression` | 全局初始化非常量 | `int g = main();` | `e1006.c` |
-| **E1007** | `unsupported vector operation …` | 向量运算不支持 | 向量类型上的 `\|` 等 | `e1007.c` |
+| **E1006** | `global initializer for '…' is not a supported constant expression` | 全局初始化非常量 | `int g = main();`；支持整数/浮点字面量、`sizeof`/`offsetof`、cast、复合字面量、向量 `{1,2,3,4}` 等 | `e1006.c` |
+| **E1007** | `unsupported vector operation …` | 向量运算不支持 | 向量类型上的 `\|`、一元运算等；支持 `+ - *` | `e1007.c` |
 | **E1008** | `unsupported complex operation …` | 复数运算不支持 | `_Complex float` 的 `/` 等 | `e1008.c` |
 | **E1009** | `unknown aggregate member '…'` | 未知成员 | 结构体上访问不存在的字段 | — |
 | **E1010** | `member access requires a struct or union` | 非聚合成员访问 | 对非 struct/union 做 `.` / `->` | — |

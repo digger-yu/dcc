@@ -22,13 +22,17 @@
    │ (tokens.rs │    │ (codegen/)     │
    │  ast.rs    │    │  ├ x86_64.rs   │
    │  parser.rs)│    │  ├ aarch64.rs  │ ← 未来
-   │            │    │  ├ riscv.rs    │ ← 未来
-   │            │    │  └ elf.rs      │
-   └────────────┘    └────────────────┘
-          │
-          ▼
+   └─────┬──────┘    │  ├ riscv.rs    │ ← 未来
+         │           │  └ elf.rs      │
+         ▼           └────────────────┘
+   ┌────────────┐
+   │ Typed IR   │
+   │ (ir.rs)    │  lower → validate → opt
+   └─────┬──────┘
+         │
+         ▼
    ┌─────────────────────────────────────┐
-   │  AST (ast.rs) = IR (第一性原理决定)  │
+   │  AST (ast.rs)                       │
    │  - FuncDecl / Block / Stmt / Expr   │
    │  - 所有节点带 Span (行/列/字符级)    │
    └─────────────────────────────────────┘
@@ -158,6 +162,20 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 
 预处理 `#` 字符串化遵循 C 规则：实参内换行与连续空白折叠为单空格
 （`NOFAIL(ptr)` → `"malloc(...)"` 单行字面量）。
+
+## Typed IR 与语义校验（`ir.rs`）
+
+Driver 在 codegen 前执行 `lower → validate → opt`：
+
+| 阶段 | 职责 |
+|------|------|
+| `lower` | AST 降级为带 `ValueType` 的函数/全局图；全局初值过 `is_static_initializer`，违例报 **E1006** |
+| `validate` | 校验 float/vector/complex 二元/一元运算是否与 codegen 能力一致（**E1003/E1007/E1008**） |
+| `opt` | 常量折叠、DCE、小函数内联（`-O1` 起） |
+
+Linux jump_label 预处理残留 `_DECLARE_STATIC_KEY_*` 在 parser 层由
+`parse_static_key_decl()` 补全为 `extern struct static_key_{false,true}`，
+再进入上述 IR 管线。回归：`tests/fixtures/static_key_*.c`、`ir::tests`。
 
 ## 自举 (M5)
 

@@ -3,7 +3,7 @@
 //! 该层保留 AST 作为后端迁移期间的语义载荷，同时建立独立、可验证的
 //! 类型化函数/表达式图。后端入口只接受通过验证的 `Module`。
 
-use crate::ast::{self, BinOp, BlockItem, Decl, Expr, InitItem, Stmt, Type};
+use crate::ast::{self, BinOp, BlockItem, Decl, Expr, InitItem, Stmt, Type, UnOp};
 use crate::const_eval;
 use crate::diagnostics::{Diagnostic, Span};
 
@@ -25,7 +25,7 @@ pub enum ExprKind {
     Constant,
     Local(String),
     Binary(BinOp),
-    Unary,
+    Unary(UnOp),
     Assign,
     Cast,
     Address,
@@ -148,30 +148,85 @@ fn validate_stmt(stmt: &TypedStmt, diagnostics: &mut Vec<Diagnostic>) {
     for nested in &stmt.nested { validate_stmt(nested, diagnostics); }
 }
 
+/// 与 codegen 浮点路径一致的二元运算符集合。
+const FLOAT_BINOPS: &[BinOp] = &[
+    BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div,
+    BinOp::EqEq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
+    BinOp::AndAnd, BinOp::OrOr,
+];
+
+/// 与 codegen SIMD 向量路径一致的二元运算符集合。
+const VECTOR_BINOPS: &[BinOp] = &[BinOp::Add, BinOp::Sub, BinOp::Mul];
+
+/// 与 codegen 复数路径一致的二元运算符集合。
+const COMPLEX_BINOPS: &[BinOp] = &[BinOp::Add, BinOp::Sub, BinOp::Mul];
+
+fn is_float_ty(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Float { .. })
+}
+
+fn is_vector_ty(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Vector(_, _))
+}
+
+fn is_complex_ty(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Complex(_))
+}
+
 fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
-    if let ExprKind::Binary(op) = expr.kind {
-        let float = expr.children.iter().any(|e| matches!(e.ty, ValueType::Float { .. }));
-        let vector = expr.children.iter().any(|e| matches!(e.ty, ValueType::Vector(_, _)));
-        let complex = expr.children.iter().any(|e| matches!(e.ty, ValueType::Complex(_)));
-        if float && !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
-            | BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-            | BinOp::AndAnd | BinOp::OrOr) {
-            diagnostics.push(Diagnostic::err(
-                "E1003",
-                format!("unsupported floating-point operation {:?}", op),
-                expr.span.clone(),
-            ));
+    match expr.kind {
+        ExprKind::Binary(op) => {
+            let float = expr.children.iter().any(|e| is_float_ty(&e.ty));
+            let vector = expr.children.iter().any(|e| is_vector_ty(&e.ty));
+            let complex = expr.children.iter().any(|e| is_complex_ty(&e.ty));
+            if float && !FLOAT_BINOPS.contains(&op) {
+                diagnostics.push(Diagnostic::err(
+                    "E1003",
+                    format!("unsupported floating-point operation {:?}", op),
+                    expr.span.clone(),
+                ));
+            }
+            if vector && !VECTOR_BINOPS.contains(&op) {
+                diagnostics.push(Diagnostic::err(
+                    "E1007",
+                    format!("unsupported vector operation {:?}", op),
+                    expr.span.clone(),
+                ));
+            }
+            if complex && !COMPLEX_BINOPS.contains(&op) {
+                diagnostics.push(Diagnostic::err(
+                    "E1008",
+                    format!("unsupported complex operation {:?}", op),
+                    expr.span.clone(),
+                ));
+            }
         }
-        if vector && !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
-            diagnostics.push(Diagnostic::err(
-                "E1007", format!("unsupported vector operation {:?}", op), expr.span.clone(),
-            ));
+        ExprKind::Unary(op) => {
+            if let Some(operand) = expr.children.first() {
+                if is_float_ty(&operand.ty) && !matches!(op, UnOp::Neg | UnOp::Plus) {
+                    diagnostics.push(Diagnostic::err(
+                        "E1003",
+                        format!("unsupported floating-point unary operation {:?}", op),
+                        expr.span.clone(),
+                    ));
+                }
+                if is_vector_ty(&operand.ty) {
+                    diagnostics.push(Diagnostic::err(
+                        "E1007",
+                        format!("unsupported vector unary operation {:?}", op),
+                        expr.span.clone(),
+                    ));
+                }
+                if is_complex_ty(&operand.ty) && !matches!(op, UnOp::Neg | UnOp::Plus) {
+                    diagnostics.push(Diagnostic::err(
+                        "E1008",
+                        format!("unsupported complex unary operation {:?}", op),
+                        expr.span.clone(),
+                    ));
+                }
+            }
         }
-        if complex && !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
-            diagnostics.push(Diagnostic::err(
-                "E1008", format!("unsupported complex operation {:?}", op), expr.span.clone(),
-            ));
-        }
+        _ => {}
     }
     for child in &expr.children { validate_expr(child, diagnostics); }
 }
@@ -297,7 +352,7 @@ impl Lowering {
             Expr::Ident { name, .. } => (ExprKind::Local(name.name.clone()), Vec::new()),
             Expr::Binop { op, l, r, .. } => (
                 ExprKind::Binary(*op), vec![self.lower_expr(l), self.lower_expr(r)]),
-            Expr::Unary { e, .. } => (ExprKind::Unary, vec![self.lower_expr(e)]),
+            Expr::Unary { op, e, .. } => (ExprKind::Unary(*op), vec![self.lower_expr(e)]),
             Expr::Assign { l, r, .. } => (
                 ExprKind::Assign, vec![self.lower_expr(l), self.lower_expr(r)]),
             Expr::Cond { cond, then_, else_, .. } => (
@@ -404,8 +459,19 @@ fn lower_inits(cx: &mut Lowering, inits: &[InitItem]) -> Vec<TypedExpr> {
 fn is_static_initializer(expr: &Expr) -> bool {
     if const_eval::eval(expr).is_ok() { return true; }
     match expr {
-        Expr::String { .. } | Expr::LabelAddr { .. } => true,
+        Expr::Int { .. } | Expr::Float { .. } | Expr::Char { .. }
+        | Expr::String { .. } | Expr::LabelAddr { .. } => true,
         Expr::Ident { .. } => true,
+        Expr::SizeofTy { .. } | Expr::SizeofExpr { .. }
+        | Expr::AlignofTy { .. } | Expr::AlignofExpr { .. } | Expr::Offsetof { .. } => true,
+        Expr::Cast { e, .. } | Expr::Unary { op: UnOp::Neg | UnOp::Plus, e, .. } => {
+            is_static_initializer(e)
+        }
+        Expr::Cond { cond, then_, else_, .. } => match const_eval::eval(cond) {
+            Ok(v) if v != 0 => is_static_initializer(then_),
+            Ok(_) => is_static_initializer(else_),
+            Err(_) => false,
+        },
         // &ident / &arr[const]：链接期可重定位常量
         Expr::AddrOf { e, .. } => match e.as_ref() {
             Expr::Ident { .. } | Expr::String { .. } => true,
@@ -456,6 +522,7 @@ fn expr_span(expr: &Expr) -> Span {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Decl;
 
     #[test]
     fn lowers_functions_and_typed_expressions() {
@@ -473,5 +540,74 @@ mod tests {
             module.functions[0].body[0].expressions[0].ty,
             ValueType::Integer { bits: 32, signed: true }
         );
+    }
+
+    #[test]
+    fn static_key_residual_decl_becomes_extern_global() {
+        let src = b"_DECLARE_STATIC_KEY_0(init_on_alloc);\nint main(void) { return 0; }\n";
+        let (program, diagnostics) = crate::parser::parse(src, "static-key.c");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(program.decls.len(), 2);
+        if let Decl::Var(v) = &program.decls[0] {
+            assert!(v.is_extern);
+            assert_eq!(v.name.name, "init_on_alloc");
+            assert!(matches!(v.ty, Type::Struct(ref n, _) if n == "static_key_false"));
+        } else {
+            panic!("expected VarDecl, got {:?}", program.decls[0]);
+        }
+        let module = lower(program).expect("static key should lower");
+        validate(&module).expect("static key global should validate");
+        assert_eq!(module.globals.len(), 1);
+        assert_eq!(module.globals[0].name, "init_on_alloc");
+    }
+
+    #[test]
+    fn static_key_is_enabled_form_becomes_extern_global() {
+        let src = b"_DECLARE_STATIC_KEY_IS_ENABLED(CFG)(init_on_alloc);\nint main(void) { return 0; }\n";
+        let (program, diagnostics) = crate::parser::parse(src, "static-key-is-enabled.c");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        if let Decl::Var(v) = &program.decls[0] {
+            assert!(v.is_extern);
+            assert_eq!(v.name.name, "init_on_alloc");
+        } else {
+            panic!("expected VarDecl");
+        }
+        lower(program).expect("IS_ENABLED static key form should lower");
+    }
+
+    #[test]
+    fn vector_global_initializer_is_static() {
+        let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
+                     v4si g = {1, 2, 3, 4};\n\
+                     int main(void) { return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "vector-global.c");
+        lower(program).expect("vector global init should be constant");
+    }
+
+    #[test]
+    fn non_constant_global_init_reports_e1006() {
+        let src = b"int g = main();\nint main(void) { return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "e1006.c");
+        let err = lower(program).expect_err("runtime call init must fail");
+        assert!(err.iter().any(|d| d.code == "E1006"), "{err:?}");
+    }
+
+    #[test]
+    fn float_mod_reports_e1003() {
+        let src = b"int main(void) { float a = 1, b = 2; return (int)(a % b); }\n";
+        let (program, _) = crate::parser::parse(src, "e1003.c");
+        let module = lower(program).expect("lower despite float mod");
+        let err = validate(&module).expect_err("float mod must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1003"), "{err:?}");
+    }
+
+    #[test]
+    fn vector_bitwise_or_reports_e1007() {
+        let src = b"typedef float v4f __attribute__((vector_size(16)));\n\
+                     int main(void) { v4f a, b; return (int)(a | b)[0]; }\n";
+        let (program, _) = crate::parser::parse(src, "e1007.c");
+        let module = lower(program).expect("lower despite vector or");
+        let err = validate(&module).expect_err("vector or must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
     }
 }

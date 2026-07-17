@@ -1254,3 +1254,37 @@ fn vector_global_copy_compiles() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// 预处理残留的 _DECLARE_STATIC_KEY_0 → extern struct static_key_false
+#[test]
+fn static_key_maybe_compiles() {
+    let source = include_str!("fixtures/static_key_maybe.c");
+    let output = run_syntax_test("static-key-maybe", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn static_key_chain_compiles() {
+    let source = include_str!("fixtures/static_key_chain.c");
+    let output = run_syntax_test("static-key-chain", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn static_key_decl_compiles() {
+    let source = include_str!("fixtures/static_key_decl.c");
+    let output = run_syntax_test("static-key-decl", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

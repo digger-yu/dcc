@@ -121,7 +121,7 @@
 | `tags[3][EXPR]` | 结构体字段只解析一维 `[...]` | while LBracket + const_eval 数组界 |
 | `void __attr__ *fn()` | void 后属性残留 | `skip_attributes` 后再 `parse_ptr_suffix` |
 | 语句表达式 `q * n_` | `is_decl_start` 误判 | ident 须为类型名；补 `__auto_type` |
-| `_DECLARE_STATIC_KEY_0(x)` | 预处理二次宏残留 | parse_decl 跳过 + 待语义补全 |
+| `_DECLARE_STATIC_KEY_0(x)` | 预处理二次宏残留 | `parse_static_key_decl()` 语义补全 |
 | `ret ?: -7` | 未实现 GNU 省略三元 | 中间缺省则 then_=cond |
 | `current_thread_info()` 未展开 | include 缓存零参宏误读为 `[""]` | load 过滤空 param；缓存 V6 |
 | percpu 三元 `*` 解引用 E1004 | `Cond` 固定 int 类型 | 分支为指针时保留指针类型 |
@@ -140,6 +140,8 @@
 
 | 特性 | 说明 |
 |------|------|
+| jump_label 静态 key 声明 | `parse_static_key_decl()`：`_DECLARE_STATIC_KEY_0/1` 及 `IS_ENABLED` 残留 → `extern struct static_key_{false,true}` |
+| Typed IR 语义校验 | `ir.rs`：`is_static_initializer` 扩展；float/vector/complex 二元/一元运算与 codegen 对齐 |
 | BTF struct 探测 | `build_btf_probe()`：int + `dcc_probe` 结构体 |
 | eh_frame FDE | 每函数 PC+size 生成 FDE；ORC 节写入 PC 列表 |
 | LTO 链接 + gc | `src/link.rs`：`ld -r --gc-sections` + `.llvm.lto` 注入 + dead strip |
