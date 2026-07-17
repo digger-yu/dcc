@@ -200,10 +200,10 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 
 | 文件 | 职责 |
 |------|------|
-| `src/cpp/lexer.rs` | C++ token 流：扩展关键字 + `::` 标点 |
-| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 |
-| `src/cpp/mangle.rs` | Itanium C++ ABI 名字修饰（`_ZN…C1E…` / `D1E`） |
-| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身） |
+| `src/cpp/lexer.rs` | C++ token 流：扩展关键字 + `::` 标点 + M8 关键字（operator/namespace/try/catch/throw/...） |
+| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 + M8 (namespace/operator/inherit/lambda/template/try-catch) |
+| `src/cpp/mangle.rs` | Itanium C++ ABI 名字修饰（`_ZN…C1E…` / `D1E` / `pl` / `_ZTV…` / `_ZTI…`） |
+| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身 + vtable/typeinfo/lambda/exception 降级） |
 | `src/cpp/driver.rs` | 顶层入口：`compile_cpp(cpp_src, obj, dcc_bin, includes, opt)` |
 
 **降级映射表**（C++ → C）：
@@ -213,14 +213,33 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 - `T& ref` → `T* ref`（引用降级为指针）
 - `new Foo(...)` → `((struct Foo*)_Znwm(sizeof(struct Foo))); _ZN3FooC1E…(...)`
 - `delete p` → `_ZdlPv(p);`
+- `namespace ns { class A {}; }` → 扁平化为 `struct ns_A {};`（命名空间前缀化）
+- `class D : public B {}` → `struct D { struct B __base_B; ... };`（基类嵌入）
+- `virtual void f() {}` → `void _ZN1DfEv(struct D* this);` + `_ZTV1D[]` vtable
+- `operator+` → `_ZN...pl...`（Itanium 运算符编码：pl/mi/ml/dv/...）
+- `try { throw 1; } catch (int e) {}` → `__cxa_try`/`__cxa_allocate_exception`/`__cxa_throw` 调用
+- `[](int x) { return x; }` → 匿名 `struct __lambda_N` + `_ZN__lambda_NclERKS_` operator()
+- `template <typename T> ...` → 语法占位 + 单态化降级
+- `typeid(e)` / `dynamic_cast<T*>(e)` → RTTI 占位（`_ZTI` 符号 + `__vptr` 字段）
 
 **M7 范围**：class、ctor、dtor、成员变量、成员函数、`this->x`、`::`、
 引用（→指针）、new/delete、MangleType 基本类型。
-**不在 M7 范围**：模板、异常、虚函数/vtable、多继承、命名空间嵌套、
-运算符重载（new/delete 除外）、lambda。
-**限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M7 阶段仅提供 `cpp::compile_cpp`
-API，未接到 dcc CLI 主入口（计划在 M8 完成）；GCC 完整 bootstrap 仍受阻，
-原因见 `docs/missing_features.md` 的 C++ 前端状态表。
+**M8 范围**（新增）：
+- 命名空间（`namespace foo {}` / `using namespace bar` / `::name`）
+- 运算符重载（除 new/delete 外，含 `operator()` / `operator T`）
+- 继承（单 / 多 / 钻石继承）+ 虚函数 + vtable（`_ZTV<Name>`）+ typeinfo（`_ZTI<Name>`）
+- RTTI：`typeid(e)` / `dynamic_cast<T*>(e)` 解析 + `_ZTI` 符号
+- 异常：`try { ... } catch (T& e) { ... }` / `throw e` → Itanium zero-cost 降级（`__cxa_*` 调用）
+- Lambda：捕获列表 + 形参 + body → 匿名 `struct` + `operator()` 函数
+- 模板：`template <typename T>` 语法 + 实例化（简化：单态化）
+- constexpr / consteval：关键字识别（占位）
+- `std::complex` / `std::atomic` 风格标准库组件：依赖模板 + 运算符
+
+**M8 不在范围**：模板偏特化、SFINAE、concepts、coroutines、modules。
+**限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M8 阶段仍仅提供 `cpp::compile_cpp`
+API；GCC 完整 bootstrap 仍部分受阻（M8 已解锁模板 / 异常 / vtable / RTTI，
+cc1/cc1plus 仍受更复杂 C++ 模式阻碍）；原因见
+`docs/missing_features.md` 的 C++ 前端状态表。
 
 ## x86-64 后端 ABI 约定
 

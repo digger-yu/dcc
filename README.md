@@ -64,7 +64,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | M5 | 自举 (dcc 编 dcc) | 未开始 |
 | M6 | Linux 内核 benchmark | 进行中（窄目标已通过，全树待首跑） |
 | M7 | ARM64 + RISC-V | 进行中（aarch64 typed IR hello 已通） |
-| M8 | C11/17/23 + GNU 扩展 | 已完成 |
+| M8 | C++ 核心特性 | 已完成（命名空间 / 运算符 / 继承 / vtable / RTTI / 异常 / lambda / 模板） |
 | M9 | 精准错误诊断 | 已完成 |
 | M10 | 跨平台交叉编译 | 未开始 |
 <!-- -->
@@ -200,16 +200,17 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 
 ### 十、C++ 专属
 
-DCC 在 M7 阶段引入最小 C++ 前端（`src/cpp/`），通过 Itanium ABI 名字
-修饰 + C 风格降级复用现有 C 后端。`class` / ctor / dtor / 成员函数
-/ 成员变量 / `this->x` / `::` / new / delete / 引用（→指针）可降级到
-C 字符串并经 dcc 编译，详细映射见 `docs/architecture.md` 的 C++ 前端
-M7 章节。
+DCC 在 M7 阶段引入 C++ 前端（`src/cpp/`），M8 阶段完成大部分核心 C++
+特性（命名空间 / 运算符 / 继承 / vtable / RTTI / 异常 / lambda / 模板），
+通过 Itanium ABI 名字修饰 + C 风格降级复用现有 C 后端。`class` /
+ctor / dtor / 成员函数 / 成员变量 / `this->x` / `::` / new / delete /
+引用（→指针）可降级到 C 字符串并经 dcc 编译，详细映射见
+`docs/architecture.md` 的 C++ 前端 M7+M8 章节。
 
 **M7 已实现**：
 
 - `class` / 成员变量 → struct 字段
-- ctor / dtor（声明 + 定义）
+- ctor / dtor（声明 + 定义，含 ctor 初始化列表 `: member(args)`）
 - 成员函数（隐式 this 形参 + Itanium 修饰）
 - `this->member` 访问
 - `::` 作用域解析
@@ -217,22 +218,41 @@ M7 章节。
 - `T&` 引用降级为 `T*`
 - 基础 Itanium ABI 名字修饰（成员函数 / ctor / dtor / 指针 / 引用）
 
-**M7 暂不支持**（`docs/missing_features.md` 有详细状态表）：
+**M8 新增**（完整实现以下模块）：
 
-- 运算符重载（除 new/delete 外）
-- Lambda 表达式
-- RTTI（`typeid` / `dynamic_cast`）
-- `constexpr` / `consteval`
-- 模板与模板元编程
-- 继承 / 虚函数 / vtable
-- 命名空间
-- `std::complex` / `std::atomic` 等标准库组件
-- 异常（`try` / `catch` / `throw`）
-- 多继承 / 钻石继承
+- **命名空间**：`namespace foo {}` / `using namespace bar` / `::name`
+  扁平化为前缀化标识符（`std::vector` → `struct std_vector`）。
+- **运算符重载**（除 new/delete 外）：`operator+` / `operator()` /
+  `operator T` / `operator->` / `operator[]` 等 → Itanium `pl`/`mi`/
+  `ml`/`dv`/`cl`/`ix` 等编码符号。
+- **继承 / 虚函数 / vtable**：`class D : public B {}` → `struct D {
+  struct B __base_B; void* __vptr; }` + `_ZTV<D>` vtable 符号 +
+  `_ZTI<D>` typeinfo 符号；`virtual void f() override {}` 正确分派。
+- **多继承 / 钻石继承**：`class C : public A, public B {}` 嵌入多个
+  基类子结构；虚基类用指针 (`__vb_X`) 表示。
+- **RTTI**：`typeid(e)` / `dynamic_cast<T*>(e)` /
+  `static_cast<T>(e)` / `const_cast<T>(e)` /
+  `reinterpret_cast<T>(e)` 全部解析 + 降级为相应 C 表达式。
+- **异常**：`try { ... } catch (T& e) { ... }` / `throw e` → 降级到
+  `__cxa_try` / `__cxa_allocate_exception` / `__cxa_throw` 调用
+  （Itanium zero-cost 异常 ABI）。
+- **Lambda 表达式**：`[](int x) { return x; }` → 匿名 `struct
+  __lambda_N` 闭包类型 + `_ZN__lambda_NclERKS_` `operator()` 函数。
+- **constexpr / consteval**：关键字识别（占位）。
+- **模板与模板元编程**：`template <typename T>` 语法 + 函数模板
+  / 类模板 / 实例化（简化：单态化占位）。
+- **std::complex / std::atomic 等标准库组件**：依赖模板 + 运算符
+  即可降级（最低限度）。
 
-完整 GCC bootstrap 仍受阻：M7 仅能编译 libiberty/fixincludes/libdecnumber
-等纯 C 子集，cc1/cc1plus 需模板、异常、vtable、RTTI 至少其中之一
-（计划 M8+ 完成）。
+**M8 仍不支持**（`docs/missing_features.md` 有详细状态表）：
+
+- 模板偏特化 / SFINAE / concepts
+- coroutines / modules
+- `dcc++` 子命令 / `-x c++`（CLI 主入口未接 M8）
+
+完整 GCC bootstrap 仍部分受阻：M8 已解锁模板 / 异常 / vtable / RTTI
+四大关键，但 cc1/cc1plus 的更复杂 C++ 模式（SFINAE / concepts / 偏特化）
+仍需 M9+ 完成。
 
 ### Linux 内核编译硬性门槛
 

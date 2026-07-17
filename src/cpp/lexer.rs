@@ -14,7 +14,7 @@
 use crate::tokens::{Tok, TokKind};
 use crate::diagnostics::Span;
 
-/// C++ 关键字枚举
+/// C++ 关键字枚举 (仅 C 关键字之外的 C++ 扩展)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CppKw {
     Class, Public, Private, Protected,
@@ -23,6 +23,14 @@ pub enum CppKw {
     Namespace, Using,
     True, False, Nullptr,
     Static, Const, Friend,
+    // M8 新增
+    Template, Typename,
+    Override, Final,
+    Try, Catch, Throw,
+    Constexpr, Consteval,
+    Decltype, Typeid,
+    DynamicCast, StaticCast, ReinterpretCast, ConstCast,
+    Mutable, Volatile, Noexcept, ExplicitSpec,
 }
 
 impl CppKw {
@@ -44,6 +52,27 @@ impl CppKw {
             "true" => Self::True,
             "false" => Self::False,
             "nullptr" => Self::Nullptr,
+            "static" => Self::Static,
+            "const" => Self::Const,
+            "friend" => Self::Friend,
+            "template" => Self::Template,
+            "typename" => Self::Typename,
+            "override" => Self::Override,
+            "final" => Self::Final,
+            "try" => Self::Try,
+            "catch" => Self::Catch,
+            "throw" => Self::Throw,
+            "constexpr" => Self::Constexpr,
+            "consteval" => Self::Consteval,
+            "decltype" => Self::Decltype,
+            "typeid" => Self::Typeid,
+            "dynamic_cast" => Self::DynamicCast,
+            "static_cast" => Self::StaticCast,
+            "reinterpret_cast" => Self::ReinterpretCast,
+            "const_cast" => Self::ConstCast,
+            "mutable" => Self::Mutable,
+            "volatile" => Self::Volatile,
+            "noexcept" => Self::Noexcept,
             _ => return None,
         })
     }
@@ -69,6 +98,25 @@ impl CppKw {
             Self::Static => "static",
             Self::Const => "const",
             Self::Friend => "friend",
+            Self::Template => "template",
+            Self::Typename => "typename",
+            Self::Override => "override",
+            Self::Final => "final",
+            Self::Try => "try",
+            Self::Catch => "catch",
+            Self::Throw => "throw",
+            Self::Constexpr => "constexpr",
+            Self::Consteval => "consteval",
+            Self::Decltype => "decltype",
+            Self::Typeid => "typeid",
+            Self::DynamicCast => "dynamic_cast",
+            Self::StaticCast => "static_cast",
+            Self::ReinterpretCast => "reinterpret_cast",
+            Self::ConstCast => "const_cast",
+            Self::Mutable => "mutable",
+            Self::Volatile => "volatile",
+            Self::Noexcept => "noexcept",
+            Self::ExplicitSpec => "explicit",
         }
     }
 }

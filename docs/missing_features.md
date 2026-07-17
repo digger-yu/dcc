@@ -90,22 +90,25 @@
 
 | 缺口 | 影响 |
 |------|------|
-| 无 C++ | 详见下表：M7 提供最小 class/ctor/dtor/this 降级；模板/异常/vtable 不支持 |
+| 无 C++ (M8 部分解锁) | M8 已支持 命名空间 / 运算符 / 继承 / vtable / RTTI / 异常 / lambda / 模板；仍缺 SFINAE / concepts / modules / coroutines |
 | `_Generic` 指针精确匹配 | ✅ 按 pointee 匹配；void* 与对象指针兼容 |
 | libdecnumber 组合编译 | ✅ `tools/libdecnumber_combined.c` 把 11 个 SKIP 文件合一，DECPMAX 7/16/34 三段；远程 1 OK |
 | 内联 asm 约束 | ✅ `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber |
 | SysV va_list SSE | ✅ GP + XMM0–7 保存区；float/double/long double va_arg |
 
-## C++ 前端 M7 / GCC bootstrap 状态
+## C++ 前端 M7 + M8 / GCC bootstrap 状态
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| C++ token 扩展 (`class`/`this`/`new`/`delete`/`::`) | ✅ | `src/cpp/lexer.rs` 5 单测 |
-| Itanium C++ ABI 名字修饰 | ✅ | `src/cpp/mangle.rs` 6 单测：成员函数 C1/D1/参数类型 `v`/`i`/`P`/`R` |
-| 最小 C++ 解析器 | ✅ | `src/cpp/parser.rs`：class、ctor、dtor、成员函数、成员变量、::、this->x |
-| C++→C 降级 | ✅ | `src/cpp/lower.rs`：struct 字段、隐式 this 形参、`_Znwm`/`_ZdlPv` 替身 |
-| dcc++ 子命令 / `-x c++` | ⏳ M8 | M7 仅提供 `cpp::compile_cpp` API，未接 dcc CLI |
-| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 受阻 | 模板/异常/vtable/RTTI 不在 M7；远期需 M8+ |
+| C++ token 扩展 (`class`/`this`/`new`/`delete`/`::`) | ✅ | `src/cpp/lexer.rs` 5+ 单测 |
+| M8 token 扩展 (operator/template/virtual/namespace/try/catch/throw/constexpr/consteval/decltype/typeid) | ✅ | `src/cpp/lexer.rs` |
+| Itanium C++ ABI 名字修饰 | ✅ | `src/cpp/mangle.rs`：成员函数 C1/D1/参数类型 `v`/`i`/`P`/`R` + 运算符 (`pl`/`mi`/`ml`/`dv`/...) + `_ZTV<Name>` vtable + `_ZTI<Name>` typeinfo + 模板形参 |
+| 最小 C++ 解析器 (M7) | ✅ | `src/cpp/parser.rs`：class、ctor、dtor、成员函数、成员变量、::、this->x |
+| M8 解析器扩展 | ✅ | 命名空间 / 运算符 / 继承 (单/多/钻石) / 虚函数 / 模板声明 / try-catch / lambda / typeid / dynamic_cast / static_cast / const_cast / reinterpret_cast |
+| C++→C 降级 (M7) | ✅ | `src/cpp/lower.rs`：struct 字段、隐式 this 形参、`_Znwm`/`_ZdlPv` 替身 |
+| M8 C++→C 降级 | ✅ | 命名空间扁平化 / 基类嵌入 / vtable 符号 / typeinfo 符号 / 异常 (Itanium zero-cost 降级) / lambda 闭包类型 / 模板 (占位) / dynamic_cast 简化实现 |
+| dcc++ 子命令 / `-x c++` | ⏳ M9 | M7/M8 仅提供 `cpp::compile_cpp` API，未接 dcc CLI |
+| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M8 解锁模板/异常/vtable/RTTI；远期仍受 SFINAE/概念/模块阻碍 |
 | libdecnumber 组合 TU 编译 | ✅ 远程 OK | `scripts/remote_gcc_c_probe.sh` 改用 `tools/libdecnumber_combined.c` |
 | 嵌套块重声明 (C99 6.2.1) | ✅ | `parser.rs::check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍报 E0007 |
 

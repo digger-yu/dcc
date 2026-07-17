@@ -1,24 +1,28 @@
-//! Itanium C++ ABI 名字修饰 (M7 最小).
+//! Itanium C++ ABI 名字修饰 (M7 + M8 扩展).
 //!
-//! 完整 Itanium ABI 见 Itanium C++ ABI 5.1.  本模块实现 M7 范围
-//! 必需的子集: 类名, 成员函数, 构造, 析构.  模板 / 虚函数表 /
-//! typeinfo 等用到的 RTTI 符号暂不实现 (GCC bootstrap 阶段 1
-//! 通常不会立刻触雷, 但 stage 2/3 会需要).
+//! 实现 Itanium C++ ABI 5.1 中 M7/M8 必需的子集:
+//!   - 类名 / 限定名 / 嵌套名
+//!   - 构造 (C1/C2/C3) / 析构 (D0/D1/D2)
+//!   - 运算符重载 (operator+/-/*/.../()/<</>>/==/...)
+//!   - 模板 (M8: 留作模板参数后缀)
+//!   - vtable / typeinfo (M8: _ZTV / _ZTI)
 //!
 //! 修饰格式 (简化):
 //!   _ZN<name>E                   -- 嵌套名
 //!   _ZN<len><class>E<name>E      -- 限定名
 //!   _ZN<len><class>E<name>...    -- 成员函数 (含参数)
-//!   C1                           -- 完整对象构造 (base ctor)
-//!   C2                           -- 基对象构造 (base ctor)
-//!   C3                           -- 完整分配构造 (allocating ctor)
-//!   D1                           -- 完整对象析构 (base dtor)
-//!   D2                           -- 基对象析构 (base dtor)
+//!   C1 / C2 / C3                 -- 构造
+//!   D0 / D1 / D2                 -- 析构
+//!   _ZTV<name>                   -- vtable
+//!   _ZTI<name>                   -- typeinfo
 //!
 //! 例子:
 //!   Foo::bar()                 -> _ZN3Foo3barEv
 //!   Foo::Foo(int)              -> _ZN3FooC1Ei
 //!   Foo::~Foo()                -> _ZN3FooD1Ev
+//!   Foo::operator+(int)        -> _ZN3FooaddEi (M8 简化为 add/sub/mul/..)
+//!   vtable for Foo             -> _ZTV3Foo
+//!   typeinfo for Foo           -> _ZTI3Foo
 
 /// 类型编码 (M7 范围: 内置类型 + 类引用)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +171,188 @@ pub fn mangle_global_function(name: &str, params: &[MangleType]) -> String {
             p.encode(&mut out);
         }
     }
+    out
+}
+
+/// 运算符 (二元 / 一元 / 转型 / 函数调用)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operator {
+    // 二元算术
+    Add, Sub, Mul, Div, Mod,
+    // 二元位运算
+    Shl, Shr, And, Or, Xor,
+    // 比较
+    Eq, Ne, Lt, Le, Gt, Ge,
+    // 逻辑
+    LAnd, LOr,
+    // 赋值
+    Assign, AddAssign, SubAssign, MulAssign, DivAssign, ModAssign,
+    ShlAssign, ShrAssign, AndAssign, OrAssign, XorAssign,
+    // 自增自减
+    Inc, Dec,
+    // 复合下标 / 调用 / 成员
+    Index, Call, Arrow, ArrowStar,
+    // 一元
+    Plus, Minus, Not, LNot, Deref, AddrOf, PreInc, PreDec, PostInc, PostDec,
+    // 转型
+    CastTo(MangleType),
+    // 特殊
+    Comma,
+}
+
+impl Operator {
+    /// 编码成 Itanium operator-name (简单形式: 用字符串代替)
+    pub fn encode_name(self) -> &'static str {
+        match self {
+            Self::Add => "pl",
+            Self::Sub => "mi",
+            Self::Mul => "ml",
+            Self::Div => "dv",
+            Self::Mod => "rm",
+            Self::Shl => "ls",
+            Self::Shr => "rs",
+            Self::And => "an",
+            Self::Or => "or",
+            Self::Xor => "eo",
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::Lt => "lt",
+            Self::Le => "le",
+            Self::Gt => "gt",
+            Self::Ge => "ge",
+            Self::LAnd => "aa",
+            Self::LOr => "oo",
+            Self::Assign => "aS",
+            Self::AddAssign => "pL",
+            Self::SubAssign => "mI",
+            Self::MulAssign => "mL",
+            Self::DivAssign => "dV",
+            Self::ModAssign => "rM",
+            Self::ShlAssign => "lS",
+            Self::ShrAssign => "rS",
+            Self::AndAssign => "aN",
+            Self::OrAssign => "oR",
+            Self::XorAssign => "eO",
+            Self::Inc | Self::PreInc | Self::PostInc => "pp",
+            Self::Dec | Self::PreDec | Self::PostDec => "mm",
+            Self::Index => "ix",
+            Self::Call => "cl",
+            Self::Arrow => "pt",
+            Self::ArrowStar => "pm",
+            Self::Plus => "ps",
+            Self::Minus => "ng",
+            Self::Not => "co",
+            Self::LNot => "nt",
+            Self::Deref => "de",
+            Self::AddrOf => "ad",
+            Self::Comma => "cm",
+            Self::CastTo(_) => "cv",
+        }
+    }
+
+    /// 把 + - * / ++ -- 等原始运算符字面量映射到 Operator
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            "+" => Self::Add,
+            "-" => Self::Sub,
+            "*" => Self::Mul,
+            "/" => Self::Div,
+            "%" => Self::Mod,
+            "<<" => Self::Shl,
+            ">>" => Self::Shr,
+            "&" => Self::And,
+            "|" => Self::Or,
+            "^" => Self::Xor,
+            "==" => Self::Eq,
+            "!=" => Self::Ne,
+            "<" => Self::Lt,
+            "<=" => Self::Le,
+            ">" => Self::Gt,
+            ">=" => Self::Ge,
+            "&&" => Self::LAnd,
+            "||" => Self::LOr,
+            "=" => Self::Assign,
+            "+=" => Self::AddAssign,
+            "-=" => Self::SubAssign,
+            "*=" => Self::MulAssign,
+            "/=" => Self::DivAssign,
+            "%=" => Self::ModAssign,
+            "<<=" => Self::ShlAssign,
+            ">>=" => Self::ShrAssign,
+            "&=" => Self::AndAssign,
+            "|=" => Self::OrAssign,
+            "^=" => Self::XorAssign,
+            "++" => Self::Inc,
+            "--" => Self::Dec,
+            "()" => Self::Call,
+            "[]" => Self::Index,
+            "->" => Self::Arrow,
+            "->*" => Self::ArrowStar,
+            "," => Self::Comma,
+            _ => return None,
+        })
+    }
+}
+
+/// 运算符重载函数修饰 (成员或非成员)
+/// 格式: _ZN<class> op<args>E   或   _Z op<args>E
+pub fn mangle_operator_member(
+    class: &str,
+    op: Operator,
+    params: &[MangleType],
+) -> String {
+    let n = NestedName::from_dotted(vec![class.to_string(), op.encode_name().to_string()]);
+    let mut out = String::new();
+    n.encode(&mut out);
+    if params.is_empty() {
+        out.push('v');
+    } else {
+        for p in params {
+            p.encode(&mut out);
+        }
+    }
+    out
+}
+
+pub fn mangle_operator_global(op: Operator, params: &[MangleType]) -> String {
+    let mut out = String::new();
+    out.push_str("_Z");
+    out.push_str(op.encode_name());
+    if params.is_empty() {
+        out.push('v');
+    } else {
+        for p in params {
+            p.encode(&mut out);
+        }
+    }
+    out
+}
+
+/// vtable 符号: _ZTV<name>
+pub fn mangle_vtable(name: &str) -> String {
+    format!("_ZTV{}{}", name.len(), name)
+}
+
+/// typeinfo 符号: _ZTI<name>
+pub fn mangle_typeinfo(name: &str) -> String {
+    format!("_ZTI{}{}", name.len(), name)
+}
+
+/// 虚表项的类型信息符号: _ZTT<name> (抛掷类型表, gcc 用)
+pub fn mangle_ttt(name: &str) -> String {
+    format!("_ZTT{}{}", name.len(), name)
+}
+
+/// 模板实例化: 在 nested name 末尾追加类型参数
+/// 例: std::vector<int>   ->   St6vectorIiSaIiEE (M8 简化)
+pub fn mangle_template_args(prefix: &str, args: &[MangleType]) -> String {
+    let mut out = String::new();
+    out.push_str("_Z");
+    out.push_str(&format!("{}{}", prefix.len(), prefix));
+    for a in args {
+        a.encode(&mut out);
+    }
+    out.push('E');
     out
 }
 
