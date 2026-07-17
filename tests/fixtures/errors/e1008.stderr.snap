@@ -1,2 +1,2 @@
-error[E1008]: unsupported complex operation Div
+error[E1008]: unsupported complex operation Mod
   --> <file>:1:65

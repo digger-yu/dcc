@@ -3,8 +3,10 @@
 // 测试 __builtin_object_size
 int test_object_size() {
     int x = 42;
+    char buf[16];
     long sz = __builtin_object_size(&x, 0);
-    if (sz != -1) return 1;
+    if (sz != 4) return 1;
+    if (__builtin_object_size(buf, 0) != 16) return 2;
     return 0;
 }
 

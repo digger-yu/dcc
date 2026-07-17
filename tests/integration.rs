@@ -28,6 +28,36 @@ fn run_object_test(name: &str, source: &str) -> (std::process::Output, std::path
     (output, object_path)
 }
 
+/// 编译为可执行文件并返回路径（Linux 远程测试用）
+fn run_compile_and_run(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
+    let exe_path = dir.join(format!("dcc-{name}-{}", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
+    }
+    let _ = fs::remove_file(source_path);
+    (output, exe_path)
+}
+
+fn run_exe(path: &std::path::Path) -> i32 {
+    Command::new(path)
+        .output()
+        .expect("run executable")
+        .status
+        .code()
+        .unwrap_or(-1)
+}
+
 #[test]
 fn constant_builtin_and_static_assert_pass_through_typed_ir() {
     let output = run_syntax_test(
@@ -1277,6 +1307,60 @@ fn nofail_stringify_compiles() {
 fn vector_global_copy_compiles() {
     let source = include_str!("fixtures/vector_global.c");
     let (output, _obj) = run_object_test("vector-global", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 全局向量初始化 + 运行时求值（期望 exit 0）
+#[test]
+fn vector_global_run_returns_zero() {
+    let source = include_str!("fixtures/vector_global_run.c");
+    let (output, exe) = run_compile_and_run("vector-global-run", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "vector_global_run should return 0, got {rc}");
+}
+
+/// _Complex 除法 codegen
+#[test]
+fn complex_div_run_returns_zero() {
+    let source = include_str!("fixtures/complex_div.c");
+    let (output, exe) = run_compile_and_run("complex-div", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "complex_div should return 0, got {rc}");
+}
+
+/// __builtin_object_size 编译期折叠
+#[test]
+fn object_size_builtin_run_returns_zero() {
+    let source = include_str!("fixtures/object_size_builtin.c");
+    let (output, exe) = run_compile_and_run("object-size-builtin", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "object_size_builtin should return 0, got {rc}");
+}
+
+/// inline asm: lock cmpxchg 内存操作数
+#[test]
+fn asm_cmpxchg_mem_compiles() {
+    let source = include_str!("fixtures/asm_cmpxchg_mem.c");
+    let (output, _obj) = run_object_test("asm-cmpxchg-mem", source);
     assert!(
         output.status.success(),
         "stderr: {}",

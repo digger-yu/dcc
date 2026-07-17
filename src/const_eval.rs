@@ -122,6 +122,62 @@ pub fn is_constant(expr: &Expr) -> bool {
     eval(expr).is_ok()
 }
 
+/// 编译期 `__builtin_object_size(ptr, type)` 求值。
+/// 未知时返回 `None`，调用方应回退为 `(size_t)-1`。
+pub fn object_size(ptr: &Expr, type_arg: i128) -> Option<i128> {
+    let mode = type_arg.clamp(0, 3);
+    let base = match ptr {
+        Expr::AddrOf { e, .. } | Expr::Cast { e, .. } => e.as_ref(),
+        other => other,
+    };
+    object_size_of(base, mode)
+}
+
+fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
+    match expr {
+        Expr::Ident { ty, .. } => Some(ty.size() as i128),
+        Expr::Index { arr, idx, ty: elem_ty, .. } => {
+            let parent = object_size_of(arr, mode)?;
+            if let Ok(i) = eval(idx) {
+                let off = i * elem_ty.size() as i128;
+                let remain = parent.saturating_sub(off);
+                Some(remain.max(elem_ty.size() as i128))
+            } else if mode == 1 || mode == 3 {
+                None
+            } else {
+                Some(parent)
+            }
+        }
+        Expr::Member { expr, field, is_arrow, .. } => {
+            let lookup = |container: i128, fields: &[crate::ast::Field]| -> Option<i128> {
+                let (f, extra) = find_field(fields, &field.name)?;
+                let field_sz = f.ty.size() as i128;
+                Some(if mode == 1 || mode == 3 {
+                    field_sz
+                } else {
+                    let off = (f.offset + extra) as i128;
+                    container.saturating_sub(off).max(field_sz)
+                })
+            };
+            match (*is_arrow, expr.ty()) {
+                (true, Type::Ptr(inner)) => match inner.as_ref() {
+                    Type::Struct(_, f) | Type::Union(_, f) => {
+                        lookup(inner.size() as i128, f.as_ref())
+                    }
+                    _ => None,
+                },
+                (false, Type::Struct(_, f) | Type::Union(_, f)) => {
+                    lookup(expr.ty().size() as i128, f.as_ref())
+                }
+                _ => None,
+            }
+        }
+        Expr::Deref { e, .. } => object_size_of(e, mode),
+        _ => None,
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +208,20 @@ mod tests {
     #[test]
     fn division_by_zero_is_not_zero() {
         assert_eq!(eval(&bin(BinOp::Div, 4, 0)), Err(ConstEvalError::DivisionByZero));
+    }
+
+    #[test]
+    fn object_size_of_local_int() {
+        let x = Expr::Ident {
+            name: crate::ast::Ident { name: "x".into(), span: Span::point("t.c", 1, 1) },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Int,
+        };
+        let addr = Expr::AddrOf {
+            e: Box::new(x),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Ptr(Box::new(Type::Int)),
+        };
+        assert_eq!(object_size(&addr, 0), Some(4));
     }
 }

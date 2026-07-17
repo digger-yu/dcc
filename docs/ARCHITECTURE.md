@@ -176,8 +176,16 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 - **同行标签**：`N:insn`（GNU 局部数字标签）与 `found: ret` 在发射前拆成
   标签行 + 指令行（`expand_label_insn_lines`）。
 - **局部数字标签**：`6:` / `6f` / `6b` 映射为内部符号（`AsmLocalLabels`）。
-- **指令子集**：除 mov/alu/jcc 外，含 `btl/bts/btr`、`shld/shrd`、`rdmsr/wrmsr`
-  等；未识别指令 warning + nop 占位。
+- **指令子集**：除 mov/alu/jcc 外，含 `btl/bts/btr`、`shld/shrd`、`adc/sbb`、
+  `cmpxchg`/`xadd` 内存操作数、`movzbl` 内存源、`setcc` 内存目标、
+  `cmp`/`test` 内存操作数等；未识别指令 warning + nop 占位。
+- **SIMD/复数**：向量全局 `{…}` init、间接向量 `rep movsb` 复制；`_Complex`
+  add/sub/mul/div（SSE 标量）；`parser` 对复数二元结果保留 `Type::Complex` 以便
+  `(int)(a+b)` 等 Cast 正确发射 `cvttss2si`；虚部清零用 `movss` 避免 64 位
+  store 覆盖相邻实部；`mov_xmm` 仅在 xmm≥8 时加 REX。不支持表达式路径发射
+  **ud2** 而非静默 `mov 0`。
+- **Builtins**：`__builtin_object_size` 常量折叠；`__builtin_apply`/`return`
+  SysV ≤6 GP 参数子集。
 
 预处理 `#` 字符串化遵循 C 规则：实参内换行与连续空白折叠为单空格
 （`NOFAIL(ptr)` → `"malloc(...)"` 单行字面量）。

@@ -2336,9 +2336,14 @@ impl<'a> Parser<'a> {
                     | BinOp::Gt | BinOp::Ge | BinOp::AndAnd | BinOp::OrOr) {
                     int_t()
                 } else {
+                let is_ca = matches!(&lt, Type::Complex(_));
+                let is_cb = matches!(&rt, Type::Complex(_));
                 let is_fa = matches!(&lt, Type::Float | Type::Double | Type::LongDouble);
                 let is_fb = matches!(&rt, Type::Float | Type::Double | Type::LongDouble);
-                if is_fa || is_fb {
+                if is_ca || is_cb {
+                    // 复数算术结果仍为复数（供 Cast 等类型推导）
+                    if is_ca { lt } else { rt }
+                } else if is_fa || is_fb {
                     if matches!(&lt, Type::LongDouble) || matches!(&rt, Type::LongDouble) { Type::LongDouble }
                     else if matches!(&lt, Type::Double) || matches!(&rt, Type::Double) { Type::Double }
                     else { Type::Float }
