@@ -45,6 +45,8 @@
 | GCC Builtin 完整化 | object_size FORTIFY、apply/return、prefetch no-op、未知 builtin warning |
 | __builtin_constant_p / inline 属性 | `tests/fixtures/builtin_constant_p_full.c`、`inline_attrs.c` |
 | 未知 __builtin_* ud2 | `tests/fixtures/unknown_builtin.c`；void → ud2，其余 → 零值 + warning |
+| IR 优化 pass | `ssa_gvn.rs` GVN/CSE；`loop_opt.rs` LICM/展开/向量循环；`-O2`/`-O3` |
+| always_inline @ -O0 | `tests/fixtures/always_inline_o0.c` |
 | 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；`.data` 逐元素静态 init + 运行时 binop |
 | 浮点 SIMD 标量逐元素 | `tests/fixtures/vector_float_scalar.c`；v4f/v2d +/-/× 标量 SSE |
 | __int128 SysV 传参/乘除模 | `tests/fixtures/int128_call_abi.c`、`int128_mul_div_mod.c` |

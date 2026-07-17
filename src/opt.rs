@@ -11,16 +11,17 @@ use crate::ir::Module;
 /// 按 -O 级别运行 IR 优化。
 pub fn optimize(module: &mut Module, level: u8) {
     if level == 0 {
+        function_inline(module, 0);
         return;
     }
     fold_constants(module);
-    if level >= 1 {
-        function_inline(module, level);
-    }
+    function_inline(module, level);
     if level >= 2 {
         prune_dead_stores(module);
         fold_constant_branches(module);
         eliminate_unreachable(module);
+        crate::ssa_gvn::run(module, level);
+        crate::loop_opt::run(module, level);
     }
 }
 
@@ -568,7 +569,7 @@ fn try_inline_call(
         return None;
     }
     let item_count = count_block_items(body);
-    let allowed = if f.is_always_inline && level >= 1 {
+    let allowed = if f.is_always_inline {
         item_count <= 8
     } else if f.is_static && f.params.is_empty() && level >= 3 {
         item_count <= 4

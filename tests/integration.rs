@@ -1822,6 +1822,90 @@ fn unknown_builtin_warning_zero_and_ud2() {
     let _ = fs::remove_file(object_path);
 }
 
+fn run_compile_o(name: &str, source: &str, opt: &str) -> (std::process::Output, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
+    let exe_path = dir.join(format!("dcc-{name}-{}", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", opt, "-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
+    }
+    (output, exe_path)
+}
+
+/// always_inline 在 -O0 仍展开
+#[test]
+#[cfg(unix)]
+fn always_inline_o0_run_returns_zero() {
+    let source = include_str!("fixtures/always_inline_o0.c");
+    let (output, exe) = run_compile_o("always-inline-o0", source, "-O0");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "always_inline_o0 should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// GVN/CSE：重复纯表达式复用
+#[test]
+#[cfg(unix)]
+fn opt_gvn_o2_run_returns_zero() {
+    let source = include_str!("fixtures/opt_gvn.c");
+    let (output, exe) = run_compile_o("opt-gvn", source, "-O2");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "opt_gvn should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// 循环展开（-O3）
+#[test]
+#[cfg(unix)]
+fn opt_loop_unroll_o3_run_returns_zero() {
+    let source = include_str!("fixtures/opt_loop_unroll.c");
+    let (output, exe) = run_compile_o("opt-loop-unroll", source, "-O3");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "opt_loop_unroll should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// 向量循环向量化（-O3）
+#[test]
+#[cfg(unix)]
+fn opt_loop_vectorize_o3_run_returns_zero() {
+    let source = include_str!("fixtures/opt_loop_vectorize.c");
+    let (output, exe) = run_compile_o("opt-loop-vectorize", source, "-O3");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "opt_loop_vectorize should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 /// 预处理残留的 _DECLARE_STATIC_KEY_0 → extern struct static_key_false
 #[test]
 fn static_key_maybe_compiles() {

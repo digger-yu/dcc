@@ -315,5 +315,44 @@ EOF
 check "unknown_builtin_warn" bash -c "grep -q 'unsupported __builtin_' '$TMP/unk.err' && test -f '$TMP/unk.o'"
 check "unknown_builtin_ud2" bash -c "objdump -d '$TMP/unk.o' | grep -q ud2"
 
+cat > "$TMP/gvn.c" <<'EOF'
+int f(int x, int y) {
+	int a = x + y, b = x + y;
+	return a + b;
+}
+int main(void) { return f(3, 4) == 14 ? 0 : 1; }
+EOF
+"$DCC" -O2 -o "$TMP/gvn" "$TMP/gvn.c" && "$TMP/gvn"
+check "opt_gvn_o2" test $? -eq 0
+
+cat > "$TMP/unroll.c" <<'EOF'
+int sum4(const int *p) {
+	int s = 0;
+	for (int i = 0; i < 4; i++) s += p[i];
+	return s;
+}
+int main(void) { int a[4] = {1,2,3,4}; return sum4(a) == 10 ? 0 : 1; }
+EOF
+"$DCC" -O3 -o "$TMP/unroll" "$TMP/unroll.c" && "$TMP/unroll"
+check "opt_loop_unroll_o3" test $? -eq 0
+
+cat > "$TMP/vecloop.c" <<'EOF'
+typedef int v4si __attribute__((vector_size(16)));
+int main(void) {
+	v4si a = {1,2,3,4}, b = {5,6,7,8}, c = {0,0,0,0};
+	for (int i = 0; i < 4; i++) c[i] = a[i] + b[i];
+	return c[0] == 6 && c[3] == 12 ? 0 : 1;
+}
+EOF
+"$DCC" -O3 -o "$TMP/vecloop" "$TMP/vecloop.c" && "$TMP/vecloop"
+check "opt_loop_vectorize_o3" test $? -eq 0
+
+cat > "$TMP/ailo0.c" <<'EOF'
+static int __attribute__((always_inline)) dbl(int x) { return x + x; }
+int main(void) { return dbl(21) == 42 ? 0 : 1; }
+EOF
+"$DCC" -O0 -o "$TMP/ailo0" "$TMP/ailo0.c" && "$TMP/ailo0"
+check "always_inline_o0" test $? -eq 0
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

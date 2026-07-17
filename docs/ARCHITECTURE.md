@@ -206,6 +206,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
   局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（整数用 GP，
   浮点用标量 SSE，不用 XMM 向量指令）；
+  向量 `arr[i]` 读写经 LEA 取栈/全局基址再按元素偏移寻址（非指针 load）；
   非 Ident 向量（binop、compound literal、InitList）经 `gen_vector_to_temp` 物化；
   `_Complex` add/sub/mul/div（SSE 标量）；`parser` 对复数二元结果保留 `Type::Complex` 以便
   `(int)(a+b)` 等 Cast 正确发射 `cvttss2si`；虚部清零用 `movss` 避免 64 位
@@ -215,8 +216,10 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   `const_eval::is_constant`；`__builtin_object_size` 编译期折叠；
   `__builtin_apply`/`return` SysV 子集；`__builtin_prefetch*` void no-op；
   未知 `__builtin_*` warning + 零值（有返回值）或 **ud2**（void）。
-- **IR 内联**：`-O1+` 对 `__attribute__((always_inline))` 做单返回体
-  内联；`-O3` 额外内联小型 static 零参函数；`noinline` 阻止内联。
+- **IR 内联**：`-O0+` 对 `always_inline` 单返回体内联；`-O1+` 完整 pass；
+  `-O3` opportunistic 小 static 函数；`noinline` 阻止内联。
+- **SSA/GVN（`-O2+`）**：块内 GVN/CSE、拷贝传播、冗余局部合并。
+- **循环优化**：`-O2+` LICM；`-O3` 小 trip 展开与向量元素循环向量化。
 
 ## AArch64 后端（`codegen/aarch64.rs`，M7）
 
@@ -250,7 +253,8 @@ Driver 在 codegen 前执行 `lower → validate → opt → resync → validate
 |------|------|
 | `lower` | AST 降级为带 `ValueType` 的函数/全局图；全局初值过 `is_static_initializer`，违例报 **E1006** |
 | `validate` | 校验 float/vector/complex 二元/一元/赋值/条件/聚合/转换是否与 codegen 能力一致（**E1003/E1007/E1008**）；向量二元仅 Add/Sub/Mul |
-| `opt` | 常量折叠（含 float 四则）、DCE、分支折叠、小函数内联（`-O1` 起）；改写 AST |
+| `opt` | 常量折叠、`-O0` 仍内联 `always_inline`、`-O1+` 函数内联、
+  `-O2+` GVN/CSE/拷贝传播/LICM、`-O3` 循环展开与向量循环向量化；改写 AST |
 | `resync` | opt 后从 AST 重新 lower，使 IR 图与优化结果一致 |
 | `validate`（二次） | resync 后再次语义校验 |
 

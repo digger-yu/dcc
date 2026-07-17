@@ -15,6 +15,8 @@ mod ast;
 mod const_eval;
 mod ir;
 mod opt;
+mod ssa_gvn;
+mod loop_opt;
 mod lto;
 mod link;
 mod debug;

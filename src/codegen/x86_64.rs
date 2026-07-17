@@ -2562,6 +2562,13 @@ impl Codegen {
                             // VLA: 基址存储在变量栈槽中
                             let off = self.var_offset(&arr_name.name);
                             self.load_stack(0, off); // rax = VLA 基址
+                        } else if matches!(arr_ty, Type::Vector(_, _)) {
+                            if self.globals.contains_key(&arr_name.name) {
+                                self.emit_global_addr(0, &arr_name.name);
+                            } else {
+                                let off = self.var_offset(&arr_name.name);
+                                self.emit_lea_r13(0, off);
+                            }
                         } else if matches!(arr_ty, Type::Array(_, _)) {
                             // 静态数组: LEA 取基址
                             if self.globals.contains_key(&arr_name.name) {
@@ -2592,8 +2599,12 @@ impl Codegen {
                         self.push(0); // save addr
                         self.gen_expr(r, 0); // rax = val
                         self.pop(1); // rcx = addr
-                        // mov [rcx], rax: 48 89 01
-                        self.emit(&[0x48, 0x89, 0x01]);
+                        match es {
+                            1 => self.emit(&[0x88, 0x01]),
+                            2 => self.emit(&[0x66, 0x89, 0x01]),
+                            4 => self.emit(&[0x89, 0x01]),
+                            _ => self.emit(&[0x48, 0x89, 0x01]),
+                        }
                     }
                 } else if let Expr::Deref { e: ptr_e, .. } = l.as_ref() {
                     // *ptr = val
@@ -3004,6 +3015,13 @@ impl Codegen {
                         // VLA: 基址存储在变量栈槽中
                         let off = self.var_offset(&arr_name.name);
                         self.load_stack(0, off); // rax = VLA 基址
+                    } else if matches!(arr_ty, Type::Vector(_, _)) {
+                        if self.globals.contains_key(&arr_name.name) {
+                            self.emit_global_addr(0, &arr_name.name);
+                        } else {
+                            let off = self.var_offset(&arr_name.name);
+                            self.emit_lea_r13(0, off);
+                        }
                     } else if matches!(arr_ty, Type::Array(_, _)) {
                         // 静态数组: LEA 取基址
                         if self.globals.contains_key(&arr_name.name) {

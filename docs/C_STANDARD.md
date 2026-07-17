@@ -95,9 +95,10 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `__builtin_va_list` 当前采用 x86-64 简化指针模型。函数序言保存六个
   GP 参数寄存器，可支持常见整数/指针变参；SSE 变参、跨 GP 保存区与
   栈参数边界、超过 8 字节的 `va_arg` 尚不等价于完整 SysV ABI。
-- `noinline` / `always_inline`：`-O1+` IR 内联 pass 尊重属性；
-  `always_inline` 展开单返回体（含形参替换），`noinline` 永不内联；
-  `-O3` 额外 opportunistic 内联小型 static 零参函数。
+- `noinline` / `always_inline`：`-O0+` 仍内联 `always_inline` 单返回体；
+  `-O1+` 完整内联 pass；`noinline` 永不内联；`-O3` opportunistic 小函数。
+- **优化级别**：`-O2` 启用 GVN/CSE、拷贝传播、LICM；`-O3` 额外循环
+  展开（trip≤4）与向量元素循环向量化（标量 SSE/GP 后端不变）。
 - ELF 的 section/weak/visibility 属性作用于 `-c`/`-r` 可重定位输出；
   直接 ET_EXEC 模式不提供完整符号表语义。
 
