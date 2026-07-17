@@ -101,6 +101,14 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
   展开（trip≤4）与向量元素循环向量化（标量 SSE/GP 后端不变）。
 - ELF 的 section/weak/visibility 属性作用于 `-c`/`-r` 可重定位输出；
   直接 ET_EXEC 模式不提供完整符号表语义。
+- **Sanitizer（初版桩）**：`-fsanitize=address|undefined|thread|kernel-*`、
+  `-fsanitize=a,b` 组合、`-fsanitize-coverage` / `fuzzer`。Driver 在 IR
+  lower 前于 AST 插桩：TU 级 `__asan_init` / `__ubsan_init` / `__kcsan_init`
+  仅在首个有体函数前各插入一次；每个有体函数（含嵌套函数）入口插入
+  `__sanitizer_cov_trace_pc`（coverage）与 `__kcsan_func_entry`（KCSAN）。
+  `-c` 输出附带 `.dcc.san_info`（`DCC_SAN` v1 + 四标志位）。**不做**
+  内存访问/UB 条件的指令级插桩；完整 KASAN/UBSAN/KCSAN 数据竞争检测
+  需后续 IR/codegen 扩展。
 
 ## 重要选项
 
@@ -110,6 +118,10 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 | `-std=cXX` | 严格 C 标准 | - |
 | `-ffreestanding` | 不假设标准库存在 | off (假设 hosted) |
 | `-fno-builtin` | 不使用 builtin | off |
+| `-fsanitize=address` | KASAN 桩：TU init + `.dcc.san_info` | off |
+| `-fsanitize=undefined` | UBSAN 桩：TU init | off |
+| `-fsanitize=thread` | KCSAN 桩：TU init + 每函数 entry | off |
+| `-fsanitize-coverage` | KCOV：`__sanitizer_cov_trace_pc` 每函数 | off |
 
 ## Linux 内核编译
 

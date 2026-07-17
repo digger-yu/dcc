@@ -6,7 +6,7 @@
 // - 不做内存访问/UB 条件的指令级插桩；完整 KASAN/UBSAN 需 IR/codegen 扩展
 // - codegen 写入 `.dcc.san_info` 节记录启用的后端位图
 
-use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type, int_t};
+use crate::ast::{BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type, int_t};
 use crate::diagnostics::Span;
 
 /// 启用的 sanitizer 标志（与 GCC `-fsanitize=*` 子集对应）。
@@ -44,7 +44,7 @@ impl SanitizerFlags {
         match name {
             "address" | "kernel-address" | "hwaddress" | "kernel-hwaddress" => f.kasan = true,
             "undefined" => f.ubsan = true,
-            "thread" => f.kcsan = true,
+            "thread" | "kernel-kcsan" => f.kcsan = true,
             "fuzzer" | "coverage" => f.kcov = true,
             _ if name.contains("coverage") => f.kcov = true,
             _ => {}
@@ -304,6 +304,65 @@ mod tests {
         let names = call_names(f1.body.as_ref().unwrap());
         assert!(!names.iter().any(|n| n == "__kcsan_init"));
         assert!(names.iter().any(|n| n == "__kcsan_func_entry"));
+    }
+
+    #[test]
+    fn extern_func_skips_prologue() {
+        let mut prog = Program {
+            decls: vec![Decl::Func(FuncDecl {
+                ret_ty: Type::Int,
+                name: Ident { name: "ext".into(), span: Span::point("t.c", 1, 1) },
+                params: vec![],
+                body: None,
+                span: Span::point("t.c", 1, 1),
+                is_extern: true,
+                is_static: false,
+                section: None,
+                alignment: None,
+                is_weak: false,
+                visibility: None,
+                is_unused: false,
+                is_cold: false,
+                is_noinline: false,
+                is_always_inline: false,
+                is_variadic: false,
+                is_constructor: false,
+                is_destructor: false,
+                alias_name: None,
+                is_nested: false,
+                upvars: vec![],
+            })],
+        };
+        instrument_program(&mut prog, SanitizerFlags { kasan: true, kcov: true, ..Default::default() });
+        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        assert!(f.body.is_none());
+    }
+
+    #[test]
+    fn nested_function_gets_entry_stub() {
+        let sp = Span::point("t.c", 1, 1);
+        let inner = Decl::Func(empty_func("inner"));
+        let mut outer = empty_func("outer");
+        if let Some(body) = &mut outer.body {
+            body.items.insert(0, BlockItem::Decl(inner));
+        }
+        let mut prog = Program { decls: vec![Decl::Func(outer)] };
+        instrument_program(&mut prog, SanitizerFlags { kcsan: true, ..Default::default() });
+        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        assert!(call_names(body).iter().any(|n| n == "__kcsan_init"));
+        let nested = body.items.iter().find_map(|item| {
+            if let BlockItem::Decl(Decl::Func(f)) = item {
+                Some(f)
+            } else {
+                None
+            }
+        });
+        let nested = nested.expect("nested func");
+        let names = call_names(nested.body.as_ref().unwrap());
+        assert!(names.iter().any(|n| n == "__kcsan_func_entry"));
+        assert!(!names.iter().any(|n| n == "__kcsan_init"));
+        let _ = sp;
     }
 
     #[test]

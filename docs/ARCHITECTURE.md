@@ -273,13 +273,17 @@ Driver 在 parse 之后、IR lower 之前调用 `instrument_program()`：
 |------|------|----------|
 | TU init | 首个有体函数前插入 `__asan_init` / `__ubsan_init` / `__kcsan_init` 各一次 | 重复 init |
 | 函数入口 | 每个有体函数（含嵌套函数）前插入 `__sanitizer_cov_trace_pc`（KCOV）、`__kcsan_func_entry`（KCSAN） | 每函数 KASAN/UBSAN 内存/UB 检查 |
-| 元数据 | codegen 写 `.dcc.san_info`（`DCC_SAN` v1 + 4 标志位） | 运行时库内置 |
+| 元数据 | codegen 写 `.dcc.san_info`（`DCC_SAN\0` + v1 + kasan/ubsan/kcsan/kcov 各 1 字节） | 运行时库内置 |
 
-CLI：`-fsanitize=address|undefined|thread`、`-fsanitize=a,b` 组合、
-`-fsanitize-coverage` / `fuzzer`。完整 KASAN/UBSAN 需后续 IR 指令级插桩。
+**明确未实现（需 IR/codegen 扩展）**：内存访问级 KASAN shadow、UB 条件
+指令级 UBSAN、KCSAN 数据竞争 watchpoint、KCOV 边/对比计数等覆盖率细节。
+
+CLI：`-fsanitize=address|undefined|thread|kernel-kcsan`、`-fsanitize=a,b`
+组合、`-fsanitize-coverage` / `fuzzer` / `kernel-address`。完整
+KASAN/UBSAN 需后续 IR 指令级插桩。
 
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
-`scripts/remote_feature_check.sh`（sanitizer 节）。
+`scripts/remote_feature_check.sh`（sanitizer 节 + 汇编桩计数）。
 
 ## 自举 (M5)
 

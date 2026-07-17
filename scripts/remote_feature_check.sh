@@ -72,6 +72,15 @@ EOF
 "$DCC" -fsanitize=address -c -o "$TMP/san.o" "$TMP/san.c"
 check "sanitizer" bash -c "readelf -SW '$TMP/san.o' | grep -q '\\.dcc\\.san_info'"
 
+cat > "$TMP/san_multi.c" <<'EOF'
+int a(void) { return 1; }
+int b(void) { return 2; }
+EOF
+"$DCC" -fsanitize=address,thread -fsanitize-coverage -S -o "$TMP/san_multi.s" "$TMP/san_multi.c"
+check "sanitizer_prologue" bash -c "grep -c __asan_init '$TMP/san_multi.s' | grep -qx 1"
+check "sanitizer_kcsan_entry" bash -c "grep -c __kcsan_func_entry '$TMP/san_multi.s' | grep -qx 2"
+check "sanitizer_cov_entry" bash -c "grep -c __sanitizer_cov_trace_pc '$TMP/san_multi.s' | grep -qx 2"
+
 "$DCC" -g -fno-omit-frame-pointer -c -o "$TMP/fp.o" "$TMP/san.c"
 check "eh_frame" bash -c "readelf -SW '$TMP/fp.o' | grep -q '\\.eh_frame'"
 

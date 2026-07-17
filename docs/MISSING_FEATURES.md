@@ -175,6 +175,18 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | 链接/LTO 模块（非自研） | `link.rs`+`lto.rs`：host `ld/objcopy`、`.llvm.lto` 摘要 + gc-sections；无 IR 跨 TU 优化 |
 | 验收脚本 | prepare0 / pahole / objtool / modpost / vmlinux / kernel_full_check |
 
+## Sanitizer 后续（初版 AST 桩已交付）
+
+| 缺口 | 说明 |
+|------|------|
+| 内存访问级 KASAN | 需 IR/codegen 对 load/store 插 shadow 检查 |
+| 指令级 UBSAN | 除零、溢出、未定义移位等条件分支插桩 |
+| KCSAN 数据竞争 | watchpoint / happens-before 完整语义 |
+| KCOV 覆盖率细节 | 边计数、对比模式、guard 表等 |
+
+当前交付：`sanitizer.rs` TU init 一次 + 每函数 coverage/KCSAN entry 桩 +
+`.dcc.san_info` v1；见 `docs/ARCHITECTURE.md` Sanitizer 节。
+
 ## 远程基线
 
 - 工作区：`~/dcc`（亦见历史 `~/dcc-agent-linux66`）
