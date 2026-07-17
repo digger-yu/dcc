@@ -68,5 +68,5 @@ T_dcc = T_gcc / (S_macro * S_header * S_type * S_opt * S_dbg * S_codegen * S_io)
 |------|------|------|
 | 内核编译时间 (warm) | < GCC/2 | GitHub Actions 趋势 |
 | 二进制大小 (a.out) | 跟 GCC 同档 | CI artifact |
-| 错误诊断 LOC | 每条 < 200 字符 | `tests/errors.rs` snapshot；码表 [DIAGNOSTICS.md](./DIAGNOSTICS.md) |
+| 错误诊断 LOC | 每条 < 200 字符 | `tests/errors.rs` snapshot；码表 [diagnostics.md](./diagnostics.md) |
 | 自举差 (dcc1 vs dcc2 字节差) | = 0 | CI diff |

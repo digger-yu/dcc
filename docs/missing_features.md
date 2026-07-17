@@ -72,7 +72,7 @@
 
 ## 短期：GCC libiberty（纯 C）
 
-详见 `docs/GCC_BUILD_GUIDE.md`。远程当前（2026-07-16）：
+详见 `docs/gcc_build_guide.md`。远程当前（2026-07-16）：
 
 | 组件 | 结果 |
 |------|------|
@@ -190,7 +190,7 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | KCOV 覆盖率细节 | 边计数、对比模式、guard 表等 |
 
 当前交付：`sanitizer.rs` TU init 一次 + 每函数 coverage/KCSAN entry 桩 +
-`.dcc.san_info` v1；见 `docs/ARCHITECTURE.md` Sanitizer 节。
+`.dcc.san_info` v1；见 `docs/architecture.md` Sanitizer 节。
 
 ## 远程基线
 

@@ -1,6 +1,6 @@
 // tests/errors.rs - 错误诊断 snapshot 回归
 //
-// 错误码详细说明: docs/DIAGNOSTICS.md
+// 错误码详细说明: docs/diagnostics.md
 // 每个用例：tests/fixtures/errors/<name>.c + <name>.stderr.snap
 // 更新 snapshot：DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors
 //

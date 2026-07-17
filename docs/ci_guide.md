@@ -42,7 +42,7 @@ CI 会在日志中显示 dcc 的真实报错位置。看:
 
 ### errors snapshot 不匹配
 
-诊断格式或列号变更后，snapshot 可能失败。详见 [DIAGNOSTICS.md](./DIAGNOSTICS.md) 第 9 节。在 Linux 上更新:
+诊断格式或列号变更后，snapshot 可能失败。详见 [diagnostics.md](./diagnostics.md) 第 9 节。在 Linux 上更新:
 
 ```bash
 DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors --release
@@ -57,4 +57,4 @@ bash scripts/update_error_snapshots.sh
 在已配置 SSH 的开发机上，可用 `scripts/sync_remote_build.sh` 同步
 源码到 Linux 并跑 cargo test、feature check、prepare0、pahole、
 objtool 与 `kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物
-时 SKIP）。详见 `docs/KERNEL_BUILD_GUIDE.md`。
+时 SKIP）。详见 `docs/kernel_build_guide.md`。

@@ -217,12 +217,12 @@ dcc: error: <message>
 2. 选用未占用编号（避免与 Link/Preproc 的 `E02xx` 冲突，或更新本文档号段表）
 3. 在 `tests/fixtures/errors/` 添加最小触发 `.c` + 运行 snapshot 更新
 4. **更新本文档**对应表格行
-5. 若用户可见频率高，在 `docs/ARCHITECTURE.md` 保留一行链接即可
+5. 若用户可见频率高，在 `docs/architecture.md` 保留一行链接即可
 
 ---
 
 ## 相关文档
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — 诊断架构与 M9 里程碑
-- [CI_GUIDE.md](./CI_GUIDE.md) — CI 中 snapshot 失败处理
-- [ROADMAP.md](./ROADMAP.md) — M9 精准错误诊断路线
+- [architecture.md](./architecture.md) — 诊断架构与 M9 里程碑
+- [ci_guide.md](./ci_guide.md) — CI 中 snapshot 失败处理
+- [roadmap.md](./roadmap.md) — M9 精准错误诊断路线

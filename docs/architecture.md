@@ -83,7 +83,7 @@ error[E0001]: expected ';', got '{'
 ### Snapshot 回归（tests/errors.rs）
 
 失败路径的诊断格式由 snapshot 锁定，与 59 项 integration 成功路径互补。  
-**完整错误码说明见 [DIAGNOSTICS.md](./DIAGNOSTICS.md)。**
+**完整错误码说明见 [diagnostics.md](./diagnostics.md)。**
 
 | 目录 | 内容 |
 |------|------|
@@ -310,6 +310,6 @@ cp target/release/dcc bin/dcc0
 # dcc1 == dcc2 (字节级或语义级),即自举收敛
 ```
 
-## 路线图 (来自 docs/ROADMAP.md)
+## 路线图 (来自 docs/roadmap.md)
 
 M0~M10 见根目录的 task 列表。

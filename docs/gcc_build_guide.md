@@ -63,6 +63,6 @@ python3 scripts/archive/rootcause_sim.py
 
 ## 与内核路径的关系
 
-- 内核路径：`docs/KERNEL_BUILD_GUIDE.md`、`docs/MISSING_FEATURES.md`
+- 内核路径：`docs/kernel_build_guide.md`、`docs/missing_features.md`
 - GCC 路径：用更“脏”的用户态头（glibc `_Generic` / `include_next`）补洞
 - 二者互补；**全树 GCC 仍受阻于无 C++**

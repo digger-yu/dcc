@@ -1,6 +1,6 @@
 # 后续步骤：20 步路线图 Checklist
 
-> 最后更新：2026-07-17 — 以 `docs/ROADMAP.md`、`docs/MISSING_FEATURES.md`
+> 最后更新：2026-07-17 — 以 `docs/roadmap.md`、`docs/missing_features.md`
 > 与远程 `ds@192.168.148.128` 自动化日志为准。
 > 勾选 `[x]` 表示已有 PASS 证据；`[ ]` 表示待完成或待首跑验证。
 

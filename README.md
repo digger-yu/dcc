@@ -295,7 +295,7 @@ bash scripts/kernel_full_check.sh          # modpost / QEMU / vmlinux（非阻�
 BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh  # 可选构建 bzImage
 ```
 
-详见 `docs/KERNEL_BUILD_GUIDE.md`。
+详见 `docs/kernel_build_guide.md`。
 
 ## 项目结构
 
@@ -328,7 +328,7 @@ src/
 |------|------|------|
 | 单元测试 | `src/` 内 `#[test]` | parser/preproc/opt 等 |
 | integration | 59 项 | 成功路径语法/codegen 回归 |
-| errors | 14 项测试 / 37 snapshot | 失败路径诊断，见 [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) |
+| errors | 14 项测试 / 37 snapshot | 失败路径诊断，见 [docs/diagnostics.md](docs/diagnostics.md) |
 
 错误 snapshot 位于 `tests/fixtures/errors/`；更新命令:
 

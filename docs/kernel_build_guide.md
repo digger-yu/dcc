@@ -442,4 +442,4 @@ A: 可能是遇到了 DCC 尚未支持的内核构造。使用 `-dump-ast` 查�
 
 - DCC 源码: `src/preproc.rs` (预处理器), `src/parser.rs` (解析器)
 - Linux 内核构建系统: `Documentation/kbuild/` 
-- GCC 兼容性: `docs/ROADMAP.md`
+- GCC 兼容性: `docs/roadmap.md`
