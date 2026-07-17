@@ -27,7 +27,7 @@
 
 - [x] **3. libiberty / fixincludes 回归锁定基线**
   - 验证：`bash scripts/remote_gcc_c_probe.sh` → libiberty **125/0/4**，fixincludes **6/0/1**
-  - 附加：`bash scripts/test_tr2.sh`、`bash scripts/test_v3_cache.sh`
+  - 附加：`bash scripts/archive/test_tr2.sh`、`bash scripts/archive/test_v3_cache.sh`
 
 - [ ] **4. 内核全树首次 `make CC=dcc` 编译至首个失败点**
   - 验证：Linux 6.6 + `.config`；`make CC=dcc -k V=1 2>&1 | tee build.log`
@@ -120,9 +120,9 @@
 
 - [x] **20. 决策点：M7 多架构 vs M5 自举 → 选定 M7**
   - 路径：**M7**（内核+速度优先）；M5 自举维持 backlog
-  - 实现：`src/codegen/aarch64.rs` hello world；`build_elf_aarch64` / `build_elf_rel_aarch64`
-  - 验证：`dcc --target aarch64-linux-gnu -c hello.c`；`remote_feature_check aarch64_hello`
-  - 文档：`docs/ROADMAP.md` M7 进行中；README 里程碑已同步
+  - 实现：`src/codegen/aarch64.rs` typed IR lowering；`TypedExpr.literal`；`build_elf_*`
+  - 验证：`aarch64_hello_cross_compile` / `aarch64_ir_add_cross_compile`；`remote_feature_check`
+  - 脚本：活跃脚本 `scripts/README.md`；历史探针归档 `scripts/archive/`
 
 ---
 

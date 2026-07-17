@@ -20,6 +20,13 @@ pub enum ValueType {
     Complex(Box<ValueType>),
 }
 
+/// 编译期可确定的标量字面量（供多架构 IR lowering 使用）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExprLiteral {
+    Int(i128),
+    Float(f64),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprKind {
     Constant,
@@ -46,6 +53,8 @@ pub struct TypedExpr {
     pub kind: ExprKind,
     pub children: Vec<TypedExpr>,
     pub span: Span,
+    /// `ExprKind::Constant` 等节点的字面量值
+    pub literal: Option<ExprLiteral>,
 }
 
 #[derive(Debug, Clone)]
@@ -345,10 +354,21 @@ impl Lowering {
     fn lower_expr(&mut self, expr: &Expr) -> TypedExpr {
         let span = expr_span(expr);
         let mut ty = self.lower_type(&expr.ty(), &span);
+        let mut literal = None;
         let (kind, children) = match expr {
-            Expr::Int { .. } | Expr::Float { .. } | Expr::String { .. } | Expr::Char { .. } => {
+            Expr::Int { v, .. } => {
+                literal = Some(ExprLiteral::Int(*v));
                 (ExprKind::Constant, Vec::new())
             }
+            Expr::Char { v, .. } => {
+                literal = Some(ExprLiteral::Int(*v as i128));
+                (ExprKind::Constant, Vec::new())
+            }
+            Expr::Float { v, .. } => {
+                literal = Some(ExprLiteral::Float(*v));
+                (ExprKind::Constant, Vec::new())
+            }
+            Expr::String { .. } => (ExprKind::Constant, Vec::new()),
             Expr::Ident { name, .. } => (ExprKind::Local(name.name.clone()), Vec::new()),
             Expr::Binop { op, l, r, .. } => (
                 ExprKind::Binary(*op), vec![self.lower_expr(l), self.lower_expr(r)]),
@@ -440,7 +460,7 @@ impl Lowering {
             }
             Expr::AsmExpr { .. } | Expr::LabelAddr { .. } => (ExprKind::Opaque, Vec::new()),
         };
-        TypedExpr { ty, kind, children, span }
+        TypedExpr { ty, kind, children, span, literal }
     }
 }
 

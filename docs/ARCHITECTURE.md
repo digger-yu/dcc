@@ -21,7 +21,7 @@
    │ Parser     │    │ Codegen        │
    │ (tokens.rs │    │ (codegen/)     │
    │  ast.rs    │    │  ├ x86_64.rs   │
-   │  parser.rs)│    │  ├ aarch64.rs  │ ← 未来
+   │  parser.rs)│    │  ├ aarch64.rs  │ ← M7 typed IR lowering
    └─────┬──────┘    │  ├ riscv.rs    │ ← 未来
          │           │  └ elf.rs      │
          ▼           └────────────────┘
@@ -186,6 +186,20 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   **ud2** 而非静默 `mov 0`。
 - **Builtins**：`__builtin_object_size` 常量折叠；`__builtin_apply`/`return`
   SysV ≤6 GP 参数子集。
+
+## AArch64 后端（`codegen/aarch64.rs`，M7）
+
+- **入口**：`codegen::emit` 在 `--target aarch64-linux-gnu` 时选用 `Aarch64Codegen`。
+- **IR lowering**：遍历 `Module.functions` 与 `TypedExpr`（`Constant`/`Local`/`Binary`/…）；
+  语句结构（`return`/局部声明）仍对照 AST `BlockItem` 以保持控制流语义。
+- **已实现**：`return` 常量与整数二元 `+/-/*`、局部变量、`ET_REL` `.o` 与 `ET_EXEC` hello
+  （`_start` → `bl main` → `svc #0`）；`-S` 输出占位 GNU 汇编骨架。
+- **待扩展**：调用约定、浮点/向量、全局 `.rodata`、完整控制流；RISC-V 仍走
+  `emit()` 未实现分支。
+
+## 测试脚本布局
+
+活跃验收脚本见 `scripts/README.md`；历史调试脚本归档于 `scripts/archive/`。
 
 预处理 `#` 字符串化遵循 C 规则：实参内换行与连续空白折叠为单空格
 （`NOFAIL(ptr)` → `"malloc(...)"` 单行字面量）。

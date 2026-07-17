@@ -56,9 +56,9 @@ libiberty 单文件编译、**整库 `dcc -r` 链接**、fixincludes 与 libdecn
 ### 宏展开回归
 
 ```bash
-bash scripts/test_tr2.sh            # 最小例
-bash scripts/test_v3_cache.sh       # 旧 V2 缓存存在时 regex.c 仍正确
-python3 scripts/rootcause_sim.py
+bash scripts/archive/test_tr2.sh            # 最小例
+bash scripts/archive/test_v3_cache.sh       # 旧 V2 缓存存在时 regex.c 仍正确
+python3 scripts/archive/rootcause_sim.py
 ```
 
 ## 与内核路径的关系

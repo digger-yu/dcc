@@ -87,7 +87,7 @@ Linux 6.6 x86_64 在 `prepare0` 中会编译 `arch/x86/kernel/asm-offsets.c` 生
 
 ```bash
 # 远程（内核树 ~/linux-6.6，dcc ~/dcc-agent-linux66/target/release/dcc）
-python3 scripts/test_asm_offsets.py
+python3 scripts/archive/test_asm_offsets.py
 
 # 或手动：读取 .asm-offsets.s.cmd 中的 gcc 命令，将 gcc 替换为 dcc 后执行
 cd ~/linux-6.6
@@ -119,8 +119,8 @@ for-init 枚举声明、属性后指针函数声明、GNU `?:` 省略中间操�
 | `struct __attribute__((__may_alias__))` | 解析器在 struct/enum 名之前跳过属性 |
 | 剩余阻塞 | duplicate typedef、`bool` 等系统头重复定义（待后续迭代） |
 
-辅助脚本：`scripts/test_asm_offsets.py`（一键替换 gcc 为 dcc 并统计错误）、
-`scripts/summarize_err.py`（解析/语义错误分类）。
+辅助脚本：`scripts/archive/test_asm_offsets.py`（一键替换 gcc 为 dcc 并统计错误）、
+`scripts/archive/summarize_err.py`（解析/语义错误分类）。
 
 **Windows 同步注意**：scp 后须 `perl -pi -e 's/\x0d//g'` 去 CR；勿用 `sed 's/\r//g'`。
 
@@ -422,7 +422,7 @@ A: 通常是因为宏定义体中包含注释（如 `HZ CONFIG_HZ /* comment */`
 
 A: 可能是遇到了 DCC 尚未支持的内核构造。使用 `-dump-ast` 查看已解析的部分，
 定位错误位置。`asm-offsets.c` 已于 2026-07-17 全链路通过；历史问题可用
-`scripts/summarize_err.py` 区分解析与语义错误。
+`scripts/archive/summarize_err.py` 区分解析与语义错误。
 
 ## 8. 性能对比
 

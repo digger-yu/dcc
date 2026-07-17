@@ -1013,7 +1013,7 @@ void use_it(void) { (void)slot_after_return(0, 1); }
     let _ = fs::remove_file(asm_path);
 }
 
-/// M7: aarch64-linux-gnu 交叉编译 hello.o。
+/// M7: aarch64-linux-gnu 交叉编译 hello.o（typed IR lowering）。
 #[test]
 fn aarch64_hello_cross_compile() {
     let dir = std::env::temp_dir();
@@ -1039,6 +1039,35 @@ fn aarch64_hello_cross_compile() {
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
+}
+
+/// M7: aarch64 typed IR 二元表达式 return 10+32。
+#[test]
+fn aarch64_ir_add_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-a64-add-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-a64-add-{}.o", std::process::id()));
+    fs::write(&source_path, "int main(void) { return 10 + 32; }\n").expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target", "aarch64-linux-gnu",
+            "-c", "-O0",
+            "-o", object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
+    assert!(bytes.len() > 64);
 }
 
 /// static_call 语句表达式 + 尾随调用: ({ ... ;; expr })()

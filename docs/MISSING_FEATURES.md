@@ -4,7 +4,7 @@
 > `scripts/kernel_full_check.sh`、`scripts/prepare0_check.sh`、
 > `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh`、
 > `scripts/modpost_link.sh`、`scripts/vmlinux_regress.sh`、
-> `scripts/remote_libiberty_probe.sh`
+> `scripts/archive/remote_libiberty_probe.sh`
 > 与远程 Linux 6.6 / GCC libiberty 日志为准。
 
 ## 已通过的门禁
@@ -42,6 +42,7 @@
 | Mini x86 asm 位操作 / 双精度移位 | codegen `btl/bts/btr`、`shld/shrd`（内核 paravirt 等） |
 | 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；全局 init + 间接 load + 逐元素 store |
 | x86_64 codegen 扩展 | 向量全局 init、复数四则/Cast、object_size fold、apply/return 子集、asm mem 操作数 |
+| aarch64 typed IR | hello `.o`、整数 return/二元表达式；见 `aarch64_ir_add_cross_compile` |
 | 诊断 snapshot 格式锁定 | `tests/errors.rs` schema + `diagnostic_format.stderr.snap`（V1） |
 | `struct __attribute__((__may_alias__))` | `tests/fixtures/may_alias_struct.c` |
 | 宏 `#` 字符串化换行折叠 | `preproc` 单测 `stringify_collapses_*`；`NOFAIL`/`modpost.c` |
@@ -157,6 +158,6 @@
 - 工作区：`~/dcc`（亦见历史 `~/dcc-agent-linux66`）
 - 同步构建：`scripts/sync_remote_build.sh`（含 prepare0/pahole/objtool/kernel_full_check）
 - 内核树：`~/linux-6.6`，需已有 `.config`
-- GCC 子集：`~/gcc-src` + `scripts/remote_libiberty_probe.sh`
+- GCC 子集：`~/gcc-src` + `scripts/archive/remote_libiberty_probe.sh`
 - 内核全树：`scripts/kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物 SKIP）
 - QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` + bzImage）

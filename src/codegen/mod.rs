@@ -127,9 +127,17 @@ pub fn emit(
         }
         crate::cli::Arch::AArch64 => {
             let mut cg = aarch64::Aarch64Codegen::new(target.clone(), relocatable || emit_asm);
-            cg.compile(module.source());
+            cg.set_source_name(source_name);
+            if emit_asm {
+                cg.compile(module);
+                return cg.build_asm_output(module).into_bytes();
+            }
+            cg.compile(module);
             cg.build_output()
         }
-        a => panic!("arch {:?} not yet implemented (M0: x86_64 only)", a),
+        a => panic!(
+            "target arch {:?} is not yet implemented (supported: x86_64, aarch64)",
+            a
+        ),
     }
 }
