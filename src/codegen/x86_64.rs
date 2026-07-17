@@ -651,7 +651,7 @@ impl Codegen {
                         Expr::Int { v, .. } => Some(v.to_le_bytes()[..sz].to_vec()),
                         Expr::String { data, .. } => Some(data.clone()),
                         Expr::InitList { inits, .. } => {
-                            let base = self.data_section.len() as u64;
+                            let base = self.rodata.len() as u64;
                             self.gen_global_init_list(&v.ty, inits, Some((base, None)))
                         },
                         Expr::AddrOf { e, .. } => {
@@ -2292,7 +2292,7 @@ impl Codegen {
             Expr::Char { v, .. } => self.mov_imm(dst, *v as i128),
             Expr::Ident { name, ty, .. } => {
                 if matches!(ty, Type::Vector(_, _)) {
-                    // 向量变量: 用 movups 加载到 xmm0
+                    // 向量变量: 标量逐元素加载到帧临时区 slot 0
                     self.gen_vector_load(e);
                 } else if self.globals.contains_key(&name.name)
                     && matches!(ty, Type::Int128 | Type::UInt128) {
@@ -2368,9 +2368,9 @@ impl Codegen {
                     self.gen_float_binop(*op, l, r);
                     return;
                 }
-                // SIMD 向量运算: 使用 SSE 指令
+                // SIMD 向量运算: 标量逐元素，结果写入帧临时区
                 if matches!(l.ty(), Type::Vector(_, _)) {
-                    self.gen_vector_binop(*op, l, r);
+                    self.gen_vector_binop(*op, l, r, 0);
                     return;
                 }
                 // P1-4: __int128 运算
@@ -3166,6 +3166,10 @@ impl Codegen {
                 }
             }
             Expr::CompoundLit { ty, inits, .. } => {
+                if let Type::Vector(elem_ty, n) = ty {
+                    self.gen_vector_init_rvalue(inits, elem_ty, *n, 0);
+                    return;
+                }
                 // 复合字面量: (type){...} - 在 rodata 中存储初始化数据, 加载地址
                 let size = ty.size();
                 let data = self.gen_global_init_list(ty, inits, None)
@@ -3948,42 +3952,34 @@ impl Codegen {
         self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
     }
 
-    // SIMD 向量运算: 使用标量整数运算逐元素操作 (避免 SSE 对齐问题)
-    fn gen_vector_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) {
+    // SIMD 向量运算: 标量逐元素操作 (不用 XMM 寄存器)
+    fn gen_vector_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, result_slot: usize) {
         let (elem_ty, count) = match l.ty() {
             Type::Vector(ref elem, n) => { let et = (**elem).clone(); (et, n) }
             _ => return,
         };
         let elem_size = elem_ty.size();
         let vec_size = elem_size * count;
-        // 使用帧底部 slot 0 临时区域保存结果 (完全不用 XMM 寄存器)
-        let result_off = self.vector_temp_base(0, vec_size);
+        let result_off = self.vector_temp_base(result_slot, vec_size);
         for i in 0..count {
-            // 加载左操作数第 i 个元素到 rax
             self.gen_scalar_vector_load(l, i, elem_size);
-            // 保存到 rcx
             self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-            // 加载右操作数第 i 个元素到 rax
             self.gen_scalar_vector_load(r, i, elem_size);
-            // rcx = rcx op rax
             match op {
                 BinOp::Add => { self.emit(&[0x48, 0x01, 0xC1]); }
                 BinOp::Sub => { self.emit(&[0x48, 0x29, 0xC1]); }
                 BinOp::Mul => { self.emit(&[0x48, 0x0F, 0xAF, 0xC8]); } // imul rcx, rax
                 _ => { self.emit(&[0x48, 0x01, 0xC1]); }
             }
-            // 存储结果到临时区域: mov [r13+off], ecx
             let off = result_off + (i * elem_size) as i32;
             self.emit(&[0x41, 0x89]); // REX.B + mov r/m32, r32
             if off.abs() < 128 {
-                // ModRM: mod=01, reg=001(ecx), rm=101(r13) = 0x45 | (1<<3) = 0x4D
                 self.emit(&[0x4D, off as i8 as u8]);
             } else {
-                self.emit(&[0x8D]); // mod=10, reg=001, rm=101
+                self.emit(&[0x8D]);
                 self.emit(&off.to_le_bytes());
             }
         }
-        // 结果在临时区域, gen_vector_store 会从该区域读取
     }
 
     /// 从全局向量对象加载第 elem_idx 个元素到 rax（标量路径）
@@ -4039,6 +4035,25 @@ impl Codegen {
         }
     }
 
+    /// 将向量 rvalue 物化到帧临时区 slot（标量逐元素路径）
+    fn gen_vector_to_temp(&mut self, e: &Expr, temp_slot: usize) {
+        if let Some((elem_ty, n, inits)) = Self::vector_init_from_expr(e) {
+            self.gen_vector_init_rvalue(inits, elem_ty, n, temp_slot);
+            return;
+        }
+        match e {
+            Expr::Binop { op, l, r, .. } if matches!(e.ty(), Type::Vector(_, _)) => {
+                self.gen_vector_binop(*op, l, r, temp_slot);
+            }
+            Expr::InitList { inits, .. } => {
+                if let Type::Vector(elem_ty, n) = e.ty() {
+                    self.gen_vector_init_rvalue(inits, &elem_ty, n, temp_slot);
+                }
+            }
+            _ => self.gen_vector_load_into_slot(e, temp_slot),
+        }
+    }
+
     /// 加载向量变量的第 i 个元素到 rax (标量)
     fn gen_scalar_vector_load(&mut self, e: &Expr, elem_idx: usize, elem_size: usize) {
         if let Some((elem_ty, n, inits)) = Self::vector_init_from_expr(e) {
@@ -4056,6 +4071,16 @@ impl Codegen {
                     let off = self.var_offset(&name.name) + (elem_idx * elem_size) as i32;
                     self.load_stack(0, off);
                 }
+            }
+            _ if matches!(e.ty(), Type::Vector(_, _)) => {
+                let count = match e.ty() {
+                    Type::Vector(_, n) => n,
+                    _ => 0,
+                };
+                let vec_size = elem_size * count;
+                self.gen_vector_to_temp(e, 1);
+                let temp_off = self.vector_temp_base(1, vec_size) + (elem_idx * elem_size) as i32;
+                self.load_stack(0, temp_off);
             }
             _ => {
                 self.gen_expr(e, 0);
@@ -4075,13 +4100,21 @@ impl Codegen {
 
     // 加载向量变量到临时区域 (完全标量, 不用 XMM)
     fn gen_vector_load(&mut self, e: &Expr) {
+        self.gen_vector_load_into_slot(e, 0);
+    }
+
+    fn gen_vector_load_into_slot(&mut self, e: &Expr, temp_slot: usize) {
         let (elem_ty, count) = match e.ty() {
             Type::Vector(ref elem, n) => { let et = (**elem).clone(); (et, n) }
             _ => return,
         };
+        if let Some((et, n, inits)) = Self::vector_init_from_expr(e) {
+            self.gen_vector_init_rvalue(inits, et, n, temp_slot);
+            return;
+        }
         let elem_size = elem_ty.size();
         let vec_size = elem_size * count;
-        let temp_off = self.vector_temp_base(0, vec_size);
+        let temp_off = self.vector_temp_base(temp_slot, vec_size);
         match e {
             Expr::Ident { name, .. } => {
                 if self.globals.contains_key(&name.name) {
@@ -4094,9 +4127,8 @@ impl Codegen {
                 }
                 let var_off = self.var_offset(&name.name);
                 for i in 0..count {
-                    // 从源变量加载元素 (按元素大小)
                     let src_off = var_off + (i * elem_size) as i32;
-                    self.emit(&[0x49, 0x8D]); // lea rax, [r13 + src_off]
+                    self.emit(&[0x49, 0x8D]);
                     if src_off.abs() < 128 {
                         self.emit(&[0x45, src_off as i8 as u8]);
                     } else {
@@ -4104,18 +4136,22 @@ impl Codegen {
                         self.emit(&src_off.to_le_bytes());
                     }
                     self.emit_load_mem(elem_size);
-                    // 存储到临时区域
                     let dst_off = temp_off + (i * elem_size) as i32;
                     self.emit_store(0, dst_off, elem_size);
                 }
             }
+            Expr::Binop { op, l, r, .. } => {
+                self.gen_vector_binop(*op, l, r, temp_slot);
+            }
+            Expr::InitList { inits, .. } => {
+                self.gen_vector_init_rvalue(inits, &elem_ty, count, temp_slot);
+            }
             _ => {
-                // 间接向量：rax 为源地址，逐字节复制到帧临时区
                 self.gen_expr(e, 0);
                 let total_bytes = elem_size * count;
                 self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
                 self.emit_lea_r13(7, temp_off); // rdi = 临时区
-                self.mov_imm(1, total_bytes as i128); // rcx = 字节数
+                self.mov_imm(1, total_bytes as i128);
                 self.emit(&[0xFC]); // cld
                 self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
             }

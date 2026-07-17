@@ -2299,6 +2299,8 @@ impl<'a> Parser<'a> {
                         target.ty()
                     } else if matches!(target.ty(), Type::Float | Type::Double | Type::LongDouble) {
                         target.ty()
+                    } else if matches!(target.ty(), Type::Vector(_, _)) {
+                        target.ty()
                     } else { int_t() };
                     let expanded = Expr::Binop { op, l: read, r: Box::new(r), span: self.cur.span.clone(), ty: binop_ty };
                     let assign_ty = target.ty();
@@ -2364,9 +2366,13 @@ impl<'a> Parser<'a> {
                 } else {
                 let is_ca = matches!(&lt, Type::Complex(_));
                 let is_cb = matches!(&rt, Type::Complex(_));
+                let is_va = matches!(&lt, Type::Vector(_, _));
+                let is_vb = matches!(&rt, Type::Vector(_, _));
                 let is_fa = matches!(&lt, Type::Float | Type::Double | Type::LongDouble);
                 let is_fb = matches!(&rt, Type::Float | Type::Double | Type::LongDouble);
-                if is_ca || is_cb {
+                if is_va || is_vb {
+                    if is_va { lt } else { rt }
+                } else if is_ca || is_cb {
                     // 复数算术结果仍为复数（供 Cast 等类型推导）
                     if is_ca { lt } else { rt }
                 } else if is_fa || is_fb {

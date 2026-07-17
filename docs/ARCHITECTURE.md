@@ -194,8 +194,10 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 - **指令子集**：除 mov/alu/jcc 外，含 `btl/bts/btr`、`shld/shrd`、`adc/sbb`、
   `cmpxchg`/`xadd` 内存操作数、`movzbl` 内存源、`setcc` 内存目标、
   `cmp`/`test` 内存操作数等；未识别指令 warning + nop 占位。
-- **SIMD/复数**：向量全局 `{…}` init、间接向量 `rep movsb` 复制；`_Complex`
-  add/sub/mul/div（SSE 标量）；`parser` 对复数二元结果保留 `Type::Complex` 以便
+- **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
+  局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（不用 XMM 向量指令）；
+  非 Ident 向量（binop、compound literal、InitList）经 `gen_vector_to_temp` 物化；
+  `_Complex` add/sub/mul/div（SSE 标量）；`parser` 对复数二元结果保留 `Type::Complex` 以便
   `(int)(a+b)` 等 Cast 正确发射 `cvttss2si`；虚部清零用 `movss` 避免 64 位
   store 覆盖相邻实部；`mov_xmm` 仅在 xmm≥8 时加 REX。不支持表达式路径发射
   **ud2** 而非静默 `mov 0`。
@@ -233,7 +235,7 @@ Driver 在 codegen 前执行 `lower → validate → opt → resync → validate
 | 阶段 | 职责 |
 |------|------|
 | `lower` | AST 降级为带 `ValueType` 的函数/全局图；全局初值过 `is_static_initializer`，违例报 **E1006** |
-| `validate` | 校验 float/vector/complex 二元/一元/赋值/条件/聚合/转换是否与 codegen 能力一致（**E1003/E1007/E1008**） |
+| `validate` | 校验 float/vector/complex 二元/一元/赋值/条件/聚合/转换是否与 codegen 能力一致（**E1003/E1007/E1008**）；向量二元仅 Add/Sub/Mul |
 | `opt` | 常量折叠（含 float 四则）、DCE、分支折叠、小函数内联（`-O1` 起）；改写 AST |
 | `resync` | opt 后从 AST 重新 lower，使 IR 图与优化结果一致 |
 | `validate`（二次） | resync 后再次语义校验 |

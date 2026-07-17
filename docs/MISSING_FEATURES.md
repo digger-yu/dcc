@@ -40,7 +40,8 @@
 | SysV va_list SSE | `examples/test_p4_va_list.c`（GP + float/double） |
 | Mini x86 asm 局部/C 标签 | `tests/fixtures/asm_local_label.c`、`asm_label_insn.c`（`N:`/`N:insn`/`found:`） |
 | Mini x86 asm 位操作 / 双精度移位 | codegen `btl/bts/btr`、`shld/shrd`（内核 paravirt 等） |
-| 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；全局 init + 间接 load + 逐元素 store |
+| 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；`.data` 逐元素静态 init + 运行时 binop |
+| 非 Ident 向量 rvalue | `tests/fixtures/vector_binop_non_ident.c`；`(a+b)+c`、`v=v+w` |
 | x86_64 codegen 扩展 | ✅ 向量全局/rvalue init、复数四则/Cast、object_size fold、apply/return 子集；mini-asm 仍部分 nop |
 | aarch64 typed IR | hello/控制流/调用/浮点/向量/rodata；见 `aarch64_*_cross_compile` |
 | riscv64 typed IR | hello/控制流/调用/rodata；见 `riscv64_*_cross_compile` |
@@ -138,6 +139,8 @@
 | `typeof(_Generic(...))` | `_Generic` 被当作类型名 | `typeof_operand_is_type_form` 排除 `_Generic` |
 | 声明初始化 `sizeof(*v)` | 变量未先入 locals | `=` 前 `locals.insert` |
 | asm goto `jmp %l[x] # cmt` panic | `#` 后注释被当作标签名 | `strip_asm_comment` 剥离 AT&T 注释 |
+| 向量 `e = e + b` E1007 | binop 结果误标 int | parser 保留 Vector；validate 允许 Binary 赋值 |
+| 向量 binop 非 Ident 操作数 | `gen_scalar_vector_load` 从 rax 误读 | `gen_vector_to_temp` 物化到 slot |
 
 **当前 asm-offsets 状态**：解析 **0**、语义 **0**；`-O2` 不再 panic `unresolved label: found`；
 全树 `-O2 -c` 仍可能遇 paravirt 类型冲突等后续阻塞。验收脚本：

@@ -247,7 +247,10 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
             let lhs = &expr.children[0];
             let rhs = &expr.children[1];
             if is_vector_ty(&lhs.ty) && !is_vector_ty(&rhs.ty)
-                && !matches!(rhs.kind, ExprKind::Aggregate | ExprKind::Cast)
+                && !matches!(
+                    rhs.kind,
+                    ExprKind::Aggregate | ExprKind::Cast | ExprKind::Binary(_)
+                )
             {
                 diagnostics.push(Diagnostic::err(
                     "E1007",
@@ -722,6 +725,15 @@ mod tests {
         let module = lower(program).expect("lower despite vector cast");
         let err = validate(&module).expect_err("vector cast must fail validation");
         assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+    }
+
+    #[test]
+    fn vector_assign_binop_validates() {
+        let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
+                     int main(void) { v4si a={1,2,3,4}, b={5,6,7,8}; a = a + b; return 0; }\n";
+        let (program, _) = crate::parser::parse(src, "vector-assign.c");
+        let module = lower(program).expect("vector assign binop should lower");
+        validate(&module).expect("vector assign from binop should validate");
     }
 
     #[test]

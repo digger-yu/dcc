@@ -208,5 +208,23 @@ EOF
 "$DCC" -o "$TMP/asm_goto_hash" "$TMP/asm_goto_hash.c" && "$TMP/asm_goto_hash"
 check "asm_goto_hash_comment" test $? -eq 0
 
+cat > "$TMP/simd.c" <<'EOF'
+typedef int v4si __attribute__((vector_size(16)));
+int main(void) {
+    v4si a = {1, 2, 3, 4};
+    v4si b = {10, 20, 30, 40};
+    v4si c = a + b;
+    v4si e = a;
+    e = e + b;
+    int *p = (int *)&c;
+    if (p[0] != 11 || p[1] != 22 || p[2] != 33 || p[3] != 44) return 1;
+    int *q = (int *)&e;
+    if (q[0] != 11 || q[3] != 44) return 2;
+    return 0;
+}
+EOF
+"$DCC" -o "$TMP/simd" "$TMP/simd.c" && "$TMP/simd"
+check "vector_simd_scalar" test $? -eq 0
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

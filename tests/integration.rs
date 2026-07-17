@@ -1539,6 +1539,19 @@ fn asm_goto_hash_comment_compiles() {
     assert_eq!(run_exe(&exe), 0);
 }
 
+/// 非 Ident 向量表达式：嵌套 binop 与 `v = v + w` 赋值
+#[test]
+fn vector_binop_non_ident_run_returns_zero() {
+    let source = include_str!("fixtures/vector_binop_non_ident.c");
+    let (output, exe) = run_compile_and_run("vector-binop-non-ident", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0);
+}
+
 /// 全局 SIMD 向量复制与逐元素运算
 #[test]
 fn vector_global_copy_compiles() {
