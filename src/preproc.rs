@@ -1638,9 +1638,13 @@ impl Preprocessor {
         result
     }
 
-    /// 将参数值转为字符串字面量 (转义 " 和 \)
+    /// 将参数值转为字符串字面量 (转义 " 和 \；换行/连续空白折叠为单空格，符合 C # 规则)
     fn stringify_arg(arg: &str) -> String {
-        let escaped = arg.replace('\\', "\\\\").replace('"', "\\\"");
+        let collapsed: String = arg
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let escaped = collapsed.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{}\"", escaped)
     }
 
@@ -2669,6 +2673,29 @@ mod tests {
         );
         assert!(
             !output.contains("current_thread_info->"),
+            "output: {output}"
+        );
+    }
+
+    #[test]
+    fn stringify_collapses_multiline_whitespace() {
+        let (output, diags, _) = preprocess(
+            b"#define NOFAIL(ptr) do_nofail((ptr), #ptr)\n\
+              void *do_nofail(void *p, const char *e);\n\
+              void *f(void) {\n\
+                return NOFAIL(malloc(sizeof(int) + \\\n\
+                                     1));\n\
+              }\n",
+            "nofail.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            output.contains("\"malloc(sizeof(int) + 1)\""),
             "output: {output}"
         );
     }

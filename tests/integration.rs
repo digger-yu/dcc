@@ -1206,3 +1206,39 @@ fn asm_local_label_compiles() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// 同行局部标签 N:insn（如 1:jmp 2f）
+#[test]
+fn asm_label_insn_same_line_compiles() {
+    let source = include_str!("fixtures/asm_label_insn.c");
+    let (output, _obj) = run_object_test("asm-label-insn", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// struct __attribute__((__may_alias__)) name
+#[test]
+fn may_alias_struct_compiles() {
+    let source = include_str!("fixtures/may_alias_struct.c");
+    let (output, _obj) = run_object_test("may-alias-struct", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// NOFAIL / # 字符串化：多行实参折叠为单行字面量
+#[test]
+fn nofail_stringify_compiles() {
+    let source = include_str!("fixtures/nofail_stringify.c");
+    let (output, _obj) = run_object_test("nofail-stringify", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

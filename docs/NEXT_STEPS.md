@@ -53,7 +53,7 @@
 - [x] **8. modpost 全 dcc 化（fixdep 替代）**
   - 验证：`scripts/modpost_link.sh` Rust fixdep + dcc 编译 file2alias/empty
   - 方案：`src/bin/fixdep.rs`（cargo fixdep）；`dcc-host-wrapper.sh` 安装 Rust fixdep
-  - 待补：modpost.c / sumversion.c 宿主 C（复用已有 modpost 二进制）
+  - 进展（2026-07-17）：`NOFAIL`/`#` 字符串化、`__may_alias__` 已修；modpost/sumversion 仍剩 duplicate typedef 等
 
 - [x] **9. prepare0 全链路 vs 窄目标对齐**
   - 验证：`bash scripts/prepare0_full.sh` PASS（远程 2026-07-16）
@@ -64,6 +64,7 @@
   - 验证：内核能打印 boot log 不 panic
   - 进展：脚本已用系统 vmlinuz 冒烟 **PASS**（2/2 配置）；dcc 自编译 bzImage 待步骤 6
   - 进展：`asm-offsets.c` **867→0 解析、0 语义、`.s` 已生成**（2026-07-17）
+  - 进展：`-O2` **`goto found` 标签 DCE**、mini-asm `N:insn`/位操作指令（2026-07-17）
   - 验收：`python3 scripts/test_asm_offsets.py`（远程 `~/linux-6.6` + dcc release）
   - 阻塞：全树 `make CC=dcc` 仍待步骤 4–6；远程 gcc-15 亦无法完成 6.6 全树
 

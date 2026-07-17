@@ -2,7 +2,7 @@
 
 > 目标版本：**Linux 6.6 / x86_64**。远程验收目录：`~/dcc-agent-linux66`（独立同步，不覆盖旧仓库）。
 
-## 当前进度（2026-07-16）
+## 当前进度（2026-07-17）
 
 | 阶段 | 状态 |
 |------|------|
@@ -17,7 +17,7 @@
 | `arch/x86/kernel/asm-offsets.c` 预处理 + 解析 + 代码生成 | ✅ 2026-07-17：867→0 解析；0 语义；`.s` 已生成 |
 | modpost `file2alias.c` 单 TU | ✅ |
 | LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
-| `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc file2alias/empty（modpost/sumversion 待补） |
+| `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc file2alias/empty；modpost/sumversion **部分**（`NOFAIL`/`__may_alias__` 已修） |
 | 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ⚠️ 脚本就绪 | 步骤 6–7/10 需 `BUILD_*=1`；无产物 SKIP |
 
 ### 远程同步构建
@@ -108,7 +108,16 @@ asm goto 试探解析、位域逗号分隔、结构体空字段、__auto_type、
 for-init 枚举声明、属性后指针函数声明、GNU `?:` 省略中间操作数等。
 
 **2026-07-17** 补充：include 缓存零参 function-like 宏（V6）、三元指针类型、
-内联 asm GNU 局部数字标签（`6:`/`6f`/`6b`）。
+内联 asm GNU 局部数字标签（`6:`/`6f`/`6b`）、**`-O2` 保留 `goto` 目标 C 标签**、
+**同行标签拆分**（`1:jmp` / `found: ret`）、**mini-asm 位测试与 shld/shrd**。
+
+**modpost 宿主 C（2026-07-17）**：
+
+| 修复项 | 说明 |
+|--------|------|
+| `NOFAIL` / `#` 字符串化 | 多行实参折叠为单行字面量，消除 `modpost.c:5560` Invalid token |
+| `struct __attribute__((__may_alias__))` | 解析器在 struct/enum 名之前跳过属性 |
+| 剩余阻塞 | duplicate typedef、`bool` 等系统头重复定义（待后续迭代） |
 
 辅助脚本：`scripts/test_asm_offsets.py`（一键替换 gcc 为 dcc 并统计错误）、
 `scripts/summarize_err.py`（解析/语义错误分类）。

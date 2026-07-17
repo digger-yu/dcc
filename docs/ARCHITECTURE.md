@@ -143,6 +143,19 @@ Parser 直接表示 `&&label`、`goto *expr` 和 `asm goto`。标签地址使用
 RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
 汇编器之前将 `%lN` / `%l[name]` 解析到函数内标签。
 
+Mini x86 汇编器（`codegen/x86_64.rs`）要点：
+
+- **标签命名空间**：C 层 `Stmt::Label` 与 asm 字符串内命名标签（如 `found:`）
+  共用 `Codegen::label()`；`-O2` DCE 在 `return` 后仍保留可达标签。
+- **同行标签**：`N:insn`（GNU 局部数字标签）与 `found: ret` 在发射前拆成
+  标签行 + 指令行（`expand_label_insn_lines`）。
+- **局部数字标签**：`6:` / `6f` / `6b` 映射为内部符号（`AsmLocalLabels`）。
+- **指令子集**：除 mov/alu/jcc 外，含 `btl/bts/btr`、`shld/shrd`、`rdmsr/wrmsr`
+  等；未识别指令 warning + nop 占位。
+
+预处理 `#` 字符串化遵循 C 规则：实参内换行与连续空白折叠为单空格
+（`NOFAIL(ptr)` → `"malloc(...)"` 单行字面量）。
+
 ## 自举 (M5)
 
 ```bash

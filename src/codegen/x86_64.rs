@@ -166,6 +166,32 @@ impl AsmLocalLabels {
         s.parse().ok()
     }
 
+    /// 将 `N:insn` / `found:insn` 拆成标签行与指令行（GNU as 局部/C 标签同行写法）
+    fn expand_label_insn_lines(lines: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in lines {
+            let trimmed = line.trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(colon) = trimmed.find(':') {
+                let label = trimmed[..colon].trim();
+                let rest = trimmed[colon + 1..].trim();
+                if !label.is_empty() && !rest.is_empty() && !label.ends_with('%') && !label.contains('(') {
+                    let is_numeric = label.chars().all(|c| c.is_ascii_digit());
+                    let is_named = !is_numeric && !label.starts_with('.');
+                    if is_numeric || is_named {
+                        out.push(format!("{}:", label));
+                        out.push(rest.to_string());
+                        continue;
+                    }
+                }
+            }
+            out.push(trimmed);
+        }
+        out
+    }
+
     fn name_at(&self, line_idx: usize) -> Option<&str> {
         self.defs
             .iter()
@@ -6029,15 +6055,16 @@ impl Codegen {
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
         } else { asm_str };
-        let resolved_lines: Vec<String> = s
-            .split(|c| c == '\n' || c == ';')
-            .map(|line| {
-                self.resolve_asm_template(
-                    line.trim(), outputs, output_names, inputs, input_names, &op_map,
-                )
-            })
-            .filter(|l| !l.trim().is_empty())
-            .collect();
+        let resolved_lines = AsmLocalLabels::expand_label_insn_lines(
+            s.split(|c| c == '\n' || c == ';')
+                .map(|line| {
+                    self.resolve_asm_template(
+                        line.trim(), outputs, output_names, inputs, input_names, &op_map,
+                    )
+                })
+                .filter(|l| !l.trim().is_empty())
+                .collect::<Vec<_>>(),
+        );
         self.emit_resolved_asm_lines(&resolved_lines, true);
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
@@ -6067,15 +6094,16 @@ impl Codegen {
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
             &asm_str[1..asm_str.len()-1]
         } else { asm_str };
-        let resolved_lines: Vec<String> = s
-            .split(|c| c == '\n' || c == ';')
-            .map(|line| {
-                self.resolve_asm_template(
-                    line.trim(), outputs, output_names, inputs, input_names, &op_map,
-                )
-            })
-            .filter(|l| !l.trim().is_empty())
-            .collect();
+        let resolved_lines = AsmLocalLabels::expand_label_insn_lines(
+            s.split(|c| c == '\n' || c == ';')
+                .map(|line| {
+                    self.resolve_asm_template(
+                        line.trim(), outputs, output_names, inputs, input_names, &op_map,
+                    )
+                })
+                .filter(|l| !l.trim().is_empty())
+                .collect::<Vec<_>>(),
+        );
         self.emit_resolved_asm_lines(&resolved_lines, false);
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
@@ -6322,6 +6350,19 @@ impl Codegen {
             "shrl" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 5, 32),
             "sar" | "sarq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 64),
             "sarl" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 32),
+
+            // 双精度移位 / 位测试
+            "shld" | "shldq" if ops.len() == 3 => self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], true, 64),
+            "shldl" if ops.len() == 3 => self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], true, 32),
+            "shrd" | "shrdq" if ops.len() == 3 => self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], false, 64),
+            "shrdl" if ops.len() == 3 => self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], false, 32),
+            "bt" | "btq" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xA3, 64),
+            "btl" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xA3, 32),
+            "btw" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xA3, 16),
+            "bts" | "btsq" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xAB, 64),
+            "btsl" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xAB, 32),
+            "btr" | "btrq" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xB3, 64),
+            "btrl" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xB3, 32),
 
             // 跳转
             "jmp" if ops.len() == 1 => self.emit_asm_jmp(&ops[0]),
@@ -6688,6 +6729,65 @@ impl Codegen {
             }
             _ => {
                 eprintln!("warning: unsupported shift operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// shld/shrd: AT&T shld src, dst, count
+    fn emit_asm_shld_shrd(
+        &mut self,
+        src: &AsmOperand,
+        dst: &AsmOperand,
+        count: &AsmOperand,
+        is_shld: bool,
+        bits: u8,
+    ) {
+        let w = bits == 64;
+        let op = if is_shld { 0xA5u8 } else { 0xADu8 };
+        let op_imm = if is_shld { 0xA4u8 } else { 0xACu8 };
+        if bits == 16 {
+            self.emit(&[0x66]);
+        }
+        match (src, dst, count) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _), AsmOperand::Reg(c, _)) if *c == 1 => {
+                self.emit(&[Self::rex(w, *s, 0, *d), 0x0F, op, Self::modrm_reg_reg(*s, *d)]);
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _), AsmOperand::Imm(v)) => {
+                self.emit(&[Self::rex(w, *s, 0, *d), 0x0F, op_imm, Self::modrm_reg_reg(*s, *d), *v as u8]);
+            }
+            _ => {
+                eprintln!("warning: unsupported shld/shrd operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// bt/bts/btr: AT&T btl src, dst（src=位索引，dst=被测操作数）
+    fn emit_asm_bit(&mut self, src: &AsmOperand, dst: &AsmOperand, opcode: u8, bits: u8) {
+        let w = bits == 64;
+        if bits == 16 {
+            self.emit(&[0x66]);
+        }
+        match (src, dst) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                self.emit(&[Self::rex(w, *s, 0, *d), 0x0F, opcode, Self::modrm_reg_reg(*s, *d)]);
+            }
+            (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
+                let ext = match opcode {
+                    0xA3 => 4,
+                    0xAB => 5,
+                    0xB3 => 6,
+                    _ => 4,
+                };
+                self.emit(&[Self::rex(w, 0, 0, *d), 0x0F, 0xBA, Self::modrm_reg_reg(ext, *d), *v as u8]);
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported bit-test operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }

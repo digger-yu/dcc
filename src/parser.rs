@@ -1348,6 +1348,8 @@ impl<'a> Parser<'a> {
         // struct/union/enum
         if self.cur.kind == TokKind::KwStruct || self.cur.kind == TokKind::KwUnion {
             let is_u = self.cur.kind == TokKind::KwUnion; self.advance();
+            // struct __attribute__((__may_alias__)) name
+            self.skip_attributes();
             let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
             if self.cur.kind == TokKind::LBrace {
                 self.advance(); let fields = self.parse_fields();
@@ -1397,6 +1399,7 @@ impl<'a> Parser<'a> {
         }
         if self.cur.kind == TokKind::KwEnum {
             self.advance();
+            self.skip_attributes();
             let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
             if self.cur.kind == TokKind::LBrace {
                 self.advance(); let vs = self.parse_enum_body();

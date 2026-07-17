@@ -30,6 +30,7 @@
 | 原子内存序 | P3 | ✅ `__ATOMIC_*` 宏定义 | ✅ mfence(seq_cst) | ✅ atomic_test.c |
 | __builtin__ 语义 | P1 | ✅ expect/constant_p/memcpy 等 | ✅ codegen 层内建函数处理 | ✅ examples/dev/builtins.c |
 | __attribute__ 语义 | P1 | ✅ packed/aligned/noreturn/unused | ✅ 解析器静默剥离 | ✅ examples/dev/builtins.c |
+| __may_alias__ 类型属性 | P1 | ✅ struct/enum 名前的 `__attribute__((__may_alias__))` | ✅ 不影响 codegen | ✅ may_alias_struct.c |
 | sizeof(expr) 修复 | P2 | ✅ 计算实际表达式类型大小 | ✅ | ✅ examples/dev/builtins.c |
 | _Alignof 对齐查询 | P2 | ✅ _Alignof(type)/_Alignof(expr) | ✅ 返回对齐值 | ✅ examples/dev/builtins.c |
 | typeof 运算符 | P3 | ✅ typeof(expr/type) 推导类型 | ✅ | ✅ examples/dev/builtins.c |
@@ -39,7 +40,7 @@
 | 逗号运算符 | P2 | ✅ Pratt bp=1 最低优先级 | ✅ 求值 lhs 丢弃返回 rhs | ✅ runtime_features.c |
 | VLA 可变长数组 | P2 | ✅ ArraySize::Var(Box<Expr>) | ✅ 动态栈分配+16字节对齐 | ✅ runtime_features.c |
 | 整数提升 | P2 | ✅ char/short 隐式提升 | ✅ movsx/movzx 符号/零扩展 | ✅ runtime_features.c |
-| 内联汇编 __asm__ | P1 | ✅ __asm__/__asm/asm + volatile/const, 带冒号约束列表 | ✅ 约束 `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber | ✅ runtime_features.c, test_asm_constraints.c |
+| 内联汇编 __asm__ | P1 | ✅ __asm__/__asm/asm + volatile/const, 带冒号约束列表 | ✅ Mini x86：约束、`N:/Nf/Nb`、`N:insn`、bt/shld 等 | ✅ runtime_features.c, test_asm_constraints.c, asm_label_insn.c |
 | LTO + dead symbol gc | P2 | ✅ `-flto` / `-ffunction-sections` | ✅ `.llvm.lto` + `ld --gc-sections` + objcopy strip | ✅ `cargo test` + remote_feature_check |
 | struct 整体赋值 | P1 | ✅ 聚合初始化 | ✅ memcpy 整体拷贝 | ✅ Linux 验证 |
 | struct 传参/返回 | P2 | ✅ 函数参数/返回值 | ✅ SysV ABI 寄存器拆分 (<=16B) | ✅ Linux 验证 |
@@ -71,7 +72,9 @@
 - **逗号运算符**: Pratt 解析 bp=1 最低优先级, 调用参数用 parse_expr_bp(2) 排除逗号, 初始化列表同理
 - **VLA**: ArraySize::Var 存储运行时表达式, 分配策略: 求值大小→imul元素大小→16字节对齐→sub rsp→保存基址到变量槽
 - **整数提升**: gen_int_promote() — char/SChar/Bool→movsx, Short→movsx, UChar→movzx, UShort→movzx
-- **内联汇编**: 识别 __asm__/__asm/asm, 跳过 volatile/const, 收集字符串, 跳过冒号分隔输出/输入/clobber 列表, codegen 为 no-op; 支持文件级 asm 声明和函数内 asm 表达式
+- **内联汇编**: Mini x86 后端解析 AT&T 模板；约束 `"r"`/`"m"`/`"=r"`/`+m`；
+  GNU 局部标签 `N:`/`Nf`/`Nb` 与同行 `N:insn`；位测试与双精度移位指令子集
+- **宏 `#` 字符串化**: 实参空白折叠为单空格，支持多行 `NOFAIL(malloc(...))` 等宿主宏
 - **-MD/-MF 依赖文件**: 内核构建系统需要编译器生成 .d 依赖文件, 格式为目标:源; 支持 -MD(启用)/-MF(指定路径)/-MT-MQ(目标名), 无 -MF 时默认输出 <stem>.d
 - **struct 传参**: SysV ABI 简化版, <=8B 单寄存器, <=16B 拆双寄存器(rax:rdx), >16B 隐藏指针; 被调端从寄存器恢复到变量槽
 - **long double 16B**: 占 16 字节栈空间(低 8 字节 double + 高 8 字节零), 运算用 SSE double 近似, movq 加载低 8 字节

@@ -1,6 +1,6 @@
 # DCC Linux 6.6 缺失特性（按自动化证据）
 
-> 最后更新：2026-07-16 — 以 `scripts/sync_remote_build.sh`、
+> 最后更新：2026-07-17 — 以 `scripts/sync_remote_build.sh`、
 > `scripts/kernel_full_check.sh`、`scripts/prepare0_check.sh`、
 > `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh`、
 > `scripts/modpost_link.sh`、`scripts/vmlinux_regress.sh`、
@@ -38,6 +38,10 @@
 | `_Generic` 指针精确匹配 | `tests/fixtures/generic_pointer.c` |
 | 内联 asm 约束 | `examples/test_asm_constraints.c` |
 | SysV va_list SSE | `examples/test_p4_va_list.c`（GP + float/double） |
+| Mini x86 asm 局部/C 标签 | `tests/fixtures/asm_local_label.c`、`asm_label_insn.c`（`N:`/`N:insn`/`found:`） |
+| Mini x86 asm 位操作 / 双精度移位 | codegen `btl/bts/btr`、`shld/shrd`（内核 paravirt 等） |
+| `struct __attribute__((__may_alias__))` | `tests/fixtures/may_alias_struct.c` |
+| 宏 `#` 字符串化换行折叠 | `preproc` 单测 `stringify_collapses_*`；`NOFAIL`/`modpost.c` |
 
 ## 阻塞级（Linux 6.6 全树）
 
@@ -45,7 +49,7 @@
 |------|----------|------|
 | prepare0 全链路 `make prepare0` | ✅ 脚本等价 | 用 `prepare0_full.sh`；`make prepare0 CC=dcc` 豁免（kconfig 宿主 C） |
 | 全树 `make CC=dcc` | ⏳ 待远程首跑 | 推荐 `HOSTCC=gcc` 混合；Rust fixdep 已替代 C fixdep |
-| modpost.c / sumversion.c（宿主） | ⏳ dcc 编译失败 | file2alias/empty 已通过；全链接受阻于此 |
+| modpost.c / sumversion.c（宿主） | ⏳ 部分过编 | `NOFAIL`/`#` 字符串化、`__may_alias__` 已修；仍剩 duplicate typedef / `bool` 等 |
 | QEMU 启动矩阵 | ⚠️ 脚本就绪 | 无 bzImage 时 SKIP；需步骤 6 产物 |
 | vmlinux pahole / objtool | ⚠️ 脚本就绪 | 无 vmlinux 时 SKIP；单 TU 回归已通过 |
 
@@ -120,9 +124,14 @@
 | `current_thread_info()` 未展开 | include 缓存零参宏误读为 `[""]` | load 过滤空 param；缓存 V6 |
 | percpu 三元 `*` 解引用 E1004 | `Cond` 固定 int 类型 | 分支为指针时保留指针类型 |
 | codegen panic `6f` | 内联 asm 缺 GNU 局部数字标签 | `AsmLocalLabels` N:/Nf/Nb |
+| `-O2` 后 `goto found` panic | DCE 删除 `return` 后 C 标签 | `opt.rs` 保留 `Stmt::Label` |
+| 同行 `1:jmp` / `found: ret` | 整行当助记符 `1:jmp` | `expand_label_insn_lines` 拆分 |
+| `btl`/`shld` 等 nop 降级 | mini-asm 缺编码 | `emit_asm_bit` / `emit_asm_shld_shrd` |
+| modpost `Invalid token`（5560） | `#ptr` 字符串化含换行 | `stringify_arg` 折叠空白 |
+| sumversion `__may_alias__` | struct 名前的类型属性 | `parse_type_mode` 后 `skip_attributes` |
 
-**当前 asm-offsets 状态**：解析 **0**、语义 **0**；`asm-offsets.s` **已生成**
-（2026-07-17，远程 `test_asm_offsets.py` exit 0）。验收脚本：
+**当前 asm-offsets 状态**：解析 **0**、语义 **0**；`-O2` 不再 panic `unresolved label: found`；
+全树 `-O2 -c` 仍可能遇 paravirt 类型冲突等后续阻塞。验收脚本：
 `scripts/test_asm_offsets.py`。
 
 ## 已实现模块（2026-07-16 扩展）
