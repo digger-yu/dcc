@@ -719,6 +719,10 @@ mod tests {
                 is_unused: false,
                 is_noinline: false,
                 is_always_inline: false,
+                is_old_style: false,
+                format_kind: None,
+                format_string_idx: None,
+                format_first_arg: None,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");
@@ -787,6 +791,10 @@ mod tests {
                 is_unused: false,
                 is_noinline: false,
                 is_always_inline: false,
+                is_old_style: false,
+                format_kind: None,
+                format_string_idx: None,
+                format_first_arg: None,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");
@@ -852,6 +860,10 @@ mod tests {
             is_unused: false,
             is_noinline: false,
             is_always_inline: true,
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
         });
         let main_fn = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
@@ -890,6 +902,10 @@ mod tests {
             is_unused: false,
             is_noinline: false,
             is_always_inline: false,
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
         });
         let prog = Program {
             decls: vec![sq, main_fn],

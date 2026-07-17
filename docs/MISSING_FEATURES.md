@@ -130,7 +130,7 @@
 | 位域 `a:8, b:4` | `parse_expr()` 吞逗号 | `parse_expr_bp(2)` |
 | struct `{ lock; ; }` | 空字段非法 | `parse_fields` 跳过 lone `;` |
 | `__auto_type` / typedef `(fn)(...)` | 未支持 GNU 分支 | 新增解析路径 |
-| C11 atomic 预置宏 | 与内核 atomic-instrumented 冲突 | 删除 preproc 预置宏 |
+| C11 atomic 预置宏 | 与内核 atomic-instrumented 冲突 | freestanding 下不预置；hosted 预置完整 `atomic_*` 宏族 |
 | `_Static_assert(offsetof(...))` | const_eval 无 Offsetof | `offsetof_member()` + find_field |
 | `DIV_ROUND_UP` 未展开 | object-like 别名后 `(args)` 未重扫描 | preproc 条件 tail_call 重扫描; 缓存 V5 |
 | `tags[3][EXPR]` | 结构体字段只解析一维 `[...]` | while LBracket + const_eval 数组界 |
@@ -174,6 +174,11 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | CLI 多输入 | `-r a.o [b.o…] -o merged.o` 链接模式；多 `.c` 须 `-c` 后用 gcc 或 `-r` |
 | 链接/LTO 模块（非自研） | `link.rs`+`lto.rs`：host `ld/objcopy`、`.llvm.lto` 摘要 + gc-sections；无 IR 跨 TU 优化 |
 | 验收脚本 | prepare0 / pahole / objtool / modpost / vmlinux / kernel_full_check |
+| TLS codegen | `_Thread_local` → `.tdata`/`.tbss`、`STT_TLS`；ET_EXEC 经 `arch_prctl` 设 FS |
+| ET_EXEC symtab | `build_elf_exec_x86_64` 输出 `.symtab`/`.strtab` |
+| format 属性 | `format_check.rs`：`-Wformat` / `W0003` arity 检查 |
+| 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002`+int |
+| K&R 函数 | 解析 + `is_old_style` 标志 + codegen 测试 |
 
 ## Sanitizer 后续（初版 AST 桩已交付）
 

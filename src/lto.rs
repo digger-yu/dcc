@@ -181,7 +181,7 @@ mod tests {
         let unit = build_unit("unit.c", &[("entry", 48, true)]);
         let payload = serialize_summary(&unit);
         let obj = elf::build_elf_rel_x86_64(
-            &[0xc3], &[], &[], 0, 1, 1, 1, &[], &[],
+            &[0xc3], &[], &[], 0, &[], 0, 1, 1, 1, 8, 8, &[], &[],
             &[ElfSection {
                 name: ".llvm.lto".to_string(),
                 data: payload,
@@ -228,9 +228,13 @@ mod tests {
             &[],
             &[],
             0,
+            &[],
+            0,
             1,
             1,
             1,
+            8,
+            8,
             &[
                 ElfSym {
                     name: "caller".to_string(),

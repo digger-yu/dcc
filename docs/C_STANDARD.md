@@ -8,7 +8,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - 基础类型 (int, char, long, ...)
 - struct / union / enum
 - 函数声明与定义
-- K&R 风格函数 (M5 之后实装)
+- K&R 风格函数定义与参数声明
 - 预处理器 (#define, #include, #if, #ifdef, #ifndef, #else, #elif, #endif, #undef)
 
 ## C99
@@ -27,9 +27,9 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `_Static_assert` (解析器静默跳过)
 - `_Atomic` (基础类型表支持)
 - 匿名 struct/union
-- `<stdatomic.h>` 内建宏定义
+- `<stdatomic.h>` 内建宏（hosted 模式预置 `atomic_*` → `__atomic_*`）
 - `_Generic` 泛型选择表达式
-- `_Thread_local` 线程存储类 (解析器静默跳过, freestanding 下无需特殊处理)
+- `_Thread_local` / `__thread` 线程局部存储（`.tdata`/`.tbss` + `STT_TLS`）
 - `_Noreturn` 函数限定符 (解析器静默跳过)
 
 ## C17
@@ -85,7 +85,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `__builtin_constant_p`：parser/opt/codegen 共享 `const_eval::is_constant`
 - `__builtin_expect_with_probability` 降级为 `__builtin_expect`
 - `address_space(N)` sparse 注解 (静默跳过)
-- `__attribute__((format))` printf/scanf 格式检查 (静默跳过)
+- `__attribute__((format))` printf/scanf 格式检查（`-Wformat` / `W0003`）
 - `&&label` 标签地址 (GNU 扩展, 通过 RIP-relative LEA 实现)
 - `asm goto` 实际发射 (支持标签跳转)
 - `goto *expr` 计算跳转
@@ -100,7 +100,8 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - **优化级别**：`-O2` 启用 GVN/CSE、拷贝传播、LICM；`-O3` 额外循环
   展开（trip≤4）与向量元素循环向量化（标量 SSE/GP 后端不变）。
 - ELF 的 section/weak/visibility 属性作用于 `-c`/`-r` 可重定位输出；
-  直接 ET_EXEC 模式不提供完整符号表语义。
+  ET_EXEC 输出含 `.symtab`/`.strtab` 与函数/全局符号。
+- `-fpermissive`：未知 typedef 降级为 `int` 并发出 `W0002`（默认严格 `E0009`）。
 - **Sanitizer（初版桩）**：`-fsanitize=address|undefined|thread|kernel-*`、
   `-fsanitize=a,b` 组合、`-fsanitize-coverage` / `fuzzer`。Driver 在 IR
   lower 前于 AST 插桩：TU 级 `__asan_init` / `__ubsan_init` / `__kcsan_init`

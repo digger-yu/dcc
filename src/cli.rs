@@ -47,6 +47,7 @@ pub struct Config {
     pub input_lang: InputLang,
     pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
     pub parallel_codegen: bool, // -O2+ 默认多线程并行 emit（DCC_NO_PARALLEL=1 关闭）
+    pub permissive: bool,       // -fpermissive：未知 typedef 降级为 int
     pub raw_args: Vec<String>,   // 原始参数（sanitizer/LTO 探测）
 }
 
@@ -167,6 +168,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut std = StdMode::Gnu23;   // 第一性原理:默认 gnu23,跟现代 GCC 行为一致
     let mut target = TargetTriple::host();
     let mut freestanding = false;
+    let mut permissive = false;
     let mut include_paths: Vec<PathBuf> = vec![];
     let mut system_paths: Vec<PathBuf> = vec![];
     let mut defines: Vec<(String, Option<String>)> = vec![];
@@ -326,6 +328,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-std=gnu18" => std = StdMode::Gnu17, // gnu18 = gnu17 别名
             "-std=gnu23" => std = StdMode::Gnu23,
             "-ffreestanding" => freestanding = true,
+            "-fpermissive" => permissive = true,
             "-I" => {
                 i += 1;
                 include_paths.push(PathBuf::from(args.get(i)
@@ -568,6 +571,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,
+            permissive,
             raw_args: args.to_vec() })
     } else {
         if inputs.is_empty() {
@@ -579,6 +583,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,
+            permissive,
             raw_args: args.to_vec() })
     }
 }

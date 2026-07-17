@@ -36,6 +36,7 @@ pub struct VarDecl {
     pub is_unused: bool,
     pub register_name: Option<String>,  // register asm("rN")
     pub cleanup_fn: Option<String>,     // __attribute__((cleanup(fn)))
+    pub is_thread_local: bool,          // _Thread_local / __thread
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,10 @@ pub struct FuncDecl {
     // 嵌套函数静态链
     pub is_nested: bool,              // 是否是嵌套函数
     pub upvars: Vec<(String, i32)>,   // 从外层捕获的变量: (name, offset_in_parent_frame)
+    pub is_old_style: bool,           // K&R 风格定义
+    pub format_kind: Option<String>,  // __attribute__((format(printf, ...)))
+    pub format_string_idx: Option<u32>,
+    pub format_first_arg: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

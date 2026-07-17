@@ -113,9 +113,13 @@ pub fn emit(
                     &cg.rodata,
                     &cg.data_section,
                     cg.bss_size,
+                    &cg.tdata_section,
+                    cg.tbss_size,
                     cg.text_align,
                     cg.data_align,
                     cg.bss_align,
+                    cg.tdata_align,
+                    cg.tbss_align,
                     &cg.symbols,
                     &cg.relocations,
                     &cg.extra_sections,
@@ -123,7 +127,15 @@ pub fn emit(
                     &cg.extra_rela_sections,
                 )
             } else {
-                elf::build_elf_x86_64(&cg.code, cg.entry)
+                elf::build_elf_exec_x86_64(
+                    &cg.code,
+                    cg.entry,
+                    cg.exec_text_size,
+                    cg.rodata.len() as u64,
+                    cg.tdata_section.len() as u64,
+                    cg.tbss_size,
+                    &cg.symbols,
+                )
             }
         }
         crate::cli::Arch::AArch64 => {

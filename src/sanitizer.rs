@@ -232,6 +232,10 @@ mod tests {
             alias_name: None,
             is_nested: false,
             upvars: vec![],
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
         }
     }
 
@@ -331,6 +335,10 @@ mod tests {
                 alias_name: None,
                 is_nested: false,
                 upvars: vec![],
+                is_old_style: false,
+                format_kind: None,
+                format_string_idx: None,
+                format_first_arg: None,
             })],
         };
         instrument_program(&mut prog, SanitizerFlags { kasan: true, kcov: true, ..Default::default() });

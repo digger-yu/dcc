@@ -73,7 +73,8 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                   system_paths: &[PathBuf],
                   defines: &[(String, Option<String>)],
                   std_mode: StdMode,
-                  force_includes: &[String]) -> (String, Vec<Diagnostic>, Vec<String>) {
+                  force_includes: &[String],
+                  freestanding: bool) -> (String, Vec<Diagnostic>, Vec<String>) {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
         Err(e) => {
@@ -221,6 +222,28 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     // Linux 内核 atomic-instrumented.h 等同名 inline 函数会被误展开
     // （如 atomic_fetch_add(i,v) → __atomic_fetch_add(i,v,5) 破坏声明）。
     // __atomic_* 内建与 __ATOMIC_* 常量仍保留，供显式调用。
+    // hosted 模式（非 -ffreestanding）预置常用 C11 atomic 宏：
+    if !freestanding {
+        let atomic_macros: &[(&str, &[&str], &str)] = &[
+            ("atomic_store", &["obj", "val"], "__atomic_store_n(obj, val, __ATOMIC_SEQ_CST)"),
+            ("atomic_load", &["obj"], "__atomic_load_n(obj, __ATOMIC_SEQ_CST)"),
+            ("atomic_exchange", &["obj", "val"], "__atomic_exchange_n(obj, val, __ATOMIC_SEQ_CST)"),
+            ("atomic_fetch_add", &["obj", "val"], "__atomic_fetch_add(obj, val, __ATOMIC_SEQ_CST)"),
+            ("atomic_fetch_sub", &["obj", "val"], "__atomic_fetch_sub(obj, val, __ATOMIC_SEQ_CST)"),
+            ("atomic_fetch_and", &["obj", "val"], "__atomic_fetch_and(obj, val, __ATOMIC_SEQ_CST)"),
+            ("atomic_fetch_or", &["obj", "val"], "__atomic_fetch_or(obj, val, __ATOMIC_SEQ_CST)"),
+            ("atomic_fetch_xor", &["obj", "val"], "__atomic_fetch_xor(obj, val, __ATOMIC_SEQ_CST)"),
+            ("atomic_compare_exchange_strong", &["obj", "expected", "desired"],
+                "__atomic_compare_exchange_n(obj, expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)"),
+        ];
+        for (name, params, body) in atomic_macros {
+            pp.macros.insert(name.to_string(), MacroDef {
+                params: Some(params.iter().map(|s| s.to_string()).collect()),
+                body: body.to_string(),
+                variadic: false,
+            });
+        }
+    }
     // 内存序别名 (memory_order_xxx 已在上面定义)
     // __attribute__: 不定义为宏, 让 token 透传到解析器处理
     // 解析器会识别 __attribute__ 并处理 vector_size 等属性

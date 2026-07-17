@@ -6,7 +6,7 @@ use crate::ast::*;
 use crate::target::Target;
 use crate::codegen::elf::{ElfSym, ElfRela, ElfSection, R_X86_64_PC32, R_X86_64_PLT32,
     R_X86_64_64, R_X86_64_32,
-    STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_NOTYPE, STT_FUNC, STT_OBJECT, STT_SECTION, SHN_UNDEF,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_NOTYPE, STT_FUNC, STT_OBJECT, STT_TLS, STT_SECTION, SHN_UNDEF,
     STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
     SHT_PROGBITS, SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR};
 use crate::codegen::elf;
@@ -49,6 +49,12 @@ pub struct Codegen {
     pending_data_rels: Vec<(u64, String)>,  // (disp32_pos, var_name) - 全局变量重定位
     pub data_section: Vec<u8>,    // .data 节 (已初始化全局变量)
     pub bss_size: u64,            // .bss 大小
+    pub tdata_section: Vec<u8>,   // .tdata (TLS 初始化)
+    pub tbss_size: u64,           // .tbss (TLS 未初始化)
+    pub tdata_align: u64,
+    pub tbss_align: u64,
+    pub exec_text_size: u64,      // ET_EXEC 模式下 .text 大小
+    pending_tls_rels: Vec<(u64, String)>, // TLS fs 相对引用
     pub text_align: u64,
     pub data_align: u64,
     pub bss_align: u64,
@@ -108,7 +114,7 @@ struct PendingJump { at: u64, target: String, kind: JumpKind }
 #[derive(PartialEq)]
 enum JumpKind { Jmp, Je, Jne, Jl, Jle, Jg, Jge, Jb, Ja, Jns }
 #[derive(Clone)]
-struct GlobalVar { offset: u64, size: usize, ty: Type, init: Option<Vec<u8>>, section: u16 }
+struct GlobalVar { offset: u64, size: usize, ty: Type, init: Option<Vec<u8>>, section: u16, is_tls: bool }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AbiClass { Integer, Sse, Memory }
@@ -271,6 +277,7 @@ struct ParallelGlobalSnap {
     offset: u64,
     size: usize,
     section: u16,
+    is_tls: bool,
 }
 
 #[derive(Clone)]
@@ -316,6 +323,8 @@ impl Codegen {
                relocatable: false, function_sections: false, symbols: vec![], sym_index: HashMap::new(),
                relocations: vec![], pending_func_rels: vec![], pending_data_rels: vec![],
                data_section: vec![], bss_size: 0,
+               tdata_section: vec![], tbss_size: 0, tdata_align: 8, tbss_align: 8,
+               exec_text_size: 0, pending_tls_rels: vec![],
                text_align: 16, data_align: 8, bss_align: 8,
                extra_sections: vec![],
                custom_sec_indices: HashMap::new(), func_sizes: HashMap::new(),
@@ -601,8 +610,22 @@ impl Codegen {
         // 修补 RIP-relative 全局变量引用 (mov/lea reg, [RIP+disp32])
         for (disp32_pos, var_name) in self.pending_data_rels.drain(..) {
             if let Some(g) = self.globals.get(&var_name) {
+                if g.is_tls {
+                    continue;
+                }
                 let var_vaddr = rodata_start + g.offset;
-                let rip = self.entry + disp32_pos + 4; // disp32 后紧跟 4 字节
+                let rip = self.entry + disp32_pos + 4;
+                let rel = (var_vaddr as i64) - (rip as i64);
+                let p = disp32_pos as usize;
+                self.code[p..p+4].copy_from_slice(&(rel as i32).to_le_bytes());
+            }
+        }
+        // 修补 TLS 变量 RIP-relative 引用（ET_EXEC .tdata 模板）
+        let tdata_start = rodata_start + self.rodata.len() as u64;
+        for (disp32_pos, var_name) in self.pending_tls_rels.drain(..) {
+            if let Some(g) = self.globals.get(&var_name) {
+                let var_vaddr = tdata_start + g.offset;
+                let rip = self.entry + disp32_pos + 4;
                 let rel = (var_vaddr as i64) - (rip as i64);
                 let p = disp32_pos as usize;
                 self.code[p..p+4].copy_from_slice(&(rel as i32).to_le_bytes());
@@ -647,63 +670,48 @@ impl Codegen {
     /// ET_EXEC 模式: 生成可直接执行的 ELF
     fn compile_exec(&mut self, prog: &Program) {
         self.entry = 0x400000 + 64 + 56;
-        // 收集全局变量到 rodata (声明顺序分配偏移, 直接写入初始化数据)
+        // 收集全局变量 → rodata / .tdata(TLS)
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
+                if v.is_extern {
+                    continue;
+                }
                 let sz = v.ty.size().max(1);
                 let align = v.alignment.unwrap_or(v.ty.align()).max(1);
+                if v.is_thread_local {
+                    self.tdata_align = self.tdata_align.max(align as u64);
+                    let off = (self.tdata_section.len() + align - 1) & !(align - 1);
+                    while self.tdata_section.len() < off { self.tdata_section.push(0); }
+                    let offset = self.tdata_section.len() as u64;
+                    let init_data = Self::eval_global_init(self, v, sz, false);
+                    if let Some(ref data) = init_data {
+                        self.tdata_section.extend_from_slice(data);
+                        for _ in data.len()..sz { self.tdata_section.push(0); }
+                    } else {
+                        for _ in 0..sz { self.tdata_section.push(0); }
+                    }
+                    let sec = if v.init.is_some() { 5u16 } else { 6u16 };
+                    if v.init.is_none() {
+                        self.tbss_size = self.tbss_size.max(offset + sz as u64);
+                    }
+                    self.globals.insert(v.name.name.clone(), GlobalVar {
+                        offset, size: sz, ty: v.ty.clone(), init: init_data, section: sec, is_tls: true,
+                    });
+                    continue;
+                }
                 let off = (self.rodata.len() + align - 1) & !(align - 1);
                 while self.rodata.len() < off { self.rodata.push(0); }
                 let offset = self.rodata.len() as u64;
-                let init_data = if let Some(init) = &v.init {
-                    match init {
-                        Expr::Int { v, .. } => Some(v.to_le_bytes()[..sz].to_vec()),
-                        Expr::String { data, .. } => Some(data.clone()),
-                        Expr::InitList { inits, .. } => {
-                            let base = self.rodata.len() as u64;
-                            self.gen_global_init_list(&v.ty, inits, Some((base, None)))
-                        },
-                        Expr::AddrOf { e, .. } => {
-                            // P1-6: 全局变量初始化中的符号引用 (&other_var / &arr[i])
-                            match e.as_ref() {
-                                Expr::Ident { name: ref_name, .. } => {
-                                    let mut bytes = vec![0u8; 8];
-                                    if let Some(ref g) = self.globals.get(&ref_name.name) {
-                                        let vaddr = self.entry + g.offset;
-                                        bytes = vaddr.to_le_bytes().to_vec();
-                                    }
-                                    Some(bytes)
-                                }
-                                Expr::Index { arr, idx, ty: elem_ty, .. } => {
-                                    if let (Expr::Ident { name: ref_name, .. }, Ok(i)) =
-                                        (arr.as_ref(), const_eval::eval(idx))
-                                    {
-                                        let mut bytes = vec![0u8; 8];
-                                        if let Some(ref g) = self.globals.get(&ref_name.name) {
-                                            let vaddr = self.entry + g.offset
-                                                + (i as u64) * elem_ty.size().max(1) as u64;
-                                            bytes = vaddr.to_le_bytes().to_vec();
-                                        }
-                                        Some(bytes)
-                                    } else {
-                                        None
-                                    }
-                                }
-                                _ => None,
-                            }
-                        }
-                        _ => const_eval::eval(init).ok()
-                            .map(|value| value.to_le_bytes()[..sz].to_vec()),
-                    }
-                } else { None };
-                // 直接写入初始化数据 (或零填充)
+                let init_data = Self::eval_global_init(self, v, sz, true);
                 if let Some(ref data) = init_data {
                     self.rodata.extend_from_slice(data);
                     for _ in data.len()..sz { self.rodata.push(0); }
                 } else {
                     for _ in 0..sz { self.rodata.push(0); }
                 }
-                self.globals.insert(v.name.name.clone(), GlobalVar { offset, size: sz, ty: v.ty.clone(), init: init_data, section: 0 });
+                self.globals.insert(v.name.name.clone(), GlobalVar {
+                    offset, size: sz, ty: v.ty.clone(), init: init_data, section: 1, is_tls: false,
+                });
             }
         }
         let _rodata_size = self.rodata.len();
@@ -741,9 +749,99 @@ impl Codegen {
         self.emit_functions(prog);
         // 对齐 code 到 8 字节 (ELF 的 .rodata 也按 8 对齐)
         while self.code.len() % 8 != 0 { self.code.push(0); }
-        let rodata_start = self.entry + self.code.len() as u64;
+        self.exec_text_size = self.code.len() as u64;
+        let rodata_start = self.entry + self.exec_text_size;
         self.code.extend_from_slice(&self.rodata);
+        self.code.extend_from_slice(&self.tdata_section);
+        self.collect_exec_symbols(prog);
         self.resolve(rodata_start);
+    }
+
+    /// ET_EXEC：设置 FS 基址指向 TLS 模板（可写 PT_LOAD 段内）
+    fn emit_tls_fs_setup(&mut self) {
+        // lea rsi, [rip+disp32]  → TLS 模板地址
+        let lea_pos = self.pos() + 3;
+        self.emit(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]);
+        self.pending_tls_rels.push((lea_pos, "__dcc_tls_base".to_string()));
+        // mov rdi, 0x1002 (ARCH_SET_FS)
+        self.emit(&[0x48, 0xC7, 0xC7, 0x02, 0x00, 0x01, 0x00]);
+        // mov rax, 158; syscall
+        self.emit(&[0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00]);
+        self.emit(&[0x0F, 0x05]);
+    }
+
+    /// 收集 ET_EXEC 符号表（函数 + 全局变量）
+    fn collect_exec_symbols(&mut self, prog: &Program) {
+        self.symbols.clear();
+        self.sym_index.clear();
+        self.symbols.push(ElfSym {
+            name: String::new(), section: SHN_UNDEF, value: 0, size: 0,
+            bind: STB_LOCAL, ty: STT_NOTYPE, visibility: STV_DEFAULT,
+        });
+        if !self.rodata.is_empty() {
+            self.symbols.push(ElfSym {
+                name: ".rodata".into(), section: 2, value: 0, size: self.rodata.len() as u64,
+                bind: STB_LOCAL, ty: STT_SECTION, visibility: STV_DEFAULT,
+            });
+        }
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                if v.is_extern && v.init.is_none() {
+                    continue;
+                }
+                let Some(g) = self.globals.get(&v.name.name) else { continue };
+                let ty = if g.is_tls { STT_TLS } else { STT_OBJECT };
+                self.symbols.push(ElfSym {
+                    name: v.name.name.clone(), section: g.section, value: g.offset, size: g.size as u64,
+                    bind: if v.is_static { STB_LOCAL } else { STB_GLOBAL },
+                    ty, visibility: Self::parse_visibility(&v.visibility),
+                });
+            }
+        }
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_none() {
+                    continue;
+                }
+                if let Some(&off) = self.labels.get(&f.name.name) {
+                    let sz = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                    self.symbols.push(ElfSym {
+                        name: f.name.name.clone(), section: 1, value: off, size: sz,
+                        bind: if f.is_static { STB_LOCAL } else { STB_GLOBAL },
+                        ty: STT_FUNC, visibility: Self::parse_visibility(&f.visibility),
+                    });
+                }
+            }
+        }
+        for (i, sym) in self.symbols.iter().enumerate() {
+            if !sym.name.is_empty() {
+                self.sym_index.insert(sym.name.clone(), i as u32);
+            }
+        }
+    }
+
+    fn eval_global_init(&mut self, v: &VarDecl, sz: usize, use_rodata: bool) -> Option<Vec<u8>> {
+        let init = v.init.as_ref()?;
+        match init {
+            Expr::Int { v, .. } => Some(v.to_le_bytes()[..sz].to_vec()),
+            Expr::String { data, .. } => Some(data.clone()),
+            Expr::InitList { inits, .. } => {
+                let base = if use_rodata { self.rodata.len() } else { self.tdata_section.len() } as u64;
+                self.gen_global_init_list(&v.ty, inits, Some((base, None)))
+            }
+            Expr::AddrOf { e, .. } => match e.as_ref() {
+                Expr::Ident { name: ref_name, .. } => {
+                    if let Some(ref g) = self.globals.get(&ref_name.name) {
+                        let vaddr = self.entry + g.offset;
+                        Some(vaddr.to_le_bytes().to_vec())
+                    } else {
+                        Some(vec![0u8; 8])
+                    }
+                }
+                _ => None,
+            },
+            _ => const_eval::eval(init).ok().map(|value| value.to_le_bytes()[..sz].to_vec()),
+        }
     }
 
     /// ET_REL 模式: 生成可重定位 .o 文件
@@ -756,7 +854,36 @@ impl Codegen {
                 let align = v.alignment.unwrap_or(v.ty.align()).max(1);
                 if v.is_extern && v.init.is_none() {
                     self.globals.insert(v.name.name.clone(), GlobalVar {
-                        offset: 0, size: sz, ty: v.ty.clone(), init: None, section: SHN_UNDEF,
+                        offset: 0, size: sz, ty: v.ty.clone(), init: None, section: SHN_UNDEF, is_tls: false,
+                    });
+                    continue;
+                }
+                if v.is_thread_local {
+                    let initialized = v.init.is_some();
+                    if initialized {
+                        self.tdata_align = self.tdata_align.max(align as u64);
+                    } else {
+                        self.tbss_align = self.tbss_align.max(align as u64);
+                    }
+                    let offset = if initialized {
+                        let off = (self.tdata_section.len() + align - 1) & !(align - 1);
+                        while self.tdata_section.len() < off { self.tdata_section.push(0); }
+                        self.tdata_section.len() as u64
+                    } else {
+                        let off = ((self.tbss_size + align as u64 - 1) / align as u64) * align as u64;
+                        self.tbss_size = off + sz as u64;
+                        off
+                    };
+                    if let Some(init) = &v.init {
+                        if let Ok(value) = const_eval::eval(init) {
+                            self.tdata_section.extend_from_slice(&value.to_le_bytes()[..sz]);
+                        } else if let Expr::Int { v: iv, .. } = init {
+                            self.tdata_section.extend_from_slice(&iv.to_le_bytes()[..sz]);
+                        }
+                    }
+                    self.globals.insert(v.name.name.clone(), GlobalVar {
+                        offset, size: sz, ty: v.ty.clone(), init: None,
+                        section: if initialized { 5 } else { 6 }, is_tls: true,
                     });
                     continue;
                 }
@@ -840,7 +967,7 @@ impl Codegen {
                         for _ in 0..sz { self.extra_sections[sec_idx].data.push(0); }
                     }
                     self.globals.insert(v.name.name.clone(), GlobalVar {
-                        offset, size: sz, ty: v.ty.clone(), init: None, section: (sec_idx + 5) as u16,
+                        offset, size: sz, ty: v.ty.clone(), init: None, section: (sec_idx + 7) as u16, is_tls: false,
                     });
                     continue;
                 }
@@ -924,7 +1051,7 @@ impl Codegen {
                 }
                 self.globals.insert(v.name.name.clone(), GlobalVar {
                     offset, size: sz, ty: v.ty.clone(), init: None,
-                    section: if initialized { 3 } else { 4 },
+                    section: if initialized { 3 } else { 4 }, is_tls: false,
                 });
             }
         }
@@ -970,7 +1097,7 @@ impl Codegen {
                         self.extra_sections[sec_idx].data.extend_from_slice(&code_slice);
                         // 暂时保留 .text 原代码；resolve() 修补本地跳转后会重新复制。
                         custom_func_ranges.push((func_start, func_size, sec_idx, sec_off));
-                        custom_func_offsets.insert(f.name.name.clone(), ((sec_idx + 5) as u16, sec_off));
+                        custom_func_offsets.insert(f.name.name.clone(), ((sec_idx + 7) as u16, sec_off));
                     }
                 }
             }
@@ -1013,7 +1140,7 @@ impl Codegen {
                     let code_slice = self.code[func_start as usize..(func_start + func_size) as usize].to_vec();
                     self.extra_sections[sec_idx].data.extend_from_slice(&code_slice);
                     custom_func_ranges.push((func_start, func_size, sec_idx, sec_off));
-                    custom_func_offsets.insert(f.name.name.clone(), ((sec_idx + 5) as u16, sec_off));
+                    custom_func_offsets.insert(f.name.name.clone(), ((sec_idx + 7) as u16, sec_off));
                 }
             }
         }
@@ -1058,7 +1185,7 @@ impl Codegen {
                     name: v.name.name.clone(), section, value: g.offset,
                     size: g.size as u64,
                     bind,
-                    ty: STT_OBJECT,
+                    ty: if g.is_tls { STT_TLS } else { STT_OBJECT },
                     visibility: Self::parse_visibility(&v.visibility),
                 };
                 if v.is_static { local_syms.push(sym); } else { global_syms.push(sym); }
@@ -1254,7 +1381,7 @@ impl Codegen {
             self.extra_rela_sections.push(elf::ExtraRelaSection {
                 name: format!(".rela{}", self.extra_sections[sec_idx].name),
                 relocations,
-                target_sec_index: 5 + sec_idx as u32,
+                target_sec_index: 7 + sec_idx as u32,
             });
         }
 
@@ -1270,7 +1397,7 @@ impl Codegen {
             }
         }
         if !constructors.is_empty() || !destructors.is_empty() {
-            let base_sec_idx = 5 + self.extra_sections.len() as u32;
+            let base_sec_idx = 7 + self.extra_sections.len() as u32;
             // .init_array
             if !constructors.is_empty() {
                 let init_array_sec_idx = base_sec_idx;
@@ -1347,7 +1474,7 @@ impl Codegen {
         for (sec_idx, relocations) in custom_relas {
             if relocations.is_empty() { continue; }
             let rela_name = format!(".rela{}", self.extra_sections[sec_idx].name);
-            let target_sec_index = 5 + sec_idx as u32;
+            let target_sec_index = 7 + sec_idx as u32;
             if let Some(existing) = self.extra_rela_sections.iter_mut()
                 .find(|r| r.target_sec_index == target_sec_index) {
                 existing.relocations.extend(relocations);
@@ -1437,6 +1564,7 @@ impl Codegen {
                     offset: v.offset,
                     size: v.size,
                     section: v.section,
+                    is_tls: v.is_tls,
                 })
             }).collect(),
             variadic_funcs: self.variadic_funcs.clone(),
@@ -1463,6 +1591,7 @@ impl Codegen {
                 ty: Type::Int,
                 init: None,
                 section: snap.section,
+                is_tls: snap.is_tls,
             });
         }
         cg.variadic_funcs = ctx.variadic_funcs;
@@ -4570,43 +4699,46 @@ impl Codegen {
     /// 全局变量 RIP-relative 加载: reg = [global_var]
     /// 根据变量实际大小选择操作数尺寸 (1/2/4/8 字节)
     fn emit_global_load(&mut self, reg: u8, name: &str) {
-        let sz = self.globals.get(name).map_or(8, |g| g.size);
+        let (sz, is_tls, _off) = self.globals.get(name)
+            .map(|g| (g.size, g.is_tls, g.offset))
+            .unwrap_or((8, false, 0));
+        let tls_exec = is_tls && !self.relocatable;
         let pref = if reg >= 8 { 0x41 } else { 0x00 }; // REX.R for high reg
         match sz {
             1 => {
-                // movzx reg32, byte [rip+disp32]: 0F B6 /r [disp32]
                 let pos = self.pos() + 3 + if pref != 0 { 1 } else { 0 };
                 let modrm = 0x05 | ((reg & 7) << 3);
                 let mut b = if pref != 0 { vec![pref] } else { vec![] };
                 b.extend_from_slice(&[0x0F, 0xB6, modrm, 0,0,0,0]);
                 self.emit(&b);
-                self.pending_data_rels.push((pos, name.to_string()));
+                if tls_exec { self.pending_tls_rels.push((pos, name.to_string())); }
+                else { self.pending_data_rels.push((pos, name.to_string())); }
             }
             2 => {
-                // movzx reg32, word [rip+disp32]: 0F B7 /r [disp32]
                 let pos = self.pos() + 3 + if pref != 0 { 1 } else { 0 };
                 let modrm = 0x05 | ((reg & 7) << 3);
                 let mut b = if pref != 0 { vec![pref] } else { vec![] };
                 b.extend_from_slice(&[0x0F, 0xB7, modrm, 0,0,0,0]);
                 self.emit(&b);
-                self.pending_data_rels.push((pos, name.to_string()));
+                if tls_exec { self.pending_tls_rels.push((pos, name.to_string())); }
+                else { self.pending_data_rels.push((pos, name.to_string())); }
             }
             4 => {
-                // 32-bit load (zero-extends to 64-bit): 8B /r [disp32]
                 let pos = self.pos() + 2 + if pref != 0 { 1 } else { 0 };
                 let modrm = 0x05 | ((reg & 7) << 3);
                 let mut b = if pref != 0 { vec![pref] } else { vec![] };
                 b.extend_from_slice(&[0x8B, modrm, 0,0,0,0]);
                 self.emit(&b);
-                self.pending_data_rels.push((pos, name.to_string()));
+                if tls_exec { self.pending_tls_rels.push((pos, name.to_string())); }
+                else { self.pending_data_rels.push((pos, name.to_string())); }
             }
             _ => {
-                // 64-bit load: REX.W 8B /r [disp32]
                 let pos = self.pos() + 3;
                 let rex = if reg >= 8 { 0x4C } else { 0x48 };
                 let modrm = 0x05 | ((reg & 7) << 3);
                 self.emit(&[rex, 0x8B, modrm, 0,0,0,0]);
-                self.pending_data_rels.push((pos, name.to_string()));
+                if tls_exec { self.pending_tls_rels.push((pos, name.to_string())); }
+                else { self.pending_data_rels.push((pos, name.to_string())); }
             }
         }
     }
@@ -4614,38 +4746,40 @@ impl Codegen {
     /// 全局变量 RIP-relative 存储: [global_var] = reg
     /// 根据变量实际大小选择操作数尺寸 (1/2/4/8 字节)
     fn emit_global_store(&mut self, reg: u8, name: &str) {
-        let sz = self.globals.get(name).map_or(8, |g| g.size);
+        let (sz, is_tls, _off) = self.globals.get(name)
+            .map(|g| (g.size, g.is_tls, g.offset))
+            .unwrap_or((8, false, 0));
+        let tls_exec = is_tls && !self.relocatable;
         let modrm = 0x05 | ((reg & 7) << 3);
         match sz {
             1 => {
-                // byte store: 88 /r [disp32]
-                // REX needed for registers 4-7 (spl/bpl/sil/dil)
                 let pos = self.pos() + 2 + if reg >= 4 { 1 } else { 0 };
                 if reg >= 4 {
                     self.emit(&[0x40, 0x88, modrm, 0,0,0,0]);
                 } else {
                     self.emit(&[0x88, modrm, 0,0,0,0]);
                 }
-                self.pending_data_rels.push((pos, name.to_string()));
+                if tls_exec { self.pending_tls_rels.push((pos, name.to_string())); }
+                else { self.pending_data_rels.push((pos, name.to_string())); }
             }
             2 => {
-                // word store: 66 89 /r [disp32]
                 let pos = self.pos() + 3;
                 self.emit(&[0x66, 0x89, modrm, 0,0,0,0]);
-                self.pending_data_rels.push((pos, name.to_string()));
+                if tls_exec { self.pending_tls_rels.push((pos, name.to_string())); }
+                else { self.pending_data_rels.push((pos, name.to_string())); }
             }
             4 => {
-                // 32-bit store: 89 /r [disp32]
                 let pos = self.pos() + 2;
                 self.emit(&[0x89, modrm, 0,0,0,0]);
-                self.pending_data_rels.push((pos, name.to_string()));
+                if tls_exec { self.pending_tls_rels.push((pos, name.to_string())); }
+                else { self.pending_data_rels.push((pos, name.to_string())); }
             }
             _ => {
-                // 64-bit store: REX.W 89 /r [disp32]
                 let pos = self.pos() + 3;
                 let rex = if reg >= 8 { 0x4C } else { 0x48 };
                 self.emit(&[rex, 0x89, modrm, 0,0,0,0]);
-                self.pending_data_rels.push((pos, name.to_string()));
+                if tls_exec { self.pending_tls_rels.push((pos, name.to_string())); }
+                else { self.pending_data_rels.push((pos, name.to_string())); }
             }
         }
     }

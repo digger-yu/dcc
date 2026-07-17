@@ -33,6 +33,7 @@ pub const SHT_NOBITS: u32 = 8;
 pub const SHF_ALLOC: u32 = 2;
 pub const SHF_EXECINSTR: u32 = 4;
 pub const SHF_WRITE: u32 = 1;
+pub const SHF_TLS: u32 = 0x400;
 pub const SHF_INFO_LINK: u32 = 0x40;
 
 // 符号绑定
@@ -51,6 +52,7 @@ pub const STT_NOTYPE: u8 = 0;
 pub const STT_FUNC: u8 = 2;
 pub const STT_SECTION: u8 = 3;
 pub const STT_OBJECT: u8 = 1;
+pub const STT_TLS: u8 = 6;
 
 // 特殊节索引
 pub const SHN_UNDEF: u16 = 0;
@@ -156,6 +158,154 @@ pub fn build_elf_x86_64(code: &[u8], entry: u64) -> Vec<u8> {
 
     // ===== Code =====
     out.extend_from_slice(code);
+    out
+}
+
+/// ET_EXEC + 节头表 / 符号表（供 readelf -s 等工具使用）
+pub fn build_elf_exec_x86_64(
+    image: &[u8],
+    entry: u64,
+    text_size: u64,
+    rodata_size: u64,
+    tdata_size: u64,
+    tbss_size: u64,
+    symbols: &[ElfSym],
+) -> Vec<u8> {
+    let hdr = 64 + 56;
+    let p_vaddr = 0x400000u64;
+
+    let mut shstr = vec![0u8];
+    let mut names: Vec<&str> = vec![".text"];
+    if rodata_size > 0 {
+        names.push(".rodata");
+    }
+    if tdata_size > 0 {
+        names.push(".tdata");
+    }
+    if tbss_size > 0 {
+        names.push(".tbss");
+    }
+    names.extend_from_slice(&[".symtab", ".strtab", ".shstrtab"]);
+    let mut name_off = vec![0u32];
+    for n in &names {
+        name_off.push(shstr.len() as u32);
+        shstr.extend_from_slice(n.as_bytes());
+        shstr.push(0);
+    }
+
+    let (strtab, sym_name_offsets) = build_strtab(symbols);
+    let symtab_data = build_symtab(symbols, &sym_name_offsets);
+    let n_locals = symbols.iter().filter(|s| s.bind == STB_LOCAL).count() as u32;
+
+    let sh_symtab = {
+        let mut idx = 2u16;
+        if rodata_size > 0 { idx += 1; }
+        if tdata_size > 0 { idx += 1; }
+        if tbss_size > 0 { idx += 1; }
+        idx
+    };
+    let sh_strtab = sh_symtab + 1;
+    let sh_shstrtab = sh_strtab + 1;
+    let shnum = sh_shstrtab + 1;
+
+    let mut out = Vec::new();
+    // 占位 ELF 头 + Program Header
+    out.resize(hdr, 0);
+
+    let image_off = hdr as u64;
+    out.extend_from_slice(image);
+
+    let symtab_off = out.len() as u64;
+    out.extend_from_slice(&symtab_data);
+    let strtab_off = out.len() as u64;
+    out.extend_from_slice(&strtab);
+    let shstrtab_off = out.len() as u64;
+    out.extend_from_slice(&shstr);
+
+    let shoff = align(out.len() as u64, 8);
+    pad_to(&mut out, shoff as usize);
+    write_sh_null(&mut out);
+
+    let mut vaddr = p_vaddr + hdr as u64;
+    let mut file_off = image_off;
+    write_section_header(
+        &mut out, name_off[1], SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
+        vaddr, file_off, text_size, 0, 0, 16, 0,
+    );
+    vaddr += text_size;
+    file_off += text_size;
+
+    let mut ni = 2usize;
+    if rodata_size > 0 {
+        write_section_header(
+            &mut out, name_off[ni], SHT_PROGBITS, SHF_ALLOC,
+            vaddr, file_off, rodata_size, 0, 0, 8, 0,
+        );
+        vaddr += rodata_size;
+        file_off += rodata_size;
+        ni += 1;
+    }
+    if tdata_size > 0 {
+        write_section_header(
+            &mut out, name_off[ni], SHT_PROGBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
+            vaddr, file_off, tdata_size, 0, 0, 8, 0,
+        );
+        vaddr += tdata_size;
+        file_off += tdata_size;
+        ni += 1;
+    }
+    if tbss_size > 0 {
+        write_section_header(
+            &mut out, name_off[ni], SHT_NOBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
+            vaddr, 0, tbss_size, 0, 0, 8, 0,
+        );
+        ni += 1;
+    }
+
+    write_section_header(
+        &mut out, name_off[ni], SHT_SYMTAB, 0,
+        0, symtab_off, symtab_data.len() as u64, sh_strtab as u32, n_locals, 8, 24,
+    );
+    ni += 1;
+    write_section_header(
+        &mut out, name_off[ni], SHT_STRTAB, 0,
+        0, strtab_off, strtab.len() as u64, 0, 0, 1, 0,
+    );
+    ni += 1;
+    write_section_header(
+        &mut out, name_off[ni], SHT_STRTAB, 0,
+        0, shstrtab_off, shstr.len() as u64, 0, 0, 1, 0,
+    );
+
+    // 回填 ELF 头与 Program Header
+    out[0..4].copy_from_slice(&ELFMAG);
+    out[4] = ELFCLASS64;
+    out[5] = ELFDATA2LSB;
+    out[6] = EV_CURRENT;
+    out[0x10..0x12].copy_from_slice(&ET_EXEC.to_le_bytes());
+    out[0x12..0x14].copy_from_slice(&EM_X86_64.to_le_bytes());
+    out[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
+    out[0x18..0x20].copy_from_slice(&entry.to_le_bytes());
+    out[0x20..0x28].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+    out[0x28..0x30].copy_from_slice(&shoff.to_le_bytes());
+    out[0x34..0x36].copy_from_slice(&64u16.to_le_bytes());
+    out[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+    out[0x38..0x3a].copy_from_slice(&1u16.to_le_bytes());
+    out[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
+    out[0x3c..0x3e].copy_from_slice(&(shnum as u16).to_le_bytes());
+    out[0x3e..0x40].copy_from_slice(&(sh_shstrtab as u16).to_le_bytes());
+
+    let p_filesz = hdr as u64 + image.len() as u64;
+    let p_memsz = p_filesz + tbss_size;
+    out[0x40..0x44].copy_from_slice(&PT_LOAD.to_le_bytes());
+    out[0x44..0x48].copy_from_slice(&7u32.to_le_bytes());
+    out[0x48..0x50].copy_from_slice(&0u64.to_le_bytes());
+    out[0x50..0x58].copy_from_slice(&p_vaddr.to_le_bytes());
+    out[0x58..0x60].copy_from_slice(&p_vaddr.to_le_bytes());
+    out[0x60..0x68].copy_from_slice(&p_filesz.to_le_bytes());
+    out[0x68..0x70].copy_from_slice(&p_memsz.to_le_bytes());
+    out[0x70..0x78].copy_from_slice(&0x1000u64.to_le_bytes());
+
     out
 }
 
@@ -485,9 +635,13 @@ pub fn build_elf_rel_x86_64(
     rodata: &[u8],
     data: &[u8],
     bss_size: u64,
+    tdata: &[u8],
+    tbss_size: u64,
     text_align: u64,
     data_align: u64,
     bss_align: u64,
+    tdata_align: u64,
+    tbss_align: u64,
     symbols: &[ElfSym],
     relocations: &[ElfRela],
     extra_sections: &[ElfSection],
@@ -500,24 +654,26 @@ pub fn build_elf_rel_x86_64(
     // [2] .rodata
     // [3] .data
     // [4] .bss
-    // [5..5+N] extra sections
-    // [5+N..5+N+M] extra rela sections (.rela.init_array etc.)
-    // [5+N+M] .rela.text
-    // [6+N+M] .rela.data
-    // [7+N+M] .symtab
-    // [8+N+M] .strtab
-    // [9+N+M] .shstrtab
+    // [5] .tdata
+    // [6] .tbss
+    // [7..7+N] extra sections
+    // [7+N..7+N+M] extra rela sections
+    // [7+N+M] .rela.text
+    // [8+N+M] .rela.data
+    // [9+N+M] .symtab
+    // [10+N+M] .strtab
+    // [11+N+M] .shstrtab
     let n_extra = extra_sections.len() as u16;
     let n_extra_rela = extra_rela_sections.len() as u16;
-    let _sh_rela: u16 = 5 + n_extra + n_extra_rela;
-    let _sh_rela_data: u16 = 6 + n_extra + n_extra_rela;
-    let sh_symtab: u16 = 7 + n_extra + n_extra_rela;
-    let sh_strtab: u16 = 8 + n_extra + n_extra_rela;
-    let sh_shstrtab: u16 = 9 + n_extra + n_extra_rela;
-    let shnum: u16 = 10 + n_extra + n_extra_rela;
+    let _sh_rela: u16 = 7 + n_extra + n_extra_rela;
+    let _sh_rela_data: u16 = 8 + n_extra + n_extra_rela;
+    let sh_symtab: u16 = 9 + n_extra + n_extra_rela;
+    let sh_strtab: u16 = 10 + n_extra + n_extra_rela;
+    let sh_shstrtab: u16 = 11 + n_extra + n_extra_rela;
+    let shnum: u16 = 12 + n_extra + n_extra_rela;
 
     // 构建 .shstrtab (节名字符串表)
-    let shstrtab = build_shstrtab(extra_sections, extra_rela_sections);
+    let shstrtab = build_shstrtab_with_tls(extra_sections, extra_rela_sections);
 
     // 构建 .strtab (符号名字符串表)
     let (strtab, sym_name_offsets) = build_strtab(symbols);
@@ -551,7 +707,17 @@ pub fn build_elf_rel_x86_64(
     offset += data.len() as u64;
 
     // .bss 不占文件空间
-    let bss_off = align(offset, bss_align.max(1));
+    offset = align(offset, bss_align.max(1));
+    let bss_off = offset;
+    offset += bss_size;
+
+    offset = align(offset, tdata_align.max(1));
+    let tdata_off = offset;
+    offset += tdata.len() as u64;
+
+    offset = align(offset, tbss_align.max(1));
+    let tbss_off = offset;
+    offset += tbss_size;
 
     // 自定义节
     let mut extra_offsets = Vec::with_capacity(extra_sections.len());
@@ -632,6 +798,10 @@ pub fn build_elf_rel_x86_64(
     pad_to(&mut out, data_off as usize);
     out.extend_from_slice(data);
 
+    // ===== .tdata =====
+    pad_to(&mut out, tdata_off as usize);
+    out.extend_from_slice(tdata);
+
     // ===== 自定义节 =====
     for (i, sec) in extra_sections.iter().enumerate() {
         if sec.ty == SHT_NOBITS { continue; }
@@ -690,7 +860,17 @@ pub fn build_elf_rel_x86_64(
         0, bss_off, bss_size, 0, 0, bss_align.max(1), 0,
     );
 
-    // [5..5+N] 自定义节
+    // [5] .tdata
+    write_section_header(&mut out, 26, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
+        0, tdata_off, tdata.len() as u64, 0, 0, tdata_align.max(1), 0,
+    );
+
+    // [6] .tbss
+    write_section_header(&mut out, 33, SHT_NOBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
+        0, tbss_off, tbss_size, 0, 0, tbss_align.max(1), 0,
+    );
+
+    // [7..7+N] 自定义节
     for (i, sec) in extra_sections.iter().enumerate() {
         let name_off = shstrtab_name_offset(extra_sections, i);
         write_section_header(&mut out, name_off, sec.ty, sec.flags,
@@ -710,7 +890,7 @@ pub fn build_elf_rel_x86_64(
     // [.rela.text]
     let extra_names_len: u32 = extra_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
     let extra_rela_names_len: u32 = extra_rela_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
-    let base_off: u32 = 26 + extra_names_len + extra_rela_names_len;
+    let base_off: u32 = 39 + extra_names_len + extra_rela_names_len;
     let rela_text_name_off = base_off;
     let rela_data_name_off = rela_text_name_off + ".rela.text".len() as u32 + 1;
     let symtab_name_off = rela_data_name_off + ".rela.data".len() as u32 + 1;
@@ -752,20 +932,17 @@ fn align(v: u64, a: u64) -> u64 {
     (v + a - 1) & !(a - 1)
 }
 
-/// 构建 .shstrtab: 所有节名的字符串表
-fn build_shstrtab(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection]) -> Vec<u8> {
-    // 布局: \0 .text \0 .rodata \0 .data \0 .bss \0 [extra names...] [extra rela names...] .rela.text \0 .rela.data \0 .symtab \0 .strtab \0 .shstrtab \0
-    let mut s = vec![0u8]; // 初始 \0
-    for name in &[".text", ".rodata", ".data", ".bss"] {
+/// 构建 .shstrtab（含 .tdata / .tbss）
+fn build_shstrtab_with_tls(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection]) -> Vec<u8> {
+    let mut s = vec![0u8];
+    for name in &[".text", ".rodata", ".data", ".bss", ".tdata", ".tbss"] {
         s.extend_from_slice(name.as_bytes());
         s.push(0);
     }
-    // 自定义节名
     for sec in extra_sections {
         s.extend_from_slice(sec.name.as_bytes());
         s.push(0);
     }
-    // 额外 .rela 节名 (放在标准 .rela 名之前)
     for sec in extra_rela_sections {
         s.extend_from_slice(sec.name.as_bytes());
         s.push(0);
@@ -777,10 +954,15 @@ fn build_shstrtab(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRel
     s
 }
 
+/// 构建 .shstrtab: 所有节名的字符串表
+fn build_shstrtab(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection]) -> Vec<u8> {
+    build_shstrtab_with_tls(extra_sections, extra_rela_sections)
+}
+
 /// 计算自定义节名在 .shstrtab 中的偏移
 fn shstrtab_name_offset(extra_sections: &[ElfSection], idx: usize) -> u32 {
-    // 偏移计算: \0(1) + .text\0(6) + .rodata\0(8) + .data\0(6) + .bss\0(5) = 26
-    let mut off = 26u32;
+    // \0(1) + .text\0(6) + .rodata\0(8) + .data\0(6) + .bss\0(5) + .tdata\0(7) + .tbss\0(6) = 39
+    let mut off = 39u32;
     for i in 0..idx {
         off += extra_sections[i].name.len() as u32 + 1;
     }
@@ -789,8 +971,7 @@ fn shstrtab_name_offset(extra_sections: &[ElfSection], idx: usize) -> u32 {
 
 /// 计算额外 .rela 节名在 .shstrtab 中的偏移
 fn shstrtab_extra_rela_name_offset(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection], idx: usize) -> u32 {
-    // 偏移: 26 (base) + extra section names + preceding extra rela names
-    let mut off = 26u32;
+    let mut off = 39u32;
     for sec in extra_sections {
         off += sec.name.len() as u32 + 1;
     }

@@ -110,12 +110,21 @@ error[E0001]: expected ';', got '{'
 
 `-c` / `-r` 使用三个阶段生成 ET_REL：
 
-1. `x86_64.rs` 发射函数机器码，收集 `.rodata`、`.data`、`.bss` 和
-   `section` 属性产生的动态节，同时记录尚未绑定的符号引用。
-2. 按 ELF 规则构造 `STN_UNDEF → LOCAL → GLOBAL/WEAK` 符号表，并把
-   declaration 的 weak/visibility/alignment 信息传递到符号和节布局。
+1. `x86_64.rs` 发射函数机器码，收集 `.rodata`、`.data`、`.bss`、
+   `.tdata`/`.tbss`（`_Thread_local`）和 `section` 属性产生的动态节，
+   同时记录尚未绑定的符号引用。
+2. 按 ELF 规则构造 `STN_UNDEF → LOCAL → GLOBAL/WEAK` 符号表（TLS 用
+   `STT_TLS`），并把 declaration 的 weak/visibility/alignment 信息传递到
+   符号和节布局。
 3. 符号索引稳定后生成 `.rela.text`、`.rela.data` 及动态
    `.rela.<section>`，最后由 `elf.rs` 动态构造 `.shstrtab` 和节头表。
+
+ET_EXEC（无 `-c`）由 `build_elf_exec_x86_64` 附加 `.symtab`/`.strtab`；
+TLS 变量经 `_start` 中 `arch_prctl(ARCH_SET_FS)` 绑定 FS 段。
+
+Driver 在 parse 后运行 `format_check::check_program`（`-Wformat` / `W0003`）。
+未知 typedef 默认 **E0009**；`-fpermissive` 降级为 `int` + **W0002**。
+hosted 模式（非 `-ffreestanding`）预置 C11 `atomic_*` 宏。
 
 自定义代码节中的重定位会从 `.rela.text` 迁移到对应 relocation section；
 未初始化的普通全局对象进入 `.bss`，不占目标文件数据空间。

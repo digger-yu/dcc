@@ -21,6 +21,7 @@ mod lto;
 mod link;
 mod debug;
 mod sanitizer;
+mod format_check;
 mod parser;
 mod codegen;
 mod preproc;

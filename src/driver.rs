@@ -13,6 +13,7 @@ use crate::parser;
 use crate::codegen;
 use crate::ir;
 use crate::sanitizer;
+use crate::format_check;
 use crate::lto;
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // -r 多 .o 可重定位链接
@@ -55,7 +56,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let src = mapped.as_slice();
 
     // 预处理
-    let (preprocessed, mut pp_diags, include_deps) = preproc::preprocess(&src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes);
+    let (preprocessed, mut pp_diags, include_deps) = preproc::preprocess(
+        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+    );
     enrich_diags(&mut pp_diags, &src);
     if !pp_diags.is_empty() {
         for d in &pp_diags { d.print(); }
@@ -71,7 +74,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // 解析
-    let (mut prog, mut diags) = parser::parse(preprocessed.as_bytes(), &file_name);
+    let (mut prog, mut diags) = parser::parse_with_opts(
+        preprocessed.as_bytes(),
+        &file_name,
+        parser::ParseOptions { permissive: cfg.permissive },
+    );
     drop(preprocessed);
     enrich_diags(&mut diags, &src);
     for d in &diags {
@@ -80,6 +87,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
     if diags.iter().any(|d| matches!(d.sev, Severity::Error)) { return Err(diags); }
+
+    for w in format_check::check_program(&prog) {
+        w.print();
+        diags.push(w);
+    }
 
     // sanitizer 插桩（AST 层，在 IR lower 之前）
     sanitizer::instrument_program(&mut prog, cfg.sanitizers);
@@ -208,7 +220,8 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
             crate::diagnostics::Span::point(&file_name, 0, 0))])?;
 
     let (preprocessed, mut pp_diags, _) = preproc::preprocess(
-        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes);
+        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+    );
     enrich_diags(&mut pp_diags, &src);
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         for d in &pp_diags { d.print(); }

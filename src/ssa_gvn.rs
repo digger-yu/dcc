@@ -355,6 +355,7 @@ mod tests {
                             is_unused: false,
                             register_name: None,
                             cleanup_fn: None,
+                            is_thread_local: false,
                         })),
                         BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                             ty: int_ty(),
@@ -370,6 +371,7 @@ mod tests {
                             is_unused: false,
                             register_name: None,
                             cleanup_fn: None,
+                            is_thread_local: false,
                         })),
                     ],
                     span: sp.clone(),
@@ -391,6 +393,10 @@ mod tests {
                 is_unused: false,
                 is_noinline: false,
                 is_always_inline: false,
+                is_old_style: false,
+                format_kind: None,
+                format_string_idx: None,
+                format_first_arg: None,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");

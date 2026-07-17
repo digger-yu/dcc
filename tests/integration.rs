@@ -2033,3 +2033,74 @@ fn lto_single_object_relocatable_link() {
         "single-object -r must preserve .llvm.lto"
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn thread_local_exec_returns_15() {
+    let src = include_str!("fixtures/thread_local.c");
+    let (out, exe) = run_compile_and_run("tls", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 15, "tls counter");
+    let _ = fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn kr_old_style_function() {
+    let src = include_str!("fixtures/kr_func.c");
+    let (out, exe) = run_compile_and_run("kr", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 7);
+    let _ = fs::remove_file(&exe);
+}
+
+#[test]
+fn format_attr_warns_on_missing_arg() {
+    let src = "__attribute__((format(printf, 1, 2))) void p(const char *f, ...);\n\
+               int main(void) { p(\"%d %d\", 1); return 0; }\n";
+    let output = run_syntax_test("fmt-warn", src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("W0003"), "expected format warning: {stderr}");
+}
+
+#[test]
+#[cfg(unix)]
+fn stdatomic_macros_hosted() {
+    let src = include_str!("fixtures/atomic_macros.c");
+    let (out, exe) = run_compile_and_run("atomic", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 7);
+    let _ = fs::remove_file(&exe);
+}
+
+#[test]
+fn permissive_unknown_typedef_warns() {
+    let src = "unknown_t x = 0;\nint main(void) { return (int)x; }\n";
+    let path = std::env::temp_dir().join(format!("dcc-perm-{}.c", std::process::id()));
+    fs::write(&path, src).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fpermissive", "-fsyntax-only"])
+        .arg(&path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "permissive should not error: {stderr}");
+    assert!(stderr.contains("W0002"), "expected permissive warning: {stderr}");
+}
+
+#[test]
+#[cfg(unix)]
+fn exec_elf_has_symtab() {
+    let src = "int g = 1; int main(void) { return g; }\n";
+    let (out, exe) = run_compile_and_run("symtab", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let readelf = Command::new("readelf")
+        .args(["-s", exe.to_str().unwrap()])
+        .output()
+        .expect("readelf");
+    let sym = String::from_utf8_lossy(&readelf.stdout);
+    assert!(sym.contains(" main"), "symtab missing main: {sym}");
+    assert!(sym.contains(" g"), "symtab missing g: {sym}");
+    let _ = fs::remove_file(&exe);
+}

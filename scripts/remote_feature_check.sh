@@ -363,5 +363,23 @@ EOF
 "$DCC" -O0 -o "$TMP/ailo0" "$TMP/ailo0.c" && "$TMP/ailo0"
 check "always_inline_o0" test $? -eq 0
 
+"$DCC" -o "$TMP/tls" tests/fixtures/thread_local.c
+check "thread_local_exec" bash -c "'$TMP/tls'; test \$? -eq 15"
+
+"$DCC" -c -o "$TMP/tls.o" tests/fixtures/thread_local.c
+check "thread_local_tdata" bash -c "readelf -SW '$TMP/tls.o' | grep -q '\\.tdata'"
+
+"$DCC" -o "$TMP/kr" tests/fixtures/kr_func.c
+check "kr_old_style" bash -c "'$TMP/kr'; test \$? -eq 7"
+
+"$DCC" -fsyntax-only tests/fixtures/format_attr.c 2>"$TMP/fmt.err" || true
+check "format_attr_ok" test ! -s "$TMP/fmt.err"
+
+"$DCC" -c -o "$TMP/atom.o" tests/fixtures/atomic_macros.c
+check "stdatomic_macros" test -f "$TMP/atom.o"
+
+"$DCC" -o "$TMP/symexe" tests/fixtures/thread_local.c
+check "exec_symtab" bash -c "readelf -s '$TMP/symexe' | grep -q ' main'"
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0
