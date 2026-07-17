@@ -172,7 +172,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | P2 | 后端 | sizeof(expr) | 已实现 | 计算实际表达式类型大小 |
 | P2 | 后端 | _Alignof 对齐查询 | 已实现 | C11 _Alignof(type)/_Alignof(expr) 返回对齐值 |
 | P3 | 后端 | typeof 运算符 | 已实现 | GNU 扩展 typeof(expr/type) 推导类型，内核广泛使用 |
-| P3 | 后端 | __builtin_constant_p | 已实现 | 判断是否为编译期常量 (当前返回 0) |
+| P3 | 后端 | __builtin_constant_p | 已实现 | parser/opt/codegen 共享 `const_eval::is_constant` |
 | P3 | 后端 | 常量表达式折叠 | 部分实现 | 预处理器 #if 支持，编译器内部无独立优化 pass |
 | P3 | 后端 | __extension__ | 已实现 | GNU 扩展，解析器直接跳过抑制警告 |
 | P3 | 后端 | 语句表达式 ({...}) | 已实现 | GNU 扩展，块内最后表达式值作为结果 |

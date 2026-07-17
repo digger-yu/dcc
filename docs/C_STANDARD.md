@@ -80,7 +80,9 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
   模式 0–3）；未知时 `(size_t)-1`（parser/codegen 双路径折叠）
 - `__builtin_apply` / `__builtin_return` SysV 子集（常量 size、`void (*)(void)` 回调）
 - `__builtin_prefetch` 及 `__builtin_prefetch_*` 变体：void 编译期 no-op
-- 未知 `__builtin_*`：warning + 零值/ud2，不静默链接不存在的 libc 符号
+- 未知 `__builtin_*`：warning + 零值（有返回值）或 **ud2**（void），
+  不静默链接不存在的 libc 符号
+- `__builtin_constant_p`：parser/opt/codegen 共享 `const_eval::is_constant`
 - `__builtin_expect_with_probability` 降级为 `__builtin_expect`
 - `address_space(N)` sparse 注解 (静默跳过)
 - `__attribute__((format))` printf/scanf 格式检查 (静默跳过)
@@ -93,8 +95,9 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `__builtin_va_list` 当前采用 x86-64 简化指针模型。函数序言保存六个
   GP 参数寄存器，可支持常见整数/指针变参；SSE 变参、跨 GP 保存区与
   栈参数边界、超过 8 字节的 `va_arg` 尚不等价于完整 SysV ABI。
-- `noinline` / `always_inline` 当前只保留在 AST 中。后端尚无通用内联
-  优化 pass，因此二者不会改变机器码。
+- `noinline` / `always_inline`：`-O1+` IR 内联 pass 尊重属性；
+  `always_inline` 展开单返回体（含形参替换），`noinline` 永不内联；
+  `-O3` 额外 opportunistic 内联小型 static 零参函数。
 - ELF 的 section/weak/visibility 属性作用于 `-c`/`-r` 可重定位输出；
   直接 ET_EXEC 模式不提供完整符号表语义。
 

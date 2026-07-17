@@ -2153,7 +2153,11 @@ impl Codegen {
                 } else { self.emit(&[0x31, 0xc0]); }
                 self.emit_func_epilogue();
             }
-            Stmt::Expr { e, .. } => { self.gen_expr(e, 0); }
+            Stmt::Expr { e, .. } => {
+                if !self.gen_unknown_builtin_stmt(e) {
+                    self.gen_expr(e, 0);
+                }
+            }
             Stmt::If { cond, then_, else_, .. } => {
                 self.gen_expr(cond, 0); self.emit(&[0x85, 0xc0]);
                 let le = self.fresh_label(); let lend = self.fresh_label();
@@ -2764,10 +2768,15 @@ impl Codegen {
                         // 已成功处理 __builtin_* 函数
                     } else if name.name.starts_with("__builtin_") {
                         eprintln!(
-                            "warning: unsupported __builtin__ function '{}', emitted as zero",
-                            name.name
+                            "warning: unsupported __builtin_ function '{}', emitted as {}",
+                            name.name,
+                            if matches!(ty, Type::Void) { "ud2" } else { "zero" }
                         );
-                        self.mov_imm(dst, 0);
+                        if matches!(ty, Type::Void) {
+                            self.emit(&[0x0F, 0x0B]); // ud2
+                        } else {
+                            self.mov_imm(dst, 0);
+                        }
                     } else {
                         self.emit_sysv_call(Some(&name.name), None, args, sret_off);
                         if sret_off.is_some() {
@@ -5471,6 +5480,28 @@ impl Codegen {
     }
 
     /// __builtin_* 系列内置函数 codegen: 返回 true 表示已处理
+    /// 语句上下文中未识别的 __builtin_*：warning + ud2
+    fn gen_unknown_builtin_stmt(&mut self, e: &Expr) -> bool {
+        let Expr::Call { callee, args, .. } = e else {
+            return false;
+        };
+        let Expr::Ident { name, .. } = callee.as_ref() else {
+            return false;
+        };
+        if !name.name.starts_with("__builtin_") {
+            return false;
+        }
+        if self.gen_builtin(&name.name, args, 0) {
+            return true;
+        }
+        eprintln!(
+            "warning: unsupported __builtin_ function '{}', emitted as ud2",
+            name.name
+        );
+        self.emit(&[0x0F, 0x0B]); // ud2
+        true
+    }
+
     fn gen_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
         match name {
             // __builtin_expect(expr, val): 分支预测提示, 直接返回 expr

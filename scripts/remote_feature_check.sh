@@ -285,5 +285,35 @@ EOF
 "$DCC" -o "$TMP/builtin_apply" "$TMP/builtin_apply.c" && "$TMP/builtin_apply"
 check "builtin_apply_return" test $? -eq 0
 
+cat > "$TMP/constp.c" <<'EOF'
+int main(void) {
+	int x = 1;
+	if (__builtin_constant_p(42) != 1) return 1;
+	if (__builtin_constant_p(x) != 0) return 2;
+	return 0;
+}
+EOF
+"$DCC" -o "$TMP/constp" "$TMP/constp.c" && "$TMP/constp"
+check "builtin_constant_p" test $? -eq 0
+
+cat > "$TMP/inline.c" <<'EOF'
+static int __attribute__((always_inline)) sq(int x) { return x * x; }
+static int __attribute__((noinline)) bump(int x) { return x + 1; }
+int main(void) {
+	return sq(4) == 16 && bump(9) == 10 ? 0 : 1;
+}
+EOF
+"$DCC" -O1 -o "$TMP/inline" "$TMP/inline.c" && "$TMP/inline"
+check "inline_attrs_o1" test $? -eq 0
+
+cat > "$TMP/unk.c" <<'EOF'
+int f(void) { return __builtin_dcc_unknown_xyz(1); }
+void g(void) { __builtin_dcc_unknown_void(); }
+int main(void) { return f(); }
+EOF
+"$DCC" -c -o "$TMP/unk.o" "$TMP/unk.c" 2>"$TMP/unk.err"
+check "unknown_builtin_warn" bash -c "grep -q 'unsupported __builtin_' '$TMP/unk.err' && test -f '$TMP/unk.o'"
+check "unknown_builtin_ud2" bash -c "objdump -d '$TMP/unk.o' | grep -q ud2"
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

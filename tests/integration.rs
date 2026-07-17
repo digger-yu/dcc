@@ -1744,6 +1744,84 @@ fn asm_kernel_extra_compiles_without_nop_fallback() {
     );
 }
 
+/// __builtin_constant_p：编译期常量判定（含 __int128 表达式）
+#[test]
+fn builtin_constant_p_full_run_returns_zero() {
+    let source = include_str!("fixtures/builtin_constant_p_full.c");
+    let (output, exe) = run_compile_and_run("builtin-constant-p-full", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "builtin_constant_p_full should return 0, got {rc}");
+}
+
+/// always_inline / noinline：IR 内联 pass 尊重属性
+#[test]
+fn inline_attrs_o1_run_returns_zero() {
+    let source = include_str!("fixtures/inline_attrs.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-inline-attrs-{}.c", std::process::id()));
+    let exe_path = dir.join(format!("dcc-inline-attrs-{}", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-O1", "-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
+        let rc = run_exe(&exe_path);
+        assert_eq!(rc, 0, "inline_attrs should return 0, got {rc}");
+        let _ = fs::remove_file(exe_path);
+    }
+}
+
+/// 未知 __builtin_*：warning + 零值；void 变体发射 ud2
+#[test]
+#[cfg(unix)]
+fn unknown_builtin_warning_zero_and_ud2() {
+    let source = include_str!("fixtures/unknown_builtin.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-unknown-builtin-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-unknown-builtin-{}.o", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_file(source_path);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("unsupported __builtin_"),
+        "expected warning for unknown builtin: {stderr}"
+    );
+    let disasm = Command::new("objdump")
+        .args(["-d", object_path.to_str().unwrap()])
+        .output()
+        .expect("objdump");
+    let text = String::from_utf8_lossy(&disasm.stdout);
+    assert!(
+        text.contains("ud2"),
+        "void unknown __builtin_ should emit ud2, disasm:\n{text}"
+    );
+    let _ = fs::remove_file(object_path);
+}
+
 /// 预处理残留的 _DECLARE_STATIC_KEY_0 → extern struct static_key_false
 #[test]
 fn static_key_maybe_compiles() {

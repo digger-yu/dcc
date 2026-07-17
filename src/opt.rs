@@ -1,6 +1,8 @@
 // src/opt.rs - typed IR 优化 passes
 // 第一性原理: 优化在 IR 层做数据流/常量传播，后端只负责指令选择。
 
+use std::collections::HashMap;
+
 use crate::ast::{BinOp, Expr, Program, Stmt, BlockItem, Decl, FuncDecl, Block};
 use crate::const_eval;
 use crate::diagnostics::Span;
@@ -12,13 +14,13 @@ pub fn optimize(module: &mut Module, level: u8) {
         return;
     }
     fold_constants(module);
+    if level >= 1 {
+        function_inline(module, level);
+    }
     if level >= 2 {
         prune_dead_stores(module);
         fold_constant_branches(module);
         eliminate_unreachable(module);
-    }
-    if level >= 3 {
-        simple_inline(module);
     }
 }
 
@@ -112,6 +114,23 @@ fn fold_expr(e: Expr) -> Expr {
                 }
             }
             Expr::Unary { op, e, span, ty }
+        }
+        Expr::Call { callee, args, span, ty } => {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                if name.name == "__builtin_constant_p" && args.len() == 1 {
+                    return Expr::Int {
+                        v: const_eval::is_constant(&args[0]) as i128,
+                        span,
+                        ty,
+                    };
+                }
+            }
+            Expr::Call {
+                callee: Box::new(fold_expr(*callee)),
+                args: args.into_iter().map(fold_expr).collect(),
+                span,
+                ty,
+            }
         }
         other => other,
     };
@@ -381,31 +400,24 @@ fn dce_block_in_stmt(s: &mut Stmt) {
     }
 }
 
-/// -O3: 单调用小函数内联（仅 static 且无递归）。
-fn simple_inline(module: &mut Module) {
+/// -O1+: `always_inline` 函数内联；-O3 额外内联小型 static 零参函数。
+fn function_inline(module: &mut Module, level: u8) {
     let prog = module.source_mut();
-    let candidates: Vec<(String, FuncDecl)> = prog
+    let funcs: HashMap<String, FuncDecl> = prog
         .decls
         .iter()
         .filter_map(|d| match d {
-            Decl::Func(f) if f.body.is_some() && f.is_static && f.params.is_empty() => {
-                let lines = f.body.as_ref().map(count_block_items).unwrap_or(0);
-                if lines <= 4 {
-                    Some((f.name.name.clone(), f.clone()))
-                } else {
-                    None
-                }
-            }
+            Decl::Func(f) if f.body.is_some() => Some((f.name.name.clone(), f.clone())),
             _ => None,
         })
         .collect();
-    if candidates.is_empty() {
+    if funcs.is_empty() {
         return;
     }
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
             if let Some(body) = &mut f.body {
-                inline_calls_in_block(body, &candidates);
+                inline_calls_in_block(body, &funcs, level);
             }
         }
     }
@@ -415,13 +427,13 @@ fn count_block_items(b: &Block) -> usize {
     b.items.len()
 }
 
-fn inline_calls_in_block(body: &mut Block, candidates: &[(String, FuncDecl)]) {
+fn inline_calls_in_block(body: &mut Block, funcs: &HashMap<String, FuncDecl>, level: u8) {
     for item in &mut body.items {
         match item {
-            BlockItem::Stmt(s) => inline_calls_in_stmt(s, candidates),
+            BlockItem::Stmt(s) => inline_calls_in_stmt(s, funcs, level),
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &mut f.body {
-                    inline_calls_in_block(b, candidates);
+                    inline_calls_in_block(b, funcs, level);
                 }
             }
             _ => {}
@@ -429,65 +441,191 @@ fn inline_calls_in_block(body: &mut Block, candidates: &[(String, FuncDecl)]) {
     }
 }
 
-fn inline_calls_in_stmt(s: &mut Stmt, candidates: &[(String, FuncDecl)]) {
+fn inline_calls_in_stmt(s: &mut Stmt, funcs: &HashMap<String, FuncDecl>, level: u8) {
     match s {
         Stmt::Return { val: Some(e), .. } => {
-            *e = inline_expr(e.clone(), candidates);
+            *e = inline_expr(e.clone(), funcs, level);
         }
-        Stmt::Expr { e, .. } => *e = inline_expr(e.clone(), candidates),
+        Stmt::Expr { e, .. } => *e = inline_expr(e.clone(), funcs, level),
         Stmt::If { cond, then_, else_, .. } => {
-            *cond = inline_expr(cond.clone(), candidates);
-            inline_calls_in_stmt(then_, candidates);
+            *cond = inline_expr(cond.clone(), funcs, level);
+            inline_calls_in_stmt(then_, funcs, level);
             if let Some(e) = else_ {
-                inline_calls_in_stmt(e, candidates);
+                inline_calls_in_stmt(e, funcs, level);
             }
         }
-        Stmt::Block { b, .. } => inline_calls_in_block(b, candidates),
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => inline_calls_in_stmt(body, candidates),
+        Stmt::Block { b, .. } => inline_calls_in_block(b, funcs, level),
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => inline_calls_in_stmt(body, funcs, level),
         Stmt::For { init, cond, step, body, .. } => {
             if let Some(c) = cond {
-                *c = inline_expr(c.clone(), candidates);
+                *c = inline_expr(c.clone(), funcs, level);
             }
             if let Some(st) = step {
-                *st = inline_expr(st.clone(), candidates);
+                *st = inline_expr(st.clone(), funcs, level);
             }
             if let Some(i) = init {
-                inline_calls_in_stmt(i, candidates);
+                inline_calls_in_stmt(i, funcs, level);
             }
-            inline_calls_in_stmt(body, candidates);
+            inline_calls_in_stmt(body, funcs, level);
         }
         _ => {}
     }
 }
 
-fn inline_expr(e: Expr, candidates: &[(String, FuncDecl)]) -> Expr {
-    let e = match e {
-        Expr::Call { callee, args, span, ty } => {
-            if let Expr::Ident { name, .. } = callee.as_ref() {
-                if args.is_empty() {
-                    if let Some((_, f)) = candidates.iter().find(|(n, _)| n == &name.name) {
-                        if let Some(body) = &f.body {
-                            if let Some(BlockItem::Stmt(Stmt::Return { val: Some(ret), .. })) =
-                                body.items.last()
-                            {
-                                return inline_expr(ret.clone(), candidates);
-                            }
-                        }
-                    }
+fn extract_inline_return(body: &Block) -> Option<&Expr> {
+    match body.items.as_slice() {
+        [BlockItem::Stmt(Stmt::Return { val: Some(e), .. })] => Some(e),
+        items if !items.is_empty() => {
+            if let BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) = items.last()? {
+                if items.iter().all(|it| {
+                    matches!(it, BlockItem::Decl(_) | BlockItem::Stmt(Stmt::Return { .. }))
+                }) {
+                    Some(e)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-            Expr::Call { callee, args, span, ty }
+        }
+        _ => None,
+    }
+}
+
+fn expr_calls_name(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Call { callee, args, .. } => {
+            let direct = matches!(callee.as_ref(), Expr::Ident { name: n, .. } if n.name == name);
+            direct || args.iter().any(|a| expr_calls_name(a, name))
+        }
+        Expr::Binop { l, r, .. } => expr_calls_name(l, name) || expr_calls_name(r, name),
+        Expr::Unary { e, .. } => expr_calls_name(e, name),
+        Expr::Cast { e, .. } => expr_calls_name(e, name),
+        Expr::Cond { cond, then_, else_, .. } => {
+            expr_calls_name(cond, name) || expr_calls_name(then_, name) || expr_calls_name(else_, name)
+        }
+        Expr::Comma { l, r, .. } => expr_calls_name(l, name) || expr_calls_name(r, name),
+        _ => false,
+    }
+}
+
+fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
+    match expr {
+        Expr::Ident { name, span, ty } => {
+            if let Some((_, arg)) = params.iter().find(|(n, _)| n == &name.name) {
+                arg.clone()
+            } else {
+                Expr::Ident { name, span, ty }
+            }
         }
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op,
-            l: Box::new(inline_expr(*l, candidates)),
-            r: Box::new(inline_expr(*r, candidates)),
+            l: Box::new(substitute_params(*l, params)),
+            r: Box::new(substitute_params(*r, params)),
             span,
             ty,
         },
         Expr::Unary { op, e, span, ty } => Expr::Unary {
             op,
-            e: Box::new(inline_expr(*e, candidates)),
+            e: Box::new(substitute_params(*e, params)),
+            span,
+            ty,
+        },
+        Expr::Cast { ty, e, span } => Expr::Cast {
+            ty,
+            e: Box::new(substitute_params(*e, params)),
+            span,
+        },
+        Expr::Cond { cond, then_, else_, span, ty } => Expr::Cond {
+            cond: Box::new(substitute_params(*cond, params)),
+            then_: Box::new(substitute_params(*then_, params)),
+            else_: Box::new(substitute_params(*else_, params)),
+            span,
+            ty,
+        },
+        Expr::Comma { l, r, span, ty } => Expr::Comma {
+            l: Box::new(substitute_params(*l, params)),
+            r: Box::new(substitute_params(*r, params)),
+            span,
+            ty,
+        },
+        other => other,
+    }
+}
+
+fn try_inline_call(
+    name: &str,
+    args: &[Expr],
+    funcs: &HashMap<String, FuncDecl>,
+    level: u8,
+) -> Option<Expr> {
+    let f = funcs.get(name)?;
+    if f.is_noinline {
+        return None;
+    }
+    let body = f.body.as_ref()?;
+    if f.is_variadic || args.len() != f.params.len() {
+        return None;
+    }
+    let item_count = count_block_items(body);
+    let allowed = if f.is_always_inline && level >= 1 {
+        item_count <= 8
+    } else if f.is_static && f.params.is_empty() && level >= 3 {
+        item_count <= 4
+    } else {
+        return None;
+    };
+    if !allowed {
+        return None;
+    }
+    let ret = extract_inline_return(body)?;
+    if expr_calls_name(ret, name) {
+        return None;
+    }
+    let bindings: Vec<(String, Expr)> = f
+        .params
+        .iter()
+        .zip(args.iter())
+        .filter_map(|(p, a)| p.name.as_ref().map(|id| (id.name.clone(), a.clone())))
+        .collect();
+    if bindings.len() != f.params.len() {
+        return None;
+    }
+    Some(substitute_params(ret.clone(), &bindings))
+}
+
+fn inline_expr(e: Expr, funcs: &HashMap<String, FuncDecl>, level: u8) -> Expr {
+    let e = match e {
+        Expr::Call { callee, args, span, ty } => {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                if let Some(inlined) = try_inline_call(&name.name, &args, funcs, level) {
+                    return inline_expr(inlined, funcs, level);
+                }
+            }
+            Expr::Call {
+                callee: Box::new(inline_expr(*callee, funcs, level)),
+                args: args.into_iter().map(|a| inline_expr(a, funcs, level)).collect(),
+                span,
+                ty,
+            }
+        }
+        Expr::Binop { op, l, r, span, ty } => Expr::Binop {
+            op,
+            l: Box::new(inline_expr(*l, funcs, level)),
+            r: Box::new(inline_expr(*r, funcs, level)),
+            span,
+            ty,
+        },
+        Expr::Unary { op, e, span, ty } => Expr::Unary {
+            op,
+            e: Box::new(inline_expr(*e, funcs, level)),
+            span,
+            ty,
+        },
+        Expr::Cond { cond, then_, else_, span, ty } => Expr::Cond {
+            cond: Box::new(inline_expr(*cond, funcs, level)),
+            then_: Box::new(inline_expr(*then_, funcs, level)),
+            else_: Box::new(inline_expr(*else_, funcs, level)),
             span,
             ty,
         },
@@ -663,6 +801,110 @@ mod tests {
                 f.body.as_ref().unwrap().items[2],
                 BlockItem::Stmt(Stmt::Label { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn o1_inlines_always_inline_with_params() {
+        let span = Span::point("t.c", 1, 1);
+        let int = int_ty();
+        let x_ident = || Expr::Ident {
+            name: Ident { name: "x".into(), span: span.clone() },
+            span: span.clone(),
+            ty: int.clone(),
+        };
+        let sq = Decl::Func(FuncDecl {
+            ret_ty: int.clone(),
+            name: Ident { name: "sq".into(), span: span.clone() },
+            params: vec![crate::ast::Param {
+                ty: int.clone(),
+                name: Some(Ident { name: "x".into(), span: span.clone() }),
+                span: span.clone(),
+            }],
+            body: Some(Block {
+                items: vec![BlockItem::Stmt(Stmt::Return {
+                    val: Some(Expr::Binop {
+                        op: BinOp::Mul,
+                        l: Box::new(x_ident()),
+                        r: Box::new(x_ident()),
+                        span: span.clone(),
+                        ty: int.clone(),
+                    }),
+                    span: span.clone(),
+                })],
+                span: span.clone(),
+            }),
+            span: span.clone(),
+            is_static: true,
+            is_extern: false,
+            is_variadic: false,
+            is_weak: false,
+            is_constructor: false,
+            is_destructor: false,
+            is_nested: false,
+            is_cold: false,
+            section: None,
+            alignment: None,
+            visibility: None,
+            alias_name: None,
+            upvars: vec![],
+            is_unused: false,
+            is_noinline: false,
+            is_always_inline: true,
+        });
+        let main_fn = Decl::Func(FuncDecl {
+            ret_ty: int.clone(),
+            name: Ident { name: "main".into(), span: span.clone() },
+            params: vec![],
+            body: Some(Block {
+                items: vec![BlockItem::Stmt(Stmt::Return {
+                    val: Some(Expr::Call {
+                        callee: Box::new(Expr::Ident {
+                            name: Ident { name: "sq".into(), span: span.clone() },
+                            span: span.clone(),
+                            ty: int.clone(),
+                        }),
+                        args: vec![Expr::Int { v: 5, span: span.clone(), ty: int.clone() }],
+                        span: span.clone(),
+                        ty: int.clone(),
+                    }),
+                    span: span.clone(),
+                })],
+                span: span.clone(),
+            }),
+            span: span.clone(),
+            is_static: false,
+            is_extern: false,
+            is_variadic: false,
+            is_weak: false,
+            is_constructor: false,
+            is_destructor: false,
+            is_nested: false,
+            is_cold: false,
+            section: None,
+            alignment: None,
+            visibility: None,
+            alias_name: None,
+            upvars: vec![],
+            is_unused: false,
+            is_noinline: false,
+            is_always_inline: false,
+        });
+        let prog = Program {
+            decls: vec![sq, main_fn],
+        };
+        let mut module = ir::lower(prog).expect("lower");
+        optimize(&mut module, 1);
+        let main_body = match &module.source().decls[1] {
+            Decl::Func(f) => f.body.as_ref().unwrap(),
+            _ => panic!("expected main"),
+        };
+        match &main_body.items[0] {
+            BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Int { v: 25, .. }),
+                ..
+            }) => {}
+            other => panic!("expected inlined constant 25, got {other:?}"),
         }
     }
 }
