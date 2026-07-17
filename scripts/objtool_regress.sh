@@ -24,7 +24,7 @@ for sec in .eh_frame .orc_unwind_ip; do
     fi
 done
 
-EH_SIZE=$(readelf -S "$OBJ" | awk '/\.eh_frame/ {gsub(/\]/,"",$7); print $7; exit}')
+EH_SIZE=$(readelf -S "$OBJ" | awk '/\.eh_frame/ {getline; gsub(/^0+/,"",$1); print $1; exit}')
 if [[ "${EH_SIZE:-0}" -lt 32 ]]; then
     echo "FAIL: .eh_frame too small (${EH_SIZE:-0} bytes); expected CIE+FDE"
     exit 1
