@@ -1488,6 +1488,57 @@ fn nofail_stringify_compiles() {
     );
 }
 
+/// GCC 兼容：相同类型的重复 typedef 不报错
+#[test]
+fn compat_typedef_redefinition_compiles() {
+    let source = include_str!("fixtures/compat_typedef.c");
+    let (output, _obj) = run_object_test("compat-typedef", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 局部变量可遮蔽全局函数名（index/basename 等 libc 符号）
+#[test]
+fn local_shadows_libc_function_name() {
+    let source = include_str!("fixtures/shadow_libc_name.c");
+    let (output, exe) = run_compile_and_run("shadow-libc-name", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0);
+}
+
+/// typeof(_Generic(...))：内核 READ_ONCE 类宏展开形态
+#[test]
+fn typeof_generic_read_once_compiles() {
+    let source = include_str!("fixtures/typeof_generic_read_once.c");
+    let (output, exe) = run_compile_and_run("typeof-generic-read-once", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0);
+}
+
+/// asm goto 模板行内 `#` 注释（jump_label.h objtool 标注）不污染标签名
+#[test]
+fn asm_goto_hash_comment_compiles() {
+    let source = include_str!("fixtures/asm_goto_hash_comment.c");
+    let (output, exe) = run_compile_and_run("asm-goto-hash-comment", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0);
+}
+
 /// 全局 SIMD 向量复制与逐元素运算
 #[test]
 fn vector_global_copy_compiles() {

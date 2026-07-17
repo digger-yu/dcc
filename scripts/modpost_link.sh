@@ -98,7 +98,6 @@ if [[ $dcc_ok -eq 3 ]]; then
 else
     if [[ -x "$MOD/modpost" ]]; then
         echo "PASS: file2alias/empty via dcc; modpost binary reused ($dcc_ok/3 TU dcc)"
-        echo "NOTE: modpost.c/sumversion.c blocked on dcc host C — see MISSING_FEATURES.md"
     else
         echo "FAIL: modpost binary missing and dcc could not build all TUs"
         exit 1

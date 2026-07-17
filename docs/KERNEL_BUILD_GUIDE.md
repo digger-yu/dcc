@@ -17,7 +17,7 @@
 | `arch/x86/kernel/asm-offsets.c` 预处理 + 解析 + 代码生成 | ✅ 2026-07-17：867→0 解析；0 语义；`.s` 已生成 |
 | modpost `file2alias.c` 单 TU | ✅ |
 | LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
-| `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc file2alias/empty；modpost/sumversion **部分**（`NOFAIL`/`__may_alias__` 已修） |
+| `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc 三 TU（modpost/file2alias/sumversion） |
 | 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ⚠️ 脚本就绪 | 步骤 6–7/10 需 `BUILD_*=1`；无产物 SKIP |
 
 ### 远程同步构建
@@ -117,7 +117,10 @@ for-init 枚举声明、属性后指针函数声明、GNU `?:` 省略中间操�
 |--------|------|
 | `NOFAIL` / `#` 字符串化 | 多行实参折叠为单行字面量，消除 `modpost.c:5560` Invalid token |
 | `struct __attribute__((__may_alias__))` | 解析器在 struct/enum 名之前跳过属性 |
-| 剩余阻塞 | duplicate typedef、`bool` 等系统头重复定义（待后续迭代） |
+| 兼容 typedef 重定义 | glibc/linux 头重复 `dev_t`/`uint64_t` 等 → `register_typedef` |
+| 局部遮蔽 libc 名 | `index`/`basename` 等不再 E0007 |
+| `typeof(_Generic(...))` | READ_ONCE 类宏；声明初始化 `sizeof(*v)` |
+| asm `#` 行内注释 | `jump_label.h` `jmp %l[l_yes] # objtool NOPs this` |
 
 辅助脚本：`scripts/archive/test_asm_offsets.py`（一键替换 gcc 为 dcc 并统计错误）、
 `scripts/archive/summarize_err.py`（解析/语义错误分类）。

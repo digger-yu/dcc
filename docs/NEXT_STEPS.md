@@ -53,7 +53,7 @@
 - [x] **8. modpost 全 dcc 化（fixdep 替代）**
   - 验证：`scripts/modpost_link.sh` Rust fixdep + dcc 编译 file2alias/empty
   - 方案：`src/bin/fixdep.rs`（cargo fixdep）；`dcc-host-wrapper.sh` 安装 Rust fixdep
-  - 进展（2026-07-17）：`NOFAIL`/`#` 字符串化、`__may_alias__` 已修；modpost/sumversion 仍剩 duplicate typedef 等
+  - 进展（2026-07-17）：三 TU 均可 dcc `-c` + gcc 链接；typedef/遮蔽/`typeof(_Generic)`/asm `#` 注释
 
 - [x] **9. prepare0 全链路 vs 窄目标对齐**
   - 验证：`bash scripts/prepare0_full.sh` PASS（远程 2026-07-16）

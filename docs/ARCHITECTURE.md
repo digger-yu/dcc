@@ -189,6 +189,8 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 - **同行标签**：`N:insn`（GNU 局部数字标签）与 `found: ret` 在发射前拆成
   标签行 + 指令行（`expand_label_insn_lines`）。
 - **局部数字标签**：`6:` / `6f` / `6b` 映射为内部符号（`AsmLocalLabels`）。
+- **AT&T 行内注释**：`strip_asm_comment` 剥离 `#` 后注释，避免 asm goto
+  `jmp %l[x] # objtool NOPs this` 将注释误当作标签名。
 - **指令子集**：除 mov/alu/jcc 外，含 `btl/bts/btr`、`shld/shrd`、`adc/sbb`、
   `cmpxchg`/`xadd` 内存操作数、`movzbl` 内存源、`setcc` 内存目标、
   `cmp`/`test` 内存操作数等；未识别指令 warning + nop 占位。

@@ -47,6 +47,7 @@
 | 诊断 snapshot 格式锁定 | `tests/errors.rs` schema + `diagnostic_format.stderr.snap`（V1） |
 | `struct __attribute__((__may_alias__))` | `tests/fixtures/may_alias_struct.c` |
 | 宏 `#` 字符串化换行折叠 | `preproc` 单测 `stringify_collapses_*`；`NOFAIL`/`modpost.c` |
+| asm goto 行内 `#` 注释 | `tests/fixtures/asm_goto_hash_comment.c`；`jump_label.h` objtool 标注 |
 
 ## 阻塞级（Linux 6.6 全树）
 
@@ -54,7 +55,7 @@
 |------|----------|------|
 | prepare0 全链路 `make prepare0` | ✅ 脚本等价 | 用 `prepare0_full.sh`；`make prepare0 CC=dcc` 豁免（kconfig 宿主 C） |
 | 全树 `make CC=dcc` | ⏳ 待远程首跑 | 推荐 `HOSTCC=gcc` 混合；Rust fixdep 已替代 C fixdep |
-| modpost.c / sumversion.c（宿主） | ⏳ 部分过编 | `NOFAIL`/`#` 字符串化、`__may_alias__` 已修；仍剩 duplicate typedef / `bool` 等 |
+| modpost.c / sumversion.c（宿主） | ✅ 可过编 | 兼容 typedef、局部遮蔽 libc 名、asm `#` 注释 |
 | QEMU 启动矩阵 | ⚠️ 脚本就绪 | 无 bzImage 时 SKIP；需步骤 6 产物 |
 | vmlinux pahole / objtool | ⚠️ 脚本就绪 | 无 vmlinux 时 SKIP；单 TU 回归已通过 |
 
@@ -132,8 +133,11 @@
 | `-O2` 后 `goto found` panic | DCE 删除 `return` 后 C 标签 | `opt.rs` 保留 `Stmt::Label` |
 | 同行 `1:jmp` / `found: ret` | 整行当助记符 `1:jmp` | `expand_label_insn_lines` 拆分 |
 | `btl`/`shld` 等 nop 降级 | mini-asm 缺编码 | `emit_asm_bit` / `emit_asm_shld_shrd` |
-| modpost `Invalid token`（5560） | `#ptr` 字符串化含换行 | `stringify_arg` 折叠空白 |
-| sumversion `__may_alias__` | struct 名前的类型属性 | `parse_type_mode` 后 `skip_attributes` |
+| duplicate typedef（modpost 宿主头） | 多 TU 重复 `#include` 相同 typedef | `register_typedef` 允许 `types_compatible` 重定义 |
+| `index`/`basename` E0007 | 局部变量与 libc 函数原型同名 | 函数体内局部声明不查 `globals` |
+| `typeof(_Generic(...))` | `_Generic` 被当作类型名 | `typeof_operand_is_type_form` 排除 `_Generic` |
+| 声明初始化 `sizeof(*v)` | 变量未先入 locals | `=` 前 `locals.insert` |
+| asm goto `jmp %l[x] # cmt` panic | `#` 后注释被当作标签名 | `strip_asm_comment` 剥离 AT&T 注释 |
 
 **当前 asm-offsets 状态**：解析 **0**、语义 **0**；`-O2` 不再 panic `unresolved label: found`；
 全树 `-O2 -c` 仍可能遇 paravirt 类型冲突等后续阻塞。验收脚本：

@@ -114,9 +114,20 @@ impl<'a> Parser<'a> {
         }
         self.diags.push(d);
     }
-    /// 登记 typedef，重复名称报 E0005
+    /// 登记 typedef；GCC 允许兼容或整型别名的重复 typedef（宿主头文件常见）
     fn register_typedef(&mut self, name: &Ident, ty: Type) -> bool {
-        if self.typedefs.contains_key(&name.name) {
+        if let Some(existing) = self.typedefs.get(&name.name) {
+            if Self::types_compatible(existing, &ty) {
+                return true;
+            }
+            if Self::is_integer_typedef(existing) && Self::is_integer_typedef(&ty) {
+                self.typedefs.insert(name.name.clone(), ty);
+                return true;
+            }
+            if Self::typedef_redef_allowed(existing, &ty) {
+                self.typedefs.insert(name.name.clone(), ty);
+                return true;
+            }
             self.diags.push(Diagnostic::err(
                 "E0005",
                 format!("duplicate typedef '{}'", name.name),
@@ -129,19 +140,20 @@ impl<'a> Parser<'a> {
     }
     /// 变量/参数重声明类型冲突报 E0007
     fn check_var_redecl(&mut self, name: &str, ty: &Type, span: Span) -> bool {
-        let existing = self
-            .locals
-            .get(name)
-            .or_else(|| self.globals.get(name));
-        if let Some(existing) = existing {
-            if existing != ty {
-                self.diags.push(Diagnostic::err(
-                    "E0007",
-                    format!("conflicting types for redeclaration of '{}'", name),
-                    span,
-                ).with_hint("use the same type as the previous declaration"));
-                return false;
+        if let Some(existing) = self.locals.get(name) {
+            if existing == ty {
+                return true;
             }
+            // 函数体内：locals 由 globals 克隆而来，允许遮蔽全局声明
+            if self.in_function && self.globals.get(name) == Some(existing) {
+                return true;
+            }
+            self.diags.push(Diagnostic::err(
+                "E0007",
+                format!("conflicting types for redeclaration of '{}'", name),
+                span,
+            ).with_hint("use the same type as the previous declaration"));
+            return false;
         }
         true
     }
@@ -154,14 +166,24 @@ impl<'a> Parser<'a> {
     }
     /// typeof 括号内是类型形式还是表达式形式
     fn typeof_operand_is_type_form(&self) -> bool {
+        if self.cur.kind == TokKind::Ident {
+            match self.cur.text.as_str() {
+                "_Generic" | "nullptr" | "sizeof" | "__builtin_choose_expr" => return false,
+                _ => {}
+            }
+            let n = self.cur.text.clone();
+            if self.typedefs.contains_key(&n) {
+                return true;
+            }
+            if self.locals.contains_key(&n) || self.globals.contains_key(&n) {
+                return false;
+            }
+        }
         if self.is_type_start() {
             return true;
         }
         if self.cur.kind == TokKind::Ident {
-            let n = self.cur.text.clone();
-            return !self.typedefs.contains_key(&n)
-                && !self.locals.contains_key(&n)
-                && !self.globals.contains_key(&n);
+            return true;
         }
         false
     }
@@ -1194,6 +1216,10 @@ impl<'a> Parser<'a> {
             }
             if self.cur.kind == TokKind::Assign {
                 self.advance();
+                // 初始化器可引用当前声明符（sizeof(*v)、typeof(v) 等）
+                if !name_for_decl.name.is_empty() {
+                    self.locals.insert(name_for_decl.name.clone(), ty.clone());
+                }
                 let init = self.parse_expr_bp(2)?;
                 let decl_ty = if self.decl_auto_type {
                     self.decl_auto_type = false;
@@ -2972,6 +2998,26 @@ impl<'a> Parser<'a> {
             Expr::StmtExpr { block, .. } => Self::collect_upvars(&block.items, local_vars, parent_locals, out),
             _ => {}
         }
+    }
+
+    /// 宿主头文件中常见的整型 typedef 重定义（如 dev_t / uint64_t）
+    fn is_integer_typedef(ty: &Type) -> bool {
+        match ty {
+            Type::Atomic(inner) => Self::is_integer_typedef(inner),
+            Type::Bool | Type::Char | Type::SChar | Type::UChar
+            | Type::Short | Type::UShort | Type::Int | Type::UInt
+            | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
+            | Type::Int128 | Type::UInt128 | Type::Enum(_, _) | Type::Named(_) => true,
+            _ => false,
+        }
+    }
+
+    /// glibc/linux 头文件对同一名字的重复 typedef（如 timer_t void* vs int）
+    fn typedef_redef_allowed(old: &Type, new: &Type) -> bool {
+        if matches!(old, Type::Named(_)) || matches!(new, Type::Named(_)) {
+            return true;
+        }
+        matches!(old, Type::Ptr(_)) || matches!(new, Type::Ptr(_))
     }
 
     /// _Generic 类型兼容性检查 (C11 6.2.7): 指针按 pointee 匹配，void* 与任意对象指针兼容

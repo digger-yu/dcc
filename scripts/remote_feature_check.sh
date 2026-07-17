@@ -181,5 +181,32 @@ EOF
 "$DCC" -O1 -c -o "$TMP/irfold.o" "$TMP/irfold.c"
 check "ir_resync_o1" bash -c "objdump -d '$TMP/irfold.o' | grep -q 'mov.*\\\$0x5'"
 
+cat > "$TMP/compat_td.c" <<'EOF'
+typedef unsigned long sz;
+typedef unsigned long sz;
+int main(void) { sz x = 0; return (int)x; }
+EOF
+"$DCC" -c -o "$TMP/compat_td.o" "$TMP/compat_td.c"
+check "compat_typedef" test -f "$TMP/compat_td.o"
+
+cat > "$TMP/shadow.c" <<'EOF'
+char *index(const char *s, int c) { (void)s; (void)c; return (char *)0; }
+int f(void) { unsigned int index = 3; return (int)index; }
+int main(void) { return f(); }
+EOF
+"$DCC" -c -o "$TMP/shadow.o" "$TMP/shadow.c"
+check "local_shadows_libc" test -f "$TMP/shadow.o"
+
+cat > "$TMP/asm_goto_hash.c" <<'EOF'
+#define asm_volatile_goto(x...) asm goto(x)
+int main(void) {
+	asm_volatile_goto("1:" "jmp %l[l_yes] # objtool NOPs this \n\t"
+		: : "i" (0) : : l_yes);
+l_yes: return 0;
+}
+EOF
+"$DCC" -o "$TMP/asm_goto_hash" "$TMP/asm_goto_hash.c" && "$TMP/asm_goto_hash"
+check "asm_goto_hash_comment" test $? -eq 0
+
 echo "=== $pass passed, $fail failed ==="
 test "$fail" -eq 0

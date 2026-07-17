@@ -159,9 +159,14 @@ impl AsmLocalLabels {
         Self { defs }
     }
 
+    /// GNU as AT&T：`#` 起至行尾为注释（如 jump_label.h 的 objtool 标注）
+    fn strip_asm_comment(s: &str) -> &str {
+        s.split('#').next().unwrap_or(s).trim_end()
+    }
+
     fn parse_numeric_label(s: &str) -> Option<u32> {
         let s = s.strip_suffix(':')?;
-        let s = s.trim();
+        let s = Self::strip_asm_comment(s).trim();
         if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit()) {
             return None;
         }
@@ -172,13 +177,13 @@ impl AsmLocalLabels {
     fn expand_label_insn_lines(lines: impl IntoIterator<Item = String>) -> Vec<String> {
         let mut out = Vec::new();
         for line in lines {
-            let trimmed = line.trim().to_string();
+            let trimmed = Self::strip_asm_comment(line.trim()).trim().to_string();
             if trimmed.is_empty() {
                 continue;
             }
             if let Some(colon) = trimmed.find(':') {
-                let label = trimmed[..colon].trim();
-                let rest = trimmed[colon + 1..].trim();
+                let label = Self::strip_asm_comment(&trimmed[..colon]).trim();
+                let rest = Self::strip_asm_comment(&trimmed[colon + 1..]).trim();
                 if !label.is_empty() && !rest.is_empty() && !label.ends_with('%') && !label.contains('(') {
                     let is_numeric = label.chars().all(|c| c.is_ascii_digit());
                     let is_named = !is_numeric && !label.starts_with('.');
@@ -6316,7 +6321,7 @@ impl Codegen {
             }
             // 命名标签 foo:（非纯数字）
             if let Some(label) = trimmed.strip_suffix(':') {
-                let label = label.trim();
+                let label = AsmLocalLabels::strip_asm_comment(label).trim();
                 if !label.is_empty()
                     && !label.starts_with('.')
                     && !label.chars().all(|c| c.is_ascii_digit())
@@ -6467,7 +6472,7 @@ impl Codegen {
             return Self::parse_asm_mem(s);
         }
         // 符号名 (全局标签引用)
-        AsmOperand::Sym(s.to_string())
+        AsmOperand::Sym(AsmLocalLabels::strip_asm_comment(s).trim().to_string())
     }
 
     /// 解析 AT&T 内存操作数
@@ -6507,6 +6512,10 @@ impl Codegen {
 
     /// 发射单条 AT&T 汇编指令
     fn emit_asm_line(&mut self, line: &str) {
+        let line = AsmLocalLabels::strip_asm_comment(line).trim();
+        if line.is_empty() {
+            return;
+        }
         // 处理前缀: lock, rep, repz, repnz
         let (prefix, rest) = if line.starts_with("lock ") || line.starts_with("lock\t") {
             (Some(0xF0u8), line[5..].trim())
