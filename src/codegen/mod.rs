@@ -106,6 +106,15 @@ pub fn emit(
                     flags: 0,
                     align: 1,
                 });
+                // 新版：嵌入 dcc 自有 IR 位码（供 src/link 多 TU LTO 使用）
+                let bc = crate::link::lto_bitcode::serialize_module(module, source_name);
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".dcc.lto".to_string(),
+                    data: bc,
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
             }
             if relocatable {
                 elf::build_elf_rel_x86_64(

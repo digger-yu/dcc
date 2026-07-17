@@ -2441,6 +2441,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         let _ = fs::remove_file(hdr);
         assert!(diags.is_empty(), "{diags:?}");
@@ -2463,6 +2464,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &force_includes,
+            false,
         );
 
         assert!(diags.is_empty(), "{diags:?}");
@@ -2487,6 +2489,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("asm goto(\"1:\""), "output: {output}");
@@ -2509,6 +2512,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("\"2\""), "output: {output}");
@@ -2526,6 +2530,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("asm goto(\"jmp\""), "output: {output}");
@@ -2542,6 +2547,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
 
         assert!(diags.iter().any(|d| d.code == "E0207"));
@@ -2564,6 +2570,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 1;"), "output: {output}");
@@ -2579,6 +2586,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 1;"), "output: {output}");
@@ -2597,6 +2605,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(
@@ -2619,6 +2628,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         // 展开后应留下涂蓝的 F(...) 调用，而非栈溢出
@@ -2652,6 +2662,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         let _ = fs::remove_dir_all(&dir);
         assert!(diags.is_empty(), "{diags:?}");
@@ -2669,6 +2680,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 42;"), "output: {output}");
@@ -2688,6 +2700,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(
@@ -2715,6 +2728,7 @@ mod tests {
             &[],
             StdMode::Gnu11,
             &[],
+            false,
         );
         assert!(diags.is_empty(), "{diags:?}");
         assert!(

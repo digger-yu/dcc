@@ -1,18 +1,18 @@
-// src/link.rs - 可重定位目标文件链接（-r）与 LTO 摘要合并
+// src/link.rs - 旧 host `ld -r` 兼容路径（保留 -r 行为）
 //
-// 设计边界（非自研链接器）：
-// - 合并 .o 委托 host `ld -r`；注入/剥离 .llvm.lto 与 dead symbol 用 `objcopy`
-// - 不做 IR 级跨 TU 内联/常量传播；LTO 仅摘要 + --gc-sections + strip
-// - 可通过 LD / OBJCOPY 环境变量覆盖工具路径
+// 设计边界：
+//   - 旧的 -r 模式仍可作为“外发 ld 合并”入口
+//   - 新的 -flto 多 TU 链接 / PIE / .so 路径在 src/link/ 模块中
+//
+// 历史沿用：本文件保持对 host ld + objcopy 的依赖（与早期 .llvm.lto 摘要模式兼容）。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::diagnostics::{Diagnostic, Span};
-use crate::lto;
+use crate::link::lto_bitcode;
 
-/// 解析 host 工具路径（`LD` / `OBJCOPY` 环境变量优先）。
 fn tool_path(default: &str, env_var: &str) -> PathBuf {
     std::env::var(env_var)
         .ok()
@@ -25,7 +25,7 @@ fn tool_command(default: &str, env_var: &str) -> Command {
     Command::new(tool_path(default, env_var))
 }
 
-/// 合并多个 ET_REL 目标文件；启用 LTO 时合并 .llvm.lto 并注入输出节。
+/// 合并多个 ET_REL 目标文件；启用 LTO 时合并 dcc.lto 摘要。
 pub fn link_relocatable(
     inputs: &[PathBuf],
     output: &Path,
@@ -53,51 +53,34 @@ pub fn link_relocatable(
         .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
     let refs: Vec<&[u8]> = object_bytes.iter().map(|b| b.as_slice()).collect();
 
-    let mut lto_unit = if lto_enabled {
-        Some(lto::collect_from_objects(&refs))
+    let mut bc_modules: Vec<lto_bitcode::BitcodeModule> = if lto_enabled {
+        refs.iter()
+            .filter_map(|obj| lto_bitcode::deserialize_module(&crate::codegen::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default()).ok())
+            .collect()
     } else {
-        None
+        Vec::new()
     };
-
-    let mut dead_syms: Vec<String> = vec![];
-    if let Some(ref mut unit) = lto_unit {
-        lto::mark_references_from_objects(unit, &refs);
-        dead_syms = lto::dead_local_functions(unit);
-        if unit.path.is_empty() {
-            unit.path = output.display().to_string();
-        }
+    if lto_enabled && !bc_modules.is_empty() {
+        lto_bitcode::run_cross_tu_lto(&mut bc_modules);
     }
 
     if verbose {
-        if let Some(ref unit) = lto_unit {
-            eprintln!(
-                "dcc: LTO merge {} functions from {} objects",
-                unit.functions.len(),
-                inputs.len()
-            );
-            for name in &dead_syms {
-                eprintln!("dcc: LTO dead local: {}", name);
-            }
-        }
         eprintln!(
-            "dcc: link {} -> {} (ld={}, objcopy={})",
+            "dcc: legacy -r link {} -> {} (ld={}, objcopy={})",
             inputs.len(),
             output.display(),
             tool_path("ld", "LD").display(),
             tool_path("objcopy", "OBJCOPY").display(),
         );
+        if lto_enabled {
+            eprintln!("dcc: LTO bitcode modules: {}", bc_modules.len());
+        }
     }
 
     let mut ld = tool_command("ld", "LD");
     ld.arg("-r").arg("-o").arg(output);
     if lto_enabled {
         ld.arg("--gc-sections");
-        // bfd ld 要求 gc 根：-u 保留至少一个已定义符号
-        if let Some(ref unit) = lto_unit {
-            if let Some(root) = lto::gc_sections_root(unit, &dead_syms) {
-                ld.arg("-u").arg(&root);
-            }
-        }
     }
     for input in inputs {
         ld.arg(input);
@@ -122,47 +105,20 @@ pub fn link_relocatable(
         )]);
     }
 
-    if let Some(unit) = lto_unit {
-        inject_lto_section(output, &lto::serialize_summary(&unit))?;
-    }
-
-    if lto_enabled && !dead_syms.is_empty() {
-        strip_dead_symbols(output, &dead_syms)?;
+    if lto_enabled && !bc_modules.is_empty() {
+        // 把合并后的位码重新注入 .dcc.lto
+        let mut merged = Vec::new();
+        for m in &bc_modules {
+            let payload = lto_bitcode::serialize_module_from_bc(m);
+            merged.extend_from_slice(&payload);
+        }
+        inject_lto_section(output, &merged)?;
     }
 
     Ok(())
 }
 
-/// 用 objcopy 剔除 LTO 探测到的 dead local 符号（--gc-sections 的补充）。
-fn strip_dead_symbols(output: &Path, names: &[String]) -> Result<(), Vec<Diagnostic>> {
-    let objcopy = tool_path("objcopy", "OBJCOPY");
-    let mut cmd = tool_command("objcopy", "OBJCOPY");
-    for name in names {
-        cmd.arg(format!("--strip-symbol={}", name));
-    }
-    cmd.arg(output);
-    let status = cmd.status().map_err(|e| {
-        vec![Diagnostic::err(
-            "E0204",
-            format!(
-                "cannot invoke {} for dead symbol strip: {} (set OBJCOPY=)",
-                objcopy.display(),
-                e
-            ),
-            Span::point("", 0, 0),
-        )]
-    })?;
-    if !status.success() {
-        return Err(vec![Diagnostic::err(
-            "E0204",
-            format!("{} failed to strip dead LTO symbols", objcopy.display()),
-            Span::point("", 0, 0),
-        )]);
-    }
-    Ok(())
-}
-
-/// 用 objcopy 向 ET_REL 输出追加 .llvm.lto 节（Linux 链接路径）。
+/// 用 objcopy 向 ET_REL 输出追加 .dcc.lto 节。
 fn inject_lto_section(output: &Path, payload: &[u8]) -> Result<(), Vec<Diagnostic>> {
     let objcopy = tool_path("objcopy", "OBJCOPY");
     let tmp = std::env::temp_dir().join(format!("dcc-lto-{}.bin", std::process::id()));
@@ -176,7 +132,7 @@ fn inject_lto_section(output: &Path, payload: &[u8]) -> Result<(), Vec<Diagnosti
     let tmp_str = tmp.to_string_lossy();
     let status = tool_command("objcopy", "OBJCOPY")
         .arg("--update-section")
-        .arg(format!(".llvm.lto={}", tmp_str))
+        .arg(format!(".dcc.lto={}", tmp_str))
         .arg(output)
         .status()
         .map_err(|e| {
@@ -194,7 +150,7 @@ fn inject_lto_section(output: &Path, payload: &[u8]) -> Result<(), Vec<Diagnosti
     if !status.success() {
         return Err(vec![Diagnostic::err(
             "E0203",
-            format!("{} failed to inject .llvm.lto", objcopy.display()),
+            format!("{} failed to inject .dcc.lto", objcopy.display()),
             Span::point("", 0, 0),
         )]);
     }

@@ -1,0 +1,302 @@
+// src/link/elf_exec.rs - ET_EXEC 输出生成
+//
+// 把 Layout 序列化进 ELF64 ET_EXEC 文件。
+// 段布局：
+//   PHDR[0]  PT_LOAD  R+X  .text + .rodata + .init + .fini
+//   PHDR[1]  PT_LOAD  R+W  .data + .bss + .tdata + .tbss
+//   PHDR[2]  PT_GNU_STACK  RW  (无 X)
+
+use super::layout::{Layout, OutputSection, OutputSectionKind, OutputSymbol};
+use crate::codegen::elf::{
+    ELFMAG, ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ET_EXEC,
+    EM_X86_64, EM_AARCH64, EM_RISCV,
+    SHT_NULL, SHT_PROGBITS, SHT_NOBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_DYNAMIC,
+    PT_LOAD, PT_GNU_STACK, PF_X, PF_W, PF_R,
+    SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR, SHF_TLS,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_NOTYPE, STT_FUNC, STT_OBJECT, STT_SECTION, STT_TLS,
+    STV_DEFAULT, STV_HIDDEN, STV_INTERNAL, STV_PROTECTED,
+};
+
+pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
+    let mut shstrtab = vec![0u8];
+    for sec in &layout.sections {
+        for byte in sec.name.as_bytes() { shstrtab.push(*byte); }
+        shstrtab.push(0);
+    }
+    shstrtab.extend_from_slice(b".symtab\0.strtab\0.shstrtab\0");
+
+    let mut strtab = vec![0u8];
+    let mut strtab_offsets = vec![0u32; layout.symbols.len()];
+    for (i, sym) in layout.symbols.iter().enumerate() {
+        if sym.name.is_empty() { continue; }
+        strtab_offsets[i] = strtab.len() as u32;
+        for byte in sym.name.bytes() { strtab.push(byte); }
+        strtab.push(0);
+    }
+
+    let mut symtab = Vec::with_capacity(layout.symbols.len() * 24);
+    for (i, sym) in layout.symbols.iter().enumerate() {
+        let st_name = strtab_offsets[i];
+        let st_info = (sym.bind << 4) | sym.ty;
+        let st_other = sym.visibility;
+        let st_shndx = sym.section;
+        symtab.extend_from_slice(&st_name.to_le_bytes());
+        symtab.push(st_info);
+        symtab.push(st_other);
+        symtab.extend_from_slice(&st_shndx.to_le_bytes());
+        symtab.extend_from_slice(&sym.value.to_le_bytes());
+        symtab.extend_from_slice(&sym.size.to_le_bytes());
+    }
+
+    let gnu_hash = build_gnu_hash(&layout.symbols);
+
+    let mut out = Vec::new();
+    write_elf_internal(layout, machine, ET_EXEC, &mut out, &shstrtab, &strtab, &symtab, &gnu_hash);
+    out
+}
+
+fn segment_range(layout: &Layout, seg: u8) -> (u64, u64, u64, u64) {
+    let mut lo = u64::MAX; let mut hi = 0u64;
+    let mut fo = u64::MAX; let mut fend = 0u64;
+    for sec in &layout.sections {
+        if sec.load_segment != seg { continue; }
+        if sec.ty == SHT_NOBITS { continue; }
+        if sec.size == 0 { continue; }
+        lo = lo.min(sec.vaddr);
+        hi = hi.max(sec.vaddr + sec.size);
+        fo = fo.min(sec.file_off);
+        fend = fend.max(sec.file_off + sec.size);
+    }
+    if lo == u64::MAX { return (0, 0, 0, 0); }
+    (lo, hi, fo, fend - fo)
+}
+
+fn build_gnu_hash(symbols: &[OutputSymbol]) -> Vec<u8> {
+    // 简化 GNU hash 表：仅头 + bucket count = 0
+    let mut h = Vec::new();
+    h.extend_from_slice(&1u32.to_le_bytes());  // nbuckets
+    h.extend_from_slice(&0u32.to_le_bytes());  // symoffset
+    h.extend_from_slice(&0u32.to_le_bytes());  // bloom_size
+    h.extend_from_slice(&0u32.to_le_bytes());  // bloom_shift
+    h.extend_from_slice(&0u64.to_le_bytes());  // bloom[0]
+    h.extend_from_slice(&0u32.to_le_bytes());  // buckets[0]
+    h.extend_from_slice(&0u32.to_le_bytes());  // chain[0]
+    let _ = symbols;
+    h
+}
+
+pub fn write_elf_internal(
+    layout: &Layout,
+    machine: u16,
+    e_type: u16,
+    out: &mut Vec<u8>,
+    shstrtab: &[u8],
+    strtab: &[u8],
+    symtab: &[u8],
+    gnu_hash: &[u8],
+) {
+    // 1. ELF 头占位
+    let ehdr_off = 0u64;
+    out.resize(64, 0);
+    // 2. PHDR
+    let nphdr = if layout.has_dynamic { 4u16 } else { 3u16 };
+    let phdr_off = 64u64;
+    out.resize(64 + nphdr as usize * 56, 0);
+
+    // 3. 计算节数据偏移
+    let mut cur = (64 + nphdr as usize * 56) as u64;
+    let mut section_offsets: Vec<u64> = Vec::with_capacity(layout.sections.len() + 5);
+    for sec in &layout.sections {
+        let a = sec.align.max(1);
+        cur = (cur + a - 1) & !(a - 1);
+        section_offsets.push(cur);
+        if sec.ty != SHT_NOBITS && sec.size > 0 {
+            cur += sec.size;
+        }
+    }
+    // 加上 .gnu.hash .symtab .strtab .shstrtab
+    let gnu_hash_off = cur;
+    cur += gnu_hash.len() as u64;
+    let symtab_off = cur;
+    cur += symtab.len() as u64;
+    let strtab_off = cur;
+    cur += strtab.len() as u64;
+    let shstrtab_off = cur;
+    cur += shstrtab.len() as u64;
+    // shdr
+    let shdr_off = (cur + 7) & !7;
+
+    // 4. 写入各节数据
+    for (i, sec) in layout.sections.iter().enumerate() {
+        let off = section_offsets[i];
+        out.resize(off as usize, 0);
+        if sec.ty != SHT_NOBITS {
+            out.extend_from_slice(&sec.data);
+        }
+    }
+    // .gnu.hash
+    out.resize(gnu_hash_off as usize, 0);
+    out.extend_from_slice(gnu_hash);
+    out.resize(symtab_off as usize, 0);
+    out.extend_from_slice(symtab);
+    out.resize(strtab_off as usize, 0);
+    out.extend_from_slice(strtab);
+    out.resize(shstrtab_off as usize, 0);
+    out.extend_from_slice(shstrtab);
+    out.resize(shdr_off as usize, 0);
+
+    // 5. 段 (PHDR) 范围
+    let (s0_lo, s0_hi, s0_fo, s0_fsz) = segment_range(layout, 0);
+    let (s1_lo, s1_hi, s1_fo, s1_fsz) = segment_range(layout, 1);
+    let s0_memsz = s0_hi - s0_lo;
+    let s1_memsz = s1_hi - s1_lo;
+
+    // 6. 写 PHDR
+    let mut phdr_cursor = phdr_off as usize;
+    // PT_LOAD #1
+    write_phdr(out, &mut phdr_cursor, PT_LOAD, PF_R | PF_X,
+        s0_fo, s0_lo, s0_lo, s0_fsz, s0_memsz, 0x1000);
+    // PT_LOAD #2
+    write_phdr(out, &mut phdr_cursor, PT_LOAD, PF_R | PF_W,
+        s1_fo, s1_lo, s1_lo, s1_fsz, s1_memsz, 0x1000);
+    // PT_GNU_STACK
+    write_phdr(out, &mut phdr_cursor, PT_GNU_STACK, PF_R | PF_W,
+        0, 0, 0, 0, 0, 0);
+    if layout.has_dynamic {
+        // 找到 .dynamic 节
+        let dyn_vaddr = layout.sections.iter()
+            .find(|s| s.kind == OutputSectionKind::Dynamic)
+            .map(|s| s.vaddr).unwrap_or(0);
+        let dyn_filesz = layout.sections.iter()
+            .find(|s| s.kind == OutputSectionKind::Dynamic)
+            .map(|s| s.size).unwrap_or(0);
+        let dyn_fileoff = layout.sections.iter()
+            .find(|s| s.kind == OutputSectionKind::Dynamic)
+            .map(|s| s.file_off).unwrap_or(0);
+        write_phdr(out, &mut phdr_cursor, 2 /*PT_DYNAMIC*/, PF_R | PF_W,
+            dyn_fileoff, dyn_vaddr, dyn_vaddr, dyn_filesz, dyn_filesz, 8);
+    }
+
+    // 7. 节头表
+    // 总数 = SHT_NULL + 用户节 + .gnu.hash + .symtab + .strtab + .shstrtab + .note.GNU-stack
+    let nshdr = layout.sections.len() + 6;
+    // 预留所有节头空间
+    out.resize(shdr_off as usize + nshdr * 64, 0);
+    let mut shdr_cursor = shdr_off as usize;
+    // SHT_NULL
+    write_shdr(out, &mut shdr_cursor, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    // 各节
+    for (i, sec) in layout.sections.iter().enumerate() {
+        let sh_name = lookup_sh_name(shstrtab, &sec.name);
+        let sh_link = if sec.kind == OutputSectionKind::Dynamic {
+            // .dynamic 的 sh_link 指向 .dynstr
+            let dynstr_idx = layout.sections.iter().position(|s| s.kind == OutputSectionKind::DynStr).unwrap_or(0) as u32 + 1;
+            dynstr_idx
+        } else {
+            0
+        };
+        write_shdr(out, &mut shdr_cursor, sh_name, sec.ty, sec.flags as u64,
+            sec.vaddr, section_offsets[i], sec.size, sh_link, 0, sec.align, sec.entsize);
+    }
+    // .gnu.hash
+    write_shdr(out, &mut shdr_cursor, 0, 0xa000_0000, 0, 0, gnu_hash_off, gnu_hash.len() as u64, 0, 0, 8, 0);
+    // .symtab
+    let n_locals = layout.n_locals;
+    let strtab_shdr_idx = (layout.sections.len() + 3) as u32;
+    write_shdr(out, &mut shdr_cursor, 0, SHT_SYMTAB, 0, 0, symtab_off,
+        symtab.len() as u64, strtab_shdr_idx, n_locals, 8, 24);
+    // .strtab
+    write_shdr(out, &mut shdr_cursor, 0, SHT_STRTAB, 0, 0, strtab_off, strtab.len() as u64, 0, 0, 1, 0);
+    // .shstrtab
+    let shstrtab_shdr_idx = (layout.sections.len() + 4) as u32;
+    write_shdr(out, &mut shdr_cursor, 0, SHT_STRTAB, 0, 0, shstrtab_off, shstrtab.len() as u64, 0, 0, 1, 0);
+    // .note.GNU-stack
+    write_shdr(out, &mut shdr_cursor, 0, SHT_PROGBITS, 0, 0, shstrtab_off, 0, 0, 0, 1, 0);
+
+    // 8. ELF 头
+    write_elf_header(out, e_type, machine, layout.entry, phdr_off, shdr_off,
+        nphdr, nshdr as u16, shstrtab_shdr_idx as u16);
+    let _ = shstrtab_shdr_idx;
+}
+
+fn lookup_sh_name(shstrtab: &[u8], name: &str) -> u32 {
+    // 找 name 在 shstrtab 中的偏移
+    if name.is_empty() { return 0; }
+    let needle = name.as_bytes();
+    let mut i = 0;
+    while i < shstrtab.len() {
+        let end = shstrtab[i..].iter().position(|&b| b == 0).unwrap_or(shstrtab.len() - i) + i;
+        if end - i == needle.len() && &shstrtab[i..end] == needle {
+            return i as u32;
+        }
+        i = end + 1;
+    }
+    0
+}
+
+fn write_phdr(
+    out: &mut Vec<u8>, cur: &mut usize,
+    p_type: u32, p_flags: u32,
+    p_offset: u64, p_vaddr: u64, p_paddr: u64,
+    p_filesz: u64, p_memsz: u64, p_align: u64,
+) {
+    out[*cur..*cur + 4].copy_from_slice(&p_type.to_le_bytes());
+    out[*cur + 4..*cur + 8].copy_from_slice(&p_flags.to_le_bytes());
+    out[*cur + 8..*cur + 16].copy_from_slice(&p_offset.to_le_bytes());
+    out[*cur + 16..*cur + 24].copy_from_slice(&p_vaddr.to_le_bytes());
+    out[*cur + 24..*cur + 32].copy_from_slice(&p_paddr.to_le_bytes());
+    out[*cur + 32..*cur + 40].copy_from_slice(&p_filesz.to_le_bytes());
+    out[*cur + 40..*cur + 48].copy_from_slice(&p_memsz.to_le_bytes());
+    out[*cur + 48..*cur + 56].copy_from_slice(&p_align.to_le_bytes());
+    *cur += 56;
+}
+
+fn write_shdr(
+    out: &mut Vec<u8>, cur: &mut usize,
+    sh_name: u32, sh_type: u32, sh_flags: u64,
+    sh_addr: u64, sh_offset: u64, sh_size: u64,
+    sh_link: u32, sh_info: u32, sh_addralign: u64, sh_entsize: u64,
+) {
+    out[*cur..*cur + 4].copy_from_slice(&sh_name.to_le_bytes());
+    out[*cur + 4..*cur + 8].copy_from_slice(&sh_type.to_le_bytes());
+    out[*cur + 8..*cur + 16].copy_from_slice(&sh_flags.to_le_bytes());
+    out[*cur + 16..*cur + 24].copy_from_slice(&sh_addr.to_le_bytes());
+    out[*cur + 24..*cur + 32].copy_from_slice(&sh_offset.to_le_bytes());
+    out[*cur + 32..*cur + 40].copy_from_slice(&sh_size.to_le_bytes());
+    out[*cur + 40..*cur + 44].copy_from_slice(&sh_link.to_le_bytes());
+    out[*cur + 44..*cur + 48].copy_from_slice(&sh_info.to_le_bytes());
+    out[*cur + 48..*cur + 56].copy_from_slice(&sh_addralign.to_le_bytes());
+    out[*cur + 56..*cur + 64].copy_from_slice(&sh_entsize.to_le_bytes());
+    *cur += 64;
+}
+
+fn write_elf_header(
+    out: &mut [u8],
+    e_type: u16, machine: u16, entry: u64,
+    e_phoff: u64, e_shoff: u64,
+    e_phnum: u16, e_shnum: u16, e_shstrndx: u16,
+) {
+    out[0..4].copy_from_slice(&ELFMAG);
+    out[4] = ELFCLASS64;
+    out[5] = ELFDATA2LSB;
+    out[6] = EV_CURRENT;
+    out[7] = 0;
+    out[8..16].copy_from_slice(&[0u8; 8]);
+    out[16..18].copy_from_slice(&e_type.to_le_bytes());
+    out[18..20].copy_from_slice(&machine.to_le_bytes());
+    out[20..24].copy_from_slice(&1u32.to_le_bytes());
+    out[24..32].copy_from_slice(&entry.to_le_bytes());
+    out[32..40].copy_from_slice(&e_phoff.to_le_bytes());
+    out[40..48].copy_from_slice(&e_shoff.to_le_bytes());
+    out[48..52].copy_from_slice(&0u32.to_le_bytes());
+    out[52..54].copy_from_slice(&64u16.to_le_bytes());
+    out[54..56].copy_from_slice(&56u16.to_le_bytes());
+    out[56..58].copy_from_slice(&e_phnum.to_le_bytes());
+    out[58..60].copy_from_slice(&64u16.to_le_bytes());
+    out[60..62].copy_from_slice(&e_shnum.to_le_bytes());
+    out[62..64].copy_from_slice(&e_shstrndx.to_le_bytes());
+}
+
+pub fn write_elf_exec_x86_64(layout: &Layout) -> Vec<u8> {
+    write_elf_exec(layout, EM_X86_64)
+}

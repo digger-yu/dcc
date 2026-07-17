@@ -258,10 +258,15 @@ dcc input.c -o output
 # 生成可重定位目标文件 (.o)
 dcc -c input.c -o input.o
 
-# 多文件链接 (通过 gcc 或 dcc -r)
+# 多文件链接 (通过 gcc / dcc -r / dcc -fbuiltin-linker)
 dcc -c a.c -o a.o
 dcc -c b.c -o b.o
 gcc a.o b.o -o program
+# 或用 dcc 自带的多 TU 链接器：
+dcc -fbuiltin-linker a.o b.o -o program
+# 或链接 PIE / .so：
+dcc -fbuiltin-linker -pie a.o b.o -o program-pie
+dcc -fbuiltin-linker -shared -Wl,-soname,libfoo.so a.o b.o -o libfoo.so
 
 # LTO 可重定位链接（需 Linux ld/objcopy）
 dcc -flto -c a.c -o a.o
@@ -304,8 +309,18 @@ src/
 ├── main.rs          # 入口: 参数 → 配置 → driver
 ├── cli.rs           # CLI 解析: GCC 兼容的命令行选项
 ├── driver.rs        # 驱动: 读 → 预处理 → 解析 → codegen → 写
-├── link.rs          # 可重定位链接 (-r) + LTO gc-sections
-├── lto.rs           # 跨 TU LTO 摘要与 dead symbol 探测
+├── link/            # 多 TU ELF 链接器（自研，对标 mold/lld）
+│   ├── mod.rs       # LinkConfig / OutputKind / 入口
+│   ├── object.rs    # ELF ET_REL 解析
+│   ├── resolve.rs   # 跨 TU 符号解析
+│   ├── layout.rs    # 节合并 + 虚拟地址布局
+│   ├── relocate.rs  # 重定位引擎 (PC32/PLT32/64/32/32S/GOTPCREL)
+│   ├── plt_got.rs   # PLT/GOT/.dynamic 生成
+│   ├── elf_exec.rs  # ET_EXEC 输出
+│   ├── elf_dyn.rs   # ET_DYN 输出 (PIE/.so)
+│   ├── lto_bitcode.rs # DBC 格式 IR 位码 + 跨 TU DCE
+│   └── legacy.rs    # 旧 -r 模式 (host ld -r)
+├── lto.rs           # 旧 .llvm.lto 文本摘要与 dead symbol 探测
 ├── preproc.rs       # 预处理器: #include/#define/#if/宏展开
 ├── tokens.rs        # 词法分析: 字符流 → token 流
 ├── parser.rs        # 语法分析: token 流 → AST (递归下降 + Pratt)

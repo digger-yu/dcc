@@ -49,6 +49,24 @@ pub struct Config {
     pub parallel_codegen: bool, // -O2+ 默认多线程并行 emit（DCC_NO_PARALLEL=1 关闭）
     pub permissive: bool,       // -fpermissive：未知 typedef 降级为 int
     pub raw_args: Vec<String>,   // 原始参数（sanitizer/LTO 探测）
+
+    // 内置链接器相关（-pie / -shared / -flinker-output=）
+    pub built_link: bool,        // 走 src/link/ 全内置链接器而非 host ld -r
+    pub output_kind: LinkerOutputKind,  // Executable / PIE / Shared
+    pub soname: Option<String>,
+    pub linker_entry: Option<String>,   // -e: 显式指定 entry
+    pub linker_lto: bool,               // 启用 IR 级 LTO
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkerOutputKind {
+    Executable,  // 默认
+    PIE,         // -pie
+    Shared,      // -shared
+}
+
+impl Default for LinkerOutputKind {
+    fn default() -> Self { Self::Executable }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +212,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
     let mut relocatable_link = false; // 仅 -r 置位；-c 只产出 .o 不进入 link.rs
+    let mut output_kind = LinkerOutputKind::Executable;
+    let mut built_link = false;
+    let mut soname: Option<String> = None;
+    let mut linker_entry: Option<String> = None;
+    let mut linker_lto = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -214,6 +237,26 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-E" => { preprocess_only = true; }
             "-pipe" => {} // GCC -pipe: 使用管道代替临时文件，DCC 忽略
             "-r" => { relocatable = true; relocatable_link = true; } // -r: 可重定位 .o 合并
+            // 内置链接器开关
+            "-pie" | "-fpie" | "-fPIE" => { output_kind = LinkerOutputKind::PIE; built_link = true; }
+            "-shared" | "-fpic" | "-fPIC" => { output_kind = LinkerOutputKind::Shared; built_link = true; }
+            "--pie" => { output_kind = LinkerOutputKind::PIE; built_link = true; }
+            "-flinker-output=exe" => { output_kind = LinkerOutputKind::Executable; built_link = true; }
+            "-flinker-output=pie" => { output_kind = LinkerOutputKind::PIE; built_link = true; }
+            "-flinker-output=so"  => { output_kind = LinkerOutputKind::Shared; built_link = true; }
+            "-fbuiltin-linker" => { built_link = true; }
+            "-fno-builtin-linker" => { built_link = false; }
+            "-Wl,-soname," => {
+                i += 1;
+                soname = Some(args.get(i).ok_or_else(|| CliError::new("missing -soname arg"))?.to_string());
+            }
+            a if a.starts_with("-Wl,-soname,") => {
+                soname = Some(a["-Wl,-soname,".len()..].to_string());
+            }
+            "-e" => {
+                i += 1;
+                linker_entry = Some(args.get(i).ok_or_else(|| CliError::new("missing arg after -e"))?.to_string());
+            }
             // -L, -l, -T 等链接器选项
             "-L" | "-l" | "-T" => { i += 1; } // 跳过参数
             a if a.starts_with("-L") || a.starts_with("-l") || a.starts_with("-T") => {} // 内联形式
@@ -572,7 +615,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,
             permissive,
-            raw_args: args.to_vec() })
+            raw_args: args.to_vec(),
+            built_link,
+            output_kind,
+            soname: soname.clone(),
+            linker_entry: linker_entry.clone(),
+            linker_lto, })
     } else {
         if inputs.is_empty() {
             inputs.push(PathBuf::from("-"));
@@ -584,7 +632,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,
             permissive,
-            raw_args: args.to_vec() })
+            raw_args: args.to_vec(),
+            built_link: false,
+            output_kind: LinkerOutputKind::Executable,
+            soname: None,
+            linker_entry: None,
+            linker_lto: false, })
     }
 }
 

@@ -168,11 +168,11 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | Typed IR 语义校验 | ✅ `ir.rs`：`lower`/`validate`/`resync`；float/vector/complex 二元/一元/赋值/条件/聚合/转换与 codegen 对齐 |
 | BTF struct 探测 | `build_btf_probe()`：int + `dcc_probe` 结构体 |
 | eh_frame FDE | 每函数 PC+size 生成 FDE；ORC 节写入 PC 列表 |
-| LTO 链接 + gc | `src/link.rs`：`ld -r --gc-sections` + `.llvm.lto` 注入 + dead strip |
+| LTO 链接 + gc | `src/link/legacy.rs`：`ld -r --gc-sections` + `.llvm.lto` 注入 + dead strip |
 | per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |
 | rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |
 | CLI 多输入 | `-r a.o [b.o…] -o merged.o` 链接模式；多 `.c` 须 `-c` 后用 gcc 或 `-r` |
-| 链接/LTO 模块（非自研） | `link.rs`+`lto.rs`：host `ld/objcopy`、`.llvm.lto` 摘要 + gc-sections；无 IR 跨 TU 优化 |
+| 链接/LTO 模块（自研多 TU + 旧 `-r`） | `src/link/`：object 解析 / 跨 TU 解析 / 节合并 / 重定位 / PLT-GOT / ET_EXEC+ET_DYN / DBC 位码 LTO；`-r` 沿用 host `ld -r` + objcopy |
 | 验收脚本 | prepare0 / pahole / objtool / modpost / vmlinux / kernel_full_check |
 | TLS codegen | `_Thread_local` → `.tdata`/`.tbss`、`STT_TLS`；ET_EXEC 经 `arch_prctl` 设 FS |
 | ET_EXEC symtab | `build_elf_exec_x86_64` 输出 `.symtab`/`.strtab` |

@@ -12,13 +12,18 @@ pub const ELFMAG:    [u8; 4] = [0x7f, b'E', b'L', b'F'];
 pub const ELFCLASS64: u8 = 2;
 pub const ELFDATA2LSB: u8 = 1;
 pub const EV_CURRENT: u8 = 1;
-pub const ET_EXEC:    u16 = 2;
 pub const ET_REL:     u16 = 1;
+pub const ET_EXEC:    u16 = 2;
+pub const ET_DYN:     u16 = 3;
 pub const EM_X86_64:  u16 = 62;
 pub const EM_AARCH64: u16 = 183;
 pub const EM_RISCV:   u16 = 243;
 
 pub const PT_LOAD: u32 = 1;
+pub const PT_DYNAMIC: u32 = 2;
+pub const PT_TLS: u32 = 7;
+pub const PT_GNU_STACK: u32 = 0x6474e551;
+pub const PT_GNU_RELRO: u32 = 0x6474e552;
 pub const PF_X: u32 = 1; pub const PF_W: u32 = 2; pub const PF_R: u32 = 4;
 
 // 节类型
@@ -27,7 +32,11 @@ pub const SHT_PROGBITS: u32 = 1;
 pub const SHT_SYMTAB: u32 = 2;
 pub const SHT_STRTAB: u32 = 3;
 pub const SHT_RELA: u32 = 4;
+pub const SHT_HASH: u32 = 5;
+pub const SHT_DYNAMIC: u32 = 6;
+pub const SHT_NOTE: u32 = 7;
 pub const SHT_NOBITS: u32 = 8;
+pub const SHT_DYNSYM: u32 = 11;
 
 // 节标志
 pub const SHF_ALLOC: u32 = 2;
@@ -58,12 +67,15 @@ pub const STT_TLS: u8 = 6;
 pub const SHN_UNDEF: u16 = 0;
 
 // x86-64 重定位类型
-pub const R_X86_64_PC32: u32 = 2;
-pub const R_X86_64_PLT32: u32 = 4;  // 用于函数调用 (PIE 兼容)
-pub const R_X86_64_32: u32 = 10;
-pub const R_X86_64_32S: u32 = 11;
-pub const R_X86_64_64: u32 = 1;
-pub const R_X86_64_GOTPCREL: u32 = 9;
+pub const R_X86_64_64:        u32 = 1;
+pub const R_X86_64_PC32:      u32 = 2;
+pub const R_X86_64_PLT32:     u32 = 4;  // 用于函数调用 (PIE 兼容)
+pub const R_X86_64_GLOB_DAT:  u32 = 6;  // GOT 数据（动态库符号）
+pub const R_X86_64_JUMP_SLOT: u32 = 7;  // PLT 槽
+pub const R_X86_64_RELATIVE:  u32 = 8;  // base + offset
+pub const R_X86_64_GOTPCREL:  u32 = 9;
+pub const R_X86_64_32:        u32 = 10;
+pub const R_X86_64_32S:       u32 = 11;
 
 // AArch64 重定位类型
 pub const R_AARCH64_CALL26: u32 = 283;

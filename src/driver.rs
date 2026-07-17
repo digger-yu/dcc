@@ -5,21 +5,27 @@ use std::fs;
 use std::io::{self, Write};
 use crate::mmap_io::MappedInput;
 use std::process::Command;
-use crate::cli::{Config, InputLang};
+use crate::cli::{Config, InputLang, LinkerOutputKind};
 use crate::diagnostics::{Diagnostic, Severity, enrich_diags};
 use crate::target::Target;
 use crate::preproc;
 use crate::parser;
 use crate::codegen;
 use crate::ir;
+use crate::link;
 use crate::sanitizer;
 use crate::format_check;
 use crate::lto;
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
-    // -r 多 .o 可重定位链接
-    if cfg.link_mode {
+    // -r 多 .o 可重定位链接（host ld -r 兼容路径）
+    if cfg.link_mode && !cfg.built_link {
         let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
         return crate::link::link_relocatable(&cfg.inputs, &cfg.output, lto_enabled, cfg.verbose);
+    }
+
+    // -pie / -shared / -fbuiltin-linker：走内置全链接器
+    if cfg.built_link && cfg.link_mode {
+        return run_builtin_linker(&cfg);
     }
 
     let input = cfg.inputs.first().ok_or_else(|| {
@@ -257,5 +263,73 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
             crate::diagnostics::Span::point(&file_name, 0, 0))]);
     }
     eprintln!("dcc: wrote {}", cfg.output.display());
+    Ok(())
+}
+
+/// 内置全链接器：合并多个 .o → 写 ET_EXEC / ET_DYN（PIE / .so）
+fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
+    if cfg.inputs.is_empty() {
+        return Err(vec![Diagnostic::err(
+            "E0300",
+            "no input files for built-in linker",
+            crate::diagnostics::Span::point("", 0, 0),
+        )]);
+    }
+    let output_kind = match cfg.output_kind {
+        LinkerOutputKind::Executable => link::OutputKind::Executable,
+        LinkerOutputKind::PIE => link::OutputKind::PIE,
+        LinkerOutputKind::Shared => link::OutputKind::Shared,
+    };
+    let mut link_cfg = link::LinkConfig {
+        output_kind,
+        lto: cfg.linker_lto,
+        entry: cfg.linker_entry.clone().unwrap_or_else(|| {
+            if matches!(output_kind, link::OutputKind::PIE) { "_start".into() }
+            else if matches!(output_kind, link::OutputKind::Shared) { String::new() }
+            else { "main".into() }
+        }),
+        base_addr: 0x400000,
+        soname: cfg.soname.clone(),
+        needed: vec![],
+        strip_debug: false,
+        gc_sections: true,
+        allowed_undef: vec![
+            "memcpy".into(), "memmove".into(), "memset".into(), "memcmp".into(),
+            "printf".into(), "puts".into(), "exit".into(), "abort".into(),
+            "malloc".into(), "free".into(),
+            "__stack_chk_fail".into(), "__cxa_atexit".into(), "__cxa_finalize".into(),
+            "_start".into(), "main".into(),
+        ],
+        verbose: cfg.verbose,
+    };
+    if cfg.linker_entry.is_some() {
+        link_cfg.entry = cfg.linker_entry.clone().unwrap();
+    }
+    let bytes = if cfg.linker_lto {
+        // LTO 路径：暂时不读取 .dcc.lto（保留给后续：load bitcode 后做 cross-TU 优化）
+        link::link_multi_tu(&cfg.inputs, &cfg.output, &link_cfg)?
+    } else {
+        link::link_multi_tu(&cfg.inputs, &cfg.output, &link_cfg)?
+    };
+    std::fs::write(&cfg.output, &bytes).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0301",
+            format!("cannot write {}: {}", cfg.output.display(), e),
+            crate::diagnostics::Span::point(&cfg.output.display().to_string(), 0, 0),
+        )]
+    })?;
+    if !matches!(output_kind, link::OutputKind::Shared) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&cfg.output) {
+                let mut p = meta.permissions();
+                p.set_mode(0o755);
+                let _ = std::fs::set_permissions(&cfg.output, p);
+            }
+        }
+    }
+    eprintln!("dcc: built-in linker wrote {} ({} bytes, {:?})",
+        cfg.output.display(), bytes.len(), output_kind);
     Ok(())
 }

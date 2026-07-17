@@ -129,37 +129,57 @@ hosted 模式（非 `-ffreestanding`）预置 C11 `atomic_*` 宏。
 自定义代码节中的重定位会从 `.rela.text` 迁移到对应 relocation section；
 未初始化的普通全局对象进入 `.bss`，不占目标文件数据空间。
 
-## 链接与 LTO（`-r` / `-flto`，非自研链接器）
+## 链接与 LTO（`-r` / `-flto` / `-pie` / `-shared` / `-fbuiltin-linker`）
 
-DCC **不包含**内置可执行文件链接器，也 **不做** IR/bitcode 级跨 TU 内联或
-常量传播。多文件产物标准工作流：
+DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld 行为：
 
-```text
-dcc -c a.c -o a.o && dcc -c b.c -o b.o
-gcc a.o b.o -o prog          # 最终可执行文件
-# 或仅合并可重定位对象：
-dcc -r [-flto] -o all.o a.o b.o
-```
+- **单 TU 路径**（`dcc a.c` 直出可执行文件）：单 TU 使用 `R_X86_64_PLT32`
+  重定位，仅 stub PLT（不写 `.dynamic`、不生成完整链接器代码路径）。
+- **多 TU 路径**（`dcc -fbuiltin-linker a.o b.o -o prog`）：启用完整
+  `src/link` 链接器：ELF ET_REL 解析、跨 TU 符号解析、节合并、虚拟地址
+  布局、完整重定位引擎、PLT/GOT 生成、ET_EXEC/ET_DYN 输出。
+- **`-r` 模式**（合并可重定位对象）：通过 host `ld -r --gc-sections` 合并，
+  `objcopy` 注入 `.llvm.lto` 摘要，并对 dead local 符号执行 `--strip-symbol`
+  补充剔除。兼容旧工作流。
+- **`-pie` / `-shared`**：输出 ET_DYN（PIE 或 `.so`），生成 `.dynamic`、
+  `.dynsym`、`.dynstr`、`.rela.dyn`、`.rela.plt`、`.plt`、`.got`、`.got.plt`。
+- **`-flto` IR/bitcode LTO**：每 TU 末尾在 `.dcc.lto` 节写入自定义位码
+  （魔数 `DBC` + 版本 1），链接时反序列化、做跨 TU dead-code 消除。
 
 | 组件 | 职责 | 依赖 |
 |------|------|------|
-| `cli.rs` | 区分 `-c`（单 TU 出 `.o`）与 `-r`（仅接受 `.o` 输入）；多 `.c` 直链 `a.out` 报错并提示工作流 | — |
-| `lto.rs` | 编译期写 `.llvm.lto` 文本摘要（函数 defined/referenced/size）；链接期合并摘要 | — |
-| `link.rs` | `ld -r [--gc-sections]` 合并；`objcopy` 注入/更新 `.llvm.lto` 与 `--strip-symbol` dead local | host `ld`、`objcopy`（`LD`/`OBJCOPY` 可覆盖） |
+| `cli.rs` | 区分 `-c` / `-r` / `-pie` / `-shared` / `-fbuiltin-linker` / `-Wl,-soname=…` | — |
+| `link/object.rs` | 解析 ELF ET_REL 目标文件：节、符号、`.rela.*` 重定位 | — |
+| `link/resolve.rs` | 跨 TU 符号解析：强 > 弱 > undef；隐式 undef 允许 libc weak | — |
+| `link/layout.rs` | 同名节合并 + 2 段布局（`R+X` / `R+W`） + 自定义节独立 | — |
+| `link/relocate.rs` | 重定位引擎：`PC32` / `PLT32` / `64` / `32` / `32S` / `GOTPCREL` | — |
+| `link/plt_got.rs` | PLT/GOT 生成、`.dynamic`、`.dynsym`、`.rela.{dyn,plt}` | — |
+| `link/elf_exec.rs` | ET_EXEC 输出：ELF 头、PHDR、节头、`.symtab`、`.strtab`、`.gnu.hash` | — |
+| `link/elf_dyn.rs` | ET_DYN 输出：PIE / `.so` 共享库 | — |
+| `link/lto_bitcode.rs` | 自有 DBC 格式 IR 位码序列化 + 跨 TU DCE | — |
+| `link/legacy.rs` | 旧 `-r` 模式（host `ld -r`） | host `ld`、`objcopy` |
 
-管线（`driver.rs` → `link.rs`）：
+**多 TU 链接管线**（`driver.rs::run_builtin_linker`）：
 
-1. 读取各 TU 的 `.llvm.lto` 摘要（`lto.rs`），合并函数定义/引用。
-2. 扫描输入 ELF 的 `.rela.*` 表标记跨 TU 引用（`elf.rs`）。
-3. 调用 `ld -r --gc-sections` 合并目标文件；`-flto` 时默认
-   `-ffunction-sections`，每函数位于 `.text.<name>` 节。
-4. 用 `objcopy` 注入合并后的 `.llvm.lto`，并对 dead local 符号
-   执行 `--strip-symbol` 补充剔除。
+1. `parse_object` 读取每个 `.o` 的节 / 符号 / 重定位（`object.rs`）。
+2. `resolve` 做跨 TU 强/弱/undef 规则合并（`resolve.rs`）。
+3. `LayoutBuilder` 按同名节合并并分配虚拟地址（`layout.rs`）。
+4. 动态构建 PLT/GOT 与 `.dynamic` 节（`plt_got.rs`，仅 `-pie`/`-shared`）。
+5. `apply_relocations` 写入最终字节；动态重定向分离到 `.rela.dyn` / `.rela.plt`。
+6. `write_elf_*_x86_64` 写出 ET_EXEC / ET_DYN / ET_REL。
 
-**明确不做**：ELF 可执行链接（`ET_EXEC`）、跨 TU IR 内联、LLVM bitcode LTO。
+**IR/Bitcode LTO 管线**（`lto_bitcode.rs`）：
 
-远程验收：`scripts/sync_remote_build.sh` → `remote_feature_check.sh`（LTO 节）；
-`cargo test flto_relocatable_link` / `lto_link_strips_unreferenced_static`。
+1. Codegen 在 `.dcc.lto` 节写入每个 TU 的 IR 摘要（`DBC\0` 头 + version 1）。
+2. `serialize_module` 把 `ir::Module` 编码进 DBC 流（含所有 `ValueType`、
+   `BinOp` / `UnOp` / `ExprKind` / 函数 / 全局）。
+3. `deserialize_module` 反向重建模块。
+4. `run_cross_tu_lto` 跨 TU DCE：标记未引用函数 / 全局为 dead。
+
+**明确不做**：跨 TU 函数内联 / 常量传播 / 全局优化（仅做 DCE），
+AArch64 / RISC-V 后端的 ELF 输出（沿用 host 链接器）。
+
+远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（12 用例）。
 
 ## x86-64 后端 ABI 约定
 
