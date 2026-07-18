@@ -477,6 +477,59 @@ KASAN/UBSAN 需后续 IR 指令级插桩。
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
 `scripts/remote_feature_check.sh`（sanitizer 节 + 汇编桩计数）。
 
+## C 前端补洞（M11.1，`src/parser.rs` + `src/preproc.rs`）
+
+M11.1 集中补齐 GCC/MSVC 在 C 前端的扩展语法与预处理指令，全部按
+"解析 → AST 留痕 → 当前阶段不破坏语义" 的原则实现，避免在跨 TU
+编译（libiberty / 内核 / GCC bootstrap）时出现语法错误。
+
+### 解析层（`src/parser.rs`）
+
+- **MS 扩展关键字**：`parse_type_mode` 优先匹配 `__declspec(...)` /
+  `_ms_restrict` / `__pragma(...)` / `_Pragma(...)`；括号深度匹配跳过
+  整个参数段（如 `__declspec(align(8))`）。
+- **参数声明符**：`skip_ptr_qualifiers` 额外接受 `_ms_restrict` /
+  `_restrict`，覆盖 `int * _ms_restrict dst` 这类 MS-only 限定。
+- **`__attribute__` 全族**：
+  - `cleanup(fn)` → `VarDecl.cleanup_fn`，由 codegen 在变量离开作用域
+    时插入 `cleanup_fn(&var)`。
+  - `no_sanitize(...)` → `VarDecl.no_sanitize` / `FuncDecl.no_sanitize`，
+    sanitizer 阶段跳过对所有启用 sanitizer 的插桩。
+  - `target_clones(...)` → `FuncDecl.target_clones`，暂存以备 IFUNC
+    resolver 阶段使用。
+  - `copy(fn)` → 复用 `alias_name` 通道生成别名符号。
+  - `returns_nonnull` → `FuncDecl.returns_nonnull`（当前 noop 占位）。
+- **`_Static_assert` 字符串化**：`const_eval::ExprDebug` 把表达式渲染
+  为可读文本，失败消息附加 `evaluates to: <text>`；同时支持 C23
+  单参形式 `_Static_assert(expr)`。
+
+### 预处理层（`src/preproc.rs`）
+
+- **`#pragma` 全家族**：`process_directive` 派发到
+  `handle_pragma_pack` / `handle_pragma_weak` / `handle_pragma_stdc` /
+  `handle_pragma_diagnostic`，分别维护 `pack_stack: Vec<Option<usize>>` /
+  `weak_symbols: HashSet<String>` / `fenv_access: bool` / 诊断栈。
+- **`_Pragma` 操作符**：宏展开阶段遇到 `_Pragma("...")` 时把内部字符串
+  解码后推入 `pending_pragmas: RefCell<Vec<String>>`，在
+  `flush_active_source` 中按源序批量调用 `process_directive`，避免
+  `&self` / `&mut self` 借用冲突。
+- **`#warning` / `#error`**：与 `_Pragma` 走同一过程；`#error` 走 fatal
+  诊断中止编译，`#warning` 输出到 stderr。
+
+### AST 留痕（`src/ast.rs`）
+
+`VarDecl` / `FuncDecl` 新增字段：`no_sanitize: Vec<String>` /
+`copy_fn: Option<String>` / `target_clones: Vec<String>` /
+`returns_nonnull: bool`，现有 14 处构造点（`sanitizer.rs` /
+`opt.rs` / `ssa_gvn.rs`）同步更新。
+
+### 集成测试
+
+`tests/integration.rs` 新增 9 条 case 覆盖全部特性；fixture 放在
+`tests/fixtures/{ms_extensions,attr_cleanup,attr_target_clones,
+attr_no_sanitize,attr_copy_returns_nonnull,pragma_family,
+pragma_operator,user_diagnostics,static_assert_msg}.c`。
+
 ## 自举 (M5)
 
 ```bash

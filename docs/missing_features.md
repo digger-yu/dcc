@@ -128,6 +128,16 @@
 | dcc++ std::initializer_list (M10+) | ✅ | 解析 `{1, 2, 3}` 为 `InitList` / `TypedInitList`；降级为复合字面量 `((int[]){1, 2, 3})` |
 | dcc++ C 关键字 / 复合操作符 (M9) | ✅ | 词法补全：`int`/`return`/`if`/`while` 不再被误为 `Ident`；`->`/`->*`/`++`/`--`/`<<=`/`>>=` 等 23 个复合操作符完整 |
 | dcc++ Windows 兼容 (M9) | ✅ | `stddef.h` / `stdint.h` 仅在用到 `new`/`delete`/`throw`/`try`/`typeid` 时引入；否则用 `typedef unsigned long size_t;` 替代 |
+| C 前端补洞 MS 扩展 (M11.1) | ✅ | `__declspec(align/noreturn/thread/dllimport/dllexport)` / `_ms_restrict` / `__pragma` / `_Pragma` 静默接受；不影响语义 |
+| C 前端补洞 `__attribute__((cleanup(fn)))` (M11.1) | ✅ | 解析并存入 `VarDecl.cleanup_fn`；codegen 在变量离开作用域时插入 `cleanup_fn(&var)` 调用 |
+| C 前端补洞 `__attribute__((target_clones(...)))` (M11.1) | ✅ | 解析并存入 `FuncDecl.target_clones`；当前阶段按默认版本编译，多版本 IFUNC resolver 待 M12+ |
+| C 前端补洞 `__attribute__((no_sanitize(...)))` (M11.1) | ✅ | 解析并存入 `VarDecl/FuncDecl.no_sanitize`；`sanitizer.rs` 在所有启用的 sanitizer 都被禁止时跳过插桩 |
+| C 前端补洞 `__attribute__((copy(fn)))` (M11.1) | ✅ | 复用 `alias_name` 通道生成 `fn` 的别名符号，链接器直接引用原目标 |
+| C 前端补洞 `__attribute__((returns_nonnull))` (M11.1) | ✅ | 解析并存入 `FuncDecl.returns_nonnull`；当前阶段作为 noop 属性保留在 AST |
+| C 前端补洞 `#pragma` 全家族 (M11.1) | ✅ | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS ON/OFF/DEFAULT` / `GCC diagnostic push/pop/ignored/warning/error` / `once` / `comment` 静默接受 |
+| C 前端补洞 `_Pragma` 操作符 (M11.1) | ✅ | C99 `_Pragma("string")` 在 preproc 展开阶段累积到 `pending_pragmas: RefCell<Vec<String>>`，源块刷新时批量应用到 `process_directive` |
+| C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
+| C 前端补洞 `_Static_assert` 字符串化 (M11.1) | ✅ | C23 单参 `_Static_assert(expr)` 与双参 `_Static_assert(expr,"msg")` 全部支持；失败消息附加 `evaluates to: <ExprDebug 文本>` 便于定位 |
 | GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；远端可用磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）；仍缺 SFINAE / partial specialization / 完整 concepts / 协程 / module |
 | libdecnumber 组合 TU 编译 | ✅ 远程 OK | `scripts/remote_gcc_c_probe.sh` 改用 `tools/libdecnumber_combined.c` |
 | 嵌套块重声明 (C99 6.2.1) | ✅ | `parser.rs::check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍报 E0007 |
