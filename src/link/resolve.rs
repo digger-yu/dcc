@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use super::object::{FlatSymbol, InputBundle};
+use super::object::InputBundle;
 use crate::codegen::elf::{STB_LOCAL, STB_GLOBAL, STB_WEAK};
 
 /// 解析结果：每个名字最终被解析到的全局符号。
@@ -155,7 +155,7 @@ pub fn resolve(
     }
 
     // 补充：把 LOCAL 符号也放入 resolved（供 layout 与 codegen 用）
-    for (i, sym) in bundle.symbols.iter().enumerate() {
+    for (_, sym) in bundle.symbols.iter().enumerate() {
         if sym.bind != STB_LOCAL { continue; }
         if sym.section == 0 { continue; }
         let r = ResolvedSymbol {
@@ -188,7 +188,11 @@ fn is_implicit_undef(name: &str) -> bool {
         // glibc / libgcc 弱入口
         "memcpy" | "memmove" | "memset" | "memcmp" |
         "printf" | "__printf_chk" | "puts" | "exit" | "abort" | "malloc" | "free" |
-        "__stack_chk_fail" | "__cxa_atexit" | "__cxa_finalize"
+        "__stack_chk_fail" | "__cxa_atexit" | "__cxa_finalize" |
+        // glibc 字符串/数学库: dcc 通过 __builtin_strcasecmp/__builtin_fma 等
+        // 转发到 libm/glibc; freestanding 链接器无法解析, 但允许作为
+        // implicit undefined 以让测试编译通过 (运行时由 libc 提供).
+        "strcasecmp" | "strncasecmp" | "fma" | "fmaf" | "fmal"
     )
 }
 

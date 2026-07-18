@@ -46,6 +46,19 @@
 | GCC Builtin 完整化 | object_size FORTIFY、apply/return、prefetch no-op、未知 builtin warning |
 | __builtin_constant_p / inline 属性 | `tests/fixtures/builtin_constant_p_full.c`、`inline_attrs.c` |
 | 未知 __builtin_* ud2 | `tests/fixtures/unknown_builtin.c`；void → ud2，其余 → 零值 + warning |
+| __builtin_va_start/end/copy/arg | SysV va_list 结构（r13 帧链 + 24 字节槽） |
+| __builtin_strcasecmp / strncasecmp | 转发到 libc strcasecmp/strncasecmp |
+| __builtin_fma / fmaf / fmal | 调 libm 对应函数（fmaf 走 movss，F2/F3 0F 10/11 备份 xmm3） |
+| __builtin_rotateleft/right{8,16,32,64} | ROL/ROR + cl，32 位 mov eax 回写 |
+| __builtin_clrsb/clrsbl/clrsbll | cdq/cqo 符号扩展 + bsr，sentinel -1 + cmove 兜底 |
+| __builtin_{add,sub,mul}_overflow | 64 位运算 + 截断到操作数宽 + 比较 SETcc |
+| __builtin_{add,sub,mul}_overflow_p | SETO/SETB 标志直接返回 |
+| __builtin_bswap16/32/64 | bswap r32/r64；16 位走 rol r16, 8 + movzx |
+| __builtin_clz/ctz/popcount/parity | bsr/bsf/POPCNT/XOR fold |
+| __builtin_bitreverse8/16/32/64 | 固定次数移位循环，无外部依赖 |
+| __builtin_frame_address / return_address | r13 帧链遍历 |
+| __builtin_types_compatible_p / choose_expr | parser 折叠 + codegen 兜底 |
+| __builtin_va_list / FILE / LINE / FUNCTION / FUNCSIG | 类型别名 + codegen 字符串 rodata |
 | IR 优化 pass | `ssa_gvn.rs` GVN/CSE；`loop_opt.rs` LICM/展开/向量循环；`-O2`/`-O3` |
 | always_inline @ -O0 | `tests/fixtures/always_inline_o0.c` |
 | 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；`.data` 逐元素静态 init + 运行时 binop |

@@ -6,10 +6,10 @@
 //   PHDR[1]  PT_LOAD  R+W  .data + .bss + .tdata + .tbss
 //   PHDR[2]  PT_GNU_STACK  RW  (无 X)
 
-use super::layout::{Layout, OutputSection, OutputSectionKind, OutputSymbol};
+use super::layout::{Layout, OutputSectionKind, OutputSymbol};
 use crate::codegen::elf::{
     ELFMAG, ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ET_EXEC,
-    EM_X86_64, EM_AARCH64, EM_RISCV,
+    EM_X86_64,
     SHT_NULL, SHT_PROGBITS, SHT_NOBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_DYNAMIC,
     PT_LOAD, PT_GNU_STACK, PF_X, PF_W, PF_R,
     SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR, SHF_TLS,
@@ -96,7 +96,7 @@ pub fn write_elf_internal(
     gnu_hash: &[u8],
 ) {
     // 1. ELF 头占位
-    let ehdr_off = 0u64;
+    let _ehdr_off = 0u64;
     out.resize(64, 0);
     // 2. PHDR
     let nphdr = if layout.has_dynamic { 4u16 } else { 3u16 };

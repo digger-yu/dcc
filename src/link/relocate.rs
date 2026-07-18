@@ -200,7 +200,7 @@ fn write_u32(sec: &mut OutputSection, off: usize, value: u32) -> Result<(), Relo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::link::layout::{LayoutBuilder, OutputSectionKind, OutputSection};
+    use crate::link::layout::{OutputSectionKind, OutputSection};
     use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS, STB_GLOBAL, STT_FUNC};
 
     fn mk_layout(text_vaddr: u64, text: Vec<u8>, text_off: u64,

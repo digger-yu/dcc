@@ -250,6 +250,15 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
                 _ => Some(ty.size() as i128),
             }
         }
+        Expr::String { data, .. } => {
+            // 字符串字面量: 含末尾 '\0' 的大小 (sizeof "abcd" == 5)
+            let total = data.len() as i128;
+            if mode == 1 || mode == 3 {
+                Some(1) // 子对象 (char) 元素大小
+            } else {
+                Some(total)
+            }
+        }
         Expr::Index { arr, idx, ty: elem_ty, .. } => {
             let parent = object_size_of(arr, mode)?;
             if let Ok(i) = eval(idx) {

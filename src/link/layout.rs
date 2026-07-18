@@ -817,7 +817,7 @@ fn find_output_section_for(sections: &[OutputSection], in_sec: &FlatSection) -> 
     None
 }
 
-fn find_input_offset(sections: &[OutputSection], _in_idx: u32, _orig_section: u32) -> Option<u64> {
+fn find_input_offset(_sections: &[OutputSection], _in_idx: u32, _orig_section: u32) -> Option<u64> {
     // 这里需要把输入节在输出节内的偏移算出来；需要先做一次内容拼接。
     // layout 阶段在 assign_addresses 之前应该已经做了 input_offsets 计算。
     // 此函数假定 layout.fill_section_data 已运行。

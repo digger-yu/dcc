@@ -1841,6 +1841,73 @@ fn builtin_constant_p_full_run_returns_zero() {
     assert_eq!(rc, 0, "builtin_constant_p_full should return 0, got {rc}");
 }
 
+/// M12+ builtins: rotate/clrsb/fma/strcasecmp/FILE/LINE/FUNCTION/classify_type 等
+#[test]
+fn builtin_m12_extra_run_returns_zero() {
+    let source = include_str!("fixtures/test_m12_builtins.c");
+    let (output, exe) = run_compile_and_run("builtin-m12-extra", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "test_m12_builtins should return 0, got {rc}");
+}
+
+/// M12+ builtins: rotate / clrsb / fma 综合测试
+#[test]
+fn builtin_rotate_clrsb_run_returns_zero() {
+    let source = include_str!("fixtures/builtin_rotate_clrsb.c");
+    let (output, exe) = run_compile_and_run("builtin-rotate-clrsb", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "rotate/clrsb/fma should return 0, got {rc}");
+}
+
+/// M12+ builtins: strcasecmp / strncasecmp (走 libc)
+#[test]
+fn builtin_strcasecmp_run_returns_zero() {
+    let source = include_str!("fixtures/builtin_strcasecmp.c");
+    let (output, exe) = run_compile_and_run("builtin-strcasecmp", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "strcasecmp should return 0, got {rc}");
+}
+
+/// M12+ builtins: __builtin_FILE / __builtin_LINE / __builtin_FUNCTION /
+/// __builtin_PRETTY_FUNCTION / __func__ / __FUNCTION__
+#[test]
+fn builtin_file_line_func_run_returns_zero() {
+    let source = include_str!("fixtures/builtin_file_line_func.c");
+    let (output, exe) = run_compile_and_run("builtin-file-line-func", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "file/line/func should return 0, got {rc}");
+}
+
+/// M12+ builtins: classify_type / types_compatible_p
+#[test]
+fn builtin_classify_compat_run_returns_zero() {
+    let source = include_str!("fixtures/builtin_classify_compat.c");
+    let (output, exe) = run_compile_and_run("builtin-classify-compat", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "classify/compat should return 0, got {rc}");
+}
+
+/// M12+ builtins: choose_expr + constant_p + object_size 综合
+#[test]
+fn builtin_choose_full_run_returns_zero() {
+    let source = include_str!("fixtures/builtin_choose.c");
+    let (output, exe) = run_compile_and_run("builtin-choose-full", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "choose should return 0, got {rc}");
+}
+
 /// always_inline / noinline：IR 内联 pass 尊重属性
 #[test]
 fn inline_attrs_o1_run_returns_zero() {
@@ -1905,6 +1972,8 @@ fn unknown_builtin_warning_zero_and_ud2() {
     let _ = fs::remove_file(object_path);
 }
 
+/// 通用工具：编译一个 C 源文件并返回 output + 可执行路径
+#[allow(dead_code)]
 fn run_compile_o(name: &str, source: &str, opt: &str) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));

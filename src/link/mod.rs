@@ -30,10 +30,10 @@ use std::path::{Path, PathBuf};
 
 use crate::diagnostics::{Diagnostic, Span};
 
-pub use object::{InputBundle, InputObject, parse_object};
-pub use resolve::{resolve, ResolvedSymbol, ResolveError};
-pub use layout::{Layout, LayoutBuilder, OutputSection, OutputSectionKind, OutputSymbol};
-pub use relocate::{apply_relocations, DynamicRelocs};
+pub use object::InputBundle;
+pub use resolve::resolve;
+pub use layout::{LayoutBuilder, OutputSectionKind};
+pub use relocate::apply_relocations;
 pub use lto_bitcode::{serialize_module, deserialize_module, run_cross_tu_lto, BitcodeModule};
 pub use elf_exec::write_elf_exec_x86_64;
 pub use elf_dyn::{write_elf_pie_x86_64, write_elf_shared_x86_64};

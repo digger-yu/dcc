@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn mark_references_from_rela_marks_cross_tu() {
-        use crate::codegen::elf::{self, ElfRela, ElfSection, ElfSym, SHT_PROGBITS};
+        use crate::codegen::elf::{self, ElfRela, ElfSym};
         let caller_obj = elf::build_elf_rel_x86_64(
             &[0xe8, 0, 0, 0, 0, 0xc3], // call rel32 + ret
             &[],

@@ -1,7 +1,6 @@
 // src/mmap_io.rs - ADR-006: Unix mmap 零拷贝读源，Windows 回退 read
 // 第一性原理: 大文件预处理不必先复制到堆；映射只读私有页即可。
 
-use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -67,6 +66,7 @@ impl MappedInput {
 
 #[cfg(unix)]
 fn try_mmap_file(path: &Path) -> io::Result<MappedInput> {
+    use std::fs::File;
     use std::os::unix::io::AsRawFd;
 
     let file = File::open(path)?;

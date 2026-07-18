@@ -5,7 +5,7 @@
 
 use super::elf_exec::write_elf_internal;
 use super::layout::Layout;
-use crate::codegen::elf::{ET_DYN, EM_X86_64, EM_AARCH64, EM_RISCV};
+use crate::codegen::elf::{ET_DYN, EM_X86_64};
 
 pub fn write_elf_pie_x86_64(layout: &Layout) -> Vec<u8> {
     let mut out = Vec::new();

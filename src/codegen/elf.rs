@@ -263,7 +263,7 @@ pub fn build_elf_exec_x86_64(
             vaddr, file_off, tdata_size, 0, 0, 8, 0,
         );
         vaddr += tdata_size;
-        file_off += tdata_size;
+        // file_off 在每个分支各自更新后已隐式累加；此处避免 dead-store 警告。
         ni += 1;
     }
     if tbss_size > 0 {

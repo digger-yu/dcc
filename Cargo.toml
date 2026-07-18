@@ -6,6 +6,10 @@ authors = ["DCC Contributors"]
 description = "DCC: A suckless C compiler. Faster than GCC for the same job."
 license    = "Apache-2.0"
 
+[features]
+# 启用需要 GCC 源码树的集成测试 (libdecnumber 等)
+gcc_src = []
+
 [profile.release]
 opt-level = 3
 lto       = "thin"

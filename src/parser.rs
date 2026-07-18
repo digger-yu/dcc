@@ -88,6 +88,7 @@ pub struct Parser<'a> {
     locals: HashMap<String, Type>, // 变量名 → 类型 (函数内会清除)
     globals: HashMap<String, Type>, // 全局变量名 → 类型 (永不清除)
     in_function: bool,              // 是否在函数体内
+    current_function: Option<String>, // 当前函数名 (供 __func__/__builtin_FUNCTION 等使用)
     pub last_variadic: bool,        // parse_params 是否遇到 ...
     decl_storage: StorageClass,     // 最近一次声明说明符中的存储类
     decl_attrs: ParsedAttrs,        // 类型说明符之间出现的 GNU 属性
@@ -113,6 +114,7 @@ impl<'a> Parser<'a> {
                typedefs: HashMap::new(), struct_defs: HashMap::new(),
                enum_defs: HashMap::new(), enum_consts: HashMap::new(),
                locals: HashMap::new(), globals: HashMap::new(), in_function: false,
+               current_function: None,
                last_variadic: false, decl_storage: StorageClass::default(),
                decl_attrs: ParsedAttrs::default(), decl_auto_type: false,
                allow_named_type: false, opts }
@@ -1128,6 +1130,7 @@ impl<'a> Parser<'a> {
                     self.skip_asm_label();
                     self.locals = self.globals.clone();
                     self.in_function = true;
+                    let saved_func = std::mem::replace(&mut self.current_function, Some(name.name.clone()));
                     for p in &outer_params {
                         if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
                     }
@@ -1140,6 +1143,7 @@ impl<'a> Parser<'a> {
                     self.skip_attributes();
                     self.locals = self.globals.clone();
                     self.in_function = false;
+                    self.current_function = saved_func;
                     let sp = name.span.clone();
                     return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false })]);
                 }
@@ -1155,6 +1159,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.locals = self.globals.clone();
                     self.in_function = true;
+                    let saved_func = std::mem::replace(&mut self.current_function, Some(name.name.clone()));
                     for p in &inner_params {
                         if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
                     }
@@ -1162,6 +1167,7 @@ impl<'a> Parser<'a> {
                     if !self.expect(TokKind::RBrace, "'}'") { return None; }
                     self.locals = self.globals.clone();
                     self.in_function = false;
+                    self.current_function = saved_func;
                     Some(b)
                 } else {
                     if !self.expect(TokKind::Semi, "';' or '{'") { return None; }
@@ -1303,6 +1309,7 @@ impl<'a> Parser<'a> {
             }
             self.locals = self.globals.clone();
             self.in_function = true;
+            let saved_func = std::mem::replace(&mut self.current_function, Some(name_for_decl.name.clone()));
             for p in &params {
                 if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
             }
@@ -1321,6 +1328,8 @@ impl<'a> Parser<'a> {
                 self.locals = self.globals.clone();
                 self.in_function = false;
             }
+            // 恢复外层 current_function (嵌套函数时为 outer；顶层函数时为 None)
+            self.current_function = saved_func;
             // 检测嵌套函数捕获的外层变量
             let upvars = if is_nested_func {
                 let mut captured = Vec::new();
@@ -2947,6 +2956,13 @@ impl<'a> Parser<'a> {
                             if !self.expect(TokKind::Comma, "','") { return None; }
                             let ty2 = self.parse_type()?;
                             if !self.expect(TokKind::RParen, "')'") { return None; }
+                            // 解析 typedef 别名以比较真实类型
+                            let ty1 = if let Type::Named(ref n) = ty1 {
+                                self.typedefs.get(n).cloned().unwrap_or(ty1)
+                            } else { ty1 };
+                            let ty2 = if let Type::Named(ref n) = ty2 {
+                                self.typedefs.get(n).cloned().unwrap_or(ty2)
+                            } else { ty2 };
                             let v = if Self::types_compatible(&ty1, &ty2) { 1 } else { 0 };
                             e = Expr::Int { v: v as i128, span: sp.clone(), ty: int_t() };
                             continue;
@@ -2994,6 +3010,67 @@ impl<'a> Parser<'a> {
                             let mode = const_eval::eval(&type_arg).unwrap_or(0);
                             let size = const_eval::object_size(&ptr, mode).unwrap_or(-1);
                             e = Expr::Int { v: size, span: sp.clone(), ty: int_t() };
+                            continue;
+                        }
+                        // __builtin_FILE / __builtin_LINE / __builtin_FUNCTION /
+                        // __builtin_FUNCSIG: 编译期折叠为常量 (按 GCC 行为)。
+                        if name.name == "__builtin_FILE" {
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            let file_str = self.cur.span.file.clone();
+                            let mut data = file_str.into_bytes();
+                            data.push(0);
+                            e = Expr::String { data, span: sp.clone(),
+                                               ty: Type::Ptr(Box::new(Type::Char)) };
+                            continue;
+                        }
+                        if name.name == "__builtin_LINE" {
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            e = Expr::Int { v: self.cur.span.line.max(1) as i128,
+                                            span: sp.clone(), ty: int_t() };
+                            continue;
+                        }
+                        if name.name == "__builtin_FUNCTION"
+                            || name.name == "__builtin_FUNCSIG"
+                            || name.name == "__builtin_PRETTY_FUNCTION" {
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            // 函数外: GCC 返回空串; 函数内: 返回函数名
+                            let name_str = self.current_function.clone().unwrap_or_default();
+                            let mut data = name_str.into_bytes();
+                            data.push(0);
+                            e = Expr::String { data, span: sp.clone(),
+                                               ty: Type::Ptr(Box::new(Type::Char)) };
+                            continue;
+                        }
+                        // __builtin_classify_type(type): GCC type classification.
+                        // 1=void, 2=integer, 3=pointer, 4=real_float,
+                        // 5=complex, 6=struct_union, 7=array, 8=function,
+                        // 9=vector, 10=enum, -1=lang_mask (unknown).
+                        if name.name == "__builtin_classify_type" {
+                            let ty = self.parse_type()?;
+                            if !self.expect(TokKind::RParen, "')'") { return None; }
+                            // 若仍为 Type::Named, 查 typedef 映射以获得真实类型
+                            let ty = if let Type::Named(ref n) = ty {
+                                self.typedefs.get(n).cloned().unwrap_or(ty)
+                            } else { ty };
+                            let class = match ty {
+                                Type::Void => 1,
+                                Type::Bool | Type::Char | Type::SChar | Type::UChar
+                                | Type::Short | Type::UShort
+                                | Type::Int | Type::UInt
+                                | Type::Long | Type::ULong
+                                | Type::LongLong | Type::ULongLong
+                                | Type::Int128 | Type::UInt128
+                                | Type::Fract | Type::Accum => 2,
+                                Type::Ptr(_) | Type::Func(_, _) => 3,
+                                Type::Float | Type::Double | Type::LongDouble => 4,
+                                Type::Complex(_) => 5,
+                                Type::Struct(_, _) | Type::Union(_, _) => 6,
+                                Type::Array(_, _) => 7,
+                                Type::Vector(_, _) => 9,
+                                Type::Enum(_, _) => 10,
+                                Type::Atomic(_) | Type::Named(_) => 1,
+                            };
+                            e = Expr::Int { v: class, span: sp.clone(), ty: int_t() };
                             continue;
                         }
                         // __builtin_offsetof(type, member): 结构体成员偏移
@@ -3103,6 +3180,17 @@ impl<'a> Parser<'a> {
             TokKind::CharLit => { let v = parse_chr(&self.cur.text); self.advance(); Some(Expr::Char { v, span: sp, ty: Type::Int }) }
             TokKind::Ident => {
                 let t = self.cur.text.clone();
+                // C99 __func__ / GCC __FUNCTION__ / __PRETTY_FUNCTION__:
+                // 编译期折叠为当前函数名字符串字面量.
+                if t == "__func__" || t == "__FUNCTION__" || t == "__PRETTY_FUNCTION__" {
+                    self.advance();
+                    let name_str = self.current_function.clone().unwrap_or_default();
+                    let mut data = name_str.into_bytes();
+                    data.push(0);
+                    return Some(Expr::String {
+                        data, span: sp, ty: Type::Ptr(Box::new(Type::Char))
+                    });
+                }
                 if let Some(&val) = self.enum_consts.get(&t) { self.advance(); return Some(Expr::Int { v: val as i128, span: sp, ty: Type::Int }); }
                 let id = Ident { name: t, span: sp.clone() }; self.advance();
                 let id_ty = self.lookup_ident_type(&id.name);

@@ -6056,6 +6056,263 @@ impl Codegen {
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
+            // ===== M12+ 补洞 builtins =====
+            // __builtin_strcasecmp(s1, s2): 不区分大小写比较, 走 libc.
+            // 链接时由 glibc strcasecmp 提供; freestanding 测试可在 fixture 中
+            // 自行实现同名函数并通过 weak 引用覆盖 (见 link/resolve.rs).
+            "__builtin_strcasecmp" | "__builtin_strncasecmp" => {
+                let libc_name = if name == "__builtin_strncasecmp" { "strncasecmp" } else { "strcasecmp" };
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() { self.gen_expr(a, ar[i]); }
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_fma / fmaf / fmal: 融合乘加 (优先 vfmadd213pd/fma libm 走 fma).
+            // 走 libm: 链接器解析 fma, 兼顾 freestanding (编译时不开 vfmadd).
+            "__builtin_fma" | "__builtin_fmaf" | "__builtin_fmal" => {
+                if args.len() < 3 { self.mov_imm(dst, 0); return true; }
+                // SysV ABI: xmm0, xmm1, xmm2.
+                // 策略: 每个参数都 gen_expr 到 xmm0, 然后移至目标 xmm.
+                // 但 i=1/2 加载到 xmm0 会覆盖 i=0 的 arg0. 修复: 用 xmm3 备份 arg0.
+                // 关键: fmaf 用 movss (F3 0F 10/11, 32-bit), fma/fmal 用 movsd (F2 0F 10/11, 64-bit).
+                // movss 只设低 32 位, 高 96 位不变; movsd 只设低 64 位, 高 64 位不变.
+                // 备份/恢复必须用与原始加载同宽的指令.
+                let (prefix, opcode) = if name == "__builtin_fmaf" { (0xF3u8, 0x10u8) }
+                                       else { (0xF2u8, 0x10u8) };
+                // ModR/M (F2/F3 0F 11 指令: MOVSD/MOVSS xmm/m, xmm; reg=src, rm=dst):
+                //   xmm3 <- xmm0: reg=0, rm=3 ⇒ 0xC3
+                //   xmm1 <- xmm0: reg=0, rm=1 ⇒ 0xC1
+                //   xmm2 <- xmm0: reg=0, rm=2 ⇒ 0xC2
+                // ModR/M (F2/F3 0F 10 指令: MOVSD/MOVSS xmm, xmm/m; reg=dst, rm=src):
+                //   xmm0 <- xmm3: reg=0, rm=3 ⇒ 0xC3
+                self.gen_expr(&args[0], 0);  // xmm0 = arg0
+                self.emit(&[prefix, 0x0F, 0x11, 0xC3]); // mov[sd|ss] xmm3, xmm0 (备份 arg0)
+                self.gen_expr(&args[1], 0);  // xmm0 = arg1
+                self.emit(&[prefix, 0x0F, 0x11, 0xC1]); // mov[sd|ss] xmm1, xmm0
+                self.gen_expr(&args[2], 0);  // xmm0 = arg2
+                self.emit(&[prefix, 0x0F, 0x11, 0xC2]); // mov[sd|ss] xmm2, xmm0
+                self.emit(&[prefix, 0x0F, opcode, 0xC3]); // mov[sd|ss] xmm0, xmm3 (恢复 arg0)
+                self.emit(&[0x54]); // push rsp
+                // 调用 libm 中对应函数: fma / fmaf / fmal
+                let fn_name = match name {
+                    "__builtin_fmaf" => "fmaf",
+                    "__builtin_fmal" => "fmal",
+                    _ => "fma",
+                };
+                self.call_label(fn_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_rotateleft8/16/32/64 / __builtin_rotateright8/16/32/64
+            // 策略: 按位宽选 ROL/ROR modrm 编码.
+            n if n.starts_with("__builtin_rotateleft") || n.starts_with("__builtin_rotateright") => {
+                if args.len() < 2 { self.mov_imm(dst, 0); return true; }
+                let width: u32 = match n {
+                    "__builtin_rotateleft8" | "__builtin_rotateright8" => 8,
+                    "__builtin_rotateleft16" | "__builtin_rotateright16" => 16,
+                    "__builtin_rotateleft32" | "__builtin_rotateright32" => 32,
+                    _ => 64,
+                };
+                // shift amount = args[1] & (width - 1)
+                // result = rotate(args[0], shift)
+                self.gen_expr(&args[0], dst);
+                self.gen_expr(&args[1], 1); // rcx = shift
+                if width == 64 {
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                    if n.starts_with("__builtin_rotateleft") {
+                        self.emit(&[rex, 0xD3, 0xC0 | (dst & 7)]); // rol dst, cl
+                    } else {
+                        self.emit(&[rex, 0xD3, 0xC8 | (dst & 7)]); // ror dst, cl
+                    }
+                } else if width == 32 {
+                    // 32-bit 操作: mov 到 eax, rol/ror eax, cl, mov 回 dst
+                    self.emit(&[0x89, 0xC0 | (dst & 7)]); // mov eax, dst (截断到 32 位)
+                    if n.starts_with("__builtin_rotateleft") {
+                        self.emit(&[0xD3, 0xC0]); // rol eax, cl
+                    } else {
+                        self.emit(&[0xD3, 0xC8]); // ror eax, cl
+                    }
+                    if dst >= 8 {
+                        // mov dst, eax  (REX.B 89 C0+reg)
+                        self.emit(&[0x41, 0x89, 0xC0 | (dst & 7)]);
+                    } else {
+                        self.emit(&[0x89, 0xC0 | (dst & 7)]);
+                    }
+                } else if width == 16 {
+                    // 16-bit 操作
+                    self.emit(&[0x66]);
+                    if dst >= 8 { self.emit(&[0x41]); }
+                    if n.starts_with("__builtin_rotateleft") {
+                        self.emit(&[0xD3, 0xC0 | (dst & 7)]); // rol r16, cl
+                    } else {
+                        self.emit(&[0xD3, 0xC8 | (dst & 7)]); // ror r16, cl
+                    }
+                } else {
+                    // 8-bit 操作
+                    if n.starts_with("__builtin_rotateleft") {
+                        self.emit(&[0xD2, 0xC0 | (dst & 7)]); // rol r8, cl
+                    } else {
+                        self.emit(&[0xD2, 0xC8 | (dst & 7)]); // ror r8, cl
+                    }
+                }
+                true
+            }
+            // __builtin_clrsb / clrsbl / clrsbll: 计算符号位冗余的位数.
+            // 等价于: clz(x ^ s_bits) - 1, 其中 s_bits = 把符号位扩展到整个类型宽度.
+            // 对 32-bit:
+            //   x = 0x00000001 → s=0, x^s = 1,         clz=31, clrsb=30
+            //   x = 0x80000000 → s=-1, x^s = 0x7FFFFFFF, clz=1,  clrsb=0
+            //   x = 0xFFFFFFFF → s=-1, x^s = 0,         clz=32, clrsb=31
+            //   x = 0          → s=0,  x^s = 0,         clz=32, clrsb=31
+            // 实现技巧 (关键: 必须用与类型宽度一致的位运算):
+            //   1. mask 到类型宽度 (32-bit 用 cdq/32-bit bsr; 64-bit 用 cqo/64-bit bsr).
+            //   2. 用 cdq (32-bit) 或 cqo (64-bit) 把符号位扩展到寄存器宽度.
+            //   3. xor 后, 用 test+cmove 解决 bsr 0 未定义:
+            //      a. 把 x^s 复制到第二寄存器 (ecx/rcx), 用于 test 设置 ZF
+            //         (不能依赖 bsr 的 ZF, 因为 bsr(0) 在 x86 CPU 上 ZF=0, 不可靠).
+            //      b. bsr eax, eax (无副作用依赖)
+            //      c. mov edx, -1 (sentinel); test ecx, ecx; cmove eax, edx
+            //         → ecx==0 时 eax = -1; 否则 eax = bsr.
+            //      d. mov ecx, bits-2; sub ecx, eax
+            //         正常: bits-2 - bsr = clrsb ✓
+            //         零:   bits-2 - (-1) = bits-1 = clrsb ✓
+            // 注: 不能用 sar reg, (bits-1) 在 64-bit reg 上做符号扩展, 因为
+            //     dcc 把 0x80000000 当作正数 2^31 零扩展到 64-bit (0x0000000080000000),
+            //     SAR 31 不会把 1 符号位填到 64 位, 而是填 0. 必须用 cdq/cqo.
+            "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                let bits = args[0].ty().size() as i32 * 8;
+                self.gen_expr(&args[0], 0); // rax = x
+                if bits == 64 {
+                    // 64-bit clrsb: 用 cqo 复制符号到 rdx, 然后 xor rax, rdx.
+                    self.emit(&[0x48, 0x99]); // cqo (REX.W)
+                    self.emit(&[0x48, 0x31, 0xD0]); // xor rax, rdx
+                    self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                    self.emit(&[0x48, 0x0F, 0xBD, 0xC0]); // bsr rax, rax
+                    self.emit(&[0x48, 0xC7, 0xC2, 0xFF, 0xFF, 0xFF, 0xFF]); // mov rdx, -1
+                    self.emit(&[0x48, 0x85, 0xC9]); // test rcx, rcx
+                    self.emit(&[0x48, 0x0F, 0x44, 0xC2]); // cmove rax, rdx
+                    self.emit(&[0x48, 0xC7, 0xC2, 0x3E, 0x00, 0x00, 0x00]); // mov rdx, 62
+                    self.emit(&[0x48, 0x29, 0xC2]); // sub rdx, rax
+                    if dst != 2 {
+                        if dst < 8 {
+                            self.emit(&[0x48, 0x89, 0xD0 | (dst & 7)]);
+                        } else {
+                            self.emit(&[0x49, 0x89, 0xD0 | ((dst - 8) & 7)]);
+                        }
+                    }
+                } else {
+                    // 32-bit (及 16/8-bit) clrsb: 用 32-bit 操作.
+                    // 32-bit AND EAX, imm32 零扩展到 RAX (无 REX.W).
+                    let mask32: u32 = if bits == 32 { 0xFFFFFFFF }
+                                      else if bits == 16 { 0x0000FFFF }
+                                      else { 0x000000FF };
+                    let mb = mask32.to_le_bytes();
+                    self.emit(&[0x25, mb[0], mb[1], mb[2], mb[3]]);
+                    // 计算 s_bits 到 edx: 0 或 mask32 (32-bit).
+                    if bits == 32 {
+                        self.emit(&[0x99]); // cdq: edx = sign(eax) = 0 或 0xFFFFFFFF
+                    } else if bits == 16 {
+                        self.emit(&[0xC1, 0xE0, 16]); // shl eax, 16
+                        self.emit(&[0xC1, 0xF8, 31]); // sar eax, 31 → 0 或 -1
+                        self.emit(&[0x25, 0xFF, 0xFF, 0x00, 0x00]); // and eax, 0xFFFF
+                        self.emit(&[0x89, 0xC2]); // mov edx, eax
+                    } else { // bits == 8
+                        self.emit(&[0xC1, 0xE0, 24]); // shl eax, 24
+                        self.emit(&[0xC1, 0xF8, 31]); // sar eax, 31 → 0 或 -1
+                        self.emit(&[0x25, 0xFF, 0x00, 0x00, 0x00]); // and eax, 0xFF
+                        self.emit(&[0x89, 0xC2]); // mov edx, eax
+                    }
+                    // xor eax, edx: eax = x ^ s_bits (32-bit)
+                    self.emit(&[0x31, 0xD0]);
+                    // mov ecx, eax: 保存 x^s_bits 到 ecx, 用于 test
+                    self.emit(&[0x89, 0xC1]);
+                    // bsr eax, eax (32-bit) - 可能为 UB for 0, 但 cmove 兜底
+                    self.emit(&[0x0F, 0xBD, 0xC0]);
+                    // mov edx, 0xFFFFFFFF (sentinel)
+                    self.emit(&[0xBA, 0xFF, 0xFF, 0xFF, 0xFF]);
+                    // test ecx, ecx: 设置 ZF 基于 ecx (0 ⇒ ZF=1), 覆盖 bsr 的 ZF
+                    self.emit(&[0x85, 0xC9]);
+                    // cmove eax, edx: 如果 x^s_bits==0, eax = edx = -1
+                    // ModR/M = 0xC2 = 11_000_010: reg=eax(0), rm=edx(2) ⇒ Intel cmove eax, edx
+                    self.emit(&[0x0F, 0x44, 0xC2]);
+                    // mov ecx, (bits-2)
+                    let bm2: u32 = (bits - 2) as u32;
+                    let b = bm2.to_le_bytes();
+                    self.emit(&[0xB9, b[0], b[1], b[2], b[3]]);
+                    // sub ecx, eax: ecx = clrsb
+                    self.emit(&[0x29, 0xC1]);
+                    // mov dst, ecx (REX.W; ecx 零扩展到 dst)
+                    if dst != 1 {
+                        if dst < 8 {
+                            self.emit(&[0x48, 0x89, 0xC8 | (dst & 7)]);
+                        } else {
+                            self.emit(&[0x49, 0x89, 0xC8 | ((dst - 8) & 7)]);
+                        }
+                    }
+                }
+                true
+            }
+            // __builtin_apply_args(): 返回保存区指针 (SysV: [rsp+8])
+            "__builtin_apply_args" => {
+                // lea rax, [rsp+8]: 48 8D 44 24 08
+                self.emit(&[0x48, 0x8D, 0x44, 0x24, 0x08]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_choose_expr fallback (parser 应当已折叠)
+            "__builtin_choose_expr" => {
+                if args.len() >= 3 {
+                    let cond = const_eval::eval(&args[0]).unwrap_or(0);
+                    let chosen = if cond != 0 { &args[1] } else { &args[2] };
+                    self.gen_expr(chosen, dst);
+                } else {
+                    self.mov_imm(dst, 0);
+                }
+                true
+            }
+            // __builtin_types_compatible_p fallback
+            "__builtin_types_compatible_p" => {
+                // parser 应当已折叠; 此处按 0 处理
+                self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_va_arg(ap, type) — parser 已生成 Expr::VaArg, 此兜底不会到达
+            "__builtin_va_arg" => {
+                true
+            }
+            // __builtin_FILE / __builtin_LINE / __builtin_FUNCTION / __builtin_FUNCSIG
+            // parser 已折叠; codegen 兜底返回空串 (与 parser 一致).
+            "__builtin_FILE" | "__builtin_FUNCTION" | "__builtin_FUNCSIG"
+            | "__builtin_PRETTY_FUNCTION" => {
+                // 复用 string 表达式生成路径, 避免重复维护 rodata ref 编码
+                let empty: Vec<u8> = vec![0];
+                let data = empty;
+                if !self.string_pool.contains_key(&data) {
+                    let o = self.rodata.len() as u64;
+                    self.rodata.extend_from_slice(&data);
+                    self.string_pool.insert(data.clone(), o);
+                }
+                let at = self.pos();
+                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                self.emit(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]);
+                self.string_refs.push((at, data));
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            "__builtin_LINE" => {
+                self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_classify_type fallback
+            "__builtin_classify_type" => {
+                self.mov_imm(dst, 0);
+                true
+            }
             _ => false,
         }
     }

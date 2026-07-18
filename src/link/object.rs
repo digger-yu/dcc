@@ -129,8 +129,8 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         let sh_addr = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
         let sh_offset = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap()) as usize;
         let sh_size = u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap()) as usize;
-        let sh_link = u32::from_le_bytes(data[off + 40..off + 44].try_into().unwrap());
-        let sh_info = u32::from_le_bytes(data[off + 44..off + 48].try_into().unwrap());
+        let _sh_link = u32::from_le_bytes(data[off + 40..off + 44].try_into().unwrap());
+        let _sh_info = u32::from_le_bytes(data[off + 44..off + 48].try_into().unwrap());
         let sh_addralign = u64::from_le_bytes(data[off + 48..off + 56].try_into().unwrap());
         let sh_entsize = u64::from_le_bytes(data[off + 56..off + 64].try_into().unwrap());
         raw_sections.push((sh_name, sh_type, sh_flags, sh_addr, sh_offset as u64, sh_size as u64, sh_addralign, sh_entsize));

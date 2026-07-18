@@ -245,7 +245,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut built_link = false;
     let mut soname: Option<String> = None;
     let mut linker_entry: Option<String> = None;
-    let mut linker_lto = false;
+    let linker_lto = false;
 
     let mut i = 0;
     while i < args.len() {

@@ -390,6 +390,28 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 - **Builtins**：`__builtin_constant_p` 经 parser/opt/codegen 共享
   `const_eval::is_constant`；`__builtin_object_size` 编译期折叠；
   `__builtin_apply`/`return` SysV 子集；`__builtin_prefetch*` void no-op；
+  `__builtin_va_*`（start/end/copy/arg）走 SysV va_list 结构；
+  `__builtin_strcasecmp`/`__builtin_strncasecmp` 转发到 libc；
+  `__builtin_fma`/`fmaf`/`fmal` 调用 libm 同名函数（fmaf/fmal 走
+  F3 0F 10/11 `movss`，fma/fmal 走 F2 0F 10/11 `movsd`；
+  备份 arg0 至 xmm3 避免被 i=1/2 覆盖）；
+  `__builtin_rotateleft*`/`__builtin_rotateright*`（8/16/32/64 位宽
+  用 ROL/ROR + cl 编码，32 位先 mov 到 eax 再回写高寄存器）；
+  `__builtin_clrsb`/`clrsbl`/`clrsbll`（`clz(x ^ s_bits) - 1`，
+  32-bit 用 cdq/32-bit bsr，64-bit 用 cqo/64-bit bsr；
+  解决 bsr(0) 不可靠 ZF：先 `mov ecx/rcx, eax` 备份 `x ^ s_bits`，
+  `bsr eax, eax` 后 `test ecx/rcx, ecx/rcx` 覆盖 ZF，
+  `cmove eax, edx/rax, rdx`（sentinel=-1），
+  最后 `bits-2 - eax` 得 clrsb）；
+  `__builtin_overflow_p`/`__builtin_*_overflow` 用 SETO/SETB 标志；
+  `__builtin_bswap*`（16 位走 rol r16, 8 + movzx 零扩）；
+  `__builtin_clz`/`ctz`/`popcount`/`parity`；
+  `__builtin_bitreverse*`（固定次数移位循环，无外部依赖）；
+  `__builtin_frame_address`/`__builtin_return_address`（r13 帧链）；
+  `__builtin_types_compatible_p`/`__builtin_choose_expr`（parser
+  已折叠，codegen 兜底）；`__builtin_va_list`（类型别名）；
+  `__builtin_FILE`/`__builtin_LINE`/`__builtin_FUNCTION`/
+  `__builtin_FUNCSIG`/`__builtin_PRETTY_FUNCTION`；
   未知 `__builtin_*` warning + 零值（有返回值）或 **ud2**（void）。
 - **IR 内联**：`-O0+` 对 `always_inline` 单返回体内联；`-O1+` 完整 pass；
   `-O3` opportunistic 小 static 函数；`noinline` 阻止内联。

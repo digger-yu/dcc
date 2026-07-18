@@ -10,11 +10,11 @@
 //   - .dynsym:        动态符号表
 //   - .dynstr:        动态字符串表
 
-use super::layout::{Layout, OutputSection, OutputSectionKind, OutputSymbol, OutputRela};
+use super::layout::{Layout, OutputSectionKind};
 use crate::codegen::elf::{
-    R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE,
-    SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR, SHT_DYNAMIC, SHT_SYMTAB, SHT_STRTAB, SHT_RELA,
-    STB_GLOBAL, STB_WEAK, STT_FUNC, STT_NOTYPE, STV_DEFAULT,
+    R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT,
+    SHT_SYMTAB, SHT_STRTAB,
+    STB_GLOBAL, STT_FUNC, STV_DEFAULT,
 };
 
 /// 收集 .plt / .got.plt 中需要为哪些外部符号创建槽。
@@ -290,8 +290,8 @@ pub fn fill_plt_got(layout: &mut Layout) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::link::layout::{OutputSection, OutputSymbol, Layout, OutputSectionKind};
-    use crate::codegen::elf::{SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR, SHT_PROGBITS, SHT_RELA, SHT_SYMTAB, SHT_STRTAB, STB_GLOBAL, STT_FUNC, STT_NOTYPE};
+    use crate::link::layout::OutputSectionKind;
+    use crate::codegen::elf::SHT_PROGBITS;
 
     #[test]
     fn plt_entry_has_correct_displacement() {
