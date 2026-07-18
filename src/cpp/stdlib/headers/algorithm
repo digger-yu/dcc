@@ -1,0 +1,33 @@
+// <algorithm> - dcc++ C++ 标准库
+// 排序 / 查找 / 计数 / min / max
+
+extern "C" {
+    void dccpp_sort(void* base, size_t n, size_t esz, void* cmp);
+    void* dccpp_find(void* base, size_t n, size_t esz, const void* key, void* cmp);
+    size_t dccpp_count(void* base, size_t n, size_t esz, const void* key, void* cmp);
+    long long dccpp_min_ll(long long a, long long b);
+    long long dccpp_max_ll(long long a, long long b);
+    double    dccpp_min_f (double a, double b);
+    double    dccpp_max_f (double a, double b);
+}
+
+namespace std {
+    inline void sort(void* base, size_t n, size_t esz, void* cmp) {
+        dccpp_sort(base, n, esz, cmp);
+    }
+
+    inline void* find(void* base, size_t n, size_t esz, const void* key, void* cmp) {
+        return dccpp_find(base, n, esz, key, cmp);
+    }
+
+    inline size_t count(void* base, size_t n, size_t esz, const void* key, void* cmp) {
+        return dccpp_count(base, n, esz, key, cmp);
+    }
+
+    inline long long min(long long a, long long b) { return dccpp_min_ll(a, b); }
+    inline long long max(long long a, long long b) { return dccpp_max_ll(a, b); }
+    inline long long min(int a, int b) { return dccpp_min_ll(a, b); }
+    inline long long max(int a, int b) { return dccpp_max_ll(a, b); }
+    inline double    min(double a, double b) { return dccpp_min_f(a, b); }
+    inline double    max(double a, double b) { return dccpp_max_f(a, b); }
+}

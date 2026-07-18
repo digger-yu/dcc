@@ -1,0 +1,70 @@
+// <vector> - dcc++ C++ 标准库
+// std::vector<T> (无模板实例化, 元素按字节存储 + 析构回调)
+
+extern "C" {
+    struct dccpp_vector;
+
+    dccpp_vector* dccpp_vector_new(size_t elem_size, void* dtor);
+    void          dccpp_vector_free(dccpp_vector* v);
+    size_t        dccpp_vector_size(const dccpp_vector* v);
+    size_t        dccpp_vector_cap(const dccpp_vector* v);
+    int           dccpp_vector_empty(const dccpp_vector* v);
+    void          dccpp_vector_reserve(dccpp_vector* v, size_t n);
+    void          dccpp_vector_push_back_copy(dccpp_vector* v, const void* elem);
+    void          dccpp_vector_pop_back(dccpp_vector* v);
+    void*         dccpp_vector_at(dccpp_vector* v, size_t i);
+    void          dccpp_vector_clear(dccpp_vector* v);
+    void          dccpp_vector_resize(dccpp_vector* v, size_t n);
+}
+
+namespace std {
+    class vector {
+    public:
+        vector() : p_(dccpp_vector_new(1, 0)) {}
+        vector(size_t elem_size) : p_(dccpp_vector_new(elem_size, 0)) {}
+        vector(size_t elem_size, void* dtor)
+            : p_(dccpp_vector_new(elem_size, dtor)) {}
+        ~vector() { dccpp_vector_free(p_); }
+
+        vector(const vector& other) : p_(0) {
+            size_t n = dccpp_vector_size(other.p_);
+            p_ = dccpp_vector_new(1, 0);
+            for (size_t i = 0; i < n; ++i) {
+                dccpp_vector_push_back_copy(p_, dccpp_vector_at((dccpp_vector*)other.p_, i));
+            }
+        }
+
+        vector& operator=(const vector& other) {
+            if (this != &other) {
+                dccpp_vector_clear(p_);
+                size_t n = dccpp_vector_size(other.p_);
+                for (size_t i = 0; i < n; ++i) {
+                    dccpp_vector_push_back_copy(p_, dccpp_vector_at((dccpp_vector*)other.p_, i));
+                }
+            }
+            return *this;
+        }
+
+        void* at(size_t i) { return dccpp_vector_at(p_, i); }
+        const void* at(size_t i) const { return dccpp_vector_at((dccpp_vector*)p_, i); }
+
+        size_t size() const  { return dccpp_vector_size(p_); }
+        size_t capacity() const { return dccpp_vector_cap(p_); }
+        int    empty() const { return dccpp_vector_empty(p_); }
+
+        void reserve(size_t n) { dccpp_vector_reserve(p_, n); }
+        void clear()           { dccpp_vector_clear(p_); }
+        void resize(size_t n)  { dccpp_vector_resize(p_, n); }
+
+        void push_back_bytes(const void* elem) {
+            dccpp_vector_push_back_copy(p_, elem);
+        }
+
+        void pop_back() { dccpp_vector_pop_back(p_); }
+
+        void* data() { return dccpp_vector_at(p_, 0); }
+
+    private:
+        dccpp_vector* p_;
+    };
+}

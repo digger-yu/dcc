@@ -1,17 +1,26 @@
 //! C++ 编译驱动 (M7 最小).
 //!
-//! 流程: 读入 C++ 源 -> lex/parse -> lower 到 C 字符串 -> 写到
-//! 临时 .c 文件 -> 调 dcc C 驱动编译.
+//! 流程: 读入 C++ 源 -> C 预处理器 (展开 #include) -> lex/parse ->
+//! lower 到 C 字符串 -> 写到临时 .c 文件 -> 调 dcc C 驱动编译.
 //!
 //! 限制: M7 阶段只支持 .cpp → .o 一次性编译, 不支持单独头文件.
+//! M11 stdlib: 默认 include 路径加入 src/cpp/stdlib/headers,
+//!   允许 `#include <string>` / `#include <vector>` 等直接被解析.
 
 use std::fs;
+use std::path::PathBuf;
 use std::path::Path;
 use std::process::Command;
 
 use crate::cpp::CppError;
 use crate::cpp::lower::Lower;
 use crate::cpp::parser::CppParser;
+
+/// M11 stdlib 默认 include 路径 (含本 crate 的 stdlib/headers)
+pub fn default_stdlib_include() -> Option<PathBuf> {
+    let p = PathBuf::from("src/cpp/stdlib/headers");
+    if p.is_dir() { Some(p) } else { None }
+}
 
 /// 编译 C++ 源到 .o
 pub fn compile_cpp(
@@ -25,7 +34,35 @@ pub fn compile_cpp(
         .map_err(|e| CppError::Io(std::io::Error::new(e.kind(), format!("read {}: {}", cpp_src.display(), e))))?;
     let bytes = src.as_bytes();
     let file = cpp_src.to_str().unwrap_or("input.cpp");
-    let mut parser = CppParser::new(bytes, file);
+
+    // M11 stdlib: 先用 dcc C 预处理器展开 #include / #define / #ifndef
+    // 等预处理指令, 这样 dcc++ 的 parser 就可以处理已展开的源.
+    // 始终把 stdlib headers 加到 include 路径, 允许 #include <string>.
+    let mut all_includes: Vec<PathBuf> = include_paths.iter()
+        .map(PathBuf::from).collect();
+    if let Some(stdlib_inc) = default_stdlib_include() {
+        all_includes.push(stdlib_inc);
+    }
+    let (preprocessed, diags, _stats) =
+        crate::preproc::preprocess(
+            bytes, file,
+            &all_includes,
+            &[],                          /* system paths */
+            &[],                          /* defines */
+            crate::cli::StdMode::Gnu11,
+            &[],                          /* force includes */
+            false,                        /* freestanding */
+        );
+    if !diags.is_empty() {
+        let mut out = Vec::new();
+        for d in &diags {
+            out.push(d.clone());
+        }
+        return Err(CppError::Diagnostics(out));
+    }
+    let preprocessed_bytes = preprocessed.into_bytes();
+
+    let mut parser = CppParser::new(&preprocessed_bytes, file);
     let decls = parser.parse_top_level()
         .map_err(|e| CppError::Diagnostics(vec![e.to_diag(file)]))?;
     let mut lower = Lower::new();

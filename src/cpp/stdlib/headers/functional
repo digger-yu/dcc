@@ -1,0 +1,14 @@
+// <functional> - dcc++ C++ 标准库
+// std::function<> 占位 (类型擦除函数指针, 简化版)
+
+namespace std {
+    class function_t {
+    public:
+        function_t() : fp_(0) {}
+        function_t(void* fp) : fp_(fp) {}
+        void operator()() { /* fp_ 通过 dcc C 代码调用 */ }
+        int empty() { return fp_ == 0; }
+    private:
+        void* fp_;
+    };
+}

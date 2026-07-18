@@ -371,9 +371,11 @@ impl<'a> CppLexer<'a> {
             return Some(CppTok::C(Tok { kind: TokKind::AmpEq,
                 span: self.mk_span(2), text: "&=".to_string() }));
         }
-        if b == b'.' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'.' {
-            // ... 用于异常 catch (...), 变参模板
-            self.pos += 2; self.col += 2;
+        if b == b'.' && self.pos + 2 < self.src.len()
+            && self.src[self.pos + 1] == b'.' && self.src[self.pos + 2] == b'.'
+        {
+            // ... 用于异常 catch (...), 变参模板, C 变参
+            self.pos += 3; self.col += 3;
             return Some(CppTok::C(Tok { kind: TokKind::Ellipsis,
                 span: self.mk_span(3), text: "...".to_string() }));
         }

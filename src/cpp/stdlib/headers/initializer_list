@@ -1,0 +1,22 @@
+// <initializer_list> - dcc++ C++ 标准库
+// std::initializer_list 简化版 (无模板, 按字节存储)
+
+extern "C" {
+    struct dccpp_initializer_list {
+        const void* data;
+        size_t      n;
+    };
+}
+
+namespace std {
+    class initializer_list {
+    public:
+        initializer_list() : data_(0), n_(0) {}
+        initializer_list(const void* data, size_t n) : data_(data), n_(n) {}
+        const void* data() const { return data_; }
+        size_t      size() const { return n_; }
+    private:
+        const void* data_;
+        size_t      n_;
+    };
+}

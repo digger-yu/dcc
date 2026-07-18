@@ -246,6 +246,10 @@ pub enum CppDecl {
     },
     /// C++20 export 块声明 (M9: 占位, 立即展开为 no-op)
     ExportBlock(Vec<CppDecl>),
+    /// M11: extern "C" { ... } 原始块 (透传到 C 输出)
+    RawExternC,
+    /// M11: typedef 声明 (解析为 no-op, lower 时不产生 C 输出)
+    Typedef,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -443,8 +447,14 @@ impl<'a> CppParser<'a> {
     }
 
     fn parse_qualified_name(&mut self) -> Result<Vec<String>, CppParseError> {
+        let mut parts = vec![];
+        // 支持 `::name` (全局作用域) 与 `std::name` (命名空间) 等
+        if matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+            self.bump();
+            parts.push("".to_string());
+        }
         let first = self.expect_ident()?;
-        let mut parts = vec![first];
+        parts.push(first);
         while matches!(&self.peek, Some(CppTok::ColonColon(_))) {
             self.bump();
             parts.push(self.expect_ident()?);
@@ -452,12 +462,14 @@ impl<'a> CppParser<'a> {
         Ok(parts)
     }
 
-    /// 窥探 lexer 中第 n 个 token (n=1 表示当前 token 之后下一个)
+    /// 窥探 lexer 中第 n 个 token (n=0 表示当前 token, 1 表示下一个, ...)
     fn peek_token_at(&self, n: usize) -> Option<CppTok> {
+        if n == 0 { return self.peek.clone(); }
         let mut clone = self.lex.clone();
         let mut result = None;
         for _ in 0..n {
             result = clone.next_tok();
+            if result.is_none() { return result; }
         }
         result
     }
@@ -477,6 +489,10 @@ impl<'a> CppParser<'a> {
 
     /// 解析一条声明
     fn parse_decl(&mut self) -> Result<CppDecl, CppParseError> {
+        // typedef <type> <name>; (M11 stdlib: 解析为 no-op 占位)
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwTypedef, .. }))) {
+            return self.parse_typedef_decl();
+        }
         // 模板声明 (M8: 简化为占位)
         if self.at(CppKw::Template) {
             return self.parse_template_decl();
@@ -505,6 +521,10 @@ impl<'a> CppParser<'a> {
         if self.at(CppKw::Concept) {
             return self.parse_concept_decl();
         }
+        // extern "C" { ... } 块 (M11 stdlib: C 头引用)
+        if self.is_extern_c_block_start() {
+            return self.parse_extern_c_block();
+        }
         // class / struct Name (M8: 可继承)
         if self.at(CppKw::Class) {
             return self.parse_class_decl();
@@ -523,21 +543,88 @@ impl<'a> CppParser<'a> {
             return self.parse_free_fn();
         }
         // M9: 顶层声明以类型关键字开头 (`void f()`, `int g(int)`)
-        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwInt
-            | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
-            | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
-            | TokKind::KwSigned | TokKind::KwUnsigned
-            | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
-            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic
-            | TokKind::KwInline | TokKind::KwBool
-            | TokKind::KwAuto | TokKind::KwAtomic
-            | TokKind::KwRestrict, .. })))
-        {
+        // M11 stdlib: 支持返回类型带指针/引用, 如 `char* strcpy(char* dst, ...)`
+        // 同时支持 C++ 关键字 (CppTok::Kw) 与 C 关键字 (CppTok::C)
+        let is_type_kw_or_spec = matches!(&self.peek,
+            Some(CppTok::C(Tok { kind: TokKind::KwInt
+                | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+                | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+                | TokKind::KwSigned | TokKind::KwUnsigned
+                | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+                | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic
+                | TokKind::KwInline | TokKind::KwBool
+                | TokKind::KwAuto | TokKind::KwAtomic
+                | TokKind::KwRestrict, .. }))
+        ) || matches!(&self.peek,
+            Some(CppTok::Kw(CppKw::Inline | CppKw::Static
+                | CppKw::Const | CppKw::Volatile, _))
+        );
+        if is_type_kw_or_spec {
             // 区分: 顶层是自由函数 vs 顶层是带类型的变量声明
-            // 看后两个 token: 第二个是 ident, 第三个是 `(` 才是函数
-            let second = self.peek_token_at(1);
-            let is_fn = matches!(second, Some(CppTok::C(Tok { kind: TokKind::Ident, .. })))
-                && matches!(self.peek_token_at(2),
+            // 跳过类型后所有可能的指针/引用修饰, 找到 ident 名字, 然后看是不是 `(`.
+            let mut j = 1;
+            // 跳过 const/volatile
+            while matches!(self.peek_token_at(j),
+                Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)))
+            {
+                j += 1;
+            }
+            // 跳过额外的类型关键字 (例: `inline void*` 中的 void, `long long`,
+            // `unsigned char` 等) 或 typedef 标识符 (例: `FILE*`, `size_t`)
+            while let Some(tok) = self.peek_token_at(j) {
+                // C++ 关键字: inline, static, const, volatile
+                if let CppTok::Kw(k, _) = &tok {
+                    if matches!(k, CppKw::Inline | CppKw::Static
+                        | CppKw::Const | CppKw::Volatile) {
+                        j += 1;
+                        continue;
+                    }
+                }
+                // C 关键字: void, int, char, ...
+                if let CppTok::C(t) = &tok {
+                    if matches!(t.kind, TokKind::KwVoid | TokKind::KwInt
+                        | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+                        | TokKind::KwFloat | TokKind::KwDouble
+                        | TokKind::KwSigned | TokKind::KwUnsigned
+                        | TokKind::KwInline | TokKind::KwBool)
+                    {
+                        j += 1;
+                        continue;
+                    }
+                }
+                // typedef / 用户类型 ident: 仅当后面紧跟 `*` 或 `&` 或另一个 ident
+                // 时认为是类型 (例: `FILE*`, `size_t f`, `MyType&`).
+                // 注意: 单独的 ident 不被跳, 因为可能直接是函数名.
+                if let CppTok::C(Tok { kind: TokKind::Ident, .. }) = &tok {
+                    let next = self.peek_token_at(j + 1);
+                    if matches!(next,
+                        Some(CppTok::C(Tok { kind: TokKind::Star | TokKind::Amp, .. }))
+                        | Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))
+                    ) {
+                        j += 1;
+                        continue;
+                    }
+                }
+                break;
+            }
+            // 跳过 * 和 &
+            loop {
+                while matches!(self.peek_token_at(j),
+                    Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)))
+                {
+                    j += 1;
+                }
+                if matches!(self.peek_token_at(j),
+                    Some(CppTok::C(Tok { kind: TokKind::Star | TokKind::Amp, .. })))
+                {
+                    j += 1;
+                } else { break; }
+            }
+            let name_pos = j;
+            let name_tok = self.peek_token_at(name_pos);
+            let is_fn = matches!(name_tok,
+                Some(CppTok::C(Tok { kind: TokKind::Ident, .. })))
+                && matches!(self.peek_token_at(name_pos + 1),
                     Some(CppTok::C(Tok { kind: TokKind::LParen, .. })));
             if is_fn { return self.parse_free_fn(); }
         }
@@ -988,6 +1075,10 @@ impl<'a> CppParser<'a> {
                         _ => return self.parse_member_var(),
                     }
                 }
+                Some(CppTok::C(Tok { kind: TokKind::Star, .. })) => {
+                    // M11 stdlib: typedef 指针类型成员变量 `dccpp_ostream* p_;`
+                    return self.parse_member_var();
+                }
                 Some(CppTok::Kw(_, _)) => {
                     // 第二 token 是关键字: 可能是 `class operator+` (operator fn)
                     if self.is_operator_fn_start() {
@@ -995,37 +1086,184 @@ impl<'a> CppParser<'a> {
                     }
                     return Err(CppParseError::Unsupported("class member", self.span()));
                 }
+                Some(CppTok::C(Tok { kind: TokKind::Amp, .. })) => {
+                    // M11 stdlib: `T& operator=()` - 返回引用的 operator
+                    // 必须确保 & 后面是 `operator` 关键字, 不是普通 ident
+                    // (避免 `ostream& cout();` 这种自由函数被误判)
+                    self.bump();  // 跳过 T
+                    self.bump();  // 跳过 &
+                    if matches!(&self.peek, Some(CppTok::Kw(CppKw::Operator, _))) {
+                        return self.parse_operator_fn();
+                    }
+                    return Err(CppParseError::Unsupported("T& member", self.span()));
+                }
                 _ => return Err(CppParseError::Unsupported("class member", self.span())),
             }
         }
         // M9: 成员函数以类型关键字开头 (`int get() ...`, `void set(int) ...` 等)
-        // 由于 C++ lexer 现在把 int/void 等识别为 TokKind::KwInt 等, 需要直接走
-        // parse_member_fn_inline. 但要先看下一个 token 是否 ident 且再下一个
-        // token 是 `(`, 否则可能是 `int n_;` 这样的成员变量
-        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwInt
-            | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
-            | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
-            | TokKind::KwSigned | TokKind::KwUnsigned
-            | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
-            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic
-            | TokKind::KwInline | TokKind::KwBool
-            | TokKind::KwAuto | TokKind::KwAtomic
-            | TokKind::KwRestrict, .. })))
-        {
-            let second = self.peek_token_at(1);
-            let is_fn = matches!(second,
-                Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))
-            ) && matches!(self.peek_token_at(2),
-                Some(CppTok::C(Tok { kind: TokKind::LParen, .. }))
-            );
+        // M11 stdlib: 同样支持 C++ 关键字开头 (`const T& method()`) 与类型关键字 +
+        // * + 名 (`const void* data()`)
+        let is_type_kw_or_qual = matches!(&self.peek,
+            Some(CppTok::C(Tok { kind: TokKind::KwInt
+                | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+                | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+                | TokKind::KwSigned | TokKind::KwUnsigned
+                | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+                | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic
+                | TokKind::KwInline | TokKind::KwBool
+                | TokKind::KwAuto | TokKind::KwAtomic
+                | TokKind::KwRestrict, .. }))
+        ) || matches!(&self.peek,
+            Some(CppTok::Kw(CppKw::Const | CppKw::Volatile | CppKw::Static, _))
+        );
+        if is_type_kw_or_qual {
+            // M11 stdlib: 如果是 `Type operator ...` 模式, 走 parse_operator_fn
+            if self.is_operator_fn_start() {
+                return self.parse_operator_fn();
+            }
+            // 跳过 const/volatile 限定
+            let mut j = 1;
+            while matches!(self.peek_token_at(j),
+                Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)))
+            {
+                j += 1;
+            }
+            // 跳过 * 和 &
+            loop {
+                while matches!(self.peek_token_at(j),
+                    Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)))
+                {
+                    j += 1;
+                }
+                if matches!(self.peek_token_at(j),
+                    Some(CppTok::C(Tok { kind: TokKind::Star | TokKind::Amp, .. })))
+                {
+                    j += 1;
+                } else { break; }
+            }
+            // 此时 token[j] 应是 ident 函数名
+            let name_tok = self.peek_token_at(j);
+            let is_fn = matches!(name_tok,
+                Some(CppTok::C(Tok { kind: TokKind::Ident, .. })))
+                && matches!(self.peek_token_at(j + 1),
+                    Some(CppTok::C(Tok { kind: TokKind::LParen, .. })));
             return if is_fn { self.parse_member_fn_inline() } else { self.parse_member_var() };
         }
         Err(CppParseError::Unsupported("class member", self.span()))
     }
 
+    /// 判断当前位置是否是 `extern "C" { ... }` 块
+    fn is_extern_c_block_start(&self) -> bool {
+        // extern "C" { ... }
+        if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwExtern, .. }))) {
+            return false;
+        }
+        // 第二个 token 必须是字符串字面量 "C" 或 "c"
+        match self.peek_token_at(1) {
+            Some(CppTok::C(Tok { kind: TokKind::StringLit, text, .. })) => {
+                text == "\"C\"" || text == "\"c\""
+            }
+            _ => false,
+        }
+    }
+
+    /// 解析 `extern "C" { ... }` 块
+    ///
+    /// M11 stdlib: 解析 extern "C" 块内的所有声明, 透传给外层.
+    /// 这些是 C 函数的声明, 会在 lower 阶段作为 extern 转发.
+    fn parse_extern_c_block(&mut self) -> Result<CppDecl, CppParseError> {
+        // 跳过 `extern`
+        self.bump();
+        // 跳过字符串字面量 (例如 "C")
+        if let Some(CppTok::C(Tok { kind: TokKind::StringLit, .. })) = &self.peek {
+            self.bump();
+        }
+        // 期望 `{`
+        if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBrace, .. }))) {
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
+        }
+        self.bump();
+        // 简化: 跟踪花括号深度, 找到匹配的 `}` 为止.
+        // 块内内容透传, 不解析 (因为 C 头语法可能不被 dcc++ 完整支持).
+        let mut depth = 1i32;
+        while let Some(t) = self.peek.clone() {
+            match t {
+                CppTok::C(Tok { kind: TokKind::LBrace, .. }) => {
+                    self.bump();
+                    depth += 1;
+                }
+                CppTok::C(Tok { kind: TokKind::RBrace, .. }) => {
+                    self.bump();
+                    depth -= 1;
+                    if depth == 0 { break; }
+                }
+                _ => { self.bump(); }
+            }
+        }
+        // 用一个 RawExternC 节点占位 (lower 时整体输出 extern "C" { ... })
+        Ok(CppDecl::RawExternC)
+    }
+
+    /// 解析 typedef <type> <name>; (M11 stdlib: 简化, 作为占位)
+    fn parse_typedef_decl(&mut self) -> Result<CppDecl, CppParseError> {
+        self.bump();  // 跳过 `typedef`
+        // 跳过 <type> 部分 (这里简化: 只跳过 ident / 关键字 + 可能的 * / [N])
+        // 注意: 最后一个 ident 是 typedef 名称, 要留给 expect_ident.
+        // 所以 loop 中遇到 ident 时不能直接 bump, 需要 break.
+        // 简化策略: 跳过所有 * / 关键字, ident 留给 expect_ident
+        loop {
+            match &self.peek {
+                Some(CppTok::C(Tok { kind: TokKind::Star, .. })) => { self.bump(); }
+                Some(CppTok::C(Tok { kind: TokKind::KwChar | TokKind::KwInt
+                    | TokKind::KwShort | TokKind::KwLong
+                    | TokKind::KwFloat | TokKind::KwDouble
+                    | TokKind::KwVoid | TokKind::KwBool
+                    | TokKind::KwSigned | TokKind::KwUnsigned
+                    | TokKind::KwStruct | TokKind::KwUnion
+                    | TokKind::KwEnum | TokKind::KwConst
+                    | TokKind::KwVolatile | TokKind::KwStatic
+                    | TokKind::KwAtomic | TokKind::KwRestrict, .. })) => {
+                    self.bump();
+                }
+                _ => break,
+            }
+        }
+        // 期望 ident (typedef 名)
+        let _name = self.expect_ident()?;
+        // 跳过 `;`
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            self.bump();
+        }
+        // M11 stdlib: typedef 不在 lower 阶段产生任何输出 (lower 后的 C
+        // 代码会用 stddef.h 等系统头处理 size_t, NULL 等).
+        Ok(CppDecl::Typedef)
+    }
+
     /// 判断当前位置是否是 `Type operator ... (...)`
+    /// 形式: `T operator+(...)`, `T operator()(...)`, `operator()(...)` (无返回类型)
     fn is_operator_fn_start(&self) -> bool {
+        // 形式 A: ident operator...  (例: string operator+(...))
         if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = &self.peek {
+            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(1) {
+                return true;
+            }
+        }
+        // 形式 B: type-kw operator...  (例: int operator==(...), ostream& operator<<(...))
+        // 先跳过 const / volatile 限定, 再看 type-kw, 再看 `operator` 关键字
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwConst | TokKind::KwVolatile, .. }))) {
+            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(2) {
+                return true;
+            }
+        }
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwInt
+            | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+            | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+            | TokKind::KwSigned | TokKind::KwUnsigned
+            | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+            | TokKind::KwInline | TokKind::KwBool
+            | TokKind::KwAuto | TokKind::KwAtomic
+            | TokKind::KwRestrict, .. })))
+        {
             if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(1) {
                 return true;
             }
@@ -1040,14 +1278,26 @@ impl<'a> CppParser<'a> {
         // 形式 3: Type operator+(...)          (全局)
         // 形式 4: Class::operator()(...)        (类内 inline)
         // 形式 5: operator()(...)               (类内 inline, 无返回类型)
+        // 形式 6: const Type operator()(...)    (M11 stdlib: 限定符 + 类型)
         let mut ret = MangleType::Void;
-        let _consumed_ret = false;
-        if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = &self.peek {
-            if !is_reserved_word(text_of(&self.peek)) {
-                if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(1) {
-                    ret = self.parse_mangle_type()?;
-                }
-            }
+        // 判断是否需要解析返回类型
+        // 1) Ident 后面是 `operator`  -> 不解析 (Ident 可能是类名)
+        // 2) Ident 后面是 `:: operator`  -> 不解析 (Ident 是类名)
+        // 3) 关键字后面是 `operator`  -> 解析为返回类型
+        let need_ret = match &self.peek {
+            Some(CppTok::C(Tok { kind: TokKind::KwInt
+                | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+                | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+                | TokKind::KwSigned | TokKind::KwUnsigned
+                | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+                | TokKind::KwConst | TokKind::KwVolatile
+                | TokKind::KwInline | TokKind::KwBool
+                | TokKind::KwAuto | TokKind::KwAtomic
+                | TokKind::KwRestrict, .. })) => true,
+            _ => false,
+        };
+        if need_ret {
+            ret = self.parse_mangle_type()?;
         }
         let mut class: Option<String> = None;
         if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = &self.peek {
@@ -1077,6 +1327,13 @@ impl<'a> CppParser<'a> {
         let saved = self.peek.clone();
         let t1 = self.bump();
         if let Some(t1) = t1 {
+            // 先看 t1 自己是否已经是组合 token (如 PlusEq, Shl, EqEq 等)
+            // M11 stdlib: 直接按 TokKind 映射, 避免多字符组合错误.
+            if let CppTok::C(tok) = &t1 {
+                if let Some(op) = crate::cpp::mangle::from_tok_kind(&tok.kind) {
+                    return Ok(op);
+                }
+            }
             let s1 = match &t1 {
                 CppTok::C(Tok { kind: TokKind::Plus, .. }) => "+",
                 CppTok::C(Tok { kind: TokKind::Minus, .. }) => "-",
@@ -1096,12 +1353,14 @@ impl<'a> CppParser<'a> {
                 CppTok::C(Tok { kind: TokKind::LBracket, .. }) => "[]",
                 _ => "",
             };
-            // 尝试 2-char 组合
-            let two = format!("{}{}", s1, peek_two_str(&self.peek));
-            if let Some(op) = Operator::from_token(&two) {
-                // 吃掉第二个字符
-                if two.len() == 2 { self.bump(); }
-                return Ok(op);
+            // 尝试 2-char 组合 (只当 s1 是单字符时)
+            if s1.len() == 1 {
+                let two = format!("{}{}", s1, peek_two_str(&self.peek));
+                if let Some(op) = Operator::from_token(&two) {
+                    // 吃掉第二个字符 (s1 已 bump, 还要再 bump 第二个)
+                    if two.len() == 2 { self.bump(); }
+                    return Ok(op);
+                }
             }
             if let Some(op) = Operator::from_token(s1) {
                 return Ok(op);
@@ -1121,6 +1380,12 @@ impl<'a> CppParser<'a> {
             if matches!(t, CppTok::C(Tok { kind: TokKind::RParen, .. })) { break; }
             // 跳过 const 限定 (例如 `T const&` 表达成 const T& )
             if self.at(CppKw::Const) { self.bump(); continue; }
+            // M11 stdlib: variadic `...` (C 风格变参)
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Ellipsis, .. }))) {
+                self.bump();
+                params.push(("...".to_string(), MangleType::Void));
+                break;
+            }
             let mut ty = self.parse_mangle_type()?;
             // 跳过 const 后缀限定
             if self.at(CppKw::Const) { self.bump(); }
@@ -1280,9 +1545,11 @@ impl<'a> CppParser<'a> {
         };
         // 跳过 const 限定后缀 (`int const*` 等)
         if self.at(CppKw::Const) { self.bump(); }
-        // 吞 unsigned long long / long long 这种组合
+        // 吞 unsigned long long / long long / unsigned char / signed int 等组合
+        // M11 stdlib: signed/unsigned 后可跟 char/short/int/long/long long
         while matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwLong
-            | TokKind::KwShort, .. }))) {
+            | TokKind::KwShort | TokKind::KwChar | TokKind::KwInt
+            | TokKind::KwSigned | TokKind::KwUnsigned, .. }))) {
             self.bump();
         }
         while matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Star, .. }))) {
@@ -1322,6 +1589,15 @@ impl<'a> CppParser<'a> {
     }
 
     fn parse_free_fn(&mut self) -> Result<CppDecl, CppParseError> {
+        // 跳过函数说明符 (inline, static, virtual, explicit, ...)
+        loop {
+            let is_spec = match &self.peek {
+                Some(CppTok::Kw(CppKw::Inline | CppKw::Static
+                    | CppKw::Virtual | CppKw::Explicit, _)) => true,
+                _ => false,
+            };
+            if is_spec { self.bump(); } else { break; }
+        }
         let ret = self.parse_mangle_type()?;
         let name = self.expect_ident()?;
         let params = self.parse_param_list()?;
@@ -1342,6 +1618,16 @@ impl<'a> CppParser<'a> {
         }
         self.bump();
         Ok(CppBody { stmts })
+    }
+
+    /// 解析 body 或单个 stmt (用于 if/while 等的 body, 支持无 `{}` 的单语句)
+    fn parse_body_or_stmt(&mut self) -> Result<CppBody, CppParseError> {
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBrace, .. }))) {
+            self.parse_body()
+        } else {
+            let stmt = self.parse_stmt()?;
+            Ok(CppBody { stmts: vec![stmt] })
+        }
     }
 
     fn parse_stmt(&mut self) -> Result<CppStmt, CppParseError> {
@@ -1486,10 +1772,10 @@ impl<'a> CppParser<'a> {
             return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
-        let then = self.parse_body()?;
+        let then = self.parse_body_or_stmt()?;
         let els = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwElse, .. }))) {
             self.bump();
-            Some(Box::new(self.parse_body()?))
+            Some(Box::new(self.parse_body_or_stmt()?))
         } else { None };
         Ok(CppStmt::If { cond, then: Box::new(then), els })
     }
@@ -1505,7 +1791,7 @@ impl<'a> CppParser<'a> {
             return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
-        let body = self.parse_body()?;
+        let body = self.parse_body_or_stmt()?;
         Ok(CppStmt::While { cond, body: Box::new(body) })
     }
 
@@ -1984,7 +2270,31 @@ impl<'a> CppParser<'a> {
             return Ok(CppExpr::IntLit(v));
         }
         if let Some(CppTok::C(Tok { kind: TokKind::LParen, .. })) = &self.peek {
+            // M11 stdlib: 区分 C 风格转换 `(T)expr` 与括号表达式 `(expr)`.
+            // 先保存 lexer 状态, 尝试解析类型, 如果类型后是 `)` 则认为是转换.
+            // 否则回退为括号表达式.
+            let saved = self.lex.clone();
             self.bump();
+            match self.parse_mangle_type() {
+                Ok(ty) => {
+                    if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RParen, .. }))) {
+                        // 确认是 C 风格转换
+                        self.bump(); // 吞 `)`
+                        let e = self.parse_unary()?;
+                        return Ok(CppExpr::Cast(ty, Box::new(e)));
+                    }
+                    // 不是转换, 恢复 lexer 状态, 重新解析为括号表达式
+                    self.lex = saved;
+                    self.peek = self.lex.next_tok();
+                }
+                Err(_) => {
+                    // 解析类型失败, 恢复 lexer 状态
+                    self.lex = saved;
+                    self.peek = self.lex.next_tok();
+                }
+            }
+            // 普通括号表达式
+            self.bump(); // 吞 `(`
             let e = self.parse_expr()?;
             if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RParen, .. }))) {
                 return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
@@ -2026,6 +2336,14 @@ impl<'a> CppParser<'a> {
                 }
             }
             return Ok(CppExpr::Ident(name));
+        }
+        // M11 stdlib: `::name` 全局作用域访问
+        if matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+            let parts = self.parse_qualified_name()?;
+            if let Some(last) = parts.last().cloned() {
+                let path = parts[..parts.len()-1].to_vec();
+                return Ok(CppExpr::QualifiedAccess(path, last));
+            }
         }
         // 把 `auto` 当作类型占位 (M8: 不做实际类型推断)
         if let Some(CppTok::C(Tok { kind: TokKind::KwAuto, .. })) = &self.peek {
@@ -2166,42 +2484,103 @@ impl<'a> CppParser<'a> {
 
     /// M9: 判断当前位置是否是局部变量声明
     /// 形式: `Type name;` / `Type name = init;` / `Type name(args);`
-    /// 要求: 第一 token 是类型关键字 / auto / 用户自定义类型 ident, 第二是 ident,
-    ///      第三是 `;` `=` 或 `(`.
+    /// 要求: 第一段是类型关键字 / auto / 用户自定义类型 ident (允许 const/volatile
+    ///      限定, char/short/int/long 等类型说明符, * 与 & 修饰), 后面跟 ident
+    ///      作为变量名, 再跟 `;` `=` 或 `(`.
     /// 用户自定义类型 ident 不能是 C/C++ 关键字或保留字 (避免与 `if (...)` 冲突).
     /// M10+: 支持 `static Type name = init;` 静态局部变量
+    /// M11: 支持多 token 类型如 `const char* p = ...;` 与 `ostream& r = ...;`
+    /// 同时识别 C++ 关键字 (CppTok::Kw: const, volatile, static) 和 C 关键字
+    /// (CppTok::C: int, char, void 等).
     fn is_local_var_decl_start(&self) -> bool {
-        let mut is_static = false;
-        if self.at(CppKw::Static) {
-            is_static = true;
-        }
-        let next1 = if is_static { self.peek_token_at(1) } else { self.peek.clone() };
-        let is_type_kw = matches!(next1, Some(CppTok::C(Tok { kind: TokKind::KwInt
-            | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
-            | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
-            | TokKind::KwSigned | TokKind::KwUnsigned
-            | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
-            | TokKind::KwConst | TokKind::KwVolatile
-            | TokKind::KwInline | TokKind::KwBool
-            | TokKind::KwAuto | TokKind::KwAtomic
-            | TokKind::KwRestrict, .. })));
-        let first_is_ident_type = if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &next1 {
-            !is_reserved_word(text)
-        } else { false };
-        if !is_type_kw && !first_is_ident_type { return false; }
-        // 第二 token 必须是 ident
-        let second_offset = if is_static { 2 } else { 1 };
-        let second = self.peek_token_at(second_offset);
-        if !matches!(second, Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))) {
+        let mut i = 0;
+        // 跳过 static
+        let is_static = self.at(CppKw::Static);
+        if is_static { i += 1; }
+        // 跳过 const/volatile 限定符
+        while self.is_qualifier_at(i) { i += 1; }
+        // 第一个类型说明符
+        let first = self.peek_token_at(i);
+        if !self.is_type_specifier(first.as_ref()) {
             return false;
         }
-        // 第三 token 必须是 `;` `=` `(` 之一 (C++ 风格声明)
-        let third = self.peek_token_at(second_offset + 1);
-        matches!(third,
+        i += 1;
+        // 允许 multi-token 类型: long long, short int, unsigned char, signed int 等
+        // 只要下一个 token 是另一个类型说明符 (char/short/long/int/float/double/signed/unsigned)
+        // 或后置限定 (const/volatile) 或指针/引用, 就继续
+        loop {
+            if self.is_qualifier_at(i) { i += 1; continue; }
+            if self.is_extra_type_spec_at(i) { i += 1; continue; }
+            break;
+        }
+        // * 或 & 修饰 (允许交错 const/volatile)
+        loop {
+            while self.is_qualifier_at(i) { i += 1; }
+            if self.is_star_amp_at(i) { i += 1; } else { break; }
+        }
+        // 此时第 i 个 token 应是变量名 (ident)
+        let name_tok = self.peek_token_at(i);
+        if !matches!(name_tok, Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))) {
+            return false;
+        }
+        // 第 i+1 个 token 必须是 `;` `=` `(` 之一
+        let after_name = self.peek_token_at(i + 1);
+        matches!(after_name,
             Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))
             | Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))
             | Some(CppTok::C(Tok { kind: TokKind::LParen, .. }))
         )
+    }
+
+    /// 第 i 个 token 是否是除第一个类型说明符之外的其他类型说明符
+    /// 用于 multi-token 类型如 `unsigned char` / `long long` / `long int`
+    fn is_extra_type_spec_at(&self, i: usize) -> bool {
+        match self.peek_token_at(i) {
+            Some(CppTok::C(Tok { kind: TokKind::KwChar
+                | TokKind::KwShort | TokKind::KwLong
+                | TokKind::KwInt | TokKind::KwFloat | TokKind::KwDouble
+                | TokKind::KwSigned | TokKind::KwUnsigned, .. })) => true,
+            _ => false,
+        }
+    }
+
+    /// 第 i 个 token 是否是 const/volatile/restrict 限定符
+    fn is_qualifier_at(&self, i: usize) -> bool {
+        match self.peek_token_at(i) {
+            Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)) => true,
+            _ => false,
+        }
+    }
+
+    /// 第 i 个 token 是否是 long / short
+    fn is_long_short_at(&self, i: usize) -> bool {
+        match self.peek_token_at(i) {
+            Some(CppTok::C(Tok { kind: TokKind::KwLong | TokKind::KwShort, .. })) => true,
+            _ => false,
+        }
+    }
+
+    /// 第 i 个 token 是否是 * 或 &
+    fn is_star_amp_at(&self, i: usize) -> bool {
+        match self.peek_token_at(i) {
+            Some(CppTok::C(Tok { kind: TokKind::Star | TokKind::Amp, .. })) => true,
+            _ => false,
+        }
+    }
+
+    /// 第 i 个 token 是否是类型说明符 (int/char/.../auto/用户类型 ident)
+    fn is_type_specifier(&self, t: Option<&CppTok>) -> bool {
+        match t {
+            Some(CppTok::C(Tok { kind: TokKind::KwInt
+                | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+                | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+                | TokKind::KwSigned | TokKind::KwUnsigned
+                | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+                | TokKind::KwInline | TokKind::KwBool
+                | TokKind::KwAuto | TokKind::KwAtomic, .. })) => true,
+            Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) => !is_reserved_word(text),
+            _ => false,
+        }
     }
 
     /// M9: 解析局部变量声明

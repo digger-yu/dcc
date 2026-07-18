@@ -1,0 +1,40 @@
+// <cstdlib> - dcc++ C++ 标准库
+// malloc / free / atoi / exit 等 (薄包装 libc)
+
+extern "C" {
+    void*  malloc(size_t n);
+    void*  calloc(size_t nmemb, size_t sz);
+    void*  realloc(void* p, size_t n);
+    void   free(void* p);
+    int    atoi(const char* s);
+    long   atol(const char* s);
+    long long atoll(const char* s);
+    double atof(const char* s);
+    long   strtol(const char* s, char** end, int base);
+    unsigned long strtoul(const char* s, char** end, int base);
+    void   exit(int code);
+    void   abort(void);
+    int    system(const char* cmd);
+    char*  getenv(const char* name);
+    int    rand(void);
+    void   srand(unsigned seed);
+}
+
+namespace std {
+    inline void*  malloc(size_t n) { return ::malloc(n); }
+    inline void*  calloc(size_t nmemb, size_t sz) { return ::calloc(nmemb, sz); }
+    inline void*  realloc(void* p, size_t n) { return ::realloc(p, n); }
+    inline void   free(void* p) { ::free(p); }
+    inline int    atoi(const char* s) { return ::atoi(s); }
+    inline long   atol(const char* s) { return ::atol(s); }
+    inline long long atoll(const char* s) { return ::atoll(s); }
+    inline double atof(const char* s) { return ::atof(s); }
+    inline long   strtol(const char* s, char** end, int base) { return ::strtol(s, end, base); }
+    inline unsigned long strtoul(const char* s, char** end, int base) { return ::strtoul(s, end, base); }
+    inline void   exit(int code) { ::exit(code); }
+    inline void   abort(void) { ::abort(); }
+    inline int    system(const char* cmd) { return ::system(cmd); }
+    inline char*  getenv(const char* name) { return ::getenv(name); }
+    inline int    rand(void) { return ::rand(); }
+    inline void   srand(unsigned seed) { ::srand(seed); }
+}

@@ -1,0 +1,168 @@
+// <iostream> - dcc++ C++ 标准库
+// cout / cin / cerr 全局对象 + << / >> 操作符 (简化版, 无 endl 操纵器)
+
+extern "C" {
+    struct dccpp_ostream;
+    struct dccpp_istream;
+
+    dccpp_ostream* dccpp_cout(void);
+    dccpp_ostream* dccpp_cerr(void);
+    dccpp_istream* dccpp_cin(void);
+
+    void dccpp_ostream_putc(dccpp_ostream* os, char c);
+    void dccpp_ostream_puts(dccpp_ostream* os, const char* s);
+    void dccpp_ostream_write(dccpp_ostream* os, const char* p, size_t n);
+    void dccpp_ostream_flush(dccpp_ostream* os);
+    void dccpp_ostream_i64(dccpp_ostream* os, long long v);
+    void dccpp_ostream_u64(dccpp_ostream* os, unsigned long long v);
+    void dccpp_ostream_f64(dccpp_ostream* os, double v);
+    void dccpp_ostream_ptr(dccpp_ostream* os, const void* p);
+    void dccpp_ostream_bool(dccpp_ostream* os, int v);
+    void dccpp_ostream_endl(dccpp_ostream* os);
+
+    int  dccpp_istream_getc(dccpp_istream* is);
+    int  dccpp_istream_eof(dccpp_istream* is);
+    void dccpp_istream_i64(dccpp_istream* is, long long* out);
+    void dccpp_istream_u64(dccpp_istream* is, unsigned long long* out);
+    void dccpp_istream_f64(dccpp_istream* is, double* out);
+}
+
+namespace std {
+    class ostream {
+    public:
+        ostream() : p_(0) {}
+        ostream(dccpp_ostream* impl) : p_(impl) {}
+
+        ostream& operator<<(const char* s) {
+            dccpp_ostream_puts(p_, s);
+            return *this;
+        }
+        ostream& operator<<(char c) {
+            dccpp_ostream_putc(p_, c);
+            return *this;
+        }
+        ostream& operator<<(int v) {
+            dccpp_ostream_i64(p_, v);
+            return *this;
+        }
+        ostream& operator<<(unsigned v) {
+            dccpp_ostream_u64(p_, v);
+            return *this;
+        }
+        ostream& operator<<(long v) {
+            dccpp_ostream_i64(p_, v);
+            return *this;
+        }
+        ostream& operator<<(unsigned long v) {
+            dccpp_ostream_u64(p_, v);
+            return *this;
+        }
+        ostream& operator<<(long long v) {
+            dccpp_ostream_i64(p_, v);
+            return *this;
+        }
+        ostream& operator<<(unsigned long long v) {
+            dccpp_ostream_u64(p_, v);
+            return *this;
+        }
+        ostream& operator<<(double v) {
+            dccpp_ostream_f64(p_, v);
+            return *this;
+        }
+        ostream& operator<<(float v) {
+            dccpp_ostream_f64(p_, v);
+            return *this;
+        }
+        ostream& operator<<(const void* p) {
+            dccpp_ostream_ptr(p_, p);
+            return *this;
+        }
+        ostream& operator<<(bool v) {
+            dccpp_ostream_bool(p_, v);
+            return *this;
+        }
+
+        void flush() { dccpp_ostream_flush(p_); }
+
+    private:
+        dccpp_ostream* p_;
+    };
+
+    class istream {
+    public:
+        istream() : p_(0) {}
+        istream(dccpp_istream* impl) : p_(impl) {}
+
+        istream& operator>>(int& v) {
+            long long x = 0;
+            dccpp_istream_i64(p_, &x);
+            v = (int)x;
+            return *this;
+        }
+        istream& operator>>(long& v) {
+            long long x = 0;
+            dccpp_istream_i64(p_, &x);
+            v = (long)x;
+            return *this;
+        }
+        istream& operator>>(long long& v) {
+            dccpp_istream_i64(p_, &v);
+            return *this;
+        }
+        istream& operator>>(unsigned& v) {
+            unsigned long long x = 0;
+            dccpp_istream_u64(p_, &x);
+            v = (unsigned)x;
+            return *this;
+        }
+        istream& operator>>(unsigned long& v) {
+            unsigned long long x = 0;
+            dccpp_istream_u64(p_, &x);
+            v = (unsigned long)x;
+            return *this;
+        }
+        istream& operator>>(unsigned long long& v) {
+            dccpp_istream_u64(p_, &v);
+            return *this;
+        }
+        istream& operator>>(double& v) {
+            dccpp_istream_f64(p_, &v);
+            return *this;
+        }
+        istream& operator>>(float& v) {
+            double x = 0;
+            dccpp_istream_f64(p_, &x);
+            v = (float)x;
+            return *this;
+        }
+        istream& operator>>(char& c) {
+            int x = dccpp_istream_getc(p_);
+            c = (char)x;
+            return *this;
+        }
+
+        int get() { return dccpp_istream_getc(p_); }
+        int eof() { return dccpp_istream_eof(p_); }
+
+    private:
+        dccpp_istream* p_;
+    };
+
+    inline ostream& cout() {
+        static ostream os(dccpp_cout());
+        return os;
+    }
+    inline ostream& cerr() {
+        static ostream os(dccpp_cerr());
+        return os;
+    }
+    inline istream& cin() {
+        static istream is(dccpp_cin());
+        return is;
+    }
+
+    inline ostream& endl(ostream& os) {
+        dccpp_ostream_endl(0);
+        return os;
+    }
+}

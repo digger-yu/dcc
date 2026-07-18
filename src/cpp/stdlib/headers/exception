@@ -1,0 +1,80 @@
+// <exception> - dcc++ C++ 标准库
+// std::exception 基类 + throw 集成 (简化版: 无继承, 无 protected)
+
+extern "C" {
+    void __cxa_throw(void*, void*, void* dtor);
+    void* __cxa_allocate_exception(size_t);
+    void __cxa_free_exception(void*);
+    void* __cxa_begin_catch(void*);
+    void __cxa_end_catch(void);
+
+    void dccpp_throw_bad_alloc(void);
+    void dccpp_throw_runtime_error(const char* msg);
+    void dccpp_throw_out_of_range(const char* msg);
+    const char* dccpp_exception_what(void* exc);
+}
+
+namespace std {
+    class exception {
+    public:
+        exception() : msg_(0) {}
+        exception(const char* msg) : msg_(msg) {}
+        const char* what() {
+            return msg_ ? msg_ : "std::exception";
+        }
+        ~exception() {}
+    public:
+        const char* msg_;
+    };
+
+    class bad_alloc {
+    public:
+        bad_alloc() {}
+    };
+
+    class runtime_error {
+    public:
+        runtime_error(const char* msg) : msg_(msg) {}
+    public:
+        const char* msg_;
+    };
+
+    class out_of_range {
+    public:
+        out_of_range(const char* msg) : msg_(msg) {}
+    public:
+        const char* msg_;
+    };
+
+    class logic_error {
+    public:
+        logic_error(const char* msg) : msg_(msg) {}
+    public:
+        const char* msg_;
+    };
+
+    class invalid_argument {
+    public:
+        invalid_argument(const char* msg) : msg_(msg) {}
+    public:
+        const char* msg_;
+    };
+
+    class domain_error {
+    public:
+        domain_error(const char* msg) : msg_(msg) {}
+    public:
+        const char* msg_;
+    };
+
+    class length_error {
+    public:
+        length_error(const char* msg) : msg_(msg) {}
+    public:
+        const char* msg_;
+    };
+
+    inline void throw_bad_alloc() { dccpp_throw_bad_alloc(); }
+    inline void throw_runtime_error(const char* m) { dccpp_throw_runtime_error(m); }
+    inline void throw_out_of_range(const char* m) { dccpp_throw_out_of_range(m); }
+}

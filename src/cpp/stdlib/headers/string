@@ -1,0 +1,103 @@
+// <string> - dcc++ C++ 标准库
+// std::string (无模板, 包装 dccpp_string C 运行时)
+
+extern "C" {
+    struct dccpp_string;
+
+    dccpp_string* dccpp_string_new(void);
+    dccpp_string* dccpp_string_from_cstr(const char* s);
+    void          dccpp_string_free(dccpp_string* s);
+    size_t        dccpp_string_size(const dccpp_string* s);
+    const char*   dccpp_string_cstr(const dccpp_string* s);
+    void          dccpp_string_push_back(dccpp_string* s, char c);
+    void          dccpp_string_append(dccpp_string* s, const char* p, size_t n);
+    int           dccpp_string_eq(const dccpp_string* a, const dccpp_string* b);
+    int           dccpp_string_eq_cstr(const dccpp_string* a, const char* b);
+    char          dccpp_string_at(const dccpp_string* s, size_t i);
+    void          dccpp_string_clear(dccpp_string* s);
+    size_t        dccpp_string_strlen(const char* s);
+}
+
+namespace std {
+    class string {
+    public:
+        string() : p_(dccpp_string_new()) {}
+        string(const char* s) : p_(dccpp_string_from_cstr(s)) {}
+        string(const string& other) : p_(dccpp_string_from_cstr(dccpp_string_cstr(other.p_))) {}
+        ~string() { dccpp_string_free(p_); }
+
+        string& operator=(const string& other) {
+            if (this != &other) {
+                dccpp_string_free(p_);
+                p_ = dccpp_string_from_cstr(dccpp_string_cstr(other.p_));
+            }
+            return *this;
+        }
+
+        string& operator=(const char* s) {
+            dccpp_string_free(p_);
+            p_ = dccpp_string_from_cstr(s);
+            return *this;
+        }
+
+        string& operator+=(const string& other) {
+            dccpp_string_append(p_, dccpp_string_cstr(other.p_), dccpp_string_size(other.p_));
+            return *this;
+        }
+
+        string& operator+=(const char* s) {
+            size_t n = dccpp_string_strlen(s);
+            dccpp_string_append(p_, s, n);
+            return *this;
+        }
+
+        string& operator+=(char c) {
+            dccpp_string_push_back(p_, c);
+            return *this;
+        }
+
+        int operator==(const string& other) const { return dccpp_string_eq(p_, other.p_); }
+        int operator!=(const string& other) const {
+            int eq = dccpp_string_eq(p_, other.p_);
+            return !eq;
+        }
+        int operator==(const char* s)        const { return dccpp_string_eq_cstr(p_, s); }
+        int operator!=(const char* s)        const {
+            int eq = dccpp_string_eq_cstr(p_, s);
+            return !eq;
+        }
+        int operator<(const string& other)   const {
+            const char* a = dccpp_string_cstr(p_);
+            const char* b = dccpp_string_cstr(other.p_);
+            while (*a && *b && *a == *b) { a++; b++; }
+            int av = *a;
+            int bv = *b;
+            return av < bv;
+        }
+
+        char  at(size_t i) const { return dccpp_string_at(p_, i); }
+        const char* c_str() const { return dccpp_string_cstr(p_); }
+        size_t size()      const { return dccpp_string_size(p_); }
+        int    empty()     const { return dccpp_string_size(p_) == 0; }
+
+        void push_back(char c) { dccpp_string_push_back(p_, c); }
+        void append(const char* s) { *this += s; }
+        void append(const string& other) { *this += other; }
+        void clear() { dccpp_string_clear(p_); }
+
+        const char* data() const { return dccpp_string_cstr(p_); }
+
+    private:
+        dccpp_string* p_;
+    };
+
+    inline string operator+(const string& a, const char* b) {
+        string r = a; r += b; return r;
+    }
+    inline string operator+(const string& a, const string& b) {
+        string r = a; r += b; return r;
+    }
+    inline string operator+(const char* a, const string& b) {
+        string r(a); r += b; return r;
+    }
+}

@@ -1,0 +1,47 @@
+// <typeinfo> - dcc++ C++ 标准库
+// std::type_info 包装 (无 friend, 简化版)
+
+extern "C" {
+    struct dccpp_typeinfo;
+
+    const char* dccpp_typeinfo_name(const dccpp_typeinfo* ti);
+    int         dccpp_typeinfo_eq(const dccpp_typeinfo* a, const dccpp_typeinfo* b);
+    dccpp_typeinfo* dccpp_typeid_int(void);
+    dccpp_typeinfo* dccpp_typeid_char(void);
+    dccpp_typeinfo* dccpp_typeid_void(void);
+    dccpp_typeinfo* dccpp_typeid_double(void);
+    dccpp_typeinfo* dccpp_typeid_bool(void);
+}
+
+namespace std {
+    class type_info {
+    public:
+        type_info() : impl_(0) {}
+        const char* name() { return dccpp_typeinfo_name(impl_); }
+        int operator==(type_info& other) {
+            return dccpp_typeinfo_eq(impl_, other.impl_);
+        }
+        int operator!=(type_info& other) {
+            int eq = dccpp_typeinfo_eq(impl_, other.impl_);
+            return !eq;
+        }
+    private:
+        const dccpp_typeinfo* impl_;
+    };
+
+    inline type_info dccpp_typeid_int(void)    { type_info t; return t; }
+    inline type_info dccpp_typeid_char(void)   { type_info t; return t; }
+    inline type_info dccpp_typeid_void(void)   { type_info t; return t; }
+    inline type_info dccpp_typeid_double(void) { type_info t; return t; }
+    inline type_info dccpp_typeid_bool(void)   { type_info t; return t; }
+
+    class bad_cast {
+    public:
+        bad_cast() {}
+    };
+
+    class bad_typeid {
+    public:
+        bad_typeid() {}
+    };
+}

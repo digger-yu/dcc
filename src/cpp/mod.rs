@@ -30,6 +30,7 @@
 //!   - mangle.rs: Itanium C++ ABI 名字修饰
 //!   - lower.rs:  C++ AST → dcc C 风格声明 / 函数
 //!   - m10.rs:    M10+ SFINAE / partial spec / concept / 协程 / RTTI 等
+//!   - std/:      M11 C++ 标准库 (头 + C 运行时)
 //!   - driver.rs: 顶层入口, 串 lexer→parser→lower→dcc driver
 //!
 //! 限制: C++ 前端在 M7+ 阶段只支持 dcc 既有的 C 子集能直接
@@ -44,6 +45,7 @@ pub mod parser;
 pub mod mangle;
 pub mod lower;
 pub mod m10;
+pub mod stdlib;
 pub mod driver;
 
 use std::path::PathBuf;

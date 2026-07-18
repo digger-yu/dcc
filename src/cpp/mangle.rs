@@ -24,6 +24,8 @@
 //!   vtable for Foo             -> _ZTV3Foo
 //!   typeinfo for Foo           -> _ZTI3Foo
 
+use crate::tokens::TokKind;
+
 /// 类型编码 (M7 范围: 内置类型 + 类引用)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MangleType {
@@ -292,6 +294,49 @@ impl Operator {
             _ => return None,
         })
     }
+}
+
+/// 把 lexer 输出的 TokKind 直接映射到 Operator (M11 stdlib).
+/// lexer 会把 `+=` 合并成 `PlusEq` 等, 因此按字符字面量匹配不可靠.
+/// 这里按 TokKind 一对一映射, 避免重复消费.
+pub fn from_tok_kind(kind: &TokKind) -> Option<Operator> {
+    use Operator as Op;
+    Some(match kind {
+        TokKind::Plus => Op::Add,
+        TokKind::Minus => Op::Sub,
+        TokKind::Star => Op::Mul,
+        TokKind::Slash => Op::Div,
+        TokKind::Percent => Op::Mod,
+        TokKind::Shl => Op::Shl,
+        TokKind::Shr => Op::Shr,
+        TokKind::Amp => Op::And,
+        TokKind::Pipe => Op::Or,
+        TokKind::Caret => Op::Xor,
+        TokKind::EqEq => Op::Eq,
+        TokKind::Ne => Op::Ne,
+        TokKind::Lt => Op::Lt,
+        TokKind::Le => Op::Le,
+        TokKind::Gt => Op::Gt,
+        TokKind::Ge => Op::Ge,
+        TokKind::AndAnd => Op::LAnd,
+        TokKind::OrOr => Op::LOr,
+        TokKind::Assign => Op::Assign,
+        TokKind::PlusEq => Op::AddAssign,
+        TokKind::MinusEq => Op::SubAssign,
+        TokKind::StarEq => Op::MulAssign,
+        TokKind::SlashEq => Op::DivAssign,
+        TokKind::PercentEq => Op::ModAssign,
+        TokKind::ShlEq => Op::ShlAssign,
+        TokKind::ShrEq => Op::ShrAssign,
+        TokKind::AmpEq => Op::AndAssign,
+        TokKind::PipeEq => Op::OrAssign,
+        TokKind::CaretEq => Op::XorAssign,
+        TokKind::LParen => Op::Call,
+        TokKind::LBracket => Op::Index,
+        TokKind::Arrow => Op::Arrow,
+        TokKind::Comma => Op::Comma,
+        _ => return None,
+    })
 }
 
 /// 运算符重载函数修饰 (成员或非成员)

@@ -1,0 +1,28 @@
+// <cstring> - dcc++ C++ 标准库
+// strlen / memcpy / strcmp / strcpy 等 (薄包装 libc)
+
+extern "C" {
+    size_t strlen(const char* s);
+    int    strcmp(const char* a, const char* b);
+    int    strncmp(const char* a, const char* b, size_t n);
+    char*  strcpy(char* dst, const char* src);
+    char*  strncpy(char* dst, const char* src, size_t n);
+    size_t strcat(char* dst, const char* src);
+    void*  memcpy(void* dst, const void* src, size_t n);
+    void*  memmove(void* dst, const void* src, size_t n);
+    int    memcmp(const void* a, const void* b, size_t n);
+    void*  memset(void* dst, int c, size_t n);
+}
+
+namespace std {
+    size_t strlen(const char* s)        { return ::strlen(s); }
+    int    strcmp(const char* a, const char* b) { return ::strcmp(a, b); }
+    int    strncmp(const char* a, const char* b, size_t n) { return ::strncmp(a, b, n); }
+    char*  strcpy(char* dst, const char* src) { return ::strcpy(dst, src); }
+    char*  strncpy(char* dst, const char* src, size_t n) { return ::strncpy(dst, src, n); }
+    char*  strcat(char* dst, const char* src) { return ::strcat(dst, src); }
+    void*  memcpy(void* dst, const void* src, size_t n) { return ::memcpy(dst, src, n); }
+    void*  memmove(void* dst, const void* src, size_t n) { return ::memmove(dst, src, n); }
+    int    memcmp(const void* a, const void* b, size_t n) { return ::memcmp(a, b, n); }
+    void*  memset(void* dst, int c, size_t n) { return ::memset(dst, c, n); }
+}

@@ -1,0 +1,36 @@
+// <map> - dcc++ C++ 标准库
+// std::map<K,V> 简化版 (固定大小数组, K/V 通过回调管理)
+
+extern "C" {
+    struct dccpp_map;
+    struct dccpp_map_entry;
+
+    dccpp_map* dccpp_map_new(size_t cap,
+                             void* kc,
+                             void* kd,
+                             void* vd);
+    void dccpp_map_free(dccpp_map* m);
+    int  dccpp_map_insert(dccpp_map* m, void* key, void* val);
+    void* dccpp_map_get(dccpp_map* m, const void* key);
+    int dccpp_map_contains(dccpp_map* m, const void* key);
+    size_t dccpp_map_size(const dccpp_map* m);
+}
+
+namespace std {
+    class map {
+    public:
+        map() : p_(dccpp_map_new(64, 0, 0, 0)) {}
+        map(size_t cap) : p_(dccpp_map_new(cap, 0, 0, 0)) {}
+        map(size_t cap, void* kc, void* kd, void* vd)
+            : p_(dccpp_map_new(cap, kc, kd, vd)) {}
+        ~map() { dccpp_map_free(p_); }
+
+        int  insert(void* key, void* val) { return dccpp_map_insert(p_, key, val); }
+        void* get(const void* key)         { return dccpp_map_get(p_, key); }
+        int  contains(const void* key)     { return dccpp_map_contains(p_, key); }
+        size_t size()                      { return dccpp_map_size(p_); }
+
+    private:
+        dccpp_map* p_;
+    };
+}

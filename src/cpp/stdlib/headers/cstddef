@@ -1,0 +1,10 @@
+// <cstddef> - dcc++ C++ 标准库
+// 常用类型与宏 (与 C11 <stddef.h> 对齐)
+// 注: dcc++ 暂不处理预处理器指令, NULL 在 lower 后的 C
+// 代码中由 stddef.h 提供.
+
+namespace std {
+    typedef unsigned long size_t;
+    typedef long          ptrdiff_t;
+    typedef int           max_align_t;
+}

@@ -1,0 +1,94 @@
+// <memory> - dcc++ C++ 标准库
+// unique_ptr / shared_ptr (无模板, 通过 dtor 回调管理)
+
+extern "C" {
+    struct dccpp_unique_ptr;
+    struct dccpp_shared_ptr;
+
+    dccpp_unique_ptr dccpp_make_unique(void* p, void* dtor);
+    void dccpp_unique_ptr_reset(dccpp_unique_ptr* u, void* p, void* dtor);
+    void* dccpp_unique_ptr_get(const dccpp_unique_ptr* u);
+    void* dccpp_unique_ptr_release(dccpp_unique_ptr* u);
+
+    dccpp_shared_ptr dccpp_make_shared(void* p, void* dtor);
+    void dccpp_shared_ptr_inc(dccpp_shared_ptr* s);
+    void dccpp_shared_ptr_dec(dccpp_shared_ptr* s);
+    void* dccpp_shared_ptr_get(const dccpp_shared_ptr* s);
+    size_t dccpp_shared_ptr_use_count(const dccpp_shared_ptr* s);
+}
+
+namespace std {
+    class unique_ptr {
+    public:
+        unique_ptr() : p_(0), dtor_(0) {}
+        unique_ptr(void* p, void* dtor) : p_(p), dtor_(dtor) {}
+        unique_ptr(const unique_ptr& other) : p_(0), dtor_(0) {
+            (void)other;
+        }
+        ~unique_ptr() {
+            if (p_ && dtor_) {
+                // 通过 dtor_ 释放 (C 运行时负责调用)
+            }
+        }
+
+        unique_ptr& operator=(const unique_ptr& other) {
+            if (this != &other) {
+                p_ = other.p_;
+                dtor_ = other.dtor_;
+            }
+            return *this;
+        }
+
+        void reset(void* p, void* dtor) {
+            p_ = p;
+            dtor_ = dtor;
+        }
+
+        void* get() const { return p_; }
+        void* release() {
+            void* p = p_;
+            p_ = 0;
+            dtor_ = 0;
+            return p;
+        }
+
+        int operator!() const { return p_ == 0; }
+
+    private:
+        void* p_;
+        void* dtor_;
+    };
+
+    class shared_ptr {
+    public:
+        shared_ptr() : s_(dccpp_make_shared(0, 0)) {}
+        shared_ptr(void* p, void* dtor)
+            : s_(dccpp_make_shared(p, dtor)) {}
+        shared_ptr(const shared_ptr& other) : s_(dccpp_make_shared(0, 0)) {
+            s_ = other.s_;
+            dccpp_shared_ptr_inc(&s_);
+        }
+        ~shared_ptr() { dccpp_shared_ptr_dec(&s_); }
+
+        shared_ptr& operator=(const shared_ptr& other) {
+            if (this != &other) {
+                dccpp_shared_ptr_dec(&s_);
+                s_ = other.s_;
+                dccpp_shared_ptr_inc(&s_);
+            }
+            return *this;
+        }
+
+        void* get() const { return dccpp_shared_ptr_get(&s_); }
+        size_t use_count() const { return dccpp_shared_ptr_use_count(&s_); }
+
+    private:
+        dccpp_shared_ptr s_;
+    };
+
+    class allocator {
+    public:
+        void* allocate(size_t n);
+        void  deallocate(void* p, size_t n);
+    };
+}

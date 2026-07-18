@@ -1,0 +1,13 @@
+// <stdexcept> - dcc++ C++ 标准库
+// 转发 <exception> 中定义的异常类型
+
+namespace std {
+    // 转发声明: runtime_error / out_of_range / logic_error 等在 <exception> 中
+    // 这里仅占位以保证 #include <stdexcept> 可用
+    class runtime_error;
+    class out_of_range;
+    class logic_error;
+    class invalid_argument;
+    class domain_error;
+    class length_error;
+}

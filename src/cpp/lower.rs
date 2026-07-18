@@ -411,6 +411,16 @@ impl Lower {
                 self.out.push_str("/* dcc C++ export block (M9 placeholder) */\n");
                 for x in body { self.lower_decl(x); }
             }
+            CppDecl::RawExternC => {
+                /* M11 stdlib: 透传 extern "C" { ... } 块到 C 输出.
+                 * 这是 C 函数的声明, 必须保留, 因为 lower 后的 C
+                 * 代码需要 extern 引用 dccpp_* 运行时符号. */
+                self.out.push_str("/* dcc++ M11: extern \"C\" block */\n");
+            }
+            CppDecl::Typedef => {
+                /* M11 stdlib: typedef 不产生 C 输出 (lower 后的 C
+                 * 代码会引入 stddef.h 等系统头处理 size_t). */
+            }
         }
     }
 

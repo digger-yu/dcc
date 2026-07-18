@@ -1,0 +1,42 @@
+// <utility> - dcc++ C++ 标准库
+// pair / swap (简化版, 无模板 forward/move)
+
+extern "C" {
+    struct dccpp_pair {
+        void* first;
+        void* second;
+    };
+    dccpp_pair dccpp_make_pair(void* a, void* b);
+    void dccpp_swap_bytes(void* a, void* b, size_t n);
+}
+
+namespace std {
+    class pair {
+    public:
+        pair() : first(0), second(0) {}
+        pair(void* a, void* b) : first(a), second(b) {}
+
+        void* first;
+        void* second;
+
+        int operator==(const pair& other) const {
+            return first == other.first && second == other.second;
+        }
+        int operator!=(const pair& other) const {
+            int eq = (first == other.first) && (second == other.second);
+            return !eq;
+        }
+    };
+
+    inline pair make_pair(void* a, void* b) {
+        return pair(a, b);
+    }
+
+    inline void swap_bytes(void* a, void* b, size_t n) {
+        dccpp_swap_bytes(a, b, n);
+    }
+
+    // 简化版 move: 直接返回 x (C++ 语义上等价于 static_cast<T&&>(x))
+    // 不支持模板, 仅作为占位
+    inline int identity_int(int x) { return x; }
+}
