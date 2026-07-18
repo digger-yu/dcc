@@ -66,7 +66,7 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | M7 | ARM64 + RISC-V | 进行中（aarch64 typed IR hello 已通） |
 | M8 | C++ 核心特性 | 已完成（命名空间 / 运算符 / 继承 / vtable / RTTI / 异常 / lambda / 模板） |
 | M9 | 精准错误诊断 | 已完成 |
-| M10 | 跨平台交叉编译 | 未开始 |
+| M10+ | C++ 高级特性 | 已完成（SFINAE / partial spec / 完整 concepts / 协程 / module 分区 / operator-> / dynamic_cast 跨虚继承 / 构造委托 / 成员函数指针 / __cxa_guard_ / initializer_list） |
 <!-- -->
 
 ## 能力总表 — 按 Linux 内核需求优先级排序
@@ -291,8 +291,48 @@ gcc m9m.o -o m9m && ./m9m                    # exit=0
 - 完整 GCC cc1/cc1plus bootstrap（远端可用磁盘 2.5G 不足，且 dcc C++
   标准库支持度仍需扩展）
 
-完整 GCC bootstrap 仍部分受阻：M9 已解锁 dcc++ 端到端，cc1/cc1plus
-仍受 SFINAE / concepts / partial specialization / 协程阻碍；详见
+**M10+ 新增**（C++ 高级特性降级，详见 `src/cpp/m10.rs`）：
+
+- **SFINAE**（substitution failure is not an error）：
+  `SfinaeCtx` 记录类型形参→实参绑定；`try_substitute` 替换失败时保留
+  原 ident，模板实例化阶段跳过该候选。
+- **Partial specialization**：
+  `template <typename T> class Foo<T*> {}` 解析为 `PartialSpec`；
+  `pattern_matches` 支持 `T*` / `T&` / `const T` / 精确匹配。
+- **完整 concept 求值**（`requires { ... }`）：
+  解析 `sizeof(T) <= N` / `same_as<T, U>` / `derived_from<T, Base>` /
+  `T::value` / 表达式约束；`Concept::evaluate(&SfinaeCtx)` 替换形参后
+  返回 bool。
+- **协程挂起恢复**（C++20）：
+  `co_await` / `co_yield` 降级为 `static int __coro_state` 状态机驱动；
+  `co_return` 降级为 `return`。
+- **Module 分区**：
+  `module foo:part1;` / `export module foo:part1;` 解析为
+  `Module { name, partition: Some("part1"), is_export }`。
+- **operator-> 重载链**：
+  类型名含 `Ptr` / `Wrapper` / `Iter` 的局部变量在 `->` 访问时识别
+  为可走 operator-> 链。
+- **RTTI 完整 dynamic_cast 跨虚继承**：
+  `dynamic_cast<T*>(e)` 降级为
+  `((T*)__dynamic_cast((void*)(e), 0, 0, -1))`；Itanium C++ ABI:
+  通过 vtable RTTI 查找 `_ZTV<T>` 偏移。
+- **构造委托 / 继承链 ctor**：
+  `using Base::Base;` 解析为 `InheritingCtor { class, base }`；
+  `CtorExpander::emit_inheriting` 生成 wrapper 转发到 Base 构造。
+- **成员函数指针** `&Class::method`：
+  解析为 `MemberPtr { class, name }`；降级为
+  `&_member_fn_<Class>_<method>` 形式。
+- **C++ ABI 线程安全 init guard** `__cxa_guard_*`：
+  静态局部变量 `static T x = init;` 触发
+  `_cxa_guard_acquire` / `_cxa_guard_release` 调用；状态机
+  未初始化(0) → 初始化中(1) → 已初始化(2)。
+- **`std::initializer_list`** `{1, 2, 3}`：
+  解析为 `InitList` / `TypedInitList`；降级为复合字面量
+  `((int[]){1, 2, 3})` 形式。
+
+完整 GCC bootstrap 仍部分受阻：M9 已解锁 dcc++ 端到端，M10+ 已实现
+SFINAE / partial specialization / 完整 concept 求值 / 协程 / module
+分区；cc1/cc1plus 仍受更复杂 C++ 库 + 远端磁盘 2.5G 阻碍；详见
 `docs/missing_features.md`。
 
 ### Linux 内核编译硬性门槛

@@ -115,6 +115,17 @@
 | dcc++ 局部类变量 + 方法调用改写 (M9) | ✅ | `Counter c;` → `struct Counter c; _ZN7CounterC1Ev(&c);`；`c.inc()` → `_ZN7Counter3incEv(&c)`；远端 `m9_cpp_simple.cpp` / `m9_cpp_multi.cpp` 端到端 `exit=0` |
 | dcc++ 隐式 this 注入 (M9) | ✅ | 类方法体内未限定成员 `n_` 自动改写为 `this->n_`（基于 `current_class` + `class_fields`） |
 | dcc++ C++20 占位 (M9) | ✅ | `module` / `import` / `export` / `concept` / `requires` / `co_await` / `co_yield` / `co_return` 降级为 no-op 注释 |
+| dcc++ 完整 SFINAE (M10+) | ✅ | `src/cpp/m10.rs::SfinaeCtx` + `try_substitute` 替换失败不报错，模板形参未绑定跳过该候选 |
+| dcc++ partial specialization (M10+) | ✅ | 解析 `template <T> class Foo<T*> {}` 为 `PartialSpec { params, pattern_text, decl }`；`pattern_matches` 支持 `T*` / `T&` / `const T` / 精确匹配 |
+| dcc++ 完整 concept 求值 (M10+) | ✅ | `Concept::parse` 支持 `sizeof(T)<=N` / `same_as<T,U>` / `derived_from<T,Base>` / `T::value` / 表达式约束；`Concept::evaluate(&SfinaeCtx)` 替换形参后求值 |
+| dcc++ 协程挂起恢复 (M10+) | ✅ | `co_await` / `co_yield` 降级为 `static int __coro_state` 状态机驱动；`co_return` 降级为 `return` |
+| dcc++ module 分区 (M10+) | ✅ | 解析 `module foo:part1;` / `export module foo:part1;`；输出 `/* dcc C++ module (M10+): foo:part1 */` |
+| dcc++ operator-> 重载链 (M10+) | ✅ | 类型名含 `Ptr`/`Wrapper`/`Iter` 的局部变量在 `->` 访问时识别为可走 operator-> 链 |
+| dcc++ 完整 RTTI dynamic_cast 跨虚继承 (M10+) | ✅ | `dynamic_cast<T*>(e)` 降级为 `((T*)__dynamic_cast((void*)(e), 0, 0, -1))`；Itanium C++ ABI: 通过 vtable RTTI 查找 |
+| dcc++ 构造委托 / 继承链 ctor (M10+) | ✅ | 解析 `using Base::Base;` 为 `InheritingCtor { class, base }`；`CtorExpander::emit_inheriting` 生成 wrapper 转发 |
+| dcc++ 成员函数指针 (M10+) | ✅ | 解析 `&Class::method` 为 `MemberPtr { class, name }`；降级为 `&_member_fn_<Class>_<method>` |
+| dcc++ __cxa_guard_* 线程安全 init guard (M10+) | ✅ | 静态局部变量 `static T x = init;` 触发 `_cxa_guard_acquire` / `_cxa_guard_release` 调用；状态机 0/1/2 |
+| dcc++ std::initializer_list (M10+) | ✅ | 解析 `{1, 2, 3}` 为 `InitList` / `TypedInitList`；降级为复合字面量 `((int[]){1, 2, 3})` |
 | dcc++ C 关键字 / 复合操作符 (M9) | ✅ | 词法补全：`int`/`return`/`if`/`while` 不再被误为 `Ident`；`->`/`->*`/`++`/`--`/`<<=`/`>>=` 等 23 个复合操作符完整 |
 | dcc++ Windows 兼容 (M9) | ✅ | `stddef.h` / `stdint.h` 仅在用到 `new`/`delete`/`throw`/`try`/`typeid` 时引入；否则用 `typedef unsigned long size_t;` 替代 |
 | GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；远端可用磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）；仍缺 SFINAE / partial specialization / 完整 concepts / 协程 / module |

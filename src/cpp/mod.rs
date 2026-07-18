@@ -1,4 +1,4 @@
-//! C++ 前端 (M7 最小可编译子集)
+//! C++ 前端 (M7+ 最小可编译子集)
 //!
 //! 目标: 实现 GCC 编译 C++ 子集所必需的最小特性, 满足
 //! GCC bootstrap 阶段 1 (cc1plus) 编译时不会立刻触雷。
@@ -7,7 +7,7 @@
 //! 的 C IR / C 风格声明, 复用 codegen + link 链路。
 //! 不另起一套 IR, 避免 4 倍维护负担。
 //!
-//! M7 范围 (本模块):
+//! M7 范围:
 //!   - C++ token 扩展: `class`, `public`, `private`, `protected`,
 //!     `this`, `new`, `delete`, `::`, `operator`
 //!   - class 声明: 成员变量 + 成员函数
@@ -18,23 +18,21 @@
 //!   - new T / delete p (调用 ::operator new / ::operator delete)
 //!   - Itanium C++ ABI 名字修饰 (mangle.rs)
 //!
-//! 不在 M7 范围:
-//!   - 模板 (templates)
-//!   - 异常 (try/catch/throw)
-//!   - 虚函数 / vtable
-//!   - 多继承 / 虚继承
-//!   - 命名空间嵌套
-//!   - 运算符重载 (除 new/delete)
-//!   - lambda
+//! M8: 模板 / 异常 / 虚函数 / vtable / 命名空间 / operator 重载
+//! M9: concept 占位, module 占位, lambda, 多继承, lambda
+//! M10+: 完整 SFINAE / 偏特化 / concept 求值 / 协程 / module 分区
+//!      / operator-> 链 / 跨虚继承 dynamic_cast / 构造委托 /
+//!      成员函数指针 / __cxa_guard_ / initializer_list
 //!
 //! 文件:
 //!   - lexer.rs:  C++ token 流 (基于 C tokens, 扩展关键字)
 //!   - parser.rs: 类 / 成员函数 / this / :: / 引用 解析
 //!   - mangle.rs: Itanium C++ ABI 名字修饰
 //!   - lower.rs:  C++ AST → dcc C 风格声明 / 函数
+//!   - m10.rs:    M10+ SFINAE / partial spec / concept / 协程 / RTTI 等
 //!   - driver.rs: 顶层入口, 串 lexer→parser→lower→dcc driver
 //!
-//! 限制: C++ 前端在 M7 阶段只支持 dcc 既有的 C 子集能直接
+//! 限制: C++ 前端在 M7+ 阶段只支持 dcc 既有的 C 子集能直接
 //! 表达的特性 (struct-as-class, 成员函数, this 隐式形参化,
 //! 引用→指针退化). GCC 真实 bootstrap 会因模板/异常/虚函数
 //! 失败, 已在 docs/missing_features.md 与 docs/gcc_build_guide.md
@@ -45,6 +43,7 @@ pub mod lexer;
 pub mod parser;
 pub mod mangle;
 pub mod lower;
+pub mod m10;
 pub mod driver;
 
 use std::path::PathBuf;

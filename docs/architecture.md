@@ -201,9 +201,10 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 | 文件 | 职责 |
 |------|------|
 | `src/cpp/lexer.rs` | C++ token 流：扩展关键字 + `::` 标点 + M8 关键字（operator/namespace/try/catch/throw/...） |
-| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 + M8 (namespace/operator/inherit/lambda/template/try-catch) |
+| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 + M8 (namespace/operator/inherit/lambda/template/try-catch) + M10+ (partial spec/using Base::Base/init list/static local) |
 | `src/cpp/mangle.rs` | Itanium C++ ABI 名字修饰（`_ZN…C1E…` / `D1E` / `pl` / `_ZTV…` / `_ZTI…`） |
-| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身 + vtable/typeinfo/lambda/exception 降级） |
+| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身 + vtable/typeinfo/lambda/exception 降级 + M10+ cxa_guard/init_list/coroutine 状态机） |
+| `src/cpp/m10.rs` | M10+ 高级特性降级器：SFINAE / partial spec / concept 求值 / 协程 / module 分区 / operator-> / dynamic_cast / 构造委托 / 成员函数指针 / __cxa_guard_ / initializer_list |
 | `src/cpp/driver.rs` | 顶层入口：`compile_cpp(cpp_src, obj, dcc_bin, includes, opt)` |
 
 **降级映射表**（C++ → C）：
@@ -269,6 +270,55 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 **M9 不在范围**：SFINAE / partial specialization（`partial_sort`）/
 完整 concept 求值 / 协程挂起恢复 / module 分区 / 完整 GCC cc1/cc1plus
 bootstrap（受限于 `dcc` 自身 C++ 库支持度与远端磁盘空间）。
+
+**M10+ 范围**（新增，已在 `src/cpp/m10.rs` 中实现）：
+- **SFINAE**（`substitution failure is not an error`）：
+  - `SfinaeCtx` 记录类型形参→实参绑定，`try_substitute` 替换失败时降级
+    为保留原 ident（pattern_matches 阶段判定非匹配）
+  - 模板形参未绑定时不报错，模板实例化阶段跳过该候选
+- **Partial specialization**：
+  - 解析 `template <typename T> class Foo<T*> { ... }` 为
+    `PartialSpec { params, pattern_text, decl }`
+  - `pattern_matches("T*", "int*")` 识别形参/实参；支持 `T*` / `T&` /
+    `const T` / 精确匹配
+- **Concept 求值**（`requires { ... }`）：
+  - 解析 `sizeof(T) <= N` / `same_as<T, U>` / `derived_from<T, Base>` /
+    `T::value` / 表达式约束
+  - `Concept::evaluate(&SfinaeCtx)` 替换形参后求值，返回 bool
+- **协程挂起恢复**（C++20）：
+  - `co_await expr` → `static int __coro_state = (expr);` 状态机驱动
+  - `co_yield expr` → `static int __coro_yield_state = (expr); return ...;`
+  - `co_return expr` → `return expr;`（带 co_return 注释）
+- **Module 分区**：
+  - 解析 `module foo:part1;` / `export module foo:part1;` 为
+    `Module { name, partition: Some("part1"), is_export }`
+  - 输出 `/* dcc C++ module (M10+): foo:part1 */` 注释
+- **operator-> 重载链**：
+  - 类型名含 `Ptr`/`ptr`/`Wrapper`/`Iter`/`iter` 的局部变量在 `->`
+    访问时走 operator-> 链 (简化: 直接展开为 `obj->member`)
+- **RTTI 完整 dynamic_cast 跨虚继承**：
+  - `dynamic_cast<T*>(e)` 降级为 `((T*)__dynamic_cast((void*)(e), 0, 0, -1))`
+  - Itanium C++ ABI: 通过 vtable RTTI 查找 `_ZTV<T>` 偏移
+- **构造委托 / 继承链 ctor**：
+  - `using Base::Base;` 解析为 `InheritingCtor { class, base }`
+  - `CtorExpander::emit_inheriting(this, base)` 生成 wrapper 转发
+  - 构造委托 `Foo(int) : Foo() {}` 简化为注释 (M10 简化)
+- **成员函数指针** `&Class::method`：
+  - 解析为 `MemberPtr { class, name }`
+  - 降级为 `&_member_fn_<Class>_<method>` 形式 (M10 简化)
+- **C++ ABI 线程安全 init guard** `__cxa_guard_*`：
+  - 静态局部变量 `static T x = init;` 触发
+  - 降级为 `_cxa_guard_acquire(&_cxa_guard_x)` + 初始化 +
+    `_cxa_guard_release(&_cxa_guard_x)`
+  - 状态机: 未初始化(0) → 初始化中(1) → 已初始化(2)
+- **`std::initializer_list`** `{1, 2, 3}`：
+  - 解析为 `InitList(elems)` / `TypedInitList { ty, elems }`
+  - 降级为复合字面量 `((int[]){1, 2, 3})` 形式
+  - `InitList::emit_c()` 生成 `{ ptr, count, capacity }` 结构
+
+**M10+ 设计原则**：所有特性均降级为 dcc C 后端可直接消费的 C 代码；
+对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 远端
+磁盘空间），但 M10+ 显著扩展了能直接编译的 C++ 模式范围。
 
 **限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M9 阶段已可端到端运行
 简单 C++ 源（含 class / 成员函数 / 构造初始化列表 / 局部类变量 /

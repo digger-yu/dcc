@@ -211,16 +211,32 @@ pub enum CppDecl {
         params: TemplateArgs,
         decl: Box<CppDecl>,
     },
+    /// C++20 partial specialization (M10+):
+    ///   `template <typename T> class Foo<T*> { ... };`
+    ///   `template <typename T> void foo<T>(T) { ... }` 不被支持
+    PartialSpec {
+        params: TemplateArgs,
+        /// 特化模式, 字符串形式: `T*`, `int`, `std::vector<T>` 等
+        pattern_text: String,
+        decl: Box<CppDecl>,
+    },
+    /// `using Base::Base;` 继承构造函数 (M10+)
+    InheritingCtor {
+        class: String,
+        base: String,
+    },
     /// C++20 concept 定义 (M9: 占位, 立即展开为 no-op)
     Concept {
         name: String,
-        /// constraint expression 文本 (M9 占位, 不求值)
+        /// constraint expression 文本 (M10+ 解析为简单 constraint 树)
         body_text: String,
     },
     /// C++20 module 声明 (M9: 占位, 立即展开为 no-op)
     /// `module foo;` / `export module foo;` / `module;`
+    /// M10+: 支持分区 `module foo:part1;`
     Module {
         name: Option<String>,
+        partition: Option<String>,
         is_export: bool,
     },
     /// C++20 import 声明 (M9: 占位, 立即展开为 no-op)
@@ -249,6 +265,13 @@ pub enum CppStmt {
     ThisMember(String, Box<CppStmt>),
     /// M9: 局部变量声明 `T name;` / `T name = init;` / `auto name = init;`
     LocalVar {
+        ty: MangleType,
+        name: String,
+        init: Option<CppExpr>,
+    },
+    /// M10+: 静态局部变量 `static T name = init;`
+    /// 触发 `__cxa_guard_*` 调用 (C++ ABI 线程安全单次初始化)
+    StaticLocal {
         ty: MangleType,
         name: String,
         init: Option<CppExpr>,
@@ -288,6 +311,18 @@ pub enum CppExpr {
     Member(Box<CppExpr>, String),
     /// `obj->member` 指针访问
     PtrMember(Box<CppExpr>, String),
+    /// M10+: 成员函数指针 `&Class::method` (简化: 形参 self, 传 this)
+    MemberPtr {
+        class: String,
+        name: String,
+    },
+    /// M10+: 大括号初始化列表 `{1, 2, 3}` (initializer_list)
+    InitList(Vec<CppExpr>),
+    /// M10+: 类型化的大括号初始化列表 `T{1, 2, 3}` (initializer_list<T>)
+    TypedInitList {
+        ty: MangleType,
+        elems: Vec<CppExpr>,
+    },
     /// `obj.*ptr_to_member` (M8 简化: 不支持)
     Call(Box<CppExpr>, Vec<CppExpr>),
     New(String, Vec<CppExpr>),
@@ -538,6 +573,91 @@ impl<'a> CppParser<'a> {
             return Err(CppParseError::Unexpected(">", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
+        // M10+: 检测 partial specialization 模式
+        // `class Foo<T*>` 或 `class Foo<int>` (区别于普通 `class Foo`)
+        if self.at(CppKw::Class) {
+            // 窥探: class Name <
+            let saved_lex = self.lex.clone();
+            let saved_peek = self.peek.clone();
+            self.bump(); // class
+            let _name = self.expect_ident()?;
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. }))) {
+                // 是 partial specialization
+                // 收集 <...> 内的所有 token 文本为 pattern_text
+                self.bump(); // <
+                let mut pattern_text = String::new();
+                let mut depth: i32 = 1;
+                while depth > 0 {
+                    let t = self.bump();
+                    match t {
+                        Some(CppTok::C(Tok { kind: TokKind::Lt, .. })) => {
+                            pattern_text.push('<');
+                            depth += 1;
+                        }
+                        Some(CppTok::C(Tok { kind: TokKind::Gt, .. })) => {
+                            depth -= 1;
+                            if depth > 0 { pattern_text.push('>'); }
+                        }
+                        Some(CppTok::C(Tok { kind: TokKind::Shr, .. })) => {
+                            depth -= 1;
+                            if depth > 0 { pattern_text.push_str(">>"); }
+                        }
+                        Some(CppTok::C(Tok { kind: TokKind::Colon, .. })) => {
+                            pattern_text.push(':');
+                        }
+                        Some(CppTok::C(Tok { kind: TokKind::Star, .. })) => {
+                            pattern_text.push('*');
+                        }
+                        Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) => {
+                            pattern_text.push_str(&text);
+                        }
+                        Some(CppTok::C(Tok { kind: TokKind::Number, text, .. })) => {
+                            pattern_text.push_str(&text);
+                        }
+                        Some(CppTok::ColonColon(_)) => {
+                            pattern_text.push_str("::");
+                        }
+                        Some(other) => {
+                            // 其他 token 转为文本
+                            let s = format!("{:?}", other);
+                            pattern_text.push_str(&s);
+                        }
+                        None => break,
+                    }
+                    if depth > 0 {
+                        pattern_text.push(' ');
+                    }
+                }
+                // 继续解析类体 (或函数模板特化)
+                // 复用 parse_class_decl 流程
+                let bases = self.parse_base_list()?;
+                if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBrace, .. }))) {
+                    return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
+                }
+                self.bump();
+                let mut members = vec![];
+                while let Some(t) = &self.peek {
+                    if matches!(t, CppTok::C(Tok { kind: TokKind::RBrace, .. })) { break; }
+                    members.push(self.parse_member_decl_with_class(&_name)?);
+                }
+                self.bump();
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                    self.bump();
+                }
+                let decl = CppDecl::Class(ClassDecl {
+                    name: _name, is_struct: false, bases, members,
+                });
+                return Ok(CppDecl::PartialSpec {
+                    params: TemplateArgs { params },
+                    pattern_text: pattern_text.trim().to_string(),
+                    decl: Box::new(decl),
+                });
+            } else {
+                // 不是 partial spec, 恢复 lex 状态
+                self.lex = saved_lex;
+                self.peek = saved_peek;
+            }
+        }
         let decl = self.parse_decl()?;
         Ok(CppDecl::Template { params: TemplateArgs { params }, decl: Box::new(decl) })
     }
@@ -567,40 +687,55 @@ impl<'a> CppParser<'a> {
         Ok(CppDecl::Namespace { name: real_name, body })
     }
 
-    /// 解析 using namespace std; 或 using std::cout;
+    /// 解析 using namespace std; 或 using std::cout; 或 using Base::Base;
     fn parse_using_decl(&mut self) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Using)?;
         let is_namespace = if self.at(CppKw::Namespace) {
             self.bump(); true
         } else { false };
         let path = self.parse_qualified_name()?;
+        // M10+: using Base::Base 形式 (继承构造)
+        if path.len() == 2 && path[0] == path[1] {
+            // `using Base::Base;` 继承构造
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                self.bump();
+            }
+            return Ok(CppDecl::InheritingCtor {
+                class: String::new(),  // 占位, 实际由类外解析注入
+                base: path[0].clone(),
+            });
+        }
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
             self.bump();
         }
         Ok(CppDecl::Using { is_namespace, path })
     }
 
-    /// 解析 `module foo;` / `module;` / `export module foo;` (M9 占位)
+    /// 解析 `module foo;` / `module foo:part1;` / `module;` / `export module foo;` (M9 占位)
     fn parse_module_decl(&mut self) -> Result<CppDecl, CppParseError> {
         let is_export = false;  // 顶层 parse_decl 不带 export 前缀
         self.expect_kw(CppKw::Module)?;
-        let name = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
-            None
-        } else if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
-            if text == ":" {
-                // 跳过 : 之后的 partition 名 (M9 占位)
-                let _ = self.parse_qualified_name();
-                None
-            } else {
-                Some(self.expect_ident()?)
+        let mut name: Option<String> = None;
+        let mut partition: Option<String> = None;
+        if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+                if text == ":" {
+                    // 跳过 : 之后的 partition 名 (M9 占位)
+                    let _ = self.parse_qualified_name();
+                } else {
+                    name = Some(self.expect_ident()?);
+                    // M10+: 检查是否有 : 分区符 (注意: 是 `:` 单冒号, 不是 `::`)
+                    if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Colon, .. }))) {
+                        self.bump();  // 吃掉 :
+                        partition = Some(self.expect_ident()?);
+                    }
+                }
             }
-        } else {
-            None
-        };
+        }
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
             self.bump();
         }
-        Ok(CppDecl::Module { name, is_export })
+        Ok(CppDecl::Module { name, partition, is_export })
     }
 
     /// 解析 `import foo;` / `import <iostream>;` / `import "header.h";` (M9 占位)
@@ -632,16 +767,29 @@ impl<'a> CppParser<'a> {
     /// 解析 `export { ... }` / `export module foo;` (M9 占位)
     fn parse_export_decl(&mut self) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Export)?;
-        // export module foo;
+        // export module foo; / export module foo:part1;
         if self.at(CppKw::Module) {
             self.bump();
-            let name = if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
-                Some(self.expect_ident()?)
-            } else { None };
+            let mut name: Option<String> = None;
+            let mut partition: Option<String> = None;
+            if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+                    if text == ":" {
+                        let _ = self.parse_qualified_name();
+                    } else {
+                        name = Some(self.expect_ident()?);
+                        // M10+: 支持 export module foo:part1;
+                        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Colon, .. }))) {
+                            self.bump();
+                            partition = Some(self.expect_ident()?);
+                        }
+                    }
+                }
+            }
             if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
                 self.bump();
             }
-            return Ok(CppDecl::Module { name, is_export: true });
+            return Ok(CppDecl::Module { name, partition, is_export: true });
         }
         // export { decls }
         if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBrace, .. }))) {
@@ -1599,6 +1747,27 @@ impl<'a> CppParser<'a> {
             return Ok(CppExpr::UnaryOp(UnaryOpKind::Deref, Box::new(e)));
         }
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Amp, .. }))) {
+            // M10+: 检查是否是 `&Class::method` (成员函数指针)
+            if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = self.peek_token_at(1) {
+                // 看是否是 qualified name: &Foo::bar
+                let mut clone = self.lex.clone();
+                clone.next_tok(); // skip &
+                let mut parts = vec![];
+                if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = clone.next_tok() {
+                    parts.push(text);
+                    if let Some(CppTok::ColonColon(_)) = clone.next_tok() {
+                        if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = clone.next_tok() {
+                            parts.push(text);
+                            // &Foo::bar
+                            self.bump(); // &
+                            let class = self.expect_ident()?;
+                            self.bump(); // ::
+                            let name = self.expect_ident()?;
+                            return Ok(CppExpr::MemberPtr { class, name });
+                        }
+                    }
+                }
+            }
             self.bump();
             let e = self.parse_unary()?;
             return Ok(CppExpr::AddrOf(Box::new(e)));
@@ -1823,6 +1992,10 @@ impl<'a> CppParser<'a> {
             self.bump();
             return Ok(e);
         }
+        if let Some(CppTok::C(Tok { kind: TokKind::LBrace, .. })) = &self.peek {
+            // M10+: 大括号初始化列表 `{1, 2, 3}` (initializer_list)
+            return self.parse_init_list();
+        }
         if let Some(CppTok::C(Tok { kind: TokKind::LBracket, .. })) = &self.peek {
             // Lambda
             return self.parse_lambda();
@@ -1940,6 +2113,30 @@ impl<'a> CppParser<'a> {
         Ok(CppExpr::New(ty, args))
     }
 
+    /// 解析大括号初始化列表 `{1, 2, 3}` (M10+: initializer_list)
+    fn parse_init_list(&mut self) -> Result<CppExpr, CppParseError> {
+        // 已经在 {
+        self.bump();
+        let mut elems = vec![];
+        if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBrace, .. }))) {
+            loop {
+                elems.push(self.parse_expr()?);
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+                    self.bump();
+                    // 允许尾随逗号: {1, 2, 3,}
+                    if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBrace, .. }))) {
+                        break;
+                    }
+                } else { break; }
+            }
+        }
+        if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBrace, .. }))) {
+            return Err(CppParseError::Unexpected("}", format!("{:?}", self.peek), self.span()));
+        }
+        self.bump();
+        Ok(CppExpr::InitList(elems))
+    }
+
     /// 跳过 const / override / final / noexcept / 0
     fn skip_cv_qual(&mut self) -> bool {
         let mut is_const = false;
@@ -1972,27 +2169,34 @@ impl<'a> CppParser<'a> {
     /// 要求: 第一 token 是类型关键字 / auto / 用户自定义类型 ident, 第二是 ident,
     ///      第三是 `;` `=` 或 `(`.
     /// 用户自定义类型 ident 不能是 C/C++ 关键字或保留字 (避免与 `if (...)` 冲突).
+    /// M10+: 支持 `static Type name = init;` 静态局部变量
     fn is_local_var_decl_start(&self) -> bool {
-        let is_type_kw = matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwInt
+        let mut is_static = false;
+        if self.at(CppKw::Static) {
+            is_static = true;
+        }
+        let next1 = if is_static { self.peek_token_at(1) } else { self.peek.clone() };
+        let is_type_kw = matches!(next1, Some(CppTok::C(Tok { kind: TokKind::KwInt
             | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
             | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
             | TokKind::KwSigned | TokKind::KwUnsigned
             | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
-            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic
+            | TokKind::KwConst | TokKind::KwVolatile
             | TokKind::KwInline | TokKind::KwBool
             | TokKind::KwAuto | TokKind::KwAtomic
             | TokKind::KwRestrict, .. })));
-        let first_is_ident_type = if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+        let first_is_ident_type = if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &next1 {
             !is_reserved_word(text)
         } else { false };
         if !is_type_kw && !first_is_ident_type { return false; }
         // 第二 token 必须是 ident
-        let second = self.peek_token_at(1);
+        let second_offset = if is_static { 2 } else { 1 };
+        let second = self.peek_token_at(second_offset);
         if !matches!(second, Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))) {
             return false;
         }
         // 第三 token 必须是 `;` `=` `(` 之一 (C++ 风格声明)
-        let third = self.peek_token_at(2);
+        let third = self.peek_token_at(second_offset + 1);
         matches!(third,
             Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))
             | Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))
@@ -2002,6 +2206,9 @@ impl<'a> CppParser<'a> {
 
     /// M9: 解析局部变量声明
     fn parse_local_var_decl(&mut self) -> Result<CppStmt, CppParseError> {
+        // M10+: 检测 static 关键字
+        let is_static = self.at(CppKw::Static);
+        if is_static { self.bump(); }
         let ty = self.parse_mangle_type()?;
         let name = self.expect_ident()?;
         // 跳过可能的 `()` (如 `int x(0);` C++ 风格构造)
@@ -2018,7 +2225,11 @@ impl<'a> CppParser<'a> {
             if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
                 self.bump();
             }
-            return Ok(CppStmt::LocalVar { ty, name, init });
+            return if is_static {
+                Ok(CppStmt::StaticLocal { ty, name, init })
+            } else {
+                Ok(CppStmt::LocalVar { ty, name, init })
+            };
         }
         let init = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
             self.bump();
@@ -2027,7 +2238,11 @@ impl<'a> CppParser<'a> {
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
             self.bump();
         }
-        Ok(CppStmt::LocalVar { ty, name, init })
+        if is_static {
+            Ok(CppStmt::StaticLocal { ty, name, init })
+        } else {
+            Ok(CppStmt::LocalVar { ty, name, init })
+        }
     }
 }
 
