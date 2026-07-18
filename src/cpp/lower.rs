@@ -43,10 +43,46 @@ pub struct Lower {
     pub ns: NamespaceCtx,
     /// 已知类集合 (用于 typeid / dynamic_cast)
     pub classes: Vec<String>,
+    /// 已知类方法 (class -> [method_name, ...])
+    pub class_methods: std::collections::HashMap<String, Vec<String>>,
+    /// 已知类成员 (class -> [(name, type), ...])
+    pub class_fields: std::collections::HashMap<String, Vec<(String, MangleType)>>,
+    /// 局部变量 -> 类型映射 (用于 c.method() -> _ZN<Cls>3<method>Ev(&c))
+    pub local_var_types: std::collections::HashMap<String, MangleType>,
+    /// 形参 -> 类型映射
+    pub param_var_types: std::collections::HashMap<String, MangleType>,
+    /// 当前所在类 (用于 this 隐式注入)
+    pub current_class: Option<String>,
     /// 待降级的 lambda 闭包
     pub lambdas: Vec<LambdaExpr>,
     /// 临时计数器 (lambda 编号)
     pub lambda_counter: usize,
+}
+
+/// 类型到 C 字符串 (模块级, Lower 内外共用)
+pub fn mangle_to_c(ty: &MangleType) -> String {
+    match ty {
+        MangleType::Void => "void".into(),
+        MangleType::Bool => "_Bool".into(),
+        MangleType::Char => "char".into(),
+        MangleType::Schar => "signed char".into(),
+        MangleType::Uchar => "unsigned char".into(),
+        MangleType::Short => "short".into(),
+        MangleType::Ushort => "unsigned short".into(),
+        MangleType::Int => "int".into(),
+        MangleType::Uint => "unsigned int".into(),
+        MangleType::Long => "long".into(),
+        MangleType::Ulong => "unsigned long".into(),
+        MangleType::LongLong => "long long".into(),
+        MangleType::UlongLong => "unsigned long long".into(),
+        MangleType::Float => "float".into(),
+        MangleType::Double => "double".into(),
+        MangleType::LongDouble => "long double".into(),
+        MangleType::Pointer(t) => format!("{}*", mangle_to_c(t)),
+        MangleType::Reference(t) => format!("{}*", mangle_to_c(t)),
+        MangleType::Class(n) => format!("struct {}", n),
+        MangleType::Ellipsis => "...".into(),
+    }
 }
 
 impl Lower {
@@ -56,6 +92,11 @@ impl Lower {
             opt: LowerOptions::default(),
             ns: NamespaceCtx::default(),
             classes: vec![],
+            class_methods: std::collections::HashMap::new(),
+            class_fields: std::collections::HashMap::new(),
+            local_var_types: std::collections::HashMap::new(),
+            param_var_types: std::collections::HashMap::new(),
+            current_class: None,
             lambdas: vec![],
             lambda_counter: 0,
         }
@@ -63,30 +104,7 @@ impl Lower {
     pub fn with_options(_opt: LowerOptions) -> Self { Self::new() }
 
     /// 类型到 C 字符串
-    fn mangle_to_c(ty: &MangleType) -> String {
-        match ty {
-            MangleType::Void => "void".into(),
-            MangleType::Bool => "_Bool".into(),
-            MangleType::Char => "char".into(),
-            MangleType::Schar => "signed char".into(),
-            MangleType::Uchar => "unsigned char".into(),
-            MangleType::Short => "short".into(),
-            MangleType::Ushort => "unsigned short".into(),
-            MangleType::Int => "int".into(),
-            MangleType::Uint => "unsigned int".into(),
-            MangleType::Long => "long".into(),
-            MangleType::Ulong => "unsigned long".into(),
-            MangleType::LongLong => "long long".into(),
-            MangleType::UlongLong => "unsigned long long".into(),
-            MangleType::Float => "float".into(),
-            MangleType::Double => "double".into(),
-            MangleType::LongDouble => "long double".into(),
-            MangleType::Pointer(t) => format!("{}*", Self::mangle_to_c(t)),
-            MangleType::Reference(t) => format!("{}*", Self::mangle_to_c(t)),
-            MangleType::Class(n) => format!("struct {}", n),
-            MangleType::Ellipsis => "...".into(),
-        }
-    }
+    fn mangle_to_c(ty: &MangleType) -> String { mangle_to_c(ty) }
 
     /// 类型名 (用于符号 mangling, 不带 struct 前缀)
     fn type_name(ty: &MangleType) -> String {
@@ -96,11 +114,33 @@ impl Lower {
         }
     }
 
+    /// 查找表达式 (通常是 Ident 或 Member) 对应的类名 (M9: 仅局部变量)
+    fn lookup_var_class(&self, e: &CppExpr) -> Option<String> {
+        if let CppExpr::Ident(name) = e {
+            // 先查局部变量
+            if let Some(ty) = self.local_var_types.get(name) {
+                if let MangleType::Class(c) = ty { return Some(c.clone()); }
+            }
+            // 再查形参
+            if let Some(ty) = self.param_var_types.get(name) {
+                if let MangleType::Class(c) = ty { return Some(c.clone()); }
+            }
+        }
+        None
+    }
+
     /// 入口
     pub fn lower_decls(&mut self, decls: &[CppDecl]) {
         self.out.push_str("/* dcc C++ frontend M7+M8 lowered output */\n");
-        self.out.push_str("#include <stddef.h>\n");
-        self.out.push_str("#include <stdint.h>\n");
+        // stddef.h / stdint.h 仅在 M9 (异常 / RTTI) 真正用到 size_t 等类型时引入
+        let needs_system_headers = decls.iter().any(|d| self.decl_needs_system_headers(d));
+        if needs_system_headers {
+            self.out.push_str("#include <stddef.h>\n");
+            self.out.push_str("#include <stdint.h>\n");
+        } else {
+            // 不用系统头时, 显式声明 size_t 为 unsigned long 以便本地 dcc 也能工作
+            self.out.push_str("typedef unsigned long size_t;\n");
+        }
         // 通用 ABI 运行时
         self.out.push_str("extern void *_Znwm(size_t);\n");
         self.out.push_str("extern void _ZdlPv(void*);\n");
@@ -117,16 +157,124 @@ impl Lower {
         for d in decls { self.lower_decl(d); }
         // 最后降级所有 lambda
         self.lower_lambdas();
+        // 若是顶层 main, 加 C 端 trampoline 让 libc 启动器能找到 main
+        self.emit_main_trampoline(decls);
+    }
+
+    /// 如果存在 `int main() { ... }` (在 lower 后是 `_ZN4mainEv`),
+    /// 末尾追加 `int main() { return _ZN4mainEv(); }`
+    fn emit_main_trampoline(&mut self, decls: &[CppDecl]) {
+        let has_main = decls.iter().any(|d| match d {
+            CppDecl::FreeFn { name, .. } => name == "main",
+            _ => false,
+        });
+        if has_main {
+            self.out.push_str("int main() { return _ZN4mainEv(); }\n");
+        }
     }
 
     fn collect_classes(&mut self, d: &CppDecl) {
         match d {
-            CppDecl::Class(c) => { self.classes.push(c.name.clone()); }
+            CppDecl::Class(c) => {
+                self.classes.push(c.name.clone());
+                // 收集方法名 + 成员字段
+                let mut methods = vec![];
+                let mut fields = vec![];
+                for m in &c.members {
+                    match m {
+                        CppDecl::MemberFn { name, .. } => methods.push(name.clone()),
+                        CppDecl::Ctor { .. } | CppDecl::Dtor { .. } => {}
+                        CppDecl::MemberVar { ty, name } => fields.push((name.clone(), ty.clone())),
+                        _ => {}
+                    }
+                }
+                self.class_methods.insert(c.name.clone(), methods);
+                self.class_fields.insert(c.name.clone(), fields);
+            }
             CppDecl::Namespace { body, .. } => {
                 for x in body { self.collect_classes(x); }
             }
             CppDecl::Template { decl, .. } => { self.collect_classes(decl); }
             _ => {}
+        }
+    }
+
+    /// 判断一个声明树是否需要 stddef.h / stdint.h (异常 / new / delete 等)
+    fn decl_needs_system_headers(&self, d: &CppDecl) -> bool {
+        match d {
+            CppDecl::Template { decl, .. } => self.decl_needs_system_headers(decl),
+            CppDecl::Namespace { body, .. } => {
+                body.iter().any(|x| self.decl_needs_system_headers(x))
+            }
+            CppDecl::Class(c) => {
+                // 类内成员函数体可能用 new / delete / throw
+                c.members.iter().any(|m| self.decl_needs_system_headers(m))
+            }
+            CppDecl::FreeFn { body, .. } | CppDecl::MemberFn { body, .. }
+            | CppDecl::Ctor { body, .. } | CppDecl::Dtor { body, .. } => {
+                self.body_needs_system_headers(body)
+            }
+            CppDecl::OperatorFn { body, .. } => self.body_needs_system_headers(body),
+            _ => false,
+        }
+    }
+
+    /// 判断函数体是否使用 new / delete / throw / try
+    fn body_needs_system_headers(&self, body: &CppBody) -> bool {
+        for s in &body.stmts {
+            if self.stmt_needs_system_headers(s) { return true; }
+        }
+        false
+    }
+
+    fn stmt_needs_system_headers(&self, s: &CppStmt) -> bool {
+        match s {
+            CppStmt::Expr(e) => self.expr_needs_system_headers(e),
+            CppStmt::Return(Some(e)) => self.expr_needs_system_headers(e),
+            CppStmt::Block(b) => self.body_needs_system_headers(b),
+            CppStmt::If { cond, then, els } => {
+                self.expr_needs_system_headers(cond)
+                    || self.body_needs_system_headers(then)
+                    || els.as_ref().map_or(false, |b| self.body_needs_system_headers(b))
+            }
+            CppStmt::While { cond, body } => {
+                self.expr_needs_system_headers(cond) || self.body_needs_system_headers(body)
+            }
+            CppStmt::For { init, cond, step, body } => {
+                init.as_ref().map_or(false, |s| self.stmt_needs_system_headers(s))
+                    || cond.as_ref().map_or(false, |e| self.expr_needs_system_headers(e))
+                    || step.as_ref().map_or(false, |s| self.stmt_needs_system_headers(s))
+                    || self.body_needs_system_headers(body)
+            }
+            CppStmt::LocalVar { init: Some(e), .. } => self.expr_needs_system_headers(e),
+            CppStmt::Try { .. } | CppStmt::Throw(_) => true,
+            _ => false,
+        }
+    }
+
+    fn expr_needs_system_headers(&self, e: &CppExpr) -> bool {
+        match e {
+            CppExpr::New(_, _) | CppExpr::Delete(_) => true,
+            CppExpr::Call(f, args) => {
+                self.expr_needs_system_headers(f)
+                    || args.iter().any(|a| self.expr_needs_system_headers(a))
+            }
+            CppExpr::BinOp(_, l, r) => {
+                self.expr_needs_system_headers(l) || self.expr_needs_system_headers(r)
+            }
+            CppExpr::UnaryOp(_, x) | CppExpr::Ref(x) | CppExpr::AddrOf(x)
+            | CppExpr::Cast(_, x) | CppExpr::DynamicCast { expr: x, .. }
+            | CppExpr::StaticCast { expr: x, .. } | CppExpr::ConstCast { expr: x, .. }
+            | CppExpr::ReinterpretCast { expr: x, .. } | CppExpr::PtrMember(x, _)
+            | CppExpr::Member(x, _) => self.expr_needs_system_headers(x),
+            CppExpr::Ternary { cond, then, els } => {
+                self.expr_needs_system_headers(cond)
+                    || self.expr_needs_system_headers(then)
+                    || self.expr_needs_system_headers(els)
+            }
+            CppExpr::Comma(exprs) => exprs.iter().any(|e| self.expr_needs_system_headers(e)),
+            CppExpr::Typeid(_) => true,
+            _ => false,
         }
     }
 
@@ -149,10 +297,12 @@ impl Lower {
                     // 输出 vtable 项
                     self.emit_vtable_entry(class, name, &m, *is_const);
                 }
+                // 设置 current_class, 让 body 内 n_ -> this->n_
+                self.current_class = Some(class_q);
                 self.emit_fn(&m, ret, &all_params, body);
                 let _ = is_override;
             }
-            CppDecl::Ctor { class, params, body, is_virtual } => {
+            CppDecl::Ctor { class, params, inits, body, is_virtual } => {
                 let class_q = self.qualify_name(class);
                 let n = NestedName::from_dotted(vec![class_q.clone()]);
                 let param_tys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
@@ -160,7 +310,7 @@ impl Lower {
                 let this_ty = MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
                 let mut all_params: Vec<(String, MangleType)> = vec![("this".to_string(), this_ty)];
                 all_params.extend(params.iter().cloned());
-                self.emit_fn(&m, &MangleType::Void, &all_params, body);
+                self.emit_ctor(&m, &class_q, &all_params, inits, body);
                 let _ = is_virtual;
             }
             CppDecl::Dtor { class, body, is_virtual } => {
@@ -206,6 +356,30 @@ impl Lower {
                 self.out.push_str(&format!("/* template <{}> */\n",
                     params.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")));
                 self.lower_decl(decl);
+            }
+            // M9: C++20 占位, lower 为 no-op 注释
+            CppDecl::Concept { name, body_text } => {
+                self.out.push_str(&format!(
+                    "/* dcc C++ concept (M9 placeholder): {} = {} */\n",
+                    name, body_text
+                ));
+            }
+            CppDecl::Module { name, is_export } => {
+                let kind = if *is_export { "export module" } else { "module" };
+                let n = name.as_deref().unwrap_or("(global)");
+                self.out.push_str(&format!(
+                    "/* dcc C++ {} (M9 placeholder): {} */\n", kind, n
+                ));
+            }
+            CppDecl::Import { path } => {
+                self.out.push_str(&format!(
+                    "/* dcc C++ import (M9 placeholder): {} */\n",
+                    path.join("::")
+                ));
+            }
+            CppDecl::ExportBlock(body) => {
+                self.out.push_str("/* dcc C++ export block (M9 placeholder) */\n");
+                for x in body { self.lower_decl(x); }
             }
         }
     }
@@ -292,7 +466,7 @@ impl Lower {
     fn emit_typeinfo(&mut self, name: &str) {
         let zti = mangle_typeinfo(name);
         self.out.push_str(&format!(
-            "static char __dcc_ti_{}_name[] = \"{};\n",
+            "static char __dcc_ti_{}_name[] = \"{}\";\n",
             name, name
         ));
         self.out.push_str(&format!(
@@ -331,6 +505,11 @@ impl Lower {
 
     fn emit_fn(&mut self, mangled: &str, ret: &MangleType,
                params: &[(String, MangleType)], body: &CppBody) {
+        // 记录形参类型, 用于 body 内 obj.method() 改写
+        self.param_var_types.clear();
+        for (n, t) in params {
+            self.param_var_types.insert(n.clone(), t.clone());
+        }
         self.out.push_str(&format!("{} {} (", Self::mangle_to_c(ret), mangled));
         for (i, (n, t)) in params.iter().enumerate() {
             if i > 0 { self.out.push_str(", "); }
@@ -339,6 +518,38 @@ impl Lower {
         self.out.push_str(") {\n");
         for s in &body.stmts { self.emit_stmt(s); }
         self.out.push_str("}\n");
+        self.param_var_types.clear();
+        self.current_class = None;
+    }
+
+    /// 构造函数: 先把 init 列表展开为 `this->member = expr;`,
+    /// 然后接 body.
+    fn emit_ctor(&mut self, mangled: &str, class: &str,
+                 params: &[(String, MangleType)],
+                 inits: &[(String, CppExpr)],
+                 body: &CppBody) {
+        // 记录形参类型, 用于 body 内 obj.method() 改写
+        self.param_var_types.clear();
+        for (n, t) in params {
+            self.param_var_types.insert(n.clone(), t.clone());
+        }
+        self.current_class = Some(class.to_string());
+        self.out.push_str(&format!("void {} (", mangled));
+        for (i, (n, t)) in params.iter().enumerate() {
+            if i > 0 { self.out.push_str(", "); }
+            self.out.push_str(&format!("{} {}", Self::mangle_to_c(t), n));
+        }
+        self.out.push_str(") {\n");
+        // init 列表: this->member = expr;
+        for (member, expr) in inits {
+            self.out.push_str(&format!("    ((struct {}*)this)->{} = ", class, member));
+            self.emit_expr(expr);
+            self.out.push_str(";\n");
+        }
+        for s in &body.stmts { self.emit_stmt(s); }
+        self.out.push_str("}\n");
+        self.param_var_types.clear();
+        self.current_class = None;
     }
 
     fn emit_stmt(&mut self, s: &CppStmt) {
@@ -361,6 +572,25 @@ impl Lower {
                     self.emit_expr(e);
                 }
                 self.out.push_str(";\n");
+            }
+            CppStmt::LocalVar { ty, name, init } => {
+                // 记录局部变量类型, 用于 c.method() 改写
+                self.local_var_types.insert(name.clone(), ty.clone());
+                // 把 C++ 类型名映射到 C 类型 (`Counter` -> `struct Counter`)
+                self.out.push_str(&mangle_to_c(ty));
+                self.out.push(' ');
+                self.out.push_str(name);
+                if let Some(e) = init {
+                    self.out.push_str(" = ");
+                    self.emit_expr(e);
+                }
+                self.out.push_str(";\n");
+                // 若是类类型, 显式调用默认构造 (M9: 简化, 总是调 _ZN<cls>C1Ev)
+                if let MangleType::Class(class) = ty {
+                    let n = NestedName::from_dotted(vec![class.clone()]);
+                    let m = mangle_ctor(&n, &[], 1);
+                    self.out.push_str(&format!("    {}(&{});\n", m, name));
+                }
             }
             CppStmt::If { cond, then, els } => {
                 self.out.push_str("if (");
@@ -433,6 +663,26 @@ impl Lower {
             }
             CppStmt::Break => self.out.push_str("break;\n"),
             CppStmt::Continue => self.out.push_str("continue;\n"),
+            // M9: C++20 协程占位 (实际无操作, 表达副作用 + 注释)
+            CppStmt::CoAwait(e) => {
+                self.out.push_str("/* co_await */ ");
+                self.emit_expr(e);
+                self.out.push_str(";\n");
+            }
+            CppStmt::CoYield(e) => {
+                self.out.push_str("/* co_yield */ ");
+                self.emit_expr(e);
+                self.out.push_str(";\n");
+            }
+            CppStmt::CoReturn(v) => {
+                if let Some(e) = v {
+                    self.out.push_str("return ");
+                    self.emit_expr(e);
+                    self.out.push_str(";\n");
+                } else {
+                    self.out.push_str("return;\n");
+                }
+            }
             CppStmt::Decl(d) => { self.lower_decl(d); }
         }
     }
@@ -446,13 +696,45 @@ impl Lower {
                 for p in parts { self.out.push_str(p); }
                 self.out.push('"');
             }
-            CppExpr::Ident(s) => self.out.push_str(s),
+            CppExpr::Ident(s) => {
+                // 当前在类方法内, 且 s 是该类的成员, 改写为 this->s
+                if let Some(cls) = &self.current_class {
+                    if let Some(fields) = self.class_fields.get(cls) {
+                        if fields.iter().any(|(n, _)| n == s) {
+                            self.out.push_str(&format!("this->{}", s));
+                            return;
+                        }
+                    }
+                }
+                self.out.push_str(s);
+            }
             CppExpr::This => self.out.push_str("this"),
             CppExpr::ThisMember(s) => self.out.push_str(&format!("this->{}", s)),
             CppExpr::QualifiedAccess(_, s) => self.out.push_str(s),
             CppExpr::Member(b, s) => { self.emit_expr(b); self.out.push_str(&format!(".{}", s)); }
             CppExpr::PtrMember(b, s) => { self.emit_expr(b); self.out.push_str(&format!("->{}", s)); }
             CppExpr::Call(f, args) => {
+                // 方法调用改写: obj.method(args) -> _ZN<Cls><Len><method>E<args>(&obj, args)
+                if let CppExpr::Member(obj, method) = &**f {
+                    if let Some(class) = self.lookup_var_class(obj) {
+                        if self.class_methods.get(&class)
+                            .map_or(false, |m| m.contains(method)) {
+                            let n = NestedName::from_dotted(vec![class.clone(), method.clone()]);
+                            let m = mangle_member_function(&n, &[], &MangleType::Void);
+                            self.out.push_str(&m);
+                            self.out.push('(');
+                            self.out.push('&');
+                            self.emit_expr(obj);
+                            for a in args {
+                                self.out.push_str(", ");
+                                self.emit_expr(a);
+                            }
+                            self.out.push(')');
+                            return;
+                        }
+                    }
+                }
+                // 普通 C 函数调用
                 self.emit_expr(f);
                 self.out.push('(');
                 for (i, a) in args.iter().enumerate() {
@@ -684,13 +966,51 @@ mod tests {
 
     #[test]
     fn lower_try_catch() {
-        let src = b"void f() { try { int x = 1; } catch (int e) { } }";
+        let src = b"void f() { try { throw 1; } catch (int e) { } }";
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().unwrap();
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
         assert!(s.contains("__cxa_try"), "{}", s);
+    }
+
+    #[test]
+    fn lower_local_var_class() {
+        // M9: 函数体内 `Counter c;` 应被降为 `struct Counter c;`
+        let src = b"void f() { Counter c; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("struct Counter c;"),
+                "expected 'struct Counter c;' in: {}", s);
+    }
+
+    #[test]
+    fn lower_local_var_int_with_init() {
+        // `int x = 42;` -> `int x = 42;`
+        let src = b"void f() { int x = 42; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("int x = 42;"), "{}", s);
+    }
+
+    #[test]
+    fn lower_local_var_class_with_init() {
+        // `Counter c = make();` -> `struct Counter c = make();`
+        let src = b"int make() { return 0; } void f() { Counter c = (Counter)make(); }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("struct Counter c ="),
+                "expected 'struct Counter c =' in: {}", s);
     }
 
     #[test]
@@ -846,6 +1166,41 @@ mod tests {
     }
 
     #[test]
+    fn lower_module_emit_placeholder() {
+        let src = b"module foo;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("module (M9 placeholder)"), "{}", s);
+    }
+
+    #[test]
+    fn lower_concept_emit_placeholder() {
+        let src = b"template <typename T> concept Integral = sizeof(T) <= 8;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("concept (M9 placeholder)"), "{}", s);
+    }
+
+    #[test]
+    fn lower_coroutine_basic() {
+        let src = b"void f() { co_await 1; co_yield 2; co_return 3; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("co_await"), "{}", s);
+        assert!(s.contains("co_yield"), "{}", s);
+        assert!(s.contains("return"), "{}", s);
+    }
+
+    #[test]
     fn lower_diamond_inheritance() {
         // 钻石继承: Base -> Mid1, Mid2 -> Final
         let src = b"class Base { public: int b; };
@@ -890,5 +1245,39 @@ mod tests {
         // 模板声明 + main 都应在
         assert!(s.contains("id"), "{}", s);
         assert!(s.contains("main"), "{}", s);
+    }
+
+    #[test]
+    fn lower_method_call_rewrites_to_mangled_fn() {
+        // M9: c.inc() 应改写为 _ZN7Counter3incEv(&c)
+        let src = b"class Counter { public: void inc() {} int get() const { return 0; } };
+                   int main() { Counter c; c.inc(); return c.get(); }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("_ZN7Counter3incEv(&c)"),
+                "expected method call rewrite, got: {}", s);
+        assert!(s.contains("_ZN7Counter3getEv(&c)"),
+                "expected method call rewrite, got: {}", s);
+    }
+
+    #[test]
+    fn lower_no_system_headers_when_unused() {
+        // M9: 不使用 new/delete/throw 时, 不引入 stddef.h/stdint.h
+        let src = b"class Foo { public: int x; };
+                   int main() { Foo f; return f.x; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(!s.contains("#include <stddef.h>"),
+                "should not include stddef.h, got: {}", s);
+        assert!(!s.contains("#include <stdint.h>"),
+                "should not include stdint.h, got: {}", s);
+        assert!(s.contains("typedef unsigned long size_t;"),
+                "should provide fallback size_t, got: {}", s);
     }
 }

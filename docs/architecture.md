@@ -235,10 +235,46 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 - constexpr / consteval：关键字识别（占位）
 - `std::complex` / `std::atomic` 风格标准库组件：依赖模板 + 运算符
 
-**M8 不在范围**：模板偏特化、SFINAE、concepts、coroutines、modules。
-**限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M8 阶段仍仅提供 `cpp::compile_cpp`
-API；GCC 完整 bootstrap 仍部分受阻（M8 已解锁模板 / 异常 / vtable / RTTI，
-cc1/cc1plus 仍受更复杂 C++ 模式阻碍）；原因见
+**M9 范围**（新增）：
+- **CLI 集成**：`dcc -x c++ foo.cpp` / `dcc foo.cpp`（按 `.cpp`/`.cc`/`.cxx`
+  扩展名自动识别）；`dcc -dump-ast` / `dcc -fsyntax-only` 模式
+- **C++ 词法补全**：C 关键字（`int` / `return` / `if` / `while` / ...）在 C++
+  源码里被识别为 `TokKind::KwInt` 等，不再被误作 `Ident`；全部复合操作符
+  `->` / `->*` / `--` / `-=` / `++` / `+=` / `<<` / `<<=` / `>>` / `>>=`
+  / `==` / `!=` / `<=` / `>=` / `&&` / `||` / `*=` / `/=` / `%=` / `^=`
+  / `|=` / `&=` / `...` 完整支持
+- **C++20 占位降级**：
+  - `module foo;` / `export module foo;` / `import <iostream>;` /
+    `import "header.h";` / `export { ... }` 降级为 no-op 注释
+  - `concept Name = ...;` / `requires ...` 降级为占位注释
+  - `co_await` / `co_yield` 降级为表达式 + 注释；`co_return` 降级为 `return`
+- **C++ → C 降级完善**：
+  - 局部变量声明 `T name;` / `T name = init;` / `T name(args);` 解析 + 降级
+    为 `struct T name;` 形式
+  - 构造初始化列表 `Foo() : x_(0), y_(1) {}` 解析 + 降级为
+    `((struct Foo*)this)->x_ = 0; ((struct Foo*)this)->y_ = 1;`
+  - 类内方法体对未限定成员访问 `n_` 自动改写为 `this->n_`
+  - `obj.method(args)` 改写为 `_ZN<Cls><Len><method>E<args>(&obj, args)` 形式
+    （M9 简化：仅在 `obj` 是已知类类型的局部变量时）
+  - 局部类类型变量声明时显式调用默认构造 `Counter c;` →
+    `struct Counter c; _ZN7CounterC1Ev(&c);`
+  - 顶层 `int main() {}` 末尾追加 C 端 trampoline
+    `int main() { return _ZN4mainEv(); }` 以让 libc 启动器找到 main
+  - 系统头 `stddef.h` / `stdint.h` 仅在确实使用 `new` / `delete` /
+    `throw` / `try` / `typeid` 时引入；否则用 `typedef unsigned long size_t;`
+    替代以保证 Windows 也能用
+- **DCC_CPP_KEEP_TMP**：环境变量；非空时把降级后的 C 文件写到指定路径
+  而不是临时目录，便于调试
+
+**M9 不在范围**：SFINAE / partial specialization（`partial_sort`）/
+完整 concept 求值 / 协程挂起恢复 / module 分区 / 完整 GCC cc1/cc1plus
+bootstrap（受限于 `dcc` 自身 C++ 库支持度与远端磁盘空间）。
+
+**限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M9 阶段已可端到端运行
+简单 C++ 源（含 class / 成员函数 / 构造初始化列表 / 局部类变量 /
+方法调用改写）；GCC 完整 bootstrap 仍部分受阻（M9 已解锁 C++ 端到端，
+cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 远端可用磁盘 2.5G 不够装 GCC
+源码约 1GB + 构建临时文件约 5GB）；原因见
 `docs/missing_features.md` 的 C++ 前端状态表。
 
 ## x86-64 后端 ABI 约定

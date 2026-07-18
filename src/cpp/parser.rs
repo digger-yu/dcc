@@ -163,6 +163,8 @@ pub enum CppDecl {
     Ctor {
         class: String,
         params: Vec<(String, MangleType)>,
+        /// 成员初始化列表: `name(value)` 对 (M9: 仅简单表达式 / 字面量)
+        inits: Vec<(String, CppExpr)>,
         body: CppBody,
         is_virtual: bool,
     },
@@ -209,6 +211,25 @@ pub enum CppDecl {
         params: TemplateArgs,
         decl: Box<CppDecl>,
     },
+    /// C++20 concept 定义 (M9: 占位, 立即展开为 no-op)
+    Concept {
+        name: String,
+        /// constraint expression 文本 (M9 占位, 不求值)
+        body_text: String,
+    },
+    /// C++20 module 声明 (M9: 占位, 立即展开为 no-op)
+    /// `module foo;` / `export module foo;` / `module;`
+    Module {
+        name: Option<String>,
+        is_export: bool,
+    },
+    /// C++20 import 声明 (M9: 占位, 立即展开为 no-op)
+    /// `import foo;` / `import <iostream>;` / `import "header.h";`
+    Import {
+        path: Vec<String>,
+    },
+    /// C++20 export 块声明 (M9: 占位, 立即展开为 no-op)
+    ExportBlock(Vec<CppDecl>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -226,6 +247,12 @@ pub enum CppStmt {
     Block(CppBody),
     /// `this->member = expr` 或 `this->member(args)`
     ThisMember(String, Box<CppStmt>),
+    /// M9: 局部变量声明 `T name;` / `T name = init;` / `auto name = init;`
+    LocalVar {
+        ty: MangleType,
+        name: String,
+        init: Option<CppExpr>,
+    },
     /// `try { ... } catch (T& e) { ... }` (M8)
     Try {
         body: Box<CppBody>,
@@ -237,6 +264,12 @@ pub enum CppStmt {
     Break,
     /// `continue;` (M8)
     Continue,
+    /// `co_await expr;` (C++20 协程, M9 占位)
+    CoAwait(CppExpr),
+    /// `co_yield expr;` (C++20 协程, M9 占位)
+    CoYield(CppExpr),
+    /// `co_return expr;` (C++20 协程, M9 占位)
+    CoReturn(Option<CppExpr>),
     /// 空声明 `;` 已被调用方过滤
     Decl(CppDecl),
 }
@@ -421,6 +454,22 @@ impl<'a> CppParser<'a> {
         if self.at(CppKw::Using) {
             return self.parse_using_decl();
         }
+        // C++20 module / export module (M9: 占位)
+        if self.at(CppKw::Module) {
+            return self.parse_module_decl();
+        }
+        // C++20 import (M9: 占位)
+        if self.at(CppKw::Import) {
+            return self.parse_import_decl();
+        }
+        // C++20 export { ... } (M9: 占位)
+        if self.at(CppKw::Export) {
+            return self.parse_export_decl();
+        }
+        // C++20 concept (M9: 占位, 仅顶层)
+        if self.at(CppKw::Concept) {
+            return self.parse_concept_decl();
+        }
         // class / struct Name (M8: 可继承)
         if self.at(CppKw::Class) {
             return self.parse_class_decl();
@@ -437,6 +486,25 @@ impl<'a> CppParser<'a> {
         // 顶层: 全局函数 (返回类型 + 名 + 形参)
         if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = &self.peek {
             return self.parse_free_fn();
+        }
+        // M9: 顶层声明以类型关键字开头 (`void f()`, `int g(int)`)
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwInt
+            | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+            | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+            | TokKind::KwSigned | TokKind::KwUnsigned
+            | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic
+            | TokKind::KwInline | TokKind::KwBool
+            | TokKind::KwAuto | TokKind::KwAtomic
+            | TokKind::KwRestrict, .. })))
+        {
+            // 区分: 顶层是自由函数 vs 顶层是带类型的变量声明
+            // 看后两个 token: 第二个是 ident, 第三个是 `(` 才是函数
+            let second = self.peek_token_at(1);
+            let is_fn = matches!(second, Some(CppTok::C(Tok { kind: TokKind::Ident, .. })))
+                && matches!(self.peek_token_at(2),
+                    Some(CppTok::C(Tok { kind: TokKind::LParen, .. })));
+            if is_fn { return self.parse_free_fn(); }
         }
         Err(CppParseError::Unsupported("declaration form", self.span()))
     }
@@ -510,6 +578,129 @@ impl<'a> CppParser<'a> {
             self.bump();
         }
         Ok(CppDecl::Using { is_namespace, path })
+    }
+
+    /// 解析 `module foo;` / `module;` / `export module foo;` (M9 占位)
+    fn parse_module_decl(&mut self) -> Result<CppDecl, CppParseError> {
+        let is_export = false;  // 顶层 parse_decl 不带 export 前缀
+        self.expect_kw(CppKw::Module)?;
+        let name = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            None
+        } else if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+            if text == ":" {
+                // 跳过 : 之后的 partition 名 (M9 占位)
+                let _ = self.parse_qualified_name();
+                None
+            } else {
+                Some(self.expect_ident()?)
+            }
+        } else {
+            None
+        };
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            self.bump();
+        }
+        Ok(CppDecl::Module { name, is_export })
+    }
+
+    /// 解析 `import foo;` / `import <iostream>;` / `import "header.h";` (M9 占位)
+    fn parse_import_decl(&mut self) -> Result<CppDecl, CppParseError> {
+        self.expect_kw(CppKw::Import)?;
+        let path = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. }))) {
+            self.bump();
+            let mut parts = vec![];
+            loop {
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Gt, .. }))) { break; }
+                parts.push(text_of(&self.peek).to_string());
+                self.bump();
+            }
+            self.bump();  // eat >
+            vec![parts.join("")]
+        } else if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::StringLit, .. }))) {
+            let s = text_of(&self.peek).to_string();
+            self.bump();
+            vec![s]
+        } else {
+            self.parse_qualified_name()?
+        };
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            self.bump();
+        }
+        Ok(CppDecl::Import { path })
+    }
+
+    /// 解析 `export { ... }` / `export module foo;` (M9 占位)
+    fn parse_export_decl(&mut self) -> Result<CppDecl, CppParseError> {
+        self.expect_kw(CppKw::Export)?;
+        // export module foo;
+        if self.at(CppKw::Module) {
+            self.bump();
+            let name = if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                Some(self.expect_ident()?)
+            } else { None };
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                self.bump();
+            }
+            return Ok(CppDecl::Module { name, is_export: true });
+        }
+        // export { decls }
+        if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBrace, .. }))) {
+            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
+        }
+        self.bump();
+        let mut body = vec![];
+        while let Some(t) = &self.peek {
+            if matches!(t, CppTok::C(Tok { kind: TokKind::RBrace, .. })) { break; }
+            body.push(self.parse_decl()?);
+        }
+        self.bump();
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            self.bump();
+        }
+        Ok(CppDecl::ExportBlock(body))
+    }
+
+    /// 解析 `concept Name = ...;` (M9 占位)
+    fn parse_concept_decl(&mut self) -> Result<CppDecl, CppParseError> {
+        self.expect_kw(CppKw::Concept)?;
+        let name = self.expect_ident()?;
+        if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
+            return Err(CppParseError::Unexpected("=", format!("{:?}", self.peek), self.span()));
+        }
+        self.bump();
+        // 简化: 把 = 之后到 ; 之前的 token 收为 body_text (M9 不解析表达式)
+        let mut body_text = String::new();
+        loop {
+            if let Some(t) = &self.peek.clone() {
+                if matches!(t, CppTok::C(Tok { kind: TokKind::Semi, .. })) { break; }
+                body_text.push_str(text_of(&self.peek));
+                body_text.push(' ');
+            } else { break; }
+            self.bump();
+        }
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            self.bump();
+        }
+        Ok(CppDecl::Concept { name, body_text: body_text.trim().to_string() })
+    }
+
+    /// 解析 `requires` 后缀 (M9 占位: 跳过 requires expr)
+    fn skip_requires_clause(&mut self) -> bool {
+        if !self.at(CppKw::Requires) { return false; }
+        self.bump();
+        // 简化: 消耗到 { 或 ; 为止
+        let mut depth = 0i32;
+        while let Some(t) = &self.peek.clone() {
+            match t {
+                CppTok::C(Tok { kind: TokKind::LBrace, .. }) if depth == 0 => break,
+                CppTok::C(Tok { kind: TokKind::Semi, .. }) if depth == 0 => break,
+                CppTok::C(Tok { kind: TokKind::LParen | TokKind::LBracket | TokKind::LBrace, .. }) => depth += 1,
+                CppTok::C(Tok { kind: TokKind::RParen | TokKind::RBracket | TokKind::RBrace, .. }) => depth -= 1,
+                _ => {}
+            }
+            self.bump();
+        }
+        true
     }
 
     fn parse_class_decl(&mut self) -> Result<CppDecl, CppParseError> {
@@ -658,6 +849,28 @@ impl<'a> CppParser<'a> {
                 }
                 _ => return Err(CppParseError::Unsupported("class member", self.span())),
             }
+        }
+        // M9: 成员函数以类型关键字开头 (`int get() ...`, `void set(int) ...` 等)
+        // 由于 C++ lexer 现在把 int/void 等识别为 TokKind::KwInt 等, 需要直接走
+        // parse_member_fn_inline. 但要先看下一个 token 是否 ident 且再下一个
+        // token 是 `(`, 否则可能是 `int n_;` 这样的成员变量
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwInt
+            | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+            | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+            | TokKind::KwSigned | TokKind::KwUnsigned
+            | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic
+            | TokKind::KwInline | TokKind::KwBool
+            | TokKind::KwAuto | TokKind::KwAtomic
+            | TokKind::KwRestrict, .. })))
+        {
+            let second = self.peek_token_at(1);
+            let is_fn = matches!(second,
+                Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))
+            ) && matches!(self.peek_token_at(2),
+                Some(CppTok::C(Tok { kind: TokKind::LParen, .. }))
+            );
+            return if is_fn { self.parse_member_fn_inline() } else { self.parse_member_var() };
         }
         Err(CppParseError::Unsupported("class member", self.span()))
     }
@@ -815,31 +1028,45 @@ impl<'a> CppParser<'a> {
         let is_virtual = self.skip_cv_qual() || false;
         // 可能有 `noexcept` / `override` (跳过)
         self.skip_specifiers();
-        // 跳过 ctor 初始化列表 `: re(r), im(i)`
+        // 解析 ctor 初始化列表 `: re(r), im(i)`
+        let mut inits: Vec<(String, CppExpr)> = vec![];
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Colon, .. }))) {
             self.bump();
-            // 简单跳过到匹配的 `{` 或 `;` (平衡括号)
-            let mut paren_depth: i32 = 0;
-            let mut brace_depth: i32 = 0;
             loop {
-                match self.peek.clone() {
-                    Some(CppTok::C(Tok { kind: TokKind::LParen, .. })) => { paren_depth += 1; self.bump(); }
-                    Some(CppTok::C(Tok { kind: TokKind::RParen, .. })) => { paren_depth -= 1; self.bump(); }
-                    Some(CppTok::C(Tok { kind: TokKind::LBrace, .. })) if brace_depth == 0 && paren_depth == 0 => break,
-                    Some(CppTok::C(Tok { kind: TokKind::LBrace, .. })) => { brace_depth += 1; self.bump(); }
-                    Some(CppTok::C(Tok { kind: TokKind::RBrace, .. })) => { brace_depth -= 1; self.bump(); }
-                    Some(CppTok::C(Tok { kind: TokKind::Semi, .. })) if brace_depth == 0 && paren_depth == 0 => break,
-                    Some(_) => { self.bump(); }
-                    None => return Err(CppParseError::Unexpected(";", "EOF".into(), self.span())),
-                }
+                let member = self.expect_ident()?;
+                let init = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LParen, .. }))) {
+                    self.bump();
+                    let e = if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RParen, .. }))) {
+                        Some(self.parse_expr()?)
+                    } else { None };
+                    if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RParen, .. }))) {
+                        return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
+                    }
+                    self.bump();
+                    e
+                } else if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBrace, .. }))) {
+                    self.bump();
+                    let e = if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBrace, .. }))) {
+                        Some(self.parse_expr()?)
+                    } else { None };
+                    if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBrace, .. }))) {
+                        return Err(CppParseError::Unexpected("}", format!("{:?}", self.peek), self.span()));
+                    }
+                    self.bump();
+                    e
+                } else { None };
+                inits.push((member, init.unwrap_or(CppExpr::IntLit(0))));
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+                    self.bump();
+                } else { break; }
             }
         }
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
             self.bump();
-            return Ok(CppDecl::Ctor { class, params, body: CppBody::default(), is_virtual });
+            return Ok(CppDecl::Ctor { class, params, inits, body: CppBody::default(), is_virtual });
         }
         let body = self.parse_body()?;
-        Ok(CppDecl::Ctor { class, params, body, is_virtual })
+        Ok(CppDecl::Ctor { class, params, inits, body, is_virtual })
     }
 
     fn parse_dtor(&mut self) -> Result<CppDecl, CppParseError> {
@@ -866,10 +1093,26 @@ impl<'a> CppParser<'a> {
             self.bump();
             is_const = true;
         }
-        // 接受普通 ident (含 'auto')
+        // 接受普通 ident (含 'auto') 和 C 类型关键字 (int, void, char, ...)
         let name = match self.peek.clone() {
             Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) => text,
             Some(CppTok::C(Tok { kind: TokKind::KwAuto, .. })) => "auto".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwVoid, .. })) => "void".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwBool, .. })) => "bool".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwChar, .. })) => "char".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwShort, .. })) => "short".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwInt, .. })) => "int".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwLong, .. })) => "long".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwFloat, .. })) => "float".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwDouble, .. })) => "double".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwSigned, .. })) => "signed".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwUnsigned, .. })) => "unsigned".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwStruct, .. })) => "struct".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwUnion, .. })) => "union".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwEnum, .. })) => "enum".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwAtomic, .. })) => "atomic".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwInt128, .. })) => "__int128".to_string(),
+            Some(CppTok::C(Tok { kind: TokKind::KwUInt128, .. })) => "__uint128_t".to_string(),
             _ => return Err(CppParseError::Unexpected("type", format!("{:?}", self.peek), self.span())),
         };
         self.bump();
@@ -887,6 +1130,13 @@ impl<'a> CppParser<'a> {
             "auto" => MangleType::Int, // M8 简化
             other => MangleType::Class(other.to_string()),
         };
+        // 跳过 const 限定后缀 (`int const*` 等)
+        if self.at(CppKw::Const) { self.bump(); }
+        // 吞 unsigned long long / long long 这种组合
+        while matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwLong
+            | TokKind::KwShort, .. }))) {
+            self.bump();
+        }
         while matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Star, .. }))) {
             self.bump();
             ty = MangleType::Pointer(Box::new(ty));
@@ -903,7 +1153,7 @@ impl<'a> CppParser<'a> {
     fn parse_member_fn_inline(&mut self) -> Result<CppDecl, CppParseError> {
         let mut is_virtual = false;
         if self.at(CppKw::Virtual) { self.bump(); is_virtual = true; }
-        let _ret = self.parse_mangle_type()?;
+        let ret = self.parse_mangle_type()?;
         let name = self.expect_ident()?;
         let params = self.parse_param_list()?;
         let is_const = self.skip_cv_qual();
@@ -911,25 +1161,25 @@ impl<'a> CppParser<'a> {
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
             self.bump();
             return Ok(CppDecl::MemberFn {
-                class: String::new(), ret: MangleType::Void, name, params,
+                class: String::new(), ret, name, params,
                 body: CppBody::default(),
                 is_virtual, is_override, is_const,
             });
         }
         let body = self.parse_body()?;
         Ok(CppDecl::MemberFn {
-            class: String::new(), ret: MangleType::Void, name, params, body,
+            class: String::new(), ret, name, params, body,
             is_virtual, is_override, is_const,
         })
     }
 
     fn parse_free_fn(&mut self) -> Result<CppDecl, CppParseError> {
-        let _ret = self.parse_mangle_type()?;
+        let ret = self.parse_mangle_type()?;
         let name = self.expect_ident()?;
         let params = self.parse_param_list()?;
         self.skip_cv_qual();
         let body = self.parse_body()?;
-        Ok(CppDecl::FreeFn { ret: MangleType::Void, name, params, body })
+        Ok(CppDecl::FreeFn { ret, name, params, body })
     }
 
     fn parse_body(&mut self) -> Result<CppBody, CppParseError> {
@@ -990,9 +1240,42 @@ impl<'a> CppParser<'a> {
             }
             return Ok(CppStmt::Continue);
         }
+        // C++20 协程 (M9: 占位, 直接走对应 C 表达式)
+        if self.at(CppKw::CoAwait) {
+            self.bump();
+            let e = self.parse_expr()?;
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                self.bump();
+            }
+            return Ok(CppStmt::CoAwait(e));
+        }
+        if self.at(CppKw::CoYield) {
+            self.bump();
+            let e = self.parse_expr()?;
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                self.bump();
+            }
+            return Ok(CppStmt::CoYield(e));
+        }
+        if self.at(CppKw::CoReturn) {
+            self.bump();
+            let val = if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                Some(self.parse_expr()?)
+            } else { None };
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                self.bump();
+            }
+            return Ok(CppStmt::CoReturn(val));
+        }
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBrace, .. }))) {
             let body = self.parse_body()?;
             return Ok(CppStmt::Block(body));
+        }
+        // M9: 局部变量声明 `Type name;` / `Type name = expr;` / `auto name = expr;`
+        // 严格说应单独走 CppStmt::LocalVar, 这里降级为 Lower 阶段识别:
+        // 暂作为 Expr 处理 (Lower 阶段根据 ty/=expr 重写)
+        if self.is_local_var_decl_start() {
+            return self.parse_local_var_decl();
         }
         let e = self.parse_expr()?;
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
@@ -1663,6 +1946,8 @@ impl<'a> CppParser<'a> {
         loop {
             let is = match &self.peek {
                 Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) if text == "const" => { is_const = true; true }
+                Some(CppTok::C(Tok { kind: TokKind::KwConst, .. })) => { is_const = true; true }
+                Some(CppTok::Kw(CppKw::Const, _)) => { is_const = true; true }
                 _ => false,
             };
             if is { self.bump(); } else { break; }
@@ -1681,6 +1966,69 @@ impl<'a> CppParser<'a> {
         }
         is_override
     }
+
+    /// M9: 判断当前位置是否是局部变量声明
+    /// 形式: `Type name;` / `Type name = init;` / `Type name(args);`
+    /// 要求: 第一 token 是类型关键字 / auto / 用户自定义类型 ident, 第二是 ident,
+    ///      第三是 `;` `=` 或 `(`.
+    /// 用户自定义类型 ident 不能是 C/C++ 关键字或保留字 (避免与 `if (...)` 冲突).
+    fn is_local_var_decl_start(&self) -> bool {
+        let is_type_kw = matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwInt
+            | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+            | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+            | TokKind::KwSigned | TokKind::KwUnsigned
+            | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+            | TokKind::KwConst | TokKind::KwVolatile | TokKind::KwStatic
+            | TokKind::KwInline | TokKind::KwBool
+            | TokKind::KwAuto | TokKind::KwAtomic
+            | TokKind::KwRestrict, .. })));
+        let first_is_ident_type = if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
+            !is_reserved_word(text)
+        } else { false };
+        if !is_type_kw && !first_is_ident_type { return false; }
+        // 第二 token 必须是 ident
+        let second = self.peek_token_at(1);
+        if !matches!(second, Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))) {
+            return false;
+        }
+        // 第三 token 必须是 `;` `=` `(` 之一 (C++ 风格声明)
+        let third = self.peek_token_at(2);
+        matches!(third,
+            Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))
+            | Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))
+            | Some(CppTok::C(Tok { kind: TokKind::LParen, .. }))
+        )
+    }
+
+    /// M9: 解析局部变量声明
+    fn parse_local_var_decl(&mut self) -> Result<CppStmt, CppParseError> {
+        let ty = self.parse_mangle_type()?;
+        let name = self.expect_ident()?;
+        // 跳过可能的 `()` (如 `int x(0);` C++ 风格构造)
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LParen, .. }))) {
+            // 简化: 仅支持空参 `int x();` 或单参 `int x(0);`
+            self.bump();
+            let init = if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RParen, .. }))) {
+                Some(self.parse_expr()?)
+            } else { None };
+            if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RParen, .. }))) {
+                return Err(CppParseError::Unexpected(")", format!("{:?}", self.peek), self.span()));
+            }
+            self.bump();
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+                self.bump();
+            }
+            return Ok(CppStmt::LocalVar { ty, name, init });
+        }
+        let init = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
+            self.bump();
+            Some(self.parse_expr()?)
+        } else { None };
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
+            self.bump();
+        }
+        Ok(CppStmt::LocalVar { ty, name, init })
+    }
 }
 
 /// 给定声明 d, 注入类名 (用于类内 inline 函数)
@@ -1697,8 +2045,8 @@ fn inject_class_name(d: CppDecl, class: &str, _saved: &Option<CppTok>) -> CppDec
                     is_virtual, is_override, is_const }
             }
         }
-        CppDecl::Ctor { params, body, is_virtual, .. } => {
-            CppDecl::Ctor { class: class.to_string(), params, body, is_virtual }
+        CppDecl::Ctor { params, inits, body, is_virtual, .. } => {
+            CppDecl::Ctor { class: class.to_string(), params, inits, body, is_virtual }
         }
         CppDecl::Dtor { body, is_virtual, .. } => {
             CppDecl::Dtor { class: class.to_string(), body, is_virtual }
@@ -1838,6 +2186,59 @@ mod tests {
     #[test]
     fn parse_operator_overload() {
         let src = b"class Vec { public: Vec operator+(Vec const& other) { return *this; } };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        assert!(d.len() == 1);
+    }
+
+    #[test]
+    fn parse_concept() {
+        let src = b"template <typename T> concept Integral = sizeof(T) <= 8;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        // outer is Template wrapping Concept
+        if let CppDecl::Template { decl, .. } = &d[0] {
+            assert!(matches!(decl.as_ref(), CppDecl::Concept { .. }));
+        } else { panic!("expected Template wrapping Concept"); }
+    }
+
+    #[test]
+    fn parse_module() {
+        let src = b"module foo;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        assert!(matches!(&d[0], CppDecl::Module { name: Some(_), .. }));
+    }
+
+    #[test]
+    fn parse_export_module() {
+        let src = b"export module foo;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        assert!(matches!(&d[0], CppDecl::Module { is_export: true, .. }));
+    }
+
+    #[test]
+    fn parse_import() {
+        let src = b"import std;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        assert!(matches!(&d[0], CppDecl::Import { .. }));
+    }
+
+    #[test]
+    fn parse_import_angle() {
+        let src = b"import <iostream>;";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        if let CppDecl::Import { path } = &d[0] {
+            assert!(!path.is_empty());
+        } else { panic!("expected Import"); }
+    }
+
+    #[test]
+    fn parse_coroutine_basic() {
+        let src = b"void f() { co_await 1; co_yield 2; co_return 3; }";
         let mut p = CppParser::new(src, "test.cpp");
         let d = p.parse_top_level().unwrap();
         assert!(d.len() == 1);

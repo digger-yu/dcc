@@ -38,6 +38,15 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return run_assembler_driver(&cfg, input);
     }
 
+    // C++ 前端: -x c++ / .cpp / .cc / .cxx / .CPP / .CXX
+    let is_cpp = matches!(cfg.input_lang, InputLang::Cpp)
+        || input.extension().and_then(|e| e.to_str())
+            .map(|e| matches!(e, "cpp" | "cc" | "cxx" | "CPP" | "CXX"))
+            .unwrap_or(false);
+    if is_cpp {
+        return run_cpp_driver(&cfg, input);
+    }
+
     if cfg.verbose {
         eprintln!("dcc: input  = {}", input.display());
         eprintln!("dcc: target = {}", cfg.target.as_str());
@@ -260,6 +269,131 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
     let _ = fs::remove_file(&asm_path);
     if !status.success() {
         return Err(vec![Diagnostic::err("E0102", "assembler failed",
+            crate::diagnostics::Span::point(&file_name, 0, 0))]);
+    }
+    eprintln!("dcc: wrote {}", cfg.output.display());
+    Ok(())
+}
+
+/// C++ 编译驱动: M9 接入点
+///
+/// 流程:
+///   1. 预处理 C++ 源 (复用 C 预处理器; C++ 模式不处理 #include <iostream> 等)
+///   2. 调 cpp 前端 lex/parse/lower → 降级到 C 字符串
+///   3. 写到临时 .c 文件
+///   4. 调 C 链路 (re-preprocess / parse / IR / codegen) 写 .o 或 .s
+///
+/// 设计: C++ 不另起 IR, 而是降级到 C 后复用整条 C 链路 (M7 决策)。
+/// 这意味着 C++ 的所有限制 = 现有 C 后端能表达的限制。
+fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagnostic>> {
+    use crate::cpp::lower::Lower;
+    use crate::cpp::parser::CppParser;
+
+    let file_name = input.display().to_string();
+
+    // -E 模式: 复用 C 预处理器 (C++ 注释 + 基本宏支持, 不解析 #include <iostream> 等)
+    if cfg.preprocess_only {
+        let src = fs::read(input)
+            .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
+                crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+        let (preprocessed, mut pp_diags, _) = preproc::preprocess(
+            &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+        );
+        enrich_diags(&mut pp_diags, &src);
+        if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
+            for d in &pp_diags { d.print(); }
+            return Err(pp_diags);
+        }
+        print!("{}", preprocessed);
+        return Ok(());
+    }
+
+    if cfg.verbose {
+        eprintln!("dcc: cpp     = {}", input.display());
+        eprintln!("dcc: target  = {}", cfg.target.as_str());
+        eprintln!("dcc: std     = {}", cfg.std.as_str());
+        eprintln!("dcc: -O{}", cfg.opt);
+    }
+
+    // 1. 预处理 (复用 C 预处理器, 暂不解析 C++ 标准库头)
+    let src = fs::read(input)
+        .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
+            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    let (preprocessed, mut pp_diags, _include_deps) = preproc::preprocess(
+        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+    );
+    enrich_diags(&mut pp_diags, &src);
+    if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
+        for d in &pp_diags { d.print(); }
+        return Err(pp_diags);
+    }
+
+    // 2. C++ lex + parse + lower
+    let mut parser = CppParser::new(preprocessed.as_bytes(), &file_name);
+    let decls = parser.parse_top_level()
+        .map_err(|e| vec![e.to_diag(&file_name)])?;
+    let mut lower = Lower::new();
+    lower.lower_decls(&decls);
+    let c_src = lower.finish();
+
+    // -dump-ast: 打印 C++ AST 后退出
+    if cfg.dump_ast {
+        println!("{:#?}", decls);
+        return Ok(());
+    }
+
+    // -fsyntax-only: 只跑 lower, 不调 dcc 编译
+    if cfg.syntax_only {
+        return Ok(());
+    }
+
+    // 3. 写临时 .c
+    let tmp = if let Ok(p) = std::env::var("DCC_CPP_KEEP_TMP") {
+        std::path::PathBuf::from(p)
+    } else {
+        std::env::temp_dir().join(format!(
+            "dcc-cpp-{}-{}.c",
+            std::process::id(),
+            input.file_name().and_then(|n| n.to_str()).unwrap_or("input")
+        ))
+    };
+    fs::write(&tmp, c_src)
+        .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write tmp: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+
+    // 4. 调 dcc C 链路编译 (走相同 dcc 二进制, 复用 codegen/IR)
+    let dcc_bin = std::env::current_exe()
+        .map_err(|e| vec![Diagnostic::err("E0102", format!("cannot find dcc: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    let mut cmd = Command::new(&dcc_bin);
+    cmd.arg("-c");
+    cmd.arg(format!("-O{}", cfg.opt));
+    cmd.arg(format!("-std={}", cfg.std.as_str()));
+    for inc in &cfg.include_paths { cmd.arg("-I").arg(inc); }
+    for sys in &cfg.system_paths { cmd.arg("-isystem").arg(sys); }
+    for d in &cfg.defines {
+        if let Some(v) = &d.1 { cmd.arg("-D").arg(format!("{}={}", d.0, v)); }
+        else { cmd.arg("-D").arg(&d.0); }
+    }
+    if cfg.debug_level > 0 { cmd.arg(format!("-g{}", cfg.debug_level)); }
+    if cfg.emit_asm { cmd.arg("-S"); }
+    cmd.arg("-o").arg(&cfg.output);
+    cmd.arg(&tmp);
+
+    if cfg.verbose {
+        eprintln!("dcc: dcc -c -O{} -o {} {}", cfg.opt, cfg.output.display(), tmp.display());
+    }
+
+    let out = cmd.output()
+        .map_err(|e| vec![Diagnostic::err("E0102", format!("cannot spawn dcc: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    if std::env::var("DCC_CPP_KEEP_TMP").is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        return Err(vec![Diagnostic::err("E0301",
+            format!("dcc C backend failed for {}: {}", file_name, stderr),
             crate::diagnostics::Span::point(&file_name, 0, 0))]);
     }
     eprintln!("dcc: wrote {}", cfg.output.display());

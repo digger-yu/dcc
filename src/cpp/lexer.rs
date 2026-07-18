@@ -7,12 +7,44 @@
 //!   template, typename, try, catch, throw, ...
 //!
 //! 本模块定义 CppToken, 与 C 词法保持兼容:
-//!   - C 关键字仍走 C 的 TokKind
+//!   - C 关键字 (int, return, if, while, ...) 仍走 C 的 TokKind
 //!   - C++ 关键字映射到新的 CppKw 包装, parser 优先匹配
 //!   - :: 双冒号被 lex 为单个 ColonColon 标点
 
 use crate::tokens::{Tok, TokKind};
 use crate::diagnostics::Span;
+
+/// C 关键字 → TokKind (M9 共享, 避免 C++ lexer 漏识别 return 等关键字)
+fn c_keyword_kind(s: &str) -> Option<TokKind> {
+    Some(match s {
+        "int" => TokKind::KwInt, "char" => TokKind::KwChar,
+        "short" => TokKind::KwShort, "long" => TokKind::KwLong,
+        "void" => TokKind::KwVoid, "float" => TokKind::KwFloat,
+        "double" => TokKind::KwDouble, "signed" | "__signed__" => TokKind::KwSigned,
+        "unsigned" => TokKind::KwUnsigned,
+        "struct" => TokKind::KwStruct, "union" => TokKind::KwUnion,
+        "enum" => TokKind::KwEnum, "typedef" => TokKind::KwTypedef,
+        "if" => TokKind::KwIf, "else" => TokKind::KwElse,
+        "while" => TokKind::KwWhile, "for" => TokKind::KwFor,
+        "do" => TokKind::KwDo, "switch" => TokKind::KwSwitch,
+        "case" => TokKind::KwCase, "default" => TokKind::KwDefault,
+        "break" => TokKind::KwBreak, "continue" => TokKind::KwContinue,
+        "return" => TokKind::KwReturn, "goto" => TokKind::KwGoto,
+        "static" => TokKind::KwStatic, "extern" => TokKind::KwExtern,
+        "const" | "__const__" => TokKind::KwConst,
+        "volatile" | "__volatile__" => TokKind::KwVolatile,
+        "inline" | "__inline__" | "__inline" => TokKind::KwInline,
+        "restrict" | "__restrict__" | "__restrict" => TokKind::KwRestrict,
+        "auto" => TokKind::KwAuto, "register" => TokKind::KwRegister,
+        "sizeof" => TokKind::KwSizeof,
+        "_Alignof" | "alignof" | "__alignof" | "__alignof__" => TokKind::KwAlignof,
+        "_Atomic" => TokKind::KwAtomic,
+        "_Bool" => TokKind::KwBool,
+        "__int128" | "__int128_t" => TokKind::KwInt128,
+        "__uint128_t" => TokKind::KwUInt128,
+        _ => return None,
+    })
+}
 
 /// C++ 关键字枚举 (仅 C 关键字之外的 C++ 扩展)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +63,11 @@ pub enum CppKw {
     Decltype, Typeid,
     DynamicCast, StaticCast, ReinterpretCast, ConstCast,
     Mutable, Volatile, Noexcept, ExplicitSpec,
+    // M9 新增 (C++20)
+    Concept, Requires, CoAwait, CoYield, CoReturn,
+    Module, Import, Export,
+    // C++20 杂项
+    Char8T, ConstevalAuto,
 }
 
 impl CppKw {
@@ -73,6 +110,15 @@ impl CppKw {
             "mutable" => Self::Mutable,
             "volatile" => Self::Volatile,
             "noexcept" => Self::Noexcept,
+            "concept" => Self::Concept,
+            "requires" => Self::Requires,
+            "co_await" => Self::CoAwait,
+            "co_yield" => Self::CoYield,
+            "co_return" => Self::CoReturn,
+            "module" => Self::Module,
+            "import" => Self::Import,
+            "export" => Self::Export,
+            "char8_t" => Self::Char8T,
             _ => return None,
         })
     }
@@ -117,6 +163,16 @@ impl CppKw {
             Self::Volatile => "volatile",
             Self::Noexcept => "noexcept",
             Self::ExplicitSpec => "explicit",
+            Self::Concept => "concept",
+            Self::Requires => "requires",
+            Self::CoAwait => "co_await",
+            Self::CoYield => "co_yield",
+            Self::CoReturn => "co_return",
+            Self::Module => "module",
+            Self::Import => "import",
+            Self::Export => "export",
+            Self::Char8T => "char8_t",
+            Self::ConstevalAuto => "consteval",
         }
     }
 }
@@ -202,6 +258,125 @@ impl<'a> CppLexer<'a> {
             self.pos += 2; self.col += 2;
             return Some(CppTok::ColonColon(self.mk_span(2)));
         }
+        // C++ 复合操作符: ->, ->*, --, -=, <<=, >>=
+        if b == b'-' && self.pos + 1 < self.src.len() {
+            let n = self.src[self.pos + 1];
+            if n == b'>' {
+                self.pos += 2; self.col += 2;
+                // ->* (成员指针访问) 也归并到 Arrow, 后续解析按上下文区分
+                return Some(CppTok::C(Tok { kind: TokKind::Arrow,
+                    span: self.mk_span(2), text: "->".to_string() }));
+            }
+            if n == b'-' {
+                self.pos += 2; self.col += 2;
+                return Some(CppTok::C(Tok { kind: TokKind::MinusMinus,
+                    span: self.mk_span(2), text: "--".to_string() }));
+            }
+            if n == b'=' {
+                self.pos += 2; self.col += 2;
+                return Some(CppTok::C(Tok { kind: TokKind::MinusEq,
+                    span: self.mk_span(2), text: "-=".to_string() }));
+            }
+        }
+        if b == b'+' && self.pos + 1 < self.src.len() {
+            let n = self.src[self.pos + 1];
+            if n == b'+' {
+                self.pos += 2; self.col += 2;
+                return Some(CppTok::C(Tok { kind: TokKind::PlusPlus,
+                    span: self.mk_span(2), text: "++".to_string() }));
+            }
+            if n == b'=' {
+                self.pos += 2; self.col += 2;
+                return Some(CppTok::C(Tok { kind: TokKind::PlusEq,
+                    span: self.mk_span(2), text: "+=".to_string() }));
+            }
+        }
+        if b == b'<' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'<' {
+            self.pos += 2; self.col += 2;
+            if self.pos < self.src.len() && self.src[self.pos] == b'=' {
+                self.pos += 1; self.col += 1;
+                return Some(CppTok::C(Tok { kind: TokKind::ShlEq,
+                    span: self.mk_span(3), text: "<<=".to_string() }));
+            }
+            return Some(CppTok::C(Tok { kind: TokKind::Shl,
+                span: self.mk_span(2), text: "<<".to_string() }));
+        }
+        if b == b'>' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'>' {
+            self.pos += 2; self.col += 2;
+            if self.pos < self.src.len() && self.src[self.pos] == b'=' {
+                self.pos += 1; self.col += 1;
+                return Some(CppTok::C(Tok { kind: TokKind::ShrEq,
+                    span: self.mk_span(3), text: ">>=".to_string() }));
+            }
+            return Some(CppTok::C(Tok { kind: TokKind::Shr,
+                span: self.mk_span(2), text: ">>".to_string() }));
+        }
+        if b == b'=' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::EqEq,
+                span: self.mk_span(2), text: "==".to_string() }));
+        }
+        if b == b'!' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::Ne,
+                span: self.mk_span(2), text: "!=".to_string() }));
+        }
+        if b == b'<' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::Le,
+                span: self.mk_span(2), text: "<=".to_string() }));
+        }
+        if b == b'>' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::Ge,
+                span: self.mk_span(2), text: ">=".to_string() }));
+        }
+        if b == b'&' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'&' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::AndAnd,
+                span: self.mk_span(2), text: "&&".to_string() }));
+        }
+        if b == b'|' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'|' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::OrOr,
+                span: self.mk_span(2), text: "||".to_string() }));
+        }
+        if b == b'*' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::StarEq,
+                span: self.mk_span(2), text: "*=".to_string() }));
+        }
+        if b == b'/' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::SlashEq,
+                span: self.mk_span(2), text: "/=".to_string() }));
+        }
+        if b == b'%' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::PercentEq,
+                span: self.mk_span(2), text: "%=".to_string() }));
+        }
+        if b == b'^' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::CaretEq,
+                span: self.mk_span(2), text: "^=".to_string() }));
+        }
+        if b == b'|' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::PipeEq,
+                span: self.mk_span(2), text: "|=".to_string() }));
+        }
+        if b == b'&' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::AmpEq,
+                span: self.mk_span(2), text: "&=".to_string() }));
+        }
+        if b == b'.' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'.' {
+            // ... 用于异常 catch (...), 变参模板
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok { kind: TokKind::Ellipsis,
+                span: self.mk_span(3), text: "...".to_string() }));
+        }
         if b.is_ascii_alphabetic() || b == b'_' {
             let start = self.pos;
             while self.pos < self.src.len()
@@ -212,6 +387,11 @@ impl<'a> CppLexer<'a> {
             let span = self.mk_span(len);
             if let Some(kw) = CppKw::from_ident(s) {
                 return Some(CppTok::Kw(kw, span));
+            }
+            // M9: 也识别 C 关键字 (return, if, while, ...)
+            if let Some(kind) = c_keyword_kind(s) {
+                let tok = Tok { kind, span, text: s.to_string() };
+                return Some(CppTok::C(tok));
             }
             let tok = Tok { kind: TokKind::Ident, span, text: s.to_string() };
             return Some(CppTok::C(tok));
@@ -308,5 +488,70 @@ mod tests {
         let mut lx = CppLexer::new(b"/* a\nb */ class X;", "t.cpp");
         let t = lx.next_tok().unwrap();
         assert!(matches!(t, CppTok::Kw(CppKw::Class, _)));
+    }
+    #[test]
+    fn cpp_lex_arrow_ptr_member() {
+        // this->n_ 应被识别为 this Kw, -> Tok(Arrow), n_ Ident
+        let mut lx = CppLexer::new(b"this->n_", "t.cpp");
+        let t0 = lx.next_tok().unwrap();
+        let t1 = lx.next_tok().unwrap();
+        let t2 = lx.next_tok().unwrap();
+        assert!(matches!(t0, CppTok::Kw(CppKw::This, _)));
+        assert!(matches!(t1, CppTok::C(Tok { kind: TokKind::Arrow, .. })));
+        assert!(matches!(t2, CppTok::C(Tok { kind: TokKind::Ident, .. })));
+    }
+    #[test]
+    fn cpp_lex_compound_assigns() {
+        // + - * / % & | ^ << >> == != <= >= && ||
+        // (这里每个字符后接 = 或复合, 不应误判 +=/-= 等等)
+        let mut lx = CppLexer::new(b"+ - * / % & | ^ << >> == != <= >= && ||",
+                                   "t.cpp");
+        let expect = [
+            TokKind::Plus, TokKind::Minus, TokKind::Star, TokKind::Slash,
+            TokKind::Percent, TokKind::Amp, TokKind::Pipe, TokKind::Caret,
+            TokKind::Shl, TokKind::Shr, TokKind::EqEq, TokKind::Ne,
+            TokKind::Le, TokKind::Ge, TokKind::AndAnd, TokKind::OrOr,
+        ];
+        for k in expect.iter() {
+            let t = lx.next_tok().unwrap();
+            match t {
+                CppTok::C(Tok { kind, .. }) => assert_eq!(&kind, k, "token mismatch"),
+                _ => panic!("expected C tok, got {:?}", t),
+            }
+        }
+    }
+    #[test]
+    fn cpp_lex_compound_assigns_with_eq() {
+        // 单独验证 += -= *= /= %= &= |= ^= <<= >>=
+        let mut lx = CppLexer::new(b"+=-=*=/=%=&=|=^=<<=>>=", "t.cpp");
+        let expect = [
+            TokKind::PlusEq, TokKind::MinusEq, TokKind::StarEq, TokKind::SlashEq,
+            TokKind::PercentEq, TokKind::AmpEq, TokKind::PipeEq, TokKind::CaretEq,
+            TokKind::ShlEq, TokKind::ShrEq,
+        ];
+        for k in expect.iter() {
+            let t = lx.next_tok().unwrap();
+            match t {
+                CppTok::C(Tok { kind, .. }) => assert_eq!(&kind, k, "token mismatch"),
+                _ => panic!("expected C tok, got {:?}", t),
+            }
+        }
+    }
+    #[test]
+    fn cpp_lex_incr_decr() {
+        let mut lx = CppLexer::new(b"i++ j--", "t.cpp");
+        // i Ident
+        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))));
+        // ++
+        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::PlusPlus, .. }))));
+        // j Ident
+        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))));
+        // --
+        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::MinusMinus, .. }))));
+    }
+    #[test]
+    fn cpp_lex_ellipsis() {
+        let mut lx = CppLexer::new(b"...", "t.cpp");
+        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::Ellipsis, .. }))));
     }
 }

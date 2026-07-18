@@ -1,6 +1,6 @@
 # DCC Linux 6.6 缺失特性（按自动化证据）
 
-> 最后更新：2026-07-17 — 以 `scripts/sync_remote_build.sh`、
+> 最后更新：2026-07-18 — 以 `scripts/sync_remote_build.sh`、
 > `scripts/kernel_full_check.sh`、`scripts/prepare0_check.sh`、
 > `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh`、
 > `scripts/modpost_link.sh`、`scripts/vmlinux_regress.sh`、
@@ -64,6 +64,10 @@
 | aarch64/riscv64 移位 (M7) | `lslv`/`lsrv` (aarch64) 修复 Rm bit 错位；`sll`/`srl`/`sra` (riscv64) 替代 0；`aarch64_ir_shifts_emit_lslv_lsrv` + `riscv64_ir_shifts_emit_sll_srl` |
 | 聚合类型 by-ref (M7) | aarch64/riscv64 `gen_call` 检测 `ValueType::Aggregate`/`Array`/`Complex`，local 参数通过 `add xN, sp, #off` / `addi aN, sp, #off` 传地址；`aarch64_aggregate_arg_by_ref` + `riscv64_aggregate_arg_by_ref` |
 | 聚合类型 sret 返回 (M7) | 返回 > 16 字节时 caller 分配 `<sret>` local，x0/a0 指向 sret 槽 |
+| dcc++ 端到端编译 (M9) | `dcc -x c++ examples/m9_cpp_simple.cpp -o a.o` + `gcc a.o -o a && ./a` 在远端 Linux 实测 `exit=0`（`Counter` 局部变量 + `c.inc()` 改写 + ctor 初始化列表 + 顶层 main trampoline） |
+| dcc++ 多类 + 隐式 this (M9) | `examples/m9_cpp_multi.cpp` 远端实测 `exit=0`（方法体内未限定 `n_` 自动改写为 `this->n_`） |
+| dcc++ 复合操作符 / C 关键字 (M9) | `->` / `->*` / `--` / `-=` / `++` / `+=` / `<<` / `<<=` / `>>` / `>>=` / `==` / `!=` / `<=` / `>=` / `&&` / `||` / `*=` / `/=` / `%=` / `^=` / `|=` / `&=` / `...` 全部支持；`int` / `return` / `if` / `while` 等不再被误为 `Ident` |
+| dcc++ C++20 占位 (M9) | `module` / `import` / `export` / `concept` / `requires` / `co_await` / `co_yield` / `co_return` 全部降级为 no-op 注释 |
 
 ## 阻塞级（Linux 6.6 全树）
 
@@ -107,8 +111,13 @@
 | M8 解析器扩展 | ✅ | 命名空间 / 运算符 / 继承 (单/多/钻石) / 虚函数 / 模板声明 / try-catch / lambda / typeid / dynamic_cast / static_cast / const_cast / reinterpret_cast |
 | C++→C 降级 (M7) | ✅ | `src/cpp/lower.rs`：struct 字段、隐式 this 形参、`_Znwm`/`_ZdlPv` 替身 |
 | M8 C++→C 降级 | ✅ | 命名空间扁平化 / 基类嵌入 / vtable 符号 / typeinfo 符号 / 异常 (Itanium zero-cost 降级) / lambda 闭包类型 / 模板 (占位) / dynamic_cast 简化实现 |
-| dcc++ 子命令 / `-x c++` | ⏳ M9 | M7/M8 仅提供 `cpp::compile_cpp` API，未接 dcc CLI |
-| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M8 解锁模板/异常/vtable/RTTI；远期仍受 SFINAE/概念/模块阻碍 |
+| dcc++ 子命令 / `-x c++` | ✅ M9 | `dcc -x c++ foo.cpp` / `dcc foo.cpp`（按 `.cpp`/`.cc`/`.cxx` 扩展名自动识别）；`dcc -dump-ast` / `dcc -fsyntax-only`；远端 Linux 实测 `exit=0` |
+| dcc++ 局部类变量 + 方法调用改写 (M9) | ✅ | `Counter c;` → `struct Counter c; _ZN7CounterC1Ev(&c);`；`c.inc()` → `_ZN7Counter3incEv(&c)`；远端 `m9_cpp_simple.cpp` / `m9_cpp_multi.cpp` 端到端 `exit=0` |
+| dcc++ 隐式 this 注入 (M9) | ✅ | 类方法体内未限定成员 `n_` 自动改写为 `this->n_`（基于 `current_class` + `class_fields`） |
+| dcc++ C++20 占位 (M9) | ✅ | `module` / `import` / `export` / `concept` / `requires` / `co_await` / `co_yield` / `co_return` 降级为 no-op 注释 |
+| dcc++ C 关键字 / 复合操作符 (M9) | ✅ | 词法补全：`int`/`return`/`if`/`while` 不再被误为 `Ident`；`->`/`->*`/`++`/`--`/`<<=`/`>>=` 等 23 个复合操作符完整 |
+| dcc++ Windows 兼容 (M9) | ✅ | `stddef.h` / `stdint.h` 仅在用到 `new`/`delete`/`throw`/`try`/`typeid` 时引入；否则用 `typedef unsigned long size_t;` 替代 |
+| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；远端可用磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）；仍缺 SFINAE / partial specialization / 完整 concepts / 协程 / module |
 | libdecnumber 组合 TU 编译 | ✅ 远程 OK | `scripts/remote_gcc_c_probe.sh` 改用 `tools/libdecnumber_combined.c` |
 | 嵌套块重声明 (C99 6.2.1) | ✅ | `parser.rs::check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍报 E0007 |
 

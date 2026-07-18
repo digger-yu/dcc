@@ -10,6 +10,7 @@ use crate::sanitizer::SanitizerFlags;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputLang {
     C,
+    Cpp,
     AssemblerWithCpp,
 }
 
@@ -367,6 +368,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 input_lang = match lang.as_str() {
                     "assembler-with-cpp" | "assembler" => InputLang::AssemblerWithCpp,
                     "c" | "c-header" => InputLang::C,
+                    "c++" | "cpp" | "cxx" => InputLang::Cpp,
                     other => return Err(CliError::new(&format!("unsupported -x language: {}", other))),
                 };
             }

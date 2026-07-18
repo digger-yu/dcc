@@ -248,11 +248,52 @@ ctor / dtor / 成员函数 / 成员变量 / `this->x` / `::` / new / delete /
 
 - 模板偏特化 / SFINAE / concepts
 - coroutines / modules
-- `dcc++` 子命令 / `-x c++`（CLI 主入口未接 M8）
 
-完整 GCC bootstrap 仍部分受阻：M8 已解锁模板 / 异常 / vtable / RTTI
-四大关键，但 cc1/cc1plus 的更复杂 C++ 模式（SFINAE / concepts / 偏特化）
-仍需 M9+ 完成。
+**M9 新增**（CLI 集成 + 降级完善 + C++20 占位）：
+
+- **CLI 集成**：`dcc -x c++ foo.cpp` / `dcc foo.cpp`（按 `.cpp`/`.cc`/
+  `.cxx` 扩展名自动识别 C++ 模式）；`dcc -dump-ast` / `dcc -fsyntax-only`
+  调试模式。
+- **局部类变量 + 构造初始化列表**：`Counter c;` → `struct Counter c;
+  _ZN7CounterC1Ev(&c);`；`Foo() : x_(0), y_(1) {}` → 降级为
+  `((struct Foo*)this)->x_ = 0; ((struct Foo*)this)->y_ = 1;`。
+- **方法调用改写**：`obj.method(args)` 改写为 Itanium 修饰的 C 函数
+  `_ZN<Cls><Len><method>E<args>(&obj, args)`。
+- **隐式 this 注入**：类方法体内未限定成员访问 `n_` 自动改写为 `this->n_`
+  （基于 `current_class` + `class_fields`），不再要求显式 `this->`。
+- **C 端 main trampoline**：顶层 `int main() {}` 末尾追加
+  `int main() { return _ZN4mainEv(); }` 以让 libc 启动器找到 main。
+- **C++20 占位降级**：`module` / `import` / `export` / `concept` /
+  `requires` / `co_await` / `co_yield` / `co_return` 全部降级为 no-op
+  注释。
+- **C 关键字 / 复合操作符词法补全**：`int` / `return` / `if` / `while` 等
+  不再被误为 `Ident`；`->` / `->*` / `++` / `--` / `<<` / `<<=` / `>>` /
+  `>>=` / `==` / `!=` / `<=` / `>=` / `&&` / `||` / `*=` / `/=` / `%=` /
+  `^=` / `|=` / `&=` / `...` 完整支持。
+- **Windows 兼容**：`stddef.h` / `stdint.h` 仅在用到 `new` / `delete` /
+  `throw` / `try` / `typeid` 时引入；否则用 `typedef unsigned long size_t;`
+  替代。
+- **DCC_CPP_KEEP_TMP**：环境变量；非空时把降级后的 C 文件写到指定路径。
+
+**M9 端到端验证**（远端 Linux 实测 `exit=0`）：
+
+```bash
+dcc -c examples/m9_cpp_simple.cpp -o m9.o    # 1 个 class + 构造 + 成员函数
+gcc m9.o -o m9 && ./m9                       # exit=0
+dcc -c examples/m9_cpp_multi.cpp -o m9m.o    # 多类 + 隐式 this
+gcc m9m.o -o m9m && ./m9m                    # exit=0
+```
+
+**M9 仍不支持**：
+
+- SFINAE / partial specialization / 完整 concept 求值
+- 协程挂起恢复 / module 分区
+- 完整 GCC cc1/cc1plus bootstrap（远端可用磁盘 2.5G 不足，且 dcc C++
+  标准库支持度仍需扩展）
+
+完整 GCC bootstrap 仍部分受阻：M9 已解锁 dcc++ 端到端，cc1/cc1plus
+仍受 SFINAE / concepts / partial specialization / 协程阻碍；详见
+`docs/missing_features.md`。
 
 ### Linux 内核编译硬性门槛
 
@@ -332,6 +373,21 @@ dcc --target riscv64-linux-gnu input.c
 # 仅 Triple 解析 (parse-only, 无后端):
 #   --target= 字符串解析通过,Target::resolve() 给出几何参数,
 #   codegen::emit() 会 panic 并提示 "parse-only"。
+# 适用于 mips / mips64 / arm / armv7。
+
+# C++ 编译 (M9, 端到端支持 class / ctor / 成员函数 / 方法调用改写)
+dcc -x c++ examples/m9_cpp_simple.cpp -o m9.o
+gcc m9.o -o m9 && ./m9     # dcc 输出 .o, 用系统 gcc 链接
+# 或 .cpp/.cc/.cxx 扩展名自动识别
+dcc -c examples/m9_cpp_multi.cpp -o m9.o
+# 调试降级: DCC_CPP_KEEP_TMP 把 C 输出写到指定路径
+DCC_CPP_KEEP_TMP=/tmp/out.c dcc -x c++ foo.cpp -o foo.o
+# C++ 范围: class / 构造(初始化列表) / 析构 / 成员函数 / 命名空间 /
+#           运算符重载 / 继承 / 虚函数 / vtable / typeinfo / 异常 /
+#           lambda / 模板 / 局部类变量 / 隐式 this 注入 /
+#           C++20 占位(module/import/export/concept/requires/co_await)
+# 不支持: SFINAE / partial specialization / 完整 concept 求值 /
+#         协程挂起恢复 / module 分区 / 完整 GCC cc1/cc1plus bootstrap
 dcc --target mips-linux-gnu      input.c   # parse-only
 dcc --target mips64-linux-gnuabi64 input.c # parse-only
 dcc --target arm-linux-gnueabihf input.c   # parse-only (armv7 也接受)
