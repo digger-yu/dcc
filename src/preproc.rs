@@ -2,6 +2,7 @@
 // 第一性原理: 预处理 = 文本变换 + 宏展开。在词法分析之前运行。
 // suckless 准则: 行级处理 #include/#define/#if, 然后 token 级宏展开。
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -41,6 +42,14 @@ pub struct Preprocessor {
     in_comment: bool,
     /// 成功打开过的 include 路径 (供 -MD/-MMD)
     deps: Vec<String>,
+    /// #pragma pack 栈: 栈顶是当前 packing 对齐 (None = 默认 8)
+    pack_stack: Vec<Option<usize>>,
+    /// #pragma weak 记录的弱符号集合 (在 codegen 中处理)
+    pub weak_symbols: HashSet<String>,
+    /// #pragma STDC FENV_ACCESS 状态
+    pub fenv_access: bool,
+    /// 收集在展开阶段遇到的 _Pragma 操作符, 待外层 &mut self 方法批量处理
+    pending_pragmas: RefCell<Vec<String>>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -106,6 +115,10 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         cache_dir: Preprocessor::init_cache_dir(),
         in_comment: false,
         deps: Vec::new(),
+        pack_stack: vec![None],
+        weak_symbols: HashSet::new(),
+        fenv_access: false,
+        pending_pragmas: RefCell::new(Vec::new()),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -477,6 +490,12 @@ impl Preprocessor {
                 self.out.push('\n');
             }
         }
+        // 把展开阶段累积的 _Pragma 字符串批量应用
+        // (顺序与源中出现顺序一致, 即 _Pragma(...) 在某一行后, 立即生效)
+        let pending: Vec<String> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
+        for p in pending {
+            self.apply_pragma_string(&p, self.cur_line);
+        }
         src.clear();
     }
 
@@ -761,6 +780,40 @@ impl Preprocessor {
                 self.pragma_once.insert(canonical.to_string_lossy().to_string());
             } else if pragma_text.starts_with("GCC diagnostic") {
                 self.handle_gcc_diagnostic(&pragma_text[14..].trim(), line_no);
+            } else if pragma_text.starts_with("pack") {
+                // #pragma pack() / pack(1) / pack(2) / pack(4) / pack(8) / pack(16)
+                // #pragma pack(push[, n]) / #pragma pack(pop[, n])
+                // #pragma pack(push) / #pragma pack(pop)
+                self.handle_pragma_pack(&pragma_text[4..].trim());
+            } else if pragma_text.starts_with("weak") {
+                // #pragma weak name
+                // 记录弱符号名 (后续在 codegen 中以 weak 链接生成)
+                let rest = pragma_text[4..].trim();
+                if !rest.is_empty() {
+                    // 支持 #pragma weak name 或 #pragma weak(name)
+                    let name = rest.trim_start_matches('(').trim_end_matches(')').trim();
+                    // 可能有别名: #pragma weak name = other
+                    let name = name.split('=').next().unwrap_or("").trim();
+                    if !name.is_empty() {
+                        self.weak_symbols.insert(name.to_string());
+                    }
+                }
+            } else if pragma_text.starts_with("STDC") {
+                // #pragma STDC FENV_ACCESS ON/OFF/DEFAULT
+                // #pragma STDC FP_CONTRACT ON/OFF/DEFAULT
+                // #pragma STDC CX_LIMITED_RANGE ON/OFF/DEFAULT
+                let rest = pragma_text[4..].trim();
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let kind = parts[0];
+                    let state = parts[1].to_uppercase();
+                    if kind.eq_ignore_ascii_case("FENV_ACCESS") {
+                        self.fenv_access = matches!(state.as_str(), "ON" | "DEFAULT");
+                    }
+                    // 其他 STDC 子句忽略, 仅用于兼容
+                }
+            } else if pragma_text.starts_with("comment") {
+                // #pragma comment(...) — 链接器注释, 忽略
             }
             // 其他 #pragma 忽略
         } else if directive.starts_with("error") {
@@ -1154,6 +1207,108 @@ impl Preprocessor {
         }
     }
 
+    /// 处理 #pragma pack() / pack(n) / pack(push[,n]) / pack(pop[,n])
+    ///
+    /// 栈顶元素代表当前生效的 packing 对齐 (None=默认 8)。
+    /// 后续记录的 packing 值可被 struct 布局查询 (cdecl/ext_abi 兼容)。
+    fn handle_pragma_pack(&mut self, text: &str) {
+        let text = text.trim();
+        // 去掉包裹的括号
+        let inner = text.trim_start_matches('(').trim_end_matches(')').trim();
+        if inner.is_empty() {
+            // #pragma pack(): 恢复默认
+            if let Some(top) = self.pack_stack.last_mut() {
+                *top = None;
+            }
+            return;
+        }
+        // 拆分 token
+        let mut parts = inner.split(',').map(|p| p.trim());
+        let first = parts.next().unwrap_or("");
+        if first == "push" {
+            // 复制当前对齐再压栈
+            let current = self.pack_stack.last().copied().flatten();
+            let n = parts.next().and_then(|s| s.parse::<usize>().ok());
+            // 如果 push 给了对齐, 优先级: 显式 n > 当前对齐
+            let pushed = n.or(current);
+            self.pack_stack.push(pushed);
+        } else if first == "pop" {
+            // 弹出栈顶
+            if self.pack_stack.len() > 1 {
+                self.pack_stack.pop();
+            }
+        } else if let Ok(n) = first.parse::<usize>() {
+            // #pragma pack(n): 仅修改当前层
+            if let Some(top) = self.pack_stack.last_mut() {
+                *top = Some(n);
+            }
+        }
+    }
+
+    /// 公开接口: 获取当前 packing 对齐 (供 codegen struct 布局使用)
+    pub fn current_pack(&self) -> Option<usize> {
+        self.pack_stack.last().copied().flatten()
+    }
+
+    /// 把 `_Pragma("...")` 中的字符串当作一行 #pragma 处理
+    /// (不在源码中插入新行, 而是直接调用对应的 handler)
+    pub fn apply_pragma_string(&mut self, pragma_text: &str, line_no: u32) {
+        // 构造 "pragma ..." 形式的伪指令, 复用 process_directive
+        let pseudo = format!("pragma {}", pragma_text);
+        self.process_directive(&pseudo, line_no);
+    }
+
+    /// 反转义字符串 (用于 _Pragma 操作符)
+    /// 支持: \\ \n \t \r \" \' \x.. \ooo \? \\"
+    pub fn unescape_string(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        let bytes = raw.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'\\' && i + 1 < bytes.len() {
+                match bytes[i + 1] {
+                    b'n' => { out.push('\n'); i += 2; continue; }
+                    b't' => { out.push('\t'); i += 2; continue; }
+                    b'r' => { out.push('\r'); i += 2; continue; }
+                    b'\\' => { out.push('\\'); i += 2; continue; }
+                    b'"' => { out.push('"'); i += 2; continue; }
+                    b'\'' => { out.push('\''); i += 2; continue; }
+                    b'?' => { out.push('?'); i += 2; continue; }
+                    b'0'..=b'7' => {
+                        // 八进制: 最多 3 位
+                        let mut n = 0u32;
+                        let mut k = 0;
+                        while k < 3 && i + 1 + k < bytes.len() && (b'0'..=b'7').contains(&bytes[i + 1 + k]) {
+                            n = n * 8 + (bytes[i + 1 + k] - b'0') as u32;
+                            k += 1;
+                        }
+                        out.push(n as u8 as char);
+                        i += 1 + k;
+                        continue;
+                    }
+                    b'x' => {
+                        // 十六进制
+                        let mut n = 0u32;
+                        let mut k = 0;
+                        while k < 2 && i + 2 + k < bytes.len() && (bytes[i + 2 + k].is_ascii_hexdigit()) {
+                            let d = (bytes[i + 2 + k] as char).to_digit(16).unwrap_or(0);
+                            n = n * 16 + d;
+                            k += 1;
+                        }
+                        out.push(n as u8 as char);
+                        i += 2 + k;
+                        continue;
+                    }
+                    _ => { out.push(b as char); i += 1; continue; }
+                }
+            }
+            out.push(b as char);
+            i += 1;
+        }
+        out
+    }
+
     /// 处理 #pragma GCC diagnostic
     fn handle_gcc_diagnostic(&mut self, text: &str, _line_no: u32) {
         let text = text.trim();
@@ -1262,6 +1417,44 @@ impl Preprocessor {
                 }
                 if ident == "__TIME__" {
                     out.push_str(&format!("\"{}\"", self.compile_time));
+                    continue;
+                }
+
+                // C99 _Pragma("...") 操作符: 把字符串字面量当作 #pragma 处理
+                // 把 _Pragma(...) 整体吃掉, 然后调用 process_directive 内部逻辑
+                if ident == "_Pragma" {
+                    let mut j = i;
+                    while j < len && chars[j].is_whitespace() { j += 1; }
+                    if j < len && chars[j] == '(' {
+                        j += 1;
+                        while j < len && chars[j].is_whitespace() { j += 1; }
+                        if j < len && chars[j] == '"' {
+                            // 提取字符串内容
+                            j += 1;
+                            let content_start = j;
+                            while j < len && chars[j] != '"' {
+                                if chars[j] == '\\' && j + 1 < len { j += 2; continue; }
+                                j += 1;
+                            }
+                            let raw: String = chars[content_start..j].iter().collect();
+                            let pragma_text = Self::unescape_string(&raw);
+                            if j < len { j += 1; } // 跳过 "
+                            while j < len && chars[j] != ')' { j += 1; }
+                            if j < len { j += 1; } // 跳过 )
+                            i = j;
+                            // _Pragma 是 expr, 在展开阶段不能改状态。
+                            // 我们把它的字符串收集起来, 待外层 &mut self 方法批量应用
+                            if let Ok(mut v) = self.pending_pragmas.try_borrow_mut() {
+                                v.push(pragma_text);
+                            }
+                            continue;
+                        }
+                    }
+                    // 解析失败, 跳过整个 _Pragma(...) 表达式
+                    let mut j = i;
+                    while j < len && chars[j] != ')' { j += 1; }
+                    if j < len { j += 1; }
+                    i = j;
                     continue;
                 }
 

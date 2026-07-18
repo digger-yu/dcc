@@ -28,6 +28,14 @@ struct ParsedAttrs {
     format_kind: Option<String>,
     format_string_idx: Option<u32>,
     format_first_arg: Option<u32>,
+    /// __attribute__((no_sanitize("address"|"undefined"|"thread"|"kernel-address")))
+    no_sanitize: Vec<String>,
+    /// __attribute__((target_clones("default,avx2,...")))
+    target_clones: Vec<String>,
+    /// __attribute__((copy("fn")))
+    copy_fn: Option<String>,
+    /// __attribute__((returns_nonnull))
+    returns_nonnull: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -55,6 +63,10 @@ impl ParsedAttrs {
         if other.format_kind.is_some() { self.format_kind = other.format_kind; }
         if other.format_string_idx.is_some() { self.format_string_idx = other.format_string_idx; }
         if other.format_first_arg.is_some() { self.format_first_arg = other.format_first_arg; }
+        if !other.no_sanitize.is_empty() { self.no_sanitize.extend(other.no_sanitize); }
+        if !other.target_clones.is_empty() { self.target_clones.extend(other.target_clones); }
+        if other.copy_fn.is_some() { self.copy_fn = other.copy_fn; }
+        if other.returns_nonnull { self.returns_nonnull = true; }
     }
 }
 
@@ -388,6 +400,92 @@ impl<'a> Parser<'a> {
                                 self.advance();
                             }
                             if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "no_sanitize" | "no_sanitize_address" | "no_address_safety_analysis" => {
+                        // __attribute__((no_sanitize("address", "undefined")))
+                        // __attribute__((no_sanitize_address))
+                        // __attribute__((no_address_safety_analysis))
+                        if name == "no_sanitize" {
+                            self.advance();
+                            if self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                while self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
+                                    if self.cur.kind == TokKind::StringLit {
+                                        let s = Self::strip_quotes(&self.cur.text);
+                                        if !s.is_empty() {
+                                            attrs.no_sanitize.push(s);
+                                        }
+                                        self.advance();
+                                    } else {
+                                        self.advance();
+                                    }
+                                    if self.cur.kind == TokKind::Comma { self.advance(); }
+                                }
+                                if self.cur.kind == TokKind::RParen { self.advance(); }
+                            }
+                        } else {
+                            attrs.no_sanitize.push(name.clone());
+                            self.advance();
+                        }
+                    }
+                    "target_clones" => {
+                        // __attribute__((target_clones("default,avx2,avx512f")))
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            while self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
+                                if self.cur.kind == TokKind::StringLit {
+                                    let s = Self::strip_quotes(&self.cur.text);
+                                    if !s.is_empty() {
+                                        // split by comma
+                                        for part in s.split(',') {
+                                            let part = part.trim();
+                                            if !part.is_empty() {
+                                                attrs.target_clones.push(part.to_string());
+                                            }
+                                        }
+                                    }
+                                    self.advance();
+                                } else {
+                                    self.advance();
+                                }
+                                if self.cur.kind == TokKind::Comma { self.advance(); }
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "copy" => {
+                        // __attribute__((copy("fn"))) — 函数/变量符号别名
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if let Some(s) = self.parse_concatenated_string_lit() {
+                                attrs.copy_fn = Some(s);
+                            } else if self.cur.kind == TokKind::Ident {
+                                attrs.copy_fn = Some(self.cur.text.clone());
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "returns_nonnull" => {
+                        attrs.returns_nonnull = true;
+                        self.advance();
+                        // optional (): __attribute__((returns_nonnull))
+                        if self.cur.kind == TokKind::LParen {
+                            let mut depth = 0i32;
+                            loop {
+                                if self.cur.kind == TokKind::LParen { depth += 1; }
+                                else if self.cur.kind == TokKind::RParen {
+                                    depth -= 1;
+                                    self.advance();
+                                    if depth == 0 { break; }
+                                    continue;
+                                }
+                                self.advance();
+                                if self.cur.kind == TokKind::Eof { break; }
+                            }
                         }
                     }
                     _ => {
@@ -856,6 +954,15 @@ impl<'a> Parser<'a> {
             if decls.is_empty() { None } else { Some(decls) }
         } else {
         let ty = self.parse_decl_specifiers()?;
+        // 单独的 struct/union/enum 定义: `__declspec(...) struct S { int x; };`
+        // 解析说明符后类型是 struct/union/enum, 而当前 token 是分号,
+        // 直接吃掉分号返回空 decl, 避免后面误调 parse_var_or_func.
+        if matches!(ty, Type::Struct(_, _) | Type::Union(_, _) | Type::Enum(_, _))
+            && self.cur.kind == TokKind::Semi
+        {
+            self.advance();
+            return Some(vec![]);
+        }
         let storage = self.decl_storage;
         let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));
         let mut decls = vec![];
@@ -879,6 +986,7 @@ impl<'a> Parser<'a> {
         self.advance();
         if !self.expect(TokKind::LParen, "'('") { return None; }
         let condition = self.parse_expr_bp(2)?;
+        // C23 允许省略消息; 默认为 "static assertion failed"
         let mut message = "static assertion failed".to_string();
         if self.cur.kind == TokKind::Comma {
             self.advance();
@@ -894,13 +1002,22 @@ impl<'a> Parser<'a> {
         }
         if !self.expect(TokKind::RParen, "')'") { return None; }
         if !self.expect(TokKind::Semi, "';'") { return None; }
+        // 在求值失败时附加条件表达式文本 (GCC 兼容: 错误消息后追加 "evaluates to <text>")
+        let cond_text = format!("{}", const_eval::ExprDebug(&condition));
         match const_eval::eval(&condition) {
-            Ok(0) => self.diags.push(Diagnostic::err("E0010", message, span)),
+            Ok(0) => {
+                if cond_text.len() > 0 && cond_text != "<expr>" {
+                    self.diags.push(Diagnostic::err(
+                        "E0010", format!("{} (evaluates to: {})", message, cond_text), span));
+                } else {
+                    self.diags.push(Diagnostic::err("E0010", message, span));
+                }
+            }
             Ok(_) => {}
             Err(ConstEvalError::DivisionByZero) => self.diags.push(Diagnostic::err(
-                "E0011", "division by zero in static assertion", span)),
+                "E0011", format!("division by zero in static assertion (evaluates to: {})", cond_text), span)),
             Err(_) => self.diags.push(Diagnostic::err(
-                "E0011", "_Static_assert condition is not an integer constant expression", span)),
+                "E0011", format!("{} (not an integer constant expression: {})", message, cond_text), span)),
         }
         Some(())
     }
@@ -974,6 +1091,8 @@ impl<'a> Parser<'a> {
             register_name: None,
             cleanup_fn: None,
             is_thread_local: false,
+            no_sanitize: vec![],
+            copy_fn: None,
         })])
     }
 
@@ -1022,7 +1141,7 @@ impl<'a> Parser<'a> {
                     self.locals = self.globals.clone();
                     self.in_function = false;
                     let sp = name.span.clone();
-                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None })]);
+                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false })]);
                 }
                 // (*name(params)) — 返回指针的函数，无外层参数表
                 let ptr_ty = Type::Ptr(Box::new(ty));
@@ -1057,6 +1176,7 @@ impl<'a> Parser<'a> {
                     is_variadic: self.last_variadic, is_constructor: false, is_destructor: false,
                     alias_name: None, is_nested: false, upvars: vec![],
                     is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None,
+                    no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
                 })]);
             }
             // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
@@ -1097,7 +1217,7 @@ impl<'a> Parser<'a> {
                 let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
                 if !self.expect(TokKind::Semi, "';'") { return None; }
                 let sp = name.span.clone();
-                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local })]);
+                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None })]);
             }
             // 不是函数指针, 只是带括号的指针变量 (罕见)
             self.skip_attributes();
@@ -1106,7 +1226,7 @@ impl<'a> Parser<'a> {
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             let sp = name.span.clone();
-            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local })]);
+            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None })]);
         }
         // `char const *p`：const 在基类型之后、* 之前，须先于 parse_ptr_suffix 跳过
         while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
@@ -1218,10 +1338,12 @@ impl<'a> Parser<'a> {
                 visibility: attrs.visibility, is_unused: attrs.is_unused,
                 is_cold: attrs.is_cold, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
                 is_variadic: self.last_variadic, is_constructor: attrs.is_constructor,
-                is_destructor: attrs.is_destructor, alias_name: attrs.alias_name,
+                is_destructor: attrs.is_destructor, alias_name: attrs.alias_name.clone().or(attrs.copy_fn.clone()),
                 is_nested: is_nested_func, upvars, is_old_style,
                 format_kind: attrs.format_kind, format_string_idx: attrs.format_string_idx,
-                format_first_arg: attrs.format_first_arg })])
+                format_first_arg: attrs.format_first_arg,
+                no_sanitize: attrs.no_sanitize.clone(), target_clones: attrs.target_clones.clone(),
+                returns_nonnull: attrs.returns_nonnull })])
         } else if self.cur.kind == TokKind::LBracket {
             let mut arr_ty = ty;
             while self.cur.kind == TokKind::LBracket {
@@ -1249,7 +1371,8 @@ impl<'a> Parser<'a> {
             if self.cur.kind != TokKind::Comma && !self.expect(TokKind::Semi, "';'") { return None; }
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                 section: arr_attrs.section, alignment: arr_attrs.alignment, is_weak: arr_attrs.is_weak,
-                visibility: arr_attrs.visibility, is_unused: arr_attrs.is_unused, register_name: arr_attrs.register_name, cleanup_fn: arr_attrs.cleanup_fn, is_thread_local: storage.is_thread_local })])
+                visibility: arr_attrs.visibility, is_unused: arr_attrs.is_unused, register_name: arr_attrs.register_name, cleanup_fn: arr_attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
+                no_sanitize: arr_attrs.no_sanitize.clone(), copy_fn: arr_attrs.copy_fn.clone() })])
         } else {
             if matches!(ty, Type::Void) {
                 self.err_here(
@@ -1292,20 +1415,23 @@ impl<'a> Parser<'a> {
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), decl_ty.clone()); }
                 Some(vec![Decl::Var(VarDecl { ty: decl_ty, name: name_for_decl, init: Some(init), span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
-                                        visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local })])
+                                        visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
+                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
                 self.advance();
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
-                                        visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local })])
+                                        visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
+                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
             } else if self.cur.kind == TokKind::Comma {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
-                                        visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local })])
+                                        visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
+                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
             } else {
                 self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind), Some("declaration must end with ';' or have an initializer"));
                 None
@@ -1423,6 +1549,53 @@ impl<'a> Parser<'a> {
                 // __const__/__volatile__/__restrict__: GNU 扩展拼写, 同 const/volatile/restrict
                 TokKind::Ident if self.cur.text == "__const__" || self.cur.text == "__volatile__"
                     || self.cur.text == "__restrict__" => { self.advance(); }
+                // MSVC 扩展 _ms_restrict: 视为 restrict 同义
+                TokKind::Ident if self.cur.text == "_ms_restrict" => { self.advance(); }
+                // MSVC 扩展 __declspec: 静默跳过参数
+                // 形式: __declspec(align(8)) / __declspec(noreturn) / __declspec(thread) / __declspec(dllimport) / __declspec(dllexport)
+                TokKind::Ident if self.cur.text == "__declspec" => {
+                    self.advance();
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        // 深度匹配括号, 跳过 __declspec 的整段参数
+                        let mut depth = 1i32;
+                        while depth > 0 && self.cur.kind != TokKind::Eof {
+                            if self.cur.kind == TokKind::LParen { depth += 1; }
+                            else if self.cur.kind == TokKind::RParen { depth -= 1; }
+                            self.advance();
+                        }
+                    }
+                }
+                // MSVC 扩展 __pragma: 跳过参数
+                TokKind::Ident if self.cur.text == "__pragma" => {
+                    self.advance();
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        let mut depth = 1i32;
+                        while depth > 0 && self.cur.kind != TokKind::Eof {
+                            if self.cur.kind == TokKind::LParen { depth += 1; }
+                            else if self.cur.kind == TokKind::RParen { depth -= 1; }
+                            self.advance();
+                        }
+                    }
+                }
+                // _Pragma("..."): C99 操作符
+                TokKind::Ident if self.cur.text == "_Pragma" => {
+                    self.advance();
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        // 提取字符串字面量; 实际应用在 preproc 阶段已经完成
+                        // (preproc 把 _Pragma(...) 整体收集到 pending_pragmas 后批量执行).
+                        // 此处仅做语法消费, 不再额外处理.
+                        if self.cur.kind == TokKind::StringLit {
+                            self.advance();
+                        }
+                        while self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
+                            self.advance();
+                        }
+                        if self.cur.kind == TokKind::RParen { self.advance(); }
+                    }
+                }
                 // SysV AMD64 va_list: gp_offset, fp_offset,
                 // overflow_arg_area, reg_save_area.  C ABI 中它是单元素数组；
                 // AST 内保留等价的 24 字节对象，builtin 操作直接取得其地址。
@@ -1697,7 +1870,7 @@ impl<'a> Parser<'a> {
     fn skip_ptr_qualifiers(&mut self) {
         while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwAtomic | TokKind::KwRestrict)
             || (self.cur.kind == TokKind::Ident
-                && matches!(self.cur.text.as_str(), "__restrict__" | "__const__" | "__volatile__" | "__attribute__"))
+                && matches!(self.cur.text.as_str(), "__restrict__" | "__const__" | "__volatile__" | "__attribute__" | "_ms_restrict" | "_restrict"))
         {
             if self.cur.text == "__attribute__" { self.skip_attributes(); }
             else { self.advance(); }
@@ -2006,7 +2179,8 @@ impl<'a> Parser<'a> {
                     if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
                         self.advance(); // (
                         self.advance(); // *
-                        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) { self.advance(); }
+                        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
+                            || (self.cur.kind == TokKind::Ident && self.cur.text == "_ms_restrict") { self.advance(); }
                         let nm = if self.cur.kind == TokKind::Ident {
                             let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() };
                             self.advance(); Some(id)
@@ -2668,7 +2842,8 @@ impl<'a> Parser<'a> {
                     if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
                         self.advance(); // (
                         self.advance(); // *
-                        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) { self.advance(); }
+                        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
+                            || (self.cur.kind == TokKind::Ident && self.cur.text == "_ms_restrict") { self.advance(); }
                         if self.cur.kind == TokKind::RParen {
                             self.advance(); // )
                             if self.cur.kind == TokKind::LParen {
@@ -2708,6 +2883,7 @@ impl<'a> Parser<'a> {
                     | "__builtin_va_list"
                     | "_Float16" | "_Float32" | "_Float32x" | "_Float64" | "_Float64x"
                     | "_Float128" | "_Float128x"
+                    | "_ms_restrict" | "__declspec" | "__pragma" | "_Pragma"
             )
     }
 

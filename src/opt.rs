@@ -723,6 +723,9 @@ mod tests {
                 format_kind: None,
                 format_string_idx: None,
                 format_first_arg: None,
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");
@@ -795,6 +798,9 @@ mod tests {
                 format_kind: None,
                 format_string_idx: None,
                 format_first_arg: None,
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");
@@ -864,6 +870,9 @@ mod tests {
             format_kind: None,
             format_string_idx: None,
             format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
         });
         let main_fn = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
@@ -906,6 +915,9 @@ mod tests {
             format_kind: None,
             format_string_idx: None,
             format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
         });
         let prog = Program {
             decls: vec![sq, main_fn],

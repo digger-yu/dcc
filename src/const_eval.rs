@@ -122,6 +122,108 @@ pub fn is_constant(expr: &Expr) -> bool {
     eval(expr).is_ok()
 }
 
+/// 把表达式渲染为可读文本 (用于 `_Static_assert` 失败时的诊断)。
+/// 模仿 GCC 的 `stringify` 风格：操作符前后留空格，标识符原样输出。
+pub struct ExprDebug<'a>(pub &'a Expr);
+
+impl<'a> std::fmt::Display for ExprDebug<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Expr::Int { v, .. } => write!(f, "{}", v),
+            Expr::Char { v, .. } => write!(f, "'{}'", *v as char),
+            Expr::Float { v, .. } => write!(f, "{}", v),
+            Expr::String { data, .. } => {
+                write!(f, "\"")?;
+                for b in data {
+                    if *b == 0 { break; }
+                    if *b == b'"' { write!(f, "\\\"")?; }
+                    else if *b == b'\\' { write!(f, "\\\\")?; }
+                    else if (0x20..0x7f).contains(b) { write!(f, "{}", *b as char)?; }
+                    else { write!(f, "\\x{:02x}", b)?; }
+                }
+                write!(f, "\"")
+            }
+            Expr::Ident { name, .. } => write!(f, "{}", name.name),
+            Expr::Binop { op, l, r, .. } => {
+                let sym = match op {
+                    BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*",
+                    BinOp::Div => "/", BinOp::Mod => "%",
+                    BinOp::And => "&", BinOp::Or => "|", BinOp::Xor => "^",
+                    BinOp::Shl => "<<", BinOp::Shr => ">>",
+                    BinOp::Lt => "<", BinOp::Gt => ">", BinOp::Le => "<=",
+                    BinOp::Ge => ">=", BinOp::EqEq => "==", BinOp::Ne => "!=",
+                    BinOp::AndAnd => "&&", BinOp::OrOr => "||",
+                };
+                write!(f, "({} {} {})", ExprDebug(l), sym, ExprDebug(r))
+            }
+            Expr::Unary { op, e, .. } => {
+                let sym = match op {
+                    UnOp::Neg => "-", UnOp::Not => "!", UnOp::BitNot => "~", UnOp::Plus => "+",
+                };
+                write!(f, "{}{}", sym, ExprDebug(e))
+            }
+            Expr::SizeofTy { ty, .. } => write!(f, "sizeof({})", ty),
+            Expr::SizeofExpr { e, .. } => write!(f, "sizeof({})", ExprDebug(e)),
+            Expr::AlignofTy { ty, .. } => write!(f, "_Alignof({})", ty),
+            Expr::AlignofExpr { e, .. } => write!(f, "_Alignof({})", ExprDebug(e)),
+            Expr::Cast { ty, e, .. } => write!(f, "({}){}", ty, ExprDebug(e)),
+            Expr::Index { arr, idx, .. } => write!(f, "{}[{}]", ExprDebug(arr), ExprDebug(idx)),
+            Expr::Member { expr, field, is_arrow, .. } => {
+                if *is_arrow {
+                    write!(f, "{}->{}", ExprDebug(expr), field.name)
+                } else {
+                    write!(f, "{}.{}", ExprDebug(expr), field.name)
+                }
+            }
+            Expr::AddrOf { e, .. } => write!(f, "&{}", ExprDebug(e)),
+            Expr::Deref { e, .. } => write!(f, "*{}", ExprDebug(e)),
+            Expr::Call { callee, args, .. } => {
+                write!(f, "{}(", ExprDebug(callee))?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", ExprDebug(a))?;
+                }
+                write!(f, ")")
+            }
+            Expr::Cond { cond, then_, else_, .. } => {
+                write!(f, "({} ? {} : {})", ExprDebug(cond), ExprDebug(then_), ExprDebug(else_))
+            }
+            Expr::Assign { l, r, .. } => write!(f, "{} = {}", ExprDebug(l), ExprDebug(r)),
+            Expr::PostInc { e, .. } => write!(f, "{}++", ExprDebug(e)),
+            Expr::PostDec { e, .. } => write!(f, "{}--", ExprDebug(e)),
+            Expr::PreInc { e, .. } => write!(f, "++{}", ExprDebug(e)),
+            Expr::PreDec { e, .. } => write!(f, "--{}", ExprDebug(e)),
+            Expr::Comma { l, r, .. } => write!(f, "({}, {})", ExprDebug(l), ExprDebug(r)),
+            Expr::CompoundLit { ty, inits, .. } => {
+                write!(f, "({}){{", ty)?;
+                for (i, it) in inits.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    match it {
+                        crate::ast::InitItem::Expr(e) => write!(f, "{}", ExprDebug(e))?,
+                        crate::ast::InitItem::Designated { value, .. } =>
+                            write!(f, "{}", ExprDebug(value))?,
+                    }
+                }
+                write!(f, "}}")
+            }
+            Expr::InitList { inits, .. } => {
+                write!(f, "{{")?;
+                for (i, it) in inits.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    match it {
+                        crate::ast::InitItem::Expr(e) => write!(f, "{}", ExprDebug(e))?,
+                        crate::ast::InitItem::Designated { value, .. } =>
+                            write!(f, "{}", ExprDebug(value))?,
+                    }
+                }
+                write!(f, "}}")
+            }
+            Expr::Offsetof { ty, member, .. } => write!(f, "offsetof({}, {})", ty, member),
+            _ => write!(f, "<expr>"),
+        }
+    }
+}
+
 /// 编译期 `__builtin_object_size(ptr, type)` 求值。
 /// 未知时返回 `None`，调用方应回退为 `(size_t)-1`。
 pub fn object_size(ptr: &Expr, type_arg: i128) -> Option<i128> {

@@ -37,6 +37,10 @@ pub struct VarDecl {
     pub register_name: Option<String>,  // register asm("rN")
     pub cleanup_fn: Option<String>,     // __attribute__((cleanup(fn)))
     pub is_thread_local: bool,          // _Thread_local / __thread
+    /// __attribute__((no_sanitize("address"|"undefined"|"thread"|"kernel-address")))
+    pub no_sanitize: Vec<String>,
+    /// __attribute__((copy("fn"))): 函数符号别名
+    pub copy_fn: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +69,13 @@ pub struct FuncDecl {
     pub format_kind: Option<String>,  // __attribute__((format(printf, ...)))
     pub format_string_idx: Option<u32>,
     pub format_first_arg: Option<u32>,
+    /// __attribute__((no_sanitize("address"|"undefined"|"thread"|"kernel-address")))
+    pub no_sanitize: Vec<String>,
+    /// __attribute__((target_clones("default,avx2,...", "sse4.2,default")))
+    /// 收集所有目标版本 (忽略实际变体生成, 仅用于兼容)
+    pub target_clones: Vec<String>,
+    /// __attribute__((returns_nonnull))
+    pub returns_nonnull: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +392,54 @@ pub fn int_t()  -> Type { Type::Int }
 pub fn long_t() -> Type { Type::Long }
 pub fn void_t() -> Type { Type::Void }
 pub fn char_t() -> Type { Type::Char }
+
+/// 简洁的 C 风格类型名 (用于诊断与字符串化)
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Void => write!(f, "void"),
+            Type::Bool => write!(f, "_Bool"),
+            Type::Char => write!(f, "char"),
+            Type::SChar => write!(f, "signed char"),
+            Type::UChar => write!(f, "unsigned char"),
+            Type::Short => write!(f, "short"),
+            Type::UShort => write!(f, "unsigned short"),
+            Type::Int => write!(f, "int"),
+            Type::UInt => write!(f, "unsigned int"),
+            Type::Long => write!(f, "long"),
+            Type::ULong => write!(f, "unsigned long"),
+            Type::LongLong => write!(f, "long long"),
+            Type::ULongLong => write!(f, "unsigned long long"),
+            Type::Int128 => write!(f, "__int128"),
+            Type::UInt128 => write!(f, "__uint128_t"),
+            Type::Float => write!(f, "float"),
+            Type::Double => write!(f, "double"),
+            Type::LongDouble => write!(f, "long double"),
+            Type::Fract => write!(f, "_Fract"),
+            Type::Accum => write!(f, "_Accum"),
+            Type::Complex(inner) => write!(f, "_Complex {}", inner),
+            Type::Ptr(inner) => write!(f, "{}*", inner),
+            Type::Array(inner, sz) => match sz {
+                ArraySize::Const(n) => write!(f, "{}[{}]", inner, n),
+                ArraySize::Var(_) => write!(f, "{}[]", inner),
+            }
+            Type::Vector(inner, n) => write!(f, "__attribute__((vector_size({}))){}", n * inner.size() * 8, inner),
+            Type::Struct(name, _) => write!(f, "struct {}", name),
+            Type::Union(name, _) => write!(f, "union {}", name),
+            Type::Enum(name, _) => write!(f, "enum {}", name),
+            Type::Func(ret, params) => {
+                write!(f, "(")?;
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", p)?;
+                }
+                write!(f, ") -> {}", ret)
+            }
+            Type::Named(name) => write!(f, "{}", name),
+            Type::Atomic(inner) => write!(f, "_Atomic({})", inner),
+        }
+    }
+}
 
 /// 在字段列表中递归查找字段 (支持匿名 struct/union 透明穿透)
 /// 返回 (找到的 Field, 累计偏移)

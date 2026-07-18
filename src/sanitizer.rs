@@ -78,6 +78,9 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, tu_init_pending: 
     if func.body.is_none() {
         return;
     }
+    if is_excluded_from_sanitize(&func.no_sanitize, flags) {
+        return;
+    }
     let span = func.span.clone();
     let mut prologue = Vec::new();
     if *tu_init_pending {
@@ -187,6 +190,33 @@ fn sanitizer_call(name: &str, span: &Span) -> BlockItem {
     })
 }
 
+/// 检查函数是否在 no_sanitize 列表中禁止了所有启用的 sanitizer。
+/// 例如 `__attribute__((no_sanitize("address")))` 关闭 KASAN。
+/// 返回 true 表示该函数对当前启用的 sanitizer 已全部豁免, 可跳过插桩。
+fn is_excluded_from_sanitize(no_sanitize: &[String], flags: SanitizerFlags) -> bool {
+    if no_sanitize.is_empty() {
+        return false;
+    }
+    let mut no_kasan = false;
+    let mut no_ubsan = false;
+    let mut no_kcsan = false;
+    for tag in no_sanitize {
+        match tag.as_str() {
+            "address" | "kernel-address" | "hwaddress" | "kernel-hwaddress"
+            | "no_sanitize_address" | "no_address_safety_analysis" => no_kasan = true,
+            "undefined" => no_ubsan = true,
+            "thread" | "kernel-kcsan" | "no_sanitize_thread" => no_kcsan = true,
+            "all" => { no_kasan = true; no_ubsan = true; no_kcsan = true; }
+            _ => {}
+        }
+    }
+    // 只有当每个启用的 sanitizer 都被显式排除时, 才算完全豁免。
+    // coverage (kcov) 不受 no_sanitize 控制.
+    (flags.kasan && no_kasan || !flags.kasan)
+        && (flags.ubsan && no_ubsan || !flags.ubsan)
+        && (flags.kcsan && no_kcsan || !flags.kcsan)
+}
+
 /// `.dcc.san_info` 节载荷（格式 v1：magic + 4×u8 标志位）。
 pub fn sanitizer_metadata(flags: SanitizerFlags) -> Vec<u8> {
     let mut out = b"DCC_SAN\0".to_vec();
@@ -236,6 +266,9 @@ mod tests {
             format_kind: None,
             format_string_idx: None,
             format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
         }
     }
 
@@ -339,6 +372,9 @@ mod tests {
                 format_kind: None,
                 format_string_idx: None,
                 format_first_arg: None,
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
             })],
         };
         instrument_program(&mut prog, SanitizerFlags { kasan: true, kcov: true, ..Default::default() });

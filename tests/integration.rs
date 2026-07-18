@@ -2082,6 +2082,144 @@ fn lto_link_strips_unreferenced_static() {
     );
 }
 
+// =================== C 前端补洞: 新增特性 ===================
+
+/// MS 扩展关键字: _ms_restrict / __declspec / __pragma
+#[test]
+#[cfg(unix)]
+fn ms_extensions_compile_and_run() {
+    let source = include_str!("fixtures/ms_extensions.c");
+    let (output, exe) = run_compile_and_run("ms-extensions", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "ms_extensions should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// __attribute__((cleanup(fn))): 离开作用域时调用 fn(&var)
+#[test]
+#[cfg(unix)]
+fn attr_cleanup_compile_and_run() {
+    let source = include_str!("fixtures/attr_cleanup.c");
+    let (output, exe) = run_compile_and_run("attr-cleanup", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "attr_cleanup should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// __attribute__((target_clones(...))): 解析并存入 FuncDecl.target_clones
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_compile_and_run() {
+    let source = include_str!("fixtures/attr_target_clones.c");
+    let (output, exe) = run_compile_and_run("attr-target-clones", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "attr_target_clones should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// __attribute__((no_sanitize(...))) / no_sanitize_address
+#[test]
+#[cfg(unix)]
+fn attr_no_sanitize_compile_and_run() {
+    let source = include_str!("fixtures/attr_no_sanitize.c");
+    let (output, exe) = run_compile_and_run("attr-no-sanitize", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "attr_no_sanitize should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// __attribute__((copy(fn))) / __attribute__((returns_nonnull))
+#[test]
+#[cfg(unix)]
+fn attr_copy_returns_nonnull_compile_and_run() {
+    let source = include_str!("fixtures/attr_copy_returns_nonnull.c");
+    let (output, exe) = run_compile_and_run("attr-copy-returns-nonnull", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "attr_copy_returns_nonnull should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// #pragma pack / weak / STDC FENV_ACCESS / GCC diagnostic
+#[test]
+#[cfg(unix)]
+fn pragma_family_compile_and_run() {
+    let source = include_str!("fixtures/pragma_family.c");
+    let (output, exe) = run_compile_and_run("pragma-family", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "pragma_family should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// _Pragma 操作符: 等价于 #pragma
+#[test]
+#[cfg(unix)]
+fn pragma_operator_compile_and_run() {
+    let source = include_str!("fixtures/pragma_operator.c");
+    let (output, exe) = run_compile_and_run("pragma-operator", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "pragma_operator should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// #warning: 编译时输出警告, 不中断
+#[test]
+fn user_warning_does_not_break_compile() {
+    let source = include_str!("fixtures/user_diagnostics.c");
+    let output = run_syntax_test("user-warning", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// _Static_assert 字符串化消息: C23 单参, 失败时附加表达式文本
+#[test]
+fn static_assert_stringification_succeeds() {
+    let source = include_str!("fixtures/static_assert_msg.c");
+    let output = run_syntax_test("static-assert-msg", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// 单输入 -r 仍可注入合并 .llvm.lto（单 .o 重打包）
 #[test]
 #[cfg(unix)]
