@@ -824,25 +824,37 @@ Linux jump_label 预处理残留 `_DECLARE_STATIC_KEY_*` 在 parser 层由
 `parse_static_key_decl()` 补全为 `extern struct static_key_{false,true}`，
 再进入上述 IR 管线。回归：`tests/fixtures/static_key_*.c`、`ir::tests`。
 
-## Sanitizer 初版桩（`sanitizer.rs`）
+## Sanitizer 完整桩（`sanitizer.rs`）
 
-Driver 在 parse 之后、IR lower 之前调用 `instrument_program()`：
+Driver 在 parse 之后、IR lower 之前调用 `instrument_program()`，所有通道
+都在 AST 层通过 `Expr::Comma` 注入 side-effect 调用 + `Stmt::Block` 注入
+边覆盖 guard 调用实现，不需要修改 IR / codegen：
 
-| 层级 | 行为 | 明确不做 |
+| 层级 / 通道 | 行为 | 显式不做的部分 |
 |------|------|----------|
-| TU init | 首个有体函数前插入 `__asan_init` / `__ubsan_init` / `__kcsan_init` 各一次 | 重复 init |
-| 函数入口 | 每个有体函数（含嵌套函数）前插入 `__sanitizer_cov_trace_pc`（KCOV）、`__kcsan_func_entry`（KCSAN） | 每函数 KASAN/UBSAN 内存/UB 检查 |
-| 元数据 | codegen 写 `.dcc.san_info`（`DCC_SAN\0` + v1 + kasan/ubsan/kcsan/kcov 各 1 字节） | 运行时库内置 |
+| TU init | 首个有体函数前插入 `__asan_init` / `__hwasan_init` / `__ubsan_init` / `__kcsan_init` 各一次 | 重复 init |
+| 函数入口 | 每个有体函数（含嵌套函数）前插入 `__sanitizer_cov_trace_pc`（KCOV / Fuzzer）、`__kcsan_func_entry`（KCSAN） |  |
+| KCOV / Fuzzer 边覆盖 | 每函数声明 `static uint32_t __dcc_cov_guards_N[16]` + 调 `__sanitizer_cov_trace_pc_guard_init` 一次；然后在 `if/while/do/for/case/label/goto` 等边位置插入 `__sanitizer_cov_trace_pc_guard(&guards[i])` | 跨函数 inline 合并 |
+| KASAN / HWASAN | 任意 `Deref/Index/ArrowMember` load 前注入 `__asan_load1/2/4/8/16(&e)`；任意 LHS 为 `Deref/Index/ArrowMember` 的 `Assign` 前注入 `__asan_storeN(&lhs)`（取 LHS 的地址避免重复求值） | struct 16B 以上 / 非整型 load/store、MTE 标签 |
+| UBSAN | `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 在非常量折叠时前插 `__ubsan_handle_signed_integer_overflow(0, lhs)` | VLA bound、null deref、float cast 等 |
+| Fuzzer | 比较 `EqEq/Ne/Lt/Gt/Le/Ge/AndAnd/OrOr` 前 `__sanitizer_cov_trace_cmp1/2/4/8(a, b)`；switch dispatch 前 `__sanitizer_cov_trace_switch(val)` | 运行时拦截 / libFuzzer 协议 |
+| KCSAN | 每函数 entry stub；内存访问 watchpoint 与 KASAN 共享 `__asan_loadN/__asan_storeN` 注入位 | 专用 `__kcsan_check_access` 路径 |
+| 元数据 | codegen 写 `.dcc.san_info`（`DCC_SAN\0` + v2 + kasan/hwasan/ubsan/kcsan/kcov/fuzzer 各 1 字节） |  |
+| `no_sanitize("address"/"undefined"/"thread"/"all")` | 按通道在函数级关闭：KASAN / UBSAN / KCSAN 通道分别被屏蔽；KCOV / Fuzzer 不受影响（coverage 仅反馈，无语义影响） |  |
 
-**明确未实现（需 IR/codegen 扩展）**：内存访问级 KASAN shadow、UB 条件
-指令级 UBSAN、KCSAN 数据竞争 watchpoint、KCOV 边/对比计数等覆盖率细节。
+CLI 解析：`SanitizerFlags::from_args` 支持
+`-fsanitize=address,undefined,thread,hwaddress,fuzzer,coverage`
+（含 `kernel-address` / `kernel-kcsan` 别名）与 `-fsanitize-coverage`。
 
-CLI：`-fsanitize=address|undefined|thread|kernel-kcsan`、`-fsanitize=a,b`
-组合、`-fsanitize-coverage` / `fuzzer` / `kernel-address`。完整
-KASAN/UBSAN 需后续 IR 指令级插桩。
+已知遗留：
+- dcc codegen 对 `Expr::Assign` 当前仅支持 LHS 为 `Ident`；`*p = v` /
+  `a[i] = v` / `p->f = v` 的实际 store 仍是空操作，但 KASAN store 桩
+  已正确插入到 store 之前（仅 codegen 部分缺失）。
+- KCSAN 完整 watchpoint 仍走 KASAN 共享通道，未独立发 `__kcsan_check_access`。
 
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
-`scripts/remote_feature_check.sh`（sanitizer 节 + 汇编桩计数）。
+`scripts/remote_feature_check.sh`（sanitizer 节 + 汇编桩计数）+ 12 个
+`sanitizer::tests` 单元测试。
 
 ## C 前端补洞（M11.1，`src/parser.rs` + `src/preproc.rs`）
 

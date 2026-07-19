@@ -1011,7 +1011,7 @@ fn switch_trace_wrapper(arg_expr: &Expr, cases: &[i128], arg_ty: &Type, span: &S
 fn guard_array_decl(name: &str, span: &Span) -> BlockItem {
     BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
         ty: Type::Array(Box::new(Type::UInt), ArraySize::Var(Box::new(Expr::Int {
-            v: 256,
+            v: 16,
             span: span.clone(),
             ty: Type::Int,
         }))),
@@ -1065,7 +1065,7 @@ fn guard_call_stmt(guard_var: &str, idx: u32, span: &Span) -> BlockItem {
             arr: Box::new(Expr::Ident {
                 name: Ident { name: guard_var.to_string(), span: span.clone() },
                 span: span.clone(),
-                ty: Type::Array(Box::new(Type::UInt), ArraySize::Const(256)),
+                ty: Type::Array(Box::new(Type::UInt), ArraySize::Const(16)),
             }),
             idx: Box::new(Expr::Int { v: idx as i128, span: span.clone(), ty: Type::Int }),
             span: span.clone(),

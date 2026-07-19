@@ -182,20 +182,22 @@ AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节
 
 ## 3. Sanitizer 桩（`src/sanitizer.rs`）
 
-🟠 当前只交付初版 AST 桩，运行时未接通。
+🟢 AST 层全部通道已交付（KASAN / HWASAN / UBSAN / KCSAN / KCOV / Fuzzer）。
 
-| Sanitizer | 实际能力 | 缺失 |
+| Sanitizer | 实际能力 | 已知遗留 |
 |-----------|----------|------|
-| KASAN (`-fsanitize=address`) | TU init + `.dcc.san_info` 元数据 | **没有 shadow memory 插桩**；load/store 不插入 poison check |
-| HWASAN (`-fsanitize=hwaddress`) | 同 KASAN（共享路径） | 缺 ARM MTE 标签插入 |
-| KASAN-kernel (`-fsanitize=kernel-address`) | 同 KASAN | 缺内核定制 shadow 范围（`0xffff...`） |
-| UBSAN (`-fsanitize=undefined`) | TU init | **没有 trap 插桩**（除零、移位 UB、有符号溢出、null 解引用、VLA bound） |
-| KCSAN (`-fsanitize=thread` / `kernel-kcsan`) | TU init + 每函数 entry | **没有 watchpoint 与 happens-before 跟踪** |
-| KCOV (`-fsanitize-coverage`) | 每函数 `__sanitizer_cov_trace_pc` 入口 | **没有边计数 / 对比模式 / guard 表** |
-| Fuzzer (`-fsanitize=fuzzer`) | 仅 KCOV 标志 | **没有 `__sanitizer_cov_trace_cmp*` / `__sanitizer_cov_trace_switch`** |
+| KASAN (`-fsanitize=address`) | TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 `Deref/Index/ArrowMember` 与对应 `Assign` 之前插入 | dcc codegen 对 `Assign` LHS 仍仅支持 `Ident`；`*p = v` 的实际 store 是空操作（KASAN 桩本身正确） |
+| HWASAN (`-fsanitize=hwaddress`) | 同 KASAN（共享路径，函数名解析时分发） | ARM MTE 标签插入未做 |
+| KASAN-kernel (`-fsanitize=kernel-address`) | 同 KASAN | 内核定制 shadow 范围（`0xffff...`）未单独分发 |
+| UBSAN (`-fsanitize=undefined`) | TU init + `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 前 `__ubsan_handle_signed_integer_overflow(0, lhs)` | VLA bound / null deref / float cast trap 仍缺 |
+| KCSAN (`-fsanitize=thread` / `kernel-kcsan`) | TU init + 每函数 `__kcsan_func_entry`；内存访问 watchpoint 与 KASAN 共享 load/store 通道 | 专用 `__kcsan_check_access` 路径未独立发出 |
+| KCOV (`-fsanitize-coverage`) | 每函数 `__sanitizer_cov_trace_pc` + `__dcc_cov_guards_N[16]` 计数器 + `__sanitizer_cov_trace_pc_guard` 在 if / while / do / for / case / label / goto 等边 | 跨函数 inline 合并未做 |
+| Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + 比较 `__sanitizer_cov_trace_cmp1/2/4/8` + switch dispatch `__sanitizer_cov_trace_switch` | libFuzzer 协议 / 拦截器接入未做 |
 
-**完整 KASAN/UBSAN/KCSAN 需要在 IR / codegen 阶段做指令级插桩**，当前架构仅做
-TU init + 入口回调。`docs/missing_features.md` Sanitizer 后续章节有相同记录。
+实现位置：`src/sanitizer.rs::instrument_program()`，在 driver parse 之后、
+IR lower 之前由 AST walker 注入。CLI 由 `SanitizerFlags::from_args` 解析。
+`no_sanitize` 属性按通道关闭；KCOV / Fuzzer 不受 `no_sanitize` 影响。
+`.dcc.san_info` 节 v2，载荷为 8 字节 magic + 版本 + 6 标志字节。
 
 ---
 

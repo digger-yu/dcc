@@ -20,7 +20,7 @@
 | mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
 | DWARF + BTF（含 struct） | `-g` 生成 `.debug_*` + `.BTF`（含 `dcc_probe` STRUCT 类型） |
 | objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`、`.orc_unwind_ip` |
-| KASAN/UBSAN/KCSAN/KCOV 插桩（初版） | `-fsanitize=*`：TU init 一次 + 每函数入口桩 + `.dcc.san_info` v1 |
+| KASAN/UBSAN/KCSAN/KCOV/Fuzzer 插桩 | `-fsanitize=*`：TU init 一次 + 每函数入口桩 + AST 表达式级 KASAN load/store + UBSAN div/shift/signed overflow + KCOV 边覆盖 + Fuzzer cmp/switch trace + `.dcc.san_info` v2 |
 | 跨 TU LTO | `-flto` 生成 `.llvm.lto`；`-r` 多 `.o` 经 `ld -r` + objcopy 合并摘要 |
 | LTO dead symbol 剔除 | `-ffunction-sections`（`-flto` 默认）+ `ld --gc-sections` + objcopy strip |
 | 跨平台 Triple 解析 (parse-only) | `cli.rs` + `target.rs` 接受 `mips / mips64 / arm (armv7)` 的 `--target` 字符串,`Target::resolve()` 给出正确几何参数;`codegen::emit()` 通过 `Arch::has_backend()` 显式 panic,文本经 `Arch::backend_missing_msg()` 输出 |
@@ -282,17 +282,23 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | int128 `&&`/`\|\|` (M13.1) | `or rdx, dst` 合并高 64 位后再 test，避免「高 1 低 0」误判 0 |
 | asm `x` 约束 XMM early-clobber (M13.1) | 独立 `input_xmm_set` + `xmm_pool` 0..15 内避让，asm goto 输出寄存器可落入不同 XMM |
 
-## Sanitizer 后续（初版 AST 桩已交付）
+## Sanitizer 插桩（AST 层全部通道已交付）
 
-| 缺口 | 说明 |
-|------|------|
-| 内存访问级 KASAN | 需 IR/codegen 对 load/store 插 shadow 检查 |
-| 指令级 UBSAN | 除零、溢出、未定义移位等条件分支插桩 |
-| KCSAN 数据竞争 | watchpoint / happens-before 完整语义 |
-| KCOV 覆盖率细节 | 边计数、对比模式、guard 表等 |
+| 通道 | 能力 | 已知遗留 |
+|------|------|------|
+| KASAN / HWASAN | TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 `Deref/Index/ArrowMember` 与对应 `Assign` LHS 之前插入 | 16B 以上 / 非整型 load/store 走 `__asan_load`；MTE 标签未实现 |
+| UBSAN | `Div/Mod` / `Shl/Shr` / 有符号 `Add/Sub/Mul` 全部前置 `__ubsan_handle_*`；签名整数 overflow 在常量折叠时跳过 | VLA bound、null deref、float cast 单独 trap 仍缺 |
+| KCSAN | TU init + 每函数 `__kcsan_func_entry`；内存访问 watchpoint 与 KASAN 共享 load/store 通道 | 专用 `__kcsan_check_access` 路径未独立发出 |
+| KCOV | 每函数 `__dcc_cov_guards_N[16]` 计数器 + 入口 `__sanitizer_cov_trace_pc` + 边覆盖 `__sanitizer_cov_trace_pc_guard`（if / while / do / for / case / label / goto）| 跨函数 inline 合并未做 |
+| Fuzzer | KCOV 全部 + 比较 `EqEq/Ne/Lt/Gt/Le/Ge/AndAnd/OrOr` 前 `__sanitizer_cov_trace_cmp1/2/4/8` + switch dispatch 前 `__sanitizer_cov_trace_switch` | libFuzzer 协议 / 拦截器接入 |
+| no_sanitize | `address` / `kernel-address` / `hwaddress` / `undefined` / `thread` / `kernel-kcsan` / `all` 按通道关闭；KCOV / Fuzzer 不受 `no_sanitize` 影响 |  |
 
-当前交付：`sanitizer.rs` TU init 一次 + 每函数 coverage/KCSAN entry 桩 +
-`.dcc.san_info` v1；见 `docs/architecture.md` Sanitizer 节。
+实现：`src/sanitizer.rs` `instrument_program()`，所有通道在 driver parse 之后、
+IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用，
+不需要修改 IR / codegen。`.dcc.san_info` 节版本 v2，载荷为
+`DCC_SAN\0 + v2 + kasan/hwasan/ubsan/kcsan/kcov/fuzzer` 各 1 字节。
+回归：`src/sanitizer.rs` 12 个单元测试 + `scripts/remote_feature_check.sh`
+（sanitizer 节 + 汇编桩计数）。
 
 ## 远程基线
 

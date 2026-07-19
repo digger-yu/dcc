@@ -102,14 +102,20 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - ELF 的 section/weak/visibility 属性作用于 `-c`/`-r` 可重定位输出；
   ET_EXEC 输出含 `.symtab`/`.strtab` 与函数/全局符号。
 - `-fpermissive`：未知 typedef 降级为 `int` 并发出 `W0002`（默认严格 `E0009`）。
-- **Sanitizer（初版桩）**：`-fsanitize=address|undefined|thread|kernel-*`、
-  `-fsanitize=a,b` 组合、`-fsanitize-coverage` / `fuzzer`。Driver 在 IR
-  lower 前于 AST 插桩：TU 级 `__asan_init` / `__ubsan_init` / `__kcsan_init`
-  仅在首个有体函数前各插入一次；每个有体函数（含嵌套函数）入口插入
-  `__sanitizer_cov_trace_pc`（coverage）与 `__kcsan_func_entry`（KCSAN）。
-  `-c` 输出附带 `.dcc.san_info`（`DCC_SAN` v1 + 四标志位）。**不做**
-  内存访问/UB 条件的指令级插桩；完整 KASAN/UBSAN/KCSAN 数据竞争检测
-  需后续 IR/codegen 扩展。
+- **Sanitizer（AST 层完整桩）**：`-fsanitize=address|undefined|thread|hwaddress|fuzzer|kernel-*`、
+  `-fsanitize=a,b` 组合、`-fsanitize-coverage`。Driver 在 IR lower 前于
+  AST 插桩：TU 级 `__asan_init` / `__hwasan_init` / `__ubsan_init` /
+  `__kcsan_init` 仅在首个有体函数前各插入一次；每个有体函数（含嵌套函数）
+  入口插入 `__sanitizer_cov_trace_pc`（coverage）与 `__kcsan_func_entry`
+  （KCSAN）；表达式层在 `Deref/Index/ArrowMember` 与对应 `Assign` LHS
+  之前注入 `__asan_load1/2/4/8/16` / `__asan_storeN`；`Div/Mod` /
+  `Shl/Shr` / 有符号 `Add/Sub/Mul` 之前注入 `__ubsan_handle_*`；比较
+  之前注入 `__sanitizer_cov_trace_cmp1/2/4/8`；switch dispatch 之前
+  `__sanitizer_cov_trace_switch`；KCOV 在每个 `if/while/do/for/case/label/goto`
+  边位置插 `__sanitizer_cov_trace_pc_guard(&__dcc_cov_guards_N[i])`。
+  `-c` 输出附带 `.dcc.san_info`（`DCC_SAN` v2 + 六标志位）。
+  `no_sanitize("address"/"undefined"/"thread"/"all")` 按通道关闭；
+  KCOV / Fuzzer 不受 `no_sanitize` 影响。
 
 ## 重要选项
 
@@ -119,10 +125,12 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 | `-std=cXX` | 严格 C 标准 | - |
 | `-ffreestanding` | 不假设标准库存在 | off (假设 hosted) |
 | `-fno-builtin` | 不使用 builtin | off |
-| `-fsanitize=address` | KASAN 桩：TU init + `.dcc.san_info` | off |
-| `-fsanitize=undefined` | UBSAN 桩：TU init | off |
-| `-fsanitize=thread` | KCSAN 桩：TU init + 每函数 entry | off |
-| `-fsanitize-coverage` | KCOV：`__sanitizer_cov_trace_pc` 每函数 | off |
+| `-fsanitize=address` | KASAN 桩：TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 load/store 前 | off |
+| `-fsanitize=hwaddress` | HWASAN 桩：同 KASAN 路径（ARM MTE 标签未插入） | off |
+| `-fsanitize=undefined` | UBSAN 桩：div / shift / 有符号 overflow 前 `__ubsan_handle_*` | off |
+| `-fsanitize=thread` | KCSAN 桩：TU init + 每函数 entry，load/store 走 KASAN 通道 | off |
+| `-fsanitize=fuzzer` | Fuzzer：KCOV + `__sanitizer_cov_trace_cmpN` + `__sanitizer_cov_trace_switch` | off |
+| `-fsanitize-coverage` | KCOV：`__sanitizer_cov_trace_pc` + 边覆盖 guard 计数器 | off |
 
 ## Linux 内核编译
 
