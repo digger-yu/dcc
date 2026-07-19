@@ -146,6 +146,10 @@ struct AsmOpBinding {
     is_output: bool,
     /// 模板替换为内存操作数
     is_mem: bool,
+    /// early-clobber (`&`): 分配到的寄存器与所有输入都不重叠
+    early_clobber: bool,
+    /// XMM 寄存器宽度 (0 = GP, 32 = float, 64 = double, 128 = xmm full)
+    xmm_width: u8,
 }
 
 /// GNU as 局部数字标签：同一块 asm 内 `6:` 定义，`6f`/`6b` 引用。
@@ -7037,20 +7041,29 @@ impl Codegen {
 
     // ===== Inline Asm Mini-Assembler (AT&T syntax) =====
 
-    /// 解析 GCC asm 约束前缀 (= 输出, + 读写)
-    fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool) {
+    /// 解析 GCC asm 约束前缀 (= 输出, + 读写, & early-clobber)
+    /// 返回 (is_output, is_inout, early_clobber, match_digit)
+    /// match_digit: Some(n) 表示 "与第 n 个操作数共用寄存器", None 表示无
+    fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u8>) {
         let mut is_output = false;
         let mut is_inout = false;
+        let mut early = false;
+        let mut match_digit: Option<u8> = None;
         let mut s = constraint.trim();
         while !s.is_empty() {
             match s.chars().next() {
                 Some('=') => { is_output = true; s = &s[1..]; }
                 Some('+') => { is_output = true; is_inout = true; s = &s[1..]; }
-                Some('&') => { s = &s[1..]; }
+                Some('&') => { early = true; s = &s[1..]; }
+                Some('%') => { s = &s[1..]; } // 数字标签计数约束, 模板替换处理
+                Some(c) if c.is_ascii_digit() => {
+                    match_digit = Some(c.to_digit(10).unwrap() as u8);
+                    s = &s[1..];
+                }
                 _ => break,
             }
         }
-        (is_output, is_inout)
+        (is_output, is_inout, early, match_digit)
     }
 
     /// 约束是否优先使用内存操作数
@@ -7060,16 +7073,56 @@ impl Codegen {
         }
         let letters: Vec<char> = constraint.chars().filter(|c| c.is_ascii_alphabetic()).collect();
         let has_m = letters.contains(&'m');
+        let _has_p = letters.contains(&'p');
         let has_r = letters.iter().any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'));
+        // "p" 表示内存地址, 但仍需填入寄存器 (地址本身), 不当作内存操作数直接替换
         if has_m && (!has_r || is_inout) {
             return true;
         }
         letters == vec!['m']
     }
 
-    /// 约束是否使用立即数
+    /// 约束是否使用立即数 (含 "i", "n", "I", "N", "M", "X", "E")
     fn asm_constraint_is_immediate(constraint: &str) -> bool {
-        constraint.chars().any(|c| matches!(c, 'i' | 'n' | 'I' | 'N' | 'M'))
+        constraint.chars().any(|c| matches!(c, 'i' | 'n' | 'I' | 'N' | 'M' | 'X' | 'E'))
+    }
+
+    /// 约束是否要求 XMM 寄存器 ("x", "Y", "Yt", "Xf")
+    fn asm_constraint_wants_xmm(constraint: &str) -> Option<u8> {
+        let letters: Vec<char> = constraint.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        if letters.contains(&'x') {
+            // 默认 128 位; "Yt" 是 xmm, "Xf" 是 32 位, "Yx" 是 64 位
+            return Some(128);
+        }
+        if letters.contains(&'Y') {
+            return Some(128);
+        }
+        None
+    }
+
+    /// 约束是否要求内存地址 ("p")
+    fn asm_constraint_is_address(constraint: &str) -> bool {
+        constraint.chars().any(|c| c == 'p')
+    }
+
+    /// 约束是否通用 ("g" 包含 reg/mem/imm)
+    fn asm_constraint_is_general(constraint: &str) -> bool {
+        let letters: Vec<char> = constraint.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        letters.contains(&'g')
+    }
+
+    /// 从多约束 (如 "rm") 中按优先级选择单约束
+    fn asm_pick_sub_constraint(constraint: &str, prefer_memory: bool) -> &'static str {
+        let letters: Vec<char> = constraint.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        if prefer_memory && letters.contains(&'m') { return "m"; }
+        if letters.contains(&'r') { return "r"; }
+        if letters.contains(&'m') { return "m"; }
+        // 立即数约束: i (任意) / n / I/J/K/L/M/N/O (位移量) / X / E/F/G/H (浮点常量)
+        if letters.iter().any(|c| matches!(c, 'i' | 'n' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'X' | 'E' | 'F' | 'G' | 'H' | 's')) {
+            return "i";
+        }
+        if letters.contains(&'g') { return "g"; }
+        "r"
     }
 
     /// 为 asm 操作数生成 AT&T 内存操作数字符串 (基于 r13 帧指针)
@@ -7108,6 +7161,15 @@ impl Codegen {
         }
     }
 
+    /// XMM 寄存器名 (xmm0..xmm15) → 物理索引 (0..15)
+    fn asm_xmm_name(idx: usize) -> &'static str {
+        const NAMES: [&str; 16] = [
+            "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+            "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+        ];
+        NAMES[idx % 16]
+    }
+
     /// 构建 asm 操作数映射: %N / %[name] → 寄存器名或内存操作数
     fn build_asm_operand_map(
         &mut self,
@@ -7121,58 +7183,266 @@ impl Codegen {
     ) -> HashMap<String, String> {
         let mut map = HashMap::new();
         let mut idx = 0usize;
+
+        // 内部占位: 每个操作数分配状态
+        enum Slot {
+            /// 立即数 (模板内联)
+            Imm(String),
+            /// 内存操作数 (模板直接出现)
+            Mem(String),
+            /// 寄存器 (GP 或 XMM)
+            Reg(u8, &'static str),
+        }
+        let mut slots: Vec<Slot> = Vec::new();
+        let mut meta: Vec<(u8, u8, bool, bool, u8)> = Vec::new(); // (reg, xmm_width, is_output, is_mem, flags_raw)
+        // flags_raw: bit 0 = early_clobber
+
+        // 先扫一遍输入, 收集输入寄存器集合 (用于 early-clobber 输出避让)
+        let mut input_reg_set: std::collections::HashSet<u8> = std::collections::HashSet::new();
+
+        // ===== 处理 outputs =====
         for (op_idx, op) in outputs.iter().enumerate() {
-            let constraint = output_constraints.get(op_idx).map(String::as_str).unwrap_or("");
-            let (is_output, is_inout) = Self::parse_asm_constraint_flags(constraint);
-            if Self::asm_constraint_is_immediate(constraint) {
+            let raw = output_constraints.get(op_idx).map(String::as_str).unwrap_or("=r");
+            let (is_output, is_inout, early, match_digit) = Self::parse_asm_constraint_flags(raw);
+            let letter = Self::asm_pick_sub_constraint(raw, is_inout);
+            let _ = is_output; // 已经在 flags 派生
+
+            // match-digit: 复用先前操作数 (仅当 N < 当前全局 idx)
+            if let Some(n) = match_digit {
+                if (n as usize) < slots.len() {
+                    let slot = &slots[n as usize];
+                    match slot {
+                        Slot::Imm(s) => { map.insert(format!("%{idx}"), s.clone()); }
+                        Slot::Mem(s) => { map.insert(format!("%{idx}"), s.clone()); }
+                        Slot::Reg(r, name) => {
+                            let nreg = *r;
+                            map.insert(format!("%{idx}"), (*name).to_string());
+                            input_reg_set.insert(nreg);
+                            meta.push((nreg, 0, true, false, 0));
+                        }
+                    }
+                    slots.push(match slot { Slot::Imm(s) => Slot::Imm(s.clone()), Slot::Mem(s) => Slot::Mem(s.clone()), Slot::Reg(r, n) => Slot::Reg(*r, n) });
+                    idx += 1;
+                    continue;
+                }
+            }
+
+            // 立即数约束且操作数可常量求值
+            if matches!(letter, "i") && Self::asm_constraint_is_immediate(raw) {
                 if let Some(val) = Self::eval_asm_operand(op) {
-                    map.insert(format!("%{idx}"), val);
-                    bindings.push(AsmOpBinding { reg: 0, is_output: false, is_mem: false });
+                    // 添加 AT&T 立即数前缀 $, 例如 305419896 -> $305419896
+                    let att_val = if val.starts_with('$') { val.clone() } else { format!("${val}") };
+                    map.insert(format!("%{idx}"), att_val.clone());
+                    slots.push(Slot::Imm(att_val));
+                    meta.push((0, 0, true, false, 0));
                     idx += 1;
                     continue;
                 }
             }
-            if Self::asm_constraint_prefers_memory(constraint, is_inout) {
+
+            // 内存操作数 (m 优先)
+            if Self::asm_constraint_prefers_memory(raw, is_inout) {
                 if let Some(mem) = self.asm_memory_operand_str(op) {
-                    map.insert(format!("%{idx}"), mem);
-                    bindings.push(AsmOpBinding { reg: 0, is_output, is_mem: true });
+                    map.insert(format!("%{idx}"), mem.clone());
+                    slots.push(Slot::Mem(mem));
+                    meta.push((0, 0, true, true, if early { 1 } else { 0 }));
                     idx += 1;
                     continue;
                 }
             }
-            let reg_name = Self::asm_reg_for_constraint(constraint, idx);
-            let reg_idx = Self::asm_name_to_reg_index(reg_name);
-            self.prepare_asm_binding(op, reg_idx);
-            map.insert(format!("%{idx}"), reg_name.to_string());
-            bindings.push(AsmOpBinding { reg: reg_idx, is_output, is_mem: false });
+
+            // XMM 寄存器约束
+            if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
+                let xi = idx % 16;
+                let name = Self::asm_xmm_name(xi);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(xi as u8, name));
+                meta.push((xi as u8, xmm_bits, true, false, if early { 1 } else { 0 }));
+                idx += 1;
+                continue;
+            }
+
+            // 内存地址 (p): lea 到一个 GP 寄存器, 模板里就是 %reg
+            if Self::asm_constraint_is_address(raw) {
+                let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+                let chosen = gp_pool[idx % gp_pool.len()];
+                // 把 expr 地址加载到 chosen
+                self.asm_load_address_to_reg(op, chosen);
+                let name = Self::gp_reg_name(chosen as usize);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(chosen, name));
+                meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
+                idx += 1;
+                continue;
+            }
+
+            // 默认: GP 寄存器
+            let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+            let chosen = gp_pool[idx % gp_pool.len()];
+            let name = Self::gp_reg_name(chosen as usize);
+            self.prepare_asm_binding(op, chosen, true);
+            map.insert(format!("%{idx}"), name.to_string());
+            slots.push(Slot::Reg(chosen, name));
+            meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
             idx += 1;
         }
+
+        // ===== 处理 inputs =====
         for (op_idx, op) in inputs.iter().enumerate() {
-            let constraint = input_constraints.get(op_idx).map(String::as_str).unwrap_or("r");
-            let (is_output, is_inout) = Self::parse_asm_constraint_flags(constraint);
-            if Self::asm_constraint_is_immediate(constraint) {
+            let raw = input_constraints.get(op_idx).map(String::as_str).unwrap_or("r");
+            let (_is_output, is_inout, _early, match_digit) = Self::parse_asm_constraint_flags(raw);
+            let _letter = Self::asm_pick_sub_constraint(raw, is_inout);
+
+            // match-digit: 复用先前操作数的寄存器, 但仍需 prepare_asm_binding
+            // 把当前操作数 (作为输入) 的值加载到该寄存器, 不能只复制 slot.
+            // 例如 "=r"(b) : "0"(a): 输出准备把 &b 加载到 rax, 但输入 a 应当把
+            // a 的值 (42) 重新加载到 rax, 覆盖 &b, 这样 asm "add $1, %0" 才能
+            // 在 rax 上做正确算术 (rax = 42 + 1 = 43), 再写回 b.
+            if let Some(n) = match_digit {
+                if (n as usize) < slots.len() {
+                    let slot = &slots[n as usize];
+                    if let Slot::Reg(r, name) = slot {
+                        let nreg = *r;
+                        let nname = *name;
+                        // 对当前操作数 (输入) 调 prepare, 把值加载到复用寄存器
+                        self.prepare_asm_binding(op, nreg, false);
+                        map.insert(format!("%{idx}"), nname.to_string());
+                        input_reg_set.insert(nreg);
+                        meta.push((nreg, 0, false, false, 0));
+                        slots.push(Slot::Reg(nreg, nname));
+                        idx += 1;
+                        continue;
+                    }
+                    // 非 Reg slot (Imm/Mem): 直接复制即可
+                    match slot {
+                        Slot::Imm(s) => { map.insert(format!("%{idx}"), s.clone()); }
+                        Slot::Mem(s) => { map.insert(format!("%{idx}"), s.clone()); }
+                        Slot::Reg(_, _) => unreachable!(),
+                    }
+                    slots.push(match slot { Slot::Imm(s) => Slot::Imm(s.clone()), Slot::Mem(s) => Slot::Mem(s.clone()), Slot::Reg(r, n) => Slot::Reg(*r, n) });
+                    idx += 1;
+                    continue;
+                }
+            }
+
+            // 立即数约束且操作数可常量求值
+            if Self::asm_constraint_is_immediate(raw) {
                 if let Some(val) = Self::eval_asm_operand(op) {
-                    map.insert(format!("%{idx}"), val);
-                    bindings.push(AsmOpBinding { reg: 0, is_output: false, is_mem: false });
+                    // 添加 AT&T 立即数前缀 $, 例如 305419896 -> $305419896
+                    let att_val = if val.starts_with('$') { val.clone() } else { format!("${val}") };
+                    map.insert(format!("%{idx}"), att_val.clone());
+                    slots.push(Slot::Imm(att_val));
+                    meta.push((0, 0, false, false, 0));
                     idx += 1;
                     continue;
                 }
             }
-            if Self::asm_constraint_prefers_memory(constraint, is_inout) {
+
+            // 内存操作数
+            if Self::asm_constraint_prefers_memory(raw, is_inout) {
                 if let Some(mem) = self.asm_memory_operand_str(op) {
-                    map.insert(format!("%{idx}"), mem);
-                    bindings.push(AsmOpBinding { reg: 0, is_output: is_output || is_inout, is_mem: true });
+                    map.insert(format!("%{idx}"), mem.clone());
+                    slots.push(Slot::Mem(mem));
+                    meta.push((0, 0, false, true, 0));
                     idx += 1;
                     continue;
                 }
             }
-            let reg_name = Self::asm_reg_for_constraint(constraint, idx);
-            let reg_idx = Self::asm_name_to_reg_index(reg_name);
-            self.prepare_asm_binding(op, reg_idx);
-            map.insert(format!("%{idx}"), reg_name.to_string());
-            bindings.push(AsmOpBinding { reg: reg_idx, is_output: is_output || is_inout, is_mem: false });
+
+            // XMM
+            if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
+                let xi = idx % 16;
+                let name = Self::asm_xmm_name(xi);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(xi as u8, name));
+                input_reg_set.insert(xi as u8);
+                meta.push((xi as u8, xmm_bits, false, false, 0));
+                idx += 1;
+                continue;
+            }
+
+            // 内存地址 (p)
+            if Self::asm_constraint_is_address(raw) {
+                let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+                let chosen = gp_pool[idx % gp_pool.len()];
+                self.asm_load_address_to_reg(op, chosen);
+                let name = Self::gp_reg_name(chosen as usize);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(chosen, name));
+                input_reg_set.insert(chosen);
+                meta.push((chosen, 0, false, false, 0));
+                idx += 1;
+                continue;
+            }
+
+            // GP 寄存器
+            let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+            let chosen = gp_pool[idx % gp_pool.len()];
+            let name = Self::gp_reg_name(chosen as usize);
+            self.prepare_asm_binding(op, chosen, false);
+            map.insert(format!("%{idx}"), name.to_string());
+            slots.push(Slot::Reg(chosen, name));
+            input_reg_set.insert(chosen);
+            meta.push((chosen, 0, false, false, 0));
             idx += 1;
         }
+
+        // ===== early-clobber: 输出寄存器不能与任何输入寄存器重叠 =====
+        let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+        let num_outputs = outputs.len();
+        for i in 0..num_outputs {
+            let (reg, xmm_w, is_out, is_mem, flags) = meta[i];
+            if !is_out || is_mem || (flags & 1) == 0 { continue; }
+            // XMM 暂不处理
+            if xmm_w != 0 { continue; }
+            if !input_reg_set.contains(&reg) { continue; }
+            // 找一个不冲突的 GP
+            for &cand in &gp_pool {
+                if !input_reg_set.contains(&cand) {
+                    let new_name = Self::gp_reg_name(cand as usize);
+                    // 替换 map 中对应的 %N 条目
+                    let key = format!("%{i}");
+                    if let Some(old) = map.get(&key).cloned() {
+                        // 重新 prepare_asm_binding 到新寄存器
+                        if let Some(op) = outputs.get(i) {
+                            self.prepare_asm_binding(op, cand, true);
+                        }
+                        map.insert(key.clone(), new_name.to_string());
+                        slots[i] = Slot::Reg(cand, match slots[i] {
+                            Slot::Reg(_, _) => {
+                                // 取一个静态名: 用 cand 处的名字
+                                let n: &'static str = match cand {
+                                    0 => "rax", 1 => "rcx", 2 => "rdx", 3 => "rbx",
+                                    4 => "rsp", 5 => "rbp", 6 => "rsi", 7 => "rdi",
+                                    8 => "r8", 9 => "r9", 10 => "r10", 11 => "r11",
+                                    _ => "rax",
+                                };
+                                n
+                            }
+                            _ => unreachable!(),
+                        });
+                        let _ = old;
+                    }
+                    meta[i] = (cand, 0, true, false, flags);
+                    break;
+                }
+            }
+        }
+
+        // 把 meta 转成 AsmOpBinding
+        bindings.clear();
+        for (i, (reg, xmm_w, is_out, is_mem, flags)) in meta.iter().enumerate() {
+            let _ = i;
+            bindings.push(AsmOpBinding {
+                reg: *reg,
+                is_output: *is_out,
+                is_mem: *is_mem,
+                early_clobber: (flags & 1) != 0,
+                xmm_width: *xmm_w,
+            });
+        }
+
+        // name aliases
         for (i, name) in output_names.iter().enumerate() {
             if let Some(n) = name {
                 if let Some(reg) = map.get(&format!("%{}", i)) {
@@ -7189,6 +7459,24 @@ impl Codegen {
             }
         }
         map
+    }
+
+    /// GP 寄存器索引 → AT&T 名
+    fn gp_reg_name(idx: usize) -> &'static str {
+        match idx {
+            0 => "rax", 1 => "rcx", 2 => "rdx", 3 => "rbx",
+            4 => "rsp", 5 => "rbp", 6 => "rsi", 7 => "rdi",
+            8 => "r8", 9 => "r9", 10 => "r10", 11 => "r11",
+            12 => "r12", 13 => "r13", 14 => "r14", 15 => "r15",
+            _ => "rax",
+        }
+    }
+
+    /// 把 expr 表示的地址 (指针值) 加载到 GP 寄存器 (用于 "p" 约束)
+    fn asm_load_address_to_reg(&mut self, expr: &Expr, reg: u8) {
+        // p 约束: 把指针值加载到寄存器 (而不是 lea 变量地址)
+        // 对于指针变量, 加载其值; 对于其他表达式, 按值求值
+        self.gen_expr(expr, reg);
     }
 
     /// asm 输出操作数写回 C 变量
@@ -7212,7 +7500,11 @@ impl Codegen {
             self.emit(&[0x66, 0x41, 0x89, 0x85 | ((reg & 7) << 3)]);
             self.emit(&off.to_le_bytes());
         } else if sz <= 4 {
-            self.emit(&[0x41, 0x89, 0x85 | ((reg & 7) << 3)]);
+            // 32-bit 整型写回需零扩展到 64 位槽, 否则后续 64-bit 重载读到栈残留
+            // 旧实现用 `mov %eax, [r13+off]` (4 字节), C codegen 后续用 64-bit 读
+            // (mov -off(%r13), %rax) 会读到未初始化高 32 位.
+            // 改为 `mov %rax, [r13+off]` (REX.W + REX.B, 8 字节), 保证 64-bit 槽整体更新.
+            self.emit(&[Self::rex(true, reg, 0, 13), 0x89, 0x85 | ((reg & 7) << 3)]);
             self.emit(&off.to_le_bytes());
         } else {
             self.store_stack(reg, off);
@@ -7251,14 +7543,21 @@ impl Codegen {
         }
     }
 
-    /// 将 asm 约束表达式加载到指定寄存器（Ident 取地址，其余求值）。
-    fn prepare_asm_binding(&mut self, expr: &Expr, reg: u8) {
+    /// 将 asm 约束表达式加载到指定寄存器。
+    /// - `is_output = true`: Ident 取地址 (用于 `writeback_asm_operand` 走 [reg+off] 写回)
+    /// - `is_output = false`: Ident 取栈/全局值 (asm 模板里使用该值)
+    /// - 其他表达式统一 `gen_expr` 求值。
+    fn prepare_asm_binding(&mut self, expr: &Expr, reg: u8, is_output: bool) {
         if let Expr::Ident { name, .. } = expr {
             if self.globals.contains_key(&name.name) {
                 self.emit_global_addr(reg, &name.name);
-            } else {
+            } else if is_output {
+                // 输出: lea 出变量地址, writeback 通过 [r13+off] 写回
                 let off = self.var_offset(&name.name);
                 self.emit_lea_r13(reg, off);
+            } else {
+                // 输入: 直接 load 变量值, asm 模板里使用该值
+                self.gen_expr(expr, reg);
             }
         } else {
             self.gen_expr(expr, reg);
@@ -7447,7 +7746,9 @@ impl Codegen {
 
     /// 将 op_map 值格式化为 AT&T 操作数字符串
     fn asm_format_subst(val: &str) -> String {
-        if val.contains('(') || val.starts_with('-') || val.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        // 内存操作数 (含 '('), 立即数 (以 $ 开头), 偏移 (以 - 开头), 或纯数字:
+        // 直接使用, 不加 % 前缀
+        if val.contains('(') || val.starts_with('$') || val.starts_with('-') || val.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             val.to_string()
         } else {
             format!("%{val}")

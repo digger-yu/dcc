@@ -1,6 +1,6 @@
 # DCC Linux 6.6 缺失特性（按自动化证据）
 
-> 最后更新：2026-07-18 — 以 `scripts/sync_remote_build.sh`、
+> 最后更新：2026-07-19 — 以 `scripts/sync_remote_build.sh`、
 > `scripts/kernel_full_check.sh`、`scripts/prepare0_check.sh`、
 > `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh`、
 > `scripts/modpost_link.sh`、`scripts/vmlinux_regress.sh`、
@@ -111,6 +111,7 @@
 | `_Generic` 指针精确匹配 | ✅ 按 pointee 匹配；void* 与对象指针兼容 |
 | libdecnumber 组合编译 | ✅ `tools/libdecnumber_combined.c` 把 11 个 SKIP 文件合一，DECPMAX 7/16/34 三段；远程 1 OK |
 | 内联 asm 约束 | ✅ `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber |
+| 内联 asm 约束扩展 (M11.3) | ✅ `"i"` 立即数 / `"p"` 内存地址 / `"g"` 通用 / `"X"` 常量 / `"0..9"` 复用 / `"&"` early-clobber / 多重约束 `"rm"` / XMM `"x"`/`"Y"` / 数字标签 `"%"` / `offsetof` 约束；同步修复 `prepare_asm_binding` 输入侧取值的 bug（之前给输入也走 lea，破坏 `r`/`+r` 实参语义，导致 `test_bit_ops` 等 segfault）、`writeback_asm_operand` 32 位写回未零扩展的 bug（C codegen 用 64 位 reload，未初始化槽高 32 位残留栈数据）、`disasm.rs::reg` 错叠 REX.B 的 bug（让反汇编把 reg 字段错当成 r/m 字段扩展），以及 `asm_pick_sub_constraint` 漏识别 X/n/I/N/M/E/F/G/H 的问题 |
 | SysV va_list SSE | ✅ GP + XMM0–7 保存区；float/double/long double va_arg |
 
 ## C++ 前端 M7 + M8 / GCC bootstrap 状态
@@ -152,6 +153,7 @@
 | C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
 | C 前端补洞 `_Static_assert` 字符串化 (M11.1) | ✅ | C23 单参 `_Static_assert(expr)` 与双参 `_Static_assert(expr,"msg")` 全部支持；失败消息附加 `evaluates to: <ExprDebug 文本>` 便于定位 |
 | C 前端补洞 GNU 扩展 (M11.2) | ✅ | `__builtin_offsetof` 支持嵌套 struct/union/数组下标/匿名 struct 成员访问；`__builtin_huge_val`/`huge_valf`/`huge_vall` 按 IEEE 754 位模式 (double 0x7FF0000000000000 / float 0x7F800000 / long double 0x7FFF8000000000000000) rodata 加载；`__builtin_nan`/`nanf`/`nanl` 走 qNaN 编码 (double 0x7FF8000000000000)；`_Atomic` 在 C 前端接通 `__atomic_*` 内建函数 + `__c11_atomic_*` 路径；`__builtin_call_with_static_chain` 按 SysV ABI 把 chain 写入 r10 并按 GP/XMM 寄存器约定传参 + 间接 call；嵌套函数作为 IR 一等公民支持静态链参数；computed goto 跨函数（标签地址走 LEA 加载，间接 jmp 通过寄存器）；asm goto 输出约束在 fall-through 路径上写回，跳转路径保留原值；`__builtin_isnan`/`isinf`/`finite`/`signbit`/`fpclassify` 正确处理 NaN/Inf 位模式；`Expr::Unary` 浮点取负走恒常折叠 + 运行时 XOR 符号位；`AddrOf` REX.R 编码对 r10–r15 修复 |
+| 内联 asm 约束全家族 (M11.3) | ✅ | `parse_asm_constraint_flags` 解析 `=` / `+` / `&` / `%` / `0..9`；`asm_constraint_*` 判定：is_immediate (i/n/I/J/K/L/M/N/O/X/E/F/G/H/s)、is_address (p)、wants_xmm (x/Y)、is_general (g)、prefers_memory；`asm_pick_sub_constraint` 从多约束 ("rm") 选单约束，按 `r` > `m` > 立即数 > `g` > 默认优先级；`build_asm_operand_map` 用 `Slot::{Reg, Imm, Mem}` + `meta: (reg, xmm_w, is_out, is_mem, flags)` 记录每个操作数；`prepare_asm_binding(expr, reg, is_output)` 区分输出/输入语义：输出走 lea 取地址（配合 `writeback_asm_operand` 写回），输入直接 `gen_expr` 取值（修复原 bug：输入也走 lea 导致 segfault）；early-clobber 阶段若 `&` 输出寄存器与任一输入寄存器重叠，重新从 GP 池挑选并重新 emit prepare/map；`asm_format_subst` 把 `op_map` 值按 AT&T 形态输出（`%rax` / `$305419896` / `-16(%r13)`）；offsetof 约束在输入侧走 `const_eval::eval` 求值，失败时回退到 GP 寄存器并 `lea` 加载常量基址 + 偏移；测试 `test_asm_constraints_ext.c` 10 个用例 (`test_immediate_constraint` / `test_address_constraint` / `test_general_constraint` / `test_constant_constraint` / `test_match_constraint_0` / `test_early_clobber` / `test_multi_constraint` / `test_xmm_constraint` / `test_digit_label_constraint` / `test_offsetof_constraint`) 远程 Linux 10/10 PASS |
 | GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；远端可用磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）；仍缺 SFINAE / partial specialization / 完整 concepts / 协程 / module |
 | libdecnumber 组合 TU 编译 | ✅ 远程 OK | `scripts/remote_gcc_c_probe.sh` 改用 `tools/libdecnumber_combined.c` |
 | 嵌套块重声明 (C99 6.2.1) | ✅ | `parser.rs::check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍报 E0007 |

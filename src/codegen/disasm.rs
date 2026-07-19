@@ -74,8 +74,11 @@ impl<'a> Dec<'a> {
         self.base + self.pos as u64
     }
 
-    fn reg(&self, rex: &Rex, idx: u8, width: u8) -> &'static str {
-        let i = (idx & 7) as usize + if rex.b { 8 } else { 0 };
+    fn reg(&self, _rex: &Rex, idx: u8, width: u8) -> &'static str {
+        // idx 已由调用方按 REX.R / REX.B / REX.X 扩展为完整 0..15 索引.
+        // 此处不能再叠加 REX.B, 否则会把 reg 字段 (用 REX.R 扩展) 错当成 r/m 字段
+        // (用 REX.B 扩展), 导致反汇编里 rax 误显示为 r8, r8 误显示为 rax 等.
+        let i = (idx & 15) as usize;
         match width {
             1 => REG8[i],
             4 => REG32[i],

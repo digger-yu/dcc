@@ -376,6 +376,46 @@ M11.2 扩展：
   适配 GNU 嵌套函数的静态链调用约定，配合 IR 一等公民的
   嵌套函数（nested function）支持。
 
+M11.3 扩展 — 内联 asm 约束全家族：
+
+- **约束解析**：`parse_asm_constraint_flags` 把约束字符串拆为
+  `(is_output, is_inout, early_clobber, match_digit)` 四个标志。
+  `is_output` 由首字符 `=` / `+` 决定；`early_clobber` 由前缀 `&` 决定；
+  `match_digit` 由末尾 `0..9` 决定；`is_inout` 由 `+` 决定。
+- **约束分类**：`asm_constraint_is_immediate` (i/n/I/J/K/L/M/N/O/X/E/F/G/H/s)、
+  `asm_constraint_is_address` (p)、`asm_constraint_wants_xmm` (x/Y)、
+  `asm_constraint_is_general` (g)、`asm_constraint_prefers_memory` (含 m 且不含 r)
+  在 `asm_pick_sub_constraint` 中按 `r` > `m` > 立即数 > `g` > 默认
+  优先级从多约束 ("rm") 选单约束。
+- **操作数映射**：`build_asm_operand_map` 用 `Slot::{Reg, Imm, Mem}` +
+  `meta: (reg, xmm_w, is_out, is_mem, flags)` 记录每个操作数。
+  - GP 池：`[0, 1, 2, 6, 7, 8, 9, 10, 11]` (rax/rcx/rdx/rsi/rdi/r8..r11)。
+  - XMM 池：`[0..15]`，XMM 约束 `x` / `Y` 时 `xmm_width` 记录 32/64 位。
+  - `"&"` early-clobber 阶段：若输出寄存器与任一输入寄存器重叠，
+    重新从 GP 池挑选并重新 emit `prepare_asm_binding` + 更新 `op_map`。
+  - `"0..9"` 复用约束：复用先前操作数（`Slot::Reg`）的寄存器，
+    但仍对当前操作数调 `prepare_asm_binding(expr, reg, is_output=false)`
+    把值重新加载（输入语义），覆盖先前输出 prepare 写入的地址。
+- **准备 / 写回**：`prepare_asm_binding(expr, reg, is_output)`
+  区分语义：输出走 `lea` 取地址（配合 `writeback_asm_operand` 的
+  `mov [r13+off], reg` 写回），输入直接 `gen_expr` 取值
+  （修复原 bug：输入也走 lea 破坏 `r`/`+r` 实参语义）。
+  `writeback_asm_operand` 对 32 位整型使用 REX.W (8 字节) 零扩展
+  写回（修复原 bug：4 字节写回让 C codegen 64 位 reload 读到
+  未初始化槽高 32 位的栈残留）。
+- **offsetof 约束**：输入侧先尝试 `const_eval::eval` 求值，
+  失败时回退到 GP 寄存器并 `lea` 加载常量基址 + 字段偏移。
+- **模板替换**：`resolve_asm_template` 把 `op_map` 中的
+  `%N` 占位符替换为 AT&T 形态 (`%rax` / `$305419896` /
+  `-16(%r13)`)；`asm_format_subst` 对寄存器名加 `%` 前缀、
+  对立即数原样 (已含 `$`)、对内存操作数原样 (含 `(`)。
+- **disasm**：`reg` 函数不再叠加 REX.B（由调用方按 REX.R / REX.B /
+  REX.X 决定扩展位），避免 reg 字段被错当作 r/m 字段
+  扩展（之前 rax 误显示为 r8，r8 误显示为 rax）。
+- **测试**：`test_asm_constraints_ext.c` 10 个用例覆盖
+  i / p / g / X / 0 / & / rm / x / %= / offsetof 约束，
+  远程 Linux 全 10/10 PASS。
+
 Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 
 - **标签命名空间**：C 层 `Stmt::Label` 与 asm 字符串内命名标签（如 `found:`）
