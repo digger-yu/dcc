@@ -19,6 +19,7 @@
 | **M10** | 跨平台交叉编译 | ⏳ | riscv64-linux-gnu-dcc 命名 |
 | **M11.3** | 链接器补洞 | ✅ 完成 | LTO 跨函数内联/常量传播/全局优化；`.gnu.hash` TIE 压缩；`.eh_frame_hdr` 搜索表；IFUNC；`--exclude-libs`/`--build-id=sha1`/`--no-undefined-version`；AArch64+RISC-V 重定位（22+15 种）；GOT64；TLS 重定位 |
 | **M12** | **x86_64 mini-asm 补全** | ✅ 完成 | 消除 nop 警告：段寄存器 (cs/ds/es/fs/gs/ss) 读写、push/pop 段、imm64 内存目标、pushq imm64、%al/%ax imm test、shift $cl on any reg、cmpxchg/xadd/bswap/popcnt/movnt/prefetch 内存源+SymDisp、setcc AH/BH/CH/DH、movzx/movsx 全 8/16/32→32/64、wbinvd/invd/cpuid/rdtsc/rdtscp/rdpmc、syscall/sysret/sysenter/sysexit/swapgs/stac/clac/endbr64/pause、vmx vmlaunch/vmresume/vmread/vmwrite、fxsave/fxrstor/ldmxcsr/stmxcsr、ud2/hlt/cli/sti/cld/std、pushq/popq 扩展、vmovq/段前缀 mem 寻址；新增 `tests/fixtures/asm_paravirt_boot.c` |
+| **M13** | **x86_64 SIMD 指令子集补全** | ✅ 完成 | 完整实装 AVX/AVX2/AVX-512（EVEX）+ SSE3/SSSE3/SSE4.1/SSE4.2 + AES-NI/SHA + FMA 4 操作数 + F16C + TSX + AMX tile + AVX-VNNI；VEX (C5/C4) + EVEX (62) 通用前缀 helper；32 个 FMA 变体（132/213/231 × ps/pd/ss/sd × add/sub/nmadd/nmsub）；AES-NI 6 + SHA 7 + F16C 2 + TSX 4 + AMX 9 + AVX-VNNI 3；新增 `tests/fixtures/asm_avx_aes_fma_tsx.c` + `asm_avx_aes_fma_tsx_compiles_without_nop_fallback` 远程 PASS |
 
 ## 后端能力矩阵 (M8 细分)
 

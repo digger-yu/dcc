@@ -8303,6 +8303,8 @@ impl Codegen {
             "mov" | "movq" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 64),
             "movl" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 32),
             "movw" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 16),
+            // movd: 32-bit 整数与 xmm 之间的传送 (66 0F 6E / 66 0F 7E)
+            "movd" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 32),
             "movb" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 8),
             "movzbl" if ops.len() == 2 => self.emit_asm_movzx(&ops[0], &ops[1], 8, 32),
             "movzbq" if ops.len() == 2 => self.emit_asm_movzx(&ops[0], &ops[1], 8, 64),
@@ -8540,6 +8542,801 @@ impl Codegen {
             "rdmsr" => self.emit(&[0x0F, 0x32]),
             "wrmsr" => self.emit(&[0x0F, 0x30]),
             "movq" if ops.len() == 2 && mnemonic == "movq" => self.emit_asm_mov(&ops[0], &ops[1], 64),
+
+            // === TSX (Transactional Synchronization Extensions) ===
+            // xbegin rel16: C7 F8 iw
+            "xbegin" if ops.len() == 1 => {
+                if let AsmOperand::Imm(v) = &ops[0] {
+                    self.emit(&[0xC7, 0xF8]); self.emit(&(*v as i16).to_le_bytes());
+                } else if let AsmOperand::Sym(s) = &ops[0] {
+                    let at = self.pos();
+                    self.emit(&[0xC7, 0xF8, 0, 0]);
+                    self.pending.push(PendingJump { at, target: s.clone(), kind: JumpKind::Je });
+                } else {
+                    eprintln!("warning: xbegin needs label or imm, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "xend" => self.emit(&[0x0F, 0x01, 0xD5]),
+            "xabort" if ops.len() == 1 => {
+                if let AsmOperand::Imm(v) = &ops[0] {
+                    self.emit(&[0xC6, 0xF8, *v as u8]);
+                } else {
+                    eprintln!("warning: xabort needs imm8, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "xtest" => self.emit(&[0x0F, 0x01, 0xD6]),
+
+            // === AES-NI (66 0F 38 DC-DF) ===
+            // aesenc aesi, xesi   : 66 0F 38 DC /r
+            // aesenclast          : 66 0F 38 DD /r
+            // aesdec              : 66 0F 38 DE /r
+            // aesdeclast          : 66 0F 38 DF /r
+            "aesenc" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0xDC, 0),
+            "aesenclast" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0xDD, 0),
+            "aesdec" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0xDE, 0),
+            "aesdeclast" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0xDF, 0),
+            // aesimc xmm1, xmm2/m128 : 66 0F 38 DB /r
+            "aesimc" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0xDB, 0),
+            // aeskeygenassist xmm1, xmm2/m128, imm8 : 66 0F 3A DF /r ib
+            "aeskeygenassist" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0xDF, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: aeskeygenassist needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+
+            // === SHA Extensions ===
+            // sha1rnds4 xmm1, xmm2/m128, imm8 : 0F 3A CC /r ib
+            "sha1rnds4" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 0);
+                        self.emit(&[0xCC, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: sha1rnds4 needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // sha1nexte xmm1, xmm2/m128 : 0F 38 C8 /r
+            "sha1nexte" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 0, 2, 0xC8, 0),
+            // sha1msg1 xmm1, xmm2/m128 : 0F 38 C9 /r
+            "sha1msg1" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 0, 2, 0xC9, 0),
+            // sha1msg2 xmm1, xmm2/m128 : 0F 38 CA /r
+            "sha1msg2" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 0, 2, 0xCA, 0),
+            // sha256rnds2 xmm1, xmm2/m128, <XMM0> : 0F 38 CB /r (隐式 xmm0)
+            "sha256rnds2" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 0, 2, 0xCB, 0),
+            // sha256msg1 xmm1, xmm2/m128 : 0F 38 CC /r
+            "sha256msg1" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 0, 2, 0xCC, 0),
+            // sha256msg2 xmm1, xmm2/m128 : 0F 38 CD /r
+            "sha256msg2" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 0, 2, 0xCD, 0),
+
+            // === FMA (Fused Multiply-Add) — 4 操作数 ===
+            // vfmadd132ps/pd/ss/sd: VEX.NDS.128/256.66.0F38.W 98-99 /r
+            // vfmadd213ps/pd/ss/sd: VEX.NDS.128/256.66.0F38.W A8-A9 /r
+            // vfmadd231ps/pd/ss/sd: VEX.NDS.128/256.66.0F38.W B8-B9 /r
+            // 4 操作数: dst, src1, src2/m ; dst = src1 * src2 + dst (132)
+            // 模式: 所有 FMA 走 0F38 映射 (4 字节 VEX 前缀)
+            // 由于 AT&T 语法中 dst 是第一个操作数, 1 2 3 对应 (3, 1, 2): dst 是 modrm.reg
+            "vfmadd132ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x98, 0, false),
+            "vfmadd132pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x98, 1, false),
+            "vfmadd132ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x99, 0, true),
+            "vfmadd132sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x99, 1, true),
+            "vfmadd213ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xA8, 0, false),
+            "vfmadd213pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xA8, 1, false),
+            "vfmadd213ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xA9, 0, true),
+            "vfmadd213sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xA9, 1, true),
+            "vfmadd231ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xB8, 0, false),
+            "vfmadd231pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xB8, 1, false),
+            "vfmadd231ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xB9, 0, true),
+            "vfmadd231sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xB9, 1, true),
+            // 256-bit 版本 — 删去 (Reg 字段 u8, 256 不在范围内)
+            // 256 位 FMA 走同一个 emit_asm_fma_3op, 调用方显式传 l=1
+            // vfmsub132ps/pd/ss/sd (0x9A/9B/A8/AB/B8/BB)
+            "vfmsub132ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9A, 0, false),
+            "vfmsub132pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9A, 1, false),
+            "vfmsub132ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9B, 0, true),
+            "vfmsub132sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9B, 1, true),
+            "vfmsub213ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xAA, 0, false),
+            "vfmsub213pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xAA, 1, false),
+            "vfmsub231ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 0, 1, 0xBA, 0, false),
+            "vfmsub231pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 1, 1, 0xBA, 1, false),
+            "vfmsub231ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 0, 1, 0xBB, 0, true),
+            "vfmsub231sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 1, 1, 0xBB, 1, true),
+            "vfmsub213ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 0, 1, 0xAB, 0, true),
+            "vfmsub213sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 1, 1, 0xAB, 1, true),
+            "vfmsub132ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 0, 1, 0x9B, 0, true),
+            "vfmsub132sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 1, 1, 0x9B, 1, true),
+            "vfmsub231pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xBA, 1, false),
+            // vfnmadd132ps/pd (0x9C/9D/AC/AD/BC/BD)
+            "vfnmadd132ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9C, 0, false),
+            "vfnmadd132pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9C, 1, false),
+            "vfnmadd132ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9D, 0, true),
+            "vfnmadd132sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9D, 1, true),
+            "vfnmadd213ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xAC, 0, false),
+            "vfnmadd213pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xAC, 1, false),
+            "vfnmadd231ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xBC, 0, false),
+            "vfnmadd231pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xBC, 1, false),
+            // vfnmsub132ps/pd (0x9E/9F/AE/AF/BE/BF)
+            "vfnmsub132ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9E, 0, false),
+            "vfnmsub132pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9E, 1, false),
+            "vfnmsub132ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9F, 0, true),
+            "vfnmsub132sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0x9F, 1, true),
+            "vfnmsub213ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xAE, 0, false),
+            "vfnmsub213pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xAE, 1, false),
+            "vfnmsub213ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 0, 1, 0xAF, 0, true),
+            "vfnmsub213sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 1, 1, 0xAF, 1, true),
+            "vfnmsub231ps" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xBE, 0, false),
+            "vfnmsub231pd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 128, 1, 0xBE, 1, false),
+            "vfnmsub231ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 0, 1, 0xBF, 0, true),
+            "vfnmsub231sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 1, 1, 0xBF, 1, true),
+            // vfnmadd132/213/231 标量 (0x9D/AD/BD)
+            "vfnmadd213ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 0, 1, 0xAD, 0, true),
+            "vfnmadd213sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 1, 1, 0xAD, 1, true),
+            "vfnmadd231ss" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 0, 1, 0xBD, 0, true),
+            "vfnmadd231sd" if ops.len() == 3 => self.emit_asm_fma_3op(&ops[0], &ops[1], &ops[2], 1, 1, 0xBD, 1, true),
+
+            // === F16C (Half-precision ↔ Single-precision) ===
+            // vcvtph2ps xmm1, xmm2/m128 : VEX.128.66.0F38.W0 13 /r
+            "vcvtph2ps" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x13, 0),
+            // vcvtps2ph xmm1/m128, xmm2, imm8 : VEX.128.66.0F3A.W0 1D /r ib
+            "vcvtps2ph" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x1D, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Mem { disp, base, index, scale }) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_vex4_prefix(*s, *base, 3, 0, 0, 0, 1);
+                        self.emit(&[0x1D]);
+                        self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+                        self.emit(&[*imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: vcvtps2ph needs imm, reg, reg/mem, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+
+            // === AVX/AVX2 整数 SIMD (0F 38 / 0F 3A 映射) ===
+            // pshufb xmm1, xmm2/m128 : 66 0F 38 00 /r
+            "pshufb" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x00, 0),
+            // pshufd xmm1, xmm2/m128, imm8 : 66 0F 70 /r ib
+            "pshufd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 1);
+                        self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pshufd needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "pshufhw" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 3);
+                        self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pshufhw needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "pshuflw" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 2);
+                        self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pshuflw needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // pmulhrsw xmm1, xmm2/m128 : 66 0F 38 0B /r
+            "pmulhrsw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x0B, 0),
+            // pmaddubsw xmm1, xmm2/m128 : 66 0F 38 04 /r
+            "pmaddubsw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x04, 0),
+            // pabsb/pabsw/pabsd : 66 0F 38 1C/1D/1E /r
+            "pabsb" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x1C, 0),
+            "pabsw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x1D, 0),
+            "pabsd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x1E, 0),
+            // palignr xmm1, xmm2/m128, imm8 : 66 0F 3A 0F /r ib
+            "palignr" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x0F, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: palignr needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // pblendw xmm1, xmm2/m128, imm8 : 66 0F 3A 0E /r ib
+            "pblendw" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x0E, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pblendw needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // phminposuw xmm1, xmm2/m128, imm8 : 66 0F 38 41 /r ib
+            "phminposuw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x41, 0),
+            // pmuldq xmm1, xmm2/m128 : 66 0F 38 28 /r
+            "pmuldq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x28, 0),
+            // pmulld xmm1, xmm2/m128 : 66 0F 38 40 /r
+            "pmulld" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x40, 0),
+            // pmuludq xmm1, xmm2/m128 : 66 0F F4 /r
+            "pmuludq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 1, 0xF4, 0),
+            // pminub/pmaxub/pminuw/pmaxuw/pminsb/pmaxsb/pminud/pmaxud/pminsd/pmaxsd
+            // 66 0F DA/DE/D8/DC/38/3C/3B/3F/39/3D
+            "pminub" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 1, 0xDA, 0),
+            "pmaxub" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 1, 0xDE, 0),
+            "pminuw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 1, 0xD8, 0),
+            "pmaxuw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 1, 0xDC, 0),
+            "pminsb" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x38, 0),
+            "pmaxsb" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x3C, 0),
+            "pminud" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x3B, 0),
+            "pmaxud" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x3F, 0),
+            "pminsd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x39, 0),
+            "pmaxsd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x3D, 0),
+            // pcmpeqq/pcmpgtq : 66 0F 38 29/37 /r
+            "pcmpeqq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x29, 0),
+            "pcmpgtq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x37, 0),
+            // pinsrb/pinsrd/pinsrq : 66 0F 3A 20/22/21 /r ib
+            "pinsrb" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x20, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pinsrb needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "pinsrd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x22, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pinsrd needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "pinsrq" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 1, 0, 0, 1);
+                        self.emit(&[0x22, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pinsrq needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // pextrb/pextrd/pextrq : 66 0F 3A 14/16/15 /r ib
+            "pextrb" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*s, *d, 3, 0, 0, 0, 1);
+                        self.emit(&[0x14, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pextrb needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "pextrd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*s, *d, 3, 0, 0, 0, 1);
+                        self.emit(&[0x16, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pextrd needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "pextrq" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*s, *d, 3, 1, 0, 0, 1);
+                        self.emit(&[0x16, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: pextrq needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // extractps : 66 0F 3A 17 /r ib
+            "extractps" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*s, *d, 3, 0, 0, 0, 1);
+                        self.emit(&[0x17, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: extractps needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // insertps xmm1, xmm2/m128, imm8 : 66 0F 3A 21 /r ib
+            "insertps" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x21, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else {
+                    eprintln!("warning: insertps needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // pmovsxbw / pmovsxbd / pmovsxbq / pmovsxwd / pmovsxwq / pmovsxdq
+            // pmovzxbw / pmovzxbd / pmovzxbq / pmovzxwd / pmovzxwq / pmovzxdq
+            // 66 0F 38 20-25 (sx) / 30-35 (zx)
+            "pmovsxbw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x20, 0),
+            "pmovsxbd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x21, 0),
+            "pmovsxbq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x22, 0),
+            "pmovsxwd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x23, 0),
+            "pmovsxwq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x24, 0),
+            "pmovsxdq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x25, 0),
+            "pmovzxbw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x30, 0),
+            "pmovzxbd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x31, 0),
+            "pmovzxbq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x32, 0),
+            "pmovzxwd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x33, 0),
+            "pmovzxwq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x34, 0),
+            "pmovzxdq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x35, 0),
+            // pcmpestri/pcmpestrm/pcmpistri/pcmpistrm 复杂指令, 此处仅预留 nop
+            // roundps/roundpd/roundss/roundsd : 66 0F 3A 08/09/0A/0B /r ib
+            "roundps" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x08, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "roundpd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x09, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "roundss" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x0A, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "roundsd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x0B, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+
+            // === AVX/AVX2 浮点与整数 3 操作数 ===
+            // vaddps/vaddpd/vmulps/vmulpd/vsubps/vsubpd/vdivps/vdivpd/vminps/vmaxps
+            // VEX.NDS.128/256.0F 58/59/5C/5D/5E/5F/5E(vdiv)/5D(vdiv)
+            "vaddps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x58, 0, false),
+            "vaddpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x58, 0, false),
+            "vmulps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x59, 0, false),
+            "vmulpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x59, 0, false),
+            "vsubps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x5C, 0, false),
+            "vsubpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x5C, 0, false),
+            "vdivps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x5E, 0, false),
+            "vdivpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x5E, 0, false),
+            "vminps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x5D, 0, false),
+            "vmaxps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x5F, 0, false),
+            "vminpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x5D, 0, false),
+            "vmaxpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x5F, 0, false),
+            "vsqrtps" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 1, 0x51, 0),
+            "vsqrtpd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 1, 0, 1, 0x51, 0),
+            "vandps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x54, 0, false),
+            "vandpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x54, 0, false),
+            "vorps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x56, 0, false),
+            "vorpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x56, 0, false),
+            "vxorps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x57, 0, false),
+            "vxorpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x57, 0, false),
+            // vaddss/vaddsd/vmulss/vmulsd/vsubss/vsubsd/vdivss/vdivsd/vminss/vmaxss
+            // F3 0F 58/F2 0F 58/F3 0F 59/F2 0F 59/F3 0F 5C/F2 0F 5C/F3 0F 5E/F2 0F 5E/F3 0F 5D/F2 0F 5D/F3 0F 5F/F2 0F 5F
+            "vaddss" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x58, 2, true),
+            "vaddsd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x58, 3, true),
+            "vmulss" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x59, 2, true),
+            "vmulsd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x59, 3, true),
+            "vsubss" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x5C, 2, true),
+            "vsubsd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x5C, 3, true),
+            "vdivss" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x5E, 2, true),
+            "vdivsd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x5E, 3, true),
+            "vminss" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x5D, 2, true),
+            "vmaxss" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x5F, 2, true),
+            "vminsd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x5D, 3, true),
+            "vmaxsd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x5F, 3, true),
+            "vsqrtss" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 2, 1, 0x51, 0),
+            "vsqrtsd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 3, 1, 0x51, 0),
+            // vblendps/vblendpd : 66 0F 3A 0C/0D /r ib
+            // AT&T: vblendps $imm, src, dst (3 ops)
+            "vblendps" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x0C, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vblendpd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                        self.emit(&[0x0D, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            // vshufps : 0F C6 /r ib ; vshufpd : 66 0F C6 /r ib
+            // AT&T: vshufps $imm, src, dst (3 ops)
+            "vshufps" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, *s, 0, 0);
+                        self.emit(&[0xC6, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vshufpd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, *s, 0, 1);
+                        self.emit(&[0xC6, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            // vunpcklps/vunpckhps : 0F 14/15 /r
+            "vunpcklps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x14, 0, false),
+            "vunpckhps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x15, 0, false),
+            "vunpcklpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x14, 0, false),
+            "vunpckhpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x15, 0, false),
+            // vunpck*ps/pd 2-op form: AT&T `vunpcklps src, dst` 等价于 `dst = unpack_low(dst, src)`
+            // Intel 编码: vvvv = dst (modrm.reg = dst, modrm.rm = src)
+            "vunpcklps" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, *d, 0, 0);
+                        self.emit(&[0x14, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vunpckhps" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, *d, 0, 0);
+                        self.emit(&[0x15, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vunpcklpd" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, *d, 0, 1);
+                        self.emit(&[0x14, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vunpckhpd" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, *d, 0, 1);
+                        self.emit(&[0x15, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            // vpermilps/vpermilpd : 0F 38 0C/0D /r (reg-reg-reg 3-op)
+            "vpermilps" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 0, 0x0C, 2, false),
+            "vpermilpd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x0D, 2, false),
+            // vbroadcastss : 66 0F 38 18 /r (3-op 形式)
+            "vbroadcastss" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 2, 0x18, 0),
+            // vbroadcastsd : VEX.256.66.0F38.W0 19 /r
+            "vbroadcastsd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 1, 1, 2, 0x19, 0),
+            // vbroadcasti128 : VEX.256.66.0F38.W0 5A /r
+            "vbroadcasti128" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 1, 1, 2, 0x5A, 0),
+            // vperm2f128/vperm2i128 : 66 0F 3A 06/46 /r ib
+            "vperm2f128" if ops.len() == 4 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds), _) = (&ops[0], &ops[1], &ops[2], &ops[3]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 1, 1);
+                        self.emit(&[0x06, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vperm2i128" if ops.len() == 4 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds), _) = (&ops[0], &ops[1], &ops[2], &ops[3]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 1, 1);
+                        self.emit(&[0x46, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            // vinsertf128/vinserti128 : 66 0F 3A 18/38 /r ib
+            "vinsertf128" if ops.len() == 4 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds), _) = (&ops[0], &ops[1], &ops[2], &ops[3]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 1, 1);
+                        self.emit(&[0x18, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vinserti128" if ops.len() == 4 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds), _) = (&ops[0], &ops[1], &ops[2], &ops[3]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 1, 1);
+                        self.emit(&[0x38, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            // vextractf128/vextracti128 : 66 0F 3A 19/39 /r ib
+            "vextractf128" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*s, *d, 3, 0, 0, 1, 1);
+                        self.emit(&[0x19, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vextracti128" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex4_prefix(*s, *d, 3, 0, 0, 1, 1);
+                        self.emit(&[0x39, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+
+            // === AVX/AVX2 整数 SIMD ===
+            "vpaddb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xFC, 0, false),
+            "vpaddw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xFD, 0, false),
+            "vpaddd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xFE, 0, false),
+            "vpaddq" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xD4, 0, false),
+            "vpsubb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xF8, 0, false),
+            "vpsubw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xF9, 0, false),
+            "vpsubd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xFA, 0, false),
+            "vpsubq" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xFB, 0, false),
+            "vpmullw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xD5, 0, false),
+            "vpmulld" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x40, 2, false),
+            "vpand" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xDB, 0, false),
+            "vpandn" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xDF, 0, false),
+            "vpor" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xEB, 0, false),
+            "vpxor" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xEF, 0, false),
+            "vpcmpeqb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x74, 0, false),
+            "vpcmpeqw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x75, 0, false),
+            "vpcmpeqd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x76, 0, false),
+            "vpcmpgtb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x64, 0, false),
+            "vpcmpgtw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x65, 0, false),
+            "vpcmpgtd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x66, 0, false),
+            "vpshufd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 && *ds == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 1);
+                        self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vpshufb" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 2, 0x00, 0),
+            "vpminub" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xDA, 0, false),
+            "vpmaxub" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xDE, 0, false),
+            "vpminuw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xD8, 0, false),
+            "vpmaxuw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xDC, 0, false),
+            "vpminsb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x38, 2, false),
+            "vpmaxsb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x3C, 2, false),
+            "vpminsd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x39, 2, false),
+            "vpmaxsd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x3D, 2, false),
+            "vpminud" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x3B, 2, false),
+            "vpmaxud" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x3F, 2, false),
+            "vpmuldq" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x28, 2, false),
+            "vpmuludq" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xF4, 0, false),
+            "vpmulhrsw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x0B, 2, false),
+            "vpabsb" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 2, 0x1C, 0),
+            "vpabsw" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 2, 0x1D, 0),
+            "vpabsd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 2, 0x1E, 0),
+            "vpaddusb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xDC, 2, false),
+            "vpaddsb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xEC, 2, false),
+            "vpsubusb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xD8, 2, false),
+            "vpsubsb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xE8, 2, false),
+            "vpsignb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x08, 2, false),
+            "vpsignw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x09, 2, false),
+            "vpsignd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x0A, 2, false),
+            "vphaddw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x01, 2, false),
+            "vphaddd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x02, 2, false),
+            "vphaddsw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x03, 2, false),
+            "vphsubw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x05, 2, false),
+            "vphsubd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x06, 2, false),
+            "vphsubsw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x07, 2, false),
+            "vpmaddwd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xF5, 0, false),
+            "vpmaddubsw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x04, 2, false),
+            "vpavgb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xE0, 2, false),
+            "vpavgw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0xE3, 2, false),
+            "vpacksswb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x63, 0, false),
+            "vpackssdw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x6B, 0, false),
+            "vpackuswb" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x67, 0, false),
+            "vpackusdw" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x2B, 2, false),
+            "vpcmpeqq" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x29, 2, false),
+            "vpcmpgtq" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x37, 2, false),
+
+            // === AVX mov 指令 (256-bit) ===
+            "vmovaps" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 1, 0x28, 0),
+            "vmovapd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 1, 0x28, 0),
+            "vmovups" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 1, 0x10, 0),
+            "vmovupd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 1, 0x10, 0),
+            "vmovdqa" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 1, 0x6F, 0),
+            "vmovdqu" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 2, 1, 0x6F, 0),
+            "vmovdqa32" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 1, 0x6F, 0),
+            "vmovdqu32" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 2, 1, 0x6F, 0),
+            "vmovdqa64" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 1, 0x6F, 1),
+            "vmovdqu64" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 2, 1, 0x6F, 1),
+
+            // vzeroupper / vzeroall : 0F 77 (vex.128.0F)
+            "vzeroupper" => self.emit(&[0xC5, 0xF8, 0x77]),
+            "vzeroall" => self.emit(&[0xC5, 0xFC, 0x77]),
+
+            // vpmovmskb : 0F D7 /r (vex.128/256.0F D7)
+            "vpmovmskb" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, _)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 1);
+                        self.emit(&[0xD7, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            // vmovmskps : 0F 50 /r ; vmovmskpd : 66 0F 50 /r
+            "vmovmskps" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, _)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 0);
+                        self.emit(&[0x50, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vmovmskpd" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, _)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 1);
+                        self.emit(&[0x50, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+
+            // vcvtps2pd / vcvtpd2ps : VEX.256/128
+            "vcvtps2pd" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 1, 0x5A, 0),
+            "vcvtpd2ps" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 1, 0x5A, 0),
+            "vcvtss2si" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, _)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 2);
+                        self.emit(&[0x2D, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vcvtsd2si" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, _)) = (&ops[0], &ops[1]) {
+                    if *ss == 128 {
+                        self.emit_vex3_prefix(*d, 0, 0, 3);
+                        self.emit(&[0x2D, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vcvtsi2ss" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, ds), AsmOperand::Reg(_, _)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ds == 128 {
+                        self.emit_vex3_prefix(*d, *s, 0, 2);
+                        self.emit(&[0x2A, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+            "vcvtsi2sd" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, ds), AsmOperand::Reg(_, _)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ds == 128 {
+                        self.emit_vex3_prefix(*d, *s, 0, 3);
+                        self.emit(&[0x2A, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+
+            // === AVX-VNNI (VEX 形式 0F 38 /r) ===
+            // vpdpbusd : 66 0F 38 50 /r ; vpdpbssd : 66 0F 38 51 /r ; vpdpwssd : 66 0F 38 52 /r
+            "vpdpbusd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x50, 2, false),
+            "vpdpbssd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x51, 2, false),
+            "vpdpwssd" if ops.len() == 3 => self.emit_asm_vex_3op_imm8_check(&ops[0], &ops[1], &ops[2], 1, 0x52, 2, false),
+
+            // === AMX (Advanced Matrix Extensions) — Tile 指令 ===
+            // ldtilecfg : VEX.128.0F38.W0 49 /r (mem)
+            "ldtilecfg" if ops.len() == 1 => self.emit_asm_vex_2op(&AsmOperand::None, &ops[0], 0, 0, 2, 0x49, 0),
+            // sttilecfg : VEX.128.0F38.W0 4B /r (mem)
+            "sttilecfg" if ops.len() == 1 => self.emit_asm_vex_2op(&ops[0], &AsmOperand::None, 0, 0, 2, 0x4B, 0),
+            // tilezero tmm1 : VEX.128.F2.0F38.W0 49 /r (reg)
+            "tilezero" if ops.len() == 1 => {
+                if let AsmOperand::Reg(d, _) = &ops[0] {
+                    self.emit(&[0xC4, 0xE2, 0x7B, 0x49, 0xC0 | (d & 7)]);
+                } else { self.emit(&[0x90]); }
+            }
+            // tileloadd tmm1, sibmem : VEX.128.F2.0F38.W0 4B /r
+            "tileloadd" if ops.len() == 2 => {
+                if let (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0xC4, 0xE2, 0x7B, 0x4B]);
+                    self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                } else { self.emit(&[0x90]); }
+            }
+            // tilestored sibmem, tmm1 : VEX.128.F3.0F38.W0 4B /r
+            "tilestored" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) = (&ops[0], &ops[1]) {
+                    self.emit(&[0xC4, 0xE2, 0x7A, 0x4B]);
+                    self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+                } else { self.emit(&[0x90]); }
+            }
+            // tdpbssd tmm1, tmm2, tmm3 : VEX.128.F2.0F38.W0 5E /r
+            "tdpbssd" if ops.len() == 3 => self.emit_asm_amx_3op(&ops[0], &ops[1], &ops[2], 0x5E, 2),
+            "tdpbusd" if ops.len() == 3 => self.emit_asm_amx_3op(&ops[0], &ops[1], &ops[2], 0x5E, 0),
+            "tdpbuud" if ops.len() == 3 => self.emit_asm_amx_3op(&ops[0], &ops[1], &ops[2], 0x5E, 1),
+            "tdpbf16ps" if ops.len() == 3 => self.emit_asm_amx_3op(&ops[0], &ops[1], &ops[2], 0x5F, 2),
+
+            // === AVX-512 简化版 (无 mask / 无 broadcast) ===
+            // vmovdqu32 (zmm) : 0F 6F (map=1, w=0) ; vmovdqu64 : 0F 6F (w=1)
+            "vmovdqu32_z" if ops.len() == 2 => self.emit_asm_evex_2op(&ops[0], &ops[1], 512, 2, 1, 0x6F, 0),
+            "vmovdqu64_z" if ops.len() == 2 => self.emit_asm_evex_2op(&ops[0], &ops[1], 512, 2, 1, 0x6F, 1),
+            "vmovdqa32_z" if ops.len() == 2 => self.emit_asm_evex_2op(&ops[0], &ops[1], 512, 1, 1, 0x6F, 0),
+            "vmovdqa64_z" if ops.len() == 2 => self.emit_asm_evex_2op(&ops[0], &ops[1], 512, 1, 1, 0x6F, 1),
+            // vaddps zmm : 0F 58 (map=1, w=0)
+            "vaddps_z" if ops.len() == 3 => self.emit_asm_evex_3op_reg(
+                if let AsmOperand::Reg(d, _) = &ops[0] { *d } else { 0 },
+                if let AsmOperand::Reg(s, _) = &ops[1] { *s } else { 0 },
+                if let AsmOperand::Reg(s, _) = &ops[2] { *s } else { 0 },
+                512, 0, 1, 0x58, 0),
+            "vmulps_z" if ops.len() == 3 => self.emit_asm_evex_3op_reg(
+                if let AsmOperand::Reg(d, _) = &ops[0] { *d } else { 0 },
+                if let AsmOperand::Reg(s, _) = &ops[1] { *s } else { 0 },
+                if let AsmOperand::Reg(s, _) = &ops[2] { *s } else { 0 },
+                512, 0, 1, 0x59, 0),
+
+            // === Mask 寄存器 (k0-k7) 操作 ===
+            // kmovw : VEX.128.0F (k1, k2)
+            // 简化版: 假设 REX 编码: 仅支持 reg-reg 和 reg-mem
+            "kmovw" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1]) {
+                    if *ss <= 16 && *ds <= 16 {
+                        // 0F 90 /r (vex.L0.0F.W0)
+                        self.emit_vex3_prefix(*d, 0, 0, 0);
+                        self.emit(&[0x90, Self::modrm_reg_reg(*d, *s)]);
+                    }
+                } else { self.emit(&[0x90]); }
+            }
+
+            // crc32 : F2 0F 38 F0/F1 /r
+            "crc32b" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 0, 0xF0, 0),  // F2 0F 38 F0
+            "crc32w" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 1, 0, 0xF1, 0),  // 66 0F 38 F1
+            "crc32l" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 0, 0xF1, 0),  // F2 0F 38 F1
+            "crc32q" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 0, 0xF1, 1),  // F2 0F 38 F1 + REX.W
 
             // 未识别指令: 警告 + nop 占位
             _ => {
@@ -10076,6 +10873,316 @@ impl Codegen {
             eprintln!("warning: unsupported movnt operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
+    }
+
+    // === VEX / EVEX 前缀编码辅助 ===
+    // VEX 3 字节前缀 (C5): 0F 映射
+    // VEX 4 字节前缀 (C4): 0F38/0F3A 映射
+    // EVEX 4 字节前缀 (62): AVX-512 (含 mask / broadcast / 32-bit disp8)
+
+    /// 发射 3 字节 VEX 前缀 (C5 形式) — 用于 0F 主映射指令
+    /// r: 目标寄存器号 (0-15)
+    /// v: vvvv 字段 (0-15), 内部反码
+    /// l: L 位 (0=128-bit xmm, 1=256-bit ymm)
+    /// pp: 前缀 0=none, 1=66, 2=F3, 3=F2
+    fn emit_vex3_prefix(&mut self, r: u8, v: u8, l: u8, pp: u8) {
+        let r_inv = if r >= 8 { 0u8 } else { 1u8 };
+        let v_inv = (!v) & 0x0F;
+        self.emit(&[0xC5, (r_inv << 7) | (v_inv << 3) | (l << 2) | pp]);
+    }
+
+    /// 发射 4 字节 VEX 前缀 (C4 形式) — 用于 0F38/0F3A 主映射指令
+    /// r: 目标寄存器号 (0-15)
+    /// b: rm/base 寄存器号 (0-15)
+    /// map: 1=0F, 2=0F38, 3=0F3A
+    /// w: W 位 (0/1)
+    /// v: vvvv 字段 (0-15)
+    /// l: L 位
+    /// pp: 前缀
+    fn emit_vex4_prefix(&mut self, r: u8, b: u8, map: u8, w: u8, v: u8, l: u8, pp: u8) {
+        let r_inv = if r >= 8 { 0u8 } else { 1u8 };
+        let b_inv = if b >= 8 { 0u8 } else { 1u8 };
+        let v_inv = (!v) & 0x0F;
+        self.emit(&[0xC4,
+            (r_inv << 7) | (1u8 << 6) | (b_inv << 5) | (map & 0x1F),
+            (w << 7) | (v_inv << 3) | (l << 2) | (pp & 0x03),
+        ]);
+    }
+
+    /// 发射 3 操作数 VEX 指令 (reg-reg-reg):  v<op> dst, src1, src2
+    /// map: 1=0F (3 字节前缀), 2=0F38 / 3=0F3A (4 字节前缀)
+    fn emit_asm_vex_3op_reg(&mut self, dst: u8, src1: u8, src2: u8, l: u8, pp: u8,
+                             map: u8, opcode: u8, w: u8) {
+        if map == 1 {
+            self.emit_vex3_prefix(dst, src1, l, pp);
+        } else {
+            self.emit_vex4_prefix(dst, src2, map, w, src1, l, pp);
+        }
+        self.emit(&[opcode, Self::modrm_reg_reg(dst, src2)]);
+    }
+
+    /// 发射 3 操作数 VEX 指令 (reg-reg-mem):  v<op> dst, src1, [src2]
+    /// map: 1=0F, 2=0F38, 3=0F3A
+    fn emit_asm_vex_3op_mem(&mut self, dst: u8, src1: u8, disp: i32, base: u8,
+                             index: Option<u8>, scale: u8, l: u8, pp: u8,
+                             map: u8, opcode: u8, w: u8) {
+        if map == 1 {
+            self.emit_vex3_prefix(dst, src1, l, pp);
+        } else {
+            self.emit_vex4_prefix(dst, base, map, w, src1, l, pp);
+        }
+        self.emit(&[opcode]);
+        self.emit_asm_modrm_mem_only(dst, disp, base, index, scale);
+    }
+
+    /// 发射 3 操作数 VEX 指令 (reg-reg-reg + imm8):  v<op> dst, src1, src2, imm8
+    /// 用于 0F3A 映射 (imm8 是必需的)
+    fn emit_asm_vex_3op_imm8(&mut self, dst: u8, src1: u8, src2: u8, imm8: u8,
+                              l: u8, pp: u8, map: u8, opcode: u8, w: u8) {
+        if map == 1 {
+            self.emit_vex3_prefix(dst, src1, l, pp);
+        } else {
+            self.emit_vex4_prefix(dst, src2, map, w, src1, l, pp);
+        }
+        self.emit(&[opcode, Self::modrm_reg_reg(dst, src2), imm8]);
+    }
+
+    /// 3 操作数 VEX 指令 (reg-mem-reg):  v<op> dst, [src1], src2
+    /// 用于 FMA 等 dst 在 modrm.reg 但源是 [mem]+reg 形式
+    fn emit_asm_vex_3op_mem_src2(&mut self, dst: u8, src1_disp: i32, src1_base: u8,
+                                  src1_index: Option<u8>, src1_scale: u8,
+                                  src2: u8, l: u8, pp: u8, map: u8, opcode: u8, w: u8) {
+        if map == 1 {
+            self.emit_vex3_prefix(dst, src2, l, pp);
+        } else {
+            self.emit_vex4_prefix(dst, src1_base, map, w, src2, l, pp);
+        }
+        self.emit(&[opcode]);
+        self.emit_asm_modrm_mem_only(dst, src1_disp, src1_base, src1_index, src1_scale);
+    }
+
+    /// 3 操作数 VEX 指令，兼顾 reg-reg-reg 和 reg-mem-reg (与 gcc 行为一致)
+    /// 操作数按 AT&T 顺序: (src1, src2, dst) — 也就是 `vaddps src1, src2, dst`
+    /// `pp` 同时支持 F2/F3 前缀 (标量单精度/双精度)
+    /// `is_scalar` 标志 2 操作数 (ss/sd) 强制走 0F 映射 (3 字节前缀)
+    fn emit_asm_vex_3op_imm8_check(&mut self, src1: &AsmOperand, src2: &AsmOperand,
+                                    dst: &AsmOperand, pp: u8, opcode: u8, map: u8, _is_scalar: bool) {
+        // AT&T 顺序: src1 在 vvvv, src2/m 在 modrm.rm, dst 在 modrm.reg
+        let (d, s1) = match (dst, src1) {
+            (AsmOperand::Reg(d, ds), AsmOperand::Reg(s, ss)) if *ds >= 128 && *ss >= 128 => (*d, *s),
+            _ => { eprintln!("warning: unsupported VEX 3-op reg-reg pattern, emitted as nop"); self.emit(&[0x90]); return; }
+        };
+        match src2 {
+            AsmOperand::Reg(s2, sz2) if *sz2 >= 128 => {
+                self.emit_asm_vex_3op_reg(d, s1, *s2, 0, pp, map, opcode, 0);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit_asm_vex_3op_mem(d, s1, *disp, *base, *index, *scale, 0, pp, map, opcode, 0);
+            }
+            _ => { eprintln!("warning: unsupported VEX 3-op src2 pattern, emitted as nop"); self.emit(&[0x90]); }
+        }
+    }
+
+    /// FMA 4 操作数编码:  vfmadd123ss a, b, c  ≡  a = a * b + c
+    /// AT&T 顺序: src1 (in vvvv), src2/m (in modrm.rm), dst (in modrm.reg)
+    /// dst 在第一个位置, 故 modrm.reg = dst.
+    /// 第二个 AT&T 操作数 (src1) 进入 vvvv 字段, 第三个 (src2/m) 进入 modrm.rm
+    fn emit_asm_fma_3op(&mut self, src1: &AsmOperand, src2: &AsmOperand, dst: &AsmOperand,
+                         l: u8, pp: u8, opcode: u8, w: u8, _is_scalar: bool) {
+        let (d, s1) = match (dst, src1) {
+            (AsmOperand::Reg(d, ds), AsmOperand::Reg(s, ss)) if *ds >= 128 && *ss >= 128 => (*d, *s),
+            _ => { eprintln!("warning: unsupported FMA dst/src1 pattern, emitted as nop"); self.emit(&[0x90]); return; }
+        };
+        match src2 {
+            AsmOperand::Reg(s2, sz2) if *sz2 >= 128 => {
+                // reg-reg-reg
+                self.emit_vex4_prefix(d, *s2, 2, w, s1, l, pp);
+                self.emit(&[opcode, Self::modrm_reg_reg(d, *s2)]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                // reg-reg-mem
+                self.emit_vex4_prefix(d, *base, 2, w, s1, l, pp);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(d, *disp, *base, *index, *scale);
+            }
+            _ => { eprintln!("warning: unsupported FMA src2 pattern, emitted as nop"); self.emit(&[0x90]); }
+        }
+    }
+
+    /// AMX 3 操作数 tdp* 编码:  tdp* dst, src1, src2
+    /// VEX.NDS.128.0F38.W0 5E /r 或 5F /r
+    /// pp: 0 (none) / 1 (66) / 2 (F3) / 3 (F2)
+    fn emit_asm_amx_3op(&mut self, dst: &AsmOperand, src1: &AsmOperand, src2: &AsmOperand,
+                        opcode: u8, pp: u8) {
+        let (d, s1, s2) = match (dst, src1, src2) {
+            (AsmOperand::Reg(d, _), AsmOperand::Reg(s, _), AsmOperand::Reg(t, _)) => (*d, *s, *t),
+            _ => { eprintln!("warning: AMX tdp* needs tmm regs, emitted as nop"); self.emit(&[0x90]); return; }
+        };
+        self.emit_vex4_prefix(d, s2, 2, 0, s1, 0, pp);
+        self.emit(&[opcode, Self::modrm_reg_reg(d, s2)]);
+    }
+
+    /// 通用 VEX 2 操作数 (reg-reg / reg-mem) — 用于 vmovaps/vmovdqa/vmovdqu 等
+    /// map: 1=0F, 2=0F38, 3=0F3A
+    fn emit_asm_vex_2op(&mut self, src: &AsmOperand, dst: &AsmOperand, l: u8, pp: u8,
+                         map: u8, opcode: u8, w: u8) {
+        match (src, dst) {
+            (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) if *ss == 128 && *ds == 128 => {
+                if map == 1 {
+                    self.emit_vex3_prefix(*d, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*d, *s, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds)) if *ds == 128 => {
+                if map == 1 {
+                    self.emit_vex3_prefix(*d, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*d, *base, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Reg(s, ss), AsmOperand::Mem { disp, base, index, scale }) if *ss == 128 => {
+                if map == 1 {
+                    self.emit_vex3_prefix(*s, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*s, *base, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, ds)) if *ds == 128 => {
+                // VEX RIP-relative load: 走 mod=00 r/m=101 + disp32 (与标量 mov 一致)
+                if map == 1 {
+                    self.emit_vex3_prefix(*d, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*d, 0, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
+            (AsmOperand::Reg(s, ss), AsmOperand::SymDisp(sym, _)) if *ss == 128 => {
+                if map == 1 {
+                    self.emit_vex3_prefix(*s, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*s, 0, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode, 0x05 | ((s & 7) << 3), 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
+            // ldtilecfg / sttilecfg 形式: (None, Reg) 或 (Reg, None) — vvvv=0
+            (AsmOperand::None, AsmOperand::Reg(d, ds)) if *ds >= 128 => {
+                if map == 1 {
+                    self.emit_vex3_prefix(*d, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*d, 0, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode, Self::modrm_reg_reg(0, *d)]);
+            }
+            (AsmOperand::Reg(s, ss), AsmOperand::None) if *ss >= 128 => {
+                if map == 1 {
+                    self.emit_vex3_prefix(*s, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*s, 0, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode, Self::modrm_reg_reg(0, *s)]);
+            }
+            // crc32 类 GPR-GPR / GPR-Mem: 无 VEX 前缀, 0F 38 F0/F1 + ModR/M
+            // pp=0 → F2 (crc32b/crc32l/crc32q), pp=1 → 66 (crc32w); w=1 → REX.W (crc32q)
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) if pp <= 1 => {
+                let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
+                if w == 1 { self.emit(&[0x48]); }  // REX.W
+                self.emit(&[prefix, 0x0F, 0x38, opcode, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) if pp <= 1 => {
+                let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
+                if w == 1 { self.emit(&[0x48]); }  // REX.W
+                self.emit(&[prefix, 0x0F, 0x38, opcode]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) if pp <= 1 => {
+                let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
+                if w == 1 { self.emit(&[0x48]); }  // REX.W
+                self.emit(&[prefix, 0x0F, 0x38, opcode]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported vex 2-op operand pattern (l:{}, pp:{}, map:{}, opcode:0x{:02x}, w:{}), src:{:?}, dst:{:?}, emitted as nop", l, pp, map, opcode, w, src, dst);
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// 通用 VEX 1 操作数 (reg) — 用于 vzeroupper, vzeroall, vpmovmskb 等
+    fn emit_asm_vex_1op_reg(&mut self, dst: u8, l: u8, pp: u8, map: u8, opcode: u8) {
+        if map == 1 {
+            self.emit_vex3_prefix(dst, 0, l, pp);
+        } else {
+            self.emit_vex4_prefix(dst, 0, map, 0, 0, l, pp);
+        }
+        self.emit(&[opcode, Self::modrm_reg_reg(0, dst)]);
+    }
+
+    // === EVEX 编码辅助 (AVX-512) ===
+    // 简化版: 仅支持 32/64 位无掩码无广播的基本形式
+
+    /// 发射 EVEX 前缀 (62) — 简化版
+    /// r: dst reg (0-15 或 16-31 表示 zmm16-31)
+    /// b: rm/base reg (0-15)
+    /// map: 1=0F, 2=0F38, 3=0F3A
+    /// w: W 位
+    /// v: vvvv reg (0-15)
+    /// l: L'L (0=128, 1=256, 2=512)
+    /// pp: 前缀
+    /// mask: aaa 字段 (0=无掩码, 1-7=k1-k7)
+    fn emit_evex_prefix(&mut self, r: u8, b: u8, map: u8, w: u8, v: u8, l: u8, pp: u8, mask: u8) {
+        let r_inv = if r >= 8 { 0u8 } else { 1u8 };
+        let r2 = if r >= 16 { 0u8 } else { 1u8 };
+        let b_inv = if b >= 8 { 0u8 } else { 1u8 };
+        let v_inv = (!v) & 0x0F;
+        self.emit(&[0x62,
+            (r_inv << 7) | (1u8 << 6) | (b_inv << 5) | (r2 << 4) | (map & 0x0F),
+            (w << 7) | (v_inv << 3) | (1u8 << 2) | (pp & 0x03),
+            (0u8 << 7) | (l << 5) | (0u8 << 4) | (mask & 0x07),
+        ]);
+    }
+
+    /// 通用 EVEX 2 操作数 (无 mask / 无 broadcast)
+    fn emit_asm_evex_2op(&mut self, src: &AsmOperand, dst: &AsmOperand, l: u16, pp: u8,
+                          map: u8, opcode: u8, w: u8) {
+        let l_bits: u8 = if l >= 512 { 2u8 } else if l >= 256 { 1u8 } else { 0u8 };
+        match (src, dst) {
+            (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) if *ss >= 128 && *ds >= 128 => {
+                self.emit_evex_prefix(*d, *s, map, w, 0, l_bits, pp, 0);
+                self.emit(&[opcode, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds)) if *ds >= 128 => {
+                self.emit_evex_prefix(*d, *base, map, w, 0, l_bits, pp, 0);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Reg(s, ss), AsmOperand::Mem { disp, base, index, scale }) if *ss >= 128 => {
+                self.emit_evex_prefix(*s, *base, map, w, 0, l_bits, pp, 0);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported evex 2-op operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// 通用 EVEX 3 操作数 (reg-reg-reg):  v<op> dst, src1, src2
+    fn emit_asm_evex_3op_reg(&mut self, dst: u8, src1: u8, src2: u8, l: u16, pp: u8,
+                              map: u8, opcode: u8, w: u8) {
+        let l_bits: u8 = if l >= 512 { 2u8 } else if l >= 256 { 1u8 } else { 0u8 };
+        self.emit_evex_prefix(dst, src2, map, w, src1, l_bits, pp, 0);
+        self.emit(&[opcode, Self::modrm_reg_reg(dst, src2)]);
     }
 
 }

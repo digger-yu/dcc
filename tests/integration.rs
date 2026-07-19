@@ -1843,6 +1843,22 @@ fn asm_paravirt_boot_compiles_without_nop_fallback() {
     );
 }
 
+/// 完整指令子集 (M13): AVX/AVX2/AVX-VNNI + AES-NI/SHA + FMA/F16C + TSX + AMX
+#[test]
+fn asm_avx_aes_fma_tsx_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/asm_avx_aes_fma_tsx.c");
+    let (output, _obj) = run_object_test("asm-avx-aes-fma-tsx", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// __builtin_constant_p：编译期常量判定（含 __int128 表达式）
 #[test]
 fn builtin_constant_p_full_run_returns_zero() {

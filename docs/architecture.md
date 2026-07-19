@@ -527,6 +527,86 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     without_nop_fallback` 在远程 192.168.148.128 上 PASS。
   - **降级**：未识别指令仍走 `eprintln! warning` + 单字节 0x90
     (`nop`) 占位；带行号和源位置信息以方便追踪（避免静默 nop）。
+- **M13 SIMD 指令子集补全（高）** — 完整实装 x86_64 SIMD 指令子集，
+  覆盖加密/科学计算/机器学习等场景的内联汇编：
+  - **VEX 编码基础设施**：新增 `emit_vex3_prefix` (C5)、`emit_vex4_prefix` (C4)
+    通用前缀编码；`emit_asm_vex_3op_reg` / `_mem` / `_imm8` / `_imm8_check` 等
+    通用 helper；AT&T 顺序 `(src1, src2, dst)` 与 imm-first 顺序 `(Imm, Reg, Reg)`
+    在 helper 内部自动重排，编码符合 Intel 规范。
+  - **EVEX 编码（AVX-512 简化）**：新增 `emit_evex_prefix` (62) 与
+    `emit_asm_evex_3op_reg` / `_2op`；当前覆盖 zmm 大小的 vmovdqu32/64、
+    vmovdqa32/64、vaddps/mulps 等基础路径；broadcast/mask/RC-SAES
+    全模式为后续工作。
+  - **SSE3/SSSE3/SSE4.1/SSE4.2 整数 SIMD**：`pshufb`/`pshufd/hw/lw`、
+    `pmulhrsw`/`pmullw`/`pmulld`/`pmuludq`/`pmuldq`/`pmaddubsw`/
+    `pmaddwd`、`pabsb/w/d`、`palignr`、`pblendw`、`phminposuw`、
+    `pminub/uw/sb/ud/sd`、`pmaxub/uw/sb/ud/sd`、`pcmpeqq`、
+    `pcmpgtq`、`pinsrb/d/q`、`pextrb/d/q`、`extractps`、`insertps`、
+    `pmovsxbw/bd/bq/wd/wq/dq`、`pmovzxbw/bd/bq/wd/wq/dq`、
+    `roundps/pd/ss/sd`、`crc32b/w/l/q`。
+  - **AVX/AVX2 浮点**：`vaddps`/`vaddpd`/`vmulps`/`vmulpd`/`vsubps`/
+    `vsubpd`/`vdivps`/`vdivpd`/`vminps`/`vmaxps`/`vminpd`/`vmaxpd`/
+    `vsqrtps`/`vsqrtpd`/`vandps`/`vandpd`/`vorps`/`vorpd`/`vxorps`/
+    `vxorpd`、`vaddss/sd`/`vmulss/sd`/`vsubss/sd`/`vdivss/sd`/
+    `vminss/maxss/minsd/maxsd`/`vsqrtss/sd`、`vshufps/pd`、
+    `vunpcklps/hps/lpd/hpd`、`vpermilps/pd`、`vbroadcastss/sd`/
+    `i128`、`vblendps/pd`、`vperm2f128/i128`、`vinsertf128/i128`、
+    `vextractf128/i128`。
+  - **AVX/AVX2 整数**：`vpaddb/w/d/q`/`vpsubb/w/d/q`/`vpmullw`/
+    `vpmulld`/`vpand`/`vpandn`/`vpor`/`vpxor`/`vpcmpeqb/w/d/q`/
+    `vpcmpgtb/w/d/q`/`vpshufd`/`vpshufb`/`vpminub/uw/sb/ud/sd`/
+    `vpmaxub/uw/sb/ud/sd`/`vpmuldq`/`vpmuludq`/`vpmulhrsw`/
+    `vpabsb/w/d`/`vpaddusb/sb`/`vpsubusb`/`vpsignb/w/d`/
+    `vphaddw/d/sw`/`vphsubw/d/sw`/`vpmaddwd`/`vpmaddubsw`/
+    `vpavgb/w`/`vpacksswb/dw`/`vpackuswb/dw`。
+  - **AVX 移动与杂项**：`vmovaps`/`vmovapd`/`vmovups`/`vmovupd`/
+    `vmovdqa`/`vmovdqu`（含 128/256 位）、`vzeroupper`/`vzeroall`、
+    `vpmovmskb`/`vmovmskps`/`vmovmskpd`。
+  - **AVX 转换**：`vcvtps2pd`/`vcvtpd2ps`/`vcvtss2si`/`vcvtsd2si`/
+    `vcvtsi2ss`/`vcvtsi2sd`。
+  - **AES-NI**：`aesenc`/`aesenclast`/`aesdec`/`aesdeclast`/
+    `aesimc`/`aeskeygenassist`（66 0F 38 DC-DF/DB/DE/DF 全部实装）。
+  - **SHA**：`sha1rnds4`/`sha1nexte`/`sha1msg1`/`sha1msg2`/
+    `sha256rnds2`/`sha256msg1`/`sha256msg2`。
+  - **FMA 4 操作数（AVX/FMA）**：`vfmadd132/213/231 {ps,pd,ss,sd}`、
+    `vfmsub132/213/231 {ps,pd,ss,sd}`、`vfnmadd132/213/231 {ps,pd,ss,sd}`、
+    `vfnmsub132/213/231 {ps,pd,ss,sd}` 共 32 个变体；通过
+    `emit_asm_fma_3op` 通用 helper 编码，AT&T 顺序 `(src1, src2, dst)`
+    内部自动重排。
+  - **F16C**：`vcvtph2ps`（VEX.128.66.0F38 13 /r）、`vcvtps2ph`
+    （VEX.128.66.0F3A 1D /r ib）。
+  - **TSX（Restricted Transactional Memory）**：`xbegin` rel16
+    （C7 F8 rel16）、`xend`（0F 01 D5）、`xabort` imm8（C6 F8 ib）、
+    `xtest`（0F 01 D6）；含 gcc AT&T 风格的标签相对寻址。
+  - **AMX tile 指令**：`ldtilecfg`（VEX.128.0F38 49 /0）、
+    `sttilecfg`（VEX.128.0F38 49 /1）、`tilezero`（VEX.128.F2.0F38 49 /0）、
+    `tileloadd`（VEX.128.F2.0F38 4B /0）、`tilestored`（VEX.128.F3.0F38 4B /0）、
+    `tdpbssd`/`tdpbusd`/`tdpbuud`/`tdpbf16ps`（VEX.128.F2.0F38 5E/50/51/5C）。
+  - **AVX-VNNI（神经网络点积）**：`vpdpbusd`（VEX.128.66.0F38 50 /r）、
+    `vpdpbssd`（VEX.128.66.0F38 51 /r）、`vpdpwssd`（VEX.128.66.0F38 52 /r）。
+  - **Mask 寄存器（k0-k7）**：`kmovw`（0F 90 /r）基础路径实装。
+  - **movd/movq 增强**：SSE/MMX `movd`（66 0F 6E/7E）显式
+    dispatch；`movq` 走通用 `emit_asm_mov` (size=64)。
+  - **2 操作数 VEX 形式**：`vunpcklps/hps/lpd/hpd` 等支持 AT&T
+    2 操作数形式（src, dst），通过专用 helper 编码 vvvv=dst。
+  - **测试**：`tests/fixtures/asm_avx_aes_fma_tsx.c` 26+ 个用例
+    覆盖 AES-NI、SHA、FMA 132/213/231、F16C、AVX 浮点 3 操作数、
+    AVX 标量、AVX 整数 3 操作数、AVX 移动与杂项、AVX-VNNI、
+    SSE3/SSSE3/SSE4.1/SSE4.2、TSX、AVX 转换、AVX-512 zmm 编码、
+    256 位 vperm2f128/vinsertf128/vextractf128 等；每个函数只
+    测试一类指令子集（失败易定位）。
+    `asm_avx_aes_fma_tsx_compiles_without_nop_fallback` 在远程
+    192.168.148.128 上 PASS。
+  - **已知简化**：
+    - AVX-512 mask (`aaa`) / broadcast (`b`) / ER (`RC`/`RM`/`RD`/`RU`)
+      路由字段目前未区分（默认 000），适用于非掩码 / 非广播场景；
+      `vmovdqu32_z` 等占位编码可能与未来硬件需求不完全一致。
+    - 256 位 AVX 指令在 `(Reg, Reg)` arm 中以 `l: u8` 控制 VEX.L
+      位；后续可升级为 `l: u16` 统一 128/256/512。
+    - `vcvtsi2ss`/`vcvtsi2sd` GPR 源操作数（32 位 vs 64 位）当前
+      由 `w` 字段区分；GPR 内存源（cvt si2ss mem）未实装。
+  - **降级**：少数 AVX-512 复杂指令（`vfpclassps`/`vgetmants`/`vreduceps`
+    等）仍走 nop 警告；后续按需补全。
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
   局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（整数用 GP，
   浮点用标量 SSE，不用 XMM 向量指令）；
