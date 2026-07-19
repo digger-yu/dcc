@@ -51,7 +51,7 @@ pub struct Preprocessor {
     /// #pragma STDC FENV_ACCESS 状态
     pub fenv_access: bool,
     /// 收集在展开阶段遇到的 _Pragma 操作符, 待外层 &mut self 方法批量处理
-    pending_pragmas: RefCell<Vec<String>>,
+    pending_pragmas: RefCell<Vec<(String, u32)>>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -527,12 +527,12 @@ impl Preprocessor {
             }
         }
         // 把展开阶段累积的 _Pragma 字符串批量应用
-        // (顺序与源中出现顺序一致, 即 _Pragma(...) 在某一行后, 立即生效)
-        // 注意: 传递当前 out 的行数 (count_out_lines) 而非 self.cur_line,
-        // 因为 _Pragma 在输出中被吞掉, parser 看到的行号是输出行号.
-        let pending: Vec<String> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
-        for p in pending {
-            self.apply_pragma_string(&p, self.count_out_lines());
+        // 顺序与源中出现顺序一致; 行号用收集时记录的 out 行号,
+        // 这样 pack_history 与 parser 的 lex.line 严格对齐
+        let pending: Vec<(String, u32)> =
+            std::mem::take(&mut *self.pending_pragmas.borrow_mut());
+        for (p, line_no) in pending {
+            self.apply_pragma_string(&p, line_no);
         }
         src.clear();
     }
@@ -1520,8 +1520,9 @@ impl Preprocessor {
                             i = j;
                             // _Pragma 是 expr, 在展开阶段不能改状态。
                             // 我们把它的字符串收集起来, 待外层 &mut self 方法批量应用
+                            // 同时记录当前 out 的行号, 这样 pack_history 与 parser 的 lex.line 对齐
                             if let Ok(mut v) = self.pending_pragmas.try_borrow_mut() {
-                                v.push(pragma_text);
+                                v.push((pragma_text, self.count_out_lines()));
                             }
                             continue;
                         }
