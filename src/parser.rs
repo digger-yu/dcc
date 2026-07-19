@@ -1744,10 +1744,12 @@ impl<'a> Parser<'a> {
         }
         // struct/union/enum
         if self.cur.kind == TokKind::KwStruct || self.cur.kind == TokKind::KwUnion {
-            let is_u = self.cur.kind == TokKind::KwUnion; self.advance();
+            let is_u = self.cur.kind == TokKind::KwUnion;
+            // struct 关键字所在行, 用于查询 #pragma pack
+            let struct_line = self.cur.span.line;
+            self.advance();
             // struct __attribute__((__may_alias__)) name
             self.skip_attributes();
-            let struct_line = self.lex.line;  // struct 关键字所在行, 用于查询 #pragma pack
             let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
             if self.cur.kind == TokKind::LBrace {
                 self.advance(); let fields = self.parse_fields();

@@ -1287,9 +1287,27 @@ impl Preprocessor {
             }
         }
         // 记录到 pack_history, 供 parser 按位置查询
+        // out_line 是当前输出 (预处理后) 的行号, 与 parser 的 lex.line 对齐
         if self.pack_history.last().map(|(_, p)| *p) != Some(new_pack) {
-            self.pack_history.push((self.cur_line, new_pack));
+            // 计算当前输出已经写入的行数 (out_line 缓存)
+            let prev_last = self.pack_history.last().map(|(l, _)| *l).unwrap_or(0);
+            // 增量计算: 找到自上次记录以来 out 中新加的行
+            let current_out_line = self.count_out_lines();
+            // 只有当行号真正增加时才记录 (避免同一行多次)
+            if current_out_line > prev_last {
+                self.pack_history.push((current_out_line, new_pack));
+            }
         }
+    }
+
+    /// 计算 self.out 已写入的行数 (1-based)
+    fn count_out_lines(&self) -> u32 {
+        // 行数 = 换行符个数 + 1 (如果非空)
+        let mut n = 1u32;
+        for c in self.out.chars() {
+            if c == '\n' { n += 1; }
+        }
+        n
     }
 
     /// 公开接口: 获取当前 packing 对齐 (供 codegen struct 布局使用)
