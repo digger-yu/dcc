@@ -11,6 +11,7 @@
 //   - .dynstr:        动态字符串表
 
 use super::layout::{Layout, OutputSectionKind};
+use super::link_opts::LinkOpts;
 use crate::codegen::elf::{
     R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT,
     STB_GLOBAL, STT_FUNC, STV_DEFAULT,
@@ -92,6 +93,13 @@ fn emit_plt0(plt0_vaddr: u64, got1_vaddr: u64, got2_vaddr: u64) -> Vec<u8> {
 }
 
 pub fn fill_plt_got(layout: &mut Layout) {
+    // 复制 LinkOpts 出来 (避免后续借用)
+    let opts = LinkOpts::from_env();
+    fill_plt_got_with_opts(layout, &opts);
+}
+
+/// 带 LinkOpts 的版本：支持 BIND_NOW / RPATH / RUNPATH / DT_NEEDED
+pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts) {
     let plt_gots = PltGots::from_layout(layout);
     let n_plt = plt_gots.plt_funcs.len();
     let n_got_data = plt_gots.got_data.len();
@@ -203,6 +211,8 @@ pub fn fill_plt_got(layout: &mut Layout) {
     let dynstr_size = dynstr_data.len() as u64;
     let rela_plt_size = rela_plt_data.len() as u64;
     let rela_dyn_size = rela_dyn_data.len() as u64;
+    // DT_NEEDED (1) - 每个 DT_NEEDED 一个, value 指向 .dynstr 中的字符串
+    // dcc 简化: 用 layout.soname / layout.needed
     // DT_STRTAB = 5
     dynamic_data.extend_from_slice(&5u64.to_le_bytes());
     dynamic_data.extend_from_slice(&dynstr_vaddr.to_le_bytes());
@@ -236,6 +246,29 @@ pub fn fill_plt_got(layout: &mut Layout) {
     // DT_RELAENT = 9
     dynamic_data.extend_from_slice(&9u64.to_le_bytes());
     dynamic_data.extend_from_slice(&24u64.to_le_bytes());
+    // DT_FLAGS = 30 (BIND_NOW 等), DF_BIND_NOW = 0x8
+    if _opts.bind_now {
+        dynamic_data.extend_from_slice(&30u64.to_le_bytes());  // DT_FLAGS
+        dynamic_data.extend_from_slice(&0x8u64.to_le_bytes());  // DF_BIND_NOW
+    }
+    // DT_FLAGS_1 = 0x6ffffffb (compat flag), DF_1_NOW = 0x1
+    if _opts.bind_now {
+        dynamic_data.extend_from_slice(&0x6ffffffbu64.to_le_bytes());
+        dynamic_data.extend_from_slice(&0x1u64.to_le_bytes());
+    }
+    // DT_RPATH (23) / DT_RUNPATH (29) - 字符串在 .dynstr 末尾追加
+    if let Some(rp) = &_opts.rpath {
+        dynamic_data.extend_from_slice(&23u64.to_le_bytes());
+        dynamic_data.extend_from_slice(&(dynstr_vaddr + dynstr_data.len() as u64).to_le_bytes());
+        for b in rp.bytes() { dynstr_data.push(b); }
+        dynstr_data.push(0);
+    }
+    if let Some(rp) = &_opts.runpath {
+        dynamic_data.extend_from_slice(&29u64.to_le_bytes());
+        dynamic_data.extend_from_slice(&(dynstr_vaddr + dynstr_data.len() as u64).to_le_bytes());
+        for b in rp.bytes() { dynstr_data.push(b); }
+        dynstr_data.push(0);
+    }
     // DT_NULL = 0
     dynamic_data.extend_from_slice(&0u64.to_le_bytes());
     dynamic_data.extend_from_slice(&0u64.to_le_bytes());

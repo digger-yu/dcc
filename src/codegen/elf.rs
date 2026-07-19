@@ -26,6 +26,12 @@ pub const PT_GNU_STACK: u32 = 0x6474e551;
 pub const PT_GNU_RELRO: u32 = 0x6474e552;
 pub const PF_X: u32 = 1; pub const PF_W: u32 = 2; pub const PF_R: u32 = 4;
 
+/// Section header flag: section is retained by --gc-sections even if no
+/// explicit reference exists. Used by `__attribute__((retain))` and various
+/// metadata sections (`.init`, `.fini`, `.init_array`, `.fini_array`, ...).
+/// Defined by binutils since 2017; mirrors the constant in <elf.h>.
+pub const SHF_GNU_RETAIN: u32 = 0x200000;
+
 // 节类型
 pub const SHT_NULL: u32 = 0;
 pub const SHT_PROGBITS: u32 = 1;

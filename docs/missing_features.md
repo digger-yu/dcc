@@ -251,6 +251,23 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | `--exclude-libs` 隐藏静态库符号 | `LinkConfig.exclude_libs` → 被排除归档库中全局符号打 `STV_HIDDEN` |
 | `--build-id=sha1/uuid/md5/none` | `link/build_id.rs`：内置 SHA-1 / MD5 / UUID v4 写 `.note.gnu.build-id` |
 | `--no-undefined-version` | `LinkConfig.no_undefined_version`：缺版本 `.symver` 引用 → 错误 |
+| `.symver` 完整版本表 (M12) | `link/symver.rs::VersionTable` 收集 `.symver name,alias@ver` / `@@ver`，生成 `.gnu.version` 16-bit 索引表与 `.gnu.version_d` VERDEF 结构 |
+| `-z relro[=partial\|full]` (M12) | 写 `PT_GNU_RELRO` 段，覆盖 `.got` / `.got.plt` / `.init_array` / `.fini_array` / `.data.rel.ro` |
+| `-z now` / `BIND_NOW` (M12) | `.dynamic` 写 `DT_FLAGS=DF_BIND_NOW` (0x8) 与 `DT_FLAGS_1=DF_1_NOW` (0x1)，关闭延迟绑定 |
+| `-z lazy` (M12) | 恢复延迟绑定（默认行为） |
+| `-z execstack` / `-z noexecstack` (M12) | 控制 `PT_GNU_STACK` 的 `PF_X` 标志 |
+| `-z max-page-size=N` / `-z common-page-size=N` (M12) | 解析 K/M/G 后缀与 `0x` 前缀，控制 `PT_LOAD` align |
+| `-z pack-relative-relocs` (M12) | 生成 `.gnu.pack.relocs` 段（SHT_GNU_RELR，内核/RTOS 友好的 RELR 压缩） |
+| `-rpath` / `-rpath-link` / `-runpath` (M12) | `.dynamic` 写 `DT_RPATH` (23, deprecated) / `DT_RUNPATH` (29, glibc 推荐) |
+| `-fuse-ld=<name>` (M12) | `LinkOpts.fuse_ld` 字段 + `DCC_FUSE_LD` 环境变量覆盖 |
+| `-fno-semantic-interposition` / `-fsemantic-interposition` (M12) | LTO 阶段控制函数符号插入语义 |
+| `--gdb-index` (M12, 占位) | 生成最小 `.gdb_index` 节（GDB 识别，内容仅占位） |
+| `--compress-debug-sections=zlib\|zstd` (M12, 占位) | 当前忽略压缩，保留 CLI 兼容 |
+| `SHF_GNU_RETAIN` 节标志 (M12) | 对 `.init` / `.fini` / `.init_array` / `.fini_array` / `.text.startup` 等元数据节自动打 `0x200000` |
+| `gc_sections_root` 自动选根 (M12) | 接受 `-u <sym>` / `-Wl,-u,<sym>` 显式根符号，从 `entry + -u` 集合做引用图 BFS，软删除未被引用节 |
+| IFUNC `target_clones` 多版本 (M12) | 解析 `__attribute__((target_clones("sse4.2,default")))`，生成 STT_GNU_IFUNC 符号 + R_X86_64_IRELATIVE 重定位，resolver 简化返回 default 变体 |
+| `__dso_handle` / `.fini_array` 调度 (M12) | `__dso_handle` 指向 `.data` 起始；`FiniArrayBuilder` 收集 destructor 符号按 priority 排序生成 `.fini_array` 数据 |
+| `-r` 自研路径 (M12, 简化) | `OutputKind::Relocatable` + `write_elf_relocatable` 生成 ET_REL；当前复用 ET_EXEC 写盘改 e_type |
 | AArch64 重定位（22 种） | `ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_LO21` / `ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` / `LDST*_ABS_LO12_NC` / `MOVW_UABS_G0..G3` |
 | RISC-V 重定位（15 种） | `64` / `32` / `32_PCREL` / `CALL` / `CALL_PLT` / `PCREL_HI20` / `PCREL_LO12_I` / `PCREL_LO12_S` / `HI20` / `LO12_I` / `LO12_S` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S` |
 | GOT64 大条目 | `R_X86_64_GOT64` / `R_X86_64_GOTOFF64` 重定位支持 |

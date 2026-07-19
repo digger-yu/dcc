@@ -89,21 +89,22 @@ pub fn resolve_with_config(
     let mut candidates: HashMap<String, Candidate> = HashMap::new();
     let mut errors = Vec::new();
 
-    // ----- Pass 0: 检查 --no-undefined-version -----
+    // ----- Pass 0: 检查 --no-undefined-version (使用 cfg.version_table) -----
     if cfg.no_undefined_version {
+        // 收集所有未定义的 name@ver 引用
+        let mut undef_refs: Vec<String> = Vec::new();
         for sym in bundle.symbols.iter() {
-            // 形如 `foo@VERSION` 但未定义 version
-            if sym.name.contains('@') && sym.section == 0 {
-                // 简单检查：@ 后为空或以数字开头
-                if let Some(idx) = sym.name.find('@') {
-                    let ver = &sym.name[idx + 1..];
-                    if ver.is_empty() {
-                        errors.push(ResolveError {
-                            name: sym.name.clone(),
-                            msg: "no version definition for symbol".into(),
-                        });
-                    }
-                }
+            if sym.section == 0 && sym.name.contains('@') {
+                undef_refs.push(sym.name.clone());
+            }
+        }
+        // 用 VersionTable 的查找 + cfg 中的版本定义校验
+        for r in &undef_refs {
+            if cfg.version_table.resolve(r).is_none() {
+                errors.push(ResolveError {
+                    name: r.clone(),
+                    msg: "undefined versioned reference (no .symver definition)".into(),
+                });
             }
         }
     }

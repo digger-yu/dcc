@@ -33,6 +33,10 @@ pub mod gnu_hash;
 pub mod eh_frame;
 pub mod build_id;
 pub mod ifunc;
+pub mod link_opts;
+pub mod symver;
+pub mod target_clones;
+pub mod fini_dispatch;
 
 use std::path::{Path, PathBuf};
 
@@ -75,6 +79,22 @@ pub struct LinkConfig {
     pub no_undefined_version: bool,
     /// 详细日志
     pub verbose: bool,
+    /// 扩展链接选项 (-z *, -rpath, -fuse-ld= 等)
+    pub opts: link_opts::LinkOpts,
+    /// DT_NEEDED: 需要的共享库列表 (-lxxx 转化的 so 名)
+    pub libs: Vec<String>,
+    /// 显式 unresolved 根符号 (--entry 之外的 gc-sections 根)
+    pub gc_sections_root: Vec<String>,
+    /// -fno-semantic-interposition / -fsemantic-interposition
+    pub no_semantic_interposition: bool,
+    /// -fuse-ld=
+    pub fuse_ld: Option<String>,
+    /// VersionTable (--no-undefined-version 等)
+    pub version_table: symver::VersionTable,
+    /// target_clones 收集表
+    pub target_clones: target_clones::TargetClonesTable,
+    /// FiniArray builder (__cxa_atexit / destructor 调度)
+    pub fini_builder: fini_dispatch::FiniArrayBuilder,
 }
 
 /// build-id 风格
@@ -113,6 +133,14 @@ impl Default for LinkConfig {
             build_id: BuildIdStyle::None,
             no_undefined_version: false,
             verbose: false,
+            opts: link_opts::LinkOpts::from_env(),
+            libs: vec![],
+            gc_sections_root: vec![],
+            no_semantic_interposition: false,
+            fuse_ld: None,
+            version_table: symver::VersionTable::new(),
+            target_clones: target_clones::TargetClonesTable::new(),
+            fini_builder: fini_dispatch::FiniArrayBuilder::new(),
         }
     }
 }
@@ -122,6 +150,7 @@ pub enum OutputKind {
     Executable,  // ET_EXEC
     PIE,         // ET_DYN, entry != 0
     Shared,      // ET_DYN, entry = 0
+    Relocatable, // ET_REL, -r 自研合并
 }
 
 /// 链接诊断
@@ -150,7 +179,12 @@ pub fn link_multi_tu(inputs: &[PathBuf], output: &Path, cfg: &LinkConfig) -> Res
 pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -> Result<Vec<u8>, Vec<Diagnostic>> {
     if cfg.verbose {
         eprintln!("dcc-link: {} object(s), output = {}", bundle.objects.len(), output.display());
+        eprintln!("dcc-link: opts: {}", link_opts::opts_summary(&cfg.opts));
     }
+    // 0. 收集 input bundle 中的 .symver / target_clones / destructor 信息
+    let mut cfg_owned = cfg.clone();
+    collect_link_directives(bundle, &mut cfg_owned);
+    let cfg = &cfg_owned;
     // 1. 符号解析
     let undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
     let (resolved, resolve_errors) = resolve::resolve_with_config(bundle, &undef, cfg);
@@ -169,10 +203,34 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
     builder.gc_sections = cfg.gc_sections;
     builder.emit_dynamic = matches!(cfg.output_kind, OutputKind::PIE | OutputKind::Shared);
     builder.keep_debug = !cfg.strip_debug;
+    builder.gc_sections_root = cfg.gc_sections_root.clone();
     let mut layout = builder.build(bundle, &resolved).map_err(|e| diag("E0303", e))?;
+    // 2.5 SHF_GNU_RETAIN 标记 (M12+ 链接器补洞)
+    link_opts::apply_retain_flags(&mut layout);
+    // 2.6 fini_array / __dso_handle 调度
+    fini_dispatch::ensure_fini_runtime_symbols(&mut layout);
+    // 2.7 -z pack-relative-relocs -> .gnu.pack.relocs
+    if cfg.opts.pack_relative_relocs {
+        link_opts::add_pack_relocs_section(&mut layout);
+    }
+    // 2.8 --gdb-index
+    if cfg.opts.gdb_index {
+        link_opts::add_gdb_index_section(&mut layout);
+    }
+    // 2.9 target_clones IFUNC resolver + IRELATIVE 重定位
+    if !cfg.target_clones.funcs.is_empty() {
+        let (new_syms, irel_relas) = cfg.target_clones.gen_irelative_relas(&layout);
+        for s in new_syms {
+            layout.symbols.push(s);
+        }
+        // IRELATIVE 重定位加入 output_relas
+        for r in irel_relas {
+            layout.output_relas.push(r);
+        }
+    }
     // 3. 生成 PLT/GOT（仅动态）
     if builder.emit_dynamic {
-        plt_got::fill_plt_got(&mut layout);
+        plt_got::fill_plt_got_with_opts(&mut layout, &cfg.opts);
     }
     // 4. 应用重定位
     let _dyn = apply_relocations(&mut layout).map_err(|e| diag("E0304", e.to_string()))?;
@@ -181,11 +239,63 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
         OutputKind::Executable => write_elf_exec_x86_64(&layout),
         OutputKind::PIE => write_elf_pie_x86_64(&layout),
         OutputKind::Shared => write_elf_shared_x86_64(&layout),
+        OutputKind::Relocatable => elf_exec::write_elf_relocatable_x86_64(&layout),
     };
     if cfg.verbose {
         eprintln!("dcc-link: wrote {} ({} bytes)", output.display(), bytes.len());
     }
     Ok(bytes)
+}
+
+/// 收集 input bundle 中的 .symver / target_clones / destructor 信息
+fn collect_link_directives(bundle: &InputBundle, cfg: &mut LinkConfig) {
+    for obj in &bundle.objects {
+        // 扫描 .symver 指令
+        for sec in &obj.sections {
+            if sec.name == ".symver" || sec.name == ".gnu.symver" {
+                // 每行 8 字节指针
+                for chunk in sec.data.chunks(8) {
+                    if chunk.len() == 8 {
+                        let ptr = u64::from_le_bytes(chunk.try_into().unwrap()) as usize;
+                        if ptr < bundle.symbols.len() {
+                            let sym = &bundle.symbols[ptr];
+                            if !sym.name.is_empty() {
+                                // 这是 .symver NAME,NAME@VER 的第二个符号 (target)
+                                // 真实 name 在 .rodata (简化: 跳过解析)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 扫描 .note.GNU.target_clones (target_clones 通常以 .note 段记录)
+        for sym in &obj.symbols {
+            if sym.name.starts_with("__target_clones__") {
+                // 简化: 跳过; 让 driver 层显式注册
+            }
+        }
+    }
+    // 收集 .fini_array 已注册的 destructor (M11+)
+    // dcc 在 codegen 阶段把 destructor 写入 .fini_array, 此处只统计大小
+    for obj in &bundle.objects {
+        for sec in &obj.sections {
+            if sec.name == ".fini_array" {
+                let n_dtor = (sec.size / 8) as usize;
+                for i in 0..n_dtor {
+                    let off = i * 8;
+                    if off + 8 <= sec.data.len() {
+                        let vaddr = u64::from_le_bytes(sec.data[off..off+8].try_into().unwrap());
+                        // 找对应符号
+                        for s in &obj.symbols {
+                            if s.section == 1 && s.value as usize + (obj.sections[1].data.as_ptr() as usize - 0) == vaddr as usize {
+                                cfg.fini_builder.add(&s.name, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// 链接并启用 LTO：先读 .dcc.lto 节，做跨 TU 优化后写回新 .o

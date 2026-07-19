@@ -173,6 +173,10 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 | `link/ifunc.rs` | IFUNC（STT_GNU_IFUNC）解析 + `R_X86_64_IRELATIVE` 生成 | — |
 | `link/lto_bitcode.rs` | 自有 DBC 格式 IR 位码序列化 + 跨 TU DCE / 内联 / 常量传播 / DAE | — |
 | `link/legacy.rs` | 旧 `-r` 模式（host `ld -r`） | host `ld`、`objcopy` |
+| `link/link_opts.rs` | `-z relro/now/lazy/execstack/noexecstack/pack-relative-relocs/max-page-size=N`、RPATH/RUNPATH、-fuse-ld=、-fno-semantic-interposition、SHF_GNU_RETAIN | — |
+| `link/symver.rs` | `.symver` 完整版本表（VERDEF / VERNEED） + `--no-undefined-version` 严格检查 | — |
+| `link/target_clones.rs` | `__attribute__((target_clones(...)))` IFUNC resolver 多版本生成 | — |
+| `link/fini_dispatch.rs` | `__dso_handle` / `__cxa_atexit` / `atexit` / `.fini_array` 调度 | — |
 
 **多 TU 链接管线**（`driver.rs::run_builtin_linker`）：
 
@@ -198,7 +202,60 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 5. `LinkConfig` CLI 入口支持 `-Wl,--exclude-libs=libxxx.a`（被排除的归档
    库中的全局符号打 `STV_HIDDEN`），`--build-id=sha1|uuid|md5|none`
    （生成 `.note.gnu.build-id` 段），`--no-undefined-version`（拒绝
-   `.symver` 缺版本的符号引用）。
+   `.symver` 缺版本的符号引用，通过 `link/symver.rs` 完整版本表校验）。
+
+**M12+ GNU ld 兼容链接特性**（`link/link_opts.rs` + `link/symver.rs` +
+`link/target_clones.rs` + `link/fini_dispatch.rs`）：
+
+- `-z relro` / `-z relro=partial|full`：写 `PT_GNU_RELRO` 段，覆盖范围
+  由 `compute_relro_range` 计算（包含 `.got` / `.got.plt` / `.init_array`
+  / `.fini_array` / `.data.rel.ro`）。
+- `-z now` / `BIND_NOW`：在 `.dynamic` 写 `DT_FLAGS = DF_BIND_NOW`
+  (0x8) 和 `DT_FLAGS_1 = DF_1_NOW` (0x1)，关闭延迟绑定。
+- `-z lazy`：恢复 `DF_LAZY`（默认）。
+- `-z execstack` / `-z noexecstack`：控制 `PT_GNU_STACK` 的 `PF_X` 标志。
+- `-z max-page-size=N` / `-z common-page-size=N`：解析 K/M/G 后缀和
+  `0x` 前缀，控制 `PT_LOAD` 的 align 字段。
+- `-z pack-relative-relocs`：生成 `.gnu.pack.relocs` 段（SHT_GNU_RELR，
+  内核/RTOS 友好的 RELR 压缩）。
+- `-rpath <path>` / `-runpath <path>`：写 `DT_RPATH` (23, deprecated) /
+  `DT_RUNPATH` (29, glibc 推荐) 动态项。
+- `-fuse-ld=<name>`：选择链接器后端（`dcc` 内置 / `gold` / `lld` /
+  `bfd`），`DCC_FUSE_LD` 环境变量可覆盖。
+- `-fno-semantic-interposition` / `-fsemantic-interposition`：LTO 阶段
+  控制函数符号插入语义（`LinkConfig.no_semantic_interposition`）。
+- `--gdb-index`：生成 `.gdb_index` 节（最小占位：版本字符串 +
+  0 填充，GDB 可识别但内容不完整）。
+- `--compress-debug-sections=zlib|zstd`：占位，当前忽略。
+- `--lto-partition=N`：接受但忽略（单分区足够）。
+- `SHF_GNU_RETAIN` 标志（0x200000）：对 `.init` / `.fini` /
+  `.init_array` / `.fini_array` / `.text.startup` 等元数据节自动标记，
+  `gc-sections` 即使无显式引用也保留。
+- `gc_sections_root` 自动选根：除 `entry` 外接受 `-u <sym>` /
+  `-Wl,-u,<sym>` 显式根符号，根集合从 `entry` + `-u` + 用户指定符号
+  并集 + `.init`/`.fini`/`.init_array`/`.fini_array` 等始终 live 节
+  出发做引用图 BFS，软删除未被引用的节（`output_index = u32::MAX`，
+  `size = 0`）。
+- `.symver` 完整实现（`link/symver.rs::VersionTable`）：
+  - `add_symver(".symver memcpy,memcpy@GLIBC_2.14")` 解析
+    `name,alias@ver` 形式，区分 `@ver` 和 `@@ver`（hidden）。
+  - `gen_gnu_version(dynsym_names)` 生成 `.gnu.version` 节（每个
+    dynsym 一个 16-bit 索引，0=VER_NDX_LOCAL, 1=VER_NDX_GLOBAL, 2+=
+    版本化）。
+  - `gen_verdef()` 生成 `.gnu.version_d`（VERDEF 结构 + 字符串表）。
+  - `check_undef(refs)` 在 `--no-undefined-version` 模式下严格检查。
+- IFUNC `target_clones`（`link/target_clones.rs::TargetClonesTable`）：
+  - 解析 `__attribute__((target_clones("sse4.2,default")))` 字符串。
+  - 生成 STT_GNU_IFUNC 类型符号 + `R_X86_64_IRELATIVE` 重定位。
+  - Resolver 简化实现：直接返回 default 变体地址（无 CPU feature 探测）。
+- `__dso_handle` / `.fini_array` 调度（`link/fini_dispatch.rs`）：
+  - `__dso_handle` 指向 `.data` 起始。
+  - `FiniArrayBuilder` 收集 destructor 符号，按 priority 排序生成
+    `.fini_array` 数据。
+  - `ensure_fini_array_section` 在 layout 中添加缺失的 `.fini_array` 节。
+- `-r` 自研路径：新增 `OutputKind::Relocatable` + `write_elf_relocatable`
+  生成 ET_REL .o（简化：复用 ET_EXEC 写盘路径，改 e_type；完整
+  ET_REL 输出需独立写节头/重定位，见 TODO）。
 
 **重定位类型**（`relocate.rs`）：
 
@@ -213,10 +270,9 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
   / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S`。
 
 **明确不做**：AArch64 / RISC-V 完整后端 ELF 输出（沿用 host 链接器）
-之外的非 x86-64 后端；`--no-undefined-version` 的 .symver 完整实现（仅
-打印告警拒绝）。
+之外的非 x86-64 后端。
 
-远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（31 用例）
+远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（50 用例）
 + `cargo test lto::`（7 用例）。
 
 ## C++ 前端 M7（`src/cpp/`）

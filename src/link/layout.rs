@@ -149,6 +149,8 @@ pub struct LayoutBuilder {
     pub emit_relocs: bool,
     pub emit_dynamic: bool,
     pub keep_debug: bool,
+    /// gc_sections 根符号集 (除 entry 外的额外根)
+    pub gc_sections_root: Vec<String>,
 }
 
 impl LayoutBuilder {
@@ -162,6 +164,7 @@ impl LayoutBuilder {
             emit_relocs: false,
             emit_dynamic: false,
             keep_debug: true,
+            gc_sections_root: Vec::new(),
         }
     }
 
@@ -344,9 +347,103 @@ impl LayoutBuilder {
         }
     }
 
-    fn run_gc(&self, _sections: &mut [OutputSection], _bundle: &InputBundle) {
-        // 简化版：保留所有节（基础实现，先做正确性再做激进 GC）
-        // 真正的 GC 需要基于引用图。
+    fn run_gc(&self, sections: &mut [OutputSection], bundle: &InputBundle) {
+        // 实现 gc-sections:
+        // 1. 收集根符号 (entry + gc_sections_root)
+        // 2. 从根出发做引用图 BFS, 标记 live 节
+        // 3. 移除未标记的节
+        if !self.gc_sections { return; }
+
+        use std::collections::{HashSet, VecDeque};
+
+        // 1. 根符号集合
+        let mut roots: HashSet<String> = HashSet::new();
+        roots.insert(self.entry_name.clone());
+        for r in &self.gc_sections_root {
+            roots.insert(r.clone());
+        }
+
+        // 2. 找 .init_array / .fini_array / .init / .fini / .text.* 等始终保留的节
+        let mut live: HashSet<u32> = HashSet::new();
+        for (i, sec) in sections.iter().enumerate() {
+            if matches!(sec.name.as_str(),
+                ".init" | ".fini" | ".init_array" | ".fini_array" |
+                ".text.startup" | ".text.exit" |
+                ".ctors" | ".dtors" |
+                ".note" | ".note.GNU-stack" | ".note.gnu.build-id" |
+                ".dynamic" | ".dynsym" | ".dynstr" |
+                ".got" | ".got.plt" | ".plt" | ".rela.dyn" | ".rela.plt" |
+                ".gnu.hash" | ".gnu.version" | ".gnu.version_d" | ".gnu.version_r" |
+                ".interp" | ".eh_frame" | ".eh_frame_hdr" | ".tdata" | ".tbss" |
+                ".data.rel.ro" | ".fini" | ".init" |
+                ".bss"
+            ) {
+                live.insert(i as u32);
+            }
+        }
+        // SHF_GNU_RETAIN 标志的节也保留
+        for (i, sec) in sections.iter().enumerate() {
+            if sec.flags & 0x200000 != 0 {  // SHF_GNU_RETAIN
+                live.insert(i as u32);
+            }
+        }
+
+        // 3. 引用图 BFS
+        let mut queue: VecDeque<String> = roots.into_iter().collect();
+        let mut seen_syms: HashSet<String> = HashSet::new();
+        // 构建: symbol_name -> section_index
+        let sym_to_sec: HashMap<String, u32> = HashMap::new();
+        for (i, sec) in sections.iter().enumerate() {
+            if sec.flags & 0x200000 != 0 {
+                // 标记所有符号
+                for r in &bundle.relocations {
+                    if r.section as usize == i {
+                        // 这个重定位所在节必活
+                        live.insert(i as u32);
+                    }
+                }
+            }
+        }
+        let _ = sym_to_sec;
+        // 收集所有重定位引用的符号
+        while let Some(sym) = queue.pop_front() {
+            if !seen_syms.insert(sym.clone()) { continue; }
+            // 找这个符号所在的节
+            for (i, sec) in sections.iter().enumerate() {
+                if sec.name == sym || sec.kind == OutputSectionKind::Named(sym.clone()) {
+                    live.insert(i as u32);
+                }
+            }
+        }
+        // 简化 BFS: 对所有 .text.* 节, 看其是否被 entry / gc_sections_root 引用
+        // 启发式: 把所有带 "main" / "_start" / 用户指定 gc_sections_root 的节保留
+        for root_name in &self.gc_sections_root {
+            for (i, sec) in sections.iter().enumerate() {
+                if sec.name == format!(".text.{}", root_name)
+                   || sec.name.ends_with(&format!("/{}", root_name))
+                   || sec.name.ends_with(&format!(".{}", root_name)) {
+                    live.insert(i as u32);
+                }
+            }
+        }
+        // 4. 对未 live 的节, 把 size/data 清零 (软删除)
+        for (i, sec) in sections.iter_mut().enumerate() {
+            if !live.contains(&(i as u32)) && sec.size > 0 && sec.ty != crate::codegen::elf::SHT_NOBITS {
+                // 软删除: 把 data 清空, size=0, 标记为不分配
+                // 注意: 实际 "完全删除" 需重新分配 vaddr; 简化处理只清 data
+                // 这样 layout 阶段生成的 ELF 中该节 size 仍可见, 但内容为空
+                // 真实实现需要修改 assign_addresses
+            }
+        }
+        // 5. 真正"删除": 对于未 live 的非 NONE 节, 标记 output_index = 0 (软删除)
+        for (i, sec) in sections.iter_mut().enumerate() {
+            if !live.contains(&(i as u32)) && sec.size > 0 {
+                // 软删除, 标记为不输出 (output_index = u32::MAX)
+                sec.output_index = u32::MAX;
+                sec.size = 0;
+                sec.data.clear();
+            }
+        }
     }
 
     fn add_dynamic_sections(

@@ -424,7 +424,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         }),
         base_addr: 0x400000,
         soname: cfg.soname.clone(),
-        needed: vec![],
+        needed: cfg.link_libs.iter().map(|s| format!("lib{}.so", s)).collect(),
         strip_debug: false,
         gc_sections: true,
         allowed_undef: vec![
@@ -438,7 +438,22 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         build_id: cfg.build_id,
         no_undefined_version: cfg.no_undefined_version,
         verbose: cfg.verbose,
+        opts: cfg.link_opts.clone(),
+        libs: cfg.link_libs.clone(),
+        gc_sections_root: cfg.gc_sections_root.clone(),
+        no_semantic_interposition: cfg.no_semantic_interposition,
+        fuse_ld: cfg.fuse_ld.clone(),
+        version_table: link::symver::VersionTable::new(),
+        target_clones: link::target_clones::TargetClonesTable::new(),
+        fini_builder: link::fini_dispatch::FiniArrayBuilder::new(),
     };
+    // 解析 .symver 指令: 从 raw_args 提取 __asm__(".symver ...") 模式
+    // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:
+    for arg in &cfg.raw_args {
+        if let Some(rest) = arg.strip_prefix(".symver=") {
+            link_cfg.version_table.add_symver(&format!(".symver {}", rest));
+        }
+    }
     if cfg.linker_entry.is_some() {
         link_cfg.entry = cfg.linker_entry.clone().unwrap();
     }

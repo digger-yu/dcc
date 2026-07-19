@@ -64,6 +64,24 @@ pub struct Config {
     pub build_id: BuildIdStyle,
     /// --no-undefined-version
     pub no_undefined_version: bool,
+    /// 链接器扩展选项 (-z, -rpath, -fuse-ld= 等)
+    pub link_opts: crate::link::link_opts::LinkOpts,
+    /// 链接库名 (-lxxx)
+    pub link_libs: Vec<String>,
+    /// gc-sections 显式根符号 (-u)
+    pub gc_sections_root: Vec<String>,
+    /// -fno-semantic-interposition
+    pub no_semantic_interposition: bool,
+    /// -fsemantic-interposition
+    pub semantic_interposition: bool,
+    /// -fuse-ld=<name>
+    pub fuse_ld: Option<String>,
+    /// --gdb-index
+    pub gdb_index: bool,
+    /// --compress-debug-sections=<style>
+    pub compress_debug: Option<String>,
+    /// -flto-partition=N
+    pub lto_partitions: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,10 +270,23 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut built_link = false;
     let mut soname: Option<String> = None;
     let mut linker_entry: Option<String> = None;
-    let linker_lto = false;
+    let mut linker_lto = false;
     let mut exclude_libs: Vec<String> = Vec::new();
     let mut build_id = BuildIdStyle::None;
     let mut no_undefined_version = false;
+    // 链接器扩展选项 (M12)
+    let mut link_opts_z: Vec<String> = Vec::new();
+    let mut link_rpath: Vec<String> = Vec::new();
+    let mut link_runpath: Vec<String> = Vec::new();
+    let mut link_rpath_link: Vec<String> = Vec::new();
+    let mut fuse_ld: Option<String> = None;
+    let mut no_semantic_interposition = false;
+    let mut semantic_interposition = false;
+    let mut gdb_index = false;
+    let mut compress_debug: Option<String> = None;
+    let mut lto_partitions: Option<u32> = None;
+    let mut gc_sections_root: Vec<String> = Vec::new();
+    let mut link_libs: Vec<String> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -310,6 +341,95 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-Wl,--build-id=md5" => { build_id = BuildIdStyle::Md5; }
             "-Wl,--build-id=none" => { build_id = BuildIdStyle::None; }
             "-Wl,--no-undefined-version" => { no_undefined_version = true; }
+            // -z options: -z relro, -z now, -z max-page-size=N, etc.
+            "-z" => {
+                i += 1;
+                let v = args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -z"))?
+                    .clone();
+                link_opts_z.push(v);
+            }
+            // -Wl,-z,* form
+            a if a.starts_with("-Wl,-z,") => {
+                let v = &a[7..];
+                link_opts_z.push(v.to_string());
+            }
+            // -rpath
+            a if a == "-rpath" => {
+                i += 1;
+                link_rpath.push(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -rpath"))?
+                    .clone());
+            }
+            a if a.starts_with("-Wl,-rpath,") => {
+                link_rpath.push(a[11..].to_string());
+            }
+            // -rpath-link
+            a if a == "-rpath-link" => {
+                i += 1;
+                link_rpath_link.push(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -rpath-link"))?
+                    .clone());
+            }
+            a if a.starts_with("-Wl,-rpath-link,") => {
+                link_rpath_link.push(a[16..].to_string());
+            }
+            // -runpath
+            a if a == "-runpath" => {
+                i += 1;
+                link_runpath.push(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -runpath"))?
+                    .clone());
+            }
+            a if a.starts_with("-Wl,-runpath,") => {
+                link_runpath.push(a[13..].to_string());
+            }
+            // -fuse-ld=
+            a if a.starts_with("-fuse-ld=") => {
+                fuse_ld = Some(a[9..].to_string());
+            }
+            a if a.starts_with("-Wl,-fuse-ld,") => {
+                fuse_ld = Some(a[13..].to_string());
+            }
+            // -fno-semantic-interposition / -fsemantic-interposition
+            "-fno-semantic-interposition" => { no_semantic_interposition = true; }
+            "-fsemantic-interposition" => { semantic_interposition = true; }
+            // --gdb-index
+            "-Wl,--gdb-index" => { gdb_index = true; }
+            "--gdb-index" => { gdb_index = true; }
+            // --compress-debug-sections
+            a if a.starts_with("-Wa,--compress-debug-sections=") => {
+                compress_debug = Some(a[31..].to_string());
+            }
+            a if a.starts_with("-Wl,--compress-debug-sections=") => {
+                compress_debug = Some(a[32..].to_string());
+            }
+            // -flto-partition=N / -Wl,-lto-partition=N
+            a if a.starts_with("-flto-partition=") => {
+                if let Ok(n) = a[16..].parse::<u32>() {
+                    lto_partitions = Some(n);
+                }
+            }
+            // -u <sym>  显式 unresolved 根符号
+            "-u" => {
+                i += 1;
+                gc_sections_root.push(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -u"))?
+                    .clone());
+            }
+            a if a.starts_with("-Wl,-u,") => {
+                gc_sections_root.push(a[8..].to_string());
+            }
+            // -lxxx 转 so 名 (从 .a 库解析, 此处简化为收集库名)
+            a if a == "-l" => {
+                i += 1;
+                link_libs.push(args.get(i)
+                    .ok_or_else(|| CliError::new("missing arg after -l"))?
+                    .clone());
+            }
+            a if a.starts_with("-l") && a.len() > 2 => {
+                link_libs.push(a[2..].to_string());
+            }
             // -L, -l, -T 等链接器选项
             "-L" | "-l" | "-T" => { i += 1; } // 跳过参数
             a if a.starts_with("-L") || a.starts_with("-l") || a.starts_with("-T") => {} // 内联形式
@@ -664,6 +784,19 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         });
         let parallel_codegen = opt >= 2
             && std::env::var("DCC_NO_PARALLEL").is_err();
+        let mut all_link_opts = crate::link::link_opts::LinkOpts::from_env();
+        for z in &link_opts_z {
+            all_link_opts.parse_z(z);
+        }
+        if no_semantic_interposition { all_link_opts.no_semantic_interposition = true; }
+        if semantic_interposition { all_link_opts.semantic_interposition = true; }
+        if gdb_index { all_link_opts.gdb_index = true; }
+        if let Some(ref c) = compress_debug { all_link_opts.compress_debug = Some(c.clone()); }
+        if let Some(n) = lto_partitions { all_link_opts.lto_partitions = Some(n); }
+        if let Some(ref fl) = fuse_ld { all_link_opts.fuse_ld = Some(fl.clone()); }
+        if !link_rpath.is_empty() { all_link_opts.rpath = Some(link_rpath.join(":")); }
+        if !link_runpath.is_empty() { all_link_opts.runpath = Some(link_runpath.join(":")); }
+        all_link_opts.rpath_link = link_rpath_link.clone();
         Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, force_includes, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
@@ -677,7 +810,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             linker_lto,
             exclude_libs: exclude_libs.clone(),
             build_id,
-            no_undefined_version, })
+            no_undefined_version,
+            link_opts: all_link_opts,
+            link_libs: link_libs.clone(),
+            gc_sections_root: gc_sections_root.clone(),
+            no_semantic_interposition,
+            semantic_interposition,
+            fuse_ld: fuse_ld.clone(),
+            gdb_index,
+            compress_debug: compress_debug.clone(),
+            lto_partitions,
+        })
     } else {
         if inputs.is_empty() {
             inputs.push(PathBuf::from("-"));
@@ -697,7 +840,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             linker_lto: false,
             exclude_libs: Vec::new(),
             build_id: BuildIdStyle::None,
-            no_undefined_version: false, })
+            no_undefined_version: false,
+            link_opts: crate::link::link_opts::LinkOpts::from_env(),
+            link_libs: Vec::new(),
+            gc_sections_root: Vec::new(),
+            no_semantic_interposition: false,
+            semantic_interposition: false,
+            fuse_ld: None,
+            gdb_index: false,
+            compress_debug: None,
+            lto_partitions: None,
+        })
     }
 }
 

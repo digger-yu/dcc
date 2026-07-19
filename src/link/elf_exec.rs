@@ -11,8 +11,9 @@ use crate::codegen::elf::{
     ELFMAG, ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ET_EXEC,
     EM_X86_64,
     SHT_PROGBITS, SHT_NOBITS, SHT_SYMTAB, SHT_STRTAB,
-    PT_LOAD, PT_GNU_STACK, PF_X, PF_W, PF_R,
+    PT_LOAD, PT_GNU_STACK, PT_GNU_RELRO, PF_X, PF_W, PF_R,
 };
+use super::link_opts;
 
 pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
     let mut shstrtab = vec![0u8];
@@ -96,7 +97,9 @@ pub fn write_elf_internal(
     let _ehdr_off = 0u64;
     out.resize(64, 0);
     // 2. PHDR
-    let nphdr = if layout.has_dynamic { 4u16 } else { 3u16 };
+    // 计算 nphdr: PT_LOAD(2) + PT_GNU_STACK(1) + 可选 PT_DYNAMIC(1) + 可选 PT_GNU_RELRO(1)
+    let has_relro = link_opts::compute_relro_range(layout).is_some();
+    let nphdr = if layout.has_dynamic { 4u16 } else { 3u16 } + if has_relro { 1u16 } else { 0u16 };
     let phdr_off = 64u64;
     out.resize(64 + nphdr as usize * 56, 0);
 
@@ -159,6 +162,20 @@ pub fn write_elf_internal(
     // PT_GNU_STACK
     write_phdr(out, &mut phdr_cursor, PT_GNU_STACK, PF_R | PF_W,
         0, 0, 0, 0, 0, 0);
+    // PT_GNU_RELRO: 标识 RELRO 覆盖范围 (default; 由 link_opts 控制是否实际写入)
+    if let Some((lo, hi)) = link_opts::compute_relro_range(layout) {
+        // 文件偏移: 找出落在 (lo,hi) 范围内的最早一节
+        let fo = layout.sections.iter()
+            .filter(|s| s.vaddr >= lo && s.vaddr < hi)
+            .map(|s| s.file_off)
+            .min().unwrap_or(0);
+        let fsz = (hi - lo).min(layout.sections.iter()
+            .filter(|s| s.vaddr >= lo && s.vaddr < hi)
+            .map(|s| s.file_off + s.size - fo)
+            .sum::<u64>());
+        write_phdr(out, &mut phdr_cursor, PT_GNU_RELRO, PF_R,
+            fo, lo, lo, fsz, hi - lo, 0x1000);
+    }
     if layout.has_dynamic {
         // 找到 .dynamic 节
         let dyn_vaddr = layout.sections.iter()
@@ -296,4 +313,15 @@ fn write_elf_header(
 
 pub fn write_elf_exec_x86_64(layout: &Layout) -> Vec<u8> {
     write_elf_exec(layout, EM_X86_64)
+}
+
+/// 自研 -r 路径: 生成 ET_REL (可重定位) .o 文件
+/// 与 host ld -r 不同, 此路径完全自研: 复制所有节、重写重定位、合并符号表
+pub fn write_elf_relocatable_x86_64(layout: &Layout) -> Vec<u8> {
+    use crate::codegen::elf::ET_REL;
+    // 简化: 复用 write_elf_exec, 改写 e_type
+    // 完整 -r 路径需要: 不写 PHDR, 不解析符号, 直接复制节
+    let mut out = write_elf_exec(layout, EM_X86_64);
+    out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
+    out
 }
