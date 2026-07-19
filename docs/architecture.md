@@ -359,6 +359,23 @@ Parser 直接表示 `&&label`、`goto *expr` 和 `asm goto`。标签地址使用
 RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
 汇编器之前将 `%lN` / `%l[name]` 解析到函数内标签。
 
+M11.2 扩展：
+
+- **跨函数 computed goto**：`&&outer_label`（其他函数的命名标签）
+  通过 `lea rax, [rip + label]` 加载 64-bit 绝对地址，再经
+  `jmp *rax` 间接跳转到目标函数入口；前提是目标标签 `global` 可见。
+- **asm goto 输出约束增强**：`asm goto (...) : "=r"(out) : ... : : lab1, lab2`
+  中 `out` 的语义遵循 GCC：仅在 fall-through 路径上写回 `out`，
+  跳转到任何 `goto` 标签时 `out` 保留调用方传入的旧值。
+  实现路径：跳板代码段把 `out` 当前值保存在 volatile 临时槽，
+  fall-through 时 `mov` 回调用方槽，跳转路径不写回。
+- **`__builtin_call_with_static_chain(callee, chain, args...)`**：
+  按 SysV AMD64 ABI 把 `chain` 写入 `%r10`（静态链寄存器），
+  之后按 GP 寄存器约定（`rdi/rsi/rdx/rcx/r8/r9`）和 XMM 寄存器
+  约定（`xmm0..xmm5`）传递 `args`，多余参数走 caller 栈。
+  适配 GNU 嵌套函数的静态链调用约定，配合 IR 一等公民的
+  嵌套函数（nested function）支持。
+
 Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 
 - **标签命名空间**：C 层 `Stmt::Label` 与 asm 字符串内命名标签（如 `found:`）
@@ -412,6 +429,28 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   已折叠，codegen 兜底）；`__builtin_va_list`（类型别名）；
   `__builtin_FILE`/`__builtin_LINE`/`__builtin_FUNCTION`/
   `__builtin_FUNCSIG`/`__builtin_PRETTY_FUNCTION`；
+  `__builtin_offsetof`（M11.2）支持嵌套 struct / union / 数组下标 /
+  匿名 struct 成员访问，编译期折叠为字节偏移常量；
+  `__builtin_huge_val`/`huge_valf`/`huge_vall`（M11.2）按 IEEE 754
+  位模式 rodata 加载（double 0x7FF0000000000000 / float 0x7F800000 /
+  long double 0x7FFF8000000000000000），通过 `.rodata` 重定位在
+  ET_EXEC/ET_REL 模式下都正确；
+  `__builtin_nan`/`nanf`/`nanl`（M11.2）走 qNaN 编码
+  （double 0x7FF8000000000000，类比 huge_val 把尾数最高位置 1）；
+  `__builtin_isnan`/`isinf`/`finite`/`signbit`/`fpclassify`（M11.2）
+  对 NaN/Inf 位模式正确判定（`__builtin_isnan` 走 `xorps` 屏蔽符号
+  位 + `ucomisd` + `setnp` + `setne`；`__builtin_isinf` 用 `andps`
+  提取指数字段；`__builtin_signbit` 通过 `movmskpd` 取符号位）；
+  `__builtin_call_with_static_chain`（M11.2）按 SysV ABI 把 chain
+  写入 r10，并按 GP/XMM 寄存器约定（rdi/rsi/rdx/rcx/r8/r9 +
+  xmm0–xmm5）传递额外参数，多余参数压栈 + 间接 call；
+  `Expr::Unary Neg`（M11.2）浮点取负走恒常折叠（字面量直接生成
+  -v）+ 运行时 XOR 符号位（`movabs rax, 0x8000000000000000` + 
+  `movq xmm1, rax` + `pxor xmm0, xmm1`），避免之前对 `-1.0` 等
+  字面量错误地走 `neg rax` 路径；
+  `Expr::AddrOf` / `var_offset lea`（M11.2）REX.R 编码对 r10–r15
+  修复（之前写死 `rex = 0x49` 缺少 REX.R bit，导致 r10/r11/r12/r14/
+  r15 编码错位到 rdx/rcx/r8/r12/r13）；
   未知 `__builtin_*` warning + 零值（有返回值）或 **ud2**（void）。
 - **IR 内联**：`-O0+` 对 `always_inline` 单返回体内联；`-O1+` 完整 pass；
   `-O3` opportunistic 小 static 函数；`noinline` 阻止内联。

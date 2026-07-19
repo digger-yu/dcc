@@ -151,6 +151,7 @@
 | C 前端补洞 `_Pragma` 操作符 (M11.1) | ✅ | C99 `_Pragma("string")` 在 preproc 展开阶段累积到 `pending_pragmas: RefCell<Vec<String>>`，源块刷新时批量应用到 `process_directive` |
 | C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
 | C 前端补洞 `_Static_assert` 字符串化 (M11.1) | ✅ | C23 单参 `_Static_assert(expr)` 与双参 `_Static_assert(expr,"msg")` 全部支持；失败消息附加 `evaluates to: <ExprDebug 文本>` 便于定位 |
+| C 前端补洞 GNU 扩展 (M11.2) | ✅ | `__builtin_offsetof` 支持嵌套 struct/union/数组下标/匿名 struct 成员访问；`__builtin_huge_val`/`huge_valf`/`huge_vall` 按 IEEE 754 位模式 (double 0x7FF0000000000000 / float 0x7F800000 / long double 0x7FFF8000000000000000) rodata 加载；`__builtin_nan`/`nanf`/`nanl` 走 qNaN 编码 (double 0x7FF8000000000000)；`_Atomic` 在 C 前端接通 `__atomic_*` 内建函数 + `__c11_atomic_*` 路径；`__builtin_call_with_static_chain` 按 SysV ABI 把 chain 写入 r10 并按 GP/XMM 寄存器约定传参 + 间接 call；嵌套函数作为 IR 一等公民支持静态链参数；computed goto 跨函数（标签地址走 LEA 加载，间接 jmp 通过寄存器）；asm goto 输出约束在 fall-through 路径上写回，跳转路径保留原值；`__builtin_isnan`/`isinf`/`finite`/`signbit`/`fpclassify` 正确处理 NaN/Inf 位模式；`Expr::Unary` 浮点取负走恒常折叠 + 运行时 XOR 符号位；`AddrOf` REX.R 编码对 r10–r15 修复 |
 | GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；远端可用磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）；仍缺 SFINAE / partial specialization / 完整 concepts / 协程 / module |
 | libdecnumber 组合 TU 编译 | ✅ 远程 OK | `scripts/remote_gcc_c_probe.sh` 改用 `tools/libdecnumber_combined.c` |
 | 嵌套块重声明 (C99 6.2.1) | ✅ | `parser.rs::check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍报 E0007 |

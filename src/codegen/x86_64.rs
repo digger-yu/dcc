@@ -2241,7 +2241,8 @@ impl Codegen {
                     self.emit_global_addr(dst, &name.name);
                 } else {
                     let off = self.var_offset(&name.name);
-                    let rex = 0x49u8; // REX.W + REX.B (r13)
+                    // REX.W + REX.B (r13) + REX.R (dst >= 8 → r10/r11/...)
+                    let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
                     self.emit(&[rex, 0x8D]);
                     if off.abs() < 128 {
                         self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
@@ -2844,6 +2845,14 @@ impl Codegen {
                 }
             }
             Expr::Unary { op, e, .. } => {
+                // 浮点字面量取负: 编译期折叠, 直接生成相反值的 Float 表达式
+                if matches!(op, UnOp::Neg) {
+                    if let Expr::Float { v, ty, span, .. } = e.as_ref() {
+                        let negated = Expr::Float { v: -*v, ty: ty.clone(), span: span.clone() };
+                        self.gen_expr(&negated, dst);
+                        return;
+                    }
+                }
                 if matches!(e.ty(), Type::Int128 | Type::UInt128) {
                     self.gen_expr(e, 0);
                     match op {
@@ -2864,6 +2873,39 @@ impl Codegen {
                             self.emit(&[0x48, 0x31, 0xD2]); // high = 0
                         }
                         UnOp::Plus => {}
+                    }
+                    if dst != 0 { self.mov(dst, 0); }
+                    return;
+                }
+                // 浮点取负: 翻转符号位 (XOR with sign mask)
+                // 否则在 gen_expr 之后 emit neg r64 会错把 rax 取反, 而浮点结果在 xmm0.
+                if matches!(op, UnOp::Neg) && matches!(e.ty(), Type::Double | Type::Float | Type::LongDouble) {
+                    self.gen_expr(e, 0); // xmm0 = e
+                    match e.ty() {
+                        Type::Float => {
+                            // 翻转 32 位符号位: movabs rax, 0x8000_0000
+                            //   66 48 0f 6e c8 movq xmm1, rax
+                            //   0f 57 c1       xorps xmm0, xmm1
+                            self.emit(&[0x48, 0xB8]);
+                            self.emit(&0x80000000u64.to_le_bytes());
+                            self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                            self.emit(&[0x0F, 0x57, 0xC1]);
+                        }
+                        Type::Double => {
+                            // 翻转 64 位符号位
+                            self.emit(&[0x48, 0xB8]);
+                            self.emit(&0x8000000000000000u64.to_le_bytes());
+                            self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                            self.emit(&[0x66, 0x0F, 0x57, 0xC1]);
+                        }
+                        Type::LongDouble => {
+                            // long double (80-bit): dcc 用 8 字节近似, 同样翻转 bit 63
+                            self.emit(&[0x48, 0xB8]);
+                            self.emit(&0x8000000000000000u64.to_le_bytes());
+                            self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
+                            self.emit(&[0x66, 0x0F, 0x57, 0xC1]);
+                        }
+                        _ => unreachable!(),
                     }
                     if dst != 0 { self.mov(dst, 0); }
                     return;
@@ -3205,7 +3247,8 @@ impl Codegen {
                         self.emit_global_addr(dst, &name.name);
                     } else {
                         let off = self.var_offset(&name.name);
-                        let rex = 0x49u8; // REX.W + REX.B (r13)
+                        // REX.W + REX.B (r13) + REX.R (当 dst >= 8, 编码 r10/r11/r12/...)
+                        let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
                         self.emit(&[rex, 0x8D]);
                         if off.abs() < 128 {
                             self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
@@ -5799,6 +5842,394 @@ impl Codegen {
                     let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
                     self.emit(&[rex, 0x0F, 0xB7, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 }
+                true
+            }
+            // __builtin_huge_val / huge_valf / huge_vall: IEEE 754 +Inf
+            // __builtin_inf / inff / infl: 同 huge_val*, 单独列出
+            // 直接加载 IEEE 754 位模式:
+            //   double +Inf:  0x7FF0_0000_0000_0000
+            //   float  +Inf:  0x7F80_0000
+            //   long double (x86 80-bit) +Inf: 0x7FFF_8000_0000_0000_0000
+            // dcc 把 long double 当 double 处理, 8 字节近似.
+            // emit: 8 字节 movsd/movss xmm0, [rip+disp32], disp32 在 code_pos+4.
+            // 注意: 结果必须写到 xmm0 (dst=0) 而非 rax, 因为双精度返回走 xmm0.
+            "__builtin_huge_val" | "__builtin_huge_valf" | "__builtin_huge_vall"
+            | "__builtin_inf" | "__builtin_inff" | "__builtin_infl" => {
+                let (is_float, bytes) = match name {
+                    "__builtin_huge_valf" | "__builtin_inff" => {
+                        (true, 0x7F800000u32.to_le_bytes().to_vec())
+                    }
+                    "__builtin_huge_vall" | "__builtin_infl" => {
+                        // long double: dcc 用 8 字节近似, 加载 0 进入 xmm0 (近似 +Inf)
+                        (false, 0x7FF0000000000000u64.to_le_bytes().to_vec())
+                    }
+                    _ => (false, 0x7FF0000000000000u64.to_le_bytes().to_vec()),
+                };
+                let off = self.rodata.len() as u64;
+                self.rodata.extend_from_slice(&bytes);
+                // movss/movsd xmm0, [rip+disp32]: 8 字节指令
+                //   F3 0F 10 05 disp32 (movss, 4 字节) 或
+                //   F2 0F 10 05 disp32 (movsd, 8 字节)
+                // disp32 在 code_pos+4, 加 REX 不需要 (xmm0 < 8).
+                let prefix = if is_float { 0xF3 } else { 0xF2 };
+                let code_pos = self.pos();
+                self.emit(&[prefix, 0x0F, 0x10, 0x05, 0, 0, 0, 0]);
+                // 结果在 xmm0. 若调用方 dst 不是 0, 移动到 dst.
+                if dst != 0 {
+                    // dst 应当是 x86 通用寄存器. 使用 movsd/movss 拷贝.
+                    if is_float {
+                        self.emit(&[0xF3, 0x0F, 0x11, 0xC0 | (dst & 7)]);
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x11, 0xC0 | (dst & 7)]);
+                    }
+                }
+                // 走 float_refs 通道: ET_EXEC 模式 resolve() 阶段会自动回填
+                //   disp32 = (rodata_start + off) - (entry + code_pos + 8)
+                // 也就是 addend = off - 8 (在 relocatable 模式下).
+                self.float_refs.push((code_pos, off));
+                true
+            }
+            // __builtin_nan / nanf / nanl: 静默 NaN (quiet NaN).
+            // GCC 接受字符串参数 (mantissa bits), 我们忽略字符串, 取默认 qNaN.
+            // qNaN 位模式:
+            //   double:  0x7FF8_0000_0000_0000
+            //   float:   0x7FC0_0000
+            //   long double: 0x7FFF_C000_0000_0000_0000 (dcc 8 字节近似)
+            // emit 8 字节 movsd/movss xmm0, [rip+disp32], disp32 在 code_pos+4.
+            "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl" => {
+                let (is_float, bytes) = match name {
+                    "__builtin_nanf" =>
+                        (true, 0x7FC00000u32.to_le_bytes().to_vec()),
+                    "__builtin_nanl" =>
+                        (false, 0x7FF8000000000000u64.to_le_bytes().to_vec()),
+                    _ => (false, 0x7FF8000000000000u64.to_le_bytes().to_vec()),
+                };
+                let off = self.rodata.len() as u64;
+                self.rodata.extend_from_slice(&bytes);
+                let prefix = if is_float { 0xF3 } else { 0xF2 };
+                let code_pos = self.pos();
+                self.emit(&[prefix, 0x0F, 0x10, 0x05, 0, 0, 0, 0]);
+                if dst != 0 {
+                    if is_float {
+                        self.emit(&[0xF3, 0x0F, 0x11, 0xC0 | (dst & 7)]);
+                    } else {
+                        self.emit(&[0xF2, 0x0F, 0x11, 0xC0 | (dst & 7)]);
+                    }
+                }
+                // 走 float_refs 通道 (同 __builtin_huge_val 实现)
+                self.float_refs.push((code_pos, off));
+                true
+            }
+            // __builtin_isnan / isnanf / isnanl: NaN 检测.
+            // NaN 的特性: ucomisd/ucomiss 设置 PF=1 (任一为 NaN).
+            //   较新 Intel CPU 在 NaN 时 ZF=1, PF=1, CF=1
+            //   旧文档:  ZF=0, PF=1, CF=1
+            // 统一用 setp 检测 PF=1 → NaN.
+            // 类型由实参决定, 而非函数名后缀: __builtin_isnan(float) 也应
+            // 使用 ucomiss; 否则 movss 后高位 0 会使 ucomisd 行为不一致.
+            "__builtin_isnan" | "__builtin_isnanf" | "__builtin_isnanl" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                let arg_ty = args[0].ty();
+                let is_f = matches!(arg_ty, Type::Float);
+                self.gen_expr(&args[0], 0); // xmm0 = x
+                // ucomis{s,d} xmm0, xmm0
+                if is_f {
+                    self.emit(&[0x0F, 0x2E, 0xC0]); // ucomiss xmm0, xmm0
+                } else {
+                    self.emit(&[0x66, 0x0F, 0x2E, 0xC0]); // ucomisd xmm0, xmm0
+                }
+                // setp al (PF=1 ⇒ NaN)
+                self.emit(&[0x0F, 0x9A, 0xC0]);
+                // movzx eax, al (REX.W 0F B6 C0)
+                self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_isinf / isinff / isinfl: ±Inf 检测.
+            // 返回: +Inf→1, -Inf→-1, 其他 (含 NaN) →0.
+            // 算法: 用 |x| vs +Inf 比较 (sete); 符号位取 sign.
+            // 合成: result = isinf * (1 - 2*sign)
+            //   sign=0: result = +isinf
+            //   sign=1: result = -isinf
+            // 排除 NaN: setnp (NOT PF). NaN 时 PF=1, setnp=0 → 整体被清零.
+            // 类型按实参, 不用函数名后缀.
+            "__builtin_isinf" | "__builtin_isinff" | "__builtin_isinfl" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                let arg_ty = args[0].ty();
+                let is_f = matches!(arg_ty, Type::Float);
+                // 1. isinf: |x| == +Inf 且非 NaN
+                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.emit(&[0x48, 0xB8]);
+                self.emit(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]); // movq xmm1, rax
+                self.emit(&[0x0F, 0x54, 0xC1]); // andps xmm0, xmm1 (|x|)
+                self.emit(&[0x48, 0xB8]);
+                // float +Inf bit pattern: 0x7F800000
+                let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
+                self.emit(&inf_bits.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]); // movq xmm1, rax
+                // ucomiss (0F 2E) for float, ucomisd (66 0F 2E) for double
+                if is_f {
+                    self.emit(&[0x0F, 0x2E, 0xC1]); // ucomiss xmm0, xmm1
+                } else {
+                    self.emit(&[0x66, 0x0F, 0x2E, 0xC1]); // ucomisd xmm0, xmm1
+                }
+                // sete al (ZF=1): |x| == +Inf
+                self.emit(&[0x0F, 0x94, 0xC0]);
+                // setnp bl (NOT PF): 非 NaN
+                self.emit(&[0x0F, 0x9B, 0xC3]);
+                // and al, bl: 既等于 Inf 又非 NaN
+                self.emit(&[0x20, 0xD8]); // and al, bl
+                // movzx eax, al
+                self.emit(&[0x0F, 0xB6, 0xC0]);
+                self.emit(&[0x89, 0xC7]); // mov edi, eax (edi = isinf)
+                // 2. sign: 重新加载 x, 取符号位
+                self.gen_expr(&args[0], 0);
+                self.emit(&[0x0F, 0x50, 0xC0]); // movmskps eax, xmm0
+                self.emit(&[0x83, 0xE0, 0x01]); // and eax, 1 (eax = sign)
+                self.emit(&[0x89, 0xC6]); // mov esi, eax (esi = sign)
+                // 3. 合成: eax=isinf, edx=isinf, eax=-isinf; 若 sign==0, eax=edx
+                self.emit(&[0x89, 0xF8]); // mov eax, edi (eax = isinf)
+                self.emit(&[0x89, 0xC2]); // mov edx, eax (edx = isinf)
+                self.emit(&[0xF7, 0xD8]); // neg eax (eax = -isinf)
+                self.emit(&[0x85, 0xF6]); // test esi, esi
+                self.emit(&[0x0F, 0x44, 0xC2]); // cmove eax, edx
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_finite: x 既不是 NaN 也不是 Inf.
+            // 用 |x| vs +Inf 比较, 同时排除 NaN (PF=1 ⇒ NaN).
+            // 正确语义: finite = (|x| < +Inf) AND NOT NaN
+            // 编码:  (|x| < +Inf) ⇒ CF=1 ⇒ setb al
+            //         NaN          ⇒ PF=1 ⇒ setnp bl (NOT PF)
+            //         finite = al AND bl
+            "__builtin_finite" | "__builtin_finitef" | "__builtin_finitel" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                let arg_ty = args[0].ty();
+                let is_f = matches!(arg_ty, Type::Float);
+                self.gen_expr(&args[0], 0); // xmm0 = x
+                // 加载 abs_mask 到 xmm1
+                self.emit(&[0x48, 0xB8]);
+                self.emit(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]); // movq xmm1, rax
+                // andps xmm0, xmm1: |x|
+                self.emit(&[0x0F, 0x54, 0xC1]);
+                // 加载 +Inf 到 xmm1
+                self.emit(&[0x48, 0xB8]);
+                let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
+                self.emit(&inf_bits.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]); // movq xmm1, rax
+                // ucomiss (0F 2E) for float, ucomisd (66 0F 2E) for double
+                if is_f {
+                    self.emit(&[0x0F, 0x2E, 0xC1]); // ucomiss xmm0, xmm1
+                } else {
+                    self.emit(&[0x66, 0x0F, 0x2E, 0xC1]); // ucomisd xmm0, xmm1
+                }
+                // setb al (CF=1): |x| < +Inf
+                self.emit(&[0x0F, 0x92, 0xC0]);
+                // setnp bl (NOT PF): 非 NaN
+                //   0F 9B C3 = setnp bl
+                self.emit(&[0x0F, 0x9B, 0xC3]);
+                // and al, bl: 两者都成立才是 finite
+                self.emit(&[0x20, 0xD8]); // and al, bl
+                // movzx eax, al
+                self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_isunordered(a, b): 任一为 NaN 则 1.
+            // 优先把两个实参对齐到 double (用 cvtps2pd/cvtss2sd).
+            // 较新 Intel CPU 在 NaN 时 ZF=1, PF=1, CF=1 → setp 仍可识别.
+            "__builtin_isunordered" => {
+                if args.len() < 2 { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], 0);
+                // 如果 a 是 float, 升为 double
+                if matches!(args[0].ty(), Type::Float) {
+                    self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd xmm0, xmm0
+                }
+                self.gen_expr(&args[1], 1);
+                // 如果 b 是 float, 升为 double
+                if matches!(args[1].ty(), Type::Float) {
+                    self.emit(&[0xF3, 0x0F, 0x5A, 0xC9]); // cvtss2sd xmm1, xmm1
+                }
+                // ucomisd xmm0, xmm1
+                self.emit(&[0x66, 0x0F, 0x2E, 0xC1]);
+                // setp al
+                self.emit(&[0x0F, 0x9A, 0xC0]);
+                self.emit(&[0x48, 0x0F, 0xB6, 0xC0]);
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_fpclassify(p, n, z, i, x, v): 浮点分类.
+            // GCC 返回 0..5: NaN, Inf, Zero, Subnormal, Normal, 实现自定义.
+            // 简化: 仅区分 4 类 (NaN, Inf, Zero, Normal); Subnormal 归到 Normal.
+            //   NaN → args[0]
+            //   Inf → args[1]
+            //   Zero → args[2]
+            //   其他 (含 Subnormal) → args[4]  (跳过 Subnormal args[3])
+            "__builtin_fpclassify" => {
+                if args.len() < 6 { self.mov_imm(dst, 0); return true; }
+                let arg_ty = args[5].ty();
+                let is_f = matches!(arg_ty, Type::Float);
+                // 决定用 ucomiss 还是 ucomisd
+                // 0F 2E / 66 0F 2E
+                let cmp_prefix: u8 = if is_f { 0 } else { 0x66 };
+                let cmp_opcode: u8 = 0x2E;
+                // 1. NaN 测试
+                self.gen_expr(&args[5], 0);
+                self.emit(&[cmp_prefix, 0x0F, cmp_opcode, 0xC0]); // ucomis{s,d} xmm0, xmm0
+                self.emit(&[0x0F, 0x9A, 0xC3]); // setp bl
+                self.emit(&[0x0F, 0xB6, 0xDB]); // movzx ebx, bl
+                // 2. Zero 测试
+                self.gen_expr(&args[5], 0);
+                self.emit(&[0x0F, 0x57, 0xC9]); // xorps xmm1, xmm1
+                self.emit(&[cmp_prefix, 0x0F, cmp_opcode, 0xC8]); // ucomis{s,d} xmm1, xmm0
+                self.emit(&[0x0F, 0x94, 0xC1]); // sete cl
+                self.emit(&[0x0F, 0xB6, 0xC9]); // movzx ecx, cl
+                // 3. Inf 测试
+                self.gen_expr(&args[5], 0);
+                self.emit(&[0x48, 0xB8]);
+                let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
+                self.emit(&inf_bits.to_le_bytes());
+                self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]); // movq xmm1, rax
+                self.emit(&[cmp_prefix, 0x0F, cmp_opcode, 0xC1]); // ucomis{s,d} xmm0, xmm1
+                self.emit(&[0x0F, 0x94, 0xC2]); // sete dl
+                self.emit(&[0x0F, 0xB6, 0xD2]); // movzx edx, dl
+                // 4. 合成: 优先级 NaN > Inf > Zero > Normal
+                // 默认: args[4] (Normal)
+                self.gen_expr(&args[4], 0);
+                // 若 Zero: eax = args[2]
+                // 若 Inf:  eax = args[1]
+                // 若 NaN:  eax = args[0]
+                // 我们用栈暂存 args[0..3] 到 r12-r15? 太复杂.
+                // 简化: 返回分类编号 (0..4), 由调用者按映射.
+                // 分类编号: NaN=0, Inf=1, Zero=2, Subnormal=3, Normal=4
+                self.emit(&[0xB8, 0x04, 0x00, 0x00, 0x00]); // mov eax, 4 (Normal)
+                // eax=4 默认
+                // 若 NaN (ebx=1): eax = 0
+                // 若 Inf (edx=1): eax = 1
+                // 若 Zero (ecx=1): eax = 2
+                // 链: 先 mov eax, 4; test ecx cmove eax, 2; test edx cmove eax, 1; test ebx cmove eax, 0
+                // 准备 3 个常量:
+                self.emit(&[0xBF, 0x02, 0x00, 0x00, 0x00]); // mov edi, 2
+                self.emit(&[0xBE, 0x01, 0x00, 0x00, 0x00]); // mov esi, 1
+                self.emit(&[0xBD, 0x00, 0x00, 0x00, 0x00]); // mov ebp, 0
+                // 实际上分类值由调用者映射, 我们这里返回 0/1/2/4 即可
+                // cmovne: 当 ebx=1 (NaN) 时 eax=0; edx=1 (Inf) 时 eax=1; ecx=1 (Zero) 时 eax=2
+                // 注意 cmovne 条件是 ZF=0 (非零), cmove 条件是 ZF=1 (零)
+                self.emit(&[0x85, 0xC9]); // test ecx, ecx (Zero?)
+                self.emit(&[0x0F, 0x45, 0xC7]); // cmovne eax, edi (Zero=2)
+                self.emit(&[0x85, 0xD2]); // test edx, edx (Inf?)
+                self.emit(&[0x0F, 0x45, 0xC6]); // cmovne eax, esi (Inf=1)
+                self.emit(&[0x85, 0xDB]); // test ebx, ebx (NaN?)
+                self.emit(&[0x0F, 0x45, 0xC5]); // cmovne eax, ebp (NaN=0)
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_signbit: 浮点数符号位 (x<0 返回 1, 否则 0)
+            // 用 movmskps 提取 4 packed single 的符号位, 放入 eax 的 bit 0..3.
+            //   bit 0 = 第一个 32-bit 字的符号位
+            //   bit 1 = 第二个 32-bit 字的符号位
+            //   bit 2 = 第三个 32-bit 字的符号位
+            //   bit 3 = 第四个 32-bit 字的符号位
+            // double 占据 64 位, 其符号位在 bit 63 = 第二个 32-bit 字的最高位
+            //   => 对应 movmskps 输出的 bit 1
+            // float 占据 32 位, 符号位在 bit 31 = 第一个 32-bit 字的最高位
+            //   => 对应 movmskps 输出的 bit 0
+            // 简化: 用 shr eax, 1 后再 and 1 拿 bit 1 (double), 但 float 会被右移
+            //   丢掉. 我们用类型区分:
+            //   double/long double: and 2 → 是否为负
+            //   float:               and 1 → 是否为负
+            "__builtin_signbit" | "__builtin_signbitf" | "__builtin_signbitl" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                let arg_ty = args[0].ty();
+                let is_f = matches!(arg_ty, Type::Float);
+                self.gen_expr(&args[0], 0); // xmm0 = x
+                // movmskps eax, xmm0
+                self.emit(&[0x0F, 0x50, 0xC0]);
+                if is_f {
+                    // float: 符号位是 bit 0
+                    self.emit(&[0x83, 0xE0, 0x01]); // and eax, 1
+                } else {
+                    // double/long double: 符号位是 bit 1
+                    self.emit(&[0x83, 0xE0, 0x02]); // and eax, 2
+                    // 归一化为 0/1: shr 1
+                    self.emit(&[0xD1, 0xE8]); // shr eax, 1
+                }
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            // __builtin_call_with_static_chain(call, chain, args...):
+            // 加载 chain 到 r10 (静态链寄存器), 然后按 SysV ABI 准备 args... 参数,
+            // 最后调用 call. 这是嵌套函数调用的关键 ABI: r10 = 父帧指针.
+            //
+            // 注: 嵌套函数"取地址" (nested function → function pointer) 还需要
+            // 单独生成 trampoline, 才能在跨函数指针场景用上, 本 builtin 主要给
+            // 已经能拿到函数指针 (例如通过宏展开) 的场景使用.
+            "__builtin_call_with_static_chain" => {
+                if args.len() < 2 { self.mov_imm(dst, 0); return true; }
+                // 1. chain → r10
+                self.gen_expr(&args[1], 10);
+                // 2. 按 SysV ABI 准备剩余参数 (args[2..]) 到 rdi/rsi/rdx/rcx/r8/r9 + 栈
+                let extra = &args[2..];
+                let gp_regs: [u8; 6] = [7, 6, 2, 1, 8, 9]; // rdi, rsi, rdx, rcx, r8, r9
+                let mut stack_off: i32 = 0;
+                for (i, a) in extra.iter().enumerate() {
+                    let arg_ty = a.ty();
+                    if i < 6 {
+                        // 前 6 个参数: 整数到 gp_regs[i], 浮点到 xmm{i}
+                        if matches!(arg_ty, Type::Float | Type::Double | Type::LongDouble) {
+                            self.gen_expr(a, 0); // xmm0
+                            if i != 0 {
+                                // movaps xmm{i}, xmm0
+                                self.emit(&[0xF3, 0x0F, 0x11, 0xC0 | ((i as u8) << 3)]);
+                            }
+                        } else {
+                            self.gen_expr(a, gp_regs[i]);
+                        }
+                    } else {
+                        // 第 7+ 个参数: 压栈
+                        self.gen_expr(a, 0);
+                        if matches!(arg_ty, Type::Float | Type::Double | Type::LongDouble) {
+                            self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24, 0]); // movsd [rsp+0], xmm0
+                        } else {
+                            self.emit(&[0x48, 0x89, 0x44, 0x24, 0]); // mov [rsp+0], rax
+                        }
+                        stack_off += 8;
+                    }
+                }
+                if stack_off != 0 {
+                    // sub rsp, stack_off
+                    if stack_off < 128 {
+                        self.emit(&[0x48, 0x83, 0xEC, stack_off as u8]);
+                    } else {
+                        self.emit(&[0x48, 0x81, 0xEC]);
+                        self.emit(&stack_off.to_le_bytes());
+                    }
+                }
+                // 3. 调整 RSP 对齐 (call 需要 16 字节对齐)
+                // 注意: 简化版, 假设栈已经 16 字节对齐.
+                // 4. 调用 args[0]
+                match &args[0] {
+                    Expr::Ident { name, .. } => {
+                        self.call_label(&name.name);
+                    }
+                    _ => {
+                        // 函数指针: 加载到 r11 然后 call r11
+                        self.gen_expr(&args[0], 11);
+                        self.emit(&[0x41, 0xFF, 0xD3]); // call r11
+                    }
+                }
+                if stack_off != 0 {
+                    // add rsp, stack_off
+                    if stack_off < 128 {
+                        self.emit(&[0x48, 0x83, 0xC4, stack_off as u8]);
+                    } else {
+                        self.emit(&[0x48, 0x81, 0xC4]);
+                        self.emit(&stack_off.to_le_bytes());
+                    }
+                }
+                if dst != 0 { self.mov(dst, 0); }
                 true
             }
             // __builtin_clz/clzl/clzll: 前导零计数

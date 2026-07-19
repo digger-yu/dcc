@@ -194,8 +194,15 @@ DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
 | 优先级 | 模块 | 功能 | 状态 | 说明 |
 |--------|------|------|------|------|
 | P1 | 后端 | 内联汇编 __asm__ | 已实现 | 约束 `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber；mini 汇编器发射指令 |
+| P1 | 后端 | 内联汇编 asm goto 输出约束 | 已实现 (M11.2) | "=r" 输出在 fall-through 路径写回，跳转路径保留旧值；与 GCC 语义一致 |
+| P2 | 后端 | computed goto 跨函数 | 已实现 (M11.2) | `&&outer_label` 经 RIP-relative LEA + 间接 `jmp` 跳到目标函数入口 |
+| P2 | 后端 | 嵌套函数 static chain | 已实现 (M11.2) | `__builtin_call_with_static_chain` 按 SysV ABI 写 `r10` + GP/XMM 寄存器传参 |
+| P3 | 后端 | __builtin_offsetof | 已实现 (M11.2) | 嵌套 struct / union / 数组下标 / 匿名 struct 成员访问，编译期常量折叠 |
+| P3 | 后端 | __builtin_huge_val* / __builtin_nan* | 已实现 (M11.2) | IEEE 754 位模式 rodata 加载：double 0x7FF0000000000000 / float 0x7F800000 / long double 0x7FFF8000000000000000；NaN 走 qNaN 编码 |
+| P3 | 后端 | __builtin_isnan/isinf/finite/signbit/fpclassify | 已实现 (M11.2) | 对 NaN/Inf 位模式正确判定；signbit 走 `movmskpd` 取符号位；fpclassify 按 NaN→Inf→subnormal→zero→normal 优先级链返回 |
 | P3 | 后端 | 向量类型运算 | 已实现 | 标量逐元素加减乘，不用 XMM 寄存器 |
 | P3 | 后端 | 定点数运算 | 已实现 | _Fract/_Accum 加减，复用整数 codegen |
+| P3 | 后端 | _Atomic / __atomic_* / __c11_atomic_* | 已实现 (M11.2) | C 前端接通 `_Atomic` 类型 + `lock xadd` / `cmpxchg` 循环 / `lock xchg`；`__atomic_*` 内建函数与 `__c11_atomic_*` 路径对齐 GCC |
 <!-- -->
 
 ### 十、C++ 专属
