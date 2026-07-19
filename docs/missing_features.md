@@ -261,6 +261,9 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | format 属性 | `format_check.rs`：`-Wformat` / `W0003` arity 检查 |
 | 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002`+int |
 | K&R 函数 | 解析 + `is_old_style` 标志 + codegen 测试 |
+| float 取模 (M13.1) | 软件 fmod = l - trunc(l/r) * r，divss/divsd + cvttsX2si + cvtsi2sX + mul + sub，零 libc 依赖；`ir.rs::FLOAT_BINOPS` 含 `Mod` |
+| int128 `&&`/`\|\|` (M13.1) | `or rdx, dst` 合并高 64 位后再 test，避免「高 1 低 0」误判 0 |
+| asm `x` 约束 XMM early-clobber (M13.1) | 独立 `input_xmm_set` + `xmm_pool` 0..15 内避让，asm goto 输出寄存器可落入不同 XMM |
 
 ## Sanitizer 后续（初版 AST 桩已交付）
 

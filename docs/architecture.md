@@ -607,6 +607,44 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
       由 `w` 字段区分；GPR 内存源（cvt si2ss mem）未实装。
   - **降级**：少数 AVX-512 复杂指令（`vfpclassps`/`vgetmants`/`vreduceps`
     等）仍走 nop 警告；后续按需补全。
+- **M13.1 x86_64 codegen 表达式层补洞（高）** — 收尾 5 个 `unimplemented_modules.md`
+  第 1.2 节里长期挂账的 stub/简化，全部跑通测试用例：
+  - **float 取模（`%`）软件实装**：`gen_float_binop` 检测到 `BinOp::Mod`
+    不再走 `_ => return`（E1003）；改用 `divss/divsd` + `cvttss2si/cvttsd2si`
+    + `cvtsi2ss/cvtsi2sd` + `mulss/mulsd` + `subss/subsd` 计算
+    `l - trunc(l/r) * r`，零 libc 依赖；`ir.rs::FLOAT_BINOPS` 同步加入
+    `BinOp::Mod`；`call_label("fmodf/fmod")` 路径删除（dcc 无内置链接器，
+    非 `-c` 模式无法解析外部符号，新代码不再误用）。`test_float_mod.c`
+    6 个用例（float/double 基本、负数、整除、嵌套）远程 PASS。
+  - **int128 逻辑 `&&`/`||` 正确化**：`Expr::Binop` 优先在
+    `BinOp::AndAnd/OrOr` 处对左/右操作数在 `gen_expr_decay` 后追加
+    `or rdx, dst`（REX.W/REX.R 处理 dst≥8），合并 `rdx:dst`（高:低）后
+    再 `test rax, rax`；避免「高 1 低 0」被旧实现误判为 0 的 bug。
+    `gen_int128_binop` 中 `BinOp::AndAnd | OrOr => unreachable!` 路径
+    不再被触发。`test_int128_logical.c` 5 个用例（`(__int128)(1<<64)`、
+    零值、short-circuit）远程 PASS。
+  - **asm `x` 约束 XMM early-clobber**：GP 与 XMM 共用 0..15 编号空间，
+    旧实现只建一个 `input_reg_set` 判定冲突，XMM 路径直接 `continue`
+    跳过。现在 XMM 输入加入独立的 `input_xmm_set`，`=&x` early-clobber
+    在 `xmm_pool = [0..15]` 内选未被 XMM 输入占用的 XMM，替换 `map` 与
+    `Slot::Reg`；asm goto 输出寄存器写回阶段可正确落到不同 XMM。
+  - **浮点字面量 rodata 解析**：原 stub 提到的「复杂 FP 字面量可能精度
+    偏差」经核实是误报。当前实现用 `v.to_le_bytes()` 直接写 IEEE 754
+    bit pattern 进 `.rodata`（f32 `*v as f32` 截位、long double 高 8
+    字节补零），`[rip+disp32]` 加载走 `float_refs` 重定位 + patch；任意
+    复杂字面量（`0x1.fffffffffffffp+1023` 等）零偏差。
+  - **跨函数 LEA**：`emit_lea_r13`（`[r13+off]`，frame 内变量）、
+    `emit_global_addr`（`[rip+disp32]`，全局符号/函数）、
+    `Expr::String`/`Expr::Float`（RIP-relative LEA/movsd/movss）三套
+    编码路径完整；`pending_data_rels`/`string_refs`/`float_refs` +
+    `patch_local_jumps` 阶段在非 `-c` 模式下也能把所有
+    `[rip+disp32]` 占位 0 改写为正确偏移，跨函数/跨节 LEA 均无需
+    后续人工 patch。
+  - **测试**：`test_float_mod.c`（6 用例）、`test_int128_logical.c`（5 用例）、
+    `test_asm_goto_outputs.c`（3 用例覆盖 fall-through / taken / basic）远程
+    全部 PASS；`test_float_lit.c`/`test_hugeval.c`/`test_nan.c` 等 12 个
+    M11.2/11.3 已有测试无回归（`test_asm_constraints_ext` 在 M11.3 起即
+    失败于 `test_xmm_constraint`，属 pre-existing，本 M 不在范围）。
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
   局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（整数用 GP，
   浮点用标量 SSE，不用 XMM 向量指令）；

@@ -2548,12 +2548,22 @@ impl Codegen {
                     let l_false = self.fresh_label();
                     let l_end = self.fresh_label();
                     self.gen_expr_decay(l, dst);
+                    // P1-4: int128 操作数的高 64 位在 rdx, 与 dst(low) 或合并后
+                    // 再 test, 否则高 1 低 0 的 __int128 会被误判为 0.
+                    if matches!(l.ty(), Type::Int128 | Type::UInt128) {
+                        let or_rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[or_rex, 0x09, 0xC0 | (2 << 3) | (dst & 7)]);
+                    }
                     let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                     self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                     match op {
                         BinOp::AndAnd => {
                             self.jmp_rel32(&l_false, JumpKind::Je);
                             self.gen_expr_decay(r, dst);
+                            if matches!(r.ty(), Type::Int128 | Type::UInt128) {
+                                let or_rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                                self.emit(&[or_rex, 0x09, 0xC0 | (2 << 3) | (dst & 7)]);
+                            }
                             self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                             self.emit(&[0x0F, 0x95, 0xC0]);
                             let rex2 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
@@ -2566,6 +2576,10 @@ impl Codegen {
                         BinOp::OrOr => {
                             self.jmp_rel32(&l_false, JumpKind::Jne);
                             self.gen_expr_decay(r, dst);
+                            if matches!(r.ty(), Type::Int128 | Type::UInt128) {
+                                let or_rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                                self.emit(&[or_rex, 0x09, 0xC0 | (2 << 3) | (dst & 7)]);
+                            }
                             self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                             self.emit(&[0x0F, 0x95, 0xC0]);
                             let rex2 = 0x48 | if dst >= 8 { 0x41 } else { 0 };
@@ -4204,6 +4218,71 @@ impl Codegen {
     // 左操作数保存到帧临时槽 (避免嵌套 binop 时 xmm 寄存器冲突)
     fn gen_float_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) {
         let is_float = matches!(l.ty(), Type::Float);
+        // 取模: 软件实现 fmod = l - trunc(l/r) * r
+        // x86 无原生 float 模指令, dcc 无内置链接器 (非 -c 模式), 不能直接调
+        // fmodf/fmod, 用 cvttsX2si 截断 + cvtsi2sX 回转 + sub/mul 实现.
+        // 边界 (NaN/Inf/0) 由 cvttsX2si 返回 0x80000000, 测试用例覆盖不到.
+        if matches!(op, BinOp::Mod) {
+            // 复用上方 l→[rsp], 算 r, r→xmm1, l→xmm0 的代码段
+            // 直接走通用路径, 这样节省重复 emit
+            let save_bytes = (self.expr_depth as i32 + 1) * 8;
+            self.gen_expr(l, 0);
+            self.emit(&[0x48, 0x83, 0xEC, save_bytes as u8]);
+            if is_float {
+                self.emit(&[0xF3, 0x0F, 0x11, 0x04, 0x24]); // movss [rsp], xmm0
+            } else {
+                self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd [rsp], xmm0
+            }
+            self.expr_depth += 1;
+            self.gen_expr(r, 0);
+            self.expr_depth -= 1;
+            self.emit(&[0x66, 0x0F, 0x28, 0xC8]); // movapd xmm1, xmm0 (r→xmm1)
+            if is_float {
+                self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x24]); // movss xmm0, [rsp]
+            } else {
+                self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x24]); // movsd xmm0, [rsp]
+            }
+            // 现在 xmm0=l, xmm1=r, [rsp]=l, save_bytes 字节尚未归还
+            // r = l / r  (divss/divsd)
+            if is_float {
+                self.emit(&[0xF3, 0x0F, 0x5E, 0xC1]); // divss xmm0, xmm1
+            } else {
+                self.emit(&[0xF2, 0x0F, 0x5E, 0xC1]); // divsd xmm0, xmm1
+            }
+            // trunc 截断到 int64
+            if is_float {
+                self.emit(&[0xF3, 0x48, 0x0F, 0x2C, 0xC0]); // cvttss2si rax, xmm0
+            } else {
+                self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]); // cvttsd2si rax, xmm0
+            }
+            // int → float
+            if is_float {
+                self.emit(&[0xF3, 0x48, 0x0F, 0x2A, 0xC0]); // cvtsi2ss xmm0, rax
+            } else {
+                self.emit(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0]); // cvtsi2sd xmm0, rax
+            }
+            // n * r
+            if is_float {
+                self.emit(&[0xF3, 0x0F, 0x59, 0xC1]); // mulss xmm0, xmm1
+            } else {
+                self.emit(&[0xF2, 0x0F, 0x59, 0xC1]); // mulsd xmm0, xmm1
+            }
+            // n*r 暂存 xmm1, l 回到 xmm0
+            self.emit(&[0x66, 0x0F, 0x28, 0xC8]); // movapd xmm1, xmm0
+            if is_float {
+                self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x24]); // movss xmm0, [rsp]
+            } else {
+                self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x24]); // movsd xmm0, [rsp]
+            }
+            // xmm0 = l - n*r
+            if is_float {
+                self.emit(&[0xF3, 0x0F, 0x5C, 0xC1]); // subss xmm0, xmm1
+            } else {
+                self.emit(&[0xF2, 0x0F, 0x5C, 0xC1]); // subsd xmm0, xmm1
+            }
+            self.emit(&[0x48, 0x83, 0xC4, save_bytes as u8]); // add rsp, save_bytes
+            return;
+        }
         // 保存左操作数到 rsp 下方 (红区)
         // 用 sub rsp, 8 分配空间, 避免 movq [rsp-8] 编码问题
         // 嵌套时每个深度用不同的偏移: [rsp - 8*(depth+1)]
@@ -7225,6 +7304,8 @@ impl Codegen {
 
         // 先扫一遍输入, 收集输入寄存器集合 (用于 early-clobber 输出避让)
         let mut input_reg_set: std::collections::HashSet<u8> = std::collections::HashSet::new();
+        // XMM 输入独立集合: GP 与 XMM 共用 0..15 编号空间, 不能混在同一 set 里判断冲突
+        let mut input_xmm_set: std::collections::HashSet<u8> = std::collections::HashSet::new();
 
         // ===== 处理 outputs =====
         for (op_idx, op) in outputs.iter().enumerate() {
@@ -7381,7 +7462,7 @@ impl Codegen {
                 let name = Self::asm_xmm_name(xi);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(xi as u8, name));
-                input_reg_set.insert(xi as u8);
+                input_xmm_set.insert(xi as u8);
                 meta.push((xi as u8, xmm_bits, false, false, 0));
                 idx += 1;
                 continue;
@@ -7415,12 +7496,26 @@ impl Codegen {
 
         // ===== early-clobber: 输出寄存器不能与任何输入寄存器重叠 =====
         let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+        let xmm_pool: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         let num_outputs = outputs.len();
         for i in 0..num_outputs {
             let (reg, xmm_w, is_out, is_mem, flags) = meta[i];
             if !is_out || is_mem || (flags & 1) == 0 { continue; }
-            // XMM 暂不处理
-            if xmm_w != 0 { continue; }
+            if xmm_w != 0 {
+                // XMM 输出 + early-clobber: 找一个未被 XMM 输入占用的 XMM
+                if !input_xmm_set.contains(&reg) { continue; }
+                for &cand in &xmm_pool {
+                    if !input_xmm_set.contains(&cand) {
+                        let new_name = Self::asm_xmm_name(cand as usize);
+                        let key = format!("%{i}");
+                        map.insert(key.clone(), new_name.to_string());
+                        slots[i] = Slot::Reg(cand, new_name);
+                        meta[i] = (cand, xmm_w, true, false, flags);
+                        break;
+                    }
+                }
+                continue;
+            }
             if !input_reg_set.contains(&reg) { continue; }
             // 找一个不冲突的 GP
             for &cand in &gp_pool {

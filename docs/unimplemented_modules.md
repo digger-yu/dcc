@@ -73,15 +73,22 @@ AVX/AVX2 浮点 60+ 条；`asm_avx_aes_fma_tsx_compiles_without_nop_fallback`
 
 ### 1.2 x86_64 codegen 表达式层
 
-🟠 当前 stub / 简化：
+> **M13.1 已完成**（见 `docs/architecture.md` M13.1 章节）：float 取模软件实装
+> （divss/divsd + cvttsX2si + cvtsi2sX + sub/mul，无 libc 依赖）、int128 `&&`/`||`
+> 合并 rax:rdx 后再 test（避免高 1 低 0 误判 0）、asm `=&x` early-clobber
+> 独立 XMM 池（不再复用 GP 集合判定冲突）、asm goto 输出寄存器写回阶段支持
+> 落入不同 XMM；float/跨函数 LEA/rip-relative `[rip+disp32]` 通过既有
+> `float_refs`/`pending_data_rels` 重定位 + patch 路径已稳定支撑。
 
-| 模块 | 文件:行 | 现状 |
-|------|---------|------|
-| 浮点字面量 rodata 解析 | `x86_64.rs:1412` | `init_data.extend_from_slice(&[0u8; 8])` 占位，复杂 FP 字面量可能精度偏差 |
-| 跨函数 LEA | `x86_64.rs:3149` | `disp32 = placeholder 0`，依赖后续 patch 修复，但部分 RIP-relative + 索引组合未实现 |
-| `gen_float_binop` 不支持运算 | `x86_64.rs:4219` | `_ => return`，float 取模/部分一元运算不发射（E1003 已覆盖） |
-| XMM 临时槽 | `x86_64.rs:7396` | "XMM 暂不处理" 注释，复杂 SIMD 路径走内存往返 |
-| int128 binary 逻辑 | `x86_64.rs:3995` | `BinOp::AndAnd/OrOr => unreachable!`，int128 上的 `&&`/`\|\|` 仍走条件路径 |
+历史 stub（已全部解决）：
+
+| 模块 | 文件:行 | 现状（M13.1 后） |
+|------|---------|------------------|
+| 浮点字面量 rodata 解析 | `x86_64.rs:3194` | `v.to_le_bytes()` 直接写入 `.rodata`，f32/double IEEE 754 精确，movss/movsd 加载，复杂字面量无精度偏差 |
+| 跨函数 LEA | `x86_64.rs:5396` | `[r13+off]` 用 `emit_lea_r13` 直编；RIP-relative LEA (`emit_global_addr`/`Expr::String`/`Expr::Float`) 走 `pending_data_rels`/`string_refs`/`float_refs` + patch 路径，跨函数/跨节均正确 |
+| `gen_float_binop` 不支持运算 | `x86_64.rs:4219` | float/double 取模改软件实装：cvttsX2si 截断 + cvtsi2sX 回转 + mul + sub，零 libc 依赖；E1003 不再触发 |
+| XMM 临时槽 | `x86_64.rs:7466` | asm `x` XMM 输入加入独立 `input_xmm_set`；`=&x` early-clobber 在 `xmm_pool` 0..15 内选不冲突的 XMM 并替换 map 与 `Slot`；不再走 "XMM 暂不处理" |
+| int128 binary 逻辑 | `x86_64.rs:2553` | `Expr::Binop` 优先在 `&&`/`\|\|` 处用 `or rdx, dst` 合并高 64 位后 `test rax, rax`；不再依赖 `gen_int128_binop` 里的 `unreachable!` 路径 |
 
 ### 1.3 AArch64 后端
 

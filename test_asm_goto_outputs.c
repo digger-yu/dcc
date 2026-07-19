@@ -7,15 +7,16 @@
  * 因此:
  *   test_asm_goto_basic:
  *     让 asm 始终 jmp, 输出不会被写回, x 保持初值 0.
- *   test_asm_goto_conditional:
- *     根据输入寄存器 (x 值) 决定是否 jmp. x == 0 不跳,
- *     此时输出 result 保持初值 (我们把它初始化为 0, 这样不跳时
- *     仍是 0; 跳到 label_zero 时会返回 3).
+ *   test_asm_goto_fallthrough:
+ *     asm 显式写 42 到输出且不跳, 验证 fall-through 路径下输出被写回 42.
+ *   test_asm_goto_taken:
+ *     asm 写 42 到输出但条件跳, 验证 goto taken 路径下输出保持初值 0.
  *
- * 注: dcc 现有实现可能对 "r"(x) 输入语义处理有偏差 (dcc 在寄存器里
- *   放的是 x 的地址而非值), 因此 condition test 主要依赖 dcc 行为.
- *   本测试只验证最基本机制: "=r" 输出 + 立即数 "i" 输入 + goto label
- *   联合时编译能通过、运行不崩溃.
+ * 注: dcc 当前 "=r" 输出准备时执行 lea 把变量地址放入寄存器, 实际 asm
+ *   模板若显式写 %N (例如 "mov $42, %0") 会覆盖该地址, 写回阶段即可获得
+ *   正确值; 模板不写 %N 时寄存器保留地址, 与 GCC "未初始化" 语义不同,
+ *   调用方应避免依赖这种情况.  本测试只验证最基本机制:
+ *   "=r" 输出 + "r" 输入 + goto label 联合时编译能通过、运行不崩溃.
  */
 
 int test_asm_goto_basic(void) {
@@ -33,13 +34,30 @@ label_done:
     return x;  /* 0: 输出未被写回 */
 }
 
-int test_asm_goto_conditional(void) {
+int test_asm_goto_fallthrough(void) {
     int x = 0;
-    int result = 0;  /* 输出初值 */
-    /* "r"(x) 输入: 测试 x 是否非 0, 是则跳到 label_zero
-     * 已知 dcc 行为: "r"(x) 实际传入的是 x 的地址, 因此 test 始终非 0,
-     * 会跳到 label_zero, 返回 3.  本测试验证该已知行为. */
+    int result = 0;
+    /* asm 显式写 42 到输出且不跳, 验证 fall-through 路径下输出被写回 42 */
     asm goto (
+        "mov $42, %0"
+        : "=r"(result)
+        : "r"(x)
+        : "cc"
+        : label_unused
+    );
+    if (result != 42) return 1;
+    if (x != 0) return 2;
+    return 0;
+label_unused:
+    return 3;  /* 不会执行 */
+}
+
+int test_asm_goto_taken(void) {
+    int x = 1;  /* 非零, jne 必跳 */
+    int result = 0;
+    /* asm 写 42 到输出, 但因 x=1 条件跳到 label_zero, 输出不应被写回 */
+    asm goto (
+        "mov $42, %0\n\t"
         "test %1, %1\n\t"
         "jne %l0"
         : "=r"(result)
@@ -48,18 +66,17 @@ int test_asm_goto_conditional(void) {
         : label_zero
     );
     /* 不应到达 */
-    if (result != 0) return 1;
-    if (x != 0) return 2;
-    return 0;
+    return 4;
 label_zero:
-    return 3;  /* dcc 当前会跳到这里 */
+    return result;  /* dcc 跳过后不写回, result 保持初值 0 */
 }
 
 int main(void) {
     int r = test_asm_goto_basic();
     if (r != 0) return 100 + r;
-    r = test_asm_goto_conditional();
-    /* test_asm_goto_conditional 当前返回 3 (dcc 已知行为: "r" 输入传地址) */
-    if (r != 3) return 200 + r;
+    r = test_asm_goto_fallthrough();
+    if (r != 0) return 200 + r;
+    r = test_asm_goto_taken();
+    if (r != 0) return 300 + r;
     return 0;
 }

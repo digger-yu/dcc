@@ -167,7 +167,7 @@ fn validate_stmt(stmt: &TypedStmt, diagnostics: &mut Vec<Diagnostic>) {
 
 /// 与 codegen 浮点路径一致的二元运算符集合。
 const FLOAT_BINOPS: &[BinOp] = &[
-    BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div,
+    BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Mod,
     BinOp::EqEq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
     BinOp::AndAnd, BinOp::OrOr,
 ];
