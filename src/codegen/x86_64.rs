@@ -74,6 +74,8 @@ pub struct Codegen {
     /// 函数形参类型表（SysV 实参按形参类型分类）
     func_param_types: HashMap<String, Vec<Type>>,
     current_func_is_nested: bool,  // 当前编译的函数是否是嵌套函数
+    /// 当前函数标了 __attribute__((returns_nonnull)): 返回时需检查 rax 非空
+    current_returns_nonnull: bool,
     static_chain_offset: i32,      // 静态链在当前帧中的偏移
     upvar_offsets: HashMap<String, i32>, // upvar 名称 → 在父帧中的偏移
     // &&label 地址引用: (disp32_pos, label_name)
@@ -369,6 +371,7 @@ impl Codegen {
                nested_funcs: HashMap::new(),
                func_param_types: HashMap::new(),
                current_func_is_nested: false,
+               current_returns_nonnull: false,
                static_chain_offset: 0,
                upvar_offsets: HashMap::new(),
                label_addr_refs: vec![],
@@ -1821,6 +1824,7 @@ impl Codegen {
         self.vla_total_size = 0;
         // 设置嵌套函数状态
         self.current_func_is_nested = f.is_nested;
+        self.current_returns_nonnull = f.returns_nonnull;
         self.upvar_offsets.clear();
         if f.is_nested {
             for (name, off) in &f.upvars {
@@ -2309,6 +2313,16 @@ impl Codegen {
                         }
                     } else {
                         self.gen_expr(e, 0);
+                    }
+                    // __attribute__((returns_nonnull)): 返回前检查 rax 非空.
+                    // 若为 0 触发 UD2 (执行未定义指令) 立即 abort.
+                    if self.current_returns_nonnull && matches!(ret_ty, Type::Ptr(_) | Type::Func(_, _)) {
+                        // test rax, rax; jnz .ok; ud2; .ok:
+                        self.emit(&[0x48, 0x85, 0xc0]);  // test rax, rax
+                        let ok_label = self.fresh_label();
+                        self.jmp_rel32(&ok_label, JumpKind::Jne);
+                        self.emit(&[0x0f, 0x0b]);  // ud2 - undefined instruction trap
+                        self.label(&ok_label);
                     }
                 } else { self.emit(&[0x31, 0xc0]); }
                 self.emit_func_epilogue();

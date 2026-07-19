@@ -44,6 +44,8 @@ pub struct Preprocessor {
     deps: Vec<String>,
     /// #pragma pack 栈: 栈顶是当前 packing 对齐 (None = 默认 8)
     pack_stack: Vec<Option<usize>>,
+    /// #pragma pack 变更历史: (行号, 新对齐). 供 parser 按位置查询
+    pack_history: Vec<(u32, Option<usize>)>,
     /// #pragma weak 记录的弱符号集合 (在 codegen 中处理)
     pub weak_symbols: HashSet<String>,
     /// #pragma STDC FENV_ACCESS 状态
@@ -78,20 +80,39 @@ struct MacroDef {
     variadic: bool,
 }
 
+/// 预处理器输出: 包含文本与全部对 codegen 有影响的元数据
+#[derive(Default)]
+pub struct PreprocessOutput {
+    /// 预处理后的源码
+    pub text: String,
+    /// 诊断信息
+    pub diags: Vec<Diagnostic>,
+    /// 成功打开过的 include 路径 (供 -MD/-MMD)
+    pub deps: Vec<String>,
+    /// #pragma pack 变更历史: (行号, 新对齐). 供 parser 按位置查询
+    pub pack_history: Vec<(u32, Option<usize>)>,
+    /// #pragma weak 记录的弱符号集合 (供 codegen 标记 weak 绑定)
+    pub weak_symbols: std::collections::HashSet<String>,
+}
+
 pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                   system_paths: &[PathBuf],
                   defines: &[(String, Option<String>)],
                   std_mode: StdMode,
                   force_includes: &[String],
-                  freestanding: bool) -> (String, Vec<Diagnostic>, Vec<String>) {
+                  freestanding: bool) -> PreprocessOutput {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
         Err(e) => {
-            return (String::new(), vec![Diagnostic::err(
-                "E0208",
-                format!("source is not valid UTF-8: {}", e),
-                Span::point(file, 1, 1),
-            )], Vec::new());
+            return PreprocessOutput {
+                text: String::new(),
+                diags: vec![Diagnostic::err(
+                    "E0208",
+                    format!("source is not valid UTF-8: {}", e),
+                    Span::point(file, 1, 1),
+                )],
+                ..Default::default()
+            };
         }
     };
     let base = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -116,6 +137,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         in_comment: false,
         deps: Vec::new(),
         pack_stack: vec![None],
+        pack_history: vec![(0, None)],
         weak_symbols: HashSet::new(),
         fenv_access: false,
         pending_pragmas: RefCell::new(Vec::new()),
@@ -137,7 +159,15 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     if let Some(v) = stc_version {
         pp.define_builtin("__STDC_VERSION__", v);
     }
-    pp.define_builtin("__STDC_HOSTED__", "1");
+    if freestanding {
+        // 独立 (freestanding) 实现: C11 § 4/6 允许省略 <stdatomic.h>,
+        // 必须定义 __STDC_NO_ATOMICS__=1. 不预置 atomic_* 宏
+        // (与 Linux 内核同名 inline 函数冲突, 见 M11.2 注释).
+        pp.define_builtin("__STDC_HOSTED__", "0");
+        pp.define_builtin("__STDC_NO_ATOMICS__", "1");
+    } else {
+        pp.define_builtin("__STDC_HOSTED__", "1");
+    }
     pp.define_builtin("NULL", "((void*)0)");
     // GCC 兼容宏 (Linux 内核头文件大量使用)
     pp.define_builtin("__GNUC__", "13");
@@ -328,7 +358,13 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     }
 
     pp.process_text(&text, file);
-    (pp.out, pp.diags, pp.deps)
+    PreprocessOutput {
+        text: pp.out,
+        diags: pp.diags,
+        deps: pp.deps,
+        pack_history: pp.pack_history,
+        weak_symbols: pp.weak_symbols,
+    }
 }
 
 /// 探测 GCC 内建头文件目录（`gcc -print-file-name=include` 及常见路径）。
@@ -1215,39 +1251,60 @@ impl Preprocessor {
         let text = text.trim();
         // 去掉包裹的括号
         let inner = text.trim_start_matches('(').trim_end_matches(')').trim();
+        let new_pack: Option<usize>;
         if inner.is_empty() {
             // #pragma pack(): 恢复默认
             if let Some(top) = self.pack_stack.last_mut() {
                 *top = None;
             }
-            return;
+            new_pack = None;
+        } else {
+            // 拆分 token
+            let mut parts = inner.split(',').map(|p| p.trim());
+            let first = parts.next().unwrap_or("");
+            if first == "push" {
+                // 复制当前对齐再压栈
+                let current = self.pack_stack.last().copied().flatten();
+                let n = parts.next().and_then(|s| s.parse::<usize>().ok());
+                // 如果 push 给了对齐, 优先级: 显式 n > 当前对齐
+                let pushed = n.or(current);
+                self.pack_stack.push(pushed);
+                new_pack = pushed;
+            } else if first == "pop" {
+                // 弹出栈顶
+                if self.pack_stack.len() > 1 {
+                    self.pack_stack.pop();
+                }
+                new_pack = self.pack_stack.last().copied().flatten();
+            } else if let Ok(n) = first.parse::<usize>() {
+                // #pragma pack(n): 仅修改当前层
+                if let Some(top) = self.pack_stack.last_mut() {
+                    *top = Some(n);
+                }
+                new_pack = Some(n);
+            } else {
+                return; // 未识别的 pack 形式, 不记录
+            }
         }
-        // 拆分 token
-        let mut parts = inner.split(',').map(|p| p.trim());
-        let first = parts.next().unwrap_or("");
-        if first == "push" {
-            // 复制当前对齐再压栈
-            let current = self.pack_stack.last().copied().flatten();
-            let n = parts.next().and_then(|s| s.parse::<usize>().ok());
-            // 如果 push 给了对齐, 优先级: 显式 n > 当前对齐
-            let pushed = n.or(current);
-            self.pack_stack.push(pushed);
-        } else if first == "pop" {
-            // 弹出栈顶
-            if self.pack_stack.len() > 1 {
-                self.pack_stack.pop();
-            }
-        } else if let Ok(n) = first.parse::<usize>() {
-            // #pragma pack(n): 仅修改当前层
-            if let Some(top) = self.pack_stack.last_mut() {
-                *top = Some(n);
-            }
+        // 记录到 pack_history, 供 parser 按位置查询
+        if self.pack_history.last().map(|(_, p)| *p) != Some(new_pack) {
+            self.pack_history.push((self.cur_line, new_pack));
         }
     }
 
     /// 公开接口: 获取当前 packing 对齐 (供 codegen struct 布局使用)
     pub fn current_pack(&self) -> Option<usize> {
         self.pack_stack.last().copied().flatten()
+    }
+
+    /// 取出 pack_history (移动所有权) 供外部使用
+    pub fn take_pack_history(&mut self) -> Vec<(u32, Option<usize>)> {
+        std::mem::take(&mut self.pack_history)
+    }
+
+    /// 取出 weak_symbols (移动所有权) 供外部使用
+    pub fn take_weak_symbols(&mut self) -> HashSet<String> {
+        std::mem::take(&mut self.weak_symbols)
     }
 
     /// 把 `_Pragma("...")` 中的字符串当作一行 #pragma 处理
@@ -2626,7 +2683,7 @@ mod tests {
         let hdr = dir.join(format!("dcc-abs-inc-{}.h", std::process::id()));
         fs::write(&hdr, "#define ABS_INCLUDE_MARKER 42\n").expect("write hdr");
         let src = format!("#include {}\nint x = ABS_INCLUDE_MARKER;\n", hdr.display());
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             src.as_bytes(),
             "abs-include.c",
             &[],
@@ -2637,6 +2694,8 @@ mod tests {
             false,
         );
         let _ = fs::remove_file(hdr);
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(
             output.contains("int x = ABS_INCLUDE_MARKER") || output.contains("int x = 42"),
@@ -2649,7 +2708,7 @@ mod tests {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/preproc_comment_force.h");
         let force_includes = vec![fixture.to_string_lossy().into_owned()];
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"int value = FORCED_VALUE;\n",
             "comment-regression.c",
             &[],
@@ -2659,6 +2718,8 @@ mod tests {
             &force_includes,
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
 
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(output.trim(), "int value = 7;");
@@ -2669,7 +2730,7 @@ mod tests {
 
     #[test]
     fn gnu_variadic_preserves_multiline_asm_goto_args() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#define asm_volatile_goto(x...) asm goto(x)\n\
               void f(void) {\n\
               asm_volatile_goto(\"1:\"\n\
@@ -2684,6 +2745,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("asm goto(\"1:\""), "output: {output}");
         assert!(output.contains("\"jmp\\n\""), "output: {output}");
@@ -2693,7 +2756,7 @@ mod tests {
 
     #[test]
     fn iso_variadic_macro_allows_empty_va_args() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#define __stringify_1(x...) #x\n\
               #define __stringify(x...) __stringify_1(x)\n\
               #define __ASM_FORM(x, ...) \" \" __stringify(x,##__VA_ARGS__) \" \"\n\
@@ -2707,6 +2770,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("\"2\""), "output: {output}");
         assert!(!output.contains("__ASM_FORM"), "output: {output}");
@@ -2714,7 +2779,7 @@ mod tests {
 
     #[test]
     fn gnu_named_variadic_macro_expands() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#define asm_volatile_goto(x...) asm goto(x)\n\
               void f(void) { asm_volatile_goto(\"jmp\" : : : : lbl); lbl: ; }\n",
             "gnu-variadic.c",
@@ -2725,6 +2790,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("asm goto(\"jmp\""), "output: {output}");
         assert!(!output.contains("asm goto(x)"), "output: {output}");
@@ -2732,7 +2799,7 @@ mod tests {
 
     #[test]
     fn unterminated_block_comment_is_an_error() {
-        let (_, diags, _) = preprocess(
+        let out = preprocess(
             b"int value;\n/* never closed\n",
             "unterminated.c",
             &[],
@@ -2742,6 +2809,7 @@ mod tests {
             &[],
             false,
         );
+        let diags = out.diags;
 
         assert!(diags.iter().any(|d| d.code == "E0207"));
     }
@@ -2749,7 +2817,7 @@ mod tests {
     /// #if 中 0x 十六进制不得被 replace_unknown_idents 拆坏（GCC safe-ctype.h）
     #[test]
     fn if_hex_and_char_const_compare() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#if '\\n' == 0x0A && ' ' == 0x20 && '0' == 0x30 \\\n\
                && 'A' == 0x41 && 'a' == 0x61 && '!' == 0x21\n\
               #define HOST_CHARSET 1\n\
@@ -2765,13 +2833,15 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 1;"), "output: {output}");
     }
 
     #[test]
     fn if_hex_literal_equals_decimal() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#if 0x41 == 65\n#define OK 1\n#else\n#define OK 0\n#endif\nint x = OK;\n",
             "hex-if.c",
             &[],
@@ -2781,13 +2851,15 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 1;"), "output: {output}");
     }
 
     #[test]
     fn object_like_alias_expands_function_like_tail() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#define __KERNEL_DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))\n\
               #define DIV_ROUND_UP __KERNEL_DIV_ROUND_UP\n\
               #define XA_MARK_LONGS DIV_ROUND_UP((1UL << 6), 64)\n\
@@ -2800,6 +2872,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(
             !output.contains("__KERNEL_DIV_ROUND_UP"),
@@ -2811,7 +2885,7 @@ mod tests {
     /// 嵌套函数宏参数预展开须继承涂蓝集，避免 F(F(1)) 类无限递归
     #[test]
     fn nested_function_macro_does_not_recurse_forever() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#define F(x) G(x)\n\
               #define G(x) F(x)\n\
               int v = F(F(1));\n",
@@ -2823,6 +2897,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         // 展开后应留下涂蓝的 F(...) 调用，而非栈溢出
         assert!(output.contains("int v ="), "output: {output}");
@@ -2847,7 +2923,7 @@ mod tests {
         let src = dir.join("t.c");
         let mut f = fs::File::create(&src).unwrap();
         writeln!(f, "#include <foo.h>\nint x = FROM_B;").unwrap();
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             &fs::read(&src).unwrap(),
             src.to_str().unwrap(),
             &[],
@@ -2857,6 +2933,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         let _ = fs::remove_dir_all(&dir);
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 42;"), "output: {output}");
@@ -2865,7 +2943,7 @@ mod tests {
     /// 零参 function-like 宏经缓存往返后仍须匹配 F() 而非误读成 F("")
     #[test]
     fn zero_arg_function_macro_roundtrip() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#define F() 42\nint x = F();\n",
             "zero-arg-fn.c",
             &[],
@@ -2875,6 +2953,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int x = 42;"), "output: {output}");
         assert!(!output.contains("F()"), "macro should expand: {output}");
@@ -2882,7 +2962,7 @@ mod tests {
 
     #[test]
     fn current_thread_info_zero_arg_expands() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#define current ((void*)0)\n\
               #define current_thread_info() ((struct thread_info *)current)\n\
               struct thread_info { unsigned long syscall_work; };\n\
@@ -2895,6 +2975,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(
             output.contains("((struct thread_info *)"),
@@ -2908,7 +2990,7 @@ mod tests {
 
     #[test]
     fn stringify_collapses_multiline_whitespace() {
-        let (output, diags, _) = preprocess(
+        let out = preprocess(
             b"#define NOFAIL(ptr) do_nofail((ptr), #ptr)\n\
               void *do_nofail(void *p, const char *e);\n\
               void *f(void) {\n\
@@ -2923,6 +3005,8 @@ mod tests {
             &[],
             false,
         );
+        let output = out.text;
+        let diags = out.diags;
         assert!(diags.is_empty(), "{diags:?}");
         assert!(
             output.contains("\"malloc(sizeof(int) + 1)\""),

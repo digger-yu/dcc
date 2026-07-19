@@ -39,10 +39,14 @@ struct ParsedAttrs {
 }
 
 /// 解析选项（Driver 传入）
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ParseOptions {
     /// `-fpermissive`：未知 typedef 降级为 int 并告警（默认严格 E0009）
     pub permissive: bool,
+    /// #pragma pack 变更历史: (行号, 新对齐). 供 struct 布局按位置查询
+    pub pack_history: Vec<(u32, Option<usize>)>,
+    /// #pragma weak 记录的弱符号集合
+    pub weak_symbols: std::collections::HashSet<String>,
 }
 
 impl ParsedAttrs {
@@ -120,6 +124,25 @@ impl<'a> Parser<'a> {
                allow_named_type: false, opts }
     }
     fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
+
+    /// 给定源行号, 查找 #pragma pack 历史中的当前 packing 对齐
+    /// pack_history 按行号升序, 找到最后一个 l <= line 的条目即生效值
+    pub fn pack_at_line(&self, line: u32) -> Option<usize> {
+        let mut current: Option<usize> = None;
+        for &(l, pack) in &self.opts.pack_history {
+            if l <= line {
+                current = pack;
+            } else {
+                break;
+            }
+        }
+        current
+    }
+
+    /// 当前行处是否标记为弱符号 (#pragma weak name)
+    pub fn is_weak_symbol(&self, name: &str) -> bool {
+        self.opts.weak_symbols.contains(name)
+    }
 
     /// 保存解析器/词法位置，供试探性解析后回退
     fn bookmark(&self) -> (usize, u32, u32, Tok, Tok) {
@@ -1342,8 +1365,10 @@ impl<'a> Parser<'a> {
             };
             // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
             let attrs = attrs;
+            // #pragma weak name 在 codegen 体现为 STB_WEAK 绑定, 此处合并
+            let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
             Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
-                section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
+                section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                 visibility: attrs.visibility, is_unused: attrs.is_unused,
                 is_cold: attrs.is_cold, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
                 is_variadic: self.last_variadic, is_constructor: attrs.is_constructor,
@@ -1422,23 +1447,26 @@ impl<'a> Parser<'a> {
                 if self.cur.kind != TokKind::Comma && !self.expect(TokKind::Semi, "';'") { return None; }
                 self.locals.insert(name_for_decl.name.clone(), decl_ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), decl_ty.clone()); }
+                let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
                 Some(vec![Decl::Var(VarDecl { ty: decl_ty, name: name_for_decl, init: Some(init), span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
-                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
+                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                                         visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
                                         no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
                 self.advance();
+                let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
-                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
+                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                                         visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
                                         no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
             } else if self.cur.kind == TokKind::Comma {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
+                let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
-                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak,
+                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                                         visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
                                         no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
             } else {
@@ -1560,19 +1588,58 @@ impl<'a> Parser<'a> {
                     || self.cur.text == "__restrict__" => { self.advance(); }
                 // MSVC 扩展 _ms_restrict: 视为 restrict 同义
                 TokKind::Ident if self.cur.text == "_ms_restrict" => { self.advance(); }
-                // MSVC 扩展 __declspec: 静默跳过参数
-                // 形式: __declspec(align(8)) / __declspec(noreturn) / __declspec(thread) / __declspec(dllimport) / __declspec(dllexport)
+                // MSVC 扩展 __declspec: 解析参数并转化为等价 GCC 属性
+                // 形式: __declspec(align(8)) / __declspec(noreturn) / __declspec(thread)
+                //       __declspec(dllimport) / __declspec(dllexport)
                 TokKind::Ident if self.cur.text == "__declspec" => {
                     self.advance();
                     if self.cur.kind == TokKind::LParen {
                         self.advance();
-                        // 深度匹配括号, 跳过 __declspec 的整段参数
-                        let mut depth = 1i32;
-                        while depth > 0 && self.cur.kind != TokKind::Eof {
-                            if self.cur.kind == TokKind::LParen { depth += 1; }
-                            else if self.cur.kind == TokKind::RParen { depth -= 1; }
-                            self.advance();
+                        // 解析 __declspec 的内容, 逐个 ident 应用等价属性
+                        while self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
+                            if self.cur.kind == TokKind::Ident {
+                                let kw = self.cur.text.clone();
+                                self.advance();
+                                if kw == "thread" {
+                                    // __declspec(thread) ≡ __thread (TLS 变量)
+                                    self.decl_storage.is_thread_local = true;
+                                } else if kw == "noreturn" {
+                                    // __declspec(noreturn) 标记函数不返回, 用 cold + noinline 提示
+                                    self.decl_attrs.is_cold = true;
+                                    self.decl_attrs.is_noinline = true;
+                                } else if kw == "align" {
+                                    // __declspec(align(N)): 设置对齐
+                                    if self.cur.kind == TokKind::LParen {
+                                        self.advance();
+                                        if self.cur.kind == TokKind::Number {
+                                            if let Ok(n) = self.cur.text.parse::<usize>() {
+                                                // 已有 alignment 则取较大者
+                                                let cur = self.decl_attrs.alignment.unwrap_or(0);
+                                                self.decl_attrs.alignment = Some(cur.max(n));
+                                            }
+                                            self.advance();
+                                        }
+                                        if self.cur.kind == TokKind::RParen { self.advance(); }
+                                    }
+                                }
+                                // dllimport / dllexport / 其他: 接受但无 codegen 差异
+                            } else if self.cur.kind == TokKind::Number {
+                                self.advance();
+                            } else if self.cur.kind == TokKind::LParen {
+                                // 跳过一个带参数的子句 (例如 align(N))
+                                self.advance();
+                                let mut depth = 1i32;
+                                while depth > 0 && self.cur.kind != TokKind::Eof {
+                                    if self.cur.kind == TokKind::LParen { depth += 1; }
+                                    else if self.cur.kind == TokKind::RParen { depth -= 1; }
+                                    if depth > 0 { self.advance(); }
+                                }
+                                if self.cur.kind == TokKind::RParen { self.advance(); }
+                            } else {
+                                self.advance();
+                            }
                         }
+                        if self.cur.kind == TokKind::RParen { self.advance(); }
                     }
                 }
                 // MSVC 扩展 __pragma: 跳过参数
@@ -1680,6 +1747,7 @@ impl<'a> Parser<'a> {
             let is_u = self.cur.kind == TokKind::KwUnion; self.advance();
             // struct __attribute__((__may_alias__)) name
             self.skip_attributes();
+            let struct_line = self.lex.line;  // struct 关键字所在行, 用于查询 #pragma pack
             let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
             if self.cur.kind == TokKind::LBrace {
                 self.advance(); let fields = self.parse_fields();
@@ -1708,7 +1776,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if pack { Type::layout_struct_packed(&mut fields, is_u); }
-                else { Type::layout_struct(&mut fields, is_u); }
+                else {
+                    // 优先级: __attribute__((packed)) > 当前 #pragma pack(n) > 自然对齐
+                    let max_align = self.pack_at_line(struct_line);
+                    Type::layout_struct_with_pack(&mut fields, is_u, max_align);
+                }
                 if let Some(a) = align_n { for f in fields.iter_mut() { f.offset = (f.offset + a - 1) & !(a - 1); } }
                 let fields_rc = Arc::new(fields);
                 self.struct_defs.insert(nm.clone(), (Arc::clone(&fields_rc), is_u));

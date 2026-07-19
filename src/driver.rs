@@ -71,9 +71,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let src = mapped.as_slice();
 
     // 预处理
-    let (preprocessed, mut pp_diags, include_deps) = preproc::preprocess(
+    let pp_out = preproc::preprocess(
         &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
     );
+    let mut pp_diags = pp_out.diags;
+    let preprocessed = pp_out.text;
+    let pack_history = pp_out.pack_history;
+    let weak_symbols = pp_out.weak_symbols;
+    let include_deps = pp_out.deps;
     enrich_diags(&mut pp_diags, &src);
     if !pp_diags.is_empty() {
         for d in &pp_diags { d.print(); }
@@ -92,9 +97,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let (mut prog, mut diags) = parser::parse_with_opts(
         preprocessed.as_bytes(),
         &file_name,
-        parser::ParseOptions { permissive: cfg.permissive },
+        parser::ParseOptions { permissive: cfg.permissive, pack_history: pack_history.clone(), weak_symbols: weak_symbols.clone() },
     );
     drop(preprocessed);
+    drop(pack_history);
+    drop(weak_symbols);
     enrich_diags(&mut diags, &src);
     for d in &diags {
         if matches!(d.sev, Severity::Warning) {
@@ -234,9 +241,11 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
         .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
             crate::diagnostics::Span::point(&file_name, 0, 0))])?;
 
-    let (preprocessed, mut pp_diags, _) = preproc::preprocess(
+    let pp_out = preproc::preprocess(
         &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
     );
+    let mut pp_diags = pp_out.diags;
+    let preprocessed = pp_out.text;
     enrich_diags(&mut pp_diags, &src);
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         for d in &pp_diags { d.print(); }
@@ -296,15 +305,16 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         let src = fs::read(input)
             .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
                 crate::diagnostics::Span::point(&file_name, 0, 0))])?;
-        let (preprocessed, mut pp_diags, _) = preproc::preprocess(
+        let pp_out = preproc::preprocess(
             &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
         );
+        let mut pp_diags = pp_out.diags;
         enrich_diags(&mut pp_diags, &src);
         if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
             for d in &pp_diags { d.print(); }
             return Err(pp_diags);
         }
-        print!("{}", preprocessed);
+        print!("{}", pp_out.text);
         return Ok(());
     }
 
@@ -319,9 +329,10 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     let src = fs::read(input)
         .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
             crate::diagnostics::Span::point(&file_name, 0, 0))])?;
-    let (preprocessed, mut pp_diags, _include_deps) = preproc::preprocess(
+    let pp_out = preproc::preprocess(
         &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
     );
+    let mut pp_diags = pp_out.diags;
     enrich_diags(&mut pp_diags, &src);
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         for d in &pp_diags { d.print(); }
@@ -329,7 +340,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     }
 
     // 2. C++ lex + parse + lower
-    let mut parser = CppParser::new(preprocessed.as_bytes(), &file_name);
+    let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
     let decls = parser.parse_top_level()
         .map_err(|e| vec![e.to_diag(&file_name)])?;
     let mut lower = Lower::new();

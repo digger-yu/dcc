@@ -143,13 +143,18 @@
 | dcc++ C 关键字 / 复合操作符 (M9) | ✅ | 词法补全：`int`/`return`/`if`/`while` 不再被误为 `Ident`；`->`/`->*`/`++`/`--`/`<<=`/`>>=` 等 23 个复合操作符完整 |
 | dcc++ Windows 兼容 (M9) | ✅ | `stddef.h` / `stdint.h` 仅在用到 `new`/`delete`/`throw`/`try`/`typeid` 时引入；否则用 `typedef unsigned long size_t;` 替代 |
 | C 前端补洞 MS 扩展 (M11.1) | ✅ | `__declspec(align/noreturn/thread/dllimport/dllexport)` / `_ms_restrict` / `__pragma` / `_Pragma` 静默接受；不影响语义 |
+| C 前端补洞 MS 扩展 (M14) | ✅ | `__declspec(thread)` → TLS；`__declspec(noreturn)` → cold+noinline；`__declspec(align(N))` → 对齐；dllimport/dllexport 接受无 codegen 差异 |
 | C 前端补洞 `__attribute__((cleanup(fn)))` (M11.1) | ✅ | 解析并存入 `VarDecl.cleanup_fn`；codegen 在变量离开作用域时插入 `cleanup_fn(&var)` 调用 |
 | C 前端补洞 `__attribute__((target_clones(...)))` (M11.1) | ✅ | 解析并存入 `FuncDecl.target_clones`；当前阶段按默认版本编译，多版本 IFUNC resolver 待 M12+ |
+| C 前端补洞 `__attribute__((target_clones(...)))` (M14) | ✅ | 链接期 `TargetClonesTable::gen_irelative_relas` 生成 STT_GNU_IFUNC 符号 + R_X86_64_IRELATIVE 重定位，resolver 简化返回 default 变体 |
 | C 前端补洞 `__attribute__((no_sanitize(...)))` (M11.1) | ✅ | 解析并存入 `VarDecl/FuncDecl.no_sanitize`；`sanitizer.rs` 在所有启用的 sanitizer 都被禁止时跳过插桩 |
 | C 前端补洞 `__attribute__((copy(fn)))` (M11.1) | ✅ | 复用 `alias_name` 通道生成 `fn` 的别名符号，链接器直接引用原目标 |
 | C 前端补洞 `__attribute__((returns_nonnull))` (M11.1) | ✅ | 解析并存入 `FuncDecl.returns_nonnull`；当前阶段作为 noop 属性保留在 AST |
+| C 前端补洞 `__attribute__((returns_nonnull))` (M14) | ✅ | codegen `current_returns_nonnull` 状态机 + `test rax, rax; jnz .ok; ud2; .ok:` 强制非空 |
 | C 前端补洞 `#pragma` 全家族 (M11.1) | ✅ | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS ON/OFF/DEFAULT` / `GCC diagnostic push/pop/ignored/warning/error` / `once` / `comment` 静默接受 |
+| C 前端补洞 `#pragma pack` 影响 struct 布局 (M14) | ✅ | `preproc.pack_history: Vec<(u32, Option<usize>)>` 携带行号 + packing 变化；`ParseOptions.pack_history` 传入 parser；`Parser::pack_at_line(line)` 二分查找生效值；`layout_struct_with_pack(max_align)` 把字段对齐 cap 到 `min(nat, n)` |
 | C 前端补洞 `_Pragma` 操作符 (M11.1) | ✅ | C99 `_Pragma("string")` 在 preproc 展开阶段累积到 `pending_pragmas: RefCell<Vec<String>>`，源块刷新时批量应用到 `process_directive` |
+| C 前端补洞 `_Pragma` 操作符 (M14) | ✅ | `_Pragma` 与 `#pragma` 共享同一条 `process_directive` 通路，自动具备 pack/weak/STDC/GCC diagnostic 处理 |
 | C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
 | C 前端补洞 `_Static_assert` 字符串化 (M11.1) | ✅ | C23 单参 `_Static_assert(expr)` 与双参 `_Static_assert(expr,"msg")` 全部支持；失败消息附加 `evaluates to: <ExprDebug 文本>` 便于定位 |
 | C 前端补洞 GNU 扩展 (M11.2) | ✅ | `__builtin_offsetof` 支持嵌套 struct/union/数组下标/匿名 struct 成员访问；`__builtin_huge_val`/`huge_valf`/`huge_vall` 按 IEEE 754 位模式 (double 0x7FF0000000000000 / float 0x7F800000 / long double 0x7FFF8000000000000000) rodata 加载；`__builtin_nan`/`nanf`/`nanl` 走 qNaN 编码 (double 0x7FF8000000000000)；`_Atomic` 在 C 前端接通 `__atomic_*` 内建函数 + `__c11_atomic_*` 路径；`__builtin_call_with_static_chain` 按 SysV ABI 把 chain 写入 r10 并按 GP/XMM 寄存器约定传参 + 间接 call；嵌套函数作为 IR 一等公民支持静态链参数；computed goto 跨函数（标签地址走 LEA 加载，间接 jmp 通过寄存器）；asm goto 输出约束在 fall-through 路径上写回，跳转路径保留原值；`__builtin_isnan`/`isinf`/`finite`/`signbit`/`fpclassify` 正确处理 NaN/Inf 位模式；`Expr::Unary` 浮点取负走恒常折叠 + 运行时 XOR 符号位；`AddrOf` REX.R 编码对 r10–r15 修复 |

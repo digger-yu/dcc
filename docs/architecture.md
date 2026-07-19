@@ -701,6 +701,65 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     全部 PASS；`test_float_lit.c`/`test_hugeval.c`/`test_nan.c` 等 12 个
     M11.2/11.3 已有测试无回归（`test_asm_constraints_ext` 在 M11.3 起即
     失败于 `test_xmm_constraint`，属 pre-existing，本 M 不在范围）。
+- **M14 C 前端补洞：#pragma / attribute / atomic / MS 扩展** —
+  收尾 `unimplemented_modules.md` 第 4.1 节里 8 条长期挂账的简化项，
+  全链路贯穿 preproc → parser → codegen → link：
+  - **`#pragma pack(n)` 影响 struct 布局**：`preproc` 维护 `pack_stack` +
+    `pack_history: Vec<(u32, Option<usize>)>`，把每次 packing 变化按行号
+    记录；`preprocess` 函数返回 `PreprocessOutput` 结构（取代旧 tuple
+    返回），携带 `pack_history` + `weak_symbols`；`driver.rs` 把这两个
+    字段塞入新加的 `ParseOptions` 传给 parser；`Parser::pack_at_line(line)`
+    二分查找生效 packing；`layout_struct_with_pack` 新增
+    `max_align: Option<usize>` 参数把每个字段对齐 cap 到 `min(nat, n)`；
+    `parse_type_mode` 记下 `struct` 关键字所在行作为查询基准。
+    优先级：`__attribute__((packed))` > `#pragma pack(n)` > 自然对齐。
+  - **`_Pragma("...")` 等价 `#pragma ...`**：`_Pragma` 操作符与
+    `#pragma` 复用同一条 `process_directive` 通路，自动具备
+    `pack/weak/STDC/GCC diagnostic` 处理；包字符串经 `unescape_string`
+    反转义。
+  - **`#pragma weak name` + `__attribute__((weak))` 合并**：
+    `preproc` 收集到 `weak_symbols: HashSet<String>`；`ParseOptions` 把
+    集合带入 parser；`Parser::is_weak_symbol(name)` 暴露查询；
+    `VarDecl` / `FuncDecl` 创建时合并 `attrs.is_weak || pragma_weak`；
+    codegen 已有的 `STB_WEAK` 通路自动生效（`f.is_weak` →
+    `bind: STB_WEAK`）。
+  - **`__attribute__((returns_nonnull))` codegen**：
+    `codegen/x86_64.rs` 新增 `current_returns_nonnull: bool` 状态；
+    `compile_func` 入口处 `self.current_returns_nonnull = f.returns_nonnull`；
+    `gen_stmt` 遇到 `Stmt::Return { val: Some(e) }` 时若返回类型为
+    `Ptr` 或 `Func`，在 `emit_func_epilogue` 之前插入
+    `test rax, rax; jnz .ok; ud2; .ok:` 序列强制非空。
+  - **`__attribute__((target_clones(...)))` IFUNC resolver**：
+    解析为 `FuncDecl.target_clones: Vec<String>`；链接期
+    `link/target_clones.rs::TargetClonesTable::parse` 把变体名
+    `foo.sse4.2` / `foo.default` 入表；`gen_irelative_relas` 写
+    `STT_GNU_IFUNC` 符号 + `R_X86_64_IRELATIVE` 重定位。
+    静态可执行无 CPU feature 检测时，resolver 默认返回 default
+    变体地址。
+  - **freestanding 模式原子宏语义修正**：`preproc` 在
+    `freestanding=true` 时显式定义 `__STDC_HOSTED__=0` +
+    `__STDC_NO_ATOMICS__=1`（C11 §4/6 规定），且不预置
+    `atomic_store/atomic_load/atomic_exchange/atomic_fetch_*` /
+    `atomic_compare_exchange_strong` 等 C11 stdatomic 宏（与 Linux
+    内核 `arch/x86/include/asm/atomic.h` 等同名 inline 函数冲突，
+    误展开为 `__atomic_fetch_add(i, v, 5)` 会破坏声明）。
+    `__atomic_*` 内建 + `__ATOMIC_*` 常量仍保留供显式调用。
+  - **MS 扩展 `__declspec` 翻译**：`parse_type_mode` 解析
+    `__declspec(...)` 参数列表；`thread` → `decl_storage.is_thread_local = true`；
+    `noreturn` → `decl_attrs.is_cold = true; is_noinline = true`；
+    `align(N)` → `decl_attrs.alignment = max(cur, N)`；
+    `dllimport` / `dllexport` 接受但无 codegen 差异。
+  - **K&R 函数自动检测**：`parse_func_decl` 检测到 `(name1, name2, ...)`
+    形式（参数无类型）时设 `is_old_style = true`；codegen 走与 ANSI
+    相同的参数压栈路径。
+  - **测试**：`pragma_family_compile_and_run` +
+    `pragma_operator_compile_and_run`（覆盖 pack/weak/STDC/diagnostic）+ 
+    `kr_old_style_function`（K&R 风格）+ `ms_extensions_compile_and_run`
+    （__declspec 全家族）+ `attr_target_clones_compile_and_run` +
+    `attr_copy_returns_nonnull_compile_and_run`（含 returns_nonnull）+
+    `stdatomic_macros_hosted`（hosted 模式 atomic 宏）远程 PASS；
+    freestanding 模式通过 `preproc.rs` 单元测试验证
+    `__STDC_NO_ATOMICS__=1` 已设置。
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
   局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（整数用 GP，
   浮点用标量 SSE，不用 XMM 向量指令）；

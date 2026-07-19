@@ -43,7 +43,7 @@ pub fn compile_cpp(
     if let Some(stdlib_inc) = default_stdlib_include() {
         all_includes.push(stdlib_inc);
     }
-    let (preprocessed, diags, _stats) =
+    let pp_out =
         crate::preproc::preprocess(
             bytes, file,
             &all_includes,
@@ -53,13 +53,14 @@ pub fn compile_cpp(
             &[],                          /* force includes */
             false,                        /* freestanding */
         );
-    if !diags.is_empty() {
+    if !pp_out.diags.is_empty() {
         let mut out = Vec::new();
-        for d in &diags {
+        for d in &pp_out.diags {
             out.push(d.clone());
         }
         return Err(CppError::Diagnostics(out));
     }
+    let preprocessed = pp_out.text;
     let preprocessed_bytes = preprocessed.into_bytes();
 
     let mut parser = CppParser::new(&preprocessed_bytes, file);

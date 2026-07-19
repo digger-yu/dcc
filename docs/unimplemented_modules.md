@@ -213,18 +213,18 @@ MS 扩展 + `#pragma` 全家族 + `_Pragma` 静默接受（M11.1）；
 （M11.2）；`__builtin_call_with_static_chain` / 嵌套函数 / computed goto /
 asm goto 输出约束（M11.2）；内联 asm 约束全家族（M11.3）。
 
-🟠 已识别但简化：
+🟠 已识别但简化（多数已交付，详见 M14）：
 
-| 特性 | 现状 |
+| 特性 | 现状 (M14) |
 |------|------|
-| 预置 C11 `atomic_*` 宏 | hosted 模式预置；freestanding 模式不预置（与内核冲突） |
-| `__attribute__((returns_nonnull))` | 解析为 `FuncDecl.returns_nonnull` 但 codegen 是 noop |
-| `__attribute__((target_clones(...)))` | 解析后存为 `FuncDecl.target_clones`，未生成 IFUNC resolver |
-| `__attribute__((weak(...)))` | 解析但 codegen 路径未走 weak resolver |
-| K&R 函数 | 解析 OK；codegen 走测试时部分老式风格需手动标 `is_old_style` |
+| 预置 C11 `atomic_*` 宏 | hosted 模式预置；freestanding 模式显式 `__STDC_NO_ATOMICS__=1` + `__STDC_HOSTED__=0` 且不预置（与内核冲突） |
+| `__attribute__((returns_nonnull))` | 解析 + codegen：返回前 `test rax, rax; jnz .ok; ud2; .ok:` 强制非空 |
+| `__attribute__((target_clones(...)))` | 解析并存为 `FuncDecl.target_clones`；IFUNC resolver 由 `link/target_clones.rs` 生成 STT_GNU_IFUNC + R_X86_64_IRELATIVE |
+| `__attribute__((weak(...)))` 与 `#pragma weak name` | 解析并由 codegen 写 `STB_WEAK` 绑定；`#pragma weak` 走 `ParseOptions.weak_symbols` 通路 |
+| K&R 函数 | 解析自动检测 + 标 `is_old_style`；codegen 走与 ANSI 相同路径 |
 | 嵌套块重声明 | `check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍 E0007 |
-| MS 扩展关键字 | `__declspec(align/noreturn/thread/dllimport/dllexport)` 静默接受，无 codegen 差异 |
-| `__pragma` | 静默接受 |
+| MS 扩展关键字 | `__declspec(thread)` → TLS；`__declspec(noreturn)` → cold+noinline；`__declspec(align(N))` → 对齐；dllimport/dllexport 接受无 codegen 差异 |
+| `__pragma` | 接受（无操作） |
 
 ### 4.2 编译期常量求值（`src/const_eval.rs`）
 
