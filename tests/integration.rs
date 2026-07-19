@@ -1827,6 +1827,22 @@ fn asm_kernel_extra_compiles_without_nop_fallback() {
     );
 }
 
+/// mini-asm 补全 (高): 段寄存器 / 系统指令 / 内核启动 / 虚拟化指令
+#[test]
+fn asm_paravirt_boot_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/asm_paravirt_boot.c");
+    let (output, _obj) = run_object_test("asm-paravirt-boot", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// __builtin_constant_p：编译期常量判定（含 __int128 表达式）
 #[test]
 fn builtin_constant_p_full_run_returns_zero() {

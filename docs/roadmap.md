@@ -18,6 +18,7 @@
 | **M9** | 精准错误诊断 | ✅ 完成 | GitHub-style 行+指针+hint；码表见 [diagnostics.md](./diagnostics.md)；snapshot 回归 `tests/errors.rs` |
 | **M10** | 跨平台交叉编译 | ⏳ | riscv64-linux-gnu-dcc 命名 |
 | **M11.3** | 链接器补洞 | ✅ 完成 | LTO 跨函数内联/常量传播/全局优化；`.gnu.hash` TIE 压缩；`.eh_frame_hdr` 搜索表；IFUNC；`--exclude-libs`/`--build-id=sha1`/`--no-undefined-version`；AArch64+RISC-V 重定位（22+15 种）；GOT64；TLS 重定位 |
+| **M12** | **x86_64 mini-asm 补全** | ✅ 完成 | 消除 nop 警告：段寄存器 (cs/ds/es/fs/gs/ss) 读写、push/pop 段、imm64 内存目标、pushq imm64、%al/%ax imm test、shift $cl on any reg、cmpxchg/xadd/bswap/popcnt/movnt/prefetch 内存源+SymDisp、setcc AH/BH/CH/DH、movzx/movsx 全 8/16/32→32/64、wbinvd/invd/cpuid/rdtsc/rdtscp/rdpmc、syscall/sysret/sysenter/sysexit/swapgs/stac/clac/endbr64/pause、vmx vmlaunch/vmresume/vmread/vmwrite、fxsave/fxrstor/ldmxcsr/stmxcsr、ud2/hlt/cli/sti/cld/std、pushq/popq 扩展、vmovq/段前缀 mem 寻址；新增 `tests/fixtures/asm_paravirt_boot.c` |
 
 ## 后端能力矩阵 (M8 细分)
 

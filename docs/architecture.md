@@ -462,6 +462,71 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   `rol`/`ror`、`prefetcht0/t1/t2/nta`、`movss`/`movsd`/`addss`/`addsd`、
   `xorps`/`xorpd`、`swapgs`/`invlpg`/`int3` 等；
   未识别指令 warning + nop 占位。
+- **M12 mini-asm 补全（高）** — 消除内核 paravirt / 启动代码的 nop 警告：
+  - **段寄存器**：解析 `%cs`/`%ds`/`%es`/`%fs`/`%gs`/`%ss` 6 个名字成
+    段号 + 0x26/0x2E/0x36/0x3E/0x64/0x65 前缀；`mov` 段寄存器支持
+    `8C /r` (read) / `8E /r` (write) 两条 ModR/M 路径；`push`/`pop` 段
+    走 `0x0F A0`/`0x0F A8` 系列；段寄存器 *不* 触发 REX
+    编码。`SymDisp` 内存 + 段前缀直接拼接段字节在 ModR/M 之前。
+  - **SymDisp 操作数**：新增 `AsmOperand::SymDisp(String, i32)`
+    表示 `sym(%rip)`，写回靠 `pending_data_rels`（不再用
+    `pending`，`pending` 仅给跳转用）；`jmp`/`jcc`/`call` 走
+    `movabs rax, sym` + `jmp *%rax`；`setcc`/`cmpxchg`/`xadd`/
+    `movzx`/`movsx`/`popcnt`/`movnt*`/`prefetch*`/`alu`/`test`/
+    `shift` 全部支持 SymDisp。`parse_asm_operand_str` 处理 `*` 前缀
+    把 `Sym` 升级为 `SymDisp`（间接跳转/调用）。
+  - **mov 增强**：`mov %gs:mem, reg` 走 8C /r；`mov reg, %gs:mem`
+    走 8E /r；`mov $imm64, mem` 走 `movabs rax, imm64` + `movq rax, mem`；
+    `movabs $imm64, %rax` 直接 REX.W + B8+rd。
+  - **push/pop 增强**：新增 `push`/`pushq`/`pushl`/`pushw` 与
+    `pop`/`popq`/`popl`/`popw` 6 个 AT&T 扩展助记符；立即数 >8 位
+    按符号扩展 32 位后 `68 id`；`pushq $imm64` 走
+    `movabs rax, imm64` + `push %rax`；`push %seg` 走 0x0F A8
+    1+seg*8。
+  - **ALU/test 增强**：`add/sub/and/or/xor/cmp $imm, mem`
+    走 `mov{abs,b} rax, imm` + ALU reg,mem；`test $imm, mem`
+    走 `test imm, rax` + `mov mem, rax`；`test $imm, %al/%ax`
+    直接 A8/A9。
+  - **shift 增强**：`shl/shr/sar/rol/ror $cl, reg_or_mem` 当
+    shift-amount 寄存器不是 `%cl`（如 `%r13`）时走
+    `mov %r13, %ecx` + D3 /4 编码；`shl $imm, mem` 走
+    `mov reg, mem` + `shl imm, reg` + `mov mem, reg`。
+  - **setcc 增强**：AH/BH/CH/DH 高 8 位目标跳过 REX 编码（与
+    gcc 行为一致；REX 会把 AH 转成 SPL 编码）；SymDisp mem 目标走
+    `setcc rax` + `mov mem, al`。
+  - **cmpxchg/xadd**：`cmpxchg %rax, mem` 走 `lock cmpxchg`；
+    `xadd` 走 `lock xadd`；非 rax 隐式操作数走 `mov mem, %rax` +
+    `lock cmpxchg` + 写回。
+  - **bswap**：拒绝 16 位操作数（与 gcc 一致 — 16 位 bswap 不存在）。
+  - **movnt/movntdq/movntps/movntpd**：加 NT store 编码（0F 2B /
+    0F E7 等），mem 目标走 SymDisp。
+  - **prefetch**：prefetcht0/t1/t2/nta 走 0F 18 /1-5；支持 SegMem
+    与 SymDisp `%rip` 寻址。
+  - **jmp/jcc/call 间接**：`jmp *%rax` / `call *%rax` 走 FF /4 或
+    FF /2；SymDisp mem 走 `movabs rax, sym` + `jmp/call *%rax`。
+  - **系统指令**：`wbinvd` (0F 09)、`invd` (0F 08)、`cpuid` (0F A2)、
+    `rdtsc` (0F 31)、`rdtscp` (0F 01 F9)、`rdpmc` (0F 33)、
+    `syscall` (0F 05)、`sysret` (0F 07)、`sysenter` (0F 34)、
+    `sysexit` (0F 35)、`swapgs` (0F 01 F8)、`stac`/`clac` (0F 01 CB/CA)、
+    `endbr64` (F3 0F 1E FA)、`endbr32` (F3 0F 1E FB)、`pause` (F3 90)、
+    `hlt` (F4)、`cli`/`sti` (FA/FB)、`cld`/`std` (FC/FD)、`clc`/`stc`/`cmc`
+    (F8/F9/F5)、`lahf`/`sahf` (9F/9E)、`pushf`/`popf` (9C/9D)、
+    `ud2` (0F 0B)、`int3` (CC)、`lfence`/`sfence`/`mfence`
+    (0F AE E8-EF)、`vmlaunch`/`vmresume`/`vmxoff` (0F 01 C4/C5/C4)、
+    `vmptrld`/`vmptrst`/`vmclear` (0F C7 /6/7/6)、
+    `vmread`/`vmwrite` (0F 78/79)。
+  - **FPU/XMM 保存**：`fxsave`/`fxrstor` (0F AE /0/1)、
+    `fnsave` (DD /6)、`fnstenv` (D9 /6)、`fnclex` (DB E2)、
+    `fninit` (DB E3)、`ldmxcsr` (0F AE /2)、`stmxcsr` (0F AE /3)；
+    FPU 加载走 `emit_asm_fpu_load`（带 SymDisp RIP-relative 支持）。
+  - **测试**：`tests/fixtures/asm_paravirt_boot.c` 26 个用例覆盖
+    段寄存器、push/pop 段、imm64、shift $cl、setcc AH、间接
+    jmp、cpuid/rdtsc/wbinvd/invd、cli/sti/cld/clc/hlt、
+    stac/clac、swapgs、fxsave、imm64→mem、prefetch、int3、
+    pause、ud2、syscall、endbr64；`asm_paravirt_boot_compiles_-
+    without_nop_fallback` 在远程 192.168.148.128 上 PASS。
+  - **降级**：未识别指令仍走 `eprintln! warning` + 单字节 0x90
+    (`nop`) 占位；带行号和源位置信息以方便追踪（避免静默 nop）。
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
   局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（整数用 GP，
   浮点用标量 SSE，不用 XMM 向量指令）；
