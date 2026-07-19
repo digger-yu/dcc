@@ -549,10 +549,19 @@ impl Preprocessor {
 
     /// 把 `_Pragma("...")` 中的字符串当作一行 #pragma 处理
     /// (不在源码中插入新行, 而是直接调用对应的 handler)
+    /// `line_no` 是 _Pragma 被检测时记录的 out 行号 (即 _Pragma
+    /// 在输出流中"逻辑上"所在的行), 用来精确对齐 pack_history
     pub fn apply_pragma_string(&mut self, pragma_text: &str, line_no: u32) {
-        // 构造 "pragma ..." 形式的伪指令, 复用 process_directive
-        let pseudo = format!("pragma {}", pragma_text);
-        self.process_directive(&pseudo, line_no);
+        let text = pragma_text.trim();
+        // 仅处理 pack 相关的 _Pragma; 其他类型仍走 process_directive 路径
+        // (GCC diagnostic / weak / STDC / once 等不依赖行号)
+        if text.starts_with("pack") {
+            self.handle_pragma_pack(&text[4..].trim(), line_no);
+        } else {
+            // 构造 "pragma ..." 形式的伪指令, 复用 process_directive
+            let pseudo = format!("pragma {}", pragma_text);
+            self.process_directive(&pseudo, line_no);
+        }
     }
 
     /// 去除单行中的 C 风格注释 (跨行注释由 in_comment 状态跟踪)
@@ -840,7 +849,8 @@ impl Preprocessor {
                 // #pragma pack() / pack(1) / pack(2) / pack(4) / pack(8) / pack(16)
                 // #pragma pack(push[, n]) / #pragma pack(pop[, n])
                 // #pragma pack(push) / #pragma pack(pop)
-                self.handle_pragma_pack(&pragma_text[4..].trim());
+                // 直接 #pragma 用 0, 让 handle_pragma_pack 自动用 count_out_lines()
+                self.handle_pragma_pack(&pragma_text[4..].trim(), 0);
             } else if pragma_text.starts_with("weak") {
                 // #pragma weak name
                 // 记录弱符号名 (后续在 codegen 中以 weak 链接生成)
@@ -1267,7 +1277,9 @@ impl Preprocessor {
     ///
     /// 栈顶元素代表当前生效的 packing 对齐 (None=默认 8)。
     /// 后续记录的 packing 值可被 struct 布局查询 (cdecl/ext_abi 兼容)。
-    fn handle_pragma_pack(&mut self, text: &str) {
+    /// `line_no` 是 _Pragma / 直接 #pragma 所在源行号; 若为 0 则
+    /// 自动使用 self.count_out_lines() (适用于直接 #pragma 的常见情形)
+    fn handle_pragma_pack(&mut self, text: &str, line_no: u32) {
         let text = text.trim();
         // 去掉包裹的括号
         let inner = text.trim_start_matches('(').trim_end_matches(')').trim();
@@ -1311,7 +1323,9 @@ impl Preprocessor {
         if self.pack_history.last().map(|(_, p)| *p) != Some(new_pack) {
             // 计算当前输出已经写入的行数
             let prev_last = self.pack_history.last().map(|(l, _)| *l).unwrap_or(0);
-            let current_out_line = self.count_out_lines();
+            // 优先使用调用方提供的行号 (_Pragma 时机);
+            // 否则使用当前 out 的行数 (直接 #pragma 的常见情形)
+            let current_out_line = if line_no > 0 { line_no } else { self.count_out_lines() };
             // 只有当行号真正增加时才记录 (避免同一行多次)
             if current_out_line > prev_last {
                 self.pack_history.push((current_out_line, new_pack));
