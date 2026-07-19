@@ -528,11 +528,31 @@ impl Preprocessor {
         }
         // 把展开阶段累积的 _Pragma 字符串批量应用
         // (顺序与源中出现顺序一致, 即 _Pragma(...) 在某一行后, 立即生效)
+        // 注意: 传递当前 out 的行数 (count_out_lines) 而非 self.cur_line,
+        // 因为 _Pragma 在输出中被吞掉, parser 看到的行号是输出行号.
         let pending: Vec<String> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
         for p in pending {
-            self.apply_pragma_string(&p, self.cur_line);
+            self.apply_pragma_string(&p, self.count_out_lines());
         }
         src.clear();
+    }
+
+    /// 计算 self.out 已写入的行数 (1-based)
+    fn count_out_lines(&self) -> u32 {
+        // 行数 = 换行符个数 + 1 (如果非空)
+        let mut n = 1u32;
+        for c in self.out.chars() {
+            if c == '\n' { n += 1; }
+        }
+        n
+    }
+
+    /// 把 `_Pragma("...")` 中的字符串当作一行 #pragma 处理
+    /// (不在源码中插入新行, 而是直接调用对应的 handler)
+    pub fn apply_pragma_string(&mut self, pragma_text: &str, line_no: u32) {
+        // 构造 "pragma ..." 形式的伪指令, 复用 process_directive
+        let pseudo = format!("pragma {}", pragma_text);
+        self.process_directive(&pseudo, line_no);
     }
 
     /// 去除单行中的 C 风格注释 (跨行注释由 in_comment 状态跟踪)
@@ -1289,25 +1309,14 @@ impl Preprocessor {
         // 记录到 pack_history, 供 parser 按位置查询
         // out_line 是当前输出 (预处理后) 的行号, 与 parser 的 lex.line 对齐
         if self.pack_history.last().map(|(_, p)| *p) != Some(new_pack) {
-            // 计算当前输出已经写入的行数 (out_line 缓存)
+            // 计算当前输出已经写入的行数
             let prev_last = self.pack_history.last().map(|(l, _)| *l).unwrap_or(0);
-            // 增量计算: 找到自上次记录以来 out 中新加的行
             let current_out_line = self.count_out_lines();
             // 只有当行号真正增加时才记录 (避免同一行多次)
             if current_out_line > prev_last {
                 self.pack_history.push((current_out_line, new_pack));
             }
         }
-    }
-
-    /// 计算 self.out 已写入的行数 (1-based)
-    fn count_out_lines(&self) -> u32 {
-        // 行数 = 换行符个数 + 1 (如果非空)
-        let mut n = 1u32;
-        for c in self.out.chars() {
-            if c == '\n' { n += 1; }
-        }
-        n
     }
 
     /// 公开接口: 获取当前 packing 对齐 (供 codegen struct 布局使用)
@@ -1323,14 +1332,6 @@ impl Preprocessor {
     /// 取出 weak_symbols (移动所有权) 供外部使用
     pub fn take_weak_symbols(&mut self) -> HashSet<String> {
         std::mem::take(&mut self.weak_symbols)
-    }
-
-    /// 把 `_Pragma("...")` 中的字符串当作一行 #pragma 处理
-    /// (不在源码中插入新行, 而是直接调用对应的 handler)
-    pub fn apply_pragma_string(&mut self, pragma_text: &str, line_no: u32) {
-        // 构造 "pragma ..." 形式的伪指令, 复用 process_directive
-        let pseudo = format!("pragma {}", pragma_text);
-        self.process_directive(&pseudo, line_no);
     }
 
     /// 反转义字符串 (用于 _Pragma 操作符)
