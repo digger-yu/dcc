@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use crate::sanitizer::SanitizerFlags;
+use crate::link::BuildIdStyle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputLang {
@@ -57,6 +58,12 @@ pub struct Config {
     pub soname: Option<String>,
     pub linker_entry: Option<String>,   // -e: 显式指定 entry
     pub linker_lto: bool,               // 启用 IR 级 LTO
+    /// --exclude-libs: 隐藏静态库符号 (all / libfoo,libbar)
+    pub exclude_libs: Vec<String>,
+    /// --build-id: build-id 风格
+    pub build_id: BuildIdStyle,
+    /// --no-undefined-version
+    pub no_undefined_version: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +253,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut soname: Option<String> = None;
     let mut linker_entry: Option<String> = None;
     let linker_lto = false;
+    let mut exclude_libs: Vec<String> = Vec::new();
+    let mut build_id = BuildIdStyle::None;
+    let mut no_undefined_version = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -286,6 +296,20 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 i += 1;
                 linker_entry = Some(args.get(i).ok_or_else(|| CliError::new("missing arg after -e"))?.to_string());
             }
+            "-Wl,--exclude-libs," => {
+                i += 1;
+                let v = args.get(i).ok_or_else(|| CliError::new("missing --exclude-libs arg"))?.to_string();
+                exclude_libs.extend(v.split(',').map(String::from));
+            }
+            a if a.starts_with("-Wl,--exclude-libs,") => {
+                let v = &a["-Wl,--exclude-libs,".len()..];
+                exclude_libs.extend(v.split(',').map(String::from));
+            }
+            "-Wl,--build-id=sha1" => { build_id = BuildIdStyle::Sha1; }
+            "-Wl,--build-id=uuid" => { build_id = BuildIdStyle::Uuid; }
+            "-Wl,--build-id=md5" => { build_id = BuildIdStyle::Md5; }
+            "-Wl,--build-id=none" => { build_id = BuildIdStyle::None; }
+            "-Wl,--no-undefined-version" => { no_undefined_version = true; }
             // -L, -l, -T 等链接器选项
             "-L" | "-l" | "-T" => { i += 1; } // 跳过参数
             a if a.starts_with("-L") || a.starts_with("-l") || a.starts_with("-T") => {} // 内联形式
@@ -650,7 +674,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             output_kind,
             soname: soname.clone(),
             linker_entry: linker_entry.clone(),
-            linker_lto, })
+            linker_lto,
+            exclude_libs: exclude_libs.clone(),
+            build_id,
+            no_undefined_version, })
     } else {
         if inputs.is_empty() {
             inputs.push(PathBuf::from("-"));
@@ -667,7 +694,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             output_kind: LinkerOutputKind::Executable,
             soname: None,
             linker_entry: None,
-            linker_lto: false, })
+            linker_lto: false,
+            exclude_libs: Vec::new(),
+            build_id: BuildIdStyle::None,
+            no_undefined_version: false, })
     }
 }
 

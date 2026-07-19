@@ -76,6 +76,14 @@ pub const R_X86_64_RELATIVE:  u32 = 8;  // base + offset
 pub const R_X86_64_GOTPCREL:  u32 = 9;
 pub const R_X86_64_32:        u32 = 10;
 pub const R_X86_64_32S:       u32 = 11;
+pub const R_X86_64_TPOFF64:   u32 = 18; // TLS: thread pointer offset (64-bit)
+pub const R_X86_64_TPOFF32:   u32 = 23; // TLS: thread pointer offset (32-bit, sign-extend)
+pub const R_X86_64_GOT64:     u32 = 19; // 64-bit GOT entry
+pub const R_X86_64_GOTOFF64:  u32 = 25; // 64-bit GOT-relative
+pub const R_X86_64_IRELATIVE: u32 = 37; // IFUNC resolver
+pub const R_X86_64_TPOFF:     u32 = 17; // TLS: traditional thread-pointer offset
+pub const R_X86_64_DTPOFF64:  u32 = 21; // TLS: dynamic thread pointer offset
+pub const R_X86_64_DTPMOD64:  u32 = 20; // TLS: module id
 
 // AArch64 重定位类型
 pub const R_AARCH64_CALL26: u32 = 283;
@@ -83,12 +91,41 @@ pub const R_AARCH64_JUMP26: u32 = 282;
 pub const R_AARCH64_ADR_PREL_LO21: u32 = 274;
 pub const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
 pub const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277;
+pub const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
+pub const R_AARCH64_LDST8_ABS_LO12_NC: u32 = 278;
+pub const R_AARCH64_LDST16_ABS_LO12_NC: u32 = 284;
+pub const R_AARCH64_LDST32_ABS_LO12_NC: u32 = 285;
+pub const R_AARCH64_LDST128_ABS_LO12_NC: u32 = 299;
+pub const R_AARCH64_MOVW_UABS_G0: u32 = 287;
+pub const R_AARCH64_MOVW_UABS_G1: u32 = 288;
+pub const R_AARCH64_MOVW_UABS_G2: u32 = 289;
+pub const R_AARCH64_MOVW_UABS_G3: u32 = 290;
+pub const R_AARCH64_ABS64: u32 = 257;
+pub const R_AARCH64_PREL64: u32 = 260;
+pub const R_AARCH64_GOTREL64: u32 = 311;
+pub const R_AARCH64_GOT_LD_PREL19: u32 = 309;
 
 // RISC-V 重定位类型
 pub const R_RISCV_JAL: u32 = 5;
 pub const R_RISCV_CALL: u32 = 18;
-pub const R_RISCV_PCREL_HI20: u32 = 19;
-pub const R_RISCV_PCREL_LO12_I: u32 = 20;
+pub const R_RISCV_CALL_PLT: u32 = 19;
+pub const R_RISCV_PCREL_HI20: u32 = 20;
+pub const R_RISCV_PCREL_LO12_I: u32 = 21;
+pub const R_RISCV_PCREL_LO12_S: u32 = 22;
+pub const R_RISCV_HI20: u32 = 23;
+pub const R_RISCV_LO12_I: u32 = 24;
+pub const R_RISCV_LO12_S: u32 = 25;
+pub const R_RISCV_RELAX: u32 = 51;
+pub const R_RISCV_64: u32 = 2;
+pub const R_RISCV_32: u32 = 1;
+pub const R_RISCV_32_PCREL: u32 = 3;
+pub const R_RISCV_TPOFF64: u32 = 7;
+pub const R_RISCV_TPREL_HI20: u32 = 29;
+pub const R_RISCV_TPREL_LO12_I: u32 = 32;
+pub const R_RISCV_TPREL_LO12_S: u32 = 33;
+
+// 符号类型 (扩展, 用于 STT_GNU_IFUNC)
+pub const STT_GNU_IFUNC: u8 = 10;
 
 // ===== 数据结构 =====
 

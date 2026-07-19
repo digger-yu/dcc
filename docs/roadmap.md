@@ -17,6 +17,7 @@
 | **M8** | C11/17/23 + GNU 扩展 | ✅ 完成 | 位域/原子/SIMD/定点数/柔性数组/内存序 后端已实现+Linux验证; C标准全家族别名支持(c89/c90/c99/c9x/c11/c1x/c17/c18/c23/c2x+gnu变体+iso9899) |
 | **M9** | 精准错误诊断 | ✅ 完成 | GitHub-style 行+指针+hint；码表见 [diagnostics.md](./diagnostics.md)；snapshot 回归 `tests/errors.rs` |
 | **M10** | 跨平台交叉编译 | ⏳ | riscv64-linux-gnu-dcc 命名 |
+| **M11.3** | 链接器补洞 | ✅ 完成 | LTO 跨函数内联/常量传播/全局优化；`.gnu.hash` TIE 压缩；`.eh_frame_hdr` 搜索表；IFUNC；`--exclude-libs`/`--build-id=sha1`/`--no-undefined-version`；AArch64+RISC-V 重定位（22+15 种）；GOT64；TLS 重定位 |
 
 ## 后端能力矩阵 (M8 细分)
 
@@ -82,6 +83,46 @@
 - **_Complex**: Type::Complex(Box<Type>) 包装内部类型, size=inner*2, 支持 __complex__/__complex/_Complex 关键字, 代码生成实部存储+虚部清零, >8B 使用聚合拷贝路径; 标量初始化复杂类型时虚部自动清零
 - **_Decimal**: 解析期直接映射到等效类型 (_Decimal32→float, _Decimal64→double, _Decimal128→long double), 无需独立 codegen
 - **全局类型注册表**: 头文件缓存到 ~/.dcc/cache/, 键=文件路径哈希+内容哈希(FNV-1a), 值=预处理输出+宏状态, 内容变化时自动失效
+
+## M11.3 链接器补洞（第一性原理）
+
+- **LTO 跨函数内联**: cost model = 语句数 ≤4 ∧ 表达式数 ≤4 ∧ 无递归;
+  跨 TU 时按 DBC 位码 `Callee` 名称在合并 `HashMap<String, Function>`
+  中查 body，原地展开（同 TU / 跨 TU 一致）；超 cost 自动放弃。
+- **LTO 跨 TU 常量传播**: `global` `constant` 初始化值合并到 `propagated`
+  表，其他 TU 引用按 `Symbol` 名查表替换 `Const`；非字面量初始化
+  （如 `addr-of`）保守跳过。
+- **LTO 跨 TU 全局优化**: DCE 删未引用函数/全局；DAE 删 `global` 中
+  无 reader 的 `store` 副作用（保留初始 `init` 表达式）。
+- **.gnu.hash TIE 压缩**: ELF 64-bit 格式 — `nbuckets` (4 字节) +
+  `symoffset` (4) + `bloom_size` (4) + `bloom_shift` (4) +
+  `bloom[bloom_size]` (8 字节/元素) + `buckets[nbuckets]` (4) +
+  `chain[]` (4)。bloom 元素 = `(C1 | (C2 << 1) | ... | (C32 << 31) |
+  ((C1 >> 32) << 32) | ...) & !(low 32-bit)`。chain 与 symoffset
+  决定每个符号在 dynsym 中的索引。
+- **.eh_frame_hdr 搜索表**: `EhFrameHdr { version, eh_frame_ptr,
+  fde_count, binary_search_table }`。表项 `(initial_location,
+  fde_offset)` 按 `initial_location` 升序排列。运行时 `_Unwind_Find_FDE`
+  二分查找。
+- **IFUNC 解析**: `STT_GNU_IFUNC`（type=10）符号单独 `IfuncTable` 表，
+  链接时生成 `R_X86_64_IRELATIVE` 重定位（addend=resolver 地址），
+  运行时动态链接器调用 resolver 获得真实地址填入 GOT。
+- **--exclude-libs**: 解析时记录 `ResolvedSymbol.source_lib`；
+  写入 dynsym/symtab 时若 `source_lib` 命中排除列表，`st_other` =
+  `STV_HIDDEN` 防止外部链接。
+- **--build-id**: 内置 SHA-1（160-bit FIPS 180-4）/ MD5（128-bit
+  RFC 1321）/ UUID v4（122-bit 随机）；`BuildIdStyle` 枚举
+  `None/Sha1/FastSha1/Uuid/Md5`；写 `.note.gnu.build-id` 段
+  （namesz=4 "GNU\0"，type=NT_GNU_BUILD_ID=3，desc=hex 摘要）。
+- **--no-undefined-version**: 拒绝 `.symver` 引用但缺版本定义。
+  本阶段只检查 `.symver` 标记后无对应符号。
+- **AArch64/RISC-V 重定位**: 本阶段仅在 `relocate.rs` 写 relocation
+  apply 路径（数据值计算），AArch64/RISC-V 后端 ELF 输出仍沿用
+  host 链接器；与 x86-64 的 `apply_relocations` API 保持一致。
+- **GOT64/TLS 重定位**: `R_X86_64_GOT64` / `GOTOFF64` 用 64-bit
+  写入；`TPOFF64` 为 `sym_addr - tls_module_base`（fs:0），
+  `TPOFF32` 为低 32-bit 截断，FS 段 base 由 `_start` 中
+  `arch_prctl(ARCH_SET_FS)` 设置。
 
 ## 每个里程碑的第一性原理复盘
 

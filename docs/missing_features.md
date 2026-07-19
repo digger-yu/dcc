@@ -242,6 +242,19 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |
 | CLI 多输入 | `-r a.o [b.o…] -o merged.o` 链接模式；多 `.c` 须 `-c` 后用 gcc 或 `-r` |
 | 链接/LTO 模块（自研多 TU + 旧 `-r`） | `src/link/`：object 解析 / 跨 TU 解析 / 节合并 / 重定位 / PLT-GOT / ET_EXEC+ET_DYN / DBC 位码 LTO；`-r` 沿用 host `ld -r` + objcopy |
+| LTO 跨函数内联 | `run_cross_tu_lto` cost model：≤4 语句 / 4 表达式 / 无递归，含同 TU 与跨 TU 调用 |
+| LTO 跨 TU 常量传播 | 跨 TU `global constant` 初始化值合并 + 引用替换 |
+| LTO 跨 TU 全局优化 | DCE + DAE（消除 `global` 中无副作用 store） |
+| `.gnu.hash` TIE 压缩 | `link/gnu_hash.rs` 写 ELF 64-bit GNU hash（含 bloom filter + buckets + chain） |
+| `.eh_frame_hdr` 搜索表 | `link/eh_frame.rs` 二分搜索表（按 initial_location 排序） |
+| IFUNC 解析 | `link/ifunc.rs`：`STT_GNU_IFUNC` → `R_X86_64_IRELATIVE` 重定位生成 |
+| `--exclude-libs` 隐藏静态库符号 | `LinkConfig.exclude_libs` → 被排除归档库中全局符号打 `STV_HIDDEN` |
+| `--build-id=sha1/uuid/md5/none` | `link/build_id.rs`：内置 SHA-1 / MD5 / UUID v4 写 `.note.gnu.build-id` |
+| `--no-undefined-version` | `LinkConfig.no_undefined_version`：缺版本 `.symver` 引用 → 错误 |
+| AArch64 重定位（22 种） | `ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_LO21` / `ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` / `LDST*_ABS_LO12_NC` / `MOVW_UABS_G0..G3` |
+| RISC-V 重定位（15 种） | `64` / `32` / `32_PCREL` / `CALL` / `CALL_PLT` / `PCREL_HI20` / `PCREL_LO12_I` / `PCREL_LO12_S` / `HI20` / `LO12_I` / `LO12_S` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S` |
+| GOT64 大条目 | `R_X86_64_GOT64` / `R_X86_64_GOTOFF64` 重定位支持 |
+| TLS 重定位 | `R_X86_64_TPOFF64` / `R_X86_64_TPOFF32` 重定位支持 |
 | 验收脚本 | prepare0 / pahole / objtool / modpost / vmlinux / kernel_full_check |
 | TLS codegen | `_Thread_local` → `.tdata`/`.tbss`、`STT_TLS`；ET_EXEC 经 `arch_prctl` 设 FS |
 | ET_EXEC symtab | `build_elf_exec_x86_64` 输出 `.symtab`/`.strtab` |

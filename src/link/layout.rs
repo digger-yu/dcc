@@ -14,12 +14,11 @@
 
 use std::collections::HashMap;
 
-use super::object::{FlatSection, InputBundle, InputSymbol};
+use super::object::{FlatSection, InputBundle};
 use super::resolve::ResolvedSymbol;
 use crate::codegen::elf::{
     SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHF_TLS, SHT_NOBITS, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA,
-    STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_NOTYPE, STT_FUNC, STT_OBJECT, STT_SECTION, STT_TLS,
-    ElfSym,
+    STB_LOCAL, STT_NOTYPE, STT_SECTION,
 };
 
 /// 输出节类型：标准节按类合并，自定义节独立。
@@ -92,9 +91,13 @@ pub struct OutputSegment {
 pub struct OutputSymbol {
     pub name: String,
     pub value: u64,
+    /// 输出 vaddr (layout 之后): section.vaddr + value
+    pub vaddr: u64,
     pub size: u64,
     pub bind: u8,
     pub ty: u8,
+    /// 符号类型辅助字段：对于 STT_GNU_IFUNC 符号, kind = 10
+    pub kind: u8,
     pub visibility: u8,
     pub section: u16,        // 输出节索引
     pub shndx_if_section: u16, // STT_SECTION 的 shndx
@@ -127,6 +130,14 @@ pub struct OutputRela {
     pub sym: u32,            // 输出符号索引
     pub rel_type: u32,
     pub addend: i64,
+    /// 内部标识 (for IFUNC / 调试), 不影响输出
+    pub _name: String,
+}
+
+impl OutputRela {
+    pub fn new(section: u32, offset: u64, sym: u32, rel_type: u32, addend: i64) -> Self {
+        Self { section, offset, sym, rel_type, addend, _name: String::new() }
+    }
 }
 
 pub struct LayoutBuilder {
@@ -556,9 +567,11 @@ impl LayoutBuilder {
         out.push(OutputSymbol {
             name: String::new(),
             value: 0,
+            vaddr: 0,
             size: 0,
             bind: STB_LOCAL,
             ty: STT_NOTYPE,
+            kind: 0,
             visibility: 0,
             section: 0,
             shndx_if_section: 0,
@@ -570,9 +583,11 @@ impl LayoutBuilder {
             out.push(OutputSymbol {
                 name: sec.name.clone(),
                 value: 0,
+                vaddr: sec.vaddr,
                 size: 0,
                 bind: STB_LOCAL,
                 ty: STT_SECTION,
+                kind: 0,
                 visibility: 0,
                 section: sec.output_index as u16,
                 shndx_if_section: sec.output_index as u16,
@@ -589,9 +604,11 @@ impl LayoutBuilder {
             out.push(OutputSymbol {
                 name: r.name.clone(),
                 value: r.value,
+                vaddr: sec.vaddr + r.value,
                 size: r.size,
                 bind: r.bind,
                 ty: r.ty,
+                kind: r.ty,
                 visibility: r.visibility,
                 section: sec.output_index as u16,
                 shndx_if_section: 0,
@@ -613,9 +630,11 @@ impl LayoutBuilder {
                     out.push(OutputSymbol {
                         name: sym.name.clone(),
                         value: sym.value,
+                        vaddr: sec.vaddr + sym.value,
                         size: sym.size,
                         bind: sym.bind,
                         ty: sym.ty,
+                        kind: sym.ty,
                         visibility: sym.visibility,
                         section: sec.output_index as u16,
                         shndx_if_section: 0,
@@ -717,6 +736,7 @@ impl LayoutBuilder {
                 sym: out_sym as u32,
                 rel_type: r.rel_type,
                 addend: r.addend,
+                _name: String::new(),
             });
         }
         out

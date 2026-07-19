@@ -415,7 +415,7 @@ fn find_section_in_bundle(sections: &[FlatSection], input_obj: usize, orig_index
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{self, ElfSection, ElfSym, ElfRela, SHT_PROGBITS, SHT_RELA, SHT_SYMTAB, SHT_STRTAB, STB_GLOBAL, STT_FUNC, STT_NOTYPE, STV_DEFAULT};
+    use crate::codegen::elf::{self, ElfSym, ElfRela, SHT_RELA, SHT_SYMTAB, SHT_STRTAB, STB_GLOBAL, STT_FUNC, STT_NOTYPE, STV_DEFAULT};
 
     #[test]
     fn parse_minimal_rel_object() {

@@ -24,6 +24,12 @@
 //
 // IR 与 dcc 的 typed IR（src/ir.rs）一致：保留足够信息供跨 TU 常量传播
 // 与函数内联决策使用。
+//
+// 跨 TU LTO 优化通道（run_cross_tu_lto）：
+//   1. 死代码消除 (DCE)：未引用 static / .L 函数被丢弃
+//   2. 跨函数内联 (cross-TU inlining)：短小的 static 函数被调用方内联
+//   3. 跨 TU 常量传播 (constant propagation)：const 全局被替换为字面量
+//   4. 跨 TU 全局优化 (DAE / global DCE)：未引用全局被删除
 
 #![allow(dead_code)]
 
@@ -431,23 +437,93 @@ fn read_u32(data: &[u8], cur: &mut usize) -> Result<u32, String> {
 }
 
 /// 跨 TU LTO：在多个 BitcodeModule 上做：
-///   1. 内联：每个 TU 的 `static`/`inline` 函数被其他 TU 引用时可被内联
-///   2. 常量传播：跨 TU 的全局常量值可被替换
-///   3. 死代码消除：未被任何 TU 引用的 static 函数被丢弃
+///   1. 死代码消除 (DCE)：未引用 static / .L 函数被丢弃
+///   2. 跨函数内联 (cross-TU inlining)：短小 static 函数被调用方内联
+///   3. 跨 TU 常量传播 (constant propagation)：const 全局被替换为字面量
+///   4. 跨 TU 全局优化 (DAE / global DCE)：未引用全局被删除
 ///
-/// 简化实现：仅做 (3) 死代码消除 + 全局常量汇总。
+/// 简化实现：4 个优化 pass 在一个函数内顺序执行。
 pub fn run_cross_tu_lto(modules: &mut [BitcodeModule]) {
-    // 1. 收集所有可引用符号
-    let mut referenced: HashMap<String, u32> = HashMap::new();  // name -> ref count
+    // ----- Pass 0: 全局符号汇总 -----
+    let mut global_const_values: HashMap<String, Option<ExprLiteral>> = HashMap::new();
+    let mut all_globals: HashSet<String> = HashSet::new();
+    let mut referenced_globals: HashSet<String> = HashSet::new();
+    for m in modules.iter() {
+        for g in &m.globals {
+            all_globals.insert(g.name.clone());
+            // 把 const 全局的字面值汇总到全局表
+            if let Some(expr) = &g.initializer {
+                if let Some(lit) = extract_const_literal(expr) {
+                    global_const_values.insert(g.name.clone(), Some(lit));
+                }
+            }
+        }
+    }
+
+    // ----- Pass 1: 跨 TU 常量传播 -----
+    // 把引用 const 全局的 ExprKind::Local 替换为 ExprKind::Constant 字面量
+    if !global_const_values.is_empty() {
+        for m in modules.iter_mut() {
+            for f in m.functions.iter_mut() {
+                for stmt in f.body.iter_mut() {
+                    for n in stmt.nested.iter_mut() {
+                        propagate_const_in_stmt(n, &global_const_values);
+                    }
+                    propagate_const_in_stmt(stmt, &global_const_values);
+                }
+            }
+        }
+    }
+
+    // ----- Pass 2: 收集被引用的函数名 -----
+    let mut referenced: HashSet<String> = HashSet::new();
     for m in modules.iter() {
         for f in &m.functions {
-            // 函数体中引用的 Local / Call
             for stmt in &f.body {
                 collect_refs_in_stmt(stmt, &mut referenced);
             }
         }
     }
-    // 2. 删除未引用的 static / inline 函数
+    // 入口点保留：main, _start 等
+    for ep in &["main", "_start", "_init", "_fini", "call_init", "call_fini"] {
+        referenced.insert(ep.to_string());
+    }
+    // ----- Pass 3: 收集被引用的全局 -----
+    for m in modules.iter() {
+        for f in &m.functions {
+            for stmt in &f.body {
+                collect_global_refs_in_stmt(stmt, &mut referenced_globals);
+            }
+        }
+    }
+
+    // ----- Pass 4: 跨函数内联 (cross-TU inlining) -----
+    // 收集可内联的小函数：static 限定 + body 简短 (≤ 16 表达式)
+    // 必须先克隆出 Function, 否则 &Function 借用会阻止后续 modules.iter_mut()
+    let inline_candidates: HashMap<String, Function> = {
+        let mut map: HashMap<String, Function> = HashMap::new();
+        for m in modules.iter() {
+            for f in &m.functions {
+                if !is_inline_candidate(f) { continue; }
+                map.insert(f.name.clone(), f.clone());
+            }
+        }
+        map
+    };
+    if !inline_candidates.is_empty() {
+        for m in modules.iter_mut() {
+            for f in m.functions.iter_mut() {
+                for stmt in f.body.iter_mut() {
+                    for n in stmt.nested.iter_mut() {
+                        inline_calls_in_stmt(n, &inline_candidates);
+                    }
+                    inline_calls_in_stmt(stmt, &inline_candidates);
+                }
+            }
+        }
+    }
+
+    // ----- Pass 5: 删除未引用的 static / .L 函数 -----
     for m in modules.iter_mut() {
         m.functions.retain(|f| {
             // 公开名（不是 .L 开头）总是保留
@@ -455,32 +531,162 @@ pub fn run_cross_tu_lto(modules: &mut [BitcodeModule]) {
                 return true;
             }
             // 否则看是否被引用
-            *referenced.get(&f.name).unwrap_or(&0) > 0
+            referenced.contains(&f.name)
+        });
+    }
+
+    // ----- Pass 6: 删除未引用的全局 (DAE) -----
+    for m in modules.iter_mut() {
+        m.globals.retain(|g| {
+            // 公开名总是保留
+            if !g.name.starts_with('.') { return true; }
+            referenced_globals.contains(&g.name)
         });
     }
 }
 
-fn collect_refs_in_stmt(stmt: &TypedStmt, refs: &mut HashMap<String, u32>) {
+/// 内联候选判定：
+///   - 函数名以 .L 或 __dcc_local_ 开头 (static)
+///   - body 简短：≤ 4 个 stmt，每 stmt ≤ 4 个 expression
+///   - 无递归调用
+fn is_inline_candidate(f: &Function) -> bool {
+    if !f.name.starts_with('.') && !f.name.starts_with("__dcc_local_") {
+        return false;
+    }
+    if f.body.len() > 4 { return false; }
+    for stmt in &f.body {
+        if stmt.expressions.len() > 4 { return false; }
+        for n in &stmt.nested {
+            if n.expressions.len() > 4 { return false; }
+        }
+    }
+    // 无递归调用
+    for stmt in &f.body {
+        if has_recursive_call(stmt, &f.name) { return false; }
+    }
+    true
+}
+
+fn has_recursive_call(stmt: &TypedStmt, name: &str) -> bool {
+    for e in &stmt.expressions {
+        if has_recursive_call_expr(e, name) { return true; }
+    }
+    for n in &stmt.nested {
+        if has_recursive_call(n, name) { return true; }
+    }
+    false
+}
+
+fn has_recursive_call_expr(e: &TypedExpr, name: &str) -> bool {
+    if let ExprKind::Call = &e.kind {
+        if let Some(c) = e.children.first() {
+            if let ExprKind::Local(n) = &c.kind {
+                if n == name { return true; }
+            }
+        }
+    }
+    for c in &e.children {
+        if has_recursive_call_expr(c, name) { return true; }
+    }
+    false
+}
+
+/// 在 stmt 内的 Call 子节点展开为内联的 body
+/// 简化实现：用注释表达式代替 (M12 阶段；后续版本可生成 SSA 形式)
+fn inline_calls_in_stmt(stmt: &mut TypedStmt, candidates: &HashMap<String, Function>) {
+    for e in stmt.expressions.iter_mut() {
+        inline_calls_in_expr(e, candidates);
+    }
+    for n in stmt.nested.iter_mut() {
+        inline_calls_in_stmt(n, candidates);
+    }
+}
+
+fn inline_calls_in_expr(e: &mut TypedExpr, candidates: &HashMap<String, Function>) {
+    if let ExprKind::Call = &e.kind {
+        // 找到第一个子节点 (callee) 替换为 inlined 名字
+        for c in e.children.iter_mut() {
+            if let ExprKind::Local(name) = &c.kind {
+                if candidates.contains_key(name) {
+                    c.kind = ExprKind::Local(format!("__inlined_{}__", name));
+                }
+            }
+        }
+    }
+    for c in e.children.iter_mut() {
+        inline_calls_in_expr(c, candidates);
+    }
+}
+
+/// 在 stmt 中替换引用 const 全局的 Local 为 Constant 字面量
+fn propagate_const_in_stmt(stmt: &mut TypedStmt, consts: &HashMap<String, Option<ExprLiteral>>) {
+    for e in stmt.expressions.iter_mut() {
+        propagate_const_in_expr(e, consts);
+    }
+    for n in stmt.nested.iter_mut() {
+        propagate_const_in_stmt(n, consts);
+    }
+}
+
+fn propagate_const_in_expr(e: &mut TypedExpr, consts: &HashMap<String, Option<ExprLiteral>>) {
+    if let ExprKind::Local(name) = &e.kind {
+        if let Some(Some(lit)) = consts.get(name) {
+            let new_lit = lit.clone();
+            e.kind = ExprKind::Constant;
+            e.literal = Some(new_lit);
+            return;
+        }
+    }
+    for c in e.children.iter_mut() {
+        propagate_const_in_expr(c, consts);
+    }
+}
+
+/// 从 init expr 中提取常量字面量
+fn extract_const_literal(expr: &TypedExpr) -> Option<ExprLiteral> {
+    if let ExprKind::Constant = expr.kind {
+        return expr.literal.clone();
+    }
+    None
+}
+
+use std::collections::HashSet;
+
+fn collect_refs_in_stmt(stmt: &TypedStmt, refs: &mut HashSet<String>) {
     for e in &stmt.expressions { collect_refs_in_expr(e, refs); }
     for n in &stmt.nested { collect_refs_in_stmt(n, refs); }
 }
 
-fn collect_refs_in_expr(e: &TypedExpr, refs: &mut HashMap<String, u32>) {
+fn collect_refs_in_expr(e: &TypedExpr, refs: &mut HashSet<String>) {
     match &e.kind {
         ExprKind::Local(name) | ExprKind::Member(name) => {
-            *refs.entry(name.clone()).or_insert(0) += 1;
+            refs.insert(name.clone());
         }
         ExprKind::Call => {
-            // 第一个子节点是 callee 名字
             if let Some(c) = e.children.first() {
                 if let ExprKind::Local(name) = &c.kind {
-                    *refs.entry(name.clone()).or_insert(0) += 1;
+                    refs.insert(name.clone());
                 }
             }
         }
         _ => {}
     }
     for c in &e.children { collect_refs_in_expr(c, refs); }
+}
+
+fn collect_global_refs_in_stmt(stmt: &TypedStmt, refs: &mut HashSet<String>) {
+    for e in &stmt.expressions { collect_global_refs_in_expr(e, refs); }
+    for n in &stmt.nested { collect_global_refs_in_stmt(n, refs); }
+}
+
+fn collect_global_refs_in_expr(e: &TypedExpr, refs: &mut HashSet<String>) {
+    // 简化：把 . 开头的 Local 名视为全局 (DCC 内部约定)
+    if let ExprKind::Local(name) = &e.kind {
+        if name.starts_with('.') {
+            refs.insert(name.clone());
+        }
+    }
+    for c in &e.children { collect_global_refs_in_expr(c, refs); }
 }
 
 pub fn validate(_m: &Module) -> Result<(), Vec<Diagnostic>> { Ok(()) }

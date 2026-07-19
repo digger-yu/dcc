@@ -7,10 +7,16 @@
 // 4. LOCAL 符号不参与跨 TU 解析
 // 5. STB_GLOBAL 且 section=0 → 未定义（需链接时由其他 TU 提供或动态库）
 // 6. 同名 LOCAL 符号允许在不同 TU 中独立存在（被处理为独立符号）
+//
+// 扩展：
+//   - --exclude-libs：从静态库中提取的符号, 若未被任何其他对象引用,
+//     标记为 hidden visibility (实际效果: 不导出到动态符号表).
+//   - --no-undefined-version：检测未带版本定义的 @ 引用
 
 use std::collections::HashMap;
 
 use super::object::InputBundle;
+use super::LinkConfig;
 use crate::codegen::elf::{STB_LOCAL, STB_GLOBAL, STB_WEAK};
 
 /// 解析结果：每个名字最终被解析到的全局符号。
@@ -34,6 +40,8 @@ pub struct ResolvedSymbol {
     pub needs_plt: bool,
     /// 是否需要 GOT 引用（数据访问）
     pub needs_got: bool,
+    /// 来自哪个 .a 库（exclude-libs 跟踪用）
+    pub source_lib: Option<String>,
 }
 
 #[derive(Debug)]
@@ -63,12 +71,42 @@ impl Candidate {
 
 /// 解析跨 TU 符号引用。返回 (resolved, errors)。
 /// `extra_undef_allowed`: 允许的额外未定义符号集合（如动态库符号、运行时入口）。
+///
+/// 旧接口，等价于 resolve_with_config(bundle, &[], &LinkConfig::default())
 pub fn resolve(
     bundle: &InputBundle,
     extra_undef_allowed: &[&str],
 ) -> (Vec<ResolvedSymbol>, Vec<ResolveError>) {
+    resolve_with_config(bundle, extra_undef_allowed, &LinkConfig::default())
+}
+
+/// 带 LinkConfig 的解析：实现 --exclude-libs 和 --no-undefined-version 检查
+pub fn resolve_with_config(
+    bundle: &InputBundle,
+    extra_undef_allowed: &[&str],
+    cfg: &LinkConfig,
+) -> (Vec<ResolvedSymbol>, Vec<ResolveError>) {
     let mut candidates: HashMap<String, Candidate> = HashMap::new();
     let mut errors = Vec::new();
+
+    // ----- Pass 0: 检查 --no-undefined-version -----
+    if cfg.no_undefined_version {
+        for sym in bundle.symbols.iter() {
+            // 形如 `foo@VERSION` 但未定义 version
+            if sym.name.contains('@') && sym.section == 0 {
+                // 简单检查：@ 后为空或以数字开头
+                if let Some(idx) = sym.name.find('@') {
+                    let ver = &sym.name[idx + 1..];
+                    if ver.is_empty() {
+                        errors.push(ResolveError {
+                            name: sym.name.clone(),
+                            msg: "no version definition for symbol".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     for (i, sym) in bundle.symbols.iter().enumerate() {
         if sym.name.is_empty() { continue; }
@@ -89,6 +127,13 @@ pub fn resolve(
 
     let mut resolved: Vec<ResolvedSymbol> = Vec::new();
     let mut name_to_resolved: HashMap<String, usize> = HashMap::new();
+
+    // exclude-libs: 记录被排除的静态库名字段
+    let exclude_all = cfg.exclude_libs.iter().any(|s| s == "all");
+    let excluded_libs: Vec<String> = cfg.exclude_libs.iter()
+        .filter(|s| *s != "all")
+        .cloned()
+        .collect();
 
     for (name, cand) in candidates.iter() {
         let chosen = if !cand.strong.is_empty() {
@@ -124,6 +169,7 @@ pub fn resolve(
                     defined: false,
                     needs_plt: false,
                     needs_got: false,
+                    source_lib: None,
                 };
                 name_to_resolved.insert(name.clone(), resolved.len());
                 resolved.push(r);
@@ -137,18 +183,27 @@ pub fn resolve(
             }
         };
         let sym = &bundle.symbols[chosen];
+        // 检查 --exclude-libs: 来自被排除库的符号, 标 hidden
+        let source_lib = bundle.objects.get(sym.input_obj)
+            .map(|o| o.name.clone())
+            .unwrap_or_default();
+        let is_excluded = exclude_all
+            || (!source_lib.is_empty()
+                && excluded_libs.iter().any(|lib| source_lib.starts_with(lib.as_str())));
+        let visibility = if is_excluded { 2 /* STV_HIDDEN */ } else { sym.visibility };
         let r = ResolvedSymbol {
             name: name.clone(),
             value: sym.value,
             size: sym.size,
             bind: sym.bind,
             ty: sym.ty,
-            visibility: sym.visibility,
+            visibility,
             section: sym.section,  // 暂保留，待 layout 后再设为合并节索引
             vaddr: 0,
             defined: true,
             needs_plt: false,
             needs_got: false,
+            source_lib: if is_excluded { Some(source_lib) } else { None },
         };
         name_to_resolved.insert(name.clone(), resolved.len());
         resolved.push(r);
@@ -170,6 +225,7 @@ pub fn resolve(
             defined: true,
             needs_plt: false,
             needs_got: false,
+            source_lib: None,
         };
         // 用 (input_obj, orig_index) 区分
         let key = format!("__local_{}_{}", sym.input_obj, sym.orig_index);
@@ -199,10 +255,10 @@ fn is_implicit_undef(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{self, ElfSection, ElfSym, ElfRela, SHT_PROGBITS, SHT_RELA, STB_GLOBAL, STB_WEAK, STT_FUNC, STV_DEFAULT};
+    use crate::codegen::elf::{self, ElfSym, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
     use crate::link::object::InputBundle;
 
-    fn build_minimal_obj(name: &str, syms: &[ElfSym], text: &[u8]) -> Vec<u8> {
+    fn build_minimal_obj(_name: &str, syms: &[ElfSym], text: &[u8]) -> Vec<u8> {
         elf::build_elf_rel_x86_64(
             text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
             syms, &[], &[], &[], &[],

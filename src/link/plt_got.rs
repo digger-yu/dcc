@@ -13,7 +13,6 @@
 use super::layout::{Layout, OutputSectionKind};
 use crate::codegen::elf::{
     R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT,
-    SHT_SYMTAB, SHT_STRTAB,
     STB_GLOBAL, STT_FUNC, STV_DEFAULT,
 };
 
@@ -204,7 +203,6 @@ pub fn fill_plt_got(layout: &mut Layout) {
     let dynstr_size = dynstr_data.len() as u64;
     let rela_plt_size = rela_plt_data.len() as u64;
     let rela_dyn_size = rela_dyn_data.len() as u64;
-    let dynsym_size = dynsym_data.len() as u64;
     // DT_STRTAB = 5
     dynamic_data.extend_from_slice(&5u64.to_le_bytes());
     dynamic_data.extend_from_slice(&dynstr_vaddr.to_le_bytes());
@@ -290,8 +288,6 @@ pub fn fill_plt_got(layout: &mut Layout) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::link::layout::OutputSectionKind;
-    use crate::codegen::elf::SHT_PROGBITS;
 
     #[test]
     fn plt_entry_has_correct_displacement() {

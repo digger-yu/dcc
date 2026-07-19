@@ -9,6 +9,10 @@
 //   - ET_EXEC 输出（elf_exec.rs）
 //   - ET_DYN 输出（PIE / .so）（elf_dyn.rs）
 //   - 自有 LTO 位码（lto_bitcode.rs）
+//   - GNU hash TIE 压缩（gnu_hash.rs）
+//   - .eh_frame_hdr 搜索表（eh_frame.rs）
+//   - .note.gnu.build-id 段生成（build_id.rs）
+//   - IFUNC 间接函数解析（ifunc.rs）
 //
 // 用法：
 //   let r = link::link_multi_tu(&[a.o, b.o], &output, &LinkConfig::default());
@@ -25,14 +29,17 @@ pub mod elf_exec;
 pub mod elf_dyn;
 pub mod lto_bitcode;
 pub mod legacy;
+pub mod gnu_hash;
+pub mod eh_frame;
+pub mod build_id;
+pub mod ifunc;
 
 use std::path::{Path, PathBuf};
 
 use crate::diagnostics::{Diagnostic, Span};
 
 pub use object::InputBundle;
-pub use resolve::resolve;
-pub use layout::{LayoutBuilder, OutputSectionKind};
+pub use layout::LayoutBuilder;
 pub use relocate::apply_relocations;
 pub use lto_bitcode::{serialize_module, deserialize_module, run_cross_tu_lto, BitcodeModule};
 pub use elf_exec::write_elf_exec_x86_64;
@@ -60,8 +67,28 @@ pub struct LinkConfig {
     pub gc_sections: bool,
     /// 显式 unresolved 允许列表（运行时入口/弱 libc）
     pub allowed_undef: Vec<String>,
+    /// --exclude-libs：需要隐藏的静态库符号集合（all / libname1,libname2）
+    pub exclude_libs: Vec<String>,
+    /// --build-id：build-id 风格 (None / Sha1 / Uuid / Md5 / Hex)
+    pub build_id: BuildIdStyle,
+    /// --no-undefined-version：拒绝无版本 undef 符号
+    pub no_undefined_version: bool,
     /// 详细日志
     pub verbose: bool,
+}
+
+/// build-id 风格
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildIdStyle {
+    None,
+    Sha1,
+    FastSha1,  // 优化版：复用已计算 hash，避免重算
+    Uuid,
+    Md5,
+}
+
+impl Default for BuildIdStyle {
+    fn default() -> Self { Self::None }
 }
 
 impl Default for LinkConfig {
@@ -82,6 +109,9 @@ impl Default for LinkConfig {
                 "__stack_chk_fail".into(), "__cxa_atexit".into(), "__cxa_finalize".into(),
                 "_start".into(), "main".into(),
             ],
+            exclude_libs: vec![],
+            build_id: BuildIdStyle::None,
+            no_undefined_version: false,
             verbose: false,
         }
     }
@@ -123,7 +153,7 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
     }
     // 1. 符号解析
     let undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
-    let (resolved, resolve_errors) = resolve(bundle, &undef);
+    let (resolved, resolve_errors) = resolve::resolve_with_config(bundle, &undef, cfg);
     if !resolve_errors.is_empty() {
         let errs: Vec<Diagnostic> = resolve_errors.iter().map(|e| {
             Diagnostic::err("E0302", e.to_string(), Span::point("", 0, 0))
@@ -184,9 +214,9 @@ pub fn link_with_lto(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{self, ElfSection, ElfSym, ElfRela, SHT_PROGBITS, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
+    use crate::codegen::elf::{self, ElfRela, ElfSym, STB_GLOBAL, STT_FUNC, STV_DEFAULT};
 
-    fn build_minimal_obj(name: &str, syms: &[ElfSym], text: &[u8]) -> Vec<u8> {
+    fn build_minimal_obj(_name: &str, syms: &[ElfSym], text: &[u8]) -> Vec<u8> {
         elf::build_elf_rel_x86_64(
             text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
             syms, &[], &[], &[], &[],

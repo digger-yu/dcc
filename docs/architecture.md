@@ -163,11 +163,15 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 | `link/object.rs` | 解析 ELF ET_REL 目标文件：节、符号、`.rela.*` 重定位 | — |
 | `link/resolve.rs` | 跨 TU 符号解析：强 > 弱 > undef；隐式 undef 允许 libc weak | — |
 | `link/layout.rs` | 同名节合并 + 2 段布局（`R+X` / `R+W`） + 自定义节独立 | — |
-| `link/relocate.rs` | 重定位引擎：`PC32` / `PLT32` / `64` / `32` / `32S` / `GOTPCREL` | — |
+| `link/relocate.rs` | 重定位引擎：`PC32` / `PLT32` / `64` / `32` / `32S` / `GOTPCREL` / `GOT64` / `GOTOFF64` / `TPOFF64` / `TPOFF32` / AArch64（22 种）/ RISC-V（15 种） | — |
 | `link/plt_got.rs` | PLT/GOT 生成、`.dynamic`、`.dynsym`、`.rela.{dyn,plt}` | — |
 | `link/elf_exec.rs` | ET_EXEC 输出：ELF 头、PHDR、节头、`.symtab`、`.strtab`、`.gnu.hash` | — |
 | `link/elf_dyn.rs` | ET_DYN 输出：PIE / `.so` 共享库 | — |
-| `link/lto_bitcode.rs` | 自有 DBC 格式 IR 位码序列化 + 跨 TU DCE | — |
+| `link/gnu_hash.rs` | `.gnu.hash` TIE 压缩（bloom filter + buckets） | — |
+| `link/eh_frame.rs` | `.eh_frame_hdr` 二分搜索表 | — |
+| `link/build_id.rs` | `.note.gnu.build-id` 段（SHA-1 / MD5 / UUID v4） | — |
+| `link/ifunc.rs` | IFUNC（STT_GNU_IFUNC）解析 + `R_X86_64_IRELATIVE` 生成 | — |
+| `link/lto_bitcode.rs` | 自有 DBC 格式 IR 位码序列化 + 跨 TU DCE / 内联 / 常量传播 / DAE | — |
 | `link/legacy.rs` | 旧 `-r` 模式（host `ld -r`） | host `ld`、`objcopy` |
 
 **多 TU 链接管线**（`driver.rs::run_builtin_linker`）：
@@ -185,12 +189,35 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 2. `serialize_module` 把 `ir::Module` 编码进 DBC 流（含所有 `ValueType`、
    `BinOp` / `UnOp` / `ExprKind` / 函数 / 全局）。
 3. `deserialize_module` 反向重建模块。
-4. `run_cross_tu_lto` 跨 TU DCE：标记未引用函数 / 全局为 dead。
+4. `run_cross_tu_lto` 跨 TU 优化（4 pass）：
+   - 跨 TU 常量传播：合并 `global constant` 初始化值，替换跨 TU 引用。
+   - DCE：标记未引用函数 / 全局为 dead。
+   - 跨函数内联：cost model（≤4 语句 / 4 表达式 / 无递归）的小函数
+     （含同 TU 与跨 TU 调用）原地展开。
+   - 全局 DAE：消除 `global` 中无用的 store 副作用。
+5. `LinkConfig` CLI 入口支持 `-Wl,--exclude-libs=libxxx.a`（被排除的归档
+   库中的全局符号打 `STV_HIDDEN`），`--build-id=sha1|uuid|md5|none`
+   （生成 `.note.gnu.build-id` 段），`--no-undefined-version`（拒绝
+   `.symver` 缺版本的符号引用）。
 
-**明确不做**：跨 TU 函数内联 / 常量传播 / 全局优化（仅做 DCE），
-AArch64 / RISC-V 后端的 ELF 输出（沿用 host 链接器）。
+**重定位类型**（`relocate.rs`）：
 
-远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（12 用例）。
+- x86-64：`R_X86_64_PC32` / `PLT32` / `64` / `32` / `32S` / `GOTPCREL`
+  / `GOT64` / `GOTOFF64` / `TPOFF64` / `TPOFF32` / `IRELATIVE` / `DTPMOD64`
+  / `DTPOFF64`。
+- AArch64：`ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_LO21`
+  / `ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` / `LDST*_ABS_LO12_NC`
+  / `MOVW_UABS_G0..G3`。
+- RISC-V：`64` / `32` / `32_PCREL` / `CALL` / `CALL_PLT` / `PCREL_HI20`
+  / `PCREL_LO12_I` / `PCREL_LO12_S` / `HI20` / `LO12_I` / `LO12_S`
+  / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S`。
+
+**明确不做**：AArch64 / RISC-V 完整后端 ELF 输出（沿用 host 链接器）
+之外的非 x86-64 后端；`--no-undefined-version` 的 .symver 完整实现（仅
+打印告警拒绝）。
+
+远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（31 用例）
++ `cargo test lto::`（7 用例）。
 
 ## C++ 前端 M7（`src/cpp/`）
 

@@ -434,6 +434,9 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             "__stack_chk_fail".into(), "__cxa_atexit".into(), "__cxa_finalize".into(),
             "_start".into(), "main".into(),
         ],
+        exclude_libs: cfg.exclude_libs.clone(),
+        build_id: cfg.build_id,
+        no_undefined_version: cfg.no_undefined_version,
         verbose: cfg.verbose,
     };
     if cfg.linker_entry.is_some() {
