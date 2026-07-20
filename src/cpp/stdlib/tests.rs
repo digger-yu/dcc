@@ -32,7 +32,7 @@ fn emit_stdlib_includes_has_all_headers() {
 
 #[test]
 fn stdlib_headers_count_matches() {
-    assert_eq!(STD_HEADERS.len(), 16);
+    assert_eq!(STD_HEADERS.len(), 25);
 }
 
 #[test]

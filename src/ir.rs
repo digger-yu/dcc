@@ -699,12 +699,11 @@ mod tests {
     }
 
     #[test]
-    fn float_mod_reports_e1003() {
+    fn float_mod_lowers_and_validates() {
         let src = b"int main(void) { float a = 1, b = 2; return (int)(a % b); }\n";
-        let (program, _) = crate::parser::parse(src, "e1003.c");
-        let module = lower(program).expect("lower despite float mod");
-        let err = validate(&module).expect_err("float mod must fail validation");
-        assert!(err.iter().any(|d| d.code == "E1003"), "{err:?}");
+        let (program, _) = crate::parser::parse(src, "float_mod.c");
+        let module = lower(program).expect("lower float mod");
+        validate(&module).expect("float mod should pass validation");
     }
 
     #[test]

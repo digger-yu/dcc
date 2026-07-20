@@ -1395,13 +1395,13 @@ static void dccpp_re_parse_class(struct dccpp_re_parser* p, int negate) {
 static void dccpp_re_parse_atom(struct dccpp_re_parser* p) {
     unsigned char c = dccpp_re_peek(p);
     if (c == 0) { p->err = 1; return; }
-    if (c == '(') {
+    if (c == '\x28') {
         p->pos++;
         unsigned char save_idx = (unsigned char)p->saves++;
         dccpp_re_emit(p, DCCPP_RE_SAVE);
         dccpp_re_emit(p, save_idx);
         dccpp_re_parse_alt(p);
-        if (p->pos < p->len && p->src[p->pos] == ')') p->pos++;
+        if (p->pos < p->len && p->src[p->pos] == '\x29') p->pos++;
         dccpp_re_emit(p, DCCPP_RE_SAVE);
         dccpp_re_emit(p, (unsigned char)(save_idx + 1));
         return;
@@ -1475,7 +1475,7 @@ static void dccpp_re_parse_quant(struct dccpp_re_parser* p) {
 
 static void dccpp_re_parse_seq(struct dccpp_re_parser* p) {
     while (p->pos < p->len && p->src[p->pos] != '|' &&
-           p->src[p->pos] != ')') {
+           p->src[p->pos] != '\x29') {
         dccpp_re_parse_quant(p);
         if (p->err) return;
     }

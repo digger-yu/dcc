@@ -6,7 +6,7 @@ namespace std {
     public:
         function_t() : fp_(0) {}
         function_t(void* fp) : fp_(fp) {}
-        void operator()() { /* fp_ 通过 dcc C 代码调用 */ }
+        void invoke() { /* fp_ 通过 dcc C 代码调用 */ }
         int empty() { return fp_ == 0; }
     private:
         void* fp_;

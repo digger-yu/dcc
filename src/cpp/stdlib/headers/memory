@@ -52,7 +52,7 @@ namespace std {
             return p;
         }
 
-        int operator!() const { return p_ == 0; }
+        int empty() const { return p_ == 0; }
 
     private:
         void* p_;
