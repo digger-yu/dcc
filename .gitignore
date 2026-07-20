@@ -32,10 +32,12 @@ call
 fib
 bad
 
-# Temp scripts
+# Temp scripts / artifacts
 _*.py
 _*.txt
 _*.sh
+test_output.txt
+target-*/
 scripts/dump_*.py
 scripts/grep_pp.py
 scripts/compare_pp_ti.py

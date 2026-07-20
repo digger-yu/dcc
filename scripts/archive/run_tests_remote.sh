@@ -5,7 +5,7 @@ PASS=0
 FAIL=0
 for t in huge hugeval ieee754 nan offsetof_full nested_full cwsc computed_goto asm_goto_outputs atomic_c fpclassify float_lit; do
   echo "=== test_$t ==="
-  out=$($DCC $SRC/test_$t.c -o /tmp/test_$t 2>&1)
+  out=$($DCC $SRC/examples/dev/test_$t.c -o /tmp/test_$t 2>&1)
   if [ $? -ne 0 ]; then
     echo "  COMPILE FAILED: $out"
     FAIL=$((FAIL+1))

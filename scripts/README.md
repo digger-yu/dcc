@@ -6,6 +6,12 @@
 |------|------|
 | `sync_remote_build.sh` | rsync 远程 + `cargo test` + feature + 内核窄目标 |
 | `remote_feature_check.sh` | 功能矩阵（含 aarch64 hello、LTO、sanitizer） |
+| `remote-m18.sh` | 远程 M18 集成测试（pull + release build + m18_*） |
+| `remote-build.sh` | 远程 release 编译 |
+| `remote-test-all.sh` | 远程 m15 + m16 集成测试 |
+| `remote-test-m15.sh` / `remote-test-m16.sh` | 远程单里程碑集成测试 |
+| `remote-test-ssa.sh` | 远程 SSA 单元测试 |
+| `remote-test-attr.sh` | 远程 function attribute 示例编译运行 |
 | `test_all.sh` | 本地全量测试 |
 | `ci-trigger.sh` | CI 触发 |
 | `bench.sh` / `bench_phase_e.sh` | 性能与阶段 E 基准 |
