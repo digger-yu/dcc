@@ -174,6 +174,9 @@ impl Function {
     }
 
     pub fn unique_bb(&mut self, prefix: &str) -> String {
+        if !self.blocks.contains_key(prefix) {
+            return self.add_block(prefix.to_string());
+        }
         for i in 0..10000 {
             let n = format!("{}.{}", prefix, i);
             if !self.blocks.contains_key(&n) {
