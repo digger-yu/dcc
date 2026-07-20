@@ -153,6 +153,8 @@
 | C 前端补洞 `__attribute__((returns_nonnull))` (M14) | ✅ | codegen `current_returns_nonnull` 状态机 + `test rax, rax; jnz .ok; ud2; .ok:` 强制非空 |
 | C 前端补洞 `#pragma` 全家族 (M11.1) | ✅ | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS ON/OFF/DEFAULT` / `GCC diagnostic push/pop/ignored/warning/error` / `once` / `comment` 静默接受 |
 | C 前端补洞 `#pragma pack` 影响 struct 布局 (M14) | ✅ | `preproc.pack_history: Vec<(u32, Option<usize>)>` 携带行号 + packing 变化；`ParseOptions.pack_history` 传入 parser；`Parser::pack_at_line(line)` 二分查找生效值；`layout_struct_with_pack(max_align)` 把字段对齐 cap 到 `min(nat, n)` |
+| C 前端补洞 const_eval 完整化 (M15) | ✅ | `ConstValue` 枚举（`Int/Float/Str/Addr/Bytes`）；`eval_full` 返回完整常量值，旧 `eval` 仅取整数部分；浮点 + - * / 与 `Int<->Float` 混合算术；比较提升到 f64；字符串字面量走 FNV-1a 64-bit 标签 + 字节内容；`&ident` / `&arr[i]` / `&&label` → `Addr { name, offset }`；新增 `__builtin_strlen/abs/labs/llabs/bswap16/32/64/expect/popcount*` 编译期折叠；`Cast` 阶段新增 `-Wint-truncation` / `-Wint-conversion` 严格类型 warning（不阻塞） |
+| C 前端补洞 运行时检查 (M15) | ✅ | `-fbounds-check` 数组下标运行时边界检查：仅对 `ArraySize::Const(n)` 的数组插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds`；`-ftrapv` 有符号算术溢出 trap：binop 之后置 `jo` 跳到 `__dcc_trapv_overflow` 桩函数（覆盖 `Add/Sub/Mul/Div`） |
 | C 前端补洞 `_Pragma` 操作符 (M11.1) | ✅ | C99 `_Pragma("string")` 在 preproc 展开阶段累积到 `pending_pragmas: RefCell<Vec<String>>`，源块刷新时批量应用到 `process_directive` |
 | C 前端补洞 `_Pragma` 操作符 (M14) | ✅ | `_Pragma` 与 `#pragma` 共享同一条 `process_directive` 通路，自动具备 pack/weak/STDC/GCC diagnostic 处理 |
 | C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |

@@ -129,6 +129,43 @@
   `TPOFF32` 为低 32-bit 截断，FS 段 base 由 `_start` 中
   `arch_prctl(ARCH_SET_FS)` 设置。
 
+## M15 const_eval 完整化 + 运行时检查（第一性原理）
+
+- **`ConstValue` 枚举**: 不再只有 `i128`，引入 `Int/Float/Str/Addr/Bytes`
+  五种值。`eval_full` 返回该枚举（保持旧 `eval` i128 兼容封装），让
+  parser 与 codegen 共用同一套"什么是常量"的判断。`as_int/as_float`
+  辅助方法负责类型收窄。
+- **浮点常量求值**: 算术 `+ - * /` 走 `f64`，并允许 `Int<->Float`
+  双向混合（如 `2 * pi`）；比较 (`==/!=/</<=/>=/>`) 全部提升到 f64，
+  与 GCC 浮点字面量语义一致。
+- **字符串字面量作为常量**: `ConstValue::Str { data, label }`，label
+  用 FNV-1a 64-bit 哈希分配（与 codegen `string_pool` dedup 标签格式
+  区分），方便 codegen 后续将同一字符串合并到 rodata。
+- **地址常量**: `&ident` / `&arr[i]` / `&&label` → `ConstValue::Addr`。
+  与 codegen 配合时，静态对象地址可参与 `static_assert`/`sizeof` 求值。
+- **`__builtin_*` 编译期折叠**: 新增 `__builtin_strlen` (字符串→整数)、
+  `__builtin_abs/labs/llabs` (整数/float→绝对值)、`__builtin_bswap16/32/64`
+  (字节序反转)、`__builtin_expect (cond, expect) → cond`、
+  `__builtin_popcount*` (整数位数)。所有折叠均走 `eval_int_lit` 复用
+  字面量解析逻辑。
+- **字符串字面量拼接**: 实际工作在 parser 层完成
+  （`while TokKind::StringLit { data.extend(...) }`），const_eval 看到
+  的是合并后的单个 `Expr::String`，无需在 const_eval 内重复。
+- **C23 constexpr 函数**: 仅作函数声明解析（`while "constexpr" { advance }`），
+  不强制编译期求值；与 `inline`/`__attribute__((always_inline))` 同等待遇，
+  函数体走普通 codegen 路径。
+- **`#embed` 字节数**: preproc 已展开为逗号分隔整数字节；`sizeof` /
+  `__builtin_strlen` / 数组初始化器可直接求长度。
+- **严格类型检查 warning**: `cast` 阶段调用 `check_strict_conversion`
+  给出 `-Wint-truncation`（`char` 接收 0x100 等）与 `-Wint-conversion`
+  （隐式指针↔整数）警告；不阻塞编译，遵循 GCC 类别代码。
+- **运行时边界检查 `-fbounds-check`**: 仅对 `ArraySize::Const(n)` 数组
+  下标插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds` 序列
+  （n 溢出或 0 时跳过检查）；变长数组走运行时长度，不在静态检查范围内。
+- **整数溢出 trap `-ftrapv`**: `Expr::Binop` 处理路径末尾追加 `jo` 跳到
+  `__dcc_trapv_overflow` 桩（用户链接 runtime helper）。x86_64 ADD/SUB/
+  IMUL/IDIV 在有符号溢出时均置 OF=1，`jo rel32` (0F 80) 直接捕获。
+
 ## 每个里程碑的第一性原理复盘
 
 每个 M 完成后,我们都问一次:

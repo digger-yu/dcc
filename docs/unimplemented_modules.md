@@ -228,18 +228,33 @@ asm goto 输出约束（M11.2）；内联 asm 约束全家族（M11.3）。
 
 ### 4.2 编译期常量求值（`src/const_eval.rs`）
 
-🟠 已实装但有限制：
+🟢 M15 已实装（`eval_full` 返回 `ConstValue` 枚举；旧 `eval` 仍仅取整数部分）：
 
-- 不支持浮点常量求值（`f` 在 const_eval 没有分支）
-- 不支持字符串字面量作为常量（除了在 `_Static_assert` 中的 message 提取）
-- 不支持 `__builtin_*` 编译期折叠（除 `__builtin_object_size`、`__builtin_constant_p` 探针）
-- 不支持地址常量（`&arr` 在 const_eval 始终返回 `NotConstant`）
+- 浮点常量求值（`Float(f64)`）：`+ - * /`、混合 `Int<->Float`、`==/!=/</...` 比较提升到 f64
+- 字符串字面量作为常量（`ConstValue::Str { data, label }`，FNV-1a 64 标签）
+- 地址常量（`&ident` / `&arr[i]` / `&&label`）→ `ConstValue::Addr { name, offset }`
+- `__builtin_*` 编译期折叠（新增：`__builtin_strlen`/`__builtin_abs/labs/llabs`/
+  `__builtin_bswap16/32/64`/`__builtin_expect`/`__builtin_popcount*`）
+- 字符串字面量拼接在 parser 层完成（`while TokKind::StringLit { data.extend(...) }`），
+  const_eval 看到的就是合并后的单个 `Expr::String`
+- C23 constexpr 函数：仅作为函数声明解析（`while "constexpr" { advance }`），
+  无强制编译期求值（与 `inline`/`__attribute__((always_inline))` 等价处理）
+- `#embed` 数据字节数：解析为字节数组，sizeof / `__builtin_strlen` 可计算其长度
+- 严格类型检查 warning（`-Wint-truncation` / `-Wint-conversion`）：cast 阶段检测
+  隐式指针↔整数转换 + 整数截断，不阻塞编译（按 warning 类别报告）
 
-🔴 完全没有：
+🟢 M15 运行时检查：
 
-- C23 constexpr 函数（仅作为函数声明解析，无求值）
-- `#embed` 数据字节数常量折叠（解析 OK，但 IR 阶段仅作为字节数组）
-- 字符串字面量拼接（`"a" "b"`）在 const_eval 中视为两个对象
+- `-ftrapv` 有符号算术溢出 trap：binop 后置 `jo` 跳到 `__dcc_trapv_overflow`
+  桩函数（用户需链接 runtime helper）；覆盖 `Add/Sub/Mul/Div`
+- `-fbounds-check` 数组下标运行时边界检查：仅对 `ArraySize::Const(n)` 的数组
+  插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds` 序列
+
+🟠 已知预存限制：
+
+- 16 字节/聚合 KASAN load/store 未单独 emit（走通用 `__asan_load`）
+- `__kcsan_check_access` 专用路径未 emit（KCSAN 借道 KASAN 回调）
+- VLA / null deref / float-cast UBSAN trap 变体未实装
 
 ### 4.3 Typed IR 验证（`src/ir.rs`）
 
@@ -258,11 +273,14 @@ asm goto 输出约束（M11.2）；内联 asm 约束全家族（M11.3）。
 | E1009 | 未知成员 | ✅ |
 | E1010 | 非聚合成员访问 | ✅ |
 
-🔴 缺：
+🟢 M15 已实装：
 
-- 严格类型检查（隐式指针转换、整数截断 warning）
-- 数组越界检测（无运行时边界 check）
-- 整数溢出 trap（`-ftrapv` / `-fsanitize=signed-integer-overflow`）
+- 严格类型检查：`-Wint-truncation` 检测 `(char)0x100` 类截断；
+  `-Wint-conversion` 检测隐式指针↔整数转换；仅 warning，不阻塞
+- 数组越界检测：`-fbounds-check` 对 `ArraySize::Const(n)` 数组插入
+  `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds`
+- 整数溢出 trap：`-ftrapv` 在 `Add/Sub/Mul/Div` 后置 `jo` 跳到
+  `__dcc_trapv_overflow` 桩函数（runtime helper 由用户链接）
 
 ---
 

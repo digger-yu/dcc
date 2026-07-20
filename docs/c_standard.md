@@ -83,7 +83,16 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - 未知 `__builtin_*`：warning + 零值（有返回值）或 **ud2**（void），
   不静默链接不存在的 libc 符号
 - `__builtin_constant_p`：parser/opt/codegen 共享 `const_eval::is_constant`
+- `__builtin_*` 编译期折叠 (M15)：`__builtin_strlen`/`__builtin_abs/labs/llabs`/
+  `__builtin_bswap16/32/64`/`__builtin_expect`/`__builtin_popcount*` —
+  解析阶段走 `const_eval::eval_full` 折叠为整数常量
 - `__builtin_expect_with_probability` 降级为 `__builtin_expect`
+- 严格类型检查 warning (M15)：`-Wint-truncation` / `-Wint-conversion` —
+  cast 阶段检测整数截断与隐式指针↔整数转换，仅 warning 不阻塞
+- 运行时边界检查 (M15)：`-fbounds-check` 对 `ArraySize::Const(n)` 数组
+  下标插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds`
+- 整数溢出 trap (M15)：`-ftrapv` 在 `Add/Sub/Mul/Div` 后置
+  `jo` 跳到 `__dcc_trapv_overflow` 桩函数
 - `address_space(N)` sparse 注解 (静默跳过)
 - `__attribute__((format))` printf/scanf 格式检查（`-Wformat` / `W0003`）
 - `&&label` 标签地址 (GNU 扩展, 通过 RIP-relative LEA 实现)

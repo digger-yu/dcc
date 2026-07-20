@@ -760,6 +760,57 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     `stdatomic_macros_hosted`（hosted 模式 atomic 宏）远程 PASS；
     freestanding 模式通过 `preproc.rs` 单元测试验证
     `__STDC_NO_ATOMICS__=1` 已设置。
+- **M15 const_eval 完整化 + 运行时检查**：补全 `unimplemented_modules.md`
+  第 4.2/4.3 节 7 条长期挂账项（浮点常量 / 字符串常量 / 地址常量 /
+  `__builtin_*` 折叠 / constexpr / `#embed` 字节数 / 严格类型 warning）
+  与 3 条运行时检查（`-fbounds-check` 数组越界 / `-ftrapv` 整数溢出
+  trap / 隐式指针整数转换 warning）：
+  - **`ConstValue` 枚举**：`const_eval.rs` 引入
+    `Int(i128) | Float(f64) | Str { data, label } | Addr { name, offset } | Bytes { data, label }`
+    五种值；`eval_full` 返回该枚举（保留旧 `eval() -> i128` API 作为
+    兼容封装，仅在 `ConstValue::Float` 上做 `f as i128` 截断）。所有
+    旧 parser/IR 调用点不变。
+  - **浮点常量算术**：`add_values/sub_values/mul_values/div_values`
+    增加 `Float<->Float` 与 `Int<->Float` 混合分支；
+    `cmp_values` 把 `lt/gt/le/ge/eq/ne` 全部提升到 f64 比较（整数通过
+    `as_float()` 走 i128→f64 转换；f64→i128 由 `as_int()` 负责）。
+  - **字符串字面量**：`Expr::String` 直接给出 `ConstValue::Str`，label
+    用 FNV-1a 64-bit 哈希（`const_str_id` 私有 helper），与 codegen
+    `string_pool` 标签格式互不耦合。
+  - **地址常量**：`Expr::AddrOf` 内部按子表达式分派 — `Ident` → `Addr{0}`、
+    `Index{ident, idx}` → 索引常量作为 `offset`、`LabelAddr` → `Addr{0}`。
+  - **`__builtin_*` 折叠**（parser 层）：`__builtin_strlen(s)` 把字符串
+    字面量折叠为整数长度；`__builtin_abs/labs/llabs` 走
+    `i128::wrapping_abs()`；`__builtin_bswap16/32/64` 走
+    `uN::swap_bytes()`；`__builtin_expect(cond, expect) → cond`；
+    `__builtin_popcount*` 走 `u64::count_ones()`。所有 builtin 折叠
+    都用 `const_eval::eval_int_lit` 解析参数 + `eval_full` 验证。
+  - **C23 constexpr 函数**：`parser` 在 declaration specifier 与
+    `parse_type_mode` 两处识别 `constexpr` 关键字并 `advance` 跳过；
+    不强制编译期求值，函数体走普通 codegen 路径。
+  - **`#embed` 字节数**：preproc 已展开为 `byte0, byte1, ..., byteN-1`
+    逗号分隔整数字节；`sizeof(embed_arr)` / `__builtin_strlen(embed_str)`
+    走 const_eval 求长度（与普通数组无差异）。
+  - **严格类型检查 warning**：parser 新增 `check_strict_conversion`，
+    cast 阶段按位宽比较检测：整型收窄（`char` 接收 0x100 等）报
+    `-Wint-truncation`；隐式指针↔整数转换报 `-Wint-conversion`。
+    警告不阻塞编译（按 warning 类别报告），遵循 GCC 类别命名。
+  - **`-fbounds-check`**：codegen `Expr::Index` 处理路径在 imul 后
+    插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds`；
+    n 溢出/0/未知大小 (`ArraySize::Var`) 时跳过检查。
+  - **`-ftrapv`**：codegen `Expr::Binop` 路径末尾追加
+    `jo .trap; jmp .ok; .trap: call __dcc_trapv_overflow; .ok:`；
+    覆盖 `Add/Sub/Mul/Div`（x86_64 OF=1 即有符号溢出）。`__dcc_trapv_overflow`
+    桩由用户链接 runtime helper（与现有 `__ubsan_*` 模式一致）。
+  - **测试**：6 个新增集成测试（`m15_float_const_eval` /
+    `m15_string_literal_and_concat` / `m15_address_const` /
+    `m15_builtin_fold` / `m15_strict_warning_compile` /
+    `m15_bounds_check_inrange` / `m15_constexpr_function`），12 个
+    const_eval 单元测试（`float_arithmetic_eval` /
+    `float_comparison_eval` / `int_float_mixed_eval` /
+    `string_literal_eval_returns_str_value` / `address_of_ident_eval` /
+    `address_of_index_eval` / `label_address_eval` /
+    `legacy_eval_truncates_float_to_int` + 4 个旧测试）全部 PASS。
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
   局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（整数用 GP，
   浮点用标量 SSE，不用 XMM 向量指令）；
