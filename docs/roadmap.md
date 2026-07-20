@@ -270,3 +270,44 @@
   - regex 不支持 unicode / 反向引用 / lookahead。
   - `std::thread` 成员函数入口需用户自己写 C thunk（dcc++
     不会自动从 `&Class::method` 生成 `void*(*)(void*)`）。
+
+## M19 预处理器收尾（`__COUNTER__` / `__VA_OPT__` / 预定义宏 / `#pragma locale` / 缓存失效）
+
+- **`__COUNTER__`**：在 `Preprocessor` 中以 `u32` 状态字段持有。
+  `expand_with_disabled_inner` 每次访问后 wrapping_add(1)，
+  跨宏嵌套展开共享同一 counter，TU 内单调递增。
+  在 `#if` 中可被求值（先 `expand_macros` 再 `eval_int_expr`）。
+- **`__VA_OPT__` (C++20 / C23)**：在 `substitute_params` 入口
+  按"是否可变参数宏 + `__VA_ARGS__` 是否非空"二分支消解：
+  - 非空：保留 content（内部参数照常被 caller 替换）。
+  - 空：移除 `__VA_OPT__(...)` 整段，并消掉前面紧邻的
+    空白（与 GCC 行为一致：token 视作不可见）。
+  - 嵌套：按"内→外"顺序递归消解。
+  - 字符串/字符字面量内的 `__VA_OPT__` 视为普通 token。
+  - 在普通宏或无 `__VA_ARGS__` 的宏体中保留为字面 token。
+- **GCC 兼容预定义宏**（`define_builtin` 一次性预置）：
+  - 架构别名：`__amd64` / `__amd64__` / `__x86_64` / `__k8` / `__k8__` / `__x86_64__`。
+  - 链接/平台：`__USER_LABEL_PREFIX__` / `__VERSION__`。
+  - 优化相关：`__OPTIMIZE__` / `__OPTIMIZE_SIZE__` /
+    `__NO_INLINE__` / `__FINITE_MATH_ONLY__`。
+  - 编译模型：`__PIC__` / `__PIE__` / `__code_model_small__`。
+  - 段寄存器：`__SEG_GS` / `__SEG_FS`。
+- **C23 `#pragma locale`**：接受 `default` / `"POSIX"` / `reset`
+  三种形式并静默忽略，不切字符集。完全 locale 切换仍依赖 libc。
+- **include 缓存自动失效**：include 缓存版本从 V6 → V7，
+  `hash_macro_state` 把宏表（按名排序的 name+body+params+
+  variadic XOR）纳入缓存键；`-D_FORTIFY_SOURCE=2` 与 `=0` 在
+  同一文件下会失配缓存，自动重算。
+- **expand 早退修复**：`expand_macros` 不再因
+  `macros.is_empty()` 早退，确保 `__COUNTER__` / `__FILE__` /
+  `__LINE__` 等特殊 token 始终进入展开路径。
+- **空括号函数宏扩展**：`expand_with_disabled_inner` 在
+  `raw_args.is_empty() && !params.is_empty()` 时按 GCC 行为
+  视为 N 个空实参展开。修复 glibc 头 `__STRING ()` /
+  `__ASMNAME2` 链在 dcc 预处理器里残留 `__STRING` 字面量的
+  问题（`<stdio.h>` / `<stdlib.h>` 之前因 `__STRING` 残留在
+  解析阶段报 E0001 / E0003）。
+- **测试**：
+  - 25 个 `preproc::tests::` 单元测试（其中 5 个为 M19 新增）。
+  - 5 个 `m19_*` 集成测试 (`m19_counter / m19_counter_in_function_macro /
+    m19_va_opt / m19_predefined_macros / m19_pragma_locale`)。

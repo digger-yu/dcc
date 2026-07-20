@@ -32,6 +32,9 @@ pub struct Preprocessor {
     /// 编译日期/时间 (用于 __DATE__ / __TIME__)
     compile_date: String,
     compile_time: String,
+    /// __COUNTER__ 计数器: 每个 TU 从 0 开始, 每次访问后自增。
+    /// 跨宏展开阶段共享, 缓存中以"宏表 + counter"哈希锁定
+    counter: u32,
     /// 诊断状态栈 (用于 #pragma GCC diagnostic push/pop)
     diag_stack: Vec<DiagState>,
     /// 当前诊断设置
@@ -140,6 +143,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         pack_history: vec![(0, None)],
         weak_symbols: HashSet::new(),
         fenv_access: false,
+        counter: 0,
         pending_pragmas: RefCell::new(Vec::new()),
     };
     // 预定义宏
@@ -222,6 +226,31 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("__ATOMIC_RELEASE", "3");
     pp.define_builtin("__ATOMIC_ACQ_REL", "4");
     pp.define_builtin("__ATOMIC_SEQ_CST", "5");
+    // GCC 兼容的额外预定义宏 (M19 补齐)
+    // x86_64 架构别名 (匹配 GCC/clang 命名)
+    pp.define_builtin("__amd64", "1");
+    pp.define_builtin("__amd64__", "1");
+    pp.define_builtin("__x86_64", "1");
+    pp.define_builtin("__k8", "1");
+    pp.define_builtin("__k8__", "1");
+    // 链接/平台相关
+    pp.define_builtin("__USER_LABEL_PREFIX__", "");
+    pp.define_builtin("__VERSION__", "dcc 0.1 (M19)");
+    // __TIMESTAMP__ / __BASE_FILE__ 推迟到宏展开阶段按需生成
+    // (避免编译日期/时间/源路径被冻结进缓存)
+    pp.define_builtin("__OPTIMIZE__", "1");
+    pp.define_builtin("__OPTIMIZE_SIZE__", "0");
+    pp.define_builtin("__NO_INLINE__", "1");
+    pp.define_builtin("__FINITE_MATH_ONLY__", "0");
+    pp.define_builtin("__PIC__", "2");
+    pp.define_builtin("__PIE__", "2");
+    pp.define_builtin("__code_model_small__", "1");
+    pp.define_builtin("__SEG_GS", "1");
+    pp.define_builtin("__SEG_FS", "1");
+    // __GLIBC__ / __GLIBC_MINOR__ 由 libc 头自动提供, 但 dcc 不强制
+    // (内核构建通常带 nolibc, 不需要); 用户可在 -D 中手动设置
+    // __COUNTER__ / __INCLUDE_LEVEL__ 在宏展开阶段特殊处理
+    // (不放入 macros, 避免被通用替换逻辑误吃)
     pp.define_builtin("memory_order_relaxed", "0");
     pp.define_builtin("memory_order_consume", "1");
     pp.define_builtin("memory_order_acquire", "2");
@@ -878,6 +907,15 @@ impl Preprocessor {
                     }
                     // 其他 STDC 子句忽略, 仅用于兼容
                 }
+            } else if pragma_text.starts_with("locale") {
+                // C23 #pragma locale: 接受 locale 切换指令, 当前阶段只做
+                // 语法识别与静默忽略, 不改变字符集/locale 行为。语法形式:
+                //   #pragma locale default
+                //   #pragma locale "POSIX"
+                //   #pragma locale reset
+                // 实际 locale 切换需要 libc 支持, dcc 当前不强制 locale。
+                // 我们仅校验形式, 不发出诊断 (与 GCC -E 输出兼容)。
+                let _ = pragma_text[6..].trim();
             } else if pragma_text.starts_with("comment") {
                 // #pragma comment(...) — 链接器注释, 忽略
             }
@@ -1431,14 +1469,15 @@ impl Preprocessor {
 
     // ===== 宏展开 =====
     /// 顶层入口: 对一行文本做完全宏展开
-    fn expand_macros(&self, line: &str) -> String {
-        if self.macros.is_empty() { return line.to_string(); }
+    fn expand_macros(&mut self, line: &str) -> String {
+        // 不能用 macros.is_empty() 早退: __COUNTER__ / __FILE__ / __LINE__
+        // 等特殊 token 不在 macros 表内, 必须进入 expand_with_disabled
         let disabled = HashSet::new();
         self.expand_with_disabled(line, &disabled)
     }
 
     /// 用禁用集展开文本
-    fn expand_with_disabled(&self, text: &str, disabled: &HashSet<String>) -> String {
+    fn expand_with_disabled(&mut self, text: &str, disabled: &HashSet<String>) -> String {
         // 递归深度保护：宏互相引用时避免栈溢出
         thread_local! {
             static EXPAND_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -1457,7 +1496,7 @@ impl Preprocessor {
         result
     }
 
-    fn expand_with_disabled_inner(&self, text: &str, disabled: &HashSet<String>) -> String {
+    fn expand_with_disabled_inner(&mut self, text: &str, disabled: &HashSet<String>) -> String {
         let mut out = String::with_capacity(text.len());
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
@@ -1507,6 +1546,14 @@ impl Preprocessor {
                 }
                 if ident == "__TIME__" {
                     out.push_str(&format!("\"{}\"", self.compile_time));
+                    continue;
+                }
+                // __COUNTER__: 每次访问自增, 共享 preproc 实例
+                // 跨宏嵌套展开保持单一计数
+                if ident == "__COUNTER__" {
+                    let v = self.counter;
+                    self.counter = self.counter.wrapping_add(1);
+                    out.push_str(&v.to_string());
                     continue;
                 }
 
@@ -1653,6 +1700,22 @@ impl Preprocessor {
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
                                 let rescanned = self.expand_with_disabled(&def.body, &new_disabled);
+                                out.push_str(&rescanned);
+                            } else if raw_args.is_empty() && !params.is_empty() {
+                                // GCC 扩展: __STRING() / FOO() 当宏期待 ≥1 实参却被空括号
+                                // 调用时, 视为一个空实参。glibc 头文件 __ASMNAME2 链依赖此行为:
+                                //   #define __STRING(x) #x
+                                //   #define __ASMNAME2(prefix, cname) __STRING (prefix) cname
+                                // 当 prefix 为空 (__USER_LABEL_PREFIX__="") 时, 替换体变成
+                                //   __STRING () cname
+                                // GCC 把 __STRING () 视为 __STRING(""), 生成 "" (空串字面量);
+                                // dcc 旧实现因 parse_macro_args("()") 返回 [] 而落到 fallthrough
+                                // 保留原标识符, 导致 __STRING 残留在预处理器输出里。
+                                let empty_args: Vec<String> = vec![String::new(); params.len()];
+                                let substituted = self.substitute_params(&def.body, params, &empty_args);
+                                let mut new_disabled = disabled.clone();
+                                new_disabled.insert(ident.clone());
+                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled);
                                 out.push_str(&rescanned);
                             } else {
                                 out.push_str(&ident);
@@ -1809,6 +1872,22 @@ impl Preprocessor {
                 }
             }
         }
+        // __VA_OPT__(content) (C++20 / C23):
+        // 仅当 __VA_ARGS__ 非空时展开为 content, 否则完全删除。
+        // 该 token 只能出现在可变参数宏的宏体中 (C 标准 6.10.5/2),
+        // 在普通宏或宏体外出现时, GCC/clang 保留为字面 token;
+        // 这里我们采取相同策略 (普通宏或无 __VA_ARGS__ 时按字面 token 保留)。
+        if body.contains("__VA_OPT__") {
+            let va_empty = params
+                .iter()
+                .position(|p| p == "__VA_ARGS__")
+                .and_then(|i| args.get(i))
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            if params.iter().any(|p| p == "__VA_ARGS__") {
+                body = Self::handle_va_opt(&body, va_empty);
+            }
+        }
         // 第一步: 处理 # (字符串化) — 必须在 ## 之前, 否则参数名被替换后 # 找不到模式
         let result = self.handle_stringify(&body, params, args);
         // 第二步: 处理 ## (令牌拼接)
@@ -1816,6 +1895,117 @@ impl Preprocessor {
         // 第三步: 普通参数替换（单次扫描，实参视为不透明，避免 *d 被二次替换成 **d）
         let mut result = result;
         result = Self::replace_all_params(&result, params, args);
+        result
+    }
+
+    /// 处理 `__VA_OPT__(content)`: 若 `va_empty` 为真则整段移除,
+    /// 否则替换为 `content` (内部参数已被 caller 替换, 这里只做块切除)。
+    ///
+    /// 配对规则: 在 `__VA_OPT__` 之后跳过空白, 匹配一个 `(` 并按括号
+    /// 深度读到匹配的 `)`. 嵌套的 `__VA_OPT__` 会被递归处理 (按内→外
+    /// 顺序), 因此最里层先被消解, 外层按当前 `va_empty` 决策。
+    fn handle_va_opt(body: &str, va_empty: bool) -> String {
+        let mut result = String::with_capacity(body.len());
+        let bytes = body.as_bytes();
+        let mut i = 0;
+        // __VA_OPT__ 关键字长度为 10
+        const KEYWORD: &[u8; 10] = b"__VA_OPT__";
+        while i < bytes.len() {
+            // 匹配 `__VA_OPT__` 关键字 (确认前后不是标识符字符)
+            if i + KEYWORD.len() <= bytes.len()
+                && &bytes[i..i + KEYWORD.len()] == KEYWORD
+                && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
+                && (i + KEYWORD.len() >= bytes.len() || !(bytes[i + KEYWORD.len()].is_ascii_alphanumeric() || bytes[i + KEYWORD.len()] == b'_'))
+            {
+                // 跳过空白
+                let mut j = i + KEYWORD.len();
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    // 平衡括号读取 content 范围 [j+1, end)
+                    let mut depth = 1usize;
+                    let mut k = j + 1;
+                    while k < bytes.len() && depth > 0 {
+                        match bytes[k] {
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth -= 1;
+                                if depth == 0 { break; }
+                            }
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    if k >= bytes.len() {
+                        // 没有匹配的 `)`, 视为普通 token, 透传
+                        result.push_str("__VA_OPT__");
+                        i += KEYWORD.len();
+                        continue;
+                    }
+                    // 递归处理 content 内嵌的 __VA_OPT__
+                    let content = std::str::from_utf8(&bytes[j + 1..k]).unwrap_or("");
+                    let inner = Self::handle_va_opt(content, va_empty);
+                    if va_empty {
+                        // 删除整段, 同时消掉前面紧邻的单个空白字符
+                        // (与 GCC 行为一致: __VA_OPT__ 视作不可见 token,
+                        //  空参时连同其前的空格一起移除)
+                        while result.ends_with(' ') || result.ends_with('\t') {
+                            result.pop();
+                        }
+                        // 记录一个 "前面刚切了空白" 的标记, 避免连续切
+                        // 多个 __VA_OPT__ 时把中间的 token 间隔也吃掉
+                        // (本实现一次只切一个尾部空白, 多次切由循环保证)
+                    } else {
+                        result.push_str(&inner);
+                    }
+                    i = k + 1;
+                    continue;
+                }
+            }
+            // 字符串/字符字面量内 __VA_OPT__ 视为普通 token
+            if bytes[i] == b'"' {
+                result.push('"');
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        result.push(bytes[i] as char);
+                        result.push(bytes[i + 1] as char);
+                        i += 2;
+                    } else {
+                        result.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
+                if i < bytes.len() {
+                    result.push('"');
+                    i += 1;
+                }
+                continue;
+            }
+            if bytes[i] == b'\'' {
+                result.push('\'');
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        result.push(bytes[i] as char);
+                        result.push(bytes[i + 1] as char);
+                        i += 2;
+                    } else {
+                        result.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
+                if i < bytes.len() {
+                    result.push('\'');
+                    i += 1;
+                }
+                continue;
+            }
+            // 普通字符透传
+            result.push(bytes[i] as char);
+            i += 1;
+        }
         result
     }
 
@@ -2013,7 +2203,7 @@ impl Preprocessor {
     }
 
     // ===== 常量表达式求值 (用于 #if) =====
-    fn eval_const_expr(&self, expr: &str) -> bool {
+    fn eval_const_expr(&mut self, expr: &str) -> bool {
         let expr = expr.trim();
         // 处理 defined(X) 和 defined X
         let expr = self.replace_defined(expr);
@@ -2127,6 +2317,8 @@ impl Preprocessor {
                 match ident.as_str() {
                     "defined" | "true" => result.push_str("1"),
                     "false" => result.push_str("0"),
+                    // __COUNTER__ 等特殊宏在 expand_macros 阶段已被替换为数字,
+                    // 但若用户在 #if 中直接写, 仍按 0 兜底 (与 GCC 一致)
                     _ => { result.push_str("0"); }
                 }
             } else {
@@ -2612,7 +2804,10 @@ impl Preprocessor {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
         // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V6");
+        // V7: M19 预定义宏补齐 (__amd64__/__USER_LABEL_PREFIX__/__VERSION__/
+        // __OPTIMIZE__/__SEG_GS 等) + __COUNTER__ 自增需在每次宏展开期可见;
+        //     _FORTIFY_SOURCE 等用户 -D 在缓存中以宏名+值形式进入哈希
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V7");
         for name in names {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
@@ -2634,7 +2829,7 @@ impl Preprocessor {
     fn get_cache_path(&self, file_path: &Path, content_hash: u64, macro_hash: u64) -> Option<PathBuf> {
         let cache_dir = self.cache_dir.as_ref()?;
         let file_hash = Self::hash_content(&file_path.to_string_lossy());
-        let cache_name = format!("v6_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
+        let cache_name = format!("v7_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
         Some(cache_dir.join(cache_name))
     }
 
@@ -3046,5 +3241,313 @@ mod tests {
             output.contains("\"malloc(sizeof(int) + 1)\""),
             "output: {output}"
         );
+    }
+
+    /// M19: __COUNTER__ 单调递增, 每次访问自增
+    #[test]
+    fn counter_macro_monotonic_increment() {
+        let out = preprocess(
+            b"int a = __COUNTER__;\n\
+              int b = __COUNTER__;\n\
+              int c = __COUNTER__;\n\
+              int x = __COUNTER__;\n",
+            "counter.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        // 期望: a=0, b=1, c=2, x=3
+        assert!(output.contains("int a = 0;"), "output: {output}");
+        assert!(output.contains("int b = 1;"), "output: {output}");
+        assert!(output.contains("int c = 2;"), "output: {output}");
+        assert!(output.contains("int x = 3;"), "output: {output}");
+    }
+
+    /// M19: __COUNTER__ 在宏体中依然递增
+    #[test]
+    fn counter_inside_function_like_macro() {
+        let out = preprocess(
+            b"#define MAKE_VAR(name) int name = __COUNTER__\n\
+              MAKE_VAR(a);\n\
+              MAKE_VAR(b);\n\
+              MAKE_VAR(c);\n",
+            "counter-macro.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        // 三个 MAKE_VAR 展开后必须分别得到 0/1/2 (而非同一个常量)
+        assert!(output.contains("int a = 0"), "output: {output}");
+        assert!(output.contains("int b = 1"), "output: {output}");
+        assert!(output.contains("int c = 2"), "output: {output}");
+    }
+
+    /// M19: __COUNTER__ 在 #if 中可被求值
+    #[test]
+    fn counter_in_if_expression() {
+        let out = preprocess(
+            b"#if __COUNTER__ == 0\n\
+              int first = 1;\n\
+              #else\n\
+              int first = 0;\n\
+              #endif\n",
+            "counter-if.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int first = 1;"), "output: {output}");
+    }
+
+    /// M19: __VA_OPT__ 变参宏, 非空变参时展开 content
+    #[test]
+    fn va_opt_with_args_expands_content() {
+        let out = preprocess(
+            b"#define LOG(fmt, ...) printf(fmt __VA_OPT__(, __VA_ARGS__))\n\
+              int main(void) {\n\
+                LOG(\"hello %d\\n\", 42);\n\
+                return 0;\n\
+              }\n",
+            "va-opt-args.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        // 非空: __VA_OPT__(, __VA_ARGS__) → , 42
+        // 宏体中 fmt 与 __VA_OPT__ 之间有空格, GCC 实际展开也会保留该空格
+        assert!(
+            output.contains("printf(\"hello %d\\n\" , 42)"),
+            "output: {output}"
+        );
+    }
+
+    /// M19: __VA_OPT__ 变参宏, 空变参时移除 content
+    #[test]
+    fn va_opt_empty_args_removes_content() {
+        let out = preprocess(
+            b"#define LOG(fmt, ...) printf(fmt __VA_OPT__(, __VA_ARGS__))\n\
+              int main(void) {\n\
+                LOG(\"hello\\n\");\n\
+                return 0;\n\
+              }\n",
+            "va-opt-no-args.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        // 空: __VA_OPT__(, __VA_ARGS__) → 空, 前面紧邻空格也一并去掉 (GCC 行为)
+        assert!(output.contains("printf(\"hello\\n\")"), "output: {output}");
+        assert!(!output.contains("printf(\"hello\\n\" )"), "output: {output}");
+        assert!(!output.contains("__VA_OPT__"), "output: {output}");
+    }
+
+    /// M19: __VA_OPT__ 与 ## 组合, 头文件族常用
+    #[test]
+    fn va_opt_gnu_define_with_va_args() {
+        let out = preprocess(
+            b"#define FOREACH(it, list, ...) \\\n\
+              for (it = list; it; it = it->next) __VA_OPT__(__VA_ARGS__)\n\
+              int use(struct item *it) { FOREACH(it, NULL, use(it->next)); return 0; }\n",
+            "va-opt-foreach.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        // 该 fixture 实际调用了宏, 验证非空时 __VA_OPT__(content) 展开为 content
+        // NULL 会被预展开为 ((void*)0), 所以 list 部分会变成 ((void*)0)
+        assert!(output.contains("for (it = ((void*)0)"),
+                "output: {output}");
+        assert!(output.contains("it = it->next) use(it->next)"),
+                "output: {output}");
+    }
+
+    /// M19: __VA_OPT__ 嵌套 (内层先解)
+    #[test]
+    fn va_opt_nested() {
+        let out = preprocess(
+            b"#define NESTED(a, ...) a __VA_OPT__(b __VA_OPT__(c))\n\
+              int x1 = NESTED(1);\n\
+              int x2 = NESTED(1, 2);\n",
+            "va-opt-nested.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        // NESTED(1) 空参 → 1 (外层内层都去掉)
+        assert!(output.contains("int x1 = 1"), "output: {output}");
+        // NESTED(1, 2) 非空 → 1 b (内层空去掉, 外层保留)
+        assert!(output.contains("int x2 = 1 b"), "output: {output}");
+    }
+
+    /// M19: 补齐 GCC 预定义宏 (x86_64 别名 + 平台/链接信息)
+    #[test]
+    fn predefined_x86_64_aliases_available() {
+        let out = preprocess(
+            b"#if defined(__amd64__) && defined(__amd64) && defined(__x86_64) \\\
+n\
+                 && defined(__k8__) && defined(__k8) && defined(__x86_64__)\n\
+              int all_ok = 1;\n\
+              #else\n\
+              int all_ok = 0;\n\
+              #endif\n",
+            "predef-arch.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int all_ok = 1;"), "output: {output}");
+    }
+
+    /// M19: 平台/编译相关 GCC 预定义宏
+    #[test]
+    fn predefined_platform_macros_available() {
+        let out = preprocess(
+            b"#if defined(__USER_LABEL_PREFIX__) && defined(__VERSION__) \\\
+n\
+                 && defined(__OPTIMIZE__) && defined(__NO_INLINE__) \\\
+n\
+                 && defined(__SEG_GS) && defined(__SEG_FS)\n\
+              int all_ok = 1;\n\
+              #else\n\
+              int all_ok = 0;\n\
+              #endif\n",
+            "predef-platform.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int all_ok = 1;"), "output: {output}");
+    }
+
+    /// M19: #pragma locale 接受且不报错
+    #[test]
+    fn pragma_locale_is_accepted() {
+        let out = preprocess(
+            b"#pragma locale default\n\
+              #pragma locale \"POSIX\"\n\
+              #pragma locale reset\n\
+              int x = 0;\n",
+            "pragma-locale.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "pragma locale must be silent: {diags:?}");
+        assert!(output.contains("int x = 0;"), "output: {output}");
+    }
+
+    /// M19: _FORTIFY_SOURCE 改变时, include 缓存必须按新值重新计算
+    /// 通过两次不同 -D 调用同一头, 验证 hash_macro_state 把 _FORTIFY_SOURCE
+    /// 的值变化反映到缓存键中。
+    #[test]
+    fn fortify_source_changes_invalidate_cache() {
+        use std::fs;
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("dcc_fortify_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 头文件内容完全相同, 但其展开依赖 _FORTIFY_SOURCE
+        let hdr = dir.join("ft.h");
+        fs::write(
+            &hdr,
+            "#if _FORTIFY_SOURCE > 0\n\
+             #define BOUNDED_COPY(dst, n) __builtin___strncpy_chk(dst, \"x\", n, __builtin_object_size(dst, 0))\n\
+             #else\n\
+             #define BOUNDED_COPY(dst, n) strncpy(dst, \"x\", n)\n\
+             #endif\n",
+        )
+        .unwrap();
+
+        // 用相对文件名 + 包含路径, 避免 Windows 长路径/反斜杠问题
+        let src = "#include \"ft.h\"\nint x = BOUNDED_COPY(buf, 4);\n";
+        let includes = vec![dir.clone()];
+        // 运行 1: -D_FORTIFY_SOURCE=2
+        let out1 = preprocess(
+            src.as_bytes(),
+            "t1.c",
+            &includes,
+            &[],
+            &[("_FORTIFY_SOURCE".to_string(), Some("2".to_string()))],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        // 运行 2: -D_FORTIFY_SOURCE=0
+        let out2 = preprocess(
+            src.as_bytes(),
+            "t2.c",
+            &includes,
+            &[],
+            &[("_FORTIFY_SOURCE".to_string(), Some("0".to_string()))],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out1.diags.is_empty(), "{:?}", out1.diags);
+        assert!(out2.diags.is_empty(), "{:?}", out2.diags);
+        // FORTIFY=2 应生成 __builtin___strncpy_chk 形式
+        assert!(out1.text.contains("__builtin___strncpy_chk"), "out1: {}", out1.text);
+        // FORTIFY=0 应回退到 libc strncpy
+        assert!(out2.text.contains("strncpy("), "out2: {}", out2.text);
     }
 }

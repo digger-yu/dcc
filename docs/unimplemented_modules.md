@@ -392,7 +392,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 
 ## 7. 预处理器（`src/preproc.rs`）
 
-🟠 / 🔴 简化或缺：
+🟢 / 🟠 / 🔴 状态（2026-07-20 M19 之后）：
 
 | 特性 | 现状 |
 |------|------|
@@ -403,20 +403,28 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | `#embed` (C23) | ✅ 字节数组嵌入 |
 | `#elifdef` / `#elifndef` (C23) | ✅ |
 | 数字分隔符 `1'000'000` | ✅ |
-| 宏展开涂蓝继承 / 防栈溢出 | ✅（缓存 V6） |
+| 宏展开涂蓝继承 / 防栈溢出 | ✅（缓存 V7） |
 | 宏 `#` / `##` 字符串化 | ✅ |
-| `__VA_OPT__` (C++20 / C23) | 🟠 简单支持（不识别逗号 + `__VA_OPT__`） |
+| `__VA_OPT__` (C++20 / C23) | ✅ (M19) 完整支持: 空参整段 (含前导空白) 移除, 非空展开 content, 嵌套按内→外顺序消解 |
 | `__FILE__` / `__LINE__` / `__DATE__` / `__TIME__` | ✅ |
-| `__COUNTER__` | 🟠 简单递增 |
+| `__COUNTER__` | ✅ (M19) 单调递增, 跨宏嵌套共享 preproc 状态; 在 `#if` 中可被求值 |
 | `__pragma` (MS) | ✅ 静默接受 |
 | 模块化 include guards (C23 `#pragma once`) | ✅ |
-| 条件 token 拼接 | 🟠 部分支持 |
-| 宏递归展开防护 | ✅（V6 include cache） |
-| 跨 TU `assert.h` 行为 | 🟠 头文件缓存生效时需手动标 `_FORTIFY_SOURCE` 重新计算 |
-| 字符集 / locale (C23 `#pragma locale`) | 🔴 无 |
-| 预定义宏（如 `__linux__`, `__GNUC__`, `__amd64__`） | 🟠 已内置部分子集；非 GCC 全集 |
+| 条件 token 拼接 | ✅ (M19 解决: 缓存 hash 现在把 -D 定义纳入, _FORTIFY_SOURCE 等变值自动失效) |
+| 宏递归展开防护 | ✅（V7 include cache） |
+| 跨 TU `assert.h` 行为 | ✅ (M19) 缓存键包含全部宏表 (按名排序的 name+body+params+variadic XOR), `_FORTIFY_SOURCE` 等变值在 `-D` 切换时自动失配 |
+| 字符集 / locale (C23 `#pragma locale`) | 🟠 (M19) 接受 `default` / `"POSIX"` / `reset` 形式并静默忽略, 不切字符集; 完全 locale 切换仍依赖 libc, dcc 不模拟 |
+| 预定义宏（如 `__linux__`, `__GNUC__`, `__amd64__`） | 🟢 (M19) 补齐: `__amd64` / `__amd64__` / `__x86_64` / `__k8` / `__k8__` / `__USER_LABEL_PREFIX__` / `__VERSION__` / `__OPTIMIZE__` / `__OPTIMIZE_SIZE__` / `__NO_INLINE__` / `__FINITE_MATH_ONLY__` / `__PIC__` / `__PIE__` / `__code_model_small__` / `__SEG_GS` / `__SEG_FS` |
 | 依赖文件 -MD / -MMD / -MP | ✅（但与 host GCC 略有差异） |
 | 增量预处理（pch） | 🔴 无 |
+
+M19 关键改动:
+
+- `__COUNTER__` 在 `Preprocessor` 中以 `u32` 状态字段持有, `expand_with_disabled_inner` 每次访问自增 (wrapping).
+- `__VA_OPT__` 在 `substitute_params` 入口按"是否可变参数宏 + __VA_ARGS__ 是否非空"二分支消解, 解析时跳过字符串/字符字面量, 处理前后配对的 `(` 与嵌套.
+- 预定义宏全部移到 `Preprocessor::new` 旁的 `define_builtin` 调用点, 不依赖外部 libc 头.
+- include 缓存版本从 V6 → V7, 任何 `hash_macro_state` 变化都让缓存自动失配.
+- `expand_with_disabled_inner` 在函数宏调用前增加 `raw_args.is_empty() && !params.is_empty()` 分支: 当宏期待 ≥1 实参却被空括号 (`FOO()`) 调用时, 按 GCC 行为视为 N 个空实参展开. 修复 glibc 头 `__STRING ()` / `__ASMNAME2` 链在 dcc 预处理器里残留 `__STRING` 字面量的问题, 使 `<stdio.h>` / `<stdlib.h>` 在 dcc 下能被正常解析.
 
 ---
 

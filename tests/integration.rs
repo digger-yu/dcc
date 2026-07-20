@@ -2893,3 +2893,64 @@ fn m18_modules() {
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
+
+// ====== M19: 预处理器补齐 ======
+// __COUNTER__ 单调递增, 跨宏嵌套仍保持唯一
+#[test]
+#[cfg(unix)]
+fn m19_counter_monotonic() {
+    let src = include_str!("fixtures/m19_counter.c");
+    let (out, exe) = run_compile_and_run("m19-counter", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "__COUNTER__ should produce 0,1,2");
+    let _ = fs::remove_file(exe);
+}
+
+// __COUNTER__ 在宏展开中递增
+#[test]
+#[cfg(unix)]
+fn m19_counter_in_function_macro() {
+    let src = include_str!("fixtures/m19_counter_in_macro.c");
+    let (out, exe) = run_compile_and_run("m19-counter-macro", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "__COUNTER__ in macro should be 0,1,2");
+    let _ = fs::remove_file(exe);
+}
+
+// __VA_OPT__: 非空时展开 content, 空时移除
+#[test]
+#[cfg(unix)]
+fn m19_va_opt_empty_and_nonempty() {
+    let src = include_str!("fixtures/m19_va_opt.c");
+    let (out, exe) = run_compile_and_run("m19-va-opt", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "__VA_OPT__ should expand to comma list when non-empty");
+    let _ = fs::remove_file(exe);
+}
+
+// GCC 兼容预定义宏补齐
+#[test]
+#[cfg(unix)]
+fn m19_predefined_macros_available() {
+    let src = include_str!("fixtures/m19_predefined_macros.c");
+    let (out, exe) = run_compile_and_run("m19-predef", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "all GCC predefined macros must be defined");
+    let _ = fs::remove_file(exe);
+}
+
+// #pragma locale: 接受且不影响编译
+#[test]
+#[cfg(unix)]
+fn m19_pragma_locale_accepted() {
+    let src = include_str!("fixtures/m19_pragma_locale.c");
+    let (out, exe) = run_compile_and_run("m19-pragma-locale", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(exe);
+}

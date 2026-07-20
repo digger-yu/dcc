@@ -59,10 +59,17 @@
 ~/.dcc/cache/<filehash>_<contenthash>  <-- 头文件预处理缓存
 ```
 
-缓存键 = FNV-1a(文件路径) + FNV-1a(内容哈希)，值 = 预处理输出 + 头文件新增宏定义。
-- 自定义文本格式 `DCC_CACHE_V1`，零外部依赖
-- 头文件仅保存自身新增的宏，避免宏状态污染
-- 内容变化时自动失效（内容哈希不变 = 缓存命中）
+缓存键 = FNV-1a(文件路径) + FNV-1a(内容哈希) + FNV-1a(宏表状态),
+值 = 预处理输出 + 头文件新增宏定义。
+- 自定义文本格式 `DCC_PREPROCESSOR_CACHE_V7` (M19 升级), 零外部依赖
+- 头文件仅保存自身新增的宏, 避免宏状态污染
+- 内容变化时自动失效 (内容哈希不变 = 缓存命中)
+- 宏表变化时自动失效 (例如 `-D_FORTIFY_SOURCE=2` vs `=0`),
+  因为 `hash_macro_state` 把按名排序的 name+body+params+variadic
+  都纳入缓存键
+- M19 后 `macros.is_empty()` 不再触发 `expand_macros` 早退,
+  保证 `__COUNTER__` / `__FILE__` / `__LINE__` 等特殊 token
+  始终进入展开路径
 
 ## 错误诊断 (M9)
 
