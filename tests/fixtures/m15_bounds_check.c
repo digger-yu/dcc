@@ -1,5 +1,4 @@
-// 数组下标运行时边界检查 (-fbounds-check)
-extern int printf(const char *, ...);
+// 数组下标运行时边界检查 (-fbounds-check), 正常路径不触发
 
 int main(void) {
     int arr[5] = {10, 20, 30, 40, 50};
@@ -7,6 +6,5 @@ int main(void) {
     for (int i = 0; i < 5; i++) {
         sum += arr[i];
     }
-    printf("%d\n", sum);
-    return 0;
+    return sum == 150 ? 0 : 1;
 }
