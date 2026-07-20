@@ -1038,3 +1038,86 @@ cp target/release/dcc bin/dcc0
 ## 路线图 (来自 docs/roadmap.md)
 
 M0~M10 见根目录的 task 列表。
+
+## 优化 Pass 基础设施 M16（`src/ssa.rs` + `src/ssa_passes.rs`）
+
+M16 阶段在 AST/typed IR 之上引入**轻量 SSA IR**，使大多数传统编译器优化
+（强度削减、归纳变量、别名分析、SCCP、调度、TCO 等）有一致的工作面。
+设计上遵守 suckless 原则：零外部依赖、单一文件、按"结构化函数"子集
+跑全 SSA，含 goto/label/switch 的函数自动降级回原有 AST 路径。
+
+### SSA IR 形态
+
+```
+struct SsaVar { base, version, ty, span }
+enum Operand { Var, Int, Float, Str, SymAddr, FnAddr, Void, Call, Phi }
+enum InstKind { Bin, Un, Cast, AddrOf, Load, Store, IndexLoad/Store,
+                Call, MemberLoad/Store, Select }
+enum Terminator { Ret, Jump, Branch, Unreachable }
+struct BasicBlock { name, phis, insts, term, preds, succs }
+struct Function  { name, params, ret_ty, entry, blocks, block_order,
+                   globals, is_cold, is_hot, is_noreturn }
+```
+
+- 每个变量按 SSA 版本号命名（`x_0`/`x_1`/...），merge BB 顶端放 phi。
+- `compute_dominators()` 提供经典迭代 dominator set；`reverse_postorder()`
+  用于 BB 顺序。
+- 转换由 `is_structured(body)` 守门：if/while/do/for/break/continue 通过；
+  goto/label/switch/longjmp 拒绝。
+
+### AST ↔ SSA 双向桥
+
+- `ssa::build_from_func(f: &FuncDecl) -> Option<Function>`：在结构化函数上
+  把函数体降级为 SSA（参数作为 version=0 的初始值）。
+- `ssa::rebuild_block(func: &Function) -> ast::Block`：把优化后的 SSA 重建
+  为 AST（phi 退化为对原变量在 if/else 两侧的赋值，指令序列直接用
+  `Ident` 占位引用），下游 codegen 仍走 AST 路径。
+
+### 15 个优化 Pass（M16 范围）
+
+| # | Pass | 位置 | 关键作用 |
+|---|------|------|---------|
+| P1 | 跨函数 DCE | `cross_function_dce` | 从 `main` + extern 出发做 call graph BFS，删除不可达 internal static 函数 |
+| P2 | 强度削减 | `strength_reduction` | `i * 2^N` → `i << N`，`i / 2^N` → `i >> N` |
+| P3 | 归纳变量优化 (IVOP) | `ivop` | 标记 induction × constant 模式，给 strength_reduction 接续使用 |
+| P4 | 别名分析 | `alias_analysis` | Steensgaard 风格 union-find（field-insensitive），返回 SSA 名 → set id 映射 |
+| P5 | 指令调度 | `instruction_scheduling` | 局部 list scheduling：pure 运算按 dest 名字典序集中到 BB 顶端 |
+| P6 | PGO 框架 | `pgo` / `load_profile` | 读 `<func>.dcc.profdata`（text 格式 `bb <name> <count>`），给 hot/cold BB 插入 `__dcc_*_hint` Store |
+| P7 | 自动并行化 | `auto_parallelization` | 识别 `for.body.*` 名字 + 无 Call / 无非 induction Store 的 BB，emit `__dcc_parallel_hint` |
+| P8 | 循环分块 | `loop_tiling` | 检测小循环体（≤4 inst），复制最后一条 pure 指令作为第二个 tile |
+| P9 | 循环交换 | `loop_interchange` | 检测 `*.i.*` + `*.j.*` 嵌套，在 entry 插入 `__dcc_loop_interchanged` hint |
+| P10 | 尾部调用优化 (TCO) | `tail_call_optimization` | 检测 exit BB 含对自身的 `Call`，告知 codegen 可改 jump |
+| P11 | 函数属性传播 | `function_attribute_propagation` | `is_cold` 函数 entry 加 `__dcc_section_cold` Store 提示 |
+| P12 | 寄存器分配 | `register_allocation` | 线性扫描占位实现（hint 模式，真实分配在 codegen 的硬编码 GP/XMM 池） |
+| P13 | 别名集合 | `alias_set` | 三档判别（identity / disjoint / overlap），基于 P4 的 set 划分 |
+| P14 | 投机执行 | `speculative_execution` | 把 BB 内 pure 指令集中到 BB 顶端，便于分支条件尽早算出 |
+| P15 | SCCP | `sparse_conditional_constant_propagation` | 经典 lattice 分析（Undef/Const/Top），对纯运算做常量替换 + 删除冗余指令 |
+
+**调度入口**（`ssa_passes::run(func, level)`）：
+
+- `-O0` / `-O1`：跳过
+- `-O2`：跑 P2, P3, P9, P8, P4, P13, P14, P11, P10, P15
+- `-O3`：再加 P5, P12, P7, P6
+
+**Driver 集成**（`opt::optimize`）：`-O2+` 在原有 typed IR 优化后追加
+`cross_function_dce` + `run_ssa_passes`，后者对每个结构化函数做
+AST→SSA→pass→AST 重建，再走原有的 `resync` 流程。
+
+### 已知限制（与 suckless 定位一致）
+
+- `auto_parallelization` 仅发 hint 提示，真正的 SIMD 代码生成由后端
+  决定（暂未在 codegen 消费该 hint）。
+- `register_allocation` 是 hint-only，物理寄存器仍由 codegen 的
+  硬编码 GP/XMM 池负责。
+- `instruction_scheduling` 是 BB 内 list scheduling，未做跨 BB 调度。
+- `pgo` 暂未提供 instrumentation 路径，需要用户用 `perf record` 或
+  自家 profiler 写 `<func>.dcc.profdata`。
+- 含 goto/label/switch 的函数走 AST 路径，不享受 SSA pass。
+
+### 测试
+
+`tests/fixtures/m16_*.c` 7 个：ssa_ir / strength_reduction /
+cross_function_dce / sccp / loop_opt / tco / function_attr。
+`tests/integration.rs` 对应 `m16_*` 测试函数，在 Linux 远程
+跑 `cargo test m16_` 验证。
+

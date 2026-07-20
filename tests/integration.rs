@@ -2524,3 +2524,89 @@ fn m15_constexpr_function() {
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
 }
+
+// ===== M16: SSA IR + 优化 pass (DCE / SR / SCCP / TCO / ...) =====
+
+/// SSA IR 基础 - if/else/while/for 控制流正确转换
+#[test]
+#[cfg(unix)]
+fn m16_ssa_ir() {
+    let src = include_str!("fixtures/m16_ssa_ir.c");
+    let (out, exe) = run_compile_and_run("m16-ssa-ir", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// 强度削减: i * 2^N -> i << N
+#[test]
+#[cfg(unix)]
+fn m16_strength_reduction() {
+    let src = include_str!("fixtures/m16_strength_reduction.c");
+    let (out, exe) = run_compile_and_run("m16-strength", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// 跨函数 DCE: 不可达 static 函数被删除
+#[test]
+#[cfg(unix)]
+fn m16_cross_function_dce() {
+    let src = include_str!("fixtures/m16_cross_function_dce.c");
+    let (out, exe) = run_compile_and_run("m16-dce", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// SCCP: 编译期常量分支折叠
+#[test]
+#[cfg(unix)]
+fn m16_sccp() {
+    let src = include_str!("fixtures/m16_sccp.c");
+    let (out, exe) = run_compile_and_run("m16-sccp", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// 循环优化 (Tiling / IVOP / Interchange)
+#[test]
+#[cfg(unix)]
+fn m16_loop_opt() {
+    let src = include_str!("fixtures/m16_loop_opt.c");
+    let (out, exe) = run_compile_and_run("m16-loop-opt", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// TCO: 尾递归求值
+#[test]
+#[cfg(unix)]
+fn m16_tco() {
+    let src = include_str!("fixtures/m16_tco.c");
+    let (out, exe) = run_compile_and_run("m16-tco", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// 函数属性传播 (cold / hot)
+#[test]
+#[cfg(unix)]
+fn m16_function_attr() {
+    let src = include_str!("fixtures/m16_function_attr.c");
+    let (out, exe) = run_compile_and_run("m16-attr", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}

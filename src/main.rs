@@ -17,6 +17,8 @@ mod ir;
 mod opt;
 mod ssa_gvn;
 mod loop_opt;
+mod ssa;
+mod ssa_passes;
 mod lto;
 mod link;
 mod debug;

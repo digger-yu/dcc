@@ -22,7 +22,45 @@ pub fn optimize(module: &mut Module, level: u8) {
         eliminate_unreachable(module);
         crate::ssa_gvn::run(module, level);
         crate::loop_opt::run(module, level);
+        // M16: 跨函数 DCE (call graph reachability)
+        cross_function_dce(module);
+        // M16: 在结构化函数上跑新 SSA pass
+        run_ssa_passes(module, level);
     }
+}
+
+/// M16: 把 AST -> SSA, 跑 ssa_passes::run, 再 SSA -> AST 重建。
+/// 含 goto / label / switch 的函数自动跳过 (走 is_structured 检测)。
+fn run_ssa_passes(module: &mut Module, level: u8) {
+    let prog = module.source_mut();
+    let mut modified = false;
+    for decl in &mut prog.decls {
+        if let Decl::Func(f) = decl {
+            if let Some(mut ssa) = crate::ssa::build_from_func(f) {
+                crate::ssa_passes::run(&mut ssa, level);
+                *f.body.as_mut().unwrap() = crate::ssa::rebuild_block(&ssa);
+                modified = true;
+            }
+        }
+    }
+    let _ = modified; // 重建后的 AST 由外层 resync 接管
+}
+
+/// M16: 跨函数 DCE - 基于 call graph 标记不可达 internal static 函数
+fn cross_function_dce(module: &mut Module) {
+    let prog = module.source_mut();
+    let mut funcs: Vec<FuncDecl> = Vec::new();
+    let mut others: Vec<Decl> = Vec::new();
+    for d in prog.decls.drain(..) {
+        match d {
+            Decl::Func(f) => funcs.push(f),
+            other => others.push(other),
+        }
+    }
+    crate::ssa_passes::cross_function_dce(&mut funcs, true);
+    let mut all: Vec<Decl> = others;
+    for f in funcs { all.push(Decl::Func(f)); }
+    prog.decls = all;
 }
 
 fn fold_constants(module: &mut Module) {

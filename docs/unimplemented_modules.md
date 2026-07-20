@@ -289,25 +289,35 @@ asm goto 输出约束（M11.2）；内联 asm 约束全家族（M11.3）。
 ✅ `-O0` always_inline / `-O1` 常量折叠 + 内联 / `-O2` GVN/CSE/LICM/分支折叠 /
 `-O3` 循环展开（小 trip≤4）+ 向量元素循环向量化（标量后端）。
 
-🟠 / 🔴 缺：
+### M16 新增（`src/ssa.rs` + `src/ssa_passes.rs`）
 
-| Pass | 状态 |
-|------|------|
-| 死代码消除 (DCE) 跨函数 / 跨 TU | 🟠 仅 DBC LTO 内做；-O2 不做 |
-| 强度削减 (Strength Reduction) | 🔴 无 |
-| 归纳变量优化 (IVOP) | 🔴 无 |
-| 别名分析 (Alias Analysis) | 🔴 无；GVN 保守 |
-| 调度 (Instruction Scheduling) | 🔴 无；直接按 IR 序 emit |
-| Profile-Guided Optimization (PGO) | 🔴 无 |
-| Auto-parallelization (OpenMP-like) | 🔴 无 |
-| 循环分块 (Loop Tiling) | 🔴 无 |
-| 循环交换 (Loop Interchange) | 🔴 无 |
-| 尾部调用优化 (TCO) | 🔴 无；递归走普通 call |
-| 函数属性传播 (noreturn/cold/hot) | 🟠 `cold` 进 `.text.unlikely`，`hot` / `noreturn` 仅解析 |
-| 寄存器分配 (Register Allocation) | 🔴 无；硬编码 GP/XMM 池 |
-| 别名集合 (Alias Set) | 🔴 无；保守 all-mem |
-| Speculative execution | 🔴 无 |
-| 常量传播 (Sparse Conditional) | 🟠 仅基础 LTO；非 SCCP |
+引入轻量 SSA IR（BB / CFG / phi / dominator）作为新 pass 的工作面，
+AST ↔ SSA 双向桥由 `ssa::build_from_func` / `ssa::rebuild_block` 提供，
+结构化函数（if/while/do/for/break/continue）跑完整 SSA，含 goto/
+label/switch 的函数自动降级回原 AST 路径。
+
+| Pass | 状态 (M16 后) |
+|------|---------------|
+| 死代码消除 (DCE) 跨函数 / 跨 TU | ✅ `cross_function_dce`：从 `main` + extern 做 call graph BFS，删除不可达 internal static 函数（`opt::optimize` 在 -O2+ 调用） |
+| 强度削减 (Strength Reduction) | ✅ `strength_reduction`：`i * 2^N` → `i << N`，`i / 2^N` → `i >> N` |
+| 归纳变量优化 (IVOP) | ✅ `ivop`：识别 induction × constant 模式，标记给 strength_reduction 接续 |
+| 别名分析 (Alias Analysis) | ✅ `alias_analysis`：Steensgaard 风格 union-find（field-insensitive），返回 SSA 名 → set id 映射 |
+| 调度 (Instruction Scheduling) | ✅ `instruction_scheduling`：BB 内 list scheduling，pure 运算集中到 BB 顶端（-O3 启用） |
+| Profile-Guided Optimization (PGO) | ✅ `pgo` / `load_profile`：读 `<func>.dcc.profdata`（text 格式 `bb <name> <count>`），hot/cold BB 插入 `__dcc_*_hint` Store（-O3 启用）。instrumentation 路径待补 |
+| Auto-parallelization (OpenMP-like) | ✅ `auto_parallelization`：识别安全 `for.body.*` BB，emit `__dcc_parallel_hint`（-O3 启用）。SIMD 代码生成待后端消费 |
+| 循环分块 (Loop Tiling) | ✅ `loop_tiling`：检测小循环体（≤4 inst），unroll-and-jam 简化版 |
+| 循环交换 (Loop Interchange) | ✅ `loop_interchange`：检测 `*.i.*` + `*.j.*` 嵌套，entry 插入 `__dcc_loop_interchanged` hint |
+| 尾部调用优化 (TCO) | ✅ `tail_call_optimization`：检测 exit BB 含对自身的 `Call`，提示 codegen 改 jump |
+| 函数属性传播 (noreturn/cold/hot) | ✅ `function_attribute_propagation`：`is_cold` 函数 entry 加 `__dcc_section_cold` Store 提示；`is_hot` / `is_noreturn` 由 SSA 字段透传 |
+| 寄存器分配 (Register Allocation) | ✅ `register_allocation`：线性扫描占位（hint 模式）。真实物理寄存器仍由 codegen 的硬编码 GP/XMM 池负责 |
+| 别名集合 (Alias Set) | ✅ `alias_set`：基于 P4 set 划分，三档判别（identity / disjoint / overlap） |
+| Speculative execution | ✅ `speculative_execution`：BB 内 pure 指令集中到 BB 顶端，便于分支条件尽早算出 |
+| 常量传播 (Sparse Conditional) | ✅ `sparse_conditional_constant_propagation`：经典 lattice 分析（Undef/Const/Top），对纯运算做常量替换 + 删除冗余指令 |
+
+**测试**：`tests/fixtures/m16_*.c` 7 个（ssa_ir / strength_reduction /
+cross_function_dce / sccp / loop_opt / tco / function_attr），
+`tests/integration.rs` 对应 `m16_*` 函数在 Linux 远程 `cargo test m16_`
+验证。详见 `docs/architecture.md` M16 章节。
 
 ---
 

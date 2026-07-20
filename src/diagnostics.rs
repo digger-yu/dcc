@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     pub file: String,
     pub line: u32,        // 1-based
