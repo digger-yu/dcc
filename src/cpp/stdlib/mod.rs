@@ -51,6 +51,16 @@ pub const STD_HEADERS: &[&str] = &[
     "algorithm",
     "map",
     "functional",
+    // M18: 新增
+    "chrono",
+    "thread",
+    "mutex",
+    "condition_variable",
+    "filesystem",
+    "expected",
+    "flat_map",
+    "regex",
+    "ranges",
 ];
 
 /// 是否启用 std 库 (M11+ 标记)
@@ -75,6 +85,16 @@ pub fn emit_stdlib_includes() -> String {
     s.push_str("#include <algorithm>\n");
     s.push_str("#include <map>\n");
     s.push_str("#include <functional>\n");
+    // M18: 新增
+    s.push_str("#include <chrono>\n");
+    s.push_str("#include <thread>\n");
+    s.push_str("#include <mutex>\n");
+    s.push_str("#include <condition_variable>\n");
+    s.push_str("#include <filesystem>\n");
+    s.push_str("#include <expected>\n");
+    s.push_str("#include <flat_map>\n");
+    s.push_str("#include <regex>\n");
+    s.push_str("#include <ranges>\n");
     s
 }
 

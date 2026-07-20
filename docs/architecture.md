@@ -284,9 +284,11 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 | 文件 | 职责 |
 |------|------|
 | `src/cpp/lexer.rs` | C++ token 流：扩展关键字 + `::` 标点 + M8 关键字（operator/namespace/try/catch/throw/...） |
-| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 + M8 (namespace/operator/inherit/lambda/template/try-catch) + M10+ (partial spec/using Base::Base/init list/static local) + M17 (decltype/auto/friend/noexcept/final/override/mutable/volatile/explicit/using-in-class) |
+| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 + M8 (namespace/operator/inherit/lambda/template/try-catch) + M10+ (partial spec/using Base::Base/init list/static local) + M17 (decltype/auto/friend/noexcept/final/override/mutable/volatile/explicit/using-in-class) + M18 (multi-dim subscript `obj[i,j,k]` → `CppExpr::MultiIndex`) |
 | `src/cpp/mangle.rs` | Itanium C++ ABI 名字修饰（`_ZN…C1E…` / `D1E` / `pl` / `_ZTV…` / `_ZTI…`） |
-| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身 + vtable/typeinfo/lambda/exception 降级 + M10+ cxa_guard/init_list/coroutine 状态机） |
+| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身 + vtable/typeinfo/lambda/exception 降级 + M10+ cxa_guard/init_list/coroutine 状态机 + M18 多维下标改写为 `__dcc_multi_index_N`） |
+| `src/cpp/modules.rs` | C++20 Modules 占位 (M18)：已知 module 表 + `import X;` 改写策略；M19+ 实现 BMF 序列化 |
+| `src/cpp/stdlib/headers/*` | 26 个 C++ 标准库头（M8-M18）：cstddef/cstdlib/cstring/cstdio/string/vector/iostream/memory/exception/stdexcept/typeinfo/initializer_list/utility/algorithm/map/functional + M18 chrono/thread/mutex/condition_variable/filesystem/expected/flat_map/regex/ranges |
 | `src/cpp/m10.rs` | M10+ 高级特性降级器：SFINAE / partial spec / concept 求值 / 协程 / module 分区 / operator-> / dynamic_cast / 构造委托 / 成员函数指针 / __cxa_guard_ / initializer_list |
 | `src/cpp/driver.rs` | 顶层入口：`compile_cpp(cpp_src, obj, dcc_bin, includes, opt)` |
 

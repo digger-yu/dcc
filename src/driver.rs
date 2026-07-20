@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use crate::mmap_io::MappedInput;
 use std::process::Command;
 use crate::cli::{Config, InputLang, LinkerOutputKind};
@@ -325,12 +326,17 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         eprintln!("dcc: -O{}", cfg.opt);
     }
 
-    // 1. 预处理 (复用 C 预处理器, 暂不解析 C++ 标准库头)
+    // 1. 预处理 (复用 C 预处理器, 默认追加 stdlib headers 路径)
     let src = fs::read(input)
         .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
             crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    let mut cpp_includes: Vec<PathBuf> = cfg.include_paths.iter()
+        .map(PathBuf::from).collect();
+    if let Some(stdlib_inc) = crate::cpp::driver::default_stdlib_include() {
+        cpp_includes.push(stdlib_inc);
+    }
     let pp_out = preproc::preprocess(
-        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+        &src, &file_name, &cpp_includes, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
     );
     let mut pp_diags = pp_out.diags;
     enrich_diags(&mut pp_diags, &src);
@@ -340,6 +346,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     }
 
     // 2. C++ lex + parse + lower
+    let _ = fs::write(r"D:\git\dcc\target\debug-pp.c", &pp_out.text);
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
     let decls = parser.parse_top_level()
         .map_err(|e| vec![e.to_diag(&file_name)])?;

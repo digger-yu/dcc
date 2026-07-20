@@ -2789,3 +2789,107 @@ fn m17_volatile_member() {
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
 }
+
+// =========================================================================
+// M18: C++ 标准库扩展 (filesystem / thread / mutex / chrono / expected /
+// flat_map / multi_index / regex / ranges / concepts / modules)
+// =========================================================================
+
+#[test]
+#[cfg(unix)]
+fn m18_chrono() {
+    let src = include_str!("fixtures/m18_chrono.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-chrono", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_thread_mutex() {
+    let src = include_str!("fixtures/m18_thread_mutex.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-thread-mutex", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_condition_variable() {
+    let src = include_str!("fixtures/m18_condition_variable.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-cv", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_filesystem() {
+    let src = include_str!("fixtures/m18_filesystem.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-filesystem", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_expected() {
+    let src = include_str!("fixtures/m18_expected.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-expected", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_flat_map() {
+    let src = include_str!("fixtures/m18_flat_map.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-flat-map", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_multi_index() {
+    let src = include_str!("fixtures/m18_multi_index.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-multi-index", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_regex() {
+    let src = include_str!("fixtures/m18_regex.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-regex", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_ranges() {
+    let src = include_str!("fixtures/m18_ranges.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-ranges", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_concept() {
+    let src = include_str!("fixtures/m18_concept.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-concept", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m18_modules() {
+    let src = include_str!("fixtures/m18_modules.cpp");
+    let (out, _obj) = run_cpp_object_test("m18-modules", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}

@@ -1,0 +1,132 @@
+// <filesystem> - dcc++ C++ 标准库 (M18)
+//
+// std::filesystem::path + file_type + 顶层 free functions.
+// path 是字节字符串, 不区分 Windows / POSIX 分隔符 (统一用 /).
+
+extern "C" {
+    struct dccpp_path;
+    struct dccpp_directory;
+
+    dccpp_path* dccpp_path_new(const char* s);
+    dccpp_path* dccpp_path_copy(const dccpp_path* p);
+    void        dccpp_path_free(dccpp_path* p);
+    const char* dccpp_path_cstr(const dccpp_path* p);
+    size_t      dccpp_path_size(const dccpp_path* p);
+    void        dccpp_path_assign(dccpp_path* p, const char* s);
+    void        dccpp_path_append(dccpp_path* p, const char* s);
+    void        dccpp_path_append_path(dccpp_path* p, const dccpp_path* other);
+    int         dccpp_path_eq(const dccpp_path* a, const dccpp_path* b);
+    int         dccpp_path_eq_cstr(const dccpp_path* a, const char* s);
+
+    /* file_status 编码: 0=none 1=regular 2=dir 3=symlink 4=other */
+    struct dccpp_file_status { int type; int perms; };
+    dccpp_file_status dccpp_status_of(const char* path);
+
+    int     dccpp_fs_exists(const char* path);
+    int     dccpp_fs_is_regular(const char* path);
+    int     dccpp_fs_is_directory(const char* path);
+    int     dccpp_fs_remove(const char* path);
+    int     dccpp_fs_mkdir(const char* path);
+    int     dccpp_fs_rename(const char* src, const char* dst);
+    int64_t dccpp_fs_file_size(const char* path);
+
+    dccpp_directory* dccpp_dir_open(const char* path);
+    void             dccpp_dir_close(dccpp_directory* d);
+    const char*      dccpp_dir_read(dccpp_directory* d);
+}
+
+namespace std {
+    namespace filesystem {
+        enum file_type {
+            none = 0,
+            regular = 1,
+            directory = 2,
+            symlink = 3,
+            other = 4
+        };
+
+        class path {
+        public:
+            path() : p_(dccpp_path_new("")) {}
+            path(const char* s) : p_(dccpp_path_new(s ? s : "")) {}
+            path(const path& o) : p_(dccpp_path_copy(o.p_)) {}
+            ~path() { dccpp_path_free(p_); }
+
+            path& operator=(const path& o) {
+                if (this != &o) dccpp_path_assign(p_, dccpp_path_cstr(o.p_));
+                return *this;
+            }
+            path& operator=(const char* s) {
+                dccpp_path_assign(p_, s ? s : "");
+                return *this;
+            }
+
+            const char* c_str() const { return dccpp_path_cstr(p_); }
+            size_t size() const { return dccpp_path_size(p_); }
+            int empty() const { return dccpp_path_size(p_) == 0; }
+
+            path& operator/=(const char* s) {
+                dccpp_path_append(p_, s);
+                return *this;
+            }
+            path& operator/=(const path& o) {
+                dccpp_path_append_path(p_, o.p_);
+                return *this;
+            }
+            path operator/(const char* s) const {
+                path r(*this); r /= s; return r;
+            }
+            path operator/(const path& o) const {
+                path r(*this); r /= o; return r;
+            }
+
+            int operator==(const path& o) const { return dccpp_path_eq(p_, o.p_); }
+            int operator!=(const path& o) const { return !dccpp_path_eq(p_, o.p_); }
+            int operator==(const char* s) const { return dccpp_path_eq_cstr(p_, s); }
+            int operator!=(const char* s) const { return !dccpp_path_eq_cstr(p_, s); }
+
+            dccpp_path* raw() { return p_; }
+            const dccpp_path* raw() const { return p_; }
+
+        private:
+            dccpp_path* p_;
+        };
+
+        inline int exists(const path& p)    { return dccpp_fs_exists(p.c_str()); }
+        inline int exists(const char* s)    { return dccpp_fs_exists(s); }
+        inline int is_regular_file(const path& p) { return dccpp_fs_is_regular(p.c_str()); }
+        inline int is_directory(const path& p)    { return dccpp_fs_is_directory(p.c_str()); }
+        inline int remove(const path& p)          { return dccpp_fs_remove(p.c_str()); }
+        inline int create_directory(const path& p){ return dccpp_fs_mkdir(p.c_str()); }
+        inline int rename(const path& a, const path& b) {
+            return dccpp_fs_rename(a.c_str(), b.c_str());
+        }
+        inline int64_t file_size(const path& p)   { return dccpp_fs_file_size(p.c_str()); }
+
+        inline file_type status(const path& p) {
+            dccpp_file_status s = dccpp_status_of(p.c_str());
+            return (file_type)s.type;
+        }
+
+        class directory_iterator {
+        public:
+            directory_iterator() : d_(0) {}
+            directory_iterator(const path& p) : d_(dccpp_dir_open(p.c_str())) {}
+            ~directory_iterator() { if (d_) dccpp_dir_close(d_); }
+            directory_iterator(const directory_iterator&) = 0;
+            directory_iterator& operator=(const directory_iterator&) = 0;
+
+            /* 简化: 每个 * 迭代器都内含一个 path, 用户要循环构造. */
+            int read(path& out) {
+                if (!d_) return 0;
+                const char* name = dccpp_dir_read(d_);
+                if (!name) return 0;
+                out = path(name);
+                return 1;
+            }
+            int at_end() const { return d_ == 0; }
+        private:
+            dccpp_directory* d_;
+        };
+    }
+}

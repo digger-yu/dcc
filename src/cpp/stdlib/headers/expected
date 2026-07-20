@@ -1,0 +1,57 @@
+// <expected> - dcc++ C++ 标准库 (C++23, M18)
+//
+// std::expected<T, E> 简化版: 把 T/E 都按字节存, 用 void* + 析构
+// 回调擦除. 不支持模板特化 (dcc++ 不支持模板), 用工厂函数
+// expected_value / expected_error + user-side 包装.
+
+extern "C" {
+    struct dccpp_expected;
+    dccpp_expected dccpp_expected_make_val(void* v, size_t vs,
+                                            void (*vd)(void*));
+    dccpp_expected dccpp_expected_make_err(void* er, size_t es,
+                                            void (*ed)(void*));
+    void           dccpp_expected_destroy(dccpp_expected* e);
+    int            dccpp_expected_has_value(const dccpp_expected* e);
+    void*          dccpp_expected_value(const dccpp_expected* e);
+    void*          dccpp_expected_error(const dccpp_expected* e);
+}
+
+namespace std {
+    /* 简化 expected: 用一个 dccpp_expected 存任意 T / E.
+       模板参数通过 ctor 重载特化. 这里提供两种 alias:
+         expected_int      - 存 int / int
+         expected_string   - 存 const char* / int
+     */
+    class expected_int {
+    public:
+        expected_int() : has_v_(0), v_(0), e_(0) {}
+        expected_int(int v) : has_v_(1), v_(v), e_(0) {}
+        static expected_int error(int err) {
+            expected_int r; r.has_v_ = 0; r.e_ = err; return r;
+        }
+        int has_value() const { return has_v_; }
+        int value() const     { return v_; }
+        int error() const     { return e_; }
+    private:
+        int has_v_;
+        int v_;
+        int e_;
+    };
+
+    /* expected<const char*, int>: 字符串/错误码, 不持有 str */
+    class expected_str {
+    public:
+        expected_str() : has_v_(0), v_(0), e_(0) {}
+        expected_str(const char* v) : has_v_(1), v_(v), e_(0) {}
+        static expected_str error(int err) {
+            expected_str r; r.has_v_ = 0; r.e_ = err; return r;
+        }
+        int has_value() const    { return has_v_; }
+        const char* value() const { return v_; }
+        int error() const        { return e_; }
+    private:
+        int has_v_;
+        const char* v_;
+        int e_;
+    };
+}

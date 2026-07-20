@@ -46,6 +46,7 @@ pub mod mangle;
 pub mod lower;
 pub mod m10;
 pub mod m17;
+pub mod modules;
 pub mod stdlib;
 pub mod driver;
 

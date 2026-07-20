@@ -1,0 +1,42 @@
+// <condition_variable> - dcc++ C++ 标准库 (M18)
+//
+// std::condition_variable 包装 pthread_cond_t. wait 必须与
+// std::mutex 配合 (unique_lock 简化版).
+
+extern "C" {
+    struct dccpp_condition_variable;
+    struct dccpp_mutex;
+    struct dccpp_duration;
+
+    dccpp_condition_variable* dccpp_cv_new(void);
+    void                      dccpp_cv_free(dccpp_condition_variable* cv);
+    void                      dccpp_cv_wait(dccpp_condition_variable* cv,
+                                           dccpp_mutex* m);
+    int                       dccpp_cv_wait_for(dccpp_condition_variable* cv,
+                                                 dccpp_mutex* m,
+                                                 const dccpp_duration* d);
+    void                      dccpp_cv_notify_one(dccpp_condition_variable* cv);
+    void                      dccpp_cv_notify_all(dccpp_condition_variable* cv);
+}
+
+namespace std {
+    class condition_variable {
+    public:
+        condition_variable() : p_(dccpp_cv_new()) {}
+        ~condition_variable() { if (p_) dccpp_cv_free(p_); }
+        condition_variable(const condition_variable&) = 0;
+        condition_variable& operator=(const condition_variable&) = 0;
+
+        void wait(mutex& m) {
+            dccpp_cv_wait(p_, m.native_handle());
+        }
+        int wait_for(mutex& m, duration d) {
+            return dccpp_cv_wait_for(p_, m.native_handle(), &d.raw());
+        }
+        void notify_one() { dccpp_cv_notify_one(p_); }
+        void notify_all() { dccpp_cv_notify_all(p_); }
+
+    private:
+        dccpp_condition_variable* p_;
+    };
+}

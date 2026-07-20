@@ -212,3 +212,61 @@
 - 代码总量 < 5 万行 (vs GCC 700 万)
 - 零外部 crate 依赖 (除了 std)
 - 任何 patch 必须先回答"为什么比当前方案快?"
+
+## M18 C++ 标准库扩展（filesystem / thread / mutex / chrono / expected / flat_map / multi_index / regex / ranges / concepts / modules）
+
+- **`<chrono>`**: 三种 clock + duration + time_point. 内部统一
+  `int64_t 纳秒`，用 `clock_gettime(CLOCK_*)` 实现。头文件
+  `chrono` 提供 `system_clock::now()`、`steady_clock::now()`、
+  `high_resolution_clock::now()` 静态方法。
+- **`<thread>` / `<mutex>` / `<condition_variable>`**:
+  基于 `pthread` 包装。`std::thread(fn, arg)` 启动线程；`std::mutex`
+  `lock/try_lock/unlock`；`std::recursive_mutex` 用 `PTHREAD_MUTEX_RECURSIVE`；
+  `std::condition_variable::wait/wait_for/notify_one/notify_all`。
+  `this_thread::sleep_for(duration)` 用 `nanosleep`。
+- **`<filesystem>`**: `path` 类（内部字节向量，POSIX 风格分隔符）；
+  `file_type` 枚举（none/regular/directory/symlink/other）；
+  顶层 `exists/is_regular_file/is_directory/create_directory/remove/rename/file_size`；
+  `directory_iterator` 包 `opendir/readdir/closedir`。
+- **`<expected>` (C++23)**: 提供 `expected_int` / `expected_str` 两种
+  擦除模板特化；通用 `dccpp_expected_make_val/err/destroy` 走
+  `void*` + 析构回调擦除所有 T / E。
+- **`<flat_map>` (C++23)**: 排序数组 + 二分查找。`flat_map_ii`
+  （int → int）做完整接口：insert/get/contains/erase/clear，
+  范围遍历通过 `key_at(i) / val_at(i)`。
+- **多维下标 (C++23)**: parser 在 `obj[...]` 内允许逗号分隔的
+  多个索引；多维时构造 `CppExpr::MultiIndex(obj, [i1, ..., iN])`。
+  lower 改写为 `__dcc_multi_index_N(obj, i1, ..., iN)` 调用；
+  C 运行时提供 N=2/3/4 占位实现（按 `sizeof(int) * offset`）。
+- **`<regex>` (简化子集)**: 编译 regex 字符串为 byte-code
+  （LIT/ANY/CLASS/NCLASS/SPLIT/JMP/SAVE/MATCH/BOL/EOL 操作码）。
+  解释器用递归回溯 NFA 模拟，支持：字面字符 / `.` / `[abc]` / `[a-z]`
+  / `[^...]` / `*` / `+` / `?` / `|` / `()` / `^` / `$` / `\x`。
+  不支持反向引用、命名捕获、lookahead。
+- **`<ranges>` (C++20, 简化)**: `views::filter_view` /
+  `transform_view` / `take_view` / `reverse_view` 四个 view
+  适配器，底层用 `dccpp_view` 字节数组存 int 元素。
+  `views::iota_view` 接收外部 view 指针。简化：view 不真正 lazy，
+  调用时立即 materialize 到 dccpp_view。
+- **Concepts (SFINAE 简化版)**: 现有 `parse_concept_decl` / 
+  `skip_requires_clause` 已可接受 `concept Name = ...;` 和
+  `requires expr` 语法。M18 确认对类模板的 `template<...> requires Concept<T>`
+  模板约束可解析；不做真实 SFINAE 过滤。
+- **Modules 占位**: 新增 `src/cpp/modules.rs`，记录已知 module 表与
+  `import name` 改写策略。M18 仅注释占位，运行时不做真实 module 链接。
+  M19+ 实现 BMF 序列化 + ODR 检查。
+- **测试**: 11 个 `m18_*` 集成测试 (`m18_chrono / m18_thread_mutex /
+  m18_condition_variable / m18_filesystem / m18_expected /
+  m18_flat_map / m18_multi_index / m18_regex / m18_ranges /
+  m18_concept / m18_modules`)，全部要求在远端 Linux 上编译通过。
+- **运行时**: 新增 Part 11-18 (`dccpp_runtime.c` +1k 行)：
+  chrono / pthread / filesystem / expected / flat_map / regex NFA
+  / ranges view / 多维下标辅助。
+- **遗留已知限制**:
+  - 多维下标默认 `__dcc_multi_index_N` 返回 0；自定义类需要
+    自行提供有 stride 信息的实现。
+  - Ranges view 不真正 lazy，每次适配都 materialize。
+  - Modules 仅占位，无 BMF / ODR / 跨 TU 优化。
+  - regex 不支持 unicode / 反向引用 / lookahead。
+  - `std::thread` 成员函数入口需用户自己写 C thunk（dcc++
+    不会自动从 `&Class::method` 生成 `void*(*)(void*)`）。

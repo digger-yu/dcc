@@ -1,0 +1,108 @@
+// <chrono> - dcc++ C++ 标准库 (M18)
+//
+// duration / time_point / system_clock / steady_clock /
+// high_resolution_clock. 内部统一用 long long 纳秒 (C 内建类型,
+// 避免触发 dcc 类的 typeinfo / member offset 生成). 类只持有
+// dccpp_duration* / dccpp_time_point* 指针, 类似 <string>.
+// 形参/返回统一用 const pointer (不暴露 reference), 避免 dcc
+// C 后端把 reference 简化 pointer 后 emit `o.field` 触发 E1010.
+// 不暴露 operator overload, 改用 add / sub / add_dur /
+// sub_dur / diff 方法.
+
+extern "C" {
+    struct dccpp_duration;
+    struct dccpp_time_point;
+
+    dccpp_duration* dccpp_dur_from_nanos(long long ns);
+    dccpp_duration* dccpp_dur_from_micros(long long us);
+    dccpp_duration* dccpp_dur_from_millis(long long ms);
+    dccpp_duration* dccpp_dur_from_secs(long long s);
+    long long dccpp_dur_nanos(const dccpp_duration* d);
+    long long dccpp_dur_micros(const dccpp_duration* d);
+    long long dccpp_dur_millis(const dccpp_duration* d);
+    long long dccpp_dur_secs(const dccpp_duration* d);
+    dccpp_duration* dccpp_dur_add(const dccpp_duration* a, const dccpp_duration* b);
+    dccpp_duration* dccpp_dur_sub(const dccpp_duration* a, const dccpp_duration* b);
+    int dccpp_dur_eq(const dccpp_duration* a, const dccpp_duration* b);
+    int dccpp_dur_lt(const dccpp_duration* a, const dccpp_duration* b);
+    int dccpp_dur_gt(const dccpp_duration* a, const dccpp_duration* b);
+    void dccpp_dur_free(dccpp_duration* d);
+
+    dccpp_time_point* dccpp_now_system(void);
+    dccpp_time_point* dccpp_now_steady(void);
+    dccpp_time_point* dccpp_now_hires(void);
+    dccpp_time_point* dccpp_tp_add_dur(const dccpp_time_point* tp, const dccpp_duration* d);
+    dccpp_time_point* dccpp_tp_sub_dur(const dccpp_time_point* tp, const dccpp_duration* d);
+    dccpp_duration* dccpp_tp_diff(const dccpp_time_point* a, const dccpp_time_point* b);
+    int dccpp_tp_eq(const dccpp_time_point* a, const dccpp_time_point* b);
+    int dccpp_tp_lt(const dccpp_time_point* a, const dccpp_time_point* b);
+    int dccpp_tp_le(const dccpp_time_point* a, const dccpp_time_point* b);
+    void dccpp_tp_free(dccpp_time_point* tp);
+}
+
+namespace std {
+    class duration {
+    public:
+        duration() : d_(dccpp_dur_from_nanos(0)) {}
+        duration(long long ns) : d_(dccpp_dur_from_nanos(ns)) {}
+        ~duration() { dccpp_dur_free(d_); }
+
+        long long count_nanos() const  { return dccpp_dur_nanos(d_); }
+        long long count_micros() const { return dccpp_dur_micros(d_); }
+        long long count_millis() const { return dccpp_dur_millis(d_); }
+        long long count_secs() const   { return dccpp_dur_secs(d_); }
+
+        duration add(const duration* o) const  { return dccpp_dur_add(d_, o->d_); }
+        duration sub(const duration* o) const  { return dccpp_dur_sub(d_, o->d_); }
+        int eq(const duration* o) const        { return dccpp_dur_eq(d_, o->d_); }
+        int lt(const duration* o) const        { return dccpp_dur_lt(d_, o->d_); }
+        int gt(const duration* o) const        { return dccpp_dur_gt(d_, o->d_); }
+
+        dccpp_duration* raw() const { return d_; }
+
+    private:
+        dccpp_duration* d_;
+    };
+
+    class system_clock {
+    public:
+        static dccpp_time_point* now() { return dccpp_now_system(); }
+    };
+    class steady_clock {
+    public:
+        static dccpp_time_point* now() { return dccpp_now_steady(); }
+    };
+    class high_resolution_clock {
+    public:
+        static dccpp_time_point* now() { return dccpp_now_hires(); }
+    };
+
+    class time_point {
+    public:
+        time_point() : tp_(dccpp_now_system()) {}
+        time_point(const dccpp_time_point* tp) : tp_(tp) {}
+
+        static time_point now() {
+            time_point r; r.tp_ = dccpp_now_system(); return r;
+        }
+
+        /* 不含 operator overload, 改用 add_dur / sub_dur 方法. */
+        time_point add_dur(const duration* d) const {
+            return dccpp_tp_add_dur(tp_, d->d_);
+        }
+        time_point sub_dur(const duration* d) const {
+            return dccpp_tp_sub_dur(tp_, d->d_);
+        }
+        duration diff(const time_point* o) const {
+            return dccpp_tp_diff(tp_, o->tp_);
+        }
+        int eq(const time_point* o) const  { return dccpp_tp_eq(tp_, o->tp_); }
+        int lt(const time_point* o) const  { return dccpp_tp_lt(tp_, o->tp_); }
+        int le(const time_point* o) const  { return dccpp_tp_le(tp_, o->tp_); }
+
+        dccpp_time_point* raw() const { return tp_; }
+
+    private:
+        dccpp_time_point* tp_;
+    };
+}

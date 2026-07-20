@@ -1,6 +1,6 @@
 # DCC 未实现模块综合清单
 
-> 最后更新：2026-07-19
+> 最后更新：2026-07-20
 > 范围：`src/` 全量源码 + `docs/` 现有文档 + 远程 `192.168.148.128` 验收脚本
 > 目的：把"代码里能看到、但还没做完整 / 还没真做 / 仍然走桩"的模块统一记录，
 > 方便后续 M12+ 排期，避免"忘了还有这块没补"。
@@ -363,6 +363,17 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | `mutable` 成员 (M17 实装) | 解析层接受, 独立字段 (const 成员函数中可写) |
 | `volatile` 成员函数 (M17 实装) | 解析层接受, lower 端标记 (C 端 volatile 与 C++ volatile 在 ABI 上等价) |
 | `friend` (M17 实装) | 解析层接受, lower 端走 FreeFn 路径 (无 this 形参, 无类作用域 mangle) |
+| `std::filesystem` (M18 实装) | path / file_type / exists / is_directory / create_directory / rename / remove / file_size / directory_iterator (包 opendir/readdir); 头在 `src/cpp/stdlib/headers/filesystem` |
+| `std::thread` / `std::mutex` / `std::recursive_mutex` (M18 实装) | pthread 包装; lock/try_lock/unlock + this_thread::sleep_for/yield; 头在 `thread`/`mutex` |
+| `std::condition_variable` (M18 实装) | pthread_cond_t 包装; wait/wait_for/notify_one/notify_all; 头在 `condition_variable` |
+| `std::chrono` (M18 实装) | system_clock/steady_clock/high_resolution_clock + duration/time_point; 内部 int64 纳秒 + clock_gettime; 头在 `chrono` |
+| `std::expected` (M18 实装, C++23) | expected_int/expected_str 两种擦除特化; 通用 dccpp_expected_make_val/err/destroy 走 void*+析构回调; 头在 `expected` |
+| `std::flat_map` (M18 实装, C++23) | flat_map_ii (int→int) 排序数组 + 二分查找; insert/get/contains/erase/clear; 头在 `flat_map` |
+| C++23 多维下标 `obj[i,j,k]` (M18 实装) | parser 构造 `CppExpr::MultiIndex`; lower 改写为 `__dcc_multi_index_N(obj, i, ..., N)`; 运行时提供 N=2/3/4 占位 (返回 0) |
+| `std::regex` (M18 实装, 简化子集) | 编译 regex 为 byte-code; 解释器用递归回溯 NFA; 支持字面/`.`/`[abc]`/`[a-z]`/`[^...]`/`*`/`+`/`?`/`|`/`()`/`^`/`$`/`\x`; 头在 `regex` |
+| `std::ranges` / `std::views` (M18 实装, 简化) | filter/transform/take/reverse view (eager materialize); 头在 `ranges` |
+| Concepts (M18 实装, SFINAE 简化版) | `concept Name = ...;` 解析 + 接受; 不做实际 SFINAE 过滤, 模板约束走 free path |
+| C++20 Modules (M18 占位) | `module;` / `export module X;` / `import X;` 接受; M19+ 实现 BMF 序列化 |
 | `static` 类成员 | 解析为 C `static` 字段，no special ABI |
 | `virtual` 继承 | 部分支持（见 `M10+`），复杂虚基类不验证 |
 | `placement new` | 降级为裸 `malloc` 替身 |
@@ -371,14 +382,11 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 
 🔴 完全没有：
 
-- `std::filesystem`（依赖 C++17 库）
-- `std::thread` / `std::mutex` / `std::condition_variable`（依赖 OS API）
-- `std::chrono`（依赖时钟 API）
-- `std::regex`（依赖正则引擎）
-- Concepts 在类模板中的深度集成（仅 SFINAE 简化版）
-- Ranges (`std::views::*`, `std::ranges::*`)
-- C++23 多维下标 / 期望 (`std::expected`) / `flat_map` 等
-- Modules 真实实现（仅注释占位）
+- (M18 全部实装) `std::filesystem` / `std::thread` / `std::mutex` /
+  `std::condition_variable` / `std::chrono` / `std::regex` /
+  C++23 多维下标 / `std::expected` / `std::flat_map` /
+  `std::ranges` / `std::views` / Concepts SFINAE 简化版 /
+  C++20 Modules 占位 — 全部见第 6 节表格 M18 行
 
 ---
 

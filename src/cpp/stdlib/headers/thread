@@ -1,0 +1,63 @@
+// <thread> - dcc++ C++ 标准库 (M18)
+//
+// std::thread 包装 pthread. 线程入口是 void* (*)(void*) 函数指针.
+// 成员函数需要用 C 兼容 thunk 适配 (dcc++ 不会自动生成, 用户自己
+// 写一个 free function 取 this).
+
+extern "C" {
+    struct dccpp_thread;
+    /* M18.0: dcc++ 不支持裸函数指针类型在 param list 内 (`void* (*fn)(void*)`),
+       改用 typedef 别名简化. */
+    typedef void* (*dccpp_thread_fn)(void*);
+    dccpp_thread* dccpp_thread_new(dccpp_thread_fn fn, void* arg);
+    void* dccpp_thread_join(dccpp_thread* t);
+    void  dccpp_thread_detach(dccpp_thread* t);
+    void  dccpp_thread_free(dccpp_thread* t);
+    void  dccpp_thread_sleep_ns(long long ns);
+    void  dccpp_thread_yield(void);
+    int   dccpp_thread_eq(const dccpp_thread* a, const dccpp_thread* b);
+}
+
+namespace std {
+    class thread {
+    public:
+        thread() : p_(0), joined_(1) {}
+        thread(dccpp_thread_fn fn, void* arg) : p_(dccpp_thread_new(fn, arg)), joined_(0) {}
+        ~thread() { if (p_ && !joined_) dccpp_thread_free(p_); }
+
+        thread(const thread&) = 0;
+        thread& operator=(const thread&) = 0;
+
+        int joinable() const { return p_ != 0 && !joined_; }
+
+        void* join() {
+            if (!p_ || joined_) return (void*)0;
+            void* r = dccpp_thread_join(p_);
+            joined_ = 1;
+            return r;
+        }
+
+        void detach() {
+            if (!p_ || joined_) return;
+            dccpp_thread_detach(p_);
+            joined_ = 1;
+        }
+
+        dccpp_thread* native_handle() { return p_; }
+
+    private:
+        dccpp_thread* p_;
+        int           joined_;
+    };
+
+    inline void* join(thread& t) { return t.join(); }
+
+    // this_thread 命名空间
+    namespace this_thread {
+        inline void sleep_for_ns(long long ns) { dccpp_thread_sleep_ns(ns); }
+        inline void sleep_for(duration d) {
+            dccpp_thread_sleep_ns(d.count_nanos());
+        }
+        inline void yield(void) { dccpp_thread_yield(); }
+    }
+}

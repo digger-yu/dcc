@@ -1,0 +1,137 @@
+// <ranges> - dcc++ C++ 标准库 (C++20, M18, 简化子集)
+//
+// std::ranges / std::views 提供 filter / transform / take / reverse.
+// 简化: view 内部先把元素 collect 到 dccpp_view 缓冲区, 不做真
+// lazy. 这与 C++20 ranges 语义不同, 但能覆盖 80% 真实使用.
+
+extern "C" {
+    struct dccpp_view;
+    dccpp_view* dccpp_view_new(size_t elem_size);
+    void        dccpp_view_free(dccpp_view* v);
+    size_t      dccpp_view_size(const dccpp_view* v);
+    int         dccpp_view_empty(const dccpp_view* v);
+    void*       dccpp_view_at(const dccpp_view* v, size_t i);
+    dccpp_view* dccpp_view_filter_int(const dccpp_view* src,
+                                      int (*pred)(int));
+    dccpp_view* dccpp_view_transform_int(const dccpp_view* src,
+                                         int (*fn)(int));
+    dccpp_view* dccpp_view_take(const dccpp_view* src, size_t n);
+    dccpp_view* dccpp_view_reverse(const dccpp_view* src);
+    int         dccpp_view_sum_int(const dccpp_view* v);
+}
+
+namespace std {
+    namespace views {
+        /* ranges::filter_view 简化: 直接接收 int 元素 + 谓词.
+           view 在析构时 free. */
+        class filter_view {
+        public:
+            filter_view() : v_(0) {}
+            filter_view(dccpp_view* src, int (*pred)(int)) : v_(0) {
+                v_ = dccpp_view_filter_int(src, pred);
+            }
+            ~filter_view() { if (v_) dccpp_view_free(v_); }
+            filter_view(const filter_view&) = 0;
+            filter_view& operator=(const filter_view&) = 0;
+
+            size_t size() const { return dccpp_view_size(v_); }
+            int    empty() const { return dccpp_view_empty(v_); }
+            int    at(size_t i) const {
+                void* p = dccpp_view_at(v_, i);
+                int r = 0; if (p) memcpy(&r, p, sizeof(int));
+                return r;
+            }
+        private:
+            dccpp_view* v_;
+        };
+
+        class transform_view {
+        public:
+            transform_view() : v_(0) {}
+            transform_view(dccpp_view* src, int (*fn)(int)) : v_(0) {
+                v_ = dccpp_view_transform_int(src, fn);
+            }
+            ~transform_view() { if (v_) dccpp_view_free(v_); }
+            transform_view(const transform_view&) = 0;
+            transform_view& operator=(const transform_view&) = 0;
+
+            size_t size() const { return dccpp_view_size(v_); }
+            int    at(size_t i) const {
+                void* p = dccpp_view_at(v_, i);
+                int r = 0; if (p) memcpy(&r, p, sizeof(int));
+                return r;
+            }
+        private:
+            dccpp_view* v_;
+        };
+
+        class take_view {
+        public:
+            take_view() : v_(0) {}
+            take_view(dccpp_view* src, size_t n) : v_(dccpp_view_take(src, n)) {}
+            ~take_view() { if (v_) dccpp_view_free(v_); }
+            take_view(const take_view&) = 0;
+            take_view& operator=(const take_view&) = 0;
+
+            size_t size() const { return dccpp_view_size(v_); }
+            int    at(size_t i) const {
+                void* p = dccpp_view_at(v_, i);
+                int r = 0; if (p) memcpy(&r, p, sizeof(int));
+                return r;
+            }
+        private:
+            dccpp_view* v_;
+        };
+
+        class reverse_view {
+        public:
+            reverse_view() : v_(0) {}
+            reverse_view(dccpp_view* src) : v_(dccpp_view_reverse(src)) {}
+            ~reverse_view() { if (v_) dccpp_view_free(v_); }
+            reverse_view(const reverse_view&) = 0;
+            reverse_view& operator=(const reverse_view&) = 0;
+
+            size_t size() const { return dccpp_view_size(v_); }
+            int    at(size_t i) const {
+                void* p = dccpp_view_at(v_, i);
+                int r = 0; if (p) memcpy(&r, p, sizeof(int));
+                return r;
+            }
+        private:
+            dccpp_view* v_;
+        };
+
+        /* iota_view 简化: range 直接拿一个 dccpp_view 指针.
+           用户从某容器拿到 view 指针后, 包成 iota_view. */
+        class iota_view {
+        public:
+            iota_view() : v_(0) {}
+            iota_view(dccpp_view* src) : v_(src) {}
+            size_t size() const { return dccpp_view_size(v_); }
+            int    at(size_t i) const {
+                void* p = dccpp_view_at(v_, i);
+                int r = 0; if (p) memcpy(&r, p, sizeof(int));
+                return r;
+            }
+            dccpp_view* raw() { return v_; }
+        private:
+            dccpp_view* v_;
+        };
+    }
+
+    namespace ranges {
+        /* ranges::views::filter 工厂: 接 iota_view + 谓词 -> filter_view */
+        inline views::filter_view filter(dccpp_view* src, int (*pred)(int)) {
+            return views::filter_view(src, pred);
+        }
+        inline views::transform_view transform(dccpp_view* src, int (*fn)(int)) {
+            return views::transform_view(src, fn);
+        }
+        inline views::take_view take(dccpp_view* src, size_t n) {
+            return views::take_view(src, n);
+        }
+        inline views::reverse_view reverse(dccpp_view* src) {
+            return views::reverse_view(src);
+        }
+    }
+}

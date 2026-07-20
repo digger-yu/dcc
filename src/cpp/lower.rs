@@ -53,6 +53,9 @@ pub struct Lower {
     pub local_var_types: std::collections::HashMap<String, MangleType>,
     /// 形参 -> 类型映射
     pub param_var_types: std::collections::HashMap<String, MangleType>,
+    /// M18.0: 已输出的 typedef alias 集合, 避免重复 (e.g. system_clock/steady_clock
+    /// 都尝试 typedef ... clock). 重复的 alias 跳过 typedef 输出.
+    pub emitted_typedefs: std::collections::HashSet<String>,
     /// 当前所在类 (用于 this 隐式注入)
     pub current_class: Option<String>,
     /// 待降级的 lambda 闭包
@@ -63,6 +66,27 @@ pub struct Lower {
     pub const_local_i128: std::collections::HashMap<String, i128>,
     /// M17.0: 协程状态机计数器
     pub coro_state: i64,
+}
+
+/// M18.0: 检查 ident 是否是 C 关键字 (如 int/char/void/...), 不能作为 typedef 名
+pub fn is_c_keyword(s: &str) -> bool {
+    matches!(s, "auto" | "break" | "case" | "char" | "const" | "continue"
+        | "default" | "do" | "double" | "else" | "enum" | "extern"
+        | "float" | "for" | "goto" | "if" | "inline" | "int" | "long"
+        | "register" | "return" | "short" | "signed" | "sizeof" | "static"
+        | "struct" | "switch" | "typedef" | "union" | "unsigned" | "void"
+        | "volatile" | "while" | "_Bool" | "_Complex" | "_Imaginary"
+        | "_Atomic" | "_Generic" | "_Noreturn" | "_Static_assert" | "_Thread_local"
+        | "bool" | "true" | "false" | "NULL" | "class" | "namespace" | "typename"
+        | "template" | "this" | "virtual" | "friend" | "operator" | "explicit"
+        | "constexpr" | "decltype" | "noexcept" | "override" | "final" | "new"
+        | "delete" | "using" | "try" | "catch" | "throw" | "public" | "private"
+        | "protected" | "nullptr")
+}
+
+/// 是否是 C 标识符字符 (字母 / 数字 / 下划线)
+pub fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// 类型到 C 字符串 (模块级, Lower 内外共用)
@@ -95,6 +119,25 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
 }
 
 impl Lower {
+    /// M18.0: namespace-aware mangle_to_c, 自动 qualify 类引用
+    /// 当类在 std:: 内被引用, 且名字不含 std_ 前缀, 加 std_ 前缀
+    fn mangle_to_c_ns(&self, ty: &MangleType) -> String {
+        match ty {
+            MangleType::Class(n) => {
+                if !self.ns.stack.is_empty() && !n.contains('_') {
+                    let q = format!("{}_{}", self.ns.stack.join("_"), n);
+                    format!("struct {}", q)
+                } else {
+                    format!("struct {}", n)
+                }
+            }
+            MangleType::Pointer(t) | MangleType::Reference(t) => {
+                format!("{}*", self.mangle_to_c_ns(t))
+            }
+            _ => mangle_to_c(ty),
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             out: String::new(),
@@ -106,6 +149,7 @@ impl Lower {
             class_fields: std::collections::HashMap::new(),
             local_var_types: std::collections::HashMap::new(),
             param_var_types: std::collections::HashMap::new(),
+            emitted_typedefs: std::collections::HashSet::new(),
             current_class: None,
             lambdas: vec![],
             lambda_counter: 0,
@@ -122,7 +166,7 @@ impl Lower {
     fn type_name(ty: &MangleType) -> String {
         match ty {
             MangleType::Class(n) => n.clone(),
-            other => Self::mangle_to_c(other),
+            other => mangle_to_c(other),
         }
     }
 
@@ -202,6 +246,8 @@ impl Lower {
                 MangleType::Pointer(Box::new(MangleType::Class("Unknown".to_string()))),
             CppExpr::Member(_, _) | CppExpr::PtrMember(_, _) => MangleType::Int,
             CppExpr::Ternary { then, .. } => self.infer_type(then, is_decltype_auto),
+            // M18.0: 多维下标返回元素类型 (与单下标一致)
+            CppExpr::MultiIndex(obj, _) => self.infer_type(obj, is_decltype_auto),
             _ => MangleType::Int,
         };
         // decltype(auto) 保留引用: 若 init 是 Ident(局部), 视情况包 Reference
@@ -217,14 +263,83 @@ impl Lower {
         if let CppExpr::Ident(name) = e {
             // 先查局部变量
             if let Some(ty) = self.local_var_types.get(name) {
-                if let MangleType::Class(c) = ty { return Some(c.clone()); }
+                if let Some(c) = Self::extract_class(ty) {
+                    return Some(self.resolve_class_name(&c));
+                }
             }
             // 再查形参
             if let Some(ty) = self.param_var_types.get(name) {
-                if let MangleType::Class(c) = ty { return Some(c.clone()); }
+                if let Some(c) = Self::extract_class(ty) {
+                    return Some(self.resolve_class_name(&c));
+                }
             }
         }
         None
+    }
+
+    /// 从 MangleType 中提取类名 (支持 Pointer / Reference / Class 包装)
+    fn extract_class(ty: &MangleType) -> Option<String> {
+        match ty {
+            MangleType::Class(c) => Some(c.clone()),
+            MangleType::Pointer(t) | MangleType::Reference(t) => Self::extract_class(t),
+            _ => None,
+        }
+    }
+
+    /// 解析类名: 尝试原名, 然后 namespace 限定名
+    fn resolve_class_name(&self, c: &str) -> String {
+        // 1) 原名直接命中 class_methods (e.g. 全局类)
+        if self.class_methods.contains_key(c) {
+            return c.to_string();
+        }
+        // 2) 限定名命中 class_methods (e.g. `path` -> `std_filesystem_path`)
+        let q = self.qualify_name(c);
+        if self.class_methods.contains_key(&q) {
+            return q;
+        }
+        // 3) 已经含 `::` 的形式 (e.g. `std::filesystem::path`)
+        if c.contains("::") {
+            let flat = c.replace("::", "_");
+            if self.class_methods.contains_key(&flat) {
+                return flat;
+            }
+        }
+        // 4) 最后才回退到 self.classes Vec (兼容性)
+        if self.classes.iter().any(|x| x == c) {
+            return c.to_string();
+        }
+        c.to_string()
+    }
+
+    /// 查找 Ident 表达式对应的 MangleType (M18.0: 用于 . vs -> 选择)
+    fn lookup_ident_type(&self, e: &CppExpr) -> Option<MangleType> {
+        if let CppExpr::Ident(name) = e {
+            // 局部变量
+            if let Some(ty) = self.local_var_types.get(name) {
+                return Some(ty.clone());
+            }
+            // 形参
+            if let Some(ty) = self.param_var_types.get(name) {
+                return Some(ty.clone());
+            }
+            // M18.0: 类字段 - 当在成员函数中, ident 可能是当前类的字段
+            // (解析器不会自动加 this->, 需 lower 阶段识别)
+            if let Some(cls) = &self.current_class {
+                if let Some(fields) = self.class_fields.get(cls) {
+                    for (n, ty) in fields {
+                        if n == name {
+                            return Some(ty.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 类型是否需要 `->` 访问 (指针 / 引用)
+    fn is_ptr_like(ty: &MangleType) -> bool {
+        matches!(ty, MangleType::Pointer(_) | MangleType::Reference(_))
     }
 
     /// 入口
@@ -278,7 +393,9 @@ impl Lower {
         match d {
             CppDecl::Class(c) => {
                 self.classes.push(c.name.clone());
-                // 收集方法名 + 成员字段
+                // M18.0: 用 qualified name 作 key, 避免 namespace 内同名
+                // 类 (如 std::duration) 与全局类冲突
+                let qname = self.qualify_name(&c.name);
                 let mut methods = vec![];
                 let mut fields = vec![];
                 for m in &c.members {
@@ -289,11 +406,14 @@ impl Lower {
                         _ => {}
                     }
                 }
-                self.class_methods.insert(c.name.clone(), methods);
-                self.class_fields.insert(c.name.clone(), fields);
+                self.class_methods.insert(qname.clone(), methods);
+                self.class_fields.insert(qname, fields);
             }
-            CppDecl::Namespace { body, .. } => {
+            CppDecl::Namespace { name, body } => {
+                // M18.0: 跟踪 namespace stack 让 qualify_name 出正确名字
+                if let Some(n) = name { self.ns.stack.push(n.clone()); }
                 for x in body { self.collect_classes(x); }
+                if name.is_some() { self.ns.stack.pop(); }
             }
             CppDecl::Template { decl, .. } => { self.collect_classes(decl); }
             _ => {}
@@ -375,6 +495,8 @@ impl Lower {
             }
             CppExpr::Comma(exprs) => exprs.iter().any(|e| self.expr_needs_system_headers(e)),
             CppExpr::Typeid(_) => true,
+            // M18.0: 多维下标按 obj 递归 (与单下标一致)
+            CppExpr::MultiIndex(obj, _) => self.expr_needs_system_headers(obj),
             _ => false,
         }
     }
@@ -465,7 +587,7 @@ impl Lower {
                 // emit 时仍按非 const 处理; 正确做法是 lower_const_method 用 const-cast.
                 // 当前简化: mutable 视为普通字段, 不做差异 - 留待 M17.x 完善.
                 let _ = is_mutable;
-                self.out.push_str(&format!("    {} {};\n", Self::mangle_to_c(ty), name));
+                self.out.push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
             }
             CppDecl::Namespace { name, body } => {
                 if let Some(n) = name { self.ns.stack.push(n.clone()); }
@@ -536,7 +658,7 @@ impl Lower {
                         self.out.push_str(&format!("void {} (", m_d));
                         for (i, (n, t)) in all_params.iter().enumerate() {
                             if i > 0 { self.out.push_str(", "); }
-                            self.out.push_str(&format!("{} {}", Self::mangle_to_c(t), n));
+                            self.out.push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
                         }
                         self.out.push_str(") {\n");
                         // 转发到基类 ctor
@@ -600,22 +722,122 @@ impl Lower {
                 self.out.push_str("/* dcc C++ export block (M9 placeholder) */\n");
                 for x in body { self.lower_decl(x); }
             }
-            CppDecl::RawExternC => {
-                /* M11 stdlib: 透传 extern "C" { ... } 块到 C 输出.
-                 * 这是 C 函数的声明, 必须保留, 因为 lower 后的 C
-                 * 代码需要 extern 引用 dccpp_* 运行时符号. */
-                self.out.push_str("/* dcc++ M11: extern \"C\" block */\n");
+            CppDecl::RawExternC(text) => {
+                /* M18.0: 透传 extern "C" { ... } 块原文.
+                 * 内部 C 函数声明 (如 dccpp_dur_from_nanos) 必须保留,
+                 * 否则 lower 后的 C 代码会找不到 dccpp_* 运行时符号.
+                 *
+                 * 注意: dcc C 编译器不识别 `extern "C"` 语法, 所以只
+                 * 输出块体内的 C 声明本身 (去掉 `extern "C" {` 和 `}`).
+                 *
+                 * dcc C 同时也不接受 `dccpp_path*` 这种裸结构体名,
+                 * 这里对每个出现的 `dccpp_<ident>` (作为类型) 注入
+                 * `typedef struct dccpp_<ident> dccpp_<ident>;` 别名,
+                 * 让后续 `dccpp_path*` / `dccpp_path* foo` /
+                 * `dccpp_file_status dccpp_status_of(...)` 都能识别
+                 * 为合法 C 类型.
+                 *
+                 * 识别 type 位置的 `dccpp_<ident>`:
+                 *   1. 紧跟 (跳过空格) `*`        (e.g. `dccpp_path*`)
+                 *   2. 紧跟 (跳过空格) 另一个 ident (e.g. `dccpp_file_status dccpp_status_of`)
+                 *
+                 * 不识别 `dccpp_<ident>(` 函数名形式 (e.g. `dccpp_path_new(`)
+                 * 因为那是函数名, 不是 type.
+                 */
+                self.out.push_str("/* dcc++ M18: extern \"C\" block (de-wrapped) */\n");
+                /* 先注入 int64_t/uint64_t 等本项目常用 typedef,
+                 * 让 extern "C" 块内 `int64_t dccpp_fs_file_size(...)`
+                 * 也能被 dcc C 接受. */
+                self.out.push_str("typedef long long int64_t;\n");
+                self.out.push_str("typedef unsigned long long uint64_t;\n");
+                if let Some(open) = text.find('{') {
+                    if let Some(close) = text.rfind('}') {
+                        if open < close {
+                            let body = &text[open + 1..close];
+                            // 收集所有 type 位置的 `dccpp_<ident>`, 注入 typedef
+                            let bytes = body.as_bytes();
+                            let mut i = 0;
+                            let mut seen: std::collections::HashSet<String> =
+                                std::collections::HashSet::new();
+                            while i + 6 <= bytes.len() {
+                                if &bytes[i..i+6] == b"dccpp_"
+                                    && (i == 0 || !is_ident_char(bytes[i - 1]))
+                                {
+                                    let start = i;
+                                    let mut j = i + 6;
+                                    while j < bytes.len() && is_ident_char(bytes[j]) {
+                                        j += 1;
+                                    }
+                                    // 看 type 之后跟的是什么: `*` 还是 ident
+                                    let mut k = j;
+                                    while k < bytes.len() && bytes[k] == b' ' {
+                                        k += 1;
+                                    }
+                                    let is_type = if k < bytes.len() && bytes[k] == b'*' {
+                                        // 形式 1: dccpp_X * ...
+                                        true
+                                    } else if k < bytes.len() && is_ident_char(bytes[k]) {
+                                        // 形式 2: dccpp_X <ident> - 这是 return type + 名字
+                                        // 进一步检查: <ident> 之后是 `(` (函数声明)
+                                        let mut m = k;
+                                        while m < bytes.len() && is_ident_char(bytes[m]) {
+                                            m += 1;
+                                        }
+                                        // 跳过空格
+                                        while m < bytes.len() && bytes[m] == b' ' {
+                                            m += 1;
+                                        }
+                                        m < bytes.len() && bytes[m] == b'('
+                                    } else {
+                                        false
+                                    };
+                                    if is_type {
+                                        let name = std::string::String::from_utf8_lossy(
+                                            &bytes[start..j]).into_owned();
+                                        if !seen.contains(&name) {
+                                            seen.insert(name.clone());
+                                            self.out.push_str(&format!(
+                                                "typedef struct {} {};\n", name, name
+                                            ));
+                                        }
+                                    }
+                                    i = j;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            self.out.push_str(body);
+                        }
+                    }
+                }
+                self.out.push_str("\n");
             }
             CppDecl::Typedef => {
                 /* M11 stdlib: typedef 不产生 C 输出 (lower 后的 C
                  * 代码会引入 stddef.h 等系统头处理 size_t). */
             }
+            CppDecl::Empty => {
+                /* M18.0: enum / 修饰后无实际声明时使用, 不产生 C 输出. */
+            }
+            CppDecl::EnumPlaceholder(name) => {
+                // M18.0: 输出 `typedef int <name>;` 保证后续 `file_type x;` 类型存在.
+                // 不在 dcc C 后端用 real enum, 因为 dcc C 暂不支持 enum 完整特性.
+                // 命名空间类 enum 已经被 namespace 限定后处理, 这里只输出 typedef.
+                let prefixed = if !self.ns.stack.is_empty() && !name.contains('_') {
+                    format!("{}_{}", self.ns.stack.join("_"), name)
+                } else {
+                    name.clone()
+                };
+                self.out.push_str(&format!("typedef int {};\n", prefixed));
+            }
         }
     }
 
     fn lower_class(&mut self, c: &ClassDecl) {
+        // M18.0: 用 qualified name 避免 namespace 内类与全局类冲突
+        let qname = self.qualify_name(&c.name);
         // 阶段 1: 仅 struct 定义 (成员字段 + vptr)
-        self.out.push_str(&format!("struct {} {{\n", c.name));
+        self.out.push_str(&format!("struct {} {{\n", qname));
         // 继承: 嵌入基类子结构
         for b in &c.bases {
             if !b.is_virtual {
@@ -635,7 +857,7 @@ impl Lower {
         for m in &c.members {
             match m {
                 CppDecl::MemberVar { ty, name, .. } => {
-                    self.out.push_str(&format!("    {} {};\n", Self::mangle_to_c(ty), name));
+                    self.out.push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
                 }
                 CppDecl::Class(nested) => {
                     self.out.push_str(&format!("/* nested class {} */\n", nested.name));
@@ -645,13 +867,33 @@ impl Lower {
             }
         }
         self.out.push_str("};\n");
+        // M18.0: 同时输出 typedef 让 unqualified 类名可作为类型
+        // 例如 `std::duration` -> `typedef struct std_duration duration;`
+        // 这样测试代码可以直接用 `duration ms(100);` 而 C 也能识别.
+        // 规则: 如果 qname 包含下划线 (说明是 namespace-qualified),
+        // 取最后一段作为 alias.
+        // 多个类可能共享同一 alias (e.g. system_clock/steady_clock -> clock),
+        // 已 emit 过的 alias 跳过以避免 dcc C 报 E0005 (duplicate typedef).
+        // alias 是 C 关键字 (int/char/void/...) 时跳过, 否则 dcc C 报 E0004.
+        if qname.contains('_') {
+            if let Some(last) = qname.rsplit('_').next() {
+                if last != qname && !self.emitted_typedefs.contains(last)
+                    && !is_c_keyword(last)
+                {
+                    self.emitted_typedefs.insert(last.to_string());
+                    self.out.push_str(&format!(
+                        "typedef struct {} {};\n", qname, last
+                    ));
+                }
+            }
+        }
         // M17.0: 对每个数据成员, 输出 offsetof 函数 (供 `obj.*p` / `obj->*p` 使用)
         // 用函数而非 offsetof 宏: dcc C 前端不识别 offsetof 宏, 但能正确计算指针差
         for m in &c.members {
             if let CppDecl::MemberVar { name, .. } = m {
                 self.out.push_str(&format!(
                     "size_t __dcc_mbr_{0}_{1}(void) {{ struct {0} __f; return (size_t)((char*)&__f.{1} - (char*)&__f); }}\n",
-                    c.name, name,
+                    qname, name,
                 ));
             }
         }
@@ -680,7 +922,7 @@ impl Lower {
                 self.lower_decl(m);
             }
             CppDecl::MemberVar { ty, name, .. } => {
-                self.out.push_str(&format!("    {} {};\n", Self::mangle_to_c(ty), name));
+                self.out.push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
             }
             CppDecl::OperatorFn { .. } => { self.lower_decl(m); }
             CppDecl::Class(c) => {
@@ -753,10 +995,10 @@ impl Lower {
         for (n, t) in params {
             self.param_var_types.insert(n.clone(), t.clone());
         }
-        self.out.push_str(&format!("{} {} (", Self::mangle_to_c(ret), mangled));
+        self.out.push_str(&format!("{} {} (", self.mangle_to_c_ns(ret), mangled));
         for (i, (n, t)) in params.iter().enumerate() {
             if i > 0 { self.out.push_str(", "); }
-            self.out.push_str(&format!("{} {}", Self::mangle_to_c(t), n));
+            self.out.push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
         }
         self.out.push_str(") {\n");
         for s in &body.stmts { self.emit_stmt(s); }
@@ -780,7 +1022,7 @@ impl Lower {
         self.out.push_str(&format!("void {} (", mangled));
         for (i, (n, t)) in params.iter().enumerate() {
             if i > 0 { self.out.push_str(", "); }
-            self.out.push_str(&format!("{} {}", Self::mangle_to_c(t), n));
+            self.out.push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
         }
         self.out.push_str(") {\n");
         // init 列表: this->member = expr;
@@ -848,7 +1090,13 @@ impl Lower {
                     if let Some(CppExpr::Call(_, args)) = init { args.clone() } else { vec![] }
                 } else { vec![] };
                 // 把 C++ 类型名映射到 C 类型 (`Counter` -> `struct Counter`)
-                self.out.push_str(&mangle_to_c(&resolved_ty));
+                // M18.0: 在命名空间内, 用 namespace-aware mangle 让 qualified 类被正确解析
+                let c_type = if matches!(&resolved_ty, MangleType::Class(_)) {
+                    self.mangle_to_c_ns(&resolved_ty)
+                } else {
+                    mangle_to_c(&resolved_ty)
+                };
+                self.out.push_str(&c_type);
                 self.out.push(' ');
                 self.out.push_str(name);
                 if let Some(e) = init {
@@ -975,7 +1223,7 @@ impl Lower {
                     if let Some(ty) = &c.ty {
                         self.out.push_str(&format!("void* __exc = __cxa_begin_catch(__eh_ctx.matched);\n"));
                         self.out.push_str(&format!("{}* __e = ({}*)__exc;\n",
-                            Self::mangle_to_c(ty), Self::mangle_to_c(ty)));
+                            self.mangle_to_c_ns(ty), self.mangle_to_c_ns(ty)));
                         if let Some(n) = &c.name {
                             self.out.push_str(&format!("__cxa_end_catch(__exc);\n"));
                             self.out.push_str(&format!("(void)__e; (void){};\n", n));
@@ -1063,7 +1311,21 @@ impl Lower {
             CppExpr::This => self.out.push_str("this"),
             CppExpr::ThisMember(s) => self.out.push_str(&format!("this->{}", s)),
             CppExpr::QualifiedAccess(_, s) => self.out.push_str(s),
-            CppExpr::Member(b, s) => { self.emit_expr(b); self.out.push_str(&format!(".{}", s)); }
+            CppExpr::Member(b, s) => {
+                // M18.0: 若 b 是指针/引用类型 (e.g. const path& 参数, 或 dccpp_* 指针),
+                // 输出 `b->s` 而不是 `b.s`.
+                let use_arrow = if let Some(ty) = self.lookup_ident_type(b) {
+                    Self::is_ptr_like(&ty)
+                } else {
+                    false
+                };
+                self.emit_expr(b);
+                if use_arrow {
+                    self.out.push_str(&format!("->{}", s));
+                } else {
+                    self.out.push_str(&format!(".{}", s));
+                }
+            }
             CppExpr::PtrMember(b, s) => {
                 // M10+: operator-> 重载链
                 // 若 base 是 PtrLike 类型 (Ptr/Wrapper/Iter/ptr/iter/iter 名字),
@@ -1102,7 +1364,7 @@ impl Lower {
             }
             CppExpr::TypedInitList { ty, elems } => {
                 // M10+: initializer_list<T> T{1, 2, 3}
-                self.out.push_str(&format!("(({}){{", Self::mangle_to_c(ty)));
+                self.out.push_str(&format!("(({}){{", self.mangle_to_c_ns(ty)));
                 for (i, e) in elems.iter().enumerate() {
                     if i > 0 { self.out.push_str(", "); }
                     self.emit_expr(e);
@@ -1111,16 +1373,22 @@ impl Lower {
             }
             CppExpr::Call(f, args) => {
                 // 方法调用改写: obj.method(args) -> _ZN<Cls><Len><method>E<args>(&obj, args)
-                if let CppExpr::Member(obj, method) = &**f {
-                    if let Some(class) = self.lookup_var_class(obj) {
+                // 也支持 obj->method() (e.g. const path& p; p->c_str() 等)
+                let call_target: Option<(&CppExpr, String)> = match &**f {
+                    CppExpr::Member(o, m) => Some((o, m.clone())),
+                    CppExpr::PtrMember(o, m) => Some((o, m.clone())),
+                    _ => None,
+                };
+                if let Some((obj_expr, method_name)) = call_target {
+                    if let Some(class) = self.lookup_var_class(obj_expr) {
                         if self.class_methods.get(&class)
-                            .map_or(false, |m| m.contains(method)) {
-                            let n = NestedName::from_dotted(vec![class.clone(), method.clone()]);
+                            .map_or(false, |m| m.contains(&method_name)) {
+                            let n = NestedName::from_dotted(vec![class.clone(), method_name.clone()]);
                             let m = mangle_member_function(&n, &[], &MangleType::Void);
                             self.out.push_str(&m);
                             self.out.push('(');
                             self.out.push('&');
-                            self.emit_expr(obj);
+                            self.emit_expr(obj_expr);
                             for a in args {
                                 self.out.push_str(", ");
                                 self.emit_expr(a);
@@ -1231,13 +1499,13 @@ impl Lower {
             CppExpr::Ref(e) => { self.out.push('&'); self.emit_expr(e); }
             CppExpr::AddrOf(e) => { self.out.push('&'); self.emit_expr(e); }
             CppExpr::Cast(ty, e) => {
-                self.out.push_str(&format!("({})", Self::mangle_to_c(ty)));
+                self.out.push_str(&format!("({})", self.mangle_to_c_ns(ty)));
                 self.emit_expr(e);
             }
             CppExpr::Sizeof(arg) => {
                 self.out.push_str("sizeof(");
                 match arg {
-                    SizeofArg::Type(t) => self.out.push_str(&Self::mangle_to_c(t)),
+                    SizeofArg::Type(t) => self.out.push_str(&self.mangle_to_c_ns(t)),
                     SizeofArg::Expr(x) => self.emit_expr(x),
                 }
                 self.out.push(')');
@@ -1255,7 +1523,7 @@ impl Lower {
             // M17.0: 静态 typeid(T) -> &_ZTI<T>
             CppExpr::TypeidType(ty) => {
                 let cname = if let MangleType::Class(n) = ty { n.clone() }
-                            else { Self::mangle_to_c(ty) };
+                            else { self.mangle_to_c_ns(ty) };
                 self.out.push_str(&format!("(&__dcc_ti_{})", cname));
             }
             CppExpr::DynamicCast { ty, expr } => {
@@ -1263,23 +1531,23 @@ impl Lower {
                 // Itanium C++ ABI: __cxa_* 跨虚继承通过 vtable RTTI 查找
                 // 简化为调用 __dynamic_cast helper
                 self.out.push_str("((");
-                self.out.push_str(&Self::mangle_to_c(ty));
+                self.out.push_str(&self.mangle_to_c_ns(ty));
                 self.out.push_str(")__dynamic_cast((void*)(");
                 self.emit_expr(expr);
                 self.out.push_str("), 0, 0, -1))");
             }
             CppExpr::StaticCast { ty, expr } => {
-                self.out.push_str(&format!("(({})(", Self::mangle_to_c(ty)));
+                self.out.push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
             }
             CppExpr::ConstCast { ty, expr } => {
-                self.out.push_str(&format!("(({})(", Self::mangle_to_c(ty)));
+                self.out.push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
             }
             CppExpr::ReinterpretCast { ty, expr } => {
-                self.out.push_str(&format!("(({})(", Self::mangle_to_c(ty)));
+                self.out.push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
             }
@@ -1365,6 +1633,18 @@ impl Lower {
             CppExpr::Noexcept(_) => {
                 self.out.push_str("1");
             }
+            // M18.0: C++23 多维下标 `obj[i, j, k]` 改写为
+            // `__dcc_multi_index_N(obj, i, j, k)` C 辅助函数
+            // (N = 2..4, 真实实现在 dccpp_runtime.c)
+            CppExpr::MultiIndex(obj, indices) => {
+                self.out.push_str(&format!("__dcc_multi_index_{}(", indices.len()));
+                self.emit_expr(obj);
+                for i in indices {
+                    self.out.push_str(", ");
+                    self.emit_expr(i);
+                }
+                self.out.push(')');
+            }
         }
     }
 
@@ -1386,7 +1666,7 @@ impl Lower {
             }
             // 形参
             for (n, t) in &lam.params {
-                self.out.push_str(&format!("    {} {};\n", Self::mangle_to_c(t), n));
+                self.out.push_str(&format!("    {} {};\n", self.mangle_to_c_ns(t), n));
             }
             self.out.push_str("};\n");
             // operator() 静态函数
@@ -1395,7 +1675,7 @@ impl Lower {
             // 形参: this 闭包 + 显式形参
             self.out.push_str(&format!("    struct {}* __closure", lam.closure_name));
             for (n, t) in &lam.params {
-                self.out.push_str(&format!(", {} {}", Self::mangle_to_c(t), n));
+                self.out.push_str(&format!(", {} {}", self.mangle_to_c_ns(t), n));
             }
             self.out.push_str(") {\n");
             for s in &lam.body.stmts { self.emit_stmt(s); }
@@ -1437,13 +1717,16 @@ mod tests {
 
     #[test]
     fn lower_namespace() {
+        // M18.0: 命名空间内的类名降级时会被 qualify_name 限定 (std::vector -> std_vector)
         let src = b"namespace std { class vector { public: int x; }; }";
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().unwrap();
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(s.contains("struct vector"), "{}", s);
+        assert!(s.contains("struct std_vector"), "{}", s);
+        // 同时还应有 typedef 别名 `vector` (M18.0: 内联类方便上层用短名)
+        assert!(s.contains("typedef struct std_vector vector;"), "{}", s);
     }
 
     #[test]
@@ -1556,14 +1839,17 @@ mod tests {
     #[test]
     fn lower_full_program_namespace_class_inherit() {
         // 综合: namespace + class + 继承 + 运算符 + lambda + 模板
+        // M18.0: 命名空间类会输出 qualified name (std_complex) + typedef alias (complex)
         let src = b"namespace std { class complex { public: int re, im; complex(int r, int i); complex operator+(complex const& o); }; }";
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().unwrap();
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(s.contains("struct complex"), "{}", s);
-        assert!(s.contains("std_complex"), "{}", s);
+        // struct 本身用 qualified name
+        assert!(s.contains("struct std_complex"), "{}", s);
+        // typedef alias 让 unqualified 名也可用
+        assert!(s.contains("typedef struct std_complex complex;"), "{}", s);
     }
 
     #[test]

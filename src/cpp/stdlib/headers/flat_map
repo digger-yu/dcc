@@ -1,0 +1,74 @@
+// <flat_map> - dcc++ C++ 标准库 (C++23, M18)
+//
+// std::flat_map<K, V> 简化版. 元素按字节存, K 比较回调.
+// 排序数组 + 二分查找. flat_map 比 std::map 缓存友好.
+
+extern "C" {
+    struct dccpp_flat_map;
+    dccpp_flat_map* dccpp_flat_map_new(size_t ks, size_t vs,
+                                       int (*kc)(const void*, const void*),
+                                       void (*kd)(void*),
+                                       void (*vd)(void*));
+    void            dccpp_flat_map_free(dccpp_flat_map* m);
+    size_t          dccpp_flat_map_size(const dccpp_flat_map* m);
+    int             dccpp_flat_map_empty(const dccpp_flat_map* m);
+    int             dccpp_flat_map_contains(const dccpp_flat_map* m,
+                                            const void* key);
+    void*           dccpp_flat_map_get(const dccpp_flat_map* m,
+                                       const void* key);
+    void            dccpp_flat_map_insert(dccpp_flat_map* m, void* key, void* val);
+    int             dccpp_flat_map_erase(dccpp_flat_map* m, const void* key);
+    void            dccpp_flat_map_clear(dccpp_flat_map* m);
+    const void*     dccpp_flat_map_key_at(const dccpp_flat_map* m, size_t i);
+    const void*     dccpp_flat_map_val_at(const dccpp_flat_map* m, size_t i);
+}
+
+namespace std {
+    /* flat_map<int, int> - 用 int cmp callback.
+       M18.0: 简化 ctor init, 不用 Class::cmp 引用 (dcc++ 解析
+       Class::member 在 ctor init 内有歧义). 改为 nullptr. */
+    int dccpp_flat_map_ii_cmp(const void* a, const void* b);
+
+    class flat_map_ii {
+    public:
+        flat_map_ii() : p_(dccpp_flat_map_new(sizeof(int), sizeof(int),
+                                              dccpp_flat_map_ii_cmp,
+                                              0, 0)) {}
+        ~flat_map_ii() { dccpp_flat_map_free(p_); }
+        flat_map_ii(const flat_map_ii&) = 0;
+        flat_map_ii& operator=(const flat_map_ii&) = 0;
+
+        size_t size() const  { return dccpp_flat_map_size(p_); }
+        int    empty() const { return dccpp_flat_map_empty(p_); }
+        int    contains(int k) const {
+            return dccpp_flat_map_contains(p_, &k);
+        }
+        int at(int k) const {
+            void* v = dccpp_flat_map_get(p_, &k);
+            int r = 0;
+            if (v) { memcpy(&r, v, sizeof(int)); }
+            return r;
+        }
+        void insert(int k, int v) {
+            dccpp_flat_map_insert(p_, &k, &v);
+        }
+        int erase(int k) { return dccpp_flat_map_erase(p_, &k); }
+        void clear() { dccpp_flat_map_clear(p_); }
+
+        int key_at(size_t i) const {
+            const void* k = dccpp_flat_map_key_at(p_, i);
+            int r = 0; if (k) memcpy(&r, k, sizeof(int));
+            return r;
+        }
+        int val_at(size_t i) const {
+            const void* v = dccpp_flat_map_val_at(p_, i);
+            int r = 0; if (v) memcpy(&r, v, sizeof(int));
+            return r;
+        }
+
+        dccpp_flat_map* raw() { return p_; }
+
+    private:
+        dccpp_flat_map* p_;
+    };
+}

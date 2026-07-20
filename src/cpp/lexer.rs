@@ -223,6 +223,16 @@ impl<'a> CppLexer<'a> {
 
     /// 跳过空白 / 注释 (C 风格 // 与 /* */)
     fn skip_trivia(&mut self) {
+        // 一次性吃掉文件起始的 UTF-8 BOM (EF BB BF), C++ 标准视为
+        // 行首无字符, 等价于无 BOM.
+        if self.pos == 0
+            && self.src.len() >= 3
+            && self.src[0] == 0xEF
+            && self.src[1] == 0xBB
+            && self.src[2] == 0xBF
+        {
+            self.pos = 3;
+        }
         loop {
             while self.pos < self.src.len() {
                 let b = self.src[self.pos];
@@ -231,7 +241,9 @@ impl<'a> CppLexer<'a> {
                 else { break; }
             }
             if self.pos + 1 < self.src.len() && &self.src[self.pos..self.pos+2] == b"//" {
-                while self.pos < self.src.len() && self.src[self.pos] != b'\n' { self.pos += 1; }
+                while self.pos < self.src.len() && self.src[self.pos] != b'\n' {
+                    self.pos += 1; self.col += 1;
+                }
                 continue;
             }
             if self.pos + 1 < self.src.len() && &self.src[self.pos..self.pos+2] == b"/*" {
@@ -240,9 +252,10 @@ impl<'a> CppLexer<'a> {
                     && &self.src[self.pos..self.pos+2] != b"*/"
                 {
                     if self.src[self.pos] == b'\n' { self.line += 1; self.col = 1; }
+                    else { self.col += 1; }
                     self.pos += 1;
                 }
-                if self.pos + 1 < self.src.len() { self.pos += 2; }
+                if self.pos + 1 < self.src.len() { self.pos += 2; self.col += 2; }
                 continue;
             }
             break;

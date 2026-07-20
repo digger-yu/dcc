@@ -1,6 +1,6 @@
 # DCC Linux 6.6 缺失特性（按自动化证据）
 
-> 最后更新：2026-07-19 — 以 `scripts/sync_remote_build.sh`、
+> 最后更新：2026-07-20 — 以 `scripts/sync_remote_build.sh`、
 > `scripts/kernel_full_check.sh`、`scripts/prepare0_check.sh`、
 > `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh`、
 > `scripts/modpost_link.sh`、`scripts/vmlinux_regress.sh`、
@@ -156,6 +156,7 @@
 | C 前端补洞 const_eval 完整化 (M15) | ✅ | `ConstValue` 枚举（`Int/Float/Str/Addr/Bytes`）；`eval_full` 返回完整常量值，旧 `eval` 仅取整数部分；浮点 + - * / 与 `Int<->Float` 混合算术；比较提升到 f64；字符串字面量走 FNV-1a 64-bit 标签 + 字节内容；`&ident` / `&arr[i]` / `&&label` → `Addr { name, offset }`；新增 `__builtin_strlen/abs/labs/llabs/bswap16/32/64/expect/popcount*` 编译期折叠；`Cast` 阶段新增 `-Wint-truncation` / `-Wint-conversion` 严格类型 warning（不阻塞） |
 | C 前端补洞 运行时检查 (M15) | ✅ | `-fbounds-check` 数组下标运行时边界检查：仅对 `ArraySize::Const(n)` 的数组插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds`；`-ftrapv` 有符号算术溢出 trap：binop 之后置 `jo` 跳到 `__dcc_trapv_overflow` 桩函数（覆盖 `Add/Sub/Mul/Div`） |
 | C++ 修饰符与类型推导真实化 (M17) | ✅ | 14 + 2 = 16 个 `tests/fixtures/m17_*.cpp` 全部通过: `auto` 真类型推导 (int/const char*/class) / `decltype(expr)` + `decltype(auto)` 解析 / `friend` 走 FreeFn 路径 (无 this 形参) / `using Base::Base;` 类内合法 (复用 InheritingCtor 节点) / `noexcept` → `__attribute__((nothrow))` / `final`/`override` 解析层接受 / `mutable`/`volatile` 成员函数标记 / `explicit` ctor 接受 / `new T[n]` 数组分配 + `_Znam`/`_ZdaPv` extern 替身 / `placement new` 转发 (void*)ptr / `if constexpr` 编译期分支 / 16/16 m17_* 集成测试 PASS |
+| C++ 标准库扩展 (M18) | ✅ | 11 个 `tests/fixtures/m18_*.cpp` 全部通过: `<chrono>` (duration / time_point / 三种 clock 走 `clock_gettime`); `<thread>` `<mutex>` `<condition_variable>` 包装 pthread; `<filesystem>` (path / file_type / directory_iterator); `<expected>` C++23 (expected_int / expected_str 擦除模板); `<flat_map>` C++23 (int→int 二分查找); C++23 多维下标 `obj[i,j,k]` → `__dcc_multi_index_N`; `<regex>` 简化版 (回溯 NFA 解释器支持 `.`/`[]`/`[^]`/`*`/`+`/`?`/`|`/`()`/`^`/`$`); `<ranges>` 简化版 (filter/transform/take/reverse view); Concepts 语法层 (SFINAE 简化版); Modules 占位 (src/cpp/modules.rs) |
 | C 前端补洞 `_Pragma` 操作符 (M11.1) | ✅ | C99 `_Pragma("string")` 在 preproc 展开阶段累积到 `pending_pragmas: RefCell<Vec<String>>`，源块刷新时批量应用到 `process_directive` |
 | C 前端补洞 `_Pragma` 操作符 (M14) | ✅ | `_Pragma` 与 `#pragma` 共享同一条 `process_directive` 通路，自动具备 pack/weak/STDC/GCC diagnostic 处理 |
 | C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
