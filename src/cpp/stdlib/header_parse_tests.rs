@@ -46,6 +46,18 @@ fn header_cstdio_parses() {
 }
 
 #[test]
+fn parse_relational_lt_not_template() {
+    // 回归: `av < bv` 曾被误判为模板实参而无限循环
+    let src = b"namespace std { class string { int operator<(const string& o) const {
+        const char* a = 0; const char* b = 0;
+        while (*a && *b && *a == *b) { a++; b++; }
+        int av = *a; int bv = *b; return av < bv;
+    } }; }";
+    let mut p = CppParser::new(src, "string");
+    p.parse_top_level().expect("relational lt should parse");
+}
+
+#[test]
 fn header_string_parses() {
     let src = std::fs::read_to_string("src/cpp/stdlib/headers/string")
         .expect("read string");

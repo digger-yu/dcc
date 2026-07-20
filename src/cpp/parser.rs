@@ -526,6 +526,37 @@ impl<'a> CppParser<'a> {
         result
     }
 
+    /// `<` 在 ident 后是否像模板实参 `T<U>` 而非比较 `a < b`.
+    /// 向前扫描: 若在 depth==1 遇到 `;` `,` `)` 仍未闭合 `>`, 视为比较运算符.
+    fn looks_like_template_args_after_lt(&self) -> bool {
+        let mut depth: i32 = 1;
+        let mut i = 1usize; // self.peek 已是 `<`
+        loop {
+            match self.peek_token_at(i) {
+                None => return false,
+                Some(CppTok::C(Tok { kind: TokKind::Lt, .. })) => {
+                    depth += 1;
+                    i += 1;
+                }
+                Some(CppTok::C(Tok { kind: TokKind::Gt, .. })) => {
+                    depth -= 1;
+                    if depth == 0 { return true; }
+                    i += 1;
+                }
+                Some(CppTok::C(Tok { kind: TokKind::Shr, .. })) => {
+                    depth -= 1;
+                    if depth == 0 { return true; }
+                    i += 1;
+                }
+                Some(CppTok::C(Tok { kind: TokKind::Semi
+                    | TokKind::Comma | TokKind::RParen, .. })) if depth == 1 => {
+                    return false;
+                }
+                _ => { i += 1; }
+            }
+        }
+    }
+
     /// 顶层解析
     pub fn parse_top_level(&mut self) -> Result<Vec<CppDecl>, CppParseError> {
         let mut decls = vec![];
@@ -692,6 +723,7 @@ impl<'a> CppParser<'a> {
                 && matches!(self.peek_token_at(name_pos + 1),
                     Some(CppTok::C(Tok { kind: TokKind::LParen, .. })));
             if is_fn { return self.parse_free_fn(); }
+            if self.is_operator_fn_start() { return self.parse_operator_fn(); }
         }
         Err(CppParseError::Unsupported("declaration form", self.span()))
     }
@@ -1514,39 +1546,52 @@ impl<'a> CppParser<'a> {
     /// 判断当前位置是否是 `Type operator ... (...)`
     /// 形式: `T operator+(...)`, `T operator()(...)`, `operator()(...)` (无返回类型)
     fn is_operator_fn_start(&self) -> bool {
-        // 形式 A: ident operator...  (例: path operator/(...))
-        //   - 若 +1 是 operator, 则 ident 必为返回类型 (类外 Class::operator 需 `::`)
-        if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = &self.peek {
-            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(1) {
+        let mut j = 0;
+        while matches!(self.peek_token_at(j),
+            Some(CppTok::Kw(CppKw::Inline | CppKw::Static
+                | CppKw::Virtual | CppKw::Explicit, _)))
+        {
+            j += 1;
+        }
+        self.is_operator_fn_start_at(j)
+    }
+
+    fn is_operator_fn_start_at(&self, j: usize) -> bool {
+        // 形式 A: ident operator...  (例: string operator+(...))
+        if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = self.peek_token_at(j) {
+            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(j + 1) {
                 return true;
             }
             // M18.0: `Class& operator...` / `Class* operator...` 也算
-            if matches!(self.peek_token_at(1),
+            if matches!(self.peek_token_at(j + 1),
                 Some(CppTok::C(Tok { kind: TokKind::Amp | TokKind::Star, .. })))
             {
-                if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = self.peek_token_at(2) {
-                    if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(3) {
+                if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = self.peek_token_at(j + 2) {
+                    if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(j + 3) {
                         return true;
                     }
                 }
             }
         }
-        // 形式 B: type-kw operator...  (例: int operator==(...), ostream& operator<<(...))
-        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwConst | TokKind::KwVolatile, .. }))) {
-            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(2) {
+        // 形式 B: type-kw operator...  (例: int operator==(...))
+        if matches!(self.peek_token_at(j),
+            Some(CppTok::C(Tok { kind: TokKind::KwConst | TokKind::KwVolatile, .. })))
+        {
+            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(j + 2) {
                 return true;
             }
         }
-        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::KwInt
-            | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
-            | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
-            | TokKind::KwSigned | TokKind::KwUnsigned
-            | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
-            | TokKind::KwInline | TokKind::KwBool
-            | TokKind::KwAuto | TokKind::KwAtomic
-            | TokKind::KwRestrict, .. })))
+        if matches!(self.peek_token_at(j),
+            Some(CppTok::C(Tok { kind: TokKind::KwInt
+                | TokKind::KwChar | TokKind::KwShort | TokKind::KwLong
+                | TokKind::KwVoid | TokKind::KwFloat | TokKind::KwDouble
+                | TokKind::KwSigned | TokKind::KwUnsigned
+                | TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum
+                | TokKind::KwInline | TokKind::KwBool
+                | TokKind::KwAuto | TokKind::KwAtomic
+                | TokKind::KwRestrict, .. })))
         {
-            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(1) {
+            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(j + 1) {
                 return true;
             }
         }
@@ -1555,6 +1600,15 @@ impl<'a> CppParser<'a> {
 
     /// 解析运算符重载函数
     fn parse_operator_fn(&mut self) -> Result<CppDecl, CppParseError> {
+        // 跳过 inline/static 等说明符 (例: `inline string operator+`)
+        loop {
+            let is_spec = match &self.peek {
+                Some(CppTok::Kw(CppKw::Inline | CppKw::Static
+                    | CppKw::Virtual | CppKw::Explicit, _)) => true,
+                _ => false,
+            };
+            if is_spec { self.bump(); } else { break; }
+        }
         // 形式 1: Type Class::operator+(...)  (类外定义)
         // 形式 2: Class::operator+(...)        (返回类型被略)
         // 形式 3: Type operator+(...)          (全局)
@@ -3022,8 +3076,10 @@ impl<'a> CppParser<'a> {
             }
             let name = text.clone();
             self.bump();
-            // 模板实例化: Name<...>
-            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. }))) {
+            // 模板实例化: Name<...> (须与比较 a < b 区分)
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. })))
+                && self.looks_like_template_args_after_lt()
+            {
                 // 仅识别并跳过类型实参 (lower 阶段处理实际实例化)
                 self.bump();
                 let mut depth: i32 = 1;
@@ -3032,6 +3088,7 @@ impl<'a> CppParser<'a> {
                         Some(CppTok::C(Tok { kind: TokKind::Lt, .. })) => depth += 1,
                         Some(CppTok::C(Tok { kind: TokKind::Gt, .. })) => depth -= 1,
                         Some(CppTok::C(Tok { kind: TokKind::Shr, .. })) => depth -= 1,
+                        None => break,
                         _ => {}
                     }
                 }
