@@ -3179,6 +3179,129 @@ impl<'a> Parser<'a> {
                             e = Expr::Offsetof { ty: base_ty, member, span: sp.clone(), result_ty: int_t() };
                             continue;
                         }
+                        // __builtin_strlen(s): 字符串字面量编译期求值
+                        // 只对 String 字面量做折叠; 其它情况正常 Call
+                        if name.name == "__builtin_strlen" {
+                            let saved = self.cur.clone();
+                            if self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                if let TokKind::StringLit = self.cur.kind {
+                                    let mut data = parse_str(&self.cur.text);
+                                    self.advance();
+                                    while self.cur.kind == TokKind::StringLit {
+                                        let more = parse_str(&self.cur.text);
+                                        data.extend(more);
+                                        self.advance();
+                                    }
+                                    if self.expect(TokKind::RParen, "')'") {
+                                        // 排除末尾 '\0'
+                                        let len = if data.last() == Some(&0) {
+                                            data.len() - 1
+                                        } else {
+                                            data.len()
+                                        };
+                                        e = Expr::Int { v: len as i128, span: sp.clone(), ty: int_t() };
+                                        continue;
+                                    }
+                                }
+                                // 回退
+                                self.cur = saved.clone();
+                            }
+                        }
+                        // __builtin_abs/__builtin_labs/__builtin_llabs:
+                        // 整型字面量编译期求值
+                        if matches!(name.name.as_str(),
+                            "__builtin_abs" | "__builtin_labs" | "__builtin_llabs")
+                        {
+                            let saved = self.cur.clone();
+                            if self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                if let TokKind::Number = self.cur.kind {
+                                    let lit = self.cur.text.clone();
+                                    self.advance();
+                                    if self.expect(TokKind::RParen, "')'") {
+                                        if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
+                                            let r = v.wrapping_abs();
+                                            e = Expr::Int { v: r as i128, span: sp.clone(), ty: int_t() };
+                                            continue;
+                                        }
+                                    }
+                                }
+                                self.cur = saved.clone();
+                            }
+                        }
+                        // __builtin_bswap16/32/64: 字节序反转 (编译期)
+                        if matches!(name.name.as_str(),
+                            "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64")
+                        {
+                            let saved = self.cur.clone();
+                            if self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                if let TokKind::Number = self.cur.kind {
+                                    let lit = self.cur.text.clone();
+                                    self.advance();
+                                    if self.expect(TokKind::RParen, "')'") {
+                                        if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
+                                            let bits: u64 = v as u64;
+                                            let result = match name.name.as_str() {
+                                                "__builtin_bswap16" => (bits & 0xffff).swap_bytes() as i128,
+                                                "__builtin_bswap32" => (bits as u32).swap_bytes() as i128,
+                                                _ => bits.swap_bytes() as i128,
+                                            };
+                                            e = Expr::Int { v: result, span: sp.clone(), ty: int_t() };
+                                            continue;
+                                        }
+                                    }
+                                }
+                                self.cur = saved.clone();
+                            }
+                        }
+                        // __builtin_expect(cond, expect): 提示分支预测
+                        // 编译期折叠为 cond 的值
+                        if name.name == "__builtin_expect" {
+                            let saved = self.cur.clone();
+                            if self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                if let TokKind::Number = self.cur.kind {
+                                    let lit = self.cur.text.clone();
+                                    self.advance();
+                                    let _ = self.cur.clone();
+                                    if self.cur.kind == TokKind::Comma { self.advance(); }
+                                    // 跳过 expect 表达式 (简单形式: 标识符或数字)
+                                    while self.cur.kind != TokKind::RParen && self.cur.kind != TokKind::Eof {
+                                        self.advance();
+                                    }
+                                    if self.expect(TokKind::RParen, "')'") {
+                                        if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
+                                            e = Expr::Int { v, span: sp.clone(), ty: int_t() };
+                                            continue;
+                                        }
+                                    }
+                                }
+                                self.cur = saved.clone();
+                            }
+                        }
+                        // __builtin_popcount / __builtin_popcountl / __builtin_popcountll
+                        if matches!(name.name.as_str(),
+                            "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll")
+                        {
+                            let saved = self.cur.clone();
+                            if self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                if let TokKind::Number = self.cur.kind {
+                                    let lit = self.cur.text.clone();
+                                    self.advance();
+                                    if self.expect(TokKind::RParen, "')'") {
+                                        if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
+                                            let n = if v >= 0 { v as u64 } else { !v as u64 };
+                                            e = Expr::Int { v: n.count_ones() as i128, span: sp.clone(), ty: int_t() };
+                                            continue;
+                                        }
+                                    }
+                                }
+                                self.cur = saved.clone();
+                            }
+                        }
                     }
                     let mut args = vec![];
                     if self.cur.kind != TokKind::RParen { loop { args.push(self.parse_expr_bp(2)?); if self.cur.kind == TokKind::Comma { self.advance(); continue; } break; } }
