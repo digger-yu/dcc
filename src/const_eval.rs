@@ -11,79 +11,279 @@ pub enum ConstEvalError {
     DivisionByZero,
     InvalidShift(i128),
     Overflow,
+    /// 整型截断 (例如 `(char)0x100`): 编译期已知但可被诊断
+    IntegerTruncation,
+    /// 隐式指针/整数类型转换
+    PointerConversion,
 }
 
 pub type ConstEvalResult = Result<i128, ConstEvalError>;
 
+/// 完整的编译期常量值: 除整数外还支持浮点、字符串字面量、地址、
+/// 字节数组 (`#embed`)。`eval_full` 返回该枚举; 旧 `eval` 仍仅取
+/// 整数部分以保持 parser/IR 既有调用点不破坏。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstValue {
+    /// 整型常量 (含枚举/字符)
+    Int(i128),
+    /// 浮点常量 (f32 / f64 / long double 都存为 f64 表示)
+    Float(f64),
+    /// 字符串字面量: 字节内容 + 唯一标签 (供 codegen 写入 rodata)
+    Str  { data: Vec<u8>, label: String },
+    /// 静态对象的地址: 符号名 + 字节偏移
+    Addr { name: String, offset: i128 },
+    /// `#embed` 字节数组: 字节内容 + 标签
+    Bytes { data: Vec<u8>, label: String },
+}
+
+impl ConstValue {
+    /// 转为整数 (仅在确实是整数或可截断为整数时返回)
+    pub fn as_int(&self) -> Option<i128> {
+        match self {
+            ConstValue::Int(v) => Some(*v),
+            ConstValue::Float(f) => Some(*f as i128),
+            _ => None,
+        }
+    }
+    /// 转为浮点 (仅在确实是浮点时)
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            ConstValue::Float(f) => Some(*f),
+            ConstValue::Int(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+}
+
 pub fn eval(expr: &Expr) -> ConstEvalResult {
+    // 旧 API: 永远返回整数; 浮点截断, 其他返回 NotConstant
+    match eval_full(expr) {
+        Ok(ConstValue::Int(v)) => Ok(v),
+        Ok(ConstValue::Float(f)) => Ok(f as i128),
+        Ok(_) => Err(ConstEvalError::NotConstant),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
     match expr {
-        Expr::Int { v, .. } => Ok(*v),
-        Expr::Char { v, .. } => Ok(*v as i128),
-        Expr::SizeofTy { ty, .. } => Ok(ty.size() as i128),
-        Expr::SizeofExpr { e, .. } => Ok(e.ty().size() as i128),
-        Expr::AlignofTy { ty, .. } => Ok(ty.align() as i128),
-        Expr::AlignofExpr { e, .. } => Ok(e.ty().align() as i128),
+        Expr::Int { v, .. } => Ok(ConstValue::Int(*v)),
+        Expr::Char { v, .. } => Ok(ConstValue::Int(*v as i128)),
+        Expr::Float { v, .. } => Ok(ConstValue::Float(*v)),
+        Expr::String { data, .. } => {
+            // 字符串字面量: 编译器生成的 label 与 codegen 中的 rodata 标签对齐
+            // 调用方需要确保同源字符串复用同一 label
+            let label = format!(".L.str.const.{}", const_str_id(data));
+            Ok(ConstValue::Str { data: data.clone(), label })
+        }
+        Expr::AddrOf { e, .. } => match e.as_ref() {
+            Expr::Ident { name, .. } => Ok(ConstValue::Addr {
+                name: name.name.clone(),
+                offset: 0,
+            }),
+            Expr::Index { arr, idx, .. } => {
+                let arr_name = match arr.as_ref() {
+                    Expr::Ident { name, .. } => name.name.clone(),
+                    _ => return Err(ConstEvalError::NotConstant),
+                };
+                let off = eval(idx)?; // 索引必须是编译期整数
+                Ok(ConstValue::Addr { name: arr_name, offset: off })
+            }
+            _ => Err(ConstEvalError::NotConstant),
+        },
+        Expr::LabelAddr { label, .. } => Ok(ConstValue::Addr {
+            name: label.name.clone(),
+            offset: 0,
+        }),
+        Expr::SizeofTy { ty, .. } => Ok(ConstValue::Int(ty.size() as i128)),
+        Expr::SizeofExpr { e, .. } => Ok(ConstValue::Int(e.ty().size() as i128)),
+        Expr::AlignofTy { ty, .. } => Ok(ConstValue::Int(ty.align() as i128)),
+        Expr::AlignofExpr { e, .. } => Ok(ConstValue::Int(e.ty().align() as i128)),
         Expr::Unary { op, e, .. } => {
-            let v = eval(e)?;
+            let v = eval_full(e)?;
             match op {
-                UnOp::Neg => v.checked_neg().ok_or(ConstEvalError::Overflow),
-                UnOp::Not => Ok((v == 0) as i128),
-                UnOp::BitNot => Ok(!v),
+                UnOp::Neg => match v {
+                    ConstValue::Int(i) => i.checked_neg()
+                        .map(ConstValue::Int)
+                        .ok_or(ConstEvalError::Overflow),
+                    ConstValue::Float(f) => Ok(ConstValue::Float(-f)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                UnOp::Not => match v {
+                    ConstValue::Int(i) => Ok(ConstValue::Int((i == 0) as i128)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                UnOp::BitNot => match v {
+                    ConstValue::Int(i) => Ok(ConstValue::Int(!i)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
                 UnOp::Plus => Ok(v),
             }
         }
         Expr::Binop { op, l, r, .. } => {
+            // && / || 用整数语义, 不要求两边都是常量
             if matches!(op, BinOp::AndAnd) {
                 let lv = eval(l)?;
-                return if lv == 0 { Ok(0) } else { Ok((eval(r)? != 0) as i128) };
+                return if lv == 0 { Ok(ConstValue::Int(0)) }
+                       else { Ok(ConstValue::Int((eval(r)? != 0) as i128)) };
             }
             if matches!(op, BinOp::OrOr) {
                 let lv = eval(l)?;
-                return if lv != 0 { Ok(1) } else { Ok((eval(r)? != 0) as i128) };
+                return if lv != 0 { Ok(ConstValue::Int(1)) }
+                       else { Ok(ConstValue::Int((eval(r)? != 0) as i128)) };
             }
-            let lv = eval(l)?;
-            let rv = eval(r)?;
+            let lv = eval_full(l)?;
+            let rv = eval_full(r)?;
             match op {
-                BinOp::Add => Ok(lv.wrapping_add(rv)),
-                BinOp::Sub => Ok(lv.wrapping_sub(rv)),
-                BinOp::Mul => Ok(lv.wrapping_mul(rv)),
-                BinOp::Div => {
-                    if rv == 0 { Err(ConstEvalError::DivisionByZero) }
-                    else { lv.checked_div(rv).ok_or(ConstEvalError::Overflow) }
+                // 算术运算
+                BinOp::Add => add_values(lv, rv),
+                BinOp::Sub => sub_values(lv, rv),
+                BinOp::Mul => mul_values(lv, rv),
+                BinOp::Div => div_values(lv, rv),
+                BinOp::Mod => mod_values(lv, rv),
+                BinOp::And => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a & b)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Or => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a | b)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Xor => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a ^ b)),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Shl | BinOp::Shr if !(0..128).contains(&rv.as_int().unwrap_or(-1)) => {
+                    Err(ConstEvalError::InvalidShift(rv.as_int().unwrap_or(0)))
                 }
-                BinOp::Mod => {
-                    if rv == 0 { Err(ConstEvalError::DivisionByZero) }
-                    else { lv.checked_rem(rv).ok_or(ConstEvalError::Overflow) }
-                }
-                BinOp::And => Ok(lv & rv),
-                BinOp::Or => Ok(lv | rv),
-                BinOp::Xor => Ok(lv ^ rv),
-                BinOp::Shl | BinOp::Shr if !(0..128).contains(&rv) => {
-                    Err(ConstEvalError::InvalidShift(rv))
-                }
-                BinOp::Shl => Ok(lv.wrapping_shl(rv as u32)),
-                BinOp::Shr => Ok(lv.wrapping_shr(rv as u32)),
-                BinOp::Lt => Ok((lv < rv) as i128),
-                BinOp::Gt => Ok((lv > rv) as i128),
-                BinOp::Le => Ok((lv <= rv) as i128),
-                BinOp::Ge => Ok((lv >= rv) as i128),
-                BinOp::EqEq => Ok((lv == rv) as i128),
-                BinOp::Ne => Ok((lv != rv) as i128),
+                BinOp::Shl => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_shl(b as u32))),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                BinOp::Shr => match (lv, rv) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_shr(b as u32))),
+                    _ => Err(ConstEvalError::NotConstant),
+                },
+                // 比较
+                BinOp::Lt => cmp_values(lv, rv, |a, b| (a < b) as i128),
+                BinOp::Gt => cmp_values(lv, rv, |a, b| (a > b) as i128),
+                BinOp::Le => cmp_values(lv, rv, |a, b| (a <= b) as i128),
+                BinOp::Ge => cmp_values(lv, rv, |a, b| (a >= b) as i128),
+                BinOp::EqEq => cmp_values(lv, rv, |a, b| (a == b) as i128),
+                BinOp::Ne => cmp_values(lv, rv, |a, b| (a != b) as i128),
                 BinOp::AndAnd | BinOp::OrOr => unreachable!(),
             }
         }
-        Expr::Cast { e, .. } => eval(e),
+        Expr::Cast { e, .. } => {
+            // 强制类型转换: 数值保留, 指针转换产生 NotConstant
+            let v = eval_full(e)?;
+            // 简化: 直接返回内部值, 让 codegen 处理位宽
+            Ok(v)
+        }
         Expr::Cond { cond, then_, else_, .. } => {
-            if eval(cond)? != 0 { eval(then_) } else { eval(else_) }
+            if eval(cond)? != 0 { eval_full(then_) } else { eval_full(else_) }
         }
         Expr::Comma { l, r, .. } => {
             eval(l)?;
-            eval(r)
+            eval_full(r)
         }
         Expr::Offsetof { ty, member, .. } => {
-            Ok(offsetof_member(ty, member) as i128)
+            Ok(ConstValue::Int(offsetof_member(ty, member) as i128))
+        }
+        // constexpr 函数调用在 parser 层不展开, 走 NotConstant
+        _ => Err(ConstEvalError::NotConstant),
+    }
+}
+
+fn add_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+    match (l, r) {
+        (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_add(b))),
+        (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a + b)),
+        (ConstValue::Int(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a as f64 + b)),
+        (ConstValue::Float(a), ConstValue::Int(b)) => Ok(ConstValue::Float(a + b as f64)),
+        _ => Err(ConstEvalError::NotConstant),
+    }
+}
+fn sub_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+    match (l, r) {
+        (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_sub(b))),
+        (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a - b)),
+        (ConstValue::Int(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a as f64 - b)),
+        (ConstValue::Float(a), ConstValue::Int(b)) => Ok(ConstValue::Float(a - b as f64)),
+        _ => Err(ConstEvalError::NotConstant),
+    }
+}
+fn mul_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+    match (l, r) {
+        (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_mul(b))),
+        (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a * b)),
+        (ConstValue::Int(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a as f64 * b)),
+        (ConstValue::Float(a), ConstValue::Int(b)) => Ok(ConstValue::Float(a * b as f64)),
+        _ => Err(ConstEvalError::NotConstant),
+    }
+}
+fn div_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+    match (l, r) {
+        (ConstValue::Int(_), ConstValue::Int(0)) => Err(ConstEvalError::DivisionByZero),
+        (ConstValue::Int(a), ConstValue::Int(b)) => a.checked_div(b)
+            .map(ConstValue::Int).ok_or(ConstEvalError::Overflow),
+        (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a / b)),
+        (ConstValue::Int(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a as f64 / b)),
+        (ConstValue::Float(a), ConstValue::Int(b)) => Ok(ConstValue::Float(a / b as f64)),
+        _ => Err(ConstEvalError::NotConstant),
+    }
+}
+fn mod_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
+    match (l, r) {
+        (ConstValue::Int(_), ConstValue::Int(0)) => Err(ConstEvalError::DivisionByZero),
+        (ConstValue::Int(a), ConstValue::Int(b)) => a.checked_rem(b)
+            .map(ConstValue::Int).ok_or(ConstEvalError::Overflow),
+        (ConstValue::Float(_), ConstValue::Float(_)) => {
+            // GCC 语义: a % b = a - trunc(a/b) * b, 但 C 中浮点取模不在我们范围
+            Err(ConstEvalError::NotConstant)
         }
         _ => Err(ConstEvalError::NotConstant),
+    }
+}
+fn cmp_values<F: Fn(f64, f64) -> i128>(l: ConstValue, r: ConstValue, f: F) -> Result<ConstValue, ConstEvalError> {
+    // 提升到 f64 比较; 整数/整数走 i128 -> f64 精确
+    let a = l.as_float().ok_or(ConstEvalError::NotConstant)?;
+    let b = r.as_float().ok_or(ConstEvalError::NotConstant)?;
+    Ok(ConstValue::Int(f(a, b)))
+}
+
+/// 字符串字面量稳定性 ID: 不直接哈希 (避免开销), 仅在 const_eval
+/// 内部使用, codegen 仍按需要 dedup。 实际 label 由 codegen
+/// 分配; const_eval 这里给的是 logical label。
+fn const_str_id(data: &[u8]) -> u64 {
+    // FNV-1a 64-bit
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 把词法器抓出来的整型字面量文本解析为 i128。
+/// 支持十进制 / 0x / 0X / 0b / 0B / 八进制, 后缀 u/l/ll/U/L 忽略。
+/// 仅用于 __builtin_* 折叠等需要从字面量文本构造常量的场景。
+pub fn eval_int_lit(s: &str) -> Option<i128> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u128::from_str_radix(rest, 16).ok().map(|v| v as i128)
+    } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        u128::from_str_radix(rest, 2).ok().map(|v| v as i128)
+    } else if s.starts_with("0") && s.len() > 1 {
+        u128::from_str_radix(&s[1..], 8).ok().map(|v| v as i128)
+    } else {
+        // 截去 u/l/L/ll/LL 后缀后转十进制
+        let mut t = s;
+        while let Some(rest) = t.strip_suffix(|c: char|
+            c == 'u' || c == 'U' || c == 'l' || c == 'L') {
+            t = rest;
+        }
+        t.parse::<i128>().ok()
     }
 }
 
@@ -355,5 +555,141 @@ mod tests {
         };
         assert_eq!(object_size(&buf, 0), Some(16));
         assert_eq!(object_size(&buf, 1), Some(1));
+    }
+
+    fn float(v: f64, ty: Type) -> Expr {
+        Expr::Float { v, span: Span::point("t.c", 1, 1), ty }
+    }
+
+    #[test]
+    fn float_arithmetic_eval() {
+        // 浮点 + 浮点
+        let a = bin_f(BinOp::Add, 1.5, 2.25, Type::Double, Type::Double);
+        assert_eq!(eval_full(&a), Ok(ConstValue::Float(3.75)));
+        // 浮点 * 浮点
+        let m = bin_f(BinOp::Mul, 2.0, 3.0, Type::Double, Type::Double);
+        assert_eq!(eval_full(&m), Ok(ConstValue::Float(6.0)));
+        // 浮点 / 0 返回有限 NaN/inf, 不报错 (符合 IEEE 754)
+        let d = bin_f(BinOp::Div, 1.0, 0.0, Type::Double, Type::Double);
+        assert!(matches!(eval_full(&d), Ok(ConstValue::Float(_))));
+    }
+
+    #[test]
+    fn float_comparison_eval() {
+        let a = bin_f(BinOp::Lt, 1.0, 2.0, Type::Double, Type::Double);
+        assert_eq!(eval_full(&a), Ok(ConstValue::Int(1)));
+        let b = bin_f(BinOp::Ge, 2.0, 2.0, Type::Double, Type::Double);
+        assert_eq!(eval_full(&b), Ok(ConstValue::Int(1)));
+    }
+
+    #[test]
+    fn int_float_mixed_eval() {
+        // 1.5 + 2 (整型) -> 3.5 浮点
+        let e = Expr::Binop {
+            op: BinOp::Add,
+            l: Box::new(float(1.5, Type::Double)),
+            r: Box::new(int(2)),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Double,
+        };
+        assert_eq!(eval_full(&e), Ok(ConstValue::Float(3.5)));
+    }
+
+    fn bin_f(op: BinOp, l: f64, r: f64, lt: Type, rt: Type) -> Expr {
+        Expr::Binop {
+            op,
+            l: Box::new(float(l, lt)),
+            r: Box::new(float(r, rt)),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Double,
+        }
+    }
+
+    #[test]
+    fn string_literal_eval_returns_str_value() {
+        let s = Expr::String {
+            data: b"hello\0".to_vec(),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Ptr(Box::new(Type::Char)),
+        };
+        match eval_full(&s) {
+            Ok(ConstValue::Str { data, label }) => {
+                assert_eq!(data, b"hello\0");
+                assert!(label.starts_with(".L.str.const."));
+            }
+            other => panic!("expected Str, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn address_of_ident_eval() {
+        let id = Expr::Ident {
+            name: crate::ast::Ident { name: "arr".into(), span: Span::point("t.c", 1, 1) },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Array(Box::new(Type::Int), ArraySize::Const(8)),
+        };
+        let addr = Expr::AddrOf {
+            e: Box::new(id),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Ptr(Box::new(Type::Int)),
+        };
+        match eval_full(&addr) {
+            Ok(ConstValue::Addr { name, offset }) => {
+                assert_eq!(name, "arr");
+                assert_eq!(offset, 0);
+            }
+            other => panic!("expected Addr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn address_of_index_eval() {
+        let arr = Expr::Ident {
+            name: crate::ast::Ident { name: "buf".into(), span: Span::point("t.c", 1, 1) },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Array(Box::new(Type::Char), ArraySize::Const(16)),
+        };
+        let idx = int(4);
+        let indexed = Expr::Index {
+            arr: Box::new(arr),
+            idx: Box::new(idx),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Char,
+        };
+        let addr = Expr::AddrOf {
+            e: Box::new(indexed),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Ptr(Box::new(Type::Char)),
+        };
+        match eval_full(&addr) {
+            Ok(ConstValue::Addr { name, offset }) => {
+                assert_eq!(name, "buf");
+                assert_eq!(offset, 4);
+            }
+            other => panic!("expected Addr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn label_address_eval() {
+        let e = Expr::LabelAddr {
+            label: crate::ast::Ident { name: "my_label".into(), span: Span::point("t.c", 1, 1) },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Void,
+        };
+        match eval_full(&e) {
+            Ok(ConstValue::Addr { name, offset }) => {
+                assert_eq!(name, "my_label");
+                assert_eq!(offset, 0);
+            }
+            other => panic!("expected Addr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn legacy_eval_truncates_float_to_int() {
+        let e = float(3.7, Type::Double);
+        // 旧 eval API: 浮点截断为整数 (3)
+        assert_eq!(eval(&e), Ok(3));
     }
 }

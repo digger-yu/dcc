@@ -82,6 +82,14 @@ pub struct Config {
     pub compress_debug: Option<String>,
     /// -flto-partition=N
     pub lto_partitions: Option<u32>,
+    /// -ftrapv: 有符号整型溢出时调用 abort
+    pub trapv: bool,
+    /// -fbounds-check / -fsanitize=bounds: 数组下标运行时边界检查
+    pub bounds_check: bool,
+    /// -Wint-conversion: 隐式整数↔指针转换警告
+    pub warn_int_conversion: bool,
+    /// -Wint-truncation: 整数截断警告
+    pub warn_int_truncation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +295,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut lto_partitions: Option<u32> = None;
     let mut gc_sections_root: Vec<String> = Vec::new();
     let mut link_libs: Vec<String> = Vec::new();
+    let mut trapv = false;
+    let mut bounds_check = false;
+    let mut warn_int_conversion = false;
+    let mut warn_int_truncation = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -505,6 +517,15 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-ffunction-sections" => function_sections = true,
             "-fno-function-sections" => no_function_sections = true,
             a if a.starts_with("-fsanitize") => {}
+            "-ftrapv" => trapv = true,
+            "-fno-trapv" => trapv = false,
+            "-fbounds-check" => bounds_check = true,
+            "-fbounds-safety" => bounds_check = true,
+            "-fno-bounds-check" => bounds_check = false,
+            "-Wint-conversion" => warn_int_conversion = true,
+            "-Wno-int-conversion" => warn_int_conversion = false,
+            "-Wint-truncation" => warn_int_truncation = true,
+            "-Wno-int-truncation" => warn_int_truncation = false,
             "-x" => {
                 i += 1;
                 let lang = args.get(i)
@@ -820,6 +841,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             gdb_index,
             compress_debug: compress_debug.clone(),
             lto_partitions,
+            trapv,
+            bounds_check,
+            warn_int_conversion,
+            warn_int_truncation,
         })
     } else {
         if inputs.is_empty() {
@@ -850,6 +875,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             gdb_index: false,
             compress_debug: None,
             lto_partitions: None,
+            trapv,
+            bounds_check,
+            warn_int_conversion,
+            warn_int_truncation,
         })
     }
 }
