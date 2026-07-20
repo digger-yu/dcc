@@ -2426,3 +2426,101 @@ fn exec_elf_has_symtab() {
     assert!(sym.contains(" g"), "symtab missing g: {sym}");
     let _ = fs::remove_file(&exe);
 }
+
+// ===== M15: const_eval / 严格类型检查 / 运行时检查 =====
+
+/// 浮点常量求值 (M15.1)
+#[test]
+#[cfg(unix)]
+fn m15_float_const_eval() {
+    let src = include_str!("fixtures/m15_float_const.c");
+    let (out, exe) = run_compile_and_run("m15-float-const", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// 字符串字面量求值 + 拼接 (M15.1)
+#[test]
+#[cfg(unix)]
+fn m15_string_literal_and_concat() {
+    let src = include_str!("fixtures/m15_string_const.c");
+    let (out, exe) = run_compile_and_run("m15-string-concat", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// 地址常量求值 (M15.1)
+#[test]
+#[cfg(unix)]
+fn m15_address_const() {
+    let src = include_str!("fixtures/m15_address_const.c");
+    let (out, exe) = run_compile_and_run("m15-addr-const", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// __builtin_* 编译期折叠 (strlen/abs/bswap)
+#[test]
+#[cfg(unix)]
+fn m15_builtin_fold() {
+    let src = include_str!("fixtures/m15_builtin_fold.c");
+    let (out, exe) = run_compile_and_run("m15-builtin-fold", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// 严格类型检查: 隐式指针/整数转换 warning (不阻塞)
+#[test]
+fn m15_strict_warning_compile() {
+    let src = include_str!("fixtures/m15_strict_warning.c");
+    let path = std::env::temp_dir().join(format!("dcc-m15-strict-{}.c", std::process::id()));
+    fs::write(&path, src).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-Wint-conversion", "-Wint-truncation", "-fsyntax-only"])
+        .arg(&path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&path);
+    assert!(output.status.success(), "strict-warn should not error: {}",
+            String::from_utf8_lossy(&output.stderr));
+}
+
+/// -fbounds-check 数组越界检测 (正常路径不触发, 仅编译 + 运行)
+#[test]
+#[cfg(unix)]
+fn m15_bounds_check_inrange() {
+    let src = include_str!("fixtures/m15_bounds_check.c");
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-m15-bounds-{pid}.c"));
+    let exe = dir.join(format!("dcc-m15-bounds-{pid}"));
+    fs::write(&sp, src).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fbounds-check", "-o"]).arg(&exe).arg(&sp)
+        .output().expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// C23 constexpr 函数声明 (解析通过, 运行结果正确)
+#[test]
+#[cfg(unix)]
+fn m15_constexpr_function() {
+    let src = include_str!("fixtures/m15_constexpr.c");
+    let (out, exe) = run_compile_and_run("m15-constexpr", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}

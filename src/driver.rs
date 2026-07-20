@@ -97,7 +97,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let (mut prog, mut diags) = parser::parse_with_opts(
         preprocessed.as_bytes(),
         &file_name,
-        parser::ParseOptions { permissive: cfg.permissive, pack_history: pack_history.clone(), weak_symbols: weak_symbols.clone() },
+        parser::ParseOptions { permissive: cfg.permissive, pack_history: pack_history.clone(), weak_symbols: weak_symbols.clone(), warn_int_truncation: cfg.warn_int_truncation, warn_int_conversion: cfg.warn_int_conversion },
     );
     drop(preprocessed);
     drop(pack_history);
@@ -198,7 +198,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let bytes = codegen::emit(
         &module, &target, cfg.relocatable, cfg.emit_asm, &file_name,
         cfg.debug_level, cfg.sanitizers, lto_enabled, function_sections,
-        cfg.parallel_codegen,
+        cfg.parallel_codegen, cfg.bounds_check, cfg.trapv,
     );
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());

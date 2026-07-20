@@ -95,6 +95,9 @@ pub struct Codegen {
     pub emit_asm_text: bool,
     pub debug_level: u8,
     pub emit_cfi: bool,
+    // 编译选项: 运行时检查 (-fbounds-check / -ftrapv)
+    pub bounds_check: bool,
+    pub trapv: bool,
     asm_directives: Vec<String>,
     asm_directives_at: Vec<(u64, String)>,
     disasm_calls: HashMap<u64, String>,
@@ -114,7 +117,7 @@ struct FuncAsmLayout {
 
 struct PendingJump { at: u64, target: String, kind: JumpKind }
 #[derive(PartialEq)]
-enum JumpKind { Jmp, Je, Jne, Jl, Jle, Jg, Jge, Jb, Ja, Jns }
+enum JumpKind { Jmp, Je, Jne, Jl, Jle, Jg, Jge, Jb, Ja, Jns, Jo }
 #[derive(Clone)]
 struct GlobalVar { offset: u64, size: usize, ty: Type, init: Option<Vec<u8>>, section: u16, is_tls: bool }
 
@@ -380,6 +383,7 @@ impl Codegen {
                data_relocations: vec![], cleanup_vars: vec![],
                extra_rela_sections: vec![],
                emit_asm_text: false, debug_level: 0, emit_cfi: false,
+               bounds_check: false, trapv: false,
                asm_directives: vec![], asm_directives_at: vec![],
                disasm_calls: HashMap::new(), disasm_data: HashMap::new(),
                global_asm_exports: HashSet::new(),
@@ -395,6 +399,12 @@ impl Codegen {
     pub fn emit(&mut self, b: &[u8]) { self.code.extend_from_slice(b); }
     fn needs_memory_return(ty: &Type) -> bool {
         Self::abi_classes(ty) == vec![AbiClass::Memory]
+    }
+
+    /// 判断是否为有符号整数类型 (用于 -ftrapv 等检查)
+    fn is_signed_int(ty: &Type) -> bool {
+        matches!(ty, Type::SChar | Type::Short | Type::Int | Type::Long
+            | Type::LongLong | Type::Int128)
     }
 
     fn alloc_sret_slot(&mut self, size: usize) -> i32 {
@@ -2692,6 +2702,25 @@ impl Codegen {
                     self.emit(&[0x48, 0x99]); // cqo (符号扩展 rax→rdx:rax)
                     self.emit(&[0x48, 0xf7, 0xf9]); // idiv rcx
                 }
+                // -ftrapv: 有符号算术溢出检查
+                // ADD/SUB/IMUL/IDIV 都会在有符号溢出时置 OF=1, jo 跳到 trap
+                if self.trapv {
+                    if Self::is_signed_int(&l.ty()) || Self::is_signed_int(&r.ty()) {
+                        if matches!(*op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                            let trap_label = self.fresh_label();
+                            let ok = self.fresh_label();
+                            // jo trap_label: 跳到 trap 若 OF=1
+                            self.jmp_rel32(&trap_label, JumpKind::Jo);
+                            // 未溢出: 跳过 trap 直接到 ok
+                            self.jmp_rel32(&ok, JumpKind::Jmp);
+                            self.label(&trap_label);
+                            self.emit(&[0xe8, 0, 0, 0, 0]); // call rel32
+                            let call_at = self.code.len() as u64 - 4;
+                            self.pending_func_rels.push((call_at, "__dcc_trapv_overflow".to_string()));
+                            self.label(&ok);
+                        }
+                    }
+                }
             }
             Expr::Assign { l, r, .. } => {
                 if let Expr::Ident { name, ty: l_ty, .. } = l.as_ref() {
@@ -3276,6 +3305,26 @@ impl Codegen {
                     if es != 1 {
                         self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
                         self.emit(&es.to_le_bytes());
+                    }
+                    // -fbounds-check: 数组下标运行时边界检查
+                    if self.bounds_check {
+                        if let Type::Array(_, crate::ast::ArraySize::Const(n)) = arr_ty {
+                            // 比较 rcx (idx*es) < n*es; 不在范围内调 __ubsan_handle_out_of_bounds
+                            let ok_label = self.fresh_label();
+                            let n_imm = (*n as i64) * (es as i64);
+                            if n_imm > 0 && n_imm < i32::MAX as i64 {
+                                self.emit(&[0x48, 0x81, 0xf9]); // cmp rcx, imm32
+                                self.emit(&(n_imm as i32).to_le_bytes());
+                                self.jmp_rel32(&ok_label, JumpKind::Jb);
+                                // out of bounds: 调用 __ubsan_handle_out_of_bounds
+                                self.emit(&[0x48, 0x89, 0xce]); // mov rsi, rcx (字节偏移)
+                                self.emit(&[0xe8, 0, 0, 0, 0]); // call rel32
+                                let call_at = self.code.len() as u64;
+                                self.pending_func_rels.push((call_at, "__ubsan_handle_out_of_bounds".to_string()));
+                                self.label(&ok_label);
+                            }
+                            // n_imm 溢出/0/未知大小: 跳过检查 (留待运行时)
+                        }
                     }
                     self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
                     self.emit_load_mem_typed(es as usize, elem_ty); // 按元素类型加载

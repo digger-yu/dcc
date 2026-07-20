@@ -24,6 +24,8 @@ pub fn emit(
     lto_enabled: bool,
     function_sections: bool,
     parallel_codegen: bool,
+    bounds_check: bool,
+    trapv: bool,
 ) -> Vec<u8> {
     match target.arch {
         crate::cli::Arch::X86_64 => {
@@ -35,6 +37,8 @@ pub fn emit(
             cg.source_name = source_name.to_string();
             cg.debug_level = debug_level;
             cg.emit_cfi = debug_level > 0 || target.frame_pointer;
+            cg.bounds_check = bounds_check;
+            cg.trapv = trapv;
             cg.compile(module);
             if emit_asm {
                 return cg.build_asm_output(module.source()).into_bytes();

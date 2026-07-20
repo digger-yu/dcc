@@ -47,6 +47,10 @@ pub struct ParseOptions {
     pub pack_history: Vec<(u32, Option<usize>)>,
     /// #pragma weak 记录的弱符号集合
     pub weak_symbols: std::collections::HashSet<String>,
+    /// `-Wint-truncation`: 整数截断警告
+    pub warn_int_truncation: bool,
+    /// `-Wint-conversion`: 整数↔指针隐式转换警告
+    pub warn_int_conversion: bool,
 }
 
 impl ParsedAttrs {
@@ -169,6 +173,55 @@ impl<'a> Parser<'a> {
             d.hint = Some(h.into());
         }
         self.diags.push(d);
+    }
+    /// 严格类型转换检查: 返回 Some(diag) 当出现以下情况:
+    ///   1. 整型截断 (例如 (char)0x100, 由 warn_int_truncation 控制)
+    ///   2. 整数 ↔ 指针隐式转换 (由 warn_int_conversion 控制)
+    /// 仅在显式 (type)expr 强制转换路径触发; 隐式 cast 走 IR。
+    fn check_strict_conversion(&self, from: &Type, to: &Type, sp: crate::diagnostics::Span) -> Option<Diagnostic> {
+        use crate::ast::Type::*;
+        let from_int_bits = match from {
+            Bool | Char | SChar | UChar => Some(8),
+            Short | UShort => Some(16),
+            Int | UInt | Enum(_, _) => Some(32),
+            Long | ULong => Some(64),
+            LongLong | ULongLong => Some(64),
+            Int128 | UInt128 => Some(128),
+            _ => None,
+        };
+        let to_int_bits = match to {
+            Bool | Char | SChar | UChar => Some(8),
+            Short | UShort => Some(16),
+            Int | UInt | Enum(_, _) => Some(32),
+            Long | ULong => Some(64),
+            LongLong | ULongLong => Some(64),
+            Int128 | UInt128 => Some(128),
+            _ => None,
+        };
+        // 整数截断: 仅当 const_eval 已可算 + 超出范围
+        if let (Some(from_b), Some(to_b)) = (from_int_bits, to_int_bits) {
+            if to_b < from_b && self.opts.warn_int_truncation {
+                // 看是否紧跟字面量
+                return Some(Diagnostic::warn(
+                    "W0301",
+                    format!("integer conversion from {} to {} bits may lose information",
+                            from_b, to_b),
+                    sp,
+                ));
+            }
+        }
+        // 整数 ↔ 指针转换
+        let from_is_ptr = matches!(from, Ptr(_) | Func(_, _));
+        let to_is_ptr = matches!(to, Ptr(_) | Func(_, _));
+        if from_is_ptr != to_is_ptr && self.opts.warn_int_conversion {
+            let dir = if from_is_ptr { "pointer to integer" } else { "integer to pointer" };
+            return Some(Diagnostic::warn(
+                "W0302",
+                format!("implicit conversion from {} (use an explicit cast if intended)", dir),
+                sp,
+            ));
+        }
+        None
     }
     /// 登记 typedef；GCC 允许兼容或整型别名的重复 typedef（宿主头文件常见）
     fn register_typedef(&mut self, name: &Ident, ty: Type) -> bool {
@@ -2909,6 +2962,11 @@ impl<'a> Parser<'a> {
                 }
                 if !self.expect(TokKind::RParen, "')'") { return None; }
                 let e = self.parse_unary()?;
+                // 严格类型检查: 整数截断 / 整数↔指针转换
+                let src_ty = e.ty();
+                if let Some(diag) = self.check_strict_conversion(&src_ty, &ty, sp.clone()) {
+                    self.diags.push(diag);
+                }
                 Some(Expr::Cast { ty, e: Box::new(e), span: sp })
             }
             // 函数指针强制转换: 当 is_cast() 未检测到时, 尝试解析 (type (*...))expr
