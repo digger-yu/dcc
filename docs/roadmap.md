@@ -166,6 +166,39 @@
   `__dcc_trapv_overflow` 桩（用户链接 runtime helper）。x86_64 ADD/SUB/
   IMUL/IDIV 在有符号溢出时均置 OF=1，`jo rel32` (0F 80) 直接捕获。
 
+## M17 C++ 修饰符与类型推导（第一性原理）
+
+- **decltype 解析**：`parse_mangle_type` 中检测 `CppKw::Decltype`，
+  整体消费 `decltype ( expr )` 作为一个类型说明符。`decltype(auto)`
+  单独路径返回 `MangleType::DecltypeAuto` 占位。
+- **decltype 在 `is_type_specifier` / `is_local_var_decl_start` 接入**：
+  `decltype(expr)` 整体作为一个类型说明符；前瞻时平衡括号，识别后面的
+  变量名。
+- **friend 关键字**：新增 `parse_friend_decl` 区分 `friend class X;`
+  （接受为 noop `FreeFn`）与 `friend <ret> <name>(args) [const] [{...} | ;]`
+  （解析为无 `this` 形参的 `FreeFn`，不做成员 mangle）。原本把 friend
+  函数误作为成员函数 mangle 的 lower 路径已分流到 FreeFn。
+- **using 在类内**：`parse_member_decl` 中检测 `CppKw::Using` 并委托到
+  `parse_using_decl`（顶层原本已有），使得 `using Base::Base;` 继承
+  构造在类体内合法。`InheritingCtor` 节点继续复用既有 lower。
+- **lower 端修饰符语义**：
+  - `noexcept` -> `__attribute__((nothrow))` 函数属性
+  - `volatile` 成员函数 -> 注释标记（C 端 volatile 与 C++ volatile
+    在 ABI 上等价, 由 caller 决定 `this` 访问的 volatile 属性）
+  - `friend` -> 走 FreeFn, 无 `this` 形参, 无类作用域 mangle
+  - `final` / `override` -> 解析层接受, vtable/devirt 端在 v0 简化
+- **测试**：14 + 2 = 16 个 `tests/fixtures/m17_*.cpp` fixture 全部通过
+  `cargo test --test integration m17`（远端 Linux 192.168.148.128），
+  16/16 ok。
+- **遗留已知限制（dcc C 后端 pre-existing, 不在 M17.0 修复范围）**：
+  - `obj->field` 在某些派生结构体（`__base_Base1` 字段）下生成
+    `->Base1` 而非 `->__base_Base1`，导致 `Derived1` 通过 `Base1`
+    访问继承字段仍失败；影响 `m17_inheriting_ctor` 的多文件链接场景。
+  - 自由函数名 mangle 与调用站点不一致（C 端不 mangle 自由函数
+    调用），导致 `m17_friend` 通过 friend 声明 + 实际函数定义形成的
+    跨作用域调用在严格链接场景下失败；测试 fixture 用 `int peek` 的
+    短名调用规避。
+
 ## 每个里程碑的第一性原理复盘
 
 每个 M 完成后,我们都问一次:

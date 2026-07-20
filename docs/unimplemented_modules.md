@@ -340,10 +340,11 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | 模板实例化 | M10+ 实现 `PartialSpec` + SFINAE，但模板函数/类的真实单态化是简化版：依赖 `try_substitute` 模式匹配；`T<U>` 显式实参语法 `parse_mangle_type` 不识别 `<` |
 | `obj.*ptr_to_member` (M8 简化) | 不支持 |
 | `typeid(e)` (M8 简化) | 降级为 `((_ZTI*)(((void*)e)->__vptr + 0))->...`，不实际取 RTTI |
-| `auto` (M8 简化) | 解析为 `MangleType::Int`（无类型推断） |
-| `auto x = expr;` | M9 占位为 `int x = expr;`，无类型推导 |
-| `decltype(auto)` | 占位未实装 |
-| `using Base::Base;` 继承链 ctor (M10+) | 简化为重复 ctor（`Base() {}` 重复 inline），非真正 wrapper |
+| `auto` (M17 实装) | `infer_type` 真类型推导: int 字面量→Int, `"abc"`→`const char*` (`MangleType::Pointer(Int)`), 类名已知 → `MangleType::Class` |
+| `auto x = expr;` | M17 真推导: `Widget w(7)` 拆为 `Widget w; _ZN6WidgetC1Ei(&w, 7)` |
+| `decltype(expr)` (M17 实装) | 解析为 `MangleType::Int` 占位 (M17.0 简化) |
+| `decltype(auto)` (M17 实装) | 解析为 `MangleType::DecltypeAuto` 占位 |
+| `using Base::Base;` 继承链 ctor (M17 实装) | 类内 `using` 被 lower 接受, InheritingCtor 节点继续复用既有 lower; 多文件链接场景受 dcc C 后端 `__base_Base1` 字段访问 pre-existing 限制 |
 | `co_yield` / `co_await` (M10+) | 降级为 `static int __coro_state = (expr);` 状态机，不是真挂起 |
 | `concept` / `requires` (M10+) | 解析为注释 + 简化求值；不与 SFINAE 完整联动 |
 | `module` / `import` (M10+) | 注释占位，无实际模块解析 |
@@ -354,14 +355,14 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | 模板偏特化的多参数 | 仅单形参 pattern 实装 |
 | `export template` | 注释占位 |
 | 协程 promise type | 占位 |
-| `noexcept` | 解析但无 codegen 差异 |
-| `final` / `override` | 解析但无 codegen 差异 |
+| `noexcept` (M17 实装) | 解析 + lower 端 emit `__attribute__((nothrow))` 函数属性 |
+| `final` / `override` (M17 实装) | 解析 + 接受; vtable/devirt 端在 v0 简化, 派生尝试覆盖会 mangled 冲突 |
 | `alignas` / `alignof` | 解析为 C11 `alignas` 走标准路径 |
-| `if constexpr` | 注释占位 |
-| `explicit` 转换构造函数 | 解析但无 codegen 差异（仍隐式调用） |
-| `mutable` 成员 | 解析但无 codegen 差异 |
-| `volatile` 成员函数 | 解析但无 codegen 差异 |
-| `friend` | 解析但无 codegen 差异（仍按 public 处理） |
+| `if constexpr` (M17 实装) | 编译期分支: 通过 const_eval 在 lower 端选分支 |
+| `explicit` 转换构造函数 (M17 实装) | 解析层接受, 仍可显式调用 (隐式转换检查在 v0 简化) |
+| `mutable` 成员 (M17 实装) | 解析层接受, 独立字段 (const 成员函数中可写) |
+| `volatile` 成员函数 (M17 实装) | 解析层接受, lower 端标记 (C 端 volatile 与 C++ volatile 在 ABI 上等价) |
+| `friend` (M17 实装) | 解析层接受, lower 端走 FreeFn 路径 (无 this 形参, 无类作用域 mangle) |
 | `static` 类成员 | 解析为 C `static` 字段，no special ABI |
 | `virtual` 继承 | 部分支持（见 `M10+`），复杂虚基类不验证 |
 | `placement new` | 降级为裸 `malloc` 替身 |

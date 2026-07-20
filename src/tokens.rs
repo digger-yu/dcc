@@ -35,6 +35,7 @@ pub enum TokKind {
     KwInt128,                      // __int128 / __int128_t
     KwUInt128,                     // __uint128_t
     KwSizeof, KwAlignof,
+    KwDecltype,                  // decltype  (C++11 类型推导, M17.0)
     // 符号
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Comma, Semi, Colon, Question,
@@ -49,6 +50,7 @@ pub enum TokKind {
     PlusPlus, MinusMinus,
     Arrow,                    // ->
     Dot,                      // .
+    DotStar,                  // .*   (C++ 成员指针访问, M17.0)
     Ellipsis,                 // ...
     Hash,                     // #
     // 特殊
@@ -136,6 +138,7 @@ impl<'a> Lexer<'a> {
                 "inline" | "__inline__" | "__inline" => TokKind::KwInline, "restrict" | "__restrict__" | "__restrict" => TokKind::KwRestrict,
                 "auto" => TokKind::KwAuto, "register" => TokKind::KwRegister,
                 "sizeof" => TokKind::KwSizeof, "_Alignof" | "alignof" | "__alignof" | "__alignof__" => TokKind::KwAlignof,
+                "decltype" => TokKind::KwDecltype,                  // M17.0
                 "_Atomic" => TokKind::KwAtomic,
                 "_Bool" => TokKind::KwBool,
                 "_Fract" => TokKind::KwFract, "_Accum" => TokKind::KwAccum,

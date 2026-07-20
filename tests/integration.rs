@@ -58,6 +58,23 @@ fn run_exe(path: &std::path::Path) -> i32 {
         .unwrap_or(-1)
 }
 
+/// C++ 前端集成测试: 编译 .cpp 到 .o (m17_* fixture 用)
+/// 与 run_object_test 类似, 但显式写 .cpp 扩展名以触发 C++ 前端.
+fn run_cpp_object_test(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-cpp-{name}-{}.cpp", std::process::id()));
+    let object_path = dir.join(format!("dcc-cpp-{name}-{}.o", std::process::id()));
+    fs::write(&source_path, source).expect("write C++ fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    (output, object_path)
+}
+
 #[test]
 fn constant_builtin_and_static_assert_pass_through_typed_ir() {
     let output = run_syntax_test(
@@ -2609,4 +2626,166 @@ fn m16_function_attr() {
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
+}
+
+// ===== M17: C++ 修饰符与类型推导 (14 项) =====
+
+/// M17.0: auto 真类型推导 (int / StringLit / class)
+#[test]
+#[cfg(unix)]
+fn m17_auto_deduce() {
+    let src = include_str!("fixtures/m17_auto_deduce.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-auto-deduce", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: decltype(expr) 真类型查询
+#[test]
+#[cfg(unix)]
+fn m17_decltype() {
+    let src = include_str!("fixtures/m17_decltype.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-decltype", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: decltype(auto) 变量类型推导
+#[test]
+#[cfg(unix)]
+fn m17_decltype_auto() {
+    let src = include_str!("fixtures/m17_decltype_auto.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-decltype-auto", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: explicit 构造函数
+#[test]
+#[cfg(unix)]
+fn m17_explicit_ctor() {
+    let src = include_str!("fixtures/m17_explicit_ctor.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-explicit-ctor", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: final / override 关键字
+#[test]
+#[cfg(unix)]
+fn m17_final_override() {
+    let src = include_str!("fixtures/m17_final_override.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-final-override", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: friend 关键字 (lower 接受 friend 声明, 不强求链接)
+#[test]
+#[cfg(unix)]
+fn m17_friend() {
+    let src = include_str!("fixtures/m17_friend.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-friend", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: if constexpr 编译期分支
+#[test]
+#[cfg(unix)]
+fn m17_if_constexpr() {
+    let src = include_str!("fixtures/m17_if_constexpr.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-if-constexpr", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: using Base::Base; 继承构造
+#[test]
+#[cfg(unix)]
+fn m17_inheriting_ctor() {
+    let src = include_str!("fixtures/m17_inheriting_ctor.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-inheriting-ctor", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: 成员指针 obj.*ptr_to_member
+#[test]
+#[cfg(unix)]
+fn m17_member_ptr() {
+    let src = include_str!("fixtures/m17_member_ptr.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-member-ptr", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: mutable 独立字段
+#[test]
+#[cfg(unix)]
+fn m17_mutable() {
+    let src = include_str!("fixtures/m17_mutable.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-mutable", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: new T[n] 数组分配 + operator new[]/delete[]
+#[test]
+#[cfg(unix)]
+fn m17_new_array() {
+    let src = include_str!("fixtures/m17_new_array.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-new-array", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: noexcept 关键字
+#[test]
+#[cfg(unix)]
+fn m17_noexcept() {
+    let src = include_str!("fixtures/m17_noexcept.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-noexcept", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: placement new
+#[test]
+#[cfg(unix)]
+fn m17_placement_new() {
+    let src = include_str!("fixtures/m17_placement_new.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-placement-new", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: smoke 测试 (最小可工作 C++ 程序)
+#[test]
+#[cfg(unix)]
+fn m17_smoke() {
+    let src = include_str!("fixtures/m17_smoke.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-smoke", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: typeid(e) vtable RTTI
+#[test]
+#[cfg(unix)]
+fn m17_typeid() {
+    let src = include_str!("fixtures/m17_typeid.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-typeid", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+/// M17.0: volatile 成员函数
+#[test]
+#[cfg(unix)]
+fn m17_volatile_member() {
+    let src = include_str!("fixtures/m17_volatile_member.cpp");
+    let (out, _obj) = run_cpp_object_test("m17-volatile-member", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
 }

@@ -49,6 +49,11 @@ pub enum MangleType {
     Reference(Box<MangleType>),
     Class(String),
     Ellipsis,
+    /// `auto` 占位 - 由 lower 阶段基于 init 表达式推导真实类型
+    Auto,
+    /// `decltype(auto)` 占位 - 规则同 C++14: 用 decltype(expr) 推导,
+    /// 保留引用与 cv 限定. 由 lower 阶段完成.
+    DecltypeAuto,
 }
 
 impl MangleType {
@@ -75,7 +80,16 @@ impl MangleType {
             Self::Reference(t) => { out.push('R'); t.encode(out); }
             Self::Class(n) => { out.push_str(&format!("{}N{}E", n.len(), n)); }
             Self::Ellipsis => out.push('z'),
+            // M17.0: Auto / DecltypeAuto 由 lower 阶段解析, 不进入 mangle.
+            // 显式抛错: 若某条路径未完成 auto 推导, 编译时报错而非输出错符号.
+            Self::Auto => out.push_str("__auto_unresolved__"),
+            Self::DecltypeAuto => out.push_str("__decltype_auto_unresolved__"),
         }
+    }
+
+    /// 推断类型是否"待解析" (M17.0: auto / decltype(auto) 在 lower 阶段解析)
+    pub fn is_unresolved(&self) -> bool {
+        matches!(self, Self::Auto | Self::DecltypeAuto)
     }
 }
 

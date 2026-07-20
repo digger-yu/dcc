@@ -371,6 +371,16 @@ impl<'a> CppLexer<'a> {
             return Some(CppTok::C(Tok { kind: TokKind::AmpEq,
                 span: self.mk_span(2), text: "&=".to_string() }));
         }
+        if b == b'.' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'*' {
+            // C++ 成员指针访问: `obj.*ptr_to_member` (M17.0)
+            // `->*` 已被 `->` Arrow + `*` Star 组合表示, parser 端组合处理
+            self.pos += 2; self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::DotStar,
+                span: self.mk_span(2),
+                text: ".*".to_string(),
+            }));
+        }
         if b == b'.' && self.pos + 2 < self.src.len()
             && self.src[self.pos + 1] == b'.' && self.src[self.pos + 2] == b'.'
         {
