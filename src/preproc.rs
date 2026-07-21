@@ -55,6 +55,9 @@ pub struct Preprocessor {
     pub fenv_access: bool,
     /// 收集在展开阶段遇到的 _Pragma 操作符, 待外层 &mut self 方法批量处理
     pending_pragmas: RefCell<Vec<(String, u32)>>,
+    /// 当前字符集/编码 (C23 #pragma locale)
+    /// 支持: "UTF-8" (默认), "ASCII", "ISO-8859-1", "POSIX"
+    charset: String,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -96,6 +99,8 @@ pub struct PreprocessOutput {
     pub pack_history: Vec<(u32, Option<usize>)>,
     /// #pragma weak 记录的弱符号集合 (供 codegen 标记 weak 绑定)
     pub weak_symbols: std::collections::HashSet<String>,
+    /// 当前字符集 (C23 #pragma locale)
+    pub charset: String,
 }
 
 pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
@@ -145,6 +150,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         fenv_access: false,
         counter: 0,
         pending_pragmas: RefCell::new(Vec::new()),
+        charset: "UTF-8".to_string(),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -393,6 +399,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         deps: pp.deps,
         pack_history: pp.pack_history,
         weak_symbols: pp.weak_symbols,
+        charset: pp.charset.clone(),
     }
 }
 
@@ -564,6 +571,11 @@ impl Preprocessor {
             self.apply_pragma_string(&p, line_no);
         }
         src.clear();
+    }
+
+    /// 获取当前字符集设置 (C23 #pragma locale)
+    pub fn charset(&self) -> &str {
+        &self.charset
     }
 
     /// 计算 self.out 已写入的行数 (1-based)
@@ -908,14 +920,29 @@ impl Preprocessor {
                     // 其他 STDC 子句忽略, 仅用于兼容
                 }
             } else if pragma_text.starts_with("locale") {
-                // C23 #pragma locale: 接受 locale 切换指令, 当前阶段只做
-                // 语法识别与静默忽略, 不改变字符集/locale 行为。语法形式:
-                //   #pragma locale default
-                //   #pragma locale "POSIX"
-                //   #pragma locale reset
-                // 实际 locale 切换需要 libc 支持, dcc 当前不强制 locale。
-                // 我们仅校验形式, 不发出诊断 (与 GCC -E 输出兼容)。
-                let _ = pragma_text[6..].trim();
+                // C23 #pragma locale: 接受 locale 切换指令
+                // 语法形式:
+                //   #pragma locale default       -> 重置为 UTF-8
+                //   #pragma locale "POSIX"        -> ASCII
+                //   #pragma locale reset          -> 重置为 UTF-8
+                //   #pragma locale "UTF-8"        -> UTF-8
+                //   #pragma locale "ISO-8859-1"   -> ISO-8859-1
+                // 实际 locale 切换需要 libc 支持, dcc 记录字符集设置
+                // 用于宽字符编码转换
+                let arg = pragma_text[6..].trim();
+                match arg {
+                    "default" | "reset" => self.charset = "UTF-8".to_string(),
+                    s if s.starts_with('"') && s.ends_with('"') => {
+                        let inner = &s[1..s.len()-1];
+                        match inner {
+                            "POSIX" | "C" | "ASCII" => self.charset = "ASCII".to_string(),
+                            "UTF-8" | "utf8" => self.charset = "UTF-8".to_string(),
+                            "ISO-8859-1" | "latin1" => self.charset = "ISO-8859-1".to_string(),
+                            _ => {} // 未知 locale 静默接受
+                        }
+                    }
+                    _ => {} // 其他形式静默接受
+                }
             } else if pragma_text.starts_with("comment") {
                 // #pragma comment(...) — 链接器注释, 忽略
             }
@@ -3548,5 +3575,48 @@ n\
         assert!(out1.text.contains("__builtin___strncpy_chk"), "out1: {}", out1.text);
         // FORTIFY=0 应回退到 libc strncpy
         assert!(out2.text.contains("strncpy("), "out2: {}", out2.text);
+    }
+
+    // M23: #pragma locale 实际切换字符集
+    #[test]
+    fn pragma_locale_switches_charset() {
+        // 默认 UTF-8
+        let out = preprocess(
+            b"int x = 0;\n",
+            "charset.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        assert_eq!(out.charset, "UTF-8");
+
+        // 切换到 POSIX/ASCII
+        let out = preprocess(
+            b"#pragma locale \"POSIX\"\nint x = 0;\n",
+            "charset.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        assert_eq!(out.charset, "ASCII");
+
+        // 重置回 UTF-8
+        let out = preprocess(
+            b"#pragma locale \"POSIX\"\n#pragma locale reset\nint x = 0;\n",
+            "charset.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+        );
+        assert_eq!(out.charset, "UTF-8");
     }
 }
