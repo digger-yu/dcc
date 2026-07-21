@@ -290,9 +290,56 @@ pub fn instantiate_partial_spec(
             if args.len() == 1 && pattern_matches(pattern_text, &args[0]) {
                 return *decl.clone();
             }
+            // 多形参偏特化 (M23 增强)
+            if args.len() > 1 {
+                let patterns: Vec<&str> = pattern_text.split(',').collect();
+                if patterns.len() == args.len() {
+                    let all_match = patterns.iter().zip(args.iter())
+                        .all(|(pat, arg)| pattern_matches(pat.trim(), arg.trim()));
+                    if all_match {
+                        return *decl.clone();
+                    }
+                }
+            }
         }
     }
     primary.clone()
+}
+
+/// static 类成员: C++ 类的静态数据成员
+/// 静态成员在类的所有实例间共享，存储在静态存储区
+/// 需要在类外定义并初始化（除非是 const 整型或 inline）
+#[derive(Debug, Clone)]
+pub struct StaticDataMember {
+    /// 成员名 (如 "count")
+    pub name: String,
+    /// 成员类型 (如 "int", "std::string")
+    pub ty: String,
+    /// 所属类名 (如 "Widget")
+    pub class_name: String,
+    /// 是否有类外定义 (declaration vs definition)
+    pub is_defined: bool,
+    /// 初始值 (若有)
+    pub init_value: Option<String>,
+}
+
+impl StaticDataMember {
+    /// 生成静态成员的 C 兼容定义
+    /// C++ 静态成员降级为全局变量，名字 mangle 为 _ZN<class><name>E
+    pub fn emit_c_definition(&self) -> String {
+        let mangled = format!("_ZN{}{}{}{}E", self.class_name.len(), self.class_name, self.name.len(), self.name);
+        if let Some(init) = &self.init_value {
+            format!("static {} {} = {};\n", self.ty, mangled, init)
+        } else {
+            format!("static {} {};\n", self.ty, mangled)
+        }
+    }
+
+    /// 生成静态成员的访问代码
+    /// Widget::count -> _ZN6Widget5countE
+    pub fn emit_access(&self) -> String {
+        format!("_ZN{}{}{}{}E", self.class_name.len(), self.class_name, self.name.len(), self.name)
+    }
 }
 
 /// 协程状态机: 记录协程的挂起点
@@ -309,6 +356,63 @@ impl CoroutineState {
     }
     pub fn advance(&mut self) { self.current += 1; }
     pub fn reset(&mut self) { self.current = 0; }
+}
+
+/// 协程 promise type: C++20 协程的返回类型特征
+/// 每个协程函数都有一个关联的 promise_type，用于：
+/// 1. 创建 return_value / return_void / unhandled_exception
+/// 2. 提供 get_return_object() 生成协程句柄
+/// 3. initial_suspend() / final_suspend() 控制挂起行为
+#[derive(Debug, Clone)]
+pub struct CoroutinePromiseType {
+    /// promise 类型名 (如 std::coroutine_traits<F>::promise_type)
+    pub promise_name: String,
+    /// 协程返回类型 (如 generator<int>, task<void>)
+    pub return_type: String,
+    /// get_return_object() 返回类型
+    pub return_object_type: String,
+    /// initial_suspend() 返回的 awaiter
+    pub initial_suspend_type: String,
+    /// final_suspend() 返回的 awaiter
+    pub final_suspend_type: String,
+    /// 是否有 return_value (vs return_void)
+    pub has_return_value: bool,
+}
+
+impl CoroutinePromiseType {
+    /// 从协程函数签名推导 promise_type
+    /// C++20: std::coroutine_traits<R, P1, P2, ...>::promise_type
+    pub fn infer(return_type: &str, _param_types: &[String]) -> Self {
+        // M23 简化: 根据返回类型推断常见协程模式
+        let (promise_name, has_return_value) = if return_type.contains("generator") {
+            (format!("std::generator<{}>::promise_type", return_type), true)
+        } else if return_type.contains("task") {
+            (format!("std::task<{}>::promise_type", return_type), false)
+        } else {
+            (format!("std::coroutine_traits<{}>::promise_type", return_type), false)
+        };
+        Self {
+            promise_name,
+            return_type: return_type.to_string(),
+            return_object_type: return_type.to_string(),
+            initial_suspend_type: "std::suspend_always".to_string(),
+            final_suspend_type: "std::suspend_always".to_string(),
+            has_return_value,
+        }
+    }
+
+    /// 生成 promise 类型定义 (C 兼容降级)
+    pub fn emit_c_definition(&self) -> String {
+        format!(
+            "/* coroutine promise_type for {} */\n\
+             typedef struct {{\n\
+               int _state;\n\
+               void* _frame;\n\
+               void* _return_value;\n\
+             }} {};\n",
+            self.return_type, self.promise_name
+        )
+    }
 }
 
 /// 模块分区: 记录模块名 + 分区名
@@ -675,5 +779,46 @@ mod tests {
     fn member_ptr_emit() {
         let s = MemberPtr::emit("Foo", "bar");
         assert_eq!(s, "&_member_fn_Foo_bar");
+    }
+
+    // M23: coroutine promise type 推导
+    #[test]
+    fn coroutine_promise_type_infer() {
+        let pt = CoroutinePromiseType::infer("generator<int>", &[]);
+        assert!(pt.promise_name.contains("generator"));
+        assert!(pt.has_return_value);
+        let pt2 = CoroutinePromiseType::infer("task<void>", &[]);
+        assert!(pt2.promise_name.contains("task"));
+        assert!(!pt2.has_return_value);
+    }
+
+    // M23: static 类成员定义与访问
+    #[test]
+    fn static_data_member_emit() {
+        let m = StaticDataMember {
+            name: "count".to_string(),
+            ty: "int".to_string(),
+            class_name: "Widget".to_string(),
+            is_defined: true,
+            init_value: Some("0".to_string()),
+        };
+        let def = m.emit_c_definition();
+        assert!(def.contains("static int"));
+        assert!(def.contains("= 0"));
+        let acc = m.emit_access();
+        assert!(acc.contains("_ZN"));
+        assert!(acc.contains("Widget"));
+        assert!(acc.contains("count"));
+    }
+
+    // M23: 多参数模板偏特化
+    #[test]
+    fn multi_param_partial_spec() {
+        // 验证多形参偏特化匹配
+        let patterns = vec!["T*", "int"];
+        let args = vec!["MyClass*".to_string(), "int".to_string()];
+        let all_match = patterns.iter().zip(args.iter())
+            .all(|(pat, arg)| pattern_matches(pat.trim(), arg.trim()));
+        assert!(all_match);
     }
 }
