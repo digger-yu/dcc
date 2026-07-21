@@ -912,11 +912,21 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   - 聚合类型返回值 > 16 字节：caller 分配 `<sret>` local，x0 指向 sret 槽。
   - varargs 最小：超过 8 个 GP 参数自动 spill 到 caller 栈。
   - 通用 `mov_x_reg_imm` 支持 `movz`+`movk` 64-bit 立即数装入。
-- **限制**：HFA（NEON 同构浮点聚合）尚未识别，仍按 GP by-ref 处理；大于
-  16 字节的 struct 返回依赖 sret 但不验证调用者拿到数据；无 eh_frame / ORC /
-  sanitizer 元数据节（仅 x86_64 具备）。
+- **M8 完整化（2026-07-21）**：
+  - BL ±128MiB 范围校验 (`bl_offset_in_range`) + `debug_assert`
+  - ADR ±1MiB 范围校验 + ADRP+ADD 退化路径 (`emit_adr_large`)
+  - LDR 字面量 ±1MiB 范围校验 + 对齐检查
+  - HFA（同构浮点聚合）：`classify_hfa` + `load_hfa_to_vregs` + `store_hfa_from_vregs`
+  - >16B struct sret：`memcpy_sp_to_x0` 逐块拷贝
+  - eh_frame / ORC / sanitizer 节：`.eh_frame` + `.orc_unwind_ip` + `.dcc.san_info`
+  - DWARF / BTF：`build_dwarf_full` 用 `ArchKind::AArch64` + `.BTF` 节
+  - 谓词指令：CCMP / CSEL / CSINC / CSNEG
+  - 双精度浮点比较：FCMP Dn,Dm / FCCMP
+  - 复杂寻址：后置/前置索引 + 扩展寄存器寻址
+  - 缓存维护：dc cvac/civac/cvau/ivac + ic ivau/iallu + dsb ish/sy + isb
+- **仍待完善**：NEON HFA >4 元素；大结构体嵌套返回多层调用链验证；TLS 重定位 `R_AARCH64_TLSDESC_*`。
 
-## RISC-V 64 后端（`codegen/riscv64.rs`，M7）
+## RISC-V 64 后端（`codegen/riscv64.rs`，M7+M8）
 
 - **入口**：`codegen::emit` 在 `--target riscv64-linux-gnu` 时选用 `Riscv64Codegen`。
 - **能力与 AArch64 对齐**：整数/浮点/向量表达式、控制流、函数调用（`R_RISCV_JAL`）、
@@ -928,8 +938,18 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   - 聚合类型返回值 > 16 字节：caller 分配 `<sret>` local，a0 指向 sret 槽。
   - varargs 最小：超过 8 个 GP 参数自动 spill 到 caller 栈。
   - 大立即数通过 `lui`+`addi` 序列；浮点运算为 RV64GC `f` 扩展子集。
-- **限制**：HFA（FP aggregate）尚未识别；无 eh_frame / ORC / sanitizer 元数据节；
-  大于 16 字节 struct 返回同样依赖 sret，调用者需确保取到 sret 数据。
+- **M8 完整化（2026-07-21）**：
+  - JAL ±1MiB 范围校验 (`jal_offset_in_range`) + `debug_assert`
+  - HFA 分类：`classify_rv_hfa` + `HfaInfo`（float/double 1–4 元素）
+  - >16B struct sret：`memcpy_sp_to_a0` 逐块拷贝
+  - eh_frame / ORC / sanitizer 节：`.eh_frame` + `.orc_unwind_ip` + `.dcc.san_info`
+  - DWARF / BTF：`build_dwarf_full` 用 `ArchKind::RiscV64` + `.BTF` 节
+  - 压缩指令 (C 扩展)：C.ADDI/C.NOP/C.LI/C.LW/C.SW/C.J/C.BEQZ 16-bit 编码
+  - FP D 扩展双精度：FLD/FSD/FADD.D/FSUB.D/FMUL.D/FDIV.D/FCVT/FSGNJ.D
+  - RVV 向量基础：VSETVLI/VLE32/VSE32/VADD.VV/VMUL.VV/VREDSUM.VS
+  - 特权指令/CSR：CSRRW/CSRRS/CSRRC/CSRRWI/MRET/SRET/WFI/SFENCE.VMA/FENCE
+- **仍待完善**：RVV 完整指令集（宽化/窄化/掩码/浮点向量）；压缩指令自动选择；
+  D 扩展完整（FSQRT.D/FMIN.D/FMAX.D/比较指令）；Zicsr 全集合（CSRRSI/CSRRCI）。
 
 ## 测试脚本布局
 

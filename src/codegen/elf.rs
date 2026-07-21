@@ -477,6 +477,7 @@ pub fn build_elf_rel_riscv64(
     symbols: &[ElfSym],
     relocations: &[ElfRela],
     rodata_relocations: &[ElfRela],
+    extra_sections: &[ElfSection],
 ) -> Vec<u8> {
     build_elf_rel_generic(
         EM_RISCV,
@@ -485,7 +486,7 @@ pub fn build_elf_rel_riscv64(
         symbols,
         relocations,
         rodata_relocations,
-        &[],
+        extra_sections,
     )
 }
 

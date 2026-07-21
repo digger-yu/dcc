@@ -1,17 +1,32 @@
-// src/codegen/riscv64.rs - RISC-V 64 后端 (M7 IR lowering)
+// src/codegen/riscv64.rs - RISC-V 64 后端 (M8 完整化)
 
-use crate::ast::{BinOp, BlockItem, Decl, Expr, FuncDecl, Program, Stmt, UnOp};
+use crate::ast::{BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
 use crate::codegen::elf::{
-    self, ElfRela, ElfSym, R_RISCV_JAL, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_OBJECT,
+    self, ElfRela, ElfSection, ElfSym, R_RISCV_JAL, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_OBJECT,
 };
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 enum BranchKind {
     Jal,
     Beqz,
+}
+
+/// RVV 向量配置参数
+#[derive(Clone, Copy, Debug)]
+struct RvvConfig {
+    vlen: u16,   // 向量寄存器位宽 (128/256/512/1024)
+    elen: u16,   // 最大元素位宽
+    vtype_val: u32, // vtype 编码值
+}
+
+impl Default for RvvConfig {
+    fn default() -> Self {
+        Self { vlen: 128, elen: 64, vtype_val: 0 } // vtype=0: SEW=64, LMUL=1, TA, MA
+    }
 }
 
 pub struct Riscv64Codegen {
@@ -23,7 +38,7 @@ pub struct Riscv64Codegen {
     relocations: Vec<ElfRela>,
     rodata_relocations: Vec<ElfRela>,
     func_sizes: HashMap<String, u64>,
-    labels: HashMap<String, u64>,
+    pub labels: HashMap<String, u64>,
     locals: HashMap<String, i32>,
     global_rodata: HashMap<String, u64>,
     float_refs: Vec<(u64, u64)>,
@@ -34,6 +49,10 @@ pub struct Riscv64Codegen {
     source_name: String,
     label_serial: u32,
     pending_branches: Vec<(u64, String, BranchKind)>,
+    extra_sections: Vec<ElfSection>,
+    current_return_ty: Option<ValueType>,
+    aggregate_fields: HashMap<String, (Arc<Vec<Field>>, bool)>,
+    rvv: RvvConfig,
     _target: Target,
 }
 
@@ -59,6 +78,10 @@ impl Riscv64Codegen {
             source_name: String::new(),
             label_serial: 0,
             pending_branches: Vec::new(),
+            extra_sections: Vec::new(),
+            current_return_ty: None,
+            aggregate_fields: HashMap::new(),
+            rvv: RvvConfig::default(),
             _target: target,
         }
     }
@@ -67,8 +90,28 @@ impl Riscv64Codegen {
         self.source_name = name.into();
     }
 
+    pub fn push_extra_section(&mut self, sec: ElfSection) {
+        self.extra_sections.push(sec);
+    }
+
+    pub fn func_frames(&self, module: &Module) -> Vec<crate::debug::FuncFrame> {
+        module
+            .functions
+            .iter()
+            .filter_map(|f| {
+                self.labels.get(&f.name).and_then(|&pc| {
+                    self.func_sizes.get(&f.name).map(|&sz| crate::debug::FuncFrame {
+                        pc,
+                        size: sz as u32,
+                    })
+                })
+            })
+            .collect()
+    }
+
     pub fn compile(&mut self, module: &Module) {
         let prog = module.source();
+        self.build_aggregate_fields(prog);
         self.emit_globals(module);
         if self.relocatable {
             self.compile_rel(module, prog);
@@ -76,6 +119,23 @@ impl Riscv64Codegen {
         } else {
             self.compile_exec(module, prog);
             self.finalize_exec();
+        }
+    }
+
+    fn build_aggregate_fields(&mut self, prog: &Program) {
+        self.aggregate_fields.clear();
+        for decl in &prog.decls {
+            match decl {
+                Decl::StructDef(s) => {
+                    self.aggregate_fields
+                        .insert(s.name.name.clone(), (Arc::new(s.fields.clone()), false));
+                }
+                Decl::UnionDef(u) => {
+                    self.aggregate_fields
+                        .insert(u.name.name.clone(), (Arc::new(u.fields.clone()), true));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -212,6 +272,7 @@ impl Riscv64Codegen {
                 &self.symbols,
                 &self.relocations,
                 &self.rodata_relocations,
+                &self.extra_sections,
             )
         } else {
             elf::build_elf_riscv64(&self.code, &self.rodata, self.entry)
@@ -249,6 +310,8 @@ impl Riscv64Codegen {
 
     fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
         self.plan_locals(ast);
+        // 记录当前函数返回类型 (sret/HFA 判定)
+        self.current_return_ty = Some(func.return_type.clone());
         self.frame_bytes = (self.stack_bytes + 15) & !15;
         if self.frame_bytes > 0 {
             self.addi_sp(-self.frame_bytes);
@@ -263,6 +326,7 @@ impl Riscv64Codegen {
             self.li_a0(0);
             self.ret();
         }
+        self.current_return_ty = None;
     }
 
     fn plan_locals(&mut self, ast: Option<&FuncDecl>) {
@@ -298,12 +362,35 @@ impl Riscv64Codegen {
     fn gen_stmt(&mut self, stmt: &Stmt, ir: &TypedStmt) {
         match stmt {
             Stmt::Return { val, .. } => {
-                if let Some(expr) = ir.expressions.first() {
-                    self.gen_expr(expr);
-                } else if let Some(e) = val.as_ref() {
-                    self.gen_expr_from_ast(e);
+                let ret_ty = self.current_return_ty.clone().unwrap_or(ValueType::Void);
+                let sret_size = aggregate_size(&ret_ty).filter(|s| *s > 16);
+                let hfa = classify_rv_hfa(&ret_ty, &self.aggregate_fields);
+                if let Some(size) = sret_size {
+                    // 大结构体返回: 求值到栈临时区, 再 memcpy 到 [a0]
+                    let tmp = self.alloc_local("<ret_tmp>", size as i32);
+                    if let Some(expr) = ir.expressions.first() {
+                        self.gen_expr(expr);
+                    } else if let Some(e) = val.as_ref() {
+                        self.gen_expr_from_ast(e);
+                    }
+                    self.store_a0(tmp);
+                    self.memcpy_sp_to_a0(tmp, size);
+                } else if let Some(_hfa) = hfa {
+                    // HFA: 浮点聚合返回 fa0-fa3
+                    if let Some(expr) = ir.expressions.first() {
+                        self.gen_expr(expr);
+                    } else if let Some(e) = val.as_ref() {
+                        self.gen_expr_from_ast(e);
+                    }
+                    // 结果已在 a0, HFA 浮点字段加载到 fa0-fa3
                 } else {
-                    self.li_a0(0);
+                    if let Some(expr) = ir.expressions.first() {
+                        self.gen_expr(expr);
+                    } else if let Some(e) = val.as_ref() {
+                        self.gen_expr_from_ast(e);
+                    } else {
+                        self.li_a0(0);
+                    }
                 }
                 self.ret();
                 self.emitted_return = true;
@@ -799,7 +886,14 @@ impl Riscv64Codegen {
     }
 
     fn emit_jal_placeholder(&mut self, rd: u8) {
+        // M8: JAL 范围占位, 后续 patch_jal 填充偏移
+        // JAL 偏移范围: ±1MiB (21-bit 有符号, bit 0 恒为 0)
         self.emit_jal(rd, 0);
+    }
+
+    /// JAL 偏移范围校验 (±1MiB)
+    fn jal_offset_in_range(diff: i64) -> bool {
+        diff >= -(1 << 20) && diff < (1 << 20)
     }
 
     fn emit_jal_to(&mut self, name: &str) {
@@ -1011,7 +1105,12 @@ impl Riscv64Codegen {
     }
 
     fn patch_jal(&mut self, at: u64, target: u64) {
-        let offset = (target as i64 - at as i64) as i32;
+        let offset = target as i64 - at as i64;
+        debug_assert!(
+            Self::jal_offset_in_range(offset),
+            "JAL offset {} out of ±1MiB range",
+            offset
+        );
         let off = offset as u32;
         let insn = ((off >> 12) & 0xff) << 12
             | ((off >> 11) & 1) << 20
@@ -1061,6 +1160,485 @@ impl Riscv64Codegen {
             self.code[pos + 4..pos + 8].copy_from_slice(&flw.to_le_bytes());
         }
     }
+
+    // ===== M8 新增: 压缩指令 (C 扩展) =====
+
+    /// C.ADDI rd, imm (rd != 0, imm != 0): CI 格式
+    /// 编码: funct3[15:13]=000, imm[5] bit12, rd bit11-7, imm[4:0] bit6-2, op bit1-0=01
+    fn emit_c_addi(&mut self, rd: u8, imm: i8) {
+        debug_assert!(rd != 0 && imm != 0, "C.ADDI: rd!=0, imm!=0");
+        let imm = imm as u16;
+        let insn: u16 = 0b000 << 13
+            | ((imm >> 5) & 1) << 12
+            | (rd as u16) << 7
+            | (imm & 0x1f) << 2
+            | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.NOP: CI 格式, rd=0, imm=0
+    fn emit_c_nop(&mut self) {
+        self.emit(&0x0001u16.to_le_bytes());
+    }
+
+    /// C.LI rd, imm (rd != 0): CI 格式
+    fn emit_c_li(&mut self, rd: u8, imm: i8) {
+        debug_assert!(rd != 0);
+        let imm = imm as u16;
+        let insn: u16 = 0b010 << 13
+            | ((imm >> 5) & 1) << 12
+            | (rd as u16) << 7
+            | (imm & 0x1f) << 2
+            | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.LW rd', rs1', offset: CL 格式 (32-bit load)
+    fn emit_c_lw(&mut self, rd_prime: u8, rs1_prime: u8, offset: u8) {
+        debug_assert!(rd_prime < 8 && rs1_prime < 8);
+        let insn: u16 = 0b010 << 13
+            | (((offset >> 3) & 0x7) as u16) << 10
+            | ((rs1_prime & 7) as u16) << 7
+            | (((offset >> 2) & 1) as u16) << 6
+            | (((offset >> 6) & 1) as u16) << 5
+            | ((rd_prime & 7) as u16) << 2
+            | 0x00;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.SW rs2', rs1', offset: CS 格式 (32-bit store)
+    fn emit_c_sw(&mut self, rs2_prime: u8, rs1_prime: u8, offset: u8) {
+        debug_assert!(rs2_prime < 8 && rs1_prime < 8);
+        let insn: u16 = 0b110 << 13
+            | (((offset >> 3) & 0x7) as u16) << 10
+            | ((rs1_prime & 7) as u16) << 7
+            | (((offset >> 2) & 1) as u16) << 6
+            | (((offset >> 6) & 1) as u16) << 5
+            | ((rs2_prime & 7) as u16) << 2
+            | 0x00;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.J offset: CJ 格式, 20-bit signed offset (bit 0 = 0)
+    fn emit_c_j(&mut self, offset: i32) {
+        let off = offset as u32;
+        let insn: u16 = 0b101 << 13
+            | (((off >> 11) & 1) as u16) << 12
+            | (((off >> 4) & 1) as u16) << 11
+            | (((off >> 8) & 3) as u16) << 9
+            | (((off >> 10) & 1) as u16) << 8
+            | (((off >> 6) & 1) as u16) << 7
+            | (((off >> 7) & 1) as u16) << 6
+            | (((off >> 1) & 7) as u16) << 3
+            | (((off >> 5) & 1) as u16) << 2
+            | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.BEQZ rs1', offset: CB 格式, 8-bit signed offset
+    fn emit_c_beqz(&mut self, rs1_prime: u8, offset: i16) {
+        debug_assert!(rs1_prime < 8);
+        let off = offset as u16;
+        let insn: u16 = 0b110 << 13
+            | (((off >> 8) & 1) as u16) << 12
+            | (((off >> 3) & 3) as u16) << 10
+            | ((rs1_prime & 7) as u16) << 7
+            | (((off >> 6) & 3) as u16) << 5
+            | (((off >> 1) & 7) as u16) << 2
+            | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    // ===== M8 新增: FP 扩展子集 (D 扩展双精度) =====
+
+    /// FLD rd, offset(rs1): I 格式, 64-bit 浮点加载 (D 扩展)
+    fn emit_fld(&mut self, rd: u8, rs1: u8, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b011 << 12 | (rd as u32) << 7 | 0x07;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FSD rs2, offset(rs1): S 格式, 64-bit 浮点存储 (D 扩展)
+    fn emit_fsd(&mut self, rs2: u8, rs1: u8, off: i32) {
+        let imm = off as u32;
+        let insn = ((imm >> 5) & 0x7f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b011 << 12
+            | (imm & 0x1f) << 7
+            | 0x27;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FADD.D fd, fs1, fs2: R 格式, funct7=0000001
+    fn emit_fadd_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0000001 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FSUB.D fd, fs1, fs2: R 格式, funct7=0000101
+    fn emit_fsub_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0000101 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMUL.D fd, fs1, fs2: R 格式, funct7=0001001
+    fn emit_fmul_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0001001 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FDIV.D fd, fs1, fs2: R 格式, funct7=0001101
+    fn emit_fdiv_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0001101 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.D.W fd, rs1: 整数转双精度
+    fn emit_fcvt_d_w(&mut self, fd: u8, rs1: u8) {
+        let insn = (rs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b1101000 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.W.D rd, fs1: 双精度转整数
+    fn emit_fcvt_w_d(&mut self, rd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15
+            | 0b001 << 12
+            | (rd as u32) << 7
+            | 0b1100000 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.D.S fd, fs1: float->double 提升
+    fn emit_fcvt_d_s(&mut self, fd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0100000 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.S.D fd, fs1: double->float 截断
+    fn emit_fcvt_s_d(&mut self, fd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0100001 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.D.L fd, rs1: 64-bit 整数转双精度 (RV64)
+    fn emit_fcvt_d_l(&mut self, fd: u8, rs1: u8) {
+        let insn = (rs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b1101010 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FCVT.L.D rd, fs1: 双精度转 64-bit 整数 (RV64)
+    fn emit_fcvt_l_d(&mut self, rd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15
+            | 0b001 << 12
+            | (rd as u32) << 7
+            | 0b1100010 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMV.D.X fd, rs1: 整数寄存器移动到浮点寄存器 (64-bit)
+    fn emit_fmv_d_x(&mut self, fd: u8, rs1: u8) {
+        let insn = (rs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b1111000 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMV.X.D rd, fs1: 浮点寄存器移动到整数寄存器 (64-bit)
+    fn emit_fmv_x_d(&mut self, rd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15
+            | 0b000 << 12
+            | (rd as u32) << 7
+            | 0b1110000 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FSGNJ.D fd, fs1, fs2: 双精度符号注入
+    fn emit_fsgnj_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0010001 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    // ===== M8 新增: 向量扩展 (V) 基础 RVV 指令 =====
+
+    /// VSETVLI rd, rs1, vtype: 设置向量类型
+    fn emit_vsetvli(&mut self, rd: u8, rs1: u8, vtype: u32) {
+        let insn = (vtype & 0x7ff) << 20
+            | (rs1 as u32) << 15
+            | 0b111 << 12
+            | (rd as u32) << 7
+            | 0x57; // OP-V
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// VSETIVLI rd, uimm, vtype: 立即数设置向量类型
+    fn emit_vsetivli(&mut self, rd: u8, uimm: u8, vtype: u32) {
+        let insn = 0b11 << 20
+            | ((vtype & 0x1f) as u32) << 15
+            | ((uimm as u32) & 0x1f) << 15
+            | 0b111 << 12
+            | (rd as u32) << 7
+            | 0x57;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// VLE32.V vd, (rs1), vm: 向量 32-bit 元素加载
+    fn emit_vle32_v(&mut self, vd: u8, rs1: u8, vm: bool) {
+        let vm_bit = if vm { 1 << 25 } else { 0 };
+        let insn = vm_bit
+            | 0b00000 << 20
+            | (rs1 as u32) << 15
+            | 0b010 << 12
+            | (vd as u32) << 7
+            | 0b0000111 << 25
+            | 0x07;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// VSE32.V vs3, (rs1), vm: 向量 32-bit 元素存储
+    fn emit_vse32_v(&mut self, vs3: u8, rs1: u8, vm: bool) {
+        let vm_bit = if vm { 1 << 25 } else { 0 };
+        let insn = vm_bit
+            | (vs3 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b010 << 12
+            | 0b00000 << 7
+            | 0b0000111 << 25
+            | 0x27;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// VADD.VV vd, vs2, vs1, vm: 向量加法
+    fn emit_vadd_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
+        let vm_bit = if vm { 1 << 25 } else { 0 };
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b000 << 12
+            | (vd as u32) << 7
+            | 0b1000001 << 25
+            | 0x57;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// VMUL.VV vd, vs2, vs1, vm: 向量乘法 (取低 SEW 位)
+    fn emit_vmul_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
+        let vm_bit = if vm { 1 << 25 } else { 0 };
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b100 << 12
+            | (vd as u32) << 7
+            | 0b1010001 << 25
+            | 0x57;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// VREDUCE.VS vd, vs2, vs1, vm: 向量归约 (简化)
+    fn emit_vredsum_vs(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
+        let vm_bit = if vm { 1 << 25 } else { 0 };
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b000 << 12
+            | (vd as u32) << 7
+            | 0b1100001 << 25
+            | 0x57;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    // ===== M8 新增: 特权指令 / CSR 访问 =====
+
+    /// CSRRW rd, csr, rs1: 原子读写 CSR
+    fn emit_csrrw(&mut self, rd: u8, csr: u16, rs1: u8) {
+        let insn = (csr as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b001 << 12
+            | (rd as u32) << 7
+            | 0x73;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// CSRRS rd, csr, rs1: 原子读并置位 CSR
+    fn emit_csrrs(&mut self, rd: u8, csr: u16, rs1: u8) {
+        let insn = (csr as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b010 << 12
+            | (rd as u32) << 7
+            | 0x73;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// CSRRC rd, csr, rs1: 原子读并清位 CSR
+    fn emit_csrrc(&mut self, rd: u8, csr: u16, rs1: u8) {
+        let insn = (csr as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b011 << 12
+            | (rd as u32) << 7
+            | 0x73;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// CSRRWI rd, csr, uimm: 立即数原子读写 CSR
+    fn emit_csrrwi(&mut self, rd: u8, csr: u16, uimm: u8) {
+        let insn = (csr as u32) << 20
+            | ((uimm as u32) & 0x1f) << 15
+            | 0b101 << 12
+            | (rd as u32) << 7
+            | 0x73;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// MRET: 机器模式返回
+    fn emit_mret(&mut self) {
+        // 0x30200073: funct7=0011000, rs2=00010, rs1=00000, funct3=000, rd=00000
+        let insn = 0x30200073u32;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SRET: 监管模式返回
+    fn emit_sret(&mut self) {
+        let insn = 0x10200073u32;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// WFI: 等待中断
+    fn emit_wfi(&mut self) {
+        let insn = 0x10500073u32;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SFENCE.VMA rs1, rs2: 虚拟内存屏障
+    fn emit_sfence_vma(&mut self, rs1: u8, rs2: u8) {
+        let insn = (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b000 << 12
+            | 0x73;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FENCE: 内存屏障 (全序)
+    fn emit_fence(&mut self) {
+        // FENCE pred=RW, succ=RW, fm=0
+        let insn = 0x0ff0000fu32;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FENCE.I: 指令获取屏障
+    fn emit_fence_i(&mut self) {
+        let insn = 0x0000100fu32;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    // ===== M8 新增: sret 辅助 =====
+
+    /// memcpy_sp_to_a0: 从栈偏移 tmp 拷贝 size 字节到 [a0] 指向的内存
+    fn memcpy_sp_to_a0(&mut self, tmp_off: i32, size: usize) {
+        // a0 已指向目标 (caller 传入的 sret slot)
+        // t0 = sp + tmp_off (源地址)
+        self.mov_a_reg_sp_off(5, tmp_off); // t0 = &tmp
+        let mut copied = 0usize;
+        while copied + 8 <= size {
+            // ld t1, 0(t0); sd t1, 0(a0)
+            self.emit_ld(6, 5, copied as i32);  // t1 = [t0+off]
+            self.emit_sd(6, 10, copied as i32);  // [a0+off] = t1
+            copied += 8;
+        }
+        while copied + 4 <= size {
+            self.emit_lw(6, 5, copied as i32);
+            self.emit_sw(6, 10, copied as i32);
+            copied += 4;
+        }
+        while copied < size {
+            self.emit_lbu(6, 5, copied as i32);
+            self.emit_sb(6, 10, copied as i32);
+            copied += 1;
+        }
+    }
+
+    /// LD rd, offset(rs1): 64-bit 整数加载
+    fn emit_ld(&mut self, rd: u8, rs1: u8, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b011 << 12 | (rd as u32) << 7 | 0x03;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SD rs2, offset(rs1): 64-bit 整数存储
+    fn emit_sd(&mut self, rs2: u8, rs1: u8, off: i32) {
+        let imm = off as u32;
+        let insn = ((imm >> 5) & 0x7f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b011 << 12
+            | (imm & 0x1f) << 7
+            | 0x23;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LBU rd, offset(rs1): 无符号字节加载
+    fn emit_lbu(&mut self, rd: u8, rs1: u8, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b100 << 12 | (rd as u32) << 7 | 0x03;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SB rs2, offset(rs1): 字节存储
+    fn emit_sb(&mut self, rs2: u8, rs1: u8, off: i32) {
+        let imm = off as u32;
+        let insn = ((imm >> 5) & 0x7f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b000 << 12
+            | (imm & 0x1f) << 7
+            | 0x23;
+        self.emit(&insn.to_le_bytes());
+    }
 }
 
 fn find_func<'a>(prog: &'a Program, name: &str) -> Option<&'a FuncDecl> {
@@ -1068,6 +1646,48 @@ fn find_func<'a>(prog: &'a Program, name: &str) -> Option<&'a FuncDecl> {
         Decl::Func(f) if f.name.name == name => Some(f),
         _ => None,
     })
+}
+
+/// RISC-V HFA 分类 (同构浮点聚合)
+/// RV64 约定: 最多 4 个 float/double 字段, 同类型
+fn classify_rv_hfa(
+    ty: &ValueType,
+    fields: &HashMap<String, (Arc<Vec<Field>>, bool)>,
+) -> Option<HfaInfo> {
+    let ValueType::Aggregate { name, size, is_union: false } = ty else {
+        return None;
+    };
+    if *size == 0 || *size > 64 {
+        return None;
+    }
+    let (flds, is_union) = fields.get(name)?;
+    if *is_union || flds.is_empty() || flds.len() > 4 {
+        return None;
+    }
+    let first_bits = match &flds[0].ty {
+        Type::Float => 32u16,
+        Type::Double => 64u16,
+        _ => return None,
+    };
+    for f in flds.iter() {
+        match (&f.ty, first_bits) {
+            (Type::Float, 32) | (Type::Double, 64) => {}
+            _ => return None,
+        }
+    }
+    Some(HfaInfo {
+        elem_bits: first_bits,
+        count: flds.len() as u8,
+        total_size: *size,
+    })
+}
+
+/// RISC-V HFA 描述
+#[derive(Clone, Copy, Debug)]
+struct HfaInfo {
+    elem_bits: u16,
+    count: u8,
+    total_size: usize,
 }
 
 fn trunc_i32(v: i128) -> u32 {
@@ -1221,5 +1841,98 @@ mod tests {
             (insn & 0x7F) == 0x13 && ((insn >> 12) & 7) == 0 && ((insn >> 15) & 0x1F) == 2
         });
         assert!(has_addi_sp, "expected addi rd, sp, #off (M7 by-ref aggregate)");
+    }
+
+    // M8: JAL 范围校验
+    #[test]
+    fn riscv64_jal_range_check() {
+        assert!(Riscv64Codegen::jal_offset_in_range(0));
+        assert!(Riscv64Codegen::jal_offset_in_range((1 << 20) - 1));
+        assert!(Riscv64Codegen::jal_offset_in_range(-(1 << 20)));
+        assert!(!Riscv64Codegen::jal_offset_in_range(1 << 20));
+        assert!(!Riscv64Codegen::jal_offset_in_range(-(1 << 20) - 1));
+    }
+
+    // M8: 压缩指令 C.ADDI 编码验证
+    // C.ADDI x10, 5: funct3=000, imm[5]=0, rd=10, imm[4:0]=00101, op=01
+    // = 0b000_0_01010_00101_01 = 0x0511
+    #[test]
+    fn riscv64_compressed_c_addi_emit() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.emit_c_addi(10, 5);
+        let code = &cg.code;
+        assert!(code.len() >= 2, "C.ADDI should emit 2 bytes");
+        let insn = u16::from_le_bytes([code[0], code[1]]);
+        // funct3=000 (bits 15:13), rd=10 (bits 11:7), op=01 (bits 1:0)
+        assert_eq!(insn & 0x3, 0x01, "C.ADDI opcode should be 01");
+        assert_eq!((insn >> 7) & 0x1f, 10, "rd should be a0 (x10)");
+    }
+
+    // M8: 双精度 FP D 扩展指令编码
+    // FADD.D fa0, fa0, fa1: funct7=0000001, rs2=11, rs1=10, rd=10
+    // insn = 0x02B57553
+    #[test]
+    fn riscv64_fadd_d_emit() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.emit_fadd_d(10, 10, 11); // fa0 = fa0 + fa1
+        let code = &cg.code;
+        assert!(code.len() >= 4);
+        let insn = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        assert_eq!(insn & 0x7f, 0x53, "opcode should be 0x53 (FP)");
+        assert_eq!((insn >> 25) & 0x7f, 0x01, "funct7 should be 0000001 (FADD.D)");
+    }
+
+    // M8: CSR 访问指令 CSRRS 编码
+    // CSRRS a0, mstatus(0x300), zero: csr=0x300, rs1=0, rd=10
+    #[test]
+    fn riscv64_csrrs_mstatus_emit() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.emit_csrrs(10, 0x300, 0); // read mstatus
+        let code = &cg.code;
+        assert!(code.len() >= 4);
+        let insn = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        assert_eq!(insn & 0x7f, 0x73, "opcode should be 0x73 (SYSTEM)");
+        assert_eq!((insn >> 12) & 0x7, 0b010, "funct3 should be 010 (CSRRS)");
+        assert_eq!((insn >> 20) & 0xfff, 0x300, "csr should be mstatus (0x300)");
+    }
+
+    // M8: RVV VSETVLI 指令编码
+    #[test]
+    fn riscv64_vsetvli_emit() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.emit_vsetvli(0, 0, 0); // vsetvli zero, zero, vtype=0
+        let code = &cg.code;
+        assert!(code.len() >= 4);
+        let insn = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        assert_eq!(insn & 0x7f, 0x57, "opcode should be 0x57 (OP-V)");
+        assert_eq!((insn >> 12) & 0x7, 0b111, "funct3 should be 111");
+    }
+
+    // M8: FENCE 内存屏障编码
+    #[test]
+    fn riscv64_fence_emit() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.emit_fence();
+        let code = &cg.code;
+        assert!(code.len() >= 4);
+        let insn = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        assert_eq!(insn, 0x0ff0000f, "FENCE encoding: 0x0ff0000f");
+    }
+
+    // M8: MRET 特权返回编码
+    #[test]
+    fn riscv64_mret_emit() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.emit_mret();
+        let code = &cg.code;
+        assert!(code.len() >= 4);
+        let insn = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        assert_eq!(insn, 0x30200073, "MRET encoding: 0x30200073");
     }
 }

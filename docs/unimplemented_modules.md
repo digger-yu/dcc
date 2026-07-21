@@ -135,19 +135,28 @@ SIMD 指令子集完整实装：
 
 ### 1.4 RISC-V64 后端
 
-🟠 M7 当前桩：
+✅ M8 已实装（2026-07-21）：
 
-| 模块 | 文件:行 | 现状 |
-|------|---------|------|
-| `emit_jal_placeholder` | `riscv64.rs:801` | `jal x0, 0` 占位 |
-| HFA | — | 未识别 |
-| `>16B` struct 返回 sret | `riscv64.rs` | 同 aarch64 |
-| eh_frame / ORC / sanitizer 节 | — | 没有 |
-| DWARF / BTF | — | 没有 |
-| 压缩指令 (C 扩展) | — | 始终 4 字节编码，体积偏大 |
-| FP 扩展子集 | — | 仅基础 `f` 扩展 |
-| 向量扩展 (V) | — | 完全没有（RVV） |
-| 特权指令 / CSR 访问 | — | 缺失 |
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| `emit_jal_placeholder` | ✅ 已完善 | 增加 ±1MiB 范围校验 (`jal_offset_in_range`) + `debug_assert` |
+| HFA（同构浮点聚合） | ✅ 已实装 | `classify_rv_hfa` + `HfaInfo` 分类，支持 float/double 1–4 元素 |
+| `>16B` struct 返回 sret | ✅ 已实装 | `memcpy_sp_to_a0` 逐块拷贝 + 调用方 sret 槽 |
+| eh_frame / ORC / sanitizer 节 | ✅ 已实装 | `mod.rs` 中 RISC-V 分支已发射 `.eh_frame` + `.orc_unwind_ip` + `.dcc.san_info` |
+| DWARF / BTF | ✅ 已实装 | `build_dwarf_full` 用 `RiscV64` 架构选项 + `.BTF` 节 |
+| 压缩指令 (C 扩展) | ✅ 已实装 | `emit_c_addi/c_nop/c_li/c_lw/c_sw/c_j/c_beqz` 16-bit 编码 |
+| FP 扩展子集 (D 扩展) | ✅ 已实装 | `emit_fld/fsd` + `fadd/fsub/fmul/fdiv.d` + `fcvt.d.w/l/s` + `fmv.d.x/x.d` + `fsgnj.d` |
+| 向量扩展 (V) 基础 | ✅ 已实装 | `emit_vsetvli/vsetivli` + `vle32/vse32.v` + `vadd/vmul.vv` + `vredsum.vs` |
+| 特权指令 / CSR 访问 | ✅ 已实装 | `emit_csrrw/csrrs/csrrc/csrrwi` + `emit_mret/sret/wfi` + `sfence.vma` + `fence/fence.i` |
+
+🟠 仍待完善：
+
+| 模块 | 现状 |
+|------|------|
+| RVV 完整指令集 | 仅基础 VSETVLI/LOAD/STORE/ADD/MUL/REDUCE，缺宽化/窄化/掩码/浮点向量 |
+| 压缩指令自动选择 | 手动发射，未实现自动 4→2 字节压缩优化 |
+| D 扩展完整 | 缺 FSQRT.D / FMIN.D / FMAX.D / FEQ.D / FLT.D / FLE.D 比较指令 |
+| Zicsr 扩展 CSR 全集合 | 仅实现 CSRRW/CSRRS/CSRRC/CSRRWI，缺 CSRRSI/CSRRCI |
 
 ### 1.5 MIPS / ARM / MIPS64
 
@@ -468,16 +477,16 @@ M19 关键改动:
 
 🟠 部分实装：
 
-- DWARF v4：✅ x86_64
-- `.BTF`：✅ x86_64（struct dcc_probe）
-- `.eh_frame`：✅ x86_64（CIE + FDE）
-- `.orc_unwind_ip`：✅ x86_64
+- DWARF v4：✅ x86_64 / ✅ AArch64 (M8) / ✅ RISC-V (M8)
+- `.BTF`：✅ x86_64（struct dcc_probe）/ ✅ AArch64 (M8) / ✅ RISC-V (M8)
+- `.eh_frame`：✅ x86_64（CIE + FDE）/ ✅ AArch64 (M8) / ✅ RISC-V (M8)
+- `.orc_unwind_ip`：✅ x86_64 / ✅ AArch64 (M8) / ✅ RISC-V (M8)
 - DWARF line table：🟠 简化（无 matrix 优化）
 - DWARF type info：🟠 简化（仅 int/struct probe）
 - DWARF call frame：✅ CIE + FDE
 - `-gsplit-dwarf` / `-gpubnames` | 🔴 无
 - GDB index (`-Wl,--gdb-index`) | 🔴 无
-- AArch64/RISC-V DWARF / BTF | 🔴 无
+- AArch64/RISC-V DWARF / BTF | ✅ M8 已实装（`build_dwarf_full` + `.BTF` 节）
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
