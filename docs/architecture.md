@@ -653,14 +653,23 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     dispatch；`movq` 走通用 `emit_asm_mov` (size=64)。
   - **2 操作数 VEX 形式**：`vunpcklps/hps/lpd/hpd` 等支持 AT&T
     2 操作数形式（src, dst），通过专用 helper 编码 vvvv=dst。
-  - **测试**：`tests/fixtures/asm_avx_aes_fma_tsx.c` 26+ 个用例
+  - **测试**：`tests/fixtures/asm_avx_aes_fma_tsx.c` 30+ 个用例
     覆盖 AES-NI、SHA、FMA 132/213/231、F16C、AVX 浮点 3 操作数、
     AVX 标量、AVX 整数 3 操作数、AVX 移动与杂项、AVX-VNNI、
-    SSE3/SSSE3/SSE4.1/SSE4.2、TSX、AVX 转换、AVX-512 zmm 编码、
-    256 位 vperm2f128/vinsertf128/vextractf128 等；每个函数只
-    测试一类指令子集（失败易定位）。
+    SSE3/SSSE3/SSE4.1/SSE4.2（含 GPR 源/目的的 pinsr/pextr）、
+    VPINSR/VPEXTR/VEXTRACT、TSX（xbegin/xabort）、AMX tile、
+    AVX 转换、AVX-512 EVEX `_z` 编码、256 位 vperm2f128/vinsertf128/
+    vextractf128 等；每个函数只测试一类指令子集（失败易定位）。
     `asm_avx_aes_fma_tsx_compiles_without_nop_fallback` 在本地
-    Linux 上 PASS。
+    Linux/Windows 上 PASS。
+  - **M13.2 增量（2026-07-21）**：
+    - `parse_asm_reg` 新增 `ymm0–15`/`zmm0–31`/`tmm0–7`/`k0–7`
+      （u8 标签 128=xmm/129=ymm/130=zmm/131=tmm/132=k）；
+    - 新增 `emit_asm_pinsr_imm8`/`emit_asm_pextr_imm8`/
+      `emit_asm_vpinsr_imm8`/`emit_asm_vpextr_imm8` helper，
+      正确编码 GPR/内存 ↔ XMM 的 SSE4.1/AVX 插入提取指令；
+    - AMX `tileloadd`/`tilestored` 兼容两种 AT&T 操作数顺序；
+    - 修复 imm8 类指令 inner 条件不匹配时静默漏发字节的 bug。
   - **已知简化**：
     - AVX-512 mask (`aaa`) / broadcast (`b`) / ER (`RC`/`RM`/`RD`/`RU`)
       路由字段目前未区分（默认 000），适用于非掩码 / 非广播场景；

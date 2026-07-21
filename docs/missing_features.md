@@ -289,6 +289,7 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | float 取模 (M13.1) | 软件 fmod = l - trunc(l/r) * r，divss/divsd + cvttsX2si + cvtsi2sX + mul + sub，零 libc 依赖；`ir.rs::FLOAT_BINOPS` 含 `Mod` |
 | int128 `&&`/`\|\|` (M13.1) | `or rdx, dst` 合并高 64 位后再 test，避免「高 1 低 0」误判 0 |
 | asm `x` 约束 XMM early-clobber (M13.1) | 独立 `input_xmm_set` + `xmm_pool` 0..15 内避让，asm goto 输出寄存器可落入不同 XMM |
+| mini-asm SIMD 扩展 (M13/M13.2) | VEX/EVEX 前缀 + AVX/AVX2/AVX-512 + SSE3–4.2 + AES-NI/SHA + FMA/F16C + TSX + AMX + AVX-VNNI；`pinsr*`/`pextr*` GPR 操作数 + `tmm`/`ymm`/`zmm`/`k` 寄存器名；`asm_avx_aes_fma_tsx.c` 集成测试 PASS |
 
 ## Sanitizer 插桩（AST 层全部通道已交付）
 

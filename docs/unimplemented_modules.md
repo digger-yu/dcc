@@ -59,23 +59,27 @@ x86_64 codegen 对 GNU 内联 asm 的 mini-asm 汇编器已覆盖常用指令，
 | `ud2` | 占位 panic | — | ✅ M12 mini-asm |
 | `sse mov` / `sse arith` | 大量 xmm 内存模式 | SIMD 内联 | 🟡 部分 |
 
-🔴 完全没有的指令子集：
+✅ **M13 已完成**（见 `docs/architecture.md` M13 章节）— x86_64 mini-asm
+SIMD 指令子集完整实装：
 
-- AVX / AVX2 / AVX-512：`v*` 前缀、`vzeroupper`、`vextract*` 等
-- SSE3/SSSE3/SSE4.1/SSE4.2：缺失的整数 SIMD（`pshufb`/`pmulhrsw`/`pinsr*` 等）
-- AES-NI / SHA：`aesenc`/`aesdec`/`sha*rndsi*`
-- FMA / F16C：4 操作数 FMA、CVT 16↔32
-- TSX：`xbegin` / `xend` / `xabort`
-- AMX / AVX-VNNI：tile 指令
+| 扩展 | 状态 | 覆盖 |
+|------|------|------|
+| AVX/AVX2/AVX-512 | ✅ | `v*` 前缀、`vzeroupper`/`vzeroall`、`vextractf128/i128`、`vpinsr*`/`vpextr*`/`vextractps/pd`、EVEX `_z` 简化路径 |
+| SSE3–SSE4.2 | ✅ | `pshufb`/`pmulhrsw`/`pinsr*`/`pextr*`/`extractps`/`insertps`/`round*`/`crc32*` 等 30+ 条 |
+| AES-NI / SHA | ✅ | `aesenc/dec*`、`sha*rnds*`/`sha*msg*` 共 13 条 |
+| FMA / F16C | ✅ | 32 个 FMA 4 操作数变体 + `vcvtph2ps`/`vcvtps2ph` |
+| TSX | ✅ | `xbegin`/`xend`/`xabort`/`xtest` |
+| AMX / AVX-VNNI | ✅ | `ldtilecfg`/`sttilecfg`/`tilezero`/`tileloadd`/`tilestored` + 4× `tdp*` + `vpdp*`；`tmm0–7` 寄存器解析 |
+| 寄存器名 | ✅ | `xmm`/`ymm`/`zmm`/`tmm`/`k0–7` 均可解析 |
 
-→ **M13 已完成**（见 `docs/architecture.md` M13 章节）：新增 VEX (C5/C4)
-与 EVEX (62) 前缀通用 helper；32 个 FMA 4 操作数变体（132/213/231 ×
-ps/pd/ss/sd × add/sub/nmadd/nmsub）；AES-NI 6 条 + SHA 7 条 + F16C 2 条；
-TSX 4 条（xbegin/xend/xabort/xtest）；AMX 9 条（ldtilecfg/sttilecfg/
-tilezero/tileloadd/tilestored + 4 条 tdp*）；AVX-VNNI 3 条（vpdpbusd/
-vpdpbssd/vpdpwssd）；SSE3/SSSE3/SSE4.1/SSE4.2 整数 SIMD 30+ 条；
-AVX/AVX2 浮点 60+ 条；`asm_avx_aes_fma_tsx_compiles_without_nop_fallback`
-本地 `cargo test --test integration` PASS。
+测试：`tests/fixtures/asm_avx_aes_fma_tsx.c`（含 AMX/VPINSR/EVEX/TSX xabort）+
+`asm_avx_aes_fma_tsx_compiles_without_nop_fallback` 本地 PASS。
+
+**M13.2 增量（2026-07-21）**：修复 `pinsr*`/`pextr*`/`extractps`
+对 GPR/内存操作数的编码（此前 inner 条件不匹配会静默漏发字节）；
+新增 `vpinsrb/d/q`、`vpextrb/d/q`、`vextractps/pd`；`parse_asm_reg`
+支持 `ymm`/`zmm`/`tmm`/`k`；AMX `tileloadd`/`tilestored` 兼容
+`(tmm, mem)` 与 `(mem, tmm)` 两种 AT&T 顺序。
 
 ### 1.2 x86_64 codegen 表达式层
 

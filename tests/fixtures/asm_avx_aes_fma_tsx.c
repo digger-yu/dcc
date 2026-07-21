@@ -358,6 +358,56 @@ unsigned long long test_avx_misc2(unsigned long long a, unsigned long long b) {
     return a;
 }
 
+// AMX tile 指令（仅编码验证，需 AMX 硬件才能运行）
+int test_amx_tile(void) {
+    char buf[64] __attribute__((aligned(64)));
+    __asm__ volatile (
+        "tilezero %%tmm0\n"
+        "tileloadd %%tmm0, %0\n"
+        "tilestored %0, %%tmm0\n"
+        "tdpbssd %%tmm0, %%tmm1, %%tmm2\n"
+        "tdpbusd %%tmm0, %%tmm1, %%tmm2\n"
+        :
+        : "m"(buf)
+        : "memory"
+    );
+    return 0;
+}
+
+// AVX vpinsr/vpextr/vextract
+unsigned long long test_vpinsr_vpextr(unsigned long long a, unsigned long long b) {
+    int v = 0;
+    __asm__ volatile (
+        "movd %0, %%xmm0\n"
+        "movd %1, %%xmm1\n"
+        "vpinsrb $0, %2, %%xmm1, %%xmm0\n"
+        "vpinsrd $0, %2, %%xmm0\n"
+        "vpextrd $0, %%xmm0, %2\n"
+        "vextractps $0, %%xmm0, %2\n"
+        "movd %%xmm0, %0"
+        : "+r"(a), "+r"(b), "+r"(v)
+        :
+        : "xmm0", "xmm1"
+    );
+    return a + b + (unsigned long long)v;
+}
+
+// AVX-512 EVEX 简化 (_z 后缀)
+unsigned long long test_avx512_evex(unsigned long long a, unsigned long long b) {
+    __asm__ volatile (
+        "movd %0, %%xmm0\n"
+        "movd %1, %%xmm1\n"
+        "vaddps_z %%xmm1, %%xmm1, %%xmm0\n"
+        "vmovdqa32_z %%xmm1, %%xmm0\n"
+        "vmulps_z %%xmm1, %%xmm1, %%xmm0\n"
+        "movd %%xmm0, %0"
+        : "+r"(a)
+        : "r"(b)
+        : "xmm0", "xmm1"
+    );
+    return a;
+}
+
 // 128/256 移动: vbroadcastss
 unsigned long long test_vbroadcast(unsigned long long a, unsigned long long b) {
     __asm__ volatile (
@@ -590,11 +640,16 @@ int avx_test_main(void) {
     a = test_avx_int(a, b);
     a = test_avx_misc2(a, b);
     a = test_vbroadcast(a, b);
+    a = test_avx_256(a, b);
     a = test_vnni(a, b);
+    a = test_vpinsr_vpextr(a, b);
     a = test_sse3_ssse3_sse4(a, b);
     a = test_avx_cvt(a, b);
     a = test_avx512(a, b);
+    a = test_avx512_evex(a, b);
     (void)test_tsx_xbegin();
+    (void)test_tsx_xabort();
+    (void)test_amx_tile();
     (void)test_crc32((unsigned int)a, (unsigned char)b);
     (void)test_crc32l((unsigned int)a, (unsigned int)b);
     (void)test_crc32q(a, b);

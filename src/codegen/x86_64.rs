@@ -149,6 +149,12 @@ enum AsmOperand {
 
 /// parse_asm_mem 中 %rip 相对寻址的 base 哨兵值
 const ASM_BASE_RIP: u8 = 255;
+/// mini-asm 寄存器宽度标签（u8 编码，>=128 表示向量/特殊寄存器）
+const ASM_REG_XMM: u8 = 128;
+const ASM_REG_YMM: u8 = 129;
+const ASM_REG_ZMM: u8 = 130;
+const ASM_REG_TMM: u8 = 131;
+const ASM_REG_K: u8 = 132;
 
 /// 内联 asm 约束绑定结果
 struct AsmOpBinding {
@@ -8132,10 +8138,29 @@ impl Codegen {
             "r14" => Some((14, 64)), "r14d" => Some((14, 32)), "r14w" => Some((14, 16)), "r14b" => Some((14, 8)),
             "r15" => Some((15, 64)), "r15d" => Some((15, 32)), "r15w" => Some((15, 16)), "r15b" => Some((15, 8)),
             "rip" => Some((ASM_BASE_RIP, 64)),
-            "xmm0" => Some((0, 128)), "xmm1" => Some((1, 128)), "xmm2" => Some((2, 128)), "xmm3" => Some((3, 128)),
-            "xmm4" => Some((4, 128)), "xmm5" => Some((5, 128)), "xmm6" => Some((6, 128)), "xmm7" => Some((7, 128)),
-            "xmm8" => Some((8, 128)), "xmm9" => Some((9, 128)), "xmm10" => Some((10, 128)), "xmm11" => Some((11, 128)),
-            "xmm12" => Some((12, 128)), "xmm13" => Some((13, 128)), "xmm14" => Some((14, 128)), "xmm15" => Some((15, 128)),
+            "xmm0" => Some((0, ASM_REG_XMM)), "xmm1" => Some((1, ASM_REG_XMM)), "xmm2" => Some((2, ASM_REG_XMM)), "xmm3" => Some((3, ASM_REG_XMM)),
+            "xmm4" => Some((4, ASM_REG_XMM)), "xmm5" => Some((5, ASM_REG_XMM)), "xmm6" => Some((6, ASM_REG_XMM)), "xmm7" => Some((7, ASM_REG_XMM)),
+            "xmm8" => Some((8, ASM_REG_XMM)), "xmm9" => Some((9, ASM_REG_XMM)), "xmm10" => Some((10, ASM_REG_XMM)), "xmm11" => Some((11, ASM_REG_XMM)),
+            "xmm12" => Some((12, ASM_REG_XMM)), "xmm13" => Some((13, ASM_REG_XMM)), "xmm14" => Some((14, ASM_REG_XMM)), "xmm15" => Some((15, ASM_REG_XMM)),
+            // ymm/zmm：VEX/EVEX 256/512 位向量寄存器
+            "ymm0" => Some((0, ASM_REG_YMM)), "ymm1" => Some((1, ASM_REG_YMM)), "ymm2" => Some((2, ASM_REG_YMM)), "ymm3" => Some((3, ASM_REG_YMM)),
+            "ymm4" => Some((4, ASM_REG_YMM)), "ymm5" => Some((5, ASM_REG_YMM)), "ymm6" => Some((6, ASM_REG_YMM)), "ymm7" => Some((7, ASM_REG_YMM)),
+            "ymm8" => Some((8, ASM_REG_YMM)), "ymm9" => Some((9, ASM_REG_YMM)), "ymm10" => Some((10, ASM_REG_YMM)), "ymm11" => Some((11, ASM_REG_YMM)),
+            "ymm12" => Some((12, ASM_REG_YMM)), "ymm13" => Some((13, ASM_REG_YMM)), "ymm14" => Some((14, ASM_REG_YMM)), "ymm15" => Some((15, ASM_REG_YMM)),
+            "zmm0" => Some((0, ASM_REG_ZMM)), "zmm1" => Some((1, ASM_REG_ZMM)), "zmm2" => Some((2, ASM_REG_ZMM)), "zmm3" => Some((3, ASM_REG_ZMM)),
+            "zmm4" => Some((4, ASM_REG_ZMM)), "zmm5" => Some((5, ASM_REG_ZMM)), "zmm6" => Some((6, ASM_REG_ZMM)), "zmm7" => Some((7, ASM_REG_ZMM)),
+            "zmm8" => Some((8, ASM_REG_ZMM)), "zmm9" => Some((9, ASM_REG_ZMM)), "zmm10" => Some((10, ASM_REG_ZMM)), "zmm11" => Some((11, ASM_REG_ZMM)),
+            "zmm12" => Some((12, ASM_REG_ZMM)), "zmm13" => Some((13, ASM_REG_ZMM)), "zmm14" => Some((14, ASM_REG_ZMM)), "zmm15" => Some((15, ASM_REG_ZMM)),
+            "zmm16" => Some((16, ASM_REG_ZMM)), "zmm17" => Some((17, ASM_REG_ZMM)), "zmm18" => Some((18, ASM_REG_ZMM)), "zmm19" => Some((19, ASM_REG_ZMM)),
+            "zmm20" => Some((20, ASM_REG_ZMM)), "zmm21" => Some((21, ASM_REG_ZMM)), "zmm22" => Some((22, ASM_REG_ZMM)), "zmm23" => Some((23, ASM_REG_ZMM)),
+            "zmm24" => Some((24, ASM_REG_ZMM)), "zmm25" => Some((25, ASM_REG_ZMM)), "zmm26" => Some((26, ASM_REG_ZMM)), "zmm27" => Some((27, ASM_REG_ZMM)),
+            "zmm28" => Some((28, ASM_REG_ZMM)), "zmm29" => Some((29, ASM_REG_ZMM)), "zmm30" => Some((30, ASM_REG_ZMM)), "zmm31" => Some((31, ASM_REG_ZMM)),
+            // AMX tile 寄存器 (tmm0–tmm7)
+            "tmm0" => Some((0, ASM_REG_TMM)), "tmm1" => Some((1, ASM_REG_TMM)), "tmm2" => Some((2, ASM_REG_TMM)), "tmm3" => Some((3, ASM_REG_TMM)),
+            "tmm4" => Some((4, ASM_REG_TMM)), "tmm5" => Some((5, ASM_REG_TMM)), "tmm6" => Some((6, ASM_REG_TMM)), "tmm7" => Some((7, ASM_REG_TMM)),
+            // AVX-512 mask 寄存器 (k0–k7)
+            "k0" => Some((0, ASM_REG_K)), "k1" => Some((1, ASM_REG_K)), "k2" => Some((2, ASM_REG_K)), "k3" => Some((3, ASM_REG_K)),
+            "k4" => Some((4, ASM_REG_K)), "k5" => Some((5, ASM_REG_K)), "k6" => Some((6, ASM_REG_K)), "k7" => Some((7, ASM_REG_K)),
             _ => None,
         }
     }
@@ -8958,81 +8983,95 @@ impl Codegen {
             "pcmpgtq" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 128, 1, 2, 0x37, 0),
             // pinsrb/pinsrd/pinsrq : 66 0F 3A 20/22/21 /r ib
             "pinsrb" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit(&[0x20, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ds == 128 {
+                        self.emit_asm_pinsr_imm8(*imm, src, *d, 0x20, 0);
+                    } else {
+                        eprintln!("warning: pinsrb dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pinsrb needs imm, reg, reg, emitted as nop");
+                    eprintln!("warning: pinsrb needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             "pinsrd" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit(&[0x22, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ds == 128 {
+                        self.emit_asm_pinsr_imm8(*imm, src, *d, 0x22, 0);
+                    } else {
+                        eprintln!("warning: pinsrd dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pinsrd needs imm, reg, reg, emitted as nop");
+                    eprintln!("warning: pinsrd needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             "pinsrq" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*d, *s, 3, 1, 0, 0, 1);
-                        self.emit(&[0x22, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ds == 128 {
+                        self.emit_asm_pinsr_imm8(*imm, src, *d, 0x22, 1);
+                    } else {
+                        eprintln!("warning: pinsrq dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pinsrq needs imm, reg, reg, emitted as nop");
+                    eprintln!("warning: pinsrq needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             // pextrb/pextrd/pextrq : 66 0F 3A 14/16/15 /r ib
             "pextrb" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*s, *d, 3, 0, 0, 0, 1);
-                        self.emit(&[0x14, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_pextr_imm8(*imm, *s, dst, 0x14, 0);
+                    } else {
+                        eprintln!("warning: pextrb src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pextrb needs imm, reg, reg, emitted as nop");
+                    eprintln!("warning: pextrb needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             "pextrd" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*s, *d, 3, 0, 0, 0, 1);
-                        self.emit(&[0x16, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_pextr_imm8(*imm, *s, dst, 0x16, 0);
+                    } else {
+                        eprintln!("warning: pextrd src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pextrd needs imm, reg, reg, emitted as nop");
+                    eprintln!("warning: pextrd needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             "pextrq" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*s, *d, 3, 1, 0, 0, 1);
-                        self.emit(&[0x16, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_pextr_imm8(*imm, *s, dst, 0x16, 1);
+                    } else {
+                        eprintln!("warning: pextrq src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pextrq needs imm, reg, reg, emitted as nop");
+                    eprintln!("warning: pextrq needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             // extractps : 66 0F 3A 17 /r ib
             "extractps" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*s, *d, 3, 0, 0, 0, 1);
-                        self.emit(&[0x17, Self::modrm_reg_reg(*s, *d), *imm as u8]);
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_pextr_imm8(*imm, *s, dst, 0x17, 0);
+                    } else {
+                        eprintln!("warning: extractps src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: extractps needs imm, reg, reg, emitted as nop");
+                    eprintln!("warning: extractps needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -9042,9 +9081,163 @@ impl Codegen {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
                         self.emit(&[0x21, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    } else {
+                        eprintln!("warning: insertps needs xmm operands, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: insertps needs imm, reg, reg, emitted as nop");
+                    eprintln!("warning: insertps needs imm, xmm, xmm, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // AVX vpinsrb/vpinsrd/vpinsrq : VEX.128.66.0F3A.W0 20/22/22 /r ib
+            "vpinsrb" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ds == 128 {
+                        self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x20, 0);
+                    } else {
+                        eprintln!("warning: vpinsrb dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpinsrb needs imm, src, xmm, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vpinsrb" if ops.len() == 4 => {
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(v, vs), AsmOperand::Reg(d, ds)) =
+                    (&ops[0], &ops[1], &ops[2], &ops[3])
+                {
+                    if *vs == 128 && *ds == 128 {
+                        self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x20, 0);
+                    } else {
+                        eprintln!("warning: vpinsrb needs xmm vvvv/dst, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpinsrb needs imm, src, xmm, xmm, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vpinsrd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ds == 128 {
+                        self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x22, 0);
+                    } else {
+                        eprintln!("warning: vpinsrd dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpinsrd needs imm, src, xmm, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vpinsrd" if ops.len() == 4 => {
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(v, vs), AsmOperand::Reg(d, ds)) =
+                    (&ops[0], &ops[1], &ops[2], &ops[3])
+                {
+                    if *vs == 128 && *ds == 128 {
+                        self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x22, 0);
+                    } else {
+                        eprintln!("warning: vpinsrd needs xmm vvvv/dst, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpinsrd needs imm, src, xmm, xmm, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vpinsrq" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ds == 128 {
+                        self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x22, 1);
+                    } else {
+                        eprintln!("warning: vpinsrq dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpinsrq needs imm, src, xmm, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vpinsrq" if ops.len() == 4 => {
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(v, vs), AsmOperand::Reg(d, ds)) =
+                    (&ops[0], &ops[1], &ops[2], &ops[3])
+                {
+                    if *vs == 128 && *ds == 128 {
+                        self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x22, 1);
+                    } else {
+                        eprintln!("warning: vpinsrq needs xmm vvvv/dst, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpinsrq needs imm, src, xmm, xmm, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // AVX vpextrb/vpextrd/vpextrq、vextractps/vextractpd
+            "vpextrb" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x14, 0);
+                    } else {
+                        eprintln!("warning: vpextrb src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpextrb needs imm, xmm, dst, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vpextrd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x16, 0);
+                    } else {
+                        eprintln!("warning: vpextrd src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpextrd needs imm, xmm, dst, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vpextrq" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x16, 1);
+                    } else {
+                        eprintln!("warning: vpextrq src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vpextrq needs imm, xmm, dst, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vextractps" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x17, 0);
+                    } else {
+                        eprintln!("warning: vextractps src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vextractps needs imm, xmm, dst, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "vextractpd" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), dst) = (&ops[0], &ops[1], &ops[2]) {
+                    if *ss == 128 {
+                        self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x19, 0);
+                    } else {
+                        eprintln!("warning: vextractpd src must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: vextractpd needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -9435,23 +9628,25 @@ impl Codegen {
             "sttilecfg" if ops.len() == 1 => self.emit_asm_vex_2op(&ops[0], &AsmOperand::None, 0, 0, 2, 0x4B, 0),
             // tilezero tmm1 : VEX.128.F2.0F38.W0 49 /r (reg)
             "tilezero" if ops.len() == 1 => {
-                if let AsmOperand::Reg(d, _) = &ops[0] {
-                    self.emit(&[0xC4, 0xE2, 0x7B, 0x49, 0xC0 | (d & 7)]);
-                } else { self.emit(&[0x90]); }
+                if let AsmOperand::Reg(d, sz) = &ops[0] {
+                    if *sz == ASM_REG_TMM {
+                        self.emit(&[0xC4, 0xE2, 0x7B, 0x49, 0xC0 | (d & 7)]);
+                    } else {
+                        eprintln!("warning: tilezero needs tmm register, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: tilezero needs tmm register, emitted as nop");
+                    self.emit(&[0x90]);
+                }
             }
             // tileloadd tmm1, sibmem : VEX.128.F2.0F38.W0 4B /r
             "tileloadd" if ops.len() == 2 => {
-                if let (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) = (&ops[0], &ops[1]) {
-                    self.emit(&[0xC4, 0xE2, 0x7B, 0x4B]);
-                    self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
-                } else { self.emit(&[0x90]); }
+                self.emit_asm_tileloadd(&ops[0], &ops[1]);
             }
             // tilestored sibmem, tmm1 : VEX.128.F3.0F38.W0 4B /r
             "tilestored" if ops.len() == 2 => {
-                if let (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) = (&ops[0], &ops[1]) {
-                    self.emit(&[0xC4, 0xE2, 0x7A, 0x4B]);
-                    self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
-                } else { self.emit(&[0x90]); }
+                self.emit_asm_tilestored(&ops[0], &ops[1]);
             }
             // tdpbssd tmm1, tmm2, tmm3 : VEX.128.F2.0F38.W0 5E /r
             "tdpbssd" if ops.len() == 3 => self.emit_asm_amx_3op(&ops[0], &ops[1], &ops[2], 0x5E, 2),
@@ -11173,11 +11368,135 @@ impl Codegen {
     fn emit_asm_amx_3op(&mut self, dst: &AsmOperand, src1: &AsmOperand, src2: &AsmOperand,
                         opcode: u8, pp: u8) {
         let (d, s1, s2) = match (dst, src1, src2) {
-            (AsmOperand::Reg(d, _), AsmOperand::Reg(s, _), AsmOperand::Reg(t, _)) => (*d, *s, *t),
-            _ => { eprintln!("warning: AMX tdp* needs tmm regs, emitted as nop"); self.emit(&[0x90]); return; }
+            (AsmOperand::Reg(d, ds), AsmOperand::Reg(s, ss), AsmOperand::Reg(t, ts))
+                if *ds == ASM_REG_TMM && *ss == ASM_REG_TMM && *ts == ASM_REG_TMM => (*d, *s, *t),
+            _ => {
+                eprintln!("warning: AMX tdp* needs tmm regs, emitted as nop");
+                self.emit(&[0x90]);
+                return;
+            }
         };
         self.emit_vex4_prefix(d, s2, 2, 0, s1, 0, pp);
         self.emit(&[opcode, Self::modrm_reg_reg(d, s2)]);
+    }
+
+    /// SSE4.1 PINSR* — AT&T (imm, src_gpr/mem, dst_xmm)
+    fn emit_asm_pinsr_imm8(&mut self, imm: i64, src: &AsmOperand, dst_xmm: u8, opcode: u8, w: u8) {
+        match src {
+            AsmOperand::Reg(r, sz) if *sz < 128 => {
+                self.emit_vex4_prefix(dst_xmm, *r, 3, w, 0, 0, 1);
+                self.emit(&[opcode, Self::modrm_reg_reg(dst_xmm, *r), imm as u8]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit_vex4_prefix(dst_xmm, *base, 3, w, 0, 0, 1);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(dst_xmm, *disp, *base, *index, *scale);
+                self.emit(&[imm as u8]);
+            }
+            _ => {
+                eprintln!("warning: pinsr src must be gpr or mem, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// SSE4.1 PEXTR* / EXTRACTPS — AT&T (imm, src_xmm, dst_gpr/mem)
+    fn emit_asm_pextr_imm8(&mut self, imm: i64, src_xmm: u8, dst: &AsmOperand, opcode: u8, w: u8) {
+        match dst {
+            AsmOperand::Reg(r, sz) if *sz < 128 => {
+                self.emit_vex4_prefix(src_xmm, *r, 3, w, 0, 0, 1);
+                self.emit(&[opcode, Self::modrm_reg_reg(src_xmm, *r), imm as u8]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit_vex4_prefix(src_xmm, *base, 3, w, 0, 0, 1);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(src_xmm, *disp, *base, *index, *scale);
+                self.emit(&[imm as u8]);
+            }
+            _ => {
+                eprintln!("warning: pextr dst must be gpr or mem, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// AVX VPINSR* — AT&T (imm, src, vvvv_xmm, dst_xmm) 或 3-op (vvvv=dst)
+    fn emit_asm_vpinsr_imm8(&mut self, imm: i64, src: &AsmOperand, vvvv: u8, dst: u8,
+                            opcode: u8, w: u8) {
+        match src {
+            AsmOperand::Reg(r, sz) if *sz < 128 => {
+                self.emit_vex4_prefix(dst, *r, 3, w, vvvv, 0, 1);
+                self.emit(&[opcode, Self::modrm_reg_reg(dst, *r), imm as u8]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit_vex4_prefix(dst, *base, 3, w, vvvv, 0, 1);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(dst, *disp, *base, *index, *scale);
+                self.emit(&[imm as u8]);
+            }
+            _ => {
+                eprintln!("warning: vpinsr src must be gpr or mem, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// AVX VPEXTR* / VEXTRACTPS/PD — AT&T (imm, src_xmm, dst_gpr/mem)
+    fn emit_asm_vpextr_imm8(&mut self, imm: i64, src_xmm: u8, dst: &AsmOperand, opcode: u8, w: u8) {
+        match dst {
+            AsmOperand::Reg(r, sz) if *sz < 128 => {
+                self.emit_vex4_prefix(src_xmm, *r, 3, w, 0, 0, 1);
+                self.emit(&[opcode, Self::modrm_reg_reg(src_xmm, *r), imm as u8]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit_vex4_prefix(src_xmm, *base, 3, w, 0, 0, 1);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(src_xmm, *disp, *base, *index, *scale);
+                self.emit(&[imm as u8]);
+            }
+            _ => {
+                eprintln!("warning: vpextr dst must be gpr or mem, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// TILELOADD — 兼容 AT&T (mem, tmm) 与 (tmm, mem) 两种操作数顺序
+    fn emit_asm_tileloadd(&mut self, op0: &AsmOperand, op1: &AsmOperand) {
+        let (tmm, disp, base, index, scale) = match (op0, op1) {
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, sz)) if *sz == ASM_REG_TMM => {
+                (*d, *disp, *base, *index, *scale)
+            }
+            (AsmOperand::Reg(d, sz), AsmOperand::Mem { disp, base, index, scale }) if *sz == ASM_REG_TMM => {
+                (*d, *disp, *base, *index, *scale)
+            }
+            _ => {
+                eprintln!("warning: tileloadd needs tmm and mem, emitted as nop");
+                self.emit(&[0x90]);
+                return;
+            }
+        };
+        self.emit(&[0xC4, 0xE2, 0x7B, 0x4B]);
+        self.emit_asm_modrm_mem_only(tmm, disp, base, index, scale);
+    }
+
+    /// TILESTORED — 兼容 AT&T (tmm, mem) 与 (mem, tmm)
+    fn emit_asm_tilestored(&mut self, op0: &AsmOperand, op1: &AsmOperand) {
+        let (tmm, disp, base, index, scale) = match (op0, op1) {
+            (AsmOperand::Reg(s, sz), AsmOperand::Mem { disp, base, index, scale }) if *sz == ASM_REG_TMM => {
+                (*s, *disp, *base, *index, *scale)
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(s, sz)) if *sz == ASM_REG_TMM => {
+                (*s, *disp, *base, *index, *scale)
+            }
+            _ => {
+                eprintln!("warning: tilestored needs tmm and mem, emitted as nop");
+                self.emit(&[0x90]);
+                return;
+            }
+        };
+        self.emit(&[0xC4, 0xE2, 0x7A, 0x4B]);
+        self.emit_asm_modrm_mem_only(tmm, disp, base, index, scale);
     }
 
     /// 通用 VEX 2 操作数 (reg-reg / reg-mem) — 用于 vmovaps/vmovdqa/vmovdqu 等
