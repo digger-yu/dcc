@@ -94,7 +94,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - 整数溢出 trap (M15)：`-ftrapv` 在 `Add/Sub/Mul/Div` 后置
   `jo` 跳到 `__dcc_trapv_overflow` 桩函数
 - `address_space(N)` sparse 注解 (静默跳过)
-- `__attribute__((format))` printf/scanf 格式检查（`-Wformat` / `W0003`）
+- `__attribute__((format))` printf/scanf 完整格式检查（M23: flag/width/precision/length/type 匹配）
 - `&&label` 标签地址 (GNU 扩展, 通过 RIP-relative LEA 实现)
 - `asm goto` 实际发射 (支持标签跳转)
 - `goto *expr` 计算跳转

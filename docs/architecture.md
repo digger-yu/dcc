@@ -1228,3 +1228,45 @@ OmpTarget / OmpTargetSimd / Cuda / Hip 四类入口。
 
 详见 `docs/profiling.md`。
 
+## M23 边角特性完整化（2026-07-21）
+
+本里程碑将 `unimplemented_modules.md` 中所有 🟠/🔴 状态项实现或升级为 🟢。
+
+### 属性/builtin/杂项（Section 11）
+
+| 模块 | 实现要点 |
+|------|----------|
+| `__attribute__((retain))` | AST `is_retain` + codegen SHF_GNU_RETAIN 节标记 |
+| `__attribute__((used))` | AST `is_used_attr` + codegen USED 符号标记 |
+| `__attribute__((flatten))` | AST `is_flatten` + codegen 调用视为 always_inline |
+| `__attribute__((error/warning/deprecated))` | AST 存储消息 + codegen 扫描调用点发射诊断 |
+| `__attribute__((ifunc("resolver")))` | AST `ifunc_resolver` + codegen STT_GNU_IFUNC |
+| `__attribute__((constructor(N)/destructor(N)))` | AST priority 字段 + codegen 按 priority 排序 |
+| `__builtin_debugtrap()` | codegen 发射 int3 (0xCC) |
+| `__builtin_assume_aligned(p, n)` | codegen 透传指针 |
+| `__builtin_alloca(size)` | codegen sub rsp + 16 字节对齐 |
+| `printf/scanf` 格式检查 | 完整 flag/width/precision/length/type 匹配 |
+| `char16_t`/`char32_t` + u""/U"" | 解析为 uint16/uint32 字符串 |
+| `L"..."` 宽字符 | 解析为 wchar_t 编码 |
+
+### RISC-V D 扩展 + Zicsr（Section 1.4）
+
+- D 扩展完整: FSQRT.D / FMIN.D / FMAX.D / FEQ.D / FLT.D / FLE.D
+- Zicsr 全集合: CSRRSI / CSRRCI 补齐（与既有 CSRRW/S/C + CSRRWI 合计 6 条）
+
+### C++ 前端增强（Section 6）
+
+- `CoroutinePromiseType`: 从协程返回类型推导 promise_type + C 兼容降级
+- `StaticDataMember`: Itanium ABI mangling (`_ZN<class><name>E`) + 定义/访问
+- 模板多参数偏特化: `instantiate_partial_spec` 支持多形参 pattern 匹配
+
+### 预处理器 locale/charset（Section 7）
+
+- `#pragma locale` 实际切换字符集: UTF-8/ASCII/ISO-8859-1
+- `Preprocessor.charset` 字段 + `PreprocessOutput.charset` 暴露
+
+### 文档更新（Section 8.1）
+
+- split-dwarf / gdb-index / DWARF line table 状态更新为 🟢
+- 全部 20+ 项从 🟠/🔴 升级为 🟢
+
