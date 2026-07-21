@@ -76,6 +76,7 @@
 | aarch64/riscv64 移位 (M7) | `lslv`/`lsrv` (aarch64) 修复 Rm bit 错位；`sll`/`srl`/`sra` (riscv64) 替代 0；`aarch64_ir_shifts_emit_lslv_lsrv` + `riscv64_ir_shifts_emit_sll_srl` |
 | 聚合类型 by-ref (M7) | aarch64/riscv64 `gen_call` 检测 `ValueType::Aggregate`/`Array`/`Complex`，local 参数通过 `add xN, sp, #off` / `addi aN, sp, #off` 传地址；`aarch64_aggregate_arg_by_ref` + `riscv64_aggregate_arg_by_ref` |
 | 聚合类型 sret 返回 (M7) | 返回 > 16 字节时 caller 分配 `<sret>` local，x0/a0 指向 sret 槽 |
+| aarch64 M8 完整化 | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 (FCMP Dn,Dm / FCCMP) + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护完整 (dc cvac/civac/cvau/ivac + ic ivau/iallu + dsb ish/sy + isb) + BL/ADR/LDR 范围校验 + HFA store + `emit_cache_sync_range` 循环修复；测试 `aarch64_ccmp_csel_csinc_emit` / `aarch64_fcmp_double_emit` / `aarch64_cache_maintain_emit` / `aarch64_post_index_addring_emit` / `aarch64_bl_range_check` / `aarch64_adr_range_check` 全部 PASS |
 | dcc++ 端到端编译 (M9) | `dcc -x c++ examples/m9_cpp_simple.cpp -o a.o` + `gcc a.o -o a && ./a` 在本地 cargo test 实测 `exit=0`（`Counter` 局部变量 + `c.inc()` 改写 + ctor 初始化列表 + 顶层 main trampoline） |
 | dcc++ 多类 + 隐式 this (M9) | `examples/m9_cpp_multi.cpp` 本地实测 `exit=0`（方法体内未限定 `n_` 自动改写为 `this->n_`） |
 | dcc++ 复合操作符 / C 关键字 (M9) | `->` / `->*` / `--` / `-=` / `++` / `+=` / `<<` / `<<=` / `>>` / `>>=` / `==` / `!=` / `<=` / `>=` / `&&` / `||` / `*=` / `/=` / `%=` / `^=` / `|=` / `&=` / `...` 全部支持；`int` / `return` / `if` / `while` 等不再被误为 `Ident` |

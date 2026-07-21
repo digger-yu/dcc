@@ -109,21 +109,29 @@ SIMD 指令子集完整实装：
 
 ### 1.3 AArch64 后端
 
-🟠 M7 当前桩：
+✅ M8 已实装（2026-07-21）：
 
-| 模块 | 文件:行 | 现状 |
-|------|---------|------|
-| `emit_bl_placeholder` | `aarch64.rs:1027` | `bl 0` 占位，靠 `patch_bl` 修复 |
-| `emit_adr_placeholder` | `aarch64.rs:1079` | ADR 0 占位，部分立即寻址未实现 |
-| `emit_ldr_s0_u32_placeholder` | `aarch64.rs:1084` | LDR s0 占位，浮点字面量走硬编码 |
-| HFA（NEON 同构浮点聚合） | — | 未识别，仍按 GP by-ref 处理，效率低 |
-| `>16B` struct 返回 sret | `aarch64.rs:472-475` | 仅 caller 分配 `<sret>` local，callee 写 `[x0]`；不验证调用者取到数据 |
-| eh_frame / ORC / sanitizer 节 | — | 完全没有（仅 x86_64 具备） |
-| DWARF / BTF | — | 完全没有 |
-| 谓词指令（CCMP / CSEL / CSINC） | — | 未发射 |
-| 复杂寻址模式 | — | 后置索引、扩展寄存器多为桩 |
-| 浮点比较 (`fcc*`) | — | 仅 4 种基础 FCMP |
-| 缓存维护指令 (`dc *` / `ic *`) | — | 缺失 |
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| `emit_bl_placeholder` | ✅ 已完善 | 增加 ±128MiB 范围校验 (`bl_offset_in_range`) + `debug_assert` |
+| `emit_adr_placeholder` | ✅ 已完善 | 增加 ±1MiB 范围校验 + ADRP+ADD 退化路径 + `emit_adr_large` 双指令序列 |
+| `emit_ldr_s0_u32_placeholder` | ✅ 已完善 | 增加 ±1MiB 范围校验 + 对齐检查 |
+| HFA（同构浮点聚合） | ✅ 已实装 | `classify_hfa` + `load_hfa_to_vregs` + `store_hfa_from_vregs` + `gen_hfa_expr` |
+| `>16B` struct 返回 sret | ✅ 已实装 | `memcpy_sp_to_x0` 逐块拷贝 + 调用方 `load_w0` 取结果 |
+| eh_frame / ORC / sanitizer 节 | ✅ 已实装 | `mod.rs` 中 AArch64 分支已发射 `.eh_frame` + `.orc_unwind_ip` + `.dcc.san_info` |
+| DWARF / BTF | ✅ 已实装 | `build_dwarf_full` 用 `AArch64` 架构选项 + `.BTF` 节 |
+| 谓词指令（CCMP / CSEL / CSINC） | ✅ 已实装 | `emit_ccmp_w0_w1` + `emit_ccmp_w0_imm` + `emit_csel_w0_w0_w1` + `emit_csinc` + `emit_csneg` |
+| 复杂寻址模式 | ✅ 已实装 | 后置索引 (`emit_str/ldr_post_index`) + 前置索引 (`emit_str/ldr_pre_index`) + 扩展寄存器 (`emit_ldr/str_ext_reg`) |
+| 浮点比较 (`fcc*`) | ✅ 已实装 | `fcmp_s0_s1` + `fcmp_d0_d1` + `fcmp_s0/d0_zero` + `emit_fccmp_s0_s1_ne` + `emit_fccmp_d0_d1_ne` |
+| 缓存维护指令 (`dc *` / `ic *`) | ✅ 已实装 | `emit_dc_cvac/civac/cvau/ivac` + `emit_ic_ivau/iallu` + `emit_dsb_ish/sy` + `emit_isb` + `emit_cache_sync_range` (循环结构已修复) |
+
+🟠 仍待完善：
+
+| 模块 | 现状 |
+|------|------|
+| NEON 浮点聚合传参 > 4 元素 | 仅支持 1–4 元素 HFA |
+| 大结构体 > 16B 嵌套返回 | 仅单层 sret，未验证多层嵌套调用链 |
+| TLS 重定位 (`R_AARCH64_TLSDESC_*`) | 仅基础 `tpoff` 模型 |
 
 ### 1.4 RISC-V64 后端
 

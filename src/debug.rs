@@ -650,6 +650,53 @@ pub fn build_dwarf(source: &str, functions: &[(&str, u64)]) -> DebugSections {
     build_dwarf_full(&cu, &opts)
 }
 
+/// 指定目标架构的 DWARF 生成（AArch64 / RISC-V 等）
+pub fn build_dwarf_arch(source: &str, functions: &[(&str, u64)], arch: ArchKind) -> DebugSections {
+    let funcs: Vec<DwarfFuncInfo> = functions
+        .iter()
+        .map(|(name, pc)| DwarfFuncInfo {
+            name: (*name).to_string(),
+            linkage_name: None,
+            low_pc: *pc,
+            high_pc: *pc + 16,
+            decl_line: 1,
+            decl_file_idx: 0,
+            return_type: DwarfType {
+                name: "int".to_string(),
+                byte_size: 4,
+                kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+            },
+            params: vec![],
+            is_external: true,
+            is_inline: false,
+            is_declaration: false,
+        })
+        .collect();
+    let cu = CompileUnit {
+        source_name: source.to_string(),
+        comp_dir: None,
+        producer: format!("dcc {}", env!("CARGO_PKG_VERSION")),
+        language: DW_LANG_C99,
+        functions: funcs,
+        globals: vec![],
+        types: vec![],
+        line_entries: vec![],
+        line_files: vec![source.to_string()],
+        line_dirs: vec![".".to_string()],
+        low_pc: 0,
+        high_pc: 0,
+        func_ranges: functions.iter().map(|(_, pc)| (*pc, *pc + 16)).collect(),
+        cfi_rows: vec![],
+    };
+    let opts = DebugOptions {
+        level: 2,
+        source_name: source.to_string(),
+        arch,
+        ..Default::default()
+    };
+    build_dwarf_full(&cu, &opts)
+}
+
 /// 完整 DWARF v4 + 辅助节生成（主入口）
 pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections {
     let mut sec = DebugSections::default();

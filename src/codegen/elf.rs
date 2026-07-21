@@ -414,6 +414,7 @@ pub fn build_elf_rel_aarch64(
     symbols: &[ElfSym],
     relocations: &[ElfRela],
     rodata_relocations: &[ElfRela],
+    extra_sections: &[ElfSection],
 ) -> Vec<u8> {
     build_elf_rel_generic(
         EM_AARCH64,
@@ -422,6 +423,7 @@ pub fn build_elf_rel_aarch64(
         symbols,
         relocations,
         rodata_relocations,
+        extra_sections,
     )
 }
 
@@ -483,6 +485,7 @@ pub fn build_elf_rel_riscv64(
         symbols,
         relocations,
         rodata_relocations,
+        &[],
     )
 }
 
@@ -494,6 +497,7 @@ fn build_elf_rel_generic(
     symbols: &[ElfSym],
     relocations: &[ElfRela],
     rodata_relocations: &[ElfRela],
+    extra_sections: &[ElfSection],
 ) -> Vec<u8> {
     let mut shstr = vec![0u8];
     let mut strtab = vec![0u8];
@@ -518,6 +522,10 @@ fn build_elf_rel_generic(
     } else {
         sec_name_off(&mut shstr, ".rela.rodata")
     };
+    let extra_names: Vec<u32> = extra_sections
+        .iter()
+        .map(|s| sec_name_off(&mut shstr, &s.name))
+        .collect();
 
     let mut sym_name_off = vec![0u32];
     for sym in symbols {
@@ -577,13 +585,21 @@ fn build_elf_rel_generic(
         cursor = off + rela_rodata.len();
         off
     };
-    let shoff = align_up(if rela_rodata.is_empty() { cursor } else { rela_rodata_off + rela_rodata.len() }, 8);
+    let mut extra_layout: Vec<(u32, u64, &ElfSection)> = Vec::new();
+    for sec in extra_sections {
+        let off = align_up(cursor, sec.align.max(1) as usize);
+        let name = extra_names[extra_layout.len()];
+        extra_layout.push((name, off as u64, sec));
+        cursor = off + sec.data.len();
+    }
+    let shoff = align_up(cursor, 8);
 
     let n_sections = 1 + 1
         + if rodata.is_empty() { 0 } else { 1 }
         + 3
         + 1
-        + if rela_rodata.is_empty() { 0 } else { 1 };
+        + if rela_rodata.is_empty() { 0 } else { 1 }
+        + extra_sections.len();
 
     let symtab_idx = if rodata.is_empty() { 2u32 } else { 3 };
     let strtab_idx = symtab_idx + 1;
@@ -628,6 +644,10 @@ fn build_elf_rel_generic(
         pad_to(&mut out, rela_rodata_off);
         out.extend_from_slice(&rela_rodata);
     }
+    for (_, off, sec) in &extra_layout {
+        pad_to(&mut out, *off as usize);
+        out.extend_from_slice(&sec.data);
+    }
     pad_to(&mut out, shoff);
 
     let rela_text_idx = shstrtab_idx + 1;
@@ -656,6 +676,21 @@ fn build_elf_rel_generic(
     if !rela_rodata.is_empty() {
         write_section_header(&mut out, rela_rodata_name, SHT_RELA, SHF_INFO_LINK,
             0, rela_rodata_off as u64, rela_rodata.len() as u64, symtab_idx, rodata_idx as u32, 8, 24);
+    }
+    for (name, off, sec) in &extra_layout {
+        write_section_header(
+            &mut out,
+            *name,
+            sec.ty,
+            sec.flags,
+            0,
+            *off,
+            sec.data.len() as u64,
+            0,
+            0,
+            sec.align.max(1),
+            0,
+        );
     }
     out
 }
