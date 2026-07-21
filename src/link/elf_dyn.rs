@@ -5,21 +5,59 @@
 
 use super::elf_exec::write_elf_internal;
 use super::layout::Layout;
-use crate::codegen::elf::{ET_DYN, EM_X86_64};
+use crate::codegen::elf::{ET_DYN, EM_X86_64, EM_AARCH64, EM_RISCV, EM_MIPS, EM_ARM};
 
 pub fn write_elf_pie_x86_64(layout: &Layout) -> Vec<u8> {
+    write_elf_pie(layout, EM_X86_64)
+}
+
+pub fn write_elf_pie_aarch64(layout: &Layout) -> Vec<u8> {
+    write_elf_pie(layout, EM_AARCH64)
+}
+
+pub fn write_elf_pie_riscv64(layout: &Layout) -> Vec<u8> {
+    write_elf_pie(layout, EM_RISCV)
+}
+
+pub fn write_elf_pie_mips64(layout: &Layout) -> Vec<u8> {
+    write_elf_pie(layout, EM_MIPS)
+}
+
+pub fn write_elf_pie_arm(layout: &Layout) -> Vec<u8> {
+    write_elf_pie(layout, EM_ARM)
+}
+
+fn write_elf_pie(layout: &Layout, machine: u16) -> Vec<u8> {
     let mut out = Vec::new();
-    // 构造 shstrtab / strtab / symtab
     let shstrtab = build_shstrtab(layout);
     let (strtab, strtab_offsets) = build_strtab(layout);
     let symtab = build_symtab(layout, &strtab_offsets);
     let gnu_hash = build_gnu_hash(layout);
-    write_elf_internal(layout, EM_X86_64, ET_DYN, &mut out, &shstrtab, &strtab, &symtab, &gnu_hash);
+    write_elf_internal(layout, machine, ET_DYN, &mut out, &shstrtab, &strtab, &symtab, &gnu_hash);
     out
 }
 
 pub fn write_elf_shared_x86_64(layout: &Layout) -> Vec<u8> {
-    // 共享库无 entry
+    write_elf_shared(layout, EM_X86_64)
+}
+
+pub fn write_elf_shared_aarch64(layout: &Layout) -> Vec<u8> {
+    write_elf_shared(layout, EM_AARCH64)
+}
+
+pub fn write_elf_shared_riscv64(layout: &Layout) -> Vec<u8> {
+    write_elf_shared(layout, EM_RISCV)
+}
+
+pub fn write_elf_shared_mips64(layout: &Layout) -> Vec<u8> {
+    write_elf_shared(layout, EM_MIPS)
+}
+
+pub fn write_elf_shared_arm(layout: &Layout) -> Vec<u8> {
+    write_elf_shared(layout, EM_ARM)
+}
+
+fn write_elf_shared(layout: &Layout, machine: u16) -> Vec<u8> {
     let mut layout_clone = layout.clone();
     layout_clone.entry = 0;
     let mut out = Vec::new();
@@ -27,7 +65,7 @@ pub fn write_elf_shared_x86_64(layout: &Layout) -> Vec<u8> {
     let (strtab, strtab_offsets) = build_strtab(&layout_clone);
     let symtab = build_symtab(&layout_clone, &strtab_offsets);
     let gnu_hash = build_gnu_hash(&layout_clone);
-    write_elf_internal(&layout_clone, EM_X86_64, ET_DYN, &mut out, &shstrtab, &strtab, &symtab, &gnu_hash);
+    write_elf_internal(&layout_clone, machine, ET_DYN, &mut out, &shstrtab, &strtab, &symtab, &gnu_hash);
     out
 }
 

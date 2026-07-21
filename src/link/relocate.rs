@@ -644,6 +644,7 @@ mod tests {
             has_dynamic: false,
             n_locals: 1,
             output_relas: relas,
+            dynamic_linker: None,
         };
         apply_relocations(&mut layout).expect("apply");
         layout

@@ -120,6 +120,8 @@ pub struct Layout {
     pub n_locals: u32,
     /// FlatRela 在应用后被转化为已修复的字节
     pub output_relas: Vec<OutputRela>,
+    /// 自定义动态链接器路径 (-Wl,--dynamic-linker=)
+    pub dynamic_linker: Option<String>,
 }
 
 /// 输出重定位（应用于输出节，目标是合并后的符号）。
@@ -151,6 +153,8 @@ pub struct LayoutBuilder {
     pub keep_debug: bool,
     /// gc_sections 根符号集 (除 entry 外的额外根)
     pub gc_sections_root: Vec<String>,
+    /// 自定义动态链接器路径
+    pub dynamic_linker: Option<String>,
 }
 
 impl LayoutBuilder {
@@ -165,6 +169,7 @@ impl LayoutBuilder {
             emit_dynamic: false,
             keep_debug: true,
             gc_sections_root: Vec::new(),
+            dynamic_linker: None,
         }
     }
 
@@ -314,6 +319,7 @@ impl LayoutBuilder {
             has_dynamic: self.emit_dynamic,
             n_locals,
             output_relas,
+            dynamic_linker: self.dynamic_linker.clone(),
         })
     }
 
@@ -359,8 +365,20 @@ impl LayoutBuilder {
         // 1. 根符号集合
         let mut roots: HashSet<String> = HashSet::new();
         roots.insert(self.entry_name.clone());
-        for r in &self.gc_sections_root {
-            roots.insert(r.clone());
+        // 如果用户没有指定 gc_sections_root，自动选择所有全局符号作为根
+        if self.gc_sections_root.is_empty() {
+            for sym in &bundle.symbols {
+                if !sym.name.is_empty() && sym.section != 0 {
+                    // STB_GLOBAL = 1, STB_WEAK = 2
+                    if sym.bind == 1 || sym.bind == 2 {
+                        roots.insert(sym.name.clone());
+                    }
+                }
+            }
+        } else {
+            for r in &self.gc_sections_root {
+                roots.insert(r.clone());
+            }
         }
 
         // 2. 找 .init_array / .fini_array / .init / .fini / .text.* 等始终保留的节

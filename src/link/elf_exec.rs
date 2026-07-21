@@ -97,9 +97,12 @@ pub fn write_elf_internal(
     let _ehdr_off = 0u64;
     out.resize(64, 0);
     // 2. PHDR
-    // 计算 nphdr: PT_LOAD(2) + PT_GNU_STACK(1) + 可选 PT_DYNAMIC(1) + 可选 PT_GNU_RELRO(1)
+    // 计算 nphdr: PT_LOAD(2) + PT_GNU_STACK(1) + 可选 PT_DYNAMIC(1) + 可选 PT_GNU_RELRO(1) + 可选 PT_INTERP(1)
     let has_relro = link_opts::compute_relro_range(layout).is_some();
-    let nphdr = if layout.has_dynamic { 4u16 } else { 3u16 } + if has_relro { 1u16 } else { 0u16 };
+    let has_interp = layout.dynamic_linker.is_some();
+    let nphdr = if layout.has_dynamic { 4u16 } else { 3u16 }
+        + if has_relro { 1u16 } else { 0u16 }
+        + if has_interp { 1u16 } else { 0u16 };
     let phdr_off = 64u64;
     out.resize(64 + nphdr as usize * 56, 0);
 
@@ -189,6 +192,20 @@ pub fn write_elf_internal(
             .map(|s| s.file_off).unwrap_or(0);
         write_phdr(out, &mut phdr_cursor, 2 /*PT_DYNAMIC*/, PF_R | PF_W,
             dyn_fileoff, dyn_vaddr, dyn_vaddr, dyn_filesz, dyn_filesz, 8);
+    }
+    // PT_INTERP: 动态链接器路径
+    if let Some(ref interp) = layout.dynamic_linker {
+        // interp 字符串已经在节数据中写入 (通过 .interp 节)
+        // 此处只写 PHDR
+        let interp_vaddr = layout.sections.iter()
+            .find(|s| s.name == ".interp")
+            .map(|s| s.vaddr).unwrap_or(0);
+        let interp_filesz = (interp.len() + 1) as u64; // +1 for NUL
+        let interp_fileoff = layout.sections.iter()
+            .find(|s| s.name == ".interp")
+            .map(|s| s.file_off).unwrap_or(0);
+        write_phdr(out, &mut phdr_cursor, 3 /*PT_INTERP*/, PF_R,
+            interp_fileoff, interp_vaddr, interp_vaddr, interp_filesz, interp_filesz, 1);
     }
 
     // 7. 节头表
@@ -315,6 +332,22 @@ pub fn write_elf_exec_x86_64(layout: &Layout) -> Vec<u8> {
     write_elf_exec(layout, EM_X86_64)
 }
 
+pub fn write_elf_exec_aarch64(layout: &Layout) -> Vec<u8> {
+    write_elf_exec(layout, crate::codegen::elf::EM_AARCH64)
+}
+
+pub fn write_elf_exec_riscv64(layout: &Layout) -> Vec<u8> {
+    write_elf_exec(layout, crate::codegen::elf::EM_RISCV)
+}
+
+pub fn write_elf_exec_mips64(layout: &Layout) -> Vec<u8> {
+    write_elf_exec(layout, crate::codegen::elf::EM_MIPS)
+}
+
+pub fn write_elf_exec_arm(layout: &Layout) -> Vec<u8> {
+    write_elf_exec(layout, crate::codegen::elf::EM_ARM)
+}
+
 /// 自研 -r 路径: 生成 ET_REL (可重定位) .o 文件
 /// 与 host ld -r 不同, 此路径完全自研: 复制所有节、重写重定位、合并符号表
 pub fn write_elf_relocatable_x86_64(layout: &Layout) -> Vec<u8> {
@@ -322,6 +355,34 @@ pub fn write_elf_relocatable_x86_64(layout: &Layout) -> Vec<u8> {
     // 简化: 复用 write_elf_exec, 改写 e_type
     // 完整 -r 路径需要: 不写 PHDR, 不解析符号, 直接复制节
     let mut out = write_elf_exec(layout, EM_X86_64);
+    out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
+    out
+}
+
+pub fn write_elf_relocatable_aarch64(layout: &Layout) -> Vec<u8> {
+    use crate::codegen::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_AARCH64);
+    out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
+    out
+}
+
+pub fn write_elf_relocatable_riscv64(layout: &Layout) -> Vec<u8> {
+    use crate::codegen::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_RISCV);
+    out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
+    out
+}
+
+pub fn write_elf_relocatable_mips64(layout: &Layout) -> Vec<u8> {
+    use crate::codegen::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_MIPS);
+    out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
+    out
+}
+
+pub fn write_elf_relocatable_arm(layout: &Layout) -> Vec<u8> {
+    use crate::codegen::elf::ET_REL;
+    let mut out = write_elf_exec(layout, crate::codegen::elf::EM_ARM);
     out[16..18].copy_from_slice(&ET_REL.to_le_bytes());
     out
 }

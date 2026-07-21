@@ -41,13 +41,21 @@ pub mod fini_dispatch;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostics::{Diagnostic, Span};
+use crate::debug::ArchKind;
 
 pub use object::InputBundle;
 pub use layout::LayoutBuilder;
 pub use relocate::apply_relocations;
 pub use lto_bitcode::{serialize_module, deserialize_module, run_cross_tu_lto, BitcodeModule};
-pub use elf_exec::write_elf_exec_x86_64;
-pub use elf_dyn::{write_elf_pie_x86_64, write_elf_shared_x86_64};
+pub use elf_exec::{write_elf_exec_x86_64, write_elf_exec_aarch64, write_elf_exec_riscv64,
+    write_elf_exec_mips64, write_elf_exec_arm,
+    write_elf_relocatable_x86_64, write_elf_relocatable_aarch64,
+    write_elf_relocatable_riscv64, write_elf_relocatable_mips64,
+    write_elf_relocatable_arm};
+pub use elf_dyn::{write_elf_pie_x86_64, write_elf_pie_aarch64, write_elf_pie_riscv64,
+    write_elf_pie_mips64, write_elf_pie_arm,
+    write_elf_shared_x86_64, write_elf_shared_aarch64, write_elf_shared_riscv64,
+    write_elf_shared_mips64, write_elf_shared_arm};
 pub use legacy::link_relocatable;
 
 /// 链接配置
@@ -95,6 +103,10 @@ pub struct LinkConfig {
     pub target_clones: target_clones::TargetClonesTable,
     /// FiniArray builder (__cxa_atexit / destructor 调度)
     pub fini_builder: fini_dispatch::FiniArrayBuilder,
+    /// 目标架构 (决定 ELF e_machine 及链接行为)
+    pub arch: ArchKind,
+    /// 自定义动态链接器路径 (-Wl,--dynamic-linker=)
+    pub dynamic_linker: Option<String>,
 }
 
 /// build-id 风格
@@ -141,6 +153,8 @@ impl Default for LinkConfig {
             version_table: symver::VersionTable::new(),
             target_clones: target_clones::TargetClonesTable::new(),
             fini_builder: fini_dispatch::FiniArrayBuilder::new(),
+            arch: ArchKind::X86_64,
+            dynamic_linker: None,
         }
     }
 }
@@ -204,9 +218,36 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
     builder.emit_dynamic = matches!(cfg.output_kind, OutputKind::PIE | OutputKind::Shared);
     builder.keep_debug = !cfg.strip_debug;
     builder.gc_sections_root = cfg.gc_sections_root.clone();
+    builder.dynamic_linker = cfg.dynamic_linker.clone();
     let mut layout = builder.build(bundle, &resolved).map_err(|e| diag("E0303", e))?;
     // 2.5 SHF_GNU_RETAIN 标记 (M12+ 链接器补洞)
     link_opts::apply_retain_flags(&mut layout);
+    // 2.5.1 压缩调试节 (--compress-debug-sections)
+    if let Some(ref method) = cfg.opts.compress_debug {
+        link_opts::compress_debug_sections(&mut layout, method);
+    }
+    // 2.5.2 添加 .interp 节 (自定义动态链接器)
+    if let Some(ref interp) = cfg.dynamic_linker {
+        let mut interp_data = interp.as_bytes().to_vec();
+        interp_data.push(0); // NUL 终止
+        layout.sections.push(layout::OutputSection {
+            kind: layout::OutputSectionKind::Named(".interp".into()),
+            name: ".interp".into(),
+            sh_name_off: 0,
+            ty: crate::codegen::elf::SHT_PROGBITS,
+            flags: crate::codegen::elf::SHF_ALLOC as u32,
+            align: 1,
+            data: interp_data.clone(),
+            size: interp_data.len() as u64,
+            entsize: 0,
+            output_index: 0,
+            load_segment: 0,
+            vaddr: 0,
+            file_off: 0,
+            input_offsets: Vec::new(),
+            input_sections: Vec::new(),
+        });
+    }
     // 2.6 fini_array / __dso_handle 调度
     fini_dispatch::ensure_fini_runtime_symbols(&mut layout);
     // 2.7 -z pack-relative-relocs -> .gnu.pack.relocs
@@ -234,12 +275,32 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
     }
     // 4. 应用重定位
     let _dyn = apply_relocations(&mut layout).map_err(|e| diag("E0304", e.to_string()))?;
-    // 5. 输出 ELF
-    let bytes = match cfg.output_kind {
-        OutputKind::Executable => write_elf_exec_x86_64(&layout),
-        OutputKind::PIE => write_elf_pie_x86_64(&layout),
-        OutputKind::Shared => write_elf_shared_x86_64(&layout),
-        OutputKind::Relocatable => elf_exec::write_elf_relocatable_x86_64(&layout),
+    // 5. 输出 ELF (按架构分发)
+    let bytes = match (cfg.output_kind, cfg.arch) {
+        (OutputKind::Executable, ArchKind::X86_64) => write_elf_exec_x86_64(&layout),
+        (OutputKind::Executable, ArchKind::AArch64) => write_elf_exec_aarch64(&layout),
+        (OutputKind::Executable, ArchKind::RiscV64) => write_elf_exec_riscv64(&layout),
+        (OutputKind::Executable, ArchKind::Mips64) => write_elf_exec_mips64(&layout),
+        (OutputKind::Executable, ArchKind::Arm) => write_elf_exec_arm(&layout),
+        (OutputKind::PIE, ArchKind::X86_64) => write_elf_pie_x86_64(&layout),
+        (OutputKind::PIE, ArchKind::AArch64) => write_elf_pie_aarch64(&layout),
+        (OutputKind::PIE, ArchKind::RiscV64) => write_elf_pie_riscv64(&layout),
+        (OutputKind::PIE, ArchKind::Mips64) => write_elf_pie_mips64(&layout),
+        (OutputKind::PIE, ArchKind::Arm) => write_elf_pie_arm(&layout),
+        (OutputKind::Shared, ArchKind::X86_64) => write_elf_shared_x86_64(&layout),
+        (OutputKind::Shared, ArchKind::AArch64) => write_elf_shared_aarch64(&layout),
+        (OutputKind::Shared, ArchKind::RiscV64) => write_elf_shared_riscv64(&layout),
+        (OutputKind::Shared, ArchKind::Mips64) => write_elf_shared_mips64(&layout),
+        (OutputKind::Shared, ArchKind::Arm) => write_elf_shared_arm(&layout),
+        (OutputKind::Relocatable, ArchKind::X86_64) => write_elf_relocatable_x86_64(&layout),
+        (OutputKind::Relocatable, ArchKind::AArch64) => write_elf_relocatable_aarch64(&layout),
+        (OutputKind::Relocatable, ArchKind::RiscV64) => write_elf_relocatable_riscv64(&layout),
+        (OutputKind::Relocatable, ArchKind::Mips64) => write_elf_relocatable_mips64(&layout),
+        (OutputKind::Relocatable, ArchKind::Arm) => write_elf_relocatable_arm(&layout),
+        (OutputKind::Executable, _) => write_elf_exec_x86_64(&layout),
+        (OutputKind::PIE, _) => write_elf_pie_x86_64(&layout),
+        (OutputKind::Shared, _) => write_elf_shared_x86_64(&layout),
+        (OutputKind::Relocatable, _) => write_elf_relocatable_x86_64(&layout),
     };
     if cfg.verbose {
         eprintln!("dcc-link: wrote {} ({} bytes)", output.display(), bytes.len());

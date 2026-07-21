@@ -35,6 +35,7 @@ use super::layout::{Layout, OutputSection, OutputSectionKind};
 use crate::codegen::elf::{
     PF_X,
     SHF_GNU_RETAIN,
+    SHF_COMPRESSED,
 };
 
 /// 链接选项集合 (LinkConfig 之外需独立携带的)
@@ -169,6 +170,117 @@ fn parse_size(s: &str) -> Result<u64, ()> {
         rest.parse::<u64>().map(|n| n * 1024 * 1024 * 1024).map_err(|_| ())
     } else {
         s.parse::<u64>().map_err(|_| ())
+    }
+}
+
+/// 链接器后端选择 (-fuse-ld=)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkerBackend {
+    /// 内置链接器 (默认)
+    Builtin,
+    /// LLVM lld
+    Lld,
+    /// GNU gold
+    Gold,
+    /// GNU ld.bfd
+    Bfd,
+    /// mold
+    Mold,
+    /// 自定义路径
+    Custom(String),
+}
+
+impl LinkerBackend {
+    /// 从 -fuse-ld= 值解析后端
+    pub fn from_fuse_ld(value: &str) -> Self {
+        match value {
+            "lld" => LinkerBackend::Lld,
+            "gold" => LinkerBackend::Gold,
+            "bfd" => LinkerBackend::Bfd,
+            "mold" => LinkerBackend::Mold,
+            "dcc" | "" => LinkerBackend::Builtin,
+            path => LinkerBackend::Custom(path.to_string()),
+        }
+    }
+
+    /// 获取外部链接器命令名 (Builtin 返回 None)
+    pub fn external_command(&self) -> Option<&str> {
+        match self {
+            LinkerBackend::Builtin => None,
+            LinkerBackend::Lld => Some("ld.lld"),
+            LinkerBackend::Gold => Some("ld.gold"),
+            LinkerBackend::Bfd => Some("ld.bfd"),
+            LinkerBackend::Mold => Some("ld.mold"),
+            LinkerBackend::Custom(path) => Some(path.as_str()),
+        }
+    }
+
+    /// 是否使用内置链接器
+    pub fn is_builtin(&self) -> bool {
+        matches!(self, LinkerBackend::Builtin)
+    }
+}
+
+/// 解析 -fuse-ld= 选项并返回后端
+pub fn resolve_linker_backend(opts: &LinkOpts) -> LinkerBackend {
+    if let Some(ref fuse_ld) = opts.fuse_ld {
+        LinkerBackend::from_fuse_ld(fuse_ld)
+    } else if let Ok(ld) = std::env::var("DCC_LD") {
+        LinkerBackend::from_fuse_ld(&ld)
+    } else {
+        LinkerBackend::Builtin
+    }
+}
+
+/// 压缩 layout 中的调试节 (SHF_COMPRESSED + zlib deflate)
+/// 返回被压缩的节名列表
+pub fn compress_debug_sections(layout: &mut Layout, method: &str) -> Vec<String> {
+    let mut compressed = Vec::new();
+    if method == "none" { return compressed; }
+    // 仅压缩调试节 (以 .debug_ 开头)
+    for sec in &mut layout.sections {
+        if !sec.name.starts_with(".debug_") { continue; }
+        if sec.data.is_empty() || sec.size == 0 { continue; }
+        if sec.flags & (SHF_COMPRESSED as u32) != 0 { continue; } // 已压缩
+        // 使用 miniz_oxide 压缩
+        let compressed_data = match method {
+            "zlib" | "zlib-gnu" | "zlib-gabi" => {
+                deflate_compress(&sec.data)
+            }
+            "zstd" => {
+                // zstd 未实现，回退到 zlib
+                deflate_compress(&sec.data)
+            }
+            _ => continue,
+        };
+        if let Some(cdata) = compressed_data {
+            if cdata.len() < sec.data.len() {
+                // ELF 压缩头: ch_type(4) + ch_size(8) + ch_addralign(8) = 20 bytes
+                let orig_size = sec.data.len() as u64;
+                let orig_align = sec.align;
+                let mut new_data = Vec::with_capacity(20 + cdata.len());
+                new_data.extend_from_slice(&1u32.to_le_bytes()); // ELFCOMPRESS_ZLIB = 1
+                new_data.extend_from_slice(&orig_size.to_le_bytes());
+                new_data.extend_from_slice(&orig_align.to_le_bytes());
+                new_data.extend_from_slice(&cdata);
+                sec.data = new_data;
+                sec.size = sec.data.len() as u64;
+                sec.flags |= SHF_COMPRESSED as u32;
+                compressed.push(sec.name.clone());
+            }
+        }
+    }
+    compressed
+}
+
+/// 使用 miniz_oxide 进行 deflate 压缩
+fn deflate_compress(data: &[u8]) -> Option<Vec<u8>> {
+    use miniz_oxide::deflate::compress_to_vec_zlib;
+    let compressed = compress_to_vec_zlib(data, 6);
+    if compressed.len() < data.len() {
+        Some(compressed)
+    } else {
+        None // 压缩后更大，不压缩
     }
 }
 

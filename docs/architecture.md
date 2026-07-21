@@ -165,9 +165,9 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 - **多 TU 路径**（`dcc -fbuiltin-linker a.o b.o -o prog`）：启用完整
   `src/link` 链接器：ELF ET_REL 解析、跨 TU 符号解析、节合并、虚拟地址
   布局、完整重定位引擎、PLT/GOT 生成、ET_EXEC/ET_DYN 输出。
-- **`-r` 模式**（合并可重定位对象）：通过 host `ld -r --gc-sections` 合并，
-  `objcopy` 注入 `.llvm.lto` 摘要，并对 dead local 符号执行 `--strip-symbol`
-  补充剔除。兼容旧工作流。
+- **`-r` 模式**（合并可重定位对象）：优先使用内置路径
+  `link_relocatable_builtin`（通过 `link_multi_tu` + `OutputKind::Relocatable`），
+  旧路径 `link_relocatable_legacy` 保留 host `ld -r --gc-sections` 桥接。
 - **`-pie` / `-shared`**：输出 ET_DYN（PIE 或 `.so`），生成 `.dynamic`、
   `.dynsym`、`.dynstr`、`.rela.dyn`、`.rela.plt`、`.plt`、`.got`、`.got.plt`。
 - **`-flto` IR/bitcode LTO**：每 TU 末尾在 `.dcc.lto` 节写入自定义位码
@@ -181,14 +181,14 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 | `link/layout.rs` | 同名节合并 + 2 段布局（`R+X` / `R+W`） + 自定义节独立 | — |
 | `link/relocate.rs` | 重定位引擎：`PC32` / `PLT32` / `64` / `32` / `32S` / `GOTPCREL` / `GOT64` / `GOTOFF64` / `TPOFF64` / `TPOFF32` / AArch64（22 种）/ RISC-V（15 种） | — |
 | `link/plt_got.rs` | PLT/GOT 生成、`.dynamic`、`.dynsym`、`.rela.{dyn,plt}` | — |
-| `link/elf_exec.rs` | ET_EXEC 输出：ELF 头、PHDR、节头、`.symtab`、`.strtab`、`.gnu.hash` | — |
-| `link/elf_dyn.rs` | ET_DYN 输出：PIE / `.so` 共享库 | — |
+| `link/elf_exec.rs` | ET_EXEC 输出：ELF 头、PHDR、节头、`.symtab`、`.strtab`、`.gnu.hash`；多架构包装 (x86_64/AArch64/RISC-V/MIPS64/ARM) + PT_INTERP | — |
+| `link/elf_dyn.rs` | ET_DYN 输出：PIE / `.so` 共享库；多架构包装 (5 架构 × PIE/Shared) | — |
 | `link/gnu_hash.rs` | `.gnu.hash` TIE 压缩（bloom filter + buckets） | — |
 | `link/eh_frame.rs` | `.eh_frame_hdr` 二分搜索表 | — |
 | `link/build_id.rs` | `.note.gnu.build-id` 段（SHA-1 / MD5 / UUID v4） | — |
 | `link/ifunc.rs` | IFUNC（STT_GNU_IFUNC）解析 + `R_X86_64_IRELATIVE` 生成 | — |
-| `link/lto_bitcode.rs` | 自有 DBC 格式 IR 位码序列化 + 跨 TU DCE / 内联 / 常量传播 / DAE | — |
-| `link/legacy.rs` | 旧 `-r` 模式（host `ld -r`） | host `ld`、`objcopy` |
+| `link/lto_bitcode.rs` | 自有 DBC 格式 IR 位码序列化 + 跨 TU DCE / 内联 / 常量传播 / DAE + LtoConfig 配置化 + Pass 7 no_semantic_interposition | — |
+| `link/legacy.rs` | `-r` 模式：优先内置路径 `link_relocatable_builtin`，旧路径 `link_relocatable_legacy` (host `ld -r`) | host `ld`（仅 legacy 路径） |
 | `link/link_opts.rs` | `-z relro/now/lazy/execstack/noexecstack/pack-relative-relocs/max-page-size=N`、RPATH/RUNPATH、-fuse-ld=、-fno-semantic-interposition、SHF_GNU_RETAIN | — |
 | `link/symver.rs` | `.symver` 完整版本表（VERDEF / VERNEED） + `--no-undefined-version` 严格检查 | — |
 | `link/target_clones.rs` | `__attribute__((target_clones(...)))` IFUNC resolver 多版本生成 | — |
@@ -285,8 +285,8 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
   / `PCREL_LO12_I` / `PCREL_LO12_S` / `HI20` / `LO12_I` / `LO12_S`
   / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S`。
 
-**明确不做**：AArch64 / RISC-V 完整后端 ELF 输出（沿用 host 链接器）
-之外的非 x86-64 后端。
+**明确不做**：运行时 dynamic loader（`ld.so`）——完全依赖 host ld.so，
+这是设计决策而非缺失。vDSO 集成亦不在范围内。
 
 本地验收：`cargo test link::`（50 用例）
 + `cargo test lto::`（7 用例）。

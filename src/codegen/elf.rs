@@ -54,6 +54,7 @@ pub const SHF_ALLOC: u32 = 2;
 pub const SHF_EXECINSTR: u32 = 4;
 pub const SHF_WRITE: u32 = 1;
 pub const SHF_TLS: u32 = 0x400;
+pub const SHF_COMPRESSED: u32 = 0x800;
 pub const SHF_INFO_LINK: u32 = 0x40;
 
 // 符号绑定

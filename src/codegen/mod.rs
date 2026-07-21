@@ -12,7 +12,6 @@ pub mod arm;
 
 use crate::debug;
 use crate::ir::Module;
-use crate::lto;
 use crate::sanitizer::{SanitizerFlags, sanitizer_metadata};
 use crate::target::Target;
 
@@ -100,20 +99,8 @@ pub fn emit(
                 });
             }
             if lto_enabled {
-                let summaries: Vec<(&str, u64, bool)> = cg
-                    .func_sizes
-                    .iter()
-                    .map(|(name, size)| (name.as_str(), *size as u64, true))
-                    .collect();
-                let unit = lto::build_unit(source_name, &summaries);
-                cg.extra_sections.push(elf::ElfSection {
-                    name: ".llvm.lto".to_string(),
-                    data: lto::serialize_summary(&unit),
-                    ty: elf::SHT_PROGBITS,
-                    flags: 0,
-                    align: 1,
-                });
-                // 新版：嵌入 dcc 自有 IR 位码（供 src/link 多 TU LTO 使用）
+                // 嵌入 dcc 自有 IR 位码（供 src/link 多 TU LTO 使用）
+                // 旧版 .llvm.lto 文本摘要已废弃，统一使用 .dcc.lto DBC 位码格式
                 let bc = crate::link::lto_bitcode::serialize_module(module, source_name);
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".dcc.lto".to_string(),

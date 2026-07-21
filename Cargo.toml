@@ -21,8 +21,8 @@ opt-level = 0
 debug     = true
 
 [dependencies]
-# 零外部依赖:仅使用 Rust std。这是 suckless 哲学的一部分。
-# 所有"基础设施"(解析器、IR、ELF 生成) 都自己写。
+# 最小外部依赖: miniz_oxide 用于 DWARF 压缩节 (zlib/deflate)
+miniz_oxide = "0.7"
 
 [[bin]]
 name = "dcc"

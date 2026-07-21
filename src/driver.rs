@@ -487,6 +487,8 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         version_table: link::symver::VersionTable::new(),
         target_clones: link::target_clones::TargetClonesTable::new(),
         fini_builder: link::fini_dispatch::FiniArrayBuilder::new(),
+        arch: crate::debug::ArchKind::X86_64,
+        dynamic_linker: None, // TODO: parse from -Wl,--dynamic-linker=
     };
     // 解析 .symver 指令: 从 raw_args 提取 __asm__(".symver ...") 模式
     // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:

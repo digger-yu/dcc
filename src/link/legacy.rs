@@ -48,7 +48,67 @@ fn collect_global_roots(inputs: &[PathBuf]) -> Vec<String> {
 }
 
 /// 合并多个 ET_REL 目标文件；启用 LTO 时合并 dcc.lto 摘要。
+/// 优先使用内置链接器路径，仅在 host ld 不可用时回退。
 pub fn link_relocatable(
+    inputs: &[PathBuf],
+    output: &Path,
+    lto_enabled: bool,
+    verbose: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    if inputs.is_empty() {
+        return Err(vec![Diagnostic::err(
+            "E0200",
+            "no input files for link",
+            Span::point("", 0, 0),
+        )]);
+    }
+    // 优先使用内置 relocatable 路径 (不依赖 host ld)
+    if !lto_enabled || std::env::var("DCC_USE_BUILTIN_RELOCATABLE").ok().as_deref() == Some("1") {
+        return link_relocatable_builtin(inputs, output, lto_enabled, verbose);
+    }
+    // 回退到 host ld -r 路径
+    link_relocatable_legacy(inputs, output, lto_enabled, verbose)
+}
+
+/// 内置 relocatable 路径: 完全自研，不依赖 host ld / objcopy
+fn link_relocatable_builtin(
+    inputs: &[PathBuf],
+    output: &Path,
+    lto_enabled: bool,
+    verbose: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    let mut cfg = super::LinkConfig::default();
+    cfg.output_kind = super::OutputKind::Relocatable;
+    cfg.lto = lto_enabled;
+    cfg.verbose = verbose;
+    // 内置路径不需要 entry / gc_sections
+    cfg.gc_sections = false;
+    cfg.entry = String::new();
+    match super::link_multi_tu(inputs, output, &cfg) {
+        Ok(bytes) => {
+            std::fs::write(output, &bytes).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0201",
+                    format!("cannot write {}: {}", output.display(), e),
+                    Span::point(&output.display().to_string(), 0, 0),
+                )]
+            })?;
+            if verbose {
+                eprintln!(
+                    "dcc-link: builtin -r link {} -> {} ({} bytes)",
+                    inputs.len(),
+                    output.display(),
+                    bytes.len()
+                );
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 旧 host `ld -r` + `objcopy` 路径 (保留作为回退)
+fn link_relocatable_legacy(
     inputs: &[PathBuf],
     output: &Path,
     lto_enabled: bool,

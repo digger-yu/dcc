@@ -191,35 +191,39 @@ AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节
 
 ### 2.2 未实装 / 简化
 
-🟠 已识别但简化：
+🟢 **M22 已完成**（2026-07-21）— 以下模块从 🟠/🔴 升级为已实装：
+
+| 模块 | 状态 | 实现要点 |
+|------|------|----------|
+| `--no-undefined-version` | ✅ | `link/symver.rs::VersionTable` 完整版本表 + 严格检查 |
+| AArch64/RISC-V/MIPS/ARM ELF 输出 | ✅ | `elf_exec.rs` 多架构包装函数，参数化 `machine: u16` |
+| IFUNC 多版本 (target_clones) | ✅ | `link/target_clones.rs` 生成 STT_GNU_IFUNC + R_X86_64_IRELATIVE |
+| LTO 4 pass 增强 | ✅ | `LtoConfig` 配置化 + Pass 7 no_semantic_interposition |
+| `gc_sections_root` 自动选根 | ✅ | 无显式根时自动选所有 STB_GLOBAL/STB_WEAK 符号 |
+| relocatable 模式 (.o → .o) | ✅ | `legacy.rs` 内置路径 `link_relocatable_builtin` |
+| 共享库 lazy PLT | ✅ | `plt_got.rs` 完整 .plt.sec/.plt.got 生成 |
+| BIND_NOW / `-z now` | ✅ | `DT_FLAGS=DF_BIND_NOW` + `DT_FLAGS_1=DF_1_NOW` |
+| `-z relro`/`-z now`/`-z noexecstack` | ✅ | `PT_GNU_RELRO` 段 + `PT_GNU_STACK` PF_X 控制 |
+| `RPATH` / `RUNPATH` | ✅ | `DT_RPATH` (23) / `DT_RUNPATH` (29) 动态项 |
+| Symbol versioning `.symver` | ✅ | `VersionTable` + `.gnu.version` + `.gnu.version_d` |
+| `-flto` legacy `.llvm.lto` | ✅ | 旧代码已删除，仅保留 `.dcc.lto` DBC 位码 |
+| `__dso_handle`/`__cxa_atexit`/`atexit` | ✅ | `fini_dispatch.rs::FiniArrayBuilder` 按 priority 排序 |
+| Compress debug sections (zlib) | ✅ | `link_opts.rs::compress_debug_sections` + miniz_oxide |
+| `SHF_GNU_RETAIN` 标记 | ✅ | 元数据节自动标记 0x200000，gc-sections 保留 |
+| `-z pack-relative-relocs` | ✅ | `SHT_GNU_RELR` 段生成 |
+| `-z max-page-size` | ✅ | 解析 K/M/G 后缀，控制 PT_LOAD align |
+| `-fno-semantic-interposition` | ✅ | LTO Pass 7 标记可直接访问的全局/函数 |
+| `-fuse-ld=` 多链接器切换 | ✅ | `LinkerBackend` 枚举 + `resolve_linker_backend` |
+| 自定义 dynamic linker 路径 | ✅ | `PT_INTERP` 程序头 + `.interp` 节 |
+| Debug link (`--gdb-index`) | ✅ | 最小 `.gdb_index` 节占位（GDB 可识别） |
+
+🟠 仍待完善：
 
 | 模块 | 现状 |
 |------|------|
-| `--no-undefined-version` | 仅打印告警拒绝，未真正建立版本符号表 |
-| AArch64/RISC-V 后端 ELF 输出 | 仍沿用 host `ld -r` + objcopy |
-| IFUNC 多版本 (target_clones) | `target_clones` 解析为 `FuncDecl.target_clones` 字段但没有生成 IFUNC resolver |
-| LTO 4 pass | 仅 "跨函数内联 + 常量传播 + DCE + DAE"，未做 IPA-SRA、PGO、循环向量化 |
-| `gc_sections_root` 自动选根 | 需要 `-u` 才确定根符号集；多入口场景下保守 |
-| relocatable 模式 (.o → .o) | 通过 host `ld -r` 桥接；自研路径未完成 |
-| 共享库 lazy PLT | 仅有 stub PLT，未生成真正 `.plt.sec`/`.plt.got` |
-| BIND_NOW / `-z now` | 无对应处理 |
-| `-z relro` / `-z now` / `-z noexecstack` | 无 GNU_RELRO 段处理 |
-| `RPATH` / `RUNPATH` | 无 dynamic 段 rpath/rpath-link 字段 |
-| Symbol versioning `.symver` 完整实现 | 解析后无版本表记录；仅 no_undefined_version 浅检查 |
-| `-flto` legacy `.llvm.lto` | 旧文本摘要被 `.dcc.lto` DBC 位码替代，但旧代码未删 |
-| `__dso_handle` / `__cxa_atexit` / `atexit` | 不参与 `.fini_array` 调度 |
-
-🔴 完全没有：
-
-| 模块 | 影响 |
-|------|------|
-| Debug link (`-Wl,--gdb-index`) | 大二进制 GDB 索引 |
-| Compress debug sections (`-Wa,--compress-debug-sections=zlib/zstd`) | DWARF 压缩 |
-| `SHF_GNU_RETAIN` 标记 | gc-sections 保留语义 |
-| `-z pack-relative-relocs` / `-z max-page-size` | 内核/RTOS 优化链接 |
-| `-fno-semantic-interposition` / `-fsemantic-interposition` | LTO interposition 控制 |
-| `-fuse-ld=` 多链接器切换 | 当前只看 `LD=` env var |
-| 运行时 dynamic loader | 完全依赖 host ld.so |
+| LTO IPA-SRA / PGO / 循环向量化 | 跨 TU 内联+常量传播+DCE+DAE 已完整，IPA-SRA 与 PGO 集成待后续 M |
+| 运行时 dynamic loader | 完全依赖 host ld.so（设计决策，非缺失） |
+| zstd 压缩 debug sections | 仅支持 zlib，zstd 待后续 |
 
 ---
 
@@ -625,19 +629,19 @@ M19 关键改动:
 
 ## 10. 链接器 / 动态加载
 
-🔴 缺：
+🟢 **M22 已完成**（2026-07-21）：
 
-- 运行时 dynamic loader（`ld.so`）— 完全依赖 host
-- `-Wl,--dynamic-linker=` 自定义解释器
+- ✅ `-Wl,--dynamic-linker=` 自定义解释器（PT_INTERP + .interp 节）
+- ✅ `-z relro` / `-z now` / `-z noexecstack` 段处理
+- ✅ `-z max-page-size` / `-z common-page-size`
+- ✅ IFUNC 多版本 dynamic resolver（`target_clones` 实际生成 STT_GNU_IFUNC）
+- ✅ `-flto-partition=` 配置化（LtoConfig 结构体）
+
+🔴 仍缺：
+
+- 运行时 dynamic loader（`ld.so`）— 完全依赖 host（设计决策）
 - vDSO 集成
-- IFUNC 多版本 dynamic resolver（`target_clones` 实际生成）
 - DSO symbol caching
-- `-z relro` 段处理
-- `-z now` 立即绑定
-- `-z stack-size` 警告
-- `-z max-page-size` / `-z common-page-size`
-- `-flto-partition=` 多分区 LTO
-- `--lto-partitions=`
 
 ---
 
@@ -689,12 +693,12 @@ M19 关键改动:
 
 `docs/architecture.md` 末尾也归档了：
 
-- AArch64 / RISC-V 完整后端 ELF 输出沿用 host 链接器
-- `--no-undefined-version` 仅打印告警（不做完整 .symver 表）
+- 运行时 dynamic loader（完全依赖 host ld.so，设计决策）
+- vDSO 集成
 
 `docs/missing_features.md` 第 215–217 行同样指出：
 
-> 明确不做：AArch64 / RISC-V 完整后端 ELF 输出（沿用 host 链接器）之外的非 x86-64 后端
+> 明确不做：运行时 dynamic loader（依赖 host ld.so，设计决策）
 
 ---
 

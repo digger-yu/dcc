@@ -251,7 +251,7 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |
 | rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |
 | CLI 多输入 | `-r a.o [b.o…] -o merged.o` 链接模式；多 `.c` 须 `-c` 后用 gcc 或 `-r` |
-| 链接/LTO 模块（自研多 TU + 旧 `-r`） | `src/link/`：object 解析 / 跨 TU 解析 / 节合并 / 重定位 / PLT-GOT / ET_EXEC+ET_DYN / DBC 位码 LTO；`-r` 沿用 host `ld -r` + objcopy |
+| 链接/LTO 模块（自研多 TU + 内置 -r） | `src/link/`：object 解析 / 跨 TU 解析 / 节合并 / 重定位 / PLT/GOT / ET_EXEC+ET_DYN / DBC 位码 LTO；`-r` 优先内置路径 `link_relocatable_builtin`，旧路径沿用 host `ld -r` |
 | LTO 跨函数内联 | `run_cross_tu_lto` cost model：≤4 语句 / 4 表达式 / 无递归，含同 TU 与跨 TU 调用 |
 | LTO 跨 TU 常量传播 | 跨 TU `global constant` 初始化值合并 + 引用替换 |
 | LTO 跨 TU 全局优化 | DCE + DAE（消除 `global` 中无副作用 store） |
@@ -272,12 +272,12 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | `-fuse-ld=<name>` (M12) | `LinkOpts.fuse_ld` 字段 + `DCC_FUSE_LD` 环境变量覆盖 |
 | `-fno-semantic-interposition` / `-fsemantic-interposition` (M12) | LTO 阶段控制函数符号插入语义 |
 | `--gdb-index` (M12, 占位) | 生成最小 `.gdb_index` 节（GDB 识别，内容仅占位） |
-| `--compress-debug-sections=zlib\|zstd` (M12, 占位) | 当前忽略压缩，保留 CLI 兼容 |
+| `--compress-debug-sections=zlib\|zstd` (M22) | `link_opts.rs::compress_debug_sections` 用 miniz_oxide 压缩 .debug_* 节，设置 SHF_COMPRESSED 标志；zstd 待后续 |
 | `SHF_GNU_RETAIN` 节标志 (M12) | 对 `.init` / `.fini` / `.init_array` / `.fini_array` / `.text.startup` 等元数据节自动打 `0x200000` |
 | `gc_sections_root` 自动选根 (M12) | 接受 `-u <sym>` / `-Wl,-u,<sym>` 显式根符号，从 `entry + -u` 集合做引用图 BFS，软删除未被引用节 |
 | IFUNC `target_clones` 多版本 (M12) | 解析 `__attribute__((target_clones("sse4.2,default")))`，生成 STT_GNU_IFUNC 符号 + R_X86_64_IRELATIVE 重定位，resolver 简化返回 default 变体 |
 | `__dso_handle` / `.fini_array` 调度 (M12) | `__dso_handle` 指向 `.data` 起始；`FiniArrayBuilder` 收集 destructor 符号按 priority 排序生成 `.fini_array` 数据 |
-| `-r` 自研路径 (M12, 简化) | `OutputKind::Relocatable` + `write_elf_relocatable` 生成 ET_REL；当前复用 ET_EXEC 写盘改 e_type |
+| `-r` 自研路径 (M22) | `OutputKind::Relocatable` + `write_elf_relocatable` 生成 ET_REL；`legacy.rs` 优先内置路径 `link_relocatable_builtin`，旧路径 `link_relocatable_legacy` 保留 host `ld -r` |
 | AArch64 重定位（22 种） | `ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_LO21` / `ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` / `LDST*_ABS_LO12_NC` / `MOVW_UABS_G0..G3` |
 | RISC-V 重定位（15 种） | `64` / `32` / `32_PCREL` / `CALL` / `CALL_PLT` / `PCREL_HI20` / `PCREL_LO12_I` / `PCREL_LO12_S` / `HI20` / `LO12_I` / `LO12_S` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S` |
 | GOT64 大条目 | `R_X86_64_GOT64` / `R_X86_64_GOTOFF64` 重定位支持 |
