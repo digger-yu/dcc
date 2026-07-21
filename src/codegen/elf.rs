@@ -1267,3 +1267,98 @@ fn read_cstr(data: &[u8], off: usize) -> Option<&str> {
     let end = data.get(off..)?.iter().position(|&b| b == 0)?;
     std::str::from_utf8(&data[off..off + end]).ok()
 }
+
+/// 从 ET_REL 目标文件的 .symtab 收集 STB_GLOBAL / STB_WEAK 符号名。
+///
+/// 供 `-r --gc-sections` 通路用 `-u <name>` 把每个全局符号都定为
+/// root, 让宿主 ld 不会因为"无 root"而直接拒绝.
+pub fn global_symbol_names(elf: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    if elf.len() < 64 || elf.get(0..4) != Some(&ELFMAG) || elf[4] != ELFCLASS64 {
+        return out;
+    }
+    let shoff = match u64::from_le_bytes(elf.get(40..48).and_then(|s| s.try_into().ok()).unwrap_or([0; 8])) {
+        v if v > 0 => v as usize,
+        _ => return out,
+    };
+    let shentsize = u16::from_le_bytes(elf.get(58..60).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
+    let shnum = u16::from_le_bytes(elf.get(60..62).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
+    let shstrndx = u16::from_le_bytes(elf.get(62..64).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
+    if shnum == 0 || shentsize < 64 || shstrndx >= shnum {
+        return out;
+    }
+    let shstr_hdr = shoff + shstrndx * shentsize;
+    if shstr_hdr + 64 > elf.len() {
+        return out;
+    }
+    let shstr_off = u64::from_le_bytes(elf[shstr_hdr + 24..shstr_hdr + 32].try_into().unwrap()) as usize;
+    let shstr_size = u64::from_le_bytes(elf[shstr_hdr + 32..shstr_hdr + 40].try_into().unwrap()) as usize;
+    if shstr_off + shstr_size > elf.len() {
+        return out;
+    }
+    let shstrtab = &elf[shstr_off..shstr_off + shstr_size];
+
+    let mut symtab: Option<(usize, usize, u64)> = None;
+    let mut strtab: Option<(usize, usize)> = None;
+    for i in 0..shnum {
+        let base = shoff + i * shentsize;
+        if base + 64 > elf.len() {
+            break;
+        }
+        let name_idx = u32::from_le_bytes(elf[base..base + 4].try_into().unwrap()) as usize;
+        let sh_type = u32::from_le_bytes(elf[base + 4..base + 8].try_into().unwrap());
+        let data_off = u64::from_le_bytes(elf[base + 24..base + 32].try_into().unwrap()) as usize;
+        let data_size = u64::from_le_bytes(elf[base + 32..base + 40].try_into().unwrap()) as usize;
+        let entsize = u64::from_le_bytes(elf[base + 56..base + 64].try_into().unwrap());
+        let name = read_cstr(shstrtab, name_idx).unwrap_or("").to_string();
+        if name == ".symtab" && sh_type == SHT_SYMTAB {
+            symtab = Some((data_off, data_size, entsize));
+        } else if name == ".strtab" {
+            strtab = Some((data_off, data_size));
+        }
+    }
+
+    let (sym_off, sym_size, sym_entsize) = match symtab {
+        Some(v) if v.2 >= 24 => v,
+        _ => return out,
+    };
+    let (str_off, str_size) = match strtab {
+        Some(v) => v,
+        _ => return out,
+    };
+    if sym_off + sym_size > elf.len() || str_off + str_size > elf.len() {
+        return out;
+    }
+    let symtab_data = &elf[sym_off..sym_off + sym_size];
+    let strtab_data = &elf[str_off..str_off + str_size];
+    let sym_count = sym_size / sym_entsize as usize;
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..sym_count {
+        let base = i * sym_entsize as usize;
+        if base + 24 > symtab_data.len() {
+            break;
+        }
+        let st_name = u32::from_le_bytes(symtab_data[base..base + 4].try_into().unwrap()) as usize;
+        let st_info = symtab_data[base + 4];
+        let st_shndx = u16::from_le_bytes(symtab_data[base + 6..base + 8].try_into().unwrap());
+        let st_value = u64::from_le_bytes(symtab_data[base + 8..base + 16].try_into().unwrap());
+        let st_size = u64::from_le_bytes(symtab_data[base + 16..base + 24].try_into().unwrap());
+        let bind = st_info >> 4;
+        // STB_GLOBAL=1 / STB_WEAK=2
+        if bind != 1 && bind != 2 {
+            continue;
+        }
+        // 跳过 UNDEF 且 size=0 且 value=0 的"声明"空符号
+        if st_shndx == 0 && st_value == 0 && st_size == 0 {
+            continue;
+        }
+        let name = read_cstr(strtab_data, st_name).unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        if seen.insert(name.clone()) {
+            out.push(name);
+        }
+    }
+    out
+}

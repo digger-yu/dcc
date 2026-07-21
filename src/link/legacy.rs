@@ -6,10 +6,12 @@
 //
 // 历史沿用：本文件保持对 host ld + objcopy 的依赖（与早期 .llvm.lto 摘要模式兼容）。
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::codegen::elf::global_symbol_names;
 use crate::diagnostics::{Diagnostic, Span};
 use crate::link::lto_bitcode;
 
@@ -23,6 +25,26 @@ fn tool_path(default: &str, env_var: &str) -> PathBuf {
 
 fn tool_command(default: &str, env_var: &str) -> Command {
     Command::new(tool_path(default, env_var))
+}
+
+/// 收集所有输入对象的 STB_GLOBAL / STB_WEAK 符号, 供 `ld -r --gc-sections`
+/// 用 `-u <name>` 设为 root, 避免宿主 ld 报"无 root"错误. 重复项
+/// 用 HashSet 去重, 输出顺序按"先到先得"保持稳定.
+fn collect_global_roots(inputs: &[PathBuf]) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut roots: Vec<String> = Vec::new();
+    for p in inputs {
+        let bytes = match fs::read(p) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        for name in global_symbol_names(&bytes) {
+            if seen.insert(name.clone()) {
+                roots.push(name);
+            }
+        }
+    }
+    roots
 }
 
 /// 合并多个 ET_REL 目标文件；启用 LTO 时合并 dcc.lto 摘要。
@@ -79,8 +101,16 @@ pub fn link_relocatable(
 
     let mut ld = tool_command("ld", "LD");
     ld.arg("-r").arg("-o").arg(output);
+    // `-r` 模式本意是"保符号", 宿主 ld 在 `--gc-sections` 下会强制要求
+    // entry/root, 这里把每个输入的全局符号都加为 -u root, 与 GCC
+    // `-r -flto` 行为一致 (保留全部全局符号, 让 LTO/DCE 自己处理
+    // 死代码). LTO 期间把 dcc.lto 节以字节形式重写注入, 与是否 GC
+    // 无关.
     if lto_enabled {
         ld.arg("--gc-sections");
+        for root in collect_global_roots(inputs) {
+            ld.arg("-u").arg(root);
+        }
     }
     for input in inputs {
         ld.arg(input);

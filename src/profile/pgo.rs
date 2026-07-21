@@ -19,11 +19,10 @@
 //     落 `pgo_weights: HashMap<func_name, u64>` 备查.
 
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 
-use crate::ast::{BlockItem, Decl, Expr, FuncDecl, Program, Stmt, Type};
-use crate::diagnostics::Span;
+use crate::ast::{BlockItem, Decl, Expr, Program, Stmt, Type};
 
 #[derive(Debug, Clone, Default)]
 pub struct PgoConfig {

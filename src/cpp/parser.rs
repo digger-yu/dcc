@@ -1282,7 +1282,7 @@ impl<'a> CppParser<'a> {
                     }
                     // M18.0: `T& m_;` 类内引用成员变量
                     // 第一个 ident 是 type, 第二个是 name
-                    let mut ty = MangleType::Class("_".into());
+                    let ty = MangleType::Class("_".into());
                     // 这里 type 信息已经丢失, 用 `_` 占位; lower 时按 var 解析.
                     let _ = ty;
                     if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {

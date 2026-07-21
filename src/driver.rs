@@ -124,7 +124,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
     if diags.iter().any(|d| matches!(d.sev, Severity::Error)) { return Err(diags); }
 
-    let mut wlist: Vec<Diagnostic> = format_check::check_program(&prog);
+    let wlist: Vec<Diagnostic> = format_check::check_program(&prog);
     for w in &wlist {
         w.print_with(&dcfg);
         diags.push(w.clone());
@@ -370,7 +370,6 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     }
 
     // 2. C++ lex + parse + lower
-    let _ = fs::write(r"D:\git\dcc\target\debug-pp.c", &pp_out.text);
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
     let decls = parser.parse_top_level()
         .map_err(|e| vec![e.to_diag(&file_name)])?;

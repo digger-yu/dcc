@@ -19,6 +19,11 @@
 //   * `build_dwarf_full(cu, opts)` 完整入口
 //   * `build_eh_frame_with_arch(funcs, arch)` 跨架构
 //   * `build_gdb_index(funcs)` 链接器 -Wl,--gdb-index 数据
+//
+// 模块级 `non_upper_case_globals` allow: DWARF v4 规范常量 (DW_TAG_* /
+// DW_AT_* / DW_FORM_* / DW_CFA_* / DW_LNS_* / DW_LNE_* / DW_LNCT_* /
+// DW_INL_*) 严格沿用规范原名, 改写为 ALL_CAPS 会丢失与规范章节对应.
+#![allow(non_upper_case_globals)]
 
 use crate::codegen::elf::{ElfSection, SHF_ALLOC, SHT_PROGBITS};
 
@@ -334,7 +339,13 @@ impl DebugSections {
 
 // ============================================================================
 // DWARF v4 常量（tag / attribute / form / opcode）
+//
+// 这些常量名严格遵循 DWARF v4 规范原文, 例如 DW_TAG_array_type /
+// DW_CFA_def_cfa_offset_sf 等, 故全部标 `non_upper_case_globals` 抑制
+// 命名风格告警。改写为 Rust 风格 ALL_CAPS 会丢失与规范章节的对应关系,
+// 不利于调试. -- 2026-07-21
 // ============================================================================
+#[allow(non_upper_case_globals)]
 
 const DW_TAG_array_type: u16 = 0x01;
 const DW_TAG_class_type: u16 = 0x02;

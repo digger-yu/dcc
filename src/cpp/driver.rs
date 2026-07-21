@@ -79,7 +79,6 @@ pub fn compile_cpp(
         cpp_src.file_name().and_then(|n| n.to_str()).unwrap_or("input")
     ));
     fs::write(&tmp, c_src.clone())?;
-    let _ = fs::write(r"D:\git\dcc\target\debug-cpp.c", &c_src);
 
     // 调 dcc 编译
     let mut cmd = Command::new(dcc_bin);

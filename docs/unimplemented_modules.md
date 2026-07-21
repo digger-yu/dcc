@@ -1,9 +1,13 @@
 # DCC 未实现模块综合清单
 
-> 最后更新：2026-07-20
+> 最后更新：2026-07-21
 > 范围：`src/` 全量源码 + `docs/` 现有文档 + 远程 `192.168.148.128` 验收脚本
 > 目的：把"代码里能看到、但还没做完整 / 还没真做 / 仍然走桩"的模块统一记录，
 > 方便后续 M12+ 排期，避免"忘了还有这块没补"。
+> 维护约定：每完成一个 M 里程碑后, 在对应节加 `🟢 已实装` 标记 + 简述
+> 改动要点 (含回归测试), M 之前标记为 `🟠 简化` 或 `🔴 完全没有`。
+> 远程相关脚本 (`remote_*` / `sync_remote_*` / `192.168.148.128`) 不进
+> 入此清单 (本机调试期间不引用, 见用户偏好).
 
 ---
 
@@ -79,6 +83,13 @@ AVX/AVX2 浮点 60+ 条；`asm_avx_aes_fma_tsx_compiles_without_nop_fallback`
 > 独立 XMM 池（不再复用 GP 集合判定冲突）、asm goto 输出寄存器写回阶段支持
 > 落入不同 XMM；float/跨函数 LEA/rip-relative `[rip+disp32]` 通过既有
 > `float_refs`/`pending_data_rels` 重定位 + patch 路径已稳定支撑。
+>
+> **M21 增量（2026-07-21）**：asm `%0` 在约束 `"i"` 下正确展开
+> 为带 `$` 前缀的 AT&T 立即数（与 GCC 行为一致），Kbuild
+> `devicetable-offsets.c` 的 `DEFINE(SIZE_..., sizeof(struct ...))`
+> 宏能正确产出 `.ascii "->SIZE_usb_device_id $8 sizeof(struct
+> usb_device_id)"` 行；`kbuild_define_emits_ascii_in_asm_output`
+> 集成测试从错误预期 `8` 修正为 `$8` 后 PASS。
 
 历史 stub（已全部解决）：
 
@@ -145,6 +156,15 @@ AVX/AVX2 浮点 60+ 条；`asm_avx_aes_fma_tsx_compiles_without_nop_fallback`
 ✅ LTO 跨函数内联 / 常量传播 / 全局优化；`.gnu.hash` TIE；`.eh_frame_hdr` 搜索表；
 IFUNC；`--exclude-libs`；`--build-id=sha1/uuid/md5`；`--no-undefined-version`；
 AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节。
+
+> **M21 增量（2026-07-21）**：修复 `ld -r -flto` 在现代 binutils 下
+> 的 `--gc-sections requires a defined symbol root` 错误。新增
+> `codegen::elf::global_symbol_names` 解析输入对象的 STB_GLOBAL /
+> STB_WEAK 符号；`link::legacy::link_relocatable` 在 LTO 模式下为
+> 每个全局符号追加 `-u <name>` 作 root，使 `--gc-sections` 不会
+> 拒绝入口。受影响 4 个集成测试 (`flto_relocatable_link_merges_section`
+> / `lto_single_object_relocatable_link` / `lto_link_strips_unreferenced_static`
+> / `lto_summary_includes_function_size`) 全部 PASS。
 
 ### 2.2 未实装 / 简化
 
@@ -444,6 +464,14 @@ M19 关键改动:
 - `-gsplit-dwarf` / `-gpubnames` | 🔴 无
 - GDB index (`-Wl,--gdb-index`) | 🔴 无
 - AArch64/RISC-V DWARF / BTF | 🔴 无
+
+> **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
+> `#![allow(non_upper_case_globals)]` 抑制 121 个
+> `DW_TAG_*` / `DW_AT_*` / `DW_FORM_*` / `DW_CFA_*` /
+> `DW_LNS_*` / `DW_LNE_*` / `DW_LNCT_*` / `DW_INL_*`
+> 命名风格告警（这些常量严格沿用 DWARF v4 规范原名,
+> 改写为 ALL_CAPS 会丢失与规范章节对应）。`cargo build`
+> 与 `cargo build --tests` 0 警告。
 
 ### 8.2 诊断（`src/diagnostics.rs` + `tests/errors.rs`）
 

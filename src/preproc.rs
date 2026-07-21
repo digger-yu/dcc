@@ -3501,7 +3501,6 @@ n\
     #[test]
     fn fortify_source_changes_invalidate_cache() {
         use std::fs;
-        use std::io::Write;
         let dir = std::env::temp_dir().join(format!("dcc_fortify_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
