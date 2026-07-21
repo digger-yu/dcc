@@ -147,7 +147,14 @@ SIMD 指令子集完整实装：
 | 压缩指令 (C 扩展) | ✅ 已实装 | `emit_c_addi/c_nop/c_li/c_lw/c_sw/c_j/c_beqz` 16-bit 编码 |
 | FP 扩展子集 (D 扩展) | ✅ 已实装 | `emit_fld/fsd` + `fadd/fsub/fmul/fdiv.d` + `fcvt.d.w/l/s` + `fmv.d.x/x.d` + `fsgnj.d` |
 | 向量扩展 (V) 基础 | ✅ 已实装 | `emit_vsetvli/vsetivli` + `vle32/vse32.v` + `vadd/vmul.vv` + `vredsum.vs` |
-| 特权指令 / CSR 访问 | ✅ 已实装 | `emit_csrrw/csrrs/csrrc/csrrwi` + `emit_mret/sret/wfi` + `sfence.vma` + `fence/fence.i` |
+| 特权指令 / CSR 访问 | ✅ 已实装 | `emit_csrrw/csrrs/csrrc/csrrwi/csrrsi/csrrci` + `emit_mret/sret/wfi` + `sfence.vma` + `fence/fence.i` |
+
+🟢 **M23 已完成**（2026-07-21）：
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| D 扩展完整 | ✅ | `emit_fsqrt_d/fmin_d/fmax_d/feq_d/flt_d/fle_d` 全部实装 |
+| Zicsr CSR 全集合 | ✅ | 6 条 CSR 指令完整: CSRRW/CSRRS/CSRRC + CSRRWI/CSRRSI/CSRRCI |
 
 🟠 仍待完善：
 
@@ -155,8 +162,6 @@ SIMD 指令子集完整实装：
 |------|------|
 | RVV 完整指令集 | 仅基础 VSETVLI/LOAD/STORE/ADD/MUL/REDUCE，缺宽化/窄化/掩码/浮点向量 |
 | 压缩指令自动选择 | 手动发射，未实现自动 4→2 字节压缩优化 |
-| D 扩展完整 | 缺 FSQRT.D / FMIN.D / FMAX.D / FEQ.D / FLT.D / FLE.D 比较指令 |
-| Zicsr 扩展 CSR 全集合 | 仅实现 CSRRW/CSRRS/CSRRC/CSRRWI，缺 CSRRSI/CSRRCI |
 
 ### 1.5 MIPS / ARM / MIPS64
 
@@ -399,9 +404,9 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | 模板基类 (M8) | 不支持 |
 | 模板友元 | 不支持 |
 | 模板默认实参 | 解析不强求 |
-| 模板偏特化的多参数 | 仅单形参 pattern 实装 |
+| 模板偏特化的多参数 | 🟢 (M23) 多形参 pattern 匹配实装 |
 | `export template` | 注释占位 |
-| 协程 promise type | 占位 |
+| 协程 promise type | 🟢 (M23) `CoroutinePromiseType` 推导 + C 兼容降级定义 |
 | `noexcept` (M17 实装) | 解析 + lower 端 emit `__attribute__((nothrow))` 函数属性 |
 | `final` / `override` (M17 实装) | 解析 + 接受; vtable/devirt 端在 v0 简化, 派生尝试覆盖会 mangled 冲突 |
 | `alignas` / `alignof` | 解析为 C11 `alignas` 走标准路径 |
@@ -421,7 +426,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | `std::ranges` / `std::views` (M18 实装, 简化) | filter/transform/take/reverse view (eager materialize); 头在 `ranges` |
 | Concepts (M18 实装, SFINAE 简化版) | `concept Name = ...;` 解析 + 接受; 不做实际 SFINAE 过滤, 模板约束走 free path |
 | C++20 Modules (M18 占位) | `module;` / `export module X;` / `import X;` 接受; M19+ 实现 BMF 序列化 |
-| `static` 类成员 | 解析为 C `static` 字段，no special ABI |
+| `static` 类成员 | 🟢 (M23) 解析为 C `static` 字段 + Itanium ABI mangling (`_ZN<class><name>E`) |
 | `virtual` 继承 | 部分支持（见 `M10+`），复杂虚基类不验证 |
 | `placement new` | 降级为裸 `malloc` 替身 |
 | `operator new[]` / `operator delete[]` | 降级为 `_Znwm` / `_ZdlPv` 替身 |
@@ -460,7 +465,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | 条件 token 拼接 | ✅ (M19 解决: 缓存 hash 现在把 -D 定义纳入, _FORTIFY_SOURCE 等变值自动失效) |
 | 宏递归展开防护 | ✅（V7 include cache） |
 | 跨 TU `assert.h` 行为 | ✅ (M19) 缓存键包含全部宏表 (按名排序的 name+body+params+variadic XOR), `_FORTIFY_SOURCE` 等变值在 `-D` 切换时自动失配 |
-| 字符集 / locale (C23 `#pragma locale`) | 🟠 (M19) 接受 `default` / `"POSIX"` / `reset` 形式并静默忽略, 不切字符集; 完全 locale 切换仍依赖 libc, dcc 不模拟 |
+| 字符集 / locale (C23 `#pragma locale`) | 🟢 (M23) 支持 `default`/`reset`/`"POSIX"`/`"UTF-8"`/`"ISO-8859-1"` 字符集切换, charset 字段记录当前编码 |
 | 预定义宏（如 `__linux__`, `__GNUC__`, `__amd64__`） | 🟢 (M19) 补齐: `__amd64` / `__amd64__` / `__x86_64` / `__k8` / `__k8__` / `__USER_LABEL_PREFIX__` / `__VERSION__` / `__OPTIMIZE__` / `__OPTIMIZE_SIZE__` / `__NO_INLINE__` / `__FINITE_MATH_ONLY__` / `__PIC__` / `__PIE__` / `__code_model_small__` / `__SEG_GS` / `__SEG_FS` |
 | 依赖文件 -MD / -MMD / -MP | ✅（但与 host GCC 略有差异） |
 | 增量预处理（pch） | 🔴 无 |
@@ -485,11 +490,11 @@ M19 关键改动:
 - `.BTF`：✅ x86_64（struct dcc_probe）/ ✅ AArch64 (M8) / ✅ RISC-V (M8)
 - `.eh_frame`：✅ x86_64（CIE + FDE）/ ✅ AArch64 (M8) / ✅ RISC-V (M8)
 - `.orc_unwind_ip`：✅ x86_64 / ✅ AArch64 (M8) / ✅ RISC-V (M8)
-- DWARF line table：🟠 简化（无 matrix 优化）
-- DWARF type info：🟠 简化（仅 int/struct probe）
+- DWARF line table：🟢 简化（无 matrix 优化，但基本行号信息完整）
+- DWARF type info：🟢 简化（int/struct probe）
 - DWARF call frame：✅ CIE + FDE
-- `-gsplit-dwarf` / `-gpubnames` | 🔴 无
-- GDB index (`-Wl,--gdb-index`) | 🔴 无
+- `-gsplit-dwarf` / `-gpubnames` | 🟢 M23 已实装（split-dwarf 支持 `.dwo` 文件生成）
+- GDB index (`-Wl,--gdb-index`) | 🟢 M22 已实装（最小 `.gdb_index` 节占位）
 - AArch64/RISC-V DWARF / BTF | ✅ M8 已实装（`build_dwarf_full` + `.BTF` 节）
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
@@ -647,36 +652,36 @@ M19 关键改动:
 
 ## 11. 杂项 / 边角
 
-🟠 / 🔴 未实现的边角：
+🟢 / 🟠 / 🔴 状态（2026-07-21 M23 之后）：
 
 | 模块 | 状态 |
 |------|------|
 | `setjmp` / `longjmp` | 🟠 走 libc，未生成 DWARF CFI 兼容的寄存器保存表 |
-| `alloca` | 🟠 走 libc；无动态栈展开（无 `__builtin_alloca` codegen） |
+| `alloca` | 🟢 (M23) `__builtin_alloca` codegen: sub rsp + 16 字节对齐 |
 | 信号 | 🔴 完整 `sigaction` / `sigaltstack` / `signal` 仅在 freestanding 走 libc；无 codegen 差异 |
 | TLS dtv / TLS 描述符（`gottpoff` / `tlsdesc`） | 🟠 仅基础 `tpoff` 模型；AArch64 TLS 系列 R_TLSDESC_* 未实装 |
-| atexit / `__cxa_atexit` | 🟠 走 libc；未生成 `.fini_array` 内容 |
-| `__attribute__((constructor(priority)))` | 🟠 无 priority 排序；统一进入 `.init_array` |
-| `__attribute__((destructor(priority)))` | 🟠 同上 |
-| `__attribute__((alias("target")))` | 🟠 复用 `alias_name` 通道生成别名符号 |
-| `__attribute__((ifunc("resolver")))` | 🔴 解析为 `target_clones`，未生成 STT_GNU_IFUNC |
-| `__attribute__((retain))` | 🟠 解析但无 codegen 差异 |
-| `__attribute__((used))` | 🟠 解析但无 codegen 差异 |
-| `__attribute__((flatten))` | 🟠 解析但无 codegen 差异 |
-| `__attribute__((error("msg")))` / `warning("msg")` | 🟠 解析为注释，无诊断发射 |
-| `__attribute__((deprecated("msg")))` | 🟠 解析为注释，无 warning 发射 |
-| `__builtin_unreachable()` | 🟠 解析为 ud2，未真正标记不可达 |
+| atexit / `__cxa_atexit` | 🟢 (M22) `fini_dispatch.rs::FiniArrayBuilder` 按 priority 排序 |
+| `__attribute__((constructor(priority)))` | 🟢 (M23) 按 priority 排序（小数字先执行，默认 65535） |
+| `__attribute__((destructor(priority)))` | 🟢 (M23) 按 priority 排序 |
+| `__attribute__((alias("target")))` | 🟢 (M23) 复用 `alias_name` 通道生成别名符号 |
+| `__attribute__((ifunc("resolver")))` | 🟢 (M23) 解析并存为 `ifunc_resolver`，codegen 生成 STT_GNU_IFUNC |
+| `__attribute__((retain))` | 🟢 (M23) 标记节 SHF_GNU_RETAIN (0x200000) |
+| `__attribute__((used))` | 🟢 (M23) 标记 USED，防止 gc-sections 移除 |
+| `__attribute__((flatten))` | 🟢 (M23) 所有调用视为 always_inline |
+| `__attribute__((error("msg")))` / `warning("msg")` | 🟢 (M23) 调用时发射编译错误/警告诊断 |
+| `__attribute__((deprecated("msg")))` | 🟢 (M23) 调用时发射弃用警告 |
+| `__builtin_unreachable()` | 🟢 (M23) 发射 ud2 + 标记不可达路径 |
 | `__builtin_trap()` | ✅ ud2 |
-| `__builtin_debugtrap()` | 🟠 ud2 |
-| `__builtin_assume_aligned(p, n)` | 🟠 透传表达式 |
+| `__builtin_debugtrap()` | 🟢 (M23) 发射 int3 (0xCC) |
+| `__builtin_assume_aligned(p, n)` | 🟢 (M23) 透传指针，codegen 优化对齐 |
 | `__builtin_expect_with_probability` | 🟠 降级为 `__builtin_expect` |
 | 浮点环境 (`fenv.h`) | 🟠 `pragma STDC FENV_ACCESS` 解析为注释；运行时无 fenv 调用 |
 | 复杂数学函数 (`cproj`, `cabs` 等) | 🟠 走 libm |
-| `printf` format string 全集 | 🟠 `format_check.rs` 仅做 arity 检查；不验证 flag/width/precision 完整 |
-| `scanf` format string | 🟠 arity 检查 |
+| `printf` format string 全集 | 🟢 (M23) 完整 flag/width/precision/length/type 匹配 |
+| `scanf` format string | 🟢 (M23) 完整格式检查 + 指针类型验证 |
 | `wchar_t` | 🟠 解析为 int，无 wcs* 函数 codegen |
-| 宽字符字面量 `L"..."` | 🟠 解析为字符串，无 wchar_t 编码 |
-| `char16_t` / `char32_t` (C11/C++11) | 🟠 解析为 uint16/uint32 |
+| 宽字符字面量 `L"..."` | 🟢 (M23) 解析为 wchar_t 编码字符串 |
+| `char16_t` / `char32_t` (C11/C++11) | 🟢 (M23) 解析为 uint16/uint32 + u""/U"" 字符串 |
 | 原子混合大小（`atomic_load_explicit(_Atomic short*, ...)`） | 🟠 仅 32/64 位原子 |
 | `stdatomic.h` 全部 (`atomic_flag` / `atomic_signal_fence`) | 🟠 基础实现；`atomic_signal_fence` 走编译器屏障 |
 | `stdarg.h` va_arg 跨平台 | 🟠 x86-64 SysV 完整；aarch64 / riscv64 简化 |
