@@ -90,6 +90,12 @@ pub struct Config {
     pub warn_int_conversion: bool,
     /// -Wint-truncation: 整数截断警告
     pub warn_int_truncation: bool,
+    /// -fdiagnostics-color=always|never|auto
+    pub diag_color: crate::diagnostics::ColorPolicy,
+    /// -fdiagnostics-format=github|clang|msvc|vi|sarif
+    pub diag_format: crate::diagnostics::FormatStyle,
+    /// -fdiagnostics-show-template-tree
+    pub diag_show_template_tree: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +305,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut bounds_check = false;
     let mut warn_int_conversion = false;
     let mut warn_int_truncation = false;
+    let mut diag_color = crate::diagnostics::ColorPolicy::Auto;
+    let mut diag_format = crate::diagnostics::FormatStyle::Github;
+    let mut diag_show_template_tree = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -526,6 +535,27 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-Wno-int-conversion" => warn_int_conversion = false,
             "-Wint-truncation" => warn_int_truncation = true,
             "-Wno-int-truncation" => warn_int_truncation = false,
+            // 诊断输出控制
+            "-fdiagnostics-color=always" => diag_color = crate::diagnostics::ColorPolicy::Always,
+            "-fdiagnostics-color=never" => diag_color = crate::diagnostics::ColorPolicy::Never,
+            "-fdiagnostics-color=auto" => diag_color = crate::diagnostics::ColorPolicy::Auto,
+            a if a.starts_with("-fdiagnostics-color=") => {
+                let v = &a["-fdiagnostics-color=".len()..];
+                diag_color = crate::diagnostics::ColorPolicy::from_arg(v)
+                    .map_err(|e| CliError::new(&e))?;
+            }
+            "-fdiagnostics-format=github" => diag_format = crate::diagnostics::FormatStyle::Github,
+            "-fdiagnostics-format=clang" => diag_format = crate::diagnostics::FormatStyle::Clang,
+            "-fdiagnostics-format=msvc" => diag_format = crate::diagnostics::FormatStyle::Msvc,
+            "-fdiagnostics-format=vi" => diag_format = crate::diagnostics::FormatStyle::Vi,
+            "-fdiagnostics-format=sarif" => diag_format = crate::diagnostics::FormatStyle::Sarif,
+            a if a.starts_with("-fdiagnostics-format=") => {
+                let v = &a["-fdiagnostics-format=".len()..];
+                diag_format = crate::diagnostics::FormatStyle::from_arg(v)
+                    .map_err(|e| CliError::new(&e))?;
+            }
+            "-fdiagnostics-show-template-tree" => diag_show_template_tree = true,
+            "-fno-diagnostics-show-template-tree" => diag_show_template_tree = false,
             "-x" => {
                 i += 1;
                 let lang = args.get(i)
@@ -845,6 +875,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             bounds_check,
             warn_int_conversion,
             warn_int_truncation,
+            diag_color,
+            diag_format,
+            diag_show_template_tree,
         })
     } else {
         if inputs.is_empty() {
@@ -879,6 +912,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             bounds_check,
             warn_int_conversion,
             warn_int_truncation,
+            diag_color,
+            diag_format,
+            diag_show_template_tree,
         })
     }
 }

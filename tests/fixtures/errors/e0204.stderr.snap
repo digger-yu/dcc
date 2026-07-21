@@ -2,7 +2,3 @@ error[E0204]: expected "file" or <file>
   --> <file>:1:1
    1 |#include BOGUS
      | ^
-error[E0204]: expected "file" or <file>
-  --> <file>:1:1
-   1 |#include BOGUS
-     | ^

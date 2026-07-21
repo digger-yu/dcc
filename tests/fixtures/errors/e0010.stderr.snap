@@ -1,4 +1,4 @@
-error[E0010]: fail
+error[E0010]: fail (evaluates to: 0)
   --> <file>:1:1
    1 |_Static_assert(0, "fail");
      | ^^^^^^^^^^^^^^

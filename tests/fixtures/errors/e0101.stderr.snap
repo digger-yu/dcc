@@ -1,0 +1,1 @@
+error[E0101]: cannot write /this/dir/does/not/exist/a.out: No such file or directory (os error 2)

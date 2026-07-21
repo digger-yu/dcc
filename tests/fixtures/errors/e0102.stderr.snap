@@ -1,0 +1,2 @@
+error[E0102]: assembler failed: /tmp/<asm-tmp>: Assembler messages:
+/tmp/<asm-tmp>:5: 错误： no such instruction: `this_is_definitely_not_a_valid_x86_instruction_xyz'

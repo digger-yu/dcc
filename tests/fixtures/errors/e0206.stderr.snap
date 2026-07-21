@@ -2,7 +2,3 @@ error[E0206]: include file not found: no_such_header_xyz.h
   --> <file>:1:1
    1 |#include "no_such_header_xyz.h"
      | ^
-error[E0206]: include file not found: no_such_header_xyz.h
-  --> <file>:1:1
-   1 |#include "no_such_header_xyz.h"
-     | ^

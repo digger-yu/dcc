@@ -2,7 +2,3 @@ error[E0203]: #error stop here
   --> <file>:1:1
    1 |#error stop here
      | ^
-error[E0203]: #error stop here
-  --> <file>:1:1
-   1 |#error stop here
-     | ^

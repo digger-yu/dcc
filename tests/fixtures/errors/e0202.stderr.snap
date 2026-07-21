@@ -2,7 +2,3 @@ error[E0202]: #endif without #if
   --> <file>:1:1
    1 |#endif
      | ^
-error[E0202]: #endif without #if
-  --> <file>:1:1
-   1 |#endif
-     | ^

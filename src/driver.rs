@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use crate::mmap_io::MappedInput;
 use std::process::Command;
 use crate::cli::{Config, InputLang, LinkerOutputKind};
-use crate::diagnostics::{Diagnostic, Severity, enrich_diags};
+use crate::diagnostics::{
+    Diagnostic, DiagnosticsConfig, Severity, enrich_diags,
+};
 use crate::target::Target;
 use crate::preproc;
 use crate::parser;
@@ -17,6 +19,17 @@ use crate::link;
 use crate::sanitizer;
 use crate::format_check;
 use crate::lto;
+
+/// 根据 Config 构造 DiagnosticsConfig。-v / DCC_FORCE_COLOR 等不参与,
+/// 直接由 ColorPolicy::Auto 走 IsTerminal 判定。
+fn diag_cfg(cfg: &Config) -> DiagnosticsConfig {
+    DiagnosticsConfig {
+        color: cfg.diag_color,
+        format: cfg.diag_format,
+        show_template_tree: cfg.diag_show_template_tree,
+    }
+}
+
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // -r 多 .o 可重定位链接（host ld -r 兼容路径）
     if cfg.link_mode && !cfg.built_link {
@@ -81,11 +94,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let weak_symbols = pp_out.weak_symbols;
     let include_deps = pp_out.deps;
     enrich_diags(&mut pp_diags, &src);
-    if !pp_diags.is_empty() {
-        for d in &pp_diags { d.print(); }
-        if pp_diags.iter().any(|d| matches!(d.sev, crate::diagnostics::Severity::Error)) {
-            return Err(pp_diags);
-        }
+    if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
+        return Err(pp_diags);
     }
 
     // -E 模式：只做预处理，输出到 stdout
@@ -103,18 +113,23 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     drop(preprocessed);
     drop(pack_history);
     drop(weak_symbols);
+    let dcfg = diag_cfg(&cfg);
     enrich_diags(&mut diags, &src);
+    // 打印 parser 警告(注意: parser 错误会在下面 return Err,
+    // 由 main.rs 统一输出,避免重复)
     for d in &diags {
         if matches!(d.sev, Severity::Warning) {
-            d.print();
+            d.print_with(&dcfg);
         }
     }
     if diags.iter().any(|d| matches!(d.sev, Severity::Error)) { return Err(diags); }
 
-    for w in format_check::check_program(&prog) {
-        w.print();
-        diags.push(w);
+    let mut wlist: Vec<Diagnostic> = format_check::check_program(&prog);
+    for w in &wlist {
+        w.print_with(&dcfg);
+        diags.push(w.clone());
     }
+    drop(wlist);
 
     // sanitizer 插桩（AST 层，在 IR lower 之前）
     sanitizer::instrument_program(&mut prog, cfg.sanitizers);
@@ -186,11 +201,13 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             format!("{:?}", g).contains("Float") || format!("{:?}", g).contains("Double")
         });
         if uses_sse {
-            return Err(vec![Diagnostic::err(
+            let mut diags = vec![Diagnostic::err(
                 "E0300",
                 "floating-point code requires SSE on the SysV AMD64 target; remove -mno-sse",
                 crate::diagnostics::Span::point(&file_name, 1, 1),
-            )]);
+            )];
+            enrich_diags(&mut diags, &src);
+            return Err(diags);
         }
     }
 
@@ -249,7 +266,6 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
     let preprocessed = pp_out.text;
     enrich_diags(&mut pp_diags, &src);
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
-        for d in &pp_diags { d.print(); }
         return Err(pp_diags);
     }
 
@@ -273,12 +289,22 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
         }
     }
     cmd.arg("-o").arg(&cfg.output).arg(&asm_path);
-    let status = cmd.status()
+    let output = cmd.output()
         .map_err(|e| vec![Diagnostic::err("E0102", format!("cannot invoke assembler: {}", e),
             crate::diagnostics::Span::point(&file_name, 0, 0))])?;
     let _ = fs::remove_file(&asm_path);
-    if !status.success() {
-        return Err(vec![Diagnostic::err("E0102", "assembler failed",
+    if !output.status.success() {
+        // 把汇编器自身 stderr / stdout 折叠进 message, 避免与 snapshot 漂移
+        let mut msg = String::from("assembler failed");
+        let stderr_s = String::from_utf8_lossy(&output.stderr);
+        let stdout_s = String::from_utf8_lossy(&output.stdout);
+        for chunk in [stderr_s.trim_end(), stdout_s.trim_end()] {
+            if !chunk.is_empty() {
+                msg.push_str(": ");
+                msg.push_str(chunk);
+            }
+        }
+        return Err(vec![Diagnostic::err("E0102", msg,
             crate::diagnostics::Span::point(&file_name, 0, 0))]);
     }
     eprintln!("dcc: wrote {}", cfg.output.display());
@@ -312,7 +338,6 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         let mut pp_diags = pp_out.diags;
         enrich_diags(&mut pp_diags, &src);
         if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
-            for d in &pp_diags { d.print(); }
             return Err(pp_diags);
         }
         print!("{}", pp_out.text);
@@ -341,7 +366,6 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     let mut pp_diags = pp_out.diags;
     enrich_diags(&mut pp_diags, &src);
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
-        for d in &pp_diags { d.print(); }
         return Err(pp_diags);
     }
 

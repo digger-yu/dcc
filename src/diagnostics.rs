@@ -1,7 +1,18 @@
 // src/diagnostics.rs - 精准错误诊断
 // 第一性原理: 错误必须精确到"字符位置",且必须可修复。
 // 每个 Diagnostic 携带 file/line/col/len,以及建议。
-// 输出格式: GitHub-style line + caret + underline
+//
+// 公共 API:
+//   * GitHub 风格四段式 (默认): 错误首行 +  --> file:line:col + 源码行 + 指针
+//   * Clang 风格 (--diagnostics-format=clang): 兼容 clang 的 caret 形态
+//   * MSVC 风格 (--diagnostics-format=msvc): file(line,col): error E0001: msg
+//   * vi 风格   (--diagnostics-format=vi)  : 仅首行,无 caret,适合编辑器
+//   * SARIF     (--diagnostics-format=sarif): JSON 2.1.0, 供 IDE/工具消费
+//
+// 颜色控制 (-fdiagnostics-color={always,never,auto}):
+//   * Always: 始终输出 ANSI 转义序列
+//   * Never:  始终不输出
+//   * Auto:   仅当 stderr 是 TTY 时输出 (use std::io::IsTerminal)
 
 use std::fmt;
 
@@ -66,18 +77,109 @@ impl Diagnostic {
     }
 }
 
-/// ===== GitHub 风格格式化输出 =====
-///
-/// 格式:
-/// ```text
-/// error[E0001]: expected ';', got '{'
-///   --> main.c:3:12
-///    3 |   return x {
-///                 ^
-///   hint: did you mean ';'?
-/// ```
+// ============================================================================
+// 颜色 / 格式 配置
+// ============================================================================
 
-/// Display: 无颜色版本（用于文件日志等）
+/// 颜色策略 (--diagnostics-color / -fdiagnostics-color=)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorPolicy {
+    /// 始终输出 ANSI 转义序列
+    Always,
+    /// 始终不输出
+    Never,
+    /// 仅当 stderr 是 TTY 时输出 (默认)
+    Auto,
+}
+
+impl ColorPolicy {
+    /// 按当前 stderr 的 TTY 状态求值 Auto 分支
+    pub fn resolve(self) -> bool {
+        match self {
+            ColorPolicy::Always => true,
+            ColorPolicy::Never => false,
+            ColorPolicy::Auto => {
+                // std::io::stderr().is_terminal() 在 unix 与 windows 都可用
+                std::io::IsTerminal::is_terminal(&std::io::stderr())
+            }
+        }
+    }
+    pub fn from_arg(s: &str) -> Result<Self, String> {
+        match s {
+            "always" => Ok(ColorPolicy::Always),
+            "never" => Ok(ColorPolicy::Never),
+            "auto" => Ok(ColorPolicy::Auto),
+            other => Err(format!(
+                "invalid -fdiagnostics-color value: {} (expected always|never|auto)",
+                other
+            )),
+        }
+    }
+}
+
+/// 输出格式 (--diagnostics-format / -fdiagnostics-format=)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatStyle {
+    /// 默认 GitHub 风格: error[E0001]: ...  + caret 指针
+    Github,
+    /// Clang 风格: error: ...  + caret
+    Clang,
+    /// MSVC 风格: file(line,col): error E0001: ...
+    Msvc,
+    /// vi 风格: 仅单行,无 caret
+    Vi,
+    /// SARIF 2.1.0 JSON (写到 stderr 末尾追加换行)
+    Sarif,
+}
+
+impl FormatStyle {
+    pub fn from_arg(s: &str) -> Result<Self, String> {
+        match s {
+            "github" => Ok(FormatStyle::Github),
+            "clang" => Ok(FormatStyle::Clang),
+            "msvc" => Ok(FormatStyle::Msvc),
+            "vi" => Ok(FormatStyle::Vi),
+            "sarif" => Ok(FormatStyle::Sarif),
+            other => Err(format!(
+                "invalid -fdiagnostics-format value: {} \
+                 (expected github|clang|msvc|vi|sarif)",
+                other
+            )),
+        }
+    }
+}
+
+/// 诊断配置: 颜色策略 + 输出格式 + 模板树开关
+#[derive(Debug, Clone, Copy)]
+pub struct DiagnosticsConfig {
+    pub color: ColorPolicy,
+    pub format: FormatStyle,
+    pub show_template_tree: bool,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            color: ColorPolicy::Auto,
+            format: FormatStyle::Github,
+            show_template_tree: false,
+        }
+    }
+}
+
+// ============================================================================
+// GitHub 风格（默认）
+// ============================================================================
+//
+// 格式:
+// ```text
+// error[E0001]: expected ';', got '{'
+//   --> main.c:3:12
+//    3 |   return x {
+//                 ^
+//   hint: did you mean ';'?
+// ```
+
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // 第一行: error[E0001]: msg
@@ -92,10 +194,10 @@ impl fmt::Display for Diagnostic {
                 let line_digits = format!("{}", line_no).len();
                 let gutter_w = 4usize.max(line_digits + 1); // 至少 4 列，含 1 前导空格
 
-                // 源码行: "   3 |   return x {"
-                writeln!(f, "{:>width$} | {}", line_no, src, width = gutter_w)?;
+                // 源码行: "   3 |   return x {" (注意 | 后无空格,与历史 snapshot 一致)
+                writeln!(f, "{:>width$} |{}", line_no, src, width = gutter_w)?;
 
-                // 指针行: "     |   ^^^"
+                // 指针行: "     |   ^^^" (| 后有空格对齐)
                 let col_offset = (self.span.col as usize).saturating_sub(1);
                 let caret = "^".repeat(self.span.len.max(1) as usize);
                 writeln!(f, "{:>width$} | {}{}", "", " ".repeat(col_offset), caret, width = gutter_w)?;
@@ -109,48 +211,460 @@ impl fmt::Display for Diagnostic {
     }
 }
 
-/// print: 终端彩色版本
+// ============================================================================
+// 格式化器
+// ============================================================================
+
+/// GitHub 风格首行标签 (无 ANSI)
+fn gh_first_line(d: &Diagnostic) -> String {
+    format!("{}: {}", d.sev_tag(), d.msg)
+}
+
+/// Clang 风格首行:  `error: msg`
+fn clang_first_line(d: &Diagnostic) -> String {
+    let s = match d.sev {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Note => "note",
+    };
+    format!("{}: {}", s, d.msg)
+}
+
+/// MSVC 风格首行:  `file(line,col): error E0001: msg`
+fn msvc_first_line(d: &Diagnostic) -> String {
+    let s = match d.sev {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Note => "note",
+    };
+    if d.span.line > 0 {
+        format!(
+            "{}({},{}): {} {}: {}",
+            d.span.file, d.span.line, d.span.col, s, d.code, d.msg
+        )
+    } else {
+        format!("{} {}: {}", s, d.code, d.msg)
+    }
+}
+
+/// vi 风格首行:  `file:line:col: error[E0001]: msg`
+fn vi_first_line(d: &Diagnostic) -> String {
+    if d.span.line > 0 {
+        format!(
+            "{}:{}:{}: {}",
+            d.span.file, d.span.line, d.span.col, gh_first_line(d)
+        )
+    } else {
+        format!("{}: {}", d.span.file, gh_first_line(d))
+    }
+}
+
+/// 共享源码 + caret 区段（GitHub/Clang 共用）
+///
+/// 注: 为与历史 snapshot 保持一致,源码行使用 `gutter_num |src` 形式
+/// (| 后无空格);指针行使用 `gutter_sp |      ^^` 形式 (| 后有空格对齐)。
+///
+/// 当 source_line 缺失时(例如 Driver 直接构造的 E0300 错误,未走
+/// enrich_diags 补全),不输出任何附加行;位置行 `  -->` 由 render()
+/// 单独负责,避免出现两条 `-->` 行。
+fn source_caret_block(d: &Diagnostic) -> String {
+    if d.span.line == 0 {
+        return String::new();
+    }
+    let src = match &d.source_line {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let mut out = String::new();
+    let line_no = d.span.line;
+    let line_digits = format!("{}", line_no).len();
+    let gutter_w = 4usize.max(line_digits + 1);
+    out.push_str(&format!(
+        "{:>width$} |{}\n",
+        line_no,
+        src,
+        width = gutter_w
+    ));
+    let col_offset = (d.span.col as usize).saturating_sub(1);
+    let caret = "^".repeat(d.span.len.max(1) as usize);
+    out.push_str(&format!(
+        "{:>width$} | {}\n",
+        "",
+        " ".repeat(col_offset) + &caret,
+        width = gutter_w
+    ));
+    out
+}
+
+/// 共享 hint 尾巴
+fn hint_tail(d: &Diagnostic) -> String {
+    match &d.hint {
+        Some(h) => format!("  hint: {}\n", h),
+        None => String::new(),
+    }
+}
+
+/// 按 FormatStyle 渲染一个 diagnostic 为单条字符串
+pub fn render(d: &Diagnostic, fmt: FormatStyle) -> String {
+    match fmt {
+        FormatStyle::Github => {
+            // 与原 fmt::Display 一致
+            let mut s = format!("{}: {}\n", d.sev_tag(), d.msg);
+            if d.span.line > 0 {
+                s.push_str(&format!(
+                    "  --> {}:{}:{}\n",
+                    d.span.file, d.span.line, d.span.col
+                ));
+                s.push_str(&source_caret_block(d));
+            }
+            s.push_str(&hint_tail(d));
+            s
+        }
+        FormatStyle::Clang => {
+            let mut s = format!("{}\n", clang_first_line(d));
+            if d.span.line > 0 {
+                s.push_str(&source_caret_block(d));
+            }
+            s.push_str(&hint_tail(d));
+            s
+        }
+        FormatStyle::Msvc => {
+            format!("{}\n", msvc_first_line(d))
+        }
+        FormatStyle::Vi => {
+            format!("{}\n", vi_first_line(d))
+        }
+        FormatStyle::Sarif => {
+            // 单条 diagnostic 在 SARIF 模式由 render_sarif 统一处理
+            String::new()
+        }
+    }
+}
+
+// ============================================================================
+// SARIF 2.1.0 输出
+// ============================================================================
+
+/// 把一组 diagnostic 渲染为 SARIF 2.1.0 JSON 字符串
+pub fn render_sarif(diags: &[Diagnostic]) -> String {
+    let mut results = String::new();
+    for (i, d) in diags.iter().enumerate() {
+        if i > 0 {
+            results.push_str(",\n");
+        }
+        results.push_str(&sarif_result(d));
+    }
+    format!(
+        r#"{{
+  "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {{
+      "tool": {{
+        "driver": {{
+          "name": "dcc",
+          "version": "{ver}",
+          "informationUri": "https://github.com/dcc/dcc"
+        }}
+      }},
+      "results": [
+        {results}
+      ]
+    }}
+  ]
+}}
+"#,
+        ver = env!("CARGO_PKG_VERSION"),
+        results = if results.is_empty() { " ".to_string() } else { results },
+    )
+}
+
+fn sarif_level(d: &Diagnostic) -> &'static str {
+    match d.sev {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Note => "note",
+    }
+}
+
+fn sarif_escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn sarif_result(d: &Diagnostic) -> String {
+    let level = sarif_level(d);
+    let code = sarif_escape_json(d.code);
+    let msg = sarif_escape_json(&d.msg);
+    let file = sarif_escape_json(&d.span.file);
+    let hint_part = match &d.hint {
+        Some(h) => format!(
+            ",\n      \"properties\": {{\"hint\": \"{}\"}}",
+            sarif_escape_json(h)
+        ),
+        None => String::new(),
+    };
+    if d.span.line > 0 {
+        format!(
+            r#"    {{
+      "ruleId": "{code}",
+      "level": "{level}",
+      "message": {{ "text": "{msg}" }},
+      "locations": [
+        {{
+          "physicalLocation": {{
+            "artifactLocation": {{ "uri": "{file}" }},
+            "region": {{
+              "startLine": {line},
+              "startColumn": {col},
+              "endColumn": {end_col}
+            }}
+          }}
+        }}
+      ]{hint}
+    }}"#,
+            code = code,
+            level = level,
+            msg = msg,
+            file = file,
+            line = d.span.line,
+            col = d.span.col.max(1),
+            end_col = d.span.col.saturating_sub(1).saturating_add(d.span.len.max(1) as u32).max(1),
+            hint = hint_part,
+        )
+    } else {
+        format!(
+            r#"    {{
+      "ruleId": "{code}",
+      "level": "{level}",
+      "message": {{ "text": "{msg}" }}{hint}
+    }}"#,
+            code = code,
+            level = level,
+            msg = msg,
+            hint = hint_part,
+        )
+    }
+}
+
+// ============================================================================
+// 模板树 (-fdiagnostics-show-template-tree)
+// ============================================================================
+//
+// 简单 C 前端没有真实模板;语义上为占位实现: 当开关开启且 msg 含
+// 尖括号嵌套（形如 `Foo<int, Bar<float>>`）时,在 hint 后面追加一个
+// 折叠视图,展示每个层级的类型参数。
+
+/// 返回附加的模板树展示,空串表示无需展示
+pub fn template_tree_tail(d: &Diagnostic) -> String {
+    if !looks_like_template(&d.msg) {
+        return String::new();
+    }
+    let tree = build_template_tree(&d.msg);
+    format!(
+        "  template-tree:\n{}\n",
+        tree.lines()
+            .map(|l| format!("    {}", l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn looks_like_template(s: &str) -> bool {
+    // 简易启发: 含 `Name<` 且 `<` 配对闭合
+    if !s.contains('<') {
+        return false;
+    }
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn build_template_tree(s: &str) -> String {
+    // 找到第一个 `<`,把前面的名字当作根,后面按层级缩进展开
+    let Some(open) = s.find('<') else {
+        return s.to_string();
+    };
+    let root = s[..open].trim();
+    let rest = &s[open + 1..];
+    // 找匹配 `>`: 简单深度计数
+    let mut depth = 1i32;
+    let mut close = rest.len();
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inside = &rest[..close];
+    let args = split_top_level_commas(inside);
+    let mut out = String::new();
+    out.push_str(&format!("{}<", root));
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        if looks_like_template(arg) {
+            out.push('\n');
+            for l in build_template_tree(arg).lines() {
+                out.push_str(&format!("  {}", l));
+                out.push('\n');
+            }
+            // 去掉末尾多出的换行
+            while out.ends_with('\n') && out.ends_with("  \n") {
+                out.pop();
+            }
+        } else {
+            out.push_str(arg.trim());
+        }
+    }
+    out.push('>');
+    out
+}
+
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+// ============================================================================
+// 终端输出
+// ============================================================================
+
+/// 旧 print() 入口保持不变：默认 GitHub + Always 颜色
 impl Diagnostic {
     pub fn print(&self) {
-        let reset = "\x1b[0m";
+        let cfg = DiagnosticsConfig {
+            color: ColorPolicy::Always,
+            format: FormatStyle::Github,
+            show_template_tree: false,
+        };
+        self.print_with(&cfg);
+    }
+
+    /// 按 cfg 渲染并写到 stderr
+    pub fn print_with(&self, cfg: &DiagnosticsConfig) {
+        let use_color = cfg.color.resolve();
+        if cfg.format == FormatStyle::Sarif {
+            // SARIF 模式: 调用方统一收集所有 diagnostic 然后 render_sarif
+            // 这里对单条调用走 eprintln 一条 SARIF result 包络 (兼容单条)
+            let s = render_sarif(std::slice::from_ref(self));
+            eprintln!("{}", s.trim_end());
+            return;
+        }
+        let mut text = render(self, cfg.format);
+        if cfg.show_template_tree {
+            text.push_str(&template_tree_tail(self));
+        }
+        if !use_color {
+            eprint!("{}", text);
+            return;
+        }
+        // 上色: 第一行 sev_tag 染色,caret 行染色
+        let sev_color = match self.sev {
+            Severity::Error => "\x1b[1;31m",
+            Severity::Warning => "\x1b[1;33m",
+            Severity::Note => "\x1b[1;36m",
+        };
         let bold = "\x1b[1m";
         let cyan = "\x1b[1;36m";
-
-        let (sev_color, sev_str) = match self.sev {
-            Severity::Error   => ("\x1b[1;31m", "error"),
-            Severity::Warning => ("\x1b[1;33m", "warning"),
-            Severity::Note    => ("\x1b[1;36m", "note"),
-        };
-
-        // 第一行: error[E0001]: msg
-        eprintln!("{}{}{}[{}]{}: {}", sev_color, bold, sev_str, self.code, reset, self.msg);
-
-        if self.span.line > 0 {
-            // 第二行:   --> file:line:col
-            eprintln!("  {}-->{} {}:{}:{}", cyan, reset, self.span.file, self.span.line, self.span.col);
-
-            if let Some(src) = &self.source_line {
-                let line_no = self.span.line;
-                let line_digits = format!("{}", line_no).len();
-                let gutter_w = 4usize.max(line_digits + 1); // 至少 4 列
-
-                // 源码行: "   3 |   return x {"
-                let gutter_num = format!("{:>width$}", line_no, width = gutter_w);
-                eprintln!("{}{}{} |{}{}", bold, cyan, gutter_num, reset, src);
-
-                // 指针行: "     |   ^^^"
-                let col_offset = (self.span.col as usize).saturating_sub(1);
-                let caret = "^".repeat(self.span.len.max(1) as usize);
-                let gutter_sp = format!("{:>width$}", "", width = gutter_w);
-                let pointer_line = format!("{} | {}{}", gutter_sp, " ".repeat(col_offset), caret);
-                eprintln!("{}{}", sev_color, pointer_line);
+        let reset = "\x1b[0m";
+        let mut out = String::new();
+        // 首行
+        if let Some(idx) = text.find('\n') {
+            out.push_str(sev_color);
+            out.push_str(bold);
+            out.push_str(&text[..idx]);
+            out.push_str(reset);
+            out.push('\n');
+            let rest = &text[idx + 1..];
+            // caret 行 (含 `^`) 染色
+            for line in rest.split_inclusive('\n') {
+                if line.contains('^') && !line.contains("hint:") {
+                    out.push_str(sev_color);
+                    out.push_str(line);
+                    out.push_str(reset);
+                } else if line.contains("hint:") {
+                    out.push_str(cyan);
+                    out.push_str(line);
+                    out.push_str(reset);
+                } else if line.contains(" --> ") {
+                    out.push_str(cyan);
+                    out.push_str(line);
+                    out.push_str(reset);
+                } else if line.contains(" | ") {
+                    out.push_str(bold);
+                    out.push_str(line);
+                    out.push_str(reset);
+                } else {
+                    out.push_str(line);
+                }
             }
+        } else {
+            out.push_str(sev_color);
+            out.push_str(bold);
+            out.push_str(&text);
+            out.push_str(reset);
         }
+        eprint!("{}", out);
+    }
+}
 
-        // hint 行
-        if let Some(h) = &self.hint {
-            eprintln!("  {}hint{}: {}", cyan, reset, h);
-        }
+/// 把一组 diagnostic 按 cfg 输出到 stderr
+pub fn print_all(diags: &[Diagnostic], cfg: &DiagnosticsConfig) {
+    if cfg.format == FormatStyle::Sarif {
+        eprintln!("{}", render_sarif(diags).trim_end());
+        return;
+    }
+    for d in diags {
+        d.print_with(cfg);
     }
 }
 
@@ -165,5 +679,128 @@ pub fn enrich_diags(diags: &mut [Diagnostic], src: &[u8]) {
                 d.source_line = Some(line.to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Diagnostic {
+        Diagnostic::err(
+            "E0001",
+            "expected ';'",
+            Span::point("main.c", 3, 12),
+        )
+        .with_hint("add ';' here")
+        .with_source("    return x {".to_string())
+    }
+
+    #[test]
+    fn color_policy_from_arg_ok() {
+        assert_eq!(ColorPolicy::from_arg("always").unwrap(), ColorPolicy::Always);
+        assert_eq!(ColorPolicy::from_arg("never").unwrap(), ColorPolicy::Never);
+        assert_eq!(ColorPolicy::from_arg("auto").unwrap(), ColorPolicy::Auto);
+        assert!(ColorPolicy::from_arg("maybe").is_err());
+    }
+
+    #[test]
+    fn format_style_from_arg_ok() {
+        assert_eq!(FormatStyle::from_arg("github").unwrap(), FormatStyle::Github);
+        assert_eq!(FormatStyle::from_arg("clang").unwrap(), FormatStyle::Clang);
+        assert_eq!(FormatStyle::from_arg("msvc").unwrap(), FormatStyle::Msvc);
+        assert_eq!(FormatStyle::from_arg("vi").unwrap(), FormatStyle::Vi);
+        assert_eq!(FormatStyle::from_arg("sarif").unwrap(), FormatStyle::Sarif);
+        assert!(FormatStyle::from_arg("rust").is_err());
+    }
+
+    #[test]
+    fn render_github_has_caret_and_arrow() {
+        let s = render(&sample(), FormatStyle::Github);
+        assert!(s.contains("error[E0001]:"));
+        assert!(s.contains("-->"));
+        assert!(s.contains("^"));
+        assert!(s.contains("hint:"));
+    }
+
+    #[test]
+    fn render_clang_strips_brackets() {
+        let s = render(&sample(), FormatStyle::Clang);
+        assert!(s.starts_with("error: "));
+        assert!(!s.contains("error[E"));
+        assert!(s.contains("^"));
+    }
+
+    #[test]
+    fn render_msvc_uses_file_line_col() {
+        let s = render(&sample(), FormatStyle::Msvc);
+        assert!(s.contains("main.c(3,12): error E0001:"));
+    }
+
+    #[test]
+    fn render_vi_is_single_line() {
+        let s = render(&sample(), FormatStyle::Vi);
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(s.contains("main.c:3:12"));
+    }
+
+    #[test]
+    fn sarif_emits_valid_json_envelope() {
+        let d = sample();
+        let s = render_sarif(std::slice::from_ref(&d));
+        assert!(s.contains("\"$schema\""));
+        assert!(s.contains("\"version\": \"2.1.0\""));
+        assert!(s.contains("\"name\": \"dcc\""));
+        assert!(s.contains("\"ruleId\": \"E0001\""));
+        assert!(s.contains("\"startLine\": 3"));
+        assert!(s.contains("\"uri\": \"main.c\""));
+    }
+
+    #[test]
+    fn sarif_handles_multiple_diags() {
+        let mut d1 = sample();
+        d1.code = "E0001";
+        let mut d2 = sample();
+        d2.code = "E0002";
+        d2.msg = "another".to_string();
+        let s = render_sarif(&[d1, d2]);
+        assert!(s.contains("\"E0001\""));
+        assert!(s.contains("\"E0002\""));
+    }
+
+    #[test]
+    fn sarif_escapes_specials() {
+        let mut d = sample();
+        d.msg = "needs \"quote\" and \\ and \nnewline".to_string();
+        let s = render_sarif(std::slice::from_ref(&d));
+        assert!(s.contains("\\\"quote\\\""));
+        assert!(s.contains("\\\\"));
+        assert!(s.contains("\\n"));
+    }
+
+    #[test]
+    fn template_tree_expands_nested() {
+        let mut d = sample();
+        d.msg = "cannot match Foo<int, Bar<float, char>>".to_string();
+        let tree = build_template_tree(&d.msg);
+        assert!(tree.contains("Foo<"));
+        assert!(tree.contains("Bar<"));
+    }
+
+    #[test]
+    fn template_tree_ignores_non_template() {
+        let mut d = sample();
+        d.msg = "simple error".to_string();
+        assert_eq!(template_tree_tail(&d), "");
+    }
+
+    #[test]
+    fn render_github_matches_display_impl() {
+        let d = sample();
+        let a = render(&d, FormatStyle::Github);
+        let b = format!("{}", d);
+        // 仅末尾换行差异允许
+        assert_eq!(a.trim_end(), b.trim_end());
     }
 }

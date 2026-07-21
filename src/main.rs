@@ -33,13 +33,25 @@ mod cpp;
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let cfg = match cli::parse(&args) {
-        Ok(c)  => c,
-        Err(e) => { e.print(); return ExitCode::from(2); }
+        Ok(c) => c,
+        Err(e) => {
+            e.print();
+            return ExitCode::from(2);
+        }
+    };
+    // 拿到 cfg 之后再构造诊断配置,这样 driver 路径与 main 路径
+    // (cli 错误 / driver 错误) 都尊重 -fdiagnostics-* 选项
+    let dcfg = crate::diagnostics::DiagnosticsConfig {
+        color: cfg.diag_color,
+        format: cfg.diag_format,
+        show_template_tree: cfg.diag_show_template_tree,
     };
     match driver::run(cfg) {
-        Ok(())  => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::SUCCESS,
         Err(es) => {
-            for e in es { e.print(); }
+            // 统一由 main.rs 兜底打印所有错误诊断;
+            // 正常路径下 driver 不再 emit,避免重复输出。
+            crate::diagnostics::print_all(&es, &dcfg);
             ExitCode::from(1)
         }
     }

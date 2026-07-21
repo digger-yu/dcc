@@ -2,7 +2,3 @@ error[E0208]: embed file not found: missing.embed
   --> <file>:2:1
    2 |#embed "missing.embed"
      | ^
-error[E0208]: embed file not found: missing.embed
-  --> <file>:2:1
-   2 |#embed "missing.embed"
-     | ^

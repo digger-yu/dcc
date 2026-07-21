@@ -1,6 +1,6 @@
 # DCC 错误诊断码参考
 
-> 最后更新：2026-07-17  
+> 最后更新：2026-07-21  
 > 实现：`src/diagnostics.rs` · 回归：`tests/errors.rs` + `tests/fixtures/errors/`
 
 本文档是 DCC **Diagnostic 错误/警告码**的权威说明。CLI 参数错误（`dcc: error: …`，无 `[Exxxx]`）不在编号体系内，见 [CLI 非编号错误](#cli-非编号错误)。
@@ -27,6 +27,41 @@ error[E0006]: expected expression, got Semi
 | 源码行 | gutter + `\|` + 原文 |
 | 指针 | `^` 重复 `len` 次 |
 | hint | 可选修复建议 |
+
+### 1.1 颜色控制：`-fdiagnostics-color=<policy>`
+
+| 取值 | 行为 |
+|------|------|
+| `always` | 始终输出 ANSI 转义序列（强制上色，便于 `tee` / `less -R` 配色） |
+| `never` | 始终不输出（适合重定向到日志/文件/CI artifact） |
+| `auto` | 仅当 stderr 是 TTY 时输出（**默认**；`std::io::IsTerminal`） |
+
+非法值会以 `dcc: error: invalid -fdiagnostics-color value: …` 拒绝并退出码 2。  
+覆盖所有错误路径（CLI 错误 / Driver 错误 / 模板树提示），保证 `tee`、`less -R`、CI artifact 行为一致。
+
+### 1.2 输出格式：`-fdiagnostics-format=<style>`
+
+| 取值 | 形态 | 典型首行 |
+|------|------|----------|
+| `github` | 默认 GitHub 四段式 | `error[E0006]: expected expression, got Semi` |
+| `clang` | Clang 风格（去掉 `[E0006]` 括号） | `error: expected expression, got Semi` |
+| `msvc` | MSVC 风格 | `main.c(3,13): error E0006: expected expression, got Semi` |
+| `vi`    | 单行（无 caret / 无 hint） | `main.c:3:13: error[E0006]: expected expression, got Semi` |
+| `sarif` | SARIF 2.1.0 JSON（写到 stderr） | `{"$schema": … "version": "2.1.0" …}` |
+
+非法值会以 `dcc: error: invalid -fdiagnostics-format value: …` 拒绝并退出码 2。  
+SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` `\` 控制字符等）。
+
+### 1.3 模板树：`-fdiagnostics-show-template-tree`
+
+开启后，若诊断消息内含 `Foo<…, Bar<…>>` 形式的尖括号嵌套，将额外输出 `  template-tree:` 折叠视图（按层级缩进展开类型参数）。  
+当前 C 前端**不会**构造带模板的诊断（占位实现），开关主要用于：
+
+- 配合 `C++` 路径输出（`--target c++` 试验性）
+- IDE 集成测试时验证开关被接受而不破坏现有诊断布局
+
+`-fno-diagnostics-show-template-tree` 显式关闭（默认）。  
+模板树解析为 O(N) 字符级扫描（`split_top_level_commas`），不依赖正则。
 
 ---
 
@@ -87,9 +122,9 @@ error[E0006]: expected expression, got Semi
 | 码 | 消息（典型） | 含义 | 触发条件 | Snapshot |
 |----|--------------|------|----------|----------|
 | **E0100** | `no input file` / `cannot read …` | 输入缺失或不可读 | 无参数（Diagnostic 形式为后者）；打开失败 | `e0100_*` 测试 |
-| **E0101** | `cannot write …` | 写文件失败 | `.o`/`.s`/`.d`/dep 文件写入失败 | — |
-| **E0102** | `cannot invoke assembler` / `assembler failed` | 汇编器失败 | 调 `as` 失败或非零退出 | — |
-| **E0300** | `floating-point code requires SSE…` | SSE 与浮点代码冲突 | `-mno-sse` 且 TU 含 float/double | — |
+| **E0101** | `cannot write …` | 写文件失败 | `.o`/`.s`/`.d`/dep 文件写入失败 | `e0101.stderr.snap` |
+| **E0102** | `cannot invoke assembler` / `assembler failed` | 汇编器失败 | 调 `as` 失败或非零退出 | `e0102.stderr.snap` |
+| **E0300** | `floating-point code requires SSE…` | SSE 与浮点代码冲突 | `-mno-sse` 且 TU 含 float/double | `e0300.stderr.snap` |
 
 **CLI 形式的 E0100**：无输入文件时，`cli.rs` 直接输出 `dcc: error: no input file`（无 `[E0100]`），exit 2。语义等价于 Diagnostic E0100。
 
@@ -198,7 +233,22 @@ dcc: error: <message>
 - `e0205` / `e0209`：依赖 Unix 文件权限（`chmod 000`），Windows 上跳过
 - `e0208_utf8`：运行时写入含 `0xFF` 的临时源文件
 
-**当前覆盖**：37 个 `.stderr.snap`（含 `diagnostic_format`、`w0001`、`e0208_utf8`、`e0205`、`e0209`、`e1009`、`e1010` 等）；未覆盖码见上表「Snapshot」列为 — 的条目。
+**当前覆盖**：37 个 `.stderr.snap`（含 `diagnostic_format`、`w0001`、`e0208_utf8`、`e0205`、`e0209`、`e1009`、`e1010` 等）；未覆盖码见上表「Snapshot」列为 — 的条目。  
+**新增覆盖**（2026-07-21）：`e0101.stderr.snap`、`e0102.stderr.snap`、`e0300.stderr.snap`、`e0205.stderr.snap`、`e0209.stderr.snap`。
+
+**诊断选项回归**（与上述 snapshot 互补，验证 `-fdiagnostics-*` CLI 行为）：
+
+| 测试 | 覆盖点 |
+|------|--------|
+| `diag_color_never_strips_ansi` | `-fdiagnostics-color=never` 不输出 `\x1b[` |
+| `diag_color_always_emits_ansi`  | `-fdiagnostics-color=always` 必输出 `\x1b[` |
+| `diag_color_rejects_unknown_value` | 非法 color 取值 → `dcc: error:` + 退出码 2 |
+| `diag_format_clang_strips_brackets` | clang 模式首行 `error: …`，无 `[Exxxx]` |
+| `diag_format_msvc_uses_file_line_col` | msvc 模式 `file(line,col): error Exxxx: …` |
+| `diag_format_vi_is_single_line` | vi 模式只输出 1 行 |
+| `diag_format_sarif_emits_json` | sarif 模式输出 `version: 2.1.0` + `name: dcc` + `ruleId` |
+| `diag_format_rejects_unknown_value` | 非法 format 取值 → `dcc: error:` + 退出码 2 |
+| `diag_template_tree_runs_without_panic` | `-fdiagnostics-show-template-tree` 不破坏现有诊断 |
 
 **格式锁定**：
 
