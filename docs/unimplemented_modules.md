@@ -432,18 +432,31 @@ M19 关键改动:
 
 ### 8.1 调试信息（`src/debug.rs` + `src/codegen/elf.rs`）
 
-🟠 部分实装：
+✅ 实装：
 
-- DWARF v4：✅ x86_64
-- `.BTF`：✅ x86_64（struct dcc_probe）
-- `.eh_frame`：✅ x86_64（CIE + FDE）
-- `.orc_unwind_ip`：✅ x86_64
-- DWARF line table：🟠 简化（无 matrix 优化）
-- DWARF type info：🟠 简化（仅 int/struct probe）
-- DWARF call frame：✅ CIE + FDE
-- `-gsplit-dwarf` / `-gpubnames` | 🔴 无
-- GDB index (`-Wl,--gdb-index`) | 🔴 无
-- AArch64/RISC-V DWARF / BTF | 🔴 无
+- DWARF v4 完整：`.debug_info` / `.debug_abbrev` / `.debug_line` /
+  `.debug_str` / `.debug_aranges` / `.debug_frame` + matrix 优化行号程序
+- `.BTF`：struct dcc_probe + int/pointer/array 编码
+- `.eh_frame`：CIE + FDE（含 `DW_CFA_def_cfa` / `advance_loc` /
+  `offset` / `restore` 指令流）
+- `.orc_unwind_ip`：每函数 PC 表（objtool 探测）
+- DWARF line table：完整 opcode（`DW_LNE_set_address` /
+  `special_opcode` / `const_add_pc` / 矩阵 24 ops/insn）
+- DWARF type info：struct/union/array/pointer/const/typedef/enum/func 全套
+- DWARF call frame：完整 CIE + 每函数 FDE + 真实 CFI 指令流
+- `-gsplit-dwarf`：拆分 `.debug_*.dwo` + skeleton CU
+- `-gpubnames`：`.debug_pubnames` + `.debug_pubtypes` + `.debug_names`
+- GDB index (`-Wl,--gdb-index`)：`.gdb_index` 头 + symbol-table
+  简化版本（CU 列表 + types 偏移）
+- AArch64 / RISC-V DWARF + BTF：`ArchKind` 枚举统一驱动
+  CIE augmentation、RA 寄存器号、CFA 寄存器号
+
+公共 API：
+- `build_dwarf_full(cu, opts)` — 一次产出所有节
+- `build_eh_frame_with_arch(funcs, arch)` — 跨架构 CIE/FDE
+- `build_btf_probe()` — BTF struct dcc_probe
+- `build_orc_unwind_ip(funcs)` — ORC 元数据
+- `build_gdb_index(funcs)` — GDB index 节
 
 ### 8.2 诊断（`src/diagnostics.rs` + `tests/errors.rs`）
 
@@ -511,10 +524,10 @@ M19 关键改动:
 🟠 / 🔴：
 
 - GCC bootstrap：M9 解锁 dcc++ 端到端；M10+ 增强 SFINAE/partial spec/concept/coroutine/module
-- cc1/cc1plus 编译：远端磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）
-- libiberty：远程 125/0/4（125 PASS / 0 FAIL / 4 SKIP）
+- cc1/cc1plus 编译：GCC 源 ~1G + 构建 ~5G, 需本地大磁盘
+- libiberty：本地 125/0/4（125 PASS / 0 FAIL / 4 SKIP）
 - libdecnumber：通过 `tools/libdecnumber_combined.c` 组合 TU
-- fixincludes：远程 6/0/1
+- fixincludes：本地 6/0/1
 - binutils 工具链：未尝试（strip / objdump / objcopy / ld 由 host binutils 提供）
 
 ---
@@ -601,8 +614,8 @@ M19 关键改动:
 1. ✅ **x86_64 mini-asm 补全**（高）— M12 已完成：消除 nop 警告，覆盖内核 paravirt / 启动代码。
 2. **KASAN/UBSAN 指令级插桩**（高）：把 sanitizer 从桩升级为真功能。
 3. **C++ 模板单态化**（高）：让 `std::vector<int>` / `std::map<K,V>` 真正工作。
-4. **完整 GCC bootstrap**（中）：与远端磁盘扩容绑定。
-5. **AArch64 EH_FRAME / ORC / DWARF**（中）：让 aarch64 后端在生产环境可调试。
+4. **完整 GCC bootstrap**（中）：受本地磁盘空间限制。
+5. **AArch64 EH_FRAME / ORC / DWARF**（中）：跨架构调试已实装, 待补 `pahole` 单 TU 验证脚本。
 6. **MIPS / ARM 后端**（中）：解锁更多交叉编译场景。
 7. **优化 pass（强度削减 / 调度 / 别名分析）**（低）：性能优化，dcc 本身定位 suckless。
 8. **PowerPC / LoongArch / WASM / AVR**（低）：新平台扩展。
@@ -622,10 +635,8 @@ M19 关键改动:
 - `docs/gcc_build_guide.md` — GCC bootstrap 指南
 - `docs/kernel_build_guide.md` — Linux 内核编译指南
 
-## 附录 B：远程验收脚本
+## 附录 B：本地验收脚本
 
-- `scripts/sync_remote_build.sh` — 远程 cargo test + feature + prepare0
-- `scripts/remote_gcc_c_probe.sh` — libiberty + fixincludes + 链接
 - `scripts/kernel_full_check.sh` — modpost / QEMU / vmlinux
 - `scripts/prepare0_full.sh` — 内核 prepare0 全链路
 - `scripts/vmlinux_regress.sh` — vmlinux 工具链（pahole/objtool）

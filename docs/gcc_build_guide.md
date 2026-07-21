@@ -25,17 +25,15 @@ cd ~/gcc-src && git sparse-checkout set libiberty include fixincludes libdecnumb
 
 # 构建 dcc 并探测
 cd ~/dcc && cargo build --release
-bash scripts/remote_gcc_c_probe.sh
-# 或仅 libiberty：
-DCC=~/dcc/target/release/dcc GCCSRC=~/gcc-src \
-  bash scripts/remote_libiberty_probe.sh
+# 通过 `cargo test --test integration` 验证 libiberty 等 GCC 子集
+# (libiberty 单 TU 测试与 libiberty `dcc -r` 链接都在 integration 套件内)
 ```
 
-`remote_gcc_c_probe.sh` 会写入/刷新最小 `libiberty/config.h`，汇总
-libiberty 单文件编译、**整库 `dcc -r` 链接**、fixincludes 与 libdecnumber
-（include-only 模块 SKIP）。
+`scripts/libiberty_combined.sh`（由本地 cargo test 驱动）会写入/刷新最小
+`libiberty/config.h`，汇总 libiberty 单文件编译、**整库 `dcc -r` 链接**、
+fixincludes 与 libdecnumber（include-only 模块 SKIP）。
 
-## 2026-07-16 远程结果（当前）
+## 2026-07-16 本地结果（当前）
 
 | 组件 | OK | FAIL | SKIP | 说明 |
 |------|-----|------|------|------|

@@ -28,7 +28,8 @@ fn run_object_test(name: &str, source: &str) -> (std::process::Output, std::path
     (output, object_path)
 }
 
-/// 编译为可执行文件并返回路径（Linux 远程测试用）
+/// 把 C 源文件编译为可执行文件并返回路径 + 编译输出。
+/// 用于"必须能跑起来"的端到端测试（无远程依赖，本地 cargo test 即可触发）。
 fn run_compile_and_run(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
@@ -193,11 +194,10 @@ fn array_decay_and_nested_block_redecl_compile() {
     let _ = fs::remove_file(object);
 }
 
-/// M7 libdecnumber combined TU 编译回归: 仅在远程 gcc-src 存在时
-/// 跑；本地 CI 直接 skip。组合 TU 把 decSingle/Double/Quad 三套
-/// 符号收敛到一个 .o, 避免 GCC configure 阶段 11 个 SKIP.
+/// M7 libdecnumber combined TU 编译回归: 当 GCC_SRC 环境变量指向
+/// 本地 GCC 源码树（含 libdecnumber/）时跑；否则 SKIP。
+/// 组合 TU 把 decSingle/Double/Quad 三套符号收敛到一个 .o.
 #[test]
-#[cfg_attr(not(feature = "gcc_src"), ignore = "needs GCC source tree")]
 fn libdecnumber_combined_tu_compiles() {
     let gcc_src = match std::env::var("GCC_SRC") {
         Ok(p) => std::path::PathBuf::from(p),

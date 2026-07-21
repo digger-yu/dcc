@@ -1,17 +1,15 @@
 # DCC 手工编译 Linux 内核指南
 
-> 目标版本：**Linux 6.6 / x86_64**。远程验收目录：`~/dcc-agent-linux66`（独立同步，不覆盖旧仓库）。
+> 目标版本：**Linux 6.6 / x86_64**。本地验收目录：`./`。
 
 ## 当前进度（2026-07-17）
 
 | 阶段 | 状态 |
 |------|------|
-| DCC release 构建 + `cargo test`（integration + errors snapshot） | ✅ 远程通过 |
+| DCC release 构建 + `cargo test`（integration + errors snapshot） | ✅ 本地通过 |
 | `scripts/test_kernel_features.sh` | ✅ 7/7 |
-| `scripts/remote_feature_check.sh` | ✅ 17/17（含 LTO per-function section） |
 | `scripts/prepare0_check.sh` | ✅ devicetable / bounds / file2alias 窄目标 |
 | `scripts/pahole_regress.sh` / `objtool_regress.sh` | ✅ BTF struct + eh_frame FDE |
-| `scripts/sync_remote_build.sh` | ✅ rsync + 全量远程测试 + autoconf 自愈 |
 | Kbuild `devicetable-offsets.c`（直接 dcc -S） | ✅ 50+ SIZE_* 行 |
 | Kbuild `kernel/bounds.c`（直接 dcc -S） | ✅ |
 | `arch/x86/kernel/asm-offsets.c` 预处理 + 解析 + 代码生成 | ✅ 2026-07-17：867→0 解析；0 语义；`.s` 已生成 |
@@ -20,26 +18,28 @@
 | `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc 三 TU（modpost/file2alias/sumversion） |
 | 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ⚠️ 脚本就绪 | 步骤 6–7/10 需 `BUILD_*=1`；无产物 SKIP |
 
-### 远程同步构建
+### 本地一键验证
 
 ```bash
-# 从开发机（含 Windows Git Bash / WSL）执行
-bash scripts/sync_remote_build.sh
+# 在 dcc 仓库根目录执行
+bash scripts/test_kernel_features.sh
+bash scripts/prepare0_check.sh
+bash scripts/pahole_regress.sh
+bash scripts/objtool_regress.sh
 ```
 
-默认同步到 `ds@192.168.148.128:~/dcc-agent-linux66` 并依次运行：
+默认在 `./` 仓库内依次运行：
 
 1. `cargo build --release` + `cargo test --release`
-2. `scripts/remote_feature_check.sh`（含 `-S` 自定义节 / lock cmpxchg）
-3. `scripts/test_kernel_features.sh`
-4. 内核单 TU：`devicetable-offsets.s`、`bounds.s`
-5. `prepare0_check.sh`、`pahole_regress.sh`、`objtool_regress.sh`
-6. `kernel_phase_b_check.sh` 或 `kernel_full_check.sh`（modpost / prepare0 / QEMU / vmlinux）
+2. `scripts/test_kernel_features.sh`（含 `-S` 自定义节 / lock cmpxchg）
+3. 内核单 TU：`devicetable-offsets.s`、`bounds.s`
+4. `prepare0_check.sh`、`pahole_regress.sh`、`objtool_regress.sh`
+5. `kernel_phase_b_check.sh` 或 `kernel_full_check.sh`（modpost / prepare0 / QEMU / vmlinux）
 
 ### 阶段 B 质量门禁（步骤 7–10）
 
 ```bash
-# 远程（脚本须 LF；Windows scp 后执行 perl -pi -e 's/\x0d//g' scripts/*.sh）
+# 本地（脚本须 LF；Windows scp 后执行 perl -pi -e 's/\x0d//g' scripts/*.sh）
 bash scripts/kernel_phase_b_check.sh          # modpost + prepare0 → PASS
 bash scripts/vmlinux_regress.sh               # 无 vmlinux 时 SKIP
 bash scripts/qemu_boot_matrix.sh              # 无 bzImage 时 SKIP
@@ -57,7 +57,6 @@ BUILD_BZIMAGE=1 BUILD_VMLINUX=1 bash scripts/kernel_build_smoke.sh  # 全树 smo
 | `qemu_boot_matrix.sh` | QEMU 加载 bzImage（无镜像 SKIP） |
 | `vmlinux_regress.sh` | pahole -J / objtool check vmlinux |
 | `kernel_full_check.sh` | 编排 modpost + QEMU + vmlinux（非阻塞） |
-| `remote_libiberty_probe.sh` | GCC libiberty 纯 C 子集探测 |
 
 ### LTO 与 dead symbol 剔除
 

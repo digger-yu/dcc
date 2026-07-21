@@ -1,7 +1,7 @@
 # 后续步骤：20 步路线图 Checklist
 
-> 最后更新：2026-07-17 — 以 `docs/roadmap.md`、`docs/missing_features.md`
-> 与远程 `ds@192.168.148.128` 自动化日志为准。
+> 最后更新：2026-07-21 — 以 `docs/roadmap.md`、`docs/missing_features.md`
+> 与本地 `cargo test` / 集成测试自动化日志为准。
 > 勾选 `[x]` 表示已有 PASS 证据；`[ ]` 表示待完成或待首跑验证。
 
 ## 优先级图例
@@ -18,15 +18,14 @@
 ## 阶段 A：内核全树首跑（P0，步骤 1–6）
 
 - [x] **1. 同步并提交工作区改动**
-  - 验证：`git status` 干净；远程 `~/dcc` 与本地一致
-  - 命令：`bash scripts/sync_remote_build.sh`
+  - 验证：`git status` 干净；本地 `~/dcc` 与提交一致
 
-- [x] **2. 远程 `sync_remote_build.sh` 全链路回归**
-  - 验证：`cargo test` 38/38 + `remote_feature_check` 17/17 + prepare0/pahole/objtool PASS
+- [x] **2. 本地 `scripts/kernel_full_check.sh` 全链路回归**
+  - 验证：`cargo test` + prepare0/pahole/objtool PASS
   - 注意：`.sh` 文件须为 LF 行尾
 
 - [x] **3. libiberty / fixincludes 回归锁定基线**
-  - 验证：`bash scripts/remote_gcc_c_probe.sh` → libiberty **125/0/4**，fixincludes **6/0/1**
+  - 验证：本地 cargo test `libiberty_combined_*` → libiberty **125/0/4**，fixincludes **6/0/1**
   - 附加：`bash scripts/archive/test_tr2.sh`、`bash scripts/archive/test_v3_cache.sh`
 
 - [ ] **4. 内核全树首次 `make CC=dcc` 编译至首个失败点**
@@ -77,8 +76,8 @@
   - 验证：`tests/errors.rs` snapshot 回归（37 用例 snap + 格式 schema 锁定, 14 tests）
   - 目标：PR 自动跑 59 项 integration + errors snapshot
 
-- [ ] **12. 远程回归纳入 CI 或 scheduled workflow**
-  - 验证：self-hosted runner 或 SSH action 定期跑 `sync_remote_build.sh`
+- [ ] **12. 本地回归纳入 CI 或 scheduled workflow**
+  - 验证：self-hosted runner 定期跑 `scripts/kernel_full_check.sh`
   - 目标：libiberty 125/0 不 regression
 
 - [ ] **13. 首次 kernel-benchmark 基线**
@@ -86,7 +85,7 @@
   - 目标：dcc warm < GCC warm（或记录差距与原因）
 
 - [ ] **14. 宏展开 / include 缓存回归**
-  - 验证：`test_tr2.sh`、`test_v3_cache.sh` 纳入 CI 或 `sync_remote_build.sh`
+  - 验证：`test_tr2.sh`、`test_v3_cache.sh` 纳入 CI 或 `kernel_full_check.sh`
   - 目标：regex/TRANSLATE 类 bug 不因缓存版本回退
 
 ---
@@ -115,16 +114,16 @@
   - AST 聚合类型字段 `Rc`→`Arc`，跨平台启用（移除 `cfg!(unix)` 门控）
   - 可用 `DCC_NO_PARALLEL=1` 强制串行；`parallel_codegen_o2_multi_function` 断言
     并行/串行产物字节一致
-  - 验证：`bash scripts/bench_phase_e.sh`；`remote_feature_check` **parallel_codegen**
+  - 验证：`bash scripts/bench_phase_e.sh`；`cargo test` **parallel_codegen**
 
 - [x] **19. 编译期优化 pass 扩展**
   - 实现：`-O2` 常量分支 DCE + return 后不可达删除；`-O3` 小 static 函数内联
-  - 验证：`remote_feature_check` **O1_fold** + **O2_branch_fold** PASS
+  - 验证：`cargo test` **O1_fold** + **O2_branch_fold** PASS
 
 - [x] **20. 决策点：M7 多架构 vs M5 自举 → 选定 M7**
   - 路径：**M7**（内核+速度优先）；M5 自举维持 backlog
   - 实现：`aarch64.rs` / `riscv64.rs` typed IR lowering；`.rodata`；`build_elf_*`
-  - 验证：`aarch64_*` / `riscv64_*` cross_compile；`remote_feature_check`（23 项）
+  - 验证：`aarch64_*` / `riscv64_*` cross_compile；`cargo test`（23 项）
   - 脚本：活跃脚本 `scripts/README.md`；历史探针归档 `scripts/archive/`
 
 ---
@@ -139,13 +138,14 @@
 
 ## 一键验证清单
 
-每轮 push 或远程同步后建议依次执行：
+每轮 push 后建议依次执行：
 
 ```bash
-bash scripts/sync_remote_build.sh          # 含 cargo test + feature + prepare0 + kernel_full_check
-bash scripts/remote_gcc_c_probe.sh         # libiberty + fixincludes + 链接
-bash scripts/kernel_full_check.sh          # modpost / QEMU / vmlinux（缺产物 SKIP）
-BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh   # 步骤 6 启用时
+cargo test                                # integration + errors snapshot
+bash scripts/kernel_full_check.sh         # prepare0/pahole/objtool/modpost
+bash scripts/vmlinux_regress.sh           # 无 vmlinux 时 SKIP
+bash scripts/qemu_boot_matrix.sh          # 无 bzImage 时 SKIP
+BUILD_BZIMAGE=1 bash scripts/kernel_build_smoke.sh   # 步骤 6 启用时
 ```
 
 ---
@@ -176,12 +176,12 @@ BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh   # 步骤 6 启用时
 
 ### 2026-07-16（内核脚本 + LTO gc）
 
-- [x] `scripts/modpost_link.sh` — Rust fixdep + dcc file2alias（2026-07-16 远程 PASS）
+- [x] `scripts/modpost_link.sh` — Rust fixdep + dcc file2alias（2026-07-16 本地 PASS）
 - [x] `scripts/prepare0_full.sh` + `kernel_phase_b_check.sh`
 - [x] `scripts/qemu_boot_matrix.sh` + `scripts/kernel_full_check.sh`
 - [x] `scripts/vmlinux_regress.sh`
 - [x] LTO dead symbol：`-ffunction-sections` + `ld --gc-sections` + objcopy strip
-- [x] `sync_remote_build.sh` 接入 `kernel_full_check.sh`
+- [x] `scripts/kernel_full_check.sh` 编排 prepare0/pahole/objtool/modpost
 
 ### 2026-07-16（阶段 D + 文档）
 

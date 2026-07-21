@@ -19,4 +19,4 @@ echo "==== compile regex.c ===="
 $DCC -c -I"$GCCSRC/include" -I"$GCCSRC/libiberty" -DHAVE_CONFIG_H "$REGEX" -o /tmp/regex.o 2>&1 | tail -3
 
 echo "==== libiberty ===="
-bash "$(dirname "$0")/remote_libiberty_probe.sh" 2>&1 | tail -3
+echo "(已迁移到 cargo test --test integration libiberty_combined_*)"

@@ -52,9 +52,8 @@ bash scripts/update_error_snapshots.sh
 
 任何一个失败,把日志贴给我,我立刻修。
 
-## 5. 远程 Linux 内核回归（可选）
+## 5. Linux 内核回归（可选）
 
-在已配置 SSH 的开发机上，可用 `scripts/sync_remote_build.sh` 同步
-源码到 Linux 并跑 cargo test、feature check、prepare0、pahole、
-objtool 与 `kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物
+在已经 clone Linux 6.6 源码树 + 已有 `.config` 的开发机上，可依次跑
+`scripts/kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物
 时 SKIP）。详见 `docs/kernel_build_guide.md`。

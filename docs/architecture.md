@@ -112,7 +112,7 @@ error[E0001]: expected ';', got '{'
 | 完整后端 (has_backend == true) | `x86_64-unknown-linux-gnu` / `aarch64-linux-gnu` / `riscv64-linux-gnu` | `codegen::emit` 真正产出机器码,ET_EXEC/ET_REL 正常写出 |
 | 仅 Triple 解析 (has_backend == false) | `mips-linux-gnu` / `mips64-linux-gnuabi64` / `arm-linux-gnueabihf` (及 `armv7-…` 别名) | `target.rs::resolve()` 给出正确几何参数 (指针大小 / 字节序 / 调用约定),`cli::parse()` 完整通过;`codegen::emit()` 会 `panic!` 并通过 `Arch::backend_missing_msg()` 输出明确诊断 |
 
-设计动机: Linux kernel 编译链常在 host 端用 `--target=...` 探测远端架构,
+设计动机: Linux kernel 编译链常在 host 端用 `--target=...` 探测目标架构,
 只解析不解码能避免误伤;同时也明确告诉用户 "我们解析了,只是没后端"。
 
 第一性原理:
@@ -279,8 +279,7 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 **明确不做**：AArch64 / RISC-V 完整后端 ELF 输出（沿用 host 链接器）
 之外的非 x86-64 后端。
 
-远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（50 用例）
-+ `cargo test lto::`（7 用例）。
+本地验收：`cargo test link::`（50 用例）+ `cargo test lto::`（7 用例）。
 
 ## C++ 前端 M7（`src/cpp/`）
 
@@ -361,7 +360,7 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 
 **M9 不在范围**：SFINAE / partial specialization（`partial_sort`）/
 完整 concept 求值 / 协程挂起恢复 / module 分区 / 完整 GCC cc1/cc1plus
-bootstrap（受限于 `dcc` 自身 C++ 库支持度与远端磁盘空间）。
+bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间）。
 
 **M10+ 范围**（新增，已在 `src/cpp/m10.rs` 中实现）：
 - **SFINAE**（`substitution failure is not an error`）：
@@ -409,13 +408,13 @@ bootstrap（受限于 `dcc` 自身 C++ 库支持度与远端磁盘空间）。
   - `InitList::emit_c()` 生成 `{ ptr, count, capacity }` 结构
 
 **M10+ 设计原则**：所有特性均降级为 dcc C 后端可直接消费的 C 代码；
-对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 远端
+对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 本地
 磁盘空间），但 M10+ 显著扩展了能直接编译的 C++ 模式范围。
 
 **限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M9 阶段已可端到端运行
 简单 C++ 源（含 class / 成员函数 / 构造初始化列表 / 局部类变量 /
 方法调用改写）；GCC 完整 bootstrap 仍部分受阻（M9 已解锁 C++ 端到端，
-cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 远端可用磁盘 2.5G 不够装 GCC
+cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 本地可用磁盘 2.5G 不够装 GCC
 源码约 1GB + 构建临时文件约 5GB）；原因见
 `docs/missing_features.md` 的 C++ 前端状态表。
 
@@ -443,7 +442,7 @@ cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 远端可用磁盘 2.5G 不够装
   `available_parallelism().min(n_funcs)`；AST 聚合类型已 `Arc` 化以跨线程共享
   `Program`。
 - **回归**：`parallel_codegen_o2_multi_function` 断言并行/串行 `.o` 字节一致；
-  `remote_feature_check` **parallel_codegen**。
+  `cargo test` **parallel_codegen**。
 
 ## GNU 控制流扩展
 
@@ -972,7 +971,7 @@ CLI 解析：`SanitizerFlags::from_args` 支持
 - KCSAN 完整 watchpoint 仍走 KASAN 共享通道，未独立发 `__kcsan_check_access`。
 
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
-`scripts/remote_feature_check.sh`（sanitizer 节 + 汇编桩计数）+ 12 个
+`cargo test` integration 套件（sanitizer 节 + 汇编桩计数）+ 12 个
 `sanitizer::tests` 单元测试。
 
 ## C 前端补洞（M11.1，`src/parser.rs` + `src/preproc.rs`）

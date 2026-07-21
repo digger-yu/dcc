@@ -138,7 +138,7 @@ impl Arch {
     ///   * has_backend == false : 仅解析 triple (在 --target / 交叉编译场景
     ///                            中合法),emit() 会 panic 报清楚
     /// 之所以区分而不是直接拒绝 mips/arm triple: Linux kernel 编译链
-    /// 经常在 host 端用 --target 探测远端架构,只解析不解码能避免误伤。
+    /// 经常在 host 端用 --target 探测目标架构,只解析不解码能避免误伤。
     pub fn has_backend(self) -> bool {
         match self {
             Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 => true,

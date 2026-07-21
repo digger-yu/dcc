@@ -47,7 +47,7 @@
 | VLA 可变长数组 | P2 | ✅ ArraySize::Var(Box<Expr>) | ✅ 动态栈分配+16字节对齐 | ✅ runtime_features.c |
 | 整数提升 | P2 | ✅ char/short 隐式提升 | ✅ movsx/movzx 符号/零扩展 | ✅ runtime_features.c |
 | 内联汇编 __asm__ | P1 | ✅ __asm__/__asm/asm + volatile/const, 带冒号约束列表 | ✅ Mini x86：约束、`N:/Nf/Nb`、`N:insn`、bt/shld 等 | ✅ runtime_features.c, test_asm_constraints.c, asm_label_insn.c |
-| LTO + dead symbol gc | P2 | ✅ `-flto` / `-ffunction-sections` | ✅ `.llvm.lto` + `ld --gc-sections` + objcopy strip | ✅ `cargo test` + remote_feature_check |
+| LTO + dead symbol gc | P2 | ✅ `-flto` / `-ffunction-sections` | ✅ `.llvm.lto` + `ld --gc-sections` + objcopy strip | ✅ `cargo test` |
 | struct 整体赋值 | P1 | ✅ 聚合初始化 | ✅ memcpy 整体拷贝 | ✅ Linux 验证 |
 | struct 传参/返回 | P2 | ✅ 函数参数/返回值 | ✅ SysV ABI 寄存器拆分 (<=16B) | ✅ Linux 验证 |
 | long double 16B | P3 | ✅ sizeof=16 | ✅ 16字节存储 + SSE 运算 | ✅ Linux 验证 |
@@ -188,8 +188,7 @@
   - `friend` -> 走 FreeFn, 无 `this` 形参, 无类作用域 mangle
   - `final` / `override` -> 解析层接受, vtable/devirt 端在 v0 简化
 - **测试**：14 + 2 = 16 个 `tests/fixtures/m17_*.cpp` fixture 全部通过
-  `cargo test --test integration m17`（远端 Linux 192.168.148.128），
-  16/16 ok。
+  `cargo test --test integration m17`，16/16 ok。
 - **遗留已知限制（dcc C 后端 pre-existing, 不在 M17.0 修复范围）**：
   - `obj->field` 在某些派生结构体（`__base_Base1` 字段）下生成
     `->Base1` 而非 `->__base_Base1`，导致 `Derived1` 通过 `Base1`
@@ -258,7 +257,7 @@
 - **测试**: 11 个 `m18_*` 集成测试 (`m18_chrono / m18_thread_mutex /
   m18_condition_variable / m18_filesystem / m18_expected /
   m18_flat_map / m18_multi_index / m18_regex / m18_ranges /
-  m18_concept / m18_modules`)，全部要求在远端 Linux 上编译通过。
+  m18_concept / m18_modules`)，全部要求在本地 cargo test 通过。
 - **运行时**: 新增 Part 11-18 (`dccpp_runtime.c` +1k 行)：
   chrono / pthread / filesystem / expected / flat_map / regex NFA
   / ranges view / 多维下标辅助。

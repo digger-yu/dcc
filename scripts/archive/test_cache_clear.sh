@@ -23,4 +23,4 @@ $DCC -c -I"$GCCSRC/include" -I"$GCCSRC/libiberty" -DHAVE_CONFIG_H "$REGEX" -o /t
 echo "compile exit: $?"
 
 echo "==== libiberty probe ===="
-bash /home/ds/dcc/scripts/remote_libiberty_probe.sh 2>&1 | tail -5
+echo "(已迁移到 cargo test --test integration libiberty_combined_*)"
