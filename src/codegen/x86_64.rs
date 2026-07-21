@@ -694,6 +694,24 @@ impl Codegen {
 
     pub fn compile(&mut self, module: &crate::ir::Module) {
         let prog = module.source();
+        // 检查 __attribute__((error/warning/deprecated)): 扫描所有函数声明
+        // 如果函数体中调用了这些函数，发射诊断信息
+        let diag_fns: Vec<(&str, Option<&str>, Option<&str>, Option<&str>)> = prog.decls.iter().filter_map(|d| {
+            if let Decl::Func(f) = d {
+                if f.error_msg.is_some() || f.warning_msg.is_some() || f.deprecated_msg.is_some() {
+                    return Some((f.name.name.as_str(),
+                        f.error_msg.as_deref(), f.warning_msg.as_deref(), f.deprecated_msg.as_deref()));
+                }
+            }
+            None
+        }).collect();
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if let Some(body) = &f.body {
+                    Self::check_attr_diagnostics(&body.items, &diag_fns, &f.name.name);
+                }
+            }
+        }
         // 预扫描: 记录哪些函数是可变参数的
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
@@ -765,19 +783,21 @@ impl Codegen {
         }
         let _rodata_size = self.rodata.len();
         let _main = prog.decls.iter().find_map(|d| match d { Decl::Func(f) if f.name.name == "main" => Some(f), _ => None }).expect("no main()");
-        // 收集 constructor/destructor 函数
-        let ctors: Vec<String> = prog.decls.iter().filter_map(|d| {
-            if let Decl::Func(f) = d { if f.is_constructor && f.body.is_some() { Some(f.name.name.clone()) } else { None } } else { None }
+        // 收集 constructor/destructor 函数 (按 priority 排序)
+        let mut ctors: Vec<(u16, String)> = prog.decls.iter().filter_map(|d| {
+            if let Decl::Func(f) = d { if f.is_constructor && f.body.is_some() { Some((f.ctor_priority.unwrap_or(65535), f.name.name.clone())) } else { None } } else { None }
         }).collect();
-        let dtors: Vec<String> = prog.decls.iter().filter_map(|d| {
-            if let Decl::Func(f) = d { if f.is_destructor && f.body.is_some() { Some(f.name.name.clone()) } else { None } } else { None }
+        let mut dtors: Vec<(u16, String)> = prog.decls.iter().filter_map(|d| {
+            if let Decl::Func(f) = d { if f.is_destructor && f.body.is_some() { Some((f.dtor_priority.unwrap_or(65535), f.name.name.clone())) } else { None } } else { None }
         }).collect();
+        ctors.sort_by_key(|(p, _)| *p);
+        dtors.sort_by_key(|(p, _)| *p);
         self.label("_start");
         self.emit(&[0x49, 0x89, 0xe4]); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
         self.emit(&[0x55]);             // push rbp
         self.emit(&[0x48, 0x89, 0xe5]); // mov rbp, rsp
         // 调用 constructor 函数
-        for ctor in &ctors {
+        for (_p, ctor) in &ctors {
             self.emit(&[0x48, 0x31, 0xc0]); // xor rax, rax (no variadic args)
             self.call_label(ctor);
         }
@@ -786,7 +806,7 @@ impl Codegen {
         // 保存 main 返回值
         self.emit(&[0x41, 0x89, 0xc5]); // mov r13d, eax
         // 调用 destructor 函数
-        for dtor in &dtors {
+        for (_p, dtor) in &dtors {
             self.emit(&[0x48, 0x31, 0xc0]); // xor rax, rax
             self.call_label(dtor);
         }
@@ -1435,16 +1455,23 @@ impl Codegen {
         }
 
         // __attribute__((constructor/destructor)): 生成 .init_array/.fini_array
-        let mut constructors: Vec<String> = vec![];
-        let mut destructors: Vec<String> = vec![];
+        // 按 priority 排序: 小数字先执行 (constructor), 小数字后执行 (destructor)
+        let mut constructors: Vec<(u16, String)> = vec![];
+        let mut destructors: Vec<(u16, String)> = vec![];
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_some() {
-                    if f.is_constructor { constructors.push(f.name.name.clone()); }
-                    if f.is_destructor { destructors.push(f.name.name.clone()); }
+                    if f.is_constructor {
+                        constructors.push((f.ctor_priority.unwrap_or(65535), f.name.name.clone()));
+                    }
+                    if f.is_destructor {
+                        destructors.push((f.dtor_priority.unwrap_or(65535), f.name.name.clone()));
+                    }
                 }
             }
         }
+        constructors.sort_by_key(|(p, _)| *p);
+        destructors.sort_by_key(|(p, _)| *p);
         if !constructors.is_empty() || !destructors.is_empty() {
             let base_sec_idx = 7 + self.extra_sections.len() as u32;
             // .init_array
@@ -1452,7 +1479,7 @@ impl Codegen {
                 let init_array_sec_idx = base_sec_idx;
                 let mut init_data = Vec::with_capacity(constructors.len() * 8);
                 let mut init_rels = Vec::with_capacity(constructors.len());
-                for func_name in &constructors {
+                for (_prio, func_name) in &constructors {
                     let entry_off = init_data.len() as u64;
                     init_data.extend_from_slice(&[0u8; 8]); // placeholder
                     let sym_idx = self.sym_index.get(func_name).copied().unwrap_or(0);
@@ -1481,7 +1508,7 @@ impl Codegen {
                 let fini_array_sec_idx = base_sec_idx + if constructors.is_empty() { 0 } else { 1 };
                 let mut fini_data = Vec::with_capacity(destructors.len() * 8);
                 let mut fini_rels = Vec::with_capacity(destructors.len());
-                for func_name in &destructors {
+                for (_prio, func_name) in &destructors {
                     let entry_off = fini_data.len() as u64;
                     fini_data.extend_from_slice(&[0u8; 8]);
                     let sym_idx = self.sym_index.get(func_name).copied().unwrap_or(0);
@@ -6089,6 +6116,34 @@ impl Codegen {
             // __builtin_unreachable: 不可达, 生成 ud2
             "__builtin_unreachable" | "__builtin_trap" => {
                 self.emit(&[0x0F, 0x0B]); // ud2
+                true
+            }
+            // __builtin_debugtrap(): 调试断点, 生成 int3
+            "__builtin_debugtrap" => {
+                self.emit(&[0xCC]); // int3
+                true
+            }
+            // __builtin_assume_aligned(p, n): 返回指针, 提示对齐
+            "__builtin_assume_aligned" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                self.gen_expr(&args[0], dst);
+                true
+            }
+            // __builtin_alloca(size): 动态栈分配, 返回 rsp 指向的内存
+            "__builtin_alloca" => {
+                if args.is_empty() { self.mov_imm(dst, 0); return true; }
+                // 计算分配大小到 rcx
+                self.gen_expr(&args[0], 2); // rcx = size
+                // 对齐到 16 字节: rcx = (rcx + 15) & ~15
+                self.emit(&[0x48, 0x83, 0xc1, 0x0f]); // add rcx, 15
+                self.emit(&[0x48, 0x83, 0xe1, 0xf0]); // and rcx, ~15
+                // sub rsp, rcx
+                self.emit(&[0x48, 0x29, 0xcc]); // sub rsp, rcx
+                // 返回新 rsp 到 dst
+                if dst != 4 && dst != 12 {
+                    let rex = if dst >= 8 { 0x49 } else { 0x48 };
+                    self.emit(&[rex, 0x89, 0xe0 | (dst & 7)]); // mov dst, rsp
+                }
                 true
             }
             // __builtin_va_start(ap, last): 初始化 SysV va_list 结构
@@ -11834,6 +11889,110 @@ impl Codegen {
         let l_bits: u8 = if l >= 512 { 2u8 } else if l >= 256 { 1u8 } else { 0u8 };
         self.emit_evex_prefix(dst, src2, map, w, src1, l_bits, pp, 0);
         self.emit(&[opcode, Self::modrm_reg_reg(dst, src2)]);
+    }
+
+    /// 检查函数体中的调用是否触发了 error/warning/deprecated 属性诊断
+    fn check_attr_diagnostics(
+        items: &[crate::ast::BlockItem],
+        diag_fns: &[(&str, Option<&str>, Option<&str>, Option<&str>)],
+        _caller: &str,
+    ) {
+        for item in items {
+            match item {
+                crate::ast::BlockItem::Stmt(s) => Self::check_attr_diagnostics_stmt(s, diag_fns, _caller),
+                crate::ast::BlockItem::Decl(Decl::Func(f)) => {
+                    if let Some(body) = &f.body {
+                        Self::check_attr_diagnostics(&body.items, diag_fns, _caller);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn check_attr_diagnostics_stmt(
+        s: &crate::ast::Stmt,
+        diag_fns: &[(&str, Option<&str>, Option<&str>, Option<&str>)],
+        _caller: &str,
+    ) {
+        use crate::ast::Stmt;
+        match s {
+            Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
+                Self::check_attr_diagnostics_expr(e, diag_fns, _caller);
+            }
+            Stmt::If { cond, then_, else_, .. } => {
+                Self::check_attr_diagnostics_expr(cond, diag_fns, _caller);
+                Self::check_attr_diagnostics_stmt(then_, diag_fns, _caller);
+                if let Some(e) = else_ {
+                    Self::check_attr_diagnostics_stmt(e, diag_fns, _caller);
+                }
+            }
+            Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+                Self::check_attr_diagnostics_expr(cond, diag_fns, _caller);
+                Self::check_attr_diagnostics_stmt(body, diag_fns, _caller);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                if let Some(i) = init { Self::check_attr_diagnostics_stmt(i, diag_fns, _caller); }
+                if let Some(c) = cond { Self::check_attr_diagnostics_expr(c, diag_fns, _caller); }
+                if let Some(st) = step { Self::check_attr_diagnostics_expr(st, diag_fns, _caller); }
+                Self::check_attr_diagnostics_stmt(body, diag_fns, _caller);
+            }
+            Stmt::Block { b, .. } => Self::check_attr_diagnostics(&b.items, diag_fns, _caller),
+            _ => {}
+        }
+    }
+
+    fn check_attr_diagnostics_expr(
+        e: &crate::ast::Expr,
+        diag_fns: &[(&str, Option<&str>, Option<&str>, Option<&str>)],
+        _caller: &str,
+    ) {
+        use crate::ast::Expr;
+        if let Expr::Call { callee, args, .. } = e {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                for (fname, err, warn, dep) in diag_fns {
+                    if name.name == *fname {
+                        if let Some(msg) = err {
+                            eprintln!("error: call to '{}' declared with error attribute: {}", fname, msg);
+                        }
+                        if let Some(msg) = warn {
+                            eprintln!("warning: call to '{}' declared with warning attribute: {}", fname, msg);
+                        }
+                        if let Some(msg) = dep {
+                            eprintln!("warning: '{}' is deprecated: {}", fname, msg);
+                        }
+                    }
+                }
+            }
+            for a in args {
+                Self::check_attr_diagnostics_expr(a, diag_fns, _caller);
+            }
+        } else {
+            match e {
+                Expr::Binop { l, r, .. } => {
+                    Self::check_attr_diagnostics_expr(l, diag_fns, _caller);
+                    Self::check_attr_diagnostics_expr(r, diag_fns, _caller);
+                }
+                Expr::Unary { e: inner, .. } | Expr::Cast { e: inner, .. }
+                | Expr::AddrOf { e: inner, .. } | Expr::Deref { e: inner, .. } => {
+                    Self::check_attr_diagnostics_expr(inner, diag_fns, _caller);
+                }
+                Expr::Assign { l, r, .. } => {
+                    Self::check_attr_diagnostics_expr(l, diag_fns, _caller);
+                    Self::check_attr_diagnostics_expr(r, diag_fns, _caller);
+                }
+                Expr::Cond { cond, then_, else_, .. } => {
+                    Self::check_attr_diagnostics_expr(cond, diag_fns, _caller);
+                    Self::check_attr_diagnostics_expr(then_, diag_fns, _caller);
+                    Self::check_attr_diagnostics_expr(else_, diag_fns, _caller);
+                }
+                Expr::Index { arr, idx, .. } => {
+                    Self::check_attr_diagnostics_expr(arr, diag_fns, _caller);
+                    Self::check_attr_diagnostics_expr(idx, diag_fns, _caller);
+                }
+                _ => {}
+            }
+        }
     }
 
 }

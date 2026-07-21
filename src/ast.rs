@@ -41,6 +41,10 @@ pub struct VarDecl {
     pub no_sanitize: Vec<String>,
     /// __attribute__((copy("fn"))): 函数符号别名
     pub copy_fn: Option<String>,
+    /// __attribute__((retain)): 标记节 SHF_GNU_RETAIN
+    pub is_retain: bool,
+    /// __attribute__((used)): 防止 gc-sections 移除
+    pub is_used_attr: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +80,23 @@ pub struct FuncDecl {
     pub target_clones: Vec<String>,
     /// __attribute__((returns_nonnull))
     pub returns_nonnull: bool,
+    /// __attribute__((constructor(N))) / __attribute__((destructor(N)))
+    pub ctor_priority: Option<u16>,
+    pub dtor_priority: Option<u16>,
+    /// __attribute__((retain)): 标记节 SHF_GNU_RETAIN，gc-sections 保留
+    pub is_retain: bool,
+    /// __attribute__((used)): 标记 USED，防止 gc-sections 移除
+    pub is_used_attr: bool,
+    /// __attribute__((flatten)): 所有调用视为 always_inline
+    pub is_flatten: bool,
+    /// __attribute__((error("msg"))): 调用时发射编译错误
+    pub error_msg: Option<String>,
+    /// __attribute__((warning("msg"))): 调用时发射编译警告
+    pub warning_msg: Option<String>,
+    /// __attribute__((deprecated("msg"))): 调用时发射弃用警告
+    pub deprecated_msg: Option<String>,
+    /// __attribute__((ifunc("resolver"))): 生成 STT_GNU_IFUNC
+    pub ifunc_resolver: Option<String>,
 }
 
 #[derive(Debug, Clone)]

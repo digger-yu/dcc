@@ -1030,6 +1030,8 @@ fn guard_array_decl(name: &str, span: &Span) -> BlockItem {
         is_thread_local: false,
         no_sanitize: vec![],
         copy_fn: None,
+        is_retain: false,
+        is_used_attr: false,
     }))
 }
 
@@ -1204,6 +1206,9 @@ mod tests {
             no_sanitize: vec![],
             target_clones: vec![],
             returns_nonnull: false,
+            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ifunc_resolver: None,
         }
     }
 
@@ -1413,6 +1418,9 @@ mod tests {
                 no_sanitize: vec![],
                 target_clones: vec![],
                 returns_nonnull: false,
+                ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+                is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                ifunc_resolver: None,
             })],
         };
         instrument_program(
@@ -1477,6 +1485,9 @@ mod tests {
                 ],
                 target_clones: vec![],
                 returns_nonnull: false,
+                ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+                is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                ifunc_resolver: None,
             })],
         };
         let flags = SanitizerFlags {

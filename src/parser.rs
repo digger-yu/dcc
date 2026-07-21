@@ -36,6 +36,23 @@ struct ParsedAttrs {
     copy_fn: Option<String>,
     /// __attribute__((returns_nonnull))
     returns_nonnull: bool,
+    /// __attribute__((constructor(N))) / __attribute__((destructor(N)))
+    ctor_priority: Option<u16>,
+    dtor_priority: Option<u16>,
+    /// __attribute__((retain))
+    is_retain: bool,
+    /// __attribute__((used))
+    is_used: bool,
+    /// __attribute__((flatten))
+    is_flatten: bool,
+    /// __attribute__((error("msg")))
+    error_msg: Option<String>,
+    /// __attribute__((warning("msg")))
+    warning_msg: Option<String>,
+    /// __attribute__((deprecated("msg")))
+    deprecated_msg: Option<String>,
+    /// __attribute__((ifunc("resolver")))
+    ifunc_resolver: Option<String>,
 }
 
 /// 解析选项（Driver 传入）
@@ -75,6 +92,15 @@ impl ParsedAttrs {
         if !other.target_clones.is_empty() { self.target_clones.extend(other.target_clones); }
         if other.copy_fn.is_some() { self.copy_fn = other.copy_fn; }
         if other.returns_nonnull { self.returns_nonnull = true; }
+        if other.ctor_priority.is_some() { self.ctor_priority = other.ctor_priority; }
+        if other.dtor_priority.is_some() { self.dtor_priority = other.dtor_priority; }
+        if other.is_retain { self.is_retain = true; }
+        if other.is_used { self.is_used = true; }
+        if other.is_flatten { self.is_flatten = true; }
+        if other.error_msg.is_some() { self.error_msg = other.error_msg; }
+        if other.warning_msg.is_some() { self.warning_msg = other.warning_msg; }
+        if other.deprecated_msg.is_some() { self.deprecated_msg = other.deprecated_msg; }
+        if other.ifunc_resolver.is_some() { self.ifunc_resolver = other.ifunc_resolver; }
     }
 }
 
@@ -430,8 +456,11 @@ impl<'a> Parser<'a> {
                         // optional priority: __attribute__((constructor(100)))
                         if self.cur.kind == TokKind::LParen {
                             self.advance();
-                            // skip priority number
-                            if self.cur.kind == TokKind::Number { self.advance(); }
+                            if self.cur.kind == TokKind::Number {
+                                let v = parse_int_lit(&self.cur.text);
+                                attrs.ctor_priority = Some(v as u16);
+                                self.advance();
+                            }
                             if self.cur.kind == TokKind::RParen { self.advance(); }
                         }
                     }
@@ -440,7 +469,11 @@ impl<'a> Parser<'a> {
                         self.advance();
                         if self.cur.kind == TokKind::LParen {
                             self.advance();
-                            if self.cur.kind == TokKind::Number { self.advance(); }
+                            if self.cur.kind == TokKind::Number {
+                                let v = parse_int_lit(&self.cur.text);
+                                attrs.dtor_priority = Some(v as u16);
+                                self.advance();
+                            }
                             if self.cur.kind == TokKind::RParen { self.advance(); }
                         }
                     }
@@ -564,6 +597,58 @@ impl<'a> Parser<'a> {
                                 self.advance();
                                 if self.cur.kind == TokKind::Eof { break; }
                             }
+                        }
+                    }
+                    "retain" => {
+                        attrs.is_retain = true;
+                        self.advance();
+                    }
+                    "used" => {
+                        attrs.is_used = true;
+                        self.advance();
+                    }
+                    "flatten" => {
+                        attrs.is_flatten = true;
+                        self.advance();
+                    }
+                    "error" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if let Some(msg) = self.parse_concatenated_string_lit() {
+                                attrs.error_msg = Some(msg);
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "warning" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if let Some(msg) = self.parse_concatenated_string_lit() {
+                                attrs.warning_msg = Some(msg);
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "deprecated" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if let Some(msg) = self.parse_concatenated_string_lit() {
+                                attrs.deprecated_msg = Some(msg);
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "ifunc" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if let Some(resolver) = self.parse_concatenated_string_lit() {
+                                attrs.ifunc_resolver = Some(resolver);
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); }
                         }
                     }
                     _ => {
@@ -1171,6 +1256,8 @@ impl<'a> Parser<'a> {
             is_thread_local: false,
             no_sanitize: vec![],
             copy_fn: None,
+            is_retain: false,
+            is_used_attr: false,
         })])
     }
 
@@ -1221,7 +1308,7 @@ impl<'a> Parser<'a> {
                     self.in_function = false;
                     self.current_function = saved_func;
                     let sp = name.span.clone();
-                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false })]);
+                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false, ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false, is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None, ifunc_resolver: None })]);
                 }
                 // (*name(params)) — 返回指针的函数，无外层参数表
                 let ptr_ty = Type::Ptr(Box::new(ty));
@@ -1259,6 +1346,9 @@ impl<'a> Parser<'a> {
                     alias_name: None, is_nested: false, upvars: vec![],
                     is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None,
                     no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
+                    ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+                    is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                    ifunc_resolver: None,
                 })]);
             }
             // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
@@ -1299,7 +1389,7 @@ impl<'a> Parser<'a> {
                 let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
                 if !self.expect(TokKind::Semi, "';'") { return None; }
                 let sp = name.span.clone();
-                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None })]);
+                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None, is_retain: false, is_used_attr: false })]);
             }
             // 不是函数指针, 只是带括号的指针变量 (罕见)
             self.skip_attributes();
@@ -1308,7 +1398,7 @@ impl<'a> Parser<'a> {
             let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
             if !self.expect(TokKind::Semi, "';'") { return None; }
             let sp = name.span.clone();
-            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None })]);
+            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None, is_retain: false, is_used_attr: false })]);
         }
         // `char const *p`：const 在基类型之后、* 之前，须先于 parse_ptr_suffix 跳过
         while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
@@ -1430,7 +1520,13 @@ impl<'a> Parser<'a> {
                 format_kind: attrs.format_kind, format_string_idx: attrs.format_string_idx,
                 format_first_arg: attrs.format_first_arg,
                 no_sanitize: attrs.no_sanitize.clone(), target_clones: attrs.target_clones.clone(),
-                returns_nonnull: attrs.returns_nonnull })])
+                returns_nonnull: attrs.returns_nonnull,
+                ctor_priority: attrs.ctor_priority, dtor_priority: attrs.dtor_priority,
+                is_retain: attrs.is_retain, is_used_attr: attrs.is_used,
+                is_flatten: attrs.is_flatten,
+                error_msg: attrs.error_msg.clone(), warning_msg: attrs.warning_msg.clone(),
+                deprecated_msg: attrs.deprecated_msg.clone(),
+                ifunc_resolver: attrs.ifunc_resolver.clone(), })])
         } else if self.cur.kind == TokKind::LBracket {
             let mut arr_ty = ty;
             while self.cur.kind == TokKind::LBracket {
@@ -1459,7 +1555,8 @@ impl<'a> Parser<'a> {
             Some(vec![Decl::Var(VarDecl { ty: arr_ty, name: name_for_decl, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                 section: arr_attrs.section, alignment: arr_attrs.alignment, is_weak: arr_attrs.is_weak,
                 visibility: arr_attrs.visibility, is_unused: arr_attrs.is_unused, register_name: arr_attrs.register_name, cleanup_fn: arr_attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
-                no_sanitize: arr_attrs.no_sanitize.clone(), copy_fn: arr_attrs.copy_fn.clone() })])
+                no_sanitize: arr_attrs.no_sanitize.clone(), copy_fn: arr_attrs.copy_fn.clone(),
+                is_retain: arr_attrs.is_retain, is_used_attr: arr_attrs.is_used })])
         } else {
             if matches!(ty, Type::Void) {
                 self.err_here(
@@ -1504,7 +1601,8 @@ impl<'a> Parser<'a> {
                 Some(vec![Decl::Var(VarDecl { ty: decl_ty, name: name_for_decl, init: Some(init), span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                                         visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
-                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
+                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone(),
+                                        is_retain: attrs.is_retain, is_used_attr: attrs.is_used })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
@@ -1513,7 +1611,8 @@ impl<'a> Parser<'a> {
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                                         visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
-                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
+                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone(),
+                                        is_retain: attrs.is_retain, is_used_attr: attrs.is_used })])
             } else if self.cur.kind == TokKind::Comma {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 if !self.in_function { self.globals.insert(name_for_decl.name.clone(), ty.clone()); }
@@ -1521,7 +1620,8 @@ impl<'a> Parser<'a> {
                 Some(vec![Decl::Var(VarDecl { ty, name: name_for_decl, init: None, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                                         visibility: attrs.visibility, is_unused: attrs.is_unused, register_name: attrs.register_name, cleanup_fn: attrs.cleanup_fn, is_thread_local: storage.is_thread_local,
-                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone() })])
+                                        no_sanitize: attrs.no_sanitize.clone(), copy_fn: attrs.copy_fn.clone(),
+                                        is_retain: attrs.is_retain, is_used_attr: attrs.is_used })])
             } else {
                 self.err_here("E0002", format!("expected ';', '=', '(', got {:?}", self.cur.kind), Some("declaration must end with ';' or have an initializer"));
                 None

@@ -1006,6 +1006,7 @@ mod tests {
                         is_extern: false, is_static: false, section: None, alignment: None,
                         is_weak: false, visibility: None, is_unused: false, register_name: None,
                         cleanup_fn: None, is_thread_local: false, no_sanitize: vec![], copy_fn: None,
+                        is_retain: false, is_used_attr: false,
                     })),
                     BlockItem::Stmt(Stmt::Return { val: Some(Expr::Ident {
                         name: crate::ast::Ident { name: "x".into(), span: span.clone() },
@@ -1021,6 +1022,9 @@ mod tests {
             is_constructor: false, is_destructor: false, alias_name: None, is_nested: false,
             upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None,
             format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
+            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ifunc_resolver: None,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("entry"));
@@ -1052,6 +1056,9 @@ mod tests {
             is_constructor: false, is_destructor: false, alias_name: None, is_nested: false,
             upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None,
             format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
+            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ifunc_resolver: None,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("if.then"));
@@ -1079,6 +1086,9 @@ mod tests {
             is_constructor: false, is_destructor: false, alias_name: None, is_nested: false,
             upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None,
             format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
+            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ifunc_resolver: None,
         };
         assert!(build_from_func(&f).is_none());
     }

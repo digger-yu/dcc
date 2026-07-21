@@ -358,6 +358,8 @@ mod tests {
                             is_thread_local: false,
                             no_sanitize: vec![],
                             copy_fn: None,
+                            is_retain: false,
+                            is_used_attr: false,
                         })),
                         BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                             ty: int_ty(),
@@ -376,6 +378,8 @@ mod tests {
                             is_thread_local: false,
                             no_sanitize: vec![],
                             copy_fn: None,
+                            is_retain: false,
+                            is_used_attr: false,
                         })),
                     ],
                     span: sp.clone(),
@@ -404,6 +408,9 @@ mod tests {
                 no_sanitize: vec![],
                 target_clones: vec![],
                 returns_nonnull: false,
+                ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+                is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                ifunc_resolver: None,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");
