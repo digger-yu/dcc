@@ -90,6 +90,8 @@ pub struct Config {
     pub warn_int_conversion: bool,
     /// -Wint-truncation: 整数截断警告
     pub warn_int_truncation: bool,
+    /// PGO / GCOV / AutoFDO / LBR / MemProf / Offloading 统一配置
+    pub profile: crate::profile::ProfileConfig,
     /// -fdiagnostics-color=always|never|auto
     pub diag_color: crate::diagnostics::ColorPolicy,
     /// -fdiagnostics-format=github|clang|msvc|vi|sarif
@@ -305,6 +307,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut bounds_check = false;
     let mut warn_int_conversion = false;
     let mut warn_int_truncation = false;
+    let mut profile = crate::profile::ProfileConfig::default();
+    let mut offload = crate::profile::offload::OffloadConfig::default();
     let mut diag_color = crate::diagnostics::ColorPolicy::Auto;
     let mut diag_format = crate::diagnostics::FormatStyle::Github;
     let mut diag_show_template_tree = false;
@@ -535,20 +539,127 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-Wno-int-conversion" => warn_int_conversion = false,
             "-Wint-truncation" => warn_int_truncation = true,
             "-Wno-int-truncation" => warn_int_truncation = false,
-            // 诊断输出控制
-            "-fdiagnostics-color=always" => diag_color = crate::diagnostics::ColorPolicy::Always,
-            "-fdiagnostics-color=never" => diag_color = crate::diagnostics::ColorPolicy::Never,
-            "-fdiagnostics-color=auto" => diag_color = crate::diagnostics::ColorPolicy::Auto,
+            // ====== PGO / GCOV / AutoFDO / LBR / MemProf ======
+            "-fprofile-generate" => {
+                profile.pgo_generate = Some(std::path::PathBuf::from("."));
+                if let Some(next) = args.get(i + 1) {
+                    if !next.starts_with('-') && next != &args[i] {
+                        profile.pgo_generate = Some(std::path::PathBuf::from(next));
+                        i += 1;
+                    }
+                }
+            }
+            "-fprofile-instr-generate" => {
+                profile.pgo_generate = Some(std::path::PathBuf::from("."));
+                if let Some(next) = args.get(i + 1) {
+                    if !next.starts_with('-') {
+                        profile.pgo_generate = Some(std::path::PathBuf::from(next));
+                        i += 1;
+                    }
+                }
+            }
+            "-fprofile-use" | "-fprofile-instr-use" => {
+                if let Some(next) = args.get(i + 1) {
+                    profile.pgo_use = Some(std::path::PathBuf::from(next));
+                    i += 1;
+                } else {
+                    return Err(CliError::new(&format!("{a}: missing profile data path")));
+                }
+            }
+            "-fauto-profile" => {
+                if let Some(next) = args.get(i + 1) {
+                    profile.auto_profile = Some(std::path::PathBuf::from(next));
+                    i += 1;
+                } else {
+                    return Err(CliError::new("-fauto-profile: missing file"));
+                }
+            }
+            "-fprofile-sample-use" => {
+                if let Some(next) = args.get(i + 1) {
+                    profile.sample_use = Some(std::path::PathBuf::from(next));
+                    i += 1;
+                } else {
+                    return Err(CliError::new("-fprofile-sample-use: missing file"));
+                }
+            }
+            "-flbr-profile" => {
+                if let Some(next) = args.get(i + 1) {
+                    profile.lbr_profile = Some(std::path::PathBuf::from(next));
+                    i += 1;
+                } else {
+                    return Err(CliError::new("-flbr-profile: missing file"));
+                }
+            }
+            "-ftest-coverage" => { profile.gcov = true; profile.profile_arcs = true; }
+            "-fno-test-coverage" => { profile.gcov = false; }
+            "-fprofile-arcs" => { profile.profile_arcs = true; }
+            "-fno-profile-arcs" => { profile.profile_arcs = false; }
+            "-fbranch-probabilities" => { /* 兼容 GCC: 默认与 -fprofile-use 配对使用 */ }
+            "-fprofile-values" => { /* TODO: 块级值采样, 当前 no-op */ }
+            "-fprofile-list" => {
+                if let Some(next) = args.get(i + 1) {
+                    if !next.starts_with('-') {
+                        profile.profile_list = Some(std::path::PathBuf::from(next));
+                        i += 1;
+                    } else {
+                        profile.profile_list = Some(std::path::PathBuf::from("dcc.profile-list.txt"));
+                    }
+                } else {
+                    profile.profile_list = Some(std::path::PathBuf::from("dcc.profile-list.txt"));
+                }
+            }
+            "-ftopdownmetrics" => { profile.topdown_metrics = true; }
+            "-fno-topdownmetrics" => { profile.topdown_metrics = false; }
+            "-frecord-profile" => {
+                if let Some(next) = args.get(i + 1) {
+                    profile.perf_record = Some(std::path::PathBuf::from(next));
+                    i += 1;
+                } else {
+                    return Err(CliError::new("-frecord-profile: missing dir"));
+                }
+            }
+            // ====== MemProf ======
+            "-fmemory-profile" | "-fmemprof" => { profile.memprof = true; }
+            "-fno-memory-profile" | "-fno-memprof" => { profile.memprof = false; }
+            "-fmemory-profile-use" => {
+                if let Some(next) = args.get(i + 1) {
+                    profile.memprof_use = Some(std::path::PathBuf::from(next));
+                    i += 1;
+                } else {
+                    return Err(CliError::new("-fmemory-profile-use: missing file"));
+                }
+            }
+            // ====== Offloading ======
+            "-fopenmp" => { offload.openmp = true; offload.enabled = true; }
+            "-fopenmp=simd" => { offload.openmp_simd = true; offload.enabled = true; }
+            "-fno-openmp" => { offload.openmp = false; }
+            "-fcuda" => { offload.cuda = true; offload.enabled = true; }
+            "-fno-cuda" => { offload.cuda = false; }
+            "-fhip" | "-fcuda-hip" => { offload.hip = true; offload.enabled = true; }
+            "-fno-hip" => { offload.hip = false; }
+            "-fopenmp-targets" => {
+                if let Some(next) = args.get(i + 1) {
+                    offload.target_triples = next.split(',').map(|s| s.to_string()).collect();
+                    i += 1;
+                } else {
+                    return Err(CliError::new("-fopenmp-targets: missing triple list"));
+                }
+            }
+            "-foffload-arch" => {
+                if let Some(next) = args.get(i + 1) {
+                    offload.target_archs.push(next.clone());
+                    i += 1;
+                } else {
+                    return Err(CliError::new("-foffload-arch: missing arch"));
+                }
+            }
+            // ====== 诊断格式 (-fdiagnostics-*) ======
+            // (具体解析见下方 `a if a.starts_with("-fdiagnostics-color=")` 块)
             a if a.starts_with("-fdiagnostics-color=") => {
                 let v = &a["-fdiagnostics-color=".len()..];
                 diag_color = crate::diagnostics::ColorPolicy::from_arg(v)
                     .map_err(|e| CliError::new(&e))?;
             }
-            "-fdiagnostics-format=github" => diag_format = crate::diagnostics::FormatStyle::Github,
-            "-fdiagnostics-format=clang" => diag_format = crate::diagnostics::FormatStyle::Clang,
-            "-fdiagnostics-format=msvc" => diag_format = crate::diagnostics::FormatStyle::Msvc,
-            "-fdiagnostics-format=vi" => diag_format = crate::diagnostics::FormatStyle::Vi,
-            "-fdiagnostics-format=sarif" => diag_format = crate::diagnostics::FormatStyle::Sarif,
             a if a.starts_with("-fdiagnostics-format=") => {
                 let v = &a["-fdiagnostics-format=".len()..];
                 diag_format = crate::diagnostics::FormatStyle::from_arg(v)
@@ -878,6 +989,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_color,
             diag_format,
             diag_show_template_tree,
+            profile: merge_profile_config(profile, offload),
         })
     } else {
         if inputs.is_empty() {
@@ -915,8 +1027,25 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_color,
             diag_format,
             diag_show_template_tree,
+            profile: merge_profile_config(profile, offload),
         })
     }
+}
+
+/// 把 `offload` 子状态合并到 `profile` 顶层 (openmp / cuda / hip / targets).
+fn merge_profile_config(
+    mut p: crate::profile::ProfileConfig,
+    o: crate::profile::offload::OffloadConfig,
+) -> crate::profile::ProfileConfig {
+    p.openmp = o.openmp || o.openmp_simd;
+    p.openmp_target = if o.target_triples.is_empty() {
+        None
+    } else {
+        Some(o.target_triples.join(","))
+    };
+    p.cuda = o.cuda;
+    p.hip = o.hip;
+    p
 }
 
 fn print_help() {

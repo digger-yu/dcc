@@ -29,6 +29,7 @@ mod codegen;
 mod preproc;
 mod mmap_io;
 mod cpp;
+mod profile;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();

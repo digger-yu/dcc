@@ -282,7 +282,7 @@ ctor / dtor / 成员函数 / 成员变量 / `this->x` / `::` / new / delete /
   替代。
 - **DCC_CPP_KEEP_TMP**：环境变量；非空时把降级后的 C 文件写到指定路径。
 
-**M9 端到端验证**（本地 cargo test 实测 `exit=0`）：
+**M9 端到端验证**（远端 Linux 实测 `exit=0`）：
 
 ```bash
 dcc -c examples/m9_cpp_simple.cpp -o m9.o    # 1 个 class + 构造 + 成员函数
@@ -295,7 +295,7 @@ gcc m9m.o -o m9m && ./m9m                    # exit=0
 
 - SFINAE / partial specialization / 完整 concept 求值
 - 协程挂起恢复 / module 分区
-- 完整 GCC cc1/cc1plus bootstrap（本地可用磁盘 2.5G 不足，且 dcc C++
+- 完整 GCC cc1/cc1plus bootstrap（远端可用磁盘 2.5G 不足，且 dcc C++
   标准库支持度仍需扩展）
 
 **M10+ 新增**（C++ 高级特性降级，详见 `src/cpp/m10.rs`）：
@@ -339,7 +339,7 @@ gcc m9m.o -o m9m && ./m9m                    # exit=0
 
 完整 GCC bootstrap 仍部分受阻：M9 已解锁 dcc++ 端到端，M10+ 已实现
 SFINAE / partial specialization / 完整 concept 求值 / 协程 / module
-分区；cc1/cc1plus 仍受更复杂 C++ 库 + 本地磁盘 2.5G 阻碍；详见
+分区；cc1/cc1plus 仍受更复杂 C++ 库 + 远端磁盘 2.5G 阻碍；详见
 `docs/missing_features.md`。
 
 ### Linux 内核编译硬性门槛
@@ -450,9 +450,10 @@ dcc -dump-ast input.c
 dcc -v input.c
 ```
 
-## 内核验收
+## 远程内核验收
 
 ```bash
+bash scripts/sync_remote_build.sh          # rsync + 全量远程测试
 bash scripts/kernel_full_check.sh          # modpost / QEMU / vmlinux（非阻塞）
 BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh  # 可选构建 bzImage
 ```
@@ -505,9 +506,10 @@ src/
 
 | 套件 | 数量 | 说明 |
 |------|------|------|
-| 单元测试 | `src/` 内 `#[test]` | parser/preproc/opt 等 |
+| 单元测试 | `src/` 内 `#[test]` | parser/preproc/opt/profile 等 |
 | integration | 59 项 | 成功路径语法/codegen 回归 |
 | errors | 14 项测试 / 37 snapshot | 失败路径诊断，见 [docs/diagnostics.md](docs/diagnostics.md) |
+| profile | 11 项 | 性能分析 CLI / 缺路径拒绝，见 [docs/profiling.md](docs/profiling.md) |
 
 错误 snapshot 位于 `tests/fixtures/errors/`；更新命令:
 

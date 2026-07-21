@@ -1,10 +1,11 @@
 # DCC Linux 6.6 缺失特性（按自动化证据）
 
-> 最后更新：2026-07-21 — 以 `scripts/kernel_full_check.sh`、
-> `scripts/prepare0_check.sh`、`scripts/pahole_regress.sh`、
-> `scripts/objtool_regress.sh`、`scripts/modpost_link.sh`、
-> `scripts/vmlinux_regress.sh` 与本地 Linux 6.6 / GCC libiberty
-> 集成测试日志为准。
+> 最后更新：2026-07-20 — 以 `scripts/sync_remote_build.sh`、
+> `scripts/kernel_full_check.sh`、`scripts/prepare0_check.sh`、
+> `scripts/pahole_regress.sh`、`scripts/objtool_regress.sh`、
+> `scripts/modpost_link.sh`、`scripts/vmlinux_regress.sh`、
+> `scripts/archive/remote_libiberty_probe.sh`
+> 与远程 Linux 6.6 / GCC libiberty 日志为准。
 
 ## 已通过的门禁
 
@@ -17,9 +18,8 @@
 | __int128 / register asm / 全局符号 | `examples/test_p1_features.c` |
 | 预处理 forced-include 注释安全 | `tests/fixtures/preproc_comment_force.h` |
 | mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
-| DWARF v4 + BTF | `-g` 生成 `.debug_info` / `.debug_abbrev` / `.debug_line` / `.debug_aranges` / `.debug_frame` + `.BTF`（含 `dcc_probe` STRUCT 类型 + int/pointer/array 编码） |
-| DWARF 高级节 | `-gsplit-dwarf` 拆 `.debug_*.dwo` + skeleton；`-gpubnames` 写 `.debug_pubnames` / `.debug_pubtypes` / `.debug_names` |
-| objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`、`.orc_unwind_ip`；CIE 按 x86_64/aarch64/riscv64 三种 `ArchKind` 编码 augmentation 与 RA 寄存器号 |
+| DWARF + BTF（含 struct） | `-g` 生成 `.debug_*` + `.BTF`（含 `dcc_probe` STRUCT 类型） |
+| objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`、`.orc_unwind_ip` |
 | KASAN/UBSAN/KCSAN/KCOV/Fuzzer 插桩 | `-fsanitize=*`：TU init 一次 + 每函数入口桩 + AST 表达式级 KASAN load/store + UBSAN div/shift/signed overflow + KCOV 边覆盖 + Fuzzer cmp/switch trace + `.dcc.san_info` v2 |
 | 跨 TU LTO | `-flto` 生成 `.llvm.lto`；`-r` 多 `.o` 经 `ld -r` + objcopy 合并摘要 |
 | LTO dead symbol 剔除 | `-ffunction-sections`（`-flto` 默认）+ `ld --gc-sections` + objcopy strip |
@@ -77,8 +77,8 @@
 | aarch64/riscv64 移位 (M7) | `lslv`/`lsrv` (aarch64) 修复 Rm bit 错位；`sll`/`srl`/`sra` (riscv64) 替代 0；`aarch64_ir_shifts_emit_lslv_lsrv` + `riscv64_ir_shifts_emit_sll_srl` |
 | 聚合类型 by-ref (M7) | aarch64/riscv64 `gen_call` 检测 `ValueType::Aggregate`/`Array`/`Complex`，local 参数通过 `add xN, sp, #off` / `addi aN, sp, #off` 传地址；`aarch64_aggregate_arg_by_ref` + `riscv64_aggregate_arg_by_ref` |
 | 聚合类型 sret 返回 (M7) | 返回 > 16 字节时 caller 分配 `<sret>` local，x0/a0 指向 sret 槽 |
-| dcc++ 端到端编译 (M9) | `dcc -x c++ examples/m9_cpp_simple.cpp -o a.o` + `gcc a.o -o a && ./a` 在本地 cargo test 实测 `exit=0`（`Counter` 局部变量 + `c.inc()` 改写 + ctor 初始化列表 + 顶层 main trampoline） |
-| dcc++ 多类 + 隐式 this (M9) | `examples/m9_cpp_multi.cpp` 本地实测 `exit=0`（方法体内未限定 `n_` 自动改写为 `this->n_`） |
+| dcc++ 端到端编译 (M9) | `dcc -x c++ examples/m9_cpp_simple.cpp -o a.o` + `gcc a.o -o a && ./a` 在远端 Linux 实测 `exit=0`（`Counter` 局部变量 + `c.inc()` 改写 + ctor 初始化列表 + 顶层 main trampoline） |
+| dcc++ 多类 + 隐式 this (M9) | `examples/m9_cpp_multi.cpp` 远端实测 `exit=0`（方法体内未限定 `n_` 自动改写为 `this->n_`） |
 | dcc++ 复合操作符 / C 关键字 (M9) | `->` / `->*` / `--` / `-=` / `++` / `+=` / `<<` / `<<=` / `>>` / `>>=` / `==` / `!=` / `<=` / `>=` / `&&` / `||` / `*=` / `/=` / `%=` / `^=` / `|=` / `&=` / `...` 全部支持；`int` / `return` / `if` / `while` 等不再被误为 `Ident` |
 | dcc++ C++20 占位 (M9) | `module` / `import` / `export` / `concept` / `requires` / `co_await` / `co_yield` / `co_return` 全部降级为 no-op 注释 |
 
@@ -125,8 +125,8 @@
 | M8 解析器扩展 | ✅ | 命名空间 / 运算符 / 继承 (单/多/钻石) / 虚函数 / 模板声明 / try-catch / lambda / typeid / dynamic_cast / static_cast / const_cast / reinterpret_cast |
 | C++→C 降级 (M7) | ✅ | `src/cpp/lower.rs`：struct 字段、隐式 this 形参、`_Znwm`/`_ZdlPv` 替身 |
 | M8 C++→C 降级 | ✅ | 命名空间扁平化 / 基类嵌入 / vtable 符号 / typeinfo 符号 / 异常 (Itanium zero-cost 降级) / lambda 闭包类型 / 模板 (占位) / dynamic_cast 简化实现 |
-| dcc++ 子命令 / `-x c++` | ✅ M9 | `dcc -x c++ foo.cpp` / `dcc foo.cpp`（按 `.cpp`/`.cc`/`.cxx` 扩展名自动识别）；`dcc -dump-ast` / `dcc -fsyntax-only`；本地 cargo test 实测 `exit=0` |
-| dcc++ 局部类变量 + 方法调用改写 (M9) | ✅ | `Counter c;` → `struct Counter c; _ZN7CounterC1Ev(&c);`；`c.inc()` → `_ZN7Counter3incEv(&c)`；`m9_cpp_simple.cpp` / `m9_cpp_multi.cpp` 端到集成测试 `exit=0` |
+| dcc++ 子命令 / `-x c++` | ✅ M9 | `dcc -x c++ foo.cpp` / `dcc foo.cpp`（按 `.cpp`/`.cc`/`.cxx` 扩展名自动识别）；`dcc -dump-ast` / `dcc -fsyntax-only`；远端 Linux 实测 `exit=0` |
+| dcc++ 局部类变量 + 方法调用改写 (M9) | ✅ | `Counter c;` → `struct Counter c; _ZN7CounterC1Ev(&c);`；`c.inc()` → `_ZN7Counter3incEv(&c)`；远端 `m9_cpp_simple.cpp` / `m9_cpp_multi.cpp` 端到端 `exit=0` |
 | dcc++ 隐式 this 注入 (M9) | ✅ | 类方法体内未限定成员 `n_` 自动改写为 `this->n_`（基于 `current_class` + `class_fields`） |
 | dcc++ C++20 占位 (M9) | ✅ | `module` / `import` / `export` / `concept` / `requires` / `co_await` / `co_yield` / `co_return` 降级为 no-op 注释 |
 | dcc++ 完整 SFINAE (M10+) | ✅ | `src/cpp/m10.rs::SfinaeCtx` + `try_substitute` 替换失败不报错，模板形参未绑定跳过该候选 |
@@ -162,21 +162,21 @@
 | C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
 | C 前端补洞 `_Static_assert` 字符串化 (M11.1) | ✅ | C23 单参 `_Static_assert(expr)` 与双参 `_Static_assert(expr,"msg")` 全部支持；失败消息附加 `evaluates to: <ExprDebug 文本>` 便于定位 |
 | C 前端补洞 GNU 扩展 (M11.2) | ✅ | `__builtin_offsetof` 支持嵌套 struct/union/数组下标/匿名 struct 成员访问；`__builtin_huge_val`/`huge_valf`/`huge_vall` 按 IEEE 754 位模式 (double 0x7FF0000000000000 / float 0x7F800000 / long double 0x7FFF8000000000000000) rodata 加载；`__builtin_nan`/`nanf`/`nanl` 走 qNaN 编码 (double 0x7FF8000000000000)；`_Atomic` 在 C 前端接通 `__atomic_*` 内建函数 + `__c11_atomic_*` 路径；`__builtin_call_with_static_chain` 按 SysV ABI 把 chain 写入 r10 并按 GP/XMM 寄存器约定传参 + 间接 call；嵌套函数作为 IR 一等公民支持静态链参数；computed goto 跨函数（标签地址走 LEA 加载，间接 jmp 通过寄存器）；asm goto 输出约束在 fall-through 路径上写回，跳转路径保留原值；`__builtin_isnan`/`isinf`/`finite`/`signbit`/`fpclassify` 正确处理 NaN/Inf 位模式；`Expr::Unary` 浮点取负走恒常折叠 + 运行时 XOR 符号位；`AddrOf` REX.R 编码对 r10–r15 修复 |
-| 内联 asm 约束全家族 (M11.3) | ✅ | `parse_asm_constraint_flags` 解析 `=` / `+` / `&` / `%` / `0..9`；`asm_constraint_*` 判定：is_immediate (i/n/I/J/K/L/M/N/O/X/E/F/G/H/s)、is_address (p)、wants_xmm (x/Y)、is_general (g)、prefers_memory；`asm_pick_sub_constraint` 从多约束 ("rm") 选单约束，按 `r` > `m` > 立即数 > `g` > 默认优先级；`build_asm_operand_map` 用 `Slot::{Reg, Imm, Mem}` + `meta: (reg, xmm_w, is_out, is_mem, flags)` 记录每个操作数；`prepare_asm_binding(expr, reg, is_output)` 区分输出/输入语义：输出走 lea 取地址（配合 `writeback_asm_operand` 写回），输入直接 `gen_expr` 取值（修复原 bug：输入也走 lea 导致 segfault）；early-clobber 阶段若 `&` 输出寄存器与任一输入寄存器重叠，重新从 GP 池挑选并重新 emit prepare/map；`asm_format_subst` 把 `op_map` 值按 AT&T 形态输出（`%rax` / `$305419896` / `-16(%r13)`）；offsetof 约束在输入侧走 `const_eval::eval` 求值，失败时回退到 GP 寄存器并 `lea` 加载常量基址 + 偏移；测试 `test_asm_constraints_ext.c` 10 个用例 (`test_immediate_constraint` / `test_address_constraint` / `test_general_constraint` / `test_constant_constraint` / `test_match_constraint_0` / `test_early_clobber` / `test_multi_constraint` / `test_xmm_constraint` / `test_digit_label_constraint` / `test_offsetof_constraint`) 本地 cargo test 10/10 PASS |
-| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；本地磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）；仍缺 SFINAE / partial specialization / 完整 concepts / 协程 / module |
-| libdecnumber 组合 TU 编译 | ✅ 本地 OK | `tools/libdecnumber_combined.c` 收敛 decSingle/Double/Quad 三套符号 |
+| 内联 asm 约束全家族 (M11.3) | ✅ | `parse_asm_constraint_flags` 解析 `=` / `+` / `&` / `%` / `0..9`；`asm_constraint_*` 判定：is_immediate (i/n/I/J/K/L/M/N/O/X/E/F/G/H/s)、is_address (p)、wants_xmm (x/Y)、is_general (g)、prefers_memory；`asm_pick_sub_constraint` 从多约束 ("rm") 选单约束，按 `r` > `m` > 立即数 > `g` > 默认优先级；`build_asm_operand_map` 用 `Slot::{Reg, Imm, Mem}` + `meta: (reg, xmm_w, is_out, is_mem, flags)` 记录每个操作数；`prepare_asm_binding(expr, reg, is_output)` 区分输出/输入语义：输出走 lea 取地址（配合 `writeback_asm_operand` 写回），输入直接 `gen_expr` 取值（修复原 bug：输入也走 lea 导致 segfault）；early-clobber 阶段若 `&` 输出寄存器与任一输入寄存器重叠，重新从 GP 池挑选并重新 emit prepare/map；`asm_format_subst` 把 `op_map` 值按 AT&T 形态输出（`%rax` / `$305419896` / `-16(%r13)`）；offsetof 约束在输入侧走 `const_eval::eval` 求值，失败时回退到 GP 寄存器并 `lea` 加载常量基址 + 偏移；测试 `test_asm_constraints_ext.c` 10 个用例 (`test_immediate_constraint` / `test_address_constraint` / `test_general_constraint` / `test_constant_constraint` / `test_match_constraint_0` / `test_early_clobber` / `test_multi_constraint` / `test_xmm_constraint` / `test_digit_label_constraint` / `test_offsetof_constraint`) 远程 Linux 10/10 PASS |
+| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；远端可用磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）；仍缺 SFINAE / partial specialization / 完整 concepts / 协程 / module |
+| libdecnumber 组合 TU 编译 | ✅ 远程 OK | `scripts/remote_gcc_c_probe.sh` 改用 `tools/libdecnumber_combined.c` |
 | 嵌套块重声明 (C99 6.2.1) | ✅ | `parser.rs::check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍报 E0007 |
 
-## 本地 debug 记录（2026-07-15）
+## 远程 debug 记录（2026-07-15）
 
 | 问题 | 根因 | 修复 |
 |------|------|------|
-| `test_kernel_features.sh` 报 `pipefail: invalid option` | Windows 同步后脚本为 CRLF | `.gitattributes` 强制 `*.sh` LF |
-| `devicetable-offsets.c` 缺 `generated/autoconf.h` | 内核树未跑 `syncconfig` | `scripts/kernel_full_check.sh` 自动 `make include/generated/autoconf.h` |
+| `remote_feature_check.sh` 报 `pipefail: invalid option` | Windows 同步后脚本为 CRLF | `.gitattributes` 强制 `*.sh` LF |
+| `devicetable-offsets.c` 缺 `generated/autoconf.h` | 内核树未跑 `syncconfig` | `sync_remote_build.sh` 自动 `make include/generated/autoconf.h` |
 | `file2alias.c` 编译失败 | stddef 重入 + linux/stddef.h 误解析 | 移除 include-once；GCC include 优先 |
 | file2alias IR | DEF_FIELD typeof / devtable 非常量初始化 | `type_of_member` + 函数指针静态初始化 |
 
-## 本地 debug 记录（2026-07-16，GCC libiberty）
+## 远程 debug 记录（2026-07-16，GCC libiberty）
 
 | 问题 | 根因 | 修复 |
 |------|------|------|
@@ -244,8 +244,8 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 |------|------|
 | jump_label 静态 key 声明 | `parse_static_key_decl()`：`_DECLARE_STATIC_KEY_0/1` 及 `IS_ENABLED` 残留 → `extern struct static_key_{false,true}` |
 | Typed IR 语义校验 | ✅ `ir.rs`：`lower`/`validate`/`resync`；float/vector/complex 二元/一元/赋值/条件/聚合/转换与 codegen 对齐 |
-| BTF struct 探测 | `build_btf_probe()`：int + `dcc_probe` 结构体；支持 int/pointer/array 编码 |
-| eh_frame FDE | 每函数 PC+size 生成 FDE；ORC 节写入 PC 列表；CIE 按 `ArchKind` 跨架构生成 |
+| BTF struct 探测 | `build_btf_probe()`：int + `dcc_probe` 结构体 |
+| eh_frame FDE | 每函数 PC+size 生成 FDE；ORC 节写入 PC 列表 |
 | LTO 链接 + gc | `src/link/legacy.rs`：`ld -r --gc-sections` + `.llvm.lto` 注入 + dead strip |
 | per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |
 | rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |
@@ -270,7 +270,7 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 | `-rpath` / `-rpath-link` / `-runpath` (M12) | `.dynamic` 写 `DT_RPATH` (23, deprecated) / `DT_RUNPATH` (29, glibc 推荐) |
 | `-fuse-ld=<name>` (M12) | `LinkOpts.fuse_ld` 字段 + `DCC_FUSE_LD` 环境变量覆盖 |
 | `-fno-semantic-interposition` / `-fsemantic-interposition` (M12) | LTO 阶段控制函数符号插入语义 |
-| `--gdb-index` (M12) | `link/gdb_index.rs` 写 `.gdb_index` 节（GDB 8+ 加速符号查找）|
+| `--gdb-index` (M12, 占位) | 生成最小 `.gdb_index` 节（GDB 识别，内容仅占位） |
 | `--compress-debug-sections=zlib\|zstd` (M12, 占位) | 当前忽略压缩，保留 CLI 兼容 |
 | `SHF_GNU_RETAIN` 节标志 (M12) | 对 `.init` / `.fini` / `.init_array` / `.fini_array` / `.text.startup` 等元数据节自动打 `0x200000` |
 | `gc_sections_root` 自动选根 (M12) | 接受 `-u <sym>` / `-Wl,-u,<sym>` 显式根符号，从 `entry + -u` 集合做引用图 BFS，软删除未被引用节 |
@@ -306,14 +306,42 @@ mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`
 IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用，
 不需要修改 IR / codegen。`.dcc.san_info` 节版本 v2，载荷为
 `DCC_SAN\0 + v2 + kasan/hwasan/ubsan/kcsan/kcov/fuzzer` 各 1 字节。
-回归：`src/sanitizer.rs` 12 个单元测试 + `cargo test` integration 套件
+回归：`src/sanitizer.rs` 12 个单元测试 + `scripts/remote_feature_check.sh`
 （sanitizer 节 + 汇编桩计数）。
 
-## 本地基线
+## 性能分析子系统（M20 已完成）
 
-- 工作区：`~/dcc`
-- 同步构建：`scripts/kernel_full_check.sh`（含 prepare0/pahole/objtool/全链路）
+| 通道 | 能力 | 已知遗留 |
+|------|------|----------|
+| PGO instrument（`-fprofile-generate` / `-fprofile-use`） | `ProfileConfig.pgo_generate` / `pgo_use` 开关齐；`Profraw` 二进制 roundtrip（PROF magic + version 1 + sites + u64 计数器）；`pgo::instrument_program` AST 改写 FuncDecl 顶部插入 `__dcc_pgo_count_fn(idx)`；`PgoWeights` 聚合 func 入口计数 | codegen 阶段尚未自动 emit 计数器；下游权重传播 stub |
+| GCOV（`-ftest-coverage` / `-fprofile-arcs`） | `.gcno` notes + `.gcda` data 二进制（与 GCC gcov-9 layout 对齐）；`GcovUnit` / `GcovFunction` / `GcovBlock` 数据结构；`write_notes` / `write_data_with_counters` 写盘入口 | cfg_checksum 简化公式；非 x86_64 arch 未验证 |
+| AutoFDO（`-fauto-profile=` / `-fprofile-sample-use=`） | 简化 text parser（`func <name> <total>` / `line <name> <line> <col> <samples>`）；`bucketize` 按 >10% / >1% 阈值分 Hot/Warm/Cold | 权重不下发到 codegen |
+| LBR（`-flbr-profile=`） | 解析 `perf script -F brstack` 文本；`hot_entries` 按 `unknown -> func` 入度排序 | 权重不下发到 codegen |
+| MemProf（`-fmemory-profile` / `-fmemory-profile-use=`） | 简化 parser（`alloc` / `lifetime` 行式）；`is_cold(stack, threshold)` 启发 | 未在 libc malloc 上插桩；无 runtime 库 |
+| Perf 事件 / TopdownL1（`-ftopdownmetrics`） | `TopdownL1` 枚举（Retiring / BadSpeculation / FrontendBound / BackendBound）；`PerfRecord` 容器；`topdown_percentages()` 把四 slot 规整为百分比（sum = 1.0 校验） | 未读 perf.data 二进制 |
+| Offloading（`-fopenmp` / `-fcuda` / `-fhip` / `-fopenmp-targets=`） | `OffloadConfig` / `OffloadSection` / `OffloadEntry` / `OffloadKind` 数据结构；`to_json()` 序列化 | 无 device codegen 后端；runtime loader 未实装 |
+
+CLI 矩阵：
+`-fprofile-generate[=dir]` / `-fprofile-instr-generate[=dir]` /
+`-fprofile-use=file` / `-fprofile-instr-use=file` /
+`-fauto-profile=file` / `-fprofile-sample-use=file` /
+`-flbr-profile=file` / `-ftest-coverage` / `-fprofile-arcs` /
+`-ftopdownmetrics` / `-frecord-profile=dir` /
+`-fmemory-profile` / `-fmemory-profile-use=file` / `-fmemprof` /
+`-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` /
+`-fopenmp-targets=triple,...` / `--offload-arch=triple` /
+`-fbranch-probabilities` / `-fprofile-values` / `-fprofile-list[=file]`。
+
+回归：`src/profile/{mod,gcov,pgo,autofdo,lbr,memprof,perf_event,offload}.rs`
+10 个模块单元测试 + `tests/profile.rs` 11 个集成测试
+（CLI 接受 / 缺路径拒绝 / 编译出 .o）。
+详见 `docs/profiling.md`。
+
+## 远程基线
+
+- 工作区：`~/dcc`（亦见历史 `~/dcc-agent-linux66`）
+- 同步构建：`scripts/sync_remote_build.sh`（含 prepare0/pahole/objtool/kernel_full_check）
 - 内核树：`~/linux-6.6`，需已有 `.config`
-- GCC 子集：按 `cargo test --test integration` 中 `libiberty_combined_*` 走
+- GCC 子集：`~/gcc-src` + `scripts/archive/remote_libiberty_probe.sh`
 - 内核全树：`scripts/kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物 SKIP）
 - QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` + bzImage）

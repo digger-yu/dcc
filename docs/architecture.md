@@ -112,7 +112,7 @@ error[E0001]: expected ';', got '{'
 | 完整后端 (has_backend == true) | `x86_64-unknown-linux-gnu` / `aarch64-linux-gnu` / `riscv64-linux-gnu` | `codegen::emit` 真正产出机器码,ET_EXEC/ET_REL 正常写出 |
 | 仅 Triple 解析 (has_backend == false) | `mips-linux-gnu` / `mips64-linux-gnuabi64` / `arm-linux-gnueabihf` (及 `armv7-…` 别名) | `target.rs::resolve()` 给出正确几何参数 (指针大小 / 字节序 / 调用约定),`cli::parse()` 完整通过;`codegen::emit()` 会 `panic!` 并通过 `Arch::backend_missing_msg()` 输出明确诊断 |
 
-设计动机: Linux kernel 编译链常在 host 端用 `--target=...` 探测目标架构,
+设计动机: Linux kernel 编译链常在 host 端用 `--target=...` 探测远端架构,
 只解析不解码能避免误伤;同时也明确告诉用户 "我们解析了,只是没后端"。
 
 第一性原理:
@@ -279,7 +279,8 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 **明确不做**：AArch64 / RISC-V 完整后端 ELF 输出（沿用 host 链接器）
 之外的非 x86-64 后端。
 
-本地验收：`cargo test link::`（50 用例）+ `cargo test lto::`（7 用例）。
+远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（50 用例）
++ `cargo test lto::`（7 用例）。
 
 ## C++ 前端 M7（`src/cpp/`）
 
@@ -360,7 +361,7 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 
 **M9 不在范围**：SFINAE / partial specialization（`partial_sort`）/
 完整 concept 求值 / 协程挂起恢复 / module 分区 / 完整 GCC cc1/cc1plus
-bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间）。
+bootstrap（受限于 `dcc` 自身 C++ 库支持度与远端磁盘空间）。
 
 **M10+ 范围**（新增，已在 `src/cpp/m10.rs` 中实现）：
 - **SFINAE**（`substitution failure is not an error`）：
@@ -408,13 +409,13 @@ bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间）。
   - `InitList::emit_c()` 生成 `{ ptr, count, capacity }` 结构
 
 **M10+ 设计原则**：所有特性均降级为 dcc C 后端可直接消费的 C 代码；
-对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 本地
+对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 远端
 磁盘空间），但 M10+ 显著扩展了能直接编译的 C++ 模式范围。
 
 **限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M9 阶段已可端到端运行
 简单 C++ 源（含 class / 成员函数 / 构造初始化列表 / 局部类变量 /
 方法调用改写）；GCC 完整 bootstrap 仍部分受阻（M9 已解锁 C++ 端到端，
-cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 本地可用磁盘 2.5G 不够装 GCC
+cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 远端可用磁盘 2.5G 不够装 GCC
 源码约 1GB + 构建临时文件约 5GB）；原因见
 `docs/missing_features.md` 的 C++ 前端状态表。
 
@@ -442,7 +443,7 @@ cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 本地可用磁盘 2.5G 不够装
   `available_parallelism().min(n_funcs)`；AST 聚合类型已 `Arc` 化以跨线程共享
   `Program`。
 - **回归**：`parallel_codegen_o2_multi_function` 断言并行/串行 `.o` 字节一致；
-  `cargo test` **parallel_codegen**。
+  `remote_feature_check` **parallel_codegen**。
 
 ## GNU 控制流扩展
 
@@ -971,7 +972,7 @@ CLI 解析：`SanitizerFlags::from_args` 支持
 - KCSAN 完整 watchpoint 仍走 KASAN 共享通道，未独立发 `__kcsan_check_access`。
 
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
-`cargo test` integration 套件（sanitizer 节 + 汇编桩计数）+ 12 个
+`scripts/remote_feature_check.sh`（sanitizer 节 + 汇编桩计数）+ 12 个
 `sanitizer::tests` 单元测试。
 
 ## C 前端补洞（M11.1，`src/parser.rs` + `src/preproc.rs`）
@@ -1128,4 +1129,59 @@ AST→SSA→pass→AST 重建，再走原有的 `resync` 流程。
 cross_function_dce / sccp / loop_opt / tco / function_attr。
 `tests/integration.rs` 对应 `m16_*` 测试函数，在 Linux 远程
 跑 `cargo test m16_` 验证。
+
+## M20 性能分析与插桩子系统（`src/profile/`）
+
+PGO / GCOV / AutoFDO / LBR / MemProf / Perf 事件 / Offloading 七个
+子系统的统一入口与配置：
+
+| 子模块 | 文件 | 关键数据结构 | 关键 CLI |
+|--------|------|--------------|----------|
+| `profile::mod` | `src/profile/mod.rs` | `ProfileConfig` 集中开关 | — |
+| `profile::gcov` | `src/profile/gcov.rs` | `GcovUnit` / `GcovFunction` / `GcovBlock` + `.gcno`/`.gcda` 二进制 | `-ftest-coverage` / `-fprofile-arcs` |
+| `profile::pgo` | `src/profile/pgo.rs` | `Profraw` + `PgoSite` + `PgoWeights` + `instrument_program` | `-fprofile-generate` / `-fprofile-use` / `-fprofile-instr-generate` / `-fprofile-instr-use` |
+| `profile::autofdo` | `src/profile/autofdo.rs` | `AutoFdoProfile` + `Hotness` 桶化 | `-fauto-profile=` / `-fprofile-sample-use=` |
+| `profile::lbr` | `src/profile/lbr.rs` | `LbrProfile.edges` + `hot_entries` | `-flbr-profile=` |
+| `profile::memprof` | `src/profile/memprof.rs` | `MemProfData` + `is_cold` 启发 | `-fmemory-profile` / `-fmemory-profile-use=` |
+| `profile::perf_event` | `src/profile/perf_event.rs` | `TopdownL1` 枚举 + `PerfRecord` | `-ftopdownmetrics` |
+| `profile::offload` | `src/profile/offload.rs` | `OffloadConfig` + `OffloadSection` + `OffloadKind` | `-fopenmp` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` |
+
+第一性原理：编译器在 release/profile 路径要回答「哪里跑得慢 /
+为什么是热点 / 内存分配合理吗 / 流水线饱和吗 / 要不要 offload」五
+个问题，每个子系统只解决其中之一。`ProfileConfig` 把七个开关聚合
+到 `cli::Config.profile`，driver 根据 `any_instrumentation()` /
+`any_use()` 决定走 instrument pass 还是 use pass。
+
+**PGO 二进制格式**（`.profraw`，`pgo::Profraw::write/read`）：
+```
+"PROF" 4B | version:u32 (=1) | n_sites:u32
+sites[]: { func_len:u32 | func | file_len:u32 | file | line:u32 }
+n_counters:u32 | counter[]: u64
+```
+
+**GCOV 二进制格式**（`.gcno` / `.gcda`，与 GCC gcov-9 layout 对齐）：
+- magic `0x67636E6F` (gcno) / `0x67636461` (gcda)
+- version `0x34302A` (40*)
+- function_record 序列：ident / lno_sum / cfg_sum / name_len+name /
+  n_bb + bb 列表（flags / succs）/ n_line + line[]
+- data 加 arc tag `0x01` + u64 计数器数组
+
+**AST 改写**（`pgo::instrument_program`）：`-fprofile-generate` 时在
+每个 `Decl::Func(f)` 的 `body` 顶部插入 `BlockItem::Stmt(Stmt::Expr(
+Expr::Call { __dcc_pgo_count_fn(idx) }))`，保证 PGO 计数先于 user code。
+
+**Offload 元数据**：`OffloadSection::to_json()` 序列化为
+`{"entries":[{"kind":"...","func":"...","file":"...","line":N,"device":"..."}]}`
+形式，后续可换 `.dcc.offload` 二进制格式。`OffloadKind` 区分
+OmpTarget / OmpTargetSimd / Cuda / Hip 四类入口。
+
+**回归**：
+- 10 个模块单元测试（`src/profile/{gcov,pgo,autofdo,lbr,memprof,perf_event,offload}.rs`）
+- 11 个集成测试（`tests/profile.rs`）：`-fprofile-generate` /
+  `-fprofile-use` 缺路径 / `-fprofile-arcs` / `-ftest-coverage` /
+  `-frecord-profile` 缺路径 / `-fopenmp` / `-fopenmp-targets` /
+  `-fcuda -fhip` / `-fmemory-profile` / `-ftopdownmetrics` /
+  `-flbr-profile` 缺路径
+
+详见 `docs/profiling.md`。
 
