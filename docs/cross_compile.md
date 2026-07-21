@@ -48,5 +48,6 @@ CROSS_COMPILE=aarch64-linux-gnu- make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu
 | x86_64 | ✅ 完整支持 (M0) |
 | aarch64 | ✅ M7：hello/控制流/调用/浮点/向量/rodata |
 | riscv64 | ✅ M7：hello/控制流/调用/浮点/向量/rodata |
-| mips / mips64 | ⏳ M7 之后 |
-| arm | ⏳ M7 之后 |
+| mips | ✅ M8：MIPS32 O32 ABI, ELF32 big-endian |
+| mips64 | ✅ M8：MIPS64 N64 ABI, ELF64 big-endian |
+| arm | ✅ M8：ARM AAPCS, ELF32 little-endian |

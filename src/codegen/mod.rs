@@ -6,6 +6,9 @@ pub mod elf;
 pub mod x86_64;
 pub mod aarch64;
 pub mod riscv64;
+pub mod mips;
+pub mod mips64;
+pub mod arm;
 
 use crate::debug;
 use crate::ir::Module;
@@ -357,9 +360,274 @@ pub fn emit(
             }
             cg.build_output()
         }
+        crate::cli::Arch::Mips => {
+            let mut cg = mips::MipsCodegen::new(target.clone(), relocatable || emit_asm);
+            cg.set_source_name(source_name);
+            if emit_asm {
+                cg.compile(module);
+                return cg.build_asm_output(module).into_bytes();
+            }
+            cg.compile(module);
+            if debug_level > 0 && relocatable {
+                let funcs: Vec<(&str, u64)> = module
+                    .functions
+                    .iter()
+                    .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .collect();
+                let mut opts = debug::DebugOptions::default();
+                opts.level = debug_level;
+                opts.source_name = source_name.to_string();
+                opts.arch = debug::ArchKind::Mips;
+                let cu = debug::CompileUnit {
+                    source_name: source_name.to_string(),
+                    comp_dir: None,
+                    producer: "dcc".to_string(),
+                    language: 12,
+                    functions: funcs
+                        .iter()
+                        .map(|(n, pc)| debug::DwarfFuncInfo {
+                            name: n.to_string(),
+                            linkage_name: None,
+                            low_pc: *pc,
+                            high_pc: *pc + 64,
+                            decl_line: 0,
+                            decl_file_idx: 0,
+                            return_type: debug::DwarfType {
+                                name: "void".to_string(),
+                                byte_size: 0,
+                                kind: debug::DwarfTypeKind::Void,
+                            },
+                            params: Vec::new(),
+                            is_external: *n == "main",
+                            is_inline: false,
+                            is_declaration: false,
+                        })
+                        .collect(),
+                    globals: Vec::new(),
+                    types: Vec::new(),
+                    line_entries: Vec::new(),
+                    line_files: vec![source_name.to_string()],
+                    line_dirs: Vec::new(),
+                    low_pc: funcs.first().map(|(_, pc)| *pc).unwrap_or(0),
+                    high_pc: funcs.last().map(|(_, pc)| *pc + 64).unwrap_or(0),
+                    func_ranges: funcs.iter().map(|(_, pc)| (*pc, 64)).collect(),
+                    cfi_rows: Vec::new(),
+                };
+                let dbg = debug::build_dwarf_full(&cu, &opts);
+                let extra_secs = debug::dwarf_elf_sections(&dbg);
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".debug_info".to_string(),
+                    data: dbg.info,
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
+                for sec in extra_secs {
+                    cg.push_extra_section(sec);
+                }
+            }
+            if relocatable {
+                let frames = cg.func_frames(module);
+                if !frames.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".eh_frame".to_string(),
+                        data: debug::build_eh_frame_with_arch(&frames, debug::ArchKind::Mips),
+                        ty: elf::SHT_PROGBITS,
+                        flags: elf::SHF_ALLOC,
+                        align: 4,
+                    });
+                }
+            }
+            if sanitizers.any() {
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".dcc.san_info".to_string(),
+                    data: sanitizer_metadata(sanitizers),
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
+            }
+            cg.build_output()
+        }
+        crate::cli::Arch::Mips64 => {
+            let mut cg = mips64::Mips64Codegen::new(target.clone(), relocatable || emit_asm);
+            cg.set_source_name(source_name);
+            if emit_asm {
+                cg.compile(module);
+                return cg.build_asm_output(module).into_bytes();
+            }
+            cg.compile(module);
+            if debug_level > 0 && relocatable {
+                let funcs: Vec<(&str, u64)> = module
+                    .functions
+                    .iter()
+                    .filter_map(|f| cg.labels().get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .collect();
+                let mut opts = debug::DebugOptions::default();
+                opts.level = debug_level;
+                opts.source_name = source_name.to_string();
+                opts.arch = debug::ArchKind::Mips64;
+                let cu = debug::CompileUnit {
+                    source_name: source_name.to_string(),
+                    comp_dir: None,
+                    producer: "dcc".to_string(),
+                    language: 12,
+                    functions: funcs
+                        .iter()
+                        .map(|(n, pc)| debug::DwarfFuncInfo {
+                            name: n.to_string(),
+                            linkage_name: None,
+                            low_pc: *pc,
+                            high_pc: *pc + 64,
+                            decl_line: 0,
+                            decl_file_idx: 0,
+                            return_type: debug::DwarfType {
+                                name: "void".to_string(),
+                                byte_size: 0,
+                                kind: debug::DwarfTypeKind::Void,
+                            },
+                            params: Vec::new(),
+                            is_external: *n == "main",
+                            is_inline: false,
+                            is_declaration: false,
+                        })
+                        .collect(),
+                    globals: Vec::new(),
+                    types: Vec::new(),
+                    line_entries: Vec::new(),
+                    line_files: vec![source_name.to_string()],
+                    line_dirs: Vec::new(),
+                    low_pc: funcs.first().map(|(_, pc)| *pc).unwrap_or(0),
+                    high_pc: funcs.last().map(|(_, pc)| *pc + 64).unwrap_or(0),
+                    func_ranges: funcs.iter().map(|(_, pc)| (*pc, 64)).collect(),
+                    cfi_rows: Vec::new(),
+                };
+                let dbg = debug::build_dwarf_full(&cu, &opts);
+                let extra_secs = debug::dwarf_elf_sections(&dbg);
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".debug_info".to_string(),
+                    data: dbg.info,
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
+                for sec in extra_secs {
+                    cg.push_extra_section(sec);
+                }
+            }
+            if relocatable {
+                let frames = cg.func_frames(module);
+                if !frames.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".eh_frame".to_string(),
+                        data: debug::build_eh_frame_with_arch(&frames, debug::ArchKind::Mips64),
+                        ty: elf::SHT_PROGBITS,
+                        flags: elf::SHF_ALLOC,
+                        align: 8,
+                    });
+                }
+            }
+            if sanitizers.any() {
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".dcc.san_info".to_string(),
+                    data: sanitizer_metadata(sanitizers),
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
+            }
+            cg.build_output()
+        }
+        crate::cli::Arch::Arm => {
+            let mut cg = arm::ArmCodegen::new(target.clone(), relocatable || emit_asm);
+            cg.set_source_name(source_name);
+            if emit_asm {
+                cg.compile(module);
+                return cg.build_asm_output(module).into_bytes();
+            }
+            cg.compile(module);
+            if debug_level > 0 && relocatable {
+                let funcs: Vec<(&str, u64)> = module
+                    .functions
+                    .iter()
+                    .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .collect();
+                let mut opts = debug::DebugOptions::default();
+                opts.level = debug_level;
+                opts.source_name = source_name.to_string();
+                opts.arch = debug::ArchKind::Arm;
+                let cu = debug::CompileUnit {
+                    source_name: source_name.to_string(),
+                    comp_dir: None,
+                    producer: "dcc".to_string(),
+                    language: 12,
+                    functions: funcs
+                        .iter()
+                        .map(|(n, pc)| debug::DwarfFuncInfo {
+                            name: n.to_string(),
+                            linkage_name: None,
+                            low_pc: *pc,
+                            high_pc: *pc + 64,
+                            decl_line: 0,
+                            decl_file_idx: 0,
+                            return_type: debug::DwarfType {
+                                name: "void".to_string(),
+                                byte_size: 0,
+                                kind: debug::DwarfTypeKind::Void,
+                            },
+                            params: Vec::new(),
+                            is_external: *n == "main",
+                            is_inline: false,
+                            is_declaration: false,
+                        })
+                        .collect(),
+                    globals: Vec::new(),
+                    types: Vec::new(),
+                    line_entries: Vec::new(),
+                    line_files: vec![source_name.to_string()],
+                    line_dirs: Vec::new(),
+                    low_pc: funcs.first().map(|(_, pc)| *pc).unwrap_or(0),
+                    high_pc: funcs.last().map(|(_, pc)| *pc + 64).unwrap_or(0),
+                    func_ranges: funcs.iter().map(|(_, pc)| (*pc, 64)).collect(),
+                    cfi_rows: Vec::new(),
+                };
+                let dbg = debug::build_dwarf_full(&cu, &opts);
+                let extra_secs = debug::dwarf_elf_sections(&dbg);
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".debug_info".to_string(),
+                    data: dbg.info,
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
+                for sec in extra_secs {
+                    cg.push_extra_section(sec);
+                }
+            }
+            if relocatable {
+                let frames = cg.func_frames(module);
+                if !frames.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".eh_frame".to_string(),
+                        data: debug::build_eh_frame_with_arch(&frames, debug::ArchKind::Arm),
+                        ty: elf::SHT_PROGBITS,
+                        flags: elf::SHF_ALLOC,
+                        align: 4,
+                    });
+                }
+            }
+            if sanitizers.any() {
+                cg.push_extra_section(elf::ElfSection {
+                    name: ".dcc.san_info".to_string(),
+                    data: sanitizer_metadata(sanitizers),
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
+            }
+            cg.build_output()
+        }
         a => {
-            // parse-only triple: mips / mips64 / arm 仅有 triple 解析,
-            // 无 codegen 后端,显式 panic 并给出准确诊断
             panic!("{}", a.backend_missing_msg());
         }
     }

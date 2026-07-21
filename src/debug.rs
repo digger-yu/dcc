@@ -37,6 +37,9 @@ pub enum ArchKind {
     X86_64,
     AArch64,
     RiscV64,
+    Mips,
+    Mips64,
+    Arm,
 }
 
 impl ArchKind {
@@ -46,6 +49,8 @@ impl ArchKind {
             ArchKind::X86_64 => 16,    // %rip
             ArchKind::AArch64 => 30,   // PC (R30)
             ArchKind::RiscV64 => 1,    // ra (x1)
+            ArchKind::Mips | ArchKind::Mips64 => 31, // $ra
+            ArchKind::Arm => 14,       // R14 (lr)
         }
     }
     /// 帧基址寄存器
@@ -54,17 +59,22 @@ impl ArchKind {
             ArchKind::X86_64 => 6,     // x86_64 CIE 用 rsp-relative CFA
             ArchKind::AArch64 => 29,   // FP (X29)
             ArchKind::RiscV64 => 8,    // s0/fp (x8)
+            ArchKind::Mips | ArchKind::Mips64 => 30, // $fp
+            ArchKind::Arm => 11,       // R11 (fp)
         }
     }
     /// 字宽（字节）
     pub fn address_size(self) -> u8 {
-        8
+        match self {
+            ArchKind::X86_64 | ArchKind::AArch64 | ArchKind::RiscV64 | ArchKind::Mips64 => 8,
+            ArchKind::Mips | ArchKind::Arm => 4,
+        }
     }
     /// EH 帧 CIE augmentation 字符串
     pub fn cie_augmentation(self) -> &'static str {
         match self {
             ArchKind::X86_64 => "",
-            ArchKind::AArch64 | ArchKind::RiscV64 => "zR",
+            ArchKind::AArch64 | ArchKind::RiscV64 | ArchKind::Mips | ArchKind::Mips64 | ArchKind::Arm => "zR",
         }
     }
     /// DW_CFA_def_cfa 默认寄存器编号
@@ -73,6 +83,8 @@ impl ArchKind {
             ArchKind::X86_64 => 7,  // rsp
             ArchKind::AArch64 => 31, // sp
             ArchKind::RiscV64 => 2,  // sp
+            ArchKind::Mips | ArchKind::Mips64 => 29, // $sp
+            ArchKind::Arm => 13,     // sp (R13)
         }
     }
 }

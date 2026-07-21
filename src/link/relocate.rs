@@ -63,6 +63,8 @@ use crate::codegen::elf::{
     R_RISCV_PCREL_LO12_S, R_RISCV_HI20, R_RISCV_LO12_I, R_RISCV_LO12_S,
     R_RISCV_64, R_RISCV_32, R_RISCV_32_PCREL,
     R_RISCV_TPOFF64, R_RISCV_TPREL_HI20, R_RISCV_TPREL_LO12_I, R_RISCV_TPREL_LO12_S,
+    R_MIPS_26, R_MIPS_HI16, R_MIPS_LO16, R_MIPS_32, R_MIPS_64,
+    R_ARM_ABS32, R_ARM_CALL, R_ARM_JUMP24, R_ARM_MOVW_ABS_NC, R_ARM_MOVT_ABS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +404,75 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let imm_lo = s & 0xfff;
                     let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfe000f80) | (((imm_lo as u32) >> 5) << 25) | (((imm_lo as u32) & 0x1f) << 7);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                // 4. MIPS 重定位
+                R_MIPS_26 => {
+                    // J-type: target = (S + A) >> 2, 26-bit
+                    let target = (s_sym_vaddr.wrapping_add(r_addend as u64)) >> 2;
+                    let inst = u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xFC000000) | ((target as u32) & 0x03FFFFFF);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_HI16 => {
+                    // 高 16 位: (S + A) >> 16
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm_hi = ((s >> 16) & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xFFFF0000) | imm_hi;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_LO16 => {
+                    // 低 16 位: (S + A) & 0xffff
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm_lo = (s & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xFFFF0000) | imm_lo;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_32 => {
+                    // 32-bit 绝对
+                    let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_be_bytes());
+                }
+                R_MIPS_64 => {
+                    // 64-bit 绝对
+                    let value = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_be_bytes());
+                }
+                // 5. ARM 重定位
+                R_ARM_ABS32 => {
+                    // 32-bit 绝对
+                    let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
+                }
+                R_ARM_CALL | R_ARM_JUMP24 => {
+                    // 24-bit PC 相对: offset = (S + A - P) >> 2
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p);
+                    let imm24 = (offset >> 2) & 0xffffff;
+                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xFF000000) | (imm24 as u32);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_ARM_MOVW_ABS_NC => {
+                    // 16-bit 低 16 位: imm16 = (S + A) & 0xffff
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = (s & 0xffff) as u32;
+                    let imm4 = (imm16 >> 12) & 0xf;
+                    let imm12 = imm16 & 0xfff;
+                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xFFF0F000) | (imm4 << 16) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_ARM_MOVT_ABS => {
+                    // 16-bit 高 16 位: imm16 = (S + A) >> 16
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let imm4 = (imm16 >> 12) & 0xf;
+                    let imm12 = imm16 & 0xfff;
+                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xFFF0F000) | (imm4 << 16) | imm12;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 _ => return Err(RelocError::UnsupportedType(r_type)),

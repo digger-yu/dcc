@@ -16,8 +16,13 @@ pub const ET_REL:     u16 = 1;
 pub const ET_EXEC:    u16 = 2;
 pub const ET_DYN:     u16 = 3;
 pub const EM_X86_64:  u16 = 62;
+pub const EM_MIPS:    u16 = 8;
+pub const EM_ARM:     u16 = 40;
 pub const EM_AARCH64: u16 = 183;
 pub const EM_RISCV:   u16 = 243;
+
+pub const ELFCLASS32: u8 = 1;
+pub const ELFDATA2MSB: u8 = 2;  // Big-endian (MIPS)
 
 pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
@@ -129,6 +134,20 @@ pub const R_RISCV_TPOFF64: u32 = 7;
 pub const R_RISCV_TPREL_HI20: u32 = 29;
 pub const R_RISCV_TPREL_LO12_I: u32 = 32;
 pub const R_RISCV_TPREL_LO12_S: u32 = 33;
+
+// MIPS 重定位类型
+pub const R_MIPS_26:     u32 = 4;
+pub const R_MIPS_HI16:   u32 = 5;
+pub const R_MIPS_LO16:   u32 = 6;
+pub const R_MIPS_32:     u32 = 2;
+pub const R_MIPS_64:     u32 = 18;
+
+// ARM 重定位类型
+pub const R_ARM_ABS32:   u32 = 2;
+pub const R_ARM_CALL:    u32 = 28;
+pub const R_ARM_JUMP24:  u32 = 29;
+pub const R_ARM_MOVW_ABS_NC: u32 = 43;
+pub const R_ARM_MOVT_ABS:    u32 = 44;
 
 // 符号类型 (扩展, 用于 STT_GNU_IFUNC)
 pub const STT_GNU_IFUNC: u8 = 10;
@@ -424,6 +443,7 @@ pub fn build_elf_rel_aarch64(
         relocations,
         rodata_relocations,
         extra_sections,
+        ELFDATA2LSB,
     )
 }
 
@@ -487,10 +507,11 @@ pub fn build_elf_rel_riscv64(
         relocations,
         rodata_relocations,
         extra_sections,
+        ELFDATA2LSB,
     )
 }
 
-/// 通用 ET_REL 构建（AArch64 / RISC-V）
+/// 通用 ET_REL 构建（AArch64 / RISC-V / MIPS64）
 fn build_elf_rel_generic(
     e_machine: u16,
     text: &[u8],
@@ -499,6 +520,7 @@ fn build_elf_rel_generic(
     relocations: &[ElfRela],
     rodata_relocations: &[ElfRela],
     extra_sections: &[ElfSection],
+    ei_data: u8,
 ) -> Vec<u8> {
     let mut shstr = vec![0u8];
     let mut strtab = vec![0u8];
@@ -609,7 +631,7 @@ fn build_elf_rel_generic(
     let mut out = Vec::with_capacity(shoff + n_sections * 64);
     out.extend_from_slice(&ELFMAG);
     out.push(ELFCLASS64);
-    out.push(ELFDATA2LSB);
+    out.push(ei_data);
     out.push(EV_CURRENT);
     out.push(0);
     out.extend_from_slice(&[0u8; 8]);
@@ -1397,4 +1419,320 @@ pub fn global_symbol_names(elf: &[u8]) -> Vec<String> {
         }
     }
     out
+}
+
+/// MIPS64 ET_REL .o (ELF64, big-endian)
+pub fn build_elf_rel_mips64(
+    text: &[u8],
+    rodata: &[u8],
+    symbols: &[ElfSym],
+    relocations: &[ElfRela],
+    rodata_relocations: &[ElfRela],
+    extra_sections: &[ElfSection],
+) -> Vec<u8> {
+    build_elf_rel_generic(
+        EM_MIPS,
+        text,
+        rodata,
+        symbols,
+        relocations,
+        rodata_relocations,
+        extra_sections,
+        ELFDATA2MSB,
+    )
+}
+
+// ===== ELF32 构建器 (MIPS32 / ARM) =====
+
+/// 通用 ELF32 ET_REL 构建器
+///
+/// 布局:
+///   ELF Header (52B)
+///   .text
+///   .rodata (对齐 4)
+///   .symtab (对齐 4)
+///   .strtab
+///   .shstrtab
+///   .rel.text (对齐 4)
+///   .rel.rodata (可选, 对齐 4)
+///   自定义节
+///   节头表 (对齐 4)
+fn build_elf32_rel_generic(
+    e_machine: u16,
+    ei_data: u8,
+    text: &[u8],
+    rodata: &[u8],
+    symbols: &[ElfSym],
+    relocations: &[ElfRela],
+    rodata_relocations: &[ElfRela],
+    extra_sections: &[ElfSection],
+) -> Vec<u8> {
+    let mut shstr = vec![0u8];
+    let mut strtab = vec![0u8];
+    let sec_name_off = |buf: &mut Vec<u8>, name: &str| -> u32 {
+        let off = buf.len() as u32;
+        buf.extend_from_slice(name.as_bytes());
+        buf.push(0);
+        off
+    };
+    let text_name = sec_name_off(&mut shstr, ".text");
+    let rodata_name = if rodata.is_empty() {
+        0
+    } else {
+        sec_name_off(&mut shstr, ".rodata")
+    };
+    let symtab_name = sec_name_off(&mut shstr, ".symtab");
+    let strtab_name = sec_name_off(&mut shstr, ".strtab");
+    let shstrtab_name = sec_name_off(&mut shstr, ".shstrtab");
+    let rel_text_name = sec_name_off(&mut shstr, ".rel.text");
+    let rel_rodata_name = if rodata_relocations.is_empty() {
+        0
+    } else {
+        sec_name_off(&mut shstr, ".rel.rodata")
+    };
+    let extra_names: Vec<u32> = extra_sections
+        .iter()
+        .map(|s| sec_name_off(&mut shstr, &s.name))
+        .collect();
+
+    let mut sym_name_off = vec![0u32];
+    for sym in symbols {
+        sym_name_off.push(strtab.len() as u32);
+        strtab.extend_from_slice(sym.name.as_bytes());
+        strtab.push(0);
+    }
+
+    // ELF32 symtab: 16 bytes per entry
+    let mut symtab = Vec::new();
+    symtab.extend_from_slice(&0u32.to_le_bytes());
+    symtab.push(0); // st_info
+    symtab.push(0); // st_other
+    symtab.extend_from_slice(&0u16.to_le_bytes()); // st_shndx
+    symtab.extend_from_slice(&0u32.to_le_bytes()); // st_value
+    symtab.extend_from_slice(&0u32.to_le_bytes()); // st_size
+    for (i, sym) in symbols.iter().enumerate() {
+        symtab.extend_from_slice(&sym_name_off[i + 1].to_le_bytes());
+        symtab.push((sym.bind << 4) | sym.ty);
+        symtab.push(sym.visibility);
+        symtab.extend_from_slice(&sym.section.to_le_bytes());
+        symtab.extend_from_slice(&(sym.value as u32).to_le_bytes());
+        symtab.extend_from_slice(&(sym.size as u32).to_le_bytes());
+    }
+
+    // ELF32 Rel: 8 bytes per entry (no addend)
+    let mut rel_text = Vec::new();
+    for rel in relocations {
+        rel_text.extend_from_slice(&(rel.offset as u32).to_le_bytes());
+        let info = ((rel.sym_index as u32) << 8) | (rel.rel_type as u32);
+        rel_text.extend_from_slice(&info.to_le_bytes());
+    }
+    let mut rel_rodata = Vec::new();
+    for rel in rodata_relocations {
+        rel_rodata.extend_from_slice(&(rel.offset as u32).to_le_bytes());
+        let info = ((rel.sym_index as u32) << 8) | (rel.rel_type as u32);
+        rel_rodata.extend_from_slice(&info.to_le_bytes());
+    }
+
+    let header_size = 52usize;
+    let text_off = header_size;
+    let rodata_off = align_up(text_off + text.len(), 4);
+    let mut cursor = if rodata.is_empty() {
+        rodata_off
+    } else {
+        rodata_off + rodata.len()
+    };
+    let symtab_off = align_up(cursor, 4);
+    cursor = symtab_off + symtab.len();
+    let strtab_off = cursor;
+    cursor = strtab_off + strtab.len();
+    let shstrtab_off = cursor;
+    cursor = shstrtab_off + shstr.len();
+    let rel_text_off = align_up(cursor, 4);
+    cursor = rel_text_off + rel_text.len();
+    let rel_rodata_off = if rel_rodata.is_empty() {
+        cursor
+    } else {
+        let off = align_up(cursor, 4);
+        cursor = off + rel_rodata.len();
+        off
+    };
+    let mut extra_layout: Vec<(u32, u64, &ElfSection)> = Vec::new();
+    for sec in extra_sections {
+        let off = align_up(cursor, sec.align.max(1) as usize);
+        let name = extra_names[extra_layout.len()];
+        extra_layout.push((name, off as u64, sec));
+        cursor = off + sec.data.len();
+    }
+    let shoff = align_up(cursor, 4);
+
+    let n_sections = 1 + 1
+        + if rodata.is_empty() { 0 } else { 1 }
+        + 3
+        + 1
+        + if rel_rodata.is_empty() { 0 } else { 1 }
+        + extra_sections.len();
+
+    let symtab_idx = if rodata.is_empty() { 2u32 } else { 3 };
+    let strtab_idx = symtab_idx + 1;
+    let shstrtab_idx = strtab_idx + 1;
+
+    let mut out = Vec::with_capacity(shoff + n_sections * 40);
+    // ELF32 header (52 bytes)
+    out.extend_from_slice(&ELFMAG);
+    out.push(ELFCLASS32);
+    out.push(ei_data);
+    out.push(EV_CURRENT);
+    out.push(0); // ei_osabi
+    out.extend_from_slice(&[0u8; 8]); // ei_pad
+    out.extend_from_slice(&ET_REL.to_le_bytes());
+    out.extend_from_slice(&e_machine.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    out.extend_from_slice(&0u32.to_le_bytes()); // e_entry
+    out.extend_from_slice(&0u32.to_le_bytes()); // e_phoff
+    out.extend_from_slice(&(shoff as u32).to_le_bytes()); // e_shoff
+    out.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    out.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_phnum
+    out.extend_from_slice(&40u16.to_le_bytes()); // e_shentsize
+    out.extend_from_slice(&(n_sections as u16).to_le_bytes()); // e_shnum
+    out.extend_from_slice(&(shstrtab_idx as u16).to_le_bytes()); // e_shstrndx
+
+    pad_to(&mut out, text_off);
+    out.extend_from_slice(text);
+    if !rodata.is_empty() {
+        pad_to(&mut out, rodata_off);
+        out.extend_from_slice(rodata);
+    }
+    pad_to(&mut out, symtab_off);
+    out.extend_from_slice(&symtab);
+    pad_to(&mut out, strtab_off);
+    out.extend_from_slice(&strtab);
+    pad_to(&mut out, shstrtab_off);
+    out.extend_from_slice(&shstr);
+    pad_to(&mut out, rel_text_off);
+    out.extend_from_slice(&rel_text);
+    if !rel_rodata.is_empty() {
+        pad_to(&mut out, rel_rodata_off);
+        out.extend_from_slice(&rel_rodata);
+    }
+    for (_, off, sec) in &extra_layout {
+        pad_to(&mut out, *off as usize);
+        out.extend_from_slice(&sec.data);
+    }
+    pad_to(&mut out, shoff);
+
+    let rel_text_idx = shstrtab_idx + 1;
+    let rodata_idx = if rodata.is_empty() { 0 } else { 2 };
+    let _rel_rodata_idx = if rel_rodata.is_empty() {
+        0
+    } else {
+        rel_text_idx + 1
+    };
+
+    // Section headers (40 bytes each for ELF32)
+    write_section_header32(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    write_section_header32(&mut out, text_name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
+        0, text_off as u32, text.len() as u32, 0, 0, 4, 0);
+    if !rodata.is_empty() {
+        write_section_header32(&mut out, rodata_name, SHT_PROGBITS, SHF_ALLOC,
+            0, rodata_off as u32, rodata.len() as u32, 0, 0, 4, 0);
+    }
+    write_section_header32(&mut out, symtab_name, SHT_SYMTAB, 0,
+        0, symtab_off as u32, symtab.len() as u32, strtab_idx as u32, 1, 4, 16);
+    write_section_header32(&mut out, strtab_name, SHT_STRTAB, 0,
+        0, strtab_off as u32, strtab.len() as u32, 0, 0, 1, 0);
+    write_section_header32(&mut out, shstrtab_name, SHT_STRTAB, 0,
+        0, shstrtab_off as u32, shstr.len() as u32, 0, 0, 1, 0);
+    write_section_header32(&mut out, rel_text_name, SHT_RELA, SHF_INFO_LINK,
+        0, rel_text_off as u32, rel_text.len() as u32, symtab_idx as u32, 1, 4, 8);
+    if !rel_rodata.is_empty() {
+        write_section_header32(&mut out, rel_rodata_name, SHT_RELA, SHF_INFO_LINK,
+            0, rel_rodata_off as u32, rel_rodata.len() as u32, symtab_idx, rodata_idx as u32, 4, 8);
+    }
+    for (name, off, sec) in &extra_layout {
+        write_section_header32(
+            &mut out,
+            *name,
+            sec.ty,
+            sec.flags,
+            0,
+            *off as u32,
+            sec.data.len() as u32,
+            0,
+            0,
+            sec.align.max(1) as u32,
+            0,
+        );
+    }
+    out
+}
+
+/// MIPS32 ET_REL .o (ELF32, big-endian)
+pub fn build_elf32_mips(
+    text: &[u8],
+    rodata: &[u8],
+    symbols: &[ElfSym],
+    relocations: &[ElfRela],
+    rodata_relocations: &[ElfRela],
+    extra_sections: &[ElfSection],
+) -> Vec<u8> {
+    build_elf32_rel_generic(
+        EM_MIPS,
+        ELFDATA2MSB,
+        text,
+        rodata,
+        symbols,
+        relocations,
+        rodata_relocations,
+        extra_sections,
+    )
+}
+
+/// ARM ET_REL .o (ELF32, little-endian)
+pub fn build_elf32_arm(
+    text: &[u8],
+    rodata: &[u8],
+    symbols: &[ElfSym],
+    relocations: &[ElfRela],
+    rodata_relocations: &[ElfRela],
+    extra_sections: &[ElfSection],
+) -> Vec<u8> {
+    build_elf32_rel_generic(
+        EM_ARM,
+        ELFDATA2LSB,
+        text,
+        rodata,
+        symbols,
+        relocations,
+        rodata_relocations,
+        extra_sections,
+    )
+}
+
+/// ELF32 section header (40 bytes)
+fn write_section_header32(
+    out: &mut Vec<u8>,
+    sh_name: u32,
+    sh_type: u32,
+    sh_flags: u32,
+    sh_addr: u32,
+    sh_offset: u32,
+    sh_size: u32,
+    sh_link: u32,
+    sh_info: u32,
+    sh_addralign: u32,
+    sh_entsize: u32,
+) {
+    out.extend_from_slice(&sh_name.to_le_bytes());       // 4
+    out.extend_from_slice(&sh_type.to_le_bytes());        // 4
+    out.extend_from_slice(&sh_flags.to_le_bytes());       // 4
+    out.extend_from_slice(&sh_addr.to_le_bytes());        // 4
+    out.extend_from_slice(&sh_offset.to_le_bytes());      // 4
+    out.extend_from_slice(&sh_size.to_le_bytes());        // 4
+    out.extend_from_slice(&sh_link.to_le_bytes());        // 4
+    out.extend_from_slice(&sh_info.to_le_bytes());        // 4
+    out.extend_from_slice(&sh_addralign.to_le_bytes());   // 4
+    out.extend_from_slice(&sh_entsize.to_le_bytes());     // 4
+    // Total: 40 bytes
 }

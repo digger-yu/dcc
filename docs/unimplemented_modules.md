@@ -160,15 +160,15 @@ SIMD 指令子集完整实装：
 
 ### 1.5 MIPS / ARM / MIPS64
 
-🔴 **完全没有后端**（`Arch::has_backend() == false`）：
+🟢 **后端已实装**（`Arch::has_backend() == true`）：
 
-| Triple | 现状 | 影响 |
+| Triple | 现状 | 备注 |
 |--------|------|------|
-| `mips-linux-gnu` | parse-only | 内核 cross-build 探测、bootloader 工具链不可用 |
-| `mips64-linux-gnuabi64` | parse-only | 内核 cross-build 探测、UEFI 不可用 |
-| `arm-linux-gnueabihf` / `arm-linux-gnueabi` | parse-only | 嵌入式 / 内核 cross-build 不可用 |
+| `mips-linux-gnu` | 完整后端 (ELF32, big-endian) | MIPS32 O32 ABI |
+| `mips64-linux-gnuabi64` | 完整后端 (ELF64, big-endian) | MIPS64 N64 ABI，复用 mips.rs |
+| `arm-linux-gnueabihf` / `arm-linux-gnueabi` | 完整后端 (ELF32, little-endian) | ARM AAPCS |
 
-`codegen::emit()` 在这些 arch 上 `panic!("{}", a.backend_missing_msg())`。
+`codegen::emit()` 支持这三个架构，可产出 ET_REL `.o` 与 `-S` 汇编。
 
 ---
 
@@ -597,9 +597,7 @@ M19 关键改动:
 
 ### 9.2 交叉编译
 
-✅ `--target=x86_64/aarch64/riscv64` 有完整后端
-
-🟠 parse-only：`mips` / `mips64` / `arm`（及 `armv7`）只解析 triple，无 codegen
+✅ `--target=x86_64/aarch64/riscv64/mips/mips64/arm` 有完整后端
 
 🔴 缺：
 

@@ -100,8 +100,7 @@ mod tests {
 
     #[test]
     fn mips_parse_only_4byte_ptr_big_endian_aapcs() {
-        // mips 仅有 triple 解析: arch 字段可解析,resolve() 给出正确几何,
-        // 但 has_backend() 必须为 false,emit() 会 panic。
+        // mips 有 triple 解析和 codegen 后端
         let t = Target::resolve(&trip(Arch::Mips, Os::Linux, Abi::Gnu));
         assert_eq!(t.arch, Arch::Mips);
         assert_eq!(t.ptr_size, 4);
@@ -110,8 +109,7 @@ mod tests {
         assert_eq!(t.llong_size, 8);
         assert_eq!(t.endian, Endian::Big);
         assert_eq!(t.callee_save, CalleeSave::AAPCS);
-        assert!(!t.arch.has_backend());
-        assert!(t.arch.backend_missing_msg().contains("parse-only"));
+        assert!(t.arch.has_backend());
     }
 
     #[test]
@@ -122,7 +120,7 @@ mod tests {
         assert_eq!(t.long_size, 8);
         assert_eq!(t.endian, Endian::Big);
         assert_eq!(t.callee_save, CalleeSave::AAPCS);
-        assert!(!t.arch.has_backend());
+        assert!(t.arch.has_backend());
     }
 
     #[test]
@@ -135,8 +133,7 @@ mod tests {
         assert_eq!(t.llong_size, 8);
         assert_eq!(t.endian, Endian::Little);
         assert_eq!(t.callee_save, CalleeSave::AAPCS);
-        assert!(!t.arch.has_backend());
-        assert!(t.arch.backend_missing_msg().contains("parse-only"));
+        assert!(t.arch.has_backend());
     }
 
     #[test]

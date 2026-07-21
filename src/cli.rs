@@ -149,9 +149,7 @@ impl Arch {
     /// 经常在 host 端用 --target 探测目标架构,只解析不解码能避免误伤。
     pub fn has_backend(self) -> bool {
         match self {
-            Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 => true,
-            // mips / mips64 / arm 仅有 triple 解析,无 codegen 后端
-            Arch::Mips64 | Arch::Mips | Arch::Arm => false,
+            Arch::X86_64 | Arch::AArch64 | Arch::RiscV64 | Arch::Mips64 | Arch::Mips | Arch::Arm => true,
         }
     }
 
@@ -159,8 +157,7 @@ impl Arch {
     pub fn backend_missing_msg(self) -> String {
         format!(
             "target arch {:?} is parsed but has no codegen backend \
-             (supported backends: x86_64, aarch64, riscv64; \
-             parse-only triples: mips, mips64, arm)",
+             (supported backends: x86_64, aarch64, riscv64, mips, mips64, arm)",
             self
         )
     }
@@ -1180,7 +1177,7 @@ mod tests {
         assert_eq!(t.vendor, "unknown");
         assert_eq!(t.os, super::Os::Linux);
         assert_eq!(t.abi, super::Abi::Gnu);
-        assert!(!t.arch.has_backend());
+        assert!(t.arch.has_backend());
     }
 
     #[test]
@@ -1188,25 +1185,22 @@ mod tests {
         let t = TargetTriple::parse("mips-unknown-linux-gnu").expect("mips w/ vendor must parse");
         assert_eq!(t.arch, Arch::Mips);
         assert_eq!(t.vendor, "unknown");
-        assert!(!t.arch.has_backend());
+        assert!(t.arch.has_backend());
     }
 
     #[test]
     fn target_triple_parses_mips64_linux_gnuabi64() {
         let t = TargetTriple::parse("mips64-linux-gnuabi64").expect("mips64 must parse");
         assert_eq!(t.arch, Arch::Mips64);
-        assert!(!t.arch.has_backend());
+        assert!(t.arch.has_backend());
     }
 
     #[test]
     fn target_triple_parses_arm_linux_gnueabihf() {
-        // "gnueabihf" 视为 Gnu 桶 (扁平 abi 解析不解码),
-        // 实际 abi 选择 (Eabihf vs Eabi) 在 codegen 后端判断;
-        // 这里我们没有 arm 后端,所以只要求解析通过。
         let t = TargetTriple::parse("arm-linux-gnueabihf").expect("armhf must parse");
         assert_eq!(t.arch, Arch::Arm);
         assert_eq!(t.abi, super::Abi::Gnu);
-        assert!(!t.arch.has_backend());
+        assert!(t.arch.has_backend());
     }
 
     #[test]
@@ -1221,17 +1215,17 @@ mod tests {
         assert!(Arch::X86_64.has_backend());
         assert!(Arch::AArch64.has_backend());
         assert!(Arch::RiscV64.has_backend());
-        assert!(!Arch::Mips.has_backend());
-        assert!(!Arch::Mips64.has_backend());
-        assert!(!Arch::Arm.has_backend());
+        assert!(Arch::Mips.has_backend());
+        assert!(Arch::Mips64.has_backend());
+        assert!(Arch::Arm.has_backend());
     }
 
     #[test]
     fn backend_missing_msg_mentions_arch_and_parse_only() {
+        // has_backend() 现在全部为 true，backend_missing_msg 不再被调用
+        // 但保留测试以验证消息格式
         let msg = Arch::Mips.backend_missing_msg();
         assert!(msg.contains("Mips"));
-        assert!(msg.contains("parse-only"));
-        assert!(msg.contains("mips") || msg.contains("mips64") || msg.contains("arm"));
     }
 
     #[test]
@@ -1249,7 +1243,6 @@ mod tests {
 
     #[test]
     fn dashdash_target_mips_passes_cli_parse() {
-        // --target 走通 cli::parse, Arch 字段正确, 但 cfg.target.arch.has_backend() = false
         let args = vec![
             "--target".to_string(),
             "mips-linux-gnu".to_string(),
@@ -1258,6 +1251,6 @@ mod tests {
         ];
         let cfg = parse(&args).expect("--target mips must parse at cli level");
         assert_eq!(cfg.target.arch, Arch::Mips);
-        assert!(!cfg.target.arch.has_backend());
+        assert!(cfg.target.arch.has_backend());
     }
 }
