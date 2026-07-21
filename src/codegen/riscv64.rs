@@ -1314,6 +1314,71 @@ impl Riscv64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// FSQRT.D fd, fs1: 双精度平方根, funct7=0101101
+    fn emit_fsqrt_d(&mut self, fd: u8, fs1: u8) {
+        let insn = (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0101101 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMIN.D fd, fs1, fs2: 双精度最小值, funct7=0010101, funct3=000
+    fn emit_fmin_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b000 << 12
+            | (fd as u32) << 7
+            | 0b0010101 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FMAX.D fd, fs1, fs2: 双精度最大值, funct7=0010101, funct3=001
+    fn emit_fmax_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b001 << 12
+            | (fd as u32) << 7
+            | 0b0010101 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FEQ.D rd, fs1, fs2: 双精度相等比较, funct7=1010001, funct3=010
+    fn emit_feq_d(&mut self, rd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b010 << 12
+            | (rd as u32) << 7
+            | 0b1010001 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FLT.D rd, fs1, fs2: 双精度小于比较, funct7=1010001, funct3=001
+    fn emit_flt_d(&mut self, rd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b001 << 12
+            | (rd as u32) << 7
+            | 0b1010001 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FLE.D rd, fs1, fs2: 双精度小于等于比较, funct7=1010001, funct3=000
+    fn emit_fle_d(&mut self, rd: u8, fs1: u8, fs2: u8) {
+        let insn = (fs2 as u32) << 20
+            | (fs1 as u32) << 15
+            | 0b000 << 12
+            | (rd as u32) << 7
+            | 0b1010001 << 25
+            | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
     /// FCVT.D.W fd, rs1: 整数转双精度
     fn emit_fcvt_d_w(&mut self, fd: u8, rs1: u8) {
         let insn = (rs1 as u32) << 15
@@ -1530,6 +1595,26 @@ impl Riscv64Codegen {
         let insn = (csr as u32) << 20
             | ((uimm as u32) & 0x1f) << 15
             | 0b101 << 12
+            | (rd as u32) << 7
+            | 0x73;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// CSRRSI rd, csr, uimm: 立即数原子读并置位 CSR
+    fn emit_csrrsi(&mut self, rd: u8, csr: u16, uimm: u8) {
+        let insn = (csr as u32) << 20
+            | ((uimm as u32) & 0x1f) << 15
+            | 0b110 << 12
+            | (rd as u32) << 7
+            | 0x73;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// CSRRCI rd, csr, uimm: 立即数原子读并清位 CSR
+    fn emit_csrrci(&mut self, rd: u8, csr: u16, uimm: u8) {
+        let insn = (csr as u32) << 20
+            | ((uimm as u32) & 0x1f) << 15
+            | 0b111 << 12
             | (rd as u32) << 7
             | 0x73;
         self.emit(&insn.to_le_bytes());
@@ -1934,5 +2019,70 @@ mod tests {
         assert!(code.len() >= 4);
         let insn = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
         assert_eq!(insn, 0x30200073, "MRET encoding: 0x30200073");
+    }
+
+    // M8: Zicsr 完整 CSR 指令集测试
+    #[test]
+    fn riscv64_zicsr_full() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // CSRRSI x10, mstatus(0x300), 0x1f
+        cg.emit_csrrsi(10, 0x300, 0x1f);
+        // CSRRCI x11, mstatus(0x300), 0x0f
+        cg.emit_csrrci(11, 0x300, 0x0f);
+        let code = &cg.code;
+        assert!(code.len() >= 8, "expected 8 bytes for 2 CSR instructions");
+        let insn1 = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        let insn2 = u32::from_le_bytes([code[4], code[5], code[6], code[7]]);
+        // CSRRSI: funct3=110, opcode=0x73
+        assert_eq!((insn1 & 0x7000) >> 12, 0b110, "CSRRSI funct3=110");
+        assert_eq!(insn1 & 0x7f, 0x73, "CSRRSI opcode=0x73");
+        // CSRRCI: funct3=111, opcode=0x73
+        assert_eq!((insn2 & 0x7000) >> 12, 0b111, "CSRRCI funct3=111");
+        assert_eq!(insn2 & 0x7f, 0x73, "CSRRCI opcode=0x73");
+    }
+
+    // M8: D 扩展完整指令集测试
+    #[test]
+    fn riscv64_d_extension_full() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // FSQRT.D f10, f11
+        cg.emit_fsqrt_d(10, 11);
+        // FMIN.D f12, f13, f14
+        cg.emit_fmin_d(12, 13, 14);
+        // FMAX.D f15, f16, f17
+        cg.emit_fmax_d(15, 16, 17);
+        // FEQ.D x10, f11, f12
+        cg.emit_feq_d(10, 11, 12);
+        // FLT.D x13, f14, f15
+        cg.emit_flt_d(13, 14, 15);
+        // FLE.D x16, f17, f18
+        cg.emit_fle_d(16, 17, 18);
+        let code = &cg.code;
+        assert!(code.len() >= 24, "expected 24 bytes for 6 D-extension instructions");
+        // FSQRT.D: funct7=0101101
+        let insn_sqrt = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        assert_eq!((insn_sqrt >> 25) & 0x7f, 0b0101101, "FSQRT.D funct7=0101101");
+        // FMIN.D: funct7=0010101, funct3=000
+        let insn_min = u32::from_le_bytes([code[4], code[5], code[6], code[7]]);
+        assert_eq!((insn_min >> 25) & 0x7f, 0b0010101, "FMIN.D funct7=0010101");
+        assert_eq!((insn_min >> 12) & 0x7, 0b000, "FMIN.D funct3=000");
+        // FMAX.D: funct7=0010101, funct3=001
+        let insn_max = u32::from_le_bytes([code[8], code[9], code[10], code[11]]);
+        assert_eq!((insn_max >> 25) & 0x7f, 0b0010101, "FMAX.D funct7=0010101");
+        assert_eq!((insn_max >> 12) & 0x7, 0b001, "FMAX.D funct3=001");
+        // FEQ.D: funct7=1010001, funct3=010
+        let insn_eq = u32::from_le_bytes([code[12], code[13], code[14], code[15]]);
+        assert_eq!((insn_eq >> 25) & 0x7f, 0b1010001, "FEQ.D funct7=1010001");
+        assert_eq!((insn_eq >> 12) & 0x7, 0b010, "FEQ.D funct3=010");
+        // FLT.D: funct7=1010001, funct3=001
+        let insn_lt = u32::from_le_bytes([code[16], code[17], code[18], code[19]]);
+        assert_eq!((insn_lt >> 25) & 0x7f, 0b1010001, "FLT.D funct7=1010001");
+        assert_eq!((insn_lt >> 12) & 0x7, 0b001, "FLT.D funct3=001");
+        // FLE.D: funct7=1010001, funct3=000
+        let insn_le = u32::from_le_bytes([code[20], code[21], code[22], code[23]]);
+        assert_eq!((insn_le >> 25) & 0x7f, 0b1010001, "FLE.D funct7=1010001");
+        assert_eq!((insn_le >> 12) & 0x7, 0b000, "FLE.D funct3=000");
     }
 }
