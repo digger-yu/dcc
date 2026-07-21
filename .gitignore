@@ -20,7 +20,6 @@ Thumbs.db
 # DCC artifacts
 bin/
 *.o
-*.s
 *.exe
 a.out
 core
@@ -31,6 +30,12 @@ control
 call
 fib
 bad
+
+# Test fixtures (.c files under tests/fixtures/ are tracked, but inline
+# `.s` asm fixtures for snapshot tests should also be tracked).
+# 仅排除编译产物 .s；tests/fixtures 下的 .s 用 `!tests/fixtures/**/*.s` 重新纳入
+*.s
+!tests/fixtures/**/*.s
 
 # Temp scripts / artifacts
 _*.py

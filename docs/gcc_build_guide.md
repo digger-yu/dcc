@@ -2,7 +2,8 @@
 
 > 最终目标仍是 Linux 内核；短期用 GCC 树中的**纯 C**子集（`libiberty`、
 > `fixincludes` 等）暴露 dcc 与现代 glibc/GNU C 的差距。
-> 最后更新：2026-07-16。
+> 最后更新：2026-07-21。
+> 调试环境：本地 Ubuntu (已安装, 磁盘充足), 不再依赖远端 SSH.
 
 ## 范围说明
 
@@ -13,9 +14,9 @@
 | 扩展子集 | `fixincludes/*.c`（fixinc 工具链，纯 C） |
 | 非目标（现阶段） | 完整 GCC bootstrap；GCC 主体为 **C++**，dcc 无 C++ 前端 |
 | `libdecnumber` | 源文件为 **include 单元**，须按 DECPMAX 宏组合，单文件 `-c` 跳过 |
-| 远程 | `ssh ds@192.168.148.128`，源码稀疏克隆于 `~/gcc-src` |
+| 调试环境 | 本地 Ubuntu, 磁盘充足, `~/gcc-src` 稀疏克隆在本地 |
 
-## 远程探测
+## 本地探测
 
 ```bash
 # 稀疏克隆（约数十 MB，勿拉全树）

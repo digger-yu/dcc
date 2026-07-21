@@ -63,8 +63,6 @@ pub fn compile_cpp(
     let preprocessed = pp_out.text;
     let preprocessed_bytes = preprocessed.clone().into_bytes();
 
-    // M18 debug: 写到 target/debug-cpp-preproc.c
-    let _ = fs::write(r"D:\git\dcc\target\debug-cpp-preproc.c", &preprocessed);
     let mut parser = CppParser::new(&preprocessed_bytes, file);
     let decls = parser.parse_top_level()
         .map_err(|e| CppError::Diagnostics(vec![e.to_diag(file)]))?;
@@ -72,7 +70,7 @@ pub fn compile_cpp(
     lower.lower_decls(&decls);
     let c_src = lower.finish();
 
-    // 写到临时 .c 文件 (M18 debug: 保留一份到 /tmp/dcc-cpp-debug.c 方便看)
+    // 写到临时 .c 文件, 调 dcc 编译后删除
     let tmp = std::env::temp_dir().join(format!(
         "dcc-cpp-{}-{}.c",
         std::process::id(),
@@ -90,8 +88,7 @@ pub fn compile_cpp(
 
     let out = cmd.output()
         .map_err(|e| CppError::Io(std::io::Error::new(e.kind(), format!("spawn dcc: {}", e))))?;
-    // M18 debug: 保留 tmp 文件不删, 方便看 C 输出 (后续 commit 时去掉)
-    // let _ = fs::remove_file(&tmp);
+    let _ = fs::remove_file(&tmp);
     if !out.status.success() {
         let mut span = crate::diagnostics::Span::point(file, 0, 0);
         span.file = file.to_string();

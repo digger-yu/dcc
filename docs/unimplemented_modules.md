@@ -1,13 +1,15 @@
 # DCC 未实现模块综合清单
 
 > 最后更新：2026-07-21
-> 范围：`src/` 全量源码 + `docs/` 现有文档 + 远程 `192.168.148.128` 验收脚本
+> 范围：`src/` 全量源码 + `docs/` 现有文档
 > 目的：把"代码里能看到、但还没做完整 / 还没真做 / 仍然走桩"的模块统一记录，
 > 方便后续 M12+ 排期，避免"忘了还有这块没补"。
 > 维护约定：每完成一个 M 里程碑后, 在对应节加 `🟢 已实装` 标记 + 简述
 > 改动要点 (含回归测试), M 之前标记为 `🟠 简化` 或 `🔴 完全没有`。
-> 远程相关脚本 (`remote_*` / `sync_remote_*` / `192.168.148.128`) 不进
-> 入此清单 (本机调试期间不引用, 见用户偏好).
+> 调试环境：当前在 Ubuntu 本地调试 (已安装, 磁盘充足),
+> 一切以本地 `cargo test` / `cargo build` 为准.
+> 同步: 本节 8.2 状态以 `tests/fixtures/errors/*.stderr.snap` 与
+> `tests/errors.rs::diag_*` 实际产物为准。
 
 ---
 
@@ -15,7 +17,7 @@
 
 | 状态 | 含义 | 数量（粗略） |
 |------|------|--------------|
-| 🟢 已实装并有测试 | 远程 PASS 或 `cargo test` 通过 | 见各里程碑 |
+| 🟢 已实装并有测试 | `cargo test` 通过 | 见各里程碑 |
 | 🟡 已解析/已降级，行为简化 | 走 no-op / placeholder / 不严格 C 语义 | ~15 |
 | 🟠 桩已交付，运行时未接 | 框架代码在但实际不工作 | ~10 |
 | 🔴 完全没有 | 解析或后端未实现 | ~20 |
@@ -73,7 +75,7 @@ TSX 4 条（xbegin/xend/xabort/xtest）；AMX 9 条（ldtilecfg/sttilecfg/
 tilezero/tileloadd/tilestored + 4 条 tdp*）；AVX-VNNI 3 条（vpdpbusd/
 vpdpbssd/vpdpwssd）；SSE3/SSSE3/SSE4.1/SSE4.2 整数 SIMD 30+ 条；
 AVX/AVX2 浮点 60+ 条；`asm_avx_aes_fma_tsx_compiles_without_nop_fallback`
-远程 PASS。
+本地 `cargo test --test integration` PASS。
 
 ### 1.2 x86_64 codegen 表达式层
 
@@ -336,7 +338,7 @@ label/switch 的函数自动降级回原 AST 路径。
 
 **测试**：`tests/fixtures/m16_*.c` 7 个（ssa_ir / strength_reduction /
 cross_function_dce / sccp / loop_opt / tco / function_attr），
-`tests/integration.rs` 对应 `m16_*` 函数在 Linux 远程 `cargo test m16_`
+`tests/integration.rs` 对应 `m16_*` 函数在本地 `cargo test m16_`
 验证。详见 `docs/architecture.md` M16 章节。
 
 ---
@@ -472,24 +474,46 @@ M19 关键改动:
 > 命名风格告警（这些常量严格沿用 DWARF v4 规范原名,
 > 改写为 ALL_CAPS 会丢失与规范章节对应）。`cargo build`
 > 与 `cargo build --tests` 0 警告。
+>
+> `src/cpp/driver.rs` 移除硬编码 `D:\git\dcc\target\debug-cpp-preproc.c`
+> debug 写文件（原 M18 调试期产物，本机调试期间已不再需要），并
+> 恢复调 dcc 编译后 `fs::remove_file(&tmp)` 清理临时 `.c` 的行为，
+> 避免在 `/tmp` 累积 `dcc-cpp-*.c`。
 
 ### 8.2 诊断（`src/diagnostics.rs` + `tests/errors.rs`）
 
 ✅ E0001-E0013 / E0100-E0102 / E0200-E0209 / E0300 / E1001-E1010 / W0001 / W0200
 
-🟠 未覆盖 snapshot（见 `docs/diagnostics.md`）：
+🟢 已覆盖 snapshot（2026-07-21 更新）：
 
-- E0101 (cannot write)
-- E0102 (cannot invoke assembler)
-- E0300 (SSE 与浮点冲突)
-- E1001-E1010 中部分 (E1006 等部分代码未在 errors 目录)
+- E0101 (cannot write) — `e0101.stderr.snap`（写不可写路径触发）
+- E0102 (cannot invoke assembler) — `e0102.stderr.snap`（非法指令 `as` 失败）
+- E0300 (SSE 与浮点冲突) — `e0300.stderr.snap`（`-mno-sse` + 浮点字面量）
+- E1001-E1010 全部 — `e1001.stderr.snap` … `e1010.stderr.snap`
+- E0205/E0209（Unix 权限拒绝）— `e0205.stderr.snap` / `e0209.stderr.snap`
+- E0208 UTF-8 / `#embed` 找不到 — `e0208_utf8.stderr.snap` / `e0208_embed.stderr.snap`
+- W0001 隐式 int — `w0001.stderr.snap`
+- `diagnostic_format.stderr.snap`（E0004 canonical 格式锁定）
 
-🔴 缺：
+🟢 诊断选项（2026-07-21 全部实装）：
 
-- `-fdiagnostics-color=always/never/auto`（始终按 TTY 判定）
-- `-fdiagnostics-format=clang/msvc/vi`
-- `-fdiagnostics-show-template-tree`
-- SARIF 输出 (`-fdiagnostics-format=sarif`)
+- `-fdiagnostics-color=always/never/auto`（auto 走 `IsTerminal` 判定）
+- `-fdiagnostics-format=github/clang/msvc/vi/sarif`（sarif 写 stderr JSON 2.1.0）
+- `-fdiagnostics-show-template-tree` / `-fno-diagnostics-show-template-tree`
+
+回归覆盖（`tests/errors.rs::diag_*`）：
+
+| 测试 | 覆盖点 |
+|------|--------|
+| `diag_color_never_strips_ansi` | never 模式无 `\x1b[` |
+| `diag_color_always_emits_ansi` | always 模式有 `\x1b[` |
+| `diag_color_rejects_unknown_value` | 非法值 → `dcc: error:` + exit 2 |
+| `diag_format_clang_strips_brackets` | clang 模式首行 `error: …` |
+| `diag_format_msvc_uses_file_line_col` | msvc `file(line,col): error Exxxx:` |
+| `diag_format_vi_is_single_line` | vi 单行 |
+| `diag_format_sarif_emits_json` | sarif `version: 2.1.0` + `name: dcc` + `ruleId` |
+| `diag_format_rejects_unknown_value` | 非法 format 值 → `dcc: error:` + exit 2 |
+| `diag_template_tree_runs_without_panic` | 开关被接受且不破坏现有诊断 |
 
 ### 8.3 Sanitizer / LTO / Profiling
 
@@ -572,10 +596,10 @@ M19 关键改动:
 🟠 / 🔴：
 
 - GCC bootstrap：M9 解锁 dcc++ 端到端；M10+ 增强 SFINAE/partial spec/concept/coroutine/module
-- cc1/cc1plus 编译：远端磁盘 2.5G 不足（GCC 源 ~1G + 构建 ~5G）
-- libiberty：远程 125/0/4（125 PASS / 0 FAIL / 4 SKIP）
+- cc1/cc1plus 编译：GCC 源 ~1G + 构建 ~5G, 需本地大磁盘（已具备, 后续 M 推进）
+- libiberty：本地 125/0/4（125 PASS / 0 FAIL / 4 SKIP）
 - libdecnumber：通过 `tools/libdecnumber_combined.c` 组合 TU
-- fixincludes：远程 6/0/1
+- fixincludes：本地 6/0/1
 - binutils 工具链：未尝试（strip / objdump / objcopy / ld 由 host binutils 提供）
 
 ---
@@ -662,7 +686,7 @@ M19 关键改动:
 1. ✅ **x86_64 mini-asm 补全**（高）— M12 已完成：消除 nop 警告，覆盖内核 paravirt / 启动代码。
 2. **KASAN/UBSAN 指令级插桩**（高）：把 sanitizer 从桩升级为真功能。
 3. **C++ 模板单态化**（高）：让 `std::vector<int>` / `std::map<K,V>` 真正工作。
-4. **完整 GCC bootstrap**（中）：与远端磁盘扩容绑定。
+4. **完整 GCC bootstrap**（中）：本地磁盘已具备, 与后续 dcc++ SFINAE / 协程 / module 推进同步.
 5. **AArch64 EH_FRAME / ORC / DWARF**（中）：让 aarch64 后端在生产环境可调试。
 6. **MIPS / ARM 后端**（中）：解锁更多交叉编译场景。
 7. **优化 pass（强度削减 / 调度 / 别名分析）**（低）：性能优化，dcc 本身定位 suckless。
@@ -683,13 +707,22 @@ M19 关键改动:
 - `docs/gcc_build_guide.md` — GCC bootstrap 指南
 - `docs/kernel_build_guide.md` — Linux 内核编译指南
 
-## 附录 B：远程验收脚本
+## 附录 B：本地验收脚本
 
-- `scripts/sync_remote_build.sh` — 远程 cargo test + feature + prepare0
-- `scripts/remote_gcc_c_probe.sh` — libiberty + fixincludes + 链接
-- `scripts/kernel_full_check.sh` — modpost / QEMU / vmlinux
-- `scripts/prepare0_full.sh` — 内核 prepare0 全链路
-- `scripts/vmlinux_regress.sh` — vmlinux 工具链（pahole/objtool）
-- `scripts/objtool_regress.sh` — objtool 单 TU
-- `scripts/pahole_regress.sh` — pahole 单 TU
-- `scripts/modpost_link.sh` — modpost 链接
+| 脚本 | 用途 |
+|------|------|
+| `scripts/test_all.sh` | 本地全量 cargo test 一键 |
+| `scripts/ci-trigger.sh` | CI 触发 |
+| `scripts/kernel_full_check.sh` | modpost / QEMU / vmlinux 编排 |
+| `scripts/kernel_full_build.sh` | 内核全树构建 |
+| `scripts/kernel_build_smoke.sh` / `kernel_phase_b_check.sh` | smoke / phase B |
+| `scripts/prepare0_check.sh` / `prepare0_full.sh` | prepare0 窄/全链路 |
+| `scripts/modpost_link.sh` | modpost 链接 + fixdep |
+| `scripts/pahole_regress.sh` / `objtool_regress.sh` / `vmlinux_regress.sh` | 回归 |
+| `scripts/qemu_boot_matrix.sh` | QEMU 启动矩阵 |
+| `scripts/test_kernel_features.sh` | 内核特性示例 |
+| `scripts/build_fixdep_dcc.sh` / `gen_elfconfig_h.sh` | 工具链辅助 |
+| `scripts/bench.sh` / `bench_phase_e.sh` | 性能与阶段 E 基准 |
+| `scripts/dcc-host-wrapper.sh` | host 链接器包装 |
+| `scripts/update_error_snapshots.sh` | 刷新 E1xxx snapshot |
+| `scripts/archive/` | 历史调试与一次性探针脚本 |

@@ -69,9 +69,9 @@ dcc -flto -c -o b.o b.c
 dcc -r -flto -o merged.o a.o b.o
 ```
 
-**Windows 注意**：`*.sh` 必须为 LF 行尾。若远程报 `pipefail: invalid option`，
-在本地执行 `git ls-files --eol scripts/*.sh` 确认工作区为 `w/lf`，再重新同步。
-scp 后可在远程执行 `perl -pi -e 's/\x0d//g' scripts/*.sh` 去除 CR。
+**Windows 注意**：`*.sh` 必须为 LF 行尾。若在 Windows 编辑后 `pipefail: invalid option`，
+在本地执行 `git ls-files --eol scripts/*.sh` 确认工作区为 `w/lf`，再重新保存。
+Linux 环境下 LF 是默认, 不需要此步骤.
 
 **prepare0 豁免**：`make prepare0 CC=dcc` 会触发 Kbuild 重建宿主工具（kconfig/conf 等），
 dcc 宿主 C 尚未覆盖。请用 `scripts/prepare0_full.sh` 验收等价窄目标 + Rust fixdep + modpost。
@@ -85,7 +85,7 @@ Linux 6.6 x86_64 在 `prepare0` 中会编译 `arch/x86/kernel/asm-offsets.c` 生
 `asm-offsets.s`（供后续提取结构体偏移常量）。
 
 ```bash
-# 远程（内核树 ~/linux-6.6，dcc ~/dcc-agent-linux66/target/release/dcc）
+# 本地 (内核树 ~/linux-6.6, dcc ~/dcc/target/release/dcc)
 python3 scripts/archive/test_asm_offsets.py
 
 # 或手动：读取 .asm-offsets.s.cmd 中的 gcc 命令，将 gcc 替换为 dcc 后执行
@@ -375,7 +375,7 @@ dcc -v input.c -o output.o
 ### 6.4 使用 GDB 调试 DCC
 
 ```bash
-# 在远程 Linux 上编译 debug 版本
+# 在本地 Linux 上编译 debug 版本
 cargo build  # debug 模式
 
 # 启动 GDB

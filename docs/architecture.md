@@ -279,7 +279,7 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 **明确不做**：AArch64 / RISC-V 完整后端 ELF 输出（沿用 host 链接器）
 之外的非 x86-64 后端。
 
-远程验收：`scripts/sync_remote_build.sh`；`cargo test link::`（50 用例）
+本地验收：`cargo test link::`（50 用例）
 + `cargo test lto::`（7 用例）。
 
 ## C++ 前端 M7（`src/cpp/`）
@@ -361,7 +361,7 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 
 **M9 不在范围**：SFINAE / partial specialization（`partial_sort`）/
 完整 concept 求值 / 协程挂起恢复 / module 分区 / 完整 GCC cc1/cc1plus
-bootstrap（受限于 `dcc` 自身 C++ 库支持度与远端磁盘空间）。
+bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间）。
 
 **M10+ 范围**（新增，已在 `src/cpp/m10.rs` 中实现）：
 - **SFINAE**（`substitution failure is not an error`）：
@@ -409,14 +409,14 @@ bootstrap（受限于 `dcc` 自身 C++ 库支持度与远端磁盘空间）。
   - `InitList::emit_c()` 生成 `{ ptr, count, capacity }` 结构
 
 **M10+ 设计原则**：所有特性均降级为 dcc C 后端可直接消费的 C 代码；
-对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 远端
+对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 本地
 磁盘空间），但 M10+ 显著扩展了能直接编译的 C++ 模式范围。
 
 **限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M9 阶段已可端到端运行
 简单 C++ 源（含 class / 成员函数 / 构造初始化列表 / 局部类变量 /
 方法调用改写）；GCC 完整 bootstrap 仍部分受阻（M9 已解锁 C++ 端到端，
-cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 远端可用磁盘 2.5G 不够装 GCC
-源码约 1GB + 构建临时文件约 5GB）；原因见
+cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 本地磁盘需要为 GCC
+源码约 1GB + 构建临时文件约 5GB 留足空间）；原因见
 `docs/missing_features.md` 的 C++ 前端状态表。
 
 ## x86-64 后端 ABI 约定
@@ -442,8 +442,7 @@ cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 远端可用磁盘 2.5G 不够装
 - **线程模型**：`std::thread::scope` + 原子 job 索引；worker 数 =
   `available_parallelism().min(n_funcs)`；AST 聚合类型已 `Arc` 化以跨线程共享
   `Program`。
-- **回归**：`parallel_codegen_o2_multi_function` 断言并行/串行 `.o` 字节一致；
-  `remote_feature_check` **parallel_codegen**。
+- **回归**：`parallel_codegen_o2_multi_function` 断言并行/串行 `.o` 字节一致。
 
 ## GNU 控制流扩展
 
@@ -506,7 +505,7 @@ M11.3 扩展 — 内联 asm 约束全家族：
   扩展（之前 rax 误显示为 r8，r8 误显示为 rax）。
 - **测试**：`test_asm_constraints_ext.c` 10 个用例覆盖
   i / p / g / X / 0 / & / rm / x / %= / offsetof 约束，
-  远程 Linux 全 10/10 PASS。
+  本地 Linux 全 10/10 PASS。
 
 Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 
@@ -589,7 +588,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     jmp、cpuid/rdtsc/wbinvd/invd、cli/sti/cld/clc/hlt、
     stac/clac、swapgs、fxsave、imm64→mem、prefetch、int3、
     pause、ud2、syscall、endbr64；`asm_paravirt_boot_compiles_-
-    without_nop_fallback` 在远程 192.168.148.128 上 PASS。
+    without_nop_fallback` 在本地 Linux 上 PASS。
   - **降级**：未识别指令仍走 `eprintln! warning` + 单字节 0x90
     (`nop`) 占位；带行号和源位置信息以方便追踪（避免静默 nop）。
 - **M13 SIMD 指令子集补全（高）** — 完整实装 x86_64 SIMD 指令子集，
@@ -660,8 +659,8 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     SSE3/SSSE3/SSE4.1/SSE4.2、TSX、AVX 转换、AVX-512 zmm 编码、
     256 位 vperm2f128/vinsertf128/vextractf128 等；每个函数只
     测试一类指令子集（失败易定位）。
-    `asm_avx_aes_fma_tsx_compiles_without_nop_fallback` 在远程
-    192.168.148.128 上 PASS。
+    `asm_avx_aes_fma_tsx_compiles_without_nop_fallback` 在本地
+    Linux 上 PASS。
   - **已知简化**：
     - AVX-512 mask (`aaa`) / broadcast (`b`) / ER (`RC`/`RM`/`RD`/`RU`)
       路由字段目前未区分（默认 000），适用于非掩码 / 非广播场景；
@@ -680,14 +679,14 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     `l - trunc(l/r) * r`，零 libc 依赖；`ir.rs::FLOAT_BINOPS` 同步加入
     `BinOp::Mod`；`call_label("fmodf/fmod")` 路径删除（dcc 无内置链接器，
     非 `-c` 模式无法解析外部符号，新代码不再误用）。`test_float_mod.c`
-    6 个用例（float/double 基本、负数、整除、嵌套）远程 PASS。
+    6 个用例（float/double 基本、负数、整除、嵌套）本地 PASS。
   - **int128 逻辑 `&&`/`||` 正确化**：`Expr::Binop` 优先在
     `BinOp::AndAnd/OrOr` 处对左/右操作数在 `gen_expr_decay` 后追加
     `or rdx, dst`（REX.W/REX.R 处理 dst≥8），合并 `rdx:dst`（高:低）后
     再 `test rax, rax`；避免「高 1 低 0」被旧实现误判为 0 的 bug。
     `gen_int128_binop` 中 `BinOp::AndAnd | OrOr => unreachable!` 路径
     不再被触发。`test_int128_logical.c` 5 个用例（`(__int128)(1<<64)`、
-    零值、short-circuit）远程 PASS。
+    零值、short-circuit）本地 PASS。
   - **asm `x` 约束 XMM early-clobber**：GP 与 XMM 共用 0..15 编号空间，
     旧实现只建一个 `input_reg_set` 判定冲突，XMM 路径直接 `continue`
     跳过。现在 XMM 输入加入独立的 `input_xmm_set`，`=&x` early-clobber
@@ -706,7 +705,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     `[rip+disp32]` 占位 0 改写为正确偏移，跨函数/跨节 LEA 均无需
     后续人工 patch。
   - **测试**：`test_float_mod.c`（6 用例）、`test_int128_logical.c`（5 用例）、
-    `test_asm_goto_outputs.c`（3 用例覆盖 fall-through / taken / basic）远程
+    `test_asm_goto_outputs.c`（3 用例覆盖 fall-through / taken / basic）本地
     全部 PASS；`test_float_lit.c`/`test_hugeval.c`/`test_nan.c` 等 12 个
     M11.2/11.3 已有测试无回归（`test_asm_constraints_ext` 在 M11.3 起即
     失败于 `test_xmm_constraint`，属 pre-existing，本 M 不在范围）。
@@ -766,7 +765,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     `kr_old_style_function`（K&R 风格）+ `ms_extensions_compile_and_run`
     （__declspec 全家族）+ `attr_target_clones_compile_and_run` +
     `attr_copy_returns_nonnull_compile_and_run`（含 returns_nonnull）+
-    `stdatomic_macros_hosted`（hosted 模式 atomic 宏）远程 PASS；
+    `stdatomic_macros_hosted`（hosted 模式 atomic 宏）本地 PASS；
     freestanding 模式通过 `preproc.rs` 单元测试验证
     `__STDC_NO_ATOMICS__=1` 已设置。
 - **M15 const_eval 完整化 + 运行时检查**：补全 `unimplemented_modules.md`
@@ -972,8 +971,7 @@ CLI 解析：`SanitizerFlags::from_args` 支持
 - KCSAN 完整 watchpoint 仍走 KASAN 共享通道，未独立发 `__kcsan_check_access`。
 
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
-`scripts/remote_feature_check.sh`（sanitizer 节 + 汇编桩计数）+ 12 个
-`sanitizer::tests` 单元测试。
+12 个 `sanitizer::tests` 单元测试。
 
 ## C 前端补洞（M11.1，`src/parser.rs` + `src/preproc.rs`）
 
@@ -1127,7 +1125,7 @@ AST→SSA→pass→AST 重建，再走原有的 `resync` 流程。
 
 `tests/fixtures/m16_*.c` 7 个：ssa_ir / strength_reduction /
 cross_function_dce / sccp / loop_opt / tco / function_attr。
-`tests/integration.rs` 对应 `m16_*` 测试函数，在 Linux 远程
+`tests/integration.rs` 对应 `m16_*` 测试函数，在本地
 跑 `cargo test m16_` 验证。
 
 ## M20 性能分析与插桩子系统（`src/profile/`）

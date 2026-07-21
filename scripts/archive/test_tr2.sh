@@ -1,5 +1,5 @@
 #!/bin/bash
-# 远程验证 TRANSLATE(*d) 宏展开：期望 (*d)，禁止 (**d)
+# 本地验证 TRANSLATE(*d) 宏展开：期望 (*d)，禁止 (**d)
 set -euo pipefail
 export PATH="/usr/bin:/bin:$HOME/.cargo/bin:$PATH"
 cd "$(dirname "$0")/.."
