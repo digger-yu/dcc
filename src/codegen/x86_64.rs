@@ -3275,6 +3275,16 @@ impl Codegen {
             Expr::Index { arr, idx, ty: elem_ty, .. } => {
                 let es = elem_ty.size() as i32;
                 if let Expr::Ident { name: arr_name, ty: arr_ty, .. } = arr.as_ref() {
+                    let is_global = self.globals.contains_key(&arr_name.name);
+                    if is_global {
+                        // 全局数组: 单条 [rip+disp32+idx*scale] 加载, 避免 LEA+ADD 两步
+                        self.gen_expr(idx, 1);
+                        if es != 1 {
+                            self.emit(&[0x48, 0x69, 0xC9]);
+                            self.emit(&es.to_le_bytes());
+                        }
+                        self.emit_load_global_indexed(dst, 1, &arr_name.name, es as u8, elem_ty);
+                    } else {
                     if self.vla_offsets.contains_key(&arr_name.name) {
                         // VLA: 基址存储在变量栈槽中
                         let off = self.var_offset(&arr_name.name);
@@ -3336,6 +3346,7 @@ impl Codegen {
                     self.emit_load_mem_typed(es as usize, elem_ty); // 按元素类型加载
                     if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
                         self.mov(dst, 0);
+                    }
                     }
                 }
             }
@@ -5108,22 +5119,132 @@ impl Codegen {
     }
     // 浮点变量加载: 栈 → xmm0 (使用 XMM 指令)
     fn gen_float_load(&mut self, name: &str, ty: &Type) {
+        self.load_float_to_xmm(name, ty, 0);
+    }
+
+    /// 浮点变量加载: 栈/[r13+off] → 指定 xmm 寄存器
+    fn load_float_to_xmm(&mut self, name: &str, ty: &Type, xmm: u8) {
         let off = self.var_offset(name);
         let is_float = matches!(ty, Type::Float);
         let is_ld = matches!(ty, Type::LongDouble);
         if is_ld {
-            self.emit(&[0xF3, 0x49, 0x0F, 0x7E]);
-            if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
-            else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+            self.emit(&[0xF3]);
+            if xmm >= 8 {
+                self.emit(&[0x44]);
+            }
+            self.emit(&[0x41, 0x0F, 0x7E]);
         } else if is_float {
-            self.emit(&[0xF3, 0x49, 0x0F, 0x10]);
-            if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
-            else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+            self.emit(&[0xF3]);
+            if xmm >= 8 {
+                self.emit(&[0x44]);
+            }
+            self.emit(&[0x41, 0x0F, 0x10]);
         } else {
-            self.emit(&[0xF2, 0x49, 0x0F, 0x10]);
-            if off.abs() < 128 { self.emit(&[0x45, off as i8 as u8]); }
-            else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
+            self.emit(&[0xF2]);
+            if xmm >= 8 {
+                self.emit(&[0x44]);
+            }
+            self.emit(&[0x41, 0x0F, 0x10]);
         }
+        if off.abs() < 128 {
+            self.emit(&[0x45 | ((xmm & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((xmm & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
+    /// 从全局对象加载带下标的元素: [rip + disp32 + idx*scale]
+    fn emit_load_global_indexed(&mut self, dst_gp: u8, idx_reg: u8, global: &str,
+                                elem_size: u8, elem_ty: &Type) {
+        let scale = match elem_size {
+            2 => 1u8,
+            4 => 2,
+            8 => 3,
+            _ => 0,
+        };
+        let sib = (scale << 6) | ((idx_reg & 7) << 3) | 5; // base=101 → RIP
+        let modrm = 0x04; // mod=00, rm=100 (SIB), reg 字段在下方按目标寄存器填充
+        let is_float = matches!(elem_ty, Type::Float);
+        let is_double = matches!(elem_ty, Type::Double | Type::LongDouble);
+        let disp32_pos;
+        if is_float {
+            let xmm = 0u8; // 浮点表达式结果约定在 xmm0
+            let mut rex = 0u8;
+            if xmm >= 8 { rex |= 0x04; }
+            if idx_reg >= 8 { rex |= 0x02; }
+            let mut ins = Vec::new();
+            if rex != 0 { ins.push(rex); }
+            ins.extend_from_slice(&[0xF3, 0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
+            self.emit(&ins);
+            disp32_pos = self.pos();
+            self.emit(&[0, 0, 0, 0]);
+        } else if is_double {
+            let xmm = 0u8;
+            let mut rex = 0u8;
+            if xmm >= 8 { rex |= 0x04; }
+            if idx_reg >= 8 { rex |= 0x02; }
+            let mut ins = Vec::new();
+            if rex != 0 { ins.push(rex); }
+            ins.extend_from_slice(&[0xF2, 0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
+            self.emit(&ins);
+            disp32_pos = self.pos();
+            self.emit(&[0, 0, 0, 0]);
+        } else {
+            let mut rex = 0x48u8;
+            if dst_gp >= 8 { rex |= 0x04; }
+            if idx_reg >= 8 { rex |= 0x02; }
+            self.emit(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib]);
+            disp32_pos = self.pos();
+            self.emit(&[0, 0, 0, 0]);
+        }
+        self.pending_data_rels.push((disp32_pos, global.to_string()));
+    }
+
+    /// 全局浮点变量 RIP-relative 加载到 xmm
+    fn emit_global_float_load_to_xmm(&mut self, xmm: u8, name: &str, ty: &Type) {
+        let is_float = matches!(ty, Type::Float);
+        let mut rex = 0u8;
+        if xmm >= 8 { rex |= 0x04; }
+        let modrm = 0x05 | ((xmm & 7) << 3);
+        let mut ins = Vec::new();
+        if rex != 0 { ins.push(rex); }
+        if is_float {
+            ins.extend_from_slice(&[0xF3, 0x0F, 0x10, modrm, 0, 0, 0, 0]);
+        } else {
+            ins.extend_from_slice(&[0xF2, 0x0F, 0x10, modrm, 0, 0, 0, 0]);
+        }
+        let disp_pos = self.pos() + ins.len() as u64 - 4;
+        self.emit(&ins);
+        self.pending_data_rels.push((disp_pos, name.to_string()));
+    }
+
+    /// 全局浮点变量 RIP-relative 存储: xmm → [global]
+    fn emit_global_float_store_from_xmm(&mut self, xmm: u8, name: &str, ty: &Type) {
+        let is_float = matches!(ty, Type::Float);
+        let mut rex = 0u8;
+        if xmm >= 8 { rex |= 0x04; }
+        let modrm = 0x05 | ((xmm & 7) << 3);
+        let mut ins = Vec::new();
+        if rex != 0 { ins.push(rex); }
+        if is_float {
+            ins.extend_from_slice(&[0xF3, 0x0F, 0x11, modrm, 0, 0, 0, 0]);
+        } else {
+            ins.extend_from_slice(&[0xF2, 0x0F, 0x11, modrm, 0, 0, 0, 0]);
+        }
+        let disp_pos = self.pos() + ins.len() as u64 - 4;
+        self.emit(&ins);
+        self.pending_data_rels.push((disp_pos, name.to_string()));
+    }
+
+    /// xmm 寄存器间拷贝 (movaps)
+    fn mov_xmm_to_xmm(&mut self, dst: u8, src: u8) {
+        if dst == src { return; }
+        let mut rex = 0x40u8;
+        if dst >= 8 { rex |= 0x04; }
+        if src >= 8 { rex |= 0x01; }
+        let modrm = 0xC0 | ((dst & 7) << 3) | (src & 7);
+        self.emit(&[rex, 0x0F, 0x28, modrm]);
     }
 
     // 浮点值按偏移存储: xmm0 → [r13+off]
@@ -7431,6 +7552,9 @@ impl Codegen {
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
                 let xi = idx % 16;
                 let name = Self::asm_xmm_name(xi);
+                if is_inout {
+                    self.prepare_asm_xmm_binding(op, xi as u8, true);
+                }
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(xi as u8, name));
                 meta.push((xi as u8, xmm_bits, true, false, if early { 1 } else { 0 }));
@@ -7480,11 +7604,20 @@ impl Codegen {
                     if let Slot::Reg(r, name) = slot {
                         let nreg = *r;
                         let nname = *name;
-                        // 对当前操作数 (输入) 调 prepare, 把值加载到复用寄存器
-                        self.prepare_asm_binding(op, nreg, false);
+                        let is_xmm = meta.get(n as usize).map(|m| m.1 != 0).unwrap_or(false);
+                        if is_xmm {
+                            self.prepare_asm_xmm_binding(op, nreg, is_inout);
+                        } else {
+                            // 对当前操作数 (输入) 调 prepare, 把值加载到复用寄存器
+                            self.prepare_asm_binding(op, nreg, false);
+                        }
                         map.insert(format!("%{idx}"), nname.to_string());
-                        input_reg_set.insert(nreg);
-                        meta.push((nreg, 0, false, false, 0));
+                        if is_xmm {
+                            input_xmm_set.insert(nreg);
+                        } else {
+                            input_reg_set.insert(nreg);
+                        }
+                        meta.push((nreg, if is_xmm { 128 } else { 0 }, false, false, 0));
                         slots.push(Slot::Reg(nreg, nname));
                         idx += 1;
                         continue;
@@ -7529,6 +7662,7 @@ impl Codegen {
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
                 let xi = idx % 16;
                 let name = Self::asm_xmm_name(xi);
+                self.prepare_asm_xmm_binding(op, xi as u8, is_inout);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(xi as u8, name));
                 input_xmm_set.insert(xi as u8);
@@ -7577,6 +7711,13 @@ impl Codegen {
                     if !input_xmm_set.contains(&cand) {
                         let new_name = Self::asm_xmm_name(cand as usize);
                         let key = format!("%{i}");
+                        if let Some(op) = outputs.get(i) {
+                            let raw = output_constraints.get(i).map(String::as_str).unwrap_or("=r");
+                            let (_, is_inout, _, _) = Self::parse_asm_constraint_flags(raw);
+                            if is_inout {
+                                self.prepare_asm_xmm_binding(op, cand, true);
+                            }
+                        }
                         map.insert(key.clone(), new_name.to_string());
                         slots[i] = Slot::Reg(cand, new_name);
                         meta[i] = (cand, xmm_w, true, false, flags);
@@ -7670,14 +7811,28 @@ impl Codegen {
     }
 
     /// asm 输出操作数写回 C 变量
-    fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8) {
+    fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u8) {
+        if xmm_width != 0 {
+            let Expr::Ident { name, ty, .. } = expr else { return };
+            if self.globals.contains_key(&name.name) {
+                self.emit_global_float_store_from_xmm(reg, &name.name, ty);
+            } else {
+                let off = self.var_offset(&name.name);
+                if matches!(ty, Type::Float) || xmm_width == 32 {
+                    self.store_xmm32_stack(reg, off);
+                } else {
+                    self.store_xmm64_stack(reg, off);
+                }
+            }
+            return;
+        }
         let Expr::Ident { name, ty, .. } = expr else { return };
         if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
             let off = self.var_offset(&name.name);
             if matches!(ty, Type::Float) {
-                self.store_xmm32_stack(reg.min(8), off);
+                self.store_xmm32_stack(reg, off);
             } else {
-                self.store_xmm64_stack(reg.min(8), off);
+                self.store_xmm64_stack(reg, off);
             }
             return;
         }
@@ -7730,6 +7885,25 @@ impl Codegen {
         } else {
             self.emit(&[0x85 | ((xmm & 7) << 3)]);
             self.emit(&off.to_le_bytes());
+        }
+    }
+
+    /// 将 asm 约束表达式加载到指定 xmm 寄存器。
+    /// `is_inout`: "+x" 约束需先把当前值装入 xmm；纯输入 "x" 同理。
+    fn prepare_asm_xmm_binding(&mut self, expr: &Expr, xmm: u8, _is_inout: bool) {
+        if let Expr::Ident { name, ty, .. } = expr {
+            if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                if self.globals.contains_key(&name.name) {
+                    self.emit_global_float_load_to_xmm(xmm, &name.name, ty);
+                } else {
+                    self.load_float_to_xmm(&name.name, ty, xmm);
+                }
+                return;
+            }
+        }
+        self.gen_expr(expr, 0);
+        if matches!(expr.ty(), Type::Float | Type::Double | Type::LongDouble) {
+            self.mov_xmm_to_xmm(xmm, 0);
         }
     }
 
@@ -8069,7 +8243,7 @@ impl Codegen {
         self.emit_resolved_asm_lines(&resolved_lines, true);
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
-                self.writeback_asm_operand(&outputs[i], binding.reg);
+                self.writeback_asm_operand(&outputs[i], binding.reg, binding.xmm_width);
             }
         }
         let _ = clobbers;
@@ -8108,7 +8282,7 @@ impl Codegen {
         self.emit_resolved_asm_lines(&resolved_lines, false);
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
-                self.writeback_asm_operand(&outputs[i], binding.reg);
+                self.writeback_asm_operand(&outputs[i], binding.reg, binding.xmm_width);
             }
         }
         if clobbers.iter().any(|c| c == "memory") {

@@ -102,10 +102,10 @@ SIMD 指令子集完整实装：
 | 模块 | 文件:行 | 现状（M13.1 后） |
 |------|---------|------------------|
 | 浮点字面量 rodata 解析 | `x86_64.rs:3194` | `v.to_le_bytes()` 直接写入 `.rodata`，f32/double IEEE 754 精确，movss/movsd 加载，复杂字面量无精度偏差 |
-| 跨函数 LEA | `x86_64.rs:5396` | `[r13+off]` 用 `emit_lea_r13` 直编；RIP-relative LEA (`emit_global_addr`/`Expr::String`/`Expr::Float`) 走 `pending_data_rels`/`string_refs`/`float_refs` + patch 路径，跨函数/跨节均正确 |
-| `gen_float_binop` 不支持运算 | `x86_64.rs:4219` | float/double 取模改软件实装：cvttsX2si 截断 + cvtsi2sX 回转 + mul + sub，零 libc 依赖；E1003 不再触发 |
-| XMM 临时槽 | `x86_64.rs:7466` | asm `x` XMM 输入加入独立 `input_xmm_set`；`=&x` early-clobber 在 `xmm_pool` 0..15 内选不冲突的 XMM 并替换 map 与 `Slot`；不再走 "XMM 暂不处理" |
-| int128 binary 逻辑 | `x86_64.rs:2553` | `Expr::Binop` 优先在 `&&`/`\|\|` 处用 `or rdx, dst` 合并高 64 位后 `test rax, rax`；不再依赖 `gen_int128_binop` 里的 `unreachable!` 路径 |
+| 跨函数 LEA | `x86_64.rs:5157` | `[r13+off]` 用 `emit_lea_r13`；RIP-relative 走 `pending_data_rels` patch；全局数组下标新增 `emit_load_global_indexed` 单条 `[rip+disp32+idx*scale]` |
+| `gen_float_binop` 不支持运算 | `x86_64.rs:4294` | float/double 取模软件实装：cvttsX2si + cvtsi2sX + mul + sub，零 libc；`tests/fixtures/float_mod.c` |
+| XMM 临时槽 | `x86_64.rs:7550` | `prepare_asm_xmm_binding` 加载 float 到 xmm；`writeback_asm_operand` 按 `xmm_width` 写回 xmm8–15；`input_xmm_set` + early-clobber `xmm_pool` |
+| int128 binary 逻辑 | `x86_64.rs:2577` | `Expr::Binop` 优先 `&&`/`\|\|`，`or rdx, dst` 合并高 64 位；`tests/fixtures/int128_logical.c` |
 
 ### 1.3 AArch64 后端
 

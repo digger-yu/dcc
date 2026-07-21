@@ -698,9 +698,11 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     零值、short-circuit）本地 PASS。
   - **asm `x` 约束 XMM early-clobber**：GP 与 XMM 共用 0..15 编号空间，
     旧实现只建一个 `input_reg_set` 判定冲突，XMM 路径直接 `continue`
-    跳过。现在 XMM 输入加入独立的 `input_xmm_set`，`=&x` early-clobber
-    在 `xmm_pool = [0..15]` 内选未被 XMM 输入占用的 XMM，替换 `map` 与
-    `Slot::Reg`；asm goto 输出寄存器写回阶段可正确落到不同 XMM。
+    跳过。现在 XMM 输入加入独立的 `input_xmm_set`，`prepare_asm_xmm_binding`
+    在输入/`+x` inout 时把 float 变量/表达式加载到指定 xmm（含全局
+    RIP-relative movss/movsd）；`writeback_asm_operand` 按 `xmm_width`
+    写回栈或全局，支持 xmm8–15；`=&x` early-clobber 在
+    `xmm_pool = [0..15]` 内选未被 XMM 输入占用的 XMM。
   - **浮点字面量 rodata 解析**：原 stub 提到的「复杂 FP 字面量可能精度
     偏差」经核实是误报。当前实现用 `v.to_le_bytes()` 直接写 IEEE 754
     bit pattern 进 `.rodata`（f32 `*v as f32` 截位、long double 高 8
@@ -712,8 +714,13 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     编码路径完整；`pending_data_rels`/`string_refs`/`float_refs` +
     `patch_local_jumps` 阶段在非 `-c` 模式下也能把所有
     `[rip+disp32]` 占位 0 改写为正确偏移，跨函数/跨节 LEA 均无需
-    后续人工 patch。
-  - **测试**：`test_float_mod.c`（6 用例）、`test_int128_logical.c`（5 用例）、
+    后续人工 patch。全局数组下标 `Expr::Index` 对全局符号走
+    `emit_load_global_indexed`（单条 `[rip+disp32+idx*scale]` mov/movss/movsd），
+    替代 LEA+ADD 两步。
+  - **测试**：`tests/fixtures/float_mod.c`（6 用例）、
+    `tests/fixtures/int128_logical.c`（5 用例）、
+    `tests/fixtures/asm_constraints_ext.c`（含 XMM `"x"`）、
+    `tests/fixtures/global_indexed.c`（全局数组 RIP+SIB）；
     `test_asm_goto_outputs.c`（3 用例覆盖 fall-through / taken / basic）本地
     全部 PASS；`test_float_lit.c`/`test_hugeval.c`/`test_nan.c` 等 12 个
     M11.2/11.3 已有测试无回归（`test_asm_constraints_ext` 在 M11.3 起即

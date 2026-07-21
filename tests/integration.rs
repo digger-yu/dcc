@@ -1814,6 +1814,74 @@ fn int128_mul_div_mod_run_returns_zero() {
     assert_eq!(rc, 0, "int128_mul_div_mod should return 0, got {rc}");
 }
 
+/// M13.1: float/double 取模软件实装 (divss/divsd + trunc)
+#[test]
+fn float_mod_run_returns_zero() {
+    let source = include_str!("fixtures/float_mod.c");
+    let (output, _exe) = run_compile_and_run("float-mod", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&_exe);
+        assert_eq!(rc, 0, "float_mod should return 0, got {rc}");
+    }
+}
+
+/// M13.1: __int128 &&/|| 高 64 位合并后再 test
+#[test]
+fn int128_logical_run_returns_zero() {
+    let source = include_str!("fixtures/int128_logical.c");
+    let (output, _exe) = run_compile_and_run("int128-logical", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&_exe);
+        assert_eq!(rc, 0, "int128_logical should return 0, got {rc}");
+    }
+}
+
+/// M13.1: asm 约束扩展 (含 XMM "x" 输入 prepare + 写回)
+#[test]
+fn asm_constraints_ext_compiles_and_runs() {
+    let source = include_str!("fixtures/asm_constraints_ext.c");
+    let (output, _exe) = run_compile_and_run("asm-constraints-ext", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&_exe);
+        assert_eq!(rc, 0, "asm_constraints_ext should return 0, got {rc}");
+    }
+}
+
+/// M13.1: 全局数组 [rip+disp32+idx*scale] 单指令加载
+#[test]
+fn global_indexed_run_returns_zero() {
+    let source = include_str!("fixtures/global_indexed.c");
+    let (output, _exe) = run_compile_and_run("global-indexed", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&_exe);
+        assert_eq!(rc, 0, "global_indexed should return 0, got {rc}");
+    }
+}
+
 /// SIMD 浮点向量：标量 SSE 逐元素 +/-/×
 #[test]
 fn vector_float_scalar_run_returns_zero() {
