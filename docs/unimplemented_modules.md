@@ -674,7 +674,7 @@ M19 关键改动:
 | `__builtin_trap()` | ✅ ud2 |
 | `__builtin_debugtrap()` | 🟢 (M23) 发射 int3 (0xCC) |
 | `__builtin_assume_aligned(p, n)` | 🟢 (M23) 透传指针，codegen 优化对齐 |
-| `__builtin_expect_with_probability` | 🟠 降级为 `__builtin_expect` |
+| `__builtin_expect_with_probability` | 🟢 (M24) 解析层与 `__builtin_expect` 一致处理: 字面量首参编译期折叠, 其它形态走 codegen 既有 builtin 路径 |
 | 浮点环境 (`fenv.h`) | 🟠 `pragma STDC FENV_ACCESS` 解析为注释；运行时无 fenv 调用 |
 | 复杂数学函数 (`cproj`, `cabs` 等) | 🟠 走 libm |
 | `printf` format string 全集 | 🟢 (M23) 完整 flag/width/precision/length/type 匹配 |

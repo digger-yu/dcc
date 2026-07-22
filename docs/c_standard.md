@@ -86,7 +86,8 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `__builtin_*` 编译期折叠 (M15)：`__builtin_strlen`/`__builtin_abs/labs/llabs`/
   `__builtin_bswap16/32/64`/`__builtin_expect`/`__builtin_popcount*` —
   解析阶段走 `const_eval::eval_full` 折叠为整数常量
-- `__builtin_expect_with_probability` 降级为 `__builtin_expect`
+- `__builtin_expect_with_probability` (M24) 与 `__builtin_expect` 解析层同路径:
+  字面量首参编译期折叠为整数常量, 其它形态走 codegen builtin 路径
 - 严格类型检查 warning (M15)：`-Wint-truncation` / `-Wint-conversion` —
   cast 阶段检测整数截断与隐式指针↔整数转换，仅 warning 不阻塞
 - 运行时边界检查 (M15)：`-fbounds-check` 对 `ArraySize::Const(n)` 数组
