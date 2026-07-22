@@ -7197,8 +7197,8 @@ impl Codegen {
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7);
                 self.gen_expr(&args[1], 6);
-                self.emit_cas_loop(sz, |cg| {
-                    cg.emit_and_rsi();
+                self.emit_cas_loop(sz, |cg, s| {
+                    cg.emit_and_rdx_rsi(s);
                 });
                 if dst != 1 { self.mov(dst, 1); }
                 true
@@ -7208,8 +7208,8 @@ impl Codegen {
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7);
                 self.gen_expr(&args[1], 6);
-                self.emit_cas_loop(sz, |cg| {
-                    cg.emit_or_rsi();
+                self.emit_cas_loop(sz, |cg, s| {
+                    cg.emit_or_rdx_rsi(s);
                 });
                 if dst != 1 { self.mov(dst, 1); }
                 true
@@ -7219,8 +7219,8 @@ impl Codegen {
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7);
                 self.gen_expr(&args[1], 6);
-                self.emit_cas_loop(sz, |cg| {
-                    cg.emit_xor_rsi();
+                self.emit_cas_loop(sz, |cg, s| {
+                    cg.emit_xor_rdx_rsi(s);
                 });
                 if dst != 1 { self.mov(dst, 1); }
                 true
@@ -7243,11 +7243,7 @@ impl Codegen {
                 self.gen_expr(&args[2], 6); // rsi = desired
                 // lock cmpxchg [rdi], rsi: 按 sz 选尺寸
                 let sz = self.atomic_elem_size(args, 0);
-                if sz == 8 {
-                    self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x37]);
-                } else {
-                    self.emit(&[0xF0, 0x0F, 0xB1, 0x37]);
-                }
+                self.emit_lock_cmpxchg_rdi_rsi(sz);
                 // ZF=1 成功(rax=old), ZF=0 失败(rax=old)
                 self.emit(&[0x0F, 0x94, 0xC2]); // sete dl
                 let l_skip = self.fresh_label();
@@ -7292,11 +7288,7 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], 6); // rsi = val
                 // lock xchg [rdi], rsi: 按 sz 选尺寸
-                if sz == 8 {
-                    self.emit(&[0xF0, 0x48, 0x87, 0x37]);
-                } else {
-                    self.emit(&[0xF0, 0x87, 0x37]);
-                }
+                self.emit_lock_xchg_rdi_rsi(sz);
                 if dst != 6 { self.mov(dst, 6); }
                 true
             }
@@ -7306,19 +7298,31 @@ impl Codegen {
 
     // ===== 原子操作辅助指令 =====
 
-    /// lock xadd [rdi], rsi — 按 sz 选 32/64 位
+    /// lock xadd [rdi], rsi — 按 sz 选 8/16/32/64 位
+    /// 1/2 字节变体在 xadd 后插入 movzx 把 sil/si 零扩展到 rsi, 避免旧值返回时高
+    /// 位出现寄存器残留.
     fn emit_atomic_xadd(&mut self, sz: usize) {
         match sz {
-            4 => self.emit(&[0xF0, 0x0F, 0xC1, 0x37]),        // lock xadd [rdi], esi
-            _ => self.emit(&[0xF0, 0x48, 0x0F, 0xC1, 0x37]),  // lock xadd [rdi], rsi
+            1 => self.emit(&[0xF0, 0x40, 0x0F, 0xC0, 0x37]),       // lock xadd [rdi], sil
+            2 => self.emit(&[0x66, 0xF0, 0x0F, 0xC1, 0x37]),       // lock xadd [rdi], si
+            4 => self.emit(&[0xF0, 0x0F, 0xC1, 0x37]),             // lock xadd [rdi], esi
+            _ => self.emit(&[0xF0, 0x48, 0x0F, 0xC1, 0x37]),       // lock xadd [rdi], rsi
+        }
+        // 零扩展 8/16 位子寄存器返回值到 64 位 rsi
+        match sz {
+            1 => self.emit(&[0x40, 0x0F, 0xB6, 0xF6]),              // movzbl sil, esi (REX 0x40)
+            2 => self.emit(&[0x0F, 0xB7, 0xF6]),                   // movzwl si, esi
+            _ => {}
         }
     }
 
-    /// neg rsi — 按 sz 选 32/64 位
+    /// neg rsi — 按 sz 选 8/16/32/64 位
     fn emit_neg(&mut self, sz: usize) {
         match sz {
-            4 => self.emit(&[0xF7, 0xDE]),        // neg esi
-            _ => self.emit(&[0x48, 0xF7, 0xDE]),  // neg rsi
+            1 => self.emit(&[0x40, 0xF6, 0xDE]),        // neg sil
+            2 => self.emit(&[0x66, 0xF7, 0xDE]),        // neg si
+            4 => self.emit(&[0xF7, 0xDE]),              // neg esi
+            _ => self.emit(&[0x48, 0xF7, 0xDE]),        // neg rsi
         }
     }
 
@@ -7343,49 +7347,133 @@ impl Codegen {
         if dst != 0 { self.mov(dst, 0); }
     }
 
-    /// CAS 循环: 读旧值, 计算新值, lock cmpxchg, 循环直到成功
-    fn emit_cas_loop<F: Fn(&mut Self)>(&mut self, sz: usize, compute_new: F) {
-        if sz == 8 {
-            // 64-bit
-            self.emit(&[0x48, 0x8B, 0x07]); // mov rax, [rdi]
-            let l_retry = self.fresh_label();
-            self.label(&l_retry);
-            self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax (save old)
-            self.emit(&[0x48, 0x89, 0xC2]); // mov rdx, rax
-            compute_new(self);                 // and/or/xor rdx, rsi
-            self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x17]); // lock cmpxchg [rdi], rdx
-            let l_done = self.fresh_label();
-            self.jmp_rel32(&l_done, JumpKind::Je);
-            self.jmp_rel32(&l_retry, JumpKind::Jmp);
-            self.label(&l_done);
-            // After successful cmpxchg: RAX = old value, RCX = old value (from mov rcx,rax before cmpxchg)
-        } else {
-            // 32-bit (zero-extends to 64-bit)
-            self.emit(&[0x8B, 0x07]); // mov eax, [rdi]
-            let l_retry = self.fresh_label();
-            self.label(&l_retry);
-            self.emit(&[0x89, 0xC1]); // mov ecx, eax
-            self.emit(&[0x89, 0xC2]); // mov edx, eax
-            compute_new(self);
-            self.emit(&[0xF0, 0x0F, 0xB1, 0x17]); // lock cmpxchg [rdi], edx
-            let l_done = self.fresh_label();
-            self.jmp_rel32(&l_done, JumpKind::Je);
-            self.jmp_rel32(&l_retry, JumpKind::Jmp);
-            self.label(&l_done);
+    /// lock xchg [rdi], rsi — 按 sz 选 8/16/32/64 位
+    /// 1/2 字节变体在 xchg 后插入 movzx 把返回值零扩展到 rsi.
+    fn emit_lock_xchg_rdi_rsi(&mut self, sz: usize) {
+        match sz {
+            1 => self.emit(&[0xF0, 0x40, 0x86, 0x37]),       // lock xchg [rdi], sil
+            2 => self.emit(&[0x66, 0xF0, 0x87, 0x37]),       // lock xchg [rdi], si
+            4 => self.emit(&[0xF0, 0x87, 0x37]),             // lock xchg [rdi], esi
+            _ => self.emit(&[0xF0, 0x48, 0x87, 0x37]),       // lock xchg [rdi], rsi
+        }
+        match sz {
+            1 => self.emit(&[0x40, 0x0F, 0xB6, 0xF6]),       // movzbl sil, esi
+            2 => self.emit(&[0x0F, 0xB7, 0xF6]),             // movzwl si, esi
+            _ => {}
         }
     }
 
-    /// and rdx, rsi (32-bit: 21 F2, 64-bit: 48 21 F2)
+    /// lock cmpxchg [rdi], rsi — 按 sz 选 8/16/32/64 位
+    fn emit_lock_cmpxchg_rdi_rsi(&mut self, sz: usize) {
+        match sz {
+            1 => self.emit(&[0xF0, 0x40, 0x0F, 0xB0, 0x37]), // lock cmpxchg [rdi], sil
+            2 => self.emit(&[0x66, 0xF0, 0x0F, 0xB1, 0x37]), // lock cmpxchg [rdi], si
+            4 => self.emit(&[0xF0, 0x0F, 0xB1, 0x37]),       // lock cmpxchg [rdi], esi
+            _ => self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x37]), // lock cmpxchg [rdi], rsi
+        }
+    }
+
+    /// lock cmpxchg [rdi], rdx — 按 sz 选 8/16/32/64 位
+    /// 由 emit_cas_loop 使用, 新值放在 rdx/rdx 子寄存器中.
+    fn emit_lock_cmpxchg_rdi_rdx(&mut self, sz: usize) {
+        match sz {
+            1 => self.emit(&[0xF0, 0x40, 0x0F, 0xB0, 0x17]), // lock cmpxchg [rdi], dl
+            2 => self.emit(&[0x66, 0xF0, 0x0F, 0xB1, 0x17]), // lock cmpxchg [rdi], dx
+            4 => self.emit(&[0xF0, 0x0F, 0xB1, 0x17]),       // lock cmpxchg [rdi], edx
+            _ => self.emit(&[0xF0, 0x48, 0x0F, 0xB1, 0x17]), // lock cmpxchg [rdi], rdx
+        }
+    }
+
+    /// CAS 循环: 读旧值, 计算新值, lock cmpxchg, 循环直到成功
+    /// 闭包 receive (cg, sz) 用于发出 and/or/xor rdx, rsi 指令
+    fn emit_cas_loop<F: Fn(&mut Self, usize)>(&mut self, sz: usize, compute_new: F) {
+        match sz {
+            1 => {
+                // 8-bit: al/al, sil/dl/ah 8 位子寄存器参与
+                self.emit(&[0x0F, 0xB6, 0x07]); // movzx eax, byte [rdi]
+                let l_retry = self.fresh_label();
+                self.label(&l_retry);
+                self.emit(&[0x89, 0xC1]); // mov ecx, eax
+                self.emit(&[0x89, 0xC2]); // mov edx, eax
+                compute_new(self, sz);
+                self.emit_lock_cmpxchg_rdi_rdx(sz);
+                let l_done = self.fresh_label();
+                self.jmp_rel32(&l_done, JumpKind::Je);
+                self.jmp_rel32(&l_retry, JumpKind::Jmp);
+                self.label(&l_done);
+            }
+            2 => {
+                // 16-bit: ax/si/dx 子寄存器
+                self.emit(&[0x0F, 0xB7, 0x07]); // movzx eax, word [rdi]
+                let l_retry = self.fresh_label();
+                self.label(&l_retry);
+                self.emit(&[0x89, 0xC1]); // mov ecx, eax
+                self.emit(&[0x89, 0xC2]); // mov edx, eax
+                compute_new(self, sz);
+                self.emit_lock_cmpxchg_rdi_rdx(sz);
+                let l_done = self.fresh_label();
+                self.jmp_rel32(&l_done, JumpKind::Je);
+                self.jmp_rel32(&l_retry, JumpKind::Jmp);
+                self.label(&l_done);
+            }
+            4 => {
+                // 32-bit (zero-extends to 64-bit)
+                self.emit(&[0x8B, 0x07]); // mov eax, [rdi]
+                let l_retry = self.fresh_label();
+                self.label(&l_retry);
+                self.emit(&[0x89, 0xC1]); // mov ecx, eax
+                self.emit(&[0x89, 0xC2]); // mov edx, eax
+                compute_new(self, sz);
+                self.emit_lock_cmpxchg_rdi_rdx(sz);
+                let l_done = self.fresh_label();
+                self.jmp_rel32(&l_done, JumpKind::Je);
+                self.jmp_rel32(&l_retry, JumpKind::Jmp);
+                self.label(&l_done);
+            }
+            _ => {
+                // 64-bit
+                self.emit(&[0x48, 0x8B, 0x07]); // mov rax, [rdi]
+                let l_retry = self.fresh_label();
+                self.label(&l_retry);
+                self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                self.emit(&[0x48, 0x89, 0xC2]); // mov rdx, rax
+                compute_new(self, sz);
+                self.emit_lock_cmpxchg_rdi_rdx(sz);
+                let l_done = self.fresh_label();
+                self.jmp_rel32(&l_done, JumpKind::Je);
+                self.jmp_rel32(&l_retry, JumpKind::Jmp);
+                self.label(&l_done);
+            }
+        }
+    }
+
+    /// and rdx, rsi — 按 sz 选 8/16/32/64 位
     /// 由 emit_cas_loop 的 compute_new 回调使用
-    fn emit_and_rsi(&mut self) {
-        // 32-bit and (rdx = rdx & rsi)
-        self.emit(&[0x21, 0xF2]); // and edx, esi
+    fn emit_and_rdx_rsi(&mut self, sz: usize) {
+        match sz {
+            1 => self.emit(&[0x40, 0x20, 0xF2]), // and dl, sil
+            2 => self.emit(&[0x66, 0x21, 0xF2]), // and dx, si
+            4 => self.emit(&[0x21, 0xF2]),       // and edx, esi
+            _ => self.emit(&[0x48, 0x21, 0xF2]), // and rdx, rsi
+        }
     }
-    fn emit_or_rsi(&mut self) {
-        self.emit(&[0x09, 0xF2]); // or edx, esi
+    /// or rdx, rsi — 按 sz 选 8/16/32/64 位
+    fn emit_or_rdx_rsi(&mut self, sz: usize) {
+        match sz {
+            1 => self.emit(&[0x40, 0x08, 0xF2]), // or dl, sil
+            2 => self.emit(&[0x66, 0x09, 0xF2]), // or dx, si
+            4 => self.emit(&[0x09, 0xF2]),       // or edx, esi
+            _ => self.emit(&[0x48, 0x09, 0xF2]), // or rdx, rsi
+        }
     }
-    fn emit_xor_rsi(&mut self) {
-        self.emit(&[0x31, 0xF2]); // xor edx, esi
+    /// xor rdx, rsi — 按 sz 选 8/16/32/64 位
+    fn emit_xor_rdx_rsi(&mut self, sz: usize) {
+        match sz {
+            1 => self.emit(&[0x40, 0x30, 0xF2]), // xor dl, sil
+            2 => self.emit(&[0x66, 0x31, 0xF2]), // xor dx, si
+            4 => self.emit(&[0x31, 0xF2]),       // xor edx, esi
+            _ => self.emit(&[0x48, 0x31, 0xF2]), // xor rdx, rsi
+        }
     }
 
     // ===== Inline Asm Mini-Assembler (AT&T syntax) =====

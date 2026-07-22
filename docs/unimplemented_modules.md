@@ -682,7 +682,7 @@ M19 关键改动:
 | `wchar_t` | 🟠 解析为 int，无 wcs* 函数 codegen |
 | 宽字符字面量 `L"..."` | 🟢 (M23) 解析为 wchar_t 编码字符串 |
 | `char16_t` / `char32_t` (C11/C++11) | 🟢 (M23) 解析为 uint16/uint32 + u""/U"" 字符串 |
-| 原子混合大小（`atomic_load_explicit(_Atomic short*, ...)`） | 🟠 仅 32/64 位原子 |
+| 原子混合大小（`atomic_load_explicit(_Atomic short*, ...)`） | 🟢 (M24) `__atomic_*` codegen 补齐 1/2 字节 (x86-64 编码: lock xadd/xchg/cmpxchg 8/16 位变体 + sil/si/dx/dl 子寄存器 + movzx 零扩展返回值) |
 | `stdatomic.h` 全部 (`atomic_flag` / `atomic_signal_fence`) | 🟠 基础实现；`atomic_signal_fence` 走编译器屏障 |
 | `stdarg.h` va_arg 跨平台 | 🟠 x86-64 SysV 完整；aarch64 / riscv64 简化 |
 
