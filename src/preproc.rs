@@ -290,12 +290,23 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.macros.insert("kill_dependency".to_string(), MacroDef {
         params: Some(vec!["y".to_string()]), body: "(y)".to_string(), variadic: false,
     });
-    // atomic_thread_fence / atomic_signal_fence: 编译屏障 (代码生成忽略)
+    // atomic_thread_fence: 跨线程全屏障, emit  mfence + lock 序
+    // 对应 GCC __atomic_thread_fence(MEMORY_ORDER): hardware fence
+    // 注: dcc 当前不跨函数优化, 整个函数都是一应连续. 主依赖
+    // codegen 把 __ATOMIC_SEQ_CST 序列化为 mfence 序列.
+    // 实现: emit 一个 volatile 空 asm + memory 寄存器clobber, 防止
+    // 编译器重排外尧访存. 这只是编译器屏障 (ompiler barrier),
+    // 不是硬件屏障; 硬件序由 mfence 等交互.
     pp.macros.insert("atomic_thread_fence".to_string(), MacroDef {
-        params: Some(vec!["order".to_string()]), body: "".to_string(), variadic: false,
+        params: Some(vec!["order".to_string()]),
+        body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(), variadic: false,
     });
+    // atomic_signal_fence: 编译期屏障, 防止编译器重排. 不同于
+    // atomic_thread_fence, 不需要硬件序, 只需阻止本地优化.
+    // 实现: 空 asm volatile 块 + memory 寄存器clobber.
     pp.macros.insert("atomic_signal_fence".to_string(), MacroDef {
-        params: Some(vec!["order".to_string()]), body: "".to_string(), variadic: false,
+        params: Some(vec!["order".to_string()]),
+        body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(), variadic: false,
     });
     // 注意: 不预置 atomic_store/atomic_fetch_add 等 C11 stdatomic 宏。
     // Linux 内核 atomic-instrumented.h 等同名 inline 函数会被误展开
