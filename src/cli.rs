@@ -101,15 +101,15 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum LinkerOutputKind {
+    #[default]
     Executable,  // 默认
     PIE,         // -pie
     Shared,      // -shared
 }
 
-impl Default for LinkerOutputKind {
-    fn default() -> Self { Self::Executable }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdMode {
@@ -144,7 +144,8 @@ impl Arch {
     /// 第一性原理: 三类语义
     ///   * has_backend == true  : 该 arch 有完整 codegen 后端,emit() 会成功
     ///   * has_backend == false : 仅解析 triple (在 --target / 交叉编译场景
-    ///                            中合法),emit() 会 panic 报清楚
+    ///     中合法),emit() 会 panic 报清楚
+    ///
     /// 之所以区分而不是直接拒绝 mips/arm triple: Linux kernel 编译链
     /// 经常在 host 端用 --target 探测目标架构,只解析不解码能避免误伤。
     pub fn has_backend(self) -> bool {
@@ -377,7 +378,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 link_opts_z.push(v.to_string());
             }
             // -rpath
-            a if a == "-rpath" => {
+            "-rpath" => {
                 i += 1;
                 link_rpath.push(args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -rpath"))?
@@ -387,7 +388,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 link_rpath.push(a[11..].to_string());
             }
             // -rpath-link
-            a if a == "-rpath-link" => {
+            "-rpath-link" => {
                 i += 1;
                 link_rpath_link.push(args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -rpath-link"))?
@@ -397,7 +398,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 link_rpath_link.push(a[16..].to_string());
             }
             // -runpath
-            a if a == "-runpath" => {
+            "-runpath" => {
                 i += 1;
                 link_runpath.push(args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -runpath"))?
@@ -443,7 +444,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 gc_sections_root.push(a[8..].to_string());
             }
             // -lxxx 转 so 名 (从 .a 库解析, 此处简化为收集库名)
-            a if a == "-l" => {
+            "-l" => {
                 i += 1;
                 link_libs.push(args.get(i)
                     .ok_or_else(|| CliError::new("missing arg after -l"))?
@@ -841,7 +842,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             // -print-search-dirs: 输出搜索目录
             "-print-search-dirs" => {
-                println!("");
+                println!();
                 std::process::exit(0);
             }
             "-dumpversion" => {
@@ -886,7 +887,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         });
 
     if relocatable_link && !inputs.is_empty()
-        && inputs.iter().any(|p| p.extension().map(|e| e == "o").unwrap_or(false) == false)
+        && inputs.iter().any(|p| !p.extension().map(|e| e == "o").unwrap_or(false))
     {
         return Err(CliError::new(
             "relocatable link (-r) requires object (.o) inputs; \
@@ -921,7 +922,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         }
         let first = inputs.first().cloned().unwrap_or_else(|| PathBuf::from("-"));
         // -c / -S 模式默认输出扩展名（单 TU 编译）
-        if !link_mode && output == PathBuf::from("a.out") {
+        if !link_mode && output == *"a.out" {
             let stem = first.file_stem().unwrap_or_default().to_string_lossy();
             if emit_asm {
                 output = PathBuf::from(format!("{}.s", stem));

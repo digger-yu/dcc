@@ -273,7 +273,7 @@ fn is_structured_item(item: &BlockItem) -> bool {
     match item {
         BlockItem::Stmt(s) => is_structured_stmt(s),
         BlockItem::Decl(d) => match d {
-            Decl::Func(f) => f.body.as_ref().map_or(true, is_structured),
+            Decl::Func(f) => f.body.as_ref().is_none_or(is_structured),
             _ => true,
         },
     }
@@ -286,7 +286,7 @@ fn is_structured_stmt(s: &Stmt) -> bool {
         Stmt::Switch { .. } => false, // Switch 简化为 if-chains 后再 SSA 化
         Stmt::If { then_, else_, .. } => {
             is_structured_stmt(then_)
-                && else_.as_ref().map_or(true, |e| is_structured_stmt(e))
+                && else_.as_ref().is_none_or(|e| is_structured_stmt(e))
         }
         Stmt::While { body, .. } | Stmt::Do { body, .. } => is_structured_stmt(body),
         Stmt::For { body, .. } => is_structured_stmt(body),

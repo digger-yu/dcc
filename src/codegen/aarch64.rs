@@ -430,7 +430,7 @@ impl Aarch64Codegen {
                 if let Some(expr) = ir.expressions.first() {
                     let _ = self.gen_expr(expr);
                 } else {
-                    let _ = self.gen_expr_from_ast(e);
+                    self.gen_expr_from_ast(e);
                 }
             }
             Stmt::If { then_, else_, .. } => {
@@ -590,7 +590,7 @@ impl Aarch64Codegen {
         let mut sret_reg_idx = 0usize;
         let mut sret_off: Option<i32> = None;
         let needs_sret = is_aggregate(&expr.ty)
-            && aggregate_size(&expr.ty).map_or(false, |s| s > 16);
+            && aggregate_size(&expr.ty).is_some_and(|s| s > 16);
         if needs_sret {
             let size = aggregate_size(&expr.ty).unwrap();
             let aligned = (size + 15) & !15;
@@ -1006,7 +1006,7 @@ impl Aarch64Codegen {
             if part == 0 && shift > 0 && !higher_nonzero {
                 continue;
             }
-            let hw = (shift / 16) as u32;
+            let hw = shift / 16;
             let insn: u32 = (1 << 31) | (0b10 << 29) | (0b100101 << 23) | (hw << 21)
                 | (part << 5) | (reg as u32 & 0x1f);
             self.emit(&insn.to_le_bytes());
@@ -1018,7 +1018,7 @@ impl Aarch64Codegen {
     //       sub xN, sp, #imm12  (off < 0)    => 0x510003e0 | (-off<<10) | rd
     // 限制: 偏移 12-bit (0..4095); frame 大于此范围需分段
     fn mov_x_reg_sp_off(&mut self, reg: u8, off: i32) {
-        if off >= 0 && off < 4096 {
+        if (0..4096).contains(&off) {
             let insn = 0x910003e0u32 | ((off as u32) << 10) | (reg as u32 & 0x1f);
             self.emit(&insn.to_le_bytes());
         } else if off < 0 && off > -4096 {
@@ -1206,7 +1206,7 @@ impl Aarch64Codegen {
 
     /// 校验 BL 偏移是否在 ±128MiB 范围内 (imm26 × 4)
     fn bl_offset_in_range(diff: i64) -> bool {
-        diff >= -(1 << 27) && diff < (1 << 27)
+        (-(1 << 27)..(1 << 27)).contains(&diff)
     }
 
     fn emit_bl_to(&mut self, name: &str) {
@@ -1269,7 +1269,7 @@ impl Aarch64Codegen {
 
     /// 校验 ADR 偏移是否在 ±1MiB 范围内 (immhi[20:0] : immlo[1:0])
     fn adr_offset_in_range(diff: i64) -> bool {
-        diff >= -(1 << 20) && diff < (1 << 20)
+        (-(1 << 20)..(1 << 20)).contains(&diff)
     }
 
     fn emit_ldr_s0_u32_placeholder(&mut self) {
@@ -1280,7 +1280,7 @@ impl Aarch64Codegen {
 
     /// 校验 LDR literal 偏移是否在 ±1MiB 范围内 (imm19 × 4)
     fn ldr_literal_offset_in_range(diff: i64) -> bool {
-        diff >= -(1 << 20) && diff < (1 << 20)
+        (-(1 << 20)..(1 << 20)).contains(&diff)
     }
 
     fn patch_ldr_u32(&mut self, at: u64, addr: u64) {
@@ -1417,8 +1417,7 @@ impl Aarch64Codegen {
         let insn = 0x7a400000u32
             | ((nzcv as u32 & 0xf) << 12)
             | (1u32 << 12)  // cond = ne
-            | (1u32 << 16)  // Rm = w1
-            | (0u32 << 5);  // Rn = w0
+            | (1u32 << 16);  // Rn = w0
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1453,9 +1452,7 @@ impl Aarch64Codegen {
     fn emit_csel_w0_w0_w1(&mut self, cond: u8) {
         let insn = 0x1a800000u32
             | (1u32 << 16)   // Rm = w1
-            | ((cond as u32 & 0xf) << 12)
-            | (0u32 << 5)    // Rn = w0
-            | 0u32;          // Rd = w0
+            | ((cond as u32 & 0xf) << 12);          // Rd = w0
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1615,7 +1612,7 @@ impl Aarch64Codegen {
         if idx == 0 {
             let insn = 0xf9400000u32 | (base as u32) << 5 | 2;
             self.emit(&insn.to_le_bytes());
-        } else if idx >= 0 && idx < 4096 && idx % 8 == 0 {
+        } else if (0..4096).contains(&idx) && idx % 8 == 0 {
             let imm12 = (idx / 8) as u32 & 0xfff;
             let insn = 0xf9400000u32 | imm12 << 10 | (base as u32) << 5 | 2;
             self.emit(&insn.to_le_bytes());
@@ -1626,7 +1623,7 @@ impl Aarch64Codegen {
         if idx == 0 {
             let insn = 0xf9000000u32 | (base as u32) << 5 | 2;
             self.emit(&insn.to_le_bytes());
-        } else if idx >= 0 && idx < 4096 && idx % 8 == 0 {
+        } else if (0..4096).contains(&idx) && idx % 8 == 0 {
             let imm12 = (idx / 8) as u32 & 0xfff;
             let insn = 0xf9000000u32 | imm12 << 10 | (base as u32) << 5 | 2;
             self.emit(&insn.to_le_bytes());
@@ -1900,8 +1897,8 @@ fn aggregate_size(ty: &ValueType) -> Option<usize> {
 fn value_type_size(ty: &ValueType) -> usize {
     match ty {
         ValueType::Void => 0,
-        ValueType::Integer { bits, .. } => (*bits as usize + 7) / 8,
-        ValueType::Float { bits } => (*bits as usize + 7) / 8,
+        ValueType::Integer { bits, .. } => (*bits as usize).div_ceil(8),
+        ValueType::Float { bits } => (*bits as usize).div_ceil(8),
         ValueType::Pointer(_) => 8,
         ValueType::Array(inner, Some(n)) => value_type_size(inner) * n,
         ValueType::Array(inner, None) => value_type_size(inner),

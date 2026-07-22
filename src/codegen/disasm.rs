@@ -322,8 +322,6 @@ impl<'a> Dec<'a> {
             0xB0 | 0xB1 => {
                 let rex = self.parse_rex();
                 let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
-                let mn = if op == 0xB0 { "cmpxchg" } else { "cmpxchg" };
-                let _ = mn;
                 Some(self.finish(start, pfx, &format!("cmpxchg {src}, {dst}")))
             }
             0xC1 => {
@@ -501,6 +499,7 @@ impl<'a> Dec<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn disassemble_range(
     code: &[u8],
     start: usize,

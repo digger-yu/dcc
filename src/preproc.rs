@@ -103,6 +103,7 @@ pub struct PreprocessOutput {
     pub charset: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                   system_paths: &[PathBuf],
                   defines: &[(String, Option<String>)],
@@ -392,7 +393,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         pp.force_include(fi);
     }
 
-    pp.process_text(&text, file);
+    pp.process_text(text, file);
     PreprocessOutput {
         text: pp.out,
         diags: pp.diags,
@@ -596,8 +597,8 @@ impl Preprocessor {
         let text = pragma_text.trim();
         // 仅处理 pack 相关的 _Pragma; 其他类型仍走 process_directive 路径
         // (GCC diagnostic / weak / STDC / once 等不依赖行号)
-        if text.starts_with("pack") {
-            self.handle_pragma_pack(&text[4..].trim(), line_no);
+        if let Some(rest) = text.strip_prefix("pack") {
+            self.handle_pragma_pack(rest.trim(), line_no);
         } else {
             // 构造 "pragma ..." 形式的伪指令, 复用 process_directive
             let pseudo = format!("pragma {}", pragma_text);
@@ -726,8 +727,8 @@ impl Preprocessor {
         let mut result = String::with_capacity(text.len());
         let mut continued = String::new();
         for line in text.lines() {
-            if line.ends_with('\\') {
-                continued.push_str(&line[..line.len()-1]);
+            if let Some(prefix) = line.strip_suffix('\\') {
+                continued.push_str(prefix);
                 continued.push(' '); // \ 替换为空格
             } else {
                 if !continued.is_empty() {
@@ -750,32 +751,32 @@ impl Preprocessor {
         // 处理行续接 (\ at end)
         let directive = after_hash;
 
-        if directive.starts_with("include_next") {
+        if let Some(rest) = directive.strip_prefix("include_next") {
             // 必须在 "include" 之前匹配，否则 include_next 会被当成 include
             if self.is_active() {
-                self.do_include_next(&directive["include_next".len()..].trim(), line_no);
+                self.do_include_next(rest.trim(), line_no);
             }
-        } else if directive.starts_with("include") {
+        } else if let Some(rest) = directive.strip_prefix("include") {
             if self.is_active() {
-                self.do_include(&directive[7..].trim(), line_no);
+                self.do_include(rest.trim(), line_no);
             }
-        } else if directive.starts_with("define") {
+        } else if let Some(rest) = directive.strip_prefix("define") {
             if self.is_active() {
-                self.do_define(&directive[6..].trim());
+                self.do_define(rest.trim());
             }
-        } else if directive.starts_with("undef") {
+        } else if let Some(rest) = directive.strip_prefix("undef") {
             if self.is_active() {
-                let name = directive[5..].trim();
+                let name = rest.trim();
                 self.macros.remove(name);
             }
-        } else if directive.starts_with("ifdef") {
-            let name = directive[5..].trim();
+        } else if let Some(rest) = directive.strip_prefix("ifdef") {
+            let name = rest.trim();
             let active = self.is_active() && self.macros.contains_key(name);
             self.cond_stack.push(CondState {
                 any_true: active, active, saw_else: false,
             });
-        } else if directive.starts_with("ifndef") {
-            let name = directive[6..].trim();
+        } else if let Some(rest) = directive.strip_prefix("ifndef") {
+            let name = rest.trim();
             let active = self.is_active() && !self.macros.contains_key(name);
             self.cond_stack.push(CondState {
                 any_true: active, active, saw_else: false,
@@ -877,25 +878,25 @@ impl Preprocessor {
                 self.diags.push(Diagnostic::err("E0202", "#endif without #if",
                     Span::point(&self.file, line_no, 1)));
             }
-        } else if directive.starts_with("pragma") {
-            let pragma_text = directive[6..].trim();
+        } else if let Some(rest) = directive.strip_prefix("pragma") {
+            let pragma_text = rest.trim();
             if pragma_text == "once" {
                 // 记录当前文件为 pragma once
                 let canonical = Path::new(&self.file).canonicalize()
                     .unwrap_or_else(|_| Path::new(&self.file).to_path_buf());
                 self.pragma_once.insert(canonical.to_string_lossy().to_string());
-            } else if pragma_text.starts_with("GCC diagnostic") {
-                self.handle_gcc_diagnostic(&pragma_text[14..].trim(), line_no);
-            } else if pragma_text.starts_with("pack") {
+            } else if let Some(rest) = pragma_text.strip_prefix("GCC diagnostic") {
+                self.handle_gcc_diagnostic(rest.trim(), line_no);
+            } else if let Some(rest) = pragma_text.strip_prefix("pack") {
                 // #pragma pack() / pack(1) / pack(2) / pack(4) / pack(8) / pack(16)
                 // #pragma pack(push[, n]) / #pragma pack(pop[, n])
                 // #pragma pack(push) / #pragma pack(pop)
                 // 直接 #pragma 用 0, 让 handle_pragma_pack 自动用 count_out_lines()
-                self.handle_pragma_pack(&pragma_text[4..].trim(), 0);
-            } else if pragma_text.starts_with("weak") {
+                self.handle_pragma_pack(rest.trim(), 0);
+            } else if let Some(rest) = pragma_text.strip_prefix("weak") {
                 // #pragma weak name
                 // 记录弱符号名 (后续在 codegen 中以 weak 链接生成)
-                let rest = pragma_text[4..].trim();
+                let rest = rest.trim();
                 if !rest.is_empty() {
                     // 支持 #pragma weak name 或 #pragma weak(name)
                     let name = rest.trim_start_matches('(').trim_end_matches(')').trim();
@@ -905,11 +906,11 @@ impl Preprocessor {
                         self.weak_symbols.insert(name.to_string());
                     }
                 }
-            } else if pragma_text.starts_with("STDC") {
+            } else if let Some(rest) = pragma_text.strip_prefix("STDC") {
                 // #pragma STDC FENV_ACCESS ON/OFF/DEFAULT
                 // #pragma STDC FP_CONTRACT ON/OFF/DEFAULT
                 // #pragma STDC CX_LIMITED_RANGE ON/OFF/DEFAULT
-                let rest = pragma_text[4..].trim();
+                let rest = rest.trim();
                 let parts: Vec<&str> = rest.split_whitespace().collect();
                 if parts.len() >= 2 {
                     let kind = parts[0];
@@ -919,7 +920,7 @@ impl Preprocessor {
                     }
                     // 其他 STDC 子句忽略, 仅用于兼容
                 }
-            } else if pragma_text.starts_with("locale") {
+            } else if let Some(rest) = pragma_text.strip_prefix("locale") {
                 // C23 #pragma locale: 接受 locale 切换指令
                 // 语法形式:
                 //   #pragma locale default       -> 重置为 UTF-8
@@ -929,7 +930,7 @@ impl Preprocessor {
                 //   #pragma locale "ISO-8859-1"   -> ISO-8859-1
                 // 实际 locale 切换需要 libc 支持, dcc 记录字符集设置
                 // 用于宽字符编码转换
-                let arg = pragma_text[6..].trim();
+                let arg = rest.trim();
                 match arg {
                     "default" | "reset" => self.charset = "UTF-8".to_string(),
                     s if s.starts_with('"') && s.ends_with('"') => {
@@ -947,23 +948,22 @@ impl Preprocessor {
                 // #pragma comment(...) — 链接器注释, 忽略
             }
             // 其他 #pragma 忽略
-        } else if directive.starts_with("error") {
+        } else if let Some(rest) = directive.strip_prefix("error") {
             if self.is_active() {
-                let msg = directive[5..].trim();
+                let msg = rest.trim();
                 self.diags.push(Diagnostic::err("E0203", format!("#error {}", msg),
                     Span::point(&self.file, line_no, 1)));
             }
-        } else if directive.starts_with("warning") {
+        } else if let Some(rest) = directive.strip_prefix("warning") {
             if self.is_active() {
-                let msg = directive[7..].trim();
+                let msg = rest.trim();
                 self.diags.push(Diagnostic::warn("W0200", format!("#warning {}", msg),
                     Span::point(&self.file, line_no, 1)));
             }
-        } else if directive.starts_with("embed") {
-            if self.is_active() {
-                self.do_embed(&directive[5..].trim(), line_no);
+        } else if directive.starts_with("embed")
+            && self.is_active() {
+                self.do_embed(directive[5..].trim(), line_no);
             }
-        }
         // 忽略未知指令 (line markers 等)
     }
 
@@ -987,10 +987,9 @@ impl Preprocessor {
             for s in params_str.split(',') {
                 let s = s.trim();
                 if s == "..." { variadic = true; }
-                else if s.starts_with("...") {
+                else if let Some(va_name) = s.strip_prefix("...") {
                     // ...name 形式
                     variadic = true;
-                    let va_name = &s[3..];
                     if !va_name.is_empty() { params.push(va_name.to_string()); }
                 } else if s.ends_with("...") && s.len() > 3 {
                     // name... 形式 (GNU): #define F(x...) body(x)
@@ -1034,16 +1033,16 @@ impl Preprocessor {
     fn parse_include_path_token(rest: &str) -> &str {
         let rest = rest.trim();
         let end = rest.find("//").unwrap_or(rest.len());
-        rest[..end].trim().split_whitespace().next().unwrap_or(rest)
+        rest[..end].split_whitespace().next().unwrap_or(rest)
     }
 
     fn do_include(&mut self, rest: &str, line_no: u32) {
         let rest = rest.trim();
-        let (path, is_system) = if rest.starts_with('"') {
-            let end = rest[1..].find('"').map(|i| i + 1).unwrap_or(rest.len());
+        let (path, is_system) = if let Some(stripped) = rest.strip_prefix('"') {
+            let end = stripped.find('"').map(|i| i + 1).unwrap_or(rest.len());
             (&rest[1..end], false)
-        } else if rest.starts_with('<') {
-            let end = rest[1..].find('>').map(|i| i + 1).unwrap_or(rest.len());
+        } else if let Some(stripped) = rest.strip_prefix('<') {
+            let end = stripped.find('>').map(|i| i + 1).unwrap_or(rest.len());
             (&rest[1..end], true)
         } else if Self::is_absolute_include_path(rest) {
             (Self::parse_include_path_token(rest), false)
@@ -1068,11 +1067,11 @@ impl Preprocessor {
     /// `#include_next`：从当前头文件所在目录之后继续搜索。
     fn do_include_next(&mut self, rest: &str, line_no: u32) {
         let rest = rest.trim();
-        let (path, is_system) = if rest.starts_with('"') {
-            let end = rest[1..].find('"').map(|i| i + 1).unwrap_or(rest.len());
+        let (path, is_system) = if let Some(stripped) = rest.strip_prefix('"') {
+            let end = stripped.find('"').map(|i| i + 1).unwrap_or(rest.len());
             (&rest[1..end], false)
-        } else if rest.starts_with('<') {
-            let end = rest[1..].find('>').map(|i| i + 1).unwrap_or(rest.len());
+        } else if let Some(stripped) = rest.strip_prefix('<') {
+            let end = stripped.find('>').map(|i| i + 1).unwrap_or(rest.len());
             (&rest[1..end], true)
         } else if Self::is_absolute_include_path(rest) {
             (Self::parse_include_path_token(rest), false)
@@ -1277,11 +1276,11 @@ impl Preprocessor {
     fn do_embed(&mut self, args: &str, line_no: u32) {
         let args = args.trim();
         // 提取文件名: 以 "file" 或 <file> 开头
-        let (path, rest) = if args.starts_with('"') {
-            let end = args[1..].find('"').map(|i| i + 1).unwrap_or(args.len());
+        let (path, rest) = if let Some(stripped) = args.strip_prefix('"') {
+            let end = stripped.find('"').map(|i| i + 1).unwrap_or(args.len());
             (&args[1..end], args[end+1..].trim())
-        } else if args.starts_with('<') {
-            let end = args[1..].find('>').map(|i| i + 1).unwrap_or(args.len());
+        } else if let Some(stripped) = args.strip_prefix('<') {
+            let end = stripped.find('>').map(|i| i + 1).unwrap_or(args.len());
             (&args[1..end], args[end+1..].trim())
         } else {
             self.diags.push(Diagnostic::err("E0207", "expected \"file\" or <file> for #embed",
@@ -1473,20 +1472,20 @@ impl Preprocessor {
             if let Some(prev) = self.diag_stack.pop() {
                 self.diag_state = prev;
             }
-        } else if text.starts_with("ignored") {
-            let diag_name = text[7..].trim().trim_start_matches("-W");
+        } else if let Some(rest) = text.strip_prefix("ignored") {
+            let diag_name = rest.trim().trim_start_matches("-W");
             if !diag_name.is_empty() {
                 self.diag_state.ignored.insert(diag_name.to_string());
                 self.diag_state.as_error.remove(diag_name);
             }
-        } else if text.starts_with("warning") {
-            let diag_name = text[7..].trim().trim_start_matches("-W");
+        } else if let Some(rest) = text.strip_prefix("warning") {
+            let diag_name = rest.trim().trim_start_matches("-W");
             if !diag_name.is_empty() {
                 self.diag_state.ignored.remove(diag_name);
                 self.diag_state.as_error.remove(diag_name);
             }
-        } else if text.starts_with("error") {
-            let diag_name = text[5..].trim().trim_start_matches("-W");
+        } else if let Some(rest) = text.strip_prefix("error") {
+            let diag_name = rest.trim().trim_start_matches("-W");
             if !diag_name.is_empty() {
                 self.diag_state.ignored.remove(diag_name);
                 self.diag_state.as_error.insert(diag_name.to_string());
@@ -2274,12 +2273,12 @@ impl Preprocessor {
     fn eval_int_expr(&self, expr: &str) -> i64 {
         let expr = expr.trim();
         // 替换未知标识符为 0
-        let expr = self.replace_unknown_idents(&expr);
+        let expr = self.replace_unknown_idents(expr);
         // 递归下降求值
         let mut pos = 0;
         let bytes = expr.as_bytes();
-        let val = Self::parse_ternary(bytes, &mut pos);
-        val
+        
+        Self::parse_ternary(bytes, &mut pos)
     }
 
     fn replace_unknown_idents(&self, expr: &str) -> String {
@@ -2342,11 +2341,11 @@ impl Preprocessor {
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
                 let ident: String = chars[start..i].iter().collect();
                 match ident.as_str() {
-                    "defined" | "true" => result.push_str("1"),
-                    "false" => result.push_str("0"),
+                    "defined" | "true" => result.push('1'),
+                    "false" => result.push('0'),
                     // __COUNTER__ 等特殊宏在 expand_macros 阶段已被替换为数字,
                     // 但若用户在 #if 中直接写, 仍按 0 兜底 (与 GCC 一致)
-                    _ => { result.push_str("0"); }
+                    _ => { result.push('0'); }
                 }
             } else {
                 result.push(chars[i]);
@@ -2622,7 +2621,7 @@ impl Preprocessor {
             }
             let s = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("0");
             // 去掉后缀 (L, U, LL 等)
-            let s = s.trim_end_matches(|c: char| c == 'L' || c == 'l' || c == 'U' || c == 'u');
+            let s = s.trim_end_matches(['L', 'l', 'U', 'u']);
             if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
                 i64::from_str_radix(hex, 16).unwrap_or(0)
             } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
@@ -2646,8 +2645,8 @@ impl Preprocessor {
     fn replace_has_macros(&self, expr: &str) -> String {
         let mut result = expr.to_string();
         result = self.replace_has_include(&result);
-        result = self.replace_has_attr_like(&result, "__has_attribute", |attr| Self::is_known_attribute(attr));
-        result = self.replace_has_attr_like(&result, "__has_builtin", |name| Self::is_known_builtin(name));
+        result = self.replace_has_attr_like(&result, "__has_attribute", Self::is_known_attribute);
+        result = self.replace_has_attr_like(&result, "__has_builtin", Self::is_known_builtin);
         result = self.replace_has_attr_like(&result, "__has_feature", |_| false);
         result
     }

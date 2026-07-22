@@ -76,7 +76,7 @@ impl VersionTable {
             let after = &target[idx + 1..];
             if before.ends_with('@') {
                 // NAME@@VER
-                (before[..before.len() - 1].to_string(), after.to_string(), true)
+                (before.strip_suffix('@').unwrap().to_string(), after.to_string(), true)
             } else {
                 (before.to_string(), after.to_string(), false)
             }
@@ -256,7 +256,7 @@ mod tests {
     fn gen_gnu_version_layout() {
         let mut t = VersionTable::new();
         t.add_symver(".symver foo,foo@V1");
-        let (data, idx) = t.gen_gnu_version(&vec!["".into(), "foo".into()]);
+        let (data, idx) = t.gen_gnu_version(&["".into(), "foo".into()]);
         assert_eq!(data.len(), 4);
         assert_eq!(idx[0], 0);  // empty -> local
         assert!(idx[1] >= 2);   // foo@V1 -> some non-zero index

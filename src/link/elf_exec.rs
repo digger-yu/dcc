@@ -6,6 +6,9 @@
 //   PHDR[1]  PT_LOAD  R+W  .data + .bss + .tdata + .tbss
 //   PHDR[2]  PT_GNU_STACK  RW  (无 X)
 
+// ELF PHDR/SHDR 写入函数需传入多个 p_* / sh_* 字段, 允许超过 7
+#![allow(clippy::too_many_arguments)]
+
 use super::layout::{Layout, OutputSectionKind, OutputSymbol};
 use crate::codegen::elf::{
     ELFMAG, ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ET_EXEC,
@@ -266,7 +269,7 @@ fn lookup_sh_name(shstrtab: &[u8], name: &str) -> u32 {
 }
 
 fn write_phdr(
-    out: &mut Vec<u8>, cur: &mut usize,
+    out: &mut [u8], cur: &mut usize,
     p_type: u32, p_flags: u32,
     p_offset: u64, p_vaddr: u64, p_paddr: u64,
     p_filesz: u64, p_memsz: u64, p_align: u64,
@@ -283,7 +286,7 @@ fn write_phdr(
 }
 
 fn write_shdr(
-    out: &mut Vec<u8>, cur: &mut usize,
+    out: &mut [u8], cur: &mut usize,
     sh_name: u32, sh_type: u32, sh_flags: u64,
     sh_addr: u64, sh_offset: u64, sh_size: u64,
     sh_link: u32, sh_info: u32, sh_addralign: u64, sh_entsize: u64,

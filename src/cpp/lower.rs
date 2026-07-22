@@ -178,11 +178,11 @@ impl Lower {
     fn expr_static_class(&self, e: &CppExpr) -> String {
         match e {
             CppExpr::Ident(n) => {
-                if let Some(ty) = self.local_var_types.get(n) {
-                    if let MangleType::Class(c) = ty { return c.clone(); }
+                if let Some(MangleType::Class(c)) = self.local_var_types.get(n) {
+                    return c.clone();
                 }
-                if let Some(ty) = self.param_var_types.get(n) {
-                    if let MangleType::Class(c) = ty { return c.clone(); }
+                if let Some(MangleType::Class(c)) = self.param_var_types.get(n) {
+                    return c.clone();
                 }
                 String::new()
             }
@@ -254,7 +254,8 @@ impl Lower {
         // C++14 decltype 规则: 若 expr 是无括号 id 表达式, decltype 给出声明类型;
         // 若 expr 是 (id) 或其他, decltype 给出值类别对应的类型.
         // 我们的简化: 都不包引用 (C 端无引用概念).
-        if is_decltype_auto { /* 同 ty */ } else { /* 同 ty */ }
+        // (is_decltype_auto 与 is_decltype 在本路径上行为一致)
+        let _ = is_decltype_auto;
         ty
     }
 
@@ -456,15 +457,15 @@ impl Lower {
             CppStmt::If { cond, then, els } => {
                 self.expr_needs_system_headers(cond)
                     || self.body_needs_system_headers(then)
-                    || els.as_ref().map_or(false, |b| self.body_needs_system_headers(b))
+                    || els.as_ref().is_some_and(|b| self.body_needs_system_headers(b))
             }
             CppStmt::While { cond, body } => {
                 self.expr_needs_system_headers(cond) || self.body_needs_system_headers(body)
             }
             CppStmt::For { init, cond, step, body } => {
-                init.as_ref().map_or(false, |s| self.stmt_needs_system_headers(s))
-                    || cond.as_ref().map_or(false, |e| self.expr_needs_system_headers(e))
-                    || step.as_ref().map_or(false, |s| self.stmt_needs_system_headers(s))
+                init.as_ref().is_some_and(|s| self.stmt_needs_system_headers(s))
+                    || cond.as_ref().is_some_and(|e| self.expr_needs_system_headers(e))
+                    || step.as_ref().is_some_and(|s| self.stmt_needs_system_headers(s))
                     || self.body_needs_system_headers(body)
             }
             CppStmt::LocalVar { init: Some(e), .. } => self.expr_needs_system_headers(e),
@@ -666,7 +667,7 @@ impl Lower {
                         let m_b = mangle_ctor(&n_b, &param_tys, 1);
                         self.out.push_str("    ");
                         self.out.push_str(&m_b);
-                        self.out.push_str("(");
+                        self.out.push('(');
                         self.out.push_str("this");
                         for (n, _) in params {
                             self.out.push_str(", ");
@@ -810,7 +811,7 @@ impl Lower {
                         }
                     }
                 }
-                self.out.push_str("\n");
+                self.out.push('\n');
             }
             CppDecl::Typedef => {
                 /* M11 stdlib: typedef 不产生 C 输出 (lower 后的 C
@@ -1221,11 +1222,11 @@ impl Lower {
                 for c in catches {
                     self.out.push_str("{\n");
                     if let Some(ty) = &c.ty {
-                        self.out.push_str(&format!("void* __exc = __cxa_begin_catch(__eh_ctx.matched);\n"));
+                        self.out.push_str("void* __exc = __cxa_begin_catch(__eh_ctx.matched);\n");
                         self.out.push_str(&format!("{}* __e = ({}*)__exc;\n",
                             self.mangle_to_c_ns(ty), self.mangle_to_c_ns(ty)));
                         if let Some(n) = &c.name {
-                            self.out.push_str(&format!("__cxa_end_catch(__exc);\n"));
+                            self.out.push_str("__cxa_end_catch(__exc);\n");
                             self.out.push_str(&format!("(void)__e; (void){};\n", n));
                         }
                     } else {
@@ -1279,7 +1280,7 @@ impl Lower {
                 if let Some(e) = v {
                     self.emit_expr(e);
                 } else {
-                    self.out.push_str("0");
+                    self.out.push('0');
                 }
                 self.out.push_str(";\n");
             }
@@ -1382,7 +1383,7 @@ impl Lower {
                 if let Some((obj_expr, method_name)) = call_target {
                     if let Some(class) = self.lookup_var_class(obj_expr) {
                         if self.class_methods.get(&class)
-                            .map_or(false, |m| m.contains(&method_name)) {
+                            .is_some_and(|m| m.contains(&method_name)) {
                             let n = NestedName::from_dotted(vec![class.clone(), method_name.clone()]);
                             let m = mangle_member_function(&n, &[], &MangleType::Void);
                             self.out.push_str(&m);
@@ -1442,7 +1443,7 @@ impl Lower {
                 self.emit_expr(ptr);
                 self.out.push_str("), ");
                 self.out.push_str(&m);
-                self.out.push_str("(");
+                self.out.push('(');
                 self.emit_expr(ptr);
                 for a in args {
                     self.out.push_str(", ");
@@ -1584,7 +1585,7 @@ impl Lower {
                 self.out.push(')');
             }
             CppExpr::Ternary { cond, then, els } => {
-                self.out.push_str("(");
+                self.out.push('(');
                 self.emit_expr(cond);
                 self.out.push_str(" ? ");
                 self.emit_expr(then);
@@ -1631,7 +1632,7 @@ impl Lower {
             // M17.0: `noexcept(expr)` 编译期 bool -> 我们用 1 (true) 占位
             // 实际规则: noexcept 谓词检查 expr 及其操作是否可能抛, 这里简化为 1
             CppExpr::Noexcept(_) => {
-                self.out.push_str("1");
+                self.out.push('1');
             }
             // M18.0: C++23 多维下标 `obj[i, j, k]` 改写为
             // `__dcc_multi_index_N(obj, i, j, k)` C 辅助函数

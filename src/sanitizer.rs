@@ -237,7 +237,7 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, ctx: &mut Instrum
 }
 
 fn instrument_block(
-    items: &mut Vec<BlockItem>,
+    items: &mut [BlockItem],
     flags: SanitizerFlags,
     ctx: &mut InstrumentCtx,
     guard_var: Option<&str>,
@@ -307,7 +307,7 @@ fn instrument_stmt(
                 let g = ctx.next_guard();
                 let span = then_.span();
                 let new_then = wrap_stmt_with_guard(then_, gv, g, &span);
-                *then_ = Box::new(new_then);
+                **then_ = new_then;
             }
             instrument_stmt(then_, flags, ctx, guard_var, guard_base);
             if let Some(e) = else_ {
@@ -315,7 +315,7 @@ fn instrument_stmt(
                     let g = ctx.next_guard();
                     let span = e.span();
                     let new_e = wrap_stmt_with_guard(e, gv, g, &span);
-                    *e = Box::new(new_e);
+                    **e = new_e;
                 }
                 instrument_stmt(e, flags, ctx, guard_var, guard_base);
             }
@@ -326,7 +326,7 @@ fn instrument_stmt(
                 let g = ctx.next_guard();
                 let span = body.span();
                 let new_body = wrap_stmt_with_guard(body, gv, g, &span);
-                *body = Box::new(new_body);
+                **body = new_body;
             }
             instrument_stmt(body, flags, ctx, guard_var, guard_base);
         }
@@ -336,7 +336,7 @@ fn instrument_stmt(
                 let g = ctx.next_guard();
                 let span = body.span();
                 let new_body = wrap_stmt_with_guard(body, gv, g, &span);
-                *body = Box::new(new_body);
+                **body = new_body;
             }
             instrument_expr(cond, flags, ctx, guard_var, guard_base);
         }
@@ -351,7 +351,7 @@ fn instrument_stmt(
                 let g = ctx.next_guard();
                 let span = body.span();
                 let new_body = wrap_stmt_with_guard(body, gv, g, &span);
-                *body = Box::new(new_body);
+                **body = new_body;
             }
             instrument_stmt(body, flags, ctx, guard_var, guard_base);
             if let Some(s) = step {
@@ -391,7 +391,7 @@ fn instrument_stmt(
                 let g = ctx.next_guard();
                 let span = stmt.span();
                 let new_stmt = wrap_stmt_with_guard(stmt, gv, g, &span);
-                *stmt = Box::new(new_stmt);
+                **stmt = new_stmt;
             }
             instrument_stmt(stmt, flags, ctx, guard_var, guard_base);
         }
@@ -771,13 +771,12 @@ fn try_wrap_ubsan(expr: &Expr, op: BinOp) -> Option<Expr> {
         }
         BinOp::Add | BinOp::Sub | BinOp::Mul => {
             if let Expr::Binop { l, r, .. } = expr {
-                if is_signed_int(&l.ty()) && is_signed_int(&r.ty()) {
-                    if !is_const_arith(expr) {
+                if is_signed_int(&l.ty()) && is_signed_int(&r.ty())
+                    && !is_const_arith(expr) {
                         let wrapped =
                             wrap_with_ubsan_check_arg(expr, l, "signed_integer_overflow", &span);
                         return Some(wrapped);
                     }
-                }
             }
             None
         }

@@ -111,7 +111,9 @@ pub struct LinkConfig {
 
 /// build-id 风格
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum BuildIdStyle {
+    #[default]
     None,
     Sha1,
     FastSha1,  // 优化版：复用已计算 hash，避免重算
@@ -119,9 +121,6 @@ pub enum BuildIdStyle {
     Md5,
 }
 
-impl Default for BuildIdStyle {
-    fn default() -> Self { Self::None }
-}
 
 impl Default for LinkConfig {
     fn default() -> Self {
@@ -160,6 +159,7 @@ impl Default for LinkConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum OutputKind {
     Executable,  // ET_EXEC
     PIE,         // ET_DYN, entry != 0
@@ -235,7 +235,7 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
             name: ".interp".into(),
             sh_name_off: 0,
             ty: crate::codegen::elf::SHT_PROGBITS,
-            flags: crate::codegen::elf::SHF_ALLOC as u32,
+            flags: crate::codegen::elf::SHF_ALLOC,
             align: 1,
             data: interp_data.clone(),
             size: interp_data.len() as u64,
@@ -348,7 +348,7 @@ fn collect_link_directives(bundle: &InputBundle, cfg: &mut LinkConfig) {
                         let vaddr = u64::from_le_bytes(sec.data[off..off+8].try_into().unwrap());
                         // 找对应符号
                         for s in &obj.symbols {
-                            if s.section == 1 && s.value as usize + (obj.sections[1].data.as_ptr() as usize - 0) == vaddr as usize {
+                            if s.section == 1 && s.value as usize + (obj.sections[1].data.as_ptr() as usize) == vaddr as usize {
                                 cfg.fini_builder.add(&s.name, 0);
                             }
                         }
@@ -426,8 +426,7 @@ mod tests {
         );
         std::fs::write(&p1, &a).unwrap();
         std::fs::write(&p2, &b).unwrap();
-        let mut cfg = LinkConfig::default();
-        cfg.entry = "main".into();  // 用 main 当 entry
+        let cfg = LinkConfig { entry: "main".into(), ..LinkConfig::default() };
         let bytes = link_multi_tu(&[p1.clone(), p2.clone()], Path::new("test.out"), &cfg)
             .expect("link ok");
         // 头 4 字节是 ELF magic

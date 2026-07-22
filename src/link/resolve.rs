@@ -211,7 +211,7 @@ pub fn resolve_with_config(
     }
 
     // 补充：把 LOCAL 符号也放入 resolved（供 layout 与 codegen 用）
-    for (_, sym) in bundle.symbols.iter().enumerate() {
+    for sym in bundle.symbols.iter() {
         if sym.bind != STB_LOCAL { continue; }
         if sym.section == 0 { continue; }
         let r = ResolvedSymbol {
@@ -274,7 +274,7 @@ mod tests {
             bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
         }], &[0xc3, 0xc3, 0xc3, 0xc3]);
         std::fs::write(&path, &obj).unwrap();
-        let bundle = InputBundle::from_files(&[path.clone()]).unwrap();
+        let bundle = InputBundle::from_files(std::slice::from_ref(&path)).unwrap();
         let (resolved, errs) = resolve(&bundle, &[]);
         assert!(errs.is_empty(), "{:?}", errs);
         assert!(resolved.iter().any(|r| r.name == "main" && r.defined));

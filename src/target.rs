@@ -8,6 +8,7 @@ use crate::cli::{Arch, Os, TargetTriple};
 pub enum Endian { Little, Big }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum CalleeSave { SysV, Win64, AAPCS64, AAPCS }
 
 #[derive(Clone)]

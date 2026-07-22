@@ -12,6 +12,10 @@ use crate::codegen::elf::{
     ELFCLASS64, ELFMAG, EM_X86_64, EM_AARCH64, EM_RISCV,
 };
 
+/// 从 .o 文件节头表中读出的原始字段:
+/// (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_addralign, sh_entsize)
+type RawShdr = (u32, u32, u64, u64, u64, u64, u64, u64);
+
 /// 从 .o 文件读出的节描述。
 #[derive(Debug, Clone)]
 pub struct InputSection {
@@ -90,7 +94,7 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
     if data.len() < 64 {
         return Err(ObjectError { msg: format!("{}: too short for ELF header", name) });
     }
-    if &data[0..4] != &ELFMAG {
+    if data[0..4] != ELFMAG {
         return Err(ObjectError { msg: format!("{}: bad ELF magic", name) });
     }
     if data[4] != ELFCLASS64 {
@@ -120,7 +124,7 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
     }
 
     // 读取节头表
-    let mut raw_sections: Vec<(u32, u32, u64, u64, u64, u64, u64, u64)> = Vec::with_capacity(shnum);
+    let mut raw_sections: Vec<RawShdr> = Vec::with_capacity(shnum);
     for i in 0..shnum {
         let off = shoff + i * shentsize;
         let sh_name = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
@@ -386,7 +390,7 @@ impl InputBundle {
         }
         for (oi, obj) in objects.iter().enumerate() {
             for r in &obj.relocations {
-                let target_section = find_section_in_bundle(&sections, oi, r.section as u32).unwrap_or(0);
+                let target_section = find_section_in_bundle(&sections, oi, r.section).unwrap_or(0);
                 let sym_global = *sym_index_map.get(&(oi, r.sym)).unwrap_or(&0);
                 relocations.push(FlatRela {
                     offset: r.offset,

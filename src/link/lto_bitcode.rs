@@ -689,7 +689,7 @@ fn propagate_const_in_stmt(stmt: &mut TypedStmt, consts: &HashMap<String, Option
 fn propagate_const_in_expr(e: &mut TypedExpr, consts: &HashMap<String, Option<ExprLiteral>>) {
     if let ExprKind::Local(name) = &e.kind {
         if let Some(Some(lit)) = consts.get(name) {
-            let new_lit = lit.clone();
+            let new_lit = *lit;
             e.kind = ExprKind::Constant;
             e.literal = Some(new_lit);
             return;
@@ -703,7 +703,7 @@ fn propagate_const_in_expr(e: &mut TypedExpr, consts: &HashMap<String, Option<Ex
 /// 从 init expr 中提取常量字面量
 fn extract_const_literal(expr: &TypedExpr) -> Option<ExprLiteral> {
     if let ExprKind::Constant = expr.kind {
-        return expr.literal.clone();
+        return expr.literal;
     }
     None
 }

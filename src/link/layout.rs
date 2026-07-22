@@ -298,7 +298,7 @@ impl LayoutBuilder {
                         return sec.vaddr + s.value;
                     }
                 }
-                sections.get(0).map(|s| s.vaddr).unwrap_or(self.base_addr)
+                sections.first().map(|s| s.vaddr).unwrap_or(self.base_addr)
             });
 
         // 转换重定位到输出节/输出符号空间

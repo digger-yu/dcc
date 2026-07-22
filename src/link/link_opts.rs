@@ -80,14 +80,16 @@ pub struct LinkOpts {
 impl LinkOpts {
     /// 从环境 / 默认初始化
     pub fn from_env() -> Self {
-        let mut opts = Self::default();
         // 默认: 部分 RELRO + lazy 绑定 + 不可执行栈 + 4K 页
-        opts.relro = true;
-        opts.relro_partial = true;
-        opts.lazy = true;
-        opts.execstack = false;
-        opts.max_page_size = 0x1000;
-        opts.common_page_size = 0x1000;
+        let mut opts = Self {
+            relro: true,
+            relro_partial: true,
+            lazy: true,
+            execstack: false,
+            max_page_size: 0x1000,
+            common_page_size: 0x1000,
+            ..Self::default()
+        };
         // 允许 DCC_FUSE_LD 覆盖
         if let Ok(v) = std::env::var("DCC_FUSE_LD") {
             opts.fuse_ld = Some(v);
@@ -241,7 +243,7 @@ pub fn compress_debug_sections(layout: &mut Layout, method: &str) -> Vec<String>
     for sec in &mut layout.sections {
         if !sec.name.starts_with(".debug_") { continue; }
         if sec.data.is_empty() || sec.size == 0 { continue; }
-        if sec.flags & (SHF_COMPRESSED as u32) != 0 { continue; } // 已压缩
+        if sec.flags & SHF_COMPRESSED != 0 { continue; } // 已压缩
         // 使用 miniz_oxide 压缩
         let compressed_data = match method {
             "zlib" | "zlib-gnu" | "zlib-gabi" => {
@@ -265,7 +267,7 @@ pub fn compress_debug_sections(layout: &mut Layout, method: &str) -> Vec<String>
                 new_data.extend_from_slice(&cdata);
                 sec.data = new_data;
                 sec.size = sec.data.len() as u64;
-                sec.flags |= SHF_COMPRESSED as u32;
+                sec.flags |= SHF_COMPRESSED;
                 compressed.push(sec.name.clone());
             }
         }
@@ -419,7 +421,7 @@ pub const SHF_GNU_RETAIN_FLAG: u64 = 0x200000;
 
 /// 返回 sec 是否被 SHF_GNU_RETAIN 标记
 pub fn has_retain_flag(sec: &OutputSection) -> bool {
-    sec.flags & (SHF_GNU_RETAIN as u32) != 0
+    sec.flags & SHF_GNU_RETAIN != 0
 }
 
 /// -z 选项汇总 (给 doc / verbose 用)
@@ -452,7 +454,7 @@ mod tests {
         assert!(o.relro);
         assert!(o.relro_partial);
         o.parse_z("relro=full");
-        assert!(o.relro_partial == false);
+        assert!(!o.relro_partial);
     }
 
     #[test]
@@ -496,8 +498,7 @@ mod tests {
 
     #[test]
     fn dynamic_entries_with_bind_now() {
-        let mut o = LinkOpts::default();
-        o.bind_now = true;
+        let o = LinkOpts { bind_now: true, ..LinkOpts::default() };
         let entries = gen_dynamic_entries(&o, &[]);
         assert!(entries.contains(&30u64));    // DT_FLAGS
         assert!(entries.contains(&0x8u64));   // DF_BIND_NOW

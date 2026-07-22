@@ -91,7 +91,7 @@ impl TargetClonesTable {
         let rel_dyn_idx = layout.sections.iter()
             .position(|s| s.kind == OutputSectionKind::RelDyn)
             .unwrap_or(0) as u32;
-        for (_name, tcf) in &self.funcs {
+        for tcf in self.funcs.values() {
             // 找 default 变体的 vaddr
             let mut default_vaddr = 0u64;
             for v in &tcf.variants {
@@ -112,8 +112,8 @@ impl TargetClonesTable {
                 vaddr: default_vaddr,
                 size: 0,
                 bind: STB_GLOBAL,
-                ty: STT_GNU_IFUNC as u8,
-                kind: STT_GNU_IFUNC as u8,
+                ty: STT_GNU_IFUNC,
+                kind: STT_GNU_IFUNC,
                 visibility: STV_DEFAULT,
                 section: 0,
                 shndx_if_section: 0,

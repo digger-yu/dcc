@@ -15,6 +15,7 @@ use crate::ir::Module;
 use crate::sanitizer::{SanitizerFlags, sanitizer_metadata};
 use crate::target::Target;
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit(
     module: &Module,
     target: &Target,
@@ -155,10 +156,12 @@ pub fn emit(
                     .iter()
                     .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
                     .collect();
-                let mut opts = debug::DebugOptions::default();
-                opts.level = debug_level;
-                opts.source_name = source_name.to_string();
-                opts.arch = debug::ArchKind::AArch64;
+                let opts = debug::DebugOptions {
+                    level: debug_level,
+                    source_name: source_name.to_string(),
+                    arch: debug::ArchKind::AArch64,
+                    ..debug::DebugOptions::default()
+                };
                 let cu = debug::CompileUnit {
                     source_name: source_name.to_string(),
                     comp_dir: None,
@@ -258,10 +261,12 @@ pub fn emit(
                     .iter()
                     .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
                     .collect();
-                let mut opts = debug::DebugOptions::default();
-                opts.level = debug_level;
-                opts.source_name = source_name.to_string();
-                opts.arch = debug::ArchKind::RiscV64;
+                let opts = debug::DebugOptions {
+                    level: debug_level,
+                    source_name: source_name.to_string(),
+                    arch: debug::ArchKind::RiscV64,
+                    ..debug::DebugOptions::default()
+                };
                 let cu = debug::CompileUnit {
                     source_name: source_name.to_string(),
                     comp_dir: None,
@@ -361,10 +366,12 @@ pub fn emit(
                     .iter()
                     .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
                     .collect();
-                let mut opts = debug::DebugOptions::default();
-                opts.level = debug_level;
-                opts.source_name = source_name.to_string();
-                opts.arch = debug::ArchKind::Mips;
+                let opts = debug::DebugOptions {
+                    level: debug_level,
+                    source_name: source_name.to_string(),
+                    arch: debug::ArchKind::Mips,
+                    ..debug::DebugOptions::default()
+                };
                 let cu = debug::CompileUnit {
                     source_name: source_name.to_string(),
                     comp_dir: None,
@@ -450,10 +457,12 @@ pub fn emit(
                     .iter()
                     .filter_map(|f| cg.labels().get(&f.name).map(|&pc| (f.name.as_str(), pc)))
                     .collect();
-                let mut opts = debug::DebugOptions::default();
-                opts.level = debug_level;
-                opts.source_name = source_name.to_string();
-                opts.arch = debug::ArchKind::Mips64;
+                let opts = debug::DebugOptions {
+                    level: debug_level,
+                    source_name: source_name.to_string(),
+                    arch: debug::ArchKind::Mips64,
+                    ..debug::DebugOptions::default()
+                };
                 let cu = debug::CompileUnit {
                     source_name: source_name.to_string(),
                     comp_dir: None,
@@ -539,10 +548,12 @@ pub fn emit(
                     .iter()
                     .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
                     .collect();
-                let mut opts = debug::DebugOptions::default();
-                opts.level = debug_level;
-                opts.source_name = source_name.to_string();
-                opts.arch = debug::ArchKind::Arm;
+                let opts = debug::DebugOptions {
+                    level: debug_level,
+                    source_name: source_name.to_string(),
+                    arch: debug::ArchKind::Arm,
+                    ..debug::DebugOptions::default()
+                };
                 let cu = debug::CompileUnit {
                     source_name: source_name.to_string(),
                     comp_dir: None,

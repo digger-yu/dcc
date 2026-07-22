@@ -358,7 +358,6 @@ impl DebugSections {
 // 不利于调试. -- 2026-07-21
 // ============================================================================
 #[allow(non_upper_case_globals)]
-
 const DW_TAG_array_type: u16 = 0x01;
 const DW_TAG_class_type: u16 = 0x02;
 const DW_TAG_enumeration_type: u16 = 0x04;
@@ -561,10 +560,13 @@ impl StringTable {
 // Abbrev 构造器
 // ============================================================================
 
+/// DWARF 缩写表 key: (tag code, children flag, [(attr, form), ...])
+type AbbrevKey = (u16, u8, Vec<(u16, u16)>);
+
 #[derive(Debug, Default, Clone)]
 struct AbbrevBuilder {
     data: Vec<u8>,
-    map: std::collections::HashMap<(u16, u8, Vec<(u16, u16)>), u32>,
+    map: std::collections::HashMap<AbbrevKey, u32>,
     /// 已经分配的 entry index（1-based）
     next_index: u32,
 }
@@ -1250,13 +1252,13 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
         .copy_from_slice(&header_length.to_le_bytes());
 
     // ===== Line program =====
-    let mut state = LineState::default();
-    state.line = 1;
-    state.file = 1;
-    state.column = 1;
-    state.is_stmt = true;
-    state.basic_block = false;
-    state.discriminator = 0;
+    let mut state = LineState {
+        line: 1,
+        file: 1,
+        column: 1,
+        is_stmt: true,
+        ..LineState::default()
+    };
 
     let entries: Vec<LineEntry> = if cu.line_entries.is_empty() {
         vec![LineEntry {
@@ -1328,14 +1330,14 @@ fn write_line_entry(
     //   可以 1 字节同时推进 line + pc, 比分开 4-5 字节小
     if line_advance >= line_base as i64
         && line_advance <= max_line_incr
-        && pc_advance < (min_insn as u64) * 1
+        && pc_advance < (min_insn as u64)
     {
         let op_increment = line_advance - line_base as i64;
         let opcode = opcode_base as i64 + op_increment;
         out.push(opcode as u8);
         state.address = e.pc;
         state.line = e.line as i64;
-        state.column = e.column as u32;
+        state.column = e.column;
         state.file = e.file_idx as u32 + 1;
         state.discriminator = e.discriminator as u32;
         return;
@@ -1349,7 +1351,7 @@ fn write_line_entry(
     if column_advance != 0 {
         out.push(DW_LNS_set_column);
         write_uleb128(out, e.column as u64);
-        state.column = e.column as u32;
+        state.column = e.column;
     }
     if e.is_stmt != state.is_stmt {
         out.push(DW_LNS_negate_stmt);
@@ -1394,7 +1396,7 @@ fn build_aranges(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
     } else {
         for &(lo, hi) in &cu.func_ranges {
             out.extend_from_slice(&lo.to_le_bytes());
-            out.extend_from_slice(&((hi - lo) as u64).to_le_bytes());
+            out.extend_from_slice(&(hi - lo).to_le_bytes());
         }
         out.extend_from_slice(&0u64.to_le_bytes());
         out.extend_from_slice(&0u64.to_le_bytes());
@@ -1439,11 +1441,11 @@ fn build_debug_frame(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
         let cie_ptr = (cie_id_off as i64 - (fde_start as i64 + 4)) as u32;
         out.extend_from_slice(&cie_ptr.to_le_bytes());
         out.extend_from_slice(&lo.to_le_bytes());
-        out.extend_from_slice(&((hi - lo) as u64).to_le_bytes());
+        out.extend_from_slice(&(hi - lo).to_le_bytes());
         out.push(0); // augmentation length
         // 写 CFI rows
         let mut pc_off: u64 = 0;
-        let fde_size = (hi - lo) as u64;
+        let fde_size = hi - lo;
         let rows: Vec<CfiRow> = cu
             .cfi_rows
             .iter()
@@ -1457,7 +1459,7 @@ fn build_debug_frame(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
                 if diff < 0x40 {
                     out.push(DW_CFA_advance_loc | (diff as u8 & 0x3f));
                 } else {
-                    out.push(DW_CFA_advance_loc | 0);
+                    out.push(DW_CFA_advance_loc);
                     write_uleb128(&mut out, diff);
                 }
                 pc_off = advance;
@@ -1473,7 +1475,7 @@ fn build_debug_frame(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
         // 末尾: advance 到函数结束, 恢复
         if pc_off < fde_size {
             let diff = fde_size - pc_off;
-            out.push(DW_CFA_advance_loc | 0);
+            out.push(DW_CFA_advance_loc);
             write_uleb128(&mut out, diff);
         }
         out.push(DW_CFA_def_cfa);
@@ -1681,7 +1683,7 @@ pub fn build_btf_probe() -> Vec<u8> {
     // type 1: int (32-bit signed)
     types.extend_from_slice(&1u32.to_le_bytes()); // name_off "int"
     types.extend_from_slice(&BTF_KIND_INT.to_le_bytes());
-    let int_enc = (32u32 << 24) | (0u32 << 16); // 32 bits, offset 0
+    let int_enc = 32u32 << 24; // 32 bits, offset 0
     types.extend_from_slice(&int_enc.to_le_bytes());
     // type 2: struct dcc_probe { int val; } size 4
     types.extend_from_slice(&5u32.to_le_bytes()); // name_off "dcc_probe"

@@ -119,10 +119,9 @@ pub fn pattern_matches(pattern: &str, arg: &str) -> bool {
 /// 判断 ident 是否是模板形参名 (约定: 单个 ident, 不是已知类型)
 fn is_template_param(s: &str) -> bool {
     // 已知基本类型
-    matches!(s, "int" | "long" | "short" | "char" | "void" | "float" | "double"
+    !matches!(s, "int" | "long" | "short" | "char" | "void" | "float" | "double"
         | "bool" | "signed" | "unsigned" | "int8_t" | "int16_t" | "int32_t" | "int64_t"
         | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "size_t" | "ptrdiff_t")
-        == false
         && !s.is_empty()
         && !s.contains(' ')
 }
@@ -815,8 +814,8 @@ mod tests {
     #[test]
     fn multi_param_partial_spec() {
         // 验证多形参偏特化匹配
-        let patterns = vec!["T*", "int"];
-        let args = vec!["MyClass*".to_string(), "int".to_string()];
+        let patterns = ["T*", "int"];
+        let args = ["MyClass*".to_string(), "int".to_string()];
         let all_match = patterns.iter().zip(args.iter())
             .all(|(pat, arg)| pattern_matches(pat.trim(), arg.trim()));
         assert!(all_match);

@@ -137,7 +137,7 @@ fn sum_blocks_before(u: &GcovUnit, idx: usize) -> usize {
 
 const GCOV_NOTE_MAGIC: u32 = 0x6763_6E6F; // "gcno"
 const GCOV_DATA_MAGIC: u32 = 0x6763_6461; // "gcda"
-const GCOV_VERSION:   u32 = 0x3430_2A;    // "40*"
+const GCOV_VERSION:   u32 = 0x34_30_2A;    // "40*"
 
 /// 简化版 .gcno record 编码 (按 GCC gcov-io.h):
 ///   u32 ident

@@ -167,12 +167,12 @@ impl<'a> Lexer<'a> {
             return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
         }
         // 数字
-        if b.is_ascii_digit() || (b == b'.' && self.peek_at(1).map_or(false, |c| c.is_ascii_digit())) {
+        if b.is_ascii_digit() || (b == b'.' && self.peek_at(1).is_some_and(|c| c.is_ascii_digit())) {
             let mut is_float = b == b'.';
             if b == b'0' && matches!(self.peek_at(1), Some(b'x') | Some(b'X')) {
                 self.bump(); self.bump();
                 while let Some(c) = self.peek() {
-                    if c == b'\'' && self.peek_at(1).map_or(false, |n| n.is_ascii_hexdigit()) {
+                    if c == b'\'' && self.peek_at(1).is_some_and(|n| n.is_ascii_hexdigit()) {
                         self.bump(); continue;
                     }
                     if c.is_ascii_hexdigit() { self.bump(); } else { break; }
@@ -180,14 +180,14 @@ impl<'a> Lexer<'a> {
             } else if b == b'0' && matches!(self.peek_at(1), Some(b'b') | Some(b'B')) {
                 self.bump(); self.bump();
                 while let Some(c) = self.peek() {
-                    if c == b'\'' && self.peek_at(1).map_or(false, |n| n == b'0' || n == b'1') {
+                    if c == b'\'' && self.peek_at(1).is_some_and(|n| n == b'0' || n == b'1') {
                         self.bump(); continue;
                     }
                     if c == b'0' || c == b'1' { self.bump(); } else { break; }
                 }
             } else {
                 while let Some(c) = self.peek() {
-                    if c == b'\'' && self.peek_at(1).map_or(false, |n| n.is_ascii_digit()) {
+                    if c == b'\'' && self.peek_at(1).is_some_and(|n| n.is_ascii_digit()) {
                         self.bump(); continue;
                     }
                     if c.is_ascii_digit() { self.bump(); }

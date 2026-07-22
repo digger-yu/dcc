@@ -86,14 +86,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // 预处理
     let pp_out = preproc::preprocess(
-        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+        src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
     let pack_history = pp_out.pack_history;
     let weak_symbols = pp_out.weak_symbols;
     let include_deps = pp_out.deps;
-    enrich_diags(&mut pp_diags, &src);
+    enrich_diags(&mut pp_diags, src);
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
     }
@@ -114,7 +114,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     drop(pack_history);
     drop(weak_symbols);
     let dcfg = diag_cfg(&cfg);
-    enrich_diags(&mut diags, &src);
+    enrich_diags(&mut diags, src);
     // 打印 parser 警告(注意: parser 错误会在下面 return Err,
     // 由 main.rs 统一输出,避免重复)
     for d in &diags {
@@ -142,7 +142,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // 生成依赖文件 (.d)
     if cfg.gen_dep {
-        let dep_path = cfg.dep_file.as_ref().unwrap_or_else(|| &cfg.output);
+        let dep_path = cfg.dep_file.as_ref().unwrap_or(&cfg.output);
         let target = cfg.dep_target.as_deref().unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
         let deps: Vec<String> = if cfg.dep_mmd_only {
             filter_user_deps(include_deps, &cfg.system_paths)
@@ -206,7 +206,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 "floating-point code requires SSE on the SysV AMD64 target; remove -mno-sse",
                 crate::diagnostics::Span::point(&file_name, 1, 1),
             )];
-            enrich_diags(&mut diags, &src);
+            enrich_diags(&mut diags, src);
             return Err(diags);
         }
     }

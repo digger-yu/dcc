@@ -739,13 +739,11 @@ impl<'a> CppParser<'a> {
         loop {
             // class / typename Name (= default)?
             // M18.0: 接受 CppKw::Class (C++ 词法) 和 Ident "class" (C 词法)
-            let _is_ty = if self.at(CppKw::Typename) {
-                self.bump(); true
-            } else if self.at(CppKw::Class) {
-                self.bump(); true
+            if self.at(CppKw::Typename) || self.at(CppKw::Class) {
+                self.bump();
             } else if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
-                if text == "class" { self.bump(); true } else { false }
-            } else { false };
+                if text == "class" { self.bump(); }
+            }
             let name = self.expect_ident()?;
             let default = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
                 self.bump();
@@ -1015,12 +1013,10 @@ impl<'a> CppParser<'a> {
         self.bump();
         // 简化: 把 = 之后到 ; 之前的 token 收为 body_text (M9 不解析表达式)
         let mut body_text = String::new();
-        loop {
-            if let Some(t) = &self.peek.clone() {
-                if matches!(t, CppTok::C(Tok { kind: TokKind::Semi, .. })) { break; }
-                body_text.push_str(text_of(&self.peek));
-                body_text.push(' ');
-            } else { break; }
+        while let Some(t) = &self.peek {
+            if matches!(t, CppTok::C(Tok { kind: TokKind::Semi, .. })) { break; }
+            body_text.push_str(text_of(&self.peek));
+            body_text.push(' ');
             self.bump();
         }
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Semi, .. }))) {
@@ -1062,15 +1058,14 @@ impl<'a> CppParser<'a> {
                     depth -= 1;
                     self.bump();
                     // 顶层 > 后若紧跟 ident/* /& 视作 function 声明开始, 停止 requires
-                    if depth == 0 {
-                        if matches!(&self.peek,
+                    if depth == 0
+                        && matches!(&self.peek,
                             Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))
                             | Some(CppTok::C(Tok { kind: TokKind::Star, .. }))
                             | Some(CppTok::C(Tok { kind: TokKind::Amp, .. })))
                         {
                             break;
                         }
-                    }
                 }
                 _ => { self.bump(); }
             }
@@ -1602,11 +1597,9 @@ impl<'a> CppParser<'a> {
     fn parse_operator_fn(&mut self) -> Result<CppDecl, CppParseError> {
         // 跳过 inline/static 等说明符 (例: `inline string operator+`)
         loop {
-            let is_spec = match &self.peek {
+            let is_spec = matches!(&self.peek,
                 Some(CppTok::Kw(CppKw::Inline | CppKw::Static
-                    | CppKw::Virtual | CppKw::Explicit, _)) => true,
-                _ => false,
-            };
+                    | CppKw::Virtual | CppKw::Explicit, _)));
             if is_spec { self.bump(); } else { break; }
         }
         // 形式 1: Type Class::operator+(...)  (类外定义)
@@ -1642,11 +1635,8 @@ impl<'a> CppParser<'a> {
                 else if matches!(self.peek_token_at(1),
                     Some(CppTok::C(Tok { kind: TokKind::Amp | TokKind::Star, .. })))
                 {
-                    if let Some(CppTok::C(Tok { kind: TokKind::Ident, .. })) = self.peek_token_at(2) {
-                        if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(3) {
-                            true
-                        } else { false }
-                    } else { false }
+                    matches!(self.peek_token_at(2), Some(CppTok::C(Tok { kind: TokKind::Ident, .. })))
+                        && matches!(self.peek_token_at(3), Some(CppTok::Kw(CppKw::Operator, _)))
                 } else { false }
             }
             _ => false,
@@ -2140,11 +2130,9 @@ impl<'a> CppParser<'a> {
     fn parse_free_fn(&mut self) -> Result<CppDecl, CppParseError> {
         // 跳过函数说明符 (inline, static, virtual, explicit, ...)
         loop {
-            let is_spec = match &self.peek {
+            let is_spec = matches!(&self.peek,
                 Some(CppTok::Kw(CppKw::Inline | CppKw::Static
-                    | CppKw::Virtual | CppKw::Explicit, _)) => true,
-                _ => false,
-            };
+                    | CppKw::Virtual | CppKw::Explicit, _)));
             if is_spec { self.bump(); } else { break; }
         }
         // M18.0: 解析限定名返回类型 `views::filter_view` / `std::ranges::foo`
@@ -3230,8 +3218,8 @@ impl<'a> CppParser<'a> {
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::LBracket, .. }))) {
             self.bump();
             let count = if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBracket, .. }))) {
-                let c = self.parse_expr()?;
-                c
+                
+                self.parse_expr()?
             } else { CppExpr::IntLit(0) };
             if !matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::RBracket, .. }))) {
                 return Err(CppParseError::Unexpected("]",
@@ -3449,37 +3437,29 @@ impl<'a> CppParser<'a> {
     /// 第 i 个 token 是否是除第一个类型说明符之外的其他类型说明符
     /// 用于 multi-token 类型如 `unsigned char` / `long long` / `long int`
     fn is_extra_type_spec_at(&self, i: usize) -> bool {
-        match self.peek_token_at(i) {
+        matches!(self.peek_token_at(i),
             Some(CppTok::C(Tok { kind: TokKind::KwChar
                 | TokKind::KwShort | TokKind::KwLong
                 | TokKind::KwInt | TokKind::KwFloat | TokKind::KwDouble
-                | TokKind::KwSigned | TokKind::KwUnsigned, .. })) => true,
-            _ => false,
-        }
+                | TokKind::KwSigned | TokKind::KwUnsigned, .. })))
     }
 
     /// 第 i 个 token 是否是 const/volatile/restrict 限定符
     fn is_qualifier_at(&self, i: usize) -> bool {
-        match self.peek_token_at(i) {
-            Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)) => true,
-            _ => false,
-        }
+        matches!(self.peek_token_at(i),
+            Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)))
     }
 
     /// 第 i 个 token 是否是 long / short
     fn is_long_short_at(&self, i: usize) -> bool {
-        match self.peek_token_at(i) {
-            Some(CppTok::C(Tok { kind: TokKind::KwLong | TokKind::KwShort, .. })) => true,
-            _ => false,
-        }
+        matches!(self.peek_token_at(i),
+            Some(CppTok::C(Tok { kind: TokKind::KwLong | TokKind::KwShort, .. })))
     }
 
     /// 第 i 个 token 是否是 * 或 &
     fn is_star_amp_at(&self, i: usize) -> bool {
-        match self.peek_token_at(i) {
-            Some(CppTok::C(Tok { kind: TokKind::Star | TokKind::Amp, .. })) => true,
-            _ => false,
-        }
+        matches!(self.peek_token_at(i),
+            Some(CppTok::C(Tok { kind: TokKind::Star | TokKind::Amp, .. })))
     }
 
     /// 第 i 个 token 是否是类型说明符 (int/char/.../auto/用户类型 ident)
@@ -3594,16 +3574,9 @@ fn inject_class_name(d: CppDecl, class: &str, _saved: &Option<CppTok>) -> CppDec
         CppDecl::MemberFn { name, ret, params, body, is_virtual, is_override, is_const,
             is_final, is_noexcept, is_volatile, is_friend, .. } => {
             // 已经是定义形式: 不再注入
-            let is_extern_def = name.contains("::");
-            if is_extern_def {
-                CppDecl::MemberFn { class: class.to_string(), ret, name, params, body,
-                    is_virtual, is_override, is_const,
-                    is_final, is_noexcept, is_volatile, is_friend }
-            } else {
-                CppDecl::MemberFn { class: class.to_string(), ret, name, params, body,
-                    is_virtual, is_override, is_const,
-                    is_final, is_noexcept, is_volatile, is_friend }
-            }
+            CppDecl::MemberFn { class: class.to_string(), ret, name, params, body,
+                is_virtual, is_override, is_const,
+                is_final, is_noexcept, is_volatile, is_friend }
         }
         CppDecl::Ctor { params, inits, body, is_virtual,
             is_explicit, is_noexcept, .. } => {
@@ -3655,9 +3628,7 @@ fn peek_two_str(t: &Option<CppTok>) -> &str {
 }
 
 fn strip_quotes(s: &str) -> String {
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        s[1..s.len()-1].to_string()
-    } else if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
+    if s.len() >= 2 && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\''))) {
         s[1..s.len()-1].to_string()
     } else {
         s.to_string()

@@ -203,6 +203,7 @@ impl<'a> Parser<'a> {
     /// 严格类型转换检查: 返回 Some(diag) 当出现以下情况:
     ///   1. 整型截断 (例如 (char)0x100, 由 warn_int_truncation 控制)
     ///   2. 整数 ↔ 指针隐式转换 (由 warn_int_conversion 控制)
+    ///
     /// 仅在显式 (type)expr 强制转换路径触发; 隐式 cast 走 IR。
     fn check_strict_conversion(&self, from: &Type, to: &Type, sp: crate::diagnostics::Span) -> Option<Diagnostic> {
         use crate::ast::Type::*;
@@ -710,8 +711,8 @@ impl<'a> Parser<'a> {
 
     /// 剥离 __asm__("label"): GNU asm 标签, 不影响代码生成
     fn skip_asm_label(&mut self) -> Option<String> {
-        if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "__asm" || self.cur.text == "asm") {
-            if self.peek.kind == TokKind::LParen {
+        if self.cur.kind == TokKind::Ident && (self.cur.text == "__asm__" || self.cur.text == "__asm" || self.cur.text == "asm")
+            && self.peek.kind == TokKind::LParen {
                 self.advance(); // asm
                 self.advance(); // (
                 let mut label = String::new();
@@ -740,7 +741,6 @@ impl<'a> Parser<'a> {
                 if self.cur.kind == TokKind::RParen { self.advance(); }
                 return Some(label);
             }
-        }
         None
     }
 
@@ -1002,15 +1002,13 @@ impl<'a> Parser<'a> {
             }
             // 解析带约束的内联汇编表达式
             if self.cur.kind == TokKind::LParen {
-                if let Some(expr) = self.parse_asm_expr(sp.clone()) {
-                    if let Expr::AsmExpr { asm_str, outputs, output_names, output_constraints,
-                        inputs, input_names, input_constraints, clobbers, span, .. } = expr {
-                        if !self.expect(TokKind::Semi, "';'") { return None; }
-                        return Some(vec![Decl::GlobalAsm {
-                            asm_str, outputs, output_names, output_constraints,
-                            inputs, input_names, input_constraints, clobbers, span,
-                        }]);
-                    }
+                if let Some(Expr::AsmExpr { asm_str, outputs, output_names, output_constraints,
+                    inputs, input_names, input_constraints, clobbers, span, .. }) = self.parse_asm_expr(sp.clone()) {
+                    if !self.expect(TokKind::Semi, "';'") { return None; }
+                    return Some(vec![Decl::GlobalAsm {
+                        asm_str, outputs, output_names, output_constraints,
+                        inputs, input_names, input_constraints, clobbers, span,
+                    }]);
                 }
                 return None;
             } else {
@@ -1073,7 +1071,6 @@ impl<'a> Parser<'a> {
                 return Some(vec![Decl::Typedef { name, ty: func_ty, span: sp }]);
             }
             // 数组 typedef: typedef T name[N] / name[]
-            let mut ty = ty;
             while self.cur.kind == TokKind::LBracket {
                 self.advance();
                 let arr_size = if self.cur.kind != TokKind::RBracket {
@@ -1103,16 +1100,10 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::Semi { self.advance(); return Some(vec![]); }
             // 支持 `struct T *a, *b;` 多声明符
             let mut decls = vec![];
-            loop {
-                match self.parse_var_or_func(ty.clone(), attrs.clone(), storage) {
-                    Some(ds) => decls.extend(ds),
-                    None => break,
-                }
-                if self.cur.kind == TokKind::Comma {
-                    self.advance();
-                    continue;
-                }
-                break;
+            while let Some(ds) = self.parse_var_or_func(ty.clone(), attrs.clone(), storage) {
+                decls.extend(ds);
+                if self.cur.kind != TokKind::Comma { break; }
+                self.advance();
             }
             if decls.is_empty() { None } else { Some(decls) }
         } else {
@@ -1129,16 +1120,10 @@ impl<'a> Parser<'a> {
         let storage = self.decl_storage;
         let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));
         let mut decls = vec![];
-        loop {
-            match self.parse_var_or_func(ty.clone(), attrs.clone(), storage) {
-                Some(ds) => decls.extend(ds),
-                None => break,
-            }
-            if self.cur.kind == TokKind::Comma {
-                self.advance();
-                continue;
-            }
-            break;
+        while let Some(ds) = self.parse_var_or_func(ty.clone(), attrs.clone(), storage) {
+            decls.extend(ds);
+            if self.cur.kind != TokKind::Comma { break; }
+            self.advance();
         }
         if decls.is_empty() { None } else { Some(decls) }
         }
@@ -1169,7 +1154,7 @@ impl<'a> Parser<'a> {
         let cond_text = format!("{}", const_eval::ExprDebug(&condition));
         match const_eval::eval(&condition) {
             Ok(0) => {
-                if cond_text.len() > 0 && cond_text != "<expr>" {
+                if !cond_text.is_empty() && cond_text != "<expr>" {
                     self.diags.push(Diagnostic::err(
                         "E0010", format!("{} (evaluates to: {})", message, cond_text), span));
                 } else {
@@ -1293,7 +1278,7 @@ impl<'a> Parser<'a> {
                     self.skip_asm_label();
                     self.locals = self.globals.clone();
                     self.in_function = true;
-                    let saved_func = std::mem::replace(&mut self.current_function, Some(name.name.clone()));
+                    let saved_func = self.current_function.replace(name.name.clone());
                     for p in &outer_params {
                         if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
                     }
@@ -1322,7 +1307,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.locals = self.globals.clone();
                     self.in_function = true;
-                    let saved_func = std::mem::replace(&mut self.current_function, Some(name.name.clone()));
+                    let saved_func = self.current_function.replace(name.name.clone());
                     for p in &inner_params {
                         if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
                     }
@@ -1475,7 +1460,7 @@ impl<'a> Parser<'a> {
             }
             self.locals = self.globals.clone();
             self.in_function = true;
-            let saved_func = std::mem::replace(&mut self.current_function, Some(name_for_decl.name.clone()));
+            let saved_func = self.current_function.replace(name_for_decl.name.clone());
             for p in &params {
                 if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
             }
@@ -1507,7 +1492,6 @@ impl<'a> Parser<'a> {
                 vec![]
             };
             // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
-            let attrs = attrs;
             // #pragma weak name 在 codegen 体现为 STB_WEAK 绑定, 此处合并
             let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
             Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
@@ -2282,12 +2266,8 @@ impl<'a> Parser<'a> {
                 let bw = if self.cur.kind == TokKind::Colon {
                     self.advance();
                     // 位域宽度必须是单个表达式，不能含逗号（同类型多个位域: a:8, b:4）
-                    if let Some(e) = self.parse_expr_bp(2) {
-                        if let Expr::Int { v, .. } = e {
-                            Some(v as u32)
-                        } else {
-                            None
-                        }
+                    if let Some(Expr::Int { v, .. }) = self.parse_expr_bp(2) {
+                        Some(v as u32)
                     } else {
                         None
                     }
@@ -2487,7 +2467,6 @@ impl<'a> Parser<'a> {
             let nm = if self.cur.kind == TokKind::Ident { let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id) } else { None };
             // 参数名后的 __attribute__((unused)) 等
             self.skip_attributes();
-            let mut ty = ty;
             if self.cur.kind == TokKind::LBracket {
                 self.advance();
                 // 跳过 C99 数组参数限定符: [restrict] / [static N] / [const]
@@ -2776,13 +2755,13 @@ impl<'a> Parser<'a> {
                     // 提取赋值目标 (如果 lhs 已是 Assign, 提取其目标)
                     let target = Self::assign_target(&lhs);
                     let read = Box::new(lhs.clone()); // 读取当前值
-                    let binop_ty = if matches!(target.ty(), Type::Ptr(_)) && matches!(op, BinOp::Add | BinOp::Sub) {
-                        target.ty()
-                    } else if matches!(target.ty(), Type::Float | Type::Double | Type::LongDouble) {
-                        target.ty()
-                    } else if matches!(target.ty(), Type::Vector(_, _)) {
-                        target.ty()
-                    } else { int_t() };
+                    let target_ty = target.ty();
+                    let binop_ty = match target_ty {
+                        Type::Ptr(_) if matches!(op, BinOp::Add | BinOp::Sub) => target_ty.clone(),
+                        Type::Float | Type::Double | Type::LongDouble => target_ty.clone(),
+                        Type::Vector(_, _) => target_ty.clone(),
+                        _ => int_t(),
+                    };
                     let expanded = Expr::Binop { op, l: read, r: Box::new(r), span: self.cur.span.clone(), ty: binop_ty };
                     let assign_ty = target.ty();
                     lhs = Expr::Assign { op: BinOp::Add, l: Box::new(target), r: Box::new(expanded), span: self.cur.span.clone(), ty: assign_ty }; continue; }
@@ -2803,12 +2782,12 @@ impl<'a> Parser<'a> {
                 let else_ = self.parse_expr_bp(2)?;
                 let then_ty = then_.ty();
                 let else_ty = else_.ty();
-                let cond_ty = if then_ty == else_ty {
-                    then_ty
-                } else if matches!(then_ty, Type::Ptr(_)) {
+                let cond_ty = if matches!(then_ty, Type::Ptr(_)) {
                     then_ty
                 } else if matches!(else_ty, Type::Ptr(_)) {
                     else_ty
+                } else if then_ty == else_ty {
+                    then_ty
                 } else {
                     int_t()
                 };
@@ -3039,7 +3018,7 @@ impl<'a> Parser<'a> {
                 });
                 // 语句表达式后可跟后缀运算符，如 ({ ... })()
                 let e = Expr::StmtExpr { block: Box::new(b), span: sp.clone(), ty };
-                return Some(self.parse_postfix_suffix(e, sp)?);
+                self.parse_postfix_suffix(e, sp)
             }
             TokKind::LParen if self.is_cast() => {
                 self.advance(); let ty = self.parse_type()?;
@@ -3371,7 +3350,7 @@ impl<'a> Parser<'a> {
                                 if self.expect(TokKind::RParen, "')'") {
                                     if let Some(v) = crate::const_eval::eval_int_lit(&lit) {
                                         let r = v.wrapping_abs();
-                                        e = Expr::Int { v: r as i128, span: sp.clone(), ty: int_t() };
+                                        e = Expr::Int { v: r, span: sp.clone(), ty: int_t() };
                                         continue;
                                     }
                                 }
@@ -3487,7 +3466,7 @@ impl<'a> Parser<'a> {
             }
             TokKind::FloatLit => {
                 let s = &self.cur.text;
-                let s_clean = s.trim_end_matches(|c| c == 'f' || c == 'F' || c == 'l' || c == 'L');
+                let s_clean = s.trim_end_matches(['f', 'F', 'l', 'L']);
                 let v: f64 = s_clean.parse().unwrap_or(0.0);
                 let ty = if s.ends_with('f') || s.ends_with('F') { Type::Float }
                     else if s.ends_with('l') || s.ends_with('L') { Type::LongDouble }
@@ -3652,12 +3631,11 @@ impl<'a> Parser<'a> {
             Expr::Ident { name, .. } => {
                 let n = &name.name;
                 // 如果变量不在当前局部变量表中, 但在父级局部变量表中, 则是捕获的 upvar
-                if !local_vars.contains_key(n) && parent_locals.contains_key(n) {
-                    if !out.iter().any(|(name, _)| name == n) {
+                if !local_vars.contains_key(n) && parent_locals.contains_key(n)
+                    && !out.iter().any(|(name, _)| name == n) {
                         // 偏移占位符 0, 实际偏移在 codegen 中计算
                         out.push((n.clone(), 0));
                     }
-                }
             }
             Expr::Binop { l, r, .. } => {
                 Self::collect_upvars_expr(l, local_vars, parent_locals, out);

@@ -77,13 +77,15 @@ fn link_relocatable_builtin(
     lto_enabled: bool,
     verbose: bool,
 ) -> Result<(), Vec<Diagnostic>> {
-    let mut cfg = super::LinkConfig::default();
-    cfg.output_kind = super::OutputKind::Relocatable;
-    cfg.lto = lto_enabled;
-    cfg.verbose = verbose;
-    // 内置路径不需要 entry / gc_sections
-    cfg.gc_sections = false;
-    cfg.entry = String::new();
+    let cfg = super::LinkConfig {
+        output_kind: super::OutputKind::Relocatable,
+        lto: lto_enabled,
+        verbose,
+        // 内置路径不需要 entry / gc_sections
+        gc_sections: false,
+        entry: String::new(),
+        ..Default::default()
+    };
     match super::link_multi_tu(inputs, output, &cfg) {
         Ok(bytes) => {
             std::fs::write(output, &bytes).map_err(|e| {

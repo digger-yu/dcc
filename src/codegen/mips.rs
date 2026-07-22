@@ -167,7 +167,7 @@ impl MipsCodegen {
     }
 
     fn emit_jr(&mut self, rs: u8) {
-        let inst = (0b000000 << 26) | ((rs as u32) << 21) | (0b001000 << 0);
+        let inst = ((rs as u32) << 21) | 0b001000;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 

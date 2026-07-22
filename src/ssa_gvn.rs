@@ -61,7 +61,7 @@ fn gvn_stmt(s: &mut Stmt, avail: &mut HashMap<String, String>, copies: &mut Hash
                     propagate_copies_expr(r, copies);
                     if let Some(key) = gvn_key_string(r) {
                         if let Some(prev) = avail.get(&key) {
-                            *r = Box::new(ident_expr(prev, r.ty()));
+                            **r = ident_expr(prev, r.ty());
                             copies.insert(name.name.clone(), prev.clone());
                         } else {
                             avail.insert(key, name.name.clone());

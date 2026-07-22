@@ -26,7 +26,7 @@ pub fn gen_dso_handle(layout: &Layout) -> u64 {
         }
     }
     // 兜底: .text 起始
-    layout.sections.get(0).map(|s| s.vaddr).unwrap_or(0)
+    layout.sections.first().map(|s| s.vaddr).unwrap_or(0)
 }
 
 /// 收集 .fini_array 需要的 destructor 列表

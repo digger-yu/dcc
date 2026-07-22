@@ -109,6 +109,7 @@ pub struct Block { pub items: Vec<BlockItem>, pub span: Span }
 pub enum BlockItem { Stmt(Stmt), Decl(Decl) }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Stmt {
     Return { val: Option<Expr>, span: Span },
     Expr    { e: Expr, span: Span },
@@ -139,6 +140,7 @@ pub struct Case {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum Expr {
     Int       { v: i128, span: Span, ty: Type },
     Float     { v: f64, span: Span, ty: Type },
@@ -186,6 +188,7 @@ pub enum Expr {
 
 /// 初始化项: 普通值 或 指定初始化器
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum InitItem {
     /// 普通初始化值
     Expr(Expr),
@@ -195,6 +198,7 @@ pub enum InitItem {
 
 /// 指定符
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Designator {
     /// .field
     Field(Ident),
@@ -329,13 +333,13 @@ impl Type {
     }
     pub fn is_arith(&self) -> bool { self.is_int() || matches!(self, Type::Float | Type::Double | Type::LongDouble | Type::Fract | Type::Accum | Type::Complex(_)) }
 
-    pub fn layout_struct(fields: &mut Vec<Field>, is_union: bool) {
+    pub fn layout_struct(fields: &mut [Field], is_union: bool) {
         Self::layout_struct_with_pack(fields, is_union, None);
     }
 
     /// 按对齐限制布局: max_align = None 用自然对齐, Some(n) 把字段对齐限制为 n
     /// (实现 #pragma pack(n): 把结构体内部所有字段对齐不超过 n 字节)
-    pub fn layout_struct_with_pack(fields: &mut Vec<Field>, is_union: bool, max_align: Option<usize>) {
+    pub fn layout_struct_with_pack(fields: &mut [Field], is_union: bool, max_align: Option<usize>) {
         // 实际应用的对齐: None => 自然对齐, Some(n) => min(n, 自然对齐)
         let eff = |nat: usize| -> usize {
             match max_align { Some(n) if n < nat => n, _ => nat }
@@ -402,7 +406,7 @@ impl Type {
     }
 
     /// packed 结构体布局: 所有字段对齐为 1, 无填充
-    pub fn layout_struct_packed(fields: &mut Vec<Field>, is_union: bool) {
+    pub fn layout_struct_packed(fields: &mut [Field], is_union: bool) {
         if is_union {
             for f in fields.iter_mut() { f.offset = 0; }
         } else {
@@ -411,7 +415,7 @@ impl Type {
                 if let Some(bw) = f.bit_width {
                     f.offset = off;
                     f.bit_offset = 0; // 简化: packed 下位域从字节边界开始
-                    off += (bw as usize + 7) / 8;
+                    off += (bw as usize).div_ceil(8);
                 } else {
                     f.offset = off;
                     off += f.ty.size();

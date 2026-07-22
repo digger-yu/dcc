@@ -51,9 +51,9 @@ pub fn build_note_section(style: BuildIdStyle, image: &[u8]) -> (usize, Vec<u8>)
     out.extend_from_slice(&(descsz as u32).to_le_bytes());
     out.extend_from_slice(&3u32.to_le_bytes());  // NT_GNU_BUILD_ID
     out.extend_from_slice(name);
-    for _ in 0..name_pad { out.push(0); }
+    out.resize(out.len() + name_pad, 0);
     out.extend_from_slice(&desc);
-    for _ in 0..desc_pad { out.push(0); }
+    out.resize(out.len() + desc_pad, 0);
     (descsz, out)
 }
 
@@ -76,7 +76,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
             w[i] = v.rotate_left(1);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        for i in 0..80 {
+        for (i, &wi) in w.iter().enumerate() {
             let (f, k) = if i < 20 {
                 ((b & c) | ((!b) & d), 0x5A827999)
             } else if i < 40 {
@@ -86,7 +86,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
             } else {
                 (b ^ c ^ d, 0xCA62C1D6)
             };
-            let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(w[i]);
+            let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(wi);
             e = d; d = c; c = b.rotate_left(30); b = a; a = temp;
         }
         h[0] = h[0].wrapping_add(a);

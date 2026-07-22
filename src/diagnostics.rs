@@ -444,7 +444,7 @@ fn sarif_result(d: &Diagnostic) -> String {
             file = file,
             line = d.span.line,
             col = d.span.col.max(1),
-            end_col = d.span.col.saturating_sub(1).saturating_add(d.span.len.max(1) as u32).max(1),
+            end_col = d.span.col.saturating_sub(1).saturating_add(d.span.len.max(1)).max(1),
             hint = hint_part,
         )
     } else {
@@ -631,11 +631,7 @@ impl Diagnostic {
                     out.push_str(sev_color);
                     out.push_str(line);
                     out.push_str(reset);
-                } else if line.contains("hint:") {
-                    out.push_str(cyan);
-                    out.push_str(line);
-                    out.push_str(reset);
-                } else if line.contains(" --> ") {
+                } else if line.contains("hint:") || line.contains(" --> ") {
                     out.push_str(cyan);
                     out.push_str(line);
                     out.push_str(reset);

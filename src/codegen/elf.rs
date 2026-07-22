@@ -6,6 +6,9 @@
 
 #![allow(dead_code)]
 
+// ELF 段头/节头序列化函数需传入多个字段, 允许超过 7
+#![allow(clippy::too_many_arguments)]
+
 
 // ===== ELF 常量 =====
 pub const ELFMAG:    [u8; 4] = [0x7f, b'E', b'L', b'F'];
@@ -283,9 +286,8 @@ pub fn build_elf_exec_x86_64(
     let sh_shstrtab = sh_strtab + 1;
     let shnum = sh_shstrtab + 1;
 
-    let mut out = Vec::new();
+    let mut out = vec![0u8; hdr];
     // 占位 ELF 头 + Program Header
-    out.resize(hdr, 0);
 
     let image_off = hdr as u64;
     out.extend_from_slice(image);
@@ -367,8 +369,8 @@ pub fn build_elf_exec_x86_64(
     out[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
     out[0x38..0x3a].copy_from_slice(&1u16.to_le_bytes());
     out[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
-    out[0x3c..0x3e].copy_from_slice(&(shnum as u16).to_le_bytes());
-    out[0x3e..0x40].copy_from_slice(&(sh_shstrtab as u16).to_le_bytes());
+    out[0x3c..0x3e].copy_from_slice(&shnum.to_le_bytes());
+    out[0x3e..0x40].copy_from_slice(&sh_shstrtab.to_le_bytes());
 
     let p_filesz = hdr as u64 + image.len() as u64;
     let p_memsz = p_filesz + tbss_size;
@@ -690,13 +692,13 @@ fn build_elf_rel_generic(
             0, rodata_off as u64, rodata.len() as u64, 0, 0, 8, 0);
     }
     write_section_header(&mut out, symtab_name, SHT_SYMTAB, 0,
-        0, symtab_off as u64, symtab.len() as u64, strtab_idx as u32, 1, 8, 24);
+        0, symtab_off as u64, symtab.len() as u64, strtab_idx, 1, 8, 24);
     write_section_header(&mut out, strtab_name, SHT_STRTAB, 0,
         0, strtab_off as u64, strtab.len() as u64, 0, 0, 1, 0);
     write_section_header(&mut out, shstrtab_name, SHT_STRTAB, 0,
         0, shstrtab_off as u64, shstr.len() as u64, 0, 0, 1, 0);
     write_section_header(&mut out, rela_text_name, SHT_RELA, SHF_INFO_LINK,
-        0, rela_text_off as u64, rela_text.len() as u64, symtab_idx as u32, 1, 8, 24);
+        0, rela_text_off as u64, rela_text.len() as u64, symtab_idx, 1, 8, 24);
     if !rela_rodata.is_empty() {
         write_section_header(&mut out, rela_rodata_name, SHT_RELA, SHF_INFO_LINK,
             0, rela_rodata_off as u64, rela_rodata.len() as u64, symtab_idx, rodata_idx as u32, 8, 24);
@@ -836,7 +838,7 @@ pub fn build_elf_rel_x86_64(
     // 自定义节
     let mut extra_offsets = Vec::with_capacity(extra_sections.len());
     for sec in extra_sections {
-        offset = align(offset, sec.align.max(1) as u64);
+        offset = align(offset, sec.align.max(1));
         extra_offsets.push(offset);
         if sec.ty != SHT_NOBITS {
             offset += sec.data.len() as u64;
@@ -897,8 +899,8 @@ pub fn build_elf_rel_x86_64(
     out.extend_from_slice(&0u16.to_le_bytes());   // e_phentsize
     out.extend_from_slice(&0u16.to_le_bytes());   // e_phnum
     out.extend_from_slice(&64u16.to_le_bytes());  // e_shentsize
-    out.extend_from_slice(&(shnum as u16).to_le_bytes()); // e_shnum
-    out.extend_from_slice(&(sh_shstrtab as u16).to_le_bytes()); // e_shstrndx
+    out.extend_from_slice(&shnum.to_le_bytes()); // e_shnum
+    out.extend_from_slice(&sh_shstrtab.to_le_bytes()); // e_shstrndx
 
     // ===== .text =====
     pad_to(&mut out, text_off as usize);
@@ -1077,8 +1079,8 @@ fn build_shstrtab(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRel
 fn shstrtab_name_offset(extra_sections: &[ElfSection], idx: usize) -> u32 {
     // \0(1) + .text\0(6) + .rodata\0(8) + .data\0(6) + .bss\0(5) + .tdata\0(7) + .tbss\0(6) = 39
     let mut off = 39u32;
-    for i in 0..idx {
-        off += extra_sections[i].name.len() as u32 + 1;
+    for sec in &extra_sections[..idx] {
+        off += sec.name.len() as u32 + 1;
     }
     off
 }
@@ -1089,8 +1091,8 @@ fn shstrtab_extra_rela_name_offset(extra_sections: &[ElfSection], extra_rela_sec
     for sec in extra_sections {
         off += sec.name.len() as u32 + 1;
     }
-    for i in 0..idx {
-        off += extra_rela_sections[i].name.len() as u32 + 1;
+    for sec in &extra_rela_sections[..idx] {
+        off += sec.name.len() as u32 + 1;
     }
     off
 }
@@ -1179,7 +1181,7 @@ fn write_section_header(
 
 /// 从 ET_REL ELF64 目标文件中按节名读取载荷（供 LTO 摘要提取等）。
 pub fn read_section_data(elf: &[u8], section_name: &str) -> Option<Vec<u8>> {
-    if elf.len() < 64 || elf.get(0..4)? != &ELFMAG || elf[4] != ELFCLASS64 {
+    if elf.len() < 64 || elf.get(0..4)? != ELFMAG || elf[4] != ELFCLASS64 {
         return None;
     }
     let shoff = u64::from_le_bytes(elf.get(40..48)?.try_into().ok()?);
@@ -1287,13 +1289,13 @@ pub fn referenced_symbol_names(elf: &[u8]) -> Vec<String> {
     let sym_count = sym_size / sym_entsize as usize;
 
     let mut sym_names: Vec<String> = vec![String::new(); sym_count];
-    for i in 0..sym_count {
+    for (i, name) in sym_names.iter_mut().enumerate() {
         let base = i * sym_entsize as usize;
         if base + 24 > symtab_data.len() {
             break;
         }
         let name_idx = u32::from_le_bytes(symtab_data[base..base + 4].try_into().unwrap()) as usize;
-        sym_names[i] = read_cstr(strtab_data, name_idx).unwrap_or("").to_string();
+        *name = read_cstr(strtab_data, name_idx).unwrap_or("").to_string();
     }
 
     let mut seen = std::collections::HashSet::new();
@@ -1524,13 +1526,13 @@ fn build_elf32_rel_generic(
     let mut rel_text = Vec::new();
     for rel in relocations {
         rel_text.extend_from_slice(&(rel.offset as u32).to_le_bytes());
-        let info = ((rel.sym_index as u32) << 8) | (rel.rel_type as u32);
+        let info = (rel.sym_index << 8) | rel.rel_type;
         rel_text.extend_from_slice(&info.to_le_bytes());
     }
     let mut rel_rodata = Vec::new();
     for rel in rodata_relocations {
         rel_rodata.extend_from_slice(&(rel.offset as u32).to_le_bytes());
-        let info = ((rel.sym_index as u32) << 8) | (rel.rel_type as u32);
+        let info = (rel.sym_index << 8) | rel.rel_type;
         rel_rodata.extend_from_slice(&info.to_le_bytes());
     }
 
@@ -1640,13 +1642,13 @@ fn build_elf32_rel_generic(
             0, rodata_off as u32, rodata.len() as u32, 0, 0, 4, 0);
     }
     write_section_header32(&mut out, symtab_name, SHT_SYMTAB, 0,
-        0, symtab_off as u32, symtab.len() as u32, strtab_idx as u32, 1, 4, 16);
+        0, symtab_off as u32, symtab.len() as u32, strtab_idx, 1, 4, 16);
     write_section_header32(&mut out, strtab_name, SHT_STRTAB, 0,
         0, strtab_off as u32, strtab.len() as u32, 0, 0, 1, 0);
     write_section_header32(&mut out, shstrtab_name, SHT_STRTAB, 0,
         0, shstrtab_off as u32, shstr.len() as u32, 0, 0, 1, 0);
     write_section_header32(&mut out, rel_text_name, SHT_RELA, SHF_INFO_LINK,
-        0, rel_text_off as u32, rel_text.len() as u32, symtab_idx as u32, 1, 4, 8);
+        0, rel_text_off as u32, rel_text.len() as u32, symtab_idx, 1, 4, 8);
     if !rel_rodata.is_empty() {
         write_section_header32(&mut out, rel_rodata_name, SHT_RELA, SHF_INFO_LINK,
             0, rel_rodata_off as u32, rel_rodata.len() as u32, symtab_idx, rodata_idx as u32, 4, 8);

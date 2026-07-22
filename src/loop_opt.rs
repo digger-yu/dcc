@@ -103,7 +103,7 @@ fn split_invariants(body: &mut Block, loop_var: Option<&str>) -> Vec<BlockItem> 
 
 fn is_invariant_item(item: &BlockItem, loop_var: Option<&str>) -> bool {
     match item {
-        BlockItem::Decl(Decl::Var(v)) => v.init.as_ref().map_or(true, |e| !expr_mentions(e, loop_var)),
+        BlockItem::Decl(Decl::Var(v)) => v.init.as_ref().is_none_or(|e| !expr_mentions(e, loop_var)),
         BlockItem::Stmt(Stmt::Expr { e, .. }) => match e {
             Expr::Assign { l, r, .. } => {
                 !expr_mentions(l, loop_var) && !expr_mentions(r, loop_var)
@@ -321,7 +321,7 @@ fn parse_lt_limit(cond: &Expr, ivar: &str) -> Option<usize> {
             if let Expr::Ident { name, .. } = l.as_ref() {
                 if name.name == ivar {
                     if let Ok(v) = const_eval::eval(r) {
-                        if v >= 0 && v <= 4 {
+                        if (0..=4).contains(&v) {
                             return Some(v as usize);
                         }
                     }

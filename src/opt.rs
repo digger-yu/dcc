@@ -78,7 +78,7 @@ fn fold_program(prog: &mut Program) {
     }
 }
 
-fn fold_block(items: &mut Vec<BlockItem>) {
+fn fold_block(items: &mut [BlockItem]) {
     for item in items.iter_mut() {
         match item {
             BlockItem::Stmt(s) => fold_stmt(s),
@@ -117,10 +117,8 @@ fn fold_stmt(s: &mut Stmt) {
             }
             fold_stmt(body);
         }
-        Stmt::Return { val, .. } => {
-            if let Some(e) = val {
-                *e = fold_expr(e.clone());
-            }
+        Stmt::Return { val: Some(e), .. } => {
+            *e = fold_expr(e.clone());
         }
         Stmt::Expr { e, .. } => *e = fold_expr(e.clone()),
         Stmt::Block { b, .. } => fold_block(&mut b.items),

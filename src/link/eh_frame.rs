@@ -63,7 +63,7 @@ impl Default for EhFrameHdr {
 
 /// 生成 .eh_frame_hdr 字节
 pub fn serialize(hdr: &EhFrameHdr) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(4);
     out.push(hdr.version);
     out.push(hdr.eh_frame_ptr_enc);
     out.push(hdr.fde_count_enc);

@@ -206,11 +206,9 @@ pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
                         }
                     }
                 }
-                InstKind::Store { e, src } => {
-                    if let Operand::Var(v) = e {
-                        let src_set = set_of(src, &sets).unwrap_or(0);
-                        union_into(&mut sets, &mut parents, &v.name(), src_set);
-                    }
+                InstKind::Store { e: Operand::Var(v), src } => {
+                    let src_set = set_of(src, &sets).unwrap_or(0);
+                    union_into(&mut sets, &mut parents, &v.name(), src_set);
                 }
                 InstKind::Call { args, .. } => {
                     if let Some(d) = &inst.dest {
@@ -400,7 +398,7 @@ pub fn loop_tiling(func: &mut Function) -> bool {
         if !n.starts_with("for.body") { continue; }
         let bb = func.blocks.get(n).cloned();
         if let Some(bb) = bb {
-            if bb.insts.len() <= 4 && bb.insts.len() >= 1 {
+            if bb.insts.len() <= 4 && !bb.insts.is_empty() {
                 // 复制最后一条纯运算到 BB 末尾 (作为 tiled 第二 tile)
                 if let Some(last) = bb.insts.last().cloned() {
                     if matches!(last.kind, InstKind::Bin {..} | InstKind::Un {..} | InstKind::Cast {..}) {
@@ -507,7 +505,7 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
 /// 物理寄存器池; 这里只在 BB 顶端插入一个 `__dcc_regalloc` hint, 标记该
 /// 函数经过了 register allocation pass)。
 pub fn register_allocation(func: &mut Function) -> bool {
-    if func.params.is_empty() && func.blocks.get(&func.entry).map_or(true, |b| b.insts.is_empty()) {
+    if func.params.is_empty() && func.blocks.get(&func.entry).is_none_or(|b| b.insts.is_empty()) {
         return false;
     }
     if let Some(entry) = func.blocks.get_mut(&func.entry) {

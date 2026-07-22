@@ -101,7 +101,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
     use std::collections::HashMap;
     let mut by_section: HashMap<u32, Vec<OutputRela>> = HashMap::new();
     for r in relas {
-        by_section.entry(r.section).or_insert_with(Vec::new).push(r);
+        by_section.entry(r.section).or_default().push(r);
     }
 
     for (sec_idx, rs) in by_section {
@@ -148,6 +148,9 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                 return Err(RelocError::OutOfRange);
             }
             // 1. x86-64 通用重定位
+            // 注: 不同架构的 relocation type 数值可能撞车 (如 R_X86_64_64=1 与 R_RISCV_32=1),
+            // layout 实际上只装一种 arch 的重定位, 故此处 match 看似 overlap 实则安全.
+            #[allow(clippy::match_overlapping_arm)]
             match r_type {
                 R_X86_64_64 => {
                     if r_offset + 8 > sec_data_len { return Err(RelocError::OutOfRange); }
@@ -566,6 +569,7 @@ mod tests {
     use crate::link::layout::{OutputSectionKind, OutputSection, OutputSymbol};
     use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS, STB_GLOBAL, STT_FUNC};
 
+    #[allow(clippy::too_many_arguments)]
     fn mk_layout(text_vaddr: u64, text: Vec<u8>, text_off: u64,
                  data_vaddr: u64, data: Vec<u8>, data_off: u64,
                  relas: Vec<OutputRela>, sym_value: u64, sym_section: u16) -> Layout {

@@ -2,6 +2,7 @@
 use super::*;
 
 #[test]
+#[allow(clippy::assertions_on_constants)]
 fn stdlib_constants_in_range() {
     assert!(STDLIB_ENABLED);
     assert!(!STD_HEADERS.is_empty());
