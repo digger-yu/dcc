@@ -561,7 +561,9 @@ M19 关键改动:
   - `.gcno` notes + `.gcda` 数据 二进制格式 (与 GCC gcov-9 layout 对齐)
   - `GcovUnit` / `GcovFunction` / `GcovBlock` 数据结构
   - `write_notes` / `write_data_with_counters` 写盘入口
-  - 已知限制：cfg_checksum 简化公式；非 x86_64 arch 未验证
+  - 🟢 (M24) `cfg_checksum` 采用 GCC libgcov `compute_cfg_checksum` 公式:
+    对每条 succ arc 加 `(dst_index + 1)`, CFG 拓扑敏感
+  - 已知限制: 非 x86_64 arch 未验证
 - **AutoFDO** 🟡
   - 简化 text format parser（`func <name> <total>` / `line <name>
     <line> <col> <samples>`）

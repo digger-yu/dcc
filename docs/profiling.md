@@ -165,7 +165,8 @@ function_data[] : N × {
 ### 2.4 已知限制
 
 * 配合 `llvm-cov gcov` 不可读 (BB 边界 tag 不全)
-* 简化 cfg_checksum 公式：仅基于 bb 数 + arc 数 + 名字长度
+* ✅ (M24) `cfg_checksum` 采用 GCC libgcov `compute_cfg_checksum` 公式
+  (每条 succ arc 加 `dst_index + 1`), CFG 拓扑敏感
 * 真实场景下用 `llvm-cov convert-for-llvm` 二次转换
 
 ---

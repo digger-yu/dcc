@@ -198,14 +198,27 @@ fn write_pascal_string(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(bytes);
 }
 
+/// cfg_checksum: 与 GCC libgcov `compute_cfg_checksum` 完全一致.
+///
+/// 公式 (见 libgcc/libgcov.c: compute_cfg_checksum):
+///     for each bb:
+///         for each succ:
+///             chksum += succ->index + 1
+///
+/// 含义: 检验和由 CFG 拓扑决定. 对 BB 拓扑或 successor 关系任一变化
+/// 都会改变 chksum, 借由 .gcno/.gcda 配对校验可在 profile 误用 (用错
+/// 源文件混用 .gcda) 时被 `gcov-tool` 拒绝. 不依赖函数名 / 行号,
+/// 也不需"每 BB +1"——这一行为与 GCC 完全等价 (但与 dcc 旧版"块数+arc
+/// 数+名字长"公式不同, 旧公式与 `llvm-cov gcov` 不兼容).
 fn cfg_checksum(f: &GcovFunction) -> u32 {
-    // 与 GCC 一致: 基于 bb/arc 数 + 名字长度
     let mut h: u32 = 0;
-    h = h.wrapping_add(f.blocks.len() as u32);
     for bb in &f.blocks {
-        h = h.wrapping_add(bb.succs.len() as u32);
+        for (dst, _flags) in &bb.succs {
+            // succ BB 的索引 + 1. +1 防止 BB 0 边被忽略
+            // (与 GCC 公式 `succ->index + 1` 一致).
+            h = h.wrapping_add(*dst + 1);
+        }
     }
-    h = h.wrapping_add(f.name.len() as u32);
     h
 }
 
@@ -254,5 +267,79 @@ mod tests {
         let n = u.write_data_with_counters(&tmp, &[7, 11]).unwrap();
         assert!(n > 16);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// cfg_checksum 与 GCC libgcov `compute_cfg_checksum` 一致:
+    /// 对每条 succ arc 加 (dst_index + 1).
+    /// 样例: BB0 -> BB1, BB1 无 succ → chksum = (1+1) = 2.
+    #[test]
+    fn gcov_cfg_checksum_gcc_compat() {
+        let f = GcovFunction {
+            name: "main".into(),
+            file: "main.c".into(),
+            ident: 1,
+            lineno: 1,
+            blocks: vec![
+                GcovBlock { flags: 0, succs: vec![(1, 0)] },
+                GcovBlock { flags: 0, succs: vec![] },
+            ],
+        };
+        // 0->1, 1 无 succ: chksum = (1+1) = 2
+        assert_eq!(cfg_checksum(&f), 2);
+    }
+
+    /// cfg_checksum 对 CFG 拓扑敏感: BB 数相同但 succ 不同 → 检验和
+    /// 不同. 验证公式不只算"bb 数 + succ 数"而是看具体 dst.
+    #[test]
+    fn gcov_cfg_checksum_topology_sensitive() {
+        let f_a = GcovFunction {
+            name: "f".into(),
+            file: "f.c".into(),
+            ident: 1,
+            lineno: 1,
+            blocks: vec![
+                GcovBlock { flags: 0, succs: vec![(1, 0)] },  // 0->1
+                GcovBlock { flags: 0, succs: vec![] },
+            ],
+        };
+        let f_b = GcovFunction {
+            name: "f".into(),
+            file: "f.c".into(),
+            ident: 1,
+            lineno: 1,
+            blocks: vec![
+                GcovBlock { flags: 0, succs: vec![(2, 0)] },  // 0->2 (与 f_a 同样 1 个 succ, 但 dst 不同)
+                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock { flags: 0, succs: vec![] },
+            ],
+        };
+        // f_a: 0->1 → (1+1) = 2
+        assert_eq!(cfg_checksum(&f_a), 2);
+        // f_b: 0->2 → (2+1) = 3
+        assert_eq!(cfg_checksum(&f_b), 3);
+        // 同 1 个 succ 边但拓扑不同 → chksum 不同 (旧公式两条都返回 1+1+0+1=3)
+    }
+
+    /// cfg_checksum 对环路 (loop) 处理正确: 1->0 + 0->1 两个边
+    /// → chksum = (1+1) + (0+1) = 3.
+    #[test]
+    fn gcov_cfg_checksum_loop() {
+        let f = GcovFunction {
+            name: "loop".into(),
+            file: "l.c".into(),
+            ident: 1,
+            lineno: 1,
+            blocks: vec![
+                GcovBlock { flags: 0, succs: vec![(1, 0)] },  // 0->1 (entry)
+                GcovBlock { flags: 0, succs: vec![(0, 0), (2, 0)] },  // 1->0 + 1->2
+                GcovBlock { flags: 0, succs: vec![] },
+            ],
+        };
+        // succs:
+        //   bb0: 0->1 → 2
+        //   bb1: 1->0 → 1, 1->2 → 3
+        //   bb2: nothing
+        // total: 2 + 1 + 3 = 6
+        assert_eq!(cfg_checksum(&f), 6);
     }
 }
