@@ -19,6 +19,7 @@ use crate::link;
 use crate::sanitizer;
 use crate::format_check;
 use crate::lto;
+use crate::profile;
 
 /// 根据 Config 构造 DiagnosticsConfig。-v / DCC_FORCE_COLOR 等不参与,
 /// 直接由 ColorPolicy::Auto 走 IsTerminal 判定。
@@ -133,6 +134,19 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // sanitizer 插桩（AST 层，在 IR lower 之前）
     sanitizer::instrument_program(&mut prog, cfg.sanitizers);
+
+    // PGO 插桩（AST 层）: -fprofile-generate 时在每个函数体顶部插入
+    // `__dcc_pgo_count_fn(idx)` 调用. 运行期由用户提供的 runtime helper
+    // (或 dcc 内置桩) 累加 idx -> counter, atexit 写 `<name>.profraw`.
+    // 权重读回 (`-fprofile-use`) 仅解析 .profraw, 不修改 codegen.
+    if cfg.profile.pgo_generate.is_some() {
+        let pgo_cfg = profile::pgo::PgoConfig {
+            generate: true,
+            use_file: cfg.profile.pgo_use.as_ref().map(|p| p.display().to_string()),
+            out_dir: cfg.profile.pgo_generate.as_ref().map(|p| p.display().to_string()),
+        };
+        profile::pgo::instrument_program(&mut prog, &pgo_cfg);
+    }
 
     // dump AST?
     if cfg.dump_ast {

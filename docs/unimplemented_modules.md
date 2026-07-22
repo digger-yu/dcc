@@ -555,8 +555,10 @@ M19 关键改动:
     + u64 计数器数组）
   - `pgo::instrument_program` 在 AST 层 FuncDecl 顶部插入
     `__dcc_pgo_count_fn(idx)` 调用
+  - ✅ (M24) driver.rs 接入 `pgo::instrument_program`, codegen 阶段
+    自动 emit `call __dcc_pgo_count_fn` 指令
   - `PgoWeights` 聚合 func 入口计数，备查
-  - 已知限制：codegen 阶段尚未自动 emit 计数器，下游权重传播 stub
+  - 已知限制: 下游权重传播 stub
 - **GCOV**（`-ftest-coverage` / `-fprofile-arcs`） 🟢
   - `.gcno` notes + `.gcda` 数据 二进制格式 (与 GCC gcov-9 layout 对齐)
   - `GcovUnit` / `GcovFunction` / `GcovBlock` 数据结构

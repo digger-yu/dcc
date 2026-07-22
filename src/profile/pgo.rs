@@ -236,4 +236,142 @@ mod tests {
         assert_eq!(w.count_of("main"), 10);
         assert_eq!(w.count_of("foo"), 9);
     }
+
+    /// 验证 instrument_program 会在每个有 body 的函数顶部插入
+    /// `__dcc_pgo_count_fn(idx)` 调用. 这是 PGO "codegen 阶段自动
+    /// emit 计数器" 的前端桥: AST 改写后被 IR lower 与 codegen
+    /// 消费, 最终 emit 为 `call __dcc_pgo_count_fn` 指令.
+    #[test]
+    fn instrument_program_inserts_call_at_body_top() {
+        use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
+        let span_zero = crate::diagnostics::Span::point("m.c", 1, 0);
+        let mut prog = Program { decls: vec![] };
+        let body = Block { items: vec![
+            BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Int { v: 0, span: span_zero.clone(), ty: Type::Int }),
+                span: span_zero.clone(),
+            }),
+        ], span: span_zero.clone()};
+        prog.decls.push(Decl::Func(FuncDecl {
+            name: Ident { name: "foo".into(), span: span_zero.clone() },
+            ret_ty: Type::Int,
+            params: vec![],
+            body: Some(body),
+            span: span_zero.clone(),
+            is_extern: false,
+            is_static: false,
+            is_unused: false,
+            is_cold: false,
+            is_noinline: false,
+            is_always_inline: false,
+            is_variadic: false,
+            is_constructor: false,
+            is_destructor: false,
+            is_weak: false,
+            is_nested: false,
+            upvars: vec![],
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
+            ifunc_resolver: None,
+            section: None,
+            alignment: None,
+            alias_name: None,
+            visibility: None,
+        }));
+        // 旧 body 顶部是 return 0, 跑 instrument 后应变为
+        // call __dcc_pgo_count_fn(0)  +  return 0
+        let cfg = PgoConfig { generate: true, use_file: None, out_dir: None };
+        instrument_program(&mut prog, &cfg);
+        // 1 个函数 → 0 号 idx
+        if let Decl::Func(f) = &prog.decls[0] {
+            let body = f.body.as_ref().unwrap();
+            assert_eq!(body.items.len(), 2, "instrument 应在原 1 项前插入 1 项");
+            match &body.items[0] {
+                BlockItem::Stmt(Stmt::Expr { e, .. }) => {
+                    if let Expr::Call { callee, args, .. } = e {
+                        if let Expr::Ident { name, .. } = callee.as_ref() {
+                            assert_eq!(name.name, "__dcc_pgo_count_fn");
+                        } else { panic!("callee not Ident"); }
+                        assert_eq!(args.len(), 1);
+                        if let Expr::Int { v, .. } = &args[0] {
+                            assert_eq!(*v, 0, "第一个函数的 idx 应为 0");
+                        } else { panic!("arg not Int"); }
+                    } else { panic!("first stmt not Call"); }
+                }
+                _ => panic!("first item not Stmt::Expr"),
+            }
+        } else { panic!("decl not Func"); }
+    }
+
+    /// instrument_program 对 generate=false 不做任何改写.
+    #[test]
+    fn instrument_program_noop_when_disabled() {
+        use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
+        let span_zero = crate::diagnostics::Span::point("m.c", 1, 0);
+        let mut prog = Program { decls: vec![] };
+        let body = Block { items: vec![
+            BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Int { v: 7, span: span_zero.clone(), ty: Type::Int }),
+                span: span_zero.clone(),
+            }),
+        ], span: span_zero.clone()};
+        prog.decls.push(Decl::Func(FuncDecl {
+            name: Ident { name: "foo".into(), span: span_zero.clone() },
+            ret_ty: Type::Int,
+            params: vec![],
+            body: Some(body),
+            span: span_zero.clone(),
+            is_extern: false,
+            is_static: false,
+            is_unused: false,
+            is_cold: false,
+            is_noinline: false,
+            is_always_inline: false,
+            is_variadic: false,
+            is_constructor: false,
+            is_destructor: false,
+            is_weak: false,
+            is_nested: false,
+            upvars: vec![],
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
+            ifunc_resolver: None,
+            section: None,
+            alignment: None,
+            alias_name: None,
+            visibility: None,
+        }));
+        let cfg = PgoConfig { generate: false, use_file: None, out_dir: None };
+        instrument_program(&mut prog, &cfg);
+        if let Decl::Func(f) = &prog.decls[0] {
+            assert_eq!(f.body.as_ref().unwrap().items.len(), 1,
+                "generate=false 时 body 不应被改写");
+        }
+    }
 }

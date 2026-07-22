@@ -315,7 +315,7 @@ IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用�
 
 | 通道 | 能力 | 已知遗留 |
 |------|------|----------|
-| PGO instrument（`-fprofile-generate` / `-fprofile-use`） | `ProfileConfig.pgo_generate` / `pgo_use` 开关齐；`Profraw` 二进制 roundtrip（PROF magic + version 1 + sites + u64 计数器）；`pgo::instrument_program` AST 改写 FuncDecl 顶部插入 `__dcc_pgo_count_fn(idx)`；`PgoWeights` 聚合 func 入口计数 | codegen 阶段尚未自动 emit 计数器；下游权重传播 stub |
+| PGO instrument（`-fprofile-generate` / `-fprofile-use`） | `ProfileConfig.pgo_generate` / `pgo_use` 开关齐；`Profraw` 二进制 roundtrip（PROF magic + version 1 + sites + u64 计数器）；`pgo::instrument_program` AST 改写 FuncDecl 顶部插入 `__dcc_pgo_count_fn(idx)`；✅ (M24) driver.rs 接入 `pgo::instrument_program`, codegen 自动 emit `call __dcc_pgo_count_fn`；`PgoWeights` 聚合 func 入口计数 | 下游权重传播 stub |
 | GCOV（`-ftest-coverage` / `-fprofile-arcs`） | `.gcno` notes + `.gcda` data 二进制（与 GCC gcov-9 layout 对齐）；`GcovUnit` / `GcovFunction` / `GcovBlock` 数据结构；`write_notes` / `write_data_with_counters` 写盘入口；✅ (M24) `cfg_checksum` 采用 GCC libgcov `compute_cfg_checksum` 公式 (每 succ 加 `dst_index+1`) | 非 x86_64 arch 未验证 |
 | AutoFDO（`-fauto-profile=` / `-fprofile-sample-use=`） | 简化 text parser（`func <name> <total>` / `line <name> <line> <col> <samples>`）；`bucketize` 按 >10% / >1% 阈值分 Hot/Warm/Cold | 权重不下发到 codegen |
 | LBR（`-flbr-profile=`） | 解析 `perf script -F brstack` 文本；`hot_entries` 按 `unknown -> func` 入度排序 | 权重不下发到 codegen |
