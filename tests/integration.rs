@@ -3022,3 +3022,91 @@ fn m19_pragma_locale_accepted() {
     assert_eq!(rc, 0);
     let _ = fs::remove_file(exe);
 }
+
+// ====== M23: Section 11 属性/builtin/alloca ======
+// __attribute__((retain)): 变量和函数应被保留, gc-sections 不移除
+#[test]
+#[cfg(unix)]
+fn m23_attr_retain_compiles_and_runs() {
+    let src = include_str!("fixtures/m23_attr_retain.c");
+    let (out, exe) = run_compile_and_run("m23-attr-retain", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 42, "retain_var + retain_func(0) = 41+1 = 42");
+    let _ = fs::remove_file(exe);
+}
+
+// __attribute__((used)): 静态函数即使未被引用也应保留并执行
+#[test]
+#[cfg(unix)]
+fn m23_attr_used_compiles_and_runs() {
+    let src = include_str!("fixtures/m23_attr_used.c");
+    let (out, exe) = run_compile_and_run("m23-attr-used", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 42, "used_helper(21) = 42");
+    let _ = fs::remove_file(exe);
+}
+
+// __attribute__((flatten)): 解析且编译通过
+#[test]
+#[cfg(unix)]
+fn m23_attr_flatten_compiles_and_runs() {
+    let src = include_str!("fixtures/m23_attr_flatten.c");
+    let (out, exe) = run_compile_and_run("m23-attr-flatten", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 42, "outer(20) = (20+1)*2 = 42");
+    let _ = fs::remove_file(exe);
+}
+
+// __attribute__((deprecated("msg"))): 仅声明, 解析/编译不应报错
+#[test]
+#[cfg(unix)]
+fn m23_attr_deprecated_compiles_and_runs() {
+    let src = include_str!("fixtures/m23_attr_deprecated.c");
+    let (out, exe) = run_compile_and_run("m23-attr-deprecated", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 42);
+    let _ = fs::remove_file(exe);
+}
+
+// __attribute__((constructor(N))) / __attribute__((destructor(N))): 优先级排序
+// GCC 约定: 数字越小优先级越高. 100 应在 300 之前构造.
+#[test]
+#[cfg(unix)]
+fn m23_attr_ctor_priority_orders_correctly() {
+    let src = include_str!("fixtures/m23_attr_ctor_priority.c");
+    let (out, exe) = run_compile_and_run("m23-attr-ctor-priority", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    // init_100 (prio=100) 先, order=0*10+2=2; init_300 (prio=300) 后, order=2*10+1=21
+    assert_eq!(rc, 21, "constructor priority 100 should run before 300");
+    let _ = fs::remove_file(exe);
+}
+
+// __builtin_debugtrap / __builtin_assume_aligned / __builtin_alloca
+#[test]
+#[cfg(unix)]
+fn m23_builtin_dbg_compiles_and_runs() {
+    let src = include_str!("fixtures/m23_builtin_dbg.c");
+    let (out, exe) = run_compile_and_run("m23-builtin-dbg", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    // alloca 4 个 int, 写 10/11/12/9, sum=42
+    assert_eq!(rc, 42, "alloca + assume_aligned + (dead)debugtrap");
+    let _ = fs::remove_file(exe);
+}
+
+// __attribute__((retain, used)) 联合使用
+#[test]
+#[cfg(unix)]
+fn m23_attr_retain_used_compiles_and_runs() {
+    let src = include_str!("fixtures/m23_attr_retain_used.c");
+    let (out, exe) = run_compile_and_run("m23-attr-retain-used", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 42, "combo_var + combo_fn(0) = 7+35 = 42");
+    let _ = fs::remove_file(exe);
+}

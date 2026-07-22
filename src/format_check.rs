@@ -344,3 +344,347 @@ fn format_string_literal(e: &Expr) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Block, BlockItem, Ident, Param, Type};
+    use crate::diagnostics::Span;
+
+    // M24: parse_format_specs —— 基础 conversion
+    #[test]
+    fn parse_simple_conversion() {
+        let specs = parse_format_specs("%d");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].conv, 'd');
+        assert_eq!(specs[0].length, "");
+        assert!(!specs[0].width_star);
+        assert!(!specs[0].prec_star);
+    }
+
+    // %% 不算 conversion
+    #[test]
+    fn parse_double_percent_skipped() {
+        let specs = parse_format_specs("100%% %d");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].conv, 'd');
+    }
+
+    // flags: -+ #0 空格
+    #[test]
+    fn parse_flags_consumed() {
+        let specs = parse_format_specs("%-+#0 d");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].conv, 'd');
+        // 顺序: - + # 0 空格
+        assert_eq!(specs[0]._flags, "-+#0 ");
+    }
+
+    // width 和 precision 数字
+    #[test]
+    fn parse_width_and_precision_digits() {
+        let specs = parse_format_specs("%10.3f");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].conv, 'f');
+        assert!(!specs[0].width_star);
+        assert!(!specs[0].prec_star);
+    }
+
+    // width 和 precision 用 * 消耗额外参数
+    #[test]
+    fn parse_star_width_and_precision() {
+        let specs = parse_format_specs("%*.*d");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].conv, 'd');
+        assert!(specs[0].width_star);
+        assert!(specs[0].prec_star);
+    }
+
+    // length modifier: hh / h / l / ll / z / j / t / L
+    #[test]
+    fn parse_length_modifiers() {
+        assert_eq!(parse_format_specs("%hhd")[0].length, "hh");
+        assert_eq!(parse_format_specs("%hd")[0].length, "h");
+        assert_eq!(parse_format_specs("%ld")[0].length, "l");
+        assert_eq!(parse_format_specs("%lld")[0].length, "ll");
+        assert_eq!(parse_format_specs("%zd")[0].length, "z");
+        assert_eq!(parse_format_specs("%jd")[0].length, "j");
+        assert_eq!(parse_format_specs("%td")[0].length, "t");
+        assert_eq!(parse_format_specs("%Le")[0].length, "L");
+    }
+
+    // 多个 spec + 普通文本混合
+    #[test]
+    fn parse_mixed_specs_and_text() {
+        let specs = parse_format_specs("name=%s age=%d hex=%x\n");
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].conv, 's');
+        assert_eq!(specs[1].conv, 'd');
+        assert_eq!(specs[2].conv, 'x');
+    }
+
+    // check_format_type: int 配 d/i 通过
+    #[test]
+    fn check_type_int_matches_d() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 'd',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(&spec, Some(&Type::Int), false, &span, "log", &mut out);
+        assert!(out.is_empty(), "int should match %d: {out:?}");
+    }
+
+    // check_format_type: int 配 f 应报告 mismatch
+    #[test]
+    fn check_type_int_mismatch_f() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 'f',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(&spec, Some(&Type::Int), false, &span, "log", &mut out);
+        assert_eq!(out.len(), 1, "int should NOT match %f");
+        assert!(out[0].msg.contains("floating-point"), "msg: {}", out[0].msg);
+    }
+
+    // check_format_type: scanf 非指针应警告
+    #[test]
+    fn check_type_scanf_non_pointer_warns() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 'd',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(&spec, Some(&Type::Int), true, &span, "scan", &mut out);
+        assert_eq!(out.len(), 1, "scanf expects pointer, got int");
+        assert!(out[0].msg.contains("pointer"), "msg: {}", out[0].msg);
+    }
+
+    // check_format_type: scanf 指针应通过
+    #[test]
+    fn check_type_scanf_pointer_passes() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 'd',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(
+            &spec,
+            Some(&Type::Ptr(Box::new(Type::Int))),
+            true,
+            &span,
+            "scan",
+            &mut out,
+        );
+        assert!(out.is_empty(), "scanf pointer should pass: {out:?}");
+    }
+
+    // check_format_type: char* 配 %s 通过
+    #[test]
+    fn check_type_string_matches_s() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 's',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(
+            &spec,
+            Some(&Type::Ptr(Box::new(Type::Char))),
+            false,
+            &span,
+            "log",
+            &mut out,
+        );
+        assert!(out.is_empty(), "char* should match %s: {out:?}");
+    }
+
+    // check_format_type: long double 配 %Lf 通过
+    #[test]
+    fn check_type_longdouble_matches_lf() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: "L".to_string(),
+            conv: 'f',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(
+            &spec,
+            Some(&Type::LongDouble),
+            false,
+            &span,
+            "log",
+            &mut out,
+        );
+        assert!(out.is_empty(), "long double should match %Lf: {out:?}");
+    }
+
+    // end-to-end: check_program 对 %d 传 int 不告警
+    #[test]
+    fn check_program_no_warning_for_correct_types() {
+        let prog = Program {
+            decls: vec![Decl::Func(FuncDecl {
+                ret_ty: Type::Void,
+                name: Ident { name: "log".to_string(), span: Span::point("t.c", 1, 1) },
+                params: vec![Param {
+                    ty: Type::Ptr(Box::new(Type::Char)),
+                    name: Some(Ident { name: "fmt".to_string(), span: Span::point("t.c", 1, 1) }),
+                    span: Span::point("t.c", 1, 1),
+                }],
+                body: Some(Block {
+                    items: vec![BlockItem::Stmt(Stmt::Expr {
+                        e: Expr::Call {
+                            callee: Box::new(Expr::Ident {
+                                name: Ident { name: "log".to_string(), span: Span::point("t.c", 1, 1) },
+                                span: Span::point("t.c", 1, 1),
+                                ty: Type::Void,
+                            }),
+                            args: vec![
+                                Expr::String {
+                                    data: b"value=%d".to_vec(),
+                                    span: Span::point("t.c", 2, 5),
+                                    ty: Type::Ptr(Box::new(Type::Char)),
+                                },
+                                Expr::Int { v: 42, span: Span::point("t.c", 2, 17), ty: Type::Int },
+                            ],
+                            span: Span::point("t.c", 2, 5),
+                            ty: Type::Void,
+                        },
+                        span: Span::point("t.c", 2, 5),
+                    })],
+                    span: Span::point("t.c", 1, 1),
+                }),
+                span: Span::point("t.c", 1, 1),
+                is_extern: false,
+                is_static: false,
+                section: None,
+                alignment: None,
+                is_weak: false,
+                visibility: None,
+                is_unused: false,
+                is_cold: false,
+                is_noinline: false,
+                is_always_inline: false,
+                is_variadic: true,
+                is_constructor: false,
+                is_destructor: false,
+                alias_name: None,
+                is_nested: false,
+                upvars: vec![],
+                is_old_style: false,
+                format_kind: Some("printf".to_string()),
+                format_string_idx: Some(1),
+                format_first_arg: Some(2),
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
+                ifunc_resolver: None,
+            })],
+        };
+        let diags = check_program(&prog);
+        assert!(diags.is_empty(), "expected no warnings, got: {diags:?}");
+    }
+
+    // end-to-end: check_program 对参数不足应告警
+    #[test]
+    fn check_program_warns_on_too_few_args() {
+        let prog = Program {
+            decls: vec![Decl::Func(FuncDecl {
+                ret_ty: Type::Void,
+                name: Ident { name: "log".to_string(), span: Span::point("t.c", 1, 1) },
+                params: vec![Param {
+                    ty: Type::Ptr(Box::new(Type::Char)),
+                    name: Some(Ident { name: "fmt".to_string(), span: Span::point("t.c", 1, 1) }),
+                    span: Span::point("t.c", 1, 1),
+                }],
+                body: Some(Block {
+                    items: vec![BlockItem::Stmt(Stmt::Expr {
+                        e: Expr::Call {
+                            callee: Box::new(Expr::Ident {
+                                name: Ident { name: "log".to_string(), span: Span::point("t.c", 1, 1) },
+                                span: Span::point("t.c", 1, 1),
+                                ty: Type::Void,
+                            }),
+                            args: vec![Expr::String {
+                                data: b"%d %s".to_vec(),
+                                span: Span::point("t.c", 2, 5),
+                                ty: Type::Ptr(Box::new(Type::Char)),
+                            }],
+                            span: Span::point("t.c", 2, 5),
+                            ty: Type::Void,
+                        },
+                        span: Span::point("t.c", 2, 5),
+                    })],
+                    span: Span::point("t.c", 1, 1),
+                }),
+                span: Span::point("t.c", 1, 1),
+                is_extern: false,
+                is_static: false,
+                section: None,
+                alignment: None,
+                is_weak: false,
+                visibility: None,
+                is_unused: false,
+                is_cold: false,
+                is_noinline: false,
+                is_always_inline: false,
+                is_variadic: true,
+                is_constructor: false,
+                is_destructor: false,
+                alias_name: None,
+                is_nested: false,
+                upvars: vec![],
+                is_old_style: false,
+                format_kind: Some("printf".to_string()),
+                format_string_idx: Some(1),
+                format_first_arg: Some(2),
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
+                ifunc_resolver: None,
+            })],
+        };
+        let diags = check_program(&prog);
+        assert!(!diags.is_empty(), "expected warning for missing args");
+        assert!(diags[0].msg.contains("at least 2"), "msg: {}", diags[0].msg);
+    }
+}
