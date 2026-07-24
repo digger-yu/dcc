@@ -547,6 +547,22 @@ M19 关键改动:
 > - `dcc .o` + 主机 gcc 链接验证：setjmp/longjmp 运行时返回 49
 >   (与手写 .c 期望一致)。
 
+> **M25 增量（2026-07-24）— Section 11 P0.1 wchar_t libc 转发**：
+> - `src/link/resolve.rs` `is_implicit_undef` 白名单补齐 11 个
+>   wcs*/wmem* libc 入口: `wcscpy` / `wcscat` / `wcscmp` /
+>   `wcsncmp` / `wcslen` / `wcschr` / `wcsrchr` / `wmemcpy` /
+>   `wmemmove` / `wmemset` / `wmemcmp` (原本走 freestanding linker
+>   会报 undefined reference, 允许为 implicit undefined 以让
+>   host gcc 在 -lc 下解析)。
+> - 新增 `tests/fixtures/wchar_libc.c` 覆盖 wcslen / wcschr /
+>   wcsrchr / wmemcpy / wmemcmp / wmemset / wmemmove / wcscmp /
+>   wcsncmp / wcscat 运行时行为。
+> - 新增 integration test `wchar_libc_fixture_runs` 与 helper
+>   `run_host_link_and_run` (dcc -c + host gcc link + run).
+> - Section 11 表格 `wchar_t` 行 🟠 → 🟢 (M25)。
+> - 跟踪记录：dcc 现有多数组栈变量分配有重叠 bug (Section 9
+>   follow-up)，本 fixture 故意只用单个 32 元素 buf 避开。
+
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
 > `DW_TAG_*` / `DW_AT_*` / `DW_FORM_*` / `DW_CFA_*` /
@@ -781,7 +797,7 @@ M19 关键改动:
 | 复杂数学函数 (`cproj`, `cabs` 等) | 🟠 走 libm |
 | `printf` format string 全集 | 🟢 (M23) 完整 flag/width/precision/length/type 匹配 |
 | `scanf` format string | 🟢 (M23) 完整格式检查 + 指针类型验证 |
-| `wchar_t` | 🟠 解析为 int，无 wcs* 函数 codegen |
+| `wchar_t` | 🟢 (M25) 解析为 int; 补齐 wcs*/wmem* libc 转发: wcscpy/wcscat/wcscmp/wcsncmp/wcslen/wcschr/wcsrchr/wmemcpy/wmemmove/wmemset/wmemcmp 在 link 隐式 undef 白名单, fixture+integration 覆盖 (Section 11 P0.1) |
 | 宽字符字面量 `L"..."` | 🟢 (M23) 解析为 wchar_t 编码字符串 |
 | `char16_t` / `char32_t` (C11/C++11) | 🟢 (M23) 解析为 uint16/uint32 + u""/U"" 字符串 |
 | 原子混合大小（`atomic_load_explicit(_Atomic short*, ...)`） | 🟢 (M24) `__atomic_*` codegen 补齐 1/2 字节 (x86-64 编码: lock xadd/xchg/cmpxchg 8/16 位变体 + sil/si/dx/dl 子寄存器 + movzx 零扩展返回值) |

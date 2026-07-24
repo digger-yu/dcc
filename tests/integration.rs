@@ -75,6 +75,56 @@ fn run_cpp_object_test(name: &str, source: &str) -> (std::process::Output, std::
     (output, object_path)
 }
 
+/// dcc -c + 主机 gcc 链接 + 运行. 用于验证运行时行为 (libc 调用等).
+/// 返回 (编译输出, 链接+运行退出码). 退出码 0 表示通过.
+fn run_host_link_and_run(name: &str, source: &str) -> (std::process::Output, i32) {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-link-{name}-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-link-{name}-{}.o", std::process::id()));
+    let exe_path = dir.join(format!("dcc-link-{name}-{}", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    if !compile.status.success() {
+        let _ = fs::remove_file(&object_path);
+        return (compile, -1);
+    }
+    let link = Command::new("gcc")
+        .args(["-o"])
+        .arg(&exe_path)
+        .arg(&object_path)
+        .output()
+        .expect("run gcc");
+    let _ = fs::remove_file(&object_path);
+    if !link.status.success() {
+        let combined = std::process::Output {
+            status: link.status,
+            stdout: compile.stdout,
+            stderr: {
+                let mut s = compile.stderr;
+                s.extend_from_slice(b"\n--- link ---\n");
+                s.extend_from_slice(&link.stderr);
+                s
+            },
+        };
+        return (combined, -2);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
+    }
+    let run = Command::new(&exe_path).output().expect("run exe");
+    let _ = fs::remove_file(&exe_path);
+    let code = run.status.code().unwrap_or(-3);
+    (compile, code)
+}
+
 #[test]
 fn constant_builtin_and_static_assert_pass_through_typed_ir() {
     let output = run_syntax_test(
@@ -692,7 +742,6 @@ fn global_asm_exports_symbol() {
     let source_path = dir.join(format!("dcc-gasm-{}.c", std::process::id()));
     let out_path = dir.join(format!("dcc-gasm-{}.o", std::process::id()));
     let source = "asm(\".globl global_marker\\nglobal_marker:\\n\");\nint main(void) { return 0; }\n";
-    fs::write(&source_path, source).expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(&out_path)
@@ -3534,4 +3583,16 @@ fn setjmp_x86_64_eh_frame_has_cfi_ops() {
         }
     }
     assert!(found_lsb_cie, ".eh_frame CIE should use LSB CIE_id=0");
+}
+
+/// wchar_t wcs* / wmem* libc 转发 (Section 11 P0.1).
+/// 编译 + 链接 + 运行 fixtures/wchar_libc.c; 退出码 0 表示通过.
+#[test]
+fn wchar_libc_fixture_runs() {
+    let src = include_str!("fixtures/wchar_libc.c");
+    let (compile, code) = run_host_link_and_run("wchar-libc", src);
+    if code != 0 {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        panic!("wchar_libc fixture exit={code}, expected 0\ndcc stderr: {stderr}");
+    }
 }
