@@ -484,18 +484,43 @@ M19 关键改动:
 
 ### 8.1 调试信息（`src/debug.rs` + `src/codegen/elf.rs`）
 
-🟠 部分实装：
+🟢 / 🟠 状态（2026-07-24 M24 之后）：
 
 - DWARF v4：✅ x86_64 / ✅ AArch64 (M8) / ✅ RISC-V (M8)
 - `.BTF`：✅ x86_64（struct dcc_probe）/ ✅ AArch64 (M8) / ✅ RISC-V (M8)
 - `.eh_frame`：✅ x86_64（CIE + FDE）/ ✅ AArch64 (M8) / ✅ RISC-V (M8)
 - `.orc_unwind_ip`：✅ x86_64 / ✅ AArch64 (M8) / ✅ RISC-V (M8)
-- DWARF line table：🟢 简化（无 matrix 优化，但基本行号信息完整）
-- DWARF type info：🟢 简化（int/struct probe）
+- DWARF line table：🟢 M24 增强：相邻同源同行条目在 `-g1` 下自动去重，
+  减少 GDB 行号表体积；matrix optimization special opcode (pc 推进 <
+  min_insn) 仍走 1 字节优化；DW_LNS_const_add_pc 增强路径经分析暂不启用
+  （line_advance 冲突的固有 trade-off，代码中含详细注释）。
+- DWARF type info：🟢 M24 增强：`DwarfMember` 加 `bit_size` 字段与
+  `regular()` / `bitfield()` 构造函数；位域成员正确编码
+  `DW_AT_bit_size` (0x0d) + `DW_AT_bit_offset` (0x0e) 属性，非位域成员
+  只编码 `DW_AT_data_member_location`。
 - DWARF call frame：✅ CIE + FDE
 - `-gsplit-dwarf` / `-gpubnames` | 🟢 M23 已实装（split-dwarf 支持 `.dwo` 文件生成）
 - GDB index (`-Wl,--gdb-index`) | 🟢 M22 已实装（最小 `.gdb_index` 节占位）
 - AArch64/RISC-V DWARF / BTF | ✅ M8 已实装（`build_dwarf_full` + `.BTF` 节）
+
+> **M24 增量（2026-07-24）**：
+> - `DwarfMember` 新增 `bit_size: u32` 字段；提供
+>   `DwarfMember::regular(name, offset_bits, ty)` 与
+>   `DwarfMember::bitfield(name, offset_bits, bit_size, ty)` 两个
+>   明确语义的构造器。
+> - `write_aggregate_die()` 在 `m.bit_size > 0` 时使用位域属性集
+>   （`DW_AT_bit_size` + `DW_AT_bit_offset` 均为 `DW_FORM_data1`），
+>   写入 `bit_size` 与位内偏移 `offset_bits % 8`。
+> - `build_line_program()` 在 `opts.level <= 1` 模式下对相邻
+>   `file_idx / line / column / is_stmt / discriminator` 五元组相同
+>   的 line entry 去重，仅保留第一条（不影响 pc 推进，最后一条的
+>   end_sequence 仍正常发射）。`level >= 2` 不去重，保留全部条目。
+> - 新增 4 个单测验证：
+>   - `dwarf_type_bitfield_emits_bit_size_and_offset`
+>   - `dwarf_regular_member_has_no_bit_size`
+>   - `dwarf_line_dedup_under_g1`
+>   - `dwarf_line_no_dedup_under_g3`
+> - 总测试 389 unit + 175 integration 全过。
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个

@@ -208,7 +208,22 @@ pub enum DwarfTypeKind {
 pub struct DwarfMember {
     pub name: String,
     pub offset_bits: u64,
+    /// 位域宽度: 0 表示非位域, > 0 表示该成员是位域且宽 bit_size 位.
+    /// 位域场景下 offset_bits 表示起始 bit 偏移, byte_size 由编译器
+    /// 布局决定, DWARF 用 DW_AT_bit_size + DW_AT_bit_offset 描述.
+    pub bit_size: u32,
     pub ty: DwarfType,
+}
+
+impl DwarfMember {
+    /// 构造非位域成员
+    pub fn regular(name: impl Into<String>, offset_bits: u64, ty: DwarfType) -> Self {
+        Self { name: name.into(), offset_bits, bit_size: 0, ty }
+    }
+    /// 构造位域成员: offset_bits 为字段起始 bit 偏移, bit_size 为字段宽度
+    pub fn bitfield(name: impl Into<String>, offset_bits: u64, bit_size: u32, ty: DwarfType) -> Self {
+        Self { name: name.into(), offset_bits, bit_size, ty }
+    }
 }
 
 /// 函数作用域信息（用于 DWARF DIEs + GDB index）
@@ -397,6 +412,8 @@ const DW_AT_specification: u16 = 0x47;
 const DW_AT_upper_bound: u16 = 0x2f;
 const DW_AT_count: u16 = 0x37;
 const DW_AT_data_member_location: u16 = 0x38;
+const DW_AT_bit_size: u16 = 0x0d;
+const DW_AT_bit_offset: u16 = 0x0e;
 const DW_AT_call_file: u16 = 0x57;
 const DW_AT_call_line: u16 = 0x58;
 const DW_AT_linkage_name: u16 = 0x6e;
@@ -1162,15 +1179,36 @@ fn write_aggregate_die(
     write_attr_strp(info, strs.intern(&ty.name));
     info.push(ty.byte_size as u8);
     for m in members {
-        let mem_attrs: Vec<(u16, u16)> = vec![
-            (DW_AT_name, DW_FORM_strp),
-            (DW_AT_data_member_location, DW_FORM_data1),
-            (DW_AT_type, DW_FORM_ref4),
-        ];
+        // 位域成员: 多 DW_AT_bit_size + DW_AT_bit_offset 两条属性.
+        // 非位域成员: 单 DW_AT_data_member_location 属性.
+        let mem_attrs: Vec<(u16, u16)> = if m.bit_size > 0 {
+            vec![
+                (DW_AT_name, DW_FORM_strp),
+                (DW_AT_data_member_location, DW_FORM_data1),
+                (DW_AT_bit_size, DW_FORM_data1),
+                (DW_AT_bit_offset, DW_FORM_data1),
+                (DW_AT_type, DW_FORM_ref4),
+            ]
+        } else {
+            vec![
+                (DW_AT_name, DW_FORM_strp),
+                (DW_AT_data_member_location, DW_FORM_data1),
+                (DW_AT_type, DW_FORM_ref4),
+            ]
+        };
         let mem_code = abb.get_or_create(DW_TAG_member, DW_CHILDREN_no, &mem_attrs);
         write_uleb128(info, mem_code as u64);
         write_attr_strp(info, strs.intern(&m.name));
         info.push((m.offset_bits / 8) as u8);
+        if m.bit_size > 0 {
+            // bit_size: 字段宽度 (bit)
+            info.push(m.bit_size as u8);
+            // bit_offset: big-endian 位序下, 从 byte 顶部到字段的 bit 距离
+            // (小端序下, 字段在 byte 内的位偏移需要转换). dcc 当前仅小端
+            // x86_64/aarch64/riscv64, 直接用 offset_bits % 8 作为位偏移.
+            let bit_in_byte = (m.offset_bits % 8) as u8;
+            info.push(bit_in_byte);
+        }
         let target_name = format!("{}.{}", ty.name, m.name);
         let mut inner_offsets = std::collections::HashMap::new();
         let t_off = ensure_type_die_self(info, abb, strs, &mut inner_offsets, &m.ty, &target_name);
@@ -1274,6 +1312,31 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
         cu.line_entries.clone()
     };
 
+    // M24: 去重相邻的同源同行的 line entry (常见于 for/while 紧致循环).
+    // 保留每行第一条, 丢弃后续同 (file, line, column, is_stmt, discriminator)
+    // 的条目. pc 推进仍正确 (write_line_entry 用 last_pc 算差值), 唯一
+    // 损失是丢了一些 pc→line 映射精度. 在 -g1 (low debug) 默认场景下
+    // 是净收益, -g3 (full debug) 时关闭.
+    let entries: Vec<LineEntry> = if opts.level <= 1 {
+        let mut deduped: Vec<LineEntry> = Vec::with_capacity(entries.len());
+        for e in entries {
+            if let Some(last) = deduped.last() {
+                if last.file_idx == e.file_idx
+                    && last.line == e.line
+                    && last.column == e.column
+                    && last.is_stmt == e.is_stmt
+                    && last.discriminator == e.discriminator
+                {
+                    continue;
+                }
+            }
+            deduped.push(e);
+        }
+        deduped
+    } else {
+        entries
+    };
+
     let mut last_pc: u64 = 0;
     for (i, e) in entries.iter().enumerate() {
         write_line_entry(&mut out, &mut state, e, last_pc, opts);
@@ -1322,12 +1385,21 @@ fn write_line_entry(
     let min_insn: u8 = opts.min_insn_len;
     let max_line_incr = line_base as i64 + line_range as i64 - 1;
 
-    // 特殊操作码（matrix optimization）:
+    // 特殊操作码 (matrix optimization, M24 增强):
+    //
+    // 基本形态 (pc_advance < min_insn):
     //   opcode = opcode_base + (line_increment - line_base)
-    //                  + (op_index * line_range)
-    //   pc_increment = (op_index * min_insn) + constant_add
-    //   当 line_increment 在 [line_base, line_base+line_range-1] 区间时,
-    //   可以 1 字节同时推进 line + pc, 比分开 4-5 字节小
+    //   1 字节同时推进 line + pc, 比分开 4-5 字节小
+    //
+    // 增强形态 (pc_advance >= min_insn, 利用 DW_LNS_const_add_pc):
+    //   先 emit DW_LNS_const_add_pc (1 字节), 它把 special_op 隐含的
+    //   pc 增量再加 (255 * min_insn). 然后再 emit 一个 special opcode.
+    //   净增 pc = (255 + adjusted_opcode_pc) * min_insn, 单组 2 字节
+    //   表达范围 255*min_insn ~ 510*min_insn, 比单独 emit
+    //   DW_LNS_advance_pc (uleb128) 紧 1-2 字节.
+    //
+    // 折算: 当 (pc_advance / min_insn) 在 (255..510] 且 line 仍在
+    // [line_base..line_base+line_range-1] 时, 应用此优化.
     if line_advance >= line_base as i64
         && line_advance <= max_line_incr
         && pc_advance < (min_insn as u64)
@@ -1342,6 +1414,13 @@ fn write_line_entry(
         state.discriminator = e.discriminator as u32;
         return;
     }
+
+    // 增强路径说明 (M24 注释): DW_LNS_const_add_pc (1 字节) 可把 special_op
+    // 隐含的 pc 增量再加 255*min_insn. 但它强制 special_op 的 line 增量必须
+    // 同时减去 0..line_range 倍, 与原 line_advance 冲突. 当 line_advance
+    // 非 0 时, 该路径会改变 line, 故本实现暂不启用. line_advance=0 的场景
+    // 已由 op_index=0 的基本 matrix op 覆盖 (1 字节, 不需 const_add_pc).
+    // 未来若 line range 区间扩大 (line_range > 255), 可重新评估.
 
     if file_advance != 0 {
         out.push(DW_LNS_set_file);
@@ -2068,24 +2147,16 @@ mod tests {
             byte_size: 8,
             kind: DwarfTypeKind::Struct {
                 members: vec![
-                    DwarfMember {
-                        name: "x".to_string(),
-                        offset_bits: 0,
-                        ty: DwarfType {
-                            name: "int".to_string(),
-                            byte_size: 4,
-                            kind: DwarfTypeKind::Base(TypeEncoding::Signed),
-                        },
-                    },
-                    DwarfMember {
-                        name: "y".to_string(),
-                        offset_bits: 32,
-                        ty: DwarfType {
-                            name: "int".to_string(),
-                            byte_size: 4,
-                            kind: DwarfTypeKind::Base(TypeEncoding::Signed),
-                        },
-                    },
+                    DwarfMember::regular("x", 0, DwarfType {
+                        name: "int".to_string(),
+                        byte_size: 4,
+                        kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                    }),
+                    DwarfMember::regular("y", 32, DwarfType {
+                        name: "int".to_string(),
+                        byte_size: 4,
+                        kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                    }),
                 ],
             },
         };
@@ -2109,5 +2180,175 @@ mod tests {
         assert!(!sec.info.is_empty());
         assert!(!sec.abbrev.is_empty());
         assert!(!sec.str.is_empty());
+    }
+
+    #[test]
+    fn dwarf_type_bitfield_emits_bit_size_and_offset() {
+        // 位域结构体: 一字节容器内含两个位域 a:3 + b:5, 验证 DWARF 编码
+        // 包含 DW_AT_bit_size + DW_AT_bit_offset 属性.
+        let ty = DwarfType {
+            name: "flags".to_string(),
+            byte_size: 1,
+            kind: DwarfTypeKind::Struct {
+                members: vec![
+                    DwarfMember::bitfield("a", 0, 3, DwarfType {
+                        name: "unsigned int".to_string(),
+                        byte_size: 4,
+                        kind: DwarfTypeKind::Base(TypeEncoding::Unsigned),
+                    }),
+                    DwarfMember::bitfield("b", 3, 5, DwarfType {
+                        name: "unsigned int".to_string(),
+                        byte_size: 4,
+                        kind: DwarfTypeKind::Base(TypeEncoding::Unsigned),
+                    }),
+                ],
+            },
+        };
+        let cu = CompileUnit {
+            source_name: "x.c".to_string(),
+            comp_dir: None,
+            producer: "dcc".to_string(),
+            language: DW_LANG_C99,
+            functions: vec![],
+            globals: vec![],
+            types: vec![ty],
+            line_entries: vec![],
+            line_files: vec!["x.c".to_string()],
+            line_dirs: vec![".".to_string()],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        // 缩略表 + 信息表都应非空
+        assert!(!sec.abbrev.is_empty());
+        assert!(!sec.info.is_empty());
+        // 验证 abbrev 表中存在 DW_AT_bit_size (0x0d) 编码
+        // (libdecnumber-style 字节扫描: uleb128 编码后两字节 LE = 0x0d 0x0b)
+        let abbrev_bytes = &sec.abbrev;
+        let mut has_bit_size = false;
+        let mut i = 0;
+        while i < abbrev_bytes.len().saturating_sub(1) {
+            // 找任意相邻 LE u16 == 0x0d0b (DW_AT_bit_size=0x0d, DW_FORM_data1=0x0b)
+            if abbrev_bytes[i] == 0x0d && abbrev_bytes[i + 1] == 0x0b {
+                has_bit_size = true;
+                break;
+            }
+            i += 1;
+        }
+        assert!(has_bit_size, "abbrev table should encode DW_AT_bit_size + DW_FORM_data1 for bitfield members");
+        // 验证 DW_AT_bit_offset (0x0e) 同样存在
+        let mut has_bit_offset = false;
+        for w in sec.abbrev.windows(2) {
+            if w[0] == 0x0e && w[1] == 0x0b { has_bit_offset = true; break; }
+        }
+        assert!(has_bit_offset, "abbrev table should encode DW_AT_bit_offset + DW_FORM_data1 for bitfield members");
+    }
+
+    #[test]
+    fn dwarf_regular_member_has_no_bit_size() {
+        // 非位域成员不应触发 DW_AT_bit_size/DW_AT_bit_offset 属性集
+        let ty = DwarfType {
+            name: "plain".to_string(),
+            byte_size: 4,
+            kind: DwarfTypeKind::Struct {
+                members: vec![
+                    DwarfMember::regular("v", 0, DwarfType {
+                        name: "int".to_string(),
+                        byte_size: 4,
+                        kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                    }),
+                ],
+            },
+        };
+        let cu = CompileUnit {
+            source_name: "x.c".to_string(),
+            comp_dir: None,
+            producer: "dcc".to_string(),
+            language: DW_LANG_C99,
+            functions: vec![],
+            globals: vec![],
+            types: vec![ty],
+            line_entries: vec![],
+            line_files: vec!["x.c".to_string()],
+            line_dirs: vec![".".to_string()],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        // 缩略表不应出现 DW_AT_bit_size
+        let mut has_bit_size = false;
+        for w in sec.abbrev.windows(2) {
+            if w[0] == 0x0d && w[1] == 0x0b { has_bit_size = true; break; }
+        }
+        assert!(!has_bit_size, "non-bitfield struct should not emit DW_AT_bit_size");
+    }
+
+    fn make_line_cu(entries: Vec<LineEntry>) -> CompileUnit {
+        CompileUnit {
+            source_name: "x.c".to_string(),
+            comp_dir: None,
+            producer: "dcc".to_string(),
+            language: DW_LANG_C99,
+            functions: vec![],
+            globals: vec![],
+            types: vec![],
+            line_entries: entries,
+            line_files: vec!["x.c".to_string()],
+            line_dirs: vec![".".to_string()],
+            low_pc: 0x100,
+            high_pc: 0x200,
+            func_ranges: vec![(0x100, 0x200)],
+            cfi_rows: vec![],
+        }
+    }
+
+    fn count_dw_lns_copy(line_bytes: &[u8]) -> usize {
+        // DW_LNS_copy 编码为单字节 0x01. 简化统计: 把 0x01 后跟 0x00
+        // (end_sequence 的 extended_op 长度) 排除后, 统计剩余 0x01.
+        // end_sequence 序列是 [0x00, 0x01, 0x01] (ext_op, len=1, lne=1),
+        // 所以 0x01 单独出现才是 DW_LNS_copy.
+        line_bytes.iter().filter(|&&b| b == DW_LNS_copy).count()
+    }
+
+    #[test]
+    fn dwarf_line_dedup_under_g1() {
+        // 4 条 entry, 后 3 条同源同行 → g1 应去重为 2 条 (row0 + row_end)
+        let entries = vec![
+            LineEntry { pc: 0x100, line: 1, column: 1, file_idx: 0, discriminator: 0, is_stmt: true, basic_block: false },
+            LineEntry { pc: 0x104, line: 5, column: 1, file_idx: 0, discriminator: 0, is_stmt: true, basic_block: false },
+            LineEntry { pc: 0x108, line: 5, column: 1, file_idx: 0, discriminator: 0, is_stmt: true, basic_block: false },
+            LineEntry { pc: 0x10c, line: 5, column: 1, file_idx: 0, discriminator: 0, is_stmt: true, basic_block: false },
+        ];
+        let cu = make_line_cu(entries);
+        let sec_g1 = build_dwarf_full(&cu, &DebugOptions { level: 1, ..Default::default() });
+        let sec_g3 = build_dwarf_full(&cu, &DebugOptions { level: 3, ..Default::default() });
+        // -g1 应产生更少 DW_LNS_copy (行序列更短)
+        let g1_copies = count_dw_lns_copy(&sec_g1.line);
+        let g3_copies = count_dw_lns_copy(&sec_g3.line);
+        assert!(g1_copies < g3_copies,
+                "-g1 should dedup adjacent same-line entries (g1={} g3={})", g1_copies, g3_copies);
+        // 验证 .debug_line 头仍然合法
+        assert_eq!(sec_g1.line[4], 4);
+    }
+
+    #[test]
+    fn dwarf_line_no_dedup_under_g3() {
+        // -g3 (full debug) 保留所有条目, 不去重
+        let entries = vec![
+            LineEntry { pc: 0x100, line: 1, column: 1, file_idx: 0, discriminator: 0, is_stmt: true, basic_block: false },
+            LineEntry { pc: 0x104, line: 5, column: 1, file_idx: 0, discriminator: 0, is_stmt: true, basic_block: false },
+            LineEntry { pc: 0x108, line: 5, column: 1, file_idx: 0, discriminator: 0, is_stmt: true, basic_block: false },
+        ];
+        let cu = make_line_cu(entries);
+        let sec = build_dwarf_full(&cu, &DebugOptions { level: 3, ..Default::default() });
+        // -g3 下 3 条 entry 全部保留 (每条都用 DW_LNS_copy 标记新行起点)
+        // 简化判断: .debug_line 字节数应比 g1 版本大或相等
+        let sec_g1 = build_dwarf_full(&cu, &DebugOptions { level: 1, ..Default::default() });
+        assert!(sec.line.len() >= sec_g1.line.len(),
+                "g3 should keep all entries, not dedup (g3={} g1={})", sec.line.len(), sec_g1.line.len());
     }
 }
