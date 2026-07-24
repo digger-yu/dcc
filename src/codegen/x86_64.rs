@@ -8945,6 +8945,57 @@ impl Codegen {
             "xorpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x57),
             "ucomiss" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x2E),
             "ucomisd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x2E),
+            // 打包 SSE (packed) 算术 / 逻辑 / 移动
+            "addps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x58),
+            "addpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x58),
+            "subps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x5C),
+            "subpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x5C),
+            "mulps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x59),
+            "mulpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x59),
+            "divps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x5E),
+            "divpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x5E),
+            "andps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x54),
+            "andpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x54),
+            "andnps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x55),
+            "andnpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x55),
+            "orps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x56),
+            "orpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x56),
+            "minps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x5D),
+            "minpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x5D),
+            "maxps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x5F),
+            "maxpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x5F),
+            "sqrtps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x51),
+            "sqrtpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x51),
+            "rcpps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x53),
+            "rsqrtps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x52),
+            "cmpps" if ops.len() == 3 => self.emit_asm_sse_cmp_packed(&ops[0], &ops[1], &ops[2], 0x0F, 0xC2),
+            "cmppd" if ops.len() == 3 => self.emit_asm_sse_cmp_packed(&ops[0], &ops[1], &ops[2], 0x66, 0xC2),
+            "movaps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x28),
+            "movups" if ops.len() == 2 => self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0x0F, 0x10, 0x11),
+            "movapd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x28),
+            "movupd" if ops.len() == 2 => self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0x66, 0x10, 0x11),
+            "movdqa" if ops.len() == 2 => self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0x66, 0x6F, 0x7F),
+            "movdqu" if ops.len() == 2 => self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0xF3, 0x6F, 0x7F),
+            "movhlps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x12),
+            "movlhps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x16),
+            "movhps" if ops.len() == 2 => self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0x0F, 0x16, 0x17),
+            "movlps" if ops.len() == 2 => self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0x0F, 0x12, 0x13),
+            "movhpd" if ops.len() == 2 => self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0x66, 0x16, 0x17),
+            "movlpd" if ops.len() == 2 => self.emit_asm_sse_mov_packed(&ops[0], &ops[1], 0x66, 0x12, 0x13),
+            "shufps" if ops.len() == 3 => self.emit_asm_sse_cmp_packed(&ops[0], &ops[1], &ops[2], 0x0F, 0xC6),
+            "shufpd" if ops.len() == 3 => self.emit_asm_sse_cmp_packed(&ops[0], &ops[1], &ops[2], 0x66, 0xC6),
+            "unpckhps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x15),
+            "unpcklps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x14),
+            "unpckhpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x15),
+            "unpcklpd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x14),
+            "cvtps2pd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x5A),
+            "cvtpd2ps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x5A),
+            "cvtdq2ps" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x0F, 0x5B),
+            "cvtps2dq" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0x5B),
+            "cvttps2dq" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF3, 0x5B),
+            "cvtdq2pd" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF3, 0xE6),
+            "cvtpd2dq" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0xF2, 0xE6),
+            "cvttpd2dq" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0xE6),
 
             // 移位
             "shl" | "sal" | "shlq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 64),
@@ -10932,6 +10983,97 @@ impl Codegen {
         }
     }
 
+    /// 打包 SSE 比较/shuffle: prefix 0F/66, opcode C2/C6, 带 imm8
+    fn emit_asm_sse_cmp_packed(&mut self, src: &AsmOperand, dst: &AsmOperand, imm_op: &AsmOperand, prefix: u8, opcode: u8) {
+        let imm8 = match imm_op {
+            AsmOperand::Imm(v) => *v as u8,
+            _ => 0,
+        };
+        let is_xmm = |_r: u8, sz: u8| sz == 128;
+        match (src, dst) {
+            (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) if is_xmm(*s, *ss) && is_xmm(*d, *ds) => {
+                let mut rex = 0u8;
+                if *d >= 8 { rex |= 0x04; }
+                if *s >= 8 { rex |= 0x01; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                if prefix == 0x66 {
+                    self.emit(&[0x66, 0x0F, opcode, Self::modrm_reg_reg(*d, *s), imm8]);
+                } else {
+                    self.emit(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s), imm8]);
+                }
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds)) if is_xmm(*d, *ds) => {
+                let mut rex = 0u8;
+                if *d >= 8 { rex |= 0x04; }
+                if *base >= 8 { rex |= 0x01; }
+                if index.unwrap_or(0) >= 8 { rex |= 0x02; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                if prefix == 0x66 {
+                    self.emit(&[0x66, 0x0F, opcode]);
+                } else {
+                    self.emit(&[0x0F, opcode]);
+                }
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                self.emit(&[imm8]);
+            }
+            _ => {
+                eprintln!("warning: unsupported sse cmp/shuffle operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// 打包 SSE 移动 (load/store 双向): prefix + 0F + load_op / store_op
+    fn emit_asm_sse_mov_packed(&mut self, src: &AsmOperand, dst: &AsmOperand, prefix: u8, load_op: u8, store_op: u8) {
+        let is_xmm = |_r: u8, sz: u8| sz == 128;
+        match (src, dst) {
+            // mem -> xmm (load)
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds)) if is_xmm(*d, *ds) => {
+                let mut rex = 0u8;
+                if *d >= 8 { rex |= 0x04; }
+                if *base >= 8 { rex |= 0x01; }
+                if index.unwrap_or(0) >= 8 { rex |= 0x02; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                if prefix == 0x66 || prefix == 0xF3 || prefix == 0xF2 {
+                    self.emit(&[prefix, 0x0F, load_op]);
+                } else {
+                    self.emit(&[0x0F, load_op]);
+                }
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            // xmm -> mem (store)
+            (AsmOperand::Reg(s, ss), AsmOperand::Mem { disp, base, index, scale }) if is_xmm(*s, *ss) => {
+                let mut rex = 0u8;
+                if *s >= 8 { rex |= 0x04; }
+                if *base >= 8 { rex |= 0x01; }
+                if index.unwrap_or(0) >= 8 { rex |= 0x02; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                if prefix == 0x66 || prefix == 0xF3 || prefix == 0xF2 {
+                    self.emit(&[prefix, 0x0F, store_op]);
+                } else {
+                    self.emit(&[0x0F, store_op]);
+                }
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            // xmm -> xmm (reg-reg move, use load_op)
+            (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) if is_xmm(*s, *ss) && is_xmm(*d, *ds) => {
+                let mut rex = 0u8;
+                if *d >= 8 { rex |= 0x04; }
+                if *s >= 8 { rex |= 0x01; }
+                if rex != 0 { self.emit(&[0x40 | rex]); }
+                if prefix == 0x66 || prefix == 0xF3 || prefix == 0xF2 {
+                    self.emit(&[prefix, 0x0F, load_op, Self::modrm_reg_reg(*d, *s)]);
+                } else {
+                    self.emit(&[0x0F, load_op, Self::modrm_reg_reg(*d, *s)]);
+                }
+            }
+            _ => {
+                eprintln!("warning: unsupported sse packed mov operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
     /// shld/shrd: AT&T shld src, dst, count
     fn emit_asm_shld_shrd(
         &mut self,
@@ -11025,12 +11167,32 @@ impl Codegen {
     }
 
     fn emit_asm_imul3(&mut self, src1: &AsmOperand, src2: &AsmOperand, dst: &AsmOperand) {
-        if let (AsmOperand::Reg(s, _), AsmOperand::Imm(v), AsmOperand::Reg(d, _)) = (src2, src1, dst) {
-            if *v >= -128 && *v <= 127 {
-                self.emit(&[Self::rex(true, *d, 0, *s), 0x6B, Self::modrm_reg_reg(*d, *s), *v as u8]);
-            } else {
-                self.emit(&[Self::rex(true, *d, 0, *s), 0x69, Self::modrm_reg_reg(*d, *s)]);
-                self.emit(&(*v as i32).to_le_bytes());
+        // AT&T: imul $imm, src, dst  =>  src1=$imm, src2=src(reg/mem), dst=reg
+        if let (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) = (src1, dst) {
+            match src2 {
+                AsmOperand::Reg(s, _) => {
+                    if *v >= -128 && *v <= 127 {
+                        self.emit(&[Self::rex(true, *d, 0, *s), 0x6B, Self::modrm_reg_reg(*d, *s), *v as u8]);
+                    } else {
+                        self.emit(&[Self::rex(true, *d, 0, *s), 0x69, Self::modrm_reg_reg(*d, *s)]);
+                        self.emit(&(*v as i32).to_le_bytes());
+                    }
+                }
+                AsmOperand::Mem { disp, base, index, scale } => {
+                    if *v >= -128 && *v <= 127 {
+                        self.emit(&[Self::rex(true, *d, index.unwrap_or(0), *base), 0x6B]);
+                        self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                        self.emit(&[*v as u8]);
+                    } else {
+                        self.emit(&[Self::rex(true, *d, index.unwrap_or(0), *base), 0x69]);
+                        self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                        self.emit(&(*v as i32).to_le_bytes());
+                    }
+                }
+                _ => {
+                    eprintln!("warning: unsupported imul3 src operand pattern, emitted as nop");
+                    self.emit(&[0x90]);
+                }
             }
         } else {
             eprintln!("warning: unsupported imul3 operand pattern, emitted as nop");
