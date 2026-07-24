@@ -3144,3 +3144,102 @@ fn wide_char_literal_run_returns_zero() {
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "wide_char_literal should return 0, got {rc}");
 }
+
+/// fenv.h 函数 pass-through (Section 11.2)
+/// 验证 feclearexcept / fegetround / fesetround / feraiseexcept
+/// / fetestexcept 等被 dcc 发射为外部符号, 走 libc / libm.
+/// 编译为 -c 后, 用 nm 检查符号表.
+#[test]
+fn fenv_pass_through_emits_external_symbols() {
+    let source = include_str!("fixtures/fenv_pass_through.c");
+    let (output, object_path) = run_object_test("fenv-pass-through", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&object_path).unwrap_or_default();
+    let _ = fs::remove_file(&object_path);
+    let bytes = obj;
+    for name in &[
+        "feclearexcept",
+        "fegetround",
+        "fesetround",
+        "feraiseexcept",
+        "fetestexcept",
+    ] {
+        let needle = name.as_bytes();
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "object file should contain fenv symbol {name}, got {} bytes",
+            bytes.len()
+        );
+    }
+}
+
+/// 复杂数学函数 pass-through (Section 11.2)
+/// 验证 cproj / cabs / creal / cimag / conj / csqrt / cexp
+/// / csin / ccos / cpow / carg / csinh / ccosh / ctanh 等
+/// 复杂数学函数被 dcc 发射为外部符号, 走 libm.
+#[test]
+fn cmath_pass_through_emits_external_symbols() {
+    let source = include_str!("fixtures/cmath_pass_through.c");
+    let (output, object_path) = run_object_test("cmath-pass-through", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&object_path).unwrap_or_default();
+    let _ = fs::remove_file(&object_path);
+    let bytes = obj;
+    for name in &[
+        "cabs", "cproj", "creal", "cimag", "conj",
+        "csqrt", "cexp", "clog", "csin", "ccos", "cpow",
+        "carg", "csinh", "ccosh", "ctanh",
+    ] {
+        let needle = name.as_bytes();
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "object file should contain cmath symbol {name}, got {} bytes",
+            bytes.len()
+        );
+    }
+}
+
+/// fenv pragma STDC FENV_ACCESS 解析 (Section 11.2)
+/// 验证 #pragma STDC FENV_ACCESS ON/OFF/DEFAULT 不会破坏编译.
+/// pragma 状态在 dcc preproc 中由 fenv_access 字段记录, 但 codegen
+/// 仍允许 fenv 函数被发射 (运行时语义依赖 libc).
+#[test]
+fn fenv_pragma_parses_without_error() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-fenv-pragma-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-fenv-pragma-{}.o", std::process::id()));
+    let source = "#pragma STDC FENV_ACCESS ON\n\
+                  #pragma STDC FENV_ACCESS OFF\n\
+                  #pragma STDC FENV_ACCESS DEFAULT\n\
+                  #pragma STDC FENV_ACCESS ON\n\
+                  #include <fenv.h>\n\
+                  int test_fenv_pr(void) {\n\
+                      feclearexcept(FE_ALL_EXCEPT);\n\
+                      int r = fegetround();\n\
+                      fesetround(FE_TOWARDZERO);\n\
+                      fesetround(r);\n\
+                      return 0;\n\
+                  }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&out_path);
+    assert!(
+        output.status.success(),
+        "fenv pragma should parse without error, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
