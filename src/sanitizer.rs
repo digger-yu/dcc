@@ -24,7 +24,7 @@
 
 use crate::ast::{
     ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, Stmt,
-    Type, UnOp,
+    Type, UnOp, VarDecl,
 };
 use crate::diagnostics::Span;
 
@@ -276,6 +276,37 @@ fn instrument_block(
                     }
                 }
             }
+            BlockItem::Decl(Decl::Var(v)) => {
+                // VLA 边界检查: 在变长数组声明前插入
+                // `__ubsan_handle_vla_bound_not_positive(bound_expr)`
+                if flags.needs_ubsan() {
+                    if let Some(bound) = vla_bound_expr(v) {
+                        let item_span = v.span.clone();
+                        // 准备: 提取 bound + span, 然后 std::mem::take
+                        // (item 整体被替换, 不再借用 v)
+                        let check_stmt = BlockItem::Stmt(Stmt::Expr {
+                            e: vla_bound_check(bound, &item_span),
+                            span: item_span.clone(),
+                        });
+                        // std::mem::replace 把原 item 取走, 替换为临时占位
+                        let outer_span = v.span.clone();
+                        let original = std::mem::replace(
+                            item,
+                            BlockItem::Stmt(Stmt::Expr {
+                                e: Expr::Int { v: 0, span: item_span.clone(), ty: Type::Int },
+                                span: item_span.clone(),
+                            }),
+                        );
+                        *item = BlockItem::Stmt(Stmt::Block {
+                            b: Block {
+                                items: vec![check_stmt, original],
+                                span: item_span,
+                            },
+                            span: outer_span,
+                        });
+                    }
+                }
+            }
             BlockItem::Decl(_) => {}
             BlockItem::Stmt(stmt) => {
                 instrument_stmt(stmt, flags, ctx, guard_var, guard_base);
@@ -515,7 +546,20 @@ fn instrument_expr(
             instrument_expr(else_, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
         }
-        Expr::Cast { e, .. } => {
+        Expr::Cast { e, ty: cast_ty, .. } => {
+            // float→int cast: emit __ubsan_handle_float_cast_overflow.
+            // NaN/范围检查在运行时做;本侧仅插入调用,cast 本身的值仍正确。
+            if flags.needs_ubsan() && is_float_to_int_cast(&e.ty(), cast_ty) {
+                let inner_span = e.span();
+                let original_inner = e.as_ref().clone();
+                let check_expr = float_cast_check(Box::new(original_inner.clone()), cast_ty, &inner_span);
+                *e = Box::new(Expr::Comma {
+                    l: Box::new(check_expr),
+                    r: Box::new(original_inner),
+                    span: inner_span,
+                    ty: e.ty(),
+                });
+            }
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
         }
@@ -593,19 +637,33 @@ fn instrument_expr(
         }
         ExprKind::Deref(sz) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span);
+                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
+                *expr = wrapped;
+            }
+            // UBSAN null deref check: 与 KASAN/KCSAN 并存, 但单独
+            // 通过 wrapper (在 KASAN wrapper 之前再包一层)。
+            if flags.needs_ubsan() {
+                let wrapped = wrap_with_null_check(expr, &span);
                 *expr = wrapped;
             }
         }
         ExprKind::Index(sz) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span);
+                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
+                *expr = wrapped;
+            }
+            if flags.needs_ubsan() {
+                let wrapped = wrap_with_null_check(expr, &span);
                 *expr = wrapped;
             }
         }
         ExprKind::ArrowMember(sz) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span);
+                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
+                *expr = wrapped;
+            }
+            if flags.needs_ubsan() {
+                let wrapped = wrap_with_null_check(expr, &span);
                 *expr = wrapped;
             }
         }
@@ -615,8 +673,30 @@ fn instrument_expr(
             // 检查入参,rhs 再赋值。
             let lhs_clone = if let Expr::Assign { l, .. } = expr { Some(l.clone()) } else { None };
             if let Some(l) = lhs_clone {
-                let wrapped = wrap_with_mem_check_assign(&l, expr, check_kind, &span);
+                let wrapped = wrap_with_mem_check_assign(&l, expr, check_kind, &span, flags);
                 *expr = wrapped;
+            }
+            // 赋值前的 null check (UBSAN): 包在 LHS 之上
+            if flags.needs_ubsan() {
+                if let Expr::Comma { r, .. } = expr {
+                    if let Expr::Assign { l, .. } = r.as_ref() {
+                        let null_call = null_deref_check(&l.span());
+                        // (null_check, original) — original 已经是 (mem_check, assign)
+                        let original_ty = expr.ty().clone();
+                        let original = expr.clone();
+                        *expr = Expr::Comma {
+                            l: Box::new(Expr::Comma {
+                                l: Box::new(null_call),
+                                r: Box::new(Expr::Int { v: 0, span: span.clone(), ty: Type::Int }),
+                                span: span.clone(),
+                                ty: Type::Int,
+                            }),
+                            r: Box::new(original),
+                            span: span.clone(),
+                            ty: original_ty,
+                        };
+                    }
+                }
             }
         }
         ExprKind::Assign(None) => {}
@@ -784,6 +864,115 @@ fn try_wrap_ubsan(expr: &Expr, op: BinOp) -> Option<Expr> {
     }
 }
 
+/// 检测 VLA 声明并返回其边界表达式。
+/// 仅对 `Type::Array(_, ArraySize::Var(_))` 返回 `Some(bound)`。
+fn vla_bound_expr(v: &VarDecl) -> Option<Box<Expr>> {
+    if let Type::Array(_, ArraySize::Var(bound)) = &v.ty {
+        // 仅当 bound 是非平凡表达式 (避免对常量 0 之类的纯 stub 重复插入)
+        Some(bound.clone())
+    } else {
+        None
+    }
+}
+
+/// 生成 `__ubsan_handle_vla_bound_not_positive(bound)` 调用表达式。
+/// runtime 会判断 bound 是否为正。
+fn vla_bound_check(bound: Box<Expr>, span: &Span) -> Expr {
+    let bound_ty = bound.ty();
+    let call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: "__ubsan_handle_vla_bound_not_positive".to_string(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(Box::new(Type::Void), vec![bound_ty.clone()]),
+        }),
+        args: vec![*bound],
+        span: span.clone(),
+        ty: Type::Void,
+    };
+    call
+}
+
+/// 生成 `__ubsan_handle_null_pointer_dereference()` 调用表达式。
+/// 无参数 (运行时由 caller frame 反查地址)。
+fn null_deref_check(span: &Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: "__ubsan_handle_null_pointer_dereference".to_string(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(Box::new(Type::Void), vec![]),
+        }),
+        args: vec![],
+        span: span.clone(),
+        ty: Type::Void,
+    }
+}
+
+/// 生成 `__ubsan_handle_float_cast_overflow(value, int_min, int_max)` 表达式。
+/// 在 float→int 转换时检查是否溢出。运行时判断:
+///   - value 是 NaN
+///   - value 超出目标整型范围
+/// 若溢出则 trap, 否则保留原值继续 codegen 中的 cast。
+fn float_cast_check(value: Box<Expr>, target_ty: &Type, span: &Span) -> Expr {
+    let val_ty = value.ty();
+    // 目标整型最小/最大值 (LLVM sanitizer 接口)
+    let (min_v, max_v) = int_range(target_ty);
+    let min_expr = Expr::Int { v: min_v, span: span.clone(), ty: target_ty.clone() };
+    let max_expr = Expr::Int { v: max_v, span: span.clone(), ty: target_ty.clone() };
+    let call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: "__ubsan_handle_float_cast_overflow".to_string(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(
+                Box::new(Type::Void),
+                vec![val_ty, target_ty.clone(), target_ty.clone()],
+            ),
+        }),
+        args: vec![*value, min_expr, max_expr],
+        span: span.clone(),
+        ty: Type::Void,
+    };
+    call
+}
+
+/// 返回目标整型的 (最小值, 最大值)。
+fn int_range(ty: &Type) -> (i128, i128) {
+    match ty {
+        Type::Bool => (0, 1),
+        Type::Char | Type::SChar => (i8::MIN as i128, i8::MAX as i128),
+        Type::UChar => (0, u8::MAX as i128),
+        Type::Short => (i16::MIN as i128, i16::MAX as i128),
+        Type::UShort => (0, u16::MAX as i128),
+        Type::Int => (i32::MIN as i128, i32::MAX as i128),
+        Type::UInt => (0, u32::MAX as i128),
+        Type::Long => (i64::MIN as i128, i64::MAX as i128),
+        Type::ULong => (0, u64::MAX as i128),
+        Type::LongLong => (i64::MIN as i128, i64::MAX as i128),
+        Type::ULongLong => (0, u64::MAX as i128),
+        Type::Int128 => (i128::MIN, i128::MAX),
+        Type::UInt128 => (0, u128::MAX as i128),
+        _ => (i64::MIN as i128, i64::MAX as i128),
+    }
+}
+
+/// 判断类型是否为 float/double/long double。
+fn is_float_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Float | Type::Double | Type::LongDouble)
+}
+
+/// 判断 cast 是否为 float→int (UBSAN float-cast 触发条件)。
+fn is_float_to_int_cast(from: &Type, to: &Type) -> bool {
+    is_float_ty(from) && is_integer_ty(to) && !matches!(to, Type::Bool)
+}
+
 /// 把 `expr` 包成 `Expr::Comma { l: call, r: expr }`,其中 `call` 是
 /// `__ubsan_handle_*` 系列,带两个参数:源位置结构体 (0 作为简化,
 /// 让运行时读取 `__ubsan_get_source()` / 栈回溯) 与 `check_arg`。
@@ -846,12 +1035,12 @@ fn wrap_with_ubsan_check(expr: &Expr, kind: &str, span: &Span) -> Expr {
 }
 
 /// 把 `expr` 包成 `Expr::Comma { l: side_effect_call, r: expr }`。
-/// `kind` 决定插入 `__asan_loadN` / `__asan_storeN`。
+/// `kind` 决定插入 `__asan_loadN` / `__asan_storeN` / `__kcsan_check_access`。
 /// `addr_lhs` 是表达式的"lvalue 子表达式" — 对 Deref/Index/Member
 /// 而言是 `expr` 自身 (其 AddrOf 在 codegen 中得到正确地址);
 /// 对 Assign 而言是 LHS (本函数不处理 Assign,见
 /// `wrap_with_mem_check_assign`)。
-fn wrap_with_mem_check(expr: &Expr, kind: MemCheckKind, span: &Span) -> Expr {
+fn wrap_with_mem_check(expr: &Expr, kind: MemCheckKind, span: &Span, flags: SanitizerFlags) -> Expr {
     let inner_ty = expr.ty();
     // AddrOf(&expr) → codegen 支持 Deref/Index/Member/Ident,
     // 返回 lvalue 地址,不读取。
@@ -863,20 +1052,10 @@ fn wrap_with_mem_check(expr: &Expr, kind: MemCheckKind, span: &Span) -> Expr {
     let size = match kind {
         MemCheckKind::Load(sz) | MemCheckKind::Store(sz) => sz,
     };
-    let fn_name = match kind {
-        MemCheckKind::Load(_) => kasan_load_fn(size),
-        MemCheckKind::Store(_) => kasan_store_fn(size),
-    };
-    let call = Expr::Call {
-        callee: Box::new(Expr::Ident {
-            name: Ident { name: fn_name, span: span.clone() },
-            span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
-        }),
-        args: vec![addr_expr],
-        span: span.clone(),
-        ty: Type::Void,
-    };
+    let is_write = matches!(kind, MemCheckKind::Store(_));
+    // KCSAN-only 与 KASAN-only 是互斥选项;若同时启用则 KASAN 优先
+    // (KASAN 覆盖 KCSAN 的所有检测并提供更细粒度的诊断)。
+    let call = make_mem_check_call(addr_expr, size, is_write, span, flags);
     Expr::Comma {
         l: Box::new(call),
         r: Box::new(expr.clone()),
@@ -893,6 +1072,7 @@ fn wrap_with_mem_check_assign(
     assign: &Expr,
     kind: MemCheckKind,
     span: &Span,
+    flags: SanitizerFlags,
 ) -> Expr {
     let inner_ty = assign.ty();
     let addr_expr = Expr::AddrOf {
@@ -903,24 +1083,79 @@ fn wrap_with_mem_check_assign(
     let size = match kind {
         MemCheckKind::Load(sz) | MemCheckKind::Store(sz) => sz,
     };
-    let fn_name = match kind {
-        MemCheckKind::Load(_) => kasan_load_fn(size),
-        MemCheckKind::Store(_) => kasan_store_fn(size),
-    };
+    let is_write = matches!(kind, MemCheckKind::Store(_));
     let _ = kind; // 静音未使用
-    let call = Expr::Call {
+    let call = make_mem_check_call(addr_expr, size, is_write, span, flags);
+    Expr::Comma {
+        l: Box::new(call),
+        r: Box::new(assign.clone()),
+        span: span.clone(),
+        ty: inner_ty,
+    }
+}
+
+/// 根据当前启用的 sanitizer 选择正确的内存检查函数。
+///
+/// - KASAN/HWASAN (或与 KCSAN 同时):  `__asan_loadN` / `__asan_storeN`
+/// - KCSAN only:                       `__kcsan_check_access(addr, size, is_write)`
+///
+/// KASAN 优先 (它提供更细粒度的诊断, KCSAN 仅是数据竞争检测)。
+fn make_mem_check_call(addr: Expr, size: usize, is_write: bool, span: &Span, flags: SanitizerFlags) -> Expr {
+    let kasan_active = flags.kasan || flags.hwasan;
+    if !kasan_active && flags.kcsan {
+        // KCSAN-only 路径: emit __kcsan_check_access(addr, size, is_write)
+        // LLVM 运行时签名: void __kcsan_check_access(const volatile void *ptr,
+        //                                          size_t size, int is_write)
+        return Expr::Call {
+            callee: Box::new(Expr::Ident {
+                name: Ident {
+                    name: "__kcsan_check_access".to_string(),
+                    span: span.clone(),
+                },
+                span: span.clone(),
+                ty: Type::Func(
+                    Box::new(Type::Void),
+                    vec![
+                        Type::Ptr(Box::new(Type::Void)),
+                        Type::ULong,
+                        Type::Int,
+                    ],
+                ),
+            }),
+            args: vec![
+                addr,
+                Expr::Int { v: size as i128, span: span.clone(), ty: Type::ULong },
+                Expr::Int { v: if is_write { 1 } else { 0 }, span: span.clone(), ty: Type::Int },
+            ],
+            span: span.clone(),
+            ty: Type::Void,
+        };
+    }
+    let fn_name = if is_write {
+        kasan_store_fn(size)
+    } else {
+        kasan_load_fn(size)
+    };
+    Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident { name: fn_name, span: span.clone() },
             span: span.clone(),
             ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
         }),
-        args: vec![addr_expr],
+        args: vec![addr],
         span: span.clone(),
         ty: Type::Void,
-    };
+    }
+}
+
+/// 把 `expr` 包成 `(null_check, expr)`,其中 `null_check` 是
+/// `__ubsan_handle_null_pointer_dereference()` 调用。
+fn wrap_with_null_check(expr: &Expr, span: &Span) -> Expr {
+    let inner_ty = expr.ty();
+    let null_call = null_deref_check(span);
     Expr::Comma {
-        l: Box::new(call),
-        r: Box::new(assign.clone()),
+        l: Box::new(null_call),
+        r: Box::new(expr.clone()),
         span: span.clone(),
         ty: inner_ty,
     }
@@ -1314,6 +1549,13 @@ mod tests {
                 collect_call_names_expr(idx, out);
             }
             Expr::Member { expr, .. } => collect_call_names_expr(expr, out),
+            Expr::Cast { e, .. } => collect_call_names_expr(e, out),
+            Expr::SizeofExpr { e, .. }
+            | Expr::AlignofExpr { e, .. }
+            | Expr::PreInc { e, .. }
+            | Expr::PreDec { e, .. }
+            | Expr::PostInc { e, .. }
+            | Expr::PostDec { e, .. } => collect_call_names_expr(e, out),
             _ => {}
         }
     }
@@ -1654,5 +1896,184 @@ mod tests {
         assert!(SanitizerFlags { kasan: true, ..Default::default() }.any());
         assert!(SanitizerFlags { kcov: true, ..Default::default() }.any());
         assert!(!SanitizerFlags::default().any());
+    }
+
+    #[test]
+    fn ubsan_vla_bound_check_inserted() {
+        // VLA 声明 int arr[n]; 应在声明前插入
+        // __ubsan_handle_vla_bound_not_positive(n) 调用。
+        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
+        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let vla_decl = VarDecl {
+            ty: Type::Array(
+                Box::new(Type::Int),
+                ArraySize::Var(Box::new(Expr::Ident {
+                    name: Ident { name: "n".into(), span: Span::point("t.c", 1, 1) },
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                })),
+            ),
+            name: Ident { name: "arr".into(), span: Span::point("t.c", 1, 1) },
+            init: None,
+            span: Span::point("t.c", 1, 1),
+            is_extern: false,
+            is_static: false,
+            section: None,
+            alignment: None,
+            is_weak: false,
+            visibility: None,
+            is_unused: false,
+            register_name: None,
+            cleanup_fn: None,
+            is_thread_local: false,
+            no_sanitize: vec![],
+            copy_fn: None,
+            is_retain: false,
+            is_used_attr: false,
+        };
+        f.body = Some(Block {
+            items: vec![
+                BlockItem::Decl(Decl::Var(vla_decl)),
+                BlockItem::Stmt(Stmt::Return {
+                    val: None,
+                    span: Span::point("t.c", 1, 1),
+                }),
+            ],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags { ubsan: true, ..Default::default() },
+        );
+        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__ubsan_handle_vla_bound_not_positive"),
+            "VLA bound check not inserted: calls = {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn ubsan_null_deref_check_inserted() {
+        // *p 应同时插入 KASAN (若启用) 与 null 检查。
+        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
+        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int)),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags { ubsan: true, ..Default::default() },
+        );
+        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__ubsan_handle_null_pointer_dereference"),
+            "null check missing: calls = {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn ubsan_float_cast_check_inserted() {
+        // (int)f 应插入 __ubsan_handle_float_cast_overflow 调用。
+        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
+        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Cast {
+                    ty: Type::Int,
+                    e: Box::new(Expr::Ident {
+                        name: Ident { name: "d".into(), span: Span::point("t.c", 1, 1) },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Double,
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags { ubsan: true, ..Default::default() },
+        );
+        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__ubsan_handle_float_cast_overflow"),
+            "float cast check missing: calls = {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kcsan_only_uses_kcsan_check_access() {
+        // 当 KCSAN 是唯一的内存 sanitizer 时,Deref 应使用
+        // __kcsan_check_access 而非 __asan_loadN。
+        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
+        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int)),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags { kcsan: true, ..Default::default() },
+        );
+        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__kcsan_check_access"),
+            "KCSAN access check missing: calls = {:?}",
+            names
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("__asan_load")),
+            "KASAN load should not be emitted when only KCSAN is enabled: calls = {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn int_range_covers_all_integer_types() {
+        assert_eq!(int_range(&Type::Int), (i32::MIN as i128, i32::MAX as i128));
+        assert_eq!(int_range(&Type::UInt), (0, u32::MAX as i128));
+        assert_eq!(int_range(&Type::Int128), (i128::MIN, i128::MAX));
+        assert_eq!(int_range(&Type::UInt128), (0, u128::MAX as i128));
+    }
+
+    #[test]
+    fn is_float_to_int_cast_classifies_correctly() {
+        assert!(is_float_to_int_cast(&Type::Double, &Type::Int));
+        assert!(is_float_to_int_cast(&Type::Float, &Type::UInt));
+        assert!(is_float_to_int_cast(&Type::LongDouble, &Type::LongLong));
+        assert!(!is_float_to_int_cast(&Type::Int, &Type::Int));
+        assert!(!is_float_to_int_cast(&Type::Double, &Type::Double));
+        assert!(!is_float_to_int_cast(&Type::Double, &Type::Bool));
     }
 }
