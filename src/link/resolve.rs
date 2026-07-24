@@ -258,7 +258,9 @@ fn is_implicit_undef(name: &str) -> bool {
         // 注: dcc 当前的 struct sigaction / stack_t 布局有 bug (Section 9
         // follow-up), runtime 传 struct 会 segfault; 但 libc 转发本身 OK,
         // 故这些名字仍列为 implicit undefined 以使 host gcc 链接成功.
-        "sigaction" | "sigaltstack" | "signal"
+        "sigaction" | "sigaltstack" | "signal" |
+        // 复杂数学 (Section 11 P0.3): cproj / cabs / carg 走 libm.
+        "cproj" | "cabs" | "carg"
     )
 }
 

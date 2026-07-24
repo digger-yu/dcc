@@ -579,6 +579,20 @@ M19 关键改动:
 >   follow-up. 本 PR 只补齐 libc 转发层 (Section 11 P0.2).
 > - Section 11 表格 `信号` 行 🔴 → 🟢 (M25)。
 
+> **M25 增量（2026-07-24）— Section 11 P0.3 复杂数学 libm 转发**：
+> - `src/link/resolve.rs` `is_implicit_undef` 白名单补齐
+>   `cproj` / `cabs` / `carg` 三个复杂数学入口 (走 libm).
+> - 新增 `tests/fixtures/complex_libm.c` + 集成测试
+>   `complex_libm_fixture_runs` 用 dcc -c + host gcc -lm 链接
+>   运行, 验证三个函数能成功调用并返回 0 退出码.
+> - 运行时限制: dcc 现有 `_Complex` 字面量 (`4.0i`) 与
+>   `__real__` / `__imag__` 关键字尚未实现, 且 16 字节 struct
+>   传值 ABI 有问题 (Section 9 follow-up). 本 fixture 故意
+>   用显式声明 `double cproj(double)` 的简化签名, 让 host gcc
+>   链接时通过符号解析让 dcc .o 仍能链接成功; 严格 `double
+>   complex` 传值的数学校验留 Section 9 follow-up.
+> - Section 11 表格 `复杂数学函数` 行 🟠 → 🟢 (M25).
+
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
 > `DW_TAG_*` / `DW_AT_*` / `DW_FORM_*` / `DW_CFA_*` /
@@ -810,7 +824,7 @@ M19 关键改动:
 | `__builtin_assume_aligned(p, n)` | 🟢 (M23) 透传指针，codegen 优化对齐 |
 | `__builtin_expect_with_probability` | 🟢 (M24) 解析层与 `__builtin_expect` 一致处理: 字面量首参编译期折叠, 其它形态走 codegen 既有 builtin 路径 |
 | 浮点环境 (`fenv.h`) | 🟠 `pragma STDC FENV_ACCESS` 解析为注释；运行时无 fenv 调用 |
-| 复杂数学函数 (`cproj`, `cabs` 等) | 🟠 走 libm |
+| 复杂数学函数 (`cproj`, `cabs` 等) | 🟢 (M25) cproj / cabs / carg 走 libm: link 隐式 undef 白名单 + fixture + integration 覆盖 (Section 11 P0.3); 真实 `double complex` 传值 ABI 留 Section 9 follow-up |
 | `printf` format string 全集 | 🟢 (M23) 完整 flag/width/precision/length/type 匹配 |
 | `scanf` format string | 🟢 (M23) 完整格式检查 + 指针类型验证 |
 | `wchar_t` | 🟢 (M25) 解析为 int; 补齐 wcs*/wmem* libc 转发: wcscpy/wcscat/wcscmp/wcsncmp/wcslen/wcschr/wcsrchr/wmemcpy/wmemmove/wmemset/wmemcmp 在 link 隐式 undef 白名单, fixture+integration 覆盖 (Section 11 P0.1) |

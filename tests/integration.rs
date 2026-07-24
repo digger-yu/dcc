@@ -77,7 +77,12 @@ fn run_cpp_object_test(name: &str, source: &str) -> (std::process::Output, std::
 
 /// dcc -c + 主机 gcc 链接 + 运行. 用于验证运行时行为 (libc 调用等).
 /// 返回 (编译输出, 链接+运行退出码). 退出码 0 表示通过.
+/// link_extra_args: 传给 gcc 的额外参数 (如 "-lm" 用于 libm 转发).
 fn run_host_link_and_run(name: &str, source: &str) -> (std::process::Output, i32) {
+    run_host_link_and_run_with(name, source, &[])
+}
+
+fn run_host_link_and_run_with(name: &str, source: &str, link_extra_args: &[&str]) -> (std::process::Output, i32) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-link-{name}-{}.c", std::process::id()));
     let object_path = dir.join(format!("dcc-link-{name}-{}.o", std::process::id()));
@@ -98,6 +103,7 @@ fn run_host_link_and_run(name: &str, source: &str) -> (std::process::Output, i32
         .args(["-o"])
         .arg(&exe_path)
         .arg(&object_path)
+        .args(link_extra_args)
         .output()
         .expect("run gcc");
     let _ = fs::remove_file(&object_path);
@@ -3650,5 +3656,18 @@ int main(void) {
             "fixture .o should reference {}",
             String::from_utf8_lossy(needle)
         );
+    }
+}
+
+/// 复杂数学 cproj / cabs / carg libm 转发 (Section 11 P0.3).
+/// 编译 fixtures/complex_libm.c, 验证 .o 引用 cproj / cabs / carg
+/// 作为 undefined symbol (留给 host gcc -lm 解析), 然后链接运行.
+#[test]
+fn complex_libm_fixture_runs() {
+    let src = include_str!("fixtures/complex_libm.c");
+    let (compile, code) = run_host_link_and_run_with("complex-libm", src, &["-lm"]);
+    if code != 0 {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        panic!("complex_libm fixture exit={code}, expected 0\ndcc stderr: {stderr}");
     }
 }
