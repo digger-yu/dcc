@@ -3110,3 +3110,37 @@ fn m23_attr_retain_used_compiles_and_runs() {
     assert_eq!(rc, 42, "combo_var + combo_fn(0) = 7+35 = 42");
     let _ = fs::remove_file(exe);
 }
+
+/// `double _Complex` 类型说明符 (C99 complex.h 形式)
+/// M26: 此前 parse_type_mode 第二 loop 的 KwDouble arm 带 `break;`
+/// 提前退出, 导致 `_Complex` 后续修饰符被外层误判为 declarator.
+/// 现已去掉 break, 允许 `float _Complex` / `double _Complex` /
+/// `long double _Complex` 自由组合.
+#[test]
+fn double_complex_decl_run_returns_zero() {
+    let source = include_str!("fixtures/double_complex_decl.c");
+    let (output, exe) = run_compile_and_run("double-complex-decl", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "double_complex_decl should return 0, got {rc}");
+}
+
+/// L'x' 宽字符字面量 (Section 11)
+/// M26: 新增 TokKind::WideCharLit, lexer 在 `L` 标识符后看到
+/// `'` 时走宽字符路径; 解析层复用 parse_wide_str 输出 UTF-32LE.
+#[test]
+fn wide_char_literal_run_returns_zero() {
+    let source = include_str!("fixtures/wide_char_literal.c");
+    let (output, exe) = run_compile_and_run("wide-char-literal", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "wide_char_literal should return 0, got {rc}");
+}

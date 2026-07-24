@@ -20,6 +20,7 @@ pub enum TokKind {
     StringLit,     // "abc"
     WideStringLit, // L"abc" (wchar_t string, UTF-32 on Linux)
     CharLit,       // 'a'
+    WideCharLit,   // L'a' (wchar_t char literal, wchar_t on Linux = int/UTF-32)
     Ident,         // foo _x
     // 关键字
     KwInt, KwChar, KwShort, KwLong, KwVoid, KwFloat, KwDouble, KwSigned, KwUnsigned,
@@ -162,6 +163,20 @@ impl<'a> Lexer<'a> {
                 }
                 let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
                 let kind = if terminated { TokKind::WideStringLit } else { TokKind::Invalid };
+                return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            }
+            // L'...' wide char literal
+            if text == "L" && self.peek() == Some(b'\'') {
+                self.bump(); // consume opening '\''
+                let mut terminated = false;
+                while let Some(c) = self.peek() {
+                    if c == b'\'' { self.bump(); terminated = true; break; }
+                    if c == b'\n' || c == b'\r' { break; }
+                    if c == b'\\' { self.bump(); self.bump(); continue; }
+                    self.bump();
+                }
+                let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
+                let kind = if terminated { TokKind::WideCharLit } else { TokKind::Invalid };
                 return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
             }
             return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
@@ -315,5 +330,45 @@ mod tests {
             assert_eq!(lexer.next().kind, TokKind::Number, "{source}");
             assert_eq!(lexer.next().kind, TokKind::Eof, "{source}");
         }
+    }
+
+    #[test]
+    fn wide_string_and_char_literals() {
+        // L"hello" 应产生 WideStringLit
+        let mut lx = Lexer::new(br#"L"hello""#, "wide.c");
+        let tok = lx.next();
+        assert_eq!(tok.kind, TokKind::WideStringLit);
+        assert_eq!(tok.text.as_str(), r#"L"hello""#);
+        assert_eq!(lx.next().kind, TokKind::Eof);
+
+        // L'a' 应产生 WideCharLit
+        let mut lx = Lexer::new(b"L'a'", "wide.c");
+        let tok = lx.next();
+        assert_eq!(tok.kind, TokKind::WideCharLit);
+        assert_eq!(tok.text.as_str(), "L'a'");
+        assert_eq!(lx.next().kind, TokKind::Eof);
+
+        // L'\u00e9' 宽字符 (UTF-8 字节序列 e9 在源里)
+        let mut lx = Lexer::new("L'\u{e9}'".as_bytes(), "wide.c");
+        let tok = lx.next();
+        assert_eq!(tok.kind, TokKind::WideCharLit);
+
+        // 普通 'a' 仍是 CharLit, 不被 L 前缀吞
+        let mut lx = Lexer::new(b"'a'", "plain.c");
+        assert_eq!(lx.next().kind, TokKind::CharLit);
+        assert_eq!(lx.next().kind, TokKind::Eof);
+
+        // L 后接 identifier (非 ' " 前缀) 应是普通 ident Lx
+        let mut lx = Lexer::new(b"Lx", "ident.c");
+        let tok = lx.next();
+        assert_eq!(tok.kind, TokKind::Ident);
+        assert_eq!(tok.text.as_str(), "Lx");
+        assert_eq!(lx.next().kind, TokKind::Eof);
+    }
+
+    #[test]
+    fn wide_char_unterminated_is_invalid() {
+        let mut lx = Lexer::new(b"L'abc", "wide.c");
+        assert_eq!(lx.next().kind, TokKind::Invalid);
     }
 }

@@ -1878,6 +1878,8 @@ impl<'a> Parser<'a> {
         }
         // 如果已从 _BitInt(typeof 等确定了 base 类型,立即解析避免后续 ident 误判
         // 注意: 必须放在 struct/union/enum/ident 检查之前
+        // _Complex 不在此触发早退: 它可与 _Atomic/限定符任意顺序组合,
+        // 且必须配 float/double/long double 基类型, 留到第二个 loop 统一处理.
         if base.is_some() || is_unsigned || is_long > 0 || is_short {
             let ty = self.resolve_base(base, is_unsigned, is_long, is_short);
             return Some(self.finish_type(ty, specifiers_only));
@@ -2000,6 +2002,11 @@ impl<'a> Parser<'a> {
         // 基本类型
         let mut is_complex = false;
         loop {
+            // 注意: 浮点类 (float / double / long double / decimal) 与 _Complex
+            // 复合 (例 `double _Complex z`), 故其 arm 不带 `break`, 让第二 loop
+            // 继续消费后续修饰符. 整数类 (int / char / short / long / int128)
+            // 与 _Bool / void / _Atomic 不与 _Complex 组合, 加 `break` 防止吞掉
+            // 后续 declarator ident (例 `typedef _Bool _Bool;`).
             match self.cur.kind {
                 TokKind::KwComplex => { is_complex = true; self.advance(); }
                 TokKind::KwInt => { base = Some(Type::Int); self.advance(); }
@@ -2008,11 +2015,11 @@ impl<'a> Parser<'a> {
                 TokKind::KwLong => { is_long += 1; self.advance(); }
                 TokKind::KwVoid => { base = Some(Type::Void); self.advance(); break; }
                 TokKind::KwBool => { base = Some(Type::Bool); self.advance(); break; }
-                TokKind::KwFloat => { base = Some(Type::Float); self.advance(); break; }
-                TokKind::KwDouble => { base = Some(Type::Double); self.advance(); break; }
-                TokKind::KwDecimal32 => { base = Some(Type::Float); self.advance(); break; }
-                TokKind::KwDecimal64 => { base = Some(Type::Double); self.advance(); break; }
-                TokKind::KwDecimal128 => { base = Some(Type::LongDouble); self.advance(); break; }
+                TokKind::KwFloat => { base = Some(Type::Float); self.advance(); }
+                TokKind::KwDouble => { base = Some(Type::Double); self.advance(); }
+                TokKind::KwDecimal32 => { base = Some(Type::Float); self.advance(); }
+                TokKind::KwDecimal64 => { base = Some(Type::Double); self.advance(); }
+                TokKind::KwDecimal128 => { base = Some(Type::LongDouble); self.advance(); }
                 TokKind::KwInt128 => { base = Some(Type::Int128); self.advance(); break; }
                 TokKind::KwUInt128 => { base = Some(Type::UInt128); self.advance(); break; }
                 TokKind::KwFract => { base = Some(Type::Fract); self.advance(); break; }
@@ -3502,6 +3509,19 @@ impl<'a> Parser<'a> {
                 Some(Expr::String { data, span: sp, ty: Type::Ptr(Box::new(Type::Int)) })
             }
             TokKind::CharLit => { let v = parse_chr(&self.cur.text); self.advance(); Some(Expr::Char { v, span: sp, ty: Type::Int }) }
+            // L'x' / L'\u00e9' 宽字符字面量: 编码为 UTF-32LE (wchar_t 在 Linux
+            // 为 4 字节 int), 数值上与 L"..." 字符串中单字符语义一致.
+            // 注: Expr::Char.v 为 u8, 此处截断低位; 实际工程里 wchar_t 超出
+            // ASCII 范围时, 用户通常用 L"..." 字符串而非单字符字面量.
+            TokKind::WideCharLit => {
+                let wide_text = &self.cur.text;
+                let bytes = parse_wide_str(wide_text);
+                let v = if bytes.len() >= 4 {
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u8
+                } else { 0 };
+                self.advance();
+                Some(Expr::Char { v, span: sp, ty: Type::Int })
+            }
             TokKind::Ident => {
                 let t = self.cur.text.clone();
                 // C99 __func__ / GCC __FUNCTION__ / __PRETTY_FUNCTION__:
@@ -3775,11 +3795,44 @@ fn parse_wide_str(raw: &str) -> Vec<u8> {
                 Some('"') => '"' as u32,
                 Some('\'') => '\'' as u32,
                 Some('x') => {
+                    // \xHH 十六进制转义, 1-2 位
                     let mut val = 0u32;
                     for _ in 0..2 {
-                        if let Some(h) = it.next() {
-                            val = val * 16 + h.to_digit(16).unwrap_or(0);
+                        if let Some(h) = it.clone().next() {
+                            if let Some(d) = h.to_digit(16) {
+                                val = val * 16 + d;
+                                it.next();
+                            } else { break; }
+                        } else { break; }
+                    }
+                    val
+                }
+                Some('u') => {
+                    // \u{XXXX} 通用字符名 (C99), 1-6 位十六进制
+                    let mut val = 0u32;
+                    if it.next() == Some('{') {
+                        for _ in 0..6 {
+                            if let Some(h) = it.clone().next() {
+                                if h == '}' { it.next(); break; }
+                                if let Some(d) = h.to_digit(16) {
+                                    val = val * 16 + d;
+                                    it.next();
+                                } else { break; }
+                            } else { break; }
                         }
+                    }
+                    val
+                }
+                Some('U') => {
+                    // \UXXXXXXXX 8 位十六进制
+                    let mut val = 0u32;
+                    for _ in 0..8 {
+                        if let Some(h) = it.clone().next() {
+                            if let Some(d) = h.to_digit(16) {
+                                val = val * 16 + d;
+                                it.next();
+                            } else { break; }
+                        } else { break; }
                     }
                     val
                 }
@@ -3800,4 +3853,41 @@ fn parse_chr(raw: &str) -> u8 {
     let inner = &raw[1..raw.len()-1];
     if inner.starts_with('\\') { match inner.chars().nth(1) { Some('n') => b'\n', Some('t') => b'\t', Some('r') => b'\r', Some('0') => 0, Some('\\') => b'\\', Some('\'') => b'\'', _ => inner.as_bytes().get(1).copied().unwrap_or(0) } }
     else { inner.as_bytes().first().copied().unwrap_or(0) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_wide_str;
+
+    #[test]
+    fn wide_str_ascii() {
+        // L"a" -> 'a' 编码为 UTF-32LE 0x61 + 4 字节 null terminator
+        let bytes = parse_wide_str(r#"L"a""#);
+        assert_eq!(bytes, vec![0x61, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn wide_str_escape() {
+        // L"\n" -> '\n' 编码为 0x0a + null terminator
+        let bytes = parse_wide_str(r#"L"\n""#);
+        assert_eq!(bytes, vec![0x0a, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn wide_str_unicode() {
+        // L"\u{e9}" -> U+00E9 (UTF-32LE: e9 00 00 00) + null
+        let bytes = parse_wide_str(r#"L"\u{e9}""#);
+        assert_eq!(bytes, vec![0xe9, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn wide_str_multiple_chars() {
+        // L"abc" -> 3 字符, 各 4 字节, + null terminator
+        let bytes = parse_wide_str(r#"L"abc""#);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[0..4], &[0x61, 0, 0, 0]);
+        assert_eq!(&bytes[4..8], &[0x62, 0, 0, 0]);
+        assert_eq!(&bytes[8..12], &[0x63, 0, 0, 0]);
+        assert_eq!(&bytes[12..16], &[0, 0, 0, 0]);
+    }
 }
