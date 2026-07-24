@@ -1401,7 +1401,11 @@ impl Codegen {
                 offset: code_pos + 3,
                 sym_index: rodata_sym_idx.unwrap_or(0),
                 rel_type: R_X86_64_PC32,
-                addend: str_off - 7,
+                // addend = str_off - 4: LEA 7 字节指令, disp32 在 byte 3.
+                // rip = code_pos + 7, P = code_pos + 3, 差 4 字节.
+                // R_X86_64_PC32: disp32 = S + A - P, target = rip + disp32 = S + A + 4.
+                // 要 target = S + str_off, addend = str_off - 4.
+                addend: str_off - 4,
             });
         }
 
@@ -1411,7 +1415,9 @@ impl Codegen {
                 offset: code_pos + 4,
                 sym_index: rodata_sym_idx.unwrap_or(0),
                 rel_type: R_X86_64_PC32,
-                addend: rodata_off as i64 - 8,
+                // addend = rodata_off - 4: movsd/movss 8 字节, disp32 在 byte 4.
+                // rip = code_pos + 8, P = code_pos + 4, 差 4 字节. 同上.
+                addend: rodata_off as i64 - 4,
             });
         }
 
@@ -1925,7 +1931,7 @@ impl Codegen {
                                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                                     .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
                                     .sum();
-                                let off = -(used + 16);
+                                let off = -(used + 16 + temp_slots * 8);
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                                 for c in 0..chunks {
                                     if gp_idx + c < 6 {
@@ -1942,7 +1948,7 @@ impl Codegen {
                                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                                     .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
                                     .sum();
-                                let off = -(used + 16);
+                                let off = -(used + 16 + temp_slots * 8);
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                                 if fp_idx < 8 {
                                     xmm_param_stores.push((fp_idx as u8, off, p.ty.clone()));
@@ -1958,7 +1964,7 @@ impl Codegen {
                                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                                     .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
                                     .sum();
-                                let off = -(used + 16);
+                                let off = -(used + 16 + temp_slots * 8);
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                                 param_stores.push((arg_regs[gp_idx], off));
                                 gp_idx += 1;
@@ -1968,7 +1974,7 @@ impl Codegen {
                                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                                     .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
                                     .sum();
-                                let off = -(used + 16);
+                                let off = -(used + 16 + temp_slots * 8);
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                                 stack_param_stores.push((stack_arg_idx, off));
                                 stack_arg_idx += 1;
@@ -1994,8 +2000,16 @@ impl Codegen {
                     self.emit(&[0x48, 0x81, 0xec]);
                     self.emit(&self.frame_size.to_le_bytes());
                 }
-                // 帧底部先留给表达式临时槽，其后是可变参数 GP 保存区和静态链。
-                self.variadic_reg_save_offset = -self.frame_size + temp_slots * 8;
+                // 变参 reg save area 放在 frame 底部 (紧贴 rsp 之后).
+                // 帧布局 (自下而上):
+                //   r13+0 saved r13 / r13+8 ret addr
+                //   r13-16..-(16+temp_slots*8) binop temp_slots
+                //   r13-(16+temp_slots*8)..-(16+temp_slots*8+var_bytes) 变量
+                //   r13-frame_size..r13-frame_size+va_slots 变参 reg save area
+                // 关键: save area 必须在变量下方, 否则 XMM 槽位会与
+                //       变量 (尤其 for-init 的 i) 重叠, 导致变参读取
+                //       错误返回循环变量值.
+                self.variadic_reg_save_offset = -self.frame_size;
                 if f.is_variadic {
                     for (i, reg) in arg_regs.iter().enumerate() {
                         self.store_stack(*reg, self.variadic_reg_save_offset + i as i32 * 8);
@@ -2455,6 +2469,10 @@ impl Codegen {
                                     self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                                 } else if let Type::Complex(inner) = &v.ty {
                                     self.gen_complex_init(&v.name.name, inner, init);
+                                } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
+                                    // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
+                                    self.gen_expr(init, 0);
+                                    self.gen_float_store(&v.name.name, &v.ty);
                                 } else {
                                     self.gen_expr(init, 0);
                                     self.mov_to_stack(0, &v.name.name);
@@ -2692,12 +2710,12 @@ impl Codegen {
                 // 统一路径: 使用帧临时槽保存左操作数 (避免 push 与 call 返回地址冲突)
                 // 使用 gen_expr_decay: 数组标识符在运算中衰减为指针
                 // binop 临时槽: 放在 temp_slots 区域 (保存寄存器下方, 变量上方)
-                // 布局: r13 → saved_regs(-8,-16) → temp_slots → variables
-                let var_bytes: i32 = self.var_map.values()
-                    .filter(|(_, ty)| !matches!(ty, Type::Void))
-                    .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
-                    .sum();
-                let slot_off = -(24 + var_bytes + self.expr_depth as i32 * 8);
+                // 布局: r13+0 saved r13 / r13+8 ret addr / r13-16..-(16+temp_slots*8) temp_slots
+                //       / r13-(16+temp_slots*8)..-frame_size 变量
+                // 关键: temp_slots 必须从 -16 开始 (紧随 ret addr), 变量必须从
+                //       -(16+temp_slots*8) 开始, 二者无缝衔接, 不与 va_arg
+                //       ap 字段重叠 (ap 通常占 24 字节).
+                let slot_off = -(16 + self.expr_depth as i32 * 8);
                 self.gen_expr_decay(l, dst);
                 // 保存左操作数到帧临时槽: mov [r13+slot_off], dst
                 {
@@ -5084,12 +5102,15 @@ impl Codegen {
         let slots = ty.size().div_ceil(8); // 向上对齐到 8 字节
         let slots = slots.max(1) as i32;
         // 基于实际类型大小计算偏移 (过滤 padding 条目)
-        // 变量放在保存寄存器下方: offset = -(used + 16)
+        // 帧布局: r13+0 saved r13 / r13+8 ret addr / r13-(16+temp_slots*8) temp_slots
+        //         / 变量(从此向下) / variadic reg_save_area 在 frame 底部.
+        // 关键: 变量必须放在 temp_slots 区域下方, 否则会与 binop 临时槽
+        // 冲突, 进一步破坏 va_list (ap.gp_offset / ap.reg_save_area 等) 读取.
         let used: i32 = self.var_map.values()
             .filter(|(_, ty)| !matches!(ty, Type::Void))
             .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
             .sum();
-        let mut off = -(used + 16);
+        let mut off = -(used + 16 + self.temp_slots * 8);
         while off + ty.size() as i32 > 0 {
             off -= 8;
         }
@@ -5748,7 +5769,10 @@ impl Codegen {
         let fp_init = 48 + self.variadic_named_fp * 16;
         self.store_stack_imm32(ap_off, gp_init);
         self.store_stack_imm32(ap_off + 4, fp_init);
-        let overflow_off = self.frame_size + 16;
+        // overflow_arg_area: r13 是 push 后的 rsp,
+        //   [r13+0]=saved r13, [r13+8]=ret addr, [r13+16]=caller 栈上第 1 个变参.
+        // 与 frame_size 无关 — 帧是 sub 出的, 与 caller 栈方向相反.
+        let overflow_off: i32 = 16;
         self.emit_lea_r13(0, overflow_off);
         self.store_stack(0, ap_off + 8);
         self.emit_lea_r13(0, self.variadic_reg_save_offset);
@@ -5819,7 +5843,8 @@ impl Codegen {
     /// SysV va_arg 浮点路径：fp_offset + reg_save_area XMM 槽。
     fn gen_va_arg_fp(&mut self, ap_name: &str, arg_ty: &Type, dst: u8) {
         let ap_off = self.var_offset(ap_name);
-        let step = 16i32;
+        let reg_step = 16i32; // reg_save_area 中 XMM 槽为 16 字节对齐
+        let overflow_step = 8i32; // overflow_arg_area 中 double/float 8 字节对齐
         let overflow = self.fresh_label();
         let done = self.fresh_label();
         // eax = fp_offset (va_list + 4)
@@ -5841,7 +5866,7 @@ impl Codegen {
         }
         self.emit(&[0x41, 0x83, 0x85]);
         self.emit(&(ap_off + 4).to_le_bytes());
-        self.emit(&step.to_le_bytes()[..1]);
+        self.emit(&reg_step.to_le_bytes()[..1]);
         self.jmp_rel32(&done, JumpKind::Jmp);
         self.label(&overflow);
         self.emit(&[0x49, 0x8B, 0x8D]);
@@ -5855,8 +5880,9 @@ impl Codegen {
         self.push(0);
         self.emit(&[0x49, 0x8B, 0x8D]);
         self.emit(&(ap_off + 8).to_le_bytes());
+        // overflow_arg_area 上 double/float 8 字节步进 (即使 long double 也占用 16 但 movsd 只取 8)
         self.emit(&[0x48, 0x83, 0xC1]);
-        self.emit(&step.to_le_bytes()[..1]);
+        self.emit(&overflow_step.to_le_bytes()[..1]);
         self.emit(&[0x49, 0x89, 0x8D]);
         self.emit(&(ap_off + 8).to_le_bytes());
         self.pop(0);
@@ -5888,11 +5914,14 @@ impl Codegen {
                 BlockItem::Decl(Decl::Var(v)) => {
                     let slots = v.ty.size().div_ceil(8).max(1) as i32;
                     // 基于实际类型大小计算偏移 (过滤 padding 条目)
+                    // 帧布局: temp_slots 区域在 r13+16 下方, 变量在 temp_slots 下方.
+                    // 关键: 变量必须跳过 temp_slots, 否则会与 binop 临时槽冲突,
+                    // 进一步破坏 va_list 字段 (ap.gp_offset 等).
                     let used: i32 = var_map.values()
                         .filter(|(_, ty)| !matches!(ty, Type::Void))
                         .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
                         .sum();
-                    let mut off = -(used + 16);
+                    let mut off = -(used + 16 + temp_slots * 8);
                     while off + v.ty.size() as i32 > 0 {
                         off -= 8;
                     }

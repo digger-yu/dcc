@@ -3303,3 +3303,166 @@ fn wcs_libc_call_passes_through() {
         );
     }
 }
+
+// =========================================================================
+// Section 11.4: x86_64 SysV va_arg 全栈支持
+// =========================================================================
+
+const VA_LIST_TYPEDEF: &str = "typedef __builtin_va_list va_list;\n";
+
+/// x86_64 va_arg GP 寄存器路径 (1-5 变参全部在 GP 寄存器).
+/// 修复前 overflow 偏移多 8 字节, 5+ 变参会读到错误参数.
+#[test]
+fn va_arg_x86_64_gp_path() {
+    let src = VA_LIST_TYPEDEF.to_string()
+        + "int sum_int5(int n, ...) {\n\
+           va_list ap;\n\
+           __builtin_va_start(ap, n);\n\
+           int s = 0;\n\
+           for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int);\n\
+           __builtin_va_end(ap);\n\
+           return s;\n\
+           }\n\
+           int main(void) { return sum_int5(2, 10, 20) - 30; }\n";
+    let (output, exe) = run_compile_and_run("va-arg-gp", &src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "expected sum_int5(2, 10, 20) == 30");
+}
+
+/// x86_64 va_arg 溢出栈路径 (6+ 变参走 overflow_arg_area).
+/// 修复前 overflow_off = frame_size + 16 错为 16, 现已对齐到
+/// SysV ABI: r13 + 16 = caller 栈上第 1 个变参.
+#[test]
+fn va_arg_x86_64_overflow_path() {
+    let src = VA_LIST_TYPEDEF.to_string()
+        + "int sum_int13(int n, ...) {\n\
+           va_list ap;\n\
+           __builtin_va_start(ap, n);\n\
+           int s = 0;\n\
+           for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int);\n\
+           __builtin_va_end(ap);\n\
+           return s;\n\
+           }\n\
+           int main(void) { return sum_int13(13, 1,2,3,4,5,6,7,8,9,10,11,12,13) - 91; }\n";
+    let (output, exe) = run_compile_and_run("va-arg-overflow", &src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "expected sum_int13(13, 1..13) == 91");
+}
+
+/// x86_64 va_arg 浮点路径 (XMM reg + 溢出栈 8 字节步进).
+/// 修复前 overflow 步进用 16 (XMM 槽位) 而非 8 (栈上 double).
+#[test]
+fn va_arg_x86_64_double_path() {
+    let src = VA_LIST_TYPEDEF.to_string()
+        + "double sum_double5(int n, ...) {\n\
+           va_list ap;\n\
+           __builtin_va_start(ap, n);\n\
+           double s = 0.0;\n\
+           for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, double);\n\
+           __builtin_va_end(ap);\n\
+           return s;\n\
+           }\n\
+           int main(void) {\n\
+               double r = sum_double5(3, 1.0, 2.0, 3.0);\n\
+               return ((int)r) - 6;\n\
+           }\n";
+    let (output, exe) = run_compile_and_run("va-arg-double", &src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "expected sum_double5(3, 1.0,2.0,3.0) == 6.0");
+}
+
+/// x86_64 va_arg 浮点溢出栈 (4 个 XMM 用完后, 第 5+ 走栈).
+/// overflow 步进 8 字节, 验证 sum_double8 = 36.0.
+#[test]
+fn va_arg_x86_64_double_overflow() {
+    let src = VA_LIST_TYPEDEF.to_string()
+        + "double sum_double8(int n, ...) {\n\
+           va_list ap;\n\
+           __builtin_va_start(ap, n);\n\
+           double s = 0.0;\n\
+           for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, double);\n\
+           __builtin_va_end(ap);\n\
+           return s;\n\
+           }\n\
+           int main(void) {\n\
+               double r = sum_double8(8, 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0);\n\
+               return ((int)r) - 36;\n\
+           }\n";
+    let (output, exe) = run_compile_and_run("va-arg-double-overflow", &src);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "expected sum_double8(8, 1..8) == 36.0");
+}
+
+/// x86_64 va_arg 无外部符号 — overflow 路径直接读栈, 无需 libc.
+#[test]
+fn va_arg_x86_64_no_external_symbols() {
+    let source = VA_LIST_TYPEDEF.to_string()
+        + "int sum_int5(int n, ...) {\n\
+           va_list ap;\n\
+           __builtin_va_start(ap, n);\n\
+           int s = 0;\n\
+           for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int);\n\
+           __builtin_va_end(ap);\n\
+           return s;\n\
+           }\n";
+    let (output, object_path) = run_object_test("va-arg-noext", &source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&object_path).unwrap_or_default();
+    let _ = fs::remove_file(&object_path);
+    for forbidden in &["__va_", "__builtin_va_", "va_start", "va_arg", "va_end"] {
+        let needle = forbidden.as_bytes();
+        assert!(
+            !obj.windows(needle.len()).any(|w| w == needle),
+            "object should not reference libc/internal va symbols ({forbidden})"
+        );
+    }
+}
+
+/// x86_64 va_arg fixture 包含 sum_int5/sum_int13/sum_long5/sum_double5/sum_double8.
+#[test]
+fn va_arg_x86_64_fixture_compiles() {
+    let src = include_str!("fixtures/va_arg_x86_64.c");
+    let (output, object_path) = run_object_test("va-arg-fixture", src);
+    assert!(
+        output.status.success(),
+        "fixture compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&object_path).unwrap_or_default();
+    let _ = fs::remove_file(&object_path);
+    for fname in &["sum_int5", "sum_int13", "sum_long5", "sum_double5", "sum_double8"] {
+        let needle = fname.as_bytes();
+        assert!(
+            obj.windows(needle.len()).any(|w| w == needle),
+            "fixture should define {fname}"
+        );
+    }
+}
