@@ -304,7 +304,6 @@ asm goto 输出约束（M11.2）；内联 asm 约束全家族（M11.3）。
 
 🟠 已知预存限制：
 
-- 16 字节/聚合 KASAN load/store 未单独 emit（走通用 `__asan_load`）
 - `__kcsan_check_access` 专用路径未 emit（KCSAN 借道 KASAN 回调）
 - VLA / null deref / float-cast UBSAN trap 变体未实装
 
@@ -592,6 +591,27 @@ M19 关键改动:
 >   链接时通过符号解析让 dcc .o 仍能链接成功; 严格 `double
 >   complex` 传值的数学校验留 Section 9 follow-up.
 > - Section 11 表格 `复杂数学函数` 行 🟠 → 🟢 (M25).
+
+> **M25 增量（2026-07-24）— Section 4.2 P1.1 16 字节/聚合 KASAN**：
+> - `src/sanitizer.rs::kasan_load_fn` / `kasan_store_fn` 对 N > 16
+>   走 `__asan_loadN` / `__asan_storeN` 通用名 (N 即实际 size),
+>   而非之前的通用 `__asan_load` / `__asan_store`.
+> - `make_mem_check_call` 对 size > 16 自动 emit 双参形式
+>   `__asan_loadN(addr, size_t)`, 16 字节及以下仍 emit 单参
+>   `__asan_loadN(addr)`. 与 LLVM asan_interface.h 的 N > 16
+>   双参 variant 对齐.
+> - 新增 6 个单元测试: `kasan_load_fn_maps_known_sizes` /
+>   `kasan_load_fn_emits_generic_for_aggregate_sizes` /
+>   `kasan_store_fn_maps_known_sizes` /
+>   `kasan_store_fn_emits_generic_for_aggregate_sizes` /
+>   `make_mem_check_call_emits_size_arg_for_aggregate_kasan` /
+>   `make_mem_check_call_emits_single_arg_for_small_kasan`.
+>   24 个 sanitizer 单元测试 0 失败.
+> - Section 4.2 已知预存限制列表移除 `16 字节/聚合 KASAN load/
+>   store 未单独 emit` 一条 (M25).
+> - 运行时限制: 用户需自行提供匹配的 `__asan_load24` /
+>   `__asan_load32` 等符号 (LLVM 编译器-rt 包含). dcc 仅
+>   emit 调用.
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个

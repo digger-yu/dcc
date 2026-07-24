@@ -1136,13 +1136,33 @@ fn make_mem_check_call(addr: Expr, size: usize, is_write: bool, span: &Span, fla
     } else {
         kasan_load_fn(size)
     };
+    // P1.1: 16 字节以下用单参 `__asan_loadN(addr)`,16 字节以上或
+    // 聚合类型用双参 `__asan_loadN(addr, size_t)`. LLVM 运行时
+    // 期望的签名 (asan_interface.h):
+    //   void __asan_loadN(void const volatile *addr)         N in {1,2,4,8,16}
+    //   void __asan_loadN(void const volatile *addr, size_t size)  N > 16
+    // 同理 store. 运行时须提供匹配的 __asan_load24 / __asan_load32 /
+    // __asan_load64 / __asan_loadN 等符号. dcc 这边只 emit 调用.
+    let args = if size > 16 && size != 0 {
+        vec![
+            addr,
+            Expr::Int { v: size as i128, span: span.clone(), ty: Type::ULong },
+        ]
+    } else {
+        vec![addr]
+    };
+    let param_tys = if size > 16 && size != 0 {
+        vec![Type::Ptr(Box::new(Type::Void)), Type::ULong]
+    } else {
+        vec![Type::Ptr(Box::new(Type::Void))]
+    };
     Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident { name: fn_name, span: span.clone() },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
+            ty: Type::Func(Box::new(Type::Void), param_tys),
         }),
-        args: vec![addr],
+        args,
         span: span.clone(),
         ty: Type::Void,
     }
@@ -1168,7 +1188,12 @@ fn kasan_load_fn(sz: usize) -> String {
         4 => "__asan_load4".to_string(),
         8 => "__asan_load8".to_string(),
         16 => "__asan_load16".to_string(),
-        _ => "__asan_load".to_string(),
+        // P1.1: 16 字节以上或聚合类型的 KASAN load 检查
+        // (Section 4.2) - 走 `__asan_loadN` + size 第二参的
+        // 通用 variant. LLVM 运行时接口对 N>16 的情况提供
+        // `__asan_load(addr, size)` 形式. 这里 emit N=实际 size
+        // 的形式以与 task 描述一致, 并以 size 作为第二参.
+        n => format!("__asan_load{}", n),
     }
 }
 
@@ -1179,7 +1204,8 @@ fn kasan_store_fn(sz: usize) -> String {
         4 => "__asan_store4".to_string(),
         8 => "__asan_store8".to_string(),
         16 => "__asan_store16".to_string(),
-        _ => "__asan_store".to_string(),
+        // P1.1: 16 字节以上或聚合类型的 KASAN store 检查.
+        n => format!("__asan_store{}", n),
     }
 }
 
@@ -2078,5 +2104,95 @@ mod tests {
         assert!(!is_float_to_int_cast(&Type::Int, &Type::Int));
         assert!(!is_float_to_int_cast(&Type::Double, &Type::Double));
         assert!(!is_float_to_int_cast(&Type::Double, &Type::Bool));
+    }
+
+    // P1.1: 16 字节以下 KASAN load/store 函数名映射。
+    #[test]
+    fn kasan_load_fn_maps_known_sizes() {
+        assert_eq!(kasan_load_fn(1), "__asan_load1");
+        assert_eq!(kasan_load_fn(2), "__asan_load2");
+        assert_eq!(kasan_load_fn(4), "__asan_load4");
+        assert_eq!(kasan_load_fn(8), "__asan_load8");
+        assert_eq!(kasan_load_fn(16), "__asan_load16");
+    }
+
+    // P1.1: 16 字节以上走 `__asan_loadN` 通用名,运行时提供
+    // `__asan_loadN(addr, size)` 双参 variant.
+    #[test]
+    fn kasan_load_fn_emits_generic_for_aggregate_sizes() {
+        assert_eq!(kasan_load_fn(24), "__asan_load24");
+        assert_eq!(kasan_load_fn(32), "__asan_load32");
+        assert_eq!(kasan_load_fn(48), "__asan_load48");
+        assert_eq!(kasan_load_fn(64), "__asan_load64");
+    }
+
+    // P1.1: store 侧 16 字节以下函数名映射。
+    #[test]
+    fn kasan_store_fn_maps_known_sizes() {
+        assert_eq!(kasan_store_fn(1), "__asan_store1");
+        assert_eq!(kasan_store_fn(2), "__asan_store2");
+        assert_eq!(kasan_store_fn(4), "__asan_store4");
+        assert_eq!(kasan_store_fn(8), "__asan_store8");
+        assert_eq!(kasan_store_fn(16), "__asan_store16");
+    }
+
+    // P1.1: store 侧 16 字节以上走 `__asan_storeN` 通用名。
+    #[test]
+    fn kasan_store_fn_emits_generic_for_aggregate_sizes() {
+        assert_eq!(kasan_store_fn(24), "__asan_store24");
+        assert_eq!(kasan_store_fn(32), "__asan_store32");
+        assert_eq!(kasan_store_fn(48), "__asan_store48");
+        assert_eq!(kasan_store_fn(64), "__asan_store64");
+    }
+
+    // P1.1: 16 字节以上 emit 双参调用 (addr + size).
+    #[test]
+    fn make_mem_check_call_emits_size_arg_for_aggregate_kasan() {
+        let addr = Expr::Ident {
+            name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Ptr(Box::new(Type::Void)),
+        };
+        let call = make_mem_check_call(
+            addr,
+            24,
+            false,
+            &Span::point("t.c", 1, 1),
+            SanitizerFlags { kasan: true, ..Default::default() },
+        );
+        if let Expr::Call { callee, args, .. } = call {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                assert_eq!(name.name, "__asan_load24");
+            } else {
+                panic!("callee should be Ident");
+            }
+            assert_eq!(args.len(), 2, "aggregate load must pass size as 2nd arg");
+        } else {
+            panic!("expected Expr::Call");
+        }
+    }
+
+    // P1.1: 16 字节及以下 emit 单参调用 (只 addr).
+    #[test]
+    fn make_mem_check_call_emits_single_arg_for_small_kasan() {
+        let addr = Expr::Ident {
+            name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Ptr(Box::new(Type::Void)),
+        };
+        for &sz in &[1usize, 2, 4, 8, 16] {
+            let call = make_mem_check_call(
+                addr.clone(),
+                sz,
+                false,
+                &Span::point("t.c", 1, 1),
+                SanitizerFlags { kasan: true, ..Default::default() },
+            );
+            if let Expr::Call { args, .. } = call {
+                assert_eq!(args.len(), 1, "size {} should emit single arg", sz);
+            } else {
+                panic!("expected Expr::Call");
+            }
+        }
     }
 }
