@@ -44,6 +44,51 @@ fn diag_cfg(cfg: &Config) -> DiagnosticsConfig {
     }
 }
 
+/// 跨数据源权重下发: 从 -fprofile-use / -fauto-profile / -flbr-profile /
+/// -fmemory-profile-use 指定的文件读 4 个 profile 源, 聚合为
+/// `ProfileWeights`, 写入每个 FuncDecl 的 `is_cold` / `is_hot` 字段.
+///
+/// 设计: 任意源文件读取失败都 silently 跳过 (回退到 "无权重" 状态),
+/// 不阻塞编译, 与 GCC / Clang 的 "profile 不匹配时仍可编译" 行为一致.
+fn apply_profile_weights(prog: &mut crate::ast::Program, prof: &profile::ProfileConfig) {
+    use crate::ast::Decl;
+
+    // 1) PGO: 读 .profraw
+    let pgo_w = prof.pgo_use.as_ref().and_then(|p| {
+        profile::pgo::Profraw::read(p).ok()
+            .map(|p| profile::pgo::PgoWeights::from_profraw(&p))
+    }).unwrap_or_default();
+
+    // 2) AutoFDO
+    let autofdo = prof.auto_profile.as_ref()
+        .or(prof.sample_use.as_ref())
+        .and_then(|p| profile::autofdo::AutoFdoProfile::read(p).ok())
+        .unwrap_or_default();
+
+    // 3) LBR
+    let lbr = prof.lbr_profile.as_ref()
+        .and_then(|p| profile::lbr::LbrProfile::read_perf_brstack(p).ok())
+        .unwrap_or_default();
+
+    // 4) MemProf
+    let memprof = prof.memprof_use.as_ref()
+        .and_then(|p| profile::memprof::MemProfData::read(p).ok())
+        .unwrap_or_default();
+
+    let weights = profile::weights::ProfileWeights::from_sources(
+        &pgo_w, &autofdo, &lbr, &memprof);
+
+    let hot = weights.hot_funcs();
+    let cold = weights.cold_funcs();
+    for d in &mut prog.decls {
+        if let Decl::Func(f) = d {
+            if f.body.is_none() { continue; }
+            if hot.contains(&f.name.name) { f.is_hot = true; }
+            if cold.contains(&f.name.name) { f.is_cold = true; }
+        }
+    }
+}
+
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // -r 多 .o 可重定位链接（host ld -r 兼容路径）
     if cfg.link_mode && !cfg.built_link {
@@ -162,6 +207,15 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             out_dir: cfg.profile.pgo_generate.as_ref().map(|p| p.display().to_string()),
         };
         profile::pgo::instrument_program(&mut prog, &pgo_cfg);
+    }
+
+    // 跨数据源权重下发: 加载 4 个 profile 源 (PGO/AutoFDO/LBR/MemProf),
+    // 聚合为 ProfileWeights, 写入每个 FuncDecl 的 is_cold / is_hot 字段,
+    // 让 codegen 把 hot 函数放到 .text.hot, cold 函数放到 .text.unlikely.
+    // 任意 -fprofile-use / -fauto-profile / -flbr-profile / -fmemory-profile-use
+    // 任一被设置才执行; 缺省保持 noop, 不影响默认编译.
+    if cfg.profile.any_use() {
+        apply_profile_weights(&mut prog, &cfg.profile);
     }
 
     // dump AST?

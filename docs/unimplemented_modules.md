@@ -591,26 +591,39 @@ M19 关键改动:
   - 🟢 (M24) `cfg_checksum` 采用 GCC libgcov `compute_cfg_checksum` 公式:
     对每条 succ arc 加 `(dst_index + 1)`, CFG 拓扑敏感
   - 已知限制: 非 x86_64 arch 未验证
-- **AutoFDO** 🟡
+- **AutoFDO** 🟢
   - 简化 text format parser（`func <name> <total>` / `line <name>
     <line> <col> <samples>`）
   - `bucketize` 按 >10% / >1% 阈值分 Hot/Warm/Cold
-  - 已知限制：权重不下发到 codegen
-- **LBR-based profiling**（`-flbr-profile=`） 🟡
+  - ✅ (M25) 通过 `ProfileWeights` 聚合，hot 函数下沉到 `.text.hot` 段
+- **LBR-based profiling**（`-flbr-profile=`） 🟢
   - 解析 `perf script -F brstack` 文本（`from_func from_addr
     to_func to_addr cycles`）
   - `hot_entries` 按 `unknown -> func` 入度排序
-  - 已知限制：权重不下发到 codegen
+  - ✅ (M25) 通过 `ProfileWeights` 聚合，hot 函数下沉到 `.text.hot` 段
 - **MemProf / Page Weight Profiler**（`-fmemory-profile` /
-  `-fmemory-profile-use=`） 🟡
+  `-fmemory-profile-use=`） 🟢
   - 简化 format parser（`alloc <frames...> = <count> <bytes>` /
     `lifetime <alloc> -> <dealloc> = <bytes>`）
   - `is_cold(stack, threshold)` 启发
-  - 已知限制：未在 libc malloc 上插桩，无 runtime 库
-- **Perf event 输出 (TopdownL1 metrics)**（`-ftopdownmetrics`） 🟡
+  - ✅ (M25) 冷分配栈对应的函数下沉到 `.text.unlikely` 段
+- **跨源权重聚合**（`-fprofile-use` / `-fauto-profile` /
+  `-flbr-profile` / `-fmemory-profile-use` 任意组合） 🟢 (M25)
+  - 新增 `profile::weights::ProfileWeights` 模块：聚合 4 源 PGO /
+    AutoFDO / LBR / MemProf，输出统一 hot/cold func 集合
+  - 新增 `FuncDecl.is_hot: bool` 字段；`x86_64` codegen 把 hot 函数
+    切到 `.text.hot`，cold 函数切到 `.text.unlikely`（与
+    `-fprofile-sections` 协同）
+  - driver 在 PGO 插桩之后、IR lower 之前调用
+    `apply_profile_weights(&mut prog, &cfg.profile)`，任意源文件
+    读取失败都 silently 跳过（与 GCC/Clang 行为一致）
+- **Perf event 输出 (TopdownL1 metrics)**（`-ftopdownmetrics`） 🟢 (M25)
   - `TopdownL1` 枚举 + `PerfRecord` 容器
   - `topdown_percentages()` 把四 slot 规整为百分比
-  - 已知限制：未读 perf.data 二进制
+  - ✅ (M25) 新增 `profile::perf_data::PerfDataFile` 读 Linux
+    `perf.data` v2 二进制（`PERFILE2` magic + header + perf_event_attr
+    数组 + data section），不依赖 `libperf` 运行时
+  - `event_names()` / `synthetic_counts()` 暴露元信息给上层 metric 汇总
 - **Offloading (OpenMP target / CUDA / HIP)** 🟡
   - `OffloadConfig` / `OffloadSection` / `OffloadEntry` 数据结构
   - `OffloadKind` 区分 OmpTarget / OmpTargetSimd / Cuda / Hip

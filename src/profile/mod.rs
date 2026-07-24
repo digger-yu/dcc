@@ -26,6 +26,8 @@ pub mod autofdo;
 pub mod lbr;
 pub mod memprof;
 pub mod perf_event;
+pub mod perf_data;
+pub mod weights;
 pub mod offload;
 
 use std::path::{Path, PathBuf};

@@ -393,6 +393,7 @@ mod tests {
                 is_destructor: false,
                 is_nested: false,
                 is_cold: false,
+            is_hot: false,
                 section: None,
                 alignment: None,
                 visibility: None,

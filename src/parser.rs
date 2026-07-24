@@ -18,6 +18,7 @@ struct ParsedAttrs {
     visibility: Option<String>,
     is_unused: bool,
     is_cold: bool,
+    is_hot: bool,
     is_noinline: bool,
     is_always_inline: bool,
     register_name: Option<String>,
@@ -1293,7 +1294,8 @@ impl<'a> Parser<'a> {
                     self.in_function = false;
                     self.current_function = saved_func;
                     let sp = name.span.clone();
-                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false, ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false, is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None, ifunc_resolver: None })]);
+                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false,
+            is_hot: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false, ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false, is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None, ifunc_resolver: None })]);
                 }
                 // (*name(params)) — 返回指针的函数，无外层参数表
                 let ptr_ty = Type::Ptr(Box::new(ty));
@@ -1326,7 +1328,8 @@ impl<'a> Parser<'a> {
                     ret_ty: ptr_ty, name, params: inner_params, body, span: sp,
                     is_extern: storage.is_extern, is_static: storage.is_static,
                     section: None, alignment: None, is_weak: false, visibility: None,
-                    is_unused: false, is_cold: false, is_noinline: false, is_always_inline: false,
+                    is_unused: false, is_cold: false,
+            is_hot: false, is_noinline: false, is_always_inline: false,
                     is_variadic: self.last_variadic, is_constructor: false, is_destructor: false,
                     alias_name: None, is_nested: false, upvars: vec![],
                     is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None,
@@ -1497,7 +1500,7 @@ impl<'a> Parser<'a> {
             Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                 section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                 visibility: attrs.visibility, is_unused: attrs.is_unused,
-                is_cold: attrs.is_cold, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
+                is_cold: attrs.is_cold, is_hot: attrs.is_hot, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
                 is_variadic: self.last_variadic, is_constructor: attrs.is_constructor,
                 is_destructor: attrs.is_destructor, alias_name: attrs.alias_name.clone().or(attrs.copy_fn.clone()),
                 is_nested: is_nested_func, upvars, is_old_style,

@@ -1152,7 +1152,9 @@ impl Codegen {
             if let Decl::Func(f) = decl {
                 if f.body.is_none() { continue; }
                 let effective_section = f.section.clone()
-                    .or_else(|| if f.is_cold { Some(".text.unlikely".to_string()) } else { None });
+                    .or_else(|| if f.is_cold { Some(".text.unlikely".to_string()) }
+                             else if f.is_hot { Some(".text.hot".to_string()) }
+                             else { None });
                 if let Some(sec_name) = effective_section.as_ref() {
                     if sec_name.is_empty() { continue; }
                     if let Some(&func_start) = self.labels.get(&f.name.name) {

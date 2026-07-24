@@ -59,6 +59,7 @@ pub struct FuncDecl {
     pub visibility: Option<String>,
     pub is_unused: bool,
     pub is_cold: bool,
+    pub is_hot: bool,
     pub is_noinline: bool,
     pub is_always_inline: bool,
     pub is_variadic: bool,
