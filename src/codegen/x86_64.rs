@@ -6106,6 +6106,27 @@ impl Codegen {
                 if dst != 0 { self.mov(dst, 0); }
                 true
             }
+            // __builtin_wc* 系列 (Section 11.3): wchar_t 版本的字符串函数.
+            // wchar_t 在 Linux 为 4 字节 int, 但调用约定与 char* 版本相同
+            // (指针 / size_t 均通过 rdi / rsi / rdx 传递). 这里直接转发到
+            // libc 的 wcs* / wmem* 函数, 与 __builtin_str* 的处理方式一致.
+            "__builtin_wcslen" | "__builtin_wcscpy" | "__builtin_wcscat"
+            | "__builtin_wcschr" | "__builtin_wcsrchr"
+            | "__builtin_wcscmp" | "__builtin_wcsncmp"
+            | "__builtin_wmemcpy" | "__builtin_wmemmove"
+            | "__builtin_wmemset" | "__builtin_wmemcmp" => {
+                let libc_name = name.strip_prefix("__builtin_").unwrap();
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() {
+                    if i >= 6 { break; }
+                    self.gen_expr(a, ar[i]);
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
             // __builtin_abs: 绝对值
             "__builtin_abs" => {
                 if args.is_empty() { self.mov_imm(dst, 0); return true; }

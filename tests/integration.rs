@@ -3243,3 +3243,63 @@ fn fenv_pragma_parses_without_error() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// wchar_t 函数 codegen (Section 11.3)
+/// 验证 __builtin_wcslen / __builtin_wcscpy / __builtin_wcscat
+/// / __builtin_wcschr / __builtin_wcsrchr / __builtin_wcscmp
+/// / __builtin_wcsncmp / __builtin_wmemcpy / __builtin_wmemmove
+/// / __builtin_wmemset / __builtin_wmemcmp 被 dcc 发射为外部
+/// 符号 (走 libc). 与 __builtin_str* 形式一致, 但作用于 wchar_t.
+#[test]
+fn wcs_builtins_forward_to_libc() {
+    let source = include_str!("fixtures/wcs_builtins.c");
+    let (output, object_path) = run_object_test("wcs-builtins", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&object_path).unwrap_or_default();
+    let _ = fs::remove_file(&object_path);
+    let bytes = obj;
+    for name in &[
+        "wcslen", "wcscpy", "wcscat", "wcschr", "wcsrchr",
+        "wcscmp", "wcsncmp",
+        "wmemcpy", "wmemmove", "wmemset", "wmemcmp",
+    ] {
+        let needle = name.as_bytes();
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "object file should contain wcs symbol {name}, got {} bytes",
+            bytes.len()
+        );
+    }
+}
+
+/// wchar_t 函数 pass-through (Section 11.3)
+/// 不带 __builtin_ 前缀的 wcslen / wcscpy 等也走 libc, 与
+/// __builtin_wc* 行为一致. 该测试确认 -c 模式下两个路径都
+/// 生成对 libc 的 PLT32 重定位.
+#[test]
+fn wcs_libc_call_passes_through() {
+    let source = "#include <wchar.h>\n\
+                  int test_wcslen(const wchar_t *s) { return wcslen(s); }\n\
+                  wchar_t *test_wcscpy(wchar_t *d, const wchar_t *s) { return wcscpy(d, s); }\n\
+                  int test_wcscmp(const wchar_t *a, const wchar_t *b) { return wcscmp(a, b); }\n";
+    let (output, object_path) = run_object_test("wcs-libc-pass", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&object_path).unwrap_or_default();
+    let _ = fs::remove_file(&object_path);
+    let bytes = obj;
+    for name in &["wcslen", "wcscpy", "wcscmp"] {
+        let needle = name.as_bytes();
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "object file should contain libc symbol {name}"
+        );
+    }
+}
