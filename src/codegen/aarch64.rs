@@ -1823,6 +1823,174 @@ impl Aarch64Codegen {
             }
         }
     }
+
+    // ========================================================================
+    // TLS 访问序列 (TLSDESC / Initial Exec / Local Exec)
+    // ========================================================================
+
+    /// TLSDESC 访问序列: 获取 TLS 变量地址到 x0
+    /// 序列: adrp x0, :tlsdesc:var
+    ///       ldr  x1, [x0, :tlsdesc_lo12:var]
+    ///       add  x0, x0, :tlsdesc_lo12:var
+    ///       .tlsdesccall var
+    ///       blr  x1
+    ///       mrs  x1, tpidr_el0
+    ///       add  x0, x0, x1
+    fn emit_tlsdesc_access(&mut self, sym: &str) {
+        // adrp x0, :tlsdesc:var (R_AARCH64_TLSDESC_ADR_PAGE21)
+        let insn_adrp = 0x90000000u32; // adrp x0, #0 (placeholder)
+        self.emit(&insn_adrp.to_le_bytes());
+        let adrp_pos = self.pos() - 4;
+        let idx = self.ensure_sym(sym);
+        self.relocations.push(ElfRela {
+            offset: adrp_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSDESC_ADR_PAGE21,
+            addend: 0,
+        });
+        // ldr x1, [x0, :tlsdesc_lo12:var] (R_AARCH64_TLSDESC_LD64_LO12)
+        let insn_ldr = 0xf9400001u32; // ldr x1, [x0]
+        self.emit(&insn_ldr.to_le_bytes());
+        let ldr_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: ldr_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSDESC_LD64_LO12,
+            addend: 0,
+        });
+        // add x0, x0, :tlsdesc_lo12:var (R_AARCH64_TLSDESC_ADD_LO12)
+        let insn_add = 0x91000000u32; // add x0, x0, #0
+        self.emit(&insn_add.to_le_bytes());
+        let add_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: add_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSDESC_ADD_LO12,
+            addend: 0,
+        });
+        // blr x1 (TLSDESC call)
+        let insn_blr = 0xd63f0020u32; // blr x1
+        self.emit(&insn_blr.to_le_bytes());
+        // mrs x1, tpidr_el0
+        let insn_mrs = 0xd53bd041u32; // mrs x1, tpidr_el0
+        self.emit(&insn_mrs.to_le_bytes());
+        // add x0, x0, x1
+        let insn_add2 = 0x8b010000u32; // add x0, x0, x1
+        self.emit(&insn_add2.to_le_bytes());
+    }
+
+    /// Initial Exec TLS 访问: 通过 GOT 获取 tpoff
+    /// 序列: adrp x0, :gottprel:var
+    ///       ldr  x0, [x0, :gottprel_lo12:var]
+    ///       mrs  x1, tpidr_el0
+    ///       add  x0, x0, x1
+    fn emit_tls_ie_access(&mut self, sym: &str) {
+        // adrp x0, :gottprel:var
+        let insn_adrp = 0x90000000u32;
+        self.emit(&insn_adrp.to_le_bytes());
+        let adrp_pos = self.pos() - 4;
+        let idx = self.ensure_sym(sym);
+        self.relocations.push(ElfRela {
+            offset: adrp_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21,
+            addend: 0,
+        });
+        // ldr x0, [x0, :gottprel_lo12:var]
+        let insn_ldr = 0xf9400000u32; // ldr x0, [x0]
+        self.emit(&insn_ldr.to_le_bytes());
+        let ldr_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: ldr_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC,
+            addend: 0,
+        });
+        // mrs x1, tpidr_el0
+        self.emit(&0xd53bd041u32.to_le_bytes());
+        // add x0, x0, x1
+        self.emit(&0x8b010000u32.to_le_bytes());
+    }
+
+    /// Local Exec TLS 访问: 直接 TP + offset
+    /// 序列: movz x0, #:tprel_g1:var
+    ///       movk x0, #:tprel_g0_nc:var
+    ///       mrs  x1, tpidr_el0
+    ///       add  x0, x0, x1
+    fn emit_tls_le_access(&mut self, sym: &str) {
+        // movz x0, #:tprel_g1:var
+        let insn_movz = 0xd2a00000u32; // movz x0, #0, lsl #16
+        self.emit(&insn_movz.to_le_bytes());
+        let movz_pos = self.pos() - 4;
+        let idx = self.ensure_sym(sym);
+        self.relocations.push(ElfRela {
+            offset: movz_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSLE_MOVW_TPREL_G1,
+            addend: 0,
+        });
+        // movk x0, #:tprel_g0_nc:var
+        let insn_movk = 0xf2800000u32; // movk x0, #0
+        self.emit(&insn_movk.to_le_bytes());
+        let movk_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: movk_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSLE_MOVW_TPREL_G0_NC,
+            addend: 0,
+        });
+        // mrs x1, tpidr_el0
+        self.emit(&0xd53bd041u32.to_le_bytes());
+        // add x0, x0, x1
+        self.emit(&0x8b010000u32.to_le_bytes());
+    }
+
+    // ========================================================================
+    // 嵌套大结构体返回 (multi-level sret)
+    // ========================================================================
+
+    /// 嵌套 sret: 从 [sp+off] 拷贝 size 字节到 [dst_reg]
+    /// 支持多层嵌套调用链: 每一层都通过 x0 传递 sret 指针
+    fn memcpy_sp_to_reg(&mut self, off: i32, size: usize, dst_reg: u8) {
+        // 先把 dst_reg 保存到 x1 (src = sp+off)
+        self.mov_x_reg_sp_off(2, off); // x2 = src (sp+off)
+        // x0 = dst_reg (sret 指针已在 dst_reg)
+        if dst_reg != 0 {
+            // mov x0, dst_reg
+            let insn = 0xaa0003e0u32 | ((dst_reg as u32 & 0x1f) << 16);
+            self.emit(&insn.to_le_bytes());
+        }
+        let mut remaining = size;
+        let mut src_off = 0i32;
+        while remaining > 0 {
+            let chunk = remaining.min(8);
+            if chunk >= 8 {
+                // ldr x3, [x2, #src_off]
+                let imm12 = (src_off / 8) as u32 & 0xfff;
+                let insn_ldr = 0xf9400043u32 | (imm12 << 10);
+                self.emit(&insn_ldr.to_le_bytes());
+                // str x3, [x0, #src_off]
+                let insn_str = 0xf9000003u32 | (imm12 << 10);
+                self.emit(&insn_str.to_le_bytes());
+            } else if chunk >= 4 {
+                let imm12 = (src_off / 4) as u32 & 0xfff;
+                let insn_ldr = 0xb9400043u32 | (imm12 << 10);
+                self.emit(&insn_ldr.to_le_bytes());
+                let insn_str = 0xb9000003u32 | (imm12 << 10);
+                self.emit(&insn_str.to_le_bytes());
+            } else {
+                // byte-by-byte for tail
+                for b in 0..chunk as i32 {
+                    let ldrb = 0x39400043u32 | (((src_off + b) as u32 & 0xfff) << 10);
+                    self.emit(&ldrb.to_le_bytes());
+                    let strb = 0x39000003u32 | (((src_off + b) as u32 & 0xfff) << 10);
+                    self.emit(&strb.to_le_bytes());
+                }
+            }
+            src_off += chunk as i32;
+            remaining -= chunk;
+        }
+    }
 }
 
 fn find_func<'a>(prog: &'a Program, name: &str) -> Option<&'a FuncDecl> {
@@ -1839,11 +2007,12 @@ fn classify_hfa(
     let ValueType::Aggregate { name, size, is_union: false } = ty else {
         return None;
     };
-    if *size == 0 || *size > 64 {
+    if *size == 0 || *size > 128 {
         return None;
     }
     let (flds, is_union) = fields.get(name)?;
-    if *is_union || flds.is_empty() || flds.len() > 4 {
+    // AAPCS64: HFA 最多 8 个同类浮点元素 (v0-v7)
+    if *is_union || flds.is_empty() || flds.len() > 8 {
         return None;
     }
     let first_bits = match &flds[0].ty {
