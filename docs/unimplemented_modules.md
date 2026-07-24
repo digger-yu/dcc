@@ -644,7 +644,14 @@ M19 关键改动:
 - 步骤 1 (`rustc → dcc0`)：✅
 - 步骤 2 (`dcc0 → dcc1`)：未开始（需要 dcc0 完整支持自身依赖：std 子集）
 - 步骤 3 (`dcc1 → dcc2`)：未开始
-- 字节级 / 语义级回归对比：未实现
+- 🟢 (M25) 字节级 / 语义级回归对比基础设施 (`src/bootstrap.rs`):
+  - 三层对比: byte (同节逐字节, 限 16 个不同偏移) / struct (节集合+类型+体积) /
+    semantic (全局符号集合+大小+bind+引用关系)
+  - CLI 开关 `--bootstrap-compare=<ref.o>`, 编译结束后, 把当前输出
+    .o 与 ref.o 做三层对比, 仅诊断打印, 不阻塞编译 (与 GCC
+    `-fcompare-debug` 行为一致)
+  - 9 个单元测试覆盖: identical / byte-diff / struct-diff /
+    symbol-add/remove/size/bind / invalid-elf / format
 
 ### 9.2 交叉编译
 

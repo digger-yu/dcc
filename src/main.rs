@@ -30,6 +30,7 @@ mod preproc;
 mod mmap_io;
 mod cpp;
 mod profile;
+mod bootstrap;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();

@@ -321,6 +321,22 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
     eprintln!("dcc: wrote {}", out.display());
+
+    // 自举回归对比: -c/--bootstrap-compare=<ref.o> 模式.
+    // 编译结束后, 把当前 .o 与 ref.o 做三层对比 (byte / struct /
+    // semantic). 仅做诊断打印, 不阻塞编译, 与 GCC -fcompare-debug 行为一致.
+    if let Some(ref_path) = cfg.bootstrap_compare.as_ref() {
+        match crate::bootstrap::compare_files(ref_path, out) {
+            Ok(report) => {
+                eprintln!("dcc: bootstrap compare vs {}:", ref_path.display());
+                eprint!("{}", report.format());
+            }
+            Err(e) => {
+                eprintln!("dcc: bootstrap compare error: {e}");
+            }
+        }
+    }
+
     Ok(())
 }
 

@@ -99,6 +99,9 @@ pub struct Config {
     pub diag_format: crate::diagnostics::FormatStyle,
     /// -fdiagnostics-show-template-tree
     pub diag_show_template_tree: bool,
+    /// --bootstrap-compare=<ref.o>: 自举回归对比. 编译结束后, 把当前输出
+    /// 与 ref.o 做三层对比 (byte / struct / semantic), 仅做诊断打印, 不阻塞.
+    pub bootstrap_compare: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +315,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut diag_color = crate::diagnostics::ColorPolicy::Auto;
     let mut diag_format = crate::diagnostics::FormatStyle::Github;
     let mut diag_show_template_tree = false;
+    let mut bootstrap_compare: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -667,6 +671,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "-fdiagnostics-show-template-tree" => diag_show_template_tree = true,
             "-fno-diagnostics-show-template-tree" => diag_show_template_tree = false,
+            a if a.starts_with("--bootstrap-compare=") => {
+                bootstrap_compare = Some(PathBuf::from(&a["--bootstrap-compare=".len()..]));
+            }
             "-x" => {
                 i += 1;
                 let lang = args.get(i)
@@ -1003,6 +1010,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_color,
             diag_format,
             diag_show_template_tree,
+            bootstrap_compare: bootstrap_compare.clone(),
             profile: merge_profile_config(profile, offload),
         })
     } else {
@@ -1041,6 +1049,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_color,
             diag_format,
             diag_show_template_tree,
+            bootstrap_compare,
             profile: merge_profile_config(profile, offload),
         })
     }
