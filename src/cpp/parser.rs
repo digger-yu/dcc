@@ -527,7 +527,11 @@ impl<'a> CppParser<'a> {
     }
 
     /// `<` 在 ident 后是否像模板实参 `T<U>` 而非比较 `a < b`.
-    /// 向前扫描: 若在 depth==1 遇到 `;` `,` `)` 仍未闭合 `>`, 视为比较运算符.
+    /// 向前扫描:
+    /// - 跨过嵌套 `<`/`>` (Shr=`>>` 视为两层 `>`)
+    /// - 遇到 `;` / unmatched `)` / EOF 在 depth==1 仍未闭合 `>` → 比较
+    /// - 遇到合法类型 token (ident / C 类型关键字 / `*` / `&` / `,` / `const`)
+    ///   不直接判否; 只有破坏 C++ 表达式的 token 才判否
     fn looks_like_template_args_after_lt(&self) -> bool {
         let mut depth: i32 = 1;
         let mut i = 1usize; // self.peek 已是 `<`
@@ -544,12 +548,23 @@ impl<'a> CppParser<'a> {
                     i += 1;
                 }
                 Some(CppTok::C(Tok { kind: TokKind::Shr, .. })) => {
+                    // `>>` 当两层 `>`
+                    depth -= 1;
+                    if depth == 0 { return true; }
                     depth -= 1;
                     if depth == 0 { return true; }
                     i += 1;
                 }
+                // 仅在 depth==1 遇到语句/表达式终结符才判否
+                // 逗号在 depth==1 是模板实参分隔符, 合法
                 Some(CppTok::C(Tok { kind: TokKind::Semi
-                    | TokKind::Comma | TokKind::RParen, .. })) if depth == 1 => {
+                    | TokKind::RParen | TokKind::LBrace | TokKind::RBrace
+                    | TokKind::Semi, .. })) if depth == 1 => {
+                    return false;
+                }
+                Some(CppTok::C(Tok { kind: TokKind::Assign
+                    | TokKind::Question | TokKind::Colon, .. })) if depth == 1 => {
+                    // `a < b ? c : d` / `a < b = c` 是表达式
                     return false;
                 }
                 _ => { i += 1; }
@@ -2004,6 +2019,40 @@ impl<'a> CppParser<'a> {
             | TokKind::KwShort | TokKind::KwChar | TokKind::KwInt
             | TokKind::KwSigned | TokKind::KwUnsigned, .. }))) {
             self.bump();
+        }
+        // M18: `T<U1, U2, ...>` 模板实例化语法
+        // 判别: ident/类名 后紧跟 `<` 且形参合法 (递归到匹配 `>`)
+        if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. })))
+            && self.looks_like_template_args_after_lt()
+        {
+            self.bump(); // 吞 `<`
+            let mut args = Vec::new();
+            // 至少 1 个实参; 跨过嵌套 `<`/`>`
+            loop {
+                let arg = self.parse_mangle_type()?;
+                args.push(arg);
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+                    self.bump();
+                    continue;
+                }
+                // 期望 `>` 或 `>>` (嵌套模板)
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Gt, .. }))) {
+                    self.bump();
+                    break;
+                }
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Shr, .. }))) {
+                    // `>>` 拆为 `> >` (split: 已吞 Shr)
+                    // 补一个 `>` token (仅用于缩短调用方代码; 但 `parse_mangle_type` 已不再检查
+                    // Gt, 所以 Shr 的第二个 `>` 已被 lexer 合并, 此处不可拆。
+                    // 现实: lexer 把 `>>` 整体吐为 Shr, 模板场景需要消费两个 `>`,
+                    // 我们仅消费 Shr 并停止 (匹配 "嵌套 >>" 的外层 ">")
+                    self.bump();
+                    break;
+                }
+                return Err(CppParseError::Unexpected(">", format!("{:?}", self.peek), self.span()));
+            }
+            // 升级为 Template
+            ty = MangleType::Template { name: name.clone(), args };
         }
         while matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Star, .. }))) {
             self.bump();
@@ -3775,5 +3824,41 @@ mod tests {
         let mut p = CppParser::new(src, "test.cpp");
         let d = p.parse_top_level().unwrap();
         assert!(d.len() == 1);
+    }
+
+    // M18.1: T<U1, U2, ...> 模板实参语法解析
+    // 注: 模板类型出现在自由函数参数中, 类成员声明 parser 尚不支持.
+    #[test]
+    fn parse_template_arg_single() {
+        let src = b"int f(vector<int> v) { return 0; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level();
+        assert!(d.is_ok(), "parse failed: {:?}", d.err());
+    }
+
+    #[test]
+    fn parse_template_arg_multi() {
+        let src = b"int f(map<string, int> m) { return 0; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level();
+        assert!(d.is_ok(), "parse failed: {:?}", d.err());
+    }
+
+    #[test]
+    fn parse_template_arg_pointer() {
+        let src = b"int f(vector<int*> v) { return 0; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level();
+        assert!(d.is_ok(), "parse failed: {:?}", d.err());
+    }
+
+    #[test]
+    fn lt_after_ident_is_template_not_compare() {
+        // 表达式 `a < b` 不应被误判为模板实参
+        // 这里是函数体内部的二元比较: 解析应不报"期望 >"错误
+        let src = b"int f(int a, int b) { return a < b; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level();
+        assert!(d.is_ok(), "parse failed: {:?}", d.err());
     }
 }

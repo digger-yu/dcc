@@ -115,6 +115,52 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
         // M17.0: Auto / DecltypeAuto 在所有变量声明点都应已被解析;
         // 若此处仍出现, 说明 lower 顺序错误, 输出占位 int 并发出警告.
         MangleType::Auto | MangleType::DecltypeAuto => "int /*M17 unresolved auto*/".into(),
+        // M18: T<U1, U2, ...> 模板实例化 — C 端没有等价表达, 用占位 typedef.
+        // 真实单态化由 dcc 模板子系统按需生成; 这里降级为 T_<U1>_<U2> 形态.
+        MangleType::Template { name, args } => {
+            let mut s = format!("__dcc_template_{}", name);
+            for a in args {
+                s.push('_');
+                s.push_str(&template_arg_to_c(a));
+            }
+            format!("struct {}", s)
+        }
+    }
+}
+
+/// 模板实参序列化为 C 标识符片段 (用于 typedef 名).
+fn template_arg_to_c(ty: &MangleType) -> String {
+    match ty {
+        MangleType::Void => "void".into(),
+        MangleType::Bool => "bool".into(),
+        MangleType::Char => "char".into(),
+        MangleType::Int => "int".into(),
+        MangleType::Uint => "uint".into(),
+        MangleType::Long => "long".into(),
+        MangleType::Ulong => "ulong".into(),
+        MangleType::LongLong => "llong".into(),
+        MangleType::UlongLong => "ullong".into(),
+        MangleType::Float => "float".into(),
+        MangleType::Double => "double".into(),
+        MangleType::Pointer(t) => format!("p_{}", template_arg_to_c(t)),
+        MangleType::Reference(t) => format!("r_{}", template_arg_to_c(t)),
+        MangleType::Class(n) => n.clone(),
+        MangleType::Template { name, args } => {
+            let mut s = format!("T_{}", name);
+            for a in args {
+                s.push('_');
+                s.push_str(&template_arg_to_c(a));
+            }
+            s
+        }
+        MangleType::Schar => "schar".into(),
+        MangleType::Uchar => "uchar".into(),
+        MangleType::Short => "short".into(),
+        MangleType::Ushort => "ushort".into(),
+        MangleType::LongDouble => "ldouble".into(),
+        MangleType::Ellipsis => "ellipsis".into(),
+        MangleType::Auto => "auto".into(),
+        MangleType::DecltypeAuto => "decltype_auto".into(),
     }
 }
 
@@ -714,6 +760,23 @@ impl Lower {
                 ));
             }
             CppDecl::Import { path } => {
+                // M18.1: 尝试把 import 解析为 C 头文件:
+                //   - path 仅 1 段且像文件路径 (e.g. "iostream" / "std")
+                //     → 输出 /* dcc C++ import (M9): iostream */
+                //   - path 含 `header` 形式 (M18.1) 或单段以 .h/.hpp 结尾
+                //     → emit `#include <header>` 或 `#include "header"`
+                // 当前实现: 检测 path 末端是 "<file>" / "\"file\"" 字面量
+                // (parser 在 `import <foo>;` 时记 path = vec!["foo"], 尖括号
+                // 头为单段名; `import "header.h";` 也是单段). 因此
+                // 单段非命名空间路径 → 视为 C include; 其它 → 注释占位.
+                if path.len() == 1 {
+                    let p = &path[0];
+                    if p.contains('.') || p.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        // 单段且像 header (含扩展名或纯标识符) → 当作 `#include <p>`
+                        self.out.push_str(&format!("#include <{}>\n", p));
+                        return;
+                    }
+                }
                 self.out.push_str(&format!(
                     "/* dcc C++ import (M9 placeholder): {} */\n",
                     path.join("::")

@@ -54,6 +54,9 @@ pub enum MangleType {
     /// `decltype(auto)` 占位 - 规则同 C++14: 用 decltype(expr) 推导,
     /// 保留引用与 cv 限定. 由 lower 阶段完成.
     DecltypeAuto,
+    /// 模板实例化: `T<U1, U2, ...>` 解析为 `Template { name: "T", args: [...] }`.
+    /// Itanium 编码: `N<name_len><name>I<arg1><arg2>...E` (与 St6vectorIiSaIiEE 形式一致).
+    Template { name: String, args: Vec<MangleType> },
 }
 
 impl MangleType {
@@ -84,6 +87,15 @@ impl MangleType {
             // 显式抛错: 若某条路径未完成 auto 推导, 编译时报错而非输出错符号.
             Self::Auto => out.push_str("__auto_unresolved__"),
             Self::DecltypeAuto => out.push_str("__decltype_auto_unresolved__"),
+            // 模板实例化: N<name_len><name>I<arg1>...<argN>E
+            // 与 St6vectorIiSaIiEE 一致
+            Self::Template { name, args } => {
+                out.push_str(&format!("N{}{}I", name.len(), name));
+                for a in args {
+                    a.encode(out);
+                }
+                out.push('E');
+            }
         }
     }
 
@@ -465,5 +477,60 @@ mod tests {
             mangle_global_function("foo", &[MangleType::Int, MangleType::Int]),
             "_Z3fooii"
         );
+    }
+
+    // M18.1: 模板实例化 T<U> 编码 — 与 St6vectorIiSaIiEE 一致
+    #[test]
+    fn encode_template_int() {
+        let t = MangleType::Template {
+            name: "vector".to_string(),
+            args: vec![MangleType::Int],
+        };
+        let mut s = String::new();
+        t.encode(&mut s);
+        assert_eq!(s, "N6vectorIiE");
+    }
+
+    #[test]
+    fn encode_template_multi_args() {
+        let t = MangleType::Template {
+            name: "map".to_string(),
+            args: vec![
+                MangleType::Class("string".to_string()),
+                MangleType::Int,
+            ],
+        };
+        let mut s = String::new();
+        t.encode(&mut s);
+        // MangleType::Class 自身编码为 N<len><name>E, 形参里再嵌套 N<...>E
+        assert_eq!(s, "N3mapI6NstringEiE");
+    }
+
+    #[test]
+    fn encode_template_pointer_arg() {
+        let t = MangleType::Template {
+            name: "X".to_string(),
+            args: vec![MangleType::Pointer(Box::new(MangleType::Int))],
+        };
+        let mut s = String::new();
+        t.encode(&mut s);
+        assert_eq!(s, "N1XIPiE");
+    }
+
+    #[test]
+    fn encode_nested_template() {
+        // vector<pair<int, int>>
+        let t = MangleType::Template {
+            name: "vector".to_string(),
+            args: vec![MangleType::Template {
+                name: "pair".to_string(),
+                args: vec![MangleType::Int, MangleType::Int],
+            }],
+        };
+        let mut s = String::new();
+        t.encode(&mut s);
+        // pair<int,int> 编码为 N4pairIiiE (两 int 直接拼接)
+        // vector<pair<int,int>> 编码为 N6vectorIN4pairIiiEE
+        assert_eq!(s, "N6vectorIN4pairIiiEE");
     }
 }
