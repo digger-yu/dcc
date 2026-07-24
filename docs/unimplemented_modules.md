@@ -521,6 +521,31 @@ M19 关键改动:
 >   - `dwarf_line_dedup_under_g1`
 >   - `dwarf_line_no_dedup_under_g3`
 > - 总测试 389 unit + 175 integration 全过。
+>
+> **M24 增量（2026-07-24）— Section 11.5 setjmp CFI 寄存器保存表**：
+> - `src/debug.rs` `FuncFrame` 增加 `cfi_ops: Vec<u8>` 字段并提供
+>   `FuncFrame::new()` / `FuncFrame::with_cfi()` 构造器；
+>   `build_eh_frame_with_arch` 在 FDE body 内嵌入 `func.cfi_ops`。
+> - `src/codegen/x86_64.rs` 新增 `build_cfi_ops()` 构造
+>   `DW_CFA_def_cfa(7, 16|24)` + `DW_CFA_offset(13, 2)` +
+>   `DW_CFA_offset(16, 1)` (+ `DW_CFA_offset(6, 3)` 当
+>   `-fno-omit-frame-pointer`)，CFA 偏移与 dcc prologue
+>   (push r13 [+ push rbp]) 一一对应；新增 `func_frames()`
+>   供 `src/codegen/mod.rs` 统一调用。
+> - 修复 3 处 `.eh_frame` CIE 预存 bug：
+>   - `CIE_id`: 0xFFFFFFFF (DWARF `.debug_frame` 约定) → 0 (LSB)
+>   - `CIE_pointer` 公式符号反了 → `(fde_start+4) - cie_len_pos`
+>   - CIE 对齐从 `eh.len() % 8 != 4` 改为 CIE 相对的 4 字节对齐，
+>     避免插入 6 字节多余 CFA_nop
+> - 迁移 `aarch64` / `arm` / `mips` / `riscv64` 四后端的
+>   `func_frames()` 到 `FuncFrame::new()`，等待 CFI ops 后续实装。
+> - 新增 4 个单测/集成测试验证：
+>   - `eh_frame_fde_emits_cfi_ops_for_setjmp` (debug::tests)
+>   - `eh_frame_fde_omits_cfi_ops_when_empty` (debug::tests)
+>   - `setjmp_x86_64_fixture_compiles` (integration)
+>   - `setjmp_x86_64_eh_frame_has_cfi_ops` (integration)
+> - `dcc .o` + 主机 gcc 链接验证：setjmp/longjmp 运行时返回 49
+>   (与手写 .c 期望一致)。
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
@@ -729,11 +754,11 @@ M19 关键改动:
 
 ## 11. 杂项 / 边角
 
-🟢 / 🟠 / 🔴 状态（2026-07-21 M23 之后）：
+🟢 / 🟠 / 🔴 状态（2026-07-24 M24 之后）：
 
 | 模块 | 状态 |
 |------|------|
-| `setjmp` / `longjmp` | 🟠 走 libc，未生成 DWARF CFI 兼容的寄存器保存表 |
+| `setjmp` / `longjmp` | 🟢 (M24) 走 libc + 生成 DWARF CFI 兼容的寄存器保存表（CIE/FDE 修复 + DW_CFA_def_cfa + DW_CFA_offset） |
 | `alloca` | 🟢 (M23) `__builtin_alloca` codegen: sub rsp + 16 字节对齐 |
 | 信号 | 🔴 完整 `sigaction` / `sigaltstack` / `signal` 仅在 freestanding 走 libc；无 codegen 差异 |
 | TLS dtv / TLS 描述符（`gottpoff` / `tlsdesc`） | 🟠 仅基础 `tpoff` 模型；AArch64 TLS 系列 R_TLSDESC_* 未实装 |
