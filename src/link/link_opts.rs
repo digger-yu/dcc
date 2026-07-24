@@ -244,14 +244,16 @@ pub fn compress_debug_sections(layout: &mut Layout, method: &str) -> Vec<String>
         if !sec.name.starts_with(".debug_") { continue; }
         if sec.data.is_empty() || sec.size == 0 { continue; }
         if sec.flags & SHF_COMPRESSED != 0 { continue; } // 已压缩
-        // 使用 miniz_oxide 压缩
+        // 使用 miniz_oxide / zstd 压缩
+        let compress_type: u32; // ELFCOMPRESS_ZLIB=1, ELFCOMPRESS_ZSTD=2
         let compressed_data = match method {
             "zlib" | "zlib-gnu" | "zlib-gabi" => {
+                compress_type = 1;
                 deflate_compress(&sec.data)
             }
             "zstd" => {
-                // zstd 未实现，回退到 zlib
-                deflate_compress(&sec.data)
+                compress_type = 2;
+                zstd_compress(&sec.data)
             }
             _ => continue,
         };
@@ -261,7 +263,7 @@ pub fn compress_debug_sections(layout: &mut Layout, method: &str) -> Vec<String>
                 let orig_size = sec.data.len() as u64;
                 let orig_align = sec.align;
                 let mut new_data = Vec::with_capacity(20 + cdata.len());
-                new_data.extend_from_slice(&1u32.to_le_bytes()); // ELFCOMPRESS_ZLIB = 1
+                new_data.extend_from_slice(&compress_type.to_le_bytes());
                 new_data.extend_from_slice(&orig_size.to_le_bytes());
                 new_data.extend_from_slice(&orig_align.to_le_bytes());
                 new_data.extend_from_slice(&cdata);
@@ -283,6 +285,17 @@ fn deflate_compress(data: &[u8]) -> Option<Vec<u8>> {
         Some(compressed)
     } else {
         None // 压缩后更大，不压缩
+    }
+}
+
+/// 使用 zstd 进行压缩 (--compress-debug-sections=zstd)
+fn zstd_compress(data: &[u8]) -> Option<Vec<u8>> {
+    // zstd 压缩级别 3 (默认, 平衡速度与压缩率)
+    let compressed = zstd::encode_all(std::io::Cursor::new(data), 3).ok()?;
+    if compressed.len() < data.len() {
+        Some(compressed)
+    } else {
+        None
     }
 }
 

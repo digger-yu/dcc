@@ -1853,7 +1853,7 @@ impl Riscv64Codegen {
 
     /// 通用压缩判定: 给定一条 32-bit 指令的语义, 尝试发射 16-bit 版本
     /// 返回 true 如果成功压缩
-    fn try_compress_insn(&mut self, rd: u8, rs1: u8, rs2: u8, imm: i32, op: u8) -> bool {
+    fn try_compress_insn(&mut self, rd: u8, rs1: u8, _rs2: u8, imm: i32, op: u8) -> bool {
         match op {
             0x13 => self.try_compress_addi(rd, rs1, imm), // ADDI
             0x37 => self.try_compress_li(rd, imm),         // LUI/LI
