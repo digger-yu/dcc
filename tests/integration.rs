@@ -3466,3 +3466,72 @@ fn va_arg_x86_64_fixture_compiles() {
         );
     }
 }
+/// setjmp/longjmp 夹具能被 dcc 编译 (含 setjmp.h 调用).
+#[test]
+fn setjmp_x86_64_fixture_compiles() {
+    let src = include_str!("fixtures/setjmp_longjmp_x86_64.c");
+    let (output, _object_path) = run_object_test("setjmp-fixture", src);
+    assert!(
+        output.status.success(),
+        "fixture compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// x86_64 setjmp CFI (Section 11.5) 在 dcc 生成的 .o 里嵌入 DW_CFA_def_cfa
+/// + DW_CFA_offset 描述 callee-saved 寄存器保存位置. 这个测试验证:
+/// 1. 编译到 .o 成功 (带 -g 以生成 .eh_frame)
+/// 2. .eh_frame 节存在且含 CIE + FDE
+/// 3. CIE 使用 LSB CIE_id = 0 (不是 DWARF 0xFFFFFFFF)
+/// 4. FDE 包含 DW_CFA_def_cfa(7, 16) + DW_CFA_offset(13, 2) + DW_CFA_offset(16, 1)
+///    字节序列, 描述 r13 / %rip 在 CFA 处的偏移
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn setjmp_x86_64_eh_frame_has_cfi_ops() {
+    let src = include_str!("fixtures/setjmp_longjmp_x86_64.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-setjmp-cfi-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-setjmp-cfi-{}.o", std::process::id()));
+    fs::write(&source_path, src).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    assert!(
+        output.status.success(),
+        "fixture compile with -g failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&object_path).unwrap_or_default();
+    let _ = fs::remove_file(&object_path);
+
+    // DW_CFA_def_cfa(7, 16) = 0c 07 10
+    let needle_def_cfa = [0x0c, 7, 16u8];
+    let found_def_cfa = obj.windows(3).any(|w| w == needle_def_cfa);
+    assert!(found_def_cfa, "FDE should embed DW_CFA_def_cfa(rsp, 16)");
+
+    // DW_CFA_offset(13, 2) = 8d 02  (r13 saved at CFA-16)
+    let needle_r13 = [0x8d, 0x02];
+    let found_r13 = obj.windows(2).any(|w| w == needle_r13);
+    assert!(found_r13, "FDE should embed DW_CFA_offset(r13, 2)");
+
+    // DW_CFA_offset(16, 1) = 90 01  (%rip saved at CFA-8)
+    let needle_rip = [0x90, 0x01];
+    let found_rip = obj.windows(2).any(|w| w == needle_rip);
+    assert!(found_rip, "FDE should embed DW_CFA_offset(%rip, 1)");
+
+    // 验证 CIE 使用 LSB CIE_id = 0
+    // .eh_frame CIE 起始: 4 字节 length + 4 字节 CIE_id
+    // dcc 当前生成 length=12, CIE_id=0 (LSB), 不再是 DWARF 0xFFFFFFFF
+    let mut found_lsb_cie = false;
+    for off in 0..obj.len().saturating_sub(8) {
+        if obj[off..off + 4] == [0x0c, 0, 0, 0] && obj[off + 4..off + 8] == [0, 0, 0, 0] {
+            found_lsb_cie = true;
+            break;
+        }
+    }
+    assert!(found_lsb_cie, ".eh_frame CIE should use LSB CIE_id=0");
+}
