@@ -102,6 +102,9 @@ pub struct Config {
     /// --bootstrap-compare=<ref.o>: 自举回归对比. 编译结束后, 把当前输出
     /// 与 ref.o 做三层对比 (byte / struct / semantic), 仅做诊断打印, 不阻塞.
     pub bootstrap_compare: Option<PathBuf>,
+    /// --sysroot=<path>: 根目录, 头文件查找与链接器 -L 均带 <path>/include,
+    /// <path>/lib 前缀. 为 musl 交叉编译提供完整 sysroot 路径.
+    pub sysroot: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +236,22 @@ impl TargetTriple {
         format!("{}-{}-{}-{}",
             arch_name(self.arch), self.vendor, os_name(self.os), abi_name(self.abi))
     }
+
+    /// 当 abi == Musl 时, 返回 musl 动态加载器在 sysroot 内的相对路径.
+    /// 例: x86_64-linux-musl -> "lib/ld-musl-x86_64.so.1".
+    /// 其它 abi 返回 None.
+    pub fn musl_loader_path(&self) -> Option<String> {
+        if self.abi != Abi::Musl { return None; }
+        let arch = match self.arch {
+            Arch::X86_64  => "x86_64",
+            Arch::AArch64 => "aarch64",
+            Arch::RiscV64 => "riscv64",
+            Arch::Arm     => "armhf",
+            // musl 官方仓库在 mips 上游未提供, 返回 None 保持保守
+            Arch::Mips | Arch::Mips64 => return None,
+        };
+        Some(format!("lib/ld-musl-{}.so.1", arch))
+    }
 }
 
 pub fn arch_name(a: Arch) -> &'static str {
@@ -316,6 +335,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut diag_format = crate::diagnostics::FormatStyle::Github;
     let mut diag_show_template_tree = false;
     let mut bootstrap_compare: Option<PathBuf> = None;
+    let mut sysroot: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -674,6 +694,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("--bootstrap-compare=") => {
                 bootstrap_compare = Some(PathBuf::from(&a["--bootstrap-compare=".len()..]));
             }
+            a if a.starts_with("--sysroot=") => {
+                sysroot = Some(PathBuf::from(&a["--sysroot=".len()..]));
+            }
+            a if a.starts_with("-Wl,--sysroot=") => {
+                sysroot = Some(PathBuf::from(&a["-Wl,--sysroot=".len()..]));
+            }
             "-x" => {
                 i += 1;
                 let lang = args.get(i)
@@ -1011,6 +1037,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_format,
             diag_show_template_tree,
             bootstrap_compare: bootstrap_compare.clone(),
+            sysroot: sysroot.clone(),
             profile: merge_profile_config(profile, offload),
         })
     } else {
@@ -1050,6 +1077,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_format,
             diag_show_template_tree,
             bootstrap_compare,
+            sysroot,
             profile: merge_profile_config(profile, offload),
         })
     }
@@ -1278,5 +1306,58 @@ mod tests {
         let cfg = parse(&args).expect("--target mips must parse at cli level");
         assert_eq!(cfg.target.arch, Arch::Mips);
         assert!(cfg.target.arch.has_backend());
+    }
+
+    #[test]
+    fn musl_loader_path_x86_64() {
+        let t = TargetTriple::parse("x86_64-linux-musl").unwrap();
+        assert_eq!(t.musl_loader_path().as_deref(),
+                   Some("lib/ld-musl-x86_64.so.1"));
+    }
+
+    #[test]
+    fn musl_loader_path_aarch64() {
+        let t = TargetTriple::parse("aarch64-linux-musl").unwrap();
+        assert_eq!(t.musl_loader_path().as_deref(),
+                   Some("lib/ld-musl-aarch64.so.1"));
+    }
+
+    #[test]
+    fn musl_loader_path_riscv64() {
+        let t = TargetTriple::parse("riscv64-linux-musl").unwrap();
+        assert_eq!(t.musl_loader_path().as_deref(),
+                   Some("lib/ld-musl-riscv64.so.1"));
+    }
+
+    #[test]
+    fn musl_loader_path_arm() {
+        let t = TargetTriple::parse("arm-linux-musl").unwrap();
+        assert_eq!(t.musl_loader_path().as_deref(),
+                   Some("lib/ld-musl-armhf.so.1"));
+    }
+
+    #[test]
+    fn musl_loader_path_gnu_returns_none() {
+        let t = TargetTriple::parse("x86_64-linux-gnu").unwrap();
+        assert_eq!(t.musl_loader_path(), None);
+    }
+
+    #[test]
+    fn musl_loader_path_mips_returns_none() {
+        // musl 官方仓库在 mips 上游未提供, 保守返回 None
+        let t = TargetTriple::parse("mips-linux-musl").unwrap();
+        assert_eq!(t.musl_loader_path(), None);
+    }
+
+    #[test]
+    fn dashdash_sysroot_passes_cli_parse() {
+        let args = vec![
+            "--sysroot=/opt/musl-sysroot".to_string(),
+            "-c".to_string(),
+            "foo.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("--sysroot must parse at cli level");
+        assert_eq!(cfg.sysroot.as_ref().unwrap().to_str().unwrap(),
+                   "/opt/musl-sysroot");
     }
 }

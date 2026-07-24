@@ -44,6 +44,32 @@ fn diag_cfg(cfg: &Config) -> DiagnosticsConfig {
     }
 }
 
+/// 根据 --sysroot= 重写 cfg 的 include / library 路径, 产出一个新 cfg.
+/// 不修改原 cfg; 调用方负责在后续路径使用结果.
+///
+/// 规则: 若 cfg.sysroot == Some(p), 则:
+///   - include_paths 前面加 <p>/include, <p>/usr/include
+///   - link_libs 不动 (-L 由 host linker 自动处理)
+fn apply_sysroot(mut cfg: Config) -> Config {
+    let Some(sr) = cfg.sysroot.clone() else { return cfg; };
+    if cfg.verbose {
+        eprintln!("dcc: sysroot = {}", sr.display());
+    }
+    // 前缀: <sysroot>/include, <sysroot>/usr/include
+    let mut new_inc = Vec::with_capacity(cfg.include_paths.len() + 2);
+    let p1 = sr.join("include");
+    if p1.is_dir() || !cfg.include_paths.is_empty() {
+        new_inc.push(p1);
+    }
+    let p2 = sr.join("usr").join("include");
+    if p2.is_dir() || !cfg.include_paths.is_empty() {
+        new_inc.push(p2);
+    }
+    new_inc.append(&mut cfg.include_paths);
+    cfg.include_paths = new_inc;
+    cfg
+}
+
 /// 跨数据源权重下发: 从 -fprofile-use / -fauto-profile / -flbr-profile /
 /// -fmemory-profile-use 指定的文件读 4 个 profile 源, 聚合为
 /// `ProfileWeights`, 写入每个 FuncDecl 的 `is_cold` / `is_hot` 字段.
@@ -90,6 +116,10 @@ fn apply_profile_weights(prog: &mut crate::ast::Program, prof: &profile::Profile
 }
 
 pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
+    // --sysroot= 重写 include / library 路径. 必须在最早期调用, 让后续
+    // 预处理器 / 链接器都看到正确路径.
+    let cfg = apply_sysroot(cfg);
+
     // -r 多 .o 可重定位链接（host ld -r 兼容路径）
     if cfg.link_mode && !cfg.built_link {
         let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);

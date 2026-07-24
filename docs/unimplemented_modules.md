@@ -657,10 +657,19 @@ M19 关键改动:
 
 ✅ `--target=x86_64/aarch64/riscv64/mips/mips64/arm` 有完整后端
 
+🟢 (M25) Musl sysroot 集成:
+- 新增 `--sysroot=<path>` CLI 开关 (也接受 `-Wl,--sysroot=`)
+- driver 最早期 `apply_sysroot()` 重写 `cfg.include_paths`,
+  前缀 `<sysroot>/include` 与 `<sysroot>/usr/include`
+- 新增 `TargetTriple::musl_loader_path()`: 当 abi == Musl,
+  返回 musl 动态加载器在 sysroot 内的相对路径 (例: x86_64
+  → `lib/ld-musl-x86_64.so.1`); mips 走保守 None
+- 7 个单元测试覆盖各 arch (x86_64/aarch64/riscv64/arm) + mips 拒绝
+  + gnu 返回 None + `--sysroot=` 解析
+
 🔴 缺：
 
 - 真正的多平台 binary（`x86_64-dcc` / `aarch64-dcc` / `riscv64-dcc`）
-- Musl libc 目标（虽然 ABI 字段支持，但未集成 musl sysroot）
 - Windows MSVC 目标（`windows-msvc`）— codegen 仍是 SysV-like
 - Darwin 目标 — 没有 Mach-O 输出
 - WASM 目标 — 没有 wasm32 codegen
