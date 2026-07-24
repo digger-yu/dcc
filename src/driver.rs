@@ -21,6 +21,19 @@ use crate::format_check;
 use crate::lto;
 use crate::profile;
 
+/// 把预处理器阶段产生的非致命诊断打印到 stderr。
+/// PCH 不兼容 (W0400) / 缓存写失败 (W0402) 等场景会被转储; 错误会通过
+/// 调用方已有的错误检查路径处理 (Err(pp_diags) → main.rs 输出).
+/// 设计: 与 parser/sanitizer 警告保持视觉一致, 但不重复 main.rs 的
+/// 统一错误输出逻辑 (本函数只针对 warning 级别).
+fn emit_preproc_warnings(diags: &[Diagnostic]) {
+    for d in diags {
+        if !matches!(d.sev, Severity::Error) {
+            eprintln!("dcc: {}: {}", d.code, d.msg);
+        }
+    }
+}
+
 /// 根据 Config 构造 DiagnosticsConfig。-v / DCC_FORCE_COLOR 等不参与,
 /// 直接由 ColorPolicy::Auto 走 IsTerminal 判定。
 fn diag_cfg(cfg: &Config) -> DiagnosticsConfig {
@@ -87,7 +100,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // 预处理
     let pp_out = preproc::preprocess(
-        src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+        src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
@@ -98,6 +111,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
     }
+    // 把预处理器阶段的非致命诊断 (PCH 不兼容 / 缓存跳过等) 打印到 stderr.
+    // 这与 -E 模式共享同一路径, 即使 -E 也会显示 PCH 警告.
+    emit_preproc_warnings(&pp_diags);
 
     // -E 模式：只做预处理，输出到 stdout
     if cfg.preprocess_only {
@@ -274,7 +290,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
             crate::diagnostics::Span::point(&file_name, 0, 0))])?;
 
     let pp_out = preproc::preprocess(
-        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
@@ -347,7 +363,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
                 crate::diagnostics::Span::point(&file_name, 0, 0))])?;
         let pp_out = preproc::preprocess(
-            &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+            &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
         );
         let mut pp_diags = pp_out.diags;
         enrich_diags(&mut pp_diags, &src);
@@ -375,7 +391,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         cpp_includes.push(stdlib_inc);
     }
     let pp_out = preproc::preprocess(
-        &src, &file_name, &cpp_includes, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding,
+        &src, &file_name, &cpp_includes, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
     );
     let mut pp_diags = pp_out.diags;
     enrich_diags(&mut pp_diags, &src);

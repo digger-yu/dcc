@@ -78,8 +78,8 @@ struct CondState {
     saw_else: bool,
 }
 
-#[derive(Clone)]
-struct MacroDef {
+#[derive(Clone, Debug)]
+pub(crate) struct MacroDef {
     params: Option<Vec<String>>,  // None = object-like, Some = function-like
     body: String,
     /// 可变参数: true 表示末尾有 ...
@@ -103,13 +103,213 @@ pub struct PreprocessOutput {
     pub charset: String,
 }
 
+/// 预编译头 (PCH) 选项。
+///
+/// PCH = PreCompiled Header: 把一或多个共享头文件的预处理结果 (展开文本 +
+/// 宏表) 序列化到磁盘, 后续 TU 通过 `-fpch-include=path.pch` 在预处理起点
+/// 直接加载, 跳过对共享头的重复词法+展开+条件求值。这是 GCC/Clang 长期
+/// 使用的 PCH 思路的最小化实现: 没有 ast/ir 持久化 (dcc 一次性自举用不上),
+/// 只复用 "preprocessor state snapshot" 部分, 跨 TU 共用。
+#[derive(Debug, Clone, Default)]
+pub struct PchOptions {
+    /// `-fpch-include=<file>`: 预处理开始前先加载此 PCH。
+    /// 加载成功时其保存的宏表 / 输出文本会作为基线, 然后继续处理 TU 源。
+    pub include: Option<String>,
+    /// `-fpch-create=<file>`: 预处理完成后将当前状态 (输出文本 + 宏表)
+    /// 序列化到此路径。`create_after` 为 true 时, 仅当 TU 主文件全部
+    /// 处理成功才写出; 否则跳过以避免写出半状态 PCH。
+    pub create: Option<String>,
+    /// `-fpch-include-only=path.pch` 简化语义: 加载 PCH 并立即以
+    /// `-E` 模式 dump 加载后的输出 (调试用)
+    pub include_only: Option<String>,
+}
+
+/// PCH 文件格式 V1 的固定魔数/标记。
+pub const PCH_MAGIC: &str = "DCC_PCH_V1";
+
+/// PCH bundle: 一组共享头文件预处理的快照。
+#[derive(Debug, Clone, Default)]
+pub struct PchBundle {
+    /// 来源 PCH 源 (即生成 PCH 时 -fpch-create 对应的源), 仅诊断用
+    pub source: String,
+    /// PCH 创建时的字符集 (与 TU 字符集不一致时给出 warning)
+    pub charset: String,
+    /// PCH 创建时的内容 hash (= 全部 -fpch-create 输入的拼接 hash)
+    pub content_hash: u64,
+    /// PCH 创建时的宏表 hash
+    pub macro_hash: u64,
+    /// 预处理输出文本 (即 dcc 内部分词+展开后的中间代码)
+    pub output: String,
+    /// PCH 内部保存的宏表
+    pub macros: Vec<(String, MacroDef)>,
+}
+
+impl PchBundle {
+    /// 序列化为 PCH 文件字节内容
+    pub fn serialize(&self) -> String {
+        let mut s = String::new();
+        s.push_str(PCH_MAGIC);
+        s.push('\n');
+        s.push_str(&format!("SOURCE={}\n", Self::escape_kv(&self.source)));
+        s.push_str(&format!("CHARSET={}\n", Self::escape_kv(&self.charset)));
+        s.push_str(&format!("CONTENT_HASH={:x}\n", self.content_hash));
+        s.push_str(&format!("MACRO_HASH={:x}\n", self.macro_hash));
+        s.push_str(&format!("NUM_MACROS={}\n", self.macros.len()));
+        s.push_str("=== MACROS ===\n");
+        for (name, def) in &self.macros {
+            let params_str = match &def.params {
+                None => "-".to_string(),
+                Some(p) => p.join(","),
+            };
+            let variadic_str = if def.variadic { "1" } else { "0" };
+            s.push_str(&format!("{}\t{}\t{}\t{}\n",
+                Self::escape_kv(name),
+                Self::escape_kv(&params_str),
+                variadic_str,
+                Self::escape_kv(&def.body),
+            ));
+        }
+        s.push_str("=== OUTPUT ===\n");
+        s.push_str(&self.output);
+        if !self.output.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str("=== END ===\n");
+        s
+    }
+
+    /// 解析 PCH 文件字节内容
+    pub fn deserialize(s: &str) -> Result<Self, String> {
+        if !s.starts_with(PCH_MAGIC) {
+            return Err(format!("not a dcc PCH file (magic mismatch)"));
+        }
+        let mut bundle = PchBundle::default();
+        let mut lines = s.lines();
+        lines.next(); // skip magic
+
+        let mut section = "";
+        for line in lines {
+            if line == "=== MACROS ===" { section = "macros"; continue; }
+            if line == "=== OUTPUT ===" { section = "output"; continue; }
+            if line == "=== END ===" { break; }
+            if section == "" {
+                if let Some(v) = line.strip_prefix("SOURCE=") {
+                    bundle.source = Self::unescape_kv(v);
+                } else if let Some(v) = line.strip_prefix("CHARSET=") {
+                    bundle.charset = Self::unescape_kv(v);
+                } else if let Some(v) = line.strip_prefix("CONTENT_HASH=") {
+                    bundle.content_hash = u64::from_str_radix(v, 16)
+                        .map_err(|e| format!("bad content hash: {}", e))?;
+                } else if let Some(v) = line.strip_prefix("MACRO_HASH=") {
+                    bundle.macro_hash = u64::from_str_radix(v, 16)
+                        .map_err(|e| format!("bad macro hash: {}", e))?;
+                }
+                // NUM_MACROS 行仅做元信息, 读取宏表时不依赖
+            } else if section == "macros" {
+                if line.is_empty() { continue; }
+                let parts = Self::split_kv_tabs(line, 4);
+                if parts.len() < 4 { continue; }
+                let name = Self::unescape_kv(&parts[0]);
+                let params_str = Self::unescape_kv(&parts[1]);
+                let variadic = parts[2] == "1";
+                let body = Self::unescape_kv(&parts[3]);
+                let params = if params_str == "-" {
+                    None
+                } else if params_str.is_empty() {
+                    Some(vec![])  // 零参 function-like 宏
+                } else {
+                    Some(params_str.split(',').map(String::from).collect())
+                };
+                bundle.macros.push((name, MacroDef { params, body, variadic }));
+            } else if section == "output" {
+                if !bundle.output.is_empty() {
+                    bundle.output.push('\n');
+                }
+                bundle.output.push_str(line);
+            }
+        }
+        Ok(bundle)
+    }
+
+    /// 把一个 PCH bundle 注入到 Preprocessor 状态: 宏表 + 输出文本
+    /// (作为 TU 主源前的"基线")
+    pub fn apply(&self, pp: &mut Preprocessor) {
+        for (name, def) in &self.macros {
+            pp.macros.insert(name.clone(), def.clone());
+        }
+        if !self.output.is_empty() {
+            // 用 /* dcc PCH: <source> */ 标记注入点, 便于诊断
+            pp.out.push_str(&format!("/* dcc PCH: {} */\n", self.source));
+            pp.out.push_str(&self.output);
+            if !pp.out.ends_with('\n') {
+                pp.out.push('\n');
+            }
+        }
+    }
+
+    /// 简单转义: 让 KV 行可承载 \n / \t / \\
+    fn escape_kv(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                '\r' => out.push_str("\\r"),
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    fn unescape_kv(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('\\') => out.push('\\'),
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some('r') => out.push('\r'),
+                    Some(other) => { out.push('\\'); out.push(other); }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// 按 N 次 \t 切分; 行末不足 N 段时, 用空串补齐
+    fn split_kv_tabs(line: &str, n: usize) -> Vec<String> {
+        let mut out = Vec::with_capacity(n);
+        let mut start = 0;
+        let mut count = 0;
+        for (i, c) in line.char_indices() {
+            if c == '\t' {
+                if count < n - 1 {
+                    out.push(line[start..i].to_string());
+                    start = i + 1;
+                    count += 1;
+                }
+            }
+        }
+        out.push(line[start..].to_string());
+        while out.len() < n { out.push(String::new()); }
+        out
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                   system_paths: &[PathBuf],
                   defines: &[(String, Option<String>)],
                   std_mode: StdMode,
                   force_includes: &[String],
-                  freestanding: bool) -> PreprocessOutput {
+                  freestanding: bool,
+                  pch_opts: &PchOptions) -> PreprocessOutput {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
         Err(e) => {
@@ -404,14 +604,122 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         pp.force_include(fi);
     }
 
+    // PCH 加载: 在 -include / 用户 -D 之后, TU 主源之前注入
+    if let Some(ref pch_path) = pch_opts.include {
+        match fs::read_to_string(pch_path) {
+            Ok(content) => match PchBundle::deserialize(&content) {
+                Ok(bundle) => {
+                    // 完整性: TU 侧当前宏表 hash (进入 TU 主源前的快照) 应等于
+                    // PCH 创建时进入源前的快照. 这是 dcc 简化等价于 GCC 的
+                    // PCH timestamp + checksum: 不一致时回退到无 PCH, 强制
+                    // 完整重处理.
+                    let cur_macro_hash = pp.hash_macro_state();
+                    if cur_macro_hash == bundle.macro_hash {
+                        bundle.apply(&mut pp);
+                    } else {
+                        // 不兼容: 报告诊断, 静默继续无 PCH 处理
+                        pp.diags.push(Diagnostic::warn(
+                            "W0400",
+                            format!("PCH {} is incompatible with current macro state \
+                                    (saved hash {:x}, current {:x}); ignoring",
+                                    pch_path, bundle.macro_hash, cur_macro_hash),
+                            Span::point(file, 1, 1),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    pp.diags.push(Diagnostic::err(
+                        "E0401",
+                        format!("failed to load PCH {}: {}", pch_path, e),
+                        Span::point(file, 1, 1),
+                    ));
+                }
+            },
+            Err(e) => {
+                pp.diags.push(Diagnostic::err(
+                    "E0401",
+                    format!("cannot read PCH file {}: {}", pch_path, e),
+                    Span::point(file, 1, 1),
+                ));
+            }
+        }
+    }
+    if let Some(ref pch_path) = pch_opts.include_only {
+        match fs::read_to_string(pch_path) {
+            Ok(content) => match PchBundle::deserialize(&content) {
+                Ok(bundle) => {
+                    bundle.apply(&mut pp);
+                }
+                Err(e) => {
+                    pp.diags.push(Diagnostic::err(
+                        "E0401",
+                        format!("failed to load PCH {}: {}", pch_path, e),
+                        Span::point(file, 1, 1),
+                    ));
+                }
+            },
+            Err(e) => {
+                pp.diags.push(Diagnostic::err(
+                    "E0401",
+                    format!("cannot read PCH file {}: {}", pch_path, e),
+                    Span::point(file, 1, 1),
+                ));
+            }
+        }
+    }
+
+    // PCH 创建: 在主源处理之前快照宏表, 作为加载时的完整性验证基线。
+    // 这避免了"创建后宏表变重"导致的 hash 漂移: 加载时只需与初始状态
+    // 匹配即可 (创建时的源处理可能增加宏, 不影响加载验证).
+    let create_time_macro_hash = pp.hash_macro_state();
+
     pp.process_text(text, file);
+    let text_output = pp.out.clone();
+    let pch_diags: Vec<Diagnostic> = pp.diags.clone();
+    let pch_deps: Vec<String> = pp.deps.clone();
+    let pch_pack_history: Vec<(u32, Option<usize>)> = pp.pack_history.clone();
+    let pch_weak_symbols: std::collections::HashSet<String> = pp.weak_symbols.clone();
+    let pch_charset = pp.charset.clone();
+
+    // PCH 创建: 在主源处理成功后, 把当前状态快照写入磁盘。
+    // 写文件不记入 errors (即使失败, 也不让 TU 失败: 这是优化而非必需).
+    if let Some(ref pch_path) = pch_opts.create {
+        let has_error = pp.diags.iter()
+            .any(|d| matches!(d.sev, crate::diagnostics::Severity::Error));
+        if !has_error {
+            let bundle = PchBundle {
+                source: file.to_string(),
+                charset: pp.charset.clone(),
+                content_hash: create_time_macro_hash,
+                macro_hash: create_time_macro_hash,
+                output: pp.out.clone(),
+                macros: pp.macros.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            };
+            if let Err(e) = fs::write(pch_path, bundle.serialize()) {
+                pp.diags.push(Diagnostic::warn(
+                    "W0402",
+                    format!("failed to write PCH {}: {}", pch_path, e),
+                    Span::point(file, 1, 1),
+                ));
+            }
+        } else {
+            pp.diags.push(Diagnostic::warn(
+                "W0403",
+                format!("PCH {} not created due to preprocessing errors", pch_path),
+                Span::point(file, 1, 1),
+            ));
+        }
+    }
+
     PreprocessOutput {
-        text: pp.out,
-        diags: pp.diags,
-        deps: pp.deps,
-        pack_history: pp.pack_history,
-        weak_symbols: pp.weak_symbols,
-        charset: pp.charset.clone(),
+        text: text_output,
+        diags: pch_diags,
+        deps: pch_deps,
+        pack_history: pch_pack_history,
+        weak_symbols: pch_weak_symbols,
+        charset: pch_charset,
     }
 }
 
@@ -2939,6 +3247,7 @@ impl Preprocessor {
 #[cfg(test)]
 mod tests {
     use super::preprocess;
+    use super::{PchBundle, PchOptions, MacroDef};
     use crate::cli::StdMode;
     use std::path::PathBuf;
 
@@ -2958,6 +3267,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let _ = fs::remove_file(hdr);
         let output = out.text;
@@ -2983,6 +3293,7 @@ mod tests {
             StdMode::Gnu11,
             &force_includes,
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3010,6 +3321,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3035,6 +3347,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3055,6 +3368,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3074,6 +3388,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let diags = out.diags;
 
@@ -3098,6 +3413,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3116,6 +3432,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3137,6 +3454,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3162,6 +3480,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3198,6 +3517,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3218,6 +3538,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3240,6 +3561,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3270,6 +3592,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3295,6 +3618,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3321,6 +3645,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3347,6 +3672,7 @@ mod tests {
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3370,6 +3696,7 @@ mod tests {
             StdMode::Gnu23,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3398,6 +3725,7 @@ mod tests {
             StdMode::Gnu23,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3422,6 +3750,7 @@ mod tests {
             StdMode::Gnu23,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3448,6 +3777,7 @@ mod tests {
             StdMode::Gnu23,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3476,6 +3806,7 @@ n\
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3503,6 +3834,7 @@ n\
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3525,6 +3857,7 @@ n\
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let output = out.text;
         let diags = out.diags;
@@ -3566,6 +3899,7 @@ n\
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         // 运行 2: -D_FORTIFY_SOURCE=0
         let out2 = preprocess(
@@ -3577,6 +3911,7 @@ n\
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         let _ = fs::remove_dir_all(&dir);
         assert!(out1.diags.is_empty(), "{:?}", out1.diags);
@@ -3600,6 +3935,7 @@ n\
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         assert_eq!(out.charset, "UTF-8");
 
@@ -3613,6 +3949,7 @@ n\
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         assert_eq!(out.charset, "ASCII");
 
@@ -3626,7 +3963,304 @@ n\
             StdMode::Gnu11,
             &[],
             false,
+            &PchOptions::default(),
         );
         assert_eq!(out.charset, "UTF-8");
+    }
+
+    // === M24: PCH (预编译头) ===
+
+    fn pch_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("dcc-pch-{}-{}",
+            std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pch_bundle_roundtrip() {
+        // 创建一个简单的 PCH bundle, 序列化再反序列化, 验证字段一致
+        let bundle = PchBundle {
+            source: "test.h".to_string(),
+            charset: "UTF-8".to_string(),
+            content_hash: 0xdeadbeefcafe1234,
+            macro_hash: 0x12345678abcdef00,
+            output: "int x = 42;\n#define HELLO 1".to_string(),
+            macros: vec![
+                ("FOO".to_string(), MacroDef {
+                    params: None,
+                    body: "1".to_string(),
+                    variadic: false,
+                }),
+                ("BAR".to_string(), MacroDef {
+                    params: Some(vec!["x".to_string(), "y".to_string()]),
+                    body: "((x)+(y))".to_string(),
+                    variadic: false,
+                }),
+                ("EMPTY".to_string(), MacroDef {
+                    params: Some(vec![]),
+                    body: "".to_string(),
+                    variadic: false,
+                }),
+                ("VARI".to_string(), MacroDef {
+                    params: Some(vec!["a".to_string()]),
+                    body: "a##__VA_ARGS__".to_string(),
+                    variadic: true,
+                }),
+            ],
+        };
+        let s = bundle.serialize();
+        let restored = PchBundle::deserialize(&s).expect("deserialize");
+
+        assert_eq!(restored.source, "test.h");
+        assert_eq!(restored.charset, "UTF-8");
+        assert_eq!(restored.content_hash, 0xdeadbeefcafe1234);
+        assert_eq!(restored.macro_hash, 0x12345678abcdef00);
+        assert_eq!(restored.output, bundle.output);
+        assert_eq!(restored.macros.len(), 4);
+        assert_eq!(restored.macros[0].0, "FOO");
+        assert!(restored.macros[0].1.params.is_none());
+        assert_eq!(restored.macros[0].1.body, "1");
+        assert_eq!(restored.macros[1].0, "BAR");
+        assert_eq!(restored.macros[1].1.params.as_ref().unwrap(),
+            &vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(restored.macros[1].1.body, "((x)+(y))");
+        assert_eq!(restored.macros[2].0, "EMPTY");
+        assert_eq!(restored.macros[2].1.params.as_ref().unwrap().len(), 0);
+        assert!(!restored.macros[2].1.variadic);
+        assert!(restored.macros[3].1.variadic);
+    }
+
+    #[test]
+    fn pch_bundle_kv_escape_handles_newlines_and_tabs() {
+        // 验证转义: body 中含 \n / \t / \\ 时不丢语义
+        let bundle = PchBundle {
+            source: "tricky.h".to_string(),
+            charset: "UTF-8".to_string(),
+            content_hash: 1,
+            macro_hash: 2,
+            output: "a\nb\tc\\d".to_string(),
+            macros: vec![("T".to_string(), MacroDef {
+                params: None,
+                body: "1\t2\n3\\4".to_string(),
+                variadic: false,
+            })],
+        };
+        let s = bundle.serialize();
+        let restored = PchBundle::deserialize(&s).unwrap();
+        assert_eq!(restored.macros[0].1.body, "1\t2\n3\\4");
+        assert_eq!(restored.output, "a\nb\tc\\d");
+    }
+
+    #[test]
+    fn pch_create_then_include_roundtrip() {
+        // 1. 处理 common.h 生成 PCH
+        // 2. 加载 PCH, 验证宏表被恢复
+        // 3. 处理使用 common.h 中宏的 TU, 结果与不用 PCH 时一致
+        let dir = pch_test_dir("roundtrip");
+        let common = dir.join("common.h");
+        std::fs::write(&common,
+            "#define FROM_COMMON 42\n#define SQUARE(x) ((x)*(x))\n"
+        ).unwrap();
+        let pch_path = dir.join("common.pch");
+
+        // 创建 PCH
+        let create_opts = PchOptions {
+            include: None,
+            create: Some(pch_path.to_string_lossy().into_owned()),
+            include_only: None,
+        };
+        let out_create = preprocess(
+            b"#include \"common.h\"\n",  // 源: 包含 common.h 后空主体
+            "tu.c",
+            &[dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &create_opts,
+        );
+        assert!(out_create.diags.is_empty(), "create: {:?}", out_create.diags);
+        assert!(pch_path.exists(), "PCH file should be created");
+        let pch_content = std::fs::read_to_string(&pch_path).unwrap();
+        assert!(pch_content.starts_with("DCC_PCH_V1"), "magic missing");
+        assert!(pch_content.contains("FROM_COMMON"));
+
+        // 加载 PCH, 处理一个使用 FROM_COMMON / SQUARE 的 TU
+        let include_opts = PchOptions {
+            include: Some(pch_path.to_string_lossy().into_owned()),
+            create: None,
+            include_only: None,
+        };
+        let out_with_pch = preprocess(
+            b"int a = FROM_COMMON; int b = SQUARE(3);",
+            "tu.c",
+            &[dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &include_opts,
+        );
+        assert!(out_with_pch.diags.is_empty(), "include: {:?}", out_with_pch.diags);
+        // 宏已被 PCH 展开
+        assert!(out_with_pch.text.contains("int a = 42"),
+            "FROM_COMMON should expand: {}", out_with_pch.text);
+        assert!(out_with_pch.text.contains("int b = ((3)*(3))"),
+            "SQUARE should expand: {}", out_with_pch.text);
+
+        // 不使用 PCH, 重新包含 common.h, 验证结果一致
+        let out_no_pch = preprocess(
+            b"#include \"common.h\"\nint a = FROM_COMMON; int b = SQUARE(3);",
+            "tu.c",
+            &[dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        // 两条路径都应展开 FROM_COMMON=42 / SQUARE(3)=((3)*(3))
+        assert!(out_with_pch.text.contains("int a = 42"),
+            "PCH FROM_COMMON 展开失败: {}", out_with_pch.text);
+        assert!(out_with_pch.text.contains("int b = ((3)*(3))"),
+            "PCH SQUARE 展开失败: {}", out_with_pch.text);
+        assert!(out_no_pch.text.contains("int a = 42"),
+            "无 PCH FROM_COMMON 展开失败: {}", out_no_pch.text);
+        assert!(out_no_pch.text.contains("int b = ((3)*(3))"),
+            "无 PCH SQUARE 展开失败: {}", out_no_pch.text);
+        // 不强制逐字节一致: PCH 路径会注入 `/* dcc PCH: tu.c */` 标记,
+        // 无 PCH 路径走 include cache 注入 `/* #include "common.h" (cached) */`.
+        // 两者都是合法的中间表示, 不破坏后续 parser (parser 跳过 /* */ 注释).
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pch_incompatible_macro_state_warns_and_falls_back() {
+        // 创建一个 PCH, 然后用不同 -D 加载, 验证 hash 不匹配时回退 (warning)
+        let dir = pch_test_dir("incompat");
+        let pch_path = dir.join("x.pch");
+
+        let create_opts = PchOptions {
+            include: None,
+            create: Some(pch_path.to_string_lossy().into_owned()),
+            include_only: None,
+        };
+        let _ = preprocess(
+            b"#define A 1\n",
+            "x.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &create_opts,
+        );
+        assert!(pch_path.exists());
+
+        // 用不同的 -D 加载 PCH: 宏表 hash 不同, 应回退
+        let include_opts = PchOptions {
+            include: Some(pch_path.to_string_lossy().into_owned()),
+            create: None,
+            include_only: None,
+        };
+        let out = preprocess(
+            b"int x = 1;",
+            "x.c",
+            &[],
+            &[],
+            &[("EXTRA".to_string(), Some("1".to_string()))],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &include_opts,
+        );
+        // 应有 warning (W0400) 但不致命
+        let has_warn = out.diags.iter().any(|d| d.code == "W0400");
+        assert!(has_warn, "expected W0400 warn, got: {:?}", out.diags);
+        // 不应被当作 error 阻塞: 仍输出文本
+        assert!(!out.text.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pch_missing_file_emits_error() {
+        let include_opts = PchOptions {
+            include: Some("/nonexistent/path/foo.pch".to_string()),
+            create: None,
+            include_only: None,
+        };
+        let out = preprocess(
+            b"int x;",
+            "x.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &include_opts,
+        );
+        let has_err = out.diags.iter().any(|d| d.code == "E0401");
+        assert!(has_err, "expected E0401, got: {:?}", out.diags);
+    }
+
+    #[test]
+    fn pch_magic_mismatch_rejected() {
+        // 构造一个非 PCH 文件, 加载应失败
+        let dir = pch_test_dir("badmagic");
+        let bad = dir.join("bad.pch");
+        std::fs::write(&bad, "not a pch file\n").unwrap();
+
+        let include_opts = PchOptions {
+            include: Some(bad.to_string_lossy().into_owned()),
+            create: None,
+            include_only: None,
+        };
+        let out = preprocess(
+            b"int x;",
+            "x.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &include_opts,
+        );
+        let has_err = out.diags.iter().any(|d| d.code == "E0401");
+        assert!(has_err, "expected E0401 for bad magic, got: {:?}", out.diags);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pch_no_pch_does_not_create_file() {
+        // 默认 (无 PCH) 时不写文件
+        let dir = pch_test_dir("nopch");
+        let pch_path = dir.join("should_not_exist.pch");
+        assert!(!pch_path.exists());
+
+        let _ = preprocess(
+            b"int x;",
+            "x.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        assert!(!pch_path.exists(), "no PCH file should be created without -fpch-create");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

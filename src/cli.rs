@@ -33,6 +33,7 @@ pub struct Config {
     pub emit_asm: bool,     // -S: 输出汇编文本 .s
     pub preprocess_only: bool, // -E: 只做预处理
     pub force_includes: Vec<String>, // -include file: 强制包含文件
+    pub pch_opts: crate::preproc::PchOptions, // PCH (预编译头): -fpch-include / -fpch-create
     pub syntax_only: bool, // -fsyntax-only: 只做语法检查, 不生成代码
     pub dep_file: Option<PathBuf>, // -MF: 依赖文件输出路径
     pub dep_target: Option<String>, // -MT/-MQ: 依赖文件中的目标名
@@ -264,6 +265,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut emit_asm = false;
     let mut preprocess_only = false;
     let mut force_includes: Vec<String> = vec![];
+    let mut pch_opts = crate::preproc::PchOptions::default();
     let mut syntax_only = false;
     let mut dep_file: Option<PathBuf> = None;
     let mut dep_target: Option<String> = None;
@@ -777,6 +779,20 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-W") => {}
             // -m* 机器选项 - 忽略
             a if a.starts_with("-m") => {}
+            // PCH (预编译头): -fpch-include=path / -fpch-create=path / -include-pch=path
+            // 这是 GCC/Clang 的 PCH 简化接口: 把一组共享头的预处理结果缓存为
+            // .pch 文件, 后续 TU 通过 -fpch-include 直接加载, 跳过对共享头的
+            // 重复 lex+展开+条件求值.
+            // 注意: 这几条规则必须在 "-f*" 通用 catch-all 之前, 否则被忽略.
+            a if a.starts_with("-fpch-include=") => {
+                pch_opts.include = Some(a[14..].to_string());
+            }
+            a if a.starts_with("-fpch-create=") => {
+                pch_opts.create = Some(a[13..].to_string());
+            }
+            a if a.starts_with("-fpch-include-only=") => {
+                pch_opts.include_only = Some(a[19..].to_string());
+            }
             // -f* 其他选项 - 忽略
             a if a.starts_with("-f") => {}
             // -std=* 已经处理过了
@@ -957,7 +973,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         if !link_rpath.is_empty() { all_link_opts.rpath = Some(link_rpath.join(":")); }
         if !link_runpath.is_empty() { all_link_opts.runpath = Some(link_runpath.join(":")); }
         all_link_opts.rpath_link = link_rpath_link.clone();
-        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, force_includes, syntax_only,
+        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, force_includes, pch_opts, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,
@@ -995,7 +1011,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         }
         let parallel_codegen = opt >= 2
             && std::env::var("DCC_NO_PARALLEL").is_err();
-        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode: false, emit_asm, preprocess_only, force_includes, syntax_only,
+        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode: false, emit_asm, preprocess_only, force_includes, pch_opts, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,

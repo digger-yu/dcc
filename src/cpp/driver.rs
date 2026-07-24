@@ -52,6 +52,7 @@ pub fn compile_cpp(
             crate::cli::StdMode::Gnu11,
             &[],                          /* force includes */
             false,                        /* freestanding */
+            &crate::preproc::PchOptions::default(),  /* PCH */
         );
     if !pp_out.diags.is_empty() {
         let mut out = Vec::new();
