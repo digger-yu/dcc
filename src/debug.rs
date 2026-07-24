@@ -162,10 +162,26 @@ pub struct LineEntry {
 }
 
 /// 函数 PC 与大小（供 eh_frame FDE / DWARF DW_AT_low_pc 生成）
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FuncFrame {
     pub pc: u64,
     pub size: u32,
+    /// FDE 内 CFI 指令字节流 (从 CFA 初始指令之后开始; 不含末尾 advance_loc).
+    /// 为空表示该函数无 CFI 信息 (沿用 CIE 默认 CFA = rsp + 8).
+    /// 字节流内: DW_CFA_def_cfa / DW_CFA_def_cfa_offset /
+    /// DW_CFA_offset / DW_CFA_restore 等 uleb128 编码指令按顺序串接.
+    pub cfi_ops: Vec<u8>,
+}
+
+impl FuncFrame {
+    /// 构造一个无 CFI 信息的 FuncFrame (仅 PC + size).
+    pub fn new(pc: u64, size: u32) -> Self {
+        Self { pc, size, cfi_ops: Vec::new() }
+    }
+    /// 构造带 CFI ops 的 FuncFrame.
+    pub fn with_cfi(pc: u64, size: u32, cfi_ops: Vec<u8>) -> Self {
+        Self { pc, size, cfi_ops }
+    }
 }
 
 /// 类型编码（DWARF DW_AT_encoding）
@@ -1849,6 +1865,11 @@ pub fn build_eh_frame_with_arch(functions: &[FuncFrame], arch: ArchKind) -> Vec<
         eh.extend_from_slice(&func.pc.to_le_bytes());
         eh.extend_from_slice(&func.size.to_le_bytes());
         eh.push(0); // augmentation data length
+        // CFI ops: 初始化 CFA + 各寄存器保存描述
+        // (setjmp / longjmp 依赖此信息正确恢复 callee-saved 寄存器)
+        if !func.cfi_ops.is_empty() {
+            eh.extend_from_slice(&func.cfi_ops);
+        }
         while eh.len() % 8 != 0 {
             eh.push(0);
         }
@@ -1969,14 +1990,14 @@ mod tests {
 
     #[test]
     fn eh_frame_includes_fde_for_function() {
-        let frames = [FuncFrame { pc: 0x100, size: 32 }];
+        let frames = [FuncFrame::new(0x100, 32)];
         let eh = build_eh_frame(&frames);
         assert!(eh.len() > 32, "eh_frame should contain CIE + FDE");
     }
 
     #[test]
     fn aarch64_eh_frame_uses_zr_augmentation() {
-        let frames = [FuncFrame { pc: 0x200, size: 16 }];
+        let frames = [FuncFrame::new(0x200, 16)];
         let eh = build_eh_frame_with_arch(&frames, ArchKind::AArch64);
         let win = b"zR\0";
         let mut found = false;
@@ -1988,7 +2009,7 @@ mod tests {
 
     #[test]
     fn riscv64_eh_frame_uses_zr_augmentation() {
-        let frames = [FuncFrame { pc: 0x300, size: 16 }];
+        let frames = [FuncFrame::new(0x300, 16)];
         let eh = build_eh_frame_with_arch(&frames, ArchKind::RiscV64);
         let win = b"zR\0";
         let mut found = false;
@@ -1996,6 +2017,63 @@ mod tests {
             if w == win { found = true; break; }
         }
         assert!(found, "riscv64 CIE should contain 'zR' augmentation");
+    }
+
+    /// M24.1: setjmp / longjmp 依赖 .eh_frame FDE 内的 CFI ops 描述
+    /// callee-saved 寄存器位置. 验证 FDE ops 正确插入并包含
+    /// DW_CFA_def_cfa + DW_CFA_offset(13, 2) + DW_CFA_offset(16, 1) 序列.
+    #[test]
+    fn eh_frame_fde_emits_cfi_ops_for_setjmp() {
+        // 构造 cfi_ops: CFA = rsp + 16, r13@CFA-16, %rip@CFA-8
+        let mut cfi_ops = Vec::new();
+        // DW_CFA_def_cfa(7, 16)
+        cfi_ops.push(0x0c);
+        cfi_ops.push(7);
+        cfi_ops.push(16);
+        // DW_CFA_offset(13, 2)
+        cfi_ops.push(0x80 | 13);
+        cfi_ops.push(2);
+        // DW_CFA_offset(16, 1)
+        cfi_ops.push(0x80 | 16);
+        cfi_ops.push(1);
+
+        let frames = [FuncFrame::with_cfi(0x100, 32, cfi_ops.clone())];
+        let eh = build_eh_frame(&frames);
+        // 验证 FDE 内出现 cfi_ops 的关键字节序列: DW_CFA_def_cfa 0x0c
+        let needle_def_cfa = [0x0c, 7, 16u8];
+        let mut found = false;
+        for w in eh.windows(needle_def_cfa.len()) {
+            if w == needle_def_cfa { found = true; break; }
+        }
+        assert!(found, "FDE should embed DW_CFA_def_cfa(7, 16) from cfi_ops");
+        // 验证 DW_CFA_offset 字节
+        let needle_r13 = [0x80u8 | 13, 2];
+        let mut found_r13 = false;
+        for w in eh.windows(needle_r13.len()) {
+            if w == needle_r13 { found_r13 = true; break; }
+        }
+        assert!(found_r13, "FDE should embed DW_CFA_offset(13, 2) for r13 save");
+        // 验证 %rip (reg 16) 字节
+        let needle_rip = [0x80u8 | 16, 1];
+        let mut found_rip = false;
+        for w in eh.windows(needle_rip.len()) {
+            if w == needle_rip { found_rip = true; break; }
+        }
+        assert!(found_rip, "FDE should embed DW_CFA_offset(16, 1) for %rip save");
+    }
+
+    /// M24.1: cfi_ops 为空时 FDE 不嵌入任何 CFI ops, 仅 PC+size.
+    #[test]
+    fn eh_frame_fde_omits_cfi_ops_when_empty() {
+        let frames = [FuncFrame::new(0x400, 16)];
+        let eh = build_eh_frame(&frames);
+        // 不应该出现 DW_CFA_def_cfa(7, 16) 序列 (cfi_ops 为空).
+        let needle = [0x0c, 0x07, 0x10];
+        let mut found_in_full = false;
+        for w in eh.windows(needle.len()) {
+            if w == needle { found_in_full = true; break; }
+        }
+        assert!(!found_in_full, "FDE with empty cfi_ops should not embed def_cfa(7,16)");
     }
 
     #[test]

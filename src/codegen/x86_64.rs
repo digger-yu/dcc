@@ -697,6 +697,65 @@ impl Codegen {
         }
     }
 
+    /// 构造符合 DWARF CFI 规范的 FDE CFI ops. dcc x86_64 调用约定:
+    ///  prologue 总是:
+    ///    push r13     ; 保存调用者的 r13 (dcc 用 r13 作 frame pointer)
+    ///    mov  r13, rsp
+    ///  若 -fno-omit-frame-pointer: 额外 push rbp / mov rbp,rsp
+    ///  CFA = rsp + 16 (无 frame_pointer) / rsp + 24 (有 frame_pointer).
+    ///  r13 保存于 CFA-16, %rip 保存于 CFA-8; frame_pointer 时 rbp 保存于 CFA-24.
+    ///  CFI 描述了 setjmp / longjmp (libc) 需要的所有信息 — longjmp
+    ///  凭此 CFI 即可定位 jmp_buf 中应被恢复的寄存器位.
+    pub fn build_cfi_ops(&self) -> Vec<u8> {
+        // uleb128 编码 (借用 debug::write_uleb128 但不导出, 这里 inline)
+        fn enc_uleb128(out: &mut Vec<u8>, mut v: u64) {
+            loop {
+                let mut b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v != 0 { b |= 0x80; }
+                out.push(b);
+                if v == 0 { break; }
+            }
+        }
+        let mut ops = Vec::new();
+        // CFA = rsp + 16 (无 frame_pointer) / rsp + 24 (有 frame_pointer)
+        let cfa_off: u32 = if self.target.frame_pointer { 24 } else { 16 };
+        // DW_CFA_def_cfa (0x0c) uleb128(rsp=7) uleb128(offset)
+        ops.push(0x0c);
+        enc_uleb128(&mut ops, 7);
+        enc_uleb128(&mut ops, cfa_off as u64);
+        // r13 (reg 13) saved at CFA-16 -> factor 2
+        ops.push(0x80 | 13);
+        enc_uleb128(&mut ops, 2);
+        // %rip (reg 16) saved at CFA-8 -> factor 1
+        ops.push(0x80 | 16);
+        enc_uleb128(&mut ops, 1);
+        // rbp (reg 6) saved at CFA-24 -> factor 3, only with frame_pointer
+        if self.target.frame_pointer {
+            ops.push(0x80 | 6);
+            enc_uleb128(&mut ops, 3);
+        }
+        ops
+    }
+
+    /// 返回 .eh_frame FDE 描述 (PC + size + CFI ops). 供 mod.rs 构造 .eh_frame 节.
+    pub fn func_frames(&self, module: &crate::ir::Module) -> Vec<crate::debug::FuncFrame> {
+        module
+            .functions
+            .iter()
+            .filter_map(|f| {
+                let pc = *self.labels.get(&f.name)?;
+                let sz = *self.func_sizes.get(&f.name)? as u32;
+                let cfi_ops = if self.emit_cfi {
+                    self.build_cfi_ops()
+                } else {
+                    Vec::new()
+                };
+                Some(crate::debug::FuncFrame::with_cfi(pc, sz, cfi_ops))
+            })
+            .collect()
+    }
+
     pub fn compile(&mut self, module: &crate::ir::Module) {
         let prog = module.source();
         // 检查 __attribute__((error/warning/deprecated)): 扫描所有函数声明

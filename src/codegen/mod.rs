@@ -63,18 +63,7 @@ pub fn emit(
                 });
             }
             if cg.emit_cfi && relocatable {
-                let frames: Vec<debug::FuncFrame> = module
-                    .functions
-                    .iter()
-                    .filter_map(|f| {
-                        cg.labels.get(&f.name).and_then(|&pc| {
-                            cg.func_sizes.get(&f.name).map(|&sz| debug::FuncFrame {
-                                pc,
-                                size: sz as u32,
-                            })
-                        })
-                    })
-                    .collect();
+                let frames: Vec<debug::FuncFrame> = cg.func_frames(module);
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".eh_frame".to_string(),
                     data: debug::build_eh_frame(&frames),

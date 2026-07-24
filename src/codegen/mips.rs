@@ -75,10 +75,9 @@ impl MipsCodegen {
             .iter()
             .filter_map(|f| {
                 self.labels.get(&f.name).and_then(|&pc| {
-                    self.func_sizes.get(&f.name).map(|&sz| crate::debug::FuncFrame {
-                        pc,
-                        size: sz as u32,
-                    })
+                    self.func_sizes
+                        .get(&f.name)
+                        .map(|&sz| crate::debug::FuncFrame::new(pc, sz as u32))
                 })
             })
             .collect()
