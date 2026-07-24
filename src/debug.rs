@@ -1811,9 +1811,12 @@ pub fn build_eh_frame_with_arch(functions: &[FuncFrame], arch: ArchKind) -> Vec<
     let augmentation = arch.cie_augmentation();
 
     // CIE body
+    // LSB .eh_frame 用 CIE_id = 0 (区别于 .debug_frame 的 0xFFFFFFFF DWARF 约定).
+    // 0 是 glibc unwinder / setjmp 实际解析用的值, 错填 0xFFFFFFFF 会让
+    // FDE 找不到对应 CIE → setjmp/longjmp 异常时栈展开失败.
     let cie_len_pos = eh.len();
     eh.extend_from_slice(&[0u8; 4]);
-    eh.extend_from_slice(&0xffffffffu32.to_le_bytes());
+    eh.extend_from_slice(&0u32.to_le_bytes());
     eh.push(1); // version
     eh.extend_from_slice(augmentation.as_bytes());
     eh.push(0); // null-terminate augmentation
@@ -1827,17 +1830,21 @@ pub fn build_eh_frame_with_arch(functions: &[FuncFrame], arch: ArchKind) -> Vec<
     } else {
         eh.push(0);
     }
-    while eh.len() % 8 != 4 {
+    // 4 字节对齐下一个 record (FDE 起点) - LSB 仅要求 4 字节对齐.
+    // 之前用 `eh.len() % 8 != 4` 造成 6 字节 CFA_nop, 使 readelf 误读 CIE 长度.
+    while (eh.len() - cie_len_pos - 4) % 4 != 0 {
         eh.push(0);
     }
     let cie_len = (eh.len() - cie_len_pos - 4) as u32;
     eh[cie_len_pos..cie_len_pos + 4].copy_from_slice(&cie_len.to_le_bytes());
-    let cie_id_offset = cie_len_pos + 4;
 
     for func in functions {
         let fde_start = eh.len();
         eh.extend_from_slice(&[0u8; 4]);
-        let cie_ptr = (cie_id_offset as i64 - (fde_start as i64 + 4)) as u32;
+        // LSB: CIE_pointer = CIE_pointer_field_offset - CIE_start_offset
+        // (取值为正, 代表向后跳的距离). 之前用 cie_id_offset - (fde_start+4)
+        // 符号反了, 导致 readelf 误读 FDE 长度.
+        let cie_ptr = ((fde_start + 4) as i64 - cie_len_pos as i64) as u32;
         eh.extend_from_slice(&cie_ptr.to_le_bytes());
         eh.extend_from_slice(&func.pc.to_le_bytes());
         eh.extend_from_slice(&func.size.to_le_bytes());
