@@ -3596,3 +3596,59 @@ fn wchar_libc_fixture_runs() {
         panic!("wchar_libc fixture exit={code}, expected 0\ndcc stderr: {stderr}");
     }
 }
+
+/// signal() libc 转发 (Section 11 P0.2) - 运行时路径.
+/// 编译 + 链接 + 运行 fixtures/signal_libc.c; 退出码 0 表示通过.
+#[test]
+fn signal_libc_fixture_runs() {
+    let src = include_str!("fixtures/signal_libc.c");
+    let (compile, code) = run_host_link_and_run("signal-libc", src);
+    if code != 0 {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        panic!("signal_libc fixture exit={code}, expected 0\ndcc stderr: {stderr}");
+    }
+}
+
+/// sigaction / sigaltstack libc 转发 (Section 11 P0.2) - 编译路径.
+/// 验证 dcc 能编译带 struct sigaction / stack_t 的代码, 且 .o 引用
+/// sigaction / sigaltstack 作为 undefined symbol (留给 host gcc 解析).
+/// 注: 运行时 segfault 是 dcc 现有 struct 布局 bug, 不在本测试覆盖范围.
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn sigaction_sigaltstack_fixture_compiles() {
+    let src = "\
+#include <signal.h>
+void handler(int s) { (void)s; }
+int main(void) {
+    struct sigaction sa;
+    sa.sa_handler = handler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(10, &sa, (struct sigaction*)0);
+
+    stack_t ss;
+    ss.ss_sp = (void*)0;
+    ss.ss_flags = 0;
+    ss.ss_size = 0;
+    sigaltstack(&ss, (stack_t*)0);
+    return 0;
+}
+";
+    let (output, object_path) = run_object_test("sigaction-fixture", src);
+    assert!(
+        output.status.success(),
+        "sigaction/sigaltstack compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 确认 .o 引用 sigaction / sigaltstack 作为 undefined symbol.
+    let obj = fs::read(&object_path).unwrap_or_default();
+    let _ = fs::remove_file(&object_path);
+    for needle in [b"sigaction".as_slice(), b"sigaltstack".as_slice()] {
+        let found = obj.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            found,
+            "fixture .o should reference {}",
+            String::from_utf8_lossy(needle)
+        );
+    }
+}

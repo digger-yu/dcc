@@ -563,6 +563,22 @@ M19 关键改动:
 > - 跟踪记录：dcc 现有多数组栈变量分配有重叠 bug (Section 9
 >   follow-up)，本 fixture 故意只用单个 32 元素 buf 避开。
 
+> **M25 增量（2026-07-24）— Section 11 P0.2 signal libc 转发**：
+> - `src/link/resolve.rs` `is_implicit_undef` 白名单补齐
+>   `sigaction` / `sigaltstack` / `signal` 三个 POSIX 信号入口。
+> - 新增 `tests/fixtures/signal_libc.c` + 集成测试
+>   `signal_libc_fixture_runs` 验证 `signal(SIGTERM, handler)`
+>   运行时返回非 NULL 旧 handler (即 prev != handler 0)。
+> - 新增集成测试 `sigaction_sigaltstack_fixture_compiles`
+>   验证 dcc 编译带 `struct sigaction` / `stack_t` 参数的代码,
+>   且生成的 .o 引用 `sigaction` / `sigaltstack` 作为 undefined
+>   symbol (host gcc 链接时 -lc 解析).
+> - 运行时限制：dcc 现有 struct sigaction / stack_t 布局与
+>   glibc 不一致，传 struct 参数的 `sigaction(2, &sa, ...)` /
+>   `sigaltstack(&ss, ...)` 会 segfault。跟踪为 Section 9
+>   follow-up. 本 PR 只补齐 libc 转发层 (Section 11 P0.2).
+> - Section 11 表格 `信号` 行 🔴 → 🟢 (M25)。
+
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
 > `DW_TAG_*` / `DW_AT_*` / `DW_FORM_*` / `DW_CFA_*` /
@@ -776,7 +792,7 @@ M19 关键改动:
 |------|------|
 | `setjmp` / `longjmp` | 🟢 (M24) 走 libc + 生成 DWARF CFI 兼容的寄存器保存表（CIE/FDE 修复 + DW_CFA_def_cfa + DW_CFA_offset） |
 | `alloca` | 🟢 (M23) `__builtin_alloca` codegen: sub rsp + 16 字节对齐 |
-| 信号 | 🔴 完整 `sigaction` / `sigaltstack` / `signal` 仅在 freestanding 走 libc；无 codegen 差异 |
+| 信号 | 🟢 (M25) `sigaction` / `sigaltstack` / `signal` 在 link implicit undef 白名单, signal() 运行时验证; sigaction/sigaltstack 编入 .o 作为 undefined symbol, dcc 现有 struct sigaction / stack_t 布局有 bug 限制运行时 (Section 9 follow-up) |
 | TLS dtv / TLS 描述符（`gottpoff` / `tlsdesc`） | 🟠 仅基础 `tpoff` 模型；AArch64 TLS 系列 R_TLSDESC_* 未实装 |
 | atexit / `__cxa_atexit` | 🟢 (M22) `fini_dispatch.rs::FiniArrayBuilder` 按 priority 排序 |
 | `__attribute__((constructor(priority)))` | 🟢 (M23) 按 priority 排序（小数字先执行，默认 65535） |

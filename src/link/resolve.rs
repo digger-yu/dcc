@@ -253,7 +253,12 @@ fn is_implicit_undef(name: &str) -> bool {
         // wchar_t 字符串/内存库 (Section 11 P0.1): wcscpy/wcscmp/wcslen/wcschr/
         // wcsncmp/wcsrchr/wcscat/wmemcpy/wmemmove/wmemset/wmemcmp.
         "wcscpy" | "wcscat" | "wcscmp" | "wcsncmp" | "wcslen" | "wcschr" | "wcsrchr" |
-        "wmemcpy" | "wmemmove" | "wmemset" | "wmemcmp"
+        "wmemcpy" | "wmemmove" | "wmemset" | "wmemcmp" |
+        // POSIX signal (Section 11 P0.2): sigaction / sigaltstack / signal.
+        // 注: dcc 当前的 struct sigaction / stack_t 布局有 bug (Section 9
+        // follow-up), runtime 传 struct 会 segfault; 但 libc 转发本身 OK,
+        // 故这些名字仍列为 implicit undefined 以使 host gcc 链接成功.
+        "sigaction" | "sigaltstack" | "signal"
     )
 }
 
