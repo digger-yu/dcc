@@ -700,11 +700,30 @@ M19 关键改动:
 - ✅ IFUNC 多版本 dynamic resolver（`target_clones` 实际生成 STT_GNU_IFUNC）
 - ✅ `-flto-partition=` 配置化（LtoConfig 结构体）
 
+🟡 (M25) vDSO 集成基础设施:
+- 新增 `link::vdso::VdsoInfo` + `parse_vdso()`: 读 vDSO ELF, 提取
+  `.text` 载荷 + `.dynsym` (仅 STT_FUNC) + `.strtab`
+- `vdso_alias(standard_name)` 辅助: `clock_gettime` →
+  `__vdso_clock_gettime` 等 4 个内置别名
+- 7 个单元测试覆盖: 解析 .text + 符号、bad magic、truncated header、
+  ELF32 拒绝、no .text 拒绝、alias 映射、文件读取端到端
+- 未完成: 把 vDSO `.text` 嵌入输出 layout + 加 `.note.GNU-vdso` 节.
+  需要重写 `link::layout` 的段追加顺序, 留作下一阶段.
+
+🟡 (M25) DSO symbol caching:
+- 新增 `link::dso_cache::DsoCache`: 按 (path, mtime, size) 三元组去重
+  缓存 DSO 解析结果, 返回 `Arc<DsoInfo>` 共享所有权
+- 便捷入口 `get_or_load(cache, path, loader)`: 命中走缓存, 未命中
+  调用 loader 并 insert
+- 5 个单元测试覆盖: miss-then-hit、size 变化时失效、loader 仅调用
+  一次、clear 后清空、缺失路径返回 None
+- 未完成: 链接器侧接入 (link/mod.rs 当前还没有 DSO 读取路径, 需要
+  先把 built-in linker 的 -lxxx → libc.so 解析补上, 再用 DsoCache
+  做缓存层)
+
 🔴 仍缺：
 
 - 运行时 dynamic loader（`ld.so`）— 完全依赖 host（设计决策）
-- vDSO 集成
-- DSO symbol caching
 
 ---
 

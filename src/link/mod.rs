@@ -37,6 +37,8 @@ pub mod link_opts;
 pub mod symver;
 pub mod target_clones;
 pub mod fini_dispatch;
+pub mod vdso;
+pub mod dso_cache;
 
 use std::path::{Path, PathBuf};
 
