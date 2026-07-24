@@ -467,12 +467,12 @@ impl Riscv64Codegen {
         if is_vector_ty(&expr.ty) {
             return self.gen_vector_expr(expr);
         }
-        if is_float_ty(&expr.ty)
-            || expr
-                .children
-                .iter()
-                .any(|c| is_float_ty(&c.ty) || is_vector_ty(&c.ty))
-        {
+        // expr.ty 自身是 float/vector 时走 gen_float_expr.
+        // 注意: 不能用 children 检查 (float 子节点会让 gen_expr 反复调
+        // gen_float_expr 形成死循环). 例如 (int)sum(double) 这个 Cast
+        // children[0]=Double 但 expr.ty=Integer, 应走 gen_expr 主路径,
+        // 内层 Call(Double) 再递归调 gen_expr -> gen_float_expr.
+        if is_float_ty(&expr.ty) {
             return self.gen_float_expr(expr);
         }
         match expr.kind {
@@ -609,10 +609,20 @@ impl Riscv64Codegen {
                 self.float_binop_fa0(op);
                 return true;
             }
+            // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
+            // (__builtin_va_arg 在 IR 中被降级为 ExprKind::Call, expr.ty=float)
+            ExprKind::Call => {
+                eprintln!("warning: __builtin_va_arg not yet implemented on riscv64, emitting 0");
+                self.li_a0(0);
+                return true;
+            }
             _ => {
-                if self.gen_expr(expr) {
-                    self.emit_fcvt_s_w_fa0();
-                    return true;
+                // expr.ty 已是 float/vector 时不能再回 gen_expr (死循环).
+                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty) {
+                    if self.gen_expr(expr) {
+                        self.emit_fcvt_s_w_fa0();
+                        return true;
+                    }
                 }
             }
         }

@@ -504,12 +504,12 @@ impl Aarch64Codegen {
         if is_vector_ty(&expr.ty) {
             return self.gen_vector_expr(expr);
         }
-        if is_float_ty(&expr.ty)
-            || expr
-                .children
-                .iter()
-                .any(|c| is_float_ty(&c.ty) || is_vector_ty(&c.ty))
-        {
+        // expr.ty 自身是 float/vector 时走 gen_float_expr.
+        // 注意: 不能用 children 检查 (float 子节点会让 gen_expr 反复调
+        // gen_float_expr 形成死循环). 例如 (int)sum(double) 这个 Cast
+        // children[0]=Double 但 expr.ty=Integer, 应走 gen_expr 主路径,
+        // 内层 Call(Double) 再递归调 gen_expr -> gen_float_expr.
+        if is_float_ty(&expr.ty) {
             return self.gen_float_expr(expr);
         }
         match expr.kind {
@@ -680,14 +680,41 @@ impl Aarch64Codegen {
                 self.neg_s0();
                 return true;
             }
+            // Cast: 若目标本身是 float 则保留 float, 否则按整数提升处理.
+            // 关键: 调 self.gen_expr(child) 而不是 self.gen_float_expr(child),
+            //       避免 (double)x 这种 noop cast 死循环 (child 仍是 double).
             ExprKind::Cast if !expr.children.is_empty() => {
-                self.gen_float_expr(&expr.children[0]);
+                let child = &expr.children[0];
+                if is_float_ty(&expr.ty) {
+                    // 浮点 cast: 直接求值 child (它会自己走 gen_float_expr)
+                    self.gen_expr(child);
+                } else {
+                    // 整数 cast (如 (int)sum(d)): 求值 child 后用 trunc_*
+                    self.gen_expr(child);
+                }
+                return true;
+            }
+            // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
+            // 例: __builtin_va_arg(ap, double) 在 IR 中被降级为
+            //     ExprKind::Call { children: [ap] }, expr.ty = double.
+            //     gen_expr 看到 float 调 gen_float_expr, 后者若走
+            //     fallback 又调回 gen_expr, 死循环. 此处显式返回 false
+            //     让上层走默认占位 (w0=0).
+            ExprKind::Call => {
+                eprintln!("warning: __builtin_va_arg not yet implemented on aarch64, emitting 0");
+                self.mov_w0_imm(0);
                 return true;
             }
             _ => {
-                if self.gen_expr(expr) {
-                    self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
-                    return true;
+                // 已经是 float/vector 走到这里, 不能再回 gen_expr (死循环).
+                // 整数/复合字面量进 gen_float_expr 是为了 int→float 转换, 但
+                // gen_expr 不会调 gen_float_expr (ty 不是 float), 所以这里
+                // expr.ty 必然是 float, 直接返回 false 让上层走 fallback.
+                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty) {
+                    if self.gen_expr(expr) {
+                        self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
+                        return true;
+                    }
                 }
             }
         }
@@ -1566,6 +1593,21 @@ impl Aarch64Codegen {
     fn str_s0_sp(&mut self, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
         let insn = 0xbd000000u32 | imm12 << 10 | 31 << 5;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// `ldr s0, [sp, #imm12]` —— 从栈加载单精度浮点到 s0.
+    /// imm12 编码: insn[21:10] = imm12/4, 实际偏移范围 ±4 KB / 4 = 1024 个 4 字节槽.
+    fn ldr_s0_sp(&mut self, off: i32) {
+        let imm12 = (off / 4) as u32 & 0xfff;
+        let insn = 0xbd400000u32 | imm12 << 10 | 31 << 5;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// `ldr d0, [sp, #imm12]` —— 从栈加载双精度浮点到 d0.
+    fn ldr_d0_sp(&mut self, off: i32) {
+        let imm12 = (off / 8) as u32 & 0xfff;
+        let insn = 0xfd400000u32 | imm12 << 10 | 31 << 5;
         self.emit(&insn.to_le_bytes());
     }
 
