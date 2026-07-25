@@ -385,7 +385,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 
 | 模块 | 现状 |
 |------|------|
-| 模板实例化 | M10+ 实现 `PartialSpec` + SFINAE，但模板函数/类的真实单态化是简化版：依赖 `try_substitute` 模式匹配；`T<U>` 显式实参语法 `parse_mangle_type` 不识别 `<` |
+| 模板实例化 | M10+ 实现 `PartialSpec` + SFINAE，但模板函数/类的真实单态化是简化版：依赖 `try_substitute` 模式匹配。`T<U>` 显式实参语法 (M18) 🟢 (M25) `parse_mangle_type` 在 ident 后识别 `<`, 走 `looks_like_template_args_after_lt` 嵌套扫描, 升级为 `MangleType::Template`; 嵌套 `>>` 视作两层 `>` |
 | `obj.*ptr_to_member` (M8 简化) | 🟢 (M25) MemberStar / PtrMemberStar 路径实装, 解析 `.*` 与 `->*` 语法, 走 `__dcc_mbr_<class>_<member>` 偏移 |
 | `typeid(e)` (M8 简化) | 🟢 (M25) `CppExpr::Typeid` 和 `TypeidType` 走真 RTTI: `expr_static_class` 推断静态类, 生成 `(&__dcc_ti_<class>)` 符号引用, 替代 M8 stub `((_ZTI*)(((void*)e)->__vptr + 0))`; 跨多态指针动态 RTTI 仍为 Section 9 follow-up |
 | `auto` (M17 实装) | `infer_type` 真类型推导: int 字面量→Int, `"abc"`→`const char*` (`MangleType::Pointer(Int)`), 类名已知 → `MangleType::Class` |
@@ -700,6 +700,18 @@ M19 关键改动:
 >   动态 `typeid(a)` 取 a 的静态类两条路径) +
 >   集成测试 `p2_2_typeid_rtti`.
 > - Section 6 表格 `typeid(e)` 行 M8 stub → 🟢 (M25).
+
+> **M25 增量（2026-07-24）— Section 6 P2.3 C++ 模板实参语法 T<U>**：
+> - 验证 `src/cpp/parser.rs::parse_mangle_type` (M18 阶段
+>   实装) 在 ident 后识别 `<` 触发 `MangleType::Template` 分支;
+>   走 `looks_like_template_args_after_lt` 嵌套扫描, 跨过
+>   嵌套 `<`/`>`/`>>` 判别模板实参列表. M18 已支持但未加
+>   集成测试, 本 P2.3 补上 fixture + 测试.
+> - 新增 fixture `tests/fixtures/p2_3_template_arg.cpp`
+>   (覆盖 `Holder<int>` 单实参 + `Holder<Holder<int>>`
+>   嵌套 >> 实参) + 集成测试 `p2_3_template_arg_syntax`.
+> - Section 6 表格 `模板实例化` 行 `parse_mangle_type 不识别 <`
+>   → 🟢 (M25). 真实单态化仍为 M10+ 简化版 (Section 6 follow-up).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个

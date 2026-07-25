@@ -3872,3 +3872,21 @@ fn p2_2_typeid_rtti() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+/// P2.3: C++ 模板实参语法 T<U> (Section 6 表格 模板实例化行).
+/// 验证 dcc cpp 解析器 `parse_mangle_type` (M18 阶段实装)
+/// 在 ident 后识别 `<` 触发 `MangleType::Template` 分支, 接受
+/// `Holder<int>` / `Holder<Holder<int>>` (嵌套 >> 视作两层 `>)
+/// 语法, 不再走 M8 简化版对模板实参的剥离.
+#[test]
+#[cfg(unix)]
+fn p2_3_template_arg_syntax() {
+    let src = include_str!("fixtures/p2_3_template_arg.cpp");
+    let (out, obj) = run_cpp_object_test("p2-3-template-arg", src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        out.status.success(),
+        "p2_3_template_arg compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
