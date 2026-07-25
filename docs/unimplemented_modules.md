@@ -305,7 +305,7 @@ asm goto 输出约束（M11.2）；内联 asm 约束全家族（M11.3）。
 🟠 已知预存限制：
 
 - `__kcsan_check_access` 专用路径未 emit（KCSAN 借道 KASAN 回调）
-- VLA / null deref / float-cast UBSAN trap 变体未实装
+- null deref / float-cast UBSAN trap 变体未实装
 
 ### 4.3 Typed IR 验证（`src/ir.rs`）
 
@@ -612,6 +612,22 @@ M19 关键改动:
 > - 运行时限制: 用户需自行提供匹配的 `__asan_load24` /
 >   `__asan_load32` 等符号 (LLVM 编译器-rt 包含). dcc 仅
 >   emit 调用.
+
+> **M25 增量（2026-07-24）— Section 4.2 P1.2 VLA bound UBSAN**：
+> - `src/sanitizer.rs::vla_bound_check` 已在 M15 阶段实装
+>   (`__ubsan_handle_vla_bound_not_positive(bound)`) 且带
+>   单元测试 `ubsan_vla_bound_check_inserted`. P1.2 PR
+>   仅补齐集成层覆盖.
+> - 新增集成测试 `ubsan_vla_bound_check_emitted` (在
+>   `tests/integration.rs`): 编译带 `int vla[n]` 的 C
+>   代码 + `-fsanitize=undefined`, 验证汇编层含
+>   `call __ubsan_handle_vla_bound_not_positive`. 用
+>   `-S` 检查汇编而非 .o 的 strtab 是因为 dcc 当前对
+>   未声明的外部 sanitizer 函数不会自动写入
+>   `.symtab`/`.strtab` (Section 9 follow-up), 汇编层
+>   已正确 emit 调用。
+> - Section 4.2 已知预存限制列表移除 `VLA UBSAN trap
+>   变体未实装` 一条 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个

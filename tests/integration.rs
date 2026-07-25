@@ -3671,3 +3671,50 @@ fn complex_libm_fixture_runs() {
         panic!("complex_libm fixture exit={code}, expected 0\ndcc stderr: {stderr}");
     }
 }
+
+/// P1.2: VLA bound UBSAN trap. 编译带 VLA 的代码, 验证
+/// 生成的汇编中插入 `call __ubsan_handle_vla_bound_not_positive`
+/// (LLVM compiler-rt 符号名). runtime 时用户需链接 ubsan
+/// runtime, dcc 只 emit 调用. 测试只验证编译路径
+/// (Section 4.2 P1.2). 注: 用 -S 检查汇编而非 .o 的 strtab,
+/// 是因为 dcc 当前对未声明的外部函数 (如 sanitizer 桩) 不会
+/// 自动加到 .symtab / .strtab (Section 9 follow-up); 汇编层
+/// 已正确 emit 调用.
+#[test]
+fn ubsan_vla_bound_check_emitted() {
+    let src = "\
+int f(int n) {
+    int vla[n];
+    int sum = 0;
+    for (int i = 0; i < n; i++) vla[i] = i;
+    for (int i = 0; i < n; i++) sum += vla[i];
+    return sum;
+}
+int main(void) { return f(4); }
+";
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-ubsan-vla-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-ubsan-vla-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write VLA fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=undefined", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "VLA + ubsan compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    let needle = "call __ubsan_handle_vla_bound_not_positive";
+    assert!(
+        asm.contains(needle),
+        "VLA bound ubsan stub should be called in asm, but `{}` not found in:\n{}",
+        needle,
+        asm
+    );
+}
