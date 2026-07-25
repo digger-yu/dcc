@@ -2347,4 +2347,52 @@ mod tests {
         assert!(!Aarch64Codegen::adr_offset_in_range(0x100000));
         assert!(!Aarch64Codegen::adr_offset_in_range(-0x100001));
     }
+
+    // M25: AArch64 TLSDESC 访问序列 单元测试
+    // 验证 emit_tlsdesc_access 发出
+    //   adrp x0, :tlsdesc:sym          (R_AARCH64_TLSDESC_ADR_PAGE21)
+    //   ldr  x1, [x0, :tlsdesc_lo12:sym] (R_AARCH64_TLSDESC_LD64_LO12)
+    //   add  x0, x0, :tlsdesc_lo12:sym  (R_AARCH64_TLSDESC_ADD_LO12)
+    //   blr  x1                        (TLSDESC 间接调用)
+    // 共 4 条指令 + 3 条 TLSDESC_* 重定位 + 1 个 sym 符号.
+    #[test]
+    fn aarch64_tlsdesc_access_emits_expected_sequence() {
+        use crate::codegen::elf::{
+            R_AARCH64_TLSDESC_ADD_LO12, R_AARCH64_TLSDESC_ADR_PAGE21,
+            R_AARCH64_TLSDESC_LD64_LO12,
+        };
+        let mut cg = Aarch64Codegen::new(
+            crate::target::Target::resolve(
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap()
+            ),
+            true,
+        );
+        cg.emit_tlsdesc_access("my_tls_var");
+        // 4 条 aarch64 指令: adrp (0x90xx xxxx) + ldr (0xf940 xxxx)
+        // + add (0x91xx xxxx) + blr (0xd63f 0020)
+        assert!(cg.code.windows(4).any(|w| (w[3] & 0x9f) == 0x90),
+                "missing adrp insn (top byte & 0x9f should be 0x90)");
+        assert!(cg.code.windows(4).any(|w| w[3] == 0xf9 && (w[2] & 0xc0) == 0x40),
+                "missing ldr 64-bit insn");
+        assert!(cg.code.windows(4).any(|w| (w[3] & 0x9f) == 0x91),
+                "missing add insn (top byte & 0x9f should be 0x91)");
+        let blr_pattern: [u8; 4] = [0x20, 0x00, 0x3f, 0xd6];
+        assert!(cg.code.windows(4).any(|w| *w == blr_pattern),
+                "missing blr x1 (expected 20 00 3f d6)");
+        // 3 个 TLSDESC 重定位 (类型 + 引用 my_tls_var)
+        let tlsdesc_rels: Vec<_> = cg.relocations.iter()
+            .filter(|r| matches!(r.rel_type,
+                R_AARCH64_TLSDESC_ADR_PAGE21
+                | R_AARCH64_TLSDESC_LD64_LO12
+                | R_AARCH64_TLSDESC_ADD_LO12))
+            .collect();
+        assert_eq!(tlsdesc_rels.len(), 3,
+                   "expected 3 TLSDESC relocations, got {}", tlsdesc_rels.len());
+        for r in &tlsdesc_rels {
+            // 全部引用同一个符号 my_tls_var (确保 ensure_sym 去重)
+            let sym = &cg.symbols[r.sym_index as usize - 1];
+            assert_eq!(sym.name, "my_tls_var",
+                       "TLSDESC relocation must reference my_tls_var");
+        }
+    }
 }

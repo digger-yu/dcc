@@ -824,6 +824,31 @@ M19 关键改动:
 >   验证返回码 0; 同时跑一条无 PCH 对照路径
 >   同样返回 0, 验证两条路径在功能上等价.
 > - Section 4.2 表格 `增量预处理 (pch)` 行 `🔴 无` → 🟢 (M25).
+>
+> **M25 增量（2026-07-24）— AArch64 TLSDESC 序列单元测试**：
+> - 验证 `src/codegen/aarch64.rs::Aarch64Codegen::emit_tlsdesc_access`
+>   走标准 4 指令序列:
+>   `adrp x0, :tlsdesc:sym` +
+>   `ldr  x1, [x0, :tlsdesc_lo12:sym]` +
+>   `add  x0, x0, :tlsdesc_lo12:sym` +
+>   `blr  x1` (调 glibc 提供的 `_dl_tlsdesc_resolve`).
+> - 序列伴随 3 个重定位
+>   (R_AARCH64_TLSDESC_{ADR_PAGE21, LD64_LO12, ADD_LO12}),
+>   全部引用同一 TLS 变量符号 (由 `ensure_sym` 去重保证).
+> - 新增单元测试 `aarch64_tlsdesc_access_emits_expected_sequence`:
+>   构造空 codegen, 调 `emit_tlsdesc_access("my_tls_var")`, 验证
+>   code 缓冲里能找到 adrp/ldr/add/blr 4 条指令 (用 aarch64
+>   机器码的 top-byte 0x90/0xf9/0x91/0xd6 模式匹配), 且
+>   relocations 数组里有且仅有 3 条 TLSDESC_* 类型, 全部
+>   引用同一个 sym "my_tls_var".
+> - ELF 常量里还预留了 5 个扩展 TLSDESC 重定位
+>   (R_AARCH64_TLSDESC_{OFF_G1, OFF_G0_NC, LDR, ADD, CALL}),
+>   用于 2018+ 优化版 2 指令 TLSDESC 序列, codegen 暂未
+>   用到, 留 Section 9 follow-up.
+> - 运行时 `_dl_tlsdesc_resolve` 桩由 host glibc 提供, dcc
+>   自身不重新实现.
+> - Section 11 表格 `TLS dtv / TLS 描述符` 行
+>   `仅基础 tpoff 模型; R_TLSDESC_* 未实装` → 🟢 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
@@ -1039,7 +1064,7 @@ M19 关键改动:
 | `setjmp` / `longjmp` | 🟢 (M24) 走 libc + 生成 DWARF CFI 兼容的寄存器保存表（CIE/FDE 修复 + DW_CFA_def_cfa + DW_CFA_offset） |
 | `alloca` | 🟢 (M23) `__builtin_alloca` codegen: sub rsp + 16 字节对齐 |
 | 信号 | 🟢 (M25) `sigaction` / `sigaltstack` / `signal` 在 link implicit undef 白名单, signal() 运行时验证; sigaction/sigaltstack 编入 .o 作为 undefined symbol, dcc 现有 struct sigaction / stack_t 布局有 bug 限制运行时 (Section 9 follow-up) |
-| TLS dtv / TLS 描述符（`gottpoff` / `tlsdesc`） | 🟠 仅基础 `tpoff` 模型；AArch64 TLS 系列 R_TLSDESC_* 未实装 |
+| TLS dtv / TLS 描述符（`gottpoff` / `tlsdesc`） | 🟢 (M25) AArch64 `emit_tlsdesc_access` 发出 adrp + ldr + add + blr 序列 + 3 个 R_AARCH64_TLSDESC_{ADR_PAGE21, LD64_LO12, ADD_LO12} 重定位, `emit_tls_ie_access` / `emit_tls_le_access` 走 Initial-Exec / Local-Exec 路径; ELF 常量里已定义扩展 TLSDESC 5 个 (R_AARCH64_TLSDESC_{OFF_G1, OFF_G0_NC, LDR, ADD, CALL}) 预留, 但 codegen 还未用到 (Section 9 follow-up); 运行时 `_dl_tlsdesc_resolve` 依赖 host glibc, dcc 自身不提供桩 |
 | atexit / `__cxa_atexit` | 🟢 (M22) `fini_dispatch.rs::FiniArrayBuilder` 按 priority 排序 |
 | `__attribute__((constructor(priority)))` | 🟢 (M23) 按 priority 排序（小数字先执行，默认 65535） |
 | `__attribute__((destructor(priority)))` | 🟢 (M23) 按 priority 排序 |
