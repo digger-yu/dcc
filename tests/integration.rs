@@ -747,8 +747,9 @@ fn global_asm_exports_symbol() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-gasm-{}.c", std::process::id()));
     let out_path = dir.join(format!("dcc-gasm-{}.o", std::process::id()));
-    let source = "asm(\".globl global_marker\nglobal_marker:\n\");\nint main(void) { return 0; }\n";
-    fs::write(&source_path, source).expect("write asm fixture");
+    // raw string 保留 \n 为字面 2 字符, dcc C 解析器只接受单行串字面量
+    let source = r#"asm(".globl global_marker\nglobal_marker:\n");"#;
+    std::fs::write(&source_path, source).expect("write asm fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(&out_path)
