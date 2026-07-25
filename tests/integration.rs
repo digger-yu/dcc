@@ -3794,3 +3794,46 @@ int main(void) { return f(3.14); }
         asm
     );
 }
+
+/// P1.5: __kcsan_check_access 专用路径. 编译 KCSAN-only 代码
+/// (只启 -fsanitize=thread, 不启 -fsanitize=address), 验证生成的
+/// 汇编中插入 `call __kcsan_check_access`, 而不是走 KASAN 的
+/// `__asan_loadN` / `__asan_storeN` (Section 4.2 P1.5).
+#[test]
+fn kcsan_only_emits_kcsan_check_access() {
+    let src = "\
+int f(int *p) { return *p; }
+int main(void) { int x = 42; return f(&x); }
+";
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-kcsan-only-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-kcsan-only-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write kcsan fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=thread", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "kcsan-only compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    let kcsan_needle = "call __kcsan_check_access";
+    assert!(
+        asm.contains(kcsan_needle),
+        "kcsan access check should be called in asm, but `{}` not found in:\n{}",
+        kcsan_needle,
+        asm
+    );
+    // 同时确认 KASAN 路径没有被启用 (没有 __asan_loadN 调用).
+    assert!(
+        !asm.contains("call __asan_load") && !asm.contains("call __asan_store"),
+        "KASAN path must not be emitted when only KCSAN is enabled:\n{}",
+        asm
+    );
+}

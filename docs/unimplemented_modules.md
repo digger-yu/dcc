@@ -304,8 +304,6 @@ asm goto 输出约束（M11.2）；内联 asm 约束全家族（M11.3）。
 
 🟠 已知预存限制：
 
-- `__kcsan_check_access` 专用路径未 emit（KCSAN 借道 KASAN 回调）
-
 ### 4.3 Typed IR 验证（`src/ir.rs`）
 
 🟠 已识别 E10xx 但部分能力为 noop：
@@ -648,6 +646,21 @@ M19 关键改动:
 >   (Section 9 follow-up), 汇编层已正确 emit 调用。
 > - Section 4.2 已知预存限制列表移除 `null deref / float-cast
 >   UBSAN trap 变体未实装` 一条 (M25).
+
+> **M25 增量（2026-07-24）— Section 4.2 P1.5 __kcsan_check_access
+> 专用路径**：
+> - `src/sanitizer.rs::make_mem_check_call` 已在 M15 阶段实装
+>   KCSAN-only 分支: 当 `flags.kcsan && !flags.kasan && !flags.hwasan`
+>   时, emit `__kcsan_check_access(addr, size, is_write)` 三参
+>   调用, 走 LLVM KCSAN 运行时接口而非 KASAN 的 `__asan_loadN`.
+>   单元测试 `kcsan_only_uses_kcsan_check_access` 覆盖。
+> - P1.5 PR 仅补齐集成层覆盖: 新增
+>   `kcsan_only_emits_kcsan_check_access` 集成测试, 用
+>   `-fsanitize=thread -S` 编译指针解引用代码, 验证汇编
+>   含 `call __kcsan_check_access` 且没有 `call __asan_loadN`
+>   / `call __asan_storeN` (证明未走 KASAN 路径).
+> - Section 4.2 已知预存限制列表移除 `__kcsan_check_access
+>   专用路径未 emit` 一条 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
