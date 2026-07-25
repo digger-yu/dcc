@@ -1,560 +1,401 @@
 # dcc
 
-> **一个极简 C 编译器。比 GCC 更快，代码量超乎想象。**
+> 一个极简 C 编译器。
 
-## 第一性原理
+Rust 实现的递归下降编译器，typed IR + 自写 ELF64 输出，目标 Linux 6.6
+级别源码树与 C/C++ 主流子集；当前 **alpha**（CI 全绿但 vmlinux
+整树未首跑）。本文按 GCC 手册目录方式组织：概述 → 调用约定 → 语言支持
+→ 目标 → 代码生成 → 诊断 → 内建 → 缺失 → 路线图 → 限制 → 引用。
 
-```
-编译器的本质 = 将人类可读的文本无损转换为机器可执行的二进制指令
-GCC 的本质 = 多语言 + 多目标平台的编译器基础设施
-DCC 的目标 = GCC 能干的，DCC 都能干，而且干的更好
-```
+## 目录
 
-## 核心承诺
+- [1. 概述](#1-概述)
+- [2. 调用约定](#2-调用约定)
+- [3. 语言支持](#3-语言支持)
+- [4. 目标平台](#4-目标平台)
+- [5. 代码生成](#5-代码生成)
+- [6. 诊断与调试](#6-诊断与调试)
+- [7. 内建函数](#7-内建函数)
+- [8. 不支持的功能](#8-不支持的功能)
+- [9. 路线图](#9-路线图)
+- [10. 交叉编译](#10-交叉编译)
+- [11. 限制与已知问题](#11-限制与已知问题)
+- [12. 引用文档](#12-引用文档)
 
-| 指标 | GCC | DCC 目标 |
-|------|-----|----------|
-| 编译 linux 6.6 内核 | 30-60 分钟 | **< 30 分钟** |
-| 自举 | 已实现 | 未实现 |
-| 支持标准 | C89-C23 + GNU ext | **完全对标** |
-| 目标架构 | 30+ | x86_64 已实现 / ARM64 / RISC-V / MIPS |
-| 错误诊断 | 行级 | **字符级 + 修复建议** |
-| 代码行数 | 700 万 | 目标 < 5 万 |
-<!-- -->
+## 1. 概述
 
-### 核心承诺 — 已实现部分
-
-| 承诺 | 当前状态 |
+| 维度 | 当前状态 |
 |------|----------|
-| 编译 C 子集并生成可执行文件 | 已实现 — 支持整数运算、逻辑运算、控制流、函数调用、指针/数组、全局变量 |
-| 字符级错误诊断 | 已实现 — 精确到行号+列号，源码引用，修复建议，彩色输出 |
-| 手写 ELF64 输出 | 已实现 — ET_EXEC (可直接执行) + ET_REL (可重定位 .o) |
-| 预处理器 | 已实现 — #include/#define/#if 全家族 + 函数宏 + __has_include/__has_attribute/__has_builtin + 全局类型注册表（头文件缓存） |
-| 交叉编译框架 | 已实现 — TargetTriple 解析，多架构数据布局，后端分发 |
-| CLI 兼容 GCC 参数 | 已实现 — -O0~O3, -std=c89/c90/c99/c11/c17/c18/c23 + gnu 变体 + iso9899 别名, --target, -ffreestanding, -I, -D, -c |
-| 多文件编译 (.o 输出) | 已实现 — dcc -c 生成标准 .o，gcc 可链接，多文件链接验证通过 |
-| 浮点运算 | 已实现 — float/double SSE 指令 + 类型转换 + 比较 |
-| 位域/柔性数组/原子/SIMD/定点数 | 已实现 — 6 大后端模块全部通过 Linux 验证 |
-| 编译期运算 (__builtin/attribute/typeof/alignof) | 已实现 — 9 大编译期模块全部实现+Linux 验证 |
-| 运行时特性 (函数指针/逗号/VLA/整数提升/内联汇编) | 已实现 — 5 大运行时模块全部通过 Linux 验证 |
-<!-- -->
+| 实现语言 | Rust（suckless 零 crate 依赖，ADR-005） |
+| 输入 | C89/99/11/17/23 + GNU 扩展；C++ 子集（M7–M18，详见 §3.2） |
+| 中间层 | typed IR（`src/ir.rs`）+ 轻量 SSA（M16，`src/ssa.rs`） |
+| 输出 | ELF64（ET_EXEC / ET_REL / ET_DYN），自写 `src/codegen/elf.rs` |
+| 后端 | x86_64 / aarch64 / riscv64 / mips / mips64 / arm 全部完整（`has_backend() == true`） |
+| 链接器 | 自有 `src/link/` 内置链接器；旧路径走 host `ld -r`（`link/legacy.rs`） |
+| LTO | 自有 `.dcc.lto` 段 + DBC 位码（`src/link/lto_bitcode.rs`） |
+| 当前阶段 | **alpha**（M0–M25 已完成；M5 自举未开始；内核全树未首跑） |
 
-### 核心承诺 — 未实现部分
+## 2. 调用约定
 
-| 承诺 | 缺失内容 |
-|------|----------|
-| 编译 Linux 内核 | struct 传参/返回/long double 等已实现，剩余特性持续补齐 |
-| ARM64 / RISC-V 后端 | aarch64 typed IR hello（M7）；RISC-V 待补 |
-| 自举 | M5 未开始；阶段 E 选定 M7 多架构优先于自举 |
-| 内联 asm | 已实现 — 常用约束 `"r"`/`"m"`/`"=r"`、`memory` clobber、文件级 asm |
-| va_list (SysV) | 已实现 — GP 参数区 + XMM0–7 SSE 保存区，float/double/long double |
-| _Generic 指针 | 已实现 — 按 pointee 精确匹配，void* 与对象指针兼容 |
-| 优化 pass | `-O1` 常量折叠；`-O2` DCE/分支折叠（保留 goto 目标标签）；`-O3` 小 static 函数内联 |
-<!-- -->
+`dcc [options] <input>`，详细实现在 `src/cli.rs`。
 
-## 里程碑
+### 2.1 总体
 
-| 阶段 | 描述 | 状态 |
+| 选项 | 含义 |
+|------|------|
+| `-c` | 输出 `.o`（ET_REL），不链接 |
+| `-r` | 链接 `.o` → `.o`（合并可重定位），依赖 host `ld` 或内置链接器 |
+| `-S` | 输出 `.s` 汇编文本，不汇编 |
+| `-E` | 只做预处理，stdout 输出 |
+| `-o <file>` | 输出路径，默认 `a.out` |
+| `-x <lang>` | 强制输入语言 `c` / `c++` / `assembler-with-cpp` |
+| `--target <triple>` | 目标三元组（见 §4） |
+| `-std=<mode>` | C 标准模式（见 §3.1） |
+| `-ffreestanding` | 不假设 libc/CRT |
+| `-fpermissive` | 未知 typedef 降级为 `int`（W0002） |
+| `-fsyntax-only` | 只跑解析与语义检查 |
+| `-pipe` | 接受（no-op） |
+| `-dump-ast` | 打印 AST 后退出 |
+| `-v`, `--verbose` | 详细输出 |
+| `--version` / `--help` / `-dumpversion` / `-dumpmachine` / `-print-file-name=` / `-print-search-dirs` | GCC 兼容查询 |
+
+### 2.2 优化与调试
+
+| 选项 | 含义 |
+|------|------|
+| `-O0` / `-O1` / `-O2` / `-O3` / `-Os` | 优化级别（默认 O0，Os 合并到 O2） |
+| `-g0` / `-g1` / `-g2` / `-g3` | DWARF 调试等级（默认 0，-g 等价 -g2） |
+| `-flto` | 启用 LTO（per-function sections + `.dcc.lto` 摘要） |
+| `-ffunction-sections` / `-fno-function-sections` | 每函数独立 `.text.<name>` 节 |
+| `-fno-omit-frame-pointer` / `-fomit-frame-pointer` | 帧指针开关 |
+| `-mno-red-zone` | 关闭 128 字节红区（内核必需） |
+| `-mno-sse` / `-mno-sse2` | 关闭 SSE 浮点（E0300 与浮点 TU 冲突） |
+| `-D <name>[=<val>]` | 预定义宏 |
+| `-I <dir>` | 头文件搜索目录 |
+| `-isystem <dir>` | 系统头搜索目录 |
+| `-include <file>` | 强制包含 |
+| `-MD` / `-MMD` | 生成 `.d` 依赖文件 |
+| `-MF <file>` / `-MT <tgt>` / `-MQ <tgt>` / `-MP` | 依赖文件参数 |
+| `-Wp,<opts>` | 预处理器参数透传 |
+| `-Wa,<opts>` | 汇编器参数透传 |
+| `-Wl,<opts>` | 链接器参数透传（无 `-fuse-ld` 时走 host） |
+| `-fpch-create=<f>` / `-fpch-include=<f>` / `-fpch-include-only=<f>` | 预编译头（M19） |
+| `-ftrapv` / `-fbounds-check` / `-fbounds-safety` | 整数溢出 trap / 数组边界检查（M15） |
+| `-Wint-conversion` / `-Wint-truncation` | 严格整数类型检查（M15） |
+| `-W` 其它 | 接受但 no-op |
+
+### 2.3 链接器 / 内置链接
+
+| 选项 | 含义 |
+|------|------|
+| `-pie` / `-shared` / `-fpie` / `-fpic` / `-fPIE` / `-fPIC` | 输出 ET_DYN（PIE / 共享库） |
+| `-fbuiltin-linker` / `-fno-builtin-linker` | 强制走内置链接器 |
+| `-fuse-ld=<name>` | `dcc` / `gold` / `lld` / `bfd`（`DCC_FUSE_LD` 覆盖） |
+| `-z relro` / `-z now` / `-z lazy` / `-z execstack` / `-z noexecstack` / `-z max-page-size=N` / `-z pack-relative-relocs` | GNU ld 兼容 |
+| `-rpath` / `-rpath-link` / `-runpath` | DT_RPATH / DT_RUNPATH |
+| `-Wl,-soname=` / `-Wl,--exclude-libs=` / `-Wl,--build-id=sha1\|uuid\|md5\|none` / `-Wl,--no-undefined-version` | ELF 扩展 |
+| `-Wl,--gdb-index` / `-Wl,--compress-debug-sections=zlib\|zstd` | 调试节 |
+| `-Wl,-u <sym>` / `-u <sym>` | gc-sections 根符号 |
+| `-fno-semantic-interposition` / `-fsemantic-interposition` | LTO 插入语义 |
+| `-flto-partition=N` | 接受但仅单分区 |
+| `-e <sym>` | 自定义 entry |
+| `-l<lib>` / `-L<dir>` | 链接库搜索 |
+| `--sysroot=<path>` / `-Wl,--sysroot=` | musl 交叉 sysroot（M25） |
+| `-static` / `-nostdinc` / `-nostdlib` / `-nodefaultlibs` / `-fno-pic` / `-fno-stack-protector` / `-fno-strict-aliasing` / `-fno-common` 等 | 接受（常用于内核 makefile） |
+
+### 2.4 诊断输出
+
+| 选项 | 含义 |
+|------|------|
+| `-fdiagnostics-color=always\|never\|auto` | ANSI 颜色（默认 auto） |
+| `-fdiagnostics-format=github\|clang\|msvc\|vi\|sarif` | 输出风格（默认 github） |
+| `-fdiagnostics-show-template-tree` | C++ 模板树展开（C 端 no-op） |
+| `--bootstrap-compare=<ref.o>` | 自举回归：byte / struct / semantic 三层对比（M25） |
+
+### 2.5 Sanitizer（`-fsanitize=` 子集，详细码表见 `docs/diagnostics.md` §3）
+
+| 取值 | 状态 |
+|------|------|
+| `address` / `kernel-address` | KASAN 桩（TU init + load/store 通道） |
+| `hwaddress` | HWASAN 桩（共享 KASAN 路径，ARM MTE 未做） |
+| `undefined` | UBSAN 桩（div / shift / 有符号 overflow / null deref / float cast / VLA bound） |
+| `thread` / `kernel-thread` / `kernel-kcsan` | KCSAN 桩（每函数 entry，专用 `__kcsan_check_access`） |
+| `fuzzer` | KCOV + cmp/switch 追踪 |
+| `-fsanitize-coverage` | KCOV 边覆盖（独立开关） |
+| `no_sanitize("address"/"undefined"/"thread"/"all")` 属性 | 通道级关闭 |
+
+## 3. 语言支持
+
+### 3.1 C
+
+默认 `-std=gnu23`，与 GCC 15 一致。
+
+| 标准 | 状态 | 覆盖 |
 |------|------|------|
-| M0 | 最小 hello world | 已完成 |
-| M1 | C 子集 + 控制流 | 已完成 |
-| M2 | struct/union/enum + 指针/数组 | 已完成 |
-| M3 | 全局类型注册表 | 已完成 |
-| M4 | 预处理 + builtin | 已完成 |
-| M5 | 自举 (dcc 编 dcc) | 未开始 |
-| M6 | Linux 内核 benchmark | 进行中（窄目标已通过，全树待首跑） |
-| M7 | ARM64 + RISC-V | 进行中（aarch64 typed IR hello 已通） |
-| M8 | C++ 核心特性 | 已完成（命名空间 / 运算符 / 继承 / vtable / RTTI / 异常 / lambda / 模板） |
-| M9 | 精准错误诊断 | 已完成 |
-| M10+ | C++ 高级特性 | 已完成（SFINAE / partial spec / 完整 concepts / 协程 / module 分区 / operator-> / dynamic_cast 跨虚继承 / 构造委托 / 成员函数指针 / __cxa_guard_ / initializer_list） |
-<!-- -->
-
-## 能力总表 — 按 Linux 内核需求优先级排序
-
-### 一、基础设施
-
-| <nobr>优先级</nobr> | <nobr>模块</nobr> | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| — | 前端 | 词法分析 | 已实现 | 完整 C token 集，关键字/数字/字符串/符号 |
-| — | 前端 | 语法分析 | 已实现 | 递归下降 + Pratt 表达式解析 |
-| — | 前端 | 类型系统 | 已实现 | void/char/short/int/long/long long/float/double + 指针/数组/struct/union/enum/typedef |
-| — | 前端 | 预处理器 | 已实现 | #include/#define/#if 全家族 + 函数宏 + __has_include/attribute/builtin + GCC 兼容宏 |
-| — | 前端 | 控制流 | 已实现 | if/else/while/for/do/goto/label + 三元运算符 |
-| — | 前端 | 错误诊断 | 已实现 | 行号+列号 + 源码引用 + 修复建议 + 彩色输出 |
-| — | 前端 | CLI | 已实现 | -O0~O3, -std=c89~gnu23, --target, -ffreestanding, -I, -D, -c |
-| — | 前端 | 交叉编译框架 | 已实现 | TargetTriple 解析，多架构数据布局，后端分发 |
-| — | 前端 | CI/CD | 已实现 | E2E 测试 11 项全通过 + Linux 内核编译 benchmark |
-| P0 | 后端 | 可重定位 ELF (.o) | 已实现 | ET_REL + .text/.rodata/.data/.bss/.rela.text/.symtab，gcc 链接验证通过 |
-| P0 | 后端 | 多文件编译 (-c) | 已实现 | dcc -c 输出标准 .o，符号表+重定位表完整 |
-| — | 后端 | ELF 输出 (ET_EXEC) | 已实现 | 手写 ELF64 可直接执行 |
-| — | 后端 | 字符串池 | 已实现 | .rodata 去重 + RIP-relative 寻址 |
-<!-- -->
-
-### 二、整数运算
-
-| 优先级 | 模块 | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| — | 前端 | 整数算术 | 已实现 | 加减乘除 (+-*/)、取模 (%) |
-| — | 前端 | 整数比较 | 已实现 | < <= > >= == != |
-| — | 前端 | 位运算 | 已实现 | & | ^ ~ << >> |
-| — | 前端 | 逻辑运算 | 已实现 | ! && || 短路求值，返回 0 或 1 |
-| — | 前端 | 复合赋值 | 已实现 | += -= *= /= %= &= |= ^= <<= >>= |
-| — | 前端 | 自增自减 | 已实现 | ++ -- (前缀/后缀) |
-| — | 前端 | 整数类型转换 | 已实现 | 所有值以 64 位存储，隐式处理整数提升 |
-| — | 前端 | typedef / enum | 已实现 | 完整支持，枚举常量内联替换 |
-<!-- -->
-
-### 三、指针与地址运算
-
-| 优先级 | 模块 | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| P0 | 后端 | 指针±整数缩放 | 已实现 | ptr±n 按 sizeof(*ptr) 步进 |
-| P0 | 后端 | 指针-指针 | 已实现 | 返回元素个数 |
-| P1 | 后端 | 取地址 & | 已实现 | 获取变量/成员地址 |
-| P1 | 后端 | 解引用 * | 已实现 | 访问指针所指内存 |
-| P1 | 后端 | 指针比较 | 已实现 | < <= > >= == != 比较指针位置 |
-| P1 | 后端 | 数组下标 [] | 已实现 | 本质是指针运算语法糖 |
-| P2 | 后端 | void* 隐式转换 | 已实现 | 无类型检查，void* ↔ 任意指针隐式允许 |
-| P2 | 后端 | 指针类型强制转换 | 已实现 | 语法支持，codegen 直接传递 (指针均为 64 位地址) |
-<!-- -->
-
-### 四、浮点与复数运算
-
-| 优先级 | 模块 | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| P3 | 后端 | float 算术/比较 | 已实现 | 单精度 IEEE 754，SSE 指令 (addss/subss/mulss/divss) |
-| P3 | 后端 | double 算术/比较 | 已实现 | 双精度 IEEE 754，SSE 指令 (addsd/subsd/mulsd/divsd) |
-| P3 | 后端 | long double 支持 | 已实现 | 16 字节存储，SSE 双精度运算（近似） |
-| P3 | 后端 | 浮点字面量解析 | 已实现 | 1.5f / 2.0 / 3.0L / 1.5e10 等 |
-| P3 | 后端 | 浮点类型转换 | 已实现 | cvtsi2sd/cvttsd2si/cvtss2sd/cvtsd2ss 等 SSE 指令 |
-| P3 | 后端 | 浮点数学函数 | 已支持 | 由 libm 提供，函数调用已支持 |
-| P3 | 后端 | _Complex 复数类型 | 已实现 | _Complex float/double 解析+sizeof+变量声明 |
-| P3 | 后端 | _Decimal 十进制浮点 | 已实现 | _Decimal32/64/128 解析，映射到等效 IEEE 浮点类型 |
-<!-- -->
-
-### 五、复合类型运算
-
-| 优先级 | 模块 | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| P0 | 后端 | struct 成员访问 (.和->) | 已实现 | codegen 支持基址+偏移寻址，支持.和->操作符 |
-| P0 | 后端 | switch/case/default | 已实现 | 比较链实现，支持default分支 |
-| P1 | 后端 | struct 整体赋值 | 已实现 | memcpy 整体拷贝 + 成员级赋值 |
-| P1 | 后端 | 指定初始化器 | 已实现 | struct foo f = { .bar = 1 }; 支持字段和数组指定 |
-| P1 | 前端 | 聚合类型初始化 | 已实现 | 花括号初始化列表 = { ... } 支持嵌套 |
-| P1 | 后端 | 全局变量字符串初始化 | 已实现 | char s[] = "hello" 支持 |
-| P2 | 后端 | 复合字面量 | 已实现 | (struct foo){1, 2} 支持 |
-| P2 | 后端 | struct 传参/返回值 | 已实现 | SysV ABI 寄存器拆分传参，<=16B rax[:rdx] 返回 |
-| P2 | 后端 | union 成员访问 | 已实现 | codegen 同 struct，偏移均为 0 |
-| P2 | 后端 | 数组初始化 | 已实现 | int a[] = {1,2,3}; 支持 |
-| P2 | 后端 | struct 初始化器 | 已实现 | struct 聚合初始化支持 |
-| P2 | 后端 | 枚举比较/赋值 | 已实现 | 本质是整数运算 |
-<!-- -->
-
-### 六、GCC 扩展类型
-
-| 优先级 | 模块 | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| P2 | 后端 | 位域 bitfields | 已实现 | 位偏移计算 + 掩码移位 + 有符号扩展 + 跨容器边界 |
-| P2 | 后端 | 柔性数组成员 | 已实现 | sizeof 不贡献 + 偏移紧跟前一字段 |
-| P3 | 后端 | 向量类型 (SIMD) | 已实现 | 标量逐元素 +/-/*；全局 `{…}` init；非 Ident rvalue |
-| P3 | 后端 | 定点数类型 | 已实现 | _Fract(1.31) / _Accum(16.16) 复用整数路径 |
-| P3 | 后端 | _Atomic 原子操作 | 已实现 | lock xadd / cmpxchg 循环 / lock xchg |
-| P3 | 后端 | 原子内存序 | 已实现 | __ATOMIC_* 宏 + seq_cst=mfence |
-<!-- -->
-
-### 七、编译期运算
-
-| <nobr>优先级</nobr> | <nobr>模块</nobr> | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| P1 | 后端 | __builtin__ 语义 | 已实现 | __builtin_expect/constant_p/memcpy/memset/abs/trap 等 codegen，__has_builtin 查询 |
-| P1 | 后端 | __attribute__ 语义 | 已实现 | packed/aligned/noreturn/unused 等解析器静默剥离，__has_attribute 查询 |
-| P2 | 后端 | sizeof(type) | 已实现 | 编译期返回类型大小 |
-| P2 | 后端 | sizeof(expr) | 已实现 | 计算实际表达式类型大小 |
-| P2 | 后端 | _Alignof 对齐查询 | 已实现 | C11 _Alignof(type)/_Alignof(expr) 返回对齐值 |
-| P3 | 后端 | typeof 运算符 | 已实现 | GNU 扩展 typeof(expr/type) 推导类型，内核广泛使用 |
-| P3 | 后端 | __builtin_constant_p | 已实现 | parser/opt/codegen 共享 `const_eval::is_constant` |
-| P3 | 后端 | 常量表达式折叠 | 部分实现 | 预处理器 #if 支持，编译器内部无独立优化 pass |
-| P3 | 后端 | __extension__ | 已实现 | GNU 扩展，解析器直接跳过抑制警告 |
-| P3 | 后端 | 语句表达式 ({...}) | 已实现 | GNU 扩展，块内最后表达式值作为结果 |
-<!-- -->
-
-### 八、函数与调用
-
-| 优先级 | 模块 | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| P0 | 后端 | 函数调用 (标识符) | 已实现 | call_label 直接调用，SysV ABI 寄存器传参 |
-| P1 | 后端 | 函数指针调用 | 已实现 | callee 为表达式, 间接调用 call *r11 |
-| P2 | 后端 | 逗号运算符 | 已实现 | for(i=0,j=0; ...; i++,j++) 支持 |
-| P2 | 后端 | VLA 可变长数组 | 已实现 | 动态栈分配+16字节对齐+表达式大小 |
-| P2 | 后端 | 完整类型检查 | 已实现 | char/short 隐式整数提升 (movsx/movzx) |
-<!-- -->
-
-### 九、GNU 扩展与特殊语法
-
-| 优先级 | 模块 | 功能 | 状态 | 说明 |
-|--------|------|------|------|------|
-| P1 | 后端 | 内联汇编 __asm__ | 已实现 | 约束 `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber；mini 汇编器发射指令 |
-| P1 | 后端 | 内联汇编 asm goto 输出约束 | 已实现 (M11.2) | "=r" 输出在 fall-through 路径写回，跳转路径保留旧值；与 GCC 语义一致 |
-| P2 | 后端 | computed goto 跨函数 | 已实现 (M11.2) | `&&outer_label` 经 RIP-relative LEA + 间接 `jmp` 跳到目标函数入口 |
-| P2 | 后端 | 嵌套函数 static chain | 已实现 (M11.2) | `__builtin_call_with_static_chain` 按 SysV ABI 写 `r10` + GP/XMM 寄存器传参 |
-| P3 | 后端 | __builtin_offsetof | 已实现 (M11.2) | 嵌套 struct / union / 数组下标 / 匿名 struct 成员访问，编译期常量折叠 |
-| P3 | 后端 | __builtin_huge_val* / __builtin_nan* | 已实现 (M11.2) | IEEE 754 位模式 rodata 加载：double 0x7FF0000000000000 / float 0x7F800000 / long double 0x7FFF8000000000000000；NaN 走 qNaN 编码 |
-| P3 | 后端 | __builtin_isnan/isinf/finite/signbit/fpclassify | 已实现 (M11.2) | 对 NaN/Inf 位模式正确判定；signbit 走 `movmskpd` 取符号位；fpclassify 按 NaN→Inf→subnormal→zero→normal 优先级链返回 |
-| P3 | 后端 | 向量类型运算 | 已实现 | 标量逐元素加减乘，不用 XMM 寄存器 |
-| P3 | 后端 | 定点数运算 | 已实现 | _Fract/_Accum 加减，复用整数 codegen |
-| P3 | 后端 | _Atomic / __atomic_* / __c11_atomic_* | 已实现 (M11.2) | C 前端接通 `_Atomic` 类型 + `lock xadd` / `cmpxchg` 循环 / `lock xchg`；`__atomic_*` 内建函数与 `__c11_atomic_*` 路径对齐 GCC |
-<!-- -->
-
-### 十、C++ 专属
-
-DCC 在 M7 阶段引入 C++ 前端（`src/cpp/`），M8 阶段完成大部分核心 C++
-特性（命名空间 / 运算符 / 继承 / vtable / RTTI / 异常 / lambda / 模板），
-通过 Itanium ABI 名字修饰 + C 风格降级复用现有 C 后端。`class` /
-ctor / dtor / 成员函数 / 成员变量 / `this->x` / `::` / new / delete /
-引用（→指针）可降级到 C 字符串并经 dcc 编译，详细映射见
-`docs/architecture.md` 的 C++ 前端 M7+M8 章节。
-
-**M7 已实现**：
-
-- `class` / 成员变量 → struct 字段
-- ctor / dtor（声明 + 定义，含 ctor 初始化列表 `: member(args)`）
-- 成员函数（隐式 this 形参 + Itanium 修饰）
-- `this->member` 访问
-- `::` 作用域解析
-- `new T(...)` / `delete p`（降级到 `_Znwm` / `_ZdlPv`）
-- `T&` 引用降级为 `T*`
-- 基础 Itanium ABI 名字修饰（成员函数 / ctor / dtor / 指针 / 引用）
-
-**M8 新增**（完整实现以下模块）：
-
-- **命名空间**：`namespace foo {}` / `using namespace bar` / `::name`
-  扁平化为前缀化标识符（`std::vector` → `struct std_vector`）。
-- **运算符重载**（除 new/delete 外）：`operator+` / `operator()` /
-  `operator T` / `operator->` / `operator[]` 等 → Itanium `pl`/`mi`/
-  `ml`/`dv`/`cl`/`ix` 等编码符号。
-- **继承 / 虚函数 / vtable**：`class D : public B {}` → `struct D {
-  struct B __base_B; void* __vptr; }` + `_ZTV<D>` vtable 符号 +
-  `_ZTI<D>` typeinfo 符号；`virtual void f() override {}` 正确分派。
-- **多继承 / 钻石继承**：`class C : public A, public B {}` 嵌入多个
-  基类子结构；虚基类用指针 (`__vb_X`) 表示。
-- **RTTI**：`typeid(e)` / `dynamic_cast<T*>(e)` /
-  `static_cast<T>(e)` / `const_cast<T>(e)` /
-  `reinterpret_cast<T>(e)` 全部解析 + 降级为相应 C 表达式。
-- **异常**：`try { ... } catch (T& e) { ... }` / `throw e` → 降级到
-  `__cxa_try` / `__cxa_allocate_exception` / `__cxa_throw` 调用
-  （Itanium zero-cost 异常 ABI）。
-- **Lambda 表达式**：`[](int x) { return x; }` → 匿名 `struct
-  __lambda_N` 闭包类型 + `_ZN__lambda_NclERKS_` `operator()` 函数。
-- **constexpr / consteval**：关键字识别（占位）。
-- **模板与模板元编程**：`template <typename T>` 语法 + 函数模板
-  / 类模板 / 实例化（简化：单态化占位）。
-- **std::complex / std::atomic 等标准库组件**：依赖模板 + 运算符
-  即可降级（最低限度）。
-
-**M8 仍不支持**（`docs/missing_features.md` 有详细状态表）：
-
-- 模板偏特化 / SFINAE / concepts
-- coroutines / modules
-
-**M9 新增**（CLI 集成 + 降级完善 + C++20 占位）：
-
-- **CLI 集成**：`dcc -x c++ foo.cpp` / `dcc foo.cpp`（按 `.cpp`/`.cc`/
-  `.cxx` 扩展名自动识别 C++ 模式）；`dcc -dump-ast` / `dcc -fsyntax-only`
-  调试模式。
-- **局部类变量 + 构造初始化列表**：`Counter c;` → `struct Counter c;
-  _ZN7CounterC1Ev(&c);`；`Foo() : x_(0), y_(1) {}` → 降级为
-  `((struct Foo*)this)->x_ = 0; ((struct Foo*)this)->y_ = 1;`。
-- **方法调用改写**：`obj.method(args)` 改写为 Itanium 修饰的 C 函数
-  `_ZN<Cls><Len><method>E<args>(&obj, args)`。
-- **隐式 this 注入**：类方法体内未限定成员访问 `n_` 自动改写为 `this->n_`
-  （基于 `current_class` + `class_fields`），不再要求显式 `this->`。
-- **C 端 main trampoline**：顶层 `int main() {}` 末尾追加
-  `int main() { return _ZN4mainEv(); }` 以让 libc 启动器找到 main。
-- **C++20 占位降级**：`module` / `import` / `export` / `concept` /
-  `requires` / `co_await` / `co_yield` / `co_return` 全部降级为 no-op
-  注释。
-- **C 关键字 / 复合操作符词法补全**：`int` / `return` / `if` / `while` 等
-  不再被误为 `Ident`；`->` / `->*` / `++` / `--` / `<<` / `<<=` / `>>` /
-  `>>=` / `==` / `!=` / `<=` / `>=` / `&&` / `||` / `*=` / `/=` / `%=` /
-  `^=` / `|=` / `&=` / `...` 完整支持。
-- **Windows 兼容**：`stddef.h` / `stdint.h` 仅在用到 `new` / `delete` /
-  `throw` / `try` / `typeid` 时引入；否则用 `typedef unsigned long size_t;`
-  替代。
-- **DCC_CPP_KEEP_TMP**：环境变量；非空时把降级后的 C 文件写到指定路径。
-
-**M9 端到端验证**（远端 Linux 实测 `exit=0`）：
-
-```bash
-dcc -c examples/m9_cpp_simple.cpp -o m9.o    # 1 个 class + 构造 + 成员函数
-gcc m9.o -o m9 && ./m9                       # exit=0
-dcc -c examples/m9_cpp_multi.cpp -o m9m.o    # 多类 + 隐式 this
-gcc m9m.o -o m9m && ./m9m                    # exit=0
-```
-
-**M9 仍不支持**：
-
-- SFINAE / partial specialization / 完整 concept 求值
-- 协程挂起恢复 / module 分区
-- 完整 GCC cc1/cc1plus bootstrap（远端可用磁盘 2.5G 不足，且 dcc C++
-  标准库支持度仍需扩展）
-
-**M10+ 新增**（C++ 高级特性降级，详见 `src/cpp/m10.rs`）：
-
-- **SFINAE**（substitution failure is not an error）：
-  `SfinaeCtx` 记录类型形参→实参绑定；`try_substitute` 替换失败时保留
-  原 ident，模板实例化阶段跳过该候选。
-- **Partial specialization**：
-  `template <typename T> class Foo<T*> {}` 解析为 `PartialSpec`；
-  `pattern_matches` 支持 `T*` / `T&` / `const T` / 精确匹配。
-- **完整 concept 求值**（`requires { ... }`）：
-  解析 `sizeof(T) <= N` / `same_as<T, U>` / `derived_from<T, Base>` /
-  `T::value` / 表达式约束；`Concept::evaluate(&SfinaeCtx)` 替换形参后
-  返回 bool。
-- **协程挂起恢复**（C++20）：
-  `co_await` / `co_yield` 降级为 `static int __coro_state` 状态机驱动；
-  `co_return` 降级为 `return`。
-- **Module 分区**：
-  `module foo:part1;` / `export module foo:part1;` 解析为
-  `Module { name, partition: Some("part1"), is_export }`。
-- **operator-> 重载链**：
-  类型名含 `Ptr` / `Wrapper` / `Iter` 的局部变量在 `->` 访问时识别
-  为可走 operator-> 链。
-- **RTTI 完整 dynamic_cast 跨虚继承**：
-  `dynamic_cast<T*>(e)` 降级为
-  `((T*)__dynamic_cast((void*)(e), 0, 0, -1))`；Itanium C++ ABI:
-  通过 vtable RTTI 查找 `_ZTV<T>` 偏移。
-- **构造委托 / 继承链 ctor**：
-  `using Base::Base;` 解析为 `InheritingCtor { class, base }`；
-  `CtorExpander::emit_inheriting` 生成 wrapper 转发到 Base 构造。
-- **成员函数指针** `&Class::method`：
-  解析为 `MemberPtr { class, name }`；降级为
-  `&_member_fn_<Class>_<method>` 形式。
-- **C++ ABI 线程安全 init guard** `__cxa_guard_*`：
-  静态局部变量 `static T x = init;` 触发
-  `_cxa_guard_acquire` / `_cxa_guard_release` 调用；状态机
-  未初始化(0) → 初始化中(1) → 已初始化(2)。
-- **`std::initializer_list`** `{1, 2, 3}`：
-  解析为 `InitList` / `TypedInitList`；降级为复合字面量
-  `((int[]){1, 2, 3})` 形式。
-
-完整 GCC bootstrap 仍部分受阻：M9 已解锁 dcc++ 端到端，M10+ 已实现
-SFINAE / partial specialization / 完整 concept 求值 / 协程 / module
-分区；cc1/cc1plus 仍受更复杂 C++ 库 + 远端磁盘 2.5G 阻碍；详见
-`docs/missing_features.md`。
-
-### Linux 内核编译硬性门槛
-
-```
-必须全部满足才能开始真正的内核编译:
-  ☑ 可重定位 ELF (.o 输出)     ← 已完成: ET_REL + 符号表 + 重定位，gcc 链接通过
-  ☑ 多文件编译 (-c)            ← 已完成: dcc -c 输出标准 .o
-  ☑ 指针运算缩放               ← 已完成: ptr±n 按 sizeof(*ptr) 缩放
-  ☑ 取地址 & / 解引用 *        ← 已完成: 基本指针操作可用
-  ☑ struct 成员读写            ← 已完成: codegen 支持基址+偏移寻址
-  ☑ switch/case                ← 已完成: 比较链实现，支持 default 分支
-  ☑ 指定初始化器               ← 已完成: .field = expr 语法
-  ☑ 位域/柔性数组/原子/SIMD/定点数 ← 已完成: 6 大后端模块全部实现
-  ☑ __builtin_expect/constant_p/memcpy ← 已完成: codegen 层内建函数处理
-  ☑ __attribute__ 语义         ← 已完成: packed/aligned/noreturn/unused 解析+剥离
-  ☑ sizeof(expr)/_Alignof/typeof/__extension__/语句表达式 ← 已完成
-  ☑ __asm__ 内联汇编透传       ← 已完成: no-op 透传，支持 volatile/const
-  ☑ 函数指针                   ← 已完成: 间接调用 call *r11
-  ☑ struct 整体传参/返回       ← 已完成: SysV ABI 寄存器拆分 (<=16B)
-  ☑ long double 16字节存储    ← 已完成: 16字节对齐 + SSE 双精度运算
-  ☑ _Complex/_Decimal 类型    ← 已完成: 解析+sizeof+变量声明
-```
-
-> **注**: `kernel-bench.yml` 是编译性能基准测试（测量编译速度），不是真正编译内核。
-
-## 哲学 (suckless)
-
-> "能用 50 行代码解决的不写 200 行。"
-
-每行代码必须值回它的存在成本。参考 dwm/suckless 风格:
-- 零冗余文件 IO
-- 不引入不必要的抽象层
-- AST 即 IR，不做多余的中间表示转换
-- 直接 emit 机器码字节，不依赖外部汇编器/链接器
-
-## 构建
-
-```bash
-cargo build --release
-./target/release/dcc examples/hello.c
-chmod +x a.out && ./a.out
-echo $?   # 期望 42
-```
-
-## 使用
-
-```bash
-# 基础编译
-dcc input.c -o output
-
-# 生成可重定位目标文件 (.o)
-dcc -c input.c -o input.o
-
-# 多文件链接 (通过 gcc / dcc -r / dcc -fbuiltin-linker)
-dcc -c a.c -o a.o
-dcc -c b.c -o b.o
-gcc a.o b.o -o program
-# 或用 dcc 自带的多 TU 链接器：
-dcc -fbuiltin-linker a.o b.o -o program
-# 或链接 PIE / .so：
-dcc -fbuiltin-linker -pie a.o b.o -o program-pie
-dcc -fbuiltin-linker -shared -Wl,-soname,libfoo.so a.o b.o -o libfoo.so
-
-# LTO 可重定位链接（需 Linux ld/objcopy）
-dcc -flto -c a.c -o a.o
-dcc -flto -c b.c -o b.o
-dcc -r -flto -o merged.o a.o b.o
-
-# 指定标准
-dcc -std=gnu23 input.c
-dcc -std=c11 input.c
-
-# 交叉编译
-dcc --target aarch64-linux-gnu input.c
-dcc --target riscv64-linux-gnu input.c
-
-# 仅 Triple 解析 (parse-only, 无后端):
-#   --target= 字符串解析通过,Target::resolve() 给出几何参数,
-#   codegen::emit() 会 panic 并提示 "parse-only"。
-# 适用于 mips / mips64 / arm / armv7。
-
-# C++ 编译 (M9, 端到端支持 class / ctor / 成员函数 / 方法调用改写)
-dcc -x c++ examples/m9_cpp_simple.cpp -o m9.o
-gcc m9.o -o m9 && ./m9     # dcc 输出 .o, 用系统 gcc 链接
-# 或 .cpp/.cc/.cxx 扩展名自动识别
-dcc -c examples/m9_cpp_multi.cpp -o m9.o
-# 调试降级: DCC_CPP_KEEP_TMP 把 C 输出写到指定路径
-DCC_CPP_KEEP_TMP=/tmp/out.c dcc -x c++ foo.cpp -o foo.o
-# C++ 范围: class / 构造(初始化列表) / 析构 / 成员函数 / 命名空间 /
-#           运算符重载 / 继承 / 虚函数 / vtable / typeinfo / 异常 /
-#           lambda / 模板 / 局部类变量 / 隐式 this 注入 /
-#           C++20 占位(module/import/export/concept/requires/co_await)
-# 不支持: SFINAE / partial specialization / 完整 concept 求值 /
-#         协程挂起恢复 / module 分区 / 完整 GCC cc1/cc1plus bootstrap
-dcc --target mips-linux-gnu      input.c   # parse-only
-dcc --target mips64-linux-gnuabi64 input.c # parse-only
-dcc --target arm-linux-gnueabihf input.c   # parse-only (armv7 也接受)
-
-# 独立环境 (内核编译)
-dcc -ffreestanding -nostdinc kernel.c
-
-# 预处理选项
-dcc -I./include -DDEBUG=1 -DCONFIG_X input.c
-
-# 调试
-dcc -dump-ast input.c
-dcc -v input.c
-```
-
-## 远程内核验收
-
-```bash
-bash scripts/sync_remote_build.sh          # rsync + 全量远程测试
-bash scripts/kernel_full_check.sh          # modpost / QEMU / vmlinux（非阻塞）
-BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh  # 可选构建 bzImage
-```
-
-详见 `docs/kernel_build_guide.md`。
-
-## 项目结构
-
-```
-src/
-├── main.rs          # 入口: 参数 → 配置 → driver
-├── cli.rs           # CLI 解析: GCC 兼容的命令行选项
-├── driver.rs        # 驱动: 读 → 预处理 → 解析 → codegen → 写
-├── link/            # 多 TU ELF 链接器（自研，对标 mold/lld）
-│   ├── mod.rs       # LinkConfig / OutputKind / 入口
-│   ├── object.rs    # ELF ET_REL 解析
-│   ├── resolve.rs   # 跨 TU 符号解析
-│   ├── layout.rs    # 节合并 + 虚拟地址布局
-│   ├── relocate.rs  # 重定位引擎 (PC32/PLT32/64/32/32S/GOTPCREL)
-│   ├── plt_got.rs   # PLT/GOT/.dynamic 生成
-│   ├── elf_exec.rs  # ET_EXEC 输出
-│   ├── elf_dyn.rs   # ET_DYN 输出 (PIE/.so)
-│   ├── lto_bitcode.rs # DBC 格式 IR 位码 + 跨 TU DCE
-│   └── legacy.rs    # 旧 -r 模式 (host ld -r)
-├── lto.rs           # 旧 .llvm.lto 文本摘要与 dead symbol 探测
-├── preproc.rs       # 预处理器: #include/#define/#if/宏展开
-├── tokens.rs        # 词法分析: 字符流 → token 流
-├── parser.rs        # 语法分析: token 流 → AST (递归下降 + Pratt)
-├── ast.rs           # AST 定义: Type/Expr/Stmt/Decl
-├── cpp/             # C++ 前端 M7 (降级到 C, 复用 C 后端)
-│   ├── mod.rs       # CppOptions / CppError / Display
-│   ├── lexer.rs     # C++ token 流 + CppKw 扩展
-│   ├── parser.rs    # class/ctor/dtor/this/:: 解析
-│   ├── mangle.rs    # Itanium C++ ABI 名字修饰
-│   ├── lower.rs     # C++ AST → C 字符串
-│   └── driver.rs    # compile_cpp(cpp_src, obj, dcc_bin, ...)
-├── diagnostics.rs   # 错误诊断: 精确到字符 + 源码引用 + 修复建议
-├── target.rs        # 目标平台: 数据布局/调用约定/字节序
-└── codegen/
-    ├── mod.rs       # 后端调度: 按 target 选后端
-    ├── x86_64.rs    # x86_64 代码生成: 直接 emit 字节
-    └── elf.rs       # ELF64 生成器: ET_EXEC + ET_REL
-```
-
-## CI/CD
-
-### Rust 测试（dcc-e2e workflow）
-
-每次 push/PR 自动运行 `cargo test --release`，包含:
-
-| 套件 | 数量 | 说明 |
+| C89 / C90 | ✅ | 含 K&R 函数（自动检测 `is_old_style`） |
+| C99 | ✅ | 复合字面量 / 指定初始化 / VLA / `long long` / `_Bool` / `inline` / `for` 内声明 |
+| C11 | ✅ | `_Static_assert` / `_Atomic` / 匿名 struct/union / `_Generic` / `_Thread_local` / `_Noreturn` |
+| C17 | ✅ | C11 修正版，复用 C11 路径 |
+| C23 | 🟡 部分 | `typeof` / `constexpr` / `[[attributes]]` / `_BitInt(N)` / 数字分隔符 / `#embed` / `nullptr` / `#elifdef` / `#elifndef` / `__VA_OPT__` 全部；其它按需补 |
+| GNU 扩展 | ✅ | `__int128`（`rax:rdx`）/ 语句表达式 / `__VA_ARGS__` / 嵌套函数 / computed goto / `asm goto` / `&&label` / `__attribute__` 全家族 / `__declspec` 翻译 / `_Complex` / `_Decimal` / `_Fract` / `_Accum` |
+
+### 3.2 C++
+
+C++ 走"降级到 C"路径（`src/cpp/lower.rs`），Itanium ABI 名字修饰，
+复用 C 后端 + 链接器。**不**另起 IR。
+
+| 范围 | 状态 | 覆盖 |
 |------|------|------|
-| 单元测试 | `src/` 内 `#[test]` | parser/preproc/opt/profile 等 |
-| integration | 59 项 | 成功路径语法/codegen 回归 |
-| errors | 14 项测试 / 37 snapshot | 失败路径诊断，见 [docs/diagnostics.md](docs/diagnostics.md) |
-| profile | 11 项 | 性能分析 CLI / 缺路径拒绝，见 [docs/profiling.md](docs/profiling.md) |
+| 类与对象 | ✅ | class / struct / ctor / dtor / 成员函数 / 成员变量 / `this->` / 引用→指针 |
+| 继承 | ✅ | 单 / 多 / 钻石；虚函数 + vtable（`_ZTV`）+ RTTI（`_ZTI`） |
+| 运算符 | ✅ | 命名空间 / operator / Itanium 编码（`pl`/`mi`/`dv`/...） |
+| 异常 | ✅ | `try`/`catch`/`throw` → `__cxa_*` 桩 |
+| Lambda | ✅ | 匿名 `__lambda_N` + `operator()` |
+| 模板 | 🟡 | 解析 + `PartialSpec` / SFINAE / 多参偏特化；完整单态化待补 |
+| SFINAE / concepts / coroutine | 🟡 简化 | 概念求值简化；`co_yield`/`co_await` 走 `__coro_state` 状态机 |
+| modules | 🟡 占位 | 解析接受；M19+ 实现 BMF 序列化 |
+| C++17 修饰 | ✅ | `decltype` / `auto` 真推导 / `friend` / `noexcept` / `final` / `override` / `mutable` / `volatile` 成员函数 / `explicit` / `if constexpr` / `using Base::Base` 构造委托 |
+| C++20/23 库 | ✅ | `std::filesystem` / `thread` / `mutex` / `condition_variable` / `chrono` / `expected` / `flat_map` / `regex`（子集）/ `ranges` / `views` / 多维下标 / placement new / `new T[n]` / `operator new[]` / `delete[]` |
+| GCC 兼容 | 🟡 | `obj.*ptr_to_member` / `typeid(e)` 真 RTTI / 模板实参 `T<U>` / 跨虚继承 `dynamic_cast` / `__cxa_guard_*` / `std::initializer_list` |
 
-错误 snapshot 位于 `tests/fixtures/errors/`；更新命令:
+### 3.3 内联汇编
+
+| 范围 | 状态 |
+|------|------|
+| `__asm__` / `asm` / 文件级 `asm()` | ✅ |
+| AT&T 约束全家族 | ✅ `r` / `m` / `=r` / `+m` / `&` (early-clobber) / `i` / `0..9` / 命名操作数 |
+| `asm goto` | ✅ 标签跳转真实发射（M11.2） |
+| mini-asm (x86_64) | ✅ 100+ 指令；AVX/AVX2/AVX-512(EVEX) / SSE3-SSE4.2 / AES-NI / SHA / FMA / F16C / TSX / AMX / AVX-VNNI 全部（M13） |
+| mini-asm (aarch64) | ✅ BL ±128MiB / ADR ±1MiB / HFA / sret / CCMP/CSEL / 缓存维护 / SIMD 基础 |
+| mini-asm (riscv64) | ✅ JAL ±1MiB / 压缩 C 扩展 / D 扩展 / V 扩展基础 / Zicsr 全 6 条 |
+
+### 3.4 预处理器
+
+实现：`src/preproc.rs`；缓存 V7，`~/.dcc/cache/<filehash>_<contenthash>`，
+键含宏表状态哈希（`-D_FORTIFY_SOURCE=2` 切换自动失配）。
+
+| 特性 | 状态 |
+|------|------|
+| `#include` / `#define` / `#if` 全家族 / `#elifdef` / `#elifndef` / `#endif` / `#include_next` / `#pragma once` | ✅ |
+| `#warning` / `#error` | ✅ |
+| `#pragma` 全家族 + `_Pragma` + `__pragma` + `#pragma STDC FENV_ACCESS/FP_CONTRACT/CX_LIMITED_RANGE` | ✅ |
+| `#embed` (C23) 字节数组 + `limit` / `prefix` | ✅ |
+| `__VA_ARGS__` / `__VA_OPT__` / `__has_include` / `__has_attribute` / `__has_builtin` | ✅ |
+| `__FILE__` / `__LINE__` / `__DATE__` / `__TIME__` / `__COUNTER__` | ✅（COUNTER 跨宏嵌套共享） |
+| 预定义宏 | ✅ `__linux__` / `__GNUC__` / `__amd64__` / `__x86_64` / `__USER_LABEL_PREFIX__` / `__VERSION__` / `__OPTIMIZE__` / `__PIC__` / `__PIE__` / `__code_model_small__` / `__SEG_GS` / `__SEG_FS` |
+| 增量预处理 PCH（`PchBundle` + 宏状态校验 + DCC_PCH_V1 魔数） | ✅ `-fpch-create=` / `-fpch-include=`（M19 实装） |
+
+## 4. 目标平台
+
+`Arch::has_backend()` 当前对全部 6 个 arch 返回 `true`（`src/cli.rs` §1）。
+
+| Triple | 状态 | 指针 | 字节序 | 调用约定 | ELF | 几何 |
+|--------|------|------|--------|----------|------|------|
+| `x86_64-unknown-linux-gnu` | ✅ 完整（M0） | 8 | LE | SysV | ELF64 | SSE/AVX 全家族 |
+| `aarch64-linux-gnu` | ✅ 完整（M7-M8） | 8 | LE | AAPCS64 | ELF64 | HFA / sret / TLSDESC（M25） |
+| `riscv64-linux-gnu` | ✅ 完整（M7-M8） | 8 | LE | SysV | ELF64 | D 扩展 / V 扩展基础 / Zicsr（M25） |
+| `mips-linux-gnu` | ✅ 完整（M8） | 4 | BE | O32 | ELF32 | big-endian |
+| `mips64-linux-gnuabi64` | ✅ 完整（M8） | 8 | BE | N64 | ELF64 | big-endian |
+| `arm-linux-gnueabi(hf)` | ✅ 完整（M8） | 4 | LE | AAPCS | ELF32 | `armv7` alias 接受 |
+
+变参（`va_list` / `va_arg`）支持范围：
+
+| 架构 | GP / 整数 | FP / 浮点 | 栈溢出 |
+|------|-----------|-----------|--------|
+| x86-64 SysV | ✅ 6 个 GP 保存区 | ✅ XMM0–7 保存区 | 栈溢出（>8 个）部分支持 |
+| aarch64 AAPCS64 | ✅ x0–x7 保存区（M25） | 🟠 v0–7 stub（返回 0.0） | 🔴 |
+| riscv64 SysV | ✅ a0–a7 保存区（M25） | 🟠 fa0–fa7 stub | 🔴 |
+| mips / mips64 / arm | 🟠 stub | 🟠 stub | 🔴 |
+
+TLS 模式：local-exec / TLSDESC（aarch64 4 指令序列 + 3 个 R_AARCH64_TLSDESC_*
+重定位，glibc `_dl_tlsdesc_resolve` 由 host 提供）。
+
+## 5. 代码生成
+
+### 5.1 优化遍（`src/opt.rs` + `src/ssa*.rs` + `src/loop_opt.rs`）
+
+| 级别 | 启用 | 包含 |
+|------|------|------|
+| `-O0` | 默认 | `always_inline` 强制内联单返回体 |
+| `-O1` | 显式 | 常量折叠 + 内联 |
+| `-O2` | 默认推荐 | GVN / CSE / 拷贝传播 / LICM / 分支折叠（保留 goto 目标）/ 死代码消除（`cross_function_dce`） / 强度削减 / 归纳变量优化 / 别名分析（Steensgaard） |
+| `-O3` | 显式 | 循环展开（trip≤4）+ 向量元素循环向量化（标量 SSE/GP）+ 指令调度（BB 内 list scheduling）+ TCO / 循环分块 / 循环交换 / 稀疏条件常量传播 / 函数属性传播（hot/cold） |
+| `-O2+` | 默认 | 函数级并行 codegen（`std::thread` 池，`DCC_NO_PARALLEL=1` 关闭） |
+
+### 5.2 LTO（`src/link/lto_bitcode.rs`）
+
+| 项 | 状态 |
+|----|------|
+| 自有 `.dcc.lto` 段 | ✅ 魔数 `DBC\0` + version 1 |
+| 跨 TU DCE | ✅ |
+| 跨函数内联 | ✅ cost model = 语句 ≤4 ∧ 表达式 ≤4 ∧ 无递归 |
+| 跨 TU 常量传播 | ✅ |
+| 全局 DAE | ✅ |
+| `LtoConfig` 配置化 | ✅ |
+| Pass 7 `no_semantic_interposition` | ✅ |
+| IPA-SRA / PGO 集成 | 🔴 |
+
+### 5.3 链接器（`src/link/`）
+
+| 模块 | 能力 |
+|------|------|
+| `object.rs` / `resolve.rs` | ET_REL 解析；跨 TU 强 > 弱 > undef；implicit undef 白名单（`wcs*`/`wmem*`/`sigaction`/`signal`/`cproj`/`cabs`/`carg`） |
+| `layout.rs` | 同名节合并 + R+X / R+W 2 段 |
+| `relocate.rs` | x86-64 13 / AArch64 22 / RISC-V 15 / TLS / GOT64 重定位 |
+| `plt_got.rs` | `.plt.sec` / `.plt.got` / `.dynamic` / `.dynsym` |
+| `elf_exec.rs` / `elf_dyn.rs` | 5 架构 ET_EXEC / ET_DYN（PIE/Shared）+ PT_INTERP |
+| `gnu_hash.rs` | `.gnu.hash` TIE（bloom filter + buckets） |
+| `eh_frame.rs` / `build_id.rs` | `.eh_frame_hdr` 二分表 + `.note.gnu.build-id`（sha1/md5/uuid） |
+| `ifunc.rs` + `target_clones.rs` | `R_X86_64_IRELATIVE` + 多版本 IFUNC |
+| `symver.rs` | `VERDEF` / `VERNEED` + `--no-undefined-version` |
+| `link_opts.rs` | `-z relro/now/lazy/execstack/noexecstack/max-page-size=N/pack-relative-relocs`、RPATH/RUNPATH、`-fuse-ld=`、`-fno-semantic-interposition`、SHF_GNU_RETAIN |
+| `fini_dispatch.rs` | `__dso_handle` / `__cxa_atexit` / `atexit` / `.fini_array` 按 priority |
+| `legacy.rs` | `-r` 内置 `link_relocatable_builtin` 优先；旧路径 `link_relocatable_legacy`（host `ld -r --gc-sections`） |
+| 调试节压缩 | zlib + zstd（`ELFCOMPRESS_ZSTD` 头，level 3） |
+
+## 6. 诊断与调试
+
+### 6.1 错误码
+
+详细码表见 [`docs/diagnostics.md`](./docs/diagnostics.md)：
+E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
+（Preprocessor；E0200–E0204 与 Link 路径**号段重叠**）、E1001–E1010
+（Typed IR）、W0001 / W0200。Snapshot 回归：`tests/fixtures/errors/`
+共 37 个 `.stderr.snap`，版本常量 `DIAGNOSTIC_FORMAT_VERSION = 1`。
+
+### 6.2 输出格式
+
+`-fdiagnostics-format=github`（默认 GitHub 四段式）/ `clang` /
+`msvc` / `vi` / `sarif`（SARIF 2.1.0 JSON 写 stderr）。
+
+### 6.3 调试信息（`src/debug.rs`）
+
+| 项 | 状态 |
+|----|------|
+| DWARF v4 | ✅ x86_64 / aarch64 / riscv64 |
+| `.BTF` / `.eh_frame` + CFI / `.orc_unwind_ip` | ✅ x86_64（M24 setjmp FDE 含 `DW_CFA_*` ops）；其它架构 placeholder |
+| DWARF line table | ✅ M24 增强：相邻同源同行条目在 `-g1` 下自动去重 |
+| 位域 DWARF | ✅ `DW_AT_bit_size` + `DW_AT_bit_offset`（M24） |
+| `-gsplit-dwarf` / `.gdb_index` | ✅ `.dwo` 文件生成 + 最小 `.gdb_index` 占位（GDB 可识别） |
+
+### 6.4 性能分析（`src/profile/`，详见 `docs/profiling.md`）
+
+| 子系统 | CLI | 状态 |
+|--------|------|------|
+| PGO (frontend) | `-fprofile-generate[=dir]` / `-fprofile-use=file` | ✅ `.profraw` 二进制；driver/codegen 接入 `__dcc_pgo_count_fn` |
+| PGO (instr) | `-fprofile-instr-generate` / `-fprofile-instr-use=` | ✅ stub（仅入口计数器） |
+| GCOV | `-ftest-coverage` / `-fprofile-arcs` | ✅ `.gcno` + `.gcda`（GCC gcov-9 layout 对齐，CFG checksum 拓扑敏感） |
+| AutoFDO | `-fauto-profile=` / `-fprofile-sample-use=` | ✅ text parser + bucketize；M25 接入 hot 函数下沉 `.text.hot` |
+| LBR | `-flbr-profile=` | ✅ `perf script -F brstack` 解析 + `hot_entries`；M25 接入 |
+| MemProf | `-fmemory-profile` / `-fmemory-profile-use=` | ✅ text parser + `is_cold` 启发；M25 cold 函数下沉 `.text.unlikely` |
+| 跨源权重聚合 | 任意 `-fprofile-*` 组合 | ✅ `ProfileWeights` 聚合 4 源（M25） |
+| TopdownL1 | `-ftopdownmetrics` | ✅ 四 slot 枚举 + `topdown_percentages` + Linux `perf.data` v2 读 |
+| Offloading | `-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` | 🟡 元数据 + JSON 序列化；**无 device codegen** |
+
+## 7. 内建函数
+
+实现：`src/codegen/x86_64.rs::builtin_call` / `src/const_eval.rs`。
+详细列表见 [`docs/c_standard.md` §GNU 扩展](./docs/c_standard.md)。
+
+| 类别 | 代表 |
+|------|------|
+| 变参 | `__builtin_va_list` / `__builtin_va_start` / `__builtin_va_end` / `__builtin_va_arg` / `__builtin_va_copy`（架构支持见 §4 表） |
+| 框架 / 栈 | `__builtin_frame_address` / `__builtin_return_address` / `__builtin_call_with_static_chain` |
+| 溢出 / 算术 | `__builtin_add_overflow` / `__builtin_sub_overflow` / `__builtin_mul_overflow` / `__builtin_abs` / `__builtin_labs` / `__builtin_llabs` |
+| 位 / 字节 | `__builtin_clz` / `__builtin_ctz` / `__builtin_popcount` / `__builtin_parity` / `__builtin_bswap16/32/64` |
+| 内存 | `__builtin_memcpy/memset/memmove` / `__builtin_strcpy` / `__builtin_strlen` / `__builtin_object_size`（模式 0–3；未知 `(size_t)-1`） |
+| 分支 / 控制流 | `__builtin_expect` / `__builtin_expect_with_probability`（M24 编译期折叠字面量首参）/ `__builtin_unreachable` / `__builtin_trap` / `__builtin_choose_expr` / `__builtin_types_compatible_p` / `__builtin_constant_p`（parser/opt/codegen 共享 `const_eval::is_constant`） |
+| 杂项 | `__builtin_offsetof` / `__builtin_prefetch`（no-op）/ `__builtin_apply` / `__builtin_return`（SysV 子集）/ `__builtin_huge_val` / `__builtin_nan` / `__builtin_isnan` / `__builtin_isinf` / `__builtin_finite` / `__builtin_signbit` / `__builtin_fpclassify` |
+| 编译期折叠（M15） | `__builtin_strlen` / `__builtin_abs/labs/llabs` / `__builtin_bswap16/32/64` / `__builtin_expect` / `__builtin_popcount*` — 解析阶段走 `const_eval::eval_full` 折叠为整数常量 |
+| 未知 `__builtin_*` | warning + 零值（有返回值）或 `ud2`（void），不静默链接不存在的 libc 符号 |
+
+## 8. 不支持的功能
+
+完整清单见 [`docs/unimplemented_modules.md`](./docs/unimplemented_modules.md) / [`docs/missing_features.md`](./docs/missing_features.md)。
+
+| 范围 | 缺口 | 备注 |
+|------|------|------|
+| aarch64 | NEON 浮点聚合 > 4 元素 HFA；大结构体 > 16B 嵌套返回 sret | 单层已实装 |
+| riscv64 | RVV 完整指令集；压缩指令自动 4→2 字节压缩 | 仅基础 VSETVLI/LOAD/STORE/ADD/MUL/REDUCE |
+| x86_64 | bswap 16 位操作数 | GCC 同 |
+| 链接 | LTO IPA-SRA / PGO 集成；运行时 dynamic loader (`ld.so`) | DCE/内联/常量传播已完整；`ld.so` 为设计决策 |
+| C++ | 完整模板单态化；真 BMF modules；`co_yield`/`co_await` 真挂起；concept SFINAE 联动；模板基类 / 友元；`export template` | 当前为简化 / 占位 / 不支持 |
+| 平台 | Windows MSVC（codegen SysV-like）；Darwin / Mach-O；wasm32；AVR / MSP430 / Xtensa；PowerPC；LoongArch64 | 🔴 |
+| 自举 | `dcc0 → dcc1` 起步；`dcc1 → dcc2` 验证 | 字节/语义对比基础设施 `--bootstrap-compare=` 已实装（M25） |
+
+## 9. 路线图
+
+完整版见 [`docs/roadmap.md`](./docs/roadmap.md) / [`docs/next_steps.md`](./docs/next_steps.md) / [`docs/missing_features.md`](./docs/missing_features.md)。
+
+**近期（未完成里程碑）**
+
+- **M5 自举**：`dcc0 → dcc1` 起步；需先补 std 子集。
+- **M6 Linux 内核全树首跑**：`make CC=dcc` 推进至 vmlinux + bzImage + QEMU 启动（`scripts/kernel_full_check.sh` 脚本就绪，`BUILD_BZIMAGE=1` 时非 SKIP）。
+- **M10 跨平台二进制**：`x86_64-dcc` / `aarch64-dcc` / `riscv64-dcc` 命名分发。
+
+**中期（质量门禁 / 补洞）**
+
+- vmlinux 工具链（pahole BTF / objtool check）非 SKIP 验证；QEMU 启动矩阵至少一种配置 PASS。
+- C++ 模板单态化与 concept SFINAE 联动；多平台 binary。
+- 链接器 IPA-SRA / PGO 集成；LTO `no_semantic-interposition` Pass 7 完整化。
+
+**远期（架构 / 性能）**
+
+- 自举完成 + 字节级差为 0（CI 锁定）；GCC cc1/cc1plus 全树编译（需本地 ~5G 磁盘）。
+- Offloading device codegen（OpenMP target / CUDA / HIP）；AArch64 / RISC-V profile runtime helper。
+
+## 10. 交叉编译
+
+详细见 [`docs/cross_compile.md`](./docs/cross_compile.md)。
 
 ```bash
-DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors --release
+dcc --target=aarch64-linux-gnu -o hello-arm64 hello.c
+dcc --target=x86_64-linux-musl --sysroot=/opt/musl-sysroot -o hello hello.c
+CROSS_COMPILE=aarch64-linux-gnu- make ARCH=arm64 dcc
 ```
 
-### E2E 编译运行
-每次 push/PR 另验证 example 编译运行:
-- `hello.c` → exit 42
-- `arith.c` → exit 23
-- `control.c` → exit 100
-- `call.c` → exit 42
-- `codegen_test.c` → exit 42
-- `pp_simple_test.c` → exit 42
-- `pp_attr_test.c` → exit 30
-- `call_assign_test.c` → exit 20
-- `bar_test.c` → exit 20
-- `ptr_arith_test.c` → exit 64
-- `fib.c` → exit 55
+`--target` 接受 `x86_64` / `aarch64` / `riscv64` / `mips` / `mips64` / `arm` / `armv7` 别名；
+OS 接受 `linux` / `linux-musl` / `freestanding` / `windows` / `darwin`；
+ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
+工具链命名：`<arch>-<vendor>-<os>-<abi>-dcc` 与 `…-dcc-cc` 别名。
 
-### 可重定位 ELF 测试
-- 单文件 .o 生成 + gcc 链接 → exit 0
-- 多文件 .o 生成 + gcc 链接 → exit 42
+## 11. 限制与已知问题
 
-### 内核编译 Benchmark
-仅手动触发（Actions → kernel-benchmark → Run workflow），在 GitHub Actions 上编译 Linux 内核:
-- GCC 基线对比
-- 自动生成 Markdown 性能报告
-- 支持自定义内核版本/优化级别/并行数
-
-## 技术决策 (ADR)
-
-| 决策 | 选择 | 理由 |
+| 范围 | 限制 | 跟踪 |
 |------|------|------|
-| 语言 | Rust | 内存安全 + 零成本抽象 + 现代工具链 |
-| 表达式解析 | Pratt parsing | 比递归下降更简洁，优先级驱动 |
-| 帧指针 | R13 | 释放 RBP，简化栈帧管理 |
-| ELF | 手写 | 避免依赖 ld/binutils，完全控制输出格式 |
-| 字符串存储 | .rodata 池 | 去重 + RIP-relative 寻址 |
-| 函数调用重定位 | R_X86_64_PLT32 | 兼容 gcc PIE 默认设置 |
-| 数据引用重定位 | R_X86_64_PC32 | 小代码模型下的 RIP-relative 寻址 |
-| 错误格式 | GCC 风格 | 开发者熟悉，工具链兼容 |
-<!-- -->
+| 后端 | 多数组栈变量分配有重叠 bug | unimplemented §9 follow-up（M25 wchar_libc fixture 故意单 buffer 规避） |
+| 后端 | `_Complex` 字面量 `4.0i` 与 `__real__` / `__imag__` 关键字尚未实现 | unimplemented §9 |
+| 后端 | 16 字节 struct 传值 ABI 与 glibc 不一致 | unimplemented §9（M25 complex_libc fixture 显式声明 `double cproj(double)` 规避） |
+| 后端 | `struct sigaction` / `stack_t` 布局与 glibc 不一致（信号调用 segfault） | unimplemented §9（M25 signal_libc fixture 仅验证 libc 转发层） |
+| 后端 | dcc 对未声明的外部 sanitizer 函数不写入 `.symtab`/`.strtab` | unimplemented §9（M25 集成测试用 `-S` 检查汇编） |
+| 后端 | `*p = v` 的实际 store 仍是空操作；KASAN 桩本身正确 | unimplemented §3 |
+| 后端 | ARM MTE 标签插入未做（HWASAN 共享 KASAN 路径） | unimplemented §3 |
+| 后端 | 内核定制 shadow 范围未单独分发（`-fsanitize=kernel-address`） | unimplemented §3 |
+| 后端 | 跨函数 inline 合并（KCOV）未做 | unimplemented §3 |
+| 后端 | libFuzzer 协议 / 拦截器接入未做 | unimplemented §3 |
+| 后端 | 浮点变参（v0–7 / fa0–fa7）未保存，stub 返回 0.0 | unimplemented §11 |
+| 后端 | 栈溢出变参（>8 个）未实装 | unimplemented §11 |
+| C++ | 跨多态指针动态 RTTI 仍依赖 C 后端在 vtable 中写 typeinfo 字段 | unimplemented §9 follow-up |
+| C++ | 多文件链接场景受 dcc C 后端 `__base_Base1` 字段访问 pre-existing 限制 | M25 note |
+| C++ | `obj.*ptr_to_member` 偏移常量 `__dcc_mbr_<class>_<member>` 需 runtime helper 定义 | M25 note（仅验证 dcc -c 路径） |
+| 链接 | Windows 本地无法完整验证链接路径（依赖 host `ld` / `objcopy`） | ADR-008 |
+| 测试 | 5 个 pre-existing LTO 集成测试在 origin/main 已失败，与本分支无关 | git worktree 已确认 |
 
-## License
+## 12. 引用文档
 
-Apache-2.0
+| 文档 | 简介 |
+|------|------|
+| [`docs/adr.md`](./docs/adr.md) | 8 条架构决策（Rust / AST-as-IR / 全局类型表 / gnu23 / 零 crate 依赖 / mmap / 跨平台优先 / LTO gc-sections） |
+| [`docs/architecture.md`](./docs/architecture.md) | 整体架构 + 性能优化表 + x86-64/AArch64/RISC-V 后端 + 链接器管线 + C++ 降级 + SSA/GVN + 性能分析子系统 |
+| [`docs/c_standard.md`](./docs/c_standard.md) | C89–C23 + GNU 扩展支持矩阵 + 重要选项表 + Linux 内核编译示例 |
+| [`docs/ci_guide.md`](./docs/ci_guide.md) | 推送与触发 CI + 失败处理 + e2e 失败定位 |
+| [`docs/cross_compile.md`](./docs/cross_compile.md) | 跨平台三元组 + 工具链命名 + 6 架构状态 |
+| [`docs/diagnostics.md`](./docs/diagnostics.md) | 错误码权威说明（E/W 码表 + 输出格式 + snapshot 回归 + 新增 checklist） |
+| [`docs/gcc_build_guide.md`](./docs/gcc_build_guide.md) | GCC 源码子集（libiberty / fixincludes / libdecnumber）+ libiberty 125/0/4 基线 |
+| [`docs/kernel_build_guide.md`](./docs/kernel_build_guide.md) | Linux 6.6 x86_64 编译全流程 + asm-offsets 验收 + modpost / pahole / objtool / QEMU 脚本 |
+| [`docs/missing_features.md`](./docs/missing_features.md) | Linux 6.6 缺失特性自动化证据 + 通过门禁 + 阻塞项 + libiberty + sanitizer + profiling |
+| [`docs/next_steps.md`](./docs/next_steps.md) | 20 步路线图 checklist（A 内核全树 / B 质量门禁 / C CI / D 编译器补洞 / E 性能 / F profiling） |
+| [`docs/performance.md`](./docs/performance.md) | 性能模型 + 加速来源 + 实测 + KPI |
+| [`docs/profiling.md`](./docs/profiling.md) | PGO / GCOV / AutoFDO / LBR / MemProf / TopdownL1 / Offloading 7 子系统详述 |
+| [`docs/roadmap.md`](./docs/roadmap.md) | M0–M25 里程碑 + 后端能力矩阵 + 第一性原理设计决策 |
+| [`docs/unimplemented_modules.md`](./docs/unimplemented_modules.md) | 全量未实现模块清单（codegen / linker / sanitizer / C / C++ / preproc / debug / bootstrap） |
