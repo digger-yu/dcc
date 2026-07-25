@@ -425,7 +425,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | `static` 类成员 | 🟢 (M23) 解析为 C `static` 字段 + Itanium ABI mangling (`_ZN<class><name>E`) |
 | `virtual` 继承 | 部分支持（见 `M10+`），复杂虚基类不验证 |
 | `placement new` | 降级为裸 `malloc` 替身 |
-| `operator new[]` / `operator delete[]` | 降级为 `_Znwm` / `_ZdlPv` 替身 |
+| `operator new[]` / `operator delete[]` | 🟢 (M25) lower 走 mangle_op_new_array() / mangle_op_delete_array() 命名常量, 即 Itanium C++ ABI `_Znam` / `_ZdaPv` 数组分配/释放符号; 符号由 dcc 运行时 dccpp_runtime.c 声明 (extern) 并最终转发到 libstdc++ / libc malloc |
 | `new T[n]` 数组分配 | 不识别 `[]`，按 `new T` 处理 |
 
 🔴 完全没有：
@@ -712,6 +712,22 @@ M19 关键改动:
 >   嵌套 >> 实参) + 集成测试 `p2_3_template_arg_syntax`.
 > - Section 6 表格 `模板实例化` 行 `parse_mangle_type 不识别 <`
 >   → 🟢 (M25). 真实单态化仍为 M10+ 简化版 (Section 6 follow-up).
+
+> **M25 增量（2026-07-24）— Section 6 P2.4 operator new[] / delete[] mangler**：
+> - `src/cpp/mangle.rs` 新增 4 个命名常量 helper:
+>   `mangle_op_new` (`_Znwm`) / `mangle_op_new_array` (`_Znam`) /
+>   `mangle_op_delete` (`_ZdlPv`) / `mangle_op_delete_array` (`_ZdaPv`).
+>   原 lower 阶段硬编码 `"_Znwm"` / `"_Znam"` / `"_ZdlPv"` / `"_ZdaPv"`
+>   字符串全部替换为 helper 调用, 避免 typo.
+> - 新增单元测试 `mangle_op_new_constants` 验证 4 个常量
+>   名字拼写符合 Itanium C++ ABI 数组分配/释放符号.
+> - 新增 fixture `tests/fixtures/p2_4_new_arr_mangler.cpp`
+>   (覆盖 `Item* arr = new Item[4]; ... delete[] arr;`) +
+>   集成测试 `p2_4_new_arr_mangler`.
+> - Section 6 表格 `operator new[] / operator delete[]` 行
+>   `_Znwm / _ZdlPv 替身` → 🟢 (M25). 符号转发走
+>   dccpp_runtime.c extern 声明, 最终在链接时由 libstdc++
+>   / libc malloc 解析.
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个

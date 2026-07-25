@@ -3890,3 +3890,20 @@ fn p2_3_template_arg_syntax() {
     );
 }
 
+/// P2.4: operator new[] / operator delete[] 走 _Znam / _ZdaPv
+/// (Section 6). 验证 dcc lower 阶段对 `new T[n]` 和 `delete[] p`
+/// 调用 mangle_op_new_array() / mangle_op_delete_array() 命名常量,
+/// 即 Itanium C++ ABI 数组分配/释放符号 _Znam / _ZdaPv.
+#[test]
+#[cfg(unix)]
+fn p2_4_new_arr_mangler() {
+    let src = include_str!("fixtures/p2_4_new_arr_mangler.cpp");
+    let (out, obj) = run_cpp_object_test("p2-4-new-arr-mangler", src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        out.status.success(),
+        "p2_4_new_arr_mangler compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+

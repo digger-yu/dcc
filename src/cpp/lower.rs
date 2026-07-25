@@ -17,8 +17,9 @@
 
 use crate::cpp::mangle::{
     MangleType, NestedName, mangle_ctor, mangle_dtor, mangle_global_function,
-    mangle_member_function, mangle_operator_member, mangle_operator_global,
-    mangle_typeinfo, mangle_vtable, Operator,
+    mangle_member_function, mangle_op_delete, mangle_op_delete_array,
+    mangle_op_new, mangle_op_new_array, mangle_operator_member,
+    mangle_operator_global, mangle_typeinfo, mangle_vtable, Operator,
 };
 use crate::cpp::parser::*;
 
@@ -1472,11 +1473,14 @@ impl Lower {
                 self.out.push(')');
             }
             CppExpr::New(ty, args) => {
-                self.out.push_str(&format!("((struct {}*)_Znwm(sizeof(struct {})))", ty, ty));
+                // P2.4: 走 mangle_op_new / mangle_op_new_array /
+                // mangle_op_delete / mangle_op_delete_array 命名常量,
+                // 不再硬编码 "_Znwm" / "_Znam" / "_ZdlPv" / "_ZdaPv".
+                self.out.push_str(&format!("((struct {}*){}(sizeof(struct {})))", ty, mangle_op_new(), ty));
                 if !args.is_empty() {
                     let n = NestedName::from_dotted(vec![ty.clone()]);
                     let m = mangle_ctor(&n, &[MangleType::Pointer(Box::new(MangleType::Void))], 1);
-                    self.out.push_str(&format!("; {}((struct {}*)_Znwm(sizeof(struct {}))", m, ty, ty));
+                    self.out.push_str(&format!("; {}((struct {}){}(sizeof(struct {}))", m, ty, mangle_op_new(), ty));
                     for a in args { self.out.push_str(", "); self.emit_expr(a); }
                     self.out.push(')');
                 }
@@ -1491,7 +1495,7 @@ impl Lower {
                     "int" | "char" | "long" | "short" | "float"
                     | "double" | "void" | "bool" | "unsigned" | "int*");
                 let c_ty = if is_builtin { ty.clone() } else { format!("struct {}", ty) };
-                self.out.push_str(&format!("(({}*)_Znam(sizeof({}) * (", c_ty, c_ty));
+                self.out.push_str(&format!("(({}*){}(sizeof({}) * (", c_ty, mangle_op_new_array(), c_ty));
                 self.emit_expr(count);
                 self.out.push_str(")))");
             }
@@ -1515,13 +1519,13 @@ impl Lower {
                 self.out.push_str("))");
             }
             CppExpr::Delete(p) => {
-                self.out.push_str("_ZdlPv(");
+                self.out.push_str(&format!("{}(", mangle_op_delete()));
                 self.emit_expr(p);
                 self.out.push(')');
             }
             // M17.0: `delete[] p` 数组释放 - 调用 _ZdaPv
             CppExpr::DeleteArr(p) => {
-                self.out.push_str("_ZdaPv(");
+                self.out.push_str(&format!("{}(", mangle_op_delete_array()));
                 self.emit_expr(p);
                 self.out.push(')');
             }

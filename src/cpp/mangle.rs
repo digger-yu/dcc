@@ -409,6 +409,15 @@ pub fn mangle_typeinfo(name: &str) -> String {
     format!("_ZTI{}{}", name.len(), name)
 }
 
+/// operator new(size_t) Itanium 名字: _Znwm
+pub fn mangle_op_new() -> &'static str { "_Znwm" }
+/// operator new[](size_t) Itanium 名字: _Znam
+pub fn mangle_op_new_array() -> &'static str { "_Znam" }
+/// operator delete(void*) Itanium 名字: _ZdlPv
+pub fn mangle_op_delete() -> &'static str { "_ZdlPv" }
+/// operator delete[](void*) Itanium 名字: _ZdaPv
+pub fn mangle_op_delete_array() -> &'static str { "_ZdaPv" }
+
 /// 虚表项的类型信息符号: _ZTT<name> (抛掷类型表, gcc 用)
 pub fn mangle_ttt(name: &str) -> String {
     format!("_ZTT{}{}", name.len(), name)
@@ -462,6 +471,16 @@ mod tests {
             mangle_member_function(&n, &[MangleType::Pointer(Box::new(MangleType::Int))], &MangleType::Void),
             "_ZN3Foo3barEPi"
         );
+    }
+    // P2.4: operator new / new[] / delete / delete[] Itanium
+    // 名称常量, lower 阶段以前硬编码 "_Znwm" / "_Znam" 等
+    // 字符串, 现统一走 mangle.rs 命名常量以避免 typo.
+    #[test]
+    fn mangle_op_new_constants() {
+        assert_eq!(mangle_op_new(),          "_Znwm");
+        assert_eq!(mangle_op_new_array(),    "_Znam");
+        assert_eq!(mangle_op_delete(),       "_ZdlPv");
+        assert_eq!(mangle_op_delete_array(), "_ZdaPv");
     }
     #[test]
     fn mangle_reference_type() {
