@@ -772,6 +772,31 @@ M19 关键改动:
 >   段数据大小在压缩后变小 (zstd 对全 0 输入极致压缩).
 > - Section 2 表格 `zstd 压缩 debug sections` 行
 >   `仅支持 zlib, zstd 待后续` → 🟢 (M25).
+>
+> **M25 增量（2026-07-24）— Section 11 P4.1 pragma STDC FENV_ACCESS**：
+> - 从 `preproc.rs::process_directive` 抽出独立的
+>   `handle_pragma_stdc(text, line_no)` 函数, 集中处理 C99
+>   标准的三个 STDC 子句: FENV_ACCESS / FP_CONTRACT /
+>   CX_LIMITED_RANGE, 都接受 ON / OFF / DEFAULT 三态, 且
+>   状态名不区分大小写.
+> - FENV_ACCESS 路径: ON / DEFAULT 置 `self.fenv_access=true`,
+>   OFF 置 false, 拼写错 (如 `MAYBE`) 发 W0001 警告 (不
+>   静默接受, 避免污染语义状态).
+> - FP_CONTRACT / CX_LIMITED_RANGE 走静默 noop 路径 (dcc
+>   codegen 暂不区分这两个开关, 与现有 GCC 行为一致).
+> - 直接 `#pragma` 形式与 `_Pragma("...")` 操作符两条路径
+>   都经 `process_directive` 统一汇入, 复用同一 handler.
+> - 运行时 fenv 调用 (fesetround / fegetround 等) 仍
+>   未提供, 留 Section 9 follow-up; codegen 也不插
+>   `volatile` (FENV_ACCESS 在 dcc 仍为纯语义状态).
+> - 新增 3 个单元测试:
+>   `pragma_stdc_fenv_access_accepted_silently` 验证 ON/OFF/
+>   DEFAULT/小写 都不发警告; `pragma_stdc_fenv_access_unknown_state_warns`
+>   验证 `MAYBE` 触发 W0001 警告 (非错误);
+>   `pragma_stdc_fp_contract_cx_limited_accepted` 验证
+>   FP_CONTRACT / CX_LIMITED_RANGE 静默 noop.
+> - Section 11 表格 `浮点环境 (fenv.h)` 行
+>   `pragma STDC FENV_ACCESS 解析为注释` → 🟢 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
@@ -1003,7 +1028,7 @@ M19 关键改动:
 | `__builtin_debugtrap()` | 🟢 (M23) 发射 int3 (0xCC) |
 | `__builtin_assume_aligned(p, n)` | 🟢 (M23) 透传指针，codegen 优化对齐 |
 | `__builtin_expect_with_probability` | 🟢 (M24) 解析层与 `__builtin_expect` 一致处理: 字面量首参编译期折叠, 其它形态走 codegen 既有 builtin 路径 |
-| 浮点环境 (`fenv.h`) | 🟠 `pragma STDC FENV_ACCESS` 解析为注释；运行时无 fenv 调用 |
+| 浮点环境 (`fenv.h`) | 🟢 (M25) `pragma STDC FENV_ACCESS ON/OFF/DEFAULT` 走 `handle_pragma_stdc` 独立函数, ON/DEFAULT 置 `fenv_access=true`, OFF 置 false, 小写状态也接受; 未知状态 (如 `MAYBE`) 发 W0001 警告; FP_CONTRACT / CX_LIMITED_RANGE 静默 noop; codegen 阶段不插 `volatile` (仍是纯语义状态) — 运行时 fenv 调用留 Section 9 follow-up |
 | 复杂数学函数 (`cproj`, `cabs` 等) | 🟢 (M25) cproj / cabs / carg 走 libm: link 隐式 undef 白名单 + fixture + integration 覆盖 (Section 11 P0.3); 真实 `double complex` 传值 ABI 留 Section 9 follow-up |
 | `printf` format string 全集 | 🟢 (M23) 完整 flag/width/precision/length/type 匹配 |
 | `scanf` format string | 🟢 (M23) 完整格式检查 + 指针类型验证 |

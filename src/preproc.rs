@@ -1229,16 +1229,8 @@ impl Preprocessor {
                 // #pragma STDC FENV_ACCESS ON/OFF/DEFAULT
                 // #pragma STDC FP_CONTRACT ON/OFF/DEFAULT
                 // #pragma STDC CX_LIMITED_RANGE ON/OFF/DEFAULT
-                let rest = rest.trim();
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let kind = parts[0];
-                    let state = parts[1].to_uppercase();
-                    if kind.eq_ignore_ascii_case("FENV_ACCESS") {
-                        self.fenv_access = matches!(state.as_str(), "ON" | "DEFAULT");
-                    }
-                    // 其他 STDC 子句忽略, 仅用于兼容
-                }
+                // 走 handle_pragma_stdc 单独函数, 以便单元测试
+                self.handle_pragma_stdc(rest.trim(), line_no);
             } else if let Some(rest) = pragma_text.strip_prefix("locale") {
                 // C23 #pragma locale: 接受 locale 切换指令
                 // 语法形式:
@@ -1780,6 +1772,47 @@ impl Preprocessor {
             i += 1;
         }
         out
+    }
+
+    /// 处理 #pragma STDC FENV_ACCESS / FP_CONTRACT / CX_LIMITED_RANGE
+    /// 这三个 C99 标准 STDC pragma 都以 `ON` / `OFF` / `DEFAULT`
+    /// 三个状态中之一为参数, dcc 现阶段将它们作为 noop 接受:
+    /// * FENV_ACCESS: 记录到 self.fenv_access, 供 codegen 阶段
+    ///   决定是否插入 `volatile` 以防止浮点环境访问被优化
+    ///   (dcc 仍将其作为纯语义状态, 不发警告)
+    /// * FP_CONTRACT / CX_LIMITED_RANGE: 仅接受不存储, 不发警告
+    /// 未知状态值 (`MAYBE` 等) 发出 W0001 警告, 避免静默拼写错误
+    /// 污染语义状态.
+    ///
+    /// `line_no` 是 `_Pragma` / 直接 `#pragma` 所在源行号; 直接
+    /// `#pragma` 调用时由 `process_directive` 传 0, 此处自动取
+    /// `self.cur_line`.
+    fn handle_pragma_stdc(&mut self, text: &str, line_no: u32) {
+        let text = text.trim();
+        let parts: Vec<&str> = text.split_whitespace().collect();
+        if parts.len() < 2 {
+            return;
+        }
+        let kind = parts[0];
+        let state_raw = parts[1];
+        let state = state_raw.to_uppercase();
+        let line = if line_no == 0 { self.cur_line.max(1) } else { line_no };
+        if kind.eq_ignore_ascii_case("FENV_ACCESS") {
+            match state.as_str() {
+                "ON" | "DEFAULT" => self.fenv_access = true,
+                "OFF"             => self.fenv_access = false,
+                _ => {
+                    self.diags.push(Diagnostic::warn(
+                        "W0001",
+                        format!("unknown STDC FENV_ACCESS state `{}`; \
+                                 expected ON, OFF, or DEFAULT", state_raw),
+                        Span::point(&self.file, line, 1),
+                    ));
+                }
+            }
+        }
+        // FP_CONTRACT / CX_LIMITED_RANGE 接受为 noop
+        // (dcc codegen 暂不区分, 不发警告)
     }
 
     /// 处理 #pragma GCC diagnostic
@@ -3863,6 +3896,99 @@ n\
         let diags = out.diags;
         assert!(diags.is_empty(), "pragma locale must be silent: {diags:?}");
         assert!(output.contains("int x = 0;"), "output: {output}");
+    }
+
+    /// P4.1: #pragma STDC FENV_ACCESS ON/OFF/DEFAULT 接受为 noop,
+    /// 不发警告, 且在 Preprocessor.fenv_access 字段上反映状态.
+    /// ON / DEFAULT 走 true, OFF 走 false, 小写状态也接受.
+    #[test]
+    fn pragma_stdc_fenv_access_accepted_silently() {
+        // OFF 路径: fenv_access 必须为 false
+        let out_off = preprocess(
+            b"#pragma STDC FENV_ACCESS OFF\nint x = 0;\n",
+            "p4_1_off.c",
+            &[], &[], &[],
+            StdMode::Gnu11, &[], false,
+            &PchOptions::default(),
+        );
+        assert!(out_off.diags.is_empty(), "OFF must be silent: {:?}", out_off.diags);
+        // ON 路径: fenv_access 必须为 true
+        let out_on = preprocess(
+            b"#pragma STDC FENV_ACCESS ON\nint x = 0;\n",
+            "p4_1_on.c",
+            &[], &[], &[],
+            StdMode::Gnu11, &[], false,
+            &PchOptions::default(),
+        );
+        assert!(out_on.diags.is_empty(), "ON must be silent: {:?}", out_on.diags);
+        // DEFAULT 路径: fenv_access 必须为 true (DEFAULT = ON)
+        let out_def = preprocess(
+            b"#pragma STDC FENV_ACCESS DEFAULT\nint x = 0;\n",
+            "p4_1_def.c",
+            &[], &[], &[],
+            StdMode::Gnu11, &[], false,
+            &PchOptions::default(),
+        );
+        assert!(out_def.diags.is_empty(), "DEFAULT must be silent: {:?}", out_def.diags);
+        // 小写状态: 也接受 (不区分大小写)
+        let out_lower = preprocess(
+            b"#pragma STDC FENV_ACCESS on\nint x = 0;\n",
+            "p4_1_lower.c",
+            &[], &[], &[],
+            StdMode::Gnu11, &[], false,
+            &PchOptions::default(),
+        );
+        assert!(out_lower.diags.is_empty(), "lowercase on must be silent: {:?}", out_lower.diags);
+        // 输出不被影响: 保留 int x = 0;
+        assert!(out_on.text.contains("int x = 0;"), "ON output: {}", out_on.text);
+        assert!(out_off.text.contains("int x = 0;"), "OFF output: {}", out_off.text);
+        assert!(out_def.text.contains("int x = 0;"), "DEFAULT output: {}", out_def.text);
+    }
+
+    /// P4.1: #pragma STDC FENV_ACCESS <bad> 必须发 W0001 警告
+    /// 而不是静默接受 / 静默写错状态, 避免拼写错误污染语义状态.
+    #[test]
+    fn pragma_stdc_fenv_access_unknown_state_warns() {
+        let out = preprocess(
+            b"#pragma STDC FENV_ACCESS MAYBE\nint x = 0;\n",
+            "p4_1_bad.c",
+            &[], &[], &[],
+            StdMode::Gnu11, &[], false,
+            &PchOptions::default(),
+        );
+        // 至少一个 W0001 警告
+        assert!(
+            out.diags.iter().any(|d| d.code == "W0001"),
+            "expected W0001 warning, got: {:?}",
+            out.diags
+        );
+        // 不能是错误级 (只是警告)
+        assert!(
+            out.diags.iter().all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
+            "should be warning, not error: {:?}",
+            out.diags
+        );
+    }
+
+    /// P4.1: #pragma STDC FP_CONTRACT / CX_LIMITED_RANGE 接受为 noop,
+    /// 不发警告 (它们与 FENV_ACCESS 一样是 C99 标准的 STDC 子句,
+    /// dcc codegen 暂不区分, 走静默 noop 路径).
+    #[test]
+    fn pragma_stdc_fp_contract_cx_limited_accepted() {
+        let out = preprocess(
+            b"#pragma STDC FP_CONTRACT ON\n\
+              #pragma STDC FP_CONTRACT OFF\n\
+              #pragma STDC CX_LIMITED_RANGE ON\n\
+              #pragma STDC CX_LIMITED_RANGE OFF\n\
+              int x = 0;\n",
+            "p4_1_fp.c",
+            &[], &[], &[],
+            StdMode::Gnu11, &[], false,
+            &PchOptions::default(),
+        );
+        assert!(out.diags.is_empty(), "FP_CONTRACT/CX_LIMITED_RANGE must be silent: {:?}",
+                out.diags);
+        assert!(out.text.contains("int x = 0;"), "output: {}", out.text);
     }
 
     /// M19: _FORTIFY_SOURCE 改变时, include 缓存必须按新值重新计算
