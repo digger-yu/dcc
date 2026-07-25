@@ -3718,3 +3718,79 @@ int main(void) { return f(4); }
         asm
     );
 }
+
+/// P1.3: Null deref UBSAN trap. 编译通过指针解引用的代码,
+/// 验证生成的汇编中插入 `call __ubsan_handle_null_pointer_dereference`
+/// (LLVM compiler-rt 符号名). runtime 时用户需链接 ubsan
+/// runtime, dcc 只 emit 调用. 测试只验证编译路径
+/// (Section 4.2 P1.3). 用 -S 检查汇编原因同 P1.2.
+#[test]
+fn ubsan_null_deref_check_emitted() {
+    let src = "\
+int f(int *p) { return *p; }
+int main(void) { int x = 42; return f(&x); }
+";
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-ubsan-null-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-ubsan-null-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write null-deref fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=undefined", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "null deref + ubsan compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    let needle = "call __ubsan_handle_null_pointer_dereference";
+    assert!(
+        asm.contains(needle),
+        "null deref ubsan stub should be called in asm, but `{}` not found in:\n{}",
+        needle,
+        asm
+    );
+}
+
+/// P1.4: Float-cast UBSAN trap. 编译 float→int 强制转换的代码,
+/// 验证生成的汇编中插入 `call __ubsan_handle_float_cast_overflow`
+/// (LLVM compiler-rt 符号名). runtime 时用户需链接 ubsan
+/// runtime, dcc 只 emit 调用. 测试只验证编译路径
+/// (Section 4.2 P1.4). 用 -S 检查汇编原因同 P1.2.
+#[test]
+fn ubsan_float_cast_check_emitted() {
+    let src = "\
+int f(double d) { return (int)d; }
+int main(void) { return f(3.14); }
+";
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-ubsan-fc-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-ubsan-fc-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write float-cast fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=undefined", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "float cast + ubsan compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    let needle = "call __ubsan_handle_float_cast_overflow";
+    assert!(
+        asm.contains(needle),
+        "float cast ubsan stub should be called in asm, but `{}` not found in:\n{}",
+        needle,
+        asm
+    );
+}

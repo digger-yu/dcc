@@ -305,7 +305,6 @@ asm goto 输出约束（M11.2）；内联 asm 约束全家族（M11.3）。
 🟠 已知预存限制：
 
 - `__kcsan_check_access` 专用路径未 emit（KCSAN 借道 KASAN 回调）
-- null deref / float-cast UBSAN trap 变体未实装
 
 ### 4.3 Typed IR 验证（`src/ir.rs`）
 
@@ -628,6 +627,27 @@ M19 关键改动:
 >   已正确 emit 调用。
 > - Section 4.2 已知预存限制列表移除 `VLA UBSAN trap
 >   变体未实装` 一条 (M25).
+
+> **M25 增量（2026-07-24）— Section 4.2 P1.3+P1.4 null deref 与
+> float-cast UBSAN 集成覆盖**：
+> - `src/sanitizer.rs::null_deref_check` 与
+>   `src/sanitizer.rs::float_cast_check` 已在 M15 阶段实装
+>   (`__ubsan_handle_null_pointer_dereference` 与
+>   `__ubsan_handle_float_cast_overflow`) 且带单元测试
+>   `ubsan_null_deref_check_inserted` /
+>   `ubsan_float_cast_check_inserted`. P1.3+P1.4 PR
+>   仅补齐集成层覆盖。
+> - 新增集成测试 `ubsan_null_deref_check_emitted` 与
+>   `ubsan_float_cast_check_emitted` (在 `tests/integration.rs`):
+>   编译带指针解引用 / float→int cast 的 C 代码 +
+>   `-fsanitize=undefined -S`, 验证汇编层含
+>   `call __ubsan_handle_null_pointer_dereference` /
+>   `call __ubsan_handle_float_cast_overflow`. 用 `-S`
+>   检查汇编而非 .o 的 strtab 是因为 dcc 当前对未声明的
+>   外部 sanitizer 函数不会自动写入 `.symtab`/`.strtab`
+>   (Section 9 follow-up), 汇编层已正确 emit 调用。
+> - Section 4.2 已知预存限制列表移除 `null deref / float-cast
+>   UBSAN trap 变体未实装` 一条 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
