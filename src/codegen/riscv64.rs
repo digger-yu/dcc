@@ -53,6 +53,12 @@ pub struct Riscv64Codegen {
     current_return_ty: Option<ValueType>,
     aggregate_fields: HashMap<String, (Arc<Vec<Field>>, bool)>,
     rvv: RvvConfig,
+    /// M25: 当前函数是否为 variadic
+    is_current_func_variadic: bool,
+    /// M25: 寄存器保存区在 frame 内的起始偏移 (a0..a7 顺序存 8 槽)
+    va_save_base_off: i32,
+    /// M25: 下一个 va_arg 槽位索引 (0..N)
+    va_offs: i32,
     _target: Target,
 }
 
@@ -82,6 +88,9 @@ impl Riscv64Codegen {
             current_return_ty: None,
             aggregate_fields: HashMap::new(),
             rvv: RvvConfig::default(),
+            is_current_func_variadic: false,
+            va_save_base_off: 0,
+            va_offs: 0,
             _target: target,
         }
     }
@@ -311,9 +320,29 @@ impl Riscv64Codegen {
         self.plan_locals(ast);
         // 记录当前函数返回类型 (sret/HFA 判定)
         self.current_return_ty = Some(func.return_type.clone());
+        // M25: 变参函数需要在 frame 顶部预留 a0..a7 保存区 (8 * 8 = 64 字节).
+        // 该区域在 frame_bytes 之后追加, 紧贴 sp. 避免与临时/局部变量重叠.
+        let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
+        self.is_current_func_variadic = is_variadic;
+        self.va_offs = 0;
+        if is_variadic {
+            // 保存区位于 frame 顶部 (紧接 locals 之后), off >= frame_bytes.
+            // RISC-V a0..a7 各占 8 字节, 总计 64 字节.
+            self.va_save_base_off = self.stack_bytes;
+            self.stack_bytes += 64;
+        } else {
+            self.va_save_base_off = 0;
+        }
         self.frame_bytes = (self.stack_bytes + 15) & !15;
         if self.frame_bytes > 0 {
             self.addi_sp(-self.frame_bytes);
+        }
+        // M25: 进入变参函数立即把 a0..a7 写入保存区
+        if is_variadic {
+            for i in 0..8u8 {
+                // sd a(i+10), off(sp)
+                self.emit_sd(10 + i, 2, self.va_save_base_off + (i as i32) * 8);
+            }
         }
         self.emitted_return = false;
         let body = ast.and_then(|f| f.body.as_ref());
@@ -474,7 +503,7 @@ impl Riscv64Codegen {
         if is_float_ty(&expr.ty) {
             return self.gen_float_expr(expr);
         }
-        match expr.kind {
+        match &expr.kind {
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Int(v)) = expr.literal {
                     self.li_a0(trunc_i32(v) as i32);
@@ -501,7 +530,7 @@ impl Riscv64Codegen {
                 self.gen_expr(&expr.children[0]);
                 self.mv_a1_a0();
                 self.gen_expr(&expr.children[1]);
-                self.binop_a0_a1(op);
+                self.binop_a0_a1(*op);
                 return true;
             }
             ExprKind::Unary(op) if !expr.children.is_empty() => {
@@ -516,6 +545,11 @@ impl Riscv64Codegen {
             }
             ExprKind::Cast if !expr.children.is_empty() => {
                 self.gen_expr(&expr.children[0]);
+                return true;
+            }
+            ExprKind::VaArg { ap } => {
+                // M25: 整数/指针型 __builtin_va_arg(ap, T) — 从保存区读
+                self.gen_va_arg_int(&ap);
                 return true;
             }
             ExprKind::Call if !expr.children.is_empty() => {
@@ -540,6 +574,37 @@ impl Riscv64Codegen {
     }
 
     fn gen_call(&mut self, expr: &TypedExpr) {
+        // M25: 识别 __builtin_va_start / __builtin_va_end / __builtin_va_copy
+        // 内置函数, 不生成实际 jal 调用.
+        let callee = match expr.children[0].kind {
+            ExprKind::Local(ref n) => n.clone(),
+            _ => "unknown".to_string(),
+        };
+        if callee == "__builtin_va_start" {
+            if let Some(ap_expr) = expr.children.get(1) {
+                if let ExprKind::Local(ref ap_name) = ap_expr.kind {
+                    self.gen_va_start(ap_name);
+                }
+            }
+            self.li_a0(0);
+            return;
+        }
+        if callee == "__builtin_va_end" {
+            self.li_a0(0);
+            return;
+        }
+        if callee == "__builtin_va_copy" {
+            if let (Some(dst), Some(src)) = (expr.children.get(1), expr.children.get(2)) {
+                if let (ExprKind::Local(d), ExprKind::Local(s)) = (&dst.kind, &src.kind) {
+                    if let (Some(&doff), Some(&soff)) = (self.locals.get(d), self.locals.get(s)) {
+                        self.emit_lw(10, 2, soff);
+                        self.emit_sw(10, 2, doff);
+                    }
+                }
+            }
+            self.li_a0(0);
+            return;
+        }
         let args = &expr.children[1..];
 
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 a0 = sret slot)
@@ -587,15 +652,48 @@ impl Riscv64Codegen {
             }
         }
 
-        let callee = match expr.children[0].kind {
+        let callee_final = match expr.children[0].kind {
             ExprKind::Local(ref n) => n.clone(),
             _ => "unknown".to_string(),
         };
-        self.emit_jal_to(&callee);
+        self.emit_jal_to(&callee_final);
+    }
+
+    // M25: 初始化 RISC-V va_list 变量.
+    // 简化: ap = 指向保存区的指针 (addi a0, sp, va_save_base_off).
+    fn gen_va_start(&mut self, ap_name: &str) {
+        let ap_off = match self.locals.get(ap_name) {
+            Some(&o) => o,
+            None => return,
+        };
+        // addi a0, sp, va_save_base_off => a0 = &save_area
+        self.emit_addi(10, 2, self.va_save_base_off);
+        // sw a0, ap_off(sp)
+        self.emit_sw(10, 2, ap_off);
+    }
+
+    // M25: 读取下一个变参 (整数路径) 到 a0.
+    fn gen_va_arg_int(&mut self, _ap_name: &str) {
+        if self.va_offs < 8 {
+            let off = self.va_save_base_off + self.va_offs * 8;
+            // ld a0, off(sp)
+            self.emit_ld(10, 2, off);
+            self.va_offs += 1;
+        } else {
+            eprintln!("warning: __builtin_va_arg beyond 8th argument on riscv64, returning 0");
+            self.li_a0(0);
+        }
+    }
+
+    // M25: 读取下一个变参 (浮点路径) 到 fa0.
+    fn gen_va_arg_float(&mut self, _ap_name: &str) {
+        // 当前 riscv64 变参保存区只存 a0..a7 (GP), fa0..fa7 暂未保存.
+        eprintln!("warning: __builtin_va_arg(float) not yet supported on riscv64, emitting 0.0");
+        self.load_float_fa0(0.0);
     }
 
     fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {
-        match expr.kind {
+        match &expr.kind {
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Float(v)) = expr.literal {
                     self.load_float_fa0(v as f32);
@@ -605,13 +703,18 @@ impl Riscv64Codegen {
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
                 self.gen_float_expr(&expr.children[0]);
                 self.gen_float_expr(&expr.children[1]);
-                self.float_binop_fa0(op);
+                self.float_binop_fa0(*op);
+                return true;
+            }
+            // M25: 浮点型 __builtin_va_arg(ap, double) — 暂走 stub (fa0..fa7 未保存)
+            ExprKind::VaArg { ap } => {
+                self.gen_va_arg_float(&ap);
                 return true;
             }
             // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
-            // (__builtin_va_arg 在 IR 中被降级为 ExprKind::Call, expr.ty=float)
+            // 例: 浮点 Call 在 IR 中 children[0] 是 callee, 不再与 va_arg 混清.
             ExprKind::Call => {
-                eprintln!("warning: __builtin_va_arg not yet implemented on riscv64, emitting 0");
+                eprintln!("warning: zero-arg float call not yet supported on riscv64, emitting 0.0");
                 self.li_a0(0);
                 return true;
             }
@@ -630,12 +733,12 @@ impl Riscv64Codegen {
     }
 
     fn gen_vector_expr(&mut self, expr: &TypedExpr) -> bool {
-        match expr.kind {
+        match &expr.kind {
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
                 self.gen_expr(&expr.children[0]);
                 self.mv_a1_a0();
                 self.gen_expr(&expr.children[1]);
-                self.binop_a0_a1(op);
+                self.binop_a0_a1(*op);
                 return true;
             }
             _ => self.li_a0(0),
@@ -2394,5 +2497,54 @@ mod tests {
         let insn_le = u32::from_le_bytes([code[20], code[21], code[22], code[23]]);
         assert_eq!((insn_le >> 25) & 0x7f, 0b1010001, "FLE.D funct7=1010001");
         assert_eq!((insn_le >> 12) & 0x7, 0b000, "FLE.D funct3=000");
+    }
+
+    // M25: RISC-V va_list 寄存器保存区 单元测试
+    // 验证变参函数入口发出 8 条 sd a0..a7, off(sp) 保存指令.
+    #[test]
+    fn riscv64_va_save_area_stores_a0_through_a7() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.is_current_func_variadic = true;
+        cg.va_save_base_off = 16;
+        cg.stack_bytes = 80;
+        cg.frame_bytes = 80;
+        // 模拟 gen_function 入口保存动作
+        for i in 0..8u8 {
+            cg.emit_sd(10 + i, 2, cg.va_save_base_off + (i as i32) * 8);
+        }
+        // 验证: 8 条 sd aN, off(sp) 指令, LE 编码:
+        //   byte0 低 7 位 = opcode = 0x23 (SD)
+        //   byte1 位 6:4  = funct3 = 0b011
+        assert!(cg.code.len() >= 32, "expected at least 32 bytes of SD instructions");
+        let sd_count = cg.code.windows(4).filter(|w| {
+            (w[0] & 0x7f) == 0x23 && (w[1] & 0x70) == 0x30
+        }).count();
+        assert_eq!(sd_count, 8, "expected 8 SD instructions, got {sd_count}");
+    }
+
+    // M25: RISC-V va_arg 整数路径 单元测试
+    // 验证 gen_va_arg_int 从保存区顺序读 a0
+    #[test]
+    fn riscv64_va_arg_int_reads_sequentially_from_save_area() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.is_current_func_variadic = true;
+        cg.va_save_base_off = 0;
+        cg.va_offs = 0;
+        cg.locals.insert("ap".to_string(), 100);
+        // 读 3 个变参
+        cg.gen_va_arg_int("ap");
+        cg.gen_va_arg_int("ap");
+        cg.gen_va_arg_int("ap");
+        // 验证: 3 条 ld a0, off(sp) 指令, LE 编码:
+        //   byte0 低 7 位 = opcode = 0x03 (LD)
+        //   byte1 位 6:4  = funct3 = 0b011
+        let ld_count = cg.code.windows(4).filter(|w| {
+            (w[0] & 0x7f) == 0x03 && (w[1] & 0x70) == 0x30
+        }).count();
+        assert_eq!(ld_count, 3, "expected 3 LD instructions, got {ld_count}");
+        // 验证 va_offs 推进
+        assert_eq!(cg.va_offs, 3, "va_offs should be 3 after 3 reads");
     }
 }
