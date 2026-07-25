@@ -426,7 +426,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | `virtual` 继承 | 部分支持（见 `M10+`），复杂虚基类不验证 |
 | `placement new` | 降级为裸 `malloc` 替身 |
 | `operator new[]` / `operator delete[]` | 🟢 (M25) lower 走 mangle_op_new_array() / mangle_op_delete_array() 命名常量, 即 Itanium C++ ABI `_Znam` / `_ZdaPv` 数组分配/释放符号; 符号由 dcc 运行时 dccpp_runtime.c 声明 (extern) 并最终转发到 libstdc++ / libc malloc |
-| `new T[n]` 数组分配 | 不识别 `[]`，按 `new T` 处理 |
+| `new T[n]` 数组分配 | 🟢 (M25) parser 识别 `new T[n]` 形式构造 `CppExpr::NewArr { ty, count }`, lower 走 mangle_op_new_array() 调用, 即 Itanium C++ ABI `_Znam` 数组分配; 配合 `delete[] p` → `_ZdaPv` 完整 array 生命周期 |
 
 🔴 完全没有：
 
@@ -728,6 +728,19 @@ M19 关键改动:
 >   `_Znwm / _ZdlPv 替身` → 🟢 (M25). 符号转发走
 >   dccpp_runtime.c extern 声明, 最终在链接时由 libstdc++
 >   / libc malloc 解析.
+
+> **M25 增量（2026-07-24）— Section 6 P2.5 new T[n] 数组分配**：
+> - 验证 dcc parser 的 `parse_new` 在 `new T[n]` 形式下识别
+>   `[` 触发 `CppExpr::NewArr { ty, count }` (M17.0 阶段实装),
+>   不再降级为 `new T` 标量分配 (M8 简化).
+> - lower 阶段调用 mangle_op_new_array() (P2.4 helper),
+>   emit `((T*)_Znam(sizeof(T) * count))` 形式, 对类类型
+>   T 用 `(struct T*)` cast, 内建类型直接 `(T*)`.
+> - 新增 fixture `tests/fixtures/p2_5_new_array_alloc.cpp`
+>   (覆盖类类型 Cell + 变量计数 n + 完整 new T[n] / delete[]
+>   array 生命周期) + 集成测试 `p2_5_new_array_alloc`.
+> - Section 6 表格 `new T[n]` 行 `不识别 [] 按 new T 处理`
+>   → 🟢 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个

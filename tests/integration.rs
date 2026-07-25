@@ -3907,3 +3907,21 @@ fn p2_4_new_arr_mangler() {
     );
 }
 
+/// P2.5: new T[n] 数组分配 (Section 6). 验证 dcc parser
+/// 在 `new T[n]` 形式下识别 `[` 触发 CppExpr::NewArr, lower
+/// 阶段 emit `((T*)mangle_op_new_array()(sizeof(T) * n))`, 即
+/// Itanium C++ ABI 数组分配符号 _Znam 调用. 配合
+/// `delete[] p` 走 _ZdaPv (P2.4) 走完整 array 生命周期.
+#[test]
+#[cfg(unix)]
+fn p2_5_new_array_alloc() {
+    let src = include_str!("fixtures/p2_5_new_array_alloc.cpp");
+    let (out, obj) = run_cpp_object_test("p2-5-new-array-alloc", src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        out.status.success(),
+        "p2_5_new_array_alloc compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
