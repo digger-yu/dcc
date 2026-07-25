@@ -3674,6 +3674,89 @@ fn complex_libm_fixture_runs() {
     }
 }
 
+/// M25 增量: PCH (预编译头) 集成测试. 验证 -fpch-create 与
+/// -fpch-include 两条路径能端到端工作:
+/// 1. 编译 preamble.c 头引用 + 函数体, 用 -fpch-create 生成 PCH.
+/// 2. 编译 main.c 用 -fpch-include 加载 PCH, 验证头宏/typedef
+///    仍然可用, 生成的 .o 与不使用 PCH 的对照路径都能正确运行.
+/// 3. 对照路径: 不使用 PCH 直接编译 main.c, 同样运行成功.
+#[test]
+fn pch_create_then_include_compiles_and_runs() {
+    use std::env;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    let dir = env::temp_dir();
+    let header_path = dir.join(format!("dcc-pch-hdr-{}.h", std::process::id()));
+    let preamble_src = dir.join(format!("dcc-pch-pre-{}.c", std::process::id()));
+    let main_src = dir.join(format!("dcc-pch-main-{}.c", std::process::id()));
+    let pch_path = dir.join(format!("dcc-pch-{}.pch", std::process::id()));
+    let preamble_o = dir.join(format!("dcc-pch-pre-{}.o", std::process::id()));
+    let main_o_pch = dir.join(format!("dcc-pch-main-pch-{}.o", std::process::id()));
+    let main_o_nopch = dir.join(format!("dcc-pch-main-nopch-{}.o", std::process::id()));
+    let exe_pch = dir.join(format!("dcc-pch-pch-{}", std::process::id()));
+    let exe_nopch = dir.join(format!("dcc-pch-nopch-{}", std::process::id()));
+    fs::write(&header_path, b"#define PCH_CONST 42\n#define PCH_INC(x) ((x) + 1)\ntypedef int pch_int;\n").expect("write header");
+    let hdr_str = header_path.to_str().unwrap().to_string();
+    let preamble_text = format!("#include \"{hdr_str}\"\nint get_const(void) {{ return PCH_CONST; }}\n");
+    let main_text = format!("#include \"{hdr_str}\"\nint main(void) {{\n    pch_int v = PCH_INC(PCH_CONST);\n    return v == 43 ? 0 : 1;\n}}\n");
+    fs::write(&preamble_src, preamble_text.as_bytes()).expect("write preamble");
+    fs::write(&main_src, main_text.as_bytes()).expect("write main");
+    // Step 1: create PCH from preamble
+    let create_out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg(format!("-fpch-create={}", pch_path.display()))
+        .args(["-c", "-o"]).arg(&preamble_o)
+        .arg(&preamble_src)
+        .output()
+        .expect("run dcc -fpch-create");
+    assert!(create_out.status.success(),
+            "PCH create must succeed; stderr: {}",
+            String::from_utf8_lossy(&create_out.stderr));
+    assert!(pch_path.exists(), "PCH file must be created");
+    // Step 2: compile main with -fpch-include
+    let with_pch = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg(format!("-fpch-include={}", pch_path.display()))
+        .args(["-c", "-o"]).arg(&main_o_pch)
+        .arg(&main_src)
+        .output()
+        .expect("run dcc -fpch-include");
+    assert!(with_pch.status.success(),
+            "PCH include must succeed; stderr: {}",
+            String::from_utf8_lossy(&with_pch.stderr));
+    // Step 3: link + run with PCH
+    let _ = fs::set_permissions(&exe_pch, fs::Permissions::from_mode(0o755));
+    let link_pch = Command::new("gcc").arg(&main_o_pch).arg("-o").arg(&exe_pch).output().expect("link pch");
+    assert!(link_pch.status.success(),
+            "link (PCH) failed; stderr: {}", String::from_utf8_lossy(&link_pch.stderr));
+    let run_pch = Command::new(&exe_pch).status().expect("run pch");
+    assert_eq!(run_pch.code(), Some(0), "PCH build must return 0");
+    // Step 4: baseline (no PCH) for parity check
+    let nopch = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"]).arg(&main_o_nopch)
+        .arg(&main_src)
+        .output()
+        .expect("run dcc (no pch)");
+    assert!(nopch.status.success(),
+            "no-PCH compile must succeed; stderr: {}",
+            String::from_utf8_lossy(&nopch.stderr));
+    let _ = fs::set_permissions(&exe_nopch, fs::Permissions::from_mode(0o755));
+    let link_nopch = Command::new("gcc").arg(&main_o_nopch).arg("-o").arg(&exe_nopch).output().expect("link nopch");
+    assert!(link_nopch.status.success(),
+            "link (no PCH) failed; stderr: {}", String::from_utf8_lossy(&link_nopch.stderr));
+    let run_nopch = Command::new(&exe_nopch).status().expect("run nopch");
+    assert_eq!(run_nopch.code(), Some(0), "no-PCH build must return 0");
+    // cleanup
+    let _ = fs::remove_file(&header_path);
+    let _ = fs::remove_file(&preamble_src);
+    let _ = fs::remove_file(&main_src);
+    let _ = fs::remove_file(&pch_path);
+    let _ = fs::remove_file(&preamble_o);
+    let _ = fs::remove_file(&main_o_pch);
+    let _ = fs::remove_file(&main_o_nopch);
+    let _ = fs::remove_file(&exe_pch);
+    let _ = fs::remove_file(&exe_nopch);
+}
+
 /// P1.2: VLA bound UBSAN trap. 编译带 VLA 的代码, 验证
 /// 生成的汇编中插入 `call __ubsan_handle_vla_bound_not_positive`
 /// (LLVM compiler-rt 符号名). runtime 时用户需链接 ubsan

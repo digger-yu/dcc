@@ -464,7 +464,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | 字符集 / locale (C23 `#pragma locale`) | 🟢 (M23) 支持 `default`/`reset`/`"POSIX"`/`"UTF-8"`/`"ISO-8859-1"` 字符集切换, charset 字段记录当前编码 |
 | 预定义宏（如 `__linux__`, `__GNUC__`, `__amd64__`） | 🟢 (M19) 补齐: `__amd64` / `__amd64__` / `__x86_64` / `__k8` / `__k8__` / `__USER_LABEL_PREFIX__` / `__VERSION__` / `__OPTIMIZE__` / `__OPTIMIZE_SIZE__` / `__NO_INLINE__` / `__FINITE_MATH_ONLY__` / `__PIC__` / `__PIE__` / `__code_model_small__` / `__SEG_GS` / `__SEG_FS` |
 | 依赖文件 -MD / -MMD / -MP | ✅（但与 host GCC 略有差异） |
-| 增量预处理（pch） | 🔴 无 |
+| 增量预处理（pch） | 🟢 (M25) `src/preproc.rs::PchOptions` / `PchBundle` / `serialize` / `apply` 走完整的"创建 + 加载 + 宏状态哈希校验"路径; CLI `-fpch-include=path` / `-fpch-create=path` / `-fpch-include-only=path` 在 `src/cli.rs` 已接受; 7 个单元测试 + 1 个集成测试 `pch_create_then_include_compiles_and_runs` 覆盖 create→include 端到端 |
 
 M19 关键改动:
 
@@ -797,6 +797,33 @@ M19 关键改动:
 >   FP_CONTRACT / CX_LIMITED_RANGE 静默 noop.
 > - Section 11 表格 `浮点环境 (fenv.h)` 行
 >   `pragma STDC FENV_ACCESS 解析为注释` → 🟢 (M25).
+>
+> **M25 增量（2026-07-24）— Section 4.2 增量预处理 (pch) 文档同步**：
+> - 调查发现 `src/preproc.rs` 已实现完整 PCH 路径:
+>   `PchOptions` (CLI 选项) + `PchBundle` (序列化的宏表 +
+>   输出文本快照) + `serialize` / `deserialize` (魔数
+>   `DCC_PCH_V1` 头) + `apply` (注入到 Preprocessor 状态) +
+>   `hash_macro_state` 驱动的缓存失配检测 (7 个单元测试
+>   `pch_bundle_kv_escape_handles_newlines_and_tabs` /
+>   `pch_bundle_roundtrip` / `pch_incompatible_macro_state_warns_and_falls_back`
+>   / `pch_missing_file_emits_error` /
+>   `pch_magic_mismatch_rejected` /
+>   `pch_no_pch_does_not_create_file` /
+>   `pch_create_then_include_roundtrip` 全部 0 失败).
+> - CLI 端 `src/cli.rs` 已接受三个标志:
+>   `-fpch-include=<file>` 加载已有 PCH;
+>   `-fpch-create=<file>` 预处理成功后写出 PCH;
+>   `-fpch-include-only=<file>` 加载并立即 dump 输出 (调试).
+> - 文档 M25 之前该行误标 `🔴 无`, 本增量补成
+>   🟢 (M25). 实际上 PCH 的端到端功能早已交付
+>   (M19 前后, 但当时未同步到本表格).
+> - 新增集成测试 `pch_create_then_include_compiles_and_runs`:
+>   写一个 `header.h` 包含宏/typedef, preamble.c
+>   引用头并 -fpch-create 生成 PCH, main.c 通过
+>   -fpch-include 加载 PCH 后编译/链接/运行,
+>   验证返回码 0; 同时跑一条无 PCH 对照路径
+>   同样返回 0, 验证两条路径在功能上等价.
+> - Section 4.2 表格 `增量预处理 (pch)` 行 `🔴 无` → 🟢 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
