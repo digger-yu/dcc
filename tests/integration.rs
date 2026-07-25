@@ -3925,3 +3925,21 @@ fn p2_5_new_array_alloc() {
     );
 }
 
+/// P2.6: placement new 走裸 malloc 替身 (Section 6). 验证 dcc
+/// parser 检测 `new (ptr) T(args)` 形式, lower 阶段 emit 构造
+/// 链 `(void*)(ptr), mangle_ctor(&n, ...)(ptr, args)`, 不调用
+/// operator new 分配新内存, 模拟 Itanium C++ ABI placement
+/// new 语义 (M17.0 阶段实装).
+#[test]
+#[cfg(unix)]
+fn p2_6_placement_new() {
+    let src = include_str!("fixtures/p2_6_placement_new.cpp");
+    let (out, obj) = run_cpp_object_test("p2-6-placement-new", src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        out.status.success(),
+        "p2_6_placement_new compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+

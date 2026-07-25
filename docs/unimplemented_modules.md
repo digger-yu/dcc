@@ -424,7 +424,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | C++20 Modules (M18 占位) | `module;` / `export module X;` / `import X;` 接受; M19+ 实现 BMF 序列化 |
 | `static` 类成员 | 🟢 (M23) 解析为 C `static` 字段 + Itanium ABI mangling (`_ZN<class><name>E`) |
 | `virtual` 继承 | 部分支持（见 `M10+`），复杂虚基类不验证 |
-| `placement new` | 降级为裸 `malloc` 替身 |
+| `placement new` | 🟢 (M25) parser 检测 `new (ptr) T(args)` 形式构造 `CppExpr::PlacementNew { ptr, ty, args }`, lower emit `((void*)ptr, ctor(ptr, args))` 走原地构造, 不调用 operator new 分配新内存 |
 | `operator new[]` / `operator delete[]` | 🟢 (M25) lower 走 mangle_op_new_array() / mangle_op_delete_array() 命名常量, 即 Itanium C++ ABI `_Znam` / `_ZdaPv` 数组分配/释放符号; 符号由 dcc 运行时 dccpp_runtime.c 声明 (extern) 并最终转发到 libstdc++ / libc malloc |
 | `new T[n]` 数组分配 | 🟢 (M25) parser 识别 `new T[n]` 形式构造 `CppExpr::NewArr { ty, count }`, lower 走 mangle_op_new_array() 调用, 即 Itanium C++ ABI `_Znam` 数组分配; 配合 `delete[] p` → `_ZdaPv` 完整 array 生命周期 |
 
@@ -740,6 +740,20 @@ M19 关键改动:
 >   (覆盖类类型 Cell + 变量计数 n + 完整 new T[n] / delete[]
 >   array 生命周期) + 集成测试 `p2_5_new_array_alloc`.
 > - Section 6 表格 `new T[n]` 行 `不识别 [] 按 new T 处理`
+>   → 🟢 (M25).
+
+> **M25 增量（2026-07-24）— Section 6 P2.6 placement new**：
+> - 验证 dcc parser 的 `parse_new` 在 `new (ptr) T(args)`
+>   形式下识别开括号 + 指针表达式触发
+>   `CppExpr::PlacementNew { ptr, ty, args }` (M17.0 阶段实装).
+> - lower 阶段 emit `((void*)(ptr), ctor_mangled(ptr, args))`
+>   走原地构造链, 不调用 operator new 分配新内存, 模拟
+>   Itanium C++ ABI placement new 语义. 释放由用户管理
+>   (不 emit `delete p`, 调 dtor 后手动 free).
+> - 新增 fixture `tests/fixtures/p2_6_placement_new.cpp`
+>   (覆盖 `new (p) Token` 无参 + `new (p) Token(42)` 带参
+>   两种形式) + 集成测试 `p2_6_placement_new`.
+> - Section 6 表格 `placement new` 行 `降级为裸 malloc 替身`
 >   → 🟢 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
