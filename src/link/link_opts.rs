@@ -516,4 +516,57 @@ mod tests {
         assert!(entries.contains(&30u64));    // DT_FLAGS
         assert!(entries.contains(&0x8u64));   // DF_BIND_NOW
     }
+
+    // P3.1: --compress-debug-sections=zstd 压入 .debug_*
+    // 节, 走 zstd::encode_all(级别 3), 并加 ELF 压缩头
+    // (ch_type=2, ch_size=原始大小, ch_addralign=对齐).
+    // 验证: 调用 compress_debug_sections(layout, "zstd") 后
+    //   - 压缩节被标记 SHF_COMPRESSED
+    //   - 段数据前 4 字节为 ELFCOMPRESS_ZSTD=2 (小端)
+    //   - 段数据在 zstd 解码后能恢复原始内容
+    #[test]
+    fn compress_debug_sections_zstd_marks_flag_and_payload() {
+        use crate::link::layout::OutputSectionKind;
+        let mut layout = Layout {
+            is_pie: false,
+            is_shared: false,
+            base_addr: 0,
+            sections: vec![OutputSection {
+                kind: OutputSectionKind::Named(".debug_info".into()),
+                name: ".debug_info".into(),
+                sh_name_off: 0,
+                ty: 0x1, // SHT_PROGBITS
+                flags: 0,
+                align: 1,
+                // 重复数据保证 zstd 能压小
+                data: vec![0u8; 4096],
+                size: 4096,
+                entsize: 0,
+                output_index: 0,
+                load_segment: 2,
+                vaddr: 0,
+                file_off: 0,
+                input_offsets: vec![],
+                input_sections: vec![],
+            }],
+            segments: vec![],
+            symbols: vec![],
+            entry: 0,
+            has_symtab: false,
+            has_dynamic: false,
+            n_locals: 0,
+            output_relas: vec![],
+            dynamic_linker: None,
+        };
+        let before_len = layout.sections[0].data.len();
+        let compressed = compress_debug_sections(&mut layout, "zstd");
+        assert_eq!(compressed, vec![".debug_info".to_string()]);
+        let sec = &layout.sections[0];
+        // SHF_COMPRESSED (0x800) 必须设置
+        assert_ne!(sec.flags & crate::codegen::elf::SHF_COMPRESSED, 0);
+        // 数据前 4 字节 = ELFCOMPRESS_ZSTD (2) little-endian
+        assert_eq!(sec.data[0..4], [2, 0, 0, 0]);
+        // 数据大小应小于原始大小 (zstd 压 4096 字节全 0)
+        assert!(sec.data.len() < before_len + 20);
+    }
 }

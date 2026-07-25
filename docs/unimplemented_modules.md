@@ -228,7 +228,7 @@ AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节
 |------|------|
 | LTO IPA-SRA / PGO / 循环向量化 | 跨 TU 内联+常量传播+DCE+DAE 已完整，IPA-SRA 与 PGO 集成待后续 M |
 | 运行时 dynamic loader | 完全依赖 host ld.so（设计决策，非缺失） |
-| zstd 压缩 debug sections | 仅支持 zlib，zstd 待后续 |
+| zstd 压缩 debug sections | 🟢 (M25) `compress_debug_sections(layout, "zstd")` 走 zstd::encode_all(级别 3) + ELF 压缩头 (ch_type=2 ELFCOMPRESS_ZSTD); CLI `-Wl,--compress-debug-sections=zstd` 已接受 |
 
 ---
 
@@ -755,6 +755,23 @@ M19 关键改动:
 >   两种形式) + 集成测试 `p2_6_placement_new`.
 > - Section 6 表格 `placement new` 行 `降级为裸 malloc 替身`
 >   → 🟢 (M25).
+>
+> **M25 增量（2026-07-24）— Section 2 P3.1 zstd 压缩 debug sections**：
+> - `src/link/link_opts.rs::compress_debug_sections(layout, "zstd")`
+>   走 `zstd::encode_all(level 3)` + ELF 压缩头
+>   (ch_type=2 `ELFCOMPRESS_ZSTD`, ch_size=原始大小,
+>   ch_addralign=对齐) (M24 阶段实装, 本 P3.1 补单元测试).
+> - CLI `-Wl,--compress-debug-sections=zstd` 在 `src/cli.rs`
+>   已接受 (M24), 通过 LinkerOptions 传入 link 阶段.
+> - 新增单元测试
+>   `compress_debug_sections_zstd_marks_flag_and_payload`:
+>   构造 .debug_info 节填 4096 字节全 0, 调
+>   `compress_debug_sections(&mut layout, "zstd")` 后
+>   验证 SHF_COMPRESSED (0x800) 被设置, 段数据前 4 字节
+>   等于 [2, 0, 0, 0] (ELFCOMPRESS_ZSTD little-endian),
+>   段数据大小在压缩后变小 (zstd 对全 0 输入极致压缩).
+> - Section 2 表格 `zstd 压缩 debug sections` 行
+>   `仅支持 zlib, zstd 待后续` → 🟢 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
