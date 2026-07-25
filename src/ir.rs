@@ -40,6 +40,10 @@ pub enum ExprKind {
     Index,
     Member(String),
     Call,
+    /// M25: `__builtin_va_arg(ap, T)` 在 aarch64/riscv64 后端
+    /// 需特殊处理 (走寄存器保存区, 跟普通 Call 区别开).
+    /// `ap` 保留 ap 变量名便于 codegen 查 var_map.
+    VaArg { ap: String },
     Conditional,
     Aggregate,
     SizeAlignOffset,
@@ -536,7 +540,13 @@ impl Lowering {
                         "E1005", "va_arg currently requires a va_list object", span.clone(),
                     ));
                 }
-                (ExprKind::Call, vec![self.lower_expr(ap)])
+                // M25: 用独立 ExprKind 保留 ap 名, 避免跟 f() 误判
+                let ap_name = if let Expr::Ident { name, .. } = ap.as_ref() {
+                    name.name.clone()
+                } else {
+                    String::new()
+                };
+                (ExprKind::VaArg { ap: ap_name }, Vec::new())
             }
             Expr::SizeofTy { .. } | Expr::AlignofTy { .. } | Expr::Offsetof { .. } => {
                 (ExprKind::SizeAlignOffset, Vec::new())

@@ -105,6 +105,7 @@ fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
         ExprKind::SizeAlignOffset => 13u8,
         ExprKind::ControlFlow => 14u8,
         ExprKind::Opaque => 15u8,
+        ExprKind::VaArg { .. } => 16u8,
     };
     out.push(kind_tag);
     // name / op tag
@@ -119,6 +120,11 @@ fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
         }
         ExprKind::Unary(op) => {
             out.push(unop_to_tag(*op));
+        }
+        ExprKind::VaArg { ap } => {
+            let n = ap.as_bytes();
+            out.extend_from_slice(&(n.len() as u32).to_le_bytes());
+            out.extend_from_slice(n);
         }
         _ => {}
     }
@@ -341,6 +347,12 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
         13 => ExprKind::SizeAlignOffset,
         14 => ExprKind::ControlFlow,
         15 => ExprKind::Opaque,
+        16 => {
+            let n = read_u32(data, cur)? as usize;
+            let ap = std::str::from_utf8(&data[*cur..*cur + n]).map_err(|e| e.to_string())?.to_string();
+            *cur += n;
+            ExprKind::VaArg { ap }
+        }
         _ => return Err(format!("bad expr kind {}", kind_tag)),
     };
     let ty = decode_type(data, cur)?;

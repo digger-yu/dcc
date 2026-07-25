@@ -849,6 +849,48 @@ M19 关键改动:
 >   自身不重新实现.
 > - Section 11 表格 `TLS dtv / TLS 描述符` 行
 >   `仅基础 tpoff 模型; R_TLSDESC_* 未实装` → 🟢 (M25).
+>
+> **M25 增量（2026-07-24）— AArch64 va_list / va_arg 帧布局**：
+> - `src/ir.rs::ExprKind` 新增 `VaArg { ap: String }` 变体:
+>   原先 `Expr::VaArg` 降级到 `ExprKind::Call { children: [ap] }`,
+>   与零参函数调用 `f()` 在 IR 层无法区分 (都是单 Local 子节点);
+>   新变体携带 ap 名字, 让后端可以明确判别变参读取路径.
+>   对应 `src/link/lto_bitcode.rs` 加 tag 16 serialize/deserialize
+>   路径 (在尾部, 不影响已有 0..15 tag 的 bitcode 兼容性).
+> - `src/codegen/aarch64.rs`:
+>   - 增 `is_current_func_variadic` / `va_save_base_off` / `va_offs` 三字段.
+>   - 增 `str_xt_sp` / `ldr_xt_sp` 两个 64 位通用寄存器
+>     store/load 帮助函数 (编码
+>     `str xN, [sp, #off]` = 0xF9000000 | (off/8)<<10 | 31<<5 | N).
+>   - `gen_function` 遇 `ast.is_variadic=true`:
+>     (1) `stack_bytes += 64` 预留 x0..x7 保存区;
+>     (2) 入口按 8 字节步进发出 8 条 `str xN, [sp, #off]`
+>         保存 x0..x7 到保存区 (后续 `va_arg` 直接从保存区读).
+>   - 增 `gen_va_start(ap)`: 计算 va_save_base 地址到 x9,
+>     8 字节 str 到 ap 局部 (ap_off 必须 8 字节对齐).
+>   - 增 `gen_va_arg_int(ap)`: 从保存区顺序读 `ldr w0, [sp, #off]`,
+>     `va_offs` 步进 8. 超出 8 个槽位发警告并返回 0.
+>   - 增 `gen_va_arg_float(ap)`: 暂走 stub (v0..v7 未保存),
+>     返回 0.0 + 警告, 留 Section 9 follow-up.
+>   - `gen_call` 增 `__builtin_va_start` / `__builtin_va_end` /
+>     `__builtin_va_copy` 名字识别, 不发出实际 `bl` 调用,
+>     转调对应 gen_va_* 帮助函数.
+>   - `gen_expr` / `gen_float_expr` 增 `ExprKind::VaArg { ap }` 分支
+>     分别路由到 int / float 路径.
+> - 增 2 个单元测试:
+>   - `aarch64_va_save_area_stores_x0_through_x7`:
+>     验证手动调 8 次 `str_xt_sp` 后 code 缓冲里有 8 条
+>     STR X (top byte 0xF9) 且 imm12 与 (16 + i*8) 匹配.
+>   - `aarch64_va_arg_int_reads_sequentially_from_save_area`:
+>     验证 3 次 `gen_va_arg_int` 发出 3 条 LDR W 指令,
+>     偏移按 0/8/16 递增, 且 `va_offs` 推进到 3.
+> - 限制: 当前实现仅支持前 8 个 GP 变参槽 (AAPCS64 x0..x7),
+>   浮点变参 (v0..v7) 与栈溢出变参 (>8 个) 暂未实装,
+>   留 Section 9 follow-up.
+> - Section 11 表格 `stdarg.h va_arg 跨平台` 行
+>   `🟠 x86-64 SysV 完整; aarch64 / riscv64 简化` →
+>   `🟠 x86-64 SysV 完整; aarch64 GP 槽 (x0..x7) 走保存区
+>   + 顺序读, 浮点 (v0..v7) 暂未保存; riscv64 简化`.
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个
@@ -1089,7 +1131,7 @@ M19 关键改动:
 | `char16_t` / `char32_t` (C11/C++11) | 🟢 (M23) 解析为 uint16/uint32 + u""/U"" 字符串 |
 | 原子混合大小（`atomic_load_explicit(_Atomic short*, ...)`） | 🟢 (M24) `__atomic_*` codegen 补齐 1/2 字节 (x86-64 编码: lock xadd/xchg/cmpxchg 8/16 位变体 + sil/si/dx/dl 子寄存器 + movzx 零扩展返回值) |
 | `stdatomic.h` 全部 (`atomic_flag` / `atomic_signal_fence`) | 🟢 (M24) `atomic_signal_fence` 走 `__asm__ volatile("" ::: "memory")` 编译器屏障; `atomic_thread_fence` 同实现; `atomic_flag` 走现有 builtin 路径 |
-| `stdarg.h` va_arg 跨平台 | 🟠 x86-64 SysV 完整；aarch64 / riscv64 简化 |
+| `stdarg.h` va_arg 跨平台 | 🟠 x86-64 SysV 完整；aarch64 GP 槽 (x0..x7) 走保存区 + 顺序读，浮点 (v0..v7) 暂未保存；riscv64 简化 |
 
 ---
 
