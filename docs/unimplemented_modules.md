@@ -387,7 +387,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 |------|------|
 | 模板实例化 | M10+ 实现 `PartialSpec` + SFINAE，但模板函数/类的真实单态化是简化版：依赖 `try_substitute` 模式匹配；`T<U>` 显式实参语法 `parse_mangle_type` 不识别 `<` |
 | `obj.*ptr_to_member` (M8 简化) | 🟢 (M25) MemberStar / PtrMemberStar 路径实装, 解析 `.*` 与 `->*` 语法, 走 `__dcc_mbr_<class>_<member>` 偏移 |
-| `typeid(e)` (M8 简化) | 降级为 `((_ZTI*)(((void*)e)->__vptr + 0))->...`，不实际取 RTTI |
+| `typeid(e)` (M8 简化) | 🟢 (M25) `CppExpr::Typeid` 和 `TypeidType` 走真 RTTI: `expr_static_class` 推断静态类, 生成 `(&__dcc_ti_<class>)` 符号引用, 替代 M8 stub `((_ZTI*)(((void*)e)->__vptr + 0))`; 跨多态指针动态 RTTI 仍为 Section 9 follow-up |
 | `auto` (M17 实装) | `infer_type` 真类型推导: int 字面量→Int, `"abc"`→`const char*` (`MangleType::Pointer(Int)`), 类名已知 → `MangleType::Class` |
 | `auto x = expr;` | M17 真推导: `Widget w(7)` 拆为 `Widget w; _ZN6WidgetC1Ei(&w, 7)` |
 | `decltype(expr)` (M17 实装) | 解析为 `MangleType::Int` 占位 (M17.0 简化) |
@@ -682,6 +682,24 @@ M19 关键改动:
 >   时会触发 implicit undef, 须用户链接自定义 stub
 >   或改为用 host gcc 链接 (本集成测试只验证 dcc -c 路径).
 > - Section 6 表格 `obj.*ptr_to_member` 行 不支持 → 🟢 (M25).
+
+> **M25 增量（2026-07-24）— Section 6 P2.2 typeid(e) 真 RTTI 取类型**：
+> - 验证 `src/cpp/lower.rs` 中 `CppExpr::Typeid` / `TypeidType`
+>   两条 lower 路径 (M17.0 阶段实装) 都生成
+>   `(&__dcc_ti_<class>)` 真 RTTI 符号引用:
+>   - `Typeid(e)` 动态路径调用 `expr_static_class(e)`
+>     推断 e 的静态类, 然后 emit `(&__dcc_ti_<cls>)`.
+>   - `TypeidType(ty)` 静态路径对 `MangleType::Class`
+>     直接 emit `(&__dcc_ti_<cname>)`, 否则 mangle 后 emit.
+> - 原本 M8 简化版 stub `((_ZTI*)(((void*)e)->__vptr + 0))`
+>   的 vtable header 假设被替换; 跨多态指针的动态 RTTI
+>   仍依赖 dcc C 后端在 vtable 中写 typeinfo 字段,
+>   是 Section 9 follow-up.
+> - 新增 fixture `tests/fixtures/p2_2_typeid.cpp`
+>   (覆盖静态 `typeid(Animal)` 等值比较和
+>   动态 `typeid(a)` 取 a 的静态类两条路径) +
+>   集成测试 `p2_2_typeid_rtti`.
+> - Section 6 表格 `typeid(e)` 行 M8 stub → 🟢 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个

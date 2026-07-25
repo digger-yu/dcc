@@ -747,7 +747,8 @@ fn global_asm_exports_symbol() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-gasm-{}.c", std::process::id()));
     let out_path = dir.join(format!("dcc-gasm-{}.o", std::process::id()));
-    let source = "asm(\".globl global_marker\\nglobal_marker:\\n\");\nint main(void) { return 0; }\n";
+    let source = "asm(\".globl global_marker\nglobal_marker:\n\");\nint main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write asm fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(&out_path)
@@ -3851,6 +3852,23 @@ fn p2_1_member_ptr_dotstar() {
     assert!(
         out.status.success(),
         "p2_1_member_ptr compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// P2.2: typeid(e) 真 RTTI 取类型 (Section 6). 验证 dcc lower
+/// 阶段为 `typeid(T)` 静态路径和 `typeid(e)` 动态路径都生成
+/// `(&__dcc_ti_<class>)` 真实 typeinfo 符号 (M17.0 阶段实装),
+/// 而非 M8 简化版的 `((_ZTI*)(((void*)e)->__vptr + 0))` stub.
+#[test]
+#[cfg(unix)]
+fn p2_2_typeid_rtti() {
+    let src = include_str!("fixtures/p2_2_typeid.cpp");
+    let (out, obj) = run_cpp_object_test("p2-2-typeid", src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        out.status.success(),
+        "p2_2_typeid compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
