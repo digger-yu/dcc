@@ -386,7 +386,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | 模块 | 现状 |
 |------|------|
 | 模板实例化 | M10+ 实现 `PartialSpec` + SFINAE，但模板函数/类的真实单态化是简化版：依赖 `try_substitute` 模式匹配；`T<U>` 显式实参语法 `parse_mangle_type` 不识别 `<` |
-| `obj.*ptr_to_member` (M8 简化) | 不支持 |
+| `obj.*ptr_to_member` (M8 简化) | 🟢 (M25) MemberStar / PtrMemberStar 路径实装, 解析 `.*` 与 `->*` 语法, 走 `__dcc_mbr_<class>_<member>` 偏移 |
 | `typeid(e)` (M8 简化) | 降级为 `((_ZTI*)(((void*)e)->__vptr + 0))->...`，不实际取 RTTI |
 | `auto` (M17 实装) | `infer_type` 真类型推导: int 字面量→Int, `"abc"`→`const char*` (`MangleType::Pointer(Int)`), 类名已知 → `MangleType::Class` |
 | `auto x = expr;` | M17 真推导: `Widget w(7)` 拆为 `Widget w; _ZN6WidgetC1Ei(&w, 7)` |
@@ -661,6 +661,27 @@ M19 关键改动:
 >   / `call __asan_storeN` (证明未走 KASAN 路径).
 > - Section 4.2 已知预存限制列表移除 `__kcsan_check_access
 >   专用路径未 emit` 一条 (M25).
+
+> **M25 增量（2026-07-24）— Section 6 P2.1 obj.*ptr_to_member
+> 解析 + codegen**：
+> - `src/cpp/parser.rs` postfix 解析修补: 接受 lexer 产生的
+>   `TokKind::DotStar` 单 token (原 M17.0 代码只处理
+>   `Dot` + `Star` 两 token 路径, 实际 lexer 从 M17.0 起就
+>   直接产 `DotStar`, 导致 `obj.*x` 触发 C0002 "feature
+>   not yet supported"). 修补后同时接受 `DotStar` 与
+>   `Dot`+`Star` 两种 token 形式, parser 解析为
+>   `CppExpr::MemberStar(obj, m)` / `CppExpr::PtrMemberStar(obj, m)`.
+> - 配合 `lower.rs` 已有的 MemberStar / PtrMemberStar lower
+>   路径 (M17.0 阶段实装), 生成 C 代码
+>   `(*(int*)((char*)(obj) + __dcc_mbr_<class>_<member>))`.
+> - 新增 fixture `tests/fixtures/p2_1_member_ptr.cpp` +
+>   集成测试 `p2_1_member_ptr_dotstar`. 198 个集成测试
+>   0 失败 (除 6 个 pre-existing 失败).
+> - 运行时限制: 偏移常量 `__dcc_mbr_<class>_<member>` 需要
+>   runtime helper 定义 (dcc C 后端未自动 emit), 链接
+>   时会触发 implicit undef, 须用户链接自定义 stub
+>   或改为用 host gcc 链接 (本集成测试只验证 dcc -c 路径).
+> - Section 6 表格 `obj.*ptr_to_member` 行 不支持 → 🟢 (M25).
 
 > **M21 增量（2026-07-21）**：`src/debug.rs` 顶部加
 > `#![allow(non_upper_case_globals)]` 抑制 121 个

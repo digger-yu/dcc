@@ -2936,16 +2936,26 @@ impl<'a> CppParser<'a> {
                 }
                 continue;
             }
-            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Dot, .. }))) {
-                self.bump();
+            if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Dot, .. }))
+                | Some(CppTok::C(Tok { kind: TokKind::DotStar, .. })))
+            {
                 // M17.0: `.*` 成员指针访问 (区别于 `.` 成员访问)
-                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Star, .. }))) {
+                // P2.1: 接受 lexer 产生的 `DotStar` 单 token 以及
+                // 手动合成的 `Dot` + `Star` (老路径).
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::DotStar, .. }))) {
                     self.bump();
                     let m = self.expect_ident()?;
                     e = CppExpr::MemberStar(Box::new(e), m);
                 } else {
-                    let m = self.expect_ident()?;
-                    e = CppExpr::Member(Box::new(e), m);
+                    self.bump();
+                    if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Star, .. }))) {
+                        self.bump();
+                        let m = self.expect_ident()?;
+                        e = CppExpr::MemberStar(Box::new(e), m);
+                    } else {
+                        let m = self.expect_ident()?;
+                        e = CppExpr::Member(Box::new(e), m);
+                    }
                 }
                 continue;
             }
