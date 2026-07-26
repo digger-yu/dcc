@@ -1777,6 +1777,27 @@ fn object_size_builtin_run_returns_zero() {
     assert_eq!(rc, 0, "object_size_builtin should return 0, got {rc}");
 }
 
+/// cast 表达式内部带 __attribute__((vector_size(N))) 修饰
+/// 场景: libiberty/sha1.c 的 HAVE_X86_SHA1_HW_SUPPORT 路径
+///       以及 GCC 内部头文件常见用法
+/// 验证: dcc 解析 ((__attribute__((__vector_size__ (16))) int) &x)
+///       不再报 "expected ')', got KwInt", 且运行时能正确取值.
+#[test]
+fn vector_size_cast_in_expression_run_returns_zero() {
+    let source = include_str!("fixtures/vector_size_cast_in_expr.c");
+    let (output, exe) = run_compile_and_run("vector-size-cast-in-expr", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(
+        rc, 0,
+        "vector_size_cast_in_expression should return 0, got {rc}"
+    );
+}
+
 /// __builtin_object_size FORTIFY 模式（数组/成员）
 #[test]
 fn builtin_object_size_fortify_run_returns_zero() {
@@ -3581,15 +3602,10 @@ fn setjmp_x86_64_eh_frame_has_cfi_ops() {
     assert!(found_rip, "FDE should embed DW_CFA_offset(%rip, 1)");
 
     // 验证 CIE 使用 LSB CIE_id = 0
-    // .eh_frame CIE 起始: 4 字节 length + 4 字节 CIE_id
-    // dcc 当前生成 length=12, CIE_id=0 (LSB), 不再是 DWARF 0xFFFFFFFF
-    let mut found_lsb_cie = false;
-    for off in 0..obj.len().saturating_sub(8) {
-        if obj[off..off + 4] == [0x0c, 0, 0, 0] && obj[off + 4..off + 8] == [0, 0, 0, 0] {
-            found_lsb_cie = true;
-            break;
-        }
-    }
+    // CIE 起始 8 字节特征: CIE_id=0 (4 字节零) + version=1 + "zR" augmentation
+    // 头. 在整个 .o 中查找这一特征序列以确认 LSB CIE_id (不是 DWARF 0xFFFFFFFF).
+    let cie_sig: [u8; 7] = [0, 0, 0, 0, 1, 0x7a, 0x52];
+    let found_lsb_cie = obj.windows(cie_sig.len()).any(|w| w == cie_sig);
     assert!(found_lsb_cie, ".eh_frame CIE should use LSB CIE_id=0");
 }
 

@@ -3031,7 +3031,14 @@ impl<'a> Parser<'a> {
                 self.parse_postfix_suffix(e, sp)
             }
             TokKind::LParen if self.is_cast() => {
-                self.advance(); let ty = self.parse_type()?;
+                self.advance();
+                // 在 cast 中可能出现位于 type 之前的 __attribute__((...)) 修饰符,
+                // 例如 (__attribute__((__vector_size__ (16))) int)x. 在 parse_type 之前先剖离,
+                // 避免与 is_type_start(含 typedefs/修饰符) 冲突.
+                while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                    self.skip_attributes();
+                }
+                let ty = self.parse_type()?;
                 // 函数指针强制转换: (type (*)(params))expr
                 // 解析完类型后, 检查是否是 (* 模式
                 if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
@@ -3144,7 +3151,8 @@ impl<'a> Parser<'a> {
                 | TokKind::KwInt128
                 | TokKind::KwUInt128
         ) || (self.peek.kind == TokKind::Ident
-            && Self::is_type_specifier_ident(&self.peek.text, &self.typedefs))
+            && (Self::is_type_specifier_ident(&self.peek.text, &self.typedefs)
+                || self.peek.text == "__attribute__" || self.peek.text == "__vector_size__"))
     }
 
     fn parse_postfix(&mut self) -> Option<Expr> {
