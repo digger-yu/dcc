@@ -284,6 +284,8 @@ impl<'a> Parser<'a> {
     ///   - 同类型: 允许
     ///   - 函数体内: 允许 (嵌套块遮蔽 / 遮蔽全局)
     ///   - 文件作用域且不同类型: 报 E0007
+    /// 例外: `extern struct gstr x;` (不完整) + `struct gstr x;` (完整
+    /// 定义) 是合法 C (从声明变为定义). 跳过该情形.
     fn check_var_redecl(&mut self, name: &str, ty: &Type, span: Span) -> bool {
         if let Some(existing) = self.locals.get(name) {
             if existing == ty {
@@ -292,6 +294,24 @@ impl<'a> Parser<'a> {
             // 函数体内允许遮蔽 (嵌套块 / 遮蔽全局)
             if self.in_function {
                 return true;
+            }
+            // 允许不完整 -> 完整的重定义: 例如内核 lkc.h 提供了
+            //   extern struct gstr autoconf_cmd;
+            // confdata.c 中以非 extern 形式提供了完整定义
+            //   struct gstr autoconf_cmd;
+            // C 标准允许多次声明只要不是定义, 后续有 extern 前缀
+            // 时是重复声明, 没有 extern 时是该变量的唯一定义.
+            // 判定: 类型名相同且现有类型字段为空 (不完整) 时
+            // 跳过检查, 以新类型为准.
+            if let (Type::Struct(en, e_fields), Type::Struct(nn, n_fields)) = (existing, ty) {
+                if en == nn && e_fields.is_empty() && !n_fields.is_empty() {
+                    return true;
+                }
+            }
+            if let (Type::Union(en, e_fields), Type::Union(nn, n_fields)) = (existing, ty) {
+                if en == nn && e_fields.is_empty() && !n_fields.is_empty() {
+                    return true;
+                }
             }
             // 文件作用域且类型不匹配: 报 E0007
             self.diags.push(Diagnostic::err(
@@ -1140,9 +1160,18 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::Comma {
             self.advance();
             if self.cur.kind == TokKind::StringLit {
-                message = String::from_utf8_lossy(&parse_str(&self.cur.text))
+                let mut buf = String::from_utf8_lossy(&parse_str(&self.cur.text))
                     .trim_end_matches('\0').to_string();
                 self.advance();
+                // C 允许相邻字符串字面量拼接: "foo" "bar" → "foobar"
+                // 内核的 BUILD_BUG_ON_MSG 宏会用到 "..." " is true" 形式.
+                while self.cur.kind == TokKind::StringLit {
+                    let more = String::from_utf8_lossy(&parse_str(&self.cur.text))
+                        .trim_end_matches('\0').to_string();
+                    buf.push_str(&more);
+                    self.advance();
+                }
+                message = buf;
             } else {
                 self.err_here("E0012", "expected string literal in _Static_assert",
                     Some("the second argument must be a diagnostic string"));
@@ -1388,13 +1417,8 @@ impl<'a> Parser<'a> {
             let sp = name.span.clone();
             return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None, is_retain: false, is_used_attr: false })]);
         }
-        // `char const *p`：const 在基类型之后、* 之前，须先于 parse_ptr_suffix 跳过
-        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
-            || (self.cur.kind == TokKind::Ident
-                && matches!(self.cur.text.as_str(), "__const__" | "__volatile__" | "__restrict__"))
-        {
-            self.advance();
-        }
+        // 限定符在基类型与 * 之间 (如 const, __seg_gs 等)
+        self.skip_ptr_qualifiers();
         // void __attribute__(...) *fn(): 基本类型后的属性在 specifiers_only 路径下会残留
         self.skip_attributes();
         let ty = self.parse_ptr_suffix(ty);
@@ -1641,13 +1665,8 @@ impl<'a> Parser<'a> {
         if specifiers_only {
             return ty;
         }
-        // `char const *p`：限定符可在基类型与 * 之间（C 声明符语法）
-        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
-            || (self.cur.kind == TokKind::Ident
-                && matches!(self.cur.text.as_str(), "__const__" | "__volatile__" | "__restrict__"))
-        {
-            self.advance();
-        }
+        // 限定符可在基类型与 * 之间 (C 声明符语法); 也可出现地址空间限定符
+        self.skip_ptr_qualifiers();
         self.parse_ptr_suffix(ty)
     }
 
@@ -2100,7 +2119,9 @@ impl<'a> Parser<'a> {
     fn skip_ptr_qualifiers(&mut self) {
         while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwAtomic | TokKind::KwRestrict)
             || (self.cur.kind == TokKind::Ident
-                && matches!(self.cur.text.as_str(), "__restrict__" | "__const__" | "__volatile__" | "__attribute__" | "_ms_restrict" | "_restrict"))
+                && matches!(self.cur.text.as_str(),
+                    "__restrict__" | "__const__" | "__volatile__" | "__attribute__" | "_ms_restrict" | "_restrict"
+                    | "__seg_gs" | "__seg_fs" | "__seg_ds" | "__seg_es" | "__seg_cs" | "__seg_ss"))
         {
             if self.cur.text == "__attribute__" { self.skip_attributes(); }
             else { self.advance(); }
@@ -2108,7 +2129,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_ptr_suffix(&mut self, mut ty: Type) -> Type {
-        while self.cur.kind == TokKind::Star {
+        loop {
+            // 在 * 之前可能出现的地址空间限定符 (如 __seg_gs)
+            self.skip_ptr_qualifiers();
+            if self.cur.kind != TokKind::Star { break; }
             self.advance();
             self.skip_ptr_qualifiers();
             ty = Type::Ptr(Box::new(ty));
@@ -2265,6 +2289,17 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
+            // C11: _Static_assert(expr, msg) 可以作为 struct/union 成员
+            // (用于内核的 compile-time 断言). 解析后丢弃, 不影响布局.
+            if self.cur.kind == TokKind::Ident && self.cur.text == "_Static_assert" {
+                let _ = self.parse_static_assert();
+                continue;
+            }
+            // C23 static_assert 同义
+            if self.cur.kind == TokKind::Ident && self.cur.text == "static_assert" {
+                let _ = self.parse_static_assert();
+                continue;
+            }
             let spec = match self.parse_decl_specifiers() {
                 Some(t) => t,
                 None => { self.advance(); continue; }
@@ -2367,6 +2402,37 @@ impl<'a> Parser<'a> {
     fn parse_ident(&mut self) -> Option<Ident> {
         if self.cur.kind != TokKind::Ident { self.err_here("E0004", format!("expected identifier, got {:?}", self.cur.kind), Some("identifiers must start with a letter or '_'")); return None; }
         let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id)
+    }
+
+    /// 解析一个或多个链式 designator: .a 或 .a.b.c 或 [0] 或 [0].a.b
+    /// 返回单元素 (Field/Index) 或 Chain (多个).
+    /// ISO C99 6.7.8/19: chain 顺序应用于子对象定位, 例如
+    ///   struct { union { int x; int y; } u; } s = { .u.x = 1 };
+    fn parse_designator(&mut self) -> Option<Designator> {
+        let mut chain: Vec<Designator> = Vec::new();
+        loop {
+            if self.cur.kind == TokKind::Dot {
+                self.advance();
+                let field = self.parse_ident()?;
+                chain.push(Designator::Field(field));
+            } else if self.cur.kind == TokKind::LBracket {
+                self.advance();
+                let idx = self.parse_expr()?;
+                if !self.expect(TokKind::RBracket, "']'") { return None; }
+                chain.push(Designator::Index(idx));
+            } else {
+                break;
+            }
+        }
+        if chain.is_empty() {
+            self.err_here("E0004", "expected designator ('.' or '[')", None);
+            return None;
+        }
+        if chain.len() == 1 {
+            Some(chain.into_iter().next().unwrap())
+        } else {
+            Some(Designator::Chain(chain))
+        }
     }
 
     fn parse_params(&mut self) -> Option<Vec<Param>> {
@@ -2545,6 +2611,14 @@ impl<'a> Parser<'a> {
     /// 声明上下文允许把 `unknown_type value` 交给 parse_type 产生精确诊断，
     /// 但表达式中的 `(value * other)` 不能因此被误判为类型名。
     fn is_decl_start(&self) -> bool {
+        // __attribute__: 在语句起始位置永远是声明 (gcc 扩展). 例如
+        // 内核 BUILD_BUG_ON 宏展开: do { __attribute__((__noreturn__))
+        // extern void f(void) __attribute__((__error__("..."))); ... } while (0)
+        // 若不识别 __attribute__ 为声明起始, 解析器会落入 expression 分支
+        // 而报 "expected ';', got KwExtern".
+        if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+            return true;
+        }
         self.is_type_start()
             || (self.cur.kind == TokKind::Ident
                 && self.cur.text != "_Generic"
@@ -3038,7 +3112,27 @@ impl<'a> Parser<'a> {
                 while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
                     self.skip_attributes();
                 }
-                let ty = self.parse_type()?;
+                let mut ty = self.parse_type()?;
+                // 解析完类型后, 类型与 * 之间可能出现 __attribute__((...)) 修饰符与
+                // 多个 * 指针, 例如内核 percpu 的
+                //   (typeof(*(p)) __attribute__((force))
+                //    __attribute__((address_space(0))) *)p.
+                // 循环处理: 每轮先剥除 attribute 和地址空间限定符 (如 __seg_gs),
+                // 然后吃掉一个 *, 直到遇到 ( 或 ).
+                loop {
+                    while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                        self.skip_attributes();
+                    }
+                    // 跳过地址空间限定符 (如 __seg_gs), 它们出现在类型和 * 之间
+                    self.skip_ptr_qualifiers();
+                    if self.cur.kind == TokKind::Star {
+                        self.advance();
+                        self.skip_ptr_qualifiers();
+                        ty = Type::Ptr(Box::new(ty));
+                        continue;
+                    }
+                    break;
+                }
                 // 函数指针强制转换: (type (*)(params))expr
                 // 解析完类型后, 检查是否是 (* 模式
                 if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
@@ -3562,12 +3656,14 @@ impl<'a> Parser<'a> {
                             self.advance(); // 跳过 {
                             let mut inits = Vec::new();
                             while self.cur.kind != TokKind::RBrace {
-                                let item = if self.cur.kind == TokKind::Dot {
-                                    self.advance();
-                                    let field = self.parse_ident()?;
+                                let item = if self.cur.kind == TokKind::Dot
+                                    || self.cur.kind == TokKind::LBracket
+                                {
+                                    // 指定初始化器 (支持链式: .a.b.c / [0].field)
+                                    let designator = self.parse_designator()?;
                                     if !self.expect(TokKind::Assign, "'='") { return None; }
                                     let value = self.parse_expr_bp(2)?;
-                                    InitItem::Designated { designator: Designator::Field(field), value }
+                                    InitItem::Designated { designator, value }
                                 } else {
                                     let e = self.parse_expr_bp(2)?;
                                     InitItem::Expr(e)
@@ -3588,25 +3684,18 @@ impl<'a> Parser<'a> {
                 Some(e)
             }
             TokKind::LBrace => {
-                // 初始化列表: {1, 2, 3} 或 {.x = 1, .y = 2}
+                // 初始化列表: {1, 2, 3} 或 {.x = 1, .y = 2} 或 {.a.b.c = 1, [0].x = 2}
                 self.advance();
                 let mut inits = Vec::new();
                 while self.cur.kind != TokKind::RBrace {
-                    let item = if self.cur.kind == TokKind::Dot {
-                        // 指定初始化器: .field = value
-                        self.advance();
-                        let field = self.parse_ident()?;
+                    let item = if self.cur.kind == TokKind::Dot
+                        || self.cur.kind == TokKind::LBracket
+                    {
+                        // 指定初始化器 (支持链式: .a.b.c / [0].field)
+                        let designator = self.parse_designator()?;
                         if !self.expect(TokKind::Assign, "'='") { return None; }
                         let value = self.parse_expr_bp(2)?;
-                        InitItem::Designated { designator: Designator::Field(field), value }
-                    } else if self.cur.kind == TokKind::LBracket {
-                        // 数组指定初始化器: [idx] = value
-                        self.advance();
-                        let idx = self.parse_expr()?;
-                        if !self.expect(TokKind::RBracket, "']'") { return None; }
-                        if !self.expect(TokKind::Assign, "'='") { return None; }
-                        let value = self.parse_expr_bp(2)?;
-                        InitItem::Designated { designator: Designator::Index(idx), value }
+                        InitItem::Designated { designator, value }
                     } else {
                         // 普通初始化值
                         let e = self.parse_expr_bp(2)?;

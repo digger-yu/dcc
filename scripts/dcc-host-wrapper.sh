@@ -134,7 +134,9 @@ if [[ -n "$out" && "$src" == *.c ]]; then
         esac
     done
     "$DCC_BIN" "${compile[@]}"
-    "$HOST_LD" -o "$out" "$tmp_o"
+    # 用 -no-pie 跳过 ld 默认的 PIE 检查 (dcc .o 含绝对 32 位重定位,
+    # 与 ld --pie 不兼容, 常见于 kernel 宿主工具 relocs_32/genksyms 等).
+    "$HOST_LD" -no-pie -o "$out" "$tmp_o"
     # 将 .d 文件中的临时 .o 目标名替换为最终输出名，供 fixdep 解析
     if [[ -n "${depfile:-}" && -f "$depfile" ]]; then
         tmp_base="$(basename "$tmp_o")"
@@ -145,4 +147,4 @@ if [[ -n "$out" && "$src" == *.c ]]; then
     exit 0
 fi
 
-exec "$HOST_LD" "$@"
+exec "$HOST_LD" -no-pie "$@"

@@ -32,6 +32,7 @@ pub struct Config {
     pub link_mode: bool,    // -r 合并 .o（依赖 host ld/objcopy，非内置链接器）
     pub emit_asm: bool,     // -S: 输出汇编文本 .s
     pub preprocess_only: bool, // -E: 只做预处理
+    pub dump_macros: bool,     // -dM: 预处理后输出所有宏定义
     pub force_includes: Vec<String>, // -include file: 强制包含文件
     pub pch_opts: crate::preproc::PchOptions, // PCH (预编译头): -fpch-include / -fpch-create
     pub syntax_only: bool, // -fsyntax-only: 只做语法检查, 不生成代码
@@ -286,6 +287,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut relocatable = false;
     let mut emit_asm = false;
     let mut preprocess_only = false;
+    let mut dump_macros = false;
     let mut force_includes: Vec<String> = vec![];
     let mut pch_opts = crate::preproc::PchOptions::default();
     let mut syntax_only = false;
@@ -354,6 +356,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-c" => { relocatable = true; }
             "-S" => { emit_asm = true; }
             "-E" => { preprocess_only = true; }
+            "-dM" => { dump_macros = true; }
             "-pipe" => {} // GCC -pipe: 使用管道代替临时文件，DCC 忽略
             "-r" => { relocatable = true; relocatable_link = true; } // -r: 可重定位 .o 合并
             // 内置链接器开关
@@ -807,6 +810,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-fno-asynchronous-unwind-tables" | "-fno-unwind-tables"
             | "-fno-plt" | "-fno-strict-overflow" | "-ftrivial-auto-var-init=zero"
             | "-falign-jumps=1" | "-falign-loops=1" | "-fshort-wchar" => {}
+            // GCC 警告/诊断类选项 - 接受但忽略
+            "-pedantic" | "-pedantic-errors" | "-ansi" | "-traditional"
+            | "-trigraphs" | "-Wmissing-prototypes" | "-Wstrict-prototypes"
+            | "-Wold-style-definition" | "-Wmissing-format-attribute"
+            | "-Wno-long-long" | "-Wc++-compat" | "-Wcast-qual" => {}
+            // GCC -U 取消宏定义 - 接受但忽略（预处理阶段已处理）
+            a if a.starts_with("-U") => {}
+            // -fcf-protection: 控制流保护 - 接受但忽略
+            "-fcf-protection" | "-fcf-protection=none" | "-fcf-protection=full"
+            | "-fcf-protection=branch" | "-fcf-protection=return" => {}
+            // -Wshadow=*: 接受但忽略
+            a if a.starts_with("-Wshadow") => {}
             "-P" => {} // 抑制 #line 指令，DCC 预处理器本身就不输出它们
             // -W* 警告选项 - 忽略
             a if a.starts_with("-W") => {}
@@ -1006,7 +1021,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         if !link_rpath.is_empty() { all_link_opts.rpath = Some(link_rpath.join(":")); }
         if !link_runpath.is_empty() { all_link_opts.runpath = Some(link_runpath.join(":")); }
         all_link_opts.rpath_link = link_rpath_link.clone();
-        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, force_includes, pch_opts, syntax_only,
+        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, dump_macros, force_includes, pch_opts, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,
@@ -1046,7 +1061,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         }
         let parallel_codegen = opt >= 2
             && std::env::var("DCC_NO_PARALLEL").is_err();
-        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode: false, emit_asm, preprocess_only, force_includes, pch_opts, syntax_only,
+        Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode: false, emit_asm, preprocess_only, dump_macros, force_includes, pch_opts, syntax_only,
             dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,

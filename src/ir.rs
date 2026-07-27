@@ -608,6 +608,12 @@ fn is_static_initializer(expr: &Expr) -> bool {
                     let index_ok = match designator {
                         ast::Designator::Field(_) => true,
                         ast::Designator::Index(e) => const_eval::eval(e).is_ok(),
+                        // 链式 designator: 全部 Index 都要能常量求值, Field 始终 OK
+                        ast::Designator::Chain(items) => items.iter().all(|d| match d {
+                            ast::Designator::Field(_) => true,
+                            ast::Designator::Index(e) => const_eval::eval(e).is_ok(),
+                            ast::Designator::Chain(_) => false,
+                        }),
                     };
                     index_ok && is_static_initializer(value)
                 }

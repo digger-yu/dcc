@@ -2412,6 +2412,210 @@ fn attr_no_sanitize_compile_and_run() {
     let _ = fs::remove_file(exe);
 }
 
+/// GCC 接受 `__attribute` (无尾部双下划线) 作为 `__attribute__` 的简写.
+/// linux 7.1 的 __noinstr_section() 误用此写法，dcc 需要支持.
+/// 验证两种写法产生的 ELF section 相同.
+#[test]
+#[cfg(unix)]
+fn attr_no_trailing_underscore_alias() {
+    let source = r#"
+__attribute((__section__(".kernel_alias_test"))) int kernel_var = 42;
+__attribute__((__section__(".kernel_alias_test"))) int canonical_var = 7;
+int sum(void) { return kernel_var + canonical_var; }
+"#;
+    let (out, obj) = run_object_test("attr-alias", source);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let objdump_out = Command::new("objdump")
+        .args(["-h", obj.to_str().unwrap()])
+        .output()
+        .expect("objdump");
+    let sec = String::from_utf8_lossy(&objdump_out.stdout);
+    assert!(sec.contains(".kernel_alias_test"),
+        "section .kernel_alias_test missing: {sec}");
+    let _ = fs::remove_file(obj);
+}
+
+/// `-dM`: 预处理后输出所有宏定义. Linux 内核的编译器探测脚本依赖此标志.
+/// 验证: dcc 内置宏 + 用户 -D 都在输出里.
+#[test]
+fn dM_flag_emits_all_macros() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-dM-{}.c", std::process::id()));
+    fs::write(&src, "int x = 1;").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E", "-dM", "-DUSER_MACRO=42", "-x", "c", src.to_str().unwrap()])
+        .output()
+        .expect("run dcc -dM");
+    let _ = fs::remove_file(&src);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("#define __DCC__ 1"), "missing __DCC__: {text}");
+    assert!(text.contains("#define __GNUC__"), "missing __GNUC__: {text}");
+    assert!(text.contains("#define USER_MACRO 42"), "missing USER_MACRO: {text}");
+}
+
+/// ISO C 6.10.2: `#include pp-tokens` 形式应先做宏展开.
+/// Linux kernel 大量使用 `#include TRACE_INCLUDE(TRACE_INCLUDE_FILE)`.
+/// 验证: 自定义宏展开后能被正确解析为 <file> 形式.
+#[test]
+fn include_macro_expansion() {
+    let dir = std::env::temp_dir().join(format!("dcc-inc-macro-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let header = dir.join("inc_target.h");
+    fs::write(&header, "int inc_target_value = 1234;\n").unwrap();
+    let main_src = dir.join("main.c");
+    fs::write(&main_src, r#"
+#define HEADER_PATH inc_target.h
+#define INCLUDE_HDR(x) <x>
+#include INCLUDE_HDR(HEADER_PATH)
+int main(void) { return inc_target_value; }
+"#).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E", "-I", dir.to_str().unwrap(), main_src.to_str().unwrap()])
+        .output()
+        .expect("run dcc -E");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("inc_target_value"),
+        "include macro expansion failed: {text}");
+    let _ = fs::remove_file(&header);
+    let _ = fs::remove_file(&main_src);
+    let _ = fs::remove_dir(&dir);
+}
+
+/// C 宏的 `#param` 字符串化 (stringification) 应在 `##` 后面也能正确工作.
+/// Linux kernel `SAVE_SEGMENT(seg)` 宏同时使用 `__savesegment_##seg` 和 `"%%" #seg`,
+/// 之前的实现遇到 `##seg` 后会停止扫描, 导致 `#seg` 未被展开.
+#[test]
+fn stringify_after_paste() {
+    let src = r#"
+#define SAVE_SEGMENT(seg)              \
+static inline unsigned long __savesegment_##seg(void) \
+{                                      \
+    unsigned long v;                   \
+    asm volatile("movl %%" #seg ",%k0" : "=r" (v)); \
+    return v;                          \
+}
+SAVE_SEGMENT(ds)
+SAVE_SEGMENT(cs)
+int main(void) { return (int)(__savesegment_ds() + __savesegment_cs()); }
+"#;
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E", "-x", "c", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn dcc");
+    child.stdin.as_mut().unwrap().write_all(src.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    // #ds / #cs 应被字符串化为 "ds" / "cs"
+    assert!(text.contains("\"ds\""), "stringify 'ds' missing: {text}");
+    assert!(text.contains("\"cs\""), "stringify 'cs' missing: {text}");
+    // ## 应被令牌拼接
+    assert!(text.contains("__savesegment_ds"), "paste 'ds' missing: {text}");
+    assert!(text.contains("__savesegment_cs"), "paste 'cs' missing: {text}");
+}
+
+/// 链式 designated initializer (ISO C99 6.7.8/19: `.a.b.c` 或 `[0].field`).
+/// 用于 Linux kernel `_ddebug.key.dd_key_true = ...` 初始化 union 成员.
+#[test]
+fn chained_designator_init() {
+    use std::io::Write;
+    let src = r#"
+struct inner1 { int a; int b; };
+struct inner2 { int x; struct inner1 sub; };
+struct outer {
+    int tag;
+    union {
+        struct inner1 k1;
+        struct inner2 k2;
+    } u;
+};
+int main(void) {
+    struct outer s1 = { .tag = 7, .u.k2.x = 11, .u.k2.sub.a = 22, .u.k2.sub.b = 33 };
+    if (s1.tag != 7) return 1;
+    if (s1.u.k2.x != 11) return 2;
+    if (s1.u.k2.sub.a != 22) return 3;
+    if (s1.u.k2.sub.b != 33) return 4;
+    // 数组中的链式 designator
+    struct inner1 arr[3] = { [0].a = 100, [1].b = 200, [2].a = 300 };
+    if (arr[0].a != 100 || arr[0].b != 0) return 5;
+    if (arr[1].a != 0 || arr[1].b != 200) return 6;
+    if (arr[2].a != 300 || arr[2].b != 0) return 7;
+    return 0;
+}
+"#;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-x", "c", "-o", "/tmp/chained.o", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn dcc");
+    child.stdin.as_mut().unwrap().write_all(src.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(),
+        "chained designator compile failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file("/tmp/chained.o");
+}
+
+/// 前向声明 + 同 TU 后续定义: dcc 不应为前向声明额外生成 UND 符号,
+/// 避免与本 TU 内的定义在同名前缀下产生多个 .symtab 条目.
+/// 复现 kernel `arch/x86/tools/relocs_32.c` 模式: relocs.h 声明 process_32,
+/// relocs_32.c 经 relocs.c 包含定义 process_32. 之前会同时输出
+/// `FUNC GLOBAL UND process_32` 与 `FUNC GLOBAL DEFAULT 1 process_32`,
+/// 导致静态检查和外部链接失败.
+#[test]
+fn fwd_decl_same_tu_dedup() {
+    use std::io::Write;
+    let src = r#"
+void helper(int);  // 前向声明 (本 TU 后面有定义)
+static int local_static_helper(int);  // static 不影响, 但走同一路径
+void helper(int x) {
+    if (x > 0) {
+        local_static_helper(x - 1);
+    }
+}
+static int local_static_helper(int x) {
+    return x + 1;
+}
+int main(void) {
+    helper(5);
+    return 0;
+}
+"#;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-x", "c", "-o", "/tmp/fwd_decl.o", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn dcc");
+    child.stdin.as_mut().unwrap().write_all(src.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(),
+        "fwd_decl compile failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    // 用 readelf 检查 .symtab 不应同时有 UND 和已定义的 helper
+    let readelf = Command::new("readelf")
+        .args(["-s", "/tmp/fwd_decl.o"])
+        .output()
+        .expect("run readelf");
+    let syms = String::from_utf8_lossy(&readelf.stdout);
+    let helper_und = syms.lines().filter(|l| l.contains("helper") && l.contains("UND")).count();
+    let helper_defined = syms.lines().filter(|l| l.contains("helper") && l.contains("DEFAULT")).count();
+    assert_eq!(helper_und, 0,
+        "fwd declaration should not emit UND sym; got:\n{syms}");
+    assert!(helper_defined >= 1,
+        "definition should emit at least one DEFAULT sym; got:\n{syms}");
+    let _ = fs::remove_file("/tmp/fwd_decl.o");
+}
+
 /// __attribute__((copy(fn))) / __attribute__((returns_nonnull))
 #[test]
 #[cfg(unix)]

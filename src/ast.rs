@@ -205,6 +205,11 @@ pub enum Designator {
     Field(Ident),
     /// [index]
     Index(Expr),
+    /// 链式指定符 .a.b.c 或 [0].field[1]
+    /// (ISO C99 6.7.8/19: 多个 designator 按顺序应用以定位子对象).
+    /// Linux kernel `_ddebug` 初始化使用 `.key.dd_key_true = ...` (进入
+    /// union 的具名字段再取 union 成员).
+    Chain(Vec<Designator>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

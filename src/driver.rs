@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::mmap_io::MappedInput;
 use std::process::Command;
 use crate::cli::{Config, InputLang, LinkerOutputKind};
@@ -150,6 +150,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return run_cpp_driver(&cfg, input);
     }
 
+    // 默认可执行路径：委托 host `cc` 做最终链接。
+    // dcc 的 x86_64 codegen 在 executable 模式下遇外部调用（如 `fopen`）会
+    // panic "unresolved label: <name>"，因为 dcc 内置链接器不能跨进程
+    // 访问 libc 符号表。与 GCC 一致：dcc 只出 .o，host cc 负责链接。
+    if needs_host_cc_link(&cfg) {
+        return run_with_host_link(cfg);
+    }
+
     if cfg.verbose {
         eprintln!("dcc: input  = {}", input.display());
         eprintln!("dcc: target = {}", cfg.target.as_str());
@@ -182,6 +190,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let pack_history = pp_out.pack_history;
     let weak_symbols = pp_out.weak_symbols;
     let include_deps = pp_out.deps;
+    let pp_macros = pp_out.macros;
     enrich_diags(&mut pp_diags, src);
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
@@ -193,6 +202,30 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // -E 模式：只做预处理，输出到 stdout
     if cfg.preprocess_only {
         print!("{}", preprocessed);
+        // -dM: 额外输出所有宏定义 (供 kernel 探测编译器用)
+        if cfg.dump_macros {
+            // 按宏名字典序输出，便于差异比较
+            let mut sorted = pp_macros;
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, params, variadic, body) in &sorted {
+                match params {
+                    None => println!("#define {} {}", name, body),
+                    Some(p) => {
+                        let p_str = if *variadic {
+                            let (last, rest) = p.split_last().unwrap();
+                            if rest.is_empty() {
+                                format!("{}, ...", last)
+                            } else {
+                                format!("{}, {}, ...", rest.join(", "), last)
+                            }
+                        } else {
+                            p.join(", ")
+                        };
+                        println!("#define {}({}) {}", name, p_str, body);
+                    }
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -656,5 +689,147 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     }
     eprintln!("dcc: built-in linker wrote {} ({} bytes, {:?})",
         cfg.output.display(), bytes.len(), output_kind);
+    Ok(())
+}
+
+/// 判别是否走 “dcc → host cc” 双阶段路径。
+///
+/// 默认的可执行输出 (`dcc foo.c`) 走 dcc 内置链接器；后者生成 ET_EXEC，
+/// 在 dcc 的 x86_64 后端中遇到 libc 调用（如 `fopen` / `printf`）会因
+/// 符号未定义而 panic "unresolved label: <name>"。本谓词判断是否满足
+/// “dcc 只出 .o，host cc 负责最终链接” 的前置条件：
+///   1. 单一输入
+///   2. 既不是 -c / -S / -E / -fsyntax-only / -r / -fbuiltin-linker
+///   3. 输出文件是 “可执行”（不是 .o / .s / .a / .so）
+///
+/// 一旦命中，run() 会交递到 `run_with_host_link`。
+fn needs_host_cc_link(cfg: &Config) -> bool {
+    if cfg.link_mode { return false; }          // -r
+    if cfg.built_link { return false; }         // -pie / -shared / -fbuiltin-linker
+    if cfg.relocatable { return false; }        // -c
+    if cfg.emit_asm { return false; }           // -S
+    if cfg.preprocess_only { return false; }    // -E
+    if cfg.syntax_only { return false; }        // -fsyntax-only
+    if cfg.dump_ast { return false; }           // -dump-ast
+    if cfg.inputs.len() != 1 { return false; }
+    let out = cfg.output.to_string_lossy();
+    if out.ends_with(".o") || out.ends_with(".s")
+        || out.ends_with(".a") || out.ends_with(".so")
+    {
+        return false;
+    }
+    true
+}
+
+/// 委托 host `cc` 做最终链接：dcc 先以 -c 产生临时 .o，再调 cc 链接。
+///
+/// 与 GCC 默认行为一致：dcc 只负责 .c → .o，host 链接器负责 .o + libc
+/// → 可执行。这使 dcc 能在不动 ET_EXEC codegen 的前提下，调过
+/// “unresolved label: libc 符号” 的 panic，同时让 host cc 自动加上
+/// crt0 / libc / crtend 运行时起步代码。
+fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
+    let final_output = cfg.output.clone();
+    let link_libs = cfg.link_libs.clone();
+    let sysroot = cfg.sysroot.clone();
+    let verbose = cfg.verbose;
+    let input_name = cfg.inputs.first()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("input");
+    let tmp_o = std::env::temp_dir().join(format!(
+        "dcc-hostlink-{}-{}.o",
+        std::process::id(),
+        input_name,
+    ));
+    if verbose {
+        eprintln!("dcc: host-link: {} -> {} -> {}",
+            cfg.inputs[0].display(), tmp_o.display(), final_output.display());
+    }
+    // 1) 临时 .o：设 relocatable=true 后递归 run()
+    cfg.output = tmp_o.clone();
+    cfg.relocatable = true;
+    // 强制走内置链接器 ≠ 1 路径是上面“递归后”需走的；现在 cfg.built_link
+    // 仍是 false，所以 .o 由 run() 末端 codegen 直接输出。
+    let result = run(cfg);
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_o);
+        return result;
+    }
+    // 2) 调 host cc 链接
+    let link_result = link_with_host_cc(
+        &tmp_o, &final_output, &link_libs,
+        sysroot.as_deref(), verbose,
+    );
+    let _ = fs::remove_file(&tmp_o);
+    if link_result.is_ok() {
+        eprintln!("dcc: {} (via host cc)", final_output.display());
+    }
+    link_result
+}
+
+/// 调 host `cc` 把单 .o 链成可执行。传递 --sysroot= 与 -l 列表。
+/// 失败时返回包含 cc 自身 stdout/stderr 的诊断 E0202。
+///
+/// 启动选项 (与 dcc 旧内部链接器输出对齐):
+///   - -no-pie : dcc 现有 codegen 采用 RIP-相对 / 静态地址访问 TLS / 全局;
+///               PIE 下需要重写为 -fpie. 在 -no-pie 下生成 ET_EXEC, 所有地址
+///               运行时固定, 与 dcc codegen 期望一致.
+///   - -z norelro : 避免 GNU_RELRO 覆盖 .tdata, 造成 TLS 写入段错误 (因为
+///               dcc 的 .tdata 位于 .data LOAD 段首, 与 RELRO 重叠).
+///   - -Wl,-z,noexecstack : dcc 当前不输出 .note.GNU-stack, 避免 ld 警告
+///               "missing .note.GNU-stack section implies executable stack".
+fn link_with_host_cc(
+    obj_path: &Path,
+    output: &Path,
+    link_libs: &[String],
+    sysroot: Option<&Path>,
+    verbose: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    // CC 环境变量优先, 与 GNU make 一致; 缺省为 cc.
+    // 防递归: GCC 构建中 `CC=dcc` 是常见写法, 如果这里读 CC=dcc,
+    // 会导致 dcc 递归调用 dcc, 最终试图把 .o 当 C 源预处,
+    // 触发 E0208 ("source is not valid UTF-8"). 遇 CC 指向自己时回退
+    // 到默认 "cc" (host 系统上 99% 是 gcc), 与 gcc 手工调用 dcc 时
+    // 设 `CC=gcc` 一致.
+    let cc = match std::env::var("CC") {
+        Ok(v) if v != std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_default() => v,
+        _ => "cc".to_string(),
+    };
+    let mut cmd = Command::new(&cc);
+    cmd.arg(obj_path).arg("-o").arg(output);
+    cmd.arg("-no-pie");
+    cmd.arg("-z").arg("norelro");
+    cmd.arg("-Wl,-z,noexecstack");
+    if let Some(sr) = sysroot {
+        cmd.arg(format!("--sysroot={}", sr.display()));
+    }
+    for lib in link_libs {
+        cmd.arg(format!("-l{}", lib));
+    }
+    if verbose {
+        eprintln!("dcc: invoking {}: {:?}", cc, cmd);
+    }
+    let out = cmd.output().map_err(|e| {
+        vec![Diagnostic::err("E0202",
+            format!("cannot invoke {}: {} (set CC= or install gcc)", cc, e),
+            crate::diagnostics::Span::point("", 0, 0))]
+    })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut msg = format!("{} link failed (exit {:?})",
+            cc, out.status.code());
+        for chunk in [stderr.trim_end(), stdout.trim_end()] {
+            if !chunk.is_empty() {
+                msg.push_str(": ");
+                msg.push_str(chunk);
+            }
+        }
+        return Err(vec![Diagnostic::err("E0202", msg,
+            crate::diagnostics::Span::point(&output.display().to_string(), 0, 0))]);
+    }
     Ok(())
 }

@@ -718,12 +718,10 @@ fn eval_unop(op: UnOp, v: i128) -> Option<i128> {
 /// 跨函数 DCE: 给定函数集合 + 已知的入口 (main 或 extern), 标记可达函数,
 /// 删除不可达的 internal 函数 (FuncDecl)。
 pub fn cross_function_dce(funcs: &mut Vec<FuncDecl>, keep_extern: bool) -> bool {
-    // 1. 建立反向调用图 (callee -> callers)
-    let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+    // 1. 建立正向调用图 (caller -> callees) - 用于 BFS 从 main 出发找到所有可达函数
+    let mut callees: HashMap<String, Vec<String>> = HashMap::new();
     for f in funcs.iter() {
-        for c in collect_call_targets(f) {
-            callers.entry(c).or_default().push(f.name.name.clone());
-        }
+        callees.insert(f.name.name.clone(), collect_call_targets(f));
     }
     // 2. 从入口 (main / 标记 noreturn-extern) 做可达性 BFS
     let mut reachable: HashSet<String> = HashSet::new();
@@ -738,7 +736,7 @@ pub fn cross_function_dce(funcs: &mut Vec<FuncDecl>, keep_extern: bool) -> bool 
     }
     while let Some(name) = stack.pop() {
         if !reachable.insert(name.clone()) { continue; }
-        if let Some(cs) = callers.get(&name) {
+        if let Some(cs) = callees.get(&name) {
             for c in cs {
                 if !reachable.contains(c) { stack.push(c.clone()); }
             }

@@ -63,6 +63,11 @@ pub fn emit(
                 });
             }
             if cg.emit_cfi && relocatable {
+                // dcc 输出 .eh_frame FDE 需带 .rela.eh_frame relocations 才能在 ld 链接时
+                // 正确解析 PC begin / PC range. 之前 (M15 阶段) 临时跳过是因 R_X86_64_PC32
+                // 未生成, 报 "PHDR segment not covered by LOAD segment". 现 relocation 已
+                // 正常生成 (.rela.eh_frame, 见 mod.rs 下方), 这里默认恢复 .eh_frame 输出,
+                // setjmp / longjmp / C++ 异常等栈展开路径可正确恢复 callee-saved 寄存器.
                 let frames: Vec<debug::FuncFrame> = cg.func_frames(module);
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".eh_frame".to_string(),
@@ -95,6 +100,19 @@ pub fn emit(
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".dcc.lto".to_string(),
                     data: bc,
+                    ty: elf::SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                });
+                // 同时输出 .llvm.lto 文本摘要, 兼容 GC-sections 探测和 ld -r 合并路径
+                let funcs: Vec<(&str, u64, bool)> = module.functions.iter().map(|f| {
+                    let sz = cg.func_sizes.get(&f.name).copied().unwrap_or(0);
+                    (f.name.as_str(), sz, true)
+                }).collect();
+                let summary_unit = crate::lto::build_unit(source_name, &funcs);
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".llvm.lto".to_string(),
+                    data: crate::lto::serialize_summary(&summary_unit),
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,

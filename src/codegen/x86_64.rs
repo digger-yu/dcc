@@ -8,7 +8,7 @@
 use crate::ast::*;
 use crate::target::Target;
 use crate::codegen::elf::{ElfSym, ElfRela, ElfSection, R_X86_64_PC32, R_X86_64_PLT32,
-    R_X86_64_64, R_X86_64_32,
+    R_X86_64_64, R_X86_64_32, R_X86_64_32S,
     STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_NOTYPE, STT_FUNC, STT_OBJECT, STT_TLS, STT_SECTION, SHN_UNDEF,
     STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
     SHT_PROGBITS, SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR};
@@ -18,6 +18,52 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::ast::ArraySize;
+
+/// 沿 designator chain 定位子对象. 返回 (偏移, 大小, 目标类型).
+/// 用于初始化列表 codegen: 处理 `.a.b.c` / `[0].x` 链式指定符
+/// (ISO C99 6.7.8/19). Chain 元素依次应用, 中间环节要求是 struct/union
+/// (Field) 或 array (Index).
+fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, usize, Type)> {
+    match d {
+        Designator::Field(name) => {
+            let fields = match ty {
+                Type::Struct(_, fs) | Type::Union(_, fs) => fs.as_ref(),
+                _ => return None,
+            };
+            let f = fields.iter().find(|f| f.name == name.name)?;
+            Some((f.offset, f.ty.size(), f.ty.clone()))
+        }
+        Designator::Index(idx_expr) => {
+            let elem_ty = match ty {
+                Type::Array(e, _) => e.as_ref().clone(),
+                _ => return None,
+            };
+            let idx = match idx_expr {
+                Expr::Int { v, .. } if *v >= 0 => *v as usize,
+                _ => return None,
+            };
+            let elem_size = elem_ty.size();
+            Some((idx * elem_size, elem_size, elem_ty))
+        }
+        Designator::Chain(items) => {
+            let mut cur_ty = ty.clone();
+            let mut off = 0usize;
+            for (i, sub) in items.iter().enumerate() {
+                let (d_off, d_sz, new_ty) = resolve_designator(&cur_ty, sub)?;
+                off += d_off;
+                if i + 1 < items.len() {
+                    // 中间环节使用子类型继续往下走
+                    let _ = d_sz;
+                    cur_ty = new_ty;
+                } else {
+                    // 最后一段: 返回 (累计偏移, 大小, 目标类型)
+                    return Some((off, d_sz, new_ty));
+                }
+            }
+            None
+        }
+    }
+}
 
 /// 检查 __attribute__((error/warning/deprecated)) 函数的诊断元组:
 /// (函数名, error msg, warning msg, deprecated msg)
@@ -54,6 +100,7 @@ pub struct Codegen {
     pub relocations: Vec<ElfRela>,
     pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
     pending_data_rels: Vec<(u64, String)>,  // (disp32_pos, var_name) - 全局变量重定位
+    pending_sib_data_rels: Vec<(u64, String)>,  // SIB base=101 (disp32 绝对寻址) - 需要 R_X86_64_32S
     pub data_section: Vec<u8>,    // .data 节 (已初始化全局变量)
     pub bss_size: u64,            // .bss 大小
     pub tdata_section: Vec<u8>,   // .tdata (TLS 初始化)
@@ -353,6 +400,7 @@ struct FuncEmitChunk {
     float_refs: Vec<(u64, u64)>,
     pending_func_rels: Vec<(u64, String)>,
     pending_data_rels: Vec<(u64, String)>,
+    pending_sib_data_rels: Vec<(u64, String)>,
     label_addr_refs: Vec<(u64, String)>,
     disasm_calls: HashMap<u64, String>,
 }
@@ -367,7 +415,7 @@ impl Codegen {
                vla_offsets: HashMap::new(),
                vla_total_size: 0,
                relocatable: false, function_sections: false, symbols: vec![], sym_index: HashMap::new(),
-               relocations: vec![], pending_func_rels: vec![], pending_data_rels: vec![],
+               relocations: vec![], pending_func_rels: vec![], pending_data_rels: vec![], pending_sib_data_rels: vec![],
                data_section: vec![], bss_size: 0,
                tdata_section: vec![], tbss_size: 0, tdata_align: 8, tbss_align: 8,
                exec_text_size: 0, pending_tls_rels: vec![],
@@ -674,6 +722,14 @@ impl Codegen {
                 self.code[p..p+4].copy_from_slice(&(rel as i32).to_le_bytes());
             }
         }
+        // 修补 SIB base=101 全局访问 (disp32 绝对寻址) - 直接写符号绝对地址
+        for (disp32_pos, var_name) in self.pending_sib_data_rels.drain(..) {
+            if let Some(g) = self.globals.get(&var_name) {
+                let var_vaddr = rodata_start + g.offset;
+                let p = disp32_pos as usize;
+                self.code[p..p+4].copy_from_slice(&(var_vaddr as u32).to_le_bytes());
+            }
+        }
         // 修补 TLS 变量 RIP-relative 引用（ET_EXEC .tdata 模板）
         let tdata_start = rodata_start + self.rodata.len() as u64;
         for (disp32_pos, var_name) in self.pending_tls_rels.drain(..) {
@@ -973,6 +1029,19 @@ impl Codegen {
                 }
                 _ => None,
             },
+            // 浮点初始化: 走 eval_full 取 f64 位, 而非 eval 截断为 int
+            Expr::Float { .. } | Expr::Unary { .. } if matches!(init.ty(), Type::Float | Type::Double | Type::LongDouble) => {
+                if let Ok(cv) = const_eval::eval_full(init) {
+                    match cv {
+                        const_eval::ConstValue::Float(f) => {
+                            if sz == 4 { Some((f as f32).to_bits().to_le_bytes().to_vec()) }
+                            else { Some(f.to_bits().to_le_bytes().to_vec()) }
+                        }
+                        const_eval::ConstValue::Int(v) => Some(v.to_le_bytes()[..sz].to_vec()),
+                        _ => None,
+                    }
+                } else { None }
+            }
             _ => const_eval::eval(init).ok().map(|value| value.to_le_bytes()[..sz].to_vec()),
         }
     }
@@ -1328,9 +1397,19 @@ impl Codegen {
         }
 
         // extern 函数声明 (无函数体 = 外部引用, 排除 alias 声明)
+        // 若本 TU 内有同名函数定义, 则跳过后者的 UND 符号 (与 gcc/clang 行为一致)
+        let func_has_definition = |name: &str| -> bool {
+            prog.decls.iter().any(|d| {
+                matches!(d, Decl::Func(f) if f.name.name == name && f.body.is_some())
+            })
+        };
+        let mut emitted_func_syms: std::collections::HashSet<String> = std::collections::HashSet::new();
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_none() && f.alias_name.is_none() {
+                    // 本 TU 内有同名函数定义, 前向声明不生成单独的 UND 符号
+                    if func_has_definition(&f.name.name) { continue; }
+                    if !emitted_func_syms.insert(f.name.name.clone()) { continue; }
                     global_syms.push(ElfSym {
                         name: f.name.name.clone(), section: SHN_UNDEF, value: 0, size: 0,
                         bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
@@ -1350,6 +1429,8 @@ impl Codegen {
         }
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
+                // __attribute__((copy(fn))) 设置 alias_name - 跳过符号创建, 由 alias 路径处理
+                if f.alias_name.is_some() { continue; }
                 if f.body.is_some() {
                     // 收集此函数的嵌套函数 (递归, 不含自身)
                     let mut nested = vec![];
@@ -1480,13 +1561,19 @@ impl Codegen {
             });
         }
 
-        // 解析函数调用重定位 (使用最终符号表, 用 PLT32 以兼容 PIE)
+        // 解析函数调用重定位 (本 TU 内的 static/本地函数用 PC32,
+        // 跨 TU 外部调用用 PLT32 以兼容 PIE/动态链接).
         for (code_off, func_name) in self.pending_func_rels.drain(..) {
             let sym_idx = self.sym_index.get(&func_name).copied().unwrap_or(0);
+            // 检查符号绑定: LOCAL 表示本 TU 定义 (含 static), 用 PC32
+            // 产生位置无关重定位, 避免 PLT 跳转
+            let is_local = self.symbols.get(sym_idx as usize)
+                .map(|s| s.bind == STB_LOCAL).unwrap_or(false);
+            let rel_type = if is_local { R_X86_64_PC32 } else { R_X86_64_PLT32 };
             self.relocations.push(ElfRela {
                 offset: code_off,
                 sym_index: sym_idx,
-                rel_type: R_X86_64_PLT32,
+                rel_type,
                 addend: -4,
             });
         }
@@ -1499,6 +1586,17 @@ impl Codegen {
                 sym_index: sym_idx,
                 rel_type: R_X86_64_PC32,
                 addend: -4,
+            });
+        }
+
+        // 解析 SIB base=101 全局访问 (disp32 绝对寻址) - 需要 R_X86_64_32S
+        for (disp32_pos, var_name) in self.pending_sib_data_rels.drain(..) {
+            let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
+            self.relocations.push(ElfRela {
+                offset: disp32_pos,
+                sym_index: sym_idx,
+                rel_type: R_X86_64_32S,
+                addend: 0,
             });
         }
 
@@ -1686,8 +1784,21 @@ impl Codegen {
 
     /// 生成所有函数代码；`-O2+` 且 relocatable 时走函数级并行 emit。
     fn emit_functions(&mut self, prog: &Program) {
+        // 收集所有 __attribute__((copy(fn))) 的函数名 - 这些函数即使带 body 也不应生成代码,
+        // 因为其同名 function 已被 alias 取代
+        let copy_fn_names: std::collections::HashSet<String> = prog.decls.iter().filter_map(|d| {
+            if let Decl::Func(f) = d {
+                if f.alias_name.is_some() { Some(f.name.name.clone()) } else { None }
+            } else { None }
+        }).collect();
         let top_funcs: Vec<FuncDecl> = prog.decls.iter().filter_map(|d| {
-            if let Decl::Func(f) = d { if f.body.is_some() { Some(f.clone()) } else { None } } else { None }
+            if let Decl::Func(f) = d {
+                // __attribute__((copy(fn))) → alias_name=Some(fn); 不应生成函数体
+                if f.alias_name.is_some() { return None; }
+                // 同名函数已在前面声明带 copy 属性 - 此 decl 视为 alias, 不生成 body
+                if copy_fn_names.contains(&f.name.name) { return None; }
+                if f.body.is_some() { Some(f.clone()) } else { None }
+            } else { None }
         }).collect();
         if self.parallel_codegen && self.relocatable && top_funcs.len() >= 2 {
             self.emit_functions_parallel(&top_funcs, prog);
@@ -1778,6 +1889,7 @@ impl Codegen {
             float_refs: cg.float_refs,
             pending_func_rels: cg.pending_func_rels,
             pending_data_rels: cg.pending_data_rels,
+            pending_sib_data_rels: cg.pending_sib_data_rels,
             label_addr_refs: cg.label_addr_refs,
             disasm_calls: cg.disasm_calls,
         }
@@ -1799,6 +1911,9 @@ impl Codegen {
         }
         for (pos, sym) in chunk.pending_func_rels {
             self.pending_func_rels.push((base + pos, sym));
+        }
+        for (pos, sym) in chunk.pending_sib_data_rels {
+            self.pending_sib_data_rels.push((base + pos, sym));
         }
         for (pos, sym) in chunk.pending_data_rels {
             self.pending_data_rels.push((base + pos, sym));
@@ -3387,12 +3502,9 @@ impl Codegen {
                 if let Expr::Ident { name: arr_name, ty: arr_ty, .. } = arr.as_ref() {
                     let is_global = self.globals.contains_key(&arr_name.name);
                     if is_global {
-                        // 全局数组: 单条 [rip+disp32+idx*scale] 加载, 避免 LEA+ADD 两步
+                        // 全局数组: 单条 [disp32+idx*scale] 加载, 避免 LEA+ADD 两步。
+                        // 注: 不在前面 imul rcx, rcx, es - emit_load_global_indexed 已用 SIB scale 体现 es。
                         self.gen_expr(idx, 1);
-                        if es != 1 {
-                            self.emit(&[0x48, 0x69, 0xC9]);
-                            self.emit(&es.to_le_bytes());
-                        }
                         self.emit_load_global_indexed(dst, 1, &arr_name.name, es as u8, elem_ty);
                     } else {
                     if self.vla_offsets.contains_key(&arr_name.name) {
@@ -3445,7 +3557,10 @@ impl Codegen {
                                 // out of bounds: 调用 __ubsan_handle_out_of_bounds
                                 self.emit(&[0x48, 0x89, 0xce]); // mov rsi, rcx (字节偏移)
                                 self.emit(&[0xe8, 0, 0, 0, 0]); // call rel32
-                                let call_at = self.code.len() as u64;
+                                // call 位移起始于当前 code.len() - 4 (0xe8 之后).
+                                // 与 trapv 处同号。- 4 错为 - 0 会让 R_X86_64_PLT32
+                                // 盖到下一条指令首字节, 运行时 SIGILL.
+                                let call_at = self.code.len() as u64 - 4;
                                 self.pending_func_rels.push((call_at, "__ubsan_handle_out_of_bounds".to_string()));
                                 self.label(&ok_label);
                             }
@@ -3774,10 +3889,12 @@ impl Codegen {
                 for (i, item) in inits.iter().enumerate() {
                     let (_idx, value) = match item {
                         InitItem::Expr(e) => (i, e),
-                        InitItem::Designated { designator: Designator::Index(idx_expr), value } => {
-                            if let Expr::Int { v, .. } = idx_expr { (*v as usize, value) } else { continue; }
+                        InitItem::Designated { designator, value } => {
+                            // 链式 designator 仍可能作用在数组上 (如 [2].field)
+                            if let Some((off, _, _)) = resolve_designator(ty, designator) {
+                                if off == i * elem_size { (i, value) } else { continue; }
+                            } else { continue; }
                         }
-                        _ => continue,
                     };
                     self.gen_expr(value, 0);
                     // arr[i] 在 var_off + i * elem_size
@@ -3808,26 +3925,28 @@ impl Codegen {
             }
             Type::Struct(_, fields) | Type::Union(_, fields) => {
                 // struct 初始化: struct Point p = {1, 2} 或 {.x = 1, .y = 2}
+                // 或链式: {.u.x = 1} / {.key.dd_key_true = ...}
                 let mut field_idx = 0;
                 for item in inits {
-                    let (field, value) = match item {
+                    let (off, sz, value) = match item {
                         InitItem::Expr(e) => {
                             if field_idx < fields.len() {
                                 let f = &fields[field_idx];
                                 field_idx += 1;
-                                (f, e)
+                                (f.offset, f.ty.size(), e)
                             } else { continue; }
                         }
-                        InitItem::Designated { designator: Designator::Field(name), value } => {
-                            if let Some(f) = fields.iter().find(|f| f.name == name.name) {
-                                (f, value)
-                            } else { continue; }
+                        InitItem::Designated { designator, value } => {
+                            // 链式 designator: resolve_designator 沿 .a.b.c 累积偏移
+                            match resolve_designator(ty, designator) {
+                                Some((o, s, _)) => (o, s, value),
+                                None => continue,
+                            }
                         }
-                        _ => continue,
                     };
                     self.gen_expr(value, 0);
-                    let off = var_off + field.offset as i32;
-                    self.emit_store(0, off, field.ty.size());
+                    let store_off = var_off + off as i32;
+                    self.emit_store(0, store_off, sz);
                 }
             }
             _ => {
@@ -3854,13 +3973,17 @@ impl Codegen {
                 for (i, item) in inits.iter().enumerate() {
                     let value = match item {
                         InitItem::Expr(e) => e,
-                        InitItem::Designated { designator: Designator::Index(idx_expr), value } => {
-                            if let Expr::Int { v, .. } = idx_expr {
-                                while data.len() < (*v as usize) * elem_size { data.push(0); }
-                                value
-                            } else { continue; }
+                        InitItem::Designated { designator, value } => {
+                            // 链式 designator: resolve_designator 累积偏移
+                            match resolve_designator(ty, designator) {
+                                Some((off, _, _)) if off == i * elem_size => value,
+                                Some((off, _, _)) => {
+                                    while data.len() < off { data.push(0); }
+                                    value
+                                }
+                                None => continue,
+                            }
                         }
-                        _ => continue,
                     };
                     if let Expr::InitList { inits: nested, ty: nested_ty, .. } = value {
                         let nested_ty = if matches!(nested_ty, Type::Int) { elem_ty.as_ref() } else { nested_ty };
@@ -3881,24 +4004,24 @@ impl Codegen {
                 data.resize(total_size, 0);
                 let mut field_idx = 0;
                 for item in inits {
-                    let (field, value) = match item {
+                    let (off, sz, value) = match item {
                         InitItem::Expr(e) => {
                             if field_idx < fields.len() {
                                 let f = &fields[field_idx];
                                 field_idx += 1;
-                                (f, e)
+                                (f.offset, f.ty.size(), e)
                             } else { continue; }
                         }
-                        InitItem::Designated { designator: Designator::Field(name), value } => {
-                            if let Some(f) = fields.iter().find(|f| f.name == name.name) {
-                                (f, value)
-                            } else { continue; }
+                        InitItem::Designated { designator, value } => {
+                            // 链式 designator: resolve_designator 累积偏移
+                            match resolve_designator(ty, designator) {
+                                Some((o, s, _)) => (o, s, value),
+                                None => continue,
+                            }
                         }
-                        _ => continue,
                     };
-                    let field_rel = rel.map(|(base, sec)| (base + field.offset as u64, sec));
-                    let field_data = self.eval_const_expr(value, field_rel, field.ty.size());
-                    let off = field.offset;
+                    let field_rel = rel.map(|(base, sec)| (base + off as u64, sec));
+                    let field_data = self.eval_const_expr(value, field_rel, sz);
                     for (j, &b) in field_data.iter().enumerate() {
                         if off + j < data.len() { data[off + j] = b; }
                     }
@@ -3937,11 +4060,31 @@ impl Codegen {
         rel: Option<(u64, Option<usize>)>,
         width: usize,
     ) -> Vec<u8> {
-        if let Ok(value) = const_eval::eval(e) {
-            let size = e.ty().size().max(width);
-            return value.to_le_bytes()[..size].to_vec();
-        }
-        match e {
+        // 优先用 eval_full: 浮点字面量直接走 .to_bits(), 不被截断为整数
+        if let Ok(cv) = const_eval::eval_full(e) {
+            match cv {
+                const_eval::ConstValue::Float(f) => {
+                    let size = e.ty().size().max(width);
+                    if size <= 4 {
+                        (f as f32).to_bits().to_le_bytes()[..size].to_vec()
+                    } else {
+                        f.to_bits().to_le_bytes()[..size].to_vec()
+                    }
+                }
+                const_eval::ConstValue::Int(v) => {
+                    let size = e.ty().size().max(width);
+                    v.to_le_bytes()[..size].to_vec()
+                }
+                _ => {
+                    if let Ok(value) = const_eval::eval(e) {
+                        let size = e.ty().size().max(width);
+                        return value.to_le_bytes()[..size].to_vec();
+                    }
+                    vec![0u8; width.max(e.ty().size())]
+                }
+            }
+        } else {
+            match e {
             Expr::String { data, .. } => data.clone(),
             Expr::Ident { name, .. } => {
                 if let Some((off, sec)) = rel {
@@ -3968,6 +4111,7 @@ impl Codegen {
                 _ => vec![0u8; width.max(e.ty().size())],
             },
             _ => vec![0u8; width.max(e.ty().size())],
+        }
         }
     }
 
@@ -5303,14 +5447,28 @@ impl Codegen {
             disp32_pos = self.pos();
             self.emit(&[0, 0, 0, 0]);
         } else {
-            let mut rex = 0x48u8;
+            // 按 elem_size 选操作数尺寸: 1=movzx, 2/4=零扩展 mov, 8=REX.W mov
+            let mut rex = 0x48u8; // 默认 REX.W (8 字节)
             if dst_gp >= 8 { rex |= 0x04; }
             if idx_reg >= 8 { rex |= 0x02; }
-            self.emit(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib]);
+            let prefix: Option<u8> = match elem_size {
+                2 => Some(0x66),
+                _ => None,
+            };
+            let use_movzx = elem_size == 1;
+            // 4 字节路径需要去掉 REX.W (否则变成 64-bit load)
+            if elem_size == 4 { rex &= !0x08; }
+            if elem_size == 1 { rex &= !0x08; } // movzx 不需要 REX.W
+            if let Some(p) = prefix { self.emit(&[p]); }
+            if use_movzx {
+                self.emit(&[rex, 0x0F, 0xB6, modrm | ((dst_gp & 7) << 3), sib]);
+            } else {
+                self.emit(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib]);
+            }
             disp32_pos = self.pos();
             self.emit(&[0, 0, 0, 0]);
         }
-        self.pending_data_rels.push((disp32_pos, global.to_string()));
+        self.pending_sib_data_rels.push((disp32_pos, global.to_string()));
     }
 
     /// 全局浮点变量 RIP-relative 加载到 xmm

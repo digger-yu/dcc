@@ -72,9 +72,14 @@ impl ArchKind {
     }
     /// EH 帧 CIE augmentation 字符串
     pub fn cie_augmentation(self) -> &'static str {
+        // 所有架构都输出 "zR" (带 FDE encoding 0x1b), 这样 ld 可以生成
+        // .eh_frame_hdr (binary search 表, CET / glibc unwinder 依赖). 
+        // 之前 x86_64 走 “” augmentation 路径, ld 报
+        // "no .eh_frame_hdr table will be created" + "PHDR segment not
+        // covered by LOAD segment".
         match self {
-            ArchKind::X86_64 => "",
-            ArchKind::AArch64 | ArchKind::RiscV64 | ArchKind::Mips | ArchKind::Mips64 | ArchKind::Arm => "zR",
+            ArchKind::X86_64 | ArchKind::AArch64 | ArchKind::RiscV64
+            | ArchKind::Mips | ArchKind::Mips64 | ArchKind::Arm => "zR",
         }
     }
     /// DW_CFA_def_cfa 默认寄存器编号
@@ -358,7 +363,10 @@ impl DebugSections {
         push(&mut v, ".debug_line", &self.line, false);
         push(&mut v, ".debug_str", &self.str, false);
         push(&mut v, ".debug_aranges", &self.aranges, false);
-        push(&mut v, ".debug_frame", &self.frame, true);
+        // .debug_frame 仅为 gdb DWARF 调试使用, 不需被加载器装入内存, 不加 SHF_ALLOC.
+        // (之前在 .debug_frame 加 SHF_ALLOC, ld 在尝试映射时发现其不在任何 LOAD
+        // 段中, 报 “PHDR segment not covered by LOAD segment”.)
+        push(&mut v, ".debug_frame", &self.frame, false);
         push(&mut v, ".debug_ranges", &self.ranges, false);
         push(&mut v, ".debug_pubnames", &self.pubnames, false);
         push(&mut v, ".debug_pubtypes", &self.pubtypes, false);
@@ -1842,7 +1850,10 @@ pub fn build_eh_frame_with_arch(functions: &[FuncFrame], arch: ArchKind) -> Vec<
     if !augmentation.is_empty() {
         // "zR" augmentation: 1 字节 augmentation_data 长度
         eh.push(1);
-        eh.push(0x01); // DW_EH_PE_pcrel | DW_EH_PE_sdata4
+        // FDE encoding: DW_EH_PE_pcrel (0x10) | DW_EH_PE_sdata4 (0x0b) = 0x1b
+        // ld 用这个 encoding 决定 FDE 里 PC begin / PC range 如何编码.
+        // 之前调成 0x01 (=DW_EH_PE_absptr) 会让 ld 误读 FDE PC 字段.
+        eh.push(0x1b);
     } else {
         eh.push(0);
     }
@@ -1857,19 +1868,33 @@ pub fn build_eh_frame_with_arch(functions: &[FuncFrame], arch: ArchKind) -> Vec<
     for func in functions {
         let fde_start = eh.len();
         eh.extend_from_slice(&[0u8; 4]);
-        // LSB: CIE_pointer = CIE_pointer_field_offset - CIE_start_offset
-        // (取值为正, 代表向后跳的距离). 之前用 cie_id_offset - (fde_start+4)
-        // 符号反了, 导致 readelf 误读 FDE 长度.
+        // LSB .eh_frame FDE.CIE_pointer 字段 = (FDE 长度字段之后的地址) - CIE 起始地址.
+        // 比如 CIE 在 offset 0, FDE 长度在 0x10, FDE+4 在 0x14, 字段在 0x14, 则
+        // cie_ptr = 0x14 - 0 = 0x14 (正跳距离). readelf / ld 都按这个公式
+        // 跳回 CIE. 之前用 `cie_len_pos - (fde_start + 4)` 跳反方向, 在大函数
+        // / 多个 FDE 下读错 FDE 长度, 报 "cie=invalid" / "PHDR segment not
+        // covered by LOAD segment" / DW_CFA_expression corrupt.
         let cie_ptr = ((fde_start + 4) as i64 - cie_len_pos as i64) as u32;
         eh.extend_from_slice(&cie_ptr.to_le_bytes());
-        eh.extend_from_slice(&func.pc.to_le_bytes());
-        eh.extend_from_slice(&func.size.to_le_bytes());
+        // LSB .eh_frame FDE 初始位置 + 地址范围字段宽度 = address_size,
+        // x86_64/aarch64/riscv64/mips64 = 8 字节; mips/arm = 4 字节.
+        // 之前一律用 func.size (u32) to_le_bytes() (4 字节), 64 位目标下
+        // 会把后续 aug_data_length/CFI 全部错位 4 字节 → readelf FDE 长度
+        // 报告为 0x0190028d, PC 范围成 0x10070c0000000017, 引发
+        // "PHDR segment not covered by LOAD segment" / "DW_CFA_expression
+        // corrupt len".
+        let addr_size: usize = arch.address_size() as usize;
+        let pc_bytes = func.pc.to_le_bytes();
+        eh.extend_from_slice(&pc_bytes[..addr_size]);
+        let size_bytes = (func.size as u64).to_le_bytes();
+        eh.extend_from_slice(&size_bytes[..addr_size]);
         eh.push(0); // augmentation data length
         // CFI ops: 初始化 CFA + 各寄存器保存描述
         // (setjmp / longjmp 依赖此信息正确恢复 callee-saved 寄存器)
         if !func.cfi_ops.is_empty() {
             eh.extend_from_slice(&func.cfi_ops);
         }
+        // FDE 整体按 8 字节对齐 (address_size = 8 的目标也对齐到 8)
         while eh.len() % 8 != 0 {
             eh.push(0);
         }

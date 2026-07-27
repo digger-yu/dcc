@@ -101,6 +101,8 @@ pub struct PreprocessOutput {
     pub weak_symbols: std::collections::HashSet<String>,
     /// 当前字符集 (C23 #pragma locale)
     pub charset: String,
+    /// 预处理结束时所有可见的宏定义 (供 -dM 输出来源)
+    pub macros: Vec<(String, Option<Vec<String>>, bool, String)>,
 }
 
 /// 预编译头 (PCH) 选项。
@@ -440,6 +442,14 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("__x86_64", "1");
     pp.define_builtin("__k8", "1");
     pp.define_builtin("__k8__", "1");
+    // x86_64 默认启用 SSE2 (需要 __SSE2__ 才能让 CET / _mm_* / setssbsy 路径编译过)
+    pp.define_builtin("__SSE2__", "1");
+    pp.define_builtin("__SSE2_MATH__", "1");
+    pp.define_builtin("__SSE_MATH__", "1");
+    pp.define_builtin("__SSE__", "1");
+    pp.define_builtin("__MMX__", "1");
+    // CET 头 (cet.h) 依赖这个 feature 宏
+    pp.define_builtin("__CET__", "0");
     // 链接/平台相关
     pp.define_builtin("__USER_LABEL_PREFIX__", "");
     pp.define_builtin("__VERSION__", "dcc 0.1 (M19)");
@@ -512,33 +522,17 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     // Linux 内核 atomic-instrumented.h 等同名 inline 函数会被误展开
     // （如 atomic_fetch_add(i,v) → __atomic_fetch_add(i,v,5) 破坏声明）。
     // __atomic_* 内建与 __ATOMIC_* 常量仍保留，供显式调用。
-    // hosted 模式（非 -ffreestanding）预置常用 C11 atomic 宏：
-    if !freestanding {
-        let atomic_macros: &[(&str, &[&str], &str)] = &[
-            ("atomic_store", &["obj", "val"], "__atomic_store_n(obj, val, __ATOMIC_SEQ_CST)"),
-            ("atomic_load", &["obj"], "__atomic_load_n(obj, __ATOMIC_SEQ_CST)"),
-            ("atomic_exchange", &["obj", "val"], "__atomic_exchange_n(obj, val, __ATOMIC_SEQ_CST)"),
-            ("atomic_fetch_add", &["obj", "val"], "__atomic_fetch_add(obj, val, __ATOMIC_SEQ_CST)"),
-            ("atomic_fetch_sub", &["obj", "val"], "__atomic_fetch_sub(obj, val, __ATOMIC_SEQ_CST)"),
-            ("atomic_fetch_and", &["obj", "val"], "__atomic_fetch_and(obj, val, __ATOMIC_SEQ_CST)"),
-            ("atomic_fetch_or", &["obj", "val"], "__atomic_fetch_or(obj, val, __ATOMIC_SEQ_CST)"),
-            ("atomic_fetch_xor", &["obj", "val"], "__atomic_fetch_xor(obj, val, __ATOMIC_SEQ_CST)"),
-            ("atomic_compare_exchange_strong", &["obj", "expected", "desired"],
-                "__atomic_compare_exchange_n(obj, expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)"),
-        ];
-        for (name, params, body) in atomic_macros {
-            pp.macros.insert(name.to_string(), MacroDef {
-                params: Some(params.iter().map(|s| s.to_string()).collect()),
-                body: body.to_string(),
-                variadic: false,
-            });
-        }
-    }
+    // 不要在 hosted 模式下预置它们 (会破坏 glibc/userspace 中同名函数/宏的调用).
     // 内存序别名 (memory_order_xxx 已在上面定义)
     // __attribute__: 不定义为宏, 让 token 透传到解析器处理
     // 解析器会识别 __attribute__ 并处理 vector_size 等属性
     // __has_attribute / __has_builtin / __has_feature: 不在宏表中定义, 在展开时特殊处理
     // 这样可以在宏展开路径和 #if 路径都返回正确值
+    // GCC 接受 `__attribute` (无尾部双下划线) 作为 `__attribute__` 的简写。
+    // kernel 7.1 的 __noinstr_section() 误用此写法, 故加入映射.
+    pp.macros.insert("__attribute".to_string(), MacroDef {
+        params: None, body: "__attribute__".to_string(), variadic: false,
+    });
     // likely/unlikely 分支提示
     pp.macros.insert("likely".to_string(), MacroDef {
         params: Some(vec!["x".to_string()]), body: "(x)".to_string(), variadic: false,
@@ -720,6 +714,9 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         pack_history: pch_pack_history,
         weak_symbols: pch_weak_symbols,
         charset: pch_charset,
+        macros: pp.macros.iter()
+            .map(|(k, v)| (k.clone(), v.params.clone(), v.variadic, v.body.clone()))
+            .collect(),
     }
 }
 
@@ -1073,11 +1070,26 @@ impl Preprocessor {
         if let Some(rest) = directive.strip_prefix("include_next") {
             // 必须在 "include" 之前匹配，否则 include_next 会被当成 include
             if self.is_active() {
-                self.do_include_next(rest.trim(), line_no);
+                // ISO C 6.10.2: 先用原始形式试 (<file> / "file" / 绝对路径);
+                // 解析失败再做宏展开 (kernel 的 `#include TRACE_INCLUDE(x)` 走这条).
+                let raw = rest.trim();
+                if Self::is_parsable_include_path(raw) {
+                    self.do_include_next(raw, line_no);
+                } else {
+                    let expanded = self.expand_macros(raw);
+                    self.do_include_next(expanded.trim(), line_no);
+                }
             }
         } else if let Some(rest) = directive.strip_prefix("include") {
             if self.is_active() {
-                self.do_include(rest.trim(), line_no);
+                let raw = rest.trim();
+                if Self::is_parsable_include_path(raw) {
+                    self.do_include(raw, line_no);
+                } else {
+                    // ISO C 6.10.2: 头文件名先做宏展开 (e.g. `#include TRACE_INCLUDE(file)`).
+                    let expanded = self.expand_macros(raw);
+                    self.do_include(expanded.trim(), line_no);
+                }
             }
         } else if let Some(rest) = directive.strip_prefix("define") {
             if self.is_active() {
@@ -1373,6 +1385,16 @@ impl Preprocessor {
                     Span::point(&self.file, line_no, 1)));
             }
         }
+    }
+
+    /// 判断 `#include` 后的原始文本是否已经是 <file> / "file" / 绝对路径。
+    /// 是则不必再走宏展开 (避免误展开 `current` 这样的对象宏).
+    fn is_parsable_include_path(rest: &str) -> bool {
+        let rest = rest.trim();
+        if rest.starts_with('"') || rest.starts_with('<') {
+            return true;
+        }
+        Self::is_absolute_include_path(rest)
     }
 
     /// `#include_next`：从当前头文件所在目录之后继续搜索。
@@ -2105,17 +2127,50 @@ impl Preprocessor {
                     } else {
                         // object-like 别名后接 (args) 时须与替换体一起重扫描，
                         // 例如 #define DIV_ROUND_UP __KERNEL_DIV_ROUND_UP
+                        // 但是只有当替换体本身是函数式宏名时才需要 tail_call
+                        // 优化 (后跟 ( 能发走函数调用). 如果替换体仅是
+                        // 普通别名 (如 stdbool.h 的 #define bool _Bool),
+                        // 不应采用该优化: tail_call 会把整个剩余文本都
+                        // 以 "bool" 处于 disabled 集的方式重扫描, 令后续
+                        // 同一别名出现时不再展开, 例如
+                        //   static char *f(bool (*cb)(int)) {}
+                        //   static bool g(void) {}
+                        // 第二个 static bool 会保留为 bool, 报 unknown type.
+                        // 判定依据: def.body 为简单 identifier 标识时
+                        // 才走 tail_call 优化.
+                        let body_is_simple_ident = def.body.chars().next()
+                            .map(|c| c.is_alphabetic() || c == '_')
+                            .unwrap_or(false)
+                            && def.body.chars().all(|c| c.is_alphanumeric() || c == '_');
                         let mut new_disabled = disabled.clone();
                         new_disabled.insert(ident.clone());
                         let mut j = i;
                         while j < len && chars[j].is_whitespace() { j += 1; }
-                        let tail_call = j < len && chars[j] == '(';
+                        let tail_call = body_is_simple_ident
+                            && j < len && chars[j] == '(';
                         let rescanned = if tail_call {
-                            let remainder: String = chars[i..].iter().collect();
-                            self.expand_with_disabled(
-                                &format!("{}{}", def.body, remainder),
+                            // 只重扫描到本次调用的闭合括号, 避免把后续同
+                            // 名标识符一起带进 disabled 集.
+                            let mut depth = 0i32;
+                            let mut k = j;
+                            // 进入 ( 后逐字符计深度, 跳过本组 () 的全部内容.
+                            if k < len && chars[k] == '(' {
+                                depth = 1;
+                                k += 1;
+                                while k < len && depth > 0 {
+                                    if chars[k] == '(' { depth += 1; }
+                                    else if chars[k] == ')' { depth -= 1; }
+                                    k += 1;
+                                }
+                            }
+                            let call_args: String = chars[j..k].iter().collect();
+                            let after_call: String = chars[k..].iter().collect();
+                            let head = self.expand_with_disabled(
+                                &format!("{}{}", def.body, call_args),
                                 &new_disabled,
-                            )
+                            );
+                            // 后续文本不带 disabled 集, 正常展开.
+                            format!("{}{}", head, self.expand_macros(&after_call))
                         } else {
                             self.expand_with_disabled(&def.body, &new_disabled)
                         };
@@ -2500,13 +2555,24 @@ impl Preprocessor {
             // 查找 # param (注意不是 ##)
             let pattern = format!("# {}", param);
             let pattern2 = format!("#{}", param);
-            for pat in &[pattern, pattern2] {
-                while let Some(pos) = result.find(pat.as_str()) {
-                    // 确保不是 ##
-                    if pos > 0 && result.as_bytes()[pos-1] == b'#' { break; }
+            // 从起始位扫描, 避免 ## 后 的 #被误判为 ## 而跳过
+            // (find 返回首个匹配, 若该匹配是 ## 的第二#, 必须推进扫描指针)
+            let mut search_from = 0usize;
+            for pat in &[&pattern, &pattern2] {
+                search_from = 0;
+                while let Some(rel) = result[search_from..].find(pat.as_str()) {
+                    let pos = search_from + rel;
+                    // 确保不是 ##: 如果前一字符也是 #, 则这是 ##, 跳过此匹配
+                    if pos > 0 && result.as_bytes()[pos-1] == b'#' {
+                        search_from = pos + 1;
+                        continue;
+                    }
                     let stringified = Self::stringify_arg(&args[i]);
                     let end = pos + pat.len();
                     result = format!("{}{}{}", &result[..pos], stringified, &result[end..]);
+                    // 替换后 search_from 前进 (基于原 body 长度, 这里 result 变短,
+                    // 新位置以原本的 pos 作为起点继续)
+                    search_from = pos + stringified.len();
                 }
             }
         }
