@@ -90,6 +90,7 @@ pub struct Codegen {
     expr_depth: u32,              // 当前表达式嵌套深度 (用于帧临时槽分配)
     max_expr_depth: u32,          // 最大表达式嵌套深度
     temp_slots: i32,              // 帧临时槽数量 (用于变量偏移计算)
+    vec_temp_off: i32,            // 向量临时槽区基址 (r13 相对)
     vla_offsets: HashMap<String, i32>,
     vla_total_size: i32,
     // 可重定位模式 (.o)
@@ -412,6 +413,7 @@ impl Codegen {
                loop_continue: None, loop_break: None,
                rodata: vec![], string_pool: HashMap::new(), string_refs: vec![], float_refs: vec![],
                globals: HashMap::new(), frame_size: 0, expr_depth: 0, max_expr_depth: 0, temp_slots: 0,
+               vec_temp_off: 0,
                vla_offsets: HashMap::new(),
                vla_total_size: 0,
                relocatable: false, function_sections: false, symbols: vec![], sym_index: HashMap::new(),
@@ -523,7 +525,8 @@ impl Codegen {
     fn classify_at(ty: &Type, base: usize, classes: &mut [AbiClass]) -> bool {
         if ty.align() > 1 && !base.is_multiple_of(ty.align()) { return false; }
         match ty {
-            Type::Float | Type::Double | Type::Vector(_, _) => {}
+            // Vector 不留 Sse: dcc 内部把 vector 标量化, 按 GP 8 字节块传递
+            Type::Float | Type::Double => {}
             Type::Struct(_, fields) => {
                 for field in fields.iter() {
                     if !Self::classify_at(&field.ty, base + field.offset, classes) { return false; }
@@ -2097,7 +2100,8 @@ impl Codegen {
                             // __int128 / 大聚合体按 8 字节块占用 GP 寄存器或栈槽
                             let is_agg_param = matches!(&p.ty, Type::Int128 | Type::UInt128)
                                 || (matches!(&p.ty, Type::Struct(_,_) | Type::Union(_,_)
-                                    | Type::Array(_,ArraySize::Const(_)) | Type::Atomic(_))
+                                    | Type::Array(_,ArraySize::Const(_)) | Type::Atomic(_)
+                                    | Type::Vector(_,_))
                                     && p.ty.size() > 8);
                             if is_agg_param {
                                 let chunks = p.ty.size().div_ceil(8);
@@ -2105,7 +2109,9 @@ impl Codegen {
                                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                                     .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
                                     .sum();
-                                let off = -(used + 16 + temp_slots * 8);
+                                // 多块参数同 register_var: off 下移 (chunks-1)*8
+                                let off = -(used + 16 + temp_slots * 8)
+                                    - (chunks as i32 - 1) * 8;
                                 self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                                 for c in 0..chunks {
                                     if gp_idx + c < 6 {
@@ -2167,9 +2173,13 @@ impl Codegen {
                 } else {
                     0
                 };
+                // 向量临时槽区: 固定预留 128 字节, 位于 va save/静态链上方,
+                // 避免 vector_temp_base 与变量区重叠 (red-zone 模式无额外缓冲)
+                let vec_reserve = 128;
                 let raw = var_bytes + 16 + temp_slots * 8 + sc_slot + va_slots
-                    + self.stack_reserve_bytes();
+                    + vec_reserve + self.stack_reserve_bytes();
                 self.frame_size = ((raw + 15) / 16) * 16; // 16 字节对齐
+                self.vec_temp_off = -self.frame_size + va_slots + sc_slot + 8;
                 if self.frame_size > 0 {
                     self.emit(&[0x48, 0x81, 0xec]);
                     self.emit(&self.frame_size.to_le_bytes());
@@ -2226,8 +2236,9 @@ impl Codegen {
                     .filter(|(_, ty)| !matches!(ty, Type::Void))
                     .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
                     .sum();
-                let raw = var_bytes + 16 + temp_slots * 8 + self.stack_reserve_bytes();
+                let raw = var_bytes + 16 + temp_slots * 8 + 128 + self.stack_reserve_bytes();
                 self.frame_size = ((raw + 15) / 16) * 16;
+                self.vec_temp_off = -self.frame_size + 8;
                 if self.frame_size > 0 {
                     self.emit(&[0x48, 0x81, 0xec]);
                     self.emit(&self.frame_size.to_le_bytes());
@@ -2411,7 +2422,34 @@ impl Codegen {
             let aggregate = matches!(effective_ty, Type::Int128 | Type::UInt128)
                 || matches!(effective_ty, Type::Struct(_, _) | Type::Union(_, _)
                     | Type::Array(_, ArraySize::Const(_)) | Type::Atomic(_));
-            if aggregate {
+            if matches!(effective_ty, Type::Vector(_, _)) {
+                // vector 实参: 按 GP 8 字节块传递 (dcc 内部标量化约定)
+                // 1. 取 vector 数据地址到 rax
+                if !self.gen_lvalue_addr(arg, 0) {
+                    // rvalue: 先物化到向量临时槽 0 再取地址
+                    self.gen_expr(arg, 0);
+                    let toff = self.vector_temp_base(0, effective_ty.size());
+                    self.emit_lea_r13(0, toff);
+                }
+                // 2. 逐 8 字节块装入 rcx 并暂存
+                for (chunk, loc) in arg_locs.iter().enumerate() {
+                    let disp = (chunk * 8) as i32;
+                    if disp < 128 {
+                        self.emit(&[0x48, 0x8B, 0x48, disp as u8]); // mov rcx, [rax+disp8]
+                    } else {
+                        self.emit(&[0x48, 0x8B, 0x88]); // mov rcx, [rax+disp32]
+                        self.emit(&disp.to_le_bytes());
+                    }
+                    match *loc {
+                        ArgLoc::Stack(off) => self.store_rsp_qword(1, off),
+                        _ => {
+                            self.store_rsp_qword(1, stage);
+                            staged.push((*loc, stage));
+                            stage += 8;
+                        }
+                    }
+                }
+            } else if aggregate {
                 for (chunk, loc) in arg_locs.iter().enumerate() {
                     if let Expr::Ident { name, .. } = arg {
                         if self.globals.contains_key(&name.name) {
@@ -2537,7 +2575,7 @@ impl Codegen {
                     let ret_ty = e.ty();
                     let ret_sz = ret_ty.size();
                     let is_agg_ret = matches!(&ret_ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
-                        | Type::Complex(_) | Type::Atomic(_))
+                        | Type::Complex(_) | Type::Atomic(_) | Type::Vector(_,_))
                         && ret_sz > 8;
                     if is_agg_ret {
                         // struct 返回: 加载到 rax[:rdx]
@@ -2546,6 +2584,17 @@ impl Codegen {
                             self.load_stack(0, off); // rax = 前 8 字节
                             if ret_sz > 8 {
                                 self.load_stack(2, off + 8); // rdx = 后 8 字节
+                            }
+                        } else if matches!(ret_ty, Type::Vector(_, _)) {
+                            // vector 返回: lvalue 直接取地址, rvalue 先物化到临时槽
+                            if self.gen_lvalue_addr(e, 0) {
+                                self.emit(&[0x48, 0x8B, 0x50, 0x08]); // mov rdx, [rax+8]
+                                self.emit(&[0x48, 0x8B, 0x00]);       // mov rax, [rax]
+                            } else {
+                                self.gen_expr(e, 0); // 物化到向量临时槽 0
+                                let toff = self.vector_temp_base(0, ret_sz);
+                                self.load_stack(0, toff);
+                                self.load_stack(2, toff + 8);
                             }
                         } else {
                             self.gen_expr(e, 0);
@@ -2760,11 +2809,21 @@ impl Codegen {
     }
 
     fn gen_expr(&mut self, e: &Expr, dst: u8) {
+        // vector 类型的 lvalue 表达式 (Member/Index/Deref): 物化到向量临时槽 0
+        // (dcc vector 值约定: vector rvalue 结果放在临时槽 0)
+        if matches!(e, Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. })
+            && matches!(e.ty(), Type::Vector(_, _)) {
+            self.gen_vector_load_into_slot(e, 0);
+            return;
+        }
         match e {
             Expr::Int { v, .. } => self.mov_imm(dst, *v),
             Expr::Char { v, .. } => self.mov_imm(dst, *v as i128),
             Expr::Ident { name, ty, .. } => {
-                if matches!(ty, Type::Vector(_, _)) {
+                if matches!(ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
+                    // 函数名作为值: 退化为函数地址
+                    self.emit_func_addr(dst, &name.name);
+                } else if matches!(ty, Type::Vector(_, _)) {
                     // 向量变量: 标量逐元素加载到帧临时区 slot 0
                     self.gen_vector_load(e);
                 } else if self.globals.contains_key(&name.name)
@@ -2935,6 +2994,23 @@ impl Codegen {
                     self.emit(&[0x48, 0x99]); // cqo (符号扩展 rax→rdx:rax)
                     self.emit(&[0x48, 0xf7, 0xf9]); // idiv rcx
                 }
+                // C 语义: 32 位整数运算结果需截断回 32 位 (溢出 wrap),
+                // 否则 64 位寄存器高位垃圾会泄漏给后续移位/除法等运算.
+                {
+                    let res_ty = e.ty();
+                    if res_ty.size() == 4 && res_ty.is_int()
+                        && matches!(*op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl) {
+                        if Self::is_signed_int(&res_ty) {
+                            // movsxd dst, dst32 (符号扩展)
+                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                            self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                        } else {
+                            // mov dst32, dst32 (零扩展)
+                            if dst >= 8 { self.emit(&[0x45]); }
+                            self.emit(&[0x8B, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                        }
+                    }
+                }
                 // -ftrapv: 有符号算术溢出检查
                 // ADD/SUB/IMUL/IDIV 都会在有符号溢出时置 OF=1, jo 跳到 trap
                 if self.trapv
@@ -2954,6 +3030,22 @@ impl Codegen {
                         }
             }
             Expr::Assign { l, r, .. } => {
+                // 16 字节 vector 赋值到 Member/Index/Deref lvalue:
+                // RHS 物化到向量临时槽 0, 再整块拷贝到 LHS 地址
+                let assign_l_ty = l.ty();
+                if matches!(assign_l_ty, Type::Vector(_, _)) && assign_l_ty.size() > 8
+                    && !matches!(l.as_ref(), Expr::Ident { .. }) {
+                    self.gen_expr(r, 0); // RHS → 向量临时槽 0
+                    if self.gen_lvalue_addr(l, 0) {
+                        let toff = self.vector_temp_base(0, assign_l_ty.size());
+                        self.emit(&[0x48, 0x89, 0xC7]); // mov rdi, rax
+                        self.emit_lea_r13(6, toff);     // rsi = 临时槽
+                        self.mov_imm(1, assign_l_ty.size() as i128);
+                        self.emit(&[0xFC]); // cld
+                        self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                        return;
+                    }
+                }
                 if let Expr::Ident { name, ty: l_ty, .. } = l.as_ref() {
                     let sz = l_ty.size();
                     let is_aggregate = matches!(l_ty, Type::Struct(_,_) | Type::Union(_,_) | Type::Array(_,ArraySize::Const(_))
@@ -3053,6 +3145,31 @@ impl Codegen {
                             4 => self.emit(&[0x89, 0x01]),
                             _ => self.emit(&[0x48, 0x89, 0x01]),
                         }
+                    } else {
+                        // 通用路径: 基址来自任意 lvalue/指针表达式 (如 s.i[k] = v)
+                        let arr_ty = arr.ty();
+                        if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                            if !self.gen_lvalue_addr(arr, 0) { self.gen_expr(arr, 0); }
+                        } else {
+                            self.gen_expr(arr, 0);
+                        }
+                        self.push(0);
+                        self.gen_expr(idx, 1);
+                        self.pop(0);
+                        if es != 1 {
+                            self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
+                            self.emit(&es.to_le_bytes());
+                        }
+                        self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx (addr in rax)
+                        self.push(0);
+                        self.gen_expr(r, 0);
+                        self.pop(1);
+                        match es {
+                            1 => self.emit(&[0x88, 0x01]),
+                            2 => self.emit(&[0x66, 0x89, 0x01]),
+                            4 => self.emit(&[0x89, 0x01]),
+                            _ => self.emit(&[0x48, 0x89, 0x01]),
+                        }
                     }
                 } else if let Expr::Deref { e: ptr_e, .. } = l.as_ref() {
                     // *ptr = val
@@ -3085,6 +3202,9 @@ impl Codegen {
                             self.emit(&[0x85]); // mod=00, rm=r13
                             self.emit(&off.to_le_bytes());
                         }
+                    } else if !self.gen_lvalue_addr(expr, 0) {
+                        // 通用路径失败: 退回直接求值 (旧行为)
+                        self.gen_expr(expr, 0);
                     }
                     // 3. 加上字段偏移
                     if let Some(ref f) = field_info {
@@ -3259,17 +3379,27 @@ impl Codegen {
                 } else {
                     None
                 };
-                // 检查是否为直接调用 (callee 是 Ident)
-                if let Expr::Ident { name, .. } = callee.as_ref() {
+                // 检查是否为直接调用 (callee 是 Ident 且不是局部函数指针变量)
+                let direct_name = if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if self.var_map.contains_key(&name.name)
+                        || (self.current_func_is_nested && self.upvar_offsets.contains_key(&name.name))
+                        || self.globals.contains_key(&name.name) {
+                        None // 函数指针变量: 走间接调用
+                    } else {
+                        Some(name.name.clone())
+                    }
+                } else { None };
+                if let Some(fname) = direct_name {
+                    let name_name = fname;
                     // __atomic_* 内置函数特殊处理 (生成 lock 前缀指令)
-                    if name.name.starts_with("__atomic_") && self.gen_atomic_builtin(&name.name, args, dst) {
+                    if name_name.starts_with("__atomic_") && self.gen_atomic_builtin(&name_name, args, dst) {
                         // 已成功生成原子指令
-                    } else if self.gen_builtin(&name.name, args, dst) {
+                    } else if self.gen_builtin(&name_name, args, dst) {
                         // 已成功处理 __builtin_* 函数
-                    } else if name.name.starts_with("__builtin_") {
+                    } else if name_name.starts_with("__builtin_") {
                         eprintln!(
                             "warning: unsupported __builtin_ function '{}', emitted as {}",
-                            name.name,
+                            name_name,
                             if matches!(ty, Type::Void) { "ud2" } else { "zero" }
                         );
                         if matches!(ty, Type::Void) {
@@ -3278,7 +3408,7 @@ impl Codegen {
                             self.mov_imm(dst, 0);
                         }
                     } else {
-                        self.emit_sysv_call(Some(&name.name), None, args, sret_off);
+                        self.emit_sysv_call(Some(&name_name), None, args, sret_off);
                         if let Some(off) = sret_off {
                             if dst != 0 {
                                 self.emit_lea_r13(dst, off);
@@ -3296,6 +3426,12 @@ impl Codegen {
                     } else if dst != 0 {
                         self.mov(dst, 0);
                     }
+                }
+                // vector 返回值: 被调方按 rax:rdx 返回, 存入向量临时槽 0
+                if matches!(ty, Type::Vector(_, _)) && ty.size() > 8 && sret_off.is_none() {
+                    let toff = self.vector_temp_base(0, ty.size());
+                    self.store_stack(0, toff);
+                    self.store_stack(2, toff + 8);
                 }
             }
             Expr::SizeofTy { ty, .. } => self.mov_imm(dst, ty.size() as i128),
@@ -3361,6 +3497,11 @@ impl Codegen {
                     return;
                 }
                 let src_ty = e.ty();
+                // 数组在 cast 中 decay 为首元素地址, 如 (const __m128i *) buf.
+                // 直接 gen_expr 会误读数组内容 (mov 而非 lea).
+                if matches!(src_ty, Type::Array(_, _)) && self.gen_lvalue_addr(e, dst) {
+                    return;
+                }
                 self.gen_expr(e, dst);
                 // 类型转换
                 match (&src_ty, ty) {
@@ -3401,27 +3542,13 @@ impl Codegen {
                             }
                             Expr::Ident { name, .. } => {
                                 let off = self.var_offset(&name.name);
-                                if is_f32 {
-                                    self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x45]);
-                                    if off.abs() < 128 { self.emit(&[off as u8]); }
-                                    else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
-                                } else {
-                                    self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x45]);
-                                    if off.abs() < 128 { self.emit(&[off as u8]); }
-                                    else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
-                                }
+                                let pfx = if is_f32 { 0xF3u8 } else { 0xF2u8 };
+                                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], off);
                             }
                             _ => {
                                 let result_off = -self.frame_size + 8;
-                                if is_f32 {
-                                    self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x45]);
-                                    if result_off.abs() < 128 { self.emit(&[result_off as u8]); }
-                                    else { self.emit(&[0x85]); self.emit(&result_off.to_le_bytes()); }
-                                } else {
-                                    self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x45]);
-                                    if result_off.abs() < 128 { self.emit(&[result_off as u8]); }
-                                    else { self.emit(&[0x85]); self.emit(&result_off.to_le_bytes()); }
-                                }
+                                let pfx = if is_f32 { 0xF3u8 } else { 0xF2u8 };
+                                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
                             }
                         }
                         if is_f32 {
@@ -3573,6 +3700,26 @@ impl Codegen {
                         self.mov(dst, 0);
                     }
                     }
+                } else {
+                    // 通用路径: 基址来自任意 lvalue/指针表达式 (如 s.i[k])
+                    let arr_ty = arr.ty();
+                    if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                        if !self.gen_lvalue_addr(arr, 0) { self.gen_expr(arr, 0); }
+                    } else {
+                        self.gen_expr(arr, 0);
+                    }
+                    self.push(0);
+                    self.gen_expr(idx, 1);
+                    self.pop(0);
+                    if es != 1 {
+                        self.emit(&[0x48, 0x69, 0xc9]); // imul rcx, rcx, imm32
+                        self.emit(&es.to_le_bytes());
+                    }
+                    self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
+                    self.emit_load_mem_typed(es as usize, elem_ty);
+                    if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
+                        self.mov(dst, 0);
+                    }
                 }
             }
             Expr::PostInc { e, .. } => self.gen_inc_dec(e, dst, false, true),
@@ -3591,8 +3738,11 @@ impl Codegen {
             }
             Expr::AddrOf { e, .. } => {
                 // &var / &struct.field / &ptr->field / *ptr: 计算地址到 dst
-                if let Expr::Ident { name, .. } = e.as_ref() {
-                    if self.globals.contains_key(&name.name) {
+                if let Expr::Ident { name, ty: id_ty, .. } = e.as_ref() {
+                    if matches!(id_ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
+                        // &func: 函数地址
+                        self.emit_func_addr(dst, &name.name);
+                    } else if self.globals.contains_key(&name.name) {
                         self.emit_global_addr(dst, &name.name);
                     } else {
                         let off = self.var_offset(&name.name);
@@ -3625,7 +3775,10 @@ impl Codegen {
                             }
                         }
                     } else {
-                        self.gen_expr(expr, dst);
+                        // 通用路径: 基址来自任意 lvalue (如 &s.a.b, &s.i[k].f)
+                        if !self.gen_lvalue_addr(expr, dst) {
+                            self.gen_expr(expr, dst);
+                        }
                     }
                     let field_info = if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty() {
                         find_field(fields, &field.name).map(|(f, extra)| {
@@ -3657,6 +3810,14 @@ impl Codegen {
                         } else {
                             let off = self.var_offset(&arr_name.name);
                             self.emit_lea_r13(0, off);
+                        }
+                    } else {
+                        // 通用路径: 基址来自任意 lvalue/指针表达式 (如 &s.i[k])
+                        let arr_ty = arr.ty();
+                        if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                            if !self.gen_lvalue_addr(arr, 0) { self.gen_expr(arr, 0); }
+                        } else {
+                            self.gen_expr(arr, 0);
                         }
                     }
                     self.push(0);
@@ -3691,7 +3852,10 @@ impl Codegen {
                             }
                         }
                     } else {
-                        self.gen_expr(expr, dst);
+                        // 通用路径: 嵌套成员/下标等复合 lvalue (如 s.a.b)
+                        if !self.gen_lvalue_addr(expr, dst) {
+                            self.gen_expr(expr, dst);
+                        }
                     }
                 }
                 // 2. 查找字段信息 (支持匿名 struct/union), 加上字段偏移
@@ -3823,7 +3987,7 @@ impl Codegen {
     // 向量 rvalue 初始化列表: 结果写入帧临时区 (与 gen_vector_load/store 一致)
     fn vector_temp_base(&self, slot: usize, vec_size: usize) -> i32 {
         let slot_bytes = vec_size.div_ceil(8) as i32 * 8;
-        -self.frame_size + 8 + (slot as i32 * slot_bytes)
+        self.vec_temp_off + (slot as i32 * slot_bytes)
     }
 
     /// 标量整型表达式写入浮点向量元素前，将 rax 转为 xmm0
@@ -5004,6 +5168,29 @@ impl Codegen {
             Expr::InitList { inits, .. } => {
                 self.gen_vector_init_rvalue(inits, &elem_ty, count, temp_slot);
             }
+            Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. } => {
+                // vector lvalue: 取地址后整块拷贝到临时槽
+                // (不能回退 gen_expr: 会递归回本函数)
+                if self.gen_lvalue_addr(e, 0) {
+                    self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
+                    self.emit_lea_r13(7, temp_off); // rdi = 临时槽
+                    self.mov_imm(1, vec_size as i128);
+                    self.emit(&[0xFC]); // cld
+                    self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                }
+            }
+            Expr::Call { .. } => {
+                // vector 返回值: gen_expr 已将 rax:rdx 存入槽 0
+                self.gen_expr(e, 0);
+                if temp_slot != 0 {
+                    let src_off = self.vector_temp_base(0, vec_size);
+                    let n_qwords = vec_size.div_ceil(8);
+                    for q in 0..n_qwords {
+                        self.load_stack(0, src_off + (q * 8) as i32);
+                        self.emit_store(0, temp_off + (q * 8) as i32, 8);
+                    }
+                }
+            }
             _ => {
                 self.gen_expr(e, 0);
                 let total_bytes = elem_size * count;
@@ -5156,8 +5343,26 @@ impl Codegen {
                 self.emit(&[rex, 0xF7, 0xF8 | (src & 7)]);
                 if matches!(op, BinOp::Mod) { self.mov(dst, 2); }
             }
-            BinOp::Shl => { let mut rex = 0x48u8; if dst >= 8 { rex |= 0x41; } self.emit(&[rex, 0xD3, 0xE0 | m]); }
-            BinOp::Shr => { let mut rex = 0x48u8; if dst >= 8 { rex |= 0x41; } self.emit(&[rex, 0xD3, 0xE8 | m]); }
+            BinOp::Shl | BinOp::Shr => {
+                let sub: u8 = if matches!(op, BinOp::Shl) { 0xE0 } else { 0xE8 };
+                if src == 1 {
+                    // 移位量已在 cl
+                    let mut rex = 0x48u8; if dst >= 8 { rex |= 0x41; }
+                    self.emit(&[rex, 0xD3, sub | m]);
+                } else if dst == 1 {
+                    // dst=rcx 且移位量在 src: xchg 后在 src 上移位, 再搬回 rcx
+                    let mut rex = 0x48u8; if src >= 8 { rex |= 0x41; }
+                    self.emit(&[rex, 0x87, 0xC8 | (src & 7)]); // xchg rcx, src
+                    self.emit(&[rex, 0xD3, sub | (src & 7)]);  // shl/shr src, cl
+                    self.emit(&[rex, 0x8B, 0xC8 | (src & 7)]); // mov rcx, src
+                } else {
+                    // 移位量搬到 cl 后对 dst 移位
+                    let mut rex1 = 0x48u8; if src >= 8 { rex1 |= 0x41; }
+                    self.emit(&[rex1, 0x8B, 0xC8 | (src & 7)]); // mov rcx, src
+                    let mut rex = 0x48u8; if dst >= 8 { rex |= 0x41; }
+                    self.emit(&[rex, 0xD3, sub | m]);
+                }
+            }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
                 let mut rex = 0x48u8; if src >= 8 { rex |= 0x44; } else if dst >= 8 { rex |= 0x41; }
                 self.emit(&[rex, 0x39, 0xC0 | ((src & 7) << 3) | (dst & 7)]);
@@ -5313,7 +5518,10 @@ impl Codegen {
             .filter(|(_, ty)| !matches!(ty, Type::Void))
             .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
             .sum();
-        let mut off = -(used + 16 + self.temp_slots * 8);
+        // 多槽变量: 数据区 [off, off+size) 向高地址延伸, 需把 off 下移
+        // (slots-1)*8, 否则高槽会覆盖先前分配的变量 (如 16B vector 参数
+        // 的高 8 字节踩上一个指针参数槽)
+        let mut off = -(used + 16 + self.temp_slots * 8) - (slots - 1) * 8;
         while off + ty.size() as i32 > 0 {
             off -= 8;
         }
@@ -5659,15 +5867,8 @@ impl Codegen {
         self.store_complex_pair_from_rsp(result_off, inner_sz, is_float);
         self.emit(&[0x48, 0x83, 0xC4, save_sz as u8]);
         // 实部载入 xmm0，供浮点/整型转换
-        if is_float {
-            self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x45]);
-            if result_off.abs() < 128 { self.emit(&[result_off as u8]); }
-            else { self.emit(&[0x85]); self.emit(&result_off.to_le_bytes()); }
-        } else {
-            self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x45]);
-            if result_off.abs() < 128 { self.emit(&[result_off as u8]); }
-            else { self.emit(&[0x85]); self.emit(&result_off.to_le_bytes()); }
-        }
+        let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
     }
 
     /// 将复数操作数写入 [rsp+slot]（实部）与 [rsp+slot+inner_sz]（虚部）
@@ -5677,27 +5878,11 @@ impl Codegen {
         match e {
             Expr::Ident { name, .. } => {
                 let off = self.var_offset(&name.name);
-                if is_float {
-                    self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x45]);
-                    if off.abs() < 128 { self.emit(&[off as u8]); }
-                    else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
-                    self.emit(&[0xF3, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                    let imag_off = off + inner_sz;
-                    self.emit(&[0xF3, 0x49, 0x0F, 0x10, 0x45]);
-                    if imag_off.abs() < 128 { self.emit(&[imag_off as u8]); }
-                    else { self.emit(&[0x85]); self.emit(&imag_off.to_le_bytes()); }
-                    self.emit(&[0xF3, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
-                } else {
-                    self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x45]);
-                    if off.abs() < 128 { self.emit(&[off as u8]); }
-                    else { self.emit(&[0x85]); self.emit(&off.to_le_bytes()); }
-                    self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                    let imag_off = off + inner_sz;
-                    self.emit(&[0xF2, 0x49, 0x0F, 0x10, 0x45]);
-                    if imag_off.abs() < 128 { self.emit(&[imag_off as u8]); }
-                    else { self.emit(&[0x85]); self.emit(&imag_off.to_le_bytes()); }
-                    self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
-                }
+                let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], off);
+                self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], off + inner_sz);
+                self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
             }
             Expr::Binop { .. } => {
                 self.gen_expr(e, 0);
@@ -5723,28 +5908,24 @@ impl Codegen {
         let _ = total_sz;
     }
 
-    fn store_complex_pair_from_rsp(&mut self, result_off: i32, inner_sz: i32, is_float: bool) {
-        if is_float {
-            self.emit(&[0xF3, 0x0F, 0x10, 0x04, 0x24]);
-            self.emit(&[0xF3, 0x41, 0x0F, 0x11, 0x45]);
-            if result_off.abs() < 128 { self.emit(&[result_off as u8]); }
-            else { self.emit(&[0x85]); self.emit(&result_off.to_le_bytes()); }
-            self.emit(&[0xF3, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8]);
-            self.emit(&[0xF3, 0x41, 0x0F, 0x11, 0x45]);
-            let imag_off = result_off + inner_sz;
-            if imag_off.abs() < 128 { self.emit(&[imag_off as u8]); }
-            else { self.emit(&[0x85]); self.emit(&imag_off.to_le_bytes()); }
+    /// 发射 xmm0 <-> [r13+off] 的 movss/movsd, 正确处理 disp8/disp32 编码.
+    /// opcode: 不含 ModRM 的完整前缀+操作码 (如 [0xF3,0x49,0x0F,0x10])
+    fn emit_xmm0_r13_disp(&mut self, opcode: &[u8], off: i32) {
+        self.emit(opcode);
+        if (-128..=127).contains(&off) {
+            self.emit(&[0x45, off as u8]);
         } else {
-            self.emit(&[0xF2, 0x0F, 0x10, 0x04, 0x24]);
-            self.emit(&[0xF2, 0x41, 0x0F, 0x11, 0x45]);
-            if result_off.abs() < 128 { self.emit(&[result_off as u8]); }
-            else { self.emit(&[0x85]); self.emit(&result_off.to_le_bytes()); }
-            self.emit(&[0xF2, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8]);
-            self.emit(&[0xF2, 0x41, 0x0F, 0x11, 0x45]);
-            let imag_off = result_off + inner_sz;
-            if imag_off.abs() < 128 { self.emit(&[imag_off as u8]); }
-            else { self.emit(&[0x85]); self.emit(&imag_off.to_le_bytes()); }
+            self.emit(&[0x85]);
+            self.emit(&off.to_le_bytes());
         }
+    }
+
+    fn store_complex_pair_from_rsp(&mut self, result_off: i32, inner_sz: i32, is_float: bool) {
+        let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+        self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
+        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
+        self.emit(&[pfx, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8]);
+        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
     }
 
     fn copy_complex_from_result_to_rsp(&mut self, result_off: i32, rsp_slot: i32, inner_sz: i32, is_float: bool) {
@@ -5862,6 +6043,72 @@ impl Codegen {
         } else {
             self.emit(&[0x85 | ((reg & 7) << 3)]);
             self.emit(&off.to_le_bytes());
+        }
+    }
+
+    /// 计算任意 lvalue 表达式的地址到 rax (dst != 0 时再 mov).
+    /// 支持 Ident / Member / Index / Deref / Cast 递归组合, 例如
+    /// `s.i[k]`, `p->arr[i].f`, `(*q).buf[n]`. 返回 false 表示无法处理.
+    fn gen_lvalue_addr(&mut self, e: &Expr, dst: u8) -> bool {
+        match e {
+            Expr::Ident { name, .. } => {
+                if self.globals.contains_key(&name.name) {
+                    self.emit_global_addr(dst, &name.name);
+                } else if self.vla_offsets.contains_key(&name.name) {
+                    // VLA: 基址存储在变量栈槽中
+                    let off = self.var_offset(&name.name);
+                    self.load_stack(dst, off);
+                } else {
+                    let off = self.var_offset(&name.name);
+                    self.emit_lea_r13(dst, off);
+                }
+                true
+            }
+            Expr::Member { expr, field, is_arrow, .. } => {
+                if *is_arrow {
+                    self.gen_expr(expr, dst);
+                } else if !self.gen_lvalue_addr(expr, dst) {
+                    return false;
+                }
+                let field_off = if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty() {
+                    find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
+                } else { None };
+                if let Some(off) = field_off {
+                    let off = off as i32;
+                    if off != 0 {
+                        let rex = 0x48 | if dst >= 8 { 0x41 } else { 0 };
+                        self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                        self.emit(&off.to_le_bytes());
+                    }
+                }
+                true
+            }
+            Expr::Index { arr, idx, ty: elem_ty, .. } => {
+                let es = elem_ty.size().max(1) as i32;
+                // 数组/向量 lvalue: 取其地址; 指针: 求值指针本身
+                let arr_ty = arr.ty();
+                if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                    if !self.gen_lvalue_addr(arr, 0) { return false; }
+                } else {
+                    self.gen_expr(arr, 0);
+                }
+                self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
+                self.gen_expr(idx, 1); // rcx = index
+                self.pop(0);
+                if es != 1 {
+                    self.emit(&[0x48, 0x69, 0xC9]); // imul rcx, rcx, imm32
+                    self.emit(&es.to_le_bytes());
+                }
+                self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
+                if dst != 0 { self.mov(dst, 0); }
+                true
+            }
+            Expr::Deref { e: inner, .. } => {
+                self.gen_expr(inner, dst);
+                true
+            }
+            Expr::Cast { e: inner, .. } => self.gen_lvalue_addr(inner, dst),
+            _ => false,
         }
     }
 
@@ -6138,7 +6385,8 @@ impl Codegen {
                         .filter(|(_, ty)| !matches!(ty, Type::Void))
                         .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
                         .sum();
-                    let mut off = -(used + 16 + temp_slots * 8);
+                    // 多槽变量同 register_var: off 下移 (slots-1)*8 预留自身空间
+                    let mut off = -(used + 16 + temp_slots * 8) - (slots - 1) * 8;
                     while off + v.ty.size() as i32 > 0 {
                         off -= 8;
                     }
@@ -7370,6 +7618,20 @@ impl Codegen {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// 发射函数地址加载: lea dst, [rip+disp32] + 重定位/延迟修补.
+    /// 用于函数名作为值 (函数指针) 的场景: `fn_t f = func;` / `return func;`
+    fn emit_func_addr(&mut self, dst: u8, name: &str) {
+        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+        let modrm = 0x05 | ((dst & 7) << 3);
+        self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
+        let disp32_pos = self.pos() - 4;
+        if self.relocatable {
+            self.pending_func_rels.push((disp32_pos, name.to_string()));
+        } else {
+            self.label_addr_refs.push((disp32_pos, name.to_string()));
         }
     }
 

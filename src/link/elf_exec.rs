@@ -40,7 +40,9 @@ pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
         let st_name = strtab_offsets[i];
         let st_info = (sym.bind << 4) | sym.ty;
         let st_other = sym.visibility;
-        let st_shndx = sym.section;
+        // section 是 0-based 内部索引。ELF 节 0 是 NULL 节，所以 st_shndx = section + 1。
+        // i==0 的符号条目总是 UNDEF（st_shndx=0）。
+        let st_shndx = if i == 0 { 0 } else { sym.section + 1 };
         symtab.extend_from_slice(&st_name.to_le_bytes());
         symtab.push(st_info);
         symtab.push(st_other);
@@ -56,17 +58,18 @@ pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
     out
 }
 
-fn segment_range(layout: &Layout, seg: u8) -> (u64, u64, u64, u64) {
+fn segment_range_actual(layout: &Layout, seg: u8, section_offsets: &[u64], _data_base: u64) -> (u64, u64, u64, u64) {
     let mut lo = u64::MAX; let mut hi = 0u64;
     let mut fo = u64::MAX; let mut fend = 0u64;
-    for sec in &layout.sections {
+    for (i, sec) in layout.sections.iter().enumerate() {
         if sec.load_segment != seg { continue; }
         if sec.ty == SHT_NOBITS { continue; }
         if sec.size == 0 { continue; }
         lo = lo.min(sec.vaddr);
         hi = hi.max(sec.vaddr + sec.size);
-        fo = fo.min(sec.file_off);
-        fend = fend.max(sec.file_off + sec.size);
+        let actual_off = section_offsets.get(i).copied().unwrap_or(sec.file_off);
+        fo = fo.min(actual_off);
+        fend = fend.max(actual_off + sec.size);
     }
     if lo == u64::MAX { return (0, 0, 0, 0); }
     (lo, hi, fo, fend - fo)
@@ -110,7 +113,15 @@ pub fn write_elf_internal(
     out.resize(64 + nphdr as usize * 56, 0);
 
     // 3. 计算节数据偏移
-    let mut cur = (64 + nphdr as usize * 56) as u64;
+    let data_base: u64 = (64 + nphdr as usize * 56) as u64;
+    // ET_EXEC/ET_DYN: 文件偏移必须满足 offset % page == vaddr % page.
+    // 由于 vaddr 是 page-aligned, 把 data_base 对齐到 page.
+    let data_aligned = if e_type == 2 || e_type == 3 {
+        (data_base + 0xfff) & !0xfff
+    } else {
+        data_base
+    };
+    let mut cur = data_aligned;
     let mut section_offsets: Vec<u64> = Vec::with_capacity(layout.sections.len() + 5);
     for sec in &layout.sections {
         let a = sec.align.max(1);
@@ -151,9 +162,9 @@ pub fn write_elf_internal(
     out.extend_from_slice(shstrtab);
     out.resize(shdr_off as usize, 0);
 
-    // 5. 段 (PHDR) 范围
-    let (s0_lo, s0_hi, s0_fo, s0_fsz) = segment_range(layout, 0);
-    let (s1_lo, s1_hi, s1_fo, s1_fsz) = segment_range(layout, 1);
+    // 5. 段 (PHDR) 范围, 使用实际 section_offsets 计算文件偏移
+    let (s0_lo, s0_hi, s0_fo, s0_fsz) = segment_range_actual(layout, 0, &section_offsets, data_base);
+    let (s1_lo, s1_hi, s1_fo, s1_fsz) = segment_range_actual(layout, 1, &section_offsets, data_base);
     let s0_memsz = s0_hi - s0_lo;
     let s1_memsz = s1_hi - s1_lo;
 

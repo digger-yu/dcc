@@ -1375,6 +1375,10 @@ impl Preprocessor {
             return;
         };
 
+        // dcc 内置 intrinsics 头: 拦截 x86intrin.h 系列 (标量模拟实现),
+        // 优先于 host GCC 同名头 (后者依赖 dcc 未支持的 SIMD builtin)
+        if self.try_include_builtin_intrin(path) { return; }
+
         // 搜索文件
         let found = self.find_include(path, is_system);
         match found {
@@ -1385,6 +1389,25 @@ impl Preprocessor {
                     Span::point(&self.file, line_no, 1)));
             }
         }
+    }
+
+    /// 拦截 x86 intrinsics 头文件, 注入 dcc 内置标量模拟实现.
+    /// 命中返回 true (已处理), 未命中返回 false (继续正常搜索).
+    fn try_include_builtin_intrin(&mut self, path: &str) -> bool {
+        const X86INTRIN_H: &str = include_str!("headers/x86intrin.h");
+        let name = Path::new(path).file_name()
+            .and_then(|s| s.to_str()).unwrap_or(path);
+        let text = match name {
+            "x86intrin.h" | "immintrin.h" | "emmintrin.h"
+            | "smmintrin.h" | "tmmintrin.h" | "shaintrin.h" => X86INTRIN_H,
+            _ => return false,
+        };
+        let key = "<builtin:x86intrin.h>".to_string();
+        if self.pragma_once.contains(&key) { return true; }
+        self.pragma_once.insert(key.clone());
+        self.out.push_str(&format!("/* #include <{}> (dcc builtin) */\n", name));
+        self.process_text(text, &key);
+        true
     }
 
     /// 判断 `#include` 后的原始文本是否已经是 <file> / "file" / 绝对路径。

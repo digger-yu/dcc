@@ -54,6 +54,8 @@ struct ParsedAttrs {
     deprecated_msg: Option<String>,
     /// __attribute__((ifunc("resolver")))
     ifunc_resolver: Option<String>,
+    /// __attribute__((vector_size(N)))
+    vector_size: Option<usize>,
 }
 
 /// 解析选项（Driver 传入）
@@ -102,6 +104,7 @@ impl ParsedAttrs {
         if other.warning_msg.is_some() { self.warning_msg = other.warning_msg; }
         if other.deprecated_msg.is_some() { self.deprecated_msg = other.deprecated_msg; }
         if other.ifunc_resolver.is_some() { self.ifunc_resolver = other.ifunc_resolver; }
+        if other.vector_size.is_some() { self.vector_size = other.vector_size; }
     }
 }
 
@@ -671,6 +674,18 @@ impl<'a> Parser<'a> {
                                 attrs.ifunc_resolver = Some(resolver);
                             }
                             if self.cur.kind == TokKind::RParen { self.advance(); }
+                        }
+                    }
+                    "vector_size" | "__vector_size__" => {
+                        self.advance(); // vector_size
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance(); // (
+                            if self.cur.kind == TokKind::Number {
+                                let v: usize = parse_int_lit(&self.cur.text) as usize;
+                                attrs.vector_size = Some(v);
+                                self.advance();
+                            }
+                            if self.cur.kind == TokKind::RParen { self.advance(); } // )
                         }
                     }
                     _ => {
@@ -1661,6 +1676,15 @@ impl<'a> Parser<'a> {
     }
 
     fn finish_type(&mut self, ty: Type, specifiers_only: bool) -> Type {
+        // 应用 parse_type_mode 中通过 parse_attributes 存储的 vector_size,
+        // 处理 __attribute__((vector_size(N))) 出现在类型之前的场景
+        let ty = if let Some(vsize) = self.decl_attrs.vector_size.take() {
+            let elem_size = ty.size().max(1);
+            let count = vsize / elem_size;
+            Type::Vector(Box::new(ty), count)
+        } else {
+            ty
+        };
         let ty = self.try_parse_vector_attr(ty);
         if specifiers_only {
             return ty;
@@ -2148,8 +2172,9 @@ impl<'a> Parser<'a> {
         self.advance(); // (
         if self.cur.kind != TokKind::LParen { return ty; }
         self.advance(); // (
-        // 解析 vector_size(N)
-        if self.cur.kind == TokKind::Ident && self.cur.text == "vector_size" {
+        // 解析 vector_size(N) (含 __vector_size__ 别名)
+        if self.cur.kind == TokKind::Ident
+            && (self.cur.text == "vector_size" || self.cur.text == "__vector_size__") {
             self.advance(); // vector_size
             if self.cur.kind == TokKind::LParen {
                 self.advance(); // (
@@ -3107,11 +3132,9 @@ impl<'a> Parser<'a> {
             TokKind::LParen if self.is_cast() => {
                 self.advance();
                 // 在 cast 中可能出现位于 type 之前的 __attribute__((...)) 修饰符,
-                // 例如 (__attribute__((__vector_size__ (16))) int)x. 在 parse_type 之前先剖离,
-                // 避免与 is_type_start(含 typedefs/修饰符) 冲突.
-                while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                    self.skip_attributes();
-                }
+                // 例如 (__attribute__((__vector_size__ (16))) int)x.
+                // parse_type_mode 已在类型说明符中处理 __attribute__,
+                // 会通过 parse_attributes 安全地消耗并跳过未知属性.
                 let mut ty = self.parse_type()?;
                 // 解析完类型后, 类型与 * 之间可能出现 __attribute__((...)) 修饰符与
                 // 多个 * 指针, 例如内核 percpu 的

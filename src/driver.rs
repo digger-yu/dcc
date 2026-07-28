@@ -126,8 +126,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return crate::link::link_relocatable(&cfg.inputs, &cfg.output, lto_enabled, cfg.verbose);
     }
 
-    // -pie / -shared / -fbuiltin-linker：走内置全链接器
-    if cfg.built_link && cfg.link_mode {
+    // -pie / -shared / -fbuiltin-linker / .o 自动链接：走内置全链接器
+    if cfg.built_link {
         return run_builtin_linker(&cfg);
     }
 

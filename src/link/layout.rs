@@ -186,8 +186,8 @@ impl LayoutBuilder {
         // 合并同名同类节
         for (i, sec) in bundle.sections.iter().enumerate() {
             let kind = classify_section(&sec.name);
-            // 跳过符号表与重定位节（链接后由链接器自己生成）
-            if sec.name == ".symtab" || sec.name == ".strtab" ||
+            // 跳过 NULL 节、符号表与重定位节（链接后由链接器自己生成）
+            if sec.name.is_empty() || sec.name == ".symtab" || sec.name == ".strtab" ||
                sec.name == ".shstrtab" || sec.name.starts_with(".rela") {
                 continue;
             }
@@ -281,22 +281,13 @@ impl LayoutBuilder {
         // 段映射
         let segments = self.build_segments(&sections);
 
-        // 入口
+        // 入口 (使用 OutputSymbol.vaddr, 它已是 section.vaddr + value)
         let entry = symbols.iter()
             .find(|s| s.name == self.entry_name)
-            .map(|s| {
-                if let Some(sec) = sections.get(s.section as usize) {
-                    sec.vaddr + s.value
-                } else {
-                    0
-                }
-            })
+            .map(|s| s.vaddr)
             .unwrap_or_else(|| {
-                // 尝试 _start, main
                 if let Some(s) = symbols.iter().find(|s| s.name == "main") {
-                    if let Some(sec) = sections.get(s.section as usize) {
-                        return sec.vaddr + s.value;
-                    }
+                    return s.vaddr;
                 }
                 sections.first().map(|s| s.vaddr).unwrap_or(self.base_addr)
             });
@@ -344,10 +335,15 @@ impl LayoutBuilder {
                 if in_idx >= bundle.sections.len() { continue; }
                 let in_sec = &bundle.sections[in_idx];
                 let a = in_sec.align.max(1);
-                cur = (cur + a - 1) & !(a - 1);
-                sec.input_offsets.push(cur);
+                let aligned = (cur + a - 1) & !(a - 1);
+                // 填充对齐字节，使 data 与 input_offsets 一致
+                let pad = aligned - cur;
+                if pad > 0 {
+                    sec.data.extend(std::iter::repeat(0).take(pad as usize));
+                }
+                sec.input_offsets.push(aligned);
                 sec.data.extend_from_slice(&in_sec.data);
-                cur += in_sec.data.len() as u64;
+                cur = aligned + in_sec.data.len() as u64;
             }
             sec.size = cur;
         }
@@ -710,16 +706,22 @@ impl LayoutBuilder {
         }
 
         // 跨 TU 解析后的 GLOBAL/WEAK 符号
+        // 注意: r.section 是 bundle 内的 flat section 索引, 需要映射到输出节
+        // r.value 是输入节内的偏移, 需要加上输入节在输出节内的偏移
         for r in resolved {
             if r.section == 0 { continue; }   // undefined 已合并到 ResolvedSymbol 但不出现在 .symtab
             if r.bind == STB_LOCAL { continue; }
-            let sec_idx = r.section as usize;
-            if sec_idx >= sections.len() { continue; }
-            let sec = &sections[sec_idx];
+            let in_offset = find_input_offset(sections, r.section, 0).unwrap_or(0);
+            let out_sec_idx = match find_output_section_for_input_idx(sections, r.section) {
+                Some(v) => v,
+                None => continue,
+            };
+            let sec = &sections[out_sec_idx];
+            let val = r.value + in_offset;
             out.push(OutputSymbol {
                 name: r.name.clone(),
-                value: r.value,
-                vaddr: sec.vaddr + r.value,
+                value: val,
+                vaddr: sec.vaddr + val,
                 size: r.size,
                 bind: r.bind,
                 ty: r.ty,
@@ -735,28 +737,25 @@ impl LayoutBuilder {
             if sym.bind != STB_LOCAL { continue; }
             if sym.section == 0 { continue; }
             if sym.name.is_empty() { continue; }
-            // 找对应输出节
-            let sec_idx = sym.section as usize;
-            if sec_idx >= bundle.sections.len() { continue; }
-            let input_sec = &bundle.sections[sec_idx];
-            // 找第一个匹配的自定义节
-            for sec in sections {
-                if sec.kind == OutputSectionKind::Named(input_sec.name.clone()) {
-                    out.push(OutputSymbol {
-                        name: sym.name.clone(),
-                        value: sym.value,
-                        vaddr: sec.vaddr + sym.value,
-                        size: sym.size,
-                        bind: sym.bind,
-                        ty: sym.ty,
-                        kind: sym.ty,
-                        visibility: sym.visibility,
-                        section: sec.output_index as u16,
-                        shndx_if_section: 0,
-                    });
-                    break;
-                }
-            }
+            let in_offset = find_input_offset(sections, sym.section as u32, 0).unwrap_or(0);
+            let out_sec_idx = match find_output_section_for_input_idx(sections, sym.section as u32) {
+                Some(v) => v,
+                None => continue,
+            };
+            let sec = &sections[out_sec_idx];
+            let val = sym.value + in_offset;
+            out.push(OutputSymbol {
+                name: sym.name.clone(),
+                value: val,
+                vaddr: sec.vaddr + val,
+                size: sym.size,
+                bind: sym.bind,
+                ty: sym.ty,
+                kind: sym.ty,
+                visibility: sym.visibility,
+                section: sec.output_index as u16,
+                shndx_if_section: 0,
+            });
             let _ = i;
         }
         out
@@ -952,11 +951,25 @@ fn find_output_section_for(sections: &[OutputSection], in_sec: &FlatSection) -> 
     None
 }
 
-fn find_input_offset(_sections: &[OutputSection], _in_idx: u32, _orig_section: u32) -> Option<u64> {
-    // 这里需要把输入节在输出节内的偏移算出来；需要先做一次内容拼接。
-    // layout 阶段在 assign_addresses 之前应该已经做了 input_offsets 计算。
-    // 此函数假定 layout.fill_section_data 已运行。
-    Some(0)
+fn find_output_section_for_input_idx(sections: &[OutputSection], bundle_sec_idx: u32) -> Option<usize> {
+    for (idx, sec) in sections.iter().enumerate() {
+        if sec.input_sections.contains(&bundle_sec_idx) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn find_input_offset(sections: &[OutputSection], in_idx: u32, _orig_section: u32) -> Option<u64> {
+    // 遍历所有输出节, 查找包含输入节 in_idx 的那个
+    for sec in sections {
+        for (j, &input_sec) in sec.input_sections.iter().enumerate() {
+            if input_sec == in_idx {
+                return sec.input_offsets.get(j).copied();
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

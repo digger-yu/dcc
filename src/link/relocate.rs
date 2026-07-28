@@ -132,10 +132,19 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                 sec.vaddr
             };
             let sym = &layout.symbols[r_sym as usize];
-            let s_sym_vaddr = if sym.section != 0 {
-                let sym_sec = &layout.sections[sym.section as usize];
-                sym_sec.vaddr + sym.value
-            } else { 0 };
+            // sym.section 是 0-based 输出节索引, 0 对应 .text (有效), 不是 UNDEF.
+            // 只有第一个空符号 (name="" + value=0 + size=0) 才是真正的 UNDEF.
+            let s_sym_vaddr = if sym.name.is_empty() && sym.value == 0 && sym.size == 0 {
+                0  // null entry
+            } else {
+                let sec_idx = sym.section as usize;
+                if sec_idx < layout.sections.len() {
+                    let sym_sec = &layout.sections[sec_idx];
+                    sym_sec.vaddr + sym.value
+                } else {
+                    0
+                }
+            };
             let sec = &mut layout.sections[s_idx];
             // 64-bit 重定位 (R_X86_64_64 / GOT64 / GOTOFF64 / TPOFF64) 需要 8 字节
             let needs_8 = matches!(r_type,

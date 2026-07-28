@@ -13,8 +13,8 @@ use crate::codegen::elf::{
 };
 
 /// 从 .o 文件节头表中读出的原始字段:
-/// (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_addralign, sh_entsize)
-type RawShdr = (u32, u32, u64, u64, u64, u64, u64, u64);
+/// (sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_addralign, sh_entsize, sh_info)
+type RawShdr = (u32, u32, u64, u64, u64, u64, u64, u64, u32);
 
 /// 从 .o 文件读出的节描述。
 #[derive(Debug, Clone)]
@@ -134,10 +134,10 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         let sh_offset = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap()) as usize;
         let sh_size = u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap()) as usize;
         let _sh_link = u32::from_le_bytes(data[off + 40..off + 44].try_into().unwrap());
-        let _sh_info = u32::from_le_bytes(data[off + 44..off + 48].try_into().unwrap());
+        let sh_info = u32::from_le_bytes(data[off + 44..off + 48].try_into().unwrap());
         let sh_addralign = u64::from_le_bytes(data[off + 48..off + 56].try_into().unwrap());
         let sh_entsize = u64::from_le_bytes(data[off + 56..off + 64].try_into().unwrap());
-        raw_sections.push((sh_name, sh_type, sh_flags, sh_addr, sh_offset as u64, sh_size as u64, sh_addralign, sh_entsize));
+        raw_sections.push((sh_name, sh_type, sh_flags, sh_addr, sh_offset as u64, sh_size as u64, sh_addralign, sh_entsize, sh_info));
     }
 
     // 读取 shstrtab
@@ -225,6 +225,8 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         let off = s.4 as usize;
         let size = s.5 as usize;
         let count = size / entsize as usize;
+        // sh_info 是被重定位的目标节索引
+        let target_sec = s.8;
         for j in 0..count {
             let base = off + j * entsize as usize;
             if base + 24 > data.len() { break; }
@@ -238,7 +240,7 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
                 sym: r_sym,
                 rel_type: r_type,
                 addend: r_addend,
-                section: i as u32,
+                section: target_sec,
                 input_obj: 0,
             });
         }

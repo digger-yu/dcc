@@ -271,6 +271,8 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
             layout.output_relas.push(r);
         }
     }
+    // 2.10 为静态链接可执行文件合成 _start 桩 (如果没有 _start)
+    ensure_start_stub(&mut layout);
     // 3. 生成 PLT/GOT（仅动态）
     if builder.emit_dynamic {
         plt_got::fill_plt_got_with_opts(&mut layout, &cfg.opts);
@@ -382,6 +384,78 @@ pub fn link_with_lto(
     // 3. 链接（简化：LTO 暂只做 DCE，后续可加 inlining 后 codegen）
     let bytes = link_multi_tu(inputs, output, cfg)?;
     Ok(bytes)
+}
+
+/// 为静态链接可执行文件合成 _start 桩 (仅当 _start 不存在且 entry=_start 时).
+/// _start 调用 main(argc=0, argv=NULL, envp=NULL) 然后 exit(return).
+fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
+    use crate::codegen::elf::{STB_GLOBAL, STT_FUNC};
+    use crate::link::layout::{OutputSectionKind, OutputSymbol};
+    // 如果已存在 _start 或不是可执行文件, 跳过
+    if layout.symbols.iter().any(|s| s.name == "_start") {
+        return;
+    }
+    if layout.is_shared || layout.is_pie {
+        return;
+    }
+    // 找 main 符号
+    let main_vaddr = match layout.symbols.iter().find(|s| s.name == "main") {
+        Some(s) => s.vaddr,
+        None => return,
+    };
+    // 找 .text 输出节
+    let text_idx = match layout.sections.iter().position(|s| s.kind == OutputSectionKind::Text) {
+        Some(i) => i,
+        None => return,
+    };
+    let text_vaddr = layout.sections[text_idx].vaddr;
+    let text_old_size = layout.sections[text_idx].size;
+    let start_vaddr = text_vaddr + text_old_size;
+    // 构建 _start 桩 (22 字节):
+    //   xor  rdi, rdi        ; 48 31 ff
+    //   xor  rsi, rsi        ; 48 31 f6
+    //   xor  rdx, rdx        ; 48 31 d2
+    //   call rel32           ; e8 xx xx xx xx
+    //   mov  rdi, rax        ; 48 89 c7
+    //   mov  eax, 60         ; b8 3c 00 00 00
+    //   syscall               ; 0f 05
+    let mut code = vec![
+        0x48, 0x31, 0xff, // xor rdi,rdi
+        0x48, 0x31, 0xf6, // xor rsi,rsi
+        0x48, 0x31, 0xd2, // xor rdx,rdx
+        0xe8, 0, 0, 0, 0, // call rel32 (placeholder)
+        0x48, 0x89, 0xc7, // mov rdi,rax
+        0xb8, 0x3c, 0, 0, 0, // mov eax,60
+        0x0f, 0x05, // syscall
+    ];
+    // 计算 call rel32: 目标 = main_vaddr, 下一条指令地址 = start_vaddr + 9 + 5
+    // call 指令在 stub 偏移 9 处 (3+3+3 字节前缀), 长度 5 字节
+    let call_next = start_vaddr + 9 + 5;
+    let rel32 = (main_vaddr.wrapping_sub(call_next)) as i32 as u32;
+    code[10..14].copy_from_slice(&rel32.to_le_bytes()); // rel32 在 code[10..14]
+    // 追加到 .text 节
+    let text = &mut layout.sections[text_idx];
+    eprintln!("dcc-link: ensure_start_stub: text_idx={}, old_size={}, stub_len={}, start_vaddr={:#x}", text_idx, text.size, code.len(), start_vaddr);
+    text.data.extend_from_slice(&code);
+    text.size += code.len() as u64;
+    eprintln!("dcc-link: ensure_start_stub: new text.size={}", text.size);
+    // 添加 _start 输出符号
+    let start_value = text_old_size;
+    let sym_idx = layout.symbols.len() as u32;
+    layout.symbols.push(OutputSymbol {
+        name: "_start".into(),
+        value: start_value,
+        vaddr: start_vaddr,
+        size: code.len() as u64,
+        bind: STB_GLOBAL,
+        ty: STT_FUNC,
+        kind: STT_FUNC,
+        visibility: 0,
+        section: text_idx as u16,
+        shndx_if_section: 0,
+    });
+    layout.entry = start_vaddr;
+    let _ = sym_idx;
 }
 
 #[cfg(test)]

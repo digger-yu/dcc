@@ -970,13 +970,33 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 Some("c") | Some("C") | Some("S") | Some("s")
             )
         });
-        let msg = if all_sources {
-            "multiple source files cannot produce a single executable; \
-             compile each with -c, then link with gcc(1) or dcc -r to merge .o files"
+        let all_objects = inputs.iter().all(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("o")
+        });
+        if all_sources {
+            return Err(CliError::new(
+                "multiple source files cannot produce a single executable; \
+                 compile each with -c, then link with gcc(1) or dcc -r to merge .o files"
+            ));
+        }
+        if all_objects {
+            // 所有输入是 .o 文件, 自动启用内置链接器
+            built_link = true;
+            if cfg!(debug_assertions) && verbose {
+                eprintln!("dcc: auto-enabling built-in linker for .o inputs");
+            }
         } else {
-            "multiple input files require -r link mode with .o files"
-        };
-        return Err(CliError::new(msg));
+            return Err(CliError::new(
+                "mixed input types; compile sources with -c first, then link .o files"
+            ));
+        }
+    } else if !link_mode && inputs.len() == 1 {
+        // 单个 .o 文件输入: 自动启用内置链接器
+        if let Some(ext) = inputs[0].extension().and_then(|e| e.to_str()) {
+            if ext == "o" && !relocatable && !emit_asm && !preprocess_only && !syntax_only {
+                built_link = true;
+            }
+        }
     }
 
     // -E 模式允许没有输入文件 (从 stdin 读取)
