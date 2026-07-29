@@ -787,7 +787,7 @@ fn is_integer_ty(ty: &Type) -> bool {
             | Type::ULongLong
             | Type::Int128
             | Type::UInt128
-            | Type::Enum(_, _)
+            | Type::Enum(_, _, _)
     )
 }
 
@@ -801,7 +801,7 @@ fn is_signed_int(ty: &Type) -> bool {
             | Type::Long
             | Type::LongLong
             | Type::Int128
-            | Type::Enum(_, _)
+            | Type::Enum(_, _, _)
     )
 }
 

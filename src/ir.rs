@@ -343,7 +343,7 @@ impl Lowering {
             Type::UChar => ValueType::Integer { bits: 8, signed: false },
             Type::Short => ValueType::Integer { bits: 16, signed: true },
             Type::UShort => ValueType::Integer { bits: 16, signed: false },
-            Type::Int | Type::Enum(_, _) | Type::Fract | Type::Accum => {
+            Type::Int | Type::Enum(_, _, _) | Type::Fract | Type::Accum => {
                 ValueType::Integer { bits: 32, signed: true }
             }
             Type::UInt => ValueType::Integer { bits: 32, signed: false },

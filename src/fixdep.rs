@@ -28,6 +28,11 @@ fn is_ignored_file(s: &str) -> bool {
     ends_with(s, "include/generated/autoconf.h")
 }
 
+/// 系统/宿主路径不可能包含内核 CONFIG_*，跳过以避免不必要的文件读取
+fn is_system_path(s: &str) -> bool {
+    s.starts_with("/usr/") || s.starts_with("/lib/")
+}
+
 fn is_no_parse_file(s: &str) -> bool {
     ends_with(s, ".rlib") || ends_with(s, ".rmeta") || ends_with(s, ".so")
 }
@@ -160,7 +165,7 @@ fn parse_dep_file(content: &str, target: &str, out: &mut impl Write) -> io::Resu
             }
         }
 
-        if need_parse && !is_no_parse_file(token) {
+        if need_parse && !is_no_parse_file(token) && !is_system_path(token) {
             if let Ok(buf) = fs::read_to_string(token) {
                 parse_config_file(&buf, &mut config_seen);
             }
@@ -197,6 +202,10 @@ fn main() {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     writeln!(out, "savedcmd_{target} := {cmdline}\n").unwrap();
-    parse_dep_file(&dep_content, target, &mut out).unwrap();
+    parse_dep_file(&dep_content, target, &mut out)
+        .unwrap_or_else(|e| {
+            eprintln!("fixdep: {e}");
+            std::process::exit(1);
+        });
     out.flush().unwrap();
 }

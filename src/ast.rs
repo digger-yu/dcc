@@ -257,7 +257,7 @@ pub enum Type {
     Vector(Box<Type>, usize),  // SIMD 向量: (元素类型, 元素个数)
     Struct(String, Arc<Vec<Field>>),
     Union(String, Arc<Vec<Field>>),
-    Enum(String, Arc<Vec<(String, i64)>>),
+    Enum(String, Arc<Vec<(String, i64)>>, bool), // (name, values, packed)
     Func(Box<Type>, Vec<Type>),
     Named(String),
     Atomic(Box<Type>),     // _Atomic(T): 原子类型, 大小/对齐同 T
@@ -289,7 +289,8 @@ impl Type {
             Type::Void => 0,
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
-            Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) | Type::Fract | Type::Accum => 4,
+            Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
+            Type::Enum(_, _, packed) => if *packed { 1 } else { 4 },
             Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
             Type::Int128 | Type::UInt128 => 16,
@@ -314,7 +315,8 @@ impl Type {
             Type::Void => 1,
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
-            Type::Int | Type::UInt | Type::Float | Type::Enum(_, _) | Type::Fract | Type::Accum => 4,
+            Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
+            Type::Enum(_, _, packed) => if *packed { 1 } else { 4 },
             Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
             Type::Int128 | Type::UInt128 => 16,
@@ -469,7 +471,7 @@ impl std::fmt::Display for Type {
             Type::Vector(inner, n) => write!(f, "__attribute__((vector_size({}))){}", n * inner.size() * 8, inner),
             Type::Struct(name, _) => write!(f, "struct {}", name),
             Type::Union(name, _) => write!(f, "union {}", name),
-            Type::Enum(name, _) => write!(f, "enum {}", name),
+            Type::Enum(name, _, _) => write!(f, "enum {}", name),
             Type::Func(ret, params) => {
                 write!(f, "(")?;
                 for (i, p) in params.iter().enumerate() {

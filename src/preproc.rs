@@ -1892,11 +1892,25 @@ impl Preprocessor {
 
     // ===== 宏展开 =====
     /// 顶层入口: 对一行文本做完全宏展开
+    ///
+    /// 重复展开直到结果稳定, 处理一类边界情况: 函数式宏的替换结果
+    /// 末尾标识符恰好与替换体后的 `(X)` 形成新函数式宏调用
+    /// (例如内核 cleanup.h 的 DEFINE_LOCK_GUARD_1_COND 模式):
+    ///   #define F(X...) CONCATENATE(F_, COUNT_ARGS(X))(X)
+    /// 第一轮展开 CONCATENATE 得到 F_3(…) 但 `(…)` 未被识别为新宏调用;
+    /// 第二轮用空禁用集重扫描即可捕获 F_3(…).
     fn expand_macros(&mut self, line: &str) -> String {
         // 不能用 macros.is_empty() 早退: __COUNTER__ / __FILE__ / __LINE__
         // 等特殊 token 不在 macros 表内, 必须进入 expand_with_disabled
         let disabled = HashSet::new();
-        self.expand_with_disabled(line, &disabled)
+        let mut result = self.expand_with_disabled(line, &disabled);
+        // 多轮展开直到稳定 (上限 8 轮, 防止无限递归)
+        for _ in 0..8 {
+            let next = self.expand_with_disabled(&result, &HashSet::new());
+            if next == result { break; }
+            result = next;
+        }
+        result
     }
 
     /// 用禁用集展开文本
@@ -2076,36 +2090,23 @@ impl Preprocessor {
                             // 可变参数处理
                             let mut final_args = expanded_args.clone();
                             if def.variadic {
-                                let has_va_ident = params.last().map(|p| p == "__VA_ARGS__").unwrap_or(false);
-                                let fixed = if has_va_ident {
-                                    params.len().saturating_sub(1)
-                                } else {
-                                    0
-                                };
+                                // 最后一位是可变参数 (__VA_ARGS__ 或 GNU 命名)
+                                let fixed = params.len().saturating_sub(1);
                                 if raw_args.len() >= fixed {
-                                    if has_va_ident {
-                                        let mut normal = expanded_args[..fixed].to_vec();
-                                        let va_text = if raw_args.len() > fixed {
-                                            raw_args[fixed..].iter().map(|a| {
-                                                self.expand_with_disabled(a, disabled)
-                                            }).collect::<Vec<_>>().join(", ")
-                                        } else {
-                                            String::new()
-                                        };
-                                        normal.push(va_text);
-                                        final_args = normal;
-                                    } else if !raw_args.is_empty() {
-                                        let va_text = raw_args.iter().map(|a| {
+                                    let mut normal = expanded_args[..fixed.min(expanded_args.len())].to_vec();
+                                    let va_text = if raw_args.len() > fixed {
+                                        raw_args[fixed..].iter().map(|a| {
                                             self.expand_with_disabled(a, disabled)
-                                        }).collect::<Vec<_>>().join(", ");
-                                        final_args = vec![va_text];
+                                        }).collect::<Vec<_>>().join(", ")
                                     } else {
-                                        final_args = vec![String::new()];
-                                    }
+                                        String::new()
+                                    };
+                                    normal.push(va_text);
+                                    final_args = normal;
                                 }
                             }
                             if final_args.len() == params.len() {
-                                let substituted = self.substitute_params(&def.body, params, &final_args);
+                                let substituted = self.substitute_params(&def.body, params, &final_args, def.variadic);
                                 // 创建新禁用集 = 原禁用集 + 当前宏名
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
@@ -2113,7 +2114,7 @@ impl Preprocessor {
                                 let rescanned = self.expand_with_disabled(&substituted, &new_disabled);
                                 out.push_str(&rescanned);
                             } else if raw_args.len() == params.len() {
-                                let substituted = self.substitute_params(&def.body, params, &raw_args);
+                                let substituted = self.substitute_params(&def.body, params, &raw_args, def.variadic);
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
                                 let rescanned = self.expand_with_disabled(&substituted, &new_disabled);
@@ -2135,7 +2136,7 @@ impl Preprocessor {
                                 // dcc 旧实现因 parse_macro_args("()") 返回 [] 而落到 fallthrough
                                 // 保留原标识符, 导致 __STRING 残留在预处理器输出里。
                                 let empty_args: Vec<String> = vec![String::new(); params.len()];
-                                let substituted = self.substitute_params(&def.body, params, &empty_args);
+                                let substituted = self.substitute_params(&def.body, params, &empty_args, def.variadic);
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
                                 let rescanned = self.expand_with_disabled(&substituted, &new_disabled);
@@ -2318,7 +2319,7 @@ impl Preprocessor {
         args
     }
 
-    fn substitute_params(&self, body: &str, params: &[String], args: &[String]) -> String {
+    fn substitute_params(&self, body: &str, params: &[String], args: &[String], variadic: bool) -> String {
         // 空 __VA_ARGS__ 时移除 GCC 扩展 ", ## __VA_ARGS__"
         let mut body = body.to_string();
         if let Some(va_idx) = params.iter().position(|p| p == "__VA_ARGS__") {
@@ -2347,7 +2348,7 @@ impl Preprocessor {
         // 第一步: 处理 # (字符串化) — 必须在 ## 之前, 否则参数名被替换后 # 找不到模式
         let result = self.handle_stringify(&body, params, args);
         // 第二步: 处理 ## (令牌拼接)
-        let result = self.handle_paste(&result, params, args);
+        let result = self.handle_paste(&result, params, args, variadic);
         // 第三步: 普通参数替换（单次扫描，实参视为不透明，避免 *d 被二次替换成 **d）
         let mut result = result;
         result = Self::replace_all_params(&result, params, args);
@@ -2532,10 +2533,14 @@ impl Preprocessor {
 
     /// ## 令牌拼接: 仅替换 ## 两侧的参数名后拼接（勿全局替换，否则会与后续
     /// substitute_params 二次替换把 `&di` 弄成 `&&di`）
-    fn handle_paste(&self, body: &str, params: &[String], args: &[String]) -> String {
+    ///
+    /// GNU 可变参数扩展: `,##X` 当 X 可变参数非空时 ## 无效果（仅移除 `##`）；
+    /// 当 X 为空时移除 `,##X` 整段（含逗号）。
+    fn handle_paste(&self, body: &str, params: &[String], args: &[String], variadic: bool) -> String {
         if !body.contains("##") {
             return body.to_string();
         }
+        let variadic_param = if variadic { params.last() } else { None };
         let mut result = body.to_string();
         while let Some(pos) = result.find("##") {
             let before = result[..pos].trim_end();
@@ -2564,6 +2569,30 @@ impl Preprocessor {
                 .and_then(|i| args.get(i))
                 .map(|s| s.as_str())
                 .unwrap_or(right);
+            // GNU 可变参数 `,##X` 特殊处理:
+            if let Some(vp) = variadic_param {
+                if vp == right {
+                    // right 是可变参数
+                    if right_sub.trim().is_empty() {
+                        // 空: 移除 `,##X` 整段 (含逗号)
+                        let prefix = &before[..left_start];
+                        // 如果 left 为空, 则逗号在 prefix 末尾, 要去掉
+                        let stripped = if left.is_empty() && prefix.ends_with(',') {
+                            &prefix[..prefix.len() - 1]
+                        } else {
+                            prefix
+                        };
+                        result = format!("{}{}", stripped, &after[right_end..]);
+                        continue;
+                    } else {
+                        // 非空: 仅移除 `##`, 不拼接
+                        let space = if left_sub.is_empty() || right_sub.is_empty() { "" } else { " " };
+                        result = format!("{}{}{}{}{}",
+                            &before[..left_start], left_sub, space, right_sub, &after[right_end..]);
+                        continue;
+                    }
+                }
+            }
             let pasted = format!("{}{}", left_sub, right_sub);
             result = format!("{}{}{}", &before[..left_start], pasted, &after[right_end..]);
         }

@@ -121,7 +121,7 @@ pub struct Parser<'a> {
     diags: Vec<Diagnostic>, finished: bool,
     typedefs: HashMap<String, Type>,
     struct_defs: HashMap<String, (Arc<Vec<Field>>, bool)>,
-    enum_defs: HashMap<String, Arc<Vec<(String, i64)>>>,
+    enum_defs: HashMap<String, (Arc<Vec<(String, i64)>>, bool)>,
     enum_consts: HashMap<String, i64>,
     locals: HashMap<String, Type>, // 变量名 → 类型 (函数内会清除)
     globals: HashMap<String, Type>, // 全局变量名 → 类型 (永不清除)
@@ -214,7 +214,7 @@ impl<'a> Parser<'a> {
         let from_int_bits = match from {
             Bool | Char | SChar | UChar => Some(8),
             Short | UShort => Some(16),
-            Int | UInt | Enum(_, _) => Some(32),
+            Int | UInt | Enum(_, _, _) => Some(32),
             Long | ULong => Some(64),
             LongLong | ULongLong => Some(64),
             Int128 | UInt128 => Some(128),
@@ -223,7 +223,7 @@ impl<'a> Parser<'a> {
         let to_int_bits = match to {
             Bool | Char | SChar | UChar => Some(8),
             Short | UShort => Some(16),
-            Int | UInt | Enum(_, _) => Some(32),
+            Int | UInt | Enum(_, _, _) => Some(32),
             Long | ULong => Some(64),
             LongLong | ULongLong => Some(64),
             Int128 | UInt128 => Some(128),
@@ -1147,7 +1147,7 @@ impl<'a> Parser<'a> {
         // 单独的 struct/union/enum 定义: `__declspec(...) struct S { int x; };`
         // 解析说明符后类型是 struct/union/enum, 而当前 token 是分号,
         // 直接吃掉分号返回空 decl, 避免后面误调 parse_var_or_func.
-        if matches!(ty, Type::Struct(_, _) | Type::Union(_, _) | Type::Enum(_, _))
+        if matches!(ty, Type::Struct(_, _) | Type::Union(_, _) | Type::Enum(_, _, _))
             && self.cur.kind == TokKind::Semi
         {
             self.advance();
@@ -1709,7 +1709,13 @@ impl<'a> Parser<'a> {
                 TokKind::KwExtern => { self.decl_storage.is_extern = true; self.advance(); }
                 TokKind::KwRegister => { self.decl_storage.is_register = true; self.advance(); }
                 TokKind::KwConst | TokKind::KwVolatile | TokKind::KwInline
-                | TokKind::KwRestrict | TokKind::KwAuto => { self.advance(); }
+                | TokKind::KwRestrict => { self.advance(); }
+                // C23 auto: 类型由初始化表达式推导（同 __auto_type）
+                TokKind::KwAuto => {
+                    self.advance();
+                    self.decl_auto_type = true;
+                    return Some(self.finish_type(Type::Int, specifiers_only));
+                }
                 // _Noreturn: C11 函数限定符, 不影响代码生成, 静默跳过
                 TokKind::Ident if self.cur.text == "_Noreturn" => { self.advance(); }
                 // _Thread_local / __thread：线程局部存储
@@ -1952,7 +1958,7 @@ impl<'a> Parser<'a> {
                         let mut depth = 2i32;
                         while depth > 0 && self.cur.kind != TokKind::Eof {
                             // 识别属性名 (仅在 depth==2 时, 否则在嵌套括号内部)
-                            if depth == 2 && self.cur.kind == TokKind::Ident && self.cur.text == "packed" {
+                            if depth == 2 && self.cur.kind == TokKind::Ident && (self.cur.text == "packed" || self.cur.text == "__packed__") {
                                 pack = true;
                             }
                             if self.cur.kind == TokKind::LParen { depth += 1; }
@@ -1995,13 +2001,32 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 let vals: Vec<(String, i64)> = vs.iter().map(|(id, v)| (id.name.clone(), v.unwrap_or(0))).collect();
                 let vals_rc = Arc::new(vals);
-                self.enum_defs.insert(nm.clone(), Arc::clone(&vals_rc));
+                // 检查 enum 后的 __attribute__((packed/__packed__))
+                let mut enum_packed = false;
+                if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                    while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen { self.advance(); }
+                        if self.cur.kind == TokKind::LParen { self.advance(); }
+                        let mut depth = 2i32;
+                        while depth > 0 && self.cur.kind != TokKind::Eof {
+                            if depth == 2 && self.cur.kind == TokKind::Ident && (self.cur.text == "packed" || self.cur.text == "__packed__") {
+                                enum_packed = true;
+                            }
+                            if self.cur.kind == TokKind::LParen { depth += 1; }
+                            if self.cur.kind == TokKind::RParen { depth -= 1; if depth == 0 { break; } }
+                            self.advance();
+                        }
+                        if self.cur.kind == TokKind::RParen { self.advance(); }
+                    }
+                }
+                self.enum_defs.insert(nm.clone(), (Arc::clone(&vals_rc), enum_packed));
                 let mut nv = 0i64;
                 for (id, v) in &vs { let val = v.unwrap_or(nv); self.enum_consts.insert(id.name.clone(), val); nv = val + 1; }
-                return Some(self.finish_type(Type::Enum(nm, vals_rc), specifiers_only));
+                return Some(self.finish_type(Type::Enum(nm, vals_rc, enum_packed), specifiers_only));
             } else if !nm.is_empty() {
-                if let Some(v) = self.enum_defs.get(&nm) { return Some(self.finish_type(Type::Enum(nm, Arc::clone(v)), specifiers_only)); }
-                return Some(self.finish_type(Type::Enum(nm, Arc::new(vec![])), specifiers_only));
+                if let Some((v, packed)) = self.enum_defs.get(&nm) { return Some(self.finish_type(Type::Enum(nm, Arc::clone(v), *packed), specifiers_only)); }
+                return Some(self.finish_type(Type::Enum(nm, Arc::new(vec![]), false), specifiers_only));
             }
         }
         // typedef 引用
@@ -2110,7 +2135,7 @@ impl<'a> Parser<'a> {
     }
 
     fn resolve_base(&self, base: Option<Type>, uns: bool, long: u8, short: bool) -> Type {
-        if let Some(ty @ (Type::Struct(_, _) | Type::Union(_, _) | Type::Enum(_, _) | Type::Atomic(_))) = base {
+        if let Some(ty @ (Type::Struct(_, _) | Type::Union(_, _) | Type::Enum(_, _, _) | Type::Atomic(_))) = base {
             return ty;
         }
         match (base, uns, long, short) {
@@ -3413,7 +3438,7 @@ impl<'a> Parser<'a> {
                                 Type::Struct(_, _) | Type::Union(_, _) => 6,
                                 Type::Array(_, _) => 7,
                                 Type::Vector(_, _) => 9,
-                                Type::Enum(_, _) => 10,
+                                Type::Enum(_, _, _) => 10,
                                 Type::Atomic(_) | Type::Named(_) => 1,
                             };
                             e = Expr::Int { v: class, span: sp.clone(), ty: int_t() };
@@ -3832,7 +3857,7 @@ impl<'a> Parser<'a> {
             Type::Bool | Type::Char | Type::SChar | Type::UChar
             | Type::Short | Type::UShort | Type::Int | Type::UInt
             | Type::Long | Type::ULong | Type::LongLong | Type::ULongLong
-            | Type::Int128 | Type::UInt128 | Type::Enum(_, _) | Type::Named(_) => true,
+            | Type::Int128 | Type::UInt128 | Type::Enum(_, _, _) | Type::Named(_) => true,
             _ => false,
         }
     }
@@ -3870,7 +3895,7 @@ impl<'a> Parser<'a> {
             (Type::Accum, Type::Accum) => true,
             (Type::Struct(na, _), Type::Struct(nb, _)) => na == nb,
             (Type::Union(na, _), Type::Union(nb, _)) => na == nb,
-            (Type::Enum(na, _), Type::Enum(nb, _)) => na == nb,
+            (Type::Enum(na, _, _), Type::Enum(nb, _, _)) => na == nb,
             _ => a == b,
         }
     }

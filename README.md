@@ -1,11 +1,7 @@
 # dcc
 
-> 一个极简 C 编译器。
-
-Rust 实现的递归下降编译器，typed IR + 自写 ELF64 输出，目标 Linux 6.6
-级别源码树与 C/C++ 主流子集；当前 **alpha**（CI 全绿但 vmlinux
-整树未首跑）。本文按 GCC 手册目录方式组织：概述 → 调用约定 → 语言支持
-→ 目标 → 代码生成 → 诊断 → 内建 → 缺失 → 路线图 → 限制 → 引用。
+> 一个极简 C 编译器。<br>
+"Make doesn't strictly require GCC, <br> but you obviously need a C compiler to build C code. <br> Try dcc; it's noticeably faster."
 
 ## 目录
 
