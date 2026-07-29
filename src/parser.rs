@@ -290,7 +290,7 @@ impl<'a> Parser<'a> {
     /// 例外: `extern struct gstr x;` (不完整) + `struct gstr x;` (完整
     /// 定义) 是合法 C (从声明变为定义). 跳过该情形.
     fn check_var_redecl(&mut self, name: &str, ty: &Type, span: Span) -> bool {
-        if let Some(existing) = self.locals.get(name) {
+        if let Some(existing) = self.locals.get(name).or_else(|| self.globals.get(name)) {
             if existing == ty {
                 return true;
             }
@@ -1110,10 +1110,23 @@ impl<'a> Parser<'a> {
             while self.cur.kind == TokKind::LBracket {
                 self.advance();
                 let arr_size = if self.cur.kind != TokKind::RBracket {
-                    let e = self.parse_expr()?;
-                    match &e {
-                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                        _ => ArraySize::Var(Box::new(e)),
+                    // 跳过 const/static/restrict 限定符
+                    while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile
+                                          | TokKind::KwRestrict | TokKind::KwStatic) {
+                        self.advance();
+                    }
+                    if self.cur.kind == TokKind::RBracket {
+                        ArraySize::Const(0)
+                    } else {
+                        let e = self.parse_expr()?;
+                        if let Ok(v) = crate::const_eval::eval(&e) {
+                            ArraySize::Const(v.max(0) as usize)
+                        } else {
+                            match &e {
+                                Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                                _ => ArraySize::Var(Box::new(e)),
+                            }
+                        }
                     }
                 } else {
                     ArraySize::Const(0)
@@ -1584,7 +1597,10 @@ impl<'a> Parser<'a> {
                 no_sanitize: arr_attrs.no_sanitize.clone(), copy_fn: arr_attrs.copy_fn.clone(),
                 is_retain: arr_attrs.is_retain, is_used_attr: arr_attrs.is_used })])
         } else {
-            if matches!(ty, Type::Void) {
+            // extern 变量可以是 void 类型: 内核使用 `extern const void __nosave_begin, __nosave_end;`
+            // 作为链接器 section 标记, 实际类型/大小由链接脚本决定.
+            let allow_void = storage.is_extern;
+            if matches!(ty, Type::Void) && !allow_void {
                 self.err_here(
                     "E0008",
                     "variable declared with void type",
@@ -1691,7 +1707,45 @@ impl<'a> Parser<'a> {
         }
         // 限定符可在基类型与 * 之间 (C 声明符语法); 也可出现地址空间限定符
         self.skip_ptr_qualifiers();
-        self.parse_ptr_suffix(ty)
+        let ty = self.parse_ptr_suffix(ty);
+        // 数组后缀: `int [N]`, `int []` (C99 柔性数组), `(int)[N]`
+        self.parse_array_suffix(ty)
+    }
+
+    /// 解析类型后的数组后缀: `int`, `int [N]`, `int [N][M]`, `int []`.
+    /// 出现在 cast / sizeof / 变量声明等多种上下文. 空括号 `[]` 用 ArraySize::Const(0)
+    /// 表示柔性数组, 后续 codegen 阶段会处理为指针语义.
+    fn parse_array_suffix(&mut self, mut ty: Type) -> Type {
+        while self.cur.kind == TokKind::LBracket {
+            let la = self.cur.span.clone();
+            self.advance();
+            let arr_size = if self.cur.kind != TokKind::RBracket {
+                // 跳过 const/static/restrict 限定符
+                while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
+                                       | TokKind::KwStatic)
+                {
+                    self.advance();
+                }
+                if self.cur.kind == TokKind::RBracket {
+                    ArraySize::Const(0)
+                } else {
+                    let e = self.parse_expr().unwrap_or(Expr::Int { v: 0, span: la.clone(), ty: Type::Int });
+                    if let Ok(v) = crate::const_eval::eval(&e) {
+                        ArraySize::Const(v.max(0) as usize)
+                    } else {
+                        match &e {
+                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                            _ => ArraySize::Var(Box::new(e)),
+                        }
+                    }
+                }
+            } else {
+                ArraySize::Const(0)
+            };
+            let _ = self.expect(TokKind::RBracket, "']'");
+            ty = Type::Array(Box::new(ty), arr_size);
+        }
+        ty
     }
 
     fn parse_type_mode(&mut self, specifiers_only: bool) -> Option<Type> {
@@ -2550,6 +2604,24 @@ impl<'a> Parser<'a> {
                 if self.cur.kind == TokKind::Ellipsis { self.advance(); self.last_variadic = true; }
                 break;
             }
+            // 内核宏 DECL_BUCKET_PARAMS 等使用 `size_t (name)` 在类型与参数名之间
+            // 加括号, 避免被预处理时替换为多 token 表达式. dcc 在 parse_type 之前
+            // 已经吞掉外层 __attribute__ 等, 但参数声明处的括号需要单独处理.
+            // 另一种情形: GNU 允许 `int (name)` 作为 `int name` 的语法变体
+            // (`(name)` 是 GNU/C11 允许的 declarator 形式).
+            if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Ident {
+                self.advance(); // (
+                let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() };
+                self.advance(); // ident
+                if self.cur.kind == TokKind::RParen { self.advance(); }
+                ps.push(Param { ty, name: Some(id), span: param_span });
+                if self.cur.kind == TokKind::Comma { self.advance();
+                    if self.cur.kind == TokKind::Ellipsis { self.advance(); self.last_variadic = true; break; }
+                    continue;
+                }
+                if self.cur.kind == TokKind::Ellipsis { self.advance(); self.last_variadic = true; }
+                break;
+            }
             let nm = if self.cur.kind == TokKind::Ident { let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() }; self.advance(); Some(id) } else { None };
             // 参数名后的 __attribute__((unused)) 等
             self.skip_attributes();
@@ -3077,8 +3149,9 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RParen, "')'") { return None; }
                 // 优先使用精确匹配, 否则使用 default
                 let chosen = result.or(default_result);
+                let sp2 = self.cur.span.clone();
                 match chosen {
-                    Some(e) => Some(e),
+                    Some(e) => self.parse_postfix_suffix(e, sp2),
                     None => {
                         self.err_here("E0001", "no matching generic selection", Some("add a 'default' association to _Generic"));
                         None

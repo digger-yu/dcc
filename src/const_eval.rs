@@ -174,10 +174,34 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 BinOp::AndAnd | BinOp::OrOr => unreachable!(),
             }
         }
-        Expr::Cast { e, .. } => {
+        Expr::Cast { ty, e, .. } => {
             // 强制类型转换: 数值保留, 指针转换产生 NotConstant
             let v = eval_full(e)?;
-            // 简化: 直接返回内部值, 让 codegen 处理位宽
+            // 整数类型间: 根据目标类型位宽截断/零扩展/符号扩展
+            // (否则 `~0U` 转为 u64 会保持 -1, 与 C 语义不符)
+            if let ConstValue::Int(i) = v {
+                if let Some(bits) = int_type_bits(ty) {
+                    if is_unsigned_int_ty(ty) {
+                        let mask = if bits == 128 { -1i128 }
+                                   else { (1i128 << bits) - 1 };
+                        return Ok(ConstValue::Int(i & mask));
+                    } else {
+                        // 有符号: 截断到目标位宽再符号扩展
+                        let mask = if bits == 128 { -1i128 }
+                                   else { (1i128 << bits) - 1 };
+                        let truncated = i & mask;
+                        let sign_bit = 1i128 << (bits - 1);
+                        let signed = if (truncated & sign_bit) != 0 {
+                            truncated | !mask
+                        } else {
+                            truncated
+                        };
+                        return Ok(ConstValue::Int(signed));
+                    }
+                }
+                return Ok(ConstValue::Int(i));
+            }
+            // 浮点 / 指针等: 简化处理, 让 codegen 处理位宽
             Ok(v)
         }
         Expr::Cond { cond, then_, else_, .. } => {
@@ -190,9 +214,85 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
         Expr::Offsetof { ty, member, .. } => {
             Ok(ConstValue::Int(offsetof_member(ty, member) as i128))
         }
-        // constexpr 函数调用在 parser 层不展开, 走 NotConstant
+        // 编译期可求值的 GCC/LLVM 内建函数: 参数是常量时返回常量结果。
+        // 这些函数通常用 __builtin_constant_p 包裹, dcc 直接展开即可。
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                if let Some(v) = eval_intrinsic(name.name.as_str(), args)? {
+                    return Ok(ConstValue::Int(v));
+                }
+            }
+            // constexpr 函数调用在 parser 层不展开, 走 NotConstant
+            Err(ConstEvalError::NotConstant)
+        }
         _ => Err(ConstEvalError::NotConstant),
     }
+}
+
+/// 编译期内建函数求值 (如 __builtin_clzll/__builtin_ctzll/__builtin_popcountll)。
+/// 仅当参数是常量整数时返回 Some; 否则返回 None 让外层走 NotConstant。
+fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalError> {
+    let argc = args.len();
+    let take1 = |args: &[Expr]| -> Result<i128, ConstEvalError> { eval(&args[0]) };
+    match name {
+        "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" if argc == 1 => {
+            let v = take1(args)?;
+            if v == 0 { return Ok(Some(0)); } // GCC 约定: 输入 0 时结果未定义, 取 0
+            let bits = match name {
+                "__builtin_clz" => 32,
+                "__builtin_clzl" => if cfg!(target_pointer_width = "64") { 64 } else { 32 },
+                _ => 64,
+            };
+            let n = (v as u64).leading_zeros() as i128;
+            Ok(Some(n - (64 - bits) as i128))
+        }
+        "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" if argc == 1 => {
+            let v = take1(args)?;
+            if v == 0 { return Ok(Some(0)); } // GCC 约定: 输入 0 时结果未定义, 取 0
+            Ok(Some((v as u64).trailing_zeros() as i128))
+        }
+        "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" if argc == 1 => {
+            let v = take1(args)?;
+            Ok(Some((v as u64).count_ones() as i128))
+        }
+        "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" if argc == 1 => {
+            let v = take1(args)?;
+            if v == 0 { return Ok(Some(0)); }
+            Ok(Some((v as u64).trailing_zeros() as i128 + 1))
+        }
+        "__builtin_bswap16" if argc == 1 => {
+            let v = take1(args)?;
+            Ok(Some(((v as u16).swap_bytes() as i128)))
+        }
+        "__builtin_bswap32" if argc == 1 => {
+            let v = take1(args)?;
+            Ok(Some(((v as u32).swap_bytes() as i128)))
+        }
+        "__builtin_bswap64" if argc == 1 => {
+            let v = take1(args)?;
+            Ok(Some((v as u64).swap_bytes() as i128))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// 返回整数类型的位宽; 非整数类型返回 None。
+fn int_type_bits(ty: &Type) -> Option<usize> {
+    Some(match ty {
+        Type::Bool | Type::Char | Type::SChar | Type::UChar => 8,
+        Type::Short | Type::UShort => 16,
+        Type::Int | Type::UInt => 32,
+        Type::Long | Type::ULong => 64, // x86_64: long 64-bit
+        Type::LongLong | Type::ULongLong => 64,
+        Type::Int128 | Type::UInt128 => 128,
+        _ => return None,
+    })
+}
+
+/// 是否为无符号整数类型。
+fn is_unsigned_int_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Bool | Type::UChar | Type::UShort | Type::UInt
+                  | Type::ULong | Type::ULongLong | Type::UInt128)
 }
 
 fn add_values(l: ConstValue, r: ConstValue) -> Result<ConstValue, ConstEvalError> {
