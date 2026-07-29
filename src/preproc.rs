@@ -2574,21 +2574,34 @@ impl Preprocessor {
                 if vp == right {
                     // right 是可变参数
                     if right_sub.trim().is_empty() {
-                        // 空: 移除 `,##X` 整段 (含逗号)
-                        let prefix = &before[..left_start];
-                        // 如果 left 为空, 则逗号在 prefix 末尾, 要去掉
-                        let stripped = if left.is_empty() && prefix.ends_with(',') {
-                            &prefix[..prefix.len() - 1]
+                        // 空 variadic:
+                        //  - 标准 C99: identifier##__VA_ARGS__ → 移除 ##__VA_ARGS__, 保留左 token
+                        //  - GCC 扩展: ,##X → 移除 ,##X 整段 (含前导逗号)
+                        // left 为空表示左 token 是标点 (rfind 当成分隔符),
+                        // 此时检查前一个字符是否为 ','。
+                        let prefix = if left.is_empty() {
+                            let chars: Vec<char> = before.chars().collect();
+                            if left_start > 0
+                                && left_start - 1 < chars.len()
+                                && chars[left_start - 1] == ','
+                            {
+                                &before[..left_start - 1]
+                            } else {
+                                &before[..left_start]
+                            }
                         } else {
-                            prefix
+                            // left 是有效 token (如 __try_acquires), 保留
+                            &before[..left_start + left.len()]
                         };
-                        result = format!("{}{}", stripped, &after[right_end..]);
+                        result = format!("{}{}", prefix, &after[right_end..]);
                         continue;
                     } else {
-                        // 非空: 仅移除 `##`, 不拼接
-                        let space = if left_sub.is_empty() || right_sub.is_empty() { "" } else { " " };
-                        result = format!("{}{}{}{}{}",
-                            &before[..left_start], left_sub, space, right_sub, &after[right_end..]);
+                        // 非空: 按 ## 语义拼接两侧 token (无空格)
+                        // - ,##X: , 在 before[..left_start], 直接拼上 right_sub → ,X
+                        // - identifier##__VA_ARGS__: left_sub + right_sub 无空格
+                        let pasted = format!("{}{}", left_sub, right_sub);
+                        result = format!("{}{}{}",
+                            &before[..left_start], pasted, &after[right_end..]);
                         continue;
                     }
                 }
@@ -3300,10 +3313,10 @@ impl Preprocessor {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
         // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
-        // V7: M19 预定义宏补齐 (__amd64__/__USER_LABEL_PREFIX__/__VERSION__/
-        // __OPTIMIZE__/__SEG_GS 等) + __COUNTER__ 自增需在每次宏展开期可见;
-        //     _FORTIFY_SOURCE 等用户 -D 在缓存中以宏名+值形式进入哈希
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V7");
+        // V8: handle_paste 修复 ##__VA_ARGS__ / ## 拼接语义，空 variadic 保留
+        //     左 token (C99 identifier##__VA_ARGS__), 非空变体不再插入空格;
+        //     GCC 扩展 ,##X 仍然移除逗号。
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V8");
         for name in names {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
