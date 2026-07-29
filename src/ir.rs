@@ -588,12 +588,14 @@ fn is_static_initializer(expr: &Expr) -> bool {
             Ok(_) => is_static_initializer(else_),
             Err(_) => false,
         },
-        // &ident / &arr[const]：链接期可重定位常量
+        // &ident / &arr[const] / &ident.field...: 链接期可重定位常量
         Expr::AddrOf { e, .. } => match e.as_ref() {
             Expr::Ident { .. } | Expr::String { .. } => true,
             Expr::Index { arr, idx, .. } => {
                 matches!(arr.as_ref(), Expr::Ident { .. }) && const_eval::eval(idx).is_ok()
             }
+            // &ident.field / &ident.field.field... : 链接期可重定位常量
+            Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
             _ => false,
         },
         // 数组到指针衰减: arr + const / &arr[i] 的等价形式
@@ -619,6 +621,16 @@ fn is_static_initializer(expr: &Expr) -> bool {
                 }
             }
         }),
+        _ => false,
+    }
+}
+
+/// 嵌套 `&ident.field...` 中基址是标识符的简单形式是链接期常量。
+/// 例如 `&init_uts_ns.ns_unified_node` 或 `&a.b.c.d`。
+fn is_addr_of_member_ok(e: &Expr) -> bool {
+    match e {
+        Expr::Ident { .. } => true,
+        Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
         _ => false,
     }
 }

@@ -1310,146 +1310,19 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
             self.advance(); // (
             self.advance(); // *
-            // 可选的 const/volatile/restrict 限定符
-            while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) {
-                self.advance();
-            }
-            let name = self.parse_ident()?;
-            // (*name(params)): 返回指针的函数
-            // (*name(params1))(params2): 返回函数指针的函数
-            // (*name)(params) / (*name[N])(params): 函数指针（数组）
-            if self.cur.kind == TokKind::LParen {
-                self.advance();
-                let inner_params = self.parse_params()?;
-                if !self.expect(TokKind::RParen, "')'") { return None; }
-                // 关闭 (*...) 分组
-                if !self.expect(TokKind::RParen, "')'") { return None; }
-                // 外层函数参数列表 (params2)
-                if self.cur.kind == TokKind::LParen {
-                    self.advance();
-                    let outer_params = self.parse_params()?;
-                    if !self.expect(TokKind::RParen, "')'") { return None; }
-                    let inner_func = Type::Func(Box::new(ty), inner_params.iter().map(|p| p.ty.clone()).collect());
-                    let ptr_ty = Type::Ptr(Box::new(inner_func));
-                    let outer_func = Type::Func(Box::new(ptr_ty), outer_params.iter().map(|p| p.ty.clone()).collect());
-                    self.skip_attributes();
-                    self.skip_asm_label();
-                    self.locals = self.globals.clone();
-                    self.in_function = true;
-                    let saved_func = self.current_function.replace(name.name.clone());
-                    for p in &outer_params {
-                        if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
-                    }
-                    let body = if self.cur.kind == TokKind::LBrace {
-                        self.advance();
-                        let b = self.parse_block();
-                        if !self.expect(TokKind::RBrace, "'}'" ) { return None; }
-                        Some(b)
-                    } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
-                    self.skip_attributes();
-                    self.locals = self.globals.clone();
-                    self.in_function = false;
-                    self.current_function = saved_func;
-                    let sp = name.span.clone();
-                    return Some(vec![Decl::Func(FuncDecl { ret_ty: outer_func, name, params: outer_params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, is_cold: false,
-            is_hot: false, is_noinline: false, is_always_inline: false, is_variadic: self.last_variadic, is_constructor: false, is_destructor: false, alias_name: None, is_nested: false, upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false, ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false, is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None, ifunc_resolver: None })]);
-                }
-                // (*name(params)) — 返回指针的函数，无外层参数表
-                let ptr_ty = Type::Ptr(Box::new(ty));
-                let func_ty = Type::Func(Box::new(ptr_ty.clone()), inner_params.iter().map(|p| p.ty.clone()).collect());
-                self.skip_attributes();
-                self.skip_asm_label();
-                if !self.in_function {
-                    self.globals.insert(name.name.clone(), func_ty.clone());
-                }
-                let body = if self.cur.kind == TokKind::LBrace {
-                    self.advance();
-                    self.locals = self.globals.clone();
-                    self.in_function = true;
-                    let saved_func = self.current_function.replace(name.name.clone());
-                    for p in &inner_params {
-                        if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
-                    }
-                    let b = self.parse_block();
-                    if !self.expect(TokKind::RBrace, "'}'") { return None; }
-                    self.locals = self.globals.clone();
-                    self.in_function = false;
-                    self.current_function = saved_func;
-                    Some(b)
-                } else {
-                    if !self.expect(TokKind::Semi, "';' or '{'") { return None; }
-                    None
-                };
-                let sp = name.span.clone();
-                return Some(vec![Decl::Func(FuncDecl {
-                    ret_ty: ptr_ty, name, params: inner_params, body, span: sp,
-                    is_extern: storage.is_extern, is_static: storage.is_static,
-                    section: None, alignment: None, is_weak: false, visibility: None,
-                    is_unused: false, is_cold: false,
-            is_hot: false, is_noinline: false, is_always_inline: false,
-                    is_variadic: self.last_variadic, is_constructor: false, is_destructor: false,
-                    alias_name: None, is_nested: false, upvars: vec![],
-                    is_old_style: false, format_kind: None, format_string_idx: None, format_first_arg: None,
-                    no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
-                    ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-                    is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
-                    ifunc_resolver: None,
-                })]);
-            }
-            // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
-            let array_sizes = {
-                let mut sizes = Vec::new();
-                while self.cur.kind == TokKind::LBracket {
-                    self.advance();
-                    let arr_size = if self.cur.kind != TokKind::RBracket {
-                        let e = self.parse_expr()?;
-                        match &e {
-                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                            _ => ArraySize::Var(Box::new(e)),
-                        }
-                    } else {
-                        ArraySize::Const(0)
-                    };
-                    if !self.expect(TokKind::RBracket, "']'") { return None; }
-                    sizes.push(arr_size);
-                }
-                sizes
-            };
-            if !self.expect(TokKind::RParen, "')'") { return None; }
-            if self.cur.kind == TokKind::LParen {
-                self.advance();
-                let params = self.parse_params()?;
-                if !self.expect(TokKind::RParen, "')'") { return None; }
-                let func_ty = Type::Func(Box::new(ty.clone()), params.iter().map(|p| p.ty.clone()).collect());
-                let mut ptr_ty = Type::Ptr(Box::new(func_ty));
-                for sz in array_sizes.into_iter().rev() {
-                    ptr_ty = Type::Array(Box::new(ptr_ty), sz);
-                }
-                self.skip_attributes();
-                self.skip_asm_label();
-                // 注册到变量表
-                self.locals.insert(name.name.clone(), ptr_ty.clone());
-                if !self.in_function { self.globals.insert(name.name.clone(), ptr_ty.clone()); }
-                // 可选初始化器
-                let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
-                if !self.expect(TokKind::Semi, "';'") { return None; }
-                let sp = name.span.clone();
-                return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None, is_retain: false, is_used_attr: false })]);
-            }
-            // 不是函数指针, 只是带括号的指针变量 (罕见)
-            self.skip_attributes();
-            self.skip_asm_label();
-            let ptr_ty = Type::Ptr(Box::new(ty));
-            let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
-            if !self.expect(TokKind::Semi, "';'") { return None; }
-            let sp = name.span.clone();
-            return Some(vec![Decl::Var(VarDecl { ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern, is_static: storage.is_static, section: None, alignment: None, is_weak: false, visibility: None, is_unused: false, register_name: None, cleanup_fn: None, is_thread_local: storage.is_thread_local, no_sanitize: vec![], copy_fn: None, is_retain: false, is_used_attr: false })]);
+            return self.parse_func_ptr_inner(ty, leading_attrs, storage);
         }
         // 限定符在基类型与 * 之间 (如 const, __seg_gs 等)
         self.skip_ptr_qualifiers();
         // void __attribute__(...) *fn(): 基本类型后的属性在 specifiers_only 路径下会残留
         self.skip_attributes();
         let ty = self.parse_ptr_suffix(ty);
+        // 函数指针: void * (*name)(params) — * 已被 parse_ptr_suffix 吃掉, 现在是 (
+        if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+            self.advance(); // (
+            self.advance(); // *
+            return self.parse_func_ptr_inner(ty, leading_attrs, storage);
+        }
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
         let pre_attrs = Self::merge_attrs(leading_attrs, self.parse_attributes());
         self.skip_asm_label();
@@ -1669,6 +1542,169 @@ impl<'a> Parser<'a> {
                 None
             }
         }
+    }
+
+    /// 解析函数指针内层： caller 已吃掉 `(*`、当前 token 为名字
+    /// 类型构造与 parse_var_or_func 原始函数指针分支一致。
+    fn parse_func_ptr_inner(&mut self, ty: Type, leading_attrs: ParsedAttrs, storage: StorageClass) -> Option<Vec<Decl>> {
+        // 可选的 const/volatile/restrict 限定符
+        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) {
+            self.advance();
+        }
+        // 处理 * 和名字之间的属性: 如 void (*__attribute__((...)) fp)();
+        self.skip_attributes();
+        let name = self.parse_ident()?;
+        // (*name(params)): 返回指针的函数
+        // (*name(params1))(params2): 返回函数指针的函数
+        // (*name)(params) / (*name[N])(params): 函数指针（数组）
+        if self.cur.kind == TokKind::LParen {
+            self.advance();
+            let inner_params = self.parse_params()?;
+            if !self.expect(TokKind::RParen, "')'") { return None; }
+            // 关闭 (*...) 分组
+            if !self.expect(TokKind::RParen, "')'") { return None; }
+            // 外层函数参数列表 (params2)
+            if self.cur.kind == TokKind::LParen {
+                self.advance();
+                let outer_params = self.parse_params()?;
+                if !self.expect(TokKind::RParen, "')'") { return None; }
+                let inner_func = Type::Func(Box::new(ty.clone()), inner_params.iter().map(|p| p.ty.clone()).collect());
+                let ptr_ty = Type::Ptr(Box::new(inner_func));
+                let outer_func = Type::Func(Box::new(ptr_ty), outer_params.iter().map(|p| p.ty.clone()).collect());
+                self.skip_attributes();
+                self.skip_asm_label();
+                self.locals = self.globals.clone();
+                self.in_function = true;
+                let saved_func = self.current_function.replace(name.name.clone());
+                for p in &outer_params {
+                    if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
+                }
+                let body = if self.cur.kind == TokKind::LBrace {
+                    self.advance();
+                    let b = self.parse_block();
+                    if !self.expect(TokKind::RBrace, "'}'" ) { return None; }
+                    Some(b)
+                } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
+                self.skip_attributes();
+                self.locals = self.globals.clone();
+                self.in_function = false;
+                self.current_function = saved_func;
+                let sp = name.span.clone();
+                return Some(vec![Decl::Func(FuncDecl {
+                    ret_ty: outer_func, name, params: outer_params, body, span: sp,
+                    is_extern: storage.is_extern, is_static: storage.is_static,
+                    section: None, alignment: None, is_weak: false, visibility: None,
+                    is_unused: false, is_cold: false, is_hot: false, is_noinline: false,
+                    is_always_inline: false, is_variadic: self.last_variadic,
+                    is_constructor: false, is_destructor: false, alias_name: None,
+                    is_nested: false, upvars: vec![], is_old_style: false,
+                    format_kind: None, format_string_idx: None, format_first_arg: None,
+                    no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
+                    ctor_priority: None, dtor_priority: None, is_retain: false,
+                    is_used_attr: false, is_flatten: false, error_msg: None,
+                    warning_msg: None, deprecated_msg: None, ifunc_resolver: None,
+                })]);
+            }
+            // (*name(params)) — 返回指针的函数，无外层参数表
+            let ptr_ty = Type::Ptr(Box::new(ty));
+            let func_ty = Type::Func(Box::new(ptr_ty.clone()), inner_params.iter().map(|p| p.ty.clone()).collect());
+            self.skip_attributes();
+            self.skip_asm_label();
+            if !self.in_function {
+                self.globals.insert(name.name.clone(), func_ty.clone());
+            }
+            let body = if self.cur.kind == TokKind::LBrace {
+                self.advance();
+                self.locals = self.globals.clone();
+                self.in_function = true;
+                let saved_func = self.current_function.replace(name.name.clone());
+                for p in &inner_params {
+                    if let Some(nm) = &p.name { self.locals.insert(nm.name.clone(), p.ty.clone()); }
+                }
+                let b = self.parse_block();
+                if !self.expect(TokKind::RBrace, "'}'") { return None; }
+                self.locals = self.globals.clone();
+                self.in_function = false;
+                self.current_function = saved_func;
+                Some(b)
+            } else {
+                if !self.expect(TokKind::Semi, "';' or '{'") { return None; }
+                None
+            };
+            let sp = name.span.clone();
+            return Some(vec![Decl::Func(FuncDecl {
+                ret_ty: ptr_ty, name, params: inner_params, body, span: sp,
+                is_extern: storage.is_extern, is_static: storage.is_static,
+                section: None, alignment: None, is_weak: false, visibility: None,
+                is_unused: false, is_cold: false, is_hot: false, is_noinline: false,
+                is_always_inline: false, is_variadic: self.last_variadic,
+                is_constructor: false, is_destructor: false, alias_name: None,
+                is_nested: false, upvars: vec![], is_old_style: false,
+                format_kind: None, format_string_idx: None, format_first_arg: None,
+                no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
+                ctor_priority: None, dtor_priority: None, is_retain: false,
+                is_used_attr: false, is_flatten: false, error_msg: None,
+                warning_msg: None, deprecated_msg: None, ifunc_resolver: None,
+            })]);
+        }
+        // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
+        let array_sizes = {
+            let mut sizes = Vec::new();
+            while self.cur.kind == TokKind::LBracket {
+                self.advance();
+                let arr_size = if self.cur.kind != TokKind::RBracket {
+                    let e = self.parse_expr()?;
+                    match &e {
+                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                        _ => ArraySize::Var(Box::new(e)),
+                    }
+                } else {
+                    ArraySize::Const(0)
+                };
+                if !self.expect(TokKind::RBracket, "']'") { return None; }
+                sizes.push(arr_size);
+            }
+            sizes
+        };
+        if !self.expect(TokKind::RParen, "')'") { return None; }
+        if self.cur.kind == TokKind::LParen {
+            self.advance();
+            let params = self.parse_params()?;
+            if !self.expect(TokKind::RParen, "')'") { return None; }
+            let func_ty = Type::Func(Box::new(ty.clone()), params.iter().map(|p| p.ty.clone()).collect());
+            let mut ptr_ty = Type::Ptr(Box::new(func_ty));
+            for sz in array_sizes.into_iter().rev() {
+                ptr_ty = Type::Array(Box::new(ptr_ty), sz);
+            }
+            self.skip_attributes();
+            self.skip_asm_label();
+            self.locals.insert(name.name.clone(), ptr_ty.clone());
+            if !self.in_function { self.globals.insert(name.name.clone(), ptr_ty.clone()); }
+            let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
+            if !self.expect(TokKind::Semi, "';'") { return None; }
+            let sp = name.span.clone();
+            return Some(vec![Decl::Var(VarDecl {
+                ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern,
+                is_static: storage.is_static, section: None, alignment: None,
+                is_weak: false, visibility: None, is_unused: false, register_name: None,
+                cleanup_fn: None, is_thread_local: storage.is_thread_local,
+                no_sanitize: vec![], copy_fn: None, is_retain: false, is_used_attr: false,
+            })]);
+        }
+        // 不是函数指针, 只是带括号的指针变量 (罕见)
+        self.skip_attributes();
+        self.skip_asm_label();
+        let ptr_ty = Type::Ptr(Box::new(ty));
+        let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
+        if !self.expect(TokKind::Semi, "';'") { return None; }
+        let sp = name.span.clone();
+        Some(vec![Decl::Var(VarDecl {
+            ty: ptr_ty, name, init, span: sp, is_extern: storage.is_extern,
+            is_static: storage.is_static, section: None, alignment: None,
+            is_weak: false, visibility: None, is_unused: false, register_name: None,
+            cleanup_fn: None, is_thread_local: storage.is_thread_local,
+            no_sanitize: vec![], copy_fn: None, is_retain: false, is_used_attr: false,
+        })])
     }
 
     /// 判断 peek 是否像声明符起始（指针/标识符），但排除 __attribute__ 等后缀属性。
