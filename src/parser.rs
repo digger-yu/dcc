@@ -2509,49 +2509,9 @@ impl<'a> Parser<'a> {
         }
         loop {
             // 函数指针参数: ret_type (*name)(params)
-            // 第一性原理: 当类型后跟 (* 时, 这是函数指针参数而非普通参数
-            // 注意: _BitInt(N) 和 constexpr 的 ( 不是函数指针指示符, 跳过前瞻
-            if self.is_type_start() && self.peek.kind == TokKind::LParen
-                && !(self.cur.kind == TokKind::Ident && self.cur.text == "_BitInt")
-                && !(self.cur.kind == TokKind::Ident && self.cur.text == "constexpr") {
-                // 检查是否是函数指针参数模式: type (* ...)
-                let saved_cur = self.cur.clone();
-                let saved_peek = self.peek.clone();
-                if let Some(ret_ty) = self.parse_type() {
-                    if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
-                        self.advance(); // (
-                        self.advance(); // *
-                        while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict)
-                            || (self.cur.kind == TokKind::Ident && self.cur.text == "_ms_restrict") { self.advance(); }
-                        let nm = if self.cur.kind == TokKind::Ident {
-                            let id = Ident { name: self.cur.text.clone(), span: self.cur.span.clone() };
-                            self.advance(); Some(id)
-                        } else { None };
-                        self.skip_attributes();
-                        if !self.expect(TokKind::RParen, "')'") { return None; }
-                        if self.cur.kind == TokKind::LParen {
-                            self.advance();
-                            let inner_params = self.parse_params()?;
-                            if !self.expect(TokKind::RParen, "')'") { return None; }
-                            let func_ty = Type::Func(Box::new(ret_ty), inner_params.iter().map(|p| p.ty.clone()).collect());
-                            let ptr_ty = Type::Ptr(Box::new(func_ty));
-                            ps.push(Param { ty: ptr_ty, name: nm, span: saved_cur.span.clone() });
-                            if self.cur.kind == TokKind::Comma { self.advance();
-                                if self.cur.kind == TokKind::Ellipsis { self.advance(); self.last_variadic = true; break; }
-                                continue;
-                            }
-                            if self.cur.kind == TokKind::Ellipsis { self.advance(); self.last_variadic = true; }
-                            break;
-                        }
-                    }
-                    // 不是函数指针参数, 恢复并走普通路径
-                    self.cur = saved_cur;
-                    self.peek = saved_peek;
-                } else {
-                    self.cur = saved_cur;
-                    self.peek = saved_peek;
-                }
-            }
+            // 由下面 parse_type() 之后的 LParen-Star 检查处理, 不再预测
+            // 调用 parse_type (避免词法器位置不可回滚, 导致重复 parse_type
+            // 拿到不一样的 token)
             let param_span = self.cur.span.clone();
             let mut ty = self.parse_type()?;
             // 普通路径可能漏掉指针: parse_type 已含 *, 这里再吞一层 qual
