@@ -2115,16 +2115,21 @@ impl<'a> Parser<'a> {
                                 if aname == "aligned" {
                                     self.advance();
                                     if self.cur.kind == TokKind::LParen {
-                                        self.advance();
+                                        self.advance(); // consume '(' after 'aligned'
+                                        depth += 1;     // account for the consumed '('
                                         if self.cur.kind == TokKind::Number {
                                             let v = parse_int_lit(&self.cur.text);
                                             if v > 0 { align_n = Some(v as usize); }
                                             self.advance();
                                         }
+                                        // non-numeric arg (e.g. sizeof(void *)):
+                                        // fall through to depth-tracker;
+                                        // depth +1 accounts for the '(' we consumed,
+                                        // so paren counting stays correct.
                                     } else if align_n.is_none() {
                                         align_n = Some(16);
                                     }
-                                    continue;
+                                    // no continue: let depth-tracker consume remaining parens
                                 }
                             }
                             if self.cur.kind == TokKind::LParen { depth += 1; }
