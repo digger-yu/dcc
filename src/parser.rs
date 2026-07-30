@@ -2410,7 +2410,17 @@ impl<'a> Parser<'a> {
                 return (ty, nm);
             }
             self.skip_attributes();
-            let nm = if self.cur.kind == TokKind::Ident {
+            // 匿名 struct/union 字段后直接接另一个字段的场景：
+            //   union { struct {...} ATTRS; struct {...} ATTRS NAME; }  NAME_or_next_field;
+            // 如果 spec 是 struct/union 且当前 ident 看起来是类型说明符 (typedef
+            // 或关键字), 则它其实是下一个字段的类型, 匿名 struct/union 名字为空。
+            // 这样可避免下个字段的类型名被当作当前匿名 struct/union 的字段名
+            // (内核 struct_group(..., MEMBERS...) 展开丢失尾 `;` 后常出
+            // 现这种状态)。
+            let nm = if self.cur.kind == TokKind::Ident
+                && !(matches!(ty, Type::Struct(_, _) | Type::Union(_, _))
+                    && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs))
+            {
                 let n = self.cur.text.clone();
                 self.advance();
                 n
