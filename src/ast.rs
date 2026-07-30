@@ -365,6 +365,20 @@ impl Type {
                     let field_bits = bw;
                     let container_ty_bits = (f.ty.size() * 8) as u32;
 
+                    // 零宽度位域: 强制下一个位域从新存储单元开始
+                    if field_bits == 0 {
+                        if container_bits > 0 {
+                            off += (container_bits / 8) as usize;
+                        }
+                        let align = eff(f.ty.align());
+                        off = (off + align - 1) & !(align - 1);
+                        container_bits = 0;
+                        bit_pos = 0;
+                        f.offset = off;
+                        f.bit_offset = 0;
+                        continue;
+                    }
+
                     // 第一个位域或容器类型变化: 开始新存储单元
                     if container_bits == 0 || container_ty_bits != container_bits {
                         // 对齐到容器类型边界

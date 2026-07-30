@@ -380,6 +380,40 @@ impl<'a> Parser<'a> {
             }
         }
     }
+    /// C usual arithmetic conversions: determine common type for integer binops
+    fn usual_arith_type(a: &Type, b: &Type) -> Type {
+        use Type::*;
+        let rank = |t: &Type| -> i32 {
+            match t {
+                Bool | Char | SChar | UChar => 1,
+                Short | UShort => 2,
+                Int | UInt => 3,
+                Long | ULong => 4,
+                LongLong | ULongLong => 5,
+                Int128 | UInt128 => 6,
+                _ => 0,
+            }
+        };
+        let is_uns = |t: &Type| -> bool {
+            matches!(t, UChar | UShort | UInt | ULong | ULongLong | UInt128)
+        };
+        // integer promotion first
+        let a = match a { Char | SChar | UChar | Short | UShort => &Int, _ => a };
+        let b = match b { Char | SChar | UChar | Short | UShort => &Int, _ => b };
+        if std::mem::discriminant(a) == std::mem::discriminant(b) { return a.clone(); }
+        let ra = rank(a);
+        let rb = rank(b);
+        let (higher, lower) = if ra >= rb { (a, b) } else { (b, a) };
+        if is_uns(higher) { return higher.clone(); }
+        if !is_uns(lower) { return higher.clone(); }
+        if rank(higher) > rank(lower) { return higher.clone(); }
+        match higher {
+            Long => return ULong,
+            LongLong => return ULongLong,
+            _ => return higher.clone(),
+        }
+    }
+
     /// 去除字符串字面量两端的引号
     fn strip_quotes(s: &str) -> String {
         let s = s.trim();
@@ -2029,8 +2063,35 @@ impl<'a> Parser<'a> {
             // struct 关键字所在行, 用于查询 #pragma pack
             let struct_line = self.cur.span.line;
             self.advance();
-            // struct __attribute__((__may_alias__)) name
-            self.skip_attributes();
+            // struct __attribute__((packed/aligned/may_alias)) name
+            let mut pack = false;
+            let mut align_n: Option<usize> = None;
+            while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+                self.advance(); // __attribute__
+                if self.cur.kind == TokKind::LParen { self.advance(); }
+                if self.cur.kind == TokKind::LParen { self.advance(); }
+                let mut depth = 2i32;
+                while depth > 0 && self.cur.kind != TokKind::Eof {
+                    if depth == 2 && self.cur.kind == TokKind::Ident {
+                        let aname = self.cur.text.trim_matches('_').to_string();
+                        if aname == "packed" { pack = true; }
+                        if aname == "aligned" && align_n.is_none() {
+                            // Mark that we need to capture the aligned value
+                            // The value will be captured when we encounter Number at depth==3
+                        }
+                    }
+                    // Capture aligned(N) value: after 'aligned', '(' bumps depth to 3,
+                    // then the Number at depth 3 is the alignment value
+                    if depth == 3 && self.cur.kind == TokKind::Number && align_n.is_none() {
+                        let v = parse_int_lit(&self.cur.text);
+                        if v > 0 { align_n = Some(v as usize); }
+                    }
+                    if self.cur.kind == TokKind::LParen { depth += 1; }
+                    if self.cur.kind == TokKind::RParen { depth -= 1; if depth == 0 { break; } }
+                    self.advance();
+                }
+                if self.cur.kind == TokKind::RParen { self.advance(); }
+            }
             let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
             if self.cur.kind == TokKind::LBrace {
                 self.advance(); let fields = self.parse_fields();
@@ -2038,7 +2099,7 @@ impl<'a> Parser<'a> {
                 let mut fields = fields;
                 // 检查 struct 后的 __attribute__((packed/aligned(N)))
                 // 注意: 使用 skip_attributes 正确处理嵌套括号, 如 section(".init.text")
-                let mut pack = false; let align_n: Option<usize> = None;
+                // pack/align_n already captured from pre-body attributes
                 if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
                     // 先跳过所有 __attribute__((...))，用深度计数支持嵌套括号
                     while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
@@ -2048,8 +2109,23 @@ impl<'a> Parser<'a> {
                         let mut depth = 2i32;
                         while depth > 0 && self.cur.kind != TokKind::Eof {
                             // 识别属性名 (仅在 depth==2 时, 否则在嵌套括号内部)
-                            if depth == 2 && self.cur.kind == TokKind::Ident && (self.cur.text == "packed" || self.cur.text == "__packed__") {
-                                pack = true;
+                            if depth == 2 && self.cur.kind == TokKind::Ident {
+                                let aname = self.cur.text.trim_matches('_').to_string();
+                                if aname == "packed" { pack = true; }
+                                if aname == "aligned" {
+                                    self.advance();
+                                    if self.cur.kind == TokKind::LParen {
+                                        self.advance();
+                                        if self.cur.kind == TokKind::Number {
+                                            let v = parse_int_lit(&self.cur.text);
+                                            if v > 0 { align_n = Some(v as usize); }
+                                            self.advance();
+                                        }
+                                    } else if align_n.is_none() {
+                                        align_n = Some(16);
+                                    }
+                                    continue;
+                                }
                             }
                             if self.cur.kind == TokKind::LParen { depth += 1; }
                             if self.cur.kind == TokKind::RParen { depth -= 1; if depth == 0 { break; } }
@@ -2064,7 +2140,16 @@ impl<'a> Parser<'a> {
                     let max_align = self.pack_at_line(struct_line);
                     Type::layout_struct_with_pack(&mut fields, is_u, max_align);
                 }
-                if let Some(a) = align_n { for f in fields.iter_mut() { f.offset = (f.offset + a - 1) & !(a - 1); } }
+                if let Some(a) = align_n {
+                    for f in fields.iter_mut() { f.offset = (f.offset + a - 1) & !(a - 1); }
+                    let cur_size = fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0);
+                    let aligned_size = (cur_size + a - 1) & !(a - 1);
+                    let max_field_align = fields.iter().map(|f| f.ty.align()).max().unwrap_or(1);
+                    if aligned_size > cur_size || max_field_align < a {
+                        let sentinel_ty = if a <= 8 { Type::Ptr(Box::new(Type::Char)) } else { Type::Int128 };
+                        fields.push(Field { name: String::new(), ty: sentinel_ty, offset: aligned_size, bit_width: None, bit_offset: 0 });
+                    }
+                }
                 let fields_rc = Arc::new(fields);
                 self.struct_defs.insert(nm.clone(), (Arc::clone(&fields_rc), is_u));
                 let ty = if is_u { Type::Union(nm, fields_rc) } else { Type::Struct(nm, fields_rc) };
@@ -3069,13 +3154,13 @@ impl<'a> Parser<'a> {
                         if matches!(&lt, Type::UInt128) || matches!(&rt, Type::UInt128) {
                             Type::UInt128
                         } else { Type::Int128 }
-                    } else { int_t() }
+                    } else { Self::usual_arith_type(&lt, &rt) }
                 } else if matches!(&lt, Type::Int128 | Type::UInt128)
                     || matches!(&rt, Type::Int128 | Type::UInt128) {
                     if matches!(&lt, Type::UInt128) || matches!(&rt, Type::UInt128) {
                         Type::UInt128
                     } else { Type::Int128 }
-                } else { int_t() }
+                } else { Self::usual_arith_type(&lt, &rt) }
                 }
             };
             lhs = Expr::Binop { op, l: Box::new(lhs), r: Box::new(r), span: self.cur.span.clone(), ty: binop_ty };

@@ -4463,3 +4463,122 @@ fn m1_4_elf_format() {
     let _ = fs::remove_file(&obj);
 }
 
+// =====================================================================
+// M2 milestone tests
+// =====================================================================
+
+/// M2.1: type system - sizeof/alignof for all basic types
+/// matches gcc on x86_64 Linux.
+#[test]
+#[cfg(unix)]
+fn m2_1_type_system() {
+    let src = include_str!("fixtures/m2_1_types.c");
+    let (out, code) = run_host_link_and_run("m2-1-types", src);
+    assert!(
+        out.status.success(),
+        "m2_1 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "type size/align checks failed (exit={code})");
+}
+
+/// M2.2: struct layout - bitfields, alignment, padding, packed,
+/// aligned attribute, unions, flexible array members.
+#[test]
+#[cfg(unix)]
+fn m2_2_struct_layout() {
+    let src = include_str!("fixtures/m2_2_struct.c");
+    let (out, code) = run_host_link_and_run("m2-2-struct", src);
+    assert!(
+        out.status.success(),
+        "m2_2 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "struct layout checks failed (exit={code})");
+}
+
+/// M2.3: integer promotion and implicit conversion rules.
+#[test]
+#[cfg(unix)]
+fn m2_3_integer_promotion() {
+    let src = include_str!("fixtures/m2_3_promotion.c");
+    let (out, code) = run_host_link_and_run("m2-3-promotion", src);
+    assert!(
+        out.status.success(),
+        "m2_3 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "promotion checks failed (exit={code})");
+}
+
+/// M2.4: pointer operations - multi-level ptrs, function ptrs,
+/// NULL, sizeof pointer types, pointer to struct members.
+#[test]
+#[cfg(unix)]
+fn m2_4_pointers() {
+    let src = include_str!("fixtures/m2_4_pointer.c");
+    let (out, code) = run_host_link_and_run("m2-4-pointer", src);
+    assert!(
+        out.status.success(),
+        "m2_4 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "pointer checks failed (exit={code})");
+}
+
+/// M2.5: float support - float/double/long double ABI,
+/// arithmetic, conversions, comparisons.
+#[test]
+#[cfg(unix)]
+fn m2_5_float() {
+    let src = include_str!("fixtures/m2_5_float.c");
+    let (out, code) = run_host_link_and_run("m2-5-float", src);
+    assert!(
+        out.status.success(),
+        "m2_5 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "float checks failed (exit={code})");
+}
+
+/// M2.6: batch compilation test - compile a representative set
+/// of existing C fixtures to .o files, verifying the compiler
+/// handles diverse C programs (asm, attributes, builtins, etc.).
+#[test]
+#[cfg(unix)]
+fn m2_6_batch_compile() {
+    let fixtures = [
+        "hello.c", "arith.c", "control.c", "fib.c",
+        "struct_test.c", "switch_test.c", "call.c",
+        "bitfield_test.c", "global_arr_test.c",
+        "logic_test.c", "rel_test.c", "ptr_arith_test.c",
+    ];
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    let mut pass = 0u32;
+    let mut fail = 0u32;
+    let dir = std::env::temp_dir();
+    for name in &fixtures {
+        let src = format!("examples/{name}");
+        if !std::path::Path::new(&src).exists() { continue; }
+        let obj = dir.join(format!("dcc-m2-6-{name}-{}.o",
+            std::process::id()));
+        let out = Command::new(dcc)
+            .args(["-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("dcc");
+        let _ = fs::remove_file(&obj);
+        if out.status.success() { pass += 1; }
+        else {
+            fail += 1;
+            eprintln!("FAIL {name}: {}",
+                String::from_utf8_lossy(&out.stderr));
+        }
+    }
+    assert!(
+        fail == 0,
+        "batch compile: {pass} passed, {fail} failed"
+    );
+}
+
