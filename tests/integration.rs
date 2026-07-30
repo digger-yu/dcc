@@ -4247,3 +4247,219 @@ fn p2_6_placement_new() {
     );
 }
 
+// =====================================================================
+// M1 milestone tests
+// =====================================================================
+
+/// M1.1: Hello World — compile a single-file C program with stdio.h
+/// and printf, link with host gcc, verify stdout output.
+#[test]
+#[cfg(unix)]
+fn m1_1_hello_world() {
+    let src = include_str!("fixtures/m1_1_hello.c");
+    let (out, code) = run_host_link_and_run("m1-1-hello", src);
+    assert!(
+        out.status.success(),
+        "m1_1_hello compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "m1_1_hello exit code = {code}");
+}
+
+/// M1.1b: Hello World — verify stdout contains "Hello, World!".
+#[test]
+#[cfg(unix)]
+fn m1_1_hello_stdout() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-m1-1-stdout-{}.c", std::process::id()));
+    let obj_path = dir.join(format!("dcc-m1-1-stdout-{}.o", std::process::id()));
+    let exe_path = dir.join(format!("dcc-m1-1-stdout-{}", std::process::id()));
+    let src = include_str!("fixtures/m1_1_hello.c");
+    fs::write(&src_path, src).expect("write");
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src_path);
+    assert!(compile.status.success(), "compile: {}", String::from_utf8_lossy(&compile.stderr));
+    let link = Command::new("gcc")
+        .args(["-o"])
+        .arg(&exe_path)
+        .arg(&obj_path)
+        .output()
+        .expect("run gcc");
+    let _ = fs::remove_file(&obj_path);
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
+    }
+    let run = Command::new(&exe_path).output().expect("run");
+    let _ = fs::remove_file(&exe_path);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("Hello, World!"), "stdout = {stdout:?}");
+}
+
+/// M1.2: multi-file compilation — compile two .c files separately,
+/// link together, verify extern/static linkage works correctly.
+#[test]
+#[cfg(unix)]
+fn m1_2_multi_file() {
+    let dir = std::env::temp_dir();
+    let helper_src = include_str!("fixtures/m1_2_helper.c");
+    let main_src = include_str!("fixtures/m1_2_main.c");
+    let h_path = dir.join(format!("dcc-m1-2-h-{}.c", std::process::id()));
+    let m_path = dir.join(format!("dcc-m1-2-m-{}.c", std::process::id()));
+    let h_obj = dir.join(format!("dcc-m1-2-h-{}.o", std::process::id()));
+    let m_obj = dir.join(format!("dcc-m1-2-m-{}.o", std::process::id()));
+    let exe = dir.join(format!("dcc-m1-2-{}", std::process::id()));
+    fs::write(&h_path, helper_src).expect("write helper");
+    fs::write(&m_path, main_src).expect("write main");
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    let c1 = Command::new(dcc).args(["-c", "-o"]).arg(&h_obj).arg(&h_path).output().expect("dcc");
+    let _ = fs::remove_file(&h_path);
+    assert!(c1.status.success(), "helper compile: {}", String::from_utf8_lossy(&c1.stderr));
+    let c2 = Command::new(dcc).args(["-c", "-o"]).arg(&m_obj).arg(&m_path).output().expect("dcc");
+    let _ = fs::remove_file(&m_path);
+    assert!(c2.status.success(), "main compile: {}", String::from_utf8_lossy(&c2.stderr));
+    let link = Command::new("gcc")
+        .args(["-o"])
+        .arg(&exe)
+        .arg(&h_obj)
+        .arg(&m_obj)
+        .output()
+        .expect("gcc link");
+    let _ = fs::remove_file(&h_obj);
+    let _ = fs::remove_file(&m_obj);
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe, fs::Permissions::from_mode(0o755));
+    }
+    let run = Command::new(&exe).output().expect("run");
+    let _ = fs::remove_file(&exe);
+    assert!(run.status.success(), "run failed");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("sum=7") && stdout.contains("sq=25")
+            && stdout.contains("ctr=3") && stdout.contains("loc=100"),
+        "unexpected stdout: {stdout:?}"
+    );
+}
+
+/// M1.3: preprocessor verification — macro expansion, conditional
+/// compilation, token pasting, stringification, #undef, #ifndef,
+/// defined() operator.  Compare dcc -E output with gcc -E.
+#[test]
+#[cfg(unix)]
+fn m1_3_preprocessor() {
+    let src = include_str!("fixtures/m1_3_preproc.c");
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-m1-3-{}.c", std::process::id()));
+    fs::write(&src_path, src).expect("write");
+    // dcc -E
+    let dcc_out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E"])
+        .arg(&src_path)
+        .output()
+        .expect("dcc -E");
+    // gcc -E
+    let gcc_out = Command::new("gcc")
+        .args(["-E"])
+        .arg(&src_path)
+        .output()
+        .expect("gcc -E");
+    let _ = fs::remove_file(&src_path);
+    assert!(dcc_out.status.success(), "dcc -E: {}", String::from_utf8_lossy(&dcc_out.stderr));
+    assert!(gcc_out.status.success(), "gcc -E: {}", String::from_utf8_lossy(&gcc_out.stderr));
+    // Strip linemarkers (# N ...) and blank lines, then compare
+    let strip = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| l.trim().to_string())
+            .collect()
+    };
+    let dcc_lines = strip(&String::from_utf8_lossy(&dcc_out.stdout));
+    let gcc_lines = strip(&String::from_utf8_lossy(&gcc_out.stdout));
+    assert_eq!(
+        dcc_lines, gcc_lines,
+        "dcc -E differs from gcc -E\nDCC: {:?}\nGCC: {:?}",
+        dcc_lines, gcc_lines
+    );
+}
+
+/// M1.4: ELF object file format — verify dcc -c produces a valid
+/// ELF64 relocatable object that readelf can parse, with correct
+/// sections (.text, .rodata, .data, .bss, .symtab, .strtab),
+/// symbol visibility (GLOBAL vs LOCAL), and relocation entries.
+#[test]
+#[cfg(unix)]
+fn m1_4_elf_format() {
+    let src = include_str!("fixtures/m1_4_elf.c");
+    let (out, obj) = run_object_test("m1-4-elf", src);
+    assert!(
+        out.status.success(),
+        "m1_4_elf compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // file(1) should say "ELF 64-bit LSB relocatable"
+    let file_out = Command::new("file")
+        .arg(&obj)
+        .output()
+        .expect("file");
+    let file_str = String::from_utf8_lossy(&file_out.stdout);
+    assert!(
+        file_str.contains("ELF 64-bit") && file_str.contains("relocatable"),
+        "not a valid ELF64 relocatable: {file_str}"
+    );
+    // readelf -h: check ELF header
+    let hdr = Command::new("readelf")
+        .args(["-h"])
+        .arg(&obj)
+        .output()
+        .expect("readelf -h");
+    assert!(hdr.status.success(), "readelf -h failed");
+    let hdr_str = String::from_utf8_lossy(&hdr.stdout);
+    assert!(hdr_str.contains("ELF64"), "not ELF64");
+    assert!(hdr_str.contains("REL"), "not relocatable");
+    // readelf -S: check sections
+    let sec = Command::new("readelf")
+        .args(["-S"])
+        .arg(&obj)
+        .output()
+        .expect("readelf -S");
+    assert!(sec.status.success(), "readelf -S failed");
+    let sec_str = String::from_utf8_lossy(&sec.stdout);
+    for name in &[".text", ".rodata", ".symtab", ".strtab"] {
+        assert!(sec_str.contains(name), "missing section {name}");
+    }
+    // readelf -s: check symbols
+    let sym = Command::new("readelf")
+        .args(["-s"])
+        .arg(&obj)
+        .output()
+        .expect("readelf -s");
+    assert!(sym.status.success(), "readelf -s failed");
+    let sym_str = String::from_utf8_lossy(&sym.stdout);
+    assert!(sym_str.contains("main"), "missing main symbol");
+    assert!(sym_str.contains("global_var"), "missing global_var");
+    assert!(sym_str.contains("global_func"), "missing global_func");
+    // readelf -r: check relocations exist
+    let rel = Command::new("readelf")
+        .args(["-r"])
+        .arg(&obj)
+        .output()
+        .expect("readelf -r");
+    assert!(rel.status.success(), "readelf -r failed");
+    let rel_str = String::from_utf8_lossy(&rel.stdout);
+    assert!(
+        rel_str.contains("R_X86_64"),
+        "missing x86_64 relocations: {rel_str}"
+    );
+    let _ = fs::remove_file(&obj);
+}
+
