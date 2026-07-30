@@ -1384,7 +1384,7 @@ impl Codegen {
                 }
                 let g = self.globals[&v.name.name].clone();
                 let (section, bind) = if v.is_extern && v.init.is_none() && g.section == SHN_UNDEF {
-                    (SHN_UNDEF, STB_GLOBAL)
+                    (SHN_UNDEF, if v.is_weak { STB_WEAK } else { STB_GLOBAL })
                 } else {
                     (g.section, if v.is_weak { STB_WEAK } else if v.is_static { STB_LOCAL } else { STB_GLOBAL })
                 };
@@ -1415,7 +1415,9 @@ impl Codegen {
                     if !emitted_func_syms.insert(f.name.name.clone()) { continue; }
                     global_syms.push(ElfSym {
                         name: f.name.name.clone(), section: SHN_UNDEF, value: 0, size: 0,
-                        bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
+                        bind: if f.is_weak { STB_WEAK } else { STB_GLOBAL },
+                        ty: STT_FUNC,
+                        visibility: Self::parse_visibility(&f.visibility),
                     });
                 }
             }

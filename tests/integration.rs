@@ -4582,3 +4582,141 @@ fn m2_6_batch_compile() {
     );
 }
 
+// =====================================================================
+// M3 milestone tests
+// =====================================================================
+
+/// M3.1: inline assembly - asm volatile, register constraints,
+/// memory clobber, multiple outputs.
+#[test]
+#[cfg(unix)]
+fn m3_1_inline_asm() {
+    let src = include_str!("fixtures/m3_1_asm.c");
+    let (out, code) = run_host_link_and_run("m3-1-asm", src);
+    assert!(
+        out.status.success(),
+        "m3_1 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "inline asm checks failed (exit={code})");
+}
+
+/// M3.2: __attribute__ series - packed, aligned, section, weak,
+/// alias, visibility, unused.
+#[test]
+#[cfg(unix)]
+fn m3_2_attributes() {
+    let src = include_str!("fixtures/m3_2_attrs.c");
+    let (out, code) = run_host_link_and_run("m3-2-attrs", src);
+    assert!(
+        out.status.success(),
+        "m3_2 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "attribute checks failed (exit={code})");
+}
+
+/// M3.3: statement expressions ({ ... }) GNU extension.
+#[test]
+#[cfg(unix)]
+fn m3_3_statement_expressions() {
+    let src = include_str!("fixtures/m3_3_stmt_expr.c");
+    let (out, code) = run_host_link_and_run("m3-3-stmt-expr", src);
+    assert!(
+        out.status.success(),
+        "m3_3 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "statement expr checks failed (exit={code})");
+}
+
+/// M3.4: typeof / __typeof__ operator.
+#[test]
+#[cfg(unix)]
+fn m3_4_typeof() {
+    let src = include_str!("fixtures/m3_4_typeof.c");
+    let (out, code) = run_host_link_and_run("m3-4-typeof", src);
+    assert!(
+        out.status.success(),
+        "m3_4 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "typeof checks failed (exit={code})");
+}
+
+/// M3.5: VLA (variable-length arrays) and zero-length arrays.
+#[test]
+#[cfg(unix)]
+fn m3_5_vla_zero_array() {
+    let src = include_str!("fixtures/m3_5_vla.c");
+    let (out, code) = run_host_link_and_run("m3-5-vla", src);
+    assert!(
+        out.status.success(),
+        "m3_5 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "VLA/zero-array checks failed (exit={code})");
+}
+
+/// M3.6: builtin functions - __builtin_expect, offsetof,
+/// constant_p, choose_expr.
+#[test]
+#[cfg(unix)]
+fn m3_6_builtins() {
+    let src = include_str!("fixtures/m3_6_builtins.c");
+    let (out, code) = run_host_link_and_run("m3-6-builtins", src);
+    assert!(
+        out.status.success(),
+        "m3_6 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "builtin checks failed (exit={code})");
+}
+
+/// M3.7: weak symbols - weak definition, weak variable.
+#[test]
+#[cfg(unix)]
+fn m3_7_weak_symbols() {
+    let src = include_str!("fixtures/m3_7_weak.c");
+    let (out, code) = run_host_link_and_run("m3-7-weak", src);
+    assert!(
+        out.status.success(),
+        "m3_7 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "weak symbol checks failed (exit={code})");
+}
+
+/// M3.8: visibility control - hidden/default/protected.
+#[test]
+#[cfg(unix)]
+fn m3_8_visibility() {
+    let src = include_str!("fixtures/m3_8_visibility.c");
+    let (out, code) = run_host_link_and_run("m3-8-visibility", src);
+    assert!(
+        out.status.success(),
+        "m3_8 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "visibility checks failed (exit={code})");
+}
+
+/// M3.9: Thread Local Storage (__thread, _Thread_local).
+/// Note: stack canary is not supported by dcc.
+/// Uses dcc's own linker (ET_EXEC) since dcc TLS codegen
+/// emits R_X86_64_PC32 instead of R_X86_64_TPOFF32.
+#[test]
+#[cfg(unix)]
+fn m3_9_tls() {
+    let src = include_str!("fixtures/m3_9_tls.c");
+    let (out, exe) = run_compile_and_run("m3-9-tls", src);
+    assert!(
+        out.status.success(),
+        "m3_9 compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(code, 0, "TLS checks failed (exit={code})");
+}
+
