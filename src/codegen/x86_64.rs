@@ -3970,6 +3970,18 @@ impl Codegen {
             Expr::InitList { inits, .. } => {
                 if let Type::Vector(elem_ty, n) = e.ty() {
                     self.gen_vector_init_rvalue(inits, &elem_ty, n, 0);
+                } else if e.ty().is_arith() || e.ty().is_ptr() || matches!(e.ty(), Type::Bool) {
+                    // 标量初始化列表 (如 `int x = {1};` 或带 brace 的复合字面量):
+                    // 第一个元素就是要赋的值, 后续 (C99 6.7.8/11) 只能是 0
+                    if let Some(first) = inits.first() {
+                        let v = match first {
+                            InitItem::Expr(ex) => ex,
+                            InitItem::Designated { value, .. } => value,
+                        };
+                        self.gen_expr(v, dst);
+                    } else {
+                        self.mov_imm(dst, 0);
+                    }
                 } else {
                     eprintln!("dcc: codegen unsupported InitList rvalue for {:?}", e.ty());
                     self.emit(&[0x0F, 0x0B]); // ud2
