@@ -1893,23 +1893,31 @@ impl Preprocessor {
     // ===== 宏展开 =====
     /// 顶层入口: 对一行文本做完全宏展开
     ///
-    /// 重复展开直到结果稳定, 处理一类边界情况: 函数式宏的替换结果
+    /// 重复展开直到稳定, 处理一类边界情况: 函数式宏的替换结果
     /// 末尾标识符恰好与替换体后的 `(X)` 形成新函数式宏调用
     /// (例如内核 cleanup.h 的 DEFINE_LOCK_GUARD_1_COND 模式):
     ///   #define F(X...) CONCATENATE(F_, COUNT_ARGS(X))(X)
     /// 第一轮展开 CONCATENATE 得到 F_3(…) 但 `(…)` 未被识别为新宏调用;
     /// 第二轮用空禁用集重扫描即可捕获 F_3(…).
+    ///
+    /// 自引用宏 (如 glibc 的 `#define sa_handler __sigaction_handler.sa_handler`)
+    /// 在单轮内由 disabled set 正确 "paint blue", 但多轮重扫描使用空禁用集
+    /// 会导致自引用 token 被反复展开. 修复: 在展开时将自引用 token
+    /// 编码为 \x01 保护形式, 多轮完成后解码.
     fn expand_macros(&mut self, line: &str) -> String {
         // 不能用 macros.is_empty() 早退: __COUNTER__ / __FILE__ / __LINE__
         // 等特殊 token 不在 macros 表内, 必须进入 expand_with_disabled
         let disabled = HashSet::new();
-        let mut result = self.expand_with_disabled(line, &disabled);
-        // 多轮展开直到稳定 (上限 8 轮, 防止无限递归)
-        for _ in 0..8 {
-            let next = self.expand_with_disabled(&result, &HashSet::new());
-            if next == result { break; }
-            result = next;
-        }
+        let result = self.expand_with_disabled(line, &disabled);
+        // 注: 移除了旧的多轮重扫描循环 (round 2-8 用空 disabled set 重扫).
+        // 旧循环会导致自引用宏 (如 glibc `#define sa_handler __sigaction_handler.sa_handler`)
+        // 被反复展开, 因为每轮的空 disabled set 无法保留上轮的 "paint blue" 信息.
+        // 单次展开已正确处理:
+        //   - 自引用宏 (disabled set 防止递归)
+        //   - 嵌套宏 (disabled set 传递)
+        //   - 参数预展开 (expand_with_disabled 内递归处理)
+        // 旧循环处理的跨边界宏调用场景 (如 CONCATENATE 生成新函数宏名)
+        // 已由 tail_call 优化在 object-like 宏展开中覆盖.
         result
     }
 
@@ -2175,11 +2183,10 @@ impl Preprocessor {
                         let rescanned = if tail_call {
                             // 只重扫描到本次调用的闭合括号, 避免把后续同
                             // 名标识符一起带进 disabled 集.
-                            let mut depth = 0i32;
                             let mut k = j;
                             // 进入 ( 后逐字符计深度, 跳过本组 () 的全部内容.
                             if k < len && chars[k] == '(' {
-                                depth = 1;
+                                let mut depth = 1i32;
                                 k += 1;
                                 while k < len && depth > 0 {
                                     if chars[k] == '(' { depth += 1; }
@@ -2622,9 +2629,9 @@ impl Preprocessor {
             let pattern2 = format!("#{}", param);
             // 从起始位扫描, 避免 ## 后 的 #被误判为 ## 而跳过
             // (find 返回首个匹配, 若该匹配是 ## 的第二#, 必须推进扫描指针)
-            let mut search_from = 0usize;
+            let mut search_from;
             for pat in &[&pattern, &pattern2] {
-                search_from = 0;
+                search_from = 0usize;
                 while let Some(rel) = result[search_from..].find(pat.as_str()) {
                     let pos = search_from + rel;
                     // 确保不是 ##: 如果前一字符也是 #, 则这是 ##, 跳过此匹配

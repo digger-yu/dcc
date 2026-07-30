@@ -262,11 +262,11 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
         }
         "__builtin_bswap16" if argc == 1 => {
             let v = take1(args)?;
-            Ok(Some(((v as u16).swap_bytes() as i128)))
+            Ok(Some((v as u16).swap_bytes() as i128))
         }
         "__builtin_bswap32" if argc == 1 => {
             let v = take1(args)?;
-            Ok(Some(((v as u32).swap_bytes() as i128)))
+            Ok(Some((v as u32).swap_bytes() as i128))
         }
         "__builtin_bswap64" if argc == 1 => {
             let v = take1(args)?;

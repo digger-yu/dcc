@@ -1580,7 +1580,7 @@ impl<'a> Parser<'a> {
 
     /// 解析函数指针内层： caller 已吃掉 `(*`、当前 token 为名字
     /// 类型构造与 parse_var_or_func 原始函数指针分支一致。
-    fn parse_func_ptr_inner(&mut self, ty: Type, leading_attrs: ParsedAttrs, storage: StorageClass) -> Option<Vec<Decl>> {
+    fn parse_func_ptr_inner(&mut self, ty: Type, _leading_attrs: ParsedAttrs, storage: StorageClass) -> Option<Vec<Decl>> {
         // 可选的 const/volatile/restrict 限定符
         while matches!(self.cur.kind, TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict) {
             self.advance();

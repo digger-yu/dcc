@@ -93,6 +93,7 @@ pub const R_X86_64_32:        u32 = 10;
 pub const R_X86_64_32S:       u32 = 11;
 pub const R_X86_64_TPOFF64:   u32 = 18; // TLS: thread pointer offset (64-bit)
 pub const R_X86_64_TPOFF32:   u32 = 23; // TLS: thread pointer offset (32-bit, sign-extend)
+pub const R_X86_64_GOTTPOFF:  u32 = 30; // TLS: PC-relative offset to GOT TPOFF entry
 pub const R_X86_64_GOT64:     u32 = 19; // 64-bit GOT entry
 pub const R_X86_64_GOTOFF64:  u32 = 25; // 64-bit GOT-relative
 pub const R_X86_64_IRELATIVE: u32 = 37; // IFUNC resolver

@@ -17,6 +17,14 @@ Thumbs.db
 # WorkBuddy
 .workbuddy/
 
+# Autotools / configure artifacts
+config.log
+config.status
+Makefile
+
+# Scratch / debug temp files
+.scratch/
+
 # DCC artifacts
 bin/
 *.o

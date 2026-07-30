@@ -341,6 +341,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // codegen
     let mut target = Target::resolve(&cfg.target);
     target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
+    target.set_stack_protector(cfg.stack_protector);
     if !target.sse {
         let uses_sse = module.functions.iter().any(|f| {
             format!("{:?}", f).contains("Float") || format!("{:?}", f).contains("Double")

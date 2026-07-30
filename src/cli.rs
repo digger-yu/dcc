@@ -44,6 +44,7 @@ pub struct Config {
     pub red_zone: bool,
     pub frame_pointer: bool,
     pub sse: bool,
+    pub stack_protector: bool, // -fstack-protector / -fstack-protector-all
     pub debug_level: u8,   // 0=off (g0), 1=g1, 2=g2, 3=g3
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
@@ -299,6 +300,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut red_zone = true;
     let mut frame_pointer = false;
     let mut sse = true;
+    let mut stack_protector = false;
     let mut debug_level: u8 = 0;
     let mut lto_enabled = false;
     let mut function_sections = false;
@@ -797,6 +799,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-fomit-frame-pointer" => frame_pointer = false,
             "-mno-sse" | "-mno-sse2" => sse = false,
             "-msse" | "-msse2" => sse = true,
+            "-fstack-protector" | "-fstack-protector-all" | "-fstack-protector-strong" => stack_protector = true,
             // Linux 内核编译常用的 GCC flags - 忽略但接受
             "-fno-pic" | "-fno-stack-protector" | "-fno-strict-aliasing"
             | "-fno-common" | "-fno-delete-null-pointer-checks" | "-fno-strict-overflow"
@@ -1042,7 +1045,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         if !link_runpath.is_empty() { all_link_opts.runpath = Some(link_runpath.join(":")); }
         all_link_opts.rpath_link = link_rpath_link.clone();
         Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode, emit_asm, preprocess_only, dump_macros, force_includes, pch_opts, syntax_only,
-            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
+            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, stack_protector, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,
             permissive,
@@ -1082,7 +1085,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         let parallel_codegen = opt >= 2
             && std::env::var("DCC_NO_PARALLEL").is_err();
         Ok(Config { inputs, output, opt, std, target, freestanding, include_paths, system_paths, defines, dump_ast, verbose, relocatable, link_mode: false, emit_asm, preprocess_only, dump_macros, force_includes, pch_opts, syntax_only,
-            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, debug_level, lto_enabled, function_sections,
+            dep_file, dep_target, gen_dep, dep_mmd_only, dep_phony, red_zone, frame_pointer, sse, stack_protector, debug_level, lto_enabled, function_sections,
             sanitizers: SanitizerFlags::from_args(args), input_lang, as_options,
             parallel_codegen,
             permissive,

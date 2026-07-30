@@ -100,6 +100,8 @@ pub struct Codegen {
     sym_index: HashMap<String, u32>,
     pub relocations: Vec<ElfRela>,
     pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
+    pending_func_addr_rels: Vec<(u64, String)>, // 函数地址取址 (GOTPCREL)
+    defined_funcs: HashSet<String>, // 本 TU 中有函数体的函数名
     pending_data_rels: Vec<(u64, String)>,  // (disp32_pos, var_name) - 全局变量重定位
     pending_sib_data_rels: Vec<(u64, String)>,  // SIB base=101 (disp32 绝对寻址) - 需要 R_X86_64_32S
     pub data_section: Vec<u8>,    // .data 节 (已初始化全局变量)
@@ -387,6 +389,7 @@ struct ParallelEmitCtx {
     variadic_funcs: HashMap<String, bool>,
     nested_funcs: HashMap<String, Vec<(String, i32)>>,
     func_param_types: HashMap<String, Vec<Type>>,
+    defined_funcs: HashSet<String>,
     rodata: Vec<u8>,
     string_pool: HashMap<Vec<u8>, u64>,
     text_align: u64,
@@ -400,6 +403,7 @@ struct FuncEmitChunk {
     string_refs: Vec<(u64, Vec<u8>)>,
     float_refs: Vec<(u64, u64)>,
     pending_func_rels: Vec<(u64, String)>,
+    pending_func_addr_rels: Vec<(u64, String)>,
     pending_data_rels: Vec<(u64, String)>,
     pending_sib_data_rels: Vec<(u64, String)>,
     label_addr_refs: Vec<(u64, String)>,
@@ -417,7 +421,9 @@ impl Codegen {
                vla_offsets: HashMap::new(),
                vla_total_size: 0,
                relocatable: false, function_sections: false, symbols: vec![], sym_index: HashMap::new(),
-               relocations: vec![], pending_func_rels: vec![], pending_data_rels: vec![], pending_sib_data_rels: vec![],
+               relocations: vec![], pending_func_rels: vec![], pending_func_addr_rels: vec![],
+               defined_funcs: HashSet::new(),
+               pending_data_rels: vec![], pending_sib_data_rels: vec![],
                data_section: vec![], bss_size: 0,
                tdata_section: vec![], tbss_size: 0, tdata_align: 8, tbss_align: 8,
                exec_text_size: 0, pending_tls_rels: vec![],
@@ -736,6 +742,14 @@ impl Codegen {
         // 修补 TLS 变量 RIP-relative 引用（ET_EXEC .tdata 模板）
         let tdata_start = rodata_start + self.rodata.len() as u64;
         for (disp32_pos, var_name) in self.pending_tls_rels.drain(..) {
+            // __dcc_tls_base 是合成符号: 指向 TLS 模板起始地址
+            if var_name == "__dcc_tls_base" {
+                let rip = self.entry + disp32_pos + 4;
+                let rel = (tdata_start as i64) - (rip as i64);
+                let p = disp32_pos as usize;
+                self.code[p..p+4].copy_from_slice(&(rel as i32).to_le_bytes());
+                continue;
+            }
             if let Some(g) = self.globals.get(&var_name) {
                 let var_vaddr = tdata_start + g.offset;
                 let rip = self.entry + disp32_pos + 4;
@@ -860,6 +874,15 @@ impl Codegen {
     /// ET_EXEC 模式: 生成可直接执行的 ELF
     fn compile_exec(&mut self, prog: &Program) {
         self.entry = 0x400000 + 64 + 56;
+        // 收集本 TU 中有函数体的函数名
+        self.defined_funcs.clear();
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_some() {
+                    self.defined_funcs.insert(f.name.name.clone());
+                }
+            }
+        }
         // 收集全局变量 → rodata / .tdata(TLS)
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
@@ -870,6 +893,7 @@ impl Codegen {
                 let align = v.alignment.unwrap_or(v.ty.align()).max(1);
                 if v.is_thread_local {
                     self.tdata_align = self.tdata_align.max(align as u64);
+                    // ET_EXEC: 所有 TLS 数据（含 .tbss）都在单一 TLS 模板中
                     let off = (self.tdata_section.len() + align - 1) & !(align - 1);
                     while self.tdata_section.len() < off { self.tdata_section.push(0); }
                     let offset = self.tdata_section.len() as u64;
@@ -1051,6 +1075,15 @@ impl Codegen {
 
     /// ET_REL 模式: 生成可重定位 .o 文件
     fn compile_rel(&mut self, prog: &Program) {
+        // 收集本 TU 中有函数体的函数名 (用于 emit_func_addr 区分内部/外部)
+        self.defined_funcs.clear();
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if f.body.is_some() {
+                    self.defined_funcs.insert(f.name.name.clone());
+                }
+            }
+        }
         // Phase 1: 生成代码, 收集数据
         // 收集全局变量 → .data / .bss (或自定义 section)
         for decl in &prog.decls {
@@ -1423,6 +1456,14 @@ impl Codegen {
             }
         }
 
+        // Stack canary: 添加 __stack_chk_fail 未定义符号 (由 libc 提供)
+        if self.target.stack_protector {
+            global_syms.push(ElfSym {
+                name: "__stack_chk_fail".to_string(), section: SHN_UNDEF, value: 0, size: 0,
+                bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
+            });
+        }
+
         // 函数定义符号 (包括嵌套函数)
         for name in &self.global_asm_exports {
             if let Some(&off) = self.labels.get(name) {
@@ -1583,6 +1624,17 @@ impl Codegen {
             });
         }
 
+        // 解析函数地址重定位 (GOT 间接寻址: MOV + GOTPCREL)
+        for (code_off, func_name) in self.pending_func_addr_rels.drain(..) {
+            let sym_idx = self.sym_index.get(&func_name).copied().unwrap_or(0);
+            self.relocations.push(ElfRela {
+                offset: code_off,
+                sym_index: sym_idx,
+                rel_type: elf::R_X86_64_GOTPCREL,
+                addend: -4,
+            });
+        }
+
         // 解析全局变量重定位 (使用最终符号表)
         for (disp32_pos, var_name) in self.pending_data_rels.drain(..) {
             let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
@@ -1591,6 +1643,19 @@ impl Codegen {
                 sym_index: sym_idx,
                 rel_type: R_X86_64_PC32,
                 addend: -4,
+            });
+        }
+
+        // 解析 TLS 重定位 (relocatable mode)
+        // 注: 当前使用 R_X86_64_TPOFF32 (Local Exec), 适用于主可执行文件.
+        // 共享库需要 R_X86_64_GOTTPOFF (Initial Exec) + 双指令序列.
+        for (disp32_pos, var_name) in self.pending_tls_rels.drain(..) {
+            let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
+            self.relocations.push(ElfRela {
+                offset: disp32_pos,
+                sym_index: sym_idx,
+                rel_type: elf::R_X86_64_TPOFF32,
+                addend: 0,
             });
         }
 
@@ -1834,6 +1899,7 @@ impl Codegen {
             variadic_funcs: self.variadic_funcs.clone(),
             nested_funcs: self.nested_funcs.clone(),
             func_param_types: self.func_param_types.clone(),
+            defined_funcs: self.defined_funcs.clone(),
             rodata: self.rodata.clone(),
             string_pool: self.string_pool.clone(),
             text_align: self.text_align,
@@ -1861,6 +1927,7 @@ impl Codegen {
         cg.variadic_funcs = ctx.variadic_funcs;
         cg.nested_funcs = ctx.nested_funcs;
         cg.func_param_types = ctx.func_param_types;
+        cg.defined_funcs = ctx.defined_funcs;
         cg.rodata = ctx.rodata;
         cg.string_pool = ctx.string_pool;
         cg.text_align = ctx.text_align;
@@ -1893,6 +1960,7 @@ impl Codegen {
             string_refs: cg.string_refs,
             float_refs: cg.float_refs,
             pending_func_rels: cg.pending_func_rels,
+            pending_func_addr_rels: cg.pending_func_addr_rels,
             pending_data_rels: cg.pending_data_rels,
             pending_sib_data_rels: cg.pending_sib_data_rels,
             label_addr_refs: cg.label_addr_refs,
@@ -1916,6 +1984,9 @@ impl Codegen {
         }
         for (pos, sym) in chunk.pending_func_rels {
             self.pending_func_rels.push((base + pos, sym));
+        }
+        for (pos, sym) in chunk.pending_func_addr_rels {
+            self.pending_func_addr_rels.push((base + pos, sym));
         }
         for (pos, sym) in chunk.pending_sib_data_rels {
             self.pending_sib_data_rels.push((base + pos, sym));
@@ -2186,6 +2257,13 @@ impl Codegen {
                     self.emit(&[0x48, 0x81, 0xec]);
                     self.emit(&self.frame_size.to_le_bytes());
                 }
+                // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
+                if self.target.stack_protector && self.frame_size >= 8 {
+                    // mov rax, fs:[0x28]  → 加载 canary
+                    self.emit(&[0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]);
+                    // mov [r13 - 8], rax  → 存储在帧顶部
+                    self.emit(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]);
+                }
                 // 变参 reg save area 放在 frame 底部 (紧贴 rsp 之后).
                 // 帧布局 (自下而上):
                 //   r13+0 saved r13 / r13+8 ret addr
@@ -2244,6 +2322,13 @@ impl Codegen {
                 if self.frame_size > 0 {
                     self.emit(&[0x48, 0x81, 0xec]);
                     self.emit(&self.frame_size.to_le_bytes());
+                }
+                // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
+                if self.target.stack_protector && self.frame_size >= 8 {
+                    // mov rax, fs:[0x28]  → 加载 canary
+                    self.emit(&[0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]);
+                    // mov [r13 - 8], rax  → 存储在帧顶部
+                    self.emit(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]);
                 }
                 }
                 let ends_ret = if let Some(body) = &f.body {
@@ -2942,6 +3027,7 @@ impl Codegen {
                     if let Some(s) = l_inner { s } else { r_inner.unwrap_or(1) }
                 } else { 1 };
                 let elem_size = if is_ptr_sub { l_inner.unwrap_or(1) } else { 1 };
+                let is_signed = Self::is_signed_int(&l.ty()) || Self::is_signed_int(&r.ty());
                 // 统一路径: 使用帧临时槽保存左操作数 (避免 push 与 call 返回地址冲突)
                 // 使用 gen_expr_decay: 数组标识符在运算中衰减为指针
                 // binop 临时槽: 放在 temp_slots 区域 (保存寄存器下方, 变量上方)
@@ -2979,7 +3065,7 @@ impl Codegen {
                         else { self.emit(&[0x85 | ((dst & 7) << 3)]); self.emit(&slot_off.to_le_bytes()); }
                     }
                     self.pop(2); // pop rdx (右操作数)
-                    self.binop(*op, dst, 2);
+                    self.binop(*op, dst, 2, is_signed);
                 } else {
                     // 恢复左操作数: mov dst, [r13+slot_off]
                     {
@@ -2988,7 +3074,7 @@ impl Codegen {
                         if slot_off.abs() < 128 { self.emit(&[0x45 | ((dst & 7) << 3), slot_off as i8 as u8]); }
                         else { self.emit(&[0x85 | ((dst & 7) << 3)]); self.emit(&slot_off.to_le_bytes()); }
                     }
-                    self.binop(*op, dst, 1);
+                    self.binop(*op, dst, 1, is_signed);
                 }
                 // ptr - ptr: 字节差 ÷ 元素大小 = 元素数
                 if is_ptr_sub && elem_size > 1 {
@@ -5338,7 +5424,7 @@ impl Codegen {
         else { panic!("pop: unsupported reg {}", reg); }
     }
 
-    fn binop(&mut self, op: BinOp, dst: u8, src: u8) {
+    fn binop(&mut self, op: BinOp, dst: u8, src: u8, is_signed: bool) {
         let is_cmp = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne);
         if !is_cmp && !matches!(op, BinOp::Div | BinOp::Mod) {
             let mut rex = 0x48u8; if src >= 8 { rex |= 0x44; } else if dst >= 8 { rex |= 0x41; } self.emit(&[rex]);
@@ -5380,7 +5466,14 @@ impl Codegen {
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
                 let mut rex = 0x48u8; if src >= 8 { rex |= 0x44; } else if dst >= 8 { rex |= 0x41; }
                 self.emit(&[rex, 0x39, 0xC0 | ((src & 7) << 3) | (dst & 7)]);
-                let cc = match op { BinOp::Lt=>0x9C, BinOp::Le=>0x9E, BinOp::Gt=>0x9F, BinOp::Ge=>0x9D, BinOp::EqEq=>0x94, BinOp::Ne=>0x95, _=>unreachable!() };
+                let cc = match op {
+                    BinOp::Lt => if is_signed { 0x9C } else { 0x92 },
+                    BinOp::Le => if is_signed { 0x9E } else { 0x96 },
+                    BinOp::Gt => if is_signed { 0x9F } else { 0x97 },
+                    BinOp::Ge => if is_signed { 0x9D } else { 0x93 },
+                    BinOp::EqEq => 0x94, BinOp::Ne => 0x95,
+                    _ => unreachable!()
+                };
                 self.emit(&[0x0F, cc, 0xC0, 0x48, 0x0F, 0xB6, 0xC0]);
                 if dst != 0 { self.mov(dst, 0); }
             }
@@ -5408,6 +5501,9 @@ impl Codegen {
             .unwrap_or((8, false, 0));
         let tls_exec = is_tls && !self.relocatable;
         let pref = if reg >= 8 { 0x41 } else { 0x00 }; // REX.R for high reg
+        // 注: ET_EXEC TLS 走 pending_tls_rels (由 resolve() 修补).
+        // ET_REL TLS 走 pending_data_rels + R_X86_64_PC32 (host linker 处理).
+        // FS 段前缀与 RIP-relative 寻址不兼容, 故不使用.
         match sz {
             1 => {
                 let pos = self.pos() + 3 + if pref != 0 { 1 } else { 0 };
@@ -6230,6 +6326,25 @@ impl Codegen {
 
     // 函数尾声: 恢复 r13 + 返回
     fn emit_func_epilogue(&mut self) {
+        // Stack canary 检查: 在恢复 rsp 前验证金丝雀值
+        if self.target.stack_protector && self.frame_size >= 8 {
+            // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器
+            self.emit(&[0x4d, 0x8b, 0x9d, 0xf8, 0xff, 0xff, 0xff]);
+            // xor r11, fs:[0x28]  → 与原始 canary 比较
+            self.emit(&[0x64, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00]);
+            if self.relocatable {
+                // ET_REL: call __stack_chk_fail (由 host libc 提供)
+                self.emit(&[0x74, 0x05]); // je .+5 (canary 匹配则跳过失败处理)
+                self.call_label("__stack_chk_fail");
+            } else {
+                // ET_EXEC: 内联 exit(255) syscall (无 libc 可用)
+                self.emit(&[0x74, 0x07]); // je .+7 (canary 匹配则跳过 inline exit)
+                // mov edi, 255 (exit code)
+                self.emit(&[0xbf, 0xff, 0x00, 0x00, 0x00]);
+                // mov eax, 60 (exit syscall) + syscall
+                self.emit(&[0xb8, 0x3c, 0x00, 0x00, 0x00, 0x0f, 0x05]);
+            }
+        }
         // mov rsp, r13: 恢复栈指针
         self.emit(&[0x49, 0x8b, 0xe5]);
         self.emit(&[0x41, 0x5d]); // pop r13
@@ -7635,17 +7750,28 @@ impl Codegen {
         }
     }
 
-    /// 发射函数地址加载: lea dst, [rip+disp32] + 重定位/延迟修补.
-    /// 用于函数名作为值 (函数指针) 的场景: `fn_t f = func;` / `return func;`
+    /// 发射函数地址加载.
+    /// - ET_EXEC: LEA dst, [RIP+disp32] + label_addr_refs (直接修补)
+    /// - ET_REL 内部函数: LEA dst, [RIP+disp32] + pending_func_rels (PC32/PLT32)
+    /// - ET_REL 外部函数: MOV dst, [RIP+disp32] + pending_func_addr_rels (GOTPCREL)
     fn emit_func_addr(&mut self, dst: u8, name: &str) {
-        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+        let rex_base = 0x48u8 | if dst >= 8 { 0x44 } else { 0 };
         let modrm = 0x05 | ((dst & 7) << 3);
-        self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
-        let disp32_pos = self.pos() - 4;
-        if self.relocatable {
+        if !self.relocatable {
+            // ET_EXEC: LEA + label_addr_refs
+            self.emit(&[rex_base, 0x8D, modrm, 0, 0, 0, 0]);
+            let disp32_pos = self.pos() - 4;
+            self.label_addr_refs.push((disp32_pos, name.to_string()));
+        } else if self.defined_funcs.contains(name) {
+            // 内部函数: LEA dst, [RIP+disp32] → 直接地址
+            self.emit(&[rex_base, 0x8D, modrm, 0, 0, 0, 0]);
+            let disp32_pos = self.pos() - 4;
             self.pending_func_rels.push((disp32_pos, name.to_string()));
         } else {
-            self.label_addr_refs.push((disp32_pos, name.to_string()));
+            // 外部/未定义函数: MOV dst, [RIP+disp32] → GOT 间接
+            self.emit(&[rex_base, 0x8B, modrm, 0, 0, 0, 0]);
+            let disp32_pos = self.pos() - 4;
+            self.pending_func_addr_rels.push((disp32_pos, name.to_string()));
         }
     }
 
@@ -7657,11 +7783,7 @@ impl Codegen {
         };
         if let Expr::Ident { name, .. } = inner {
             if self.labels.contains_key(&name.name) || self.globals.contains_key(&name.name) {
-                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                let modrm = 0x05 | ((dst & 7) << 3);
-                self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
-                let disp32_pos = self.pos() - 4;
-                self.label_addr_refs.push((disp32_pos, name.name.clone()));
+                self.emit_func_addr(dst, &name.name);
                 return;
             }
         }
@@ -9395,10 +9517,15 @@ impl Codegen {
             "imul" if ops.len() == 2 => self.emit_asm_imul2(&ops[0], &ops[1]),
             "imul" if ops.len() == 3 => self.emit_asm_imul3(&ops[0], &ops[1], &ops[2]),
             "mul" | "mulq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 4, 64),
+            "mull" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 4, 32),
             "div" | "divq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 6, 64),
+            "divl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 6, 32),
             "idiv" | "idivq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 7, 64),
+            "idivl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 7, 32),
             "neg" | "negq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 3, 64),
+            "negl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 3, 32),
             "not" | "notq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 2, 64),
+            "notl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 2, 32),
             "inc" | "incq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 64),
             "incl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 32),
             "incw" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 16),

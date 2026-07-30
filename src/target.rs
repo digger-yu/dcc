@@ -25,6 +25,7 @@ pub struct Target {
     pub red_zone:   bool,
     pub frame_pointer: bool,
     pub sse: bool,
+    pub stack_protector: bool,
 }
 
 impl Target {
@@ -48,6 +49,7 @@ impl Target {
             red_zone: true,
             frame_pointer: false,
             sse: true,
+            stack_protector: false,
         }
     }
 
@@ -55,6 +57,10 @@ impl Target {
         self.red_zone = red_zone;
         self.frame_pointer = frame_pointer;
         self.sse = sse;
+    }
+
+    pub fn set_stack_protector(&mut self, enable: bool) {
+        self.stack_protector = enable;
     }
 }
 
