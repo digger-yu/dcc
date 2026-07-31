@@ -55,6 +55,9 @@ pub struct Preprocessor {
     pub fenv_access: bool,
     /// 收集在展开阶段遇到的 _Pragma 操作符, 待外层 &mut self 方法批量处理
     pending_pragmas: RefCell<Vec<(String, u32)>>,
+    /// 本轮 expand_macros 实际展开过的宏名 (跨嵌套调用累积),
+    /// 供第二轮重扫描作为禁用集延续 paint blue 语义
+    expanded_macros: RefCell<HashSet<String>>,
     /// 当前字符集/编码 (C23 #pragma locale)
     /// 支持: "UTF-8" (默认), "ASCII", "ISO-8859-1", "POSIX"
     charset: String,
@@ -353,6 +356,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         fenv_access: false,
         counter: 0,
         pending_pragmas: RefCell::new(Vec::new()),
+        expanded_macros: RefCell::new(HashSet::new()),
         charset: "UTF-8".to_string(),
     };
     // 预定义宏
@@ -1927,35 +1931,41 @@ impl Preprocessor {
     // ===== 宏展开 =====
     /// 顶层入口: 对一行文本做完全宏展开
     ///
-    /// 重复展开直到稳定, 处理一类边界情况: 函数式宏的替换结果
-    /// 末尾标识符恰好与替换体后的 `(X)` 形成新函数式宏调用
-    /// (例如内核 cleanup.h 的 DEFINE_LOCK_GUARD_1_COND 模式):
+    /// 第一轮展开可能留下跨边界调用: 函数式宏的替换结果末尾标识符
+    /// 恰好与替换体后的 `(X)` 形成新函数式宏调用 (例如内核 cleanup.h
+    /// 的 DEFINE_LOCK_GUARD_1_COND 模式):
     ///   #define F(X...) CONCATENATE(F_, COUNT_ARGS(X))(X)
     /// 第一轮展开 CONCATENATE 得到 F_3(…) 但 `(…)` 未被识别为新宏调用;
-    /// 第二轮用空禁用集重扫描即可捕获 F_3(…).
+    /// 第二轮重扫描即可捕获 F_3(…).
     ///
-    /// 自引用宏 (如 glibc 的 `#define sa_handler __sigaction_handler.sa_handler`)
-    /// 在单轮内由 disabled set 正确 "paint blue", 但多轮重扫描使用空禁用集
-    /// 会导致自引用 token 被反复展开. 修复: 在展开时将自引用 token
-    /// 编码为 \x01 保护形式, 多轮完成后解码.
+    /// 第二轮不能用空禁用集: 自引用宏 (如 glibc 的
+    /// `#define sa_handler __sigaction_handler.sa_handler`) 在单轮内由
+    /// disabled set "paint blue", 空禁用集重扫会把它重复展开成
+    /// __sigaction_handler.__sigaction_handler.sa_handler. 因此第二轮
+    /// 的禁用集 = 第一轮实际展开过的全部宏名: 自引用 token 不再展开,
+    /// 而跨边界调用的目标 (## 拼接产生的新宏名) 从未展开过, 不受影响.
     fn expand_macros(&mut self, line: &str) -> String {
         // 不能用 macros.is_empty() 早退: __COUNTER__ / __FILE__ / __LINE__
         // 等特殊 token 不在 macros 表内, 必须进入 expand_with_disabled
+        //
+        // 嵌套调用 (tail_call 递归) 时先保存外层记录, 结束时合并回去
+        let saved = self.expanded_macros.borrow().clone();
+        self.expanded_macros.borrow_mut().clear();
         let disabled = HashSet::new();
         let mut result = self.expand_with_disabled(line, &disabled);
-        // 第二轮重扫描: 处理跨边界宏调用 (如 cleanup.h 的 DEFINE_LOCK_GUARD_1_COND 模式):
-        //   #define F(X...) CONCATENATE(F_, COUNT_ARGS(X))(X)
-        // 第一轮展开 CONCATENATE 得到 F_3(…) 但 `(…)` 未被识别为新宏调用;
-        // 第二轮用空禁用集重扫描即可捕获 F_3(…).
-        //
-        // 自引用宏 (如 glibc `#define sa_handler __sigaction_handler.sa_handler`)
-        // 在单轮内由 disabled set 正确 "paint blue". 多轮重扫描时, 自引用宏
-        // 会在第二轮被重新展开(因为空禁用集), 但内核中不存在此类自引用模式.
-        // 两轮重扫描已足够覆盖 CONCATENATE+COUNT_ARGS 模式.
+        // 第二轮重扫描: 处理跨边界宏调用 (如 cleanup.h 的
+        // DEFINE_LOCK_GUARD_1_COND 模式). 禁用集 = 第一轮实际展开过的
+        // 宏名, 延续 paint blue 语义, 防止自引用宏被重复展开.
+        let expanded = std::mem::take(&mut *self.expanded_macros.borrow_mut());
         if result != line {
-            let result2 = self.expand_with_disabled(&result, &HashSet::new());
+            let result2 = self.expand_with_disabled(&result, &expanded);
             result = result2;
         }
+        // 丢弃第二轮的新记录, 只把第一轮展开的宏合并回外层记录
+        self.expanded_macros.borrow_mut().clear();
+        let mut merged = saved;
+        merged.extend(expanded);
+        *self.expanded_macros.borrow_mut() = merged;
         result
     }
 
@@ -2119,6 +2129,7 @@ impl Preprocessor {
                         while j < len && chars[j].is_whitespace() { j += 1; }
                         if j < len && chars[j] == '(' {
                             j += 1;
+                            self.expanded_macros.borrow_mut().insert(ident.clone());
                             let raw_args = self.parse_macro_args(&chars, &mut j);
                             // 确定哪些参数被 # 或 ## 操作 (这些参数不预展开)
                             let (stringify_params, paste_params) = self.find_special_params(&def.body, params);
@@ -2195,6 +2206,7 @@ impl Preprocessor {
                             out.push_str(&ident);
                         }
                     } else {
+                        self.expanded_macros.borrow_mut().insert(ident.clone());
                         // object-like 别名后接 (args) 时须与替换体一起重扫描，
                         // 例如 #define DIV_ROUND_UP __KERNEL_DIV_ROUND_UP
                         // 但是只有当替换体本身是函数式宏名时才需要 tail_call

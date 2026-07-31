@@ -4565,7 +4565,9 @@ fn m2_6_batch_compile() {
     for name in &fixtures {
         let src = format!("examples/{name}");
         if !std::path::Path::new(&src).exists() { continue; }
-        let obj = dir.join(format!("dcc-m2-6-{name}-{}.o",
+        // fixture 名含子目录 (如 basics/hello.c), 拍平避免父目录不存在
+        let flat = name.replace(['/', '\\'], "-");
+        let obj = dir.join(format!("dcc-m2-6-{flat}-{}.o",
             std::process::id()));
         let out = Command::new(dcc)
             .args(["-c", "-o"])
