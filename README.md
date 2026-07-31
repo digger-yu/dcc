@@ -132,7 +132,7 @@
 | C99 | ✅ | 复合字面量 / 指定初始化 / VLA / `long long` / `_Bool` / `inline` / `for` 内声明 |
 | C11 | ✅ | `_Static_assert` / `_Atomic` / 匿名 struct/union / `_Generic` / `_Thread_local` / `_Noreturn` |
 | C17 | ✅ | C11 修正版，复用 C11 路径 |
-| C23 | 🟡 部分 | `typeof` / `constexpr` / `[[attributes]]` / `_BitInt(N)` / 数字分隔符 / `#embed` / `nullptr` / `#elifdef` / `#elifndef` / `__VA_OPT__` 全部；其它按需补 |
+| C23 | ✅ 完整 | `typeof` / `typeof_unqual` / `constexpr` / `bool`/`true`/`false` 关键字 / `alignas` / `thread_local` / `nullptr`/`nullptr_t` / `static_assert` 无消息 / 枚举底层类型 `: type` / 省略 `=` 大括号初始化 / `[[attributes]]` / `_BitInt(N)` / 数字分隔符 / `#embed`+`prefix`/`suffix`/`if_empty` / `__has_embed` / `__has_c_attribute` / `__STDC_ENDIAN_*` / `#elifdef`/`#elifndef` / `%b`/`%B` printf 二进制 / `-std=gnu23`/`c23` |
 | GNU 扩展 | ✅ | `__int128`（`rax:rdx`）/ 语句表达式 / `__VA_ARGS__` / 嵌套函数 / computed goto / `asm goto` / `&&label` / `__attribute__` 全家族 / `__declspec` 翻译 / `_Complex` / `_Decimal` / `_Fract` / `_Accum` |
 
 ### 3.2 C++
@@ -175,7 +175,9 @@ C++ 走"降级到 C"路径（`src/cpp/lower.rs`），Itanium ABI 名字修饰，
 | `#include` / `#define` / `#if` 全家族 / `#elifdef` / `#elifndef` / `#endif` / `#include_next` / `#pragma once` | ✅ |
 | `#warning` / `#error` | ✅ |
 | `#pragma` 全家族 + `_Pragma` + `__pragma` + `#pragma STDC FENV_ACCESS/FP_CONTRACT/CX_LIMITED_RANGE` | ✅ |
-| `#embed` (C23) 字节数组 + `limit` / `prefix` | ✅ |
+| `#embed` (C23) 字节数组 + `limit` / `prefix` / `suffix` / `if_empty` | ✅ |
+| `__has_embed` (C23) / `__has_c_attribute` (C23) | ✅ |
+| `__STDC_ENDIAN_BIG__` / `__STDC_ENDIAN_LITTLE__` / `__STDC_ENDIAN_NATIVE__` (C23) | ✅ |
 | `__VA_ARGS__` / `__VA_OPT__` / `__has_include` / `__has_attribute` / `__has_builtin` | ✅ |
 | `__FILE__` / `__LINE__` / `__DATE__` / `__TIME__` / `__COUNTER__` | ✅（COUNTER 跨宏嵌套共享） |
 | 预定义宏 | ✅ `__linux__` / `__GNUC__` / `__amd64__` / `__x86_64` / `__USER_LABEL_PREFIX__` / `__VERSION__` / `__OPTIMIZE__` / `__PIC__` / `__PIE__` / `__code_model_small__` / `__SEG_GS` / `__SEG_FS` |

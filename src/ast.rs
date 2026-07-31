@@ -257,7 +257,7 @@ pub enum Type {
     Vector(Box<Type>, usize),  // SIMD 向量: (元素类型, 元素个数)
     Struct(String, Arc<Vec<Field>>),
     Union(String, Arc<Vec<Field>>),
-    Enum(String, Arc<Vec<(String, i64)>>, bool), // (name, values, packed)
+    Enum(String, Arc<Vec<(String, i64)>>, Option<Box<Type>>), // (name, values, C23 底层类型: None=默认 int, Some(t)=底层类型, packed 编码为 Some(SChar))
     Func(Box<Type>, Vec<Type>),
     Named(String),
     Atomic(Box<Type>),     // _Atomic(T): 原子类型, 大小/对齐同 T
@@ -290,7 +290,12 @@ impl Type {
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
-            Type::Enum(_, _, packed) => if *packed { 1 } else { 4 },
+            Type::Enum(_, _, under) => match under {
+                // C23 底层类型: enum E : unsigned char 用底层类型大小;
+                // 未指定时默认 int (4 字节); packed 编码为 Some(SChar) (1 字节)
+                Some(t) => t.size(),
+                None => 4,
+            },
             Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
             Type::Int128 | Type::UInt128 => 16,
@@ -316,7 +321,12 @@ impl Type {
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
-            Type::Enum(_, _, packed) => if *packed { 1 } else { 4 },
+            Type::Enum(_, _, under) => match under {
+                // C23 底层类型: enum E : unsigned char 用底层类型大小;
+                // 未指定时默认 int (4 字节); packed 编码为 Some(SChar) (1 字节)
+                Some(t) => t.size(),
+                None => 4,
+            },
             Type::Long | Type::ULong | Type::Ptr(_)
             | Type::LongLong | Type::ULongLong | Type::Double => 8,
             Type::Int128 | Type::UInt128 => 16,

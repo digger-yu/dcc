@@ -4761,3 +4761,104 @@ fn m3_11_got_func_addr() {
     assert_eq!(code, 0, "GOT func addr checks failed (exit={code})");
 }
 
+// C23 fixtures
+#[test]
+#[cfg(unix)]
+fn c23_alignas() {
+    let src = include_str!("fixtures/c/c23_alignas.c");
+    let (out, exe) = run_compile_and_run("c23-alignas", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_alignas: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_bool() {
+    let src = include_str!("fixtures/c/c23_bool.c");
+    let (out, exe) = run_compile_and_run("c23-bool", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_bool: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_brace_init() {
+    let src = include_str!("fixtures/c/c23_brace_init.c");
+    let (out, exe) = run_compile_and_run("c23-brace-init", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_brace_init: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_enum_under() {
+    let src = include_str!("fixtures/c/c23_enum_under.c");
+    let (out, exe) = run_compile_and_run("c23-enum-under", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_enum_under: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_has_c_attribute() {
+    let src = include_str!("fixtures/c/c23_has_c_attribute.c");
+    let (out, exe) = run_compile_and_run("c23-has-c-attr", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_has_c_attribute: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_nullptr() {
+    let src = include_str!("fixtures/c/c23_nullptr.c");
+    let (out, exe) = run_compile_and_run("c23-nullptr", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_nullptr: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_printf_b() {
+    let src = include_str!("fixtures/c/c23_printf_b.c");
+    let (out, exe) = run_compile_and_run("c23-printf-b", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_printf_b: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_static_assert() {
+    let src = include_str!("fixtures/c/c23_static_assert.c");
+    let (out, exe) = run_compile_and_run("c23-static-assert", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_static_assert: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_thread_local() {
+    let src = include_str!("fixtures/c/c23_thread_local.c");
+    let (out, exe) = run_compile_and_run("c23-thread-local", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_thread_local: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+#[cfg(unix)]
+fn c23_typeof_unqual() {
+    let src = include_str!("fixtures/c/c23_typeof_unqual.c");
+    let (out, exe) = run_compile_and_run("c23-typeof-unqual", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run_exe(&exe), 0, "c23_typeof_unqual: {}", run_exe(&exe));
+    let _ = std::fs::remove_file(&exe);
+}
+

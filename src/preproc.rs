@@ -376,6 +376,12 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     if let Some(v) = stc_version {
         pp.define_builtin("__STDC_VERSION__", v);
     }
+    // C23 字节序宏 (C23 7.1.1): 仅 C23 模式定义; 小端主机
+    if matches!(std_mode, StdMode::C23 | StdMode::Gnu23) {
+        pp.define_builtin("__STDC_ENDIAN_LITTLE__", "1234");
+        pp.define_builtin("__STDC_ENDIAN_BIG__", "4321");
+        pp.define_builtin("__STDC_ENDIAN_NATIVE__", "__STDC_ENDIAN_LITTLE__");
+    }
     if freestanding {
         // 独立 (freestanding) 实现: C11 § 4/6 允许省略 <stdatomic.h>,
         // 必须定义 __STDC_NO_ATOMICS__=1. 不预置 atomic_* 宏
@@ -1666,6 +1672,22 @@ impl Preprocessor {
         None
     }
 
+    /// 解析 #embed 的字节列表参数: "1, 2, 0x03" → [1, 2, 3]
+    fn parse_embed_bytes(s: &str) -> Vec<u8> {
+        s.split(',')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .filter_map(|t| {
+                let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                    u64::from_str_radix(h, 16).ok()
+                } else {
+                    t.parse::<u64>().ok()
+                };
+                v.map(|x| (x & 0xFF) as u8)
+            })
+            .collect()
+    }
+
     /// C23 #embed: 嵌入文件内容为逗号分隔的整数字节值
     fn do_embed(&mut self, args: &str, line_no: u32) {
         let args = args.trim();
@@ -1681,37 +1703,59 @@ impl Preprocessor {
                 Span::point(&self.file, line_no, 1)));
             return;
         };
-        // 解析可选参数: 支持标准 (limit(N)) 和裸 limit(N) 两种形式
+        // 解析可选参数: limit(N) / prefix(...) / suffix(...) / if_empty(...)
+        // 标准形式为 limit(N), 也接受 GCC 兼容的裸 `(limit(N))` 包裹形式
         let mut limit = None;
+        let mut prefix: Vec<u8> = vec![];
+        let mut suffix: Vec<u8> = vec![];
+        let mut if_empty: Vec<u8> = vec![];
         let mut rest = rest;
-        while !rest.is_empty() {
-            // 跳过前导括号
-            if rest.starts_with('(') { rest = rest[1..].trim(); }
-            // 检查 limit(N)
-            if let Some(lim_str) = rest.strip_prefix("limit(") {
-                if let Some(lim_end) = lim_str.find(')') {
-                    limit = lim_str[..lim_end].trim().parse::<usize>().ok();
-                    rest = lim_str[lim_end+1..].trim();
-                    // 跳过结尾括号
-                    if rest.starts_with(')') { rest = rest[1..].trim(); }
-                    continue;
+        loop {
+            rest = rest.trim_start();
+            if rest.is_empty() { break; }
+            // 跳过前导括号 (兼容 `(limit(4))`)
+            if rest.starts_with('(') { rest = rest[1..].trim_start(); }
+            let mut matched = false;
+            for kw in ["limit", "prefix", "suffix", "if_empty"] {
+                if let Some(after_kw) = rest.strip_prefix(kw) {
+                    let after_kw = after_kw.trim_start();
+                    if after_kw.starts_with('(') {
+                        if let Some(close) = after_kw[1..].find(')') {
+                            let arg = after_kw[1..1+close].trim();
+                            match kw {
+                                "limit" => limit = arg.parse::<usize>().ok(),
+                                "prefix" => prefix = Self::parse_embed_bytes(arg),
+                                "suffix" => suffix = Self::parse_embed_bytes(arg),
+                                _ => if_empty = Self::parse_embed_bytes(arg),
+                            }
+                            rest = after_kw[close+2..].trim_start();
+                            // 跳过结尾括号
+                            if rest.starts_with(')') { rest = rest[1..].trim_start(); }
+                            matched = true;
+                            break;
+                        }
+                    }
                 }
             }
-            // 其他参数 (prefix, suffix, if-empty) 或非参数内容: 跳过
-            if rest.starts_with('(') {
-                let end = rest[1..].find(')').map(|i| i + 2).unwrap_or(rest.len());
-                rest = rest[end..].trim();
-            } else {
-                break;
-            }
+            if !matched { break; }
         }
         // 搜索文件 (与 #include 相同逻辑)
         match self.find_include(path, args.starts_with('<')) {
             Some(full_path) => {
                 match std::fs::read(&full_path) {
                     Ok(bytes) => {
+                        // C23: prefix + 文件内容(截断至 limit) + suffix;
+                        // 文件为空时以 if_empty 代替文件内容
+                        let mut data: Vec<u8> = Vec::with_capacity(bytes.len() + prefix.len() + suffix.len());
+                        data.extend_from_slice(&prefix);
                         let max = limit.unwrap_or(bytes.len()).min(bytes.len());
-                        for (i, &b) in bytes[..max].iter().enumerate() {
+                        if bytes.is_empty() {
+                            data.extend_from_slice(&if_empty);
+                        } else {
+                            data.extend_from_slice(&bytes[..max]);
+                        }
+                        data.extend_from_slice(&suffix);
+                        for (i, &b) in data.iter().enumerate() {
                             if i > 0 { self.out.push_str(", "); }
                             self.out.push_str(&b.to_string());
                         }
@@ -2090,7 +2134,9 @@ impl Preprocessor {
                 }
 
                 // __has_attribute(xxx) / __has_builtin(xxx) / __has_feature(xxx)
-                if ident == "__has_attribute" || ident == "__has_builtin" || ident == "__has_feature" {
+                // __has_c_attribute(xxx): C23 属性检测
+                if ident == "__has_attribute" || ident == "__has_builtin" || ident == "__has_feature"
+                    || ident == "__has_c_attribute" {
                     let mut j = i;
                     while j < len && chars[j].is_whitespace() { j += 1; }
                     if j < len && chars[j] == '(' {
@@ -2106,6 +2152,8 @@ impl Preprocessor {
                         let arg = arg.trim().to_string();
                         let val = if ident == "__has_attribute" {
                             if Self::is_known_attribute(&arg) { "1" } else { "0" }
+                        } else if ident == "__has_c_attribute" {
+                            if Self::is_known_c_attribute(&arg) { "1" } else { "0" }
                         } else if ident == "__has_builtin" {
                             if Self::is_known_builtin(&arg) { "1" } else { "0" }
                         } else { "0" }; // __has_feature: always 0 for now
@@ -3181,13 +3229,62 @@ impl Preprocessor {
     }
 
     // ===== __has_* 特殊宏求值 (在宏展开之前执行) =====
-    /// 替换 __has_include/__has_attribute/__has_builtin/__has_feature 为实际值
+    /// 替换 __has_include/__has_attribute/__has_builtin/__has_feature/
+    /// __has_embed/__has_c_attribute 为实际值
     fn replace_has_macros(&self, expr: &str) -> String {
         let mut result = expr.to_string();
         result = self.replace_has_include(&result);
+        result = self.replace_has_embed(&result);
         result = self.replace_has_attr_like(&result, "__has_attribute", Self::is_known_attribute);
+        result = self.replace_has_attr_like(&result, "__has_c_attribute", Self::is_known_c_attribute);
         result = self.replace_has_attr_like(&result, "__has_builtin", Self::is_known_builtin);
         result = self.replace_has_attr_like(&result, "__has_feature", |_| false);
+        result
+    }
+
+    /// C23 __has_embed(header-name ...): 文件是否存在 (忽略 limit 等参数)
+    fn replace_has_embed(&self, expr: &str) -> String {
+        let mut result = String::with_capacity(expr.len());
+        let bytes = expr.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if i + 11 <= bytes.len() && &bytes[i..i+11] == b"__has_embed"
+                && (i == 0 || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_')
+                && (i + 11 >= bytes.len() || !bytes[i+11].is_ascii_alphanumeric() && bytes[i+11] != b'_')
+            {
+                let mut j = i + 11;
+                while j < bytes.len() && bytes[j] == b' ' { j += 1; }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    j += 1;
+                    while j < bytes.len() && bytes[j] == b' ' { j += 1; }
+                    // 提取路径: "file" 或 <file> 形式
+                    let path = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'<') {
+                        let start = j;
+                        let close_ch = if bytes[j] == b'"' { b'"' } else { b'>' };
+                        j += 1;
+                        while j < bytes.len() && bytes[j] != close_ch { j += 1; }
+                        if j < bytes.len() { j += 1; }
+                        expr[start..j].trim()
+                            .trim_matches(|c| c == '"' || c == '<' || c == '>')
+                            .to_string()
+                    } else { String::new() };
+                    // 跳过剩余参数 (limit(...) 等) 至 ')' 并求值
+                    let mut depth = 1;
+                    while j < bytes.len() && depth > 0 {
+                        if bytes[j] == b'(' { depth += 1; }
+                        else if bytes[j] == b')' { depth -= 1; }
+                        if depth > 0 { j += 1; }
+                    }
+                    let found = !path.is_empty() && self.find_has_include(&path);
+                    result.push_str(if found { "1" } else { "0" });
+                    if j < bytes.len() { j += 1; } // skip )
+                    i = j;
+                    continue;
+                }
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+        }
         result
     }
 
@@ -3196,12 +3293,12 @@ impl Preprocessor {
         let bytes = expr.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
-            // 检查 __has_include
-            if i + 14 <= bytes.len() && &bytes[i..i+14] == b"__has_include"
+            // 检查 __has_include (13 字符)
+            if i + 13 <= bytes.len() && &bytes[i..i+13] == b"__has_include"
                 && (i == 0 || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_')
-                && (i + 14 >= bytes.len() || !bytes[i+14].is_ascii_alphanumeric() && bytes[i+14] != b'_')
+                && (i + 13 >= bytes.len() || !bytes[i+13].is_ascii_alphanumeric() && bytes[i+13] != b'_')
             {
-                let mut j = i + 14;
+                let mut j = i + 13;
                 while j < bytes.len() && bytes[j] == b' ' { j += 1; }
                 if j < bytes.len() && bytes[j] == b'(' {
                     j += 1;
@@ -3305,6 +3402,18 @@ impl Preprocessor {
             | "vector_size" | "may_alias" | "transparent_union"
             | "malloc" | "returns_twice" | "pure" | "const"
             | "warn_unused_result" | "sentinel" | "format_arg"
+            | "maybe_unused" | "nodiscard" | "reproducible" | "unsequenced"
+            | "returns_nonnull" | "assume"
+        )
+    }
+
+    /// C23 标准属性 (__has_c_attribute 用): 返回 1 表示支持
+    fn is_known_c_attribute(attr: &str) -> bool {
+        let a = attr.trim().trim_matches('_');
+        matches!(a,
+            "deprecated" | "fallthrough" | "maybe_unused" | "nodiscard"
+            | "noreturn" | "unsequenced" | "reproducible" | "assume"
+            | "nonnull" | "returns_nonnull"
         )
     }
 

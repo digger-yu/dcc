@@ -71,6 +71,10 @@ pub struct ParseOptions {
     pub warn_int_truncation: bool,
     /// `-Wint-conversion`: 整数↔指针隐式转换警告
     pub warn_int_conversion: bool,
+    /// C23 模式 (-std=c23/gnu23): bool/true/false/alignas/thread_local/
+    /// typeof_unqual 等 C23 关键字生效; 非 C23 模式保持普通标识符语义
+    /// (兼容 `typedef _Bool bool;` 与 gnu11 内核代码)
+    pub is_c23: bool,
 }
 
 impl ParsedAttrs {
@@ -121,8 +125,8 @@ pub struct Parser<'a> {
     diags: Vec<Diagnostic>, finished: bool,
     typedefs: HashMap<String, Type>,
     struct_defs: HashMap<String, (Arc<Vec<Field>>, bool)>,
-    enum_defs: HashMap<String, (Arc<Vec<(String, i64)>>, bool)>,
-    enum_consts: HashMap<String, i64>,
+    enum_defs: HashMap<String, (Arc<Vec<(String, i64)>>, Option<Box<Type>>)>,
+    enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
     locals: HashMap<String, Type>, // 变量名 → 类型 (函数内会清除)
     globals: HashMap<String, Type>, // 全局变量名 → 类型 (永不清除)
     in_function: bool,              // 是否在函数体内
@@ -148,14 +152,19 @@ impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8], file: &str, opts: ParseOptions) -> Self {
         let mut lex = Lexer::new(src, file);
         let cur = lex.next(); let peek = lex.next();
-        Self { lex, cur, peek, diags: vec![], finished: false,
+        let mut p = Self { lex, cur, peek, diags: vec![], finished: false,
                typedefs: HashMap::new(), struct_defs: HashMap::new(),
                enum_defs: HashMap::new(), enum_consts: HashMap::new(),
                locals: HashMap::new(), globals: HashMap::new(), in_function: false,
                current_function: None,
                last_variadic: false, decl_storage: StorageClass::default(),
                decl_attrs: ParsedAttrs::default(), decl_auto_type: false,
-               allow_named_type: false, opts }
+               allow_named_type: false, opts };
+        // C23 nullptr_t: 内置类型 (等价 nullptr 表达式所对应的 (void*)0)
+        // 系统头 (glibc stddef.h) 若重复定义, register_typedef 按
+        // types_compatible 允许兼容重定义, 不会报错.
+        p.typedefs.insert("nullptr_t".to_string(), Type::Ptr(Box::new(Type::Void)));
+        p
     }
     fn advance(&mut self) { self.cur = std::mem::replace(&mut self.peek, self.lex.next()); }
 
@@ -375,10 +384,50 @@ impl<'a> Parser<'a> {
             let mut depth = 2i32;
             while depth > 0 && self.cur.kind != TokKind::Eof {
                 if self.cur.kind == TokKind::LParen { depth += 1; }
-                if self.cur.kind == TokKind::RParen { depth -= 1; }
-                self.advance();
+                if self.cur.kind == TokKind::RParen {
+                    depth -= 1;
+                    self.advance();
+                    if depth == 0 { break; }
+                } else if depth == 1 {
+                    // 只剩最外层 ')' 未配对: 当前 token 不是 ')' 说明
+                    // 属性列表已结束 (如 `__attribute__((packed))` 后紧跟
+                    // 声明名), 必须停止, 否则会吞掉后续 token
+                    break;
+                } else {
+                    self.advance();
+                }
             }
         }
+    }
+    /// 跳过 __attribute__((...)) 并报告是否含 packed/__packed__
+    /// (enum 的 packed 布局需要该标志: `enum __attribute__((packed)) E { ... }`)
+    fn skip_attributes_packed(&mut self) -> bool {
+        let mut packed = false;
+        while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+            self.advance(); // __attribute__
+            if self.cur.kind == TokKind::LParen { self.advance(); } // (
+            if self.cur.kind == TokKind::LParen { self.advance(); } // (
+            let mut depth = 2i32;
+            while depth > 0 && self.cur.kind != TokKind::Eof {
+                if depth == 2 && self.cur.kind == TokKind::Ident
+                    && (self.cur.text == "packed" || self.cur.text == "__packed__")
+                {
+                    packed = true;
+                }
+                if self.cur.kind == TokKind::LParen { depth += 1; }
+                if self.cur.kind == TokKind::RParen {
+                    depth -= 1;
+                    self.advance();
+                    if depth == 0 { break; }
+                } else if depth == 1 {
+                    // 同上: 属性列表结束, 避免吞掉后续 token
+                    break;
+                } else {
+                    self.advance();
+                }
+            }
+        }
+        packed
     }
     /// C usual arithmetic conversions: determine common type for integer binops
     fn usual_arith_type(a: &Type, b: &Type) -> Type {
@@ -1049,8 +1098,10 @@ impl<'a> Parser<'a> {
             self.advance();
             self.skip_std_attributes();
         }
-        // _Static_assert(expr, msg): C11 编译期断言
-        if self.cur.kind == TokKind::Ident && self.cur.text == "_Static_assert" {
+        // _Static_assert(expr, msg): C11 编译期断言; C23 static_assert 同义
+        if self.cur.kind == TokKind::Ident
+            && (self.cur.text == "_Static_assert" || self.cur.text == "static_assert")
+        {
             return self.parse_static_assert().map(|_| vec![]);
         }
         // 预处理未完全展开的静态分支 key 声明 → 语义补全为 extern struct static_key_{false,true}
@@ -1512,7 +1563,12 @@ impl<'a> Parser<'a> {
             let mut arr_attrs = pre_attrs.clone();
             arr_attrs.merge(self.parse_attributes());
             self.skip_asm_label(); // asm 标签
-            let init = if self.cur.kind == TokKind::Assign { self.advance(); Some(self.parse_expr_bp(2)?) } else { None };
+            let init = if matches!(self.cur.kind, TokKind::Assign | TokKind::LBrace) {
+                // C23 允许省略 '=' 的大括号初始化: int a[] {1,2,3}
+                // 注意: '{' 不能在这里吃掉, 必须交给 parse_expr 的 InitList 分支处理
+                if self.cur.kind == TokKind::Assign { self.advance(); }
+                Some(self.parse_expr_bp(2)?)
+            } else { None };
             // 从 InitList 推断最外层数组大小: data[] = {1,2,3} → data[3]
             if let (Type::Array(elem, ArraySize::Const(0)), Some(Expr::InitList { inits, .. })) = (&arr_ty, &init) {
                 arr_ty = Type::Array(elem.clone(), ArraySize::Const(inits.len()));
@@ -1551,8 +1607,10 @@ impl<'a> Parser<'a> {
                     attrs.register_name = Some(asm_label);
                 }
             }
-            if self.cur.kind == TokKind::Assign {
-                self.advance();
+            if matches!(self.cur.kind, TokKind::Assign | TokKind::LBrace) {
+                // C23 允许省略 '=' 的大括号初始化: int x {5}
+                // '{' 由 parse_expr 的 InitList 分支处理 (标量也可用花括号初始化)
+                if self.cur.kind == TokKind::Assign { self.advance(); }
                 // 初始化器可引用当前声明符（sizeof(*v)、typeof(v) 等）
                 if !name_for_decl.name.is_empty() {
                     self.locals.insert(name_for_decl.name.clone(), ty.clone());
@@ -1862,6 +1920,45 @@ impl<'a> Parser<'a> {
                     self.decl_auto_type = true;
                     return Some(self.finish_type(Type::Int, specifiers_only));
                 }
+                // C23 bool 关键字 (仅 C23 模式; gnu11 下保持标识符,
+                // 兼容 `typedef _Bool bool;`)
+                TokKind::Ident if self.cur.text == "bool" && self.opts.is_c23 => {
+                    base = Some(Type::Bool);
+                    self.advance();
+                }
+                // C23 thread_local (仅 C23 模式; C11 拼写为 _Thread_local)
+                TokKind::Ident if self.cur.text == "thread_local" && self.opts.is_c23 => {
+                    self.decl_storage.is_thread_local = true;
+                    self.advance();
+                }
+                // C23 alignas(N) / alignas(type); _Alignas 为 C11 拼写 (无条件)
+                TokKind::Ident
+                    if (self.cur.text == "alignas" && self.opts.is_c23) || self.cur.text == "_Alignas" =>
+                {
+                    self.advance();
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        if self.is_type_start() && self.cur.kind != TokKind::Number {
+                            // alignas(type): 取该类型的对齐值
+                            if let Some(t) = self.parse_type() {
+                                let a = t.align();
+                                let cur = self.decl_attrs.alignment.unwrap_or(0);
+                                self.decl_attrs.alignment = Some(cur.max(a));
+                            }
+                        } else {
+                            // alignas(常量表达式): 编译期求值
+                            if let Some(e) = self.parse_expr_bp(2) {
+                                if let Ok(v) = crate::const_eval::eval(&e) {
+                                    if v > 0 {
+                                        let cur = self.decl_attrs.alignment.unwrap_or(0);
+                                        self.decl_attrs.alignment = Some(cur.max(v as usize));
+                                    }
+                                }
+                            }
+                        }
+                        if self.cur.kind == TokKind::RParen { self.advance(); }
+                    }
+                }
                 // _Noreturn: C11 函数限定符, 不影响代码生成, 静默跳过
                 TokKind::Ident if self.cur.text == "_Noreturn" => { self.advance(); }
                 // _Thread_local / __thread：线程局部存储
@@ -1901,7 +1998,10 @@ impl<'a> Parser<'a> {
                     return Some(self.finish_type(Type::Int, specifiers_only));
                 }
                 // typeof(expr/type): GNU 扩展, 推导类型
-                TokKind::Ident if self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof" => {
+                // typeof_unqual: C23 关键字 (仅 C23 模式); dcc 类型系统不保留
+                // 限定符, 故与 typeof 等价
+                TokKind::Ident if self.cur.text == "typeof" || self.cur.text == "__typeof__" || self.cur.text == "__typeof"
+                    || (self.cur.text == "typeof_unqual" && self.opts.is_c23) => {
                     self.advance();
                     if self.cur.kind == TokKind::LParen {
                         self.advance();
@@ -2196,39 +2296,81 @@ impl<'a> Parser<'a> {
         }
         if self.cur.kind == TokKind::KwEnum {
             self.advance();
-            self.skip_attributes();
+            // 检测并跳过 enum 名前的属性: `enum __attribute__((packed)) E`
+            let mut enum_packed = self.skip_attributes_packed();
             let nm = if self.cur.kind == TokKind::Ident { let n = self.cur.text.clone(); self.advance(); n } else { String::new() };
+            // C23 底层类型: enum E : unsigned char { ... }
+            // 仅允许整数类型说明符; packed 属性后续编码为 Some(SChar)
+            let mut under_ty: Option<Box<Type>> = None;
+            if self.cur.kind == TokKind::Colon {
+                self.advance();
+                let mut uns = false; let mut lng = 0u8; let mut shrt = false;
+                let mut b: Option<Type> = None;
+                loop {
+                    match self.cur.kind {
+                        TokKind::KwSigned => { self.advance(); }
+                        TokKind::KwUnsigned => { uns = true; self.advance(); }
+                        TokKind::KwInt => { b = Some(Type::Int); self.advance(); }
+                        TokKind::KwChar => { b = Some(Type::Char); self.advance(); }
+                        TokKind::KwShort => { shrt = true; self.advance(); }
+                        TokKind::KwLong => { lng += 1; self.advance(); }
+                        TokKind::KwBool => { b = Some(Type::Bool); self.advance(); }
+                        // C23 bool 关键字以 Ident 形式进入 (仅 C23 模式; gnu11 下为标识符)
+                        TokKind::Ident if self.cur.text == "bool" && self.opts.is_c23 => {
+                            b = Some(Type::Bool); self.advance();
+                        }
+                        TokKind::Ident if self.cur.text == "_BitInt" => {
+                            self.advance();
+                            let width = if self.cur.kind == TokKind::LParen {
+                                self.advance();
+                                let w = if self.cur.kind == TokKind::Number {
+                                    self.cur.text.parse::<u32>().unwrap_or(32)
+                                } else { 32 };
+                                if matches!(self.cur.kind, TokKind::Number) { self.advance(); }
+                                if self.cur.kind == TokKind::RParen { self.advance(); }
+                                w
+                            } else { 32 };
+                            match width {
+                                0..=8  => { b = Some(Type::Char); }
+                                9..=16 => { shrt = true; }
+                                17..=32 => { b = Some(Type::Int); }
+                                _ => { lng = 2; }
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                if b.is_some() || uns || lng > 0 || shrt {
+                    under_ty = Some(Box::new(self.resolve_base(b, uns, lng, shrt)));
+                }
+            }
             if self.cur.kind == TokKind::LBrace {
                 self.advance(); let vs = self.parse_enum_body();
                 if !self.expect(TokKind::RBrace, "'}'") { return None; }
                 let vals: Vec<(String, i64)> = vs.iter().map(|(id, v)| (id.name.clone(), v.unwrap_or(0))).collect();
                 let vals_rc = Arc::new(vals);
-                // 检查 enum 后的 __attribute__((packed/__packed__))
-                let mut enum_packed = false;
-                if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                    while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                        self.advance();
-                        if self.cur.kind == TokKind::LParen { self.advance(); }
-                        if self.cur.kind == TokKind::LParen { self.advance(); }
-                        let mut depth = 2i32;
-                        while depth > 0 && self.cur.kind != TokKind::Eof {
-                            if depth == 2 && self.cur.kind == TokKind::Ident && (self.cur.text == "packed" || self.cur.text == "__packed__") {
-                                enum_packed = true;
-                            }
-                            if self.cur.kind == TokKind::LParen { depth += 1; }
-                            if self.cur.kind == TokKind::RParen { depth -= 1; if depth == 0 { break; } }
-                            self.advance();
-                        }
-                        if self.cur.kind == TokKind::RParen { self.advance(); }
-                    }
-                }
-                self.enum_defs.insert(nm.clone(), (Arc::clone(&vals_rc), enum_packed));
+                // 检查 enum 体后的 __attribute__((packed/__packed__))
+                enum_packed |= self.skip_attributes_packed();
+                // packed 属性优先: 编码为 1 字节有符号 (与旧行为一致)
+                let under = if enum_packed { Some(Box::new(Type::SChar)) } else { under_ty.clone() };
+                self.enum_defs.insert(nm.clone(), (Arc::clone(&vals_rc), under.clone()));
+                // C23: 枚举常量类型 = 枚举底层类型 (packed 为 GNU 扩展, 保持 int)
                 let mut nv = 0i64;
-                for (id, v) in &vs { let val = v.unwrap_or(nv); self.enum_consts.insert(id.name.clone(), val); nv = val + 1; }
-                return Some(self.finish_type(Type::Enum(nm, vals_rc, enum_packed), specifiers_only));
+                for (id, v) in &vs {
+                    let val = v.unwrap_or(nv);
+                    let cty = if enum_packed { Type::Int } else { under_ty.as_deref().cloned().unwrap_or(Type::Int) };
+                    self.enum_consts.insert(id.name.clone(), (val, cty));
+                    nv = val + 1;
+                }
+                return Some(self.finish_type(Type::Enum(nm, vals_rc, under), specifiers_only));
             } else if !nm.is_empty() {
-                if let Some((v, packed)) = self.enum_defs.get(&nm) { return Some(self.finish_type(Type::Enum(nm, Arc::clone(v), *packed), specifiers_only)); }
-                return Some(self.finish_type(Type::Enum(nm, Arc::new(vec![]), false), specifiers_only));
+                if let Some((v, under)) = self.enum_defs.get(&nm) { return Some(self.finish_type(Type::Enum(nm, Arc::clone(v), under.clone()), specifiers_only)); }
+                // 前向声明带底层类型: 登记占位 (C23: enum E : unsigned char;)
+                if let Some(u) = under_ty {
+                    self.enum_defs.insert(nm.clone(), (Arc::new(vec![]), Some(u.clone())));
+                    return Some(self.finish_type(Type::Enum(nm, Arc::new(vec![]), Some(u)), specifiers_only));
+                }
+                return Some(self.finish_type(Type::Enum(nm, Arc::new(vec![]), None), specifiers_only));
             }
         }
         // typedef 引用
@@ -2531,7 +2673,7 @@ impl<'a> Parser<'a> {
             // 现这种状态)。
             let nm = if self.cur.kind == TokKind::Ident
                 && !(matches!(ty, Type::Struct(_, _) | Type::Union(_, _))
-                    && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs))
+                    && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs, self.opts.is_c23))
             {
                 let n = self.cur.text.clone();
                 self.advance();
@@ -2845,7 +2987,7 @@ impl<'a> Parser<'a> {
             | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128 | TokKind::KwBool
             | TokKind::KwInt128 | TokKind::KwUInt128)
             || (self.cur.kind == TokKind::Ident
-                && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs))
+                && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs, self.opts.is_c23))
     }
 
     /// 声明上下文允许把 `unknown_type value` 交给 parse_type 产生精确诊断，
@@ -2859,11 +3001,17 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
             return true;
         }
+        // C11/C23 static_assert: 声明上下文 (parse_decl 中求值并丢弃)
+        if self.cur.kind == TokKind::Ident
+            && (self.cur.text == "_Static_assert" || self.cur.text == "static_assert")
+        {
+            return true;
+        }
         self.is_type_start()
             || (self.cur.kind == TokKind::Ident
                 && self.cur.text != "_Generic"
                 && self.cur.text != "nullptr"
-                && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs)
+                && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs, self.opts.is_c23)
                 && matches!(self.peek.kind, TokKind::Ident | TokKind::Star))
     }
 
@@ -2877,7 +3025,7 @@ impl<'a> Parser<'a> {
             | TokKind::KwDecimal32 | TokKind::KwDecimal64 | TokKind::KwDecimal128 | TokKind::KwBool
             | TokKind::KwInt128 | TokKind::KwUInt128)
             || (self.peek.kind == TokKind::Ident
-                && Self::is_type_specifier_ident(&self.peek.text, &self.typedefs))
+                && Self::is_type_specifier_ident(&self.peek.text, &self.typedefs, self.opts.is_c23))
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
@@ -3322,6 +3470,13 @@ impl<'a> Parser<'a> {
                 let ptr_ty = Type::Ptr(Box::new(Type::Void));
                 Some(Expr::Int { v: 0, span: sp, ty: ptr_ty })
             }
+            // C23 true/false 关键字常量 (仅 C23 模式;
+            // 非 C23 模式由 stdbool.h 宏或枚举提供)
+            TokKind::Ident if (self.cur.text == "true" || self.cur.text == "false") && self.opts.is_c23 => {
+                let v = if self.cur.text == "true" { 1 } else { 0 };
+                self.advance();
+                Some(Expr::Int { v, span: sp, ty: Type::Bool })
+            }
             // __asm__("..."): 内联汇编表达式
             TokKind::Ident if self.cur.text == "__asm__" || self.cur.text == "__asm" || self.cur.text == "asm" => {
                 self.advance();
@@ -3444,8 +3599,10 @@ impl<'a> Parser<'a> {
     }
 
     /// GNU/标准类型说明符起始（用于 is_cast / typeof 等）
-    fn is_type_specifier_ident(text: &str, typedefs: &std::collections::HashMap<String, Type>) -> bool {
+    fn is_type_specifier_ident(text: &str, typedefs: &std::collections::HashMap<String, Type>, is_c23: bool) -> bool {
         typedefs.contains_key(text)
+            // C23 关键字 (仅 C23 模式; gnu11 下为普通标识符, 兼容 `typedef _Bool bool;`)
+            || (is_c23 && matches!(text, "bool" | "typeof_unqual" | "alignas" | "thread_local"))
             || matches!(
                 text,
                 "typeof" | "__typeof__" | "__typeof" | "__auto_type" | "_Atomic" | "__extension__"
@@ -3484,7 +3641,7 @@ impl<'a> Parser<'a> {
                 | TokKind::KwInt128
                 | TokKind::KwUInt128
         ) || (self.peek.kind == TokKind::Ident
-            && (Self::is_type_specifier_ident(&self.peek.text, &self.typedefs)
+            && (Self::is_type_specifier_ident(&self.peek.text, &self.typedefs, self.opts.is_c23)
                 || self.peek.text == "__attribute__" || self.peek.text == "__vector_size__"))
     }
 
@@ -3876,7 +4033,10 @@ impl<'a> Parser<'a> {
                         data, span: sp, ty: Type::Ptr(Box::new(Type::Char))
                     });
                 }
-                if let Some(&val) = self.enum_consts.get(&t) { self.advance(); return Some(Expr::Int { v: val as i128, span: sp, ty: Type::Int }); }
+                if let Some((val, cty)) = self.enum_consts.get(&t).cloned() {
+                    self.advance();
+                    return Some(Expr::Int { v: val as i128, span: sp, ty: cty });
+                }
                 let id = Ident { name: t, span: sp.clone() }; self.advance();
                 let id_ty = self.lookup_ident_type(&id.name);
                 Some(Expr::Ident { name: id, span: sp, ty: id_ty })

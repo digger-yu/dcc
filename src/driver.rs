@@ -233,7 +233,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let (mut prog, mut diags) = parser::parse_with_opts(
         preprocessed.as_bytes(),
         &file_name,
-        parser::ParseOptions { permissive: cfg.permissive, pack_history: pack_history.clone(), weak_symbols: weak_symbols.clone(), warn_int_truncation: cfg.warn_int_truncation, warn_int_conversion: cfg.warn_int_conversion },
+        parser::ParseOptions { permissive: cfg.permissive, pack_history: pack_history.clone(), weak_symbols: weak_symbols.clone(), warn_int_truncation: cfg.warn_int_truncation, warn_int_conversion: cfg.warn_int_conversion, is_c23: matches!(cfg.std, crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23) },
     );
     drop(preprocessed);
     drop(pack_history);

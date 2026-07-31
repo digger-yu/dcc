@@ -262,7 +262,8 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
         // 解析 conversion specifier
         if i < bytes.len() {
             let conv = bytes[i] as char;
-            if "diouxXfFeEgGaAcCsSpnm".contains(conv) {
+            // C23 %b/%B: 无符号二进制格式 (同 %u 参数类型)
+            if "diouxXbBfFeEgGaAcCsSpnm".contains(conv) {
                 specs.push(FmtSpec { _flags: flags, width_star, prec_star, length, conv });
             }
             i += 1;
@@ -303,7 +304,7 @@ fn check_format_type(
     };
     let mismatch = match spec.conv {
         'd' | 'i' => !matches!(effective_ty, Type::Int | Type::Short | Type::Char | Type::Long),
-        'u' | 'o' | 'x' | 'X' => !matches!(effective_ty, Type::UInt | Type::Int | Type::Short | Type::Char | Type::ULong | Type::Long),
+        'u' | 'o' | 'x' | 'X' | 'b' | 'B' => !matches!(effective_ty, Type::UInt | Type::Int | Type::Short | Type::Char | Type::ULong | Type::Long),
         'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => {
             if spec.length == "L" {
                 !matches!(effective_ty, Type::LongDouble | Type::Double | Type::Float)
@@ -324,7 +325,7 @@ fn check_format_type(
                 spec.length, spec.conv,
                 match spec.conv {
                     'd' | 'i' => "integer",
-                    'u' | 'o' | 'x' | 'X' => "unsigned integer",
+                    'u' | 'o' | 'x' | 'X' | 'b' | 'B' => "unsigned integer",
                     'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => "floating-point",
                     'c' => "character",
                     's' => "string",
@@ -688,5 +689,86 @@ mod tests {
         let diags = check_program(&prog);
         assert!(!diags.is_empty(), "expected warning for missing args");
         assert!(diags[0].msg.contains("at least 2"), "msg: {}", diags[0].msg);
+    }
+
+    // C23: %b 解析为 binary 格式
+    #[test]
+    fn parse_binary_b() {
+        let specs = parse_format_specs("%b");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].conv, 'b');
+    }
+
+    // C23: %B 解析为 BINARY 格式
+    #[test]
+    fn parse_binary_upper_b() {
+        let specs = parse_format_specs("%B");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].conv, 'B');
+    }
+
+    // C23: unsigned int 匹配 %b 通过
+    #[test]
+    fn check_type_uint_matches_b() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 'b',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(&spec, Some(&Type::UInt), false, &span, "log", &mut out);
+        assert!(out.is_empty(), "unsigned int should match %b: {out:?}");
+    }
+
+    // C23: unsigned int 匹配 %B 通过
+    #[test]
+    fn check_type_uint_matches_upper_b() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 'B',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(&spec, Some(&Type::UInt), false, &span, "log", &mut out);
+        assert!(out.is_empty(), "unsigned int should match %B: {out:?}");
+    }
+
+    // C23: double 匹配 %b 应报错 (期望 unsigned integer)
+    #[test]
+    fn check_type_double_mismatch_b() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 'b',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(&spec, Some(&Type::Double), false, &span, "log", &mut out);
+        assert_eq!(out.len(), 1, "double should NOT match %b");
+        assert!(out[0].msg.contains("unsigned integer"), "msg: {}", out[0].msg);
+    }
+
+    // C23: int 匹配 %B 通过 (GCC 兼容: 接受有符号整型)
+    #[test]
+    fn check_type_int_matches_upper_b() {
+        let spec = FmtSpec {
+            _flags: String::new(),
+            width_star: false,
+            prec_star: false,
+            length: String::new(),
+            conv: 'B',
+        };
+        let mut out = Vec::new();
+        let span = Span::point("t.c", 1, 1);
+        check_format_type(&spec, Some(&Type::Int), false, &span, "log", &mut out);
+        assert!(out.is_empty(), "int should match %B: {out:?}");
     }
 }

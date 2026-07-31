@@ -1036,10 +1036,30 @@ impl Codegen {
         }
     }
 
+    /// 全局初始化字节: 浮点目标时, 整型/浮点常量统一转位模式
+    /// (double x = 1; 与 double x = 1.5;), 避免 eval 截断为 int
+    fn global_init_bytes(init: &Expr, sz: usize, is_float: bool) -> Option<Vec<u8>> {
+        if is_float {
+            match const_eval::eval_full(init).ok()? {
+                const_eval::ConstValue::Float(f) => {
+                    if sz == 4 { Some((f as f32).to_bits().to_le_bytes().to_vec()) }
+                    else { Some(f.to_bits().to_le_bytes().to_vec()) }
+                }
+                const_eval::ConstValue::Int(v) => {
+                    if sz == 4 { Some((v as f32).to_bits().to_le_bytes().to_vec()) }
+                    else { Some((v as f64).to_bits().to_le_bytes().to_vec()) }
+                }
+                _ => None,
+            }
+        } else {
+            const_eval::eval(init).ok().map(|value| value.to_le_bytes()[..sz].to_vec())
+        }
+    }
+
     fn eval_global_init(&mut self, v: &VarDecl, sz: usize, use_rodata: bool) -> Option<Vec<u8>> {
         let init = v.init.as_ref()?;
+        let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
         match init {
-            Expr::Int { v, .. } => Some(v.to_le_bytes()[..sz].to_vec()),
             Expr::String { data, .. } => Some(data.clone()),
             Expr::InitList { inits, .. } => {
                 let base = if use_rodata { self.rodata.len() } else { self.tdata_section.len() } as u64;
@@ -1056,20 +1076,8 @@ impl Codegen {
                 }
                 _ => None,
             },
-            // 浮点初始化: 走 eval_full 取 f64 位, 而非 eval 截断为 int
-            Expr::Float { .. } | Expr::Unary { .. } if matches!(init.ty(), Type::Float | Type::Double | Type::LongDouble) => {
-                if let Ok(cv) = const_eval::eval_full(init) {
-                    match cv {
-                        const_eval::ConstValue::Float(f) => {
-                            if sz == 4 { Some((f as f32).to_bits().to_le_bytes().to_vec()) }
-                            else { Some(f.to_bits().to_le_bytes().to_vec()) }
-                        }
-                        const_eval::ConstValue::Int(v) => Some(v.to_le_bytes()[..sz].to_vec()),
-                        _ => None,
-                    }
-                } else { None }
-            }
-            _ => const_eval::eval(init).ok().map(|value| value.to_le_bytes()[..sz].to_vec()),
+            // 整数/浮点常量: 统一走 eval_full, 浮点目标转位模式
+            _ => Self::global_init_bytes(init, sz, is_float),
         }
     }
 
@@ -1113,10 +1121,11 @@ impl Codegen {
                         off
                     };
                     if let Some(init) = &v.init {
-                        if let Ok(value) = const_eval::eval(init) {
-                            self.tdata_section.extend_from_slice(&value.to_le_bytes()[..sz]);
-                        } else if let Expr::Int { v: iv, .. } = init {
-                            self.tdata_section.extend_from_slice(&iv.to_le_bytes()[..sz]);
+                        // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;),
+                        // 避免 eval 截断为 int
+                        let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                        if let Some(bytes) = Self::global_init_bytes(init, sz, is_float) {
+                            self.tdata_section.extend_from_slice(&bytes);
                         }
                     }
                     self.globals.insert(v.name.name.clone(), GlobalVar {
@@ -1145,11 +1154,6 @@ impl Codegen {
                     let mut has_init = false;
                     if let Some(init) = &v.init {
                         match init {
-                            Expr::Int { v: iv, .. } => {
-                                let bytes = iv.to_le_bytes()[..sz].to_vec();
-                                self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
-                                has_init = true;
-                            }
                             Expr::String { data, .. } => {
                                 self.extra_sections[sec_idx].data.extend_from_slice(data);
                                 for _ in data.len()..sz { self.extra_sections[sec_idx].data.push(0); }
@@ -1193,9 +1197,10 @@ impl Codegen {
                                 }
                             }
                             _ => {
-                                if let Ok(value) = const_eval::eval(init) {
-                                    self.extra_sections[sec_idx].data
-                                        .extend_from_slice(&value.to_le_bytes()[..sz]);
+                                // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
+                                let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                                if let Some(bytes) = Self::global_init_bytes(init, sz, is_float) {
+                                    self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
                                     has_init = true;
                                 }
                             }
@@ -1225,11 +1230,6 @@ impl Codegen {
                 };
                 let has_init = if let Some(init) = &v.init {
                     match init {
-                        Expr::Int { v: iv, .. } => {
-                            let bytes = iv.to_le_bytes()[..sz].to_vec();
-                            self.data_section.extend_from_slice(&bytes);
-                            true
-                        }
                         Expr::String { data, .. } => {
                             self.data_section.extend_from_slice(data);
                             for _ in data.len()..sz { self.data_section.push(0); }
@@ -1271,12 +1271,12 @@ impl Codegen {
                             } else { false }
                         }
                         _ => {
-                            if let Ok(value) = const_eval::eval(init) {
-                                self.data_section.extend_from_slice(&value.to_le_bytes()[..sz]);
+                            // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
+                            let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                            if let Some(bytes) = Self::global_init_bytes(init, sz, is_float) {
+                                self.data_section.extend_from_slice(&bytes);
                                 true
-                            } else {
-                                false
-                            }
+                            } else { false }
                         },
                     }
                 } else { false };
@@ -2366,6 +2366,8 @@ impl Codegen {
                                         self.gen_complex_init(&v.name.name, inner, init);
                                     } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
                                         self.gen_expr(init, 0);
+                                        // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
+                                        self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
                                         self.gen_float_store(&v.name.name, &v.ty);
                                     } else if matches!(&v.ty, Type::Int128 | Type::UInt128) {
                                         // P1-4 fix: __int128 变量初始化 (rax=low, rdx=high)
@@ -2782,6 +2784,8 @@ impl Codegen {
                                 } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
                                     // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
                                     self.gen_expr(init, 0);
+                                    // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
+                                    self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
                                     self.gen_float_store(&v.name.name, &v.ty);
                                 } else {
                                     self.gen_expr(init, 0);
@@ -2918,7 +2922,14 @@ impl Codegen {
                     self.gen_int128_load(&name.name);
                     if dst != 0 { self.mov(dst, 0); }
                 } else if self.globals.contains_key(&name.name) {
-                    self.emit_global_load(dst, &name.name);
+                    // 浮点全局变量加载到 xmm0 (浮点值约定, 同局部变量);
+                    // 整数路径 emit_global_load 会把 double 装进 GP 寄存器,
+                    // 与 gen_float_binop 期望的 xmm0 不符 (TLS/普通全局都受影响)
+                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                        self.emit_global_float_load_to_xmm(0, &name.name, ty);
+                    } else {
+                        self.emit_global_load(dst, &name.name);
+                    }
                 } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
                     self.gen_float_load(&name.name, ty);
                 } else if self.current_func_is_nested
@@ -4160,10 +4171,37 @@ impl Codegen {
                             } else { continue; }
                         }
                     };
+                    if let Expr::InitList { inits: nested, .. } = value {
+                        // 嵌套数组初始化 (如 int m[2][2] = {{1,2},{3,4}}):
+                        // 展开子数组元素, 跳过 gen_expr 对 InitList 的简化处理
+                        let inner_elem_size = match elem_ty.as_ref() {
+                            Type::Array(inner, _) => inner.size(),
+                            _ => elem_size,
+                        };
+                        let base_off = var_off + (i * elem_size) as i32;
+                        for (j, subitem) in nested.iter().enumerate() {
+                            let subval = match subitem {
+                                InitItem::Expr(e) => e,
+                                InitItem::Designated { value, .. } => value,
+                            };
+                            self.gen_expr(subval, 0);
+                            self.emit_store(0, base_off + (j * inner_elem_size) as i32, inner_elem_size);
+                        }
+                        continue;
+                    }
                     self.gen_expr(value, 0);
-                    // arr[i] 在 var_off + i * elem_size
+                    // 浮点数组元素: int 常量需要转换到 xmm0 (double a[] = {1, 2})
+                    if matches!(elem_ty.as_ref(), Type::Float | Type::Double | Type::LongDouble) {
+                        self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
+                    }
                     let off = var_off + (i * elem_size) as i32;
-                    self.emit_store(0, off, elem_size);
+                    if matches!(elem_ty.as_ref(), Type::Float) {
+                        self.store_xmm32_stack(0, off);
+                    } else if matches!(elem_ty.as_ref(), Type::Double | Type::LongDouble) {
+                        self.store_xmm64_stack(0, off);
+                    } else {
+                        self.emit_store(0, off, elem_size);
+                    }
                 }
             }
             Type::Vector(elem_ty, n) => {
@@ -4192,32 +4230,52 @@ impl Codegen {
                 // 或链式: {.u.x = 1} / {.key.dd_key_true = ...}
                 let mut field_idx = 0;
                 for item in inits {
-                    let (off, sz, value) = match item {
+                    let (off, sz, field_ty, value) = match item {
                         InitItem::Expr(e) => {
                             if field_idx < fields.len() {
                                 let f = &fields[field_idx];
                                 field_idx += 1;
-                                (f.offset, f.ty.size(), e)
+                                (f.offset, f.ty.size(), Some(f.ty.clone()), e)
                             } else { continue; }
                         }
                         InitItem::Designated { designator, value } => {
                             // 链式 designator: resolve_designator 沿 .a.b.c 累积偏移
                             match resolve_designator(ty, designator) {
-                                Some((o, s, _)) => (o, s, value),
+                                Some((o, s, ft)) => (o, s, Some(ft), value),
                                 None => continue,
                             }
                         }
                     };
                     self.gen_expr(value, 0);
                     let store_off = var_off + off as i32;
+                    if let Some(ft) = &field_ty {
+                        if matches!(ft, Type::Float | Type::Double | Type::LongDouble) {
+                            self.emit_scalar_to_xmm0_if_needed(value, ft);
+                            if matches!(ft, Type::Float) {
+                                self.store_xmm32_stack(0, store_off);
+                            } else {
+                                self.store_xmm64_stack(0, store_off);
+                            }
+                            continue;
+                        }
+                    }
                     self.emit_store(0, store_off, sz);
                 }
             }
             _ => {
-                // 标量类型的单元素初始化
+                // 标量类型的单元素初始化 (C23 大括号初始化: double x = {1})
                 if let Some(InitItem::Expr(e)) = inits.first() {
                     self.gen_expr(e, 0);
-                    self.mov_to_stack(0, var_name);
+                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                        self.emit_scalar_to_xmm0_if_needed(e, ty);
+                        if matches!(ty, Type::Float) {
+                            self.store_xmm32_stack(0, var_off);
+                        } else {
+                            self.store_xmm64_stack(0, var_off);
+                        }
+                    } else {
+                        self.mov_to_stack(0, var_name);
+                    }
                 }
             }
         }
@@ -4256,8 +4314,9 @@ impl Codegen {
                             data.extend_from_slice(&elem_data);
                         }
                     } else {
+                        let is_float_elem = matches!(elem_ty.as_ref(), Type::Float | Type::Double | Type::LongDouble);
                         let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
-                        let elem_data = self.eval_const_expr(value, elem_rel, elem_size);
+                        let elem_data = self.eval_const_expr(value, elem_rel, elem_size, is_float_elem);
                         data.extend_from_slice(&elem_data);
                     }
                     while data.len() < (i + 1) * elem_size { data.push(0); }
@@ -4268,24 +4327,25 @@ impl Codegen {
                 data.resize(total_size, 0);
                 let mut field_idx = 0;
                 for item in inits {
-                    let (off, sz, value) = match item {
+                    let (off, sz, value, field_ty) = match item {
                         InitItem::Expr(e) => {
                             if field_idx < fields.len() {
                                 let f = &fields[field_idx];
                                 field_idx += 1;
-                                (f.offset, f.ty.size(), e)
+                                (f.offset, f.ty.size(), e, Some(f.ty.clone()))
                             } else { continue; }
                         }
                         InitItem::Designated { designator, value } => {
                             // 链式 designator: resolve_designator 累积偏移
                             match resolve_designator(ty, designator) {
-                                Some((o, s, _)) => (o, s, value),
+                                Some((o, s, ft)) => (o, s, value, Some(ft)),
                                 None => continue,
                             }
                         }
                     };
                     let field_rel = rel.map(|(base, sec)| (base + off as u64, sec));
-                    let field_data = self.eval_const_expr(value, field_rel, sz);
+                    let is_float_field = matches!(&field_ty, Some(Type::Float | Type::Double | Type::LongDouble));
+                    let field_data = self.eval_const_expr(value, field_rel, sz, is_float_field);
                     for (j, &b) in field_data.iter().enumerate() {
                         if off + j < data.len() { data[off + j] = b; }
                     }
@@ -4300,8 +4360,9 @@ impl Codegen {
                         InitItem::Expr(e) => e,
                         _ => continue,
                     };
+                    let is_float_elem = matches!(elem_ty.as_ref(), Type::Float | Type::Double | Type::LongDouble);
                     let elem_rel = rel.map(|(base, sec)| (base + (i * elem_size) as u64, sec));
-                    let elem_data = self.eval_const_expr(value, elem_rel, elem_size);
+                    let elem_data = self.eval_const_expr(value, elem_rel, elem_size, is_float_elem);
                     let off = i * elem_size;
                     for (j, &b) in elem_data.iter().enumerate() {
                         if off + j < data.len() { data[off + j] = b; }
@@ -4310,7 +4371,8 @@ impl Codegen {
             }
             _ => {
                 if let Some(InitItem::Expr(e)) = inits.first() {
-                    data = self.eval_const_expr(e, rel, ty.size());
+                    let is_float_ty = matches!(ty, Type::Float | Type::Double | Type::LongDouble);
+                    data = self.eval_const_expr(e, rel, ty.size(), is_float_ty);
                 }
             }
         }
@@ -4323,12 +4385,15 @@ impl Codegen {
         e: &Expr,
         rel: Option<(u64, Option<usize>)>,
         width: usize,
+        is_float: bool,
     ) -> Vec<u8> {
         // 优先用 eval_full: 浮点字面量直接走 .to_bits(), 不被截断为整数
         if let Ok(cv) = const_eval::eval_full(e) {
             match cv {
                 const_eval::ConstValue::Float(f) => {
-                    let size = e.ty().size().max(width);
+                    // 按目标宽度截断: 窄元素 (char/short) 数组不能用表达式
+                    // 类型宽度 (int=4) 写数据, 否则元素会错位/越界
+                    let size = width.max(1);
                     if size <= 4 {
                         (f as f32).to_bits().to_le_bytes()[..size].to_vec()
                     } else {
@@ -4336,12 +4401,18 @@ impl Codegen {
                     }
                 }
                 const_eval::ConstValue::Int(v) => {
-                    let size = e.ty().size().max(width);
-                    v.to_le_bytes()[..size].to_vec()
+                    let size = width.max(1);
+                    if is_float {
+                        // 浮点目标: 整型常量隐式转换为浮点位模式
+                        if size <= 4 { (v as f32).to_bits().to_le_bytes()[..size].to_vec() }
+                        else { (v as f64).to_bits().to_le_bytes()[..size].to_vec() }
+                    } else {
+                        v.to_le_bytes()[..size].to_vec()
+                    }
                 }
                 _ => {
                     if let Ok(value) = const_eval::eval(e) {
-                        let size = e.ty().size().max(width);
+                        let size = width.max(1);
                         return value.to_le_bytes()[..size].to_vec();
                     }
                     vec![0u8; width.max(e.ty().size())]
@@ -4358,7 +4429,7 @@ impl Codegen {
                 vec![0u8; width.max(8)]
             }
             Expr::AddrOf { e: inner, .. } => match inner.as_ref() {
-                Expr::Ident { .. } => self.eval_const_expr(inner, rel, width),
+                Expr::Ident { .. } => self.eval_const_expr(inner, rel, width, is_float),
                 Expr::Index { arr, idx, ty: elem_ty, .. } => {
                     if let (Expr::Ident { name, .. }, Ok(i)) = (arr.as_ref(), const_eval::eval(idx)) {
                         if let Some((off, sec)) = rel {
@@ -5765,21 +5836,20 @@ impl Codegen {
             disp32_pos = self.pos();
             self.emit(&[0, 0, 0, 0]);
         } else {
-            // 按 elem_size 选操作数尺寸: 1=movzx, 2/4=零扩展 mov, 8=REX.W mov
+            // 按 elem_size 选操作数尺寸: 1/2=movzx 零扩展, 4=32-bit mov,
+            // 8=REX.W mov. 16-bit 不能裸 mov (高 48 位寄存器残留垃圾值)
             let mut rex = 0x48u8; // 默认 REX.W (8 字节)
             if dst_gp >= 8 { rex |= 0x04; }
             if idx_reg >= 8 { rex |= 0x02; }
-            let prefix: Option<u8> = match elem_size {
-                2 => Some(0x66),
-                _ => None,
-            };
-            let use_movzx = elem_size == 1;
-            // 4 字节路径需要去掉 REX.W (否则变成 64-bit load)
-            if elem_size == 4 { rex &= !0x08; }
-            if elem_size == 1 { rex &= !0x08; } // movzx 不需要 REX.W
-            if let Some(p) = prefix { self.emit(&[p]); }
+            let use_movzx = elem_size <= 2;
+            // 非 8 字节路径需要去掉 REX.W (否则变成 64-bit load)
+            if elem_size != 8 { rex &= !0x08; }
             if use_movzx {
-                self.emit(&[rex, 0x0F, 0xB6, modrm | ((dst_gp & 7) << 3), sib]);
+                if elem_size == 1 {
+                    self.emit(&[rex, 0x0F, 0xB6, modrm | ((dst_gp & 7) << 3), sib]);
+                } else {
+                    self.emit(&[rex, 0x0F, 0xB7, modrm | ((dst_gp & 7) << 3), sib]);
+                }
             } else {
                 self.emit(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib]);
             }
@@ -5804,7 +5874,14 @@ impl Codegen {
         }
         let disp_pos = self.pos() + ins.len() as u64 - 4;
         self.emit(&ins);
-        self.pending_data_rels.push((disp_pos, name.to_string()));
+        // TLS 全局变量: ET_EXEC 走 pending_tls_rels 由 resolve() 修补,
+        // ET_REL 走 pending_data_rels + R_X86_64_PC32 (与整数路径一致)
+        let is_tls = self.globals.get(name).map(|g| g.is_tls).unwrap_or(false);
+        if is_tls && !self.relocatable {
+            self.pending_tls_rels.push((disp_pos, name.to_string()));
+        } else {
+            self.pending_data_rels.push((disp_pos, name.to_string()));
+        }
     }
 
     /// 全局浮点变量 RIP-relative 存储: xmm → [global]

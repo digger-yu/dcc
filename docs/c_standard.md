@@ -36,16 +36,27 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 
 - C11 修正版, DCC 完全复用 C11 路径
 
-## C23 (部分实装)
+## C23
 
 - `typeof` (GCC 扩展标准化) ✅
+- `typeof_unqual` — ✅ 已实装 (去除限定符的 typeof)
 - `constexpr` — ✅ 已实装 (解析器静默跳过)
+- `bool` / `true` / `false` — ✅ 已实装 (C23 关键字, `-std=gnu23`/`c23` 启用)
+- `alignas` / `thread_local` — ✅ 已实装 (C23 关键字)
+- `nullptr` / `nullptr_t` — ✅ 已实装 (解析为 `(void*)0`, `nullptr_t` 为内置类型)
+- `static_assert` 无消息参数 — ✅ 已实装 (文件级与函数内)
+- 枚举底层类型 `enum E : type` — ✅ 已实装 (枚举常量类型=底层类型)
+- 省略 `=` 的大括号初始化 `int x{5}` — ✅ 已实装 (标量/数组/结构体/嵌套)
 - `[[attributes]]` — ✅ 已实装 (解析器静默跳过 `[[deprecated]]`, `[[maybe_unused]]`, `[[nodiscard]]`)
 - `_BitInt(N)` — ✅ 已实装 (按宽度映射到标准整数类型 8/16/32/64)
 - 数字分隔符 `1'000'000` — ✅ 已实装 (词法分析器跳过 `'`)
-- `#embed` — ✅ 已实装 (预处理器嵌入文件内容为字节数组，支持 `limit`/`prefix` 参数)
-- `nullptr` — ✅ 已实装 (解析为 `(void*)0`)
+- `#embed` — ✅ 已实装 (预处理器嵌入文件内容为字节数组, 支持 `limit`/`prefix`/`suffix`/`if_empty` 参数)
+- `__has_embed` — ✅ 已实装 (预处理特性检测)
+- `__has_c_attribute` — ✅ 已实装 (预处理特性检测)
+- `__STDC_ENDIAN_*` — ✅ 已实装 (预定义宏: `__STDC_ENDIAN_BIG__`/`__STDC_ENDIAN_LITTLE__`/`__STDC_ENDIAN_NATIVE__`)
 - `#elifdef` / `#elifndef` — ✅ 已实装 (预处理器条件编译)
+- `%b` / `%B` printf 二进制格式 — ✅ 已实装 (格式检查与运行时行为)
+- `-std=gnu23` / `-std=c23` — ✅ 已实装 (Driver 选项, 默认 `gnu23`)
 
 ## GNU 扩展
 
