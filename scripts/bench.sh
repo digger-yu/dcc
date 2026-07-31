@@ -15,18 +15,18 @@ echo "=== DCC local bench ==="
 
 # 1. dcc 编 hello.c
 echo "[1/4] dcc -> hello.c"
-time $DCC -O2 examples/hello.c -o $TMP/hello-dcc
+time $DCC -O2 examples/basics/hello.c -o $TMP/hello-dcc
 chmod +x $TMP/hello-dcc
 $TMP/hello-dcc; echo "exit code: $?  (期望 42)"
 
 # 2. gcc 编 hello.c (对比)
 echo "[2/4] gcc -> hello.c (baseline)"
-$GCC -O2 examples/hello.c -o $TMP/hello-gcc
+$GCC -O2 examples/basics/hello.c -o $TMP/hello-gcc
 $TMP/hello-gcc; echo "exit code: $?  (期望 42)"
 
 # 3. dcc 编 fib.c
 echo "[3/4] dcc -> fib.c"
-time $DCC -O2 examples/fib.c -o $TMP/fib-dcc 2>&1 || echo "fib not yet supported"
+time $DCC -O2 examples/basics/fib.c -o $TMP/fib-dcc 2>&1 || echo "fib not yet supported"
 if [ -x $TMP/fib-dcc ]; then
     $TMP/fib-dcc; echo "exit code: $?  (期望 55)"
 fi

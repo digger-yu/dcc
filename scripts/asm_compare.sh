@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/asm_compare.sh - dcc vs gcc 汇编对比工具
 # 用法: ./scripts/asm_compare.sh <file.c> [dcc-args...]
-# 示例: ./scripts/asm_compare.sh examples/arith.c
+# 示例: ./scripts/asm_compare.sh examples/basics/arith.c
 #       ./scripts/asm_compare.sh tests/fixtures/m2_3_promotion.c -std=gnu23
 
 set -euo pipefail

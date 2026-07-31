@@ -20,23 +20,23 @@ run_test() {
 }
 
 # 基础测试
-run_test examples/arith.c 23 arith
-run_test examples/hello.c 42 hello
-run_test examples/control.c 100 control
-run_test examples/call.c 42 call
+run_test examples/basics/arith.c 23 arith
+run_test examples/basics/hello.c 42 hello
+run_test examples/basics/control_flow.c 100 control
+run_test examples/pointers/function_call.c 42 call
 
 # 代码生成 + 预处理器测试
-run_test examples/codegen_test.c 42 codegen
-run_test examples/pp_simple_test.c 42 pp_simple
-run_test examples/pp_attr_simple.c 10 pp_attr_simple
-run_test examples/pp_attr_test.c 30 pp_attr
+run_test examples/basics/compound_assign.c 42 codegen
+run_test examples/preprocessor/const_expr.c 42 pp_simple
+run_test examples/preprocessor/attributes_simple.c 10 pp_attr_simple
+run_test examples/preprocessor/attributes.c 30 pp_attr
 
 # 函数调用 + 求值栈测试
-run_test examples/call_assign_test.c 20 call_assign
-run_test examples/bar_test.c 20 bar_test
+run_test examples/pointers/call_by_assign.c 20 call_assign
+run_test examples/pointers/bar_call.c 20 bar_test
 
 # 指针运算缩放测试
-run_test examples/ptr_arith_test.c 64 ptr_arith
+run_test examples/pointers/pointer_arith.c 64 ptr_arith
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="

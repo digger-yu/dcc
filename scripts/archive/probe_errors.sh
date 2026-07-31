@@ -114,7 +114,7 @@ run E0206 "$D" -std=gnu23 -fsyntax-only "$TMP/e0206.c"
 echo 'int x = _Alignof int;' > "$TMP/e0001_alignof.c"
 run E0001_alignof "$D" -std=gnu23 -fsyntax-only "$TMP/e0001_alignof.c"
 
-# examples/bad.c
-if [ -f examples/bad.c ]; then
-  run bad.c "$D" -std=gnu23 -fsyntax-only examples/bad.c
+# examples/advanced/bad_syntax.c
+if [ -f examples/advanced/bad_syntax.c ]; then
+  run bad.c "$D" -std=gnu23 -fsyntax-only examples/advanced/bad_syntax.c
 fi

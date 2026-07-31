@@ -1097,7 +1097,7 @@ fn generic_pointer_precise_match_compiles() {
 /// 内联 asm 约束 (=r / +m / memory clobber) 编译通过。
 #[test]
 fn asm_constraints_compile() {
-    let source = include_str!("../examples/test_asm_constraints.c");
+    let source = include_str!("../examples/assembly/constraints.c");
     let (output, obj) = run_object_test("asm-constraints", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1110,7 +1110,7 @@ fn asm_constraints_compile() {
 /// SysV va_list GP + SSE 浮点路径编译通过。
 #[test]
 fn va_list_sse_compiles() {
-    let source = include_str!("../examples/test_p4_va_list.c");
+    let source = include_str!("../examples/advanced/va_list.c");
     let (output, obj) = run_object_test("va-list-sse", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -4553,10 +4553,10 @@ fn m2_5_float() {
 #[cfg(unix)]
 fn m2_6_batch_compile() {
     let fixtures = [
-        "hello.c", "arith.c", "control.c", "fib.c",
-        "struct_test.c", "switch_test.c", "call.c",
-        "bitfield_test.c", "global_arr_test.c",
-        "logic_test.c", "rel_test.c", "ptr_arith_test.c",
+        "basics/hello.c", "basics/arith.c", "basics/control_flow.c", "basics/fib.c",
+        "structs/basic_struct.c", "basics/switch.c", "pointers/function_call.c",
+        "structs/bitfield.c", "structs/global_array.c",
+        "basics/logic.c", "pointers/rel_ops.c", "pointers/pointer_arith.c",
     ];
     let dcc = env!("CARGO_BIN_EXE_dcc");
     let mut pass = 0u32;
