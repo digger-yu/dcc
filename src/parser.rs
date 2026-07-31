@@ -1030,7 +1030,7 @@ impl<'a> Parser<'a> {
         while self.cur.kind != TokKind::Eof {
             if self.cur.kind == TokKind::Semi { self.advance(); continue; }
             match self.parse_decl() {
-                Some(d) => decls.extend(d),
+                Some(d) => { decls.extend(d); }
                 None => { if !self.finished { self.advance(); } else { break; } }
             }
         }
@@ -1420,7 +1420,12 @@ impl<'a> Parser<'a> {
             if !is_nested_func {
                 self.globals.insert(name_for_decl.name.clone(), func_ty);
             }
-            self.locals = self.globals.clone();
+            // 非嵌套函数: 不克隆 globals, 让 lookup_ident_type 回退到 globals
+            if !is_nested_func {
+                self.locals.clear();
+            } else {
+                self.locals = self.globals.clone();
+            }
             self.in_function = true;
             let saved_func = self.current_function.replace(name_for_decl.name.clone());
             for p in &params {
@@ -1429,50 +1434,67 @@ impl<'a> Parser<'a> {
             let body = if self.cur.kind == TokKind::LBrace {
                 self.advance();
                 let b = self.parse_block();
-                if !self.expect(TokKind::RBrace, "'}'") { return None; }
+                if !self.expect(TokKind::RBrace, "'}'" ) { return None; }
                 Some(b)
-            } else { if !self.expect(TokKind::Semi, "';' or '{'") { return None; } None };
-            let child_locals = self.locals.clone();
+            } else { if !self.expect(TokKind::Semi, "';' or '{'" ) { return None; } None };
             // 恢复外层函数的 in_function 状态
             if is_nested_func {
+                let child_locals = self.locals.clone();
                 self.locals = parent_locals.clone();
                 self.in_function = true;
+                // 检测嵌套函数捕获的外层变量 — child_locals 仅在此处使用
+                let upvars = {
+                    let mut captured = Vec::new();
+                    if let Some(ref b) = body {
+                        Self::collect_upvars(&b.items, &child_locals, &parent_locals, &mut captured);
+                    }
+                    captured
+                };
+                // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
+                // #pragma weak name 在 codegen 体现为 STB_WEAK 绑定
+                let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
+                return Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
+                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
+                    visibility: attrs.visibility, is_unused: attrs.is_unused,
+                    is_cold: attrs.is_cold, is_hot: attrs.is_hot, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
+                    is_variadic: self.last_variadic, is_constructor: attrs.is_constructor,
+                    is_destructor: attrs.is_destructor, alias_name: attrs.alias_name.clone().or(attrs.copy_fn.clone()),
+                    is_nested: is_nested_func, upvars, is_old_style,
+                    format_kind: attrs.format_kind, format_string_idx: attrs.format_string_idx,
+                    format_first_arg: attrs.format_first_arg,
+                    no_sanitize: attrs.no_sanitize.clone(), target_clones: attrs.target_clones.clone(),
+                    returns_nonnull: attrs.returns_nonnull,
+                    ctor_priority: attrs.ctor_priority, dtor_priority: attrs.dtor_priority,
+                    is_retain: attrs.is_retain, is_used_attr: attrs.is_used,
+                    is_flatten: attrs.is_flatten,
+                    error_msg: attrs.error_msg.clone(), warning_msg: attrs.warning_msg.clone(),
+                    deprecated_msg: attrs.deprecated_msg.clone(),
+                    ifunc_resolver: attrs.ifunc_resolver.clone(), })]);
             } else {
-                self.locals = self.globals.clone();
+                // 非嵌套函数: 用 retain 移除函数体内新增的局部条目, 避免 O(n) 克隆 globals
+                self.locals.retain(|k, _| self.globals.contains_key(k));
                 self.in_function = false;
+                // 恢复外层 current_function
+                self.current_function = saved_func;
+                let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
+                return Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
+                    section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
+                    visibility: attrs.visibility, is_unused: attrs.is_unused,
+                    is_cold: attrs.is_cold, is_hot: attrs.is_hot, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
+                    is_variadic: self.last_variadic, is_constructor: attrs.is_constructor,
+                    is_destructor: attrs.is_destructor, alias_name: attrs.alias_name.clone().or(attrs.copy_fn.clone()),
+                    is_nested: false, upvars: vec![], is_old_style,
+                    format_kind: attrs.format_kind, format_string_idx: attrs.format_string_idx,
+                    format_first_arg: attrs.format_first_arg,
+                    no_sanitize: attrs.no_sanitize.clone(), target_clones: attrs.target_clones.clone(),
+                    returns_nonnull: attrs.returns_nonnull,
+                    ctor_priority: attrs.ctor_priority, dtor_priority: attrs.dtor_priority,
+                    is_retain: attrs.is_retain, is_used_attr: attrs.is_used,
+                    is_flatten: attrs.is_flatten,
+                    error_msg: attrs.error_msg.clone(), warning_msg: attrs.warning_msg.clone(),
+                    deprecated_msg: attrs.deprecated_msg.clone(),
+                    ifunc_resolver: attrs.ifunc_resolver.clone(), })]);
             }
-            // 恢复外层 current_function (嵌套函数时为 outer；顶层函数时为 None)
-            self.current_function = saved_func;
-            // 检测嵌套函数捕获的外层变量
-            let upvars = if is_nested_func {
-                let mut captured = Vec::new();
-                if let Some(ref b) = body {
-                    Self::collect_upvars(&b.items, &child_locals, &parent_locals, &mut captured);
-                }
-                captured
-            } else {
-                vec![]
-            };
-            // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
-            // #pragma weak name 在 codegen 体现为 STB_WEAK 绑定, 此处合并
-            let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
-            Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
-                section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
-                visibility: attrs.visibility, is_unused: attrs.is_unused,
-                is_cold: attrs.is_cold, is_hot: attrs.is_hot, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
-                is_variadic: self.last_variadic, is_constructor: attrs.is_constructor,
-                is_destructor: attrs.is_destructor, alias_name: attrs.alias_name.clone().or(attrs.copy_fn.clone()),
-                is_nested: is_nested_func, upvars, is_old_style,
-                format_kind: attrs.format_kind, format_string_idx: attrs.format_string_idx,
-                format_first_arg: attrs.format_first_arg,
-                no_sanitize: attrs.no_sanitize.clone(), target_clones: attrs.target_clones.clone(),
-                returns_nonnull: attrs.returns_nonnull,
-                ctor_priority: attrs.ctor_priority, dtor_priority: attrs.dtor_priority,
-                is_retain: attrs.is_retain, is_used_attr: attrs.is_used,
-                is_flatten: attrs.is_flatten,
-                error_msg: attrs.error_msg.clone(), warning_msg: attrs.warning_msg.clone(),
-                deprecated_msg: attrs.deprecated_msg.clone(),
-                ifunc_resolver: attrs.ifunc_resolver.clone(), })])
         } else if self.cur.kind == TokKind::LBracket {
             let mut arr_ty = ty;
             while self.cur.kind == TokKind::LBracket {

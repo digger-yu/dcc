@@ -846,7 +846,9 @@ impl Preprocessor {
             let trimmed = phase3.trim();
 
             if trimmed.starts_with('#') {
-                if !active_source.is_empty() {
+                // 宏调用可能跨越 #ifdef/#endif 边界（如 struct_group(headers, ...)），
+                // 如果 active_source 有未闭合的 (，不 flush，继续累积直到宏调用闭合。
+                if !active_source.is_empty() && !self.has_unclosed_paren(&active_source) {
                     self.flush_active_source(&mut active_source);
                 }
                 self.process_directive(trimmed, line_no);
@@ -888,6 +890,38 @@ impl Preprocessor {
             self.apply_pragma_string(&p, line_no);
         }
         src.clear();
+    }
+
+    /// 检查文本中是否存在未闭合的 ( (忽略字符串/字符字面量内的括号)。
+    /// 用于判断宏调用是否跨越 #ifdef/#endif 边界: 如 struct_group(headers, ...)
+    /// 的实参中包含 #ifdef 块时, process_file 不能在 #ifdef 处截断宏调用。
+    fn has_unclosed_paren(&self, s: &str) -> bool {
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut in_char = false;
+        let mut escape = false;
+        for c in s.chars() {
+            if in_string {
+                if escape { escape = false; }
+                else if c == '\\' { escape = true; }
+                else if c == '"' { in_string = false; }
+                continue;
+            }
+            if in_char {
+                if escape { escape = false; }
+                else if c == '\\' { escape = true; }
+                else if c == '\'' { in_char = false; }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '\'' => in_char = true,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        depth > 0
     }
 
     /// 获取当前字符集设置 (C23 #pragma locale)
@@ -1908,16 +1942,20 @@ impl Preprocessor {
         // 不能用 macros.is_empty() 早退: __COUNTER__ / __FILE__ / __LINE__
         // 等特殊 token 不在 macros 表内, 必须进入 expand_with_disabled
         let disabled = HashSet::new();
-        let result = self.expand_with_disabled(line, &disabled);
-        // 注: 移除了旧的多轮重扫描循环 (round 2-8 用空 disabled set 重扫).
-        // 旧循环会导致自引用宏 (如 glibc `#define sa_handler __sigaction_handler.sa_handler`)
-        // 被反复展开, 因为每轮的空 disabled set 无法保留上轮的 "paint blue" 信息.
-        // 单次展开已正确处理:
-        //   - 自引用宏 (disabled set 防止递归)
-        //   - 嵌套宏 (disabled set 传递)
-        //   - 参数预展开 (expand_with_disabled 内递归处理)
-        // 旧循环处理的跨边界宏调用场景 (如 CONCATENATE 生成新函数宏名)
-        // 已由 tail_call 优化在 object-like 宏展开中覆盖.
+        let mut result = self.expand_with_disabled(line, &disabled);
+        // 第二轮重扫描: 处理跨边界宏调用 (如 cleanup.h 的 DEFINE_LOCK_GUARD_1_COND 模式):
+        //   #define F(X...) CONCATENATE(F_, COUNT_ARGS(X))(X)
+        // 第一轮展开 CONCATENATE 得到 F_3(…) 但 `(…)` 未被识别为新宏调用;
+        // 第二轮用空禁用集重扫描即可捕获 F_3(…).
+        //
+        // 自引用宏 (如 glibc `#define sa_handler __sigaction_handler.sa_handler`)
+        // 在单轮内由 disabled set 正确 "paint blue". 多轮重扫描时, 自引用宏
+        // 会在第二轮被重新展开(因为空禁用集), 但内核中不存在此类自引用模式.
+        // 两轮重扫描已足够覆盖 CONCATENATE+COUNT_ARGS 模式.
+        if result != line {
+            let result2 = self.expand_with_disabled(&result, &HashSet::new());
+            result = result2;
+        }
         result
     }
 
