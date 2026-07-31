@@ -15,7 +15,7 @@
 | asm goto + computed goto | `examples/test_asm_goto.c` |
 | 自定义 ELF section / WEAK / HIDDEN | `examples/test_p2_elf_attrs.c` + readelf 断言 |
 | __int128 / register asm / 全局符号 | `examples/test_p1_features.c` |
-| 预处理 forced-include 注释安全 | `tests/fixtures/preproc_comment_force.h` |
+| 预处理 forced-include 注释安全 | `tests/fixtures/c/comment.h` |
 | mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
 | DWARF + BTF（含 struct） | `-g` 生成 `.debug_*` + `.BTF`（含 `dcc_probe` STRUCT 类型） |
 | objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`、`.orc_unwind_ip` |
@@ -34,17 +34,17 @@
 | `#if` 十六进制字面量 | `preproc` 单测 `if_hex_*`（原 `0x41` 被拆坏） |
 | `#include_next` | `preproc` 单测 + glibc `<limits.h>` |
 | 宏展开涂蓝 / 防栈溢出 | `nested_function_macro_*`；本地 `argv.c` 不再 abort |
-| `_Generic` + 三元控制表达式 | `tests/fixtures/generic_ternary.c`；本地 `libiberty/argv.c` |
-| `_Generic` 指针精确匹配 | `tests/fixtures/generic_pointer.c` |
+| `_Generic` + 三元控制表达式 | `tests/fixtures/c/generic_tern.c`；本地 `libiberty/argv.c` |
+| `_Generic` 指针精确匹配 | `tests/fixtures/c/generic_ptr.c` |
 | 内联 asm 约束 | `examples/test_asm_constraints.c` |
 | SysV va_list SSE | `examples/test_p4_va_list.c`（GP + float/double） |
-| Mini x86 asm 局部/C 标签 | `tests/fixtures/asm_local_label.c`、`asm_label_insn.c`（`N:`/`N:insn`/`found:`） |
+| Mini x86 asm 局部/C 标签 | `tests/fixtures/c/asm_label.c`（`N:`/`N:insn`/`found:`） |
 | Mini x86 asm 位操作 / 双精度移位 | codegen `bt/bts/btr/btc`、`shld/shrd`（内核 paravirt 等） |
 | Mini x86 asm 扩展位/字节/NT/虚拟化 | `bsf/bsr/popcnt/bswap/movnt*`、`vmcall/vmmcall`、RIP-relative、`push/pop` mem |
 | Mini x86 asm GAS 伪指令 / 前缀 | `.pushsection`/`.balign`/`.long`/`.quad`/`.popsection`；`lock`/`rep` |
 | GCC Builtin 完整化 | object_size FORTIFY、apply/return、prefetch no-op、未知 builtin warning |
-| __builtin_constant_p / inline 属性 | `tests/fixtures/builtin_constant_p_full.c`、`inline_attrs.c` |
-| 未知 __builtin_* ud2 | `tests/fixtures/unknown_builtin.c`；void → ud2，其余 → 零值 + warning |
+| __builtin_constant_p / inline 属性 | `tests/fixtures/c/constp.c`、`tests/fixtures/c/inline.c` |
+| 未知 __builtin_* ud2 | `tests/fixtures/c/unk_builtin.c`；void → ud2，其余 → 零值 + warning |
 | __builtin_va_start/end/copy/arg | SysV va_list 结构（r13 帧链 + 24 字节槽） |
 | __builtin_strcasecmp / strncasecmp | 转发到 libc strcasecmp/strncasecmp |
 | __builtin_fma / fmaf / fmal | 调 libm 对应函数（fmaf 走 movss，F2/F3 0F 10/11 备份 xmm3） |
@@ -59,19 +59,19 @@
 | __builtin_types_compatible_p / choose_expr | parser 折叠 + codegen 兜底 |
 | __builtin_va_list / FILE / LINE / FUNCTION / FUNCSIG | 类型别名 + codegen 字符串 rodata |
 | IR 优化 pass | `ssa_gvn.rs` GVN/CSE；`loop_opt.rs` LICM/展开/向量循环；`-O2`/`-O3` |
-| always_inline @ -O0 | `tests/fixtures/always_inline_o0.c` |
-| 全局 SIMD 向量复制 | `tests/fixtures/vector_global*.c`；`.data` 逐元素静态 init + 运行时 binop |
-| 浮点 SIMD 标量逐元素 | `tests/fixtures/vector_float_scalar.c`；v4f/v2d +/-/× 标量 SSE |
-| __int128 SysV 传参/乘除模 | `tests/fixtures/int128_call_abi.c`、`int128_mul_div_mod.c` |
-| mini-asm 内核扩展 | `tests/fixtures/asm_kernel_extra.c`；rol/prefetch/movss/addss |
-| 非 Ident 向量 rvalue | `tests/fixtures/vector_binop_non_ident.c`；`(a+b)+c`、`v=v+w` |
+| always_inline @ -O0 | `tests/fixtures/c/always_inline.c` |
+| 全局 SIMD 向量复制 | `tests/fixtures/c/vec_global.c`；`.data` 逐元素静态 init + 运行时 binop |
+| 浮点 SIMD 标量逐元素 | `tests/fixtures/c/vec_fscalar.c`；v4f/v2d +/-/× 标量 SSE |
+| __int128 SysV 传参/乘除模 | `tests/fixtures/c/int128_abi.c`、`tests/fixtures/c/int128_arith.c` |
+| mini-asm 内核扩展 | `tests/fixtures/c/asm_kernel.c`；rol/prefetch/movss/addss |
+| 非 Ident 向量 rvalue | `tests/fixtures/c/vec_binop.c`；`(a+b)+c`、`v=v+w` |
 | x86_64 codegen 扩展 | ✅ 向量/SIMD、复数、mini-asm、object_size FORTIFY、apply/return、prefetch |
 | aarch64 typed IR | hello/控制流/调用/浮点/向量/rodata；见 `aarch64_*_cross_compile` |
 | riscv64 typed IR | hello/控制流/调用/rodata；见 `riscv64_*_cross_compile` |
 | 诊断 snapshot 格式锁定 | `tests/errors.rs` schema + `diagnostic_format.stderr.snap`（V1） |
-| `struct __attribute__((__may_alias__))` | `tests/fixtures/may_alias_struct.c` |
+| `struct __attribute__((__may_alias__))` | `tests/fixtures/c/may_alias.c` |
 | 宏 `#` 字符串化换行折叠 | `preproc` 单测 `stringify_collapses_*`；`NOFAIL`/`modpost.c` |
-| asm goto 行内 `#` 注释 | `tests/fixtures/asm_goto_hash_comment.c`；`jump_label.h` objtool 标注 |
+| asm goto 行内 `#` 注释 | `tests/fixtures/c/asm_goto.c`；`jump_label.h` objtool 标注 |
 | aarch64/riscv64 整数除/取模 (M7) | `codegen/aarch64.rs` 走 `sdiv`+`msub`，`codegen/riscv64.rs` 走 RV64M `div/rem`；不再退化为 0；`aarch64_ir_div_mod_emit_sdiv_msub` + `riscv64_ir_div_mod_emit_rv64m` |
 | aarch64/riscv64 移位 (M7) | `lslv`/`lsrv` (aarch64) 修复 Rm bit 错位；`sll`/`srl`/`sra` (riscv64) 替代 0；`aarch64_ir_shifts_emit_lslv_lsrv` + `riscv64_ir_shifts_emit_sll_srl` |
 | 聚合类型 by-ref (M7) | aarch64/riscv64 `gen_call` 检测 `ValueType::Aggregate`/`Array`/`Complex`，local 参数通过 `add xN, sp, #off` / `addi aN, sp, #off` 传地址；`aarch64_aggregate_arg_by_ref` + `riscv64_aggregate_arg_by_ref` |
@@ -156,8 +156,8 @@
 | C 前端补洞 `#pragma pack` 影响 struct 布局 (M14) | ✅ | `preproc.pack_history: Vec<(u32, Option<usize>)>` 携带行号 + packing 变化；`ParseOptions.pack_history` 传入 parser；`Parser::pack_at_line(line)` 二分查找生效值；`layout_struct_with_pack(max_align)` 把字段对齐 cap 到 `min(nat, n)` |
 | C 前端补洞 const_eval 完整化 (M15) | ✅ | `ConstValue` 枚举（`Int/Float/Str/Addr/Bytes`）；`eval_full` 返回完整常量值，旧 `eval` 仅取整数部分；浮点 + - * / 与 `Int<->Float` 混合算术；比较提升到 f64；字符串字面量走 FNV-1a 64-bit 标签 + 字节内容；`&ident` / `&arr[i]` / `&&label` → `Addr { name, offset }`；新增 `__builtin_strlen/abs/labs/llabs/bswap16/32/64/expect/popcount*` 编译期折叠；`Cast` 阶段新增 `-Wint-truncation` / `-Wint-conversion` 严格类型 warning（不阻塞） |
 | C 前端补洞 运行时检查 (M15) | ✅ | `-fbounds-check` 数组下标运行时边界检查：仅对 `ArraySize::Const(n)` 的数组插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds`；`-ftrapv` 有符号算术溢出 trap：binop 之后置 `jo` 跳到 `__dcc_trapv_overflow` 桩函数（覆盖 `Add/Sub/Mul/Div`） |
-| C++ 修饰符与类型推导真实化 (M17) | ✅ | 14 + 2 = 16 个 `tests/fixtures/m17_*.cpp` 全部通过: `auto` 真类型推导 (int/const char*/class) / `decltype(expr)` + `decltype(auto)` 解析 / `friend` 走 FreeFn 路径 (无 this 形参) / `using Base::Base;` 类内合法 (复用 InheritingCtor 节点) / `noexcept` → `__attribute__((nothrow))` / `final`/`override` 解析层接受 / `mutable`/`volatile` 成员函数标记 / `explicit` ctor 接受 / `new T[n]` 数组分配 + `_Znam`/`_ZdaPv` extern 替身 / `placement new` 转发 (void*)ptr / `if constexpr` 编译期分支 / 16/16 m17_* 集成测试 PASS |
-| C++ 标准库扩展 (M18) | ✅ | 11 个 `tests/fixtures/m18_*.cpp` 全部通过: `<chrono>` (duration / time_point / 三种 clock 走 `clock_gettime`); `<thread>` `<mutex>` `<condition_variable>` 包装 pthread; `<filesystem>` (path / file_type / directory_iterator); `<expected>` C++23 (expected_int / expected_str 擦除模板); `<flat_map>` C++23 (int→int 二分查找); C++23 多维下标 `obj[i,j,k]` → `__dcc_multi_index_N`; `<regex>` 简化版 (回溯 NFA 解释器支持 `.`/`[]`/`[^]`/`*`/`+`/`?`/`|`/`()`/`^`/`$`); `<ranges>` 简化版 (filter/transform/take/reverse view); Concepts 语法层 (SFINAE 简化版); Modules 占位 (src/cpp/modules.rs) |
+| C++ 修饰符与类型推导真实化 (M17) | ✅ | 14 + 2 = 16 个 `tests/fixtures/cpp/*.cpp` 全部通过: `auto` 真类型推导 (int/const char*/class) / `decltype(expr)` + `decltype(auto)` 解析 / `friend` 走 FreeFn 路径 (无 this 形参) / `using Base::Base;` 类内合法 (复用 InheritingCtor 节点) / `noexcept` → `__attribute__((nothrow))` / `final`/`override` 解析层接受 / `mutable`/`volatile` 成员函数标记 / `explicit` ctor 接受 / `new T[n]` 数组分配 + `_Znam`/`_ZdaPv` extern 替身 / `placement new` 转发 (void*)ptr / `if constexpr` 编译期分支 / 16/16 m17_* 集成测试 PASS |
+| C++ 标准库扩展 (M18) | ✅ | 11 个 `tests/fixtures/cpp/*.cpp` 全部通过: `<chrono>` (duration / time_point / 三种 clock 走 `clock_gettime`); `<thread>` `<mutex>` `<condition_variable>` 包装 pthread; `<filesystem>` (path / file_type / directory_iterator); `<expected>` C++23 (expected_int / expected_str 擦除模板); `<flat_map>` C++23 (int→int 二分查找); C++23 多维下标 `obj[i,j,k]` → `__dcc_multi_index_N`; `<regex>` 简化版 (回溯 NFA 解释器支持 `.`/`[]`/`[^]`/`*`/`+`/`?`/`|`/`()`/`^`/`$`); `<ranges>` 简化版 (filter/transform/take/reverse view); Concepts 语法层 (SFINAE 简化版); Modules 占位 (src/cpp/modules.rs) |
 | C 前端补洞 `_Pragma` 操作符 (M11.1) | ✅ | C99 `_Pragma("string")` 在 preproc 展开阶段累积到 `pending_pragmas: RefCell<Vec<String>>`，源块刷新时批量应用到 `process_directive` |
 | C 前端补洞 `_Pragma` 操作符 (M14) | ✅ | `_Pragma` 与 `#pragma` 共享同一条 `process_directive` 通路，自动具备 pack/weak/STDC/GCC diagnostic 处理 |
 | C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
@@ -235,7 +235,7 @@
 | 向量 binop 非 Ident 操作数 | `gen_scalar_vector_load` 从 rax 误读 | `gen_vector_to_temp` 物化到 slot |
 
 **当前 asm-offsets 状态**：解析 **0**、语义 **0**；`-O2` 不再 panic `unresolved label: found`；
-mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`tests/fixtures/asm_extended.c`）；
+mini-asm 位测试/扫描/popcnt/bswap/movnt/伪指令/lock+rep 等已编码（`tests/fixtures/c/asm_ext.c`）；
 全树 `-O2 -c` 仍可能遇 paravirt 类型冲突等后续阻塞。验收脚本：
 `scripts/test_asm_offsets.py`。
 

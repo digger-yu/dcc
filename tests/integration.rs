@@ -1071,7 +1071,7 @@ fn flto_relocatable_link_merges_section() {
 /// 三元 else 不得吞掉 association 列表的逗号。
 #[test]
 fn generic_with_ternary_controlling_expr_compiles() {
-    let source = include_str!("fixtures/m3_52_generic_tern.c");
+    let source = include_str!("fixtures/c/generic_tern.c");
     let (output, obj) = run_object_test("generic-ternary", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1084,7 +1084,7 @@ fn generic_with_ternary_controlling_expr_compiles() {
 /// `_Generic` 指针按 pointee 精确匹配，char* 与 int* 不得互匹配。
 #[test]
 fn generic_pointer_precise_match_compiles() {
-    let source = include_str!("fixtures/m3_51_generic_ptr.c");
+    let source = include_str!("fixtures/c/generic_ptr.c");
     let (output, obj) = run_object_test("generic-pointer", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1391,7 +1391,7 @@ fn riscv64_ir_global_cross_compile() {
 /// static_call 语句表达式 + 尾随调用: ({ ... ;; expr })()
 #[test]
 fn stmt_expr_trailing_call_compiles() {
-    let source = include_str!("fixtures/m3_47_stmt_call.c");
+    let source = include_str!("fixtures/c/stmt_call.c");
     let (output, obj) = run_object_test("stmt-expr-call", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1404,7 +1404,7 @@ fn stmt_expr_trailing_call_compiles() {
 /// __typeof__(struct T) 类型推导
 #[test]
 fn typeof_struct_compiles() {
-    let source = include_str!("fixtures/m3_46_typeof_struct.c");
+    let source = include_str!("fixtures/c/typeof_struct.c");
     let (output, obj) = run_object_test("typeof-struct", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1417,7 +1417,7 @@ fn typeof_struct_compiles() {
 /// percpu 声明: section 字符串拼接 + __aligned__((expr))
 #[test]
 fn percpu_decl_compiles() {
-    let source = include_str!("fixtures/m4_7_percpu.c");
+    let source = include_str!("fixtures/c/percpu.c");
     let (output, obj) = run_object_test("percpu-decl", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1430,7 +1430,7 @@ fn percpu_decl_compiles() {
 /// __attribute__((section("a" "b"))) 相邻字符串拼接
 #[test]
 fn section_concat_attribute_compiles() {
-    let source = include_str!("fixtures/m4_3_section.c");
+    let source = include_str!("fixtures/c/section.c");
     let (output, obj) = run_object_test("section-concat", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1443,7 +1443,7 @@ fn section_concat_attribute_compiles() {
 /// 指定初始化器 + asm inline（内核 GDT/jump_label 常见模式）
 #[test]
 fn gdt_designated_init_and_asm_inline_compiles() {
-    let source = include_str!("fixtures/m2_14_designated.c");
+    let source = include_str!("fixtures/c/designated.c");
     let (output, obj) = run_object_test("gdt-designated-init", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1456,7 +1456,7 @@ fn gdt_designated_init_and_asm_inline_compiles() {
 /// 逗号分隔位域: u16 a:8, b:4, c:1（desc_struct 模式）
 #[test]
 fn bitfield_comma_separated_compiles() {
-    let source = include_str!("fixtures/m2_10_bitfield.c");
+    let source = include_str!("fixtures/c/bitfield.c");
     let (output, obj) = run_object_test("bitfield-comma", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1469,7 +1469,7 @@ fn bitfield_comma_separated_compiles() {
 /// asm __inline volatile(...) 限定符
 #[test]
 fn asm_inline_qualifier_compiles() {
-    let source = include_str!("fixtures/m3_17_asm_inline.c");
+    let source = include_str!("fixtures/c/asm_inline.c");
     let (output, obj) = run_object_test("asm-inline-qual", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1482,7 +1482,7 @@ fn asm_inline_qualifier_compiles() {
 /// 结构体空字段: struct { int a; ; }（lockdep class 宏）
 #[test]
 fn struct_empty_field_compiles() {
-    let source = include_str!("fixtures/m2_11_struct_empty.c");
+    let source = include_str!("fixtures/c/struct_empty.c");
     let (output, obj) = run_object_test("struct-empty-field", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1495,7 +1495,7 @@ fn struct_empty_field_compiles() {
 /// GNU __auto_type 类型推导
 #[test]
 fn auto_type_decl_compiles() {
-    let source = include_str!("fixtures/m3_44_auto_type.c");
+    let source = include_str!("fixtures/c/auto_type.c");
     let (output, obj) = run_object_test("auto-type", source);
     let _ = fs::remove_file(obj);
     assert!(
@@ -1508,7 +1508,7 @@ fn auto_type_decl_compiles() {
 /// _Static_assert + __builtin_offsetof 编译期求值
 #[test]
 fn static_assert_offsetof_compiles() {
-    let source = include_str!("fixtures/m3_60_sassert_off.c");
+    let source = include_str!("fixtures/c/sassert_off.c");
     let output = run_syntax_test("static-assert-offsetof", source);
     assert!(
         output.status.success(),
@@ -1520,7 +1520,7 @@ fn static_assert_offsetof_compiles() {
 /// object-like 宏别名 + 函数式宏链式展开
 #[test]
 fn div_round_up_macro_expands() {
-    let source = include_str!("fixtures/m4_9_div_round_up.c");
+    let source = include_str!("fixtures/c/div_round_up.c");
     let output = run_syntax_test("div-round-up", source);
     assert!(
         output.status.success(),
@@ -1532,7 +1532,7 @@ fn div_round_up_macro_expands() {
 /// 结构体多维数组字段
 #[test]
 fn multidim_array_field_compiles() {
-    let source = include_str!("fixtures/m2_12_multidim.c");
+    let source = include_str!("fixtures/c/multidim.c");
     let output = run_syntax_test("multidim-array-field", source);
     assert!(
         output.status.success(),
@@ -1544,7 +1544,7 @@ fn multidim_array_field_compiles() {
 /// void __attribute__(...) *fn(): 属性在返回类型与指针声明符之间
 #[test]
 fn attr_ptr_func_decl_compiles() {
-    let source = include_str!("fixtures/m3_25_attr_ptr.c");
+    let source = include_str!("fixtures/c/attr_ptr.c");
     let output = run_syntax_test("attr-ptr-func", source);
     assert!(
         output.status.success(),
@@ -1556,7 +1556,7 @@ fn attr_ptr_func_decl_compiles() {
 /// 语句表达式内 typeof 局部声明
 #[test]
 fn vfs_pressure_stmt_expr_compiles() {
-    let source = include_str!("fixtures/m3_50_stmt_vfs.c");
+    let source = include_str!("fixtures/c/stmt_vfs.c");
     let output = run_syntax_test("vfs-pressure", source);
     assert!(
         output.status.success(),
@@ -1568,7 +1568,7 @@ fn vfs_pressure_stmt_expr_compiles() {
 /// GNU 省略中间操作数的三元运算符 x ?: y
 #[test]
 fn gnu_elvis_operator_compiles() {
-    let source = include_str!("fixtures/m3_61_elvis.c");
+    let source = include_str!("fixtures/c/elvis.c");
     let output = run_syntax_test("gnu-elvis", source);
     assert!(
         output.status.success(),
@@ -1580,7 +1580,7 @@ fn gnu_elvis_operator_compiles() {
 /// 零参 function-like 宏 current_thread_info() + bitop 链
 #[test]
 fn current_thread_info_macro_compiles() {
-    let source = include_str!("fixtures/m4_8_thread_info.c");
+    let source = include_str!("fixtures/c/thread_info.c");
     let output = run_syntax_test("current-thread-info", source);
     assert!(
         output.status.success(),
@@ -1592,7 +1592,7 @@ fn current_thread_info_macro_compiles() {
 /// 三元表达式指针分支可被解引用
 #[test]
 fn ternary_ptr_deref_compiles() {
-    let source = include_str!("fixtures/m2_15_ternary_ptr.c");
+    let source = include_str!("fixtures/c/ternary_ptr.c");
     let output = run_syntax_test("ternary-ptr-deref", source);
     assert!(
         output.status.success(),
@@ -1604,7 +1604,7 @@ fn ternary_ptr_deref_compiles() {
 /// GNU 局部数字标签 6: / 6f / 6b
 #[test]
 fn asm_local_label_compiles() {
-    let source = include_str!("fixtures/m3_15_asm_local.c");
+    let source = include_str!("fixtures/c/asm_local.c");
     let (output, _obj) = run_object_test("asm-local-label", source);
     assert!(
         output.status.success(),
@@ -1616,7 +1616,7 @@ fn asm_local_label_compiles() {
 /// 同行局部标签 N:insn（如 1:jmp 2f）
 #[test]
 fn asm_label_insn_same_line_compiles() {
-    let source = include_str!("fixtures/m3_16_asm_label.c");
+    let source = include_str!("fixtures/c/asm_label.c");
     let (output, _obj) = run_object_test("asm-label-insn", source);
     assert!(
         output.status.success(),
@@ -1628,7 +1628,7 @@ fn asm_label_insn_same_line_compiles() {
 /// struct __attribute__((__may_alias__)) name
 #[test]
 fn may_alias_struct_compiles() {
-    let source = include_str!("fixtures/m4_12_may_alias.c");
+    let source = include_str!("fixtures/c/may_alias.c");
     let (output, _obj) = run_object_test("may-alias-struct", source);
     assert!(
         output.status.success(),
@@ -1640,7 +1640,7 @@ fn may_alias_struct_compiles() {
 /// NOFAIL / # 字符串化：多行实参折叠为单行字面量
 #[test]
 fn nofail_stringify_compiles() {
-    let source = include_str!("fixtures/m3_42_stringify.c");
+    let source = include_str!("fixtures/c/stringify.c");
     let (output, _obj) = run_object_test("nofail-stringify", source);
     assert!(
         output.status.success(),
@@ -1652,7 +1652,7 @@ fn nofail_stringify_compiles() {
 /// GCC 兼容：相同类型的重复 typedef 不报错
 #[test]
 fn compat_typedef_redefinition_compiles() {
-    let source = include_str!("fixtures/m2_6_typedef.c");
+    let source = include_str!("fixtures/c/typedef.c");
     let (output, _obj) = run_object_test("compat-typedef", source);
     assert!(
         output.status.success(),
@@ -1664,7 +1664,7 @@ fn compat_typedef_redefinition_compiles() {
 /// 局部变量可遮蔽全局函数名（index/basename 等 libc 符号）
 #[test]
 fn local_shadows_libc_function_name() {
-    let source = include_str!("fixtures/m4_2_shadow.c");
+    let source = include_str!("fixtures/c/shadow.c");
     let (output, exe) = run_compile_and_run("shadow-libc-name", source);
     assert!(
         output.status.success(),
@@ -1677,7 +1677,7 @@ fn local_shadows_libc_function_name() {
 /// typeof(_Generic(...))：内核 READ_ONCE 类宏展开形态
 #[test]
 fn typeof_generic_read_once_compiles() {
-    let source = include_str!("fixtures/m3_45_typeof_generic.c");
+    let source = include_str!("fixtures/c/typeof_generic.c");
     let (output, exe) = run_compile_and_run("typeof-generic-read-once", source);
     assert!(
         output.status.success(),
@@ -1690,7 +1690,7 @@ fn typeof_generic_read_once_compiles() {
 /// asm goto 模板行内 `#` 注释（jump_label.h objtool 标注）不污染标签名
 #[test]
 fn asm_goto_hash_comment_compiles() {
-    let source = include_str!("fixtures/m3_20_asm_goto.c");
+    let source = include_str!("fixtures/c/asm_goto.c");
     let (output, exe) = run_compile_and_run("asm-goto-hash-comment", source);
     assert!(
         output.status.success(),
@@ -1703,7 +1703,7 @@ fn asm_goto_hash_comment_compiles() {
 /// 非 Ident 向量表达式：嵌套 binop 与 `v = v + w` 赋值
 #[test]
 fn vector_binop_non_ident_run_returns_zero() {
-    let source = include_str!("fixtures/m3_67_vec_binop.c");
+    let source = include_str!("fixtures/c/vec_binop.c");
     let (output, exe) = run_compile_and_run("vector-binop-non-ident", source);
     assert!(
         output.status.success(),
@@ -1716,7 +1716,7 @@ fn vector_binop_non_ident_run_returns_zero() {
 /// 全局 SIMD 向量复制与逐元素运算
 #[test]
 fn vector_global_copy_compiles() {
-    let source = include_str!("fixtures/m3_65_vec_global.c");
+    let source = include_str!("fixtures/c/vec_global.c");
     let (output, _obj) = run_object_test("vector-global", source);
     assert!(
         output.status.success(),
@@ -1728,7 +1728,7 @@ fn vector_global_copy_compiles() {
 /// 全局向量初始化 + 运行时求值（期望 exit 0）
 #[test]
 fn vector_global_run_returns_zero() {
-    let source = include_str!("fixtures/m3_66_vec_run.c");
+    let source = include_str!("fixtures/c/vec_run.c");
     let (output, exe) = run_compile_and_run("vector-global-run", source);
     assert!(
         output.status.success(),
@@ -1742,7 +1742,7 @@ fn vector_global_run_returns_zero() {
 /// 向量 InitList rvalue（复合字面量运算）
 #[test]
 fn vector_init_rvalue_run_returns_zero() {
-    let source = include_str!("fixtures/m3_69_vec_init.c");
+    let source = include_str!("fixtures/c/vec_init.c");
     let (output, exe) = run_compile_and_run("vector-init-rvalue", source);
     assert!(
         output.status.success(),
@@ -1756,7 +1756,7 @@ fn vector_init_rvalue_run_returns_zero() {
 /// _Complex 除法 codegen
 #[test]
 fn complex_div_run_returns_zero() {
-    let source = include_str!("fixtures/m3_57_complex_div.c");
+    let source = include_str!("fixtures/c/complex_div.c");
     let (output, exe) = run_compile_and_run("complex-div", source);
     assert!(
         output.status.success(),
@@ -1770,7 +1770,7 @@ fn complex_div_run_returns_zero() {
 /// __builtin_object_size 编译期折叠
 #[test]
 fn object_size_builtin_run_returns_zero() {
-    let source = include_str!("fixtures/m3_40_objsize2.c");
+    let source = include_str!("fixtures/c/objsize2.c");
     let (output, exe) = run_compile_and_run("object-size-builtin", source);
     assert!(
         output.status.success(),
@@ -1788,7 +1788,7 @@ fn object_size_builtin_run_returns_zero() {
 ///       不再报 "expected ')', got KwInt", 且运行时能正确取值.
 #[test]
 fn vector_size_cast_in_expression_run_returns_zero() {
-    let source = include_str!("fixtures/m3_70_vec_cast.c");
+    let source = include_str!("fixtures/c/vec_cast.c");
     let (output, exe) = run_compile_and_run("vector-size-cast-in-expr", source);
     assert!(
         output.status.success(),
@@ -1805,7 +1805,7 @@ fn vector_size_cast_in_expression_run_returns_zero() {
 /// __builtin_object_size FORTIFY 模式（数组/成员）
 #[test]
 fn builtin_object_size_fortify_run_returns_zero() {
-    let source = include_str!("fixtures/m3_38_obj_size.c");
+    let source = include_str!("fixtures/c/obj_size.c");
     let (output, exe) = run_compile_and_run("builtin-os-fortify", source);
     assert!(
         output.status.success(),
@@ -1818,7 +1818,7 @@ fn builtin_object_size_fortify_run_returns_zero() {
 /// __builtin_apply / __builtin_return
 #[test]
 fn builtin_apply_return_run_returns_zero() {
-    let source = include_str!("fixtures/m3_35_apply_ret.c");
+    let source = include_str!("fixtures/c/apply_ret.c");
     let (output, exe) = run_compile_and_run("builtin-apply-return", source);
     assert!(
         output.status.success(),
@@ -1831,7 +1831,7 @@ fn builtin_apply_return_run_returns_zero() {
 /// __builtin_prefetch void no-op
 #[test]
 fn builtin_prefetch_compiles() {
-    let source = include_str!("fixtures/m3_36_prefetch.c");
+    let source = include_str!("fixtures/c/prefetch.c");
     let (output, _obj) = run_object_test("builtin-prefetch", source);
     assert!(
         output.status.success(),
@@ -1843,7 +1843,7 @@ fn builtin_prefetch_compiles() {
 /// inline asm: lock cmpxchg 内存操作数
 #[test]
 fn asm_cmpxchg_mem_compiles() {
-    let source = include_str!("fixtures/m3_18_asm_cmpxchg.c");
+    let source = include_str!("fixtures/c/asm_cmpxchg.c");
     let (output, _obj) = run_object_test("asm-cmpxchg-mem", source);
     assert!(
         output.status.success(),
@@ -1855,7 +1855,7 @@ fn asm_cmpxchg_mem_compiles() {
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {
-    let source = include_str!("fixtures/m3_14_asm_ext.c");
+    let source = include_str!("fixtures/c/asm_ext.c");
     let (output, _obj) = run_object_test("asm-extended", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -1871,7 +1871,7 @@ fn asm_extended_compiles_without_nop_fallback() {
 /// __int128 SysV 双寄存器传参与返回值
 #[test]
 fn int128_call_abi_run_returns_zero() {
-    let source = include_str!("fixtures/m3_55_int128_abi.c");
+    let source = include_str!("fixtures/c/int128_abi.c");
     let (output, exe) = run_compile_and_run("int128-call-abi", source);
     assert!(
         output.status.success(),
@@ -1885,7 +1885,7 @@ fn int128_call_abi_run_returns_zero() {
 /// __int128 乘/除/取模运行时正确性
 #[test]
 fn int128_mul_div_mod_run_returns_zero() {
-    let source = include_str!("fixtures/m3_54_int128_arith.c");
+    let source = include_str!("fixtures/c/int128_arith.c");
     let (output, exe) = run_compile_and_run("int128-mul-div-mod", source);
     assert!(
         output.status.success(),
@@ -1899,7 +1899,7 @@ fn int128_mul_div_mod_run_returns_zero() {
 /// M13.1: float/double 取模软件实装 (divss/divsd + trunc)
 #[test]
 fn float_mod_run_returns_zero() {
-    let source = include_str!("fixtures/m2_8_float_mod.c");
+    let source = include_str!("fixtures/c/float_mod.c");
     let (output, _exe) = run_compile_and_run("float-mod", source);
     assert!(
         output.status.success(),
@@ -1916,7 +1916,7 @@ fn float_mod_run_returns_zero() {
 /// M13.1: __int128 &&/|| 高 64 位合并后再 test
 #[test]
 fn int128_logical_run_returns_zero() {
-    let source = include_str!("fixtures/m3_53_int128_log.c");
+    let source = include_str!("fixtures/c/int128_log.c");
     let (output, _exe) = run_compile_and_run("int128-logical", source);
     assert!(
         output.status.success(),
@@ -1933,7 +1933,7 @@ fn int128_logical_run_returns_zero() {
 /// M13.1: asm 约束扩展 (含 XMM "x" 输入 prepare + 写回)
 #[test]
 fn asm_constraints_ext_compiles_and_runs() {
-    let source = include_str!("fixtures/m3_19_asm_constr.c");
+    let source = include_str!("fixtures/c/asm_constr.c");
     let (output, _exe) = run_compile_and_run("asm-constraints-ext", source);
     assert!(
         output.status.success(),
@@ -1950,7 +1950,7 @@ fn asm_constraints_ext_compiles_and_runs() {
 /// M13.1: 全局数组 [rip+disp32+idx*scale] 单指令加载
 #[test]
 fn global_indexed_run_returns_zero() {
-    let source = include_str!("fixtures/m2_13_global_idx.c");
+    let source = include_str!("fixtures/c/global_idx.c");
     let (output, _exe) = run_compile_and_run("global-indexed", source);
     assert!(
         output.status.success(),
@@ -1967,7 +1967,7 @@ fn global_indexed_run_returns_zero() {
 /// SIMD 浮点向量：标量 SSE 逐元素 +/-/×
 #[test]
 fn vector_float_scalar_run_returns_zero() {
-    let source = include_str!("fixtures/m3_68_vec_fscalar.c");
+    let source = include_str!("fixtures/c/vec_fscalar.c");
     let (output, exe) = run_compile_and_run("vector-float-scalar", source);
     assert!(
         output.status.success(),
@@ -1981,7 +1981,7 @@ fn vector_float_scalar_run_returns_zero() {
 /// mini-asm 内核扩展：rol/prefetch/movss/addss
 #[test]
 fn asm_kernel_extra_compiles_without_nop_fallback() {
-    let source = include_str!("fixtures/m3_21_asm_kernel.c");
+    let source = include_str!("fixtures/c/asm_kernel.c");
     let (output, _obj) = run_object_test("asm-kernel-extra", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -1997,7 +1997,7 @@ fn asm_kernel_extra_compiles_without_nop_fallback() {
 /// mini-asm 补全 (高): 段寄存器 / 系统指令 / 内核启动 / 虚拟化指令
 #[test]
 fn asm_paravirt_boot_compiles_without_nop_fallback() {
-    let source = include_str!("fixtures/m3_22_asm_paravirt.c");
+    let source = include_str!("fixtures/c/asm_paravirt.c");
     let (output, _obj) = run_object_test("asm-paravirt-boot", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -2013,7 +2013,7 @@ fn asm_paravirt_boot_compiles_without_nop_fallback() {
 /// 完整指令子集 (M13): AVX/AVX2/AVX-VNNI + AES-NI/SHA + FMA/F16C + TSX + AMX
 #[test]
 fn asm_avx_aes_fma_tsx_compiles_without_nop_fallback() {
-    let source = include_str!("fixtures/m3_23_asm_avx.c");
+    let source = include_str!("fixtures/c/asm_avx.c");
     let (output, _obj) = run_object_test("asm-avx-aes-fma-tsx", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -2029,7 +2029,7 @@ fn asm_avx_aes_fma_tsx_compiles_without_nop_fallback() {
 /// __builtin_constant_p：编译期常量判定（含 __int128 表达式）
 #[test]
 fn builtin_constant_p_full_run_returns_zero() {
-    let source = include_str!("fixtures/m3_31_constp.c");
+    let source = include_str!("fixtures/c/constp.c");
     let (output, exe) = run_compile_and_run("builtin-constant-p-full", source);
     assert!(
         output.status.success(),
@@ -2043,7 +2043,7 @@ fn builtin_constant_p_full_run_returns_zero() {
 /// M12+ builtins: rotate/clrsb/fma/strcasecmp/FILE/LINE/FUNCTION/classify_type 等
 #[test]
 fn builtin_m12_extra_run_returns_zero() {
-    let source = include_str!("fixtures/m3_43_m12_builtins.c");
+    let source = include_str!("fixtures/c/builtins_misc.c");
     let (output, exe) = run_compile_and_run("builtin-m12-extra", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
@@ -2054,7 +2054,7 @@ fn builtin_m12_extra_run_returns_zero() {
 /// M12+ builtins: rotate / clrsb / fma 综合测试
 #[test]
 fn builtin_rotate_clrsb_run_returns_zero() {
-    let source = include_str!("fixtures/m3_37_rotate.c");
+    let source = include_str!("fixtures/c/rotate.c");
     let (output, exe) = run_compile_and_run("builtin-rotate-clrsb", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
@@ -2065,7 +2065,7 @@ fn builtin_rotate_clrsb_run_returns_zero() {
 /// M12+ builtins: strcasecmp / strncasecmp (走 libc)
 #[test]
 fn builtin_strcasecmp_run_returns_zero() {
-    let source = include_str!("fixtures/m3_39_strcasecmp.c");
+    let source = include_str!("fixtures/c/strcasecmp.c");
     let (output, exe) = run_compile_and_run("builtin-strcasecmp", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
@@ -2077,7 +2077,7 @@ fn builtin_strcasecmp_run_returns_zero() {
 /// __builtin_PRETTY_FUNCTION / __func__ / __FUNCTION__
 #[test]
 fn builtin_file_line_func_run_returns_zero() {
-    let source = include_str!("fixtures/m3_33_file_line.c");
+    let source = include_str!("fixtures/c/file_line.c");
     let (output, exe) = run_compile_and_run("builtin-file-line-func", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
@@ -2088,7 +2088,7 @@ fn builtin_file_line_func_run_returns_zero() {
 /// M12+ builtins: classify_type / types_compatible_p
 #[test]
 fn builtin_classify_compat_run_returns_zero() {
-    let source = include_str!("fixtures/m3_32_classify.c");
+    let source = include_str!("fixtures/c/classify.c");
     let (output, exe) = run_compile_and_run("builtin-classify-compat", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
@@ -2099,7 +2099,7 @@ fn builtin_classify_compat_run_returns_zero() {
 /// M12+ builtins: choose_expr + constant_p + object_size 综合
 #[test]
 fn builtin_choose_full_run_returns_zero() {
-    let source = include_str!("fixtures/m3_34_choose.c");
+    let source = include_str!("fixtures/c/choose.c");
     let (output, exe) = run_compile_and_run("builtin-choose-full", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
@@ -2110,7 +2110,7 @@ fn builtin_choose_full_run_returns_zero() {
 /// always_inline / noinline：IR 内联 pass 尊重属性
 #[test]
 fn inline_attrs_o1_run_returns_zero() {
-    let source = include_str!("fixtures/m4_10_inline.c");
+    let source = include_str!("fixtures/c/inline.c");
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-inline-attrs-{}.c", std::process::id()));
     let exe_path = dir.join(format!("dcc-inline-attrs-{}", std::process::id()));
@@ -2141,7 +2141,7 @@ fn inline_attrs_o1_run_returns_zero() {
 #[test]
 #[cfg(unix)]
 fn unknown_builtin_warning_zero_and_ud2() {
-    let source = include_str!("fixtures/m3_41_unk_builtin.c");
+    let source = include_str!("fixtures/c/unk_builtin.c");
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-unknown-builtin-{}.c", std::process::id()));
     let object_path = dir.join(format!("dcc-unknown-builtin-{}.o", std::process::id()));
@@ -2197,7 +2197,7 @@ fn run_compile_o(name: &str, source: &str, opt: &str) -> (std::process::Output, 
 #[test]
 #[cfg(unix)]
 fn always_inline_o0_run_returns_zero() {
-    let source = include_str!("fixtures/m4_11_always_inline.c");
+    let source = include_str!("fixtures/c/always_inline.c");
     let (output, exe) = run_compile_o("always-inline-o0", source, "-O0");
     assert!(
         output.status.success(),
@@ -2213,7 +2213,7 @@ fn always_inline_o0_run_returns_zero() {
 #[test]
 #[cfg(unix)]
 fn opt_gvn_o2_run_returns_zero() {
-    let source = include_str!("fixtures/m16_8_gvn.c");
+    let source = include_str!("fixtures/opt/gvn.c");
     let (output, exe) = run_compile_o("opt-gvn", source, "-O2");
     assert!(
         output.status.success(),
@@ -2229,7 +2229,7 @@ fn opt_gvn_o2_run_returns_zero() {
 #[test]
 #[cfg(unix)]
 fn opt_loop_unroll_o3_run_returns_zero() {
-    let source = include_str!("fixtures/m16_9_unroll.c");
+    let source = include_str!("fixtures/opt/unroll.c");
     let (output, exe) = run_compile_o("opt-loop-unroll", source, "-O3");
     assert!(
         output.status.success(),
@@ -2245,7 +2245,7 @@ fn opt_loop_unroll_o3_run_returns_zero() {
 #[test]
 #[cfg(unix)]
 fn opt_loop_vectorize_o3_run_returns_zero() {
-    let source = include_str!("fixtures/m16_10_vecopt.c");
+    let source = include_str!("fixtures/opt/vecopt.c");
     let (output, exe) = run_compile_o("opt-loop-vectorize", source, "-O3");
     assert!(
         output.status.success(),
@@ -2260,7 +2260,7 @@ fn opt_loop_vectorize_o3_run_returns_zero() {
 /// 预处理残留的 _DECLARE_STATIC_KEY_0 → extern struct static_key_false
 #[test]
 fn static_key_maybe_compiles() {
-    let source = include_str!("fixtures/m4_6_skey_maybe.c");
+    let source = include_str!("fixtures/c/skey_maybe.c");
     let output = run_syntax_test("static-key-maybe", source);
     assert!(
         output.status.success(),
@@ -2271,7 +2271,7 @@ fn static_key_maybe_compiles() {
 
 #[test]
 fn static_key_chain_compiles() {
-    let source = include_str!("fixtures/m4_5_skey_chain.c");
+    let source = include_str!("fixtures/c/skey_chain.c");
     let output = run_syntax_test("static-key-chain", source);
     assert!(
         output.status.success(),
@@ -2282,7 +2282,7 @@ fn static_key_chain_compiles() {
 
 #[test]
 fn static_key_decl_compiles() {
-    let source = include_str!("fixtures/m4_4_skey_decl.c");
+    let source = include_str!("fixtures/c/skey_decl.c");
     let output = run_syntax_test("static-key-decl", source);
     assert!(
         output.status.success(),
@@ -2356,7 +2356,7 @@ fn lto_link_strips_unreferenced_static() {
 #[test]
 #[cfg(unix)]
 fn ms_extensions_compile_and_run() {
-    let source = include_str!("fixtures/m3_62_ms_ext.c");
+    let source = include_str!("fixtures/c/ms_ext.c");
     let (output, exe) = run_compile_and_run("ms-extensions", source);
     assert!(
         output.status.success(),
@@ -2372,7 +2372,7 @@ fn ms_extensions_compile_and_run() {
 #[test]
 #[cfg(unix)]
 fn attr_cleanup_compile_and_run() {
-    let source = include_str!("fixtures/m3_29_attr_cleanup.c");
+    let source = include_str!("fixtures/c/attr_cleanup.c");
     let (output, exe) = run_compile_and_run("attr-cleanup", source);
     assert!(
         output.status.success(),
@@ -2388,7 +2388,7 @@ fn attr_cleanup_compile_and_run() {
 #[test]
 #[cfg(unix)]
 fn attr_target_clones_compile_and_run() {
-    let source = include_str!("fixtures/m3_28_attr_clones.c");
+    let source = include_str!("fixtures/c/attr_clones.c");
     let (output, exe) = run_compile_and_run("attr-target-clones", source);
     assert!(
         output.status.success(),
@@ -2404,7 +2404,7 @@ fn attr_target_clones_compile_and_run() {
 #[test]
 #[cfg(unix)]
 fn attr_no_sanitize_compile_and_run() {
-    let source = include_str!("fixtures/m3_27_attr_nosan.c");
+    let source = include_str!("fixtures/c/attr_nosan.c");
     let (output, exe) = run_compile_and_run("attr-no-sanitize", source);
     assert!(
         output.status.success(),
@@ -2625,7 +2625,7 @@ int main(void) {
 #[test]
 #[cfg(unix)]
 fn attr_copy_returns_nonnull_compile_and_run() {
-    let source = include_str!("fixtures/m3_26_attr_copy.c");
+    let source = include_str!("fixtures/c/attr_copy.c");
     let (output, exe) = run_compile_and_run("attr-copy-returns-nonnull", source);
     assert!(
         output.status.success(),
@@ -2641,7 +2641,7 @@ fn attr_copy_returns_nonnull_compile_and_run() {
 #[test]
 #[cfg(unix)]
 fn pragma_family_compile_and_run() {
-    let source = include_str!("fixtures/m15_8_pragma_fam.c");
+    let source = include_str!("fixtures/c/pragma_fam.c");
     let (output, exe) = run_compile_and_run("pragma-family", source);
     assert!(
         output.status.success(),
@@ -2657,7 +2657,7 @@ fn pragma_family_compile_and_run() {
 #[test]
 #[cfg(unix)]
 fn pragma_operator_compile_and_run() {
-    let source = include_str!("fixtures/m15_9_pragma_op.c");
+    let source = include_str!("fixtures/c/pragma_op.c");
     let (output, exe) = run_compile_and_run("pragma-operator", source);
     assert!(
         output.status.success(),
@@ -2672,7 +2672,7 @@ fn pragma_operator_compile_and_run() {
 /// #warning: 编译时输出警告, 不中断
 #[test]
 fn user_warning_does_not_break_compile() {
-    let source = include_str!("fixtures/m4_14_user_diag.c");
+    let source = include_str!("fixtures/c/user_diag.c");
     let output = run_syntax_test("user-warning", source);
     assert!(
         output.status.success(),
@@ -2684,7 +2684,7 @@ fn user_warning_does_not_break_compile() {
 /// _Static_assert 字符串化消息: C23 单参, 失败时附加表达式文本
 #[test]
 fn static_assert_stringification_succeeds() {
-    let source = include_str!("fixtures/m3_59_sassert_msg.c");
+    let source = include_str!("fixtures/c/sassert_msg.c");
     let output = run_syntax_test("static-assert-msg", source);
     assert!(
         output.status.success(),
@@ -2731,7 +2731,7 @@ fn lto_single_object_relocatable_link() {
 #[test]
 #[cfg(unix)]
 fn thread_local_exec_returns_15() {
-    let src = include_str!("fixtures/m4_13_tls.c");
+    let src = include_str!("fixtures/c/tls_simple.c");
     let (out, exe) = run_compile_and_run("tls", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 15, "tls counter");
@@ -2741,7 +2741,7 @@ fn thread_local_exec_returns_15() {
 #[test]
 #[cfg(unix)]
 fn kr_old_style_function() {
-    let src = include_str!("fixtures/m2_9_kr_func.c");
+    let src = include_str!("fixtures/c/kr_func.c");
     let (out, exe) = run_compile_and_run("kr", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 7);
@@ -2760,7 +2760,7 @@ fn format_attr_warns_on_missing_arg() {
 #[test]
 #[cfg(unix)]
 fn stdatomic_macros_hosted() {
-    let src = include_str!("fixtures/m3_24_atomic.c");
+    let src = include_str!("fixtures/c/atomic.c");
     let (out, exe) = run_compile_and_run("atomic", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(run_exe(&exe), 7);
@@ -2805,7 +2805,7 @@ fn exec_elf_has_symtab() {
 #[test]
 #[cfg(unix)]
 fn m15_float_const_eval() {
-    let src = include_str!("fixtures/m15_float_const.c");
+    let src = include_str!("fixtures/c/float_const.c");
     let (out, exe) = run_compile_and_run("m15-float-const", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2817,7 +2817,7 @@ fn m15_float_const_eval() {
 #[test]
 #[cfg(unix)]
 fn m15_string_literal_and_concat() {
-    let src = include_str!("fixtures/m15_string_const.c");
+    let src = include_str!("fixtures/c/string_const.c");
     let (out, exe) = run_compile_and_run("m15-string-concat", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2829,7 +2829,7 @@ fn m15_string_literal_and_concat() {
 #[test]
 #[cfg(unix)]
 fn m15_address_const() {
-    let src = include_str!("fixtures/m15_address_const.c");
+    let src = include_str!("fixtures/c/address_const.c");
     let (out, exe) = run_compile_and_run("m15-addr-const", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2841,7 +2841,7 @@ fn m15_address_const() {
 #[test]
 #[cfg(unix)]
 fn m15_builtin_fold() {
-    let src = include_str!("fixtures/m15_builtin_fold.c");
+    let src = include_str!("fixtures/c/builtin_fold.c");
     let (out, exe) = run_compile_and_run("m15-builtin-fold", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2852,7 +2852,7 @@ fn m15_builtin_fold() {
 /// 严格类型检查: 隐式指针/整数转换 warning (不阻塞)
 #[test]
 fn m15_strict_warning_compile() {
-    let src = include_str!("fixtures/m15_strict_warning.c");
+    let src = include_str!("fixtures/c/strict_warning.c");
     let path = std::env::temp_dir().join(format!("dcc-m15-strict-{}.c", std::process::id()));
     fs::write(&path, src).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -2869,7 +2869,7 @@ fn m15_strict_warning_compile() {
 #[test]
 #[cfg(unix)]
 fn m15_bounds_check_inrange() {
-    let src = include_str!("fixtures/m15_bounds_check.c");
+    let src = include_str!("fixtures/c/bounds_check.c");
     let dir = std::env::temp_dir();
     let pid = std::process::id();
     let sp = dir.join(format!("dcc-m15-bounds-{pid}.c"));
@@ -2889,7 +2889,7 @@ fn m15_bounds_check_inrange() {
 #[test]
 #[cfg(unix)]
 fn m15_constexpr_function() {
-    let src = include_str!("fixtures/m15_constexpr.c");
+    let src = include_str!("fixtures/c/constexpr.c");
     let (out, exe) = run_compile_and_run("m15-constexpr", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2903,7 +2903,7 @@ fn m15_constexpr_function() {
 #[test]
 #[cfg(unix)]
 fn m16_ssa_ir() {
-    let src = include_str!("fixtures/m16_ssa_ir.c");
+    let src = include_str!("fixtures/opt/ssa_ir.c");
     let (out, exe) = run_compile_and_run("m16-ssa-ir", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2915,7 +2915,7 @@ fn m16_ssa_ir() {
 #[test]
 #[cfg(unix)]
 fn m16_strength_reduction() {
-    let src = include_str!("fixtures/m16_strength_reduction.c");
+    let src = include_str!("fixtures/opt/strength_reduction.c");
     let (out, exe) = run_compile_and_run("m16-strength", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2927,7 +2927,7 @@ fn m16_strength_reduction() {
 #[test]
 #[cfg(unix)]
 fn m16_cross_function_dce() {
-    let src = include_str!("fixtures/m16_cross_function_dce.c");
+    let src = include_str!("fixtures/opt/cross_function_dce.c");
     let (out, exe) = run_compile_and_run("m16-dce", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2939,7 +2939,7 @@ fn m16_cross_function_dce() {
 #[test]
 #[cfg(unix)]
 fn m16_sccp() {
-    let src = include_str!("fixtures/m16_sccp.c");
+    let src = include_str!("fixtures/opt/sccp.c");
     let (out, exe) = run_compile_and_run("m16-sccp", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2951,7 +2951,7 @@ fn m16_sccp() {
 #[test]
 #[cfg(unix)]
 fn m16_loop_opt() {
-    let src = include_str!("fixtures/m16_loop_opt.c");
+    let src = include_str!("fixtures/opt/loop_opt.c");
     let (out, exe) = run_compile_and_run("m16-loop-opt", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2963,7 +2963,7 @@ fn m16_loop_opt() {
 #[test]
 #[cfg(unix)]
 fn m16_tco() {
-    let src = include_str!("fixtures/m16_tco.c");
+    let src = include_str!("fixtures/opt/tco.c");
     let (out, exe) = run_compile_and_run("m16-tco", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2975,7 +2975,7 @@ fn m16_tco() {
 #[test]
 #[cfg(unix)]
 fn m16_function_attr() {
-    let src = include_str!("fixtures/m16_function_attr.c");
+    let src = include_str!("fixtures/opt/function_attr.c");
     let (out, exe) = run_compile_and_run("m16-attr", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -2989,7 +2989,7 @@ fn m16_function_attr() {
 #[test]
 #[cfg(unix)]
 fn m17_auto_deduce() {
-    let src = include_str!("fixtures/m17_auto_deduce.cpp");
+    let src = include_str!("fixtures/cpp/auto_deduce.cpp");
     let (out, _obj) = run_cpp_object_test("m17-auto-deduce", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -2999,7 +2999,7 @@ fn m17_auto_deduce() {
 #[test]
 #[cfg(unix)]
 fn m17_decltype() {
-    let src = include_str!("fixtures/m17_decltype.cpp");
+    let src = include_str!("fixtures/cpp/decltype.cpp");
     let (out, _obj) = run_cpp_object_test("m17-decltype", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3009,7 +3009,7 @@ fn m17_decltype() {
 #[test]
 #[cfg(unix)]
 fn m17_decltype_auto() {
-    let src = include_str!("fixtures/m17_decltype_auto.cpp");
+    let src = include_str!("fixtures/cpp/decltype_auto.cpp");
     let (out, _obj) = run_cpp_object_test("m17-decltype-auto", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3019,7 +3019,7 @@ fn m17_decltype_auto() {
 #[test]
 #[cfg(unix)]
 fn m17_explicit_ctor() {
-    let src = include_str!("fixtures/m17_explicit_ctor.cpp");
+    let src = include_str!("fixtures/cpp/explicit_ctor.cpp");
     let (out, _obj) = run_cpp_object_test("m17-explicit-ctor", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3029,7 +3029,7 @@ fn m17_explicit_ctor() {
 #[test]
 #[cfg(unix)]
 fn m17_final_override() {
-    let src = include_str!("fixtures/m17_final_override.cpp");
+    let src = include_str!("fixtures/cpp/final_override.cpp");
     let (out, _obj) = run_cpp_object_test("m17-final-override", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3039,7 +3039,7 @@ fn m17_final_override() {
 #[test]
 #[cfg(unix)]
 fn m17_friend() {
-    let src = include_str!("fixtures/m17_friend.cpp");
+    let src = include_str!("fixtures/cpp/friend.cpp");
     let (out, _obj) = run_cpp_object_test("m17-friend", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3049,7 +3049,7 @@ fn m17_friend() {
 #[test]
 #[cfg(unix)]
 fn m17_if_constexpr() {
-    let src = include_str!("fixtures/m17_if_constexpr.cpp");
+    let src = include_str!("fixtures/cpp/if_constexpr.cpp");
     let (out, _obj) = run_cpp_object_test("m17-if-constexpr", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3059,7 +3059,7 @@ fn m17_if_constexpr() {
 #[test]
 #[cfg(unix)]
 fn m17_inheriting_ctor() {
-    let src = include_str!("fixtures/m17_inheriting_ctor.cpp");
+    let src = include_str!("fixtures/cpp/inheriting_ctor.cpp");
     let (out, _obj) = run_cpp_object_test("m17-inheriting-ctor", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3069,7 +3069,7 @@ fn m17_inheriting_ctor() {
 #[test]
 #[cfg(unix)]
 fn m17_member_ptr() {
-    let src = include_str!("fixtures/m17_member_ptr.cpp");
+    let src = include_str!("fixtures/cpp/member_ptr.cpp");
     let (out, _obj) = run_cpp_object_test("m17-member-ptr", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3079,7 +3079,7 @@ fn m17_member_ptr() {
 #[test]
 #[cfg(unix)]
 fn m17_mutable() {
-    let src = include_str!("fixtures/m17_mutable.cpp");
+    let src = include_str!("fixtures/cpp/mutable.cpp");
     let (out, _obj) = run_cpp_object_test("m17-mutable", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3089,7 +3089,7 @@ fn m17_mutable() {
 #[test]
 #[cfg(unix)]
 fn m17_new_array() {
-    let src = include_str!("fixtures/m17_new_array.cpp");
+    let src = include_str!("fixtures/cpp/new_array.cpp");
     let (out, _obj) = run_cpp_object_test("m17-new-array", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3099,7 +3099,7 @@ fn m17_new_array() {
 #[test]
 #[cfg(unix)]
 fn m17_noexcept() {
-    let src = include_str!("fixtures/m17_noexcept.cpp");
+    let src = include_str!("fixtures/cpp/noexcept.cpp");
     let (out, _obj) = run_cpp_object_test("m17-noexcept", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3109,7 +3109,7 @@ fn m17_noexcept() {
 #[test]
 #[cfg(unix)]
 fn m17_placement_new() {
-    let src = include_str!("fixtures/m17_placement_new.cpp");
+    let src = include_str!("fixtures/cpp/placement_new.cpp");
     let (out, _obj) = run_cpp_object_test("m17-placement-new", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3119,7 +3119,7 @@ fn m17_placement_new() {
 #[test]
 #[cfg(unix)]
 fn m17_smoke() {
-    let src = include_str!("fixtures/m17_smoke.cpp");
+    let src = include_str!("fixtures/cpp/smoke.cpp");
     let (out, _obj) = run_cpp_object_test("m17-smoke", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3129,7 +3129,7 @@ fn m17_smoke() {
 #[test]
 #[cfg(unix)]
 fn m17_typeid() {
-    let src = include_str!("fixtures/m17_typeid.cpp");
+    let src = include_str!("fixtures/cpp/typeid.cpp");
     let (out, _obj) = run_cpp_object_test("m17-typeid", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3139,7 +3139,7 @@ fn m17_typeid() {
 #[test]
 #[cfg(unix)]
 fn m17_volatile_member() {
-    let src = include_str!("fixtures/m17_volatile_member.cpp");
+    let src = include_str!("fixtures/cpp/volatile_member.cpp");
     let (out, _obj) = run_cpp_object_test("m17-volatile-member", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3153,7 +3153,7 @@ fn m17_volatile_member() {
 #[test]
 #[cfg(unix)]
 fn m18_chrono() {
-    let src = include_str!("fixtures/m18_chrono.cpp");
+    let src = include_str!("fixtures/cpp/chrono.cpp");
     let (out, _obj) = run_cpp_object_test("m18-chrono", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3162,7 +3162,7 @@ fn m18_chrono() {
 #[test]
 #[cfg(unix)]
 fn m18_thread_mutex() {
-    let src = include_str!("fixtures/m18_thread_mutex.cpp");
+    let src = include_str!("fixtures/cpp/thread_mutex.cpp");
     let (out, _obj) = run_cpp_object_test("m18-thread-mutex", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3171,7 +3171,7 @@ fn m18_thread_mutex() {
 #[test]
 #[cfg(unix)]
 fn m18_condition_variable() {
-    let src = include_str!("fixtures/m18_condition_variable.cpp");
+    let src = include_str!("fixtures/cpp/condition_variable.cpp");
     let (out, _obj) = run_cpp_object_test("m18-cv", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3180,7 +3180,7 @@ fn m18_condition_variable() {
 #[test]
 #[cfg(unix)]
 fn m18_filesystem() {
-    let src = include_str!("fixtures/m18_filesystem.cpp");
+    let src = include_str!("fixtures/cpp/filesystem.cpp");
     let (out, _obj) = run_cpp_object_test("m18-filesystem", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3189,7 +3189,7 @@ fn m18_filesystem() {
 #[test]
 #[cfg(unix)]
 fn m18_expected() {
-    let src = include_str!("fixtures/m18_expected.cpp");
+    let src = include_str!("fixtures/cpp/expected.cpp");
     let (out, _obj) = run_cpp_object_test("m18-expected", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3198,7 +3198,7 @@ fn m18_expected() {
 #[test]
 #[cfg(unix)]
 fn m18_flat_map() {
-    let src = include_str!("fixtures/m18_flat_map.cpp");
+    let src = include_str!("fixtures/cpp/flat_map.cpp");
     let (out, _obj) = run_cpp_object_test("m18-flat-map", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3207,7 +3207,7 @@ fn m18_flat_map() {
 #[test]
 #[cfg(unix)]
 fn m18_multi_index() {
-    let src = include_str!("fixtures/m18_multi_index.cpp");
+    let src = include_str!("fixtures/cpp/multi_index.cpp");
     let (out, _obj) = run_cpp_object_test("m18-multi-index", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3216,7 +3216,7 @@ fn m18_multi_index() {
 #[test]
 #[cfg(unix)]
 fn m18_regex() {
-    let src = include_str!("fixtures/m18_regex.cpp");
+    let src = include_str!("fixtures/cpp/regex.cpp");
     let (out, _obj) = run_cpp_object_test("m18-regex", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3225,7 +3225,7 @@ fn m18_regex() {
 #[test]
 #[cfg(unix)]
 fn m18_ranges() {
-    let src = include_str!("fixtures/m18_ranges.cpp");
+    let src = include_str!("fixtures/cpp/ranges.cpp");
     let (out, _obj) = run_cpp_object_test("m18-ranges", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3234,7 +3234,7 @@ fn m18_ranges() {
 #[test]
 #[cfg(unix)]
 fn m18_concept() {
-    let src = include_str!("fixtures/m18_concept.cpp");
+    let src = include_str!("fixtures/cpp/concept.cpp");
     let (out, _obj) = run_cpp_object_test("m18-concept", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3243,7 +3243,7 @@ fn m18_concept() {
 #[test]
 #[cfg(unix)]
 fn m18_modules() {
-    let src = include_str!("fixtures/m18_modules.cpp");
+    let src = include_str!("fixtures/cpp/modules.cpp");
     let (out, _obj) = run_cpp_object_test("m18-modules", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let _ = fs::remove_file(_obj);
@@ -3254,7 +3254,7 @@ fn m18_modules() {
 #[test]
 #[cfg(unix)]
 fn m19_counter_monotonic() {
-    let src = include_str!("fixtures/m19_counter.c");
+    let src = include_str!("fixtures/c/counter.c");
     let (out, exe) = run_compile_and_run("m19-counter", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3266,7 +3266,7 @@ fn m19_counter_monotonic() {
 #[test]
 #[cfg(unix)]
 fn m19_counter_in_function_macro() {
-    let src = include_str!("fixtures/m19_counter_in_macro.c");
+    let src = include_str!("fixtures/c/counter_in_macro.c");
     let (out, exe) = run_compile_and_run("m19-counter-macro", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3278,7 +3278,7 @@ fn m19_counter_in_function_macro() {
 #[test]
 #[cfg(unix)]
 fn m19_va_opt_empty_and_nonempty() {
-    let src = include_str!("fixtures/m19_va_opt.c");
+    let src = include_str!("fixtures/c/va_opt.c");
     let (out, exe) = run_compile_and_run("m19-va-opt", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3290,7 +3290,7 @@ fn m19_va_opt_empty_and_nonempty() {
 #[test]
 #[cfg(unix)]
 fn m19_predefined_macros_available() {
-    let src = include_str!("fixtures/m19_predefined_macros.c");
+    let src = include_str!("fixtures/c/predefined_macros.c");
     let (out, exe) = run_compile_and_run("m19-predef", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3302,7 +3302,7 @@ fn m19_predefined_macros_available() {
 #[test]
 #[cfg(unix)]
 fn m19_pragma_locale_accepted() {
-    let src = include_str!("fixtures/m19_pragma_locale.c");
+    let src = include_str!("fixtures/c/pragma_locale.c");
     let (out, exe) = run_compile_and_run("m19-pragma-locale", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3315,7 +3315,7 @@ fn m19_pragma_locale_accepted() {
 #[test]
 #[cfg(unix)]
 fn m23_attr_retain_compiles_and_runs() {
-    let src = include_str!("fixtures/m23_attr_retain.c");
+    let src = include_str!("fixtures/c/attr_retain.c");
     let (out, exe) = run_compile_and_run("m23-attr-retain", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3327,7 +3327,7 @@ fn m23_attr_retain_compiles_and_runs() {
 #[test]
 #[cfg(unix)]
 fn m23_attr_used_compiles_and_runs() {
-    let src = include_str!("fixtures/m23_attr_used.c");
+    let src = include_str!("fixtures/c/attr_used.c");
     let (out, exe) = run_compile_and_run("m23-attr-used", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3339,7 +3339,7 @@ fn m23_attr_used_compiles_and_runs() {
 #[test]
 #[cfg(unix)]
 fn m23_attr_flatten_compiles_and_runs() {
-    let src = include_str!("fixtures/m23_attr_flatten.c");
+    let src = include_str!("fixtures/c/attr_flatten.c");
     let (out, exe) = run_compile_and_run("m23-attr-flatten", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3351,7 +3351,7 @@ fn m23_attr_flatten_compiles_and_runs() {
 #[test]
 #[cfg(unix)]
 fn m23_attr_deprecated_compiles_and_runs() {
-    let src = include_str!("fixtures/m23_attr_deprecated.c");
+    let src = include_str!("fixtures/c/attr_deprecated.c");
     let (out, exe) = run_compile_and_run("m23-attr-deprecated", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3364,7 +3364,7 @@ fn m23_attr_deprecated_compiles_and_runs() {
 #[test]
 #[cfg(unix)]
 fn m23_attr_ctor_priority_orders_correctly() {
-    let src = include_str!("fixtures/m23_attr_ctor_priority.c");
+    let src = include_str!("fixtures/c/attr_ctor_priority.c");
     let (out, exe) = run_compile_and_run("m23-attr-ctor-priority", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3377,7 +3377,7 @@ fn m23_attr_ctor_priority_orders_correctly() {
 #[test]
 #[cfg(unix)]
 fn m23_builtin_dbg_compiles_and_runs() {
-    let src = include_str!("fixtures/m23_builtin_dbg.c");
+    let src = include_str!("fixtures/c/builtin_dbg.c");
     let (out, exe) = run_compile_and_run("m23-builtin-dbg", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3390,7 +3390,7 @@ fn m23_builtin_dbg_compiles_and_runs() {
 #[test]
 #[cfg(unix)]
 fn m23_attr_retain_used_compiles_and_runs() {
-    let src = include_str!("fixtures/m23_attr_retain_used.c");
+    let src = include_str!("fixtures/c/attr_retain_used.c");
     let (out, exe) = run_compile_and_run("m23-attr-retain-used", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let rc = run_exe(&exe);
@@ -3405,7 +3405,7 @@ fn m23_attr_retain_used_compiles_and_runs() {
 /// `long double _Complex` 自由组合.
 #[test]
 fn double_complex_decl_run_returns_zero() {
-    let source = include_str!("fixtures/m3_56_complex_decl.c");
+    let source = include_str!("fixtures/c/complex_decl.c");
     let (output, exe) = run_compile_and_run("double-complex-decl", source);
     assert!(
         output.status.success(),
@@ -3421,7 +3421,7 @@ fn double_complex_decl_run_returns_zero() {
 /// `'` 时走宽字符路径; 解析层复用 parse_wide_str 输出 UTF-32LE.
 #[test]
 fn wide_char_literal_run_returns_zero() {
-    let source = include_str!("fixtures/m15_15_wide_lit.c");
+    let source = include_str!("fixtures/c/wide_lit.c");
     let (output, exe) = run_compile_and_run("wide-char-literal", source);
     assert!(
         output.status.success(),
@@ -3438,7 +3438,7 @@ fn wide_char_literal_run_returns_zero() {
 /// 编译为 -c 后, 用 nm 检查符号表.
 #[test]
 fn fenv_pass_through_emits_external_symbols() {
-    let source = include_str!("fixtures/m15_13_fenv.c");
+    let source = include_str!("fixtures/c/fenv.c");
     let (output, object_path) = run_object_test("fenv-pass-through", source);
     assert!(
         output.status.success(),
@@ -3470,7 +3470,7 @@ fn fenv_pass_through_emits_external_symbols() {
 /// 复杂数学函数被 dcc 发射为外部符号, 走 libm.
 #[test]
 fn cmath_pass_through_emits_external_symbols() {
-    let source = include_str!("fixtures/m15_12_cmath.c");
+    let source = include_str!("fixtures/c/cmath.c");
     let (output, object_path) = run_object_test("cmath-pass-through", source);
     assert!(
         output.status.success(),
@@ -3539,7 +3539,7 @@ fn fenv_pragma_parses_without_error() {
 /// 符号 (走 libc). 与 __builtin_str* 形式一致, 但作用于 wchar_t.
 #[test]
 fn wcs_builtins_forward_to_libc() {
-    let source = include_str!("fixtures/m15_16_wcs.c");
+    let source = include_str!("fixtures/c/wcs.c");
     let (output, object_path) = run_object_test("wcs-builtins", source);
     assert!(
         output.status.success(),
@@ -3736,7 +3736,7 @@ fn va_arg_x86_64_no_external_symbols() {
 /// x86_64 va_arg fixture 包含 sum_int5/sum_int13/sum_long5/sum_double5/sum_double8.
 #[test]
 fn va_arg_x86_64_fixture_compiles() {
-    let src = include_str!("fixtures/m3_63_va_arg.c");
+    let src = include_str!("fixtures/c/va_arg.c");
     let (output, object_path) = run_object_test("va-arg-fixture", src);
     assert!(
         output.status.success(),
@@ -3756,7 +3756,7 @@ fn va_arg_x86_64_fixture_compiles() {
 /// setjmp/longjmp 夹具能被 dcc 编译 (含 setjmp.h 调用).
 #[test]
 fn setjmp_x86_64_fixture_compiles() {
-    let src = include_str!("fixtures/m3_64_setjmp.c");
+    let src = include_str!("fixtures/c/setjmp.c");
     let (output, _object_path) = run_object_test("setjmp-fixture", src);
     assert!(
         output.status.success(),
@@ -3775,7 +3775,7 @@ fn setjmp_x86_64_fixture_compiles() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn setjmp_x86_64_eh_frame_has_cfi_ops() {
-    let src = include_str!("fixtures/m3_64_setjmp.c");
+    let src = include_str!("fixtures/c/setjmp.c");
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-setjmp-cfi-{}.c", std::process::id()));
     let object_path = dir.join(format!("dcc-setjmp-cfi-{}.o", std::process::id()));
@@ -3819,10 +3819,10 @@ fn setjmp_x86_64_eh_frame_has_cfi_ops() {
 }
 
 /// wchar_t wcs* / wmem* libc 转发 (Section 11 P0.1).
-/// 编译 + 链接 + 运行 fixtures/m15_14_wchar.c; 退出码 0 表示通过.
+/// 编译 + 链接 + 运行 fixtures/c/wchar.c; 退出码 0 表示通过.
 #[test]
 fn wchar_libc_fixture_runs() {
-    let src = include_str!("fixtures/m15_14_wchar.c");
+    let src = include_str!("fixtures/c/wchar.c");
     let (compile, code) = run_host_link_and_run("wchar-libc", src);
     if code != 0 {
         let stderr = String::from_utf8_lossy(&compile.stderr);
@@ -3831,10 +3831,10 @@ fn wchar_libc_fixture_runs() {
 }
 
 /// signal() libc 转发 (Section 11 P0.2) - 运行时路径.
-/// 编译 + 链接 + 运行 fixtures/m4_1_signal.c; 退出码 0 表示通过.
+/// 编译 + 链接 + 运行 fixtures/c/signal.c; 退出码 0 表示通过.
 #[test]
 fn signal_libc_fixture_runs() {
-    let src = include_str!("fixtures/m4_1_signal.c");
+    let src = include_str!("fixtures/c/signal.c");
     let (compile, code) = run_host_link_and_run("signal-libc", src);
     if code != 0 {
         let stderr = String::from_utf8_lossy(&compile.stderr);
@@ -3887,11 +3887,11 @@ int main(void) {
 }
 
 /// 复杂数学 cproj / cabs / carg libm 转发 (Section 11 P0.3).
-/// 编译 fixtures/m3_58_complex_libm.c, 验证 .o 引用 cproj / cabs / carg
+/// 编译 fixtures/c/complex_libm.c, 验证 .o 引用 cproj / cabs / carg
 /// 作为 undefined symbol (留给 host gcc -lm 解析), 然后链接运行.
 #[test]
 fn complex_libm_fixture_runs() {
-    let src = include_str!("fixtures/m3_58_complex_libm.c");
+    let src = include_str!("fixtures/c/complex_libm.c");
     let (compile, code) = run_host_link_and_run_with("complex-libm", src, &["-lm"]);
     if code != 0 {
         let stderr = String::from_utf8_lossy(&compile.stderr);
@@ -4155,7 +4155,7 @@ int main(void) { int x = 42; return f(&x); }
 #[test]
 #[cfg(unix)]
 fn p2_1_member_ptr_dotstar() {
-    let src = include_str!("fixtures/p2_1_member_ptr.cpp");
+    let src = include_str!("fixtures/cpp/member_ptr_deref.cpp");
     let (out, obj) = run_cpp_object_test("p2-1-member-ptr", src);
     let _ = fs::remove_file(&obj);
     assert!(
@@ -4172,7 +4172,7 @@ fn p2_1_member_ptr_dotstar() {
 #[test]
 #[cfg(unix)]
 fn p2_2_typeid_rtti() {
-    let src = include_str!("fixtures/p2_2_typeid.cpp");
+    let src = include_str!("fixtures/cpp/typeid_rtti.cpp");
     let (out, obj) = run_cpp_object_test("p2-2-typeid", src);
     let _ = fs::remove_file(&obj);
     assert!(
@@ -4189,7 +4189,7 @@ fn p2_2_typeid_rtti() {
 #[test]
 #[cfg(unix)]
 fn p2_3_template_arg_syntax() {
-    let src = include_str!("fixtures/p2_3_template_arg.cpp");
+    let src = include_str!("fixtures/cpp/template_arg.cpp");
     let (out, obj) = run_cpp_object_test("p2-3-template-arg", src);
     let _ = fs::remove_file(&obj);
     assert!(
@@ -4206,7 +4206,7 @@ fn p2_3_template_arg_syntax() {
 #[test]
 #[cfg(unix)]
 fn p2_4_new_arr_mangler() {
-    let src = include_str!("fixtures/p2_4_new_arr_mangler.cpp");
+    let src = include_str!("fixtures/cpp/new_arr_mangler.cpp");
     let (out, obj) = run_cpp_object_test("p2-4-new-arr-mangler", src);
     let _ = fs::remove_file(&obj);
     assert!(
@@ -4224,7 +4224,7 @@ fn p2_4_new_arr_mangler() {
 #[test]
 #[cfg(unix)]
 fn p2_5_new_array_alloc() {
-    let src = include_str!("fixtures/p2_5_new_array_alloc.cpp");
+    let src = include_str!("fixtures/cpp/new_array_alloc.cpp");
     let (out, obj) = run_cpp_object_test("p2-5-new-array-alloc", src);
     let _ = fs::remove_file(&obj);
     assert!(
@@ -4242,7 +4242,7 @@ fn p2_5_new_array_alloc() {
 #[test]
 #[cfg(unix)]
 fn p2_6_placement_new() {
-    let src = include_str!("fixtures/p2_6_placement_new.cpp");
+    let src = include_str!("fixtures/cpp/placement_new_ctor.cpp");
     let (out, obj) = run_cpp_object_test("p2-6-placement-new", src);
     let _ = fs::remove_file(&obj);
     assert!(
@@ -4261,7 +4261,7 @@ fn p2_6_placement_new() {
 #[test]
 #[cfg(unix)]
 fn m1_1_hello_world() {
-    let src = include_str!("fixtures/m1_1_hello.c");
+    let src = include_str!("fixtures/c/hello.c");
     let (out, code) = run_host_link_and_run("m1-1-hello", src);
     assert!(
         out.status.success(),
@@ -4279,7 +4279,7 @@ fn m1_1_hello_stdout() {
     let src_path = dir.join(format!("dcc-m1-1-stdout-{}.c", std::process::id()));
     let obj_path = dir.join(format!("dcc-m1-1-stdout-{}.o", std::process::id()));
     let exe_path = dir.join(format!("dcc-m1-1-stdout-{}", std::process::id()));
-    let src = include_str!("fixtures/m1_1_hello.c");
+    let src = include_str!("fixtures/c/hello.c");
     fs::write(&src_path, src).expect("write");
     let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
@@ -4314,8 +4314,8 @@ fn m1_1_hello_stdout() {
 #[cfg(unix)]
 fn m1_2_multi_file() {
     let dir = std::env::temp_dir();
-    let helper_src = include_str!("fixtures/m1_2_helper.c");
-    let main_src = include_str!("fixtures/m1_2_main.c");
+    let helper_src = include_str!("fixtures/c/helper.c");
+    let main_src = include_str!("fixtures/c/main.c");
     let h_path = dir.join(format!("dcc-m1-2-h-{}.c", std::process::id()));
     let m_path = dir.join(format!("dcc-m1-2-m-{}.c", std::process::id()));
     let h_obj = dir.join(format!("dcc-m1-2-h-{}.o", std::process::id()));
@@ -4362,7 +4362,7 @@ fn m1_2_multi_file() {
 #[test]
 #[cfg(unix)]
 fn m1_3_preprocessor() {
-    let src = include_str!("fixtures/m1_3_preproc.c");
+    let src = include_str!("fixtures/c/preproc.c");
     let dir = std::env::temp_dir();
     let src_path = dir.join(format!("dcc-m1-3-{}.c", std::process::id()));
     fs::write(&src_path, src).expect("write");
@@ -4404,7 +4404,7 @@ fn m1_3_preprocessor() {
 #[test]
 #[cfg(unix)]
 fn m1_4_elf_format() {
-    let src = include_str!("fixtures/m1_4_elf.c");
+    let src = include_str!("fixtures/c/elf.c");
     let (out, obj) = run_object_test("m1-4-elf", src);
     assert!(
         out.status.success(),
@@ -4477,7 +4477,7 @@ fn m1_4_elf_format() {
 #[test]
 #[cfg(unix)]
 fn m2_1_type_system() {
-    let src = include_str!("fixtures/m2_1_types.c");
+    let src = include_str!("fixtures/c/types.c");
     let (out, code) = run_host_link_and_run("m2-1-types", src);
     assert!(
         out.status.success(),
@@ -4492,7 +4492,7 @@ fn m2_1_type_system() {
 #[test]
 #[cfg(unix)]
 fn m2_2_struct_layout() {
-    let src = include_str!("fixtures/m2_2_struct.c");
+    let src = include_str!("fixtures/c/struct.c");
     let (out, code) = run_host_link_and_run("m2-2-struct", src);
     assert!(
         out.status.success(),
@@ -4506,7 +4506,7 @@ fn m2_2_struct_layout() {
 #[test]
 #[cfg(unix)]
 fn m2_3_integer_promotion() {
-    let src = include_str!("fixtures/m2_3_promotion.c");
+    let src = include_str!("fixtures/c/promotion.c");
     let (out, code) = run_host_link_and_run("m2-3-promotion", src);
     assert!(
         out.status.success(),
@@ -4521,7 +4521,7 @@ fn m2_3_integer_promotion() {
 #[test]
 #[cfg(unix)]
 fn m2_4_pointers() {
-    let src = include_str!("fixtures/m2_4_pointer.c");
+    let src = include_str!("fixtures/c/pointer.c");
     let (out, code) = run_host_link_and_run("m2-4-pointer", src);
     assert!(
         out.status.success(),
@@ -4536,7 +4536,7 @@ fn m2_4_pointers() {
 #[test]
 #[cfg(unix)]
 fn m2_5_float() {
-    let src = include_str!("fixtures/m2_5_float.c");
+    let src = include_str!("fixtures/c/float.c");
     let (out, code) = run_host_link_and_run("m2-5-float", src);
     assert!(
         out.status.success(),
@@ -4596,7 +4596,7 @@ fn m2_6_batch_compile() {
 #[test]
 #[cfg(unix)]
 fn m3_1_inline_asm() {
-    let src = include_str!("fixtures/m3_1_asm.c");
+    let src = include_str!("fixtures/c/asm.c");
     let (out, code) = run_host_link_and_run("m3-1-asm", src);
     assert!(
         out.status.success(),
@@ -4611,7 +4611,7 @@ fn m3_1_inline_asm() {
 #[test]
 #[cfg(unix)]
 fn m3_2_attributes() {
-    let src = include_str!("fixtures/m3_2_attrs.c");
+    let src = include_str!("fixtures/c/attrs.c");
     let (out, code) = run_host_link_and_run("m3-2-attrs", src);
     assert!(
         out.status.success(),
@@ -4625,7 +4625,7 @@ fn m3_2_attributes() {
 #[test]
 #[cfg(unix)]
 fn m3_3_statement_expressions() {
-    let src = include_str!("fixtures/m3_3_stmt_expr.c");
+    let src = include_str!("fixtures/c/stmt_expr.c");
     let (out, code) = run_host_link_and_run("m3-3-stmt-expr", src);
     assert!(
         out.status.success(),
@@ -4639,7 +4639,7 @@ fn m3_3_statement_expressions() {
 #[test]
 #[cfg(unix)]
 fn m3_4_typeof() {
-    let src = include_str!("fixtures/m3_4_typeof.c");
+    let src = include_str!("fixtures/c/typeof.c");
     let (out, code) = run_host_link_and_run("m3-4-typeof", src);
     assert!(
         out.status.success(),
@@ -4653,7 +4653,7 @@ fn m3_4_typeof() {
 #[test]
 #[cfg(unix)]
 fn m3_5_vla_zero_array() {
-    let src = include_str!("fixtures/m3_5_vla.c");
+    let src = include_str!("fixtures/c/vla.c");
     let (out, code) = run_host_link_and_run("m3-5-vla", src);
     assert!(
         out.status.success(),
@@ -4668,7 +4668,7 @@ fn m3_5_vla_zero_array() {
 #[test]
 #[cfg(unix)]
 fn m3_6_builtins() {
-    let src = include_str!("fixtures/m3_6_builtins.c");
+    let src = include_str!("fixtures/c/builtins.c");
     let (out, code) = run_host_link_and_run("m3-6-builtins", src);
     assert!(
         out.status.success(),
@@ -4682,7 +4682,7 @@ fn m3_6_builtins() {
 #[test]
 #[cfg(unix)]
 fn m3_7_weak_symbols() {
-    let src = include_str!("fixtures/m3_7_weak.c");
+    let src = include_str!("fixtures/c/weak.c");
     let (out, code) = run_host_link_and_run("m3-7-weak", src);
     assert!(
         out.status.success(),
@@ -4696,7 +4696,7 @@ fn m3_7_weak_symbols() {
 #[test]
 #[cfg(unix)]
 fn m3_8_visibility() {
-    let src = include_str!("fixtures/m3_8_visibility.c");
+    let src = include_str!("fixtures/c/visibility.c");
     let (out, code) = run_host_link_and_run("m3-8-visibility", src);
     assert!(
         out.status.success(),
@@ -4712,7 +4712,7 @@ fn m3_8_visibility() {
 #[test]
 #[cfg(unix)]
 fn m3_9_tls() {
-    let src = include_str!("fixtures/m3_9_tls.c");
+    let src = include_str!("fixtures/c/tls.c");
     let (out, exe) = run_compile_and_run("m3-9-tls", src);
     assert!(
         out.status.success(),
@@ -4729,7 +4729,7 @@ fn m3_9_tls() {
 #[test]
 #[cfg(unix)]
 fn m3_10_stack_canary() {
-    let src = include_str!("fixtures/m3_10_stack_canary.c");
+    let src = include_str!("fixtures/c/stack_canary.c");
     let (out, exe) = run_compile_and_run_flags("m3-10-canary", src, &["-fstack-protector"]);
     assert!(
         out.status.success(),
@@ -4747,7 +4747,7 @@ fn m3_10_stack_canary() {
 #[test]
 #[cfg(unix)]
 fn m3_11_got_func_addr() {
-    let src = include_str!("fixtures/m3_11_got_func.c");
+    let src = include_str!("fixtures/c/got_func.c");
     let (out, exe) = run_compile_and_run("m3-11-got", src);
     assert!(
         out.status.success(),

@@ -18,7 +18,7 @@ fn fixtures() -> std::path::PathBuf {
 }
 
 fn profile_src() -> std::path::PathBuf {
-    fixtures().join("profile.c")
+    fixtures().join("c/profile.c")
 }
 
 #[test]

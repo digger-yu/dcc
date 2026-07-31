@@ -95,7 +95,7 @@
 
 - [x] **15. `_Generic` 指针精确匹配**
   - 实现：association 按 pointee 匹配；`void*` 与对象指针兼容
-  - 验证：`tests/fixtures/generic_pointer.c`；libiberty **125/0/4**
+  - 验证：`tests/fixtures/c/generic_ptr.c`；libiberty **125/0/4**
 
 - [x] **16. 内联 asm 从 no-op 到最小可用**
   - 实现：约束 `"r"`/`"m"`/`"=r"`/`"+m"`、`memory` clobber；文件级 asm 原样输出

@@ -72,7 +72,7 @@ SIMD 指令子集完整实装：
 | AMX / AVX-VNNI | ✅ | `ldtilecfg`/`sttilecfg`/`tilezero`/`tileloadd`/`tilestored` + 4× `tdp*` + `vpdp*`；`tmm0–7` 寄存器解析 |
 | 寄存器名 | ✅ | `xmm`/`ymm`/`zmm`/`tmm`/`k0–7` 均可解析 |
 
-测试：`tests/fixtures/asm_avx_aes_fma_tsx.c`（含 AMX/VPINSR/EVEX/TSX xabort）+
+测试：`tests/fixtures/c/asm_avx.c`（含 AMX/VPINSR/EVEX/TSX xabort）+
 `asm_avx_aes_fma_tsx_compiles_without_nop_fallback` 本地 PASS。
 
 **M13.2 增量（2026-07-21）**：修复 `pinsr*`/`pextr*`/`extractps`
@@ -103,9 +103,9 @@ SIMD 指令子集完整实装：
 |------|---------|------------------|
 | 浮点字面量 rodata 解析 | `x86_64.rs:3194` | `v.to_le_bytes()` 直接写入 `.rodata`，f32/double IEEE 754 精确，movss/movsd 加载，复杂字面量无精度偏差 |
 | 跨函数 LEA | `x86_64.rs:5157` | `[r13+off]` 用 `emit_lea_r13`；RIP-relative 走 `pending_data_rels` patch；全局数组下标新增 `emit_load_global_indexed` 单条 `[rip+disp32+idx*scale]` |
-| `gen_float_binop` 不支持运算 | `x86_64.rs:4294` | float/double 取模软件实装：cvttsX2si + cvtsi2sX + mul + sub，零 libc；`tests/fixtures/float_mod.c` |
+| `gen_float_binop` 不支持运算 | `x86_64.rs:4294` | float/double 取模软件实装：cvttsX2si + cvtsi2sX + mul + sub，零 libc；`tests/fixtures/c/float_mod.c` |
 | XMM 临时槽 | `x86_64.rs:7550` | `prepare_asm_xmm_binding` 加载 float 到 xmm；`writeback_asm_operand` 按 `xmm_width` 写回 xmm8–15；`input_xmm_set` + early-clobber `xmm_pool` |
-| int128 binary 逻辑 | `x86_64.rs:2577` | `Expr::Binop` 优先 `&&`/`\|\|`，`or rdx, dst` 合并高 64 位；`tests/fixtures/int128_logical.c` |
+| int128 binary 逻辑 | `x86_64.rs:2577` | `Expr::Binop` 优先 `&&`/`\|\|`，`or rdx, dst` 合并高 64 位；`tests/fixtures/c/int128_log.c` |
 
 ### 1.3 AArch64 后端
 
@@ -362,7 +362,7 @@ label/switch 的函数自动降级回原 AST 路径。
 | Speculative execution | ✅ `speculative_execution`：BB 内 pure 指令集中到 BB 顶端，便于分支条件尽早算出 |
 | 常量传播 (Sparse Conditional) | ✅ `sparse_conditional_constant_propagation`：经典 lattice 分析（Undef/Const/Top），对纯运算做常量替换 + 删除冗余指令 |
 
-**测试**：`tests/fixtures/m16_*.c` 7 个（ssa_ir / strength_reduction /
+**测试**：`tests/fixtures/opt/*.c` 7 个（ssa_ir / strength_reduction /
 cross_function_dce / sccp / loop_opt / tco / function_attr），
 `tests/integration.rs` 对应 `m16_*` 函数在本地 `cargo test m16_`
 验证。详见 `docs/architecture.md` M16 章节。
@@ -550,7 +550,7 @@ M19 关键改动:
 >   `wmemmove` / `wmemset` / `wmemcmp` (原本走 freestanding linker
 >   会报 undefined reference, 允许为 implicit undefined 以让
 >   host gcc 在 -lc 下解析)。
-> - 新增 `tests/fixtures/wchar_libc.c` 覆盖 wcslen / wcschr /
+> - 新增 `tests/fixtures/c/wchar.c` 覆盖 wcslen / wcschr /
 >   wcsrchr / wmemcpy / wmemcmp / wmemset / wmemmove / wcscmp /
 >   wcsncmp / wcscat 运行时行为。
 > - 新增 integration test `wchar_libc_fixture_runs` 与 helper
@@ -562,7 +562,7 @@ M19 关键改动:
 > **M25 增量（2026-07-24）— Section 11 P0.2 signal libc 转发**：
 > - `src/link/resolve.rs` `is_implicit_undef` 白名单补齐
 >   `sigaction` / `sigaltstack` / `signal` 三个 POSIX 信号入口。
-> - 新增 `tests/fixtures/signal_libc.c` + 集成测试
+> - 新增 `tests/fixtures/c/signal.c` + 集成测试
 >   `signal_libc_fixture_runs` 验证 `signal(SIGTERM, handler)`
 >   运行时返回非 NULL 旧 handler (即 prev != handler 0)。
 > - 新增集成测试 `sigaction_sigaltstack_fixture_compiles`
@@ -578,7 +578,7 @@ M19 关键改动:
 > **M25 增量（2026-07-24）— Section 11 P0.3 复杂数学 libm 转发**：
 > - `src/link/resolve.rs` `is_implicit_undef` 白名单补齐
 >   `cproj` / `cabs` / `carg` 三个复杂数学入口 (走 libm).
-> - 新增 `tests/fixtures/complex_libm.c` + 集成测试
+> - 新增 `tests/fixtures/c/complex_libm.c` + 集成测试
 >   `complex_libm_fixture_runs` 用 dcc -c + host gcc -lm 链接
 >   运行, 验证三个函数能成功调用并返回 0 退出码.
 > - 运行时限制: dcc 现有 `_Complex` 字面量 (`4.0i`) 与
@@ -674,7 +674,7 @@ M19 关键改动:
 > - 配合 `lower.rs` 已有的 MemberStar / PtrMemberStar lower
 >   路径 (M17.0 阶段实装), 生成 C 代码
 >   `(*(int*)((char*)(obj) + __dcc_mbr_<class>_<member>))`.
-> - 新增 fixture `tests/fixtures/p2_1_member_ptr.cpp` +
+> - 新增 fixture `tests/fixtures/cpp/member_ptr_deref.cpp` +
 >   集成测试 `p2_1_member_ptr_dotstar`. 198 个集成测试
 >   0 失败 (除 6 个 pre-existing 失败).
 > - 运行时限制: 偏移常量 `__dcc_mbr_<class>_<member>` 需要
@@ -695,7 +695,7 @@ M19 关键改动:
 >   的 vtable header 假设被替换; 跨多态指针的动态 RTTI
 >   仍依赖 dcc C 后端在 vtable 中写 typeinfo 字段,
 >   是 Section 9 follow-up.
-> - 新增 fixture `tests/fixtures/p2_2_typeid.cpp`
+> - 新增 fixture `tests/fixtures/cpp/typeid_rtti.cpp`
 >   (覆盖静态 `typeid(Animal)` 等值比较和
 >   动态 `typeid(a)` 取 a 的静态类两条路径) +
 >   集成测试 `p2_2_typeid_rtti`.
@@ -707,7 +707,7 @@ M19 关键改动:
 >   走 `looks_like_template_args_after_lt` 嵌套扫描, 跨过
 >   嵌套 `<`/`>`/`>>` 判别模板实参列表. M18 已支持但未加
 >   集成测试, 本 P2.3 补上 fixture + 测试.
-> - 新增 fixture `tests/fixtures/p2_3_template_arg.cpp`
+> - 新增 fixture `tests/fixtures/cpp/template_arg.cpp`
 >   (覆盖 `Holder<int>` 单实参 + `Holder<Holder<int>>`
 >   嵌套 >> 实参) + 集成测试 `p2_3_template_arg_syntax`.
 > - Section 6 表格 `模板实例化` 行 `parse_mangle_type 不识别 <`
@@ -721,7 +721,7 @@ M19 关键改动:
 >   字符串全部替换为 helper 调用, 避免 typo.
 > - 新增单元测试 `mangle_op_new_constants` 验证 4 个常量
 >   名字拼写符合 Itanium C++ ABI 数组分配/释放符号.
-> - 新增 fixture `tests/fixtures/p2_4_new_arr_mangler.cpp`
+> - 新增 fixture `tests/fixtures/cpp/new_arr_mangler.cpp`
 >   (覆盖 `Item* arr = new Item[4]; ... delete[] arr;`) +
 >   集成测试 `p2_4_new_arr_mangler`.
 > - Section 6 表格 `operator new[] / operator delete[]` 行
@@ -736,7 +736,7 @@ M19 关键改动:
 > - lower 阶段调用 mangle_op_new_array() (P2.4 helper),
 >   emit `((T*)_Znam(sizeof(T) * count))` 形式, 对类类型
 >   T 用 `(struct T*)` cast, 内建类型直接 `(T*)`.
-> - 新增 fixture `tests/fixtures/p2_5_new_array_alloc.cpp`
+> - 新增 fixture `tests/fixtures/cpp/new_array_alloc.cpp`
 >   (覆盖类类型 Cell + 变量计数 n + 完整 new T[n] / delete[]
 >   array 生命周期) + 集成测试 `p2_5_new_array_alloc`.
 > - Section 6 表格 `new T[n]` 行 `不识别 [] 按 new T 处理`
@@ -750,7 +750,7 @@ M19 关键改动:
 >   走原地构造链, 不调用 operator new 分配新内存, 模拟
 >   Itanium C++ ABI placement new 语义. 释放由用户管理
 >   (不 emit `delete p`, 调 dtor 后手动 free).
-> - 新增 fixture `tests/fixtures/p2_6_placement_new.cpp`
+> - 新增 fixture `tests/fixtures/cpp/placement_new_ctor.cpp`
 >   (覆盖 `new (p) Token` 无参 + `new (p) Token(42)` 带参
 >   两种形式) + 集成测试 `p2_6_placement_new`.
 > - Section 6 表格 `placement new` 行 `降级为裸 malloc 替身`

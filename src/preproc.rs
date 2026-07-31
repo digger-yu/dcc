@@ -3491,7 +3491,7 @@ mod tests {
     #[test]
     fn forced_include_comments_cannot_leak_literals_or_words() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/m15_10_comment.h");
+            .join("tests/fixtures/c/comment.h");
         let force_includes = vec![fixture.to_string_lossy().into_owned()];
         let out = preprocess(
             b"int value = FORCED_VALUE;\n",

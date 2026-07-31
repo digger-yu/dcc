@@ -592,7 +592,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     `fnsave` (DD /6)、`fnstenv` (D9 /6)、`fnclex` (DB E2)、
     `fninit` (DB E3)、`ldmxcsr` (0F AE /2)、`stmxcsr` (0F AE /3)；
     FPU 加载走 `emit_asm_fpu_load`（带 SymDisp RIP-relative 支持）。
-  - **测试**：`tests/fixtures/asm_paravirt_boot.c` 26 个用例覆盖
+  - **测试**：`tests/fixtures/c/asm_paravirt.c` 26 个用例覆盖
     段寄存器、push/pop 段、imm64、shift $cl、setcc AH、间接
     jmp、cpuid/rdtsc/wbinvd/invd、cli/sti/cld/clc/hlt、
     stac/clac、swapgs、fxsave、imm64→mem、prefetch、int3、
@@ -662,7 +662,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     dispatch；`movq` 走通用 `emit_asm_mov` (size=64)。
   - **2 操作数 VEX 形式**：`vunpcklps/hps/lpd/hpd` 等支持 AT&T
     2 操作数形式（src, dst），通过专用 helper 编码 vvvv=dst。
-  - **测试**：`tests/fixtures/asm_avx_aes_fma_tsx.c` 30+ 个用例
+  - **测试**：`tests/fixtures/c/asm_avx.c` 30+ 个用例
     覆盖 AES-NI、SHA、FMA 132/213/231、F16C、AVX 浮点 3 操作数、
     AVX 标量、AVX 整数 3 操作数、AVX 移动与杂项、AVX-VNNI、
     SSE3/SSSE3/SSE4.1/SSE4.2（含 GPR 源/目的的 pinsr/pextr）、
@@ -726,10 +726,10 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     后续人工 patch。全局数组下标 `Expr::Index` 对全局符号走
     `emit_load_global_indexed`（单条 `[rip+disp32+idx*scale]` mov/movss/movsd），
     替代 LEA+ADD 两步。
-  - **测试**：`tests/fixtures/float_mod.c`（6 用例）、
-    `tests/fixtures/int128_logical.c`（5 用例）、
-    `tests/fixtures/asm_constraints_ext.c`（含 XMM `"x"`）、
-    `tests/fixtures/global_indexed.c`（全局数组 RIP+SIB）；
+  - **测试**：`tests/fixtures/c/float_mod.c`（6 用例）、
+    `tests/fixtures/c/int128_log.c`（5 用例）、
+    `tests/fixtures/c/asm_constr.c`（含 XMM `"x"`）、
+    `tests/fixtures/c/global_idx.c`（全局数组 RIP+SIB）；
     `test_asm_goto_outputs.c`（3 用例覆盖 fall-through / taken / basic）本地
     全部 PASS；`test_float_lit.c`/`test_hugeval.c`/`test_nan.c` 等 12 个
     M11.2/11.3 已有测试无回归（`test_asm_constraints_ext` 在 M11.3 起即
@@ -985,7 +985,7 @@ x86_64 后端 `compile(&Module)` 与 AArch64/RISC-V 一致：从 `Module::source
 
 Linux jump_label 预处理残留 `_DECLARE_STATIC_KEY_*` 在 parser 层由
 `parse_static_key_decl()` 补全为 `extern struct static_key_{false,true}`，
-再进入上述 IR 管线。回归：`tests/fixtures/static_key_*.c`、`ir::tests`。
+再进入上述 IR 管线。回归：`tests/fixtures/c/skey_*.c`、`ir::tests`。
 
 ## Sanitizer 完整桩（`sanitizer.rs`）
 
@@ -1067,9 +1067,9 @@ M11.1 集中补齐 GCC/MSVC 在 C 前端的扩展语法与预处理指令，全�
 ### 集成测试
 
 `tests/integration.rs` 新增 9 条 case 覆盖全部特性；fixture 放在
-`tests/fixtures/{ms_extensions,attr_cleanup,attr_target_clones,
-attr_no_sanitize,attr_copy_returns_nonnull,pragma_family,
-pragma_operator,user_diagnostics,static_assert_msg}.c`。
+`tests/fixtures/{ms_ext,attr_cleanup,attr_clones,
+attr_nosan,attr_copy,pragma_fam,
+pragma_op,user_diag,sassert_msg}.c`。
 
 ## 自举 (M5)
 
@@ -1168,7 +1168,7 @@ AST→SSA→pass→AST 重建，再走原有的 `resync` 流程。
 
 ### 测试
 
-`tests/fixtures/m16_*.c` 7 个：ssa_ir / strength_reduction /
+`tests/fixtures/opt/*.c` 7 个：ssa_ir / strength_reduction /
 cross_function_dce / sccp / loop_opt / tco / function_attr。
 `tests/integration.rs` 对应 `m16_*` 测试函数，在本地
 跑 `cargo test m16_` 验证。
