@@ -37,6 +37,12 @@ impl SfinaeCtx {
             .find(|(p, _)| p == name)
             .map(|(_, a)| a.clone())
     }
+    /// 批量替换多个 pattern (供偏特化多实参 / enable_if 条件替换使用)
+    pub fn substitute_all(&self, patterns: &[String]) -> Vec<String> {
+        patterns.iter()
+            .map(|p| try_substitute(p, self).unwrap_or_else(|_| p.clone()))
+            .collect()
+    }
 }
 
 /// SFINAE 替换尝试结果
@@ -124,6 +130,197 @@ fn is_template_param(s: &str) -> bool {
         | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "size_t" | "ptrdiff_t")
         && !s.is_empty()
         && !s.contains(' ')
+}
+
+/// 求值类型 trait 条件 (SFINAE / enable_if 用), 无法判定时返回 None.
+/// 支持 (M18.x 简化, 实参先经 ctx 替换):
+///   - `std::is_same<T, U>::value` / `is_same<T, U>::value`
+///   - `std::is_integral<T>::value` / `is_pointer<T>` / `is_class<T>` / `is_floating_point<T>`
+///   - `sizeof(T) <= N` / `>= N` / `== N` (复用 type_size_hint)
+///   - `T::value` (trait 常量)
+///   - `!C` / `C && D` / `C || D` 组合
+pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
+    let c = cond.trim();
+    // 逻辑组合: && 优先于 ||
+    if let Some(i) = find_top_level(c, "&&") {
+        let l = evaluate_trait_condition(&c[..i], ctx)?;
+        let r = evaluate_trait_condition(&c[i + 2..], ctx)?;
+        return Some(l && r);
+    }
+    if let Some(i) = find_top_level(c, "||") {
+        let l = evaluate_trait_condition(&c[..i], ctx)?;
+        let r = evaluate_trait_condition(&c[i + 2..], ctx)?;
+        return Some(l || r);
+    }
+    if let Some(rest) = c.strip_prefix('!') {
+        return evaluate_trait_condition(rest.trim(), ctx).map(|v| !v);
+    }
+    if c == "true" { return Some(true); }
+    if c == "false" { return Some(false); }
+    // sizeof(T) <= N / >= N / == N
+    if let Some(rest) = c.strip_prefix("sizeof(") {
+        if let Some(idx) = rest.find(')') {
+            let ty = rest[..idx].trim().to_string();
+            let after = rest[idx + 1..].trim();
+            let resolved = ctx.lookup(&ty).unwrap_or(ty);
+            let size = type_size_hint(&resolved) as isize;
+            if let Some(n) = after.strip_prefix("<=").and_then(|s| s.trim().parse::<isize>().ok()) {
+                return Some(size <= n);
+            }
+            if let Some(n) = after.strip_prefix(">=").and_then(|s| s.trim().parse::<isize>().ok()) {
+                return Some(size >= n);
+            }
+            if let Some(n) = after.strip_prefix("==").and_then(|s| s.trim().parse::<isize>().ok()) {
+                return Some(size == n);
+            }
+            return None;
+        }
+    }
+    // is_same<T, U>::value
+    if let Some((a, b)) = parse_trait_args(c, "is_same") {
+        let ra = resolve_arg(&a, ctx);
+        let rb = resolve_arg(&b, ctx);
+        return Some(ra == rb);
+    }
+    // is_integral<T>::value
+    if let Some(a) = parse_trait_single(c, "is_integral") {
+        return Some(is_integral_ty(&resolve_arg(&a, ctx)));
+    }
+    // is_pointer<T>::value
+    if let Some(a) = parse_trait_single(c, "is_pointer") {
+        return Some(resolve_arg(&a, ctx).ends_with('*'));
+    }
+    // is_class<T>::value
+    if let Some(a) = parse_trait_single(c, "is_class") {
+        return Some(!is_builtin_ty(&resolve_arg(&a, ctx)));
+    }
+    // is_floating_point<T>::value
+    if let Some(a) = parse_trait_single(c, "is_floating_point") {
+        let ra = resolve_arg(&a, ctx);
+        return Some(matches!(ra.as_str(), "float" | "double" | "long double"));
+    }
+    // T::value (trait 常量)
+    // 要求 ty 是纯 ident (不含模板实参), 否则视为未知 trait 返回 None
+    if let Some((ty, name)) = c.split_once("::") {
+        if (name == "value" || name == "value_type") && !ty.contains('<') {
+            let resolved = ctx.lookup(ty).unwrap_or_else(|| ty.to_string());
+            return Some(!resolved.is_empty());
+        }
+    }
+    None
+}
+
+/// 解析并求值 `enable_if<C, T>` / `enable_if_t<C, T>` / `enable_if<C>::type`
+/// 的条件部分. 提取不出条件或无法判定时返回 true (保守, 不阻塞编译).
+pub fn evaluate_enable_if(text: &str, ctx: &SfinaeCtx) -> bool {
+    let t = text.trim();
+    for prefix in ["std::enable_if_t<", "std::enable_if<", "enable_if_t<", "enable_if<"] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            if let Some(cond) = split_cond(rest) {
+                return evaluate_trait_condition(&cond, ctx).unwrap_or(true);
+            }
+        }
+    }
+    true
+}
+
+/// 顶层 (尖括号/圆括号外) 查找子串位置, 处理 `<=` / `>=` 不计数
+fn find_top_level(s: &str, pat: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'<' => {
+                if bytes.get(i + 1) == Some(&b'=') { i += 1; } else { depth += 1; }
+            }
+            b'>' => {
+                if bytes.get(i + 1) == Some(&b'=') { i += 1; } else { depth -= 1; }
+            }
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if depth == 0 && s[i..].starts_with(pat) => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 从 `enable_if<C, ...>` 剩余文本 (紧接 `<` 之后) 提取条件 C
+fn split_cond(rest: &str) -> Option<String> {
+    let mut depth: i32 = 0;
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'<' => {
+                if bytes.get(i + 1) == Some(&b'=') { i += 1; } else { depth += 1; }
+            }
+            b'>' => {
+                if bytes.get(i + 1) == Some(&b'=') { i += 1; } else if depth == 0 {
+                    return Some(rest[..i].trim().to_string());
+                } else { depth -= 1; }
+            }
+            b',' if depth == 0 => return Some(rest[..i].trim().to_string()),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 解析 `name<A, B>::value` 形式双实参 trait 的实参, 返回 (A, B)
+fn parse_trait_args(cond: &str, name: &str) -> Option<(String, String)> {
+    let open = cond.find(&format!("{}<", name))?;
+    let rest = &cond[open + name.len() + 1..];
+    let close = find_trait_close(rest)?;
+    let inner = &rest[..close];
+    let (a, b) = inner.split_once(',')?;
+    Some((a.trim().to_string(), b.trim().to_string()))
+}
+
+/// 解析 `name<T>::value` 形式单实参 trait 的实参
+fn parse_trait_single(cond: &str, name: &str) -> Option<String> {
+    let open = cond.find(&format!("{}<", name))?;
+    let rest = &cond[open + name.len() + 1..];
+    let close = find_trait_close(rest)?;
+    Some(rest[..close].trim().to_string())
+}
+
+/// 找到 trait 实参列表的闭合 `>` (跨嵌套尖括号)
+fn find_trait_close(rest: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    for (i, b) in rest.bytes().enumerate() {
+        match b {
+            b'<' => depth += 1,
+            b'>' if depth == 0 => return Some(i),
+            b'>' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn resolve_arg(s: &str, ctx: &SfinaeCtx) -> String {
+    ctx.lookup(s).unwrap_or_else(|| s.to_string())
+}
+
+fn is_builtin_ty(s: &str) -> bool {
+    matches!(s, "void" | "bool" | "char" | "signed char" | "unsigned char"
+        | "short" | "unsigned short" | "int" | "unsigned int" | "long"
+        | "unsigned long" | "long long" | "unsigned long long"
+        | "float" | "double" | "long double"
+        | "size_t" | "ptrdiff_t" | "wchar_t")
+}
+
+fn is_integral_ty(s: &str) -> bool {
+    matches!(s, "bool" | "char" | "signed char" | "unsigned char"
+        | "short" | "unsigned short" | "int" | "unsigned int" | "long"
+        | "unsigned long" | "long long" | "unsigned long long"
+        | "size_t" | "ptrdiff_t")
 }
 
 /// 完整 concept 求值: 解析并求值 `requires { ... }` 表达式
@@ -819,5 +1016,73 @@ mod tests {
         let all_match = patterns.iter().zip(args.iter())
             .all(|(pat, arg)| pattern_matches(pat.trim(), arg.trim()));
         assert!(all_match);
+    }
+
+    // ===== M18.x: SFINAE trait 条件 / enable_if 求值 =====
+
+    #[test]
+    fn sfinae_substitute_all() {
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        ctx.bind("U".to_string(), "MyClass".to_string());
+        let out = ctx.substitute_all(&["T*".to_string(), "std::vector<U>".to_string()]);
+        assert_eq!(out, vec!["int*".to_string(), "std::vector<MyClass>".to_string()]);
+    }
+
+    #[test]
+    fn sfinae_trait_is_same() {
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        assert_eq!(evaluate_trait_condition("std::is_same<T, int>::value", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("is_same<T, long>::value", &ctx), Some(false));
+    }
+
+    #[test]
+    fn sfinae_trait_sizeof_cond() {
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        assert_eq!(evaluate_trait_condition("sizeof(T) <= 4", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("sizeof(T) >= 8", &ctx), Some(false));
+        assert_eq!(evaluate_trait_condition("sizeof(T) == 4", &ctx), Some(true));
+    }
+
+    #[test]
+    fn sfinae_trait_type_kinds() {
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        ctx.bind("P".to_string(), "char*".to_string());
+        ctx.bind("F".to_string(), "double".to_string());
+        assert_eq!(evaluate_trait_condition("is_integral<T>::value", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("is_pointer<P>::value", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("is_pointer<T>::value", &ctx), Some(false));
+        assert_eq!(evaluate_trait_condition("is_class<F>::value", &ctx), Some(false));
+        assert_eq!(evaluate_trait_condition("is_floating_point<F>::value", &ctx), Some(true));
+    }
+
+    #[test]
+    fn sfinae_trait_logic() {
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        assert_eq!(evaluate_trait_condition("is_integral<T>::value && sizeof(T) <= 4", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("is_pointer<T>::value || sizeof(T) == 4", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("!is_pointer<T>::value", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("is_pointer<T>::value && is_integral<T>::value", &ctx), Some(false));
+    }
+
+    #[test]
+    fn sfinae_trait_unknown_returns_none() {
+        // 无法解析的条件返回 None (调用方保守回退 true)
+        assert_eq!(evaluate_trait_condition("some_unknown_trait<T>::value", &SfinaeCtx::new()), None);
+    }
+
+    #[test]
+    fn sfinae_enable_if_true_and_false() {
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        assert!(evaluate_enable_if("enable_if_t<is_integral<T>::value, int>", &ctx));
+        assert!(!evaluate_enable_if("enable_if_t<is_pointer<T>::value, int>", &ctx));
+        assert!(evaluate_enable_if("std::enable_if<sizeof(T) <= 4>::type", &ctx));
+        // 提取失败时保守返回 true
+        assert!(evaluate_enable_if("some_other_default", &ctx));
     }
 }

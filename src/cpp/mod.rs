@@ -29,7 +29,7 @@
 //!   - parser.rs: 类 / 成员函数 / this / :: / 引用 解析
 //!   - mangle.rs: Itanium C++ ABI 名字修饰
 //!   - lower.rs:  C++ AST → dcc C 风格声明 / 函数
-//!   - m10.rs:    M10+ SFINAE / partial spec / concept / 协程 / RTTI 等
+//!   - feature_degrade.rs: 高级特性降级 (SFINAE / concept / 偏特化 / 协程 / RTTI 等)
 //!   - std/:      M11 C++ 标准库 (头 + C 运行时)
 //!   - driver.rs: 顶层入口, 串 lexer→parser→lower→dcc driver
 //!
@@ -44,8 +44,9 @@ pub mod lexer;
 pub mod parser;
 pub mod mangle;
 pub mod lower;
-pub mod m10;
-pub mod m17;
+pub mod feature_degrade;
+pub mod template_depth;
+pub mod cpp_const_eval;
 pub mod modules;
 pub mod stdlib;
 pub mod driver;

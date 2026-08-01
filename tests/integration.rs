@@ -4199,6 +4199,75 @@ fn p2_3_template_arg_syntax() {
     );
 }
 
+/// M18.x: 模板嵌套深度限制 - 正常深度 (≤ MAX_TEMPLATE_DEPTH=128)
+/// 应在类型上下文 (形参) 与表达式上下文 (局部声明) 都能编译;
+/// 同时覆盖深层嵌套 `>>` 拆 token 的正确闭合 (template_depth.cpp).
+#[test]
+#[cfg(unix)]
+fn m18_template_depth_ok() {
+    let src = include_str!("fixtures/cpp/template_depth.cpp");
+    let (out, obj) = run_cpp_object_test("m18-template-depth-ok", src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        out.status.success(),
+        "m18_template_depth_ok compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// M18.x: 模板嵌套深度超限 (200 层 > 128) 应报模板深度错误
+/// (C0004) 而非挂起/栈溢出 (修复前 50000 层嵌套会让编译超时).
+#[test]
+#[cfg(unix)]
+fn m18_template_depth_limit_enforced() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-cpp-depth-limit-{}.cpp", std::process::id()));
+    let object_path = dir.join(format!("dcc-cpp-depth-limit-{}.o", std::process::id()));
+    // 200 层嵌套模板作为形参类型 (走 parse_mangle_type 深度检查)
+    let mut src = String::from("template <class T> struct Wrap { T v; };\n");
+    src.push_str("int take(");
+    src.push_str(&"Wrap<".repeat(200));
+    src.push_str("int");
+    src.push_str(&">".repeat(200));
+    src.push_str("* p) { return p != 0; }\n");
+    src.push_str("int main() { return 0; }\n");
+    fs::write(&source_path, &src).expect("write C++ fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&object_path);
+    assert!(
+        !output.status.success(),
+        "over-depth template should fail to compile"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("depth") && stderr.contains("exceeds limit"),
+        "stderr should report template depth: {}",
+        stderr
+    );
+}
+
+/// M18.x: SFINAE 简化支持 - 匿名默认类型形参 (`typename = T`,
+/// enable_if 惯用法) / 模板默认实参 / 多形参模板 (sfinae.cpp).
+/// 求值层 (enable_if 条件 / trait 检测) 由 feature_degrade.rs 单元测试覆盖.
+#[test]
+#[cfg(unix)]
+fn m18_sfinae_smoke() {
+    let src = include_str!("fixtures/cpp/sfinae.cpp");
+    let (out, obj) = run_cpp_object_test("m18-sfinae", src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        out.status.success(),
+        "m18_sfinae_smoke compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// P2.4: operator new[] / operator delete[] 走 _Znam / _ZdaPv
 /// (Section 6). 验证 dcc lower 阶段对 `new T[n]` 和 `delete[] p`
 /// 调用 mangle_op_new_array() / mangle_op_delete_array() 命名常量,

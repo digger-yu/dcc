@@ -742,7 +742,7 @@ impl Lower {
             }
             // M10+: concept 求值 (而非 M9 的简单占位)
             CppDecl::Concept { name, body_text } => {
-                let c = crate::cpp::m10::Concept::parse(body_text);
+                let c = crate::cpp::feature_degrade::Concept::parse(body_text);
                 self.out.push_str(&format!(
                     "/* dcc C++ concept (M10+): {} = {} (parsed, evaluated) */\n",
                     name, body_text
@@ -1137,7 +1137,7 @@ impl Lower {
                 self.local_var_types.insert(name.clone(), resolved_ty.clone());
                 // M17.0: 若 init 是整型常量, 记录到 i128 池 (供 if constexpr 使用)
                 if let Some(e) = init {
-                    if let Some(v) = crate::cpp::m17::eval_cpp_const(e, &self.const_local_i128) {
+                    if let Some(v) = crate::cpp::cpp_const_eval::eval_cpp_const(e, &self.const_local_i128) {
                         self.const_local_i128.insert(name.clone(), v);
                     }
                 }
@@ -1228,11 +1228,11 @@ impl Lower {
                     self.out.push_str("}\n");
                 }
             }
-            // M17.0: `if constexpr` 真编译期分支 - 使用 m17::eval_cpp_const 求值,
+            // M17.0: `if constexpr` 真编译期分支 - 使用 cpp_const_eval::eval_cpp_const 求值,
             // 选 then 或 els (整段被消除, 不进入输出 C).
             CppStmt::IfConstexpr { cond, then, els } => {
-                // 用 m17 helper 求值条件
-                let v = crate::cpp::m17::eval_cpp_const(cond, &self.const_local_i128);
+                // 用 cpp_const_eval helper 求值条件
+                let v = crate::cpp::cpp_const_eval::eval_cpp_const(cond, &self.const_local_i128);
                 match v {
                     Some(v) if v != 0 => {
                         for s in &then.stmts { self.emit_stmt(s); }
@@ -1397,7 +1397,7 @@ impl Lower {
                 // 展开为 base.operator->()->s
                 let use_chain = if let CppExpr::Ident(name) = &**b {
                     self.local_var_types.get(name)
-                        .map(|t| matches!(t, MangleType::Class(c) if crate::cpp::m10::ArrowChainResolver::has_arrow_overload(c)))
+                        .map(|t| matches!(t, MangleType::Class(c) if crate::cpp::feature_degrade::ArrowChainResolver::has_arrow_overload(c)))
                         .unwrap_or(false)
                 } else { false };
                 if use_chain {
@@ -2122,7 +2122,7 @@ mod tests {
 
     #[test]
     fn m10_sfinae_substitute_basic() {
-        use crate::cpp::m10::{try_substitute, SfinaeCtx};
+        use crate::cpp::feature_degrade::{try_substitute, SfinaeCtx};
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         let r = try_substitute("std::vector<T>", &ctx).unwrap();
@@ -2131,7 +2131,7 @@ mod tests {
 
     #[test]
     fn m10_partial_spec_pointer_matches() {
-        use crate::cpp::m10::pattern_matches;
+        use crate::cpp::feature_degrade::pattern_matches;
         assert!(pattern_matches("T*", "int*"));
         assert!(pattern_matches("T*", "MyClass*"));
         assert!(!pattern_matches("T*", "int"));
@@ -2139,7 +2139,7 @@ mod tests {
 
     #[test]
     fn m10_concept_size_le() {
-        use crate::cpp::m10::{Concept, SfinaeCtx};
+        use crate::cpp::feature_degrade::{Concept, SfinaeCtx};
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         let c = Concept::parse("sizeof(T) <= 4");
@@ -2150,7 +2150,7 @@ mod tests {
 
     #[test]
     fn m10_concept_same_as() {
-        use crate::cpp::m10::{Concept, SfinaeCtx};
+        use crate::cpp::feature_degrade::{Concept, SfinaeCtx};
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         let c = Concept::parse("same_as<T, int>");
@@ -2159,7 +2159,7 @@ mod tests {
 
     #[test]
     fn m10_cxa_guard_state_machine() {
-        use crate::cpp::m10::CxaGuard;
+        use crate::cpp::feature_degrade::CxaGuard;
         let mut g = CxaGuard::new("var".to_string());
         assert!(g.acquire());
         assert!(!g.acquire());
@@ -2169,7 +2169,7 @@ mod tests {
 
     #[test]
     fn m10_init_list_emit_c() {
-        use crate::cpp::m10::InitList;
+        use crate::cpp::feature_degrade::InitList;
         let mut il = InitList::new("int".to_string());
         il.push("1".to_string());
         il.push("2".to_string());
@@ -2181,7 +2181,7 @@ mod tests {
 
     #[test]
     fn m10_module_partition_signature() {
-        use crate::cpp::m10::ModulePartition;
+        use crate::cpp::feature_degrade::ModulePartition;
         let p = ModulePartition {
             name: "foo".to_string(),
             partition: "part1".to_string(),
@@ -2192,7 +2192,7 @@ mod tests {
 
     #[test]
     fn m10_coroutine_await_yield_state() {
-        use crate::cpp::m10::CoroutineMachine;
+        use crate::cpp::feature_degrade::CoroutineMachine;
         let mut cm = CoroutineMachine::new();
         let s1 = cm.co_await("x");
         let s2 = cm.co_yield("42");
@@ -2203,7 +2203,7 @@ mod tests {
 
     #[test]
     fn m10_arrow_chain_resolve() {
-        use crate::cpp::m10::ArrowChainResolver;
+        use crate::cpp::feature_degrade::ArrowChainResolver;
         assert!(ArrowChainResolver::has_arrow_overload("MyPtr"));
         assert!(ArrowChainResolver::has_arrow_overload("Iterator"));
         assert!(!ArrowChainResolver::has_arrow_overload("Foo"));
@@ -2211,21 +2211,21 @@ mod tests {
 
     #[test]
     fn m10_dynamic_cast_cross_virtual() {
-        use crate::cpp::m10::DynamicCast;
+        use crate::cpp::feature_degrade::DynamicCast;
         let s = DynamicCast::cross_virtual("p", "Derived", "Base");
         assert!(s.contains("__dynamic_cast"));
     }
 
     #[test]
     fn m10_ctor_delegation() {
-        use crate::cpp::m10::CtorExpander;
+        use crate::cpp::feature_degrade::CtorExpander;
         let s = CtorExpander::emit_delegation("D", "B", "/* body */");
         assert!(s.contains("delegating ctor"));
     }
 
     #[test]
     fn m10_member_ptr_emit() {
-        use crate::cpp::m10::MemberPtr;
+        use crate::cpp::feature_degrade::MemberPtr;
         assert_eq!(MemberPtr::emit("Foo", "bar"), "&_member_fn_Foo_bar");
     }
 
@@ -2288,7 +2288,7 @@ mod tests {
     fn lower_m10_init_list_emit() {
         // {1, 2, 3} 在数组初始化中, 应能降级
         // M10 简化: 通过 InitList 节点手动 emit
-        use crate::cpp::m10::InitList;
+        use crate::cpp::feature_degrade::InitList;
         let mut il = InitList::new("int".to_string());
         il.push("1".to_string());
         il.push("2".to_string());
@@ -2314,7 +2314,7 @@ mod tests {
     #[test]
     fn lower_m10_dynamic_cast_rtti() {
         // 跨虚继承 dynamic_cast - 仅作 M10 模块单元测试
-        use crate::cpp::m10::DynamicCast;
+        use crate::cpp::feature_degrade::DynamicCast;
         let s = DynamicCast::cross_virtual("p", "Derived", "Base");
         assert!(s.contains("__dynamic_cast"), "{}", s);
         assert!(s.contains("Derived"), "{}", s);

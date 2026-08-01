@@ -18,6 +18,7 @@
 
 use crate::cpp::lexer::{CppLexer, CppTok, CppKw};
 use crate::cpp::mangle::{MangleType, NestedName, Operator};
+use crate::cpp::template_depth::MAX_TEMPLATE_DEPTH;
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::{Tok, TokKind};
 
@@ -27,6 +28,8 @@ pub enum CppParseError {
     Unexpected(&'static str, String, Span),
     Unsupported(&'static str, Span),
     TooDeep(Span),
+    /// 模板实例化嵌套深度超限 (见 template_depth.rs)
+    TemplateDepthExceeded { depth: u32, max: u32, span: Span },
 }
 
 impl CppParseError {
@@ -51,12 +54,20 @@ impl CppParseError {
                 "nesting too deep",
                 span,
             ),
+            Self::TemplateDepthExceeded { depth, max, .. } => Diagnostic::err(
+                "C0004",
+                format!("template nesting depth {} exceeds limit {}", depth, max),
+                span,
+            ).with_hint(
+                "reduce template argument nesting (GCC equivalent: -ftemplate-depth)"
+            ),
         }
     }
 
     pub fn span(&self) -> Span {
         match self {
             Self::Unexpected(_, _, s) | Self::Unsupported(_, s) | Self::TooDeep(s) => s.clone(),
+            Self::TemplateDepthExceeded { span: s, .. } => s.clone(),
         }
     }
 }
@@ -445,13 +456,15 @@ pub struct CppParser<'a> {
     pub diags: Vec<Diagnostic>,
     /// 解析期间记下的 lambda (M8: lower 时分配闭包类型名)
     pub lambdas: Vec<LambdaExpr>,
+    /// 嵌套模板 `>>` 拆出的待闭合 `>` 计数 (M18.x, 见 parse_mangle_type_depth)
+    deferred_gt: u32,
 }
 
 impl<'a> CppParser<'a> {
     pub fn new(src: &'a [u8], file: &str) -> Self {
         let mut lex = CppLexer::new(src, file);
         let peek = lex.next_tok();
-        Self { lex, peek, file: file.to_string(), diags: vec![], lambdas: vec![] }
+        Self { lex, peek, file: file.to_string(), diags: vec![], lambdas: vec![], deferred_gt: 0 }
     }
 
     fn bump(&mut self) -> Option<CppTok> {
@@ -540,6 +553,9 @@ impl<'a> CppParser<'a> {
                 None => return false,
                 Some(CppTok::C(Tok { kind: TokKind::Lt, .. })) => {
                     depth += 1;
+                    // 嵌套深度超过限制: 提前判定为模板实参,
+                    // 由 parse_mangle_type_depth 报深度错误 (防 O(n^2) 扫描挂起)
+                    if depth > MAX_TEMPLATE_DEPTH as i32 { return true; }
                     i += 1;
                 }
                 Some(CppTok::C(Tok { kind: TokKind::Gt, .. })) => {
@@ -754,10 +770,21 @@ impl<'a> CppParser<'a> {
         loop {
             // class / typename Name (= default)?
             // M18.0: 接受 CppKw::Class (C++ 词法) 和 Ident "class" (C 词法)
-            if self.at(CppKw::Typename) || self.at(CppKw::Class) {
+            let has_kw = self.at(CppKw::Typename) || self.at(CppKw::Class)
+                || matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) if text == "class");
+            if has_kw { self.bump(); }
+            // M18.x: `typename = enable_if_t<...>` 匿名默认形参 (SFINAE 惯用法),
+            // 形参名缺省时生成内部占位名.
+            if has_kw && matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
                 self.bump();
-            } else if let Some(CppTok::C(Tok { kind: TokKind::Ident, text, .. })) = &self.peek {
-                if text == "class" { self.bump(); }
+                let anon = format!("_anon{}", params.len());
+                let default = Some(self.parse_mangle_type()?);
+                params.push(TemplateParam { name: anon, default });
+                if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+                    self.bump();
+                    continue;
+                }
+                break;
             }
             let name = self.expect_ident()?;
             let default = if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Assign, .. }))) {
@@ -1923,6 +1950,13 @@ impl<'a> CppParser<'a> {
     }
 
     fn parse_mangle_type(&mut self) -> Result<MangleType, CppParseError> {
+        self.parse_mangle_type_depth(0)
+    }
+
+    /// 带模板嵌套深度的 parse_mangle_type.
+    /// depth 随递归递增; 超过 MAX_TEMPLATE_DEPTH 时报错,
+    /// 避免超深嵌套模板 (T<T<...>>) 挂起解析器 (见 template_depth.rs).
+    fn parse_mangle_type_depth(&mut self, depth: u32) -> Result<MangleType, CppParseError> {
         // M17.0: `decltype(expr)` 是类型, 需要整体解析
         // 形式: decltype ( expr )
         // 注: C++ lexer 把 decltype 映射为 CppTok::Kw(CppKw::Decltype),
@@ -2025,15 +2059,28 @@ impl<'a> CppParser<'a> {
         if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. })))
             && self.looks_like_template_args_after_lt()
         {
+            // 嵌套深度限制: 超限直接报错 (防解析器挂起 / 栈溢出)
+            if depth + 1 > MAX_TEMPLATE_DEPTH {
+                return Err(CppParseError::TemplateDepthExceeded {
+                    depth: depth + 1,
+                    max: MAX_TEMPLATE_DEPTH,
+                    span: self.span(),
+                });
+            }
             self.bump(); // 吞 `<`
             let mut args = Vec::new();
             // 至少 1 个实参; 跨过嵌套 `<`/`>`
             loop {
-                let arg = self.parse_mangle_type()?;
+                let arg = self.parse_mangle_type_depth(depth + 1)?;
                 args.push(arg);
                 if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
                     self.bump();
                     continue;
+                }
+                // 内层模板 `>>` 拆出的第二个 `>`: 闭合当前层
+                if self.deferred_gt > 0 {
+                    self.deferred_gt -= 1;
+                    break;
                 }
                 // 期望 `>` 或 `>>` (嵌套模板)
                 if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Gt, .. }))) {
@@ -2041,12 +2088,10 @@ impl<'a> CppParser<'a> {
                     break;
                 }
                 if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Shr, .. }))) {
-                    // `>>` 拆为 `> >` (split: 已吞 Shr)
-                    // 补一个 `>` token (仅用于缩短调用方代码; 但 `parse_mangle_type` 已不再检查
-                    // Gt, 所以 Shr 的第二个 `>` 已被 lexer 合并, 此处不可拆。
-                    // 现实: lexer 把 `>>` 整体吐为 Shr, 模板场景需要消费两个 `>`,
-                    // 我们仅消费 Shr 并停止 (匹配 "嵌套 >>" 的外层 ">")
+                    // Shr = `>>`: 第一个 `>` 闭合当前层,
+                    // 第二个 `>` 记入 deferred_gt 由外层模板消费
                     self.bump();
+                    self.deferred_gt += 1;
                     break;
                 }
                 return Err(CppParseError::Unexpected(">", format!("{:?}", self.peek), self.span()));
@@ -3130,6 +3175,8 @@ impl<'a> CppParser<'a> {
                 // 仅识别并跳过类型实参 (lower 阶段处理实际实例化)
                 self.bump();
                 let mut depth: i32 = 1;
+                // 防御: token 流异常 (如永不闭合的 `>`) 时终止扫描
+                let mut guard: usize = 0;
                 while depth > 0 {
                     match self.bump() {
                         Some(CppTok::C(Tok { kind: TokKind::Lt, .. })) => depth += 1,
@@ -3137,6 +3184,15 @@ impl<'a> CppParser<'a> {
                         Some(CppTok::C(Tok { kind: TokKind::Shr, .. })) => depth -= 1,
                         None => break,
                         _ => {}
+                    }
+                    guard += 1;
+                    // 超出深度限制的嵌套: 报模板深度错误而非继续无意义扫描
+                    if guard > (MAX_TEMPLATE_DEPTH as usize + 1) * 8 {
+                        return Err(CppParseError::TemplateDepthExceeded {
+                            depth: MAX_TEMPLATE_DEPTH + 1,
+                            max: MAX_TEMPLATE_DEPTH,
+                            span: self.span(),
+                        });
                     }
                 }
             }
