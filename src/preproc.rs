@@ -11,6 +11,44 @@ use std::sync::OnceLock;
 use crate::diagnostics::{Diagnostic, Span};
 use crate::cli::StdMode;
 
+/// 逻辑行: 反斜杠续接行合并后的文本 + 其覆盖的物理行号范围 (1-based)。
+/// SourceLoc 追踪的核心: 诊断 / __LINE__ / 输出行号一律以此映射到物理行。
+#[derive(Debug, Clone)]
+struct LogicalLine {
+    text: String,
+    phys_start: u32,
+    phys_end: u32,
+}
+
+/// __LINE__ 行号映射: 把展开文本内的换行计数映射回物理行号。
+/// Block: 顶层块模式 — 行 i (0-based) 对应 phys_lines[i] (flush 时
+/// 传入的物理行号表, 续接行按逻辑行首行计);
+/// Scalar: 递归模式 — 基础物理行号 + 换行偏移 (宏体/参数展开等
+/// 单行递归层级, GCC 语义下 __LINE__ 取调用点所在行)。
+#[derive(Clone, Copy)]
+enum LineMap<'a> {
+    Block(&'a [u32]),
+    Scalar(u32),
+}
+
+impl<'a> LineMap<'a> {
+    fn line(&self, nl: u32) -> u32 {
+        match *self {
+            LineMap::Block(lines) => {
+                let idx = nl as usize;
+                if idx < lines.len() {
+                    lines[idx]
+                } else if lines.is_empty() {
+                    1
+                } else {
+                    *lines.last().unwrap()
+                }
+            }
+            LineMap::Scalar(base) => base + nl,
+        }
+    }
+}
+
 pub struct Preprocessor {
     macros: HashMap<String, MacroDef>,
     include_paths: Vec<PathBuf>,
@@ -61,6 +99,17 @@ pub struct Preprocessor {
     /// 当前字符集/编码 (C23 #pragma locale)
     /// 支持: "UTF-8" (默认), "ASCII", "ISO-8859-1", "POSIX"
     charset: String,
+    /// 当前源行文本 (原始, 未去注释), 用于诊断 source_line 附着。
+    /// 诊断在产生时即带上正确文件的源码行, 避免 enrich_diags 从主文件
+    /// 取同名行 (头文件中的 #error 不再显示主文件的注释行)。
+    cur_source_line: Option<String>,
+    /// 已读入的 include 依赖: (canonical path, content hash)。
+    /// 供头文件缓存的传递依赖校验 (include 图缓存): 缓存条目记录其
+    /// 依赖闭包, 命中前逐个重读比对, 任一依赖变更即失效重处理。
+    dep_hashes: Vec<(String, u64)>,
+    /// include-once 守卫快路径: canonical path -> (content_hash, guard 宏名)。
+    /// 守卫宏已定义时整个文件可跳过处理 (等价于 #ifndef 为假)。
+    once_guard: HashMap<String, (u64, Option<String>)>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -358,6 +407,9 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         pending_pragmas: RefCell::new(Vec::new()),
         expanded_macros: RefCell::new(HashSet::new()),
         charset: "UTF-8".to_string(),
+        cur_source_line: None,
+        dep_hashes: Vec::new(),
+        once_guard: HashMap::new(),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -799,6 +851,9 @@ impl Preprocessor {
         };
         match std::fs::read_to_string(&resolved) {
             Ok(content) => {
+                // 强制包含文件也计入 include 图: -MD 依赖 + 缓存依赖闭包
+                self.deps.push(resolved.display().to_string());
+                self.dep_hashes.push((resolved.display().to_string(), Self::hash_content(&content)));
                 let saved_file = self.file.clone();
                 let saved_dir = self.base_dir.clone();
                 self.file = resolved.display().to_string();
@@ -842,52 +897,88 @@ impl Preprocessor {
         // A malformed comment must not consume text from its includer.
         self.in_comment = false;
 
-        // 行续接: 合并以 \ 结尾的行
-        let joined = Self::join_continued_lines(text);
+        // 行续接: 合并以 \ 结尾的行, 同时记录每个逻辑行的物理行号范围
+        // (SourceLoc 追踪: 诊断/__LINE__/输出行号一律以物理行为准)
+        let logical = Self::logical_lines(text);
 
         let mut active_source = String::new();
-        for (line_no, line) in joined.lines().enumerate() {
-            let line_no = (line_no + 1) as u32;
-            self.cur_line = line_no;
+        // 与 active_source 中每行对应的物理行号范围 (逻辑行跨度)
+        let mut active_spans: Vec<(u32, u32)> = Vec::new();
+        for ll in &logical {
+            self.cur_line = ll.phys_start;
+            // 记录原始源行文本 (未去注释), 供诊断 source_line 附着
+            self.cur_source_line = Some(ll.text.trim_end().to_string());
             // C translation phase 3 removes comments before preprocessing
             // directives are recognized and before macro expansion.  Doing
             // this afterwards lets quotes in comments alter lexical state.
-            let phase3 = self.strip_comments_line(line);
+            let phase3 = self.strip_comments_line(&ll.text);
             let trimmed = phase3.trim();
 
             if trimmed.starts_with('#') {
                 // 宏调用可能跨越 #ifdef/#endif 边界（如 struct_group(headers, ...)），
                 // 如果 active_source 有未闭合的 (，不 flush，继续累积直到宏调用闭合。
                 if !active_source.is_empty() && !self.has_unclosed_paren(&active_source) {
-                    self.flush_active_source(&mut active_source);
+                    self.flush_active_source(&mut active_source, &mut active_spans);
                 }
-                self.process_directive(trimmed, line_no);
+                let out_len_before = self.out.len();
+                self.process_directive(trimmed, ll.phys_start);
+                // 指令行若不产生输出 (#define/#if/#error/#pragma 等), 以空行
+                // 占位, 保证输出行号与输入物理行号一一对应;
+                // #include/#include_next/#embed 自产输出, 无需占位。
+                if self.out.len() == out_len_before {
+                    self.preserve_lines(ll.phys_start, ll.phys_end);
+                }
             } else if self.is_active() {
                 active_source.push_str(&phase3);
                 active_source.push('\n');
+                active_spans.push((ll.phys_start, ll.phys_end));
+            } else {
+                // 非激活行 (#if 0 块等): 以空行占位保持行号对齐
+                self.preserve_lines(ll.phys_start, ll.phys_end);
             }
         }
         if !active_source.is_empty() {
-            self.flush_active_source(&mut active_source);
+            self.flush_active_source(&mut active_source, &mut active_spans);
         }
 
         if self.in_comment {
-            self.diags.push(Diagnostic::err(
-                "E0207",
-                "unterminated block comment",
-                Span::point(&self.file, self.cur_line.max(1), 1),
-            ));
+            self.diags.push(self.err_at("E0207",
+                "unterminated block comment".to_string(),
+                self.cur_line.max(1)));
         }
         self.in_comment = saved_in_comment;
         self.file = saved_file;
     }
 
     /// 对累积的活跃源码块做宏展开并写入输出
-    fn flush_active_source(&mut self, src: &mut String) {
-        let expanded = self.expand_macros(src);
-        if !expanded.trim().is_empty() {
-            self.out.push_str(&expanded);
-            if !expanded.ends_with('\n') {
+    ///
+    /// `spans` 与 `src` 中的行一一对应: (phys_start, phys_end)。
+    /// 展开结果逐行写出; 空行/注释行也输出, 续接覆盖的物理行补空行,
+    /// 保证输出行号与输入物理行号一一对应 (SourceLoc 对齐)。
+    fn flush_active_source(&mut self, src: &mut String, spans: &mut Vec<(u32, u32)>) {
+        let phys_lines: Vec<u32> = spans.iter().map(|&(s, _)| s).collect();
+        let expanded = self.expand_macros(src, &phys_lines);
+        let lines: Vec<&str> = expanded.split('\n').collect();
+        for (i, &(phys_start, phys_end)) in spans.iter().enumerate() {
+            let line = lines.get(i).copied().unwrap_or("");
+            if !line.trim().is_empty() {
+                self.out.push_str(line);
+                if !line.ends_with('\n') {
+                    self.out.push('\n');
+                }
+            } else {
+                // 空行/纯注释行: 保留行号
+                self.out.push('\n');
+            }
+            // 逻辑行覆盖多个物理行时补空行, 保持行数守恒
+            for _ in phys_start..phys_end {
+                self.out.push('\n');
+            }
+        }
+        // 兜底: 展开结果行数多于输入行数时 (理论不发生) 写全
+        for line in lines.iter().skip(spans.len()) {
+            if !line.is_empty() {
+                self.out.push_str(line);
                 self.out.push('\n');
             }
         }
@@ -900,6 +991,35 @@ impl Preprocessor {
             self.apply_pragma_string(&p, line_no);
         }
         src.clear();
+        spans.clear();
+    }
+
+    /// 向输出写入空行, 使输出行号与输入物理行号保持一致 (SourceLoc 对齐)。
+    /// 逻辑行覆盖 [start, end] 的物理行时, 每个物理行占一行。
+    fn preserve_lines(&mut self, start: u32, end: u32) {
+        for _ in start..=end {
+            self.out.push('\n');
+        }
+    }
+
+    /// 构造一条带当前源行文本的诊断 (E 系列)。
+    /// source_line 在产生时即附着正确文件的源码行, 避免 enrich_diags
+    /// 从主文件取同名行 (头文件中的 #error 不再显示主文件的注释行)。
+    fn err_at(&self, code: &'static str, msg: String, line: u32) -> Diagnostic {
+        let mut d = Diagnostic::err(code, msg, Span::point(&self.file, line, 1));
+        if let Some(src) = &self.cur_source_line {
+            d = d.with_source(src.clone());
+        }
+        d
+    }
+
+    /// 构造一条带当前源行文本的诊断 (W 系列), 语义同 err_at。
+    fn warn_at(&self, code: &'static str, msg: String, line: u32) -> Diagnostic {
+        let mut d = Diagnostic::warn(code, msg, Span::point(&self.file, line, 1));
+        if let Some(src) = &self.cur_source_line {
+            d = d.with_source(src.clone());
+        }
+        d
     }
 
     /// 检查文本中是否存在未闭合的 ( (忽略字符串/字符字面量内的括号)。
@@ -1082,28 +1202,31 @@ impl Preprocessor {
         out
     }
 
-    /// 行续接: 将行尾 \ 与下一行合并
-    fn join_continued_lines(text: &str) -> String {
-        let mut result = String::with_capacity(text.len());
-        let mut continued = String::new();
-        for line in text.lines() {
+    /// 将物理行合并为逻辑行 (行尾 \ 与下一行拼接, \ 替换为空格),
+    /// 同时记录每个逻辑行覆盖的物理行号范围。
+    fn logical_lines(text: &str) -> Vec<LogicalLine> {
+        let mut out = Vec::new();
+        let mut phys = 1u32;
+        let mut continued: Option<(String, u32)> = None; // (累积文本, 起始物理行)
+        for line in text.split('\n') {
+            let line = line.strip_suffix('\r').unwrap_or(line);
             if let Some(prefix) = line.strip_suffix('\\') {
-                continued.push_str(prefix);
-                continued.push(' '); // \ 替换为空格
-            } else {
-                if !continued.is_empty() {
-                    continued.push_str(line);
-                    result.push_str(&continued);
-                    result.push('\n');
-                    continued.clear();
-                } else {
-                    result.push_str(line);
-                    result.push('\n');
+                match &mut continued {
+                    Some((acc, _)) => { acc.push_str(prefix); acc.push(' '); }
+                    None => { continued = Some((format!("{} ", prefix), phys)); }
                 }
+            } else if let Some((mut acc, start)) = continued.take() {
+                acc.push_str(line);
+                out.push(LogicalLine { text: acc, phys_start: start, phys_end: phys });
+            } else {
+                out.push(LogicalLine { text: line.to_string(), phys_start: phys, phys_end: phys });
             }
+            phys += 1;
         }
-        if !continued.is_empty() { result.push_str(&continued); result.push('\n'); }
-        result
+        if let Some((acc, start)) = continued.take() {
+            out.push(LogicalLine { text: acc, phys_start: start, phys_end: phys - 1 });
+        }
+        out
     }
 
     fn process_directive(&mut self, line: &str, line_no: u32) {
@@ -1120,7 +1243,7 @@ impl Preprocessor {
                 if Self::is_parsable_include_path(raw) {
                     self.do_include_next(raw, line_no);
                 } else {
-                    let expanded = self.expand_macros(raw);
+                    let expanded = self.expand_macros(raw, &[self.cur_line]);
                     self.do_include_next(expanded.trim(), line_no);
                 }
             }
@@ -1131,7 +1254,7 @@ impl Preprocessor {
                     self.do_include(raw, line_no);
                 } else {
                     // ISO C 6.10.2: 头文件名先做宏展开 (e.g. `#include TRACE_INCLUDE(file)`).
-                    let expanded = self.expand_macros(raw);
+                    let expanded = self.expand_macros(raw, &[self.cur_line]);
                     self.do_include(expanded.trim(), line_no);
                 }
             }
@@ -1170,8 +1293,7 @@ impl Preprocessor {
                 let saw_else = self.cond_stack[len - 1].saw_else;
                 let any_true = self.cond_stack[len - 1].any_true;
                 if saw_else {
-                    self.diags.push(Diagnostic::err("E0200", "#elif after #else",
-                        Span::point(&self.file, line_no, 1)));
+                    self.diags.push(self.err_at("E0200", "#elif after #else".to_string(), line_no));
                     return;
                 }
                 let state = &mut self.cond_stack[len - 1];
@@ -1196,8 +1318,7 @@ impl Preprocessor {
                 let saw_else = self.cond_stack[len - 1].saw_else;
                 let any_true = self.cond_stack[len - 1].any_true;
                 if saw_else {
-                    self.diags.push(Diagnostic::err("E0200", "#elifdef after #else",
-                        Span::point(&self.file, line_no, 1)));
+                    self.diags.push(self.err_at("E0200", "#elifdef after #else".to_string(), line_no));
                     return;
                 }
                 let state = &mut self.cond_stack[len - 1];
@@ -1219,8 +1340,7 @@ impl Preprocessor {
                 let saw_else = self.cond_stack[len - 1].saw_else;
                 let any_true = self.cond_stack[len - 1].any_true;
                 if saw_else {
-                    self.diags.push(Diagnostic::err("E0200", "#elifndef after #else",
-                        Span::point(&self.file, line_no, 1)));
+                    self.diags.push(self.err_at("E0200", "#elifndef after #else".to_string(), line_no));
                     return;
                 }
                 let state = &mut self.cond_stack[len - 1];
@@ -1240,8 +1360,7 @@ impl Preprocessor {
                     else { self.cond_stack[..len-1].iter().all(|c| c.active) };
                 let state = &mut self.cond_stack[len - 1];
                 if state.saw_else {
-                    self.diags.push(Diagnostic::err("E0201", "duplicate #else",
-                        Span::point(&self.file, line_no, 1)));
+                    self.diags.push(self.err_at("E0201", "duplicate #else".to_string(), line_no));
                     return;
                 }
                 state.saw_else = true;
@@ -1250,8 +1369,7 @@ impl Preprocessor {
             }
         } else if directive.starts_with("endif") {
             if self.cond_stack.pop().is_none() {
-                self.diags.push(Diagnostic::err("E0202", "#endif without #if",
-                    Span::point(&self.file, line_no, 1)));
+                self.diags.push(self.err_at("E0202", "#endif without #if".to_string(), line_no));
             }
         } else if let Some(rest) = directive.strip_prefix("pragma") {
             let pragma_text = rest.trim();
@@ -1318,14 +1436,12 @@ impl Preprocessor {
         } else if let Some(rest) = directive.strip_prefix("error") {
             if self.is_active() {
                 let msg = rest.trim();
-                self.diags.push(Diagnostic::err("E0203", format!("#error {}", msg),
-                    Span::point(&self.file, line_no, 1)));
+                self.diags.push(self.err_at("E0203", format!("#error {}", msg), line_no));
             }
         } else if let Some(rest) = directive.strip_prefix("warning") {
             if self.is_active() {
                 let msg = rest.trim();
-                self.diags.push(Diagnostic::warn("W0200", format!("#warning {}", msg),
-                    Span::point(&self.file, line_no, 1)));
+                self.diags.push(self.warn_at("W0200", format!("#warning {}", msg), line_no));
             }
         } else if directive.starts_with("embed")
             && self.is_active() {
@@ -1414,8 +1530,7 @@ impl Preprocessor {
         } else if Self::is_absolute_include_path(rest) {
             (Self::parse_include_path_token(rest), false)
         } else {
-            self.diags.push(Diagnostic::err("E0204", "expected \"file\" or <file>",
-                Span::point(&self.file, line_no, 1)));
+            self.diags.push(self.err_at("E0204", "expected \"file\" or <file>".to_string(), line_no));
             return;
         };
 
@@ -1428,9 +1543,7 @@ impl Preprocessor {
         match found {
             Some(full_path) => self.include_resolved_file(full_path, path, line_no),
             None => {
-                self.diags.push(Diagnostic::err("E0206",
-                    format!("include file not found: {}", path),
-                    Span::point(&self.file, line_no, 1)));
+                self.diags.push(self.err_at("E0206", format!("include file not found: {}", path), line_no));
             }
         }
     }
@@ -1449,6 +1562,8 @@ impl Preprocessor {
         let key = "<builtin:x86intrin.h>".to_string();
         if self.pragma_once.contains(&key) { return true; }
         self.pragma_once.insert(key.clone());
+        // 内置头也计入依赖闭包 (缓存校验用; 伪路径, cache_deps_fresh 跳过实读)
+        self.dep_hashes.push((key.clone(), Self::hash_content(X86INTRIN_H)));
         self.out.push_str(&format!("/* #include <{}> (dcc builtin) */\n", name));
         self.process_text(text, &key);
         true
@@ -1476,93 +1591,136 @@ impl Preprocessor {
         } else if Self::is_absolute_include_path(rest) {
             (Self::parse_include_path_token(rest), false)
         } else {
-            self.diags.push(Diagnostic::err("E0204", "expected \"file\" or <file>",
-                Span::point(&self.file, line_no, 1)));
+            self.diags.push(self.err_at("E0204", "expected \"file\" or <file>".to_string(), line_no));
             return;
         };
 
         match self.find_include_next(path, is_system) {
             Some(full_path) => self.include_resolved_file(full_path, path, line_no),
             None => {
-                self.diags.push(Diagnostic::err("E0206",
-                    format!("include_next file not found: {}", path),
-                    Span::point(&self.file, line_no, 1)));
+                self.diags.push(self.err_at("E0206", format!("include_next file not found: {}", path), line_no));
             }
         }
     }
 
     /// 将已解析到的头文件内容并入预处理输出。
+    ///
+    /// 三条路径, 按代价升序:
+    /// 1. include-once 守卫快路径: 守卫宏已定义 → 整文件跳过 (等价 #ifndef 为假);
+    /// 2. 缓存命中: 依赖闭包逐一重读比对新鲜后直接复用输出 + 宏表;
+    /// 3. 正常处理; 仅当未产生任何新诊断时才落缓存 (有 #error/#warning
+    ///    的头文件不缓存, 避免缓存吞掉诊断)。
     fn include_resolved_file(&mut self, full_path: PathBuf, path: &str, line_no: u32) {
-                let canonical = full_path.canonicalize()
-                    .unwrap_or(full_path.clone());
-                let key = canonical.to_string_lossy().to_string();
-                if self.pragma_once.contains(&key) { return; }
-                self.deps.push(full_path.to_string_lossy().into_owned());
-                match fs::read_to_string(&full_path) {
-                    Ok(text) => {
-                        // 全局类型注册表: 检查缓存
-                        let content_hash = Self::hash_content(&text);
-                        let macro_hash = self.hash_macro_state();
-                        let cache_path = self.get_cache_path(&canonical, content_hash, macro_hash);
-
-                        let bool_fixup = Self::needs_linux_stddef_bool_fixup(path);
-                        // linux/stddef.h 定义 enum { false = 0, true = 1 }；若 stdbool.h
-                        // 已将 false/true 宏化，预处理会把它变成非法的 0 = 0。
-                        let skip_cache = bool_fixup
-                            && (self.macros.contains_key("false") || self.macros.contains_key("true"));
-
-                        if let Some(ref cp) = cache_path {
-                            if !skip_cache {
-                            if let Some((cached_output, cached_macros)) = self.load_from_cache(cp) {
+        let canonical = full_path.canonicalize()
+            .unwrap_or(full_path.clone());
+        let key = canonical.to_string_lossy().to_string();
+        if self.pragma_once.contains(&key) { return; }
+        self.deps.push(full_path.to_string_lossy().into_owned());
+        match fs::read_to_string(&full_path) {
+            Ok(text) => {
+                let content_hash = Self::hash_content(&text);
+                // 记录自身依赖 (含后续守卫/缓存命中路径): 父文件的依赖闭包
+                // 必须包含子文件本身, 否则子文件变更时父条目无法失效
+                self.dep_hashes.push((key.clone(), content_hash));
+        
+                // include-once 守卫快路径: 记住 (content_hash, 守卫宏名),
+                // hash 匹配才有效; 守卫宏已定义时跳过全部预处理
+                let guard = match self.once_guard.get(&key) {
+                    Some((h, g)) if *h == content_hash => g.clone(),
+                    _ => {
+                        let g = Self::detect_include_guard(&text);
+                        self.once_guard.insert(key.clone(), (content_hash, g.clone()));
+                        g
+                    }
+                };
+                if let Some(g) = &guard {
+                    if self.macros.contains_key(g) { return; }
+                }
+    
+                // 全局类型注册表: 检查缓存
+                let macro_hash = self.hash_macro_state();
+                let cache_path = self.get_cache_path(&canonical, content_hash, macro_hash);
+    
+                let bool_fixup = Self::needs_linux_stddef_bool_fixup(path);
+                // linux/stddef.h 定义 enum { false = 0, true = 1 }；若 stdbool.h
+                // 已将 false/true 宏化，预处理会把它变成非法的 0 = 0。
+                let skip_cache = bool_fixup
+                    && (self.macros.contains_key("false") || self.macros.contains_key("true"));
+    
+                if let Some(ref cp) = cache_path {
+                    if !skip_cache {
+                        if let Some((cached_output, cached_macros, cached_deps)) = self.load_from_cache(cp) {
+                            // 依赖新鲜度校验: 任一依赖文件变更即 miss (重处理)
+                            if Self::cache_deps_fresh(&cached_deps) {
                                 // 缓存命中: 直接使用缓存的预处理输出和宏
                                 self.out.push_str(&format!("/* #include \"{}\" (cached) */\n", path));
                                 self.deps.push(full_path.to_string_lossy().into_owned());
+                                // 回填传递依赖: 父条目依赖闭包完整 + -MD 依赖更完整
+                                for (dpath, dhash) in &cached_deps {
+                                    if !self.dep_hashes.iter().any(|(p, _)| p == dpath) {
+                                        self.dep_hashes.push((dpath.clone(), *dhash));
+                                    }
+                                    if !self.deps.iter().any(|d| d == dpath) {
+                                        self.deps.push(dpath.clone());
+                                    }
+                                }
                                 self.out.push_str(&cached_output);
                                 for (name, def) in cached_macros {
                                     self.macros.insert(name, def);
                                 }
                                 return;
                             }
-                            }
                         }
-
-                        // 缓存未命中: 正常处理
-                        self.out.push_str(&format!("/* #include \"{}\" */\n", path));
-                        let saved_base = self.base_dir.clone();
-                        let saved_out_len = self.out.len();
-                        // 记录当前宏表快照, 用于后续提取该头文件新增的宏
-                        let saved_macros: std::collections::HashSet<String> = self.macros.keys().cloned().collect();
-                        let saved_false = if bool_fixup { self.macros.remove("false") } else { None };
-                        let saved_true = if bool_fixup { self.macros.remove("true") } else { None };
-                        self.base_dir = full_path.parent()
-                            .unwrap_or(Path::new(".")).to_path_buf();
-                        self.process_text(&text, &full_path.to_string_lossy());
-                        if let Some(def) = saved_false {
-                            self.macros.insert("false".to_string(), def);
-                        }
-                        if let Some(def) = saved_true {
-                            self.macros.insert("true".to_string(), def);
-                        }
-                        self.base_dir = saved_base;
-
-                        // 保存到缓存 (仅保存该头文件新增的宏, 避免冗余和状态污染)
-                        if let Some(ref cp) = cache_path {
-                            if !skip_cache {
-                            let new_output = self.out[saved_out_len..].to_string();
-                            let header_macros: HashMap<String, MacroDef> = self.macros.iter()
-                                .filter(|(k, _)| !saved_macros.contains(*k))
-                                .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect();
-                            self.save_to_cache(cp, &new_output, &header_macros);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.diags.push(Diagnostic::err("E0205",
-                            format!("cannot read {}: {}", path, e),
-                            Span::point(&self.file, line_no, 1)));
                     }
                 }
+    
+                // 缓存未命中: 正常处理
+                self.out.push_str(&format!("/* #include \"{}\" */\n", path));
+                let saved_base = self.base_dir.clone();
+                let saved_out_len = self.out.len();
+                // 记录当前宏表快照, 用于后续提取该头文件新增的宏
+                let saved_macros: std::collections::HashSet<String> = self.macros.keys().cloned().collect();
+                let saved_false = if bool_fixup { self.macros.remove("false") } else { None };
+                let saved_true = if bool_fixup { self.macros.remove("true") } else { None };
+                let diags_before = self.diags.len();
+                // 记录依赖闭包起点, 用于提取本次处理期间的传递依赖
+                let deps_before = self.dep_hashes.len();
+                self.base_dir = full_path.parent()
+                    .unwrap_or(Path::new(".")).to_path_buf();
+                self.process_text(&text, &full_path.to_string_lossy());
+                if let Some(def) = saved_false {
+                    self.macros.insert("false".to_string(), def);
+                }
+                if let Some(def) = saved_true {
+                    self.macros.insert("true".to_string(), def);
+                }
+                self.base_dir = saved_base;
+    
+                // 保存到缓存 (仅保存该头文件新增的宏, 避免冗余和状态污染);
+                // 产生诊断的头文件不落缓存, 下次运行重新处理并重新报诊断
+                if let Some(ref cp) = cache_path {
+                    if !skip_cache && self.diags.len() == diags_before {
+                        let new_output = self.out[saved_out_len..].to_string();
+                        let header_macros: HashMap<String, MacroDef> = self.macros.iter()
+                            .filter(|(k, _)| !saved_macros.contains(*k))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        // 本次处理期间新增的依赖闭包: 自身 + 嵌套 include
+                        // (含嵌套缓存命中回填的传递依赖), 按路径去重后写入
+                        let mut dep_closure: Vec<(String, u64)> =
+                            vec![(key.clone(), content_hash)];
+                        dep_closure.extend(self.dep_hashes[deps_before..].iter().cloned());
+                        let mut seen: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        dep_closure.retain(|(p, _)| seen.insert(p.clone()));
+                        self.save_to_cache(cp, &new_output, &header_macros, &dep_closure);
+                    }
+                }
+            }
+            Err(e) => {
+                self.diags.push(self.err_at("E0205", format!("cannot read {}: {}", path, e), line_no));
+            }
+        }
     }
 
     /// 构造与 `find_include` 一致的搜索目录序列。
@@ -1699,8 +1857,7 @@ impl Preprocessor {
             let end = stripped.find('>').map(|i| i + 1).unwrap_or(args.len());
             (&args[1..end], args[end+1..].trim())
         } else {
-            self.diags.push(Diagnostic::err("E0207", "expected \"file\" or <file> for #embed",
-                Span::point(&self.file, line_no, 1)));
+            self.diags.push(self.err_at("E0207", "expected \"file\" or <file> for #embed".to_string(), line_no));
             return;
         };
         // 解析可选参数: limit(N) / prefix(...) / suffix(...) / if_empty(...)
@@ -1768,9 +1925,7 @@ impl Preprocessor {
             None => {
                 // 找不到文件: 输出空 (C23 标准中 #embed 找不到文件为未定义行为)
                 // #embed "file" limit(0) 总是有效
-                self.diags.push(Diagnostic::err("E0208",
-                    format!("embed file not found: {}", path),
-                    Span::point(&self.file, line_no, 1)));
+                self.diags.push(self.err_at("E0208", format!("embed file not found: {}", path), line_no));
             }
         }
     }
@@ -1988,7 +2143,15 @@ impl Preprocessor {
     /// __sigaction_handler.__sigaction_handler.sa_handler. 因此第二轮
     /// 的禁用集 = 第一轮实际展开过的全部宏名: 自引用 token 不再展开,
     /// 而跨边界调用的目标 (## 拼接产生的新宏名) 从未展开过, 不受影响.
-    fn expand_macros(&mut self, line: &str) -> String {
+    fn expand_macros(&mut self, line: &str, phys_lines: &[u32]) -> String {
+        // 顶层块模式: phys_lines 与 line 中的行一一对应 (每行一个物理行号),
+        // 使 __LINE__ 在展开块内按物理行精确定位
+        self.expand_macros_map(line, LineMap::Block(phys_lines))
+    }
+
+    /// expand_macros 的通用实现; 行号映射由调用方给定 (顶层 Block /
+    /// 递归 Scalar, 见 LineMap)。
+    fn expand_macros_map(&mut self, line: &str, map: LineMap) -> String {
         // 不能用 macros.is_empty() 早退: __COUNTER__ / __FILE__ / __LINE__
         // 等特殊 token 不在 macros 表内, 必须进入 expand_with_disabled
         //
@@ -1996,13 +2159,13 @@ impl Preprocessor {
         let saved = self.expanded_macros.borrow().clone();
         self.expanded_macros.borrow_mut().clear();
         let disabled = HashSet::new();
-        let mut result = self.expand_with_disabled(line, &disabled);
+        let mut result = self.expand_with_disabled(line, &disabled, map);
         // 第二轮重扫描: 处理跨边界宏调用 (如 cleanup.h 的
         // DEFINE_LOCK_GUARD_1_COND 模式). 禁用集 = 第一轮实际展开过的
         // 宏名, 延续 paint blue 语义, 防止自引用宏被重复展开.
         let expanded = std::mem::take(&mut *self.expanded_macros.borrow_mut());
         if result != line {
-            let result2 = self.expand_with_disabled(&result, &expanded);
+            let result2 = self.expand_with_disabled(&result, &expanded, map);
             result = result2;
         }
         // 丢弃第二轮的新记录, 只把第一轮展开的宏合并回外层记录
@@ -2013,8 +2176,8 @@ impl Preprocessor {
         result
     }
 
-    /// 用禁用集展开文本
-    fn expand_with_disabled(&mut self, text: &str, disabled: &HashSet<String>) -> String {
+    /// 用禁用集展开文本; `map` 提供 __LINE__ 的行号映射
+    fn expand_with_disabled(&mut self, text: &str, disabled: &HashSet<String>, map: LineMap) -> String {
         // 递归深度保护：宏互相引用时避免栈溢出
         thread_local! {
             static EXPAND_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -2028,16 +2191,18 @@ impl Preprocessor {
             EXPAND_DEPTH.with(|d| d.set(depth));
             return text.to_string();
         }
-        let result = self.expand_with_disabled_inner(text, disabled);
+        let result = self.expand_with_disabled_inner(text, disabled, map);
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
 
-    fn expand_with_disabled_inner(&mut self, text: &str, disabled: &HashSet<String>) -> String {
+    fn expand_with_disabled_inner(&mut self, text: &str, disabled: &HashSet<String>, map: LineMap) -> String {
         let mut out = String::with_capacity(text.len());
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
         let mut i = 0;
+        // 当前文本内已消费的换行数 (0-based): __LINE__ = map.line(nl)
+        let mut nl: u32 = 0;
 
         while i < len {
             // 跳过字符串字面量
@@ -2074,7 +2239,7 @@ impl Preprocessor {
                     continue;
                 }
                 if ident == "__LINE__" {
-                    out.push_str(&self.cur_line.to_string());
+                    out.push_str(&map.line(nl).to_string());
                     continue;
                 }
                 if ident == "__DATE__" {
@@ -2189,7 +2354,7 @@ impl Preprocessor {
                                 if stringify_params.contains(&idx) || paste_params.contains(&idx) {
                                     expanded_args.push(arg.clone());
                                 } else {
-                                    expanded_args.push(self.expand_with_disabled(arg, disabled));
+                                    expanded_args.push(self.expand_with_disabled(arg, disabled, LineMap::Scalar(map.line(nl))));
                                 }
                             }
                             // 可变参数处理
@@ -2201,7 +2366,7 @@ impl Preprocessor {
                                     let mut normal = expanded_args[..fixed.min(expanded_args.len())].to_vec();
                                     let va_text = if raw_args.len() > fixed {
                                         raw_args[fixed..].iter().map(|a| {
-                                            self.expand_with_disabled(a, disabled)
+                                            self.expand_with_disabled(a, disabled, LineMap::Scalar(map.line(nl)))
                                         }).collect::<Vec<_>>().join(", ")
                                     } else {
                                         String::new()
@@ -2216,19 +2381,19 @@ impl Preprocessor {
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
                                 // 重新扫描替换结果
-                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled);
+                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled, LineMap::Scalar(map.line(nl)));
                                 out.push_str(&rescanned);
                             } else if raw_args.len() == params.len() {
                                 let substituted = self.substitute_params(&def.body, params, &raw_args, def.variadic);
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
-                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled);
+                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled, LineMap::Scalar(map.line(nl)));
                                 out.push_str(&rescanned);
                             } else if params.is_empty() && raw_args.is_empty() {
                                 // PREFETCH() 这类无参函数宏
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
-                                let rescanned = self.expand_with_disabled(&def.body, &new_disabled);
+                                let rescanned = self.expand_with_disabled(&def.body, &new_disabled, LineMap::Scalar(map.line(nl)));
                                 out.push_str(&rescanned);
                             } else if raw_args.is_empty() && !params.is_empty() {
                                 // GCC 扩展: __STRING() / FOO() 当宏期待 ≥1 实参却被空括号
@@ -2244,7 +2409,7 @@ impl Preprocessor {
                                 let substituted = self.substitute_params(&def.body, params, &empty_args, def.variadic);
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
-                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled);
+                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled, LineMap::Scalar(map.line(nl)));
                                 out.push_str(&rescanned);
                             } else {
                                 out.push_str(&ident);
@@ -2297,11 +2462,14 @@ impl Preprocessor {
                             let head = self.expand_with_disabled(
                                 &format!("{}{}", def.body, call_args),
                                 &new_disabled,
+                                LineMap::Scalar(map.line(nl)),
                             );
-                            // 后续文本不带 disabled 集, 正常展开.
-                            format!("{}{}", head, self.expand_macros(&after_call))
+                            // 后续文本不带 disabled 集, 正常展开; 行号从当前
+                            // 行继续 (Scalar 映射, 递归层级用不到物理表)
+                            format!("{}{}", head,
+                                self.expand_macros_map(&after_call, LineMap::Scalar(map.line(nl))))
                         } else {
-                            self.expand_with_disabled(&def.body, &new_disabled)
+                            self.expand_with_disabled(&def.body, &new_disabled, LineMap::Scalar(map.line(nl)))
                         };
                         out.push_str(&rescanned);
                         if tail_call {
@@ -2313,6 +2481,7 @@ impl Preprocessor {
                 }
                 continue;
             }
+            if chars[i] == '\n' { nl += 1; }
             out.push(chars[i]);
             i += 1;
         }
@@ -2824,7 +2993,7 @@ impl Preprocessor {
         // 处理 __has_include/__has_attribute/__has_builtin/__has_feature
         let expr = self.replace_has_macros(&expr);
         // 替换已知宏
-        let expr = self.expand_macros(&expr);
+        let expr = self.expand_macros(&expr, &[self.cur_line]);
         // 宏展开后去除残留注释 (内核宏体可能含注释)
         let expr = Self::strip_comments(&expr);
         // 简单求值: 非零 = true
@@ -3479,10 +3648,10 @@ impl Preprocessor {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
         // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
-        // V8: handle_paste 修复 ##__VA_ARGS__ / ## 拼接语义，空 variadic 保留
-        //     左 token (C99 identifier##__VA_ARGS__), 非空变体不再插入空格;
-        //     GCC 扩展 ,##X 仍然移除逗号。
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V8");
+        // V9: 输出行号与输入物理行一一对应 (指令行空行占位), 缓存格式
+        //     升级为 DCC_CACHE_V4 (新增 DEPS 段, 依赖感知失效);
+        //     include-once 守卫快路径; 产生诊断的头文件不再落缓存。
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V9");
         for name in names {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
@@ -3504,17 +3673,94 @@ impl Preprocessor {
     fn get_cache_path(&self, file_path: &Path, content_hash: u64, macro_hash: u64) -> Option<PathBuf> {
         let cache_dir = self.cache_dir.as_ref()?;
         let file_hash = Self::hash_content(&file_path.to_string_lossy());
-        let cache_name = format!("v8_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
+        let cache_name = format!("v9_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
         Some(cache_dir.join(cache_name))
     }
 
-    fn load_from_cache(&self, cache_path: &Path) -> Option<(String, Vec<(String, MacroDef)>)> {
+    /// 校验缓存条目的依赖闭包是否新鲜: 逐个重读依赖文件并比对内容哈希。
+    /// 任一文件变更/缺失即失效 (依赖感知失效, 修复传递依赖陈旧问题)。
+    fn cache_deps_fresh(deps: &[(String, u64)]) -> bool {
+        for (path, hash) in deps {
+            // 内置 intrinsics 头为伪路径 (编译期内置, 内容恒定), 跳过实读
+            if path.starts_with("<builtin:") { continue; }
+            match fs::read_to_string(path) {
+                Ok(content) => {
+                    if Self::hash_content(&content) != *hash { return false; }
+                }
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
+    /// 探测 include-once 守卫: 跳过注释与空行后, 前两条指令为
+    /// `#ifndef X` (或 `#if !defined(X)`) + `#define X` 即视为守卫,
+    /// 返回守卫宏名; 否则返回 None。
+    fn detect_include_guard(text: &str) -> Option<String> {
+        let mut first: Option<&str> = None;
+        let mut second: Option<&str> = None;
+        let mut in_block_comment = false;
+        for line in text.split('\n') {
+            let line = line.trim();
+            if in_block_comment {
+                if line.contains("*/") { in_block_comment = false; }
+                continue;
+            }
+            if line.is_empty() { continue; }
+            if line.starts_with("//") { continue; }
+            if line.starts_with("/*") {
+                if !line.contains("*/") { in_block_comment = true; }
+                continue;
+            }
+            if line.starts_with('#') {
+                let d = line[1..].trim_start();
+                if first.is_none() { first = Some(d); }
+                else if second.is_none() { second = Some(d); }
+                else { break; }
+            } else {
+                // 指令前出现代码 → 不是守卫文件
+                return None;
+            }
+        }
+        let guard = first.and_then(|f| {
+            if let Some(rest) = f.strip_prefix("ifndef ") {
+                Some(rest.trim().to_string())
+            } else if let Some(rest) = f.strip_prefix("if !defined(") {
+                let name = rest.trim_end_matches(')').trim();
+                if name.is_empty() || name.contains(')') { return None; }
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })?;
+        // 第二条指令必须是 `#define <guard> ...`
+        let ok = second
+            .map(|s| s.strip_prefix("define ")
+                .map(|rest| rest.trim_start().starts_with(guard.as_str()))
+                .unwrap_or(false))
+            .unwrap_or(false);
+        if ok { Some(guard) } else { None }
+    }
+
+    fn load_from_cache(&self, cache_path: &Path) -> Option<(String, Vec<(String, MacroDef)>, Vec<(String, u64)>)> {
         let content = fs::read_to_string(cache_path).ok()?;
         let mut lines = content.lines();
 
         // 第一行: 标记
-        if lines.next()? != "DCC_CACHE_V3" {
+        if lines.next()? != "DCC_CACHE_V4" {
             return None;
+        }
+
+        // DEPS 段: <path>\t<hash_hex>
+        let mut deps = Vec::new();
+        if lines.next()? != "DEPS" { return None; }
+        for line in lines.by_ref() {
+            if line == "END_DEPS" { break; }
+            if let Some((p, h)) = line.split_once('\t') {
+                if let Ok(hash) = u64::from_str_radix(h, 16) {
+                    deps.push((p.to_string(), hash));
+                }
+            }
         }
 
         // 读取预处理输出 (直到 END_OUTPUT 标记)
@@ -3552,11 +3798,15 @@ impl Preprocessor {
             }
         }
 
-        Some((output, macros))
+        Some((output, macros, deps))
     }
 
-    fn save_to_cache(&self, cache_path: &Path, output: &str, macros: &HashMap<String, MacroDef>) {
-        let mut content = String::from("DCC_CACHE_V3\n");
+    fn save_to_cache(&self, cache_path: &Path, output: &str, macros: &HashMap<String, MacroDef>, deps: &[(String, u64)]) {
+        let mut content = String::from("DCC_CACHE_V4\nDEPS\n");
+        for (p, h) in deps {
+            content.push_str(&format!("{}\t{:x}\n", p, h));
+        }
+        content.push_str("END_DEPS\n");
         content.push_str(output);
         content.push_str("END_OUTPUT\n");
 
@@ -4685,5 +4935,167 @@ n\
         assert!(!pch_path.exists(), "no PCH file should be created without -fpch-create");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 头文件 #error 的诊断必须携带头文件自身的 source_line (bug 1 回归)
+    #[test]
+    fn error_diag_in_header_carries_header_source_line() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_hdr_err_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let hdr = dir.join("bad.h");
+        fs::write(
+            &hdr,
+            "#ifndef BAD_H\n#define BAD_H\n#error stop here in header\n#endif\n",
+        )
+        .unwrap();
+        let src = "#include \"bad.h\"\nint x;\n";
+        let out = preprocess(
+            src.as_bytes(),
+            "bad-inc.c",
+            &[dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let err = out
+            .diags
+            .iter()
+            .find(|d| d.code == "E0203")
+            .unwrap_or_else(|| panic!("expected E0203, got: {:?}", out.diags));
+        assert!(err.span.file.ends_with("bad.h"), "file: {}", err.span.file);
+        assert_eq!(err.span.line, 3);
+        let src_line = err.source_line.clone().unwrap_or_default();
+        assert!(
+            src_line.contains("stop here in header"),
+            "source_line: {src_line}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 续接行合并时记录覆盖的物理行范围 (phys_start/phys_end)
+    #[test]
+    fn logical_lines_track_physical_spans() {
+        let lines = super::Preprocessor::logical_lines("a\\\nb\nc\n");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "a b");
+        assert_eq!(lines[0].phys_start, 1);
+        assert_eq!(lines[0].phys_end, 2);
+        assert_eq!(lines[1].text, "c");
+        assert_eq!(lines[1].phys_start, 3);
+        assert_eq!(lines[1].phys_end, 3);
+        // 尾随换行的空逻辑行: 占位, 不产生输出
+        assert_eq!(lines[2].text, "");
+        assert_eq!(lines[2].phys_start, 4);
+        assert_eq!(lines[2].phys_end, 4);
+    }
+
+    /// 续接行后的 #error 必须报物理行号 (bug 2 回归)
+    #[test]
+    fn line_numbers_survive_continuation() {
+        let out = preprocess(
+            b"#define FOO 1 + \\\n  2\n#error boom\n",
+            "cont.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let err = out
+            .diags
+            .iter()
+            .find(|d| d.code == "E0203")
+            .unwrap_or_else(|| panic!("expected E0203, got: {:?}", out.diags));
+        assert_eq!(err.span.line, 3);
+    }
+
+    /// 缓存不得吞掉 #error 诊断: 有诊断的头文件不落缓存 (bug 4 回归)
+    #[test]
+    fn include_cache_does_not_swallow_errors() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_cache_err_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let hdr = dir.join("bad.h");
+        fs::write(&hdr, "#error broken header\n").unwrap();
+        let src = "#include \"bad.h\"\nint x;\n";
+        // 隔离 HOME: 缓存写入临时目录, 不污染 ~/.dcc/cache
+        std::env::set_var("HOME", &dir.join("home"));
+        for i in 0..2 {
+            let out = preprocess(
+                src.as_bytes(),
+                "cache-err.c",
+                &[dir.clone()],
+                &[],
+                &[],
+                StdMode::Gnu11,
+                &[],
+                false,
+                &PchOptions::default(),
+            );
+            assert!(
+                out.diags.iter().any(|d| d.code == "E0203"),
+                "run {i}: E0203 was swallowed: {:?}",
+                out.diags
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 嵌套依赖变更后父条目必须失效重处理 (bug 5 回归)
+    #[test]
+    fn include_cache_invalidates_on_nested_dep_change() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_cache_dep_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("A.h");
+        let b = dir.join("B.h");
+        fs::write(
+            &a,
+            "#ifndef A_H\n#define A_H\n#include \"B.h\"\n#define A_VAL (B_VAL + 10)\n#endif\n",
+        )
+        .unwrap();
+        fs::write(&b, "#ifndef B_H\n#define B_H\n#define B_VAL 42\n#endif\n").unwrap();
+        let src = "#include \"A.h\"\nint v = A_VAL;\n";
+        std::env::set_var("HOME", &dir.join("home"));
+        let out1 = preprocess(
+            src.as_bytes(),
+            "nested-dep.c",
+            &[dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        assert!(out1.text.contains("(42 + 10)"), "run 1: {}", out1.text);
+        // 修改嵌套头文件 B.h, 父条目 A.h 的 DEPS 校验必须使其失效
+        fs::write(&b, "#ifndef B_H\n#define B_H\n#define B_VAL 52\n#endif\n").unwrap();
+        let out2 = preprocess(
+            src.as_bytes(),
+            "nested-dep.c",
+            &[dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        assert!(
+            out2.text.contains("(52 + 10)"),
+            "run 2 after B.h change: {}",
+            out2.text
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
