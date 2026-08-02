@@ -147,12 +147,12 @@ C++ 走"降级到 C"路径（`src/cpp/lower.rs`），Itanium ABI 名字修饰，
 | 运算符 | ✅ | 命名空间 / operator / Itanium 编码（`pl`/`mi`/`dv`/...） |
 | 异常 | ✅ | `try`/`catch`/`throw` → `__cxa_*` 桩 |
 | Lambda | ✅ | 匿名 `__lambda_N` + `operator()` |
-| 模板 | 🟡 | 解析 + `PartialSpec` / SFINAE / 多参偏特化；完整单态化待补 |
-| SFINAE / concepts / coroutine | 🟡 简化 | 概念求值简化；`co_yield`/`co_await` 走 `__coro_state` 状态机 |
-| modules | 🟡 占位 | 解析接受；M19+ 实现 BMF 序列化 |
+| 模板 | ✅ | 解析 + 完整单态化 (src/cpp/template.rs)：注册/实例化缓存/偏特化匹配/模板-id 调用解析；496 单元测试 + 255 集成测试 |
+| SFINAE / concepts / coroutine | ✅ | `SfinaeCtx` 替换失败不报错；概念求值；`co_await`/`co_yield`/`co_return` Duff's device 状态机 (src/cpp/coroutine.rs) |
+| modules | ✅ | BMF 序列化 (src/cpp/bmf.rs)：DCC_BMF_V1 文本格式，`to_bmf`/`from_bmf` round-trip；ODR 检查待后续 |
 | C++17 修饰 | ✅ | `decltype` / `auto` 真推导 / `friend` / `noexcept` / `final` / `override` / `mutable` / `volatile` 成员函数 / `explicit` / `if constexpr` / `using Base::Base` 构造委托 |
 | C++20/23 库 | ✅ | `std::filesystem` / `thread` / `mutex` / `condition_variable` / `chrono` / `expected` / `flat_map` / `regex`（子集）/ `ranges` / `views` / 多维下标 / placement new / `new T[n]` / `operator new[]` / `delete[]` |
-| GCC 兼容 | 🟡 | `obj.*ptr_to_member` / `typeid(e)` 真 RTTI / 模板实参 `T<U>` / 跨虚继承 `dynamic_cast` / `__cxa_guard_*` / `std::initializer_list` |
+| GCC 兼容 | ✅ | `obj.*ptr_to_member` / `typeid(e)` 真 RTTI / 模板实参 `T<U>` / 跨虚继承 `dynamic_cast` / `__cxa_guard_*` / `std::initializer_list` / `__dcc_typeinfo_t` / `__dynamic_cast` / 成员指针偏移宏 (src/cpp/gcc_compat.rs) |
 
 ### 3.3 内联汇编
 
@@ -317,7 +317,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 | riscv64 | RVV 完整指令集；压缩指令自动 4→2 字节压缩 | 仅基础 VSETVLI/LOAD/STORE/ADD/MUL/REDUCE |
 | x86_64 | bswap 16 位操作数 | GCC 同 |
 | 链接 | LTO IPA-SRA / PGO 集成；运行时 dynamic loader (`ld.so`) | DCE/内联/常量传播已完整；`ld.so` 为设计决策 |
-| C++ | 完整模板单态化；真 BMF modules；`co_yield`/`co_await` 真挂起；concept SFINAE 联动；模板基类 / 友元；`export template` | 当前为简化 / 占位 / 不支持 |
+| C++ | 完整 concept SFINAE 联动；模板基类 / 友元；`export template` | 模板单态化 / BMF modules / 协程真状态机均已实装；模板基类/友元/export template 仍不支持 |
 | 平台 | Windows MSVC（codegen SysV-like）；Darwin / Mach-O；wasm32；AVR / MSP430 / Xtensa；PowerPC；LoongArch64 | 🔴 |
 | 自举 | `dcc0 → dcc1` 起步；`dcc1 → dcc2` 验证 | 字节/语义对比基础设施 `--bootstrap-compare=` 已实装（M25） |
 
@@ -334,7 +334,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 **中期（质量门禁 / 补洞）**
 
 - vmlinux 工具链（pahole BTF / objtool check）非 SKIP 验证；QEMU 启动矩阵至少一种配置 PASS。
-- C++ 模板单态化与 concept SFINAE 联动；多平台 binary。
+- C++ concept SFINAE 完整联动；模板基类/友元；多平台 binary。
 - 链接器 IPA-SRA / PGO 集成；LTO `no_semantic-interposition` Pass 7 完整化。
 
 **远期（架构 / 性能）**

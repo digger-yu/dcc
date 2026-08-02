@@ -303,9 +303,13 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 | `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 + M8 (namespace/operator/inherit/lambda/template/try-catch) + M10+ (partial spec/using Base::Base/init list/static local) + M17 (decltype/auto/friend/noexcept/final/override/mutable/volatile/explicit/using-in-class) + M18 (multi-dim subscript `obj[i,j,k]` → `CppExpr::MultiIndex`) |
 | `src/cpp/mangle.rs` | Itanium C++ ABI 名字修饰（`_ZN…C1E…` / `D1E` / `pl` / `_ZTV…` / `_ZTI…`） |
 | `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身 + vtable/typeinfo/lambda/exception 降级 + M10+ cxa_guard/init_list/coroutine 状态机 + M18 多维下标改写为 `__dcc_multi_index_N`） |
-| `src/cpp/modules.rs` | C++20 Modules 占位 (M18)：已知 module 表 + `import X;` 改写策略；M19+ 实现 BMF 序列化 |
+| `src/cpp/modules.rs` | C++20 Modules 占位 (M18)：已知 module 表 + `import X;` 改写策略；BMF 序列化由 `src/cpp/bmf.rs` 实装 |
 | `src/cpp/stdlib/headers/*` | 26 个 C++ 标准库头（M8-M18）：cstddef/cstdlib/cstring/cstdio/string/vector/iostream/memory/exception/stdexcept/typeinfo/initializer_list/utility/algorithm/map/functional + M18 chrono/thread/mutex/condition_variable/filesystem/expected/flat_map/regex/ranges |
-| `src/cpp/m10.rs` | M10+ 高级特性降级器：SFINAE / partial spec / concept 求值 / 协程 / module 分区 / operator-> / dynamic_cast / 构造委托 / 成员函数指针 / __cxa_guard_ / initializer_list |
+| `src/cpp/m10.rs` | M10+ 高级特性降级器：SFINAE / partial spec / concept 求值 / operator-> / dynamic_cast / 构造委托 / 成员函数指针 / __cxa_guard_ / initializer_list |
+| `src/cpp/template.rs` | 模板完整单态化：注册 class/function 模板及偏特化 (含 requires-clause)；`instantiate` 按需实例化 + 缓存；`pick_best_specialization` 按 match score 选择最佳偏特化；模板-id 调用表达式 `T<U>`、模板局部变量声明、typeid 模板类型 |
+| `src/cpp/coroutine.rs` | 协程 Duff's device 状态机：`co_await`/`co_yield`/`co_return` 降级为 per-function `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done` 变量 + switch 结构 |
+| `src/cpp/bmf.rs` | Modules BMF 序列化：DCC_BMF_V1 文本格式 (module 名/import 列表/export 记录)；`ModuleInfo::to_bmf`/`from_bmf` round-trip |
+| `src/cpp/gcc_compat.rs` | GCC ABI 兼容运行时：`__cxa_guard_acquire/release/abort`、`__dcc_typeinfo_t`、`__dynamic_cast`、initializer_list 布局、成员指针偏移宏；idempotent 追加到降级 C 序言 |
 | `src/cpp/driver.rs` | 顶层入口：`compile_cpp(cpp_src, obj, dcc_bin, includes, opt)` |
 
 **降级映射表**（C++ → C）：
@@ -321,8 +325,8 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 - `operator+` → `_ZN...pl...`（Itanium 运算符编码：pl/mi/ml/dv/...）
 - `try { throw 1; } catch (int e) {}` → `__cxa_try`/`__cxa_allocate_exception`/`__cxa_throw` 调用
 - `[](int x) { return x; }` → 匿名 `struct __lambda_N` + `_ZN__lambda_NclERKS_` operator()
-- `template <typename T> ...` → 语法占位 + 单态化降级
-- `typeid(e)` / `dynamic_cast<T*>(e)` → RTTI 占位（`_ZTI` 符号 + `__vptr` 字段）
+- `template <typename T> ...` → 完整单态化 (src/cpp/template.rs)：按需实例化 + 缓存 + 偏特化匹配
+- `typeid(e)` / `dynamic_cast<T*>(e)` → `__dcc_typeinfo_t` 符号 / `__dynamic_cast` 辅助
 
 **M7 范围**：class、ctor、dtor、成员变量、成员函数、`this->x`、`::`、
 引用（→指针）、new/delete、MangleType 基本类型。
@@ -349,7 +353,8 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
   - `module foo;` / `export module foo;` / `import <iostream>;` /
     `import "header.h";` / `export { ... }` 降级为 no-op 注释
   - `concept Name = ...;` / `requires ...` 降级为占位注释
-  - `co_await` / `co_yield` 降级为表达式 + 注释；`co_return` 降级为 `return`
+  - `co_await expr` / `co_yield expr` / `co_return expr` → Duff's device 状态机
+    (src/cpp/coroutine.rs)：per-function `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done`
 - **C++ → C 降级完善**：
   - 局部变量声明 `T name;` / `T name = init;` / `T name(args);` 解析 + 降级
     为 `struct T name;` 形式
@@ -369,10 +374,12 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
   而不是临时目录，便于调试
 
 **M9 不在范围**：SFINAE / partial specialization（`partial_sort`）/
-完整 concept 求值 / 协程挂起恢复 / module 分区 / 完整 GCC cc1/cc1plus
-bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间）。
+完整 concept 求值 / 协程挂起恢复 / module BMF 序列化 / 完整 GCC cc1/cc1plus
+bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间；
+其中 SFINAE / partial spec / concepts / 协程 / module BMF 在 M10+ 已实装）。
 
-**M10+ 范围**（新增，已在 `src/cpp/m10.rs` 中实现）：
+**M10+ 范围**（新增，已在 `src/cpp/m10.rs` + `src/cpp/template.rs` +
+`src/cpp/coroutine.rs` + `src/cpp/bmf.rs` + `src/cpp/gcc_compat.rs` 中实现）：
 - **SFINAE**（`substitution failure is not an error`）：
   - `SfinaeCtx` 记录类型形参→实参绑定，`try_substitute` 替换失败时降级
     为保留原 ident（pattern_matches 阶段判定非匹配）
@@ -386,14 +393,28 @@ bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间）。
   - 解析 `sizeof(T) <= N` / `same_as<T, U>` / `derived_from<T, Base>` /
     `T::value` / 表达式约束
   - `Concept::evaluate(&SfinaeCtx)` 替换形参后求值，返回 bool
-- **协程挂起恢复**（C++20）：
-  - `co_await expr` → `static int __coro_state = (expr);` 状态机驱动
-  - `co_yield expr` → `static int __coro_yield_state = (expr); return ...;`
-  - `co_return expr` → `return expr;`（带 co_return 注释）
-- **Module 分区**：
-  - 解析 `module foo:part1;` / `export module foo:part1;` 为
-    `Module { name, partition: Some("part1"), is_export }`
-  - 输出 `/* dcc C++ module (M10+): foo:part1 */` 注释
+- **模板完整单态化**（`src/cpp/template.rs`）：
+  - `TemplateRegistry` 注册 class/function 模板及偏特化（含 requires-clause 约束）
+  - `instantiate` 按需实例化 + 缓存，每个实例化定义只 emit 一次
+  - `pick_best_specialization` 按 match score 选择最佳偏特化
+  - 解析模板-id 调用表达式 `T<U>`、模板局部变量声明、typeid 模板类型
+- **协程 Duff's device 状态机**（`src/cpp/coroutine.rs`）：
+  - `co_await expr` / `co_yield expr` / `co_return expr` 降级为 per-function
+    `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done` 变量
+  - `emit_fn` 包裹协程体为 `switch(<fn>_coro_state)` 结构：
+    case 0 入口 + resume labels 在每 suspend 点
+- **Modules BMF 序列化**（`src/cpp/bmf.rs`）：
+  - DCC_BMF_V1 文本格式：module 名 / import 列表 / export 记录
+    (function/class/variable)
+  - `lower` 在 export module 声明后收集 exports
+  - `ModuleInfo::to_bmf` / `from_bmf` round-trip 辅助
+- **GCC ABI 兼容运行时**（`src/cpp/gcc_compat.rs`）：
+  - `__cxa_guard_acquire/release/abort` 静态局部初始化
+  - `__dcc_typeinfo_t` 用于 typeid 静态路径
+  - `__dynamic_cast` 辅助
+  - `initializer_list` 布局
+  - 成员指针偏移宏
+  - 运行时 idempotent 追加到降级 C 序言
 - **operator-> 重载链**：
   - 类型名含 `Ptr`/`ptr`/`Wrapper`/`Iter`/`iter` 的局部变量在 `->`
     访问时走 operator-> 链 (简化: 直接展开为 `obj->member`)
@@ -418,12 +439,15 @@ bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间）。
   - `InitList::emit_c()` 生成 `{ ptr, count, capacity }` 结构
 
 **M10+ 设计原则**：所有特性均降级为 dcc C 后端可直接消费的 C 代码；
+模板完整单态化 / 协程状态机 / Modules BMF 序列化 / GCC 兼容运行时
+均已实装并通过 496 单元测试 + 255 集成测试。
 对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 本地
 磁盘空间），但 M10+ 显著扩展了能直接编译的 C++ 模式范围。
 
 **限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M9 阶段已可端到端运行
 简单 C++ 源（含 class / 成员函数 / 构造初始化列表 / 局部类变量 /
 方法调用改写）；GCC 完整 bootstrap 仍部分受阻（M9 已解锁 C++ 端到端，
+M10+ 已实装模板完整单态化 / 协程 / module BMF / GCC 兼容运行时，
 cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 本地磁盘需要为 GCC
 源码约 1GB + 构建临时文件约 5GB 留足空间）；原因见
 `docs/missing_features.md` 的 C++ 前端状态表。

@@ -374,10 +374,12 @@ cross_function_dce / sccp / loop_opt / tco / function_attr），
 ### 6.1 已实装（M7-M10+）
 
 ✅ 命名空间 / 运算符 / 继承 (单/多/钻石) / 虚函数 / vtable (`_ZTV<Name>`) /
-typeinfo (`_ZTI<Name>`) / RTTI / 异常 (Itanium zero-cost) / lambda / 模板占位 /
-ctor 初始化列表 / 隐式 this 注入 / 局部类变量 / C++20 占位 (module/import/export/
-concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
-完整 concept 求值 / 协程状态机 / module 分区 / operator-> 链 /
+typeinfo (`_ZTI<Name>`) / RTTI / 异常 (Itanium zero-cost) / lambda / 模板完整单态化
+(src/cpp/template.rs) / ctor 初始化列表 / 隐式 this 注入 / 局部类变量 /
+`co_await`/`co_yield`/`co_return` 协程 (src/cpp/coroutine.rs) /
+module BMF 序列化 (src/cpp/bmf.rs) / GCC 兼容运行时 (src/cpp/gcc_compat.rs) /
+C++20 占位 (module/import/export/concept/requires) /
+M10+ SFINAE / partial spec / 完整 concept 求值 / operator-> 链 /
 跨虚继承 dynamic_cast / 构造委托 (`using Base::Base;`) / 成员函数指针 /
 `__cxa_guard_*` 线程安全 init guard / `std::initializer_list`。
 
@@ -385,7 +387,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 
 | 模块 | 现状 |
 |------|------|
-| 模板实例化 | M10+ 实现 `PartialSpec` + SFINAE，但模板函数/类的真实单态化是简化版：依赖 `try_substitute` 模式匹配。`T<U>` 显式实参语法 (M18) 🟢 (M25) `parse_mangle_type` 在 ident 后识别 `<`, 走 `looks_like_template_args_after_lt` 嵌套扫描, 升级为 `MangleType::Template`; 嵌套 `>>` 视作两层 `>` |
+| 模板实例化 | 🟢 (M25) `src/cpp/template.rs` 完整单态化：`TemplateRegistry` 注册 class/function 模板及偏特化 (含 requires-clause 约束)；`instantiate` 按需实例化 + 缓存；`pick_best_specialization` 按 match score 选择最佳偏特化；解析模板-id 调用表达式 `T<U>`、模板局部变量声明、typeid 模板类型；每个实例化定义只 emit 一次 |
 | `obj.*ptr_to_member` (M8 简化) | 🟢 (M25) MemberStar / PtrMemberStar 路径实装, 解析 `.*` 与 `->*` 语法, 走 `__dcc_mbr_<class>_<member>` 偏移 |
 | `typeid(e)` (M8 简化) | 🟢 (M25) `CppExpr::Typeid` 和 `TypeidType` 走真 RTTI: `expr_static_class` 推断静态类, 生成 `(&__dcc_ti_<class>)` 符号引用, 替代 M8 stub `((_ZTI*)(((void*)e)->__vptr + 0))`; 跨多态指针动态 RTTI 仍为 Section 9 follow-up |
 | `auto` (M17 实装) | `infer_type` 真类型推导: int 字面量→Int, `"abc"`→`const char*` (`MangleType::Pointer(Int)`), 类名已知 → `MangleType::Class` |
@@ -393,9 +395,9 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | `decltype(expr)` (M17 实装) | 解析为 `MangleType::Int` 占位 (M17.0 简化) |
 | `decltype(auto)` (M17 实装) | 解析为 `MangleType::DecltypeAuto` 占位 |
 | `using Base::Base;` 继承链 ctor (M17 实装) | 类内 `using` 被 lower 接受, InheritingCtor 节点继续复用既有 lower; 多文件链接场景受 dcc C 后端 `__base_Base1` 字段访问 pre-existing 限制 |
-| `co_yield` / `co_await` (M10+) | 降级为 `static int __coro_state = (expr);` 状态机，不是真挂起 |
+| `co_yield` / `co_await` / `co_return` (M10+) | 🟢 (M25) `src/cpp/coroutine.rs`：Duff's device 状态机，per-function 变量 `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done`；`emit_fn` 包裹协程体为 switch 结构，case 0 入口 + resume labels 在每 suspend 点 |
 | `concept` / `requires` (M10+) | 解析为注释 + 简化求值；不与 SFINAE 完整联动 |
-| `module` / `import` (M10+) | 注释占位，无实际模块解析 |
+| `module` / `import` (M10+) | 🟢 (M25) `src/cpp/bmf.rs`：DCC_BMF_V1 文本格式，lower 在 export module 声明后收集 exports；`ModuleInfo::to_bmf`/`from_bmf` round-trip；ODR 检查待后续 |
 | C++ 标准库 (`src/cpp/stdlib/`) | 头文件 + 运行时为 C 实现；`vector<int>` 等模板实参语法无法直接使用 |
 | 模板基类 (M8) | 不支持 |
 | 模板友元 | 不支持 |
@@ -421,7 +423,7 @@ concept/requires/co_await/co_yield/co_return) / M10+ SFINAE / partial spec /
 | `std::regex` (M18 实装, 简化子集) | 编译 regex 为 byte-code; 解释器用递归回溯 NFA; 支持字面/`.`/`[abc]`/`[a-z]`/`[^...]`/`*`/`+`/`?`/`|`/`()`/`^`/`$`/`\x`; 头在 `regex` |
 | `std::ranges` / `std::views` (M18 实装, 简化) | filter/transform/take/reverse view (eager materialize); 头在 `ranges` |
 | Concepts (M18 实装, SFINAE 简化版) | `concept Name = ...;` 解析 + 接受; 不做实际 SFINAE 过滤, 模板约束走 free path |
-| C++20 Modules (M18 占位) | `module;` / `export module X;` / `import X;` 接受; M19+ 实现 BMF 序列化 |
+| C++20 Modules (M18 占位) | 🟢 (M25) BMF 序列化已实装 (src/cpp/bmf.rs)；ODR 检查待后续 |
 | `static` 类成员 | 🟢 (M23) 解析为 C `static` 字段 + Itanium ABI mangling (`_ZN<class><name>E`) |
 | `virtual` 继承 | 部分支持（见 `M10+`），复杂虚基类不验证 |
 | `placement new` | 🟢 (M25) parser 检测 `new (ptr) T(args)` 形式构造 `CppExpr::PlacementNew { ptr, ty, args }`, lower emit `((void*)ptr, ctor(ptr, args))` 走原地构造, 不调用 operator new 分配新内存 |

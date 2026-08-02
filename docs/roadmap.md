@@ -255,7 +255,7 @@
   模板约束可解析；不做真实 SFINAE 过滤。
 - **Modules 占位**: 新增 `src/cpp/modules.rs`，记录已知 module 表与
   `import name` 改写策略。M18 仅注释占位，运行时不做真实 module 链接。
-  M19+ 实现 BMF 序列化 + ODR 检查。
+  M19+ 实现 ODR 检查（BMF 序列化已由 src/cpp/bmf.rs 实装）。
 - **测试**: 11 个 `m18_*` 集成测试 (`m18_chrono / m18_thread_mutex /
   m18_condition_variable / m18_filesystem / m18_expected /
   m18_flat_map / m18_multi_index / m18_regex / m18_ranges /
@@ -267,7 +267,7 @@
   - 多维下标默认 `__dcc_multi_index_N` 返回 0；自定义类需要
     自行提供有 stride 信息的实现。
   - Ranges view 不真正 lazy，每次适配都 materialize。
-  - Modules 仅占位，无 BMF / ODR / 跨 TU 优化。
+  - Modules BMF 已实装 (src/cpp/bmf.rs)，ODR / 跨 TU 优化待后续
   - regex 不支持 unicode / 反向引用 / lookahead。
   - `std::thread` 成员函数入口需用户自己写 C thunk（dcc++
     不会自动从 `&Class::method` 生成 `void*(*)(void*)`）。

@@ -81,7 +81,7 @@
 | dcc++ 端到端编译 (M9) | `dcc -x c++ examples/m9_cpp_simple.cpp -o a.o` + `gcc a.o -o a && ./a` 在本地 cargo test 实测 `exit=0`（`Counter` 局部变量 + `c.inc()` 改写 + ctor 初始化列表 + 顶层 main trampoline） |
 | dcc++ 多类 + 隐式 this (M9) | `examples/m9_cpp_multi.cpp` 本地实测 `exit=0`（方法体内未限定 `n_` 自动改写为 `this->n_`） |
 | dcc++ 复合操作符 / C 关键字 (M9) | `->` / `->*` / `--` / `-=` / `++` / `+=` / `<<` / `<<=` / `>>` / `>>=` / `==` / `!=` / `<=` / `>=` / `&&` / `||` / `*=` / `/=` / `%=` / `^=` / `|=` / `&=` / `...` 全部支持；`int` / `return` / `if` / `while` 等不再被误为 `Ident` |
-| dcc++ C++20 占位 (M9) | `module` / `import` / `export` / `concept` / `requires` / `co_await` / `co_yield` / `co_return` 全部降级为 no-op 注释 |
+| dcc++ C++20 占位 (M9) | `module` / `import` / `export` / `concept` / `requires` 降级为 no-op 注释；`co_await` / `co_yield` / `co_return` 由 `src/cpp/coroutine.rs` 实装为 Duff's device 状态机 |
 
 ## 阻塞级（Linux 6.6 全树）
 
@@ -108,7 +108,7 @@
 
 | 缺口 | 影响 |
 |------|------|
-| 无 C++ (M8 部分解锁) | M8 已支持 命名空间 / 运算符 / 继承 / vtable / RTTI / 异常 / lambda / 模板；仍缺 SFINAE / concepts / modules / coroutines |
+| 无 C++ (M8 部分解锁) | M8 已支持 命名空间 / 运算符 / 继承 / vtable / RTTI / 异常 / lambda / 模板完整单态化；SFINAE / concepts / modules (BMF) / coroutines 均已实装 |
 | `_Generic` 指针精确匹配 | ✅ 按 pointee 匹配；void* 与对象指针兼容 |
 | libdecnumber 组合编译 | ✅ `tools/libdecnumber_combined.c` 把 11 个 SKIP 文件合一，DECPMAX 7/16/34 三段；本地 1 OK |
 | 内联 asm 约束 | ✅ `"r"`/`"m"`/`"=r"`/`+m`、`memory` clobber |
@@ -125,16 +125,17 @@
 | 最小 C++ 解析器 (M7) | ✅ | `src/cpp/parser.rs`：class、ctor、dtor、成员函数、成员变量、::、this->x |
 | M8 解析器扩展 | ✅ | 命名空间 / 运算符 / 继承 (单/多/钻石) / 虚函数 / 模板声明 / try-catch / lambda / typeid / dynamic_cast / static_cast / const_cast / reinterpret_cast |
 | C++→C 降级 (M7) | ✅ | `src/cpp/lower.rs`：struct 字段、隐式 this 形参、`_Znwm`/`_ZdlPv` 替身 |
-| M8 C++→C 降级 | ✅ | 命名空间扁平化 / 基类嵌入 / vtable 符号 / typeinfo 符号 / 异常 (Itanium zero-cost 降级) / lambda 闭包类型 / 模板 (占位) / dynamic_cast 简化实现 |
+| M8 C++→C 降级 | ✅ | 命名空间扁平化 / 基类嵌入 / vtable 符号 / typeinfo 符号 / 异常 (Itanium zero-cost 降级) / lambda 闭包类型 / 模板完整单态化 (src/cpp/template.rs) / dynamic_cast 简化实现 |
 | dcc++ 子命令 / `-x c++` | ✅ M9 | `dcc -x c++ foo.cpp` / `dcc foo.cpp`（按 `.cpp`/`.cc`/`.cxx` 扩展名自动识别）；`dcc -dump-ast` / `dcc -fsyntax-only`；本地 cargo test 实测 `exit=0` |
 | dcc++ 局部类变量 + 方法调用改写 (M9) | ✅ | `Counter c;` → `struct Counter c; _ZN7CounterC1Ev(&c);`；`c.inc()` → `_ZN7Counter3incEv(&c)`；本地 `m9_cpp_simple.cpp` / `m9_cpp_multi.cpp` 端到端 `exit=0` |
 | dcc++ 隐式 this 注入 (M9) | ✅ | 类方法体内未限定成员 `n_` 自动改写为 `this->n_`（基于 `current_class` + `class_fields`） |
-| dcc++ C++20 占位 (M9) | ✅ | `module` / `import` / `export` / `concept` / `requires` / `co_await` / `co_yield` / `co_return` 降级为 no-op 注释 |
-| dcc++ 完整 SFINAE (M10+) | ✅ | `src/cpp/m10.rs::SfinaeCtx` + `try_substitute` 替换失败不报错，模板形参未绑定跳过该候选 |
-| dcc++ partial specialization (M10+) | ✅ | 解析 `template <T> class Foo<T*> {}` 为 `PartialSpec { params, pattern_text, decl }`；`pattern_matches` 支持 `T*` / `T&` / `const T` / 精确匹配 |
+| dcc++ C++20 占位 (M9) | ✅ | `module` / `import` / `export` / `concept` / `requires` 降级为 no-op 注释；`co_await` / `co_yield` / `co_return` 由 src/cpp/coroutine.rs 实装为 Duff's device 状态机 (per-function <fn>_coro_state/<fn>_coro_value/<fn>_coro_done) |
+| dcc++ 完整 SFINAE (M10+) | ✅ | `src/cpp/m10.rs::SfinaeCtx` + `try_substitute` 替换失败不报错，模板形参未绑定跳过该候选；`src/cpp/template.rs` 完整单态化：注册/实例化缓存/偏特化匹配/模板-id 调用解析 |
+| dcc++ partial specialization (M10+) | ✅ | 解析 `template <T> class Foo<T*> {}` 为 `PartialSpec { params, pattern_text, decl }`；`pattern_matches` 支持 `T*` / `T&` / `const T` / 精确匹配；`TemplateRegistry::register_partial_spec` 按 match score 挑选最佳特化 |
 | dcc++ 完整 concept 求值 (M10+) | ✅ | `Concept::parse` 支持 `sizeof(T)<=N` / `same_as<T,U>` / `derived_from<T,Base>` / `T::value` / 表达式约束；`Concept::evaluate(&SfinaeCtx)` 替换形参后求值 |
-| dcc++ 协程挂起恢复 (M10+) | ✅ | `co_await` / `co_yield` 降级为 `static int __coro_state` 状态机驱动；`co_return` 降级为 `return` |
-| dcc++ module 分区 (M10+) | ✅ | 解析 `module foo:part1;` / `export module foo:part1;`；输出 `/* dcc C++ module (M10+): foo:part1 */` |
+| dcc++ 协程挂起恢复 (M10+) | ✅ | `src/cpp/coroutine.rs`：`co_await` / `co_yield` / `co_return` 降级为 Duff's device 状态机 (per-function <fn>_coro_state, <fn>_coro_value, <fn>_coro_done)；`emit_fn` 包裹协程体为 switch(<fn>_coro_state) 结构 |
+| dcc++ module BMF 序列化 (M10+) | ✅ | `src/cpp/bmf.rs`：DCC_BMF_V1 文本格式包含 module 名/import 列表/export 记录 (function/class/variable)；`lower` 在 export module 声明后收集 exports；`ModuleInfo` 提供 `to_bmf`/`from_bmf` round-trip 辅助 |
+| dcc++ GCC 兼容运行时 (M10+) | ✅ | `src/cpp/gcc_compat.rs`：`__cxa_guard_acquire/release/abort` 静态局部初始化；`__dcc_typeinfo_t` 用于 typeid 静态路径；`__dynamic_cast` 辅助；`initializer_list` 布局；成员指针偏移宏；运行时 idempotent 追加到降级 C 序言 |
 | dcc++ operator-> 重载链 (M10+) | ✅ | 类型名含 `Ptr`/`Wrapper`/`Iter` 的局部变量在 `->` 访问时识别为可走 operator-> 链 |
 | dcc++ 完整 RTTI dynamic_cast 跨虚继承 (M10+) | ✅ | `dynamic_cast<T*>(e)` 降级为 `((T*)__dynamic_cast((void*)(e), 0, 0, -1))`；Itanium C++ ABI: 通过 vtable RTTI 查找 |
 | dcc++ 构造委托 / 继承链 ctor (M10+) | ✅ | 解析 `using Base::Base;` 为 `InheritingCtor { class, base }`；`CtorExpander::emit_inheriting` 生成 wrapper 转发 |
@@ -157,14 +158,14 @@
 | C 前端补洞 const_eval 完整化 (M15) | ✅ | `ConstValue` 枚举（`Int/Float/Str/Addr/Bytes`）；`eval_full` 返回完整常量值，旧 `eval` 仅取整数部分；浮点 + - * / 与 `Int<->Float` 混合算术；比较提升到 f64；字符串字面量走 FNV-1a 64-bit 标签 + 字节内容；`&ident` / `&arr[i]` / `&&label` → `Addr { name, offset }`；新增 `__builtin_strlen/abs/labs/llabs/bswap16/32/64/expect/popcount*` 编译期折叠；`Cast` 阶段新增 `-Wint-truncation` / `-Wint-conversion` 严格类型 warning（不阻塞） |
 | C 前端补洞 运行时检查 (M15) | ✅ | `-fbounds-check` 数组下标运行时边界检查：仅对 `ArraySize::Const(n)` 的数组插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds`；`-ftrapv` 有符号算术溢出 trap：binop 之后置 `jo` 跳到 `__dcc_trapv_overflow` 桩函数（覆盖 `Add/Sub/Mul/Div`） |
 | C++ 修饰符与类型推导真实化 (M17) | ✅ | 14 + 2 = 16 个 `tests/fixtures/cpp/*.cpp` 全部通过: `auto` 真类型推导 (int/const char*/class) / `decltype(expr)` + `decltype(auto)` 解析 / `friend` 走 FreeFn 路径 (无 this 形参) / `using Base::Base;` 类内合法 (复用 InheritingCtor 节点) / `noexcept` → `__attribute__((nothrow))` / `final`/`override` 解析层接受 / `mutable`/`volatile` 成员函数标记 / `explicit` ctor 接受 / `new T[n]` 数组分配 + `_Znam`/`_ZdaPv` extern 替身 / `placement new` 转发 (void*)ptr / `if constexpr` 编译期分支 / 16/16 m17_* 集成测试 PASS |
-| C++ 标准库扩展 (M18) | ✅ | 11 个 `tests/fixtures/cpp/*.cpp` 全部通过: `<chrono>` (duration / time_point / 三种 clock 走 `clock_gettime`); `<thread>` `<mutex>` `<condition_variable>` 包装 pthread; `<filesystem>` (path / file_type / directory_iterator); `<expected>` C++23 (expected_int / expected_str 擦除模板); `<flat_map>` C++23 (int→int 二分查找); C++23 多维下标 `obj[i,j,k]` → `__dcc_multi_index_N`; `<regex>` 简化版 (回溯 NFA 解释器支持 `.`/`[]`/`[^]`/`*`/`+`/`?`/`|`/`()`/`^`/`$`); `<ranges>` 简化版 (filter/transform/take/reverse view); Concepts 语法层 (SFINAE 简化版); Modules 占位 (src/cpp/modules.rs) |
+| C++ 标准库扩展 (M18) | ✅ | 11 个 `tests/fixtures/cpp/*.cpp` 全部通过: `<chrono>` (duration / time_point / 三种 clock 走 `clock_gettime`); `<thread>` `<mutex>` `<condition_variable>` 包装 pthread; `<filesystem>` (path / file_type / directory_iterator); `<expected>` C++23 (expected_int / expected_str 擦除模板); `<flat_map>` C++23 (int→int 二分查找); C++23 多维下标 `obj[i,j,k]` → `__dcc_multi_index_N`; `<regex>` 简化版 (回溯 NFA 解释器支持 `.`/`[]`/`[^]`/`*`/`+`/`?`/`|`/`()`/`^`/`$`); `<ranges>` 简化版 (filter/transform/take/reverse view); Concepts 语法层 (SFINAE 简化版); Modules BMF 序列化 (src/cpp/bmf.rs) |
 | C 前端补洞 `_Pragma` 操作符 (M11.1) | ✅ | C99 `_Pragma("string")` 在 preproc 展开阶段累积到 `pending_pragmas: RefCell<Vec<String>>`，源块刷新时批量应用到 `process_directive` |
 | C 前端补洞 `_Pragma` 操作符 (M14) | ✅ | `_Pragma` 与 `#pragma` 共享同一条 `process_directive` 通路，自动具备 pack/weak/STDC/GCC diagnostic 处理 |
 | C 前端补洞 `#warning` / `#error` (M11.1) | ✅ | preproc 阶段匹配 `^#\s*warning` / `^#\s*error` 行；`#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
 | C 前端补洞 `_Static_assert` 字符串化 (M11.1) | ✅ | C23 单参 `_Static_assert(expr)` 与双参 `_Static_assert(expr,"msg")` 全部支持；失败消息附加 `evaluates to: <ExprDebug 文本>` 便于定位 |
 | C 前端补洞 GNU 扩展 (M11.2) | ✅ | `__builtin_offsetof` 支持嵌套 struct/union/数组下标/匿名 struct 成员访问；`__builtin_huge_val`/`huge_valf`/`huge_vall` 按 IEEE 754 位模式 (double 0x7FF0000000000000 / float 0x7F800000 / long double 0x7FFF8000000000000000) rodata 加载；`__builtin_nan`/`nanf`/`nanl` 走 qNaN 编码 (double 0x7FF8000000000000)；`_Atomic` 在 C 前端接通 `__atomic_*` 内建函数 + `__c11_atomic_*` 路径；`__builtin_call_with_static_chain` 按 SysV ABI 把 chain 写入 r10 并按 GP/XMM 寄存器约定传参 + 间接 call；嵌套函数作为 IR 一等公民支持静态链参数；computed goto 跨函数（标签地址走 LEA 加载，间接 jmp 通过寄存器）；asm goto 输出约束在 fall-through 路径上写回，跳转路径保留原值；`__builtin_isnan`/`isinf`/`finite`/`signbit`/`fpclassify` 正确处理 NaN/Inf 位模式；`Expr::Unary` 浮点取负走恒常折叠 + 运行时 XOR 符号位；`AddrOf` REX.R 编码对 r10–r15 修复 |
 | 内联 asm 约束全家族 (M11.3) | ✅ | `parse_asm_constraint_flags` 解析 `=` / `+` / `&` / `%` / `0..9`；`asm_constraint_*` 判定：is_immediate (i/n/I/J/K/L/M/N/O/X/E/F/G/H/s)、is_address (p)、wants_xmm (x/Y)、is_general (g)、prefers_memory；`asm_pick_sub_constraint` 从多约束 ("rm") 选单约束，按 `r` > `m` > 立即数 > `g` > 默认优先级；`build_asm_operand_map` 用 `Slot::{Reg, Imm, Mem}` + `meta: (reg, xmm_w, is_out, is_mem, flags)` 记录每个操作数；`prepare_asm_binding(expr, reg, is_output)` 区分输出/输入语义：输出走 lea 取地址（配合 `writeback_asm_operand` 写回），输入直接 `gen_expr` 取值（修复原 bug：输入也走 lea 导致 segfault）；early-clobber 阶段若 `&` 输出寄存器与任一输入寄存器重叠，重新从 GP 池挑选并重新 emit prepare/map；`asm_format_subst` 把 `op_map` 值按 AT&T 形态输出（`%rax` / `$305419896` / `-16(%r13)`）；offsetof 约束在输入侧走 `const_eval::eval` 求值，失败时回退到 GP 寄存器并 `lea` 加载常量基址 + 偏移；测试 `test_asm_constraints_ext.c` 10 个用例 (`test_immediate_constraint` / `test_address_constraint` / `test_general_constraint` / `test_constant_constraint` / `test_match_constraint_0` / `test_early_clobber` / `test_multi_constraint` / `test_xmm_constraint` / `test_digit_label_constraint` / `test_offsetof_constraint`) 本地 cargo test 10/10 PASS |
-| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；本地磁盘已具备（GCC 源 ~1G + 构建 ~5G）；仍缺 SFINAE / partial specialization / 完整 concepts / 协程 / module |
+| GCC 完整 bootstrap (cc1/cc1plus) | ⏳ 部分受阻 | M9 解锁 dcc++ 端到端；本地磁盘已具备（GCC 源 ~1G + 构建 ~5G）；SFINAE / partial specialization / 完整 concepts / 协程 / module 均已实装；新增 GCC 兼容运行时 (__cxa_guard / __dynamic_cast / initializer_list / 成员指针)；待 GCC 源树实际构建验证 |
 | libdecnumber 组合 TU 编译 | ✅ 本地 OK | `tools/libdecnumber_combined.c` 收敛 decSingle/Double/Quad 三套符号 |
 | 嵌套块重声明 (C99 6.2.1) | ✅ | `parser.rs::check_var_redecl` 允许函数体内遮蔽；文件作用域类型不匹配仍报 E0007 |
 

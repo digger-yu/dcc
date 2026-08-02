@@ -153,7 +153,7 @@ impl TemplateRegistry {
     /// 失败返回 None (约束不满足 / 实参个数不足) → SFINAE 跳过
     pub fn resolve_args(&self, td: &TemplateDecl, args: &[MangleType]) -> Option<Vec<MangleType>> {
         let mut resolved: Vec<MangleType> = Vec::new();
-        for (i, p) in td.param_names.iter().enumerate() {
+        for (i, _p) in td.param_names.iter().enumerate() {
             if let Some(a) = args.get(i) {
                 resolved.push(a.clone());
             } else if let Some(d) = td.defaults.get(i).cloned().flatten() {
