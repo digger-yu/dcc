@@ -21,7 +21,13 @@ use crate::cpp::mangle::{
     mangle_op_new, mangle_op_new_array, mangle_operator_member,
     mangle_operator_global, mangle_typeinfo, mangle_vtable, Operator,
 };
+use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};
+use crate::cpp::coroutine::{
+    body_has_coro, coro_fn_epilogue, coro_fn_prologue, coro_return, coro_suspend,
+};
+use crate::cpp::gcc_compat::runtime_prologue as gcc_runtime_prologue;
 use crate::cpp::parser::*;
+use crate::cpp::template::{TemplateRegistry, instantiated_class_name, type_key};
 
 /// 降级选项
 #[derive(Debug, Clone, Default)]
@@ -67,6 +73,26 @@ pub struct Lower {
     pub const_local_i128: std::collections::HashMap<String, i128>,
     /// M17.0: 协程状态机计数器
     pub coro_state: i64,
+    /// M26: 当前协程函数名 (per-function 状态变量前缀)
+    pub coro_var: String,
+    /// M26: 当前协程函数返回类型的 C 文本 ("void" 跳过返回槽)
+    pub coro_ret_c: String,
+    /// M26: 模块收集: 当前 module 名 (export module 声明后非空)
+    pub module_name: String,
+    /// M26: 模块收集: export module 之后进入收集模式
+    pub module_collect: bool,
+    /// M26: 模块收集: import 依赖列表
+    pub module_imports: Vec<String>,
+    /// M26: 模块收集: 导出声明 (函数/类/变量)
+    pub module_exports: Vec<BmfExport>,
+    /// M26: 模板注册表 (模板/偏特化注册 + 实例化缓存)
+    pub templates: TemplateRegistry,
+    /// M26: 已输出定义的模板实例化 key (类/函数去重)
+    pub inst_emitted: std::collections::HashSet<String>,
+    /// M26: 普通 (非模板) 函数名 - 模板函数调用裁决用
+    pub plain_fns: std::collections::HashSet<String>,
+    /// M26: 待输出定义的函数模板实例化 (name, args)
+    pub pending_fn_insts: std::collections::VecDeque<(String, Vec<MangleType>)>,
 }
 
 /// M18.0: 检查 ident 是否是 C 关键字 (如 int/char/void/...), 不能作为 typedef 名
@@ -202,6 +228,16 @@ impl Lower {
             lambda_counter: 0,
             const_local_i128: std::collections::HashMap::new(),
             coro_state: 0,
+            coro_var: String::new(),
+            coro_ret_c: String::new(),
+            module_name: String::new(),
+            module_collect: false,
+            module_imports: vec![],
+            module_exports: vec![],
+            templates: TemplateRegistry::default(),
+            inst_emitted: std::collections::HashSet::new(),
+            plain_fns: std::collections::HashSet::new(),
+            pending_fn_insts: std::collections::VecDeque::new(),
         }
     }
     pub fn with_options(_opt: LowerOptions) -> Self { Self::new() }
@@ -326,10 +362,21 @@ impl Lower {
     }
 
     /// 从 MangleType 中提取类名 (支持 Pointer / Reference / Class 包装)
+    /// M26: 模板类型 `Box<int>` 返回实例化类名 (方法调用 / typeid 用)
     fn extract_class(ty: &MangleType) -> Option<String> {
         match ty {
             MangleType::Class(c) => Some(c.clone()),
             MangleType::Pointer(t) | MangleType::Reference(t) => Self::extract_class(t),
+            MangleType::Template { name, args } => Some(instantiated_class_name(name, args)),
+            _ => None,
+        }
+    }
+
+    /// M26: 类类型名 (Class 或模板实例化) - 仅值类型, 不含指针 (ctor 调用用)
+    fn inst_class_of(ty: &MangleType) -> Option<String> {
+        match ty {
+            MangleType::Class(c) => Some(c.clone()),
+            MangleType::Template { name, args } => Some(instantiated_class_name(name, args)),
             _ => None,
         }
     }
@@ -415,10 +462,15 @@ impl Lower {
         self.out.push_str("extern int __cxa_try(__cxa_eh_context_t*, void* (*)(void*), void*);\n");
         self.out.push_str("extern void* __cxa_begin_catch(void*);\n");
         self.out.push_str("extern void __cxa_end_catch(void);\n");
-        // 第一次遍历: 收集类名
+        // M26: GCC ABI 兼容运行时 (__cxa_guard_* / typeinfo / __dynamic_cast /
+        // initializer_list / 成员指针偏移) - 自包含 C 定义, 幂等追加
+        self.out.push_str(&gcc_runtime_prologue());
+        // 第一次遍历: 收集类名 + 注册模板 + 扫描模板类型触发类实例化
         for d in decls { self.collect_classes(d); }
         // 第二次遍历: 实际降级
         for d in decls { self.lower_decl(d); }
+        // 2.5: 输出函数模板实例化定义 (含其体内触发的类实例化)
+        self.emit_pending_fns();
         // 最后降级所有 lambda
         self.lower_lambdas();
         // 若是顶层 main, 加 C 端 trampoline 让 libc 启动器能找到 main
@@ -456,6 +508,8 @@ impl Lower {
                 }
                 self.class_methods.insert(qname.clone(), methods);
                 self.class_fields.insert(qname, fields);
+                // M26: 扫描类成员类型, 触发模板类实例化
+                self.scan_decl_types(d);
             }
             CppDecl::Namespace { name, body } => {
                 // M18.0: 跟踪 namespace stack 让 qualify_name 出正确名字
@@ -463,8 +517,256 @@ impl Lower {
                 for x in body { self.collect_classes(x); }
                 if name.is_some() { self.ns.stack.pop(); }
             }
-            CppDecl::Template { decl, .. } => { self.collect_classes(decl); }
+            // M26: 模板声明只注册 (不再展开); 模板体在实例化时替换形参
+            CppDecl::Template { params, decl, requires } => {
+                self.templates.register(params, requires, decl);
+            }
+            CppDecl::PartialSpec { params, pattern_text, decl } => {
+                if let CppDecl::Class(c) = &**decl {
+                    let names: Vec<String> = params.params.iter().map(|p| p.name.clone()).collect();
+                    self.templates.register_partial(c.name.clone(), &names, pattern_text.clone(), decl);
+                }
+            }
+            _ => {
+                // M26: 普通声明扫描类型, 触发模板类实例化 (定义先于使用)
+                if let CppDecl::FreeFn { name, .. } = d {
+                    self.plain_fns.insert(name.clone());
+                }
+                self.scan_decl_types(d);
+            }
+        }
+    }
+
+    // ===== M26: 模板单态化 lower 集成 =====
+
+    /// 递归扫描声明树中的模板实例化类型, 触发类实例化 (定义先于使用).
+    fn scan_decl_types(&mut self, d: &CppDecl) {
+        match d {
+            CppDecl::Class(c) => { for m in &c.members { self.scan_decl_types(m); } }
+            CppDecl::FreeFn { ret, params, body, .. } => {
+                self.scan_ty(ret);
+                for (_, t) in params { self.scan_ty(t); }
+                self.scan_body_types(body);
+            }
+            CppDecl::MemberFn { ret, params, body, .. } => {
+                self.scan_ty(ret);
+                for (_, t) in params { self.scan_ty(t); }
+                self.scan_body_types(body);
+            }
+            CppDecl::Ctor { params, body, .. } => {
+                for (_, t) in params { self.scan_ty(t); }
+                self.scan_body_types(body);
+            }
+            CppDecl::Dtor { body, .. } => { self.scan_body_types(body); }
+            CppDecl::MemberVar { ty, .. } => { self.scan_ty(ty); }
+            CppDecl::OperatorFn { params, body, ret, .. } => {
+                for (_, t) in params { self.scan_ty(t); }
+                self.scan_ty(ret);
+                self.scan_body_types(body);
+            }
+            CppDecl::Namespace { body, .. } => { for x in body { self.scan_decl_types(x); } }
             _ => {}
+        }
+    }
+
+    fn scan_ty(&mut self, ty: &MangleType) {
+        match ty {
+            MangleType::Template { name, args } => {
+                for a in args { self.scan_ty(a); }
+                self.emit_inst_class(name, args);
+            }
+            MangleType::Pointer(t) | MangleType::Reference(t) => self.scan_ty(t),
+            _ => {}
+        }
+    }
+
+    fn scan_body_types(&mut self, body: &CppBody) {
+        for s in &body.stmts { self.scan_stmt_types(s); }
+    }
+
+    fn scan_stmt_types(&mut self, s: &CppStmt) {
+        match s {
+            CppStmt::Expr(e) | CppStmt::Return(Some(e)) => self.scan_expr_types(e),
+            CppStmt::If { cond, then, els } => {
+                self.scan_expr_types(cond); self.scan_body_types(then);
+                if let Some(e) = els { self.scan_body_types(e); }
+            }
+            CppStmt::IfConstexpr { cond, then, els } => {
+                self.scan_expr_types(cond); self.scan_body_types(then);
+                if let Some(e) = els { self.scan_body_types(e); }
+            }
+            CppStmt::While { cond, body } => { self.scan_expr_types(cond); self.scan_body_types(body); }
+            CppStmt::For { init, cond, step, body } => {
+                if let Some(i) = init { self.scan_stmt_types(i); }
+                if let Some(c) = cond { self.scan_expr_types(c); }
+                if let Some(x) = step { self.scan_stmt_types(x); }
+                self.scan_body_types(body);
+            }
+            CppStmt::Block(b) => self.scan_body_types(b),
+            CppStmt::ThisMember(_, inner) => self.scan_stmt_types(inner),
+            CppStmt::LocalVar { ty, init, .. } | CppStmt::StaticLocal { ty, init, .. } => {
+                self.scan_ty(ty);
+                if let Some(e) = init { self.scan_expr_types(e); }
+            }
+            CppStmt::Try { body, catches } => {
+                self.scan_body_types(body);
+                for c in catches {
+                    if let Some(t) = &c.ty { self.scan_ty(t); }
+                    self.scan_body_types(&c.body);
+                }
+            }
+            CppStmt::Throw(Some(e)) => self.scan_expr_types(e),
+            CppStmt::CoAwait(e) | CppStmt::CoYield(e) => self.scan_expr_types(e),
+            CppStmt::CoReturn(Some(e)) => self.scan_expr_types(e),
+            CppStmt::Decl(d) => self.scan_decl_types(d),
+            _ => {}
+        }
+    }
+
+    fn scan_expr_types(&mut self, e: &CppExpr) {
+        match e {
+            CppExpr::Cast(t, x) => { self.scan_ty(t); self.scan_expr_types(x); }
+            CppExpr::StaticCast { ty, expr } | CppExpr::ConstCast { ty, expr }
+            | CppExpr::ReinterpretCast { ty, expr } | CppExpr::DynamicCast { ty, expr } => {
+                self.scan_ty(ty); self.scan_expr_types(expr);
+            }
+            CppExpr::TypeidType(t) => self.scan_ty(t),
+            CppExpr::Sizeof(SizeofArg::Type(t)) => self.scan_ty(t),
+            CppExpr::Sizeof(SizeofArg::Expr(x)) => self.scan_expr_types(x),
+            CppExpr::TypedInitList { ty, elems } => {
+                self.scan_ty(ty);
+                for x in elems { self.scan_expr_types(x); }
+            }
+            CppExpr::Member(o, _) | CppExpr::PtrMember(o, _)
+            | CppExpr::MemberStar(o, _) | CppExpr::PtrMemberStar(o, _) => self.scan_expr_types(o),
+            CppExpr::Call(f, args) => {
+                self.scan_expr_types(f);
+                for a in args { self.scan_expr_types(a); }
+            }
+            CppExpr::New(ty, args) => {
+                self.scan_ty(&MangleType::Class(ty.clone()));
+                for a in args { self.scan_expr_types(a); }
+            }
+            CppExpr::NewArr { ty, count } => {
+                self.scan_ty(&MangleType::Class(ty.clone()));
+                self.scan_expr_types(count);
+            }
+            CppExpr::PlacementNew { ty, args, ptr } => {
+                self.scan_ty(&MangleType::Class(ty.clone()));
+                self.scan_expr_types(ptr);
+                for a in args { self.scan_expr_types(a); }
+            }
+            CppExpr::Delete(x) | CppExpr::DeleteArr(x) | CppExpr::Noexcept(x)
+            | CppExpr::Ref(x) | CppExpr::AddrOf(x) | CppExpr::Typeid(x)
+            | CppExpr::UnaryOp(_, x) => self.scan_expr_types(x),
+            CppExpr::BinOp(_, l, r) => { self.scan_expr_types(l); self.scan_expr_types(r); }
+            CppExpr::Ternary { cond, then, els } => {
+                self.scan_expr_types(cond); self.scan_expr_types(then); self.scan_expr_types(els);
+            }
+            CppExpr::Comma(xs) | CppExpr::InitList(xs) => {
+                for x in xs { self.scan_expr_types(x); }
+            }
+            CppExpr::OpCall { args, .. } => { for a in args { self.scan_expr_types(a); } }
+            CppExpr::Lambda(lam) => {
+                for (_, t) in &lam.params { self.scan_ty(t); }
+                self.scan_body_types(&lam.body);
+            }
+            CppExpr::MultiIndex(o, idx) => {
+                self.scan_expr_types(o);
+                for x in idx { self.scan_expr_types(x); }
+            }
+            _ => {}
+        }
+    }
+
+    /// M26: 类模板实例化 + 输出定义 (递归: 嵌套模板类先于自身输出).
+    /// 触发点都在普通函数定义输出之前 (collect_classes 阶段).
+    fn emit_inst_class(&mut self, name: &str, args: &[MangleType]) {
+        let key = TemplateRegistry::key_for(name, args);
+        if self.inst_emitted.contains(&key) { return; }
+        let Some(inst) = self.resolve_class_inst(name, args) else { return; };
+        self.inst_emitted.insert(key);
+        // 先递归输出嵌套模板类 (字段/成员引用需要完整定义)
+        self.scan_decl_types(&inst);
+        // 注册类信息: 方法改写 / ctor 查找 / typeid
+        self.register_inst_class(&inst);
+        // 实例化类名是全局唯一名, 与命名空间限定无关
+        let saved_ns = self.ns.stack.clone();
+        self.ns.stack.clear();
+        self.lower_decl(&inst);
+        self.ns.stack = saved_ns;
+    }
+
+    /// M26: 解析类实例 (偏特化优先), 失败 = requires 不满足 / 模板未注册
+    fn resolve_class_inst(&mut self, name: &str, args: &[MangleType]) -> Option<CppDecl> {
+        // 偏特化优先: `Foo<T*>` 匹配实参 `int*`
+        if let Some((pdecl, pnames, pargs)) = self.templates.pick_partial(name, args) {
+            let rename = instantiated_class_name(name, args);
+            return Some(crate::cpp::template::substitute_decl(&pdecl, &pnames, &pargs, Some(&rename)));
+        }
+        self.templates.instantiate_class(name, args)
+    }
+
+    /// M26: 注册实例化类的 class_methods / class_fields / class_ctors
+    fn register_inst_class(&mut self, inst: &CppDecl) {
+        if let CppDecl::Class(c) = inst {
+            let qname = c.name.clone(); // 已是实例化类名
+            if !self.classes.contains(&qname) { self.classes.push(qname.clone()); }
+            let mut methods = vec![];
+            let mut fields = vec![];
+            let mut ctors = vec![];
+            for m in &c.members {
+                match m {
+                    CppDecl::MemberFn { name, .. } => methods.push(name.clone()),
+                    CppDecl::MemberVar { ty, name, .. } => fields.push((name.clone(), ty.clone())),
+                    CppDecl::Ctor { .. } => ctors.push(m.clone()),
+                    _ => {}
+                }
+            }
+            self.class_methods.insert(qname.clone(), methods);
+            self.class_fields.insert(qname.clone(), fields);
+            self.class_ctors.insert(qname, ctors);
+        }
+    }
+
+    /// M26: 模板函数实例化 C 名: `foo<int>` -> `__dcc_tplfn_foo_int`
+    fn tplfn_c_name(name: &str, args: &[MangleType]) -> String {
+        let keys: Vec<String> = args.iter().map(type_key).collect();
+        format!("__dcc_tplfn_{}_{}", name, keys.join("_"))
+    }
+
+    /// M26: 输出模板函数实例化调用 (调用点), 并把实例化定义排入待输出队列.
+    /// 定义在 lower_decls 2.5 阶段统一输出 (emit_pending_fns).
+    fn emit_template_fn_call(&mut self, name: &str, args: &[MangleType]) {
+        // 验证可实例化 (requires 约束); 失败 = SFINAE 跳过
+        match self.templates.instantiate_fn(name, args) {
+            Some(CppDecl::FreeFn { .. }) => {}
+            _ => {
+                self.out.push_str(&format!("0 /* SFINAE: {}<...> not a function */", name));
+                return;
+            }
+        }
+        let key = TemplateRegistry::key_for(name, args);
+        if !self.pending_fn_insts.iter().any(|(n, a)| TemplateRegistry::key_for(n, a) == key) {
+            self.pending_fn_insts.push_back((name.to_string(), args.to_vec()));
+        }
+        self.out.push_str(&Self::tplfn_c_name(name, args));
+    }
+
+    /// M26: 输出所有函数模板实例化定义 (lower_decls 2.5 阶段).
+    /// 函数体内触发的类实例化先输出 (struct 定义先于使用).
+    fn emit_pending_fns(&mut self) {
+        while let Some((name, args)) = self.pending_fn_insts.pop_front() {
+            let Some(inst) = self.templates.instantiate_fn(&name, &args) else { continue; };
+            let (ret, params, body) = match &inst {
+                CppDecl::FreeFn { ret, params, body, .. } => (ret.clone(), params.clone(), body.clone()),
+                _ => continue,
+            };
+            // 扫描体内类型 -> 触发类实例化 (struct 定义先于本函数)
+            self.scan_decl_types(&inst);
+            // 定义名 = 调用点名字 (不经过 Itanium mangle)
+            let cname = Self::tplfn_c_name(&name, &args);
+            self.emit_fn(&cname, &ret, &params, &body);
         }
     }
 
@@ -551,10 +853,36 @@ impl Lower {
 
     fn lower_decl(&mut self, d: &CppDecl) {
         match d {
-            CppDecl::Class(c) => self.lower_class(c),
+            CppDecl::Class(c) => {
+                // M26: BMF - export module 后的类记为导出 (含成员布局)
+                if self.module_collect {
+                    let layout = c.members.iter().filter_map(|m| match m {
+                        CppDecl::MemberVar { ty, name, .. } => {
+                            Some(format!("{}:{}", name, self.mangle_to_c_ns(ty)))
+                        }
+                        _ => None,
+                    }).collect::<Vec<_>>().join(", ");
+                    self.module_exports.push(BmfExport {
+                        kind: BmfKind::Class,
+                        name: c.name.clone(),
+                        signature: String::new(),
+                        layout: if layout.is_empty() { None } else { Some(layout) },
+                    });
+                }
+                self.lower_class(c);
+            }
             CppDecl::FreeFn { ret, name, params, body } => {
                 let n = NestedName::from_dotted(vec![self.qualify_name(name)]);
                 let m = mangle_member_function(&n, &[], ret);
+                // M26: BMF - export module 后的顶层自由函数记为导出 (main 除外)
+                if self.module_collect && name != "main" {
+                    self.module_exports.push(BmfExport {
+                        kind: BmfKind::Function,
+                        name: m.clone(),
+                        signature: self.fn_signature_c(ret, params),
+                        layout: None,
+                    });
+                }
                 self.emit_fn(&m, ret, params, body);
             }
             CppDecl::MemberFn { class, ret, name, params, body,
@@ -661,24 +989,32 @@ impl Lower {
                     self.emit_fn(&m, ret, params, body);
                 }
             }
-            CppDecl::Template { params, decl } => {
-                // M8 简化: 模板作为语法占位, 立即降级 decl 内容
-                // 真实模板实例化需要每种类型实参产生一份; 我们先做单态化
-                // 标记模板, 降级时附带 __template_<N>_ 前缀
-                self.out.push_str(&format!("/* template <{}> */\n",
-                    params.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")));
-                self.lower_decl(decl);
+            CppDecl::Template { params, decl, requires } => {
+                // M26: 模板已在 collect_classes 注册, 按需实例化.
+                // 未被使用的模板不产生 C 输出 (避免 T 未定义占位类型).
+                // 若内层是 Concept, 输出概念占位 (M10+)
+                if let CppDecl::Concept { name, body_text } = decl.as_ref() {
+                    let _ = requires;
+                    let c = crate::cpp::feature_degrade::Concept::parse(body_text);
+                    self.out.push_str(&format!(
+                        "/* dcc C++ concept (M10+): {} = {} (parsed, evaluated) */\n",
+                        name, body_text
+                    ));
+                    let _ = c;
+                } else {
+                    let _ = (decl, requires);
+                    self.out.push_str(&format!("/* template <{}> (registered, instantiated on demand) */\n",
+                        params.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")));
+                }
             }
             CppDecl::PartialSpec { params, pattern_text, decl } => {
-                // M10+: 偏特化
-                // 形式: `template <typename T> class Foo<T*> { ... }`
-                // 降级为注释 + decl 的实例化
+                // M26: 偏特化已在 collect_classes 注册; 实参匹配时优先选用
+                let _ = decl;
                 self.out.push_str(&format!(
-                    "/* partial specialization <{}> for pattern `{}` */\n",
+                    "/* partial specialization <{}> for pattern `{}` (registered) */\n",
                     params.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
                     pattern_text
                 ));
-                self.lower_decl(decl);
             }
             // M17.0: using Base::Base 真 wrapper - 为基类每个 ctor 生成派生 wrapper
             // 实际策略: 查 class_methods[Base] 获取基类 ctor 列表, 派生类生成转发
@@ -759,8 +1095,17 @@ impl Lower {
                 self.out.push_str(&format!(
                     "/* dcc C++ {} (M10+): {} */\n", kind, sig
                 ));
+                // M26: BMF 序列化 - export module 声明后进入导出收集模式
+                if *is_export {
+                    if let Some(n) = name { self.module_name = n.clone(); }
+                    self.module_collect = true;
+                }
             }
             CppDecl::Import { path } => {
+                // M26: BMF - 记录 import 依赖 (module 收集模式下)
+                if self.module_collect {
+                    self.module_imports.push(path.join("::"));
+                }
                 // M18.1: 尝试把 import 解析为 C 头文件:
                 //   - path 仅 1 段且像文件路径 (e.g. "iostream" / "std")
                 //     → 输出 /* dcc C++ import (M9): iostream */
@@ -1017,8 +1362,9 @@ impl Lower {
             name, name
         ));
         // M17.0: typeinfo struct, 含 name 字段; address 即 typeinfo 指针
+        // M26: 承载类型为 gcc_compat 的 __dcc_typeinfo_t (prologue 已定义)
         self.out.push_str(&format!(
-            "static struct {{ const char* name; }} __dcc_ti_{0} = {{ __dcc_ti_{0}_name }};\n",
+            "static __dcc_typeinfo_t __dcc_ti_{0} = {{ __dcc_ti_{0}_name }};\n",
             name
         ));
         // Itanium _ZTI<Name> 兼容符号
@@ -1066,7 +1412,22 @@ impl Lower {
             self.out.push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
         }
         self.out.push_str(") {\n");
+        // M26: 协程真状态机 (Duff's device) - body 含 co_await/co_yield/co_return
+        // 时包裹 switch(<fn>_coro_state) { case 0: ... }, 每个挂起点生成恢复标签
+        let is_coro = body_has_coro(body);
+        if is_coro {
+            let ret_c = self.mangle_to_c_ns(ret);
+            self.coro_var = mangled.to_string();
+            self.coro_ret_c = ret_c.clone();
+            self.coro_state = 0;
+            self.out.push_str(&coro_fn_prologue(mangled, &ret_c));
+        }
         for s in &body.stmts { self.emit_stmt(s); }
+        if is_coro {
+            self.out.push_str(&coro_fn_epilogue(&self.coro_ret_c));
+            self.coro_var.clear();
+            self.coro_ret_c.clear();
+        }
         self.out.push_str("}\n");
         self.param_var_types.clear();
         self.current_class = None;
@@ -1143,9 +1504,12 @@ impl Lower {
                 }
                 // M17.0: 检测 init 是不是类构造 `KnownClass(args)`.
                 // 若如此, 拆为两步: 1) 声明变量, 2) 调用 mangle 后的 ctor.
+                // M26: 模板类 `Box<int> b(1)` 同样走 ctor 路径
+                // (callee 名与模板名相同).
                 let is_class_ctor_init = matches!(init,
                     Some(CppExpr::Call(f, _))
-                        if matches!(&**f, CppExpr::Ident(n) if self.classes.contains(n)));
+                        if matches!(&**f, CppExpr::Ident(n) if self.classes.contains(n)
+                            || self.templates.find(n).is_some()));
                 let class_ctor_name: Option<String> = if is_class_ctor_init {
                     if let Some(CppExpr::Call(f, _)) = init {
                         if let CppExpr::Ident(n) = &**f { Some(n.clone()) } else { None }
@@ -1178,7 +1542,12 @@ impl Lower {
                 // 若是类类型, 显式调用默认/重载 ctor
                 if let Some(class) = &class_ctor_name {
                     // 走到这里说明 init 是 Class(args), 调 ctor(args)
-                    let n = NestedName::from_dotted(vec![class.clone()]);
+                    // M26: 模板类型用实例化类名 (`Box<int>` -> __dcc_template_Box_int)
+                    let inst_class = match &resolved_ty {
+                        MangleType::Template { name: tn, args: ta } => instantiated_class_name(tn, ta),
+                        _ => class.clone(),
+                    };
+                    let n = NestedName::from_dotted(vec![inst_class]);
                     let param_tys: Vec<MangleType> = class_ctor_args.iter().map(|_| MangleType::Int).collect();
                     let m = mangle_ctor(&n, &param_tys, 1);
                     self.out.push_str(&format!("    {}(&{}", m, name));
@@ -1187,9 +1556,9 @@ impl Lower {
                         self.emit_expr(a);
                     }
                     self.out.push_str(");\n");
-                } else if let MangleType::Class(class) = &resolved_ty {
-                    // 平凡无参 ctor
-                    let n = NestedName::from_dotted(vec![class.clone()]);
+                } else if let Some(inst_class) = Self::inst_class_of(&resolved_ty) {
+                    // 平凡无参 ctor (含模板类实例化)
+                    let n = NestedName::from_dotted(vec![inst_class]);
                     let m = mangle_ctor(&n, &[], 1);
                     self.out.push_str(&format!("    {}(&{});\n", m, name));
                 }
@@ -1208,8 +1577,8 @@ impl Lower {
                     self.emit_expr(e);
                     self.out.push_str(";\n");
                 }
-                if let MangleType::Class(class) = ty {
-                    let n = NestedName::from_dotted(vec![class.clone()]);
+                if let Some(inst_class) = Self::inst_class_of(ty) {
+                    let n = NestedName::from_dotted(vec![inst_class]);
                     let m = mangle_ctor(&n, &[], 1);
                     self.out.push_str(&format!("    {}(&{});\n", m, name));
                 }
@@ -1318,38 +1687,42 @@ impl Lower {
             }
             CppStmt::Break => self.out.push_str("break;\n"),
             CppStmt::Continue => self.out.push_str("continue;\n"),
-            // M17.0: 真协程状态机
-            // 策略: 每个 co_await/co_yield/co_return 对应一个 case;
-            // 第一次进入 state=0, 每次挂起递增 state, 协程返回值用 __coro_value.
-            // 调用方通过循环调用 _resume() 取下一个值.
+            // M26: 真协程状态机 (Duff's device) - 每个挂起点:
+            //   state = N+1; value = (expr); return value;  + 恢复标签 case N+1:
+            // 状态/返回槽/完成标志变量 per-function 命名 (见 coroutine.rs)
             CppStmt::CoAwait(e) => {
-                // co_await e: 设置 state = 当前 case 号, 表达式结果存入 __coro_value
-                self.out.push_str(&format!("__coro_state = {}; __coro_value = (", self.coro_state));
-                self.emit_expr(e);
-                self.out.push_str("); return;\n");
-                self.out.push_str(&format!("    case {}:\n", self.coro_state));
+                let expr = self.expr_to_c(e);
+                self.out.push_str(&coro_suspend(
+                    &self.coro_var, &self.coro_ret_c, self.coro_state, &expr,
+                ));
                 self.coro_state += 1;
             }
             CppStmt::CoYield(e) => {
-                // co_yield e: 与 co_await 类似, 但返回值是 yield 的值
-                self.out.push_str(&format!("__coro_state = {}; return (", self.coro_state));
-                self.emit_expr(e);
-                self.out.push_str(");\n");
-                self.out.push_str(&format!("    case {}:\n", self.coro_state));
+                // co_yield 与 co_await 同为挂起点 (产出值给调用方)
+                let expr = self.expr_to_c(e);
+                self.out.push_str(&coro_suspend(
+                    &self.coro_var, &self.coro_ret_c, self.coro_state, &expr,
+                ));
                 self.coro_state += 1;
             }
             CppStmt::CoReturn(v) => {
-                // co_return v: 设置 done 标志, 返回 v
-                self.out.push_str("__coro_done = 1; return ");
-                if let Some(e) = v {
-                    self.emit_expr(e);
-                } else {
-                    self.out.push('0');
-                }
-                self.out.push_str(";\n");
+                // co_return: 置 done 标志 + 存返回槽, 不生成恢复标签 (协程终止)
+                let expr = v.as_ref().map(|e| self.expr_to_c(e))
+                    .unwrap_or_else(|| "0".to_string());
+                self.out.push_str(&coro_return(
+                    &self.coro_var, &self.coro_ret_c, self.coro_state, &expr,
+                ));
+                self.coro_state += 1;
             }
             CppStmt::Decl(d) => { self.lower_decl(d); }
         }
+    }
+
+    /// 渲染表达式为 C 文本 (临时切换 out; emit_expr 只写 out, 交换安全)
+    fn expr_to_c(&mut self, e: &CppExpr) -> String {
+        let saved = std::mem::take(&mut self.out);
+        self.emit_expr(e);
+        std::mem::replace(&mut self.out, saved)
     }
 
     fn emit_expr(&mut self, e: &CppExpr) {
@@ -1414,6 +1787,10 @@ impl Lower {
                 // 降级为带 self 参数的函数指针: void (void* self, ...) __member_fn
                 self.out.push_str(&format!("&_member_fn_{}_{}", class, name));
             }
+            CppExpr::TemplateIdent { name, args } => {
+                // M26: 非调用上下文的模板名 (e.g. `&foo<int>`): 输出实例化函数名
+                self.out.push_str(&Self::tplfn_c_name(name, args));
+            }
             CppExpr::InitList(elems) => {
                 // M10+: initializer_list {1, 2, 3}
                 // 降级为复合字面量: (int[]){1, 2, 3}
@@ -1437,6 +1814,38 @@ impl Lower {
                 self.out.push_str("})");
             }
             CppExpr::Call(f, args) => {
+                // M26: 模板函数调用 (显式实参 foo<int>(...) / 隐式推导 foo(...))
+                if let CppExpr::TemplateIdent { name, args: targs } = &**f {
+                    self.emit_template_fn_call(name, targs);
+                    self.out.push('(');
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 { self.out.push_str(", "); }
+                        self.emit_expr(a);
+                    }
+                    self.out.push(')');
+                    return;
+                }
+                if let CppExpr::Ident(fname) = &**f {
+                    if self.templates.find(fname).is_some()
+                        && !self.plain_fns.contains(fname)
+                        && !self.classes.contains(fname)
+                    {
+                        // 隐式实参推导: 从调用实参类型推导
+                        let arg_tys: Vec<MangleType> = args.iter().map(|a| self.infer_type(a, false)).collect();
+                        let td = self.templates.find(fname).unwrap();
+                        if let Some(resolved) = self.templates.deduce_args(td, &arg_tys) {
+                            self.emit_template_fn_call(fname, &resolved);
+                            self.out.push('(');
+                            for (i, a) in args.iter().enumerate() {
+                                if i > 0 { self.out.push_str(", "); }
+                                self.emit_expr(a);
+                            }
+                            self.out.push(')');
+                            return;
+                        }
+                        // 推导失败 (SFINAE): 回退普通调用
+                    }
+                }
                 // 方法调用改写: obj.method(args) -> _ZN<Cls><Len><method>E<args>(&obj, args)
                 // 也支持 obj->method() (e.g. const path& p; p->c_str() 等)
                 let call_target: Option<(&CppExpr, String)> = match &**f {
@@ -1590,8 +1999,12 @@ impl Lower {
             }
             // M17.0: 静态 typeid(T) -> &_ZTI<T>
             CppExpr::TypeidType(ty) => {
-                let cname = if let MangleType::Class(n) = ty { n.clone() }
-                            else { self.mangle_to_c_ns(ty) };
+                let cname = match ty {
+                    MangleType::Class(n) => n.clone(),
+                    // M26: typeid(Box<int>) 取实例化类 typeinfo
+                    MangleType::Template { name, args } => instantiated_class_name(name, args),
+                    other => self.mangle_to_c_ns(other),
+                };
                 self.out.push_str(&format!("(&__dcc_ti_{})", cname));
             }
             CppExpr::DynamicCast { ty, expr } => {
@@ -1752,6 +2165,22 @@ impl Lower {
     }
 
     pub fn finish(self) -> String { self.out }
+
+    /// 函数签名的 C 文本 (BMF 导出记录): `ret(p1, p2)`
+    fn fn_signature_c(&self, ret: &MangleType, params: &[(String, MangleType)]) -> String {
+        let args: Vec<String> = params.iter().map(|(_, t)| self.mangle_to_c_ns(t)).collect();
+        format!("{}({})", self.mangle_to_c_ns(ret), args.join(", "))
+    }
+
+    /// M26: 模块接口序列化 (BMF 文本). 无 export module 声明时返回 None.
+    pub fn module_bmf(&self) -> Option<String> {
+        if self.module_name.is_empty() { return None; }
+        Some(BmfModule {
+            name: self.module_name.clone(),
+            exports: self.module_exports.clone(),
+            imports: self.module_imports.clone(),
+        }.serialize())
+    }
 }
 
 #[cfg(test)]
@@ -1973,9 +2402,9 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        // 模板类应当被标记
+        // M26: 模板类只注册, 不展开 (无实例化请求)
         assert!(s.contains("template"), "{}", s);
-        assert!(s.contains("Vec"), "{}", s);
+        assert!(s.contains("registered"), "{}", s);
     }
 
     #[test]
@@ -1996,9 +2425,9 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(s.contains("std_complex"), "{}", s);
-        assert!(s.contains("complex"), "{}", s);
-        assert!(s.contains("operator+") || s.contains("pl"), "{}", s);
+        // M26: 模板类只注册, 不展开; 命名空间输出保留
+        assert!(s.contains("std_complex") || s.contains("registered"), "{}", s);
+        assert!(s.contains("template"), "{}", s);
     }
 
     #[test]
@@ -2033,8 +2462,12 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(s.contains("__coro_state"), "{}", s);
-        assert!(s.contains("return"), "{}", s);
+        // M26: 真状态机 - per-function 状态变量 + switch + Duff's device 标签
+        assert!(s.contains("_ZN1fEv_coro_state"), "{}", s);
+        assert!(s.contains("switch (_ZN1fEv_coro_state) {"), "{}", s);
+        assert!(s.contains("case 0:"), "{}", s);
+        assert!(s.contains("case 1:"), "{}", s);
+        assert!(s.contains("_ZN1fEv_coro_done"), "{}", s);
     }
 
     #[test]
@@ -2300,15 +2733,17 @@ mod tests {
 
     #[test]
     fn lower_m10_coroutine_state_machine() {
-        // 协程: co_await/co_yield 应生成状态机代码
+        // 协程: co_await/co_yield 应生成真状态机代码
         let src = b"void f() { co_await 1; co_yield 2; co_return 3; }";
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().unwrap();
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        // M10+: 状态机驱动, 而非 M9 的 no-op 注释
-        assert!(s.contains("__coro_state") || s.contains("__coro_yield_state"), "{}", s);
+        // M26: 真状态机驱动 - per-function 状态变量 + switch + Duff's device 标签
+        assert!(s.contains("_ZN1fEv_coro_state"), "{}", s);
+        assert!(s.contains("case 0:"), "{}", s);
+        assert!(s.contains("case 2:"), "{}", s);
     }
 
     #[test]
@@ -2330,5 +2765,23 @@ mod tests {
         let result = p.parse_top_level();
         // 接受解析成功或失败
         let _ = result;
+    }
+
+    #[test]
+    fn lower_module_bmf_collects_exports() {
+        // M26: export module 后的自由函数/类/import 收集为 BMF 导出记录
+        let src = b"export module mymod;
+                   import other;
+                   export int answer(int x) { return x + 1; }
+                   export class Widget { public: int id; };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let bmf = l.module_bmf().expect("module_bmf() should be Some after export module");
+        assert!(bmf.starts_with("DCC_BMF_V1\nM mymod\n"), "{}", bmf);
+        assert!(bmf.contains("I other"), "{}", bmf);
+        assert!(bmf.contains("E F _ZN6answerEv int(int)"), "{}", bmf);
+        assert!(bmf.contains("E C Widget id:int"), "{}", bmf);
     }
 }

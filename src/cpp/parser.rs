@@ -234,9 +234,11 @@ pub enum CppDecl {
         is_unary: bool,
     },
     /// 模板声明 (M8: 简化, 仅作语法占位 + 立即展开)
+    /// requires: 模板头后的 `requires 约束` 文本 (M26: 实例化时求值过滤)
     Template {
         params: TemplateArgs,
         decl: Box<CppDecl>,
+        requires: Option<String>,
     },
     /// C++20 partial specialization (M10+):
     ///   `template <typename T> class Foo<T*> { ... };`
@@ -353,6 +355,12 @@ pub enum CppExpr {
     MemberPtr {
         class: String,
         name: String,
+    },
+    /// M26: 带显式模板实参的模板名 `foo<int>` / `Box<T>` (作为 callee 出现)
+    /// lower 阶段按实参实例化模板函数并调用.
+    TemplateIdent {
+        name: String,
+        args: Vec<MangleType>,
     },
     /// M10+: 大括号初始化列表 `{1, 2, 3}` (initializer_list)
     InitList(Vec<CppExpr>),
@@ -719,9 +727,8 @@ impl<'a> CppParser<'a> {
                         continue;
                     }
                 }
-                // typedef / 用户类型 ident: 仅当后面紧跟 `*` 或 `&` 或另一个 ident
-                // 时认为是类型 (例: `FILE*`, `size_t f`, `MyType&`).
-                // 注意: 单独的 ident 不被跳, 因为可能直接是函数名.
+                // typedef / 用户类型 ident: 仅当后面紧跟 `*` / `&` / 另一个 ident
+                // 或模板实参 `<...>` 时认为是类型 (例: `FILE*`, `size_t f`, `MyType&`, `Holder<int> f`).
                 if let CppTok::C(Tok { kind: TokKind::Ident, .. }) = &tok {
                     let next = self.peek_token_at(j + 1);
                     if matches!(next,
@@ -730,6 +737,13 @@ impl<'a> CppParser<'a> {
                     ) {
                         j += 1;
                         continue;
+                    }
+                    // M26: `Holder<int>` 模板类型 (跳过后再验证是函数名)
+                    if matches!(next, Some(CppTok::C(Tok { kind: TokKind::Lt, .. }))) {
+                        if let Some(after) = self.skip_template_args_at(j + 1) {
+                            j = after;
+                            continue;
+                        }
                     }
                 }
                 break;
@@ -801,7 +815,8 @@ impl<'a> CppParser<'a> {
         }
         self.bump();
         // M18.0: `template <T> requires Concept<T>` 后跟 `requires` 子句
-        let _ = self.skip_requires_clause();
+        // M26: 约束文本保存到 CppDecl::Template, 实例化时求值过滤
+        let requires = self.parse_requires_clause();
         // M10+: 检测 partial specialization 模式
         // `class Foo<T*>` 或 `class Foo<int>` (区别于普通 `class Foo`)
         if self.at(CppKw::Class) {
@@ -888,7 +903,11 @@ impl<'a> CppParser<'a> {
             }
         }
         let decl = self.parse_decl()?;
-        Ok(CppDecl::Template { params: TemplateArgs { params }, decl: Box::new(decl) })
+        Ok(CppDecl::Template {
+            params: TemplateArgs { params },
+            decl: Box::new(decl),
+            requires,
+        })
     }
 
     /// 解析 namespace foo { ... } 或 namespace { ... }
@@ -1073,9 +1092,12 @@ impl<'a> CppParser<'a> {
     /// `T identity(T x) { ... }` 会错误地把整个函数体吃掉.
     /// 进一步修正: 顶层遇到 `>` 且后跟 ident / * / & 视作 requires expr
     /// 结束 (因为 function 形参/返回类型可能也含 `>`, 但不会紧跟 `>` 后是 ident).
-    fn skip_requires_clause(&mut self) -> bool {
-        if !self.at(CppKw::Requires) { return false; }
+    /// M26: 解析 requires 子句并返回约束文本 (未命中返回 None).
+    /// 约束文本从 token 重建 (去掉空白, 保留 `&&` / `||` / `<` / `>`).
+    fn parse_requires_clause(&mut self) -> Option<String> {
+        if !self.at(CppKw::Requires) { return None; }
         self.bump();
+        let mut text = String::new();
         // 跳过到顶层 ; / { / } 为止. 跟踪 () [] {} <> 深度.
         let mut depth = 0i32;
         loop {
@@ -1091,6 +1113,7 @@ impl<'a> CppParser<'a> {
                 }
                 Some(CppTok::C(Tok { kind: TokKind::Lt, .. })) => {
                     depth += 1; self.bump();
+                    text.push('<');
                 }
                 Some(CppTok::C(Tok { kind: TokKind::RParen
                     | TokKind::RBracket | TokKind::RBrace, .. })) => {
@@ -1108,11 +1131,31 @@ impl<'a> CppParser<'a> {
                         {
                             break;
                         }
+                    text.push('>');
+                }
+                Some(CppTok::C(Tok { kind: TokKind::Ident, text: id, .. })) => {
+                    self.bump();
+                    text.push_str(&id);
+                    // 在 ident 之间加空格, 避免 `T::value` 粘连成 `T::value` 之外的拼写
+                    if !matches!(&self.peek,
+                        Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))
+                        | Some(CppTok::ColonColon(_)))
+                    {
+                        text.push(' ');
+                    }
+                }
+                Some(CppTok::C(Tok { kind: TokKind::Number, text: n, .. })) => {
+                    self.bump();
+                    text.push_str(&n);
+                }
+                Some(CppTok::ColonColon(_)) => {
+                    self.bump();
+                    text.push_str("::");
                 }
                 _ => { self.bump(); }
             }
         }
-        true
+        Some(text.trim().to_string())
     }
 
     fn parse_class_decl(&mut self) -> Result<CppDecl, CppParseError> {
@@ -3172,29 +3215,28 @@ impl<'a> CppParser<'a> {
             if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Lt, .. })))
                 && self.looks_like_template_args_after_lt()
             {
-                // 仅识别并跳过类型实参 (lower 阶段处理实际实例化)
-                self.bump();
-                let mut depth: i32 = 1;
-                // 防御: token 流异常 (如永不闭合的 `>`) 时终止扫描
-                let mut guard: usize = 0;
-                while depth > 0 {
-                    match self.bump() {
-                        Some(CppTok::C(Tok { kind: TokKind::Lt, .. })) => depth += 1,
-                        Some(CppTok::C(Tok { kind: TokKind::Gt, .. })) => depth -= 1,
-                        Some(CppTok::C(Tok { kind: TokKind::Shr, .. })) => depth -= 1,
-                        None => break,
-                        _ => {}
+                // M26: 解析并保存显式模板实参 (供 lower 阶段实例化模板函数)
+                self.bump(); // 吞 `<`
+                let mut targs: Vec<MangleType> = Vec::new();
+                loop {
+                    let arg = self.parse_mangle_type_depth(1)?;
+                    targs.push(arg);
+                    if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Comma, .. }))) {
+                        self.bump();
+                        continue;
                     }
-                    guard += 1;
-                    // 超出深度限制的嵌套: 报模板深度错误而非继续无意义扫描
-                    if guard > (MAX_TEMPLATE_DEPTH as usize + 1) * 8 {
-                        return Err(CppParseError::TemplateDepthExceeded {
-                            depth: MAX_TEMPLATE_DEPTH + 1,
-                            max: MAX_TEMPLATE_DEPTH,
-                            span: self.span(),
-                        });
+                    if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Gt, .. }))) {
+                        self.bump();
+                        break;
                     }
+                    if matches!(&self.peek, Some(CppTok::C(Tok { kind: TokKind::Shr, .. }))) {
+                        self.bump();
+                        self.deferred_gt += 1;
+                        break;
+                    }
+                    return Err(CppParseError::Unexpected(">", format!("{:?}", self.peek), self.span()));
                 }
+                return Ok(CppExpr::TemplateIdent { name, args: targs });
             }
             return Ok(CppExpr::Ident(name));
         }
@@ -3457,6 +3499,41 @@ impl<'a> CppParser<'a> {
     /// M11: 支持多 token 类型如 `const char* p = ...;` 与 `ostream& r = ...;`
     /// 同时识别 C++ 关键字 (CppTok::Kw: const, volatile, static) 和 C 关键字
     /// (CppTok::C: int, char, void 等).
+    /// M26: 从 token 索引 i 起跳过 `ident<...>` 模板实参 (尖括号平衡扫描).
+    /// 返回模板实参后的索引; `<` 后不是平衡尖括号时返回 None.
+    fn skip_template_args_at(&self, mut i: usize) -> Option<usize> {
+        if !matches!(self.peek_token_at(i),
+            Some(CppTok::C(Tok { kind: TokKind::Lt, .. }))) {
+            return Some(i);
+        }
+        let mut depth: i32 = 1;
+        i += 1;
+        loop {
+            match self.peek_token_at(i) {
+                None => return None,
+                Some(CppTok::C(Tok { kind: TokKind::Lt, .. })) => { depth += 1; i += 1; }
+                Some(CppTok::C(Tok { kind: TokKind::Gt, .. })) => {
+                    depth -= 1; i += 1;
+                    if depth == 0 { return Some(i); }
+                }
+                Some(CppTok::C(Tok { kind: TokKind::Shr, .. })) => {
+                    // `>>` 视作两层 `>`
+                    depth -= 1; i += 1;
+                    if depth == 0 { return Some(i); }
+                    depth -= 1;
+                    if depth == 0 { return Some(i); }
+                }
+                // 语句/表达式终结符在未闭合时出现: 视为比较表达式
+                Some(CppTok::C(Tok { kind: TokKind::Semi
+                    | TokKind::RParen | TokKind::LBrace | TokKind::RBrace
+                    | TokKind::Assign | TokKind::Question | TokKind::Colon, .. }))
+                    if depth == 1 => return None,
+                _ => { i += 1; }
+            }
+        }
+    }
+
+    /// 局部变量声明探测: `Type name;` / `Type name = expr;` 等
     fn is_local_var_decl_start(&self) -> bool {
         let mut i = 0;
         // 跳过 static
@@ -3501,6 +3578,14 @@ impl<'a> CppParser<'a> {
             return false;
         }
         i += 1;
+        // M26: 模板实例化类型 `Holder<int>` / `Holder<Holder<int>>`:
+        // 类型名后紧跟 `<` 且尖括号平衡 → 跳过模板实参
+        if let Some(after) = self.skip_template_args_at(i) {
+            i = after;
+        } else {
+            // 不平衡: 是表达式 (如 `a < b`) 而非声明
+            return false;
+        }
         // M17.0: `decltype(expr)` 整体作为一个类型说明符
         // 需要跳过 `(` expr `)` (含 auto 占位 + 嵌套括号) 才能继续看下一段类型
         if matches!(first, Some(CppTok::Kw(CppKw::Decltype, _))) {

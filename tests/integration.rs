@@ -4931,3 +4931,31 @@ fn c23_typeof_unqual() {
     let _ = std::fs::remove_file(&exe);
 }
 
+
+// ====== M26: 协程真状态机 / modules BMF / GCC ABI 运行时 ======
+#[test]
+#[cfg(unix)]
+fn m26_coroutine_state_machine() {
+    let src = include_str!("fixtures/cpp/coroutine_state.cpp");
+    let (out, _obj) = run_cpp_object_test("m26-coroutine-state", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m26_modules_bmf() {
+    let src = include_str!("fixtures/cpp/modules_bmf.cpp");
+    let (out, _obj) = run_cpp_object_test("m26-modules-bmf", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}
+
+#[test]
+#[cfg(unix)]
+fn m26_gcc_compat_runtime() {
+    let src = include_str!("fixtures/cpp/gcc_compat.cpp");
+    let (out, _obj) = run_cpp_object_test("m26-gcc-compat", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(_obj);
+}

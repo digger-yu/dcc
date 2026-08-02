@@ -39,6 +39,8 @@
 //! 3. `--emit-module-file=foo.bmf` 选项
 //! 4. ODR 冲突检测
 
+use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};
+
 /// 模块声明缓存 (M19+ 真实化时填充)
 #[derive(Debug, Clone, Default)]
 pub struct ModuleInfo {
@@ -46,6 +48,36 @@ pub struct ModuleInfo {
     pub exports: Vec<String>,
     pub imports: Vec<String>,
     pub bmf_path: Option<String>,
+}
+
+impl ModuleInfo {
+    /// 导出为 BMF 模块 (M26: 序列化接口文本)
+    pub fn to_bmf(&self) -> BmfModule {
+        BmfModule {
+            name: self.name.clone(),
+            exports: self
+                .exports
+                .iter()
+                .map(|e| BmfExport {
+                    kind: BmfKind::Function,
+                    name: e.clone(),
+                    signature: String::new(),
+                    layout: None,
+                })
+                .collect(),
+            imports: self.imports.clone(),
+        }
+    }
+
+    /// 从 BMF 模块还原 (M26)
+    pub fn from_bmf(b: &BmfModule) -> Self {
+        ModuleInfo {
+            name: b.name.clone(),
+            exports: b.exports.iter().map(|e| e.name.clone()).collect(),
+            imports: b.imports.clone(),
+            bmf_path: None,
+        }
+    }
 }
 
 /// 已知模块名表 (进程内). M18: 仅注释, 不影响行为.
