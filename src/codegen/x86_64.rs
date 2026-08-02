@@ -3581,8 +3581,15 @@ impl Codegen {
                         BlockItem::Decl(Decl::Var(v)) => {
                             self.register_var(&v.name.name, &v.ty);
                             if let Some(init) = &v.init {
-                                self.gen_expr(init, 0);
-                                self.mov_to_stack(0, &v.name.name);
+                                // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
+                                if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
+                                    self.gen_expr(init, 0);
+                                    self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                                    self.gen_float_store(&v.name.name, &v.ty);
+                                } else {
+                                    self.gen_expr(init, 0);
+                                    self.mov_to_stack(0, &v.name.name);
+                                }
                             }
                         }
                         _ => {}
@@ -4161,13 +4168,20 @@ impl Codegen {
                 // 数组在栈上布局: arr[0] 在 var_off, arr[1] 在 var_off + elem_size, ...
                 // 注意: 虽然栈向下增长，但数组元素地址是递增的
                 let elem_size = elem_ty.size();
+                // 已初始化覆盖到的最大元素下标 (C 标准: 剩余元素必须零填充)
+                let mut covered = 0usize;
                 for (i, item) in inits.iter().enumerate() {
                     let (_idx, value) = match item {
                         InitItem::Expr(e) => (i, e),
                         InitItem::Designated { designator, value } => {
                             // 链式 designator 仍可能作用在数组上 (如 [2].field)
                             if let Some((off, _, _)) = resolve_designator(ty, designator) {
-                                if off == i * elem_size { (i, value) } else { continue; }
+                                if off == i * elem_size { (i, value) }
+                                else {
+                                    // 跳位设计符 (如 {[3]=7}): 覆盖到 off 之后, 避免补零误清
+                                    covered = covered.max(off / elem_size + 1);
+                                    continue;
+                                }
                             } else { continue; }
                         }
                     };
@@ -4184,9 +4198,21 @@ impl Codegen {
                                 InitItem::Expr(e) => e,
                                 InitItem::Designated { value, .. } => value,
                             };
+                            // 子数组内部初始化器不足时补零 ({{1},{3,4}} → m[0][1] = 0)
+                            if let (Type::Array(_, ArraySize::Const(sub_n)),
+                                     Expr::InitList { inits: sub, .. }) = (elem_ty.as_ref(), subval)
+                            {
+                                if sub.len() < *sub_n {
+                                    self.zero_fill_tail(
+                                        base_off + (j * inner_elem_size) as i32, elem_ty, sub.len());
+                                }
+                            }
                             self.gen_expr(subval, 0);
                             self.emit_store(0, base_off + (j * inner_elem_size) as i32, inner_elem_size);
                         }
+                        // 子数组列表不足时补零 ({{1,2}} → m[1] 全零)
+                        self.zero_fill_tail(base_off, elem_ty, nested.len());
+                        covered = covered.max(i + 1);
                         continue;
                     }
                     self.gen_expr(value, 0);
@@ -4202,7 +4228,10 @@ impl Codegen {
                     } else {
                         self.emit_store(0, off, elem_size);
                     }
+                    covered = covered.max(i + 1);
                 }
+                // C 标准: 初始化器不足时剩余元素零填充 (int a[4] = {7,8} → a[2]=a[3]=0)
+                self.zero_fill_tail(var_off, ty, covered);
             }
             Type::Vector(elem_ty, n) => {
                 // SIMD 向量初始化: v4si a = {1, 2, 3, 4}
@@ -4279,6 +4308,28 @@ impl Codegen {
                 }
             }
         }
+    }
+
+    // 数组尾部零填充: C 标准要求初始化器不足时剩余元素为零
+    fn zero_fill_tail(&mut self, base_off: i32, arr_ty: &Type, init_count: usize) {
+        if let Type::Array(elem_ty, ArraySize::Const(n)) = arr_ty {
+            if init_count >= *n { return; }
+            let elem_size = elem_ty.size();
+            self.mov_imm(0, 0); // rax = 0 (补零源)
+            for i in init_count..*n {
+                self.zero_mem(base_off + (i * elem_size) as i32, elem_size);
+            }
+        }
+    }
+
+    // 内存块清零: emit_store 仅支持 1/2/4/8 字节, 按块拆解
+    fn zero_mem(&mut self, off: i32, size: usize) {
+        let mut o = off;
+        let mut rem = size;
+        while rem >= 8 { self.emit_store(0, o, 8); o += 8; rem -= 8; }
+        if rem >= 4 { self.emit_store(0, o, 4); o += 4; rem -= 4; }
+        if rem >= 2 { self.emit_store(0, o, 2); o += 2; rem -= 2; }
+        if rem >= 1 { self.emit_store(0, o, 1); }
     }
 
     // 全局变量初始化列表: 生成初始化数据字节

@@ -890,6 +890,15 @@ impl<'a> Parser<'a> {
     }
 
     fn call_result_type(&self, callee: &Expr) -> Type {
+        // __builtin_fma returns double, __builtin_fmaf returns float, __builtin_fmal returns long double
+        if let Expr::Ident { name, .. } = callee {
+            match name.name.as_str() {
+                "__builtin_fma" => return Type::Double,
+                "__builtin_fmaf" => return Type::Float,
+                "__builtin_fmal" => return Type::LongDouble,
+                _ => {}
+            }
+        }
         match callee.ty() {
             Type::Func(ret, _) => (*ret).clone(),
             Type::Ptr(inner) => match *inner {
