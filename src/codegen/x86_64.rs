@@ -45,6 +45,9 @@ fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, usize, Type)>
             let elem_size = elem_ty.size();
             Some((idx * elem_size, elem_size, elem_ty))
         }
+        // GNU 范围设计符 [first ... last]: 覆盖多个元素, 无法返回单个偏移,
+        // 由 gen_init_list / gen_global_init_list 的数组分支显式展开。
+        Designator::Range(_, _) => None,
         Designator::Chain(items) => {
             let mut cur_ty = ty.clone();
             let mut off = 0usize;
@@ -4171,6 +4174,35 @@ impl Codegen {
                 // 已初始化覆盖到的最大元素下标 (C 标准: 剩余元素必须零填充)
                 let mut covered = 0usize;
                 for (i, item) in inits.iter().enumerate() {
+                    // GNU 范围设计符 [first ... last]: 范围内每个元素写同一值
+                    if let InitItem::Designated {
+                        designator: Designator::Range(first, last),
+                        value,
+                    } = item
+                    {
+                        let (Ok(f), Ok(l)) = (const_eval::eval(first), const_eval::eval(last))
+                        else { continue; };
+                        let (f, l) = (f as usize, l as usize);
+                        if l < f { continue; }
+                        let mut k = f;
+                        while k <= l {
+                            self.gen_expr(value, 0);
+                            if matches!(elem_ty.as_ref(), Type::Float | Type::Double | Type::LongDouble) {
+                                self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
+                            }
+                            let off = var_off + (k * elem_size) as i32;
+                            if matches!(elem_ty.as_ref(), Type::Float) {
+                                self.store_xmm32_stack(0, off);
+                            } else if matches!(elem_ty.as_ref(), Type::Double | Type::LongDouble) {
+                                self.store_xmm64_stack(0, off);
+                            } else {
+                                self.emit_store(0, off, elem_size);
+                            }
+                            covered = covered.max(k + 1);
+                            k += 1;
+                        }
+                        continue;
+                    }
                     let (_idx, value) = match item {
                         InitItem::Expr(e) => (i, e),
                         InitItem::Designated { designator, value } => {
@@ -4344,6 +4376,27 @@ impl Codegen {
             Type::Array(elem_ty, _) => {
                 let elem_size = elem_ty.size();
                 for (i, item) in inits.iter().enumerate() {
+                    // GNU 范围设计符 [first ... last]: 范围内每个元素写同一值
+                    if let InitItem::Designated {
+                        designator: Designator::Range(first, last),
+                        value,
+                    } = item
+                    {
+                        let (Ok(f), Ok(l)) = (const_eval::eval(first), const_eval::eval(last))
+                        else { continue; };
+                        let (f, l) = (f as usize, l as usize);
+                        if l < f { continue; }
+                        let is_float_elem = matches!(elem_ty.as_ref(), Type::Float | Type::Double | Type::LongDouble);
+                        let mut k = f;
+                        while k <= l {
+                            while data.len() < k * elem_size { data.push(0); }
+                            let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
+                            let elem_data = self.eval_const_expr(value, elem_rel, elem_size, is_float_elem);
+                            data.extend_from_slice(&elem_data);
+                            k += 1;
+                        }
+                        continue;
+                    }
                     let value = match item {
                         InitItem::Expr(e) => e,
                         InitItem::Designated { designator, value } => {
@@ -4358,7 +4411,9 @@ impl Codegen {
                             }
                         }
                     };
-                    if let Expr::InitList { inits: nested, ty: nested_ty, .. } = value {
+                    if let Expr::InitList { inits: nested, ty: nested_ty, .. }
+                        | Expr::CompoundLit { ty: nested_ty, inits: nested, .. } = value
+                    {
                         let nested_ty = if matches!(nested_ty, Type::Int) { elem_ty.as_ref() } else { nested_ty };
                         let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
                         if let Some(elem_data) = self.gen_global_init_list(nested_ty, nested, elem_rel) {
@@ -4396,7 +4451,21 @@ impl Codegen {
                     };
                     let field_rel = rel.map(|(base, sec)| (base + off as u64, sec));
                     let is_float_field = matches!(&field_ty, Some(Type::Float | Type::Double | Type::LongDouble));
-                    let field_data = self.eval_const_expr(value, field_rel, sz, is_float_field);
+                    // 嵌套初始化列表 ({ { [0 ... N] = v } }): 递归生成字段数据,
+                    // 否则 eval_const_expr 会把整个 InitList 当成不支持表达式置零
+                    let field_data = match value {
+                        Expr::InitList { inits: nested, ty: nested_ty, .. }
+                        | Expr::CompoundLit { ty: nested_ty, inits: nested, .. } => {
+                            let nty = if matches!(nested_ty, Type::Int) {
+                                field_ty.clone().unwrap_or_else(|| ty.clone())
+                            } else {
+                                nested_ty.clone()
+                            };
+                            self.gen_global_init_list(&nty, nested, field_rel)
+                                .unwrap_or_else(|| vec![0; sz])
+                        }
+                        _ => self.eval_const_expr(value, field_rel, sz, is_float_field),
+                    };
                     for (j, &b) in field_data.iter().enumerate() {
                         if off + j < data.len() { data[off + j] = b; }
                     }

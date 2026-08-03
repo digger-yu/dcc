@@ -205,6 +205,9 @@ pub enum Designator {
     Field(Ident),
     /// [index]
     Index(Expr),
+    /// GNU 数组范围指定符: [first ... last] (GCC 扩展,
+    /// 范围内所有元素赋同一值). Linux kernel nodemask_t 初始化使用.
+    Range(Expr, Expr),
     /// 链式指定符 .a.b.c 或 [0].field[1]
     /// (ISO C99 6.7.8/19: 多个 designator 按顺序应用以定位子对象).
     /// Linux kernel `_ddebug` 初始化使用 `.key.dd_key_true = ...` (进入

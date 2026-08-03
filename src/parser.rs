@@ -2773,6 +2773,7 @@ impl<'a> Parser<'a> {
     fn parse_enum_body(&mut self) -> Vec<(Ident, Option<i64>)> {
         let mut vs = vec![];
         let mut seen = std::collections::HashSet::new();
+        let mut nv: i64 = 0; // 隐式递增游标 (enum { A, B } -> A=0, B=1)
         while self.cur.kind != TokKind::RBrace && self.cur.kind != TokKind::Eof {
             if self.cur.kind == TokKind::Comma { self.advance(); continue; }
             let nm = match self.parse_ident() { Some(id) => id, None => { self.advance(); continue; } };
@@ -2785,9 +2786,22 @@ impl<'a> Parser<'a> {
             }
             let val = if self.cur.kind == TokKind::Assign {
                 self.advance();
-                // 枚举值必须是整型常量表达式，不能含逗号运算符 (A = 0, B 会误吞后续成员)
-                if let Some(Expr::Int { v, .. }) = self.parse_expr_bp(2) { Some(v as i64) } else { None }
+                // 枚举值必须是整型常量表达式，不能含逗号运算符 (A = 0, B 会误吞后续成员)。
+                // 引用前面已定义枚举常量/字面量/算术/移位等表达式: Ident 在
+                // parse_primary 已替换为 Expr::Int (见 enum_consts 查找), 因此
+                // 只需对完整表达式做常量折叠。非整型常量表达式 (如变量引用)
+                // 返回 None, 与旧行为一致: 按隐式递增赋值。
+                if let Some(e) = self.parse_expr_bp(2) {
+                    const_eval::eval(&e).ok().map(|v| v as i64)
+                } else { None }
             } else { None };
+            // 立即登记: 同一 enum 内后续成员可引用本成员的值
+            // (enum { A = 1, B = A + 1 }; 的 B 表达式解析时 A 必须已可查)。
+            // 类型先用 Int 占位, 解析完整个 enum 后由调用方统一覆盖为
+            // C23 底层类型 (值不受影响)。
+            let v = val.unwrap_or(nv);
+            self.enum_consts.insert(nm.name.clone(), (v, Type::Int));
+            nv = v + 1;
             vs.push((nm, val));
             if self.cur.kind == TokKind::Comma { self.advance(); }
         }
@@ -2830,9 +2844,18 @@ impl<'a> Parser<'a> {
                 chain.push(Designator::Field(field));
             } else if self.cur.kind == TokKind::LBracket {
                 self.advance();
-                let idx = self.parse_expr()?;
-                if !self.expect(TokKind::RBracket, "']'") { return None; }
-                chain.push(Designator::Index(idx));
+                let first = self.parse_expr()?;
+                if self.cur.kind == TokKind::Ellipsis {
+                    // GNU 数组范围设计符: [first ... last] = value (GCC 扩展)
+                    // 范围内所有元素赋同一值。端点必须是常量表达式。
+                    self.advance();
+                    let last = self.parse_expr()?;
+                    if !self.expect(TokKind::RBracket, "']'") { return None; }
+                    chain.push(Designator::Range(first, last));
+                } else {
+                    if !self.expect(TokKind::RBracket, "']'") { return None; }
+                    chain.push(Designator::Index(first));
+                }
             } else {
                 break;
             }
@@ -3153,6 +3176,17 @@ impl<'a> Parser<'a> {
                     Some(Stmt::Expr { e, span: sp })
                 }
             }
+            // GNU 扩展: `__label__ name;` 块内局部 label 声明 (可多个, 逗号分隔)。
+            // 声明本身无运行时代码; 后面的 goto 由 Stmt::Goto 处理。
+            TokKind::Ident if self.cur.text == "__label__" => {
+                self.advance();
+                loop {
+                    if self.parse_ident().is_none() { return None; }
+                    if self.cur.kind == TokKind::Comma { self.advance(); } else { break; }
+                }
+                if !self.expect(TokKind::Semi, "';'") { return None; }
+                Some(Stmt::Expr { e: Expr::Int { v: 0, span: sp.clone(), ty: int_t() }, span: sp })
+            }
             TokKind::Ident if self.peek.kind == TokKind::Colon => {
                 let nm = self.parse_ident()?; self.advance();
                 // switch 内 `label: case X:`：标签后直接跟 case/default
@@ -3437,7 +3471,15 @@ impl<'a> Parser<'a> {
                 // 用 bp=2 跳过逗号运算符 (bp=1), 让逗号留给 association list
                 let controlling = self.parse_expr_bp(2)?;
                 if !self.expect(TokKind::Comma, "','") { return None; }
-                let ctrl_ty = controlling.ty();
+                // C11 6.5.1.1p2: 控制表达式经历 lvalue conversions (数组→指针、
+                // 函数→指针) 后才与 association 类型比较。
+                let ctrl_ty = match controlling.ty() {
+                    Type::Array(elem, _) => Type::Ptr(elem),
+                    Type::Func(ret, params) => {
+                        Type::Ptr(Box::new(Type::Func(ret, params)))
+                    }
+                    t => t,
+                };
                 let mut result: Option<Expr> = None;
                 let mut default_result: Option<Expr> = None;
                 // 解析 association-list: type-name: expr 或 default: expr

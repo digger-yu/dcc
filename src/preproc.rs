@@ -829,6 +829,10 @@ fn glob_gcc_include_paths(pattern: &str) -> Result<Vec<PathBuf>, ()> {
     Ok(out)
 }
 
+thread_local! {
+    static EXPAND_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 impl Preprocessor {
     /// 强制包含文件 (GCC -include 语义)
     fn force_include(&mut self, file_path: &str) {
@@ -1649,7 +1653,7 @@ impl Preprocessor {
     
                 if let Some(ref cp) = cache_path {
                     if !skip_cache {
-                        if let Some((cached_output, cached_macros, cached_deps)) = self.load_from_cache(cp) {
+                        if let Some((cached_output, cached_macros, cached_removed, cached_deps, counter_delta)) = self.load_from_cache(cp) {
                             // 依赖新鲜度校验: 任一依赖文件变更即 miss (重处理)
                             if Self::cache_deps_fresh(&cached_deps) {
                                 // 缓存命中: 直接使用缓存的预处理输出和宏
@@ -1665,9 +1669,18 @@ impl Preprocessor {
                                     }
                                 }
                                 self.out.push_str(&cached_output);
+                                // 回放宏变更集: 先删后插。缓存条目记录了处理期间
+                                // #undef 的宏和被重新定义/新增的宏; 只回放新增会
+                                // 丢失覆盖定义 (如 stddef.h 覆盖内置 NULL)
+                                for name in &cached_removed {
+                                    self.macros.remove(name);
+                                }
                                 for (name, def) in cached_macros {
                                     self.macros.insert(name, def);
                                 }
+                                // 缓存输出内嵌了创建时的 __COUNTER__ 值;
+                                // 回放消耗量, 使后续展开的计数器与冷缓存运行一致
+                                self.counter = self.counter.wrapping_add(counter_delta);
                                 return;
                             }
                         }
@@ -1678,8 +1691,14 @@ impl Preprocessor {
                 self.out.push_str(&format!("/* #include \"{}\" */\n", path));
                 let saved_base = self.base_dir.clone();
                 let saved_out_len = self.out.len();
-                // 记录当前宏表快照, 用于后续提取该头文件新增的宏
-                let saved_macros: std::collections::HashSet<String> = self.macros.keys().cloned().collect();
+                // 记录当前宏表快照 (含值), 用于后续提取该头文件对宏表的
+                // 变更集 (新增 + 重新定义 + #undef 删除)。仅记录新增会
+                // 丢失覆盖定义 — 如 stddef.h 把内置 NULL 重新定义为内核
+                // 版, 热缓存运行若不回放, 后续展开仍用内置版本, 输出与
+                // 冷运行不一致。
+                let saved_macros: HashMap<String, MacroDef> = self.macros.clone();
+                // 记录处理前 __COUNTER__ 值, 用于计算本头文件的计数器消耗量
+                let counter_before = self.counter;
                 let saved_false = if bool_fixup { self.macros.remove("false") } else { None };
                 let saved_true = if bool_fixup { self.macros.remove("true") } else { None };
                 let diags_before = self.diags.len();
@@ -1701,9 +1720,15 @@ impl Preprocessor {
                 if let Some(ref cp) = cache_path {
                     if !skip_cache && self.diags.len() == diags_before {
                         let new_output = self.out[saved_out_len..].to_string();
+                        // 变更集: 值被改变或新增的宏 (新增 + 重新定义)
                         let header_macros: HashMap<String, MacroDef> = self.macros.iter()
-                            .filter(|(k, _)| !saved_macros.contains(*k))
+                            .filter(|(k, v)| saved_macros.get(*k).map_or(true, |old| !Self::macro_def_eq(old, v)))
                             .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        // 变更集: 处理期间被 #undef 删除的宏, 命中时必须回放删除
+                        let removed_macros: Vec<String> = saved_macros.keys()
+                            .filter(|k| !self.macros.contains_key(*k))
+                            .cloned()
                             .collect();
                         // 本次处理期间新增的依赖闭包: 自身 + 嵌套 include
                         // (含嵌套缓存命中回填的传递依赖), 按路径去重后写入
@@ -1713,7 +1738,8 @@ impl Preprocessor {
                         let mut seen: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
                         dep_closure.retain(|(p, _)| seen.insert(p.clone()));
-                        self.save_to_cache(cp, &new_output, &header_macros, &dep_closure);
+                        let counter_delta = self.counter.wrapping_sub(counter_before);
+                        self.save_to_cache(cp, &new_output, &header_macros, &removed_macros, &dep_closure, counter_delta);
                     }
                 }
             }
@@ -2157,6 +2183,9 @@ impl Preprocessor {
         //
         // 嵌套调用 (tail_call 递归) 时先保存外层记录, 结束时合并回去
         let saved = self.expanded_macros.borrow().clone();
+        if std::env::var("DCC_PP_DEBUG").is_ok() && line.contains("asm_inline") {
+            eprintln!("[pp-debug] MAP_ENTER saved={} depth={} line_hdr={:?}", &saved.len(), EXPAND_DEPTH.with(|c| c.get()), &line[..line.len().min(60)]);
+        }
         self.expanded_macros.borrow_mut().clear();
         let disabled = HashSet::new();
         let mut result = self.expand_with_disabled(line, &disabled, map);
@@ -2165,23 +2194,73 @@ impl Preprocessor {
         // 宏名, 延续 paint blue 语义, 防止自引用宏被重复展开.
         let expanded = std::mem::take(&mut *self.expanded_macros.borrow_mut());
         if result != line {
-            let result2 = self.expand_with_disabled(&result, &expanded, map);
+            // 第二轮禁用集只保留"展开结果仍含自身标识符"的自引用宏
+            // (如 glibc `#define sa_handler __sigaction_handler.sa_handler`)。
+            // 纯转发宏 (如内核 `#define asm_inline asm __inline`、
+            // `#define __always_inline inline __attribute__((__always_inline__))`)
+            // 的展开结果不含自身 token, 重新展开是安全的; 若把它们整体禁掉,
+            // 链式宏调用在第二轮的重扫描 (如 GEN_BINARY_RMWcc_5(..) 展开出的
+            // __GEN_RMWcc body 里的 asm_inline) 会被 paint blue 误伤而残留,
+            // 导致预处理输出含未展开宏名而编译失败。
+            let mut self_ref = HashSet::new();
+            for name in &expanded {
+                if let Some(def) = self.macros.get(name) {
+                    if Self::body_contains_ident(&def.body, name) {
+                        self_ref.insert(name.clone());
+                    }
+                }
+            }
+            let result2 = self.expand_with_disabled(&result, &self_ref, map);
             result = result2;
         }
         // 丢弃第二轮的新记录, 只把第一轮展开的宏合并回外层记录
         self.expanded_macros.borrow_mut().clear();
+        let saved_len = saved.len();
         let mut merged = saved;
         merged.extend(expanded);
+        let merged_len = merged.len();
         *self.expanded_macros.borrow_mut() = merged;
+        if std::env::var("DCC_PP_DEBUG").is_ok() && result.contains("asm_inline") {
+            eprintln!("[pp-debug] MAP_EXIT saved={} merged={} result_has_asm_inline={}", saved_len, merged_len, result.contains("asm_inline"));
+        }
         result
+    }
+
+    /// body 中是否出现 name 作为完整标识符 (前后都不是标识符字符)。
+    /// 用于判断宏展开结果是否仍含自身 token (真自引用)。
+    /// 注意不能用子串匹配: `#define __always_inline inline \
+    /// __attribute__((__always_inline__))` 的 body 含 `__always_inline__`
+    /// 子串 `__always_inline`, 但那是另一个标识符, 并非自引用。
+    /// 边界 (body 开头/末尾) 视为安全分隔符: name 位于开头/末尾时
+    /// 前后无字符, 是完整标识符。
+    fn body_contains_ident(body: &str, name: &str) -> bool {
+        let bytes = body.as_bytes();
+        let mut start = 0;
+        while let Some(rel) = body[start..].find(name) {
+            let pos = start + rel;
+            let end = pos + name.len();
+            // 开头/末尾是安全边界, 中间位置按实际字符判断
+            let before_ok = pos == 0
+                || {
+                    let b = bytes[pos - 1];
+                    !b.is_ascii_alphanumeric() && b != b'_'
+                };
+            let after_ok = end >= bytes.len()
+                || {
+                    let a = bytes[end];
+                    !a.is_ascii_alphanumeric() && a != b'_'
+                };
+            if before_ok && after_ok {
+                return true;
+            }
+            start = end;
+        }
+        false
     }
 
     /// 用禁用集展开文本; `map` 提供 __LINE__ 的行号映射
     fn expand_with_disabled(&mut self, text: &str, disabled: &HashSet<String>, map: LineMap) -> String {
         // 递归深度保护：宏互相引用时避免栈溢出
-        thread_local! {
-            static EXPAND_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-        }
         let depth = EXPAND_DEPTH.with(|d| {
             let v = d.get();
             d.set(v + 1);
@@ -2189,6 +2268,9 @@ impl Preprocessor {
         });
         if depth > 256 {
             EXPAND_DEPTH.with(|d| d.set(depth));
+            if std::env::var("DCC_PP_DEBUG").is_ok() && text.contains("asm_inline") {
+                eprintln!("[pp-debug] DEPTH_LIMIT depth={} text={:?}", depth, &text[..text.len().min(200)]);
+            }
             return text.to_string();
         }
         let result = self.expand_with_disabled_inner(text, disabled, map);
@@ -2331,11 +2413,19 @@ impl Preprocessor {
 
                 // 检查是否在禁用集中 (paint blue)
                 if disabled.contains(&ident) {
+                    if std::env::var("DCC_PP_DEBUG").is_ok() && ident == "asm_inline" {
+                        let d = EXPAND_DEPTH.with(|c| c.get());
+                        eprintln!("[pp-debug] PAINT_BLUE asm_inline depth={} file={} dis={:?} text_hdr={:?}", d, self.file, disabled, &text[..text.len().min(60)]);
+                    }
                     out.push_str(&ident);
                     continue;
                 }
 
                 if let Some(def) = self.macros.get(&ident).cloned() {
+                    if std::env::var("DCC_PP_DEBUG").is_ok() && ident == "asm_inline" {
+                        let d = EXPAND_DEPTH.with(|c| c.get());
+                        eprintln!("[pp-debug] EXPAND asm_inline depth={} file={} dis_len={} dis_has_gen={} text={:?}", d, self.file, disabled.len(), disabled.contains("GEN_BINARY_RMWcc"), &text[..text.len().min(100)]);
+                    }
                     if let Some(ref params) = def.params {
                         // function-like: 需要后跟 (
                         let mut j = i;
@@ -2376,14 +2466,26 @@ impl Preprocessor {
                                 }
                             }
                             if final_args.len() == params.len() {
+                                if std::env::var("DCC_PP_DEBUG").is_ok() && (ident == "__GEN_RMWcc" || ident == "GEN_BINARY_RMWcc_6" || ident == "GEN_BINARY_RMWcc_5" || ident == "GEN_BINARY_RMWcc" || ident == "CONCATENATE" || ident == "__CONCATENATE") {
+                                    eprintln!("[pp-debug] CALL {:?} raw={} final={} params={} body_has_asm={} dis={:?} body={:?}", ident, raw_args.len(), final_args.len(), params.len(), def.body.contains("asm_inline"), disabled, &def.body[..def.body.len().min(110)]);
+                                }
                                 let substituted = self.substitute_params(&def.body, params, &final_args, def.variadic);
+                                if std::env::var("DCC_PP_DEBUG").is_ok() && substituted.contains("asm_inline") {
+                                    eprintln!("[pp-debug] SUBST {:?} -> {:?}", ident, &substituted[..substituted.len().min(250)]);
+                                }
                                 // 创建新禁用集 = 原禁用集 + 当前宏名
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
                                 // 重新扫描替换结果
                                 let rescanned = self.expand_with_disabled(&substituted, &new_disabled, LineMap::Scalar(map.line(nl)));
+                                if std::env::var("DCC_PP_DEBUG").is_ok() && rescanned.contains("asm_inline") {
+                                    eprintln!("[pp-debug] RESCAN_LEFTOVER {:?} -> {:?}", ident, &rescanned[..rescanned.len().min(250)]);
+                                }
                                 out.push_str(&rescanned);
                             } else if raw_args.len() == params.len() {
+                                if std::env::var("DCC_PP_DEBUG").is_ok() && (ident == "__GEN_RMWcc" || ident == "GEN_BINARY_RMWcc_6" || ident == "GEN_BINARY_RMWcc_5" || ident == "GEN_BINARY_RMWcc" || ident == "CONCATENATE" || ident == "__CONCATENATE") {
+                                    eprintln!("[pp-debug] CALL-raw {:?} raw={} final={} params={} body_has_asm={} body={:?}", ident, raw_args.len(), final_args.len(), params.len(), def.body.contains("asm_inline"), &def.body[..def.body.len().min(110)]);
+                                }
                                 let substituted = self.substitute_params(&def.body, params, &raw_args, def.variadic);
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
@@ -2459,6 +2561,9 @@ impl Preprocessor {
                             }
                             let call_args: String = chars[j..k].iter().collect();
                             let after_call: String = chars[k..].iter().collect();
+                            if std::env::var("DCC_PP_DEBUG").is_ok() && after_call.contains("asm_inline") {
+                                eprintln!("[pp-debug] TAILCALL_AFTER ident={} depth={} disabled={:?} after_hdr={:?}", ident, EXPAND_DEPTH.with(|c| c.get()), disabled, &after_call[..after_call.len().min(70)]);
+                            }
                             let head = self.expand_with_disabled(
                                 &format!("{}{}", def.body, call_args),
                                 &new_disabled,
@@ -3648,10 +3753,11 @@ impl Preprocessor {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
         // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
-        // V9: 输出行号与输入物理行一一对应 (指令行空行占位), 缓存格式
-        //     升级为 DCC_CACHE_V4 (新增 DEPS 段, 依赖感知失效);
-        //     include-once 守卫快路径; 产生诊断的头文件不再落缓存。
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V9");
+        // V12: 缓存条目保存完整宏变更集 (新增 + 重新定义 + #undef 删除),
+        //     命中时先删后插回放; 旧版只回放新增宏, 丢失对已存在宏的
+        //     覆盖 (如 stddef.h 重新定义内置 NULL), 导致冷/热缓存运行
+        //     输出不一致。
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V12");
         for name in names {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
@@ -3673,7 +3779,7 @@ impl Preprocessor {
     fn get_cache_path(&self, file_path: &Path, content_hash: u64, macro_hash: u64) -> Option<PathBuf> {
         let cache_dir = self.cache_dir.as_ref()?;
         let file_hash = Self::hash_content(&file_path.to_string_lossy());
-        let cache_name = format!("v9_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
+        let cache_name = format!("v12_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
         Some(cache_dir.join(cache_name))
     }
 
@@ -3695,11 +3801,16 @@ impl Preprocessor {
 
     /// 探测 include-once 守卫: 跳过注释与空行后, 前两条指令为
     /// `#ifndef X` (或 `#if !defined(X)`) + `#define X` 即视为守卫,
-    /// 返回守卫宏名; 否则返回 None。
+    /// 且守卫的匹配 `#endif` 必须是文件最后一个指令 (守卫后无内容),
+    /// 守卫层不允许 #else/#elif。若守卫之外还有指令 (如 tracepoint.h
+    /// 在守卫外定义 TRACE_EVENT, 每次包含都须重读), 返回 None,
+    /// 不能走整体跳过快路径。
     fn detect_include_guard(text: &str) -> Option<String> {
+        let mut in_block_comment = false;
+        // 收集所有指令行 (去 #)
+        let mut directives: Vec<&str> = Vec::new();
         let mut first: Option<&str> = None;
         let mut second: Option<&str> = None;
-        let mut in_block_comment = false;
         for line in text.split('\n') {
             let line = line.trim();
             if in_block_comment {
@@ -3716,38 +3827,82 @@ impl Preprocessor {
                 let d = line[1..].trim_start();
                 if first.is_none() { first = Some(d); }
                 else if second.is_none() { second = Some(d); }
-                else { break; }
+                directives.push(d);
             } else {
                 // 指令前出现代码 → 不是守卫文件
                 return None;
             }
         }
-        let guard = first.and_then(|f| {
+        // 第一条指令必须是 `#ifndef X` 或 `#if !defined(X)`
+        let (guard, ifndef_idx) = {
+            let f = first?;
             if let Some(rest) = f.strip_prefix("ifndef ") {
-                Some(rest.trim().to_string())
+                (rest.trim().to_string(), 0usize)
             } else if let Some(rest) = f.strip_prefix("if !defined(") {
                 let name = rest.trim_end_matches(')').trim();
                 if name.is_empty() || name.contains(')') { return None; }
-                Some(name.to_string())
+                (name.to_string(), 0usize)
             } else {
-                None
+                return None;
             }
-        })?;
+        };
         // 第二条指令必须是 `#define <guard> ...`
         let ok = second
             .map(|s| s.strip_prefix("define ")
                 .map(|rest| rest.trim_start().starts_with(guard.as_str()))
                 .unwrap_or(false))
             .unwrap_or(false);
-        if ok { Some(guard) } else { None }
+        if !ok { return None; }
+        // 从守卫 #if 起扫描: 匹配 #endif 必须是最后一个指令,
+        // 守卫层不得出现 #else/#elif (否则宏已定义时须走 else 分支)
+        let mut depth = 0i32;
+        for (i, d) in directives.iter().enumerate().skip(ifndef_idx) {
+            let d = d.trim_start();
+            if d.starts_with("if ")
+                || d.starts_with("if\t")
+                || d.starts_with("ifdef ")
+                || d.starts_with("ifdef\t")
+                || d.starts_with("ifndef ")
+                || d.starts_with("ifndef\t")
+                || d.starts_with("if !defined(") {
+                depth += 1;
+            } else if d.starts_with("endif") {
+                depth -= 1;
+                if depth == 0 {
+                    // 守卫 #endif 之后不能有其它指令
+                    return if i == directives.len() - 1 { Some(guard) } else { None };
+                }
+            } else if depth == 1 && (d.starts_with("else") || d.starts_with("elif")) {
+                // 守卫层 #else/#elif: 宏已定义时 GCC 会处理 else 分支, 不能跳过
+                return None;
+            }
+        }
+        None
     }
 
-    fn load_from_cache(&self, cache_path: &Path) -> Option<(String, Vec<(String, MacroDef)>, Vec<(String, u64)>)> {
+    /// 比较两个宏定义是否语义等价 (params/body/variadic 全同)。
+    fn macro_def_eq(a: &MacroDef, b: &MacroDef) -> bool {
+        a.params == b.params && a.body == b.body && a.variadic == b.variadic
+    }
+
+    fn load_from_cache(&self, cache_path: &Path) -> Option<(String, Vec<(String, MacroDef)>, Vec<String>, Vec<(String, u64)>, u32)> {
         let content = fs::read_to_string(cache_path).ok()?;
         let mut lines = content.lines();
 
         // 第一行: 标记
-        if lines.next()? != "DCC_CACHE_V4" {
+        if lines.next()? != "DCC_CACHE_V6" {
+            return None;
+        }
+
+        // 第二行: COUNTER_DELTA <n> — 本头文件处理期间的 __COUNTER__ 消耗量
+        let mut counter_delta = 0u32;
+        if let Some(line) = lines.next() {
+            if let Some(rest) = line.strip_prefix("COUNTER_DELTA\t") {
+                counter_delta = rest.trim().parse().unwrap_or(0);
+            } else {
+                return None;
+            }
+        } else {
             return None;
         }
 
@@ -3761,6 +3916,14 @@ impl Preprocessor {
                     deps.push((p.to_string(), hash));
                 }
             }
+        }
+
+        // REMOVED 段: 处理期间被 #undef 删除的宏名 (逐行)
+        let mut removed = Vec::new();
+        if lines.next()? != "REMOVED" { return None; }
+        for line in lines.by_ref() {
+            if line == "END_REMOVED" { break; }
+            removed.push(line.to_string());
         }
 
         // 读取预处理输出 (直到 END_OUTPUT 标记)
@@ -3798,15 +3961,22 @@ impl Preprocessor {
             }
         }
 
-        Some((output, macros, deps))
+        Some((output, macros, removed, deps, counter_delta))
     }
 
-    fn save_to_cache(&self, cache_path: &Path, output: &str, macros: &HashMap<String, MacroDef>, deps: &[(String, u64)]) {
-        let mut content = String::from("DCC_CACHE_V4\nDEPS\n");
+    fn save_to_cache(&self, cache_path: &Path, output: &str, macros: &HashMap<String, MacroDef>, removed: &[String], deps: &[(String, u64)], counter_delta: u32) {
+        let mut content = String::from("DCC_CACHE_V6\n");
+        content.push_str(&format!("COUNTER_DELTA\t{}\n", counter_delta));
+        content.push_str("DEPS\n");
         for (p, h) in deps {
             content.push_str(&format!("{}\t{:x}\n", p, h));
         }
         content.push_str("END_DEPS\n");
+        content.push_str("REMOVED\n");
+        for name in removed {
+            content.push_str(&format!("{}\n", name));
+        }
+        content.push_str("END_REMOVED\n");
         content.push_str(output);
         content.push_str("END_OUTPUT\n");
 
