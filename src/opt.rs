@@ -950,6 +950,9 @@ mod tests {
                 warning_msg: None,
                 deprecated_msg: None,
                 ifunc_resolver: None,
+                is_global: false,
+                is_device: false,
+                is_host: false,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");
@@ -1055,6 +1058,9 @@ mod tests {
                 warning_msg: None,
                 deprecated_msg: None,
                 ifunc_resolver: None,
+                is_global: false,
+                is_device: false,
+                is_host: false,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");
@@ -1146,6 +1152,9 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
+            is_global: false,
+            is_device: false,
+            is_host: false,
         });
         let main_fn = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
@@ -1211,6 +1220,9 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
+            is_global: false,
+            is_device: false,
+            is_host: false,
         });
         let prog = Program {
             decls: vec![sq, main_fn],
@@ -1310,6 +1322,9 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
+            is_global: false,
+            is_device: false,
+            is_host: false,
         });
         let prog = Program { decls: vec![func] };
         let mut module = ir::lower(prog).expect("lower");

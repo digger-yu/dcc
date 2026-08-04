@@ -56,6 +56,11 @@ struct ParsedAttrs {
     ifunc_resolver: Option<String>,
     /// __attribute__((vector_size(N)))
     vector_size: Option<usize>,
+    /// CUDA/HIP 函数限定符: __global__ / __device__ / __host__
+    /// (仅 -fcuda / -fhip 时解析为限定符, 否则是普通标识符)
+    is_global: bool,
+    is_device: bool,
+    is_host: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -77,6 +82,10 @@ pub struct ParseOptions {
     pub is_c23: bool,
     /// `-Wimplicit-declaration`: 未声明标识符警告
     pub warn_implicit_decl: bool,
+    /// `-fcuda`: 启用 CUDA 函数限定符 (__global__/__device__/__host__)
+    pub cuda: bool,
+    /// `-fhip`: 启用 HIP 函数限定符 (同 CUDA 拼写)
+    pub hip: bool,
 }
 
 impl ParsedAttrs {
@@ -152,6 +161,15 @@ impl ParsedAttrs {
         }
         if other.is_used {
             self.is_used = true;
+        }
+        if other.is_global {
+            self.is_global = true;
+        }
+        if other.is_device {
+            self.is_device = true;
+        }
+        if other.is_host {
+            self.is_host = true;
         }
         if other.is_flatten {
             self.is_flatten = true;
@@ -995,6 +1013,16 @@ impl<'a> Parser<'a> {
                                 self.advance();
                             } // )
                         }
+                    }
+                    // CUDA/HIP 属性拼写 (__attribute__((global)) 等形式):
+                    // 只在 -fcuda / -fhip 时生效, 否则按未知属性跳过
+                    "global" | "device" | "host" if self.opts.cuda || self.opts.hip => {
+                        match name.as_str() {
+                            "global" => attrs.is_global = true,
+                            "device" => attrs.is_device = true,
+                            _ => attrs.is_host = true,
+                        }
+                        self.advance();
                     }
                     _ => {
                         self.advance();
@@ -2047,6 +2075,9 @@ impl<'a> Parser<'a> {
                     warning_msg: attrs.warning_msg.clone(),
                     deprecated_msg: attrs.deprecated_msg.clone(),
                     ifunc_resolver: attrs.ifunc_resolver.clone(),
+                    is_global: attrs.is_global,
+                    is_device: attrs.is_device,
+                    is_host: attrs.is_host,
                 })])
             } else {
                 // 非嵌套函数: 用 retain 移除函数体内新增的局部条目, 避免 O(n) 克隆 globals
@@ -2094,6 +2125,9 @@ impl<'a> Parser<'a> {
                     warning_msg: attrs.warning_msg.clone(),
                     deprecated_msg: attrs.deprecated_msg.clone(),
                     ifunc_resolver: attrs.ifunc_resolver.clone(),
+                    is_global: attrs.is_global,
+                    is_device: attrs.is_device,
+                    is_host: attrs.is_host,
                 })])
             }
         } else if self.cur.kind == TokKind::LBracket {
@@ -2409,6 +2443,9 @@ impl<'a> Parser<'a> {
                     warning_msg: None,
                     deprecated_msg: None,
                     ifunc_resolver: None,
+                    is_global: false,
+                    is_device: false,
+                    is_host: false,
                 })]);
             }
             // (*name(params)) — 返回指针的函数，无外层参数表
@@ -2486,6 +2523,9 @@ impl<'a> Parser<'a> {
                 warning_msg: None,
                 deprecated_msg: None,
                 ifunc_resolver: None,
+                is_global: false,
+                is_device: false,
+                is_host: false,
             })]);
         }
         // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
@@ -2846,6 +2886,22 @@ impl<'a> Parser<'a> {
                         || self.cur.text == "__volatile__"
                         || self.cur.text == "__restrict__" =>
                 {
+                    self.advance();
+                }
+                // CUDA/HIP 函数限定符: __global__ / __device__ / __host__
+                // 仅 -fcuda / -fhip 时解析为限定符 (否则是普通标识符,
+                // 由后续语义阶段报 undeclared, 位置精确到标识符)
+                TokKind::Ident
+                    if matches!(
+                        self.cur.text.as_str(),
+                        "__global__" | "__device__" | "__host__"
+                    ) && (self.opts.cuda || self.opts.hip) =>
+                {
+                    match self.cur.text.as_str() {
+                        "__global__" => self.decl_attrs.is_global = true,
+                        "__device__" => self.decl_attrs.is_device = true,
+                        _ => self.decl_attrs.is_host = true,
+                    }
                     self.advance();
                 }
                 // MSVC 扩展 _ms_restrict: 视为 restrict 同义

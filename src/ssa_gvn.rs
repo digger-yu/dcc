@@ -505,6 +505,9 @@ mod tests {
                 warning_msg: None,
                 deprecated_msg: None,
                 ifunc_resolver: None,
+                is_global: false,
+                is_device: false,
+                is_host: false,
             })],
         };
         let mut module = ir::lower(prog).expect("lower");

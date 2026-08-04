@@ -314,6 +314,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23
             ),
             warn_implicit_decl: cfg.warn_implicit_decl,
+            cuda: cfg.profile.offload.cuda,
+            hip: cfg.profile.offload.hip,
         },
     );
     drop(preprocessed);
@@ -343,6 +345,32 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         diags.push(w.clone());
     }
     drop(wlist);
+
+    // Offloading: 收集 OpenMP target/simd + CUDA/HIP 限定符函数为
+    // offload entries, 构造 `.dcc.offload` 节内容。校验错误/警告均带
+    // 精确源位置 (经 line_map 映射回源文件)。
+    let (offload_section, mut offload_diags) = collect_offload_section(
+        &prog,
+        &cfg.profile.offload,
+        &pp_out.openmp_pragmas,
+        &line_map,
+    );
+    remap_diags(&mut offload_diags, &line_map);
+    enrich_diags(&mut offload_diags, src, &file_name, input.parent());
+    let offload_has_err = offload_diags
+        .iter()
+        .any(|d| matches!(d.sev, Severity::Error));
+    if offload_has_err {
+        // 错误由 main.rs 统一打印, 此处只收集, 避免重复输出
+        diags.extend(offload_diags);
+        return Err(diags);
+    }
+    // 无错误: 打印 offload 收集阶段的警告 (带精确位置)
+    for d in &offload_diags {
+        if matches!(d.sev, Severity::Warning) {
+            d.print_with(&dcfg);
+        }
+    }
 
     // sanitizer 插桩（AST 层，在 IR lower 之前）
     sanitizer::instrument_program(&mut prog, cfg.sanitizers);
@@ -508,6 +536,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         cfg.parallel_codegen,
         cfg.bounds_check,
         cfg.trapv,
+        offload_section.as_ref(),
     );
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
@@ -1138,4 +1167,192 @@ fn remap_span(span: &mut crate::diagnostics::Span, line_map: &[LineSpan]) {
             span.line = ls.src_start + (line - ls.out_start);
         }
     }
+}
+
+/// 收集 offload entries 并构造 `.dcc.offload` 节内容。
+///
+/// 输入:
+///   * OpenMP: `#pragma omp target [simd]` / `#pragma omp simd` 指令
+///     (preproc 已记录精确源文件 + 源行号); 无 `-fopenmp-targets=` 时
+///     device_triple 为空串 (host fallback), 有则每个 triple 展开一条。
+///   * CUDA/HIP: `__global__` / `__device__` / `__host__` 限定符函数
+///     (仅 -fcuda / -fhip 时 parser 接受). `--offload-arch=` 指定时每个
+///     arch 映射为 device triple 展开。
+///
+/// 诊断位置约定: 返回的诊断 span 为预处理文本坐标, 由调用方
+/// remap_diags + enrich_diags; entry 内的 file/line/col 为源坐标
+/// (已在此处 remap), 直接进入元数据。
+fn collect_offload_section(
+    prog: &crate::ast::Program,
+    offload: &crate::profile::offload::OffloadConfig,
+    omp_pragmas: &[(String, u32, String)],
+    line_map: &[LineSpan],
+) -> (
+    Option<crate::profile::offload::OffloadSection>,
+    Vec<Diagnostic>,
+) {
+    use crate::ast::Decl;
+    use crate::profile::offload::{arch_to_triple, OffloadEntry, OffloadKind, OffloadSection};
+
+    let mut section = OffloadSection::new();
+    let mut diags = Vec::new();
+    if !offload.any() {
+        return (None, diags);
+    }
+
+    // ---- CUDA / HIP: __global__ / __device__ / __host__ 限定符函数 ----
+    if offload.cuda || offload.hip {
+        let kind = if offload.hip {
+            OffloadKind::Hip
+        } else {
+            OffloadKind::Cuda
+        };
+        let default_triple = if offload.hip {
+            "amdgcn-amd-amdhsa"
+        } else {
+            "nvptx64-nvidia-cuda"
+        };
+        // --offload-arch 展开: arch -> (triple, arch 名)
+        let archs: Vec<(String, Option<String>)> = if offload.target_archs.is_empty() {
+            vec![(default_triple.to_string(), None)]
+        } else {
+            offload
+                .target_archs
+                .iter()
+                .filter_map(|a| arch_to_triple(a).map(|t| (t.to_string(), Some(a.clone()))))
+                .collect()
+        };
+        for decl in &prog.decls {
+            let f = match decl {
+                Decl::Func(f) => f,
+                _ => continue,
+            };
+            if !(f.is_global || f.is_device || f.is_host) {
+                continue;
+            }
+            // 语义校验: __global__ 不能与 __host__/__device__ 混用
+            if f.is_global && (f.is_host || f.is_device) {
+                diags.push(Diagnostic::err(
+                    "E0310",
+                    format!(
+                        "a __global__ function '{}' cannot also be __host__ or __device__",
+                        f.name.name
+                    ),
+                    f.span.clone(),
+                ));
+                continue;
+            }
+            // 纯 __host__ 函数不是 offload entry (仅 host 侧可见)
+            if !(f.is_global || f.is_device) {
+                continue;
+            }
+            let mut sp = f.span.clone();
+            remap_span(&mut sp, line_map);
+            for (triple, arch) in &archs {
+                section.add_entry(OffloadEntry {
+                    kind,
+                    func: f.name.name.clone(),
+                    file: sp.file.clone(),
+                    line: sp.line,
+                    col: sp.col,
+                    device_triple: triple.clone(),
+                    arch: arch.clone(),
+                });
+            }
+        }
+    }
+
+    // ---- OpenMP: #pragma omp target [simd] / simd ----
+    if offload.openmp || offload.openmp_simd {
+        // 有 body 的函数区间表: (函数名, 源文件, 起始行, 结束行)
+        let funcs: Vec<(String, String, u32, u32)> = prog
+            .decls
+            .iter()
+            .filter_map(|d| {
+                let f = match d {
+                    Decl::Func(f) => f,
+                    _ => return None,
+                };
+                let body = f.body.as_ref()?;
+                let mut sp = f.span.clone();
+                remap_span(&mut sp, line_map);
+                let mut end_sp = body.span.clone();
+                remap_span(&mut end_sp, line_map);
+                Some((f.name.name.clone(), sp.file, sp.line, end_sp.line))
+            })
+            .collect();
+        let triples: Vec<String> = if offload.target_triples.is_empty() {
+            // 未指定 -fopenmp-targets: host fallback (device_triple 为空串)
+            vec![String::new()]
+        } else {
+            offload.target_triples.clone()
+        };
+        for (pfile, pline, ptext) in omp_pragmas {
+            let words: Vec<&str> = ptext.split_whitespace().collect();
+            // 已知 offload 构造: target / target simd / simd;
+            // 其它 OpenMP 构造 (parallel/atomic/task/...) 无 device
+            // codegen, 警告后按 no-op 处理 (位置精确到 pragma 行)
+            let kind = match words.as_slice() {
+                ["target", "simd", ..] => Some(OffloadKind::OmpTargetSimd),
+                ["target", ..] => Some(OffloadKind::OmpTarget),
+                ["simd", ..] => Some(OffloadKind::OmpTargetSimd),
+                _ => None,
+            };
+            let owner = funcs
+                .iter()
+                .find(|(_, file, start, end)| file == pfile && *start <= *pline && *end >= *pline);
+            match (kind, owner) {
+                (Some(k), Some((name, _, _, _))) => {
+                    for t in &triples {
+                        section.add_entry(OffloadEntry {
+                            kind: k,
+                            func: name.clone(),
+                            // 位置指向 pragma 本身 (而非函数头)
+                            file: pfile.clone(),
+                            line: *pline,
+                            col: 1,
+                            device_triple: t.clone(),
+                            arch: None,
+                        });
+                    }
+                }
+                (Some(_), None) => {
+                    diags.push(Diagnostic::warn(
+                        "W0311",
+                        format!(
+                            "-fopenmp: '#pragma omp {}' outside any function body; ignored",
+                            words.join(" ")
+                        ),
+                        crate::diagnostics::Span::point(pfile, *pline, 1),
+                    ));
+                }
+                (None, Some((name, _, _, _))) => {
+                    diags.push(Diagnostic::warn(
+                        "W0312",
+                        format!(
+                            "-fopenmp: unsupported OpenMP construct '#pragma omp {}' in \
+                             function '{}'; treated as no-op (no device codegen)",
+                            words.join(" "),
+                            name
+                        ),
+                        // 位置指向 pragma 本身 (而非函数头)
+                        crate::diagnostics::Span::point(pfile, *pline, 1),
+                    ));
+                }
+                (None, None) => {
+                    diags.push(Diagnostic::warn(
+                        "W0313",
+                        format!(
+                            "-fopenmp: unsupported OpenMP construct '#pragma omp {}'; ignored",
+                            words.join(" ")
+                        ),
+                        crate::diagnostics::Span::point(pfile, *pline, 1),
+                    ));
+                }
+            }
+        }
+    }
+
+    let out = if section.is_empty() { None } else { Some(section) };
+    (out, diags)
 }

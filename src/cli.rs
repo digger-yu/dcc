@@ -850,12 +850,27 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 offload.openmp = true;
                 offload.enabled = true;
             }
-            "-fopenmp=simd" => {
-                offload.openmp_simd = true;
+            a if a.starts_with("-fopenmp=") => {
+                // -fopenmp=simd | libomp | libgomp | llvm
+                let v = &a["-fopenmp=".len()..];
+                if v == "simd" {
+                    offload.openmp_simd = true;
+                } else if matches!(v, "libomp" | "libgomp" | "llvm") {
+                    offload.openmp_library = Some(v.to_string());
+                } else {
+                    return Err(CliError::new(&format!(
+                        "unknown -fopenmp= value '{}' (expected simd/libomp/libgomp/llvm)",
+                        v
+                    )));
+                }
+                offload.openmp = true;
                 offload.enabled = true;
             }
             "-fno-openmp" => {
                 offload.openmp = false;
+                offload.openmp_simd = false;
+                offload.openmp_library = None;
+                offload.enabled = offload.any();
             }
             "-fcuda" => {
                 offload.cuda = true;
@@ -863,6 +878,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "-fno-cuda" => {
                 offload.cuda = false;
+                offload.enabled = offload.any();
             }
             "-fhip" | "-fcuda-hip" => {
                 offload.hip = true;
@@ -870,18 +886,50 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "-fno-hip" => {
                 offload.hip = false;
+                offload.enabled = offload.any();
+            }
+            a if a.starts_with("-fopenmp-targets=") => {
+                // -fopenmp-targets=triple1,triple2 (GCC 风格)
+                let list = &a["-fopenmp-targets=".len()..];
+                offload.target_triples = split_offload_list(list);
+                offload.enabled = true;
             }
             "-fopenmp-targets" => {
                 if let Some(next) = args.get(i + 1) {
-                    offload.target_triples = next.split(',').map(|s| s.to_string()).collect();
+                    offload.target_triples = split_offload_list(next);
+                    offload.enabled = true;
                     i += 1;
                 } else {
                     return Err(CliError::new("-fopenmp-targets: missing triple list"));
                 }
             }
+            a if a.starts_with("--offload-arch=") => {
+                // --offload-arch=sm_80 (LLVM 风格, 可重复)
+                offload
+                    .target_archs
+                    .push(a["--offload-arch=".len()..].to_string());
+                offload.enabled = true;
+            }
+            "--offload-arch" => {
+                if let Some(next) = args.get(i + 1) {
+                    offload.target_archs.push(next.clone());
+                    offload.enabled = true;
+                    i += 1;
+                } else {
+                    return Err(CliError::new("--offload-arch: missing arch"));
+                }
+            }
+            a if a.starts_with("-foffload-arch=") => {
+                // -foffload-arch=sm_80 (GCC 风格)
+                offload
+                    .target_archs
+                    .push(a["-foffload-arch=".len()..].to_string());
+                offload.enabled = true;
+            }
             "-foffload-arch" => {
                 if let Some(next) = args.get(i + 1) {
                     offload.target_archs.push(next.clone());
+                    offload.enabled = true;
                     i += 1;
                 } else {
                     return Err(CliError::new("-foffload-arch: missing arch"));
@@ -1343,6 +1391,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             all_link_opts.runpath = Some(link_runpath.join(":"));
         }
         all_link_opts.rpath_link = link_rpath_link.clone();
+        // 解析完成后校验 offload 参数值 (非法 triple / arch 带具体值报错)
+        if let Err(e) = offload.validate() {
+            return Err(CliError::new(&e));
+        }
         Ok(Config {
             inputs,
             output,
@@ -1485,6 +1537,14 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     }
 }
 
+/// 拆分 `-fopenmp-targets=` 的逗号分隔 triple 列表 (去空白/去空项).
+fn split_offload_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
 /// 把 `offload` 子状态合并到 `profile` 顶层 (openmp / cuda / hip / targets).
 fn merge_profile_config(
     mut p: crate::profile::ProfileConfig,
@@ -1498,6 +1558,7 @@ fn merge_profile_config(
     };
     p.cuda = o.cuda;
     p.hip = o.hip;
+    p.offload = o;
     p
 }
 

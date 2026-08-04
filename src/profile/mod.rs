@@ -59,6 +59,8 @@ pub struct ProfileConfig {
     /// `-fcuda` / `-fno-cuda`
     pub cuda: bool,
     pub hip: bool,
+    /// Offloading 完整配置 (openmp/cuda/hip 标志 + targets + archs + 校验)
+    pub offload: crate::profile::offload::OffloadConfig,
     /// AutoFDO 反馈路径 (`-fauto-profile=file`)
     pub auto_profile: Option<PathBuf>,
     /// LBR 反馈路径 (`-flbr-profile=file`)

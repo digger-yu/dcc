@@ -163,12 +163,19 @@
 
 - [x] **24. Offloading（OpenMP target / CUDA / HIP）**
   - `src/profile/offload.rs`：`OffloadConfig` / `OffloadSection` /
-    `OffloadEntry` / `OffloadKind` 数据结构；`to_json()` 序列化
-  - CLI 接入 `-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` /
-    `-fopenmp-targets=triple,...` / `--offload-arch=triple`
-  - 验证：1 个模块单元测试 + `tests/profile.rs` 3 个集成测试 PASS
+    `OffloadEntry` / `OffloadKind`；`to_binary()` / `from_binary()`
+    `.dcc.offload` 二进制（magic `DCC_OFFL` + version 1 + entries
+    含 col/arch）；`to_json()` 诊断输出；`add_entry()` 去重
+  - CLI 全形式：`-fopenmp[=simd|libomp|libgomp|llvm]` / `-fcuda` /
+    `-fhip` / `-fopenmp-targets=`（等号/空格）/ `--offload-arch=`
+    （含 `-foffload-arch` 别名），非法 triple/arch 报错带具体值
+  - preproc 收集 `#pragma omp`；parser 支持 `__global__` /
+    `__device__` / `__host__` 限定符；driver 收集 entries 并给出
+    E0310 / W0311-13（精确 file:line:col）；codegen 全 arch 输出
+    `.dcc.offload` ELF 节
+  - 验证：6 个模块单元测试 + `tests/profile.rs` 11 个 offload
+    集成测试 PASS
   - 已知限制：无 device codegen 后端，runtime loader 未实装
-    （`.dcc.offload` 二进制序列化待定）
 
 ---
 

@@ -29,6 +29,7 @@ pub fn emit(
     parallel_codegen: bool,
     bounds_check: bool,
     trapv: bool,
+    offload: Option<&crate::profile::offload::OffloadSection>,
 ) -> Vec<u8> {
     match target.arch {
         crate::cli::Arch::X86_64 => {
@@ -92,6 +93,17 @@ pub fn emit(
                     flags: 0,
                     align: 1,
                 });
+            }
+            if let Some(o) = offload {
+                if !o.is_empty() {
+                    cg.extra_sections.push(elf::ElfSection {
+                        name: ".dcc.offload".to_string(),
+                        data: o.to_binary(),
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 8,
+                    });
+                }
             }
             if lto_enabled {
                 // 嵌入 dcc 自有 IR 位码（供 src/link 多 TU LTO 使用）
@@ -256,6 +268,17 @@ pub fn emit(
                     align: 1,
                 });
             }
+            if let Some(o) = offload {
+                if !o.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".dcc.offload".to_string(),
+                        data: o.to_binary(),
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 8,
+                    });
+                }
+            }
             cg.build_output()
         }
         crate::cli::Arch::RiscV64 => {
@@ -361,6 +384,17 @@ pub fn emit(
                     align: 1,
                 });
             }
+            if let Some(o) = offload {
+                if !o.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".dcc.offload".to_string(),
+                        data: o.to_binary(),
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 8,
+                    });
+                }
+            }
             cg.build_output()
         }
         crate::cli::Arch::Mips => {
@@ -451,6 +485,17 @@ pub fn emit(
                     flags: 0,
                     align: 1,
                 });
+            }
+            if let Some(o) = offload {
+                if !o.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".dcc.offload".to_string(),
+                        data: o.to_binary(),
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 8,
+                    });
+                }
             }
             cg.build_output()
         }
@@ -543,6 +588,17 @@ pub fn emit(
                     align: 1,
                 });
             }
+            if let Some(o) = offload {
+                if !o.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".dcc.offload".to_string(),
+                        data: o.to_binary(),
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 8,
+                    });
+                }
+            }
             cg.build_output()
         }
         crate::cli::Arch::Arm => {
@@ -633,6 +689,17 @@ pub fn emit(
                     flags: 0,
                     align: 1,
                 });
+            }
+            if let Some(o) = offload {
+                if !o.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".dcc.offload".to_string(),
+                        data: o.to_binary(),
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 8,
+                    });
+                }
             }
             cg.build_output()
         }

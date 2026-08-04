@@ -28,7 +28,7 @@
 | `profile::lbr` | `src/profile/lbr.rs` | 🟡 解析 `perf script -F brstack` | `-flbr-profile=` |
 | `profile::memprof` | `src/profile/memprof.rs` | 🟡 配置 + 数据结构 | `-fmemory-profile` / `-fmemory-profile-use=` |
 | `profile::perf_event` | `src/profile/perf_event.rs` | 🟡 TopdownL1 数据结构 | `-ftopdownmetrics` |
-| `profile::offload` | `src/profile/offload.rs` | 🟡 元数据 + JSON 序列化 | `-fopenmp` / `-fcuda` / `-fhip` / `-foffload-arch=` |
+| `profile::offload` | `src/profile/offload.rs` | 🟢 二进制 `.dcc.offload` + entry 收集 | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` |
 
 统一入口：`cli::Config::profile: ProfileConfig`，所有子状态在该结构
 集中开关 + 序列化到 codegen。
@@ -340,12 +340,17 @@ pub struct PerfRecord {
 
 Offloading：把一段代码 (通常是 `#pragma omp target` / `__global__`)
 编译成 host + device 两种 object，运行时由 host 调度到 device。
-dcc 当前没有完整 device 后端；但 *接口* 与 *元数据* 必须先行：
+dcc 当前没有完整 device codegen 后端，但 *接口* 与 *元数据* 完整：
 
-* `TargetTriples`：一组 `(kind, triple)` 描述 host 和 devices
-* `OffloadSection`：序列化到 `.dcc.offload` 的元数据，runtime loader
-  找到对应 `.o` / 加载到 device
-* 给定 OpenMP/CUDA/HIP 输入，标记若干函数为 offload entry
+* `OffloadConfig`：CLI 解析 `-fopenmp[=...]` / `-fcuda` / `-fhip` /
+  `-fopenmp-targets=` / `--offload-arch=` 并校验值（非法 triple /
+  arch 报错并带具体值）
+* `OffloadSection`：二进制序列化到 `.dcc.offload` ELF 节（magic
+  `DCC_OFFL` + version 1 + entries），runtime loader 找到对应 `.o` /
+  加载到 device；`to_json()` 保留为诊断/debug 输出
+* entry 收集：`#pragma omp target [simd]` / `#pragma omp simd` →
+  OmpTarget / OmpTargetSimd；`__global__` / `__device__` → Cuda/Hip；
+  所有诊断带精确 file:line:col
 
 ### 7.2 CLI 矩阵
 
@@ -353,10 +358,17 @@ dcc 当前没有完整 device 后端；但 *接口* 与 *元数据* 必须先行
 |-----|------|----------|
 | `-fopenmp` | 启用 OpenMP | `openmp = true` |
 | `-fopenmp=simd` | 启用 OpenMP simd 子集 | `openmp_simd = true` |
+| `-fopenmp=libomp\|libgomp\|llvm` | 选择 runtime 库名 | `openmp_library` |
 | `-fcuda` | 启用 CUDA | `cuda = true` |
 | `-fhip` | 启用 HIP | `hip = true` |
-| `-fopenmp-targets=triple,...` | 指定 device triple 列表 | `target_triples` |
-| `--offload-arch=triple` | `--offload-arch` 别名 | `target_archs` |
+| `-fopenmp-targets=triple,...`（等号/空格两种形式） | device triple 列表，值校验 | `target_triples` |
+| `--offload-arch=arch` / `--offload-arch arch` / `-foffload-arch=arch` | 设备架构（sm_*/gfx*），值校验 | `target_archs` |
+
+校验规则：triple 必须是已知集合（nvptx64-nvidia-cuda /
+nvptx-nvidia-cuda / amdgcn-amd-amdhsa / x86_64-pc-linux-gnu /
+aarch64-unknown-linux-gnu）；arch 必须是 `sm_<N>` / `gfx<NNN>` 或
+已知 host triple，非法值报错并带具体值。`sm_*` 映射到
+`nvptx64-nvidia-cuda`，`gfx*` 映射到 `amdgcn-amd-amdhsa`。
 
 ### 7.3 数据结构
 
@@ -368,23 +380,47 @@ pub struct OffloadEntry {
     pub func: String,
     pub file: String,
     pub line: u32,
-    pub device_triple: String,
-}
-
-pub struct OffloadSection {
-    pub entries: Vec<OffloadEntry>,
-    pub device_objects: HashMap<String, PathBuf>,
+    pub col: u32,              // 源列号, 精确位置
+    pub device_triple: String, // 空串 = host fallback
+    pub arch: Option<String>,  // --offload-arch 值
 }
 ```
 
-`to_json()` 把 entries 序列化为简化 JSON 形式 (后续可换 `.dcc.offload`
-二进制格式)。`offload_section_json_roundtrip` 测试 roundtrip。
+`.dcc.offload` 二进制布局（小端）：
 
-### 7.4 测试
+```
+magic 8B "DCC_OFFL" | version u8 = 1 | n_entries u16 |
+entries[]: kind u8 | func u16+bytes | file u16+bytes |
+           line u32 | col u32 | triple u16+bytes |
+           has_arch u8 | arch u16+bytes (has_arch=1 时)
+```
 
-`offload_section_json_roundtrip`，以及
-`tests/profile.rs::cli_fopenmp_accepted` / `cli_fopenmp_targets_accepted` /
-`cli_fcuda_and_fhip_accepted`。
+`to_binary()` / `from_binary()` 可 roundtrip；`add_entry()` 六字段全等
+去重。entry 位置约定：OpenMP 指向 pragma 所在行，CUDA/HIP 指向函数
+名标识符。
+
+### 7.4 收集与诊断
+
+* `preproc` 收集 `#pragma omp ...`（源文件 + 源行号 + 指令文本）
+* `driver::collect_offload_section` 构造 entries：
+  - OpenMP：`target` → OmpTarget；`target simd` / `simd` →
+    OmpTargetSimd；未指定 `-fopenmp-targets` 时 device_triple 为空串
+    （host fallback）
+  - CUDA/HIP：`__global__` / `__device__` 函数为 entry，`__host__`
+    跳过；`--offload-arch` 每个 arch 展开一条 entry
+  - 诊断：E0310 `__global__` 与 `__host__`/`__device__` 混用；
+    W0311 offload 构造在函数外被忽略；W0312 不支持的构造在函数内
+    （no-op）；W0313 不支持的构造被忽略——均带精确位置
+* `codegen` 在全部 6 个 arch 输出 `.dcc.offload` 节（PROGBITS, align 8）
+
+### 7.5 测试
+
+单元：`src/profile/offload.rs` 6 个（json_roundtrip /
+binary_roundtrip / bad_magic / dedup / arch_to_triple_mapping /
+validate_reports_bad_value）。集成：`tests/profile.rs` 11 个 offload
+用例（CLI 全形式解析与非法值拒绝、`.dcc.offload` 节内容与位置断言、
+E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
+`tests/fixtures/c/offload_{omp,cuda}.c`。
 
 ---
 

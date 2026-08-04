@@ -322,7 +322,7 @@ IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用�
 | LBR（`-flbr-profile=`） | 解析 `perf script -F brstack` 文本；`hot_entries` 按 `unknown -> func` 入度排序 | 权重不下发到 codegen |
 | MemProf（`-fmemory-profile` / `-fmemory-profile-use=`） | 简化 parser（`alloc` / `lifetime` 行式）；`is_cold(stack, threshold)` 启发 | 未在 libc malloc 上插桩；无 runtime 库 |
 | Perf 事件 / TopdownL1（`-ftopdownmetrics`） | `TopdownL1` 枚举（Retiring / BadSpeculation / FrontendBound / BackendBound）；`PerfRecord` 容器；`topdown_percentages()` 把四 slot 规整为百分比（sum = 1.0 校验） | 未读 perf.data 二进制 |
-| Offloading（`-fopenmp` / `-fcuda` / `-fhip` / `-fopenmp-targets=`） | `OffloadConfig` / `OffloadSection` / `OffloadEntry` / `OffloadKind` 数据结构；`to_json()` 序列化 | 无 device codegen 后端；runtime loader 未实装 |
+| Offloading（`-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=`） | `OffloadConfig` 全形式解析+值校验；`OffloadSection` 二进制序列化（magic `DCC_OFFL` + version + entries，含 col/arch）；preproc 收集 `#pragma omp`；driver 收集 entries（E0310/W0311-13 带精确位置）；codegen 全 arch 输出 `.dcc.offload` ELF 节；`to_json()` 保留为诊断输出 | 无 device codegen 后端；runtime loader 未实装 |
 
 CLI 矩阵：
 `-fprofile-generate[=dir]` / `-fprofile-instr-generate[=dir]` /
@@ -336,8 +336,8 @@ CLI 矩阵：
 `-fbranch-probabilities` / `-fprofile-values` / `-fprofile-list[=file]`。
 
 回归：`src/profile/{mod,gcov,pgo,autofdo,lbr,memprof,perf_event,offload}.rs`
-10 个模块单元测试 + `tests/profile.rs` 11 个集成测试
-（CLI 接受 / 缺路径拒绝 / 编译出 .o）。
+10 个模块单元测试 + `tests/profile.rs` 22 个集成测试
+（CLI 接受 / 缺路径拒绝 / 编译出 .o / `.dcc.offload` 节内容与位置）。
 详见 `docs/profiling.md`。
 
 ## 本地基线

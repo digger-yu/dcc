@@ -107,6 +107,8 @@ pub struct Preprocessor {
     /// 诊断在产生时即带上正确文件的源码行, 避免 enrich_diags 从主文件
     /// 取同名行 (头文件中的 #error 不再显示主文件的注释行)。
     cur_source_line: Option<String>,
+    /// `#pragma omp ...` 指令收集: (源文件, 源行号, 指令文本)
+    openmp_pragmas: Vec<(String, u32, String)>,
     /// 已读入的 include 依赖: (canonical path, content hash)。
     /// 供头文件缓存的传递依赖校验 (include 图缓存): 缓存条目记录其
     /// 依赖闭包, 命中前逐个重读比对, 任一依赖变更即失效重处理。
@@ -183,6 +185,9 @@ pub struct PreprocessOutput {
     pub macros: Vec<(String, Option<Vec<String>>, bool, String)>,
     /// 行号映射区间: 预处理输出行号 → 源文件 (file, src_line)
     pub line_map: Vec<LineSpan>,
+    /// `#pragma omp ...` 指令: (源文件, 源行号, 指令文本)。
+    /// 无 -fopenmp 时 driver 忽略; 启用时用于收集 offload entry。
+    pub openmp_pragmas: Vec<(String, u32, String)>,
 }
 
 /// 预编译头 (PCH) 选项。
@@ -468,6 +473,7 @@ pub fn preprocess(
         expanded_macros: RefCell::new(HashSet::new()),
         charset: "UTF-8".to_string(),
         cur_source_line: None,
+        openmp_pragmas: Vec::new(),
         dep_hashes: Vec::new(),
         once_guard: HashMap::new(),
     };
@@ -891,6 +897,7 @@ pub fn preprocess(
             .map(|(k, v)| (k.clone(), v.params.clone(), v.variadic, v.body.clone()))
             .collect(),
         line_map: pp.line_map.clone(),
+        openmp_pragmas: pp.openmp_pragmas.clone(),
     }
 }
 
@@ -1693,6 +1700,14 @@ impl Preprocessor {
                 }
             } else if pragma_text.starts_with("comment") {
                 // #pragma comment(...) — 链接器注释, 忽略
+            } else if let Some(rest) = pragma_text.strip_prefix("omp") {
+                // #pragma omp ... — 记录 (源文件, 源行号, 指令文本)。
+                // 后续 driver 在 -fopenmp 下据此收集 offload entry;
+                // 无 -fopenmp 时静默忽略 (与 GCC 一致)。
+                // line_no 对直接 #pragma 是物理源行号 (preserve_lines
+                // 保证输出行号与输入物理行号一一对应), 位置精确。
+                self.openmp_pragmas
+                    .push((self.file.clone(), line_no, rest.trim().to_string()));
             }
             // 其他 #pragma 忽略
         } else if let Some(rest) = directive.strip_prefix("error") {

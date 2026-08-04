@@ -1417,6 +1417,9 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
+            is_global: false,
+            is_device: false,
+            is_host: false,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("entry"));
@@ -1494,6 +1497,9 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
+            is_global: false,
+            is_device: false,
+            is_host: false,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("if.then"));
@@ -1555,6 +1561,9 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
+            is_global: false,
+            is_device: false,
+            is_host: false,
         };
         assert!(build_from_func(&f).is_none());
     }

@@ -123,6 +123,12 @@ pub struct FuncDecl {
     pub deprecated_msg: Option<String>,
     /// __attribute__((ifunc("resolver"))): 生成 STT_GNU_IFUNC
     pub ifunc_resolver: Option<String>,
+    /// CUDA/HIP: __global__ 函数 (device entry, host 侧可调用)
+    pub is_global: bool,
+    /// CUDA/HIP: __device__ 函数 (仅 device 侧可见)
+    pub is_device: bool,
+    /// CUDA/HIP: __host__ 函数 (仅 host 侧可见)
+    pub is_host: bool,
 }
 
 #[derive(Debug, Clone)]

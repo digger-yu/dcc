@@ -1035,10 +1035,16 @@ M19 关键改动:
     `perf.data` v2 二进制（`PERFILE2` magic + header + perf_event_attr
     数组 + data section），不依赖 `libperf` 运行时
   - `event_names()` / `synthetic_counts()` 暴露元信息给上层 metric 汇总
-- **Offloading (OpenMP target / CUDA / HIP)** 🟡
+- **Offloading (OpenMP target / CUDA / HIP)** 🟢
   - `OffloadConfig` / `OffloadSection` / `OffloadEntry` 数据结构
   - `OffloadKind` 区分 OmpTarget / OmpTargetSimd / Cuda / Hip
-  - `to_json()` 序列化（后续换 .dcc.offload 二进制）
+  - CLI 全形式解析 + 值校验（`-fopenmp[=...]` / `-fcuda` / `-fhip` /
+    `-fopenmp-targets=` / `--offload-arch=`，非法值报错带具体值）
+  - `.dcc.offload` 二进制序列化（magic `DCC_OFFL` + version 1 +
+    entries 含 col/arch）+ `to_json()` 诊断输出
+  - preproc 收集 `#pragma omp`；driver 收集 entries（E0310 /
+    W0311-13 均带精确 file:line:col）；codegen 全 arch 输出
+    `.dcc.offload` ELF 节
   - 已知限制：无 device codegen 后端，runtime loader 未实装
 
 详见 `docs/profiling.md`。
