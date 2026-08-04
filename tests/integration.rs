@@ -2146,6 +2146,58 @@ fn asm_avx_aes_fma_tsx_compiles_without_nop_fallback() {
     );
 }
 
+/// x87 FPU 指令集: 无操作数指令 / 比较 / 加载存储 / 控制 / 算术 / BCD
+#[test]
+fn asm_x87_fpu_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_x87_fpu.c");
+    let (output, _obj) = run_object_test("asm-x87-fpu", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
+/// MMX 指令集: emms / 打包解包 / 算术 / 移位 / pshufw
+#[test]
+fn asm_mmx_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_mmx.c");
+    let (output, _obj) = run_object_test("asm-mmx", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
+/// 字符串操作 / 循环 / 杂项指令: lodsb-w-l-q / cmpsw-l-q / scasw-l-q / loop / enter
+#[test]
+fn asm_string_loop_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_string_loop.c");
+    let (output, _obj) = run_object_test("asm-string-loop", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
+/// BMI1/BMI2 扩展: andn/bextr/blsi/blsmsk/blsr/bzhi/mulx/pdep/pext/rorx/sarx/shlx/shrx/adcx/adox
+#[test]
+fn asm_bmi_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_bmi.c");
+    let (output, _obj) = run_object_test("asm-bmi", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// __builtin_constant_p：编译期常量判定（含 __int128 表达式）
 #[test]
 fn builtin_constant_p_full_run_returns_zero() {

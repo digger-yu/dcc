@@ -256,6 +256,8 @@ const ASM_REG_ZMM: u8 = 130;
 const ASM_REG_TMM: u8 = 131;
 const ASM_REG_K: u8 = 132;
 /// mini-asm 特殊寄存器宽度标签: 控制寄存器 (crN) / 调试寄存器 (drN, dbN)
+const ASM_REG_MMX: u8 = 135;
+const ASM_REG_ST: u8 = 136; // x87 FPU 栈寄存器 st(0)-st(7)
 const ASM_REG_CR: u8 = 133;
 const ASM_REG_DR: u8 = 134;
 
@@ -11562,6 +11564,25 @@ impl Codegen {
             "db5" => Some((5, ASM_REG_DR)),
             "db6" => Some((6, ASM_REG_DR)),
             "db7" => Some((7, ASM_REG_DR)),
+            // MMX 寄存器 (mm0–mm7)
+            "mm0" => Some((0, ASM_REG_MMX)),
+            "mm1" => Some((1, ASM_REG_MMX)),
+            "mm2" => Some((2, ASM_REG_MMX)),
+            "mm3" => Some((3, ASM_REG_MMX)),
+            "mm4" => Some((4, ASM_REG_MMX)),
+            "mm5" => Some((5, ASM_REG_MMX)),
+            "mm6" => Some((6, ASM_REG_MMX)),
+            "mm7" => Some((7, ASM_REG_MMX)),
+            // x87 FPU 栈寄存器 (AT&T 语法)
+            "st" => Some((0, ASM_REG_ST)),
+            "st(0)" => Some((0, ASM_REG_ST)),
+            "st(1)" => Some((1, ASM_REG_ST)),
+            "st(2)" => Some((2, ASM_REG_ST)),
+            "st(3)" => Some((3, ASM_REG_ST)),
+            "st(4)" => Some((4, ASM_REG_ST)),
+            "st(5)" => Some((5, ASM_REG_ST)),
+            "st(6)" => Some((6, ASM_REG_ST)),
+            "st(7)" => Some((7, ASM_REG_ST)),
             _ => None,
         }
     }
@@ -11939,6 +11960,75 @@ impl Codegen {
             "std" => self.emit(&[0xFD]),
             "hlt" => self.emit(&[0xF4]),
             "fwait" => self.emit(&[0x9B]),
+            // x87 无操作数指令 (D9 编码空间)
+            "fnop" => self.emit(&[0xD9, 0xD0]),
+            "fchs" => self.emit(&[0xD9, 0xE0]),
+            "fabs" => self.emit(&[0xD9, 0xE1]),
+            "ftst" => self.emit(&[0xD9, 0xE4]),
+            "fxam" => self.emit(&[0xD9, 0xE5]),
+            "fld1" => self.emit(&[0xD9, 0xE8]),
+            "fldl2t" => self.emit(&[0xD9, 0xE9]),
+            "fldl2e" => self.emit(&[0xD9, 0xEA]),
+            "fldpi" => self.emit(&[0xD9, 0xEB]),
+            "fldlg2" => self.emit(&[0xD9, 0xEC]),
+            "fldln2" => self.emit(&[0xD9, 0xED]),
+            "fldz" => self.emit(&[0xD9, 0xEE]),
+            "f2xm1" => self.emit(&[0xD9, 0xF0]),
+            "fyl2x" => self.emit(&[0xD9, 0xF1]),
+            "fptan" => self.emit(&[0xD9, 0xF2]),
+            "fpatan" => self.emit(&[0xD9, 0xF3]),
+            "fxtract" => self.emit(&[0xD9, 0xF4]),
+            "fprem1" => self.emit(&[0xD9, 0xF5]),
+            "fdecstp" => self.emit(&[0xD9, 0xF6]),
+            "fincstp" => self.emit(&[0xD9, 0xF7]),
+            "fprem" => self.emit(&[0xD9, 0xF8]),
+            "fyl2xp1" => self.emit(&[0xD9, 0xF9]),
+            "fsqrt" => self.emit(&[0xD9, 0xFA]),
+            "fsincos" => self.emit(&[0xD9, 0xFB]),
+            "frndint" => self.emit(&[0xD9, 0xFC]),
+            "fscale" => self.emit(&[0xD9, 0xFD]),
+            "fsin" => self.emit(&[0xD9, 0xFE]),
+            "fcos" => self.emit(&[0xD9, 0xFF]),
+            // x87 比较 (无操作数/栈顶)
+            "fcom" => self.emit(&[0xD8, 0xD1]),
+            "fcomp" => self.emit(&[0xD8, 0xD9]),
+            "fcompp" => self.emit(&[0xDE, 0xD9]),
+            "fucom" => self.emit(&[0xDD, 0xE1]),
+            "fucomp" => self.emit(&[0xDD, 0xE9]),
+            "fucomip" => self.emit(&[0xDF, 0xE9]),
+            // x87 控制 (无操作数)
+            "fninit" => self.emit(&[0xDB, 0xE3]),
+            // x87 加载/存储 (单操作数: 内存或 st(i))
+            "fld" | "flds" | "fldl" | "fldt" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 0, false),
+            "fst" | "fsts" | "fstl" | "fstt" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 2, false),
+            "fstp" | "fstps" | "fstpl" | "fstpt" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 3, false),
+            "fldcw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 5, false),
+            "fnstcw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 7, true),
+            "fnstsw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 7, false), // stsw 的编码: DF E0 (ax) 或 DD E0(mem)
+            // 整数加载/存储
+            "fild" | "fildl" | "filds" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 0, false),
+            "fist" | "fistl" | "fists" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 2, false),
+            "fistp" | "fistpl" | "fistps" | "fistpq" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 3, false),
+            // BCD 加载/存储
+            "fbld" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 4, false),
+            "fbstp" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 6, false),
+            // x87 算术 (单操作数: st(i) 或内存)
+            "fadd" | "fadds" | "faddl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 0, false),
+            "fmul" | "fmuls" | "fmull" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 1, false),
+            "fsub" | "fsubs" | "fsubl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 4, false),
+            "fsubr" | "fsubrs" | "fsubrl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 5, false),
+            "fdiv" | "fdivs" | "fdivl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 6, false),
+            "fdivr" | "fdivrs" | "fdivrl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 7, false),
+            // x87 双精度内存算术
+            "fadd" | "fadds" | "faddl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 0, 0xD8, 0),
+            "fmul" | "fmuls" | "fmull" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 1, 0xD8, 1),
+            "fsub" | "fsubs" | "fsubl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 4, 0xD8, 4),
+            "fsubr" | "fsubrs" | "fsubrl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 5, 0xD8, 5),
+            "fdiv" | "fdivs" | "fdivl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 6, 0xD8, 6),
+            "fdivr" | "fdivrs" | "fdivrl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 7, 0xD8, 7),
+            // x87 比较 (单操作数 st(i))
+            "fcom" | "fcoms" | "fcoml" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 2, false),
+            "fcomp" | "fcomps" | "fcompl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 3, false),
             "pause" => self.emit(&[0xF3, 0x90]),
             "mfence" => self.emit(&[0x0F, 0xAE, 0xF0]),
             "lfence" => self.emit(&[0x0F, 0xAE, 0xE8]),
@@ -14028,6 +14118,344 @@ impl Codegen {
             "crc32l" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 0, 0xF1, 0), // F2 0F 38 F1
             "crc32q" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 0, 0xF1, 1), // F2 0F 38 F1 + REX.W
 
+            // === MMX 指令 ===
+            "emms" => self.emit(&[0x0F, 0x77]),
+            "packsswb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x63),
+            "packssdw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x6B),
+            "packuswb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x67),
+            "punpckhbw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x68),
+            "punpckhwd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x69),
+            "punpckhdq" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x6A),
+            "punpcklbw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x60),
+            "punpcklwd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x61),
+            "punpckldq" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x62),
+            "pshufw" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *ss == ASM_REG_MMX && *ds == ASM_REG_MMX {
+                        self.emit(&[0x0F, 0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    } else {
+                        eprintln!("warning: pshufw needs mmx registers, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: pshufw needs imm, mmx, mmx, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "pmaddwd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xF5),
+            "pmulhw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xE5),
+            "pmullw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xD5),
+            "pmulhrw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xE5), // pmulhrw 是 pmulhw 的别名
+            "psllw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xF1),
+            "psrlw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xD1),
+            "psraw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xE1),
+            "pslld" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xF2),
+            "psrld" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xD2),
+            "psrad" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xE2),
+            "psllq" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xF3),
+            "psrlq" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xD3),
+
+            // === 字符串操作 (无操作数) ===
+            "lodsb" => self.emit(&[0xAC]),
+            "lodsw" => self.emit(&[0x66, 0xAD]),
+            "lodsl" | "lodsd" => self.emit(&[0xAD]),
+            "lodsq" => self.emit(&[0x48, 0xAD]),
+            "cmpsw" => self.emit(&[0x66, 0xA7]),
+            "cmpsl" | "cmpsd" => self.emit(&[0xA7]),
+            "cmpsq" => self.emit(&[0x48, 0xA7]),
+            "scasw" => self.emit(&[0x66, 0xAF]),
+            "scasl" | "scasd" => self.emit(&[0xAF]),
+            "scasq" => self.emit(&[0x48, 0xAF]),
+
+            // === 循环指令 (单操作数: 相对偏移) ===
+            "loop" if ops.len() == 1 => {
+                if let AsmOperand::Imm(v) = &ops[0] {
+                    self.emit(&[0xE2, *v as u8]);
+                } else {
+                    eprintln!("warning: loop needs imm8 offset, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "loope" | "loopz" if ops.len() == 1 => {
+                if let AsmOperand::Imm(v) = &ops[0] {
+                    self.emit(&[0xE1, *v as u8]);
+                } else {
+                    eprintln!("warning: loope needs imm8 offset, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "loopne" | "loopnz" if ops.len() == 1 => {
+                if let AsmOperand::Imm(v) = &ops[0] {
+                    self.emit(&[0xE0, *v as u8]);
+                } else {
+                    eprintln!("warning: loopne needs imm8 offset, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+
+            // === 杂项 ===
+            "bound" if ops.len() == 2 => {
+                eprintln!("warning: bound is 80286 legacy, emitted as nop");
+                self.emit(&[0x90]);
+            }
+            "enter" if ops.len() == 2 => {
+                if let (AsmOperand::Imm(imm16), AsmOperand::Imm(imm8)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0xC8, *imm16 as u8, (*imm16 >> 8) as u8, *imm8 as u8]);
+                } else {
+                    eprintln!("warning: enter needs imm16, imm8, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "into" => {
+                eprintln!("warning: into is 80286 legacy, emitted as nop");
+                self.emit(&[0x90]);
+            }
+
+            // === BMI1/BMI2 扩展 ===
+            // andn: VEX.NDS.128.0F38.W0 F2 /r (dst, src1, src2)
+            "andn" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
+                        self.emit(&[0xF2, Self::modrm_reg_reg(*d, *s)]);
+                    } else {
+                        eprintln!("warning: andn needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: andn needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // bextr: VEX.NDS.128.0F38.W0 F7 /r (dst, src1, src2)
+            "bextr" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
+                        self.emit(&[0xF7, Self::modrm_reg_reg(*d, *s)]);
+                    } else {
+                        eprintln!("warning: bextr needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: bextr needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // blsi: VEX.NDS.128.0F38.W0 F3/3 (dst, src)
+            "blsi" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
+                    if *s <= 15 && *d <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
+                        self.emit(&[0xF3, Self::modrm_reg_reg(3, *s)]);
+                    } else {
+                        eprintln!("warning: blsi needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: blsi needs reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // blsmsk: VEX.NDS.128.0F38.W0 F3/2 (dst, src)
+            "blsmsk" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
+                    if *s <= 15 && *d <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
+                        self.emit(&[0xF3, Self::modrm_reg_reg(2, *s)]);
+                    } else {
+                        eprintln!("warning: blsmsk needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: blsmsk needs reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // blsr: VEX.NDS.128.0F38.W0 F3/1 (dst, src)
+            "blsr" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
+                    if *s <= 15 && *d <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
+                        self.emit(&[0xF3, Self::modrm_reg_reg(1, *s)]);
+                    } else {
+                        eprintln!("warning: blsr needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: blsr needs reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // bzhi: VEX.NDS.128.0F38.W0 F5 /r (dst, src1, src2)
+            "bzhi" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
+                        self.emit(&[0xF5, Self::modrm_reg_reg(*d, *s)]);
+                    } else {
+                        eprintln!("warning: bzhi needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: bzhi needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // mulx: VEX.NDS.128.F2.0F38.W0 F6 /r (dst, src1, src2)
+            "mulx" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 3);
+                        self.emit(&[0xF6, Self::modrm_reg_reg(*d, *s)]);
+                    } else {
+                        eprintln!("warning: mulx needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: mulx needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // pdep: VEX.NDS.128.F2.0F38.W0 F2 /r (dst, src1, src2)
+            "pdep" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 3);
+                        self.emit(&[0xF2, Self::modrm_reg_reg(*d, *s)]);
+                    } else {
+                        eprintln!("warning: pdep needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: pdep needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // pext: VEX.NDS.128.F3.0F38.W0 F5 /r (dst, src1, src2)
+            "pext" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 2);
+                        self.emit(&[0xF5, Self::modrm_reg_reg(*d, *s)]);
+                    } else {
+                        eprintln!("warning: pext needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: pext needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // rorx: VEX.128.F2.0F3A.W0 F0 /r ib (dst, src, imm8)
+            "rorx" if ops.len() == 3 => {
+                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 3, 1, 0, 0, 3);
+                        self.emit(&[0xF0, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    } else {
+                        eprintln!("warning: rorx needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: rorx needs imm, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // sarx/shlx/shrx: VEX.NDS.128.0F38.W0 F7/F7/F7 /r (dst, src1, src2)
+            "sarx" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
+                        self.emit(&[0xF7, Self::modrm_reg_reg(7, *s)]);
+                    } else {
+                        eprintln!("warning: sarx needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: sarx needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "shlx" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
+                        self.emit(&[0xF7, Self::modrm_reg_reg(6, *s)]);
+                    } else {
+                        eprintln!("warning: shlx needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: shlx needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "shrx" if ops.len() == 3 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(v, _vs), AsmOperand::Reg(d, _ds)) =
+                    (&ops[0], &ops[1], &ops[2])
+                {
+                    if *s <= 15 && *d <= 15 && *v <= 15 {
+                        self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
+                        self.emit(&[0xF7, Self::modrm_reg_reg(5, *s)]);
+                    } else {
+                        eprintln!("warning: shrx needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: shrx needs reg, reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // adcx: 66 0F 38 F6 /r (dst, src)
+            "adcx" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
+                    if *s <= 15 && *d <= 15 {
+                        self.emit(&[Self::rex(false, *d, 0, *s), 0x66, 0x0F, 0x38, 0xF6, Self::modrm_reg_reg(*d, *s)]);
+                    } else {
+                        eprintln!("warning: adcx needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: adcx needs reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // adox: F3 0F 38 F6 /r (dst, src)
+            "adox" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
+                    if *s <= 15 && *d <= 15 {
+                        self.emit(&[Self::rex(false, *d, 0, *s), 0xF3, 0x0F, 0x38, 0xF6, Self::modrm_reg_reg(*d, *s)]);
+                    } else {
+                        eprintln!("warning: adox needs GPR operands, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
+                } else {
+                    eprintln!("warning: adox needs reg, reg, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+
             // 未识别指令: 警告 + nop 占位
             _ => {
                 eprintln!(
@@ -15612,6 +16040,75 @@ impl Codegen {
         } else {
             eprintln!("warning: unsupported int operand pattern, emitted as nop");
             self.emit(&[0x90]);
+        }
+    }
+
+    /// vmread %reg, %reg: 0F 78 /r (reg 字段 = dst 即 VmcsField, rm 字段 = src 即 GPR)
+    /// AT&T vmread src, dst → src GPR (vmcs field), dst GPR (output)
+    fn emit_asm_x87_mem(&mut self, op: &AsmOperand, esc: u8, ext: u8, no_modrm: bool) {
+        // x87 内存操作数编码: ESC opcode + ModRM (reg 字段 = ext, rm = 操作数)
+        match op {
+            AsmOperand::Reg(r, _) => {
+                // 寄存器操作数: st(i) 或 %ax (fnstsw)
+                if no_modrm {
+                    // fnstsw %ax: DF E0
+                    self.emit(&[esc, 0xE0]);
+                } else {
+                    // st(i) 操作数: 编码为 ESC C0+reg (mod=11, rm=reg)
+                    self.emit(&[esc, 0xC0 | (ext << 3) | (r & 7)]);
+                }
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit(&[esc]);
+                self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported x87 operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// x87 双操作数栈算术: 处理 st(i), st 和 st, st(i) 两种形式
+    /// rev_esc/rev_ext 用于 st(i),st 形式 (反向), fwd_esc/fwd_ext 用于 st,st(i) 形式
+    fn emit_asm_x87_st(&mut self, src: &AsmOperand, dst: &AsmOperand, rev_esc: u8, rev_ext: u8, fwd_esc: u8, fwd_ext: u8) {
+        match (src, dst) {
+            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                // AT&T: fadd %st(1), %st  →  st = st + st(1)
+                // dst 是 %st (0), src 是 %st(i)
+                if *d == 0 {
+                    // st, st(i) 形式: 使用 fwd 编码
+                    self.emit(&[fwd_esc, 0xC0 | (fwd_ext << 3) | (s & 7)]);
+                } else {
+                    // st(i), st 形式: 使用 rev 编码
+                    self.emit(&[rev_esc, 0xC0 | (rev_ext << 3) | (d & 7)]);
+                }
+            }
+            _ => {
+                eprintln!("warning: unsupported x87 st operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// MMX 2 操作数: 0F opcode /r (mmx reg, mmx reg/mem)
+    fn emit_asm_mmx_2op(&mut self, src: &AsmOperand, dst: &AsmOperand, opcode: u8) {
+        match (src, dst) {
+            (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds))
+                if *ss == ASM_REG_MMX && *ds == ASM_REG_MMX =>
+            {
+                self.emit(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
+            }
+            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds))
+                if *ds == ASM_REG_MMX =>
+            {
+                self.emit(&[0x0F, opcode]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported MMX operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
         }
     }
 
