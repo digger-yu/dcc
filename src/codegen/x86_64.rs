@@ -78,6 +78,7 @@ pub struct Codegen {
     pub entry: u64,
     pub target: Target,
     pub labels: HashMap<String, u64>,
+    current_asm_line: usize,
     pending: Vec<PendingJump>,
     next_label: u32,
     var_map: HashMap<String, (i32, Type)>,
@@ -541,6 +542,7 @@ impl Codegen {
             disasm_data: HashMap::new(),
             global_asm_exports: HashSet::new(),
             func_asm_layout: HashMap::new(),
+            current_asm_line: 0,
             source_name: String::new(),
             parallel_codegen: false,
         }
@@ -11194,6 +11196,7 @@ impl Codegen {
                 continue;
             }
             let subbed = locals.substitute(trimmed, i);
+            self.current_asm_line = i + 1;
             self.emit_asm_line(&subbed);
         }
     }
@@ -11854,9 +11857,14 @@ impl Codegen {
             (Some(0xF3u8), line[4..].trim())
         } else if line.starts_with("repnz ")
             || line.starts_with("repnz\t")
-            || line.starts_with("repe ")
         {
             (Some(0xF2u8), line[6..].trim())
+        } else if line.starts_with("repe ")
+            || line.starts_with("repe\t")
+            || line == "repe"
+        {
+            // repe 与 repz 同义: F3 前缀 (不是 F2)
+            (Some(0xF3u8), line.strip_prefix("repe").unwrap_or("").trim())
         } else {
             // 段前缀: 形如 "ds clflush %0" / "gs movq ..."
             let seg_pfx = ["ds ", "cs ", "ss ", "es ", "fs ", "gs "]
@@ -11884,6 +11892,10 @@ impl Codegen {
         } else {
             (rest, "")
         };
+        // 前缀之后无指令: 如单独一行的 "repe" (前缀已发射, 无指令需要编码)
+        if mnemonic.is_empty() {
+            return;
+        }
         // 汇编器宏调用 (如 extable_type_reg reg=.., type=..): 无机器码, 静默忽略
         if operands_str.contains('=')
             && !mnemonic.is_empty()
@@ -11926,6 +11938,7 @@ impl Codegen {
             "cld" => self.emit(&[0xFC]),
             "std" => self.emit(&[0xFD]),
             "hlt" => self.emit(&[0xF4]),
+            "fwait" => self.emit(&[0x9B]),
             "pause" => self.emit(&[0xF3, 0x90]),
             "mfence" => self.emit(&[0x0F, 0xAE, 0xF0]),
             "lfence" => self.emit(&[0x0F, 0xAE, 0xE8]),
@@ -12013,6 +12026,7 @@ impl Codegen {
                 self.emit_asm_cmov(&ops[0], &ops[1], 0x44)
             }
             "cmovnz" | "cmovne" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x45),
+            "cmova" | "cmovnbe" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x47),
             "cmovl" | "cmovnge" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4C),
             "cmovg" | "cmovnle" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4F),
             "cmovle" | "cmovng" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4E),
@@ -12037,6 +12051,8 @@ impl Codegen {
             "andl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 32),
             "or" | "orq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 64),
             "orl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 32),
+            "orw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 16),
+            "orb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 8),
             "xor" | "xorq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 64),
             "xorl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 32),
             "xorb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 8),
@@ -12091,9 +12107,10 @@ impl Codegen {
             "prefetcht2" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x1A),
             "prefetchnta" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x1B),
             "prefetchw" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x0D),
-            // clflush / clflushopt: 0F AE /7 (clflushopt 带 66 前缀)
-            "clflush" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], false),
-            "clflushopt" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], true),
+            // clflush / clflushopt: 0F AE /7 (clflushopt 带 66 前缀); clwb: 66 0F AE /6
+            "clflush" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], false, 7),
+            "clflushopt" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], true, 7),
+            "clwb" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], true, 6),
             // FSGSBASE: F3 0F AE /0-/3 (rdfsbase, rdgsbase, wrfsbase, wrgsbase)
             "rdfsbase" if ops.len() == 1 => self.emit_asm_fsgsbase(&ops[0], 0),
             "rdgsbase" if ops.len() == 1 => self.emit_asm_fsgsbase(&ops[0], 1),
@@ -12106,6 +12123,7 @@ impl Codegen {
             "verw" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 5),
             // 描述符表: str (0F 00 /1) 与 sgdt/sidt/lgdt/lidt (0F 01 /0-/3)
             "str" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 1),
+            "sldt" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 0),
             "sgdt" if ops.len() == 1 => self.emit_asm_gdt(&ops[0], 0),
             "sidt" if ops.len() == 1 => self.emit_asm_gdt(&ops[0], 1),
             "lgdt" if ops.len() == 1 => self.emit_asm_gdt(&ops[0], 2),
@@ -12140,9 +12158,30 @@ impl Codegen {
             // PKRU: rdpkru 0F 01 EE, wrpkru 0F 01 EF
             "rdpkru" => self.emit(&[0x0F, 0x01, 0xEE]),
             "wrpkru" => self.emit(&[0x0F, 0x01, 0xEF]),
+            // rdrand: F3 0F C7 /6 (reg); rdseed: F3 0F C7 /7 (reg)
+            "rdrand" if ops.len() == 1 => {
+                if let AsmOperand::Reg(d, _) = &ops[0] {
+                    self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7)]);
+                } else {
+                    eprintln!("warning: rdrand needs register operand, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "rdseed" if ops.len() == 1 => {
+                if let AsmOperand::Reg(d, _) = &ops[0] {
+                    self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7) | (1 << 3)]);
+                } else {
+                    eprintln!("warning: rdseed needs register operand, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
             "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
             "invlpga" => self.emit(&[0x0F, 0x01, 0xDF]),
             "swapgs" => self.emit(&[0x0F, 0x01, 0xF8]),
+            "monitor" => self.emit(&[0x0F, 0x01, 0xC8]),
+            "mwait" => self.emit(&[0x0F, 0x01, 0xC9]),
+            "monitorx" => self.emit(&[0x0F, 0x01, 0xFA]),
+            "mwaitx" => self.emit(&[0x0F, 0x01, 0xFB]),
             "wbinvd" => self.emit(&[0x0F, 0x09]),
             "invd" => self.emit(&[0x0F, 0x08]),
             "cpuid" => self.emit(&[0x0F, 0xA2]),
@@ -12181,13 +12220,15 @@ impl Codegen {
             "endbr64" => self.emit(&[0xF3, 0x0F, 0x1E, 0xFA]),
             "endbr32" => self.emit(&[0xF3, 0x0F, 0x1E, 0xFB]),
             // fxsave/fxrstor = 0F AE /0 /1, ldmxcsr/stmxcsr = 0F AE /2 /3
-            "fxsave" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 0, true),
-            "fxrstor" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 1, true),
-            "ldmxcsr" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 2, true),
-            "stmxcsr" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 3, true),
+            "fxsave" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 0, true, false),
+            "fxrstor" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 1, true, false),
+            "fxsaveq" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 0, true, true),
+            "fxrstorq" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 1, true, true),
+            "ldmxcsr" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 2, true, false),
+            "stmxcsr" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 3, true, false),
             // fnsave/fnstenv = D9/DD /6 (无 0F 前缀)
-            "fnsave" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xDD, 6, false),
-            "fnstenv" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xD9, 6, false),
+            "fnsave" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xDD, 6, false, false),
+            "fnstenv" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xD9, 6, false, false),
             "lfence" => self.emit(&[0x0F, 0xAE, 0xE8]),
             "sfence" => self.emit(&[0x0F, 0xAE, 0xF8]),
             "mfence" => self.emit(&[0x0F, 0xAE, 0xF0]),
@@ -12335,8 +12376,14 @@ impl Codegen {
             // 非 temporal store / 虚拟化
             "movnti" | "movntil" if ops.len() == 2 => self.emit_asm_movnt(&ops[0], &ops[1], 32),
             "movntiq" if ops.len() == 2 => self.emit_asm_movnt(&ops[0], &ops[1], 64),
+            // invpcid: 66 0F 38 82 /r (reg, m128)
+            "invpcid" if ops.len() == 2 => self.emit_asm_invpcid(&ops[0], &ops[1]),
             "vmcall" => self.emit(&[0x0F, 0x01, 0xC1]),
             "vmmcall" => self.emit(&[0x0F, 0x01, 0xD9]),
+            // SVM: clgi (0F 01 DD), stgi (0F 01 DC), vmsave (0F 01 DB)
+            "clgi" => self.emit(&[0x0F, 0x01, 0xDD]),
+            "stgi" => self.emit(&[0x0F, 0x01, 0xDC]),
+            "vmsave" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x06),
 
             // 跳转
             "jmp" if ops.len() == 1 => self.emit_asm_jmp(&ops[0]),
@@ -12405,6 +12452,8 @@ impl Codegen {
             // 特殊寄存器
             "rdmsr" => self.emit(&[0x0F, 0x32]),
             "wrmsr" => self.emit(&[0x0F, 0x30]),
+            "xgetbv" => self.emit(&[0x0F, 0x01, 0xD0]),
+            "xsetbv" => self.emit(&[0x0F, 0x01, 0xD1]),
             "movq" if ops.len() == 2 && mnemonic == "movq" => {
                 self.emit_asm_mov(&ops[0], &ops[1], 64)
             }
@@ -13982,7 +14031,9 @@ impl Codegen {
             // 未识别指令: 警告 + nop 占位
             _ => {
                 eprintln!(
-                    "warning: unsupported inline asm instruction '{}', emitted as nop",
+                    "{}:{}: warning: unsupported inline asm instruction '{}', emitted as nop",
+                    self.source_name,
+                    self.current_asm_line,
                     mnemonic
                 );
                 self.emit(&[0x90]);
@@ -15288,14 +15339,14 @@ impl Codegen {
         }
     }
 
-    /// clflush (0F AE /7) / clflushopt (66 0F AE /7), 仅内存操作数
-    fn emit_asm_clflush(&mut self, op: &AsmOperand, opt: bool) {
+    /// clflush / clwb / clflushopt: 0F AE /reg (clflushopt/clwb 带 66 前缀)
+    fn emit_asm_clflush(&mut self, op: &AsmOperand, opt: bool, reg: u8) {
         let emit_mem = |c: &mut Self, disp: i32, base: u8, index: Option<u8>, scale: u8| {
             if opt {
                 c.emit(&[0x66]);
             }
             c.emit(&[Self::rex(false, 0, index.unwrap_or(0), base), 0x0F, 0xAE]);
-            c.emit_asm_modrm_mem_only(7, disp, base, index, scale);
+            c.emit_asm_modrm_mem_only(reg, disp, base, index, scale);
         };
         match op {
             AsmOperand::Mem {
@@ -15479,6 +15530,49 @@ impl Codegen {
     }
 
     /// 0F 01 /m 系统指令（invlpg 等）
+    /// invpcid: 66 0F 38 82 /r (reg, m128)
+    /// AT&T: invpcid %reg, mem → src 是寄存器, dst 是内存
+    fn emit_asm_invpcid(&mut self, src: &AsmOperand, dst: &AsmOperand) {
+        if let AsmOperand::Reg(d, _) = src {
+            match dst {
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                } => {
+                    self.emit(&[
+                        Self::rex(false, *d, index.unwrap_or(0), *base),
+                        0x66,
+                        0x0F,
+                        0x38,
+                        0x82,
+                    ]);
+                    self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                }
+                AsmOperand::SegMem {
+                    seg,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                } => {
+                    let (_code, pfx) = Self::seg_meta(*seg);
+                    self.emit(&[pfx, Self::rex(false, *d, index.unwrap_or(0), *base)]);
+                    self.emit(&[0x66, 0x0F, 0x38, 0x82]);
+                    self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                }
+                _ => {
+                    eprintln!("warning: invpcid needs memory operand, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+        } else {
+            eprintln!("warning: invpcid needs register operand, emitted as nop");
+            self.emit(&[0x90]);
+        }
+    }
+
     fn emit_asm_sys_mem(&mut self, op: &AsmOperand, grp: u8, ext: u8) {
         if let AsmOperand::Mem {
             disp,
@@ -15556,7 +15650,7 @@ impl Codegen {
     /// opcode: 单字节操作码 (如 0xAE, 0xDD, 0xD9)
     /// ext: modrm.reg 字段
     /// has_0f: 是否带 0F 前缀
-    fn emit_asm_fpu_load(&mut self, op: &AsmOperand, opcode: u8, ext: u8, has_0f: bool) {
+    fn emit_asm_fpu_load(&mut self, op: &AsmOperand, opcode: u8, ext: u8, has_0f: bool, rex_w: bool) {
         if let AsmOperand::Mem {
             disp,
             base,
@@ -15564,7 +15658,7 @@ impl Codegen {
             scale,
         } = op
         {
-            self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base)]);
+            self.emit(&[Self::rex(rex_w, 0, index.unwrap_or(0), *base)]);
             if has_0f {
                 self.emit(&[0x0F]);
             }

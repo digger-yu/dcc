@@ -2105,6 +2105,21 @@ fn asm_kernel_extra_compiles_without_nop_fallback() {
     );
 }
 
+/// mini-asm 内核扩展指令：orb/orw/cmova/clwb/invpcid/rdrand/rdseed/
+/// fwait/fxsaveq/fxrstorq/xgetbv/xsetbv/monitor/mwait/monitorx/mwaitx/
+/// clgi/stgi/vmsave/sldt/repe 前缀修复
+#[test]
+fn asm_kernel_ext_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_kernel_ext.c");
+    let (output, _obj) = run_object_test("asm-kernel-ext", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// mini-asm 补全 (高): 段寄存器 / 系统指令 / 内核启动 / 虚拟化指令
 #[test]
 fn asm_paravirt_boot_compiles_without_nop_fallback() {
