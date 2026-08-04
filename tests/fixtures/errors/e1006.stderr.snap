@@ -1,2 +1,7 @@
+warning[W1000]: implicit declaration of 'main' (assumed int)
+  --> <file>:1:9
+   1 |int g = main();
+     |         ^^^^
+  hint: add a declaration before use
 error[E1006]: global initializer for 'g' is not a supported constant expression
   --> <file>:1:5

@@ -71,4 +71,4 @@ for a in "$@"; do
         *) out+=("$a") ;;
     esac
 done
-exec "$DCC_BIN" "${out[@]}"
+exec "$DCC_BIN" "${out[@]}" -Wno-implicit-declaration

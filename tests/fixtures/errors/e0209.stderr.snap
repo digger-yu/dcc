@@ -1,4 +1,2 @@
 error[E0209]: cannot read forced include /tmp/<tmpdir><secret.h>: Permission denied (os error 13)
   --> /tmp/<tmpdir><secret.h>:1:1
-   1 |int main(void) { return 0; }
-     | ^

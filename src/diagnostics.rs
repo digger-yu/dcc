@@ -285,8 +285,11 @@ fn source_caret_block(d: &Diagnostic) -> String {
         src,
         width = gutter_w
     ));
-    let col_offset = (d.span.col as usize).saturating_sub(1);
-    let caret = "^".repeat(d.span.len.max(1) as usize);
+    // 列号钳制: 防止宏展开产生的列号超出源码行长度
+    let src_len = src.len();
+    let col_offset = (d.span.col as usize).saturating_sub(1).min(src_len);
+    let caret_len = (d.span.len.max(1) as usize).min(src_len.saturating_sub(col_offset)).max(1);
+    let caret = "^".repeat(caret_len);
     out.push_str(&format!(
         "{:>width$} | {}\n",
         "",
@@ -653,26 +656,70 @@ impl Diagnostic {
     }
 }
 
+/// 对诊断去重: (相同 code + file + line + col + len + msg) 只保留第一条
+fn dedup_diags(diags: &[Diagnostic]) -> Vec<Diagnostic> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(diags.len());
+    for d in diags {
+        let key = (d.code, d.span.file.as_str(), d.span.line, d.span.col, d.span.len, d.msg.as_str());
+        if seen.insert(key) {
+            out.push(d.clone());
+        }
+    }
+    out
+}
+
+/// 错误风暴上限: 单次编译最多输出 50 条诊断, 超出时抑制并提示
+const MAX_DIAGS: usize = 50;
+
 /// 把一组 diagnostic 按 cfg 输出到 stderr
 pub fn print_all(diags: &[Diagnostic], cfg: &DiagnosticsConfig) {
+    let filtered = dedup_diags(diags);
     if cfg.format == FormatStyle::Sarif {
-        eprintln!("{}", render_sarif(diags).trim_end());
+        eprintln!("{}", render_sarif(&filtered).trim_end());
         return;
     }
-    for d in diags {
+    for (i, d) in filtered.iter().enumerate() {
+        if i >= MAX_DIAGS {
+            eprintln!("error: too many diagnostics, suppressing {} more", filtered.len() - i);
+            break;
+        }
         d.print_with(cfg);
     }
 }
 
 /// 填充诊断信息的 source_line 字段
-pub fn enrich_diags(diags: &mut [Diagnostic], src: &[u8]) {
-    let text = std::str::from_utf8(src).unwrap_or("");
-    let lines: Vec<&str> = text.lines().collect();
+///
+/// 当 span.file 与主文件不同时, 尝试从磁盘读取对应源文件
+/// 提取该行的源码文本。`base_dir` 用于解析相对路径。
+pub fn enrich_diags(diags: &mut [Diagnostic], src: &[u8], file_name: &str, base_dir: Option<&std::path::Path>) {
+    let main_text = std::str::from_utf8(src).unwrap_or("");
+    let main_lines: Vec<&str> = main_text.lines().collect();
     for d in diags.iter_mut() {
-        if d.source_line.is_none() && d.span.line > 0 {
+        if d.source_line.is_some() || d.span.line == 0 {
+            continue;
+        }
+        if d.span.file == file_name {
             let idx = (d.span.line as usize).saturating_sub(1);
-            if let Some(line) = lines.get(idx) {
+            if let Some(line) = main_lines.get(idx) {
                 d.source_line = Some(line.to_string());
+            }
+        } else {
+            // 尝试从磁盘读取源文件, 优先 base_dir + 相对路径
+            let tried_paths = [
+                base_dir.map(|b| b.join(&d.span.file)),
+                Some(std::path::PathBuf::from(&d.span.file)),
+            ];
+            for p in tried_paths.into_iter().flatten() {
+                if let Ok(content) = std::fs::read_to_string(&p) {
+                    if let Some(line) = content.lines()
+                        .nth((d.span.line as usize).saturating_sub(1))
+                    {
+                        d.source_line = Some(line.to_string());
+                    }
+                    break;
+                }
             }
         }
     }

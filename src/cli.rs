@@ -93,6 +93,8 @@ pub struct Config {
     pub warn_int_conversion: bool,
     /// -Wint-truncation: 整数截断警告
     pub warn_int_truncation: bool,
+    /// -Wimplicit-declaration: 未声明标识符警告
+    pub warn_implicit_decl: bool,
     /// PGO / GCOV / AutoFDO / LBR / MemProf / Offloading 统一配置
     pub profile: crate::profile::ProfileConfig,
     /// -fdiagnostics-color=always|never|auto
@@ -333,6 +335,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut bounds_check = false;
     let mut warn_int_conversion = false;
     let mut warn_int_truncation = false;
+    let mut warn_implicit_decl = true;
     let mut profile = crate::profile::ProfileConfig::default();
     let mut offload = crate::profile::offload::OffloadConfig::default();
     let mut diag_color = crate::diagnostics::ColorPolicy::Auto;
@@ -568,6 +571,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-Wno-int-conversion" => warn_int_conversion = false,
             "-Wint-truncation" => warn_int_truncation = true,
             "-Wno-int-truncation" => warn_int_truncation = false,
+            "-Wimplicit-declaration" => warn_implicit_decl = true,
+            "-Wno-implicit-declaration" => warn_implicit_decl = false,
             // ====== PGO / GCOV / AutoFDO / LBR / MemProf ======
             "-fprofile-generate" => {
                 profile.pgo_generate = Some(std::path::PathBuf::from("."));
@@ -1071,6 +1076,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             bounds_check,
             warn_int_conversion,
             warn_int_truncation,
+            warn_implicit_decl,
             diag_color,
             diag_format,
             diag_show_template_tree,
@@ -1111,6 +1117,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             bounds_check,
             warn_int_conversion,
             warn_int_truncation,
+            warn_implicit_decl,
             diag_color,
             diag_format,
             diag_show_template_tree,

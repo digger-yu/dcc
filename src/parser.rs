@@ -75,6 +75,8 @@ pub struct ParseOptions {
     /// typeof_unqual 等 C23 关键字生效; 非 C23 模式保持普通标识符语义
     /// (兼容 `typedef _Bool bool;` 与 gnu11 内核代码)
     pub is_c23: bool,
+    /// `-Wimplicit-declaration`: 未声明标识符警告
+    pub warn_implicit_decl: bool,
 }
 
 impl ParsedAttrs {
@@ -4094,6 +4096,18 @@ impl<'a> Parser<'a> {
                 if let Some((val, cty)) = self.enum_consts.get(&t).cloned() {
                     self.advance();
                     return Some(Expr::Int { v: val as i128, span: sp, ty: cty });
+                }
+                // 未声明标识符警告 (排除 __builtin_ 前缀的特殊标识符)
+                if self.opts.warn_implicit_decl
+                    && !self.locals.contains_key(&t)
+                    && !self.globals.contains_key(&t)
+                    && !self.typedefs.contains_key(&t)
+                    && !self.enum_consts.contains_key(&t)
+                    && !t.starts_with("__builtin_")
+                {
+                    self.warn_here("W1000",
+                        format!("implicit declaration of '{}' (assumed int)", t),
+                        Some("add a declaration before use"));
                 }
                 let id = Ident { name: t, span: sp.clone() }; self.advance();
                 let id_ty = self.lookup_ident_type(&id.name);

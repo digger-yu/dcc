@@ -12,6 +12,7 @@ use crate::diagnostics::{
 };
 use crate::target::Target;
 use crate::preproc;
+use crate::preproc::LineSpan;
 use crate::parser;
 use crate::codegen;
 use crate::ir;
@@ -213,11 +214,12 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
+    let line_map = pp_out.line_map;
     let pack_history = pp_out.pack_history;
     let weak_symbols = pp_out.weak_symbols;
     let include_deps = pp_out.deps;
     let pp_macros = pp_out.macros;
-    enrich_diags(&mut pp_diags, src);
+    enrich_diags(&mut pp_diags, src, &file_name, input.parent());
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
     }
@@ -259,21 +261,26 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let (mut prog, mut diags) = parser::parse_with_opts(
         preprocessed.as_bytes(),
         &file_name,
-        parser::ParseOptions { permissive: cfg.permissive, pack_history: pack_history.clone(), weak_symbols: weak_symbols.clone(), warn_int_truncation: cfg.warn_int_truncation, warn_int_conversion: cfg.warn_int_conversion, is_c23: matches!(cfg.std, crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23) },
+        parser::ParseOptions { permissive: cfg.permissive, pack_history: pack_history.clone(), weak_symbols: weak_symbols.clone(), warn_int_truncation: cfg.warn_int_truncation, warn_int_conversion: cfg.warn_int_conversion, is_c23: matches!(cfg.std, crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23), warn_implicit_decl: cfg.warn_implicit_decl },
     );
     drop(preprocessed);
     drop(pack_history);
     drop(weak_symbols);
+    // 把诊断的 span 从预处理文本行号映射回源文件位置
+    remap_diags(&mut diags, &line_map);
     let dcfg = diag_cfg(&cfg);
-    enrich_diags(&mut diags, src);
-    // 打印 parser 警告(注意: parser 错误会在下面 return Err,
-    // 由 main.rs 统一输出,避免重复)
-    for d in &diags {
-        if matches!(d.sev, Severity::Warning) {
-            d.print_with(&dcfg);
+    enrich_diags(&mut diags, src, &file_name, input.parent());
+    // 警告由 main.rs 统一输出 (print_all 含去重), 避免重复;
+    // 但无错误时需立即输出, 否则 warning-only 场景会丢失
+    let has_errors = diags.iter().any(|d| matches!(d.sev, Severity::Error));
+    if !has_errors {
+        for d in &diags {
+            if matches!(d.sev, Severity::Warning) {
+                d.print_with(&dcfg);
+            }
         }
     }
-    if diags.iter().any(|d| matches!(d.sev, Severity::Error)) { return Err(diags); }
+    if has_errors { return Err(diags); }
 
     let wlist: Vec<Diagnostic> = format_check::check_program(&prog);
     for w in &wlist {
@@ -371,21 +378,31 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if !target.sse {
         // 精确检测 IR 中是否真的使用浮点类型/字面量, 避免把含
         // double_xxx 标识符(如内核 double_rq_lock)的 Debug 串误判为浮点
-        let uses_sse = module.functions.iter().any(|f| {
-            ir_type_uses_float(&f.return_type)
-                || f.params.iter().any(ir_type_uses_float)
-                || f.body.iter().any(ir_stmt_uses_float)
-        }) || module.globals.iter().any(|g| {
-            ir_type_uses_float(&g.ty)
-                || g.initializer.as_ref().is_some_and(ir_expr_uses_float)
-        });
-        if uses_sse {
+        // 找到第一个使用浮点的函数或全局, 用其精确 span 报错
+        let sse_span = module.functions.iter()
+            .find(|f| {
+                ir_type_uses_float(&f.return_type)
+                    || f.params.iter().any(ir_type_uses_float)
+                    || f.body.iter().any(ir_stmt_uses_float)
+            })
+            .map(|f| f.span.clone())
+            .or_else(|| {
+                module.globals.iter()
+                    .find(|g| {
+                        ir_type_uses_float(&g.ty)
+                            || g.initializer.as_ref().is_some_and(ir_expr_uses_float)
+                    })
+                    .map(|g| g.span.clone())
+            });
+        if let Some(mut span) = sse_span {
+            // 将 span 从预处理文本行号映射回源文件
+            remap_span(&mut span, &line_map);
             let mut diags = vec![Diagnostic::err(
                 "E0300",
                 "floating-point code requires SSE on the SysV AMD64 target; remove -mno-sse",
-                crate::diagnostics::Span::point(&file_name, 1, 1),
+                span,
             )];
-            enrich_diags(&mut diags, src);
+            enrich_diags(&mut diags, src, &file_name, input.parent());
             return Err(diags);
         }
     }
@@ -459,7 +476,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
-    enrich_diags(&mut pp_diags, &src);
+    enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
     }
@@ -531,7 +548,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
         );
         let mut pp_diags = pp_out.diags;
-        enrich_diags(&mut pp_diags, &src);
+        enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
         if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
             return Err(pp_diags);
         }
@@ -559,7 +576,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         &src, &file_name, &cpp_includes, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
     );
     let mut pp_diags = pp_out.diags;
-    enrich_diags(&mut pp_diags, &src);
+    enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
     }
@@ -864,4 +881,27 @@ fn link_with_host_cc(
             crate::diagnostics::Span::point(&output.display().to_string(), 0, 0))]);
     }
     Ok(())
+}
+
+/// 把诊断的 span 从预处理输出行号映射回源文件 (file, line).
+/// 使用预处理阶段记录的 LineSpan 区间进行转换。
+fn remap_diags(diags: &mut [Diagnostic], line_map: &[LineSpan]) {
+    for d in diags.iter_mut() {
+        if d.span.line > 0 {
+            remap_span(&mut d.span, line_map);
+        }
+    }
+}
+
+/// 将单个 span 从预处理文本行号映射回源文件位置
+fn remap_span(span: &mut crate::diagnostics::Span, line_map: &[LineSpan]) {
+    let line = span.line;
+    // 二分查找最后一个 out_start <= line 的区间
+    let idx = line_map.partition_point(|s| s.out_start <= line);
+    if let Some(ls) = idx.checked_sub(1).and_then(|i| line_map.get(i)) {
+        if line < ls.out_start + ls.count {
+            span.file = ls.file.clone();
+            span.line = ls.src_start + (line - ls.out_start);
+        }
+    }
 }

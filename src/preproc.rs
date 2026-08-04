@@ -61,12 +61,16 @@ pub struct Preprocessor {
     cond_stack: Vec<CondState>,
     /// 输出缓冲
     out: String,
+    /// 输出行数计数器 (用于 LineMap 区间记录)
+    out_lines: u32,
     /// 当前文件名 (用于诊断 + __FILE__)
     file: String,
     /// 搜索路径基准目录
     base_dir: PathBuf,
     /// 当前行号 (用于 __LINE__)
     cur_line: u32,
+    /// 行号映射区间: 预处理输出行号 → 源文件 (file, src_line)
+    line_map: Vec<LineSpan>,
     /// 编译日期/时间 (用于 __DATE__ / __TIME__)
     compile_date: String,
     compile_time: String,
@@ -138,6 +142,19 @@ pub(crate) struct MacroDef {
     variadic: bool,
 }
 
+/// 预处理输出行号 → 源文件行号的映射区间
+#[derive(Debug, Clone)]
+pub struct LineSpan {
+    /// 预处理输出中的起始行号 (1-based)
+    pub out_start: u32,
+    /// 源文件路径
+    pub file: String,
+    /// 源文件中的起始行号 (1-based)
+    pub src_start: u32,
+    /// 连续行数
+    pub count: u32,
+}
+
 /// 预处理器输出: 包含文本与全部对 codegen 有影响的元数据
 #[derive(Default)]
 pub struct PreprocessOutput {
@@ -155,6 +172,8 @@ pub struct PreprocessOutput {
     pub charset: String,
     /// 预处理结束时所有可见的宏定义 (供 -dM 输出来源)
     pub macros: Vec<(String, Option<Vec<String>>, bool, String)>,
+    /// 行号映射区间: 预处理输出行号 → 源文件 (file, src_line)
+    pub line_map: Vec<LineSpan>,
 }
 
 /// 预编译头 (PCH) 选项。
@@ -293,10 +312,10 @@ impl PchBundle {
         }
         if !self.output.is_empty() {
             // 用 /* dcc PCH: <source> */ 标记注入点, 便于诊断
-            pp.out.push_str(&format!("/* dcc PCH: {} */\n", self.source));
-            pp.out.push_str(&self.output);
+            pp.push_out(&format!("/* dcc PCH: {} */\n", self.source));
+            pp.push_out(&self.output);
             if !pp.out.ends_with('\n') {
-                pp.out.push('\n');
+                pp.push_out("\n");
             }
         }
     }
@@ -389,6 +408,8 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         diags: vec![],
         cond_stack: vec![],
         out: String::with_capacity(text.len()),
+        out_lines: 0,
+        line_map: Vec::new(),
         file: file.to_string(),
         base_dir: base,
         cur_line: 0,
@@ -779,6 +800,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         macros: pp.macros.iter()
             .map(|(k, v)| (k.clone(), v.params.clone(), v.variadic, v.body.clone()))
             .collect(),
+        line_map: pp.line_map.clone(),
     }
 }
 
@@ -893,6 +915,12 @@ impl Preprocessor {
         (date.to_string(), time.to_string())
     }
 
+    /// 向输出写入文本并同步更新 out_lines 计数器
+    fn push_out(&mut self, s: &str) {
+        self.out_lines += s.bytes().filter(|&b| b == b'\n').count() as u32;
+        self.out.push_str(s);
+    }
+
     fn process_text(&mut self, text: &str, file: &str) {
         let saved_file = self.file.clone();
         let saved_in_comment = self.in_comment;
@@ -960,30 +988,31 @@ impl Preprocessor {
     /// 展开结果逐行写出; 空行/注释行也输出, 续接覆盖的物理行补空行,
     /// 保证输出行号与输入物理行号一一对应 (SourceLoc 对齐)。
     fn flush_active_source(&mut self, src: &mut String, spans: &mut Vec<(u32, u32)>) {
+        let out_start = self.out_lines + 1;
         let phys_lines: Vec<u32> = spans.iter().map(|&(s, _)| s).collect();
         let expanded = self.expand_macros(src, &phys_lines);
         let lines: Vec<&str> = expanded.split('\n').collect();
         for (i, &(phys_start, phys_end)) in spans.iter().enumerate() {
             let line = lines.get(i).copied().unwrap_or("");
             if !line.trim().is_empty() {
-                self.out.push_str(line);
+                self.push_out(line);
                 if !line.ends_with('\n') {
-                    self.out.push('\n');
+                    self.push_out("\n");
                 }
             } else {
                 // 空行/纯注释行: 保留行号
-                self.out.push('\n');
+                self.push_out("\n");
             }
             // 逻辑行覆盖多个物理行时补空行, 保持行数守恒
             for _ in phys_start..phys_end {
-                self.out.push('\n');
+                self.push_out("\n");
             }
         }
         // 兜底: 展开结果行数多于输入行数时 (理论不发生) 写全
         for line in lines.iter().skip(spans.len()) {
             if !line.is_empty() {
-                self.out.push_str(line);
-                self.out.push('\n');
+                self.push_out(line);
+                self.push_out("\n");
             }
         }
         // 把展开阶段累积的 _Pragma 字符串批量应用
@@ -994,6 +1023,16 @@ impl Preprocessor {
         for (p, line_no) in pending {
             self.apply_pragma_string(&p, line_no);
         }
+        // 记录行号映射区间
+        let actual_count = self.out_lines - out_start + 1;
+        if actual_count > 0 {
+            self.line_map.push(LineSpan {
+                out_start,
+                file: self.file.clone(),
+                src_start: spans[0].0,
+                count: actual_count,
+            });
+        }
         src.clear();
         spans.clear();
     }
@@ -1001,9 +1040,17 @@ impl Preprocessor {
     /// 向输出写入空行, 使输出行号与输入物理行号保持一致 (SourceLoc 对齐)。
     /// 逻辑行覆盖 [start, end] 的物理行时, 每个物理行占一行。
     fn preserve_lines(&mut self, start: u32, end: u32) {
+        let out_start = self.out_lines + 1;
+        let count = end - start + 1;
         for _ in start..=end {
-            self.out.push('\n');
+            self.push_out("\n");
         }
+        self.line_map.push(LineSpan {
+            out_start,
+            file: self.file.clone(),
+            src_start: start,
+            count,
+        });
     }
 
     /// 构造一条带当前源行文本的诊断 (E 系列)。
@@ -1568,7 +1615,7 @@ impl Preprocessor {
         self.pragma_once.insert(key.clone());
         // 内置头也计入依赖闭包 (缓存校验用; 伪路径, cache_deps_fresh 跳过实读)
         self.dep_hashes.push((key.clone(), Self::hash_content(X86INTRIN_H)));
-        self.out.push_str(&format!("/* #include <{}> (dcc builtin) */\n", name));
+        self.push_out(&format!("/* #include <{}> (dcc builtin) */\n", name));
         self.process_text(text, &key);
         true
     }
@@ -1657,7 +1704,7 @@ impl Preprocessor {
                             // 依赖新鲜度校验: 任一依赖文件变更即 miss (重处理)
                             if Self::cache_deps_fresh(&cached_deps) {
                                 // 缓存命中: 直接使用缓存的预处理输出和宏
-                                self.out.push_str(&format!("/* #include \"{}\" (cached) */\n", path));
+                                self.push_out(&format!("/* #include \"{}\" (cached) */\n", path));
                                 self.deps.push(full_path.to_string_lossy().into_owned());
                                 // 回填传递依赖: 父条目依赖闭包完整 + -MD 依赖更完整
                                 for (dpath, dhash) in &cached_deps {
@@ -1668,7 +1715,18 @@ impl Preprocessor {
                                         self.deps.push(dpath.clone());
                                     }
                                 }
-                                self.out.push_str(&cached_output);
+                                self.push_out(&cached_output);
+                                // 记录缓存回放的映射区间（近似：嵌套 include 映射到外层头文件）
+                                let cached_out_start = self.out_lines + 1;  // 跳过 include 注释行
+                                let cached_lines = cached_output.matches('\n').count() as u32;
+                                if cached_lines > 0 {
+                                    self.line_map.push(LineSpan {
+                                        out_start: cached_out_start,
+                                        file: path.to_string(),
+                                        src_start: 1,
+                                        count: cached_lines,
+                                    });
+                                }
                                 // 回放宏变更集: 先删后插。缓存条目记录了处理期间
                                 // #undef 的宏和被重新定义/新增的宏; 只回放新增会
                                 // 丢失覆盖定义 (如 stddef.h 覆盖内置 NULL)
@@ -1688,7 +1746,7 @@ impl Preprocessor {
                 }
     
                 // 缓存未命中: 正常处理
-                self.out.push_str(&format!("/* #include \"{}\" */\n", path));
+                self.push_out(&format!("/* #include \"{}\" */\n", path));
                 let saved_base = self.base_dir.clone();
                 let saved_out_len = self.out.len();
                 // 记录当前宏表快照 (含值), 用于后续提取该头文件对宏表的
@@ -1939,8 +1997,8 @@ impl Preprocessor {
                         }
                         data.extend_from_slice(&suffix);
                         for (i, &b) in data.iter().enumerate() {
-                            if i > 0 { self.out.push_str(", "); }
-                            self.out.push_str(&b.to_string());
+                            if i > 0 { self.push_out(", "); }
+                            self.push_out(&b.to_string());
                         }
                     }
                     Err(_) => {
@@ -3895,16 +3953,11 @@ impl Preprocessor {
         }
 
         // 第二行: COUNTER_DELTA <n> — 本头文件处理期间的 __COUNTER__ 消耗量
-        let mut counter_delta = 0u32;
-        if let Some(line) = lines.next() {
-            if let Some(rest) = line.strip_prefix("COUNTER_DELTA\t") {
-                counter_delta = rest.trim().parse().unwrap_or(0);
-            } else {
-                return None;
-            }
-        } else {
-            return None;
-        }
+        let line = lines.next()?;
+        let counter_delta = match line.strip_prefix("COUNTER_DELTA\t") {
+            Some(rest) => rest.trim().parse().unwrap_or(0),
+            None => return None,
+        };
 
         // DEPS 段: <path>\t<hash_hex>
         let mut deps = Vec::new();

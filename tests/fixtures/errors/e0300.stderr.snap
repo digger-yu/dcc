@@ -1,4 +1,4 @@
 error[E0300]: floating-point code requires SSE on the SysV AMD64 target; remove -mno-sse
-  --> <file>:1:1
+  --> <file>:1:8
    1 |double main(void) { return 0.5; }
-     | ^
+     |        ^^^^
