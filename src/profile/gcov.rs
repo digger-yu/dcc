@@ -35,7 +35,11 @@ pub struct GcovConfig {
 
 impl Default for GcovConfig {
     fn default() -> Self {
-        Self { emit_notes: false, emit_data: false, counter_bits: 32 }
+        Self {
+            emit_notes: false,
+            emit_data: false,
+            counter_bits: 32,
+        }
     }
 }
 
@@ -63,7 +67,10 @@ pub struct GcovUnit {
 
 impl GcovUnit {
     pub fn new(source: impl Into<String>) -> Self {
-        Self { source: source.into(), functions: vec![] }
+        Self {
+            source: source.into(),
+            functions: vec![],
+        }
     }
 
     pub fn push_function(&mut self, f: GcovFunction) {
@@ -76,9 +83,9 @@ impl GcovUnit {
         let mut buf: Vec<u8> = Vec::new();
         // 1. magic + version + stamp
         buf.extend_from_slice(&GCOV_NOTE_MAGIC.to_le_bytes()); // 0x67636E6F
-        buf.extend_from_slice(&GCOV_VERSION.to_le_bytes());    // 0x34302A
-        buf.extend_from_slice(&0u32.to_le_bytes());            // stamp
-        // 2. 文件名 (长度 + UTF-8, 以 NUL 结尾, 但写入时不加 NUL, 与 GCC 一致)
+        buf.extend_from_slice(&GCOV_VERSION.to_le_bytes()); // 0x34302A
+        buf.extend_from_slice(&0u32.to_le_bytes()); // stamp
+                                                    // 2. 文件名 (长度 + UTF-8, 以 NUL 结尾, 但写入时不加 NUL, 与 GCC 一致)
         write_pascal_string(&mut buf, &self.source);
         // 3. functions
         buf.extend_from_slice(&(self.functions.len() as u32).to_le_bytes());
@@ -99,25 +106,19 @@ impl GcovUnit {
 
     /// 写 .gcda 数据文件 (runtime)。当前写所有 block 计数器为 0,
     /// 调用方在 counter 数组填充后, 需用 `write_data_with_counters` 覆写。
-    pub fn write_data_with_counters(
-        &self,
-        out: &Path,
-        counters: &[u64],
-    ) -> io::Result<usize> {
+    pub fn write_data_with_counters(&self, out: &Path, counters: &[u64]) -> io::Result<usize> {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&GCOV_DATA_MAGIC.to_le_bytes()); // 0x67636461
         buf.extend_from_slice(&GCOV_VERSION.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());            // stamp
-        // run count + sums (略, 简化)
-        buf.extend_from_slice(&1u32.to_le_bytes());            // runs
-        buf.extend_from_slice(&0u32.to_le_bytes());            // sum
+        buf.extend_from_slice(&0u32.to_le_bytes()); // stamp
+                                                    // run count + sums (略, 简化)
+        buf.extend_from_slice(&1u32.to_le_bytes()); // runs
+        buf.extend_from_slice(&0u32.to_le_bytes()); // sum
         write_pascal_string(&mut buf, &self.source);
         for (idx, f) in self.functions.iter().enumerate() {
             let start = sum_blocks_before(self, idx);
             let end = start + f.blocks.len();
-            write_function_data(
-                &mut buf, f, idx as u32 + 1, &counters[start..end],
-            );
+            write_function_data(&mut buf, f, idx as u32 + 1, &counters[start..end]);
         }
         buf.extend_from_slice(&0u32.to_le_bytes());
 
@@ -137,7 +138,7 @@ fn sum_blocks_before(u: &GcovUnit, idx: usize) -> usize {
 
 const GCOV_NOTE_MAGIC: u32 = 0x6763_6E6F; // "gcno"
 const GCOV_DATA_MAGIC: u32 = 0x6763_6461; // "gcda"
-const GCOV_VERSION:   u32 = 0x34_30_2A;    // "40*"
+const GCOV_VERSION: u32 = 0x34_30_2A; // "40*"
 
 /// 简化版 .gcno record 编码 (按 GCC gcov-io.h):
 ///   u32 ident
@@ -170,12 +171,7 @@ fn write_function_record(buf: &mut Vec<u8>, f: &GcovFunction, ident: u32) {
     buf.extend_from_slice(&f.lineno.to_le_bytes());
 }
 
-fn write_function_data(
-    buf: &mut Vec<u8>,
-    f: &GcovFunction,
-    ident: u32,
-    counters: &[u64],
-) {
+fn write_function_data(buf: &mut Vec<u8>, f: &GcovFunction, ident: u32, counters: &[u64]) {
     buf.extend_from_slice(&ident.to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes()); // lineno checksum
     buf.extend_from_slice(&cfg_checksum(f).to_le_bytes());
@@ -235,8 +231,14 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)] },
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                },
             ],
         });
         let tmp = std::env::temp_dir().join("dcc-gcov-test.gcno");
@@ -258,8 +260,14 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)] },
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                },
             ],
         });
         let tmp = std::env::temp_dir().join("dcc-gcov-data-test.gcda");
@@ -280,8 +288,14 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)] },
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                },
             ],
         };
         // 0->1, 1 无 succ: chksum = (1+1) = 2
@@ -298,8 +312,14 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)] },  // 0->1
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                }, // 0->1
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                },
             ],
         };
         let f_b = GcovFunction {
@@ -308,9 +328,18 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(2, 0)] },  // 0->2 (与 f_a 同样 1 个 succ, 但 dst 不同)
-                GcovBlock { flags: 0, succs: vec![] },
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(2, 0)],
+                }, // 0->2 (与 f_a 同样 1 个 succ, 但 dst 不同)
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                },
             ],
         };
         // f_a: 0->1 → (1+1) = 2
@@ -330,9 +359,18 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)] },  // 0->1 (entry)
-                GcovBlock { flags: 0, succs: vec![(0, 0), (2, 0)] },  // 1->0 + 1->2
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                }, // 0->1 (entry)
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(0, 0), (2, 0)],
+                }, // 1->0 + 1->2
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                },
             ],
         };
         // succs:

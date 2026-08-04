@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use super::object::{FlatSection, InputBundle};
 use super::resolve::ResolvedSymbol;
 use crate::codegen::elf::{
-    SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHF_TLS, SHT_NOBITS, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA,
-    STB_LOCAL, STT_NOTYPE, STT_SECTION,
+    SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_NOBITS, SHT_PROGBITS, SHT_RELA, SHT_STRTAB,
+    SHT_SYMTAB, STB_LOCAL, STT_NOTYPE, STT_SECTION,
 };
 
 /// 输出节类型：标准节按类合并，自定义节独立。
@@ -52,12 +52,12 @@ pub enum OutputSectionKind {
 pub struct OutputSection {
     pub kind: OutputSectionKind,
     pub name: String,
-    pub sh_name_off: u32,    // 在 .shstrtab 中的偏移
-    pub ty: u32,             // SHT_PROGBITS / SHT_NOBITS
-    pub flags: u32,          // SHF_* 标志位
+    pub sh_name_off: u32, // 在 .shstrtab 中的偏移
+    pub ty: u32,          // SHT_PROGBITS / SHT_NOBITS
+    pub flags: u32,       // SHF_* 标志位
     pub align: u64,
     pub data: Vec<u8>,
-    pub size: u64,           // 对 NOBITS 是虚拟大小
+    pub size: u64, // 对 NOBITS 是虚拟大小
     pub entsize: u64,
     /// 在输出 section header table 中的索引
     pub output_index: u32,
@@ -69,14 +69,14 @@ pub struct OutputSection {
     pub file_off: u64,
     /// 节中每个输入节的偏移表（用于重定位）
     pub input_offsets: Vec<u64>,
-    pub input_sections: Vec<u32>,   // 对应的输入节（FlatSection 索引）
+    pub input_sections: Vec<u32>, // 对应的输入节（FlatSection 索引）
 }
 
 /// 输出段（program header）描述。
 #[derive(Debug, Clone)]
 pub struct OutputSegment {
-    pub ty: u32,             // PT_LOAD / PT_DYNAMIC / PT_TLS / ...
-    pub flags: u32,          // PF_R / PF_W / PF_X
+    pub ty: u32,    // PT_LOAD / PT_DYNAMIC / PT_TLS / ...
+    pub flags: u32, // PF_R / PF_W / PF_X
     pub vaddr: u64,
     pub file_off: u64,
     pub filesz: u64,
@@ -99,7 +99,7 @@ pub struct OutputSymbol {
     /// 符号类型辅助字段：对于 STT_GNU_IFUNC 符号, kind = 10
     pub kind: u8,
     pub visibility: u8,
-    pub section: u16,        // 输出节索引
+    pub section: u16,          // 输出节索引
     pub shndx_if_section: u16, // STT_SECTION 的 shndx
 }
 
@@ -127,9 +127,9 @@ pub struct Layout {
 /// 输出重定位（应用于输出节，目标是合并后的符号）。
 #[derive(Debug, Clone)]
 pub struct OutputRela {
-    pub section: u32,        // 输出节索引
-    pub offset: u64,         // 输出节内偏移
-    pub sym: u32,            // 输出符号索引
+    pub section: u32, // 输出节索引
+    pub offset: u64,  // 输出节内偏移
+    pub sym: u32,     // 输出符号索引
     pub rel_type: u32,
     pub addend: i64,
     /// 内部标识 (for IFUNC / 调试), 不影响输出
@@ -138,7 +138,14 @@ pub struct OutputRela {
 
 impl OutputRela {
     pub fn new(section: u32, offset: u64, sym: u32, rel_type: u32, addend: i64) -> Self {
-        Self { section, offset, sym, rel_type, addend, _name: String::new() }
+        Self {
+            section,
+            offset,
+            sym,
+            rel_type,
+            addend,
+            _name: String::new(),
+        }
     }
 }
 
@@ -187,14 +194,24 @@ impl LayoutBuilder {
         for (i, sec) in bundle.sections.iter().enumerate() {
             let kind = classify_section(&sec.name);
             // 跳过 NULL 节、符号表与重定位节（链接后由链接器自己生成）
-            if sec.name.is_empty() || sec.name == ".symtab" || sec.name == ".strtab" ||
-               sec.name == ".shstrtab" || sec.name.starts_with(".rela") {
+            if sec.name.is_empty()
+                || sec.name == ".symtab"
+                || sec.name == ".strtab"
+                || sec.name == ".shstrtab"
+                || sec.name.starts_with(".rela")
+            {
                 continue;
             }
             // debug 节按需保留
-            if !self.keep_debug && (sec.name == ".debug_info" || sec.name == ".debug_abbrev" ||
-                sec.name == ".debug_line" || sec.name == ".debug_str" || sec.name == ".debug_aranges" ||
-                sec.name == ".debug_ranges" || sec.name.starts_with(".debug_")) {
+            if !self.keep_debug
+                && (sec.name == ".debug_info"
+                    || sec.name == ".debug_abbrev"
+                    || sec.name == ".debug_line"
+                    || sec.name == ".debug_str"
+                    || sec.name == ".debug_aranges"
+                    || sec.name == ".debug_ranges"
+                    || sec.name.starts_with(".debug_"))
+            {
                 continue;
             }
 
@@ -205,7 +222,18 @@ impl LayoutBuilder {
                     let name = output_name(k_for_creation.clone());
                     let flags = section_flags_for_kind(k_for_creation.clone());
                     let align = section_align_for_kind(k_for_creation.clone());
-                    let load_segment = if matches!(k_for_creation, OutputSectionKind::Text | OutputSectionKind::Rodata | OutputSectionKind::Init | OutputSectionKind::Fini | OutputSectionKind::Plt) { 0 } else { 1 };
+                    let load_segment = if matches!(
+                        k_for_creation,
+                        OutputSectionKind::Text
+                            | OutputSectionKind::Rodata
+                            | OutputSectionKind::Init
+                            | OutputSectionKind::Fini
+                            | OutputSectionKind::Plt
+                    ) {
+                        0
+                    } else {
+                        1
+                    };
                     sections.push(OutputSection {
                         kind: k,
                         name: name.to_string(),
@@ -230,27 +258,29 @@ impl LayoutBuilder {
             } else {
                 // 自定义节（每个独立）
                 let key = sec.name.clone();
-                let entry = custom_section_indices.entry(key.clone()).or_insert_with(|| {
-                    let new_idx = sections.len() as u32;
-                    sections.push(OutputSection {
-                        kind: OutputSectionKind::Named(key.clone()),
-                        name: key.clone(),
-                        sh_name_off: 0,
-                        ty: sec.ty,
-                        flags: sec.flags,
-                        align: sec.align,
-                        data: Vec::new(),
-                        size: 0,
-                        entsize: 0,
-                        output_index: new_idx,
-                        load_segment: if sec.flags & SHF_WRITE != 0 { 1 } else { 0 },
-                        vaddr: 0,
-                        file_off: 0,
-                        input_offsets: Vec::new(),
-                        input_sections: Vec::new(),
+                let entry = custom_section_indices
+                    .entry(key.clone())
+                    .or_insert_with(|| {
+                        let new_idx = sections.len() as u32;
+                        sections.push(OutputSection {
+                            kind: OutputSectionKind::Named(key.clone()),
+                            name: key.clone(),
+                            sh_name_off: 0,
+                            ty: sec.ty,
+                            flags: sec.flags,
+                            align: sec.align,
+                            data: Vec::new(),
+                            size: 0,
+                            entsize: 0,
+                            output_index: new_idx,
+                            load_segment: if sec.flags & SHF_WRITE != 0 { 1 } else { 0 },
+                            vaddr: 0,
+                            file_off: 0,
+                            input_offsets: Vec::new(),
+                            input_sections: Vec::new(),
+                        });
+                        new_idx
                     });
-                    new_idx
-                });
                 let out = &mut sections[*entry as usize];
                 out.input_sections.push(i as u32);
             }
@@ -282,7 +312,8 @@ impl LayoutBuilder {
         let segments = self.build_segments(&sections);
 
         // 入口 (使用 OutputSymbol.vaddr, 它已是 section.vaddr + value)
-        let entry = symbols.iter()
+        let entry = symbols
+            .iter()
             .find(|s| s.name == self.entry_name)
             .map(|s| s.vaddr)
             .unwrap_or_else(|| {
@@ -320,19 +351,32 @@ impl LayoutBuilder {
 
     fn fill_section_data(&self, sections: &mut [OutputSection], bundle: &InputBundle) {
         for sec in sections.iter_mut() {
-            if sec.input_sections.is_empty() { continue; }
-            if sec.ty == SHT_NOBITS { continue; }  // NOBITS 不需要数据
-            if matches!(sec.kind,
-                OutputSectionKind::Got | OutputSectionKind::GotPlt |
-                OutputSectionKind::Plt | OutputSectionKind::RelDyn | OutputSectionKind::RelPlt |
-                OutputSectionKind::Dynamic | OutputSectionKind::DynSym | OutputSectionKind::DynStr) {
+            if sec.input_sections.is_empty() {
+                continue;
+            }
+            if sec.ty == SHT_NOBITS {
+                continue;
+            } // NOBITS 不需要数据
+            if matches!(
+                sec.kind,
+                OutputSectionKind::Got
+                    | OutputSectionKind::GotPlt
+                    | OutputSectionKind::Plt
+                    | OutputSectionKind::RelDyn
+                    | OutputSectionKind::RelPlt
+                    | OutputSectionKind::Dynamic
+                    | OutputSectionKind::DynSym
+                    | OutputSectionKind::DynStr
+            ) {
                 // 动态节在 plt_got.rs 中填充
                 continue;
             }
             let mut cur: u64 = 0;
             for &in_idx in &sec.input_sections {
                 let in_idx = in_idx as usize;
-                if in_idx >= bundle.sections.len() { continue; }
+                if in_idx >= bundle.sections.len() {
+                    continue;
+                }
                 let in_sec = &bundle.sections[in_idx];
                 let a = in_sec.align.max(1);
                 let aligned = (cur + a - 1) & !(a - 1);
@@ -354,7 +398,9 @@ impl LayoutBuilder {
         // 1. 收集根符号 (entry + gc_sections_root)
         // 2. 从根出发做引用图 BFS, 标记 live 节
         // 3. 移除未标记的节
-        if !self.gc_sections { return; }
+        if !self.gc_sections {
+            return;
+        }
 
         use std::collections::{HashSet, VecDeque};
 
@@ -380,24 +426,48 @@ impl LayoutBuilder {
         // 2. 找 .init_array / .fini_array / .init / .fini / .text.* 等始终保留的节
         let mut live: HashSet<u32> = HashSet::new();
         for (i, sec) in sections.iter().enumerate() {
-            if matches!(sec.name.as_str(),
-                ".init" | ".fini" | ".init_array" | ".fini_array" |
-                ".text.startup" | ".text.exit" |
-                ".ctors" | ".dtors" |
-                ".note" | ".note.GNU-stack" | ".note.gnu.build-id" |
-                ".dynamic" | ".dynsym" | ".dynstr" |
-                ".got" | ".got.plt" | ".plt" | ".rela.dyn" | ".rela.plt" |
-                ".gnu.hash" | ".gnu.version" | ".gnu.version_d" | ".gnu.version_r" |
-                ".interp" | ".eh_frame" | ".eh_frame_hdr" | ".tdata" | ".tbss" |
-                ".data.rel.ro" | ".fini" | ".init" |
-                ".bss"
+            if matches!(
+                sec.name.as_str(),
+                ".init"
+                    | ".fini"
+                    | ".init_array"
+                    | ".fini_array"
+                    | ".text.startup"
+                    | ".text.exit"
+                    | ".ctors"
+                    | ".dtors"
+                    | ".note"
+                    | ".note.GNU-stack"
+                    | ".note.gnu.build-id"
+                    | ".dynamic"
+                    | ".dynsym"
+                    | ".dynstr"
+                    | ".got"
+                    | ".got.plt"
+                    | ".plt"
+                    | ".rela.dyn"
+                    | ".rela.plt"
+                    | ".gnu.hash"
+                    | ".gnu.version"
+                    | ".gnu.version_d"
+                    | ".gnu.version_r"
+                    | ".interp"
+                    | ".eh_frame"
+                    | ".eh_frame_hdr"
+                    | ".tdata"
+                    | ".tbss"
+                    | ".data.rel.ro"
+                    | ".fini"
+                    | ".init"
+                    | ".bss"
             ) {
                 live.insert(i as u32);
             }
         }
         // SHF_GNU_RETAIN 标志的节也保留
         for (i, sec) in sections.iter().enumerate() {
-            if sec.flags & 0x200000 != 0 {  // SHF_GNU_RETAIN
+            if sec.flags & 0x200000 != 0 {
+                // SHF_GNU_RETAIN
                 live.insert(i as u32);
             }
         }
@@ -421,7 +491,9 @@ impl LayoutBuilder {
         let _ = sym_to_sec;
         // 收集所有重定位引用的符号
         while let Some(sym) = queue.pop_front() {
-            if !seen_syms.insert(sym.clone()) { continue; }
+            if !seen_syms.insert(sym.clone()) {
+                continue;
+            }
             // 找这个符号所在的节
             for (i, sec) in sections.iter().enumerate() {
                 if sec.name == sym || sec.kind == OutputSectionKind::Named(sym.clone()) {
@@ -434,15 +506,19 @@ impl LayoutBuilder {
         for root_name in &self.gc_sections_root {
             for (i, sec) in sections.iter().enumerate() {
                 if sec.name == format!(".text.{}", root_name)
-                   || sec.name.ends_with(&format!("/{}", root_name))
-                   || sec.name.ends_with(&format!(".{}", root_name)) {
+                    || sec.name.ends_with(&format!("/{}", root_name))
+                    || sec.name.ends_with(&format!(".{}", root_name))
+                {
                     live.insert(i as u32);
                 }
             }
         }
         // 4. 对未 live 的节, 把 size/data 清零 (软删除)
         for (i, sec) in sections.iter_mut().enumerate() {
-            if !live.contains(&(i as u32)) && sec.size > 0 && sec.ty != crate::codegen::elf::SHT_NOBITS {
+            if !live.contains(&(i as u32))
+                && sec.size > 0
+                && sec.ty != crate::codegen::elf::SHT_NOBITS
+            {
                 // 软删除: 把 data 清空, size=0, 标记为不分配
                 // 注意: 实际 "完全删除" 需重新分配 vaddr; 简化处理只清 data
                 // 这样 layout 阶段生成的 ELF 中该节 size 仍可见, 但内容为空
@@ -631,9 +707,9 @@ impl LayoutBuilder {
         // 段 0: .text / .plt / .rodata / .init / .fini
         // 段 1: .data / .bss / .tdata / .tbss / .got / .got.plt / .dynamic / .dynsym / .dynstr
         let mut v0 = self.base_addr;
-        let mut f0: u64 = 0;  // 文件偏移（layout 阶段暂按 0 起步，最后回填）
-        // 决定两段基址：保证两段 vaddr 差足够大
-        // 段 1 放在段 0 末尾后 0x1000
+        let mut f0: u64 = 0; // 文件偏移（layout 阶段暂按 0 起步，最后回填）
+                             // 决定两段基址：保证两段 vaddr 差足够大
+                             // 段 1 放在段 0 末尾后 0x1000
         let mut text_size: u64 = 0;
         for sec in sections.iter() {
             if sec.load_segment == 0 {
@@ -645,7 +721,9 @@ impl LayoutBuilder {
 
         // 段 0
         for sec in sections.iter_mut() {
-            if sec.load_segment != 0 { continue; }
+            if sec.load_segment != 0 {
+                continue;
+            }
             let a = sec.align.max(1);
             v0 = align_up_to(v0, a);
             f0 = align_up_to(f0, a);
@@ -656,7 +734,9 @@ impl LayoutBuilder {
         }
         // 段 1
         for sec in sections.iter_mut() {
-            if sec.load_segment == 0 { continue; }
+            if sec.load_segment == 0 {
+                continue;
+            }
             let a = sec.align.max(1);
             v1 = align_up_to(v1, a);
             f1 = align_up_to(f1, a);
@@ -690,7 +770,9 @@ impl LayoutBuilder {
 
         // 为每个输出节生成 STT_SECTION 符号
         for sec in sections {
-            if sec.flags & SHF_ALLOC == 0 { continue; }
+            if sec.flags & SHF_ALLOC == 0 {
+                continue;
+            }
             out.push(OutputSymbol {
                 name: sec.name.clone(),
                 value: 0,
@@ -709,8 +791,12 @@ impl LayoutBuilder {
         // 注意: r.section 是 bundle 内的 flat section 索引, 需要映射到输出节
         // r.value 是输入节内的偏移, 需要加上输入节在输出节内的偏移
         for r in resolved {
-            if r.section == 0 { continue; }   // undefined 已合并到 ResolvedSymbol 但不出现在 .symtab
-            if r.bind == STB_LOCAL { continue; }
+            if r.section == 0 {
+                continue;
+            } // undefined 已合并到 ResolvedSymbol 但不出现在 .symtab
+            if r.bind == STB_LOCAL {
+                continue;
+            }
             let in_offset = find_input_offset(sections, r.section, 0).unwrap_or(0);
             let out_sec_idx = match find_output_section_for_input_idx(sections, r.section) {
                 Some(v) => v,
@@ -734,9 +820,15 @@ impl LayoutBuilder {
 
         // LOCAL 符号
         for (i, sym) in bundle.symbols.iter().enumerate() {
-            if sym.bind != STB_LOCAL { continue; }
-            if sym.section == 0 { continue; }
-            if sym.name.is_empty() { continue; }
+            if sym.bind != STB_LOCAL {
+                continue;
+            }
+            if sym.section == 0 {
+                continue;
+            }
+            if sym.name.is_empty() {
+                continue;
+            }
             let in_offset = find_input_offset(sections, sym.section, 0).unwrap_or(0);
             let out_sec_idx = match find_output_section_for_input_idx(sections, sym.section) {
                 Some(v) => v,
@@ -765,9 +857,17 @@ impl LayoutBuilder {
         let mut seg0: Option<OutputSegment> = None;
         let mut seg1: Option<OutputSegment> = None;
         for sec in sections {
-            let flags = if sec.flags & SHF_EXECINSTR != 0 { 5 }  // PF_R | PF_X
-                        else if sec.flags & SHF_WRITE != 0 { 6 }  // PF_R | PF_W
-                        else { 4 };                              // PF_R
+            let flags = if sec.flags & SHF_EXECINSTR != 0 {
+                5
+            }
+            // PF_R | PF_X
+            else if sec.flags & SHF_WRITE != 0 {
+                6
+            }
+            // PF_R | PF_W
+            else {
+                4
+            }; // PF_R
             let target = if sec.load_segment == 0 { &mut seg0 } else { &mut seg1 };
             if target.is_none() {
                 *target = Some(OutputSegment {
@@ -820,7 +920,9 @@ impl LayoutBuilder {
         for r in &bundle.relocations {
             // 找到 r.section 所在输出节
             let in_sec_idx = r.section as usize;
-            if in_sec_idx >= bundle.sections.len() { continue; }
+            if in_sec_idx >= bundle.sections.len() {
+                continue;
+            }
             let in_sec = &bundle.sections[in_sec_idx];
             // 找到该节被合并到的输出节
             let out_sec_idx = find_output_section_for(sections, in_sec);
@@ -835,13 +937,15 @@ impl LayoutBuilder {
             };
             // 解析符号
             let sym_global = r.sym as usize;
-            if sym_global >= bundle.symbols.len() { continue; }
+            if sym_global >= bundle.symbols.len() {
+                continue;
+            }
             let bundle_sym = &bundle.symbols[sym_global];
             // 找对应输出符号
             let out_sym_idx = name_to_output_sym.get(&bundle_sym.name).copied();
             let out_sym = match out_sym_idx {
                 Some(v) => v,
-                None => continue,  // undefined 符号且未在 allowed 中 → 已报错
+                None => continue, // undefined 符号且未在 allowed 中 → 已报错
             };
             let _ = resolved;
             out.push(OutputRela {
@@ -860,7 +964,9 @@ impl LayoutBuilder {
 fn classify_section(name: &str) -> Option<OutputSectionKind> {
     match name {
         ".text" => Some(OutputSectionKind::Text),
-        ".rodata" | ".rodata.str1.1" | ".rodata.str4.4" | ".rodata.str8.8" => Some(OutputSectionKind::Rodata),
+        ".rodata" | ".rodata.str1.1" | ".rodata.str4.4" | ".rodata.str8.8" => {
+            Some(OutputSectionKind::Rodata)
+        }
         ".data" | ".data.rel.ro" => Some(OutputSectionKind::Data),
         ".bss" => Some(OutputSectionKind::Bss),
         ".tdata" => Some(OutputSectionKind::Tdata),
@@ -877,10 +983,15 @@ fn section_flags_for_kind(kind: OutputSectionKind) -> u32 {
     match kind {
         OutputSectionKind::Text | OutputSectionKind::Plt => SHF_ALLOC | SHF_EXECINSTR,
         OutputSectionKind::Rodata | OutputSectionKind::Init | OutputSectionKind::Fini => SHF_ALLOC,
-        OutputSectionKind::Data | OutputSectionKind::Bss |
-        OutputSectionKind::InitArray | OutputSectionKind::FiniArray |
-        OutputSectionKind::Got | OutputSectionKind::GotPlt |
-        OutputSectionKind::Dynamic | OutputSectionKind::DynSym | OutputSectionKind::DynStr => SHF_ALLOC | SHF_WRITE,
+        OutputSectionKind::Data
+        | OutputSectionKind::Bss
+        | OutputSectionKind::InitArray
+        | OutputSectionKind::FiniArray
+        | OutputSectionKind::Got
+        | OutputSectionKind::GotPlt
+        | OutputSectionKind::Dynamic
+        | OutputSectionKind::DynSym
+        | OutputSectionKind::DynStr => SHF_ALLOC | SHF_WRITE,
         OutputSectionKind::Tdata => SHF_ALLOC | SHF_WRITE | SHF_TLS,
         OutputSectionKind::Tbss => SHF_ALLOC | SHF_WRITE | SHF_TLS,
         OutputSectionKind::RelDyn | OutputSectionKind::RelPlt => SHF_ALLOC,
@@ -897,9 +1008,13 @@ fn section_align_for_kind(kind: OutputSectionKind) -> u64 {
         OutputSectionKind::Tdata | OutputSectionKind::Tbss => 8,
         OutputSectionKind::Init | OutputSectionKind::Fini => 4,
         OutputSectionKind::InitArray | OutputSectionKind::FiniArray => 8,
-        OutputSectionKind::Got | OutputSectionKind::GotPlt | OutputSectionKind::Dynamic |
-        OutputSectionKind::DynSym | OutputSectionKind::DynStr | OutputSectionKind::RelDyn |
-        OutputSectionKind::RelPlt => 8,
+        OutputSectionKind::Got
+        | OutputSectionKind::GotPlt
+        | OutputSectionKind::Dynamic
+        | OutputSectionKind::DynSym
+        | OutputSectionKind::DynStr
+        | OutputSectionKind::RelDyn
+        | OutputSectionKind::RelPlt => 8,
         OutputSectionKind::Plt => 16,
         OutputSectionKind::Note => 4,
         OutputSectionKind::Named(_) => 1,
@@ -951,7 +1066,10 @@ fn find_output_section_for(sections: &[OutputSection], in_sec: &FlatSection) -> 
     None
 }
 
-fn find_output_section_for_input_idx(sections: &[OutputSection], bundle_sec_idx: u32) -> Option<usize> {
+fn find_output_section_for_input_idx(
+    sections: &[OutputSection],
+    bundle_sec_idx: u32,
+) -> Option<usize> {
     for (idx, sec) in sections.iter().enumerate() {
         if sec.input_sections.contains(&bundle_sec_idx) {
             return Some(idx);

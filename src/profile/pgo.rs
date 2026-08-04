@@ -56,7 +56,9 @@ pub struct PgoSite {
 }
 
 impl Profraw {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn add(&mut self, site: PgoSite) -> usize {
         let idx = self.counters.len();
@@ -99,7 +101,10 @@ impl Profraw {
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
         if buf.len() < 12 || &buf[0..4] != b"PROF" {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad profraw magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad profraw magic",
+            ));
         }
         let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
         if ver != 1 {
@@ -112,27 +117,27 @@ impl Profraw {
         let mut off = 12usize;
         let mut sites = Vec::with_capacity(n);
         for _ in 0..n {
-            let lf = u32::from_le_bytes(buf[off..off+4].try_into().unwrap()) as usize;
+            let lf = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
             off += 4;
-            let func = std::str::from_utf8(&buf[off..off+lf])
+            let func = std::str::from_utf8(&buf[off..off + lf])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                 .to_string();
             off += lf;
-            let lp = u32::from_le_bytes(buf[off..off+4].try_into().unwrap()) as usize;
+            let lp = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
             off += 4;
-            let file = std::str::from_utf8(&buf[off..off+lp])
+            let file = std::str::from_utf8(&buf[off..off + lp])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                 .to_string();
             off += lp;
-            let line = u32::from_le_bytes(buf[off..off+4].try_into().unwrap());
+            let line = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
             off += 4;
             sites.push(PgoSite { func, file, line });
         }
-        let nc = u32::from_le_bytes(buf[off..off+4].try_into().unwrap()) as usize;
+        let nc = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
         off += 4;
         let mut counters = Vec::with_capacity(nc);
         for _ in 0..nc {
-            let c = u64::from_le_bytes(buf[off..off+8].try_into().unwrap());
+            let c = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
             off += 8;
             counters.push(c);
         }
@@ -142,11 +147,15 @@ impl Profraw {
 
 /// AST 改写: 在每个函数入口插入 `__dcc_pgo_count_fn(idx)` 调用
 pub fn instrument_program(prog: &mut Program, cfg: &PgoConfig) {
-    if !cfg.generate { return; }
+    if !cfg.generate {
+        return;
+    }
     let mut idx: u32 = 0;
     for d in &mut prog.decls {
         if let Decl::Func(f) = d {
-            if f.body.is_none() { continue; }
+            if f.body.is_none() {
+                continue;
+            }
             // 复用函数体首项插入, 保证 PGO 计数先于任何 user code.
             let site = PgoSite {
                 func: f.name.name.clone(),
@@ -163,15 +172,23 @@ pub fn instrument_program(prog: &mut Program, cfg: &PgoConfig) {
                     span: f.span.clone(),
                     ty: Type::Void,
                 }),
-                args: vec![Expr::Int { v: idx as i128, span: f.span.clone(), ty: Type::Int }],
+                args: vec![Expr::Int {
+                    v: idx as i128,
+                    span: f.span.clone(),
+                    ty: Type::Int,
+                }],
                 span: f.span.clone(),
                 ty: Type::Void,
             };
             // 包成 expr-stmt, push 到 body 顶部
             if let Some(body) = &mut f.body {
-                body.items.insert(0, BlockItem::Stmt(Stmt::Expr {
-                    e: call, span: f.span.clone(),
-                }));
+                body.items.insert(
+                    0,
+                    BlockItem::Stmt(Stmt::Expr {
+                        e: call,
+                        span: f.span.clone(),
+                    }),
+                );
             }
             idx += 1;
             let _ = site; // site 由 codegen 在另一通路落 .gcov/.profraw 索引
@@ -210,8 +227,16 @@ mod tests {
     #[test]
     fn profraw_roundtrip() {
         let mut p = Profraw::new();
-        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 1 });
-        p.add(PgoSite { func: "foo".into(), file: "m.c".into(), line: 5 });
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 1,
+        });
+        p.add(PgoSite {
+            func: "foo".into(),
+            file: "m.c".into(),
+            line: 5,
+        });
         p.counters[0] = 7;
         p.counters[1] = 11;
         let tmp = std::env::temp_dir().join("dcc-pgo-test.profraw");
@@ -226,9 +251,21 @@ mod tests {
     #[test]
     fn weights_aggregate_by_func() {
         let mut p = Profraw::new();
-        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 1 });
-        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 3 });
-        p.add(PgoSite { func: "foo".into(),  file: "m.c".into(), line: 7 });
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 1,
+        });
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 3,
+        });
+        p.add(PgoSite {
+            func: "foo".into(),
+            file: "m.c".into(),
+            line: 7,
+        });
         p.counters[0] = 4;
         p.counters[1] = 6;
         p.counters[2] = 9;
@@ -246,14 +283,22 @@ mod tests {
         use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
         let span_zero = crate::diagnostics::Span::point("m.c", 1, 0);
         let mut prog = Program { decls: vec![] };
-        let body = Block { items: vec![
-            BlockItem::Stmt(Stmt::Return {
-                val: Some(Expr::Int { v: 0, span: span_zero.clone(), ty: Type::Int }),
+        let body = Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Int {
+                    v: 0,
+                    span: span_zero.clone(),
+                    ty: Type::Int,
+                }),
                 span: span_zero.clone(),
-            }),
-        ], span: span_zero.clone()};
+            })],
+            span: span_zero.clone(),
+        };
         prog.decls.push(Decl::Func(FuncDecl {
-            name: Ident { name: "foo".into(), span: span_zero.clone() },
+            name: Ident {
+                name: "foo".into(),
+                span: span_zero.clone(),
+            },
             ret_ty: Type::Int,
             params: vec![],
             body: Some(body),
@@ -294,7 +339,11 @@ mod tests {
         }));
         // 旧 body 顶部是 return 0, 跑 instrument 后应变为
         // call __dcc_pgo_count_fn(0)  +  return 0
-        let cfg = PgoConfig { generate: true, use_file: None, out_dir: None };
+        let cfg = PgoConfig {
+            generate: true,
+            use_file: None,
+            out_dir: None,
+        };
         instrument_program(&mut prog, &cfg);
         // 1 个函数 → 0 号 idx
         if let Decl::Func(f) = &prog.decls[0] {
@@ -305,16 +354,24 @@ mod tests {
                     if let Expr::Call { callee, args, .. } = e {
                         if let Expr::Ident { name, .. } = callee.as_ref() {
                             assert_eq!(name.name, "__dcc_pgo_count_fn");
-                        } else { panic!("callee not Ident"); }
+                        } else {
+                            panic!("callee not Ident");
+                        }
                         assert_eq!(args.len(), 1);
                         if let Expr::Int { v, .. } = &args[0] {
                             assert_eq!(*v, 0, "第一个函数的 idx 应为 0");
-                        } else { panic!("arg not Int"); }
-                    } else { panic!("first stmt not Call"); }
+                        } else {
+                            panic!("arg not Int");
+                        }
+                    } else {
+                        panic!("first stmt not Call");
+                    }
                 }
                 _ => panic!("first item not Stmt::Expr"),
             }
-        } else { panic!("decl not Func"); }
+        } else {
+            panic!("decl not Func");
+        }
     }
 
     /// instrument_program 对 generate=false 不做任何改写.
@@ -323,14 +380,22 @@ mod tests {
         use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
         let span_zero = crate::diagnostics::Span::point("m.c", 1, 0);
         let mut prog = Program { decls: vec![] };
-        let body = Block { items: vec![
-            BlockItem::Stmt(Stmt::Return {
-                val: Some(Expr::Int { v: 7, span: span_zero.clone(), ty: Type::Int }),
+        let body = Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Int {
+                    v: 7,
+                    span: span_zero.clone(),
+                    ty: Type::Int,
+                }),
                 span: span_zero.clone(),
-            }),
-        ], span: span_zero.clone()};
+            })],
+            span: span_zero.clone(),
+        };
         prog.decls.push(Decl::Func(FuncDecl {
-            name: Ident { name: "foo".into(), span: span_zero.clone() },
+            name: Ident {
+                name: "foo".into(),
+                span: span_zero.clone(),
+            },
             ret_ty: Type::Int,
             params: vec![],
             body: Some(body),
@@ -369,11 +434,18 @@ mod tests {
             alias_name: None,
             visibility: None,
         }));
-        let cfg = PgoConfig { generate: false, use_file: None, out_dir: None };
+        let cfg = PgoConfig {
+            generate: false,
+            use_file: None,
+            out_dir: None,
+        };
         instrument_program(&mut prog, &cfg);
         if let Decl::Func(f) = &prog.decls[0] {
-            assert_eq!(f.body.as_ref().unwrap().items.len(), 1,
-                "generate=false 时 body 不应被改写");
+            assert_eq!(
+                f.body.as_ref().unwrap().items.len(),
+                1,
+                "generate=false 时 body 不应被改写"
+            );
         }
     }
 }

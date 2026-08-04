@@ -1,35 +1,33 @@
 // src/driver.rs - 驱动: 读文件 -> 预处理 -> 解析 -> codegen -> 写文件
 // 第一性原理: 编译器是"输入/输出"的胶水;所有业务在 preproc/parse/codegen 内部完成。
 
+use crate::cli::{Config, InputLang, LinkerOutputKind};
+use crate::codegen;
+use crate::diagnostics::{enrich_diags, Diagnostic, DiagnosticsConfig, Severity};
+use crate::format_check;
+use crate::ir;
+use crate::link;
+use crate::lto;
+use crate::mmap_io::MappedInput;
+use crate::parser;
+use crate::preproc;
+use crate::preproc::LineSpan;
+use crate::profile;
+use crate::sanitizer;
+use crate::target::Target;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use crate::mmap_io::MappedInput;
 use std::process::Command;
-use crate::cli::{Config, InputLang, LinkerOutputKind};
-use crate::diagnostics::{
-    Diagnostic, DiagnosticsConfig, Severity, enrich_diags,
-};
-use crate::target::Target;
-use crate::preproc;
-use crate::preproc::LineSpan;
-use crate::parser;
-use crate::codegen;
-use crate::ir;
-use crate::link;
-use crate::sanitizer;
-use crate::format_check;
-use crate::lto;
-use crate::profile;
 
 /// 判断 IR 类型是否(递归)包含浮点成分, 供 -mno-sse 下的 E0300 检测使用
 fn ir_type_uses_float(t: &ir::ValueType) -> bool {
     match t {
         ir::ValueType::Float { .. } => true,
-        ir::ValueType::Pointer(i) | ir::ValueType::Array(i, _)
-        | ir::ValueType::Vector(i, _) | ir::ValueType::Complex(i) => {
-            ir_type_uses_float(i)
-        }
+        ir::ValueType::Pointer(i)
+        | ir::ValueType::Array(i, _)
+        | ir::ValueType::Vector(i, _)
+        | ir::ValueType::Complex(i) => ir_type_uses_float(i),
         ir::ValueType::Function { ret, params } => {
             ir_type_uses_float(ret) || params.iter().any(ir_type_uses_float)
         }
@@ -44,8 +42,7 @@ fn ir_expr_uses_float(e: &ir::TypedExpr) -> bool {
 }
 
 fn ir_stmt_uses_float(s: &ir::TypedStmt) -> bool {
-    s.expressions.iter().any(ir_expr_uses_float)
-        || s.nested.iter().any(ir_stmt_uses_float)
+    s.expressions.iter().any(ir_expr_uses_float) || s.nested.iter().any(ir_stmt_uses_float)
 }
 
 /// 把预处理器阶段产生的非致命诊断打印到 stderr。
@@ -78,7 +75,9 @@ fn diag_cfg(cfg: &Config) -> DiagnosticsConfig {
 ///   - include_paths 前面加 <p>/include, <p>/usr/include
 ///   - link_libs 不动 (-L 由 host linker 自动处理)
 fn apply_sysroot(mut cfg: Config) -> Config {
-    let Some(sr) = cfg.sysroot.clone() else { return cfg; };
+    let Some(sr) = cfg.sysroot.clone() else {
+        return cfg;
+    };
     if cfg.verbose {
         eprintln!("dcc: sysroot = {}", sr.display());
     }
@@ -107,37 +106,53 @@ fn apply_profile_weights(prog: &mut crate::ast::Program, prof: &profile::Profile
     use crate::ast::Decl;
 
     // 1) PGO: 读 .profraw
-    let pgo_w = prof.pgo_use.as_ref().and_then(|p| {
-        profile::pgo::Profraw::read(p).ok()
-            .map(|p| profile::pgo::PgoWeights::from_profraw(&p))
-    }).unwrap_or_default();
+    let pgo_w = prof
+        .pgo_use
+        .as_ref()
+        .and_then(|p| {
+            profile::pgo::Profraw::read(p)
+                .ok()
+                .map(|p| profile::pgo::PgoWeights::from_profraw(&p))
+        })
+        .unwrap_or_default();
 
     // 2) AutoFDO
-    let autofdo = prof.auto_profile.as_ref()
+    let autofdo = prof
+        .auto_profile
+        .as_ref()
         .or(prof.sample_use.as_ref())
         .and_then(|p| profile::autofdo::AutoFdoProfile::read(p).ok())
         .unwrap_or_default();
 
     // 3) LBR
-    let lbr = prof.lbr_profile.as_ref()
+    let lbr = prof
+        .lbr_profile
+        .as_ref()
         .and_then(|p| profile::lbr::LbrProfile::read_perf_brstack(p).ok())
         .unwrap_or_default();
 
     // 4) MemProf
-    let memprof = prof.memprof_use.as_ref()
+    let memprof = prof
+        .memprof_use
+        .as_ref()
         .and_then(|p| profile::memprof::MemProfData::read(p).ok())
         .unwrap_or_default();
 
-    let weights = profile::weights::ProfileWeights::from_sources(
-        &pgo_w, &autofdo, &lbr, &memprof);
+    let weights = profile::weights::ProfileWeights::from_sources(&pgo_w, &autofdo, &lbr, &memprof);
 
     let hot = weights.hot_funcs();
     let cold = weights.cold_funcs();
     for d in &mut prog.decls {
         if let Decl::Func(f) = d {
-            if f.body.is_none() { continue; }
-            if hot.contains(&f.name.name) { f.is_hot = true; }
-            if cold.contains(&f.name.name) { f.is_cold = true; }
+            if f.body.is_none() {
+                continue;
+            }
+            if hot.contains(&f.name.name) {
+                f.is_hot = true;
+            }
+            if cold.contains(&f.name.name) {
+                f.is_cold = true;
+            }
         }
     }
 }
@@ -159,18 +174,25 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     let input = cfg.inputs.first().ok_or_else(|| {
-        vec![Diagnostic::err("E0100", "no input file", crate::diagnostics::Span::point("", 0, 0))]
+        vec![Diagnostic::err(
+            "E0100",
+            "no input file",
+            crate::diagnostics::Span::point("", 0, 0),
+        )]
     })?;
 
     // .S / -x assembler-with-cpp: 预处理 + 系统汇编器
     if matches!(cfg.input_lang, InputLang::AssemblerWithCpp)
-        || input.extension().map(|e| e == "S").unwrap_or(false) {
+        || input.extension().map(|e| e == "S").unwrap_or(false)
+    {
         return run_assembler_driver(&cfg, input);
     }
 
     // C++ 前端: -x c++ / .cpp / .cc / .cxx / .CPP / .CXX
     let is_cpp = matches!(cfg.input_lang, InputLang::Cpp)
-        || input.extension().and_then(|e| e.to_str())
+        || input
+            .extension()
+            .and_then(|e| e.to_str())
             .map(|e| matches!(e, "cpp" | "cc" | "cxx" | "CPP" | "CXX"))
             .unwrap_or(false);
     if is_cpp {
@@ -190,27 +212,47 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         eprintln!("dcc: target = {}", cfg.target.as_str());
         eprintln!("dcc: std    = {}", cfg.std.as_str());
         eprintln!("dcc: -O{}", cfg.opt);
-        if cfg.debug_level > 0 { eprintln!("dcc: -g{}", cfg.debug_level); }
-        if cfg.lto_enabled { eprintln!("dcc: -flto"); }
+        if cfg.debug_level > 0 {
+            eprintln!("dcc: -g{}", cfg.debug_level);
+        }
+        if cfg.lto_enabled {
+            eprintln!("dcc: -flto");
+        }
     }
 
     // 读源：mmap（ADR-006）或 stdin
     let (mapped, file_name) = if input.as_os_str() == "-" {
-        let mapped = MappedInput::from_stdin(io::stdin())
-            .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read stdin: {}", e),
-                crate::diagnostics::Span::point("-", 0, 0))])?;
+        let mapped = MappedInput::from_stdin(io::stdin()).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0100",
+                format!("cannot read stdin: {}", e),
+                crate::diagnostics::Span::point("-", 0, 0),
+            )]
+        })?;
         (mapped, "-".to_string())
     } else {
-        let mapped = MappedInput::open(input)
-            .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", input.display(), e),
-                crate::diagnostics::Span::point(&input.display().to_string(), 0, 0))])?;
+        let mapped = MappedInput::open(input).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0100",
+                format!("cannot read {}: {}", input.display(), e),
+                crate::diagnostics::Span::point(&input.display().to_string(), 0, 0),
+            )]
+        })?;
         (mapped, input.display().to_string())
     };
     let src = mapped.as_slice();
 
     // 预处理
     let pp_out = preproc::preprocess(
-        src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
+        src,
+        &file_name,
+        &cfg.include_paths,
+        &cfg.system_paths,
+        &cfg.defines,
+        cfg.std,
+        &cfg.force_includes,
+        cfg.freestanding,
+        &cfg.pch_opts,
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
@@ -261,7 +303,18 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let (mut prog, mut diags) = parser::parse_with_opts(
         preprocessed.as_bytes(),
         &file_name,
-        parser::ParseOptions { permissive: cfg.permissive, pack_history: pack_history.clone(), weak_symbols: weak_symbols.clone(), warn_int_truncation: cfg.warn_int_truncation, warn_int_conversion: cfg.warn_int_conversion, is_c23: matches!(cfg.std, crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23), warn_implicit_decl: cfg.warn_implicit_decl },
+        parser::ParseOptions {
+            permissive: cfg.permissive,
+            pack_history: pack_history.clone(),
+            weak_symbols: weak_symbols.clone(),
+            warn_int_truncation: cfg.warn_int_truncation,
+            warn_int_conversion: cfg.warn_int_conversion,
+            is_c23: matches!(
+                cfg.std,
+                crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23
+            ),
+            warn_implicit_decl: cfg.warn_implicit_decl,
+        },
     );
     drop(preprocessed);
     drop(pack_history);
@@ -280,7 +333,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             }
         }
     }
-    if has_errors { return Err(diags); }
+    if has_errors {
+        return Err(diags);
+    }
 
     let wlist: Vec<Diagnostic> = format_check::check_program(&prog);
     for w in &wlist {
@@ -299,8 +354,16 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.profile.pgo_generate.is_some() {
         let pgo_cfg = profile::pgo::PgoConfig {
             generate: true,
-            use_file: cfg.profile.pgo_use.as_ref().map(|p| p.display().to_string()),
-            out_dir: cfg.profile.pgo_generate.as_ref().map(|p| p.display().to_string()),
+            use_file: cfg
+                .profile
+                .pgo_use
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            out_dir: cfg
+                .profile
+                .pgo_generate
+                .as_ref()
+                .map(|p| p.display().to_string()),
         };
         profile::pgo::instrument_program(&mut prog, &pgo_cfg);
     }
@@ -323,7 +386,10 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // 生成依赖文件 (.d)
     if cfg.gen_dep {
         let dep_path = cfg.dep_file.as_ref().unwrap_or(&cfg.output);
-        let target = cfg.dep_target.as_deref().unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+        let target = cfg
+            .dep_target
+            .as_deref()
+            .unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
         let deps: Vec<String> = if cfg.dep_mmd_only {
             filter_user_deps(include_deps, &cfg.system_paths)
         } else {
@@ -337,23 +403,39 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                     let _ = fs::create_dir_all(parent);
                 }
             }
-            Box::new(fs::File::create(dep_path)
-                .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write {}: {}", dep_path.display(), e),
-                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?)
+            Box::new(fs::File::create(dep_path).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write {}: {}", dep_path.display(), e),
+                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                )]
+            })?)
         };
-        writeln!(dep_out, "{}: {}", target, input.display())
-            .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
-                crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
+        writeln!(dep_out, "{}: {}", target, input.display()).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("cannot write dep file: {}", e),
+                crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+            )]
+        })?;
         for dep in &deps {
-            writeln!(dep_out, " {}", dep)
-                .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
-                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
+            writeln!(dep_out, " {}", dep).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write dep file: {}", e),
+                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                )]
+            })?;
         }
         if cfg.dep_phony {
             for dep in &deps {
-                writeln!(dep_out, "\n{}:", dep)
-                    .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write dep file: {}", e),
-                        crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0))])?;
+                writeln!(dep_out, "\n{}:", dep).map_err(|e| {
+                    vec![Diagnostic::err(
+                        "E0101",
+                        format!("cannot write dep file: {}", e),
+                        crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                    )]
+                })?;
             }
         }
     }
@@ -379,7 +461,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         // 精确检测 IR 中是否真的使用浮点类型/字面量, 避免把含
         // double_xxx 标识符(如内核 double_rq_lock)的 Debug 串误判为浮点
         // 找到第一个使用浮点的函数或全局, 用其精确 span 报错
-        let sse_span = module.functions.iter()
+        let sse_span = module
+            .functions
+            .iter()
             .find(|f| {
                 ir_type_uses_float(&f.return_type)
                     || f.params.iter().any(ir_type_uses_float)
@@ -387,7 +471,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             })
             .map(|f| f.span.clone())
             .or_else(|| {
-                module.globals.iter()
+                module
+                    .globals
+                    .iter()
                     .find(|g| {
                         ir_type_uses_float(&g.ty)
                             || g.initializer.as_ref().is_some_and(ir_expr_uses_float)
@@ -410,18 +496,31 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
     let function_sections = cfg.function_sections || lto_enabled;
     let bytes = codegen::emit(
-        &module, &target, cfg.relocatable, cfg.emit_asm, &file_name,
-        cfg.debug_level, cfg.sanitizers, lto_enabled, function_sections,
-        cfg.parallel_codegen, cfg.bounds_check, cfg.trapv,
+        &module,
+        &target,
+        cfg.relocatable,
+        cfg.emit_asm,
+        &file_name,
+        cfg.debug_level,
+        cfg.sanitizers,
+        lto_enabled,
+        function_sections,
+        cfg.parallel_codegen,
+        cfg.bounds_check,
+        cfg.trapv,
     );
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
     }
 
     let out = &cfg.output;
-    let mut f = fs::File::create(out)
-        .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write {}: {}", out.display(), e),
-            crate::diagnostics::Span::point(&out.display().to_string(), 0, 0))])?;
+    let mut f = fs::File::create(out).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0101",
+            format!("cannot write {}: {}", out.display(), e),
+            crate::diagnostics::Span::point(&out.display().to_string(), 0, 0),
+        )]
+    })?;
     f.write_all(&bytes).unwrap();
     if !cfg.relocatable && !cfg.emit_asm {
         #[cfg(unix)]
@@ -467,12 +566,24 @@ fn filter_user_deps(deps: Vec<String>, system_paths: &[std::path::PathBuf]) -> V
 /// 独立汇编驱动: 预处理 .S 后调用系统 `as`。
 fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagnostic>> {
     let file_name = input.display().to_string();
-    let src = fs::read(input)
-        .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
-            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    let src = fs::read(input).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0100",
+            format!("cannot read {}: {}", file_name, e),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]
+    })?;
 
     let pp_out = preproc::preprocess(
-        &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
+        &src,
+        &file_name,
+        &cfg.include_paths,
+        &cfg.system_paths,
+        &cfg.defines,
+        cfg.std,
+        &cfg.force_includes,
+        cfg.freestanding,
+        &cfg.pch_opts,
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
@@ -488,9 +599,13 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
 
     let tmp_dir = std::env::temp_dir();
     let asm_path = tmp_dir.join(format!("dcc-asm-{}.s", std::process::id()));
-    fs::write(&asm_path, preprocessed.as_bytes())
-        .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write temp asm: {}", e),
-            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    fs::write(&asm_path, preprocessed.as_bytes()).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0101",
+            format!("cannot write temp asm: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]
+    })?;
 
     let mut cmd = Command::new("as");
     for opt in &cfg.as_options {
@@ -501,9 +616,13 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
         }
     }
     cmd.arg("-o").arg(&cfg.output).arg(&asm_path);
-    let output = cmd.output()
-        .map_err(|e| vec![Diagnostic::err("E0102", format!("cannot invoke assembler: {}", e),
-            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    let output = cmd.output().map_err(|e| {
+        vec![Diagnostic::err(
+            "E0102",
+            format!("cannot invoke assembler: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]
+    })?;
     let _ = fs::remove_file(&asm_path);
     if !output.status.success() {
         // 把汇编器自身 stderr / stdout 折叠进 message, 避免与 snapshot 漂移
@@ -516,8 +635,11 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
                 msg.push_str(chunk);
             }
         }
-        return Err(vec![Diagnostic::err("E0102", msg,
-            crate::diagnostics::Span::point(&file_name, 0, 0))]);
+        return Err(vec![Diagnostic::err(
+            "E0102",
+            msg,
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]);
     }
     eprintln!("dcc: wrote {}", cfg.output.display());
     Ok(())
@@ -541,11 +663,23 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
 
     // -E 模式: 复用 C 预处理器 (C++ 注释 + 基本宏支持, 不解析 #include <iostream> 等)
     if cfg.preprocess_only {
-        let src = fs::read(input)
-            .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
-                crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+        let src = fs::read(input).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0100",
+                format!("cannot read {}: {}", file_name, e),
+                crate::diagnostics::Span::point(&file_name, 0, 0),
+            )]
+        })?;
         let pp_out = preproc::preprocess(
-            &src, &file_name, &cfg.include_paths, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
+            &src,
+            &file_name,
+            &cfg.include_paths,
+            &cfg.system_paths,
+            &cfg.defines,
+            cfg.std,
+            &cfg.force_includes,
+            cfg.freestanding,
+            &cfg.pch_opts,
         );
         let mut pp_diags = pp_out.diags;
         enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
@@ -564,16 +698,27 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     }
 
     // 1. 预处理 (复用 C 预处理器, 默认追加 stdlib headers 路径)
-    let src = fs::read(input)
-        .map_err(|e| vec![Diagnostic::err("E0100", format!("cannot read {}: {}", file_name, e),
-            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
-    let mut cpp_includes: Vec<PathBuf> = cfg.include_paths.iter()
-        .map(PathBuf::from).collect();
+    let src = fs::read(input).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0100",
+            format!("cannot read {}: {}", file_name, e),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]
+    })?;
+    let mut cpp_includes: Vec<PathBuf> = cfg.include_paths.iter().map(PathBuf::from).collect();
     if let Some(stdlib_inc) = crate::cpp::driver::default_stdlib_include() {
         cpp_includes.push(stdlib_inc);
     }
     let pp_out = preproc::preprocess(
-        &src, &file_name, &cpp_includes, &cfg.system_paths, &cfg.defines, cfg.std, &cfg.force_includes, cfg.freestanding, &cfg.pch_opts,
+        &src,
+        &file_name,
+        &cpp_includes,
+        &cfg.system_paths,
+        &cfg.defines,
+        cfg.std,
+        &cfg.force_includes,
+        cfg.freestanding,
+        &cfg.pch_opts,
     );
     let mut pp_diags = pp_out.diags;
     enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
@@ -583,7 +728,8 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
 
     // 2. C++ lex + parse + lower
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);
-    let decls = parser.parse_top_level()
+    let decls = parser
+        .parse_top_level()
         .map_err(|e| vec![e.to_diag(&file_name)])?;
     let mut lower = Lower::new();
     lower.lower_decls(&decls);
@@ -607,47 +753,80 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         std::env::temp_dir().join(format!(
             "dcc-cpp-{}-{}.c",
             std::process::id(),
-            input.file_name().and_then(|n| n.to_str()).unwrap_or("input")
+            input
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("input")
         ))
     };
-    fs::write(&tmp, c_src)
-        .map_err(|e| vec![Diagnostic::err("E0101", format!("cannot write tmp: {}", e),
-            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    fs::write(&tmp, c_src).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0101",
+            format!("cannot write tmp: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]
+    })?;
 
     // 4. 调 dcc C 链路编译 (走相同 dcc 二进制, 复用 codegen/IR)
-    let dcc_bin = std::env::current_exe()
-        .map_err(|e| vec![Diagnostic::err("E0102", format!("cannot find dcc: {}", e),
-            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    let dcc_bin = std::env::current_exe().map_err(|e| {
+        vec![Diagnostic::err(
+            "E0102",
+            format!("cannot find dcc: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]
+    })?;
     let mut cmd = Command::new(&dcc_bin);
     cmd.arg("-c");
     cmd.arg(format!("-O{}", cfg.opt));
     cmd.arg(format!("-std={}", cfg.std.as_str()));
-    for inc in &cfg.include_paths { cmd.arg("-I").arg(inc); }
-    for sys in &cfg.system_paths { cmd.arg("-isystem").arg(sys); }
-    for d in &cfg.defines {
-        if let Some(v) = &d.1 { cmd.arg("-D").arg(format!("{}={}", d.0, v)); }
-        else { cmd.arg("-D").arg(&d.0); }
+    for inc in &cfg.include_paths {
+        cmd.arg("-I").arg(inc);
     }
-    if cfg.debug_level > 0 { cmd.arg(format!("-g{}", cfg.debug_level)); }
-    if cfg.emit_asm { cmd.arg("-S"); }
+    for sys in &cfg.system_paths {
+        cmd.arg("-isystem").arg(sys);
+    }
+    for d in &cfg.defines {
+        if let Some(v) = &d.1 {
+            cmd.arg("-D").arg(format!("{}={}", d.0, v));
+        } else {
+            cmd.arg("-D").arg(&d.0);
+        }
+    }
+    if cfg.debug_level > 0 {
+        cmd.arg(format!("-g{}", cfg.debug_level));
+    }
+    if cfg.emit_asm {
+        cmd.arg("-S");
+    }
     cmd.arg("-o").arg(&cfg.output);
     cmd.arg(&tmp);
 
     if cfg.verbose {
-        eprintln!("dcc: dcc -c -O{} -o {} {}", cfg.opt, cfg.output.display(), tmp.display());
+        eprintln!(
+            "dcc: dcc -c -O{} -o {} {}",
+            cfg.opt,
+            cfg.output.display(),
+            tmp.display()
+        );
     }
 
-    let out = cmd.output()
-        .map_err(|e| vec![Diagnostic::err("E0102", format!("cannot spawn dcc: {}", e),
-            crate::diagnostics::Span::point(&file_name, 0, 0))])?;
+    let out = cmd.output().map_err(|e| {
+        vec![Diagnostic::err(
+            "E0102",
+            format!("cannot spawn dcc: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]
+    })?;
     if std::env::var("DCC_CPP_KEEP_TMP").is_err() {
         let _ = fs::remove_file(&tmp);
     }
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        return Err(vec![Diagnostic::err("E0301",
+        return Err(vec![Diagnostic::err(
+            "E0301",
             format!("dcc C backend failed for {}: {}", file_name, stderr),
-            crate::diagnostics::Span::point(&file_name, 0, 0))]);
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]);
     }
     eprintln!("dcc: wrote {}", cfg.output.display());
     Ok(())
@@ -671,21 +850,39 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         output_kind,
         lto: cfg.linker_lto,
         entry: cfg.linker_entry.clone().unwrap_or_else(|| {
-            if matches!(output_kind, link::OutputKind::PIE) { "_start".into() }
-            else if matches!(output_kind, link::OutputKind::Shared) { String::new() }
-            else { "main".into() }
+            if matches!(output_kind, link::OutputKind::PIE) {
+                "_start".into()
+            } else if matches!(output_kind, link::OutputKind::Shared) {
+                String::new()
+            } else {
+                "main".into()
+            }
         }),
         base_addr: 0x400000,
         soname: cfg.soname.clone(),
-        needed: cfg.link_libs.iter().map(|s| format!("lib{}.so", s)).collect(),
+        needed: cfg
+            .link_libs
+            .iter()
+            .map(|s| format!("lib{}.so", s))
+            .collect(),
         strip_debug: false,
         gc_sections: true,
         allowed_undef: vec![
-            "memcpy".into(), "memmove".into(), "memset".into(), "memcmp".into(),
-            "printf".into(), "puts".into(), "exit".into(), "abort".into(),
-            "malloc".into(), "free".into(),
-            "__stack_chk_fail".into(), "__cxa_atexit".into(), "__cxa_finalize".into(),
-            "_start".into(), "main".into(),
+            "memcpy".into(),
+            "memmove".into(),
+            "memset".into(),
+            "memcmp".into(),
+            "printf".into(),
+            "puts".into(),
+            "exit".into(),
+            "abort".into(),
+            "malloc".into(),
+            "free".into(),
+            "__stack_chk_fail".into(),
+            "__cxa_atexit".into(),
+            "__cxa_finalize".into(),
+            "_start".into(),
+            "main".into(),
         ],
         exclude_libs: cfg.exclude_libs.clone(),
         build_id: cfg.build_id,
@@ -706,7 +903,9 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:
     for arg in &cfg.raw_args {
         if let Some(rest) = arg.strip_prefix(".symver=") {
-            link_cfg.version_table.add_symver(&format!(".symver {}", rest));
+            link_cfg
+                .version_table
+                .add_symver(&format!(".symver {}", rest));
         }
     }
     if cfg.linker_entry.is_some() {
@@ -736,8 +935,12 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             }
         }
     }
-    eprintln!("dcc: built-in linker wrote {} ({} bytes, {:?})",
-        cfg.output.display(), bytes.len(), output_kind);
+    eprintln!(
+        "dcc: built-in linker wrote {} ({} bytes, {:?})",
+        cfg.output.display(),
+        bytes.len(),
+        output_kind
+    );
     Ok(())
 }
 
@@ -753,18 +956,32 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
 ///
 /// 一旦命中，run() 会交递到 `run_with_host_link`。
 fn needs_host_cc_link(cfg: &Config) -> bool {
-    if cfg.link_mode { return false; }          // -r
-    if cfg.built_link { return false; }         // -pie / -shared / -fbuiltin-linker
-    if cfg.relocatable { return false; }        // -c
-    if cfg.emit_asm { return false; }           // -S
-    if cfg.preprocess_only { return false; }    // -E
-    if cfg.syntax_only { return false; }        // -fsyntax-only
-    if cfg.dump_ast { return false; }           // -dump-ast
-    if cfg.inputs.len() != 1 { return false; }
+    if cfg.link_mode {
+        return false;
+    } // -r
+    if cfg.built_link {
+        return false;
+    } // -pie / -shared / -fbuiltin-linker
+    if cfg.relocatable {
+        return false;
+    } // -c
+    if cfg.emit_asm {
+        return false;
+    } // -S
+    if cfg.preprocess_only {
+        return false;
+    } // -E
+    if cfg.syntax_only {
+        return false;
+    } // -fsyntax-only
+    if cfg.dump_ast {
+        return false;
+    } // -dump-ast
+    if cfg.inputs.len() != 1 {
+        return false;
+    }
     let out = cfg.output.to_string_lossy();
-    if out.ends_with(".o") || out.ends_with(".s")
-        || out.ends_with(".a") || out.ends_with(".so")
-    {
+    if out.ends_with(".o") || out.ends_with(".s") || out.ends_with(".a") || out.ends_with(".so") {
         return false;
     }
     true
@@ -781,7 +998,9 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let link_libs = cfg.link_libs.clone();
     let sysroot = cfg.sysroot.clone();
     let verbose = cfg.verbose;
-    let input_name = cfg.inputs.first()
+    let input_name = cfg
+        .inputs
+        .first()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("input");
@@ -791,8 +1010,12 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         input_name,
     ));
     if verbose {
-        eprintln!("dcc: host-link: {} -> {} -> {}",
-            cfg.inputs[0].display(), tmp_o.display(), final_output.display());
+        eprintln!(
+            "dcc: host-link: {} -> {} -> {}",
+            cfg.inputs[0].display(),
+            tmp_o.display(),
+            final_output.display()
+        );
     }
     // 1) 临时 .o：设 relocatable=true 后递归 run()
     cfg.output = tmp_o.clone();
@@ -806,8 +1029,11 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
     // 2) 调 host cc 链接
     let link_result = link_with_host_cc(
-        &tmp_o, &final_output, &link_libs,
-        sysroot.as_deref(), verbose,
+        &tmp_o,
+        &final_output,
+        &link_libs,
+        sysroot.as_deref(),
+        verbose,
     );
     let _ = fs::remove_file(&tmp_o);
     if link_result.is_ok() {
@@ -841,10 +1067,14 @@ fn link_with_host_cc(
     // 到默认 "cc" (host 系统上 99% 是 gcc), 与 gcc 手工调用 dcc 时
     // 设 `CC=gcc` 一致.
     let cc = match std::env::var("CC") {
-        Ok(v) if v != std::env::current_exe()
-            .ok()
-            .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_default() => v,
+        Ok(v)
+            if v != std::env::current_exe()
+                .ok()
+                .and_then(|p| p.to_str().map(String::from))
+                .unwrap_or_default() =>
+        {
+            v
+        }
         _ => "cc".to_string(),
     };
     let mut cmd = Command::new(&cc);
@@ -862,23 +1092,27 @@ fn link_with_host_cc(
         eprintln!("dcc: invoking {}: {:?}", cc, cmd);
     }
     let out = cmd.output().map_err(|e| {
-        vec![Diagnostic::err("E0202",
+        vec![Diagnostic::err(
+            "E0202",
             format!("cannot invoke {}: {} (set CC= or install gcc)", cc, e),
-            crate::diagnostics::Span::point("", 0, 0))]
+            crate::diagnostics::Span::point("", 0, 0),
+        )]
     })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let mut msg = format!("{} link failed (exit {:?})",
-            cc, out.status.code());
+        let mut msg = format!("{} link failed (exit {:?})", cc, out.status.code());
         for chunk in [stderr.trim_end(), stdout.trim_end()] {
             if !chunk.is_empty() {
                 msg.push_str(": ");
                 msg.push_str(chunk);
             }
         }
-        return Err(vec![Diagnostic::err("E0202", msg,
-            crate::diagnostics::Span::point(&output.display().to_string(), 0, 0))]);
+        return Err(vec![Diagnostic::err(
+            "E0202",
+            msg,
+            crate::diagnostics::Span::point(&output.display().to_string(), 0, 0),
+        )]);
     }
     Ok(())
 }

@@ -1,18 +1,18 @@
 // src/codegen/mod.rs - 代码生成调度
 // 第一性原理: codegen 入口只做"按 target 选后端"。
 
+pub mod aarch64;
+pub mod arm;
 pub mod disasm;
 pub mod elf;
-pub mod x86_64;
-pub mod aarch64;
-pub mod riscv64;
 pub mod mips;
 pub mod mips64;
-pub mod arm;
+pub mod riscv64;
+pub mod x86_64;
 
 use crate::debug;
 use crate::ir::Module;
-use crate::sanitizer::{SanitizerFlags, sanitizer_metadata};
+use crate::sanitizer::{sanitizer_metadata, SanitizerFlags};
 use crate::target::Target;
 
 #[allow(clippy::too_many_arguments)]
@@ -105,10 +105,14 @@ pub fn emit(
                     align: 1,
                 });
                 // 同时输出 .llvm.lto 文本摘要, 兼容 GC-sections 探测和 ld -r 合并路径
-                let funcs: Vec<(&str, u64, bool)> = module.functions.iter().map(|f| {
-                    let sz = cg.func_sizes.get(&f.name).copied().unwrap_or(0);
-                    (f.name.as_str(), sz, true)
-                }).collect();
+                let funcs: Vec<(&str, u64, bool)> = module
+                    .functions
+                    .iter()
+                    .map(|f| {
+                        let sz = cg.func_sizes.get(&f.name).copied().unwrap_or(0);
+                        (f.name.as_str(), sz, true)
+                    })
+                    .collect();
                 let summary_unit = crate::lto::build_unit(source_name, &funcs);
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".llvm.lto".to_string(),

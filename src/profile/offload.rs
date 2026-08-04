@@ -73,7 +73,9 @@ pub struct OffloadSection {
 }
 
 impl OffloadSection {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn add_entry(&mut self, e: OffloadEntry) {
         self.entries.push(e);
@@ -83,7 +85,9 @@ impl OffloadSection {
     pub fn to_json(&self) -> String {
         let mut s = String::from("{\"entries\":[");
         for (i, e) in self.entries.iter().enumerate() {
-            if i > 0 { s.push(','); }
+            if i > 0 {
+                s.push(',');
+            }
             s.push_str(&format!(
                 "{{\"kind\":\"{}\",\"func\":\"{}\",\"file\":\"{}\",\"line\":{},\"device\":\"{}\"}}",
                 e.kind.as_str(),

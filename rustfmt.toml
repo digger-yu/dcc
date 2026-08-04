@@ -1,0 +1,15 @@
+# rustfmt 配置 — dcc 项目代码格式规范
+# 目标: 固化项目格式约定, 保证 rustfmt 版本升级时格式不漂移。
+# 项目风格: 紧凑型代码, 中文注释, 不强制折行注释。
+
+# 与 Cargo.toml 保持一致
+edition = "2021"
+
+# 行宽上限: 超过才折行 (rustfmt 默认 100)
+max_width = 100
+
+# 缩进宽度: 4 空格 (rustfmt 默认)
+tab_spaces = 4
+
+# 单行 if/for/while 语句体宽度 (rustfmt 默认 60, 显式固化避免漂移)
+single_line_if_else_max_width = 60

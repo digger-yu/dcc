@@ -2,14 +2,14 @@
 // 第一性原理: 预处理 = 文本变换 + 宏展开。在词法分析之前运行。
 // suckless 准则: 行级处理 #include/#define/#if, 然后 token 级宏展开。
 
+use crate::cli::StdMode;
+use crate::diagnostics::{Diagnostic, Span};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use crate::diagnostics::{Diagnostic, Span};
-use crate::cli::StdMode;
 
 /// 逻辑行: 反斜杠续接行合并后的文本 + 其覆盖的物理行号范围 (1-based)。
 /// SourceLoc 追踪的核心: 诊断 / __LINE__ / 输出行号一律以此映射到物理行。
@@ -136,14 +136,20 @@ struct CondState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MacroDef {
-    params: Option<Vec<String>>,  // None = object-like, Some = function-like
+    params: Option<Vec<String>>, // None = object-like, Some = function-like
     body: String,
     /// 可变参数: true 表示末尾有 ...
     variadic: bool,
 }
 
 /// 头文件缓存内容: (guard 宏名, 宏列表, 依赖文件, (文件, hash), __COUNTER__ 消耗量)
-type MacroCacheData = (String, Vec<(String, MacroDef)>, Vec<String>, Vec<(String, u64)>, u32);
+type MacroCacheData = (
+    String,
+    Vec<(String, MacroDef)>,
+    Vec<String>,
+    Vec<(String, u64)>,
+    u32,
+);
 
 /// 预处理输出行号 → 源文件行号的映射区间
 #[derive(Debug, Clone)]
@@ -238,7 +244,8 @@ impl PchBundle {
                 Some(p) => p.join(","),
             };
             let variadic_str = if def.variadic { "1" } else { "0" };
-            s.push_str(&format!("{}\t{}\t{}\t{}\n",
+            s.push_str(&format!(
+                "{}\t{}\t{}\t{}\n",
                 Self::escape_kv(name),
                 Self::escape_kv(&params_str),
                 variadic_str,
@@ -265,9 +272,17 @@ impl PchBundle {
 
         let mut section = "";
         for line in lines {
-            if line == "=== MACROS ===" { section = "macros"; continue; }
-            if line == "=== OUTPUT ===" { section = "output"; continue; }
-            if line == "=== END ===" { break; }
+            if line == "=== MACROS ===" {
+                section = "macros";
+                continue;
+            }
+            if line == "=== OUTPUT ===" {
+                section = "output";
+                continue;
+            }
+            if line == "=== END ===" {
+                break;
+            }
             if section.is_empty() {
                 if let Some(v) = line.strip_prefix("SOURCE=") {
                     bundle.source = Self::unescape_kv(v);
@@ -277,14 +292,18 @@ impl PchBundle {
                     bundle.content_hash = u64::from_str_radix(v, 16)
                         .map_err(|e| format!("bad content hash: {}", e))?;
                 } else if let Some(v) = line.strip_prefix("MACRO_HASH=") {
-                    bundle.macro_hash = u64::from_str_radix(v, 16)
-                        .map_err(|e| format!("bad macro hash: {}", e))?;
+                    bundle.macro_hash =
+                        u64::from_str_radix(v, 16).map_err(|e| format!("bad macro hash: {}", e))?;
                 }
                 // NUM_MACROS 行仅做元信息, 读取宏表时不依赖
             } else if section == "macros" {
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 let parts = Self::split_kv_tabs(line, 4);
-                if parts.len() < 4 { continue; }
+                if parts.len() < 4 {
+                    continue;
+                }
                 let name = Self::unescape_kv(&parts[0]);
                 let params_str = Self::unescape_kv(&parts[1]);
                 let variadic = parts[2] == "1";
@@ -292,11 +311,18 @@ impl PchBundle {
                 let params = if params_str == "-" {
                     None
                 } else if params_str.is_empty() {
-                    Some(vec![])  // 零参 function-like 宏
+                    Some(vec![]) // 零参 function-like 宏
                 } else {
                     Some(params_str.split(',').map(String::from).collect())
                 };
-                bundle.macros.push((name, MacroDef { params, body, variadic }));
+                bundle.macros.push((
+                    name,
+                    MacroDef {
+                        params,
+                        body,
+                        variadic,
+                    },
+                ));
             } else if section == "output" {
                 if !bundle.output.is_empty() {
                     bundle.output.push('\n');
@@ -348,7 +374,10 @@ impl PchBundle {
                     Some('n') => out.push('\n'),
                     Some('t') => out.push('\t'),
                     Some('r') => out.push('\r'),
-                    Some(other) => { out.push('\\'); out.push(other); }
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
                     None => out.push('\\'),
                 }
             } else {
@@ -364,27 +393,32 @@ impl PchBundle {
         let mut start = 0;
         let mut count = 0;
         for (i, c) in line.char_indices() {
-            if c == '\t'
-                && count < n - 1 {
-                    out.push(line[start..i].to_string());
-                    start = i + 1;
-                    count += 1;
-                }
+            if c == '\t' && count < n - 1 {
+                out.push(line[start..i].to_string());
+                start = i + 1;
+                count += 1;
+            }
         }
         out.push(line[start..].to_string());
-        while out.len() < n { out.push(String::new()); }
+        while out.len() < n {
+            out.push(String::new());
+        }
         out
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
-                  system_paths: &[PathBuf],
-                  defines: &[(String, Option<String>)],
-                  std_mode: StdMode,
-                  force_includes: &[String],
-                  freestanding: bool,
-                  pch_opts: &PchOptions) -> PreprocessOutput {
+pub fn preprocess(
+    src: &[u8],
+    file: &str,
+    include_paths: &[PathBuf],
+    system_paths: &[PathBuf],
+    defines: &[(String, Option<String>)],
+    std_mode: StdMode,
+    force_includes: &[String],
+    freestanding: bool,
+    pch_opts: &PchOptions,
+) -> PreprocessOutput {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
         Err(e) => {
@@ -399,7 +433,10 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
             };
         }
     };
-    let base = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
+    let base = Path::new(file)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
     // 编译日期/时间
     let (compile_date, compile_time) = Preprocessor::compile_datetime();
     let mut pp = Preprocessor {
@@ -442,7 +479,7 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("__STDC__", "1");
     // __STDC_VERSION__ 根据选择的 C 标准设置
     let stc_version = match std_mode {
-        StdMode::C89 | StdMode::Gnu89 => None,  // C89/C90 不定义 __STDC_VERSION__
+        StdMode::C89 | StdMode::Gnu89 => None, // C89/C90 不定义 __STDC_VERSION__
         StdMode::C99 | StdMode::Gnu99 => Some("199901"),
         StdMode::C11 | StdMode::Gnu11 => Some("201112"),
         StdMode::C17 | StdMode::Gnu17 => Some("201710"),
@@ -582,9 +619,14 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     pp.define_builtin("atomic_double", "double");
     pp.define_builtin("atomic_long_double", "long double");
     // kill_dependency: 返回参数
-    pp.macros.insert("kill_dependency".to_string(), MacroDef {
-        params: Some(vec!["y".to_string()]), body: "(y)".to_string(), variadic: false,
-    });
+    pp.macros.insert(
+        "kill_dependency".to_string(),
+        MacroDef {
+            params: Some(vec!["y".to_string()]),
+            body: "(y)".to_string(),
+            variadic: false,
+        },
+    );
     // atomic_thread_fence: 跨线程全屏障, emit  mfence + lock 序
     // 对应 GCC __atomic_thread_fence(MEMORY_ORDER): hardware fence
     // 注: dcc 当前不跨函数优化, 整个函数都是一应连续. 主依赖
@@ -592,17 +634,25 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     // 实现: emit 一个 volatile 空 asm + memory 寄存器clobber, 防止
     // 编译器重排外尧访存. 这只是编译器屏障 (ompiler barrier),
     // 不是硬件屏障; 硬件序由 mfence 等交互.
-    pp.macros.insert("atomic_thread_fence".to_string(), MacroDef {
-        params: Some(vec!["order".to_string()]),
-        body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(), variadic: false,
-    });
+    pp.macros.insert(
+        "atomic_thread_fence".to_string(),
+        MacroDef {
+            params: Some(vec!["order".to_string()]),
+            body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(),
+            variadic: false,
+        },
+    );
     // atomic_signal_fence: 编译期屏障, 防止编译器重排. 不同于
     // atomic_thread_fence, 不需要硬件序, 只需阻止本地优化.
     // 实现: 空 asm volatile 块 + memory 寄存器clobber.
-    pp.macros.insert("atomic_signal_fence".to_string(), MacroDef {
-        params: Some(vec!["order".to_string()]),
-        body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(), variadic: false,
-    });
+    pp.macros.insert(
+        "atomic_signal_fence".to_string(),
+        MacroDef {
+            params: Some(vec!["order".to_string()]),
+            body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(),
+            variadic: false,
+        },
+    );
     // 注意: 不预置 atomic_store/atomic_fetch_add 等 C11 stdatomic 宏。
     // Linux 内核 atomic-instrumented.h 等同名 inline 函数会被误展开
     // （如 atomic_fetch_add(i,v) → __atomic_fetch_add(i,v,5) 破坏声明）。
@@ -615,20 +665,40 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     // 这样可以在宏展开路径和 #if 路径都返回正确值
     // GCC 接受 `__attribute` (无尾部双下划线) 作为 `__attribute__` 的简写。
     // kernel 7.1 的 __noinstr_section() 误用此写法, 故加入映射.
-    pp.macros.insert("__attribute".to_string(), MacroDef {
-        params: None, body: "__attribute__".to_string(), variadic: false,
-    });
+    pp.macros.insert(
+        "__attribute".to_string(),
+        MacroDef {
+            params: None,
+            body: "__attribute__".to_string(),
+            variadic: false,
+        },
+    );
     // likely/unlikely 分支提示
-    pp.macros.insert("likely".to_string(), MacroDef {
-        params: Some(vec!["x".to_string()]), body: "(x)".to_string(), variadic: false,
-    });
-    pp.macros.insert("unlikely".to_string(), MacroDef {
-        params: Some(vec!["x".to_string()]), body: "(x)".to_string(), variadic: false,
-    });
+    pp.macros.insert(
+        "likely".to_string(),
+        MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "(x)".to_string(),
+            variadic: false,
+        },
+    );
+    pp.macros.insert(
+        "unlikely".to_string(),
+        MacroDef {
+            params: Some(vec!["x".to_string()]),
+            body: "(x)".to_string(),
+            variadic: false,
+        },
+    );
     // barrier
-    pp.macros.insert("barrier".to_string(), MacroDef {
-        params: Some(vec![]), body: "".to_string(), variadic: false,
-    });
+    pp.macros.insert(
+        "barrier".to_string(),
+        MacroDef {
+            params: Some(vec![]),
+            body: "".to_string(),
+            variadic: false,
+        },
+    );
     // MODULE_LICENSE/AUTHOR/DESCRIPTION/ALIAS 等模块宏
     // 展开为 .modinfo section 的字符串变量
     pp.macros.insert("MODULE_LICENSE".to_string(), MacroDef {
@@ -657,21 +727,31 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         variadic: false,
     });
     // percpu 支持: DEFINE_PER_CPU(type, name) 展开为 .data..percpu section 的变量
-    pp.macros.insert("DEFINE_PER_CPU".to_string(), MacroDef {
-        params: Some(vec!["type".to_string(), "name".to_string()]),
-        body: "__attribute__((section(\".data..percpu\"))) type name".to_string(),
-        variadic: false,
-    });
-    pp.macros.insert("DEFINE_PER_CPU_SHARED_ALIGNED".to_string(), MacroDef {
-        params: Some(vec!["type".to_string(), "name".to_string()]),
-        body: "__attribute__((section(\".data..percpu\"), __aligned__(64))) type name".to_string(),
-        variadic: false,
-    });
-    pp.macros.insert("DECLARE_PER_CPU".to_string(), MacroDef {
-        params: Some(vec!["type".to_string(), "name".to_string()]),
-        body: "extern __attribute__((section(\".data..percpu\"))) type name".to_string(),
-        variadic: false,
-    });
+    pp.macros.insert(
+        "DEFINE_PER_CPU".to_string(),
+        MacroDef {
+            params: Some(vec!["type".to_string(), "name".to_string()]),
+            body: "__attribute__((section(\".data..percpu\"))) type name".to_string(),
+            variadic: false,
+        },
+    );
+    pp.macros.insert(
+        "DEFINE_PER_CPU_SHARED_ALIGNED".to_string(),
+        MacroDef {
+            params: Some(vec!["type".to_string(), "name".to_string()]),
+            body: "__attribute__((section(\".data..percpu\"), __aligned__(64))) type name"
+                .to_string(),
+            variadic: false,
+        },
+    );
+    pp.macros.insert(
+        "DECLARE_PER_CPU".to_string(),
+        MacroDef {
+            params: Some(vec!["type".to_string(), "name".to_string()]),
+            body: "extern __attribute__((section(\".data..percpu\"))) type name".to_string(),
+            variadic: false,
+        },
+    );
     // 用户 -D 定义
     for (name, val) in defines {
         let v = val.as_deref().unwrap_or("1");
@@ -699,9 +779,11 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                         // 不兼容: 报告诊断, 静默继续无 PCH 处理
                         pp.diags.push(Diagnostic::warn(
                             "W0400",
-                            format!("PCH {} is incompatible with current macro state \
+                            format!(
+                                "PCH {} is incompatible with current macro state \
                                     (saved hash {:x}, current {:x}); ignoring",
-                                    pch_path, bundle.macro_hash, cur_macro_hash),
+                                pch_path, bundle.macro_hash, cur_macro_hash
+                            ),
                             Span::point(file, 1, 1),
                         ));
                     }
@@ -763,7 +845,9 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
     // PCH 创建: 在主源处理成功后, 把当前状态快照写入磁盘。
     // 写文件不记入 errors (即使失败, 也不让 TU 失败: 这是优化而非必需).
     if let Some(ref pch_path) = pch_opts.create {
-        let has_error = pp.diags.iter()
+        let has_error = pp
+            .diags
+            .iter()
             .any(|d| matches!(d.sev, crate::diagnostics::Severity::Error));
         if !has_error {
             let bundle = PchBundle {
@@ -772,7 +856,9 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
                 content_hash: create_time_macro_hash,
                 macro_hash: create_time_macro_hash,
                 output: pp.out.clone(),
-                macros: pp.macros.iter()
+                macros: pp
+                    .macros
+                    .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             };
@@ -799,7 +885,9 @@ pub fn preprocess(src: &[u8], file: &str, include_paths: &[PathBuf],
         pack_history: pch_pack_history,
         weak_symbols: pch_weak_symbols,
         charset: pch_charset,
-        macros: pp.macros.iter()
+        macros: pp
+            .macros
+            .iter()
             .map(|(k, v)| (k.clone(), v.params.clone(), v.variadic, v.body.clone()))
             .collect(),
         line_map: pp.line_map.clone(),
@@ -823,7 +911,9 @@ fn host_gcc_include_dirs() -> &'static [PathBuf] {
         ] {
             if let Ok(entries) = glob_gcc_include_paths(pattern) {
                 for p in entries {
-                    if p.is_dir() { dirs.push(p); }
+                    if p.is_dir() {
+                        dirs.push(p);
+                    }
                 }
             }
         }
@@ -867,12 +957,18 @@ impl Preprocessor {
             let mut found = None;
             for dir in &self.include_paths {
                 let p = dir.join(file_path);
-                if p.exists() { found = Some(p); break; }
+                if p.exists() {
+                    found = Some(p);
+                    break;
+                }
             }
             if found.is_none() {
                 for dir in &self.system_paths {
                     let p = dir.join(file_path);
-                    if p.exists() { found = Some(p); break; }
+                    if p.exists() {
+                        found = Some(p);
+                        break;
+                    }
                 }
             }
             found.unwrap_or(path)
@@ -881,7 +977,8 @@ impl Preprocessor {
             Ok(content) => {
                 // 强制包含文件也计入 include 图: -MD 依赖 + 缓存依赖闭包
                 self.deps.push(resolved.display().to_string());
-                self.dep_hashes.push((resolved.display().to_string(), Self::hash_content(&content)));
+                self.dep_hashes
+                    .push((resolved.display().to_string(), Self::hash_content(&content)));
                 let saved_file = self.file.clone();
                 let saved_dir = self.base_dir.clone();
                 self.file = resolved.display().to_string();
@@ -905,9 +1002,14 @@ impl Preprocessor {
     }
 
     fn define_builtin(&mut self, name: &str, val: &str) {
-        self.macros.insert(name.to_string(), MacroDef {
-            params: None, body: val.to_string(), variadic: false,
-        });
+        self.macros.insert(
+            name.to_string(),
+            MacroDef {
+                params: None,
+                body: val.to_string(),
+                variadic: false,
+            },
+        );
     }
 
     fn compile_datetime() -> (String, String) {
@@ -976,9 +1078,11 @@ impl Preprocessor {
         }
 
         if self.in_comment {
-            self.diags.push(self.err_at("E0207",
+            self.diags.push(self.err_at(
+                "E0207",
                 "unterminated block comment".to_string(),
-                self.cur_line.max(1)));
+                self.cur_line.max(1),
+            ));
         }
         self.in_comment = saved_in_comment;
         self.file = saved_file;
@@ -1020,8 +1124,7 @@ impl Preprocessor {
         // 把展开阶段累积的 _Pragma 字符串批量应用
         // 顺序与源中出现顺序一致; 行号用收集时记录的 out 行号,
         // 这样 pack_history 与 parser 的 lex.line 严格对齐
-        let pending: Vec<(String, u32)> =
-            std::mem::take(&mut *self.pending_pragmas.borrow_mut());
+        let pending: Vec<(String, u32)> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
         for (p, line_no) in pending {
             self.apply_pragma_string(&p, line_no);
         }
@@ -1085,15 +1188,23 @@ impl Preprocessor {
         let mut escape = false;
         for c in s.chars() {
             if in_string {
-                if escape { escape = false; }
-                else if c == '\\' { escape = true; }
-                else if c == '"' { in_string = false; }
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
                 continue;
             }
             if in_char {
-                if escape { escape = false; }
-                else if c == '\\' { escape = true; }
-                else if c == '\'' { in_char = false; }
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '\'' {
+                    in_char = false;
+                }
                 continue;
             }
             match c {
@@ -1117,7 +1228,9 @@ impl Preprocessor {
         // 行数 = 换行符个数 + 1 (如果非空)
         let mut n = 1u32;
         for c in self.out.chars() {
-            if c == '\n' { n += 1; }
+            if c == '\n' {
+                n += 1;
+            }
         }
         n
     }
@@ -1149,7 +1262,7 @@ impl Preprocessor {
             // This check must precede quote handling: quotes have no lexical
             // meaning while a block comment is active.
             if self.in_comment {
-                if chars[i] == '*' && i + 1 < len && chars[i+1] == '/' {
+                if chars[i] == '*' && i + 1 < len && chars[i + 1] == '/' {
                     i += 2;
                     self.in_comment = false;
                 } else {
@@ -1162,10 +1275,17 @@ impl Preprocessor {
                 out.push('"');
                 i += 1;
                 while i < len && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
-                    out.push(chars[i]); i += 1;
+                    if chars[i] == '\\' && i + 1 < len {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    out.push(chars[i]);
+                    i += 1;
                 }
-                if i < len { out.push('"'); i += 1; }
+                if i < len {
+                    out.push('"');
+                    i += 1;
+                }
                 continue;
             }
             // 字符字面量
@@ -1173,19 +1293,26 @@ impl Preprocessor {
                 out.push('\'');
                 i += 1;
                 while i < len && chars[i] != '\'' {
-                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
-                    out.push(chars[i]); i += 1;
+                    if chars[i] == '\\' && i + 1 < len {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    out.push(chars[i]);
+                    i += 1;
                 }
-                if i < len { out.push('\''); i += 1; }
+                if i < len {
+                    out.push('\'');
+                    i += 1;
+                }
                 continue;
             }
             // /* ... */ 注释 (支持跨行)
-            if i + 1 < len && chars[i] == '/' && chars[i+1] == '*' {
+            if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
                 out.push(' ');
                 i += 2;
                 self.in_comment = true;
                 while i + 1 < len {
-                    if chars[i] == '*' && chars[i+1] == '/' {
+                    if chars[i] == '*' && chars[i + 1] == '/' {
                         i += 2;
                         self.in_comment = false;
                         break;
@@ -1199,9 +1326,11 @@ impl Preprocessor {
                 continue;
             }
             // // ... 注释
-            if i + 1 < len && chars[i] == '/' && chars[i+1] == '/' {
+            if i + 1 < len && chars[i] == '/' && chars[i + 1] == '/' {
                 out.push(' ');
-                while i < len && chars[i] != '\n' { i += 1; }
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
                 continue;
             }
             out.push(chars[i]);
@@ -1221,32 +1350,52 @@ impl Preprocessor {
                 out.push('"');
                 i += 1;
                 while i < len && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
-                    out.push(chars[i]); i += 1;
+                    if chars[i] == '\\' && i + 1 < len {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    out.push(chars[i]);
+                    i += 1;
                 }
-                if i < len { out.push('"'); i += 1; }
+                if i < len {
+                    out.push('"');
+                    i += 1;
+                }
                 continue;
             }
             if chars[i] == '\'' {
                 out.push('\'');
                 i += 1;
                 while i < len && chars[i] != '\'' {
-                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
-                    out.push(chars[i]); i += 1;
+                    if chars[i] == '\\' && i + 1 < len {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    out.push(chars[i]);
+                    i += 1;
                 }
-                if i < len { out.push('\''); i += 1; }
+                if i < len {
+                    out.push('\'');
+                    i += 1;
+                }
                 continue;
             }
-            if i + 1 < len && chars[i] == '/' && chars[i+1] == '*' {
+            if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
                 out.push(' ');
                 i += 2;
-                while i + 1 < len && !(chars[i] == '*' && chars[i+1] == '/') { i += 1; }
-                if i + 1 < len { i += 2; }
+                while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                if i + 1 < len {
+                    i += 2;
+                }
                 continue;
             }
-            if i + 1 < len && chars[i] == '/' && chars[i+1] == '/' {
+            if i + 1 < len && chars[i] == '/' && chars[i + 1] == '/' {
                 out.push(' ');
-                while i < len && chars[i] != '\n' { i += 1; }
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
                 continue;
             }
             out.push(chars[i]);
@@ -1265,19 +1414,36 @@ impl Preprocessor {
             let line = line.strip_suffix('\r').unwrap_or(line);
             if let Some(prefix) = line.strip_suffix('\\') {
                 match &mut continued {
-                    Some((acc, _)) => { acc.push_str(prefix); acc.push(' '); }
-                    None => { continued = Some((format!("{} ", prefix), phys)); }
+                    Some((acc, _)) => {
+                        acc.push_str(prefix);
+                        acc.push(' ');
+                    }
+                    None => {
+                        continued = Some((format!("{} ", prefix), phys));
+                    }
                 }
             } else if let Some((mut acc, start)) = continued.take() {
                 acc.push_str(line);
-                out.push(LogicalLine { text: acc, phys_start: start, phys_end: phys });
+                out.push(LogicalLine {
+                    text: acc,
+                    phys_start: start,
+                    phys_end: phys,
+                });
             } else {
-                out.push(LogicalLine { text: line.to_string(), phys_start: phys, phys_end: phys });
+                out.push(LogicalLine {
+                    text: line.to_string(),
+                    phys_start: phys,
+                    phys_end: phys,
+                });
             }
             phys += 1;
         }
         if let Some((acc, start)) = continued.take() {
-            out.push(LogicalLine { text: acc, phys_start: start, phys_end: phys - 1 });
+            out.push(LogicalLine {
+                text: acc,
+                phys_start: start,
+                phys_end: phys - 1,
+            });
         }
         out
     }
@@ -1324,29 +1490,43 @@ impl Preprocessor {
             let name = rest.trim();
             let active = self.is_active() && self.macros.contains_key(name);
             self.cond_stack.push(CondState {
-                any_true: active, active, saw_else: false,
+                any_true: active,
+                active,
+                saw_else: false,
             });
         } else if let Some(rest) = directive.strip_prefix("ifndef") {
             let name = rest.trim();
             let active = self.is_active() && !self.macros.contains_key(name);
             self.cond_stack.push(CondState {
-                any_true: active, active, saw_else: false,
+                any_true: active,
+                active,
+                saw_else: false,
             });
         } else if directive.starts_with("if ") || directive.starts_with("if\t") {
             let expr = directive[2..].trim();
-            let val = if self.is_active() { self.eval_const_expr(expr) } else { false };
+            let val = if self.is_active() {
+                self.eval_const_expr(expr)
+            } else {
+                false
+            };
             self.cond_stack.push(CondState {
-                any_true: val, active: val, saw_else: false,
+                any_true: val,
+                active: val,
+                saw_else: false,
             });
         } else if directive.starts_with("elif ") || directive.starts_with("elif\t") {
             let len = self.cond_stack.len();
             if len > 0 {
-                let parent_active = if len <= 1 { true }
-                    else { self.cond_stack[..len-1].iter().all(|c| c.active) };
+                let parent_active = if len <= 1 {
+                    true
+                } else {
+                    self.cond_stack[..len - 1].iter().all(|c| c.active)
+                };
                 let saw_else = self.cond_stack[len - 1].saw_else;
                 let any_true = self.cond_stack[len - 1].any_true;
                 if saw_else {
-                    self.diags.push(self.err_at("E0200", "#elif after #else".to_string(), line_no));
+                    self.diags
+                        .push(self.err_at("E0200", "#elif after #else".to_string(), line_no));
                     return;
                 }
                 let state = &mut self.cond_stack[len - 1];
@@ -1358,7 +1538,9 @@ impl Preprocessor {
                     drop(state);
                     let val = parent_active && self.eval_const_expr(&expr);
                     let state = &mut self.cond_stack[len - 1];
-                    if val { state.any_true = true; }
+                    if val {
+                        state.any_true = true;
+                    }
                     state.active = val;
                 }
             }
@@ -1366,12 +1548,19 @@ impl Preprocessor {
             let name = directive[8..].trim();
             let len = self.cond_stack.len();
             if len > 0 {
-                let parent_active = if len <= 1 { true }
-                    else { self.cond_stack[..len-1].iter().all(|c| c.active) };
+                let parent_active = if len <= 1 {
+                    true
+                } else {
+                    self.cond_stack[..len - 1].iter().all(|c| c.active)
+                };
                 let saw_else = self.cond_stack[len - 1].saw_else;
                 let any_true = self.cond_stack[len - 1].any_true;
                 if saw_else {
-                    self.diags.push(self.err_at("E0200", "#elifdef after #else".to_string(), line_no));
+                    self.diags.push(self.err_at(
+                        "E0200",
+                        "#elifdef after #else".to_string(),
+                        line_no,
+                    ));
                     return;
                 }
                 let state = &mut self.cond_stack[len - 1];
@@ -1380,7 +1569,9 @@ impl Preprocessor {
                 } else {
                     let val = parent_active && self.macros.contains_key(name);
                     let state = &mut self.cond_stack[len - 1];
-                    if val { state.any_true = true; }
+                    if val {
+                        state.any_true = true;
+                    }
                     state.active = val;
                 }
             }
@@ -1388,12 +1579,19 @@ impl Preprocessor {
             let name = directive[9..].trim();
             let len = self.cond_stack.len();
             if len > 0 {
-                let parent_active = if len <= 1 { true }
-                    else { self.cond_stack[..len-1].iter().all(|c| c.active) };
+                let parent_active = if len <= 1 {
+                    true
+                } else {
+                    self.cond_stack[..len - 1].iter().all(|c| c.active)
+                };
                 let saw_else = self.cond_stack[len - 1].saw_else;
                 let any_true = self.cond_stack[len - 1].any_true;
                 if saw_else {
-                    self.diags.push(self.err_at("E0200", "#elifndef after #else".to_string(), line_no));
+                    self.diags.push(self.err_at(
+                        "E0200",
+                        "#elifndef after #else".to_string(),
+                        line_no,
+                    ));
                     return;
                 }
                 let state = &mut self.cond_stack[len - 1];
@@ -1402,35 +1600,46 @@ impl Preprocessor {
                 } else {
                     let val = parent_active && !self.macros.contains_key(name);
                     let state = &mut self.cond_stack[len - 1];
-                    if val { state.any_true = true; }
+                    if val {
+                        state.any_true = true;
+                    }
                     state.active = val;
                 }
             }
         } else if directive.starts_with("else") {
             let len = self.cond_stack.len();
             if len > 0 {
-                let parent_active = if len <= 1 { true }
-                    else { self.cond_stack[..len-1].iter().all(|c| c.active) };
+                let parent_active = if len <= 1 {
+                    true
+                } else {
+                    self.cond_stack[..len - 1].iter().all(|c| c.active)
+                };
                 let state = &mut self.cond_stack[len - 1];
                 if state.saw_else {
-                    self.diags.push(self.err_at("E0201", "duplicate #else".to_string(), line_no));
+                    self.diags
+                        .push(self.err_at("E0201", "duplicate #else".to_string(), line_no));
                     return;
                 }
                 state.saw_else = true;
                 state.active = parent_active && !state.any_true;
-                if state.active { state.any_true = true; }
+                if state.active {
+                    state.any_true = true;
+                }
             }
         } else if directive.starts_with("endif") {
             if self.cond_stack.pop().is_none() {
-                self.diags.push(self.err_at("E0202", "#endif without #if".to_string(), line_no));
+                self.diags
+                    .push(self.err_at("E0202", "#endif without #if".to_string(), line_no));
             }
         } else if let Some(rest) = directive.strip_prefix("pragma") {
             let pragma_text = rest.trim();
             if pragma_text == "once" {
                 // 记录当前文件为 pragma once
-                let canonical = Path::new(&self.file).canonicalize()
+                let canonical = Path::new(&self.file)
+                    .canonicalize()
                     .unwrap_or_else(|_| Path::new(&self.file).to_path_buf());
-                self.pragma_once.insert(canonical.to_string_lossy().to_string());
+                self.pragma_once
+                    .insert(canonical.to_string_lossy().to_string());
             } else if let Some(rest) = pragma_text.strip_prefix("GCC diagnostic") {
                 self.handle_gcc_diagnostic(rest.trim(), line_no);
             } else if let Some(rest) = pragma_text.strip_prefix("pack") {
@@ -1472,7 +1681,7 @@ impl Preprocessor {
                 match arg {
                     "default" | "reset" => self.charset = "UTF-8".to_string(),
                     s if s.starts_with('"') && s.ends_with('"') => {
-                        let inner = &s[1..s.len()-1];
+                        let inner = &s[1..s.len() - 1];
                         match inner {
                             "POSIX" | "C" | "ASCII" => self.charset = "ASCII".to_string(),
                             "UTF-8" | "utf8" => self.charset = "UTF-8".to_string(),
@@ -1489,17 +1698,18 @@ impl Preprocessor {
         } else if let Some(rest) = directive.strip_prefix("error") {
             if self.is_active() {
                 let msg = rest.trim();
-                self.diags.push(self.err_at("E0203", format!("#error {}", msg), line_no));
+                self.diags
+                    .push(self.err_at("E0203", format!("#error {}", msg), line_no));
             }
         } else if let Some(rest) = directive.strip_prefix("warning") {
             if self.is_active() {
                 let msg = rest.trim();
-                self.diags.push(self.warn_at("W0200", format!("#warning {}", msg), line_no));
+                self.diags
+                    .push(self.warn_at("W0200", format!("#warning {}", msg), line_no));
             }
-        } else if directive.starts_with("embed")
-            && self.is_active() {
-                self.do_embed(directive[5..].trim(), line_no);
-            }
+        } else if directive.starts_with("embed") && self.is_active() {
+            self.do_embed(directive[5..].trim(), line_no);
+        }
         // 忽略未知指令 (line markers 等)
     }
 
@@ -1507,9 +1717,12 @@ impl Preprocessor {
         // #define NAME body  或  #define NAME(args, ...) body
         let rest = rest.trim_start();
         // 提取宏名
-        let name_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_')
+        let name_end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
             .unwrap_or(rest.len());
-        if name_end == 0 { return; }
+        if name_end == 0 {
+            return;
+        }
         let name = &rest[..name_end];
         let after_name = &rest[name_end..];
 
@@ -1522,11 +1735,14 @@ impl Preprocessor {
             let mut gnu_named_variadic = false;
             for s in params_str.split(',') {
                 let s = s.trim();
-                if s == "..." { variadic = true; }
-                else if let Some(va_name) = s.strip_prefix("...") {
+                if s == "..." {
+                    variadic = true;
+                } else if let Some(va_name) = s.strip_prefix("...") {
                     // ...name 形式
                     variadic = true;
-                    if !va_name.is_empty() { params.push(va_name.to_string()); }
+                    if !va_name.is_empty() {
+                        params.push(va_name.to_string());
+                    }
                 } else if s.ends_with("...") && s.len() > 3 {
                     // name... 形式 (GNU): #define F(x...) body(x)
                     variadic = true;
@@ -1540,16 +1756,26 @@ impl Preprocessor {
             if variadic && !gnu_named_variadic && !params.iter().any(|p| p == "__VA_ARGS__") {
                 params.push("__VA_ARGS__".to_string());
             }
-            let body = after_name[paren_end+1..].trim().to_string();
-            self.macros.insert(name.to_string(), MacroDef {
-                params: Some(params), body, variadic,
-            });
+            let body = after_name[paren_end + 1..].trim().to_string();
+            self.macros.insert(
+                name.to_string(),
+                MacroDef {
+                    params: Some(params),
+                    body,
+                    variadic,
+                },
+            );
         } else {
             // object-like macro
             let body = after_name.trim().to_string();
-            self.macros.insert(name.to_string(), MacroDef {
-                params: None, body, variadic: false,
-            });
+            self.macros.insert(
+                name.to_string(),
+                MacroDef {
+                    params: None,
+                    body,
+                    variadic: false,
+                },
+            );
         }
     }
 
@@ -1560,9 +1786,7 @@ impl Preprocessor {
     /// GCC 扩展：`#include /absolute/path`（无引号）。
     fn is_absolute_include_path(s: &str) -> bool {
         let s = s.trim();
-        s.starts_with('/')
-            || s.starts_with('\\')
-            || (s.len() >= 2 && s.as_bytes()[1] == b':')
+        s.starts_with('/') || s.starts_with('\\') || (s.len() >= 2 && s.as_bytes()[1] == b':')
     }
 
     /// 从 `#include` 行剩余部分提取路径（截断空白与 `//` 注释）。
@@ -1583,20 +1807,30 @@ impl Preprocessor {
         } else if Self::is_absolute_include_path(rest) {
             (Self::parse_include_path_token(rest), false)
         } else {
-            self.diags.push(self.err_at("E0204", "expected \"file\" or <file>".to_string(), line_no));
+            self.diags.push(self.err_at(
+                "E0204",
+                "expected \"file\" or <file>".to_string(),
+                line_no,
+            ));
             return;
         };
 
         // dcc 内置 intrinsics 头: 拦截 x86intrin.h 系列 (标量模拟实现),
         // 优先于 host GCC 同名头 (后者依赖 dcc 未支持的 SIMD builtin)
-        if self.try_include_builtin_intrin(path) { return; }
+        if self.try_include_builtin_intrin(path) {
+            return;
+        }
 
         // 搜索文件
         let found = self.find_include(path, is_system);
         match found {
             Some(full_path) => self.include_resolved_file(full_path, path, line_no),
             None => {
-                self.diags.push(self.err_at("E0206", format!("include file not found: {}", path), line_no));
+                self.diags.push(self.err_at(
+                    "E0206",
+                    format!("include file not found: {}", path),
+                    line_no,
+                ));
             }
         }
     }
@@ -1605,18 +1839,23 @@ impl Preprocessor {
     /// 命中返回 true (已处理), 未命中返回 false (继续正常搜索).
     fn try_include_builtin_intrin(&mut self, path: &str) -> bool {
         const X86INTRIN_H: &str = include_str!("headers/x86intrin.h");
-        let name = Path::new(path).file_name()
-            .and_then(|s| s.to_str()).unwrap_or(path);
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path);
         let text = match name {
-            "x86intrin.h" | "immintrin.h" | "emmintrin.h"
-            | "smmintrin.h" | "tmmintrin.h" | "shaintrin.h" => X86INTRIN_H,
+            "x86intrin.h" | "immintrin.h" | "emmintrin.h" | "smmintrin.h" | "tmmintrin.h"
+            | "shaintrin.h" => X86INTRIN_H,
             _ => return false,
         };
         let key = "<builtin:x86intrin.h>".to_string();
-        if self.pragma_once.contains(&key) { return true; }
+        if self.pragma_once.contains(&key) {
+            return true;
+        }
         self.pragma_once.insert(key.clone());
         // 内置头也计入依赖闭包 (缓存校验用; 伪路径, cache_deps_fresh 跳过实读)
-        self.dep_hashes.push((key.clone(), Self::hash_content(X86INTRIN_H)));
+        self.dep_hashes
+            .push((key.clone(), Self::hash_content(X86INTRIN_H)));
         self.push_out(&format!("/* #include <{}> (dcc builtin) */\n", name));
         self.process_text(text, &key);
         true
@@ -1644,14 +1883,22 @@ impl Preprocessor {
         } else if Self::is_absolute_include_path(rest) {
             (Self::parse_include_path_token(rest), false)
         } else {
-            self.diags.push(self.err_at("E0204", "expected \"file\" or <file>".to_string(), line_no));
+            self.diags.push(self.err_at(
+                "E0204",
+                "expected \"file\" or <file>".to_string(),
+                line_no,
+            ));
             return;
         };
 
         match self.find_include_next(path, is_system) {
             Some(full_path) => self.include_resolved_file(full_path, path, line_no),
             None => {
-                self.diags.push(self.err_at("E0206", format!("include_next file not found: {}", path), line_no));
+                self.diags.push(self.err_at(
+                    "E0206",
+                    format!("include_next file not found: {}", path),
+                    line_no,
+                ));
             }
         }
     }
@@ -1664,10 +1911,11 @@ impl Preprocessor {
     /// 3. 正常处理; 仅当未产生任何新诊断时才落缓存 (有 #error/#warning
     ///    的头文件不缓存, 避免缓存吞掉诊断)。
     fn include_resolved_file(&mut self, full_path: PathBuf, path: &str, line_no: u32) {
-        let canonical = full_path.canonicalize()
-            .unwrap_or(full_path.clone());
+        let canonical = full_path.canonicalize().unwrap_or(full_path.clone());
         let key = canonical.to_string_lossy().to_string();
-        if self.pragma_once.contains(&key) { return; }
+        if self.pragma_once.contains(&key) {
+            return;
+        }
         self.deps.push(full_path.to_string_lossy().into_owned());
         match fs::read_to_string(&full_path) {
             Ok(text) => {
@@ -1675,34 +1923,44 @@ impl Preprocessor {
                 // 记录自身依赖 (含后续守卫/缓存命中路径): 父文件的依赖闭包
                 // 必须包含子文件本身, 否则子文件变更时父条目无法失效
                 self.dep_hashes.push((key.clone(), content_hash));
-        
+
                 // include-once 守卫快路径: 记住 (content_hash, 守卫宏名),
                 // hash 匹配才有效; 守卫宏已定义时跳过全部预处理
                 let guard = match self.once_guard.get(&key) {
                     Some((h, g)) if *h == content_hash => g.clone(),
                     _ => {
                         let g = Self::detect_include_guard(&text);
-                        self.once_guard.insert(key.clone(), (content_hash, g.clone()));
+                        self.once_guard
+                            .insert(key.clone(), (content_hash, g.clone()));
                         g
                     }
                 };
                 if let Some(g) = &guard {
-                    if self.macros.contains_key(g) { return; }
+                    if self.macros.contains_key(g) {
+                        return;
+                    }
                 }
-    
+
                 // 全局类型注册表: 检查缓存
                 let macro_hash = self.hash_macro_state();
                 let cache_path = self.get_cache_path(&canonical, content_hash, macro_hash);
-    
+
                 let bool_fixup = Self::needs_linux_stddef_bool_fixup(path);
                 // linux/stddef.h 定义 enum { false = 0, true = 1 }；若 stdbool.h
                 // 已将 false/true 宏化，预处理会把它变成非法的 0 = 0。
                 let skip_cache = bool_fixup
                     && (self.macros.contains_key("false") || self.macros.contains_key("true"));
-    
+
                 if let Some(ref cp) = cache_path {
                     if !skip_cache {
-                        if let Some((cached_output, cached_macros, cached_removed, cached_deps, counter_delta)) = self.load_from_cache(cp) {
+                        if let Some((
+                            cached_output,
+                            cached_macros,
+                            cached_removed,
+                            cached_deps,
+                            counter_delta,
+                        )) = self.load_from_cache(cp)
+                        {
                             // 依赖新鲜度校验: 任一依赖文件变更即 miss (重处理)
                             if Self::cache_deps_fresh(&cached_deps) {
                                 // 缓存命中: 直接使用缓存的预处理输出和宏
@@ -1719,7 +1977,7 @@ impl Preprocessor {
                                 }
                                 self.push_out(&cached_output);
                                 // 记录缓存回放的映射区间（近似：嵌套 include 映射到外层头文件）
-                                let cached_out_start = self.out_lines + 1;  // 跳过 include 注释行
+                                let cached_out_start = self.out_lines + 1; // 跳过 include 注释行
                                 let cached_lines = cached_output.matches('\n').count() as u32;
                                 if cached_lines > 0 {
                                     self.line_map.push(LineSpan {
@@ -1746,7 +2004,7 @@ impl Preprocessor {
                         }
                     }
                 }
-    
+
                 // 缓存未命中: 正常处理
                 self.push_out(&format!("/* #include \"{}\" */\n", path));
                 let saved_base = self.base_dir.clone();
@@ -1764,8 +2022,7 @@ impl Preprocessor {
                 let diags_before = self.diags.len();
                 // 记录依赖闭包起点, 用于提取本次处理期间的传递依赖
                 let deps_before = self.dep_hashes.len();
-                self.base_dir = full_path.parent()
-                    .unwrap_or(Path::new(".")).to_path_buf();
+                self.base_dir = full_path.parent().unwrap_or(Path::new(".")).to_path_buf();
                 self.process_text(&text, &full_path.to_string_lossy());
                 if let Some(def) = saved_false {
                     self.macros.insert("false".to_string(), def);
@@ -1774,37 +2031,54 @@ impl Preprocessor {
                     self.macros.insert("true".to_string(), def);
                 }
                 self.base_dir = saved_base;
-    
+
                 // 保存到缓存 (仅保存该头文件新增的宏, 避免冗余和状态污染);
                 // 产生诊断的头文件不落缓存, 下次运行重新处理并重新报诊断
                 if let Some(ref cp) = cache_path {
                     if !skip_cache && self.diags.len() == diags_before {
                         let new_output = self.out[saved_out_len..].to_string();
                         // 变更集: 值被改变或新增的宏 (新增 + 重新定义)
-                        let header_macros: HashMap<String, MacroDef> = self.macros.iter()
-                            .filter(|(k, v)| saved_macros.get(*k).is_none_or(|old| !Self::macro_def_eq(old, v)))
+                        let header_macros: HashMap<String, MacroDef> = self
+                            .macros
+                            .iter()
+                            .filter(|(k, v)| {
+                                saved_macros
+                                    .get(*k)
+                                    .is_none_or(|old| !Self::macro_def_eq(old, v))
+                            })
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
                         // 变更集: 处理期间被 #undef 删除的宏, 命中时必须回放删除
-                        let removed_macros: Vec<String> = saved_macros.keys()
+                        let removed_macros: Vec<String> = saved_macros
+                            .keys()
                             .filter(|k| !self.macros.contains_key(*k))
                             .cloned()
                             .collect();
                         // 本次处理期间新增的依赖闭包: 自身 + 嵌套 include
                         // (含嵌套缓存命中回填的传递依赖), 按路径去重后写入
-                        let mut dep_closure: Vec<(String, u64)> =
-                            vec![(key.clone(), content_hash)];
+                        let mut dep_closure: Vec<(String, u64)> = vec![(key.clone(), content_hash)];
                         dep_closure.extend(self.dep_hashes[deps_before..].iter().cloned());
                         let mut seen: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
                         dep_closure.retain(|(p, _)| seen.insert(p.clone()));
                         let counter_delta = self.counter.wrapping_sub(counter_before);
-                        self.save_to_cache(cp, &new_output, &header_macros, &removed_macros, &dep_closure, counter_delta);
+                        self.save_to_cache(
+                            cp,
+                            &new_output,
+                            &header_macros,
+                            &removed_macros,
+                            &dep_closure,
+                            counter_delta,
+                        );
                     }
                 }
             }
             Err(e) => {
-                self.diags.push(self.err_at("E0205", format!("cannot read {}: {}", path, e), line_no));
+                self.diags.push(self.err_at(
+                    "E0205",
+                    format!("cannot read {}: {}", path, e),
+                    line_no,
+                ));
             }
         }
     }
@@ -1826,7 +2100,11 @@ impl Preprocessor {
             dirs.push(PathBuf::from(d));
         }
         dirs.extend(host_gcc_include_dirs().iter().cloned());
-        for d in ["/usr/include/linux", "/usr/include/asm", "/usr/include/asm-generic"] {
+        for d in [
+            "/usr/include/linux",
+            "/usr/include/asm",
+            "/usr/include/asm-generic",
+        ] {
             dirs.push(PathBuf::from(d));
         }
         dirs
@@ -1836,7 +2114,10 @@ impl Preprocessor {
     fn find_include_next(&self, name: &str, is_system: bool) -> Option<PathBuf> {
         let name = name.trim();
         let dirs = self.include_search_dirs(is_system);
-        let cur = self.base_dir.canonicalize().unwrap_or_else(|_| self.base_dir.clone());
+        let cur = self
+            .base_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.base_dir.clone());
 
         // 找到当前头文件目录在搜索列表中的位置，从其之后开始找
         let mut start = 0;
@@ -1874,17 +2155,23 @@ impl Preprocessor {
         // 1. 相对当前文件 (仅 "file" 形式)
         if !is_system {
             let p = self.base_dir.join(name);
-            if p.exists() { return Some(p); }
+            if p.exists() {
+                return Some(p);
+            }
         }
         // 2. 用户 -I 路径
         for dir in &self.include_paths {
             let p = dir.join(name);
-            if p.exists() { return Some(p); }
+            if p.exists() {
+                return Some(p);
+            }
         }
         // 3. 系统 -isystem 路径
         for dir in &self.system_paths {
             let p = dir.join(name);
-            if p.exists() { return Some(p); }
+            if p.exists() {
+                return Some(p);
+            }
         }
         // 4. 标准系统路径 (含多架构支持)
         let system_dirs = [
@@ -1896,12 +2183,16 @@ impl Preprocessor {
         ];
         for dir in &system_dirs {
             let p = Path::new(dir).join(name);
-            if p.exists() { return Some(p); }
+            if p.exists() {
+                return Some(p);
+            }
         }
         // 5. GCC 内建 include（stddef.h/stdbool.h 等；优先于 linux UAPI 同名头）
         for dir in host_gcc_include_dirs() {
             let p = dir.join(name);
-            if p.exists() { return Some(p); }
+            if p.exists() {
+                return Some(p);
+            }
         }
         // 6. Linux 内核 UAPI 路径（仅当标准/GCC 头不存在时）
         let kernel_dirs = [
@@ -1911,7 +2202,9 @@ impl Preprocessor {
         ];
         for dir in &kernel_dirs {
             let p = Path::new(dir).join(name);
-            if p.exists() { return Some(p); }
+            if p.exists() {
+                return Some(p);
+            }
         }
         None
     }
@@ -1938,12 +2231,16 @@ impl Preprocessor {
         // 提取文件名: 以 "file" 或 <file> 开头
         let (path, rest) = if let Some(stripped) = args.strip_prefix('"') {
             let end = stripped.find('"').map(|i| i + 1).unwrap_or(args.len());
-            (&args[1..end], args[end+1..].trim())
+            (&args[1..end], args[end + 1..].trim())
         } else if let Some(stripped) = args.strip_prefix('<') {
             let end = stripped.find('>').map(|i| i + 1).unwrap_or(args.len());
-            (&args[1..end], args[end+1..].trim())
+            (&args[1..end], args[end + 1..].trim())
         } else {
-            self.diags.push(self.err_at("E0207", "expected \"file\" or <file> for #embed".to_string(), line_no));
+            self.diags.push(self.err_at(
+                "E0207",
+                "expected \"file\" or <file> for #embed".to_string(),
+                line_no,
+            ));
             return;
         };
         // 解析可选参数: limit(N) / prefix(...) / suffix(...) / if_empty(...)
@@ -1955,9 +2252,13 @@ impl Preprocessor {
         let mut rest = rest;
         loop {
             rest = rest.trim_start();
-            if rest.is_empty() { break; }
+            if rest.is_empty() {
+                break;
+            }
             // 跳过前导括号 (兼容 `(limit(4))`)
-            if rest.starts_with('(') { rest = rest[1..].trim_start(); }
+            if rest.starts_with('(') {
+                rest = rest[1..].trim_start();
+            }
             let mut matched = false;
             for kw in ["limit", "prefix", "suffix", "if_empty"] {
                 if let Some(after_kw) = rest.strip_prefix(kw) {
@@ -1971,16 +2272,20 @@ impl Preprocessor {
                                 "suffix" => suffix = Self::parse_embed_bytes(arg),
                                 _ => if_empty = Self::parse_embed_bytes(arg),
                             }
-                            rest = after_kw[close+2..].trim_start();
+                            rest = after_kw[close + 2..].trim_start();
                             // 跳过结尾括号
-                            if rest.starts_with(')') { rest = rest[1..].trim_start(); }
+                            if rest.starts_with(')') {
+                                rest = rest[1..].trim_start();
+                            }
                             matched = true;
                             break;
                         }
                     }
                 }
             }
-            if !matched { break; }
+            if !matched {
+                break;
+            }
         }
         // 搜索文件 (与 #include 相同逻辑)
         match self.find_include(path, args.starts_with('<')) {
@@ -1989,7 +2294,8 @@ impl Preprocessor {
                     Ok(bytes) => {
                         // C23: prefix + 文件内容(截断至 limit) + suffix;
                         // 文件为空时以 if_empty 代替文件内容
-                        let mut data: Vec<u8> = Vec::with_capacity(bytes.len() + prefix.len() + suffix.len());
+                        let mut data: Vec<u8> =
+                            Vec::with_capacity(bytes.len() + prefix.len() + suffix.len());
                         data.extend_from_slice(&prefix);
                         let max = limit.unwrap_or(bytes.len()).min(bytes.len());
                         if bytes.is_empty() {
@@ -1999,7 +2305,9 @@ impl Preprocessor {
                         }
                         data.extend_from_slice(&suffix);
                         for (i, &b) in data.iter().enumerate() {
-                            if i > 0 { self.push_out(", "); }
+                            if i > 0 {
+                                self.push_out(", ");
+                            }
                             self.push_out(&b.to_string());
                         }
                     }
@@ -2011,7 +2319,11 @@ impl Preprocessor {
             None => {
                 // 找不到文件: 输出空 (C23 标准中 #embed 找不到文件为未定义行为)
                 // #embed "file" limit(0) 总是有效
-                self.diags.push(self.err_at("E0208", format!("embed file not found: {}", path), line_no));
+                self.diags.push(self.err_at(
+                    "E0208",
+                    format!("embed file not found: {}", path),
+                    line_no,
+                ));
             }
         }
     }
@@ -2101,18 +2413,49 @@ impl Preprocessor {
             let b = bytes[i];
             if b == b'\\' && i + 1 < bytes.len() {
                 match bytes[i + 1] {
-                    b'n' => { out.push('\n'); i += 2; continue; }
-                    b't' => { out.push('\t'); i += 2; continue; }
-                    b'r' => { out.push('\r'); i += 2; continue; }
-                    b'\\' => { out.push('\\'); i += 2; continue; }
-                    b'"' => { out.push('"'); i += 2; continue; }
-                    b'\'' => { out.push('\''); i += 2; continue; }
-                    b'?' => { out.push('?'); i += 2; continue; }
+                    b'n' => {
+                        out.push('\n');
+                        i += 2;
+                        continue;
+                    }
+                    b't' => {
+                        out.push('\t');
+                        i += 2;
+                        continue;
+                    }
+                    b'r' => {
+                        out.push('\r');
+                        i += 2;
+                        continue;
+                    }
+                    b'\\' => {
+                        out.push('\\');
+                        i += 2;
+                        continue;
+                    }
+                    b'"' => {
+                        out.push('"');
+                        i += 2;
+                        continue;
+                    }
+                    b'\'' => {
+                        out.push('\'');
+                        i += 2;
+                        continue;
+                    }
+                    b'?' => {
+                        out.push('?');
+                        i += 2;
+                        continue;
+                    }
                     b'0'..=b'7' => {
                         // 八进制: 最多 3 位
                         let mut n = 0u32;
                         let mut k = 0;
-                        while k < 3 && i + 1 + k < bytes.len() && (b'0'..=b'7').contains(&bytes[i + 1 + k]) {
+                        while k < 3
+                            && i + 1 + k < bytes.len()
+                            && (b'0'..=b'7').contains(&bytes[i + 1 + k])
+                        {
                             n = n * 8 + (bytes[i + 1 + k] - b'0') as u32;
                             k += 1;
                         }
@@ -2124,7 +2467,10 @@ impl Preprocessor {
                         // 十六进制
                         let mut n = 0u32;
                         let mut k = 0;
-                        while k < 2 && i + 2 + k < bytes.len() && (bytes[i + 2 + k].is_ascii_hexdigit()) {
+                        while k < 2
+                            && i + 2 + k < bytes.len()
+                            && (bytes[i + 2 + k].is_ascii_hexdigit())
+                        {
                             let d = (bytes[i + 2 + k] as char).to_digit(16).unwrap_or(0);
                             n = n * 16 + d;
                             k += 1;
@@ -2133,7 +2479,11 @@ impl Preprocessor {
                         i += 2 + k;
                         continue;
                     }
-                    _ => { out.push(b as char); i += 1; continue; }
+                    _ => {
+                        out.push(b as char);
+                        i += 1;
+                        continue;
+                    }
                 }
             }
             out.push(b as char);
@@ -2168,12 +2518,15 @@ impl Preprocessor {
         if kind.eq_ignore_ascii_case("FENV_ACCESS") {
             match state.as_str() {
                 "ON" | "DEFAULT" => self.fenv_access = true,
-                "OFF"             => self.fenv_access = false,
+                "OFF" => self.fenv_access = false,
                 _ => {
                     self.diags.push(Diagnostic::warn(
                         "W0001",
-                        format!("unknown STDC FENV_ACCESS state `{}`; \
-                                 expected ON, OFF, or DEFAULT", state_raw),
+                        format!(
+                            "unknown STDC FENV_ACCESS state `{}`; \
+                                 expected ON, OFF, or DEFAULT",
+                            state_raw
+                        ),
                         Span::point(&self.file, line, 1),
                     ));
                 }
@@ -2244,7 +2597,12 @@ impl Preprocessor {
         // 嵌套调用 (tail_call 递归) 时先保存外层记录, 结束时合并回去
         let saved = self.expanded_macros.borrow().clone();
         if std::env::var("DCC_PP_DEBUG").is_ok() && line.contains("asm_inline") {
-            eprintln!("[pp-debug] MAP_ENTER saved={} depth={} line_hdr={:?}", saved.len(), EXPAND_DEPTH.with(|c| c.get()), &line[..line.len().min(60)]);
+            eprintln!(
+                "[pp-debug] MAP_ENTER saved={} depth={} line_hdr={:?}",
+                saved.len(),
+                EXPAND_DEPTH.with(|c| c.get()),
+                &line[..line.len().min(60)]
+            );
         }
         self.expanded_macros.borrow_mut().clear();
         let disabled = HashSet::new();
@@ -2281,7 +2639,12 @@ impl Preprocessor {
         let merged_len = merged.len();
         *self.expanded_macros.borrow_mut() = merged;
         if std::env::var("DCC_PP_DEBUG").is_ok() && result.contains("asm_inline") {
-            eprintln!("[pp-debug] MAP_EXIT saved={} merged={} result_has_asm_inline={}", saved_len, merged_len, result.contains("asm_inline"));
+            eprintln!(
+                "[pp-debug] MAP_EXIT saved={} merged={} result_has_asm_inline={}",
+                saved_len,
+                merged_len,
+                result.contains("asm_inline")
+            );
         }
         result
     }
@@ -2300,16 +2663,14 @@ impl Preprocessor {
             let pos = start + rel;
             let end = pos + name.len();
             // 开头/末尾是安全边界, 中间位置按实际字符判断
-            let before_ok = pos == 0
-                || {
-                    let b = bytes[pos - 1];
-                    !b.is_ascii_alphanumeric() && b != b'_'
-                };
-            let after_ok = end >= bytes.len()
-                || {
-                    let a = bytes[end];
-                    !a.is_ascii_alphanumeric() && a != b'_'
-                };
+            let before_ok = pos == 0 || {
+                let b = bytes[pos - 1];
+                !b.is_ascii_alphanumeric() && b != b'_'
+            };
+            let after_ok = end >= bytes.len() || {
+                let a = bytes[end];
+                !a.is_ascii_alphanumeric() && a != b'_'
+            };
             if before_ok && after_ok {
                 return true;
             }
@@ -2319,7 +2680,12 @@ impl Preprocessor {
     }
 
     /// 用禁用集展开文本; `map` 提供 __LINE__ 的行号映射
-    fn expand_with_disabled(&mut self, text: &str, disabled: &HashSet<String>, map: LineMap) -> String {
+    fn expand_with_disabled(
+        &mut self,
+        text: &str,
+        disabled: &HashSet<String>,
+        map: LineMap,
+    ) -> String {
         // 递归深度保护：宏互相引用时避免栈溢出
         let depth = EXPAND_DEPTH.with(|d| {
             let v = d.get();
@@ -2329,7 +2695,11 @@ impl Preprocessor {
         if depth > 256 {
             EXPAND_DEPTH.with(|d| d.set(depth));
             if std::env::var("DCC_PP_DEBUG").is_ok() && text.contains("asm_inline") {
-                eprintln!("[pp-debug] DEPTH_LIMIT depth={} text={:?}", depth, &text[..text.len().min(200)]);
+                eprintln!(
+                    "[pp-debug] DEPTH_LIMIT depth={} text={:?}",
+                    depth,
+                    &text[..text.len().min(200)]
+                );
             }
             return text.to_string();
         }
@@ -2338,7 +2708,12 @@ impl Preprocessor {
         result
     }
 
-    fn expand_with_disabled_inner(&mut self, text: &str, disabled: &HashSet<String>, map: LineMap) -> String {
+    fn expand_with_disabled_inner(
+        &mut self,
+        text: &str,
+        disabled: &HashSet<String>,
+        map: LineMap,
+    ) -> String {
         let mut out = String::with_capacity(text.len());
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
@@ -2352,10 +2727,17 @@ impl Preprocessor {
                 out.push('"');
                 i += 1;
                 while i < len && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
-                    out.push(chars[i]); i += 1;
+                    if chars[i] == '\\' && i + 1 < len {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    out.push(chars[i]);
+                    i += 1;
                 }
-                if i < len { out.push('"'); i += 1; }
+                if i < len {
+                    out.push('"');
+                    i += 1;
+                }
                 continue;
             }
             // 跳过字符字面量
@@ -2363,16 +2745,25 @@ impl Preprocessor {
                 out.push('\'');
                 i += 1;
                 while i < len && chars[i] != '\'' {
-                    if chars[i] == '\\' && i + 1 < len { out.push(chars[i]); i += 1; }
-                    out.push(chars[i]); i += 1;
+                    if chars[i] == '\\' && i + 1 < len {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    out.push(chars[i]);
+                    i += 1;
                 }
-                if i < len { out.push('\''); i += 1; }
+                if i < len {
+                    out.push('\'');
+                    i += 1;
+                }
                 continue;
             }
             // 标识符
             if chars[i].is_alphabetic() || chars[i] == '_' {
                 let start = i;
-                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
                 let ident: String = chars[start..i].iter().collect();
 
                 // 特殊内建宏
@@ -2405,23 +2796,36 @@ impl Preprocessor {
                 // 把 _Pragma(...) 整体吃掉, 然后调用 process_directive 内部逻辑
                 if ident == "_Pragma" {
                     let mut j = i;
-                    while j < len && chars[j].is_whitespace() { j += 1; }
+                    while j < len && chars[j].is_whitespace() {
+                        j += 1;
+                    }
                     if j < len && chars[j] == '(' {
                         j += 1;
-                        while j < len && chars[j].is_whitespace() { j += 1; }
+                        while j < len && chars[j].is_whitespace() {
+                            j += 1;
+                        }
                         if j < len && chars[j] == '"' {
                             // 提取字符串内容
                             j += 1;
                             let content_start = j;
                             while j < len && chars[j] != '"' {
-                                if chars[j] == '\\' && j + 1 < len { j += 2; continue; }
+                                if chars[j] == '\\' && j + 1 < len {
+                                    j += 2;
+                                    continue;
+                                }
                                 j += 1;
                             }
                             let raw: String = chars[content_start..j].iter().collect();
                             let pragma_text = Self::unescape_string(&raw);
-                            if j < len { j += 1; } // 跳过 "
-                            while j < len && chars[j] != ')' { j += 1; }
-                            if j < len { j += 1; } // 跳过 )
+                            if j < len {
+                                j += 1;
+                            } // 跳过 "
+                            while j < len && chars[j] != ')' {
+                                j += 1;
+                            }
+                            if j < len {
+                                j += 1;
+                            } // 跳过 )
                             i = j;
                             // _Pragma 是 expr, 在展开阶段不能改状态。
                             // 我们把它的字符串收集起来, 待外层 &mut self 方法批量应用
@@ -2434,38 +2838,68 @@ impl Preprocessor {
                     }
                     // 解析失败, 跳过整个 _Pragma(...) 表达式
                     let mut j = i;
-                    while j < len && chars[j] != ')' { j += 1; }
-                    if j < len { j += 1; }
+                    while j < len && chars[j] != ')' {
+                        j += 1;
+                    }
+                    if j < len {
+                        j += 1;
+                    }
                     i = j;
                     continue;
                 }
 
                 // __has_attribute(xxx) / __has_builtin(xxx) / __has_feature(xxx)
                 // __has_c_attribute(xxx): C23 属性检测
-                if ident == "__has_attribute" || ident == "__has_builtin" || ident == "__has_feature"
-                    || ident == "__has_c_attribute" {
+                if ident == "__has_attribute"
+                    || ident == "__has_builtin"
+                    || ident == "__has_feature"
+                    || ident == "__has_c_attribute"
+                {
                     let mut j = i;
-                    while j < len && chars[j].is_whitespace() { j += 1; }
+                    while j < len && chars[j].is_whitespace() {
+                        j += 1;
+                    }
                     if j < len && chars[j] == '(' {
                         j += 1;
                         let mut depth = 1;
                         let arg_start = j;
                         while j < len && depth > 0 {
-                            if chars[j] == '(' { depth += 1; }
-                            else if chars[j] == ')' { depth -= 1; }
-                            if depth > 0 { j += 1; }
+                            if chars[j] == '(' {
+                                depth += 1;
+                            } else if chars[j] == ')' {
+                                depth -= 1;
+                            }
+                            if depth > 0 {
+                                j += 1;
+                            }
                         }
                         let arg: String = chars[arg_start..j].iter().collect();
                         let arg = arg.trim().to_string();
                         let val = if ident == "__has_attribute" {
-                            if Self::is_known_attribute(&arg) { "1" } else { "0" }
+                            if Self::is_known_attribute(&arg) {
+                                "1"
+                            } else {
+                                "0"
+                            }
                         } else if ident == "__has_c_attribute" {
-                            if Self::is_known_c_attribute(&arg) { "1" } else { "0" }
+                            if Self::is_known_c_attribute(&arg) {
+                                "1"
+                            } else {
+                                "0"
+                            }
                         } else if ident == "__has_builtin" {
-                            if Self::is_known_builtin(&arg) { "1" } else { "0" }
-                        } else { "0" }; // __has_feature: always 0 for now
+                            if Self::is_known_builtin(&arg) {
+                                "1"
+                            } else {
+                                "0"
+                            }
+                        } else {
+                            "0"
+                        }; // __has_feature: always 0 for now
                         out.push_str(val);
-                        if j < len { j += 1; } // skip )
+                        if j < len {
+                            j += 1;
+                        } // skip )
                         i = j;
                         continue;
                     }
@@ -2489,13 +2923,16 @@ impl Preprocessor {
                     if let Some(ref params) = def.params {
                         // function-like: 需要后跟 (
                         let mut j = i;
-                        while j < len && chars[j].is_whitespace() { j += 1; }
+                        while j < len && chars[j].is_whitespace() {
+                            j += 1;
+                        }
                         if j < len && chars[j] == '(' {
                             j += 1;
                             self.expanded_macros.borrow_mut().insert(ident.clone());
                             let raw_args = self.parse_macro_args(&chars, &mut j);
                             // 确定哪些参数被 # 或 ## 操作 (这些参数不预展开)
-                            let (stringify_params, paste_params) = self.find_special_params(&def.body, params);
+                            let (stringify_params, paste_params) =
+                                self.find_special_params(&def.body, params);
                             // 参数预展开: 未被 # / ## 引用的参数先展开。
                             // 必须继承当前 disabled（涂蓝）集，否则 F(F(1))
                             // 这类嵌套会在参数预展开时丢掉外层禁令而无限递归。
@@ -2504,7 +2941,11 @@ impl Preprocessor {
                                 if stringify_params.contains(&idx) || paste_params.contains(&idx) {
                                     expanded_args.push(arg.clone());
                                 } else {
-                                    expanded_args.push(self.expand_with_disabled(arg, disabled, LineMap::Scalar(map.line(nl))));
+                                    expanded_args.push(self.expand_with_disabled(
+                                        arg,
+                                        disabled,
+                                        LineMap::Scalar(map.line(nl)),
+                                    ));
                                 }
                             }
                             // 可变参数处理
@@ -2513,11 +2954,20 @@ impl Preprocessor {
                                 // 最后一位是可变参数 (__VA_ARGS__ 或 GNU 命名)
                                 let fixed = params.len().saturating_sub(1);
                                 if raw_args.len() >= fixed {
-                                    let mut normal = expanded_args[..fixed.min(expanded_args.len())].to_vec();
+                                    let mut normal =
+                                        expanded_args[..fixed.min(expanded_args.len())].to_vec();
                                     let va_text = if raw_args.len() > fixed {
-                                        raw_args[fixed..].iter().map(|a| {
-                                            self.expand_with_disabled(a, disabled, LineMap::Scalar(map.line(nl)))
-                                        }).collect::<Vec<_>>().join(", ")
+                                        raw_args[fixed..]
+                                            .iter()
+                                            .map(|a| {
+                                                self.expand_with_disabled(
+                                                    a,
+                                                    disabled,
+                                                    LineMap::Scalar(map.line(nl)),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
                                     } else {
                                         String::new()
                                     };
@@ -2526,36 +2976,84 @@ impl Preprocessor {
                                 }
                             }
                             if final_args.len() == params.len() {
-                                if std::env::var("DCC_PP_DEBUG").is_ok() && (ident == "__GEN_RMWcc" || ident == "GEN_BINARY_RMWcc_6" || ident == "GEN_BINARY_RMWcc_5" || ident == "GEN_BINARY_RMWcc" || ident == "CONCATENATE" || ident == "__CONCATENATE") {
+                                if std::env::var("DCC_PP_DEBUG").is_ok()
+                                    && (ident == "__GEN_RMWcc"
+                                        || ident == "GEN_BINARY_RMWcc_6"
+                                        || ident == "GEN_BINARY_RMWcc_5"
+                                        || ident == "GEN_BINARY_RMWcc"
+                                        || ident == "CONCATENATE"
+                                        || ident == "__CONCATENATE")
+                                {
                                     eprintln!("[pp-debug] CALL {:?} raw={} final={} params={} body_has_asm={} dis={:?} body={:?}", ident, raw_args.len(), final_args.len(), params.len(), def.body.contains("asm_inline"), disabled, &def.body[..def.body.len().min(110)]);
                                 }
-                                let substituted = self.substitute_params(&def.body, params, &final_args, def.variadic);
-                                if std::env::var("DCC_PP_DEBUG").is_ok() && substituted.contains("asm_inline") {
-                                    eprintln!("[pp-debug] SUBST {:?} -> {:?}", ident, &substituted[..substituted.len().min(250)]);
+                                let substituted = self.substitute_params(
+                                    &def.body,
+                                    params,
+                                    &final_args,
+                                    def.variadic,
+                                );
+                                if std::env::var("DCC_PP_DEBUG").is_ok()
+                                    && substituted.contains("asm_inline")
+                                {
+                                    eprintln!(
+                                        "[pp-debug] SUBST {:?} -> {:?}",
+                                        ident,
+                                        &substituted[..substituted.len().min(250)]
+                                    );
                                 }
                                 // 创建新禁用集 = 原禁用集 + 当前宏名
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
                                 // 重新扫描替换结果
-                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled, LineMap::Scalar(map.line(nl)));
-                                if std::env::var("DCC_PP_DEBUG").is_ok() && rescanned.contains("asm_inline") {
-                                    eprintln!("[pp-debug] RESCAN_LEFTOVER {:?} -> {:?}", ident, &rescanned[..rescanned.len().min(250)]);
+                                let rescanned = self.expand_with_disabled(
+                                    &substituted,
+                                    &new_disabled,
+                                    LineMap::Scalar(map.line(nl)),
+                                );
+                                if std::env::var("DCC_PP_DEBUG").is_ok()
+                                    && rescanned.contains("asm_inline")
+                                {
+                                    eprintln!(
+                                        "[pp-debug] RESCAN_LEFTOVER {:?} -> {:?}",
+                                        ident,
+                                        &rescanned[..rescanned.len().min(250)]
+                                    );
                                 }
                                 out.push_str(&rescanned);
                             } else if raw_args.len() == params.len() {
-                                if std::env::var("DCC_PP_DEBUG").is_ok() && (ident == "__GEN_RMWcc" || ident == "GEN_BINARY_RMWcc_6" || ident == "GEN_BINARY_RMWcc_5" || ident == "GEN_BINARY_RMWcc" || ident == "CONCATENATE" || ident == "__CONCATENATE") {
+                                if std::env::var("DCC_PP_DEBUG").is_ok()
+                                    && (ident == "__GEN_RMWcc"
+                                        || ident == "GEN_BINARY_RMWcc_6"
+                                        || ident == "GEN_BINARY_RMWcc_5"
+                                        || ident == "GEN_BINARY_RMWcc"
+                                        || ident == "CONCATENATE"
+                                        || ident == "__CONCATENATE")
+                                {
                                     eprintln!("[pp-debug] CALL-raw {:?} raw={} final={} params={} body_has_asm={} body={:?}", ident, raw_args.len(), final_args.len(), params.len(), def.body.contains("asm_inline"), &def.body[..def.body.len().min(110)]);
                                 }
-                                let substituted = self.substitute_params(&def.body, params, &raw_args, def.variadic);
+                                let substituted = self.substitute_params(
+                                    &def.body,
+                                    params,
+                                    &raw_args,
+                                    def.variadic,
+                                );
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
-                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled, LineMap::Scalar(map.line(nl)));
+                                let rescanned = self.expand_with_disabled(
+                                    &substituted,
+                                    &new_disabled,
+                                    LineMap::Scalar(map.line(nl)),
+                                );
                                 out.push_str(&rescanned);
                             } else if params.is_empty() && raw_args.is_empty() {
                                 // PREFETCH() 这类无参函数宏
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
-                                let rescanned = self.expand_with_disabled(&def.body, &new_disabled, LineMap::Scalar(map.line(nl)));
+                                let rescanned = self.expand_with_disabled(
+                                    &def.body,
+                                    &new_disabled,
+                                    LineMap::Scalar(map.line(nl)),
+                                );
                                 out.push_str(&rescanned);
                             } else if raw_args.is_empty() && !params.is_empty() {
                                 // GCC 扩展: __STRING() / FOO() 当宏期待 ≥1 实参却被空括号
@@ -2568,10 +3066,19 @@ impl Preprocessor {
                                 // dcc 旧实现因 parse_macro_args("()") 返回 [] 而落到 fallthrough
                                 // 保留原标识符, 导致 __STRING 残留在预处理器输出里。
                                 let empty_args: Vec<String> = vec![String::new(); params.len()];
-                                let substituted = self.substitute_params(&def.body, params, &empty_args, def.variadic);
+                                let substituted = self.substitute_params(
+                                    &def.body,
+                                    params,
+                                    &empty_args,
+                                    def.variadic,
+                                );
                                 let mut new_disabled = disabled.clone();
                                 new_disabled.insert(ident.clone());
-                                let rescanned = self.expand_with_disabled(&substituted, &new_disabled, LineMap::Scalar(map.line(nl)));
+                                let rescanned = self.expand_with_disabled(
+                                    &substituted,
+                                    &new_disabled,
+                                    LineMap::Scalar(map.line(nl)),
+                                );
                                 out.push_str(&rescanned);
                             } else {
                                 out.push_str(&ident);
@@ -2595,16 +3102,20 @@ impl Preprocessor {
                         // 第二个 static bool 会保留为 bool, 报 unknown type.
                         // 判定依据: def.body 为简单 identifier 标识时
                         // 才走 tail_call 优化.
-                        let body_is_simple_ident = def.body.chars().next()
+                        let body_is_simple_ident = def
+                            .body
+                            .chars()
+                            .next()
                             .map(|c| c.is_alphabetic() || c == '_')
                             .unwrap_or(false)
                             && def.body.chars().all(|c| c.is_alphanumeric() || c == '_');
                         let mut new_disabled = disabled.clone();
                         new_disabled.insert(ident.clone());
                         let mut j = i;
-                        while j < len && chars[j].is_whitespace() { j += 1; }
-                        let tail_call = body_is_simple_ident
-                            && j < len && chars[j] == '(';
+                        while j < len && chars[j].is_whitespace() {
+                            j += 1;
+                        }
+                        let tail_call = body_is_simple_ident && j < len && chars[j] == '(';
                         let rescanned = if tail_call {
                             // 只重扫描到本次调用的闭合括号, 避免把后续同
                             // 名标识符一起带进 disabled 集.
@@ -2614,14 +3125,19 @@ impl Preprocessor {
                                 let mut depth = 1i32;
                                 k += 1;
                                 while k < len && depth > 0 {
-                                    if chars[k] == '(' { depth += 1; }
-                                    else if chars[k] == ')' { depth -= 1; }
+                                    if chars[k] == '(' {
+                                        depth += 1;
+                                    } else if chars[k] == ')' {
+                                        depth -= 1;
+                                    }
                                     k += 1;
                                 }
                             }
                             let call_args: String = chars[j..k].iter().collect();
                             let after_call: String = chars[k..].iter().collect();
-                            if std::env::var("DCC_PP_DEBUG").is_ok() && after_call.contains("asm_inline") {
+                            if std::env::var("DCC_PP_DEBUG").is_ok()
+                                && after_call.contains("asm_inline")
+                            {
                                 eprintln!("[pp-debug] TAILCALL_AFTER ident={} depth={} disabled={:?} after_hdr={:?}", ident, EXPAND_DEPTH.with(|c| c.get()), disabled, &after_call[..after_call.len().min(70)]);
                             }
                             let head = self.expand_with_disabled(
@@ -2631,10 +3147,17 @@ impl Preprocessor {
                             );
                             // 后续文本不带 disabled 集, 正常展开; 行号从当前
                             // 行继续 (Scalar 映射, 递归层级用不到物理表)
-                            format!("{}{}", head,
-                                self.expand_macros_map(&after_call, LineMap::Scalar(map.line(nl))))
+                            format!(
+                                "{}{}",
+                                head,
+                                self.expand_macros_map(&after_call, LineMap::Scalar(map.line(nl)))
+                            )
                         } else {
-                            self.expand_with_disabled(&def.body, &new_disabled, LineMap::Scalar(map.line(nl)))
+                            self.expand_with_disabled(
+                                &def.body,
+                                &new_disabled,
+                                LineMap::Scalar(map.line(nl)),
+                            )
                         };
                         out.push_str(&rescanned);
                         if tail_call {
@@ -2646,7 +3169,9 @@ impl Preprocessor {
                 }
                 continue;
             }
-            if chars[i] == '\n' { nl += 1; }
+            if chars[i] == '\n' {
+                nl += 1;
+            }
             out.push(chars[i]);
             i += 1;
         }
@@ -2676,7 +3201,9 @@ impl Preprocessor {
             ];
             for pat in &patterns {
                 if body.contains(pat.as_str()) {
-                    if !paste.contains(&idx) { paste.push(idx); }
+                    if !paste.contains(&idx) {
+                        paste.push(idx);
+                    }
                     break;
                 }
             }
@@ -2758,12 +3285,23 @@ impl Preprocessor {
         args
     }
 
-    fn substitute_params(&self, body: &str, params: &[String], args: &[String], variadic: bool) -> String {
+    fn substitute_params(
+        &self,
+        body: &str,
+        params: &[String],
+        args: &[String],
+        variadic: bool,
+    ) -> String {
         // 空 __VA_ARGS__ 时移除 GCC 扩展 ", ## __VA_ARGS__"
         let mut body = body.to_string();
         if let Some(va_idx) = params.iter().position(|p| p == "__VA_ARGS__") {
             if args.get(va_idx).map(|s| s.is_empty()).unwrap_or(false) {
-                for pat in &[", ## __VA_ARGS__", ",## __VA_ARGS__", ", ##__VA_ARGS__", ",##__VA_ARGS__"] {
+                for pat in &[
+                    ", ## __VA_ARGS__",
+                    ",## __VA_ARGS__",
+                    ", ##__VA_ARGS__",
+                    ",##__VA_ARGS__",
+                ] {
                     body = body.replace(pat, "");
                 }
             }
@@ -2811,7 +3349,9 @@ impl Preprocessor {
             if i + KEYWORD.len() <= bytes.len()
                 && &bytes[i..i + KEYWORD.len()] == KEYWORD
                 && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
-                && (i + KEYWORD.len() >= bytes.len() || !(bytes[i + KEYWORD.len()].is_ascii_alphanumeric() || bytes[i + KEYWORD.len()] == b'_'))
+                && (i + KEYWORD.len() >= bytes.len()
+                    || !(bytes[i + KEYWORD.len()].is_ascii_alphanumeric()
+                        || bytes[i + KEYWORD.len()] == b'_'))
             {
                 // 跳过空白
                 let mut j = i + KEYWORD.len();
@@ -2827,7 +3367,9 @@ impl Preprocessor {
                             b'(' => depth += 1,
                             b')' => {
                                 depth -= 1;
-                                if depth == 0 { break; }
+                                if depth == 0 {
+                                    break;
+                                }
                             }
                             _ => {}
                         }
@@ -2975,7 +3517,13 @@ impl Preprocessor {
     ///
     /// GNU 可变参数扩展: `,##X` 当 X 可变参数非空时 ## 无效果（仅移除 `##`）；
     /// 当 X 为空时移除 `,##X` 整段（含逗号）。
-    fn handle_paste(&self, body: &str, params: &[String], args: &[String], variadic: bool) -> String {
+    fn handle_paste(
+        &self,
+        body: &str,
+        params: &[String],
+        args: &[String],
+        variadic: bool,
+    ) -> String {
         if !body.contains("##") {
             return body.to_string();
         }
@@ -3039,8 +3587,8 @@ impl Preprocessor {
                         // - ,##X: , 在 before[..left_start], 直接拼上 right_sub → ,X
                         // - identifier##__VA_ARGS__: left_sub + right_sub 无空格
                         let pasted = format!("{}{}", left_sub, right_sub);
-                        result = format!("{}{}{}",
-                            &before[..left_start], pasted, &after[right_end..]);
+                        result =
+                            format!("{}{}{}", &before[..left_start], pasted, &after[right_end..]);
                         continue;
                     }
                 }
@@ -3055,7 +3603,9 @@ impl Preprocessor {
     fn handle_stringify(&self, body: &str, params: &[String], args: &[String]) -> String {
         let mut result = body.to_string();
         for (i, param) in params.iter().enumerate() {
-            if i >= args.len() { continue; }
+            if i >= args.len() {
+                continue;
+            }
             // 查找 # param (注意不是 ##)
             let pattern = format!("# {}", param);
             let pattern2 = format!("#{}", param);
@@ -3067,7 +3617,7 @@ impl Preprocessor {
                 while let Some(rel) = result[search_from..].find(pat.as_str()) {
                     let pos = search_from + rel;
                     // 确保不是 ##: 如果前一字符也是 #, 则这是 ##, 跳过此匹配
-                    if pos > 0 && result.as_bytes()[pos-1] == b'#' {
+                    if pos > 0 && result.as_bytes()[pos - 1] == b'#' {
                         search_from = pos + 1;
                         continue;
                     }
@@ -3085,10 +3635,7 @@ impl Preprocessor {
 
     /// 将参数值转为字符串字面量 (转义 " 和 \；换行/连续空白折叠为单空格，符合 C # 规则)
     fn stringify_arg(arg: &str) -> String {
-        let collapsed: String = arg
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let collapsed: String = arg.split_whitespace().collect::<Vec<_>>().join(" ");
         let escaped = collapsed.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{}\"", escaped)
     }
@@ -3138,10 +3685,15 @@ impl Preprocessor {
             }
             if chars[i].is_alphabetic() || chars[i] == '_' {
                 let start = i;
-                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
                 let ident: String = chars[start..i].iter().collect();
-                if ident == from { result.push_str(to); }
-                else { result.push_str(&ident); }
+                if ident == from {
+                    result.push_str(to);
+                } else {
+                    result.push_str(&ident);
+                }
             } else {
                 result.push(chars[i]);
                 i += 1;
@@ -3172,7 +3724,9 @@ impl Preprocessor {
             // 确保 defined 不在标识符中间
             if pos > 0 {
                 let prev = result.as_bytes()[pos - 1];
-                if prev.is_ascii_alphanumeric() || prev == b'_' { break; }
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    break;
+                }
             }
             let after = &result[pos + 7..];
             let after = after.trim_start();
@@ -3180,9 +3734,10 @@ impl Preprocessor {
                 let end = after.find(')').unwrap_or(0);
                 let name = after[1..end].trim();
                 let val = if self.macros.contains_key(name) { "1" } else { "0" };
-                result = format!("{}{}{}", &result[..pos], val, &after[end+1..]);
+                result = format!("{}{}{}", &result[..pos], val, &after[end + 1..]);
             } else {
-                let name_end = after.find(|c: char| !c.is_alphanumeric() && c != '_')
+                let name_end = after
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
                     .unwrap_or(after.len());
                 let name = &after[..name_end];
                 let val = if self.macros.contains_key(name) { "1" } else { "0" };
@@ -3199,7 +3754,7 @@ impl Preprocessor {
         // 递归下降求值
         let mut pos = 0;
         let bytes = expr.as_bytes();
-        
+
         Self::parse_ternary(bytes, &mut pos)
     }
 
@@ -3214,11 +3769,16 @@ impl Preprocessor {
                 i += 1;
                 while i < chars.len() && chars[i] != '\'' {
                     if chars[i] == '\\' && i + 1 < chars.len() {
-                        result.push(chars[i]); i += 1;
+                        result.push(chars[i]);
+                        i += 1;
                     }
-                    result.push(chars[i]); i += 1;
+                    result.push(chars[i]);
+                    i += 1;
                 }
-                if i < chars.len() { result.push('\''); i += 1; }
+                if i < chars.len() {
+                    result.push('\'');
+                    i += 1;
+                }
                 continue;
             }
             // 数字字面量（含 0x/0b 与数字分隔符）须整段保留，
@@ -3234,24 +3794,17 @@ impl Preprocessor {
                         || chars[start + 1] == 'B')
                 {
                     i += 1; // 吃掉 x/X/b/B
-                    while i < chars.len()
-                        && (chars[i].is_ascii_hexdigit() || chars[i] == '\'')
-                    {
+                    while i < chars.len() && (chars[i].is_ascii_hexdigit() || chars[i] == '\'') {
                         i += 1;
                     }
                 } else {
-                    while i < chars.len()
-                        && (chars[i].is_ascii_digit() || chars[i] == '\'')
-                    {
+                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '\'') {
                         i += 1;
                     }
                 }
                 // 保留整型后缀 U/L/ull 等
                 while i < chars.len()
-                    && (chars[i] == 'u'
-                        || chars[i] == 'U'
-                        || chars[i] == 'l'
-                        || chars[i] == 'L')
+                    && (chars[i] == 'u' || chars[i] == 'U' || chars[i] == 'l' || chars[i] == 'L')
                 {
                     i += 1;
                 }
@@ -3260,14 +3813,18 @@ impl Preprocessor {
             }
             if chars[i].is_alphabetic() || chars[i] == '_' {
                 let start = i;
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
                 let ident: String = chars[start..i].iter().collect();
                 match ident.as_str() {
                     "defined" | "true" => result.push('1'),
                     "false" => result.push('0'),
                     // __COUNTER__ 等特殊宏在 expand_macros 阶段已被替换为数字,
                     // 但若用户在 #if 中直接写, 仍按 0 兜底 (与 GCC 一致)
-                    _ => { result.push('0'); }
+                    _ => {
+                        result.push('0');
+                    }
                 }
             } else {
                 result.push(chars[i]);
@@ -3289,7 +3846,11 @@ impl Preprocessor {
                 *pos += 1;
             }
             let else_val = Self::parse_ternary(bytes, pos);
-            if cond != 0 { then_val } else { else_val }
+            if cond != 0 {
+                then_val
+            } else {
+                else_val
+            }
         } else {
             cond
         }
@@ -3298,7 +3859,7 @@ impl Preprocessor {
     fn parse_or_expr(bytes: &[u8], pos: &mut usize) -> i64 {
         let mut val = Self::parse_and_expr(bytes, pos);
         Self::skip_ws(bytes, pos);
-        while *pos + 1 < bytes.len() && bytes[*pos] == b'|' && bytes[*pos+1] == b'|' {
+        while *pos + 1 < bytes.len() && bytes[*pos] == b'|' && bytes[*pos + 1] == b'|' {
             *pos += 2;
             let rhs = Self::parse_and_expr(bytes, pos);
             val = if val != 0 || rhs != 0 { 1 } else { 0 };
@@ -3310,7 +3871,7 @@ impl Preprocessor {
     fn parse_and_expr(bytes: &[u8], pos: &mut usize) -> i64 {
         let mut val = Self::parse_bit_or(bytes, pos);
         Self::skip_ws(bytes, pos);
-        while *pos + 1 < bytes.len() && bytes[*pos] == b'&' && bytes[*pos+1] == b'&' {
+        while *pos + 1 < bytes.len() && bytes[*pos] == b'&' && bytes[*pos + 1] == b'&' {
             *pos += 2;
             let rhs = Self::parse_bit_or(bytes, pos);
             val = if val != 0 && rhs != 0 { 1 } else { 0 };
@@ -3324,11 +3885,15 @@ impl Preprocessor {
         loop {
             Self::skip_ws(bytes, pos);
             // 排除 ||
-            if *pos < bytes.len() && bytes[*pos] == b'|'
-                && (*pos + 1 >= bytes.len() || bytes[*pos+1] != b'|') {
+            if *pos < bytes.len()
+                && bytes[*pos] == b'|'
+                && (*pos + 1 >= bytes.len() || bytes[*pos + 1] != b'|')
+            {
                 *pos += 1;
                 val |= Self::parse_bit_xor(bytes, pos);
-            } else { break; }
+            } else {
+                break;
+            }
         }
         val
     }
@@ -3340,7 +3905,9 @@ impl Preprocessor {
             if *pos < bytes.len() && bytes[*pos] == b'^' {
                 *pos += 1;
                 val ^= Self::parse_bit_and(bytes, pos);
-            } else { break; }
+            } else {
+                break;
+            }
         }
         val
     }
@@ -3350,11 +3917,15 @@ impl Preprocessor {
         loop {
             Self::skip_ws(bytes, pos);
             // 排除 &&
-            if *pos < bytes.len() && bytes[*pos] == b'&'
-                && (*pos + 1 >= bytes.len() || bytes[*pos+1] != b'&') {
+            if *pos < bytes.len()
+                && bytes[*pos] == b'&'
+                && (*pos + 1 >= bytes.len() || bytes[*pos + 1] != b'&')
+            {
                 *pos += 1;
                 val &= Self::parse_eq_expr(bytes, pos);
-            } else { break; }
+            } else {
+                break;
+            }
         }
         val
     }
@@ -3364,12 +3935,18 @@ impl Preprocessor {
         loop {
             Self::skip_ws(bytes, pos);
             if *pos + 1 < bytes.len() {
-                if bytes[*pos] == b'=' && bytes[*pos+1] == b'=' {
-                    *pos += 2; val = (val == Self::parse_cmp_expr(bytes, pos)) as i64;
-                } else if bytes[*pos] == b'!' && bytes[*pos+1] == b'=' {
-                    *pos += 2; val = (val != Self::parse_cmp_expr(bytes, pos)) as i64;
-                } else { break; }
-            } else { break; }
+                if bytes[*pos] == b'=' && bytes[*pos + 1] == b'=' {
+                    *pos += 2;
+                    val = (val == Self::parse_cmp_expr(bytes, pos)) as i64;
+                } else if bytes[*pos] == b'!' && bytes[*pos + 1] == b'=' {
+                    *pos += 2;
+                    val = (val != Self::parse_cmp_expr(bytes, pos)) as i64;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
         val
     }
@@ -3396,8 +3973,12 @@ impl Preprocessor {
                         "ge" => (val >= rhs) as i64,
                         _ => unreachable!(),
                     };
-                } else { break; }
-            } else { break; }
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
         val
     }
@@ -3407,12 +3988,18 @@ impl Preprocessor {
         loop {
             Self::skip_ws(bytes, pos);
             if *pos + 1 < bytes.len() {
-                if bytes[*pos] == b'<' && bytes[*pos+1] == b'<' {
-                    *pos += 2; val <<= Self::parse_add_expr(bytes, pos);
-                } else if bytes[*pos] == b'>' && bytes[*pos+1] == b'>' {
-                    *pos += 2; val >>= Self::parse_add_expr(bytes, pos);
-                } else { break; }
-            } else { break; }
+                if bytes[*pos] == b'<' && bytes[*pos + 1] == b'<' {
+                    *pos += 2;
+                    val <<= Self::parse_add_expr(bytes, pos);
+                } else if bytes[*pos] == b'>' && bytes[*pos + 1] == b'>' {
+                    *pos += 2;
+                    val >>= Self::parse_add_expr(bytes, pos);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
         val
     }
@@ -3422,10 +4009,18 @@ impl Preprocessor {
         loop {
             Self::skip_ws(bytes, pos);
             if *pos < bytes.len() {
-                if bytes[*pos] == b'+' { *pos += 1; val += Self::parse_mul_expr(bytes, pos); }
-                else if bytes[*pos] == b'-' { *pos += 1; val -= Self::parse_mul_expr(bytes, pos); }
-                else { break; }
-            } else { break; }
+                if bytes[*pos] == b'+' {
+                    *pos += 1;
+                    val += Self::parse_mul_expr(bytes, pos);
+                } else if bytes[*pos] == b'-' {
+                    *pos += 1;
+                    val -= Self::parse_mul_expr(bytes, pos);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
         val
     }
@@ -3435,19 +4030,23 @@ impl Preprocessor {
         loop {
             Self::skip_ws(bytes, pos);
             if *pos < bytes.len() {
-                if bytes[*pos] == b'*' { *pos += 1; val *= Self::parse_unary(bytes, pos); }
-                else if bytes[*pos] == b'/' {
+                if bytes[*pos] == b'*' {
+                    *pos += 1;
+                    val *= Self::parse_unary(bytes, pos);
+                } else if bytes[*pos] == b'/' {
                     *pos += 1;
                     let d = Self::parse_unary(bytes, pos);
                     val = if d != 0 { val / d } else { 0 };
-                }
-                else if bytes[*pos] == b'%' {
+                } else if bytes[*pos] == b'%' {
                     *pos += 1;
                     let d = Self::parse_unary(bytes, pos);
                     val = if d != 0 { val % d } else { 0 };
+                } else {
+                    break;
                 }
-                else { break; }
-            } else { break; }
+            } else {
+                break;
+            }
         }
         val
     }
@@ -3455,15 +4054,29 @@ impl Preprocessor {
     fn parse_unary(bytes: &[u8], pos: &mut usize) -> i64 {
         Self::skip_ws(bytes, pos);
         if *pos < bytes.len() {
-            if bytes[*pos] == b'!' { *pos += 1; return if Self::parse_unary(bytes, pos) == 0 { 1 } else { 0 }; }
-            if bytes[*pos] == b'-' { *pos += 1; return -Self::parse_unary(bytes, pos); }
-            if bytes[*pos] == b'+' { *pos += 1; return Self::parse_unary(bytes, pos); }
-            if bytes[*pos] == b'~' { *pos += 1; return !Self::parse_unary(bytes, pos); }
+            if bytes[*pos] == b'!' {
+                *pos += 1;
+                return if Self::parse_unary(bytes, pos) == 0 { 1 } else { 0 };
+            }
+            if bytes[*pos] == b'-' {
+                *pos += 1;
+                return -Self::parse_unary(bytes, pos);
+            }
+            if bytes[*pos] == b'+' {
+                *pos += 1;
+                return Self::parse_unary(bytes, pos);
+            }
+            if bytes[*pos] == b'~' {
+                *pos += 1;
+                return !Self::parse_unary(bytes, pos);
+            }
             if bytes[*pos] == b'(' {
                 *pos += 1;
                 let val = Self::parse_ternary(bytes, pos);
                 Self::skip_ws(bytes, pos);
-                if *pos < bytes.len() && bytes[*pos] == b')' { *pos += 1; }
+                if *pos < bytes.len() && bytes[*pos] == b')' {
+                    *pos += 1;
+                }
                 return val;
             }
         }
@@ -3485,7 +4098,8 @@ impl Preprocessor {
         let ch = if *pos < bytes.len() && bytes[*pos] == b'\\' {
             *pos += 1;
             if *pos < bytes.len() {
-                let c = bytes[*pos]; *pos += 1;
+                let c = bytes[*pos];
+                *pos += 1;
                 match c {
                     b'n' => '\n' as i64,
                     b't' => '\t' as i64,
@@ -3507,7 +4121,9 @@ impl Preprocessor {
                                 if d.is_ascii_hexdigit() {
                                     val = val * 16 + (d as char).to_digit(16).unwrap() as i64;
                                     *pos += 1;
-                                } else { break; }
+                                } else {
+                                    break;
+                                }
                             }
                         }
                         val
@@ -3516,21 +4132,34 @@ impl Preprocessor {
                         // \NNN 八进制
                         let mut val = (d - b'0') as i64;
                         for _ in 0..2 {
-                            if *pos < bytes.len() && bytes[*pos].is_ascii_digit() && bytes[*pos] < b'8' {
+                            if *pos < bytes.len()
+                                && bytes[*pos].is_ascii_digit()
+                                && bytes[*pos] < b'8'
+                            {
                                 val = val * 8 + (bytes[*pos] - b'0') as i64;
                                 *pos += 1;
-                            } else { break; }
+                            } else {
+                                break;
+                            }
                         }
                         val
                     }
                     _ => c as i64,
                 }
-            } else { 0 }
+            } else {
+                0
+            }
         } else if *pos < bytes.len() {
-            let c = bytes[*pos] as i64; *pos += 1; c
-        } else { 0 };
+            let c = bytes[*pos] as i64;
+            *pos += 1;
+            c
+        } else {
+            0
+        };
         // skip closing '
-        if *pos < bytes.len() && bytes[*pos] == b'\'' { *pos += 1; }
+        if *pos < bytes.len() && bytes[*pos] == b'\'' {
+            *pos += 1;
+        }
         ch
     }
 
@@ -3538,7 +4167,9 @@ impl Preprocessor {
         Self::skip_ws(bytes, pos);
         let start = *pos;
         if *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
-            while *pos < bytes.len() && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'\'') {
+            while *pos < bytes.len()
+                && (bytes[*pos].is_ascii_alphanumeric() || bytes[*pos] == b'\'')
+            {
                 *pos += 1;
             }
             let s = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("0");
@@ -3553,7 +4184,9 @@ impl Preprocessor {
             } else {
                 s.parse::<i64>().unwrap_or(0)
             }
-        } else { 0 }
+        } else {
+            0
+        }
     }
 
     fn skip_ws(bytes: &[u8], pos: &mut usize) {
@@ -3570,7 +4203,8 @@ impl Preprocessor {
         result = self.replace_has_include(&result);
         result = self.replace_has_embed(&result);
         result = self.replace_has_attr_like(&result, "__has_attribute", Self::is_known_attribute);
-        result = self.replace_has_attr_like(&result, "__has_c_attribute", Self::is_known_c_attribute);
+        result =
+            self.replace_has_attr_like(&result, "__has_c_attribute", Self::is_known_c_attribute);
         result = self.replace_has_attr_like(&result, "__has_builtin", Self::is_known_builtin);
         result = self.replace_has_attr_like(&result, "__has_feature", |_| false);
         result
@@ -3582,36 +4216,56 @@ impl Preprocessor {
         let bytes = expr.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
-            if i + 11 <= bytes.len() && &bytes[i..i+11] == b"__has_embed"
-                && (i == 0 || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_')
-                && (i + 11 >= bytes.len() || !bytes[i+11].is_ascii_alphanumeric() && bytes[i+11] != b'_')
+            if i + 11 <= bytes.len()
+                && &bytes[i..i + 11] == b"__has_embed"
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
+                && (i + 11 >= bytes.len()
+                    || !bytes[i + 11].is_ascii_alphanumeric() && bytes[i + 11] != b'_')
             {
                 let mut j = i + 11;
-                while j < bytes.len() && bytes[j] == b' ' { j += 1; }
+                while j < bytes.len() && bytes[j] == b' ' {
+                    j += 1;
+                }
                 if j < bytes.len() && bytes[j] == b'(' {
                     j += 1;
-                    while j < bytes.len() && bytes[j] == b' ' { j += 1; }
+                    while j < bytes.len() && bytes[j] == b' ' {
+                        j += 1;
+                    }
                     // 提取路径: "file" 或 <file> 形式
                     let path = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'<') {
                         let start = j;
                         let close_ch = if bytes[j] == b'"' { b'"' } else { b'>' };
                         j += 1;
-                        while j < bytes.len() && bytes[j] != close_ch { j += 1; }
-                        if j < bytes.len() { j += 1; }
-                        expr[start..j].trim()
+                        while j < bytes.len() && bytes[j] != close_ch {
+                            j += 1;
+                        }
+                        if j < bytes.len() {
+                            j += 1;
+                        }
+                        expr[start..j]
+                            .trim()
                             .trim_matches(|c| c == '"' || c == '<' || c == '>')
                             .to_string()
-                    } else { String::new() };
+                    } else {
+                        String::new()
+                    };
                     // 跳过剩余参数 (limit(...) 等) 至 ')' 并求值
                     let mut depth = 1;
                     while j < bytes.len() && depth > 0 {
-                        if bytes[j] == b'(' { depth += 1; }
-                        else if bytes[j] == b')' { depth -= 1; }
-                        if depth > 0 { j += 1; }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
+                        if depth > 0 {
+                            j += 1;
+                        }
                     }
                     let found = !path.is_empty() && self.find_has_include(&path);
                     result.push_str(if found { "1" } else { "0" });
-                    if j < bytes.len() { j += 1; } // skip )
+                    if j < bytes.len() {
+                        j += 1;
+                    } // skip )
                     i = j;
                     continue;
                 }
@@ -3628,28 +4282,42 @@ impl Preprocessor {
         let mut i = 0;
         while i < bytes.len() {
             // 检查 __has_include (13 字符)
-            if i + 13 <= bytes.len() && &bytes[i..i+13] == b"__has_include"
-                && (i == 0 || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_')
-                && (i + 13 >= bytes.len() || !bytes[i+13].is_ascii_alphanumeric() && bytes[i+13] != b'_')
+            if i + 13 <= bytes.len()
+                && &bytes[i..i + 13] == b"__has_include"
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
+                && (i + 13 >= bytes.len()
+                    || !bytes[i + 13].is_ascii_alphanumeric() && bytes[i + 13] != b'_')
             {
                 let mut j = i + 13;
-                while j < bytes.len() && bytes[j] == b' ' { j += 1; }
+                while j < bytes.len() && bytes[j] == b' ' {
+                    j += 1;
+                }
                 if j < bytes.len() && bytes[j] == b'(' {
                     j += 1;
-                    while j < bytes.len() && bytes[j] == b' ' { j += 1; }
+                    while j < bytes.len() && bytes[j] == b' ' {
+                        j += 1;
+                    }
                     let path_start = j;
                     // 跳过到 )
                     let mut depth = 1;
                     while j < bytes.len() && depth > 0 {
-                        if bytes[j] == b'(' { depth += 1; }
-                        else if bytes[j] == b')' { depth -= 1; }
-                        if depth > 0 { j += 1; }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
+                        if depth > 0 {
+                            j += 1;
+                        }
                     }
-                    let path = expr[path_start..j].trim()
+                    let path = expr[path_start..j]
+                        .trim()
                         .trim_matches(|c| c == '<' || c == '>' || c == '"');
                     let found = self.find_has_include(path);
                     result.push_str(if found { "1" } else { "0" });
-                    if j < bytes.len() { j += 1; } // skip )
+                    if j < bytes.len() {
+                        j += 1;
+                    } // skip )
                     i = j;
                     continue;
                 }
@@ -3661,33 +4329,47 @@ impl Preprocessor {
     }
 
     fn replace_has_attr_like<F>(&self, expr: &str, macro_name: &str, check: F) -> String
-    where F: Fn(&str) -> bool {
+    where
+        F: Fn(&str) -> bool,
+    {
         let mut result = String::with_capacity(expr.len());
         let bytes = expr.as_bytes();
         let name_len = macro_name.len();
         let mut i = 0;
         while i < bytes.len() {
             if i + name_len <= bytes.len()
-                && &bytes[i..i+name_len] == macro_name.as_bytes()
-                && (i == 0 || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_')
-                && (i + name_len >= bytes.len() || !bytes[i+name_len].is_ascii_alphanumeric() && bytes[i+name_len] != b'_')
+                && &bytes[i..i + name_len] == macro_name.as_bytes()
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
+                && (i + name_len >= bytes.len()
+                    || !bytes[i + name_len].is_ascii_alphanumeric() && bytes[i + name_len] != b'_')
             {
                 let mut j = i + name_len;
-                while j < bytes.len() && bytes[j] == b' ' { j += 1; }
+                while j < bytes.len() && bytes[j] == b' ' {
+                    j += 1;
+                }
                 if j < bytes.len() && bytes[j] == b'(' {
                     j += 1;
-                    while j < bytes.len() && bytes[j] == b' ' { j += 1; }
+                    while j < bytes.len() && bytes[j] == b' ' {
+                        j += 1;
+                    }
                     let arg_start = j;
                     let mut depth = 1;
                     while j < bytes.len() && depth > 0 {
-                        if bytes[j] == b'(' { depth += 1; }
-                        else if bytes[j] == b')' { depth -= 1; }
-                        if depth > 0 { j += 1; }
+                        if bytes[j] == b'(' {
+                            depth += 1;
+                        } else if bytes[j] == b')' {
+                            depth -= 1;
+                        }
+                        if depth > 0 {
+                            j += 1;
+                        }
                     }
                     let arg = expr[arg_start..j].trim();
                     let val = if check(arg) { "1" } else { "0" };
                     result.push_str(val);
-                    if j < bytes.len() { j += 1; }
+                    if j < bytes.len() {
+                        j += 1;
+                    }
                     i = j;
                     continue;
                 }
@@ -3706,80 +4388,155 @@ impl Preprocessor {
         }
         // 相对当前文件
         let p = self.base_dir.join(path);
-        if p.exists() { return true; }
+        if p.exists() {
+            return true;
+        }
         // -I 路径
         for dir in &self.include_paths {
-            if dir.join(path).exists() { return true; }
+            if dir.join(path).exists() {
+                return true;
+            }
         }
         // -isystem 路径
         for dir in &self.system_paths {
-            if dir.join(path).exists() { return true; }
+            if dir.join(path).exists() {
+                return true;
+            }
         }
         // 标准系统路径
         let system_dirs = [
-            "/usr/local/include", "/usr/include",
-            "/usr/include/x86_64-linux-gnu", "/usr/include/aarch64-linux-gnu",
-            "/usr/include/linux", "/usr/include/asm", "/usr/include/asm-generic",
+            "/usr/local/include",
+            "/usr/include",
+            "/usr/include/x86_64-linux-gnu",
+            "/usr/include/aarch64-linux-gnu",
+            "/usr/include/linux",
+            "/usr/include/asm",
+            "/usr/include/asm-generic",
         ];
         for dir in &system_dirs {
-            if Path::new(dir).join(path).exists() { return true; }
+            if Path::new(dir).join(path).exists() {
+                return true;
+            }
         }
         false
     }
 
     fn is_known_attribute(attr: &str) -> bool {
-        matches!(attr,
-            "packed" | "aligned" | "noreturn" | "unused" | "used"
-            | "section" | "visibility" | "always_inline" | "noinline"
-            | "format" | "nonnull" | "cleanup" | "deprecated"
-            | "fallthrough" | "weak" | "constructor" | "destructor"
-            | "vector_size" | "may_alias" | "transparent_union"
-            | "malloc" | "returns_twice" | "pure" | "const"
-            | "warn_unused_result" | "sentinel" | "format_arg"
-            | "maybe_unused" | "nodiscard" | "reproducible" | "unsequenced"
-            | "returns_nonnull" | "assume"
+        matches!(
+            attr,
+            "packed"
+                | "aligned"
+                | "noreturn"
+                | "unused"
+                | "used"
+                | "section"
+                | "visibility"
+                | "always_inline"
+                | "noinline"
+                | "format"
+                | "nonnull"
+                | "cleanup"
+                | "deprecated"
+                | "fallthrough"
+                | "weak"
+                | "constructor"
+                | "destructor"
+                | "vector_size"
+                | "may_alias"
+                | "transparent_union"
+                | "malloc"
+                | "returns_twice"
+                | "pure"
+                | "const"
+                | "warn_unused_result"
+                | "sentinel"
+                | "format_arg"
+                | "maybe_unused"
+                | "nodiscard"
+                | "reproducible"
+                | "unsequenced"
+                | "returns_nonnull"
+                | "assume"
         )
     }
 
     /// C23 标准属性 (__has_c_attribute 用): 返回 1 表示支持
     fn is_known_c_attribute(attr: &str) -> bool {
         let a = attr.trim().trim_matches('_');
-        matches!(a,
-            "deprecated" | "fallthrough" | "maybe_unused" | "nodiscard"
-            | "noreturn" | "unsequenced" | "reproducible" | "assume"
-            | "nonnull" | "returns_nonnull"
+        matches!(
+            a,
+            "deprecated"
+                | "fallthrough"
+                | "maybe_unused"
+                | "nodiscard"
+                | "noreturn"
+                | "unsequenced"
+                | "reproducible"
+                | "assume"
+                | "nonnull"
+                | "returns_nonnull"
         )
     }
 
     fn is_known_builtin(name: &str) -> bool {
         let name = name.trim();
-        matches!(name,
-            "__builtin_expect" | "__builtin_memcpy" | "__builtin_memset"
-            | "__builtin_memmove" | "__builtin_memcmp"
-            | "__builtin_malloc" | "__builtin_free"
-            | "__builtin_offsetof" | "__builtin_va_start" | "__builtin_va_end"
-            | "__builtin_va_arg" | "__builtin_va_copy"
-            | "__builtin_add_overflow" | "__builtin_sub_overflow"
-            | "__builtin_mul_overflow"
-            | "__builtin_types_compatible_p"
-            | "__builtin_choose_expr" | "__builtin_constant_p"
-            | "__builtin_abs" | "__builtin_unreachable" | "__builtin_trap"
-            | "__builtin_strcpy" | "__builtin_strncpy"
-            | "__builtin_strcmp" | "__builtin_strlen"
-            | "__builtin_prefetch"
-            | "__builtin_object_size"
-            | "__builtin_expect_with_probability"
-            | "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll"
-            | "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll"
-            | "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll"
-            | "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll"
-            | "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
-            | "__builtin_bitreverse8" | "__builtin_bitreverse16"
-            | "__builtin_bitreverse32" | "__builtin_bitreverse64"
-            | "__builtin_frame_address" | "__builtin_return_address"
-            | "__builtin_overflow_p" | "__builtin_add_overflow_p"
-            | "__builtin_sub_overflow_p" | "__builtin_mul_overflow_p"
-            | "__builtin_apply" | "__builtin_return"
+        matches!(
+            name,
+            "__builtin_expect"
+                | "__builtin_memcpy"
+                | "__builtin_memset"
+                | "__builtin_memmove"
+                | "__builtin_memcmp"
+                | "__builtin_malloc"
+                | "__builtin_free"
+                | "__builtin_offsetof"
+                | "__builtin_va_start"
+                | "__builtin_va_end"
+                | "__builtin_va_arg"
+                | "__builtin_va_copy"
+                | "__builtin_add_overflow"
+                | "__builtin_sub_overflow"
+                | "__builtin_mul_overflow"
+                | "__builtin_types_compatible_p"
+                | "__builtin_choose_expr"
+                | "__builtin_constant_p"
+                | "__builtin_abs"
+                | "__builtin_unreachable"
+                | "__builtin_trap"
+                | "__builtin_strcpy"
+                | "__builtin_strncpy"
+                | "__builtin_strcmp"
+                | "__builtin_strlen"
+                | "__builtin_prefetch"
+                | "__builtin_object_size"
+                | "__builtin_expect_with_probability"
+                | "__builtin_clz"
+                | "__builtin_clzl"
+                | "__builtin_clzll"
+                | "__builtin_ctz"
+                | "__builtin_ctzl"
+                | "__builtin_ctzll"
+                | "__builtin_popcount"
+                | "__builtin_popcountl"
+                | "__builtin_popcountll"
+                | "__builtin_parity"
+                | "__builtin_parityl"
+                | "__builtin_parityll"
+                | "__builtin_bswap16"
+                | "__builtin_bswap32"
+                | "__builtin_bswap64"
+                | "__builtin_bitreverse8"
+                | "__builtin_bitreverse16"
+                | "__builtin_bitreverse32"
+                | "__builtin_bitreverse64"
+                | "__builtin_frame_address"
+                | "__builtin_return_address"
+                | "__builtin_overflow_p"
+                | "__builtin_add_overflow_p"
+                | "__builtin_sub_overflow_p"
+                | "__builtin_mul_overflow_p"
+                | "__builtin_apply"
+                | "__builtin_return"
         )
     }
 
@@ -3836,7 +4593,12 @@ impl Preprocessor {
         hash
     }
 
-    fn get_cache_path(&self, file_path: &Path, content_hash: u64, macro_hash: u64) -> Option<PathBuf> {
+    fn get_cache_path(
+        &self,
+        file_path: &Path,
+        content_hash: u64,
+        macro_hash: u64,
+    ) -> Option<PathBuf> {
         let cache_dir = self.cache_dir.as_ref()?;
         let file_hash = Self::hash_content(&file_path.to_string_lossy());
         let cache_name = format!("v12_{:x}_{:x}_{:x}", file_hash, content_hash, macro_hash);
@@ -3848,10 +4610,14 @@ impl Preprocessor {
     fn cache_deps_fresh(deps: &[(String, u64)]) -> bool {
         for (path, hash) in deps {
             // 内置 intrinsics 头为伪路径 (编译期内置, 内容恒定), 跳过实读
-            if path.starts_with("<builtin:") { continue; }
+            if path.starts_with("<builtin:") {
+                continue;
+            }
             match fs::read_to_string(path) {
                 Ok(content) => {
-                    if Self::hash_content(&content) != *hash { return false; }
+                    if Self::hash_content(&content) != *hash {
+                        return false;
+                    }
                 }
                 Err(_) => return false,
             }
@@ -3874,20 +4640,31 @@ impl Preprocessor {
         for line in text.split('\n') {
             let line = line.trim();
             if in_block_comment {
-                if line.contains("*/") { in_block_comment = false; }
+                if line.contains("*/") {
+                    in_block_comment = false;
+                }
                 continue;
             }
-            if line.is_empty() { continue; }
-            if line.starts_with("//") { continue; }
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with("//") {
+                continue;
+            }
             if line.starts_with("/*") {
-                if !line.contains("*/") { in_block_comment = true; }
+                if !line.contains("*/") {
+                    in_block_comment = true;
+                }
                 continue;
             }
             // 指令前出现代码 → 不是守卫文件
             let after_hash = line.strip_prefix('#')?;
             let d = after_hash.trim_start();
-            if first.is_none() { first = Some(d); }
-            else if second.is_none() { second = Some(d); }
+            if first.is_none() {
+                first = Some(d);
+            } else if second.is_none() {
+                second = Some(d);
+            }
             directives.push(d);
         }
         // 第一条指令必须是 `#ifndef X` 或 `#if !defined(X)`
@@ -3898,17 +4675,23 @@ impl Preprocessor {
             } else {
                 let rest = f.strip_prefix("if !defined(")?;
                 let name = rest.trim_end_matches(')').trim();
-                if name.is_empty() || name.contains(')') { return None; }
+                if name.is_empty() || name.contains(')') {
+                    return None;
+                }
                 (name.to_string(), 0usize)
             }
         };
         // 第二条指令必须是 `#define <guard> ...`
         let ok = second
-            .map(|s| s.strip_prefix("define ")
-                .map(|rest| rest.trim_start().starts_with(guard.as_str()))
-                .unwrap_or(false))
+            .map(|s| {
+                s.strip_prefix("define ")
+                    .map(|rest| rest.trim_start().starts_with(guard.as_str()))
+                    .unwrap_or(false)
+            })
             .unwrap_or(false);
-        if !ok { return None; }
+        if !ok {
+            return None;
+        }
         // 从守卫 #if 起扫描: 匹配 #endif 必须是最后一个指令,
         // 守卫层不得出现 #else/#elif (否则宏已定义时须走 else 分支)
         let mut depth = 0i32;
@@ -3920,7 +4703,8 @@ impl Preprocessor {
                 || d.starts_with("ifdef\t")
                 || d.starts_with("ifndef ")
                 || d.starts_with("ifndef\t")
-                || d.starts_with("if !defined(") {
+                || d.starts_with("if !defined(")
+            {
                 depth += 1;
             } else if d.starts_with("endif") {
                 depth -= 1;
@@ -3959,9 +4743,13 @@ impl Preprocessor {
 
         // DEPS 段: <path>\t<hash_hex>
         let mut deps = Vec::new();
-        if lines.next()? != "DEPS" { return None; }
+        if lines.next()? != "DEPS" {
+            return None;
+        }
         for line in lines.by_ref() {
-            if line == "END_DEPS" { break; }
+            if line == "END_DEPS" {
+                break;
+            }
             if let Some((p, h)) = line.split_once('\t') {
                 if let Ok(hash) = u64::from_str_radix(h, 16) {
                     deps.push((p.to_string(), hash));
@@ -3971,9 +4759,13 @@ impl Preprocessor {
 
         // REMOVED 段: 处理期间被 #undef 删除的宏名 (逐行)
         let mut removed = Vec::new();
-        if lines.next()? != "REMOVED" { return None; }
+        if lines.next()? != "REMOVED" {
+            return None;
+        }
         for line in lines.by_ref() {
-            if line == "END_REMOVED" { break; }
+            if line == "END_REMOVED" {
+                break;
+            }
             removed.push(line.to_string());
         }
 
@@ -3990,7 +4782,9 @@ impl Preprocessor {
         // 读取宏定义
         let mut macros = Vec::new();
         for line in lines {
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             // 格式: NAME\tPARAMS\tVARIADIC\tBODY
             let parts: Vec<&str> = line.splitn(4, '\t').collect();
             if parts.len() >= 4 {
@@ -4008,14 +4802,29 @@ impl Preprocessor {
                 };
                 let variadic = parts[2] == "1";
                 let body = parts[3].to_string();
-                macros.push((name, MacroDef { params, body, variadic }));
+                macros.push((
+                    name,
+                    MacroDef {
+                        params,
+                        body,
+                        variadic,
+                    },
+                ));
             }
         }
 
         Some((output, macros, removed, deps, counter_delta))
     }
 
-    fn save_to_cache(&self, cache_path: &Path, output: &str, macros: &HashMap<String, MacroDef>, removed: &[String], deps: &[(String, u64)], counter_delta: u32) {
+    fn save_to_cache(
+        &self,
+        cache_path: &Path,
+        output: &str,
+        macros: &HashMap<String, MacroDef>,
+        removed: &[String],
+        deps: &[(String, u64)],
+        counter_delta: u32,
+    ) {
         let mut content = String::from("DCC_CACHE_V6\n");
         content.push_str(&format!("COUNTER_DELTA\t{}\n", counter_delta));
         content.push_str("DEPS\n");
@@ -4038,7 +4847,10 @@ impl Preprocessor {
                 Some(p) => p.join(","),
             };
             let variadic_str = if def.variadic { "1" } else { "0" };
-            content.push_str(&format!("{}\t{}\t{}\t{}\n", name, params_str, variadic_str, def.body));
+            content.push_str(&format!(
+                "{}\t{}\t{}\t{}\n",
+                name, params_str, variadic_str, def.body
+            ));
         }
 
         let _ = fs::write(cache_path, content);
@@ -4048,7 +4860,7 @@ impl Preprocessor {
 #[cfg(test)]
 mod tests {
     use super::preprocess;
-    use super::{PchBundle, PchOptions, MacroDef};
+    use super::{MacroDef, PchBundle, PchOptions};
     use crate::cli::StdMode;
     use std::path::PathBuf;
 
@@ -4082,8 +4894,7 @@ mod tests {
 
     #[test]
     fn forced_include_comments_cannot_leak_literals_or_words() {
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/c/comment.h");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/comment.h");
         let force_includes = vec![fixture.to_string_lossy().into_owned()];
         let out = preprocess(
             b"int value = FORCED_VALUE;\n",
@@ -4129,7 +4940,10 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("asm goto(\"1:\""), "output: {output}");
         assert!(output.contains("\"jmp\\n\""), "output: {output}");
-        assert!(output.contains(": : \"i\" (0) : : lbl)"), "output: {output}");
+        assert!(
+            output.contains(": : \"i\" (0) : : lbl)"),
+            "output: {output}"
+        );
         assert!(!output.contains("asm goto(\"1:\")"), "output: {output}");
     }
 
@@ -4264,7 +5078,10 @@ mod tests {
             !output.contains("__KERNEL_DIV_ROUND_UP"),
             "output: {output}"
         );
-        assert!(output.contains("unsigned long tags[3]["), "output: {output}");
+        assert!(
+            output.contains("unsigned long tags[3]["),
+            "output: {output}"
+        );
     }
 
     /// 嵌套函数宏参数预展开须继承涂蓝集，避免 F(F(1)) 类无限递归
@@ -4533,7 +5350,10 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         // 空: __VA_OPT__(, __VA_ARGS__) → 空, 前面紧邻空格也一并去掉 (GCC 行为)
         assert!(output.contains("printf(\"hello\\n\")"), "output: {output}");
-        assert!(!output.contains("printf(\"hello\\n\" )"), "output: {output}");
+        assert!(
+            !output.contains("printf(\"hello\\n\" )"),
+            "output: {output}"
+        );
         assert!(!output.contains("__VA_OPT__"), "output: {output}");
     }
 
@@ -4558,10 +5378,11 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         // 该 fixture 实际调用了宏, 验证非空时 __VA_OPT__(content) 展开为 content
         // NULL 会被预展开为 ((void*)0), 所以 list 部分会变成 ((void*)0)
-        assert!(output.contains("for (it = ((void*)0)"),
-                "output: {output}");
-        assert!(output.contains("it = it->next) use(it->next)"),
-                "output: {output}");
+        assert!(output.contains("for (it = ((void*)0)"), "output: {output}");
+        assert!(
+            output.contains("it = it->next) use(it->next)"),
+            "output: {output}"
+        );
     }
 
     /// M19: __VA_OPT__ 嵌套 (内层先解)
@@ -4675,42 +5496,86 @@ n\
         let out_off = preprocess(
             b"#pragma STDC FENV_ACCESS OFF\nint x = 0;\n",
             "p4_1_off.c",
-            &[], &[], &[],
-            StdMode::Gnu11, &[], false,
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
             &PchOptions::default(),
         );
-        assert!(out_off.diags.is_empty(), "OFF must be silent: {:?}", out_off.diags);
+        assert!(
+            out_off.diags.is_empty(),
+            "OFF must be silent: {:?}",
+            out_off.diags
+        );
         // ON 路径: fenv_access 必须为 true
         let out_on = preprocess(
             b"#pragma STDC FENV_ACCESS ON\nint x = 0;\n",
             "p4_1_on.c",
-            &[], &[], &[],
-            StdMode::Gnu11, &[], false,
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
             &PchOptions::default(),
         );
-        assert!(out_on.diags.is_empty(), "ON must be silent: {:?}", out_on.diags);
+        assert!(
+            out_on.diags.is_empty(),
+            "ON must be silent: {:?}",
+            out_on.diags
+        );
         // DEFAULT 路径: fenv_access 必须为 true (DEFAULT = ON)
         let out_def = preprocess(
             b"#pragma STDC FENV_ACCESS DEFAULT\nint x = 0;\n",
             "p4_1_def.c",
-            &[], &[], &[],
-            StdMode::Gnu11, &[], false,
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
             &PchOptions::default(),
         );
-        assert!(out_def.diags.is_empty(), "DEFAULT must be silent: {:?}", out_def.diags);
+        assert!(
+            out_def.diags.is_empty(),
+            "DEFAULT must be silent: {:?}",
+            out_def.diags
+        );
         // 小写状态: 也接受 (不区分大小写)
         let out_lower = preprocess(
             b"#pragma STDC FENV_ACCESS on\nint x = 0;\n",
             "p4_1_lower.c",
-            &[], &[], &[],
-            StdMode::Gnu11, &[], false,
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
             &PchOptions::default(),
         );
-        assert!(out_lower.diags.is_empty(), "lowercase on must be silent: {:?}", out_lower.diags);
+        assert!(
+            out_lower.diags.is_empty(),
+            "lowercase on must be silent: {:?}",
+            out_lower.diags
+        );
         // 输出不被影响: 保留 int x = 0;
-        assert!(out_on.text.contains("int x = 0;"), "ON output: {}", out_on.text);
-        assert!(out_off.text.contains("int x = 0;"), "OFF output: {}", out_off.text);
-        assert!(out_def.text.contains("int x = 0;"), "DEFAULT output: {}", out_def.text);
+        assert!(
+            out_on.text.contains("int x = 0;"),
+            "ON output: {}",
+            out_on.text
+        );
+        assert!(
+            out_off.text.contains("int x = 0;"),
+            "OFF output: {}",
+            out_off.text
+        );
+        assert!(
+            out_def.text.contains("int x = 0;"),
+            "DEFAULT output: {}",
+            out_def.text
+        );
     }
 
     /// P4.1: #pragma STDC FENV_ACCESS <bad> 必须发 W0001 警告
@@ -4720,8 +5585,12 @@ n\
         let out = preprocess(
             b"#pragma STDC FENV_ACCESS MAYBE\nint x = 0;\n",
             "p4_1_bad.c",
-            &[], &[], &[],
-            StdMode::Gnu11, &[], false,
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
             &PchOptions::default(),
         );
         // 至少一个 W0001 警告
@@ -4732,7 +5601,9 @@ n\
         );
         // 不能是错误级 (只是警告)
         assert!(
-            out.diags.iter().all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
+            out.diags
+                .iter()
+                .all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
             "should be warning, not error: {:?}",
             out.diags
         );
@@ -4750,12 +5621,19 @@ n\
               #pragma STDC CX_LIMITED_RANGE OFF\n\
               int x = 0;\n",
             "p4_1_fp.c",
-            &[], &[], &[],
-            StdMode::Gnu11, &[], false,
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
             &PchOptions::default(),
         );
-        assert!(out.diags.is_empty(), "FP_CONTRACT/CX_LIMITED_RANGE must be silent: {:?}",
-                out.diags);
+        assert!(
+            out.diags.is_empty(),
+            "FP_CONTRACT/CX_LIMITED_RANGE must be silent: {:?}",
+            out.diags
+        );
         assert!(out.text.contains("int x = 0;"), "output: {}", out.text);
     }
 
@@ -4811,7 +5689,11 @@ n\
         assert!(out1.diags.is_empty(), "{:?}", out1.diags);
         assert!(out2.diags.is_empty(), "{:?}", out2.diags);
         // FORTIFY=2 应生成 __builtin___strncpy_chk 形式
-        assert!(out1.text.contains("__builtin___strncpy_chk"), "out1: {}", out1.text);
+        assert!(
+            out1.text.contains("__builtin___strncpy_chk"),
+            "out1: {}",
+            out1.text
+        );
         // FORTIFY=0 应回退到 libc strncpy
         assert!(out2.text.contains("strncpy("), "out2: {}", out2.text);
     }
@@ -4865,8 +5747,7 @@ n\
     // === M24: PCH (预编译头) ===
 
     fn pch_test_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("dcc-pch-{}-{}",
-            std::process::id(), name));
+        let dir = std::env::temp_dir().join(format!("dcc-pch-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -4882,26 +5763,38 @@ n\
             macro_hash: 0x12345678abcdef00,
             output: "int x = 42;\n#define HELLO 1".to_string(),
             macros: vec![
-                ("FOO".to_string(), MacroDef {
-                    params: None,
-                    body: "1".to_string(),
-                    variadic: false,
-                }),
-                ("BAR".to_string(), MacroDef {
-                    params: Some(vec!["x".to_string(), "y".to_string()]),
-                    body: "((x)+(y))".to_string(),
-                    variadic: false,
-                }),
-                ("EMPTY".to_string(), MacroDef {
-                    params: Some(vec![]),
-                    body: "".to_string(),
-                    variadic: false,
-                }),
-                ("VARI".to_string(), MacroDef {
-                    params: Some(vec!["a".to_string()]),
-                    body: "a##__VA_ARGS__".to_string(),
-                    variadic: true,
-                }),
+                (
+                    "FOO".to_string(),
+                    MacroDef {
+                        params: None,
+                        body: "1".to_string(),
+                        variadic: false,
+                    },
+                ),
+                (
+                    "BAR".to_string(),
+                    MacroDef {
+                        params: Some(vec!["x".to_string(), "y".to_string()]),
+                        body: "((x)+(y))".to_string(),
+                        variadic: false,
+                    },
+                ),
+                (
+                    "EMPTY".to_string(),
+                    MacroDef {
+                        params: Some(vec![]),
+                        body: "".to_string(),
+                        variadic: false,
+                    },
+                ),
+                (
+                    "VARI".to_string(),
+                    MacroDef {
+                        params: Some(vec!["a".to_string()]),
+                        body: "a##__VA_ARGS__".to_string(),
+                        variadic: true,
+                    },
+                ),
             ],
         };
         let s = bundle.serialize();
@@ -4917,8 +5810,10 @@ n\
         assert!(restored.macros[0].1.params.is_none());
         assert_eq!(restored.macros[0].1.body, "1");
         assert_eq!(restored.macros[1].0, "BAR");
-        assert_eq!(restored.macros[1].1.params.as_ref().unwrap(),
-            &vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(
+            restored.macros[1].1.params.as_ref().unwrap(),
+            &vec!["x".to_string(), "y".to_string()]
+        );
         assert_eq!(restored.macros[1].1.body, "((x)+(y))");
         assert_eq!(restored.macros[2].0, "EMPTY");
         assert_eq!(restored.macros[2].1.params.as_ref().unwrap().len(), 0);
@@ -4935,11 +5830,14 @@ n\
             content_hash: 1,
             macro_hash: 2,
             output: "a\nb\tc\\d".to_string(),
-            macros: vec![("T".to_string(), MacroDef {
-                params: None,
-                body: "1\t2\n3\\4".to_string(),
-                variadic: false,
-            })],
+            macros: vec![(
+                "T".to_string(),
+                MacroDef {
+                    params: None,
+                    body: "1\t2\n3\\4".to_string(),
+                    variadic: false,
+                },
+            )],
         };
         let s = bundle.serialize();
         let restored = PchBundle::deserialize(&s).unwrap();
@@ -4954,9 +5852,11 @@ n\
         // 3. 处理使用 common.h 中宏的 TU, 结果与不用 PCH 时一致
         let dir = pch_test_dir("roundtrip");
         let common = dir.join("common.h");
-        std::fs::write(&common,
-            "#define FROM_COMMON 42\n#define SQUARE(x) ((x)*(x))\n"
-        ).unwrap();
+        std::fs::write(
+            &common,
+            "#define FROM_COMMON 42\n#define SQUARE(x) ((x)*(x))\n",
+        )
+        .unwrap();
         let pch_path = dir.join("common.pch");
 
         // 创建 PCH
@@ -4966,7 +5866,7 @@ n\
             include_only: None,
         };
         let out_create = preprocess(
-            b"#include \"common.h\"\n",  // 源: 包含 common.h 后空主体
+            b"#include \"common.h\"\n", // 源: 包含 common.h 后空主体
             "tu.c",
             std::slice::from_ref(&dir),
             &[],
@@ -4976,7 +5876,11 @@ n\
             false,
             &create_opts,
         );
-        assert!(out_create.diags.is_empty(), "create: {:?}", out_create.diags);
+        assert!(
+            out_create.diags.is_empty(),
+            "create: {:?}",
+            out_create.diags
+        );
         assert!(pch_path.exists(), "PCH file should be created");
         let pch_content = std::fs::read_to_string(&pch_path).unwrap();
         assert!(pch_content.starts_with("DCC_PCH_V1"), "magic missing");
@@ -4999,12 +5903,22 @@ n\
             false,
             &include_opts,
         );
-        assert!(out_with_pch.diags.is_empty(), "include: {:?}", out_with_pch.diags);
+        assert!(
+            out_with_pch.diags.is_empty(),
+            "include: {:?}",
+            out_with_pch.diags
+        );
         // 宏已被 PCH 展开
-        assert!(out_with_pch.text.contains("int a = 42"),
-            "FROM_COMMON should expand: {}", out_with_pch.text);
-        assert!(out_with_pch.text.contains("int b = ((3)*(3))"),
-            "SQUARE should expand: {}", out_with_pch.text);
+        assert!(
+            out_with_pch.text.contains("int a = 42"),
+            "FROM_COMMON should expand: {}",
+            out_with_pch.text
+        );
+        assert!(
+            out_with_pch.text.contains("int b = ((3)*(3))"),
+            "SQUARE should expand: {}",
+            out_with_pch.text
+        );
 
         // 不使用 PCH, 重新包含 common.h, 验证结果一致
         let out_no_pch = preprocess(
@@ -5019,14 +5933,26 @@ n\
             &PchOptions::default(),
         );
         // 两条路径都应展开 FROM_COMMON=42 / SQUARE(3)=((3)*(3))
-        assert!(out_with_pch.text.contains("int a = 42"),
-            "PCH FROM_COMMON 展开失败: {}", out_with_pch.text);
-        assert!(out_with_pch.text.contains("int b = ((3)*(3))"),
-            "PCH SQUARE 展开失败: {}", out_with_pch.text);
-        assert!(out_no_pch.text.contains("int a = 42"),
-            "无 PCH FROM_COMMON 展开失败: {}", out_no_pch.text);
-        assert!(out_no_pch.text.contains("int b = ((3)*(3))"),
-            "无 PCH SQUARE 展开失败: {}", out_no_pch.text);
+        assert!(
+            out_with_pch.text.contains("int a = 42"),
+            "PCH FROM_COMMON 展开失败: {}",
+            out_with_pch.text
+        );
+        assert!(
+            out_with_pch.text.contains("int b = ((3)*(3))"),
+            "PCH SQUARE 展开失败: {}",
+            out_with_pch.text
+        );
+        assert!(
+            out_no_pch.text.contains("int a = 42"),
+            "无 PCH FROM_COMMON 展开失败: {}",
+            out_no_pch.text
+        );
+        assert!(
+            out_no_pch.text.contains("int b = ((3)*(3))"),
+            "无 PCH SQUARE 展开失败: {}",
+            out_no_pch.text
+        );
         // 不强制逐字节一致: PCH 路径会注入 `/* dcc PCH: tu.c */` 标记,
         // 无 PCH 路径走 include cache 注入 `/* #include "common.h" (cached) */`.
         // 两者都是合法的中间表示, 不破坏后续 parser (parser 跳过 /* */ 注释).
@@ -5130,7 +6056,11 @@ n\
             &include_opts,
         );
         let has_err = out.diags.iter().any(|d| d.code == "E0401");
-        assert!(has_err, "expected E0401 for bad magic, got: {:?}", out.diags);
+        assert!(
+            has_err,
+            "expected E0401 for bad magic, got: {:?}",
+            out.diags
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5153,7 +6083,10 @@ n\
             false,
             &PchOptions::default(),
         );
-        assert!(!pch_path.exists(), "no PCH file should be created without -fpch-create");
+        assert!(
+            !pch_path.exists(),
+            "no PCH file should be created without -fpch-create"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

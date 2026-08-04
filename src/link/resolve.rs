@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use super::object::InputBundle;
 use super::LinkConfig;
-use crate::codegen::elf::{STB_LOCAL, STB_GLOBAL, STB_WEAK};
+use crate::codegen::elf::{STB_GLOBAL, STB_LOCAL, STB_WEAK};
 
 /// 解析结果：每个名字最终被解析到的全局符号。
 #[derive(Debug, Clone)]
@@ -60,13 +60,19 @@ impl std::error::Error for ResolveError {}
 
 /// 在解析阶段追踪每个符号的"候选定义"——同名的多个定义按强弱规则收敛。
 struct Candidate {
-    strong: Vec<usize>,   // 强定义在 bundle.symbols 中的索引
-    weak: Vec<usize>,     // 弱定义
-    undef: Vec<usize>,    // 未定义引用
+    strong: Vec<usize>, // 强定义在 bundle.symbols 中的索引
+    weak: Vec<usize>,   // 弱定义
+    undef: Vec<usize>,  // 未定义引用
 }
 
 impl Candidate {
-    fn new() -> Self { Self { strong: vec![], weak: vec![], undef: vec![] } }
+    fn new() -> Self {
+        Self {
+            strong: vec![],
+            weak: vec![],
+            undef: vec![],
+        }
+    }
 }
 
 /// 解析跨 TU 符号引用。返回 (resolved, errors)。
@@ -110,12 +116,16 @@ pub fn resolve_with_config(
     }
 
     for (i, sym) in bundle.symbols.iter().enumerate() {
-        if sym.name.is_empty() { continue; }
+        if sym.name.is_empty() {
+            continue;
+        }
         if sym.bind == STB_LOCAL {
             // LOCAL 符号不参与跨 TU 解析，保持独立
             continue;
         }
-        let cand = candidates.entry(sym.name.clone()).or_insert_with(Candidate::new);
+        let cand = candidates
+            .entry(sym.name.clone())
+            .or_insert_with(Candidate::new);
         if sym.section == 0 {
             // 未定义
             cand.undef.push(i);
@@ -131,7 +141,9 @@ pub fn resolve_with_config(
 
     // exclude-libs: 记录被排除的静态库名字段
     let exclude_all = cfg.exclude_libs.iter().any(|s| s == "all");
-    let excluded_libs: Vec<String> = cfg.exclude_libs.iter()
+    let excluded_libs: Vec<String> = cfg
+        .exclude_libs
+        .iter()
         .filter(|s| *s != "all")
         .cloned()
         .collect();
@@ -140,7 +152,9 @@ pub fn resolve_with_config(
         let chosen = if !cand.strong.is_empty() {
             if cand.strong.len() > 1 {
                 // 多个强定义 → 错误
-                let names: Vec<String> = cand.strong.iter()
+                let names: Vec<String> = cand
+                    .strong
+                    .iter()
                     .map(|&i| bundle.symbols[i].input_obj.to_string())
                     .collect();
                 errors.push(ResolveError {
@@ -152,8 +166,11 @@ pub fn resolve_with_config(
             cand.strong[0]
         } else if !cand.weak.is_empty() {
             // 弱定义：取 size 最大者（若都相等取第一个）
-            cand.weak.iter().max_by_key(|&&i| bundle.symbols[i].size)
-                .copied().unwrap_or(cand.weak[0])
+            cand.weak
+                .iter()
+                .max_by_key(|&&i| bundle.symbols[i].size)
+                .copied()
+                .unwrap_or(cand.weak[0])
         } else {
             // 全是未定义 → 允许列表
             if extra_undef_allowed.iter().any(|n| *n == name) || is_implicit_undef(name) {
@@ -185,13 +202,21 @@ pub fn resolve_with_config(
         };
         let sym = &bundle.symbols[chosen];
         // 检查 --exclude-libs: 来自被排除库的符号, 标 hidden
-        let source_lib = bundle.objects.get(sym.input_obj)
+        let source_lib = bundle
+            .objects
+            .get(sym.input_obj)
             .map(|o| o.name.clone())
             .unwrap_or_default();
         let is_excluded = exclude_all
             || (!source_lib.is_empty()
-                && excluded_libs.iter().any(|lib| source_lib.starts_with(lib.as_str())));
-        let visibility = if is_excluded { 2 /* STV_HIDDEN */ } else { sym.visibility };
+                && excluded_libs
+                    .iter()
+                    .any(|lib| source_lib.starts_with(lib.as_str())));
+        let visibility = if is_excluded {
+            2 /* STV_HIDDEN */
+        } else {
+            sym.visibility
+        };
         let r = ResolvedSymbol {
             name: name.clone(),
             value: sym.value,
@@ -199,7 +224,7 @@ pub fn resolve_with_config(
             bind: sym.bind,
             ty: sym.ty,
             visibility,
-            section: sym.section,  // 暂保留，待 layout 后再设为合并节索引
+            section: sym.section, // 暂保留，待 layout 后再设为合并节索引
             vaddr: 0,
             defined: true,
             needs_plt: false,
@@ -212,8 +237,12 @@ pub fn resolve_with_config(
 
     // 补充：把 LOCAL 符号也放入 resolved（供 layout 与 codegen 用）
     for sym in bundle.symbols.iter() {
-        if sym.bind != STB_LOCAL { continue; }
-        if sym.section == 0 { continue; }
+        if sym.bind != STB_LOCAL {
+            continue;
+        }
+        if sym.section == 0 {
+            continue;
+        }
         let r = ResolvedSymbol {
             name: sym.name.clone(),
             value: sym.value,
@@ -238,7 +267,8 @@ pub fn resolve_with_config(
 }
 
 fn is_implicit_undef(name: &str) -> bool {
-    matches!(name,
+    matches!(
+        name,
         "_start" | "__bss_start" | "_edata" | "_end" | "etext" |
         "__data_start" | "__dso_handle" |
         "_DYNAMIC" | "_GLOBAL_OFFSET_TABLE_" | "_PROCEDURE_LINKAGE_TABLE_" |
@@ -272,18 +302,41 @@ mod tests {
 
     fn build_minimal_obj(_name: &str, syms: &[ElfSym], text: &[u8]) -> Vec<u8> {
         elf::build_elf_rel_x86_64(
-            text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
-            syms, &[], &[], &[], &[],
+            text,
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            16,
+            16,
+            16,
+            16,
+            16,
+            syms,
+            &[],
+            &[],
+            &[],
+            &[],
         )
     }
 
     #[test]
     fn single_global_definition_resolves() {
         let path = std::env::temp_dir().join("dcc-resolve-test1.o");
-        let obj = build_minimal_obj("a", &[ElfSym {
-            name: "main".into(), section: 1, value: 0, size: 4,
-            bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
-        }], &[0xc3, 0xc3, 0xc3, 0xc3]);
+        let obj = build_minimal_obj(
+            "a",
+            &[ElfSym {
+                name: "main".into(),
+                section: 1,
+                value: 0,
+                size: 4,
+                bind: STB_GLOBAL,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3, 0xc3, 0xc3, 0xc3],
+        );
         std::fs::write(&path, &obj).unwrap();
         let bundle = InputBundle::from_files(std::slice::from_ref(&path)).unwrap();
         let (resolved, errs) = resolve(&bundle, &[]);
@@ -298,10 +351,19 @@ mod tests {
         let p1 = dir.join("dcc-resolve-test2-a.o");
         let p2 = dir.join("dcc-resolve-test2-b.o");
         let mk = |p: &std::path::Path, sec: u16| {
-            let obj = build_minimal_obj("x", &[ElfSym {
-                name: "foo".into(), section: sec, value: 0, size: 1,
-                bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
-            }], &[0xc3]);
+            let obj = build_minimal_obj(
+                "x",
+                &[ElfSym {
+                    name: "foo".into(),
+                    section: sec,
+                    value: 0,
+                    size: 1,
+                    bind: STB_GLOBAL,
+                    ty: STT_FUNC,
+                    visibility: STV_DEFAULT,
+                }],
+                &[0xc3],
+            );
             std::fs::write(p, &obj).unwrap();
         };
         mk(&p1, 1);
@@ -319,14 +381,32 @@ mod tests {
         let dir = std::env::temp_dir();
         let p1 = dir.join("dcc-resolve-test3-weak.o");
         let p2 = dir.join("dcc-resolve-test3-strong.o");
-        let weak_obj = build_minimal_obj("w", &[ElfSym {
-            name: "k".into(), section: 1, value: 0, size: 1,
-            bind: STB_WEAK, ty: STT_FUNC, visibility: STV_DEFAULT,
-        }], &[0xc3]);
-        let strong_obj = build_minimal_obj("s", &[ElfSym {
-            name: "k".into(), section: 1, value: 0, size: 8,
-            bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
-        }], &[0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3]);
+        let weak_obj = build_minimal_obj(
+            "w",
+            &[ElfSym {
+                name: "k".into(),
+                section: 1,
+                value: 0,
+                size: 1,
+                bind: STB_WEAK,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3],
+        );
+        let strong_obj = build_minimal_obj(
+            "s",
+            &[ElfSym {
+                name: "k".into(),
+                section: 1,
+                value: 0,
+                size: 8,
+                bind: STB_GLOBAL,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3],
+        );
         std::fs::write(&p1, &weak_obj).unwrap();
         std::fs::write(&p2, &strong_obj).unwrap();
         let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();

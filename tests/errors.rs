@@ -35,41 +35,286 @@ struct ErrorCase {
 }
 
 const CASES: &[ErrorCase] = &[
-    ErrorCase { name: "e0001_alignof", code: "E0001", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0002", code: "E0002", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0003", code: "E0003", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0004", code: "E0004", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0005", code: "E0005", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0006", code: "E0006", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0007", code: "E0007", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0008", code: "E0008", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0009", code: "E0009", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0010", code: "E0010", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0011", code: "E0011", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0012", code: "E0012", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0013", code: "E0013", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0101", code: "E0101", mode: Mode::CompileObjectCustom, custom_output: Some("/this/dir/does/not/exist/a.out"), extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0102", code: "E0102", mode: Mode::CompileObjectCustom, custom_output: Some("/tmp/dcc-e0102-asm-out.o"), extra_args: &["-x", "assembler-with-cpp"], fixture_ext: "s" },
-    ErrorCase { name: "e0200", code: "E0200", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0201", code: "E0201", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0202", code: "E0202", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0203", code: "E0203", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0204", code: "E0204", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0206", code: "E0206", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0207", code: "E0207", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0208_embed", code: "E0208", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e0300", code: "E0300", mode: Mode::CompileObject, custom_output: None, extra_args: &["-mno-sse"], fixture_ext: "c" },
-    ErrorCase { name: "e1001", code: "E1001", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1002", code: "E1002", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1003", code: "E1003", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1004", code: "E1004", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1005", code: "E1005", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1006", code: "E1006", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1007", code: "E1007", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1008", code: "E1008", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1009", code: "E1009", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "e1010", code: "E1010", mode: Mode::CompileObject, custom_output: None, extra_args: &[], fixture_ext: "c" },
-    ErrorCase { name: "bad", code: "E0006", mode: Mode::SyntaxOnly, custom_output: None, extra_args: &[], fixture_ext: "c" },
+    ErrorCase {
+        name: "e0001_alignof",
+        code: "E0001",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0002",
+        code: "E0002",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0003",
+        code: "E0003",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0004",
+        code: "E0004",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0005",
+        code: "E0005",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0006",
+        code: "E0006",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0007",
+        code: "E0007",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0008",
+        code: "E0008",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0009",
+        code: "E0009",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0010",
+        code: "E0010",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0011",
+        code: "E0011",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0012",
+        code: "E0012",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0013",
+        code: "E0013",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0101",
+        code: "E0101",
+        mode: Mode::CompileObjectCustom,
+        custom_output: Some("/this/dir/does/not/exist/a.out"),
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0102",
+        code: "E0102",
+        mode: Mode::CompileObjectCustom,
+        custom_output: Some("/tmp/dcc-e0102-asm-out.o"),
+        extra_args: &["-x", "assembler-with-cpp"],
+        fixture_ext: "s",
+    },
+    ErrorCase {
+        name: "e0200",
+        code: "E0200",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0201",
+        code: "E0201",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0202",
+        code: "E0202",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0203",
+        code: "E0203",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0204",
+        code: "E0204",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0206",
+        code: "E0206",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0207",
+        code: "E0207",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0208_embed",
+        code: "E0208",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e0300",
+        code: "E0300",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &["-mno-sse"],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1001",
+        code: "E1001",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1002",
+        code: "E1002",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1003",
+        code: "E1003",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1004",
+        code: "E1004",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1005",
+        code: "E1005",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1006",
+        code: "E1006",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1007",
+        code: "E1007",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1008",
+        code: "E1008",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1009",
+        code: "E1009",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "e1010",
+        code: "E1010",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
+        name: "bad",
+        code: "E0006",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
 ];
 
 fn fixtures_dir() -> PathBuf {
@@ -104,8 +349,7 @@ fn strip_ansi(raw: &str) -> String {
             continue;
         }
         // 拷贝该 UTF-8 字符到 out
-        let chunk = std::str::from_utf8(&bytes[i..i + ch_len])
-            .unwrap_or("");
+        let chunk = std::str::from_utf8(&bytes[i..i + ch_len]).unwrap_or("");
         out.push_str(chunk);
         i += ch_len;
     }
@@ -130,7 +374,9 @@ fn utf8_char_len(b: u8) -> usize {
 /// 将 stderr 中的绝对路径替换为稳定占位符 `<file>`
 fn normalize_stderr(raw: &str, file_path: &Path) -> String {
     let stripped = strip_ansi(raw).replace("\r\n", "\n").replace('\r', "\n");
-    let canonical = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
+    let canonical = file_path
+        .canonicalize()
+        .unwrap_or_else(|_| file_path.to_path_buf());
     let canonical_str = canonical.to_string_lossy().into_owned();
     let mut normalized = stripped.replace(&canonical_str, "<file>");
     if cfg!(windows) {
@@ -174,10 +420,8 @@ fn normalize_stderr(raw: &str, file_path: &Path) -> String {
                         parts.reverse();
                         if parts.len() == 3 {
                             let loc = format!("{}:{}", parts[1], parts[2]);
-                            normalized = normalized.replace(
-                                &format!("  --> {rest}"),
-                                &format!("  --> <file>:{loc}"),
-                            );
+                            normalized = normalized
+                                .replace(&format!("  --> {rest}"), &format!("  --> <file>:{loc}"));
                         }
                     }
                 }
@@ -220,16 +464,17 @@ fn validate_diagnostic_snapshot(text: &str, name: &str) -> Result<(), String> {
         || head.starts_with("note[")
         || head.starts_with("dcc: error:");
     if !head_ok {
-        return Err(format!("{name}: 首行应为 error[...]/warning[...]/dcc: error:"));
+        return Err(format!(
+            "{name}: 首行应为 error[...]/warning[...]/dcc: error:"
+        ));
     }
     if head.starts_with("error[") || head.starts_with("warning[") || head.starts_with("note[") {
         // 某些 I/O 类错误 (E0100/E0101/E0102/E0300) 不携带源位置行 (line=0),
         // 这里只要求诊断"至少有位置行 或 行号<file>:line:col 形式",
         // 不强制每条 error[Exxxx] 都包含 ` -->` 指针.
-        let has_location = lines.iter().any(|l| {
-            (l.contains(" --> ") && l.matches(':').count() >= 2)
-                || l.contains("<file>:")
-        });
+        let has_location = lines
+            .iter()
+            .any(|l| (l.contains(" --> ") && l.matches(':').count() >= 2) || l.contains("<file>:"));
         if !has_location && !name.starts_with("e010") && name != "e0300" {
             return Err(format!("{name}: 缺少位置行 ` --> file:line:col`"));
         }
@@ -254,8 +499,7 @@ fn assert_snapshot(name: &str, actual: &str) {
     validate_diagnostic_snapshot(&expected, name)
         .unwrap_or_else(|e| panic!("已存 snapshot 格式损坏 ({}): {e}", path.display()));
     assert_eq!(
-        expected,
-        actual,
+        expected, actual,
         "snapshot 不匹配: {}\n运行 DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors 更新",
         name
     );
@@ -387,7 +631,10 @@ fn e0205_unreadable_include_snapshot() {
     let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(0o600));
     let _ = fs::remove_dir_all(&dir);
     assert!(status != 0);
-    assert!(stderr_text(&stderr).contains("error[E0205]:"), "stderr:\n{stderr}");
+    assert!(
+        stderr_text(&stderr).contains("error[E0205]:"),
+        "stderr:\n{stderr}"
+    );
     let normalized = normalize_stderr(&stderr, &source);
     assert_snapshot("e0205", &normalized);
 }
@@ -421,7 +668,10 @@ fn e0209_force_include_unreadable_snapshot() {
     let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(0o600));
     let _ = fs::remove_dir_all(&dir);
     assert!(status != 0);
-    assert!(stderr_text(&stderr).contains("error[E0209]:"), "stderr:\n{stderr}");
+    assert!(
+        stderr_text(&stderr).contains("error[E0209]:"),
+        "stderr:\n{stderr}"
+    );
     let normalized = normalize_stderr(&stderr, &source);
     assert_snapshot("e0209", &normalized);
 }
@@ -499,7 +749,13 @@ fn cli_multiple_sources_error() {
     let a = dir.join("e0004.c");
     let b = dir.join("e0006.c");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-std=gnu23", "-o", "a.out", a.to_str().unwrap(), b.to_str().unwrap()])
+        .args([
+            "-std=gnu23",
+            "-o",
+            "a.out",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+        ])
         .output()
         .expect("运行 dcc");
     assert!(!output.status.success());
@@ -648,9 +904,15 @@ fn diag_format_sarif_emits_json() {
         &source,
     );
     assert!(status != 0);
-    assert!(stderr.contains("\"version\": \"2.1.0\""), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("\"version\": \"2.1.0\""),
+        "stderr:\n{stderr}"
+    );
     assert!(stderr.contains("\"name\": \"dcc\""), "stderr:\n{stderr}");
-    assert!(stderr.contains("\"ruleId\": \"E0004\""), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("\"ruleId\": \"E0004\""),
+        "stderr:\n{stderr}"
+    );
 }
 
 /// 格式: 非法取值应报错

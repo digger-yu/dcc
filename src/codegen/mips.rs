@@ -1,9 +1,7 @@
 // src/codegen/mips.rs - MIPS32 后端 (O32 ABI)
 
 use crate::ast::{FuncDecl, Program};
-use crate::codegen::elf::{
-    self, ElfRela, ElfSection, ElfSym, STB_GLOBAL, STT_FUNC,
-};
+use crate::codegen::elf::{self, ElfRela, ElfSection, ElfSym, STB_GLOBAL, STT_FUNC};
 use crate::ir::{Function, Global, Module, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
@@ -118,22 +116,23 @@ impl MipsCodegen {
 
         // 函数序言：保存 $ra 和 $fp
         self.emit_addiu(29, 29, -8); // addiu $sp, $sp, -8
-        self.emit_sw(31, 29, 4);     // sw $ra, 4($fp)
-        self.emit_sw(30, 29, 0);     // sw $fp, 0($fp)
-        self.emit_addiu(30, 29, 0);  // move $fp, $sp
+        self.emit_sw(31, 29, 4); // sw $ra, 4($fp)
+        self.emit_sw(30, 29, 0); // sw $fp, 0($fp)
+        self.emit_addiu(30, 29, 0); // move $fp, $sp
 
         // 简化：函数体只生成返回 0
-        self.emit_addiu(2, 0, 0);    // move $v0, $zero
+        self.emit_addiu(2, 0, 0); // move $v0, $zero
 
         // 函数尾声
-        self.emit_lw(30, 29, 0);     // lw $fp, 0($sp)
-        self.emit_lw(31, 29, 4);     // lw $ra, 4($sp)
-        self.emit_addiu(29, 29, 8);  // addiu $sp, $sp, 8
-        self.emit_jr(31);            // jr $ra
-        self.emit_nop();             // delay slot
+        self.emit_lw(30, 29, 0); // lw $fp, 0($sp)
+        self.emit_lw(31, 29, 4); // lw $ra, 4($sp)
+        self.emit_addiu(29, 29, 8); // addiu $sp, $sp, 8
+        self.emit_jr(31); // jr $ra
+        self.emit_nop(); // delay slot
 
         let func_end = self.code.len() as u64;
-        self.func_sizes.insert(func.name.clone(), func_end - func_start);
+        self.func_sizes
+            .insert(func.name.clone(), func_end - func_start);
 
         // 添加符号
         let sym_idx = self.symbols.len() as u32;
@@ -151,17 +150,20 @@ impl MipsCodegen {
 
     // MIPS 指令编码
     fn emit_addiu(&mut self, rt: u8, rs: u8, imm: i16) {
-        let inst = (0b001001 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | (imm as u16 as u32);
+        let inst =
+            (0b001001 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | (imm as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     fn emit_sw(&mut self, rt: u8, base: u8, offset: i16) {
-        let inst = (0b101011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+        let inst =
+            (0b101011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     fn emit_lw(&mut self, rt: u8, base: u8, offset: i16) {
-        let inst = (0b100011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+        let inst =
+            (0b100011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 

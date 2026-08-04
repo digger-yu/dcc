@@ -112,11 +112,7 @@ impl BmfModule {
                             kind: BmfKind::Class,
                             name: name.to_string(),
                             signature: String::new(),
-                            layout: if rest.is_empty() {
-                                None
-                            } else {
-                                Some(rest.to_string())
-                            },
+                            layout: if rest.is_empty() { None } else { Some(rest.to_string()) },
                         }),
                         "V" => m.exports.push(BmfExport {
                             kind: BmfKind::Variable,

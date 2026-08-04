@@ -20,45 +20,46 @@
 //   let r = link::link_shared(&[a.o, b.o], &output, &LinkConfig::default());
 //   let r = link::link_with_lto(&[a.o, b.o], &output, &LinkConfig::default(), &[("a.c", module), ...]);
 
-pub mod object;
-pub mod resolve;
-pub mod layout;
-pub mod relocate;
-pub mod plt_got;
-pub mod elf_exec;
-pub mod elf_dyn;
-pub mod lto_bitcode;
-pub mod legacy;
-pub mod gnu_hash;
-pub mod eh_frame;
 pub mod build_id;
+pub mod dso_cache;
+pub mod eh_frame;
+pub mod elf_dyn;
+pub mod elf_exec;
+pub mod fini_dispatch;
+pub mod gnu_hash;
 pub mod ifunc;
+pub mod layout;
+pub mod legacy;
 pub mod link_opts;
+pub mod lto_bitcode;
+pub mod object;
+pub mod plt_got;
+pub mod relocate;
+pub mod resolve;
 pub mod symver;
 pub mod target_clones;
-pub mod fini_dispatch;
 pub mod vdso;
-pub mod dso_cache;
 
 use std::path::{Path, PathBuf};
 
-use crate::diagnostics::{Diagnostic, Span};
 use crate::debug::ArchKind;
+use crate::diagnostics::{Diagnostic, Span};
 
-pub use object::InputBundle;
+pub use elf_dyn::{
+    write_elf_pie_aarch64, write_elf_pie_arm, write_elf_pie_mips64, write_elf_pie_riscv64,
+    write_elf_pie_x86_64, write_elf_shared_aarch64, write_elf_shared_arm, write_elf_shared_mips64,
+    write_elf_shared_riscv64, write_elf_shared_x86_64,
+};
+pub use elf_exec::{
+    write_elf_exec_aarch64, write_elf_exec_arm, write_elf_exec_mips64, write_elf_exec_riscv64,
+    write_elf_exec_x86_64, write_elf_relocatable_aarch64, write_elf_relocatable_arm,
+    write_elf_relocatable_mips64, write_elf_relocatable_riscv64, write_elf_relocatable_x86_64,
+};
 pub use layout::LayoutBuilder;
-pub use relocate::apply_relocations;
-pub use lto_bitcode::{serialize_module, deserialize_module, run_cross_tu_lto, BitcodeModule};
-pub use elf_exec::{write_elf_exec_x86_64, write_elf_exec_aarch64, write_elf_exec_riscv64,
-    write_elf_exec_mips64, write_elf_exec_arm,
-    write_elf_relocatable_x86_64, write_elf_relocatable_aarch64,
-    write_elf_relocatable_riscv64, write_elf_relocatable_mips64,
-    write_elf_relocatable_arm};
-pub use elf_dyn::{write_elf_pie_x86_64, write_elf_pie_aarch64, write_elf_pie_riscv64,
-    write_elf_pie_mips64, write_elf_pie_arm,
-    write_elf_shared_x86_64, write_elf_shared_aarch64, write_elf_shared_riscv64,
-    write_elf_shared_mips64, write_elf_shared_arm};
 pub use legacy::link_relocatable;
+pub use lto_bitcode::{deserialize_module, run_cross_tu_lto, serialize_module, BitcodeModule};
+pub use object::InputBundle;
+pub use relocate::apply_relocations;
 
 /// 链接配置
 #[derive(Debug, Clone)]
@@ -112,17 +113,15 @@ pub struct LinkConfig {
 }
 
 /// build-id 风格
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BuildIdStyle {
     #[default]
     None,
     Sha1,
-    FastSha1,  // 优化版：复用已计算 hash，避免重算
+    FastSha1, // 优化版：复用已计算 hash，避免重算
     Uuid,
     Md5,
 }
-
 
 impl Default for LinkConfig {
     fn default() -> Self {
@@ -136,11 +135,21 @@ impl Default for LinkConfig {
             strip_debug: false,
             gc_sections: true,
             allowed_undef: vec![
-                "memcpy".into(), "memmove".into(), "memset".into(), "memcmp".into(),
-                "printf".into(), "puts".into(), "exit".into(), "abort".into(),
-                "malloc".into(), "free".into(),
-                "__stack_chk_fail".into(), "__cxa_atexit".into(), "__cxa_finalize".into(),
-                "_start".into(), "main".into(),
+                "memcpy".into(),
+                "memmove".into(),
+                "memset".into(),
+                "memcmp".into(),
+                "printf".into(),
+                "puts".into(),
+                "exit".into(),
+                "abort".into(),
+                "malloc".into(),
+                "free".into(),
+                "__stack_chk_fail".into(),
+                "__cxa_atexit".into(),
+                "__cxa_finalize".into(),
+                "_start".into(),
+                "main".into(),
             ],
             exclude_libs: vec![],
             build_id: BuildIdStyle::None,
@@ -187,14 +196,26 @@ fn diag(code: &'static str, msg: impl Into<String>) -> Vec<Diagnostic> {
 }
 
 /// 主入口：链接多个 .o 文件
-pub fn link_multi_tu(inputs: &[PathBuf], output: &Path, cfg: &LinkConfig) -> Result<Vec<u8>, Vec<Diagnostic>> {
+pub fn link_multi_tu(
+    inputs: &[PathBuf],
+    output: &Path,
+    cfg: &LinkConfig,
+) -> Result<Vec<u8>, Vec<Diagnostic>> {
     let bundle = InputBundle::from_files(inputs).map_err(|e| diag("E0301", e.to_string()))?;
     link_from_bundle(&bundle, output, cfg)
 }
 
-pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -> Result<Vec<u8>, Vec<Diagnostic>> {
+pub fn link_from_bundle(
+    bundle: &InputBundle,
+    output: &Path,
+    cfg: &LinkConfig,
+) -> Result<Vec<u8>, Vec<Diagnostic>> {
     if cfg.verbose {
-        eprintln!("dcc-link: {} object(s), output = {}", bundle.objects.len(), output.display());
+        eprintln!(
+            "dcc-link: {} object(s), output = {}",
+            bundle.objects.len(),
+            output.display()
+        );
         eprintln!("dcc-link: opts: {}", link_opts::opts_summary(&cfg.opts));
     }
     // 0. 收集 input bundle 中的 .symver / target_clones / destructor 信息
@@ -205,23 +226,30 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
     let undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
     let (resolved, resolve_errors) = resolve::resolve_with_config(bundle, &undef, cfg);
     if !resolve_errors.is_empty() {
-        let errs: Vec<Diagnostic> = resolve_errors.iter().map(|e| {
-            Diagnostic::err("E0302", e.to_string(), Span::point("", 0, 0))
-        }).collect();
+        let errs: Vec<Diagnostic> = resolve_errors
+            .iter()
+            .map(|e| Diagnostic::err("E0302", e.to_string(), Span::point("", 0, 0)))
+            .collect();
         return Err(errs);
     }
     // 2. 布局
     let mut builder = LayoutBuilder::new();
     builder.is_pie = cfg.output_kind == OutputKind::PIE;
     builder.is_shared = cfg.output_kind == OutputKind::Shared;
-    builder.base_addr = if cfg.output_kind == OutputKind::Executable { cfg.base_addr } else { 0 };
+    builder.base_addr = if cfg.output_kind == OutputKind::Executable {
+        cfg.base_addr
+    } else {
+        0
+    };
     builder.entry_name = cfg.entry.clone();
     builder.gc_sections = cfg.gc_sections;
     builder.emit_dynamic = matches!(cfg.output_kind, OutputKind::PIE | OutputKind::Shared);
     builder.keep_debug = !cfg.strip_debug;
     builder.gc_sections_root = cfg.gc_sections_root.clone();
     builder.dynamic_linker = cfg.dynamic_linker.clone();
-    let mut layout = builder.build(bundle, &resolved).map_err(|e| diag("E0303", e))?;
+    let mut layout = builder
+        .build(bundle, &resolved)
+        .map_err(|e| diag("E0303", e))?;
     // 2.5 SHF_GNU_RETAIN 标记 (M12+ 链接器补洞)
     link_opts::apply_retain_flags(&mut layout);
     // 2.5.1 压缩调试节 (--compress-debug-sections)
@@ -307,7 +335,11 @@ pub fn link_from_bundle(bundle: &InputBundle, output: &Path, cfg: &LinkConfig) -
         (OutputKind::Relocatable, _) => write_elf_relocatable_x86_64(&layout),
     };
     if cfg.verbose {
-        eprintln!("dcc-link: wrote {} ({} bytes)", output.display(), bytes.len());
+        eprintln!(
+            "dcc-link: wrote {} ({} bytes)",
+            output.display(),
+            bytes.len()
+        );
     }
     Ok(bytes)
 }
@@ -349,10 +381,13 @@ fn collect_link_directives(bundle: &InputBundle, cfg: &mut LinkConfig) {
                 for i in 0..n_dtor {
                     let off = i * 8;
                     if off + 8 <= sec.data.len() {
-                        let vaddr = u64::from_le_bytes(sec.data[off..off+8].try_into().unwrap());
+                        let vaddr = u64::from_le_bytes(sec.data[off..off + 8].try_into().unwrap());
                         // 找对应符号
                         for s in &obj.symbols {
-                            if s.section == 1 && s.value as usize + (obj.sections[1].data.as_ptr() as usize) == vaddr as usize {
+                            if s.section == 1
+                                && s.value as usize + (obj.sections[1].data.as_ptr() as usize)
+                                    == vaddr as usize
+                            {
                                 cfg.fini_builder.add(&s.name, 0);
                             }
                         }
@@ -371,7 +406,8 @@ pub fn link_with_lto(
     bitcodes: &[(String, crate::ir::Module)],
 ) -> Result<Vec<u8>, Vec<Diagnostic>> {
     // 1. 序列化每个 TU 的位码并合并
-    let mut modules: Vec<BitcodeModule> = bitcodes.iter()
+    let mut modules: Vec<BitcodeModule> = bitcodes
+        .iter()
         .map(|(path, m)| {
             let payload = serialize_module(m, path);
             let mut bc = deserialize_module(&payload).expect("self roundtrip");
@@ -404,7 +440,11 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
         None => return,
     };
     // 找 .text 输出节
-    let text_idx = match layout.sections.iter().position(|s| s.kind == OutputSectionKind::Text) {
+    let text_idx = match layout
+        .sections
+        .iter()
+        .position(|s| s.kind == OutputSectionKind::Text)
+    {
         Some(i) => i,
         None => return,
     };
@@ -433,9 +473,15 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
     let call_next = start_vaddr + 9 + 5;
     let rel32 = (main_vaddr.wrapping_sub(call_next)) as i32 as u32;
     code[10..14].copy_from_slice(&rel32.to_le_bytes()); // rel32 在 code[10..14]
-    // 追加到 .text 节
+                                                        // 追加到 .text 节
     let text = &mut layout.sections[text_idx];
-    eprintln!("dcc-link: ensure_start_stub: text_idx={}, old_size={}, stub_len={}, start_vaddr={:#x}", text_idx, text.size, code.len(), start_vaddr);
+    eprintln!(
+        "dcc-link: ensure_start_stub: text_idx={}, old_size={}, stub_len={}, start_vaddr={:#x}",
+        text_idx,
+        text.size,
+        code.len(),
+        start_vaddr
+    );
     text.data.extend_from_slice(&code);
     text.size += code.len() as u64;
     eprintln!("dcc-link: ensure_start_stub: new text.size={}", text.size);
@@ -465,8 +511,22 @@ mod tests {
 
     fn build_minimal_obj(_name: &str, syms: &[ElfSym], text: &[u8]) -> Vec<u8> {
         elf::build_elf_rel_x86_64(
-            text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
-            syms, &[], &[], &[], &[],
+            text,
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            16,
+            16,
+            16,
+            16,
+            16,
+            syms,
+            &[],
+            &[],
+            &[],
+            &[],
         )
     }
 
@@ -477,14 +537,24 @@ mod tests {
         let p2 = dir.join("dcc-link-2.o");
         // a.c: 导出 helper
         let a_sym = ElfSym {
-            name: "helper".into(), section: 1, value: 0, size: 4,
-            bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
+            name: "helper".into(),
+            section: 1,
+            value: 0,
+            size: 4,
+            bind: STB_GLOBAL,
+            ty: STT_FUNC,
+            visibility: STV_DEFAULT,
         };
         let a = build_minimal_obj("a", &[a_sym], &[0xb8, 0x2a, 0, 0, 0, 0xc3]);
         // b.c: 导出 main，引用 helper
         let b_sym = ElfSym {
-            name: "main".into(), section: 1, value: 0, size: 10,
-            bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
+            name: "main".into(),
+            section: 1,
+            value: 0,
+            size: 10,
+            bind: STB_GLOBAL,
+            ty: STT_FUNC,
+            visibility: STV_DEFAULT,
         };
         // call helper; mov $0,%eax; ret
         // e8 <rel32> ; b8 00 00 00 00 ; c3
@@ -492,19 +562,46 @@ mod tests {
         let mut b_syms = vec![b_sym];
         // 添加对 helper 的 undefined 引用
         b_syms.push(ElfSym {
-            name: "helper".into(), section: 0, value: 0, size: 0,
-            bind: STB_GLOBAL, ty: STT_FUNC, visibility: STV_DEFAULT,
+            name: "helper".into(),
+            section: 0,
+            value: 0,
+            size: 0,
+            bind: STB_GLOBAL,
+            ty: STT_FUNC,
+            visibility: STV_DEFAULT,
         });
-        let b_relocs = vec![ElfRela { offset: 1, sym_index: 1, rel_type: 4, addend: -4 }];
+        let b_relocs = vec![ElfRela {
+            offset: 1,
+            sym_index: 1,
+            rel_type: 4,
+            addend: -4,
+        }];
         let b = elf::build_elf_rel_x86_64(
-            &b_text, &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
-            &b_syms, &b_relocs, &[], &[], &[],
+            &b_text,
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            16,
+            16,
+            16,
+            16,
+            16,
+            &b_syms,
+            &b_relocs,
+            &[],
+            &[],
+            &[],
         );
         std::fs::write(&p1, &a).unwrap();
         std::fs::write(&p2, &b).unwrap();
-        let cfg = LinkConfig { entry: "main".into(), ..LinkConfig::default() };
-        let bytes = link_multi_tu(&[p1.clone(), p2.clone()], Path::new("test.out"), &cfg)
-            .expect("link ok");
+        let cfg = LinkConfig {
+            entry: "main".into(),
+            ..LinkConfig::default()
+        };
+        let bytes =
+            link_multi_tu(&[p1.clone(), p2.clone()], Path::new("test.out"), &cfg).expect("link ok");
         // 头 4 字节是 ELF magic
         assert_eq!(&bytes[0..4], b"\x7fELF");
         let _ = std::fs::remove_file(p1);

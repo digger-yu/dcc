@@ -39,9 +39,7 @@ pub fn cxa_guard_runtime() -> String {
 
 /// typeinfo 结构声明 (typeid 静态路径 `&__dcc_ti_<T>` 的承载类型)
 pub fn typeinfo_struct_decl() -> String {
-    String::from(
-        "typedef struct __dcc_typeinfo { const char* name; } __dcc_typeinfo_t;\n",
-    )
+    String::from("typedef struct __dcc_typeinfo { const char* name; } __dcc_typeinfo_t;\n")
 }
 
 /// __dynamic_cast 运行时: 跨虚继承 dynamic_cast 简化实现
@@ -99,10 +97,26 @@ mod tests {
     #[test]
     fn guard_runtime_defines_both_underscore_variants() {
         let s = cxa_guard_runtime();
-        assert!(s.contains("int _cxa_guard_acquire(unsigned char* g)"), "{}", s);
-        assert!(s.contains("void _cxa_guard_release(unsigned char* g)"), "{}", s);
-        assert!(s.contains("void _cxa_guard_abort(unsigned char* g)"), "{}", s);
-        assert!(s.contains("int __cxa_guard_acquire(unsigned char* g)"), "{}", s);
+        assert!(
+            s.contains("int _cxa_guard_acquire(unsigned char* g)"),
+            "{}",
+            s
+        );
+        assert!(
+            s.contains("void _cxa_guard_release(unsigned char* g)"),
+            "{}",
+            s
+        );
+        assert!(
+            s.contains("void _cxa_guard_abort(unsigned char* g)"),
+            "{}",
+            s
+        );
+        assert!(
+            s.contains("int __cxa_guard_acquire(unsigned char* g)"),
+            "{}",
+            s
+        );
     }
 
     #[test]
@@ -117,7 +131,11 @@ mod tests {
     #[test]
     fn typeinfo_decl_has_name_field() {
         let s = typeinfo_struct_decl();
-        assert!(s.contains("typedef struct __dcc_typeinfo { const char* name; }"), "{}", s);
+        assert!(
+            s.contains("typedef struct __dcc_typeinfo { const char* name; }"),
+            "{}",
+            s
+        );
     }
 
     #[test]

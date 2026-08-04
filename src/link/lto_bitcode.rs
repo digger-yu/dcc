@@ -35,8 +35,8 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Function, Global, Module, ValueType, ExprKind, ExprLiteral, TypedExpr, TypedStmt};
 use crate::diagnostics::{Diagnostic, Span};
+use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 
 const MAGIC: &[u8; 4] = b"DBC\0";
 const VERSION: u32 = 1;
@@ -72,19 +72,27 @@ fn serialize_function(out: &mut Vec<u8>, f: &Function) {
     encode_type(out, &f.return_type);
     // params
     out.extend_from_slice(&(f.params.len() as u32).to_le_bytes());
-    for p in &f.params { encode_type(out, p); }
+    for p in &f.params {
+        encode_type(out, p);
+    }
     // body
     out.extend_from_slice(&(f.body.len() as u32).to_le_bytes());
-    for stmt in &f.body { serialize_stmt(out, stmt); }
+    for stmt in &f.body {
+        serialize_stmt(out, stmt);
+    }
 }
 
 fn serialize_stmt(out: &mut Vec<u8>, s: &TypedStmt) {
     // 简化：stmt 没有 kind tag（IR 中 stmt 由 expressions 列表表示）
     // 这里用 expression 列表编码
     out.extend_from_slice(&(s.expressions.len() as u32).to_le_bytes());
-    for e in &s.expressions { serialize_expr(out, e); }
+    for e in &s.expressions {
+        serialize_expr(out, e);
+    }
     out.extend_from_slice(&(s.nested.len() as u32).to_le_bytes());
-    for n in &s.nested { serialize_stmt(out, n); }
+    for n in &s.nested {
+        serialize_stmt(out, n);
+    }
 }
 
 fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
@@ -139,29 +147,61 @@ fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
             out.push(1u8);
             out.extend_from_slice(&f.to_le_bytes());
         }
-        None => { out.push(0xffu8); }
+        None => {
+            out.push(0xffu8);
+        }
     }
     // children
     out.extend_from_slice(&(e.children.len() as u32).to_le_bytes());
-    for c in &e.children { serialize_expr(out, c); }
+    for c in &e.children {
+        serialize_expr(out, c);
+    }
 }
 
 fn op_to_tag(op: crate::ast::BinOp) -> u8 {
     use crate::ast::BinOp::*;
     match op {
-        Add => 0, Sub => 1, Mul => 2, Div => 3, Mod => 4,
-        EqEq => 5, Ne => 6, Lt => 7, Le => 8, Gt => 9, Ge => 10,
-        AndAnd => 11, OrOr => 12, And => 13, Or => 14, Xor => 15,
-        Shl => 16, Shr => 17,
+        Add => 0,
+        Sub => 1,
+        Mul => 2,
+        Div => 3,
+        Mod => 4,
+        EqEq => 5,
+        Ne => 6,
+        Lt => 7,
+        Le => 8,
+        Gt => 9,
+        Ge => 10,
+        AndAnd => 11,
+        OrOr => 12,
+        And => 13,
+        Or => 14,
+        Xor => 15,
+        Shl => 16,
+        Shr => 17,
     }
 }
 fn tag_to_op(tag: u8) -> Option<crate::ast::BinOp> {
     use crate::ast::BinOp::*;
     match tag {
-        0 => Some(Add), 1 => Some(Sub), 2 => Some(Mul), 3 => Some(Div), 4 => Some(Mod),
-        5 => Some(EqEq), 6 => Some(Ne), 7 => Some(Lt), 8 => Some(Le), 9 => Some(Gt), 10 => Some(Ge),
-        11 => Some(AndAnd), 12 => Some(OrOr), 13 => Some(And), 14 => Some(Or), 15 => Some(Xor),
-        16 => Some(Shl), 17 => Some(Shr),
+        0 => Some(Add),
+        1 => Some(Sub),
+        2 => Some(Mul),
+        3 => Some(Div),
+        4 => Some(Mod),
+        5 => Some(EqEq),
+        6 => Some(Ne),
+        7 => Some(Lt),
+        8 => Some(Le),
+        9 => Some(Gt),
+        10 => Some(Ge),
+        11 => Some(AndAnd),
+        12 => Some(OrOr),
+        13 => Some(And),
+        14 => Some(Or),
+        15 => Some(Xor),
+        16 => Some(Shl),
+        17 => Some(Shr),
         _ => None,
     }
 }
@@ -169,21 +209,29 @@ fn tag_to_op(tag: u8) -> Option<crate::ast::BinOp> {
 fn unop_to_tag(op: crate::ast::UnOp) -> u8 {
     use crate::ast::UnOp::*;
     match op {
-        Neg => 0, Not => 1, BitNot => 2, Plus => 3,
+        Neg => 0,
+        Not => 1,
+        BitNot => 2,
+        Plus => 3,
     }
 }
 
 fn tag_to_unop(tag: u8) -> Option<crate::ast::UnOp> {
     use crate::ast::UnOp::*;
     match tag {
-        0 => Some(Neg), 1 => Some(Not), 2 => Some(BitNot), 3 => Some(Plus),
+        0 => Some(Neg),
+        1 => Some(Not),
+        2 => Some(BitNot),
+        3 => Some(Plus),
         _ => None,
     }
 }
 
 fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
     match t {
-        ValueType::Void => { out.push(0); }
+        ValueType::Void => {
+            out.push(0);
+        }
         ValueType::Integer { bits, signed } => {
             out.push(1);
             out.extend_from_slice(&bits.to_le_bytes());
@@ -205,10 +253,16 @@ fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
                     out.push(1);
                     out.extend_from_slice(&(*n as u64).to_le_bytes());
                 }
-                None => { out.push(0); }
+                None => {
+                    out.push(0);
+                }
             }
         }
-        ValueType::Aggregate { name, size, is_union } => {
+        ValueType::Aggregate {
+            name,
+            size,
+            is_union,
+        } => {
             out.push(5);
             let n = name.as_bytes();
             out.extend_from_slice(&(n.len() as u32).to_le_bytes());
@@ -220,7 +274,9 @@ fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
             out.push(6);
             encode_type(out, ret);
             out.extend_from_slice(&(params.len() as u32).to_le_bytes());
-            for p in params { encode_type(out, p); }
+            for p in params {
+                encode_type(out, p);
+            }
         }
         ValueType::Vector(inner, n) => {
             out.push(7);
@@ -244,19 +300,29 @@ fn serialize_global(out: &mut Vec<u8>, g: &Global) {
             out.push(1);
             serialize_expr(out, expr);
         }
-        None => { out.push(0); }
+        None => {
+            out.push(0);
+        }
     }
 }
 
 /// 反序列化位码，返回 (source_path, functions, globals)。
 pub fn deserialize_module(data: &[u8]) -> Result<BitcodeModule, String> {
-    if data.len() < 8 { return Err("lto bitcode too short".into()); }
-    if &data[0..4] != MAGIC { return Err("bad lto bitcode magic".into()); }
+    if data.len() < 8 {
+        return Err("lto bitcode too short".into());
+    }
+    if &data[0..4] != MAGIC {
+        return Err("bad lto bitcode magic".into());
+    }
     let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
-    if version != VERSION { return Err(format!("unsupported lto bitcode version {}", version)); }
+    if version != VERSION {
+        return Err(format!("unsupported lto bitcode version {}", version));
+    }
     let mut cur = 8;
     let path_len = read_u32(data, &mut cur)? as usize;
-    let path = std::str::from_utf8(&data[cur..cur + path_len]).map_err(|e| e.to_string())?.to_string();
+    let path = std::str::from_utf8(&data[cur..cur + path_len])
+        .map_err(|e| e.to_string())?
+        .to_string();
     cur += path_len;
     let nfuncs = read_u32(data, &mut cur)? as usize;
     let mut functions = Vec::with_capacity(nfuncs);
@@ -268,7 +334,11 @@ pub fn deserialize_module(data: &[u8]) -> Result<BitcodeModule, String> {
     for _ in 0..nglobals {
         globals.push(deserialize_global(data, &mut cur)?);
     }
-    Ok(BitcodeModule { source_path: path, functions, globals })
+    Ok(BitcodeModule {
+        source_path: path,
+        functions,
+        globals,
+    })
 }
 
 pub struct BitcodeModule {
@@ -279,12 +349,16 @@ pub struct BitcodeModule {
 
 fn deserialize_function(data: &[u8], cur: &mut usize) -> Result<Function, String> {
     let name_len = read_u32(data, cur)? as usize;
-    let name = std::str::from_utf8(&data[*cur..*cur + name_len]).map_err(|e| e.to_string())?.to_string();
+    let name = std::str::from_utf8(&data[*cur..*cur + name_len])
+        .map_err(|e| e.to_string())?
+        .to_string();
     *cur += name_len;
     let ret_type = decode_type(data, cur)?;
     let np = read_u32(data, cur)? as usize;
     let mut params = Vec::with_capacity(np);
-    for _ in 0..np { params.push(decode_type(data, cur)?); }
+    for _ in 0..np {
+        params.push(decode_type(data, cur)?);
+    }
     let nbody = read_u32(data, cur)? as usize;
     let mut body = Vec::with_capacity(nbody);
     for _ in 0..nbody {
@@ -302,11 +376,19 @@ fn deserialize_function(data: &[u8], cur: &mut usize) -> Result<Function, String
 fn deserialize_stmt(data: &[u8], cur: &mut usize) -> Result<TypedStmt, String> {
     let ne = read_u32(data, cur)? as usize;
     let mut exprs = Vec::with_capacity(ne);
-    for _ in 0..ne { exprs.push(deserialize_expr(data, cur)?); }
+    for _ in 0..ne {
+        exprs.push(deserialize_expr(data, cur)?);
+    }
     let nn = read_u32(data, cur)? as usize;
     let mut nested = Vec::with_capacity(nn);
-    for _ in 0..nn { nested.push(deserialize_stmt(data, cur)?); }
-    Ok(TypedStmt { expressions: exprs, nested, span: Span::point("", 0, 0) })
+    for _ in 0..nn {
+        nested.push(deserialize_stmt(data, cur)?);
+    }
+    Ok(TypedStmt {
+        expressions: exprs,
+        nested,
+        span: Span::point("", 0, 0),
+    })
 }
 
 fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
@@ -316,7 +398,9 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
         0 => ExprKind::Constant,
         1 => {
             let n = read_u32(data, cur)? as usize;
-            let name = std::str::from_utf8(&data[*cur..*cur + n]).map_err(|e| e.to_string())?.to_string();
+            let name = std::str::from_utf8(&data[*cur..*cur + n])
+                .map_err(|e| e.to_string())?
+                .to_string();
             *cur += n;
             ExprKind::Local(name)
         }
@@ -337,7 +421,9 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
         8 => ExprKind::Index,
         9 => {
             let n = read_u32(data, cur)? as usize;
-            let name = std::str::from_utf8(&data[*cur..*cur + n]).map_err(|e| e.to_string())?.to_string();
+            let name = std::str::from_utf8(&data[*cur..*cur + n])
+                .map_err(|e| e.to_string())?
+                .to_string();
             *cur += n;
             ExprKind::Member(name)
         }
@@ -349,7 +435,9 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
         15 => ExprKind::Opaque,
         16 => {
             let n = read_u32(data, cur)? as usize;
-            let ap = std::str::from_utf8(&data[*cur..*cur + n]).map_err(|e| e.to_string())?.to_string();
+            let ap = std::str::from_utf8(&data[*cur..*cur + n])
+                .map_err(|e| e.to_string())?
+                .to_string();
             *cur += n;
             ExprKind::VaArg { ap }
         }
@@ -373,8 +461,16 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
     };
     let nc = read_u32(data, cur)? as usize;
     let mut children = Vec::with_capacity(nc);
-    for _ in 0..nc { children.push(deserialize_expr(data, cur)?); }
-    Ok(TypedExpr { ty, kind, children, span: Span::point("", 0, 0), literal })
+    for _ in 0..nc {
+        children.push(deserialize_expr(data, cur)?);
+    }
+    Ok(TypedExpr {
+        ty,
+        kind,
+        children,
+        span: Span::point("", 0, 0),
+        literal,
+    })
 }
 
 fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
@@ -385,40 +481,62 @@ fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
         1 => {
             let bits = u16::from_le_bytes(data[*cur..*cur + 2].try_into().unwrap());
             *cur += 2;
-            let s = data[*cur]; *cur += 1;
-            Ok(ValueType::Integer { bits, signed: s != 0 })
+            let s = data[*cur];
+            *cur += 1;
+            Ok(ValueType::Integer {
+                bits,
+                signed: s != 0,
+            })
         }
         2 => {
             let bits = u16::from_le_bytes(data[*cur..*cur + 2].try_into().unwrap());
             *cur += 2;
             Ok(ValueType::Float { bits })
         }
-        3 => { let inner = decode_type(data, cur)?; Ok(ValueType::Pointer(Box::new(inner))) }
+        3 => {
+            let inner = decode_type(data, cur)?;
+            Ok(ValueType::Pointer(Box::new(inner)))
+        }
         4 => {
             let inner = decode_type(data, cur)?;
-            let has_len = data[*cur]; *cur += 1;
+            let has_len = data[*cur];
+            *cur += 1;
             let len = if has_len != 0 {
                 let v = u64::from_le_bytes(data[*cur..*cur + 8].try_into().unwrap());
                 *cur += 8;
                 Some(v as usize)
-            } else { None };
+            } else {
+                None
+            };
             Ok(ValueType::Array(Box::new(inner), len))
         }
         5 => {
             let n = read_u32(data, cur)? as usize;
-            let name = std::str::from_utf8(&data[*cur..*cur + n]).map_err(|e| e.to_string())?.to_string();
+            let name = std::str::from_utf8(&data[*cur..*cur + n])
+                .map_err(|e| e.to_string())?
+                .to_string();
             *cur += n;
             let size = u64::from_le_bytes(data[*cur..*cur + 8].try_into().unwrap()) as usize;
             *cur += 8;
-            let u = data[*cur]; *cur += 1;
-            Ok(ValueType::Aggregate { name, size, is_union: u != 0 })
+            let u = data[*cur];
+            *cur += 1;
+            Ok(ValueType::Aggregate {
+                name,
+                size,
+                is_union: u != 0,
+            })
         }
         6 => {
             let ret = decode_type(data, cur)?;
             let np = read_u32(data, cur)? as usize;
             let mut params = Vec::with_capacity(np);
-            for _ in 0..np { params.push(decode_type(data, cur)?); }
-            Ok(ValueType::Function { ret: Box::new(ret), params })
+            for _ in 0..np {
+                params.push(decode_type(data, cur)?);
+            }
+            Ok(ValueType::Function {
+                ret: Box::new(ret),
+                params,
+            })
         }
         7 => {
             let inner = decode_type(data, cur)?;
@@ -426,23 +544,40 @@ fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
             *cur += 8;
             Ok(ValueType::Vector(Box::new(inner), n))
         }
-        8 => { let inner = decode_type(data, cur)?; Ok(ValueType::Complex(Box::new(inner))) }
+        8 => {
+            let inner = decode_type(data, cur)?;
+            Ok(ValueType::Complex(Box::new(inner)))
+        }
         _ => Err(format!("bad type tag {}", tag)),
     }
 }
 
 fn deserialize_global(data: &[u8], cur: &mut usize) -> Result<Global, String> {
     let n = read_u32(data, cur)? as usize;
-    let name = std::str::from_utf8(&data[*cur..*cur + n]).map_err(|e| e.to_string())?.to_string();
+    let name = std::str::from_utf8(&data[*cur..*cur + n])
+        .map_err(|e| e.to_string())?
+        .to_string();
     *cur += n;
     let ty = decode_type(data, cur)?;
-    let has_init = data[*cur]; *cur += 1;
-    let init = if has_init != 0 { Some(deserialize_expr(data, cur)?) } else { None };
-    Ok(Global { name, ty, initializer: init, span: Span::point("", 0, 0) })
+    let has_init = data[*cur];
+    *cur += 1;
+    let init = if has_init != 0 {
+        Some(deserialize_expr(data, cur)?)
+    } else {
+        None
+    };
+    Ok(Global {
+        name,
+        ty,
+        initializer: init,
+        span: Span::point("", 0, 0),
+    })
 }
 
 fn read_u32(data: &[u8], cur: &mut usize) -> Result<u32, String> {
-    if *cur + 4 > data.len() { return Err("eof".into()); }
+    if *cur + 4 > data.len() {
+        return Err("eof".into());
+    }
     let v = u32::from_le_bytes(data[*cur..*cur + 4].try_into().unwrap());
     *cur += 4;
     Ok(v)
@@ -549,7 +684,9 @@ pub fn run_cross_tu_lto_with_config(modules: &mut [BitcodeModule], cfg: &LtoConf
         let mut map: HashMap<String, Function> = HashMap::new();
         for m in modules.iter() {
             for f in &m.functions {
-                if !is_inline_candidate(f) { continue; }
+                if !is_inline_candidate(f) {
+                    continue;
+                }
                 map.insert(f.name.clone(), f.clone());
             }
         }
@@ -585,7 +722,9 @@ pub fn run_cross_tu_lto_with_config(modules: &mut [BitcodeModule], cfg: &LtoConf
         for m in modules.iter_mut() {
             m.globals.retain(|g| {
                 // 公开名总是保留
-                if !g.name.starts_with('.') { return true; }
+                if !g.name.starts_with('.') {
+                    return true;
+                }
                 referenced_globals.contains(&g.name)
             });
         }
@@ -623,26 +762,38 @@ fn is_inline_candidate(f: &Function) -> bool {
     if !f.name.starts_with('.') && !f.name.starts_with("__dcc_local_") {
         return false;
     }
-    if f.body.len() > 4 { return false; }
+    if f.body.len() > 4 {
+        return false;
+    }
     for stmt in &f.body {
-        if stmt.expressions.len() > 4 { return false; }
+        if stmt.expressions.len() > 4 {
+            return false;
+        }
         for n in &stmt.nested {
-            if n.expressions.len() > 4 { return false; }
+            if n.expressions.len() > 4 {
+                return false;
+            }
         }
     }
     // 无递归调用
     for stmt in &f.body {
-        if has_recursive_call(stmt, &f.name) { return false; }
+        if has_recursive_call(stmt, &f.name) {
+            return false;
+        }
     }
     true
 }
 
 fn has_recursive_call(stmt: &TypedStmt, name: &str) -> bool {
     for e in &stmt.expressions {
-        if has_recursive_call_expr(e, name) { return true; }
+        if has_recursive_call_expr(e, name) {
+            return true;
+        }
     }
     for n in &stmt.nested {
-        if has_recursive_call(n, name) { return true; }
+        if has_recursive_call(n, name) {
+            return true;
+        }
     }
     false
 }
@@ -651,12 +802,16 @@ fn has_recursive_call_expr(e: &TypedExpr, name: &str) -> bool {
     if let ExprKind::Call = &e.kind {
         if let Some(c) = e.children.first() {
             if let ExprKind::Local(n) = &c.kind {
-                if n == name { return true; }
+                if n == name {
+                    return true;
+                }
             }
         }
     }
     for c in &e.children {
-        if has_recursive_call_expr(c, name) { return true; }
+        if has_recursive_call_expr(c, name) {
+            return true;
+        }
     }
     false
 }
@@ -723,8 +878,12 @@ fn extract_const_literal(expr: &TypedExpr) -> Option<ExprLiteral> {
 use std::collections::HashSet;
 
 fn collect_refs_in_stmt(stmt: &TypedStmt, refs: &mut HashSet<String>) {
-    for e in &stmt.expressions { collect_refs_in_expr(e, refs); }
-    for n in &stmt.nested { collect_refs_in_stmt(n, refs); }
+    for e in &stmt.expressions {
+        collect_refs_in_expr(e, refs);
+    }
+    for n in &stmt.nested {
+        collect_refs_in_stmt(n, refs);
+    }
 }
 
 fn collect_refs_in_expr(e: &TypedExpr, refs: &mut HashSet<String>) {
@@ -741,12 +900,18 @@ fn collect_refs_in_expr(e: &TypedExpr, refs: &mut HashSet<String>) {
         }
         _ => {}
     }
-    for c in &e.children { collect_refs_in_expr(c, refs); }
+    for c in &e.children {
+        collect_refs_in_expr(c, refs);
+    }
 }
 
 fn collect_global_refs_in_stmt(stmt: &TypedStmt, refs: &mut HashSet<String>) {
-    for e in &stmt.expressions { collect_global_refs_in_expr(e, refs); }
-    for n in &stmt.nested { collect_global_refs_in_stmt(n, refs); }
+    for e in &stmt.expressions {
+        collect_global_refs_in_expr(e, refs);
+    }
+    for n in &stmt.nested {
+        collect_global_refs_in_stmt(n, refs);
+    }
 }
 
 fn collect_global_refs_in_expr(e: &TypedExpr, refs: &mut HashSet<String>) {
@@ -756,10 +921,14 @@ fn collect_global_refs_in_expr(e: &TypedExpr, refs: &mut HashSet<String>) {
             refs.insert(name.clone());
         }
     }
-    for c in &e.children { collect_global_refs_in_expr(c, refs); }
+    for c in &e.children {
+        collect_global_refs_in_expr(c, refs);
+    }
 }
 
-pub fn validate(_m: &Module) -> Result<(), Vec<Diagnostic>> { Ok(()) }
+pub fn validate(_m: &Module) -> Result<(), Vec<Diagnostic>> {
+    Ok(())
+}
 
 /// 从 BitcodeModule 直接序列化（跳过 deserialize 再 serialize 的中间步）
 pub fn serialize_module_from_bc(m: &BitcodeModule) -> Vec<u8> {
@@ -770,8 +939,12 @@ pub fn serialize_module_from_bc(m: &BitcodeModule) -> Vec<u8> {
     out.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(path_bytes);
     out.extend_from_slice(&(m.functions.len() as u32).to_le_bytes());
-    for f in &m.functions { serialize_function(&mut out, f); }
+    for f in &m.functions {
+        serialize_function(&mut out, f);
+    }
     out.extend_from_slice(&(m.globals.len() as u32).to_le_bytes());
-    for g in &m.globals { serialize_global(&mut out, g); }
+    for g in &m.globals {
+        serialize_global(&mut out, g);
+    }
     out
 }

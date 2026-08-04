@@ -124,7 +124,9 @@ impl PerfDataFile {
                 name: None,
             });
             let step = if attr_size_us < 16 { 120 } else { attr_size_us };
-            if off + step > buf.len() { break; }
+            if off + step > buf.len() {
+                break;
+            }
             off += step;
         }
         Ok(Self {
@@ -186,11 +188,11 @@ mod tests {
         // 8 data_size
         f.write_all(&1024u64.to_le_bytes())?;
         // 1 perf_event_attr (120 bytes; 我们只填前 16)
-        f.write_all(&1u32.to_le_bytes())?;     // type = SOFTWARE
-        f.write_all(&120u32.to_le_bytes())?;   // size
-        f.write_all(&0x09u64.to_le_bytes())?;   // config = PERF_COUNT_SW_CPU_CLOCK
-        f.write_all(&[0u8; 104])?;             // padding
-        // data section: 1024 字节
+        f.write_all(&1u32.to_le_bytes())?; // type = SOFTWARE
+        f.write_all(&120u32.to_le_bytes())?; // size
+        f.write_all(&0x09u64.to_le_bytes())?; // config = PERF_COUNT_SW_CPU_CLOCK
+        f.write_all(&[0u8; 104])?; // padding
+                                   // data section: 1024 字节
         f.write_all(&vec![0u8; 1024])?;
         Ok(())
     }

@@ -65,32 +65,40 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
             used.extend(operand_uses(&inst.kind));
         }
         match &b.term {
-            Terminator::Ret { val: Some(v) } => { used.extend(operand_uses_op(v)); }
-            Terminator::Branch { cond, .. } => { used.extend(operand_uses_op(cond)); }
+            Terminator::Ret { val: Some(v) } => {
+                used.extend(operand_uses_op(v));
+            }
+            Terminator::Branch { cond, .. } => {
+                used.extend(operand_uses_op(cond));
+            }
             _ => {}
         }
         for p in &b.phis {
-            for (v, _) in &p.incoming { used.insert(v.name()); }
+            for (v, _) in &p.incoming {
+                used.insert(v.name());
+            }
         }
     }
     // 2. 删除无用 pure 指令
     let mut changed = false;
     for b in func.blocks.values_mut() {
         let before = b.insts.len();
-        b.insts.retain(|i| {
-            match &i.kind {
-                InstKind::Bin { .. } | InstKind::Un { .. }
-                | InstKind::Cast { .. } | InstKind::Select { .. } => {
-                    if let Some(d) = &i.dest {
-                        used.contains(&d.name())
-                    } else {
-                        true
-                    }
+        b.insts.retain(|i| match &i.kind {
+            InstKind::Bin { .. }
+            | InstKind::Un { .. }
+            | InstKind::Cast { .. }
+            | InstKind::Select { .. } => {
+                if let Some(d) = &i.dest {
+                    used.contains(&d.name())
+                } else {
+                    true
                 }
-                _ => true,
             }
+            _ => true,
         });
-        if b.insts.len() != before { changed = true; }
+        if b.insts.len() != before {
+            changed = true;
+        }
     }
     changed
 }
@@ -100,10 +108,14 @@ pub fn dead_bb_elim(func: &mut Function) -> bool {
     let mut reachable = HashSet::new();
     let mut stack = vec![func.entry.clone()];
     while let Some(b) = stack.pop() {
-        if !reachable.insert(b.clone()) { continue; }
+        if !reachable.insert(b.clone()) {
+            continue;
+        }
         if let Some(bb) = func.blocks.get(&b) {
             for s in &bb.succs {
-                if !reachable.contains(s) { stack.push(s.clone()); }
+                if !reachable.contains(s) {
+                    stack.push(s.clone());
+                }
             }
         }
     }
@@ -162,7 +174,12 @@ pub fn ivop(func: &mut Function) -> bool {
     let mut changed = false;
     for b in func.blocks.values_mut() {
         for inst in &mut b.insts {
-            if let InstKind::Bin { op: BinOp::Mul, l, r } = &mut inst.kind {
+            if let InstKind::Bin {
+                op: BinOp::Mul,
+                l,
+                r,
+            } = &mut inst.kind
+            {
                 if is_induction(l) && matches!(r, Operand::Int(_)) {
                     // 标记为 strength_reduction 友好
                     changed = true;
@@ -194,7 +211,11 @@ pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
         for inst in &b.insts {
             match &inst.kind {
                 InstKind::AddrOf { base } => {
-                    let id = *sets.entry(base.clone()).or_insert_with(|| { let i = next_id; next_id += 1; i });
+                    let id = *sets.entry(base.clone()).or_insert_with(|| {
+                        let i = next_id;
+                        next_id += 1;
+                        i
+                    });
                     if let Some(d) = &inst.dest {
                         sets.insert(d.name(), id);
                     }
@@ -206,7 +227,10 @@ pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
                         }
                     }
                 }
-                InstKind::Store { e: Operand::Var(v), src } => {
+                InstKind::Store {
+                    e: Operand::Var(v),
+                    src,
+                } => {
                     let src_set = set_of(src, &sets).unwrap_or(0);
                     union_into(&mut sets, &mut parents, &v.name(), src_set);
                 }
@@ -217,7 +241,8 @@ pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
                                 let _ = s;
                             }
                         }
-                        let id = next_id; next_id += 1;
+                        let id = next_id;
+                        next_id += 1;
                         sets.insert(d.name(), id);
                     }
                 }
@@ -236,7 +261,12 @@ fn set_of(o: &Operand, sets: &HashMap<String, usize>) -> Option<usize> {
     }
 }
 
-fn union_into(sets: &mut HashMap<String, usize>, _parents: &mut HashMap<usize, usize>, key: &str, other: usize) {
+fn union_into(
+    sets: &mut HashMap<String, usize>,
+    _parents: &mut HashMap<usize, usize>,
+    key: &str,
+    other: usize,
+) {
     let cur = sets.get(key).copied();
     if let Some(c) = cur {
         // 简化: 直接把 other 视作 c 的别名集合 (Steensgaard 单向合并)
@@ -255,11 +285,19 @@ fn union_into(sets: &mut HashMap<String, usize>, _parents: &mut HashMap<usize, u
 pub fn instruction_scheduling(func: &mut Function) -> bool {
     let mut changed = false;
     for b in func.blocks.values_mut() {
-        if b.insts.len() < 4 { continue; } // 太短不调度
+        if b.insts.len() < 4 {
+            continue;
+        } // 太短不调度
         let mut pure: Vec<Inst> = Vec::new();
         let mut side: Vec<Inst> = Vec::new();
         for inst in b.insts.drain(..) {
-            if matches!(inst.kind, InstKind::Store {..} | InstKind::Call {..} | InstKind::IndexStore {..} | InstKind::MemberStore {..}) {
+            if matches!(
+                inst.kind,
+                InstKind::Store { .. }
+                    | InstKind::Call { .. }
+                    | InstKind::IndexStore { .. }
+                    | InstKind::MemberStore { .. }
+            ) {
                 side.push(inst);
             } else {
                 pure.push(inst);
@@ -274,7 +312,9 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
         let len = pure.len();
         b.insts.extend(pure);
         b.insts.extend(side);
-        if b.insts.len() != len { changed = true; }
+        if b.insts.len() != len {
+            changed = true;
+        }
     }
     changed
 }
@@ -286,7 +326,9 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
 /// 解析 .dcc.profdata 文件 (text format: `bb <bb_name> <count>`)。返回每个 BB 的
 /// 执行次数,供后续 hot/cold 提示使用。
 pub fn load_profile(path: &str) -> HashMap<String, u64> {
-    let Ok(text) = std::fs::read_to_string(path) else { return HashMap::new(); };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
     let mut out = HashMap::new();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("bb ") {
@@ -306,35 +348,45 @@ pub fn load_profile(path: &str) -> HashMap<String, u64> {
 pub fn pgo(func: &mut Function) -> bool {
     let path = format!("{}.dcc.profdata", func.name);
     let profile = load_profile(&path);
-    if profile.is_empty() { return false; }
+    if profile.is_empty() {
+        return false;
+    }
     let total: u64 = profile.values().sum();
-    if total == 0 { return false; }
+    if total == 0 {
+        return false;
+    }
     let mut hot_bbs = 0;
     let mut cold_bbs = 0;
     for (name, count) in &profile {
         let ratio = *count as f64 / total as f64;
         if ratio > 0.10 {
             if let Some(bb) = func.blocks.get_mut(name) {
-                bb.insts.insert(0, Inst {
-                    dest: None,
-                    kind: InstKind::Store {
-                        e: Operand::SymAddr("__dcc_hot_hint".to_string()),
-                        src: Operand::Int(*count as i128),
+                bb.insts.insert(
+                    0,
+                    Inst {
+                        dest: None,
+                        kind: InstKind::Store {
+                            e: Operand::SymAddr("__dcc_hot_hint".to_string()),
+                            src: Operand::Int(*count as i128),
+                        },
+                        span: func.span.clone(),
                     },
-                    span: func.span.clone(),
-                });
+                );
                 hot_bbs += 1;
             }
         } else if *count < 2 {
             if let Some(bb) = func.blocks.get_mut(name) {
-                bb.insts.insert(0, Inst {
-                    dest: None,
-                    kind: InstKind::Store {
-                        e: Operand::SymAddr("__dcc_cold_hint".to_string()),
-                        src: Operand::Int(*count as i128),
+                bb.insts.insert(
+                    0,
+                    Inst {
+                        dest: None,
+                        kind: InstKind::Store {
+                            e: Operand::SymAddr("__dcc_cold_hint".to_string()),
+                            src: Operand::Int(*count as i128),
+                        },
+                        span: func.span.clone(),
                     },
-                    span: func.span.clone(),
-                });
+                );
                 cold_bbs += 1;
             }
         }
@@ -353,7 +405,9 @@ pub fn pgo(func: &mut Function) -> bool {
 pub fn auto_parallelization(func: &mut Function) -> bool {
     let mut changed = false;
     for name in &func.block_order.clone() {
-        if !name.starts_with("for.body") { continue; }
+        if !name.starts_with("for.body") {
+            continue;
+        }
         let bb = match func.blocks.get(name) {
             Some(b) => b,
             None => continue,
@@ -361,23 +415,36 @@ pub fn auto_parallelization(func: &mut Function) -> bool {
         // 简单安全检查: 循环体无 Call 指令 + 无 Store 到非 induction 变量
         let mut safe = true;
         for inst in &bb.insts {
-            if matches!(inst.kind, InstKind::Call {..}) { safe = false; break; }
-            if let InstKind::Store { e: Operand::SymAddr(n), .. } = &inst.kind {
-                if !n.starts_with("_t") { safe = false; break; }
+            if matches!(inst.kind, InstKind::Call { .. }) {
+                safe = false;
+                break;
+            }
+            if let InstKind::Store {
+                e: Operand::SymAddr(n),
+                ..
+            } = &inst.kind
+            {
+                if !n.starts_with("_t") {
+                    safe = false;
+                    break;
+                }
             }
         }
         if safe {
             changed = true;
             // 通过插入一条 marker Store 提示 codegen (注释式; 不影响正确性)
             if let Some(b) = func.blocks.get_mut(name) {
-                b.insts.insert(0, Inst {
-                    dest: None,
-                    kind: InstKind::Store {
-                        e: Operand::SymAddr("__dcc_parallel_hint".to_string()),
-                        src: Operand::Int(1),
+                b.insts.insert(
+                    0,
+                    Inst {
+                        dest: None,
+                        kind: InstKind::Store {
+                            e: Operand::SymAddr("__dcc_parallel_hint".to_string()),
+                            src: Operand::Int(1),
+                        },
+                        span: func.span.clone(),
                     },
-                    span: func.span.clone(),
-                });
+                );
             }
         }
     }
@@ -395,13 +462,18 @@ pub fn loop_tiling(func: &mut Function) -> bool {
     // 简化: 仅当 BB 名包含 for.body 且指令数 <= 4, 复制最后一个 Add 指令
     let names: Vec<String> = func.block_order.clone();
     for n in &names {
-        if !n.starts_with("for.body") { continue; }
+        if !n.starts_with("for.body") {
+            continue;
+        }
         let bb = func.blocks.get(n).cloned();
         if let Some(bb) = bb {
             if bb.insts.len() <= 4 && !bb.insts.is_empty() {
                 // 复制最后一条纯运算到 BB 末尾 (作为 tiled 第二 tile)
                 if let Some(last) = bb.insts.last().cloned() {
-                    if matches!(last.kind, InstKind::Bin {..} | InstKind::Un {..} | InstKind::Cast {..}) {
+                    if matches!(
+                        last.kind,
+                        InstKind::Bin { .. } | InstKind::Un { .. } | InstKind::Cast { .. }
+                    ) {
                         if let Some(b) = func.blocks.get_mut(n) {
                             b.insts.push(last);
                             changed = true;
@@ -425,20 +497,27 @@ pub fn loop_interchange(func: &mut Function) -> bool {
     let mut has_i = false;
     let mut has_j = false;
     for n in &func.block_order.clone() {
-        if n.contains(".i.") { has_i = true; }
-        if n.contains(".j.") { has_j = true; }
+        if n.contains(".i.") {
+            has_i = true;
+        }
+        if n.contains(".j.") {
+            has_j = true;
+        }
     }
     if has_i && has_j {
         // 简化: 在 entry BB 顶端插入一个 hint, 告诉 codegen 循环已交换
         if let Some(entry) = func.blocks.get_mut(&func.entry) {
-            entry.insts.insert(0, Inst {
-                dest: None,
-                kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_loop_interchanged".to_string()),
-                    src: Operand::Int(1),
+            entry.insts.insert(
+                0,
+                Inst {
+                    dest: None,
+                    kind: InstKind::Store {
+                        e: Operand::SymAddr("__dcc_loop_interchanged".to_string()),
+                        src: Operand::Int(1),
+                    },
+                    span: func.span.clone(),
                 },
-                span: func.span.clone(),
-            });
+            );
             changed = true;
         }
     }
@@ -453,17 +532,28 @@ pub fn loop_interchange(func: &mut Function) -> bool {
 /// 递归 return 改写为 `goto start` 形式。本 pass 实际上记录函数名 +
 /// 提供 `is_tail_recursive` 信息, codegen 见到后会用 jump 代替 call。
 pub fn tail_call_optimization(func: &mut Function) -> bool {
-    if func.blocks.is_empty() { return false; }
+    if func.blocks.is_empty() {
+        return false;
+    }
     let exit_bb = func.block_order.last().cloned();
-    let exit_bb = match exit_bb { Some(n) => n, None => return false };
+    let exit_bb = match exit_bb {
+        Some(n) => n,
+        None => return false,
+    };
     let bb = match func.blocks.get(&exit_bb) {
         Some(b) => b,
         None => return false,
     };
     let mut has_self_call = false;
     for inst in &bb.insts {
-        if let InstKind::Call { callee: Operand::FnAddr(n) | Operand::SymAddr(n), .. } = &inst.kind {
-            if n == &func.name { has_self_call = true; }
+        if let InstKind::Call {
+            callee: Operand::FnAddr(n) | Operand::SymAddr(n),
+            ..
+        } = &inst.kind
+        {
+            if n == &func.name {
+                has_self_call = true;
+            }
         }
     }
     if has_self_call {
@@ -483,14 +573,17 @@ pub fn tail_call_optimization(func: &mut Function) -> bool {
 pub fn function_attribute_propagation(func: &mut Function) -> bool {
     if func.is_cold {
         if let Some(entry) = func.blocks.get_mut(&func.entry) {
-            entry.insts.insert(0, Inst {
-                dest: None,
-                kind: InstKind::Store {
-                    e: Operand::SymAddr("__dcc_section_cold".to_string()),
-                    src: Operand::Int(1),
+            entry.insts.insert(
+                0,
+                Inst {
+                    dest: None,
+                    kind: InstKind::Store {
+                        e: Operand::SymAddr("__dcc_section_cold".to_string()),
+                        src: Operand::Int(1),
+                    },
+                    span: func.span.clone(),
                 },
-                span: func.span.clone(),
-            });
+            );
             return true;
         }
     }
@@ -505,18 +598,26 @@ pub fn function_attribute_propagation(func: &mut Function) -> bool {
 /// 物理寄存器池; 这里只在 BB 顶端插入一个 `__dcc_regalloc` hint, 标记该
 /// 函数经过了 register allocation pass)。
 pub fn register_allocation(func: &mut Function) -> bool {
-    if func.params.is_empty() && func.blocks.get(&func.entry).is_none_or(|b| b.insts.is_empty()) {
+    if func.params.is_empty()
+        && func
+            .blocks
+            .get(&func.entry)
+            .is_none_or(|b| b.insts.is_empty())
+    {
         return false;
     }
     if let Some(entry) = func.blocks.get_mut(&func.entry) {
-        entry.insts.insert(0, Inst {
-            dest: None,
-            kind: InstKind::Store {
-                e: Operand::SymAddr("__dcc_regalloc_done".to_string()),
-                src: Operand::Int(1),
+        entry.insts.insert(
+            0,
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::SymAddr("__dcc_regalloc_done".to_string()),
+                    src: Operand::Int(1),
+                },
+                span: func.span.clone(),
             },
-            span: func.span.clone(),
-        });
+        );
         return true;
     }
     false
@@ -548,17 +649,27 @@ pub fn alias_set(func: &Function) -> BTreeMap<usize, Vec<String>> {
 pub fn speculative_execution(func: &mut Function) -> bool {
     let mut changed = false;
     for b in func.blocks.values_mut() {
-        if b.insts.len() < 2 { continue; }
+        if b.insts.len() < 2 {
+            continue;
+        }
         let mut pure: Vec<Inst> = Vec::new();
         let mut side: Vec<Inst> = Vec::new();
         for inst in b.insts.drain(..) {
-            if matches!(inst.kind, InstKind::Bin {..} | InstKind::Un {..} | InstKind::Cast {..} | InstKind::Select {..}) {
+            if matches!(
+                inst.kind,
+                InstKind::Bin { .. }
+                    | InstKind::Un { .. }
+                    | InstKind::Cast { .. }
+                    | InstKind::Select { .. }
+            ) {
                 pure.push(inst);
             } else {
                 side.push(inst);
             }
         }
-        if pure.len() > 1 { changed = true; }
+        if pure.len() > 1 {
+            changed = true;
+        }
         b.insts.extend(pure);
         b.insts.extend(side);
     }
@@ -595,7 +706,9 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                             _ => None,
                         }
                     }
-                    InstKind::Un { op, e } => operand_int(e, &consts).and_then(|v| eval_unop(*op, v)),
+                    InstKind::Un { op, e } => {
+                        operand_int(e, &consts).and_then(|v| eval_unop(*op, v))
+                    }
                     InstKind::Cast { e, .. } => operand_int(e, &consts),
                     _ => None,
                 };
@@ -635,7 +748,9 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
             }
             true
         });
-        if b.insts.len() != before { modified = true; }
+        if b.insts.len() != before {
+            modified = true;
+        }
     }
     modified
 }
@@ -650,21 +765,41 @@ fn operand_int(o: &Operand, consts: &HashMap<String, i128>) -> Option<i128> {
 
 fn replace_op_in_inst(k: &mut InstKind, consts: &HashMap<String, i128>) {
     match k {
-        InstKind::Bin { l, r, .. } => { replace_op(l, consts); replace_op(r, consts); }
+        InstKind::Bin { l, r, .. } => {
+            replace_op(l, consts);
+            replace_op(r, consts);
+        }
         InstKind::Un { e, .. } => replace_op(e, consts),
         InstKind::Cast { e, .. } => replace_op(e, consts),
         InstKind::Load { e, .. } => replace_op(e, consts),
-        InstKind::Store { e, src } => { replace_op(e, consts); replace_op(src, consts); }
-        InstKind::IndexLoad { arr, idx } => { replace_op(arr, consts); replace_op(idx, consts); }
-        InstKind::IndexStore { arr, idx, src } => { replace_op(arr, consts); replace_op(idx, consts); replace_op(src, consts); }
+        InstKind::Store { e, src } => {
+            replace_op(e, consts);
+            replace_op(src, consts);
+        }
+        InstKind::IndexLoad { arr, idx } => {
+            replace_op(arr, consts);
+            replace_op(idx, consts);
+        }
+        InstKind::IndexStore { arr, idx, src } => {
+            replace_op(arr, consts);
+            replace_op(idx, consts);
+            replace_op(src, consts);
+        }
         InstKind::Call { callee, args, .. } => {
             replace_op(callee, consts);
-            for a in args { replace_op(a, consts); }
+            for a in args {
+                replace_op(a, consts);
+            }
         }
         InstKind::MemberLoad { obj, .. } => replace_op(obj, consts),
-        InstKind::MemberStore { obj, src, .. } => { replace_op(obj, consts); replace_op(src, consts); }
+        InstKind::MemberStore { obj, src, .. } => {
+            replace_op(obj, consts);
+            replace_op(src, consts);
+        }
         InstKind::Select { cond, then_, else_ } => {
-            replace_op(cond, consts); replace_op(then_, consts); replace_op(else_, consts);
+            replace_op(cond, consts);
+            replace_op(then_, consts);
+            replace_op(else_, consts);
         }
         _ => {}
     }
@@ -691,8 +826,20 @@ fn eval_binop(op: BinOp, a: i128, b: i128) -> Option<i128> {
         BinOp::Add => a.checked_add(b)?,
         BinOp::Sub => a.checked_sub(b)?,
         BinOp::Mul => a.checked_mul(b)?,
-        BinOp::Div => if b == 0 { return None; } else { a / b },
-        BinOp::Mod => if b == 0 { return None; } else { a % b },
+        BinOp::Div => {
+            if b == 0 {
+                return None;
+            } else {
+                a / b
+            }
+        }
+        BinOp::Mod => {
+            if b == 0 {
+                return None;
+            } else {
+                a % b
+            }
+        }
         BinOp::And => a & b,
         BinOp::Or => a | b,
         BinOp::Xor => a ^ b,
@@ -705,7 +852,13 @@ fn eval_binop(op: BinOp, a: i128, b: i128) -> Option<i128> {
 fn eval_unop(op: UnOp, v: i128) -> Option<i128> {
     Some(match op {
         UnOp::Neg => v.checked_neg()?,
-        UnOp::Not => if v == 0 { 1 } else { 0 },
+        UnOp::Not => {
+            if v == 0 {
+                1
+            } else {
+                0
+            }
+        }
         UnOp::BitNot => !v,
         UnOp::Plus => v,
     })
@@ -735,24 +888,33 @@ pub fn cross_function_dce(funcs: &mut Vec<FuncDecl>, keep_extern: bool) -> bool 
         stack.push(main.name.name.clone());
     }
     while let Some(name) = stack.pop() {
-        if !reachable.insert(name.clone()) { continue; }
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
         if let Some(cs) = callees.get(&name) {
             for c in cs {
-                if !reachable.contains(c) { stack.push(c.clone()); }
+                if !reachable.contains(c) {
+                    stack.push(c.clone());
+                }
             }
         }
     }
     // 3. 过滤
     let before = funcs.len();
     funcs.retain(|f| {
-        if f.is_static || f.is_extern { return true; }
+        if f.is_static || f.is_extern {
+            return true;
+        }
         reachable.contains(&f.name.name)
     });
     funcs.len() != before
 }
 
 fn collect_call_targets(f: &FuncDecl) -> Vec<String> {
-    let body = match &f.body { Some(b) => b, None => return Vec::new() };
+    let body = match &f.body {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
     let mut out = Vec::new();
     walk_block(body, &mut out);
     out
@@ -764,11 +926,15 @@ fn walk_block(b: &crate::ast::Block, out: &mut Vec<String>) {
         match item {
             BlockItem::Stmt(s) => walk_stmt(s, out),
             BlockItem::Decl(Decl::Func(f)) => {
-                if let Some(b2) = &f.body { walk_block(b2, out); }
+                if let Some(b2) = &f.body {
+                    walk_block(b2, out);
+                }
             }
             BlockItem::Decl(Decl::Var(v)) => {
                 // 变量初始化表达式中的调用也要计入调用图
-                if let Some(init) = &v.init { walk_expr(init, out); }
+                if let Some(init) = &v.init {
+                    walk_expr(init, out);
+                }
             }
             _ => {}
         }
@@ -780,25 +946,43 @@ fn walk_stmt(s: &Stmt, out: &mut Vec<String>) {
         Stmt::Return { val: Some(e), .. } => walk_expr(e, out),
         Stmt::Return { val: None, .. } => {}
         Stmt::Expr { e, .. } => walk_expr(e, out),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             walk_expr(cond, out);
             walk_stmt(then_, out);
-            if let Some(e) = else_ { walk_stmt(e, out); }
+            if let Some(e) = else_ {
+                walk_stmt(e, out);
+            }
         }
         Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
             walk_expr(cond, out);
             walk_stmt(body, out);
         }
-        Stmt::For { init, cond, step, body, .. } => {
-            if let Some(i) = init { walk_stmt(i, out); }
-            if let Some(c) = cond { walk_expr(c, out); }
-            if let Some(s) = step { walk_expr(s, out); }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                walk_stmt(i, out);
+            }
+            if let Some(c) = cond {
+                walk_expr(c, out);
+            }
+            if let Some(s) = step {
+                walk_expr(s, out);
+            }
             walk_stmt(body, out);
         }
         Stmt::Block { b, .. } => walk_block(b, out),
         Stmt::Switch { expr, cases, .. } => {
             walk_expr(expr, out);
-            for c in cases { walk_block(&c.body, out); }
+            for c in cases {
+                walk_block(&c.body, out);
+            }
         }
         _ => {}
     }
@@ -811,17 +995,35 @@ fn walk_expr(e: &crate::ast::Expr, out: &mut Vec<String>) {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 out.push(name.name.clone());
             }
-            for a in args { walk_expr(a, out); }
+            for a in args {
+                walk_expr(a, out);
+            }
         }
-        Expr::Binop { l, r, .. } => { walk_expr(l, out); walk_expr(r, out); }
+        Expr::Binop { l, r, .. } => {
+            walk_expr(l, out);
+            walk_expr(r, out);
+        }
         Expr::Unary { e, .. } => walk_expr(e, out),
         Expr::Cast { e, .. } => walk_expr(e, out),
-        Expr::Assign { l, r, .. } => { walk_expr(l, out); walk_expr(r, out); }
-        Expr::Cond { cond, then_, else_, .. } => {
-            walk_expr(cond, out); walk_expr(then_, out); walk_expr(else_, out);
+        Expr::Assign { l, r, .. } => {
+            walk_expr(l, out);
+            walk_expr(r, out);
         }
-        Expr::Comma { l, r, .. } => { walk_expr(l, out); walk_expr(r, out); }
-        Expr::Index { arr, idx, .. } => { walk_expr(arr, out); walk_expr(idx, out); }
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            walk_expr(cond, out);
+            walk_expr(then_, out);
+            walk_expr(else_, out);
+        }
+        Expr::Comma { l, r, .. } => {
+            walk_expr(l, out);
+            walk_expr(r, out);
+        }
+        Expr::Index { arr, idx, .. } => {
+            walk_expr(arr, out);
+            walk_expr(idx, out);
+        }
         Expr::Member { expr, .. } => walk_expr(expr, out),
         Expr::Deref { e, .. } => walk_expr(e, out),
         Expr::AddrOf { e, .. } => walk_expr(e, out),
@@ -838,32 +1040,56 @@ fn operand_uses(k: &InstKind) -> Vec<String> {
 
 fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
     match k {
-        InstKind::Bin { l, r, .. } => { add_op(l, out); add_op(r, out); }
+        InstKind::Bin { l, r, .. } => {
+            add_op(l, out);
+            add_op(r, out);
+        }
         InstKind::Un { e, .. } => add_op(e, out),
         InstKind::Cast { e, .. } => add_op(e, out),
         InstKind::Load { e, .. } => add_op(e, out),
-        InstKind::Store { e, src } => { add_op(e, out); add_op(src, out); }
-        InstKind::IndexLoad { arr, idx } => { add_op(arr, out); add_op(idx, out); }
-        InstKind::IndexStore { arr, idx, src } => { add_op(arr, out); add_op(idx, out); add_op(src, out); }
+        InstKind::Store { e, src } => {
+            add_op(e, out);
+            add_op(src, out);
+        }
+        InstKind::IndexLoad { arr, idx } => {
+            add_op(arr, out);
+            add_op(idx, out);
+        }
+        InstKind::IndexStore { arr, idx, src } => {
+            add_op(arr, out);
+            add_op(idx, out);
+            add_op(src, out);
+        }
         InstKind::Call { callee, args, .. } => {
             add_op(callee, out);
-            for a in args { add_op(a, out); }
+            for a in args {
+                add_op(a, out);
+            }
         }
         InstKind::MemberLoad { obj, .. } => add_op(obj, out),
-        InstKind::MemberStore { obj, src, .. } => { add_op(obj, out); add_op(src, out); }
+        InstKind::MemberStore { obj, src, .. } => {
+            add_op(obj, out);
+            add_op(src, out);
+        }
         InstKind::Select { cond, then_, else_ } => {
-            add_op(cond, out); add_op(then_, out); add_op(else_, out);
+            add_op(cond, out);
+            add_op(then_, out);
+            add_op(else_, out);
         }
         _ => {}
     }
 }
 
 fn add_op(o: &Operand, out: &mut Vec<String>) {
-    if let Operand::Var(v) = o { out.push(v.name()); }
+    if let Operand::Var(v) = o {
+        out.push(v.name());
+    }
 }
 
 fn operand_uses_op(o: &Operand) -> Vec<String> {
     let mut v = Vec::new();
-    if let Operand::Var(x) = o { v.push(x.name()); }
+    if let Operand::Var(x) = o {
+        v.push(x.name());
+    }
     v
 }

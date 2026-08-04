@@ -56,7 +56,10 @@ pub enum MangleType {
     DecltypeAuto,
     /// 模板实例化: `T<U1, U2, ...>` 解析为 `Template { name: "T", args: [...] }`.
     /// Itanium 编码: `N<name_len><name>I<arg1><arg2>...E` (与 St6vectorIiSaIiEE 形式一致).
-    Template { name: String, args: Vec<MangleType> },
+    Template {
+        name: String,
+        args: Vec<MangleType>,
+    },
 }
 
 impl MangleType {
@@ -79,9 +82,17 @@ impl MangleType {
             Self::Float => out.push('f'),
             Self::Double => out.push('d'),
             Self::LongDouble => out.push('e'),
-            Self::Pointer(t) => { out.push('P'); t.encode(out); }
-            Self::Reference(t) => { out.push('R'); t.encode(out); }
-            Self::Class(n) => { out.push_str(&format!("{}N{}E", n.len(), n)); }
+            Self::Pointer(t) => {
+                out.push('P');
+                t.encode(out);
+            }
+            Self::Reference(t) => {
+                out.push('R');
+                t.encode(out);
+            }
+            Self::Class(n) => {
+                out.push_str(&format!("{}N{}E", n.len(), n));
+            }
             Self::Ellipsis => out.push('z'),
             // M17.0: Auto / DecltypeAuto 由 lower 阶段解析, 不进入 mangle.
             // 显式抛错: 若某条路径未完成 auto 推导, 编译时报错而非输出错符号.
@@ -112,7 +123,9 @@ pub struct NestedName {
 }
 
 impl NestedName {
-    pub fn from_dotted(parts: Vec<String>) -> Self { Self { parts } }
+    pub fn from_dotted(parts: Vec<String>) -> Self {
+        Self { parts }
+    }
 
     /// 编码成 _ZN<part1_len><part1>...<partN_len><partN>E
     pub fn encode(&self, out: &mut String) {
@@ -206,22 +219,58 @@ pub fn mangle_global_function(name: &str, params: &[MangleType]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operator {
     // 二元算术
-    Add, Sub, Mul, Div, Mod,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
     // 二元位运算
-    Shl, Shr, And, Or, Xor,
+    Shl,
+    Shr,
+    And,
+    Or,
+    Xor,
     // 比较
-    Eq, Ne, Lt, Le, Gt, Ge,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
     // 逻辑
-    LAnd, LOr,
+    LAnd,
+    LOr,
     // 赋值
-    Assign, AddAssign, SubAssign, MulAssign, DivAssign, ModAssign,
-    ShlAssign, ShrAssign, AndAssign, OrAssign, XorAssign,
+    Assign,
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    ModAssign,
+    ShlAssign,
+    ShrAssign,
+    AndAssign,
+    OrAssign,
+    XorAssign,
     // 自增自减
-    Inc, Dec,
+    Inc,
+    Dec,
     // 复合下标 / 调用 / 成员
-    Index, Call, Arrow, ArrowStar,
+    Index,
+    Call,
+    Arrow,
+    ArrowStar,
     // 一元
-    Plus, Minus, Not, LNot, Deref, AddrOf, PreInc, PreDec, PostInc, PostDec,
+    Plus,
+    Minus,
+    Not,
+    LNot,
+    Deref,
+    AddrOf,
+    PreInc,
+    PreDec,
+    PostInc,
+    PostDec,
     // 转型
     CastTo(MangleType),
     // 特殊
@@ -367,11 +416,7 @@ pub fn from_tok_kind(kind: &TokKind) -> Option<Operator> {
 
 /// 运算符重载函数修饰 (成员或非成员)
 /// 格式: _ZN<class> op<args>E   或   _Z op<args>E
-pub fn mangle_operator_member(
-    class: &str,
-    op: Operator,
-    params: &[MangleType],
-) -> String {
+pub fn mangle_operator_member(class: &str, op: Operator, params: &[MangleType]) -> String {
     let n = NestedName::from_dotted(vec![class.to_string(), op.encode_name().to_string()]);
     let mut out = String::new();
     n.encode(&mut out);
@@ -410,13 +455,21 @@ pub fn mangle_typeinfo(name: &str) -> String {
 }
 
 /// operator new(size_t) Itanium 名字: _Znwm
-pub fn mangle_op_new() -> &'static str { "_Znwm" }
+pub fn mangle_op_new() -> &'static str {
+    "_Znwm"
+}
 /// operator new[](size_t) Itanium 名字: _Znam
-pub fn mangle_op_new_array() -> &'static str { "_Znam" }
+pub fn mangle_op_new_array() -> &'static str {
+    "_Znam"
+}
 /// operator delete(void*) Itanium 名字: _ZdlPv
-pub fn mangle_op_delete() -> &'static str { "_ZdlPv" }
+pub fn mangle_op_delete() -> &'static str {
+    "_ZdlPv"
+}
 /// operator delete[](void*) Itanium 名字: _ZdaPv
-pub fn mangle_op_delete_array() -> &'static str { "_ZdaPv" }
+pub fn mangle_op_delete_array() -> &'static str {
+    "_ZdaPv"
+}
 
 /// 虚表项的类型信息符号: _ZTT<name> (抛掷类型表, gcc 用)
 pub fn mangle_ttt(name: &str) -> String {
@@ -468,7 +521,11 @@ mod tests {
     fn mangle_pointer_type() {
         let n = NestedName::from_dotted(vec!["Foo".into(), "bar".into()]);
         assert_eq!(
-            mangle_member_function(&n, &[MangleType::Pointer(Box::new(MangleType::Int))], &MangleType::Void),
+            mangle_member_function(
+                &n,
+                &[MangleType::Pointer(Box::new(MangleType::Int))],
+                &MangleType::Void
+            ),
             "_ZN3Foo3barEPi"
         );
     }
@@ -477,16 +534,20 @@ mod tests {
     // 字符串, 现统一走 mangle.rs 命名常量以避免 typo.
     #[test]
     fn mangle_op_new_constants() {
-        assert_eq!(mangle_op_new(),          "_Znwm");
-        assert_eq!(mangle_op_new_array(),    "_Znam");
-        assert_eq!(mangle_op_delete(),       "_ZdlPv");
+        assert_eq!(mangle_op_new(), "_Znwm");
+        assert_eq!(mangle_op_new_array(), "_Znam");
+        assert_eq!(mangle_op_delete(), "_ZdlPv");
         assert_eq!(mangle_op_delete_array(), "_ZdaPv");
     }
     #[test]
     fn mangle_reference_type() {
         let n = NestedName::from_dotted(vec!["Foo".into(), "bar".into()]);
         assert_eq!(
-            mangle_member_function(&n, &[MangleType::Reference(Box::new(MangleType::Int))], &MangleType::Void),
+            mangle_member_function(
+                &n,
+                &[MangleType::Reference(Box::new(MangleType::Int))],
+                &MangleType::Void
+            ),
             "_ZN3Foo3barERi"
         );
     }
@@ -514,10 +575,7 @@ mod tests {
     fn encode_template_multi_args() {
         let t = MangleType::Template {
             name: "map".to_string(),
-            args: vec![
-                MangleType::Class("string".to_string()),
-                MangleType::Int,
-            ],
+            args: vec![MangleType::Class("string".to_string()), MangleType::Int],
         };
         let mut s = String::new();
         t.encode(&mut s);

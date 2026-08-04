@@ -1,9 +1,7 @@
 // src/codegen/arm.rs - ARM 后端 (AAPCS)
 
 use crate::ast::{FuncDecl, Program};
-use crate::codegen::elf::{
-    self, ElfRela, ElfSection, ElfSym, STB_GLOBAL, STT_FUNC,
-};
+use crate::codegen::elf::{self, ElfRela, ElfSection, ElfSym, STB_GLOBAL, STT_FUNC};
 use crate::ir::{Function, Global, Module, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
@@ -112,17 +110,18 @@ impl ArmCodegen {
 
         // 函数序言：保存 lr 和 fp
         self.emit_push(vec![11, 14]); // push {fp, lr}
-        self.emit_mov(11, 13);       // mov fp, sp
+        self.emit_mov(11, 13); // mov fp, sp
 
         // 简化：函数体只生成返回 0
-        self.emit_mov(0, 0);         // mov r0, #0
+        self.emit_mov(0, 0); // mov r0, #0
 
         // 函数尾声
-        self.emit_mov(13, 11);       // mov sp, fp
+        self.emit_mov(13, 11); // mov sp, fp
         self.emit_pop(vec![11, 15]); // pop {fp, pc}
 
         let func_end = self.code.len() as u64;
-        self.func_sizes.insert(func.name.clone(), func_end - func_start);
+        self.func_sizes
+            .insert(func.name.clone(), func_end - func_start);
 
         // 添加符号
         let sym_idx = self.symbols.len() as u32;

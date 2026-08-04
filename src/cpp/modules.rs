@@ -81,7 +81,11 @@ impl ModuleInfo {
 }
 
 /// 已知模块名表 (进程内). M18: 仅注释, 不影响行为.
-pub fn known_module(_name: &str) -> Option<ModuleInfo> { None }
+pub fn known_module(_name: &str) -> Option<ModuleInfo> {
+    None
+}
 
 /// 占位: 检查 `import X;` 是否应该展开为 #include. M18: 始终 true.
-pub fn should_expand_to_include(_name: &str) -> bool { true }
+pub fn should_expand_to_include(_name: &str) -> bool {
+    true
+}

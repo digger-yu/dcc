@@ -26,7 +26,9 @@ pub struct LbrProfile {
 }
 
 impl LbrProfile {
-    pub fn empty() -> Self { Self::default() }
+    pub fn empty() -> Self {
+        Self::default()
+    }
 
     /// 解析 `perf script -F brstack` 输出 (简化, 一次读一行).
     /// 输入格式: `func1 0xADDR1 func2 0xADDR2 cycles\n`
@@ -41,7 +43,9 @@ impl LbrProfile {
             let to_func = it.next().unwrap_or("").to_string();
             let _to_addr = it.next();
             let _cycles = it.next();
-            if from_func.is_empty() || to_func.is_empty() { continue; }
+            if from_func.is_empty() || to_func.is_empty() {
+                continue;
+            }
             *p.edges.entry((from_func, to_func)).or_insert(0) += 1;
         }
         // 入口热点: `unknown -> func` 计数
@@ -58,7 +62,10 @@ impl LbrProfile {
     }
 
     pub fn hot_edge_count(&self, from: &str, to: &str) -> u64 {
-        self.edges.get(&(from.into(), to.into())).copied().unwrap_or(0)
+        self.edges
+            .get(&(from.into(), to.into()))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -71,7 +78,8 @@ mod tests {
         std::fs::write(
             &tmp,
             b"main 0x1000 foo 0x2000 5\nfoo 0x2010 main 0x1020 7\nunknown 0x0 main 0x1000 3\n",
-        ).unwrap();
+        )
+        .unwrap();
         let p = LbrProfile::read_perf_brstack(&tmp).unwrap();
         assert_eq!(p.hot_edge_count("main", "foo"), 1);
         assert!(p.hot_entries.iter().any(|(f, _)| f == "main"));

@@ -139,7 +139,12 @@ fn link_relocatable_legacy(
 
     let mut bc_modules: Vec<lto_bitcode::BitcodeModule> = if lto_enabled {
         refs.iter()
-            .filter_map(|obj| lto_bitcode::deserialize_module(&crate::codegen::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default()).ok())
+            .filter_map(|obj| {
+                lto_bitcode::deserialize_module(
+                    &crate::codegen::elf::read_section_data(obj, ".dcc.lto").unwrap_or_default(),
+                )
+                .ok()
+            })
             .collect()
     } else {
         Vec::new()

@@ -17,8 +17,8 @@
 // parse_vdso() 取得 VdsoInfo, 再决定是否把 vdso 文本嵌入布局.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 /// 解析后的 vDSO 信息.
 #[derive(Debug, Clone)]
@@ -87,18 +87,26 @@ pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoErro
         return Err(VdsoError::NotElf64);
     }
 
-    let shoff = u64::from_le_bytes(buf.get(40..48)
-        .and_then(|s| s.try_into().ok())
-        .ok_or_else(|| VdsoError::Truncated("e_shoff".into()))?) as usize;
-    let shentsize = u16::from_le_bytes(buf.get(58..60)
-        .and_then(|s| s.try_into().ok())
-        .ok_or_else(|| VdsoError::Truncated("e_shentsize".into()))?) as usize;
-    let shnum = u16::from_le_bytes(buf.get(60..62)
-        .and_then(|s| s.try_into().ok())
-        .ok_or_else(|| VdsoError::Truncated("e_shnum".into()))?) as usize;
-    let shstrndx = u16::from_le_bytes(buf.get(62..64)
-        .and_then(|s| s.try_into().ok())
-        .ok_or_else(|| VdsoError::Truncated("e_shstrndx".into()))?) as usize;
+    let shoff = u64::from_le_bytes(
+        buf.get(40..48)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| VdsoError::Truncated("e_shoff".into()))?,
+    ) as usize;
+    let shentsize = u16::from_le_bytes(
+        buf.get(58..60)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| VdsoError::Truncated("e_shentsize".into()))?,
+    ) as usize;
+    let shnum = u16::from_le_bytes(
+        buf.get(60..62)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| VdsoError::Truncated("e_shnum".into()))?,
+    ) as usize;
+    let shstrndx = u16::from_le_bytes(
+        buf.get(62..64)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| VdsoError::Truncated("e_shstrndx".into()))?,
+    ) as usize;
     if shnum == 0 || shentsize < 64 || shstrndx >= shnum {
         return Err(VdsoError::Truncated("bad shdr fields".into()));
     }
@@ -108,10 +116,10 @@ pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoErro
     if shstr_hdr + 64 > buf.len() {
         return Err(VdsoError::Truncated("shstrtab header".into()));
     }
-    let shstr_off = u64::from_le_bytes(buf[shstr_hdr + 24..shstr_hdr + 32]
-        .try_into().unwrap()) as usize;
-    let shstr_size = u64::from_le_bytes(buf[shstr_hdr + 32..shstr_hdr + 40]
-        .try_into().unwrap()) as usize;
+    let shstr_off =
+        u64::from_le_bytes(buf[shstr_hdr + 24..shstr_hdr + 32].try_into().unwrap()) as usize;
+    let shstr_size =
+        u64::from_le_bytes(buf[shstr_hdr + 32..shstr_hdr + 40].try_into().unwrap()) as usize;
     if shstr_off + shstr_size > buf.len() {
         return Err(VdsoError::Truncated("shstrtab data".into()));
     }
@@ -122,7 +130,9 @@ pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoErro
     let mut text_size: usize = 0;
     for i in 0..shnum {
         let base = shoff + i * shentsize;
-        if base + 64 > buf.len() { break; }
+        if base + 64 > buf.len() {
+            break;
+        }
         let name_idx = u32::from_le_bytes(buf[base..base + 4].try_into().unwrap()) as usize;
         let name = match read_cstr(shstrtab, name_idx) {
             Some(n) => n,
@@ -131,7 +141,9 @@ pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoErro
         if name == ".text" {
             let off = u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
             let sz = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
-            if off + sz > buf.len() { continue; }
+            if off + sz > buf.len() {
+                continue;
+            }
             text_off = Some(off);
             text_size = sz;
             break;
@@ -145,7 +157,9 @@ pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoErro
     let mut strtab_off: Option<(usize, usize)> = None;
     for i in 0..shnum {
         let base = shoff + i * shentsize;
-        if base + 64 > buf.len() { break; }
+        if base + 64 > buf.len() {
+            break;
+        }
         let name_idx = u32::from_le_bytes(buf[base..base + 4].try_into().unwrap()) as usize;
         let name = match read_cstr(shstrtab, name_idx) {
             Some(n) => n,
@@ -153,22 +167,22 @@ pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoErro
         };
         if name == ".symtab" || name == ".dynsym" {
             if symtab_off.is_none() {
-                let off = u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
+                let off =
+                    u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
                 let sz = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
                 let entsize = u64::from_le_bytes(buf[base + 56..base + 64].try_into().unwrap());
                 symtab_off = Some((off, sz, entsize));
             }
-        } else if (name == ".strtab" || name == ".dynstr")
-            && strtab_off.is_none() {
-                let off = u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
-                let sz = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
-                strtab_off = Some((off, sz));
-            }
+        } else if (name == ".strtab" || name == ".dynstr") && strtab_off.is_none() {
+            let off = u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
+            let sz = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
+            strtab_off = Some((off, sz));
+        }
     }
-    let (sym_off, sym_size, sym_entsize) = symtab_off
-        .ok_or_else(|| VdsoError::Truncated("no symtab/dynsym".into()))?;
-    let (str_off, str_size) = strtab_off
-        .ok_or_else(|| VdsoError::Truncated("no strtab/dynstr".into()))?;
+    let (sym_off, sym_size, sym_entsize) =
+        symtab_off.ok_or_else(|| VdsoError::Truncated("no symtab/dynsym".into()))?;
+    let (str_off, str_size) =
+        strtab_off.ok_or_else(|| VdsoError::Truncated("no strtab/dynstr".into()))?;
     if sym_entsize < 24 {
         return Err(VdsoError::Truncated("sym entsize < 24".into()));
     }
@@ -183,23 +197,32 @@ pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoErro
     let mut symbols = HashMap::new();
     for i in 0..sym_count {
         let base = i * sym_entsize as usize;
-        if base + 24 > symtab_data.len() { break; }
+        if base + 24 > symtab_data.len() {
+            break;
+        }
         let st_name = u32::from_le_bytes(symtab_data[base..base + 4].try_into().unwrap()) as usize;
         let st_info = symtab_data[base + 4];
         let st_value = u64::from_le_bytes(symtab_data[base + 8..base + 16].try_into().unwrap());
         let st_size = u64::from_le_bytes(symtab_data[base + 16..base + 24].try_into().unwrap());
         let ty = st_info & 0xf;
         const STT_FUNC: u8 = 2;
-        if ty != STT_FUNC { continue; }
+        if ty != STT_FUNC {
+            continue;
+        }
         let name = match read_cstr(strtab_data, st_name) {
             Some(n) => n,
             None => continue,
         };
-        if name.is_empty() { continue; }
-        symbols.insert(name.to_string(), VdsoSymbol {
-            text_offset: st_value,
-            size: st_size,
-        });
+        if name.is_empty() {
+            continue;
+        }
+        symbols.insert(
+            name.to_string(),
+            VdsoSymbol {
+                text_offset: st_value,
+                size: st_size,
+            },
+        );
     }
 
     // 5) 把整个 strtab 转成 String (用于诊断)
@@ -242,7 +265,7 @@ mod tests {
     ///   和一个无关符号.
     fn build_minimal_vdso() -> Vec<u8> {
         let shstrtab = b"\0.text\0.symtab\0.strtab\0.shstrtab\0";
-        const N_TEXT:  u32 = 1;
+        const N_TEXT: u32 = 1;
         const N_SYMT: u32 = 7;
         const N_STRT: u32 = 15;
         const N_SHST: u32 = 23;
@@ -273,7 +296,7 @@ mod tests {
         out.extend_from_slice(&1u16.to_le_bytes()); // st_shndx: .text
         out.extend_from_slice(&0u64.to_le_bytes()); // st_value
         out.extend_from_slice(&5u64.to_le_bytes()); // st_size
-        // sym 2: helper (FUNC, value=0, size=5)
+                                                    // sym 2: helper (FUNC, value=0, size=5)
         out.extend_from_slice(&(strtab_helper_off as u32).to_le_bytes());
         out.push((2 << 4) | 2); // bind=WEAK, type=FUNC
         out.push(0);
@@ -287,7 +310,9 @@ mod tests {
         out.extend_from_slice(shstrtab);
 
         // 对齐到 8
-        while !out.len().is_multiple_of(8) { out.push(0); }
+        while !out.len().is_multiple_of(8) {
+            out.push(0);
+        }
 
         // 5 section headers (含 null)
         let sh_off = out.len();
@@ -307,32 +332,88 @@ mod tests {
         out[60..62].copy_from_slice(&5u16.to_le_bytes()); // e_shnum
         out[62..64].copy_from_slice(&4u16.to_le_bytes()); // e_shstrndx (4)
 
-        let write_sh = |buf: &mut Vec<u8>, idx: usize, name_off: u32,
-                          sh_type: u32, flags: u64,
-                          addr: u64, offset: u64, size: u64,
-                          link: u32, info: u32, addralign: u64, entsize: u64| {
+        let write_sh = |buf: &mut Vec<u8>,
+                        idx: usize,
+                        name_off: u32,
+                        sh_type: u32,
+                        flags: u64,
+                        addr: u64,
+                        offset: u64,
+                        size: u64,
+                        link: u32,
+                        info: u32,
+                        addralign: u64,
+                        entsize: u64| {
             let base = sh_off + idx * 64;
-            buf[base..base+4].copy_from_slice(&name_off.to_le_bytes());
-            buf[base+4..base+8].copy_from_slice(&sh_type.to_le_bytes());
-            buf[base+8..base+16].copy_from_slice(&flags.to_le_bytes());
-            buf[base+16..base+24].copy_from_slice(&addr.to_le_bytes());
-            buf[base+24..base+32].copy_from_slice(&offset.to_le_bytes());
-            buf[base+32..base+40].copy_from_slice(&size.to_le_bytes());
-            buf[base+40..base+44].copy_from_slice(&link.to_le_bytes());
-            buf[base+44..base+48].copy_from_slice(&info.to_le_bytes());
-            buf[base+48..base+56].copy_from_slice(&addralign.to_le_bytes());
-            buf[base+56..base+64].copy_from_slice(&entsize.to_le_bytes());
+            buf[base..base + 4].copy_from_slice(&name_off.to_le_bytes());
+            buf[base + 4..base + 8].copy_from_slice(&sh_type.to_le_bytes());
+            buf[base + 8..base + 16].copy_from_slice(&flags.to_le_bytes());
+            buf[base + 16..base + 24].copy_from_slice(&addr.to_le_bytes());
+            buf[base + 24..base + 32].copy_from_slice(&offset.to_le_bytes());
+            buf[base + 32..base + 40].copy_from_slice(&size.to_le_bytes());
+            buf[base + 40..base + 44].copy_from_slice(&link.to_le_bytes());
+            buf[base + 44..base + 48].copy_from_slice(&info.to_le_bytes());
+            buf[base + 48..base + 56].copy_from_slice(&addralign.to_le_bytes());
+            buf[base + 56..base + 64].copy_from_slice(&entsize.to_le_bytes());
         };
         write_sh(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-        write_sh(&mut out, 1, N_TEXT, elf::SHT_PROGBITS, 0x6, 0,
-                 text_off as u64, text.len() as u64, 0, 0, 1, 0);
+        write_sh(
+            &mut out,
+            1,
+            N_TEXT,
+            elf::SHT_PROGBITS,
+            0x6,
+            0,
+            text_off as u64,
+            text.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        );
         // .symtab: link=2 (.strtab), info=1 (first non-local sym)
-        write_sh(&mut out, 2, N_SYMT, elf::SHT_SYMTAB, 0, 0,
-                 symtab_off as u64, (24 * 3) as u64, 3, 1, 8, 24);
-        write_sh(&mut out, 3, N_STRT, elf::SHT_STRTAB, 0, 0,
-                 strtab_off as u64, strtab.len() as u64, 0, 0, 1, 0);
-        write_sh(&mut out, 4, N_SHST, elf::SHT_STRTAB, 0, 0,
-                 shstrtab_off as u64, shstrtab.len() as u64, 0, 0, 1, 0);
+        write_sh(
+            &mut out,
+            2,
+            N_SYMT,
+            elf::SHT_SYMTAB,
+            0,
+            0,
+            symtab_off as u64,
+            (24 * 3) as u64,
+            3,
+            1,
+            8,
+            24,
+        );
+        write_sh(
+            &mut out,
+            3,
+            N_STRT,
+            elf::SHT_STRTAB,
+            0,
+            0,
+            strtab_off as u64,
+            strtab.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        );
+        write_sh(
+            &mut out,
+            4,
+            N_SHST,
+            elf::SHT_STRTAB,
+            0,
+            0,
+            shstrtab_off as u64,
+            shstrtab.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        );
 
         out
     }
@@ -394,10 +475,10 @@ mod tests {
         out[62..64].copy_from_slice(&1u16.to_le_bytes());
         // sh[1] = .shstrtab
         let base = sh_off + 64;
-        out[base..base+4].copy_from_slice(&1u32.to_le_bytes());
-        out[base+4..base+8].copy_from_slice(&elf::SHT_STRTAB.to_le_bytes());
-        out[base+24..base+32].copy_from_slice(&(shstrtab_off as u64).to_le_bytes());
-        out[base+32..base+40].copy_from_slice(&(shstrtab.len() as u64).to_le_bytes());
+        out[base..base + 4].copy_from_slice(&1u32.to_le_bytes());
+        out[base + 4..base + 8].copy_from_slice(&elf::SHT_STRTAB.to_le_bytes());
+        out[base + 24..base + 32].copy_from_slice(&(shstrtab_off as u64).to_le_bytes());
+        out[base + 32..base + 40].copy_from_slice(&(shstrtab.len() as u64).to_le_bytes());
 
         let r = parse_vdso_bytes(&out, "x".into());
         assert!(matches!(r, Err(VdsoError::NoText)));

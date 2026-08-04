@@ -5,34 +5,34 @@
 // suckless 准则: 手写 ELF 头,最小必要代码。
 
 #![allow(dead_code)]
-
 // ELF 段头/节头序列化函数需传入多个字段, 允许超过 7
 #![allow(clippy::too_many_arguments)]
 
-
 // ===== ELF 常量 =====
-pub const ELFMAG:    [u8; 4] = [0x7f, b'E', b'L', b'F'];
+pub const ELFMAG: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 pub const ELFCLASS64: u8 = 2;
 pub const ELFDATA2LSB: u8 = 1;
 pub const EV_CURRENT: u8 = 1;
-pub const ET_REL:     u16 = 1;
-pub const ET_EXEC:    u16 = 2;
-pub const ET_DYN:     u16 = 3;
-pub const EM_X86_64:  u16 = 62;
-pub const EM_MIPS:    u16 = 8;
-pub const EM_ARM:     u16 = 40;
+pub const ET_REL: u16 = 1;
+pub const ET_EXEC: u16 = 2;
+pub const ET_DYN: u16 = 3;
+pub const EM_X86_64: u16 = 62;
+pub const EM_MIPS: u16 = 8;
+pub const EM_ARM: u16 = 40;
 pub const EM_AARCH64: u16 = 183;
-pub const EM_RISCV:   u16 = 243;
+pub const EM_RISCV: u16 = 243;
 
 pub const ELFCLASS32: u8 = 1;
-pub const ELFDATA2MSB: u8 = 2;  // Big-endian (MIPS)
+pub const ELFDATA2MSB: u8 = 2; // Big-endian (MIPS)
 
 pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
 pub const PT_TLS: u32 = 7;
 pub const PT_GNU_STACK: u32 = 0x6474e551;
 pub const PT_GNU_RELRO: u32 = 0x6474e552;
-pub const PF_X: u32 = 1; pub const PF_W: u32 = 2; pub const PF_R: u32 = 4;
+pub const PF_X: u32 = 1;
+pub const PF_W: u32 = 2;
+pub const PF_R: u32 = 4;
 
 /// Section header flag: section is retained by --gc-sections even if no
 /// explicit reference exists. Used by `__attribute__((retain))` and various
@@ -82,24 +82,24 @@ pub const STT_TLS: u8 = 6;
 pub const SHN_UNDEF: u16 = 0;
 
 // x86-64 重定位类型
-pub const R_X86_64_64:        u32 = 1;
-pub const R_X86_64_PC32:      u32 = 2;
-pub const R_X86_64_PLT32:     u32 = 4;  // 用于函数调用 (PIE 兼容)
-pub const R_X86_64_GLOB_DAT:  u32 = 6;  // GOT 数据（动态库符号）
-pub const R_X86_64_JUMP_SLOT: u32 = 7;  // PLT 槽
-pub const R_X86_64_RELATIVE:  u32 = 8;  // base + offset
-pub const R_X86_64_GOTPCREL:  u32 = 9;
-pub const R_X86_64_32:        u32 = 10;
-pub const R_X86_64_32S:       u32 = 11;
-pub const R_X86_64_TPOFF64:   u32 = 18; // TLS: thread pointer offset (64-bit)
-pub const R_X86_64_TPOFF32:   u32 = 23; // TLS: thread pointer offset (32-bit, sign-extend)
-pub const R_X86_64_GOTTPOFF:  u32 = 30; // TLS: PC-relative offset to GOT TPOFF entry
-pub const R_X86_64_GOT64:     u32 = 19; // 64-bit GOT entry
-pub const R_X86_64_GOTOFF64:  u32 = 25; // 64-bit GOT-relative
+pub const R_X86_64_64: u32 = 1;
+pub const R_X86_64_PC32: u32 = 2;
+pub const R_X86_64_PLT32: u32 = 4; // 用于函数调用 (PIE 兼容)
+pub const R_X86_64_GLOB_DAT: u32 = 6; // GOT 数据（动态库符号）
+pub const R_X86_64_JUMP_SLOT: u32 = 7; // PLT 槽
+pub const R_X86_64_RELATIVE: u32 = 8; // base + offset
+pub const R_X86_64_GOTPCREL: u32 = 9;
+pub const R_X86_64_32: u32 = 10;
+pub const R_X86_64_32S: u32 = 11;
+pub const R_X86_64_TPOFF64: u32 = 18; // TLS: thread pointer offset (64-bit)
+pub const R_X86_64_TPOFF32: u32 = 23; // TLS: thread pointer offset (32-bit, sign-extend)
+pub const R_X86_64_GOTTPOFF: u32 = 30; // TLS: PC-relative offset to GOT TPOFF entry
+pub const R_X86_64_GOT64: u32 = 19; // 64-bit GOT entry
+pub const R_X86_64_GOTOFF64: u32 = 25; // 64-bit GOT-relative
 pub const R_X86_64_IRELATIVE: u32 = 37; // IFUNC resolver
-pub const R_X86_64_TPOFF:     u32 = 17; // TLS: traditional thread-pointer offset
-pub const R_X86_64_DTPOFF64:  u32 = 21; // TLS: dynamic thread pointer offset
-pub const R_X86_64_DTPMOD64:  u32 = 20; // TLS: module id
+pub const R_X86_64_TPOFF: u32 = 17; // TLS: traditional thread-pointer offset
+pub const R_X86_64_DTPOFF64: u32 = 21; // TLS: dynamic thread pointer offset
+pub const R_X86_64_DTPMOD64: u32 = 20; // TLS: module id
 
 // AArch64 重定位类型
 pub const R_AARCH64_CALL26: u32 = 283;
@@ -177,18 +177,18 @@ pub const R_RISCV_TPREL_LO12_I: u32 = 32;
 pub const R_RISCV_TPREL_LO12_S: u32 = 33;
 
 // MIPS 重定位类型
-pub const R_MIPS_26:     u32 = 4;
-pub const R_MIPS_HI16:   u32 = 5;
-pub const R_MIPS_LO16:   u32 = 6;
-pub const R_MIPS_32:     u32 = 2;
-pub const R_MIPS_64:     u32 = 18;
+pub const R_MIPS_26: u32 = 4;
+pub const R_MIPS_HI16: u32 = 5;
+pub const R_MIPS_LO16: u32 = 6;
+pub const R_MIPS_32: u32 = 2;
+pub const R_MIPS_64: u32 = 18;
 
 // ARM 重定位类型
-pub const R_ARM_ABS32:   u32 = 2;
-pub const R_ARM_CALL:    u32 = 28;
-pub const R_ARM_JUMP24:  u32 = 29;
+pub const R_ARM_ABS32: u32 = 2;
+pub const R_ARM_CALL: u32 = 28;
+pub const R_ARM_JUMP24: u32 = 29;
 pub const R_ARM_MOVW_ABS_NC: u32 = 43;
-pub const R_ARM_MOVT_ABS:    u32 = 44;
+pub const R_ARM_MOVT_ABS: u32 = 44;
 
 // 符号类型 (扩展, 用于 STT_GNU_IFUNC)
 pub const STT_GNU_IFUNC: u8 = 10;
@@ -199,8 +199,8 @@ pub const STT_GNU_IFUNC: u8 = 10;
 #[derive(Clone, Debug)]
 pub struct ElfSym {
     pub name: String,
-    pub section: u16,   // 节索引 (0=SHN_UNDEF)
-    pub value: u64,     // 节内偏移
+    pub section: u16, // 节索引 (0=SHN_UNDEF)
+    pub value: u64,   // 节内偏移
     pub size: u64,
     pub bind: u8,       // STB_LOCAL / STB_GLOBAL / STB_WEAK
     pub ty: u8,         // STT_NOTYPE / STT_FUNC / STT_OBJECT
@@ -221,15 +221,15 @@ pub struct ElfRela {
 pub struct ElfSection {
     pub name: String,
     pub data: Vec<u8>,
-    pub ty: u32,      // SHT_PROGBITS / SHT_NOBITS
-    pub flags: u32,   // SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR
+    pub ty: u32,    // SHT_PROGBITS / SHT_NOBITS
+    pub flags: u32, // SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR
     pub align: u64,
 }
 
 /// 额外 .rela 节 (用于 .init_array 等自定义节的重定位)
 #[derive(Clone, Debug)]
 pub struct ExtraRelaSection {
-    pub name: String,         // e.g. ".rela.init_array"
+    pub name: String, // e.g. ".rela.init_array"
     pub relocations: Vec<ElfRela>,
     pub target_sec_index: u32, // sh_info: 目标节索引
 }
@@ -243,30 +243,30 @@ pub fn build_elf_x86_64(code: &[u8], entry: u64) -> Vec<u8> {
     out.push(ELFCLASS64);
     out.push(ELFDATA2LSB);
     out.push(EV_CURRENT);
-    out.push(0);              // ei_osabi
+    out.push(0); // ei_osabi
     out.extend_from_slice(&[0u8; 8]); // ei_pad
     out.extend_from_slice(&ET_EXEC.to_le_bytes());
     out.extend_from_slice(&EM_X86_64.to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes());   // e_version
+    out.extend_from_slice(&1u32.to_le_bytes()); // e_version
     out.extend_from_slice(&entry.to_le_bytes());
-    out.extend_from_slice(&64u64.to_le_bytes());  // e_phoff
-    out.extend_from_slice(&0u64.to_le_bytes());   // e_shoff
-    out.extend_from_slice(&0u32.to_le_bytes());   // e_flags
-    out.extend_from_slice(&64u16.to_le_bytes());  // e_ehsize
-    out.extend_from_slice(&56u16.to_le_bytes());  // e_phentsize
-    out.extend_from_slice(&1u16.to_le_bytes());   // e_phnum
-    out.extend_from_slice(&0u16.to_le_bytes());   // e_shentsize
-    out.extend_from_slice(&0u16.to_le_bytes());   // e_shnum
-    out.extend_from_slice(&0u16.to_le_bytes());   // e_shstrndx
+    out.extend_from_slice(&64u64.to_le_bytes()); // e_phoff
+    out.extend_from_slice(&0u64.to_le_bytes()); // e_shoff
+    out.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    out.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    out.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    out.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_shentsize
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // ===== Program Header =====
-    let p_vaddr  = 0x400000u64;
+    let p_vaddr = 0x400000u64;
     let p_filesz = (64 + 56) as u64 + code.len() as u64;
     out.extend_from_slice(&PT_LOAD.to_le_bytes());
-    out.extend_from_slice(&7u32.to_le_bytes());     // p_flags (PF_R|PF_W|PF_X)
-    out.extend_from_slice(&0u64.to_le_bytes());     // p_offset
+    out.extend_from_slice(&7u32.to_le_bytes()); // p_flags (PF_R|PF_W|PF_X)
+    out.extend_from_slice(&0u64.to_le_bytes()); // p_offset
     out.extend_from_slice(&p_vaddr.to_le_bytes());
-    out.extend_from_slice(&p_vaddr.to_le_bytes());  // p_paddr
+    out.extend_from_slice(&p_vaddr.to_le_bytes()); // p_paddr
     out.extend_from_slice(&p_filesz.to_le_bytes());
     out.extend_from_slice(&p_filesz.to_le_bytes()); // p_memsz
     out.extend_from_slice(&0x1000u64.to_le_bytes());
@@ -314,9 +314,15 @@ pub fn build_elf_exec_x86_64(
 
     let sh_symtab = {
         let mut idx = 2u16;
-        if rodata_size > 0 { idx += 1; }
-        if tdata_size > 0 { idx += 1; }
-        if tbss_size > 0 { idx += 1; }
+        if rodata_size > 0 {
+            idx += 1;
+        }
+        if tdata_size > 0 {
+            idx += 1;
+        }
+        if tbss_size > 0 {
+            idx += 1;
+        }
         idx
     };
     let sh_strtab = sh_symtab + 1;
@@ -343,8 +349,17 @@ pub fn build_elf_exec_x86_64(
     let mut vaddr = p_vaddr + hdr as u64;
     let mut file_off = image_off;
     write_section_header(
-        &mut out, name_off[1], SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
-        vaddr, file_off, text_size, 0, 0, 16, 0,
+        &mut out,
+        name_off[1],
+        SHT_PROGBITS,
+        SHF_ALLOC | SHF_EXECINSTR,
+        vaddr,
+        file_off,
+        text_size,
+        0,
+        0,
+        16,
+        0,
     );
     vaddr += text_size;
     file_off += text_size;
@@ -352,8 +367,17 @@ pub fn build_elf_exec_x86_64(
     let mut ni = 2usize;
     if rodata_size > 0 {
         write_section_header(
-            &mut out, name_off[ni], SHT_PROGBITS, SHF_ALLOC,
-            vaddr, file_off, rodata_size, 0, 0, 8, 0,
+            &mut out,
+            name_off[ni],
+            SHT_PROGBITS,
+            SHF_ALLOC,
+            vaddr,
+            file_off,
+            rodata_size,
+            0,
+            0,
+            8,
+            0,
         );
         vaddr += rodata_size;
         file_off += rodata_size;
@@ -361,8 +385,17 @@ pub fn build_elf_exec_x86_64(
     }
     if tdata_size > 0 {
         write_section_header(
-            &mut out, name_off[ni], SHT_PROGBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
-            vaddr, file_off, tdata_size, 0, 0, 8, 0,
+            &mut out,
+            name_off[ni],
+            SHT_PROGBITS,
+            SHF_ALLOC | SHF_WRITE | SHF_TLS,
+            vaddr,
+            file_off,
+            tdata_size,
+            0,
+            0,
+            8,
+            0,
         );
         vaddr += tdata_size;
         // file_off 在每个分支各自更新后已隐式累加；此处避免 dead-store 警告。
@@ -370,25 +403,61 @@ pub fn build_elf_exec_x86_64(
     }
     if tbss_size > 0 {
         write_section_header(
-            &mut out, name_off[ni], SHT_NOBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
-            vaddr, 0, tbss_size, 0, 0, 8, 0,
+            &mut out,
+            name_off[ni],
+            SHT_NOBITS,
+            SHF_ALLOC | SHF_WRITE | SHF_TLS,
+            vaddr,
+            0,
+            tbss_size,
+            0,
+            0,
+            8,
+            0,
         );
         ni += 1;
     }
 
     write_section_header(
-        &mut out, name_off[ni], SHT_SYMTAB, 0,
-        0, symtab_off, symtab_data.len() as u64, sh_strtab as u32, n_locals, 8, 24,
+        &mut out,
+        name_off[ni],
+        SHT_SYMTAB,
+        0,
+        0,
+        symtab_off,
+        symtab_data.len() as u64,
+        sh_strtab as u32,
+        n_locals,
+        8,
+        24,
     );
     ni += 1;
     write_section_header(
-        &mut out, name_off[ni], SHT_STRTAB, 0,
-        0, strtab_off, strtab.len() as u64, 0, 0, 1, 0,
+        &mut out,
+        name_off[ni],
+        SHT_STRTAB,
+        0,
+        0,
+        strtab_off,
+        strtab.len() as u64,
+        0,
+        0,
+        1,
+        0,
     );
     ni += 1;
     write_section_header(
-        &mut out, name_off[ni], SHT_STRTAB, 0,
-        0, shstrtab_off, shstr.len() as u64, 0, 0, 1, 0,
+        &mut out,
+        name_off[ni],
+        SHT_STRTAB,
+        0,
+        0,
+        shstrtab_off,
+        shstr.len() as u64,
+        0,
+        0,
+        1,
+        0,
     );
 
     // 回填 ELF 头与 Program Header
@@ -657,7 +726,8 @@ fn build_elf_rel_generic(
     }
     let shoff = align_up(cursor, 8);
 
-    let n_sections = 1 + 1
+    let n_sections = 1
+        + 1
         + if rodata.is_empty() { 0 } else { 1 }
         + 3
         + 1
@@ -715,30 +785,103 @@ fn build_elf_rel_generic(
 
     let rela_text_idx = shstrtab_idx + 1;
     let rodata_idx = if rodata.is_empty() { 0 } else { 2 };
-    let _rela_rodata_idx = if rela_rodata.is_empty() {
-        0
-    } else {
-        rela_text_idx + 1
-    };
+    let _rela_rodata_idx = if rela_rodata.is_empty() { 0 } else { rela_text_idx + 1 };
 
     write_section_header(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    write_section_header(&mut out, text_name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
-        0, text_off as u64, text.len() as u64, 0, 0, 4, 0);
+    write_section_header(
+        &mut out,
+        text_name,
+        SHT_PROGBITS,
+        SHF_ALLOC | SHF_EXECINSTR,
+        0,
+        text_off as u64,
+        text.len() as u64,
+        0,
+        0,
+        4,
+        0,
+    );
     if !rodata.is_empty() {
-        write_section_header(&mut out, rodata_name, SHT_PROGBITS, SHF_ALLOC,
-            0, rodata_off as u64, rodata.len() as u64, 0, 0, 8, 0);
+        write_section_header(
+            &mut out,
+            rodata_name,
+            SHT_PROGBITS,
+            SHF_ALLOC,
+            0,
+            rodata_off as u64,
+            rodata.len() as u64,
+            0,
+            0,
+            8,
+            0,
+        );
     }
-    write_section_header(&mut out, symtab_name, SHT_SYMTAB, 0,
-        0, symtab_off as u64, symtab.len() as u64, strtab_idx, 1, 8, 24);
-    write_section_header(&mut out, strtab_name, SHT_STRTAB, 0,
-        0, strtab_off as u64, strtab.len() as u64, 0, 0, 1, 0);
-    write_section_header(&mut out, shstrtab_name, SHT_STRTAB, 0,
-        0, shstrtab_off as u64, shstr.len() as u64, 0, 0, 1, 0);
-    write_section_header(&mut out, rela_text_name, SHT_RELA, SHF_INFO_LINK,
-        0, rela_text_off as u64, rela_text.len() as u64, symtab_idx, 1, 8, 24);
+    write_section_header(
+        &mut out,
+        symtab_name,
+        SHT_SYMTAB,
+        0,
+        0,
+        symtab_off as u64,
+        symtab.len() as u64,
+        strtab_idx,
+        1,
+        8,
+        24,
+    );
+    write_section_header(
+        &mut out,
+        strtab_name,
+        SHT_STRTAB,
+        0,
+        0,
+        strtab_off as u64,
+        strtab.len() as u64,
+        0,
+        0,
+        1,
+        0,
+    );
+    write_section_header(
+        &mut out,
+        shstrtab_name,
+        SHT_STRTAB,
+        0,
+        0,
+        shstrtab_off as u64,
+        shstr.len() as u64,
+        0,
+        0,
+        1,
+        0,
+    );
+    write_section_header(
+        &mut out,
+        rela_text_name,
+        SHT_RELA,
+        SHF_INFO_LINK,
+        0,
+        rela_text_off as u64,
+        rela_text.len() as u64,
+        symtab_idx,
+        1,
+        8,
+        24,
+    );
     if !rela_rodata.is_empty() {
-        write_section_header(&mut out, rela_rodata_name, SHT_RELA, SHF_INFO_LINK,
-            0, rela_rodata_off as u64, rela_rodata.len() as u64, symtab_idx, rodata_idx as u32, 8, 24);
+        write_section_header(
+            &mut out,
+            rela_rodata_name,
+            SHT_RELA,
+            SHF_INFO_LINK,
+            0,
+            rela_rodata_off as u64,
+            rela_rodata.len() as u64,
+            symtab_idx,
+            rodata_idx as u32,
+            8,
+            24,
+        );
     }
     for (name, off, sec) in &extra_layout {
         write_section_header(
@@ -840,8 +983,10 @@ pub fn build_elf_rel_x86_64(
     // 构建 .rela.data
     let rela_data_data = build_rela(data_relocations);
     // 构建额外 .rela 节
-    let extra_rela_data: Vec<Vec<u8>> = extra_rela_sections.iter()
-        .map(|ers| build_rela(&ers.relocations)).collect();
+    let extra_rela_data: Vec<Vec<u8>> = extra_rela_sections
+        .iter()
+        .map(|ers| build_rela(&ers.relocations))
+        .collect();
 
     // 计算各节偏移
     let mut offset: u64 = 64; // ELF header 后
@@ -920,22 +1065,22 @@ pub fn build_elf_rel_x86_64(
 
     // ===== ELF Header (64 bytes) =====
     out.extend_from_slice(&ELFMAG);
-    out.push(ELFCLASS64);     // ei_class
-    out.push(ELFDATA2LSB);    // ei_data
-    out.push(EV_CURRENT);     // ei_version
-    out.push(0);              // ei_osabi (SYSV)
+    out.push(ELFCLASS64); // ei_class
+    out.push(ELFDATA2LSB); // ei_data
+    out.push(EV_CURRENT); // ei_version
+    out.push(0); // ei_osabi (SYSV)
     out.extend_from_slice(&[0u8; 8]); // ei_pad
     out.extend_from_slice(&ET_REL.to_le_bytes());
     out.extend_from_slice(&EM_X86_64.to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes());   // e_version
-    out.extend_from_slice(&0u64.to_le_bytes());   // e_entry (无入口)
-    out.extend_from_slice(&0u64.to_le_bytes());   // e_phoff (无程序头)
-    out.extend_from_slice(&shoff.to_le_bytes());  // e_shoff
-    out.extend_from_slice(&0u32.to_le_bytes());   // e_flags
-    out.extend_from_slice(&64u16.to_le_bytes());  // e_ehsize
-    out.extend_from_slice(&0u16.to_le_bytes());   // e_phentsize
-    out.extend_from_slice(&0u16.to_le_bytes());   // e_phnum
-    out.extend_from_slice(&64u16.to_le_bytes());  // e_shentsize
+    out.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    out.extend_from_slice(&0u64.to_le_bytes()); // e_entry (无入口)
+    out.extend_from_slice(&0u64.to_le_bytes()); // e_phoff (无程序头)
+    out.extend_from_slice(&shoff.to_le_bytes()); // e_shoff
+    out.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    out.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_phnum
+    out.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
     out.extend_from_slice(&shnum.to_le_bytes()); // e_shnum
     out.extend_from_slice(&sh_shstrtab.to_le_bytes()); // e_shstrndx
 
@@ -957,7 +1102,9 @@ pub fn build_elf_rel_x86_64(
 
     // ===== 自定义节 =====
     for (i, sec) in extra_sections.iter().enumerate() {
-        if sec.ty == SHT_NOBITS { continue; }
+        if sec.ty == SHT_NOBITS {
+            continue;
+        }
         pad_to(&mut out, extra_offsets[i] as usize);
         out.extend_from_slice(&sec.data);
     }
@@ -993,87 +1140,215 @@ pub fn build_elf_rel_x86_64(
     write_sh_null(&mut out);
 
     // [1] .text
-    write_section_header(&mut out,
-        1, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
-        0, text_off, text.len() as u64, 0, 0, text_align.max(1), 0,
+    write_section_header(
+        &mut out,
+        1,
+        SHT_PROGBITS,
+        SHF_ALLOC | SHF_EXECINSTR,
+        0,
+        text_off,
+        text.len() as u64,
+        0,
+        0,
+        text_align.max(1),
+        0,
     );
 
     // [2] .rodata
-    write_section_header(&mut out, 7, SHT_PROGBITS, SHF_ALLOC,
-        0, rodata_off, rodata.len() as u64, 0, 0, 8, 0,
+    write_section_header(
+        &mut out,
+        7,
+        SHT_PROGBITS,
+        SHF_ALLOC,
+        0,
+        rodata_off,
+        rodata.len() as u64,
+        0,
+        0,
+        8,
+        0,
     );
 
     // [3] .data
-    write_section_header(&mut out, 15, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE,
-        0, data_off, data.len() as u64, 0, 0, data_align.max(1), 0,
+    write_section_header(
+        &mut out,
+        15,
+        SHT_PROGBITS,
+        SHF_ALLOC | SHF_WRITE,
+        0,
+        data_off,
+        data.len() as u64,
+        0,
+        0,
+        data_align.max(1),
+        0,
     );
 
     // [4] .bss
-    write_section_header(&mut out, 21, SHT_NOBITS, SHF_ALLOC | SHF_WRITE,
-        0, bss_off, bss_size, 0, 0, bss_align.max(1), 0,
+    write_section_header(
+        &mut out,
+        21,
+        SHT_NOBITS,
+        SHF_ALLOC | SHF_WRITE,
+        0,
+        bss_off,
+        bss_size,
+        0,
+        0,
+        bss_align.max(1),
+        0,
     );
 
     // [5] .tdata
-    write_section_header(&mut out, 26, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
-        0, tdata_off, tdata.len() as u64, 0, 0, tdata_align.max(1), 0,
+    write_section_header(
+        &mut out,
+        26,
+        SHT_PROGBITS,
+        SHF_ALLOC | SHF_WRITE | SHF_TLS,
+        0,
+        tdata_off,
+        tdata.len() as u64,
+        0,
+        0,
+        tdata_align.max(1),
+        0,
     );
 
     // [6] .tbss
-    write_section_header(&mut out, 33, SHT_NOBITS, SHF_ALLOC | SHF_WRITE | SHF_TLS,
-        0, tbss_off, tbss_size, 0, 0, tbss_align.max(1), 0,
+    write_section_header(
+        &mut out,
+        33,
+        SHT_NOBITS,
+        SHF_ALLOC | SHF_WRITE | SHF_TLS,
+        0,
+        tbss_off,
+        tbss_size,
+        0,
+        0,
+        tbss_align.max(1),
+        0,
     );
 
     // [7..7+N] 自定义节
     for (i, sec) in extra_sections.iter().enumerate() {
         let name_off = shstrtab_name_offset(extra_sections, i);
-        write_section_header(&mut out, name_off, sec.ty, sec.flags,
-            0, extra_offsets[i], sec.data.len() as u64, 0, 0, sec.align, 0,
+        write_section_header(
+            &mut out,
+            name_off,
+            sec.ty,
+            sec.flags,
+            0,
+            extra_offsets[i],
+            sec.data.len() as u64,
+            0,
+            0,
+            sec.align,
+            0,
         );
     }
 
     // [5+N..5+N+M] 额外 .rela 节
     for (i, ers) in extra_rela_sections.iter().enumerate() {
         let name_off = shstrtab_extra_rela_name_offset(extra_sections, extra_rela_sections, i);
-        write_section_header(&mut out, name_off, SHT_RELA, SHF_INFO_LINK,
-            0, extra_rela_offsets[i], extra_rela_data[i].len() as u64,
-            sh_symtab as u32, ers.target_sec_index, 8, 24,
+        write_section_header(
+            &mut out,
+            name_off,
+            SHT_RELA,
+            SHF_INFO_LINK,
+            0,
+            extra_rela_offsets[i],
+            extra_rela_data[i].len() as u64,
+            sh_symtab as u32,
+            ers.target_sec_index,
+            8,
+            24,
         );
     }
 
     // [.rela.text]
     let extra_names_len: u32 = extra_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
-    let extra_rela_names_len: u32 = extra_rela_sections.iter().map(|s| s.name.len() as u32 + 1).sum();
+    let extra_rela_names_len: u32 = extra_rela_sections
+        .iter()
+        .map(|s| s.name.len() as u32 + 1)
+        .sum();
     let base_off: u32 = 39 + extra_names_len + extra_rela_names_len;
     let rela_text_name_off = base_off;
     let rela_data_name_off = rela_text_name_off + ".rela.text".len() as u32 + 1;
     let symtab_name_off = rela_data_name_off + ".rela.data".len() as u32 + 1;
     let strtab_name_off = symtab_name_off + ".symtab".len() as u32 + 1;
     let shstrtab_name_off_val = strtab_name_off + ".strtab".len() as u32 + 1;
-    write_section_header(&mut out, rela_text_name_off, SHT_RELA, SHF_INFO_LINK,
-        0, rela_off, rela_data.len() as u64,
-        sh_symtab as u32, 1, 8, 24,
+    write_section_header(
+        &mut out,
+        rela_text_name_off,
+        SHT_RELA,
+        SHF_INFO_LINK,
+        0,
+        rela_off,
+        rela_data.len() as u64,
+        sh_symtab as u32,
+        1,
+        8,
+        24,
     );
 
     // [.rela.data]
-    write_section_header(&mut out, rela_data_name_off, SHT_RELA, SHF_INFO_LINK,
-        0, rela_data_off, rela_data_data.len() as u64,
-        sh_symtab as u32, 3, 8, 24,  // sh_info=3 → .data 节索引
+    write_section_header(
+        &mut out,
+        rela_data_name_off,
+        SHT_RELA,
+        SHF_INFO_LINK,
+        0,
+        rela_data_off,
+        rela_data_data.len() as u64,
+        sh_symtab as u32,
+        3,
+        8,
+        24, // sh_info=3 → .data 节索引
     );
 
     // [.symtab]
-    write_section_header(&mut out, symtab_name_off, SHT_SYMTAB, 0,
-        0, symtab_off, symtab_data.len() as u64,
-        sh_strtab as u32, n_locals, 8, 24,
+    write_section_header(
+        &mut out,
+        symtab_name_off,
+        SHT_SYMTAB,
+        0,
+        0,
+        symtab_off,
+        symtab_data.len() as u64,
+        sh_strtab as u32,
+        n_locals,
+        8,
+        24,
     );
 
     // [.strtab]
-    write_section_header(&mut out, strtab_name_off, SHT_STRTAB, 0,
-        0, strtab_off, strtab.len() as u64, 0, 0, 1, 0,
+    write_section_header(
+        &mut out,
+        strtab_name_off,
+        SHT_STRTAB,
+        0,
+        0,
+        strtab_off,
+        strtab.len() as u64,
+        0,
+        0,
+        1,
+        0,
     );
 
     // [.shstrtab]
-    write_section_header(&mut out, shstrtab_name_off_val, SHT_STRTAB, 0,
-        0, shstrtab_off, shstrtab.len() as u64, 0, 0, 1, 0,
+    write_section_header(
+        &mut out,
+        shstrtab_name_off_val,
+        SHT_STRTAB,
+        0,
+        0,
+        shstrtab_off,
+        shstrtab.len() as u64,
+        0,
+        0,
+        1,
+        0,
     );
 
     out
@@ -1086,7 +1361,10 @@ fn align(v: u64, a: u64) -> u64 {
 }
 
 /// 构建 .shstrtab（含 .tdata / .tbss）
-fn build_shstrtab_with_tls(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection]) -> Vec<u8> {
+fn build_shstrtab_with_tls(
+    extra_sections: &[ElfSection],
+    extra_rela_sections: &[ExtraRelaSection],
+) -> Vec<u8> {
     let mut s = vec![0u8];
     for name in &[".text", ".rodata", ".data", ".bss", ".tdata", ".tbss"] {
         s.extend_from_slice(name.as_bytes());
@@ -1100,7 +1378,13 @@ fn build_shstrtab_with_tls(extra_sections: &[ElfSection], extra_rela_sections: &
         s.extend_from_slice(sec.name.as_bytes());
         s.push(0);
     }
-    for name in &[".rela.text", ".rela.data", ".symtab", ".strtab", ".shstrtab"] {
+    for name in &[
+        ".rela.text",
+        ".rela.data",
+        ".symtab",
+        ".strtab",
+        ".shstrtab",
+    ] {
         s.extend_from_slice(name.as_bytes());
         s.push(0);
     }
@@ -1108,7 +1392,10 @@ fn build_shstrtab_with_tls(extra_sections: &[ElfSection], extra_rela_sections: &
 }
 
 /// 构建 .shstrtab: 所有节名的字符串表
-fn build_shstrtab(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection]) -> Vec<u8> {
+fn build_shstrtab(
+    extra_sections: &[ElfSection],
+    extra_rela_sections: &[ExtraRelaSection],
+) -> Vec<u8> {
     build_shstrtab_with_tls(extra_sections, extra_rela_sections)
 }
 
@@ -1123,7 +1410,11 @@ fn shstrtab_name_offset(extra_sections: &[ElfSection], idx: usize) -> u32 {
 }
 
 /// 计算额外 .rela 节名在 .shstrtab 中的偏移
-fn shstrtab_extra_rela_name_offset(extra_sections: &[ElfSection], extra_rela_sections: &[ExtraRelaSection], idx: usize) -> u32 {
+fn shstrtab_extra_rela_name_offset(
+    extra_sections: &[ElfSection],
+    extra_rela_sections: &[ExtraRelaSection],
+    idx: usize,
+) -> u32 {
     let mut off = 39u32;
     for sec in extra_sections {
         off += sec.name.len() as u32 + 1;
@@ -1203,17 +1494,17 @@ fn write_section_header(
     sh_addralign: u64,
     sh_entsize: u64,
 ) {
-    out.extend_from_slice(&sh_name.to_le_bytes());       // 4
-    out.extend_from_slice(&sh_type.to_le_bytes());        // 4
+    out.extend_from_slice(&sh_name.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_type.to_le_bytes()); // 4
     out.extend_from_slice(&(sh_flags as u64).to_le_bytes()); // 8 — ELF64 sh_flags is Xword
-    out.extend_from_slice(&sh_addr.to_le_bytes());        // 8
-    out.extend_from_slice(&sh_offset.to_le_bytes());      // 8
-    out.extend_from_slice(&sh_size.to_le_bytes());        // 8
-    out.extend_from_slice(&sh_link.to_le_bytes());        // 4
-    out.extend_from_slice(&sh_info.to_le_bytes());        // 4
-    out.extend_from_slice(&sh_addralign.to_le_bytes());   // 8
-    out.extend_from_slice(&sh_entsize.to_le_bytes());     // 8
-    // Total: 4+4+8+8+8+8+4+4+8+8 = 64 bytes
+    out.extend_from_slice(&sh_addr.to_le_bytes()); // 8
+    out.extend_from_slice(&sh_offset.to_le_bytes()); // 8
+    out.extend_from_slice(&sh_size.to_le_bytes()); // 8
+    out.extend_from_slice(&sh_link.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_info.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_addralign.to_le_bytes()); // 8
+    out.extend_from_slice(&sh_entsize.to_le_bytes()); // 8
+                                                      // Total: 4+4+8+8+8+8+4+4+8+8 = 64 bytes
 }
 
 /// 从 ET_REL ELF64 目标文件中按节名读取载荷（供 LTO 摘要提取等）。
@@ -1232,8 +1523,10 @@ pub fn read_section_data(elf: &[u8], section_name: &str) -> Option<Vec<u8>> {
     if shstr_hdr + 64 > elf.len() {
         return None;
     }
-    let shstr_off = u64::from_le_bytes(elf[shstr_hdr + 24..shstr_hdr + 32].try_into().ok()?) as usize;
-    let shstr_size = u64::from_le_bytes(elf[shstr_hdr + 32..shstr_hdr + 40].try_into().ok()?) as usize;
+    let shstr_off =
+        u64::from_le_bytes(elf[shstr_hdr + 24..shstr_hdr + 32].try_into().ok()?) as usize;
+    let shstr_size =
+        u64::from_le_bytes(elf[shstr_hdr + 32..shstr_hdr + 40].try_into().ok()?) as usize;
     if shstr_off + shstr_size > elf.len() {
         return None;
     }
@@ -1265,13 +1558,29 @@ pub fn referenced_symbol_names(elf: &[u8]) -> Vec<String> {
     if elf.len() < 64 || elf.get(0..4) != Some(&ELFMAG) || elf[4] != ELFCLASS64 {
         return out;
     }
-    let shoff = match u64::from_le_bytes(elf.get(40..48).and_then(|s| s.try_into().ok()).unwrap_or([0; 8])) {
+    let shoff = match u64::from_le_bytes(
+        elf.get(40..48)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 8]),
+    ) {
         v if v > 0 => v as usize,
         _ => return out,
     };
-    let shentsize = u16::from_le_bytes(elf.get(58..60).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
-    let shnum = u16::from_le_bytes(elf.get(60..62).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
-    let shstrndx = u16::from_le_bytes(elf.get(62..64).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
+    let shentsize = u16::from_le_bytes(
+        elf.get(58..60)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]),
+    ) as usize;
+    let shnum = u16::from_le_bytes(
+        elf.get(60..62)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]),
+    ) as usize;
+    let shstrndx = u16::from_le_bytes(
+        elf.get(62..64)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]),
+    ) as usize;
     if shnum == 0 || shentsize < 64 || shstrndx >= shnum {
         return out;
     }
@@ -1281,8 +1590,10 @@ pub fn referenced_symbol_names(elf: &[u8]) -> Vec<String> {
     if shstr_hdr + 64 > elf.len() {
         return out;
     }
-    let shstr_off = u64::from_le_bytes(elf[shstr_hdr + 24..shstr_hdr + 32].try_into().unwrap()) as usize;
-    let shstr_size = u64::from_le_bytes(elf[shstr_hdr + 32..shstr_hdr + 40].try_into().unwrap()) as usize;
+    let shstr_off =
+        u64::from_le_bytes(elf[shstr_hdr + 24..shstr_hdr + 32].try_into().unwrap()) as usize;
+    let shstr_size =
+        u64::from_le_bytes(elf[shstr_hdr + 32..shstr_hdr + 40].try_into().unwrap()) as usize;
     if shstr_off + shstr_size > elf.len() {
         return out;
     }
@@ -1302,7 +1613,13 @@ pub fn referenced_symbol_names(elf: &[u8]) -> Vec<String> {
         let data_size = u64::from_le_bytes(elf[base + 32..base + 40].try_into().unwrap()) as usize;
         let entsize = u64::from_le_bytes(elf[base + 56..base + 64].try_into().unwrap());
         let name = read_cstr(shstrtab, name_idx).unwrap_or("").to_string();
-        sections.push((name.clone(), sh_type, data_off as u64, data_size as u64, entsize));
+        sections.push((
+            name.clone(),
+            sh_type,
+            data_off as u64,
+            data_size as u64,
+            entsize,
+        ));
         if name == ".symtab" {
             symtab = Some((data_off, data_size, entsize));
         } else if name == ".strtab" {
@@ -1375,13 +1692,29 @@ pub fn global_symbol_names(elf: &[u8]) -> Vec<String> {
     if elf.len() < 64 || elf.get(0..4) != Some(&ELFMAG) || elf[4] != ELFCLASS64 {
         return out;
     }
-    let shoff = match u64::from_le_bytes(elf.get(40..48).and_then(|s| s.try_into().ok()).unwrap_or([0; 8])) {
+    let shoff = match u64::from_le_bytes(
+        elf.get(40..48)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 8]),
+    ) {
         v if v > 0 => v as usize,
         _ => return out,
     };
-    let shentsize = u16::from_le_bytes(elf.get(58..60).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
-    let shnum = u16::from_le_bytes(elf.get(60..62).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
-    let shstrndx = u16::from_le_bytes(elf.get(62..64).and_then(|s| s.try_into().ok()).unwrap_or([0; 2])) as usize;
+    let shentsize = u16::from_le_bytes(
+        elf.get(58..60)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]),
+    ) as usize;
+    let shnum = u16::from_le_bytes(
+        elf.get(60..62)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]),
+    ) as usize;
+    let shstrndx = u16::from_le_bytes(
+        elf.get(62..64)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0; 2]),
+    ) as usize;
     if shnum == 0 || shentsize < 64 || shstrndx >= shnum {
         return out;
     }
@@ -1389,8 +1722,10 @@ pub fn global_symbol_names(elf: &[u8]) -> Vec<String> {
     if shstr_hdr + 64 > elf.len() {
         return out;
     }
-    let shstr_off = u64::from_le_bytes(elf[shstr_hdr + 24..shstr_hdr + 32].try_into().unwrap()) as usize;
-    let shstr_size = u64::from_le_bytes(elf[shstr_hdr + 32..shstr_hdr + 40].try_into().unwrap()) as usize;
+    let shstr_off =
+        u64::from_le_bytes(elf[shstr_hdr + 24..shstr_hdr + 32].try_into().unwrap()) as usize;
+    let shstr_size =
+        u64::from_le_bytes(elf[shstr_hdr + 32..shstr_hdr + 40].try_into().unwrap()) as usize;
     if shstr_off + shstr_size > elf.len() {
         return out;
     }
@@ -1605,7 +1940,8 @@ fn build_elf32_rel_generic(
     }
     let shoff = align_up(cursor, 4);
 
-    let n_sections = 1 + 1
+    let n_sections = 1
+        + 1
         + if rodata.is_empty() { 0 } else { 1 }
         + 3
         + 1
@@ -1664,31 +2000,104 @@ fn build_elf32_rel_generic(
 
     let rel_text_idx = shstrtab_idx + 1;
     let rodata_idx = if rodata.is_empty() { 0 } else { 2 };
-    let _rel_rodata_idx = if rel_rodata.is_empty() {
-        0
-    } else {
-        rel_text_idx + 1
-    };
+    let _rel_rodata_idx = if rel_rodata.is_empty() { 0 } else { rel_text_idx + 1 };
 
     // Section headers (40 bytes each for ELF32)
     write_section_header32(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    write_section_header32(&mut out, text_name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
-        0, text_off as u32, text.len() as u32, 0, 0, 4, 0);
+    write_section_header32(
+        &mut out,
+        text_name,
+        SHT_PROGBITS,
+        SHF_ALLOC | SHF_EXECINSTR,
+        0,
+        text_off as u32,
+        text.len() as u32,
+        0,
+        0,
+        4,
+        0,
+    );
     if !rodata.is_empty() {
-        write_section_header32(&mut out, rodata_name, SHT_PROGBITS, SHF_ALLOC,
-            0, rodata_off as u32, rodata.len() as u32, 0, 0, 4, 0);
+        write_section_header32(
+            &mut out,
+            rodata_name,
+            SHT_PROGBITS,
+            SHF_ALLOC,
+            0,
+            rodata_off as u32,
+            rodata.len() as u32,
+            0,
+            0,
+            4,
+            0,
+        );
     }
-    write_section_header32(&mut out, symtab_name, SHT_SYMTAB, 0,
-        0, symtab_off as u32, symtab.len() as u32, strtab_idx, 1, 4, 16);
-    write_section_header32(&mut out, strtab_name, SHT_STRTAB, 0,
-        0, strtab_off as u32, strtab.len() as u32, 0, 0, 1, 0);
-    write_section_header32(&mut out, shstrtab_name, SHT_STRTAB, 0,
-        0, shstrtab_off as u32, shstr.len() as u32, 0, 0, 1, 0);
-    write_section_header32(&mut out, rel_text_name, SHT_RELA, SHF_INFO_LINK,
-        0, rel_text_off as u32, rel_text.len() as u32, symtab_idx, 1, 4, 8);
+    write_section_header32(
+        &mut out,
+        symtab_name,
+        SHT_SYMTAB,
+        0,
+        0,
+        symtab_off as u32,
+        symtab.len() as u32,
+        strtab_idx,
+        1,
+        4,
+        16,
+    );
+    write_section_header32(
+        &mut out,
+        strtab_name,
+        SHT_STRTAB,
+        0,
+        0,
+        strtab_off as u32,
+        strtab.len() as u32,
+        0,
+        0,
+        1,
+        0,
+    );
+    write_section_header32(
+        &mut out,
+        shstrtab_name,
+        SHT_STRTAB,
+        0,
+        0,
+        shstrtab_off as u32,
+        shstr.len() as u32,
+        0,
+        0,
+        1,
+        0,
+    );
+    write_section_header32(
+        &mut out,
+        rel_text_name,
+        SHT_RELA,
+        SHF_INFO_LINK,
+        0,
+        rel_text_off as u32,
+        rel_text.len() as u32,
+        symtab_idx,
+        1,
+        4,
+        8,
+    );
     if !rel_rodata.is_empty() {
-        write_section_header32(&mut out, rel_rodata_name, SHT_RELA, SHF_INFO_LINK,
-            0, rel_rodata_off as u32, rel_rodata.len() as u32, symtab_idx, rodata_idx as u32, 4, 8);
+        write_section_header32(
+            &mut out,
+            rel_rodata_name,
+            SHT_RELA,
+            SHF_INFO_LINK,
+            0,
+            rel_rodata_off as u32,
+            rel_rodata.len() as u32,
+            symtab_idx,
+            rodata_idx as u32,
+            4,
+            8,
+        );
     }
     for (name, off, sec) in &extra_layout {
         write_section_header32(
@@ -1764,15 +2173,15 @@ fn write_section_header32(
     sh_addralign: u32,
     sh_entsize: u32,
 ) {
-    out.extend_from_slice(&sh_name.to_le_bytes());       // 4
-    out.extend_from_slice(&sh_type.to_le_bytes());        // 4
-    out.extend_from_slice(&sh_flags.to_le_bytes());       // 4
-    out.extend_from_slice(&sh_addr.to_le_bytes());        // 4
-    out.extend_from_slice(&sh_offset.to_le_bytes());      // 4
-    out.extend_from_slice(&sh_size.to_le_bytes());        // 4
-    out.extend_from_slice(&sh_link.to_le_bytes());        // 4
-    out.extend_from_slice(&sh_info.to_le_bytes());        // 4
-    out.extend_from_slice(&sh_addralign.to_le_bytes());   // 4
-    out.extend_from_slice(&sh_entsize.to_le_bytes());     // 4
-    // Total: 40 bytes
+    out.extend_from_slice(&sh_name.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_type.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_flags.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_addr.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_offset.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_size.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_link.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_info.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_addralign.to_le_bytes()); // 4
+    out.extend_from_slice(&sh_entsize.to_le_bytes()); // 4
+                                                      // Total: 40 bytes
 }

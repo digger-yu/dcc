@@ -51,7 +51,9 @@ pub struct VersionTable {
 }
 
 impl VersionTable {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// 添加一个 .symver 声明
     /// 形如: ".symver memcpy, memcpy@GLIBC_2.14"
@@ -65,7 +67,8 @@ impl VersionTable {
         // 拆分逗号
         let parts: Vec<&str> = s.splitn(2, ',').map(|x| x.trim()).collect();
         if parts.len() != 2 {
-            self.errors.push(format!("malformed .symver: {}", asm_directive));
+            self.errors
+                .push(format!("malformed .symver: {}", asm_directive));
             return;
         }
         let base = parts[0];
@@ -76,12 +79,17 @@ impl VersionTable {
             let after = &target[idx + 1..];
             if before.ends_with('@') {
                 // NAME@@VER
-                (before.strip_suffix('@').unwrap().to_string(), after.to_string(), true)
+                (
+                    before.strip_suffix('@').unwrap().to_string(),
+                    after.to_string(),
+                    true,
+                )
             } else {
                 (before.to_string(), after.to_string(), false)
             }
         } else {
-            self.errors.push(format!("missing @ in .symver target: {}", target));
+            self.errors
+                .push(format!("missing @ in .symver target: {}", target));
             return;
         };
         let def = VersionDef {
@@ -151,11 +159,11 @@ impl VersionTable {
         let mut indices = Vec::with_capacity(dynsym_names.len());
         for name in dynsym_names {
             let idx = if name.is_empty() {
-                0u16  // VER_NDX_LOCAL
+                0u16 // VER_NDX_LOCAL
             } else if let Some(ver) = self.find_version_for(name) {
                 *version_str_to_idx.get(&ver).unwrap_or(&1)
             } else {
-                1u16  // VER_NDX_GLOBAL (unversioned)
+                1u16 // VER_NDX_GLOBAL (unversioned)
             };
             data.extend_from_slice(&idx.to_le_bytes());
             indices.push(idx);
@@ -187,19 +195,21 @@ impl VersionTable {
             // Verdaux: vda_name (4) + vda_next (4)
             verdaux_data.extend_from_slice(&name_off.to_le_bytes());
             verdaux_data.extend_from_slice(&0u32.to_le_bytes());
-            for b in vs.bytes() { strtab.push(b); }
+            for b in vs.bytes() {
+                strtab.push(b);
+            }
             strtab.push(0);
             count += 1;
         }
         // 单个 Verdef
         let mut verdef = Vec::new();
-        verdef.extend_from_slice(&1u16.to_le_bytes());  // vd_version
-        verdef.extend_from_slice(&0u16.to_le_bytes());  // vd_flags
-        verdef.extend_from_slice(&1u16.to_le_bytes());  // vd_ndx (第一个 = 1)
-        verdef.extend_from_slice(&count.to_le_bytes());  // vd_cnt
-        verdef.extend_from_slice(&0x551u32.to_le_bytes());  // vd_hash (Elf32_Vernaux 简化)
-        verdef.extend_from_slice(&16u16.to_le_bytes());  // vd_aux (verdef 之后偏移)
-        verdef.extend_from_slice(&0u32.to_le_bytes());  // vd_next (0 = 终止)
+        verdef.extend_from_slice(&1u16.to_le_bytes()); // vd_version
+        verdef.extend_from_slice(&0u16.to_le_bytes()); // vd_flags
+        verdef.extend_from_slice(&1u16.to_le_bytes()); // vd_ndx (第一个 = 1)
+        verdef.extend_from_slice(&count.to_le_bytes()); // vd_cnt
+        verdef.extend_from_slice(&0x551u32.to_le_bytes()); // vd_hash (Elf32_Vernaux 简化)
+        verdef.extend_from_slice(&16u16.to_le_bytes()); // vd_aux (verdef 之后偏移)
+        verdef.extend_from_slice(&0u32.to_le_bytes()); // vd_next (0 = 终止)
         verdef.extend_from_slice(&verdaux_data);
         verdef.extend_from_slice(&strtab);
         verdef
@@ -258,8 +268,8 @@ mod tests {
         t.add_symver(".symver foo,foo@V1");
         let (data, idx) = t.gen_gnu_version(&["".into(), "foo".into()]);
         assert_eq!(data.len(), 4);
-        assert_eq!(idx[0], 0);  // empty -> local
-        assert!(idx[1] >= 2);   // foo@V1 -> some non-zero index
+        assert_eq!(idx[0], 0); // empty -> local
+        assert!(idx[1] >= 2); // foo@V1 -> some non-zero index
     }
 
     #[test]

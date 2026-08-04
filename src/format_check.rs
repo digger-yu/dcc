@@ -26,7 +26,11 @@ pub fn check_program(prog: &Program) -> Vec<Diagnostic> {
     out
 }
 
-fn check_block(items: &[crate::ast::BlockItem], funcs: &std::collections::HashMap<String, &FuncDecl>, out: &mut Vec<Diagnostic>) {
+fn check_block(
+    items: &[crate::ast::BlockItem],
+    funcs: &std::collections::HashMap<String, &FuncDecl>,
+    out: &mut Vec<Diagnostic>,
+) {
     for item in items {
         match item {
             crate::ast::BlockItem::Stmt(s) => check_stmt(s, funcs, out),
@@ -72,11 +76,17 @@ fn expr_span(e: &Expr) -> Span {
     }
 }
 
-fn check_stmt(s: &Stmt, funcs: &std::collections::HashMap<String, &FuncDecl>, out: &mut Vec<Diagnostic>) {
+fn check_stmt(
+    s: &Stmt,
+    funcs: &std::collections::HashMap<String, &FuncDecl>,
+    out: &mut Vec<Diagnostic>,
+) {
     match s {
         Stmt::Expr { e, span } => check_expr(e, funcs, out, span),
         Stmt::Return { val: Some(e), span } => check_expr(e, funcs, out, span),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             check_expr(cond, funcs, out, &expr_span(cond));
             check_stmt(then_, funcs, out);
             if let Some(e) = else_ {
@@ -87,7 +97,13 @@ fn check_stmt(s: &Stmt, funcs: &std::collections::HashMap<String, &FuncDecl>, ou
             check_expr(cond, funcs, out, &expr_span(cond));
             check_stmt(body, funcs, out);
         }
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 check_stmt(i, funcs, out);
             }
@@ -110,7 +126,10 @@ fn check_expr(
     out: &mut Vec<Diagnostic>,
     _span: &Span,
 ) {
-    if let Expr::Call { callee, args, span, .. } = e {
+    if let Expr::Call {
+        callee, args, span, ..
+    } = e
+    {
         if let Expr::Ident { name, .. } = callee.as_ref() {
             if let Some(f) = funcs.get(&name.name) {
                 check_format_call(f, args, span, out);
@@ -140,15 +159,17 @@ fn check_format_call(f: &FuncDecl, args: &[Expr], span: &Span, out: &mut Vec<Dia
     let first_arg = f.format_first_arg.unwrap_or(2) as usize;
     let is_scanf = f.format_kind.as_deref() == Some("scanf");
     if fmt_idx == 0 || fmt_idx > args.len() {
-        out.push(Diagnostic::warn(
-            "W0003",
-            format!(
-                "format attribute on '{}' expects format string at argument {}",
-                f.name.name, fmt_idx
-            ),
-            span.clone(),
-        )
-        .with_hint("add a string literal format argument at the declared index"));
+        out.push(
+            Diagnostic::warn(
+                "W0003",
+                format!(
+                    "format attribute on '{}' expects format string at argument {}",
+                    f.name.name, fmt_idx
+                ),
+                span.clone(),
+            )
+            .with_hint("add a string literal format argument at the declared index"),
+        );
         return;
     }
     let fmt_lit = format_string_literal(&args[fmt_idx - 1]);
@@ -160,20 +181,26 @@ fn check_format_call(f: &FuncDecl, args: &[Expr], span: &Span, out: &mut Vec<Dia
     let mut needed = 0usize;
     for spec in &specs {
         needed += 1; // 转换说明符本身需要一个参数
-        if spec.width_star { needed += 1; }
-        if spec.prec_star { needed += 1; }
+        if spec.width_star {
+            needed += 1;
+        }
+        if spec.prec_star {
+            needed += 1;
+        }
     }
     let provided = args.len().saturating_sub(first_arg.saturating_sub(1));
     if provided < needed {
-        out.push(Diagnostic::warn(
-            "W0003",
-            format!(
-                "format '{}' expects at least {} argument(s) for conversion specifiers, got {}",
-                f.name.name, needed, provided
-            ),
-            span.clone(),
-        )
-        .with_hint("check printf/scanf format string and argument list"));
+        out.push(
+            Diagnostic::warn(
+                "W0003",
+                format!(
+                    "format '{}' expects at least {} argument(s) for conversion specifiers, got {}",
+                    f.name.name, needed, provided
+                ),
+                span.clone(),
+            )
+            .with_hint("check printf/scanf format string and argument list"),
+        );
     }
     // 类型匹配检查
     let arg_tys: Vec<Option<crate::ast::Type>> = args.iter().map(|a| Some(a.ty())).collect();
@@ -188,7 +215,14 @@ fn check_format_call(f: &FuncDecl, args: &[Expr], span: &Span, out: &mut Vec<Dia
             arg_pos += 1;
         }
         if arg_pos < arg_tys.len() {
-            check_format_type(spec, arg_tys[arg_pos].as_ref(), is_scanf, span, &f.name.name, out);
+            check_format_type(
+                spec,
+                arg_tys[arg_pos].as_ref(),
+                is_scanf,
+                span,
+                &f.name.name,
+                out,
+            );
         }
         arg_pos += 1;
     }
@@ -214,9 +248,14 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
             continue;
         }
         i += 1;
-        if i >= bytes.len() { break; }
-        if bytes[i] == b'%' { i += 1; continue; } // %%
-        // 解析 flags
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'%' {
+            i += 1;
+            continue;
+        } // %%
+          // 解析 flags
         let mut flags = String::new();
         while i < bytes.len() && b"-+ #0".contains(&bytes[i]) {
             flags.push(bytes[i] as char);
@@ -228,7 +267,9 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
             width_star = true;
             i += 1;
         } else {
-            while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
         }
         // 解析 precision
         let mut prec_star = false;
@@ -238,7 +279,9 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
                 prec_star = true;
                 i += 1;
             } else {
-                while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
             }
         }
         // 解析 length modifier
@@ -246,15 +289,24 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
         if i < bytes.len() {
             match bytes[i] {
                 b'h' => {
-                    length.push('h'); i += 1;
-                    if i < bytes.len() && bytes[i] == b'h' { length.push('h'); i += 1; }
+                    length.push('h');
+                    i += 1;
+                    if i < bytes.len() && bytes[i] == b'h' {
+                        length.push('h');
+                        i += 1;
+                    }
                 }
                 b'l' => {
-                    length.push('l'); i += 1;
-                    if i < bytes.len() && bytes[i] == b'l' { length.push('l'); i += 1; }
+                    length.push('l');
+                    i += 1;
+                    if i < bytes.len() && bytes[i] == b'l' {
+                        length.push('l');
+                        i += 1;
+                    }
                 }
                 b'z' | b'j' | b't' | b'L' => {
-                    length.push(bytes[i] as char); i += 1;
+                    length.push(bytes[i] as char);
+                    i += 1;
                 }
                 _ => {}
             }
@@ -264,7 +316,13 @@ fn parse_format_specs(fmt: &str) -> Vec<FmtSpec> {
             let conv = bytes[i] as char;
             // C23 %b/%B: 无符号二进制格式 (同 %u 参数类型)
             if "diouxXbBfFeEgGaAcCsSpnm".contains(conv) {
-                specs.push(FmtSpec { _flags: flags, width_star, prec_star, length, conv });
+                specs.push(FmtSpec {
+                    _flags: flags,
+                    width_star,
+                    prec_star,
+                    length,
+                    conv,
+                });
             }
             i += 1;
         }
@@ -282,7 +340,9 @@ fn check_format_type(
     out: &mut Vec<Diagnostic>,
 ) {
     use crate::ast::Type;
-    let Some(ty) = arg_ty else { return; };
+    let Some(ty) = arg_ty else {
+        return;
+    };
     // scanf 参数应该是指针类型
     let effective_ty = if is_scanf {
         match ty {
@@ -303,8 +363,14 @@ fn check_format_type(
         ty
     };
     let mismatch = match spec.conv {
-        'd' | 'i' => !matches!(effective_ty, Type::Int | Type::Short | Type::Char | Type::Long),
-        'u' | 'o' | 'x' | 'X' | 'b' | 'B' => !matches!(effective_ty, Type::UInt | Type::Int | Type::Short | Type::Char | Type::ULong | Type::Long),
+        'd' | 'i' => !matches!(
+            effective_ty,
+            Type::Int | Type::Short | Type::Char | Type::Long
+        ),
+        'u' | 'o' | 'x' | 'X' | 'b' | 'B' => !matches!(
+            effective_ty,
+            Type::UInt | Type::Int | Type::Short | Type::Char | Type::ULong | Type::Long
+        ),
         'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => {
             if spec.length == "L" {
                 !matches!(effective_ty, Type::LongDouble | Type::Double | Type::Float)
@@ -318,24 +384,27 @@ fn check_format_type(
         _ => false,
     };
     if mismatch {
-        out.push(Diagnostic::warn(
-            "W0003",
-            format!(
-                "format '%{}{}' expects {} argument, but argument has incompatible type",
-                spec.length, spec.conv,
-                match spec.conv {
-                    'd' | 'i' => "integer",
-                    'u' | 'o' | 'x' | 'X' | 'b' | 'B' => "unsigned integer",
-                    'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => "floating-point",
-                    'c' => "character",
-                    's' => "string",
-                    'p' => "pointer",
-                    _ => "compatible",
-                }
-            ),
-            span.clone(),
-        )
-        .with_hint(format!("check argument type for '{}' call", func_name)));
+        out.push(
+            Diagnostic::warn(
+                "W0003",
+                format!(
+                    "format '%{}{}' expects {} argument, but argument has incompatible type",
+                    spec.length,
+                    spec.conv,
+                    match spec.conv {
+                        'd' | 'i' => "integer",
+                        'u' | 'o' | 'x' | 'X' | 'b' | 'B' => "unsigned integer",
+                        'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' => "floating-point",
+                        'c' => "character",
+                        's' => "string",
+                        'p' => "pointer",
+                        _ => "compatible",
+                    }
+                ),
+                span.clone(),
+            )
+            .with_hint(format!("check argument type for '{}' call", func_name)),
+        );
     }
 }
 
@@ -549,17 +618,26 @@ mod tests {
         let prog = Program {
             decls: vec![Decl::Func(FuncDecl {
                 ret_ty: Type::Void,
-                name: Ident { name: "log".to_string(), span: Span::point("t.c", 1, 1) },
+                name: Ident {
+                    name: "log".to_string(),
+                    span: Span::point("t.c", 1, 1),
+                },
                 params: vec![Param {
                     ty: Type::Ptr(Box::new(Type::Char)),
-                    name: Some(Ident { name: "fmt".to_string(), span: Span::point("t.c", 1, 1) }),
+                    name: Some(Ident {
+                        name: "fmt".to_string(),
+                        span: Span::point("t.c", 1, 1),
+                    }),
                     span: Span::point("t.c", 1, 1),
                 }],
                 body: Some(Block {
                     items: vec![BlockItem::Stmt(Stmt::Expr {
                         e: Expr::Call {
                             callee: Box::new(Expr::Ident {
-                                name: Ident { name: "log".to_string(), span: Span::point("t.c", 1, 1) },
+                                name: Ident {
+                                    name: "log".to_string(),
+                                    span: Span::point("t.c", 1, 1),
+                                },
                                 span: Span::point("t.c", 1, 1),
                                 ty: Type::Void,
                             }),
@@ -569,7 +647,11 @@ mod tests {
                                     span: Span::point("t.c", 2, 5),
                                     ty: Type::Ptr(Box::new(Type::Char)),
                                 },
-                                Expr::Int { v: 42, span: Span::point("t.c", 2, 17), ty: Type::Int },
+                                Expr::Int {
+                                    v: 42,
+                                    span: Span::point("t.c", 2, 17),
+                                    ty: Type::Int,
+                                },
                             ],
                             span: Span::point("t.c", 2, 5),
                             ty: Type::Void,
@@ -587,7 +669,7 @@ mod tests {
                 visibility: None,
                 is_unused: false,
                 is_cold: false,
-            is_hot: false,
+                is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
                 is_variadic: true,
@@ -624,17 +706,26 @@ mod tests {
         let prog = Program {
             decls: vec![Decl::Func(FuncDecl {
                 ret_ty: Type::Void,
-                name: Ident { name: "log".to_string(), span: Span::point("t.c", 1, 1) },
+                name: Ident {
+                    name: "log".to_string(),
+                    span: Span::point("t.c", 1, 1),
+                },
                 params: vec![Param {
                     ty: Type::Ptr(Box::new(Type::Char)),
-                    name: Some(Ident { name: "fmt".to_string(), span: Span::point("t.c", 1, 1) }),
+                    name: Some(Ident {
+                        name: "fmt".to_string(),
+                        span: Span::point("t.c", 1, 1),
+                    }),
                     span: Span::point("t.c", 1, 1),
                 }],
                 body: Some(Block {
                     items: vec![BlockItem::Stmt(Stmt::Expr {
                         e: Expr::Call {
                             callee: Box::new(Expr::Ident {
-                                name: Ident { name: "log".to_string(), span: Span::point("t.c", 1, 1) },
+                                name: Ident {
+                                    name: "log".to_string(),
+                                    span: Span::point("t.c", 1, 1),
+                                },
                                 span: Span::point("t.c", 1, 1),
                                 ty: Type::Void,
                             }),
@@ -659,7 +750,7 @@ mod tests {
                 visibility: None,
                 is_unused: false,
                 is_cold: false,
-            is_hot: false,
+                is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
                 is_variadic: true,
@@ -753,7 +844,11 @@ mod tests {
         let span = Span::point("t.c", 1, 1);
         check_format_type(&spec, Some(&Type::Double), false, &span, "log", &mut out);
         assert_eq!(out.len(), 1, "double should NOT match %b");
-        assert!(out[0].msg.contains("unsigned integer"), "msg: {}", out[0].msg);
+        assert!(
+            out[0].msg.contains("unsigned integer"),
+            "msg: {}",
+            out[0].msg
+        );
     }
 
     // C23: int 匹配 %B 通过 (GCC 兼容: 接受有符号整型)

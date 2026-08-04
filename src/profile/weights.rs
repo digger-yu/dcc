@@ -40,9 +40,13 @@ impl FuncHotness {
         }
     }
     /// 是否应放入 .text.hot 段 (增加 icache 局部性)
-    pub fn is_hot(&self) -> bool { matches!(self, FuncHotness::Hot) }
+    pub fn is_hot(&self) -> bool {
+        matches!(self, FuncHotness::Hot)
+    }
     /// 是否应放入 .text.unlikely 段 (分离冷代码)
-    pub fn is_cold(&self) -> bool { matches!(self, FuncHotness::Cold) }
+    pub fn is_cold(&self) -> bool {
+        matches!(self, FuncHotness::Cold)
+    }
 }
 
 /// 跨数据源的权重汇总
@@ -61,7 +65,9 @@ pub struct ProfileWeights {
 }
 
 impl ProfileWeights {
-    pub fn empty() -> Self { Self::default() }
+    pub fn empty() -> Self {
+        Self::default()
+    }
 
     /// 合并 4 个数据源 (各源独立加载后调用本方法)
     pub fn from_sources(
@@ -88,21 +94,29 @@ impl ProfileWeights {
     /// 给定函数名, 综合 4 源给出最终热度
     pub fn classify(&self, func: &str) -> FuncHotness {
         let mut votes = [0u32; 4]; // [hot, warm, cold, unknown_votes]
-        // 1. PGO 计数
+                                   // 1. PGO 计数
         if let Some(&c) = self.pgo_counts.get(func) {
             let total: u64 = self.pgo_counts.values().sum::<u64>().max(1);
             let r = c as f64 / total as f64;
-            if r > 0.10 { votes[0] += 1; }
-            else if r > 0.01 { votes[1] += 1; }
-            else { votes[2] += 1; }
+            if r > 0.10 {
+                votes[0] += 1;
+            } else if r > 0.01 {
+                votes[1] += 1;
+            } else {
+                votes[2] += 1;
+            }
         }
         // 2. AutoFDO 样本
         if let Some(&c) = self.autofdo_total.get(func) {
             let total: u64 = self.autofdo_total.values().sum::<u64>().max(1);
             let r = c as f64 / total as f64;
-            if r > 0.10 { votes[0] += 1; }
-            else if r > 0.01 { votes[1] += 1; }
-            else { votes[2] += 1; }
+            if r > 0.10 {
+                votes[0] += 1;
+            } else if r > 0.01 {
+                votes[1] += 1;
+            } else {
+                votes[2] += 1;
+            }
         }
         // 3. LBR 边入度: 用 `? -> func` 求和
         let lbr_in: u64 = self
@@ -114,21 +128,33 @@ impl ProfileWeights {
         let lbr_total: u64 = self.lbr_edges.values().sum::<u64>().max(1);
         if lbr_in > 0 {
             let r = lbr_in as f64 / lbr_total as f64;
-            if r > 0.10 { votes[0] += 1; }
-            else if r > 0.01 { votes[1] += 1; }
-            else { votes[2] += 1; }
+            if r > 0.10 {
+                votes[0] += 1;
+            } else if r > 0.01 {
+                votes[1] += 1;
+            } else {
+                votes[2] += 1;
+            }
         }
         // 4. MemProf cold 站: 仅当函数名出现在 cold callstack 中 → Cold
         let in_cold_site = self
             .memprof_cold_sites
             .iter()
             .any(|stack| stack.iter().any(|f| f == func));
-        if in_cold_site { votes[2] += 1; }
+        if in_cold_site {
+            votes[2] += 1;
+        }
 
         let sum: u32 = votes.iter().sum();
-        if sum == 0 { return FuncHotness::Unknown; }
-        if votes[0] > 0 { return FuncHotness::Hot; }
-        if votes[2] == sum { return FuncHotness::Cold; }
+        if sum == 0 {
+            return FuncHotness::Unknown;
+        }
+        if votes[0] > 0 {
+            return FuncHotness::Hot;
+        }
+        if votes[2] == sum {
+            return FuncHotness::Cold;
+        }
         FuncHotness::Warm
     }
 
@@ -150,23 +176,35 @@ impl ProfileWeights {
         let mut s: HashSet<String> = HashSet::new();
         s.extend(self.pgo_counts.keys().cloned());
         s.extend(self.autofdo_total.keys().cloned());
-        for (_, t) in self.lbr_edges.keys() { s.insert(t.clone()); }
+        for (_, t) in self.lbr_edges.keys() {
+            s.insert(t.clone());
+        }
         s
     }
 
     /// 给定 callstack, 估算 cold 阈值. 简化版: 总 alloc 次数的
     /// 1% 作为阈值 (参照 LLVM MemProf 的 `ColdThreshold` 默认).
-    fn memprof_threshold(_stack: &[String]) -> u64 { 5 }
+    fn memprof_threshold(_stack: &[String]) -> u64 {
+        5
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn empty_pgo() -> PgoWeights { PgoWeights::default() }
-    fn empty_autofdo() -> AutoFdoProfile { AutoFdoProfile::default() }
-    fn empty_lbr() -> LbrProfile { LbrProfile::default() }
-    fn empty_memprof() -> MemProfData { MemProfData::default() }
+    fn empty_pgo() -> PgoWeights {
+        PgoWeights::default()
+    }
+    fn empty_autofdo() -> AutoFdoProfile {
+        AutoFdoProfile::default()
+    }
+    fn empty_lbr() -> LbrProfile {
+        LbrProfile::default()
+    }
+    fn empty_memprof() -> MemProfData {
+        MemProfData::default()
+    }
 
     #[test]
     fn empty_weights_classify_unknown() {
@@ -184,8 +222,8 @@ mod tests {
         pgo.func_counts.insert("warm_fn".into(), 150);
         pgo.func_counts.insert("cold_fn".into(), 40);
         pgo.func_counts.insert("neutral".into(), 10);
-        let w = ProfileWeights::from_sources(
-            &pgo, &empty_autofdo(), &empty_lbr(), &empty_memprof());
+        let w =
+            ProfileWeights::from_sources(&pgo, &empty_autofdo(), &empty_lbr(), &empty_memprof());
         // 800/1000 = 0.80 -> Hot
         assert_eq!(w.classify("hot_fn"), FuncHotness::Hot);
         // 150/1000 = 0.15 -> Hot (> 0.10)
@@ -201,10 +239,12 @@ mod tests {
         let mut lbr = empty_lbr();
         // main 收到 1000 次入度 -> hot
         for _ in 0..1000 {
-            *lbr.edges.entry(("caller".into(), "main".into())).or_insert(0) += 1;
+            *lbr.edges
+                .entry(("caller".into(), "main".into()))
+                .or_insert(0) += 1;
         }
-        let w = ProfileWeights::from_sources(
-            &empty_pgo(), &empty_autofdo(), &lbr, &empty_memprof());
+        let w =
+            ProfileWeights::from_sources(&empty_pgo(), &empty_autofdo(), &lbr, &empty_memprof());
         assert_eq!(w.classify("main"), FuncHotness::Hot);
     }
 
@@ -229,10 +269,9 @@ mod tests {
     fn memprof_cold_site_marks_func_cold() {
         let mut mp = empty_memprof();
         // 1 次 alloc, stack 含 "rare_fn" -> < 5 阈值 -> cold
-        mp.alloc_counts.insert(
-            vec!["main".into(), "rare_fn".into(), "malloc".into()], 1);
-        let w = ProfileWeights::from_sources(
-            &empty_pgo(), &empty_autofdo(), &empty_lbr(), &mp);
+        mp.alloc_counts
+            .insert(vec!["main".into(), "rare_fn".into(), "malloc".into()], 1);
+        let w = ProfileWeights::from_sources(&empty_pgo(), &empty_autofdo(), &empty_lbr(), &mp);
         // 没有任何源把它标 hot, 但 memprof 标 cold -> Cold
         // 注意 memprof 标 cold 需要"全部源都没标 hot", 但 memprof 自身是 cold
         // 票; votes[2] = 1, sum = 1, votes[2] == sum -> Cold
@@ -244,8 +283,8 @@ mod tests {
         let mut pgo = empty_pgo();
         pgo.func_counts.insert("hot".into(), 1000);
         pgo.func_counts.insert("cold".into(), 0);
-        let w = ProfileWeights::from_sources(
-            &pgo, &empty_autofdo(), &empty_lbr(), &empty_memprof());
+        let w =
+            ProfileWeights::from_sources(&pgo, &empty_autofdo(), &empty_lbr(), &empty_memprof());
         let hot = w.hot_funcs();
         let cold = w.cold_funcs();
         assert!(hot.contains("hot"));

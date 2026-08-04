@@ -34,14 +34,20 @@ fn run_compile_and_run(name: &str, source: &str) -> (std::process::Output, std::
 }
 
 /// 带额外参数的编译并运行
-fn run_compile_and_run_flags(name: &str, source: &str, extra_flags: &[&str]) -> (std::process::Output, std::path::PathBuf) {
+fn run_compile_and_run_flags(
+    name: &str,
+    source: &str,
+    extra_flags: &[&str],
+) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
     let exe_path = dir.join(format!("dcc-{name}-{}", std::process::id()));
     fs::write(&source_path, source).expect("write C fixture");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     cmd.args(["-std=gnu23"]);
-    for flag in extra_flags { cmd.arg(flag); }
+    for flag in extra_flags {
+        cmd.arg(flag);
+    }
     cmd.args(["-o"]).arg(&exe_path).arg(&source_path);
     let output = cmd.output().expect("run dcc");
     #[cfg(unix)]
@@ -86,7 +92,11 @@ fn run_host_link_and_run(name: &str, source: &str) -> (std::process::Output, i32
     run_host_link_and_run_with(name, source, &[])
 }
 
-fn run_host_link_and_run_with(name: &str, source: &str, link_extra_args: &[&str]) -> (std::process::Output, i32) {
+fn run_host_link_and_run_with(
+    name: &str,
+    source: &str,
+    link_extra_args: &[&str],
+) -> (std::process::Output, i32) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-link-{name}-{}.c", std::process::id()));
     let object_path = dir.join(format!("dcc-link-{name}-{}.o", std::process::id()));
@@ -266,18 +276,20 @@ fn libdecnumber_combined_tu_compiles() {
     if !gcc_src.join("libdecnumber").exists() {
         return;
     }
-    let stub_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tools/libdecnumber_stub");
-    let combined = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tools/libdecnumber_combined.c");
+    let stub_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/libdecnumber_stub");
+    let combined =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/libdecnumber_combined.c");
     let dir = std::env::temp_dir();
     let object = dir.join(format!("dcc-libdecnumber-{}.o", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
             "-c",
-            "-I", gcc_src.join("libdecnumber").to_str().unwrap(),
-            "-I", gcc_src.join("libdecnumber/dpd").to_str().unwrap(),
-            "-I", stub_dir.to_str().unwrap(),
+            "-I",
+            gcc_src.join("libdecnumber").to_str().unwrap(),
+            "-I",
+            gcc_src.join("libdecnumber/dpd").to_str().unwrap(),
+            "-I",
+            stub_dir.to_str().unwrap(),
             "-DHAVE_CONFIG_H",
             "-o",
         ])
@@ -377,7 +389,11 @@ fn s_output_disassembles_function_body() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(asm_text.contains("main:"), "asm output: {asm_text}");
     assert!(
         asm_text.contains("mov") && (asm_text.contains("$5") || asm_text.contains("$0x5")),
@@ -408,7 +424,11 @@ int main(void) { return custom_function() == 7 ? 0 : 1; }\n";
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         asm_text.contains(".section .init.text"),
         "expected custom section directive: {asm_text}"
@@ -417,8 +437,12 @@ int main(void) { return custom_function() == 7 ? 0 : 1; }\n";
         asm_text.contains("custom_function:"),
         "expected custom_function label: {asm_text}"
     );
-    let init_pos = asm_text.find(".section .init.text").expect("init.text section");
-    let custom_pos = asm_text.find("custom_function:").expect("custom_function label");
+    let init_pos = asm_text
+        .find(".section .init.text")
+        .expect("init.text section");
+    let custom_pos = asm_text
+        .find("custom_function:")
+        .expect("custom_function label");
     assert!(
         custom_pos > init_pos,
         "custom_function should appear after .section .init.text: {asm_text}"
@@ -450,7 +474,11 @@ int main(void) {\n\
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         asm_text.contains("lock cmpxchg") || asm_text.contains("lock; cmpxchg"),
         "expected lock cmpxchg in disasm, got: {asm_text}"
@@ -520,8 +548,15 @@ fn mmd_excludes_isystem_headers_from_depfile() {
     let _ = fs::remove_file(src);
     let _ = fs::remove_file(obj);
     let _ = fs::remove_file(dep);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(!dep_text.contains("sys.h"), "MMD should skip system header: {dep_text}");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dep_text.contains("sys.h"),
+        "MMD should skip system header: {dep_text}"
+    );
 }
 
 #[test]
@@ -529,8 +564,11 @@ fn flto_summary_includes_function_size() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-lto-size-{}.c", std::process::id()));
     let obj_path = dir.join(format!("dcc-lto-size-{}.o", std::process::id()));
-    fs::write(&source_path, "int helper(void) { return 1; }\nint main(void) { return helper(); }\n")
-        .expect("write C fixture");
+    fs::write(
+        &source_path,
+        "int helper(void) { return 1; }\nint main(void) { return helper(); }\n",
+    )
+    .expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-flto", "-c", "-o"])
         .arg(&obj_path)
@@ -540,9 +578,16 @@ fn flto_summary_includes_function_size() {
     let obj_bytes = fs::read(&obj_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(obj_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let text = String::from_utf8_lossy(&obj_bytes);
-    assert!(text.contains("helper:"), "LTO summary missing helper: {text}");
+    assert!(
+        text.contains("helper:"),
+        "LTO summary missing helper: {text}"
+    );
 }
 
 #[test]
@@ -612,9 +657,16 @@ fn debug_sections_emitted_with_g_flag() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let obj_str = String::from_utf8_lossy(&obj);
-    assert!(obj_str.contains(".debug_info"), "missing .debug_info in object");
+    assert!(
+        obj_str.contains(".debug_info"),
+        "missing .debug_info in object"
+    );
     assert!(obj_str.contains(".BTF"), "missing .BTF in object");
 }
 
@@ -634,7 +686,11 @@ fn o1_constant_folding_emits_immediate() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         obj.windows(5).any(|w| w == [0xB8, 0x05, 0x00, 0x00, 0x00]),
         "expected mov $5, %eax after constant fold"
@@ -668,8 +724,15 @@ fn md_dependency_file_lists_includes() {
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&out_path);
     let _ = fs::remove_file(&dep_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(dep_text.contains(&hdr_name), "dep file missing header: {dep_text}");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dep_text.contains(&hdr_name),
+        "dep file missing header: {dep_text}"
+    );
 }
 
 #[test]
@@ -688,7 +751,11 @@ fn sanitizer_metadata_section_emitted() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&obj).contains(".dcc.san_info"),
         "missing sanitizer metadata section"
@@ -740,7 +807,11 @@ fn eh_frame_with_frame_pointer() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let obj_str = String::from_utf8_lossy(&obj);
     assert!(obj_str.contains(".eh_frame"), "missing .eh_frame");
     assert!(obj_str.contains(".orc_unwind_ip"), "missing .orc_unwind_ip");
@@ -763,7 +834,11 @@ fn global_asm_exports_symbol() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&obj).contains("global_marker"),
         "global asm symbol not exported"
@@ -786,7 +861,11 @@ fn flto_section_emitted() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&obj).contains(".llvm.lto"),
         "missing LTO summary section"
@@ -992,7 +1071,11 @@ fn btf_section_contains_struct_kind() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         obj.windows(4).any(|w| {
             let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
@@ -1018,7 +1101,11 @@ fn eh_frame_larger_than_cie_only() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let obj_str = String::from_utf8_lossy(&obj);
     let start = obj_str.find(".eh_frame").expect(".eh_frame name");
     let tail = &obj_str[start..start.saturating_add(256).min(obj_str.len())];
@@ -1045,7 +1132,11 @@ fn flto_relocatable_link_merges_section() {
             .arg(src)
             .output()
             .expect("compile lto object");
-        assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "compile: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     let link = Command::new(dcc)
         .args(["-r", "-flto", "-o"])
@@ -1060,7 +1151,11 @@ fn flto_relocatable_link_merges_section() {
     let _ = fs::remove_file(&a_o);
     let _ = fs::remove_file(&b_o);
     let _ = fs::remove_file(&out_o);
-    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&merged).contains(".llvm.lto"),
         "linked object missing merged .llvm.lto"
@@ -1183,9 +1278,12 @@ fn aarch64_hello_cross_compile() {
     fs::write(&source_path, "int main(void) { return 42; }\n").expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
-            "--target", "aarch64-linux-gnu",
-            "-c", "-O0",
-            "-o", object_path.to_str().unwrap(),
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
             source_path.to_str().unwrap(),
         ])
         .output()
@@ -1211,9 +1309,12 @@ fn aarch64_ir_add_cross_compile() {
     fs::write(&source_path, "int main(void) { return 10 + 32; }\n").expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
-            "--target", "aarch64-linux-gnu",
-            "-c", "-O0",
-            "-o", object_path.to_str().unwrap(),
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
             source_path.to_str().unwrap(),
         ])
         .output()
@@ -1285,8 +1386,15 @@ fn parallel_codegen_o2_multi_function() {
     let _ = fs::remove_file(&serial_path);
     assert_eq!(&par_bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     assert_eq!(&ser_bytes[0..4], &[0x7f, b'E', b'L', b'F']);
-    assert_eq!(par_bytes.len(), ser_bytes.len(), "parallel/serial .text size mismatch");
-    assert_eq!(par_bytes, ser_bytes, "parallel and serial objects must match");
+    assert_eq!(
+        par_bytes.len(),
+        ser_bytes.len(),
+        "parallel/serial .text size mismatch"
+    );
+    assert_eq!(
+        par_bytes, ser_bytes,
+        "parallel and serial objects must match"
+    );
 }
 
 /// M7: aarch64 if/while 控制流交叉编译。
@@ -1308,9 +1416,12 @@ fn aarch64_if_while_cross_compile() {
     .expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
-            "--target", "aarch64-linux-gnu",
-            "-c", "-O0",
-            "-o", object_path.to_str().unwrap(),
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
             source_path.to_str().unwrap(),
         ])
         .output()
@@ -1336,9 +1447,12 @@ fn riscv64_hello_cross_compile() {
     fs::write(&source_path, "int main(void) { return 42; }\n").expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
-            "--target", "riscv64-linux-gnu",
-            "-c", "-O0",
-            "-o", object_path.to_str().unwrap(),
+            "--target",
+            "riscv64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
             source_path.to_str().unwrap(),
         ])
         .output()
@@ -1368,9 +1482,12 @@ fn riscv64_ir_global_cross_compile() {
     .expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args([
-            "--target", "riscv64-linux-gnu",
-            "-c", "-O0",
-            "-o", object_path.to_str().unwrap(),
+            "--target",
+            "riscv64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
             source_path.to_str().unwrap(),
         ])
         .output()
@@ -1858,10 +1975,7 @@ fn asm_extended_compiles_without_nop_fallback() {
     let source = include_str!("fixtures/c/asm_ext.c");
     let (output, _obj) = run_object_test("asm-extended", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "stderr: {stderr}"
-    );
+    assert!(output.status.success(), "stderr: {stderr}");
     assert!(
         !stderr.contains("emitted as nop"),
         "unexpected mini-asm nop fallback: {stderr}"
@@ -1984,10 +2098,7 @@ fn asm_kernel_extra_compiles_without_nop_fallback() {
     let source = include_str!("fixtures/c/asm_kernel.c");
     let (output, _obj) = run_object_test("asm-kernel-extra", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "stderr: {stderr}"
-    );
+    assert!(output.status.success(), "stderr: {stderr}");
     assert!(
         !stderr.contains("emitted as nop"),
         "unexpected mini-asm nop fallback: {stderr}"
@@ -2000,10 +2111,7 @@ fn asm_paravirt_boot_compiles_without_nop_fallback() {
     let source = include_str!("fixtures/c/asm_paravirt.c");
     let (output, _obj) = run_object_test("asm-paravirt-boot", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "stderr: {stderr}"
-    );
+    assert!(output.status.success(), "stderr: {stderr}");
     assert!(
         !stderr.contains("emitted as nop"),
         "unexpected mini-asm nop fallback: {stderr}"
@@ -2016,10 +2124,7 @@ fn asm_avx_aes_fma_tsx_compiles_without_nop_fallback() {
     let source = include_str!("fixtures/c/asm_avx.c");
     let (output, _obj) = run_object_test("asm-avx-aes-fma-tsx", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "stderr: {stderr}"
-    );
+    assert!(output.status.success(), "stderr: {stderr}");
     assert!(
         !stderr.contains("emitted as nop"),
         "unexpected mini-asm nop fallback: {stderr}"
@@ -2173,7 +2278,11 @@ fn unknown_builtin_warning_zero_and_ud2() {
 
 /// 通用工具：编译一个 C 源文件并返回 output + 可执行路径
 #[allow(dead_code)]
-fn run_compile_o(name: &str, source: &str, opt: &str) -> (std::process::Output, std::path::PathBuf) {
+fn run_compile_o(
+    name: &str,
+    source: &str,
+    opt: &str,
+) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
     let exe_path = dir.join(format!("dcc-{name}-{}", std::process::id()));
@@ -2322,7 +2431,11 @@ fn lto_link_strips_unreferenced_static() {
             .arg(src)
             .output()
             .expect("compile");
-        assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "compile: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     let link = Command::new(dcc)
         .args(["-r", "-flto", "-o"])
@@ -2331,7 +2444,11 @@ fn lto_link_strips_unreferenced_static() {
         .arg(&b_o)
         .output()
         .expect("link");
-    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     let readelf = Command::new("readelf")
         .args(["-s"])
         .arg(&out_o)
@@ -2343,7 +2460,10 @@ fn lto_link_strips_unreferenced_static() {
     let _ = fs::remove_file(&a_o);
     let _ = fs::remove_file(&b_o);
     let _ = fs::remove_file(&out_o);
-    assert!(symtab.contains("exported"), "exported must survive link: {symtab}");
+    assert!(
+        symtab.contains("exported"),
+        "exported must survive link: {symtab}"
+    );
     assert!(
         !symtab.contains("dead_fn"),
         "dead_fn should be stripped: {symtab}"
@@ -2428,14 +2548,20 @@ __attribute__((__section__(".kernel_alias_test"))) int canonical_var = 7;
 int sum(void) { return kernel_var + canonical_var; }
 "#;
     let (out, obj) = run_object_test("attr-alias", source);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let objdump_out = Command::new("objdump")
         .args(["-h", obj.to_str().unwrap()])
         .output()
         .expect("objdump");
     let sec = String::from_utf8_lossy(&objdump_out.stdout);
-    assert!(sec.contains(".kernel_alias_test"),
-        "section .kernel_alias_test missing: {sec}");
+    assert!(
+        sec.contains(".kernel_alias_test"),
+        "section .kernel_alias_test missing: {sec}"
+    );
     let _ = fs::remove_file(obj);
 }
 
@@ -2448,15 +2574,35 @@ fn dM_flag_emits_all_macros() {
     let src = dir.join(format!("dcc-dM-{}.c", std::process::id()));
     fs::write(&src, "int x = 1;").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-E", "-dM", "-DUSER_MACRO=42", "-x", "c", src.to_str().unwrap()])
+        .args([
+            "-E",
+            "-dM",
+            "-DUSER_MACRO=42",
+            "-x",
+            "c",
+            src.to_str().unwrap(),
+        ])
         .output()
         .expect("run dcc -dM");
     let _ = fs::remove_file(&src);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("#define __DCC__ 1"), "missing __DCC__: {text}");
-    assert!(text.contains("#define __GNUC__"), "missing __GNUC__: {text}");
-    assert!(text.contains("#define USER_MACRO 42"), "missing USER_MACRO: {text}");
+    assert!(
+        text.contains("#define __DCC__ 1"),
+        "missing __DCC__: {text}"
+    );
+    assert!(
+        text.contains("#define __GNUC__"),
+        "missing __GNUC__: {text}"
+    );
+    assert!(
+        text.contains("#define USER_MACRO 42"),
+        "missing USER_MACRO: {text}"
+    );
 }
 
 /// ISO C 6.10.2: `#include pp-tokens` 形式应先做宏展开.
@@ -2469,20 +2615,35 @@ fn include_macro_expansion() {
     let header = dir.join("inc_target.h");
     fs::write(&header, "int inc_target_value = 1234;\n").unwrap();
     let main_src = dir.join("main.c");
-    fs::write(&main_src, r#"
+    fs::write(
+        &main_src,
+        r#"
 #define HEADER_PATH inc_target.h
 #define INCLUDE_HDR(x) <x>
 #include INCLUDE_HDR(HEADER_PATH)
 int main(void) { return inc_target_value; }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-E", "-I", dir.to_str().unwrap(), main_src.to_str().unwrap()])
+        .args([
+            "-E",
+            "-I",
+            dir.to_str().unwrap(),
+            main_src.to_str().unwrap(),
+        ])
         .output()
         .expect("run dcc -E");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("inc_target_value"),
-        "include macro expansion failed: {text}");
+    assert!(
+        text.contains("inc_target_value"),
+        "include macro expansion failed: {text}"
+    );
     let _ = fs::remove_file(&header);
     let _ = fs::remove_file(&main_src);
     let _ = fs::remove_dir(&dir);
@@ -2513,16 +2674,31 @@ int main(void) { return (int)(__savesegment_ds() + __savesegment_cs()); }
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn dcc");
-    child.stdin.as_mut().unwrap().write_all(src.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(src.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     // #ds / #cs 应被字符串化为 "ds" / "cs"
     assert!(text.contains("\"ds\""), "stringify 'ds' missing: {text}");
     assert!(text.contains("\"cs\""), "stringify 'cs' missing: {text}");
     // ## 应被令牌拼接
-    assert!(text.contains("__savesegment_ds"), "paste 'ds' missing: {text}");
-    assert!(text.contains("__savesegment_cs"), "paste 'cs' missing: {text}");
+    assert!(
+        text.contains("__savesegment_ds"),
+        "paste 'ds' missing: {text}"
+    );
+    assert!(
+        text.contains("__savesegment_cs"),
+        "paste 'cs' missing: {text}"
+    );
 }
 
 /// 链式 designated initializer (ISO C99 6.7.8/19: `.a.b.c` 或 `[0].field`).
@@ -2561,11 +2737,18 @@ int main(void) {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn dcc");
-    child.stdin.as_mut().unwrap().write_all(src.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(src.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(),
+    assert!(
+        out.status.success(),
         "chained designator compile failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file("/tmp/chained.o");
 }
 
@@ -2601,23 +2784,40 @@ int main(void) {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn dcc");
-    child.stdin.as_mut().unwrap().write_all(src.as_bytes()).unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(src.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(),
+    assert!(
+        out.status.success(),
         "fwd_decl compile failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stderr)
+    );
     // 用 readelf 检查 .symtab 不应同时有 UND 和已定义的 helper
     let readelf = Command::new("readelf")
         .args(["-s", "/tmp/fwd_decl.o"])
         .output()
         .expect("run readelf");
     let syms = String::from_utf8_lossy(&readelf.stdout);
-    let helper_und = syms.lines().filter(|l| l.contains("helper") && l.contains("UND")).count();
-    let helper_defined = syms.lines().filter(|l| l.contains("helper") && l.contains("DEFAULT")).count();
-    assert_eq!(helper_und, 0,
-        "fwd declaration should not emit UND sym; got:\n{syms}");
-    assert!(helper_defined >= 1,
-        "definition should emit at least one DEFAULT sym; got:\n{syms}");
+    let helper_und = syms
+        .lines()
+        .filter(|l| l.contains("helper") && l.contains("UND"))
+        .count();
+    let helper_defined = syms
+        .lines()
+        .filter(|l| l.contains("helper") && l.contains("DEFAULT"))
+        .count();
+    assert_eq!(
+        helper_und, 0,
+        "fwd declaration should not emit UND sym; got:\n{syms}"
+    );
+    assert!(
+        helper_defined >= 1,
+        "definition should emit at least one DEFAULT sym; got:\n{syms}"
+    );
     let _ = fs::remove_file("/tmp/fwd_decl.o");
 }
 
@@ -2721,7 +2921,11 @@ fn lto_single_object_relocatable_link() {
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&obj);
     let _ = fs::remove_file(&out);
-    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&merged).contains(".llvm.lto"),
         "single-object -r must preserve .llvm.lto"
@@ -2733,7 +2937,11 @@ fn lto_single_object_relocatable_link() {
 fn thread_local_exec_returns_15() {
     let src = include_str!("fixtures/c/tls_simple.c");
     let (out, exe) = run_compile_and_run("tls", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 15, "tls counter");
     let _ = fs::remove_file(&exe);
 }
@@ -2743,7 +2951,11 @@ fn thread_local_exec_returns_15() {
 fn kr_old_style_function() {
     let src = include_str!("fixtures/c/kr_func.c");
     let (out, exe) = run_compile_and_run("kr", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 7);
     let _ = fs::remove_file(&exe);
 }
@@ -2754,7 +2966,10 @@ fn format_attr_warns_on_missing_arg() {
                int main(void) { p(\"%d %d\", 1); return 0; }\n";
     let output = run_syntax_test("fmt-warn", src);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("W0003"), "expected format warning: {stderr}");
+    assert!(
+        stderr.contains("W0003"),
+        "expected format warning: {stderr}"
+    );
 }
 
 #[test]
@@ -2762,7 +2977,11 @@ fn format_attr_warns_on_missing_arg() {
 fn stdatomic_macros_hosted() {
     let src = include_str!("fixtures/c/atomic.c");
     let (out, exe) = run_compile_and_run("atomic", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 7);
     let _ = fs::remove_file(&exe);
 }
@@ -2779,8 +2998,14 @@ fn permissive_unknown_typedef_warns() {
         .expect("run dcc");
     let _ = fs::remove_file(&path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "permissive should not error: {stderr}");
-    assert!(stderr.contains("W0002"), "expected permissive warning: {stderr}");
+    assert!(
+        output.status.success(),
+        "permissive should not error: {stderr}"
+    );
+    assert!(
+        stderr.contains("W0002"),
+        "expected permissive warning: {stderr}"
+    );
 }
 
 #[test]
@@ -2788,7 +3013,11 @@ fn permissive_unknown_typedef_warns() {
 fn exec_elf_has_symtab() {
     let src = "int g = 1; int main(void) { return g; }\n";
     let (out, exe) = run_compile_and_run("symtab", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let readelf = Command::new("readelf")
         .args(["-s", exe.to_str().unwrap()])
         .output()
@@ -2807,7 +3036,11 @@ fn exec_elf_has_symtab() {
 fn m15_float_const_eval() {
     let src = include_str!("fixtures/c/float_const.c");
     let (out, exe) = run_compile_and_run("m15-float-const", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2819,7 +3052,11 @@ fn m15_float_const_eval() {
 fn m15_string_literal_and_concat() {
     let src = include_str!("fixtures/c/string_const.c");
     let (out, exe) = run_compile_and_run("m15-string-concat", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2831,7 +3068,11 @@ fn m15_string_literal_and_concat() {
 fn m15_address_const() {
     let src = include_str!("fixtures/c/address_const.c");
     let (out, exe) = run_compile_and_run("m15-addr-const", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2843,7 +3084,11 @@ fn m15_address_const() {
 fn m15_builtin_fold() {
     let src = include_str!("fixtures/c/builtin_fold.c");
     let (out, exe) = run_compile_and_run("m15-builtin-fold", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2861,8 +3106,11 @@ fn m15_strict_warning_compile() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&path);
-    assert!(output.status.success(), "strict-warn should not error: {}",
-            String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "strict-warn should not error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// -fbounds-check 数组越界检测 (正常路径不触发, 仅编译 + 运行)
@@ -2876,10 +3124,17 @@ fn m15_bounds_check_inrange() {
     let exe = dir.join(format!("dcc-m15-bounds-{pid}"));
     fs::write(&sp, src).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fbounds-check", "-o"]).arg(&exe).arg(&sp)
-        .output().expect("run dcc");
+        .args(["-fbounds-check", "-o"])
+        .arg(&exe)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(&sp);
-    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2891,7 +3146,11 @@ fn m15_bounds_check_inrange() {
 fn m15_constexpr_function() {
     let src = include_str!("fixtures/c/constexpr.c");
     let (out, exe) = run_compile_and_run("m15-constexpr", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2905,7 +3164,11 @@ fn m15_constexpr_function() {
 fn m16_ssa_ir() {
     let src = include_str!("fixtures/opt/ssa_ir.c");
     let (out, exe) = run_compile_and_run("m16-ssa-ir", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2917,7 +3180,11 @@ fn m16_ssa_ir() {
 fn m16_strength_reduction() {
     let src = include_str!("fixtures/opt/strength_reduction.c");
     let (out, exe) = run_compile_and_run("m16-strength", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2929,7 +3196,11 @@ fn m16_strength_reduction() {
 fn m16_cross_function_dce() {
     let src = include_str!("fixtures/opt/cross_function_dce.c");
     let (out, exe) = run_compile_and_run("m16-dce", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2941,7 +3212,11 @@ fn m16_cross_function_dce() {
 fn m16_sccp() {
     let src = include_str!("fixtures/opt/sccp.c");
     let (out, exe) = run_compile_and_run("m16-sccp", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2953,7 +3228,11 @@ fn m16_sccp() {
 fn m16_loop_opt() {
     let src = include_str!("fixtures/opt/loop_opt.c");
     let (out, exe) = run_compile_and_run("m16-loop-opt", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2965,7 +3244,11 @@ fn m16_loop_opt() {
 fn m16_tco() {
     let src = include_str!("fixtures/opt/tco.c");
     let (out, exe) = run_compile_and_run("m16-tco", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2977,7 +3260,11 @@ fn m16_tco() {
 fn m16_function_attr() {
     let src = include_str!("fixtures/opt/function_attr.c");
     let (out, exe) = run_compile_and_run("m16-attr", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
@@ -2991,7 +3278,11 @@ fn m16_function_attr() {
 fn m17_auto_deduce() {
     let src = include_str!("fixtures/cpp/auto_deduce.cpp");
     let (out, _obj) = run_cpp_object_test("m17-auto-deduce", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3001,7 +3292,11 @@ fn m17_auto_deduce() {
 fn m17_decltype() {
     let src = include_str!("fixtures/cpp/decltype.cpp");
     let (out, _obj) = run_cpp_object_test("m17-decltype", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3011,7 +3306,11 @@ fn m17_decltype() {
 fn m17_decltype_auto() {
     let src = include_str!("fixtures/cpp/decltype_auto.cpp");
     let (out, _obj) = run_cpp_object_test("m17-decltype-auto", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3021,7 +3320,11 @@ fn m17_decltype_auto() {
 fn m17_explicit_ctor() {
     let src = include_str!("fixtures/cpp/explicit_ctor.cpp");
     let (out, _obj) = run_cpp_object_test("m17-explicit-ctor", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3031,7 +3334,11 @@ fn m17_explicit_ctor() {
 fn m17_final_override() {
     let src = include_str!("fixtures/cpp/final_override.cpp");
     let (out, _obj) = run_cpp_object_test("m17-final-override", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3041,7 +3348,11 @@ fn m17_final_override() {
 fn m17_friend() {
     let src = include_str!("fixtures/cpp/friend.cpp");
     let (out, _obj) = run_cpp_object_test("m17-friend", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3051,7 +3362,11 @@ fn m17_friend() {
 fn m17_if_constexpr() {
     let src = include_str!("fixtures/cpp/if_constexpr.cpp");
     let (out, _obj) = run_cpp_object_test("m17-if-constexpr", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3061,7 +3376,11 @@ fn m17_if_constexpr() {
 fn m17_inheriting_ctor() {
     let src = include_str!("fixtures/cpp/inheriting_ctor.cpp");
     let (out, _obj) = run_cpp_object_test("m17-inheriting-ctor", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3071,7 +3390,11 @@ fn m17_inheriting_ctor() {
 fn m17_member_ptr() {
     let src = include_str!("fixtures/cpp/member_ptr.cpp");
     let (out, _obj) = run_cpp_object_test("m17-member-ptr", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3081,7 +3404,11 @@ fn m17_member_ptr() {
 fn m17_mutable() {
     let src = include_str!("fixtures/cpp/mutable.cpp");
     let (out, _obj) = run_cpp_object_test("m17-mutable", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3091,7 +3418,11 @@ fn m17_mutable() {
 fn m17_new_array() {
     let src = include_str!("fixtures/cpp/new_array.cpp");
     let (out, _obj) = run_cpp_object_test("m17-new-array", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3101,7 +3432,11 @@ fn m17_new_array() {
 fn m17_noexcept() {
     let src = include_str!("fixtures/cpp/noexcept.cpp");
     let (out, _obj) = run_cpp_object_test("m17-noexcept", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3111,7 +3446,11 @@ fn m17_noexcept() {
 fn m17_placement_new() {
     let src = include_str!("fixtures/cpp/placement_new.cpp");
     let (out, _obj) = run_cpp_object_test("m17-placement-new", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3121,7 +3460,11 @@ fn m17_placement_new() {
 fn m17_smoke() {
     let src = include_str!("fixtures/cpp/smoke.cpp");
     let (out, _obj) = run_cpp_object_test("m17-smoke", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3131,7 +3474,11 @@ fn m17_smoke() {
 fn m17_typeid() {
     let src = include_str!("fixtures/cpp/typeid.cpp");
     let (out, _obj) = run_cpp_object_test("m17-typeid", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3141,7 +3488,11 @@ fn m17_typeid() {
 fn m17_volatile_member() {
     let src = include_str!("fixtures/cpp/volatile_member.cpp");
     let (out, _obj) = run_cpp_object_test("m17-volatile-member", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3155,7 +3506,11 @@ fn m17_volatile_member() {
 fn m18_chrono() {
     let src = include_str!("fixtures/cpp/chrono.cpp");
     let (out, _obj) = run_cpp_object_test("m18-chrono", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3164,7 +3519,11 @@ fn m18_chrono() {
 fn m18_thread_mutex() {
     let src = include_str!("fixtures/cpp/thread_mutex.cpp");
     let (out, _obj) = run_cpp_object_test("m18-thread-mutex", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3173,7 +3532,11 @@ fn m18_thread_mutex() {
 fn m18_condition_variable() {
     let src = include_str!("fixtures/cpp/condition_variable.cpp");
     let (out, _obj) = run_cpp_object_test("m18-cv", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3182,7 +3545,11 @@ fn m18_condition_variable() {
 fn m18_filesystem() {
     let src = include_str!("fixtures/cpp/filesystem.cpp");
     let (out, _obj) = run_cpp_object_test("m18-filesystem", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3191,7 +3558,11 @@ fn m18_filesystem() {
 fn m18_expected() {
     let src = include_str!("fixtures/cpp/expected.cpp");
     let (out, _obj) = run_cpp_object_test("m18-expected", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3200,7 +3571,11 @@ fn m18_expected() {
 fn m18_flat_map() {
     let src = include_str!("fixtures/cpp/flat_map.cpp");
     let (out, _obj) = run_cpp_object_test("m18-flat-map", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3209,7 +3584,11 @@ fn m18_flat_map() {
 fn m18_multi_index() {
     let src = include_str!("fixtures/cpp/multi_index.cpp");
     let (out, _obj) = run_cpp_object_test("m18-multi-index", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3218,7 +3597,11 @@ fn m18_multi_index() {
 fn m18_regex() {
     let src = include_str!("fixtures/cpp/regex.cpp");
     let (out, _obj) = run_cpp_object_test("m18-regex", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3227,7 +3610,11 @@ fn m18_regex() {
 fn m18_ranges() {
     let src = include_str!("fixtures/cpp/ranges.cpp");
     let (out, _obj) = run_cpp_object_test("m18-ranges", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3236,7 +3623,11 @@ fn m18_ranges() {
 fn m18_concept() {
     let src = include_str!("fixtures/cpp/concept.cpp");
     let (out, _obj) = run_cpp_object_test("m18-concept", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3245,7 +3636,11 @@ fn m18_concept() {
 fn m18_modules() {
     let src = include_str!("fixtures/cpp/modules.cpp");
     let (out, _obj) = run_cpp_object_test("m18-modules", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -3256,7 +3651,11 @@ fn m18_modules() {
 fn m19_counter_monotonic() {
     let src = include_str!("fixtures/c/counter.c");
     let (out, exe) = run_compile_and_run("m19-counter", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "__COUNTER__ should produce 0,1,2");
     let _ = fs::remove_file(exe);
@@ -3268,7 +3667,11 @@ fn m19_counter_monotonic() {
 fn m19_counter_in_function_macro() {
     let src = include_str!("fixtures/c/counter_in_macro.c");
     let (out, exe) = run_compile_and_run("m19-counter-macro", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "__COUNTER__ in macro should be 0,1,2");
     let _ = fs::remove_file(exe);
@@ -3280,9 +3683,16 @@ fn m19_counter_in_function_macro() {
 fn m19_va_opt_empty_and_nonempty() {
     let src = include_str!("fixtures/c/va_opt.c");
     let (out, exe) = run_compile_and_run("m19-va-opt", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
-    assert_eq!(rc, 0, "__VA_OPT__ should expand to comma list when non-empty");
+    assert_eq!(
+        rc, 0,
+        "__VA_OPT__ should expand to comma list when non-empty"
+    );
     let _ = fs::remove_file(exe);
 }
 
@@ -3292,7 +3702,11 @@ fn m19_va_opt_empty_and_nonempty() {
 fn m19_predefined_macros_available() {
     let src = include_str!("fixtures/c/predefined_macros.c");
     let (out, exe) = run_compile_and_run("m19-predef", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "all GCC predefined macros must be defined");
     let _ = fs::remove_file(exe);
@@ -3304,7 +3718,11 @@ fn m19_predefined_macros_available() {
 fn m19_pragma_locale_accepted() {
     let src = include_str!("fixtures/c/pragma_locale.c");
     let (out, exe) = run_compile_and_run("m19-pragma-locale", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(exe);
@@ -3317,7 +3735,11 @@ fn m19_pragma_locale_accepted() {
 fn m23_attr_retain_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_retain.c");
     let (out, exe) = run_compile_and_run("m23-attr-retain", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 42, "retain_var + retain_func(0) = 41+1 = 42");
     let _ = fs::remove_file(exe);
@@ -3329,7 +3751,11 @@ fn m23_attr_retain_compiles_and_runs() {
 fn m23_attr_used_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_used.c");
     let (out, exe) = run_compile_and_run("m23-attr-used", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 42, "used_helper(21) = 42");
     let _ = fs::remove_file(exe);
@@ -3341,7 +3767,11 @@ fn m23_attr_used_compiles_and_runs() {
 fn m23_attr_flatten_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_flatten.c");
     let (out, exe) = run_compile_and_run("m23-attr-flatten", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 42, "outer(20) = (20+1)*2 = 42");
     let _ = fs::remove_file(exe);
@@ -3353,7 +3783,11 @@ fn m23_attr_flatten_compiles_and_runs() {
 fn m23_attr_deprecated_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_deprecated.c");
     let (out, exe) = run_compile_and_run("m23-attr-deprecated", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 42);
     let _ = fs::remove_file(exe);
@@ -3366,7 +3800,11 @@ fn m23_attr_deprecated_compiles_and_runs() {
 fn m23_attr_ctor_priority_orders_correctly() {
     let src = include_str!("fixtures/c/attr_ctor_priority.c");
     let (out, exe) = run_compile_and_run("m23-attr-ctor-priority", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     // init_100 (prio=100) 先, order=0*10+2=2; init_300 (prio=300) 后, order=2*10+1=21
     assert_eq!(rc, 21, "constructor priority 100 should run before 300");
@@ -3379,7 +3817,11 @@ fn m23_attr_ctor_priority_orders_correctly() {
 fn m23_builtin_dbg_compiles_and_runs() {
     let src = include_str!("fixtures/c/builtin_dbg.c");
     let (out, exe) = run_compile_and_run("m23-builtin-dbg", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     // alloca 4 个 int, 写 10/11/12/9, sum=42
     assert_eq!(rc, 42, "alloca + assume_aligned + (dead)debugtrap");
@@ -3392,7 +3834,11 @@ fn m23_builtin_dbg_compiles_and_runs() {
 fn m23_attr_retain_used_compiles_and_runs() {
     let src = include_str!("fixtures/c/attr_retain_used.c");
     let (out, exe) = run_compile_and_run("m23-attr-retain-used", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rc = run_exe(&exe);
     assert_eq!(rc, 42, "combo_var + combo_fn(0) = 7+35 = 42");
     let _ = fs::remove_file(exe);
@@ -3481,8 +3927,7 @@ fn cmath_pass_through_emits_external_symbols() {
     let _ = fs::remove_file(&object_path);
     let bytes = obj;
     for name in &[
-        "cabs", "cproj", "creal", "cimag", "conj",
-        "csqrt", "cexp", "clog", "csin", "ccos", "cpow",
+        "cabs", "cproj", "creal", "cimag", "conj", "csqrt", "cexp", "clog", "csin", "ccos", "cpow",
         "carg", "csinh", "ccosh", "ctanh",
     ] {
         let needle = name.as_bytes();
@@ -3550,9 +3995,8 @@ fn wcs_builtins_forward_to_libc() {
     let _ = fs::remove_file(&object_path);
     let bytes = obj;
     for name in &[
-        "wcslen", "wcscpy", "wcscat", "wcschr", "wcsrchr",
-        "wcscmp", "wcsncmp",
-        "wmemcpy", "wmemmove", "wmemset", "wmemcmp",
+        "wcslen", "wcscpy", "wcscat", "wcschr", "wcsrchr", "wcscmp", "wcsncmp", "wmemcpy",
+        "wmemmove", "wmemset", "wmemcmp",
     ] {
         let needle = name.as_bytes();
         assert!(
@@ -3745,7 +4189,13 @@ fn va_arg_x86_64_fixture_compiles() {
     );
     let obj = fs::read(&object_path).unwrap_or_default();
     let _ = fs::remove_file(&object_path);
-    for fname in &["sum_int5", "sum_int13", "sum_long5", "sum_double5", "sum_double8"] {
+    for fname in &[
+        "sum_int5",
+        "sum_int13",
+        "sum_long5",
+        "sum_double5",
+        "sum_double8",
+    ] {
         let needle = fname.as_bytes();
         assert!(
             obj.windows(needle.len()).any(|w| w == needle),
@@ -3921,53 +4371,83 @@ fn pch_create_then_include_compiles_and_runs() {
     let main_o_nopch = dir.join(format!("dcc-pch-main-nopch-{}.o", std::process::id()));
     let exe_pch = dir.join(format!("dcc-pch-pch-{}", std::process::id()));
     let exe_nopch = dir.join(format!("dcc-pch-nopch-{}", std::process::id()));
-    fs::write(&header_path, b"#define PCH_CONST 42\n#define PCH_INC(x) ((x) + 1)\ntypedef int pch_int;\n").expect("write header");
+    fs::write(
+        &header_path,
+        b"#define PCH_CONST 42\n#define PCH_INC(x) ((x) + 1)\ntypedef int pch_int;\n",
+    )
+    .expect("write header");
     let hdr_str = header_path.to_str().unwrap().to_string();
-    let preamble_text = format!("#include \"{hdr_str}\"\nint get_const(void) {{ return PCH_CONST; }}\n");
+    let preamble_text =
+        format!("#include \"{hdr_str}\"\nint get_const(void) {{ return PCH_CONST; }}\n");
     let main_text = format!("#include \"{hdr_str}\"\nint main(void) {{\n    pch_int v = PCH_INC(PCH_CONST);\n    return v == 43 ? 0 : 1;\n}}\n");
     fs::write(&preamble_src, preamble_text.as_bytes()).expect("write preamble");
     fs::write(&main_src, main_text.as_bytes()).expect("write main");
     // Step 1: create PCH from preamble
     let create_out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg(format!("-fpch-create={}", pch_path.display()))
-        .args(["-c", "-o"]).arg(&preamble_o)
+        .args(["-c", "-o"])
+        .arg(&preamble_o)
         .arg(&preamble_src)
         .output()
         .expect("run dcc -fpch-create");
-    assert!(create_out.status.success(),
-            "PCH create must succeed; stderr: {}",
-            String::from_utf8_lossy(&create_out.stderr));
+    assert!(
+        create_out.status.success(),
+        "PCH create must succeed; stderr: {}",
+        String::from_utf8_lossy(&create_out.stderr)
+    );
     assert!(pch_path.exists(), "PCH file must be created");
     // Step 2: compile main with -fpch-include
     let with_pch = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg(format!("-fpch-include={}", pch_path.display()))
-        .args(["-c", "-o"]).arg(&main_o_pch)
+        .args(["-c", "-o"])
+        .arg(&main_o_pch)
         .arg(&main_src)
         .output()
         .expect("run dcc -fpch-include");
-    assert!(with_pch.status.success(),
-            "PCH include must succeed; stderr: {}",
-            String::from_utf8_lossy(&with_pch.stderr));
+    assert!(
+        with_pch.status.success(),
+        "PCH include must succeed; stderr: {}",
+        String::from_utf8_lossy(&with_pch.stderr)
+    );
     // Step 3: link + run with PCH
     let _ = fs::set_permissions(&exe_pch, fs::Permissions::from_mode(0o755));
-    let link_pch = Command::new("gcc").arg(&main_o_pch).arg("-o").arg(&exe_pch).output().expect("link pch");
-    assert!(link_pch.status.success(),
-            "link (PCH) failed; stderr: {}", String::from_utf8_lossy(&link_pch.stderr));
+    let link_pch = Command::new("gcc")
+        .arg(&main_o_pch)
+        .arg("-o")
+        .arg(&exe_pch)
+        .output()
+        .expect("link pch");
+    assert!(
+        link_pch.status.success(),
+        "link (PCH) failed; stderr: {}",
+        String::from_utf8_lossy(&link_pch.stderr)
+    );
     let run_pch = Command::new(&exe_pch).status().expect("run pch");
     assert_eq!(run_pch.code(), Some(0), "PCH build must return 0");
     // Step 4: baseline (no PCH) for parity check
     let nopch = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-c", "-o"]).arg(&main_o_nopch)
+        .args(["-c", "-o"])
+        .arg(&main_o_nopch)
         .arg(&main_src)
         .output()
         .expect("run dcc (no pch)");
-    assert!(nopch.status.success(),
-            "no-PCH compile must succeed; stderr: {}",
-            String::from_utf8_lossy(&nopch.stderr));
+    assert!(
+        nopch.status.success(),
+        "no-PCH compile must succeed; stderr: {}",
+        String::from_utf8_lossy(&nopch.stderr)
+    );
     let _ = fs::set_permissions(&exe_nopch, fs::Permissions::from_mode(0o755));
-    let link_nopch = Command::new("gcc").arg(&main_o_nopch).arg("-o").arg(&exe_nopch).output().expect("link nopch");
-    assert!(link_nopch.status.success(),
-            "link (no PCH) failed; stderr: {}", String::from_utf8_lossy(&link_nopch.stderr));
+    let link_nopch = Command::new("gcc")
+        .arg(&main_o_nopch)
+        .arg("-o")
+        .arg(&exe_nopch)
+        .output()
+        .expect("link nopch");
+    assert!(
+        link_nopch.status.success(),
+        "link (no PCH) failed; stderr: {}",
+        String::from_utf8_lossy(&link_nopch.stderr)
+    );
     let run_nopch = Command::new(&exe_nopch).status().expect("run nopch");
     assert_eq!(run_nopch.code(), Some(0), "no-PCH build must return 0");
     // cleanup
@@ -4357,7 +4837,11 @@ fn m1_1_hello_stdout() {
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(&src_path);
-    assert!(compile.status.success(), "compile: {}", String::from_utf8_lossy(&compile.stderr));
+    assert!(
+        compile.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
     let link = Command::new("gcc")
         .args(["-o"])
         .arg(&exe_path)
@@ -4365,7 +4849,11 @@ fn m1_1_hello_stdout() {
         .output()
         .expect("run gcc");
     let _ = fs::remove_file(&obj_path);
-    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -4393,12 +4881,30 @@ fn m1_2_multi_file() {
     fs::write(&h_path, helper_src).expect("write helper");
     fs::write(&m_path, main_src).expect("write main");
     let dcc = env!("CARGO_BIN_EXE_dcc");
-    let c1 = Command::new(dcc).args(["-c", "-o"]).arg(&h_obj).arg(&h_path).output().expect("dcc");
+    let c1 = Command::new(dcc)
+        .args(["-c", "-o"])
+        .arg(&h_obj)
+        .arg(&h_path)
+        .output()
+        .expect("dcc");
     let _ = fs::remove_file(&h_path);
-    assert!(c1.status.success(), "helper compile: {}", String::from_utf8_lossy(&c1.stderr));
-    let c2 = Command::new(dcc).args(["-c", "-o"]).arg(&m_obj).arg(&m_path).output().expect("dcc");
+    assert!(
+        c1.status.success(),
+        "helper compile: {}",
+        String::from_utf8_lossy(&c1.stderr)
+    );
+    let c2 = Command::new(dcc)
+        .args(["-c", "-o"])
+        .arg(&m_obj)
+        .arg(&m_path)
+        .output()
+        .expect("dcc");
     let _ = fs::remove_file(&m_path);
-    assert!(c2.status.success(), "main compile: {}", String::from_utf8_lossy(&c2.stderr));
+    assert!(
+        c2.status.success(),
+        "main compile: {}",
+        String::from_utf8_lossy(&c2.stderr)
+    );
     let link = Command::new("gcc")
         .args(["-o"])
         .arg(&exe)
@@ -4408,7 +4914,11 @@ fn m1_2_multi_file() {
         .expect("gcc link");
     let _ = fs::remove_file(&h_obj);
     let _ = fs::remove_file(&m_obj);
-    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -4419,8 +4929,10 @@ fn m1_2_multi_file() {
     assert!(run.status.success(), "run failed");
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
-        stdout.contains("sum=7") && stdout.contains("sq=25")
-            && stdout.contains("ctr=3") && stdout.contains("loc=100"),
+        stdout.contains("sum=7")
+            && stdout.contains("sq=25")
+            && stdout.contains("ctr=3")
+            && stdout.contains("loc=100"),
         "unexpected stdout: {stdout:?}"
     );
 }
@@ -4448,8 +4960,16 @@ fn m1_3_preprocessor() {
         .output()
         .expect("gcc -E");
     let _ = fs::remove_file(&src_path);
-    assert!(dcc_out.status.success(), "dcc -E: {}", String::from_utf8_lossy(&dcc_out.stderr));
-    assert!(gcc_out.status.success(), "gcc -E: {}", String::from_utf8_lossy(&gcc_out.stderr));
+    assert!(
+        dcc_out.status.success(),
+        "dcc -E: {}",
+        String::from_utf8_lossy(&dcc_out.stderr)
+    );
+    assert!(
+        gcc_out.status.success(),
+        "gcc -E: {}",
+        String::from_utf8_lossy(&gcc_out.stderr)
+    );
     // Strip linemarkers (# N ...) and blank lines, then compare
     let strip = |text: &str| -> Vec<String> {
         text.lines()
@@ -4481,10 +5001,7 @@ fn m1_4_elf_format() {
         String::from_utf8_lossy(&out.stderr)
     );
     // file(1) should say "ELF 64-bit LSB relocatable"
-    let file_out = Command::new("file")
-        .arg(&obj)
-        .output()
-        .expect("file");
+    let file_out = Command::new("file").arg(&obj).output().expect("file");
     let file_str = String::from_utf8_lossy(&file_out.stdout);
     assert!(
         file_str.contains("ELF 64-bit") && file_str.contains("relocatable"),
@@ -4622,10 +5139,18 @@ fn m2_5_float() {
 #[cfg(unix)]
 fn m2_6_batch_compile() {
     let fixtures = [
-        "basics/hello.c", "basics/arith.c", "basics/control_flow.c", "basics/fib.c",
-        "structs/basic_struct.c", "basics/switch.c", "pointers/function_call.c",
-        "structs/bitfield.c", "structs/global_array.c",
-        "basics/logic.c", "pointers/rel_ops.c", "pointers/pointer_arith.c",
+        "basics/hello.c",
+        "basics/arith.c",
+        "basics/control_flow.c",
+        "basics/fib.c",
+        "structs/basic_struct.c",
+        "basics/switch.c",
+        "pointers/function_call.c",
+        "structs/bitfield.c",
+        "structs/global_array.c",
+        "basics/logic.c",
+        "pointers/rel_ops.c",
+        "pointers/pointer_arith.c",
     ];
     let dcc = env!("CARGO_BIN_EXE_dcc");
     let mut pass = 0u32;
@@ -4633,11 +5158,12 @@ fn m2_6_batch_compile() {
     let dir = std::env::temp_dir();
     for name in &fixtures {
         let src = format!("examples/{name}");
-        if !std::path::Path::new(&src).exists() { continue; }
+        if !std::path::Path::new(&src).exists() {
+            continue;
+        }
         // fixture 名含子目录 (如 basics/hello.c), 拍平避免父目录不存在
         let flat = name.replace(['/', '\\'], "-");
-        let obj = dir.join(format!("dcc-m2-6-{flat}-{}.o",
-            std::process::id()));
+        let obj = dir.join(format!("dcc-m2-6-{flat}-{}.o", std::process::id()));
         let out = Command::new(dcc)
             .args(["-c", "-o"])
             .arg(&obj)
@@ -4645,17 +5171,14 @@ fn m2_6_batch_compile() {
             .output()
             .expect("dcc");
         let _ = fs::remove_file(&obj);
-        if out.status.success() { pass += 1; }
-        else {
+        if out.status.success() {
+            pass += 1;
+        } else {
             fail += 1;
-            eprintln!("FAIL {name}: {}",
-                String::from_utf8_lossy(&out.stderr));
+            eprintln!("FAIL {name}: {}", String::from_utf8_lossy(&out.stderr));
         }
     }
-    assert!(
-        fail == 0,
-        "batch compile: {pass} passed, {fail} failed"
-    );
+    assert!(fail == 0, "batch compile: {pass} passed, {fail} failed");
 }
 
 // =====================================================================
@@ -4836,7 +5359,11 @@ fn m3_11_got_func_addr() {
 fn c23_alignas() {
     let src = include_str!("fixtures/c/c23_alignas.c");
     let (out, exe) = run_compile_and_run("c23-alignas", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_alignas: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4846,7 +5373,11 @@ fn c23_alignas() {
 fn c23_bool() {
     let src = include_str!("fixtures/c/c23_bool.c");
     let (out, exe) = run_compile_and_run("c23-bool", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_bool: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4856,7 +5387,11 @@ fn c23_bool() {
 fn c23_brace_init() {
     let src = include_str!("fixtures/c/c23_brace_init.c");
     let (out, exe) = run_compile_and_run("c23-brace-init", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_brace_init: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4866,7 +5401,11 @@ fn c23_brace_init() {
 fn c23_enum_under() {
     let src = include_str!("fixtures/c/c23_enum_under.c");
     let (out, exe) = run_compile_and_run("c23-enum-under", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_enum_under: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4876,7 +5415,11 @@ fn c23_enum_under() {
 fn c23_has_c_attribute() {
     let src = include_str!("fixtures/c/c23_has_c_attribute.c");
     let (out, exe) = run_compile_and_run("c23-has-c-attr", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_has_c_attribute: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4886,7 +5429,11 @@ fn c23_has_c_attribute() {
 fn c23_nullptr() {
     let src = include_str!("fixtures/c/c23_nullptr.c");
     let (out, exe) = run_compile_and_run("c23-nullptr", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_nullptr: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4896,7 +5443,11 @@ fn c23_nullptr() {
 fn c23_printf_b() {
     let src = include_str!("fixtures/c/c23_printf_b.c");
     let (out, exe) = run_compile_and_run("c23-printf-b", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_printf_b: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4906,7 +5457,11 @@ fn c23_printf_b() {
 fn c23_static_assert() {
     let src = include_str!("fixtures/c/c23_static_assert.c");
     let (out, exe) = run_compile_and_run("c23-static-assert", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_static_assert: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4916,7 +5471,11 @@ fn c23_static_assert() {
 fn c23_thread_local() {
     let src = include_str!("fixtures/c/c23_thread_local.c");
     let (out, exe) = run_compile_and_run("c23-thread-local", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_thread_local: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
@@ -4926,11 +5485,14 @@ fn c23_thread_local() {
 fn c23_typeof_unqual() {
     let src = include_str!("fixtures/c/c23_typeof_unqual.c");
     let (out, exe) = run_compile_and_run("c23-typeof-unqual", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run_exe(&exe), 0, "c23_typeof_unqual: {}", run_exe(&exe));
     let _ = std::fs::remove_file(&exe);
 }
-
 
 // ====== M26: 协程真状态机 / modules BMF / GCC ABI 运行时 ======
 #[test]
@@ -4938,7 +5500,11 @@ fn c23_typeof_unqual() {
 fn m26_coroutine_state_machine() {
     let src = include_str!("fixtures/cpp/coroutine_state.cpp");
     let (out, _obj) = run_cpp_object_test("m26-coroutine-state", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -4947,7 +5513,11 @@ fn m26_coroutine_state_machine() {
 fn m26_modules_bmf() {
     let src = include_str!("fixtures/cpp/modules_bmf.cpp");
     let (out, _obj) = run_cpp_object_test("m26-modules-bmf", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }
 
@@ -4956,6 +5526,10 @@ fn m26_modules_bmf() {
 fn m26_gcc_compat_runtime() {
     let src = include_str!("fixtures/cpp/gcc_compat.cpp");
     let (out, _obj) = run_cpp_object_test("m26-gcc-compat", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(_obj);
 }

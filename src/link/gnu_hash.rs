@@ -110,13 +110,15 @@ pub fn build_gnu_hash(cfg: &GnuHashConfig) -> GnuHashTable {
         for &i in &indices {
             let h = hashes[i];
             let b_idx = (h % nbuckets) as usize;
-            if b[b_idx] == 0 { b[b_idx] = i as u32; }
+            if b[b_idx] == 0 {
+                b[b_idx] = i as u32;
+            }
         }
         b
     };
     GnuHashTable {
         symcount: n,
-        symndx: 1,  // 简化：忽略 local 符号头
+        symndx: 1, // 简化：忽略 local 符号头
         maskwords: bloom_words,
         shift2: cfg.shift2,
         bloom,
@@ -136,14 +138,22 @@ pub fn serialize_gnu_hash(t: &GnuHashTable) -> Vec<u8> {
     out.extend_from_slice(&t.symndx.to_le_bytes());
     out.extend_from_slice(&t.maskwords.to_le_bytes());
     out.extend_from_slice(&t.shift2.to_le_bytes());
-    for b in &t.buckets { out.extend_from_slice(&b.to_le_bytes()); }
-    for w in &t.bloom { out.extend_from_slice(&w.to_le_bytes()); }
-    for c in &t.chain { out.extend_from_slice(&c.to_le_bytes()); }
+    for b in &t.buckets {
+        out.extend_from_slice(&b.to_le_bytes());
+    }
+    for w in &t.bloom {
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+    for c in &t.chain {
+        out.extend_from_slice(&c.to_le_bytes());
+    }
     out
 }
 
 /// ELF class 标识 (64-bit only, TIE 压缩要求 64-bit)
-pub fn elfclass() -> u8 { ELFCLASS64 }
+pub fn elfclass() -> u8 {
+    ELFCLASS64
+}
 
 #[cfg(test)]
 mod tests {

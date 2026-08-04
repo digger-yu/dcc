@@ -11,9 +11,7 @@
 //! 隐式推导需要调用点类型信息, 由 lower 计算好实参类型后调用.
 
 use crate::cpp::mangle::MangleType;
-use crate::cpp::parser::{
-    ClassDecl, CppBody, CppDecl, CppExpr, CppStmt, SizeofArg, TemplateArgs,
-};
+use crate::cpp::parser::{ClassDecl, CppBody, CppDecl, CppExpr, CppStmt, SizeofArg, TemplateArgs};
 
 /// 模板声明 (类模板或函数模板的统一包装)
 #[derive(Debug, Clone)]
@@ -100,7 +98,11 @@ pub fn instantiated_class_name(name: &str, args: &[MangleType]) -> String {
 
 impl TemplateRegistry {
     /// 从 TemplateArgs 构造 TemplateDecl (解析阶段收集用)
-    pub fn decl_from(targs: &TemplateArgs, requires: &Option<String>, decl: CppDecl) -> Option<TemplateDecl> {
+    pub fn decl_from(
+        targs: &TemplateArgs,
+        requires: &Option<String>,
+        decl: CppDecl,
+    ) -> Option<TemplateDecl> {
         let name = match &decl {
             CppDecl::Class(c) => c.name.clone(),
             CppDecl::FreeFn { name, .. } => name.clone(),
@@ -124,7 +126,13 @@ impl TemplateRegistry {
     }
 
     /// 注册偏特化
-    pub fn register_partial(&mut self, name: String, params: &[String], pattern_text: String, decl: &CppDecl) {
+    pub fn register_partial(
+        &mut self,
+        name: String,
+        params: &[String],
+        pattern_text: String,
+        decl: &CppDecl,
+    ) {
         self.partials.push(PartialSpecEntry {
             name,
             param_names: params.to_vec(),
@@ -142,7 +150,9 @@ impl TemplateRegistry {
     pub fn key_for(name: &str, args: &[MangleType]) -> String {
         let mut s = format!("{}<", name);
         for (i, a) in args.iter().enumerate() {
-            if i > 0 { s.push(','); }
+            if i > 0 {
+                s.push(',');
+            }
             s.push_str(&type_key(a));
         }
         s.push('>');
@@ -181,7 +191,11 @@ impl TemplateRegistry {
 
     /// 从调用实参类型推导模板实参 (隐式实例化)
     /// call_arg_tys: 调用点实参的 MangleType (由 lower 计算)
-    pub fn deduce_args(&self, td: &TemplateDecl, call_arg_tys: &[MangleType]) -> Option<Vec<MangleType>> {
+    pub fn deduce_args(
+        &self,
+        td: &TemplateDecl,
+        call_arg_tys: &[MangleType],
+    ) -> Option<Vec<MangleType>> {
         // 已有全部默认实参的模板 (无参模板函数 `sfinae_default_arg`) → 直接取默认
         if td.defaults.iter().all(|d| d.is_some()) {
             let mut args: Vec<MangleType> = Vec::new();
@@ -241,25 +255,36 @@ impl TemplateRegistry {
     }
 
     /// 选择偏特化: 若实参匹配某偏特化模式, 返回 (特化声明, 形参名, 实参)
-    pub fn pick_partial(&self, name: &str, args: &[MangleType]) -> Option<(CppDecl, Vec<String>, Vec<MangleType>)> {
+    pub fn pick_partial(
+        &self,
+        name: &str,
+        args: &[MangleType],
+    ) -> Option<(CppDecl, Vec<String>, Vec<MangleType>)> {
         for p in &self.partials {
-            if p.name != name { continue; }
+            if p.name != name {
+                continue;
+            }
             let patterns: Vec<&str> = p.pattern_text.split(',').collect();
             let arg_keys: Vec<String> = args.iter().map(type_key).collect();
-            if patterns.len() != arg_keys.len() { continue; }
-            let all_match = patterns.iter().zip(arg_keys.iter())
-                .all(|(pat, arg)| {
-                    // 支持指针/引用模式: `T*` vs `int*`
-                    let pat = pat.trim();
-                    let pat_key = pat.replace('*', "").trim().to_string();
-                    if pat.ends_with('*') && arg.starts_with("p_") {
-                        // `T*` 匹配 `p_<T>` 编码
-                        return pat_key == "T" || arg.contains(&pat_key);
-                    }
-                    if pat == "T" || pat == "U" || pat == "V" { return true; }
-                    if pat_key.is_empty() { return false; }
-                    pat_key == *arg
-                });
+            if patterns.len() != arg_keys.len() {
+                continue;
+            }
+            let all_match = patterns.iter().zip(arg_keys.iter()).all(|(pat, arg)| {
+                // 支持指针/引用模式: `T*` vs `int*`
+                let pat = pat.trim();
+                let pat_key = pat.replace('*', "").trim().to_string();
+                if pat.ends_with('*') && arg.starts_with("p_") {
+                    // `T*` 匹配 `p_<T>` 编码
+                    return pat_key == "T" || arg.contains(&pat_key);
+                }
+                if pat == "T" || pat == "U" || pat == "V" {
+                    return true;
+                }
+                if pat_key.is_empty() {
+                    return false;
+                }
+                pat_key == *arg
+            });
             if all_match {
                 return Some((p.decl.clone(), p.param_names.clone(), args.to_vec()));
             }
@@ -270,7 +295,12 @@ impl TemplateRegistry {
 
 /// 从形参/实参类型对中收集绑定 (形参名 → 实参类型)
 /// 形如 `Class("T")` ↔ 实参 `Int`; `Pointer(Class("T"))` ↔ `Pointer(Int)` 递归
-fn collect_bindings(pt: &MangleType, at: &MangleType, names: &[String], out: &mut Vec<(String, MangleType)>) {
+fn collect_bindings(
+    pt: &MangleType,
+    at: &MangleType,
+    names: &[String],
+    out: &mut Vec<(String, MangleType)>,
+) {
     match (pt, at) {
         (MangleType::Class(n), _) if names.iter().any(|x| x == n) => {
             // 形参名直接对应实参 (整棵)
@@ -302,12 +332,18 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
             ty.clone()
         }
         MangleType::Pointer(t) => MangleType::Pointer(Box::new(substitute_type(t, params, args))),
-        MangleType::Reference(t) => MangleType::Reference(Box::new(substitute_type(t, params, args))),
+        MangleType::Reference(t) => {
+            MangleType::Reference(Box::new(substitute_type(t, params, args)))
+        }
         MangleType::Template { name, args: tas } => {
-            let new_args: Vec<MangleType> = tas.iter()
+            let new_args: Vec<MangleType> = tas
+                .iter()
                 .map(|a| substitute_type(a, params, args))
                 .collect();
-            MangleType::Template { name: name.clone(), args: new_args }
+            MangleType::Template {
+                name: name.clone(),
+                args: new_args,
+            }
         }
         other => other.clone(),
     }
@@ -316,9 +352,10 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
 /// 递归替换表达式内出现的模板形参类型
 pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> CppExpr {
     match e {
-        CppExpr::Cast(ty, inner) => {
-            CppExpr::Cast(substitute_type(ty, params, args), Box::new(substitute_expr(inner, params, args)))
-        }
+        CppExpr::Cast(ty, inner) => CppExpr::Cast(
+            substitute_type(ty, params, args),
+            Box::new(substitute_expr(inner, params, args)),
+        ),
         CppExpr::StaticCast { ty, expr } => CppExpr::StaticCast {
             ty: substitute_type(ty, params, args),
             expr: Box::new(substitute_expr(expr, params, args)),
@@ -336,26 +373,45 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
             expr: Box::new(substitute_expr(expr, params, args)),
         },
         CppExpr::TypeidType(ty) => CppExpr::TypeidType(substitute_type(ty, params, args)),
-        CppExpr::Sizeof(SizeofArg::Type(ty)) => CppExpr::Sizeof(SizeofArg::Type(substitute_type(ty, params, args))),
-        CppExpr::Sizeof(SizeofArg::Expr(x)) => CppExpr::Sizeof(SizeofArg::Expr(Box::new(substitute_expr(x, params, args)))),
+        CppExpr::Sizeof(SizeofArg::Type(ty)) => {
+            CppExpr::Sizeof(SizeofArg::Type(substitute_type(ty, params, args)))
+        }
+        CppExpr::Sizeof(SizeofArg::Expr(x)) => {
+            CppExpr::Sizeof(SizeofArg::Expr(Box::new(substitute_expr(x, params, args))))
+        }
         CppExpr::TypedInitList { ty, elems } => CppExpr::TypedInitList {
             ty: substitute_type(ty, params, args),
-            elems: elems.iter().map(|x| substitute_expr(x, params, args)).collect(),
+            elems: elems
+                .iter()
+                .map(|x| substitute_expr(x, params, args))
+                .collect(),
         },
-        CppExpr::Member(o, s) => CppExpr::Member(Box::new(substitute_expr(o, params, args)), s.clone()),
-        CppExpr::PtrMember(o, s) => CppExpr::PtrMember(Box::new(substitute_expr(o, params, args)), s.clone()),
-        CppExpr::MemberStar(o, s) => CppExpr::MemberStar(Box::new(substitute_expr(o, params, args)), s.clone()),
-        CppExpr::PtrMemberStar(o, s) => CppExpr::PtrMemberStar(Box::new(substitute_expr(o, params, args)), s.clone()),
+        CppExpr::Member(o, s) => {
+            CppExpr::Member(Box::new(substitute_expr(o, params, args)), s.clone())
+        }
+        CppExpr::PtrMember(o, s) => {
+            CppExpr::PtrMember(Box::new(substitute_expr(o, params, args)), s.clone())
+        }
+        CppExpr::MemberStar(o, s) => {
+            CppExpr::MemberStar(Box::new(substitute_expr(o, params, args)), s.clone())
+        }
+        CppExpr::PtrMemberStar(o, s) => {
+            CppExpr::PtrMemberStar(Box::new(substitute_expr(o, params, args)), s.clone())
+        }
         CppExpr::Call(f, as_) => CppExpr::Call(
             Box::new(substitute_expr(f, params, args)),
-            as_.iter().map(|a| substitute_expr(a, params, args)).collect(),
+            as_.iter()
+                .map(|a| substitute_expr(a, params, args))
+                .collect(),
         ),
         CppExpr::New(ty, as_) => CppExpr::New(
             match substitute_type(&MangleType::Class(ty.clone()), params, args) {
                 MangleType::Class(n) => n,
                 other => type_key(&other),
             },
-            as_.iter().map(|a| substitute_expr(a, params, args)).collect(),
+            as_.iter()
+                .map(|a| substitute_expr(a, params, args))
+                .collect(),
         ),
         CppExpr::NewArr { ty, count } => CppExpr::NewArr {
             ty: match substitute_type(&MangleType::Class(ty.clone()), params, args) {
@@ -370,14 +426,19 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
                 MangleType::Class(n) => n,
                 other => type_key(&other),
             },
-            args: as_.iter().map(|a| substitute_expr(a, params, args)).collect(),
+            args: as_
+                .iter()
+                .map(|a| substitute_expr(a, params, args))
+                .collect(),
         },
         CppExpr::BinOp(op, l, r) => CppExpr::BinOp(
             *op,
             Box::new(substitute_expr(l, params, args)),
             Box::new(substitute_expr(r, params, args)),
         ),
-        CppExpr::UnaryOp(op, x) => CppExpr::UnaryOp(*op, Box::new(substitute_expr(x, params, args))),
+        CppExpr::UnaryOp(op, x) => {
+            CppExpr::UnaryOp(*op, Box::new(substitute_expr(x, params, args)))
+        }
         CppExpr::Ref(x) => CppExpr::Ref(Box::new(substitute_expr(x, params, args))),
         CppExpr::AddrOf(x) => CppExpr::AddrOf(Box::new(substitute_expr(x, params, args))),
         CppExpr::Delete(x) => CppExpr::Delete(Box::new(substitute_expr(x, params, args))),
@@ -386,22 +447,37 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
         CppExpr::Typeid(x) => CppExpr::Typeid(Box::new(substitute_expr(x, params, args))),
         CppExpr::MultiIndex(o, idx) => CppExpr::MultiIndex(
             Box::new(substitute_expr(o, params, args)),
-            idx.iter().map(|x| substitute_expr(x, params, args)).collect(),
+            idx.iter()
+                .map(|x| substitute_expr(x, params, args))
+                .collect(),
         ),
         CppExpr::Ternary { cond, then, els } => CppExpr::Ternary {
             cond: Box::new(substitute_expr(cond, params, args)),
             then: Box::new(substitute_expr(then, params, args)),
             els: Box::new(substitute_expr(els, params, args)),
         },
-        CppExpr::Comma(xs) => CppExpr::Comma(xs.iter().map(|x| substitute_expr(x, params, args)).collect()),
-        CppExpr::InitList(xs) => CppExpr::InitList(xs.iter().map(|x| substitute_expr(x, params, args)).collect()),
+        CppExpr::Comma(xs) => CppExpr::Comma(
+            xs.iter()
+                .map(|x| substitute_expr(x, params, args))
+                .collect(),
+        ),
+        CppExpr::InitList(xs) => CppExpr::InitList(
+            xs.iter()
+                .map(|x| substitute_expr(x, params, args))
+                .collect(),
+        ),
         CppExpr::OpCall { op, args: as_ } => CppExpr::OpCall {
             op: op.clone(),
-            args: as_.iter().map(|a| substitute_expr(a, params, args)).collect(),
+            args: as_
+                .iter()
+                .map(|a| substitute_expr(a, params, args))
+                .collect(),
         },
         CppExpr::Lambda(lam) => CppExpr::Lambda(crate::cpp::parser::LambdaExpr {
             captures: lam.captures.clone(),
-            params: lam.params.iter()
+            params: lam
+                .params
+                .iter()
                 .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
                 .collect(),
             body: substitute_body(&lam.body, params, args),
@@ -420,21 +496,34 @@ pub fn substitute_stmt(s: &CppStmt, params: &[String], args: &[MangleType]) -> C
         CppStmt::If { cond, then, els } => CppStmt::If {
             cond: substitute_expr(cond, params, args),
             then: Box::new(substitute_body(then, params, args)),
-            els: els.as_ref().map(|x| Box::new(substitute_body(x, params, args))),
+            els: els
+                .as_ref()
+                .map(|x| Box::new(substitute_body(x, params, args))),
         },
         CppStmt::IfConstexpr { cond, then, els } => CppStmt::IfConstexpr {
             cond: substitute_expr(cond, params, args),
             then: Box::new(substitute_body(then, params, args)),
-            els: els.as_ref().map(|x| Box::new(substitute_body(x, params, args))),
+            els: els
+                .as_ref()
+                .map(|x| Box::new(substitute_body(x, params, args))),
         },
         CppStmt::While { cond, body } => CppStmt::While {
             cond: substitute_expr(cond, params, args),
             body: Box::new(substitute_body(body, params, args)),
         },
-        CppStmt::For { init, cond, step, body } => CppStmt::For {
-            init: init.as_ref().map(|x| Box::new(substitute_stmt(x, params, args))),
+        CppStmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => CppStmt::For {
+            init: init
+                .as_ref()
+                .map(|x| Box::new(substitute_stmt(x, params, args))),
             cond: cond.as_ref().map(|x| substitute_expr(x, params, args)),
-            step: step.as_ref().map(|x| Box::new(substitute_stmt(x, params, args))),
+            step: step
+                .as_ref()
+                .map(|x| Box::new(substitute_stmt(x, params, args))),
             body: Box::new(substitute_body(body, params, args)),
         },
         CppStmt::Block(b) => CppStmt::Block(substitute_body(b, params, args)),
@@ -453,16 +542,21 @@ pub fn substitute_stmt(s: &CppStmt, params: &[String], args: &[MangleType]) -> C
         },
         CppStmt::Try { body, catches } => CppStmt::Try {
             body: Box::new(substitute_body(body, params, args)),
-            catches: catches.iter().map(|c| crate::cpp::parser::CatchClause {
-                ty: c.ty.as_ref().map(|t| substitute_type(t, params, args)),
-                name: c.name.clone(),
-                body: substitute_body(&c.body, params, args),
-            }).collect(),
+            catches: catches
+                .iter()
+                .map(|c| crate::cpp::parser::CatchClause {
+                    ty: c.ty.as_ref().map(|t| substitute_type(t, params, args)),
+                    name: c.name.clone(),
+                    body: substitute_body(&c.body, params, args),
+                })
+                .collect(),
         },
         CppStmt::Throw(e) => CppStmt::Throw(e.as_ref().map(|x| substitute_expr(x, params, args))),
         CppStmt::CoAwait(e) => CppStmt::CoAwait(substitute_expr(e, params, args)),
         CppStmt::CoYield(e) => CppStmt::CoYield(substitute_expr(e, params, args)),
-        CppStmt::CoReturn(e) => CppStmt::CoReturn(e.as_ref().map(|x| substitute_expr(x, params, args))),
+        CppStmt::CoReturn(e) => {
+            CppStmt::CoReturn(e.as_ref().map(|x| substitute_expr(x, params, args)))
+        }
         CppStmt::Decl(d) => CppStmt::Decl(substitute_decl(d, params, args, None)),
         other => other.clone(),
     }
@@ -471,7 +565,11 @@ pub fn substitute_stmt(s: &CppStmt, params: &[String], args: &[MangleType]) -> C
 /// 递归替换语句体
 pub fn substitute_body(b: &CppBody, params: &[String], args: &[MangleType]) -> CppBody {
     CppBody {
-        stmts: b.stmts.iter().map(|s| substitute_stmt(s, params, args)).collect(),
+        stmts: b
+            .stmts
+            .iter()
+            .map(|s| substitute_stmt(s, params, args))
+            .collect(),
     }
 }
 
@@ -485,64 +583,140 @@ pub fn substitute_decl(
 ) -> CppDecl {
     match d {
         CppDecl::Class(c) => {
-            let new_name = class_rename.map(|n| n.to_string()).unwrap_or_else(|| c.name.clone());
+            let new_name = class_rename
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| c.name.clone());
             CppDecl::Class(ClassDecl {
                 name: new_name,
                 is_struct: c.is_struct,
                 bases: c.bases.clone(),
-                members: c.members.iter()
+                members: c
+                    .members
+                    .iter()
                     .map(|m| substitute_decl(m, params, args, class_rename))
                     .collect(),
             })
         }
-        CppDecl::FreeFn { ret, name, params: ps, body } => CppDecl::FreeFn {
+        CppDecl::FreeFn {
+            ret,
+            name,
+            params: ps,
+            body,
+        } => CppDecl::FreeFn {
             ret: substitute_type(ret, params, args),
             name: name.clone(),
-            params: ps.iter()
+            params: ps
+                .iter()
                 .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
                 .collect(),
             body: substitute_body(body, params, args),
         },
-        CppDecl::MemberFn { class, ret, name, params: ps, body, is_virtual, is_override, is_const, is_final, is_noexcept, is_volatile, is_friend } => {
-            let new_class = class_rename.map(|n| n.to_string()).unwrap_or_else(|| class.clone());
+        CppDecl::MemberFn {
+            class,
+            ret,
+            name,
+            params: ps,
+            body,
+            is_virtual,
+            is_override,
+            is_const,
+            is_final,
+            is_noexcept,
+            is_volatile,
+            is_friend,
+        } => {
+            let new_class = class_rename
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| class.clone());
             CppDecl::MemberFn {
-                class: new_class, ret: substitute_type(ret, params, args), name: name.clone(),
-                params: ps.iter().map(|(n, t)| (n.clone(), substitute_type(t, params, args))).collect(),
+                class: new_class,
+                ret: substitute_type(ret, params, args),
+                name: name.clone(),
+                params: ps
+                    .iter()
+                    .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
+                    .collect(),
                 body: substitute_body(body, params, args),
-                is_virtual: *is_virtual, is_override: *is_override, is_const: *is_const,
-                is_final: *is_final, is_noexcept: *is_noexcept, is_volatile: *is_volatile,
+                is_virtual: *is_virtual,
+                is_override: *is_override,
+                is_const: *is_const,
+                is_final: *is_final,
+                is_noexcept: *is_noexcept,
+                is_volatile: *is_volatile,
                 is_friend: *is_friend,
             }
         }
-        CppDecl::Ctor { class, params: ps, inits, body, is_virtual, is_explicit, is_noexcept } => {
-            let new_class = class_rename.map(|n| n.to_string()).unwrap_or_else(|| class.clone());
+        CppDecl::Ctor {
+            class,
+            params: ps,
+            inits,
+            body,
+            is_virtual,
+            is_explicit,
+            is_noexcept,
+        } => {
+            let new_class = class_rename
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| class.clone());
             CppDecl::Ctor {
                 class: new_class,
-                params: ps.iter().map(|(n, t)| (n.clone(), substitute_type(t, params, args))).collect(),
-                inits: inits.iter().map(|(n, e)| (n.clone(), substitute_expr(e, params, args))).collect(),
+                params: ps
+                    .iter()
+                    .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
+                    .collect(),
+                inits: inits
+                    .iter()
+                    .map(|(n, e)| (n.clone(), substitute_expr(e, params, args)))
+                    .collect(),
                 body: substitute_body(body, params, args),
-                is_virtual: *is_virtual, is_explicit: *is_explicit, is_noexcept: *is_noexcept,
+                is_virtual: *is_virtual,
+                is_explicit: *is_explicit,
+                is_noexcept: *is_noexcept,
             }
         }
-        CppDecl::Dtor { class, body, is_virtual, is_noexcept } => {
-            let new_class = class_rename.map(|n| n.to_string()).unwrap_or_else(|| class.clone());
+        CppDecl::Dtor {
+            class,
+            body,
+            is_virtual,
+            is_noexcept,
+        } => {
+            let new_class = class_rename
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| class.clone());
             CppDecl::Dtor {
                 class: new_class,
                 body: substitute_body(body, params, args),
-                is_virtual: *is_virtual, is_noexcept: *is_noexcept,
+                is_virtual: *is_virtual,
+                is_noexcept: *is_noexcept,
             }
         }
-        CppDecl::MemberVar { ty, name, is_mutable } => CppDecl::MemberVar {
+        CppDecl::MemberVar {
+            ty,
+            name,
+            is_mutable,
+        } => CppDecl::MemberVar {
             ty: substitute_type(ty, params, args),
             name: name.clone(),
             is_mutable: *is_mutable,
         },
-        CppDecl::OperatorFn { class, op, params: ps, body, ret, is_unary } => {
-            let new_class = class_rename.map(|n| n.to_string()).or_else(|| class.clone());
+        CppDecl::OperatorFn {
+            class,
+            op,
+            params: ps,
+            body,
+            ret,
+            is_unary,
+        } => {
+            let new_class = class_rename
+                .map(|n| n.to_string())
+                .or_else(|| class.clone());
             CppDecl::OperatorFn {
                 class: new_class,
                 op: op.clone(),
-                params: ps.iter().map(|(n, t)| (n.clone(), substitute_type(t, params, args))).collect(),
+                params: ps
+                    .iter()
+                    .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
+                    .collect(),
                 body: substitute_body(body, params, args),
                 ret: substitute_type(ret, params, args),
                 is_unary: *is_unary,
@@ -550,10 +724,17 @@ pub fn substitute_decl(
         }
         CppDecl::Namespace { name, body } => CppDecl::Namespace {
             name: name.clone(),
-            body: body.iter().map(|x| substitute_decl(x, params, args, class_rename)).collect(),
+            body: body
+                .iter()
+                .map(|x| substitute_decl(x, params, args, class_rename))
+                .collect(),
         },
         // 嵌套模板声明: 保留 (实例化时按需再次实例化)
-        CppDecl::Template { params: tp, decl: inner, requires } => CppDecl::Template {
+        CppDecl::Template {
+            params: tp,
+            decl: inner,
+            requires,
+        } => CppDecl::Template {
             params: tp.clone(),
             decl: Box::new(substitute_decl(inner, params, args, class_rename)),
             requires: requires.clone(),
@@ -572,7 +753,10 @@ pub fn instantiate_decl(
     _orig_args: &[MangleType],
 ) -> CppDecl {
     let rename = match decl {
-        CppDecl::Class(_) => Some(instantiated_class_name(_orig_name.unwrap_or(""), _orig_args)),
+        CppDecl::Class(_) => Some(instantiated_class_name(
+            _orig_name.unwrap_or(""),
+            _orig_args,
+        )),
         _ => None,
     };
     substitute_decl(decl, params, args, rename.as_deref())
@@ -583,25 +767,45 @@ mod tests {
     use super::*;
 
     fn t(name: &str, args: &[MangleType]) -> MangleType {
-        MangleType::Template { name: name.to_string(), args: args.to_vec() }
+        MangleType::Template {
+            name: name.to_string(),
+            args: args.to_vec(),
+        }
     }
 
     #[test]
     fn substitute_type_basic() {
         let params = ["T".to_string(), "U".to_string()];
         let args = [MangleType::Int, MangleType::Class("MyClass".to_string())];
-        assert_eq!(substitute_type(&MangleType::Class("T".to_string()), &params, &args), MangleType::Int);
-        assert_eq!(substitute_type(&MangleType::Class("U".to_string()), &params, &args), MangleType::Class("MyClass".to_string()));
+        assert_eq!(
+            substitute_type(&MangleType::Class("T".to_string()), &params, &args),
+            MangleType::Int
+        );
+        assert_eq!(
+            substitute_type(&MangleType::Class("U".to_string()), &params, &args),
+            MangleType::Class("MyClass".to_string())
+        );
         // 非形参保留
-        assert_eq!(substitute_type(&MangleType::Class("X".to_string()), &params, &args), MangleType::Class("X".to_string()));
+        assert_eq!(
+            substitute_type(&MangleType::Class("X".to_string()), &params, &args),
+            MangleType::Class("X".to_string())
+        );
         // 指针递归
         assert_eq!(
-            substitute_type(&MangleType::Pointer(Box::new(MangleType::Class("T".to_string()))), &params, &args),
+            substitute_type(
+                &MangleType::Pointer(Box::new(MangleType::Class("T".to_string()))),
+                &params,
+                &args
+            ),
             MangleType::Pointer(Box::new(MangleType::Int))
         );
         // 模板嵌套: vector<T>
         assert_eq!(
-            substitute_type(&t("vector", &[MangleType::Class("T".to_string())]), &params, &args),
+            substitute_type(
+                &t("vector", &[MangleType::Class("T".to_string())]),
+                &params,
+                &args
+            ),
             t("vector", &[MangleType::Int])
         );
     }
@@ -615,22 +819,35 @@ mod tests {
             is_struct: true,
             bases: vec![],
             members: vec![
-                CppDecl::MemberVar { ty: MangleType::Class("T".to_string()), name: "payload".to_string(), is_mutable: false },
+                CppDecl::MemberVar {
+                    ty: MangleType::Class("T".to_string()),
+                    name: "payload".to_string(),
+                    is_mutable: false,
+                },
                 CppDecl::Ctor {
                     class: "Box".to_string(),
                     params: vec![("v".to_string(), MangleType::Class("T".to_string()))],
                     inits: vec![("payload".to_string(), CppExpr::Ident("v".to_string()))],
                     body: CppBody { stmts: vec![] },
-                    is_virtual: false, is_explicit: false, is_noexcept: false,
+                    is_virtual: false,
+                    is_explicit: false,
+                    is_noexcept: false,
                 },
             ],
         });
         reg.register(
-            &TemplateArgs { params: vec![crate::cpp::parser::TemplateParam { name: "T".to_string(), default: None }] },
+            &TemplateArgs {
+                params: vec![crate::cpp::parser::TemplateParam {
+                    name: "T".to_string(),
+                    default: None,
+                }],
+            },
             &None,
             &inner,
         );
-        let inst = reg.instantiate_class("Box", &[MangleType::Int]).expect("instantiate");
+        let inst = reg
+            .instantiate_class("Box", &[MangleType::Int])
+            .expect("instantiate");
         match inst {
             CppDecl::Class(c) => {
                 assert_eq!(c.name, "__dcc_template_Box_int");
@@ -653,7 +870,9 @@ mod tests {
             _ => panic!("not class"),
         }
         // 缓存: 再次实例化返回相同结果
-        let inst2 = reg.instantiate_class("Box", &[MangleType::Int]).expect("cached");
+        let inst2 = reg
+            .instantiate_class("Box", &[MangleType::Int])
+            .expect("cached");
         match inst2 {
             CppDecl::Class(c) => assert_eq!(c.name, "__dcc_template_Box_int"),
             _ => panic!("not class"),
@@ -671,17 +890,27 @@ mod tests {
                 ("a".to_string(), MangleType::Class("T".to_string())),
                 ("b".to_string(), MangleType::Class("U".to_string())),
             ],
-            body: CppBody { stmts: vec![CppStmt::Return(Some(CppExpr::Ident("a".to_string())))] },
+            body: CppBody {
+                stmts: vec![CppStmt::Return(Some(CppExpr::Ident("a".to_string())))],
+            },
         };
         let targs = TemplateArgs {
             params: vec![
-                crate::cpp::parser::TemplateParam { name: "T".to_string(), default: None },
-                crate::cpp::parser::TemplateParam { name: "U".to_string(), default: None },
+                crate::cpp::parser::TemplateParam {
+                    name: "T".to_string(),
+                    default: None,
+                },
+                crate::cpp::parser::TemplateParam {
+                    name: "U".to_string(),
+                    default: None,
+                },
             ],
         };
         reg.register(&targs, &None, &inner);
         let td = reg.find("sfinae_first").unwrap();
-        let args = reg.deduce_args(td, &[MangleType::Long, MangleType::Double]).expect("deduce");
+        let args = reg
+            .deduce_args(td, &[MangleType::Long, MangleType::Double])
+            .expect("deduce");
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], MangleType::Long);
         assert_eq!(args[1], MangleType::Double);
@@ -695,7 +924,9 @@ mod tests {
             ret: MangleType::Int,
             name: "sfinae_default_arg".to_string(),
             params: vec![],
-            body: CppBody { stmts: vec![CppStmt::Return(Some(CppExpr::IntLit(42)))] },
+            body: CppBody {
+                stmts: vec![CppStmt::Return(Some(CppExpr::IntLit(42)))],
+            },
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {
@@ -717,16 +948,23 @@ mod tests {
             ret: MangleType::Class("T".to_string()),
             name: "pick".to_string(),
             params: vec![("x".to_string(), MangleType::Class("T".to_string()))],
-            body: CppBody { stmts: vec![CppStmt::Return(Some(CppExpr::Ident("x".to_string())))] },
+            body: CppBody {
+                stmts: vec![CppStmt::Return(Some(CppExpr::Ident("x".to_string())))],
+            },
         };
         let targs = TemplateArgs {
-            params: vec![crate::cpp::parser::TemplateParam { name: "T".to_string(), default: None }],
+            params: vec![crate::cpp::parser::TemplateParam {
+                name: "T".to_string(),
+                default: None,
+            }],
         };
         reg.register(&targs, &Some("sizeof(T) <= 4".to_string()), &inner);
         // int 满足 sizeof(int) <= 4
         assert!(reg.instantiate_fn("pick", &[MangleType::Int]).is_some());
         // long long 不满足 → SFINAE 跳过
-        assert!(reg.instantiate_fn("pick", &[MangleType::LongLong]).is_none());
+        assert!(reg
+            .instantiate_fn("pick", &[MangleType::LongLong])
+            .is_none());
     }
 
     #[test]
@@ -737,11 +975,16 @@ mod tests {
             param_names: vec!["T".to_string()],
             pattern_text: "T*".to_string(),
             decl: CppDecl::Class(ClassDecl {
-                name: "Foo".to_string(), is_struct: true, bases: vec![], members: vec![],
+                name: "Foo".to_string(),
+                is_struct: true,
+                bases: vec![],
+                members: vec![],
             }),
         });
         // int* 匹配 T*
-        assert!(reg.pick_partial("Foo", &[MangleType::Pointer(Box::new(MangleType::Int))]).is_some());
+        assert!(reg
+            .pick_partial("Foo", &[MangleType::Pointer(Box::new(MangleType::Int))])
+            .is_some());
         // int 不匹配
         assert!(reg.pick_partial("Foo", &[MangleType::Int]).is_none());
     }

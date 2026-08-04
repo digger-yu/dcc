@@ -21,7 +21,13 @@ pub fn eval_cpp_const(e: &CppExpr, locals: &HashMap<String, i128>) -> Option<i12
             let res = match op {
                 UnaryOpKind::Neg => v.wrapping_neg(),
                 UnaryOpKind::Plus => v,
-                UnaryOpKind::LNot => if v == 0 { 1 } else { 0 },
+                UnaryOpKind::LNot => {
+                    if v == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
                 UnaryOpKind::Not => !v,
                 _ => return None,
             };
@@ -34,21 +40,81 @@ pub fn eval_cpp_const(e: &CppExpr, locals: &HashMap<String, i128>) -> Option<i12
                 BinOpKind::Add => l + r,
                 BinOpKind::Sub => l - r,
                 BinOpKind::Mul => l * r,
-                BinOpKind::Div => if r != 0 { l / r } else { return None; },
-                BinOpKind::Mod => if r != 0 { l % r } else { return None; },
+                BinOpKind::Div => {
+                    if r != 0 {
+                        l / r
+                    } else {
+                        return None;
+                    }
+                }
+                BinOpKind::Mod => {
+                    if r != 0 {
+                        l % r
+                    } else {
+                        return None;
+                    }
+                }
                 BinOpKind::And => l & r,
                 BinOpKind::Or => l | r,
                 BinOpKind::Xor => l ^ r,
                 BinOpKind::Shl => l << r,
                 BinOpKind::Shr => l >> r,
-                BinOpKind::EqEq => if l == r { 1 } else { 0 },
-                BinOpKind::Ne => if l != r { 1 } else { 0 },
-                BinOpKind::Lt => if l < r { 1 } else { 0 },
-                BinOpKind::Le => if l <= r { 1 } else { 0 },
-                BinOpKind::Gt => if l > r { 1 } else { 0 },
-                BinOpKind::Ge => if l >= r { 1 } else { 0 },
-                BinOpKind::LAnd => if l != 0 && r != 0 { 1 } else { 0 },
-                BinOpKind::LOr => if l != 0 || r != 0 { 1 } else { 0 },
+                BinOpKind::EqEq => {
+                    if l == r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOpKind::Ne => {
+                    if l != r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOpKind::Lt => {
+                    if l < r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOpKind::Le => {
+                    if l <= r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOpKind::Gt => {
+                    if l > r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOpKind::Ge => {
+                    if l >= r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOpKind::LAnd => {
+                    if l != 0 && r != 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOpKind::LOr => {
+                    if l != 0 || r != 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
                 _ => return None,
             };
             Some(res)

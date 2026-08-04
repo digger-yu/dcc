@@ -23,8 +23,8 @@
 //   关闭对应 sanitizer 通道。
 
 use crate::ast::{
-    ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, Stmt,
-    Type, UnOp, VarDecl,
+    ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, Stmt, Type,
+    UnOp, VarDecl,
 };
 use crate::diagnostics::Span;
 
@@ -226,7 +226,13 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, ctx: &mut Instrum
 
     if let Some(body) = &mut func.body {
         // 插桩函数体
-        instrument_block(&mut body.items, func_flags, ctx, guard_var.as_deref(), func_guard_base);
+        instrument_block(
+            &mut body.items,
+            func_flags,
+            ctx,
+            guard_var.as_deref(),
+            func_guard_base,
+        );
         // 拼接 prologue
         if !prologue.is_empty() {
             let mut combined = prologue;
@@ -267,7 +273,13 @@ fn instrument_block(
                     };
                     prologue.extend(func_entry_calls(func_flags, &span));
                     if let Some(body) = &mut f.body {
-                        instrument_block(&mut body.items, func_flags, ctx, nested_guard_var.as_deref(), nested_guard_base);
+                        instrument_block(
+                            &mut body.items,
+                            func_flags,
+                            ctx,
+                            nested_guard_var.as_deref(),
+                            nested_guard_base,
+                        );
                         if !prologue.is_empty() {
                             let mut combined = prologue;
                             combined.append(&mut body.items);
@@ -293,7 +305,11 @@ fn instrument_block(
                         let original = std::mem::replace(
                             item,
                             BlockItem::Stmt(Stmt::Expr {
-                                e: Expr::Int { v: 0, span: item_span.clone(), ty: Type::Int },
+                                e: Expr::Int {
+                                    v: 0,
+                                    span: item_span.clone(),
+                                    ty: Type::Int,
+                                },
                                 span: item_span.clone(),
                             }),
                         );
@@ -331,7 +347,9 @@ fn instrument_stmt(
         Stmt::Expr { e, .. } => {
             instrument_expr(e, flags, ctx, guard_var, guard_base);
         }
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             instrument_expr(cond, flags, ctx, guard_var, guard_base);
             // 边覆盖:then / else / fall-through 各 1 - 在 then_ 之前注入 guard
             if let Some(gv) = guard_var {
@@ -371,7 +389,13 @@ fn instrument_stmt(
             }
             instrument_expr(cond, flags, ctx, guard_var, guard_base);
         }
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 instrument_stmt(i, flags, ctx, guard_var, guard_base);
             }
@@ -426,7 +450,10 @@ fn instrument_stmt(
             }
             instrument_stmt(stmt, flags, ctx, guard_var, guard_base);
         }
-        Stmt::Goto { .. } | Stmt::GotoIndirect { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {
+        Stmt::Goto { .. }
+        | Stmt::GotoIndirect { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {
             if let Some(gv) = guard_var {
                 let g = ctx.next_guard();
                 let span = stmt.span();
@@ -525,7 +552,12 @@ fn instrument_expr(
             instrument_expr(idx, flags, ctx, guard_var, guard_base);
             ExprKind::Index(ty.size().max(1))
         }
-        Expr::Member { expr: base, ty, is_arrow, .. } => {
+        Expr::Member {
+            expr: base,
+            ty,
+            is_arrow,
+            ..
+        } => {
             instrument_expr(base, flags, ctx, guard_var, guard_base);
             if *is_arrow {
                 ExprKind::ArrowMember(ty.size().max(1))
@@ -540,7 +572,9 @@ fn instrument_expr(
             }
             ExprKind::Trivial
         }
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             instrument_expr(cond, flags, ctx, guard_var, guard_base);
             instrument_expr(then_, flags, ctx, guard_var, guard_base);
             instrument_expr(else_, flags, ctx, guard_var, guard_base);
@@ -552,7 +586,8 @@ fn instrument_expr(
             if flags.needs_ubsan() && is_float_to_int_cast(&e.ty(), cast_ty) {
                 let inner_span = e.span();
                 let original_inner = e.as_ref().clone();
-                let check_expr = float_cast_check(Box::new(original_inner.clone()), cast_ty, &inner_span);
+                let check_expr =
+                    float_cast_check(Box::new(original_inner.clone()), cast_ty, &inner_span);
                 **e = Expr::Comma {
                     l: Box::new(check_expr),
                     r: Box::new(original_inner),
@@ -580,8 +615,10 @@ fn instrument_expr(
             instrument_expr(ap, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
         }
-        Expr::PreInc { e, .. } | Expr::PreDec { e, .. }
-        | Expr::PostInc { e, .. } | Expr::PostDec { e, .. } => {
+        Expr::PreInc { e, .. }
+        | Expr::PreDec { e, .. }
+        | Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. } => {
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
         }
@@ -671,7 +708,11 @@ fn instrument_expr(
             // 对赋值,需要的是 LHS 的地址 (不读取),所以单独走
             // `wrap_with_mem_check_assign` 路径: 取 &lhs 当作
             // 检查入参,rhs 再赋值。
-            let lhs_clone = if let Expr::Assign { l, .. } = expr { Some(l.clone()) } else { None };
+            let lhs_clone = if let Expr::Assign { l, .. } = expr {
+                Some(l.clone())
+            } else {
+                None
+            };
             if let Some(l) = lhs_clone {
                 let wrapped = wrap_with_mem_check_assign(&l, expr, check_kind, &span, flags);
                 *expr = wrapped;
@@ -687,7 +728,11 @@ fn instrument_expr(
                         *expr = Expr::Comma {
                             l: Box::new(Expr::Comma {
                                 l: Box::new(null_call),
-                                r: Box::new(Expr::Int { v: 0, span: span.clone(), ty: Type::Int }),
+                                r: Box::new(Expr::Int {
+                                    v: 0,
+                                    span: span.clone(),
+                                    ty: Type::Int,
+                                }),
                                 span: span.clone(),
                                 ty: Type::Int,
                             }),
@@ -823,7 +868,9 @@ fn classify_store_target(l: &Expr) -> Option<MemCheckKind> {
     match l {
         Expr::Deref { ty, .. } => Some(MemCheckKind::Store(ty.size().max(1))),
         Expr::Index { ty, .. } => Some(MemCheckKind::Store(ty.size().max(1))),
-        Expr::Member { ty, is_arrow: true, .. } => Some(MemCheckKind::Store(ty.size().max(1))),
+        Expr::Member {
+            ty, is_arrow: true, ..
+        } => Some(MemCheckKind::Store(ty.size().max(1))),
         _ => None,
     }
 }
@@ -851,12 +898,11 @@ fn try_wrap_ubsan(expr: &Expr, op: BinOp) -> Option<Expr> {
         }
         BinOp::Add | BinOp::Sub | BinOp::Mul => {
             if let Expr::Binop { l, r, .. } = expr {
-                if is_signed_int(&l.ty()) && is_signed_int(&r.ty())
-                    && !is_const_arith(expr) {
-                        let wrapped =
-                            wrap_with_ubsan_check_arg(expr, l, "signed_integer_overflow", &span);
-                        return Some(wrapped);
-                    }
+                if is_signed_int(&l.ty()) && is_signed_int(&r.ty()) && !is_const_arith(expr) {
+                    let wrapped =
+                        wrap_with_ubsan_check_arg(expr, l, "signed_integer_overflow", &span);
+                    return Some(wrapped);
+                }
             }
             None
         }
@@ -879,7 +925,7 @@ fn vla_bound_expr(v: &VarDecl) -> Option<Box<Expr>> {
 /// runtime 会判断 bound 是否为正。
 fn vla_bound_check(bound: Box<Expr>, span: &Span) -> Expr {
     let bound_ty = bound.ty();
-    
+
     Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident {
@@ -922,9 +968,17 @@ fn float_cast_check(value: Box<Expr>, target_ty: &Type, span: &Span) -> Expr {
     let val_ty = value.ty();
     // 目标整型最小/最大值 (LLVM sanitizer 接口)
     let (min_v, max_v) = int_range(target_ty);
-    let min_expr = Expr::Int { v: min_v, span: span.clone(), ty: target_ty.clone() };
-    let max_expr = Expr::Int { v: max_v, span: span.clone(), ty: target_ty.clone() };
-    
+    let min_expr = Expr::Int {
+        v: min_v,
+        span: span.clone(),
+        ty: target_ty.clone(),
+    };
+    let max_expr = Expr::Int {
+        v: max_v,
+        span: span.clone(),
+        ty: target_ty.clone(),
+    };
+
     Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident {
@@ -976,17 +1030,15 @@ fn is_float_to_int_cast(from: &Type, to: &Type) -> bool {
 /// 把 `expr` 包成 `Expr::Comma { l: call, r: expr }`,其中 `call` 是
 /// `__ubsan_handle_*` 系列,带两个参数:源位置结构体 (0 作为简化,
 /// 让运行时读取 `__ubsan_get_source()` / 栈回溯) 与 `check_arg`。
-fn wrap_with_ubsan_check_arg(
-    expr: &Expr,
-    check_arg: &Expr,
-    kind: &str,
-    span: &Span,
-) -> Expr {
+fn wrap_with_ubsan_check_arg(expr: &Expr, check_arg: &Expr, kind: &str, span: &Span) -> Expr {
     let sym = format!("__ubsan_handle_{}", kind);
     let inner_ty = expr.ty();
     let call = Expr::Call {
         callee: Box::new(Expr::Ident {
-            name: Ident { name: sym, span: span.clone() },
+            name: Ident {
+                name: sym,
+                span: span.clone(),
+            },
             span: span.clone(),
             ty: Type::Func(
                 Box::new(Type::Void),
@@ -1018,11 +1070,24 @@ fn wrap_with_ubsan_check(expr: &Expr, kind: &str, span: &Span) -> Expr {
     let arg_clone = expr.clone();
     let call = Expr::Call {
         callee: Box::new(Expr::Ident {
-            name: Ident { name: format!("__ubsan_handle_{}", kind), span: span.clone() },
+            name: Ident {
+                name: format!("__ubsan_handle_{}", kind),
+                span: span.clone(),
+            },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void)), inner_ty.clone()]),
+            ty: Type::Func(
+                Box::new(Type::Void),
+                vec![Type::Ptr(Box::new(Type::Void)), inner_ty.clone()],
+            ),
         }),
-        args: vec![Expr::Int { v: 0, span: span.clone(), ty: Type::Int }, arg_clone],
+        args: vec![
+            Expr::Int {
+                v: 0,
+                span: span.clone(),
+                ty: Type::Int,
+            },
+            arg_clone,
+        ],
         span: span.clone(),
         ty: Type::Void,
     };
@@ -1040,7 +1105,12 @@ fn wrap_with_ubsan_check(expr: &Expr, kind: &str, span: &Span) -> Expr {
 /// 而言是 `expr` 自身 (其 AddrOf 在 codegen 中得到正确地址);
 /// 对 Assign 而言是 LHS (本函数不处理 Assign,见
 /// `wrap_with_mem_check_assign`)。
-fn wrap_with_mem_check(expr: &Expr, kind: MemCheckKind, span: &Span, flags: SanitizerFlags) -> Expr {
+fn wrap_with_mem_check(
+    expr: &Expr,
+    kind: MemCheckKind,
+    span: &Span,
+    flags: SanitizerFlags,
+) -> Expr {
     let inner_ty = expr.ty();
     // AddrOf(&expr) → codegen 支持 Deref/Index/Member/Ident,
     // 返回 lvalue 地址,不读取。
@@ -1100,7 +1170,13 @@ fn wrap_with_mem_check_assign(
 /// - KCSAN only:                       `__kcsan_check_access(addr, size, is_write)`
 ///
 /// KASAN 优先 (它提供更细粒度的诊断, KCSAN 仅是数据竞争检测)。
-fn make_mem_check_call(addr: Expr, size: usize, is_write: bool, span: &Span, flags: SanitizerFlags) -> Expr {
+fn make_mem_check_call(
+    addr: Expr,
+    size: usize,
+    is_write: bool,
+    span: &Span,
+    flags: SanitizerFlags,
+) -> Expr {
     let kasan_active = flags.kasan || flags.hwasan;
     if !kasan_active && flags.kcsan {
         // KCSAN-only 路径: emit __kcsan_check_access(addr, size, is_write)
@@ -1115,17 +1191,21 @@ fn make_mem_check_call(addr: Expr, size: usize, is_write: bool, span: &Span, fla
                 span: span.clone(),
                 ty: Type::Func(
                     Box::new(Type::Void),
-                    vec![
-                        Type::Ptr(Box::new(Type::Void)),
-                        Type::ULong,
-                        Type::Int,
-                    ],
+                    vec![Type::Ptr(Box::new(Type::Void)), Type::ULong, Type::Int],
                 ),
             }),
             args: vec![
                 addr,
-                Expr::Int { v: size as i128, span: span.clone(), ty: Type::ULong },
-                Expr::Int { v: if is_write { 1 } else { 0 }, span: span.clone(), ty: Type::Int },
+                Expr::Int {
+                    v: size as i128,
+                    span: span.clone(),
+                    ty: Type::ULong,
+                },
+                Expr::Int {
+                    v: if is_write { 1 } else { 0 },
+                    span: span.clone(),
+                    ty: Type::Int,
+                },
             ],
             span: span.clone(),
             ty: Type::Void,
@@ -1146,7 +1226,11 @@ fn make_mem_check_call(addr: Expr, size: usize, is_write: bool, span: &Span, fla
     let args = if size > 16 && size != 0 {
         vec![
             addr,
-            Expr::Int { v: size as i128, span: span.clone(), ty: Type::ULong },
+            Expr::Int {
+                v: size as i128,
+                span: span.clone(),
+                ty: Type::ULong,
+            },
         ]
     } else {
         vec![addr]
@@ -1158,7 +1242,10 @@ fn make_mem_check_call(addr: Expr, size: usize, is_write: bool, span: &Span, fla
     };
     Expr::Call {
         callee: Box::new(Expr::Ident {
-            name: Ident { name: fn_name, span: span.clone() },
+            name: Ident {
+                name: fn_name,
+                span: span.clone(),
+            },
             span: span.clone(),
             ty: Type::Func(Box::new(Type::Void), param_tys),
         }),
@@ -1224,7 +1311,10 @@ fn wrap_with_compare_trace(expr: &Expr, span: &Span) -> Expr {
         };
         let call = Expr::Call {
             callee: Box::new(Expr::Ident {
-                name: Ident { name: fn_name, span: span.clone() },
+                name: Ident {
+                    name: fn_name,
+                    span: span.clone(),
+                },
                 span: span.clone(),
                 ty: Type::Func(Box::new(Type::Void), vec![l_ty.clone(), l_ty.clone()]),
             }),
@@ -1251,7 +1341,10 @@ fn switch_trace_wrapper(arg_expr: &Expr, cases: &[i128], arg_ty: &Type, span: &S
     let _ = (cases, arg_ty);
     let call = Expr::Call {
         callee: Box::new(Expr::Ident {
-            name: Ident { name: "__sanitizer_cov_trace_switch".to_string(), span: span.clone() },
+            name: Ident {
+                name: "__sanitizer_cov_trace_switch".to_string(),
+                span: span.clone(),
+            },
             span: span.clone(),
             ty: Type::Func(Box::new(Type::Void), vec![Type::Long]),
         }),
@@ -1270,12 +1363,18 @@ fn switch_trace_wrapper(arg_expr: &Expr, cases: &[i128], arg_ty: &Type, span: &S
 /// `__dcc_cov_guards_N` 每函数 guard 计数器数组声明。
 fn guard_array_decl(name: &str, span: &Span) -> BlockItem {
     BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
-        ty: Type::Array(Box::new(Type::UInt), ArraySize::Var(Box::new(Expr::Int {
-            v: 16,
+        ty: Type::Array(
+            Box::new(Type::UInt),
+            ArraySize::Var(Box::new(Expr::Int {
+                v: 16,
+                span: span.clone(),
+                ty: Type::Int,
+            })),
+        ),
+        name: Ident {
+            name: name.to_string(),
             span: span.clone(),
-            ty: Type::Int,
-        }))),
-        name: Ident { name: name.to_string(), span: span.clone() },
+        },
         init: None,
         span: span.clone(),
         is_extern: false,
@@ -1300,13 +1399,27 @@ fn guard_init(base: &u32, span: &Span) -> BlockItem {
     BlockItem::Stmt(Stmt::Expr {
         e: Expr::Call {
             callee: Box::new(Expr::Ident {
-                name: Ident { name: "__sanitizer_cov_trace_pc_guard_init".to_string(), span: span.clone() },
+                name: Ident {
+                    name: "__sanitizer_cov_trace_pc_guard_init".to_string(),
+                    span: span.clone(),
+                },
                 span: span.clone(),
-                ty: Type::Func(Box::new(Type::Void), vec![Type::UInt, Type::Ptr(Box::new(Type::UInt))]),
+                ty: Type::Func(
+                    Box::new(Type::Void),
+                    vec![Type::UInt, Type::Ptr(Box::new(Type::UInt))],
+                ),
             }),
             args: vec![
-                Expr::Int { v: *base as i128, span: span.clone(), ty: Type::UInt },
-                Expr::Int { v: 0, span: span.clone(), ty: Type::Ptr(Box::new(Type::UInt)) },
+                Expr::Int {
+                    v: *base as i128,
+                    span: span.clone(),
+                    ty: Type::UInt,
+                },
+                Expr::Int {
+                    v: 0,
+                    span: span.clone(),
+                    ty: Type::Ptr(Box::new(Type::UInt)),
+                },
             ],
             span: span.clone(),
             ty: Type::Void,
@@ -1319,24 +1432,37 @@ fn guard_init(base: &u32, span: &Span) -> BlockItem {
 fn guard_call_stmt(guard_var: &str, idx: u32, span: &Span) -> BlockItem {
     let call = Expr::Call {
         callee: Box::new(Expr::Ident {
-            name: Ident { name: "__sanitizer_cov_trace_pc_guard".to_string(), span: span.clone() },
+            name: Ident {
+                name: "__sanitizer_cov_trace_pc_guard".to_string(),
+                span: span.clone(),
+            },
             span: span.clone(),
             ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::UInt))]),
         }),
         args: vec![Expr::Index {
             arr: Box::new(Expr::Ident {
-                name: Ident { name: guard_var.to_string(), span: span.clone() },
+                name: Ident {
+                    name: guard_var.to_string(),
+                    span: span.clone(),
+                },
                 span: span.clone(),
                 ty: Type::Array(Box::new(Type::UInt), ArraySize::Const(16)),
             }),
-            idx: Box::new(Expr::Int { v: idx as i128, span: span.clone(), ty: Type::Int }),
+            idx: Box::new(Expr::Int {
+                v: idx as i128,
+                span: span.clone(),
+                ty: Type::Int,
+            }),
             span: span.clone(),
             ty: Type::UInt,
         }],
         span: span.clone(),
         ty: Type::Void,
     };
-    BlockItem::Stmt(Stmt::Expr { e: call, span: span.clone() })
+    BlockItem::Stmt(Stmt::Expr {
+        e: call,
+        span: span.clone(),
+    })
 }
 
 /// TU 级一次性 init (不含 per-function coverage)。
@@ -1370,7 +1496,10 @@ fn func_entry_calls(flags: SanitizerFlags, span: &Span) -> Vec<BlockItem> {
 }
 
 fn sanitizer_call(name: &str, span: &Span) -> BlockItem {
-    let id = Ident { name: name.to_string(), span: span.clone() };
+    let id = Ident {
+        name: name.to_string(),
+        span: span.clone(),
+    };
     BlockItem::Stmt(Stmt::Expr {
         e: Expr::Call {
             callee: Box::new(Expr::Ident {
@@ -1393,8 +1522,12 @@ fn effective_flags(no_sanitize: &[String], flags: SanitizerFlags) -> SanitizerFl
     let mut out = flags;
     for tag in no_sanitize {
         match tag.as_str() {
-            "address" | "kernel-address" | "hwaddress" | "kernel-hwaddress"
-            | "no_sanitize_address" | "no_address_safety_analysis" => {
+            "address"
+            | "kernel-address"
+            | "hwaddress"
+            | "kernel-hwaddress"
+            | "no_sanitize_address"
+            | "no_address_safety_analysis" => {
                 out.kasan = false;
                 out.hwasan = false;
             }
@@ -1433,7 +1566,10 @@ mod tests {
     fn empty_func(name: &str) -> FuncDecl {
         FuncDecl {
             ret_ty: Type::Int,
-            name: Ident { name: name.into(), span: Span::point("t.c", 1, 1) },
+            name: Ident {
+                name: name.into(),
+                span: Span::point("t.c", 1, 1),
+            },
             params: vec![],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {
@@ -1467,8 +1603,14 @@ mod tests {
             no_sanitize: vec![],
             target_clones: vec![],
             returns_nonnull: false,
-            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
             ifunc_resolver: None,
         }
     }
@@ -1487,7 +1629,9 @@ mod tests {
             BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) => {
                 collect_call_names_expr(e, out);
             }
-            BlockItem::Stmt(Stmt::If { cond, then_, else_, .. }) => {
+            BlockItem::Stmt(Stmt::If {
+                cond, then_, else_, ..
+            }) => {
                 collect_call_names_expr(cond, out);
                 collect_call_names_stmt(then_, out);
                 if let Some(e) = else_ {
@@ -1499,7 +1643,9 @@ mod tests {
                 collect_call_names_expr(cond, out);
                 collect_call_names_stmt(body, out);
             }
-            BlockItem::Stmt(Stmt::For { cond, step, body, .. }) => {
+            BlockItem::Stmt(Stmt::For {
+                cond, step, body, ..
+            }) => {
                 if let Some(c) = cond {
                     collect_call_names_expr(c, out);
                 }
@@ -1534,7 +1680,9 @@ mod tests {
                 }
             }
             Stmt::Return { val: Some(e), .. } => collect_call_names_expr(e, out),
-            Stmt::If { cond, then_, else_, .. } => {
+            Stmt::If {
+                cond, then_, else_, ..
+            } => {
                 collect_call_names_expr(cond, out);
                 collect_call_names_stmt(then_, out);
                 if let Some(e) = else_ {
@@ -1566,7 +1714,9 @@ mod tests {
             Expr::Unary { e, .. } | Expr::Deref { e, .. } | Expr::AddrOf { e, .. } => {
                 collect_call_names_expr(e, out);
             }
-            Expr::Cond { cond, then_, else_, .. } => {
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => {
                 collect_call_names_expr(cond, out);
                 collect_call_names_expr(then_, out);
                 collect_call_names_expr(else_, out);
@@ -1616,8 +1766,12 @@ mod tests {
             ..Default::default()
         };
         instrument_program(&mut prog, flags);
-        let Decl::Func(f0) = &prog.decls[0] else { panic!() };
-        let Decl::Func(f1) = &prog.decls[1] else { panic!() };
+        let Decl::Func(f0) = &prog.decls[0] else {
+            panic!()
+        };
+        let Decl::Func(f1) = &prog.decls[1] else {
+            panic!()
+        };
         let n0 = call_names_in_block(f0.body.as_ref().unwrap());
         let n1 = call_names_in_block(f1.body.as_ref().unwrap());
         assert!(n0.iter().any(|n| n == "__asan_init"));
@@ -1630,10 +1784,7 @@ mod tests {
     #[test]
     fn every_function_gets_kcsan_entry() {
         let mut prog = Program {
-            decls: vec![
-                Decl::Func(empty_func("a")),
-                Decl::Func(empty_func("b")),
-            ],
+            decls: vec![Decl::Func(empty_func("a")), Decl::Func(empty_func("b"))],
         };
         instrument_program(
             &mut prog,
@@ -1645,10 +1796,14 @@ mod tests {
         for decl in &prog.decls {
             let Decl::Func(f) = decl else { continue };
             let names = call_names_in_block(f.body.as_ref().unwrap());
-            assert!(names.iter().any(|n| n == "__kcsan_init")
-                || names.iter().any(|n| n == "__kcsan_func_entry"));
+            assert!(
+                names.iter().any(|n| n == "__kcsan_init")
+                    || names.iter().any(|n| n == "__kcsan_func_entry")
+            );
         }
-        let Decl::Func(f1) = &prog.decls[1] else { panic!() };
+        let Decl::Func(f1) = &prog.decls[1] else {
+            panic!()
+        };
         let names = call_names_in_block(f1.body.as_ref().unwrap());
         assert!(!names.iter().any(|n| n == "__kcsan_init"));
         assert!(names.iter().any(|n| n == "__kcsan_func_entry"));
@@ -1659,8 +1814,15 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(FuncDecl {
                 ret_ty: Type::Int,
-                name: Ident { name: "ext".into(), span: Span::point("t.c", 1, 1) },
-                params: vec![Param { ty: Type::Int, name: None, span: Span::point("t.c", 1, 1) }],
+                name: Ident {
+                    name: "ext".into(),
+                    span: Span::point("t.c", 1, 1),
+                },
+                params: vec![Param {
+                    ty: Type::Int,
+                    name: None,
+                    span: Span::point("t.c", 1, 1),
+                }],
                 body: None,
                 span: Span::point("t.c", 1, 1),
                 is_extern: true,
@@ -1671,7 +1833,7 @@ mod tests {
                 visibility: None,
                 is_unused: false,
                 is_cold: false,
-            is_hot: false,
+                is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
                 is_variadic: false,
@@ -1687,8 +1849,14 @@ mod tests {
                 no_sanitize: vec![],
                 target_clones: vec![],
                 returns_nonnull: false,
-                ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-                is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
                 ifunc_resolver: None,
             })],
         };
@@ -1700,13 +1868,18 @@ mod tests {
                 ..Default::default()
             },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         assert!(f.body.is_none());
     }
 
     #[test]
     fn metadata_includes_version_byte() {
-        let meta = sanitizer_metadata(SanitizerFlags { kasan: true, ..Default::default() });
+        let meta = sanitizer_metadata(SanitizerFlags {
+            kasan: true,
+            ..Default::default()
+        });
         assert_eq!(&meta[..8], b"DCC_SAN\0");
         assert_eq!(meta[8], 2);
         assert_eq!(meta[9], 1);
@@ -1717,7 +1890,10 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(FuncDecl {
                 ret_ty: Type::Int,
-                name: Ident { name: "skipped".into(), span: Span::point("t.c", 1, 1) },
+                name: Ident {
+                    name: "skipped".into(),
+                    span: Span::point("t.c", 1, 1),
+                },
                 params: vec![],
                 body: Some(Block {
                     items: vec![BlockItem::Stmt(Stmt::Return {
@@ -1735,7 +1911,7 @@ mod tests {
                 visibility: None,
                 is_unused: false,
                 is_cold: false,
-            is_hot: false,
+                is_hot: false,
                 is_noinline: false,
                 is_always_inline: false,
                 is_variadic: false,
@@ -1755,8 +1931,14 @@ mod tests {
                 ],
                 target_clones: vec![],
                 returns_nonnull: false,
-                ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-                is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
                 ifunc_resolver: None,
             })],
         };
@@ -1768,7 +1950,9 @@ mod tests {
             ..Default::default()
         };
         instrument_program(&mut prog, flags);
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         // 函数入口 coverage 仍保留 (KCOV 不受 no_sanitize 控制)
         assert!(names.iter().any(|n| n == "__sanitizer_cov_trace_pc"));
@@ -1779,20 +1963,30 @@ mod tests {
 
     #[test]
     fn ubsan_wraps_division_by_zero() {
-        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+        };
         // 替换 body 为 `return x / y;`
-        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
         f.body = Some(Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Binop {
                     op: BinOp::Div,
                     l: Box::new(Expr::Ident {
-                        name: Ident { name: "x".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "x".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
                     }),
                     r: Box::new(Expr::Ident {
-                        name: Ident { name: "y".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "y".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
                     }),
@@ -1810,26 +2004,38 @@ mod tests {
                 ..Default::default()
             },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(names.iter().any(|n| n == "__ubsan_handle_divrem_overflow"));
     }
 
     #[test]
     fn ubsan_wraps_shift() {
-        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
-        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
         f.body = Some(Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Binop {
                     op: BinOp::Shl,
                     l: Box::new(Expr::Ident {
-                        name: Ident { name: "x".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "x".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
                     }),
                     r: Box::new(Expr::Ident {
-                        name: Ident { name: "y".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "y".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
                     }),
@@ -1847,20 +2053,31 @@ mod tests {
                 ..Default::default()
             },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
-        assert!(names.iter().any(|n| n == "__ubsan_handle_shift_out_of_bounds"));
+        assert!(names
+            .iter()
+            .any(|n| n == "__ubsan_handle_shift_out_of_bounds"));
     }
 
     #[test]
     fn kasan_wraps_deref() {
-        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
-        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
         f.body = Some(Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Deref {
                     e: Box::new(Expr::Ident {
-                        name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Ptr(Box::new(Type::Int)),
                     }),
@@ -1878,21 +2095,30 @@ mod tests {
                 ..Default::default()
             },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(names.iter().any(|n| n == "__asan_load4"));
     }
 
     #[test]
     fn fuzzer_injects_compare_trace() {
-        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
-        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
         f.body = Some(Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Binop {
                     op: BinOp::EqEq,
                     l: Box::new(Expr::Ident {
-                        name: Ident { name: "x".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "x".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
                     }),
@@ -1915,15 +2141,25 @@ mod tests {
                 ..Default::default()
             },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(names.iter().any(|n| n == "__sanitizer_cov_trace_cmp4"));
     }
 
     #[test]
     fn any_returns_true_when_any_flag_set() {
-        assert!(SanitizerFlags { kasan: true, ..Default::default() }.any());
-        assert!(SanitizerFlags { kcov: true, ..Default::default() }.any());
+        assert!(SanitizerFlags {
+            kasan: true,
+            ..Default::default()
+        }
+        .any());
+        assert!(SanitizerFlags {
+            kcov: true,
+            ..Default::default()
+        }
+        .any());
         assert!(!SanitizerFlags::default().any());
     }
 
@@ -1931,18 +2167,28 @@ mod tests {
     fn ubsan_vla_bound_check_inserted() {
         // VLA 声明 int arr[n]; 应在声明前插入
         // __ubsan_handle_vla_bound_not_positive(n) 调用。
-        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
-        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
         let vla_decl = VarDecl {
             ty: Type::Array(
                 Box::new(Type::Int),
                 ArraySize::Var(Box::new(Expr::Ident {
-                    name: Ident { name: "n".into(), span: Span::point("t.c", 1, 1) },
+                    name: Ident {
+                        name: "n".into(),
+                        span: Span::point("t.c", 1, 1),
+                    },
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
                 })),
             ),
-            name: Ident { name: "arr".into(), span: Span::point("t.c", 1, 1) },
+            name: Ident {
+                name: "arr".into(),
+                span: Span::point("t.c", 1, 1),
+            },
             init: None,
             span: Span::point("t.c", 1, 1),
             is_extern: false,
@@ -1972,12 +2218,19 @@ mod tests {
         });
         instrument_program(
             &mut prog,
-            SanitizerFlags { ubsan: true, ..Default::default() },
+            SanitizerFlags {
+                ubsan: true,
+                ..Default::default()
+            },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(
-            names.iter().any(|n| n == "__ubsan_handle_vla_bound_not_positive"),
+            names
+                .iter()
+                .any(|n| n == "__ubsan_handle_vla_bound_not_positive"),
             "VLA bound check not inserted: calls = {:?}",
             names
         );
@@ -1986,13 +2239,20 @@ mod tests {
     #[test]
     fn ubsan_null_deref_check_inserted() {
         // *p 应同时插入 KASAN (若启用) 与 null 检查。
-        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
-        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
         f.body = Some(Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Deref {
                     e: Box::new(Expr::Ident {
-                        name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Ptr(Box::new(Type::Int)),
                     }),
@@ -2005,12 +2265,19 @@ mod tests {
         });
         instrument_program(
             &mut prog,
-            SanitizerFlags { ubsan: true, ..Default::default() },
+            SanitizerFlags {
+                ubsan: true,
+                ..Default::default()
+            },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(
-            names.iter().any(|n| n == "__ubsan_handle_null_pointer_dereference"),
+            names
+                .iter()
+                .any(|n| n == "__ubsan_handle_null_pointer_dereference"),
             "null check missing: calls = {:?}",
             names
         );
@@ -2019,14 +2286,21 @@ mod tests {
     #[test]
     fn ubsan_float_cast_check_inserted() {
         // (int)f 应插入 __ubsan_handle_float_cast_overflow 调用。
-        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
-        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
         f.body = Some(Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Cast {
                     ty: Type::Int,
                     e: Box::new(Expr::Ident {
-                        name: Ident { name: "d".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "d".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Double,
                     }),
@@ -2038,12 +2312,19 @@ mod tests {
         });
         instrument_program(
             &mut prog,
-            SanitizerFlags { ubsan: true, ..Default::default() },
+            SanitizerFlags {
+                ubsan: true,
+                ..Default::default()
+            },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(
-            names.iter().any(|n| n == "__ubsan_handle_float_cast_overflow"),
+            names
+                .iter()
+                .any(|n| n == "__ubsan_handle_float_cast_overflow"),
             "float cast check missing: calls = {:?}",
             names
         );
@@ -2053,13 +2334,20 @@ mod tests {
     fn kcsan_only_uses_kcsan_check_access() {
         // 当 KCSAN 是唯一的内存 sanitizer 时,Deref 应使用
         // __kcsan_check_access 而非 __asan_loadN。
-        let mut prog = Program { decls: vec![Decl::Func(empty_func("f"))] };
-        let Decl::Func(f) = &mut prog.decls[0] else { panic!() };
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
         f.body = Some(Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Deref {
                     e: Box::new(Expr::Ident {
-                        name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Ptr(Box::new(Type::Int)),
                     }),
@@ -2072,9 +2360,14 @@ mod tests {
         });
         instrument_program(
             &mut prog,
-            SanitizerFlags { kcsan: true, ..Default::default() },
+            SanitizerFlags {
+                kcsan: true,
+                ..Default::default()
+            },
         );
-        let Decl::Func(f) = &prog.decls[0] else { panic!() };
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(
             names.iter().any(|n| n == "__kcsan_check_access"),
@@ -2149,7 +2442,10 @@ mod tests {
     #[test]
     fn make_mem_check_call_emits_size_arg_for_aggregate_kasan() {
         let addr = Expr::Ident {
-            name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+            name: Ident {
+                name: "p".into(),
+                span: Span::point("t.c", 1, 1),
+            },
             span: Span::point("t.c", 1, 1),
             ty: Type::Ptr(Box::new(Type::Void)),
         };
@@ -2158,7 +2454,10 @@ mod tests {
             24,
             false,
             &Span::point("t.c", 1, 1),
-            SanitizerFlags { kasan: true, ..Default::default() },
+            SanitizerFlags {
+                kasan: true,
+                ..Default::default()
+            },
         );
         if let Expr::Call { callee, args, .. } = call {
             if let Expr::Ident { name, .. } = callee.as_ref() {
@@ -2176,7 +2475,10 @@ mod tests {
     #[test]
     fn make_mem_check_call_emits_single_arg_for_small_kasan() {
         let addr = Expr::Ident {
-            name: Ident { name: "p".into(), span: Span::point("t.c", 1, 1) },
+            name: Ident {
+                name: "p".into(),
+                span: Span::point("t.c", 1, 1),
+            },
             span: Span::point("t.c", 1, 1),
             ty: Type::Ptr(Box::new(Type::Void)),
         };
@@ -2186,7 +2488,10 @@ mod tests {
                 sz,
                 false,
                 &Span::point("t.c", 1, 1),
-                SanitizerFlags { kasan: true, ..Default::default() },
+                SanitizerFlags {
+                    kasan: true,
+                    ..Default::default()
+                },
             );
             if let Expr::Call { args, .. } = call {
                 assert_eq!(args.len(), 1, "size {} should emit single arg", sz);

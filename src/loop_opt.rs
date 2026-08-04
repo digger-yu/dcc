@@ -31,7 +31,13 @@ fn licm_block(block: &mut Block) {
     let mut kept = Vec::new();
     for item in block.items.drain(..) {
         match item {
-            BlockItem::Stmt(Stmt::For { init, cond, step, mut body, span }) => {
+            BlockItem::Stmt(Stmt::For {
+                init,
+                cond,
+                step,
+                mut body,
+                span,
+            }) => {
                 let loop_var = init.as_deref().and_then(init_stmt_var);
                 let mut hoisted_here = Vec::new();
                 licm_in_stmt(body.as_mut(), &mut hoisted_here, loop_var.as_deref());
@@ -44,7 +50,11 @@ fn licm_block(block: &mut Block) {
                     span,
                 }));
             }
-            BlockItem::Stmt(Stmt::While { cond, mut body, span }) => {
+            BlockItem::Stmt(Stmt::While {
+                cond,
+                mut body,
+                span,
+            }) => {
                 let mut hoisted_here = Vec::new();
                 licm_in_stmt(body.as_mut(), &mut hoisted_here, None);
                 hoisted.extend(hoisted_here);
@@ -103,11 +113,11 @@ fn split_invariants(body: &mut Block, loop_var: Option<&str>) -> Vec<BlockItem> 
 
 fn is_invariant_item(item: &BlockItem, loop_var: Option<&str>) -> bool {
     match item {
-        BlockItem::Decl(Decl::Var(v)) => v.init.as_ref().is_none_or(|e| !expr_mentions(e, loop_var)),
+        BlockItem::Decl(Decl::Var(v)) => {
+            v.init.as_ref().is_none_or(|e| !expr_mentions(e, loop_var))
+        }
         BlockItem::Stmt(Stmt::Expr { e, .. }) => match e {
-            Expr::Assign { l, r, .. } => {
-                !expr_mentions(l, loop_var) && !expr_mentions(r, loop_var)
-            }
+            Expr::Assign { l, r, .. } => !expr_mentions(l, loop_var) && !expr_mentions(r, loop_var),
             _ => !expr_mentions(e, loop_var),
         },
         _ => false,
@@ -121,9 +131,13 @@ fn expr_mentions(e: &Expr, name: Option<&str>) -> bool {
         Expr::Binop { l, r, .. } => expr_mentions(l, Some(name)) || expr_mentions(r, Some(name)),
         Expr::Unary { e: inner, .. } => expr_mentions(inner, Some(name)),
         Expr::Assign { l, r, .. } => expr_mentions(l, Some(name)) || expr_mentions(r, Some(name)),
-        Expr::Index { arr, idx, .. } => expr_mentions(arr, Some(name)) || expr_mentions(idx, Some(name)),
+        Expr::Index { arr, idx, .. } => {
+            expr_mentions(arr, Some(name)) || expr_mentions(idx, Some(name))
+        }
         Expr::Cast { e: inner, .. } => expr_mentions(inner, Some(name)),
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             expr_mentions(cond, Some(name))
                 || expr_mentions(then_, Some(name))
                 || expr_mentions(else_, Some(name))
@@ -138,15 +152,30 @@ fn unroll_block(block: &mut Block) {
     let mut out = Vec::new();
     for item in block.items.drain(..) {
         match item {
-            BlockItem::Stmt(Stmt::For { init, cond, step, mut body, span }) => {
-                if let Some(unrolled) =
-                    try_unroll_for_stmt(init.as_deref(), cond.as_ref(), step.as_ref(), body.as_ref())
-                {
+            BlockItem::Stmt(Stmt::For {
+                init,
+                cond,
+                step,
+                mut body,
+                span,
+            }) => {
+                if let Some(unrolled) = try_unroll_for_stmt(
+                    init.as_deref(),
+                    cond.as_ref(),
+                    step.as_ref(),
+                    body.as_ref(),
+                ) {
                     out.extend(unrolled);
                     continue;
                 }
                 unroll_in_stmt(body.as_mut());
-                out.push(BlockItem::Stmt(Stmt::For { init, cond, step, body, span }));
+                out.push(BlockItem::Stmt(Stmt::For {
+                    init,
+                    cond,
+                    step,
+                    body,
+                    span,
+                }));
             }
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
                 unroll_block(&mut b);
@@ -365,7 +394,13 @@ fn vectorize_block(block: &mut Block) {
     let mut out = Vec::new();
     for item in block.items.drain(..) {
         match item {
-            BlockItem::Stmt(Stmt::For { init, cond, step, mut body, span }) => {
+            BlockItem::Stmt(Stmt::For {
+                init,
+                cond,
+                step,
+                mut body,
+                span,
+            }) => {
                 if let Some(vec_stmt) = try_vectorize_for_stmt(
                     init.as_deref(),
                     cond.as_ref(),
@@ -375,7 +410,13 @@ fn vectorize_block(block: &mut Block) {
                     out.push(vec_stmt);
                 } else {
                     vectorize_in_stmt(body.as_mut());
-                    out.push(BlockItem::Stmt(Stmt::For { init, cond, step, body, span }));
+                    out.push(BlockItem::Stmt(Stmt::For {
+                        init,
+                        cond,
+                        step,
+                        body,
+                        span,
+                    }));
                 }
             }
             BlockItem::Stmt(Stmt::Block { mut b, span }) => {
@@ -482,9 +523,11 @@ fn parse_vector_elem_assign(
     };
     let dst = index_vector_ident(l, ivar)?;
     let (op, src_l, src_r) = match r {
-        Expr::Binop { op, l, r, .. } => {
-            (*op, index_vector_ident(l, ivar)?, index_vector_ident(r, ivar)?)
-        }
+        Expr::Binop { op, l, r, .. } => (
+            *op,
+            index_vector_ident(l, ivar)?,
+            index_vector_ident(r, ivar)?,
+        ),
         _ => return None,
     };
     if dst.1 != src_l.1 || dst.1 != src_r.1 {
@@ -508,9 +551,7 @@ fn index_vector_ident(e: &Expr, ivar: &str) -> Option<NamedVector> {
                         ..
                     },
                     Expr::Ident { name: idx_name, .. },
-                ) if idx_name.name == ivar => {
-                    Some((name.clone(), Type::Vector(elem.clone(), *n)))
-                }
+                ) if idx_name.name == ivar => Some((name.clone(), Type::Vector(elem.clone(), *n))),
                 _ => None,
             }
         }

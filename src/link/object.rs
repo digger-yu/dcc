@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::codegen::elf::{
-    SHN_UNDEF, SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_NOBITS,
-    ELFCLASS64, ELFMAG, EM_X86_64, EM_AARCH64, EM_RISCV,
+    ELFCLASS64, ELFMAG, EM_AARCH64, EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_NOBITS, SHT_NULL,
+    SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
 };
 
 /// 从 .o 文件节头表中读出的原始字段:
@@ -20,10 +20,10 @@ type RawShdr = (u32, u32, u64, u64, u64, u64, u64, u64, u32);
 #[derive(Debug, Clone)]
 pub struct InputSection {
     pub name: String,
-    pub ty: u32,           // SHT_PROGBITS / SHT_NOBITS / ...
+    pub ty: u32, // SHT_PROGBITS / SHT_NOBITS / ...
     pub flags: u32,
     pub align: u64,
-    pub data: Vec<u8>,     // NOBITS 时为空
+    pub data: Vec<u8>, // NOBITS 时为空
     pub size: u64,
     /// 该节在所有 .o 输入中的索引（链接后会重新编号）
     pub input_index: u32,
@@ -37,22 +37,22 @@ pub struct InputSymbol {
     pub name: String,
     pub value: u64,
     pub size: u64,
-    pub bind: u8,          // STB_LOCAL / STB_GLOBAL / STB_WEAK
-    pub ty: u8,            // STT_NOTYPE / STT_FUNC / STT_OBJECT / STT_SECTION / STT_TLS
+    pub bind: u8, // STB_LOCAL / STB_GLOBAL / STB_WEAK
+    pub ty: u8,   // STT_NOTYPE / STT_FUNC / STT_OBJECT / STT_SECTION / STT_TLS
     pub visibility: u8,
-    pub section: u16,      // 所在 .o 节索引（SHN_UNDEF=0 表示外部引用）
-    pub input_obj: usize,  // 来自第几个 .o
-    pub orig_index: u32,   // 在该 .o 的 symtab 中的原始索引
+    pub section: u16,     // 所在 .o 节索引（SHN_UNDEF=0 表示外部引用）
+    pub input_obj: usize, // 来自第几个 .o
+    pub orig_index: u32,  // 在该 .o 的 symtab 中的原始索引
 }
 
 /// 来自 .o 文件的重定位条目。
 #[derive(Debug, Clone)]
 pub struct InputRela {
-    pub offset: u64,        // 修补位置（在节内偏移）
-    pub sym: u32,           // 符号表中的索引（输入对象内部索引）
-    pub rel_type: u32,      // R_X86_64_PC32 / PLT32 / ...
+    pub offset: u64,   // 修补位置（在节内偏移）
+    pub sym: u32,      // 符号表中的索引（输入对象内部索引）
+    pub rel_type: u32, // R_X86_64_PC32 / PLT32 / ...
     pub addend: i64,
-    pub section: u32,       // 所在 .o 节索引
+    pub section: u32, // 所在 .o 节索引
     pub input_obj: usize,
 }
 
@@ -68,9 +68,13 @@ pub struct InputObject {
 
 impl InputObject {
     pub fn section_data(&self, idx: u32) -> Option<&[u8]> {
-        if idx == 0 { return None; }
+        if idx == 0 {
+            return None;
+        }
         let s = self.sections.get(idx as usize)?;
-        if s.ty == SHT_NOBITS { return None; }
+        if s.ty == SHT_NOBITS {
+            return None;
+        }
         Some(&s.data)
     }
 }
@@ -92,21 +96,31 @@ impl std::error::Error for ObjectError {}
 /// 解析一个 ET_REL 目标文件。
 pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError> {
     if data.len() < 64 {
-        return Err(ObjectError { msg: format!("{}: too short for ELF header", name) });
+        return Err(ObjectError {
+            msg: format!("{}: too short for ELF header", name),
+        });
     }
     if data[0..4] != ELFMAG {
-        return Err(ObjectError { msg: format!("{}: bad ELF magic", name) });
+        return Err(ObjectError {
+            msg: format!("{}: bad ELF magic", name),
+        });
     }
     if data[4] != ELFCLASS64 {
-        return Err(ObjectError { msg: format!("{}: only ELF64 supported", name) });
+        return Err(ObjectError {
+            msg: format!("{}: only ELF64 supported", name),
+        });
     }
     let machine = u16::from_le_bytes(data[18..20].try_into().unwrap());
     if machine != EM_X86_64 && machine != EM_AARCH64 && machine != EM_RISCV {
-        return Err(ObjectError { msg: format!("{}: unsupported e_machine={}", name, machine) });
+        return Err(ObjectError {
+            msg: format!("{}: unsupported e_machine={}", name, machine),
+        });
     }
     let e_type = u16::from_le_bytes(data[16..18].try_into().unwrap());
     if e_type != 1 {
-        return Err(ObjectError { msg: format!("{}: expected ET_REL (1), got {}", name, e_type) });
+        return Err(ObjectError {
+            msg: format!("{}: expected ET_REL (1), got {}", name, e_type),
+        });
     }
     let shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
     let shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
@@ -114,13 +128,19 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
     let shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
 
     if shentsize < 64 {
-        return Err(ObjectError { msg: format!("{}: shentsize too small", name) });
+        return Err(ObjectError {
+            msg: format!("{}: shentsize too small", name),
+        });
     }
     if shnum == 0 || shstrndx >= shnum {
-        return Err(ObjectError { msg: format!("{}: invalid shnum/shstrndx", name) });
+        return Err(ObjectError {
+            msg: format!("{}: invalid shnum/shstrndx", name),
+        });
     }
     if shoff + shnum * shentsize > data.len() {
-        return Err(ObjectError { msg: format!("{}: section header table out of bounds", name) });
+        return Err(ObjectError {
+            msg: format!("{}: section header table out of bounds", name),
+        });
     }
 
     // 读取节头表
@@ -137,7 +157,17 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         let sh_info = u32::from_le_bytes(data[off + 44..off + 48].try_into().unwrap());
         let sh_addralign = u64::from_le_bytes(data[off + 48..off + 56].try_into().unwrap());
         let sh_entsize = u64::from_le_bytes(data[off + 56..off + 64].try_into().unwrap());
-        raw_sections.push((sh_name, sh_type, sh_flags, sh_addr, sh_offset as u64, sh_size as u64, sh_addralign, sh_entsize, sh_info));
+        raw_sections.push((
+            sh_name,
+            sh_type,
+            sh_flags,
+            sh_addr,
+            sh_offset as u64,
+            sh_size as u64,
+            sh_addralign,
+            sh_entsize,
+            sh_info,
+        ));
     }
 
     // 读取 shstrtab
@@ -145,7 +175,9 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
     let shstrtab = if shstr_hdr.4 + shstr_hdr.5 <= data.len() as u64 {
         &data[shstr_hdr.4 as usize..(shstr_hdr.4 + shstr_hdr.5) as usize]
     } else {
-        return Err(ObjectError { msg: format!("{}: shstrtab out of bounds", name) });
+        return Err(ObjectError {
+            msg: format!("{}: shstrtab out of bounds", name),
+        });
     };
 
     // 收集节名与 symtab/strtab
@@ -190,7 +222,9 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
             let count = sym_size / entsize as usize;
             for i in 0..count {
                 let base = sym_off + i * entsize as usize;
-                if base + 24 > data.len() { break; }
+                if base + 24 > data.len() {
+                    break;
+                }
                 let st_name = u32::from_le_bytes(data[base..base + 4].try_into().unwrap());
                 let st_info = data[base + 4];
                 let st_other = data[base + 5];
@@ -199,7 +233,9 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
                 let st_size = u64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap());
                 let bind = st_info >> 4;
                 let ty = st_info & 0xf;
-                let sym_name = read_cstr(strtab, st_name as usize).unwrap_or("").to_string();
+                let sym_name = read_cstr(strtab, st_name as usize)
+                    .unwrap_or("")
+                    .to_string();
                 symbols.push(InputSymbol {
                     name: sym_name,
                     value: st_value,
@@ -218,9 +254,13 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
     // 读取所有 .rela.* 节的重定位
     let mut relocations = Vec::new();
     for (i, s) in raw_sections.iter().enumerate() {
-        if s.1 != SHT_RELA { continue; }
+        if s.1 != SHT_RELA {
+            continue;
+        }
         let sec_name = &sections[i].name;
-        if !sec_name.starts_with(".rela") { continue; }
+        if !sec_name.starts_with(".rela") {
+            continue;
+        }
         let entsize = if s.7 > 0 { s.7 } else { 24 };
         let off = s.4 as usize;
         let size = s.5 as usize;
@@ -229,7 +269,9 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         let target_sec = s.8;
         for j in 0..count {
             let base = off + j * entsize as usize;
-            if base + 24 > data.len() { break; }
+            if base + 24 > data.len() {
+                break;
+            }
             let r_offset = u64::from_le_bytes(data[base..base + 8].try_into().unwrap());
             let r_info = u64::from_le_bytes(data[base + 8..base + 16].try_into().unwrap());
             let r_addend = i64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap());
@@ -291,20 +333,20 @@ pub struct FlatSymbol {
     pub bind: u8,
     pub ty: u8,
     pub visibility: u8,
-    pub section: u32,        // 在 InputBundle.sections 中的索引
+    pub section: u32, // 在 InputBundle.sections 中的索引
     pub input_obj: usize,
     pub orig_index: u32,
-    pub defined: bool,       // 在某个节中定义（section != 0）
+    pub defined: bool, // 在某个节中定义（section != 0）
 }
 
 /// 跨多个 .o 的重定位条目。
 #[derive(Debug, Clone)]
 pub struct FlatRela {
     pub offset: u64,
-    pub sym: u32,            // 跨输入的符号索引
+    pub sym: u32, // 跨输入的符号索引
     pub rel_type: u32,
     pub addend: i64,
-    pub section: u32,        // 目标节（sections 索引）
+    pub section: u32, // 目标节（sections 索引）
     pub input_obj: usize,
 }
 
@@ -335,7 +377,9 @@ impl InputBundle {
             objects.push(obj);
         }
         if objects.is_empty() {
-            return Err(ObjectError { msg: "no input objects".into() });
+            return Err(ObjectError {
+                msg: "no input objects".into(),
+            });
         }
         let machine = objects[0].machine;
         for o in &objects[1..] {
@@ -405,11 +449,21 @@ impl InputBundle {
             }
         }
 
-        Ok(InputBundle { objects, symbols, relocations, sections, machine })
+        Ok(InputBundle {
+            objects,
+            symbols,
+            relocations,
+            sections,
+            machine,
+        })
     }
 }
 
-fn find_section_in_bundle(sections: &[FlatSection], input_obj: usize, orig_index: u32) -> Option<u32> {
+fn find_section_in_bundle(
+    sections: &[FlatSection],
+    input_obj: usize,
+    orig_index: u32,
+) -> Option<u32> {
     for (i, s) in sections.iter().enumerate() {
         if s.input_obj == input_obj && s.orig_index == orig_index {
             return Some(i as u32);
@@ -421,13 +475,25 @@ fn find_section_in_bundle(sections: &[FlatSection], input_obj: usize, orig_index
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::elf::{self, ElfSym, ElfRela, SHT_RELA, SHT_SYMTAB, SHT_STRTAB, STB_GLOBAL, STT_FUNC, STT_NOTYPE, STV_DEFAULT};
+    use crate::codegen::elf::{
+        self, ElfRela, ElfSym, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, STB_GLOBAL, STT_FUNC, STT_NOTYPE,
+        STV_DEFAULT,
+    };
 
     #[test]
     fn parse_minimal_rel_object() {
         let obj = elf::build_elf_rel_x86_64(
             &[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3], // mov eax, 42; ret
-            &[], &[], 0, &[], 0, 16, 16, 16, 16, 16,
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            16,
+            16,
+            16,
+            16,
+            16,
             &[ElfSym {
                 name: "answer".to_string(),
                 section: 1,
@@ -445,7 +511,11 @@ mod tests {
         let parsed = parse_object(&obj, "min.o").expect("parse");
         assert_eq!(parsed.machine, 62);
         assert_eq!(parsed.sections.len(), 12); // 1 null + 6 standard + 3 rela + symtab + strtab + shstrtab
-        let answer = parsed.symbols.iter().find(|s| s.name == "answer").expect("answer");
+        let answer = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "answer")
+            .expect("answer");
         assert_eq!(answer.value, 0);
         assert_eq!(answer.size, 6);
         assert_eq!(answer.bind, STB_GLOBAL);
@@ -455,8 +525,22 @@ mod tests {
         let _ = SHT_STRTAB;
         // 测试无符号的边界
         let empty = elf::build_elf_rel_x86_64(
-            &[], &[], &[], 0, &[], 0, 1, 1, 1, 1, 1,
-            &[], &[], &[], &[], &[],
+            &[],
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
         );
         let p2 = parse_object(&empty, "empty.o").expect("parse empty");
         assert!(p2.symbols.is_empty());
@@ -471,7 +555,11 @@ mod tests {
             0,
             &[],
             0,
-            16, 16, 16, 16, 16,
+            16,
+            16,
+            16,
+            16,
+            16,
             &[ElfSym {
                 name: "callee".to_string(),
                 section: 0,
@@ -481,8 +569,15 @@ mod tests {
                 ty: STT_FUNC,
                 visibility: STV_DEFAULT,
             }],
-            &[ElfRela { offset: 1, sym_index: 1, rel_type: 4, addend: -4 }],
-            &[], &[], &[],
+            &[ElfRela {
+                offset: 1,
+                sym_index: 1,
+                rel_type: 4,
+                addend: -4,
+            }],
+            &[],
+            &[],
+            &[],
         );
         let parsed = parse_object(&obj, "rela.o").expect("parse");
         assert!(!parsed.relocations.is_empty());

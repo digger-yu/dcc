@@ -47,7 +47,10 @@ impl CacheKey {
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        Ok(Self { mtime_nanos, size: meta.len() })
+        Ok(Self {
+            mtime_nanos,
+            size: meta.len(),
+        })
     }
 }
 
@@ -122,8 +125,7 @@ impl DsoCache {
 }
 
 /// 便捷入口: get_or_load 包装; loader 失败时返回 io::Error.
-pub fn get_or_load<F>(cache: &mut DsoCache, path: &Path, loader: F)
-    -> std::io::Result<Arc<DsoInfo>>
+pub fn get_or_load<F>(cache: &mut DsoCache, path: &Path, loader: F) -> std::io::Result<Arc<DsoInfo>>
 where
     F: FnOnce() -> std::io::Result<DsoInfo>,
 {
@@ -194,12 +196,14 @@ mod tests {
         let info = get_or_load(&mut cache, &path, || {
             calls += 1;
             Ok(fake_info(path.clone(), 1))
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(calls, 1);
         let info2 = get_or_load(&mut cache, &path, || {
             calls += 1;
             Ok(fake_info(path.clone(), 2))
-        }).unwrap();
+        })
+        .unwrap();
         // 第二次走缓存, loader 不应被调用
         assert_eq!(calls, 1);
         // 两次返回相同 Arc 内容

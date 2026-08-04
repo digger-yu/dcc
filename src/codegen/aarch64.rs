@@ -2,12 +2,13 @@
 
 use crate::ast::{BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
 use crate::codegen::elf::{
-    self, ElfRela, ElfSection, ElfSym,     R_AARCH64_ADR_PREL_LO21, R_AARCH64_CALL26, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_OBJECT,
+    self, ElfRela, ElfSection, ElfSym, R_AARCH64_ADR_PREL_LO21, R_AARCH64_CALL26, STB_GLOBAL,
+    STB_LOCAL, STT_FUNC, STT_OBJECT,
 };
-use std::sync::Arc;
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 enum BranchKind {
@@ -167,7 +168,8 @@ impl Aarch64Codegen {
                 ty: elf::STT_SECTION,
                 visibility: elf::STV_DEFAULT,
             });
-            self.sym_index.insert(".rodata".to_string(), self.symbols.len() as u32);
+            self.sym_index
+                .insert(".rodata".to_string(), self.symbols.len() as u32);
         }
     }
 
@@ -191,7 +193,8 @@ impl Aarch64Codegen {
                 ty: STT_OBJECT,
                 visibility: elf::STV_DEFAULT,
             });
-            self.sym_index.insert(g.name.clone(), self.symbols.len() as u32);
+            self.sym_index
+                .insert(g.name.clone(), self.symbols.len() as u32);
         }
     }
 
@@ -205,7 +208,8 @@ impl Aarch64Codegen {
             }
             Some(ExprLiteral::Float(v)) => {
                 let bits = (v as f32).to_bits();
-                self.rodata[start..start + 4.min(size)].copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
+                self.rodata[start..start + 4.min(size)]
+                    .copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
             }
             _ => {}
         }
@@ -218,13 +222,17 @@ impl Aarch64Codegen {
         self.mov_x8_imm(93);
         self.svc_zero();
         for func in &module.functions {
-            if find_func(prog, &func.name).and_then(|f| f.body.as_ref()).is_none() {
+            if find_func(prog, &func.name)
+                .and_then(|f| f.body.as_ref())
+                .is_none()
+            {
                 continue;
             }
             self.label(&func.name);
             let start = self.pos();
             self.gen_function(func, find_func(prog, &func.name));
-            self.func_sizes.insert(func.name.clone(), self.pos() - start);
+            self.func_sizes
+                .insert(func.name.clone(), self.pos() - start);
             if func.name == "main" {
                 self.patch_bl(bl_pos, start);
             }
@@ -234,7 +242,10 @@ impl Aarch64Codegen {
     fn compile_rel(&mut self, module: &Module, prog: &Program) {
         let mut text_off = 0u64;
         for func in &module.functions {
-            if find_func(prog, &func.name).and_then(|f| f.body.as_ref()).is_none() {
+            if find_func(prog, &func.name)
+                .and_then(|f| f.body.as_ref())
+                .is_none()
+            {
                 continue;
             }
             self.label(&func.name);
@@ -251,7 +262,8 @@ impl Aarch64Codegen {
                 ty: STT_FUNC,
                 visibility: elf::STV_DEFAULT,
             });
-            self.sym_index.insert(func.name.clone(), self.symbols.len() as u32);
+            self.sym_index
+                .insert(func.name.clone(), self.symbols.len() as u32);
             text_off += size;
         }
     }
@@ -475,11 +487,14 @@ impl Aarch64Codegen {
                     if ir.nested.len() > 1 {
                         self.gen_stmt(el, &ir.nested[1]);
                     } else {
-                        self.gen_stmt(el, &TypedStmt {
-                            expressions: Vec::new(),
-                            nested: Vec::new(),
-                            span: ir.span.clone(),
-                        });
+                        self.gen_stmt(
+                            el,
+                            &TypedStmt {
+                                expressions: Vec::new(),
+                                nested: Vec::new(),
+                                span: ir.span.clone(),
+                            },
+                        );
                     }
                 }
                 self.label(&lbl_end);
@@ -496,7 +511,13 @@ impl Aarch64Codegen {
                 self.b(&lbl_loop);
                 self.label(&lbl_exit);
             }
-            Stmt::For { init, cond, step, body, .. } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
                 let body_idx = if init.is_some() { 1 } else { 0 };
                 if let Some(s) = init {
                     self.gen_stmt(s, &ir.nested[0]);
@@ -654,8 +675,7 @@ impl Aarch64Codegen {
         //       一个 <sret> 局部, callee 写到 [x0]
         let mut sret_reg_idx = 0usize;
         let mut sret_off: Option<i32> = None;
-        let needs_sret = is_aggregate(&expr.ty)
-            && aggregate_size(&expr.ty).is_some_and(|s| s > 16);
+        let needs_sret = is_aggregate(&expr.ty) && aggregate_size(&expr.ty).is_some_and(|s| s > 16);
         if needs_sret {
             let size = aggregate_size(&expr.ty).unwrap();
             let aligned = (size + 15) & !15;
@@ -733,12 +753,11 @@ impl Aarch64Codegen {
         // x9 是 caller-saved 临时寄存器, 跨调用无需保存.
         self.mov_x_reg_sp_off(9, self.va_save_base_off);
         // str x9, [sp, #ap_off] (8 字节存储, 需 8 字节对齐 ap_off)
-        debug_assert!(ap_off >= 0 && ap_off % 8 == 0,
-                      "gen_va_start: ap_off must be 8-byte aligned, got {ap_off}");
-        let insn = 0xf900_0000u32
-            | (((ap_off / 8) as u32) & 0xfff) << 10
-            | (31u32 << 5)
-            | 9u32;
+        debug_assert!(
+            ap_off >= 0 && ap_off % 8 == 0,
+            "gen_va_start: ap_off must be 8-byte aligned, got {ap_off}"
+        );
+        let insn = 0xf900_0000u32 | (((ap_off / 8) as u32) & 0xfff) << 10 | (31u32 << 5) | 9u32;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -817,7 +836,9 @@ impl Aarch64Codegen {
             // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
             // 例: 浮点 Call 在 IR 中 children[0] 是 callee, 不再与 va_arg 混清.
             ExprKind::Call => {
-                eprintln!("warning: zero-arg float call not yet supported on aarch64, emitting 0.0");
+                eprintln!(
+                    "warning: zero-arg float call not yet supported on aarch64, emitting 0.0"
+                );
                 self.load_float_s0(0.0);
                 return true;
             }
@@ -826,11 +847,10 @@ impl Aarch64Codegen {
                 // 整数/复合字面量进 gen_float_expr 是为了 int→float 转换, 但
                 // gen_expr 不会调 gen_float_expr (ty 不是 float), 所以这里
                 // expr.ty 必然是 float, 直接返回 false 让上层走 fallback.
-                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty)
-                    && self.gen_expr(expr) {
-                        self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
-                        return true;
-                    }
+                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty) && self.gen_expr(expr) {
+                    self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
+                    return true;
+                }
             }
         }
         self.load_float_s0(0.0);
@@ -957,16 +977,28 @@ impl Aarch64Codegen {
 
     fn truncate_w0_to(&mut self, ty: &ValueType) {
         match ty {
-            ValueType::Integer { bits: 8, signed: true } => {
+            ValueType::Integer {
+                bits: 8,
+                signed: true,
+            } => {
                 self.emit(&[0x00, 0x00, 0x18, 0x13]);
             }
-            ValueType::Integer { bits: 8, signed: false } => {
+            ValueType::Integer {
+                bits: 8,
+                signed: false,
+            } => {
                 self.emit(&[0x00, 0x00, 0x14, 0x13]);
             }
-            ValueType::Integer { bits: 16, signed: true } => {
+            ValueType::Integer {
+                bits: 16,
+                signed: true,
+            } => {
                 self.emit(&[0x00, 0x00, 0x18, 0x12]);
             }
-            ValueType::Integer { bits: 16, signed: false } => {
+            ValueType::Integer {
+                bits: 16,
+                signed: false,
+            } => {
                 self.emit(&[0x00, 0x00, 0x14, 0x12]);
             }
             ValueType::Integer { bits: 32, .. } => {}
@@ -1002,8 +1034,8 @@ impl Aarch64Codegen {
             // 限制: 不区分有/无符号 (始终有符号);调用方保证 IR 已 folding 常量
             BinOp::Div => self.emit(&[0x20, 0x0c, 0xc0, 0x9a]), // sdiv w0, w0, w1
             BinOp::Mod => {
-                self.emit(&[0x20, 0x0c, 0xc0, 0x9a]);           // sdiv w0, w0, w1
-                self.emit(&[0xa0, 0x83, 0xb0, 0x9b]);           // msub w0, w1, w0, w14
+                self.emit(&[0x20, 0x0c, 0xc0, 0x9a]); // sdiv w0, w0, w1
+                self.emit(&[0xa0, 0x83, 0xb0, 0x9b]); // msub w0, w1, w0, w14
             }
             BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.cmp_w0_w1();
@@ -1149,8 +1181,12 @@ impl Aarch64Codegen {
                 continue;
             }
             let hw = shift / 16;
-            let insn: u32 = (1 << 31) | (0b10 << 29) | (0b100101 << 23) | (hw << 21)
-                | (part << 5) | (reg as u32 & 0x1f);
+            let insn: u32 = (1 << 31)
+                | (0b10 << 29)
+                | (0b100101 << 23)
+                | (hw << 21)
+                | (part << 5)
+                | (reg as u32 & 0x1f);
             self.emit(&insn.to_le_bytes());
         }
     }
@@ -1219,16 +1255,20 @@ impl Aarch64Codegen {
     // 编码 bits[31:22] = 11_111_0_01_0_L (opc=11, 111, V=0, 01, 0, L)
     // STR X (L=0) => 0xF900_0000, LDR X (L=1) => 0xF940_0000
     fn str_xt_sp(&mut self, reg: u8, off: i32) {
-        debug_assert!(off >= 0 && off % 8 == 0 && off <= 32760,
-                      "str_xt_sp: off must be non-neg 8-byte aligned, got {off}");
+        debug_assert!(
+            off >= 0 && off % 8 == 0 && off <= 32760,
+            "str_xt_sp: off must be non-neg 8-byte aligned, got {off}"
+        );
         let imm12 = ((off / 8) as u32) & 0xfff;
         let insn = 0xf900_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
     fn ldr_xt_sp(&mut self, reg: u8, off: i32) {
-        debug_assert!(off >= 0 && off % 8 == 0 && off <= 32760,
-                      "ldr_xt_sp: off must be non-neg 8-byte aligned, got {off}");
+        debug_assert!(
+            off >= 0 && off % 8 == 0 && off <= 32760,
+            "ldr_xt_sp: off must be non-neg 8-byte aligned, got {off}"
+        );
         let imm12 = ((off / 8) as u32) & 0xfff;
         let insn = 0xf940_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
@@ -1579,7 +1619,7 @@ impl Aarch64Codegen {
         let insn = 0x7a400000u32
             | ((nzcv as u32 & 0xf) << 12)
             | (1u32 << 12)  // cond = ne
-            | (1u32 << 16);  // Rn = w0
+            | (1u32 << 16); // Rn = w0
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1614,7 +1654,7 @@ impl Aarch64Codegen {
     fn emit_csel_w0_w0_w1(&mut self, cond: u8) {
         let insn = 0x1a800000u32
             | (1u32 << 16)   // Rm = w1
-            | ((cond as u32 & 0xf) << 12);          // Rd = w0
+            | ((cond as u32 & 0xf) << 12); // Rd = w0
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1641,10 +1681,7 @@ impl Aarch64Codegen {
         let imm9_u = (imm9 as u32) & 0x1ff;
         // sf=1, 111000, 00, 0 (post), imm9, 01, Rn, Rt
         // base = 0xF8000400
-        let insn = 0xf8000400u32
-            | (imm9_u << 12)
-            | ((rn as u32 & 0x1f) << 5)
-            | (rt as u32 & 0x1f);
+        let insn = 0xf8000400u32 | (imm9_u << 12) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1652,10 +1689,7 @@ impl Aarch64Codegen {
     fn emit_ldr_post_index(&mut self, rt: u8, rn: u8, imm9: i32) {
         let imm9_u = (imm9 as u32) & 0x1ff;
         // sf=1, 111000, 01, 0 (post), imm9, 01, Rn, Rt
-        let insn = 0xf8400400u32
-            | (imm9_u << 12)
-            | ((rn as u32 & 0x1f) << 5)
-            | (rt as u32 & 0x1f);
+        let insn = 0xf8400400u32 | (imm9_u << 12) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1664,10 +1698,7 @@ impl Aarch64Codegen {
         let imm9_u = (imm9 as u32) & 0x1ff;
         // sf=1, 111000, 00, 1 (pre), imm9, 01, Rn, Rt
         // base = 0xF8800000 (bit23=1 for pre-index)
-        let insn = 0xf8800000u32
-            | (imm9_u << 12)
-            | ((rn as u32 & 0x1f) << 5)
-            | (rt as u32 & 0x1f);
+        let insn = 0xf8800000u32 | (imm9_u << 12) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1675,10 +1706,7 @@ impl Aarch64Codegen {
     fn emit_ldr_pre_index(&mut self, rt: u8, rn: u8, imm9: i32) {
         let imm9_u = (imm9 as u32) & 0x1ff;
         // sf=1, 111000, 01, 1 (pre), imm9, 01, Rn, Rt
-        let insn = 0xf8c00000u32
-            | (imm9_u << 12)
-            | ((rn as u32 & 0x1f) << 5)
-            | (rt as u32 & 0x1f);
+        let insn = 0xf8c00000u32 | (imm9_u << 12) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1708,20 +1736,14 @@ impl Aarch64Codegen {
     /// 32 位后置索引: str wt, [xn], #imm
     fn emit_str_w_post_index(&mut self, rt: u8, rn: u8, imm9: i32) {
         let imm9_u = (imm9 as u32) & 0x1ff;
-        let insn = 0xb8000400u32
-            | (imm9_u << 12)
-            | ((rn as u32 & 0x1f) << 5)
-            | (rt as u32 & 0x1f);
+        let insn = 0xb8000400u32 | (imm9_u << 12) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
     /// 32 位后置索引: ldr wt, [xn], #imm
     fn emit_ldr_w_post_index(&mut self, rt: u8, rn: u8, imm9: i32) {
         let imm9_u = (imm9 as u32) & 0x1ff;
-        let insn = 0xb8400400u32
-            | (imm9_u << 12)
-            | ((rn as u32 & 0x1f) << 5)
-            | (rt as u32 & 0x1f);
+        let insn = 0xb8400400u32 | (imm9_u << 12) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1766,8 +1788,8 @@ impl Aarch64Codegen {
 
     /// 大结构体返回: 从 [sp+off] 拷贝 size 字节到 [x0]
     fn memcpy_sp_to_x0(&mut self, off: i32, size: usize) {
-        self.mov_x_reg_sp_off(1, off);   // x1 = src
-        // x0 已是 sret 指针
+        self.mov_x_reg_sp_off(1, off); // x1 = src
+                                       // x0 已是 sret 指针
         let mut remaining = size;
         let mut src_off = 0i32;
         while remaining > 0 {
@@ -1904,7 +1926,7 @@ impl Aarch64Codegen {
         // 先比较: if start >= end, 跳出
         self.emit_cmp_regs(start_reg, end_reg);
         self.emit_bcond(&dc_exit, 0xa); // b.ge exit
-        // 操作: dc cvac, start
+                                        // 操作: dc cvac, start
         self.emit_dc_cvac(start_reg);
         // 递增: start += 8
         self.emit_add_imm_x(start_reg, start_reg, 8);
@@ -1929,9 +1951,7 @@ impl Aarch64Codegen {
 
     /// cmp xn, xm — 64 位寄存器比较 (subs wzr, xn, xm)
     fn emit_cmp_regs(&mut self, rn: u8, rm: u8) {
-        let insn = 0xeb00001fu32
-            | ((rm as u32 & 0x1f) << 16)
-            | ((rn as u32 & 0x1f) << 5);
+        let insn = 0xeb00001fu32 | ((rm as u32 & 0x1f) << 16) | ((rn as u32 & 0x1f) << 5);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1962,10 +1982,8 @@ impl Aarch64Codegen {
     /// add xd, xn, #imm — 64 位立即加法
     fn emit_add_imm_x(&mut self, dst: u8, src: u8, imm: u32) {
         if imm <= 0xfff {
-            let insn = 0x91000000u32
-                | (imm << 10)
-                | ((src as u32 & 0x1f) << 5)
-                | (dst as u32 & 0x1f);
+            let insn =
+                0x91000000u32 | (imm << 10) | ((src as u32 & 0x1f) << 5) | (dst as u32 & 0x1f);
             self.emit(&insn.to_le_bytes());
         } else {
             // 大立即数: movz x9, #imm; add xd, xn, x9
@@ -2131,7 +2149,7 @@ impl Aarch64Codegen {
     fn memcpy_sp_to_reg(&mut self, off: i32, size: usize, dst_reg: u8) {
         // 先把 dst_reg 保存到 x1 (src = sp+off)
         self.mov_x_reg_sp_off(2, off); // x2 = src (sp+off)
-        // x0 = dst_reg (sret 指针已在 dst_reg)
+                                       // x0 = dst_reg (sret 指针已在 dst_reg)
         if dst_reg != 0 {
             // mov x0, dst_reg
             let insn = 0xaa0003e0u32 | ((dst_reg as u32 & 0x1f) << 16);
@@ -2181,7 +2199,12 @@ fn classify_hfa(
     ty: &ValueType,
     fields: &HashMap<String, (Arc<Vec<Field>>, bool)>,
 ) -> Option<HfaInfo> {
-    let ValueType::Aggregate { name, size, is_union: false } = ty else {
+    let ValueType::Aggregate {
+        name,
+        size,
+        is_union: false,
+    } = ty
+    else {
         return None;
     };
     if *size == 0 || *size > 128 {
@@ -2272,10 +2295,8 @@ mod tests {
 
     #[test]
     fn aarch64_ir_return_add() {
-        let (program, diags) = crate::parser::parse(
-            b"int main(void) { return 10 + 32; }\n",
-            "a64.c",
-        );
+        let (program, diags) =
+            crate::parser::parse(b"int main(void) { return 10 + 32; }\n", "a64.c");
         assert!(diags.is_empty(), "{diags:?}");
         let module = lower(program).expect("lower");
         validate(&module).expect("validate");
@@ -2305,10 +2326,11 @@ mod tests {
         cg.compile(&module);
         let obj = cg.build_output();
         // 验证 .text 段含 sdiv 指令 (0x9AC00C20 LE 编码: 20 0c c0 9a)
-        let text = obj
-            .windows(4)
-            .any(|w| w == [0x20, 0x0c, 0xc0, 0x9a]);
-        assert!(text, "expected sdiv w0, w0, w1 (0x9ac00c20) in aarch64 text");
+        let text = obj.windows(4).any(|w| w == [0x20, 0x0c, 0xc0, 0x9a]);
+        assert!(
+            text,
+            "expected sdiv w0, w0, w1 (0x9ac00c20) in aarch64 text"
+        );
     }
 
     // M7 修复: 移位真实 lslv/lsrv 替代 0
@@ -2361,7 +2383,7 @@ mod tests {
     fn aarch64_ccmp_csel_csinc_emit() {
         let mut cg = Aarch64Codegen::new(
             crate::target::Target::resolve(
-                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap()
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
             ),
             true,
         );
@@ -2373,14 +2395,14 @@ mod tests {
         cg.emit_csinc_w0_w0_w1_eq();
         let code = &cg.code;
         // ccmp: byte3=0x7a, byte1 cond=ne(1) in bits[15:12]
-        let has_ccmp = code.windows(4).any(|w| {
-            w[3] == 0x7a && (w[1] & 0xf0) == 0x10
-        });
+        let has_ccmp = code
+            .windows(4)
+            .any(|w| w[3] == 0x7a && (w[1] & 0xf0) == 0x10);
         assert!(has_ccmp, "expected ccmp w0, w1, #0, ne");
         // csel: byte3=0x1a, cond=eq(0)
-        let has_csel = code.windows(4).any(|w| {
-            w[3] == 0x1a && (w[1] & 0xf0) == 0x00
-        });
+        let has_csel = code
+            .windows(4)
+            .any(|w| w[3] == 0x1a && (w[1] & 0xf0) == 0x00);
         assert!(has_csel, "expected csel w0, w0, w1, eq");
         // csinc: 0x1a8401e0 LE = e0 01 84 1a
         let has_csinc = code.windows(4).any(|w| w == [0xe0, 0x01, 0x84, 0x1a]);
@@ -2392,7 +2414,7 @@ mod tests {
     fn aarch64_fcmp_double_emit() {
         let mut cg = Aarch64Codegen::new(
             crate::target::Target::resolve(
-                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap()
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
             ),
             true,
         );
@@ -2412,7 +2434,7 @@ mod tests {
     fn aarch64_cache_maintain_emit() {
         let mut cg = Aarch64Codegen::new(
             crate::target::Target::resolve(
-                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap()
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
             ),
             true,
         );
@@ -2440,7 +2462,7 @@ mod tests {
     fn aarch64_post_index_addring_emit() {
         let mut cg = Aarch64Codegen::new(
             crate::target::Target::resolve(
-                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap()
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
             ),
             true,
         );
@@ -2453,14 +2475,16 @@ mod tests {
         // ldr x0, [x1, #8]!
         cg.emit_ldr_pre_index(0, 1, 8);
         // 验证: post-index str byte3=0xf8, byte2 bit7=0 (bit23=0, post-index)
-        let has_post_str = cg.code.windows(4).any(|w| {
-            w[3] == 0xf8 && (w[2] & 0x80) == 0
-        });
+        let has_post_str = cg
+            .code
+            .windows(4)
+            .any(|w| w[3] == 0xf8 && (w[2] & 0x80) == 0);
         assert!(has_post_str, "expected str post-index");
         // 验证: pre-index str byte3=0xf8, byte2 bit7=1 (bit23=1, pre-index)
-        let has_pre_str = cg.code.windows(4).any(|w| {
-            w[3] == 0xf8 && (w[2] & 0x80) != 0
-        });
+        let has_pre_str = cg
+            .code
+            .windows(4)
+            .any(|w| w[3] == 0xf8 && (w[2] & 0x80) != 0);
         assert!(has_pre_str, "expected str pre-index");
     }
 
@@ -2494,41 +2518,62 @@ mod tests {
     #[test]
     fn aarch64_tlsdesc_access_emits_expected_sequence() {
         use crate::codegen::elf::{
-            R_AARCH64_TLSDESC_ADD_LO12, R_AARCH64_TLSDESC_ADR_PAGE21,
-            R_AARCH64_TLSDESC_LD64_LO12,
+            R_AARCH64_TLSDESC_ADD_LO12, R_AARCH64_TLSDESC_ADR_PAGE21, R_AARCH64_TLSDESC_LD64_LO12,
         };
         let mut cg = Aarch64Codegen::new(
             crate::target::Target::resolve(
-                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap()
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
             ),
             true,
         );
         cg.emit_tlsdesc_access("my_tls_var");
         // 4 条 aarch64 指令: adrp (0x90xx xxxx) + ldr (0xf940 xxxx)
         // + add (0x91xx xxxx) + blr (0xd63f 0020)
-        assert!(cg.code.windows(4).any(|w| (w[3] & 0x9f) == 0x90),
-                "missing adrp insn (top byte & 0x9f should be 0x90)");
-        assert!(cg.code.windows(4).any(|w| w[3] == 0xf9 && (w[2] & 0xc0) == 0x40),
-                "missing ldr 64-bit insn");
-        assert!(cg.code.windows(4).any(|w| (w[3] & 0x9f) == 0x91),
-                "missing add insn (top byte & 0x9f should be 0x91)");
+        assert!(
+            cg.code.windows(4).any(|w| (w[3] & 0x9f) == 0x90),
+            "missing adrp insn (top byte & 0x9f should be 0x90)"
+        );
+        assert!(
+            cg.code
+                .windows(4)
+                .any(|w| w[3] == 0xf9 && (w[2] & 0xc0) == 0x40),
+            "missing ldr 64-bit insn"
+        );
+        assert!(
+            cg.code.windows(4).any(|w| (w[3] & 0x9f) == 0x91),
+            "missing add insn (top byte & 0x9f should be 0x91)"
+        );
         let blr_pattern: [u8; 4] = [0x20, 0x00, 0x3f, 0xd6];
-        assert!(cg.code.windows(4).any(|w| *w == blr_pattern),
-                "missing blr x1 (expected 20 00 3f d6)");
+        assert!(
+            cg.code.windows(4).any(|w| *w == blr_pattern),
+            "missing blr x1 (expected 20 00 3f d6)"
+        );
         // 3 个 TLSDESC 重定位 (类型 + 引用 my_tls_var)
-        let tlsdesc_rels: Vec<_> = cg.relocations.iter()
-            .filter(|r| matches!(r.rel_type,
-                R_AARCH64_TLSDESC_ADR_PAGE21
-                | R_AARCH64_TLSDESC_LD64_LO12
-                | R_AARCH64_TLSDESC_ADD_LO12))
+        let tlsdesc_rels: Vec<_> = cg
+            .relocations
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.rel_type,
+                    R_AARCH64_TLSDESC_ADR_PAGE21
+                        | R_AARCH64_TLSDESC_LD64_LO12
+                        | R_AARCH64_TLSDESC_ADD_LO12
+                )
+            })
             .collect();
-        assert_eq!(tlsdesc_rels.len(), 3,
-                   "expected 3 TLSDESC relocations, got {}", tlsdesc_rels.len());
+        assert_eq!(
+            tlsdesc_rels.len(),
+            3,
+            "expected 3 TLSDESC relocations, got {}",
+            tlsdesc_rels.len()
+        );
         for r in &tlsdesc_rels {
             // 全部引用同一个符号 my_tls_var (确保 ensure_sym 去重)
             let sym = &cg.symbols[r.sym_index as usize - 1];
-            assert_eq!(sym.name, "my_tls_var",
-                       "TLSDESC relocation must reference my_tls_var");
+            assert_eq!(
+                sym.name, "my_tls_var",
+                "TLSDESC relocation must reference my_tls_var"
+            );
         }
     }
 
@@ -2538,7 +2583,7 @@ mod tests {
     fn aarch64_va_save_area_stores_x0_through_x7() {
         let mut cg = Aarch64Codegen::new(
             crate::target::Target::resolve(
-                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap()
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
             ),
             true,
         );
@@ -2553,11 +2598,15 @@ mod tests {
         }
         // 验证: 8 条 str xn, [sp, #off] 指令,
         //       byte3 = 0xF9 (STR X), bit 23 (byte2 bit7) = 0
-        let str_x_count = cg.code.windows(4).filter(|w| {
-            w[3] == 0xf9 && (w[2] & 0x80) == 0
-        }).count();
-        assert_eq!(str_x_count, 8,
-                   "expected 8 str xn, [sp, #off] instructions, got {str_x_count}");
+        let str_x_count = cg
+            .code
+            .windows(4)
+            .filter(|w| w[3] == 0xf9 && (w[2] & 0x80) == 0)
+            .count();
+        assert_eq!(
+            str_x_count, 8,
+            "expected 8 str xn, [sp, #off] instructions, got {str_x_count}"
+        );
         // 验证偏移在 [16, 72] 范围 (va_save_base_off=16, 8 * 8 步进)
         for i in 0..8 {
             let expected_off = 16 + i * 8;
@@ -2578,7 +2627,7 @@ mod tests {
     fn aarch64_va_arg_int_reads_sequentially_from_save_area() {
         let mut cg = Aarch64Codegen::new(
             crate::target::Target::resolve(
-                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap()
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
             ),
             true,
         );
@@ -2592,12 +2641,18 @@ mod tests {
         cg.gen_va_arg_int("ap");
         cg.gen_va_arg_int("ap");
         // 验证: 3 条 ldr w0, [sp, #off] 指令
-        let ldr_w_count = cg.code.windows(4).filter(|w| {
-            // ldr W: byte3 = 0xb9, byte2 bit6-4 = 100 (32-bit ldr)
-            w[3] == 0xb9 && (w[2] & 0x70) == 0x40
-        }).count();
-        assert_eq!(ldr_w_count, 3,
-                   "expected 3 ldr w0, [sp, #off] instructions, got {ldr_w_count}");
+        let ldr_w_count = cg
+            .code
+            .windows(4)
+            .filter(|w| {
+                // ldr W: byte3 = 0xb9, byte2 bit6-4 = 100 (32-bit ldr)
+                w[3] == 0xb9 && (w[2] & 0x70) == 0x40
+            })
+            .count();
+        assert_eq!(
+            ldr_w_count, 3,
+            "expected 3 ldr w0, [sp, #off] instructions, got {ldr_w_count}"
+        );
         // 验证偏移按 0, 8, 16 递增 (每 8 字节一槽, x 寄存器 8 字节)
         let mut offs = Vec::new();
         for w in cg.code.windows(4) {
@@ -2607,8 +2662,11 @@ mod tests {
                 offs.push((imm12 * 4) as i32);
             }
         }
-        assert_eq!(offs, vec![0, 8, 16],
-                   "expected offsets [0, 8, 16], got {offs:?}");
+        assert_eq!(
+            offs,
+            vec![0, 8, 16],
+            "expected offsets [0, 8, 16], got {offs:?}"
+        );
         // 验证 va_offs 推进
         assert_eq!(cg.va_offs, 3, "va_offs should be 3 after 3 reads");
     }

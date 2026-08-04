@@ -65,7 +65,7 @@ fn cli_emit_asm_still_works_with_profile() {
     let status = dcc()
         .args(["-std=gnu23", "-S", "-o"])
         .arg(&out)
-        .args(["-fprofile-arcs", "-fsyntax-only"])  // 故意让 -fsyntax-only 抢先
+        .args(["-fprofile-arcs", "-fsyntax-only"]) // 故意让 -fsyntax-only 抢先
         .arg(&src)
         .status()
         .expect("运行 dcc");
@@ -115,8 +115,12 @@ fn cli_fopenmp_accepted() {
 fn cli_fopenmp_targets_accepted() {
     let src = profile_src();
     let status = dcc()
-        .args(["-std=gnu23", "-fsyntax-only",
-               "-fopenmp", "-fopenmp-targets=nvptx64-nvidia-cuda"])
+        .args([
+            "-std=gnu23",
+            "-fsyntax-only",
+            "-fopenmp",
+            "-fopenmp-targets=nvptx64-nvidia-cuda",
+        ])
         .arg(&src)
         .status()
         .expect("运行 dcc");

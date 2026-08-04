@@ -47,7 +47,9 @@ pub struct DtorEntry {
 }
 
 impl FiniArrayBuilder {
-    pub fn new() -> Self { Self { dtors: Vec::new() } }
+    pub fn new() -> Self {
+        Self { dtors: Vec::new() }
+    }
 
     /// 注册一个 destructor
     pub fn add(&mut self, name: &str, priority: i32) {
@@ -62,7 +64,9 @@ impl FiniArrayBuilder {
 
     /// 在 layout 中填入所有 destructor vaddr
     pub fn resolve_vaddrs(&mut self, layout: &Layout) {
-        let map: HashMap<String, u64> = layout.symbols.iter()
+        let map: HashMap<String, u64> = layout
+            .symbols
+            .iter()
             .filter(|s| !s.name.is_empty())
             .map(|s| (s.name.clone(), s.vaddr))
             .collect();
@@ -127,8 +131,8 @@ pub fn ensure_fini_array_section(layout: &mut Layout) -> u32 {
         kind: OutputSectionKind::FiniArray,
         name: ".fini_array".to_string(),
         sh_name_off: 0,
-        ty: 1,  // SHT_PROGBITS
-        flags: 0x3,  // SHF_ALLOC | SHF_WRITE
+        ty: 1,      // SHT_PROGBITS
+        flags: 0x3, // SHF_ALLOC | SHF_WRITE
         align: 8,
         data: Vec::new(),
         size: 0,
@@ -167,6 +171,9 @@ mod tests {
         let data = b.gen_fini_array_data();
         assert_eq!(data.len(), 16);
         assert_eq!(u64::from_le_bytes(data[0..8].try_into().unwrap()), 0x401000);
-        assert_eq!(u64::from_le_bytes(data[8..16].try_into().unwrap()), 0x401100);
+        assert_eq!(
+            u64::from_le_bytes(data[8..16].try_into().unwrap()),
+            0x401100
+        );
     }
 }

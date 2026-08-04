@@ -3,20 +3,20 @@
 use std::collections::{BTreeMap, HashMap};
 
 const REG8: [&str; 16] = [
-    "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil",
-    "%r8b", "%r9b", "%r10b", "%r11b", "%r12b", "%r13b", "%r14b", "%r15b",
+    "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil", "%r8b", "%r9b", "%r10b", "%r11b",
+    "%r12b", "%r13b", "%r14b", "%r15b",
 ];
 const REG32: [&str; 16] = [
-    "%eax", "%ecx", "%edx", "%ebx", "%esp", "%ebp", "%esi", "%edi",
-    "%r8d", "%r9d", "%r10d", "%r11d", "%r12d", "%r13d", "%r14d", "%r15d",
+    "%eax", "%ecx", "%edx", "%ebx", "%esp", "%ebp", "%esi", "%edi", "%r8d", "%r9d", "%r10d",
+    "%r11d", "%r12d", "%r13d", "%r14d", "%r15d",
 ];
 const REG64: [&str; 16] = [
-    "%rax", "%rcx", "%rdx", "%rbx", "%rsp", "%rbp", "%rsi", "%rdi",
-    "%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15",
+    "%rax", "%rcx", "%rdx", "%rbx", "%rsp", "%rbp", "%rsi", "%rdi", "%r8", "%r9", "%r10", "%r11",
+    "%r12", "%r13", "%r14", "%r15",
 ];
 const XMM: [&str; 16] = [
-    "%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7",
-    "%xmm8", "%xmm9", "%xmm10", "%xmm11", "%xmm12", "%xmm13", "%xmm14", "%xmm15",
+    "%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7", "%xmm8", "%xmm9",
+    "%xmm10", "%xmm11", "%xmm12", "%xmm13", "%xmm14", "%xmm15",
 ];
 
 #[derive(Default, Clone, Copy)]
@@ -110,7 +110,9 @@ impl<'a> Dec<'a> {
         let mod_ = modrm >> 6;
         let reg = (modrm >> 3) & 7;
         let rm = modrm & 7;
-        let reg_name = self.reg(rex, reg | if rex.r { 8 } else { 0 }, width).to_string();
+        let reg_name = self
+            .reg(rex, reg | if rex.r { 8 } else { 0 }, width)
+            .to_string();
         let mem = self.decode_mem(rex, mod_, rm, width)?;
         Some((reg_name, mem))
     }
@@ -141,13 +143,17 @@ impl<'a> Dec<'a> {
             let base_reg = sib & 7;
             scale = 1u32 << scale_bits;
             if index_reg != 4 {
-                index = self.reg(rex, index_reg | if rex.x { 8 } else { 0 }, width).to_string();
+                index = self
+                    .reg(rex, index_reg | if rex.x { 8 } else { 0 }, width)
+                    .to_string();
             }
             if mod_ == 0 && base_reg == 5 {
                 disp = self.take_i32()?;
                 base = "rip".to_string();
             } else {
-                base = self.reg(rex, base_reg | if rex.b { 8 } else { 0 }, width).to_string();
+                base = self
+                    .reg(rex, base_reg | if rex.b { 8 } else { 0 }, width)
+                    .to_string();
             }
         } else if mod_ == 0 && rm == 5 {
             disp = self.take_i32()?;
@@ -187,11 +193,22 @@ impl<'a> Dec<'a> {
 
     fn prefix_str(pfx: &Prefixes) -> String {
         let mut parts = Vec::new();
-        if pfx.lock { parts.push("lock"); }
-        if pfx.repne { parts.push("repne"); }
-        else if pfx.rep { parts.push("rep"); }
-        if pfx.o16 { parts.push("data16"); }
-        if parts.is_empty() { String::new() } else { format!("{} ", parts.join(" ")) }
+        if pfx.lock {
+            parts.push("lock");
+        }
+        if pfx.repne {
+            parts.push("repne");
+        } else if pfx.rep {
+            parts.push("rep");
+        }
+        if pfx.o16 {
+            parts.push("data16");
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", parts.join(" "))
+        }
     }
 
     fn finish(&self, start: usize, pfx: &Prefixes, body: &str) -> (usize, String) {
@@ -207,10 +224,22 @@ impl<'a> Dec<'a> {
         let mut pfx = Prefixes::default();
         loop {
             match self.peek() {
-                Some(0xF0) => { pfx.lock = true; self.take(); }
-                Some(0xF3) => { pfx.rep = true; self.take(); }
-                Some(0xF2) => { pfx.repne = true; self.take(); }
-                Some(0x66) => { pfx.o16 = true; self.take(); }
+                Some(0xF0) => {
+                    pfx.lock = true;
+                    self.take();
+                }
+                Some(0xF3) => {
+                    pfx.rep = true;
+                    self.take();
+                }
+                Some(0xF2) => {
+                    pfx.repne = true;
+                    self.take();
+                }
+                Some(0x66) => {
+                    pfx.o16 = true;
+                    self.take();
+                }
                 _ => break,
             }
         }
@@ -225,11 +254,25 @@ impl<'a> Dec<'a> {
 
         if (0x50..=0x57).contains(&b) {
             self.take();
-            return Some((self.pos - start, format!("{}push {}", Self::prefix_str(&pfx), REG64[(b - 0x50) as usize])));
+            return Some((
+                self.pos - start,
+                format!(
+                    "{}push {}",
+                    Self::prefix_str(&pfx),
+                    REG64[(b - 0x50) as usize]
+                ),
+            ));
         }
         if (0x58..=0x5F).contains(&b) {
             self.take();
-            return Some((self.pos - start, format!("{}pop {}", Self::prefix_str(&pfx), REG64[(b - 0x58) as usize])));
+            return Some((
+                self.pos - start,
+                format!(
+                    "{}pop {}",
+                    Self::prefix_str(&pfx),
+                    REG64[(b - 0x58) as usize]
+                ),
+            ));
         }
 
         match b {
@@ -237,13 +280,34 @@ impl<'a> Dec<'a> {
                 self.take();
                 Some((self.pos - start, "pause".into()))
             }
-            0x90 => { self.take(); Some((1, "nop".into())) }
-            0xC3 => { self.take(); Some((self.pos - start, format!("{}ret", Self::prefix_str(&pfx)))) }
-            0xC9 => { self.take(); Some((self.pos - start, "leave".into())) }
-            0x55 => { self.take(); Some((self.pos - start, "push %rbp".into())) }
-            0x5D => { self.take(); Some((self.pos - start, "pop %rbp".into())) }
-            0x99 => { self.take(); Some((self.pos - start, "cltd".into())) }
-            0xA4 if pfx.rep => { self.take(); Some((self.pos - start, "rep movsb".into())) }
+            0x90 => {
+                self.take();
+                Some((1, "nop".into()))
+            }
+            0xC3 => {
+                self.take();
+                Some((self.pos - start, format!("{}ret", Self::prefix_str(&pfx))))
+            }
+            0xC9 => {
+                self.take();
+                Some((self.pos - start, "leave".into()))
+            }
+            0x55 => {
+                self.take();
+                Some((self.pos - start, "push %rbp".into()))
+            }
+            0x5D => {
+                self.take();
+                Some((self.pos - start, "pop %rbp".into()))
+            }
+            0x99 => {
+                self.take();
+                Some((self.pos - start, "cltd".into()))
+            }
+            0xA4 if pfx.rep => {
+                self.take();
+                Some((self.pos - start, "rep movsb".into()))
+            }
             0xA5 if pfx.rep => {
                 self.take();
                 let rex = self.parse_rex();
@@ -253,39 +317,64 @@ impl<'a> Dec<'a> {
             0xEB => {
                 self.take();
                 let rel = self.take_i8()? as i32;
-                Some((self.pos - start, format!("{}jmp {}", Self::prefix_str(&pfx), self.rel_target(rel, off + 2))))
+                Some((
+                    self.pos - start,
+                    format!(
+                        "{}jmp {}",
+                        Self::prefix_str(&pfx),
+                        self.rel_target(rel, off + 2)
+                    ),
+                ))
             }
             0xE8 => {
                 self.take();
                 let rel = self.take_i32()?;
                 let sym = self.calls.get(&(off + 1)).cloned();
                 let target = sym.unwrap_or_else(|| self.rel_target(rel, off + 5));
-                Some((self.pos - start, format!("{}call {target}", Self::prefix_str(&pfx))))
+                Some((
+                    self.pos - start,
+                    format!("{}call {target}", Self::prefix_str(&pfx)),
+                ))
             }
             0xE9 => {
                 self.take();
                 let rel = self.take_i32()?;
-                Some((self.pos - start, format!("{}jmp {}", Self::prefix_str(&pfx), self.rel_target(rel, off + 5))))
+                Some((
+                    self.pos - start,
+                    format!(
+                        "{}jmp {}",
+                        Self::prefix_str(&pfx),
+                        self.rel_target(rel, off + 5)
+                    ),
+                ))
             }
             0x31 if self.code.get(self.pos) == Some(&0xC0) => {
-                self.take(); self.take();
+                self.take();
+                self.take();
                 Some((self.pos - start, "xor %eax, %eax".into()))
             }
             0x85 if self.code.get(self.pos) == Some(&0xC0) => {
-                self.take(); self.take();
+                self.take();
+                self.take();
                 Some((self.pos - start, "test %eax, %eax".into()))
             }
             0xB8..=0xBF => {
                 let reg = b - 0xB8;
                 self.take();
                 let imm = self.take_i32()?;
-                Some((self.pos - start, format!("mov ${imm}, {}", REG32[reg as usize])))
+                Some((
+                    self.pos - start,
+                    format!("mov ${imm}, {}", REG32[reg as usize]),
+                ))
             }
             0xB0..=0xB7 => {
                 let reg = b - 0xB0;
                 self.take();
                 let imm = self.take()? as i32;
-                Some((self.pos - start, format!("mov ${imm}, {}", REG8[reg as usize])))
+                Some((
+                    self.pos - start,
+                    format!("mov ${imm}, {}", REG8[reg as usize]),
+                ))
             }
             0x0F => self.decode_two_byte(start, &pfx),
             0x41 | 0x49 | 0x4C | 0x48 => self.decode_rex(start, &pfx),
@@ -306,14 +395,24 @@ impl<'a> Dec<'a> {
             }
             0x84..=0x8F => {
                 let cc = match op - 0x80 {
-                    0x04 => "je", 0x05 => "jne", 0x0C => "jl", 0x0D => "jge",
-                    0x0E => "jle", 0x0F => "jg", 0x02 => "jb", 0x03 => "jae",
-                    0x08 => "js", 0x09 => "jns",
+                    0x04 => "je",
+                    0x05 => "jne",
+                    0x0C => "jl",
+                    0x0D => "jge",
+                    0x0E => "jle",
+                    0x0F => "jg",
+                    0x02 => "jb",
+                    0x03 => "jae",
+                    0x08 => "js",
+                    0x09 => "jns",
                     _ => "jcc",
                 };
                 let rel = self.take_i32()?;
                 let end = off + (self.pos - start) as u64;
-                Some((self.pos - start, format!("{cc} {}", self.rel_target(rel, end))))
+                Some((
+                    self.pos - start,
+                    format!("{cc} {}", self.rel_target(rel, end)),
+                ))
             }
             0xAE if self.peek() == Some(0xF0) => {
                 self.take();
@@ -337,7 +436,10 @@ impl<'a> Dec<'a> {
                 self.pos = start;
                 self.decode_rex(start, pfx)
             }
-            _ => { self.pos = start + 1; None }
+            _ => {
+                self.pos = start + 1;
+                None
+            }
         }
     }
 
@@ -346,7 +448,13 @@ impl<'a> Dec<'a> {
         let rex = self.parse_rex();
         let _ = self.take(); // 0x0F
         let op = self.take()?;
-        let scalar = if pfx.repne { "sd" } else if pfx.rep { "ss" } else { "sd" };
+        let scalar = if pfx.repne {
+            "sd"
+        } else if pfx.rep {
+            "ss"
+        } else {
+            "sd"
+        };
         match op {
             0x10 => {
                 let (dst, src) = self.modrm_xmm(&rex)?;
@@ -373,7 +481,10 @@ impl<'a> Dec<'a> {
                 let mn = if scalar == "ss" { "cvtss2sd" } else { "cvtsd2ss" };
                 Some(self.finish(start, &pfx, &format!("{mn} {src}, {dst}")))
             }
-            _ => { self.pos = start + 1; None }
+            _ => {
+                self.pos = start + 1;
+                None
+            }
         }
     }
 
@@ -408,7 +519,14 @@ impl<'a> Dec<'a> {
             }
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
                 let (dst, src) = self.modrm_gp(&rex, width)?;
-                let mn = match op { 0x01 => "add", 0x09 => "or", 0x21 => "and", 0x29 => "sub", 0x31 => "xor", _ => "?" };
+                let mn = match op {
+                    0x01 => "add",
+                    0x09 => "or",
+                    0x21 => "and",
+                    0x29 => "sub",
+                    0x31 => "xor",
+                    _ => "?",
+                };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
             }
             0x39 | 0x85 => {
@@ -419,7 +537,12 @@ impl<'a> Dec<'a> {
             0x81 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
-                let mn = match reg { 0 => "add", 5 => "sub", 7 => "cmp", _ => "alu" };
+                let mn = match reg {
+                    0 => "add",
+                    5 => "sub",
+                    7 => "cmp",
+                    _ => "alu",
+                };
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
@@ -427,7 +550,12 @@ impl<'a> Dec<'a> {
             0x83 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
-                let mn = match reg { 0 => "add", 5 => "sub", 7 => "cmp", _ => "alu" };
+                let mn = match reg {
+                    0 => "add",
+                    5 => "sub",
+                    7 => "cmp",
+                    _ => "alu",
+                };
                 let (_, mem) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
@@ -455,14 +583,27 @@ impl<'a> Dec<'a> {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
                 let (_, mem) = self.modrm_gp(&rex, width)?;
-                let mn = match reg { 2 => "call", 4 => "jmp", 6 => "push", _ => "ff" };
+                let mn = match reg {
+                    2 => "call",
+                    4 => "jmp",
+                    6 => "push",
+                    _ => "ff",
+                };
                 Some(self.finish(start, pfx, &format!("{mn} {mem}")))
             }
-            _ => { self.pos = start + 1; None }
+            _ => {
+                self.pos = start + 1;
+                None
+            }
         }
     }
 
-    fn decode_two_byte_rex(&mut self, start: usize, pfx: &Prefixes, rex: &Rex) -> Option<(usize, String)> {
+    fn decode_two_byte_rex(
+        &mut self,
+        start: usize,
+        pfx: &Prefixes,
+        rex: &Rex,
+    ) -> Option<(usize, String)> {
         let op = self.take()?;
         match op {
             0x10 | 0x11 => {
@@ -481,7 +622,10 @@ impl<'a> Dec<'a> {
                 let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("xadd {src}, {dst}")))
             }
-            _ => { self.pos = start + 1; None }
+            _ => {
+                self.pos = start + 1;
+                None
+            }
         }
     }
 
@@ -491,10 +635,20 @@ impl<'a> Dec<'a> {
         match op {
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
                 let (dst, src) = self.modrm_gp(&rex, 4)?;
-                let mn = match op { 0x01 => "add", 0x09 => "or", 0x21 => "and", 0x29 => "sub", 0x31 => "xor", _ => "?" };
+                let mn = match op {
+                    0x01 => "add",
+                    0x09 => "or",
+                    0x21 => "and",
+                    0x29 => "sub",
+                    0x31 => "xor",
+                    _ => "?",
+                };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
             }
-            _ => { self.pos = start + 1; None }
+            _ => {
+                self.pos = start + 1;
+                None
+            }
         }
     }
 }
@@ -527,7 +681,13 @@ pub fn disassemble_range(
                 out.push('\n');
             }
         }
-        let mut dec = Dec { code, pos, base: base_offset, calls, data };
+        let mut dec = Dec {
+            code,
+            pos,
+            base: base_offset,
+            calls,
+            data,
+        };
         match dec.decode_one() {
             Some((len, text)) if len > 0 => {
                 out.push('\t');
@@ -546,7 +706,9 @@ pub fn disassemble_range(
     out
 }
 
-pub fn label_map<'a>(labels: impl IntoIterator<Item = (&'a u64, &'a str)>) -> BTreeMap<u64, Vec<&'a str>> {
+pub fn label_map<'a>(
+    labels: impl IntoIterator<Item = (&'a u64, &'a str)>,
+) -> BTreeMap<u64, Vec<&'a str>> {
     let mut m: BTreeMap<u64, Vec<&'a str>> = BTreeMap::new();
     for (off, name) in labels {
         m.entry(*off).or_default().push(name);
@@ -554,7 +716,9 @@ pub fn label_map<'a>(labels: impl IntoIterator<Item = (&'a u64, &'a str)>) -> BT
     m
 }
 
-pub fn directive_map<'a>(items: impl IntoIterator<Item = (&'a u64, &'a str)>) -> BTreeMap<u64, Vec<&'a str>> {
+pub fn directive_map<'a>(
+    items: impl IntoIterator<Item = (&'a u64, &'a str)>,
+) -> BTreeMap<u64, Vec<&'a str>> {
     let mut m: BTreeMap<u64, Vec<&'a str>> = BTreeMap::new();
     for (off, line) in items {
         m.entry(*off).or_default().push(line);
@@ -571,17 +735,15 @@ pub fn slice_labels<'a>(
     let end = base + size;
     for (off, names) in labels {
         if *off >= base && *off < end {
-            out.entry(off - base).or_insert_with(Vec::new).extend(names.iter().copied());
+            out.entry(off - base)
+                .or_insert_with(Vec::new)
+                .extend(names.iter().copied());
         }
     }
     out
 }
 
-pub fn slice_map<T: Clone>(
-    map: &HashMap<u64, T>,
-    base: u64,
-    size: u64,
-) -> HashMap<u64, T> {
+pub fn slice_map<T: Clone>(map: &HashMap<u64, T>, base: u64, size: u64) -> HashMap<u64, T> {
     let end = base + size;
     map.iter()
         .filter(|(off, _)| **off >= base && **off < end)
@@ -604,7 +766,16 @@ mod tests {
     #[test]
     fn decodes_mov_imm_and_ret() {
         let code = [0xB8, 0x05, 0x00, 0x00, 0x00, 0xC3];
-        let out = disassemble_range(&code, 0, code.len(), 0, &BTreeMap::new(), &BTreeMap::new(), &HashMap::new(), &HashMap::new());
+        let out = disassemble_range(
+            &code,
+            0,
+            code.len(),
+            0,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(out.contains("mov $5, %eax"));
         assert!(out.contains("ret"));
     }
@@ -615,7 +786,16 @@ mod tests {
             0xF0, 0x48, 0x0F, 0xB1, 0x17, // lock cmpxchg %rdx, (%rdi)
             0xF2, 0x0F, 0x10, 0x05, 0, 0, 0, 0, // movsd 0(%rip), %xmm0
         ];
-        let out = disassemble_range(&code, 0, code.len(), 0, &BTreeMap::new(), &BTreeMap::new(), &HashMap::new(), &HashMap::new());
+        let out = disassemble_range(
+            &code,
+            0,
+            code.len(),
+            0,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(out.contains("lock cmpxchg"), "{out}");
         assert!(out.contains("movsd"), "{out}");
     }

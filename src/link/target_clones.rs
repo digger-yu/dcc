@@ -20,9 +20,7 @@
 use std::collections::HashMap;
 
 use super::layout::{Layout, OutputRela, OutputSectionKind, OutputSymbol};
-use crate::codegen::elf::{
-    R_X86_64_IRELATIVE, STB_GLOBAL, STT_GNU_IFUNC, STV_DEFAULT,
-};
+use crate::codegen::elf::{R_X86_64_IRELATIVE, STB_GLOBAL, STT_GNU_IFUNC, STV_DEFAULT};
 
 /// 单个 target_clones 函数的所有变体
 #[derive(Debug, Clone)]
@@ -52,15 +50,20 @@ pub struct TargetClonesTable {
 }
 
 impl TargetClonesTable {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// 解析 target_clones 字符串: "sse4.2,avx2,default"
     pub fn parse(&mut self, func_name: &str, attr: &str) {
-        let variants: Vec<String> = attr.split(',')
+        let variants: Vec<String> = attr
+            .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if variants.is_empty() { return; }
+        if variants.is_empty() {
+            return;
+        }
         let mut vlist = Vec::new();
         for v in &variants {
             vlist.push(TargetVariant {
@@ -70,16 +73,20 @@ impl TargetClonesTable {
             });
         }
         // default 变体: 第一个或显式 "default"
-        let default = variants.iter()
+        let default = variants
+            .iter()
             .find(|s| *s == "default")
             .cloned()
             .unwrap_or_else(|| variants[0].clone());
         let default_variant = format!("{}.{}", func_name, default);
-        self.funcs.insert(func_name.to_string(), TargetClonesFunc {
-            resolver_name: func_name.to_string(),
-            variants: vlist,
-            default_variant,
-        });
+        self.funcs.insert(
+            func_name.to_string(),
+            TargetClonesFunc {
+                resolver_name: func_name.to_string(),
+                variants: vlist,
+                default_variant,
+            },
+        );
     }
 
     /// 在 layout 中查找所有 target_clones resolver, 并生成 IRELATIVE 重定位.
@@ -88,7 +95,9 @@ impl TargetClonesTable {
         let mut new_syms = Vec::new();
         let mut relas = Vec::new();
         // 找 .rela.dyn 节
-        let rel_dyn_idx = layout.sections.iter()
+        let rel_dyn_idx = layout
+            .sections
+            .iter()
             .position(|s| s.kind == OutputSectionKind::RelDyn)
             .unwrap_or(0) as u32;
         for tcf in self.funcs.values() {
@@ -121,8 +130,8 @@ impl TargetClonesTable {
             // IRELATIVE 重定位: addend = resolver 地址
             relas.push(OutputRela::new(
                 rel_dyn_idx,
-                0,           // offset: GOT 槽 (由 plt_got 填)
-                0,           // sym: 由 plt_got 填 (symidx)
+                0, // offset: GOT 槽 (由 plt_got 填)
+                0, // sym: 由 plt_got 填 (symidx)
                 R_X86_64_IRELATIVE,
                 default_vaddr as i64,
             ));

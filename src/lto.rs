@@ -24,7 +24,10 @@ pub struct LtoUnit {
 
 /// 从函数列表构建 TU 摘要。
 pub fn build_unit(path: &str, functions: &[(&str, u64, bool)]) -> LtoUnit {
-    let mut unit = LtoUnit { path: path.to_string(), ..Default::default() };
+    let mut unit = LtoUnit {
+        path: path.to_string(),
+        ..Default::default()
+    };
     for (name, size, defined) in functions {
         unit.functions.insert(
             (*name).to_string(),
@@ -44,7 +47,8 @@ pub fn merge_units(mut units: Vec<LtoUnit>) -> LtoUnit {
     let mut merged = LtoUnit::default();
     for unit in units.drain(..) {
         for (name, summary) in unit.functions {
-            merged.functions
+            merged
+                .functions
                 .entry(name)
                 .and_modify(|existing| {
                     existing.defined |= summary.defined;
@@ -84,20 +88,28 @@ pub fn parse_summary(data: &[u8]) -> Option<LtoUnit> {
     let rest = &data[8..];
     let nul = rest.iter().position(|&b| b == 0)?;
     let path = String::from_utf8_lossy(&rest[..nul]).to_string();
-    let mut unit = LtoUnit { path, ..Default::default() };
+    let mut unit = LtoUnit {
+        path,
+        ..Default::default()
+    };
     let body = std::str::from_utf8(&rest[nul + 1..]).ok()?;
     for line in body.lines() {
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         let mut parts = line.split(':');
         let name = parts.next()?.to_string();
         let size: u64 = parts.next()?.parse().ok()?;
         let defined: u8 = parts.next()?.parse().ok()?;
-        unit.functions.insert(name.clone(), FunctionSummary {
-            name,
-            defined: defined != 0,
-            referenced: defined == 0,
-            size_hint: size,
-        });
+        unit.functions.insert(
+            name.clone(),
+            FunctionSummary {
+                name,
+                defined: defined != 0,
+                referenced: defined == 0,
+                size_hint: size,
+            },
+        );
     }
     Some(unit)
 }
@@ -110,24 +122,41 @@ pub fn extract_from_object(elf: &[u8]) -> Option<LtoUnit> {
 
 /// 合并多个目标文件的 LTO 摘要（链接器入口）。
 pub fn collect_from_objects(objects: &[&[u8]]) -> LtoUnit {
-    let units: Vec<LtoUnit> = objects.iter().filter_map(|obj| extract_from_object(obj)).collect();
+    let units: Vec<LtoUnit> = objects
+        .iter()
+        .filter_map(|obj| extract_from_object(obj))
+        .collect();
     merge_units(units)
 }
 
 /// 为 `ld -r --gc-sections` 选取保留根符号（须为已定义；优先 referenced）。
 pub fn gc_sections_root(merged: &LtoUnit, dead: &[String]) -> Option<String> {
     let is_dead = |name: &str| dead.iter().any(|d| d == name);
-    merged.functions.values()
+    merged
+        .functions
+        .values()
         .find(|s| s.defined && s.referenced && !is_dead(&s.name))
-        .or_else(|| merged.functions.values().find(|s| s.defined && s.referenced))
-        .or_else(|| merged.functions.values().find(|s| s.defined && !is_dead(&s.name)))
+        .or_else(|| {
+            merged
+                .functions
+                .values()
+                .find(|s| s.defined && s.referenced)
+        })
+        .or_else(|| {
+            merged
+                .functions
+                .values()
+                .find(|s| s.defined && !is_dead(&s.name))
+        })
         .or_else(|| merged.functions.values().find(|s| s.defined))
         .map(|s| s.name.clone())
 }
 
 /// 在合并摘要上标记跨 TU 引用，返回可安全丢弃的本地定义符号。
 pub fn dead_local_functions(merged: &LtoUnit) -> Vec<String> {
-    merged.functions.values()
+    merged
+        .functions
+        .values()
         .filter(|s| s.defined && !s.referenced && s.size_hint > 0)
         .map(|s| s.name.clone())
         .collect()
@@ -140,12 +169,15 @@ pub fn mark_references_from_objects(merged: &mut LtoUnit, objects: &[&[u8]]) {
             if let Some(summary) = merged.functions.get_mut(&name) {
                 summary.referenced = true;
             } else {
-                merged.functions.insert(name.clone(), FunctionSummary {
-                    name: name.clone(),
-                    defined: false,
-                    referenced: true,
-                    size_hint: 0,
-                });
+                merged.functions.insert(
+                    name.clone(),
+                    FunctionSummary {
+                        name: name.clone(),
+                        defined: false,
+                        referenced: true,
+                        size_hint: 0,
+                    },
+                );
             }
         }
     }
@@ -181,7 +213,19 @@ mod tests {
         let unit = build_unit("unit.c", &[("entry", 48, true)]);
         let payload = serialize_summary(&unit);
         let obj = elf::build_elf_rel_x86_64(
-            &[0xc3], &[], &[], 0, &[], 0, 1, 1, 1, 8, 8, &[], &[],
+            &[0xc3],
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            1,
+            1,
+            1,
+            8,
+            8,
+            &[],
+            &[],
             &[ElfSection {
                 name: ".llvm.lto".to_string(),
                 data: payload,
@@ -189,7 +233,8 @@ mod tests {
                 flags: 0,
                 align: 1,
             }],
-            &[], &[],
+            &[],
+            &[],
         );
         let parsed = extract_from_object(&obj).expect("extract LTO from ELF");
         assert_eq!(parsed.path, "unit.c");

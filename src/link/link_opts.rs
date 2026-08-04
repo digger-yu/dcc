@@ -32,11 +32,7 @@
 // 真正可观测的产出是 ELF 文件,不是 CLI 参数本身。
 
 use super::layout::{Layout, OutputSection, OutputSectionKind};
-use crate::codegen::elf::{
-    PF_X,
-    SHF_GNU_RETAIN,
-    SHF_COMPRESSED,
-};
+use crate::codegen::elf::{PF_X, SHF_COMPRESSED, SHF_GNU_RETAIN};
 
 /// 链接选项集合 (LinkConfig 之外需独立携带的)
 #[derive(Debug, Clone, Default)]
@@ -144,11 +140,10 @@ impl LinkOpts {
             // 已知但本阶段不实现的
             "ibt" | "shstk" | "cet-report" | "cet-report=warning" | "cet-report=error"
             | "force-bti" | "force-bti-warning" | "force-ibt" | "force-shstk"
-            | "noseparate-code" | "separate-code" | "nodynamic-linker"
-            | "dynamic-linker" | "initfirst" | "interpose" | "nodelete"
-            | "nodump" | "origin" | "defs" | "undefs" | "muldefs" | "nocopyreloc"
-            | "nosymtab" | "symtab" | "nocombreloc" | "combreloc" | "nocap-relocs"
-            | "cap-relocs" | "text" | "notext" | "rodynamic" | "norodynamic" => {
+            | "noseparate-code" | "separate-code" | "nodynamic-linker" | "dynamic-linker"
+            | "initfirst" | "interpose" | "nodelete" | "nodump" | "origin" | "defs" | "undefs"
+            | "muldefs" | "nocopyreloc" | "nosymtab" | "symtab" | "nocombreloc" | "combreloc"
+            | "nocap-relocs" | "cap-relocs" | "text" | "notext" | "rodynamic" | "norodynamic" => {
                 // 静默接受
             }
             _ => {
@@ -169,7 +164,9 @@ fn parse_size(s: &str) -> Result<u64, ()> {
     } else if let Some(rest) = s.strip_suffix("M").or_else(|| s.strip_suffix("m")) {
         rest.parse::<u64>().map(|n| n * 1024 * 1024).map_err(|_| ())
     } else if let Some(rest) = s.strip_suffix("G").or_else(|| s.strip_suffix("g")) {
-        rest.parse::<u64>().map(|n| n * 1024 * 1024 * 1024).map_err(|_| ())
+        rest.parse::<u64>()
+            .map(|n| n * 1024 * 1024 * 1024)
+            .map_err(|_| ())
     } else {
         s.parse::<u64>().map_err(|_| ())
     }
@@ -238,13 +235,21 @@ pub fn resolve_linker_backend(opts: &LinkOpts) -> LinkerBackend {
 /// 返回被压缩的节名列表
 pub fn compress_debug_sections(layout: &mut Layout, method: &str) -> Vec<String> {
     let mut compressed = Vec::new();
-    if method == "none" { return compressed; }
+    if method == "none" {
+        return compressed;
+    }
     // 仅压缩调试节 (以 .debug_ 开头)
     for sec in &mut layout.sections {
-        if !sec.name.starts_with(".debug_") { continue; }
-        if sec.data.is_empty() || sec.size == 0 { continue; }
-        if sec.flags & SHF_COMPRESSED != 0 { continue; } // 已压缩
-        // 使用 miniz_oxide / zstd 压缩
+        if !sec.name.starts_with(".debug_") {
+            continue;
+        }
+        if sec.data.is_empty() || sec.size == 0 {
+            continue;
+        }
+        if sec.flags & SHF_COMPRESSED != 0 {
+            continue;
+        } // 已压缩
+          // 使用 miniz_oxide / zstd 压缩
         let compress_type: u32; // ELFCOMPRESS_ZLIB=1, ELFCOMPRESS_ZSTD=2
         let compressed_data = match method {
             "zlib" | "zlib-gnu" | "zlib-gabi" => {
@@ -307,12 +312,17 @@ pub fn compute_relro_range(layout: &Layout) -> Option<(u64, u64)> {
         let mut lo: u64 = u64::MAX;
         let mut hi: u64 = 0;
         for sec in &layout.sections {
-            if matches!(sec.kind,
-                OutputSectionKind::Got | OutputSectionKind::GotPlt |
-                OutputSectionKind::InitArray | OutputSectionKind::FiniArray |
-                OutputSectionKind::Data
+            if matches!(
+                sec.kind,
+                OutputSectionKind::Got
+                    | OutputSectionKind::GotPlt
+                    | OutputSectionKind::InitArray
+                    | OutputSectionKind::FiniArray
+                    | OutputSectionKind::Data
             ) {
-                if sec.vaddr == 0 || sec.size == 0 { continue; }
+                if sec.vaddr == 0 || sec.size == 0 {
+                    continue;
+                }
                 lo = lo.min(sec.vaddr);
                 hi = hi.max(sec.vaddr + sec.size);
             }
@@ -329,14 +339,21 @@ pub fn apply_retain_flags(layout: &mut Layout) {
     // 对所有 .init / .fini / .init_array / .fini_array / .text.startup / .text.exit
     // 强制保留 (即使 gc_sections = true)
     for sec in &mut layout.sections {
-        if matches!(sec.name.as_str(),
-            ".init" | ".fini" |
-            ".init_array" | ".fini_array" |
-            ".text.startup" | ".text.exit" |
-            ".ctors" | ".dtors" |
-            ".text._start" | ".text.__libc_csu_init" |
-            ".note.GNU-stack" | ".note.gnu.build-id" |
-            ".note.gnu.property"
+        if matches!(
+            sec.name.as_str(),
+            ".init"
+                | ".fini"
+                | ".init_array"
+                | ".fini_array"
+                | ".text.startup"
+                | ".text.exit"
+                | ".ctors"
+                | ".dtors"
+                | ".text._start"
+                | ".text.__libc_csu_init"
+                | ".note.GNU-stack"
+                | ".note.gnu.build-id"
+                | ".note.gnu.property"
         ) {
             sec.flags |= SHF_GNU_RETAIN;
         }
@@ -346,7 +363,7 @@ pub fn apply_retain_flags(layout: &mut Layout) {
 /// 在 elf 输出阶段为 PT_GNU_STACK 决定 flags
 pub fn gnu_stack_flags(execstack: bool) -> u32 {
     // PF_R | PF_W 基础; execstack 时加 PF_X
-    let mut flags = 0x4u32 | 0x2u32;  // PF_R | PF_W
+    let mut flags = 0x4u32 | 0x2u32; // PF_R | PF_W
     if execstack {
         flags |= PF_X;
     }
@@ -360,8 +377,8 @@ pub fn add_pack_relocs_section(layout: &mut Layout) {
         kind: OutputSectionKind::Named(".gnu.pack.relocs".into()),
         name: ".gnu.pack.relocs".into(),
         sh_name_off: 0,
-        ty: 0x6ffffff7,  // SHT_GNU_RELR
-        flags: 0x2,  // SHF_ALLOC
+        ty: 0x6ffffff7, // SHT_GNU_RELR
+        flags: 0x2,     // SHF_ALLOC
         align: 8,
         data: Vec::new(),
         size: 0,
@@ -379,20 +396,20 @@ pub fn add_pack_relocs_section(layout: &mut Layout) {
 pub fn add_gdb_index_section(layout: &mut Layout) {
     let mut data = Vec::new();
     // 简化: 只放版本号 + 全 0
-    data.extend_from_slice(b"gdb-9.2");   // 8 字节
-    data.extend_from_slice(&[0u8; 24]);   // 后续占位
+    data.extend_from_slice(b"gdb-9.2"); // 8 字节
+    data.extend_from_slice(&[0u8; 24]); // 后续占位
     layout.sections.push(OutputSection {
         kind: OutputSectionKind::Named(".gdb_index".into()),
         name: ".gdb_index".into(),
         sh_name_off: 0,
-        ty: 0x6ffffff5,  // SHT_PROGBITS 但 GNU 扩展名
-        flags: 0,  // 调试节不 ALLOC
+        ty: 0x6ffffff5, // SHT_PROGBITS 但 GNU 扩展名
+        flags: 0,       // 调试节不 ALLOC
         align: 4,
         data,
         size: 32,
         entsize: 0,
         output_index: 0,
-        load_segment: 2,  // 不进任何 PT_LOAD
+        load_segment: 2, // 不进任何 PT_LOAD
         vaddr: 0,
         file_off: 0,
         input_offsets: Vec::new(),
@@ -418,8 +435,8 @@ pub fn gen_dynamic_entries(opts: &LinkOpts, rpath_runpath_extra: &[(u8, String)]
         // RFC: glibc 接受 DT_RPATH=23, DT_RUNPATH=29 (0x1d)
         // 修正: DT_RUNPATH = 29
         entries.push(match *tag {
-            1 => 23u64,    // RPATH
-            2 => 29u64,    // RUNPATH
+            1 => 23u64, // RPATH
+            2 => 29u64, // RUNPATH
             _ => *tag as u64,
         });
         // 字符串指针由 caller 写入; 此处放 0 占位
@@ -440,16 +457,36 @@ pub fn has_retain_flag(sec: &OutputSection) -> bool {
 /// -z 选项汇总 (给 doc / verbose 用)
 pub fn opts_summary(opts: &LinkOpts) -> String {
     let mut s = String::new();
-    if opts.relro { s.push_str("relro "); }
-    if opts.bind_now { s.push_str("now "); }
-    if opts.execstack { s.push_str("execstack "); } else { s.push_str("noexecstack "); }
-    if opts.pack_relative_relocs { s.push_str("pack-relative-relocs "); }
+    if opts.relro {
+        s.push_str("relro ");
+    }
+    if opts.bind_now {
+        s.push_str("now ");
+    }
+    if opts.execstack {
+        s.push_str("execstack ");
+    } else {
+        s.push_str("noexecstack ");
+    }
+    if opts.pack_relative_relocs {
+        s.push_str("pack-relative-relocs ");
+    }
     s.push_str(&format!("max-page-size=0x{:x} ", opts.max_page_size));
-    if let Some(rp) = &opts.rpath { s.push_str(&format!("rpath={} ", rp)); }
-    if let Some(rp) = &opts.runpath { s.push_str(&format!("runpath={} ", rp)); }
-    if let Some(fl) = &opts.fuse_ld { s.push_str(&format!("fuse-ld={} ", fl)); }
-    if opts.no_semantic_interposition { s.push_str("no-semantic-interposition "); }
-    if opts.gdb_index { s.push_str("gdb-index "); }
+    if let Some(rp) = &opts.rpath {
+        s.push_str(&format!("rpath={} ", rp));
+    }
+    if let Some(rp) = &opts.runpath {
+        s.push_str(&format!("runpath={} ", rp));
+    }
+    if let Some(fl) = &opts.fuse_ld {
+        s.push_str(&format!("fuse-ld={} ", fl));
+    }
+    if opts.no_semantic_interposition {
+        s.push_str("no-semantic-interposition ");
+    }
+    if opts.gdb_index {
+        s.push_str("gdb-index ");
+    }
     s
 }
 
@@ -511,10 +548,13 @@ mod tests {
 
     #[test]
     fn dynamic_entries_with_bind_now() {
-        let o = LinkOpts { bind_now: true, ..LinkOpts::default() };
+        let o = LinkOpts {
+            bind_now: true,
+            ..LinkOpts::default()
+        };
         let entries = gen_dynamic_entries(&o, &[]);
-        assert!(entries.contains(&30u64));    // DT_FLAGS
-        assert!(entries.contains(&0x8u64));   // DF_BIND_NOW
+        assert!(entries.contains(&30u64)); // DT_FLAGS
+        assert!(entries.contains(&0x8u64)); // DF_BIND_NOW
     }
 
     // P3.1: --compress-debug-sections=zstd 压入 .debug_*

@@ -124,12 +124,7 @@ fn parse_dep_file(content: &str, target: &str, out: &mut impl Write) -> io::Resu
         let mut q = 0;
         while q < p.len() {
             let c = p.as_bytes()[q];
-            if c == b' '
-                || c == b'\t'
-                || c == b'\n'
-                || c == b'#'
-                || c == b':'
-            {
+            if c == b' ' || c == b'\t' || c == b'\n' || c == b'#' || c == b':' {
                 break;
             }
             if c == b'\\' {
@@ -202,10 +197,9 @@ fn main() {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     writeln!(out, "savedcmd_{target} := {cmdline}\n").unwrap();
-    parse_dep_file(&dep_content, target, &mut out)
-        .unwrap_or_else(|e| {
-            eprintln!("fixdep: {e}");
-            std::process::exit(1);
-        });
+    parse_dep_file(&dep_content, target, &mut out).unwrap_or_else(|e| {
+        eprintln!("fixdep: {e}");
+        std::process::exit(1);
+    });
     out.flush().unwrap();
 }

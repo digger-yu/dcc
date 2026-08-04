@@ -18,14 +18,18 @@ enum BranchKind {
 /// RVV 向量配置参数
 #[derive(Clone, Copy, Debug)]
 struct RvvConfig {
-    vlen: u16,   // 向量寄存器位宽 (128/256/512/1024)
-    elen: u16,   // 最大元素位宽
+    vlen: u16,      // 向量寄存器位宽 (128/256/512/1024)
+    elen: u16,      // 最大元素位宽
     vtype_val: u32, // vtype 编码值
 }
 
 impl Default for RvvConfig {
     fn default() -> Self {
-        Self { vlen: 128, elen: 64, vtype_val: 0 } // vtype=0: SEW=64, LMUL=1, TA, MA
+        Self {
+            vlen: 128,
+            elen: 64,
+            vtype_val: 0,
+        } // vtype=0: SEW=64, LMUL=1, TA, MA
     }
 }
 
@@ -161,7 +165,8 @@ impl Riscv64Codegen {
                 ty: elf::STT_SECTION,
                 visibility: elf::STV_DEFAULT,
             });
-            self.sym_index.insert(".rodata".to_string(), self.symbols.len() as u32);
+            self.sym_index
+                .insert(".rodata".to_string(), self.symbols.len() as u32);
         }
     }
 
@@ -185,7 +190,8 @@ impl Riscv64Codegen {
                 ty: STT_OBJECT,
                 visibility: elf::STV_DEFAULT,
             });
-            self.sym_index.insert(g.name.clone(), self.symbols.len() as u32);
+            self.sym_index
+                .insert(g.name.clone(), self.symbols.len() as u32);
         }
     }
 
@@ -199,7 +205,8 @@ impl Riscv64Codegen {
             }
             Some(ExprLiteral::Float(v)) => {
                 let bits = (v as f32).to_bits();
-                self.rodata[start..start + 4.min(size)].copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
+                self.rodata[start..start + 4.min(size)]
+                    .copy_from_slice(&bits.to_le_bytes()[..4.min(size)]);
             }
             _ => {}
         }
@@ -213,13 +220,17 @@ impl Riscv64Codegen {
         self.li_a0(0);
         self.ecall();
         for func in &module.functions {
-            if find_func(prog, &func.name).and_then(|f| f.body.as_ref()).is_none() {
+            if find_func(prog, &func.name)
+                .and_then(|f| f.body.as_ref())
+                .is_none()
+            {
                 continue;
             }
             self.label(&func.name);
             let start = self.pos();
             self.gen_function(func, find_func(prog, &func.name));
-            self.func_sizes.insert(func.name.clone(), self.pos() - start);
+            self.func_sizes
+                .insert(func.name.clone(), self.pos() - start);
             if func.name == "main" {
                 self.patch_jal(jal_pos, start);
             }
@@ -229,7 +240,10 @@ impl Riscv64Codegen {
     fn compile_rel(&mut self, module: &Module, prog: &Program) {
         let mut text_off = 0u64;
         for func in &module.functions {
-            if find_func(prog, &func.name).and_then(|f| f.body.as_ref()).is_none() {
+            if find_func(prog, &func.name)
+                .and_then(|f| f.body.as_ref())
+                .is_none()
+            {
                 continue;
             }
             self.label(&func.name);
@@ -246,7 +260,8 @@ impl Riscv64Codegen {
                 ty: STT_FUNC,
                 visibility: elf::STV_DEFAULT,
             });
-            self.sym_index.insert(func.name.clone(), self.symbols.len() as u32);
+            self.sym_index
+                .insert(func.name.clone(), self.symbols.len() as u32);
             text_off += size;
         }
     }
@@ -459,7 +474,13 @@ impl Riscv64Codegen {
                 self.j(&lbl_loop);
                 self.label(&lbl_exit);
             }
-            Stmt::For { init, cond, step, body, .. } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
                 let body_idx = if init.is_some() { 1 } else { 0 };
                 if let Some(s) = init {
                     self.gen_stmt(s, &ir.nested[0]);
@@ -610,8 +631,7 @@ impl Riscv64Codegen {
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 a0 = sret slot)
         // 限制: 仅 caller 分配 <sret> local, callee 写到 [a0]
         let mut sret_reg_idx = 0usize;
-        let needs_sret = is_aggregate(&expr.ty)
-            && aggregate_size(&expr.ty).is_some_and(|s| s > 16);
+        let needs_sret = is_aggregate(&expr.ty) && aggregate_size(&expr.ty).is_some_and(|s| s > 16);
         if needs_sret {
             let size = aggregate_size(&expr.ty).unwrap();
             let aligned = (size + 15) & !15;
@@ -714,17 +734,18 @@ impl Riscv64Codegen {
             // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
             // 例: 浮点 Call 在 IR 中 children[0] 是 callee, 不再与 va_arg 混清.
             ExprKind::Call => {
-                eprintln!("warning: zero-arg float call not yet supported on riscv64, emitting 0.0");
+                eprintln!(
+                    "warning: zero-arg float call not yet supported on riscv64, emitting 0.0"
+                );
                 self.li_a0(0);
                 return true;
             }
             _ => {
                 // expr.ty 已是 float/vector 时不能再回 gen_expr (死循环).
-                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty)
-                    && self.gen_expr(expr) {
-                        self.emit_fcvt_s_w_fa0();
-                        return true;
-                    }
+                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty) && self.gen_expr(expr) {
+                    self.emit_fcvt_s_w_fa0();
+                    return true;
+                }
             }
         }
         self.li_a0(0);
@@ -938,7 +959,7 @@ impl Riscv64Codegen {
             self.emit_addi(reg, 2, off);
         } else {
             // 越界: 走 lui + addi 序列 (与 li_reg 一致)
-            self.li_reg(18, off);  // t0 = off (临时)
+            self.li_reg(18, off); // t0 = off (临时)
             self.emit_add(reg, reg, 18);
         }
     }
@@ -1070,7 +1091,8 @@ impl Riscv64Codegen {
     }
 
     fn emit_mul(&mut self, rd: u8, rs1: u8, rs2: u8) {
-        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b0000001 << 12 | (rd as u32) << 7 | 0x33;
+        let insn =
+            (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b0000001 << 12 | (rd as u32) << 7 | 0x33;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1083,22 +1105,42 @@ impl Riscv64Codegen {
     // 除 0 行为: 硬件返回 -1 (div) / -1 (rem) ;在 RV spec 中明确定义
     // 最小整数 -2^63 / -1 同样按 spec 行为, 不抛异常
     fn emit_div(&mut self, rd: u8, rs1: u8, rs2: u8) {
-        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b100 << 12 | (rd as u32) << 7 | 0x02000000 | 0x33;
+        let insn = (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b100 << 12
+            | (rd as u32) << 7
+            | 0x02000000
+            | 0x33;
         self.emit(&insn.to_le_bytes());
     }
 
     fn emit_divu(&mut self, rd: u8, rs1: u8, rs2: u8) {
-        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x02000000 | 0x33;
+        let insn = (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b101 << 12
+            | (rd as u32) << 7
+            | 0x02000000
+            | 0x33;
         self.emit(&insn.to_le_bytes());
     }
 
     fn emit_rem(&mut self, rd: u8, rs1: u8, rs2: u8) {
-        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b110 << 12 | (rd as u32) << 7 | 0x02000000 | 0x33;
+        let insn = (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b110 << 12
+            | (rd as u32) << 7
+            | 0x02000000
+            | 0x33;
         self.emit(&insn.to_le_bytes());
     }
 
     fn emit_remu(&mut self, rd: u8, rs1: u8, rs2: u8) {
-        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b111 << 12 | (rd as u32) << 7 | 0x02000000 | 0x33;
+        let insn = (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b111 << 12
+            | (rd as u32) << 7
+            | 0x02000000
+            | 0x33;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1119,7 +1161,12 @@ impl Riscv64Codegen {
     }
 
     fn emit_sra(&mut self, rd: u8, rs1: u8, rs2: u8) {
-        let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x40000000 | 0x33;
+        let insn = (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b101 << 12
+            | (rd as u32) << 7
+            | 0x40000000
+            | 0x33;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1278,10 +1325,7 @@ impl Riscv64Codegen {
     fn emit_c_addi(&mut self, rd: u8, imm: i8) {
         debug_assert!(rd != 0 && imm != 0, "C.ADDI: rd!=0, imm!=0");
         let imm = imm as u16;
-        let insn: u16 = (((imm >> 5) & 1) << 12)
-            | (rd as u16) << 7
-            | (imm & 0x1f) << 2
-            | 0x01;
+        let insn: u16 = (((imm >> 5) & 1) << 12) | (rd as u16) << 7 | (imm & 0x1f) << 2 | 0x01;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1294,11 +1338,8 @@ impl Riscv64Codegen {
     fn emit_c_li(&mut self, rd: u8, imm: i8) {
         debug_assert!(rd != 0);
         let imm = imm as u16;
-        let insn: u16 = 0b010 << 13
-            | ((imm >> 5) & 1) << 12
-            | (rd as u16) << 7
-            | (imm & 0x1f) << 2
-            | 0x01;
+        let insn: u16 =
+            0b010 << 13 | ((imm >> 5) & 1) << 12 | (rd as u16) << 7 | (imm & 0x1f) << 2 | 0x01;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1379,60 +1420,42 @@ impl Riscv64Codegen {
 
     /// FADD.D fd, fs1, fs2: R 格式, funct7=0000001
     fn emit_fadd_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
-        let insn = ((fs2 as u32) << 20
-            | (fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0000001 << 25
-            | 0x53;
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0000001 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FSUB.D fd, fs1, fs2: R 格式, funct7=0000101
     fn emit_fsub_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
-        let insn = ((fs2 as u32) << 20
-            | (fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0000101 << 25
-            | 0x53;
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0000101 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FMUL.D fd, fs1, fs2: R 格式, funct7=0001001
     fn emit_fmul_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
-        let insn = ((fs2 as u32) << 20
-            | (fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0001001 << 25
-            | 0x53;
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0001001 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FDIV.D fd, fs1, fs2: R 格式, funct7=0001101
     fn emit_fdiv_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
-        let insn = ((fs2 as u32) << 20
-            | (fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0001101 << 25
-            | 0x53;
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0001101 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FSQRT.D fd, fs1: 双精度平方根, funct7=0101101
     fn emit_fsqrt_d(&mut self, fd: u8, fs1: u8) {
-        let insn = ((fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0101101 << 25
-            | 0x53;
+        let insn = ((fs1 as u32) << 15) | (fd as u32) << 7 | 0b0101101 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FMIN.D fd, fs1, fs2: 双精度最小值, funct7=0010101, funct3=000
     fn emit_fmin_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
-        let insn = ((fs2 as u32) << 20
-            | (fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0010101 << 25
-            | 0x53;
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0010101 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1471,95 +1494,63 @@ impl Riscv64Codegen {
 
     /// FLE.D rd, fs1, fs2: 双精度小于等于比较, funct7=1010001, funct3=000
     fn emit_fle_d(&mut self, rd: u8, fs1: u8, fs2: u8) {
-        let insn = ((fs2 as u32) << 20
-            | (fs1 as u32) << 15)
-            | (rd as u32) << 7
-            | 0b1010001 << 25
-            | 0x53;
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (rd as u32) << 7 | 0b1010001 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FCVT.D.W fd, rs1: 整数转双精度
     fn emit_fcvt_d_w(&mut self, fd: u8, rs1: u8) {
-        let insn = ((rs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b1101000 << 25
-            | 0x53;
+        let insn = ((rs1 as u32) << 15) | (fd as u32) << 7 | 0b1101000 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FCVT.W.D rd, fs1: 双精度转整数
     fn emit_fcvt_w_d(&mut self, rd: u8, fs1: u8) {
-        let insn = (fs1 as u32) << 15
-            | 0b001 << 12
-            | (rd as u32) << 7
-            | 0b1100000 << 25
-            | 0x53;
+        let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1100000 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FCVT.D.S fd, fs1: float->double 提升
     fn emit_fcvt_d_s(&mut self, fd: u8, fs1: u8) {
-        let insn = ((fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0100000 << 25
-            | 0x53;
+        let insn = ((fs1 as u32) << 15) | (fd as u32) << 7 | 0b0100000 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FCVT.S.D fd, fs1: double->float 截断
     fn emit_fcvt_s_d(&mut self, fd: u8, fs1: u8) {
-        let insn = ((fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0100001 << 25
-            | 0x53;
+        let insn = ((fs1 as u32) << 15) | (fd as u32) << 7 | 0b0100001 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FCVT.D.L fd, rs1: 64-bit 整数转双精度 (RV64)
     fn emit_fcvt_d_l(&mut self, fd: u8, rs1: u8) {
-        let insn = ((rs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b1101010 << 25
-            | 0x53;
+        let insn = ((rs1 as u32) << 15) | (fd as u32) << 7 | 0b1101010 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FCVT.L.D rd, fs1: 双精度转 64-bit 整数 (RV64)
     fn emit_fcvt_l_d(&mut self, rd: u8, fs1: u8) {
-        let insn = (fs1 as u32) << 15
-            | 0b001 << 12
-            | (rd as u32) << 7
-            | 0b1100010 << 25
-            | 0x53;
+        let insn = (fs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0b1100010 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FMV.D.X fd, rs1: 整数寄存器移动到浮点寄存器 (64-bit)
     fn emit_fmv_d_x(&mut self, fd: u8, rs1: u8) {
-        let insn = ((rs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b1111000 << 25
-            | 0x53;
+        let insn = ((rs1 as u32) << 15) | (fd as u32) << 7 | 0b1111000 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FMV.X.D rd, fs1: 浮点寄存器移动到整数寄存器 (64-bit)
     fn emit_fmv_x_d(&mut self, rd: u8, fs1: u8) {
-        let insn = ((fs1 as u32) << 15)
-            | (rd as u32) << 7
-            | 0b1110000 << 25
-            | 0x53;
+        let insn = ((fs1 as u32) << 15) | (rd as u32) << 7 | 0b1110000 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
     /// FSGNJ.D fd, fs1, fs2: 双精度符号注入
     fn emit_fsgnj_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
-        let insn = ((fs2 as u32) << 20
-            | (fs1 as u32) << 15)
-            | (fd as u32) << 7
-            | 0b0010001 << 25
-            | 0x53;
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0010001 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1567,11 +1558,8 @@ impl Riscv64Codegen {
 
     /// VSETVLI rd, rs1, vtype: 设置向量类型
     fn emit_vsetvli(&mut self, rd: u8, rs1: u8, vtype: u32) {
-        let insn = (vtype & 0x7ff) << 20
-            | (rs1 as u32) << 15
-            | 0b111 << 12
-            | (rd as u32) << 7
-            | 0x57; // OP-V
+        let insn =
+            (vtype & 0x7ff) << 20 | (rs1 as u32) << 15 | 0b111 << 12 | (rd as u32) << 7 | 0x57; // OP-V
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1589,22 +1577,15 @@ impl Riscv64Codegen {
     /// VLE32.V vd, (rs1), vm: 向量 32-bit 元素加载
     fn emit_vle32_v(&mut self, vd: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit
-            | (rs1 as u32) << 15
-            | 0b010 << 12
-            | (vd as u32) << 7
-            | 0b0000111 << 25
-            | 0x07;
+        let insn =
+            vm_bit | (rs1 as u32) << 15 | 0b010 << 12 | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VSE32.V vs3, (rs1), vm: 向量 32-bit 元素存储
     fn emit_vse32_v(&mut self, vs3: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = (vm_bit
-            | (vs3 as u32) << 20
-            | (rs1 as u32) << 15
-            | 0b010 << 12)
+        let insn = (vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15 | 0b010 << 12)
             | 0b0000111 << 25
             | 0x27;
         self.emit(&insn.to_le_bytes());
@@ -1613,9 +1594,7 @@ impl Riscv64Codegen {
     /// VADD.VV vd, vs2, vs1, vm: 向量加法
     fn emit_vadd_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = (vm_bit
-            | (vs2 as u32) << 20
-            | (vs1 as u32) << 15)
+        let insn = (vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15)
             | (vd as u32) << 7
             | 0b1000001 << 25
             | 0x57;
@@ -1638,9 +1617,7 @@ impl Riscv64Codegen {
     /// VREDUCE.VS vd, vs2, vs1, vm: 向量归约 (简化)
     fn emit_vredsum_vs(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = (vm_bit
-            | (vs2 as u32) << 20
-            | (vs1 as u32) << 15)
+        let insn = (vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15)
             | (vd as u32) << 7
             | 0b1100001 << 25
             | 0x57;
@@ -1652,24 +1629,23 @@ impl Riscv64Codegen {
     /// VLE8.V vd, (rs1), vm: 向量 8-bit 元素加载
     fn emit_vle8_v(&mut self, vd: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = (vm_bit | (rs1 as u32) << 15)
-            | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
+        let insn = (vm_bit | (rs1 as u32) << 15) | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VLE16.V vd, (rs1), vm: 向量 16-bit 元素加载
     fn emit_vle16_v(&mut self, vd: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (rs1 as u32) << 15 | 0b101 << 12
-            | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
+        let insn =
+            vm_bit | (rs1 as u32) << 15 | 0b101 << 12 | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VLE64.V vd, (rs1), vm: 向量 64-bit 元素加载
     fn emit_vle64_v(&mut self, vd: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (rs1 as u32) << 15 | 0b011 << 12
-            | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
+        let insn =
+            vm_bit | (rs1 as u32) << 15 | 0b011 << 12 | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1683,72 +1659,106 @@ impl Riscv64Codegen {
     /// VSE16.V vs3, (rs1), vm
     fn emit_vse16_v(&mut self, vs3: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15
-            | 0b101 << 12 | 0b0000111 << 25 | 0x27;
+        let insn =
+            vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15 | 0b101 << 12 | 0b0000111 << 25 | 0x27;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VSE64.V vs3, (rs1), vm
     fn emit_vse64_v(&mut self, vs3: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15
-            | 0b011 << 12 | 0b0000111 << 25 | 0x27;
+        let insn =
+            vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15 | 0b011 << 12 | 0b0000111 << 25 | 0x27;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VSUB.VV vd, vs2, vs1, vm: 向量减法
     fn emit_vsub_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | (vd as u32) << 7 | 0b0000101 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | (vd as u32) << 7
+            | 0b0000101 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VAND.VV vd, vs2, vs1, vm
     fn emit_vand_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b0010011 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b0010011 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VOR.VV vd, vs2, vs1, vm
     fn emit_vor_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b010 << 12 | (vd as u32) << 7 | 0b0010101 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b010 << 12
+            | (vd as u32) << 7
+            | 0b0010101 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VXOR.VV vd, vs2, vs1, vm
     fn emit_vxor_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b011 << 12 | (vd as u32) << 7 | 0b0010111 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b011 << 12
+            | (vd as u32) << 7
+            | 0b0010111 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VSLL.VV vd, vs2, vs1, vm: 向量左移
     fn emit_vsll_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b101 << 12 | (vd as u32) << 7 | 0b1000011 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b101 << 12
+            | (vd as u32) << 7
+            | 0b1000011 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VSRL.VV vd, vs2, vs1, vm: 向量逻辑右移
     fn emit_vsrl_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b101 << 12 | (vd as u32) << 7 | 0b1010001 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b101 << 12
+            | (vd as u32) << 7
+            | 0b1010001 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VSRA.VV vd, vs2, vs1, vm: 向量算术右移
     fn emit_vsra_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b101 << 12 | (vd as u32) << 7 | 0b1010011 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b101 << 12
+            | (vd as u32) << 7
+            | 0b1010011 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1757,45 +1767,69 @@ impl Riscv64Codegen {
     /// VWADD.VV vd, vs2, vs1, vm: 宽化加法 (2*SEW)
     fn emit_vwadd_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b010 << 12 | (vd as u32) << 7 | 0b1100011 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b010 << 12
+            | (vd as u32) << 7
+            | 0b1100011 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VWSUB.VV vd, vs2, vs1, vm: 宽化减法
     fn emit_vwsub_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b010 << 12 | (vd as u32) << 7 | 0b1100101 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b010 << 12
+            | (vd as u32) << 7
+            | 0b1100101 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VWMUL.VV vd, vs2, vs1, vm: 宽化乘法
     fn emit_vwmul_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b010 << 12 | (vd as u32) << 7 | 0b1110111 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b010 << 12
+            | (vd as u32) << 7
+            | 0b1110111 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VWMULU.VV vd, vs2, vs1, vm: 宽化无符号乘法
     fn emit_vwmulu_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = (vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15) | (vd as u32) << 7 | 0b1110001 << 25 | 0x57;
+        let insn = (vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15)
+            | (vd as u32) << 7
+            | 0b1110001 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VNSRL.WI vd, vs2, uimm, vm: 窄化右移 (立即数)
     fn emit_vnsrl_wi(&mut self, vd: u8, vs2: u8, uimm: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = (vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15) | (vd as u32) << 7 | 0b1011001 << 25 | 0x57;
+        let insn = (vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15)
+            | (vd as u32) << 7
+            | 0b1011001 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VNSRA.WI vd, vs2, uimm, vm: 窄化算术右移
     fn emit_vnsra_wi(&mut self, vd: u8, vs2: u8, uimm: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = (vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15) | (vd as u32) << 7 | 0b1011011 << 25 | 0x57;
+        let insn = (vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15)
+            | (vd as u32) << 7
+            | 0b1011011 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1803,30 +1837,41 @@ impl Riscv64Codegen {
 
     /// VMAND.MM vd, vs2, vs1: 掩码 AND
     fn emit_vmand_mm(&mut self, vd: u8, vs2: u8, vs1: u8) {
-        let insn = (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b0110011 << 25 | 0x57;
+        let insn = (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b0110011 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VMOR.MM vd, vs2, vs1: 掩码 OR
     fn emit_vmor_mm(&mut self, vd: u8, vs2: u8, vs1: u8) {
-        let insn = (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b010 << 12 | (vd as u32) << 7 | 0b0110101 << 25 | 0x57;
+        let insn = (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b010 << 12
+            | (vd as u32) << 7
+            | 0b0110101 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VMXOR.MM vd, vs2, vs1: 掩码 XOR
     fn emit_vmxor_mm(&mut self, vd: u8, vs2: u8, vs1: u8) {
-        let insn = (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b011 << 12 | (vd as u32) << 7 | 0b0110111 << 25 | 0x57;
+        let insn = (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b011 << 12
+            | (vd as u32) << 7
+            | 0b0110111 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VMNOT.M vd, vs2: 掩码 NOT (vmandn with v0=ones)
     fn emit_vmnot_m(&mut self, vd: u8, vs2: u8) {
         // VMNOT.M vd, vs2 = VMXNOR.M vd, vs2, v0 (all-ones mask)
-        let insn = ((vs2 as u32) << 20)
-            | 0b100 << 12 | (vd as u32) << 7 | 0b0111001 << 25 | 0x57;
+        let insn = ((vs2 as u32) << 20) | 0b100 << 12 | (vd as u32) << 7 | 0b0111001 << 25 | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1835,64 +1880,104 @@ impl Riscv64Codegen {
     /// VFADD.VV vd, vs2, vs1, vm: 浮点向量加法
     fn emit_vfadd_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b0000001 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b0000001 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VFSUB.VV vd, vs2, vs1, vm: 浮点向量减法
     fn emit_vfsub_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b0000101 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b0000101 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VFMUL.VV vd, vs2, vs1, vm: 浮点向量乘法
     fn emit_vfmul_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b1001001 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b1001001 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VFDIV.VV vd, vs2, vs1, vm: 浮点向量除法
     fn emit_vfdiv_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b1000001 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b1000001 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VFMADD.VV vd, vs1, vs2, vm: 浮点向量 fused multiply-add
     fn emit_vfmadd_vv(&mut self, vd: u8, vs1: u8, vs2: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b1010001 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b1010001 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VFMIN.VV vd, vs2, vs1, vm: 浮点向量 min
     fn emit_vfmin_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b0001001 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b0001001 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VFMAX.VV vd, vs2, vs1, vm: 浮点向量 max
     fn emit_vfmax_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b0001101 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b0001101 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VFREDSUM.VS vd, vs2, vs1, vm: 浮点归约求和
     fn emit_vfredsum_vs(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b001 << 12 | (vd as u32) << 7 | 0b0000011 << 25 | 0x57;
+        let insn = vm_bit
+            | (vs2 as u32) << 20
+            | (vs1 as u32) << 15
+            | 0b001 << 12
+            | (vd as u32) << 7
+            | 0b0000011 << 25
+            | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1921,8 +2006,11 @@ impl Riscv64Codegen {
     /// 尝试将 32-bit LW 压缩为 C.LW
     fn try_compress_lw(&mut self, rd: u8, rs1: u8, offset: u32) -> bool {
         // C.LW: rd'/rs1' 只能是 x8-x15, offset 7-bit unsigned, 4-byte aligned
-        if (8..=15).contains(&rd) && (8..=15).contains(&rs1)
-            && offset <= 124 && offset.is_multiple_of(4) {
+        if (8..=15).contains(&rd)
+            && (8..=15).contains(&rs1)
+            && offset <= 124
+            && offset.is_multiple_of(4)
+        {
             self.emit_c_lw(rd - 8, rs1 - 8, offset as u8);
             return true;
         }
@@ -1931,8 +2019,11 @@ impl Riscv64Codegen {
 
     /// 尝试将 32-bit SW 压缩为 C.SW
     fn try_compress_sw(&mut self, rs2: u8, rs1: u8, offset: u32) -> bool {
-        if (8..=15).contains(&rs2) && (8..=15).contains(&rs1)
-            && offset <= 124 && offset.is_multiple_of(4) {
+        if (8..=15).contains(&rs2)
+            && (8..=15).contains(&rs1)
+            && offset <= 124
+            && offset.is_multiple_of(4)
+        {
             self.emit_c_sw(rs2 - 8, rs1 - 8, offset as u8);
             return true;
         }
@@ -1963,7 +2054,7 @@ impl Riscv64Codegen {
     fn try_compress_insn(&mut self, rd: u8, rs1: u8, _rs2: u8, imm: i32, op: u8) -> bool {
         match op {
             0x13 => self.try_compress_addi(rd, rs1, imm), // ADDI
-            0x37 => self.try_compress_li(rd, imm),         // LUI/LI
+            0x37 => self.try_compress_li(rd, imm),        // LUI/LI
             _ => false,
         }
     }
@@ -1972,31 +2063,19 @@ impl Riscv64Codegen {
 
     /// CSRRW rd, csr, rs1: 原子读写 CSR
     fn emit_csrrw(&mut self, rd: u8, csr: u16, rs1: u8) {
-        let insn = (csr as u32) << 20
-            | (rs1 as u32) << 15
-            | 0b001 << 12
-            | (rd as u32) << 7
-            | 0x73;
+        let insn = (csr as u32) << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x73;
         self.emit(&insn.to_le_bytes());
     }
 
     /// CSRRS rd, csr, rs1: 原子读并置位 CSR
     fn emit_csrrs(&mut self, rd: u8, csr: u16, rs1: u8) {
-        let insn = (csr as u32) << 20
-            | (rs1 as u32) << 15
-            | 0b010 << 12
-            | (rd as u32) << 7
-            | 0x73;
+        let insn = (csr as u32) << 20 | (rs1 as u32) << 15 | 0b010 << 12 | (rd as u32) << 7 | 0x73;
         self.emit(&insn.to_le_bytes());
     }
 
     /// CSRRC rd, csr, rs1: 原子读并清位 CSR
     fn emit_csrrc(&mut self, rd: u8, csr: u16, rs1: u8) {
-        let insn = (csr as u32) << 20
-            | (rs1 as u32) << 15
-            | 0b011 << 12
-            | (rd as u32) << 7
-            | 0x73;
+        let insn = (csr as u32) << 20 | (rs1 as u32) << 15 | 0b011 << 12 | (rd as u32) << 7 | 0x73;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -2051,9 +2130,7 @@ impl Riscv64Codegen {
 
     /// SFENCE.VMA rs1, rs2: 虚拟内存屏障
     fn emit_sfence_vma(&mut self, rs1: u8, rs2: u8) {
-        let insn = ((rs2 as u32) << 20
-            | (rs1 as u32) << 15)
-            | 0x73;
+        let insn = ((rs2 as u32) << 20 | (rs1 as u32) << 15) | 0x73;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -2080,8 +2157,8 @@ impl Riscv64Codegen {
         let mut copied = 0usize;
         while copied + 8 <= size {
             // ld t1, 0(t0); sd t1, 0(a0)
-            self.emit_ld(6, 5, copied as i32);  // t1 = [t0+off]
-            self.emit_sd(6, 10, copied as i32);  // [a0+off] = t1
+            self.emit_ld(6, 5, copied as i32); // t1 = [t0+off]
+            self.emit_sd(6, 10, copied as i32); // [a0+off] = t1
             copied += 8;
         }
         while copied + 4 <= size {
@@ -2125,9 +2202,7 @@ impl Riscv64Codegen {
     /// SB rs2, offset(rs1): 字节存储
     fn emit_sb(&mut self, rs2: u8, rs1: u8, off: i32) {
         let imm = off as u32;
-        let insn = (((imm >> 5) & 0x7f) << 25
-            | (rs2 as u32) << 20
-            | (rs1 as u32) << 15)
+        let insn = (((imm >> 5) & 0x7f) << 25 | (rs2 as u32) << 20 | (rs1 as u32) << 15)
             | (imm & 0x1f) << 7
             | 0x23;
         self.emit(&insn.to_le_bytes());
@@ -2147,7 +2222,12 @@ fn classify_rv_hfa(
     ty: &ValueType,
     fields: &HashMap<String, (Arc<Vec<Field>>, bool)>,
 ) -> Option<HfaInfo> {
-    let ValueType::Aggregate { name, size, is_union: false } = ty else {
+    let ValueType::Aggregate {
+        name,
+        size,
+        is_union: false,
+    } = ty
+    else {
         return None;
     };
     if *size == 0 || *size > 64 {
@@ -2245,10 +2325,8 @@ mod tests {
 
     #[test]
     fn riscv64_ir_return_add() {
-        let (program, diags) = crate::parser::parse(
-            b"int main(void) { return 10 + 32; }\n",
-            "rv.c",
-        );
+        let (program, diags) =
+            crate::parser::parse(b"int main(void) { return 10 + 32; }\n", "rv.c");
         assert!(diags.is_empty(), "{diags:?}");
         let module = lower(program).expect("lower");
         validate(&module).expect("validate");
@@ -2329,11 +2407,19 @@ mod tests {
         cg.compile(&module);
         let obj = cg.build_output();
         let has_addi_sp = obj.windows(4).any(|w| {
-            if w.len() < 4 { return false; }
-            let insn = (w[0] as u32) | ((w[1] as u32) << 8) | ((w[2] as u32) << 16) | ((w[3] as u32) << 24);
+            if w.len() < 4 {
+                return false;
+            }
+            let insn = (w[0] as u32)
+                | ((w[1] as u32) << 8)
+                | ((w[2] as u32) << 16)
+                | ((w[3] as u32) << 24);
             (insn & 0x7F) == 0x13 && ((insn >> 12) & 7) == 0 && ((insn >> 15) & 0x1F) == 2
         });
-        assert!(has_addi_sp, "expected addi rd, sp, #off (M7 by-ref aggregate)");
+        assert!(
+            has_addi_sp,
+            "expected addi rd, sp, #off (M7 by-ref aggregate)"
+        );
     }
 
     // M8: JAL 范围校验
@@ -2374,7 +2460,11 @@ mod tests {
         assert!(code.len() >= 4);
         let insn = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
         assert_eq!(insn & 0x7f, 0x53, "opcode should be 0x53 (FP)");
-        assert_eq!((insn >> 25) & 0x7f, 0x01, "funct7 should be 0000001 (FADD.D)");
+        assert_eq!(
+            (insn >> 25) & 0x7f,
+            0x01,
+            "funct7 should be 0000001 (FADD.D)"
+        );
     }
 
     // M8: CSR 访问指令 CSRRS 编码
@@ -2468,10 +2558,17 @@ mod tests {
         // FLE.D x16, f17, f18
         cg.emit_fle_d(16, 17, 18);
         let code = &cg.code;
-        assert!(code.len() >= 24, "expected 24 bytes for 6 D-extension instructions");
+        assert!(
+            code.len() >= 24,
+            "expected 24 bytes for 6 D-extension instructions"
+        );
         // FSQRT.D: funct7=0101101
         let insn_sqrt = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
-        assert_eq!((insn_sqrt >> 25) & 0x7f, 0b0101101, "FSQRT.D funct7=0101101");
+        assert_eq!(
+            (insn_sqrt >> 25) & 0x7f,
+            0b0101101,
+            "FSQRT.D funct7=0101101"
+        );
         // FMIN.D: funct7=0010101, funct3=000
         let insn_min = u32::from_le_bytes([code[4], code[5], code[6], code[7]]);
         assert_eq!((insn_min >> 25) & 0x7f, 0b0010101, "FMIN.D funct7=0010101");
@@ -2511,10 +2608,15 @@ mod tests {
         // 验证: 8 条 sd aN, off(sp) 指令, LE 编码:
         //   byte0 低 7 位 = opcode = 0x23 (SD)
         //   byte1 位 6:4  = funct3 = 0b011
-        assert!(cg.code.len() >= 32, "expected at least 32 bytes of SD instructions");
-        let sd_count = cg.code.windows(4).filter(|w| {
-            (w[0] & 0x7f) == 0x23 && (w[1] & 0x70) == 0x30
-        }).count();
+        assert!(
+            cg.code.len() >= 32,
+            "expected at least 32 bytes of SD instructions"
+        );
+        let sd_count = cg
+            .code
+            .windows(4)
+            .filter(|w| (w[0] & 0x7f) == 0x23 && (w[1] & 0x70) == 0x30)
+            .count();
         assert_eq!(sd_count, 8, "expected 8 SD instructions, got {sd_count}");
     }
 
@@ -2535,9 +2637,11 @@ mod tests {
         // 验证: 3 条 ld a0, off(sp) 指令, LE 编码:
         //   byte0 低 7 位 = opcode = 0x03 (LD)
         //   byte1 位 6:4  = funct3 = 0b011
-        let ld_count = cg.code.windows(4).filter(|w| {
-            (w[0] & 0x7f) == 0x03 && (w[1] & 0x70) == 0x30
-        }).count();
+        let ld_count = cg
+            .code
+            .windows(4)
+            .filter(|w| (w[0] & 0x7f) == 0x03 && (w[1] & 0x70) == 0x30)
+            .count();
         assert_eq!(ld_count, 3, "expected 3 LD instructions, got {ld_count}");
         // 验证 va_offs 推进
         assert_eq!(cg.va_offs, 3, "va_offs should be 3 after 3 reads");

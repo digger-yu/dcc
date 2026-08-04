@@ -34,7 +34,9 @@ pub struct MemProfData {
 }
 
 impl MemProfData {
-    pub fn empty() -> Self { Self::default() }
+    pub fn empty() -> Self {
+        Self::default()
+    }
 
     /// 解析 dcc 简化版 memprofdata 格式:
     ///   `alloc <frames...> = <count> <bytes>`
@@ -45,13 +47,12 @@ impl MemProfData {
         let mut d = Self::default();
         for line in s.lines() {
             let l = line.trim();
-            if l.is_empty() || l.starts_with('#') { continue; }
+            if l.is_empty() || l.starts_with('#') {
+                continue;
+            }
             if let Some(rest) = l.strip_prefix("alloc ") {
                 if let Some((frames, tail)) = rest.split_once(" = ") {
-                    let stack: Vec<String> = frames
-                        .split(" -> ")
-                        .map(|s| s.to_string())
-                        .collect();
+                    let stack: Vec<String> = frames.split(" -> ").map(|s| s.to_string()).collect();
                     let mut it = tail.split_whitespace();
                     let count: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
                     let bytes: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
@@ -90,7 +91,8 @@ mod tests {
         ).unwrap();
         let d = MemProfData::read(&tmp).unwrap();
         assert_eq!(
-            d.alloc_counts.get(&vec!["main".into(), "foo".into(), "malloc".into()]),
+            d.alloc_counts
+                .get(&vec!["main".into(), "foo".into(), "malloc".into()]),
             Some(&100)
         );
         // 100 < 200 -> is_cold == true (callstack 100, threshold 200)

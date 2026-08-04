@@ -23,7 +23,9 @@ pub struct AutoFdoProfile {
 }
 
 impl AutoFdoProfile {
-    pub fn empty() -> Self { Self::default() }
+    pub fn empty() -> Self {
+        Self::default()
+    }
 
     /// 解析简化格式:
     ///   `# header`
@@ -35,7 +37,9 @@ impl AutoFdoProfile {
         let mut p = AutoFdoProfile::default();
         for line in s.lines() {
             let l = line.trim();
-            if l.is_empty() || l.starts_with('#') { continue; }
+            if l.is_empty() || l.starts_with('#') {
+                continue;
+            }
             let mut it = l.split_whitespace();
             match it.next() {
                 Some("func") => {
@@ -62,20 +66,27 @@ impl AutoFdoProfile {
         let mut out = HashMap::new();
         for (name, &c) in &self.func_samples {
             let ratio = c as f64 / total as f64;
-            out.insert(name.clone(), if ratio > 0.10 {
-                Hotness::Hot
-            } else if ratio > 0.01 {
-                Hotness::Warm
-            } else {
-                Hotness::Cold
-            });
+            out.insert(
+                name.clone(),
+                if ratio > 0.10 {
+                    Hotness::Hot
+                } else if ratio > 0.01 {
+                    Hotness::Warm
+                } else {
+                    Hotness::Cold
+                },
+            );
         }
         out
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hotness { Hot, Warm, Cold }
+pub enum Hotness {
+    Hot,
+    Warm,
+    Cold,
+}
 
 #[cfg(test)]
 mod tests {
@@ -84,7 +95,11 @@ mod tests {
     #[test]
     fn parse_minimal_profile() {
         let tmp = std::env::temp_dir().join("dcc-autofdo-test.txt");
-        std::fs::write(&tmp, b"# dcc autofdo v0\nfunc main 100\nfunc foo 10\nline main 5 1 4\n").unwrap();
+        std::fs::write(
+            &tmp,
+            b"# dcc autofdo v0\nfunc main 100\nfunc foo 10\nline main 5 1 4\n",
+        )
+        .unwrap();
         let p = AutoFdoProfile::read(&tmp).unwrap();
         assert_eq!(p.func_samples.get("main"), Some(&100));
         assert_eq!(p.line_samples.get(&("main".into(), 5, 1)), Some(&4));

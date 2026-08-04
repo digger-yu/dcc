@@ -20,15 +20,15 @@
 // AutoFDO/MemProf 读取的是 LLVM/Perf 格式的 .data 概要, 当前仅做格式定义 +
 //   `ProfileUse` 占位 (在 `pgo.rs` / `autofdo.rs` 中)。
 
-pub mod gcov;
-pub mod pgo;
 pub mod autofdo;
+pub mod gcov;
 pub mod lbr;
 pub mod memprof;
-pub mod perf_event;
-pub mod perf_data;
-pub mod weights;
 pub mod offload;
+pub mod perf_data;
+pub mod perf_event;
+pub mod pgo;
+pub mod weights;
 
 use std::path::{Path, PathBuf};
 
@@ -70,10 +70,7 @@ pub struct ProfileConfig {
 impl ProfileConfig {
     /// 是否启用任何分析相关插桩
     pub fn any_instrumentation(&self) -> bool {
-        self.pgo_generate.is_some()
-            || self.gcov
-            || self.profile_arcs
-            || self.memprof
+        self.pgo_generate.is_some() || self.gcov || self.profile_arcs || self.memprof
     }
     /// 是否启用任何使用概要的优化
     pub fn any_use(&self) -> bool {

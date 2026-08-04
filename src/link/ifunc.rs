@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use super::layout::{OutputRela, Layout};
+use super::layout::{Layout, OutputRela};
 use crate::codegen::elf::R_X86_64_IRELATIVE;
 
 /// IFUNC 解析表：符号名 -> 解析器地址 (vaddr)
@@ -27,11 +27,13 @@ pub struct IfuncTable {
     /// 符号名 -> resolver 的输出 vaddr
     pub resolvers: HashMap<String, u64>,
     /// 符号名 -> IFUNC 自身 GLOB_DAT 重定位 (用于 .rela.dyn)
-    pub glob_dats: Vec<(String, u64)>,  // (name, offset in .got)
+    pub glob_dats: Vec<(String, u64)>, // (name, offset in .got)
 }
 
 impl IfuncTable {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// 注册 IFUNC：name 是 IFUNC 符号名，resolver_vaddr 是 resolver 函数地址
     pub fn register(&mut self, name: &str, resolver_vaddr: u64) {
@@ -49,7 +51,9 @@ impl IfuncTable {
 pub fn collect_ifuncs(layout: &Layout) -> IfuncTable {
     let mut table = IfuncTable::new();
     for sym in &layout.symbols {
-        if sym.kind == 10 /* STT_GNU_IFUNC */ {
+        if sym.kind == 10
+        /* STT_GNU_IFUNC */
+        {
             // 找到 resolver (与 sym 同名, kind = STT_FUNC)
             // 简化: 用 sym 的 vaddr 作为 resolver
             let vaddr = sym.vaddr;

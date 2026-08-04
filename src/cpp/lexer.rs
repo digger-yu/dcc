@@ -11,31 +11,45 @@
 //!   - C++ 关键字映射到新的 CppKw 包装, parser 优先匹配
 //!   - :: 双冒号被 lex 为单个 ColonColon 标点
 
-use crate::tokens::{Tok, TokKind};
 use crate::diagnostics::Span;
+use crate::tokens::{Tok, TokKind};
 
 /// C 关键字 → TokKind (M9 共享, 避免 C++ lexer 漏识别 return 等关键字)
 fn c_keyword_kind(s: &str) -> Option<TokKind> {
     Some(match s {
-        "int" => TokKind::KwInt, "char" => TokKind::KwChar,
-        "short" => TokKind::KwShort, "long" => TokKind::KwLong,
-        "void" => TokKind::KwVoid, "float" => TokKind::KwFloat,
-        "double" => TokKind::KwDouble, "signed" | "__signed__" => TokKind::KwSigned,
+        "int" => TokKind::KwInt,
+        "char" => TokKind::KwChar,
+        "short" => TokKind::KwShort,
+        "long" => TokKind::KwLong,
+        "void" => TokKind::KwVoid,
+        "float" => TokKind::KwFloat,
+        "double" => TokKind::KwDouble,
+        "signed" | "__signed__" => TokKind::KwSigned,
         "unsigned" => TokKind::KwUnsigned,
-        "struct" => TokKind::KwStruct, "union" => TokKind::KwUnion,
-        "enum" => TokKind::KwEnum, "typedef" => TokKind::KwTypedef,
-        "if" => TokKind::KwIf, "else" => TokKind::KwElse,
-        "while" => TokKind::KwWhile, "for" => TokKind::KwFor,
-        "do" => TokKind::KwDo, "switch" => TokKind::KwSwitch,
-        "case" => TokKind::KwCase, "default" => TokKind::KwDefault,
-        "break" => TokKind::KwBreak, "continue" => TokKind::KwContinue,
-        "return" => TokKind::KwReturn, "goto" => TokKind::KwGoto,
-        "static" => TokKind::KwStatic, "extern" => TokKind::KwExtern,
+        "struct" => TokKind::KwStruct,
+        "union" => TokKind::KwUnion,
+        "enum" => TokKind::KwEnum,
+        "typedef" => TokKind::KwTypedef,
+        "if" => TokKind::KwIf,
+        "else" => TokKind::KwElse,
+        "while" => TokKind::KwWhile,
+        "for" => TokKind::KwFor,
+        "do" => TokKind::KwDo,
+        "switch" => TokKind::KwSwitch,
+        "case" => TokKind::KwCase,
+        "default" => TokKind::KwDefault,
+        "break" => TokKind::KwBreak,
+        "continue" => TokKind::KwContinue,
+        "return" => TokKind::KwReturn,
+        "goto" => TokKind::KwGoto,
+        "static" => TokKind::KwStatic,
+        "extern" => TokKind::KwExtern,
         "const" | "__const__" => TokKind::KwConst,
         "volatile" | "__volatile__" => TokKind::KwVolatile,
         "inline" | "__inline__" | "__inline" => TokKind::KwInline,
         "restrict" | "__restrict__" | "__restrict" => TokKind::KwRestrict,
-        "auto" => TokKind::KwAuto, "register" => TokKind::KwRegister,
+        "auto" => TokKind::KwAuto,
+        "register" => TokKind::KwRegister,
         "sizeof" => TokKind::KwSizeof,
         "_Alignof" | "alignof" | "__alignof" | "__alignof__" => TokKind::KwAlignof,
         "_Atomic" => TokKind::KwAtomic,
@@ -49,25 +63,57 @@ fn c_keyword_kind(s: &str) -> Option<TokKind> {
 /// C++ 关键字枚举 (仅 C 关键字之外的 C++ 扩展)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CppKw {
-    Class, Public, Private, Protected,
-    This, New, Delete,
-    Operator, Virtual, Inline, Explicit,
-    Namespace, Using,
-    True, False, Nullptr,
-    Static, Const, Friend,
+    Class,
+    Public,
+    Private,
+    Protected,
+    This,
+    New,
+    Delete,
+    Operator,
+    Virtual,
+    Inline,
+    Explicit,
+    Namespace,
+    Using,
+    True,
+    False,
+    Nullptr,
+    Static,
+    Const,
+    Friend,
     // M8 新增
-    Template, Typename,
-    Override, Final,
-    Try, Catch, Throw,
-    Constexpr, Consteval,
-    Decltype, Typeid,
-    DynamicCast, StaticCast, ReinterpretCast, ConstCast,
-    Mutable, Volatile, Noexcept, ExplicitSpec,
+    Template,
+    Typename,
+    Override,
+    Final,
+    Try,
+    Catch,
+    Throw,
+    Constexpr,
+    Consteval,
+    Decltype,
+    Typeid,
+    DynamicCast,
+    StaticCast,
+    ReinterpretCast,
+    ConstCast,
+    Mutable,
+    Volatile,
+    Noexcept,
+    ExplicitSpec,
     // M9 新增 (C++20)
-    Concept, Requires, CoAwait, CoYield, CoReturn,
-    Module, Import, Export,
+    Concept,
+    Requires,
+    CoAwait,
+    CoYield,
+    CoReturn,
+    Module,
+    Import,
+    Export,
     // C++20 杂项
-    Char8T, ConstevalAuto,
+    Char8T,
+    ConstevalAuto,
 }
 
 impl CppKw {
@@ -197,7 +243,10 @@ impl CppTok {
     }
 
     pub fn is_access_spec(&self) -> bool {
-        matches!(self, Self::Kw(CppKw::Public | CppKw::Private | CppKw::Protected, _))
+        matches!(
+            self,
+            Self::Kw(CppKw::Public | CppKw::Private | CppKw::Protected, _)
+        )
     }
 }
 
@@ -213,12 +262,23 @@ pub struct CppLexer<'a> {
 
 impl<'a> CppLexer<'a> {
     pub fn new(src: &'a [u8], file: &str) -> Self {
-        Self { src, file: file.to_string(), pos: 0, line: 1, col: 1 }
+        Self {
+            src,
+            file: file.to_string(),
+            pos: 0,
+            line: 1,
+            col: 1,
+        }
     }
 
     /// 当前 span
     fn mk_span(&self, len: u32) -> Span {
-        Span { file: self.file.clone(), line: self.line, col: self.col, len }
+        Span {
+            file: self.file.clone(),
+            line: self.line,
+            col: self.col,
+            len,
+        }
     }
 
     /// 跳过空白 / 注释 (C 风格 // 与 /* */)
@@ -236,26 +296,40 @@ impl<'a> CppLexer<'a> {
         loop {
             while self.pos < self.src.len() {
                 let b = self.src[self.pos];
-                if b == b'\n' { self.line += 1; self.col = 1; self.pos += 1; }
-                else if b == b' ' || b == b'\t' || b == b'\r' { self.pos += 1; self.col += 1; }
-                else { break; }
+                if b == b'\n' {
+                    self.line += 1;
+                    self.col = 1;
+                    self.pos += 1;
+                } else if b == b' ' || b == b'\t' || b == b'\r' {
+                    self.pos += 1;
+                    self.col += 1;
+                } else {
+                    break;
+                }
             }
-            if self.pos + 1 < self.src.len() && &self.src[self.pos..self.pos+2] == b"//" {
+            if self.pos + 1 < self.src.len() && &self.src[self.pos..self.pos + 2] == b"//" {
                 while self.pos < self.src.len() && self.src[self.pos] != b'\n' {
-                    self.pos += 1; self.col += 1;
+                    self.pos += 1;
+                    self.col += 1;
                 }
                 continue;
             }
-            if self.pos + 1 < self.src.len() && &self.src[self.pos..self.pos+2] == b"/*" {
-                self.pos += 2; self.col += 2;
-                while self.pos + 1 < self.src.len()
-                    && &self.src[self.pos..self.pos+2] != b"*/"
-                {
-                    if self.src[self.pos] == b'\n' { self.line += 1; self.col = 1; }
-                    else { self.col += 1; }
+            if self.pos + 1 < self.src.len() && &self.src[self.pos..self.pos + 2] == b"/*" {
+                self.pos += 2;
+                self.col += 2;
+                while self.pos + 1 < self.src.len() && &self.src[self.pos..self.pos + 2] != b"*/" {
+                    if self.src[self.pos] == b'\n' {
+                        self.line += 1;
+                        self.col = 1;
+                    } else {
+                        self.col += 1;
+                    }
                     self.pos += 1;
                 }
-                if self.pos + 1 < self.src.len() { self.pos += 2; self.col += 2; }
+                if self.pos + 1 < self.src.len() {
+                    self.pos += 2;
+                    self.col += 2;
+                }
                 continue;
             }
             break;
@@ -265,148 +339,245 @@ impl<'a> CppLexer<'a> {
     /// 读一个 C++ token
     pub fn next_tok(&mut self) -> Option<CppTok> {
         self.skip_trivia();
-        if self.pos >= self.src.len() { return None; }
+        if self.pos >= self.src.len() {
+            return None;
+        }
         let b = self.src[self.pos];
         if b == b':' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b':' {
-            self.pos += 2; self.col += 2;
+            self.pos += 2;
+            self.col += 2;
             return Some(CppTok::ColonColon(self.mk_span(2)));
         }
         // C++ 复合操作符: ->, ->*, --, -=, <<=, >>=
         if b == b'-' && self.pos + 1 < self.src.len() {
             let n = self.src[self.pos + 1];
             if n == b'>' {
-                self.pos += 2; self.col += 2;
+                self.pos += 2;
+                self.col += 2;
                 // ->* (成员指针访问) 也归并到 Arrow, 后续解析按上下文区分
-                return Some(CppTok::C(Tok { kind: TokKind::Arrow,
-                    span: self.mk_span(2), text: "->".to_string() }));
+                return Some(CppTok::C(Tok {
+                    kind: TokKind::Arrow,
+                    span: self.mk_span(2),
+                    text: "->".to_string(),
+                }));
             }
             if n == b'-' {
-                self.pos += 2; self.col += 2;
-                return Some(CppTok::C(Tok { kind: TokKind::MinusMinus,
-                    span: self.mk_span(2), text: "--".to_string() }));
+                self.pos += 2;
+                self.col += 2;
+                return Some(CppTok::C(Tok {
+                    kind: TokKind::MinusMinus,
+                    span: self.mk_span(2),
+                    text: "--".to_string(),
+                }));
             }
             if n == b'=' {
-                self.pos += 2; self.col += 2;
-                return Some(CppTok::C(Tok { kind: TokKind::MinusEq,
-                    span: self.mk_span(2), text: "-=".to_string() }));
+                self.pos += 2;
+                self.col += 2;
+                return Some(CppTok::C(Tok {
+                    kind: TokKind::MinusEq,
+                    span: self.mk_span(2),
+                    text: "-=".to_string(),
+                }));
             }
         }
         if b == b'+' && self.pos + 1 < self.src.len() {
             let n = self.src[self.pos + 1];
             if n == b'+' {
-                self.pos += 2; self.col += 2;
-                return Some(CppTok::C(Tok { kind: TokKind::PlusPlus,
-                    span: self.mk_span(2), text: "++".to_string() }));
+                self.pos += 2;
+                self.col += 2;
+                return Some(CppTok::C(Tok {
+                    kind: TokKind::PlusPlus,
+                    span: self.mk_span(2),
+                    text: "++".to_string(),
+                }));
             }
             if n == b'=' {
-                self.pos += 2; self.col += 2;
-                return Some(CppTok::C(Tok { kind: TokKind::PlusEq,
-                    span: self.mk_span(2), text: "+=".to_string() }));
+                self.pos += 2;
+                self.col += 2;
+                return Some(CppTok::C(Tok {
+                    kind: TokKind::PlusEq,
+                    span: self.mk_span(2),
+                    text: "+=".to_string(),
+                }));
             }
         }
         if b == b'<' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'<' {
-            self.pos += 2; self.col += 2;
+            self.pos += 2;
+            self.col += 2;
             if self.pos < self.src.len() && self.src[self.pos] == b'=' {
-                self.pos += 1; self.col += 1;
-                return Some(CppTok::C(Tok { kind: TokKind::ShlEq,
-                    span: self.mk_span(3), text: "<<=".to_string() }));
+                self.pos += 1;
+                self.col += 1;
+                return Some(CppTok::C(Tok {
+                    kind: TokKind::ShlEq,
+                    span: self.mk_span(3),
+                    text: "<<=".to_string(),
+                }));
             }
-            return Some(CppTok::C(Tok { kind: TokKind::Shl,
-                span: self.mk_span(2), text: "<<".to_string() }));
+            return Some(CppTok::C(Tok {
+                kind: TokKind::Shl,
+                span: self.mk_span(2),
+                text: "<<".to_string(),
+            }));
         }
         if b == b'>' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'>' {
-            self.pos += 2; self.col += 2;
+            self.pos += 2;
+            self.col += 2;
             if self.pos < self.src.len() && self.src[self.pos] == b'=' {
-                self.pos += 1; self.col += 1;
-                return Some(CppTok::C(Tok { kind: TokKind::ShrEq,
-                    span: self.mk_span(3), text: ">>=".to_string() }));
+                self.pos += 1;
+                self.col += 1;
+                return Some(CppTok::C(Tok {
+                    kind: TokKind::ShrEq,
+                    span: self.mk_span(3),
+                    text: ">>=".to_string(),
+                }));
             }
-            return Some(CppTok::C(Tok { kind: TokKind::Shr,
-                span: self.mk_span(2), text: ">>".to_string() }));
+            return Some(CppTok::C(Tok {
+                kind: TokKind::Shr,
+                span: self.mk_span(2),
+                text: ">>".to_string(),
+            }));
         }
         if b == b'=' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::EqEq,
-                span: self.mk_span(2), text: "==".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::EqEq,
+                span: self.mk_span(2),
+                text: "==".to_string(),
+            }));
         }
         if b == b'!' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::Ne,
-                span: self.mk_span(2), text: "!=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::Ne,
+                span: self.mk_span(2),
+                text: "!=".to_string(),
+            }));
         }
         if b == b'<' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::Le,
-                span: self.mk_span(2), text: "<=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::Le,
+                span: self.mk_span(2),
+                text: "<=".to_string(),
+            }));
         }
         if b == b'>' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::Ge,
-                span: self.mk_span(2), text: ">=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::Ge,
+                span: self.mk_span(2),
+                text: ">=".to_string(),
+            }));
         }
         if b == b'&' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'&' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::AndAnd,
-                span: self.mk_span(2), text: "&&".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::AndAnd,
+                span: self.mk_span(2),
+                text: "&&".to_string(),
+            }));
         }
         if b == b'|' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'|' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::OrOr,
-                span: self.mk_span(2), text: "||".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::OrOr,
+                span: self.mk_span(2),
+                text: "||".to_string(),
+            }));
         }
         if b == b'*' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::StarEq,
-                span: self.mk_span(2), text: "*=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::StarEq,
+                span: self.mk_span(2),
+                text: "*=".to_string(),
+            }));
         }
         if b == b'/' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::SlashEq,
-                span: self.mk_span(2), text: "/=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::SlashEq,
+                span: self.mk_span(2),
+                text: "/=".to_string(),
+            }));
         }
         if b == b'%' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::PercentEq,
-                span: self.mk_span(2), text: "%=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::PercentEq,
+                span: self.mk_span(2),
+                text: "%=".to_string(),
+            }));
         }
         if b == b'^' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::CaretEq,
-                span: self.mk_span(2), text: "^=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::CaretEq,
+                span: self.mk_span(2),
+                text: "^=".to_string(),
+            }));
         }
         if b == b'|' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::PipeEq,
-                span: self.mk_span(2), text: "|=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::PipeEq,
+                span: self.mk_span(2),
+                text: "|=".to_string(),
+            }));
         }
         if b == b'&' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
-            self.pos += 2; self.col += 2;
-            return Some(CppTok::C(Tok { kind: TokKind::AmpEq,
-                span: self.mk_span(2), text: "&=".to_string() }));
+            self.pos += 2;
+            self.col += 2;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::AmpEq,
+                span: self.mk_span(2),
+                text: "&=".to_string(),
+            }));
         }
         if b == b'.' && self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'*' {
             // C++ 成员指针访问: `obj.*ptr_to_member` (M17.0)
             // `->*` 已被 `->` Arrow + `*` Star 组合表示, parser 端组合处理
-            self.pos += 2; self.col += 2;
+            self.pos += 2;
+            self.col += 2;
             return Some(CppTok::C(Tok {
                 kind: TokKind::DotStar,
                 span: self.mk_span(2),
                 text: ".*".to_string(),
             }));
         }
-        if b == b'.' && self.pos + 2 < self.src.len()
-            && self.src[self.pos + 1] == b'.' && self.src[self.pos + 2] == b'.'
+        if b == b'.'
+            && self.pos + 2 < self.src.len()
+            && self.src[self.pos + 1] == b'.'
+            && self.src[self.pos + 2] == b'.'
         {
             // ... 用于异常 catch (...), 变参模板, C 变参
-            self.pos += 3; self.col += 3;
-            return Some(CppTok::C(Tok { kind: TokKind::Ellipsis,
-                span: self.mk_span(3), text: "...".to_string() }));
+            self.pos += 3;
+            self.col += 3;
+            return Some(CppTok::C(Tok {
+                kind: TokKind::Ellipsis,
+                span: self.mk_span(3),
+                text: "...".to_string(),
+            }));
         }
         if b.is_ascii_alphabetic() || b == b'_' {
             let start = self.pos;
             while self.pos < self.src.len()
                 && (self.src[self.pos].is_ascii_alphanumeric() || self.src[self.pos] == b'_')
-            { self.pos += 1; self.col += 1; }
+            {
+                self.pos += 1;
+                self.col += 1;
+            }
             let s = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("");
             let len = (self.pos - start) as u32;
             let span = self.mk_span(len);
@@ -415,62 +586,102 @@ impl<'a> CppLexer<'a> {
             }
             // M9: 也识别 C 关键字 (return, if, while, ...)
             if let Some(kind) = c_keyword_kind(s) {
-                let tok = Tok { kind, span, text: s.to_string() };
+                let tok = Tok {
+                    kind,
+                    span,
+                    text: s.to_string(),
+                };
                 return Some(CppTok::C(tok));
             }
-            let tok = Tok { kind: TokKind::Ident, span, text: s.to_string() };
+            let tok = Tok {
+                kind: TokKind::Ident,
+                span,
+                text: s.to_string(),
+            };
             return Some(CppTok::C(tok));
         }
         if b.is_ascii_digit() {
             let start = self.pos;
             while self.pos < self.src.len()
                 && (self.src[self.pos].is_ascii_alphanumeric() || self.src[self.pos] == b'.')
-            { self.pos += 1; self.col += 1; }
+            {
+                self.pos += 1;
+                self.col += 1;
+            }
             let len = (self.pos - start) as u32;
             let span = self.mk_span(len);
-            let tok = Tok { kind: TokKind::Number, span,
-                            text: std::str::from_utf8(&self.src[start..self.pos])
-                                .unwrap_or("").to_string() };
+            let tok = Tok {
+                kind: TokKind::Number,
+                span,
+                text: std::str::from_utf8(&self.src[start..self.pos])
+                    .unwrap_or("")
+                    .to_string(),
+            };
             return Some(CppTok::C(tok));
         }
         if b == b'"' || b == b'\'' {
             let q = b;
             let start = self.pos;
-            self.pos += 1; self.col += 1;
+            self.pos += 1;
+            self.col += 1;
             while self.pos < self.src.len() && self.src[self.pos] != q {
                 if self.src[self.pos] == b'\\' && self.pos + 1 < self.src.len() {
                     self.pos += 1;
                 }
                 self.pos += 1;
             }
-            if self.pos < self.src.len() { self.pos += 1; }
+            if self.pos < self.src.len() {
+                self.pos += 1;
+            }
             let len = (self.pos - start) as u32;
             let span = self.mk_span(len);
             let tok = Tok {
-                kind: if q == b'"' { TokKind::StringLit } else { TokKind::CharLit },
+                kind: if q == b'"' {
+                    TokKind::StringLit
+                } else {
+                    TokKind::CharLit
+                },
                 span,
                 text: std::str::from_utf8(&self.src[start..self.pos])
-                    .unwrap_or("").to_string(),
+                    .unwrap_or("")
+                    .to_string(),
             };
             return Some(CppTok::C(tok));
         }
-        self.pos += 1; self.col += 1;
+        self.pos += 1;
+        self.col += 1;
         let kind = match b {
-            b'(' => TokKind::LParen, b')' => TokKind::RParen,
-            b'{' => TokKind::LBrace, b'}' => TokKind::RBrace,
-            b'[' => TokKind::LBracket, b']' => TokKind::RBracket,
-            b';' => TokKind::Semi, b',' => TokKind::Comma,
-            b'?' => TokKind::Question, b'~' => TokKind::Tilde,
-            b'.' => TokKind::Dot, b'&' => TokKind::Amp,
-            b'*' => TokKind::Star, b'+' => TokKind::Plus,
-            b'-' => TokKind::Minus, b'/' => TokKind::Slash,
-            b'%' => TokKind::Percent, b'^' => TokKind::Caret,
-            b'|' => TokKind::Pipe, b'!' => TokKind::Not,
-            b'=' => TokKind::Assign, b'<' => TokKind::Lt,
-            b'>' => TokKind::Gt, b':' => TokKind::Colon,
+            b'(' => TokKind::LParen,
+            b')' => TokKind::RParen,
+            b'{' => TokKind::LBrace,
+            b'}' => TokKind::RBrace,
+            b'[' => TokKind::LBracket,
+            b']' => TokKind::RBracket,
+            b';' => TokKind::Semi,
+            b',' => TokKind::Comma,
+            b'?' => TokKind::Question,
+            b'~' => TokKind::Tilde,
+            b'.' => TokKind::Dot,
+            b'&' => TokKind::Amp,
+            b'*' => TokKind::Star,
+            b'+' => TokKind::Plus,
+            b'-' => TokKind::Minus,
+            b'/' => TokKind::Slash,
+            b'%' => TokKind::Percent,
+            b'^' => TokKind::Caret,
+            b'|' => TokKind::Pipe,
+            b'!' => TokKind::Not,
+            b'=' => TokKind::Assign,
+            b'<' => TokKind::Lt,
+            b'>' => TokKind::Gt,
+            b':' => TokKind::Colon,
             _ => TokKind::Invalid,
         };
-        let tok = Tok { kind, span: self.mk_span(1), text: (b as char).to_string() };
+        let tok = Tok {
+            kind,
+            span: self.mk_span(1),
+            text: (b as char).to_string(),
+        };
         Some(CppTok::C(tok))
     }
 }
@@ -488,18 +699,40 @@ mod tests {
     fn cpp_lex_basic() {
         let mut lx = CppLexer::new(b"class Foo { public: int x; };", "t.cpp");
         let mut toks = vec![];
-        while let Some(t) = lx.next_tok() { toks.push(t); }
+        while let Some(t) = lx.next_tok() {
+            toks.push(t);
+        }
         assert!(matches!(toks[0], CppTok::Kw(CppKw::Class, _)));
-        assert!(matches!(toks[1], CppTok::C(Tok { kind: TokKind::Ident, .. })));
-        assert!(matches!(toks[2], CppTok::C(Tok { kind: TokKind::LBrace, .. })));
+        assert!(matches!(
+            toks[1],
+            CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            })
+        ));
+        assert!(matches!(
+            toks[2],
+            CppTok::C(Tok {
+                kind: TokKind::LBrace,
+                ..
+            })
+        ));
         assert!(matches!(toks[3], CppTok::Kw(CppKw::Public, _)));
-        assert!(matches!(toks[4], CppTok::C(Tok { kind: TokKind::Colon, .. })));
+        assert!(matches!(
+            toks[4],
+            CppTok::C(Tok {
+                kind: TokKind::Colon,
+                ..
+            })
+        ));
     }
     #[test]
     fn cpp_lex_colon_colon() {
         let mut lx = CppLexer::new(b"Foo::bar", "t.cpp");
         let mut toks = vec![];
-        while let Some(t) = lx.next_tok() { toks.push(t); }
+        while let Some(t) = lx.next_tok() {
+            toks.push(t);
+        }
         assert!(matches!(toks[1], CppTok::ColonColon(_)));
     }
     #[test]
@@ -522,20 +755,43 @@ mod tests {
         let t1 = lx.next_tok().unwrap();
         let t2 = lx.next_tok().unwrap();
         assert!(matches!(t0, CppTok::Kw(CppKw::This, _)));
-        assert!(matches!(t1, CppTok::C(Tok { kind: TokKind::Arrow, .. })));
-        assert!(matches!(t2, CppTok::C(Tok { kind: TokKind::Ident, .. })));
+        assert!(matches!(
+            t1,
+            CppTok::C(Tok {
+                kind: TokKind::Arrow,
+                ..
+            })
+        ));
+        assert!(matches!(
+            t2,
+            CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            })
+        ));
     }
     #[test]
     fn cpp_lex_compound_assigns() {
         // + - * / % & | ^ << >> == != <= >= && ||
         // (这里每个字符后接 = 或复合, 不应误判 +=/-= 等等)
-        let mut lx = CppLexer::new(b"+ - * / % & | ^ << >> == != <= >= && ||",
-                                   "t.cpp");
+        let mut lx = CppLexer::new(b"+ - * / % & | ^ << >> == != <= >= && ||", "t.cpp");
         let expect = [
-            TokKind::Plus, TokKind::Minus, TokKind::Star, TokKind::Slash,
-            TokKind::Percent, TokKind::Amp, TokKind::Pipe, TokKind::Caret,
-            TokKind::Shl, TokKind::Shr, TokKind::EqEq, TokKind::Ne,
-            TokKind::Le, TokKind::Ge, TokKind::AndAnd, TokKind::OrOr,
+            TokKind::Plus,
+            TokKind::Minus,
+            TokKind::Star,
+            TokKind::Slash,
+            TokKind::Percent,
+            TokKind::Amp,
+            TokKind::Pipe,
+            TokKind::Caret,
+            TokKind::Shl,
+            TokKind::Shr,
+            TokKind::EqEq,
+            TokKind::Ne,
+            TokKind::Le,
+            TokKind::Ge,
+            TokKind::AndAnd,
+            TokKind::OrOr,
         ];
         for k in expect.iter() {
             let t = lx.next_tok().unwrap();
@@ -550,9 +806,16 @@ mod tests {
         // 单独验证 += -= *= /= %= &= |= ^= <<= >>=
         let mut lx = CppLexer::new(b"+=-=*=/=%=&=|=^=<<=>>=", "t.cpp");
         let expect = [
-            TokKind::PlusEq, TokKind::MinusEq, TokKind::StarEq, TokKind::SlashEq,
-            TokKind::PercentEq, TokKind::AmpEq, TokKind::PipeEq, TokKind::CaretEq,
-            TokKind::ShlEq, TokKind::ShrEq,
+            TokKind::PlusEq,
+            TokKind::MinusEq,
+            TokKind::StarEq,
+            TokKind::SlashEq,
+            TokKind::PercentEq,
+            TokKind::AmpEq,
+            TokKind::PipeEq,
+            TokKind::CaretEq,
+            TokKind::ShlEq,
+            TokKind::ShrEq,
         ];
         for k in expect.iter() {
             let t = lx.next_tok().unwrap();
@@ -566,17 +829,47 @@ mod tests {
     fn cpp_lex_incr_decr() {
         let mut lx = CppLexer::new(b"i++ j--", "t.cpp");
         // i Ident
-        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))));
+        assert!(matches!(
+            lx.next_tok(),
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            }))
+        ));
         // ++
-        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::PlusPlus, .. }))));
+        assert!(matches!(
+            lx.next_tok(),
+            Some(CppTok::C(Tok {
+                kind: TokKind::PlusPlus,
+                ..
+            }))
+        ));
         // j Ident
-        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::Ident, .. }))));
+        assert!(matches!(
+            lx.next_tok(),
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            }))
+        ));
         // --
-        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::MinusMinus, .. }))));
+        assert!(matches!(
+            lx.next_tok(),
+            Some(CppTok::C(Tok {
+                kind: TokKind::MinusMinus,
+                ..
+            }))
+        ));
     }
     #[test]
     fn cpp_lex_ellipsis() {
         let mut lx = CppLexer::new(b"...", "t.cpp");
-        assert!(matches!(lx.next_tok(), Some(CppTok::C(Tok { kind: TokKind::Ellipsis, .. }))));
+        assert!(matches!(
+            lx.next_tok(),
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ellipsis,
+                ..
+            }))
+        ));
     }
 }

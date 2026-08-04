@@ -44,23 +44,23 @@
 //! 中列明.
 #![allow(dead_code, unused_imports)]
 
-pub mod lexer;
-pub mod parser;
-pub mod mangle;
-pub mod lower;
+pub mod bmf;
+pub mod coroutine;
+pub mod cpp_const_eval;
+pub mod driver;
 pub mod feature_degrade;
+pub mod gcc_compat;
+pub mod lexer;
+pub mod lower;
+pub mod mangle;
+pub mod modules;
+pub mod parser;
+pub mod stdlib;
 pub mod template;
 pub mod template_depth;
-pub mod cpp_const_eval;
-pub mod modules;
-pub mod stdlib;
-pub mod driver;
-pub mod coroutine;
-pub mod bmf;
-pub mod gcc_compat;
 
-use std::path::PathBuf;
 use crate::diagnostics::Diagnostic;
+use std::path::PathBuf;
 
 /// C++ 编译选项 (M7 最小)
 #[derive(Debug, Clone)]
@@ -92,7 +92,9 @@ impl std::fmt::Display for CppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CppError::Diagnostics(ds) => {
-                for d in ds { writeln!(f, "{}", d)?; }
+                for d in ds {
+                    writeln!(f, "{}", d)?;
+                }
                 Ok(())
             }
             CppError::Io(e) => write!(f, "I/O error: {}", e),
@@ -101,5 +103,7 @@ impl std::fmt::Display for CppError {
 }
 
 impl From<std::io::Error> for CppError {
-    fn from(e: std::io::Error) -> Self { CppError::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        CppError::Io(e)
+    }
 }

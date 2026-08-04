@@ -100,6 +100,6 @@ pub fn emit_stdlib_includes() -> String {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod header_parse_tests;
+#[cfg(test)]
+mod tests;

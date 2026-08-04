@@ -13,8 +13,7 @@
 use super::layout::{Layout, OutputSectionKind};
 use super::link_opts::LinkOpts;
 use crate::codegen::elf::{
-    R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT,
-    STB_GLOBAL, STT_FUNC, STV_DEFAULT,
+    R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, STB_GLOBAL, STT_FUNC, STV_DEFAULT,
 };
 
 /// 收集 .plt / .got.plt 中需要为哪些外部符号创建槽。
@@ -31,15 +30,22 @@ impl PltGots {
         let mut plt_funcs = Vec::new();
         let mut got_data = Vec::new();
         for s in &layout.symbols {
-            if s.section != 0 { continue; }
-            if s.name.is_empty() { continue; }
+            if s.section != 0 {
+                continue;
+            }
+            if s.name.is_empty() {
+                continue;
+            }
             if s.ty == STT_FUNC {
                 plt_funcs.push(s.name.clone());
             } else {
                 got_data.push(s.name.clone());
             }
         }
-        Self { plt_funcs, got_data }
+        Self {
+            plt_funcs,
+            got_data,
+        }
     }
 }
 
@@ -51,7 +57,12 @@ impl PltGots {
 ///   push $index                 ; 5 bytes
 ///   jmp PLT0                    ; 5 bytes
 ///                              = 16 bytes
-fn emit_plt_entry(plt_base_vaddr: u64, this_vaddr: u64, got_entry_vaddr: u64, index: u64) -> Vec<u8> {
+fn emit_plt_entry(
+    plt_base_vaddr: u64,
+    this_vaddr: u64,
+    got_entry_vaddr: u64,
+    index: u64,
+) -> Vec<u8> {
     let mut buf = Vec::with_capacity(16);
     // jmp *GOT_ENTRY(%rip) -> ff 25 <disp32>
     // disp32 = GOT_ENTRY - (this + 6)
@@ -85,7 +96,7 @@ fn emit_plt0(plt0_vaddr: u64, got1_vaddr: u64, got2_vaddr: u64) -> Vec<u8> {
     buf.extend_from_slice(&[0xf2, 0xff, 0x25]);
     buf.extend_from_slice(&(disp2 as i32).to_le_bytes());
     // padding 20 字节
-    buf.extend_from_slice(&[0x66, 0x90]);  // nop
+    buf.extend_from_slice(&[0x66, 0x90]); // nop
     buf.extend_from_slice(&[0x66, 0x90]);
     buf.extend_from_slice(&[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00]); // 7-byte nop
     buf.extend_from_slice(&[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00]); // 7-byte nop
@@ -105,8 +116,16 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts) {
     let n_got_data = plt_gots.got_data.len();
 
     // 找各节
-    let (plt_idx, got_plt_idx, got_idx, dynsym_idx, dynstr_idx,
-        rel_plt_idx, rel_dyn_idx, dynamic_idx) = {
+    let (
+        plt_idx,
+        got_plt_idx,
+        got_idx,
+        dynsym_idx,
+        dynstr_idx,
+        rel_plt_idx,
+        rel_dyn_idx,
+        dynamic_idx,
+    ) = {
         let mut plt_i = None;
         let mut got_plt_i = None;
         let mut got_i = None;
@@ -160,7 +179,8 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts) {
         let got_entry_off = 24 + (i * 8) as u64;
         let sym_idx = (i + 1) as u32;
         rela_plt_data.extend_from_slice(&got_entry_off.to_le_bytes());
-        rela_plt_data.extend_from_slice(&((sym_idx as u64) << 32 | R_X86_64_JUMP_SLOT as u64).to_le_bytes());
+        rela_plt_data
+            .extend_from_slice(&((sym_idx as u64) << 32 | R_X86_64_JUMP_SLOT as u64).to_le_bytes());
         rela_plt_data.extend_from_slice(&0i64.to_le_bytes());
     }
     // 写 .dynsym
@@ -182,18 +202,24 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts) {
             let got_off = (i * 8) as u64;
             let sym_idx = (1 + n_plt + i) as u32;
             rela_dyn_data.extend_from_slice(&got_off.to_le_bytes());
-            rela_dyn_data.extend_from_slice(&((sym_idx as u64) << 32 | R_X86_64_GLOB_DAT as u64).to_le_bytes());
+            rela_dyn_data.extend_from_slice(
+                &((sym_idx as u64) << 32 | R_X86_64_GLOB_DAT as u64).to_le_bytes(),
+            );
             rela_dyn_data.extend_from_slice(&0i64.to_le_bytes());
         }
     }
     // 写 .dynstr
     let mut dynstr_data = vec![0u8];
     for name in &plt_gots.plt_funcs {
-        for byte in name.bytes() { dynstr_data.push(byte); }
+        for byte in name.bytes() {
+            dynstr_data.push(byte);
+        }
         dynstr_data.push(0);
     }
     for name in &plt_gots.got_data {
-        for byte in name.bytes() { dynstr_data.push(byte); }
+        for byte in name.bytes() {
+            dynstr_data.push(byte);
+        }
         dynstr_data.push(0);
     }
     // 生成 .plt
@@ -248,8 +274,8 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts) {
     dynamic_data.extend_from_slice(&24u64.to_le_bytes());
     // DT_FLAGS = 30 (BIND_NOW 等), DF_BIND_NOW = 0x8
     if _opts.bind_now {
-        dynamic_data.extend_from_slice(&30u64.to_le_bytes());  // DT_FLAGS
-        dynamic_data.extend_from_slice(&0x8u64.to_le_bytes());  // DF_BIND_NOW
+        dynamic_data.extend_from_slice(&30u64.to_le_bytes()); // DT_FLAGS
+        dynamic_data.extend_from_slice(&0x8u64.to_le_bytes()); // DF_BIND_NOW
     }
     // DT_FLAGS_1 = 0x6ffffffb (compat flag), DF_1_NOW = 0x1
     if _opts.bind_now {
@@ -260,13 +286,17 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts) {
     if let Some(rp) = &_opts.rpath {
         dynamic_data.extend_from_slice(&23u64.to_le_bytes());
         dynamic_data.extend_from_slice(&(dynstr_vaddr + dynstr_data.len() as u64).to_le_bytes());
-        for b in rp.bytes() { dynstr_data.push(b); }
+        for b in rp.bytes() {
+            dynstr_data.push(b);
+        }
         dynstr_data.push(0);
     }
     if let Some(rp) = &_opts.runpath {
         dynamic_data.extend_from_slice(&29u64.to_le_bytes());
         dynamic_data.extend_from_slice(&(dynstr_vaddr + dynstr_data.len() as u64).to_le_bytes());
-        for b in rp.bytes() { dynstr_data.push(b); }
+        for b in rp.bytes() {
+            dynstr_data.push(b);
+        }
         dynstr_data.push(0);
     }
     // DT_NULL = 0

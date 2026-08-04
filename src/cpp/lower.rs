@@ -15,19 +15,18 @@
 //!
 //! 降级输出: 完整 C 源文件字符串, 包含被包含的头 (展开后嵌入).
 
-use crate::cpp::mangle::{
-    MangleType, NestedName, mangle_ctor, mangle_dtor, mangle_global_function,
-    mangle_member_function, mangle_op_delete, mangle_op_delete_array,
-    mangle_op_new, mangle_op_new_array, mangle_operator_member,
-    mangle_operator_global, mangle_typeinfo, mangle_vtable, Operator,
-};
 use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};
 use crate::cpp::coroutine::{
     body_has_coro, coro_fn_epilogue, coro_fn_prologue, coro_return, coro_suspend,
 };
 use crate::cpp::gcc_compat::runtime_prologue as gcc_runtime_prologue;
+use crate::cpp::mangle::{
+    mangle_ctor, mangle_dtor, mangle_global_function, mangle_member_function, mangle_op_delete,
+    mangle_op_delete_array, mangle_op_new, mangle_op_new_array, mangle_operator_global,
+    mangle_operator_member, mangle_typeinfo, mangle_vtable, MangleType, NestedName, Operator,
+};
 use crate::cpp::parser::*;
-use crate::cpp::template::{TemplateRegistry, instantiated_class_name, type_key};
+use crate::cpp::template::{instantiated_class_name, type_key, TemplateRegistry};
 
 /// 降级选项
 #[derive(Debug, Clone, Default)]
@@ -97,18 +96,78 @@ pub struct Lower {
 
 /// M18.0: 检查 ident 是否是 C 关键字 (如 int/char/void/...), 不能作为 typedef 名
 pub fn is_c_keyword(s: &str) -> bool {
-    matches!(s, "auto" | "break" | "case" | "char" | "const" | "continue"
-        | "default" | "do" | "double" | "else" | "enum" | "extern"
-        | "float" | "for" | "goto" | "if" | "inline" | "int" | "long"
-        | "register" | "return" | "short" | "signed" | "sizeof" | "static"
-        | "struct" | "switch" | "typedef" | "union" | "unsigned" | "void"
-        | "volatile" | "while" | "_Bool" | "_Complex" | "_Imaginary"
-        | "_Atomic" | "_Generic" | "_Noreturn" | "_Static_assert" | "_Thread_local"
-        | "bool" | "true" | "false" | "NULL" | "class" | "namespace" | "typename"
-        | "template" | "this" | "virtual" | "friend" | "operator" | "explicit"
-        | "constexpr" | "decltype" | "noexcept" | "override" | "final" | "new"
-        | "delete" | "using" | "try" | "catch" | "throw" | "public" | "private"
-        | "protected" | "nullptr")
+    matches!(
+        s,
+        "auto"
+            | "break"
+            | "case"
+            | "char"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extern"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "inline"
+            | "int"
+            | "long"
+            | "register"
+            | "return"
+            | "short"
+            | "signed"
+            | "sizeof"
+            | "static"
+            | "struct"
+            | "switch"
+            | "typedef"
+            | "union"
+            | "unsigned"
+            | "void"
+            | "volatile"
+            | "while"
+            | "_Bool"
+            | "_Complex"
+            | "_Imaginary"
+            | "_Atomic"
+            | "_Generic"
+            | "_Noreturn"
+            | "_Static_assert"
+            | "_Thread_local"
+            | "bool"
+            | "true"
+            | "false"
+            | "NULL"
+            | "class"
+            | "namespace"
+            | "typename"
+            | "template"
+            | "this"
+            | "virtual"
+            | "friend"
+            | "operator"
+            | "explicit"
+            | "constexpr"
+            | "decltype"
+            | "noexcept"
+            | "override"
+            | "final"
+            | "new"
+            | "delete"
+            | "using"
+            | "try"
+            | "catch"
+            | "throw"
+            | "public"
+            | "private"
+            | "protected"
+            | "nullptr"
+    )
 }
 
 /// 是否是 C 标识符字符 (字母 / 数字 / 下划线)
@@ -240,10 +299,14 @@ impl Lower {
             pending_fn_insts: std::collections::VecDeque::new(),
         }
     }
-    pub fn with_options(_opt: LowerOptions) -> Self { Self::new() }
+    pub fn with_options(_opt: LowerOptions) -> Self {
+        Self::new()
+    }
 
     /// 类型到 C 字符串
-    fn mangle_to_c(ty: &MangleType) -> String { mangle_to_c(ty) }
+    fn mangle_to_c(ty: &MangleType) -> String {
+        mangle_to_c(ty)
+    }
 
     /// 类型名 (用于符号 mangling, 不带 struct 前缀)
     fn type_name(ty: &MangleType) -> String {
@@ -297,12 +360,17 @@ impl Lower {
             CppExpr::StrConcat(_) => MangleType::Pointer(Box::new(MangleType::Char)),
             CppExpr::Ident(n) => {
                 // 查 local/param, 若是 Class 则为值类型; 若是 int, 保留 int
-                if let Some(t) = self.local_var_types.get(n) { t.clone() }
-                else if let Some(t) = self.param_var_types.get(n) { t.clone() }
-                else { MangleType::Int }
+                if let Some(t) = self.local_var_types.get(n) {
+                    t.clone()
+                } else if let Some(t) = self.param_var_types.get(n) {
+                    t.clone()
+                } else {
+                    MangleType::Int
+                }
             }
-            CppExpr::This => MangleType::Pointer(Box::new(
-                MangleType::Class(self.current_class.clone().unwrap_or_default()))),
+            CppExpr::This => MangleType::Pointer(Box::new(MangleType::Class(
+                self.current_class.clone().unwrap_or_default(),
+            ))),
             CppExpr::UnaryOp(_, inner) => self.infer_type(inner, is_decltype_auto),
             CppExpr::BinOp(_, l, _) => self.infer_type(l, is_decltype_auto),
             CppExpr::Cast(t, _) => t.clone(),
@@ -318,15 +386,20 @@ impl Lower {
                     } else {
                         // C 函数: 已知一些返回类型
                         match name.as_str() {
-                            "malloc" | "calloc" | "realloc" => MangleType::Pointer(Box::new(MangleType::Void)),
+                            "malloc" | "calloc" | "realloc" => {
+                                MangleType::Pointer(Box::new(MangleType::Void))
+                            }
                             "strlen" | "printf" | "scanf" => MangleType::Int,
                             _ => MangleType::Int,
                         }
                     }
-                } else { MangleType::Int }
+                } else {
+                    MangleType::Int
+                }
             }
-            CppExpr::New(_, _) | CppExpr::NewArr { .. } | CppExpr::PlacementNew { .. } =>
-                MangleType::Pointer(Box::new(MangleType::Class("Unknown".to_string()))),
+            CppExpr::New(_, _) | CppExpr::NewArr { .. } | CppExpr::PlacementNew { .. } => {
+                MangleType::Pointer(Box::new(MangleType::Class("Unknown".to_string())))
+            }
             CppExpr::Member(_, _) | CppExpr::PtrMember(_, _) => MangleType::Int,
             CppExpr::Ternary { then, .. } => self.infer_type(then, is_decltype_auto),
             // M18.0: 多维下标返回元素类型 (与单下标一致)
@@ -439,7 +512,8 @@ impl Lower {
 
     /// 入口
     pub fn lower_decls(&mut self, decls: &[CppDecl]) {
-        self.out.push_str("/* dcc C++ frontend M7+M8 lowered output */\n");
+        self.out
+            .push_str("/* dcc C++ frontend M7+M8 lowered output */\n");
         // stddef.h / stdint.h 仅在 M9 (异常 / RTTI) 真正用到 size_t 等类型时引入
         let needs_system_headers = decls.iter().any(|d| self.decl_needs_system_headers(d));
         if needs_system_headers {
@@ -455,20 +529,29 @@ impl Lower {
         // M17.0: 数组版本
         self.out.push_str("extern void *_Znam(size_t);\n");
         self.out.push_str("extern void _ZdaPv(void*);\n");
-        self.out.push_str("extern void __cxa_throw(void*, void*, void(*)(void*));\n");
-        self.out.push_str("extern void* __cxa_allocate_exception(size_t);\n");
-        self.out.push_str("extern void __cxa_free_exception(void*);\n");
+        self.out
+            .push_str("extern void __cxa_throw(void*, void*, void(*)(void*));\n");
+        self.out
+            .push_str("extern void* __cxa_allocate_exception(size_t);\n");
+        self.out
+            .push_str("extern void __cxa_free_exception(void*);\n");
         self.out.push_str("typedef struct __cxa_eh_context { void* matched; int rethrown; } __cxa_eh_context_t;\n");
-        self.out.push_str("extern int __cxa_try(__cxa_eh_context_t*, void* (*)(void*), void*);\n");
-        self.out.push_str("extern void* __cxa_begin_catch(void*);\n");
+        self.out
+            .push_str("extern int __cxa_try(__cxa_eh_context_t*, void* (*)(void*), void*);\n");
+        self.out
+            .push_str("extern void* __cxa_begin_catch(void*);\n");
         self.out.push_str("extern void __cxa_end_catch(void);\n");
         // M26: GCC ABI 兼容运行时 (__cxa_guard_* / typeinfo / __dynamic_cast /
         // initializer_list / 成员指针偏移) - 自包含 C 定义, 幂等追加
         self.out.push_str(&gcc_runtime_prologue());
         // 第一次遍历: 收集类名 + 注册模板 + 扫描模板类型触发类实例化
-        for d in decls { self.collect_classes(d); }
+        for d in decls {
+            self.collect_classes(d);
+        }
         // 第二次遍历: 实际降级
-        for d in decls { self.lower_decl(d); }
+        for d in decls {
+            self.lower_decl(d);
+        }
         // 2.5: 输出函数模板实例化定义 (含其体内触发的类实例化)
         self.emit_pending_fns();
         // 最后降级所有 lambda
@@ -502,7 +585,9 @@ impl Lower {
                     match m {
                         CppDecl::MemberFn { name, .. } => methods.push(name.clone()),
                         CppDecl::Ctor { .. } | CppDecl::Dtor { .. } => {}
-                        CppDecl::MemberVar { ty, name, .. } => fields.push((name.clone(), ty.clone())),
+                        CppDecl::MemberVar { ty, name, .. } => {
+                            fields.push((name.clone(), ty.clone()))
+                        }
                         _ => {}
                     }
                 }
@@ -513,18 +598,37 @@ impl Lower {
             }
             CppDecl::Namespace { name, body } => {
                 // M18.0: 跟踪 namespace stack 让 qualify_name 出正确名字
-                if let Some(n) = name { self.ns.stack.push(n.clone()); }
-                for x in body { self.collect_classes(x); }
-                if name.is_some() { self.ns.stack.pop(); }
+                if let Some(n) = name {
+                    self.ns.stack.push(n.clone());
+                }
+                for x in body {
+                    self.collect_classes(x);
+                }
+                if name.is_some() {
+                    self.ns.stack.pop();
+                }
             }
             // M26: 模板声明只注册 (不再展开); 模板体在实例化时替换形参
-            CppDecl::Template { params, decl, requires } => {
+            CppDecl::Template {
+                params,
+                decl,
+                requires,
+            } => {
                 self.templates.register(params, requires, decl);
             }
-            CppDecl::PartialSpec { params, pattern_text, decl } => {
+            CppDecl::PartialSpec {
+                params,
+                pattern_text,
+                decl,
+            } => {
                 if let CppDecl::Class(c) = &**decl {
                     let names: Vec<String> = params.params.iter().map(|p| p.name.clone()).collect();
-                    self.templates.register_partial(c.name.clone(), &names, pattern_text.clone(), decl);
+                    self.templates.register_partial(
+                        c.name.clone(),
+                        &names,
+                        pattern_text.clone(),
+                        decl,
+                    );
                 }
             }
             _ => {
@@ -542,29 +646,55 @@ impl Lower {
     /// 递归扫描声明树中的模板实例化类型, 触发类实例化 (定义先于使用).
     fn scan_decl_types(&mut self, d: &CppDecl) {
         match d {
-            CppDecl::Class(c) => { for m in &c.members { self.scan_decl_types(m); } }
-            CppDecl::FreeFn { ret, params, body, .. } => {
+            CppDecl::Class(c) => {
+                for m in &c.members {
+                    self.scan_decl_types(m);
+                }
+            }
+            CppDecl::FreeFn {
+                ret, params, body, ..
+            } => {
                 self.scan_ty(ret);
-                for (_, t) in params { self.scan_ty(t); }
+                for (_, t) in params {
+                    self.scan_ty(t);
+                }
                 self.scan_body_types(body);
             }
-            CppDecl::MemberFn { ret, params, body, .. } => {
+            CppDecl::MemberFn {
+                ret, params, body, ..
+            } => {
                 self.scan_ty(ret);
-                for (_, t) in params { self.scan_ty(t); }
+                for (_, t) in params {
+                    self.scan_ty(t);
+                }
                 self.scan_body_types(body);
             }
             CppDecl::Ctor { params, body, .. } => {
-                for (_, t) in params { self.scan_ty(t); }
+                for (_, t) in params {
+                    self.scan_ty(t);
+                }
                 self.scan_body_types(body);
             }
-            CppDecl::Dtor { body, .. } => { self.scan_body_types(body); }
-            CppDecl::MemberVar { ty, .. } => { self.scan_ty(ty); }
-            CppDecl::OperatorFn { params, body, ret, .. } => {
-                for (_, t) in params { self.scan_ty(t); }
+            CppDecl::Dtor { body, .. } => {
+                self.scan_body_types(body);
+            }
+            CppDecl::MemberVar { ty, .. } => {
+                self.scan_ty(ty);
+            }
+            CppDecl::OperatorFn {
+                params, body, ret, ..
+            } => {
+                for (_, t) in params {
+                    self.scan_ty(t);
+                }
                 self.scan_ty(ret);
                 self.scan_body_types(body);
             }
-            CppDecl::Namespace { body, .. } => { for x in body { self.scan_decl_types(x); } }
+            CppDecl::Namespace { body, .. } => {
+                for x in body {
+                    self.scan_decl_types(x);
+                }
+            }
             _ => {}
         }
     }
@@ -572,7 +702,9 @@ impl Lower {
     fn scan_ty(&mut self, ty: &MangleType) {
         match ty {
             MangleType::Template { name, args } => {
-                for a in args { self.scan_ty(a); }
+                for a in args {
+                    self.scan_ty(a);
+                }
                 self.emit_inst_class(name, args);
             }
             MangleType::Pointer(t) | MangleType::Reference(t) => self.scan_ty(t),
@@ -581,37 +713,63 @@ impl Lower {
     }
 
     fn scan_body_types(&mut self, body: &CppBody) {
-        for s in &body.stmts { self.scan_stmt_types(s); }
+        for s in &body.stmts {
+            self.scan_stmt_types(s);
+        }
     }
 
     fn scan_stmt_types(&mut self, s: &CppStmt) {
         match s {
             CppStmt::Expr(e) | CppStmt::Return(Some(e)) => self.scan_expr_types(e),
             CppStmt::If { cond, then, els } => {
-                self.scan_expr_types(cond); self.scan_body_types(then);
-                if let Some(e) = els { self.scan_body_types(e); }
+                self.scan_expr_types(cond);
+                self.scan_body_types(then);
+                if let Some(e) = els {
+                    self.scan_body_types(e);
+                }
             }
             CppStmt::IfConstexpr { cond, then, els } => {
-                self.scan_expr_types(cond); self.scan_body_types(then);
-                if let Some(e) = els { self.scan_body_types(e); }
+                self.scan_expr_types(cond);
+                self.scan_body_types(then);
+                if let Some(e) = els {
+                    self.scan_body_types(e);
+                }
             }
-            CppStmt::While { cond, body } => { self.scan_expr_types(cond); self.scan_body_types(body); }
-            CppStmt::For { init, cond, step, body } => {
-                if let Some(i) = init { self.scan_stmt_types(i); }
-                if let Some(c) = cond { self.scan_expr_types(c); }
-                if let Some(x) = step { self.scan_stmt_types(x); }
+            CppStmt::While { cond, body } => {
+                self.scan_expr_types(cond);
+                self.scan_body_types(body);
+            }
+            CppStmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                if let Some(i) = init {
+                    self.scan_stmt_types(i);
+                }
+                if let Some(c) = cond {
+                    self.scan_expr_types(c);
+                }
+                if let Some(x) = step {
+                    self.scan_stmt_types(x);
+                }
                 self.scan_body_types(body);
             }
             CppStmt::Block(b) => self.scan_body_types(b),
             CppStmt::ThisMember(_, inner) => self.scan_stmt_types(inner),
             CppStmt::LocalVar { ty, init, .. } | CppStmt::StaticLocal { ty, init, .. } => {
                 self.scan_ty(ty);
-                if let Some(e) = init { self.scan_expr_types(e); }
+                if let Some(e) = init {
+                    self.scan_expr_types(e);
+                }
             }
             CppStmt::Try { body, catches } => {
                 self.scan_body_types(body);
                 for c in catches {
-                    if let Some(t) = &c.ty { self.scan_ty(t); }
+                    if let Some(t) = &c.ty {
+                        self.scan_ty(t);
+                    }
                     self.scan_body_types(&c.body);
                 }
             }
@@ -625,27 +783,41 @@ impl Lower {
 
     fn scan_expr_types(&mut self, e: &CppExpr) {
         match e {
-            CppExpr::Cast(t, x) => { self.scan_ty(t); self.scan_expr_types(x); }
-            CppExpr::StaticCast { ty, expr } | CppExpr::ConstCast { ty, expr }
-            | CppExpr::ReinterpretCast { ty, expr } | CppExpr::DynamicCast { ty, expr } => {
-                self.scan_ty(ty); self.scan_expr_types(expr);
+            CppExpr::Cast(t, x) => {
+                self.scan_ty(t);
+                self.scan_expr_types(x);
+            }
+            CppExpr::StaticCast { ty, expr }
+            | CppExpr::ConstCast { ty, expr }
+            | CppExpr::ReinterpretCast { ty, expr }
+            | CppExpr::DynamicCast { ty, expr } => {
+                self.scan_ty(ty);
+                self.scan_expr_types(expr);
             }
             CppExpr::TypeidType(t) => self.scan_ty(t),
             CppExpr::Sizeof(SizeofArg::Type(t)) => self.scan_ty(t),
             CppExpr::Sizeof(SizeofArg::Expr(x)) => self.scan_expr_types(x),
             CppExpr::TypedInitList { ty, elems } => {
                 self.scan_ty(ty);
-                for x in elems { self.scan_expr_types(x); }
+                for x in elems {
+                    self.scan_expr_types(x);
+                }
             }
-            CppExpr::Member(o, _) | CppExpr::PtrMember(o, _)
-            | CppExpr::MemberStar(o, _) | CppExpr::PtrMemberStar(o, _) => self.scan_expr_types(o),
+            CppExpr::Member(o, _)
+            | CppExpr::PtrMember(o, _)
+            | CppExpr::MemberStar(o, _)
+            | CppExpr::PtrMemberStar(o, _) => self.scan_expr_types(o),
             CppExpr::Call(f, args) => {
                 self.scan_expr_types(f);
-                for a in args { self.scan_expr_types(a); }
+                for a in args {
+                    self.scan_expr_types(a);
+                }
             }
             CppExpr::New(ty, args) => {
                 self.scan_ty(&MangleType::Class(ty.clone()));
-                for a in args { self.scan_expr_types(a); }
+                for a in args {
+                    self.scan_expr_types(a);
+                }
             }
             CppExpr::NewArr { ty, count } => {
                 self.scan_ty(&MangleType::Class(ty.clone()));
@@ -654,26 +826,47 @@ impl Lower {
             CppExpr::PlacementNew { ty, args, ptr } => {
                 self.scan_ty(&MangleType::Class(ty.clone()));
                 self.scan_expr_types(ptr);
-                for a in args { self.scan_expr_types(a); }
+                for a in args {
+                    self.scan_expr_types(a);
+                }
             }
-            CppExpr::Delete(x) | CppExpr::DeleteArr(x) | CppExpr::Noexcept(x)
-            | CppExpr::Ref(x) | CppExpr::AddrOf(x) | CppExpr::Typeid(x)
+            CppExpr::Delete(x)
+            | CppExpr::DeleteArr(x)
+            | CppExpr::Noexcept(x)
+            | CppExpr::Ref(x)
+            | CppExpr::AddrOf(x)
+            | CppExpr::Typeid(x)
             | CppExpr::UnaryOp(_, x) => self.scan_expr_types(x),
-            CppExpr::BinOp(_, l, r) => { self.scan_expr_types(l); self.scan_expr_types(r); }
+            CppExpr::BinOp(_, l, r) => {
+                self.scan_expr_types(l);
+                self.scan_expr_types(r);
+            }
             CppExpr::Ternary { cond, then, els } => {
-                self.scan_expr_types(cond); self.scan_expr_types(then); self.scan_expr_types(els);
+                self.scan_expr_types(cond);
+                self.scan_expr_types(then);
+                self.scan_expr_types(els);
             }
             CppExpr::Comma(xs) | CppExpr::InitList(xs) => {
-                for x in xs { self.scan_expr_types(x); }
+                for x in xs {
+                    self.scan_expr_types(x);
+                }
             }
-            CppExpr::OpCall { args, .. } => { for a in args { self.scan_expr_types(a); } }
+            CppExpr::OpCall { args, .. } => {
+                for a in args {
+                    self.scan_expr_types(a);
+                }
+            }
             CppExpr::Lambda(lam) => {
-                for (_, t) in &lam.params { self.scan_ty(t); }
+                for (_, t) in &lam.params {
+                    self.scan_ty(t);
+                }
                 self.scan_body_types(&lam.body);
             }
             CppExpr::MultiIndex(o, idx) => {
                 self.scan_expr_types(o);
-                for x in idx { self.scan_expr_types(x); }
+                for x in idx {
+                    self.scan_expr_types(x);
+                }
             }
             _ => {}
         }
@@ -683,8 +876,12 @@ impl Lower {
     /// 触发点都在普通函数定义输出之前 (collect_classes 阶段).
     fn emit_inst_class(&mut self, name: &str, args: &[MangleType]) {
         let key = TemplateRegistry::key_for(name, args);
-        if self.inst_emitted.contains(&key) { return; }
-        let Some(inst) = self.resolve_class_inst(name, args) else { return; };
+        if self.inst_emitted.contains(&key) {
+            return;
+        }
+        let Some(inst) = self.resolve_class_inst(name, args) else {
+            return;
+        };
         self.inst_emitted.insert(key);
         // 先递归输出嵌套模板类 (字段/成员引用需要完整定义)
         self.scan_decl_types(&inst);
@@ -702,7 +899,12 @@ impl Lower {
         // 偏特化优先: `Foo<T*>` 匹配实参 `int*`
         if let Some((pdecl, pnames, pargs)) = self.templates.pick_partial(name, args) {
             let rename = instantiated_class_name(name, args);
-            return Some(crate::cpp::template::substitute_decl(&pdecl, &pnames, &pargs, Some(&rename)));
+            return Some(crate::cpp::template::substitute_decl(
+                &pdecl,
+                &pnames,
+                &pargs,
+                Some(&rename),
+            ));
         }
         self.templates.instantiate_class(name, args)
     }
@@ -711,7 +913,9 @@ impl Lower {
     fn register_inst_class(&mut self, inst: &CppDecl) {
         if let CppDecl::Class(c) = inst {
             let qname = c.name.clone(); // 已是实例化类名
-            if !self.classes.contains(&qname) { self.classes.push(qname.clone()); }
+            if !self.classes.contains(&qname) {
+                self.classes.push(qname.clone());
+            }
             let mut methods = vec![];
             let mut fields = vec![];
             let mut ctors = vec![];
@@ -742,13 +946,19 @@ impl Lower {
         match self.templates.instantiate_fn(name, args) {
             Some(CppDecl::FreeFn { .. }) => {}
             _ => {
-                self.out.push_str(&format!("0 /* SFINAE: {}<...> not a function */", name));
+                self.out
+                    .push_str(&format!("0 /* SFINAE: {}<...> not a function */", name));
                 return;
             }
         }
         let key = TemplateRegistry::key_for(name, args);
-        if !self.pending_fn_insts.iter().any(|(n, a)| TemplateRegistry::key_for(n, a) == key) {
-            self.pending_fn_insts.push_back((name.to_string(), args.to_vec()));
+        if !self
+            .pending_fn_insts
+            .iter()
+            .any(|(n, a)| TemplateRegistry::key_for(n, a) == key)
+        {
+            self.pending_fn_insts
+                .push_back((name.to_string(), args.to_vec()));
         }
         self.out.push_str(&Self::tplfn_c_name(name, args));
     }
@@ -757,9 +967,13 @@ impl Lower {
     /// 函数体内触发的类实例化先输出 (struct 定义先于使用).
     fn emit_pending_fns(&mut self) {
         while let Some((name, args)) = self.pending_fn_insts.pop_front() {
-            let Some(inst) = self.templates.instantiate_fn(&name, &args) else { continue; };
+            let Some(inst) = self.templates.instantiate_fn(&name, &args) else {
+                continue;
+            };
             let (ret, params, body) = match &inst {
-                CppDecl::FreeFn { ret, params, body, .. } => (ret.clone(), params.clone(), body.clone()),
+                CppDecl::FreeFn {
+                    ret, params, body, ..
+                } => (ret.clone(), params.clone(), body.clone()),
                 _ => continue,
             };
             // 扫描体内类型 -> 触发类实例化 (struct 定义先于本函数)
@@ -781,10 +995,10 @@ impl Lower {
                 // 类内成员函数体可能用 new / delete / throw
                 c.members.iter().any(|m| self.decl_needs_system_headers(m))
             }
-            CppDecl::FreeFn { body, .. } | CppDecl::MemberFn { body, .. }
-            | CppDecl::Ctor { body, .. } | CppDecl::Dtor { body, .. } => {
-                self.body_needs_system_headers(body)
-            }
+            CppDecl::FreeFn { body, .. }
+            | CppDecl::MemberFn { body, .. }
+            | CppDecl::Ctor { body, .. }
+            | CppDecl::Dtor { body, .. } => self.body_needs_system_headers(body),
             CppDecl::OperatorFn { body, .. } => self.body_needs_system_headers(body),
             _ => false,
         }
@@ -793,7 +1007,9 @@ impl Lower {
     /// 判断函数体是否使用 new / delete / throw / try
     fn body_needs_system_headers(&self, body: &CppBody) -> bool {
         for s in &body.stmts {
-            if self.stmt_needs_system_headers(s) { return true; }
+            if self.stmt_needs_system_headers(s) {
+                return true;
+            }
         }
         false
     }
@@ -806,15 +1022,27 @@ impl Lower {
             CppStmt::If { cond, then, els } => {
                 self.expr_needs_system_headers(cond)
                     || self.body_needs_system_headers(then)
-                    || els.as_ref().is_some_and(|b| self.body_needs_system_headers(b))
+                    || els
+                        .as_ref()
+                        .is_some_and(|b| self.body_needs_system_headers(b))
             }
             CppStmt::While { cond, body } => {
                 self.expr_needs_system_headers(cond) || self.body_needs_system_headers(body)
             }
-            CppStmt::For { init, cond, step, body } => {
-                init.as_ref().is_some_and(|s| self.stmt_needs_system_headers(s))
-                    || cond.as_ref().is_some_and(|e| self.expr_needs_system_headers(e))
-                    || step.as_ref().is_some_and(|s| self.stmt_needs_system_headers(s))
+            CppStmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                init.as_ref()
+                    .is_some_and(|s| self.stmt_needs_system_headers(s))
+                    || cond
+                        .as_ref()
+                        .is_some_and(|e| self.expr_needs_system_headers(e))
+                    || step
+                        .as_ref()
+                        .is_some_and(|s| self.stmt_needs_system_headers(s))
                     || self.body_needs_system_headers(body)
             }
             CppStmt::LocalVar { init: Some(e), .. } => self.expr_needs_system_headers(e),
@@ -833,10 +1061,15 @@ impl Lower {
             CppExpr::BinOp(_, l, r) => {
                 self.expr_needs_system_headers(l) || self.expr_needs_system_headers(r)
             }
-            CppExpr::UnaryOp(_, x) | CppExpr::Ref(x) | CppExpr::AddrOf(x)
-            | CppExpr::Cast(_, x) | CppExpr::DynamicCast { expr: x, .. }
-            | CppExpr::StaticCast { expr: x, .. } | CppExpr::ConstCast { expr: x, .. }
-            | CppExpr::ReinterpretCast { expr: x, .. } | CppExpr::PtrMember(x, _)
+            CppExpr::UnaryOp(_, x)
+            | CppExpr::Ref(x)
+            | CppExpr::AddrOf(x)
+            | CppExpr::Cast(_, x)
+            | CppExpr::DynamicCast { expr: x, .. }
+            | CppExpr::StaticCast { expr: x, .. }
+            | CppExpr::ConstCast { expr: x, .. }
+            | CppExpr::ReinterpretCast { expr: x, .. }
+            | CppExpr::PtrMember(x, _)
             | CppExpr::Member(x, _) => self.expr_needs_system_headers(x),
             CppExpr::Ternary { cond, then, els } => {
                 self.expr_needs_system_headers(cond)
@@ -856,12 +1089,17 @@ impl Lower {
             CppDecl::Class(c) => {
                 // M26: BMF - export module 后的类记为导出 (含成员布局)
                 if self.module_collect {
-                    let layout = c.members.iter().filter_map(|m| match m {
-                        CppDecl::MemberVar { ty, name, .. } => {
-                            Some(format!("{}:{}", name, self.mangle_to_c_ns(ty)))
-                        }
-                        _ => None,
-                    }).collect::<Vec<_>>().join(", ");
+                    let layout = c
+                        .members
+                        .iter()
+                        .filter_map(|m| match m {
+                            CppDecl::MemberVar { ty, name, .. } => {
+                                Some(format!("{}:{}", name, self.mangle_to_c_ns(ty)))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     self.module_exports.push(BmfExport {
                         kind: BmfKind::Class,
                         name: c.name.clone(),
@@ -871,7 +1109,12 @@ impl Lower {
                 }
                 self.lower_class(c);
             }
-            CppDecl::FreeFn { ret, name, params, body } => {
+            CppDecl::FreeFn {
+                ret,
+                name,
+                params,
+                body,
+            } => {
                 let n = NestedName::from_dotted(vec![self.qualify_name(name)]);
                 let m = mangle_member_function(&n, &[], ret);
                 // M26: BMF - export module 后的顶层自由函数记为导出 (main 除外)
@@ -885,9 +1128,20 @@ impl Lower {
                 }
                 self.emit_fn(&m, ret, params, body);
             }
-            CppDecl::MemberFn { class, ret, name, params, body,
-                is_virtual, is_override, is_const, is_final, is_noexcept,
-                is_volatile, is_friend } => {
+            CppDecl::MemberFn {
+                class,
+                ret,
+                name,
+                params,
+                body,
+                is_virtual,
+                is_override,
+                is_const,
+                is_final,
+                is_noexcept,
+                is_volatile,
+                is_friend,
+            } => {
                 // M17.0: friend 函数声明是自由函数, 不属于类成员
                 // (即: 没有 this 形参, 不放在类作用域中, 也不做 mangle)
                 if *is_friend {
@@ -924,8 +1178,15 @@ impl Lower {
                 // override 在派生类声明时检查基类是否存在; 当前简化不做
                 let _ = (is_override, is_final, is_friend);
             }
-            CppDecl::Ctor { class, params, inits, body, is_virtual,
-                is_explicit, is_noexcept } => {
+            CppDecl::Ctor {
+                class,
+                params,
+                inits,
+                body,
+                is_virtual,
+                is_explicit,
+                is_noexcept,
+            } => {
                 let class_q = self.qualify_name(class);
                 let n = NestedName::from_dotted(vec![class_q.clone()]);
                 let param_tys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
@@ -944,7 +1205,12 @@ impl Lower {
                 self.emit_ctor(&m, &class_q, &all_params, inits, body);
                 let _ = is_virtual;
             }
-            CppDecl::Dtor { class, body, is_virtual, is_noexcept } => {
+            CppDecl::Dtor {
+                class,
+                body,
+                is_virtual,
+                is_noexcept,
+            } => {
                 let class_q = self.qualify_name(class);
                 let n = NestedName::from_dotted(vec![class_q.clone()]);
                 let m = mangle_dtor(&n, 1);
@@ -957,39 +1223,64 @@ impl Lower {
                 self.emit_fn(&m, &MangleType::Void, &all_params, body);
                 let _ = is_virtual;
             }
-            CppDecl::MemberVar { ty, name, is_mutable } => {
+            CppDecl::MemberVar {
+                ty,
+                name,
+                is_mutable,
+            } => {
                 // M17.0: mutable 成员 - C 端不区分, 但 C++ 端 const 方法中可写.
                 // 我们已经在 const 方法中把 this 视作 const, 但为支持 mutable,
                 // emit 时仍按非 const 处理; 正确做法是 lower_const_method 用 const-cast.
                 // 当前简化: mutable 视为普通字段, 不做差异 - 留待 M17.x 完善.
                 let _ = is_mutable;
-                self.out.push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
+                self.out
+                    .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
             }
             CppDecl::Namespace { name, body } => {
-                if let Some(n) = name { self.ns.stack.push(n.clone()); }
-                for x in body { self.lower_decl(x); }
-                if name.is_some() { self.ns.stack.pop(); }
+                if let Some(n) = name {
+                    self.ns.stack.push(n.clone());
+                }
+                for x in body {
+                    self.lower_decl(x);
+                }
+                if name.is_some() {
+                    self.ns.stack.pop();
+                }
             }
             CppDecl::Using { is_namespace, path } => {
                 // M8: 仅注释提示 (lower 阶段忽略)
                 let _ = (is_namespace, path);
             }
-            CppDecl::OperatorFn { class, op, params, body, ret, .. } => {
+            CppDecl::OperatorFn {
+                class,
+                op,
+                params,
+                body,
+                ret,
+                ..
+            } => {
                 if let Some(c) = class {
                     let class_q = self.qualify_name(c);
-                    let param_tys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
+                    let param_tys: Vec<MangleType> =
+                        params.iter().map(|(_, t)| t.clone()).collect();
                     let m = mangle_operator_member(&class_q, op.clone(), &param_tys);
                     let this_ty = MangleType::Pointer(Box::new(MangleType::Class(class_q)));
-                    let mut all_params: Vec<(String, MangleType)> = vec![("this".to_string(), this_ty)];
+                    let mut all_params: Vec<(String, MangleType)> =
+                        vec![("this".to_string(), this_ty)];
                     all_params.extend(params.iter().cloned());
                     self.emit_fn(&m, ret, &all_params, body);
                 } else {
-                    let param_tys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
+                    let param_tys: Vec<MangleType> =
+                        params.iter().map(|(_, t)| t.clone()).collect();
                     let m = mangle_operator_global(op.clone(), &param_tys);
                     self.emit_fn(&m, ret, params, body);
                 }
             }
-            CppDecl::Template { params, decl, requires } => {
+            CppDecl::Template {
+                params,
+                decl,
+                requires,
+            } => {
                 // M26: 模板已在 collect_classes 注册, 按需实例化.
                 // 未被使用的模板不产生 C 输出 (避免 T 未定义占位类型).
                 // 若内层是 Concept, 输出概念占位 (M10+)
@@ -1003,16 +1294,32 @@ impl Lower {
                     let _ = c;
                 } else {
                     let _ = (decl, requires);
-                    self.out.push_str(&format!("/* template <{}> (registered, instantiated on demand) */\n",
-                        params.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")));
+                    self.out.push_str(&format!(
+                        "/* template <{}> (registered, instantiated on demand) */\n",
+                        params
+                            .params
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
             }
-            CppDecl::PartialSpec { params, pattern_text, decl } => {
+            CppDecl::PartialSpec {
+                params,
+                pattern_text,
+                decl,
+            } => {
                 // M26: 偏特化已在 collect_classes 注册; 实参匹配时优先选用
                 let _ = decl;
                 self.out.push_str(&format!(
                     "/* partial specialization <{}> for pattern `{}` (registered) */\n",
-                    params.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                    params
+                        .params
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     pattern_text
                 ));
             }
@@ -1021,7 +1328,8 @@ impl Lower {
             CppDecl::InheritingCtor { class, base } => {
                 if class.is_empty() {
                     self.out.push_str(&format!(
-                        "/* M17.0: using {}::{} (parsed at class scope) */\n", base, base
+                        "/* M17.0: using {}::{} (parsed at class scope) */\n",
+                        base, base
                     ));
                     return; // 等价于 continue, 但 match 块内不能 continue
                 }
@@ -1029,20 +1337,32 @@ impl Lower {
                 let base_q = self.qualify_name(base);
                 let base_ctors = self.class_ctors.get(&base_q).cloned().unwrap_or_default();
                 for m in &base_ctors {
-                    if let CppDecl::Ctor { params, inits, body, .. } = m {
+                    if let CppDecl::Ctor {
+                        params,
+                        inits,
+                        body,
+                        ..
+                    } = m
+                    {
                         // M17.0: 派生类 ctor 转发到基类 ctor, 不重复 inline
                         // emit: void Derived_ctor(this, params) { Base_ctor(this, params); }
                         let class_q = self.qualify_name(class);
                         let n_d = NestedName::from_dotted(vec![class_q.clone()]);
-                        let param_tys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
+                        let param_tys: Vec<MangleType> =
+                            params.iter().map(|(_, t)| t.clone()).collect();
                         let m_d = mangle_ctor(&n_d, &param_tys, 1);
-                        let this_ty = MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
-                        let mut all_params: Vec<(String, MangleType)> = vec![("this".to_string(), this_ty)];
+                        let this_ty =
+                            MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
+                        let mut all_params: Vec<(String, MangleType)> =
+                            vec![("this".to_string(), this_ty)];
                         all_params.extend(params.iter().cloned());
                         self.out.push_str(&format!("void {} (", m_d));
                         for (i, (n, t)) in all_params.iter().enumerate() {
-                            if i > 0 { self.out.push_str(", "); }
-                            self.out.push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
+                            if i > 0 {
+                                self.out.push_str(", ");
+                            }
+                            self.out
+                                .push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
                         }
                         self.out.push_str(") {\n");
                         // 转发到基类 ctor
@@ -1059,20 +1379,25 @@ impl Lower {
                         self.out.push_str(");\n");
                         // 派生类自己的 init 列表 (若 Body 中有)
                         for (member, expr) in inits {
-                            self.out.push_str(&format!("    ((struct {}*)this)->{} = ",
-                                class_q, member));
+                            self.out.push_str(&format!(
+                                "    ((struct {}*)this)->{} = ",
+                                class_q, member
+                            ));
                             self.emit_expr(expr);
                             self.out.push_str(";\n");
                         }
                         // body (若非空)
-                        for s in &body.stmts { self.emit_stmt(s); }
+                        for s in &body.stmts {
+                            self.emit_stmt(s);
+                        }
                         self.out.push_str("}\n");
                     }
                 }
                 if base_ctors.is_empty() {
                     // 没找到基类 ctor 列表 (基类未在此 TU 定义), 退化为注释
                     self.out.push_str(&format!(
-                        "/* M17.0: using {}::{} - base ctors not visible */\n", base, base
+                        "/* M17.0: using {}::{} - base ctors not visible */\n",
+                        base, base
                     ));
                 }
             }
@@ -1083,21 +1408,28 @@ impl Lower {
                     "/* dcc C++ concept (M10+): {} = {} (parsed, evaluated) */\n",
                     name, body_text
                 ));
-                let _ = c;  // 概念定义仅作声明, 实际约束在 use 处求值
+                let _ = c; // 概念定义仅作声明, 实际约束在 use 处求值
             }
-            CppDecl::Module { name, partition, is_export } => {
+            CppDecl::Module {
+                name,
+                partition,
+                is_export,
+            } => {
                 // M10+: 支持分区
                 let kind = if *is_export { "export module" } else { "module" };
                 let n = name.as_deref().unwrap_or("(global)");
                 let sig = if let Some(p) = partition {
                     format!("{}:{}", n, p)
-                } else { n.to_string() };
-                self.out.push_str(&format!(
-                    "/* dcc C++ {} (M10+): {} */\n", kind, sig
-                ));
+                } else {
+                    n.to_string()
+                };
+                self.out
+                    .push_str(&format!("/* dcc C++ {} (M10+): {} */\n", kind, sig));
                 // M26: BMF 序列化 - export module 声明后进入导出收集模式
                 if *is_export {
-                    if let Some(n) = name { self.module_name = n.clone(); }
+                    if let Some(n) = name {
+                        self.module_name = n.clone();
+                    }
                     self.module_collect = true;
                 }
             }
@@ -1129,8 +1461,11 @@ impl Lower {
                 ));
             }
             CppDecl::ExportBlock(body) => {
-                self.out.push_str("/* dcc C++ export block (M9 placeholder) */\n");
-                for x in body { self.lower_decl(x); }
+                self.out
+                    .push_str("/* dcc C++ export block (M9 placeholder) */\n");
+                for x in body {
+                    self.lower_decl(x);
+                }
             }
             CppDecl::RawExternC(text) => {
                 /* M18.0: 透传 extern "C" { ... } 块原文.
@@ -1154,7 +1489,8 @@ impl Lower {
                  * 不识别 `dccpp_<ident>(` 函数名形式 (e.g. `dccpp_path_new(`)
                  * 因为那是函数名, 不是 type.
                  */
-                self.out.push_str("/* dcc++ M18: extern \"C\" block (de-wrapped) */\n");
+                self.out
+                    .push_str("/* dcc++ M18: extern \"C\" block (de-wrapped) */\n");
                 /* 先注入 int64_t/uint64_t 等本项目常用 typedef,
                  * 让 extern "C" 块内 `int64_t dccpp_fs_file_size(...)`
                  * 也能被 dcc C 接受. */
@@ -1170,7 +1506,7 @@ impl Lower {
                             let mut seen: std::collections::HashSet<String> =
                                 std::collections::HashSet::new();
                             while i + 6 <= bytes.len() {
-                                if &bytes[i..i+6] == b"dccpp_"
+                                if &bytes[i..i + 6] == b"dccpp_"
                                     && (i == 0 || !is_ident_char(bytes[i - 1]))
                                 {
                                     let start = i;
@@ -1202,12 +1538,14 @@ impl Lower {
                                         false
                                     };
                                     if is_type {
-                                        let name = std::string::String::from_utf8_lossy(
-                                            &bytes[start..j]).into_owned();
+                                        let name =
+                                            std::string::String::from_utf8_lossy(&bytes[start..j])
+                                                .into_owned();
                                         if !seen.contains(&name) {
                                             seen.insert(name.clone());
                                             self.out.push_str(&format!(
-                                                "typedef struct {} {};\n", name, name
+                                                "typedef struct {} {};\n",
+                                                name, name
                                             ));
                                         }
                                     }
@@ -1251,26 +1589,39 @@ impl Lower {
         // 继承: 嵌入基类子结构
         for b in &c.bases {
             if !b.is_virtual {
-                self.out.push_str(&format!("    struct {} __base_{};\n", b.name, b.name));
+                self.out
+                    .push_str(&format!("    struct {} __base_{};\n", b.name, b.name));
             } else {
                 // 虚基类: 简化使用指针
-                self.out.push_str(&format!("    struct {}* __vb_{};\n", b.name, b.name));
+                self.out
+                    .push_str(&format!("    struct {}* __vb_{};\n", b.name, b.name));
             }
         }
         // 检查是否有 virtual 方法 -> 添加 vptr
-        let has_virt = c.members.iter().any(|m| matches!(m,
-            CppDecl::MemberFn { is_virtual: true, .. } | CppDecl::Dtor { is_virtual: true, .. }
-        ));
+        let has_virt = c.members.iter().any(|m| {
+            matches!(
+                m,
+                CppDecl::MemberFn {
+                    is_virtual: true,
+                    ..
+                } | CppDecl::Dtor {
+                    is_virtual: true,
+                    ..
+                }
+            )
+        });
         if has_virt {
             self.out.push_str("    void* __vptr;\n");
         }
         for m in &c.members {
             match m {
                 CppDecl::MemberVar { ty, name, .. } => {
-                    self.out.push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
+                    self.out
+                        .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
                 }
                 CppDecl::Class(nested) => {
-                    self.out.push_str(&format!("/* nested class {} */\n", nested.name));
+                    self.out
+                        .push_str(&format!("/* nested class {} */\n", nested.name));
                     self.lower_class(nested);
                 }
                 _ => {} // 成员函数 / 构造 / 析构 -> 阶段 2
@@ -1287,13 +1638,10 @@ impl Lower {
         // alias 是 C 关键字 (int/char/void/...) 时跳过, 否则 dcc C 报 E0004.
         if qname.contains('_') {
             if let Some(last) = qname.rsplit('_').next() {
-                if last != qname && !self.emitted_typedefs.contains(last)
-                    && !is_c_keyword(last)
-                {
+                if last != qname && !self.emitted_typedefs.contains(last) && !is_c_keyword(last) {
                     self.emitted_typedefs.insert(last.to_string());
-                    self.out.push_str(&format!(
-                        "typedef struct {} {};\n", qname, last
-                    ));
+                    self.out
+                        .push_str(&format!("typedef struct {} {};\n", qname, last));
                 }
             }
         }
@@ -1308,7 +1656,9 @@ impl Lower {
             }
         }
         // 阶段 2: 成员函数体外定义
-        for m in &c.members { self.lower_class_member_fn(m); }
+        for m in &c.members {
+            self.lower_class_member_fn(m);
+        }
         // 输出 typeinfo 符号 (M17.0: 真正 struct, 不是 char*)
         self.emit_typeinfo(&c.name);
         // 输出 vtable 符号
@@ -1320,8 +1670,12 @@ impl Lower {
     /// 仅降级类成员中的函数部分 (构造 / 析构 / 成员函数 / 运算符)
     fn lower_class_member_fn(&mut self, m: &CppDecl) {
         match m {
-            CppDecl::Ctor { .. } | CppDecl::Dtor { .. } | CppDecl::MemberFn { .. }
-            | CppDecl::OperatorFn { .. } => { self.lower_decl(m); }
+            CppDecl::Ctor { .. }
+            | CppDecl::Dtor { .. }
+            | CppDecl::MemberFn { .. }
+            | CppDecl::OperatorFn { .. } => {
+                self.lower_decl(m);
+            }
             _ => {}
         }
     }
@@ -1332,20 +1686,28 @@ impl Lower {
                 self.lower_decl(m);
             }
             CppDecl::MemberVar { ty, name, .. } => {
-                self.out.push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
+                self.out
+                    .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(ty), name));
             }
-            CppDecl::OperatorFn { .. } => { self.lower_decl(m); }
+            CppDecl::OperatorFn { .. } => {
+                self.lower_decl(m);
+            }
             CppDecl::Class(c) => {
                 // 嵌套类
-                self.out.push_str(&format!("/* nested class {} */\n", c.name));
+                self.out
+                    .push_str(&format!("/* nested class {} */\n", c.name));
                 self.lower_class(c);
             }
-            _ => { self.out.push_str("/* unsupported class member */\n"); }
+            _ => {
+                self.out.push_str("/* unsupported class member */\n");
+            }
         }
-    }    /// 限定名 (在当前命名空间上下文中)
+    }
+    /// 限定名 (在当前命名空间上下文中)
     fn qualify_name(&self, n: &str) -> String {
-        if self.ns.stack.is_empty() { n.to_string() }
-        else {
+        if self.ns.stack.is_empty() {
+            n.to_string()
+        } else {
             let mut s = self.ns.stack.join("_");
             s.push('_');
             s.push_str(n);
@@ -1368,22 +1730,38 @@ impl Lower {
             name
         ));
         // Itanium _ZTI<Name> 兼容符号
-        self.out.push_str(&format!("void* {} = (void*)&__dcc_ti_{};\n", zti, name));
+        self.out
+            .push_str(&format!("void* {} = (void*)&__dcc_ti_{};\n", zti, name));
     }
 
     /// 输出 vtable 数组与符号
     fn emit_vtable(&mut self, name: &str, members: &[CppDecl]) {
         let ztv = mangle_vtable(name);
-        self.out.push_str(&format!("static void* __dcc_vt_{}[] = {{\n", name));
-        self.out.push_str("    (void*)0,  /* RTTI offset (skip) */\n");
+        self.out
+            .push_str(&format!("static void* __dcc_vt_{}[] = {{\n", name));
+        self.out
+            .push_str("    (void*)0,  /* RTTI offset (skip) */\n");
         for m in members {
-            if let CppDecl::MemberFn { is_virtual: true, name: fn_name, params, class, is_const, .. } = m {
+            if let CppDecl::MemberFn {
+                is_virtual: true,
+                name: fn_name,
+                params,
+                class,
+                is_const,
+                ..
+            } = m
+            {
                 let n = NestedName::from_dotted(vec![class.clone(), fn_name.clone()]);
                 let m_name = mangle_member_function(&n, &[], &MangleType::Void);
                 let _ = (params, is_const);
                 self.out.push_str(&format!("    (void*){},\n", m_name));
             }
-            if let CppDecl::Dtor { is_virtual: true, class, .. } = m {
+            if let CppDecl::Dtor {
+                is_virtual: true,
+                class,
+                ..
+            } = m
+            {
                 let n = NestedName::from_dotted(vec![class.clone()]);
                 let m_name = mangle_dtor(&n, 1);
                 self.out.push_str(&format!("    (void*){},\n", m_name));
@@ -1391,7 +1769,8 @@ impl Lower {
         }
         self.out.push_str("    (void*)0\n");
         self.out.push_str("};\n");
-        self.out.push_str(&format!("void* {} = __dcc_vt_{};\n", ztv, name));
+        self.out
+            .push_str(&format!("void* {} = __dcc_vt_{};\n", ztv, name));
     }
 
     /// 输出 vtable 项
@@ -1399,17 +1778,26 @@ impl Lower {
         let _ = (class, name, mangled, is_const);
     }
 
-    fn emit_fn(&mut self, mangled: &str, ret: &MangleType,
-               params: &[(String, MangleType)], body: &CppBody) {
+    fn emit_fn(
+        &mut self,
+        mangled: &str,
+        ret: &MangleType,
+        params: &[(String, MangleType)],
+        body: &CppBody,
+    ) {
         // 记录形参类型, 用于 body 内 obj.method() 改写
         self.param_var_types.clear();
         for (n, t) in params {
             self.param_var_types.insert(n.clone(), t.clone());
         }
-        self.out.push_str(&format!("{} {} (", self.mangle_to_c_ns(ret), mangled));
+        self.out
+            .push_str(&format!("{} {} (", self.mangle_to_c_ns(ret), mangled));
         for (i, (n, t)) in params.iter().enumerate() {
-            if i > 0 { self.out.push_str(", "); }
-            self.out.push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
+            if i > 0 {
+                self.out.push_str(", ");
+            }
+            self.out
+                .push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
         }
         self.out.push_str(") {\n");
         // M26: 协程真状态机 (Duff's device) - body 含 co_await/co_yield/co_return
@@ -1422,7 +1810,9 @@ impl Lower {
             self.coro_state = 0;
             self.out.push_str(&coro_fn_prologue(mangled, &ret_c));
         }
-        for s in &body.stmts { self.emit_stmt(s); }
+        for s in &body.stmts {
+            self.emit_stmt(s);
+        }
         if is_coro {
             self.out.push_str(&coro_fn_epilogue(&self.coro_ret_c));
             self.coro_var.clear();
@@ -1435,10 +1825,14 @@ impl Lower {
 
     /// 构造函数: 先把 init 列表展开为 `this->member = expr;`,
     /// 然后接 body.
-    fn emit_ctor(&mut self, mangled: &str, class: &str,
-                 params: &[(String, MangleType)],
-                 inits: &[(String, CppExpr)],
-                 body: &CppBody) {
+    fn emit_ctor(
+        &mut self,
+        mangled: &str,
+        class: &str,
+        params: &[(String, MangleType)],
+        inits: &[(String, CppExpr)],
+        body: &CppBody,
+    ) {
         // 记录形参类型, 用于 body 内 obj.method() 改写
         self.param_var_types.clear();
         for (n, t) in params {
@@ -1447,17 +1841,23 @@ impl Lower {
         self.current_class = Some(class.to_string());
         self.out.push_str(&format!("void {} (", mangled));
         for (i, (n, t)) in params.iter().enumerate() {
-            if i > 0 { self.out.push_str(", "); }
-            self.out.push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
+            if i > 0 {
+                self.out.push_str(", ");
+            }
+            self.out
+                .push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
         }
         self.out.push_str(") {\n");
         // init 列表: this->member = expr;
         for (member, expr) in inits {
-            self.out.push_str(&format!("    ((struct {}*)this)->{} = ", class, member));
+            self.out
+                .push_str(&format!("    ((struct {}*)this)->{} = ", class, member));
             self.emit_expr(expr);
             self.out.push_str(";\n");
         }
-        for s in &body.stmts { self.emit_stmt(s); }
+        for s in &body.stmts {
+            self.emit_stmt(s);
+        }
         self.out.push_str("}\n");
         self.param_var_types.clear();
         self.current_class = None;
@@ -1471,10 +1871,15 @@ impl Lower {
                 self.emit_expr(e);
                 self.out.push_str(";\n");
             }
-            CppStmt::Expr(e) => { self.emit_expr(e); self.out.push_str(";\n"); }
+            CppStmt::Expr(e) => {
+                self.emit_expr(e);
+                self.out.push_str(";\n");
+            }
             CppStmt::Block(b) => {
                 self.out.push_str("{\n");
-                for s in &b.stmts { self.emit_stmt(s); }
+                for s in &b.stmts {
+                    self.emit_stmt(s);
+                }
                 self.out.push_str("}\n");
             }
             CppStmt::ThisMember(name, inner) => {
@@ -1493,12 +1898,17 @@ impl Lower {
                         // 无 init: auto 必须有 init (C++14), 退化为 int
                         MangleType::Int
                     }
-                } else { ty.clone() };
+                } else {
+                    ty.clone()
+                };
                 // 记录局部变量类型, 用于 c.method() 改写
-                self.local_var_types.insert(name.clone(), resolved_ty.clone());
+                self.local_var_types
+                    .insert(name.clone(), resolved_ty.clone());
                 // M17.0: 若 init 是整型常量, 记录到 i128 池 (供 if constexpr 使用)
                 if let Some(e) = init {
-                    if let Some(v) = crate::cpp::cpp_const_eval::eval_cpp_const(e, &self.const_local_i128) {
+                    if let Some(v) =
+                        crate::cpp::cpp_const_eval::eval_cpp_const(e, &self.const_local_i128)
+                    {
                         self.const_local_i128.insert(name.clone(), v);
                     }
                 }
@@ -1512,12 +1922,26 @@ impl Lower {
                             || self.templates.find(n).is_some()));
                 let class_ctor_name: Option<String> = if is_class_ctor_init {
                     if let Some(CppExpr::Call(f, _)) = init {
-                        if let CppExpr::Ident(n) = &**f { Some(n.clone()) } else { None }
-                    } else { None }
-                } else { None };
+                        if let CppExpr::Ident(n) = &**f {
+                            Some(n.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let class_ctor_args: Vec<CppExpr> = if is_class_ctor_init {
-                    if let Some(CppExpr::Call(_, args)) = init { args.clone() } else { vec![] }
-                } else { vec![] };
+                    if let Some(CppExpr::Call(_, args)) = init {
+                        args.clone()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
                 // 把 C++ 类型名映射到 C 类型 (`Counter` -> `struct Counter`)
                 // M18.0: 在命名空间内, 用 namespace-aware mangle 让 qualified 类被正确解析
                 let c_type = if matches!(&resolved_ty, MangleType::Class(_)) {
@@ -1532,7 +1956,7 @@ impl Lower {
                     if is_class_ctor_init {
                         // 类构造: 单独放在下一个 stmt 调用, 这里仅以 0 占位
                         self.out.push_str(" = 0 /*ctor*/");
-                        let _ = e;  // 抑制未使用警告
+                        let _ = e; // 抑制未使用警告
                     } else {
                         self.out.push_str(" = ");
                         self.emit_expr(e);
@@ -1544,11 +1968,14 @@ impl Lower {
                     // 走到这里说明 init 是 Class(args), 调 ctor(args)
                     // M26: 模板类型用实例化类名 (`Box<int>` -> __dcc_template_Box_int)
                     let inst_class = match &resolved_ty {
-                        MangleType::Template { name: tn, args: ta } => instantiated_class_name(tn, ta),
+                        MangleType::Template { name: tn, args: ta } => {
+                            instantiated_class_name(tn, ta)
+                        }
                         _ => class.clone(),
                     };
                     let n = NestedName::from_dotted(vec![inst_class]);
-                    let param_tys: Vec<MangleType> = class_ctor_args.iter().map(|_| MangleType::Int).collect();
+                    let param_tys: Vec<MangleType> =
+                        class_ctor_args.iter().map(|_| MangleType::Int).collect();
                     let m = mangle_ctor(&n, &param_tys, 1);
                     self.out.push_str(&format!("    {}(&{}", m, name));
                     for a in &class_ctor_args {
@@ -1569,9 +1996,14 @@ impl Lower {
                 self.local_var_types.insert(name.clone(), ty.clone());
                 // 生成 guard 变量名: _ZStL<len>name<suffix> (Itanium 风格, 但简化)
                 let _mangle = format!("_ZStL{}{}_thread_local_", name.len(), name);
-                self.out.push_str(&format!("static {} {};\n", mangle_to_c(ty), name));
-                self.out.push_str(&format!("static unsigned char _cxa_guard_{} = 0;\n", name));
-                self.out.push_str(&format!("if (_cxa_guard_acquire(&_cxa_guard_{})) {{\n", name));
+                self.out
+                    .push_str(&format!("static {} {};\n", mangle_to_c(ty), name));
+                self.out
+                    .push_str(&format!("static unsigned char _cxa_guard_{} = 0;\n", name));
+                self.out.push_str(&format!(
+                    "if (_cxa_guard_acquire(&_cxa_guard_{})) {{\n",
+                    name
+                ));
                 if let Some(e) = init {
                     self.out.push_str(&format!("    {} = ", name));
                     self.emit_expr(e);
@@ -1582,18 +2014,23 @@ impl Lower {
                     let m = mangle_ctor(&n, &[], 1);
                     self.out.push_str(&format!("    {}(&{});\n", m, name));
                 }
-                self.out.push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", name));
+                self.out
+                    .push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", name));
                 self.out.push_str("}\n");
             }
             CppStmt::If { cond, then, els } => {
                 self.out.push_str("if (");
                 self.emit_expr(cond);
                 self.out.push_str(") {\n");
-                for s in &then.stmts { self.emit_stmt(s); }
+                for s in &then.stmts {
+                    self.emit_stmt(s);
+                }
                 self.out.push_str("}\n");
                 if let Some(e) = els {
                     self.out.push_str("else {\n");
-                    for s in &e.stmts { self.emit_stmt(s); }
+                    for s in &e.stmts {
+                        self.emit_stmt(s);
+                    }
                     self.out.push_str("}\n");
                 }
             }
@@ -1604,11 +2041,15 @@ impl Lower {
                 let v = crate::cpp::cpp_const_eval::eval_cpp_const(cond, &self.const_local_i128);
                 match v {
                     Some(v) if v != 0 => {
-                        for s in &then.stmts { self.emit_stmt(s); }
+                        for s in &then.stmts {
+                            self.emit_stmt(s);
+                        }
                     }
                     Some(_) => {
                         if let Some(e) = els {
-                            for s in &e.stmts { self.emit_stmt(s); }
+                            for s in &e.stmts {
+                                self.emit_stmt(s);
+                            }
                         }
                     }
                     // 求值失败 (例如依赖模板参数 / SFINAE 探测): 保守地两段都保留
@@ -1618,11 +2059,15 @@ impl Lower {
                         self.out.push_str("if (");
                         self.emit_expr(cond);
                         self.out.push_str(") {\n");
-                        for s in &then.stmts { self.emit_stmt(s); }
+                        for s in &then.stmts {
+                            self.emit_stmt(s);
+                        }
                         self.out.push_str("}\n");
                         if let Some(e) = els {
                             self.out.push_str("else {\n");
-                            for s in &e.stmts { self.emit_stmt(s); }
+                            for s in &e.stmts {
+                                self.emit_stmt(s);
+                            }
                             self.out.push_str("}\n");
                         }
                     }
@@ -1632,41 +2077,67 @@ impl Lower {
                 self.out.push_str("while (");
                 self.emit_expr(cond);
                 self.out.push_str(") {\n");
-                for s in &body.stmts { self.emit_stmt(s); }
+                for s in &body.stmts {
+                    self.emit_stmt(s);
+                }
                 self.out.push_str("}\n");
             }
-            CppStmt::For { init, cond, step, body } => {
+            CppStmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
                 self.out.push_str("for (");
-                if let Some(s) = init { self.emit_stmt(s); }
-                else { self.out.push(';'); }
-                if let Some(c) = cond { self.emit_expr(c); }
+                if let Some(s) = init {
+                    self.emit_stmt(s);
+                } else {
+                    self.out.push(';');
+                }
+                if let Some(c) = cond {
+                    self.emit_expr(c);
+                }
                 self.out.push(';');
-                if let Some(s) = step { self.emit_stmt(s); }
+                if let Some(s) = step {
+                    self.emit_stmt(s);
+                }
                 self.out.push_str(") {\n");
-                for s in &body.stmts { self.emit_stmt(s); }
+                for s in &body.stmts {
+                    self.emit_stmt(s);
+                }
                 self.out.push_str("}\n");
             }
             CppStmt::Try { body, catches } => {
                 self.out.push_str("{\n");
                 self.out.push_str("__cxa_eh_context_t __eh_ctx = {0,0};\n");
-                self.out.push_str("if (__cxa_try(&__eh_ctx, (void*(*)(void*))0, (void*)0)) {\n");
-                for s in &body.stmts { self.emit_stmt(s); }
+                self.out
+                    .push_str("if (__cxa_try(&__eh_ctx, (void*(*)(void*))0, (void*)0)) {\n");
+                for s in &body.stmts {
+                    self.emit_stmt(s);
+                }
                 self.out.push_str("} else {\n");
                 for c in catches {
                     self.out.push_str("{\n");
                     if let Some(ty) = &c.ty {
-                        self.out.push_str("void* __exc = __cxa_begin_catch(__eh_ctx.matched);\n");
-                        self.out.push_str(&format!("{}* __e = ({}*)__exc;\n",
-                            self.mangle_to_c_ns(ty), self.mangle_to_c_ns(ty)));
+                        self.out
+                            .push_str("void* __exc = __cxa_begin_catch(__eh_ctx.matched);\n");
+                        self.out.push_str(&format!(
+                            "{}* __e = ({}*)__exc;\n",
+                            self.mangle_to_c_ns(ty),
+                            self.mangle_to_c_ns(ty)
+                        ));
                         if let Some(n) = &c.name {
                             self.out.push_str("__cxa_end_catch(__exc);\n");
                             self.out.push_str(&format!("(void)__e; (void){};\n", n));
                         }
                     } else {
-                        self.out.push_str("void* __exc = __cxa_begin_catch(__eh_ctx.matched);\n");
+                        self.out
+                            .push_str("void* __exc = __cxa_begin_catch(__eh_ctx.matched);\n");
                         self.out.push_str("(void)__exc; __cxa_end_catch(__exc);\n");
                     }
-                    for s in &c.body.stmts { self.emit_stmt(s); }
+                    for s in &c.body.stmts {
+                        self.emit_stmt(s);
+                    }
                     self.out.push_str("}\n");
                 }
                 self.out.push_str("}\n");
@@ -1675,14 +2146,17 @@ impl Lower {
             CppStmt::Throw(val) => {
                 if let Some(e) = val {
                     self.out.push_str("{\n");
-                    self.out.push_str("void* __exc = __cxa_allocate_exception(sizeof(int));\n");
+                    self.out
+                        .push_str("void* __exc = __cxa_allocate_exception(sizeof(int));\n");
                     self.out.push_str("*(int*)__exc = ");
                     self.emit_expr(e);
                     self.out.push_str(";\n");
-                    self.out.push_str("__cxa_throw(__exc, (void*)0, (void(*)(void*))0);\n");
+                    self.out
+                        .push_str("__cxa_throw(__exc, (void*)0, (void(*)(void*))0);\n");
                     self.out.push_str("}\n");
                 } else {
-                    self.out.push_str("__cxa_throw((void*)0, (void*)0, (void(*)(void*))0);\n");
+                    self.out
+                        .push_str("__cxa_throw((void*)0, (void*)0, (void(*)(void*))0);\n");
                 }
             }
             CppStmt::Break => self.out.push_str("break;\n"),
@@ -1693,7 +2167,10 @@ impl Lower {
             CppStmt::CoAwait(e) => {
                 let expr = self.expr_to_c(e);
                 self.out.push_str(&coro_suspend(
-                    &self.coro_var, &self.coro_ret_c, self.coro_state, &expr,
+                    &self.coro_var,
+                    &self.coro_ret_c,
+                    self.coro_state,
+                    &expr,
                 ));
                 self.coro_state += 1;
             }
@@ -1701,20 +2178,30 @@ impl Lower {
                 // co_yield 与 co_await 同为挂起点 (产出值给调用方)
                 let expr = self.expr_to_c(e);
                 self.out.push_str(&coro_suspend(
-                    &self.coro_var, &self.coro_ret_c, self.coro_state, &expr,
+                    &self.coro_var,
+                    &self.coro_ret_c,
+                    self.coro_state,
+                    &expr,
                 ));
                 self.coro_state += 1;
             }
             CppStmt::CoReturn(v) => {
                 // co_return: 置 done 标志 + 存返回槽, 不生成恢复标签 (协程终止)
-                let expr = v.as_ref().map(|e| self.expr_to_c(e))
+                let expr = v
+                    .as_ref()
+                    .map(|e| self.expr_to_c(e))
                     .unwrap_or_else(|| "0".to_string());
                 self.out.push_str(&coro_return(
-                    &self.coro_var, &self.coro_ret_c, self.coro_state, &expr,
+                    &self.coro_var,
+                    &self.coro_ret_c,
+                    self.coro_state,
+                    &expr,
                 ));
                 self.coro_state += 1;
             }
-            CppStmt::Decl(d) => { self.lower_decl(d); }
+            CppStmt::Decl(d) => {
+                self.lower_decl(d);
+            }
         }
     }
 
@@ -1731,7 +2218,9 @@ impl Lower {
             CppExpr::StrLit(s) => self.out.push_str(&format!("\"{}\"", s)),
             CppExpr::StrConcat(parts) => {
                 self.out.push('"');
-                for p in parts { self.out.push_str(p); }
+                for p in parts {
+                    self.out.push_str(p);
+                }
                 self.out.push('"');
             }
             CppExpr::Ident(s) => {
@@ -1772,7 +2261,9 @@ impl Lower {
                     self.local_var_types.get(name)
                         .map(|t| matches!(t, MangleType::Class(c) if crate::cpp::feature_degrade::ArrowChainResolver::has_arrow_overload(c)))
                         .unwrap_or(false)
-                } else { false };
+                } else {
+                    false
+                };
                 if use_chain {
                     // 通过 operator-> 递归
                     self.emit_expr(b);
@@ -1785,7 +2276,8 @@ impl Lower {
             CppExpr::MemberPtr { class, name } => {
                 // M10+: &Class::method -> 成员函数指针
                 // 降级为带 self 参数的函数指针: void (void* self, ...) __member_fn
-                self.out.push_str(&format!("&_member_fn_{}_{}", class, name));
+                self.out
+                    .push_str(&format!("&_member_fn_{}_{}", class, name));
             }
             CppExpr::TemplateIdent { name, args } => {
                 // M26: 非调用上下文的模板名 (e.g. `&foo<int>`): 输出实例化函数名
@@ -1795,20 +2287,28 @@ impl Lower {
                 // M10+: initializer_list {1, 2, 3}
                 // 降级为复合字面量: (int[]){1, 2, 3}
                 // 类型推断为第一个元素的类型, 默认为 int
-                let elem_ty = if let Some(CppExpr::IntLit(_)) = elems.first() { "int" }
-                    else { "int" };  // M10 简化
+                let elem_ty = if let Some(CppExpr::IntLit(_)) = elems.first() {
+                    "int"
+                } else {
+                    "int"
+                }; // M10 简化
                 self.out.push_str(&format!("(({}){{", elem_ty));
                 for (i, e) in elems.iter().enumerate() {
-                    if i > 0 { self.out.push_str(", "); }
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
                     self.emit_expr(e);
                 }
                 self.out.push_str("})");
             }
             CppExpr::TypedInitList { ty, elems } => {
                 // M10+: initializer_list<T> T{1, 2, 3}
-                self.out.push_str(&format!("(({}){{", self.mangle_to_c_ns(ty)));
+                self.out
+                    .push_str(&format!("(({}){{", self.mangle_to_c_ns(ty)));
                 for (i, e) in elems.iter().enumerate() {
-                    if i > 0 { self.out.push_str(", "); }
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
                     self.emit_expr(e);
                 }
                 self.out.push_str("})");
@@ -1819,7 +2319,9 @@ impl Lower {
                     self.emit_template_fn_call(name, targs);
                     self.out.push('(');
                     for (i, a) in args.iter().enumerate() {
-                        if i > 0 { self.out.push_str(", "); }
+                        if i > 0 {
+                            self.out.push_str(", ");
+                        }
                         self.emit_expr(a);
                     }
                     self.out.push(')');
@@ -1831,13 +2333,16 @@ impl Lower {
                         && !self.classes.contains(fname)
                     {
                         // 隐式实参推导: 从调用实参类型推导
-                        let arg_tys: Vec<MangleType> = args.iter().map(|a| self.infer_type(a, false)).collect();
+                        let arg_tys: Vec<MangleType> =
+                            args.iter().map(|a| self.infer_type(a, false)).collect();
                         let td = self.templates.find(fname).unwrap();
                         if let Some(resolved) = self.templates.deduce_args(td, &arg_tys) {
                             self.emit_template_fn_call(fname, &resolved);
                             self.out.push('(');
                             for (i, a) in args.iter().enumerate() {
-                                if i > 0 { self.out.push_str(", "); }
+                                if i > 0 {
+                                    self.out.push_str(", ");
+                                }
                                 self.emit_expr(a);
                             }
                             self.out.push(')');
@@ -1855,9 +2360,13 @@ impl Lower {
                 };
                 if let Some((obj_expr, method_name)) = call_target {
                     if let Some(class) = self.lookup_var_class(obj_expr) {
-                        if self.class_methods.get(&class)
-                            .is_some_and(|m| m.contains(&method_name)) {
-                            let n = NestedName::from_dotted(vec![class.clone(), method_name.clone()]);
+                        if self
+                            .class_methods
+                            .get(&class)
+                            .is_some_and(|m| m.contains(&method_name))
+                        {
+                            let n =
+                                NestedName::from_dotted(vec![class.clone(), method_name.clone()]);
                             let m = mangle_member_function(&n, &[], &MangleType::Void);
                             self.out.push_str(&m);
                             self.out.push('(');
@@ -1876,7 +2385,9 @@ impl Lower {
                 self.emit_expr(f);
                 self.out.push('(');
                 for (i, a) in args.iter().enumerate() {
-                    if i > 0 { self.out.push_str(", "); }
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
                     self.emit_expr(a);
                 }
                 self.out.push(')');
@@ -1885,12 +2396,26 @@ impl Lower {
                 // P2.4: 走 mangle_op_new / mangle_op_new_array /
                 // mangle_op_delete / mangle_op_delete_array 命名常量,
                 // 不再硬编码 "_Znwm" / "_Znam" / "_ZdlPv" / "_ZdaPv".
-                self.out.push_str(&format!("((struct {}*){}(sizeof(struct {})))", ty, mangle_op_new(), ty));
+                self.out.push_str(&format!(
+                    "((struct {}*){}(sizeof(struct {})))",
+                    ty,
+                    mangle_op_new(),
+                    ty
+                ));
                 if !args.is_empty() {
                     let n = NestedName::from_dotted(vec![ty.clone()]);
                     let m = mangle_ctor(&n, &[MangleType::Pointer(Box::new(MangleType::Void))], 1);
-                    self.out.push_str(&format!("; {}((struct {}){}(sizeof(struct {}))", m, ty, mangle_op_new(), ty));
-                    for a in args { self.out.push_str(", "); self.emit_expr(a); }
+                    self.out.push_str(&format!(
+                        "; {}((struct {}){}(sizeof(struct {}))",
+                        m,
+                        ty,
+                        mangle_op_new(),
+                        ty
+                    ));
+                    for a in args {
+                        self.out.push_str(", ");
+                        self.emit_expr(a);
+                    }
                     self.out.push(')');
                 }
             }
@@ -1900,11 +2425,30 @@ impl Lower {
                 // 我们的 ABI 桩负责分配, 元素 ctor 在使用时由代码显式调用.
                 // M17.0: 区分内建类型 (int/char/...) 和类类型.
                 // 内建类型不需要 ctor, 直接用 (ty*) 强转; 类类型用 (struct ty*).
-                let is_builtin = matches!(ty.as_str(),
-                    "int" | "char" | "long" | "short" | "float"
-                    | "double" | "void" | "bool" | "unsigned" | "int*");
-                let c_ty = if is_builtin { ty.clone() } else { format!("struct {}", ty) };
-                self.out.push_str(&format!("(({}*){}(sizeof({}) * (", c_ty, mangle_op_new_array(), c_ty));
+                let is_builtin = matches!(
+                    ty.as_str(),
+                    "int"
+                        | "char"
+                        | "long"
+                        | "short"
+                        | "float"
+                        | "double"
+                        | "void"
+                        | "bool"
+                        | "unsigned"
+                        | "int*"
+                );
+                let c_ty = if is_builtin {
+                    ty.clone()
+                } else {
+                    format!("struct {}", ty)
+                };
+                self.out.push_str(&format!(
+                    "(({}*){}(sizeof({}) * (",
+                    c_ty,
+                    mangle_op_new_array(),
+                    c_ty
+                ));
                 self.emit_expr(count);
                 self.out.push_str(")))");
             }
@@ -1941,40 +2485,78 @@ impl Lower {
             CppExpr::BinOp(op, l, r) => {
                 self.emit_expr(l);
                 let op_s = match op {
-                    BinOpKind::Add => "+", BinOpKind::Sub => "-",
-                    BinOpKind::Mul => "*", BinOpKind::Div => "/",
-                    BinOpKind::Mod => "%", BinOpKind::EqEq => "==",
-                    BinOpKind::Ne => "!=", BinOpKind::Lt => "<",
-                    BinOpKind::Gt => ">", BinOpKind::Le => "<=",
-                    BinOpKind::Ge => ">=", BinOpKind::Assign => " = ",
-                    BinOpKind::Shl => "<<", BinOpKind::Shr => ">>",
-                    BinOpKind::And => "&", BinOpKind::Or => "|",
-                    BinOpKind::Xor => "^", BinOpKind::LAnd => "&&",
+                    BinOpKind::Add => "+",
+                    BinOpKind::Sub => "-",
+                    BinOpKind::Mul => "*",
+                    BinOpKind::Div => "/",
+                    BinOpKind::Mod => "%",
+                    BinOpKind::EqEq => "==",
+                    BinOpKind::Ne => "!=",
+                    BinOpKind::Lt => "<",
+                    BinOpKind::Gt => ">",
+                    BinOpKind::Le => "<=",
+                    BinOpKind::Ge => ">=",
+                    BinOpKind::Assign => " = ",
+                    BinOpKind::Shl => "<<",
+                    BinOpKind::Shr => ">>",
+                    BinOpKind::And => "&",
+                    BinOpKind::Or => "|",
+                    BinOpKind::Xor => "^",
+                    BinOpKind::LAnd => "&&",
                     BinOpKind::LOr => "||",
-                    BinOpKind::AddAssign => "+=", BinOpKind::SubAssign => "-=",
-                    BinOpKind::MulAssign => "*=", BinOpKind::DivAssign => "/=",
-                    BinOpKind::ModAssign => "%=", BinOpKind::ShlAssign => "<<=",
-                    BinOpKind::ShrAssign => ">>=", BinOpKind::AndAssign => "&=",
-                    BinOpKind::OrAssign => "|=", BinOpKind::XorAssign => "^=",
-                    BinOpKind::Index => { self.out.push('['); self.emit_expr(r); self.out.push(']'); return; }
+                    BinOpKind::AddAssign => "+=",
+                    BinOpKind::SubAssign => "-=",
+                    BinOpKind::MulAssign => "*=",
+                    BinOpKind::DivAssign => "/=",
+                    BinOpKind::ModAssign => "%=",
+                    BinOpKind::ShlAssign => "<<=",
+                    BinOpKind::ShrAssign => ">>=",
+                    BinOpKind::AndAssign => "&=",
+                    BinOpKind::OrAssign => "|=",
+                    BinOpKind::XorAssign => "^=",
+                    BinOpKind::Index => {
+                        self.out.push('[');
+                        self.emit_expr(r);
+                        self.out.push(']');
+                        return;
+                    }
                 };
                 self.out.push_str(op_s);
-                if !matches!(op, BinOpKind::Index) { self.emit_expr(r); }
+                if !matches!(op, BinOpKind::Index) {
+                    self.emit_expr(r);
+                }
             }
             CppExpr::UnaryOp(op, e) => {
                 let s = match op {
-                    UnaryOpKind::Neg => "-", UnaryOpKind::Not => "~",
-                    UnaryOpKind::Plus => "+", UnaryOpKind::LNot => "!",
-                    UnaryOpKind::PreInc => "++", UnaryOpKind::PreDec => "--",
-                    UnaryOpKind::PostInc => { self.emit_expr(e); self.out.push_str("++"); return; }
-                    UnaryOpKind::PostDec => { self.emit_expr(e); self.out.push_str("--"); return; }
+                    UnaryOpKind::Neg => "-",
+                    UnaryOpKind::Not => "~",
+                    UnaryOpKind::Plus => "+",
+                    UnaryOpKind::LNot => "!",
+                    UnaryOpKind::PreInc => "++",
+                    UnaryOpKind::PreDec => "--",
+                    UnaryOpKind::PostInc => {
+                        self.emit_expr(e);
+                        self.out.push_str("++");
+                        return;
+                    }
+                    UnaryOpKind::PostDec => {
+                        self.emit_expr(e);
+                        self.out.push_str("--");
+                        return;
+                    }
                     UnaryOpKind::Deref => "*",
                 };
                 self.out.push_str(s);
                 self.emit_expr(e);
             }
-            CppExpr::Ref(e) => { self.out.push('&'); self.emit_expr(e); }
-            CppExpr::AddrOf(e) => { self.out.push('&'); self.emit_expr(e); }
+            CppExpr::Ref(e) => {
+                self.out.push('&');
+                self.emit_expr(e);
+            }
+            CppExpr::AddrOf(e) => {
+                self.out.push('&');
+                self.emit_expr(e);
+            }
             CppExpr::Cast(ty, e) => {
                 self.out.push_str(&format!("({})", self.mangle_to_c_ns(ty)));
                 self.emit_expr(e);
@@ -2018,17 +2600,20 @@ impl Lower {
                 self.out.push_str("), 0, 0, -1))");
             }
             CppExpr::StaticCast { ty, expr } => {
-                self.out.push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
+                self.out
+                    .push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
             }
             CppExpr::ConstCast { ty, expr } => {
-                self.out.push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
+                self.out
+                    .push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
             }
             CppExpr::ReinterpretCast { ty, expr } => {
-                self.out.push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
+                self.out
+                    .push_str(&format!("(({})(", self.mangle_to_c_ns(ty)));
                 self.emit_expr(expr);
                 self.out.push_str("))");
             }
@@ -2059,7 +2644,9 @@ impl Lower {
                 // 运算符调用: 简化调用
                 self.out.push_str(&format!("{}(", op.clone().encode_name()));
                 for (i, a) in args.iter().enumerate() {
-                    if i > 0 { self.out.push_str(", "); }
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
                     self.emit_expr(a);
                 }
                 self.out.push(')');
@@ -2076,7 +2663,9 @@ impl Lower {
             CppExpr::Comma(exprs) => {
                 self.out.push('(');
                 for (i, e) in exprs.iter().enumerate() {
-                    if i > 0 { self.out.push_str(", "); }
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
                     self.emit_expr(e);
                 }
                 self.out.push(')');
@@ -2118,7 +2707,8 @@ impl Lower {
             // `__dcc_multi_index_N(obj, i, j, k)` C 辅助函数
             // (N = 2..4, 真实实现在 dccpp_runtime.c)
             CppExpr::MultiIndex(obj, indices) => {
-                self.out.push_str(&format!("__dcc_multi_index_{}(", indices.len()));
+                self.out
+                    .push_str(&format!("__dcc_multi_index_{}(", indices.len()));
                 self.emit_expr(obj);
                 for i in indices {
                     self.out.push_str(", ");
@@ -2132,7 +2722,8 @@ impl Lower {
     /// 降级所有收集到的 lambda
     fn lower_lambdas(&mut self) {
         for lam in self.lambdas.clone() {
-            self.out.push_str(&format!("struct {} {{\n", lam.closure_name));
+            self.out
+                .push_str(&format!("struct {} {{\n", lam.closure_name));
             // 捕获字段
             for cap in &lam.captures {
                 match cap {
@@ -2147,24 +2738,34 @@ impl Lower {
             }
             // 形参
             for (n, t) in &lam.params {
-                self.out.push_str(&format!("    {} {};\n", self.mangle_to_c_ns(t), n));
+                self.out
+                    .push_str(&format!("    {} {};\n", self.mangle_to_c_ns(t), n));
             }
             self.out.push_str("};\n");
             // operator() 静态函数
-            self.out.push_str(&format!("int _ZN{}{}clERKS_(\n",
-                lam.closure_name.len(), lam.closure_name));
+            self.out.push_str(&format!(
+                "int _ZN{}{}clERKS_(\n",
+                lam.closure_name.len(),
+                lam.closure_name
+            ));
             // 形参: this 闭包 + 显式形参
-            self.out.push_str(&format!("    struct {}* __closure", lam.closure_name));
+            self.out
+                .push_str(&format!("    struct {}* __closure", lam.closure_name));
             for (n, t) in &lam.params {
-                self.out.push_str(&format!(", {} {}", self.mangle_to_c_ns(t), n));
+                self.out
+                    .push_str(&format!(", {} {}", self.mangle_to_c_ns(t), n));
             }
             self.out.push_str(") {\n");
-            for s in &lam.body.stmts { self.emit_stmt(s); }
+            for s in &lam.body.stmts {
+                self.emit_stmt(s);
+            }
             self.out.push_str("}\n");
         }
     }
 
-    pub fn finish(self) -> String { self.out }
+    pub fn finish(self) -> String {
+        self.out
+    }
 
     /// 函数签名的 C 文本 (BMF 导出记录): `ret(p1, p2)`
     fn fn_signature_c(&self, ret: &MangleType, params: &[(String, MangleType)]) -> String {
@@ -2174,12 +2775,17 @@ impl Lower {
 
     /// M26: 模块接口序列化 (BMF 文本). 无 export module 声明时返回 None.
     pub fn module_bmf(&self) -> Option<String> {
-        if self.module_name.is_empty() { return None; }
-        Some(BmfModule {
-            name: self.module_name.clone(),
-            exports: self.module_exports.clone(),
-            imports: self.module_imports.clone(),
-        }.serialize())
+        if self.module_name.is_empty() {
+            return None;
+        }
+        Some(
+            BmfModule {
+                name: self.module_name.clone(),
+                exports: self.module_exports.clone(),
+                imports: self.module_imports.clone(),
+            }
+            .serialize(),
+        )
     }
 }
 
@@ -2246,8 +2852,11 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(s.contains("struct Counter c;"),
-                "expected 'struct Counter c;' in: {}", s);
+        assert!(
+            s.contains("struct Counter c;"),
+            "expected 'struct Counter c;' in: {}",
+            s
+        );
     }
 
     #[test]
@@ -2271,8 +2880,11 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(s.contains("struct Counter c ="),
-                "expected 'struct Counter c =' in: {}", s);
+        assert!(
+            s.contains("struct Counter c ="),
+            "expected 'struct Counter c =' in: {}",
+            s
+        );
     }
 
     #[test]
@@ -2426,7 +3038,11 @@ mod tests {
         l.lower_decls(&decls);
         let s = l.finish();
         // M26: 模板类只注册, 不展开; 命名空间输出保留
-        assert!(s.contains("std_complex") || s.contains("registered"), "{}", s);
+        assert!(
+            s.contains("std_complex") || s.contains("registered"),
+            "{}",
+            s
+        );
         assert!(s.contains("template"), "{}", s);
     }
 
@@ -2527,10 +3143,16 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(s.contains("_ZN7Counter3incEv(&c)"),
-                "expected method call rewrite, got: {}", s);
-        assert!(s.contains("_ZN7Counter3getEv(&c)"),
-                "expected method call rewrite, got: {}", s);
+        assert!(
+            s.contains("_ZN7Counter3incEv(&c)"),
+            "expected method call rewrite, got: {}",
+            s
+        );
+        assert!(
+            s.contains("_ZN7Counter3getEv(&c)"),
+            "expected method call rewrite, got: {}",
+            s
+        );
     }
 
     #[test]
@@ -2543,12 +3165,21 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(!s.contains("#include <stddef.h>"),
-                "should not include stddef.h, got: {}", s);
-        assert!(!s.contains("#include <stdint.h>"),
-                "should not include stdint.h, got: {}", s);
-        assert!(s.contains("typedef unsigned long size_t;"),
-                "should provide fallback size_t, got: {}", s);
+        assert!(
+            !s.contains("#include <stddef.h>"),
+            "should not include stddef.h, got: {}",
+            s
+        );
+        assert!(
+            !s.contains("#include <stdint.h>"),
+            "should not include stdint.h, got: {}",
+            s
+        );
+        assert!(
+            s.contains("typedef unsigned long size_t;"),
+            "should provide fallback size_t, got: {}",
+            s
+        );
     }
 
     // ===== M10+ tests =====
@@ -2707,14 +3338,18 @@ mod tests {
     fn lower_m10_inheriting_ctor() {
         // using Base::Base; 在类外 (顶层作用域), 仅作注释
         let src = b"class Base { public: Base() {} };
-                   class Derived : public Base { public: Base() {} };";  // 简化的继承构造
+                   class Derived : public Base { public: Base() {} };"; // 简化的继承构造
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().unwrap();
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
         // 验证包含 Base::Base 子结构 (M10+ 简化为重复 ctor)
-        assert!(s.contains("struct Base") && s.contains("struct Derived"), "{}", s);
+        assert!(
+            s.contains("struct Base") && s.contains("struct Derived"),
+            "{}",
+            s
+        );
     }
 
     #[test]
@@ -2778,7 +3413,9 @@ mod tests {
         let decls = p.parse_top_level().unwrap();
         let mut l = Lower::new();
         l.lower_decls(&decls);
-        let bmf = l.module_bmf().expect("module_bmf() should be Some after export module");
+        let bmf = l
+            .module_bmf()
+            .expect("module_bmf() should be Some after export module");
         assert!(bmf.starts_with("DCC_BMF_V1\nM mymod\n"), "{}", bmf);
         assert!(bmf.contains("I other"), "{}", bmf);
         assert!(bmf.contains("E F _ZN6answerEv int(int)"), "{}", bmf);

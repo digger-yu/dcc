@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Expr, Program, Stmt, BlockItem, Decl, FuncDecl, Block};
+use crate::ast::{BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Program, Stmt};
 use crate::const_eval;
 use crate::diagnostics::Span;
 use crate::ir::Module;
@@ -59,7 +59,9 @@ fn cross_function_dce(module: &mut Module) {
     }
     crate::ssa_passes::cross_function_dce(&mut funcs, true);
     let mut all: Vec<Decl> = others;
-    for f in funcs { all.push(Decl::Func(f)); }
+    for f in funcs {
+        all.push(Decl::Func(f));
+    }
     prog.decls = all;
 }
 
@@ -94,7 +96,9 @@ fn fold_block(items: &mut [BlockItem]) {
 
 fn fold_stmt(s: &mut Stmt) {
     match s {
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             *cond = fold_expr(cond.clone());
             fold_stmt(then_);
             if let Some(e) = else_ {
@@ -105,7 +109,13 @@ fn fold_stmt(s: &mut Stmt) {
             *cond = fold_expr(cond.clone());
             fold_stmt(body);
         }
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(c) = cond {
                 *c = fold_expr(c.clone());
             }
@@ -136,7 +146,8 @@ fn fold_expr(e: Expr) -> Expr {
                     return Expr::Int { v, span, ty };
                 }
             }
-            if let (Expr::Float { v: lv, .. }, Expr::Float { v: rv, .. }) = (l.as_ref(), r.as_ref()) {
+            if let (Expr::Float { v: lv, .. }, Expr::Float { v: rv, .. }) = (l.as_ref(), r.as_ref())
+            {
                 if let Some(v) = eval_float_binop(op, *lv, *rv) {
                     return Expr::Float { v, span, ty };
                 }
@@ -152,7 +163,12 @@ fn fold_expr(e: Expr) -> Expr {
             }
             Expr::Unary { op, e, span, ty }
         }
-        Expr::Call { callee, args, span, ty } => {
+        Expr::Call {
+            callee,
+            args,
+            span,
+            ty,
+        } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 if name.name == "__builtin_constant_p" && args.len() == 1 {
                     return Expr::Int {
@@ -173,7 +189,11 @@ fn fold_expr(e: Expr) -> Expr {
     };
     if let Ok(v) = const_eval::eval(&e) {
         if let Expr::Int { span, ty, .. } = &e {
-            return Expr::Int { v, span: span.clone(), ty: ty.clone() };
+            return Expr::Int {
+                v,
+                span: span.clone(),
+                ty: ty.clone(),
+            };
         }
     }
     e
@@ -184,8 +204,20 @@ fn eval_binop(op: BinOp, l: i128, r: i128) -> Option<i128> {
         BinOp::Add => l.checked_add(r)?,
         BinOp::Sub => l.checked_sub(r)?,
         BinOp::Mul => l.checked_mul(r)?,
-        BinOp::Div => if r == 0 { return None; } else { l / r },
-        BinOp::Mod => if r == 0 { return None; } else { l % r },
+        BinOp::Div => {
+            if r == 0 {
+                return None;
+            } else {
+                l / r
+            }
+        }
+        BinOp::Mod => {
+            if r == 0 {
+                return None;
+            } else {
+                l % r
+            }
+        }
         BinOp::And => l & r,
         BinOp::Or => l | r,
         BinOp::Xor => l ^ r,
@@ -198,7 +230,13 @@ fn eval_binop(op: BinOp, l: i128, r: i128) -> Option<i128> {
 fn eval_unary(op: crate::ast::UnOp, v: i128) -> Option<i128> {
     Some(match op {
         crate::ast::UnOp::Neg => v.checked_neg()?,
-        crate::ast::UnOp::Not => if v == 0 { 1 } else { 0 },
+        crate::ast::UnOp::Not => {
+            if v == 0 {
+                1
+            } else {
+                0
+            }
+        }
         crate::ast::UnOp::BitNot => !v,
         _ => return None,
     })
@@ -209,7 +247,13 @@ fn eval_float_binop(op: BinOp, l: f64, r: f64) -> Option<f64> {
         BinOp::Add => l + r,
         BinOp::Sub => l - r,
         BinOp::Mul => l * r,
-        BinOp::Div => if r == 0.0 { return None; } else { l / r },
+        BinOp::Div => {
+            if r == 0.0 {
+                return None;
+            } else {
+                l / r
+            }
+        }
         _ => return None,
     })
 }
@@ -226,7 +270,9 @@ fn prune_dead_stores(module: &mut Module) {
 }
 
 fn prune_block(items: &mut Vec<BlockItem>) {
-    items.retain(|item| !matches!(item, BlockItem::Stmt(Stmt::Expr { e, .. }) if is_side_effect_free(e)));
+    items.retain(
+        |item| !matches!(item, BlockItem::Stmt(Stmt::Expr { e, .. }) if is_side_effect_free(e)),
+    );
     for item in items.iter_mut() {
         match item {
             BlockItem::Stmt(s) => prune_stmt(s),
@@ -279,8 +325,7 @@ fn stmt_has_label(s: &Stmt) -> bool {
         Stmt::Label { .. } => true,
         Stmt::Block { b, .. } => block_has_label(b),
         Stmt::If { then_, else_, .. } => {
-            stmt_has_label(then_)
-                || else_.as_ref().map(|e| stmt_has_label(e)).unwrap_or(false)
+            stmt_has_label(then_) || else_.as_ref().map(|e| stmt_has_label(e)).unwrap_or(false)
         }
         Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
             stmt_has_label(body)
@@ -293,9 +338,7 @@ fn stmt_has_label(s: &Stmt) -> bool {
 fn block_has_label(b: &Block) -> bool {
     b.items.iter().any(|item| match item {
         BlockItem::Stmt(s) => stmt_has_label(s),
-        BlockItem::Decl(Decl::Func(f)) => {
-            f.body.as_ref().map(block_has_label).unwrap_or(false)
-        }
+        BlockItem::Decl(Decl::Func(f)) => f.body.as_ref().map(block_has_label).unwrap_or(false),
         _ => false,
     })
 }
@@ -314,7 +357,14 @@ fn fold_branches_block(items: &mut Vec<BlockItem>) {
         );
         if fold_if {
             let item = items.remove(i);
-            if let BlockItem::Stmt(Stmt::If { cond, then_, else_, span, .. }) = item {
+            if let BlockItem::Stmt(Stmt::If {
+                cond,
+                then_,
+                else_,
+                span,
+                ..
+            }) = item
+            {
                 let v = const_eval::eval(&cond).unwrap_or(0);
                 // 被丢弃的分支内含 Label 时不能折叠: goto 仍可跳入, 删除会丢标签
                 let has_label = if v != 0 {
@@ -323,9 +373,15 @@ fn fold_branches_block(items: &mut Vec<BlockItem>) {
                     stmt_has_label(&then_)
                 };
                 if has_label {
-                    items.insert(i, BlockItem::Stmt(Stmt::If {
-                        cond, then_, else_, span,
-                    }));
+                    items.insert(
+                        i,
+                        BlockItem::Stmt(Stmt::If {
+                            cond,
+                            then_,
+                            else_,
+                            span,
+                        }),
+                    );
                     i += 1;
                     continue;
                 }
@@ -333,7 +389,10 @@ fn fold_branches_block(items: &mut Vec<BlockItem>) {
                     *then_
                 } else {
                     else_.map(|e| *e).unwrap_or(Stmt::Block {
-                        b: Block { items: vec![], span: span.clone() },
+                        b: Block {
+                            items: vec![],
+                            span: span.clone(),
+                        },
                         span: span.clone(),
                     })
                 };
@@ -357,19 +416,26 @@ fn fold_branches_block(items: &mut Vec<BlockItem>) {
 
 fn fold_branches_stmt(s: &mut Stmt) {
     match s {
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             *cond = fold_expr(cond.clone());
             fold_branches_stmt(then_);
             if let Some(e) = else_ {
                 fold_branches_stmt(e);
             }
         }
-        Stmt::While { cond, body, span, .. } => {
+        Stmt::While {
+            cond, body, span, ..
+        } => {
             *cond = fold_expr(cond.clone());
             if let Ok(v) = const_eval::eval(cond) {
                 if v == 0 && !stmt_has_label(body) {
                     *s = Stmt::Block {
-                        b: Block { items: vec![], span: span.clone() },
+                        b: Block {
+                            items: vec![],
+                            span: span.clone(),
+                        },
                         span: span.clone(),
                     };
                     return;
@@ -378,16 +444,28 @@ fn fold_branches_stmt(s: &mut Stmt) {
             fold_branches_stmt(body);
         }
         Stmt::Block { b, .. } => fold_branches_block(&mut b.items),
-        Stmt::For { init, cond, body, span, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            body,
+            span,
+            ..
+        } => {
             if let Some(c) = cond {
                 *c = fold_expr(c.clone());
                 if let Ok(v) = const_eval::eval(c) {
                     if v == 0 && !stmt_has_label(body) {
                         if let Some(i) = init.take() {
-                            *s = Stmt::Expr { e: stmt_to_void_expr(*i), span: span.clone() };
+                            *s = Stmt::Expr {
+                                e: stmt_to_void_expr(*i),
+                                span: span.clone(),
+                            };
                         } else {
                             *s = Stmt::Block {
-                                b: Block { items: vec![], span: span.clone() },
+                                b: Block {
+                                    items: vec![],
+                                    span: span.clone(),
+                                },
                                 span: span.clone(),
                             };
                         }
@@ -407,7 +485,10 @@ fn fold_branches_stmt(s: &mut Stmt) {
 fn items_clear_for_stmt(s: &mut Stmt) {
     let span = s.span().clone();
     *s = Stmt::Block {
-        b: Block { items: vec![], span: span.clone() },
+        b: Block {
+            items: vec![],
+            span: span.clone(),
+        },
         span,
     };
 }
@@ -415,8 +496,16 @@ fn items_clear_for_stmt(s: &mut Stmt) {
 fn stmt_to_void_expr(s: Stmt) -> Expr {
     match s {
         Stmt::Expr { e, .. } => e,
-        Stmt::Block { .. } => Expr::Int { v: 0, span: Span::point("", 0, 0), ty: crate::ast::Type::Int },
-        _ => Expr::Int { v: 0, span: Span::point("", 0, 0), ty: crate::ast::Type::Int },
+        Stmt::Block { .. } => Expr::Int {
+            v: 0,
+            span: Span::point("", 0, 0),
+            ty: crate::ast::Type::Int,
+        },
+        _ => Expr::Int {
+            v: 0,
+            span: Span::point("", 0, 0),
+            ty: crate::ast::Type::Int,
+        },
     }
 }
 
@@ -525,7 +614,9 @@ fn inline_calls_in_stmt(s: &mut Stmt, funcs: &HashMap<String, FuncDecl>, level: 
             *e = inline_expr(e.clone(), funcs, level);
         }
         Stmt::Expr { e, .. } => *e = inline_expr(e.clone(), funcs, level),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             *cond = inline_expr(cond.clone(), funcs, level);
             inline_calls_in_stmt(then_, funcs, level);
             if let Some(e) = else_ {
@@ -533,8 +624,16 @@ fn inline_calls_in_stmt(s: &mut Stmt, funcs: &HashMap<String, FuncDecl>, level: 
             }
         }
         Stmt::Block { b, .. } => inline_calls_in_block(b, funcs, level),
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => inline_calls_in_stmt(body, funcs, level),
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+            inline_calls_in_stmt(body, funcs, level)
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(c) = cond {
                 *c = inline_expr(c.clone(), funcs, level);
             }
@@ -556,7 +655,10 @@ fn extract_inline_return(body: &Block) -> Option<&Expr> {
         items if !items.is_empty() => {
             if let BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) = items.last()? {
                 if items.iter().all(|it| {
-                    matches!(it, BlockItem::Decl(_) | BlockItem::Stmt(Stmt::Return { .. }))
+                    matches!(
+                        it,
+                        BlockItem::Decl(_) | BlockItem::Stmt(Stmt::Return { .. })
+                    )
                 }) {
                     Some(e)
                 } else {
@@ -579,8 +681,12 @@ fn expr_calls_name(expr: &Expr, name: &str) -> bool {
         Expr::Binop { l, r, .. } => expr_calls_name(l, name) || expr_calls_name(r, name),
         Expr::Unary { e, .. } => expr_calls_name(e, name),
         Expr::Cast { e, .. } => expr_calls_name(e, name),
-        Expr::Cond { cond, then_, else_, .. } => {
-            expr_calls_name(cond, name) || expr_calls_name(then_, name) || expr_calls_name(else_, name)
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            expr_calls_name(cond, name)
+                || expr_calls_name(then_, name)
+                || expr_calls_name(else_, name)
         }
         Expr::Comma { l, r, .. } => expr_calls_name(l, name) || expr_calls_name(r, name),
         _ => false,
@@ -614,7 +720,13 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
             e: Box::new(substitute_params(*e, params)),
             span,
         },
-        Expr::Cond { cond, then_, else_, span, ty } => Expr::Cond {
+        Expr::Cond {
+            cond,
+            then_,
+            else_,
+            span,
+            ty,
+        } => Expr::Cond {
             cond: Box::new(substitute_params(*cond, params)),
             then_: Box::new(substitute_params(*then_, params)),
             else_: Box::new(substitute_params(*else_, params)),
@@ -674,7 +786,12 @@ fn try_inline_call(
 
 fn inline_expr(e: Expr, funcs: &HashMap<String, FuncDecl>, level: u8) -> Expr {
     let e = match e {
-        Expr::Call { callee, args, span, ty } => {
+        Expr::Call {
+            callee,
+            args,
+            span,
+            ty,
+        } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 if let Some(inlined) = try_inline_call(&name.name, &args, funcs, level) {
                     return inline_expr(inlined, funcs, level);
@@ -682,7 +799,10 @@ fn inline_expr(e: Expr, funcs: &HashMap<String, FuncDecl>, level: u8) -> Expr {
             }
             Expr::Call {
                 callee: Box::new(inline_expr(*callee, funcs, level)),
-                args: args.into_iter().map(|a| inline_expr(a, funcs, level)).collect(),
+                args: args
+                    .into_iter()
+                    .map(|a| inline_expr(a, funcs, level))
+                    .collect(),
                 span,
                 ty,
             }
@@ -700,7 +820,13 @@ fn inline_expr(e: Expr, funcs: &HashMap<String, FuncDecl>, level: u8) -> Expr {
             span,
             ty,
         },
-        Expr::Cond { cond, then_, else_, span, ty } => Expr::Cond {
+        Expr::Cond {
+            cond,
+            then_,
+            else_,
+            span,
+            ty,
+        } => Expr::Cond {
             cond: Box::new(inline_expr(*cond, funcs, level)),
             then_: Box::new(inline_expr(*then_, funcs, level)),
             else_: Box::new(inline_expr(*else_, funcs, level)),
@@ -763,15 +889,26 @@ mod tests {
     #[test]
     fn o2_folds_constant_if() {
         let prog = Program {
-            decls: vec![            Decl::Func(FuncDecl {
+            decls: vec![Decl::Func(FuncDecl {
                 ret_ty: int_ty(),
-                name: Ident { name: "main".into(), span: Span::point("t.c", 1, 1) },
+                name: Ident {
+                    name: "main".into(),
+                    span: Span::point("t.c", 1, 1),
+                },
                 params: vec![],
                 body: Some(Block {
                     items: vec![BlockItem::Stmt(Stmt::If {
-                        cond: Expr::Int { v: 1, span: Span::point("t.c", 2, 1), ty: int_ty() },
+                        cond: Expr::Int {
+                            v: 1,
+                            span: Span::point("t.c", 2, 1),
+                            ty: int_ty(),
+                        },
                         then_: Box::new(Stmt::Return {
-                            val: Some(Expr::Int { v: 7, span: Span::point("t.c", 3, 1), ty: int_ty() }),
+                            val: Some(Expr::Int {
+                                v: 7,
+                                span: Span::point("t.c", 3, 1),
+                                ty: int_ty(),
+                            }),
                             span: Span::point("t.c", 3, 1),
                         }),
                         else_: None,
@@ -788,7 +925,7 @@ mod tests {
                 is_destructor: false,
                 is_nested: false,
                 is_cold: false,
-            is_hot: false,
+                is_hot: false,
                 section: None,
                 alignment: None,
                 visibility: None,
@@ -804,8 +941,14 @@ mod tests {
                 no_sanitize: vec![],
                 target_clones: vec![],
                 returns_nonnull: false,
-                ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-                is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
                 ifunc_resolver: None,
             })],
         };
@@ -826,31 +969,51 @@ mod tests {
         let prog = Program {
             decls: vec![Decl::Func(FuncDecl {
                 ret_ty: int_ty(),
-                name: Ident { name: "f".into(), span: Span::point("t.c", 1, 1) },
+                name: Ident {
+                    name: "f".into(),
+                    span: Span::point("t.c", 1, 1),
+                },
                 params: vec![],
                 body: Some(Block {
                     items: vec![
                         BlockItem::Stmt(Stmt::If {
                             cond: Expr::Ident {
-                                name: Ident { name: "x".into(), span: Span::point("t.c", 2, 1) },
+                                name: Ident {
+                                    name: "x".into(),
+                                    span: Span::point("t.c", 2, 1),
+                                },
                                 span: Span::point("t.c", 2, 1),
                                 ty: int_ty(),
                             },
                             then_: Box::new(Stmt::Goto {
-                                target: Ident { name: "found".into(), span: Span::point("t.c", 3, 1) },
+                                target: Ident {
+                                    name: "found".into(),
+                                    span: Span::point("t.c", 3, 1),
+                                },
                                 span: Span::point("t.c", 3, 1),
                             }),
                             else_: None,
                             span: Span::point("t.c", 2, 1),
                         }),
                         BlockItem::Stmt(Stmt::Return {
-                            val: Some(Expr::Int { v: 0, span: Span::point("t.c", 4, 1), ty: int_ty() }),
+                            val: Some(Expr::Int {
+                                v: 0,
+                                span: Span::point("t.c", 4, 1),
+                                ty: int_ty(),
+                            }),
                             span: Span::point("t.c", 4, 1),
                         }),
                         BlockItem::Stmt(Stmt::Label {
-                            name: Ident { name: "found".into(), span: Span::point("t.c", 5, 1) },
+                            name: Ident {
+                                name: "found".into(),
+                                span: Span::point("t.c", 5, 1),
+                            },
                             stmt: Box::new(Stmt::Return {
-                                val: Some(Expr::Int { v: 1, span: Span::point("t.c", 6, 1), ty: int_ty() }),
+                                val: Some(Expr::Int {
+                                    v: 1,
+                                    span: Span::point("t.c", 6, 1),
+                                    ty: int_ty(),
+                                }),
                                 span: Span::point("t.c", 6, 1),
                             }),
                             span: Span::point("t.c", 5, 1),
@@ -867,7 +1030,7 @@ mod tests {
                 is_destructor: false,
                 is_nested: false,
                 is_cold: false,
-            is_hot: false,
+                is_hot: false,
                 section: None,
                 alignment: None,
                 visibility: None,
@@ -883,8 +1046,14 @@ mod tests {
                 no_sanitize: vec![],
                 target_clones: vec![],
                 returns_nonnull: false,
-                ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-                is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
                 ifunc_resolver: None,
             })],
         };
@@ -909,16 +1078,25 @@ mod tests {
         let span = Span::point("t.c", 1, 1);
         let int = int_ty();
         let x_ident = || Expr::Ident {
-            name: Ident { name: "x".into(), span: span.clone() },
+            name: Ident {
+                name: "x".into(),
+                span: span.clone(),
+            },
             span: span.clone(),
             ty: int.clone(),
         };
         let sq = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
-            name: Ident { name: "sq".into(), span: span.clone() },
+            name: Ident {
+                name: "sq".into(),
+                span: span.clone(),
+            },
             params: vec![crate::ast::Param {
                 ty: int.clone(),
-                name: Some(Ident { name: "x".into(), span: span.clone() }),
+                name: Some(Ident {
+                    name: "x".into(),
+                    span: span.clone(),
+                }),
                 span: span.clone(),
             }],
             body: Some(Block {
@@ -959,23 +1137,39 @@ mod tests {
             no_sanitize: vec![],
             target_clones: vec![],
             returns_nonnull: false,
-            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
             ifunc_resolver: None,
         });
         let main_fn = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
-            name: Ident { name: "main".into(), span: span.clone() },
+            name: Ident {
+                name: "main".into(),
+                span: span.clone(),
+            },
             params: vec![],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {
                     val: Some(Expr::Call {
                         callee: Box::new(Expr::Ident {
-                            name: Ident { name: "sq".into(), span: span.clone() },
+                            name: Ident {
+                                name: "sq".into(),
+                                span: span.clone(),
+                            },
                             span: span.clone(),
                             ty: int.clone(),
                         }),
-                        args: vec![Expr::Int { v: 5, span: span.clone(), ty: int.clone() }],
+                        args: vec![Expr::Int {
+                            v: 5,
+                            span: span.clone(),
+                            ty: int.clone(),
+                        }],
                         span: span.clone(),
                         ty: int.clone(),
                     }),
@@ -1008,8 +1202,14 @@ mod tests {
             no_sanitize: vec![],
             target_clones: vec![],
             returns_nonnull: false,
-            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
             ifunc_resolver: None,
         });
         let prog = Program {
@@ -1038,32 +1238,42 @@ mod tests {
         let int = int_ty();
         let func = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
-            name: Ident { name: "f".into(), span: span.clone() },
+            name: Ident {
+                name: "f".into(),
+                span: span.clone(),
+            },
             params: vec![],
             body: Some(Block {
-                items: vec![
-                    BlockItem::Stmt(Stmt::If {
-                        cond: Expr::Int { v: 0, span: span.clone(), ty: int.clone() },
-                        then_: Box::new(Stmt::Block {
-                            b: Block {
-                                items: vec![
-                                    BlockItem::Stmt(Stmt::Label {
-                                        name: Ident { name: "undo".into(), span: span.clone() },
-                                        stmt: Box::new(Stmt::Expr {
-                                            e: Expr::Int { v: 1, span: span.clone(), ty: int.clone() },
-                                            span: span.clone(),
-                                        }),
+                items: vec![BlockItem::Stmt(Stmt::If {
+                    cond: Expr::Int {
+                        v: 0,
+                        span: span.clone(),
+                        ty: int.clone(),
+                    },
+                    then_: Box::new(Stmt::Block {
+                        b: Block {
+                            items: vec![BlockItem::Stmt(Stmt::Label {
+                                name: Ident {
+                                    name: "undo".into(),
+                                    span: span.clone(),
+                                },
+                                stmt: Box::new(Stmt::Expr {
+                                    e: Expr::Int {
+                                        v: 1,
                                         span: span.clone(),
-                                    }),
-                                ],
+                                        ty: int.clone(),
+                                    },
+                                    span: span.clone(),
+                                }),
                                 span: span.clone(),
-                            },
+                            })],
                             span: span.clone(),
-                        }),
-                        else_: None,
+                        },
                         span: span.clone(),
                     }),
-                ],
+                    else_: None,
+                    span: span.clone(),
+                })],
                 span: span.clone(),
             }),
             span: span.clone(),
@@ -1091,8 +1301,14 @@ mod tests {
             no_sanitize: vec![],
             target_clones: vec![],
             returns_nonnull: false,
-            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
             ifunc_resolver: None,
         });
         let prog = Program { decls: vec![func] };
@@ -1102,9 +1318,7 @@ mod tests {
         if let Decl::Func(f) = body {
             let items = f.body.as_ref().unwrap().items.clone();
             let has_label = items.iter().any(|item| match item {
-                BlockItem::Stmt(Stmt::If { then_, .. }) => {
-                    stmt_has_label(then_)
-                }
+                BlockItem::Stmt(Stmt::If { then_, .. }) => stmt_has_label(then_),
                 BlockItem::Stmt(s) => stmt_has_label(s),
                 _ => false,
             });

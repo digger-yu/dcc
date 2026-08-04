@@ -53,12 +53,10 @@ fn stmt_has_coro(s: &CppStmt) -> bool {
     match s {
         CppStmt::CoAwait(_) | CppStmt::CoYield(_) | CppStmt::CoReturn(_) => true,
         CppStmt::If { then, els, .. } => {
-            body_has_coro(then)
-                || els.as_ref().map(|e| body_has_coro(e)).unwrap_or(false)
+            body_has_coro(then) || els.as_ref().map(|e| body_has_coro(e)).unwrap_or(false)
         }
         CppStmt::IfConstexpr { then, els, .. } => {
-            body_has_coro(then)
-                || els.as_ref().map(|e| body_has_coro(e)).unwrap_or(false)
+            body_has_coro(then) || els.as_ref().map(|e| body_has_coro(e)).unwrap_or(false)
         }
         CppStmt::While { body, .. } => body_has_coro(body),
         CppStmt::For { body, .. } => body_has_coro(body),

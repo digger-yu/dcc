@@ -19,29 +19,25 @@ fn parse_header(name: &str, src: &str) -> bool {
 
 #[test]
 fn header_cstddef_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/cstddef")
-        .expect("read cstddef");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/cstddef").expect("read cstddef");
     assert!(parse_header("cstddef", &src), "cstddef should parse");
 }
 
 #[test]
 fn header_cstdlib_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/cstdlib")
-        .expect("read cstdlib");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/cstdlib").expect("read cstdlib");
     assert!(parse_header("cstdlib", &src), "cstdlib should parse");
 }
 
 #[test]
 fn header_cstring_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/cstring")
-        .expect("read cstring");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/cstring").expect("read cstring");
     assert!(parse_header("cstring", &src), "cstring should parse");
 }
 
 #[test]
 fn header_cstdio_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/cstdio")
-        .expect("read cstdio");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/cstdio").expect("read cstdio");
     assert!(parse_header("cstdio", &src), "cstdio should parse");
 }
 
@@ -59,8 +55,7 @@ fn parse_relational_lt_not_template() {
 
 #[test]
 fn header_string_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/string")
-        .expect("read string");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/string").expect("read string");
     let mut p = CppParser::new(src.as_bytes(), "string");
     match p.parse_top_level() {
         Ok(_) => {}
@@ -70,49 +65,42 @@ fn header_string_parses() {
 
 #[test]
 fn diag_ns_empty_class() {
-    parse_header("ns_empty_class",
-        "namespace std { class string {}; }");
+    parse_header("ns_empty_class", "namespace std { class string {}; }");
 }
 
 #[test]
 fn header_vector_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/vector")
-        .expect("read vector");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/vector").expect("read vector");
     assert!(parse_header("vector", &src), "vector should parse");
 }
 
 #[test]
 fn header_iostream_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/iostream")
-        .expect("read iostream");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/iostream").expect("read iostream");
     assert!(parse_header("iostream", &src), "iostream should parse");
 }
 
 #[test]
 fn header_memory_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/memory")
-        .expect("read memory");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/memory").expect("read memory");
     assert!(parse_header("memory", &src), "memory should parse");
 }
 
 #[test]
 fn header_exception_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/exception")
-        .expect("read exception");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/exception").expect("read exception");
     assert!(parse_header("exception", &src), "exception should parse");
 }
 
 #[test]
 fn header_stdexcept_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/stdexcept")
-        .expect("read stdexcept");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/stdexcept").expect("read stdexcept");
     assert!(parse_header("stdexcept", &src), "stdexcept should parse");
 }
 
 #[test]
 fn header_typeinfo_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/typeinfo")
-        .expect("read typeinfo");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/typeinfo").expect("read typeinfo");
     assert!(parse_header("typeinfo", &src), "typeinfo should parse");
 }
 
@@ -120,34 +108,34 @@ fn header_typeinfo_parses() {
 fn header_initializer_list_parses() {
     let src = std::fs::read_to_string("src/cpp/stdlib/headers/initializer_list")
         .expect("read initializer_list");
-    assert!(parse_header("initializer_list", &src), "initializer_list should parse");
+    assert!(
+        parse_header("initializer_list", &src),
+        "initializer_list should parse"
+    );
 }
 
 #[test]
 fn header_utility_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/utility")
-        .expect("read utility");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/utility").expect("read utility");
     assert!(parse_header("utility", &src), "utility should parse");
 }
 
 #[test]
 fn header_algorithm_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/algorithm")
-        .expect("read algorithm");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/algorithm").expect("read algorithm");
     assert!(parse_header("algorithm", &src), "algorithm should parse");
 }
 
 #[test]
 fn header_map_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/map")
-        .expect("read map");
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/map").expect("read map");
     assert!(parse_header("map", &src), "map should parse");
 }
 
 #[test]
 fn header_functional_parses() {
-    let src = std::fs::read_to_string("src/cpp/stdlib/headers/functional")
-        .expect("read functional");
+    let src =
+        std::fs::read_to_string("src/cpp/stdlib/headers/functional").expect("read functional");
     assert!(parse_header("functional", &src), "functional should parse");
 }
 
@@ -220,8 +208,10 @@ fn stdlib_iostream_cout_usage_parses() {
     ";
     let mut p = CppParser::new(src, "test.cpp");
     let decls = p.parse_top_level().expect("parse");
-    let has_main = decls.iter().any(|d| matches!(d,
-        crate::cpp::parser::CppDecl::FreeFn { name, .. } if name == "main"
-    ));
+    let has_main = decls.iter().any(|d| {
+        matches!(d,
+            crate::cpp::parser::CppDecl::FreeFn { name, .. } if name == "main"
+        )
+    });
     assert!(has_main, "expected main function");
 }

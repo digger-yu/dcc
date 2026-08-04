@@ -33,7 +33,12 @@ impl TopdownL1 {
         }
     }
     pub fn all() -> [TopdownL1; 4] {
-        [Self::Retiring, Self::BadSpeculation, Self::FrontendBound, Self::BackendBound]
+        [
+            Self::Retiring,
+            Self::BadSpeculation,
+            Self::FrontendBound,
+            Self::BackendBound,
+        ]
     }
 }
 
@@ -54,7 +59,9 @@ pub struct PerfRecord {
 }
 
 impl PerfRecord {
-    pub fn empty() -> Self { Self::default() }
+    pub fn empty() -> Self {
+        Self::default()
+    }
 
     pub fn add(&mut self, ev: PerfEventSample) {
         *self.events.entry(ev.event.clone()).or_insert(0) += ev.count;
@@ -66,7 +73,8 @@ impl PerfRecord {
 
     /// 把 TopdownL1 四个 slot 规整为百分比 (假设四者之和为总 slots).
     pub fn topdown_percentages(&self) -> HashMap<TopdownL1, f64> {
-        let total: u64 = TopdownL1::all().iter()
+        let total: u64 = TopdownL1::all()
+            .iter()
             .map(|s| self.topdown_l1.get(s).copied().unwrap_or(0))
             .sum::<u64>()
             .max(1);

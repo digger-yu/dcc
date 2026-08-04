@@ -71,23 +71,31 @@ fn stdlib_headers_have_namespace_std() {
     ];
     for (h, pat) in headers.iter() {
         let path = format!("src/cpp/stdlib/headers/{}", h);
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {}", path, e));
-        assert!(src.contains(pat),
-            "{}: missing `{}` (not in std namespace)", h, pat);
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
+        assert!(
+            src.contains(pat),
+            "{}: missing `{}` (not in std namespace)",
+            h,
+            pat
+        );
     }
 }
 
 #[test]
 fn stdlib_runtime_c_braces_balanced() {
-    let src = std::fs::read_to_string(RUNTIME_C_PATH)
-        .expect("read runtime");
+    let src = std::fs::read_to_string(RUNTIME_C_PATH).expect("read runtime");
     let open_b = src.matches('{').count();
     let close_b = src.matches('}').count();
-    assert_eq!(open_b, close_b,
-        "unbalanced braces in runtime: {} open, {} close", open_b, close_b);
+    assert_eq!(
+        open_b, close_b,
+        "unbalanced braces in runtime: {} open, {} close",
+        open_b, close_b
+    );
     let open_p = src.matches('(').count();
     let close_p = src.matches(')').count();
-    assert_eq!(open_p, close_p,
-        "unbalanced parens in runtime: {} open, {} close", open_p, close_p);
+    assert_eq!(
+        open_p, close_p,
+        "unbalanced parens in runtime: {} open, {} close",
+        open_p, close_p
+    );
 }

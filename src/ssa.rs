@@ -68,15 +68,35 @@ pub enum InstKind {
     /// `dest = arr[idx]`
     IndexLoad { arr: Operand, idx: Operand },
     /// `arr[idx] = src`
-    IndexStore { arr: Operand, idx: Operand, src: Operand },
+    IndexStore {
+        arr: Operand,
+        idx: Operand,
+        src: Operand,
+    },
     /// `dest = call(callee, args)`
-    Call { callee: Operand, args: Vec<Operand>, ret_ty: Type },
+    Call {
+        callee: Operand,
+        args: Vec<Operand>,
+        ret_ty: Type,
+    },
     /// `dest = obj.field`
-    MemberLoad { obj: Operand, field: String, ty: Type },
+    MemberLoad {
+        obj: Operand,
+        field: String,
+        ty: Type,
+    },
     /// `obj.field = src`
-    MemberStore { obj: Operand, field: String, src: Operand },
+    MemberStore {
+        obj: Operand,
+        field: String,
+        src: Operand,
+    },
     /// `dest = cond ? t : f`
-    Select { cond: Operand, then_: Operand, else_: Operand },
+    Select {
+        cond: Operand,
+        then_: Operand,
+        else_: Operand,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -158,14 +178,17 @@ impl Function {
 
     pub fn add_block(&mut self, name: String) -> String {
         if !self.blocks.contains_key(&name) {
-            self.blocks.insert(name.clone(), BasicBlock {
-                name: name.clone(),
-                phis: Vec::new(),
-                insts: Vec::new(),
-                term: Terminator::Unreachable,
-                preds: Vec::new(),
-                succs: Vec::new(),
-            });
+            self.blocks.insert(
+                name.clone(),
+                BasicBlock {
+                    name: name.clone(),
+                    phis: Vec::new(),
+                    insts: Vec::new(),
+                    term: Terminator::Unreachable,
+                    preds: Vec::new(),
+                    succs: Vec::new(),
+                },
+            );
             if !self.block_order.contains(&name) {
                 self.block_order.push(name.clone());
             }
@@ -285,8 +308,7 @@ fn is_structured_stmt(s: &Stmt) -> bool {
         Stmt::AsmGoto { .. } => false,
         Stmt::Switch { .. } => false, // Switch 简化为 if-chains 后再 SSA 化
         Stmt::If { then_, else_, .. } => {
-            is_structured_stmt(then_)
-                && else_.as_ref().is_none_or(|e| is_structured_stmt(e))
+            is_structured_stmt(then_) && else_.as_ref().is_none_or(|e| is_structured_stmt(e))
         }
         Stmt::While { body, .. } | Stmt::Do { body, .. } => is_structured_stmt(body),
         Stmt::For { body, .. } => is_structured_stmt(body),
@@ -332,7 +354,12 @@ impl Builder {
 
     fn fresh(&mut self, base: &str, ty: Type, span: &Span) -> SsaVar {
         self.tmp_count += 1;
-        SsaVar { base: format!("_t{}_{}", base, self.tmp_count), version: 0, ty, span: span.clone() }
+        SsaVar {
+            base: format!("_t{}_{}", base, self.tmp_count),
+            version: 0,
+            ty,
+            span: span.clone(),
+        }
     }
 
     fn next_version(&mut self, base: &str) -> u32 {
@@ -393,7 +420,11 @@ impl Builder {
             Expr::Float { v, .. } => Operand::Float(*v),
             Expr::String { data, .. } => Operand::Str(data.clone()),
             Expr::Char { v, .. } => Operand::Int(*v as i128),
-            Expr::Ident { name, span: _, ty: _ } => {
+            Expr::Ident {
+                name,
+                span: _,
+                ty: _,
+            } => {
                 if let Some(v) = self.lookup(&name.name) {
                     return Operand::Var(v);
                 }
@@ -409,13 +440,30 @@ impl Builder {
                 let lo = self.lower_expr(l);
                 let ro = self.lower_expr(r);
                 let dest = self.fresh("bin", ty.clone(), span);
-                self.emit(Inst { dest: Some(dest.clone()), kind: InstKind::Bin { op: *op, l: lo, r: ro }, span: span.clone() });
+                self.emit(Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::Bin {
+                        op: *op,
+                        l: lo,
+                        r: ro,
+                    },
+                    span: span.clone(),
+                });
                 Operand::Var(dest)
             }
-            Expr::Unary { op, e: inner, span, ty } => {
+            Expr::Unary {
+                op,
+                e: inner,
+                span,
+                ty,
+            } => {
                 let o = self.lower_expr(inner);
                 let dest = self.fresh("un", ty.clone(), span);
-                self.emit(Inst { dest: Some(dest.clone()), kind: InstKind::Un { op: *op, e: o }, span: span.clone() });
+                self.emit(Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::Un { op: *op, e: o },
+                    span: span.clone(),
+                });
                 Operand::Var(dest)
             }
             Expr::Assign { op, l, r, span, ty } => {
@@ -428,17 +476,34 @@ impl Builder {
             Expr::Cast { ty, e: inner, span } => {
                 let o = self.lower_expr(inner);
                 let dest = self.fresh("cast", ty.clone(), span);
-                self.emit(Inst { dest: Some(dest.clone()), kind: InstKind::Cast { ty: ty.clone(), e: o }, span: span.clone() });
+                self.emit(Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::Cast {
+                        ty: ty.clone(),
+                        e: o,
+                    },
+                    span: span.clone(),
+                });
                 Operand::Var(dest)
             }
-            Expr::Cond { cond, then_, else_, span, ty } => {
+            Expr::Cond {
+                cond,
+                then_,
+                else_,
+                span,
+                ty,
+            } => {
                 let co = self.lower_expr(cond);
                 let t = self.lower_expr(then_);
                 let f = self.lower_expr(else_);
                 let dest = self.fresh("sel", ty.clone(), span);
                 self.emit(Inst {
                     dest: Some(dest.clone()),
-                    kind: InstKind::Select { cond: co, then_: t, else_: f },
+                    kind: InstKind::Select {
+                        cond: co,
+                        then_: t,
+                        else_: f,
+                    },
                     span: span.clone(),
                 });
                 Operand::Var(dest)
@@ -450,7 +515,12 @@ impl Builder {
                 let _ = ty;
                 o
             }
-            Expr::Call { callee, args, span, ty } => {
+            Expr::Call {
+                callee,
+                args,
+                span,
+                ty,
+            } => {
                 let callee_o = self.lower_expr(callee);
                 let arg_ops: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
                 let ret_ty = ty.clone();
@@ -461,7 +531,11 @@ impl Builder {
                 };
                 self.emit(Inst {
                     dest: dest.clone(),
-                    kind: InstKind::Call { callee: callee_o, args: arg_ops, ret_ty: ret_ty.clone() },
+                    kind: InstKind::Call {
+                        callee: callee_o,
+                        args: arg_ops,
+                        ret_ty: ret_ty.clone(),
+                    },
                     span: span.clone(),
                 });
                 match dest {
@@ -473,61 +547,134 @@ impl Builder {
                 let a = self.lower_expr(arr);
                 let i = self.lower_expr(idx);
                 let dest = self.fresh("idx", ty.clone(), span);
-                self.emit(Inst { dest: Some(dest.clone()), kind: InstKind::IndexLoad { arr: a, idx: i }, span: span.clone() });
+                self.emit(Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::IndexLoad { arr: a, idx: i },
+                    span: span.clone(),
+                });
                 Operand::Var(dest)
             }
-            Expr::Member { expr, field, span, ty, is_arrow } => {
+            Expr::Member {
+                expr,
+                field,
+                span,
+                ty,
+                is_arrow,
+            } => {
                 let obj = self.lower_expr(expr);
                 let dest = self.fresh("mem", ty.clone(), span);
                 if *is_arrow {
                     // *obj.field
                     let inner = self.fresh("deref", Type::Ptr(Box::new(ty.clone())), span);
-                    self.emit(Inst { dest: Some(inner.clone()), kind: InstKind::Load { e: obj, ty: ty.clone() }, span: span.clone() });
-                    self.emit(Inst { dest: Some(dest.clone()), kind: InstKind::MemberLoad { obj: Operand::Var(inner), field: field.name.clone(), ty: ty.clone() }, span: span.clone() });
+                    self.emit(Inst {
+                        dest: Some(inner.clone()),
+                        kind: InstKind::Load {
+                            e: obj,
+                            ty: ty.clone(),
+                        },
+                        span: span.clone(),
+                    });
+                    self.emit(Inst {
+                        dest: Some(dest.clone()),
+                        kind: InstKind::MemberLoad {
+                            obj: Operand::Var(inner),
+                            field: field.name.clone(),
+                            ty: ty.clone(),
+                        },
+                        span: span.clone(),
+                    });
                 } else {
-                    self.emit(Inst { dest: Some(dest.clone()), kind: InstKind::MemberLoad { obj, field: field.name.clone(), ty: ty.clone() }, span: span.clone() });
+                    self.emit(Inst {
+                        dest: Some(dest.clone()),
+                        kind: InstKind::MemberLoad {
+                            obj,
+                            field: field.name.clone(),
+                            ty: ty.clone(),
+                        },
+                        span: span.clone(),
+                    });
                 }
                 Operand::Var(dest)
             }
             Expr::Deref { e, span, ty } => {
                 let o = self.lower_expr(e);
                 let dest = self.fresh("deref", ty.clone(), span);
-                self.emit(Inst { dest: Some(dest.clone()), kind: InstKind::Load { e: o, ty: ty.clone() }, span: span.clone() });
+                self.emit(Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::Load {
+                        e: o,
+                        ty: ty.clone(),
+                    },
+                    span: span.clone(),
+                });
                 Operand::Var(dest)
             }
             Expr::AddrOf { e, span, ty: _ } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
                     let dest = self.fresh("addr", Type::Ptr(Box::new(Type::Void)), span);
-                    self.emit(Inst { dest: Some(dest.clone()), kind: InstKind::AddrOf { base: name.name.clone() }, span: span.clone() });
+                    self.emit(Inst {
+                        dest: Some(dest.clone()),
+                        kind: InstKind::AddrOf {
+                            base: name.name.clone(),
+                        },
+                        span: span.clone(),
+                    });
                     return Operand::Var(dest);
                 }
                 Operand::Void
             }
-            Expr::PostInc { e, span, ty: _ } | Expr::PreInc { e, span, ty: _ }
-            | Expr::PostDec { e, span, ty: _ } | Expr::PreDec { e, span, ty: _ } => {
+            Expr::PostInc { e, span, ty: _ }
+            | Expr::PreInc { e, span, ty: _ }
+            | Expr::PostDec { e, span, ty: _ }
+            | Expr::PreDec { e, span, ty: _ } => {
                 let is_inc = matches!(&**e, Expr::PostInc { .. } | Expr::PreInc { .. });
                 let one = if is_inc { 1i128 } else { -1i128 };
                 if let Expr::Ident { name, ty, .. } = e.as_ref() {
-                    let cur_v = self.lookup(&name.name).unwrap_or_else(|| SsaVar { base: name.name.clone(), version: 0, ty: ty.clone(), span: span.clone() });
+                    let cur_v = self.lookup(&name.name).unwrap_or_else(|| SsaVar {
+                        base: name.name.clone(),
+                        version: 0,
+                        ty: ty.clone(),
+                        span: span.clone(),
+                    });
                     let one_op = Operand::Int(one);
                     let new_dest = self.fresh("upd", ty.clone(), span);
                     self.emit(Inst {
                         dest: Some(new_dest.clone()),
-                        kind: InstKind::Bin { op: BinOp::Add, l: Operand::Var(cur_v.clone()), r: one_op },
+                        kind: InstKind::Bin {
+                            op: BinOp::Add,
+                            l: Operand::Var(cur_v.clone()),
+                            r: one_op,
+                        },
                         span: span.clone(),
                     });
                     // store back
                     self.emit(Inst {
                         dest: None,
-                        kind: InstKind::Store { e: Operand::SymAddr(name.name.clone()), src: Operand::Var(new_dest.clone()) },
+                        kind: InstKind::Store {
+                            e: Operand::SymAddr(name.name.clone()),
+                            src: Operand::Var(new_dest.clone()),
+                        },
                         span: span.clone(),
                     });
-                    let nv = SsaVar { base: name.name.clone(), version: self.next_version(&name.name), ty: ty.clone(), span: span.clone() };
+                    let nv = SsaVar {
+                        base: name.name.clone(),
+                        version: self.next_version(&name.name),
+                        ty: ty.clone(),
+                        span: span.clone(),
+                    };
                     self.define(nv.clone());
                     // override previous
                     let _ = cur_v;
                     let v = self.fresh("post", ty.clone(), span);
-                    self.emit(Inst { dest: Some(v.clone()), kind: InstKind::Bin { op: BinOp::Add, l: Operand::Var(cur_v), r: Operand::Int(0) }, span: span.clone() });
+                    self.emit(Inst {
+                        dest: Some(v.clone()),
+                        kind: InstKind::Bin {
+                            op: BinOp::Add,
+                            l: Operand::Var(cur_v),
+                            r: Operand::Int(0),
+                        },
+                        span: span.clone(),
+                    });
                     return Operand::Var(v);
                 }
                 Operand::Int(one)
@@ -556,14 +703,29 @@ impl Builder {
                 let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                 let _ = dead;
             }
-            Stmt::If { cond, then_, else_, span: _ } => {
+            Stmt::If {
+                cond,
+                then_,
+                else_,
+                span: _,
+            } => {
                 let cond_o = self.lower_expr(cond);
                 let then_bb = self.func.unique_bb("if.then");
                 let else_bb = self.func.unique_bb("if.else");
                 let merge_bb = self.func.unique_bb("if.end");
-                self.set_term(Terminator::Branch { cond: cond_o, t: then_bb.clone(), f: else_bb.clone() });
-                if let Some(tbb) = self.func.blocks.get_mut(&then_bb) { tbb.preds.push(self.cur.clone()); tbb.preds.dedup(); }
-                if let Some(ebb) = self.func.blocks.get_mut(&else_bb) { ebb.preds.push(self.cur.clone()); ebb.preds.dedup(); }
+                self.set_term(Terminator::Branch {
+                    cond: cond_o,
+                    t: then_bb.clone(),
+                    f: else_bb.clone(),
+                });
+                if let Some(tbb) = self.func.blocks.get_mut(&then_bb) {
+                    tbb.preds.push(self.cur.clone());
+                    tbb.preds.dedup();
+                }
+                if let Some(ebb) = self.func.blocks.get_mut(&else_bb) {
+                    ebb.preds.push(self.cur.clone());
+                    ebb.preds.dedup();
+                }
                 self.cur = then_bb;
                 self.lower_stmt(then_);
                 let then_cur = self.cur.clone();
@@ -591,7 +753,11 @@ impl Builder {
                 }
                 self.cur = merge_bb;
             }
-            Stmt::While { cond, body, span: _ } => {
+            Stmt::While {
+                cond,
+                body,
+                span: _,
+            } => {
                 let cond_bb = self.func.unique_bb("while.cond");
                 let body_bb = self.func.unique_bb("while.body");
                 let end_bb = self.func.unique_bb("while.end");
@@ -606,7 +772,11 @@ impl Builder {
                 }
                 self.cur = cond_bb.clone();
                 let cond_o = self.lower_expr(cond);
-                self.set_term(Terminator::Branch { cond: cond_o, t: body_bb.clone(), f: end_bb.clone() });
+                self.set_term(Terminator::Branch {
+                    cond: cond_o,
+                    t: body_bb.clone(),
+                    f: end_bb.clone(),
+                });
                 if let Some(bb) = self.func.blocks.get_mut(&body_bb) {
                     bb.preds.push(self.cur.clone());
                 }
@@ -632,7 +802,11 @@ impl Builder {
                 }
                 self.cur = end_bb;
             }
-            Stmt::Do { body, cond, span: _ } => {
+            Stmt::Do {
+                body,
+                cond,
+                span: _,
+            } => {
                 let body_bb = self.func.unique_bb("do.body");
                 let cond_bb = self.func.unique_bb("do.cond");
                 let end_bb = self.func.unique_bb("do.end");
@@ -663,7 +837,11 @@ impl Builder {
                 }
                 self.cur = cond_bb.clone();
                 let cond_o = self.lower_expr(cond);
-                self.set_term(Terminator::Branch { cond: cond_o, t: body_bb.clone(), f: end_bb.clone() });
+                self.set_term(Terminator::Branch {
+                    cond: cond_o,
+                    t: body_bb.clone(),
+                    f: end_bb.clone(),
+                });
                 if let Some(bb) = self.func.blocks.get_mut(&body_bb) {
                     bb.preds.push(self.cur.clone());
                 }
@@ -672,7 +850,13 @@ impl Builder {
                 }
                 self.cur = end_bb;
             }
-            Stmt::For { init, cond, step, body, span: _ } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                span: _,
+            } => {
                 if let Some(i) = init {
                     self.lower_stmt(i);
                 }
@@ -690,8 +874,15 @@ impl Builder {
                     cb.preds.push(self.cur.clone());
                 }
                 self.cur = cond_bb.clone();
-                let cond_o = cond.as_ref().map(|c| self.lower_expr(c)).unwrap_or(Operand::Int(1));
-                self.set_term(Terminator::Branch { cond: cond_o, t: body_bb.clone(), f: end_bb.clone() });
+                let cond_o = cond
+                    .as_ref()
+                    .map(|c| self.lower_expr(c))
+                    .unwrap_or(Operand::Int(1));
+                self.set_term(Terminator::Branch {
+                    cond: cond_o,
+                    t: body_bb.clone(),
+                    f: end_bb.clone(),
+                });
                 if let Some(bb) = self.func.blocks.get_mut(&body_bb) {
                     bb.preds.push(self.cur.clone());
                 }
@@ -764,14 +955,24 @@ impl Builder {
                 BlockItem::Decl(Decl::Var(v)) => {
                     if let Some(init) = &v.init {
                         let o = self.lower_expr(init);
-                        let v_0 = SsaVar { base: v.name.name.clone(), version: self.next_version(&v.name.name), ty: v.ty.clone(), span: v.span.clone() };
+                        let v_0 = SsaVar {
+                            base: v.name.name.clone(),
+                            version: self.next_version(&v.name.name),
+                            ty: v.ty.clone(),
+                            span: v.span.clone(),
+                        };
                         // 隐式 store: dest = o
                         if let Operand::Var(src) = o {
                             let _ = src; // 已经在前 emit, 简化: 直接定义
                         }
                         self.define(v_0);
                     } else {
-                        let v_0 = SsaVar { base: v.name.name.clone(), version: self.next_version(&v.name.name), ty: v.ty.clone(), span: v.span.clone() };
+                        let v_0 = SsaVar {
+                            base: v.name.name.clone(),
+                            version: self.next_version(&v.name.name),
+                            ty: v.ty.clone(),
+                            span: v.span.clone(),
+                        };
                         self.define(v_0);
                     }
                 }
@@ -789,12 +990,23 @@ fn lower_lvalue(
     ty: &Type,
     b: &mut Builder,
 ) -> Option<SsaVar> {
-    if let Expr::Ident { name, ty: var_ty, .. } = l {
-        let v = SsaVar { base: name.name.clone(), version: b.next_version(&name.name), ty: var_ty.clone(), span: span.clone() };
+    if let Expr::Ident {
+        name, ty: var_ty, ..
+    } = l
+    {
+        let v = SsaVar {
+            base: name.name.clone(),
+            version: b.next_version(&name.name),
+            ty: var_ty.clone(),
+            span: span.clone(),
+        };
         let _ = op; // AST 已是展开形式
         b.emit(Inst {
             dest: None,
-            kind: InstKind::Store { e: Operand::SymAddr(name.name.clone()), src: src.clone() },
+            kind: InstKind::Store {
+                e: Operand::SymAddr(name.name.clone()),
+                src: src.clone(),
+            },
             span: span.clone(),
         });
         b.define(v.clone());
@@ -815,20 +1027,53 @@ fn lower_lvalue(
         let i = b.lower_expr(idx);
         b.emit(Inst {
             dest: None,
-            kind: InstKind::IndexStore { arr: a, idx: i, src },
+            kind: InstKind::IndexStore {
+                arr: a,
+                idx: i,
+                src,
+            },
             span: span.clone(),
         });
         let dest = b.fresh("idxstore", ty.clone(), span);
         return Some(dest);
     }
-    if let Expr::Member { expr, field, is_arrow, .. } = l {
+    if let Expr::Member {
+        expr,
+        field,
+        is_arrow,
+        ..
+    } = l
+    {
         let obj = b.lower_expr(expr);
         if *is_arrow {
             let inner = b.fresh("deref", Type::Ptr(Box::new(ty.clone())), span);
-            b.emit(Inst { dest: Some(inner.clone()), kind: InstKind::Load { e: obj, ty: ty.clone() }, span: span.clone() });
-            b.emit(Inst { dest: None, kind: InstKind::MemberStore { obj: Operand::Var(inner), field: field.name.clone(), src }, span: span.clone() });
+            b.emit(Inst {
+                dest: Some(inner.clone()),
+                kind: InstKind::Load {
+                    e: obj,
+                    ty: ty.clone(),
+                },
+                span: span.clone(),
+            });
+            b.emit(Inst {
+                dest: None,
+                kind: InstKind::MemberStore {
+                    obj: Operand::Var(inner),
+                    field: field.name.clone(),
+                    src,
+                },
+                span: span.clone(),
+            });
         } else {
-            b.emit(Inst { dest: None, kind: InstKind::MemberStore { obj, field: field.name.clone(), src }, span: span.clone() });
+            b.emit(Inst {
+                dest: None,
+                kind: InstKind::MemberStore {
+                    obj,
+                    field: field.name.clone(),
+                    src,
+                },
+                span: span.clone(),
+            });
         }
         let dest = b.fresh("memstore", ty.clone(), span);
         return Some(dest);
@@ -848,7 +1093,12 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     let mut builder = Builder::new(func);
     for p in &f.params {
         if let Some(n) = &p.name {
-            let v = SsaVar { base: n.name.clone(), version: 0, ty: p.ty.clone(), span: p.span.clone() };
+            let v = SsaVar {
+                base: n.name.clone(),
+                version: 0,
+                ty: p.ty.clone(),
+                span: p.span.clone(),
+            };
             builder.func.params.push(v.clone());
             builder.define(v);
         }
@@ -878,10 +1128,15 @@ pub fn rebuild_block(func: &Function) -> Block {
     let mut visited: HashSet<String> = HashSet::new();
     let mut env: HashMap<String, SsaVar> = HashMap::new();
     rebuild_bb(&entry, func, &mut items, &mut visited, &mut env);
-    Block { items, span: func.span.clone() }
+    Block {
+        items,
+        span: func.span.clone(),
+    }
 }
 
-fn phi_name(v: &SsaVar) -> String { v.name() }
+fn phi_name(v: &SsaVar) -> String {
+    v.name()
+}
 
 fn rebuild_bb(
     bb_name: &str,
@@ -919,7 +1174,10 @@ fn rebuild_bb(
     match &bb.term {
         Terminator::Ret { val } => {
             let e = val.as_ref().map(|o| operand_to_expr(o, env));
-            out.push(BlockItem::Stmt(Stmt::Return { val: e, span: func.span.clone() }));
+            out.push(BlockItem::Stmt(Stmt::Return {
+                val: e,
+                span: func.span.clone(),
+            }));
         }
         Terminator::Jump(t) => {
             rebuild_bb(t, func, out, visited, env);
@@ -935,8 +1193,24 @@ fn rebuild_bb(
             rebuild_bb(f, func, &mut else_items, visited, &mut else_env.clone());
             out.push(BlockItem::Stmt(Stmt::If {
                 cond: cond_e,
-                then_: Box::new(Stmt::Block { b: Block { items: then_items, span: func.span.clone() }, span: func.span.clone() }),
-                else_: if else_items.is_empty() { None } else { Some(Box::new(Stmt::Block { b: Block { items: else_items, span: func.span.clone() }, span: func.span.clone() })) },
+                then_: Box::new(Stmt::Block {
+                    b: Block {
+                        items: then_items,
+                        span: func.span.clone(),
+                    },
+                    span: func.span.clone(),
+                }),
+                else_: if else_items.is_empty() {
+                    None
+                } else {
+                    Some(Box::new(Stmt::Block {
+                        b: Block {
+                            items: else_items,
+                            span: func.span.clone(),
+                        },
+                        span: func.span.clone(),
+                    }))
+                },
                 span: func.span.clone(),
             }));
         }
@@ -948,19 +1222,71 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
     match o {
         Operand::Var(v) => {
             if let Some(found) = env.get(&v.name()) {
-                Expr::Ident { name: crate::ast::Ident { name: found.name(), span: v.span.clone() }, span: v.span.clone(), ty: v.ty.clone() }
+                Expr::Ident {
+                    name: crate::ast::Ident {
+                        name: found.name(),
+                        span: v.span.clone(),
+                    },
+                    span: v.span.clone(),
+                    ty: v.ty.clone(),
+                }
             } else {
-                Expr::Ident { name: crate::ast::Ident { name: v.name(), span: v.span.clone() }, span: v.span.clone(), ty: v.ty.clone() }
+                Expr::Ident {
+                    name: crate::ast::Ident {
+                        name: v.name(),
+                        span: v.span.clone(),
+                    },
+                    span: v.span.clone(),
+                    ty: v.ty.clone(),
+                }
             }
         }
-        Operand::Int(v) => Expr::Int { v: *v, span: Span::point("ssa", 0, 0), ty: Type::Int },
-        Operand::Float(v) => Expr::Float { v: *v, span: Span::point("ssa", 0, 0), ty: Type::Double },
-        Operand::Str(d) => Expr::String { data: d.clone(), span: Span::point("ssa", 0, 0), ty: Type::Array(Box::new(Type::Char), crate::ast::ArraySize::Const(d.len())) },
-        Operand::SymAddr(n) => Expr::Ident { name: crate::ast::Ident { name: n.clone(), span: Span::point("ssa", 0, 0) }, span: Span::point("ssa", 0, 0), ty: Type::Ptr(Box::new(Type::Void)) },
-        Operand::FnAddr(n) => Expr::Ident { name: crate::ast::Ident { name: n.clone(), span: Span::point("ssa", 0, 0) }, span: Span::point("ssa", 0, 0), ty: Type::Ptr(Box::new(Type::Void)) },
-        Operand::Void => Expr::Int { v: 0, span: Span::point("ssa", 0, 0), ty: Type::Void },
-        Operand::Call(_) => Expr::Int { v: 0, span: Span::point("ssa", 0, 0), ty: Type::Int },
-        Operand::Phi(_) => Expr::Int { v: 0, span: Span::point("ssa", 0, 0), ty: Type::Int },
+        Operand::Int(v) => Expr::Int {
+            v: *v,
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Int,
+        },
+        Operand::Float(v) => Expr::Float {
+            v: *v,
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Double,
+        },
+        Operand::Str(d) => Expr::String {
+            data: d.clone(),
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Array(Box::new(Type::Char), crate::ast::ArraySize::Const(d.len())),
+        },
+        Operand::SymAddr(n) => Expr::Ident {
+            name: crate::ast::Ident {
+                name: n.clone(),
+                span: Span::point("ssa", 0, 0),
+            },
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Ptr(Box::new(Type::Void)),
+        },
+        Operand::FnAddr(n) => Expr::Ident {
+            name: crate::ast::Ident {
+                name: n.clone(),
+                span: Span::point("ssa", 0, 0),
+            },
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Ptr(Box::new(Type::Void)),
+        },
+        Operand::Void => Expr::Int {
+            v: 0,
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Void,
+        },
+        Operand::Call(_) => Expr::Int {
+            v: 0,
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Int,
+        },
+        Operand::Phi(_) => Expr::Int {
+            v: 0,
+            span: Span::point("ssa", 0, 0),
+            ty: Type::Int,
+        },
     }
 }
 
@@ -973,12 +1299,23 @@ pub fn dump_function(func: &Function) -> String {
     s.push_str(&format!("fn {}: {{\n", func.name));
     for b in &func.block_order {
         if let Some(bb) = func.blocks.get(b) {
-            s.push_str(&format!("  {}: preds={:?} succs={:?}\n", bb.name, bb.preds, bb.succs));
+            s.push_str(&format!(
+                "  {}: preds={:?} succs={:?}\n",
+                bb.name, bb.preds, bb.succs
+            ));
             for phi in &bb.phis {
-                s.push_str(&format!("    phi {} <- {:?}\n", phi.dest.name(), phi.incoming));
+                s.push_str(&format!(
+                    "    phi {} <- {:?}\n",
+                    phi.dest.name(),
+                    phi.incoming
+                ));
             }
             for inst in &bb.insts {
-                let dst = inst.dest.as_ref().map(|d| d.name()).unwrap_or_else(|| "_".to_string());
+                let dst = inst
+                    .dest
+                    .as_ref()
+                    .map(|d| d.name())
+                    .unwrap_or_else(|| "_".to_string());
                 s.push_str(&format!("    {} = {:?}\n", dst, inst.kind));
             }
             s.push_str(&format!("    term: {:?}\n", bb.term));
@@ -998,37 +1335,87 @@ mod tests {
         let span = Span::point("t.c", 1, 1);
         let f = FuncDecl {
             ret_ty: Type::Int,
-            name: crate::ast::Ident { name: "f".into(), span: span.clone() },
+            name: crate::ast::Ident {
+                name: "f".into(),
+                span: span.clone(),
+            },
             params: vec![],
             body: Some(Block {
                 items: vec![
                     BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                         ty: Type::Int,
-                        name: crate::ast::Ident { name: "x".into(), span: span.clone() },
-                        init: Some(Expr::Int { v: 1, span: span.clone(), ty: Type::Int }),
+                        name: crate::ast::Ident {
+                            name: "x".into(),
+                            span: span.clone(),
+                        },
+                        init: Some(Expr::Int {
+                            v: 1,
+                            span: span.clone(),
+                            ty: Type::Int,
+                        }),
                         span: span.clone(),
-                        is_extern: false, is_static: false, section: None, alignment: None,
-                        is_weak: false, visibility: None, is_unused: false, register_name: None,
-                        cleanup_fn: None, is_thread_local: false, no_sanitize: vec![], copy_fn: None,
-                        is_retain: false, is_used_attr: false,
+                        is_extern: false,
+                        is_static: false,
+                        section: None,
+                        alignment: None,
+                        is_weak: false,
+                        visibility: None,
+                        is_unused: false,
+                        register_name: None,
+                        cleanup_fn: None,
+                        is_thread_local: false,
+                        no_sanitize: vec![],
+                        copy_fn: None,
+                        is_retain: false,
+                        is_used_attr: false,
                     })),
-                    BlockItem::Stmt(Stmt::Return { val: Some(Expr::Ident {
-                        name: crate::ast::Ident { name: "x".into(), span: span.clone() },
-                        span: span.clone(), ty: Type::Int,
-                    }), span: span.clone() }),
+                    BlockItem::Stmt(Stmt::Return {
+                        val: Some(Expr::Ident {
+                            name: crate::ast::Ident {
+                                name: "x".into(),
+                                span: span.clone(),
+                            },
+                            span: span.clone(),
+                            ty: Type::Int,
+                        }),
+                        span: span.clone(),
+                    }),
                 ],
                 span: span.clone(),
             }),
             span: span.clone(),
-            is_extern: false, is_static: false, section: None, alignment: None,
-            is_weak: false, visibility: None, is_unused: false, is_cold: false,
+            is_extern: false,
+            is_static: false,
+            section: None,
+            alignment: None,
+            is_weak: false,
+            visibility: None,
+            is_unused: false,
+            is_cold: false,
             is_hot: false,
-            is_noinline: false, is_always_inline: false, is_variadic: false,
-            is_constructor: false, is_destructor: false, alias_name: None, is_nested: false,
-            upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None,
-            format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
-            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            is_noinline: false,
+            is_always_inline: false,
+            is_variadic: false,
+            is_constructor: false,
+            is_destructor: false,
+            alias_name: None,
+            is_nested: false,
+            upvars: vec![],
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
             ifunc_resolver: None,
         };
         let func = build_from_func(&f).expect("structured");
@@ -1041,29 +1428,71 @@ mod tests {
         let span = Span::point("t.c", 1, 1);
         let f = FuncDecl {
             ret_ty: Type::Int,
-            name: crate::ast::Ident { name: "f".into(), span: span.clone() },
+            name: crate::ast::Ident {
+                name: "f".into(),
+                span: span.clone(),
+            },
             params: vec![],
             body: Some(Block {
-                items: vec![
-                    BlockItem::Stmt(Stmt::If {
-                        cond: Expr::Int { v: 1, span: span.clone(), ty: Type::Int },
-                        then_: Box::new(Stmt::Return { val: Some(Expr::Int { v: 1, span: span.clone(), ty: Type::Int }), span: span.clone() }),
-                        else_: Some(Box::new(Stmt::Return { val: Some(Expr::Int { v: 0, span: span.clone(), ty: Type::Int }), span: span.clone() })),
+                items: vec![BlockItem::Stmt(Stmt::If {
+                    cond: Expr::Int {
+                        v: 1,
+                        span: span.clone(),
+                        ty: Type::Int,
+                    },
+                    then_: Box::new(Stmt::Return {
+                        val: Some(Expr::Int {
+                            v: 1,
+                            span: span.clone(),
+                            ty: Type::Int,
+                        }),
                         span: span.clone(),
                     }),
-                ],
+                    else_: Some(Box::new(Stmt::Return {
+                        val: Some(Expr::Int {
+                            v: 0,
+                            span: span.clone(),
+                            ty: Type::Int,
+                        }),
+                        span: span.clone(),
+                    })),
+                    span: span.clone(),
+                })],
                 span: span.clone(),
             }),
             span: span.clone(),
-            is_extern: false, is_static: false, section: None, alignment: None,
-            is_weak: false, visibility: None, is_unused: false, is_cold: false,
+            is_extern: false,
+            is_static: false,
+            section: None,
+            alignment: None,
+            is_weak: false,
+            visibility: None,
+            is_unused: false,
+            is_cold: false,
             is_hot: false,
-            is_noinline: false, is_always_inline: false, is_variadic: false,
-            is_constructor: false, is_destructor: false, alias_name: None, is_nested: false,
-            upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None,
-            format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
-            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            is_noinline: false,
+            is_always_inline: false,
+            is_variadic: false,
+            is_constructor: false,
+            is_destructor: false,
+            alias_name: None,
+            is_nested: false,
+            upvars: vec![],
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
             ifunc_resolver: None,
         };
         let func = build_from_func(&f).expect("structured");
@@ -1077,24 +1506,54 @@ mod tests {
         let span = Span::point("t.c", 1, 1);
         let f = FuncDecl {
             ret_ty: Type::Int,
-            name: crate::ast::Ident { name: "f".into(), span: span.clone() },
+            name: crate::ast::Ident {
+                name: "f".into(),
+                span: span.clone(),
+            },
             params: vec![],
             body: Some(Block {
-                items: vec![
-                    BlockItem::Stmt(Stmt::Goto { target: crate::ast::Ident { name: "L".into(), span: span.clone() }, span: span.clone() }),
-                ],
+                items: vec![BlockItem::Stmt(Stmt::Goto {
+                    target: crate::ast::Ident {
+                        name: "L".into(),
+                        span: span.clone(),
+                    },
+                    span: span.clone(),
+                })],
                 span: span.clone(),
             }),
             span: span.clone(),
-            is_extern: false, is_static: false, section: None, alignment: None,
-            is_weak: false, visibility: None, is_unused: false, is_cold: false,
+            is_extern: false,
+            is_static: false,
+            section: None,
+            alignment: None,
+            is_weak: false,
+            visibility: None,
+            is_unused: false,
+            is_cold: false,
             is_hot: false,
-            is_noinline: false, is_always_inline: false, is_variadic: false,
-            is_constructor: false, is_destructor: false, alias_name: None, is_nested: false,
-            upvars: vec![], is_old_style: false, format_kind: None, format_string_idx: None,
-            format_first_arg: None, no_sanitize: vec![], target_clones: vec![], returns_nonnull: false,
-            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            is_noinline: false,
+            is_always_inline: false,
+            is_variadic: false,
+            is_constructor: false,
+            is_destructor: false,
+            alias_name: None,
+            is_nested: false,
+            upvars: vec![],
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
             ifunc_resolver: None,
         };
         assert!(build_from_func(&f).is_none());

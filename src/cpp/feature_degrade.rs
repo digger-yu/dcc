@@ -15,10 +15,8 @@
 //!
 //! 设计原则: 全部产出 C 代码, 由 C 后端 (dcc codegen) 直接处理.
 
-use crate::cpp::parser::{
-    ClassDecl, CppDecl, CppExpr, CppStmt, TemplateArgs, TemplateParam,
-};
 use crate::cpp::mangle::MangleType;
+use crate::cpp::parser::{ClassDecl, CppDecl, CppExpr, CppStmt, TemplateArgs, TemplateParam};
 
 /// SFINAE 求值上下文: 记录类型形参表和实参表
 #[derive(Debug, Clone, Default)]
@@ -28,18 +26,24 @@ pub struct SfinaeCtx {
 }
 
 impl SfinaeCtx {
-    pub fn new() -> Self { Self::default() }
-    pub fn bind(&mut self, param: String, arg: String) { self.bindings.push((param, arg)); }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn bind(&mut self, param: String, arg: String) {
+        self.bindings.push((param, arg));
+    }
     /// 查找形参对应的实参 (SFINAE: 未找到说明失败)
     pub fn lookup(&self, name: &str) -> Option<String> {
-        self.bindings.iter()
+        self.bindings
+            .iter()
             .rev()
             .find(|(p, _)| p == name)
             .map(|(_, a)| a.clone())
     }
     /// 批量替换多个 pattern (供偏特化多实参 / enable_if 条件替换使用)
     pub fn substitute_all(&self, patterns: &[String]) -> Vec<String> {
-        patterns.iter()
+        patterns
+            .iter()
             .map(|p| try_substitute(p, self).unwrap_or_else(|_| p.clone()))
             .collect()
     }
@@ -68,7 +72,12 @@ pub fn try_substitute(pattern: &str, ctx: &SfinaeCtx) -> SfinaeResult<String> {
             let mut ident = String::new();
             ident.push(c);
             while let Some(&nc) = chars.peek() {
-                if nc.is_alphanumeric() || nc == '_' { ident.push(nc); chars.next(); } else { break; }
+                if nc.is_alphanumeric() || nc == '_' {
+                    ident.push(nc);
+                    chars.next();
+                } else {
+                    break;
+                }
             }
             // 是已知类型形参? 替换
             if let Some(arg) = ctx.lookup(&ident) {
@@ -92,7 +101,9 @@ pub fn pattern_matches(pattern: &str, arg: &str) -> bool {
     let pat = pattern.trim();
     let arg = arg.trim();
     // 精确匹配
-    if pat == arg { return true; }
+    if pat == arg {
+        return true;
+    }
     // pointer pattern: T* 匹配 *X
     if let Some(inner) = pat.strip_suffix('*') {
         if let Some(arg_inner) = arg.strip_suffix('*') {
@@ -125,10 +136,29 @@ pub fn pattern_matches(pattern: &str, arg: &str) -> bool {
 /// 判断 ident 是否是模板形参名 (约定: 单个 ident, 不是已知类型)
 fn is_template_param(s: &str) -> bool {
     // 已知基本类型
-    !matches!(s, "int" | "long" | "short" | "char" | "void" | "float" | "double"
-        | "bool" | "signed" | "unsigned" | "int8_t" | "int16_t" | "int32_t" | "int64_t"
-        | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "size_t" | "ptrdiff_t")
-        && !s.is_empty()
+    !matches!(
+        s,
+        "int"
+            | "long"
+            | "short"
+            | "char"
+            | "void"
+            | "float"
+            | "double"
+            | "bool"
+            | "signed"
+            | "unsigned"
+            | "int8_t"
+            | "int16_t"
+            | "int32_t"
+            | "int64_t"
+            | "uint8_t"
+            | "uint16_t"
+            | "uint32_t"
+            | "uint64_t"
+            | "size_t"
+            | "ptrdiff_t"
+    ) && !s.is_empty()
         && !s.contains(' ')
 }
 
@@ -155,8 +185,12 @@ pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
     if let Some(rest) = c.strip_prefix('!') {
         return evaluate_trait_condition(rest.trim(), ctx).map(|v| !v);
     }
-    if c == "true" { return Some(true); }
-    if c == "false" { return Some(false); }
+    if c == "true" {
+        return Some(true);
+    }
+    if c == "false" {
+        return Some(false);
+    }
     // sizeof(T) <= N / >= N / == N
     if let Some(rest) = c.strip_prefix("sizeof(") {
         if let Some(idx) = rest.find(')') {
@@ -164,13 +198,22 @@ pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
             let after = rest[idx + 1..].trim();
             let resolved = ctx.lookup(&ty).unwrap_or(ty);
             let size = type_size_hint(&resolved) as isize;
-            if let Some(n) = after.strip_prefix("<=").and_then(|s| s.trim().parse::<isize>().ok()) {
+            if let Some(n) = after
+                .strip_prefix("<=")
+                .and_then(|s| s.trim().parse::<isize>().ok())
+            {
                 return Some(size <= n);
             }
-            if let Some(n) = after.strip_prefix(">=").and_then(|s| s.trim().parse::<isize>().ok()) {
+            if let Some(n) = after
+                .strip_prefix(">=")
+                .and_then(|s| s.trim().parse::<isize>().ok())
+            {
                 return Some(size >= n);
             }
-            if let Some(n) = after.strip_prefix("==").and_then(|s| s.trim().parse::<isize>().ok()) {
+            if let Some(n) = after
+                .strip_prefix("==")
+                .and_then(|s| s.trim().parse::<isize>().ok())
+            {
                 return Some(size == n);
             }
             return None;
@@ -214,7 +257,12 @@ pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
 /// 的条件部分. 提取不出条件或无法判定时返回 true (保守, 不阻塞编译).
 pub fn evaluate_enable_if(text: &str, ctx: &SfinaeCtx) -> bool {
     let t = text.trim();
-    for prefix in ["std::enable_if_t<", "std::enable_if<", "enable_if_t<", "enable_if<"] {
+    for prefix in [
+        "std::enable_if_t<",
+        "std::enable_if<",
+        "enable_if_t<",
+        "enable_if<",
+    ] {
         if let Some(rest) = t.strip_prefix(prefix) {
             if let Some(cond) = split_cond(rest) {
                 return evaluate_trait_condition(&cond, ctx).unwrap_or(true);
@@ -233,10 +281,18 @@ fn find_top_level(s: &str, pat: &str) -> Option<usize> {
         let b = bytes[i];
         match b {
             b'<' => {
-                if bytes.get(i + 1) == Some(&b'=') { i += 1; } else { depth += 1; }
+                if bytes.get(i + 1) == Some(&b'=') {
+                    i += 1;
+                } else {
+                    depth += 1;
+                }
             }
             b'>' => {
-                if bytes.get(i + 1) == Some(&b'=') { i += 1; } else { depth -= 1; }
+                if bytes.get(i + 1) == Some(&b'=') {
+                    i += 1;
+                } else {
+                    depth -= 1;
+                }
             }
             b'(' => depth += 1,
             b')' => depth -= 1,
@@ -257,12 +313,20 @@ fn split_cond(rest: &str) -> Option<String> {
         let b = bytes[i];
         match b {
             b'<' => {
-                if bytes.get(i + 1) == Some(&b'=') { i += 1; } else { depth += 1; }
+                if bytes.get(i + 1) == Some(&b'=') {
+                    i += 1;
+                } else {
+                    depth += 1;
+                }
             }
             b'>' => {
-                if bytes.get(i + 1) == Some(&b'=') { i += 1; } else if depth == 0 {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    i += 1;
+                } else if depth == 0 {
                     return Some(rest[..i].trim().to_string());
-                } else { depth -= 1; }
+                } else {
+                    depth -= 1;
+                }
             }
             b',' if depth == 0 => return Some(rest[..i].trim().to_string()),
             _ => {}
@@ -309,18 +373,48 @@ fn resolve_arg(s: &str, ctx: &SfinaeCtx) -> String {
 }
 
 fn is_builtin_ty(s: &str) -> bool {
-    matches!(s, "void" | "bool" | "char" | "signed char" | "unsigned char"
-        | "short" | "unsigned short" | "int" | "unsigned int" | "long"
-        | "unsigned long" | "long long" | "unsigned long long"
-        | "float" | "double" | "long double"
-        | "size_t" | "ptrdiff_t" | "wchar_t")
+    matches!(
+        s,
+        "void"
+            | "bool"
+            | "char"
+            | "signed char"
+            | "unsigned char"
+            | "short"
+            | "unsigned short"
+            | "int"
+            | "unsigned int"
+            | "long"
+            | "unsigned long"
+            | "long long"
+            | "unsigned long long"
+            | "float"
+            | "double"
+            | "long double"
+            | "size_t"
+            | "ptrdiff_t"
+            | "wchar_t"
+    )
 }
 
 fn is_integral_ty(s: &str) -> bool {
-    matches!(s, "bool" | "char" | "signed char" | "unsigned char"
-        | "short" | "unsigned short" | "int" | "unsigned int" | "long"
-        | "unsigned long" | "long long" | "unsigned long long"
-        | "size_t" | "ptrdiff_t")
+    matches!(
+        s,
+        "bool"
+            | "char"
+            | "signed char"
+            | "unsigned char"
+            | "short"
+            | "unsigned short"
+            | "int"
+            | "unsigned int"
+            | "long"
+            | "unsigned long"
+            | "long long"
+            | "unsigned long long"
+            | "size_t"
+            | "ptrdiff_t"
+    )
 }
 
 /// 完整 concept 求值: 解析并求值 `requires { ... }` 表达式
@@ -337,11 +431,20 @@ pub enum Concept {
     Or(Vec<Concept>),
     Not(Box<Concept>),
     /// `T::value` (trait 检查)
-    TraitConst { ty: String, name: String },
+    TraitConst {
+        ty: String,
+        name: String,
+    },
     /// `sizeof(T) <= N`
-    SizeLe { ty: String, n: usize },
+    SizeLe {
+        ty: String,
+        n: usize,
+    },
     /// `sizeof(T) >= N`
-    SizeGe { ty: String, n: usize },
+    SizeGe {
+        ty: String,
+        n: usize,
+    },
     /// `same_as<T, U>`
     SameAs(String, String),
     /// `derived_from<T, Base>`
@@ -362,13 +465,17 @@ impl Concept {
     ///   `true` -> True
     pub fn parse(text: &str) -> Concept {
         let t = text.trim();
-        if t.is_empty() { return Concept::True; }
-        if t == "true" { return Concept::True; }
+        if t.is_empty() {
+            return Concept::True;
+        }
+        if t == "true" {
+            return Concept::True;
+        }
         // sizeof(T) <= N
         if let Some(rest) = t.strip_prefix("sizeof(") {
             if let Some(idx) = rest.find(')') {
                 let ty = rest[..idx].trim().to_string();
-                let after = rest[idx+1..].trim();
+                let after = rest[idx + 1..].trim();
                 if let Some(after) = after.strip_prefix("<=") {
                     if let Ok(n) = after.trim().parse::<usize>() {
                         return Concept::SizeLe { ty, n };
@@ -386,7 +493,10 @@ impl Concept {
                 let inner = &rest[..idx];
                 let parts: Vec<&str> = inner.split(',').collect();
                 if parts.len() == 2 {
-                    return Concept::SameAs(parts[0].trim().to_string(), parts[1].trim().to_string());
+                    return Concept::SameAs(
+                        parts[0].trim().to_string(),
+                        parts[1].trim().to_string(),
+                    );
                 }
             }
         }
@@ -395,7 +505,10 @@ impl Concept {
                 let inner = &rest[..idx];
                 let parts: Vec<&str> = inner.split(',').collect();
                 if parts.len() == 2 {
-                    return Concept::DerivedFrom(parts[0].trim().to_string(), parts[1].trim().to_string());
+                    return Concept::DerivedFrom(
+                        parts[0].trim().to_string(),
+                        parts[1].trim().to_string(),
+                    );
                 }
             }
         }
@@ -403,7 +516,10 @@ impl Concept {
         if t.contains("::") && !t.contains('(') {
             let parts: Vec<&str> = t.split("::").collect();
             if parts.len() == 2 {
-                return Concept::TraitConst { ty: parts[0].trim().to_string(), name: parts[1].trim().to_string() };
+                return Concept::TraitConst {
+                    ty: parts[0].trim().to_string(),
+                    name: parts[1].trim().to_string(),
+                };
             }
         }
         // 包含 () 认为是表达式约束
@@ -422,7 +538,11 @@ impl Concept {
             Concept::Not(c) => !c.evaluate(ctx),
             Concept::TraitConst { ty, name } => {
                 // 替换类型形参
-                let resolved = if let Some(arg) = ctx.lookup(ty) { arg } else { ty.clone() };
+                let resolved = if let Some(arg) = ctx.lookup(ty) {
+                    arg
+                } else {
+                    ty.clone()
+                };
                 // M10 简化: 只对已知的 std::xxx 类型特征返回 true
                 // 实际应通过 _ZTS 符号 / typeinfo 查找
                 if resolved.starts_with("std::") {
@@ -432,13 +552,21 @@ impl Concept {
                 }
             }
             Concept::SizeLe { ty, n } => {
-                let resolved = if let Some(arg) = ctx.lookup(ty) { arg } else { ty.clone() };
+                let resolved = if let Some(arg) = ctx.lookup(ty) {
+                    arg
+                } else {
+                    ty.clone()
+                };
                 // 启发式大小估算 (M10 简化)
                 let size = type_size_hint(&resolved);
                 size <= *n
             }
             Concept::SizeGe { ty, n } => {
-                let resolved = if let Some(arg) = ctx.lookup(ty) { arg } else { ty.clone() };
+                let resolved = if let Some(arg) = ctx.lookup(ty) {
+                    arg
+                } else {
+                    ty.clone()
+                };
                 let size = type_size_hint(&resolved);
                 size >= *n
             }
@@ -451,11 +579,10 @@ impl Concept {
                 let ra = if let Some(x) = ctx.lookup(a) { x } else { a.clone() };
                 let rb = if let Some(x) = ctx.lookup(b) { x } else { b.clone() };
                 // M10 简化: 字符串包含关系 / 前缀关系
-                ra.starts_with(&rb)
-                    || ra.contains(&format!("::{}", rb))
-                    || ra.contains(&rb)        // 名字含 base (如 MyBase 含 Base)
+                ra.starts_with(&rb) || ra.contains(&format!("::{}", rb)) || ra.contains(&rb)
+                // 名字含 base (如 MyBase 含 Base)
             }
-            Concept::Expression => true,  // M10 简化
+            Concept::Expression => true, // M10 简化
         }
     }
 }
@@ -469,7 +596,7 @@ fn type_size_hint(ty: &str) -> usize {
         "long long" | "double" | "int64_t" | "uint64_t" | "void*" | "T*" => 8,
         _ if ty.ends_with('*') => 8,
         _ if ty.ends_with("&") => 8,
-        _ => 8,  // 默认
+        _ => 8, // 默认
     }
 }
 
@@ -481,7 +608,12 @@ pub fn instantiate_partial_spec(
     args: &[String],
 ) -> CppDecl {
     for p in partials {
-        if let CppDecl::PartialSpec { params: _, pattern_text, decl } = p {
+        if let CppDecl::PartialSpec {
+            params: _,
+            pattern_text,
+            decl,
+        } = p
+        {
             // 单形参偏特化
             if args.len() == 1 && pattern_matches(pattern_text, &args[0]) {
                 return *decl.clone();
@@ -490,7 +622,9 @@ pub fn instantiate_partial_spec(
             if args.len() > 1 {
                 let patterns: Vec<&str> = pattern_text.split(',').collect();
                 if patterns.len() == args.len() {
-                    let all_match = patterns.iter().zip(args.iter())
+                    let all_match = patterns
+                        .iter()
+                        .zip(args.iter())
                         .all(|(pat, arg)| pattern_matches(pat.trim(), arg.trim()));
                     if all_match {
                         return *decl.clone();
@@ -523,7 +657,13 @@ impl StaticDataMember {
     /// 生成静态成员的 C 兼容定义
     /// C++ 静态成员降级为全局变量，名字 mangle 为 _ZN<class><name>E
     pub fn emit_c_definition(&self) -> String {
-        let mangled = format!("_ZN{}{}{}{}E", self.class_name.len(), self.class_name, self.name.len(), self.name);
+        let mangled = format!(
+            "_ZN{}{}{}{}E",
+            self.class_name.len(),
+            self.class_name,
+            self.name.len(),
+            self.name
+        );
         if let Some(init) = &self.init_value {
             format!("static {} {} = {};\n", self.ty, mangled, init)
         } else {
@@ -534,7 +674,13 @@ impl StaticDataMember {
     /// 生成静态成员的访问代码
     /// Widget::count -> _ZN6Widget5countE
     pub fn emit_access(&self) -> String {
-        format!("_ZN{}{}{}{}E", self.class_name.len(), self.class_name, self.name.len(), self.name)
+        format!(
+            "_ZN{}{}{}{}E",
+            self.class_name.len(),
+            self.class_name,
+            self.name.len(),
+            self.name
+        )
     }
 }
 
@@ -543,15 +689,19 @@ impl StaticDataMember {
 #[derive(Debug, Clone)]
 pub struct CoroutineState {
     pub name: String,
-    pub current: i32,  // 当前状态编号
+    pub current: i32, // 当前状态编号
 }
 
 impl CoroutineState {
     pub fn new(name: String) -> Self {
         Self { name, current: 0 }
     }
-    pub fn advance(&mut self) { self.current += 1; }
-    pub fn reset(&mut self) { self.current = 0; }
+    pub fn advance(&mut self) {
+        self.current += 1;
+    }
+    pub fn reset(&mut self) {
+        self.current = 0;
+    }
 }
 
 /// 协程 promise type: C++20 协程的返回类型特征
@@ -581,11 +731,17 @@ impl CoroutinePromiseType {
     pub fn infer(return_type: &str, _param_types: &[String]) -> Self {
         // M23 简化: 根据返回类型推断常见协程模式
         let (promise_name, has_return_value) = if return_type.contains("generator") {
-            (format!("std::generator<{}>::promise_type", return_type), true)
+            (
+                format!("std::generator<{}>::promise_type", return_type),
+                true,
+            )
         } else if return_type.contains("task") {
             (format!("std::task<{}>::promise_type", return_type), false)
         } else {
-            (format!("std::coroutine_traits<{}>::promise_type", return_type), false)
+            (
+                format!("std::coroutine_traits<{}>::promise_type", return_type),
+                false,
+            )
         };
         Self {
             promise_name,
@@ -643,23 +799,34 @@ pub struct CxaGuard {
 
 impl CxaGuard {
     pub fn new(mangled_name: String) -> Self {
-        Self { mangled_name, state: 0 }
+        Self {
+            mangled_name,
+            state: 0,
+        }
     }
 
     /// 尝试获取初始化权: 返回 true 表示可以初始化
     /// C 代码: if (__cxa_guard_acquire(&guard)) { ...; __cxa_guard_release(&guard); }
     pub fn acquire(&mut self) -> bool {
-        if self.state == 2 { return false; }  // 已初始化, 跳过
-        if self.state == 1 { return false; }  // 正在初始化, 跳过 (避免重入)
-        self.state = 1;  // 标记为初始化中
+        if self.state == 2 {
+            return false;
+        } // 已初始化, 跳过
+        if self.state == 1 {
+            return false;
+        } // 正在初始化, 跳过 (避免重入)
+        self.state = 1; // 标记为初始化中
         true
     }
 
     /// 初始化完成, 释放 guard
-    pub fn release(&mut self) { self.state = 2; }
+    pub fn release(&mut self) {
+        self.state = 2;
+    }
 
     /// 初始化失败, 中止 guard
-    pub fn abort(&mut self) { self.state = 0; }
+    pub fn abort(&mut self) {
+        self.state = 0;
+    }
 
     /// 生成 C 代码片段
     pub fn emit_c(&self) -> String {
@@ -677,26 +844,36 @@ impl CxaGuard {
 /// initializer_list<T> 降级: 产出 C 兼容的 { ptr, count, capacity } 结构
 #[derive(Debug, Clone)]
 pub struct InitList {
-    pub elems: Vec<String>,  // 元素字面量
+    pub elems: Vec<String>, // 元素字面量
     pub elem_ty: String,
 }
 
 impl InitList {
     pub fn new(elem_ty: String) -> Self {
-        Self { elems: vec![], elem_ty }
+        Self {
+            elems: vec![],
+            elem_ty,
+        }
     }
-    pub fn push(&mut self, elem: String) { self.elems.push(elem); }
+    pub fn push(&mut self, elem: String) {
+        self.elems.push(elem);
+    }
     /// 生成 C 兼容代码
     pub fn emit_c(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("static {} _il_arr[] = {{", self.elem_ty));
         for (i, e) in self.elems.iter().enumerate() {
-            if i > 0 { out.push_str(", "); }
+            if i > 0 {
+                out.push_str(", ");
+            }
             out.push_str(e);
         }
         out.push_str("};\n");
-        out.push_str(&format!("static const struct {{ const {}* _M_array; size_t _M_len; }} _il = {{ _il_arr, {} }};",
-            self.elem_ty, self.elems.len()));
+        out.push_str(&format!(
+            "static const struct {{ const {}* _M_array; size_t _M_len; }} _il = {{ _il_arr, {} }};",
+            self.elem_ty,
+            self.elems.len()
+        ));
         out
     }
 }
@@ -709,7 +886,12 @@ pub struct CoroutineMachine {
 }
 
 impl CoroutineMachine {
-    pub fn new() -> Self { Self { state: 0, suspended: false } }
+    pub fn new() -> Self {
+        Self {
+            state: 0,
+            suspended: false,
+        }
+    }
 
     /// co_await: 挂起当前协程, 求值 awaiter.await_suspend(), 然后调用 awaiter.await_resume()
     /// M10 简化: 同步执行, 仅记录状态
@@ -819,7 +1001,10 @@ mod tests {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         assert_eq!(try_substitute("T*", &ctx).unwrap(), "int*");
-        assert_eq!(try_substitute("std::vector<T>", &ctx).unwrap(), "std::vector<int>");
+        assert_eq!(
+            try_substitute("std::vector<T>", &ctx).unwrap(),
+            "std::vector<int>"
+        );
     }
 
     #[test]
@@ -903,9 +1088,9 @@ mod tests {
     fn cxa_guard_acquire_release() {
         let mut g = CxaGuard::new("test".to_string());
         assert!(g.acquire());
-        assert!(!g.acquire());  // 已在初始化中
+        assert!(!g.acquire()); // 已在初始化中
         g.release();
-        assert!(!g.acquire());  // 已初始化
+        assert!(!g.acquire()); // 已初始化
     }
 
     #[test]
@@ -913,7 +1098,7 @@ mod tests {
         let mut g = CxaGuard::new("test".to_string());
         g.acquire();
         g.abort();
-        assert!(g.acquire());  // abort 后可重试
+        assert!(g.acquire()); // abort 后可重试
     }
 
     #[test]
@@ -929,7 +1114,11 @@ mod tests {
 
     #[test]
     fn module_partition_signature() {
-        let mut p = ModulePartition { name: "foo".to_string(), partition: "part1".to_string(), is_export: true };
+        let mut p = ModulePartition {
+            name: "foo".to_string(),
+            partition: "part1".to_string(),
+            is_export: true,
+        };
         assert_eq!(p.signature(), "module::foo:part1");
         p.partition = "".to_string();
         assert_eq!(p.signature(), "module::foo");
@@ -1013,7 +1202,9 @@ mod tests {
         // 验证多形参偏特化匹配
         let patterns = ["T*", "int"];
         let args = ["MyClass*".to_string(), "int".to_string()];
-        let all_match = patterns.iter().zip(args.iter())
+        let all_match = patterns
+            .iter()
+            .zip(args.iter())
             .all(|(pat, arg)| pattern_matches(pat.trim(), arg.trim()));
         assert!(all_match);
     }
@@ -1026,15 +1217,24 @@ mod tests {
         ctx.bind("T".to_string(), "int".to_string());
         ctx.bind("U".to_string(), "MyClass".to_string());
         let out = ctx.substitute_all(&["T*".to_string(), "std::vector<U>".to_string()]);
-        assert_eq!(out, vec!["int*".to_string(), "std::vector<MyClass>".to_string()]);
+        assert_eq!(
+            out,
+            vec!["int*".to_string(), "std::vector<MyClass>".to_string()]
+        );
     }
 
     #[test]
     fn sfinae_trait_is_same() {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
-        assert_eq!(evaluate_trait_condition("std::is_same<T, int>::value", &ctx), Some(true));
-        assert_eq!(evaluate_trait_condition("is_same<T, long>::value", &ctx), Some(false));
+        assert_eq!(
+            evaluate_trait_condition("std::is_same<T, int>::value", &ctx),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_trait_condition("is_same<T, long>::value", &ctx),
+            Some(false)
+        );
     }
 
     #[test]
@@ -1042,7 +1242,10 @@ mod tests {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
         assert_eq!(evaluate_trait_condition("sizeof(T) <= 4", &ctx), Some(true));
-        assert_eq!(evaluate_trait_condition("sizeof(T) >= 8", &ctx), Some(false));
+        assert_eq!(
+            evaluate_trait_condition("sizeof(T) >= 8", &ctx),
+            Some(false)
+        );
         assert_eq!(evaluate_trait_condition("sizeof(T) == 4", &ctx), Some(true));
     }
 
@@ -1052,36 +1255,75 @@ mod tests {
         ctx.bind("T".to_string(), "int".to_string());
         ctx.bind("P".to_string(), "char*".to_string());
         ctx.bind("F".to_string(), "double".to_string());
-        assert_eq!(evaluate_trait_condition("is_integral<T>::value", &ctx), Some(true));
-        assert_eq!(evaluate_trait_condition("is_pointer<P>::value", &ctx), Some(true));
-        assert_eq!(evaluate_trait_condition("is_pointer<T>::value", &ctx), Some(false));
-        assert_eq!(evaluate_trait_condition("is_class<F>::value", &ctx), Some(false));
-        assert_eq!(evaluate_trait_condition("is_floating_point<F>::value", &ctx), Some(true));
+        assert_eq!(
+            evaluate_trait_condition("is_integral<T>::value", &ctx),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_trait_condition("is_pointer<P>::value", &ctx),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_trait_condition("is_pointer<T>::value", &ctx),
+            Some(false)
+        );
+        assert_eq!(
+            evaluate_trait_condition("is_class<F>::value", &ctx),
+            Some(false)
+        );
+        assert_eq!(
+            evaluate_trait_condition("is_floating_point<F>::value", &ctx),
+            Some(true)
+        );
     }
 
     #[test]
     fn sfinae_trait_logic() {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
-        assert_eq!(evaluate_trait_condition("is_integral<T>::value && sizeof(T) <= 4", &ctx), Some(true));
-        assert_eq!(evaluate_trait_condition("is_pointer<T>::value || sizeof(T) == 4", &ctx), Some(true));
-        assert_eq!(evaluate_trait_condition("!is_pointer<T>::value", &ctx), Some(true));
-        assert_eq!(evaluate_trait_condition("is_pointer<T>::value && is_integral<T>::value", &ctx), Some(false));
+        assert_eq!(
+            evaluate_trait_condition("is_integral<T>::value && sizeof(T) <= 4", &ctx),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_trait_condition("is_pointer<T>::value || sizeof(T) == 4", &ctx),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_trait_condition("!is_pointer<T>::value", &ctx),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_trait_condition("is_pointer<T>::value && is_integral<T>::value", &ctx),
+            Some(false)
+        );
     }
 
     #[test]
     fn sfinae_trait_unknown_returns_none() {
         // 无法解析的条件返回 None (调用方保守回退 true)
-        assert_eq!(evaluate_trait_condition("some_unknown_trait<T>::value", &SfinaeCtx::new()), None);
+        assert_eq!(
+            evaluate_trait_condition("some_unknown_trait<T>::value", &SfinaeCtx::new()),
+            None
+        );
     }
 
     #[test]
     fn sfinae_enable_if_true_and_false() {
         let mut ctx = SfinaeCtx::new();
         ctx.bind("T".to_string(), "int".to_string());
-        assert!(evaluate_enable_if("enable_if_t<is_integral<T>::value, int>", &ctx));
-        assert!(!evaluate_enable_if("enable_if_t<is_pointer<T>::value, int>", &ctx));
-        assert!(evaluate_enable_if("std::enable_if<sizeof(T) <= 4>::type", &ctx));
+        assert!(evaluate_enable_if(
+            "enable_if_t<is_integral<T>::value, int>",
+            &ctx
+        ));
+        assert!(!evaluate_enable_if(
+            "enable_if_t<is_pointer<T>::value, int>",
+            &ctx
+        ));
+        assert!(evaluate_enable_if(
+            "std::enable_if<sizeof(T) <= 4>::type",
+            &ctx
+        ));
         // 提取失败时保守返回 true
         assert!(evaluate_enable_if("some_other_default", &ctx));
     }

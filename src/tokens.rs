@@ -9,7 +9,7 @@ use crate::diagnostics::Span;
 pub struct Tok {
     pub kind: TokKind,
     pub span: Span,
-    pub text: String,   // 原始文本(关键字/标识符/数字/字符串存原始,符号存 1 字节)
+    pub text: String, // 原始文本(关键字/标识符/数字/字符串存原始,符号存 1 字节)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,81 +23,173 @@ pub enum TokKind {
     WideCharLit,   // L'a' (wchar_t char literal, wchar_t on Linux = int/UTF-32)
     Ident,         // foo _x
     // 关键字
-    KwInt, KwChar, KwShort, KwLong, KwVoid, KwFloat, KwDouble, KwSigned, KwUnsigned,
-    KwStruct, KwUnion, KwEnum, KwTypedef,
-    KwIf, KwElse, KwWhile, KwFor, KwDo, KwSwitch, KwCase, KwDefault, KwBreak, KwContinue,
-    KwReturn, KwGoto, KwIfDefFake,        // 后者用于 #ifdef 兼容 (M0 不解析)
-    KwStatic, KwExtern, KwConst, KwVolatile, KwInline, KwRestrict, KwAuto, KwRegister,
-    KwAtomic,                    // _Atomic
-    KwBool,                      // _Bool (C99)
-    KwFract, KwAccum,              // _Fract, _Accum (定点数)
-    KwComplex,                     // _Complex
-    KwDecimal32, KwDecimal64, KwDecimal128,  // _Decimal32/64/128
-    KwInt128,                      // __int128 / __int128_t
-    KwUInt128,                     // __uint128_t
-    KwSizeof, KwAlignof,
-    KwDecltype,                  // decltype  (C++11 类型推导, M17.0)
+    KwInt,
+    KwChar,
+    KwShort,
+    KwLong,
+    KwVoid,
+    KwFloat,
+    KwDouble,
+    KwSigned,
+    KwUnsigned,
+    KwStruct,
+    KwUnion,
+    KwEnum,
+    KwTypedef,
+    KwIf,
+    KwElse,
+    KwWhile,
+    KwFor,
+    KwDo,
+    KwSwitch,
+    KwCase,
+    KwDefault,
+    KwBreak,
+    KwContinue,
+    KwReturn,
+    KwGoto,
+    KwIfDefFake, // 后者用于 #ifdef 兼容 (M0 不解析)
+    KwStatic,
+    KwExtern,
+    KwConst,
+    KwVolatile,
+    KwInline,
+    KwRestrict,
+    KwAuto,
+    KwRegister,
+    KwAtomic, // _Atomic
+    KwBool,   // _Bool (C99)
+    KwFract,
+    KwAccum,   // _Fract, _Accum (定点数)
+    KwComplex, // _Complex
+    KwDecimal32,
+    KwDecimal64,
+    KwDecimal128, // _Decimal32/64/128
+    KwInt128,     // __int128 / __int128_t
+    KwUInt128,    // __uint128_t
+    KwSizeof,
+    KwAlignof,
+    KwDecltype, // decltype  (C++11 类型推导, M17.0)
     // 符号
-    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Comma, Semi, Colon, Question,
-    Assign,                  // =
-    Plus, Minus, Star, Slash, Percent,
-    Amp, Pipe, Caret, Tilde,
-    Lt, Gt, Le, Ge, EqEq, Ne,
-    AndAnd, OrOr, Not,
-    Shl, Shr,                 // << >>
-    PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
-    AmpEq, PipeEq, CaretEq, ShlEq, ShrEq,
-    PlusPlus, MinusMinus,
-    Arrow,                    // ->
-    Dot,                      // .
-    DotStar,                  // .*   (C++ 成员指针访问, M17.0)
-    Ellipsis,                 // ...
-    Hash,                     // #
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Semi,
+    Colon,
+    Question,
+    Assign, // =
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    EqEq,
+    Ne,
+    AndAnd,
+    OrOr,
+    Not,
+    Shl,
+    Shr, // << >>
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
+    PlusPlus,
+    MinusMinus,
+    Arrow,    // ->
+    Dot,      // .
+    DotStar,  // .*   (C++ 成员指针访问, M17.0)
+    Ellipsis, // ...
+    Hash,     // #
     // 特殊
     Invalid,
     Eof,
 }
 
 pub struct Lexer<'a> {
-    pub src:    &'a [u8],
-    pub file:   String,
-    pub pos:    usize,
-    pub line:   u32,
-    pub col:    u32,
+    pub src: &'a [u8],
+    pub file: String,
+    pub pos: usize,
+    pub line: u32,
+    pub col: u32,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a [u8], file: &str) -> Self {
-        Self { src, file: file.into(), pos: 0, line: 1, col: 1 }
+        Self {
+            src,
+            file: file.into(),
+            pos: 0,
+            line: 1,
+            col: 1,
+        }
     }
 
-    fn peek(&self) -> Option<u8> { self.src.get(self.pos).copied() }
-    fn peek_at(&self, off: usize) -> Option<u8> { self.src.get(self.pos + off).copied() }
+    fn peek(&self) -> Option<u8> {
+        self.src.get(self.pos).copied()
+    }
+    fn peek_at(&self, off: usize) -> Option<u8> {
+        self.src.get(self.pos + off).copied()
+    }
     fn bump(&mut self) -> Option<u8> {
         let b = self.peek()?;
         self.pos += 1;
-        if b == b'\n' { self.line += 1; self.col = 1; } else { self.col += 1; }
+        if b == b'\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
         Some(b)
     }
 
     fn span_here(&self, len: u32) -> Span {
-        Span { file: self.file.clone(), line: self.line, col: self.col, len }
+        Span {
+            file: self.file.clone(),
+            line: self.line,
+            col: self.col,
+            len,
+        }
     }
 
     fn skip_ws_and_comments(&mut self) {
         loop {
             match self.peek() {
-                Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
-                | Some(b'\x0c') | Some(b'\x0b') => { self.bump(); }
+                Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b'\x0c')
+                | Some(b'\x0b') => {
+                    self.bump();
+                }
                 Some(b'/') if self.peek_at(1) == Some(b'/') => {
-                    while self.peek().is_some() && self.peek() != Some(b'\n') { self.bump(); }
+                    while self.peek().is_some() && self.peek() != Some(b'\n') {
+                        self.bump();
+                    }
                 }
                 Some(b'/') if self.peek_at(1) == Some(b'*') => {
-                    self.bump(); self.bump();
+                    self.bump();
+                    self.bump();
                     while let Some(c) = self.peek() {
                         if c == b'*' && self.peek_at(1) == Some(b'/') {
-                            self.bump(); self.bump(); break;
+                            self.bump();
+                            self.bump();
+                            break;
                         }
                         self.bump();
                     }
@@ -109,40 +201,69 @@ impl<'a> Lexer<'a> {
 
     pub fn next(&mut self) -> Tok {
         self.skip_ws_and_comments();
-        let line = self.line; let col = self.col;
+        let line = self.line;
+        let col = self.col;
         let start = self.pos;
         let Some(b) = self.peek() else {
-            return Tok { kind: TokKind::Eof, span: self.span_here(0), text: "".into() };
+            return Tok {
+                kind: TokKind::Eof,
+                span: self.span_here(0),
+                text: "".into(),
+            };
         };
         // 标识符 / 关键字
         if b.is_ascii_alphabetic() || b == b'_' {
             while let Some(c) = self.peek() {
-                if c.is_ascii_alphanumeric() || c == b'_' { self.bump(); } else { break; }
+                if c.is_ascii_alphanumeric() || c == b'_' {
+                    self.bump();
+                } else {
+                    break;
+                }
             }
-            let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
+            let text = std::str::from_utf8(&self.src[start..self.pos])
+                .unwrap()
+                .to_string();
             let kind = match text.as_str() {
-                "int" => TokKind::KwInt, "char" => TokKind::KwChar,
-                "short" => TokKind::KwShort, "long" => TokKind::KwLong,
-                "void" => TokKind::KwVoid, "float" => TokKind::KwFloat,
-                "double" => TokKind::KwDouble, "signed" | "__signed__" => TokKind::KwSigned,
+                "int" => TokKind::KwInt,
+                "char" => TokKind::KwChar,
+                "short" => TokKind::KwShort,
+                "long" => TokKind::KwLong,
+                "void" => TokKind::KwVoid,
+                "float" => TokKind::KwFloat,
+                "double" => TokKind::KwDouble,
+                "signed" | "__signed__" => TokKind::KwSigned,
                 "unsigned" => TokKind::KwUnsigned,
-                "struct" => TokKind::KwStruct, "union" => TokKind::KwUnion,
-                "enum" => TokKind::KwEnum, "typedef" => TokKind::KwTypedef,
-                "if" => TokKind::KwIf, "else" => TokKind::KwElse,
-                "while" => TokKind::KwWhile, "for" => TokKind::KwFor,
-                "do" => TokKind::KwDo, "switch" => TokKind::KwSwitch,
-                "case" => TokKind::KwCase, "default" => TokKind::KwDefault,
-                "break" => TokKind::KwBreak, "continue" => TokKind::KwContinue,
-                "return" => TokKind::KwReturn, "goto" => TokKind::KwGoto,
-                "static" => TokKind::KwStatic, "extern" => TokKind::KwExtern,
-                "const" | "__const__" => TokKind::KwConst, "volatile" | "__volatile__" => TokKind::KwVolatile,
-                "inline" | "__inline__" | "__inline" => TokKind::KwInline, "restrict" | "__restrict__" | "__restrict" => TokKind::KwRestrict,
-                "auto" => TokKind::KwAuto, "register" => TokKind::KwRegister,
-                "sizeof" => TokKind::KwSizeof, "_Alignof" | "alignof" | "__alignof" | "__alignof__" => TokKind::KwAlignof,
-                "decltype" => TokKind::KwDecltype,                  // M17.0
+                "struct" => TokKind::KwStruct,
+                "union" => TokKind::KwUnion,
+                "enum" => TokKind::KwEnum,
+                "typedef" => TokKind::KwTypedef,
+                "if" => TokKind::KwIf,
+                "else" => TokKind::KwElse,
+                "while" => TokKind::KwWhile,
+                "for" => TokKind::KwFor,
+                "do" => TokKind::KwDo,
+                "switch" => TokKind::KwSwitch,
+                "case" => TokKind::KwCase,
+                "default" => TokKind::KwDefault,
+                "break" => TokKind::KwBreak,
+                "continue" => TokKind::KwContinue,
+                "return" => TokKind::KwReturn,
+                "goto" => TokKind::KwGoto,
+                "static" => TokKind::KwStatic,
+                "extern" => TokKind::KwExtern,
+                "const" | "__const__" => TokKind::KwConst,
+                "volatile" | "__volatile__" => TokKind::KwVolatile,
+                "inline" | "__inline__" | "__inline" => TokKind::KwInline,
+                "restrict" | "__restrict__" | "__restrict" => TokKind::KwRestrict,
+                "auto" => TokKind::KwAuto,
+                "register" => TokKind::KwRegister,
+                "sizeof" => TokKind::KwSizeof,
+                "_Alignof" | "alignof" | "__alignof" | "__alignof__" => TokKind::KwAlignof,
+                "decltype" => TokKind::KwDecltype, // M17.0
                 "_Atomic" => TokKind::KwAtomic,
                 "_Bool" => TokKind::KwBool,
-                "_Fract" => TokKind::KwFract, "_Accum" => TokKind::KwAccum,
+                "_Fract" => TokKind::KwFract,
+                "_Accum" => TokKind::KwAccum,
                 "_Complex" | "__complex__" | "__complex" => TokKind::KwComplex,
                 "_Decimal32" => TokKind::KwDecimal32,
                 "_Decimal64" => TokKind::KwDecimal64,
@@ -156,65 +277,150 @@ impl<'a> Lexer<'a> {
                 self.bump(); // consume opening '"'
                 let mut terminated = false;
                 while let Some(c) = self.peek() {
-                    if c == b'"' { self.bump(); terminated = true; break; }
-                    if c == b'\n' || c == b'\r' { break; }
-                    if c == b'\\' { self.bump(); self.bump(); continue; }
+                    if c == b'"' {
+                        self.bump();
+                        terminated = true;
+                        break;
+                    }
+                    if c == b'\n' || c == b'\r' {
+                        break;
+                    }
+                    if c == b'\\' {
+                        self.bump();
+                        self.bump();
+                        continue;
+                    }
                     self.bump();
                 }
-                let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
-                let kind = if terminated { TokKind::WideStringLit } else { TokKind::Invalid };
-                return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+                let text = std::str::from_utf8(&self.src[start..self.pos])
+                    .unwrap()
+                    .to_string();
+                let kind = if terminated {
+                    TokKind::WideStringLit
+                } else {
+                    TokKind::Invalid
+                };
+                return Tok {
+                    kind,
+                    span: Span {
+                        file: self.file.clone(),
+                        line,
+                        col,
+                        len: (self.pos - start) as u32,
+                    },
+                    text,
+                };
             }
             // L'...' wide char literal
             if text == "L" && self.peek() == Some(b'\'') {
                 self.bump(); // consume opening '\''
                 let mut terminated = false;
                 while let Some(c) = self.peek() {
-                    if c == b'\'' { self.bump(); terminated = true; break; }
-                    if c == b'\n' || c == b'\r' { break; }
-                    if c == b'\\' { self.bump(); self.bump(); continue; }
+                    if c == b'\'' {
+                        self.bump();
+                        terminated = true;
+                        break;
+                    }
+                    if c == b'\n' || c == b'\r' {
+                        break;
+                    }
+                    if c == b'\\' {
+                        self.bump();
+                        self.bump();
+                        continue;
+                    }
                     self.bump();
                 }
-                let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
-                let kind = if terminated { TokKind::WideCharLit } else { TokKind::Invalid };
-                return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+                let text = std::str::from_utf8(&self.src[start..self.pos])
+                    .unwrap()
+                    .to_string();
+                let kind = if terminated {
+                    TokKind::WideCharLit
+                } else {
+                    TokKind::Invalid
+                };
+                return Tok {
+                    kind,
+                    span: Span {
+                        file: self.file.clone(),
+                        line,
+                        col,
+                        len: (self.pos - start) as u32,
+                    },
+                    text,
+                };
             }
-            return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            return Tok {
+                kind,
+                span: Span {
+                    file: self.file.clone(),
+                    line,
+                    col,
+                    len: (self.pos - start) as u32,
+                },
+                text,
+            };
         }
         // 数字
-        if b.is_ascii_digit() || (b == b'.' && self.peek_at(1).is_some_and(|c| c.is_ascii_digit())) {
+        if b.is_ascii_digit() || (b == b'.' && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()))
+        {
             let mut is_float = b == b'.';
             if b == b'0' && matches!(self.peek_at(1), Some(b'x') | Some(b'X')) {
-                self.bump(); self.bump();
+                self.bump();
+                self.bump();
                 while let Some(c) = self.peek() {
                     if c == b'\'' && self.peek_at(1).is_some_and(|n| n.is_ascii_hexdigit()) {
-                        self.bump(); continue;
+                        self.bump();
+                        continue;
                     }
-                    if c.is_ascii_hexdigit() { self.bump(); } else { break; }
+                    if c.is_ascii_hexdigit() {
+                        self.bump();
+                    } else {
+                        break;
+                    }
                 }
             } else if b == b'0' && matches!(self.peek_at(1), Some(b'b') | Some(b'B')) {
-                self.bump(); self.bump();
+                self.bump();
+                self.bump();
                 while let Some(c) = self.peek() {
                     if c == b'\'' && self.peek_at(1).is_some_and(|n| n == b'0' || n == b'1') {
-                        self.bump(); continue;
+                        self.bump();
+                        continue;
                     }
-                    if c == b'0' || c == b'1' { self.bump(); } else { break; }
+                    if c == b'0' || c == b'1' {
+                        self.bump();
+                    } else {
+                        break;
+                    }
                 }
             } else {
                 while let Some(c) = self.peek() {
                     if c == b'\'' && self.peek_at(1).is_some_and(|n| n.is_ascii_digit()) {
-                        self.bump(); continue;
+                        self.bump();
+                        continue;
                     }
-                    if c.is_ascii_digit() { self.bump(); }
-                    else if c == b'.' && !is_float { is_float = true; self.bump(); }
-                    else { break; }
+                    if c.is_ascii_digit() {
+                        self.bump();
+                    } else if c == b'.' && !is_float {
+                        is_float = true;
+                        self.bump();
+                    } else {
+                        break;
+                    }
                 }
                 // 科学计数法
                 if let Some(b'e') | Some(b'E') = self.peek() {
-                    is_float = true; self.bump();
-                    if let Some(b'+') | Some(b'-') = self.peek() { self.bump(); }
+                    is_float = true;
+                    self.bump();
+                    if let Some(b'+') | Some(b'-') = self.peek() {
+                        self.bump();
+                    }
                     while let Some(c) = self.peek() {
-                        if c.is_ascii_digit() { self.bump(); } else { break; }
+                        if c.is_ascii_digit() {
+                            self.bump();
+                        } else {
+                            break;
+                        }
                     }
                 }
             }
@@ -230,84 +436,268 @@ impl<'a> Lexer<'a> {
             }
             // C23 数字分隔符: 移除 ' 字符
             let raw = &self.src[start..self.pos];
-            let text: String = raw.iter().filter(|&&b| b != b'\'').map(|&b| b as char).collect();
+            let text: String = raw
+                .iter()
+                .filter(|&&b| b != b'\'')
+                .map(|&b| b as char)
+                .collect();
             let kind = if is_float { TokKind::FloatLit } else { TokKind::Number };
-            return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            return Tok {
+                kind,
+                span: Span {
+                    file: self.file.clone(),
+                    line,
+                    col,
+                    len: (self.pos - start) as u32,
+                },
+                text,
+            };
         }
         // 字符串
         if b == b'"' {
             self.bump();
             let mut terminated = false;
             while let Some(c) = self.peek() {
-                if c == b'"' { self.bump(); terminated = true; break; }
-                if c == b'\n' || c == b'\r' { break; }
-                if c == b'\\' { self.bump(); self.bump(); continue; }
+                if c == b'"' {
+                    self.bump();
+                    terminated = true;
+                    break;
+                }
+                if c == b'\n' || c == b'\r' {
+                    break;
+                }
+                if c == b'\\' {
+                    self.bump();
+                    self.bump();
+                    continue;
+                }
                 self.bump();
             }
-            let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
-            let kind = if terminated { TokKind::StringLit } else { TokKind::Invalid };
-            return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            let text = std::str::from_utf8(&self.src[start..self.pos])
+                .unwrap()
+                .to_string();
+            let kind = if terminated {
+                TokKind::StringLit
+            } else {
+                TokKind::Invalid
+            };
+            return Tok {
+                kind,
+                span: Span {
+                    file: self.file.clone(),
+                    line,
+                    col,
+                    len: (self.pos - start) as u32,
+                },
+                text,
+            };
         }
         if b == b'\'' {
             self.bump();
             let mut terminated = false;
             while let Some(c) = self.peek() {
-                if c == b'\'' { self.bump(); terminated = true; break; }
-                if c == b'\n' || c == b'\r' { break; }
-                if c == b'\\' { self.bump(); self.bump(); continue; }
+                if c == b'\'' {
+                    self.bump();
+                    terminated = true;
+                    break;
+                }
+                if c == b'\n' || c == b'\r' {
+                    break;
+                }
+                if c == b'\\' {
+                    self.bump();
+                    self.bump();
+                    continue;
+                }
                 self.bump();
             }
-            let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
+            let text = std::str::from_utf8(&self.src[start..self.pos])
+                .unwrap()
+                .to_string();
             let kind = if terminated { TokKind::CharLit } else { TokKind::Invalid };
-            return Tok { kind, span: Span { file: self.file.clone(), line, col, len: (self.pos - start) as u32 }, text };
+            return Tok {
+                kind,
+                span: Span {
+                    file: self.file.clone(),
+                    line,
+                    col,
+                    len: (self.pos - start) as u32,
+                },
+                text,
+            };
         }
         // 符号
         self.bump();
         let (kind, len) = match b {
-            b'(' => (TokKind::LParen, 1), b')' => (TokKind::RParen, 1),
-            b'{' => (TokKind::LBrace, 1), b'}' => (TokKind::RBrace, 1),
-            b'[' => (TokKind::LBracket, 1), b']' => (TokKind::RBracket, 1),
-            b',' => (TokKind::Comma, 1), b';' => (TokKind::Semi, 1),
-            b':' => (TokKind::Colon, 1), b'?' => (TokKind::Question, 1),
+            b'(' => (TokKind::LParen, 1),
+            b')' => (TokKind::RParen, 1),
+            b'{' => (TokKind::LBrace, 1),
+            b'}' => (TokKind::RBrace, 1),
+            b'[' => (TokKind::LBracket, 1),
+            b']' => (TokKind::RBracket, 1),
+            b',' => (TokKind::Comma, 1),
+            b';' => (TokKind::Semi, 1),
+            b':' => (TokKind::Colon, 1),
+            b'?' => (TokKind::Question, 1),
             b'~' => (TokKind::Tilde, 1),
             b'#' => (TokKind::Hash, 1),
-            b'+' => if self.peek() == Some(b'+') { self.bump(); (TokKind::PlusPlus, 2) }
-                    else if self.peek() == Some(b'=') { self.bump(); (TokKind::PlusEq, 2) }
-                    else { (TokKind::Plus, 1) },
-            b'-' => if self.peek() == Some(b'-') { self.bump(); (TokKind::MinusMinus, 2) }
-                    else if self.peek() == Some(b'=') { self.bump(); (TokKind::MinusEq, 2) }
-                    else if self.peek() == Some(b'>') { self.bump(); (TokKind::Arrow, 2) }
-                    else { (TokKind::Minus, 1) },
-            b'*' => if self.peek() == Some(b'=') { self.bump(); (TokKind::StarEq, 2) } else { (TokKind::Star, 1) },
-            b'/' => if self.peek() == Some(b'=') { self.bump(); (TokKind::SlashEq, 2) } else { (TokKind::Slash, 1) },
-            b'%' => if self.peek() == Some(b'=') { self.bump(); (TokKind::PercentEq, 2) } else { (TokKind::Percent, 1) },
-            b'&' => if self.peek() == Some(b'&') { self.bump(); (TokKind::AndAnd, 2) }
-                    else if self.peek() == Some(b'=') { self.bump(); (TokKind::AmpEq, 2) }
-                    else { (TokKind::Amp, 1) },
-            b'|' => if self.peek() == Some(b'|') { self.bump(); (TokKind::OrOr, 2) }
-                    else if self.peek() == Some(b'=') { self.bump(); (TokKind::PipeEq, 2) }
-                    else { (TokKind::Pipe, 1) },
-            b'^' => if self.peek() == Some(b'=') { self.bump(); (TokKind::CaretEq, 2) } else { (TokKind::Caret, 1) },
-            b'!' => if self.peek() == Some(b'=') { self.bump(); (TokKind::Ne, 2) } else { (TokKind::Not, 1) },
-            b'=' => if self.peek() == Some(b'=') { self.bump(); (TokKind::EqEq, 2) } else { (TokKind::Assign, 1) },
-            b'<' => if self.peek() == Some(b'=') { self.bump(); (TokKind::Le, 2) }
-                    else if self.peek() == Some(b'<') {
+            b'+' => {
+                if self.peek() == Some(b'+') {
+                    self.bump();
+                    (TokKind::PlusPlus, 2)
+                } else if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::PlusEq, 2)
+                } else {
+                    (TokKind::Plus, 1)
+                }
+            }
+            b'-' => {
+                if self.peek() == Some(b'-') {
+                    self.bump();
+                    (TokKind::MinusMinus, 2)
+                } else if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::MinusEq, 2)
+                } else if self.peek() == Some(b'>') {
+                    self.bump();
+                    (TokKind::Arrow, 2)
+                } else {
+                    (TokKind::Minus, 1)
+                }
+            }
+            b'*' => {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::StarEq, 2)
+                } else {
+                    (TokKind::Star, 1)
+                }
+            }
+            b'/' => {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::SlashEq, 2)
+                } else {
+                    (TokKind::Slash, 1)
+                }
+            }
+            b'%' => {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::PercentEq, 2)
+                } else {
+                    (TokKind::Percent, 1)
+                }
+            }
+            b'&' => {
+                if self.peek() == Some(b'&') {
+                    self.bump();
+                    (TokKind::AndAnd, 2)
+                } else if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::AmpEq, 2)
+                } else {
+                    (TokKind::Amp, 1)
+                }
+            }
+            b'|' => {
+                if self.peek() == Some(b'|') {
+                    self.bump();
+                    (TokKind::OrOr, 2)
+                } else if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::PipeEq, 2)
+                } else {
+                    (TokKind::Pipe, 1)
+                }
+            }
+            b'^' => {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::CaretEq, 2)
+                } else {
+                    (TokKind::Caret, 1)
+                }
+            }
+            b'!' => {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::Ne, 2)
+                } else {
+                    (TokKind::Not, 1)
+                }
+            }
+            b'=' => {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::EqEq, 2)
+                } else {
+                    (TokKind::Assign, 1)
+                }
+            }
+            b'<' => {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::Le, 2)
+                } else if self.peek() == Some(b'<') {
+                    self.bump();
+                    if self.peek() == Some(b'=') {
                         self.bump();
-                        if self.peek() == Some(b'=') { self.bump(); (TokKind::ShlEq, 3) } else { (TokKind::Shl, 2) }
-                    } else { (TokKind::Lt, 1) },
-            b'>' => if self.peek() == Some(b'=') { self.bump(); (TokKind::Ge, 2) }
-                    else if self.peek() == Some(b'>') {
+                        (TokKind::ShlEq, 3)
+                    } else {
+                        (TokKind::Shl, 2)
+                    }
+                } else {
+                    (TokKind::Lt, 1)
+                }
+            }
+            b'>' => {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    (TokKind::Ge, 2)
+                } else if self.peek() == Some(b'>') {
+                    self.bump();
+                    if self.peek() == Some(b'=') {
                         self.bump();
-                        if self.peek() == Some(b'=') { self.bump(); (TokKind::ShrEq, 3) } else { (TokKind::Shr, 2) }
-                    } else { (TokKind::Gt, 1) },
-            b'.' => if self.peek() == Some(b'.') && self.peek_at(1) == Some(b'.') {
-                self.bump(); self.bump(); (TokKind::Ellipsis, 3)
-            } else { (TokKind::Dot, 1) },
-            _ => { return Tok { kind: TokKind::Invalid, span: self.span_here(1),
-                                text: std::str::from_utf8(&[b]).unwrap().to_string() }; }
+                        (TokKind::ShrEq, 3)
+                    } else {
+                        (TokKind::Shr, 2)
+                    }
+                } else {
+                    (TokKind::Gt, 1)
+                }
+            }
+            b'.' => {
+                if self.peek() == Some(b'.') && self.peek_at(1) == Some(b'.') {
+                    self.bump();
+                    self.bump();
+                    (TokKind::Ellipsis, 3)
+                } else {
+                    (TokKind::Dot, 1)
+                }
+            }
+            _ => {
+                return Tok {
+                    kind: TokKind::Invalid,
+                    span: self.span_here(1),
+                    text: std::str::from_utf8(&[b]).unwrap().to_string(),
+                };
+            }
         };
-        let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
-        Tok { kind, span: Span { file: self.file.clone(), line, col, len }, text }
+        let text = std::str::from_utf8(&self.src[start..self.pos])
+            .unwrap()
+            .to_string();
+        Tok {
+            kind,
+            span: Span {
+                file: self.file.clone(),
+                line,
+                col,
+                len,
+            },
+            text,
+        }
     }
 }
 

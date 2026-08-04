@@ -52,7 +52,11 @@ fn gvn_block(block: &mut Block) {
     coalesce_block(block);
 }
 
-fn gvn_stmt(s: &mut Stmt, avail: &mut HashMap<String, String>, copies: &mut HashMap<String, String>) {
+fn gvn_stmt(
+    s: &mut Stmt,
+    avail: &mut HashMap<String, String>,
+    copies: &mut HashMap<String, String>,
+) {
     match s {
         Stmt::Return { val: Some(e), .. } => propagate_copies_expr(e, copies),
         Stmt::Expr { e, .. } => {
@@ -74,7 +78,9 @@ fn gvn_stmt(s: &mut Stmt, avail: &mut HashMap<String, String>, copies: &mut Hash
                 propagate_copies_expr(e, copies);
             }
         }
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             propagate_copies_expr(cond, copies);
             gvn_stmt(then_, avail, copies);
             if let Some(e) = else_ {
@@ -90,7 +96,13 @@ fn gvn_stmt(s: &mut Stmt, avail: &mut HashMap<String, String>, copies: &mut Hash
             gvn_stmt(body, avail, copies);
             propagate_copies_expr(cond, copies);
         }
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 gvn_stmt(i, avail, copies);
             }
@@ -128,14 +140,17 @@ fn coalesce_block(block: &mut Block) {
     for item in &mut block.items {
         rewrite_aliases(item, &alias);
     }
-    block.items.retain(|item| {
-        !matches!(item, BlockItem::Decl(Decl::Var(v)) if alias.contains_key(&v.name.name))
-    });
+    block.items.retain(
+        |item| !matches!(item, BlockItem::Decl(Decl::Var(v)) if alias.contains_key(&v.name.name)),
+    );
 }
 
 fn collect_assignments(item: &BlockItem, assigned: &mut std::collections::HashSet<String>) {
     match item {
-        BlockItem::Stmt(Stmt::Expr { e: Expr::Assign { l, .. }, .. }) => {
+        BlockItem::Stmt(Stmt::Expr {
+            e: Expr::Assign { l, .. },
+            ..
+        }) => {
             if let Expr::Ident { name, .. } = l.as_ref() {
                 assigned.insert(name.name.clone());
             }
@@ -147,7 +162,10 @@ fn collect_assignments(item: &BlockItem, assigned: &mut std::collections::HashSe
 
 fn collect_assignments_stmt(s: &Stmt, assigned: &mut std::collections::HashSet<String>) {
     match s {
-        Stmt::Expr { e: Expr::Assign { l, .. }, .. } => {
+        Stmt::Expr {
+            e: Expr::Assign { l, .. },
+            ..
+        } => {
             if let Expr::Ident { name, .. } = l.as_ref() {
                 assigned.insert(name.name.clone());
             }
@@ -200,7 +218,9 @@ fn rewrite_stmt_aliases(s: &mut Stmt, alias: &HashMap<String, String>) {
     match s {
         Stmt::Return { val: Some(e), .. } => rewrite_expr_aliases(e, alias),
         Stmt::Expr { e, .. } => rewrite_expr_aliases(e, alias),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             rewrite_expr_aliases(cond, alias);
             rewrite_stmt_aliases(then_, alias);
             if let Some(e) = else_ {
@@ -220,7 +240,13 @@ fn rewrite_stmt_aliases(s: &mut Stmt, alias: &HashMap<String, String>) {
             rewrite_stmt_aliases(body, alias);
             rewrite_expr_aliases(cond, alias);
         }
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 rewrite_stmt_aliases(i, alias);
             }
@@ -261,7 +287,9 @@ fn rewrite_expr_aliases(e: &mut Expr, alias: &HashMap<String, String>) {
             rewrite_expr_aliases(l, alias);
             rewrite_expr_aliases(r, alias);
         }
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             rewrite_expr_aliases(cond, alias);
             rewrite_expr_aliases(then_, alias);
             rewrite_expr_aliases(else_, alias);
@@ -291,7 +319,9 @@ fn propagate_copies_expr(e: &mut Expr, copies: &HashMap<String, String>) {
             propagate_copies_expr(l, copies);
             propagate_copies_expr(r, copies);
         }
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             propagate_copies_expr(cond, copies);
             propagate_copies_expr(then_, copies);
             propagate_copies_expr(else_, copies);
@@ -314,9 +344,7 @@ fn gvn_key_string(e: &Expr) -> Option<String> {
             gvn_key_string(l)?,
             gvn_key_string(r)?
         )),
-        Expr::Unary { op, e: inner, .. } => {
-            Some(format!("u:{op:?}:{}", gvn_key_string(inner)?))
-        }
+        Expr::Unary { op, e: inner, .. } => Some(format!("u:{op:?}:{}", gvn_key_string(inner)?)),
         _ => None,
     }
 }
@@ -362,12 +390,18 @@ mod tests {
     fn gvn_reuses_prior_add() {
         let sp = Span::point("t.c", 1, 1);
         let x = || Expr::Ident {
-            name: Ident { name: "x".into(), span: sp.clone() },
+            name: Ident {
+                name: "x".into(),
+                span: sp.clone(),
+            },
             span: sp.clone(),
             ty: int_ty(),
         };
         let y = || Expr::Ident {
-            name: Ident { name: "y".into(), span: sp.clone() },
+            name: Ident {
+                name: "y".into(),
+                span: sp.clone(),
+            },
             span: sp.clone(),
             ty: int_ty(),
         };
@@ -381,13 +415,19 @@ mod tests {
         let prog = Program {
             decls: vec![Decl::Func(FuncDecl {
                 ret_ty: int_ty(),
-                name: Ident { name: "f".into(), span: sp.clone() },
+                name: Ident {
+                    name: "f".into(),
+                    span: sp.clone(),
+                },
                 params: vec![],
                 body: Some(Block {
                     items: vec![
                         BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                             ty: int_ty(),
-                            name: Ident { name: "a".into(), span: sp.clone() },
+                            name: Ident {
+                                name: "a".into(),
+                                span: sp.clone(),
+                            },
                             init: Some(add()),
                             span: sp.clone(),
                             is_extern: false,
@@ -407,7 +447,10 @@ mod tests {
                         })),
                         BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                             ty: int_ty(),
-                            name: Ident { name: "b".into(), span: sp.clone() },
+                            name: Ident {
+                                name: "b".into(),
+                                span: sp.clone(),
+                            },
                             init: Some(add()),
                             span: sp.clone(),
                             is_extern: false,
@@ -437,7 +480,7 @@ mod tests {
                 is_destructor: false,
                 is_nested: false,
                 is_cold: false,
-            is_hot: false,
+                is_hot: false,
                 section: None,
                 alignment: None,
                 visibility: None,
@@ -453,8 +496,14 @@ mod tests {
                 no_sanitize: vec![],
                 target_clones: vec![],
                 returns_nonnull: false,
-                ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
-                is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
                 ifunc_resolver: None,
             })],
         };

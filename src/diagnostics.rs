@@ -19,46 +19,76 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     pub file: String,
-    pub line: u32,        // 1-based
-    pub col:  u32,        // 1-based
-    pub len:  u32,        // 字节长度,1-based
+    pub line: u32, // 1-based
+    pub col: u32,  // 1-based
+    pub len: u32,  // 字节长度,1-based
 }
 
 impl Span {
     pub fn point(file: &str, line: u32, col: u32) -> Self {
-        Self { file: file.into(), line, col, len: 1 }
+        Self {
+            file: file.into(),
+            line,
+            col,
+            len: 1,
+        }
     }
     pub fn range(file: &str, line: u32, col: u32, len: u32) -> Self {
-        Self { file: file.into(), line, col, len }
+        Self {
+            file: file.into(),
+            line,
+            col,
+            len,
+        }
     }
     pub fn merge(self, other: Span) -> Span {
         debug_assert_eq!(self.file, other.file);
-        Span { file: self.file, line: self.line, col: self.col,
-               len: self.len + other.len }
+        Span {
+            file: self.file,
+            line: self.line,
+            col: self.col,
+            len: self.len + other.len,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum Severity { Error, Warning, Note }
+pub enum Severity {
+    Error,
+    Warning,
+    Note,
+}
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
-    pub sev:    Severity,
-    pub code:   &'static str,        // e.g. "E0001"
-    pub msg:    String,
-    pub span:   Span,
-    pub hint:   Option<String>,
+    pub sev: Severity,
+    pub code: &'static str, // e.g. "E0001"
+    pub msg: String,
+    pub span: Span,
+    pub hint: Option<String>,
     pub source_line: Option<String>, // 该行的源码
 }
 
 impl Diagnostic {
     pub fn err(code: &'static str, msg: impl Into<String>, span: Span) -> Self {
-        Self { sev: Severity::Error, code, msg: msg.into(), span,
-               hint: None, source_line: None }
+        Self {
+            sev: Severity::Error,
+            code,
+            msg: msg.into(),
+            span,
+            hint: None,
+            source_line: None,
+        }
     }
     pub fn warn(code: &'static str, msg: impl Into<String>, span: Span) -> Self {
-        Self { sev: Severity::Warning, code, msg: msg.into(), span,
-               hint: None, source_line: None }
+        Self {
+            sev: Severity::Warning,
+            code,
+            msg: msg.into(),
+            span,
+            hint: None,
+            source_line: None,
+        }
     }
     /// 返回一个带 [code] 的简短严重性标签
     pub fn sev_tag(&self) -> String {
@@ -70,10 +100,12 @@ impl Diagnostic {
         format!("{}[{}]", s, self.code)
     }
     pub fn with_hint(mut self, h: impl Into<String>) -> Self {
-        self.hint = Some(h.into()); self
+        self.hint = Some(h.into());
+        self
     }
     pub fn with_source(mut self, line: String) -> Self {
-        self.source_line = Some(line); self
+        self.source_line = Some(line);
+        self
     }
 }
 
@@ -187,7 +219,11 @@ impl fmt::Display for Diagnostic {
 
         if self.span.line > 0 {
             // 第二行:   --> file:line:col
-            writeln!(f, "  --> {}:{}:{}", self.span.file, self.span.line, self.span.col)?;
+            writeln!(
+                f,
+                "  --> {}:{}:{}",
+                self.span.file, self.span.line, self.span.col
+            )?;
 
             if let Some(src) = &self.source_line {
                 let line_no = self.span.line;
@@ -200,7 +236,14 @@ impl fmt::Display for Diagnostic {
                 // 指针行: "     |   ^^^" (| 后有空格对齐)
                 let col_offset = (self.span.col as usize).saturating_sub(1);
                 let caret = "^".repeat(self.span.len.max(1) as usize);
-                writeln!(f, "{:>width$} | {}{}", "", " ".repeat(col_offset), caret, width = gutter_w)?;
+                writeln!(
+                    f,
+                    "{:>width$} | {}{}",
+                    "",
+                    " ".repeat(col_offset),
+                    caret,
+                    width = gutter_w
+                )?;
             }
         }
 
@@ -252,7 +295,10 @@ fn vi_first_line(d: &Diagnostic) -> String {
     if d.span.line > 0 {
         format!(
             "{}:{}:{}: {}",
-            d.span.file, d.span.line, d.span.col, gh_first_line(d)
+            d.span.file,
+            d.span.line,
+            d.span.col,
+            gh_first_line(d)
         )
     } else {
         format!("{}: {}", d.span.file, gh_first_line(d))
@@ -279,16 +325,13 @@ fn source_caret_block(d: &Diagnostic) -> String {
     let line_no = d.span.line;
     let line_digits = format!("{}", line_no).len();
     let gutter_w = 4usize.max(line_digits + 1);
-    out.push_str(&format!(
-        "{:>width$} |{}\n",
-        line_no,
-        src,
-        width = gutter_w
-    ));
+    out.push_str(&format!("{:>width$} |{}\n", line_no, src, width = gutter_w));
     // 列号钳制: 防止宏展开产生的列号超出源码行长度
     let src_len = src.len();
     let col_offset = (d.span.col as usize).saturating_sub(1).min(src_len);
-    let caret_len = (d.span.len.max(1) as usize).min(src_len.saturating_sub(col_offset)).max(1);
+    let caret_len = (d.span.len.max(1) as usize)
+        .min(src_len.saturating_sub(col_offset))
+        .max(1);
     let caret = "^".repeat(caret_len);
     out.push_str(&format!(
         "{:>width$} | {}\n",
@@ -447,7 +490,12 @@ fn sarif_result(d: &Diagnostic) -> String {
             file = file,
             line = d.span.line,
             col = d.span.col.max(1),
-            end_col = d.span.col.saturating_sub(1).saturating_add(d.span.len.max(1)).max(1),
+            end_col = d
+                .span
+                .col
+                .saturating_sub(1)
+                .saturating_add(d.span.len.max(1))
+                .max(1),
             hint = hint_part,
         )
     } else {
@@ -662,7 +710,14 @@ fn dedup_diags(diags: &[Diagnostic]) -> Vec<Diagnostic> {
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(diags.len());
     for d in diags {
-        let key = (d.code, d.span.file.as_str(), d.span.line, d.span.col, d.span.len, d.msg.as_str());
+        let key = (
+            d.code,
+            d.span.file.as_str(),
+            d.span.line,
+            d.span.col,
+            d.span.len,
+            d.msg.as_str(),
+        );
         if seen.insert(key) {
             out.push(d.clone());
         }
@@ -682,7 +737,10 @@ pub fn print_all(diags: &[Diagnostic], cfg: &DiagnosticsConfig) {
     }
     for (i, d) in filtered.iter().enumerate() {
         if i >= MAX_DIAGS {
-            eprintln!("error: too many diagnostics, suppressing {} more", filtered.len() - i);
+            eprintln!(
+                "error: too many diagnostics, suppressing {} more",
+                filtered.len() - i
+            );
             break;
         }
         d.print_with(cfg);
@@ -693,7 +751,12 @@ pub fn print_all(diags: &[Diagnostic], cfg: &DiagnosticsConfig) {
 ///
 /// 当 span.file 与主文件不同时, 尝试从磁盘读取对应源文件
 /// 提取该行的源码文本。`base_dir` 用于解析相对路径。
-pub fn enrich_diags(diags: &mut [Diagnostic], src: &[u8], file_name: &str, base_dir: Option<&std::path::Path>) {
+pub fn enrich_diags(
+    diags: &mut [Diagnostic],
+    src: &[u8],
+    file_name: &str,
+    base_dir: Option<&std::path::Path>,
+) {
     let main_text = std::str::from_utf8(src).unwrap_or("");
     let main_lines: Vec<&str> = main_text.lines().collect();
     for d in diags.iter_mut() {
@@ -713,7 +776,8 @@ pub fn enrich_diags(diags: &mut [Diagnostic], src: &[u8], file_name: &str, base_
             ];
             for p in tried_paths.into_iter().flatten() {
                 if let Ok(content) = std::fs::read_to_string(&p) {
-                    if let Some(line) = content.lines()
+                    if let Some(line) = content
+                        .lines()
                         .nth((d.span.line as usize).saturating_sub(1))
                     {
                         d.source_line = Some(line.to_string());
@@ -730,18 +794,17 @@ mod tests {
     use super::*;
 
     fn sample() -> Diagnostic {
-        Diagnostic::err(
-            "E0001",
-            "expected ';'",
-            Span::point("main.c", 3, 12),
-        )
-        .with_hint("add ';' here")
-        .with_source("    return x {".to_string())
+        Diagnostic::err("E0001", "expected ';'", Span::point("main.c", 3, 12))
+            .with_hint("add ';' here")
+            .with_source("    return x {".to_string())
     }
 
     #[test]
     fn color_policy_from_arg_ok() {
-        assert_eq!(ColorPolicy::from_arg("always").unwrap(), ColorPolicy::Always);
+        assert_eq!(
+            ColorPolicy::from_arg("always").unwrap(),
+            ColorPolicy::Always
+        );
         assert_eq!(ColorPolicy::from_arg("never").unwrap(), ColorPolicy::Never);
         assert_eq!(ColorPolicy::from_arg("auto").unwrap(), ColorPolicy::Auto);
         assert!(ColorPolicy::from_arg("maybe").is_err());
@@ -749,7 +812,10 @@ mod tests {
 
     #[test]
     fn format_style_from_arg_ok() {
-        assert_eq!(FormatStyle::from_arg("github").unwrap(), FormatStyle::Github);
+        assert_eq!(
+            FormatStyle::from_arg("github").unwrap(),
+            FormatStyle::Github
+        );
         assert_eq!(FormatStyle::from_arg("clang").unwrap(), FormatStyle::Clang);
         assert_eq!(FormatStyle::from_arg("msvc").unwrap(), FormatStyle::Msvc);
         assert_eq!(FormatStyle::from_arg("vi").unwrap(), FormatStyle::Vi);

@@ -57,9 +57,7 @@ impl MappedInput {
         match &self.storage {
             Storage::Owned(v) => v,
             #[cfg(unix)]
-            Storage::Mapped(m) => unsafe {
-                std::slice::from_raw_parts(m.ptr, m.len)
-            },
+            Storage::Mapped(m) => unsafe { std::slice::from_raw_parts(m.ptr, m.len) },
         }
     }
 }
@@ -83,7 +81,10 @@ fn try_mmap_file(path: &Path) -> io::Result<MappedInput> {
     }
     std::mem::forget(file);
     Ok(MappedInput {
-        storage: Storage::Mapped(MmapRegion { ptr: ptr as *const u8, len }),
+        storage: Storage::Mapped(MmapRegion {
+            ptr: ptr as *const u8,
+            len,
+        }),
     })
 }
 
@@ -160,14 +161,7 @@ unsafe fn platform_munmap(ptr: *mut u8, len: usize) {
 #[cfg(all(unix, not(target_os = "linux")))]
 unsafe fn platform_mmap(len: usize, fd: i32) -> *mut u8 {
     extern "C" {
-        fn mmap(
-            addr: *mut u8,
-            len: usize,
-            prot: i32,
-            flags: i32,
-            fd: i32,
-            off: i64,
-        ) -> *mut u8;
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     }
     mmap(std::ptr::null_mut(), len, 1, 2, fd, 0)
 }
@@ -180,22 +174,23 @@ unsafe fn platform_munmap(ptr: *mut u8, len: usize) {
     let _ = munmap(ptr, len);
 }
 
-#[cfg(all(unix, target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[cfg(all(
+    unix,
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
 unsafe fn platform_mmap(len: usize, fd: i32) -> *mut u8 {
     extern "C" {
-        fn mmap(
-            addr: *mut u8,
-            len: usize,
-            prot: i32,
-            flags: i32,
-            fd: i32,
-            off: i64,
-        ) -> *mut u8;
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     }
     mmap(std::ptr::null_mut(), len, 1, 2, fd, 0)
 }
 
-#[cfg(all(unix, target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[cfg(all(
+    unix,
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
 unsafe fn platform_munmap(ptr: *mut u8, len: usize) {
     extern "C" {
         fn munmap(addr: *mut u8, len: usize) -> i32;

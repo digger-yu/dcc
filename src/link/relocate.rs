@@ -49,22 +49,18 @@
 
 use super::layout::{Layout, OutputRela, OutputSection};
 use crate::codegen::elf::{
-    R_X86_64_64, R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT,
-    R_X86_64_RELATIVE, R_X86_64_GOTPCREL, R_X86_64_32, R_X86_64_32S,
-    R_X86_64_TPOFF64, R_X86_64_GOT64, R_X86_64_TPOFF32, R_X86_64_GOTOFF64, R_X86_64_IRELATIVE,
-    R_AARCH64_CALL26, R_AARCH64_JUMP26,
-    R_AARCH64_ADR_PREL_LO21, R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC,
-    R_AARCH64_LDST64_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC,
-    R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST8_ABS_LO12_NC,
-    R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G1,
-    R_AARCH64_MOVW_UABS_G2, R_AARCH64_MOVW_UABS_G3,
-    R_AARCH64_ABS64, R_AARCH64_PREL64,
-    R_RISCV_CALL, R_RISCV_CALL_PLT, R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I,
-    R_RISCV_PCREL_LO12_S, R_RISCV_HI20, R_RISCV_LO12_I, R_RISCV_LO12_S,
-    R_RISCV_64, R_RISCV_32, R_RISCV_32_PCREL,
-    R_RISCV_TPOFF64, R_RISCV_TPREL_HI20, R_RISCV_TPREL_LO12_I, R_RISCV_TPREL_LO12_S,
-    R_MIPS_26, R_MIPS_HI16, R_MIPS_LO16, R_MIPS_32, R_MIPS_64,
-    R_ARM_ABS32, R_ARM_CALL, R_ARM_JUMP24, R_ARM_MOVW_ABS_NC, R_ARM_MOVT_ABS,
+    R_AARCH64_ABS64, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_ADR_PREL_LO21,
+    R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_CALL26, R_AARCH64_JUMP26, R_AARCH64_LDST16_ABS_LO12_NC,
+    R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC, R_AARCH64_LDST8_ABS_LO12_NC,
+    R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G2, R_AARCH64_MOVW_UABS_G3,
+    R_AARCH64_PREL64, R_ARM_ABS32, R_ARM_CALL, R_ARM_JUMP24, R_ARM_MOVT_ABS, R_ARM_MOVW_ABS_NC,
+    R_MIPS_26, R_MIPS_32, R_MIPS_64, R_MIPS_HI16, R_MIPS_LO16, R_RISCV_32, R_RISCV_32_PCREL,
+    R_RISCV_64, R_RISCV_CALL, R_RISCV_CALL_PLT, R_RISCV_HI20, R_RISCV_LO12_I, R_RISCV_LO12_S,
+    R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I, R_RISCV_PCREL_LO12_S, R_RISCV_TPOFF64,
+    R_RISCV_TPREL_HI20, R_RISCV_TPREL_LO12_I, R_RISCV_TPREL_LO12_S, R_X86_64_32, R_X86_64_32S,
+    R_X86_64_64, R_X86_64_GLOB_DAT, R_X86_64_GOT64, R_X86_64_GOTOFF64, R_X86_64_GOTPCREL,
+    R_X86_64_IRELATIVE, R_X86_64_JUMP_SLOT, R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_RELATIVE,
+    R_X86_64_TPOFF32, R_X86_64_TPOFF64,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +131,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
             // sym.section 是 0-based 输出节索引, 0 对应 .text (有效), 不是 UNDEF.
             // 只有第一个空符号 (name="" + value=0 + size=0) 才是真正的 UNDEF.
             let s_sym_vaddr = if sym.name.is_empty() && sym.value == 0 && sym.size == 0 {
-                0  // null entry
+                0 // null entry
             } else {
                 let sec_idx = sym.section as usize;
                 if sec_idx < layout.sections.len() {
@@ -147,7 +143,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
             };
             let sec = &mut layout.sections[s_idx];
             // 64-bit 重定位 (R_X86_64_64 / GOT64 / GOTOFF64 / TPOFF64) 需要 8 字节
-            let needs_8 = matches!(r_type,
+            let needs_8 = matches!(
+                r_type,
                 R_X86_64_64 | R_X86_64_GOT64 | R_X86_64_GOTOFF64 | R_X86_64_TPOFF64
             );
             if needs_8 && r_offset + 8 > sec_data_len {
@@ -162,13 +159,16 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
             #[allow(clippy::match_overlapping_arm)]
             match r_type {
                 R_X86_64_64 => {
-                    if r_offset + 8 > sec_data_len { return Err(RelocError::OutOfRange); }
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
                 R_X86_64_PC32 | R_X86_64_PLT32 | R_X86_64_GOTPCREL => {
                     let p = s_vaddr + r_offset as u64;
-                    let value = ((s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p)) as u32;
+                    let value =
+                        ((s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p)) as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
                 R_X86_64_32 => {
@@ -181,7 +181,9 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                 }
                 R_X86_64_GOT64 => {
                     // 64-bit GOT entry address (S + A)
-                    if r_offset + 8 > sec_data_len { return Err(RelocError::OutOfRange); }
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
@@ -189,14 +191,18 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 64-bit GOT-relative: S + A - GOT base
                     // 这里假设 GOT base = s_sym_vaddr 已经被设置 (在 plt_got 中分配)
                     // 简化实现：与 GOT64 相同 — 由调用方负责 GOT base
-                    if r_offset + 8 > sec_data_len { return Err(RelocError::OutOfRange); }
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
                 R_X86_64_TPOFF64 => {
                     // TLS thread-pointer 偏移: S + A - FS base
                     // 静态链接: 我们用 S + A 作为 thread-local 偏移
-                    if r_offset + 8 > sec_data_len { return Err(RelocError::OutOfRange); }
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
@@ -205,11 +211,14 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as i64 as i32 as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_RELATIVE | R_X86_64_IRELATIVE => {}
+                R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_RELATIVE | R_X86_64_IRELATIVE => {
+                }
                 // 2. AArch64 重定位
                 R_AARCH64_ABS64 => {
                     // 64-bit 绝对
-                    if r_offset + 8 > sec_data_len { return Err(RelocError::OutOfRange); }
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
@@ -224,7 +233,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let p = s_vaddr + r_offset as u64;
                     let offset = s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p);
                     let imm26 = (offset >> 2) & 0x3ffffff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0x3ffffff) | (imm26 as u32);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -235,7 +245,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 21-bit = immlo[1:0] + immhi[18:0]
                     let immlo = (offset & 0x3) as u32;
                     let immhi = ((offset >> 2) & 0x7ffff) as u32;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0x60ffffe0) | (immhi << 5) | (immlo << 29);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -246,7 +257,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let offset = ((s & !0xfff).wrapping_sub(p & !0xfff)) as i64 >> 12;
                     let immlo = (offset & 0x3) as u32;
                     let immhi = ((offset >> 2) & 0x7ffff) as u32;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0x60ffffe0) | (immhi << 5) | (immlo << 29);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -254,12 +266,15 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // ADD 12-bit unsigned
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm12 = (s & 0xfff) as u32;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfff) | imm12;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_AARCH64_LDST64_ABS_LO12_NC | R_AARCH64_LDST32_ABS_LO12_NC
-                | R_AARCH64_LDST16_ABS_LO12_NC | R_AARCH64_LDST8_ABS_LO12_NC => {
+                R_AARCH64_LDST64_ABS_LO12_NC
+                | R_AARCH64_LDST32_ABS_LO12_NC
+                | R_AARCH64_LDST16_ABS_LO12_NC
+                | R_AARCH64_LDST8_ABS_LO12_NC => {
                     // load/store 12-bit unsigned, scale by element size
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let scale: u64 = match r_type {
@@ -270,7 +285,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                         _ => 1,
                     };
                     let imm12 = ((s / scale) & 0xfff) as u32;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfff) | imm12;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -278,7 +294,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 16-bit chunk 0: bits[15:0]
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm16 = (s & 0xffff) as u32;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xffff) | imm16;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -286,7 +303,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 16-bit chunk 1: bits[31:16]
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm16 = ((s >> 16) & 0xffff) as u32;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xffff) | imm16;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -294,7 +312,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 16-bit chunk 2: bits[47:32]
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm16 = ((s >> 32) & 0xffff) as u32;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xffff) | imm16;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -302,13 +321,16 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 16-bit chunk 3: bits[63:48]
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm16 = ((s >> 48) & 0xffff) as u32;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xffff) | imm16;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 // 3. RISC-V 重定位
                 R_RISCV_64 => {
-                    if r_offset + 8 > sec_data_len { return Err(RelocError::OutOfRange); }
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
@@ -329,11 +351,14 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let imm_hi = ((offset + 0x800) >> 12) & 0xfffff;
                     let imm_lo = offset & 0xfff;
                     // auipc (first 4 bytes)
-                    let inst0 = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst0 =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst0 = (inst0 & !0xfffff000) | ((imm_hi as u32) << 12);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst0.to_le_bytes());
                     // jalr (second 4 bytes)
-                    let inst1 = u32::from_le_bytes(sec.data[r_offset + 4..r_offset + 8].try_into().unwrap());
+                    let inst1 = u32::from_le_bytes(
+                        sec.data[r_offset + 4..r_offset + 8].try_into().unwrap(),
+                    );
                     let new_inst1 = (inst1 & !0xfff00000) | ((imm_lo as u32) << 20);
                     sec.data[r_offset + 4..r_offset + 8].copy_from_slice(&new_inst1.to_le_bytes());
                 }
@@ -342,7 +367,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let p = s_vaddr + r_offset as u64;
                     let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
                     let imm_hi = ((offset + 0x800) >> 12) & 0xfffff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfffff000) | ((imm_hi as u32) << 12);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -351,7 +377,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let p = s_vaddr + r_offset as u64;
                     let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
                     let imm_lo = offset & 0xfff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfff00000) | ((imm_lo as u32) << 20);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -360,15 +387,19 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let p = s_vaddr + r_offset as u64;
                     let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
                     let imm_lo = offset & 0xfff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
-                    let new_inst = (inst & !0xfe000f80) | (((imm_lo as u32) >> 5) << 25) | (((imm_lo as u32) & 0x1f) << 7);
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfe000f80)
+                        | (((imm_lo as u32) >> 5) << 25)
+                        | (((imm_lo as u32) & 0x1f) << 7);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 R_RISCV_HI20 => {
                     // 绝对高 20 位
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_hi = ((s + 0x800) >> 12) & 0xfffff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfffff000) | ((imm_hi as u32) << 12);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -376,7 +407,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 绝对低 12 位 I-type
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = s & 0xfff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfff00000) | ((imm_lo as u32) << 20);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -384,13 +416,18 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 绝对低 12 位 S-type
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = s & 0xfff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
-                    let new_inst = (inst & !0xfe000f80) | (((imm_lo as u32) >> 5) << 25) | (((imm_lo as u32) & 0x1f) << 7);
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfe000f80)
+                        | (((imm_lo as u32) >> 5) << 25)
+                        | (((imm_lo as u32) & 0x1f) << 7);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 R_RISCV_TPOFF64 => {
                     // TLS: 64-bit thread pointer offset
-                    if r_offset + 8 > sec_data_len { return Err(RelocError::OutOfRange); }
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
@@ -398,7 +435,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // TLS: 高 20 位
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_hi = ((s + 0x800) >> 12) & 0xfffff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfffff000) | ((imm_hi as u32) << 12);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -406,7 +444,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // TLS: 低 12 位 I-type
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = s & 0xfff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xfff00000) | ((imm_lo as u32) << 20);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -414,15 +453,19 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // TLS: 低 12 位 S-type
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = s & 0xfff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
-                    let new_inst = (inst & !0xfe000f80) | (((imm_lo as u32) >> 5) << 25) | (((imm_lo as u32) & 0x1f) << 7);
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfe000f80)
+                        | (((imm_lo as u32) >> 5) << 25)
+                        | (((imm_lo as u32) & 0x1f) << 7);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 // 4. MIPS 重定位
                 R_MIPS_26 => {
                     // J-type: target = (S + A) >> 2, 26-bit
                     let target = (s_sym_vaddr.wrapping_add(r_addend as u64)) >> 2;
-                    let inst = u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & 0xFC000000) | ((target as u32) & 0x03FFFFFF);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
                 }
@@ -430,7 +473,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 高 16 位: (S + A) >> 16
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_hi = ((s >> 16) & 0xffff) as u32;
-                    let inst = u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & 0xFFFF0000) | imm_hi;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
                 }
@@ -438,7 +482,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 低 16 位: (S + A) & 0xffff
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = (s & 0xffff) as u32;
-                    let inst = u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_be_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & 0xFFFF0000) | imm_lo;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
                 }
@@ -463,7 +508,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let p = s_vaddr + r_offset as u64;
                     let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p);
                     let imm24 = (offset >> 2) & 0xffffff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & 0xFF000000) | (imm24 as u32);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -473,7 +519,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let imm16 = (s & 0xffff) as u32;
                     let imm4 = (imm16 >> 12) & 0xf;
                     let imm12 = imm16 & 0xfff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & 0xFFF0F000) | (imm4 << 16) | imm12;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -483,7 +530,8 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let imm16 = ((s >> 16) & 0xffff) as u32;
                     let imm4 = (imm16 >> 12) & 0xf;
                     let imm12 = imm16 & 0xfff;
-                    let inst = u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & 0xFFF0F000) | (imm4 << 16) | imm12;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
@@ -504,7 +552,8 @@ pub struct DynamicRelocs {
 }
 
 fn needs_dyn_rela(rel_type: u32) -> bool {
-    matches!(rel_type,
+    matches!(
+        rel_type,
         R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_RELATIVE | R_X86_64_IRELATIVE
     )
 }
@@ -561,13 +610,17 @@ fn apply_one(sec: &mut OutputSection, r: OutputRela, layout: &Layout) -> Result<
 }
 
 fn write_u64(sec: &mut OutputSection, off: usize, value: u64) -> Result<(), RelocError> {
-    if off + 8 > sec.data.len() { return Err(RelocError::OutOfRange); }
+    if off + 8 > sec.data.len() {
+        return Err(RelocError::OutOfRange);
+    }
     sec.data[off..off + 8].copy_from_slice(&value.to_le_bytes());
     Ok(())
 }
 
 fn write_u32(sec: &mut OutputSection, off: usize, value: u32) -> Result<(), RelocError> {
-    if off + 4 > sec.data.len() { return Err(RelocError::OutOfRange); }
+    if off + 4 > sec.data.len() {
+        return Err(RelocError::OutOfRange);
+    }
     sec.data[off..off + 4].copy_from_slice(&value.to_le_bytes());
     Ok(())
 }
@@ -575,13 +628,21 @@ fn write_u32(sec: &mut OutputSection, off: usize, value: u32) -> Result<(), Relo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::link::layout::{OutputSectionKind, OutputSection, OutputSymbol};
     use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS, STB_GLOBAL, STT_FUNC};
+    use crate::link::layout::{OutputSection, OutputSectionKind, OutputSymbol};
 
     #[allow(clippy::too_many_arguments)]
-    fn mk_layout(text_vaddr: u64, text: Vec<u8>, text_off: u64,
-                 data_vaddr: u64, data: Vec<u8>, data_off: u64,
-                 relas: Vec<OutputRela>, sym_value: u64, sym_section: u16) -> Layout {
+    fn mk_layout(
+        text_vaddr: u64,
+        text: Vec<u8>,
+        text_off: u64,
+        data_vaddr: u64,
+        data: Vec<u8>,
+        data_off: u64,
+        relas: Vec<OutputRela>,
+        sym_value: u64,
+        sym_section: u16,
+    ) -> Layout {
         let mut layout = Layout {
             is_pie: false,
             is_shared: false,
@@ -645,11 +706,28 @@ mod tests {
             segments: vec![],
             symbols: vec![
                 OutputSymbol {
-                    name: "".into(), value: 0, vaddr: 0, size: 0, bind: 0, ty: 0, kind: 0, visibility: 0, section: 0, shndx_if_section: 0,
+                    name: "".into(),
+                    value: 0,
+                    vaddr: 0,
+                    size: 0,
+                    bind: 0,
+                    ty: 0,
+                    kind: 0,
+                    visibility: 0,
+                    section: 0,
+                    shndx_if_section: 0,
                 },
                 OutputSymbol {
-                    name: "callee".into(), value: sym_value, vaddr: sym_value, size: 0, bind: STB_GLOBAL, ty: STT_FUNC,
-                    kind: STT_FUNC, visibility: 0, section: sym_section, shndx_if_section: 0,
+                    name: "callee".into(),
+                    value: sym_value,
+                    vaddr: sym_value,
+                    size: 0,
+                    bind: STB_GLOBAL,
+                    ty: STT_FUNC,
+                    kind: STT_FUNC,
+                    visibility: 0,
+                    section: sym_section,
+                    shndx_if_section: 0,
                 },
             ],
             entry: text_vaddr,
@@ -666,11 +744,24 @@ mod tests {
     #[test]
     fn pc32_within_text() {
         // text @ 0x401000, call at +1, A = -4, target sym @ 0x401006
-        let relas = vec![OutputRela { section: 1, offset: 1, sym: 1, rel_type: R_X86_64_PC32, addend: -4, _name: String::new() }];
+        let relas = vec![OutputRela {
+            section: 1,
+            offset: 1,
+            sym: 1,
+            rel_type: R_X86_64_PC32,
+            addend: -4,
+            _name: String::new(),
+        }];
         let layout = mk_layout(
-            0x401000, vec![0xe8, 0, 0, 0, 0, 0xc3], 0x400120,
-            0x402000, vec![0; 8], 0x401008,
-            relas, 6, 1,
+            0x401000,
+            vec![0xe8, 0, 0, 0, 0, 0xc3],
+            0x400120,
+            0x402000,
+            vec![0; 8],
+            0x401008,
+            relas,
+            6,
+            1,
         );
         // S + A - P = (0x401000 + 6) + (-4) - (0x401000 + 1) = 1
         let got = u32::from_le_bytes(layout.sections[1].data[1..5].try_into().unwrap());
@@ -679,11 +770,24 @@ mod tests {
 
     #[test]
     fn plt32_within_text() {
-        let relas = vec![OutputRela { section: 1, offset: 1, sym: 1, rel_type: R_X86_64_PLT32, addend: -4, _name: String::new() }];
+        let relas = vec![OutputRela {
+            section: 1,
+            offset: 1,
+            sym: 1,
+            rel_type: R_X86_64_PLT32,
+            addend: -4,
+            _name: String::new(),
+        }];
         let layout = mk_layout(
-            0x401000, vec![0xe8, 0, 0, 0, 0, 0xc3], 0x400120,
-            0x402000, vec![0; 8], 0x401008,
-            relas, 6, 1,
+            0x401000,
+            vec![0xe8, 0, 0, 0, 0, 0xc3],
+            0x400120,
+            0x402000,
+            vec![0; 8],
+            0x401008,
+            relas,
+            6,
+            1,
         );
         let got = u32::from_le_bytes(layout.sections[1].data[1..5].try_into().unwrap());
         assert_eq!(got, 1);
@@ -693,11 +797,24 @@ mod tests {
     fn abs64_in_data() {
         // symbol "callee" in .data at offset 0x234
         // => final vaddr = 0x402000 + 0x234 = 0x402234
-        let relas = vec![OutputRela { section: 2, offset: 0, sym: 1, rel_type: R_X86_64_64, addend: 0, _name: String::new() }];
+        let relas = vec![OutputRela {
+            section: 2,
+            offset: 0,
+            sym: 1,
+            rel_type: R_X86_64_64,
+            addend: 0,
+            _name: String::new(),
+        }];
         let layout = mk_layout(
-            0x401000, vec![0; 6], 0x400120,
-            0x402000, vec![0; 8], 0x401008,
-            relas, 0x234, 2,
+            0x401000,
+            vec![0; 6],
+            0x400120,
+            0x402000,
+            vec![0; 8],
+            0x401008,
+            relas,
+            0x234,
+            2,
         );
         let got = u64::from_le_bytes(layout.sections[2].data[0..8].try_into().unwrap());
         assert_eq!(got, 0x402234);

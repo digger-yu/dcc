@@ -22,11 +22,11 @@
 #[allow(non_upper_case_globals)]
 pub mod enc {
     pub const DW_EH_PE_absptr: u8 = 0x00;
-    pub const DW_EH_PE_pcrel:  u8 = 0x10;
-    pub const DW_EH_PE_sdata4: u8 = 0x0b;  // signed 4-byte
-    pub const DW_EH_PE_udata4: u8 = 0x03;  // unsigned 4-byte
-    pub const DW_EH_PE_sdata8: u8 = 0x0c;  // signed 8-byte
-    pub const DW_EH_PE_udata8: u8 = 0x04;  // unsigned 8-byte
+    pub const DW_EH_PE_pcrel: u8 = 0x10;
+    pub const DW_EH_PE_sdata4: u8 = 0x0b; // signed 4-byte
+    pub const DW_EH_PE_udata4: u8 = 0x03; // unsigned 4-byte
+    pub const DW_EH_PE_sdata8: u8 = 0x0c; // signed 8-byte
+    pub const DW_EH_PE_udata8: u8 = 0x04; // unsigned 8-byte
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +121,7 @@ mod tests {
         let bytes = serialize(&hdr);
         // header (4) + eh_frame_ptr (4) + fde_count (4) + table (16) = 28
         assert_eq!(bytes.len(), 4 + 4 + 4 + 2 * 8);
-        assert_eq!(bytes[0], 1);  // version
+        assert_eq!(bytes[0], 1); // version
     }
 
     #[test]
