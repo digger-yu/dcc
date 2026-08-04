@@ -122,12 +122,15 @@ struct StorageClass {
     is_thread_local: bool,
 }
 
+/// 枚举定义表项: (常量名, 值) 列表 + C23 可选底层类型
+type EnumDef = (Arc<Vec<(String, i64)>>, Option<Box<Type>>);
+
 pub struct Parser<'a> {
     lex: Lexer<'a>, cur: Tok, peek: Tok,
     diags: Vec<Diagnostic>, finished: bool,
     typedefs: HashMap<String, Type>,
     struct_defs: HashMap<String, (Arc<Vec<Field>>, bool)>,
-    enum_defs: HashMap<String, (Arc<Vec<(String, i64)>>, Option<Box<Type>>)>,
+    enum_defs: HashMap<String, EnumDef>,
     enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
     locals: HashMap<String, Type>, // 变量名 → 类型 (函数内会清除)
     globals: HashMap<String, Type>, // 全局变量名 → 类型 (永不清除)
@@ -298,8 +301,8 @@ impl<'a> Parser<'a> {
     ///   - 同类型: 允许
     ///   - 函数体内: 允许 (嵌套块遮蔽 / 遮蔽全局)
     ///   - 文件作用域且不同类型: 报 E0007
-    /// 例外: `extern struct gstr x;` (不完整) + `struct gstr x;` (完整
-    /// 定义) 是合法 C (从声明变为定义). 跳过该情形.
+    ///     例外: `extern struct gstr x;` (不完整) + `struct gstr x;` (完整
+    ///     定义) 是合法 C (从声明变为定义). 跳过该情形.
     fn check_var_redecl(&mut self, name: &str, ty: &Type, span: Span) -> bool {
         if let Some(existing) = self.locals.get(name).or_else(|| self.globals.get(name)) {
             if existing == ty {
@@ -459,9 +462,9 @@ impl<'a> Parser<'a> {
         if !is_uns(lower) { return higher.clone(); }
         if rank(higher) > rank(lower) { return higher.clone(); }
         match higher {
-            Long => return ULong,
-            LongLong => return ULongLong,
-            _ => return higher.clone(),
+            Long => ULong,
+            LongLong => ULongLong,
+            _ => higher.clone(),
         }
     }
 
@@ -1526,7 +1529,7 @@ impl<'a> Parser<'a> {
                 // 函数声明后不再解析额外属性 (避免吞掉下一个声明的属性)
                 // #pragma weak name 在 codegen 体现为 STB_WEAK 绑定
                 let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
-                return Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
+                Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                     visibility: attrs.visibility, is_unused: attrs.is_unused,
                     is_cold: attrs.is_cold, is_hot: attrs.is_hot, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
@@ -1542,7 +1545,7 @@ impl<'a> Parser<'a> {
                     is_flatten: attrs.is_flatten,
                     error_msg: attrs.error_msg.clone(), warning_msg: attrs.warning_msg.clone(),
                     deprecated_msg: attrs.deprecated_msg.clone(),
-                    ifunc_resolver: attrs.ifunc_resolver.clone(), })]);
+                    ifunc_resolver: attrs.ifunc_resolver.clone(), })])
             } else {
                 // 非嵌套函数: 用 retain 移除函数体内新增的局部条目, 避免 O(n) 克隆 globals
                 self.locals.retain(|k, _| self.globals.contains_key(k));
@@ -1550,7 +1553,7 @@ impl<'a> Parser<'a> {
                 // 恢复外层 current_function
                 self.current_function = saved_func;
                 let pragma_weak = self.is_weak_symbol(&name_for_decl.name);
-                return Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
+                Some(vec![Decl::Func(FuncDecl { ret_ty: ty, name: name_for_decl, params, body, span: sp, is_extern: storage.is_extern, is_static: storage.is_static,
                     section: attrs.section, alignment: attrs.alignment, is_weak: attrs.is_weak || pragma_weak,
                     visibility: attrs.visibility, is_unused: attrs.is_unused,
                     is_cold: attrs.is_cold, is_hot: attrs.is_hot, is_noinline: attrs.is_noinline, is_always_inline: attrs.is_always_inline,
@@ -1566,7 +1569,7 @@ impl<'a> Parser<'a> {
                     is_flatten: attrs.is_flatten,
                     error_msg: attrs.error_msg.clone(), warning_msg: attrs.warning_msg.clone(),
                     deprecated_msg: attrs.deprecated_msg.clone(),
-                    ifunc_resolver: attrs.ifunc_resolver.clone(), })]);
+                    ifunc_resolver: attrs.ifunc_resolver.clone(), })])
             }
         } else if self.cur.kind == TokKind::LBracket {
             let mut arr_ty = ty;
@@ -3193,7 +3196,7 @@ impl<'a> Parser<'a> {
             TokKind::Ident if self.cur.text == "__label__" => {
                 self.advance();
                 loop {
-                    if self.parse_ident().is_none() { return None; }
+                    self.parse_ident()?;
                     if self.cur.kind == TokKind::Comma { self.advance(); } else { break; }
                 }
                 if !self.expect(TokKind::Semi, "';'") { return None; }

@@ -450,11 +450,11 @@ mod tests {
         let strtab_off = out.len();
         out.extend_from_slice(&strtab2);
         let symtab_off = out.len();
-        // null sym
-        for _ in 0..24 { out.push(0); }
+        // null sym (24B)
+        out.resize(out.len() + 24, 0);
         for (i, (_, size, bind)) in syms.iter().enumerate() {
             out.extend_from_slice(&(offsets[i] as u32).to_le_bytes());
-            out.push((*bind << 4) | 0); // st_info: bind<<4 | STT_NOTYPE
+            out.push(*bind << 4); // st_info: bind<<4 | STT_NOTYPE
             out.push(0); // st_other
             out.extend_from_slice(&1u16.to_le_bytes()); // st_shndx: 1 (.text)
             out.extend_from_slice(&0u64.to_le_bytes()); // st_value
@@ -464,7 +464,7 @@ mod tests {
         out.extend_from_slice(shstrtab);
 
         // 对齐到 8
-        while out.len() % 8 != 0 { out.push(0); }
+        while !out.len().is_multiple_of(8) { out.push(0); }
 
         // 6 section headers
         let sh_off = out.len();

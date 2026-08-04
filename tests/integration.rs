@@ -4150,8 +4150,8 @@ int main(void) { int x = 42; return f(&x); }
 
 /// P2.1: C++ `obj.*ptr_to_member` 和 `obj->*ptr_to_member` 解析
 /// + codegen (Section 6). 验证 dcc 解析器接受 `.*` 单 token
-/// (lexer 产生 TokKind::DotStar) 和 `->*` (`->` + `*` 两 token),
-/// 并走 MemberStar / PtrMemberStar 路径.
+///   (lexer 产生 TokKind::DotStar) 和 `->*` (`->` + `*` 两 token),
+///   并走 MemberStar / PtrMemberStar 路径.
 #[test]
 #[cfg(unix)]
 fn p2_1_member_ptr_dotstar() {

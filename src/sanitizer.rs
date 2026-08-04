@@ -553,12 +553,12 @@ fn instrument_expr(
                 let inner_span = e.span();
                 let original_inner = e.as_ref().clone();
                 let check_expr = float_cast_check(Box::new(original_inner.clone()), cast_ty, &inner_span);
-                *e = Box::new(Expr::Comma {
+                **e = Expr::Comma {
                     l: Box::new(check_expr),
                     r: Box::new(original_inner),
                     span: inner_span,
                     ty: e.ty(),
-                });
+                };
             }
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
@@ -879,7 +879,8 @@ fn vla_bound_expr(v: &VarDecl) -> Option<Box<Expr>> {
 /// runtime 会判断 bound 是否为正。
 fn vla_bound_check(bound: Box<Expr>, span: &Span) -> Expr {
     let bound_ty = bound.ty();
-    let call = Expr::Call {
+    
+    Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident {
                 name: "__ubsan_handle_vla_bound_not_positive".to_string(),
@@ -891,8 +892,7 @@ fn vla_bound_check(bound: Box<Expr>, span: &Span) -> Expr {
         args: vec![*bound],
         span: span.clone(),
         ty: Type::Void,
-    };
-    call
+    }
 }
 
 /// 生成 `__ubsan_handle_null_pointer_dereference()` 调用表达式。
@@ -917,14 +917,15 @@ fn null_deref_check(span: &Span) -> Expr {
 /// 在 float→int 转换时检查是否溢出。运行时判断:
 ///   - value 是 NaN
 ///   - value 超出目标整型范围
-/// 若溢出则 trap, 否则保留原值继续 codegen 中的 cast。
+///     若溢出则 trap, 否则保留原值继续 codegen 中的 cast。
 fn float_cast_check(value: Box<Expr>, target_ty: &Type, span: &Span) -> Expr {
     let val_ty = value.ty();
     // 目标整型最小/最大值 (LLVM sanitizer 接口)
     let (min_v, max_v) = int_range(target_ty);
     let min_expr = Expr::Int { v: min_v, span: span.clone(), ty: target_ty.clone() };
     let max_expr = Expr::Int { v: max_v, span: span.clone(), ty: target_ty.clone() };
-    let call = Expr::Call {
+    
+    Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident {
                 name: "__ubsan_handle_float_cast_overflow".to_string(),
@@ -939,8 +940,7 @@ fn float_cast_check(value: Box<Expr>, target_ty: &Type, span: &Span) -> Expr {
         args: vec![*value, min_expr, max_expr],
         span: span.clone(),
         ty: Type::Void,
-    };
-    call
+    }
 }
 
 /// 返回目标整型的 (最小值, 最大值)。

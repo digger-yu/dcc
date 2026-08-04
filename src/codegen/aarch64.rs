@@ -589,7 +589,7 @@ impl Aarch64Codegen {
             }
             ExprKind::VaArg { ap } => {
                 // M25: 整数/指针型 __builtin_va_arg(ap, T) — 从保存区读
-                self.gen_va_arg_int(&ap);
+                self.gen_va_arg_int(ap);
                 return true;
             }
             ExprKind::Call if !expr.children.is_empty() => {
@@ -736,7 +736,7 @@ impl Aarch64Codegen {
         debug_assert!(ap_off >= 0 && ap_off % 8 == 0,
                       "gen_va_start: ap_off must be 8-byte aligned, got {ap_off}");
         let insn = 0xf900_0000u32
-            | ((((ap_off as i32) / 8) as u32) & 0xfff) << 10
+            | (((ap_off / 8) as u32) & 0xfff) << 10
             | (31u32 << 5)
             | 9u32;
         self.emit(&insn.to_le_bytes());
@@ -811,7 +811,7 @@ impl Aarch64Codegen {
             }
             // M25: 浮点型 __builtin_va_arg(ap, double) — 暂走 stub (v0..v7 未保存)
             ExprKind::VaArg { ap } => {
-                self.gen_va_arg_float(&ap);
+                self.gen_va_arg_float(ap);
                 return true;
             }
             // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
@@ -826,12 +826,11 @@ impl Aarch64Codegen {
                 // 整数/复合字面量进 gen_float_expr 是为了 int→float 转换, 但
                 // gen_expr 不会调 gen_float_expr (ty 不是 float), 所以这里
                 // expr.ty 必然是 float, 直接返回 false 让上层走 fallback.
-                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty) {
-                    if self.gen_expr(expr) {
+                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty)
+                    && self.gen_expr(expr) {
                         self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
                         return true;
                     }
-                }
             }
         }
         self.load_float_s0(0.0);

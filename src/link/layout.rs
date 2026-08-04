@@ -339,7 +339,7 @@ impl LayoutBuilder {
                 // 填充对齐字节，使 data 与 input_offsets 一致
                 let pad = aligned - cur;
                 if pad > 0 {
-                    sec.data.extend(std::iter::repeat(0).take(pad as usize));
+                    sec.data.extend(std::iter::repeat_n(0, pad as usize));
                 }
                 sec.input_offsets.push(aligned);
                 sec.data.extend_from_slice(&in_sec.data);
@@ -737,8 +737,8 @@ impl LayoutBuilder {
             if sym.bind != STB_LOCAL { continue; }
             if sym.section == 0 { continue; }
             if sym.name.is_empty() { continue; }
-            let in_offset = find_input_offset(sections, sym.section as u32, 0).unwrap_or(0);
-            let out_sec_idx = match find_output_section_for_input_idx(sections, sym.section as u32) {
+            let in_offset = find_input_offset(sections, sym.section, 0).unwrap_or(0);
+            let out_sec_idx = match find_output_section_for_input_idx(sections, sym.section) {
                 Some(v) => v,
                 None => continue,
             };

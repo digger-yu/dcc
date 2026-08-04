@@ -549,7 +549,7 @@ impl Riscv64Codegen {
             }
             ExprKind::VaArg { ap } => {
                 // M25: 整数/指针型 __builtin_va_arg(ap, T) — 从保存区读
-                self.gen_va_arg_int(&ap);
+                self.gen_va_arg_int(ap);
                 return true;
             }
             ExprKind::Call if !expr.children.is_empty() => {
@@ -708,7 +708,7 @@ impl Riscv64Codegen {
             }
             // M25: 浮点型 __builtin_va_arg(ap, double) — 暂走 stub (fa0..fa7 未保存)
             ExprKind::VaArg { ap } => {
-                self.gen_va_arg_float(&ap);
+                self.gen_va_arg_float(ap);
                 return true;
             }
             // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
@@ -720,12 +720,11 @@ impl Riscv64Codegen {
             }
             _ => {
                 // expr.ty 已是 float/vector 时不能再回 gen_expr (死循环).
-                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty) {
-                    if self.gen_expr(expr) {
+                if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty)
+                    && self.gen_expr(expr) {
                         self.emit_fcvt_s_w_fa0();
                         return true;
                     }
-                }
             }
         }
         self.li_a0(0);
@@ -1653,7 +1652,7 @@ impl Riscv64Codegen {
     /// VLE8.V vd, (rs1), vm: 向量 8-bit 元素加载
     fn emit_vle8_v(&mut self, vd: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (rs1 as u32) << 15 | 0b000 << 12
+        let insn = (vm_bit | (rs1 as u32) << 15)
             | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
         self.emit(&insn.to_le_bytes());
     }
@@ -1677,8 +1676,7 @@ impl Riscv64Codegen {
     /// VSE8.V vs3, (rs1), vm
     fn emit_vse8_v(&mut self, vs3: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15
-            | 0b000 << 12 | 0b0000111 << 25 | 0x27;
+        let insn = (vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15) | 0b0000111 << 25 | 0x27;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1783,24 +1781,21 @@ impl Riscv64Codegen {
     /// VWMULU.VV vd, vs2, vs1, vm: 宽化无符号乘法
     fn emit_vwmulu_vv(&mut self, vd: u8, vs2: u8, vs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15
-            | 0b000 << 12 | (vd as u32) << 7 | 0b1110001 << 25 | 0x57;
+        let insn = (vm_bit | (vs2 as u32) << 20 | (vs1 as u32) << 15) | (vd as u32) << 7 | 0b1110001 << 25 | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VNSRL.WI vd, vs2, uimm, vm: 窄化右移 (立即数)
     fn emit_vnsrl_wi(&mut self, vd: u8, vs2: u8, uimm: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15
-            | 0b000 << 12 | (vd as u32) << 7 | 0b1011001 << 25 | 0x57;
+        let insn = (vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15) | (vd as u32) << 7 | 0b1011001 << 25 | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
     /// VNSRA.WI vd, vs2, uimm, vm: 窄化算术右移
     fn emit_vnsra_wi(&mut self, vd: u8, vs2: u8, uimm: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
-        let insn = vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15
-            | 0b000 << 12 | (vd as u32) << 7 | 0b1011011 << 25 | 0x57;
+        let insn = (vm_bit | (vs2 as u32) << 20 | ((uimm as u32) & 0x1f) << 15) | (vd as u32) << 7 | 0b1011011 << 25 | 0x57;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1830,7 +1825,7 @@ impl Riscv64Codegen {
     /// VMNOT.M vd, vs2: 掩码 NOT (vmandn with v0=ones)
     fn emit_vmnot_m(&mut self, vd: u8, vs2: u8) {
         // VMNOT.M vd, vs2 = VMXNOR.M vd, vs2, v0 (all-ones mask)
-        let insn = (vs2 as u32) << 20 | 0 << 15
+        let insn = ((vs2 as u32) << 20)
             | 0b100 << 12 | (vd as u32) << 7 | 0b0111001 << 25 | 0x57;
         self.emit(&insn.to_le_bytes());
     }
@@ -1907,7 +1902,7 @@ impl Riscv64Codegen {
     /// 返回 true 如果成功发射压缩指令
     fn try_compress_addi(&mut self, rd: u8, rs1: u8, imm: i32) -> bool {
         // C.ADDI: rd==rs1, rd!=0, imm 6-bit signed (-32..31)
-        if rd == rs1 && rd != 0 && imm >= -32 && imm <= 31 && imm != 0 {
+        if rd == rs1 && rd != 0 && (-32..=31).contains(&imm) && imm != 0 {
             self.emit_c_addi(rd, imm as i8);
             return true;
         }
@@ -1916,7 +1911,7 @@ impl Riscv64Codegen {
 
     /// 尝试将 32-bit LI 压缩为 C.LI
     fn try_compress_li(&mut self, rd: u8, imm: i32) -> bool {
-        if rd != 0 && imm >= -32 && imm <= 31 {
+        if rd != 0 && (-32..=31).contains(&imm) {
             self.emit_c_li(rd, imm as i8);
             return true;
         }
@@ -1926,8 +1921,8 @@ impl Riscv64Codegen {
     /// 尝试将 32-bit LW 压缩为 C.LW
     fn try_compress_lw(&mut self, rd: u8, rs1: u8, offset: u32) -> bool {
         // C.LW: rd'/rs1' 只能是 x8-x15, offset 7-bit unsigned, 4-byte aligned
-        if rd >= 8 && rd <= 15 && rs1 >= 8 && rs1 <= 15
-            && offset <= 124 && offset % 4 == 0 {
+        if (8..=15).contains(&rd) && (8..=15).contains(&rs1)
+            && offset <= 124 && offset.is_multiple_of(4) {
             self.emit_c_lw(rd - 8, rs1 - 8, offset as u8);
             return true;
         }
@@ -1936,8 +1931,8 @@ impl Riscv64Codegen {
 
     /// 尝试将 32-bit SW 压缩为 C.SW
     fn try_compress_sw(&mut self, rs2: u8, rs1: u8, offset: u32) -> bool {
-        if rs2 >= 8 && rs2 <= 15 && rs1 >= 8 && rs1 <= 15
-            && offset <= 124 && offset % 4 == 0 {
+        if (8..=15).contains(&rs2) && (8..=15).contains(&rs1)
+            && offset <= 124 && offset.is_multiple_of(4) {
             self.emit_c_sw(rs2 - 8, rs1 - 8, offset as u8);
             return true;
         }
@@ -1947,7 +1942,7 @@ impl Riscv64Codegen {
     /// 尝试将 32-bit JAL 压缩为 C.J
     fn try_compress_jal(&mut self, offset: i32) -> bool {
         // C.J: 12-bit signed offset, 2-byte aligned
-        if offset >= -2048 && offset <= 2047 && offset % 2 == 0 {
+        if (-2048..=2047).contains(&offset) && offset % 2 == 0 {
             self.emit_c_j(offset);
             return true;
         }
@@ -1956,7 +1951,7 @@ impl Riscv64Codegen {
 
     /// 尝试将 32-bit BEQ rs, x0 压缩为 C.BEQZ
     fn try_compress_beqz(&mut self, rs1: u8, offset: i32) -> bool {
-        if rs1 >= 8 && rs1 <= 15 && offset >= -256 && offset <= 255 && offset % 2 == 0 {
+        if (8..=15).contains(&rs1) && (-256..=255).contains(&offset) && offset % 2 == 0 {
             self.emit_c_beqz(rs1 - 8, offset as i16);
             return true;
         }

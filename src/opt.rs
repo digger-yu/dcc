@@ -294,7 +294,7 @@ fn block_has_label(b: &Block) -> bool {
     b.items.iter().any(|item| match item {
         BlockItem::Stmt(s) => stmt_has_label(s),
         BlockItem::Decl(Decl::Func(f)) => {
-            f.body.as_ref().map(|b| block_has_label(b)).unwrap_or(false)
+            f.body.as_ref().map(block_has_label).unwrap_or(false)
         }
         _ => false,
     })

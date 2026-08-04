@@ -150,7 +150,7 @@ impl ProfileWeights {
         let mut s: HashSet<String> = HashSet::new();
         s.extend(self.pgo_counts.keys().cloned());
         s.extend(self.autofdo_total.keys().cloned());
-        for ((_, t), _) in &self.lbr_edges { s.insert(t.clone()); }
+        for (_, t) in self.lbr_edges.keys() { s.insert(t.clone()); }
         s
     }
 

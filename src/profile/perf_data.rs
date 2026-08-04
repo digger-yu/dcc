@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn reject_too_short() {
         let tmp = std::env::temp_dir().join("dcc-perfdata-short.bin");
-        std::fs::write(&tmp, &[0u8; 10]).unwrap();
+        std::fs::write(&tmp, [0u8; 10]).unwrap();
         let err = PerfDataFile::read(&tmp).unwrap_err();
         assert!(err.to_string().contains("too short"));
         let _ = std::fs::remove_file(&tmp);

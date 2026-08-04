@@ -821,12 +821,12 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
 ///
 /// 启动选项 (与 dcc 旧内部链接器输出对齐):
 ///   - -no-pie : dcc 现有 codegen 采用 RIP-相对 / 静态地址访问 TLS / 全局;
-///               PIE 下需要重写为 -fpie. 在 -no-pie 下生成 ET_EXEC, 所有地址
-///               运行时固定, 与 dcc codegen 期望一致.
+///     PIE 下需要重写为 -fpie. 在 -no-pie 下生成 ET_EXEC, 所有地址
+///     运行时固定, 与 dcc codegen 期望一致.
 ///   - -z norelro : 避免 GNU_RELRO 覆盖 .tdata, 造成 TLS 写入段错误 (因为
-///               dcc 的 .tdata 位于 .data LOAD 段首, 与 RELRO 重叠).
+///     dcc 的 .tdata 位于 .data LOAD 段首, 与 RELRO 重叠).
 ///   - -Wl,-z,noexecstack : dcc 当前不输出 .note.GNU-stack, 避免 ld 警告
-///               "missing .note.GNU-stack section implies executable stack".
+///     "missing .note.GNU-stack section implies executable stack".
 fn link_with_host_cc(
     obj_path: &Path,
     output: &Path,

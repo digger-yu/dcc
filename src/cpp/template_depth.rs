@@ -27,9 +27,9 @@ mod tests {
 
     #[test]
     fn limit_constant_sane() {
-        // 128 层足够覆盖 STL 常见组合, 且远低于栈溢出阈值
-        assert!(MAX_TEMPLATE_DEPTH >= 64);
-        assert!(MAX_TEMPLATE_DEPTH <= 1024);
+        // 128 层足够覆盖 STL 常见组合, 且远低于栈溢出阈值 (编译期断言)
+        const { assert!(MAX_TEMPLATE_DEPTH >= 64) };
+        const { assert!(MAX_TEMPLATE_DEPTH <= 1024) };
     }
 
     #[test]

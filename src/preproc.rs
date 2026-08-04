@@ -142,6 +142,9 @@ pub(crate) struct MacroDef {
     variadic: bool,
 }
 
+/// 头文件缓存内容: (guard 宏名, 宏列表, 依赖文件, (文件, hash), __COUNTER__ 消耗量)
+type MacroCacheData = (String, Vec<(String, MacroDef)>, Vec<String>, Vec<(String, u64)>, u32);
+
 /// 预处理输出行号 → 源文件行号的映射区间
 #[derive(Debug, Clone)]
 pub struct LineSpan {
@@ -254,7 +257,7 @@ impl PchBundle {
     /// 解析 PCH 文件字节内容
     pub fn deserialize(s: &str) -> Result<Self, String> {
         if !s.starts_with(PCH_MAGIC) {
-            return Err(format!("not a dcc PCH file (magic mismatch)"));
+            return Err("not a dcc PCH file (magic mismatch)".to_string());
         }
         let mut bundle = PchBundle::default();
         let mut lines = s.lines();
@@ -265,7 +268,7 @@ impl PchBundle {
             if line == "=== MACROS ===" { section = "macros"; continue; }
             if line == "=== OUTPUT ===" { section = "output"; continue; }
             if line == "=== END ===" { break; }
-            if section == "" {
+            if section.is_empty() {
                 if let Some(v) = line.strip_prefix("SOURCE=") {
                     bundle.source = Self::unescape_kv(v);
                 } else if let Some(v) = line.strip_prefix("CHARSET=") {
@@ -361,13 +364,12 @@ impl PchBundle {
         let mut start = 0;
         let mut count = 0;
         for (i, c) in line.char_indices() {
-            if c == '\t' {
-                if count < n - 1 {
+            if c == '\t'
+                && count < n - 1 {
                     out.push(line[start..i].to_string());
                     start = i + 1;
                     count += 1;
                 }
-            }
         }
         out.push(line[start..].to_string());
         while out.len() < n { out.push(String::new()); }
@@ -1780,7 +1782,7 @@ impl Preprocessor {
                         let new_output = self.out[saved_out_len..].to_string();
                         // 变更集: 值被改变或新增的宏 (新增 + 重新定义)
                         let header_macros: HashMap<String, MacroDef> = self.macros.iter()
-                            .filter(|(k, v)| saved_macros.get(*k).map_or(true, |old| !Self::macro_def_eq(old, v)))
+                            .filter(|(k, v)| saved_macros.get(*k).is_none_or(|old| !Self::macro_def_eq(old, v)))
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
                         // 变更集: 处理期间被 #undef 删除的宏, 命中时必须回放删除
@@ -1960,9 +1962,9 @@ impl Preprocessor {
             for kw in ["limit", "prefix", "suffix", "if_empty"] {
                 if let Some(after_kw) = rest.strip_prefix(kw) {
                     let after_kw = after_kw.trim_start();
-                    if after_kw.starts_with('(') {
-                        if let Some(close) = after_kw[1..].find(')') {
-                            let arg = after_kw[1..1+close].trim();
+                    if let Some(kw_body) = after_kw.strip_prefix('(') {
+                        if let Some(close) = kw_body.find(')') {
+                            let arg = kw_body[..close].trim();
                             match kw {
                                 "limit" => limit = arg.parse::<usize>().ok(),
                                 "prefix" => prefix = Self::parse_embed_bytes(arg),
@@ -2147,8 +2149,8 @@ impl Preprocessor {
     ///   决定是否插入 `volatile` 以防止浮点环境访问被优化
     ///   (dcc 仍将其作为纯语义状态, 不发警告)
     /// * FP_CONTRACT / CX_LIMITED_RANGE: 仅接受不存储, 不发警告
-    /// 未知状态值 (`MAYBE` 等) 发出 W0001 警告, 避免静默拼写错误
-    /// 污染语义状态.
+    ///   未知状态值 (`MAYBE` 等) 发出 W0001 警告, 避免静默拼写错误
+    ///   污染语义状态.
     ///
     /// `line_no` 是 `_Pragma` / 直接 `#pragma` 所在源行号; 直接
     /// `#pragma` 调用时由 `process_directive` 传 0, 此处自动取
@@ -2242,7 +2244,7 @@ impl Preprocessor {
         // 嵌套调用 (tail_call 递归) 时先保存外层记录, 结束时合并回去
         let saved = self.expanded_macros.borrow().clone();
         if std::env::var("DCC_PP_DEBUG").is_ok() && line.contains("asm_inline") {
-            eprintln!("[pp-debug] MAP_ENTER saved={} depth={} line_hdr={:?}", &saved.len(), EXPAND_DEPTH.with(|c| c.get()), &line[..line.len().min(60)]);
+            eprintln!("[pp-debug] MAP_ENTER saved={} depth={} line_hdr={:?}", saved.len(), EXPAND_DEPTH.with(|c| c.get()), &line[..line.len().min(60)]);
         }
         self.expanded_macros.borrow_mut().clear();
         let disabled = HashSet::new();
@@ -3881,27 +3883,23 @@ impl Preprocessor {
                 if !line.contains("*/") { in_block_comment = true; }
                 continue;
             }
-            if line.starts_with('#') {
-                let d = line[1..].trim_start();
-                if first.is_none() { first = Some(d); }
-                else if second.is_none() { second = Some(d); }
-                directives.push(d);
-            } else {
-                // 指令前出现代码 → 不是守卫文件
-                return None;
-            }
+            // 指令前出现代码 → 不是守卫文件
+            let after_hash = line.strip_prefix('#')?;
+            let d = after_hash.trim_start();
+            if first.is_none() { first = Some(d); }
+            else if second.is_none() { second = Some(d); }
+            directives.push(d);
         }
         // 第一条指令必须是 `#ifndef X` 或 `#if !defined(X)`
         let (guard, ifndef_idx) = {
             let f = first?;
             if let Some(rest) = f.strip_prefix("ifndef ") {
                 (rest.trim().to_string(), 0usize)
-            } else if let Some(rest) = f.strip_prefix("if !defined(") {
+            } else {
+                let rest = f.strip_prefix("if !defined(")?;
                 let name = rest.trim_end_matches(')').trim();
                 if name.is_empty() || name.contains(')') { return None; }
                 (name.to_string(), 0usize)
-            } else {
-                return None;
             }
         };
         // 第二条指令必须是 `#define <guard> ...`
@@ -3943,7 +3941,7 @@ impl Preprocessor {
         a.params == b.params && a.body == b.body && a.variadic == b.variadic
     }
 
-    fn load_from_cache(&self, cache_path: &Path) -> Option<(String, Vec<(String, MacroDef)>, Vec<String>, Vec<(String, u64)>, u32)> {
+    fn load_from_cache(&self, cache_path: &Path) -> Option<MacroCacheData> {
         let content = fs::read_to_string(cache_path).ok()?;
         let mut lines = content.lines();
 
@@ -3954,9 +3952,9 @@ impl Preprocessor {
 
         // 第二行: COUNTER_DELTA <n> — 本头文件处理期间的 __COUNTER__ 消耗量
         let line = lines.next()?;
-        let counter_delta = match line.strip_prefix("COUNTER_DELTA\t") {
-            Some(rest) => rest.trim().parse().unwrap_or(0),
-            None => return None,
+        let counter_delta = {
+            let rest = line.strip_prefix("COUNTER_DELTA\t")?;
+            rest.trim().parse().unwrap_or(0)
         };
 
         // DEPS 段: <path>\t<hash_hex>
@@ -4970,7 +4968,7 @@ n\
         let out_create = preprocess(
             b"#include \"common.h\"\n",  // 源: 包含 common.h 后空主体
             "tu.c",
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &[],
             &[],
             StdMode::Gnu11,
@@ -4993,7 +4991,7 @@ n\
         let out_with_pch = preprocess(
             b"int a = FROM_COMMON; int b = SQUARE(3);",
             "tu.c",
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &[],
             &[],
             StdMode::Gnu11,
@@ -5012,7 +5010,7 @@ n\
         let out_no_pch = preprocess(
             b"#include \"common.h\"\nint a = FROM_COMMON; int b = SQUARE(3);",
             "tu.c",
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &[],
             &[],
             StdMode::Gnu11,
@@ -5177,7 +5175,7 @@ n\
         let out = preprocess(
             src.as_bytes(),
             "bad-inc.c",
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &[],
             &[],
             StdMode::Gnu11,
@@ -5250,12 +5248,12 @@ n\
         fs::write(&hdr, "#error broken header\n").unwrap();
         let src = "#include \"bad.h\"\nint x;\n";
         // 隔离 HOME: 缓存写入临时目录, 不污染 ~/.dcc/cache
-        std::env::set_var("HOME", &dir.join("home"));
+        std::env::set_var("HOME", dir.join("home"));
         for i in 0..2 {
             let out = preprocess(
                 src.as_bytes(),
                 "cache-err.c",
-                &[dir.clone()],
+                std::slice::from_ref(&dir),
                 &[],
                 &[],
                 StdMode::Gnu11,
@@ -5288,11 +5286,11 @@ n\
         .unwrap();
         fs::write(&b, "#ifndef B_H\n#define B_H\n#define B_VAL 42\n#endif\n").unwrap();
         let src = "#include \"A.h\"\nint v = A_VAL;\n";
-        std::env::set_var("HOME", &dir.join("home"));
+        std::env::set_var("HOME", dir.join("home"));
         let out1 = preprocess(
             src.as_bytes(),
             "nested-dep.c",
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &[],
             &[],
             StdMode::Gnu11,
@@ -5306,7 +5304,7 @@ n\
         let out2 = preprocess(
             src.as_bytes(),
             "nested-dep.c",
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &[],
             &[],
             StdMode::Gnu11,

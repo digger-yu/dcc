@@ -158,13 +158,12 @@ pub fn parse_vdso_bytes(buf: &[u8], source: String) -> Result<VdsoInfo, VdsoErro
                 let entsize = u64::from_le_bytes(buf[base + 56..base + 64].try_into().unwrap());
                 symtab_off = Some((off, sz, entsize));
             }
-        } else if name == ".strtab" || name == ".dynstr" {
-            if strtab_off.is_none() {
+        } else if (name == ".strtab" || name == ".dynstr")
+            && strtab_off.is_none() {
                 let off = u64::from_le_bytes(buf[base + 24..base + 32].try_into().unwrap()) as usize;
                 let sz = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap()) as usize;
                 strtab_off = Some((off, sz));
             }
-        }
     }
     let (sym_off, sym_size, sym_entsize) = symtab_off
         .ok_or_else(|| VdsoError::Truncated("no symtab/dynsym".into()))?;
@@ -240,7 +239,7 @@ mod tests {
 
     /// 构造一个最小 ET_DYN ELF64 (模拟 vDSO 镜像), 包含 .text + .symtab
     /// + .strtab + .shstrtab. 2 个 STT_FUNC 符号: __vdso_clock_gettime
-    /// 和一个无关符号.
+    ///   和一个无关符号.
     fn build_minimal_vdso() -> Vec<u8> {
         let shstrtab = b"\0.text\0.symtab\0.strtab\0.shstrtab\0";
         const N_TEXT:  u32 = 1;
@@ -265,8 +264,8 @@ mod tests {
         out.extend_from_slice(text);
         let symtab_off = out.len();
         // 3 sym: null + __vdso_clock_gettime (FUNC, value=0) + helper (NOTYPE)
-        // 每个 24B
-        for _ in 0..24 { out.push(0); }
+        // 每个 24B: null sym 占位
+        out.resize(out.len() + 24, 0);
         // sym 1: __vdso_clock_gettime (FUNC, value=0, size=5)
         out.extend_from_slice(&(strtab_clock_off as u32).to_le_bytes());
         out.push((1 << 4) | 2); // bind=GLOBAL, type=FUNC
@@ -288,7 +287,7 @@ mod tests {
         out.extend_from_slice(shstrtab);
 
         // 对齐到 8
-        while out.len() % 8 != 0 { out.push(0); }
+        while !out.len().is_multiple_of(8) { out.push(0); }
 
         // 5 section headers (含 null)
         let sh_off = out.len();

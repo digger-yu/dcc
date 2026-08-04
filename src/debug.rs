@@ -2050,17 +2050,8 @@ mod tests {
     #[test]
     fn eh_frame_fde_emits_cfi_ops_for_setjmp() {
         // 构造 cfi_ops: CFA = rsp + 16, r13@CFA-16, %rip@CFA-8
-        let mut cfi_ops = Vec::new();
-        // DW_CFA_def_cfa(7, 16)
-        cfi_ops.push(0x0c);
-        cfi_ops.push(7);
-        cfi_ops.push(16);
-        // DW_CFA_offset(13, 2)
-        cfi_ops.push(0x80 | 13);
-        cfi_ops.push(2);
-        // DW_CFA_offset(16, 1)
-        cfi_ops.push(0x80 | 16);
-        cfi_ops.push(1);
+        // DW_CFA_def_cfa(7, 16); DW_CFA_offset(13, 2); DW_CFA_offset(16, 1)
+        let cfi_ops = vec![0x0c, 7, 16, 0x80 | 13, 2, 0x80 | 16, 1];
 
         let frames = [FuncFrame::with_cfi(0x100, 32, cfi_ops.clone())];
         let eh = build_eh_frame(&frames);

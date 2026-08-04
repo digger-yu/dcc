@@ -158,7 +158,7 @@ impl TemplateRegistry {
                 resolved.push(a.clone());
             } else if let Some(d) = td.defaults.get(i).cloned().flatten() {
                 resolved.push(d);
-            } else if i == 0 && args.is_empty() && td.defaults.first().is_some() {
+            } else if i == 0 && args.is_empty() && !td.defaults.is_empty() {
                 // 单默认形参模板 `template <typename T = int>` 且无实参
                 resolved.push(td.defaults[0].clone().unwrap());
             } else {
@@ -204,10 +204,9 @@ impl TemplateRegistry {
         for (i, pn) in td.param_names.iter().enumerate() {
             if let Some((_, a)) = bindings.iter().rev().find(|(b, _)| b == pn) {
                 args.push(a.clone());
-            } else if let Some(d) = td.defaults.get(i).cloned().flatten() {
-                args.push(d);
             } else {
-                return None;
+                let d = td.defaults.get(i).cloned().flatten()?;
+                args.push(d);
             }
         }
         self.resolve_args(td, &args)
