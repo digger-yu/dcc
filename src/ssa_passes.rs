@@ -766,6 +766,10 @@ fn walk_block(b: &crate::ast::Block, out: &mut Vec<String>) {
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b2) = &f.body { walk_block(b2, out); }
             }
+            BlockItem::Decl(Decl::Var(v)) => {
+                // 变量初始化表达式中的调用也要计入调用图
+                if let Some(init) = &v.init { walk_expr(init, out); }
+            }
             _ => {}
         }
     }

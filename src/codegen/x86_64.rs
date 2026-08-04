@@ -215,6 +215,9 @@ const ASM_REG_YMM: u8 = 129;
 const ASM_REG_ZMM: u8 = 130;
 const ASM_REG_TMM: u8 = 131;
 const ASM_REG_K: u8 = 132;
+/// mini-asm 特殊寄存器宽度标签: 控制寄存器 (crN) / 调试寄存器 (drN, dbN)
+const ASM_REG_CR: u8 = 133;
+const ASM_REG_DR: u8 = 134;
 
 /// 内联 asm 约束绑定结果
 struct AsmOpBinding {
@@ -3537,7 +3540,11 @@ impl Codegen {
                 }
             }
             Expr::SizeofTy { ty, .. } => self.mov_imm(dst, ty.size() as i128),
-            Expr::SizeofExpr { e, .. } => self.mov_imm(dst, e.ty().size() as i128),
+            Expr::SizeofExpr { e, .. } => match e.as_ref() {
+                // 字符串字面量: C 中为 char[N] 数组 (含 NUL), 返回实际字节数
+                Expr::String { data, .. } => self.mov_imm(dst, data.len() as i128),
+                _ => self.mov_imm(dst, e.ty().size() as i128),
+            },
             Expr::AlignofTy { ty, .. } => self.mov_imm(dst, ty.align() as i128),
             Expr::AlignofExpr { e, .. } => self.mov_imm(dst, e.ty().align() as i128),
             Expr::Offsetof { ty, ref member, .. } => {
@@ -8435,7 +8442,19 @@ impl Codegen {
             let off = self.var_offset(&name.name);
             return Some(format!("{off}(%r13)"));
         }
-        None
+        // 指针解引用/成员/下标/转型: 求值地址到 r12, 返回 (%r12)
+        // 注意 Deref/Cast 求值得到的是指针值, Member/Index 求值得到元素地址
+        match expr {
+            Expr::Deref { e, .. } | Expr::Cast { e, .. } => {
+                self.gen_expr(e, 12);
+                Some("(%r12)".to_string())
+            }
+            Expr::Member { .. } | Expr::Index { .. } => {
+                self.gen_expr(expr, 12);
+                Some("(%r12)".to_string())
+            }
+            _ => None,
+        }
     }
 
     /// 按约束为特定字母选择寄存器名
@@ -9125,6 +9144,52 @@ impl Codegen {
         }
     }
 
+    /// 由寄存器索引生成指定宽度的 AT&T 寄存器名 (含 % 前缀)
+    fn gp_reg_name_bits(idx: u8, bits: u8) -> Option<&'static str> {
+        Some(match (idx, bits) {
+            (0, 8) => "%al", (0, 16) => "%ax", (0, 32) => "%eax", (0, 64) => "%rax",
+            (1, 8) => "%cl", (1, 16) => "%cx", (1, 32) => "%ecx", (1, 64) => "%rcx",
+            (2, 8) => "%dl", (2, 16) => "%dx", (2, 32) => "%edx", (2, 64) => "%rdx",
+            (3, 8) => "%bl", (3, 16) => "%bx", (3, 32) => "%ebx", (3, 64) => "%rbx",
+            (4, 8) => "%spl", (4, 16) => "%sp", (4, 32) => "%esp", (4, 64) => "%rsp",
+            (5, 8) => "%bpl", (5, 16) => "%bp", (5, 32) => "%ebp", (5, 64) => "%rbp",
+            (6, 8) => "%sil", (6, 16) => "%si", (6, 32) => "%esi", (6, 64) => "%rsi",
+            (7, 8) => "%dil", (7, 16) => "%di", (7, 32) => "%edi", (7, 64) => "%rdi",
+            (8, 8) => "%r8b", (8, 16) => "%r8w", (8, 32) => "%r8d", (8, 64) => "%r8",
+            (9, 8) => "%r9b", (9, 16) => "%r9w", (9, 32) => "%r9d", (9, 64) => "%r9",
+            (10, 8) => "%r10b", (10, 16) => "%r10w", (10, 32) => "%r10d", (10, 64) => "%r10",
+            (11, 8) => "%r11b", (11, 16) => "%r11w", (11, 32) => "%r11d", (11, 64) => "%r11",
+            (12, 8) => "%r12b", (12, 16) => "%r12w", (12, 32) => "%r12d", (12, 64) => "%r12",
+            (13, 8) => "%r13b", (13, 16) => "%r13w", (13, 32) => "%r13d", (13, 64) => "%r13",
+            (14, 8) => "%r14b", (14, 16) => "%r14w", (14, 32) => "%r14d", (14, 64) => "%r14",
+            (15, 8) => "%r15b", (15, 16) => "%r15w", (15, 32) => "%r15d", (15, 64) => "%r15",
+            _ => return None,
+        })
+    }
+
+    /// 处理 GCC asm 模板操作数修饰符占位符 (如 %b0, %w0, %h0, %k0, %q0, %a0)
+    /// val 是 op_map 中的原始值 (无 % 前缀的寄存器名, 如 "rax")
+    /// 返回替换后的文本 (含 % 前缀); 无法转换时返回 None
+    fn asm_reg_modifier_subst(val: &str, modifier: char) -> Option<String> {
+        let (idx, sz) = Self::parse_asm_reg(val)?;
+        if sz >= 128 {
+            return None; // 向量/mask 寄存器无 b/w/k/q 修饰符
+        }
+        if modifier == 'h' {
+            // 高 8 位寄存器: 仅 ax/bx/cx/dx
+            let name = match idx {
+                0 => "%ah", 1 => "%ch", 2 => "%dh", 3 => "%bh",
+                _ => return None,
+            };
+            return Some(name.to_string());
+        }
+        let bits = match modifier {
+            'b' => 8, 'w' => 16, 'k' => 32, 'q' => 64, 'a' => sz,
+            _ => return None,
+        };
+        Self::gp_reg_name_bits(idx, bits).map(|s| s.to_string())
+    }
+
     /// 替换 asm 模板中的 %N 占位符
     fn resolve_asm_template(
         &self,
@@ -9140,6 +9205,18 @@ impl Codegen {
             let key = format!("%{}", idx);
             if let Some(val) = op_map.get(&key) {
                 resolved = resolved.replace(&key, &Self::asm_format_subst(val));
+                // 修饰符变体: %bN %wN %hN %kN %qN %aN (对寄存器操作数)
+                for m in ['b', 'w', 'h', 'k', 'q', 'a'] {
+                    let mkey = format!("%{}{}", m, idx);
+                    if resolved.contains(&mkey) {
+                        if let Some(sub) = Self::asm_reg_modifier_subst(val, m) {
+                            resolved = resolved.replace(&mkey, &sub);
+                        } else if m == 'a' {
+                            // %aN: 地址形式 (mem/imm 原样, 等价于普通替换)
+                            resolved = resolved.replace(&mkey, &Self::asm_format_subst(val));
+                        }
+                    }
+                }
             } else if let Some(val) = Self::eval_asm_operand(op) {
                 resolved = resolved.replace(&key, &val);
             }
@@ -9150,6 +9227,20 @@ impl Codegen {
                 let num_key = format!("%{}", i);
                 if let Some(reg) = op_map.get(&num_key).or_else(|| op_map.get(&key)) {
                     resolved = resolved.replace(&key, &Self::asm_format_subst(reg));
+                    // 修饰符变体: %b[name] %w[name] %h[name] %k[name] %q[name]
+                    for m in ['b', 'w', 'h', 'k', 'q'] {
+                        let mkey = format!("%{}[{n}]", m);
+                        if resolved.contains(&mkey) {
+                            if let Some(sub) = Self::asm_reg_modifier_subst(reg, m) {
+                                resolved = resolved.replace(&mkey, &sub);
+                            }
+                        }
+                    }
+                    // %a[name]: 地址形式
+                    let akey = format!("%a[{n}]");
+                    if resolved.contains(&akey) {
+                        resolved = resolved.replace(&akey, &Self::asm_format_subst(reg));
+                    }
                 }
             }
         }
@@ -9193,12 +9284,12 @@ impl Codegen {
                     }
                     continue;
                 }
-            // 命名标签 foo:（非纯数字）
+            // 命名标签 foo:（含 . 局部标签如 .slowpath:，排除 directive）
             if let Some(label) = trimmed.strip_suffix(':') {
                 let label = AsmLocalLabels::strip_asm_comment(label).trim();
                 if !label.is_empty()
-                    && !label.starts_with('.')
                     && !label.chars().all(|c| c.is_ascii_digit())
+                    && !Self::is_asm_directive(label)
                 {
                     self.label(label);
                     continue;
@@ -9293,6 +9384,24 @@ impl Codegen {
         }
     }
 
+    /// 判断点前缀名是否为汇编 directive（而非 . 局部标签）
+    fn is_asm_directive(name: &str) -> bool {
+        matches!(name,
+            ".pushsection" | ".popsection" | ".section" | ".previous"
+            | ".type" | ".size" | ".ident" | ".globl" | ".global"
+            | ".weak" | ".hidden" | ".protected" | ".balign" | ".p2align"
+            | ".align" | ".long" | ".quad" | ".byte" | ".asciz" | ".string"
+            | ".text" | ".data" | ".bss" | ".rodata" | ".org" | ".zero"
+            | ".skip" | ".set" | ".equ" | ".macro" | ".endm" | ".if" | ".endif"
+            | ".else" | ".elseif" | ".rept" | ".endr" | ".irp" | ".irpc"
+            | ".loc" | ".file" | ".symver" | ".local" | ".comm" | ".lcomm"
+            | ".altmacro" | ".code64" | ".subsection" | ".uleb128"
+            | ".sleb128" | ".2byte" | ".4byte" | ".8byte" | ".word" | ".int"
+            | ".error" | ".warning" | ".include" | ".incbin" | ".cfi_startproc"
+            | ".cfi_endproc" | ".cfi_def_cfa_offset" | ".cfi_offset"
+            | ".cfi_restore" | ".cfi_remember_state" | ".cfi_restore_state")
+    }
+
     /// 解析 AT&T 寄存器名 → (reg_index, size_bits)
     fn parse_asm_reg(name: &str) -> Option<(u8, u8)> {
         let n = name.strip_prefix('%').unwrap_or(name);
@@ -9337,6 +9446,17 @@ impl Codegen {
             // AVX-512 mask 寄存器 (k0–k7)
             "k0" => Some((0, ASM_REG_K)), "k1" => Some((1, ASM_REG_K)), "k2" => Some((2, ASM_REG_K)), "k3" => Some((3, ASM_REG_K)),
             "k4" => Some((4, ASM_REG_K)), "k5" => Some((5, ASM_REG_K)), "k6" => Some((6, ASM_REG_K)), "k7" => Some((7, ASM_REG_K)),
+            // 控制寄存器 (内核 read_crN/write_crN)
+            "cr0" => Some((0, ASM_REG_CR)), "cr1" => Some((1, ASM_REG_CR)), "cr2" => Some((2, ASM_REG_CR)),
+            "cr3" => Some((3, ASM_REG_CR)), "cr4" => Some((4, ASM_REG_CR)), "cr5" => Some((5, ASM_REG_CR)),
+            "cr6" => Some((6, ASM_REG_CR)), "cr7" => Some((7, ASM_REG_CR)), "cr8" => Some((8, ASM_REG_CR)),
+            // 调试寄存器 (GAS 用 drN 与 dbN 皆可)
+            "dr0" => Some((0, ASM_REG_DR)), "dr1" => Some((1, ASM_REG_DR)), "dr2" => Some((2, ASM_REG_DR)),
+            "dr3" => Some((3, ASM_REG_DR)), "dr4" => Some((4, ASM_REG_DR)), "dr5" => Some((5, ASM_REG_DR)),
+            "dr6" => Some((6, ASM_REG_DR)), "dr7" => Some((7, ASM_REG_DR)),
+            "db0" => Some((0, ASM_REG_DR)), "db1" => Some((1, ASM_REG_DR)), "db2" => Some((2, ASM_REG_DR)),
+            "db3" => Some((3, ASM_REG_DR)), "db4" => Some((4, ASM_REG_DR)), "db5" => Some((5, ASM_REG_DR)),
+            "db6" => Some((6, ASM_REG_DR)), "db7" => Some((7, ASM_REG_DR)),
             _ => None,
         }
     }
@@ -9573,7 +9693,7 @@ impl Codegen {
         if self.emit_asm_directive(&line) {
             return;
         }
-        // 处理前缀: lock, rep, repz, repnz
+        // 处理前缀: lock, rep, repz, repnz, 段前缀 (ds/cs/ss/es/fs/gs)
         let (prefix, rest) = if line.starts_with("lock ") || line.starts_with("lock\t") {
             (Some(0xF0u8), line[5..].trim())
         } else if line.starts_with("rep ") || line.starts_with("rep\t") || line.starts_with("repz ") || line.starts_with("repz\t") {
@@ -9581,7 +9701,17 @@ impl Codegen {
         } else if line.starts_with("repnz ") || line.starts_with("repnz\t") || line.starts_with("repe ") {
             (Some(0xF2u8), line[6..].trim())
         } else {
-            (None, line.as_str())
+            // 段前缀: 形如 "ds clflush %0" / "gs movq ..."
+            let seg_pfx = ["ds ", "cs ", "ss ", "es ", "fs ", "gs "]
+                .iter().find(|p| line.starts_with(*p));
+            if let Some(p) = seg_pfx {
+                (Some(match p.as_bytes()[0] {
+                    b'd' => 0x3E, b'c' => 0x2E, b's' => 0x36, b'e' => 0x26,
+                    b'f' => 0x64, _ => 0x65,
+                }), line[p.len()..].trim())
+            } else {
+                (None, line.as_str())
+            }
         };
         // 分割助记符和操作数
         let (mnemonic, operands_str) = if let Some(pos) = rest.find([' ', '\t']) {
@@ -9589,6 +9719,11 @@ impl Codegen {
         } else {
             (rest, "")
         };
+        // 汇编器宏调用 (如 extable_type_reg reg=.., type=..): 无机器码, 静默忽略
+        if operands_str.contains('=') && !mnemonic.is_empty()
+            && !matches!(mnemonic, "mov" | "movq" | "movl" | "movw" | "movb") {
+            return;
+        }
         let operands: Vec<&str> = if operands_str.is_empty() { vec![] }
         else { operands_str.split(',').collect() };
         let ops: Vec<AsmOperand> = operands.iter().map(|s| Self::parse_asm_operand_str(s)).collect();
@@ -9675,7 +9810,11 @@ impl Codegen {
             "movswl" if ops.len() == 2 => self.emit_asm_movsx(&ops[0], &ops[1], 16, 32),
             "lea" | "leaq" if ops.len() == 2 => self.emit_asm_lea(&ops[0], &ops[1], 64),
             "leal" if ops.len() == 2 => self.emit_asm_lea(&ops[0], &ops[1], 32),
-            "xchg" if ops.len() == 2 => self.emit_asm_xchg(&ops[0], &ops[1]),
+            "xchg" | "xchgb" | "xchgw" | "xchgl" | "xchgq" if ops.len() == 2 => {
+                let bits = if mnemonic == "xchgb" { 8 } else if mnemonic == "xchgw" { 16 }
+                    else if mnemonic == "xchgl" { 32 } else { 64 };
+                self.emit_asm_xchg(&ops[0], &ops[1], bits);
+            }
             "cmovz" | "cmovze" | "cmove" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x44),
             "cmovnz" | "cmovne" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x45),
             "cmovl" | "cmovnge" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4C),
@@ -9704,6 +9843,7 @@ impl Codegen {
             "orl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 32),
             "xor" | "xorq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 64),
             "xorl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 32),
+            "xorb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 8),
             "cmp" | "cmpq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 64),
             "cmpl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 32),
             "cmpw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 16),
@@ -9723,10 +9863,16 @@ impl Codegen {
             "negl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 3, 32),
             "not" | "notq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 2, 64),
             "notl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 2, 32),
-            "inc" | "incq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 64),
+            "inc" | "incq" | "incb" if ops.len() == 1 => {
+                let bits = if mnemonic == "incb" { 8 } else { 64 };
+                self.emit_asm_unary_rm(&ops[0], 0, bits);
+            }
             "incl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 32),
             "incw" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 0, 16),
-            "dec" | "decq" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 1, 64),
+            "dec" | "decq" | "decb" | "decw" if ops.len() == 1 => {
+                let bits = if mnemonic == "decb" { 8 } else if mnemonic == "decw" { 16 } else { 64 };
+                self.emit_asm_unary_rm(&ops[0], 1, bits);
+            }
             "decl" if ops.len() == 1 => self.emit_asm_unary_rm(&ops[0], 1, 32),
 
             // 旋转
@@ -9743,6 +9889,49 @@ impl Codegen {
             "prefetcht2" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x1A),
             "prefetchnta" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x1B),
             "prefetchw" if ops.len() == 1 => self.emit_asm_prefetch(&ops[0], 0x0D),
+            // clflush / clflushopt: 0F AE /7 (clflushopt 带 66 前缀)
+            "clflush" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], false),
+            "clflushopt" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], true),
+            // FSGSBASE: F3 0F AE /0-/3 (rdfsbase, rdgsbase, wrfsbase, wrgsbase)
+            "rdfsbase" if ops.len() == 1 => self.emit_asm_fsgsbase(&ops[0], 0),
+            "rdgsbase" if ops.len() == 1 => self.emit_asm_fsgsbase(&ops[0], 1),
+            "wrfsbase" if ops.len() == 1 => self.emit_asm_fsgsbase(&ops[0], 2),
+            "wrgsbase" if ops.len() == 1 => self.emit_asm_fsgsbase(&ops[0], 3),
+            // 描述符表指令: 0F 00 /2-/5 (lldt, ltr, verr, verw)
+            "lldt" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 2),
+            "ltr" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 3),
+            "verr" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 4),
+            "verw" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 5),
+            // 描述符表: str (0F 00 /1) 与 sgdt/sidt/lgdt/lidt (0F 01 /0-/3)
+            "str" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 1),
+            "sgdt" if ops.len() == 1 => self.emit_asm_gdt(&ops[0], 0),
+            "sidt" if ops.len() == 1 => self.emit_asm_gdt(&ops[0], 1),
+            "lgdt" if ops.len() == 1 => self.emit_asm_gdt(&ops[0], 2),
+            "lidt" if ops.len() == 1 => self.emit_asm_gdt(&ops[0], 3),
+            // lsl: 0F B3 /r (仅寄存器操作数)
+            "lsl" if ops.len() == 2 => self.emit_asm_scan(&ops[0], &ops[1], 0xB3, 64),
+            // rdpid: F3 0F C7 /7
+            "rdpid" if ops.len() == 1 => self.emit_asm_rdpid(&ops[0]),
+            // I/O: outb/outw/outl + 字符串版本; inb/inw/inl
+            "outb" if ops.len() == 2 => self.emit_asm_out(&ops[0], &ops[1], 8),
+            "outw" if ops.len() == 2 => self.emit_asm_out(&ops[0], &ops[1], 16),
+            "outl" if ops.len() == 2 => self.emit_asm_out(&ops[0], &ops[1], 32),
+            "outsb" => self.emit(&[0x6E]),
+            "outsw" => self.emit(&[0x66, 0x6F]),
+            "outsl" => self.emit(&[0x6F]),
+            "inb" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 8),
+            "inw" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 16),
+            "inl" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 32),
+            "insb" => self.emit(&[0x6C]),
+            "insw" => self.emit(&[0x66, 0x6D]),
+            "insl" => self.emit(&[0x6D]),
+            "iretq" => self.emit(&[0x48, 0xCF]),
+            // 位扫描: tzcnt/lzcnt = F3 + bsf/bsr
+            "tzcnt" if ops.len() == 2 => { self.emit(&[0xF3]); self.emit_asm_scan(&ops[0], &ops[1], 0xBC, 64); }
+            "lzcnt" if ops.len() == 2 => { self.emit(&[0xF3]); self.emit_asm_scan(&ops[0], &ops[1], 0xBD, 64); }
+            // PKRU: rdpkru 0F 01 EE, wrpkru 0F 01 EF
+            "rdpkru" => self.emit(&[0x0F, 0x01, 0xEE]),
+            "wrpkru" => self.emit(&[0x0F, 0x01, 0xEF]),
             "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
             "invlpga" => self.emit(&[0x0F, 0x01, 0xDF]),
             "swapgs" => self.emit(&[0x0F, 0x01, 0xF8]),
@@ -9944,14 +10133,18 @@ impl Codegen {
             "setnp" | "setpo" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x9B),
 
             // 原子操作
-            "cmpxchg" | "cmpxchgl" | "cmpxchgq" if ops.len() == 2 => {
-                let bits = if mnemonic == "cmpxchgl" { 32 } else { 64 };
+            "cmpxchg" | "cmpxchgb" | "cmpxchgw" | "cmpxchgl" | "cmpxchgq" if ops.len() == 2 => {
+                let bits = if mnemonic == "cmpxchgb" { 8 } else if mnemonic == "cmpxchgw" { 16 }
+                    else if mnemonic == "cmpxchgl" { 32 } else { 64 };
                 self.emit_asm_cmpxchg(&ops[0], &ops[1], bits);
             }
-            "xadd" | "xaddl" | "xaddq" if ops.len() == 2 => {
-                let bits = if mnemonic == "xaddl" { 32 } else { 64 };
+            "xadd" | "xaddb" | "xaddw" | "xaddl" | "xaddq" if ops.len() == 2 => {
+                let bits = if mnemonic == "xaddb" { 8 } else if mnemonic == "xaddw" { 16 }
+                    else if mnemonic == "xaddl" { 32 } else { 64 };
                 self.emit_asm_xadd(&ops[0], &ops[1], bits);
             }
+            // cmpxchg16b: 0F C7 /1, 仅内存操作数 (需 lock 前缀)
+            "cmpxchg16b" if ops.len() == 1 => self.emit_asm_cmpxchg16b(&ops[0]),
 
             // 特殊寄存器
             "rdmsr" => self.emit(&[0x0F, 0x32]),
@@ -11058,6 +11251,26 @@ impl Codegen {
             }
             return;
         }
+        // 控制寄存器: mov %crN, %reg (0F 20 /r) / mov %reg, %crN (0F 22 /r)
+        if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (src, dst) {
+            if *ss == ASM_REG_CR {
+                self.emit(&[Self::rex(false, *d, 0, *s), 0x0F, 0x20, Self::modrm_reg_reg(*d, *s)]);
+                return;
+            }
+            if *ds == ASM_REG_CR {
+                self.emit(&[Self::rex(false, *s, 0, *d), 0x0F, 0x22, Self::modrm_reg_reg(*s, *d)]);
+                return;
+            }
+            // 调试寄存器: mov %dbN, %reg (0F 21 /r) / mov %reg, %dbN (0F 23 /r)
+            if *ss == ASM_REG_DR {
+                self.emit(&[Self::rex(false, *d, 0, *s), 0x0F, 0x21, Self::modrm_reg_reg(*d, *s)]);
+                return;
+            }
+            if *ds == ASM_REG_DR {
+                self.emit(&[Self::rex(false, *s, 0, *d), 0x0F, 0x23, Self::modrm_reg_reg(*s, *d)]);
+                return;
+            }
+        }
         // 段前缀 mem: 发射段前缀 + 普通 mem 路径
         if let AsmOperand::SegMem { seg, disp, base, index, scale } = src {
             let (_code, pfx) = Self::seg_meta(*seg);
@@ -11680,10 +11893,144 @@ impl Codegen {
             let (_code, pfx) = Self::seg_meta(*seg);
             self.emit(&[pfx, Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x18]);
             self.emit_asm_modrm_mem_only(hint, *disp, *base, *index, *scale);
+        } else if let AsmOperand::SymDisp(sym, _) = op {
+            // 全局符号: RIP-relative 0F 18 /hint
+            self.emit(&[0x0F, 0x18, 0x05 | ((hint & 7) << 3), 0, 0, 0, 0]);
+            let pos = self.pos() - 4;
+            self.pending_data_rels.push((pos, sym.clone()));
         } else {
             eprintln!("warning: unsupported prefetch operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
+    }
+
+    /// clflush (0F AE /7) / clflushopt (66 0F AE /7), 仅内存操作数
+    fn emit_asm_clflush(&mut self, op: &AsmOperand, opt: bool) {
+        let emit_mem = |c: &mut Self, disp: i32, base: u8, index: Option<u8>, scale: u8| {
+            if opt { c.emit(&[0x66]); }
+            c.emit(&[Self::rex(false, 0, index.unwrap_or(0), base), 0x0F, 0xAE]);
+            c.emit_asm_modrm_mem_only(7, disp, base, index, scale);
+        };
+        match op {
+            AsmOperand::Mem { disp, base, index, scale } => emit_mem(self, *disp, *base, *index, *scale),
+            AsmOperand::SegMem { seg, disp, base, index, scale } => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx]);
+                emit_mem(self, *disp, *base, *index, *scale);
+            }
+            AsmOperand::SymDisp(sym, _) => {
+                if opt { self.emit(&[0x66]); }
+                self.emit(&[0x0F, 0xAE, 0x3D, 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
+            _ => {
+                eprintln!("warning: unsupported clflush operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// FSGSBASE: F3 0F AE /0-/3, 寄存器操作数 (rdfsbase/rdgsbase/wrfsbase/wrgsbase)
+    fn emit_asm_fsgsbase(&mut self, op: &AsmOperand, ext: u8) {
+        if let AsmOperand::Reg(r, _) = op {
+            self.emit(&[0xF3]);
+            self.emit(&[Self::rex(true, 0, 0, *r)]);
+            self.emit(&[0x0F, 0xAE, ((ext & 7) << 3) | (r & 7)]);
+        } else {
+            eprintln!("warning: fsgsbase requires a register operand, emitted as nop");
+            self.emit(&[0x90]);
+        }
+    }
+
+    /// 描述符表指令 lldt/ltr/verr/verw: 0F 00 /2-/5, r/m16 操作数
+    fn emit_asm_desc(&mut self, op: &AsmOperand, ext: u8) {
+        match op {
+            AsmOperand::Reg(r, _) => {
+                self.emit(&[Self::rex(false, 0, 0, *r), 0x0F, 0x00, ((ext & 7) << 3) | (r & 7)]);
+            }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x00]);
+                self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported descriptor operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// sgdt/sidt/lgdt/lidt: 0F 01 /0-/3, 仅内存操作数
+    fn emit_asm_gdt(&mut self, op: &AsmOperand, ext: u8) {
+        match op {
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x01]);
+                self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+            }
+            AsmOperand::SegMem { seg, disp, base, index, scale } => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx, Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x01]);
+                self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: unsupported gdt operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// rdpid: F3 0F C7 /7, 寄存器操作数
+    fn emit_asm_rdpid(&mut self, op: &AsmOperand) {
+        if let AsmOperand::Reg(r, _) = op {
+            self.emit(&[0xF3]);
+            if *r >= 8 { self.emit(&[0x41]); }
+            self.emit(&[0x0F, 0xC7, 0xF8 | (r & 7)]);
+        } else {
+            eprintln!("warning: rdpid requires a register operand, emitted as nop");
+            self.emit(&[0x90]);
+        }
+    }
+
+    /// outb/outw/outl: 端口为立即数 (E6/E7) 或 DX (EE/EF)
+    fn emit_asm_out(&mut self, val: &AsmOperand, port: &AsmOperand, bits: u8) {
+        match port {
+            AsmOperand::Imm(p) if *p >= 0 && *p <= 0xFFFF => {
+                if bits == 8 { self.emit(&[0xE6, *p as u8]); }
+                else if bits == 16 { self.emit(&[0x66, 0xE7, *p as u8]); }
+                else { self.emit(&[0xE7, *p as u8]); }
+            }
+            AsmOperand::Reg(2, _) => { // dx
+                if bits == 8 { self.emit(&[0xEE]); }
+                else if bits == 16 { self.emit(&[0x66, 0xEF]); }
+                else { self.emit(&[0xEF]); }
+            }
+            _ => {
+                eprintln!("warning: unsupported out port operand, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+        let _ = val;
+    }
+
+    /// inb/inw/inl: 端口为立即数 (E4/E5) 或 DX (EC/ED), 目标固定 AL/AX/EAX
+    fn emit_asm_in(&mut self, port: &AsmOperand, val: &AsmOperand, bits: u8) {
+        match port {
+            AsmOperand::Imm(p) if *p >= 0 && *p <= 0xFFFF => {
+                if bits == 8 { self.emit(&[0xE4, *p as u8]); }
+                else if bits == 16 { self.emit(&[0x66, 0xE5, *p as u8]); }
+                else { self.emit(&[0xE5, *p as u8]); }
+            }
+            AsmOperand::Reg(2, _) => { // dx
+                if bits == 8 { self.emit(&[0xEC]); }
+                else if bits == 16 { self.emit(&[0x66, 0xED]); }
+                else { self.emit(&[0xED]); }
+            }
+            _ => {
+                eprintln!("warning: unsupported in port operand, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+        let _ = val;
     }
 
     /// 0F 01 /m 系统指令（invlpg 等）
@@ -12071,13 +12418,17 @@ impl Codegen {
 
     fn emit_asm_unary_rm(&mut self, op: &AsmOperand, ext: u8, bits: u8) {
         let w = bits == 64;
+        // 操作码组: INC/DEC (ext 0/1) 用 0xFE (8位) / 0xFF (16+位);
+        // 其他单操作数组 (NOT/NEG/MUL/IMUL/DIV/IDIV, ext 2-7) 用 0xF6 (8位) / 0xF7 (16+位)
+        let opcode = if bits == 8 { if ext <= 1 { 0xFE } else { 0xF6 } }
+                    else { if ext <= 1 { 0xFF } else { 0xF7 } };
         match op {
             AsmOperand::Reg(r, _) => {
-                self.emit(&[Self::rex(w, 0, 0, *r), 0xF7, Self::modrm_reg_reg(ext, *r)]);
+                self.emit(&[Self::rex(w, 0, 0, *r), opcode, Self::modrm_reg_reg(ext, *r)]);
             }
             AsmOperand::Mem { disp, base, index, scale } => {
                 if bits == 16 { self.emit(&[0x66]); }
-                self.emit(&[Self::rex(w, 0, index.unwrap_or(0), *base), 0xF7]);
+                self.emit(&[Self::rex(w, 0, index.unwrap_or(0), *base), opcode]);
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             }
             _ => {
@@ -12328,18 +12679,44 @@ impl Codegen {
         }
     }
 
-    fn emit_asm_xchg(&mut self, src: &AsmOperand, dst: &AsmOperand) {
-        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
-            if *s == 0 { // xchg eax, reg
-                if *d >= 8 { self.emit(&[0x41]); }
-                self.emit(&[0x90 + (d & 7)]);
-            } else if *d == 0 {
-                if *s >= 8 { self.emit(&[0x41]); }
-                self.emit(&[0x90 + (s & 7)]);
-            } else {
-                self.emit(&[Self::rex(true, *s, 0, *d), 0x87, Self::modrm_reg_reg(*s, *d)]);
+    fn emit_asm_xchg(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        let w = bits == 64;
+        // xchg 编码: 8位 86 /r, 16位 66 86 /r, 32位 87 /r, 64位 REX.W 87 /r
+        let opcode = if bits == 8 { 0x86 } else { 0x87 };
+        // 段前缀 mem
+        if let AsmOperand::SegMem { seg, disp, base, index, scale } = dst {
+            let (_code, pfx) = Self::seg_meta(*seg);
+            self.emit(&[pfx]);
+            if let AsmOperand::Reg(s, _) = src {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), opcode]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
-        } else { self.emit(&[0x90]); }
+            return;
+        }
+        if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            if bits >= 32 {
+                if *s == 0 { // xchg eax, reg 快捷编码 90+rd
+                    if *d >= 8 { self.emit(&[0x41]); }
+                    self.emit(&[0x90 + (d & 7)]);
+                } else if *d == 0 {
+                    if *s >= 8 { self.emit(&[0x41]); }
+                    self.emit(&[0x90 + (s & 7)]);
+                } else {
+                    self.emit(&[Self::rex(w, *s, 0, *d), opcode, Self::modrm_reg_reg(*s, *d)]);
+                }
+            } else {
+                if bits == 16 { self.emit(&[0x66]); }
+                self.emit(&[Self::rex(w, *s, 0, *d), opcode, Self::modrm_reg_reg(*s, *d)]);
+            }
+        } else if let (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) = (src, dst) {
+            if bits == 16 { self.emit(&[0x66]); }
+            self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), opcode]);
+            self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+        } else {
+            eprintln!("warning: unsupported xchg operand pattern, emitted as nop");
+            self.emit(&[0x90]);
+        }
     }
 
     fn emit_asm_cmov(&mut self, src: &AsmOperand, dst: &AsmOperand, cc: u8) {
@@ -12392,29 +12769,31 @@ impl Codegen {
 
     fn emit_asm_cmpxchg(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
         let w = bits == 64;
+        // cmpxchg 编码: 8位 0F B0, 16位 66 0F B1, 32/64位 0F B1
+        let opcode = if bits == 8 { 0xB0 } else { 0xB1 };
         // 段前缀 mem
         if let AsmOperand::SegMem { seg, disp, base, index, scale } = dst {
             let (_code, pfx) = Self::seg_meta(*seg);
             self.emit(&[pfx]);
             if let AsmOperand::Reg(s, _) = src {
                 if bits == 16 { self.emit(&[0x66]); }
-                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, 0xB1]);
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             return;
         }
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
-                self.emit(&[Self::rex(w, *s, 0, *d), 0x0F, 0xB1, Self::modrm_reg_reg(*s, *d)]);
+                self.emit(&[Self::rex(w, *s, 0, *d), 0x0F, opcode, Self::modrm_reg_reg(*s, *d)]);
             }
             (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
                 if bits == 16 { self.emit(&[0x66]); }
-                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, 0xB1]);
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, _)) => {
                 if bits == 16 { self.emit(&[0x66]); }
-                self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, 0xB1]);
+                self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {
@@ -12426,27 +12805,48 @@ impl Codegen {
 
     fn emit_asm_xadd(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
         let w = bits == 64;
+        // xadd 编码: 8位 0F C0, 16位 66 0F C1, 32/64位 0F C1
+        let opcode = if bits == 8 { 0xC0 } else { 0xC1 };
         if let AsmOperand::SegMem { seg, disp, base, index, scale } = dst {
             let (_code, pfx) = Self::seg_meta(*seg);
             self.emit(&[pfx]);
             if let AsmOperand::Reg(s, _) = src {
                 if bits == 16 { self.emit(&[0x66]); }
-                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, 0xC1]);
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             return;
         }
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
-                self.emit(&[Self::rex(w, *s, 0, *d), 0x0F, 0xC1, Self::modrm_reg_reg(*s, *d)]);
+                self.emit(&[Self::rex(w, *s, 0, *d), 0x0F, opcode, Self::modrm_reg_reg(*s, *d)]);
             }
             (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
                 if bits == 16 { self.emit(&[0x66]); }
-                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, 0xC1]);
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             _ => {
                 eprintln!("warning: unsupported xadd operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// cmpxchg16b: 0F C7 /1, 操作数必须为内存
+    fn emit_asm_cmpxchg16b(&mut self, op: &AsmOperand) {
+        match op {
+            AsmOperand::Mem { disp, base, index, scale } => {
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0xC7]);
+                self.emit_asm_modrm_mem_only(1, *disp, *base, *index, *scale);
+            }
+            AsmOperand::SegMem { seg, disp, base, index, scale } => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx, Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0xC7]);
+                self.emit_asm_modrm_mem_only(1, *disp, *base, *index, *scale);
+            }
+            _ => {
+                eprintln!("warning: cmpxchg16b requires a memory operand, emitted as nop");
                 self.emit(&[0x90]);
             }
         }

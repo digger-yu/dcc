@@ -96,7 +96,11 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             offset: 0,
         }),
         Expr::SizeofTy { ty, .. } => Ok(ConstValue::Int(ty.size() as i128)),
-        Expr::SizeofExpr { e, .. } => Ok(ConstValue::Int(e.ty().size() as i128)),
+        Expr::SizeofExpr { e, .. } => match e.as_ref() {
+            // 字符串字面量: C 中为 char[N] 数组 (含 NUL), 返回实际字节数
+            Expr::String { data, .. } => Ok(ConstValue::Int(data.len() as i128)),
+            _ => Ok(ConstValue::Int(e.ty().size() as i128)),
+        },
         Expr::AlignofTy { ty, .. } => Ok(ConstValue::Int(ty.align() as i128)),
         Expr::AlignofExpr { e, .. } => Ok(ConstValue::Int(e.ty().align() as i128)),
         Expr::Unary { op, e, .. } => {

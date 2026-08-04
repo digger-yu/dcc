@@ -21,6 +21,32 @@ use crate::format_check;
 use crate::lto;
 use crate::profile;
 
+/// 判断 IR 类型是否(递归)包含浮点成分, 供 -mno-sse 下的 E0300 检测使用
+fn ir_type_uses_float(t: &ir::ValueType) -> bool {
+    match t {
+        ir::ValueType::Float { .. } => true,
+        ir::ValueType::Pointer(i) | ir::ValueType::Array(i, _)
+        | ir::ValueType::Vector(i, _) | ir::ValueType::Complex(i) => {
+            ir_type_uses_float(i)
+        }
+        ir::ValueType::Function { ret, params } => {
+            ir_type_uses_float(ret) || params.iter().any(ir_type_uses_float)
+        }
+        _ => false,
+    }
+}
+
+fn ir_expr_uses_float(e: &ir::TypedExpr) -> bool {
+    ir_type_uses_float(&e.ty)
+        || matches!(e.literal, Some(ir::ExprLiteral::Float(_)))
+        || e.children.iter().any(ir_expr_uses_float)
+}
+
+fn ir_stmt_uses_float(s: &ir::TypedStmt) -> bool {
+    s.expressions.iter().any(ir_expr_uses_float)
+        || s.nested.iter().any(ir_stmt_uses_float)
+}
+
 /// 把预处理器阶段产生的非致命诊断打印到 stderr。
 /// PCH 不兼容 (W0400) / 缓存写失败 (W0402) 等场景会被转储; 错误会通过
 /// 调用方已有的错误检查路径处理 (Err(pp_diags) → main.rs 输出).
@@ -343,10 +369,15 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
     target.set_stack_protector(cfg.stack_protector);
     if !target.sse {
+        // 精确检测 IR 中是否真的使用浮点类型/字面量, 避免把含
+        // double_xxx 标识符(如内核 double_rq_lock)的 Debug 串误判为浮点
         let uses_sse = module.functions.iter().any(|f| {
-            format!("{:?}", f).contains("Float") || format!("{:?}", f).contains("Double")
+            ir_type_uses_float(&f.return_type)
+                || f.params.iter().any(ir_type_uses_float)
+                || f.body.iter().any(ir_stmt_uses_float)
         }) || module.globals.iter().any(|g| {
-            format!("{:?}", g).contains("Float") || format!("{:?}", g).contains("Double")
+            ir_type_uses_float(&g.ty)
+                || g.initializer.as_ref().is_some_and(ir_expr_uses_float)
         });
         if uses_sse {
             let mut diags = vec![Diagnostic::err(

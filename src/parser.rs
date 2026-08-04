@@ -1243,10 +1243,13 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::Semi { self.advance(); return Some(vec![]); }
             // 支持 `struct T *a, *b;` 多声明符
             let mut decls = vec![];
+            let saved_auto = self.decl_auto_type;
             while let Some(ds) = self.parse_var_or_func(ty.clone(), attrs.clone(), storage) {
                 decls.extend(ds);
                 if self.cur.kind != TokKind::Comma { break; }
                 self.advance();
+                // 多声明符 (__auto_type a = 1, b = 2;): 恢复 auto 标志供下一声明符使用
+                self.decl_auto_type = saved_auto;
             }
             if decls.is_empty() { None } else { Some(decls) }
         } else {
@@ -1263,10 +1266,13 @@ impl<'a> Parser<'a> {
         let storage = self.decl_storage;
         let attrs = Self::merge_attrs(leading_attrs, std::mem::take(&mut self.decl_attrs));
         let mut decls = vec![];
+        let saved_auto = self.decl_auto_type;
         while let Some(ds) = self.parse_var_or_func(ty.clone(), attrs.clone(), storage) {
             decls.extend(ds);
             if self.cur.kind != TokKind::Comma { break; }
             self.advance();
+            // 多声明符 (__auto_type a = 1, b = 2;): 恢复 auto 标志供下一声明符使用
+            self.decl_auto_type = saved_auto;
         }
         if decls.is_empty() { None } else { Some(decls) }
         }
@@ -1399,6 +1405,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_var_or_func(&mut self, ty: Type, leading_attrs: ParsedAttrs, storage: StorageClass) -> Option<Vec<Decl>> {
+        // __auto_type/C23 auto: parse_type_mode 设置了 decl_auto_type 标志,
+        // 在此立即归属给当前声明符并清除, 防止 init 表达式内嵌套声明
+        // (如语句表达式中的局部变量) 误消费该标志
+        let auto_owned = self.decl_auto_type;
+        self.decl_auto_type = false;
         // 函数指针声明/定义: type (*name)(params)
         // 第一性原理: (* 表示这不是普通变量名, 而是函数指针声明
         if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
@@ -1625,8 +1636,7 @@ impl<'a> Parser<'a> {
                     self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 }
                 let init = self.parse_expr_bp(2)?;
-                let decl_ty = if self.decl_auto_type {
-                    self.decl_auto_type = false;
+                let decl_ty = if auto_owned {
                     init.ty()
                 } else {
                     ty.clone()
@@ -3887,12 +3897,8 @@ impl<'a> Parser<'a> {
                                     self.advance();
                                 }
                                 if self.expect(TokKind::RParen, "')'") {
-                                    // 排除末尾 '\0'
-                                    let len = if data.last() == Some(&0) {
-                                        data.len() - 1
-                                    } else {
-                                        data.len()
-                                    };
+                                    // 末尾 NUL 不计入长度
+                                    let len = data.len();
                                     e = Expr::Int { v: len as i128, span: sp.clone(), ty: int_t() };
                                     continue;
                                 }
@@ -4049,6 +4055,7 @@ impl<'a> Parser<'a> {
             TokKind::StringLit => {
                 let mut data = parse_str(&self.cur.text); self.advance();
                 while self.cur.kind == TokKind::StringLit { data.extend(parse_str(&self.cur.text)); self.advance(); }
+                data.push(0); // NUL 终止符
                 Some(Expr::String { data, span: sp, ty: Type::Ptr(Box::new(Type::Char)) })
             }
             TokKind::WideStringLit => {
@@ -4312,13 +4319,16 @@ fn parse_int_lit(s: &str) -> i128 {
     else { s.parse::<i128>().unwrap_or(0) }
 }
 
+/// 解析字符串字面量内容（不含末尾 NUL 终止符）。
+/// 相邻字符串拼接时由调用方负责在最终数据后补 NUL，
+/// 避免中间字符串的 NUL 嵌入结果（如 "a" "b" → "a\0b"）。
 fn parse_str(raw: &str) -> Vec<u8> {
     let inner = &raw[1..raw.len()-1]; let mut d = vec![]; let mut it = inner.chars();
     while let Some(c) = it.next() {
         if c == '\\' { match it.next() { Some('n') => d.push(b'\n'), Some('t') => d.push(b'\t'), Some('r') => d.push(b'\r'), Some('0') => d.push(0), Some('\\') => d.push(b'\\'), Some('"') => d.push(b'"'), Some('\'') => d.push(b'\''), Some(c) => { d.push(b'\\'); d.push(c as u8); } None => d.push(b'\\'), } }
         else { d.extend_from_slice(c.to_string().as_bytes()); }
     }
-    d.push(0); d
+    d
 }
 
 /// Parse wide string literal L"..." to UTF-32LE bytes (4 bytes per wchar_t)

@@ -272,6 +272,34 @@ fn fold_constant_branches(module: &mut Module) {
     }
 }
 
+/// 语句（递归）内是否含 Label。goto 可跳入常量死分支中的标签,
+/// 折叠时若丢弃标签会导致 codegen "unresolved label" 崩溃。
+fn stmt_has_label(s: &Stmt) -> bool {
+    match s {
+        Stmt::Label { .. } => true,
+        Stmt::Block { b, .. } => block_has_label(b),
+        Stmt::If { then_, else_, .. } => {
+            stmt_has_label(then_)
+                || else_.as_ref().map(|e| stmt_has_label(e)).unwrap_or(false)
+        }
+        Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
+            stmt_has_label(body)
+        }
+        Stmt::Switch { cases, .. } => cases.iter().any(|c| block_has_label(&c.body)),
+        _ => false,
+    }
+}
+
+fn block_has_label(b: &Block) -> bool {
+    b.items.iter().any(|item| match item {
+        BlockItem::Stmt(s) => stmt_has_label(s),
+        BlockItem::Decl(Decl::Func(f)) => {
+            f.body.as_ref().map(|b| block_has_label(b)).unwrap_or(false)
+        }
+        _ => false,
+    })
+}
+
 fn fold_branches_block(items: &mut Vec<BlockItem>) {
     let mut i = 0;
     while i < items.len() {
@@ -288,6 +316,19 @@ fn fold_branches_block(items: &mut Vec<BlockItem>) {
             let item = items.remove(i);
             if let BlockItem::Stmt(Stmt::If { cond, then_, else_, span, .. }) = item {
                 let v = const_eval::eval(&cond).unwrap_or(0);
+                // 被丢弃的分支内含 Label 时不能折叠: goto 仍可跳入, 删除会丢标签
+                let has_label = if v != 0 {
+                    else_.as_ref().map(|e| stmt_has_label(e)).unwrap_or(false)
+                } else {
+                    stmt_has_label(&then_)
+                };
+                if has_label {
+                    items.insert(i, BlockItem::Stmt(Stmt::If {
+                        cond, then_, else_, span,
+                    }));
+                    i += 1;
+                    continue;
+                }
                 let taken = if v != 0 {
                     *then_
                 } else {
@@ -326,7 +367,7 @@ fn fold_branches_stmt(s: &mut Stmt) {
         Stmt::While { cond, body, span, .. } => {
             *cond = fold_expr(cond.clone());
             if let Ok(v) = const_eval::eval(cond) {
-                if v == 0 {
+                if v == 0 && !stmt_has_label(body) {
                     *s = Stmt::Block {
                         b: Block { items: vec![], span: span.clone() },
                         span: span.clone(),
@@ -341,7 +382,7 @@ fn fold_branches_stmt(s: &mut Stmt) {
             if let Some(c) = cond {
                 *c = fold_expr(c.clone());
                 if let Ok(v) = const_eval::eval(c) {
-                    if v == 0 {
+                    if v == 0 && !stmt_has_label(body) {
                         if let Some(i) = init.take() {
                             *s = Stmt::Expr { e: stmt_to_void_expr(*i), span: span.clone() };
                         } else {
@@ -986,6 +1027,88 @@ mod tests {
                 ..
             }) => {}
             other => panic!("expected inlined constant 25, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn o2_preserves_label_in_dead_if_branch() {
+        // `if (0) { lbl: ... }` 中的标签可被 goto 跳入,
+        // 常量分支折叠不能丢弃它 (否则 codegen unresolved label 崩溃)。
+        let span = Span::point("t.c", 1, 1);
+        let int = int_ty();
+        let func = Decl::Func(FuncDecl {
+            ret_ty: int.clone(),
+            name: Ident { name: "f".into(), span: span.clone() },
+            params: vec![],
+            body: Some(Block {
+                items: vec![
+                    BlockItem::Stmt(Stmt::If {
+                        cond: Expr::Int { v: 0, span: span.clone(), ty: int.clone() },
+                        then_: Box::new(Stmt::Block {
+                            b: Block {
+                                items: vec![
+                                    BlockItem::Stmt(Stmt::Label {
+                                        name: Ident { name: "undo".into(), span: span.clone() },
+                                        stmt: Box::new(Stmt::Expr {
+                                            e: Expr::Int { v: 1, span: span.clone(), ty: int.clone() },
+                                            span: span.clone(),
+                                        }),
+                                        span: span.clone(),
+                                    }),
+                                ],
+                                span: span.clone(),
+                            },
+                            span: span.clone(),
+                        }),
+                        else_: None,
+                        span: span.clone(),
+                    }),
+                ],
+                span: span.clone(),
+            }),
+            span: span.clone(),
+            is_static: true,
+            is_extern: false,
+            is_variadic: false,
+            is_weak: false,
+            is_constructor: false,
+            is_destructor: false,
+            is_nested: false,
+            is_cold: false,
+            is_hot: false,
+            section: None,
+            alignment: None,
+            visibility: None,
+            alias_name: None,
+            upvars: vec![],
+            is_unused: false,
+            is_noinline: false,
+            is_always_inline: false,
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None, dtor_priority: None, is_retain: false, is_used_attr: false,
+            is_flatten: false, error_msg: None, warning_msg: None, deprecated_msg: None,
+            ifunc_resolver: None,
+        });
+        let prog = Program { decls: vec![func] };
+        let mut module = ir::lower(prog).expect("lower");
+        optimize(&mut module, 2);
+        let body = &module.source().decls[0];
+        if let Decl::Func(f) = body {
+            let items = f.body.as_ref().unwrap().items.clone();
+            let has_label = items.iter().any(|item| match item {
+                BlockItem::Stmt(Stmt::If { then_, .. }) => {
+                    stmt_has_label(then_)
+                }
+                BlockItem::Stmt(s) => stmt_has_label(s),
+                _ => false,
+            });
+            assert!(has_label, "label in dead if branch must survive -O2 fold");
         }
     }
 }

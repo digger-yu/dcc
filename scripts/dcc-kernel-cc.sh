@@ -59,7 +59,16 @@ case "$base" in
 esac
 # dcc 不实现 fentry, 但 kernel 头文件检查 CC_USING_FENTRY; 额外注入, 让代码以为支持.
 # 实际 fentry 钩子不会插入, 但编译可以走完.
+# dcc 的 x86_64 后端始终使用 SSE, 过滤 -mno-sse 避免 E0300 误报
 if ! printf '%s\n' "$@" | grep -q -- '-DCC_USING_FENTRY'; then
     set -- -DCC_USING_FENTRY "$@"
 fi
-exec "$DCC_BIN" "$@"
+# 过滤 -mno-sse 系列: dcc 后端始终使用 SSE
+out=()
+for a in "$@"; do
+    case "$a" in
+        -mno-sse*|-mno-mmx|-mno-3dnow*|-mno-avx*|-mno-sse4*) ;;
+        *) out+=("$a") ;;
+    esac
+done
+exec "$DCC_BIN" "${out[@]}"

@@ -140,9 +140,44 @@ fn collect_assignments(item: &BlockItem, assigned: &mut std::collections::HashSe
                 assigned.insert(name.name.clone());
             }
         }
-        BlockItem::Stmt(Stmt::Block { b, .. }) => {
+        BlockItem::Stmt(s) => collect_assignments_stmt(s, assigned),
+        _ => {}
+    }
+}
+
+fn collect_assignments_stmt(s: &Stmt, assigned: &mut std::collections::HashSet<String>) {
+    match s {
+        Stmt::Expr { e: Expr::Assign { l, .. }, .. } => {
+            if let Expr::Ident { name, .. } = l.as_ref() {
+                assigned.insert(name.name.clone());
+            }
+        }
+        Stmt::Block { b, .. } => {
             for sub in &b.items {
                 collect_assignments(sub, assigned);
+            }
+        }
+        Stmt::If { then_, else_, .. } => {
+            collect_assignments_stmt(then_, assigned);
+            if let Some(e) = else_ {
+                collect_assignments_stmt(e, assigned);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+            collect_assignments_stmt(body, assigned);
+        }
+        Stmt::For { init, body, .. } => {
+            if let Some(i) = init {
+                collect_assignments_stmt(i, assigned);
+            }
+            collect_assignments_stmt(body, assigned);
+        }
+        Stmt::Label { stmt, .. } => collect_assignments_stmt(stmt, assigned),
+        Stmt::Switch { cases, .. } => {
+            for c in cases {
+                for sub in &c.body.items {
+                    collect_assignments(sub, assigned);
+                }
             }
         }
         _ => {}
@@ -196,6 +231,15 @@ fn rewrite_stmt_aliases(s: &mut Stmt, alias: &HashMap<String, String>) {
                 rewrite_expr_aliases(st, alias);
             }
             rewrite_stmt_aliases(body, alias);
+        }
+        Stmt::Label { stmt, .. } => rewrite_stmt_aliases(stmt, alias),
+        Stmt::GotoIndirect { expr, .. } => rewrite_expr_aliases(expr, alias),
+        Stmt::Switch { cases, .. } => {
+            for c in cases {
+                for sub in &mut c.body.items {
+                    rewrite_aliases(sub, alias);
+                }
+            }
         }
         _ => {}
     }

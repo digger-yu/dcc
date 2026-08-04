@@ -533,7 +533,11 @@ impl Builder {
                 Operand::Int(one)
             }
             Expr::SizeofTy { ty, .. } => Operand::Int(ty.size() as i128),
-            Expr::SizeofExpr { e, .. } => Operand::Int(e.ty().size() as i128),
+            Expr::SizeofExpr { e, .. } => match e.as_ref() {
+                // 字符串字面量: C 中为 char[N] 数组 (含 NUL), 返回实际字节数
+                Expr::String { data, .. } => Operand::Int(data.len() as i128),
+                _ => Operand::Int(e.ty().size() as i128),
+            },
             Expr::AlignofTy { ty, .. } => Operand::Int(ty.align() as i128),
             Expr::AlignofExpr { e, .. } => Operand::Int(e.ty().align() as i128),
             _ => Operand::Void, // 简化: 复杂 expr (CompoundLit, StmtExpr, LabelAddr, VaArg) 降级
