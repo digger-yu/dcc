@@ -79,6 +79,7 @@ pub struct Codegen {
     pub target: Target,
     pub labels: HashMap<String, u64>,
     current_asm_line: usize,
+    current_asm_src_line: u32,
     pending: Vec<PendingJump>,
     next_label: u32,
     var_map: HashMap<String, (i32, Type)>,
@@ -545,6 +546,7 @@ impl Codegen {
             global_asm_exports: HashSet::new(),
             func_asm_layout: HashMap::new(),
             current_asm_line: 0,
+            current_asm_src_line: 0,
             source_name: String::new(),
             parallel_codegen: false,
         }
@@ -556,6 +558,22 @@ impl Codegen {
             0
         } else {
             128
+        }
+    }
+
+    /// mini-asm 警告: 附带源文件名与 asm 语句所在行号, 方便定位内核等
+    /// 大型 TU 中不被支持的内联汇编指令。
+    fn asm_warn(&self, msg: &str) {
+        if self.current_asm_src_line > 0 {
+            eprintln!(
+                "{}:{}: warning: {}",
+                self.source_name, self.current_asm_src_line, msg
+            );
+        } else {
+            eprintln!(
+                "{}: warning: {}",
+                self.source_name, msg
+            );
         }
     }
     pub fn emit(&mut self, b: &[u8]) {
@@ -3585,8 +3603,10 @@ impl Codegen {
                 input_constraints,
                 clobbers,
                 goto_labels,
-                ..
+                span,
             } => {
+                // 记录 asm 语句的源行号, 使 mini-asm 警告能附带源位置
+                self.current_asm_src_line = span.line;
                 // 将 GCC 的 %lN / %l[name] 占位符解析为 C 标签名。
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
@@ -4380,8 +4400,10 @@ impl Codegen {
                 input_names,
                 input_constraints,
                 clobbers,
+                span,
                 ..
             } => {
+                self.current_asm_src_line = span.line;
                 self.emit_inline_asm(
                     asm_str,
                     outputs,
@@ -9324,6 +9346,27 @@ impl Codegen {
                 }
                 true
             }
+            // __builtin_strncat(dst, src, n): 拼接字符串, 走 libc strncat.
+            // __builtin_memchr(s, c, n): 内存查找字符, 走 libc memchr.
+            // 两者签名均与 libc 完全对应, 直接转发.
+            "__builtin_strncat" | "__builtin_memchr" => {
+                let libc_name = if name == "__builtin_strncat" {
+                    "strncat"
+                } else {
+                    "memchr"
+                };
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() {
+                    self.gen_expr(a, ar[i]);
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label(libc_name);
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
             // __builtin_fma / fmaf / fmal: 融合乘加 (优先 vfmadd213pd/fma libm 走 fma).
             // 走 libm: 链接器解析 fma, 兼顾 freestanding (编译时不开 vfmadd).
             "__builtin_fma" | "__builtin_fmaf" | "__builtin_fmal" => {
@@ -11760,11 +11803,23 @@ impl Codegen {
         let parts: Vec<&str> = inner.split(',').collect();
         let base_str = parts.first().map(|s| s.trim()).unwrap_or("");
         if base_str == "%rip" || base_str == "rip" {
+            // 检查是否有 index/scale: disp(%rip,%idx,scale)
+            let mut idx: Option<u8> = None;
+            let mut scale: u8 = 1;
+            if parts.len() > 1 {
+                let idx_str = parts[1].trim();
+                if !idx_str.is_empty() {
+                    idx = Self::parse_asm_reg(idx_str).map(|(r, _)| r);
+                }
+            }
+            if parts.len() > 2 {
+                scale = parts[2].trim().parse::<u8>().unwrap_or(1);
+            }
             return AsmOperand::Mem {
                 disp,
                 base: ASM_BASE_RIP,
-                index: None,
-                scale: 1,
+                index: idx,
+                scale,
             };
         }
         let (base, _bsz) = Self::parse_asm_reg(base_str).unwrap_or((5, 64)); // 默认 rbp
@@ -12139,6 +12194,8 @@ impl Codegen {
             "subb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 8),
             "and" | "andq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 64),
             "andl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 32),
+            "andw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 16),
+            "andb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 8),
             "or" | "orq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 64),
             "orl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 32),
             "orw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 16),
@@ -12253,7 +12310,7 @@ impl Codegen {
                 if let AsmOperand::Reg(d, _) = &ops[0] {
                     self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7)]);
                 } else {
-                    eprintln!("warning: rdrand needs register operand, emitted as nop");
+                    self.asm_warn("rdrand needs register operand, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12261,7 +12318,7 @@ impl Codegen {
                 if let AsmOperand::Reg(d, _) = &ops[0] {
                     self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7) | (1 << 3)]);
                 } else {
-                    eprintln!("warning: rdseed needs register operand, emitted as nop");
+                    self.asm_warn("rdseed needs register operand, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12495,6 +12552,68 @@ impl Codegen {
             // 调用
             "call" if ops.len() == 1 => self.emit_asm_call(&ops[0]),
 
+            // 远跳转/远调用/远返回 (far jumps/calls/returns)
+            "retf" | "retfw" | "retfl" | "retfq" if ops.is_empty() => self.emit(&[0xCB]),
+            "retf" | "retfw" | "retfl" | "retfq" if ops.len() == 1 => {
+                if let AsmOperand::Imm(v) = &ops[0] {
+                    self.emit(&[0xCA]);
+                    self.emit(&(*v as i16).to_le_bytes());
+                } else {
+                    self.asm_warn("retf needs imm16, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "lret" | "lretw" | "lretl" | "lretq" if ops.is_empty() => self.emit(&[0xCB]),
+            "lret" | "lretw" | "lretl" | "lretq" if ops.len() == 1 => {
+                if let AsmOperand::Imm(v) = &ops[0] {
+                    self.emit(&[0xCA]);
+                    self.emit(&(*v as i16).to_le_bytes());
+                } else {
+                    self.asm_warn("lret needs imm16, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "ljmpw" if ops.len() == 2 => {
+                if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0xEA]);
+                    self.emit(&(*off as i16).to_le_bytes());
+                    self.emit(&(*seg as i16).to_le_bytes());
+                } else {
+                    self.asm_warn("ljmpw needs $seg, $off, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "ljmpl" if ops.len() == 2 => {
+                if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0xEA]);
+                    self.emit(&(*off as i32).to_le_bytes());
+                    self.emit(&(*seg as i16).to_le_bytes());
+                } else {
+                    self.asm_warn("ljmpl needs $seg, $off, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "lcallw" if ops.len() == 2 => {
+                if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0x9A]);
+                    self.emit(&(*off as i16).to_le_bytes());
+                    self.emit(&(*seg as i16).to_le_bytes());
+                } else {
+                    self.asm_warn("lcallw needs $seg, $off, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            "lcalll" if ops.len() == 2 => {
+                if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0x9A]);
+                    self.emit(&(*off as i32).to_le_bytes());
+                    self.emit(&(*seg as i16).to_le_bytes());
+                } else {
+                    self.asm_warn("lcalll needs $seg, $off, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+
             // 设置字节 (setcc)
             "sete" | "setz" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x94),
             "setne" | "setnz" if ops.len() == 1 => self.emit_asm_setcc(&ops[0], 0x95),
@@ -12563,7 +12682,7 @@ impl Codegen {
                         kind: JumpKind::Je,
                     });
                 } else {
-                    eprintln!("warning: xbegin needs label or imm, emitted as nop");
+                    self.asm_warn("xbegin needs label or imm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12572,7 +12691,7 @@ impl Codegen {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xC6, 0xF8, *v as u8]);
                 } else {
-                    eprintln!("warning: xabort needs imm8, emitted as nop");
+                    self.asm_warn("xabort needs imm8, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12609,7 +12728,7 @@ impl Codegen {
                         self.emit(&[0xDF, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     }
                 } else {
-                    eprintln!("warning: aeskeygenassist needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("aeskeygenassist needs imm, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12625,7 +12744,7 @@ impl Codegen {
                         self.emit(&[0xCC, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     }
                 } else {
-                    eprintln!("warning: sha1rnds4 needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("sha1rnds4 needs imm, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12853,7 +12972,7 @@ impl Codegen {
                         self.emit(&[*imm as u8]);
                     }
                 } else {
-                    eprintln!("warning: vcvtps2ph needs imm, reg, reg/mem, emitted as nop");
+                    self.asm_warn("vcvtps2ph needs imm, reg, reg/mem, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12873,7 +12992,7 @@ impl Codegen {
                         self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     }
                 } else {
-                    eprintln!("warning: pshufd needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("pshufd needs imm, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12886,7 +13005,7 @@ impl Codegen {
                         self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     }
                 } else {
-                    eprintln!("warning: pshufhw needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("pshufhw needs imm, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12899,7 +13018,7 @@ impl Codegen {
                         self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     }
                 } else {
-                    eprintln!("warning: pshuflw needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("pshuflw needs imm, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12931,7 +13050,7 @@ impl Codegen {
                         self.emit(&[0x0F, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     }
                 } else {
-                    eprintln!("warning: palignr needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("palignr needs imm, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -12945,7 +13064,7 @@ impl Codegen {
                         self.emit(&[0x0E, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     }
                 } else {
-                    eprintln!("warning: pblendw needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("pblendw needs imm, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13012,11 +13131,11 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_pinsr_imm8(*imm, src, *d, 0x20, 0);
                     } else {
-                        eprintln!("warning: pinsrb dst must be xmm, emitted as nop");
+                        self.asm_warn("pinsrb dst must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pinsrb needs imm, src, xmm, emitted as nop");
+                    self.asm_warn("pinsrb needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13027,11 +13146,11 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_pinsr_imm8(*imm, src, *d, 0x22, 0);
                     } else {
-                        eprintln!("warning: pinsrd dst must be xmm, emitted as nop");
+                        self.asm_warn("pinsrd dst must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pinsrd needs imm, src, xmm, emitted as nop");
+                    self.asm_warn("pinsrd needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13042,11 +13161,11 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_pinsr_imm8(*imm, src, *d, 0x22, 1);
                     } else {
-                        eprintln!("warning: pinsrq dst must be xmm, emitted as nop");
+                        self.asm_warn("pinsrq dst must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pinsrq needs imm, src, xmm, emitted as nop");
+                    self.asm_warn("pinsrq needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13058,11 +13177,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_pextr_imm8(*imm, *s, dst, 0x14, 0);
                     } else {
-                        eprintln!("warning: pextrb src must be xmm, emitted as nop");
+                        self.asm_warn("pextrb src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pextrb needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("pextrb needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13073,11 +13192,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_pextr_imm8(*imm, *s, dst, 0x16, 0);
                     } else {
-                        eprintln!("warning: pextrd src must be xmm, emitted as nop");
+                        self.asm_warn("pextrd src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pextrd needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("pextrd needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13088,11 +13207,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_pextr_imm8(*imm, *s, dst, 0x16, 1);
                     } else {
-                        eprintln!("warning: pextrq src must be xmm, emitted as nop");
+                        self.asm_warn("pextrq src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pextrq needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("pextrq needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13104,11 +13223,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_pextr_imm8(*imm, *s, dst, 0x17, 0);
                     } else {
-                        eprintln!("warning: extractps src must be xmm, emitted as nop");
+                        self.asm_warn("extractps src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: extractps needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("extractps needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13121,11 +13240,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
                         self.emit(&[0x21, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     } else {
-                        eprintln!("warning: insertps needs xmm operands, emitted as nop");
+                        self.asm_warn("insertps needs xmm operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: insertps needs imm, xmm, xmm, emitted as nop");
+                    self.asm_warn("insertps needs imm, xmm, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13137,11 +13256,11 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x20, 0);
                     } else {
-                        eprintln!("warning: vpinsrb dst must be xmm, emitted as nop");
+                        self.asm_warn("vpinsrb dst must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpinsrb needs imm, src, xmm, emitted as nop");
+                    self.asm_warn("vpinsrb needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13152,11 +13271,11 @@ impl Codegen {
                     if *vs == 128 && *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x20, 0);
                     } else {
-                        eprintln!("warning: vpinsrb needs xmm vvvv/dst, emitted as nop");
+                        self.asm_warn("vpinsrb needs xmm vvvv/dst, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpinsrb needs imm, src, xmm, xmm, emitted as nop");
+                    self.asm_warn("vpinsrb needs imm, src, xmm, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13167,11 +13286,11 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x22, 0);
                     } else {
-                        eprintln!("warning: vpinsrd dst must be xmm, emitted as nop");
+                        self.asm_warn("vpinsrd dst must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpinsrd needs imm, src, xmm, emitted as nop");
+                    self.asm_warn("vpinsrd needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13182,11 +13301,11 @@ impl Codegen {
                     if *vs == 128 && *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x22, 0);
                     } else {
-                        eprintln!("warning: vpinsrd needs xmm vvvv/dst, emitted as nop");
+                        self.asm_warn("vpinsrd needs xmm vvvv/dst, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpinsrd needs imm, src, xmm, xmm, emitted as nop");
+                    self.asm_warn("vpinsrd needs imm, src, xmm, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13197,11 +13316,11 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x22, 1);
                     } else {
-                        eprintln!("warning: vpinsrq dst must be xmm, emitted as nop");
+                        self.asm_warn("vpinsrq dst must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpinsrq needs imm, src, xmm, emitted as nop");
+                    self.asm_warn("vpinsrq needs imm, src, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13212,11 +13331,11 @@ impl Codegen {
                     if *vs == 128 && *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x22, 1);
                     } else {
-                        eprintln!("warning: vpinsrq needs xmm vvvv/dst, emitted as nop");
+                        self.asm_warn("vpinsrq needs xmm vvvv/dst, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpinsrq needs imm, src, xmm, xmm, emitted as nop");
+                    self.asm_warn("vpinsrq needs imm, src, xmm, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13228,11 +13347,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x14, 0);
                     } else {
-                        eprintln!("warning: vpextrb src must be xmm, emitted as nop");
+                        self.asm_warn("vpextrb src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpextrb needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("vpextrb needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13243,11 +13362,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x16, 0);
                     } else {
-                        eprintln!("warning: vpextrd src must be xmm, emitted as nop");
+                        self.asm_warn("vpextrd src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpextrd needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("vpextrd needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13258,11 +13377,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x16, 1);
                     } else {
-                        eprintln!("warning: vpextrq src must be xmm, emitted as nop");
+                        self.asm_warn("vpextrq src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vpextrq needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("vpextrq needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13273,11 +13392,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x17, 0);
                     } else {
-                        eprintln!("warning: vextractps src must be xmm, emitted as nop");
+                        self.asm_warn("vextractps src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vextractps needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("vextractps needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13288,11 +13407,11 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x19, 0);
                     } else {
-                        eprintln!("warning: vextractpd src must be xmm, emitted as nop");
+                        self.asm_warn("vextractpd src must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: vextractpd needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("vextractpd needs imm, xmm, dst, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14031,11 +14150,11 @@ impl Codegen {
                     if *sz == ASM_REG_TMM {
                         self.emit(&[0xC4, 0xE2, 0x7B, 0x49, 0xC0 | (d & 7)]);
                     } else {
-                        eprintln!("warning: tilezero needs tmm register, emitted as nop");
+                        self.asm_warn("tilezero needs tmm register, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: tilezero needs tmm register, emitted as nop");
+                    self.asm_warn("tilezero needs tmm register, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14136,11 +14255,11 @@ impl Codegen {
                     if *ss == ASM_REG_MMX && *ds == ASM_REG_MMX {
                         self.emit(&[0x0F, 0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     } else {
-                        eprintln!("warning: pshufw needs mmx registers, emitted as nop");
+                        self.asm_warn("pshufw needs mmx registers, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pshufw needs imm, mmx, mmx, emitted as nop");
+                    self.asm_warn("pshufw needs imm, mmx, mmx, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14174,7 +14293,7 @@ impl Codegen {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xE2, *v as u8]);
                 } else {
-                    eprintln!("warning: loop needs imm8 offset, emitted as nop");
+                    self.asm_warn("loop needs imm8 offset, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14182,7 +14301,7 @@ impl Codegen {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xE1, *v as u8]);
                 } else {
-                    eprintln!("warning: loope needs imm8 offset, emitted as nop");
+                    self.asm_warn("loope needs imm8 offset, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14190,26 +14309,26 @@ impl Codegen {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xE0, *v as u8]);
                 } else {
-                    eprintln!("warning: loopne needs imm8 offset, emitted as nop");
+                    self.asm_warn("loopne needs imm8 offset, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
 
             // === 杂项 ===
             "bound" if ops.len() == 2 => {
-                eprintln!("warning: bound is 80286 legacy, emitted as nop");
+                self.asm_warn("bound is 80286 legacy, emitted as nop");
                 self.emit(&[0x90]);
             }
             "enter" if ops.len() == 2 => {
                 if let (AsmOperand::Imm(imm16), AsmOperand::Imm(imm8)) = (&ops[0], &ops[1]) {
                     self.emit(&[0xC8, *imm16 as u8, (*imm16 >> 8) as u8, *imm8 as u8]);
                 } else {
-                    eprintln!("warning: enter needs imm16, imm8, emitted as nop");
+                    self.asm_warn("enter needs imm16, imm8, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             "into" => {
-                eprintln!("warning: into is 80286 legacy, emitted as nop");
+                self.asm_warn("into is 80286 legacy, emitted as nop");
                 self.emit(&[0x90]);
             }
 
@@ -14223,11 +14342,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF2, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        eprintln!("warning: andn needs GPR operands, emitted as nop");
+                        self.asm_warn("andn needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: andn needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("andn needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14240,11 +14359,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF7, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        eprintln!("warning: bextr needs GPR operands, emitted as nop");
+                        self.asm_warn("bextr needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: bextr needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("bextr needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14255,11 +14374,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
                         self.emit(&[0xF3, Self::modrm_reg_reg(3, *s)]);
                     } else {
-                        eprintln!("warning: blsi needs GPR operands, emitted as nop");
+                        self.asm_warn("blsi needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: blsi needs reg, reg, emitted as nop");
+                    self.asm_warn("blsi needs reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14270,11 +14389,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
                         self.emit(&[0xF3, Self::modrm_reg_reg(2, *s)]);
                     } else {
-                        eprintln!("warning: blsmsk needs GPR operands, emitted as nop");
+                        self.asm_warn("blsmsk needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: blsmsk needs reg, reg, emitted as nop");
+                    self.asm_warn("blsmsk needs reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14285,11 +14404,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
                         self.emit(&[0xF3, Self::modrm_reg_reg(1, *s)]);
                     } else {
-                        eprintln!("warning: blsr needs GPR operands, emitted as nop");
+                        self.asm_warn("blsr needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: blsr needs reg, reg, emitted as nop");
+                    self.asm_warn("blsr needs reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14302,11 +14421,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF5, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        eprintln!("warning: bzhi needs GPR operands, emitted as nop");
+                        self.asm_warn("bzhi needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: bzhi needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("bzhi needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14319,11 +14438,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 3);
                         self.emit(&[0xF6, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        eprintln!("warning: mulx needs GPR operands, emitted as nop");
+                        self.asm_warn("mulx needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: mulx needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("mulx needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14336,11 +14455,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 3);
                         self.emit(&[0xF2, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        eprintln!("warning: pdep needs GPR operands, emitted as nop");
+                        self.asm_warn("pdep needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pdep needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("pdep needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14353,11 +14472,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 2);
                         self.emit(&[0xF5, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        eprintln!("warning: pext needs GPR operands, emitted as nop");
+                        self.asm_warn("pext needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: pext needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("pext needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14370,11 +14489,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 3, 1, 0, 0, 3);
                         self.emit(&[0xF0, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     } else {
-                        eprintln!("warning: rorx needs GPR operands, emitted as nop");
+                        self.asm_warn("rorx needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: rorx needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("rorx needs imm, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14387,11 +14506,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF7, Self::modrm_reg_reg(7, *s)]);
                     } else {
-                        eprintln!("warning: sarx needs GPR operands, emitted as nop");
+                        self.asm_warn("sarx needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: sarx needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("sarx needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14403,11 +14522,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF7, Self::modrm_reg_reg(6, *s)]);
                     } else {
-                        eprintln!("warning: shlx needs GPR operands, emitted as nop");
+                        self.asm_warn("shlx needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: shlx needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("shlx needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14419,11 +14538,11 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF7, Self::modrm_reg_reg(5, *s)]);
                     } else {
-                        eprintln!("warning: shrx needs GPR operands, emitted as nop");
+                        self.asm_warn("shrx needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: shrx needs reg, reg, reg, emitted as nop");
+                    self.asm_warn("shrx needs reg, reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14433,11 +14552,11 @@ impl Codegen {
                     if *s <= 15 && *d <= 15 {
                         self.emit(&[Self::rex(false, *d, 0, *s), 0x66, 0x0F, 0x38, 0xF6, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        eprintln!("warning: adcx needs GPR operands, emitted as nop");
+                        self.asm_warn("adcx needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: adcx needs reg, reg, emitted as nop");
+                    self.asm_warn("adcx needs reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14447,11 +14566,11 @@ impl Codegen {
                     if *s <= 15 && *d <= 15 {
                         self.emit(&[Self::rex(false, *d, 0, *s), 0xF3, 0x0F, 0x38, 0xF6, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        eprintln!("warning: adox needs GPR operands, emitted as nop");
+                        self.asm_warn("adox needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    eprintln!("warning: adox needs reg, reg, emitted as nop");
+                    self.asm_warn("adox needs reg, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14459,10 +14578,11 @@ impl Codegen {
             // 未识别指令: 警告 + nop 占位
             _ => {
                 eprintln!(
-                    "{}:{}: warning: unsupported inline asm instruction '{}', emitted as nop",
+                    "{}:{}: warning: unsupported inline asm instruction '{}' (asm line {}), emitted as nop",
                     self.source_name,
+                    self.current_asm_src_line,
+                    mnemonic,
                     self.current_asm_line,
-                    mnemonic
                 );
                 self.emit(&[0x90]);
             }
@@ -14511,7 +14631,7 @@ impl Codegen {
                     4 => self.emit(&[0x0F, 0xA0]), // push %fs
                     5 => self.emit(&[0x0F, 0xA8]), // push %gs
                     _ => {
-                        eprintln!("warning: push: unknown segment {}, emitted as nop", seg);
+                        eprintln!("{}:{}: warning: push: unknown segment {}, emitted as nop", self.source_name, self.current_asm_src_line, seg);
                         self.emit(&[0x90]);
                     }
                 }
@@ -14550,7 +14670,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported push operand pattern, emitted as nop");
+                self.asm_warn("unsupported push operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -14573,7 +14693,7 @@ impl Codegen {
                     4 => self.emit(&[0x0F, 0xA1]), // pop %fs
                     5 => self.emit(&[0x0F, 0xA9]), // pop %gs
                     _ => {
-                        eprintln!("warning: pop: unknown segment {}, emitted as nop", seg);
+                        eprintln!("{}:{}: warning: pop: unknown segment {}, emitted as nop", self.source_name, self.current_asm_src_line, seg);
                         self.emit(&[0x90]);
                     }
                 }
@@ -14599,7 +14719,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(0, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported pop operand pattern, emitted as nop");
+                self.asm_warn("unsupported pop operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -14885,7 +15005,7 @@ impl Codegen {
                 }
             }
             _ => {
-                eprintln!("warning: unsupported mov operand pattern, emitted as nop");
+                self.asm_warn("unsupported mov operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15186,7 +15306,7 @@ impl Codegen {
                 }
             }
         } else {
-            eprintln!("warning: unsupported lea operand pattern, emitted as nop");
+            self.asm_warn("unsupported lea operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -15257,7 +15377,10 @@ impl Codegen {
                 if bits != 8 {
                     self.emit(&[Self::rex(w, 0, 0, *d)]);
                 }
-                if *v >= -128 && *v <= 127 {
+                if bits == 8 && *v >= 0 && *v <= 255 {
+                    // 8 位 ALU: 80 /0 ib, 接受 0..255 的字节值
+                    self.emit(&[0x80 + op * 8, Self::modrm_reg_reg(op, *d), *v as u8]);
+                } else if *v >= -128 && *v <= 127 {
                     // 8/16 位: 80 /0 ib
                     if bits == 8 {
                         self.emit(&[0x80 + op * 8, Self::modrm_reg_reg(op, *d), *v as u8]);
@@ -15267,8 +15390,8 @@ impl Codegen {
                 } else if bits == 8 {
                     // 8 位但 imm 越界: 报错
                     eprintln!(
-                        "warning: 8-bit ALU immediate out of range ({}), emitted as nop",
-                        v
+                        "{}:{}: warning: 8-bit ALU immediate out of range ({}), emitted as nop",
+                        self.source_name, self.current_asm_src_line, v
                     );
                     self.emit(&[0x90]);
                 } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
@@ -15363,7 +15486,7 @@ impl Codegen {
                 }
             }
             _ => {
-                eprintln!("warning: unsupported ALU operand pattern, emitted as nop");
+                self.asm_warn("unsupported ALU operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15378,12 +15501,24 @@ impl Codegen {
         scale: u8,
     ) {
         if base == ASM_BASE_RIP {
-            let mut modrm = ((reg & 7) << 3) | 0x05;
-            if disp != 0 {
-                modrm = ((reg & 7) << 3) | 0x85;
+            if let Some(idx) = index {
+                // [rip+disp+idx*scale]: modrm=0x04 (SIB), sib=scale:idx:5
+                let modrm = ((reg & 7) << 3) | 0x04;
+                let sc = match scale {
+                    2 => 1,
+                    4 => 2,
+                    8 => 3,
+                    _ => 0,
+                };
+                let sib = (sc << 6) | ((idx & 7) << 3) | 5;
+                self.emit(&[modrm, sib]);
+                self.emit(&disp.to_le_bytes());
+            } else {
+                // [rip+disp]: modrm=0x05 (mod=00, rm=101)
+                let modrm = ((reg & 7) << 3) | 0x05;
+                self.emit(&[modrm]);
+                self.emit(&disp.to_le_bytes());
             }
-            self.emit(&[modrm]);
-            self.emit(&disp.to_le_bytes());
             return;
         }
         let has_sib = index.is_some() || (base & 7) == 4;
@@ -15421,6 +15556,9 @@ impl Codegen {
             } else {
                 self.emit(&disp.to_le_bytes());
             }
+        } else if has_sib && (base & 7) == 5 {
+            // base=rbp + index, no disp: 强制 disp8=0 (mod=01, disp8=0)
+            self.emit(&[0x00]);
         }
     }
 
@@ -15478,12 +15616,15 @@ impl Codegen {
                 }
                 self.emit(&[Self::rex(w, 0, 0, *d)]);
                 if bits == 8 {
-                    if *v >= -128 && *v <= 127 {
+                    if *v >= 0 && *v <= 255 {
+                        self.emit(&[0xF6, Self::modrm_reg_reg(0, *d), *v as u8]);
+                    } else if *v >= -128 && *v <= -1 {
+                        // 负值: 0xF6 /0 ib 接受 unsigned 8-bit, 负值截断为 u8
                         self.emit(&[0xF6, Self::modrm_reg_reg(0, *d), *v as u8]);
                     } else {
                         eprintln!(
-                            "warning: 8-bit test immediate out of range ({}), emitted as nop",
-                            v
+                            "{}:{}: warning: 8-bit test immediate out of range ({}), emitted as nop",
+                            self.source_name, self.current_asm_src_line, v
                         );
                         self.emit(&[0x90]);
                     }
@@ -15574,14 +15715,14 @@ impl Codegen {
                     self.emit(&(*v as i32).to_le_bytes());
                 } else {
                     eprintln!(
-                        "warning: 32/64-bit test mem immediate out of range ({}), emitted as nop",
-                        v
+                        "{}:{}: warning: 32/64-bit test mem immediate out of range ({}), emitted as nop",
+                        self.source_name, self.current_asm_src_line, v
                     );
                     self.emit(&[0x90]);
                 }
             }
             _ => {
-                eprintln!("warning: unsupported test operand pattern, emitted as nop");
+                self.asm_warn("unsupported test operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15623,7 +15764,7 @@ impl Codegen {
                     self.emit_asm_modrm_mem_only(op, *disp, *base, *index, *scale);
                 }
                 _ => {
-                    eprintln!("warning: shift SegMem: only $imm or %cl supported, emitted as nop");
+                    self.asm_warn("shift SegMem: only $imm or %cl supported, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -15718,7 +15859,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(op, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported shift operand pattern, emitted as nop");
+                self.asm_warn("unsupported shift operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15762,7 +15903,7 @@ impl Codegen {
             let pos = self.pos() - 4;
             self.pending_data_rels.push((pos, sym.clone()));
         } else {
-            eprintln!("warning: unsupported prefetch operand pattern, emitted as nop");
+            self.asm_warn("unsupported prefetch operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -15803,7 +15944,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             }
             _ => {
-                eprintln!("warning: unsupported clflush operand pattern, emitted as nop");
+                self.asm_warn("unsupported clflush operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15816,7 +15957,7 @@ impl Codegen {
             self.emit(&[Self::rex(true, 0, 0, *r)]);
             self.emit(&[0x0F, 0xAE, ((ext & 7) << 3) | (r & 7)]);
         } else {
-            eprintln!("warning: fsgsbase requires a register operand, emitted as nop");
+            self.asm_warn("fsgsbase requires a register operand, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -15842,7 +15983,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported descriptor operand pattern, emitted as nop");
+                self.asm_warn("unsupported descriptor operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15877,7 +16018,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported gdt operand pattern, emitted as nop");
+                self.asm_warn("unsupported gdt operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15892,7 +16033,7 @@ impl Codegen {
             }
             self.emit(&[0x0F, 0xC7, 0xF8 | (r & 7)]);
         } else {
-            eprintln!("warning: rdpid requires a register operand, emitted as nop");
+            self.asm_warn("rdpid requires a register operand, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -15920,7 +16061,7 @@ impl Codegen {
                 }
             }
             _ => {
-                eprintln!("warning: unsupported out port operand, emitted as nop");
+                self.asm_warn("unsupported out port operand, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15950,7 +16091,7 @@ impl Codegen {
                 }
             }
             _ => {
-                eprintln!("warning: unsupported in port operand, emitted as nop");
+                self.asm_warn("unsupported in port operand, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -15991,12 +16132,12 @@ impl Codegen {
                     self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                 }
                 _ => {
-                    eprintln!("warning: invpcid needs memory operand, emitted as nop");
+                    self.asm_warn("invpcid needs memory operand, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
         } else {
-            eprintln!("warning: invpcid needs register operand, emitted as nop");
+            self.asm_warn("invpcid needs register operand, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -16027,8 +16168,13 @@ impl Codegen {
                 0x01,
             ]);
             self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+        } else if let AsmOperand::SymDisp(sym, _) = op {
+            // sys mem sym(%rip): 0F 01 /ext + disp32
+            self.emit(&[0x0F, 0x01, 0x05 | ((ext & 7) << 3), 0, 0, 0, 0]);
+            let pos = self.pos() - 4;
+            self.pending_data_rels.push((pos, sym.clone()));
         } else {
-            eprintln!("warning: unsupported sys mem operand pattern, emitted as nop");
+            self.asm_warn("unsupported sys mem operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
         let _ = grp;
@@ -16038,7 +16184,7 @@ impl Codegen {
         if let AsmOperand::Imm(v) = op {
             self.emit(&[0xCD, *v as u8]);
         } else {
-            eprintln!("warning: unsupported int operand pattern, emitted as nop");
+            self.asm_warn("unsupported int operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -16063,7 +16209,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported x87 operand pattern, emitted as nop");
+                self.asm_warn("unsupported x87 operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16085,7 +16231,7 @@ impl Codegen {
                 }
             }
             _ => {
-                eprintln!("warning: unsupported x87 st operand pattern, emitted as nop");
+                self.asm_warn("unsupported x87 st operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16106,7 +16252,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported MMX operand pattern, emitted as nop");
+                self.asm_warn("unsupported MMX operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16123,7 +16269,7 @@ impl Codegen {
                 Self::modrm_reg_reg(*d, *s),
             ]);
         } else {
-            eprintln!("warning: vmread only supports reg,reg operands");
+            self.asm_warn("vmread only supports reg,reg operands");
             self.emit(&[0x90]);
         }
     }
@@ -16138,7 +16284,7 @@ impl Codegen {
                 Self::modrm_reg_reg(*s, *d),
             ]);
         } else {
-            eprintln!("warning: vmwrite only supports reg,reg operands");
+            self.asm_warn("vmwrite only supports reg,reg operands");
             self.emit(&[0x90]);
         }
     }
@@ -16186,7 +16332,7 @@ impl Codegen {
             let pos = self.pos() - 4;
             self.pending_data_rels.push((pos, sym.clone()));
         } else {
-            eprintln!("warning: fpu_load only supports mem operand, emitted as nop");
+            self.asm_warn("fpu_load only supports mem operand, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -16268,7 +16414,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported sse mov operand pattern, emitted as nop");
+                self.asm_warn("unsupported sse mov operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16277,6 +16423,82 @@ impl Codegen {
     /// 标量 SSE 算术：prefix 可为 0x0F / 0xF2 / 0xF3 / 0x66
     fn emit_asm_sse_arith(&mut self, src: &AsmOperand, dst: &AsmOperand, prefix: u8, opcode: u8) {
         let is_xmm = |_r: u8, sz: u8| sz == 128;
+        // 段前缀 mem src: 段前缀 + 普通 mem sse arith
+        if let AsmOperand::SegMem {
+            seg,
+            disp,
+            base,
+            index,
+            scale,
+        } = src
+        {
+            let (_code, pfx) = Self::seg_meta(*seg);
+            self.emit(&[pfx]);
+            if let AsmOperand::Reg(d, ds) = dst {
+                if is_xmm(*d, *ds) {
+                    let mut rex = 0u8;
+                    if *d >= 8 {
+                        rex |= 0x04;
+                    }
+                    if *base >= 8 {
+                        rex |= 0x01;
+                    }
+                    if index.unwrap_or(0) >= 8 {
+                        rex |= 0x02;
+                    }
+                    if rex != 0 {
+                        self.emit(&[0x40 | rex]);
+                    }
+                    if prefix == 0x66 {
+                        self.emit(&[0x66, 0x0F, opcode]);
+                    } else if prefix == 0x0F {
+                        self.emit(&[0x0F, opcode]);
+                    } else {
+                        self.emit(&[prefix, 0x0F, opcode]);
+                    }
+                    self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                }
+            }
+            return;
+        }
+        // 段前缀 mem dst
+        if let AsmOperand::SegMem {
+            seg,
+            disp,
+            base,
+            index,
+            scale,
+        } = dst
+        {
+            let (_code, pfx) = Self::seg_meta(*seg);
+            self.emit(&[pfx]);
+            if let AsmOperand::Reg(s, ss) = src {
+                if is_xmm(*s, *ss) {
+                    let mut rex = 0u8;
+                    if *s >= 8 {
+                        rex |= 0x04;
+                    }
+                    if *base >= 8 {
+                        rex |= 0x01;
+                    }
+                    if index.unwrap_or(0) >= 8 {
+                        rex |= 0x02;
+                    }
+                    if rex != 0 {
+                        self.emit(&[0x40 | rex]);
+                    }
+                    if prefix == 0x66 {
+                        self.emit(&[0x66, 0x0F, opcode]);
+                    } else if prefix == 0x0F {
+                        self.emit(&[0x0F, opcode]);
+                    } else {
+                        self.emit(&[prefix, 0x0F, opcode]);
+                    }
+                    self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+                }
+            }
+            return;
+        }
         match (src, dst) {
             (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds))
                 if is_xmm(*s, *ss) && is_xmm(*d, *ds) =>
@@ -16362,7 +16584,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported sse arith operand pattern, emitted as nop");
+                self.asm_warn("unsupported sse arith operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16433,7 +16655,7 @@ impl Codegen {
                 self.emit(&[imm8]);
             }
             _ => {
-                eprintln!("warning: unsupported sse cmp/shuffle operand pattern, emitted as nop");
+                self.asm_warn("unsupported sse cmp/shuffle operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16531,7 +16753,7 @@ impl Codegen {
                 }
             }
             _ => {
-                eprintln!("warning: unsupported sse packed mov operand pattern, emitted as nop");
+                self.asm_warn("unsupported sse packed mov operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16570,8 +16792,19 @@ impl Codegen {
                     *v as u8,
                 ]);
             }
+            // shldq $imm, %src, (%mem): src=Imm(count), dst=Reg(src), count=Mem(dst)
+            (AsmOperand::Imm(v), AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, op_imm]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+                self.emit(&[*v as u8]);
+            }
+            // shldq %cl, %src, (%mem): src=Reg(%cl), dst=Reg(src), count=Mem(dst)
+            (AsmOperand::Reg(c, _), AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) if *c == 1 => {
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, op]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
             _ => {
-                eprintln!("warning: unsupported shld/shrd operand pattern, emitted as nop");
+                self.asm_warn("unsupported shld/shrd operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16640,8 +16873,23 @@ impl Codegen {
                 self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
+            // SegMem dst: 发射段前缀后走普通 mem 路径
+            (AsmOperand::Imm(v), AsmOperand::SegMem { seg, disp, base, index, scale }) => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx, Self::rex(w, 0, index.unwrap_or(0), *base), 0x0F, 0xBA]);
+                let ext = match opcode {
+                    0xA3 => 4, 0xAB => 5, 0xB3 => 6, 0xBB => 7, _ => 4,
+                };
+                self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+                self.emit(&[*v as u8]);
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::SegMem { seg, disp, base, index, scale }) => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx, Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
             _ => {
-                eprintln!("warning: unsupported bit-test operand pattern, emitted as nop");
+                self.asm_warn("unsupported bit-test operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16681,8 +16929,24 @@ impl Codegen {
                 self.emit(&[Self::rex(true, *s, index.unwrap_or(0), *base), 0x0F, 0xAF]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
+            (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, _)) => {
+                // imul src=*(sym(%rip)), dst=%reg: 0F AF /r
+                let rex = Self::rex(true, *d, 0, 0);
+                let modrm = 0x05 | ((d & 7) << 3);
+                self.emit(&[rex, 0x0F, 0xAF, modrm, 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::SymDisp(sym, _)) => {
+                // imul src=%reg, dst=sym(%rip): 0F AF /r — %reg is modrm.reg, sym is modrm.r/m
+                let rex = Self::rex(true, *s, 0, 0);
+                let modrm = 0x05 | ((s & 7) << 3);
+                self.emit(&[rex, 0x0F, 0xAF, modrm, 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
             _ => {
-                eprintln!("warning: unsupported imul2 operand pattern, emitted as nop");
+                self.asm_warn("unsupported imul2 operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16725,13 +16989,28 @@ impl Codegen {
                         self.emit(&(*v as i32).to_le_bytes());
                     }
                 }
+                AsmOperand::SymDisp(sym, _) => {
+                    // imul $imm, sym(%rip), %reg: 6B /r ib / 69 /r id
+                    let rex = Self::rex(true, *d, 0, 0);
+                    let modrm = 0x05 | ((d & 7) << 3);
+                    if *v >= -128 && *v <= 127 {
+                        self.emit(&[rex, 0x6B, modrm, 0, 0, 0, 0, *v as u8]);
+                        let pos = self.pos() - 5;
+                        self.pending_data_rels.push((pos, sym.clone()));
+                    } else {
+                        self.emit(&[rex, 0x69, modrm, 0, 0, 0, 0]);
+                        let pos = self.pos() - 4;
+                        self.pending_data_rels.push((pos, sym.clone()));
+                        self.emit(&(*v as i32).to_le_bytes());
+                    }
+                }
                 _ => {
-                    eprintln!("warning: unsupported imul3 src operand pattern, emitted as nop");
+                    self.asm_warn("unsupported imul3 src operand pattern, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
         } else {
-            eprintln!("warning: unsupported imul3 operand pattern, emitted as nop");
+            self.asm_warn("unsupported imul3 operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -16770,7 +17049,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported unary operand pattern, emitted as nop");
+                self.asm_warn("unsupported unary operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16833,7 +17112,7 @@ impl Codegen {
                 }
             }
             _ => {
-                eprintln!("warning: unsupported jmp operand pattern, emitted as nop");
+                self.asm_warn("unsupported jmp operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16869,7 +17148,7 @@ impl Codegen {
                 let _ = at;
             }
             _ => {
-                eprintln!("warning: unsupported jcc operand pattern, emitted as nop");
+                self.asm_warn("unsupported jcc operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16924,7 +17203,7 @@ impl Codegen {
                 self.emit(&[0xFF, 0xD0]);
             }
             _ => {
-                eprintln!("warning: unsupported call operand pattern, emitted as nop");
+                self.asm_warn("unsupported call operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -16961,7 +17240,7 @@ impl Codegen {
                     8 => self.emit(&[0x0F, 0xB6, Self::modrm_reg_reg(*d, *s)]),
                     16 => self.emit(&[0x0F, 0xB7, Self::modrm_reg_reg(*d, *s)]),
                     _ => {
-                        eprintln!("warning: unsupported movzx source size, emitted as nop");
+                        self.asm_warn("unsupported movzx source size, emitted as nop");
                         self.emit(&[0x90])
                     }
                 };
@@ -16989,12 +17268,21 @@ impl Codegen {
                         self.emit(&[0x41, 0xB0 + (d & 7), *v as u8]);
                     }
                 } else {
-                    eprintln!("warning: movzx $imm only supports 8-bit source, emitted as nop");
+                    self.asm_warn("movzx $imm only supports 8-bit source, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
+            (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, _)) => {
+                // movzx sym(%rip), %reg: 0F B6/B7 /r
+                let rex = Self::rex(w, *d, 0, 0);
+                let op = if src_bits == 8 { 0xB6u8 } else { 0xB7 };
+                let modrm = 0x05 | ((d & 7) << 3);
+                self.emit(&[rex, 0x0F, op, modrm, 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
             _ => {
-                eprintln!("warning: unsupported movzx operand pattern, emitted as nop");
+                self.asm_warn("unsupported movzx operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17037,7 +17325,7 @@ impl Codegen {
                     16 => self.emit(&[0x0F, 0xBF, Self::modrm_reg_reg(*d, *s)]),
                     32 => self.emit(&[0x63, Self::modrm_reg_reg(*d, *s)]),
                     _ => {
-                        eprintln!("warning: unsupported movsx source size, emitted as nop");
+                        self.asm_warn("unsupported movsx source size, emitted as nop");
                         self.emit(&[0x90])
                     }
                 };
@@ -17104,12 +17392,31 @@ impl Codegen {
                     }
                     self.emit(&(*v as i32).to_le_bytes());
                 } else {
-                    eprintln!("warning: movsx $imm with unsupported size, emitted as nop");
+                    self.asm_warn("movsx $imm with unsupported size, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
+            (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, _)) => {
+                // movsx sym(%rip), %reg: 0F BE/BF /r or 63 /r (movsxd)
+                let rex = Self::rex(w, *d, 0, 0);
+                let op = match src_bits {
+                    8 => 0xBEu8,
+                    16 => 0xBF,
+                    32 => 0x63,
+                    _ => 0xBE,
+                };
+                let modrm = 0x05 | ((d & 7) << 3);
+                if src_bits == 32 {
+                    // movsxd: 63 /r (no 0F prefix)
+                    self.emit(&[rex, op, modrm, 0, 0, 0, 0]);
+                } else {
+                    self.emit(&[rex, 0x0F, op, modrm, 0, 0, 0, 0]);
+                }
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
             _ => {
-                eprintln!("warning: unsupported movsx operand pattern, emitted as nop");
+                self.asm_warn("unsupported movsx operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17177,7 +17484,7 @@ impl Codegen {
             self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), opcode]);
             self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
         } else {
-            eprintln!("warning: unsupported xchg operand pattern, emitted as nop");
+            self.asm_warn("unsupported xchg operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -17258,7 +17565,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(0, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported setcc operand pattern, emitted as nop");
+                self.asm_warn("unsupported setcc operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17328,7 +17635,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported cmpxchg operand pattern, emitted as nop");
+                self.asm_warn("unsupported cmpxchg operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17382,7 +17689,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported xadd operand pattern, emitted as nop");
+                self.asm_warn("unsupported xadd operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17417,7 +17724,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(1, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: cmpxchg16b requires a memory operand, emitted as nop");
+                self.asm_warn("cmpxchg16b requires a memory operand, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17470,7 +17777,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported scan operand pattern, emitted as nop");
+                self.asm_warn("unsupported scan operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17533,7 +17840,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported popcnt operand pattern, emitted as nop");
+                self.asm_warn("unsupported popcnt operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17554,7 +17861,7 @@ impl Codegen {
                 }
                 self.emit(&[0x0F, 0xC8 + (r & 7)]);
             } else if bits == 16 {
-                eprintln!("warning: bswap on 16-bit register not supported, emitted as nop");
+                self.asm_warn("bswap on 16-bit register not supported, emitted as nop");
                 self.emit(&[0x90]);
             } else {
                 if *r >= 8 {
@@ -17563,7 +17870,7 @@ impl Codegen {
                 self.emit(&[0x0F, 0xC8 + (r & 7)]);
             }
         } else {
-            eprintln!("warning: unsupported bswap operand pattern, emitted as nop");
+            self.asm_warn("unsupported bswap operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -17622,7 +17929,7 @@ impl Codegen {
             self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
             self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
         } else {
-            eprintln!("warning: unsupported movnt operand pattern, emitted as nop");
+            self.asm_warn("unsupported movnt operand pattern, emitted as nop");
             self.emit(&[0x90]);
         }
     }
@@ -17769,18 +18076,24 @@ impl Codegen {
         map: u8,
         _is_scalar: bool,
     ) {
-        // AT&T 顺序: src1 在 vvvv, src2/m 在 modrm.rm, dst 在 modrm.reg
-        let (d, s1) = match (dst, src1) {
-            (AsmOperand::Reg(d, ds), AsmOperand::Reg(s, ss)) if *ds >= 128 && *ss >= 128 => {
-                (*d, *s)
-            }
+        // AT&T: src1=ops[0] (Intel src2=modrm.r/m), src2=ops[1] (Intel src1=VEX.vvvv), dst=ops[2] (Intel dst=modrm.reg)
+        let d = match dst {
+            AsmOperand::Reg(d, ds) if *ds >= 128 => *d,
             _ => {
-                eprintln!("warning: unsupported VEX 3-op reg-reg pattern, emitted as nop");
+                self.asm_warn("unsupported VEX 3-op dst pattern, emitted as nop");
                 self.emit(&[0x90]);
                 return;
             }
         };
-        match src2 {
+        let s1 = match src2 {
+            AsmOperand::Reg(s, ss) if *ss >= 128 => *s,
+            _ => {
+                self.asm_warn("unsupported VEX 3-op src1 pattern, emitted as nop");
+                self.emit(&[0x90]);
+                return;
+            }
+        };
+        match src1 {
             AsmOperand::Reg(s2, sz2) if *sz2 >= 128 => {
                 self.emit_asm_vex_3op_reg(d, s1, *s2, 0, pp, map, opcode, 0);
             }
@@ -17794,8 +18107,32 @@ impl Codegen {
                     d, s1, *disp, *base, *index, *scale, 0, pp, map, opcode, 0,
                 );
             }
+            AsmOperand::SegMem {
+                seg,
+                disp,
+                base,
+                index,
+                scale,
+            } => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx]);
+                self.emit_asm_vex_3op_mem(
+                    d, s1, *disp, *base, *index, *scale, 0, pp, map, opcode, 0,
+                );
+            }
+            AsmOperand::SymDisp(sym, _) => {
+                // VEX 3-op RIP-relative: mod=00 r/m=101 + disp32
+                if map == 1 {
+                    self.emit_vex3_prefix(d, s1, 0, pp);
+                } else {
+                    self.emit_vex4_prefix(d, 0, map, 0, s1, 0, pp);
+                }
+                self.emit(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
             _ => {
-                eprintln!("warning: unsupported VEX 3-op src2 pattern, emitted as nop");
+                self.asm_warn("unsupported VEX 3-op src2 pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17816,19 +18153,27 @@ impl Codegen {
         w: u8,
         _is_scalar: bool,
     ) {
-        let (d, s1) = match (dst, src1) {
-            (AsmOperand::Reg(d, ds), AsmOperand::Reg(s, ss)) if *ds >= 128 && *ss >= 128 => {
-                (*d, *s)
-            }
+        // AT&T: src1=ops[0] (Intel src2=modrm.r/m), src2=ops[1] (Intel src1=VEX.vvvv), dst=ops[2] (Intel dst=modrm.reg)
+        let d = match dst {
+            AsmOperand::Reg(d, ds) if *ds >= 128 => *d,
             _ => {
-                eprintln!("warning: unsupported FMA dst/src1 pattern, emitted as nop");
+                self.asm_warn("unsupported FMA dst pattern, emitted as nop");
                 self.emit(&[0x90]);
                 return;
             }
         };
-        match src2 {
+        let s1 = match src2 {
+            AsmOperand::Reg(s, ss) if *ss >= 128 => *s,
+            _ => {
+                self.asm_warn("unsupported FMA src1 pattern, emitted as nop");
+                self.emit(&[0x90]);
+                return;
+            }
+        };
+        // src1 (AT&T first) = Intel src2 = modrm.r/m
+        match src1 {
             AsmOperand::Reg(s2, sz2) if *sz2 >= 128 => {
-                // reg-reg-reg
+                // reg-reg-reg: all three are registers
                 self.emit_vex4_prefix(d, *s2, 2, w, s1, l, pp);
                 self.emit(&[opcode, Self::modrm_reg_reg(d, *s2)]);
             }
@@ -17838,13 +18183,34 @@ impl Codegen {
                 index,
                 scale,
             } => {
-                // reg-reg-mem
+                // reg-reg-mem: memory is in AT&T first operand
                 self.emit_vex4_prefix(d, *base, 2, w, s1, l, pp);
                 self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(d, *disp, *base, *index, *scale);
             }
+            AsmOperand::SegMem {
+                seg,
+                disp,
+                base,
+                index,
+                scale,
+            } => {
+                // reg-reg-segmem: 段前缀 + VEX + modrm
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx]);
+                self.emit_vex4_prefix(d, *base, 2, w, s1, l, pp);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(d, *disp, *base, *index, *scale);
+            }
+            AsmOperand::SymDisp(sym, _) => {
+                // reg-reg-sym: RIP-relative
+                self.emit_vex4_prefix(d, 0, 2, w, s1, l, pp);
+                self.emit(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
             _ => {
-                eprintln!("warning: unsupported FMA src2 pattern, emitted as nop");
+                self.asm_warn("unsupported FMA src2 pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17868,7 +18234,7 @@ impl Codegen {
                 (*d, *s, *t)
             }
             _ => {
-                eprintln!("warning: AMX tdp* needs tmm regs, emitted as nop");
+                self.asm_warn("AMX tdp* needs tmm regs, emitted as nop");
                 self.emit(&[0x90]);
                 return;
             }
@@ -17896,7 +18262,7 @@ impl Codegen {
                 self.emit(&[imm as u8]);
             }
             _ => {
-                eprintln!("warning: pinsr src must be gpr or mem, emitted as nop");
+                self.asm_warn("pinsr src must be gpr or mem, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17921,7 +18287,7 @@ impl Codegen {
                 self.emit(&[imm as u8]);
             }
             _ => {
-                eprintln!("warning: pextr dst must be gpr or mem, emitted as nop");
+                self.asm_warn("pextr dst must be gpr or mem, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17954,7 +18320,7 @@ impl Codegen {
                 self.emit(&[imm as u8]);
             }
             _ => {
-                eprintln!("warning: vpinsr src must be gpr or mem, emitted as nop");
+                self.asm_warn("vpinsr src must be gpr or mem, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -17979,7 +18345,7 @@ impl Codegen {
                 self.emit(&[imm as u8]);
             }
             _ => {
-                eprintln!("warning: vpextr dst must be gpr or mem, emitted as nop");
+                self.asm_warn("vpextr dst must be gpr or mem, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
@@ -18007,7 +18373,7 @@ impl Codegen {
                 },
             ) if *sz == ASM_REG_TMM => (*d, *disp, *base, *index, *scale),
             _ => {
-                eprintln!("warning: tileloadd needs tmm and mem, emitted as nop");
+                self.asm_warn("tileloadd needs tmm and mem, emitted as nop");
                 self.emit(&[0x90]);
                 return;
             }
@@ -18038,7 +18404,7 @@ impl Codegen {
                 AsmOperand::Reg(s, sz),
             ) if *sz == ASM_REG_TMM => (*s, *disp, *base, *index, *scale),
             _ => {
-                eprintln!("warning: tilestored needs tmm and mem, emitted as nop");
+                self.asm_warn("tilestored needs tmm and mem, emitted as nop");
                 self.emit(&[0x90]);
                 return;
             }
@@ -18113,6 +18479,30 @@ impl Codegen {
                 let pos = self.pos() - 4;
                 self.pending_data_rels.push((pos, sym.clone()));
             }
+            // SegMem → Reg: 段前缀 + VEX + mem
+            (AsmOperand::SegMem { seg, disp, base, index, scale }, AsmOperand::Reg(d, ds)) if *ds == 128 => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx]);
+                if map == 1 {
+                    self.emit_vex3_prefix(*d, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*d, *base, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            // Reg → SegMem: 段前缀 + VEX + mem
+            (AsmOperand::Reg(s, ss), AsmOperand::SegMem { seg, disp, base, index, scale }) if *ss == 128 => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx]);
+                if map == 1 {
+                    self.emit_vex3_prefix(*s, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(*s, *base, map, w, 0, l, pp);
+                }
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
             (AsmOperand::Reg(s, ss), AsmOperand::SymDisp(sym, _)) if *ss == 128 => {
                 if map == 1 {
                     self.emit_vex3_prefix(*s, 0, l, pp);
@@ -18182,7 +18572,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported vex 2-op operand pattern (l:{}, pp:{}, map:{}, opcode:0x{:02x}, w:{}), src:{:?}, dst:{:?}, emitted as nop", l, pp, map, opcode, w, src, dst);
+                eprintln!("{}:{}: warning: unsupported vex 2-op operand pattern (l:{}, pp:{}, map:{}, opcode:0x{:02x}, w:{}), src:{:?}, dst:{:?}, emitted as nop", self.source_name, self.current_asm_src_line, l, pp, map, opcode, w, src, dst);
                 self.emit(&[0x90]);
             }
         }
@@ -18273,7 +18663,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("warning: unsupported evex 2-op operand pattern, emitted as nop");
+                self.asm_warn("unsupported evex 2-op operand pattern, emitted as nop");
                 self.emit(&[0x90]);
             }
         }

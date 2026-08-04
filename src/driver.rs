@@ -269,9 +269,34 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // 这与 -E 模式共享同一路径, 即使 -E 也会显示 PCH 警告.
     emit_preproc_warnings(&pp_diags);
 
-    // -E 模式：只做预处理，输出到 stdout
+    // -E 模式：只做预处理，输出到 -o 指定文件或 stdout
     if cfg.preprocess_only {
-        print!("{}", preprocessed);
+        // 构建输出目标: -o 显式指定时写文件, 否则写 stdout.
+        // -o - 与不指定 -o 一样走 stdout (与 GCC 行为一致).
+        let mut pp_out: Box<dyn Write> = if cfg.output_explicit && cfg.output.to_str() != Some("-") {
+            let path = &cfg.output;
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            Box::new(fs::File::create(path).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write {}: {}", path.display(), e),
+                    crate::diagnostics::Span::point(&path.display().to_string(), 0, 0),
+                )]
+            })?)
+        } else {
+            Box::new(io::stdout())
+        };
+        write!(pp_out, "{}", preprocessed).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("write error: {}", e),
+                crate::diagnostics::Span::point("", 0, 0),
+            )]
+        })?;
         // -dM: 额外输出所有宏定义 (供 kernel 探测编译器用)
         if cfg.dump_macros {
             // 按宏名字典序输出，便于差异比较
@@ -279,7 +304,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, params, variadic, body) in &sorted {
                 match params {
-                    None => println!("#define {} {}", name, body),
+                    None => writeln!(pp_out, "#define {} {}", name, body).ok(),
                     Some(p) => {
                         let p_str = if *variadic {
                             let (last, rest) = p.split_last().unwrap();
@@ -291,9 +316,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                         } else {
                             p.join(", ")
                         };
-                        println!("#define {}({}) {}", name, p_str, body);
+                        writeln!(pp_out, "#define {}({}) {}", name, p_str, body).ok()
                     }
-                }
+                };
             }
         }
         return Ok(());
@@ -339,7 +364,12 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return Err(diags);
     }
 
-    let wlist: Vec<Diagnostic> = format_check::check_program(&prog);
+    let mut wlist: Vec<Diagnostic> = format_check::check_program(&prog);
+    // 把诊断 span 从预处理输出行号映射回源文件位置, 否则内核等
+    // 包含大量头文件的 TU 会把 50 万行的预处理物理行号直接打到 stderr.
+    remap_diags(&mut wlist, &line_map);
+    // 填充 source_line (主文件或对应头文件), 使 caret 指向真实源码.
+    enrich_diags(&mut wlist, src, &file_name, input.parent());
     for w in &wlist {
         w.print_with(&dcfg);
         diags.push(w.clone());
@@ -715,7 +745,31 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
             return Err(pp_diags);
         }
-        print!("{}", pp_out.text);
+        // -o 显式指定时写文件, 否则写 stdout (-o - 走 stdout)
+        if cfg.output_explicit && cfg.output.to_str() != Some("-") {
+            let path = &cfg.output;
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            let mut f = fs::File::create(path).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write {}: {}", path.display(), e),
+                    crate::diagnostics::Span::point(&path.display().to_string(), 0, 0),
+                )]
+            })?;
+            f.write_all(pp_out.text.as_bytes()).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("write error: {}", e),
+                    crate::diagnostics::Span::point("", 0, 0),
+                )]
+            })?;
+        } else {
+            print!("{}", pp_out.text);
+        }
         return Ok(());
     }
 
@@ -1159,13 +1213,30 @@ fn remap_diags(diags: &mut [Diagnostic], line_map: &[LineSpan]) {
 /// 将单个 span 从预处理文本行号映射回源文件位置
 fn remap_span(span: &mut crate::diagnostics::Span, line_map: &[LineSpan]) {
     let line = span.line;
+    if line_map.is_empty() {
+        return;
+    }
     // 二分查找最后一个 out_start <= line 的区间
     let idx = line_map.partition_point(|s| s.out_start <= line);
     if let Some(ls) = idx.checked_sub(1).and_then(|i| line_map.get(i)) {
+        // 严格命中: line 落在 [out_start, out_start + count) 内
         if line < ls.out_start + ls.count {
             span.file = ls.file.clone();
             span.line = ls.src_start + (line - ls.out_start);
+            return;
         }
+        // 未严格命中 (parser EOF 行号刚好超出 / 宏展开 / 缓存回放)
+        // 仍回填文件归属, 但保留原始行号: 让下游 enrich_diags 根据
+        // 磁盘文件实际行数决定是否需要 clamp, 避免此处过度截断导致
+        // 简单文件的 EOF 诊断行号回退 (e0002 回归).
+        span.file = ls.file.clone();
+        return;
+    }
+    // line 小于 line_map[0].out_start: 预处理输出起始的预写入行,
+    // 尝试用第一个区间的文件 (通常是首个 -include 头).
+    if let Some(first) = line_map.first() {
+        span.file = first.file.clone();
+        span.line = first.src_start.max(1);
     }
 }
 

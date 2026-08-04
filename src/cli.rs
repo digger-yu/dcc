@@ -19,6 +19,7 @@ pub enum InputLang {
 pub struct Config {
     pub inputs: Vec<PathBuf>,
     pub output: PathBuf, // 默认 a.out
+    pub output_explicit: bool, // -o 是否由用户显式指定
     pub opt: u8,         // 0..3
     pub std: StdMode,
     pub target: TargetTriple,
@@ -359,6 +360,7 @@ pub fn abi_name(a: Abi) -> &'static str {
 pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut inputs: Vec<PathBuf> = vec![];
     let mut output = PathBuf::from("a.out");
+    let mut output_explicit = false;
     let mut opt: u8 = 0;
     let mut std = StdMode::Gnu23; // 第一性原理:默认 gnu23,跟现代 GCC 行为一致
     let mut target = TargetTriple::host();
@@ -441,6 +443,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     args.get(i)
                         .ok_or_else(|| CliError::new("missing arg after -o"))?,
                 );
+                output_explicit = true;
             }
             "-c" => {
                 relocatable = true;
@@ -1398,6 +1401,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         Ok(Config {
             inputs,
             output,
+            output_explicit,
             opt,
             std,
             target,
@@ -1470,6 +1474,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         Ok(Config {
             inputs,
             output,
+            output_explicit,
             opt,
             std,
             target,

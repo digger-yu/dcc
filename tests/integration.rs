@@ -2198,6 +2198,45 @@ fn asm_bmi_compiles_without_nop_fallback() {
     );
 }
 
+/// Phase 2: 操作数模式补全 — 所有新加的操作数组合
+#[test]
+fn asm_operand_patterns_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_operand_patterns.c");
+    let (output, _obj) = run_object_test("asm-operand-patterns", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
+/// Phase 2: 远跳转/远调用 — 所有远跳转指令
+#[test]
+fn asm_far_jumps_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_far_jumps.c");
+    let (output, _obj) = run_object_test("asm-far-jumps", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
+/// Phase 2: GlobalAsm/asm goto 残余 — 所有间接跳转/段前缀组合
+#[test]
+fn asm_global_asm_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_global_asm.c");
+    let (output, _obj) = run_object_test("asm-global-asm", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// __builtin_constant_p：编译期常量判定（含 __int128 表达式）
 #[test]
 fn builtin_constant_p_full_run_returns_zero() {
@@ -5599,4 +5638,83 @@ fn m26_gcc_compat_runtime() {
         String::from_utf8_lossy(&out.stderr)
     );
     let _ = fs::remove_file(_obj);
+}
+
+/// kernel/sched 内存屏障模式编译测试
+#[test]
+fn sched_barrier_patterns_compiles() {
+    let source = include_str!("fixtures/c/sched_barrier_patterns.c");
+    let (output, obj) = run_object_test("sched-barrier-patterns", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// kernel/sched rq lock / atomic / seqcount 模式编译测试
+#[test]
+fn sched_rq_lock_patterns_compiles() {
+    let source = include_str!("fixtures/c/sched_rq_lock_patterns.c");
+    let (output, obj) = run_object_test("sched-rq-lock-patterns", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// -E -o 写入指定文件而非 stdout
+#[test]
+fn preprocess_only_with_output_file() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-eo-src-{}.c", std::process::id()));
+    let out = dir.join(format!("dcc-eo-out-{}.i", std::process::id()));
+    fs::write(&src, "#define X 7\nint v = X;\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run dcc -E -o");
+    let _ = fs::remove_file(&src);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = fs::read_to_string(&out).unwrap_or_default();
+    let _ = fs::remove_file(&out);
+    assert!(
+        content.contains("int v = 7;"),
+        "preprocessed output should contain expanded macro, got: {content}"
+    );
+    // stdout 应为空 (输出已重定向到文件)
+    assert!(
+        output.stdout.is_empty(),
+        "stdout should be empty when -o is specified, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// -E 无 -o 时输出到 stdout
+#[test]
+fn preprocess_only_stdout() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-eo-stdout-{}.c", std::process::id()));
+    fs::write(&src, "#define Y 3\nint z = Y;\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E"])
+        .arg(&src)
+        .output()
+        .expect("run dcc -E");
+    let _ = fs::remove_file(&src);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("int z = 3;"),
+        "stdout should contain preprocessed output, got: {stdout}"
+    );
 }

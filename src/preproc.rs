@@ -988,7 +988,7 @@ impl Preprocessor {
                     .push((resolved.display().to_string(), Self::hash_content(&content)));
                 let saved_file = self.file.clone();
                 let saved_dir = self.base_dir.clone();
-                self.file = resolved.display().to_string();
+                self.file = Self::normalize_source_path(&resolved);
                 self.base_dir = resolved.parent().unwrap_or(Path::new(".")).to_path_buf();
                 self.process_text(&content, &self.file.clone());
                 self.file = saved_file;
@@ -1030,6 +1030,27 @@ impl Preprocessor {
     fn push_out(&mut self, s: &str) {
         self.out_lines += s.bytes().filter(|&b| b == b'\n').count() as u32;
         self.out.push_str(s);
+    }
+
+    /// 规范化源文件路径: 相对路径提升为绝对路径, 解析 `.` / `..`.
+    ///
+    /// 用于 line_map / 诊断文件字段: 保证下游 `enrich_diags` 能用磁盘路径
+    /// 读回源文件, 从而把宏展开导致的“行号虚高” clamp 到文件末尾.
+    /// 若规范化失败 (罕见), 返回原始路径的字符串形式.
+    fn normalize_source_path(p: &Path) -> String {
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(p))
+                .unwrap_or_else(|_| p.to_path_buf())
+        };
+        // canonicalize 解析符号链接与 `.`/`..`, 需要文件存在; 若失败退化为
+        // 仅拼接 cwd 的绝对路径 (不解析 `.`/`..`), 至少下游能打开文件.
+        abs.canonicalize()
+            .unwrap_or(abs)
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn process_text(&mut self, text: &str, file: &str) {
@@ -1997,7 +2018,9 @@ impl Preprocessor {
                                 if cached_lines > 0 {
                                     self.line_map.push(LineSpan {
                                         out_start: cached_out_start,
-                                        file: path.to_string(),
+                                        // 用绝对路径而非 #include 参数, 使下游
+                                        // enrich_diags 能定位磁盘文件并 clamp 行号.
+                                        file: Self::normalize_source_path(&full_path),
                                         src_start: 1,
                                         count: cached_lines,
                                     });
