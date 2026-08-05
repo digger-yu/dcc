@@ -179,7 +179,6 @@ fn cli_lbr_profile_rejects_missing() {
 struct TestOffloadEntry {
     kind: u8,
     func: String,
-    file: String,
     line: u32,
     col: u32,
     triple: String,
@@ -207,7 +206,7 @@ fn parse_offload_section(obj: &[u8]) -> Option<Vec<TestOffloadEntry>> {
         p += flen;
         let slen = u16::from_le_bytes([d[p], d[p + 1]]) as usize;
         p += 2;
-        let file = String::from_utf8_lossy(&d[p..p + slen]).into_owned();
+        let _file = String::from_utf8_lossy(&d[p..p + slen]).into_owned();
         p += slen;
         let line = u32::from_le_bytes(d[p..p + 4].try_into().unwrap());
         let col = u32::from_le_bytes(d[p + 4..p + 8].try_into().unwrap());
@@ -230,7 +229,6 @@ fn parse_offload_section(obj: &[u8]) -> Option<Vec<TestOffloadEntry>> {
         out.push(TestOffloadEntry {
             kind,
             func,
-            file,
             line,
             col,
             triple,

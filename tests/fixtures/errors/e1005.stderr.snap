@@ -1,2 +1,4 @@
 error[E1005]: va_arg currently requires a va_list object
-  --> <file>:141:12
+  --> <file>:5:12
+   5 |    return __builtin_va_arg(&x, int);
+     |            ^^^^^^^^^^^^^^^^

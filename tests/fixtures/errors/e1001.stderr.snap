@@ -1,2 +1,4 @@
 error[E1001]: unresolved type 'orphan_type' reached typed IR
   --> <file>:3:11
+   3 |    (void)x;
+     |           ^

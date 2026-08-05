@@ -1,2 +1,4 @@
 error[E1002]: IR function has no name
   --> <file>:1:5
+   1 |int () { return 0; }
+     |     ^

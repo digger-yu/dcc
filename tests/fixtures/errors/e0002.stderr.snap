@@ -1,3 +1,5 @@
 error[E0002]: expected ';', '=', '(', got Eof
-  --> <file>:3:1
+  --> <file>:1:1
+   1 |int x
+     | ^
   hint: declaration must end with ';' or have an initializer

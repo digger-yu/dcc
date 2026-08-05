@@ -3408,7 +3408,7 @@ impl Preprocessor {
         let mut result = result;
         result = Self::replace_all_params(&result, params, args);
         // 清除 handle_paste 的保护标记 (\x01..\x02), 避免泄漏到输出
-        result.replace('\x01', "").replace('\x02', "")
+        result.replace(['\x01', '\x02'], "")
     }
 
     /// 处理 `__VA_OPT__(content)`: 若 `va_empty` 为真则整段移除,
@@ -4932,6 +4932,7 @@ impl Preprocessor {
         Some((output, macros, removed, deps, counter_delta, line_spans))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn save_to_cache(
         &self,
         cache_path: &Path,

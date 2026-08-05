@@ -571,6 +571,7 @@ mod tests {
             is_pie: false,
             is_shared: false,
             base_addr: 0,
+            file_base: 0,
             sections: vec![OutputSection {
                 kind: OutputSectionKind::Named(".debug_info".into()),
                 name: ".debug_info".into(),

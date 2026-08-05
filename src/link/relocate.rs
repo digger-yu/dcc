@@ -60,7 +60,7 @@ use crate::codegen::elf::{
     R_RISCV_TPREL_HI20, R_RISCV_TPREL_LO12_I, R_RISCV_TPREL_LO12_S, R_X86_64_32, R_X86_64_32S,
     R_X86_64_64, R_X86_64_GLOB_DAT, R_X86_64_GOT64, R_X86_64_GOTOFF64, R_X86_64_GOTPCREL,
     R_X86_64_IRELATIVE, R_X86_64_JUMP_SLOT, R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_RELATIVE,
-    R_X86_64_TPOFF32, R_X86_64_TPOFF64,
+    R_X86_64_TPOFF32, R_X86_64_TPOFF64, SHF_WRITE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +83,42 @@ impl std::fmt::Display for RelocError {
 }
 
 impl std::error::Error for RelocError {}
+
+/// PIE / Shared 输出: 数据段 (可写节) 中的 R_X86_64_64 绝对重定位不能在链接时
+/// 静态应用 —— 写入的是未加 load bias 的链接时地址, PIE 加载基址随机化后
+/// 立即失效 (典型崩溃: 全局指针 char *s = "hello" 的初始化, 运行时读到
+/// 0x2000 级别的非法地址)。把这些条目从 output_relas 取出并转为
+/// R_X86_64_RELATIVE 动态重定位 (由 ld.so 加载时写入 load_bias + addend,
+/// addend 在 fill_plt_got 最终 vaddr 确定后填写), 其余条目保留给
+/// apply_relocations 静态应用。
+pub fn collect_pie_dynamic_relas(layout: &mut Layout) -> Vec<OutputRela> {
+    if !(layout.is_pie || layout.is_shared) {
+        return Vec::new();
+    }
+    let mut kept = Vec::new();
+    let mut dyns = Vec::new();
+    for r in std::mem::take(&mut layout.output_relas) {
+        // 重定位所在节必须可写 (数据段); 代码段中的绝对引用保持原样
+        let is_writable = layout
+            .sections
+            .get(r.section as usize)
+            .map(|s| s.flags & SHF_WRITE != 0)
+            .unwrap_or(false);
+        // 符号必须已定义 (vaddr != 0), 否则 addend 无法确定, 保持原样
+        let sym_defined = (r.sym as usize) < layout.symbols.len()
+            && layout.symbols[r.sym as usize].vaddr != 0;
+        if r.rel_type == R_X86_64_64 && is_writable && sym_defined {
+            dyns.push(OutputRela {
+                rel_type: R_X86_64_RELATIVE,
+                ..r
+            });
+        } else {
+            kept.push(r);
+        }
+    }
+    layout.output_relas = kept;
+    dyns
+}
 
 /// 把 layout 中的输出节内容 + 输出重定位 + 输出符号表转换成最终字节。
 /// 同时把需要写入 .rela.dyn / .rela.plt 的动态重定位分离出来。
@@ -647,6 +683,7 @@ mod tests {
             is_pie: false,
             is_shared: false,
             base_addr: 0x400000,
+            file_base: 0,
             sections: vec![
                 // index 0: SHN_UNDEF 占位（真实节从 1 开始，与 ELF 约定一致）
                 OutputSection {

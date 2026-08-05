@@ -109,6 +109,10 @@ pub struct Layout {
     pub is_pie: bool,
     pub is_shared: bool,
     pub base_addr: u64,
+    /// 首个节的文件偏移起点 (ELF 头 + phdr 之后, 对齐到 16);
+    /// 节 vaddr 起点 = base_addr + file_base, 保证 file_off ≡ vaddr (mod page)。
+    /// ET_REL (可重定位) 为 0。
+    pub file_base: u64,
     pub sections: Vec<OutputSection>,
     pub segments: Vec<OutputSegment>,
     pub symbols: Vec<OutputSymbol>,
@@ -152,6 +156,7 @@ impl OutputRela {
 pub struct LayoutBuilder {
     pub is_pie: bool,
     pub is_shared: bool,
+    pub is_relocatable: bool,
     pub base_addr: u64,
     pub entry_name: String,
     pub gc_sections: bool,
@@ -169,6 +174,7 @@ impl LayoutBuilder {
         Self {
             is_pie: false,
             is_shared: false,
+            is_relocatable: false,
             base_addr: 0x400000,
             entry_name: "_start".into(),
             gc_sections: true,
@@ -295,12 +301,50 @@ impl LayoutBuilder {
         if self.emit_dynamic {
             self.add_dynamic_sections(&mut sections, &mut section_index_by_kind);
         }
+        // .interp 节 (动态链接器路径): 必须在布局分配前创建, 参与 vaddr 分配,
+        // 并位于首个 PT_LOAD 段内 (内核要求 PT_INTERP 指向可加载段)。
+        if let Some(ref interp) = self.dynamic_linker {
+            let mut data = interp.as_bytes().to_vec();
+            data.push(0); // NUL 终止
+            let size = data.len() as u64;
+            let new_idx = sections.len() as u32;
+            sections.push(OutputSection {
+                kind: OutputSectionKind::Named(".interp".into()),
+                name: ".interp".into(),
+                sh_name_off: 0,
+                ty: SHT_PROGBITS,
+                flags: SHF_ALLOC,
+                align: 1,
+                data,
+                size,
+                entsize: 0,
+                output_index: new_idx,
+                load_segment: 0,
+                vaddr: 0,
+                file_off: 0,
+                input_offsets: Vec::new(),
+                input_sections: Vec::new(),
+            });
+            section_index_by_kind
+                .insert(OutputSectionKind::Named(".interp".into()), new_idx);
+        }
 
         // 填充数据并计算 input_offsets
         self.fill_section_data(&mut sections, bundle);
 
         // 分配虚拟地址
-        self.assign_addresses(&mut sections);
+        // 首个节文件偏移起点: ELF 头 + 最大 phdr 数之后 (phdr 数量与
+        // write_elf_internal 计算一致, 实际写入的 phdr 可能更少, 预留区零填充)。
+        // ET_REL 无 LOAD 段/无同余要求, file_base = 0。
+        let file_base = if self.is_relocatable {
+            0
+        } else {
+            // PT_PHDR 也计入: PIE/Shared = 7 (PHDR+LOAD+LOAD+STACK+DYNAMIC+RELRO+INTERP),
+            // ET_EXEC = 5 (PHDR+LOAD+LOAD+STACK+RELRO)。
+            let nphdr_max = if self.emit_dynamic { 7 } else { 5 };
+            (64 + nphdr_max * 56 + 15) & !15
+        };
+        self.assign_addresses(&mut sections, file_base);
 
         // 重新分配自定义节
         self.assign_custom_sections(&mut sections);
@@ -333,6 +377,7 @@ impl LayoutBuilder {
             is_pie: self.is_pie,
             is_shared: self.is_shared,
             base_addr: self.base_addr,
+            file_base,
             sections,
             segments,
             symbols,
@@ -703,48 +748,8 @@ impl LayoutBuilder {
         idx_map.insert(OutputSectionKind::DynStr, new_idx);
     }
 
-    fn assign_addresses(&self, sections: &mut [OutputSection]) {
-        // 段 0: .text / .plt / .rodata / .init / .fini
-        // 段 1: .data / .bss / .tdata / .tbss / .got / .got.plt / .dynamic / .dynsym / .dynstr
-        let mut v0 = self.base_addr;
-        let mut f0: u64 = 0; // 文件偏移（layout 阶段暂按 0 起步，最后回填）
-                             // 决定两段基址：保证两段 vaddr 差足够大
-                             // 段 1 放在段 0 末尾后 0x1000
-        let mut text_size: u64 = 0;
-        for sec in sections.iter() {
-            if sec.load_segment == 0 {
-                text_size = text_size.max(sec.vaddr + sec.size);
-            }
-        }
-        let mut v1 = self.base_addr + align_up_to(text_size, 0x1000) + 0x1000;
-        let mut f1 = f0 + align_up_to(text_size, 0x1000) + 0x1000;
-
-        // 段 0
-        for sec in sections.iter_mut() {
-            if sec.load_segment != 0 {
-                continue;
-            }
-            let a = sec.align.max(1);
-            v0 = align_up_to(v0, a);
-            f0 = align_up_to(f0, a);
-            sec.vaddr = v0;
-            sec.file_off = f0;
-            v0 += sec.size;
-            f0 += sec.size;
-        }
-        // 段 1
-        for sec in sections.iter_mut() {
-            if sec.load_segment == 0 {
-                continue;
-            }
-            let a = sec.align.max(1);
-            v1 = align_up_to(v1, a);
-            f1 = align_up_to(f1, a);
-            sec.vaddr = v1;
-            sec.file_off = f1;
-            v1 += sec.size;
-            f1 += sec.size;
-        }
+    fn assign_addresses(&self, sections: &mut [OutputSection], file_base: u64) {
+        assign_section_addrs(sections, self.base_addr, file_base)
     }
 
     fn build_symbols(
@@ -958,6 +963,48 @@ impl LayoutBuilder {
             });
         }
         out
+    }
+}
+
+/// 按段顺序为输出节分配 vaddr (段 0: .text/.plt/.rodata/.init/.fini; 段 1: .data 等)。
+/// 幂等, 可重复调用: 链接后期向 .text 追加入口桩后需重算,
+/// 否则文件偏移 (write_elf_internal 实时计算) 与 vaddr 错位。
+pub fn assign_section_addrs(sections: &mut [OutputSection], base_addr: u64, file_base: u64) {
+    // 节 vaddr 起点 = base_addr + file_base: 文件偏移起点 (file_base) 与
+    // vaddr 起点 (base_addr) 都同余 0 (mod page), 保证 file_off ≡ vaddr (mod page),
+    // 首个 PT_LOAD 段才能从文件偏移 0 开始 (覆盖 ELF 头 + phdr, AT_PHDR 需要)。
+    let mut v0 = base_addr + file_base;
+    let mut f0 = file_base;
+    // 先给段 0 分配, 得到实际 vaddr/文件跨度, 再定段 1 基址,
+    // 保证段间不重叠且文件偏移与 vaddr 同余 (offset % page == vaddr % page)。
+    for sec in sections.iter_mut() {
+        if sec.load_segment != 0 {
+            continue;
+        }
+        let a = sec.align.max(1);
+        v0 = align_up_to(v0, a);
+        f0 = align_up_to(f0, a);
+        sec.vaddr = v0;
+        sec.file_off = f0;
+        v0 += sec.size;
+        f0 += sec.size;
+    }
+    // 段 1 基址: 段 0 末尾 page 对齐后 + 0x1000 (load segment 间隔一个 page)
+    let mut v1 = align_up_to(v0, 0x1000) + 0x1000;
+    let mut f1 = align_up_to(f0, 0x1000) + 0x1000;
+
+    // 其余段
+    for sec in sections.iter_mut() {
+        if sec.load_segment == 0 {
+            continue;
+        }
+        let a = sec.align.max(1);
+        v1 = align_up_to(v1, a);
+        f1 = align_up_to(f1, a);
+        sec.vaddr = v1;
+        sec.file_off = f1;
+        v1 += sec.size;
+        f1 += sec.size;
     }
 }
 

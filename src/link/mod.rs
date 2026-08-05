@@ -59,7 +59,7 @@ pub use layout::LayoutBuilder;
 pub use legacy::link_relocatable;
 pub use lto_bitcode::{deserialize_module, run_cross_tu_lto, serialize_module, BitcodeModule};
 pub use object::InputBundle;
-pub use relocate::apply_relocations;
+pub use relocate::{apply_relocations, collect_pie_dynamic_relas};
 
 /// 链接配置
 #[derive(Debug, Clone)]
@@ -236,6 +236,7 @@ pub fn link_from_bundle(
     let mut builder = LayoutBuilder::new();
     builder.is_pie = cfg.output_kind == OutputKind::PIE;
     builder.is_shared = cfg.output_kind == OutputKind::Shared;
+    builder.is_relocatable = cfg.output_kind == OutputKind::Relocatable;
     builder.base_addr = if cfg.output_kind == OutputKind::Executable {
         cfg.base_addr
     } else {
@@ -256,28 +257,8 @@ pub fn link_from_bundle(
     if let Some(ref method) = cfg.opts.compress_debug {
         link_opts::compress_debug_sections(&mut layout, method);
     }
-    // 2.5.2 添加 .interp 节 (自定义动态链接器)
-    if let Some(ref interp) = cfg.dynamic_linker {
-        let mut interp_data = interp.as_bytes().to_vec();
-        interp_data.push(0); // NUL 终止
-        layout.sections.push(layout::OutputSection {
-            kind: layout::OutputSectionKind::Named(".interp".into()),
-            name: ".interp".into(),
-            sh_name_off: 0,
-            ty: crate::codegen::elf::SHT_PROGBITS,
-            flags: crate::codegen::elf::SHF_ALLOC,
-            align: 1,
-            data: interp_data.clone(),
-            size: interp_data.len() as u64,
-            entsize: 0,
-            output_index: 0,
-            load_segment: 0,
-            vaddr: 0,
-            file_off: 0,
-            input_offsets: Vec::new(),
-            input_sections: Vec::new(),
-        });
-    }
+    // 2.5.2 .interp 节由 LayoutBuilder::build 内部创建 (需参与 vaddr 分配,
+    // 且必须位于首个 PT_LOAD 段内), 见 layout.rs 的 build 流程。
     // 2.6 fini_array / __dso_handle 调度
     fini_dispatch::ensure_fini_runtime_symbols(&mut layout);
     // 2.7 -z pack-relative-relocs -> .gnu.pack.relocs
@@ -301,9 +282,20 @@ pub fn link_from_bundle(
     }
     // 2.10 为静态链接可执行文件合成 _start 桩 (如果没有 _start)
     ensure_start_stub(&mut layout);
+    // 2.11 PIE/Shared: 数据段绝对重定位 (R_X86_64_64) 转 R_X86_64_RELATIVE
+    // 动态重定位 (必须在 fill_plt_got 之前收集, 使 .rela.dyn 的 size 分配
+    // 计入这些条目; ld.so 加载时写入 load_bias + addend)。
+    let pie_relas = collect_pie_dynamic_relas(&mut layout);
     // 3. 生成 PLT/GOT（仅动态）
     if builder.emit_dynamic {
-        plt_got::fill_plt_got_with_opts(&mut layout, &cfg.opts);
+        // 第一遍: 填充动态节 size (vaddr 引用此时是 size=0 时的旧值)
+        plt_got::fill_plt_got_with_opts(&mut layout, &cfg.opts, &pie_relas);
+        // 动态节 size 已确定: 重算 vaddr, 否则文件偏移与 vaddr 错位
+        // (LOAD 段 filesz > memsz, 运行段错误)。
+        recompute_section_vaddrs(&mut layout);
+        // 第二遍: vaddr 已更新, 重新生成内容 (PLT 位移 / .dynamic 的
+        // DT_STRTAB/DT_SYMTAB/DT_PLTGOT 等 vaddr 引用)。
+        plt_got::fill_plt_got_with_opts(&mut layout, &cfg.opts, &pie_relas);
     }
     // 4. 应用重定位
     let _dyn = apply_relocations(&mut layout).map_err(|e| diag("E0304", e.to_string()))?;
@@ -422,16 +414,29 @@ pub fn link_with_lto(
     Ok(bytes)
 }
 
+/// 节 size/data 变化 (如动态节填充、入口桩追加) 后重算 vaddr,
+/// 并同步重算符号 vaddr (vaddr = section.vaddr + value)。
+fn recompute_section_vaddrs(layout: &mut crate::link::layout::Layout) {
+    crate::link::layout::assign_section_addrs(&mut layout.sections, layout.base_addr, layout.file_base);
+    for sym in &mut layout.symbols {
+        let si = sym.section as usize;
+        if sym.section != 0 && si < layout.sections.len() {
+            sym.vaddr = layout.sections[si].vaddr + sym.value;
+        }
+    }
+}
+
 /// 为静态链接可执行文件合成 _start 桩 (仅当 _start 不存在且 entry=_start 时).
 /// _start 调用 main(argc=0, argv=NULL, envp=NULL) 然后 exit(return).
 fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
     use crate::codegen::elf::{STB_GLOBAL, STT_FUNC};
     use crate::link::layout::{OutputSectionKind, OutputSymbol};
     // 如果已存在 _start 或不是可执行文件, 跳过
+    // PIE 同样需要入口桩: _start 桩全部由 PC-relative 指令构成, 位置无关。
     if layout.symbols.iter().any(|s| s.name == "_start") {
         return;
     }
-    if layout.is_shared || layout.is_pie {
+    if layout.is_shared {
         return;
     }
     // 找 main 符号
@@ -475,16 +480,10 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
     code[10..14].copy_from_slice(&rel32.to_le_bytes()); // rel32 在 code[10..14]
                                                         // 追加到 .text 节
     let text = &mut layout.sections[text_idx];
-    eprintln!(
-        "dcc-link: ensure_start_stub: text_idx={}, old_size={}, stub_len={}, start_vaddr={:#x}",
-        text_idx,
-        text.size,
-        code.len(),
-        start_vaddr
-    );
     text.data.extend_from_slice(&code);
     text.size += code.len() as u64;
-    eprintln!("dcc-link: ensure_start_stub: new text.size={}", text.size);
+    // stub 追加改变了 .text 大小: 重算 vaddr, 否则与文件偏移错位
+    recompute_section_vaddrs(layout);
     // 添加 _start 输出符号
     let start_value = text_old_size;
     let sym_idx = layout.symbols.len() as u32;

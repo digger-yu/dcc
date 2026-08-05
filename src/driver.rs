@@ -933,6 +933,35 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             crate::diagnostics::Span::point("", 0, 0),
         )]);
     }
+    // 源文件输入 (.c/.i/.S 等): 先编译为临时 .o 再交给内置链接器,
+    // 否则链接器会把 C 源码当 ELF 解析 (bad ELF magic)。
+    let mut tmp_objs: Vec<std::path::PathBuf> = Vec::new();
+    let mut inputs: Vec<std::path::PathBuf> = Vec::new();
+    for (i, inp) in cfg.inputs.iter().enumerate() {
+        let is_obj = inp.extension().map(|e| e == "o").unwrap_or(false);
+        if is_obj {
+            inputs.push(inp.clone());
+        } else {
+            let tmp_o = std::env::temp_dir().join(format!(
+                "dcc-builtlink-{}-{}.o",
+                std::process::id(),
+                i
+            ));
+            let mut c = cfg.clone();
+            c.output = tmp_o.clone();
+            c.relocatable = true;
+            c.built_link = false; // 编译子任务: 递归 run 不能再进内置链接器
+            if let Err(e) = run(c) {
+                for t in &tmp_objs {
+                    let _ = std::fs::remove_file(t);
+                }
+                let _ = std::fs::remove_file(&tmp_o);
+                return Err(e);
+            }
+            tmp_objs.push(tmp_o.clone());
+            inputs.push(tmp_o);
+        }
+    }
     let output_kind = match cfg.output_kind {
         LinkerOutputKind::Executable => link::OutputKind::Executable,
         LinkerOutputKind::PIE => link::OutputKind::PIE,
@@ -989,7 +1018,10 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         target_clones: link::target_clones::TargetClonesTable::new(),
         fini_builder: link::fini_dispatch::FiniArrayBuilder::new(),
         arch: crate::debug::ArchKind::X86_64,
-        dynamic_linker: None, // TODO: parse from -Wl,--dynamic-linker=
+        // PIE/.so 需要 PT_INTERP 让动态链接器处理 GOT/重定位;
+        // TODO: parse from -Wl,--dynamic-linker=
+        dynamic_linker: matches!(output_kind, link::OutputKind::PIE | link::OutputKind::Shared)
+            .then(|| "/lib64/ld-linux-x86-64.so.2".to_string()),
     };
     // 解析 .symver 指令: 从 raw_args 提取 __asm__(".symver ...") 模式
     // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:
@@ -1005,10 +1037,13 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     }
     let bytes = if cfg.linker_lto {
         // LTO 路径：暂时不读取 .dcc.lto（保留给后续：load bitcode 后做 cross-TU 优化）
-        link::link_multi_tu(&cfg.inputs, &cfg.output, &link_cfg)?
+        link::link_multi_tu(&inputs, &cfg.output, &link_cfg)?
     } else {
-        link::link_multi_tu(&cfg.inputs, &cfg.output, &link_cfg)?
+        link::link_multi_tu(&inputs, &cfg.output, &link_cfg)?
     };
+    for t in &tmp_objs {
+        let _ = std::fs::remove_file(t);
+    }
     std::fs::write(&cfg.output, &bytes).map_err(|e| {
         vec![Diagnostic::err(
             "E0301",

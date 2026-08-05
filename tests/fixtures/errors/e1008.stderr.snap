@@ -1,2 +1,4 @@
 error[E1008]: unsupported complex operation Mod
   --> <file>:1:65
+   1 |int main(void) { _Complex float a = 1, b = 2; return (int)(a % b); }
+     |                                                                 ^

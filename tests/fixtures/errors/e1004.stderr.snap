@@ -1,2 +1,4 @@
 error[E1004]: cannot dereference a non-pointer expression
   --> <file>:1:36
+   1 |int main(void) { int x = 1; return *x; }
+     |                                    ^

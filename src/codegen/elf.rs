@@ -27,6 +27,8 @@ pub const ELFDATA2MSB: u8 = 2; // Big-endian (MIPS)
 
 pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
+pub const PT_INTERP: u32 = 3;
+pub const PT_PHDR: u32 = 6;
 pub const PT_TLS: u32 = 7;
 pub const PT_GNU_STACK: u32 = 0x6474e551;
 pub const PT_GNU_RELRO: u32 = 0x6474e552;

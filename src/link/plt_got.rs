@@ -10,10 +10,11 @@
 //   - .dynsym:        动态符号表
 //   - .dynstr:        动态字符串表
 
-use super::layout::{Layout, OutputSectionKind};
+use super::layout::{Layout, OutputRela, OutputSectionKind};
 use super::link_opts::LinkOpts;
 use crate::codegen::elf::{
-    R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, STB_GLOBAL, STT_FUNC, STV_DEFAULT,
+    R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE, STB_GLOBAL, STT_FUNC, STT_SECTION,
+    STV_DEFAULT,
 };
 
 /// 收集 .plt / .got.plt 中需要为哪些外部符号创建槽。
@@ -26,7 +27,10 @@ pub struct PltGots {
 
 impl PltGots {
     pub fn from_layout(layout: &Layout) -> Self {
-        // 简化：把 layout.symbols 中 section=0 的符号都视为需要动态链接
+        // 只收集真正未定义 (UND) 的符号。注意: OutputSymbol.section 存的是
+        // 输出节索引, 首个输出节 (.text) 的索引是 0 —— 已定义符号 (main/_start
+        // 等) 的 section 也可能是 0, 不能仅凭 section==0 判定 UND。
+        // 判定条件: section==0 && vaddr==0 (UND 无地址) && 非 STT_SECTION 节符号。
         let mut plt_funcs = Vec::new();
         let mut got_data = Vec::new();
         for s in &layout.symbols {
@@ -35,6 +39,12 @@ impl PltGots {
             }
             if s.name.is_empty() {
                 continue;
+            }
+            if s.ty == STT_SECTION {
+                continue; // .text 等节符号 (output_index 可能为 0)
+            }
+            if s.vaddr != 0 {
+                continue; // 已定义符号有地址, 不需要 PLT/GOT 槽
             }
             if s.ty == STT_FUNC {
                 plt_funcs.push(s.name.clone());
@@ -106,11 +116,14 @@ fn emit_plt0(plt0_vaddr: u64, got1_vaddr: u64, got2_vaddr: u64) -> Vec<u8> {
 pub fn fill_plt_got(layout: &mut Layout) {
     // 复制 LinkOpts 出来 (避免后续借用)
     let opts = LinkOpts::from_env();
-    fill_plt_got_with_opts(layout, &opts);
+    fill_plt_got_with_opts(layout, &opts, &[]);
 }
 
-/// 带 LinkOpts 的版本：支持 BIND_NOW / RPATH / RUNPATH / DT_NEEDED
-pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts) {
+/// 带 LinkOpts 的版本：支持 BIND_NOW / RPATH / RUNPATH / DT_NEEDED。
+/// pie_relas: PIE/Shared 下由 collect_pie_dynamic_relas 收集的
+/// R_X86_64_RELATIVE 条目 (数据段指针初始化, 见 relocate.rs), 随 .rela.dyn
+/// 一起输出, 由 ld.so 加载时写入 load_bias + addend。
+pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: &[OutputRela]) {
     let plt_gots = PltGots::from_layout(layout);
     let n_plt = plt_gots.plt_funcs.len();
     let n_got_data = plt_gots.got_data.len();
@@ -207,6 +220,16 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts) {
             );
             rela_dyn_data.extend_from_slice(&0i64.to_le_bytes());
         }
+    }
+    // PIE 数据段绝对重定位 → R_X86_64_RELATIVE: ld.so 加载时写入
+    // load_bias + addend。addend = 符号最终 vaddr + 原 addend (第二遍调用时
+    // vaddr 已由 recompute_section_vaddrs 更新, 两遍幂等: 第二遍覆盖第一遍)。
+    for r in pie_relas {
+        let r_offset = layout.sections[r.section as usize].vaddr + r.offset;
+        let addend = (layout.symbols[r.sym as usize].vaddr as i64).wrapping_add(r.addend);
+        rela_dyn_data.extend_from_slice(&r_offset.to_le_bytes());
+        rela_dyn_data.extend_from_slice(&(R_X86_64_RELATIVE as u64).to_le_bytes());
+        rela_dyn_data.extend_from_slice(&addend.to_le_bytes());
     }
     // 写 .dynstr
     let mut dynstr_data = vec![0u8];

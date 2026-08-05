@@ -303,7 +303,7 @@ fn push_str16(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-fn take_str16<'a>(data: &'a [u8], pos: usize) -> Result<(String, usize), String> {
+fn take_str16(data: &[u8], pos: usize) -> Result<(String, usize), String> {
     if pos + 2 > data.len() {
         return Err("truncated .dcc.offload string length".into());
     }

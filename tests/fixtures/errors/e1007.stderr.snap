@@ -1,2 +1,4 @@
 error[E1007]: unsupported vector operation Or
   --> <file>:2:46
+   2 |int main(void) { v4f a, b; return (int)(a | b)[0]; }
+     |                                              ^

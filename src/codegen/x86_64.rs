@@ -172,6 +172,13 @@ pub struct Codegen {
     func_asm_layout: HashMap<String, FuncAsmLayout>,
     pub source_name: String,
     pub parallel_codegen: bool,
+    /// rodata 中被字符串初始化指针占位的变量名列表 (resolve 阶段修补绝对地址)
+    rodata_string_init_globals: Vec<String>,
+    /// rodata 中字符串初始化指针槽的偏移列表 (compile_exec/ET_EXEC 路径的
+    /// InitList 数组/结构体元素; resolve 阶段修补绝对地址)
+    rodata_string_slots: Vec<u64>,
+    /// data 节引用 rodata 字符串的重定位: (data_off, string_rodata_off, custom_sec)
+    pending_data_rodata_rels: Vec<(u64, u64, Option<usize>)>,
 }
 
 /// Per-function layout captured after resolve (for -S disassembly).
@@ -554,6 +561,9 @@ impl Codegen {
             line_map: Vec::new(),
             source_name: String::new(),
             parallel_codegen: false,
+            rodata_string_init_globals: vec![],
+            rodata_string_slots: vec![],
+            pending_data_rodata_rels: vec![],
         }
     }
 
@@ -946,6 +956,33 @@ impl Codegen {
                 self.code[p..p + 4].copy_from_slice(&(rel as i32).to_le_bytes());
             }
         }
+        // 修补字符串初始化指针 (char *s = "hello"): 指针槽里的 rodata 偏移
+        // 替换为绝对地址 (rodata 已拼接到 self.code 的 exec_text_size 之后)。
+        for name in &self.rodata_string_init_globals {
+            if let Some(g) = self.globals.get(name) {
+                let code_off = (self.exec_text_size + g.offset) as usize;
+                if code_off + 8 <= self.code.len() {
+                    let str_off =
+                        u64::from_le_bytes(self.code[code_off..code_off + 8].try_into().unwrap());
+                    let abs_addr = rodata_start + str_off;
+                    self.code[code_off..code_off + 8]
+                        .copy_from_slice(&abs_addr.to_le_bytes());
+                }
+            }
+        }
+        self.rodata_string_init_globals.clear();
+        // 修补 InitList 数组/结构体中的字符串初始化指针槽 (compile_exec 路径):
+        // 槽内写入的是 str_off 占位 (emit_string_ptr_slot), 替换为绝对地址。
+        for slot_off in std::mem::take(&mut self.rodata_string_slots) {
+            let code_off = (self.exec_text_size + slot_off) as usize;
+            if code_off + 8 <= self.code.len() {
+                let str_off =
+                    u64::from_le_bytes(self.code[code_off..code_off + 8].try_into().unwrap());
+                let abs_addr = rodata_start + str_off;
+                self.code[code_off..code_off + 8]
+                    .copy_from_slice(&abs_addr.to_le_bytes());
+            }
+        }
         // 修补 &&label 地址引用 (LEA reg, [RIP+disp32])
         for (disp32_pos, label_name) in self.label_addr_refs.drain(..) {
             if let Some(&label_off) = self.labels.get(&label_name) {
@@ -1138,6 +1175,39 @@ impl Codegen {
                     self.rodata.push(0);
                 }
                 let offset = self.rodata.len() as u64;
+                // 字符串字面量初始化指针 (char *s = "hello"): 字符串进 rodata 池,
+                // 指针槽写入字符串 rodata 偏移 (占位), resolve 阶段修补为绝对地址。
+                if matches!(&v.ty, Type::Ptr(_)) {
+                    if let Some(Expr::String { data, .. }) = &v.init {
+                        // 1. 预留 8 字节指针槽 (offset 处)
+                        self.rodata.extend_from_slice(&[0u8; 8]);
+                        // 2. 字符串追加到 rodata 末尾 (池化去重)
+                        let data = data.clone();
+                        if !self.string_pool.contains_key(&data) {
+                            let o = self.rodata.len() as u64;
+                            self.rodata.extend_from_slice(&data);
+                            self.string_pool.insert(data.clone(), o);
+                        }
+                        let str_off = *self.string_pool.get(&data).unwrap();
+                        // 3. 指针槽写入字符串 rodata 偏移 (resolve 修补)
+                        let slot = offset as usize;
+                        self.rodata[slot..slot + 8].copy_from_slice(&str_off.to_le_bytes());
+                        // 4. 记录待修补变量
+                        self.rodata_string_init_globals.push(v.name.name.clone());
+                        self.globals.insert(
+                            v.name.name.clone(),
+                            GlobalVar {
+                                offset,
+                                size: sz,
+                                ty: v.ty.clone(),
+                                init: None,
+                                section: 1,
+                                is_tls: false,
+                            },
+                        );
+                        continue;
+                    }
+                }
                 let init_data = Self::eval_global_init(self, v, sz, true);
                 if let Some(ref data) = init_data {
                     self.rodata.extend_from_slice(data);
@@ -1356,14 +1426,24 @@ impl Codegen {
         let init = v.init.as_ref()?;
         let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
         match init {
-            Expr::String { data, .. } => Some(data.clone()),
+            Expr::String { data, .. } => {
+                // 指针类型 (char *s = "hello"): 字符串字面量应存字符串地址,
+                // 而非字符串内容 (13 字节 > 8 字节指针槽, 会污染布局)。
+                // ET_EXEC 路径在 compile_exec 中单独处理 (rodata 池 + resolve
+                // 修补绝对地址); 此处返回 None 让调用方零初始化兜底。
+                if matches!(&v.ty, Type::Ptr(_)) {
+                    None
+                } else {
+                    Some(data.clone())
+                }
+            }
             Expr::InitList { inits, .. } => {
                 let base = if use_rodata {
                     self.rodata.len()
                 } else {
                     self.tdata_section.len()
                 } as u64;
-                self.gen_global_init_list(&v.ty, inits, Some((base, None)))
+                self.gen_global_init_list(&v.ty, inits, Some((base, None)), use_rodata)
             }
             Expr::AddrOf { e, .. } => match e.as_ref() {
                 Expr::Ident { name: ref_name, .. } => {
@@ -1475,11 +1555,28 @@ impl Codegen {
                     if let Some(init) = &v.init {
                         match init {
                             Expr::String { data, .. } => {
-                                self.extra_sections[sec_idx].data.extend_from_slice(data);
-                                for _ in data.len()..sz {
-                                    self.extra_sections[sec_idx].data.push(0);
+                                // 指针类型: 字符串字节不能直接占据指针槽 (布局错乱),
+                                // ET_REL 下字符串地址重定位暂不支持, 零填充兜底。
+                                if matches!(&v.ty, Type::Ptr(_)) {
+                                    let data = data.clone();
+                                    if !self.string_pool.contains_key(&data) {
+                                        let o = self.rodata.len() as u64;
+                                        self.rodata.extend_from_slice(&data);
+                                        self.string_pool.insert(data.clone(), o);
+                                    }
+                                    let str_off = *self.string_pool.get(&data).unwrap();
+                                    let cur = self.extra_sections[sec_idx].data.len();
+                                    self.extra_sections[sec_idx].data.resize(cur + 8, 0);
+                                    self.pending_data_rodata_rels
+                                        .push((cur as u64, str_off, Some(sec_idx)));
+                                    has_init = true;
+                                } else {
+                                    self.extra_sections[sec_idx].data.extend_from_slice(data);
+                                    for _ in data.len()..sz {
+                                        self.extra_sections[sec_idx].data.push(0);
+                                    }
+                                    has_init = true;
                                 }
-                                has_init = true;
                             }
                             Expr::InitList { inits, .. } => {
                                 let base = self.extra_sections[sec_idx].data.len() as u64;
@@ -1487,6 +1584,7 @@ impl Codegen {
                                     &v.ty,
                                     inits,
                                     Some((base, Some(sec_idx))),
+                                    false,
                                 ) {
                                     self.extra_sections[sec_idx]
                                         .data
@@ -1593,16 +1691,33 @@ impl Codegen {
                 let has_init = if let Some(init) = &v.init {
                     match init {
                         Expr::String { data, .. } => {
-                            self.data_section.extend_from_slice(data);
-                            for _ in data.len()..sz {
-                                self.data_section.push(0);
+                            // 指针类型 (char *s = "hello"): 字符串进 rodata 池,
+                            // data 节指针槽通过 .rodata section 符号 + R_X86_64_64
+                            // 重定位指向字符串 (链接时写入 rodata 基址 + 偏移)。
+                            if matches!(&v.ty, Type::Ptr(_)) {
+                                let data = data.clone();
+                                if !self.string_pool.contains_key(&data) {
+                                    let o = self.rodata.len() as u64;
+                                    self.rodata.extend_from_slice(&data);
+                                    self.string_pool.insert(data.clone(), o);
+                                }
+                                let str_off = *self.string_pool.get(&data).unwrap();
+                                let ref_off = self.data_section.len() as u64;
+                                self.data_section.resize(ref_off as usize + 8, 0);
+                                self.pending_data_rodata_rels
+                                    .push((ref_off, str_off, None));
+                            } else {
+                                self.data_section.extend_from_slice(data);
+                                for _ in data.len()..sz {
+                                    self.data_section.push(0);
+                                }
                             }
                             true
                         }
                         Expr::InitList { inits, .. } => {
                             let base = self.data_section.len() as u64;
                             if let Some(init_data) =
-                                self.gen_global_init_list(&v.ty, inits, Some((base, None)))
+                                self.gen_global_init_list(&v.ty, inits, Some((base, None)), false)
                             {
                                 self.data_section.extend_from_slice(&init_data);
                                 for _ in init_data.len()..sz {
@@ -2189,8 +2304,29 @@ impl Codegen {
             });
         }
 
-        // P1-6: 解析 data 节 64 位符号引用重定位
+        // data 节重定位: rodata 字符串引用 (char *s = "hello") + 符号引用
         let mut custom_data_relas: HashMap<usize, Vec<ElfRela>> = HashMap::new();
+
+        // 解析 data 节引用 rodata 字符串的重定位:
+        // R_X86_64_64, 符号 = .rodata section, addend = 字符串 rodata 偏移
+        for (data_off, str_off, custom_sec) in self.pending_data_rodata_rels.drain(..) {
+            let relocation = ElfRela {
+                offset: data_off,
+                sym_index: rodata_sym_idx.unwrap_or(0),
+                rel_type: R_X86_64_64,
+                addend: str_off as i64,
+            };
+            if let Some(sec_idx) = custom_sec {
+                custom_data_relas
+                    .entry(sec_idx)
+                    .or_default()
+                    .push(relocation);
+            } else {
+                self.data_relocations.push(relocation);
+            }
+        }
+
+        // P1-6: 解析 data 节 64 位符号引用重定位
         for (data_off, var_name, custom_sec, rel_type, addend) in self.pending_data64_rels.drain(..)
         {
             let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
@@ -4666,8 +4802,13 @@ impl Codegen {
                     ..
                 } = arr.as_ref()
                 {
-                    let is_global = self.globals.contains_key(&arr_name.name);
-                    if is_global {
+                    // 仅全局数组走 SIB 索引快速路径; 全局指针 (char *s = "hello")
+                    // 的下标访问必须先加载指针值再解引用, 不能对符号本身绝对寻址。
+                    let is_global_array = self
+                        .globals
+                        .get(&arr_name.name)
+                        .is_some_and(|g| matches!(g.ty, Type::Array(_, _)));
+                    if is_global_array {
                         // 全局数组: 单条 [disp32+idx*scale] 加载, 避免 LEA+ADD 两步。
                         // 注: 不在前面 imul rcx, rcx, es - emit_load_global_indexed 已用 SIB scale 体现 es。
                         self.gen_expr(idx, 1);
@@ -5032,7 +5173,7 @@ impl Codegen {
                 // 复合字面量: (type){...} - 在 rodata 中存储初始化数据, 加载地址
                 let size = ty.size();
                 let data = self
-                    .gen_global_init_list(ty, inits, None)
+                    .gen_global_init_list(ty, inits, None, false)
                     .unwrap_or_else(|| vec![0; size]);
                 // 使用 string_pool 存储
                 if !self.string_pool.contains_key(&data) {
@@ -5389,11 +5530,44 @@ impl Codegen {
     }
 
     // 全局变量初始化列表: 生成初始化数据字节
+    /// 字符串指针初始化槽 (char *p = "s", 或 InitList 中的数组/结构体元素):
+    /// 字符串字面量进 rodata 池 (池化去重), 槽写入 8 字节占位。
+    /// - ET_REL (relocatable): 记录 pending_data_rodata_rels, 生成 .o 时转
+    ///   R_X86_64_64 重定位 (符号 = .rodata 节, addend = str_off; PIE 链接时
+    ///   再由链接器转 R_X86_64_RELATIVE)。
+    /// - ET_EXEC (rodata_slots): 槽内写 str_off 占位, resolve 阶段修补绝对地址。
+    /// - TLS / 其他 (两者皆非): 零填充兜底 (暂不支持)。
+    fn emit_string_ptr_slot(
+        &mut self,
+        rel: Option<(u64, Option<usize>)>,
+        data: &[u8],
+        rodata_slots: bool,
+    ) -> Vec<u8> {
+        let data = data.to_vec();
+        if !self.string_pool.contains_key(&data) {
+            let o = self.rodata.len() as u64;
+            self.rodata.extend_from_slice(&data);
+            self.string_pool.insert(data.clone(), o);
+        }
+        let str_off = *self.string_pool.get(&data).unwrap();
+        let mut slot = vec![0u8; 8];
+        if let Some((off, sec)) = rel {
+            if self.relocatable {
+                self.pending_data_rodata_rels.push((off, str_off, sec));
+            } else if rodata_slots {
+                slot.copy_from_slice(&str_off.to_le_bytes());
+                self.rodata_string_slots.push(off);
+            }
+        }
+        slot
+    }
+
     fn gen_global_init_list(
         &mut self,
         ty: &Type,
         inits: &[InitItem],
         rel: Option<(u64, Option<usize>)>,
+        rodata_slots: bool,
     ) -> Option<Vec<u8>> {
         let mut data = Vec::new();
         match ty {
@@ -5424,8 +5598,17 @@ impl Codegen {
                                 data.push(0);
                             }
                             let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
-                            let elem_data =
-                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem);
+                            // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
+                            // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
+                            let elem_data = if matches!(elem_ty.as_ref(), Type::Ptr(_)) {
+                                if let Expr::String { data, .. } = value {
+                                    self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
+                                } else {
+                                    self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                                }
+                            } else {
+                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                            };
                             data.extend_from_slice(&elem_data);
                             k += 1;
                         }
@@ -5465,7 +5648,7 @@ impl Codegen {
                         };
                         let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
                         if let Some(elem_data) =
-                            self.gen_global_init_list(nested_ty, nested, elem_rel)
+                            self.gen_global_init_list(nested_ty, nested, elem_rel, rodata_slots)
                         {
                             data.extend_from_slice(&elem_data);
                         }
@@ -5475,8 +5658,17 @@ impl Codegen {
                             Type::Float | Type::Double | Type::LongDouble
                         );
                         let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
-                        let elem_data =
-                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem);
+                        // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
+                        // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
+                        let elem_data = if matches!(elem_ty.as_ref(), Type::Ptr(_)) {
+                            if let Expr::String { data, .. } = value {
+                                self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
+                            } else {
+                                self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                            }
+                        } else {
+                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                        };
                         data.extend_from_slice(&elem_data);
                     }
                     while data.len() < (i + 1) * elem_size {
@@ -5530,10 +5722,21 @@ impl Codegen {
                             } else {
                                 nested_ty.clone()
                             };
-                            self.gen_global_init_list(&nty, nested, field_rel)
+                            self.gen_global_init_list(&nty, nested, field_rel, rodata_slots)
                                 .unwrap_or_else(|| vec![0; sz])
                         }
-                        _ => self.eval_const_expr(value, field_rel, sz, is_float_field),
+                        _ => {
+                            // 字符串指针字段 ({ char *p } s = {"x"}): 生成指针槽
+                            if matches!(&field_ty, Some(Type::Ptr(_))) {
+                                if let Expr::String { data, .. } = value {
+                                    self.emit_string_ptr_slot(field_rel, data, rodata_slots)
+                                } else {
+                                    self.eval_const_expr(value, field_rel, sz, is_float_field)
+                                }
+                            } else {
+                                self.eval_const_expr(value, field_rel, sz, is_float_field)
+                            }
+                        }
                     };
                     for (j, &b) in field_data.iter().enumerate() {
                         if off + j < data.len() {
@@ -5558,7 +5761,16 @@ impl Codegen {
                         Type::Float | Type::Double | Type::LongDouble
                     );
                     let elem_rel = rel.map(|(base, sec)| (base + (i * elem_size) as u64, sec));
-                    let elem_data = self.eval_const_expr(value, elem_rel, elem_size, is_float_elem);
+                    // 字符串指针元素 (向量元素为指针时): 生成指针槽
+                    let elem_data = if matches!(elem_ty.as_ref(), Type::Ptr(_)) {
+                        if let Expr::String { data, .. } = value {
+                            self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
+                        } else {
+                            self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                        }
+                    } else {
+                        self.eval_const_expr(value, elem_rel, elem_size, is_float_elem)
+                    };
                     let off = i * elem_size;
                     for (j, &b) in elem_data.iter().enumerate() {
                         if off + j < data.len() {
@@ -5570,6 +5782,11 @@ impl Codegen {
             _ => {
                 if let Some(InitItem::Expr(e)) = inits.first() {
                     let is_float_ty = matches!(ty, Type::Float | Type::Double | Type::LongDouble);
+                    if matches!(ty, Type::Ptr(_)) {
+                        if let Expr::String { data, .. } = e {
+                            return Some(self.emit_string_ptr_slot(rel, data, rodata_slots));
+                        }
+                    }
                     data = self.eval_const_expr(e, rel, ty.size(), is_float_ty);
                 }
             }
@@ -5589,6 +5806,13 @@ impl Codegen {
         width: usize,
         is_float: bool,
     ) -> Vec<u8> {
+        // 字符串字面量: 不能走 eval_full —— 它返回 ConstValue::Str, 落到
+        // 下方 _ 分支会被 0 填充 (char buf[][8] = {"hello"} 元素全为 0)。
+        // 指针类型由调用方在 Ptr 上下文特判 (emit_string_ptr_slot);
+        // 此处 (char 数组元素等) 返回内容字节。
+        if let Expr::String { data, .. } = e {
+            return data.clone();
+        }
         // 优先用 eval_full: 浮点字面量直接走 .to_bits(), 不被截断为整数
         if let Ok(cv) = const_eval::eval_full(e) {
             match cv {
@@ -7312,6 +7536,9 @@ impl Codegen {
     }
 
     /// 从全局对象加载带下标的元素: [rip + disp32 + idx*scale]
+    /// 注: x86-64 的 RIP-relative 只有 modrm.rm=101 一种编码, 无法带 index;
+    /// SIB base=101 + mod=00 是 disp32 绝对寻址 (PIE 随机基址后失效)。
+    /// 因此拆两步: lea r11, [rip+disp32] + 按 r11 基址的 SIB 索引寻址。
     fn emit_load_global_indexed(
         &mut self,
         dst_gp: u8,
@@ -7326,14 +7553,17 @@ impl Codegen {
             8 => 3,
             _ => 0,
         };
-        let sib = (scale << 6) | ((idx_reg & 7) << 3) | 5; // base=101 → RIP
+        // lea r11, [rip + disp32] (RIP-relative, 链接时修补 PC 相对位移)
+        let lea_pos = self.pos();
+        self.emit(&[0x4C, 0x8D, 0x1D, 0, 0, 0, 0]);
+        self.pending_data_rels.push((lea_pos + 3, global.to_string()));
+        let sib = (scale << 6) | ((idx_reg & 7) << 3) | 3; // base=r11 (REX.B)
         let modrm = 0x04; // mod=00, rm=100 (SIB), reg 字段在下方按目标寄存器填充
         let is_float = matches!(elem_ty, Type::Float);
         let is_double = matches!(elem_ty, Type::Double | Type::LongDouble);
-        let disp32_pos;
         if is_float {
             let xmm = 0u8; // 浮点表达式结果约定在 xmm0
-            let mut rex = 0u8;
+            let mut rex = 0x41u8; // REX.B: SIB base=r11 (REX 前缀必须 0x40-0x4F)
             if xmm >= 8 {
                 rex |= 0x04;
             }
@@ -7341,16 +7571,16 @@ impl Codegen {
                 rex |= 0x02;
             }
             let mut ins = Vec::new();
+            // 前缀顺序: F3 (legacy) 必须在 REX 之前, 否则 REX 字节被当成指令
+            ins.push(0xF3);
             if rex != 0 {
                 ins.push(rex);
             }
-            ins.extend_from_slice(&[0xF3, 0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
+            ins.extend_from_slice(&[0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
             self.emit(&ins);
-            disp32_pos = self.pos();
-            self.emit(&[0, 0, 0, 0]);
         } else if is_double {
             let xmm = 0u8;
-            let mut rex = 0u8;
+            let mut rex = 0x41u8; // REX.B: SIB base=r11 (REX 前缀必须 0x40-0x4F)
             if xmm >= 8 {
                 rex |= 0x04;
             }
@@ -7358,17 +7588,17 @@ impl Codegen {
                 rex |= 0x02;
             }
             let mut ins = Vec::new();
+            // 前缀顺序: F2 (legacy) 必须在 REX 之前, 否则 REX 字节被当成指令
+            ins.push(0xF2);
             if rex != 0 {
                 ins.push(rex);
             }
-            ins.extend_from_slice(&[0xF2, 0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
+            ins.extend_from_slice(&[0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
             self.emit(&ins);
-            disp32_pos = self.pos();
-            self.emit(&[0, 0, 0, 0]);
         } else {
             // 按 elem_size 选操作数尺寸: 1/2=movzx 零扩展, 4=32-bit mov,
             // 8=REX.W mov. 16-bit 不能裸 mov (高 48 位寄存器残留垃圾值)
-            let mut rex = 0x48u8; // 默认 REX.W (8 字节)
+            let mut rex = 0x48u8 | 0x01; // REX.W + REX.B (SIB base=r11)
             if dst_gp >= 8 {
                 rex |= 0x04;
             }
@@ -7389,11 +7619,7 @@ impl Codegen {
             } else {
                 self.emit(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib]);
             }
-            disp32_pos = self.pos();
-            self.emit(&[0, 0, 0, 0]);
         }
-        self.pending_sib_data_rels
-            .push((disp32_pos, global.to_string()));
     }
 
     /// 全局浮点变量 RIP-relative 加载到 xmm

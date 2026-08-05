@@ -13,7 +13,7 @@ use super::layout::{Layout, OutputSectionKind, OutputSymbol};
 use super::link_opts;
 use crate::codegen::elf::{
     ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64, ET_EXEC, EV_CURRENT, PF_R, PF_W, PF_X,
-    PT_GNU_RELRO, PT_GNU_STACK, PT_LOAD, SHT_NOBITS, SHT_PROGBITS, SHT_STRTAB, SHT_SYMTAB,
+    PT_GNU_RELRO, PT_GNU_STACK, PT_LOAD, PT_PHDR, SHT_NOBITS, SHT_PROGBITS, SHT_STRTAB, SHT_SYMTAB,
 };
 
 pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
@@ -124,10 +124,12 @@ pub fn write_elf_internal(
     let _ehdr_off = 0u64;
     out.resize(64, 0);
     // 2. PHDR
-    // 计算 nphdr: PT_LOAD(2) + PT_GNU_STACK(1) + 可选 PT_DYNAMIC(1) + 可选 PT_GNU_RELRO(1) + 可选 PT_INTERP(1)
+    // 计算 nphdr: PT_PHDR(1) + PT_LOAD(2) + PT_GNU_STACK(1) + 可选 PT_DYNAMIC(1) + 可选 PT_GNU_RELRO(1) + 可选 PT_INTERP(1)
+    // PT_PHDR 必须有: 动态链接器用 l_addr = AT_PHDR - p_vaddr 计算主程序 load
+    // bias, 缺失时 l_addr=0, 所有 D_PTR 解析出未加 bias 的地址 (运行段错误)。
     let has_relro = link_opts::compute_relro_range(layout).is_some();
     let has_interp = layout.dynamic_linker.is_some();
-    let nphdr = if layout.has_dynamic { 4u16 } else { 3u16 }
+    let nphdr = 1 + if layout.has_dynamic { 4u16 } else { 3u16 }
         + if has_relro { 1u16 } else { 0u16 }
         + if has_interp { 1u16 } else { 0u16 };
     let phdr_off = 64u64;
@@ -135,24 +137,30 @@ pub fn write_elf_internal(
 
     // 3. 计算节数据偏移
     let data_base: u64 = (64 + nphdr as usize * 56) as u64;
-    // ET_EXEC/ET_DYN: 文件偏移必须满足 offset % page == vaddr % page.
-    // 由于 vaddr 是 page-aligned, 把 data_base 对齐到 page.
-    let data_aligned = if e_type == 2 || e_type == 3 {
-        (data_base + 0xfff) & !0xfff
+    // ET_EXEC/ET_DYN: 节文件偏移起点由 layout 阶段确定 (file_base, 在 ELF 头 + phdr
+    // 最大数量之后), 节 vaddr 起点 = base_addr + file_base, 保证
+    // file_off ≡ vaddr (mod page), 且首个 PT_LOAD 段可从文件偏移 0 开始
+    // (覆盖 ELF 头 + phdr, 动态链接器 AT_PHDR 需要)。
+    // ET_REL (file_base=0): 无 LOAD 段, 节紧跟 phdr 区域, 对齐到 16 即可。
+    let data_aligned = if layout.file_base != 0 {
+        layout.file_base
     } else {
-        data_base
+        (data_base + 15) & !15
     };
-    let mut cur = data_aligned;
-    let mut section_offsets: Vec<u64> = Vec::with_capacity(layout.sections.len() + 5);
-    for sec in &layout.sections {
-        let a = sec.align.max(1);
-        cur = (cur + a - 1) & !(a - 1);
-        section_offsets.push(cur);
-        if sec.ty != SHT_NOBITS && sec.size > 0 {
-            cur += sec.size;
-        }
-    }
-    // 加上 .gnu.hash .symtab .strtab .shstrtab
+    // 节文件偏移 = assign_section_addrs 分配的 file_off + 起点补偿
+    let section_offsets: Vec<u64> = layout
+        .sections
+        .iter()
+        .map(|s| s.file_off + (data_aligned - layout.file_base))
+        .collect();
+    // 加上 .gnu.hash .symtab .strtab .shstrtab (接在最后一个节数据之后)
+    let mut cur = layout
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(i, s)| section_offsets[i] + if s.ty == SHT_NOBITS { 0 } else { s.size })
+        .max()
+        .unwrap_or(data_aligned);
     let gnu_hash_off = cur;
     cur += gnu_hash.len() as u64;
     let symtab_off = cur;
@@ -165,11 +173,19 @@ pub fn write_elf_internal(
     let shdr_off = (cur + 7) & !7;
 
     // 4. 写入各节数据
+    // 节偏移按 load_segment 分组分配, 索引顺序与偏移顺序不一致
+    // (段 0 末尾节 .interp 的偏移可能小于段 1 节): 先扩展文件到总长度,
+    // 再按偏移覆盖写入, 避免 resize 截断已写数据 / extend 写错位置。
+    let mut total_len: usize = 0;
     for (i, sec) in layout.sections.iter().enumerate() {
-        let off = section_offsets[i];
-        out.resize(off as usize, 0);
-        if sec.ty != SHT_NOBITS {
-            out.extend_from_slice(&sec.data);
+        let end = section_offsets[i] as usize + sec.data.len();
+        total_len = total_len.max(end);
+    }
+    out.resize(total_len, 0);
+    for (i, sec) in layout.sections.iter().enumerate() {
+        let off = section_offsets[i] as usize;
+        if sec.ty != SHT_NOBITS && !sec.data.is_empty() {
+            out[off..off + sec.data.len()].copy_from_slice(&sec.data);
         }
     }
     // .gnu.hash
@@ -193,17 +209,33 @@ pub fn write_elf_internal(
 
     // 6. 写 PHDR
     let mut phdr_cursor = phdr_off as usize;
-    // PT_LOAD #1
+    // PT_PHDR: 指向本程序头表自身。p_vaddr = base_addr + 64 (ELF 头后), 
+    // 使 ld.so 的 l_addr = AT_PHDR - p_vaddr 等于实际 load bias。
+    write_phdr(
+        out,
+        &mut phdr_cursor,
+        PT_PHDR,
+        PF_R,
+        64,
+        layout.base_addr + 64,
+        layout.base_addr + 64,
+        nphdr as u64 * 56,
+        nphdr as u64 * 56,
+        8,
+    );
+    // PT_LOAD #1: 从文件偏移 0 开始, 覆盖 ELF 头 + phdr + 段 0 节数据;
+    // p_vaddr = base_addr (与 p_offset=0 同余), 这样 AT_PHDR = base + e_phoff
+    // 指向可访问内存, 动态链接器才能解析主程序映射。
     write_phdr(
         out,
         &mut phdr_cursor,
         PT_LOAD,
         PF_R | PF_X,
-        s0_fo,
-        s0_lo,
-        s0_lo,
-        s0_fsz,
-        s0_memsz,
+        0,
+        layout.base_addr,
+        layout.base_addr,
+        s0_fsz + s0_fo,
+        s0_memsz + s0_fo,
         0x1000,
     );
     // PT_LOAD #2
@@ -234,20 +266,25 @@ pub fn write_elf_internal(
     );
     // PT_GNU_RELRO: 标识 RELRO 覆盖范围 (default; 由 link_opts 控制是否实际写入)
     if let Some((lo, hi)) = link_opts::compute_relro_range(layout) {
-        // 文件偏移: 找出落在 (lo,hi) 范围内的最早一节
+        // 文件偏移: 找出落在 (lo,hi) 范围内的最早一节 (用实际节偏移)
         let fo = layout
             .sections
             .iter()
-            .filter(|s| s.vaddr >= lo && s.vaddr < hi)
-            .map(|s| s.file_off)
+            .enumerate()
+            .filter(|(_, s)| s.vaddr >= lo && s.vaddr < hi)
+            .map(|(i, s)| section_offsets.get(i).copied().unwrap_or(s.file_off))
             .min()
             .unwrap_or(0);
         let fsz = (hi - lo).min(
             layout
                 .sections
                 .iter()
-                .filter(|s| s.vaddr >= lo && s.vaddr < hi)
-                .map(|s| s.file_off + s.size - fo)
+                .enumerate()
+                .filter(|(_, s)| s.vaddr >= lo && s.vaddr < hi)
+                .map(|(i, s)| {
+                    let off = section_offsets.get(i).copied().unwrap_or(s.file_off);
+                    off + s.size - fo
+                })
                 .sum::<u64>(),
         );
         write_phdr(
@@ -264,24 +301,19 @@ pub fn write_elf_internal(
         );
     }
     if layout.has_dynamic {
-        // 找到 .dynamic 节
-        let dyn_vaddr = layout
+        // 找到 .dynamic 节 (用实际节偏移)
+        let dyn_idx = layout
             .sections
             .iter()
-            .find(|s| s.kind == OutputSectionKind::Dynamic)
-            .map(|s| s.vaddr)
+            .position(|s| s.kind == OutputSectionKind::Dynamic);
+        let dyn_vaddr = dyn_idx
+            .map(|i| layout.sections[i].vaddr)
             .unwrap_or(0);
-        let dyn_filesz = layout
-            .sections
-            .iter()
-            .find(|s| s.kind == OutputSectionKind::Dynamic)
-            .map(|s| s.size)
+        let dyn_filesz = dyn_idx
+            .map(|i| layout.sections[i].size)
             .unwrap_or(0);
-        let dyn_fileoff = layout
-            .sections
-            .iter()
-            .find(|s| s.kind == OutputSectionKind::Dynamic)
-            .map(|s| s.file_off)
+        let dyn_fileoff = dyn_idx
+            .map(|i| section_offsets.get(i).copied().unwrap_or(0))
             .unwrap_or(0);
         write_phdr(
             out,
@@ -299,19 +331,17 @@ pub fn write_elf_internal(
     // PT_INTERP: 动态链接器路径
     if let Some(ref interp) = layout.dynamic_linker {
         // interp 字符串已经在节数据中写入 (通过 .interp 节)
-        // 此处只写 PHDR
-        let interp_vaddr = layout
+        // 此处只写 PHDR (用实际节偏移)
+        let interp_idx = layout
             .sections
             .iter()
-            .find(|s| s.name == ".interp")
-            .map(|s| s.vaddr)
+            .position(|s| s.name == ".interp");
+        let interp_vaddr = interp_idx
+            .map(|i| layout.sections[i].vaddr)
             .unwrap_or(0);
         let interp_filesz = (interp.len() + 1) as u64; // +1 for NUL
-        let interp_fileoff = layout
-            .sections
-            .iter()
-            .find(|s| s.name == ".interp")
-            .map(|s| s.file_off)
+        let interp_fileoff = interp_idx
+            .map(|i| section_offsets.get(i).copied().unwrap_or(0))
             .unwrap_or(0);
         write_phdr(
             out,
