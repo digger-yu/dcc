@@ -72,10 +72,18 @@ export -f compile_one
 export CC_WRAP PREFIX OUT_LOG
 
 files=""
-for f in kernel/*.c kernel/sched/*.c; do
-    case "$f" in
-        kernel/bounds.c|kernel/sched/rq-offsets.c) continue ;;
-    esac
+# 由内核构建系统决定编译集合: touch 使目标过期后 make -n 会打印全部命令,
+# 从中提取配置启用的源文件. 这样 CONFIG_* 关闭的文件 (如 CONFIG_CFI=n 时的
+# kernel/cfi.c, 其 DEFINE_CFI_TYPE 宏未定义) 自动排除, 与真实构建一致.
+touch kernel/*.c kernel/sched/*.c 2>/dev/null
+make -n kernel/ kernel/sched/ 2>/dev/null | grep -oE 'kernel/[a-zA-Z0-9_./-]+\.c' \
+    | sort -u \
+    | grep -vE '\.(o|s)\.c$' \
+    | grep -vE '/\.' \
+    | grep -E '^kernel/([^/]+\.c|sched/[^/]+\.c)$' \
+    | grep -vE '(^|/)asm-offsets\.c$|(^|/)bounds\.c$|(^|/)rq-offsets\.c$' \
+    > /tmp/kernel_dcc_files.txt
+for f in $(cat /tmp/kernel_dcc_files.txt); do
     o="${f%.c}.o"
     if [ "${FORCE:-0}" = "1" ] || [ ! -f "$o" ]; then
         files="$files $f"
