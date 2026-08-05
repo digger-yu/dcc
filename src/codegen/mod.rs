@@ -12,6 +12,7 @@ pub mod x86_64;
 
 use crate::debug;
 use crate::ir::Module;
+use crate::preproc::LineSpan;
 use crate::sanitizer::{sanitizer_metadata, SanitizerFlags};
 use crate::target::Target;
 
@@ -30,6 +31,7 @@ pub fn emit(
     bounds_check: bool,
     trapv: bool,
     offload: Option<&crate::profile::offload::OffloadSection>,
+    line_map: &[LineSpan],
 ) -> Vec<u8> {
     match target.arch {
         crate::cli::Arch::X86_64 => {
@@ -39,6 +41,7 @@ pub fn emit(
             cg.emit_asm_text = emit_asm;
             cg.parallel_codegen = parallel_codegen && !emit_asm;
             cg.source_name = source_name.to_string();
+            cg.line_map = line_map.to_vec();
             cg.debug_level = debug_level;
             cg.emit_cfi = debug_level > 0 || target.frame_pointer;
             cg.bounds_check = bounds_check;

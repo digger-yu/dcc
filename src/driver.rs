@@ -499,12 +499,20 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // AST -> typed IR -> validation
-    let mut module = ir::lower(prog)?;
-    ir::validate(&module)?;
+    let mut module = ir::lower(prog).map_err(|d| {
+        remap_enrich(d, &line_map, src, &file_name, input.parent())
+    })?;
+    ir::validate(&module).map_err(|d| {
+        remap_enrich(d, &line_map, src, &file_name, input.parent())
+    })?;
     crate::opt::optimize(&mut module, cfg.opt);
     if cfg.opt > 0 {
-        ir::resync(&mut module)?;
-        ir::validate(&module)?;
+        ir::resync(&mut module).map_err(|d| {
+            remap_enrich(d, &line_map, src, &file_name, input.parent())
+        })?;
+        ir::validate(&module).map_err(|d| {
+            remap_enrich(d, &line_map, src, &file_name, input.parent())
+        })?;
     }
 
     if cfg.syntax_only {
@@ -567,6 +575,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         cfg.bounds_check,
         cfg.trapv,
         offload_section.as_ref(),
+        &line_map,
     );
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
@@ -1198,6 +1207,21 @@ fn link_with_host_cc(
         )]);
     }
     Ok(())
+}
+
+/// IR/优化阶段产生的诊断: span 是预处理输出行号, 需要与 parse 阶段
+/// 相同的 remap + enrich 处理, 否则内核等大 TU 会把 60 万行的物理
+/// 行号直接打到 stderr (如 E1009 unknown aggregate member).
+fn remap_enrich(
+    mut diags: Vec<Diagnostic>,
+    line_map: &[LineSpan],
+    src: &[u8],
+    file_name: &str,
+    base_dir: Option<&std::path::Path>,
+) -> Vec<Diagnostic> {
+    remap_diags(&mut diags, line_map);
+    enrich_diags(&mut diags, src, file_name, base_dir);
+    diags
 }
 
 /// 把诊断的 span 从预处理输出行号映射回源文件 (file, line).

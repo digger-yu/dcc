@@ -754,30 +754,21 @@ pub fn print_all(diags: &[Diagnostic], cfg: &DiagnosticsConfig) {
 pub fn enrich_diags(
     diags: &mut [Diagnostic],
     src: &[u8],
-    file_name: &str,
+    _file_name: &str,
     base_dir: Option<&std::path::Path>,
 ) {
     let main_text = std::str::from_utf8(src).unwrap_or("");
     let main_lines: Vec<&str> = main_text.lines().collect();
-    // 缓存: 源文件路径 -> 行文本 (仅用于头文件, 避免重复读磁盘).
-    // 主文件始终用 `src` 提供的 main_lines (预处理输出), 保持与原行为一致.
+    // 缓存: 源文件路径 -> 行文本 (避免重复读磁盘).
+    // remap 后 span.line 已是源文件行号 (主文件同样), 因此主文件也
+    // 从磁盘读取源文本; 磁盘读取失败时 (如 stdin 输入) 回退到
+    // main_lines (预处理输出, 与 remap 未命中场景保持同源).
     let mut file_cache: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for d in diags.iter_mut() {
         if d.span.line == 0 {
             continue;
         }
-        if d.span.file == file_name {
-            // 主文件: 用 parser 看到的预处理文本, 不 clamp 行号, 不缓存.
-            let idx = (d.span.line as usize).saturating_sub(1);
-            if d.source_line.is_none() {
-                if let Some(line) = main_lines.get(idx) {
-                    d.source_line = Some(line.to_string());
-                }
-            }
-            continue;
-        }
-        // 头文件: 从磁盘读取源文件 (缓存避免重复 I/O).
         if !file_cache.contains_key(&d.span.file) {
             let tried_paths = [
                 base_dir.map(|b| b.join(&d.span.file)),
@@ -794,11 +785,22 @@ pub fn enrich_diags(
         }
         let lines_vec = file_cache.get(&d.span.file).unwrap();
         let total = lines_vec.len();
-        // Clamp 行号: 仅当头文件 span 行号超过文件实际行数时 (常见于
-        // 宏展开 / 缓存回放造成的行号虚高), 回落到文件末尾行. 这样
-        // 用户至少看到真实存在的文件和行号, 而不是 "sched.h:169110".
+        if total == 0 {
+            // 磁盘源文件不可得 (stdin / 预处理输出): 回退到 main_lines,
+            // 此时 span.line 为预处理输出行号, 行文本与其同源, 不 clamp.
+            let idx = (d.span.line as usize).saturating_sub(1);
+            if d.source_line.is_none() {
+                if let Some(line) = main_lines.get(idx) {
+                    d.source_line = Some(line.to_string());
+                }
+            }
+            continue;
+        }
+        // Clamp 行号: span 行号超过文件实际行数时 (常见于宏展开 /
+        // 缓存回放造成的行号虚高), 回落到文件末尾行. 这样用户至少
+        // 看到真实存在的文件和行号, 而不是 "sched.h:169110".
         let idx = (d.span.line as usize).saturating_sub(1);
-        if idx >= total && total > 0 {
+        if idx >= total {
             d.span.line = total as u32;
         }
         if d.source_line.is_some() {

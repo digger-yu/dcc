@@ -15,6 +15,7 @@ use crate::codegen::elf::{
     STV_HIDDEN, STV_PROTECTED,
 };
 use crate::const_eval;
+use crate::preproc::LineSpan;
 use crate::target::Target;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -80,6 +81,8 @@ pub struct Codegen {
     pub labels: HashMap<String, u64>,
     current_asm_line: usize,
     current_asm_src_line: u32,
+    /// 预处理输出行号 → 源文件位置的映射 (诊断定位用)
+    pub line_map: Vec<LineSpan>,
     pending: Vec<PendingJump>,
     next_label: u32,
     var_map: HashMap<String, (i32, Type)>,
@@ -441,6 +444,7 @@ struct ParallelEmitCtx {
     debug_level: u8,
     emit_cfi: bool,
     source_name: String,
+    line_map: Vec<LineSpan>,
     globals: HashMap<String, ParallelGlobalSnap>,
     variadic_funcs: HashMap<String, bool>,
     nested_funcs: HashMap<String, Vec<(String, i32)>>,
@@ -547,6 +551,7 @@ impl Codegen {
             func_asm_layout: HashMap::new(),
             current_asm_line: 0,
             current_asm_src_line: 0,
+            line_map: Vec::new(),
             source_name: String::new(),
             parallel_codegen: false,
         }
@@ -563,18 +568,37 @@ impl Codegen {
 
     /// mini-asm 警告: 附带源文件名与 asm 语句所在行号, 方便定位内核等
     /// 大型 TU 中不被支持的内联汇编指令。
+    /// current_asm_src_line 是预处理输出行号, 经 line_map 映射回源文件。
     fn asm_warn(&self, msg: &str) {
-        if self.current_asm_src_line > 0 {
-            eprintln!(
-                "{}:{}: warning: {}",
-                self.source_name, self.current_asm_src_line, msg
-            );
+        let (file, line) = self.asm_src_pos();
+        if line > 0 {
+            eprintln!("{}:{}: warning: {}", file, line, msg);
         } else {
-            eprintln!(
-                "{}: warning: {}",
-                self.source_name, msg
-            );
+            eprintln!("{}: warning: {}", file, msg);
         }
+    }
+
+    /// 把当前 asm 语句的预处理输出行号映射回 (源文件, 源行号)。
+    /// 映射失败时回退到 source_name + 原始行号。
+    fn asm_src_pos(&self) -> (String, u32) {
+        let line = self.current_asm_src_line;
+        if line == 0 || self.line_map.is_empty() {
+            return (self.source_name.clone(), line);
+        }
+        // 二分查找最后一个 out_start <= line 的区间
+        let idx = self.line_map.partition_point(|s| s.out_start <= line);
+        if let Some(ls) = idx.checked_sub(1).and_then(|i| self.line_map.get(i)) {
+            if line < ls.out_start + ls.count {
+                return (ls.file.clone(), ls.src_start + (line - ls.out_start));
+            }
+            // 未严格命中 (宏展开/缓存回放): 保留行号, 回填文件归属
+            return (ls.file.clone(), line);
+        }
+        // line 小于 line_map[0].out_start: 预处理输出起始的预写入行
+        if let Some(first) = self.line_map.first() {
+            return (first.file.clone(), first.src_start.max(1));
+        }
+        (self.source_name.clone(), line)
     }
     pub fn emit(&mut self, b: &[u8]) {
         self.code.extend_from_slice(b);
@@ -2420,6 +2444,7 @@ impl Codegen {
             debug_level: self.debug_level,
             emit_cfi: self.emit_cfi,
             source_name: self.source_name.clone(),
+            line_map: self.line_map.clone(),
             globals: self
                 .globals
                 .iter()
@@ -2453,6 +2478,7 @@ impl Codegen {
         cg.debug_level = ctx.debug_level;
         cg.emit_cfi = ctx.emit_cfi;
         cg.source_name = ctx.source_name;
+        cg.line_map = ctx.line_map;
         for (name, snap) in ctx.globals {
             cg.globals.insert(
                 name,
@@ -14577,13 +14603,10 @@ impl Codegen {
 
             // 未识别指令: 警告 + nop 占位
             _ => {
-                eprintln!(
-                    "{}:{}: warning: unsupported inline asm instruction '{}' (asm line {}), emitted as nop",
-                    self.source_name,
-                    self.current_asm_src_line,
-                    mnemonic,
-                    self.current_asm_line,
-                );
+                self.asm_warn(&format!(
+                    "unsupported inline asm instruction '{}' (asm line {}), emitted as nop",
+                    mnemonic, self.current_asm_line,
+                ));
                 self.emit(&[0x90]);
             }
         }
@@ -14631,7 +14654,7 @@ impl Codegen {
                     4 => self.emit(&[0x0F, 0xA0]), // push %fs
                     5 => self.emit(&[0x0F, 0xA8]), // push %gs
                     _ => {
-                        eprintln!("{}:{}: warning: push: unknown segment {}, emitted as nop", self.source_name, self.current_asm_src_line, seg);
+                        self.asm_warn(&format!("push: unknown segment {}, emitted as nop", seg));
                         self.emit(&[0x90]);
                     }
                 }
@@ -14693,7 +14716,7 @@ impl Codegen {
                     4 => self.emit(&[0x0F, 0xA1]), // pop %fs
                     5 => self.emit(&[0x0F, 0xA9]), // pop %gs
                     _ => {
-                        eprintln!("{}:{}: warning: pop: unknown segment {}, emitted as nop", self.source_name, self.current_asm_src_line, seg);
+                        self.asm_warn(&format!("pop: unknown segment {}, emitted as nop", seg));
                         self.emit(&[0x90]);
                     }
                 }
@@ -15389,10 +15412,10 @@ impl Codegen {
                     }
                 } else if bits == 8 {
                     // 8 位但 imm 越界: 报错
-                    eprintln!(
-                        "{}:{}: warning: 8-bit ALU immediate out of range ({}), emitted as nop",
-                        self.source_name, self.current_asm_src_line, v
-                    );
+                    self.asm_warn(&format!(
+                        "8-bit ALU immediate out of range ({}), emitted as nop",
+                        v
+                    ));
                     self.emit(&[0x90]);
                 } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
                     self.emit(&[0x81, Self::modrm_reg_reg(op, *d)]);
@@ -15622,10 +15645,10 @@ impl Codegen {
                         // 负值: 0xF6 /0 ib 接受 unsigned 8-bit, 负值截断为 u8
                         self.emit(&[0xF6, Self::modrm_reg_reg(0, *d), *v as u8]);
                     } else {
-                        eprintln!(
-                            "{}:{}: warning: 8-bit test immediate out of range ({}), emitted as nop",
-                            self.source_name, self.current_asm_src_line, v
-                        );
+                        self.asm_warn(&format!(
+                            "8-bit test immediate out of range ({}), emitted as nop",
+                            v
+                        ));
                         self.emit(&[0x90]);
                     }
                 } else if *v >= -128 && *v <= 127 && (*d & 7) == 0 {
@@ -15714,10 +15737,10 @@ impl Codegen {
                 } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
                     self.emit(&(*v as i32).to_le_bytes());
                 } else {
-                    eprintln!(
-                        "{}:{}: warning: 32/64-bit test mem immediate out of range ({}), emitted as nop",
-                        self.source_name, self.current_asm_src_line, v
-                    );
+                    self.asm_warn(&format!(
+                        "32/64-bit test mem immediate out of range ({}), emitted as nop",
+                        v
+                    ));
                     self.emit(&[0x90]);
                 }
             }
@@ -18572,7 +18595,10 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {
-                eprintln!("{}:{}: warning: unsupported vex 2-op operand pattern (l:{}, pp:{}, map:{}, opcode:0x{:02x}, w:{}), src:{:?}, dst:{:?}, emitted as nop", self.source_name, self.current_asm_src_line, l, pp, map, opcode, w, src, dst);
+                self.asm_warn(&format!(
+                    "unsupported vex 2-op operand pattern (l:{}, pp:{}, map:{}, opcode:0x{:02x}, w:{}), src:{:?}, dst:{:?}, emitted as nop",
+                    l, pp, map, opcode, w, src, dst
+                ));
                 self.emit(&[0x90]);
             }
         }

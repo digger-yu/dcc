@@ -2237,6 +2237,92 @@ fn asm_global_asm_compiles_without_nop_fallback() {
     );
 }
 
+/// 头文件中不支持的内联 asm 警告必须映射回真实源文件行号
+/// (而非预处理输出行号, 内核头文件可达几十万行, 虚高行号无法定位)。
+/// fixture: asm_warn_loc.h 第 6 行含 `leaq %c1(%%rip), %0`。
+#[test]
+fn asm_warning_location_maps_to_real_source_line() {
+    let dir = std::env::temp_dir();
+    let tag = format!("dcc-asm-warn-loc-{}", std::process::id());
+    let hdr_path = dir.join(format!("{tag}.h"));
+    let src_path = dir.join(format!("{tag}.c"));
+    let hdr = include_str!("fixtures/c/asm_warn_loc.h");
+    fs::write(&hdr_path, hdr).expect("write header fixture");
+    fs::write(
+        &src_path,
+        format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr_path.display()),
+    )
+    .expect("write C fixture");
+    let obj_path = dir.join(format!("{tag}.o"));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    // 警告必须落在头文件第 6 行 (asm 语句), 而不是预处理输出行号
+    let expect = format!("{}:6: warning: unsupported lea operand pattern", hdr_path.display());
+    assert!(
+        stderr.contains(&expect),
+        "expected precise asm warning location {expect:?}, got: {stderr}"
+    );
+    let _ = fs::remove_file(hdr_path);
+    let _ = fs::remove_file(src_path);
+    let _ = fs::remove_file(obj_path);
+}
+
+/// 头文件缓存 (冷→热) 回放不得丢失 line_map 精度:
+/// 第二次编译 (缓存命中) 的 asm 警告位置必须与首次一致且同样精确。
+#[test]
+fn asm_warning_location_stable_across_header_cache_replay() {
+    let dir = std::env::temp_dir();
+    let tag = format!("dcc-asm-warn-cache-{}", std::process::id());
+    let hdr_path = dir.join(format!("{tag}.h"));
+    let src_path = dir.join(format!("{tag}.c"));
+    let obj_path = dir.join(format!("{tag}.o"));
+    let home_dir = dir.join(format!("{tag}-home"));
+    fs::create_dir_all(&home_dir).expect("create temp HOME");
+    fs::write(&hdr_path, include_str!("fixtures/c/asm_warn_loc.h"))
+        .expect("write header fixture");
+    fs::write(
+        &src_path,
+        format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr_path.display()),
+    )
+    .expect("write C fixture");
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .env("HOME", &home_dir)
+            .args(["-c", "-o"])
+            .arg(&obj_path)
+            .arg(&src_path)
+            .output()
+            .expect("run dcc")
+    };
+    let cold = run();
+    let hot = run();
+    let cold_err = String::from_utf8_lossy(&cold.stderr);
+    let hot_err = String::from_utf8_lossy(&hot.stderr);
+    assert!(cold.status.success(), "cold stderr: {cold_err}");
+    assert!(hot.status.success(), "hot stderr: {hot_err}");
+    // 冷/热两条路径的警告必须一致 (缓存回放不丢映射精度)
+    assert_eq!(
+        cold_err.trim(),
+        hot_err.trim(),
+        "cold/hot cache warning mismatch"
+    );
+    let expect = format!("{}:6: warning: unsupported lea operand pattern", hdr_path.display());
+    assert!(
+        hot_err.contains(&expect),
+        "expected precise asm warning location {expect:?}, got: {hot_err}"
+    );
+    let _ = fs::remove_file(hdr_path);
+    let _ = fs::remove_file(src_path);
+    let _ = fs::remove_file(obj_path);
+    let _ = fs::remove_dir_all(home_dir);
+}
+
 /// __builtin_constant_p：编译期常量判定（含 __int128 表达式）
 #[test]
 fn builtin_constant_p_full_run_returns_zero() {

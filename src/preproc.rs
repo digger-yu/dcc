@@ -144,13 +144,15 @@ pub(crate) struct MacroDef {
     variadic: bool,
 }
 
-/// 头文件缓存内容: (guard 宏名, 宏列表, 依赖文件, (文件, hash), __COUNTER__ 消耗量)
+/// 头文件缓存内容: (guard 宏名, 宏列表, 依赖文件, (文件, hash), __COUNTER__ 消耗量,
+/// line_map 子区间 (相对 out_start, file, src_start, count))
 type MacroCacheData = (
     String,
     Vec<(String, MacroDef)>,
     Vec<String>,
     Vec<(String, u64)>,
     u32,
+    Vec<(u32, String, u32, u32)>,
 );
 
 /// 预处理输出行号 → 源文件行号的映射区间
@@ -1995,6 +1997,7 @@ impl Preprocessor {
                             cached_removed,
                             cached_deps,
                             counter_delta,
+                            cached_line_spans,
                         )) = self.load_from_cache(cp)
                         {
                             // 依赖新鲜度校验: 任一依赖文件变更即 miss (重处理)
@@ -2011,19 +2014,38 @@ impl Preprocessor {
                                         self.deps.push(dpath.clone());
                                     }
                                 }
-                                self.push_out(&cached_output);
                                 // 记录缓存回放的映射区间（近似：嵌套 include 映射到外层头文件）
+                                // 注意: out_start 必须在 push_out(&cached_output) 之前取值,
+                                // 否则区间起点被推迟整个缓存内容长度, 头文件全部行落在
+                                // line_map 缝隙中, 诊断与 asm 警告无法映射回源文件行号。
                                 let cached_out_start = self.out_lines + 1; // 跳过 include 注释行
-                                let cached_lines = cached_output.matches('\n').count() as u32;
-                                if cached_lines > 0 {
-                                    self.line_map.push(LineSpan {
-                                        out_start: cached_out_start,
-                                        // 用绝对路径而非 #include 参数, 使下游
-                                        // enrich_diags 能定位磁盘文件并 clamp 行号.
-                                        file: Self::normalize_source_path(&full_path),
-                                        src_start: 1,
-                                        count: cached_lines,
-                                    });
+                                self.push_out(&cached_output);
+                                if !cached_line_spans.is_empty() {
+                                    // 缓存携带精确子区间: 相对偏移还原为绝对输出行号,
+                                    // 使头文件内 (含嵌套 include) 的每一行都能映射回源位置
+                                    for (rel_out_start, file, src_start, count) in cached_line_spans {
+                                        if count > 0 {
+                                            self.line_map.push(LineSpan {
+                                                out_start: cached_out_start + rel_out_start,
+                                                file,
+                                                src_start,
+                                                count,
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    // 旧缓存 (无子区间): 回退到粗粒度区间
+                                    let cached_lines = cached_output.matches('\n').count() as u32;
+                                    if cached_lines > 0 {
+                                        self.line_map.push(LineSpan {
+                                            out_start: cached_out_start,
+                                            // 用绝对路径而非 #include 参数, 使下游
+                                            // enrich_diags 能定位磁盘文件并 clamp 行号.
+                                            file: Self::normalize_source_path(&full_path),
+                                            src_start: 1,
+                                            count: cached_lines,
+                                        });
+                                    }
                                 }
                                 // 回放宏变更集: 先删后插。缓存条目记录了处理期间
                                 // #undef 的宏和被重新定义/新增的宏; 只回放新增会
@@ -2047,6 +2069,9 @@ impl Preprocessor {
                 self.push_out(&format!("/* #include \"{}\" */\n", path));
                 let saved_base = self.base_dir.clone();
                 let saved_out_len = self.out.len();
+                // 记录处理前的 line_map / 输出行数, 用于收集本头文件产生的子区间
+                let line_map_before = self.line_map.len();
+                let out_lines_before = self.out_lines;
                 // 记录当前宏表快照 (含值), 用于后续提取该头文件对宏表的
                 // 变更集 (新增 + 重新定义 + #undef 删除)。仅记录新增会
                 // 丢失覆盖定义 — 如 stddef.h 把内置 NULL 重新定义为内核
@@ -2100,6 +2125,20 @@ impl Preprocessor {
                             std::collections::HashSet::new();
                         dep_closure.retain(|(p, _)| seen.insert(p.clone()));
                         let counter_delta = self.counter.wrapping_sub(counter_before);
+                        // 收集本次处理期间新增的 line_map 区间并相对化:
+                        // 回放时以注释行后的行号为基准还原, 供诊断/asm 警告精确定位
+                        let cached_line_spans: Vec<(u32, String, u32, u32)> = self.line_map
+                            [line_map_before..]
+                            .iter()
+                            .map(|ls| {
+                                (
+                                    ls.out_start.saturating_sub(out_lines_before + 1),
+                                    ls.file.clone(),
+                                    ls.src_start,
+                                    ls.count,
+                                )
+                            })
+                            .collect();
                         self.save_to_cache(
                             cp,
                             &new_output,
@@ -2107,6 +2146,7 @@ impl Preprocessor {
                             &removed_macros,
                             &dep_closure,
                             counter_delta,
+                            &cached_line_spans,
                         );
                     }
                 }
@@ -3367,7 +3407,8 @@ impl Preprocessor {
         // 第三步: 普通参数替换（单次扫描，实参视为不透明，避免 *d 被二次替换成 **d）
         let mut result = result;
         result = Self::replace_all_params(&result, params, args);
-        result
+        // 清除 handle_paste 的保护标记 (\x01..\x02), 避免泄漏到输出
+        result.replace('\x01', "").replace('\x02', "")
     }
 
     /// 处理 `__VA_OPT__(content)`: 若 `va_empty` 为真则整段移除,
@@ -3495,6 +3536,21 @@ impl Preprocessor {
         let len = chars.len();
         let mut i = 0;
         while i < len {
+            if chars[i] == '\x01' {
+                // paste 拼入的实参区域 (handle_paste 用 \x01..\x02 保护):
+                // 整体透传, 其中的形参名不得二次替换 (如 entry->func 的 func)
+                result.push(chars[i]);
+                i += 1;
+                while i < len && chars[i] != '\x02' {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                if i < len {
+                    result.push('\x02');
+                    i += 1;
+                }
+                continue;
+            }
             if chars[i] == '"' {
                 result.push('"');
                 i += 1;
@@ -3624,14 +3680,16 @@ impl Preprocessor {
                         // 非空: 按 ## 语义拼接两侧 token (无空格)
                         // - ,##X: , 在 before[..left_start], 直接拼上 right_sub → ,X
                         // - identifier##__VA_ARGS__: left_sub + right_sub 无空格
-                        let pasted = format!("{}{}", left_sub, right_sub);
+                        // 拼接产物用 \x01..\x02 保护, 防止后续普通参数替换把
+                        // 实参内同名标识符 (如 entry->func 中的 func) 二次替换
+                        let pasted = format!("\x01{}{}\x02", left_sub, right_sub);
                         result =
                             format!("{}{}{}", &before[..left_start], pasted, &after[right_end..]);
                         continue;
                     }
                 }
             }
-            let pasted = format!("{}{}", left_sub, right_sub);
+            let pasted = format!("\x01{}{}\x02", left_sub, right_sub);
             result = format!("{}{}{}", &before[..left_start], pasted, &after[right_end..]);
         }
         result
@@ -4768,7 +4826,7 @@ impl Preprocessor {
         let mut lines = content.lines();
 
         // 第一行: 标记
-        if lines.next()? != "DCC_CACHE_V6" {
+        if lines.next()? != "DCC_CACHE_V7" {
             return None;
         }
 
@@ -4817,6 +4875,26 @@ impl Preprocessor {
             output.push('\n');
         }
 
+        // LINESPANS 段: 相对 out_start\tfile\tsrc_start\tcount (逐行)
+        let mut line_spans = Vec::new();
+        if lines.next()? == "LINESPANS" {
+            for line in lines.by_ref() {
+                if line == "END_LINESPANS" {
+                    break;
+                }
+                let parts: Vec<&str> = line.splitn(4, '\t').collect();
+                if parts.len() == 4 {
+                    if let (Ok(rel), Ok(src), Ok(count)) = (
+                        parts[0].trim().parse::<u32>(),
+                        parts[2].trim().parse::<u32>(),
+                        parts[3].trim().parse::<u32>(),
+                    ) {
+                        line_spans.push((rel, parts[1].to_string(), src, count));
+                    }
+                }
+            }
+        }
+
         // 读取宏定义
         let mut macros = Vec::new();
         for line in lines {
@@ -4851,7 +4929,7 @@ impl Preprocessor {
             }
         }
 
-        Some((output, macros, removed, deps, counter_delta))
+        Some((output, macros, removed, deps, counter_delta, line_spans))
     }
 
     fn save_to_cache(
@@ -4862,8 +4940,9 @@ impl Preprocessor {
         removed: &[String],
         deps: &[(String, u64)],
         counter_delta: u32,
+        line_spans: &[(u32, String, u32, u32)],
     ) {
-        let mut content = String::from("DCC_CACHE_V6\n");
+        let mut content = String::from("DCC_CACHE_V7\n");
         content.push_str(&format!("COUNTER_DELTA\t{}\n", counter_delta));
         content.push_str("DEPS\n");
         for (p, h) in deps {
@@ -4877,6 +4956,11 @@ impl Preprocessor {
         content.push_str("END_REMOVED\n");
         content.push_str(output);
         content.push_str("END_OUTPUT\n");
+        content.push_str("LINESPANS\n");
+        for (rel, file, src_start, count) in line_spans {
+            content.push_str(&format!("{}\t{}\t{}\t{}\n", rel, file, src_start, count));
+        }
+        content.push_str("END_LINESPANS\n");
 
         for (name, def) in macros {
             // 格式: NAME\tPARAMS\tVARIADIC\tBODY
