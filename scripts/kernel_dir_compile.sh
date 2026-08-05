@@ -32,17 +32,28 @@ compile_one() {
     for a in $PREFIX; do
         if $skip; then skip=false; continue; fi
         case "$a" in
+            # 注意: 参数必须以字面双引号包裹值 (内核 make 在 shell 层剥单引号后
+            # 传给编译器的是 -DNAME="value"); 若用 '\"$var\"' 会把单引号留在
+            # 宏体里, 展开后产生 char literal, 导致 dcc 解析报 E0001.
+            # KBUILD_MODFILE 不带 .c 后缀 (与真实 .cmd 一致)
             -DKBUILD_MODFILE=*)
-                cmd+=("-DKBUILD_MODFILE='\"kernel/${src#kernel/}\"'")
+                cmd+=("-DKBUILD_MODFILE=\"$modfile\"")
                 ;;
             -DKBUILD_BASENAME=*)
-                cmd+=("-DKBUILD_BASENAME='\"$base\"'")
+                cmd+=("-DKBUILD_BASENAME=\"$base\"")
                 ;;
             -DKBUILD_MODNAME=*)
-                cmd+=("-DKBUILD_MODNAME='\"$base\"'")
+                cmd+=("-DKBUILD_MODNAME=\"$base\"")
                 ;;
             -D__KBUILD_MODNAME=*)
                 cmd+=("-D__KBUILD_MODNAME=$base")
+                ;;
+            # -Wp 依赖文件路径按当前文件替换, 避免所有文件写同一个 .d
+            -Wp,-MMD,*)
+                cmd+=("-Wp,-MMD,${out%/*}/.${out##*/}.d")
+                ;;
+            -Wp,-MT,*)
+                cmd+=("-Wp,-MT,$out")
                 ;;
             *)
                 cmd+=("$a")
