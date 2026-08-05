@@ -5804,3 +5804,63 @@ fn preprocess_only_stdout() {
         "stdout should contain preprocessed output, got: {stdout}"
     );
 }
+
+/// C89 函数类型参数 (C11 6.7.6.3p8): 参数声明为函数类型时调整为函数指针.
+/// 内核 include/net/ipv6.h 的 ip6_append_data 以 `int getfrag(void*, char*, ...)`
+/// 形式声明回调参数. 修复前 parse_params 报 E0001 (expected ')', got LParen).
+#[test]
+fn func_type_param_compiles() {
+    let source = include_str!("fixtures/c/func_type_param.c");
+    let (output, obj) = run_object_test("func-type-param", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 数组维度整型常量表达式折叠: `BITS_PER_LONG + 1` 应折叠为编译期常量,
+/// 使 typeof 重声明类型相等 (内核 kernel/cpu.c cpu_bit_bitmap 模式).
+/// 修复前维度为 ArraySize::Var, 相等比较恒 false, 误报 E0007.
+#[test]
+fn array_dim_const_fold_compiles() {
+    let source = include_str!("fixtures/c/array_dim_const_fold.c");
+    let (output, obj) = run_object_test("array-dim-const-fold", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 同标签 struct/union 指针重声明兼容: C11 6.2.5p22 同标签即同一类型.
+/// 内核 include/linux/sched.h `extern struct pid *cad_pid;` (标签不完整)
+/// + kernel/reboot.c 完整定义. 修复前 Ptr 包装后 E0007.
+#[test]
+fn tag_compat_redecl_compiles() {
+    let source = include_str!("fixtures/c/tag_compat_redecl.c");
+    let (output, obj) = run_object_test("tag-compat-redecl", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// 全局静态初始化器链接期地址常量 (E1006 回归): 数组成员隐式数组退化
+/// (utsname_sysctl.c) / &member_chain[i] (tracepoint.c) / (&x)->field
+/// (watchdog.c cpumask_bits 宏展开) 三种形式.
+#[test]
+fn static_addr_const_init_compiles() {
+    let source = include_str!("fixtures/c/static_addr_const.c");
+    let (output, obj) = run_object_test("static-addr-const", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

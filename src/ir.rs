@@ -806,12 +806,24 @@ fn is_static_initializer(expr: &Expr) -> bool {
         Expr::AddrOf { e, .. } => match e.as_ref() {
             Expr::Ident { .. } | Expr::String { .. } => true,
             Expr::Index { arr, idx, .. } => {
-                matches!(arr.as_ref(), Expr::Ident { .. }) && const_eval::eval(idx).is_ok()
+                // &arr[i] / &ident.field[i]...: 链接期可重定位常量
+                let base_ok = match arr.as_ref() {
+                    Expr::Ident { .. } => true,
+                    Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
+                    _ => false,
+                };
+                base_ok && const_eval::eval(idx).is_ok()
             }
             // &ident.field / &ident.field.field... : 链接期可重定位常量
             Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
             _ => false,
         },
+        // 数组成员隐式数组退化: init_uts_ns.name.machine (char[65]) 作为
+        // 初始化器值等价 &init_uts_ns.name.machine[0], 是链接期可重定位
+        // 地址常量 (与显式 & 形式一致)
+        e @ Expr::Member { expr, .. } if matches!(e.ty(), Type::Array(..)) => {
+            is_addr_of_member_ok(expr)
+        }
         // 数组到指针衰减: arr + const / &arr[i] 的等价形式
         Expr::Binop {
             op: BinOp::Add,
@@ -854,10 +866,13 @@ fn is_static_initializer(expr: &Expr) -> bool {
 
 /// 嵌套 `&ident.field...` 中基址是标识符的简单形式是链接期常量。
 /// 例如 `&init_uts_ns.ns_unified_node` 或 `&a.b.c.d`。
+/// 也接受 `(&x)->field` (等价 `x.field`) 与 `&(x.field)` 形式。
 fn is_addr_of_member_ok(e: &Expr) -> bool {
     match e {
         Expr::Ident { .. } => true,
         Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
+        // cpumask_bits(&mask) 等宏展开为 (&mask)->bits: 先对基址取址再访问成员
+        Expr::AddrOf { e, .. } => is_addr_of_member_ok(e),
         _ => false,
     }
 }

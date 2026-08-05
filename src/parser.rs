@@ -271,6 +271,27 @@ impl<'a> Parser<'a> {
         self.cur = std::mem::replace(&mut self.peek, self.lex.next());
     }
 
+    /// 解包指针/数组外层后比较 struct/union 标签是否兼容
+    /// 同标签且任一方不完整 (或字段完全相同) 即视为兼容类型
+    fn tag_compatible(a: &Type, b: &Type) -> bool {
+        fn unwrap(t: &Type) -> &Type {
+            match t {
+                Type::Ptr(inner) => unwrap(inner),
+                Type::Array(inner, _) => unwrap(inner),
+                other => other,
+            }
+        }
+        match (unwrap(a), unwrap(b)) {
+            (Type::Struct(an, af), Type::Struct(bn, bf)) => {
+                an == bn && (af.is_empty() || bf.is_empty() || af == bf)
+            }
+            (Type::Union(an, af), Type::Union(bn, bf)) => {
+                an == bn && (af.is_empty() || bf.is_empty() || af == bf)
+            }
+            _ => false,
+        }
+    }
+
     /// 给定源行号, 查找 #pragma pack 历史中的当前 packing 对齐
     /// pack_history 按行号升序, 找到最后一个 l <= line 的条目即生效值
     pub fn pack_at_line(&self, line: u32) -> Option<usize> {
@@ -433,23 +454,14 @@ impl<'a> Parser<'a> {
             if self.in_function {
                 return true;
             }
-            // 允许不完整 -> 完整的重定义: 例如内核 lkc.h 提供了
-            //   extern struct gstr autoconf_cmd;
-            // confdata.c 中以非 extern 形式提供了完整定义
-            //   struct gstr autoconf_cmd;
-            // C 标准允许多次声明只要不是定义, 后续有 extern 前缀
-            // 时是重复声明, 没有 extern 时是该变量的唯一定义.
-            // 判定: 类型名相同且现有类型字段为空 (不完整) 时
-            // 跳过检查, 以新类型为准.
-            if let (Type::Struct(en, e_fields), Type::Struct(nn, n_fields)) = (existing, ty) {
-                if en == nn && e_fields.is_empty() && !n_fields.is_empty() {
-                    return true;
-                }
-            }
-            if let (Type::Union(en, e_fields), Type::Union(nn, n_fields)) = (existing, ty) {
-                if en == nn && e_fields.is_empty() && !n_fields.is_empty() {
-                    return true;
-                }
+            // 允许同一 struct/union 标签的重声明: C11 6.2.5p22 规定同标签的
+            // struct/union 无论是否完整都是同一类型. dcc 的 Type 携带字段列表,
+            // 导致 Ptr(Struct(name,[])) != Ptr(Struct(name,fields)), 例如内核
+            // sched.h `extern struct pid *cad_pid;` (标签不完整) 之后源文件里
+            // `struct pid *cad_pid;` (标签已完整定义) 就会误报. 解包指针/数组
+            // 外层后按标签名比较: 同标签且任一方不完整 (或字段相同) 即兼容.
+            if Self::tag_compatible(existing, ty) {
+                return true;
             }
             // 文件作用域且类型不匹配: 报 E0007
             self.diags.push(
@@ -2136,9 +2148,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let arr_size = if self.cur.kind != TokKind::RBracket {
                     let e = self.parse_expr()?;
-                    match &e {
-                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                        _ => ArraySize::Var(Box::new(e)),
+                    // 整型常量表达式按标准折叠为编译期常量, 否则保留为 VLA
+                    if let Ok(v) = crate::const_eval::eval(&e) {
+                        ArraySize::Const(v.max(0) as usize)
+                    } else {
+                        match &e {
+                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                            _ => ArraySize::Var(Box::new(e)),
+                        }
                     }
                 } else {
                     ArraySize::Const(0)
@@ -2535,9 +2552,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let arr_size = if self.cur.kind != TokKind::RBracket {
                     let e = self.parse_expr()?;
-                    match &e {
-                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                        _ => ArraySize::Var(Box::new(e)),
+                    // 整型常量表达式按标准折叠为编译期常量, 否则保留为 VLA
+                    if let Ok(v) = crate::const_eval::eval(&e) {
+                        ArraySize::Const(v.max(0) as usize)
+                    } else {
+                        match &e {
+                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                            _ => ArraySize::Var(Box::new(e)),
+                        }
                     }
                 } else {
                     ArraySize::Const(0)
@@ -3825,9 +3847,14 @@ impl<'a> Parser<'a> {
                         span: Span::point("", 0, 0),
                         ty: Type::Int,
                     });
-                    match &e {
-                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                        _ => ArraySize::Var(Box::new(e)),
+                    // 整型常量表达式按标准折叠为编译期常量, 否则保留为 VLA
+                    if let Ok(v) = crate::const_eval::eval(&e) {
+                        ArraySize::Const(v.max(0) as usize)
+                    } else {
+                        match &e {
+                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                            _ => ArraySize::Var(Box::new(e)),
+                        }
                     }
                 } else {
                     ArraySize::Const(0)
@@ -4298,6 +4325,19 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            // C89 函数类型参数: `int getfrag(void *from, char *to, ...)`
+            // 声明为函数类型的参数按 C11 6.7.6.3p8 调整为指向函数的指针.
+            if nm.is_some() && self.cur.kind == TokKind::LParen {
+                self.advance();
+                let inner_params = self.parse_params()?;
+                if !self.expect(TokKind::RParen, "')'") {
+                    return None;
+                }
+                ty = Type::Ptr(Box::new(Type::Func(
+                    Box::new(ty),
+                    inner_params.iter().map(|p| p.ty.clone()).collect(),
+                )));
+            }
             // 参数名后的 __attribute__((unused)) 等
             self.skip_attributes();
             if self.cur.kind == TokKind::LBracket {
@@ -4319,9 +4359,14 @@ impl<'a> Parser<'a> {
                 }
                 let arr_size = if self.cur.kind != TokKind::RBracket {
                     let e = self.parse_expr()?;
-                    match &e {
-                        Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                        _ => ArraySize::Var(Box::new(e)),
+                    // 整型常量表达式按标准折叠为编译期常量, 否则保留为 VLA
+                    if let Ok(v) = crate::const_eval::eval(&e) {
+                        ArraySize::Const(v.max(0) as usize)
+                    } else {
+                        match &e {
+                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                            _ => ArraySize::Var(Box::new(e)),
+                        }
                     }
                 } else {
                     ArraySize::Const(0)
