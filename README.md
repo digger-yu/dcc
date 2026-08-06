@@ -183,6 +183,13 @@ C++ 走"降级到 C"路径（`src/cpp/lower.rs`），Itanium ABI 名字修饰，
 | 预定义宏 | ✅ `__linux__` / `__GNUC__` / `__amd64__` / `__x86_64` / `__USER_LABEL_PREFIX__` / `__VERSION__` / `__OPTIMIZE__` / `__PIC__` / `__PIE__` / `__code_model_small__` / `__SEG_GS` / `__SEG_FS` |
 | 增量预处理 PCH（`PchBundle` + 宏状态校验 + DCC_PCH_V1 魔数） | ✅ `-fpch-create=` / `-fpch-include=`（M19 实装） |
 
+> **M26 增量（2026-08-06）**：C23 预处理全家族测试覆盖补全 — 新增
+> 27 个单元测试 + 10 个集成测试（fixture `elifdef.c` / `has_macros.c`），
+> 覆盖 `#elifdef`/`#elifndef`、`#embed`（limit/prefix/suffix/if_empty）、
+> `__has_embed`/`__has_include`/`__has_c_attribute`/`__has_builtin`/
+> `__has_attribute`、`__STDC_ENDIAN_*`、`#pragma once`、`#warning`/
+> `#error`、`#include_next` 与预定义宏在 `#if` 中的求值。
+
 ## 4. 目标平台
 
 `Arch::has_backend()` 当前对全部 6 个 arch 返回 `true`（`src/cli.rs` §1）。
