@@ -231,7 +231,7 @@ TLS 模式：local-exec / TLSDESC（aarch64 4 指令序列 + 3 个 R_AARCH64_TLS
 | 全局 DAE | ✅ |
 | `LtoConfig` 配置化 | ✅ |
 | Pass 7 `no_semantic_interposition` | ✅ |
-| IPA-SRA / PGO 集成 | 🔴 |
+| IPA-SRA / PGO 集成 | ✅ |
 
 ### 5.3 链接器（`src/link/`）
 
@@ -317,7 +317,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 | aarch64 | NEON 浮点聚合 > 4 元素 HFA；大结构体 > 16B 嵌套返回 sret | 单层已实装 |
 | riscv64 | RVV 完整指令集；压缩指令自动 4→2 字节压缩 | 仅基础 VSETVLI/LOAD/STORE/ADD/MUL/REDUCE |
 | x86_64 | bswap 16 位操作数 | GCC 同 |
-| 链接 | LTO IPA-SRA / PGO 集成；运行时 dynamic loader (`ld.so`) | DCE/内联/常量传播已完整；`ld.so` 为设计决策 |
+| 链接 | 运行时 dynamic loader (`ld.so`) | IPA-SRA / PGO 集成已实装；`ld.so` 为设计决策 |
 | C++ | 完整 concept SFINAE 联动；模板基类 / 友元；`export template` | 模板单态化 / BMF modules / 协程真状态机均已实装；模板基类/友元/export template 仍不支持 |
 | 平台 | Windows MSVC（codegen SysV-like）；Darwin / Mach-O；wasm32；AVR / MSP430 / Xtensa；PowerPC；LoongArch64 | 🔴 |
 | 自举 | `dcc0 → dcc1` 起步；`dcc1 → dcc2` 验证 | 字节/语义对比基础设施 `--bootstrap-compare=` 已实装（M25） |
@@ -336,7 +336,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 
 - vmlinux 工具链（pahole BTF / objtool check）非 SKIP 验证；QEMU 启动矩阵至少一种配置 PASS。
 - C++ concept SFINAE 完整联动；模板基类/友元；多平台 binary。
-- 链接器 IPA-SRA / PGO 集成；LTO `no_semantic-interposition` Pass 7 完整化。
+- LTO `no_semantic-interposition` Pass 7 完整化。
 
 **远期（架构 / 性能）**
 

@@ -233,7 +233,7 @@ AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节
 
 | 模块 | 现状 |
 |------|------|
-| LTO IPA-SRA / PGO / 循环向量化 | 跨 TU 内联+常量传播+DCE+DAE 已完整，IPA-SRA 与 PGO 集成待后续 M |
+| LTO IPA-SRA / PGO / 循环向量化 | 🟢 (M25) IPA-SRA (`src/ipa_sra.rs`) 和 PGO 集成 (`src/profile/pgo_integration.rs`) 已实装；循环向量化待后续 M |
 | 运行时 dynamic loader | 完全依赖 host ld.so（设计决策，非缺失） |
 | zstd 压缩 debug sections | 🟢 (M25) `compress_debug_sections(layout, "zstd")` 走 zstd::encode_all(级别 3) + ELF 压缩头 (ch_type=2 ELFCOMPRESS_ZSTD); CLI `-Wl,--compress-debug-sections=zstd` 已接受 |
 
