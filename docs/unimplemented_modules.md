@@ -183,7 +183,14 @@ SIMD 指令子集完整实装：
 
 ✅ LTO 跨函数内联 / 常量传播 / 全局优化；`.gnu.hash` TIE；`.eh_frame_hdr` 搜索表；
 IFUNC；`--exclude-libs`；`--build-id=sha1/uuid/md5`；`--no-undefined-version`；
-AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节。
+AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节；
+多架构 `_start` 入口桩（`ensure_start_stub`：x86_64/AArch64/RISC-V64/ARM）。
+
+> **M25 增量（2026-08-06）**：`_start` 桩从仅 x86_64 扩展为多架构感知。
+> `Layout`/`LayoutBuilder` 新增 `arch` 字段，`run_builtin_linker` 中 `arch` 和
+> `dynamic_linker` 路径改为按目标架构自动选择（`arch_from_target` /
+> `dynamic_linker_path` 辅助函数），消除硬编码的 x86_64 依赖。新增 PIE 集成测试
+> `pie_builtin_linker_return_42` 验证 PT_INTERP + _start 桩 + 动态重定位完整链路。
 
 > **M21 增量（2026-07-21）**：修复 `ld -r -flto` 在现代 binutils 下
 > 的 `--gc-sections requires a defined symbol root` 错误。新增

@@ -977,6 +977,32 @@ impl Drop for TmpObjCleanup {
     }
 }
 
+/// 将 cli::Arch 映射到 debug::ArchKind
+fn arch_from_target(t: &crate::cli::TargetTriple) -> crate::debug::ArchKind {
+    use crate::debug::ArchKind;
+    match t.arch {
+        crate::cli::Arch::X86_64 => ArchKind::X86_64,
+        crate::cli::Arch::AArch64 => ArchKind::AArch64,
+        crate::cli::Arch::RiscV64 => ArchKind::RiscV64,
+        crate::cli::Arch::Mips64 => ArchKind::Mips64,
+        crate::cli::Arch::Mips => ArchKind::Mips,
+        crate::cli::Arch::Arm => ArchKind::Arm,
+    }
+}
+
+/// 返回架构对应的动态链接器路径
+fn dynamic_linker_path(arch: crate::debug::ArchKind) -> String {
+    match arch {
+        crate::debug::ArchKind::X86_64 => "/lib64/ld-linux-x86-64.so.2",
+        crate::debug::ArchKind::AArch64 => "/lib/ld-linux-aarch64.so.1",
+        crate::debug::ArchKind::RiscV64 => "/lib/ld-linux-riscv64-lp64d.so.1",
+        crate::debug::ArchKind::Mips64 => "/lib/ld-linux-mipsn8.so.1",
+        crate::debug::ArchKind::Mips => "/lib/ld-linux-mipsel.so.1",
+        crate::debug::ArchKind::Arm => "/lib/ld-linux-armhf.so.3",
+    }
+    .to_string()
+}
+
 /// 内置全链接器：合并多个 .o → 写 ET_EXEC / ET_DYN（PIE / .so）
 fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.inputs.is_empty() {
@@ -1064,11 +1090,11 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         version_table: link::symver::VersionTable::new(),
         target_clones: link::target_clones::TargetClonesTable::new(),
         fini_builder: link::fini_dispatch::FiniArrayBuilder::new(),
-        arch: crate::debug::ArchKind::X86_64,
+        arch: arch_from_target(&cfg.target),
         // PIE/.so 需要 PT_INTERP 让动态链接器处理 GOT/重定位;
         // TODO: parse from -Wl,--dynamic-linker=
         dynamic_linker: matches!(output_kind, link::OutputKind::PIE | link::OutputKind::Shared)
-            .then(|| "/lib64/ld-linux-x86-64.so.2".to_string()),
+            .then(|| dynamic_linker_path(arch_from_target(&cfg.target))),
     };
     // 解析 .symver 指令: 从 raw_args 提取 __asm__(".symver ...") 模式
     // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:

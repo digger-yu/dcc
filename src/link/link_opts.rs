@@ -598,6 +598,7 @@ mod tests {
             n_locals: 0,
             output_relas: vec![],
             dynamic_linker: None,
+            arch: crate::debug::ArchKind::X86_64,
         };
         let before_len = layout.sections[0].data.len();
         let compressed = compress_debug_sections(&mut layout, "zstd");

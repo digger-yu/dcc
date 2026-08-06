@@ -20,6 +20,7 @@ use crate::codegen::elf::{
     SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_NOBITS, SHT_PROGBITS, SHT_RELA, SHT_STRTAB,
     SHT_SYMTAB, STB_LOCAL, STT_NOTYPE, STT_SECTION,
 };
+use crate::debug::ArchKind;
 
 /// 输出节类型：标准节按类合并，自定义节独立。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -108,6 +109,7 @@ pub struct OutputSymbol {
 pub struct Layout {
     pub is_pie: bool,
     pub is_shared: bool,
+    pub arch: ArchKind,
     pub base_addr: u64,
     /// 首个节的文件偏移起点 (ELF 头 + phdr 之后, 对齐到 16);
     /// 节 vaddr 起点 = base_addr + file_base, 保证 file_off ≡ vaddr (mod page)。
@@ -156,6 +158,7 @@ impl OutputRela {
 pub struct LayoutBuilder {
     pub is_pie: bool,
     pub is_shared: bool,
+    pub arch: ArchKind,
     pub is_relocatable: bool,
     pub base_addr: u64,
     pub entry_name: String,
@@ -174,6 +177,7 @@ impl LayoutBuilder {
         Self {
             is_pie: false,
             is_shared: false,
+            arch: ArchKind::X86_64,
             is_relocatable: false,
             base_addr: 0x400000,
             entry_name: "_start".into(),
@@ -376,6 +380,7 @@ impl LayoutBuilder {
         Ok(Layout {
             is_pie: self.is_pie,
             is_shared: self.is_shared,
+            arch: self.arch,
             base_addr: self.base_addr,
             file_base,
             sections,

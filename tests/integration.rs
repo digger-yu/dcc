@@ -5922,3 +5922,22 @@ fn builtin_linker_cleans_tmp_objs_on_failure() {
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&out);
 }
+
+/// PIE 编译测试: 编译 return-42 程序为 PIE 可执行文件, 运行验证退出码为 42.
+/// 验证 PT_INTERP, _start 桩, 动态重定位的完整链路.
+#[test]
+fn pie_builtin_linker_return_42() {
+    let (output, exe) = run_compile_and_run_flags(
+        "pie-return-42",
+        "int main(void) { return 42; }",
+        &["-pie", "-fbuiltin-linker"],
+    );
+    assert!(
+        output.status.success(),
+        "pie compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 42, "pie return-42 should exit with 42, got {rc}");
+    let _ = fs::remove_file(&exe);
+}

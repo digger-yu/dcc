@@ -237,6 +237,7 @@ TLS 模式：local-exec / TLSDESC（aarch64 4 指令序列 + 3 个 R_AARCH64_TLS
 
 | 模块 | 能力 |
 |------|------|
+| `mod.rs` | 链接器入口管线 + 多架构 `_start` 桩合成（`ensure_start_stub`：x86_64/AArch64/RISC-V64/ARM，PIE 自动 PT_INTERP） |
 | `object.rs` / `resolve.rs` | ET_REL 解析；跨 TU 强 > 弱 > undef；implicit undef 白名单（`wcs*`/`wmem*`/`sigaction`/`signal`/`cproj`/`cabs`/`carg`） |
 | `layout.rs` | 同名节合并 + R+X / R+W 2 段 |
 | `relocate.rs` | x86-64 13 / AArch64 22 / RISC-V 15 / TLS / GOT64 重定位 |

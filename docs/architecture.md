@@ -158,7 +158,7 @@ hosted 模式（非 `-ffreestanding`）预置 C11 `atomic_*` 宏。
 
 ## 链接与 LTO（`-r` / `-flto` / `-pie` / `-shared` / `-fbuiltin-linker`）
 
-DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld 行为：
+DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch64/RISC-V64/MIPS64/ARM），对标 mold/lld 行为：
 
 - **单 TU 路径**（`dcc a.c` 直出可执行文件）：单 TU 使用 `R_X86_64_PLT32`
   重定位，仅 stub PLT（不写 `.dynamic`、不生成完整链接器代码路径）。
@@ -176,6 +176,7 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 | 组件 | 职责 | 依赖 |
 |------|------|------|
 | `cli.rs` | 区分 `-c` / `-r` / `-pie` / `-shared` / `-fbuiltin-linker` / `-Wl,-soname=…` | — |
+| `link/mod.rs` | 链接器入口 + 多架构 `_start` 桩合成（`ensure_start_stub`）：无可执行入口时自动生成 `_start` 调用 `main` 并 `exit` | — |
 | `link/object.rs` | 解析 ELF ET_REL 目标文件：节、符号、`.rela.*` 重定位 | — |
 | `link/resolve.rs` | 跨 TU 符号解析：强 > 弱 > undef；隐式 undef 允许 libc weak | — |
 | `link/layout.rs` | 同名节合并 + 2 段布局（`R+X` / `R+W`） + 自定义节独立 | — |
@@ -200,8 +201,9 @@ DCC 现已内置完整的 x86-64 链接器（`src/link/`），对标 mold/lld �
 2. `resolve` 做跨 TU 强/弱/undef 规则合并（`resolve.rs`）。
 3. `LayoutBuilder` 按同名节合并并分配虚拟地址（`layout.rs`）。
 4. 动态构建 PLT/GOT 与 `.dynamic` 节（`plt_got.rs`，仅 `-pie`/`-shared`）。
-5. `apply_relocations` 写入最终字节；动态重定向分离到 `.rela.dyn` / `.rela.plt`。
-6. `write_elf_*_x86_64` 写出 ET_EXEC / ET_DYN / ET_REL。
+5. 若无可执行入口，自动合成多架构 `_start` 桩（`ensure_start_stub`，支持 x86_64/AArch64/RISC-V64/ARM）。
+6. `apply_relocations` 写入最终字节；动态重定向分离到 `.rela.dyn` / `.rela.plt`。
+7. `write_elf_*` 按架构分发写出 ET_EXEC / ET_DYN / ET_REL。
 
 **IR/Bitcode LTO 管线**（`lto_bitcode.rs`）：
 

@@ -773,6 +773,7 @@ mod tests {
             n_locals: 1,
             output_relas: relas,
             dynamic_linker: None,
+            arch: crate::debug::ArchKind::X86_64,
         };
         apply_relocations(&mut layout).expect("apply");
         layout

@@ -236,6 +236,7 @@ pub fn link_from_bundle(
     let mut builder = LayoutBuilder::new();
     builder.is_pie = cfg.output_kind == OutputKind::PIE;
     builder.is_shared = cfg.output_kind == OutputKind::Shared;
+    builder.arch = cfg.arch;
     builder.is_relocatable = cfg.output_kind == OutputKind::Relocatable;
     builder.base_addr = if cfg.output_kind == OutputKind::Executable {
         cfg.base_addr
@@ -426,10 +427,12 @@ fn recompute_section_vaddrs(layout: &mut crate::link::layout::Layout) {
     }
 }
 
-/// 为静态链接可执行文件合成 _start 桩 (仅当 _start 不存在且 entry=_start 时).
+/// 为可执行文件合成 _start 桩 (仅当 _start 不存在且 entry=_start 时).
 /// _start 调用 main(argc=0, argv=NULL, envp=NULL) 然后 exit(return).
+/// 支持 x86_64, aarch64, riscv64, arm 架构 (MIPS 暂未实现).
 fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
     use crate::codegen::elf::{STB_GLOBAL, STT_FUNC};
+    use crate::debug::ArchKind;
     use crate::link::layout::{OutputSectionKind, OutputSymbol};
     // 如果已存在 _start 或不是可执行文件, 跳过
     // PIE 同样需要入口桩: _start 桩全部由 PC-relative 指令构成, 位置无关。
@@ -456,29 +459,99 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
     let text_vaddr = layout.sections[text_idx].vaddr;
     let text_old_size = layout.sections[text_idx].size;
     let start_vaddr = text_vaddr + text_old_size;
-    // 构建 _start 桩 (22 字节):
-    //   xor  rdi, rdi        ; 48 31 ff
-    //   xor  rsi, rsi        ; 48 31 f6
-    //   xor  rdx, rdx        ; 48 31 d2
-    //   call rel32           ; e8 xx xx xx xx
-    //   mov  rdi, rax        ; 48 89 c7
-    //   mov  eax, 60         ; b8 3c 00 00 00
-    //   syscall               ; 0f 05
-    let mut code = vec![
-        0x48, 0x31, 0xff, // xor rdi,rdi
-        0x48, 0x31, 0xf6, // xor rsi,rsi
-        0x48, 0x31, 0xd2, // xor rdx,rdx
-        0xe8, 0, 0, 0, 0, // call rel32 (placeholder)
-        0x48, 0x89, 0xc7, // mov rdi,rax
-        0xb8, 0x3c, 0, 0, 0, // mov eax,60
-        0x0f, 0x05, // syscall
-    ];
-    // 计算 call rel32: 目标 = main_vaddr, 下一条指令地址 = start_vaddr + 9 + 5
-    // call 指令在 stub 偏移 9 处 (3+3+3 字节前缀), 长度 5 字节
-    let call_next = start_vaddr + 9 + 5;
-    let rel32 = (main_vaddr.wrapping_sub(call_next)) as i32 as u32;
-    code[10..14].copy_from_slice(&rel32.to_le_bytes()); // rel32 在 code[10..14]
-                                                        // 追加到 .text 节
+
+    let code: Vec<u8> = match layout.arch {
+        ArchKind::X86_64 => {
+            // xor rdi,rdi; xor rsi,rsi; xor rdx,rdx; call rel32;
+            // mov rdi,rax; mov eax,60; syscall
+            let mut code = vec![
+                0x48, 0x31, 0xff, // xor rdi,rdi
+                0x48, 0x31, 0xf6, // xor rsi,rsi
+                0x48, 0x31, 0xd2, // xor rdx,rdx
+                0xe8, 0, 0, 0, 0, // call rel32 (placeholder)
+                0x48, 0x89, 0xc7, // mov rdi,rax
+                0xb8, 0x3c, 0, 0, 0, // mov eax,60
+                0x0f, 0x05, // syscall
+            ];
+            // call rel32 at offset 9, 5 bytes, rel32 at [10..14]
+            let call_next = start_vaddr + 9 + 5;
+            let rel32 = (main_vaddr.wrapping_sub(call_next)) as i32 as u32;
+            code[10..14].copy_from_slice(&rel32.to_le_bytes());
+            code
+        }
+        ArchKind::AArch64 => {
+            // mov x0,xzr; mov x1,xzr; mov x2,xzr; bl main;
+            // mov x8,#93; svc #0
+            let mut code = vec![
+                0xe0, 0x03, 0x00, 0xaa, // mov x0, xzr
+                0xe1, 0x03, 0x00, 0xaa, // mov x1, xzr
+                0xe2, 0x03, 0x00, 0xaa, // mov x2, xzr
+                0, 0, 0, 0,             // bl main (placeholder)
+                0xa8, 0x0b, 0x80, 0xd2, // mov x8, #93
+                0x01, 0x00, 0x00, 0xd4, // svc #0
+            ];
+            // bl at offset 12, 4 bytes
+            let call_next = start_vaddr + 12 + 4;
+            let offset = ((main_vaddr.wrapping_sub(call_next)) as i64 / 4) as i32;
+            let bl_insn = 0x94000000u32 | ((offset as u32) & 0x03FFFFFF);
+            code[12..16].copy_from_slice(&bl_insn.to_le_bytes());
+            code
+        }
+        ArchKind::RiscV64 => {
+            // addi a0,x0,0; addi a1,x0,0; addi a2,x0,0;
+            // jal ra,main; addi a7,x0,93; ecall
+            let mut code = vec![
+                0x13, 0x05, 0x00, 0x00, // addi a0, x0, 0
+                0x93, 0x05, 0x00, 0x00, // addi a1, x0, 0
+                0x13, 0x06, 0x00, 0x00, // addi a2, x0, 0
+                0, 0, 0, 0,             // jal ra, main (placeholder)
+                0x93, 0x08, 0xd0, 0x05, // addi a7, x0, 93
+                0x73, 0x00, 0x00, 0x00, // ecall
+            ];
+            // jal at offset 12, 4 bytes
+            let call_next = start_vaddr + 12 + 4;
+            let offset = ((main_vaddr.wrapping_sub(call_next)) as i64 / 4) as i32;
+            let imm = offset as u32;
+            // RISC-V JAL rd=ra(x1) encoding:
+            // imm[20|10:1|11|19:12] rd=00001 1101111
+            let mut jal_insn = 0x6fu32;
+            jal_insn |= 1 << 7; // rd = ra = x1
+            let bit20 = (imm >> 20) & 1;
+            let bits10_5 = (imm >> 5) & 0x3f;
+            let bit11 = (imm >> 11) & 1;
+            let bits19_12 = (imm >> 12) & 0xff;
+            jal_insn |= bit20 << 31;
+            jal_insn |= bits10_5 << 25;
+            jal_insn |= bit11 << 20;
+            jal_insn |= bits19_12 << 12;
+            code[12..16].copy_from_slice(&jal_insn.to_le_bytes());
+            code
+        }
+        ArchKind::Mips | ArchKind::Mips64 => {
+            // MIPS _start 暂未实现 (需要 ABI 确认延迟槽/GP 寄存器)
+            return;
+        }
+        ArchKind::Arm => {
+            // mov r0,#0; mov r1,#0; mov r2,#0; bl main;
+            // mov r7,#1; svc #0
+            let mut code = vec![
+                0x00, 0x00, 0xa0, 0xe3, // mov r0, #0
+                0x01, 0x00, 0xa0, 0xe3, // mov r1, #0
+                0x02, 0x00, 0xa0, 0xe3, // mov r2, #0
+                0, 0, 0, 0,             // bl main (placeholder)
+                0x01, 0x70, 0xa0, 0xe3, // mov r7, #1
+                0x00, 0x00, 0x00, 0xef, // svc #0
+            ];
+            // ARM BL at offset 12, 4 bytes, pc = instruction_addr + 8
+            let call_next = start_vaddr + 12 + 8;
+            let offset = ((main_vaddr.wrapping_sub(call_next)) as i64 / 4) as i32;
+            let bl_insn = 0x0b000000u32 | ((offset as u32) & 0x00FFFFFF);
+            code[12..16].copy_from_slice(&bl_insn.to_le_bytes());
+            code
+        }
+    };
+
+    // 追加到 .text 节
     let text = &mut layout.sections[text_idx];
     text.data.extend_from_slice(&code);
     text.size += code.len() as u64;
