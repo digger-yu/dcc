@@ -405,6 +405,44 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // sanitizer 插桩（AST 层，在 IR lower 之前）
     sanitizer::instrument_program(&mut prog, cfg.sanitizers);
 
+    // IPA-SRA: 跨过程标量替换 (仅 static 函数, 在 IR lower 之前)
+    // -O2 及以上默认启用; -fipa-sra / -fno-ipa-sra 显式控制
+    if cfg.ipa_sra.should_run() {
+        crate::ipa_sra::run_ipa_sra(&mut prog, &cfg.ipa_sra);
+    }
+
+    // PGO 集成: 加载 profile 数据, 构建 PGO 集成上下文
+    // 为 IPA-SRA / 内联 / 函数布局提供 profile 感知的决策
+    let _pgo_ctx = if cfg.profile.pgo_use.is_some() && (cfg.profile.pgo_inline || cfg.profile.pgo_ipa_sra) {
+        let pgo_path = cfg.profile.pgo_use.as_ref().unwrap();
+        let pgo_weights = crate::profile::pgo::PgoWeights::from_profraw(
+            &crate::profile::pgo::Profraw::read(pgo_path).unwrap_or_default(),
+        );
+        let profile_weights = crate::profile::weights::ProfileWeights::from_sources(
+            &pgo_weights,
+            &crate::profile::autofdo::AutoFdoProfile::default(),
+            &crate::profile::lbr::LbrProfile::default(),
+            &crate::profile::memprof::MemProfData::default(),
+        );
+        let pgo_cfg = crate::profile::pgo_integration::PgoIntegrationConfig {
+            enabled: true,
+            opt_level: cfg.opt,
+            profile_path: cfg.profile.pgo_use.as_ref().map(|p| p.display().to_string()),
+            inline_hints: cfg.profile.pgo_inline,
+            ipa_sra_hints: cfg.profile.pgo_ipa_sra,
+            hot_threshold: cfg.profile.pgo_hot_threshold,
+            cold_threshold: cfg.profile.pgo_cold_threshold,
+        };
+        let ctx = crate::profile::pgo_integration::PgoIntegrationContext::from_sources(
+            &pgo_weights, &profile_weights, &pgo_cfg,
+        );
+        // 应用 hot/cold 标记到函数声明
+        crate::profile::pgo_integration::apply_pgo_hotness(&mut prog, &ctx);
+        Some(ctx)
+    } else {
+        None
+    };
+
     // PGO 插桩（AST 层）: -fprofile-generate 时在每个函数体顶部插入
     // `__dcc_pgo_count_fn(idx)` 调用. 运行期由用户提供的 runtime helper
     // (或 dcc 内置桩) 累加 idx -> counter, atexit 写 `<name>.profraw`.

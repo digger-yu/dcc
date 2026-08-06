@@ -16,6 +16,7 @@ mod debug;
 mod diagnostics;
 mod driver;
 mod format_check;
+mod ipa_sra;
 mod ir;
 mod link;
 mod loop_opt;

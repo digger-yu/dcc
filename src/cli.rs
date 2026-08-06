@@ -98,6 +98,8 @@ pub struct Config {
     pub warn_implicit_decl: bool,
     /// PGO / GCOV / AutoFDO / LBR / MemProf / Offloading 统一配置
     pub profile: crate::profile::ProfileConfig,
+    /// IPA-SRA 配置: -fipa-sra
+    pub ipa_sra: crate::ipa_sra::IpaSraConfig,
     /// -fdiagnostics-color=always|never|auto
     pub diag_color: crate::diagnostics::ColorPolicy,
     /// -fdiagnostics-format=github|clang|msvc|vi|sarif
@@ -421,6 +423,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut warn_int_truncation = false;
     let mut warn_implicit_decl = true;
     let mut profile = crate::profile::ProfileConfig::default();
+    let mut ipa_sra = crate::ipa_sra::IpaSraConfig::default();
     let mut offload = crate::profile::offload::OffloadConfig::default();
     let mut diag_color = crate::diagnostics::ColorPolicy::Auto;
     let mut diag_format = crate::diagnostics::FormatStyle::Github;
@@ -848,6 +851,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     return Err(CliError::new("-fmemory-profile-use: missing file"));
                 }
             }
+            // ====== PGO 集成 ======
+            "-fprofile-pgo-inline" => profile.pgo_inline = true,
+            "-fno-profile-pgo-inline" => profile.pgo_inline = false,
+            "-fprofile-pgo-ipa-sra" => profile.pgo_ipa_sra = true,
+            "-fno-profile-pgo-ipa-sra" => profile.pgo_ipa_sra = false,
             // ====== Offloading ======
             "-fopenmp" => {
                 offload.openmp = true;
@@ -1131,6 +1139,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-W") => {}
             // -m* 机器选项 - 忽略
             a if a.starts_with("-m") => {}
+            // -fipa-sra: 启用/禁用跨过程标量替换
+            "-fipa-sra" => ipa_sra.enabled = true,
+            "-fno-ipa-sra" => ipa_sra.enabled = false,
             // PCH (预编译头): -fpch-include=path / -fpch-create=path / -include-pch=path
             // 这是 GCC/Clang 的 PCH 简化接口: 把一组共享头的预处理结果缓存为
             // .pch 文件, 后续 TU 通过 -fpch-include 直接加载, 跳过对共享头的
@@ -1464,6 +1475,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_show_template_tree,
             bootstrap_compare: bootstrap_compare.clone(),
             sysroot: sysroot.clone(),
+            ipa_sra: {
+                let mut c = ipa_sra;
+                c.opt_level = opt;
+                c
+            },
             profile: merge_profile_config(profile, offload),
         })
     } else {
@@ -1537,6 +1553,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_show_template_tree,
             bootstrap_compare,
             sysroot,
+            ipa_sra: {
+                let mut c = ipa_sra;
+                c.opt_level = opt;
+                c
+            },
             profile: merge_profile_config(profile, offload),
         })
     }

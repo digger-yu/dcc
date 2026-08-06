@@ -26,6 +26,7 @@ pub mod lbr;
 pub mod memprof;
 pub mod offload;
 pub mod perf_data;
+pub mod pgo_integration;
 pub mod perf_event;
 pub mod pgo;
 pub mod weights;
@@ -67,6 +68,14 @@ pub struct ProfileConfig {
     pub lbr_profile: Option<PathBuf>,
     /// perf-event 输出路径 (`-fperf-event-record=path` / `-frecord-profile`)
     pub perf_record: Option<PathBuf>,
+    /// PGO 集成: profile-guided 内联提示
+    pub pgo_inline: bool,
+    /// PGO 集成: profile-guided IPA-SRA 决策
+    pub pgo_ipa_sra: bool,
+    /// PGO 集成: hot 函数阈值 (占总执行次数比例)
+    pub pgo_hot_threshold: f64,
+    /// PGO 集成: cold 函数阈值
+    pub pgo_cold_threshold: f64,
 }
 
 impl ProfileConfig {
