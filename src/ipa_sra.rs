@@ -446,7 +446,7 @@ fn replace_param_refs_in_expr(
             }
             replace_param_refs_in_expr(e, param_name, field_var_map);
         }
-        Expr::Ident { name: _, .. } => {
+        Expr::Ident { .. } => {
             // 如果 param 被整体引用 (如传参), 保留原样 — 由调用方处理
         }
         Expr::AddrOf { e, .. } => {
@@ -963,7 +963,7 @@ pub fn run_ipa_sra(prog: &mut Program, config: &IpaSraConfig) {
     }
 
     // 执行拆分 (从后往前处理, 避免索引偏移)
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
     for (func_idx, analysis) in candidates {
         let func_name = match &prog.decls[func_idx] {
             Decl::Func(f) => f.name.name.clone(),

@@ -5892,7 +5892,7 @@ fn builtin_linker_cleans_tmp_objs_on_failure() {
     let out = dir.join(format!("dcc-bllink-{}.out", std::process::id()));
     fs::write(&src, "int foo(void);\nint main(void) { return foo(); }\n").unwrap();
     // spawn 拿子进程 pid: 临时 .o 文件名带 dcc 子进程的 pid
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dcc"))
+    let child = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-pie")
         .arg("-o")
         .arg(&out)

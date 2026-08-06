@@ -214,7 +214,7 @@ impl PgoIntegrationContext {
     ) -> bool {
         let callee_hot = self.is_hot(callee_name);
         let caller_hot = caller_name
-            .and_then(|n| Some(self.is_hot(n)))
+            .map(|n| self.is_hot(n))
             .unwrap_or(false);
 
         // hot 函数调用 cold 函数: 不拆分 (hot 路径不关心 cold 的优化)

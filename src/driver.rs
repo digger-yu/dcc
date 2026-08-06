@@ -413,32 +413,35 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     // PGO 集成: 加载 profile 数据, 构建 PGO 集成上下文
     // 为 IPA-SRA / 内联 / 函数布局提供 profile 感知的决策
-    let _pgo_ctx = if cfg.profile.pgo_use.is_some() && (cfg.profile.pgo_inline || cfg.profile.pgo_ipa_sra) {
-        let pgo_path = cfg.profile.pgo_use.as_ref().unwrap();
-        let pgo_weights = crate::profile::pgo::PgoWeights::from_profraw(
-            &crate::profile::pgo::Profraw::read(pgo_path).unwrap_or_default(),
-        );
-        let profile_weights = crate::profile::weights::ProfileWeights::from_sources(
-            &pgo_weights,
-            &crate::profile::autofdo::AutoFdoProfile::default(),
-            &crate::profile::lbr::LbrProfile::default(),
-            &crate::profile::memprof::MemProfData::default(),
-        );
-        let pgo_cfg = crate::profile::pgo_integration::PgoIntegrationConfig {
-            enabled: true,
-            opt_level: cfg.opt,
-            profile_path: cfg.profile.pgo_use.as_ref().map(|p| p.display().to_string()),
-            inline_hints: cfg.profile.pgo_inline,
-            ipa_sra_hints: cfg.profile.pgo_ipa_sra,
-            hot_threshold: cfg.profile.pgo_hot_threshold,
-            cold_threshold: cfg.profile.pgo_cold_threshold,
-        };
-        let ctx = crate::profile::pgo_integration::PgoIntegrationContext::from_sources(
-            &pgo_weights, &profile_weights, &pgo_cfg,
-        );
-        // 应用 hot/cold 标记到函数声明
-        crate::profile::pgo_integration::apply_pgo_hotness(&mut prog, &ctx);
-        Some(ctx)
+    let _pgo_ctx = if let Some(pgo_path) = cfg.profile.pgo_use.as_ref() {
+        if !(cfg.profile.pgo_inline || cfg.profile.pgo_ipa_sra) {
+            None
+        } else {
+            let pgo_weights = crate::profile::pgo::PgoWeights::from_profraw(
+                &crate::profile::pgo::Profraw::read(pgo_path).unwrap_or_default(),
+            );
+            let profile_weights = crate::profile::weights::ProfileWeights::from_sources(
+                &pgo_weights,
+                &crate::profile::autofdo::AutoFdoProfile::default(),
+                &crate::profile::lbr::LbrProfile::default(),
+                &crate::profile::memprof::MemProfData::default(),
+            );
+            let pgo_cfg = crate::profile::pgo_integration::PgoIntegrationConfig {
+                enabled: true,
+                opt_level: cfg.opt,
+                profile_path: cfg.profile.pgo_use.as_ref().map(|p| p.display().to_string()),
+                inline_hints: cfg.profile.pgo_inline,
+                ipa_sra_hints: cfg.profile.pgo_ipa_sra,
+                hot_threshold: cfg.profile.pgo_hot_threshold,
+                cold_threshold: cfg.profile.pgo_cold_threshold,
+            };
+            let ctx = crate::profile::pgo_integration::PgoIntegrationContext::from_sources(
+                &pgo_weights, &profile_weights, &pgo_cfg,
+            );
+            // 应用 hot/cold 标记到函数声明
+            crate::profile::pgo_integration::apply_pgo_hotness(&mut prog, &ctx);
+            Some(ctx)
+        }
     } else {
         None
     };
@@ -1002,9 +1005,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             c.relocatable = true;
             c.built_link = false; // 编译子任务: 递归 run 不能再进内置链接器
             tmp_guard.0.push(tmp_o.clone());
-            if let Err(e) = run(c) {
-                return Err(e);
-            }
+            run(c)?;
             inputs.push(tmp_o);
         }
     }
