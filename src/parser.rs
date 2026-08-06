@@ -1617,6 +1617,10 @@ impl<'a> Parser<'a> {
                 }]);
             }
             // 数组 typedef: typedef T name[N] / name[]
+            // 多维数组按 C11 6.7.6.2p4 从内向外结合: `T name[2][8]` 是
+            // "2 个 T[8]" (最内层元素先与 [8] 结合). 收集全部维度后反转
+            // 再逐层包裹, 与函数指针数组的 array_sizes.rev() 实现一致.
+            let mut arr_sizes = Vec::new();
             while self.cur.kind == TokKind::LBracket {
                 self.advance();
                 let arr_size = if self.cur.kind != TokKind::RBracket {
@@ -1649,7 +1653,10 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBracket, "']'") {
                     return None;
                 }
-                ty = Type::Array(Box::new(ty), arr_size);
+                arr_sizes.push(arr_size);
+            }
+            for sz in arr_sizes.into_iter().rev() {
+                ty = Type::Array(Box::new(ty), sz);
             }
             let ty = self.try_parse_vector_attr(ty);
             if !self.expect(TokKind::Semi, "';'") {
@@ -2144,6 +2151,9 @@ impl<'a> Parser<'a> {
             }
         } else if self.cur.kind == TokKind::LBracket {
             let mut arr_ty = ty;
+            // 多维数组从内向外结合 (C11 6.7.6.2p4): `T a[2][8]` 是
+            // "2 个 T[8]", 收集维度后反转包裹, 与函数指针数组一致.
+            let mut arr_sizes = Vec::new();
             while self.cur.kind == TokKind::LBracket {
                 self.advance();
                 let arr_size = if self.cur.kind != TokKind::RBracket {
@@ -2163,7 +2173,10 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RBracket, "']'") {
                     return None;
                 }
-                arr_ty = Type::Array(Box::new(arr_ty), arr_size);
+                arr_sizes.push(arr_size);
+            }
+            for sz in arr_sizes.into_iter().rev() {
+                arr_ty = Type::Array(Box::new(arr_ty), sz);
             }
             let mut arr_attrs = pre_attrs.clone();
             arr_attrs.merge(self.parse_attributes());
@@ -2706,6 +2719,9 @@ impl<'a> Parser<'a> {
     /// 出现在 cast / sizeof / 变量声明等多种上下文. 空括号 `[]` 用 ArraySize::Const(0)
     /// 表示柔性数组, 后续 codegen 阶段会处理为指针语义.
     fn parse_array_suffix(&mut self, mut ty: Type) -> Type {
+        // 多维数组从内向外结合 (C11 6.7.6.2p4): `int [2][8]` 是
+        // "2 个 int[8]", 收集维度后反转包裹, 与函数指针数组一致.
+        let mut arr_sizes = Vec::new();
         while self.cur.kind == TokKind::LBracket {
             let la = self.cur.span.clone();
             self.advance();
@@ -2741,7 +2757,10 @@ impl<'a> Parser<'a> {
                 ArraySize::Const(0)
             };
             let _ = self.expect(TokKind::RBracket, "']'");
-            ty = Type::Array(Box::new(ty), arr_size);
+            arr_sizes.push(arr_size);
+        }
+        for sz in arr_sizes.into_iter().rev() {
+            ty = Type::Array(Box::new(ty), sz);
         }
         ty
     }
@@ -4341,40 +4360,50 @@ impl<'a> Parser<'a> {
             // 参数名后的 __attribute__((unused)) 等
             self.skip_attributes();
             if self.cur.kind == TokKind::LBracket {
-                self.advance();
-                // 跳过 C99 数组参数限定符: [restrict] / [static N] / [const]
-                while matches!(
-                    self.cur.kind,
-                    TokKind::KwConst
-                        | TokKind::KwVolatile
-                        | TokKind::KwRestrict
-                        | TokKind::KwStatic
-                ) || (self.cur.kind == TokKind::Ident
-                    && matches!(
-                        self.cur.text.as_str(),
-                        "__restrict__" | "__restrict" | "__const__" | "__volatile__"
-                    ))
-                {
+                // 多维数组参数按 C11 6.7.6.2p4 从内向外结合: `int a[][3]`
+                // 是"未知行数的 int[3]", 收集维度后反转包裹. 参数退化时只
+                // 剥最外层 (int a[][3] → int (*a)[3]), 内层数组结构必须
+                // 保留, 因此维度顺序与声明处保持一致.
+                let mut arr_sizes = Vec::new();
+                while self.cur.kind == TokKind::LBracket {
                     self.advance();
-                }
-                let arr_size = if self.cur.kind != TokKind::RBracket {
-                    let e = self.parse_expr()?;
-                    // 整型常量表达式按标准折叠为编译期常量, 否则保留为 VLA
-                    if let Ok(v) = crate::const_eval::eval(&e) {
-                        ArraySize::Const(v.max(0) as usize)
-                    } else {
-                        match &e {
-                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
-                            _ => ArraySize::Var(Box::new(e)),
-                        }
+                    // 跳过 C99 数组参数限定符: [restrict] / [static N] / [const]
+                    while matches!(
+                        self.cur.kind,
+                        TokKind::KwConst
+                            | TokKind::KwVolatile
+                            | TokKind::KwRestrict
+                            | TokKind::KwStatic
+                    ) || (self.cur.kind == TokKind::Ident
+                        && matches!(
+                            self.cur.text.as_str(),
+                            "__restrict__" | "__restrict" | "__const__" | "__volatile__"
+                        ))
+                    {
+                        self.advance();
                     }
-                } else {
-                    ArraySize::Const(0)
-                };
-                if !self.expect(TokKind::RBracket, "']'") {
-                    return None;
+                    let arr_size = if self.cur.kind != TokKind::RBracket {
+                        let e = self.parse_expr()?;
+                        // 整型常量表达式按标准折叠为编译期常量, 否则保留为 VLA
+                        if let Ok(v) = crate::const_eval::eval(&e) {
+                            ArraySize::Const(v.max(0) as usize)
+                        } else {
+                            match &e {
+                                Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                                _ => ArraySize::Var(Box::new(e)),
+                            }
+                        }
+                    } else {
+                        ArraySize::Const(0)
+                    };
+                    if !self.expect(TokKind::RBracket, "']'") {
+                        return None;
+                    }
+                    arr_sizes.push(arr_size);
                 }
-                ty = Type::Array(Box::new(ty), arr_size);
+                for sz in arr_sizes.into_iter().rev() {
+                    ty = Type::Array(Box::new(ty), sz);
+                }
             }
             let ty = match ty {
                 Type::Array(e, _) => Type::Ptr(e),

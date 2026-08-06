@@ -4795,6 +4795,13 @@ impl Codegen {
                 ty: elem_ty,
                 ..
             } => {
+                // 数组类型的元素作为值使用时退化为指向首元素的指针
+                // (C11 6.3.2.1p3): 如 words[1] (char words[][6]) 作函数参数
+                // 时应传 &words[1] 地址, 而非对元素做标量加载。
+                if matches!(elem_ty, Type::Array(_, _)) {
+                    self.gen_lvalue_addr(e, dst);
+                    return;
+                }
                 let es = elem_ty.size() as i32;
                 if let Expr::Ident {
                     name: arr_name,
@@ -5286,12 +5293,39 @@ impl Codegen {
     }
 
     // 初始化列表 codegen: 依次计算每个元素并存储到变量
+    // 局部变量初始化入口: 解析变量栈偏移后递归展开初始化器
     fn gen_init_list(&mut self, var_name: &str, ty: &Type, inits: &[InitItem]) {
         let var_off = self.var_offset(var_name);
+        if matches!(
+            ty,
+            Type::Array(_, _) | Type::Vector(_, _) | Type::Struct(_, _) | Type::Union(_, _)
+        ) {
+            self.gen_init_list_at(var_off, ty, inits);
+        } else if let Some(InitItem::Expr(e)) = inits.first() {
+            // 标量类型的单元素初始化 (C23 大括号初始化: double x = {1})
+            self.gen_expr(e, 0);
+            if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                self.emit_scalar_to_xmm0_if_needed(e, ty);
+                if matches!(ty, Type::Float) {
+                    self.store_xmm32_stack(0, var_off);
+                } else {
+                    self.store_xmm64_stack(0, var_off);
+                }
+            } else {
+                self.mov_to_stack(0, var_name);
+            }
+        }
+    }
+
+    /// 递归初始化列表展开: 任意嵌套深度的数组/结构体初始化器按 C11 6.7.9
+    /// 逐元素/逐字段写入 base 起始的内存块。三维及以上数组元素与 struct
+    /// 数组字段的子元素仍是 InitList, gen_expr 对数组类型 InitList rvalue
+    /// 只输出 ud2+0, 必须递归展开 (修复前局部三维数组/嵌套字段全为 0)。
+    fn gen_init_list_at(&mut self, base: i32, ty: &Type, inits: &[InitItem]) {
         match ty {
             Type::Array(elem_ty, _) => {
                 // 数组初始化: int a[] = {1, 2, 3}
-                // 数组在栈上布局: arr[0] 在 var_off, arr[1] 在 var_off + elem_size, ...
+                // 数组在栈上布局: arr[0] 在 base, arr[1] 在 base + elem_size, ...
                 // 注意: 虽然栈向下增长，但数组元素地址是递增的
                 let elem_size = elem_ty.size();
                 // 已初始化覆盖到的最大元素下标 (C 标准: 剩余元素必须零填充)
@@ -5320,7 +5354,7 @@ impl Codegen {
                             ) {
                                 self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
                             }
-                            let off = var_off + (k * elem_size) as i32;
+                            let off = base + (k * elem_size) as i32;
                             if matches!(elem_ty.as_ref(), Type::Float) {
                                 self.store_xmm32_stack(0, off);
                             } else if matches!(elem_ty.as_ref(), Type::Double | Type::LongDouble) {
@@ -5352,40 +5386,9 @@ impl Codegen {
                     };
                     if let Expr::InitList { inits: nested, .. } = value {
                         // 嵌套数组初始化 (如 int m[2][2] = {{1,2},{3,4}}):
-                        // 展开子数组元素, 跳过 gen_expr 对 InitList 的简化处理
-                        let inner_elem_size = match elem_ty.as_ref() {
-                            Type::Array(inner, _) => inner.size(),
-                            _ => elem_size,
-                        };
-                        let base_off = var_off + (i * elem_size) as i32;
-                        for (j, subitem) in nested.iter().enumerate() {
-                            let subval = match subitem {
-                                InitItem::Expr(e) => e,
-                                InitItem::Designated { value, .. } => value,
-                            };
-                            // 子数组内部初始化器不足时补零 ({{1},{3,4}} → m[0][1] = 0)
-                            if let (
-                                Type::Array(_, ArraySize::Const(sub_n)),
-                                Expr::InitList { inits: sub, .. },
-                            ) = (elem_ty.as_ref(), subval)
-                            {
-                                if sub.len() < *sub_n {
-                                    self.zero_fill_tail(
-                                        base_off + (j * inner_elem_size) as i32,
-                                        elem_ty,
-                                        sub.len(),
-                                    );
-                                }
-                            }
-                            self.gen_expr(subval, 0);
-                            self.emit_store(
-                                0,
-                                base_off + (j * inner_elem_size) as i32,
-                                inner_elem_size,
-                            );
-                        }
-                        // 子数组列表不足时补零 ({{1,2}} → m[1] 全零)
-                        self.zero_fill_tail(base_off, elem_ty, nested.len());
+                        // 递归展开子数组 (任意深度), 跳过 gen_expr 对 InitList
+                        // 的简化处理; 子数组不足的尾部零填充由递归内完成
+                        self.gen_init_list_at(base + (i * elem_size) as i32, elem_ty, nested);
                         covered = covered.max(i + 1);
                         continue;
                     }
@@ -5397,7 +5400,7 @@ impl Codegen {
                     ) {
                         self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
                     }
-                    let off = var_off + (i * elem_size) as i32;
+                    let off = base + (i * elem_size) as i32;
                     if matches!(elem_ty.as_ref(), Type::Float) {
                         self.store_xmm32_stack(0, off);
                     } else if matches!(elem_ty.as_ref(), Type::Double | Type::LongDouble) {
@@ -5408,7 +5411,7 @@ impl Codegen {
                     covered = covered.max(i + 1);
                 }
                 // C 标准: 初始化器不足时剩余元素零填充 (int a[4] = {7,8} → a[2]=a[3]=0)
-                self.zero_fill_tail(var_off, ty, covered);
+                self.zero_fill_tail(base, ty, covered);
             }
             Type::Vector(elem_ty, n) => {
                 // SIMD 向量初始化: v4si a = {1, 2, 3, 4}
@@ -5423,7 +5426,7 @@ impl Codegen {
                     };
                     self.gen_expr(value, 0);
                     self.emit_scalar_to_xmm0_if_needed(value, elem_ty);
-                    let off = var_off + (i * elem_size) as i32;
+                    let off = base + (i * elem_size) as i32;
                     if matches!(**elem_ty, Type::Float) {
                         self.store_xmm32_stack(0, off);
                     } else if matches!(**elem_ty, Type::Double) {
@@ -5456,8 +5459,16 @@ impl Codegen {
                             }
                         }
                     };
+                    if let Expr::InitList { inits: nested, .. } = value {
+                        // 嵌套初始化 (数组/结构体字段, 如 { int a[3] } = {{1,2,3}}):
+                        // 递归展开字段初始化器, gen_expr 对 InitList 只输出 ud2+0
+                        if let Some(ft) = &field_ty {
+                            self.gen_init_list_at(base + off as i32, ft, nested);
+                            continue;
+                        }
+                    }
                     self.gen_expr(value, 0);
-                    let store_off = var_off + off as i32;
+                    let store_off = base + off as i32;
                     if let Some(ft) = &field_ty {
                         if matches!(ft, Type::Float | Type::Double | Type::LongDouble) {
                             self.emit_scalar_to_xmm0_if_needed(value, ft);
@@ -5473,18 +5484,19 @@ impl Codegen {
                 }
             }
             _ => {
-                // 标量类型的单元素初始化 (C23 大括号初始化: double x = {1})
+                // 递归路径下不可达 (elem_ty/field_ty 为标量时 value 不会是
+                // InitList); 保险: 按标量单元素取首值写内存
                 if let Some(InitItem::Expr(e)) = inits.first() {
                     self.gen_expr(e, 0);
                     if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
                         self.emit_scalar_to_xmm0_if_needed(e, ty);
                         if matches!(ty, Type::Float) {
-                            self.store_xmm32_stack(0, var_off);
+                            self.store_xmm32_stack(0, base);
                         } else {
-                            self.store_xmm64_stack(0, var_off);
+                            self.store_xmm64_stack(0, base);
                         }
                     } else {
-                        self.mov_to_stack(0, var_name);
+                        self.emit_store(0, base, ty.size().max(1));
                     }
                 }
             }

@@ -5864,3 +5864,21 @@ fn static_addr_const_init_compiles() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// 多维数组维度从内向外解析 (C11 6.7.6.2p4): char buf[2][8] 是 2 个 char[8].
+/// 修复前 3 处维度解析从左到右包裹, sizeof buf[0]==2 (应为 8), 元素 stride
+/// 错 (words[1] 按 1 字节步进读标量), 运行时越界/崩溃; 另覆盖参数多维数组
+/// 退化 (int a[][3] -> int (*a)[3]) 与数组类型元素表达式退化 (C11 6.3.2.1p3).
+#[test]
+fn multi_dim_array_compiles_and_runs() {
+    let source = include_str!("fixtures/c/multi_dim_array.c");
+    let (output, exe) = run_compile_and_run("multi-dim-array", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "multi_dim_array should return 0, got {rc}");
+}
+
