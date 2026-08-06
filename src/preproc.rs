@@ -6375,4 +6375,754 @@ n\
         );
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // ===== C23 / 预处理器全家族回归测试 =====
+
+    /// C23 #elifdef: 宏已定义时选中该分支
+    #[test]
+    fn elifdef_takes_branch_when_macro_defined() {
+        let out = preprocess(
+            b"#define A 1\n\
+              #if 0\n\
+              int x = 1;\n\
+              #elifdef A\n\
+              int x = 2;\n\
+              #else\n\
+              int x = 3;\n\
+              #endif\n",
+            "elifdef.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 2;"), "output: {output}");
+        assert!(!output.contains("int x = 1;"), "output: {output}");
+        assert!(!output.contains("int x = 3;"), "output: {output}");
+    }
+
+    /// C23 #elifdef: 宏未定义时跳过该分支, 落入 #else
+    #[test]
+    fn elifdef_skips_branch_when_macro_undefined() {
+        let out = preprocess(
+            b"#if 0\n\
+              int x = 1;\n\
+              #elifdef NOPE\n\
+              int x = 2;\n\
+              #else\n\
+              int x = 3;\n\
+              #endif\n",
+            "elifdef-miss.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 3;"), "output: {output}");
+        assert!(!output.contains("int x = 2;"), "output: {output}");
+    }
+
+    /// C23 #elifndef: 宏未定义时选中该分支
+    #[test]
+    fn elifndef_takes_branch_when_macro_undefined() {
+        let out = preprocess(
+            b"#if 1\n\
+              int x = 1;\n\
+              #elifndef NOPE\n\
+              int x = 2;\n\
+              #endif\n",
+            "elifndef.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+        assert!(!output.contains("int x = 2;"), "output: {output}");
+    }
+
+    /// C23 #elifndef: 宏已定义时跳过, 落入 #else
+    #[test]
+    fn elifndef_skips_branch_when_macro_defined() {
+        let out = preprocess(
+            b"#define A 1\n\
+              #if 0\n\
+              int x = 1;\n\
+              #elifndef A\n\
+              int x = 2;\n\
+              #else\n\
+              int x = 3;\n\
+              #endif\n",
+            "elifndef-miss.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 3;"), "output: {output}");
+        assert!(!output.contains("int x = 2;"), "output: {output}");
+    }
+
+    /// #elifdef after #else 必须报 E0200 (与 #elif 一致)
+    #[test]
+    fn elifdef_after_else_emits_error() {
+        let out = preprocess(
+            b"#define A 1\n\
+              #if 0\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 2;\n\
+              #elifdef A\n\
+              int x = 3;\n\
+              #endif\n",
+            "elifdef-else.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        assert!(
+            out.diags.iter().any(|d| d.code == "E0200"),
+            "expected E0200, got: {:?}",
+            out.diags
+        );
+    }
+
+    /// #if 全家族嵌套: if / elif / else 组合
+    #[test]
+    fn if_elif_else_nested_branches() {
+        let out = preprocess(
+            b"#define A 1\n\
+              #if A\n\
+              #if !defined(B)\n\
+              int x = 1;\n\
+              #elif defined(C)\n\
+              int x = 2;\n\
+              #else\n\
+              int x = 3;\n\
+              #endif\n\
+              #else\n\
+              int x = 4;\n\
+              #endif\n",
+            "if-nested.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+        assert!(!output.contains("int x = 2;"), "output: {output}");
+        assert!(!output.contains("int x = 3;"), "output: {output}");
+        assert!(!output.contains("int x = 4;"), "output: {output}");
+    }
+
+    /// 预定义宏 (__linux__ / __x86_64__ / __GNUC__ 等) 可在 #if 中求值
+    #[test]
+    fn predefined_macros_usable_in_if() {
+        let out = preprocess(
+            b"#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__)\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 0;\n\
+              #endif\n",
+            "predef-if.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+        assert!(!output.contains("int x = 0;"), "output: {output}");
+    }
+
+    /// C23: __STDC_ENDIAN_* 仅在 C23 模式预定义, 且 NATIVE 指向 LITTLE
+    #[test]
+    fn stdc_endian_macros_defined_in_c23() {
+        let out = preprocess(
+            b"#if __STDC_ENDIAN_NATIVE__ == __STDC_ENDIAN_LITTLE__\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 2;\n\
+              #endif\n",
+            "endian-c23.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    /// C23: 非 C23 模式不定义 __STDC_ENDIAN_* (defined 为假)
+    #[test]
+    fn stdc_endian_macros_absent_outside_c23() {
+        let out = preprocess(
+            b"#if defined(__STDC_ENDIAN_LITTLE__) || defined(__STDC_ENDIAN_NATIVE__)\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 2;\n\
+              #endif\n",
+            "endian-c11.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 2;"), "output: {output}");
+    }
+
+    /// C23 #embed: 嵌入文件字节为逗号分隔整数
+    #[test]
+    fn embed_emits_file_bytes() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_embed_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("data.bin");
+        fs::write(&bin, [1u8, 2, 3]).unwrap();
+        let src = format!(
+            "#embed \"{}\"\nint arr[] = {{\n__DCC_EMBED__\n}};\n",
+            bin.display()
+        );
+        let out = preprocess(
+            src.as_bytes(),
+            "embed.c",
+            std::slice::from_ref(&dir),
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("1, 2, 3"), "output: {output}");
+    }
+
+    /// C23 #embed limit(N): 只嵌入前 N 字节
+    #[test]
+    fn embed_limit_truncates_bytes() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_embed_lim_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("data.bin");
+        fs::write(&bin, [1u8, 2, 3, 4, 5]).unwrap();
+        let src = format!(
+            "#embed \"{}\" limit(2)\nint arr[] = {{ __DCC_EMBED__ }};\n",
+            bin.display()
+        );
+        let out = preprocess(
+            src.as_bytes(),
+            "embed-limit.c",
+            std::slice::from_ref(&dir),
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("1, 2"), "output: {output}");
+        assert!(!output.contains("3, 4, 5"), "output: {output}");
+    }
+
+    /// C23 #embed prefix/suffix: 首尾字节包裹
+    #[test]
+    fn embed_prefix_suffix_wrap_bytes() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_embed_ps_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("data.bin");
+        fs::write(&bin, [1u8, 2]).unwrap();
+        let src = format!(
+            "#embed \"{}\" prefix(9, 8) suffix(7)\nint arr[] = {{ __DCC_EMBED__ }};\n",
+            bin.display()
+        );
+        let out = preprocess(
+            src.as_bytes(),
+            "embed-ps.c",
+            std::slice::from_ref(&dir),
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("9, 8, 1, 2, 7"), "output: {output}");
+    }
+
+    /// C23 #embed if_empty: 空文件时以 if_empty 替代
+    #[test]
+    fn embed_if_empty_used_for_empty_file() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_embed_ie_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("empty.bin");
+        fs::write(&bin, []).unwrap();
+        let src = format!(
+            "#embed \"{}\" if_empty(0xAA, 0xBB)\nint arr[] = {{ __DCC_EMBED__ }};\n",
+            bin.display()
+        );
+        let out = preprocess(
+            src.as_bytes(),
+            "embed-ie.c",
+            std::slice::from_ref(&dir),
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("170, 187"), "output: {output}");
+    }
+
+    /// C23 __has_embed: 文件存在 → 1
+    #[test]
+    fn has_embed_true_when_file_exists() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_hse_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("data.bin");
+        fs::write(&bin, [1u8, 2]).unwrap();
+        let src = format!(
+            "#if __has_embed(\"{}\")\n\
+             int x = 1;\n\
+             #else\n\
+             int x = 2;\n\
+             #endif\n",
+            bin.display()
+        );
+        let out = preprocess(
+            src.as_bytes(),
+            "has-embed.c",
+            std::slice::from_ref(&dir),
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    /// C23 __has_embed: 文件不存在 → 0, 且不发诊断
+    #[test]
+    fn has_embed_false_when_file_missing() {
+        let out = preprocess(
+            b"#if __has_embed(\"no-such-data.bin\")\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 2;\n\
+              #endif\n",
+            "has-embed-miss.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 2;"), "output: {output}");
+    }
+
+    /// C23 __has_embed: 带 limit 参数仍只判文件存在
+    #[test]
+    fn has_embed_with_limit_param() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_hse_l_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("data.bin");
+        fs::write(&bin, [1u8, 2, 3]).unwrap();
+        let src = format!(
+            "#if __has_embed(\"{}\" limit(2))\n\
+             int x = 1;\n\
+             #else\n\
+             int x = 2;\n\
+             #endif\n",
+            bin.display()
+        );
+        let out = preprocess(
+            src.as_bytes(),
+            "has-embed-limit.c",
+            std::slice::from_ref(&dir),
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    /// C23 __has_c_attribute: 已知标准属性 → 1
+    #[test]
+    fn has_c_attribute_known_returns_1() {
+        let out = preprocess(
+            b"#if __has_c_attribute(fallthrough) && __has_c_attribute(deprecated)\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 0;\n\
+              #endif\n",
+            "has-cattr.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    /// C23 __has_c_attribute: 未知属性 → 0
+    #[test]
+    fn has_c_attribute_unknown_returns_0() {
+        let out = preprocess(
+            b"#if __has_c_attribute(no_such_attr)\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 2;\n\
+              #endif\n",
+            "has-cattr-miss.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 2;"), "output: {output}");
+    }
+
+    /// __has_include: 头文件存在 → 1 (含 -I 搜索路径)
+    #[test]
+    fn has_include_true_when_header_exists() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_hsi_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let hdr = dir.join("extra.h");
+        fs::write(&hdr, "#define EXTRA 1\n").unwrap();
+        let src = "#if __has_include(\"extra.h\")\n\
+             int x = 1;\n\
+             #else\n\
+             int x = 2;\n\
+             #endif\n";
+        let out = preprocess(
+            src.as_bytes(),
+            "has-inc.c",
+            std::slice::from_ref(&dir),
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    /// __has_include: 头文件不存在 → 0
+    #[test]
+    fn has_include_false_when_header_missing() {
+        let out = preprocess(
+            b"#if __has_include(\"no-such-header.h\")\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 2;\n\
+              #endif\n",
+            "has-inc-miss.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 2;"), "output: {output}");
+    }
+
+    /// __has_builtin / __has_attribute: 已知内置 → 1
+    #[test]
+    fn has_builtin_and_attribute_known() {
+        let out = preprocess(
+            b"#if __has_builtin(__builtin_expect) && __has_attribute(packed)\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 0;\n\
+              #endif\n",
+            "has-builtin.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 1;"), "output: {output}");
+    }
+
+    /// __has_builtin: 未知内置 → 0
+    #[test]
+    fn has_builtin_unknown_returns_0() {
+        let out = preprocess(
+            b"#if __has_builtin(__builtin_no_such_thing)\n\
+              int x = 1;\n\
+              #else\n\
+              int x = 2;\n\
+              #endif\n",
+            "has-builtin-miss.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int x = 2;"), "output: {output}");
+    }
+
+    /// #pragma once: 同一头文件二次 include 去重
+    #[test]
+    fn pragma_once_dedupes_repeated_include() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("dcc_once_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let hdr = dir.join("once.h");
+        fs::write(&hdr, "#pragma once\n#define ONCE_VAL 7\n").unwrap();
+        let src = "#include \"once.h\"\n#include \"once.h\"\nint x = ONCE_VAL;\n";
+        let out = preprocess(
+            src.as_bytes(),
+            "pragma-once.c",
+            std::slice::from_ref(&dir),
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        // 第二次 include 被 #pragma once 拦截: 头文件只处理一次 (include 注释唯一)
+        assert_eq!(
+            output.matches("/* #include \"once.h\" */").count(),
+            1,
+            "output: {output}"
+        );
+        assert!(output.contains("int x = 7;"), "output: {output}");
+    }
+
+    /// #warning: 活动分支下发 W0200 诊断
+    #[test]
+    fn warning_directive_emits_w0200() {
+        let out = preprocess(
+            b"int a;\n#warning this is a warning\nint b;\n",
+            "warn.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        assert!(
+            out.diags.iter().any(|d| d.code == "W0200" && d.msg.contains("this is a warning")),
+            "expected W0200, got: {:?}",
+            out.diags
+        );
+    }
+
+    /// #warning / #error 在非活动分支 (跳过区域) 中不产生诊断
+    #[test]
+    fn warning_error_silent_in_inactive_branch() {
+        let out = preprocess(
+            b"#if 0\n\
+              #warning hidden\n\
+              #error hidden-error\n\
+              #endif\n\
+              int x;\n",
+            "warn-inactive.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        assert!(out.diags.is_empty(), "{:?}", out.diags);
+    }
+
+    /// #error: 活动分支下发 E0203 诊断
+    #[test]
+    fn error_directive_emits_e0203() {
+        let out = preprocess(
+            b"int a;\n#error boom\nint b;\n",
+            "err.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        assert!(
+            out.diags.iter().any(|d| d.code == "E0203" && d.msg.contains("boom")),
+            "expected E0203, got: {:?}",
+            out.diags
+        );
+    }
+
+    /// #include_next: 从更靠后的搜索路径解析同名头文件 (含嵌套)
+    #[test]
+    fn include_next_resolves_from_later_path() {
+        use std::fs;
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("dcc_incnxt2_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        fs::write(
+            dir.join("a/chain.h"),
+            "#ifndef A_CHAIN\n#define A_CHAIN 1\n#include_next <chain.h>\n#endif\n",
+        )
+        .unwrap();
+        fs::write(dir.join("b/chain.h"), "#define FROM_CHAIN 99\n").unwrap();
+        let src = dir.join("t.c");
+        let mut f = fs::File::create(&src).unwrap();
+        writeln!(f, "#include <chain.h>\nint y = FROM_CHAIN;").unwrap();
+        let out = preprocess(
+            &fs::read(&src).unwrap(),
+            src.to_str().unwrap(),
+            &[],
+            &[dir.join("a"), dir.join("b")],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        let output = out.text;
+        let diags = out.diags;
+        let _ = fs::remove_dir_all(&dir);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(output.contains("int y = 99;"), "output: {output}");
+    }
 }

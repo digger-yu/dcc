@@ -475,6 +475,30 @@ M10+ SFINAE / partial spec / 完整 concept 求值 / operator-> 链 /
 | 依赖文件 -MD / -MMD / -MP | ✅（但与 host GCC 略有差异） |
 | 增量预处理（pch） | 🟢 (M25) `src/preproc.rs::PchOptions` / `PchBundle` / `serialize` / `apply` 走完整的"创建 + 加载 + 宏状态哈希校验"路径; CLI `-fpch-include=path` / `-fpch-create=path` / `-fpch-include-only=path` 在 `src/cli.rs` 已接受; 7 个单元测试 + 1 个集成测试 `pch_create_then_include_compiles_and_runs` 覆盖 create→include 端到端 |
 
+> **M26 增量（2026-08-06）— C23 预处理全家族测试覆盖补全**：
+> 实现此前已全部交付 (本节各 ✅ 行), 本次为无测试覆盖的 C23 特性补齐
+> 回归: 新增 27 个单元测试 + 10 个集成测试 (含 fixture
+> `tests/fixtures/c/elifdef.c` / `tests/fixtures/c/has_macros.c`):
+> - `#elifdef` / `#elifndef`: 已/未定义宏分支选择、`#else` 后报 E0200、
+>   与 `#if`/`#elif`/`#else` 嵌套组合 (`elifdef_*` / `elifndef_*` /
+>   `if_elif_else_nested_branches` + `m26_elifdef_elifndef_runs`)
+> - `#embed`: 字节嵌入、`limit(N)` 截断、`prefix`/`suffix` 包裹、
+>   空文件 `if_empty` 替代、`#embed` 须独占一行 (行内形式不被识别)
+>   (`embed_*` 单测 + `m26_embed_limit_prefix_suffix_runs` /
+>   `m26_embed_if_empty_runs`)
+> - `__has_embed`: 文件存在/缺失求值、带 `limit` 参数形式
+>   (`has_embed_*` + `m26_has_embed_selects_branch`)
+> - `__has_c_attribute`: 已知 (fallthrough/deprecated) → 1, 未知 → 0
+> - `__has_include`: 存在/缺失 (含 -I 搜索路径)
+> - `__has_builtin` / `__has_attribute`: 已知/未知求值
+> - `__STDC_ENDIAN_*`: 仅 C23 模式预定义, NATIVE==LITTLE (小端主机),
+>   非 C23 模式 defined 为假
+> - `#pragma once`: 重复 include 去重 (include 注释唯一, 宏只定义一次)
+> - `#warning` / `#error`: 活动分支发 W0200/E0203, 非活动分支静默
+> - `#include_next`: 多搜索路径链式解析 (单测 + `m26_include_next_chain`)
+> - 预定义宏 (`__linux__`/`__x86_64__`/`__GNUC__`) 在 `#if` 中可求值
+> 总计: 539 unit + 284 integration 全过, clippy 0 警告。
+
 M19 关键改动:
 
 - `__COUNTER__` 在 `Preprocessor` 中以 `u32` 状态字段持有, `expand_with_disabled_inner` 每次访问自增 (wrapping).

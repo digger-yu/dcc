@@ -3920,6 +3920,200 @@ fn m19_pragma_locale_accepted() {
     let _ = fs::remove_file(exe);
 }
 
+// ====== M26: C23 预处理全家族端到端 ======
+// #elifdef / #elifndef 分支选择
+#[test]
+#[cfg(unix)]
+fn m26_elifdef_elifndef_runs() {
+    let src = include_str!("fixtures/c/elifdef.c");
+    let (out, exe) = run_compile_and_run("m26-elifdef", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "#elifdef/#elifndef branch selection");
+    let _ = fs::remove_file(exe);
+}
+
+// __has_include / __has_c_attribute / __has_builtin / __has_attribute /
+// __STDC_ENDIAN_* 在 #if 中求值
+#[test]
+#[cfg(unix)]
+fn m26_has_macros_c23_runs() {
+    let src = include_str!("fixtures/c/has_macros.c");
+    let (out, exe) = run_compile_and_run("m26-has-macros", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "__has_* family + endian macros");
+    let _ = fs::remove_file(exe);
+}
+
+// #embed: limit / prefix / suffix 组合, 字节级校验
+#[test]
+#[cfg(unix)]
+fn m26_embed_limit_prefix_suffix_runs() {
+    let dir = std::env::temp_dir();
+    let data = dir.join(format!("dcc-embed-data-{}.bin", std::process::id()));
+    fs::write(&data, [1u8, 2, 3, 4, 5]).expect("write embed data");
+    let src = format!(
+        "int main(void) {{\n\
+         static const unsigned char a[] = {{\n\
+             #embed \"{}\" limit(3) prefix(9, 8) suffix(7)\n\
+         }};\n\
+         if (a[0] != 9 || a[1] != 8 || a[2] != 1 || a[3] != 2 || a[4] != 3 || a[5] != 7) return 1;\n\
+         if (sizeof(a) != 6) return 2;\n\
+         return 0;\n}}\n",
+        data.display()
+    );
+    let (out, exe) = run_compile_and_run("m26-embed", &src);
+    let _ = fs::remove_file(data);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "#embed limit/prefix/suffix bytes");
+    let _ = fs::remove_file(exe);
+}
+
+// #embed if_empty: 空文件时以 if_empty 字节替代
+#[test]
+#[cfg(unix)]
+fn m26_embed_if_empty_runs() {
+    let dir = std::env::temp_dir();
+    let data = dir.join(format!("dcc-embed-empty-{}.bin", std::process::id()));
+    fs::write(&data, []).expect("write empty embed data");
+    let src = format!(
+        "int main(void) {{\n\
+         static const unsigned char a[] = {{\n\
+             #embed \"{}\" if_empty(0xAA, 0xBB)\n\
+         }};\n\
+         if (a[0] != 0xAA || a[1] != 0xBB) return 1;\n\
+         if (sizeof(a) != 2) return 2;\n\
+         return 0;\n}}\n",
+        data.display()
+    );
+    let (out, exe) = run_compile_and_run("m26-embed-empty", &src);
+    let _ = fs::remove_file(data);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "#embed if_empty bytes");
+    let _ = fs::remove_file(exe);
+}
+
+// __has_embed: 文件存在与否选择 #if 分支
+#[test]
+#[cfg(unix)]
+fn m26_has_embed_selects_branch() {
+    let dir = std::env::temp_dir();
+    let data = dir.join(format!("dcc-has-embed-{}.bin", std::process::id()));
+    fs::write(&data, [1u8, 2]).expect("write embed data");
+    let src = format!(
+        "#if __has_embed(\"{}\")\n\
+         #define HAS_EMBED 1\n\
+         #else\n\
+         #define HAS_EMBED 0\n\
+         #endif\n\
+         #if __has_embed(\"dcc-no-such-data-xyz.bin\")\n\
+         #define HAS_EMBED_MISSING 1\n\
+         #else\n\
+         #define HAS_EMBED_MISSING 0\n\
+         #endif\n\
+         int main(void) {{\n\
+             if (HAS_EMBED != 1) return 1;\n\
+             if (HAS_EMBED_MISSING != 0) return 2;\n\
+             return 0;\n\
+         }}\n",
+        data.display()
+    );
+    let (out, exe) = run_compile_and_run("m26-has-embed", &src);
+    let _ = fs::remove_file(data);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "__has_embed branch selection");
+    let _ = fs::remove_file(exe);
+}
+
+// #pragma once: 重复 include 去重, 宏只定义一次
+#[test]
+#[cfg(unix)]
+fn m26_pragma_once_dedupes_include() {
+    let dir = std::env::temp_dir();
+    let hdr = dir.join(format!("dcc-once-{}.h", std::process::id()));
+    fs::write(&hdr, "#pragma once\n#define ONCE_VAL 7\n").expect("write header");
+    let src = format!(
+        "#include \"{}\"\n\
+         #include \"{}\"\n\
+         int main(void) {{ return ONCE_VAL - 7; }}\n",
+        hdr.display(),
+        hdr.display()
+    );
+    let (out, exe) = run_compile_and_run("m26-pragma-once", &src);
+    let _ = fs::remove_file(hdr);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "#pragma once dedup");
+    let _ = fs::remove_file(exe);
+}
+
+// #include_next: 从更靠后的搜索路径解析同名头
+#[test]
+#[cfg(unix)]
+fn m26_include_next_chain() {
+    let dir = std::env::temp_dir().join(format!("dcc-incnext-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("a")).unwrap();
+    fs::create_dir_all(dir.join("b")).unwrap();
+    fs::write(
+        dir.join("a/chain.h"),
+        "#ifndef A_CHAIN\n#define A_CHAIN 1\n#include_next <chain.h>\n#endif\n",
+    )
+    .unwrap();
+    fs::write(dir.join("b/chain.h"), "#define CHAIN_VAL 42\n").unwrap();
+    let src = "#include <chain.h>\n\
+         int main(void) {{ return CHAIN_VAL - 42; }}\n";
+    let source_path = dir.join("main.c");
+    fs::write(&source_path, src).unwrap();
+    let exe_path = dir.join("main");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-I"])
+        .arg(dir.join("a"))
+        .arg("-I")
+        .arg(dir.join("b"))
+        .args(["-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe_path);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(rc, 0, "#include_next chain");
+}
+
 // ====== M23: Section 11 属性/builtin/alloca ======
 // __attribute__((retain)): 变量和函数应被保留, gc-sections 不移除
 #[test]
