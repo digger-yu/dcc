@@ -5882,3 +5882,43 @@ fn multi_dim_array_compiles_and_runs() {
     assert_eq!(rc, 0, "multi_dim_array should return 0, got {rc}");
 }
 
+/// 内置链接器失败路径清理临时 .o: 未定义符号导致 link_multi_tu 失败时,
+/// 提前返回必须删除 /tmp/dcc-builtlink-<pid>-*.o. 修复前 `?` 跳过清理,
+/// 每次失败链接都残留一个临时目标文件.
+#[test]
+fn builtin_linker_cleans_tmp_objs_on_failure() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-bllink-{}.c", std::process::id()));
+    let out = dir.join(format!("dcc-bllink-{}.out", std::process::id()));
+    fs::write(&src, "int foo(void);\nint main(void) { return foo(); }\n").unwrap();
+    // spawn 拿子进程 pid: 临时 .o 文件名带 dcc 子进程的 pid
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-pie")
+        .arg("-o")
+        .arg(&out)
+        .arg(&src)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn dcc");
+    let dcc_pid = child.id();
+    let output = child.wait_with_output().expect("wait dcc");
+    assert!(
+        !output.status.success(),
+        "link with undefined symbol must fail, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let prefix = format!("dcc-builtlink-{dcc_pid}-");
+    let leftovers: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "builtin linker leaked tmp .o files: {leftovers:?}"
+    );
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&out);
+}

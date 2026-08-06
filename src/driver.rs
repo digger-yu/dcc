@@ -924,6 +924,18 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     Ok(())
 }
 
+/// 内置全链接器产生的临时 .o 清理 guard: 无论编译子任务、链接还是写输出
+/// 哪条路径提前返回, 栈展开时都会删除这些临时文件 (RAII, 等价 finally)。
+struct TmpObjCleanup(Vec<PathBuf>);
+
+impl Drop for TmpObjCleanup {
+    fn drop(&mut self) {
+        for t in &self.0 {
+            let _ = std::fs::remove_file(t);
+        }
+    }
+}
+
 /// 内置全链接器：合并多个 .o → 写 ET_EXEC / ET_DYN（PIE / .so）
 fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.inputs.is_empty() {
@@ -935,7 +947,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     }
     // 源文件输入 (.c/.i/.S 等): 先编译为临时 .o 再交给内置链接器,
     // 否则链接器会把 C 源码当 ELF 解析 (bad ELF magic)。
-    let mut tmp_objs: Vec<std::path::PathBuf> = Vec::new();
+    let mut tmp_guard = TmpObjCleanup(Vec::new());
     let mut inputs: Vec<std::path::PathBuf> = Vec::new();
     for (i, inp) in cfg.inputs.iter().enumerate() {
         let is_obj = inp.extension().map(|e| e == "o").unwrap_or(false);
@@ -951,14 +963,10 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             c.output = tmp_o.clone();
             c.relocatable = true;
             c.built_link = false; // 编译子任务: 递归 run 不能再进内置链接器
+            tmp_guard.0.push(tmp_o.clone());
             if let Err(e) = run(c) {
-                for t in &tmp_objs {
-                    let _ = std::fs::remove_file(t);
-                }
-                let _ = std::fs::remove_file(&tmp_o);
                 return Err(e);
             }
-            tmp_objs.push(tmp_o.clone());
             inputs.push(tmp_o);
         }
     }
@@ -1041,9 +1049,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     } else {
         link::link_multi_tu(&inputs, &cfg.output, &link_cfg)?
     };
-    for t in &tmp_objs {
-        let _ = std::fs::remove_file(t);
-    }
+    // tmp_guard drop 时统一清理临时 .o (链接/写输出失败路径也不例外)
     std::fs::write(&cfg.output, &bytes).map_err(|e| {
         vec![Diagnostic::err(
             "E0301",
