@@ -296,7 +296,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 | MemProf | `-fmemory-profile` / `-fmemory-profile-use=` | ✅ text parser + `is_cold` 启发；M25 cold 函数下沉 `.text.unlikely` |
 | 跨源权重聚合 | 任意 `-fprofile-*` 组合 | ✅ `ProfileWeights` 聚合 4 源（M25） |
 | TopdownL1 | `-ftopdownmetrics` | ✅ 四 slot 枚举 + `topdown_percentages` + Linux `perf.data` v2 读 |
-| Offloading | `-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` | 🟡 元数据 + JSON 序列化；**无 device codegen** |
+| Offloading | `-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` | ✅ `OffloadConfig` 全形式解析 + `OffloadSection` 二进制序列化 + `.dcc.offload` ELF 节 + device codegen (PTX/AMDGCN) |
 
 ## 7. 内建函数
 
@@ -348,7 +348,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 **远期（架构 / 性能）**
 
 - 自举完成 + 字节级差为 0（CI 锁定）；GCC cc1/cc1plus 全树编译（需本地 ~5G 磁盘）。
-- Offloading device codegen（OpenMP target / CUDA / HIP）；AArch64 / RISC-V profile runtime helper。
+- AArch64 / RISC-V profile runtime helper；Offloading device codegen 完整后端（当前已支持 PTX/AMDGCN stub 生成）。
 
 ## 10. 交叉编译
 
