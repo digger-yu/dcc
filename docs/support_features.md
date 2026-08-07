@@ -196,6 +196,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ std::initializer_list | `{1, 2, 3}` 降级为复合字面量 |
 | dcc++ 模板完整单态化 | `TemplateRegistry` 注册 + 缓存 + 偏特化匹配；模板-id `T<U>` 解析 |
 | dcc++ 模板基类 | `class Derived : public Base<int>` 模板基类实例化 + 嵌入继承 |
+| dcc++ 模板友元 | `friend class Foo<T>` 模板友元声明解析 + 跳过 |
 | dcc++ `auto` 类型推导 | int / `const char*` / class 真推导 |
 | dcc++ `decltype` / `decltype(auto)` | 解析 + 占位 |
 | dcc++ `operator new[]` / `delete[]` | Itanium ABI `_Znam` / `_ZdaPv` 符号 |

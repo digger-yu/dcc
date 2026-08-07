@@ -3800,7 +3800,7 @@ impl<'a> CppParser<'a> {
     ///   friend int peek(S&);    -> 自由函数声明 (无 this 形参, 不 mangle)
     ///   friend int peek(S&) {}  -> 自由函数定义 (无 this 形参, 不 mangle)
     fn parse_friend_decl(&mut self) -> Result<CppDecl, CppParseError> {
-        // `friend class Foo;` 简化: 接受, 跳过; 不生成任何代码
+        // `friend class Foo;` 或 `friend class Foo<T>;` 简化: 接受, 跳过; 不生成任何代码
         // 注: `struct` 在 C++ lexer 中走 C 关键字分支, 不是 CppKw
         if self.at(CppKw::Class)
             || matches!(
@@ -3812,8 +3812,55 @@ impl<'a> CppParser<'a> {
             )
         {
             self.bump();
-            // 读取类名 (如有) 然后 ;
+            // 读取类名 (如有)
             let _ = self.expect_ident();
+            // 解析模板实参: friend class Foo<T>
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Lt,
+                    ..
+                }))
+            ) && self.looks_like_template_args_after_lt()
+            {
+                self.bump(); // 吞 `<`
+                // 跳过模板实参 (不存储, friend 声明不影响 lower)
+                let mut depth = 1;
+                while depth > 0 {
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Lt,
+                            ..
+                        }))
+                    ) {
+                        depth += 1;
+                        self.bump();
+                    } else if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Gt,
+                            ..
+                        }))
+                    ) {
+                        depth -= 1;
+                        self.bump();
+                    } else if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Shr,
+                            ..
+                        }))
+                    ) {
+                        depth -= 2;
+                        self.bump();
+                    } else if self.peek.is_none() {
+                        break;
+                    } else {
+                        self.bump();
+                    }
+                }
+            }
             if matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {

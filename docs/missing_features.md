@@ -62,7 +62,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| 模板友元 | 不支持 `friend class Foo<T>` |
 | `export template` | 注释占位，未实装 |
 | concept 与 SFINAE 联动 | concept 解析 + 简化求值已实装，但不与 SFINAE 完整联动 |
 | module ODR 检查 | BMF 序列化已实装，ODR 检查待后续 |

@@ -2984,6 +2984,21 @@ mod tests {
     }
 
     #[test]
+    fn lower_template_friend() {
+        // 模板友元: friend class Foo<T>
+        let src = b"template <typename T> class Foo { public: T val; };
+                   class Bar { public: int x; friend class Foo<int>; };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 应该能正常解析并降级, 不报错
+        assert!(s.contains("struct Bar"), "{}", s);
+        assert!(s.contains("int x"), "{}", s);
+    }
+
+    #[test]
     fn lower_lambda() {
         let src = b"void f() { auto g = [](int x) { return x; }; }";
         let mut p = CppParser::new(src, "test.cpp");
