@@ -401,7 +401,7 @@ M10+ SFINAE / partial spec / 完整 concept 求值 / operator-> 链 /
 | `auto x = expr;` | M17 真推导: `Widget w(7)` 拆为 `Widget w; _ZN6WidgetC1Ei(&w, 7)` |
 | `decltype(expr)` (M17 实装) | 解析为 `MangleType::Int` 占位 (M17.0 简化) |
 | `decltype(auto)` (M17 实装) | 解析为 `MangleType::DecltypeAuto` 占位 |
-| `using Base::Base;` 继承链 ctor (M17 实装) | 类内 `using` 被 lower 接受, InheritingCtor 节点继续复用既有 lower; 多文件链接场景受 dcc C 后端 `__base_Base1` 字段访问 pre-existing 限制 |
+| `using Base::Base;` 继承链 ctor (M17 实装) | 类内 `using` 被 lower 接受, InheritingCtor 节点继续复用既有 lower; 多文件链接场景受 dcc C 后端嵌套字段访问限制 (`__base_Base1` 字段生成方式与直接字段不同, lower.rs#L1593) |
 | `co_yield` / `co_await` / `co_return` (M10+) | 🟢 (M25) `src/cpp/coroutine.rs`：Duff's device 状态机，per-function 变量 `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done`；`emit_fn` 包裹协程体为 switch 结构，case 0 入口 + resume labels 在每 suspend 点 |
 | `concept` / `requires` (M10+) | 解析为注释 + 简化求值；不与 SFINAE 完整联动 |
 | `module` / `import` (M10+) | 🟢 (M25) `src/cpp/bmf.rs`：DCC_BMF_V1 文本格式，lower 在 export module 声明后收集 exports；`ModuleInfo::to_bmf`/`from_bmf` round-trip；ODR 检查待后续 |
