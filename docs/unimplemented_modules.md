@@ -1113,7 +1113,7 @@ M19 关键改动:
 🔴 缺：
 
 - 真正的多平台 binary（`x86_64-dcc` / `aarch64-dcc` / `riscv64-dcc`）
-- Windows MSVC 目标（`windows-msvc`）— codegen 仍是 SysV-like
+- Windows MSVC 目标（`windows-msvc`）— codegen 仍是 SysV-like，Windows 本地无法完整验证链接路径 (依赖 host ld / objcopy，Windows 无等效工具链)
 - Darwin 目标 — 没有 Mach-O 输出
 - WASM 目标 — 没有 wasm32 codegen
 - AVR / MSP430 / Xtensa — 没有
