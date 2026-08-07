@@ -199,6 +199,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ 模板友元 | `friend class Foo<T>` 模板友元声明解析 + 跳过 |
 | dcc++ `export template` | `export template <T> class Foo` 模板导出 + BMF 序列化 |
 | dcc++ concept 与 SFINAE 联动 | concept 定义注册 + requires 子句展开 + SFINAE 约束过滤 |
+| dcc++ module ODR 检查 | `OdrChecker` 跨模块重复定义检测 + 冲突报告 |
 | dcc++ `auto` 类型推导 | int / `const char*` / class 真推导 |
 | dcc++ `decltype` / `decltype(auto)` | 解析 + 占位 |
 | dcc++ `operator new[]` / `delete[]` | Itanium ABI `_Znam` / `_ZdaPv` 符号 |

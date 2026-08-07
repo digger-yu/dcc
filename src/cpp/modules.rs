@@ -89,3 +89,140 @@ pub fn known_module(_name: &str) -> Option<ModuleInfo> {
 pub fn should_expand_to_include(_name: &str) -> bool {
     true
 }
+
+/// M26: ODR (One Definition Rule) 检查器
+/// 收集多个模块的导出实体, 检测重复定义冲突
+#[derive(Debug, Default)]
+pub struct OdrChecker {
+    /// 实体名 -> (模块名, 签名/布局)
+    definitions: std::collections::HashMap<String, Vec<(String, String)>>,
+}
+
+impl OdrChecker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 注册一个模块的导出实体
+    pub fn register_module(&mut self, module_name: &str, exports: &[BmfExport]) {
+        for e in exports {
+            let sig = match e.kind {
+                BmfKind::Function => e.signature.clone(),
+                BmfKind::Class => e.layout.clone().unwrap_or_default(),
+                BmfKind::Variable => e.signature.clone(),
+                BmfKind::Template => e.signature.clone(),
+            };
+            self.definitions
+                .entry(e.name.clone())
+                .or_default()
+                .push((module_name.to_string(), sig));
+        }
+    }
+
+    /// 检查 ODR 违规: 同名实体在不同模块中有不同定义
+    /// 返回违规列表: (实体名, [(模块名, 签名), ...])
+    pub fn check(&self) -> Vec<(String, Vec<(String, String)>)> {
+        let mut violations = Vec::new();
+        for (name, defs) in &self.definitions {
+            if defs.len() > 1 {
+                // 检查是否所有定义都相同
+                let first_sig = &defs[0].1;
+                let has_conflict = defs.iter().any(|(_, sig)| sig != first_sig);
+                if has_conflict {
+                    violations.push((name.clone(), defs.clone()));
+                }
+            }
+        }
+        violations
+    }
+
+    /// 检查并返回格式化的错误信息
+    pub fn check_and_format(&self) -> Option<String> {
+        let violations = self.check();
+        if violations.is_empty() {
+            return None;
+        }
+        let mut msg = String::from("ODR violations detected:\n");
+        for (name, defs) in violations {
+            msg.push_str(&format!("  entity '{}':\n", name));
+            for (module, sig) in defs {
+                msg.push_str(&format!("    in module '{}': {}\n", module, sig));
+            }
+        }
+        Some(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpp::bmf::{BmfExport, BmfKind};
+
+    #[test]
+    fn odr_checker_no_violations() {
+        let mut checker = OdrChecker::new();
+        // 模块 A 导出 foo(int)
+        let exports_a = vec![BmfExport {
+            kind: BmfKind::Function,
+            name: "foo".to_string(),
+            signature: "int(int)".to_string(),
+            layout: None,
+        }];
+        checker.register_module("A", &exports_a);
+        // 模块 B 导出 bar(double) - 不同名字, 无冲突
+        let exports_b = vec![BmfExport {
+            kind: BmfKind::Function,
+            name: "bar".to_string(),
+            signature: "double(double)".to_string(),
+            layout: None,
+        }];
+        checker.register_module("B", &exports_b);
+        assert!(checker.check().is_empty());
+        assert!(checker.check_and_format().is_none());
+    }
+
+    #[test]
+    fn odr_checker_same_definition_ok() {
+        let mut checker = OdrChecker::new();
+        // 模块 A 和 B 都导出相同签名的 foo(int)
+        let exports = vec![BmfExport {
+            kind: BmfKind::Function,
+            name: "foo".to_string(),
+            signature: "int(int)".to_string(),
+            layout: None,
+        }];
+        checker.register_module("A", &exports);
+        checker.register_module("B", &exports);
+        // 相同定义不算 ODR 违规
+        assert!(checker.check().is_empty());
+    }
+
+    #[test]
+    fn odr_checker_conflict_detected() {
+        let mut checker = OdrChecker::new();
+        // 模块 A 导出 foo(int)
+        let exports_a = vec![BmfExport {
+            kind: BmfKind::Function,
+            name: "foo".to_string(),
+            signature: "int(int)".to_string(),
+            layout: None,
+        }];
+        checker.register_module("A", &exports_a);
+        // 模块 B 导出 foo(double) - 同名但不同签名, ODR 违规
+        let exports_b = vec![BmfExport {
+            kind: BmfKind::Function,
+            name: "foo".to_string(),
+            signature: "int(double)".to_string(),
+            layout: None,
+        }];
+        checker.register_module("B", &exports_b);
+        let violations = checker.check();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].0, "foo");
+        let msg = checker.check_and_format().unwrap();
+        assert!(msg.contains("ODR violations"));
+        assert!(msg.contains("foo"));
+        assert!(msg.contains("module 'A'"));
+        assert!(msg.contains("module 'B'"));
+    }
+}
