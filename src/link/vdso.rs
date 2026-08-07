@@ -9,12 +9,14 @@
 //      AT_SYSINFO_EHDR 找到, 也方便静态分析
 //   3) 暴露解析元信息 (parse + symbols API) 给 link/mod.rs 主流程
 //
-// 当前 commit 只完成 (1) + (3). (2) 的 .text 嵌入需要重写 layout 的
-// 节添加流程, 留作下一阶段 (因为 link/mod.rs 的 layout 是按
-// Vec<OutputSection> 顺序追加的, vdso 必须在所有节定位之后插入).
+// 实现状态:
+//   - (1) parse_vdso() 解析 vDSO ELF, 提取 .text + FUNC 符号
+//   - (2) embed_vdso() 在 link/mod.rs 中实现, 将 .text 嵌入 .text.vdso 节,
+//         生成 .note.GNU-vdso 元信息节, 并将 vDSO 符号加入输出符号表
+//   - (3) VdsoInfo + VdsoSymbol + vdso_alias() 提供完整 API
 //
 // 调用方: link/mod.rs 接收 LinkConfig.vdso: Option<PathBuf> 后, 调用
-// parse_vdso() 取得 VdsoInfo, 再决定是否把 vdso 文本嵌入布局.
+// parse_vdso() 取得 VdsoInfo, 再通过 embed_vdso() 嵌入布局.
 
 use std::collections::HashMap;
 use std::fs;

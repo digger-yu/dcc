@@ -110,6 +110,8 @@ pub struct LinkConfig {
     pub arch: ArchKind,
     /// 自定义动态链接器路径 (-Wl,--dynamic-linker=)
     pub dynamic_linker: Option<String>,
+    /// vDSO ELF 文件路径 (--vdso=)，用于嵌入 vDSO 文本和符号
+    pub vdso: Option<PathBuf>,
 }
 
 /// build-id 风格
@@ -165,6 +167,7 @@ impl Default for LinkConfig {
             fini_builder: fini_dispatch::FiniArrayBuilder::new(),
             arch: ArchKind::X86_64,
             dynamic_linker: None,
+            vdso: None,
         }
     }
 }
@@ -283,6 +286,10 @@ pub fn link_from_bundle(
     }
     // 2.10 为静态链接可执行文件合成 _start 桩 (如果没有 _start)
     ensure_start_stub(&mut layout);
+    // 2.10.1 vDSO 集成: 嵌入 .text.vdso + .note.GNU-vdso + 符号
+    if let Some(ref vdso_path) = cfg.vdso {
+        embed_vdso(&mut layout, vdso_path, cfg.verbose)?;
+    }
     // 2.11 PIE/Shared: 数据段绝对重定位 (R_X86_64_64) 转 R_X86_64_RELATIVE
     // 动态重定位 (必须在 fill_plt_got 之前收集, 使 .rela.dyn 的 size 分配
     // 计入这些条目; ld.so 加载时写入 load_bias + addend)。
@@ -576,6 +583,162 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
     let _ = sym_idx;
 }
 
+/// vDSO 集成: 解析 vDSO ELF 并嵌入输出布局.
+///
+/// 生成:
+///   - `.text.vdso` 节: 包含 vDSO .text 载荷 (可执行, 只读)
+///   - `.note.GNU-vdso` 节: 包含 vDSO 元信息 (namesz/descsz/type + 符号表摘要)
+///   - vDSO 符号: 每个 FUNC 符号加入输出符号表 (STB_GLOBAL, STT_FUNC)
+///
+/// 布局位置:
+///   - `.text.vdso` 放在 .text 之后, 同属段 0 (R+X)
+///   - `.note.GNU-vdso` 作为 note 节, 不加载 (flags=0)
+fn embed_vdso(
+    layout: &mut crate::link::layout::Layout,
+    vdso_path: &Path,
+    verbose: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_NOTE, SHT_PROGBITS, STB_GLOBAL, STT_FUNC};
+    use crate::link::layout::{OutputSection, OutputSectionKind, OutputSymbol};
+    use crate::link::vdso;
+
+    // 1. 解析 vDSO ELF
+    let info = vdso::parse_vdso(vdso_path).map_err(|e| {
+        diag("E0305", format!("failed to parse vDSO '{}': {}", vdso_path.display(), e))
+    })?;
+
+    if verbose {
+        eprintln!(
+            "dcc-link: embedding vDSO '{}' ({} bytes text, {} symbols)",
+            info.source_path,
+            info.text_size,
+            info.symbols.len()
+        );
+    }
+
+    // 2. 找 .text 节的位置, 在其后插入 .text.vdso
+    let text_idx = layout
+        .sections
+        .iter()
+        .position(|s| s.kind == OutputSectionKind::Text);
+
+    // 3. 创建 .text.vdso 节
+    let vdso_text_name = ".text.vdso".to_string();
+    let vdso_text_size = info.text.len() as u64;
+    let new_idx = layout.sections.len() as u32;
+
+    let vdso_text_section = OutputSection {
+        kind: OutputSectionKind::Named(vdso_text_name.clone()),
+        name: vdso_text_name,
+        sh_name_off: 0,
+        ty: SHT_PROGBITS,
+        flags: SHF_ALLOC | SHF_EXECINSTR,
+        align: 16,
+        data: info.text.clone(),
+        size: vdso_text_size,
+        entsize: 0,
+        output_index: new_idx,
+        load_segment: 0, // 段 0: R+X
+        vaddr: 0,        // 稍后由 recompute_section_vaddrs 分配
+        file_off: 0,
+        input_offsets: Vec::new(),
+        input_sections: Vec::new(),
+    };
+
+    // 插入到 .text 之后 (如果有), 否则追加到末尾
+    if let Some(idx) = text_idx {
+        layout.sections.insert(idx + 1, vdso_text_section);
+        // 更新后续节的 output_index
+        for i in (idx + 2)..layout.sections.len() {
+            layout.sections[i].output_index = i as u32;
+        }
+    } else {
+        layout.sections.push(vdso_text_section);
+    }
+
+    let vdso_text_section_idx = text_idx.map(|i| i + 1).unwrap_or(new_idx as usize);
+    let vdso_text_vaddr_base = layout.sections[vdso_text_section_idx].vaddr;
+
+    // 4. 添加 vDSO 符号到输出符号表
+    let mut vdso_syms: Vec<OutputSymbol> = Vec::new();
+    for (name, sym) in &info.symbols {
+        let sym_vaddr = vdso_text_vaddr_base + sym.text_offset;
+        vdso_syms.push(OutputSymbol {
+            name: name.clone(),
+            value: sym.text_offset,
+            vaddr: sym_vaddr,
+            size: sym.size,
+            bind: STB_GLOBAL,
+            ty: STT_FUNC,
+            kind: STT_FUNC,
+            visibility: 0,
+            section: vdso_text_section_idx as u16,
+            shndx_if_section: 0,
+        });
+    }
+    layout.symbols.extend(vdso_syms);
+
+    // 5. 创建 .note.GNU-vdso 节 (元信息)
+    // 格式: namesz(4) + descsz(4) + type(4) + name + desc
+    // name = "GNU\0", type = 0x100 (NT_GNU_VDSO, 自定义)
+    // desc = vDSO 符号数量(8) + text_size(8)
+    let note_name = b"GNU\0";
+    let namesz = note_name.len() as u32;
+    let desc_data: Vec<u8> = {
+        let mut d = Vec::new();
+        d.extend_from_slice(&(info.symbols.len() as u64).to_le_bytes());
+        d.extend_from_slice(&info.text_size.to_le_bytes());
+        d
+    };
+    let descsz = desc_data.len() as u32;
+    let name_pad = (4 - (namesz % 4)) % 4;
+    let desc_pad = (4 - (descsz % 4)) % 4;
+
+    let mut note_data = Vec::new();
+    note_data.extend_from_slice(&namesz.to_le_bytes());
+    note_data.extend_from_slice(&descsz.to_le_bytes());
+    note_data.extend_from_slice(&0x100u32.to_le_bytes()); // NT_GNU_VDSO (自定义)
+    note_data.extend_from_slice(note_name);
+    note_data.resize(note_data.len() + name_pad as usize, 0);
+    note_data.extend_from_slice(&desc_data);
+    note_data.resize(note_data.len() + desc_pad as usize, 0);
+
+    let note_name_str = ".note.GNU-vdso".to_string();
+    let note_idx = layout.sections.len() as u32;
+    let note_size = note_data.len() as u64;
+    let note_section = OutputSection {
+        kind: OutputSectionKind::Note,
+        name: note_name_str,
+        sh_name_off: 0,
+        ty: SHT_NOTE,
+        flags: 0, // 不加载, 仅调试
+        align: 4,
+        data: note_data,
+        size: note_size,
+        entsize: 0,
+        output_index: note_idx,
+        load_segment: 0,
+        vaddr: 0,
+        file_off: 0,
+        input_offsets: Vec::new(),
+        input_sections: Vec::new(),
+    };
+    layout.sections.push(note_section);
+
+    // 6. 重算 vaddr (vDSO 节已加入)
+    recompute_section_vaddrs(layout);
+
+    // 7. 更新符号 vaddr (因为 .text.vdso 的 vaddr 可能变了)
+    let vdso_text_vaddr = layout.sections[vdso_text_section_idx].vaddr;
+    for sym in &mut layout.symbols {
+        if sym.section == vdso_text_section_idx as u16 {
+            sym.vaddr = vdso_text_vaddr + sym.value;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +841,136 @@ mod tests {
         assert_eq!(&bytes[0..4], b"\x7fELF");
         let _ = std::fs::remove_file(p1);
         let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
+    fn embed_vdso_adds_text_and_note_sections() {
+        // 构造一个最小 vDSO ELF
+        let shstrtab = b"\0.text\0.symtab\0.strtab\0.shstrtab\0";
+        let text = b"\x90\x90\x90\x90\xc3"; // nop*4 ; ret
+        let mut strtab = vec![0u8];
+        strtab.extend_from_slice(b"__vdso_clock_gettime");
+        strtab.push(0);
+        let strtab_clock_off = 1usize;
+
+        let mut out = vec![0u8; 64];
+        let text_off = out.len();
+        out.extend_from_slice(text);
+        let symtab_off = out.len();
+        out.resize(out.len() + 24, 0); // null sym
+        out.extend_from_slice(&(strtab_clock_off as u32).to_le_bytes());
+        out.push((1 << 4) | 2); // GLOBAL FUNC
+        out.push(0);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&5u64.to_le_bytes());
+
+        let strtab_off = out.len();
+        out.extend_from_slice(&strtab);
+        let shstrtab_off = out.len();
+        out.extend_from_slice(shstrtab);
+        while !out.len().is_multiple_of(8) {
+            out.push(0);
+        }
+        let sh_off = out.len();
+        out.resize(out.len() + 5 * 64, 0);
+
+        out[0..4].copy_from_slice(&elf::ELFMAG);
+        out[4] = elf::ELFCLASS64;
+        out[5] = elf::ELFDATA2LSB;
+        out[6] = elf::EV_CURRENT;
+        out[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        out[18..20].copy_from_slice(&elf::EM_X86_64.to_le_bytes());
+        out[20..24].copy_from_slice(&1u32.to_le_bytes());
+        out[40..48].copy_from_slice(&(sh_off as u64).to_le_bytes());
+        out[58..60].copy_from_slice(&64u16.to_le_bytes());
+        out[60..62].copy_from_slice(&5u16.to_le_bytes());
+        out[62..64].copy_from_slice(&4u16.to_le_bytes());
+
+        let write_sh = |buf: &mut Vec<u8>, idx: usize, name_off: u32, sh_type: u32, flags: u64, addr: u64, offset: u64, size: u64, link: u32, info: u32, addralign: u64, entsize: u64| {
+            let base = sh_off + idx * 64;
+            buf[base..base + 4].copy_from_slice(&name_off.to_le_bytes());
+            buf[base + 4..base + 8].copy_from_slice(&sh_type.to_le_bytes());
+            buf[base + 8..base + 16].copy_from_slice(&flags.to_le_bytes());
+            buf[base + 16..base + 24].copy_from_slice(&addr.to_le_bytes());
+            buf[base + 24..base + 32].copy_from_slice(&offset.to_le_bytes());
+            buf[base + 32..base + 40].copy_from_slice(&size.to_le_bytes());
+            buf[base + 40..base + 44].copy_from_slice(&link.to_le_bytes());
+            buf[base + 44..base + 48].copy_from_slice(&info.to_le_bytes());
+            buf[base + 48..base + 56].copy_from_slice(&addralign.to_le_bytes());
+            buf[base + 56..base + 64].copy_from_slice(&entsize.to_le_bytes());
+        };
+        write_sh(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        write_sh(&mut out, 1, 1, elf::SHT_PROGBITS, 0x6, 0, text_off as u64, text.len() as u64, 0, 0, 1, 0);
+        write_sh(&mut out, 2, 7, elf::SHT_SYMTAB, 0, 0, symtab_off as u64, 48, 3, 1, 8, 24);
+        write_sh(&mut out, 3, 15, elf::SHT_STRTAB, 0, 0, strtab_off as u64, strtab.len() as u64, 0, 0, 1, 0);
+        write_sh(&mut out, 4, 23, elf::SHT_STRTAB, 0, 0, shstrtab_off as u64, shstrtab.len() as u64, 0, 0, 1, 0);
+
+        // 写 vDSO 到临时文件
+        let dir = std::env::temp_dir();
+        let vdso_path = dir.join("dcc-test-vdso.so");
+        std::fs::write(&vdso_path, &out).unwrap();
+
+        // 构造一个最小 layout
+        let mut layout = crate::link::layout::Layout {
+            is_pie: false,
+            is_shared: false,
+            arch: crate::debug::ArchKind::X86_64,
+            base_addr: 0x400000,
+            file_base: 0x1000,
+            sections: vec![
+                crate::link::layout::OutputSection {
+                    kind: crate::link::layout::OutputSectionKind::Text,
+                    name: ".text".into(),
+                    sh_name_off: 0,
+                    ty: elf::SHT_PROGBITS,
+                    flags: elf::SHF_ALLOC | elf::SHF_EXECINSTR,
+                    align: 16,
+                    data: vec![0xc3], // ret
+                    size: 1,
+                    entsize: 0,
+                    output_index: 0,
+                    load_segment: 0,
+                    vaddr: 0x401000,
+                    file_off: 0x1000,
+                    input_offsets: Vec::new(),
+                    input_sections: Vec::new(),
+                },
+            ],
+            segments: Vec::new(),
+            symbols: Vec::new(),
+            entry: 0x401000,
+            has_symtab: true,
+            has_dynamic: false,
+            n_locals: 0,
+            output_relas: Vec::new(),
+            dynamic_linker: None,
+        };
+
+        // 调用 embed_vdso
+        embed_vdso(&mut layout, &vdso_path, false).expect("embed_vdso ok");
+
+        // 验证: .text.vdso 节存在
+        let vdso_text = layout.sections.iter().find(|s| s.name == ".text.vdso");
+        assert!(vdso_text.is_some(), ".text.vdso section should exist");
+        let vdso_text = vdso_text.unwrap();
+        assert_eq!(vdso_text.data, text);
+        assert_eq!(vdso_text.size, 5);
+
+        // 验证: .note.GNU-vdso 节存在
+        let vdso_note = layout.sections.iter().find(|s| s.name == ".note.GNU-vdso");
+        assert!(vdso_note.is_some(), ".note.GNU-vdso section should exist");
+        let vdso_note = vdso_note.unwrap();
+        assert_eq!(vdso_note.ty, elf::SHT_NOTE);
+        assert!(vdso_note.size > 0);
+
+        // 验证: vDSO 符号存在
+        let vdso_sym = layout.symbols.iter().find(|s| s.name == "__vdso_clock_gettime");
+        assert!(vdso_sym.is_some(), "__vdso_clock_gettime symbol should exist");
+        let vdso_sym = vdso_sym.unwrap();
+        assert_eq!(vdso_sym.bind, elf::STB_GLOBAL);
+        assert_eq!(vdso_sym.ty, elf::STT_FUNC);
+
+        let _ = std::fs::remove_file(vdso_path);
     }
 }

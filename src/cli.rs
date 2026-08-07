@@ -112,6 +112,8 @@ pub struct Config {
     /// --sysroot=<path>: 根目录, 头文件查找与链接器 -L 均带 <path>/include,
     /// <path>/lib 前缀. 为 musl 交叉编译提供完整 sysroot 路径.
     pub sysroot: Option<PathBuf>,
+    /// --vdso=<path>: vDSO ELF 文件路径, 嵌入输出 layout 的 .text.vdso 节
+    pub vdso: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -430,6 +432,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut diag_show_template_tree = false;
     let mut bootstrap_compare: Option<PathBuf> = None;
     let mut sysroot: Option<PathBuf> = None;
+    let mut vdso: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -969,6 +972,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-Wl,--sysroot=") => {
                 sysroot = Some(PathBuf::from(&a["-Wl,--sysroot=".len()..]));
             }
+            // --vdso=<path>: vDSO ELF 文件路径
+            a if a.starts_with("--vdso=") => {
+                vdso = Some(PathBuf::from(&a["--vdso=".len()..]));
+            }
+            a if a.starts_with("-Wl,--vdso=") => {
+                vdso = Some(PathBuf::from(&a["-Wl,--vdso=".len()..]));
+            }
             "-x" => {
                 i += 1;
                 let lang = args
@@ -1475,6 +1485,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_show_template_tree,
             bootstrap_compare: bootstrap_compare.clone(),
             sysroot: sysroot.clone(),
+            vdso: vdso.clone(),
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -1553,6 +1564,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             diag_show_template_tree,
             bootstrap_compare,
             sysroot,
+            vdso,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
