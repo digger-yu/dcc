@@ -1703,7 +1703,21 @@ impl Lower {
                     ..
                 }
             )
+        }) || c.bases.iter().any(|b| {
+            // M26: 检查基类是否有 virtual 方法 (继承虚方法)
+            if let Some(base_bases) = self.class_bases.get(&b.name) {
+                // 递归检查基类的基类
+                base_bases.iter().any(|bb| {
+                    self.class_bases.get(&bb.name).map_or(false, |bbs| {
+                        bbs.iter().any(|bbb| bbb.is_virtual)
+                    })
+                })
+            } else {
+                false
+            }
         });
+        // M26: 简化检查 - 如果任何基类存在, 认为可能有继承的虚方法
+        let has_virt = has_virt || !c.bases.is_empty();
         if has_virt {
             self.out.push_str("    void* __vptr;\n");
         }
@@ -3646,5 +3660,25 @@ mod tests {
         let s = l.finish();
         // 应该检测到菱形继承并发出警告
         assert!(s.contains("WARNING") && s.contains("diamond inheritance"), "{}", s);
+    }
+
+    #[test]
+    fn lower_rtti_typeinfo_and_vtable() {
+        // M26: RTTI 完善 - typeinfo 和 vtable 生成
+        let src = b"class Base { public: virtual void foo() {} };
+                   class Derived : public Base { public: void foo() override {} };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 应该生成 typeinfo 符号
+        assert!(s.contains("__dcc_ti_Base"), "{}", s);
+        assert!(s.contains("__dcc_ti_Derived"), "{}", s);
+        // 应该生成 vtable 符号 (因为有 virtual 方法)
+        assert!(s.contains("__dcc_vt_Base"), "{}", s);
+        assert!(s.contains("__dcc_vt_Derived"), "{}", s);
+        // vtable 应该包含 RTTI slot
+        assert!(s.contains("RTTI typeinfo pointer"), "{}", s);
     }
 }
