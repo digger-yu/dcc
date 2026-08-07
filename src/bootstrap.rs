@@ -750,6 +750,37 @@ mod tests {
     }
 
     #[test]
+    fn symbol_bind_changed_detected() {
+        // 同名同大小但绑定不同: GLOBAL(1) -> WEAK(2)
+        let l = build_minimal_rel(b"abc", b"x", &[("foo", 3, 1)]);
+        let r = build_minimal_rel(b"abc", b"x", &[("foo", 3, 2)]);
+        let rep = compare(&l, &r).unwrap();
+        assert_eq!(rep.symbol_diffs.len(), 1);
+        assert_eq!(rep.symbol_diffs[0].kind, SymbolDiffKind::BindChanged);
+        assert_eq!(rep.symbol_diffs[0].name, "foo");
+        assert!(
+            rep.symbol_diffs[0].detail.contains("GLOBAL")
+                && rep.symbol_diffs[0].detail.contains("WEAK"),
+            "detail should show bind transition: {}",
+            rep.symbol_diffs[0].detail
+        );
+        assert!(!rep.semantically_equivalent);
+    }
+
+    #[test]
+    fn symbol_bind_changed_format_output() {
+        // 验证 BindChanged 在 format() 输出中正确显示
+        let l = build_minimal_rel(b"abc", b"x", &[("foo", 3, 1)]);
+        let r = build_minimal_rel(b"abc", b"x", &[("foo", 3, 2)]);
+        let rep = compare(&l, &r).unwrap();
+        let s = rep.format();
+        assert!(s.contains("BindChanged"), "format should show kind: {s}");
+        assert!(s.contains("foo"), "format should show symbol name: {s}");
+        assert!(s.contains("GLOBAL"), "format should show old bind: {s}");
+        assert!(s.contains("WEAK"), "format should show new bind: {s}");
+    }
+
+    #[test]
     fn section_layout_difference_detected() {
         // .data 大小不同 -> 结构差异
         let l = build_minimal_rel(b"abc", b"xyzw", &[("foo", 3, 1)]);
