@@ -44,7 +44,7 @@ x86_64 codegen 对 GNU 内联 asm 的 mini-asm 汇编器已覆盖常用指令，
 | ALU | `add $imm8, %r13` 立即数过大、`sub %r13d, ...` 8/16 位 `op imm8` | — | ✅ M12 mini-asm |
 | `test` | imm 内存目标、`test $imm, %al` | — | ✅ M12 mini-asm |
 | 移位 | `shl $cl, %rsp`（cl 变体之外） | 内核 paravirt | ✅ M12 mini-asm |
-| `imul2/imul3` | 三操作数内存目标 | 旧 ABI | 🟡 部分 |
+| `imul2/imul3` | 三操作数内存目标 | 旧 ABI | ✅ 已完整支持 (reg-reg, mem-reg, reg-mem, SymDisp-reg, imm-mem-reg) |
 | `cmpxchg` | 非 rax 隐式操作数 | 某些 RCU 路径 | ✅ M12 mini-asm |
 | `xadd` | 内存 + 寄存器（隐式 LOCK） | 引用计数 fallback | ✅ M12 mini-asm |
 | `jmp` / `jcc` / `call` | 远跳转 / 远调用 / 绝对立即 | 实模式 / 启动代码 | ✅ M12 mini-asm（`*sym` 走 RIP-relative + `jmp *%rax`） |
@@ -57,7 +57,7 @@ x86_64 codegen 对 GNU 内联 asm 的 mini-asm 汇编器已覆盖常用指令，
 | `int` / `sys` / `sysenter` / `sysexit` / `vmlaunch` / `vmresume` | 完全 stub | 启动代码 / VMM | ✅ M12 mini-asm（除 `sys` 64 位） |
 | `swapgs` / `invlpg` / `wbinvd` / `cpuid` / `rdtsc` | 缺编码 | 内核入口 | ✅ M12 mini-asm |
 | `ud2` | 占位 panic | — | ✅ M12 mini-asm |
-| `sse mov` / `sse arith` | 大量 xmm 内存模式 | SIMD 内联 | 🟡 部分 |
+| `sse mov` / `sse arith` | 大量 xmm 内存模式 | SIMD 内联 | ✅ 已完整支持 (xmm-xmm, mem-xmm, xmm-mem, SegMem 变体) |
 
 ✅ **M13 已完成**（见 `docs/architecture.md` M13 章节）— x86_64 mini-asm
 SIMD 指令子集完整实装：
