@@ -50,13 +50,13 @@
 
 | 通道 | 已知遗留 |
 |------|----------|
-| PGO | 下游权重传播 stub |
+| PGO | 下游权重传播已接入 `ProfileWeights`；`.profraw` 二进制格式仅支持子集 |
 | GCOV | 非 x86_64 arch 未验证 |
-| AutoFDO | 权重不下发到 codegen |
-| LBR | 权重不下发到 codegen |
-| MemProf | 未在 libc malloc 上插桩；无 runtime 库 |
-| Perf 事件 | 未读 perf.data 二进制 |
-| Offloading | runtime loader 未实装 |
+| AutoFDO | 已接入 codegen (`.text.hot`/`.text.unlikely`)；仅支持 dcc 简化文本格式，不兼容 LLVM extbinary 格式 |
+| LBR | 已接入 codegen；仅解析 `perf script -F brstack` 文本，不直接读 `perf.data` 二进制 |
+| MemProf | 已接入 codegen + AllocClass 分类；未在 libc malloc 上插桩；无 runtime 库 |
+| Perf 事件 | L1 四 slot + L2 八子分类已接入；仅支持 `perf stat` 文本输出，不读 `perf.data` 二进制 |
+| Offloading | device codegen (PTX/AMDGCN) stub 已实装；runtime loader 未实装 |
 
 ## C++ 前端限制
 

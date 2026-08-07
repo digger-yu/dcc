@@ -9,16 +9,16 @@
 //   5. **offload 目标**        -> OpenMP target / CUDA / HIP 入口路由
 //
 // 当前实现分层:
-//   * 端到端: gcov (notes + 块/弧计数器) 与 pgo (函数入口计数器 + 概要读写骨架)
-//   * 骨架:   autofdo / lbr / memprof / perf_event / offload
-//     (CLI 接受、模块结构、数据结构、占位实现; 真实采样/反卷积/卸载在后续 milestone)
+//   * 端到端: gcov / pgo / autofdo / lbr / memprof / perf_event
+//     (CLI 接受、模块结构、数据结构、解析器、权重下发 codegen)
+//   * 骨架:   offload (CLI 接受 + 元数据 + device codegen stub)
 //
 // 设计: 与 `src/sanitizer.rs` 类似, AST 改写 + codegen 钩子。
 // GCOV/PGO 在函数 prologue 注入 `inc <counter>` (默认 edge-counter 形式),
 //   notes 文件 `.gcno` 由 `gcov::emit_notes` 写盘,
 //   数据文件 `.gcda` 由 `gcov_runtime` 在程序退出时落盘。
-// AutoFDO/MemProf 读取的是 LLVM/Perf 格式的 .data 概要, 当前仅做格式定义 +
-//   `ProfileUse` 占位 (在 `pgo.rs` / `autofdo.rs` 中)。
+// AutoFDO/LBR/MemProf/PerfEvent 已接入 driver → ProfileWeights → codegen,
+//   支持多源权重聚合 + hot/cold 函数段布局 (.text.hot / .text.unlikely).
 
 pub mod autofdo;
 pub mod device_codegen;

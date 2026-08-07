@@ -41,10 +41,10 @@
 |------|------|
 | PGO instrument | `-fprofile-generate` / `-fprofile-use`；`Profraw` 二进制 roundtrip；driver.rs 接入 `pgo::instrument_program`，codegen 自动 emit `call __dcc_pgo_count_fn`；`PgoWeights` 聚合 func 入口计数 |
 | GCOV | `-ftest-coverage` / `-fprofile-arcs`；`.gcno` notes + `.gcda` data 二进制（与 GCC gcov-9 layout 对齐）；`cfg_checksum` 采用 GCC libgcov 公式 |
-| AutoFDO | `-fauto-profile=` / `-fprofile-sample-use=`；简化 text parser；`bucketize` 按阈值分 Hot/Warm/Cold；通过 `ProfileWeights` 聚合，hot 函数下沉到 `.text.hot` 段 |
-| LBR | `-flbr-profile=`；解析 `perf script -F brstack` 文本；通过 `ProfileWeights` 聚合 |
-| MemProf | `-fmemory-profile` / `-fmemory-profile-use=`；简化 parser；冷分配栈对应函数下沉到 `.text.unlikely` 段 |
-| Perf 事件 / TopdownL1 | `-ftopdownmetrics`；`TopdownL1` 枚举；`topdown_percentages()` 规整为百分比；`PerfDataFile` 读 Linux `perf.data` v2 二进制 |
+| AutoFDO | `-fauto-profile=` / `-fprofile-sample-use=`；text parser + inline calls 链解析 + `bucketize` 按阈值分 Hot/Warm/Cold + `merge` 合并 + `summary` 统计 + roundtrip 序列化；通过 `ProfileWeights` 聚合，hot 函数下沉到 `.text.hot` 段 |
+| LBR | `-flbr-profile=`；解析 `perf script -F brstack` 文本 (含 mispredict/cycles 解析) + inbound/outbound 边查询 + `mispred_rate` 错误预测率 + `merge` 合并 + `summary` 统计；通过 `ProfileWeights` 聚合 |
+| MemProf | `-fmemory-profile` / `-fmemory-profile-use=`；text parser + `AllocClass` 分类 (Hot/Normal/Cold/Ephemeral) + lifetime 分析 + `dealloc` 解析 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；冷分配栈对应函数下沉到 `.text.unlikely` 段 |
+| Perf 事件 / TopdownL1 | `-ftopdownmetrics`；`TopdownL1` 四槽枚举 + `TopdownL2` 八子分类展开 + `perf stat` 文本解析 + `topdown_percentages()` + `primary_bottleneck()` 瓶颈诊断 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；`PerfDataFile` 读 Linux `perf.data` v2 二进制 |
 | Offloading | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=`；`OffloadConfig` 全形式解析；`OffloadSection` 二进制序列化；codegen 全 arch 输出 `.dcc.offload` ELF 节 + device codegen (PTX/AMDGCN) |
 | 跨源权重聚合 | `ProfileWeights` 聚合 4 源 PGO/AutoFDO/LBR/MemProf，输出统一 hot/cold func 集合；`FuncDecl.is_hot` 控制 `.text.hot` / `.text.unlikely` 段切换 |
 
