@@ -33,6 +33,8 @@ use crate::diagnostics::Span;
 pub struct SanitizerFlags {
     /// `-fsanitize=address` / `kernel-address`
     pub kasan: bool,
+    /// `-fsanitize=kernel-address` (内核模式, 使用不同的 shadow 基址)
+    pub kernel_mode: bool,
     /// `-fsanitize=hwaddress` (ARM MTE 标签)
     pub hwasan: bool,
     /// `-fsanitize=undefined`
@@ -70,10 +72,22 @@ impl SanitizerFlags {
 
     fn apply_sanitize_name(name: &str, f: &mut Self) {
         match name {
-            "address" | "kernel-address" => f.kasan = true,
-            "hwaddress" | "kernel-hwaddress" => f.hwasan = true,
+            "address" => f.kasan = true,
+            "kernel-address" => {
+                f.kasan = true;
+                f.kernel_mode = true;
+            }
+            "hwaddress" => f.hwasan = true,
+            "kernel-hwaddress" => {
+                f.hwasan = true;
+                f.kernel_mode = true;
+            }
             "undefined" => f.ubsan = true,
-            "thread" | "kernel-kcsan" => f.kcsan = true,
+            "thread" => f.kcsan = true,
+            "kernel-kcsan" => {
+                f.kcsan = true;
+                f.kernel_mode = true;
+            }
             "fuzzer" => f.fuzzer = true,
             "coverage" | "trace-pc" | "trace-pc-guard" => f.kcov = true,
             _ if name.contains("coverage") => f.kcov = true,
@@ -191,6 +205,7 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, ctx: &mut Instrum
         // 仅对函数实际启用的通道插 TU init
         let pending_func_init = SanitizerFlags {
             kasan: func_flags.kasan,
+            kernel_mode: func_flags.kernel_mode,
             hwasan: func_flags.hwasan,
             ubsan: func_flags.ubsan,
             kcsan: func_flags.kcsan,
@@ -1175,7 +1190,8 @@ fn wrap_with_mem_check_assign(
 
 /// 根据当前启用的 sanitizer 选择正确的内存检查函数。
 ///
-/// - KASAN/HWASAN (或与 KCSAN 同时):  `__asan_loadN` / `__asan_storeN`
+/// - KASAN kernel mode: 内联 shadow 地址计算 (shadow = (addr >> 3) + offset)
+/// - KASAN/HWASAN user mode:  `__asan_loadN` / `__asan_storeN` 运行时函数
 /// - KCSAN only:                       `__kcsan_check_access(addr, size, is_write)`
 ///
 /// KASAN 优先 (它提供更细粒度的诊断, KCSAN 仅是数据竞争检测)。
@@ -1187,6 +1203,14 @@ fn make_mem_check_call(
     flags: SanitizerFlags,
 ) -> Expr {
     let kasan_active = flags.kasan || flags.hwasan;
+    
+    // 内核模式 KASAN: 内联 shadow 地址计算
+    // x86_64: shadow = (addr >> 3) + 0xdffffc0000000000
+    // 这样内核不需要提供 __asan_loadN/__asan_storeN 运行时函数
+    if flags.kasan && flags.kernel_mode {
+        return make_kernel_kasan_check(addr, size, is_write, span);
+    }
+    
     if !kasan_active && flags.kcsan {
         // KCSAN-only 路径: emit __kcsan_check_access(addr, size, is_write)
         // LLVM 运行时签名: void __kcsan_check_access(const volatile void *ptr,
@@ -1269,6 +1293,104 @@ fn make_mem_check_call(
         args,
         span: span.clone(),
         ty: Type::Void,
+    }
+}
+
+/// 内核模式 KASAN 内联 shadow 检查
+/// 
+/// x86_64: shadow = (addr >> 3) + 0xdffffc0000000000
+/// 生成代码: 
+///   shadow = (addr >> 3) + KASAN_SHADOW_OFFSET
+///   shadow_byte = *shadow
+///   shadow_byte < 0 ? __asan_report_error(addr) : 0
+/// 
+/// 简化版: 只检查 shadow byte 是否为负 (poisoned), 不检查具体访问大小
+fn make_kernel_kasan_check(
+    addr: Expr,
+    _size: usize,
+    _is_write: bool,
+    span: &Span,
+) -> Expr {
+    // KASAN shadow offset for x86_64 kernel
+    const KASAN_SHADOW_OFFSET: i128 = 0xdffffc0000000000u64 as i128;
+    
+    // shadow_addr = (addr >> 3) + KASAN_SHADOW_OFFSET
+    let addr_shifted = Expr::Binop {
+        op: BinOp::Shr,
+        l: Box::new(addr.clone()),
+        r: Box::new(Expr::Int {
+            v: 3,
+            span: span.clone(),
+            ty: Type::ULong,
+        }),
+        span: span.clone(),
+        ty: Type::ULong,
+    };
+    
+    let shadow_addr = Expr::Binop {
+        op: BinOp::Add,
+        l: Box::new(addr_shifted),
+        r: Box::new(Expr::Int {
+            v: KASAN_SHADOW_OFFSET,
+            span: span.clone(),
+            ty: Type::ULong,
+        }),
+        span: span.clone(),
+        ty: Type::ULong,
+    };
+    
+    // shadow_byte = *(signed char*)shadow_addr
+    let shadow_byte = Expr::Deref {
+        e: Box::new(Expr::Cast {
+            e: Box::new(shadow_addr),
+            ty: Type::Ptr(Box::new(Type::Char)),
+            span: span.clone(),
+        }),
+        span: span.clone(),
+        ty: Type::Char,
+    };
+    
+    // shadow_byte < 0
+    let check = Expr::Binop {
+        op: BinOp::Lt,
+        l: Box::new(shadow_byte),
+        r: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Char,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
+    
+    let report_call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: "__asan_report_error".to_string(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(
+                Box::new(Type::Void),
+                vec![Type::Ptr(Box::new(Type::Void))],
+            ),
+        }),
+        args: vec![addr],
+        span: span.clone(),
+        ty: Type::Void,
+    };
+    
+    // Use ternary operator: check ? report_call : 0
+    Expr::Cond {
+        cond: Box::new(check),
+        then_: Box::new(report_call),
+        else_: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
     }
 }
 

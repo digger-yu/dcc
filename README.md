@@ -371,7 +371,6 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 |------|------|------|
 | 后端 | `*p = v` 的实际 store 仍是空操作；KASAN 桩本身正确 | unimplemented §3 |
 | 后端 | ARM MTE 标签插入未做 (软件 tag 模式) | HWASAN 已使用 `__hwasan_*` 函数名 (commit 50c6e4c) |
-| 后端 | 内核定制 shadow 范围未单独分发（`-fsanitize=kernel-address`） | 与用户态共用同一 shadow 基址 |
 | 后端 | 跨函数 inline 合并（KCOV）未做 | 每函数独立 guard 数组 |
 | 后端 | libFuzzer 协议 / 拦截器接入未做 | LLVMFuzzerTestOneInput / 8-bit counters / PC table / malloc 拦截器未实现 |
 | 后端 | 浮点变参（v0–7 / fa0–fa7）未保存，stub 返回 0.0 | unimplemented §11 |
@@ -386,6 +385,7 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 - ✅ 16 字节 struct 传值 ABI (验证通过)
 - ✅ `struct sigaction` / `stack_t` 布局 (commit c327d82)
 - ✅ `_Complex` 算术运算 (加/减/乘/除验证通过)
+- ✅ 内核 KASAN shadow 偏移 (内联计算 shadow = (addr >> 3) + 0xdffffc0000000000)
 - ✅ LTO 集成测试失败 (当前 287 passed, 0 failed)
 
 ## 12. 引用文档
