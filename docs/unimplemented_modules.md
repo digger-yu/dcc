@@ -1071,7 +1071,8 @@ M19 关键改动:
   - preproc 收集 `#pragma omp`；driver 收集 entries（E0310 /
     W0311-13 均带精确 file:line:col）；codegen 全 arch 输出
     `.dcc.offload` ELF 节
-  - 已知限制：无 device codegen 后端，runtime loader 未实装
+  - ✅ Device codegen: PTX (NVIDIA) / AMDGCN (AMD) 汇编生成 (`profile::device_codegen`)
+  - 已知限制：runtime loader 未实装，device 代码为 stub 实现
 
 详见 `docs/profiling.md`。
 

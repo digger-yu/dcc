@@ -21,6 +21,7 @@
 //   `ProfileUse` 占位 (在 `pgo.rs` / `autofdo.rs` 中)。
 
 pub mod autofdo;
+pub mod device_codegen;
 pub mod gcov;
 pub mod lbr;
 pub mod memprof;
