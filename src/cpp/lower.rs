@@ -1602,13 +1602,21 @@ impl Lower {
         self.out.push_str(&format!("struct {} {{\n", qname));
         // 继承: 嵌入基类子结构
         for b in &c.bases {
+            // 模板基类: 先实例化, 然后用实例化后的类名
+            let base_c_name = if let Some(ref targs) = b.template_args {
+                // 触发模板实例化
+                self.emit_inst_class(&b.name, targs);
+                instantiated_class_name(&b.name, targs)
+            } else {
+                b.name.clone()
+            };
             if !b.is_virtual {
                 self.out
-                    .push_str(&format!("    struct {} __base_{};\n", b.name, b.name));
+                    .push_str(&format!("    struct {} __base_{};\n", base_c_name, b.name));
             } else {
                 // 虚基类: 简化使用指针
                 self.out
-                    .push_str(&format!("    struct {}* __vb_{};\n", b.name, b.name));
+                    .push_str(&format!("    struct {}* __vb_{};\n", base_c_name, b.name));
             }
         }
         // 检查是否有 virtual 方法 -> 添加 vptr
@@ -2956,6 +2964,22 @@ mod tests {
         let s = l.finish();
         assert!(s.contains("struct Base"), "{}", s);
         assert!(s.contains("struct Derived"), "{}", s);
+        assert!(s.contains("__base_Base"), "{}", s);
+    }
+
+    #[test]
+    fn lower_template_base_class() {
+        // 模板基类: class Derived : public Base<int>
+        let src = b"template <typename T> class Base { public: T value; };
+                   class Derived : public Base<int> { public: int extra; };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 应该包含实例化的模板基类名
+        assert!(s.contains("__dcc_template_Base_int"), "{}", s);
+        // 应该包含 __base_Base (继承子结构)
         assert!(s.contains("__base_Base"), "{}", s);
     }
 

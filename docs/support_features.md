@@ -195,6 +195,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ `__cxa_guard_*` 线程安全 init guard | 静态局部变量状态机 0/1/2 |
 | dcc++ std::initializer_list | `{1, 2, 3}` 降级为复合字面量 |
 | dcc++ 模板完整单态化 | `TemplateRegistry` 注册 + 缓存 + 偏特化匹配；模板-id `T<U>` 解析 |
+| dcc++ 模板基类 | `class Derived : public Base<int>` 模板基类实例化 + 嵌入继承 |
 | dcc++ `auto` 类型推导 | int / `const char*` / class 真推导 |
 | dcc++ `decltype` / `decltype(auto)` | 解析 + 占位 |
 | dcc++ `operator new[]` / `delete[]` | Itanium ABI `_Znam` / `_ZdaPv` 符号 |
@@ -263,6 +264,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `-r` 自研路径 | `OutputKind::Relocatable` + `write_elf_relocatable` |
 | 共享库 lazy PLT | `plt_got.rs` 完整 .plt.sec/.plt.got 生成 |
 | 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节 |
+| vDSO 集成 | `--vdso=<path>` 解析 vDSO ELF，嵌入 `.text.vdso` + `.note.GNU-vdso` + 符号表 |
 | PIE/Shared 输出 | 多架构 `_start` 入口桩 |
 | AArch64/RISC-V/MIPS/ARM ELF 输出 | `elf_exec.rs` 多架构包装函数 |
 | AArch64 重定位（22 种） | `ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_*` / `MOVW_UABS_*` 等 |

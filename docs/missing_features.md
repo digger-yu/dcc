@@ -62,7 +62,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| 模板基类 | 不支持 `class Foo : Base<T> {}` |
 | 模板友元 | 不支持 `friend class Foo<T>` |
 | `export template` | 注释占位，未实装 |
 | concept 与 SFINAE 联动 | concept 解析 + 简化求值已实装，但不与 SFINAE 完整联动 |
@@ -78,7 +77,6 @@
 | 限制 | 说明 |
 |------|------|
 | Windows 链接路径验证 | Windows 平台链接路径未实际验证 |
-| vDSO 集成 | 基础设施已有（`VdsoInfo` + `parse_vdso`），嵌入输出 layout + `.note.GNU-vdso` 节未完成 |
 | DSO symbol caching | `DsoCache` 已实现，链接器侧未接入（需先补 `-lxxx → libc.so` 解析） |
 | 运行时 dynamic loader | 完全依赖 host `ld.so`（设计决策，非缺失） |
 

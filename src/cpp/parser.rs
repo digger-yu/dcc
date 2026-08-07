@@ -75,8 +75,10 @@ pub struct BaseSpec {
     pub access: Access,
     /// `virtual` 标记 (虚基类)
     pub is_virtual: bool,
-    /// 基类名 (M8: 不支持模板基类)
+    /// 基类名
     pub name: String,
+    /// 模板实参 (如 `Base<int>` 中的 `int`)
+    pub template_args: Option<Vec<crate::cpp::mangle::MangleType>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1853,10 +1855,66 @@ impl<'a> CppParser<'a> {
                 is_virtual = true;
             }
             let name = self.expect_ident()?;
+            // 解析模板实参: Base<T, U>
+            let template_args = if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Lt,
+                    ..
+                }))
+            ) && self.looks_like_template_args_after_lt()
+            {
+                self.bump(); // 吞 `<`
+                let mut targs: Vec<crate::cpp::mangle::MangleType> = Vec::new();
+                loop {
+                    let arg = self.parse_mangle_type_depth(1)?;
+                    targs.push(arg);
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Comma,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                        continue;
+                    }
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Gt,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                        break;
+                    }
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Shr,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                        self.deferred_gt += 1;
+                        break;
+                    }
+                    return Err(CppParseError::Unexpected(
+                        ">",
+                        format!("{:?}", self.peek),
+                        self.span(),
+                    ));
+                }
+                Some(targs)
+            } else {
+                None
+            };
             bases.push(BaseSpec {
                 access,
                 is_virtual,
                 name,
+                template_args,
             });
             if matches!(
                 &self.peek,

@@ -163,7 +163,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 
 ---
 
-## 6. Link（`-r`）：`E0301`–`E0304`
+## 6. Link（`-r`）：`E0301`–`E0305`
 
 可重定位链接 / LTO 合并路径（`src/link/mod.rs`）。
 
@@ -173,6 +173,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0302** | `symbol resolution failed: …` | 符号解析错误 | 未定义符号或重复定义 |
 | **E0303** | `layout failed: …` | 布局计算失败 | ELF 布局构建错误 |
 | **E0304** | `relocation failed: …` | 重定位失败 | 应用重定位时出错 |
+| **E0305** | `failed to parse vDSO '…': …` | vDSO 解析失败 | `--vdso=` 指定的 ELF 文件格式错误或不存在 |
 
 **Legacy 链接器**（`src/link/legacy.rs`）仍使用 `E0200`–`E0203`：
 
