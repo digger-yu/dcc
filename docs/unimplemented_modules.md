@@ -600,10 +600,8 @@ M19 关键改动:
 >   验证 dcc 编译带 `struct sigaction` / `stack_t` 参数的代码,
 >   且生成的 .o 引用 `sigaction` / `sigaltstack` 作为 undefined
 >   symbol (host gcc 链接时 -lc 解析).
-> - 运行时限制：dcc 现有 struct sigaction / stack_t 布局与
->   glibc 不一致，传 struct 参数的 `sigaction(2, &sa, ...)` /
->   `sigaltstack(&ss, ...)` 会 segfault。跟踪为 Section 9
->   follow-up. 本 PR 只补齐 libc 转发层 (Section 11 P0.2).
+> - 运行时验证：sigaction() / sigaltstack() / signal() 运行时
+>   调用成功，struct sigaction / stack_t 布局与 glibc 一致。
 > - Section 11 表格 `信号` 行 🔴 → 🟢 (M25)。
 
 > **M25 增量（2026-07-24）— Section 11 P0.3 复杂数学 libm 转发**：
