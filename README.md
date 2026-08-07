@@ -369,7 +369,7 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 
 | 范围 | 限制 | 跟踪 |
 |------|------|------|
-| 后端 | ARM MTE 标签插入未做 (软件 tag 模式) | HWASAN 已使用 `__hwasan_*` 函数名 (commit 50c6e4c) |
+| 后端 | ARM MTE 标签插入未完全集成 | AArch64 MTE 指令已实现 (IRG/ADDG/SUBG/STG/LDG/SETTCO)，待集成到 sanitizer 流程 |
 | 后端 | 跨函数 inline 合并（KCOV）未做 | 每函数独立 guard 数组 |
 | 后端 | libFuzzer 协议 / 拦截器接入未做 | LLVMFuzzerTestOneInput / 8-bit counters / PC table / malloc 拦截器未实现 |
 | 后端 | 浮点变参（v0–7 / fa0–fa7）未保存，stub 返回 0.0 | unimplemented §11 |

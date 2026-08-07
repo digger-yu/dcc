@@ -55,6 +55,10 @@ pub struct Aarch64Codegen {
     va_save_base_off: i32,
     /// M25: 下一个 va_arg 槽位索引 (0..N)
     va_offs: i32,
+    /// MTE: 是否启用内存标签扩展
+    mte_enabled: bool,
+    /// MTE: 当前函数的 tag 栈帧大小
+    tag_frame_size: i32,
     _target: Target,
 }
 
@@ -97,6 +101,8 @@ impl Aarch64Codegen {
             is_current_func_variadic: false,
             va_save_base_off: 0,
             va_offs: 0,
+            mte_enabled: false,
+            tag_frame_size: 0,
             _target: target,
         }
     }
@@ -2185,6 +2191,66 @@ impl Aarch64Codegen {
             src_off += chunk as i32;
             remaining -= chunk;
         }
+    }
+
+    /// MTE: Generate Random Tag (IRG)
+    /// Generates a random tag and inserts it into the top byte of Xd
+    /// Encoding: 0x9AC03000 | (Rd) | (Rn << 5)
+    pub fn emit_irg(&mut self, rd: u8, rn: u8) {
+        let insn = 0x9ac03000u32 | ((rd as u32) & 0x1f) | (((rn as u32) & 0x1f) << 5);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// MTE: Add Tag with Offset (ADDG)
+    /// Adds offset to tag address, creating new tagged pointer
+    /// Encoding: 0x9AC01000 | (Rd) | (Rn << 5) | (offset << 10)
+    pub fn emit_addg(&mut self, rd: u8, rn: u8, offset: u32) {
+        let insn = 0x9ac01000u32 
+            | ((rd as u32) & 0x1f) 
+            | (((rn as u32) & 0x1f) << 5)
+            | ((offset & 0xff) << 10);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// MTE: Subtract Tag with Offset (SUBG)
+    /// Subtracts offset from tag address
+    /// Encoding: 0x9AC01800 | (Rd) | (Rn << 5) | (offset << 10)
+    pub fn emit_subg(&mut self, rd: u8, rn: u8, offset: u32) {
+        let insn = 0x9ac01800u32 
+            | ((rd as u32) & 0x1f) 
+            | (((rn as u32) & 0x1f) << 5)
+            | ((offset & 0xff) << 10);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// MTE: Store Tag (STG)
+    /// Stores tag from Xt to memory at [Xn, #offset]
+    /// Encoding: 0xD9200000 | (Rt) | (Rn << 5) | (offset << 10)
+    pub fn emit_stg(&mut self, rt: u8, rn: u8, offset: u32) {
+        let insn = 0xd9200000u32 
+            | ((rt as u32) & 0x1f) 
+            | (((rn as u32) & 0x1f) << 5)
+            | ((offset & 0xff) << 10);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// MTE: Load Tag (LDG)
+    /// Loads tag from memory at [Xn, #offset] into top byte of Xt
+    /// Encoding: 0xD9600000 | (Rt) | (Rn << 5) | (offset << 10)
+    pub fn emit_ldg(&mut self, rt: u8, rn: u8, offset: u32) {
+        let insn = 0xd9600000u32 
+            | ((rt as u32) & 0x1f) 
+            | (((rn as u32) & 0x1f) << 5)
+            | ((offset & 0xff) << 10);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// MTE: Set PSTATE.TCO (Tag Check Override)
+    /// Disables/enables tag checking
+    /// Encoding: 0xD500401F | (value << 3)
+    pub fn emit_settco(&mut self, value: bool) {
+        let insn = 0xd500401fu32 | ((value as u32) << 3);
+        self.emit(&insn.to_le_bytes());
     }
 }
 
