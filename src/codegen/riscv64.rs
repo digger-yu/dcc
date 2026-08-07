@@ -57,12 +57,14 @@ pub struct Riscv64Codegen {
     current_return_ty: Option<ValueType>,
     aggregate_fields: HashMap<String, (Arc<Vec<Field>>, bool)>,
     rvv: RvvConfig,
-    /// M25: 当前函数是否为 variadic
+    /// 当前函数是否为 variadic
     is_current_func_variadic: bool,
-    /// M25: 寄存器保存区在 frame 内的起始偏移 (a0..a7 顺序存 8 槽)
+    /// 寄存器保存区在 frame 内的起始偏移 (a0..a7 + fa0..fa7 顺序存 16 槽)
     va_save_base_off: i32,
-    /// M25: 下一个 va_arg 槽位索引 (0..N)
-    va_offs: i32,
+    /// 下一个 GP va_arg 槽位索引 (0..7, 对应 a0..a7)
+    va_gp_offs: i32,
+    /// 下一个 float va_arg 槽位索引 (0..7, 对应 fa0..fa7)
+    va_flt_offs: i32,
     _target: Target,
 }
 
@@ -94,7 +96,8 @@ impl Riscv64Codegen {
             rvv: RvvConfig::default(),
             is_current_func_variadic: false,
             va_save_base_off: 0,
-            va_offs: 0,
+            va_gp_offs: 0,
+            va_flt_offs: 0,
             _target: target,
         }
     }
@@ -335,16 +338,15 @@ impl Riscv64Codegen {
         self.plan_locals(ast);
         // 记录当前函数返回类型 (sret/HFA 判定)
         self.current_return_ty = Some(func.return_type.clone());
-        // M25: 变参函数需要在 frame 顶部预留 a0..a7 保存区 (8 * 8 = 64 字节).
-        // 该区域在 frame_bytes 之后追加, 紧贴 sp. 避免与临时/局部变量重叠.
+        // 变参函数需要在 frame 顶部预留寄存器保存区:
+        // a0..a7 (64 字节) + fa0..fa7 (64 字节) = 128 字节.
         let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
         self.is_current_func_variadic = is_variadic;
-        self.va_offs = 0;
+        self.va_gp_offs = 0;
+        self.va_flt_offs = 0;
         if is_variadic {
-            // 保存区位于 frame 顶部 (紧接 locals 之后), off >= frame_bytes.
-            // RISC-V a0..a7 各占 8 字节, 总计 64 字节.
             self.va_save_base_off = self.stack_bytes;
-            self.stack_bytes += 64;
+            self.stack_bytes += 128;
         } else {
             self.va_save_base_off = 0;
         }
@@ -352,11 +354,13 @@ impl Riscv64Codegen {
         if self.frame_bytes > 0 {
             self.addi_sp(-self.frame_bytes);
         }
-        // M25: 进入变参函数立即把 a0..a7 写入保存区
+        // 进入变参函数立即把 a0..a7 和 fa0..fa7 写入保存区
         if is_variadic {
             for i in 0..8u8 {
-                // sd a(i+10), off(sp)
                 self.emit_sd(10 + i, 2, self.va_save_base_off + (i as i32) * 8);
+            }
+            for i in 0..8u8 {
+                self.emit_fsd(10 + i, 2, self.va_save_base_off + 64 + (i as i32) * 8);
             }
         }
         self.emitted_return = false;
@@ -679,7 +683,7 @@ impl Riscv64Codegen {
         self.emit_jal_to(&callee_final);
     }
 
-    // M25: 初始化 RISC-V va_list 变量.
+    // 初始化 RISC-V va_list 变量.
     // 简化: ap = 指向保存区的指针 (addi a0, sp, va_save_base_off).
     fn gen_va_start(&mut self, ap_name: &str) {
         let ap_off = match self.locals.get(ap_name) {
@@ -692,24 +696,34 @@ impl Riscv64Codegen {
         self.emit_sw(10, 2, ap_off);
     }
 
-    // M25: 读取下一个变参 (整数路径) 到 a0.
+    // 读取下一个变参 (整数路径) 到 a0.
+    // 策略: 先从 GP 保存区读, 超出 8 个则从 caller 栈读.
     fn gen_va_arg_int(&mut self, _ap_name: &str) {
-        if self.va_offs < 8 {
-            let off = self.va_save_base_off + self.va_offs * 8;
-            // ld a0, off(sp)
+        if self.va_gp_offs < 8 {
+            let off = self.va_save_base_off + self.va_gp_offs * 8;
             self.emit_ld(10, 2, off);
-            self.va_offs += 1;
+            self.va_gp_offs += 1;
         } else {
-            eprintln!("warning: __builtin_va_arg beyond 8th argument on riscv64, returning 0");
-            self.li_a0(0);
+            // 从 caller 栈读取: 栈参数位于 frame + 128 (GP+float 保存区之后)
+            let stack_off = self.frame_bytes + 128 + (self.va_gp_offs - 8) * 8;
+            self.emit_ld(10, 2, stack_off);
+            self.va_gp_offs += 1;
         }
     }
 
-    // M25: 读取下一个变参 (浮点路径) 到 fa0.
+    // 读取下一个变参 (浮点路径) 到 fa0.
+    // 策略: 先从 float 保存区读, 超出 8 个则从 caller 栈读.
     fn gen_va_arg_float(&mut self, _ap_name: &str) {
-        // 当前 riscv64 变参保存区只存 a0..a7 (GP), fa0..fa7 暂未保存.
-        eprintln!("warning: __builtin_va_arg(float) not yet supported on riscv64, emitting 0.0");
-        self.load_float_fa0(0.0);
+        if self.va_flt_offs < 8 {
+            let off = self.va_save_base_off + 64 + self.va_flt_offs * 8;
+            self.emit_fld(10, 2, off);
+            self.va_flt_offs += 1;
+        } else {
+            // 从 caller 栈读取
+            let stack_off = self.frame_bytes + 128 + (self.va_flt_offs - 8) * 8;
+            self.emit_fld(10, 2, stack_off);
+            self.va_flt_offs += 1;
+        }
     }
 
     fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {
@@ -2628,7 +2642,7 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         cg.is_current_func_variadic = true;
         cg.va_save_base_off = 0;
-        cg.va_offs = 0;
+        cg.va_gp_offs = 0;
         cg.locals.insert("ap".to_string(), 100);
         // 读 3 个变参
         cg.gen_va_arg_int("ap");
@@ -2643,7 +2657,7 @@ mod tests {
             .filter(|w| (w[0] & 0x7f) == 0x03 && (w[1] & 0x70) == 0x30)
             .count();
         assert_eq!(ld_count, 3, "expected 3 LD instructions, got {ld_count}");
-        // 验证 va_offs 推进
-        assert_eq!(cg.va_offs, 3, "va_offs should be 3 after 3 reads");
+        // 验证 va_gp_offs 推进
+        assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
     }
 }

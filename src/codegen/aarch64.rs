@@ -48,13 +48,15 @@ pub struct Aarch64Codegen {
     current_return_ty: Option<ValueType>,
     /// AST struct/union 字段表 (HFA 分类)
     aggregate_fields: HashMap<String, (Arc<Vec<Field>>, bool)>,
-    /// M25: 当前函数是否为 variadic
+    /// 当前函数是否为 variadic
     is_current_func_variadic: bool,
-    /// M25: 寄存器保存区在 frame 内的起始偏移
-    /// 0 表示未启用 (变参函数中存 x0..x7, 每 8 字节一个槽)
+    /// 寄存器保存区在 frame 内的起始偏移
+    /// 0 表示未启用 (变参函数中存 x0..x7 + v0..v7, 每 8 字节一个槽)
     va_save_base_off: i32,
-    /// M25: 下一个 va_arg 槽位索引 (0..N)
-    va_offs: i32,
+    /// 下一个 GP va_arg 槽位索引 (0..7, 对应 x0..x7)
+    va_gp_offs: i32,
+    /// 下一个 float va_arg 槽位索引 (0..7, 对应 v0..v7)
+    va_flt_offs: i32,
     /// MTE: 是否启用内存标签扩展
     mte_enabled: bool,
     /// MTE: 当前函数的 tag 栈帧大小
@@ -100,7 +102,8 @@ impl Aarch64Codegen {
             aggregate_fields: HashMap::new(),
             is_current_func_variadic: false,
             va_save_base_off: 0,
-            va_offs: 0,
+            va_gp_offs: 0,
+            va_flt_offs: 0,
             mte_enabled: false,
             tag_frame_size: 0,
             _target: target,
@@ -367,16 +370,15 @@ impl Aarch64Codegen {
     fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
         self.plan_locals(ast);
         self.current_return_ty = Some(func.return_type.clone());
-        // M25: 变参函数需要在 frame 顶部预留 x0..x7 保存区 (8 * 8 = 64 字节).
-        // 该区域在 frame_bytes 之后追加, 紧贴 sp. 避免与临时/局部变量重叠.
+        // 变参函数需要在 frame 顶部预留寄存器保存区:
+        // x0..x7 (64 字节) + v0..v7 (64 字节) = 128 字节.
         let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
         self.is_current_func_variadic = is_variadic;
-        self.va_offs = 0;
+        self.va_gp_offs = 0;
+        self.va_flt_offs = 0;
         if is_variadic {
-            // 保存区位于 frame 顶部 (紧接 locals 之后), off >= frame_bytes.
-            // AAPCS64 x0..x7 各占 8 字节, 总计 64 字节.
             self.va_save_base_off = self.stack_bytes;
-            self.stack_bytes += 64;
+            self.stack_bytes += 128;
         } else {
             self.va_save_base_off = 0;
         }
@@ -384,10 +386,13 @@ impl Aarch64Codegen {
         if self.frame_bytes > 0 {
             self.sub_sp_imm(self.frame_bytes as u32);
         }
-        // M25: 进入变参函数立即把 x0..x7 写入保存区
+        // 进入变参函数立即把 x0..x7 和 v0..v7 写入保存区
         if is_variadic {
             for i in 0..8u8 {
                 self.str_xt_sp(i, self.va_save_base_off + (i as i32) * 8);
+            }
+            for i in 0..8u8 {
+                self.str_dt_sp(i, self.va_save_base_off + 64 + (i as i32) * 8);
             }
         }
         self.emitted_return = false;
@@ -745,10 +750,9 @@ impl Aarch64Codegen {
         }
     }
 
-    // M25: 初始化 AAPCS64 va_list 变量.
+    // 初始化 AAPCS64 va_list 变量.
     // va_list 是指向寄存器保存区的 void* 指针 (本后端用单指针简化版).
     // ap 局部 (aarch64 上是一个指针) 被写为 va_save_base_off 的地址.
-    // 限制: 仅支持 GP 寄存槽 (x0..x7). 浮点 (v0..v7) 暂不支持.
     fn gen_va_start(&mut self, ap_name: &str) {
         let ap_off = match self.locals.get(ap_name) {
             Some(&o) => o,
@@ -767,31 +771,37 @@ impl Aarch64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
-    // M25: 读取下一个变参 (整数路径) 到 w0.
-    // 策略: 先从寄存器保存区 (va_save_base + va_offs*8) 读, va_offs < 8
-    //       超出则从 caller 栈 (frame 外) 读. 简化版只支持前 8 个.
+    // 读取下一个变参 (整数路径) 到 w0.
+    // 策略: 先从 GP 保存区 (va_save_base + va_gp_offs*8) 读,
+    //       超出 8 个则从 caller 栈读.
     fn gen_va_arg_int(&mut self, ap_name: &str) {
-        if self.va_offs < 8 {
-            // 从保存区读
-            let off = self.va_save_base_off + self.va_offs * 8;
-            // ldr w0, [sp, #off]
+        if self.va_gp_offs < 8 {
+            let off = self.va_save_base_off + self.va_gp_offs * 8;
             self.ldr_wt_sp(0, off);
-            self.va_offs += 1;
+            self.va_gp_offs += 1;
         } else {
-            // 简化: 超出 8 个槽返回 0, 发警告
-            eprintln!("warning: __builtin_va_arg beyond 8th argument on aarch64, returning 0");
-            self.mov_w0_imm(0);
+            // 从 caller 栈读取: 栈参数位于 frame + 128 (GP+float 保存区之后)
+            let stack_off = self.frame_bytes + 128 + (self.va_gp_offs - 8) * 8;
+            self.ldr_xt_sp(0, stack_off);
+            self.va_gp_offs += 1;
         }
-        // 更新 ap (写回新 va_offs, 简化版其实不需要因为顺序调用)
         let _ = ap_name;
     }
 
-    // M25: 读取下一个变参 (浮点路径) 到 s0.
+    // 读取下一个变参 (浮点路径) 到 s0.
+    // 策略: 先从 float 保存区 (va_save_base+64 + va_flt_offs*8) 读,
+    //       超出 8 个则从 caller 栈读.
     fn gen_va_arg_float(&mut self, _ap_name: &str) {
-        // 当前 aarch64 变参保存区只存 x0..x7 (GP), v0..v7 暂未保存.
-        // 若调用方传了 HFA/float, 直接返回 0.0 + 警告.
-        eprintln!("warning: __builtin_va_arg(float) not yet supported on aarch64, emitting 0.0");
-        self.load_float_s0(0.0);
+        if self.va_flt_offs < 8 {
+            let off = self.va_save_base_off + 64 + self.va_flt_offs * 8;
+            self.ldr_s0_sp(off);
+            self.va_flt_offs += 1;
+        } else {
+            // 从 caller 栈读取
+            let stack_off = self.frame_bytes + 128 + (self.va_flt_offs - 8) * 8;
+            self.ldr_s0_sp(stack_off);
+            self.va_flt_offs += 1;
+        }
     }
 
     fn gen_float_expr(&mut self, expr: &TypedExpr) -> bool {
@@ -1759,6 +1769,18 @@ impl Aarch64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// `str dt, [sp, #imm12]` —— 存储双精度浮点到 [sp, #off].
+    /// STR D: size=11, V=1, opc=00 => 0xFD000000 | imm12<<10 | Rn | Rt
+    fn str_dt_sp(&mut self, reg: u8, off: i32) {
+        debug_assert!(
+            off >= 0 && off % 8 == 0 && off <= 32760,
+            "str_dt_sp: off must be non-neg 8-byte aligned, got {off}"
+        );
+        let imm12 = ((off / 8) as u32) & 0xfff;
+        let insn = 0xfd000000u32 | imm12 << 10 | 31u32 << 5 | (reg as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
     /// `ldr s0, [sp, #imm12]` —— 从栈加载单精度浮点到 s0.
     /// imm12 编码: insn[21:10] = imm12/4, 实际偏移范围 ±4 KB / 4 = 1024 个 4 字节槽.
     fn ldr_s0_sp(&mut self, off: i32) {
@@ -2699,7 +2721,7 @@ mod tests {
         );
         cg.is_current_func_variadic = true;
         cg.va_save_base_off = 0;
-        cg.va_offs = 0;
+        cg.va_gp_offs = 0;
         // 注册一个假 va_list 局部
         cg.locals.insert("ap".to_string(), 100);
         // 读 3 个变参
@@ -2733,7 +2755,7 @@ mod tests {
             vec![0, 8, 16],
             "expected offsets [0, 8, 16], got {offs:?}"
         );
-        // 验证 va_offs 推进
-        assert_eq!(cg.va_offs, 3, "va_offs should be 3 after 3 reads");
+        // 验证 va_gp_offs 推进
+        assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
     }
 }
