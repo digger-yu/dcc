@@ -611,9 +611,8 @@ M19 关键改动:
 >   `complex_libm_fixture_runs` 用 dcc -c + host gcc -lm 链接
 >   运行, 验证三个函数能成功调用并返回 0 退出码.
 > - 运行时限制: dcc 已实现 `_Complex` 字面量、`__real__` /
->   `__imag__` 关键字及 16 字节 struct 传值 ABI (含 _Complex
->   返回路径修复)。但 _Complex 算术运算 (如 `imag * 1.0i`)
->   仍有 bug, 本 fixture 用简化签名避开严格数学校验.
+>   `__imag__` 关键字、16 字节 struct 传值 ABI (含 _Complex
+>   返回路径修复) 及 _Complex 算术运算 (加/减/乘/除)。
 > - Section 11 表格 `复杂数学函数` 行 🟠 → 🟢 (M25).
 
 > **M25 增量（2026-07-24）— Section 4.2 P1.1 16 字节/聚合 KASAN**：

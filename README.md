@@ -369,7 +369,6 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 
 | 范围 | 限制 | 跟踪 |
 |------|------|------|
-| 后端 | `_Complex` 算术运算 (如 `imag * 1.0i`) 结果错误 | 字面量/`__real__`/`__imag__` 已实现；算术运算待修复 |
 | 后端 | `*p = v` 的实际 store 仍是空操作；KASAN 桩本身正确 | unimplemented §3 |
 | 后端 | ARM MTE 标签插入未做 (软件 tag 模式) | HWASAN 已使用 `__hwasan_*` 函数名 (commit 50c6e4c) |
 | 后端 | 内核定制 shadow 范围未单独分发（`-fsanitize=kernel-address`） | 与用户态共用同一 shadow 基址 |
@@ -386,6 +385,7 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 - ✅ 多数组栈变量分配重叠 bug (commit 78e4eae)
 - ✅ 16 字节 struct 传值 ABI (验证通过)
 - ✅ `struct sigaction` / `stack_t` 布局 (commit c327d82)
+- ✅ `_Complex` 算术运算 (加/减/乘/除验证通过)
 - ✅ LTO 集成测试失败 (当前 287 passed, 0 failed)
 
 ## 12. 引用文档
