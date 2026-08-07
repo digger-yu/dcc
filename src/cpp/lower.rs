@@ -1768,7 +1768,7 @@ impl Lower {
             if let Some(base_bases) = self.class_bases.get(&b.name) {
                 // 递归检查基类的基类
                 base_bases.iter().any(|bb| {
-                    self.class_bases.get(&bb.name).map_or(false, |bbs| {
+                    self.class_bases.get(&bb.name).is_some_and(|bbs| {
                         bbs.iter().any(|bbb| bbb.is_virtual)
                     })
                 })

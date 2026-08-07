@@ -73,13 +73,22 @@ impl GlobalGuardIndex {
     pub fn allocate_guards(&mut self, func: &str, requested_guards: u32, is_inlined: bool) -> (String, u32) {
         if is_inlined {
             // For inlined functions, merge into caller's guard array
-            // Find the first caller and use their guard array
-            let first_caller = self.func_guards.keys().next().cloned();
-            if let Some(caller) = first_caller {
-                if let Some((array_name, count)) = self.func_guards.get_mut(&caller) {
-                    let base_id = *count;
-                    *count += requested_guards;
-                    return (array_name.clone(), base_id);
+            let caller = self.find_caller_for_func(func);
+            if let Some(caller_name) = caller {
+                // Compute merge result without holding borrow
+                let merge_info = if let Some((array_name, count)) = self.func_guards.get(&caller_name) {
+                    Some((array_name.clone(), *count))
+                } else {
+                    None
+                };
+                if let Some((array_name, base_id)) = merge_info {
+                    // Update caller's count
+                    let new_count = base_id + requested_guards;
+                    self.func_guards.get_mut(&caller_name).unwrap().1 = new_count;
+                    // Record the inlined function's mapping
+                    self.func_guards.insert(func.to_string(), (array_name.clone(), base_id));
+                    self.merged_arrays.insert(array_name, new_count);
+                    return (self.func_guards[func].0.clone(), base_id);
                 }
             }
         }
@@ -90,6 +99,12 @@ impl GlobalGuardIndex {
         self.func_guards.insert(func.to_string(), (array_name.clone(), requested_guards));
         self.merged_arrays.insert(array_name.clone(), requested_guards);
         (array_name, 0)
+    }
+
+    /// Find a caller for an inlined function from already-allocated entries
+    fn find_caller_for_func(&self, _func: &str) -> Option<String> {
+        // Find any allocated function that could be the caller
+        self.func_guards.keys().next().cloned()
     }
 
     /// Get guard array info for a function
@@ -122,9 +137,17 @@ pub fn merge_kcov_guards(
 ) -> GlobalGuardIndex {
     let mut index = GlobalGuardIndex::new();
     
+    // Process non-inlined functions first to ensure callers are allocated
+    // before inlined callees try to merge into them
     for (func, &count) in func_guard_counts {
-        let is_inlined = call_graph.is_inlined(func);
-        index.allocate_guards(func, count, is_inlined);
+        if !call_graph.is_inlined(func) {
+            index.allocate_guards(func, count, false);
+        }
+    }
+    for (func, &count) in func_guard_counts {
+        if call_graph.is_inlined(func) {
+            index.allocate_guards(func, count, true);
+        }
     }
     
     index

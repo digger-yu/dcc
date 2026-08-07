@@ -156,25 +156,25 @@ impl FuzzerProtocol {
         
         // Entry wrapper
         code.push_str(&self.generate_entry_wrapper(user_func));
-        code.push_str("\n");
+        code.push('\n');
         
         // PC table
         code.push_str(&self.generate_pc_table());
-        code.push_str("\n");
+        code.push('\n');
         
         // Counters initialization
         code.push_str(&self.generate_counters_init());
-        code.push_str("\n");
+        code.push('\n');
         
         // Interceptors
         if self.malloc_interceptor {
             code.push_str(&self.generate_malloc_interceptor());
-            code.push_str("\n");
+            code.push('\n');
         }
         
         if self.free_interceptor {
             code.push_str(&self.generate_free_interceptor());
-            code.push_str("\n");
+            code.push('\n');
         }
         
         code

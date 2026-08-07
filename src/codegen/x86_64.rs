@@ -4694,7 +4694,7 @@ impl Codegen {
                         self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
                         // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
                         self.emit(&[pfx, 0x0F, 0x10, 0x81]);
-                        self.emit(&(imag_off as i32).to_le_bytes());
+                        self.emit(&imag_off.to_le_bytes());
                         self.flip_sign_xmm(0, &inner);
                         self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz);
                     } else {
@@ -7315,17 +7315,17 @@ impl Codegen {
         match ty {
             Type::Bool => (0, 1),
             Type::Char | Type::SChar => (0, (3 << 1) | 1),
-            Type::UChar => (0, (3 << 1) | 0),
+            Type::UChar => (0, 3 << 1),
             Type::Short => (0, (4 << 1) | 1),
-            Type::UShort => (0, (4 << 1) | 0),
+            Type::UShort => (0, 4 << 1),
             Type::Int => (0, (5 << 1) | 1),
-            Type::UInt => (0, (5 << 1) | 0),
+            Type::UInt => (0, 5 << 1),
             Type::Long => (0, (6 << 1) | 1),
-            Type::ULong => (0, (6 << 1) | 0),
+            Type::ULong => (0, 6 << 1),
             Type::LongLong => (0, (6 << 1) | 1),
-            Type::ULongLong => (0, (6 << 1) | 0),
+            Type::ULongLong => (0, 6 << 1),
             Type::Int128 => (0, (7 << 1) | 1),
-            Type::UInt128 => (0, (7 << 1) | 0),
+            Type::UInt128 => (0, 7 << 1),
             Type::Float => (1, 32),
             Type::Double => (1, 64),
             Type::LongDouble => (1, 80),
