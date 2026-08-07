@@ -568,6 +568,7 @@ fn dce_block_in_stmt(s: &mut Stmt) {
 }
 
 /// -O1+: `always_inline` 函数内联；-O3 额外内联小型 static 零参函数。
+/// `flatten` 属性: 函数体内所有调用均视为 always_inline。
 fn function_inline(module: &mut Module, level: u8) {
     let prog = module.source_mut();
     let funcs: HashMap<String, FuncDecl> = prog
@@ -583,8 +584,9 @@ fn function_inline(module: &mut Module, level: u8) {
     }
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
+            let caller_flatten = f.is_flatten;
             if let Some(body) = &mut f.body {
-                inline_calls_in_block(body, &funcs, level);
+                inline_calls_in_block(body, &funcs, level, caller_flatten);
             }
         }
     }
@@ -594,13 +596,18 @@ fn count_block_items(b: &Block) -> usize {
     b.items.len()
 }
 
-fn inline_calls_in_block(body: &mut Block, funcs: &HashMap<String, FuncDecl>, level: u8) {
+fn inline_calls_in_block(
+    body: &mut Block,
+    funcs: &HashMap<String, FuncDecl>,
+    level: u8,
+    caller_flatten: bool,
+) {
     for item in &mut body.items {
         match item {
-            BlockItem::Stmt(s) => inline_calls_in_stmt(s, funcs, level),
+            BlockItem::Stmt(s) => inline_calls_in_stmt(s, funcs, level, caller_flatten),
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &mut f.body {
-                    inline_calls_in_block(b, funcs, level);
+                    inline_calls_in_block(b, funcs, level, caller_flatten);
                 }
             }
             _ => {}
@@ -608,24 +615,29 @@ fn inline_calls_in_block(body: &mut Block, funcs: &HashMap<String, FuncDecl>, le
     }
 }
 
-fn inline_calls_in_stmt(s: &mut Stmt, funcs: &HashMap<String, FuncDecl>, level: u8) {
+fn inline_calls_in_stmt(
+    s: &mut Stmt,
+    funcs: &HashMap<String, FuncDecl>,
+    level: u8,
+    caller_flatten: bool,
+) {
     match s {
         Stmt::Return { val: Some(e), .. } => {
-            *e = inline_expr(e.clone(), funcs, level);
+            *e = inline_expr(e.clone(), funcs, level, caller_flatten);
         }
-        Stmt::Expr { e, .. } => *e = inline_expr(e.clone(), funcs, level),
+        Stmt::Expr { e, .. } => *e = inline_expr(e.clone(), funcs, level, caller_flatten),
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            *cond = inline_expr(cond.clone(), funcs, level);
-            inline_calls_in_stmt(then_, funcs, level);
+            *cond = inline_expr(cond.clone(), funcs, level, caller_flatten);
+            inline_calls_in_stmt(then_, funcs, level, caller_flatten);
             if let Some(e) = else_ {
-                inline_calls_in_stmt(e, funcs, level);
+                inline_calls_in_stmt(e, funcs, level, caller_flatten);
             }
         }
-        Stmt::Block { b, .. } => inline_calls_in_block(b, funcs, level),
+        Stmt::Block { b, .. } => inline_calls_in_block(b, funcs, level, caller_flatten),
         Stmt::While { body, .. } | Stmt::Do { body, .. } => {
-            inline_calls_in_stmt(body, funcs, level)
+            inline_calls_in_stmt(body, funcs, level, caller_flatten)
         }
         Stmt::For {
             init,
@@ -635,15 +647,15 @@ fn inline_calls_in_stmt(s: &mut Stmt, funcs: &HashMap<String, FuncDecl>, level: 
             ..
         } => {
             if let Some(c) = cond {
-                *c = inline_expr(c.clone(), funcs, level);
+                *c = inline_expr(c.clone(), funcs, level, caller_flatten);
             }
             if let Some(st) = step {
-                *st = inline_expr(st.clone(), funcs, level);
+                *st = inline_expr(st.clone(), funcs, level, caller_flatten);
             }
             if let Some(i) = init {
-                inline_calls_in_stmt(i, funcs, level);
+                inline_calls_in_stmt(i, funcs, level, caller_flatten);
             }
-            inline_calls_in_stmt(body, funcs, level);
+            inline_calls_in_stmt(body, funcs, level, caller_flatten);
         }
         _ => {}
     }
@@ -748,6 +760,7 @@ fn try_inline_call(
     args: &[Expr],
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
+    caller_flatten: bool,
 ) -> Option<Expr> {
     let f = funcs.get(name)?;
     if f.is_noinline {
@@ -758,7 +771,8 @@ fn try_inline_call(
         return None;
     }
     let item_count = count_block_items(body);
-    let allowed = if f.is_always_inline {
+    // attribute((flatten)): 调用者标记 flatten 时, 所有被调用函数均视为 always_inline
+    let allowed = if f.is_always_inline || caller_flatten {
         item_count <= 8
     } else if f.is_static && f.params.is_empty() && level >= 3 {
         item_count <= 4
@@ -784,7 +798,12 @@ fn try_inline_call(
     Some(substitute_params(ret.clone(), &bindings))
 }
 
-fn inline_expr(e: Expr, funcs: &HashMap<String, FuncDecl>, level: u8) -> Expr {
+fn inline_expr(
+    e: Expr,
+    funcs: &HashMap<String, FuncDecl>,
+    level: u8,
+    caller_flatten: bool,
+) -> Expr {
     let e = match e {
         Expr::Call {
             callee,
@@ -793,15 +812,17 @@ fn inline_expr(e: Expr, funcs: &HashMap<String, FuncDecl>, level: u8) -> Expr {
             ty,
         } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
-                if let Some(inlined) = try_inline_call(&name.name, &args, funcs, level) {
-                    return inline_expr(inlined, funcs, level);
+                if let Some(inlined) =
+                    try_inline_call(&name.name, &args, funcs, level, caller_flatten)
+                {
+                    return inline_expr(inlined, funcs, level, caller_flatten);
                 }
             }
             Expr::Call {
-                callee: Box::new(inline_expr(*callee, funcs, level)),
+                callee: Box::new(inline_expr(*callee, funcs, level, caller_flatten)),
                 args: args
                     .into_iter()
-                    .map(|a| inline_expr(a, funcs, level))
+                    .map(|a| inline_expr(a, funcs, level, caller_flatten))
                     .collect(),
                 span,
                 ty,
@@ -809,14 +830,14 @@ fn inline_expr(e: Expr, funcs: &HashMap<String, FuncDecl>, level: u8) -> Expr {
         }
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op,
-            l: Box::new(inline_expr(*l, funcs, level)),
-            r: Box::new(inline_expr(*r, funcs, level)),
+            l: Box::new(inline_expr(*l, funcs, level, caller_flatten)),
+            r: Box::new(inline_expr(*r, funcs, level, caller_flatten)),
             span,
             ty,
         },
         Expr::Unary { op, e, span, ty } => Expr::Unary {
             op,
-            e: Box::new(inline_expr(*e, funcs, level)),
+            e: Box::new(inline_expr(*e, funcs, level, caller_flatten)),
             span,
             ty,
         },
@@ -827,9 +848,9 @@ fn inline_expr(e: Expr, funcs: &HashMap<String, FuncDecl>, level: u8) -> Expr {
             span,
             ty,
         } => Expr::Cond {
-            cond: Box::new(inline_expr(*cond, funcs, level)),
-            then_: Box::new(inline_expr(*then_, funcs, level)),
-            else_: Box::new(inline_expr(*else_, funcs, level)),
+            cond: Box::new(inline_expr(*cond, funcs, level, caller_flatten)),
+            then_: Box::new(inline_expr(*then_, funcs, level, caller_flatten)),
+            else_: Box::new(inline_expr(*else_, funcs, level, caller_flatten)),
             span,
             ty,
         },
