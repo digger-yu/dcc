@@ -612,12 +612,10 @@ M19 关键改动:
 > - 新增 `tests/fixtures/c/complex_libm.c` + 集成测试
 >   `complex_libm_fixture_runs` 用 dcc -c + host gcc -lm 链接
 >   运行, 验证三个函数能成功调用并返回 0 退出码.
-> - 运行时限制: dcc 现有 `_Complex` 字面量 (`4.0i`) 与
->   `__real__` / `__imag__` 关键字尚未实现, 且 16 字节 struct
->   传值 ABI 有问题 (Section 9 follow-up). 本 fixture 故意
->   用显式声明 `double cproj(double)` 的简化签名, 让 host gcc
->   链接时通过符号解析让 dcc .o 仍能链接成功; 严格 `double
->   complex` 传值的数学校验留 Section 9 follow-up.
+> - 运行时限制: dcc 已实现 `_Complex` 字面量、`__real__` /
+>   `__imag__` 关键字及 16 字节 struct 传值 ABI (含 _Complex
+>   返回路径修复)。但 _Complex 算术运算 (如 `imag * 1.0i`)
+>   仍有 bug, 本 fixture 用简化签名避开严格数学校验.
 > - Section 11 表格 `复杂数学函数` 行 🟠 → 🟢 (M25).
 
 > **M25 增量（2026-07-24）— Section 4.2 P1.1 16 字节/聚合 KASAN**：

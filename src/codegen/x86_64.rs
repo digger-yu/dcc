@@ -3624,6 +3624,14 @@ impl Codegen {
                             }
                         } else {
                             self.gen_expr(e, 0);
+                            // _Complex: gen_expr 结果在 result_off (内存), 需加载到 rax/rdx
+                            if matches!(ret_ty, Type::Complex(_)) {
+                                let result_off = -self.frame_size + 8;
+                                self.load_stack(0, result_off); // rax = 实部
+                                if ret_sz > 8 {
+                                    self.load_stack(2, result_off + 8); // rdx = 虚部
+                                }
+                            }
                         }
                     } else {
                         self.gen_expr(e, 0);
