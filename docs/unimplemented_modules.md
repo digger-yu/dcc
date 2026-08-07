@@ -251,7 +251,7 @@ AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节
 | UBSAN (`-fsanitize=undefined`) | TU init + `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 前 `__ubsan_handle_signed_integer_overflow(0, lhs)`；VLA bound 前 `__ubsan_handle_vla_bound_not_positive(bound)`；`Deref` 前 `__ubsan_handle_null_pointer_dereference`；float→int 前 `__ubsan_handle_float_cast_overflow` | — |
 | KCSAN (`-fsanitize=thread` / `kernel-kcsan`) | TU init + 每函数 `__kcsan_func_entry`；内存访问 watchpoint 与 KASAN 共享 load/store 通道 | 专用 `__kcsan_check_access` 路径未独立发出 |
 | KCOV (`-fsanitize-coverage`) | 每函数 `__sanitizer_cov_trace_pc` + `__dcc_cov_guards_N[16]` 计数器 + `__sanitizer_cov_trace_pc_guard` 在 if / while / do / for / case / label / goto 等边 | ✅ 跨函数 inline 合并已实现 (`profile::kcov_merge`): 调用图分析、全局 guard 索引、`__sanitizer_cov_weak_hook_*` 生成 |
-| Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + 比较 `__sanitizer_cov_trace_cmp1/2/4/8` + switch dispatch `__sanitizer_cov_trace_switch` | libFuzzer 协议未实现。需实现: `LLVMFuzzerTestOneInput` 入口包装、8-bit counters 初始化、PC table (`__start___pc_table`/`__stop___pc_table`) 生成、malloc/free 拦截器 (`__sanitizer_weak_hook_malloc`/`__sanitizer_weak_hook_free`) |
+| Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + 比较 `__sanitizer_cov_trace_cmp1/2/4/8` + switch dispatch `__sanitizer_cov_trace_switch` | ✅ libFuzzer 协议已实现 (`profile::fuzzer_protocol`): `LLVMFuzzerTestOneInput` 入口包装、8-bit counters 初始化、PC table (`__start___pc_table`/`__stop___pc_table`) 生成、malloc/free 拦截器 (`__sanitizer_weak_hook_malloc`/`__sanitizer_weak_hook_free`) |
 
 实现位置：`src/sanitizer.rs::instrument_program()`，在 driver parse 之后、
 IR lower 之前由 AST walker 注入。CLI 由 `SanitizerFlags::from_args` 解析。

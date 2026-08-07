@@ -22,6 +22,7 @@
 
 pub mod autofdo;
 pub mod device_codegen;
+pub mod fuzzer_protocol;
 pub mod gcov;
 pub mod kcov_merge;
 pub mod lbr;
