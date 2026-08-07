@@ -616,6 +616,7 @@ impl Lower {
                 params,
                 decl,
                 requires,
+                ..
             } => {
                 self.templates.register(params, requires, decl);
             }
@@ -1292,6 +1293,7 @@ impl Lower {
                 params,
                 decl,
                 requires,
+                is_export,
             } => {
                 // M26: 模板已在 collect_classes 注册, 按需实例化.
                 // 未被使用的模板不产生 C 输出 (避免 T 未定义占位类型).
@@ -1305,6 +1307,28 @@ impl Lower {
                     ));
                     let _ = c;
                 } else {
+                    // M26: export template 时, 将模板记为 BMF 导出
+                    if *is_export && self.module_collect {
+                        // 提取模板内层声明的名字 (类名或函数名)
+                        let tpl_name = match decl.as_ref() {
+                            CppDecl::Class(c) => c.name.clone(),
+                            CppDecl::FreeFn { name, .. } => name.clone(),
+                            _ => String::new(),
+                        };
+                        if !tpl_name.is_empty() {
+                            self.module_exports.push(BmfExport {
+                                kind: BmfKind::Template,
+                                name: tpl_name,
+                                signature: params
+                                    .params
+                                    .iter()
+                                    .map(|p| p.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(","),
+                                layout: None,
+                            });
+                        }
+                    }
                     let _ = (decl, requires);
                     self.out.push_str(&format!(
                         "/* template <{}> (registered, instantiated on demand) */\n",
@@ -3521,5 +3545,22 @@ mod tests {
         assert!(bmf.contains("I other"), "{}", bmf);
         assert!(bmf.contains("E F _ZN6answerEv int(int)"), "{}", bmf);
         assert!(bmf.contains("E C Widget id:int"), "{}", bmf);
+    }
+
+    #[test]
+    fn lower_export_template() {
+        // M26: export template <typename T> class Box { ... };
+        let src = b"export module mymod;
+                   export template <typename T>
+                   class Box { public: T value; };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let bmf = l
+            .module_bmf()
+            .expect("module_bmf() should be Some after export module");
+        // 应该包含模板导出记录
+        assert!(bmf.contains("E T Box T"), "{}", bmf);
     }
 }

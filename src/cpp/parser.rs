@@ -237,10 +237,12 @@ pub enum CppDecl {
     },
     /// 模板声明 (M8: 简化, 仅作语法占位 + 立即展开)
     /// requires: 模板头后的 `requires 约束` 文本 (M26: 实例化时求值过滤)
+    /// is_export: `export template` 时为 true (M26: BMF 导出标记)
     Template {
         params: TemplateArgs,
         decl: Box<CppDecl>,
         requires: Option<String>,
+        is_export: bool,
     },
     /// C++20 partial specialization (M10+):
     ///   `template <typename T> class Foo<T*> { ... };`
@@ -742,7 +744,7 @@ impl<'a> CppParser<'a> {
         }
         // 模板声明 (M8: 简化为占位)
         if self.at(CppKw::Template) {
-            return self.parse_template_decl();
+            return self.parse_template_decl(false);
         }
         // 命名空间 (M8)
         if self.at(CppKw::Namespace) {
@@ -985,7 +987,8 @@ impl<'a> CppParser<'a> {
     }
 
     /// 解析 template <typename T> ...
-    fn parse_template_decl(&mut self) -> Result<CppDecl, CppParseError> {
+    /// is_export: `export template` 时为 true
+    fn parse_template_decl(&mut self, is_export: bool) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Template)?;
         if !matches!(
             &self.peek,
@@ -1231,6 +1234,7 @@ impl<'a> CppParser<'a> {
             params: TemplateArgs { params },
             decl: Box::new(decl),
             requires,
+            is_export,
         })
     }
 
@@ -1441,9 +1445,13 @@ impl<'a> CppParser<'a> {
         Ok(CppDecl::Import { path })
     }
 
-    /// 解析 `export { ... }` / `export module foo;` (M9 占位)
+    /// 解析 `export { ... }` / `export module foo;` / `export template <...>` (M9 占位)
     fn parse_export_decl(&mut self) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Export)?;
+        // M26: `export template <...>` - export 修饰模板声明, 标记 is_export=true
+        if self.at(CppKw::Template) {
+            return self.parse_template_decl(true);
+        }
         // M18.0: `export int f() {}` - export 修饰函数声明, 透传.
         // 形式: export 后面不是 `module` 或 `{`, 让上层重新解析.
         if !self.at(CppKw::Module)
@@ -1954,7 +1962,7 @@ impl<'a> CppParser<'a> {
         }
         // M18.0: 类内允许 template 成员 (member template), 透传到 parse_template_decl
         if self.at(CppKw::Template) {
-            return self.parse_template_decl();
+            return self.parse_template_decl(false);
         }
         if matches!(
             &self.peek,

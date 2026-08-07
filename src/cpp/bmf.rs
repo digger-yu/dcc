@@ -31,6 +31,8 @@ pub enum BmfKind {
     Function,
     Class,
     Variable,
+    /// M26: export template 模板导出
+    Template,
 }
 
 /// 单条 export 记录
@@ -76,6 +78,10 @@ impl BmfModule {
                 BmfKind::Variable => {
                     out.push_str(&format!("E V {} {}\n", e.name, e.signature));
                 }
+                BmfKind::Template => {
+                    // M26: 模板导出格式 E T <name> <params>
+                    out.push_str(&format!("E T {} {}\n", e.name, e.signature));
+                }
             }
         }
         out
@@ -116,6 +122,12 @@ impl BmfModule {
                         }),
                         "V" => m.exports.push(BmfExport {
                             kind: BmfKind::Variable,
+                            name: name.to_string(),
+                            signature: rest.to_string(),
+                            layout: None,
+                        }),
+                        "T" => m.exports.push(BmfExport {
+                            kind: BmfKind::Template,
                             name: name.to_string(),
                             signature: rest.to_string(),
                             layout: None,

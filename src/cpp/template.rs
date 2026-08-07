@@ -734,10 +734,12 @@ pub fn substitute_decl(
             params: tp,
             decl: inner,
             requires,
+            is_export,
         } => CppDecl::Template {
             params: tp.clone(),
             decl: Box::new(substitute_decl(inner, params, args, class_rename)),
             requires: requires.clone(),
+            is_export: *is_export,
         },
         other => other.clone(),
     }
