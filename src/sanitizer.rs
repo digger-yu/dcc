@@ -1221,9 +1221,17 @@ fn make_mem_check_call(
         };
     }
     let fn_name = if is_write {
-        kasan_store_fn(size)
+        if flags.hwasan {
+            hwasan_store_fn(size)
+        } else {
+            kasan_store_fn(size)
+        }
     } else {
-        kasan_load_fn(size)
+        if flags.hwasan {
+            hwasan_load_fn(size)
+        } else {
+            kasan_load_fn(size)
+        }
     };
     // P1.1: 16 字节以下用单参 `__asan_loadN(addr)`,16 字节以上或
     // 聚合类型用双参 `__asan_loadN(addr, size_t)`. LLVM 运行时
@@ -1293,6 +1301,17 @@ fn kasan_load_fn(sz: usize) -> String {
     }
 }
 
+fn hwasan_load_fn(sz: usize) -> String {
+    match sz {
+        1 => "__hwasan_load1".to_string(),
+        2 => "__hwasan_load2".to_string(),
+        4 => "__hwasan_load4".to_string(),
+        8 => "__hwasan_load8".to_string(),
+        16 => "__hwasan_load16".to_string(),
+        n => format!("__hwasan_load{}", n),
+    }
+}
+
 fn kasan_store_fn(sz: usize) -> String {
     match sz {
         1 => "__asan_store1".to_string(),
@@ -1302,6 +1321,17 @@ fn kasan_store_fn(sz: usize) -> String {
         16 => "__asan_store16".to_string(),
         // P1.1: 16 字节以上或聚合类型的 KASAN store 检查.
         n => format!("__asan_store{}", n),
+    }
+}
+
+fn hwasan_store_fn(sz: usize) -> String {
+    match sz {
+        1 => "__hwasan_store1".to_string(),
+        2 => "__hwasan_store2".to_string(),
+        4 => "__hwasan_store4".to_string(),
+        8 => "__hwasan_store8".to_string(),
+        16 => "__hwasan_store16".to_string(),
+        n => format!("__hwasan_store{}", n),
     }
 }
 
