@@ -45,7 +45,7 @@
 | LBR | `-flbr-profile=`；解析 `perf script -F brstack` 文本 (含 mispredict/cycles 解析) + inbound/outbound 边查询 + `mispred_rate` 错误预测率 + `merge` 合并 + `summary` 统计；通过 `ProfileWeights` 聚合 |
 | MemProf | `-fmemory-profile` / `-fmemory-profile-use=`；text parser + `AllocClass` 分类 (Hot/Normal/Cold/Ephemeral) + lifetime 分析 + `dealloc` 解析 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；冷分配栈对应函数下沉到 `.text.unlikely` 段 |
 | Perf 事件 / TopdownL1 | `-ftopdownmetrics`；`TopdownL1` 四槽枚举 + `TopdownL2` 八子分类展开 + `perf stat` 文本解析 + `topdown_percentages()` + `primary_bottleneck()` 瓶颈诊断 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；`PerfDataFile` 读 Linux `perf.data` v2 二进制 |
-| Offloading | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=`；`OffloadConfig` 全形式解析；`OffloadSection` 二进制序列化；codegen 全 arch 输出 `.dcc.offload` ELF 节 + device codegen (PTX/AMDGCN) |
+| Offloading | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=`；`OffloadConfig` 全形式解析；`OffloadSection` 二进制序列化；codegen 全 arch 输出 `.dcc.offload` ELF 节 + device codegen (PTX/AMDGCN)；`OffloadRuntimeLoader` 读 `.dcc.offload` 节 + kernel launch 接口 + runtime 可用性检查 + 诊断输出 |
 | 跨源权重聚合 | `ProfileWeights` 聚合 4 源 PGO/AutoFDO/LBR/MemProf，输出统一 hot/cold func 集合；`FuncDecl.is_hot` 控制 `.text.hot` / `.text.unlikely` 段切换 |
 
 CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile=file` / `-flbr-profile=file` / `-ftest-coverage` / `-fprofile-arcs` / `-ftopdownmetrics` / `-fmemory-profile` / `-fopenmp` / `-fcuda` / `-fhip` / `-fopenmp-targets=triple,...` / `--offload-arch=triple`。

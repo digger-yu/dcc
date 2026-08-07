@@ -56,7 +56,7 @@
 | LBR | 已接入 codegen；仅解析 `perf script -F brstack` 文本，不直接读 `perf.data` 二进制 |
 | MemProf | 已接入 codegen + AllocClass 分类；未在 libc malloc 上插桩；无 runtime 库 |
 | Perf 事件 | L1 四 slot + L2 八子分类已接入；仅支持 `perf stat` 文本输出，不读 `perf.data` 二进制 |
-| Offloading | device codegen (PTX/AMDGCN) stub 已实装；runtime loader 未实装 |
+| Offloading | device codegen (PTX/AMDGCN) stub 已实装; runtime loader 已实装 (`OffloadRuntimeLoader` 读 `.dcc.offload` 节 + kernel launch 接口 + 诊断输出); 实际 CUDA/ROCm driver 链接未实装 |
 
 ## C++ 前端限制
 
