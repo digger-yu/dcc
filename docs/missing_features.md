@@ -50,7 +50,7 @@
 
 | 通道 | 已知遗留 |
 |------|----------|
-| PGO | 下游权重传播已接入 `ProfileWeights`；`.profraw` 二进制格式仅支持子集 |
+| PGO | 下游权重传播已实装 (`propagate_edge_weights` 生成 `BranchProbMap`, `propagate_loop_trip_counts` 推算循环 trip count)；`.profraw` 二进制格式仅支持子集 |
 | GCOV | 非 x86_64 arch 未验证 |
 | AutoFDO | 已接入 codegen (`.text.hot`/`.text.unlikely`)；仅支持 dcc 简化文本格式，不兼容 LLVM extbinary 格式 |
 | LBR | 已接入 codegen；仅解析 `perf script -F brstack` 文本，不直接读 `perf.data` 二进制 |

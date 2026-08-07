@@ -39,7 +39,7 @@
 
 | 通道 | 能力 |
 |------|------|
-| PGO instrument | `-fprofile-generate` / `-fprofile-use`；`Profraw` 二进制 roundtrip；driver.rs 接入 `pgo::instrument_program`，codegen 自动 emit `call __dcc_pgo_count_fn`；`PgoWeights` 聚合 func 入口计数 |
+| PGO instrument | `-fprofile-generate` / `-fprofile-use`；`Profraw` 二进制 roundtrip；driver.rs 接入 `pgo::instrument_program`，codegen 自动 emit `call __dcc_pgo_count_fn`；`PgoWeights` 聚合 func 入口计数 + edge 计数 (`with_edge_counts`)；`propagate_edge_weights` 生成 `BranchProbMap` (分支概率)；`propagate_loop_trip_counts` 推算循环 trip count (供 unroll 决策) |
 | GCOV | `-ftest-coverage` / `-fprofile-arcs`；`.gcno` notes + `.gcda` data 二进制（与 GCC gcov-9 layout 对齐）；`cfg_checksum` 采用 GCC libgcov 公式 |
 | AutoFDO | `-fauto-profile=` / `-fprofile-sample-use=`；text parser + inline calls 链解析 + `bucketize` 按阈值分 Hot/Warm/Cold + `merge` 合并 + `summary` 统计 + roundtrip 序列化；通过 `ProfileWeights` 聚合，hot 函数下沉到 `.text.hot` 段 |
 | LBR | `-flbr-profile=`；解析 `perf script -F brstack` 文本 (含 mispredict/cycles 解析) + inbound/outbound 边查询 + `mispred_rate` 错误预测率 + `merge` 合并 + `summary` 统计；通过 `ProfileWeights` 聚合 |

@@ -10,13 +10,14 @@
 //   2. **frontend-PGO** (`-fprofile-generate` / `-fprofile-use`, GCC 风格):
 //      使用 .gcda 形式的 counters, 编译时把每个 BB 的入口权重视为 hot/cold.
 //
-// 当前 dcc 实现: 入口计数器 (instr-PGO 简化版).
+// 当前 dcc 实现: 入口计数器 (instr-PGO 简化版) + 下游权重传播.
 //   * `instrument_program(prog, cfg)` 在每个 FuncDecl body 顶部插入
 //     `__dcc_pgo_count_fn(idx)` 调用
 //   * `_dcc_pgo_runtime` 累加 idx -> counter, atexit 写 `<name>.profraw`
-//   * 读回 (`read_profraw`) 仅解析 u64 array, 不做权重传播
-//   * 传播接口 `pgo::use_counts(prog, counts)` 留给后端, 当前仅
-//     落 `pgo_weights: HashMap<func_name, u64>` 备查.
+//   * `PgoWeights::with_edge_counts(p)` 从 profraw 构建边计数
+//   * `propagate_edge_weights(w)` 把边计数转为 BranchProbMap (分支概率)
+//   * `propagate_loop_trip_counts(w)` 推算循环 trip count (供 unroll 决策)
+//   * codegen 消费 BranchProbMap 做基本块布局 (hot path first)
 
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -218,6 +219,198 @@ impl PgoWeights {
     pub fn count_of(&self, func: &str) -> u64 {
         self.func_counts.get(func).copied().unwrap_or(0)
     }
+
+    /// 从 profraw 构建边计数 (edge-level counts).
+    ///
+    /// 边计数由 (func, src_bb, dst_bb) 三元组索引. profraw 中每个 site
+    /// 对应一个基本块入口计数; 边计数由相邻块的计数差值推算:
+    ///   edge_count(func, bb_i, bb_{i+1}) = counter[i+1]
+    /// 这假设 profraw 的 sites 按基本块顺序排列 (与 GCC instr-PGO 一致).
+    pub fn with_edge_counts(p: &Profraw) -> Self {
+        let mut w = Self::from_profraw(p);
+        // 按函数分组 sites, 计算边计数
+        let mut func_sites: HashMap<String, Vec<(usize, u64)>> = HashMap::new();
+        for (i, s) in p.sites.iter().enumerate() {
+            let cnt = p.counters.get(i).copied().unwrap_or(0);
+            func_sites.entry(s.func.clone()).or_default().push((i, cnt));
+        }
+        for (func, sites) in &func_sites {
+            // 按 site 索引排序 (profraw 写入顺序即 BB 顺序)
+            let mut sorted = sites.clone();
+            sorted.sort_by_key(|(idx, _)| *idx);
+            // 相邻 site 之间构成边: edge(bb_i -> bb_{i+1}) = counter[i+1]
+            for window in sorted.windows(2) {
+                let (_, src_cnt) = window[0];
+                let (dst_idx, dst_cnt) = window[1];
+                // 边计数 = 目标块入口计数 (流入 = 执行次数)
+                // 归一化为 (func, src_bb_local, dst_bb_local)
+                let src_local = window[0].0 - sorted[0].0;
+                let dst_local = dst_idx - sorted[0].0;
+                // 边计数取 min(src_cnt, dst_cnt) 防止不一致
+                let edge_cnt = src_cnt.min(dst_cnt);
+                w.edge_counts.insert(
+                    (func.clone(), src_local as u32, dst_local as u32),
+                    edge_cnt,
+                );
+                let _ = src_cnt; // 保留源计数供后续扩展
+            }
+        }
+        w
+    }
+}
+
+/// 分支概率元数据: 供 codegen 做基本块布局 (hot path first).
+///
+/// 设计: 与 LLVM `BranchProbabilityInfo` 类似, 每个条件分支有
+/// (true_prob, false_prob) 权重. codegen 用这些权重决定
+/// 哪个分支放到 fall-through 位置 (减少跳转).
+#[derive(Debug, Clone, Default)]
+pub struct BranchProbMap {
+    /// (func_name, bb_index) -> (true_weight, false_weight)
+    /// weight 为归一化前的原始计数, codegen 自行计算比例
+    pub branch_weights: HashMap<(String, u32), (u64, u64)>,
+}
+
+impl BranchProbMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 获取分支权重, 返回 (true_weight, false_weight).
+    /// 未知分支返回 (1, 1) 表示等概率.
+    pub fn get_weight(&self, func: &str, bb: u32) -> (u64, u64) {
+        self.branch_weights
+            .get(&(func.to_string(), bb))
+            .copied()
+            .unwrap_or((1, 1))
+    }
+
+    /// 计算 true 分支概率 (0.0 ~ 1.0)
+    pub fn true_probability(&self, func: &str, bb: u32) -> f64 {
+        let (t, f) = self.get_weight(func, bb);
+        let total = t + f;
+        if total == 0 {
+            0.5
+        } else {
+            t as f64 / total as f64
+        }
+    }
+
+    /// 判断分支是否为 hot (true 概率 > 阈值)
+    pub fn is_hot_true(&self, func: &str, bb: u32, threshold: f64) -> bool {
+        self.true_probability(func, bb) > threshold
+    }
+}
+
+/// PGO 权重下游传播: 把 edge_counts 转换为 BranchProbMap.
+///
+/// 这是 `pgo::use_counts(prog, counts)` 的实现. 把 profraw 中的边计数
+/// 传播到每个函数的条件分支, 供 codegen 做基本块布局优化.
+///
+/// 算法:
+///   1. 对每个函数, 找到所有 (func, bb, _) 边
+///   2. 假设 bb 是条件分支点, 有 true-edge (bb -> bb+1) 和 false-edge (bb -> bb+2)
+///   3. 从 edge_counts 读取两个方向的计数, 存入 BranchProbMap
+pub fn propagate_edge_weights(weights: &PgoWeights) -> BranchProbMap {
+    let mut map = BranchProbMap::new();
+
+    // 按函数分组边
+    let mut func_edges: HashMap<String, Vec<(u32, u32, u64)>> = HashMap::new();
+    for ((func, src, dst), &cnt) in &weights.edge_counts {
+        func_edges.entry(func.clone()).or_default().push((*src, *dst, cnt));
+    }
+
+    for (func, edges) in &func_edges {
+        // 对每个源块, 收集所有出边
+        let mut src_edges: HashMap<u32, Vec<(u32, u64)>> = HashMap::new();
+        for &(src, dst, cnt) in edges {
+            src_edges.entry(src).or_default().push((dst, cnt));
+        }
+
+        // 对每个条件分支点 (有 2 条出边的块), 计算权重
+        for (src, dsts) in &src_edges {
+            if dsts.len() == 2 {
+                // 假设 dst[0] 是 true 分支 (fall-through), dst[1] 是 false 分支
+                let sorted: Vec<_> = {
+                    let mut v = dsts.clone();
+                    v.sort_by_key(|(dst, _)| *dst);
+                    v
+                };
+                let true_cnt = sorted[0].1; // 较小 dst = true (fall-through)
+                let false_cnt = sorted[1].1; // 较大 dst = false (jump target)
+                map.branch_weights.insert((func.clone(), *src), (true_cnt, false_cnt));
+            }
+        }
+    }
+
+    map
+}
+
+/// 循环trip count 提示: 从 back-edge 计数推算循环迭代次数.
+///
+/// 用于 loop unroll 决策: 如果循环平均迭代次数 < 4, 不展开;
+/// 如果 > 16, 激进展开.
+#[derive(Debug, Clone, Default)]
+pub struct LoopTripCounts {
+    /// (func_name, header_bb) -> 平均 trip count
+    pub trip_counts: HashMap<(String, u32), f64>,
+}
+
+impl LoopTripCounts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 获取循环 trip count, 未知返回 0.0
+    pub fn get_trip_count(&self, func: &str, header_bb: u32) -> f64 {
+        self.trip_counts
+            .get(&(func.to_string(), header_bb))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// 判断循环是否值得展开 (trip count > threshold)
+    pub fn should_unroll(&self, func: &str, header_bb: u32, threshold: f64) -> bool {
+        self.get_trip_count(func, header_bb) > threshold
+    }
+}
+
+/// 从 edge_counts 推算循环 trip count.
+///
+/// 算法: 找到 back-edge (dst_bb <= src_bb), trip_count = back_edge_count / entry_count.
+pub fn propagate_loop_trip_counts(weights: &PgoWeights) -> LoopTripCounts {
+    let mut counts = LoopTripCounts::new();
+
+    // 按函数分组边
+    let mut func_edges: HashMap<String, Vec<(u32, u32, u64)>> = HashMap::new();
+    for ((func, src, dst), &cnt) in &weights.edge_counts {
+        func_edges.entry(func.clone()).or_default().push((*src, *dst, cnt));
+    }
+
+    for (func, edges) in &func_edges {
+        // 找 back-edges: dst <= src (循环回边)
+        let mut back_edges: HashMap<u32, u64> = HashMap::new(); // header -> back_edge_count
+        let mut entry_edges: HashMap<u32, u64> = HashMap::new(); // header -> entry_count
+
+        for &(src, dst, cnt) in edges {
+            if dst <= src {
+                // back-edge: dst 是循环头
+                *back_edges.entry(dst).or_insert(0) += cnt;
+            } else if dst > src && src == 0 || dst == 1 && src == 0 {
+                // entry edge: 从入口到循环头
+                *entry_edges.entry(dst).or_insert(0) += cnt;
+            }
+        }
+
+        // trip_count = back_edge_count / entry_count
+        for (&header, &back_cnt) in &back_edges {
+            let entry_cnt = entry_edges.get(&header).copied().unwrap_or(1).max(1);
+            let trip = back_cnt as f64 / entry_cnt as f64;
+            counts.trip_counts.insert((func.clone(), header), trip);
+        }
+    }
+
+    counts
 }
 
 #[cfg(test)]
@@ -453,5 +646,82 @@ mod tests {
                 "generate=false 时 body 不应被改写"
             );
         }
+    }
+
+    /// 测试 edge_counts 构建: 从 profraw 的 sites 推算边计数
+    #[test]
+    fn with_edge_counts_computes_edges() {
+        let mut p = Profraw::new();
+        // main 函数有 3 个 sites (BB0, BB1, BB2)
+        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 1 });
+        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 2 });
+        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 3 });
+        p.counters[0] = 100; // BB0 执行 100 次
+        p.counters[1] = 80;  // BB1 执行 80 次
+        p.counters[2] = 60;  // BB2 执行 60 次
+
+        let w = PgoWeights::with_edge_counts(&p);
+        // edge(BB0->BB1) = min(100, 80) = 80
+        assert_eq!(w.edge_counts.get(&("main".into(), 0, 1)), Some(&80));
+        // edge(BB1->BB2) = min(80, 60) = 60
+        assert_eq!(w.edge_counts.get(&("main".into(), 1, 2)), Some(&60));
+    }
+
+    /// 测试分支概率传播: 2 条出边 -> (true_weight, false_weight)
+    #[test]
+    fn propagate_edge_weights_branch_prob() {
+        let mut w = PgoWeights::default();
+        // foo 函数: BB0 有 2 条出边 -> BB1 (true), BB2 (false)
+        w.edge_counts.insert(("foo".into(), 0, 1), 90);  // true 分支
+        w.edge_counts.insert(("foo".into(), 0, 2), 10);  // false 分支
+
+        let map = propagate_edge_weights(&w);
+        let (t, f) = map.get_weight("foo", 0);
+        assert_eq!(t, 90);
+        assert_eq!(f, 10);
+        // true 概率 = 90 / (90 + 10) = 0.9
+        let prob = map.true_probability("foo", 0);
+        assert!((prob - 0.9).abs() < 0.01);
+        assert!(map.is_hot_true("foo", 0, 0.8));
+    }
+
+    /// 测试未知分支返回默认权重 (1, 1)
+    #[test]
+    fn branch_prob_unknown_returns_default() {
+        let map = BranchProbMap::new();
+        let (t, f) = map.get_weight("unknown_func", 0);
+        assert_eq!(t, 1);
+        assert_eq!(f, 1);
+        // 默认概率 = 0.5
+        let prob = map.true_probability("unknown_func", 0);
+        assert!((prob - 0.5).abs() < 0.01);
+    }
+
+    /// 测试循环 trip count 推算
+    #[test]
+    fn test_propagate_loop_trip_counts() {
+        let mut w = PgoWeights::default();
+        // loop 函数: BB0 (entry) -> BB1 (header)
+        //           BB1 -> BB2 (body), BB1 -> BB1 (back-edge, 循环 10 次)
+        w.edge_counts.insert(("loop".into(), 0, 1), 10);  // entry
+        w.edge_counts.insert(("loop".into(), 1, 2), 100); // body
+        w.edge_counts.insert(("loop".into(), 1, 1), 90);  // back-edge (90 次回到 header)
+
+        let counts = propagate_loop_trip_counts(&w);
+        // trip_count = back_edge_count / entry_count = 90 / 10 = 9.0
+        let trip = counts.get_trip_count("loop", 1);
+        assert!((trip - 9.0).abs() < 0.1);
+        // 应该展开 (trip > 4)
+        assert!(counts.should_unroll("loop", 1, 4.0));
+        // 不应该展开 (trip < 16)
+        assert!(!counts.should_unroll("loop", 1, 16.0));
+    }
+
+    /// 测试未知循环返回 0.0 trip count
+    #[test]
+    fn loop_trip_counts_unknown_returns_zero() {
+        let counts = LoopTripCounts::new();
+        assert_eq!(counts.get_trip_count("unknown", 0), 0.0);
+        assert!(!counts.should_unroll("unknown", 0, 4.0));
     }
 }
