@@ -3332,6 +3332,77 @@ fn m15_bounds_check_inrange() {
     let _ = fs::remove_file(&exe);
 }
 
+/// -fbounds-check 越界路径: libubsan 诊断 "index 5 out of bounds for type
+/// 'int [3]'" (OutOfBoundsData 布局与 gcc libsanitizer 一致: 可写节 +
+/// TypeInfo=(log2(bits)<<1)|signed, 元素索引而非字节偏移)
+#[test]
+#[cfg(unix)]
+fn m15_bounds_check_oob_diag() {
+    let src = include_str!("fixtures/c/bounds_check_oob.c");
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-m15-bounds-oob-{pid}.c"));
+    let exe = dir.join(format!("dcc-m15-bounds-oob-{pid}"));
+    fs::write(&sp, src).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fbounds-check", "-o"])
+        .arg(&exe)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    // 诊断在运行时的 stderr: 手动执行捕获 (run_exe 只返回码)
+    let out = Command::new(&exe).output().expect("run exe");
+    let _ = fs::remove_file(&exe);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("index 5 out of bounds for type 'int [3]'"),
+        "ubsan diag: {}",
+        stderr
+    );
+}
+
+/// 16 字节 struct 传值 ABI: struct {double,double} 走 xmm0:xmm1,
+/// struct {long,long} 走 rdi:rsi, SSE 类返回值经 xmm0:xmm1
+#[test]
+#[cfg(unix)]
+fn m15_abi16_struct_passing() {
+    let src = include_str!("fixtures/c/abi16_struct.c");
+    let (out, exe) = run_compile_and_run("m15-abi16-struct", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
+/// 浮点存储路径: double/float 数组下标、解引用、struct 字段赋值
+/// (值在 xmm0, 必须用 movss/movsd 而非 GP mov 存储)
+#[test]
+#[cfg(unix)]
+fn m15_float_store_paths() {
+    let src = include_str!("fixtures/c/abi16_struct_extra.c");
+    let (out, exe) = run_compile_and_run("m15-float-store-paths", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(&exe);
+}
+
 /// C23 constexpr 函数声明 (解析通过, 运行结果正确)
 #[test]
 #[cfg(unix)]
@@ -4246,6 +4317,23 @@ fn double_complex_decl_run_returns_zero() {
     );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "double_complex_decl should return 0, got {rc}");
+}
+
+/// _Complex 字面量 (4.0i) + __real__/__imag__ 关键字 (Section 9)
+/// M26: 新增虚数后缀、__real__/__imag__ 一元运算符、__extension__ 表达式前缀
+/// 覆盖: 虚数字面量初始化、标量 real/imag、_Complex_I 宏、复数算术、
+/// 一元负、整数虚数、非 lvalue 表达式、赋值路径、标量初始化 complex
+#[test]
+fn complex_literal_run_returns_zero() {
+    let source = include_str!("fixtures/c/complex_literal.c");
+    let (output, exe) = run_compile_and_run("complex-literal", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "complex_literal should return 0, got {rc}");
 }
 
 /// L'x' 宽字符字面量 (Section 11)

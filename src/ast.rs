@@ -248,6 +248,25 @@ pub enum Expr {
         span: Span,
         ty: Type,
     },
+    /// _Complex 字面量: 4.0i / 3j / 1.0iF (实部 + 虚部; ty = _Complex T)
+    ComplexLit {
+        real: f64,
+        imag: f64,
+        span: Span,
+        ty: Type,
+    },
+    /// __real__ expr: 取 _Complex 表达式实部 (对标量返回自身)
+    Real {
+        e: Box<Expr>,
+        span: Span,
+        ty: Type,
+    },
+    /// __imag__ expr: 取 _Complex 表达式虚部 (对标量返回 0)
+    Imag {
+        e: Box<Expr>,
+        span: Span,
+        ty: Type,
+    },
     String {
         data: Vec<u8>,
         span: Span,
@@ -858,6 +877,9 @@ impl Expr {
         match self {
             Expr::Int { ty, .. }
             | Expr::Float { ty, .. }
+            | Expr::ComplexLit { ty, .. }
+            | Expr::Real { ty, .. }
+            | Expr::Imag { ty, .. }
             | Expr::String { ty, .. }
             | Expr::Char { ty, .. }
             | Expr::Ident { ty, .. }

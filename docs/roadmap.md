@@ -53,7 +53,7 @@
 | struct 整体赋值 | P1 | ✅ 聚合初始化 | ✅ memcpy 整体拷贝 | ✅ Linux 验证 |
 | struct 传参/返回 | P2 | ✅ 函数参数/返回值 | ✅ SysV ABI 寄存器拆分 (<=16B) | ✅ Linux 验证 |
 | long double 16B | P3 | ✅ sizeof=16 | ✅ 16字节存储 + SSE 运算 | ✅ Linux 验证 |
-| _Complex 复数 | P3 | ✅ _Complex float/double/long double + __complex__/__complex | ✅ sizeof+声明+init+赋值+返回; add/sub/mul/div | ✅ complex_div.c |
+| _Complex 复数 | P3 | ✅ _Complex float/double/long double + __complex__/__complex | ✅ sizeof+声明+init+赋值+返回; add/sub/mul/div; 虚数字面量 4.0i; __real__/__imag__; __extension__ 前缀 | ✅ complex_literal.c |
 | _Decimal 十进制 | P3 | ✅ _Decimal32/64/128 | ✅ 映射到等效 IEEE 浮点 | ✅ Linux 验证 |
 
 ### 第一性原理设计决策

@@ -62,6 +62,8 @@ pub enum TokKind {
     KwFract,
     KwAccum,   // _Fract, _Accum (定点数)
     KwComplex, // _Complex
+    KwReal,    // __real__ / __real (取复数实部)
+    KwImag,    // __imag__ / __imag (取复数虚部)
     KwDecimal32,
     KwDecimal64,
     KwDecimal128, // _Decimal32/64/128
@@ -265,6 +267,8 @@ impl<'a> Lexer<'a> {
                 "_Fract" => TokKind::KwFract,
                 "_Accum" => TokKind::KwAccum,
                 "_Complex" | "__complex__" | "__complex" => TokKind::KwComplex,
+                "__real__" | "__real" => TokKind::KwReal,
+                "__imag__" | "__imag" => TokKind::KwImag,
                 "_Decimal32" => TokKind::KwDecimal32,
                 "_Decimal64" => TokKind::KwDecimal64,
                 "_Decimal128" => TokKind::KwDecimal128,
@@ -424,13 +428,26 @@ impl<'a> Lexer<'a> {
                     }
                 }
             }
-            // 数字后缀。整数允许 U/L/LL 的任意标准顺序组合；浮点只允许 F/L。
+            // 数字后缀。整数允许 U/L/LL 的任意标准顺序组合；浮点允许 F/L。
+            // 两者均可追加 C99 虚数后缀 i/I/j/J (如 4.0i、1.0iF、3j)。
             if is_float {
-                if matches!(self.peek(), Some(b'f' | b'F' | b'l' | b'L')) {
-                    self.bump();
+                // 浮点: 类型后缀 F/L 与虚数后缀 i/j 各最多一个, 顺序任意
+                for _ in 0..2 {
+                    match self.peek() {
+                        Some(b'f' | b'F' | b'l' | b'L') => {
+                            self.bump();
+                        }
+                        Some(b'i' | b'I' | b'j' | b'J') => {
+                            self.bump();
+                        }
+                        _ => break,
+                    }
                 }
             } else {
                 while matches!(self.peek(), Some(b'u' | b'U' | b'l' | b'L')) {
+                    self.bump();
+                }
+                if matches!(self.peek(), Some(b'i' | b'I' | b'j' | b'J')) {
                     self.bump();
                 }
             }

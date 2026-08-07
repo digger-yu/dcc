@@ -5221,6 +5221,12 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Option<Expr> {
         let sp = self.cur.span.clone();
+        // __extension__ 前缀: GNU 扩展抑制标记 (complex.h 中 _Complex_I
+        // 宏展开为 (__extension__ 1.0iF)), 无运行时语义, 透传解析内层表达式
+        if self.cur.kind == TokKind::Ident && self.cur.text == "__extension__" {
+            self.advance();
+            return self.parse_unary();
+        }
         match self.cur.kind {
             TokKind::Plus => {
                 self.advance();
@@ -5323,6 +5329,34 @@ impl<'a> Parser<'a> {
                 let e = self.parse_unary()?;
                 let ty = e.ty();
                 Some(Expr::PreDec {
+                    e: Box::new(e),
+                    span: sp,
+                    ty,
+                })
+            }
+            // __real__ expr: 取复数实部 (GCC 扩展; 对标量返回自身)
+            TokKind::KwReal => {
+                self.advance();
+                let e = self.parse_unary()?;
+                let ty = match &e.ty() {
+                    Type::Complex(inner) => (**inner).clone(),
+                    t => t.clone(),
+                };
+                Some(Expr::Real {
+                    e: Box::new(e),
+                    span: sp,
+                    ty,
+                })
+            }
+            // __imag__ expr: 取复数虚部 (对标量返回 0)
+            TokKind::KwImag => {
+                self.advance();
+                let e = self.parse_unary()?;
+                let ty = match &e.ty() {
+                    Type::Complex(inner) => (**inner).clone(),
+                    t => t.clone(),
+                };
+                Some(Expr::Imag {
                     e: Box::new(e),
                     span: sp,
                     ty,
@@ -5513,6 +5547,19 @@ impl<'a> Parser<'a> {
             }
             TokKind::LParen if self.is_cast() => {
                 self.advance();
+                // __extension__ 作表达式前缀 (complex.h: (__extension__ 1.0iF)):
+                // 后随非类型 token 时不是 cast, 按括号表达式解析
+                if self.cur.kind == TokKind::Ident
+                    && self.cur.text == "__extension__"
+                    && !self.is_peek_type_start()
+                {
+                    self.advance();
+                    let e = self.parse_expr()?;
+                    if !self.expect(TokKind::RParen, "')'") {
+                        return None;
+                    }
+                    return Some(e);
+                }
                 // 在 cast 中可能出现位于 type 之前的 __attribute__((...)) 修饰符,
                 // 例如 (__attribute__((__vector_size__ (16))) int)x.
                 // parse_type_mode 已在类型说明符中处理 __attribute__,
@@ -6208,13 +6255,31 @@ impl<'a> Parser<'a> {
                     (false, 1) => Type::Long,
                     (false, 0) => Type::Int,
                 };
+                // C99 虚数后缀: 3i / 3j → _Complex int 虚数字面量 (实部 0)
+                let is_imag = suffix.chars().any(|c| c == 'i' || c == 'I' || c == 'j' || c == 'J');
                 self.advance();
-                Some(Expr::Int { v, span: sp, ty })
+                if is_imag {
+                    Some(Expr::ComplexLit {
+                        real: 0.0,
+                        imag: v as f64,
+                        span: sp,
+                        ty: Type::Complex(Box::new(ty)),
+                    })
+                } else {
+                    Some(Expr::Int { v, span: sp, ty })
+                }
             }
             TokKind::FloatLit => {
                 let s = &self.cur.text;
+                // 虚数后缀 i/I/j/J 在类型后缀 F/L 之后 (1.0if / 1.0iF / 4.0i)
                 let s_clean = s.trim_end_matches(['f', 'F', 'l', 'L']);
-                let v: f64 = s_clean.parse().unwrap_or(0.0);
+                let is_imag = s_clean
+                    .ends_with('i')
+                    || s_clean.ends_with('I')
+                    || s_clean.ends_with('j')
+                    || s_clean.ends_with('J');
+                let v_s = if is_imag { &s_clean[..s_clean.len() - 1] } else { s_clean };
+                let v: f64 = v_s.parse().unwrap_or(0.0);
                 let ty = if s.ends_with('f') || s.ends_with('F') {
                     Type::Float
                 } else if s.ends_with('l') || s.ends_with('L') {
@@ -6223,7 +6288,17 @@ impl<'a> Parser<'a> {
                     Type::Double
                 };
                 self.advance();
-                Some(Expr::Float { v, span: sp, ty })
+                if is_imag {
+                    // 虚数字面量: 4.0i → _Complex double (实部 0, 虚部 v)
+                    Some(Expr::ComplexLit {
+                        real: 0.0,
+                        imag: v,
+                        span: sp,
+                        ty: Type::Complex(Box::new(ty)),
+                    })
+                } else {
+                    Some(Expr::Float { v, span: sp, ty })
+                }
             }
             TokKind::StringLit => {
                 let mut data = parse_str(&self.cur.text);
@@ -6332,6 +6407,21 @@ impl<'a> Parser<'a> {
             }
             TokKind::LParen => {
                 self.advance();
+                // (__extension__ expr): complex.h 中 _Complex_I 宏展开为
+                // (__extension__ 1.0iF), 此处 __extension__ 是表达式前缀
+                // 而非类型说明符 (is_type_specifier_ident 也列出它, 需先
+                // 排除后随表达式的情况, 否则 parse_type 会误报 E0003)
+                if self.cur.kind == TokKind::Ident
+                    && self.cur.text == "__extension__"
+                    && !self.is_peek_type_start()
+                {
+                    self.advance(); // __extension__
+                    let e = self.parse_expr()?;
+                    if !self.expect(TokKind::RParen, "')'") {
+                        return None;
+                    }
+                    return Some(e);
+                }
                 // 检查是否是复合字面量: (type){...}
                 if self.is_type_start() {
                     // 尝试解析类型
@@ -6639,7 +6729,7 @@ impl<'a> Parser<'a> {
 }
 
 fn parse_int_lit(s: &str) -> i128 {
-    let s = s.trim_end_matches(|c: char| "lLuU".contains(c));
+    let s = s.trim_end_matches(|c: char| "lLuUiIjJ".contains(c));
     if let Some(r) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         i128::from_str_radix(r, 16).unwrap_or(0)
     } else if let Some(r) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {

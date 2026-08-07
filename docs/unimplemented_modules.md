@@ -1279,3 +1279,14 @@ M19 关键改动:
 | `scripts/dcc-host-wrapper.sh` | host 链接器包装 |
 | `scripts/update_error_snapshots.sh` | 刷新 E1xxx snapshot |
 | `scripts/archive/` | 历史调试与一次性探针脚本 |
+
+> **M26 增量 — Section 9 _Complex 字面量与 __real__/__imag__ 关键字**：
+> - AST 新增 `ComplexLit` / `Real` / `Imag` 三个 Expr 变体
+> - 词法分析器支持虚数后缀 `i`/`I`/`j`/`J`（整数与浮点）
+> - 关键字 `__real__`/`__real`/`__imag__`/`__imag` 映射到 `KwReal`/`KwImag`
+> - 解析器 `__extension__` 表达式前缀特判（`complex.h` 中 `_Complex_I` 宏展开）
+> - Codegen 完整实现：ComplexLit 字面量写帧临时区、`__real__`/`__imag__` 分量访问
+>   （lvalue 直接寻址，rvalue 从 gen_complex_binop 结果取）、Unary Neg 复数分支
+> - `spill_complex_operand` 修复标量→complex 提升（`2.0` 作为 `z * 2.0` 右操作数）
+> - 新增 `tests/fixtures/c/complex_literal.c` + 集成测试 `complex_literal_run_returns_zero`
+> - 全量 286 集成测试通过，无回归

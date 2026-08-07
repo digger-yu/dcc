@@ -1218,6 +1218,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // 1) 临时 .o：设 relocatable=true 后递归 run()
     cfg.output = tmp_o.clone();
     cfg.relocatable = true;
+    let sanitizer_flags = host_sanitizer_flags(&cfg);
     // 强制走内置链接器 ≠ 1 路径是上面“递归后”需走的；现在 cfg.built_link
     // 仍是 false，所以 .o 由 run() 末端 codegen 直接输出。
     let result = run(cfg);
@@ -1232,12 +1233,34 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         &link_libs,
         sysroot.as_deref(),
         verbose,
+        &sanitizer_flags,
     );
     let _ = fs::remove_file(&tmp_o);
     if link_result.is_ok() {
         eprintln!("dcc: {} (via host cc)", final_output.display());
     }
     link_result
+}
+
+/// sanitizer 插桩产生的 __asan_* / __ubsan_* 调用符号由宿主运行时库提供:
+/// 把对应的 `-fsanitize=*` 透传给 host cc, 否则链接报 undefined reference
+/// (此前这些符号不写入 .o, 链接“成功”但 call 落到地址 0, 运行即段错误)。
+/// kernel-* / kcov 系列无宿主运行时, 不透传。
+fn host_sanitizer_flags(cfg: &Config) -> Vec<String> {
+    let mut v = Vec::new();
+    if cfg.bounds_check || cfg.sanitizers.ubsan {
+        v.push("-fsanitize=undefined".to_string());
+    }
+    if cfg.sanitizers.kasan {
+        v.push("-fsanitize=address".to_string());
+    }
+    if cfg.sanitizers.hwasan {
+        v.push("-fsanitize=hwaddress".to_string());
+    }
+    if cfg.sanitizers.fuzzer {
+        v.push("-fsanitize=fuzzer".to_string());
+    }
+    v
 }
 
 /// 调 host `cc` 把单 .o 链成可执行。传递 --sysroot= 与 -l 列表。
@@ -1257,6 +1280,7 @@ fn link_with_host_cc(
     link_libs: &[String],
     sysroot: Option<&Path>,
     verbose: bool,
+    sanitizer_flags: &[String],
 ) -> Result<(), Vec<Diagnostic>> {
     // CC 环境变量优先, 与 GNU make 一致; 缺省为 cc.
     // 防递归: GCC 构建中 `CC=dcc` 是常见写法, 如果这里读 CC=dcc,
@@ -1285,6 +1309,9 @@ fn link_with_host_cc(
     }
     for lib in link_libs {
         cmd.arg(format!("-l{}", lib));
+    }
+    for sf in sanitizer_flags {
+        cmd.arg(sf);
     }
     if verbose {
         eprintln!("dcc: invoking {}: {:?}", cc, cmd);

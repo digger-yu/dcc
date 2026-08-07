@@ -608,6 +608,15 @@ impl Lowering {
                 literal = Some(ExprLiteral::Float(*v));
                 (ExprKind::Constant, Vec::new())
             }
+            Expr::ComplexLit { imag, .. } => {
+                // 虚数字面量: 常量 (虚部值; 实部 0)
+                literal = Some(ExprLiteral::Float(*imag));
+                (ExprKind::Constant, Vec::new())
+            }
+            Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+                // 实/虚部提取: 按一元运算降级 (profile 用途, 值透传)
+                (ExprKind::Unary(UnOp::Plus), vec![self.lower_expr(e)])
+            }
             Expr::String { .. } => (ExprKind::Constant, Vec::new()),
             Expr::Ident { name, .. } => (ExprKind::Local(name.name.clone()), Vec::new()),
             Expr::Binop { op, l, r, .. } => (
@@ -881,6 +890,9 @@ fn expr_span(expr: &Expr) -> Span {
     match expr {
         Expr::Int { span, .. }
         | Expr::Float { span, .. }
+        | Expr::ComplexLit { span, .. }
+        | Expr::Real { span, .. }
+        | Expr::Imag { span, .. }
         | Expr::String { span, .. }
         | Expr::Char { span, .. }
         | Expr::Ident { span, .. }
