@@ -294,7 +294,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `-O1` 常量折叠 + 内联 | — |
 | `-O2` GVN/CSE/LICM/分支折叠 | `ssa_gvn.rs` + `loop_opt.rs` |
 | `-O3` 循环展开 + 向量元素循环向量化 | 小 trip≤4 |
-| SSA pass 全家族 | DCE / 强度削减 / 归纳变量 / 别名分析 / 调度 / PGO / 自动并行 / 循环分块 / 循环交换 / TCO / 函数属性传播 / 寄存器分配 / 别名集合 / Speculative execution / SCCP |
+| SSA pass 全家族 (15 pass) | P1 跨函数 DCE (call graph reachability, 删除不可达 static) / P2 强度削减 (Mul→Shl, 无符号 Div→Shr) / P3 归纳变量优化 (回边检测) / P4 别名分析 (Steensgaard union-find) / P5 指令调度 (BB 内 list scheduling) / P6 PGO (profdata hot/cold) / P7 自动并行 (safe loop 检测) / P8 循环分块 (2x unroll) / P9 循环交换 (block_order swap) / P10 TCO (尾递归→Jump) / P11 函数属性传播 (cold/hot/noreturn) / P12 寄存器分配 (SSA 值计数) / P13 别名集合 (identity/disjoint/overlap) / P14 投机执行 (纯计算外提) / P15 SCCP (lattice + worklist) |
 
 ## 调试信息
 
