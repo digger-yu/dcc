@@ -806,6 +806,17 @@ impl Codegen {
         }
     }
 
+    /// XMM store xmm_reg -> [rsp+off] with configurable prefix (F2=movsd, F3=movss).
+    fn emit_xmm_store_rsp(&mut self, pfx: u8, xmm: u8, off: usize) {
+        self.emit(&[pfx, 0x0F, 0x11]);
+        if off < 128 {
+            self.emit(&[0x44 | ((xmm & 7) << 3), 0x24, off as u8]);
+        } else {
+            self.emit(&[0x84 | ((xmm & 7) << 3), 0x24]);
+            self.emit(&(off as u32).to_le_bytes());
+        }
+    }
+
     fn load_rsp_xmm(&mut self, xmm: u8, off: usize) {
         self.emit(&[0xF2, 0x0F, 0x10]);
         if off < 128 {
@@ -3530,6 +3541,51 @@ impl Codegen {
                     }
                 }
             } else if aggregate {
+                // _Complex float/double: 两分量均为 SSE 类, 用 XMM 装载/存储
+                // 而非整数 GP 中转 (SysV ABI 3.2.3).
+                let is_complex_sse = matches!(&effective_ty, Type::Complex(inner)
+                    if matches!(inner.as_ref(), Type::Float | Type::Double));
+                if is_complex_sse {
+                    let inner_sz = match effective_ty {
+                        Type::Complex(ref inner) => inner.size() as i32,
+                        _ => 8,
+                    };
+                    let is_f32 = matches!(&effective_ty, Type::Complex(inner) if matches!(inner.as_ref(), Type::Float));
+                    let pfx: u8 = if is_f32 { 0xF3 } else { 0xF2 };
+                    for (chunk, loc) in arg_locs.iter().enumerate() {
+                        let chunk_off = (chunk as i32) * inner_sz;
+                        if let Expr::Ident { name, .. } = arg {
+                            if self.globals.contains_key(&name.name) {
+                                // global complex: lea rcx, [global+chunk_off]; movsd xmm0, [rcx]
+                                self.emit_global_addr(9, &name.name);
+                                if chunk_off != 0 {
+                                    self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
+                                    self.emit(&chunk_off.to_le_bytes());
+                                }
+                                self.emit(&[pfx, 0x0F, 0x10, 0x01]); // movsd/movss xmm0, [rcx]
+                            } else {
+                                let var_off = self.var_offset(&name.name) + chunk_off;
+                                self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], var_off);
+                            }
+                        } else {
+                            // 复杂表达式: 先物化到 result_off, 再逐分量加载
+                            self.gen_expr(arg, 0);
+                            let result_off = -self.frame_size + 8;
+                            self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off + chunk_off);
+                        }
+                        // 存储到 staging 或栈槽
+                        match *loc {
+                            ArgLoc::Stack(off) => {
+                                self.emit_xmm_store_rsp(pfx, 0, off);
+                            }
+                            _ => {
+                                self.emit_xmm_store_rsp(pfx, 0, stage);
+                                staged.push((*loc, stage));
+                                stage += 8;
+                            }
+                        }
+                    }
+                } else {
                 for (chunk, loc) in arg_locs.iter().enumerate() {
                     if let Expr::Ident { name, .. } = arg {
                         if self.globals.contains_key(&name.name) {
@@ -3554,6 +3610,7 @@ impl Codegen {
                             stage += 8;
                         }
                     }
+                }
                 }
             } else if matches!(effective_ty, Type::Float | Type::Double) {
                 self.gen_expr(arg, 0);
