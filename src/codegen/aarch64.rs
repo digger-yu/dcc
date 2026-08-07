@@ -844,7 +844,7 @@ impl Aarch64Codegen {
                 }
                 return true;
             }
-            // M25: 浮点型 __builtin_va_arg(ap, double) — 暂走 stub (v0..v7 未保存)
+            // M25: 浮点型 __builtin_va_arg(ap, double) — v0..v7 已在入口保存到 va_save_base+64
             ExprKind::VaArg { ap } => {
                 self.gen_va_arg_float(ap);
                 return true;
