@@ -24,20 +24,29 @@ pub fn optimize(module: &mut Module, level: u8) {
         crate::loop_opt::run(module, level);
         // M16: 跨函数 DCE (call graph reachability)
         cross_function_dce(module);
-        // M16: SSA pass pipeline 已就绪 (strength reduction, IVOP, TCO 等),
-        // 但 rebuild_block 的 SSA->AST 转换尚未完全精确, 暂时跳过。
-        // 待 SSA->AST 重建器通过完整回归后再启用:
-        // run_ssa_passes(module, level);
+        // M16: SSA pass pipeline (strength reduction, IVOP, TCO, etc.)
+        run_ssa_passes(module, level);
     }
 }
 
 /// M16: 把 AST -> SSA, 跑 ssa_passes::run, 再 SSA -> AST 重建。
 /// 含 goto / label / switch 的函数自动跳过 (走 is_structured 检测)。
+/// 含循环 (while/for/do) 的函数也跳过: SSA builder 当前不支持 phi 节点,
+/// 循环变量版本无法在回边合并。
 fn run_ssa_passes(module: &mut Module, level: u8) {
     let prog = module.source_mut();
     let mut modified = false;
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
+            // 跳过含循环的函数 (SSA builder 无 phi 节点支持)
+            if func_has_loop(f) {
+                continue;
+            }
+            // 跳过含数组/取址/指针解引用的函数: SSA→AST 重建对这些模式
+            // 尚未完全正确, 会产生错误的代码 (数组地址丢失, 栈指针被覆盖等).
+            if func_has_unsafe_ssa_pattern(f) {
+                continue;
+            }
             if let Some(mut ssa) = crate::ssa::build_from_func(f) {
                 crate::ssa_passes::run(&mut ssa, level);
                 *f.body.as_mut().unwrap() = crate::ssa::rebuild_block(&ssa);
@@ -45,7 +54,107 @@ fn run_ssa_passes(module: &mut Module, level: u8) {
             }
         }
     }
-    let _ = modified; // 重建后的 AST 由外层 resync 接管
+    let _ = modified;
+}
+
+/// 检测函数体是否包含循环 (while/for/do-while)。
+fn func_has_loop(f: &FuncDecl) -> bool {
+    f.body.as_ref().is_some_and(|b| block_has_loop(b))
+}
+
+fn block_has_loop(b: &Block) -> bool {
+    b.items.iter().any(|item| match item {
+        BlockItem::Stmt(s) => stmt_has_loop(s),
+        _ => false,
+    })
+}
+
+fn stmt_has_loop(s: &Stmt) -> bool {
+    match s {
+        Stmt::While { .. } | Stmt::For { .. } | Stmt::Do { .. } => true,
+        Stmt::Block { b, .. } => block_has_loop(b),
+        Stmt::If { then_, else_, .. } => {
+            stmt_has_loop(then_)
+                || else_.as_ref().is_some_and(|e| stmt_has_loop(e))
+        }
+        _ => false,
+    }
+}
+
+/// 检测函数是否包含 SSA→AST 重建当前无法正确处理的模式:
+///   - 数组类型声明 (int a[4])
+///   - 取址操作 (&x)
+///   - 指针解引用 (*p)
+///   - 数组索引 (a[i])
+/// 这些模式涉及地址计算, SSA 重建可能产生错误的地址/栈操作.
+fn func_has_unsafe_ssa_pattern(f: &FuncDecl) -> bool {
+    f.body.as_ref().is_some_and(|b| block_has_unsafe_ssa_pattern(b))
+}
+
+fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
+    b.items.iter().any(|item| match item {
+        BlockItem::Decl(Decl::Var(v)) => {
+            // 数组类型声明
+            matches!(v.ty, crate::ast::Type::Array(_, _))
+                || v.init.as_ref().is_some_and(|e| expr_has_unsafe_ssa_pattern(e))
+        }
+        BlockItem::Stmt(s) => stmt_has_unsafe_ssa_pattern(s),
+        _ => false,
+    })
+}
+
+fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
+    match s {
+        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
+            expr_has_unsafe_ssa_pattern(e)
+        }
+        Stmt::If { cond, then_, else_, .. } => {
+            expr_has_unsafe_ssa_pattern(cond)
+                || stmt_has_unsafe_ssa_pattern(then_)
+                || else_.as_ref().is_some_and(|e| stmt_has_unsafe_ssa_pattern(e))
+        }
+        Stmt::Block { b, .. } => block_has_unsafe_ssa_pattern(b),
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            expr_has_unsafe_ssa_pattern(cond) || stmt_has_unsafe_ssa_pattern(body)
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            init.as_ref().is_some_and(|i| stmt_has_unsafe_ssa_pattern(i))
+                || cond.as_ref().is_some_and(|c| expr_has_unsafe_ssa_pattern(c))
+                || step.as_ref().is_some_and(|s| expr_has_unsafe_ssa_pattern(s))
+                || stmt_has_unsafe_ssa_pattern(body)
+        }
+        Stmt::Switch { expr, cases, .. } => {
+            expr_has_unsafe_ssa_pattern(expr)
+                || cases.iter().any(|c| block_has_unsafe_ssa_pattern(&c.body))
+        }
+        _ => false,
+    }
+}
+
+fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
+    match e {
+        Expr::AddrOf { .. } | Expr::Deref { .. } | Expr::Index { .. } => true,
+        Expr::Binop { l, r, .. } => {
+            expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
+        }
+        Expr::Unary { e, .. } | Expr::Cast { e, .. } => expr_has_unsafe_ssa_pattern(e),
+        Expr::Cond { cond, then_, else_, .. } => {
+            expr_has_unsafe_ssa_pattern(cond)
+                || expr_has_unsafe_ssa_pattern(then_)
+                || expr_has_unsafe_ssa_pattern(else_)
+        }
+        Expr::Call { callee, args, .. } => {
+            expr_has_unsafe_ssa_pattern(callee)
+                || args.iter().any(|a| expr_has_unsafe_ssa_pattern(a))
+        }
+        Expr::Assign { l, r, .. } => {
+            expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
+        }
+        Expr::Comma { l, r, .. } => {
+            expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
+        }
+        _ => false,
+    }
 }
 
 /// M16: 跨函数 DCE - 基于 call graph 标记不可达 internal static 函数

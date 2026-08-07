@@ -155,6 +155,8 @@ pub struct Function {
     /// 函数是否不返回
     pub is_noreturn: bool,
     pub span: Span,
+    /// 原始 AST 中声明的局部变量名 (用于 rebuild_block 避免重复声明)
+    pub original_locals: HashSet<String>,
 }
 
 impl Function {
@@ -171,6 +173,7 @@ impl Function {
             is_hot: false,
             is_noreturn: false,
             span,
+            original_locals: HashSet::new(),
         };
         s.add_block("entry".to_string());
         s
@@ -415,9 +418,40 @@ impl Builder {
 
     /// 处理一个 AST expression, 返回对应的 SSA operand
     fn lower_expr(&mut self, e: &Expr) -> Operand {
+        self.lower_expr_inner(e, None)
+    }
+
+    /// 处理表达式并将结果写入目标 SSA 变量 (避免创建不必要的临时变量)
+    fn lower_expr_into(&mut self, e: &Expr, target: SsaVar) -> Operand {
+        self.lower_expr_inner(e, Some(target))
+    }
+
+    fn lower_expr_inner(&mut self, e: &Expr, target: Option<SsaVar>) -> Operand {
         match e {
-            Expr::Int { v, .. } => Operand::Int(*v),
-            Expr::Float { v, .. } => Operand::Float(*v),
+            Expr::Int { v, .. } => {
+                if let Some(t) = target {
+                    self.emit(Inst {
+                        dest: Some(t.clone()),
+                        kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(*v), r: Operand::Int(0) },
+                        span: t.span.clone(),
+                    });
+                    self.define(t.clone());
+                    return Operand::Var(t);
+                }
+                Operand::Int(*v)
+            }
+            Expr::Float { v, .. } => {
+                if let Some(t) = target {
+                    self.emit(Inst {
+                        dest: Some(t.clone()),
+                        kind: InstKind::Bin { op: BinOp::Add, l: Operand::Float(*v), r: Operand::Int(0) },
+                        span: t.span.clone(),
+                    });
+                    self.define(t.clone());
+                    return Operand::Var(t);
+                }
+                Operand::Float(*v)
+            }
             Expr::String { data, .. } => Operand::Str(data.clone()),
             Expr::Char { v, .. } => Operand::Int(*v as i128),
             Expr::Ident {
@@ -439,7 +473,7 @@ impl Builder {
             Expr::Binop { op, l, r, span, ty } => {
                 let lo = self.lower_expr(l);
                 let ro = self.lower_expr(r);
-                let dest = self.fresh("bin", ty.clone(), span);
+                let dest = target.unwrap_or_else(|| self.fresh("bin", ty.clone(), span));
                 self.emit(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Bin {
@@ -449,6 +483,7 @@ impl Builder {
                     },
                     span: span.clone(),
                 });
+                self.define(dest.clone());
                 Operand::Var(dest)
             }
             Expr::Unary {
@@ -458,24 +493,39 @@ impl Builder {
                 ty,
             } => {
                 let o = self.lower_expr(inner);
-                let dest = self.fresh("un", ty.clone(), span);
+                let dest = target.unwrap_or_else(|| self.fresh("un", ty.clone(), span));
                 self.emit(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Un { op: *op, e: o },
                     span: span.clone(),
                 });
+                self.define(dest.clone());
                 Operand::Var(dest)
             }
-            Expr::Assign { op, l, r, span, ty } => {
+            Expr::Assign { op: _, l, r, span, ty } => {
+                // 对简单标识符赋值: 直接将 rhs 写入目标变量,
+                // 避免 lower_lvalue 产生多余的 copy 指令导致 SSA 重复定义。
+                // 注: 复合赋值 (+= 等) 已在 parser 中展开为 a = a op rhs。
+                if let Expr::Ident { name, ty: var_ty, .. } = l.as_ref() {
+                    let new_v = SsaVar {
+                        base: name.name.clone(),
+                        version: self.next_version(&name.name),
+                        ty: var_ty.clone(),
+                        span: span.clone(),
+                    };
+                    self.lower_expr_into(r, new_v.clone());
+                    self.define(new_v.clone());
+                    return Operand::Var(new_v);
+                }
                 let ro = self.lower_expr(r);
-                if let Some(dest_var) = lower_lvalue(l, op, ro.clone(), span, ty, self) {
+                if let Some(dest_var) = lower_lvalue(l, &BinOp::Add, ro.clone(), span, ty, self) {
                     return Operand::Var(dest_var);
                 }
                 ro
             }
             Expr::Cast { ty, e: inner, span } => {
                 let o = self.lower_expr(inner);
-                let dest = self.fresh("cast", ty.clone(), span);
+                let dest = target.unwrap_or_else(|| self.fresh("cast", ty.clone(), span));
                 self.emit(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Cast {
@@ -484,6 +534,7 @@ impl Builder {
                     },
                     span: span.clone(),
                 });
+                self.define(dest.clone());
                 Operand::Var(dest)
             }
             Expr::Cond {
@@ -527,7 +578,7 @@ impl Builder {
                 let dest = if matches!(ret_ty, Type::Void) {
                     None
                 } else {
-                    Some(self.fresh("call", ret_ty.clone(), span))
+                    Some(target.unwrap_or_else(|| self.fresh("call", ret_ty.clone(), span)))
                 };
                 self.emit(Inst {
                     dest: dest.clone(),
@@ -538,6 +589,9 @@ impl Builder {
                     },
                     span: span.clone(),
                 });
+                if let Some(ref d) = dest {
+                    self.define(d.clone());
+                }
                 match dest {
                     Some(v) => Operand::Var(v),
                     None => Operand::Void,
@@ -546,12 +600,13 @@ impl Builder {
             Expr::Index { arr, idx, span, ty } => {
                 let a = self.lower_expr(arr);
                 let i = self.lower_expr(idx);
-                let dest = self.fresh("idx", ty.clone(), span);
+                let dest = target.unwrap_or_else(|| self.fresh("idx", ty.clone(), span));
                 self.emit(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::IndexLoad { arr: a, idx: i },
                     span: span.clone(),
                 });
+                self.define(dest.clone());
                 Operand::Var(dest)
             }
             Expr::Member {
@@ -562,7 +617,7 @@ impl Builder {
                 is_arrow,
             } => {
                 let obj = self.lower_expr(expr);
-                let dest = self.fresh("mem", ty.clone(), span);
+                let dest = target.unwrap_or_else(|| self.fresh("mem", ty.clone(), span));
                 if *is_arrow {
                     // *obj.field
                     let inner = self.fresh("deref", Type::Ptr(Box::new(ty.clone())), span);
@@ -594,11 +649,12 @@ impl Builder {
                         span: span.clone(),
                     });
                 }
+                self.define(dest.clone());
                 Operand::Var(dest)
             }
             Expr::Deref { e, span, ty } => {
                 let o = self.lower_expr(e);
-                let dest = self.fresh("deref", ty.clone(), span);
+                let dest = target.unwrap_or_else(|| self.fresh("deref", ty.clone(), span));
                 self.emit(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Load {
@@ -607,11 +663,12 @@ impl Builder {
                     },
                     span: span.clone(),
                 });
+                self.define(dest.clone());
                 Operand::Var(dest)
             }
             Expr::AddrOf { e, span, ty: _ } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
-                    let dest = self.fresh("addr", Type::Ptr(Box::new(Type::Void)), span);
+                    let dest = target.unwrap_or_else(|| self.fresh("addr", Type::Ptr(Box::new(Type::Void)), span));
                     self.emit(Inst {
                         dest: Some(dest.clone()),
                         kind: InstKind::AddrOf {
@@ -619,6 +676,7 @@ impl Builder {
                         },
                         span: span.clone(),
                     });
+                    self.define(dest.clone());
                     return Operand::Var(dest);
                 }
                 Operand::Void
@@ -909,15 +967,35 @@ impl Builder {
                 if let Some(st) = step {
                     let _ = self.lower_expr(st);
                 }
-                if let Some(b) = self.func.blocks.get_mut(&self.cur) {
-                    if matches!(b.term, Terminator::Unreachable) {
-                        b.term = Terminator::Jump(cond_bb.clone());
-                        b.succs.push(cond_bb.clone());
+                // Re-evaluate condition with updated variables after body.
+                // This ensures the branch uses current SSA versions,
+                // not the stale versions from the initial cond_bb.
+                let fresh_cond = cond
+                    .as_ref()
+                    .map(|c| self.lower_expr(c))
+                    .unwrap_or(Operand::Int(1));
+                self.set_term(Terminator::Branch {
+                    cond: fresh_cond,
+                    t: body_bb.clone(),
+                    f: end_bb.clone(),
+                });
+                if let Some(b) = self.func.blocks.get_mut(&body_bb) {
+                    if !b.preds.contains(&self.cur.clone()) {
+                        b.preds.push(self.cur.clone());
                     }
                 }
+                if let Some(eb) = self.func.blocks.get_mut(&end_bb) {
+                    if !eb.preds.contains(&self.cur.clone()) {
+                        eb.preds.push(self.cur.clone());
+                    }
+                }
+                // Override old cond_bb terminator: jump to body
+                // (its instructions provide defs needed by body).
                 if let Some(cb) = self.func.blocks.get_mut(&cond_bb) {
-                    cb.preds.push(self.cur.clone());
-                    cb.preds.dedup();
+                    cb.term = Terminator::Jump(body_bb.clone());
+                    if !cb.succs.contains(&body_bb) {
+                        cb.succs.push(body_bb.clone());
+                    }
                 }
                 self.cur = end_bb;
             }
@@ -954,17 +1032,15 @@ impl Builder {
                 BlockItem::Stmt(s) => self.lower_stmt(s),
                 BlockItem::Decl(Decl::Var(v)) => {
                     if let Some(init) = &v.init {
-                        let o = self.lower_expr(init);
                         let v_0 = SsaVar {
                             base: v.name.name.clone(),
                             version: self.next_version(&v.name.name),
                             ty: v.ty.clone(),
                             span: v.span.clone(),
                         };
-                        // 隐式 store: dest = o
-                        if let Operand::Var(src) = o {
-                            let _ = src; // 已经在前 emit, 简化: 直接定义
-                        }
+                        // Lower init expr directly into the declared variable
+                        // to avoid creating unnecessary SSA temporaries.
+                        self.lower_expr_into(init, v_0.clone());
                         self.define(v_0);
                     } else {
                         let v_0 = SsaVar {
@@ -1000,15 +1076,37 @@ fn lower_lvalue(
             ty: var_ty.clone(),
             span: span.clone(),
         };
-        let _ = op; // AST 已是展开形式
-        b.emit(Inst {
-            dest: None,
-            kind: InstKind::Store {
-                e: Operand::SymAddr(name.name.clone()),
-                src: src.clone(),
-            },
-            span: span.clone(),
-        });
+        // Emit a copy instruction so rebuild_block connects the
+        // computed value to the SSA variable name.
+        // Use lower_expr_into if src is a simple operand to avoid
+        // creating extra temporaries.
+        let v_clone = v.clone();
+        match &src {
+            Operand::Var(src_var) => {
+                // Source is already a variable - emit direct copy
+                b.emit(Inst {
+                    dest: Some(v_clone.clone()),
+                    kind: InstKind::Bin {
+                        op: BinOp::Add,
+                        l: src.clone(),
+                        r: Operand::Int(0),
+                    },
+                    span: span.clone(),
+                });
+            }
+            _ => {
+                // Source is a constant - emit as immediate assignment
+                b.emit(Inst {
+                    dest: Some(v_clone.clone()),
+                    kind: InstKind::Bin {
+                        op: BinOp::Add,
+                        l: src.clone(),
+                        r: Operand::Int(0),
+                    },
+                    span: span.clone(),
+                });
+            }
+        }
         b.define(v.clone());
         return Some(v);
     }
@@ -1081,6 +1179,35 @@ fn lower_lvalue(
     None
 }
 
+/// 递归收集 block 中所有 Decl::Var 的变量名
+fn collect_local_decls(items: &[BlockItem], out: &mut HashSet<String>) {
+    for item in items {
+        match item {
+            BlockItem::Decl(Decl::Var(v)) => {
+                out.insert(v.name.name.clone());
+            }
+            BlockItem::Stmt(s) => collect_local_decls_stmt(s, out),
+            _ => {}
+        }
+    }
+}
+
+fn collect_local_decls_stmt(s: &Stmt, out: &mut HashSet<String>) {
+    match s {
+        Stmt::Block { b, .. } => collect_local_decls(&b.items, out),
+        Stmt::If { then_, else_, .. } => {
+            collect_local_decls_stmt(then_, out);
+            if let Some(e) = else_ {
+                collect_local_decls_stmt(e, out);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
+            collect_local_decls_stmt(body, out);
+        }
+        _ => {}
+    }
+}
+
 pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     let body = f.body.as_ref()?;
     if !is_structured(body) {
@@ -1090,6 +1217,8 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     func.is_cold = f.is_cold;
     func.is_hot = false; // FuncDecl 暂无 hot 字段
     func.is_noreturn = false;
+    // Collect original local variable names for rebuild_block
+    collect_local_decls(&body.items, &mut func.original_locals);
     let mut builder = Builder::new(func);
     for p in &f.params {
         if let Some(n) = &p.name {
@@ -1120,14 +1249,114 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
 
 /// 把 SSA Function 重建为 AST Block (codegen 仍走 AST 路径)。
 ///
-/// 简化策略: 全部用临时变量 / Store 把 SSA 值塞回原变量名; phi 在 merge
-/// BB 顶端处理为对原变量多次赋值 (用同名 var, 以 if 块包成 then/else)。
+/// 策略:
+///   1. 只声明原始局部变量 (来自 func.original_locals), 不声明 SSA 临时变量。
+///   2. 单次使用的 SSA 临时变量在其使用处内联展开, 避免多余栈槽。
+///   3. phi 节点在 merge BB 用对原变量赋值处理。
 pub fn rebuild_block(func: &Function) -> Block {
     let mut items: Vec<BlockItem> = Vec::new();
     let entry = func.entry.clone();
     let mut visited: HashSet<String> = HashSet::new();
     let mut env: HashMap<String, SsaVar> = HashMap::new();
-    rebuild_bb(&entry, func, &mut items, &mut visited, &mut env);
+
+    // 1. 只声明原始局部变量 (不声明 SSA 临时变量)
+    let param_names: HashSet<String> =
+        func.params.iter().map(|p| p.base.clone()).collect();
+    for name in &func.original_locals {
+        if param_names.contains(name) {
+            continue;
+        }
+        // 找到该变量的类型
+        let ty = func
+            .blocks
+            .values()
+            .flat_map(|bb| bb.insts.iter())
+            .find_map(|inst| {
+                inst.dest
+                    .as_ref()
+                    .filter(|d| &d.base == name)
+                    .map(|d| d.ty.clone())
+            })
+            .unwrap_or(Type::Int);
+        items.push(BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
+            ty,
+            name: crate::ast::Ident {
+                name: name.clone(),
+                span: func.span.clone(),
+            },
+            init: None,
+            span: func.span.clone(),
+            is_extern: false,
+            is_static: false,
+            section: None,
+            alignment: None,
+            is_weak: false,
+            visibility: None,
+            is_unused: false,
+            register_name: None,
+            cleanup_fn: None,
+            is_thread_local: false,
+            no_sanitize: vec![],
+            copy_fn: None,
+            is_retain: false,
+            is_used_attr: false,
+        })));
+    }
+
+    // 2. 构建内联替换映射: 单次使用的 SSA 临时变量在使用处内联
+    let mut subst: HashMap<String, Option<Expr>> = HashMap::new();
+
+    // 收集所有被用作操作数的 SSA 变量
+    let mut used_ssa: HashSet<String> = HashSet::new();
+    for bb in func.blocks.values() {
+        for inst in &bb.insts {
+            collect_op_uses(&inst.kind, &mut used_ssa);
+        }
+        match &bb.term {
+            Terminator::Ret { val: Some(o) } => collect_op_uses_op(o, &mut used_ssa),
+            Terminator::Branch { cond, .. } => collect_op_uses_op(cond, &mut used_ssa),
+            _ => {}
+        }
+    }
+
+    // 对每个 SSA 定义: 如果是临时变量且只被使用一次, 标记为内联
+    for bb_name in &func.block_order {
+        if let Some(bb) = func.blocks.get(bb_name) {
+            for inst in &bb.insts {
+                if let Some(d) = &inst.dest {
+                    let ssa_name = d.name();
+                    let is_temp = d.base.starts_with('_');
+                    let use_count = used_ssa.get(&ssa_name).map_or(0, |_| {
+                        let mut count = 0;
+                        for b in func.blocks.values() {
+                            for i in &b.insts {
+                                count += op_count_in_kind(&i.kind, &ssa_name);
+                            }
+                            match &b.term {
+                                Terminator::Ret { val: Some(o) } => {
+                                    count += op_count_in_op(o, &ssa_name);
+                                }
+                                Terminator::Branch { cond, .. } => {
+                                    count += op_count_in_op(cond, &ssa_name);
+                                }
+                                _ => {}
+                            }
+                        }
+                        count
+                    });
+                    if is_temp && use_count <= 1 {
+                        let resolved =
+                            inst_to_expr_resolved(&inst.kind, &subst);
+                        subst.insert(ssa_name, Some(resolved));
+                    } else {
+                        subst.insert(ssa_name, None);
+                    }
+                }
+            }
+        }
+    }
+
+    rebuild_bb(&entry, func, &mut items, &mut visited, &mut env, &subst);
     Block {
         items,
         span: func.span.clone(),
@@ -1138,12 +1367,27 @@ fn phi_name(v: &SsaVar) -> String {
     v.name()
 }
 
+/// 判断某条 SSA 指令是否为优化 pass 插入的 hint/metadata (不对应真实计算).
+/// 这些指令以 Store 到 `__dcc_` 前缀符号的形式存在, 例如:
+///   - register_allocation: `__dcc_regalloc_done`
+///   - auto_parallelization: `__dcc_parallel_hint`
+///   - pgo: `__dcc_hot_hint` / `__dcc_cold_hint`
+/// 在 SSA→AST 重建时必须丢弃, 否则会生成对不存在全局变量的访问.
+fn is_pass_hint_inst(kind: &InstKind) -> bool {
+    if let InstKind::Store { e: Operand::SymAddr(name), .. } = kind {
+        name.starts_with("__dcc_")
+    } else {
+        false
+    }
+}
+
 fn rebuild_bb(
     bb_name: &str,
     func: &Function,
     out: &mut Vec<BlockItem>,
     visited: &mut HashSet<String>,
     env: &mut HashMap<String, SsaVar>,
+    subst: &HashMap<String, Option<Expr>>,
 ) {
     if !visited.insert(bb_name.to_string()) {
         return;
@@ -1152,28 +1396,36 @@ fn rebuild_bb(
         Some(b) => b.clone(),
         None => return,
     };
-    // 0. 应用 phi 之前的前驱 env 合并: 简单做法 - 用基本变量名, 取 self.current 同样的策略
+    // 0. phi 处理: 将前驱的 SSA 值映射到 phi dest 的基础名
     for phi in &bb.phis {
         for (src, pred) in &phi.incoming {
             if pred == bb_name || env.contains_key(&phi_name(&phi.dest)) {
                 env.insert(phi_name(&phi.dest), src.clone());
             }
         }
-        // 简化: 单一前驱或首个前驱值
         if let Some((src, _)) = bb.phis.first().and_then(|p| p.incoming.first()) {
             env.insert(phi_name(&phi.dest), src.clone());
         }
     }
     // 1. 翻译指令为 AST 赋值语句
     for inst in &bb.insts {
+        // 跳过 SSA pass 插入的 hint/metadata 指令 (register_allocation,
+        // auto_parallelization, pgo 等). 这些指令以 Store 到 __dcc_ 前缀
+        // 符号的形式存在, 不对应真实计算, 在 SSA→AST 重建时必须丢弃.
+        if is_pass_hint_inst(&inst.kind) {
+            continue;
+        }
         if let Some(d) = &inst.dest {
             env.insert(d.name(), d.clone());
-        }
-        // 将 SSA 指令转换为 AST 赋值语句: `dest = expr`
-        if let Some(d) = &inst.dest {
-            let rhs = inst_to_expr(&inst.kind, env);
+            let ssa_name = d.name();
+            // 如果被标记为内联, 跳过赋值 (表达式已在 subst 中)
+            if subst.get(&ssa_name).is_some_and(|v| v.is_some()) {
+                continue;
+            }
+            // 发射赋值: base_name = resolved_rhs
+            let rhs = inst_to_expr_resolved(&inst.kind, subst);
             let assign = Expr::Assign {
-                op: crate::ast::BinOp::Add, // plain assign (no compound op)
+                op: crate::ast::BinOp::Add,
                 l: Box::new(Expr::Ident {
                     name: crate::ast::Ident {
                         name: d.base.clone(),
@@ -1191,8 +1443,7 @@ fn rebuild_bb(
                 span: inst.span.clone(),
             }));
         } else {
-            // 无 dest 的指令 (Store/Call 等) 也需输出
-            let e = inst_to_expr(&inst.kind, env);
+            let e = inst_to_expr_resolved(&inst.kind, subst);
             out.push(BlockItem::Stmt(Stmt::Expr {
                 e,
                 span: inst.span.clone(),
@@ -1202,24 +1453,39 @@ fn rebuild_bb(
     // 2. 翻译 terminator -> AST 后, 继续后继
     match &bb.term {
         Terminator::Ret { val } => {
-            let e = val.as_ref().map(|o| operand_to_expr(o, env));
+            let e = val.as_ref().map(|o| resolve_operand(o, env, subst));
             out.push(BlockItem::Stmt(Stmt::Return {
                 val: e,
                 span: func.span.clone(),
             }));
         }
         Terminator::Jump(t) => {
-            rebuild_bb(t, func, out, visited, env);
+            rebuild_bb(t, func, out, visited, env, subst);
         }
         Terminator::Branch { cond, t, f } => {
-            let cond_e = operand_to_expr(cond, env);
-            // 顺序重建 then/else 到一个 Block; 共用 visited + env 以避免回环无限递归
+            let cond_e = resolve_operand(cond, env, subst);
             let mut then_items: Vec<BlockItem> = Vec::new();
-            let then_env = env.clone();
-            rebuild_bb(t, func, &mut then_items, visited, &mut then_env.clone());
+            let mut then_env = env.clone();
+            let mut then_subst = subst.clone();
+            rebuild_bb(
+                t,
+                func,
+                &mut then_items,
+                visited,
+                &mut then_env,
+                &then_subst,
+            );
             let mut else_items: Vec<BlockItem> = Vec::new();
-            let else_env = env.clone();
-            rebuild_bb(f, func, &mut else_items, visited, &mut else_env.clone());
+            let mut else_env = env.clone();
+            let mut else_subst = subst.clone();
+            rebuild_bb(
+                f,
+                func,
+                &mut else_items,
+                visited,
+                &mut else_env,
+                &else_subst,
+            );
             out.push(BlockItem::Stmt(Stmt::If {
                 cond: cond_e,
                 then_: Box::new(Stmt::Block {
@@ -1247,13 +1513,23 @@ fn rebuild_bb(
     }
 }
 
-fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
+/// 解析操作数: 先查 subst 内联映射, 再回退到基础名。
+fn resolve_operand(
+    o: &Operand,
+    env: &HashMap<String, SsaVar>,
+    subst: &HashMap<String, Option<Expr>>,
+) -> Expr {
     match o {
         Operand::Var(v) => {
-            if let Some(found) = env.get(&v.name()) {
+            let ssa_name = v.name();
+            if let Some(Some(expr)) = subst.get(&ssa_name) {
+                return expr.clone();
+            }
+            // 非内联: 使用基础变量名
+            if let Some(found) = env.get(&ssa_name) {
                 Expr::Ident {
                     name: crate::ast::Ident {
-                        name: found.name(),
+                        name: found.base.clone(),
                         span: v.span.clone(),
                     },
                     span: v.span.clone(),
@@ -1262,7 +1538,254 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
             } else {
                 Expr::Ident {
                     name: crate::ast::Ident {
-                        name: v.name(),
+                        name: v.base.clone(),
+                        span: v.span.clone(),
+                    },
+                    span: v.span.clone(),
+                    ty: v.ty.clone(),
+                }
+            }
+        }
+        _ => operand_to_expr(o, env),
+    }
+}
+
+/// 将 SSA 指令转换为 AST 表达式, 同时应用内联替换。
+fn inst_to_expr_resolved(
+    kind: &InstKind,
+    subst: &HashMap<String, Option<Expr>>,
+) -> Expr {
+    let sp = Span::point("ssa", 0, 0);
+    let fake_env: HashMap<String, SsaVar> = HashMap::new();
+    match kind {
+        InstKind::Bin { op, l, r } => Expr::Binop {
+            op: *op,
+            l: Box::new(resolve_operand(l, &fake_env, subst)),
+            r: Box::new(resolve_operand(r, &fake_env, subst)),
+            span: sp.clone(),
+            ty: Type::Int,
+        },
+        InstKind::Un { op, e } => Expr::Unary {
+            op: *op,
+            e: Box::new(resolve_operand(e, &fake_env, subst)),
+            span: sp.clone(),
+            ty: Type::Int,
+        },
+        InstKind::Cast { ty, e } => Expr::Cast {
+            ty: ty.clone(),
+            e: Box::new(resolve_operand(e, &fake_env, subst)),
+            span: sp.clone(),
+        },
+        InstKind::AddrOf { base } => Expr::AddrOf {
+            e: Box::new(Expr::Ident {
+                name: crate::ast::Ident {
+                    name: base.clone(),
+                    span: sp.clone(),
+                },
+                span: sp.clone(),
+                ty: Type::Void,
+            }),
+            span: sp.clone(),
+            ty: Type::Ptr(Box::new(Type::Void)),
+        },
+        InstKind::Load { e, ty } => Expr::Deref {
+            e: Box::new(resolve_operand(e, &fake_env, subst)),
+            span: sp.clone(),
+            ty: ty.clone(),
+        },
+        InstKind::Store { e, src } => Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Deref {
+                e: Box::new(resolve_operand(e, &fake_env, subst)),
+                span: sp.clone(),
+                ty: Type::Void,
+            }),
+            r: Box::new(resolve_operand(src, &fake_env, subst)),
+            span: sp.clone(),
+            ty: Type::Void,
+        },
+        InstKind::IndexLoad { arr, idx } => Expr::Index {
+            arr: Box::new(resolve_operand(arr, &fake_env, subst)),
+            idx: Box::new(resolve_operand(idx, &fake_env, subst)),
+            span: sp.clone(),
+            ty: Type::Int,
+        },
+        InstKind::IndexStore { arr, idx, src } => Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Index {
+                arr: Box::new(resolve_operand(arr, &fake_env, subst)),
+                idx: Box::new(resolve_operand(idx, &fake_env, subst)),
+                span: sp.clone(),
+                ty: Type::Int,
+            }),
+            r: Box::new(resolve_operand(src, &fake_env, subst)),
+            span: sp.clone(),
+            ty: Type::Void,
+        },
+        InstKind::Call { callee, args, ret_ty } => Expr::Call {
+            callee: Box::new(resolve_operand(callee, &fake_env, subst)),
+            args: args
+                .iter()
+                .map(|a| resolve_operand(a, &fake_env, subst))
+                .collect(),
+            span: sp.clone(),
+            ty: ret_ty.clone(),
+        },
+        InstKind::MemberLoad { obj, field, ty } => Expr::Member {
+            expr: Box::new(resolve_operand(obj, &fake_env, subst)),
+            field: crate::ast::Ident {
+                name: field.clone(),
+                span: sp.clone(),
+            },
+            span: sp.clone(),
+            ty: ty.clone(),
+            is_arrow: false,
+        },
+        InstKind::MemberStore { obj, field, src } => Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Member {
+                expr: Box::new(resolve_operand(obj, &fake_env, subst)),
+                field: crate::ast::Ident {
+                    name: field.clone(),
+                    span: sp.clone(),
+                },
+                span: sp.clone(),
+                ty: Type::Void,
+                is_arrow: false,
+            }),
+            r: Box::new(resolve_operand(src, &fake_env, subst)),
+            span: sp.clone(),
+            ty: Type::Void,
+        },
+        InstKind::Select { cond, then_, else_ } => Expr::Cond {
+            cond: Box::new(resolve_operand(cond, &fake_env, subst)),
+            then_: Box::new(resolve_operand(then_, &fake_env, subst)),
+            else_: Box::new(resolve_operand(else_, &fake_env, subst)),
+            span: sp.clone(),
+            ty: Type::Int,
+        },
+    }
+}
+
+/// 收集 InstKind 中所有被引用的 SSA 变量名。
+fn collect_op_uses(kind: &InstKind, out: &mut HashSet<String>) {
+    match kind {
+        InstKind::Bin { l, r, .. } => {
+            collect_op_uses_op(l, out);
+            collect_op_uses_op(r, out);
+        }
+        InstKind::Un { e, .. } => collect_op_uses_op(e, out),
+        InstKind::Cast { e, .. } => collect_op_uses_op(e, out),
+        InstKind::Load { e, .. } => collect_op_uses_op(e, out),
+        InstKind::Store { e, src } => {
+            collect_op_uses_op(e, out);
+            collect_op_uses_op(src, out);
+        }
+        InstKind::IndexLoad { arr, idx } => {
+            collect_op_uses_op(arr, out);
+            collect_op_uses_op(idx, out);
+        }
+        InstKind::IndexStore { arr, idx, src } => {
+            collect_op_uses_op(arr, out);
+            collect_op_uses_op(idx, out);
+            collect_op_uses_op(src, out);
+        }
+        InstKind::Call { callee, args, .. } => {
+            collect_op_uses_op(callee, out);
+            for a in args {
+                collect_op_uses_op(a, out);
+            }
+        }
+        InstKind::MemberLoad { obj, .. } => collect_op_uses_op(obj, out),
+        InstKind::MemberStore { obj, src, .. } => {
+            collect_op_uses_op(obj, out);
+            collect_op_uses_op(src, out);
+        }
+        InstKind::Select { cond, then_, else_ } => {
+            collect_op_uses_op(cond, out);
+            collect_op_uses_op(then_, out);
+            collect_op_uses_op(else_, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_op_uses_op(o: &Operand, out: &mut HashSet<String>) {
+    if let Operand::Var(v) = o {
+        out.insert(v.name());
+    }
+}
+
+/// 计算某个 SSA 变量在 InstKind 中被引用的次数。
+fn op_count_in_kind(kind: &InstKind, name: &str) -> usize {
+    let mut count = 0;
+    match kind {
+        InstKind::Bin { l, r, .. } => {
+            count += op_count_in_op(l, name);
+            count += op_count_in_op(r, name);
+        }
+        InstKind::Un { e, .. } => count += op_count_in_op(e, name),
+        InstKind::Cast { e, .. } => count += op_count_in_op(e, name),
+        InstKind::Load { e, .. } => count += op_count_in_op(e, name),
+        InstKind::Store { e, src } => {
+            count += op_count_in_op(e, name);
+            count += op_count_in_op(src, name);
+        }
+        InstKind::IndexLoad { arr, idx } => {
+            count += op_count_in_op(arr, name);
+            count += op_count_in_op(idx, name);
+        }
+        InstKind::IndexStore { arr, idx, src } => {
+            count += op_count_in_op(arr, name);
+            count += op_count_in_op(idx, name);
+            count += op_count_in_op(src, name);
+        }
+        InstKind::Call { callee, args, .. } => {
+            count += op_count_in_op(callee, name);
+            for a in args {
+                count += op_count_in_op(a, name);
+            }
+        }
+        InstKind::MemberLoad { obj, .. } => count += op_count_in_op(obj, name),
+        InstKind::MemberStore { obj, src, .. } => {
+            count += op_count_in_op(obj, name);
+            count += op_count_in_op(src, name);
+        }
+        InstKind::Select { cond, then_, else_ } => {
+            count += op_count_in_op(cond, name);
+            count += op_count_in_op(then_, name);
+            count += op_count_in_op(else_, name);
+        }
+        _ => {}
+    }
+    count
+}
+
+fn op_count_in_op(o: &Operand, name: &str) -> usize {
+    if let Operand::Var(v) = o {
+        if v.name() == name {
+            return 1;
+        }
+    }
+    0
+}
+
+fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
+    match o {
+        Operand::Var(v) => {
+            if let Some(found) = env.get(&v.name()) {
+                Expr::Ident {
+                    name: crate::ast::Ident {
+                        name: found.base.clone(),
+                        span: v.span.clone(),
+                    },
+                    span: v.span.clone(),
+                    ty: v.ty.clone(),
+                }
+            } else {
+                Expr::Ident {
+                    name: crate::ast::Ident {
+                        name: v.base.clone(),
                         span: v.span.clone(),
                     },
                     span: v.span.clone(),

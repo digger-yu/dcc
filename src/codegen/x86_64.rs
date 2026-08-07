@@ -7840,13 +7840,8 @@ impl Codegen {
         if let Some(&(off, _)) = self.var_map.get(name) {
             return off;
         }
-        // 懒分配路径: 变量未被 pre_register_vars 预注册
-        // 使用与 register_var 一致的 used 计算 (每个条目 8 字节)
-        // 并考虑 temp_slots 区域, 避免与 binop 临时槽冲突
-        let used: i32 = self.var_map.values().map(|_| 8).sum();
-        let off = -(used + 16 + self.temp_slots * 8);
-        self.var_map.insert(name.to_string(), (off, Type::Int));
-        off
+        // 懒分配路径: 委托给 register_var 以保证偏移计算一致
+        self.register_var(name, &Type::Int)
     }
 
     /// 全局变量 RIP-relative 加载: reg = [global_var]

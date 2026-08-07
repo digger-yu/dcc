@@ -409,35 +409,31 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
         if b.insts.len() < 4 {
             continue;
         } // 太短不调度
+        // 保守: 有副作用指令时不做重排, 避免破坏数据依赖
+        let has_side = b.insts.iter().any(|i| {
+            matches!(
+                i.kind,
+                InstKind::Store { .. }
+                    | InstKind::Call { .. }
+                    | InstKind::IndexStore { .. }
+                    | InstKind::MemberStore { .. }
+            )
+        });
+        if has_side {
+            continue;
+        }
         // 记录原始顺序用于检测变化
         let orig_order: Vec<String> = b
             .insts
             .iter()
             .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
             .collect();
-        let mut pure: Vec<Inst> = Vec::new();
-        let mut side: Vec<Inst> = Vec::new();
-        for inst in b.insts.drain(..) {
-            if matches!(
-                inst.kind,
-                InstKind::Store { .. }
-                    | InstKind::Call { .. }
-                    | InstKind::IndexStore { .. }
-                    | InstKind::MemberStore { .. }
-            ) {
-                side.push(inst);
-            } else {
-                pure.push(inst);
-            }
-        }
-        // 拓扑排序纯运算指令: 按依赖关系排序, 无依赖的按 dest 名字典序
-        pure.sort_by(|a, b| {
+        // 全部是纯运算指令, 按 dest 名字典序排序
+        b.insts.sort_by(|a, b| {
             let an = a.dest.as_ref().map(|d| d.name()).unwrap_or_default();
             let bn = b.dest.as_ref().map(|d| d.name()).unwrap_or_default();
             an.cmp(&bn)
         });
-        b.insts.extend(pure);
-        b.insts.extend(side);
         // 检测顺序是否真的改变了
         let new_order: Vec<String> = b
             .insts
@@ -911,30 +907,33 @@ pub fn speculative_execution(func: &mut Function) -> bool {
         if b.insts.len() < 2 {
             continue;
         }
+        // 检查是否有副作用指令: 如果有, 且纯指令依赖副作用指令的结果,
+        // 则不能安全地重排序 (会破坏数据依赖)。
+        let has_side = b.insts.iter().any(|i| {
+            matches!(
+                i.kind,
+                InstKind::Store { .. }
+                    | InstKind::Call { .. }
+                    | InstKind::IndexStore { .. }
+                    | InstKind::MemberStore { .. }
+            )
+        });
+        if has_side {
+            // 保守: 有副作用指令时不做重排, 避免破坏 Call→use 依赖
+            continue;
+        }
         // 记录原始顺序
         let orig_order: Vec<String> = b
             .insts
             .iter()
             .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
             .collect();
-        let mut pure: Vec<Inst> = Vec::new();
-        let mut side: Vec<Inst> = Vec::new();
-        for inst in b.insts.drain(..) {
-            if matches!(
-                inst.kind,
-                InstKind::Bin { .. }
-                    | InstKind::Un { .. }
-                    | InstKind::Cast { .. }
-                    | InstKind::Select { .. }
-            ) {
-                pure.push(inst);
-            } else {
-                side.push(inst);
-            }
-        }
-        b.insts.extend(pure);
-        b.insts.extend(side);
-        // 检测顺序是否真的改变了
+        // 全部是纯运算指令, 按字典序排序 (无依赖冲突)
+        b.insts.sort_by(|a, b| {
+            let an = a.dest.as_ref().map(|d| d.name()).unwrap_or_default();
+            let bn = b.dest.as_ref().map(|d| d.name()).unwrap_or_default();
+            an.cmp(&bn)
+        });
         let new_order: Vec<String> = b
             .insts
             .iter()
@@ -1009,12 +1008,37 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
             replace_op_in_inst(&mut inst.kind, &consts);
         }
         replace_op_in_term(&mut b.term, &consts);
-        // 删除冗余纯运算
+    }
+    // 3. 收集所有被引用的 SSA 变量名 (操作数 + terminator)
+    let mut used: HashSet<String> = HashSet::new();
+    for b in func.blocks.values() {
+        for inst in &b.insts {
+            for u in operand_uses(&inst.kind) {
+                used.insert(u);
+            }
+        }
+        match &b.term {
+            Terminator::Ret { val: Some(o) } => {
+                for u in operand_uses_op(o) { used.insert(u); }
+            }
+            Terminator::Branch { cond, .. } => {
+                for u in operand_uses_op(cond) { used.insert(u); }
+            }
+            _ => {}
+        }
+        for p in &b.phis {
+            for (v, _) in &p.incoming {
+                used.insert(v.name());
+            }
+        }
+    }
+    // 4. 删除冗余纯运算: 仅当 dest 不再被引用时才可安全删除
+    for b in func.blocks.values_mut() {
         let before = b.insts.len();
         b.insts.retain(|i| {
             if let Some(d) = &i.dest {
-                if consts.contains_key(&d.name()) {
-                    return false; // 已被常量替换, 指令本身多余
+                if consts.contains_key(&d.name()) && !used.contains(&d.name()) {
+                    return false; // 常量已传播且无引用, 指令多余
                 }
             }
             true
