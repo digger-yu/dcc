@@ -201,6 +201,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ concept 与 SFINAE 联动 | concept 定义注册 + requires 子句展开 + SFINAE 约束过滤 |
 | dcc++ module ODR 检查 | `OdrChecker` 跨模块重复定义检测 + 冲突报告 |
 | dcc++ `virtual` 继承复杂场景 | 菱形继承检测 + 虚基类指针表达 + 警告报告 |
+| dcc++ 标准库模板实参 | `std::vector<int>` 等限定名模板实参语法解析 |
 | dcc++ `auto` 类型推导 | int / `const char*` / class 真推导 |
 | dcc++ `decltype` / `decltype(auto)` | 解析 + 占位 |
 | dcc++ `operator new[]` / `delete[]` | Itanium ABI `_Znam` / `_ZdaPv` 符号 |

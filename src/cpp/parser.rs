@@ -3554,7 +3554,24 @@ impl<'a> CppParser<'a> {
             }
         };
         self.bump();
-        let mut ty = match name.as_str() {
+        // M26: 处理限定名 `std::vector` / `::std::vector` 等
+        let mut full_name = name.clone();
+        while matches!(&self.peek, Some(CppTok::ColonColon(_))) {
+            self.bump(); // 吞 `::`
+            // 读取下一部分标识符
+            if let Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                text,
+                ..
+            })) = &self.peek
+            {
+                full_name = format!("{}::{}", full_name, text);
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        let mut ty = match full_name.as_str() {
             "void" => MangleType::Void,
             "bool" => MangleType::Bool,
             "char" => MangleType::Char,
@@ -7339,5 +7356,18 @@ mod tests {
         let mut p = CppParser::new(src, "test.cpp");
         let d = p.parse_top_level();
         assert!(d.is_ok(), "parse failed: {:?}", d.err());
+    }
+
+    #[test]
+    fn parse_qualified_template_type() {
+        // M26: std::vector<int> 等限定名模板实参
+        // 测试函数参数中的限定名模板类型
+        let src = b"void f(std::vector<int> v) {}";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level();
+        assert!(d.is_ok(), "parse failed: {:?}", d.err());
+        let decls = d.unwrap();
+        // 验证解析成功
+        assert!(!decls.is_empty());
     }
 }
