@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{BinOp, FuncDecl, Stmt, UnOp};
+use crate::ast::{BinOp, FuncDecl, Stmt, Type, UnOp};
 use crate::ssa::{Function, Inst, InstKind, Operand, Terminator};
 
 /// 调度 pipeline 入口: 在 -O2 / -O3 时由 `opt::optimize` 调用。
@@ -130,15 +130,26 @@ pub fn dead_bb_elim(func: &mut Function) -> bool {
 // =====================================================================
 
 /// `i * 2^N`  -> `i << N` ; `i / 2^N` -> `i >> N` (仅无符号)。
+/// Mul→Shl 对有符号/无符号均安全; Div→Shr 仅对无符号类型执行,
+/// 因为有符号除法向零取整而算术右移向负无穷取整, 语义不同。
 pub fn strength_reduction(func: &mut Function) -> bool {
+    // 构建 SSA 变量类型映射, 用于判断 Div 左侧操作数是否无符号
+    let ty_map = build_ssa_type_map(func);
     let mut changed = false;
     for b in func.blocks.values_mut() {
         for inst in &mut b.insts {
-            if let InstKind::Bin { op, l: _, r } = &mut inst.kind {
+            if let InstKind::Bin { op, l, r } = &mut inst.kind {
                 if let Some(n) = const_pow2(r) {
                     let new_op = match op {
                         BinOp::Mul => Some(BinOp::Shl),
-                        BinOp::Div => Some(BinOp::Shr),
+                        BinOp::Div => {
+                            // 仅当左侧操作数可确认为无符号类型时才转换
+                            if operand_is_unsigned(l, &ty_map) {
+                                Some(BinOp::Shr)
+                            } else {
+                                None
+                            }
+                        }
                         _ => None,
                     };
                     if let Some(no) = new_op {
@@ -151,6 +162,49 @@ pub fn strength_reduction(func: &mut Function) -> bool {
         }
     }
     changed
+}
+
+/// 扫描所有指令, 收集 SSA 变量名 -> 类型 的映射。
+fn build_ssa_type_map(func: &Function) -> HashMap<String, Type> {
+    let mut m: HashMap<String, Type> = HashMap::new();
+    for b in func.blocks.values() {
+        for inst in &b.insts {
+            if let Some(d) = &inst.dest {
+                m.insert(d.name(), d.ty.clone());
+            }
+        }
+        for phi in &b.phis {
+            m.insert(phi.dest.name(), phi.dest.ty.clone());
+        }
+    }
+    for p in &func.params {
+        m.insert(p.name(), p.ty.clone());
+    }
+    m
+}
+
+/// 判断操作数是否为无符号整数类型。
+fn operand_is_unsigned(o: &Operand, ty_map: &HashMap<String, Type>) -> bool {
+    match o {
+        Operand::Int(v) => *v >= 0,
+        Operand::Var(v) => ty_map
+            .get(&v.name())
+            .is_some_and(is_unsigned_ty),
+        _ => false,
+    }
+}
+
+fn is_unsigned_ty(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::UChar
+            | Type::UShort
+            | Type::UInt
+            | Type::ULong
+            | Type::ULongLong
+            | Type::UInt128
+            | Type::Bool
+    )
 }
 
 fn const_pow2(o: &Operand) -> Option<u32> {
@@ -1229,5 +1283,110 @@ mod tests {
         assert!(names.contains(&"main"));
         assert!(names.contains(&"ext"), "extern must be preserved");
         assert!(!names.contains(&"dead_static"));
+    }
+
+    fn make_ssa_func() -> Function {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        // 添加一个 UInt 参数 x
+        let x_var = SsaVar {
+            base: "x".into(),
+            version: 0,
+            ty: Type::UInt,
+            span: span.clone(),
+        };
+        f.params.push(x_var.clone());
+        // entry BB: _t1 = x * 8 (Mul)
+        let t1 = SsaVar {
+            base: "_t1".into(),
+            version: 0,
+            ty: Type::UInt,
+            span: span.clone(),
+        };
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            bb.insts.push(Inst {
+                dest: Some(t1.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Mul,
+                    l: Operand::Var(x_var.clone()),
+                    r: Operand::Int(8),
+                },
+                span: span.clone(),
+            });
+            // _t2 = x / 4 (Div, unsigned)
+            let t2 = SsaVar {
+                base: "_t2".into(),
+                version: 0,
+                ty: Type::UInt,
+                span: span.clone(),
+            };
+            bb.insts.push(Inst {
+                dest: Some(t2),
+                kind: InstKind::Bin {
+                    op: BinOp::Div,
+                    l: Operand::Var(x_var),
+                    r: Operand::Int(4),
+                },
+                span: span.clone(),
+            });
+        }
+        f
+    }
+
+    #[test]
+    fn sr_mul_to_shl_and_unsigned_div_to_shr() {
+        let mut f = make_ssa_func();
+        let changed = strength_reduction(&mut f);
+        assert!(changed);
+        let bb = f.blocks.get("entry").unwrap();
+        // Mul 8 -> Shl 3
+        match &bb.insts[0].kind {
+            InstKind::Bin { op: BinOp::Shl, r: Operand::Int(3), .. } => {}
+            other => panic!("expected Shl 3, got {other:?}"),
+        }
+        // Div 4 -> Shr 2 (UInt is unsigned)
+        match &bb.insts[1].kind {
+            InstKind::Bin { op: BinOp::Shr, r: Operand::Int(2), .. } => {}
+            other => panic!("expected Shr 2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sr_signed_div_not_converted() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        let x_var = SsaVar {
+            base: "x".into(),
+            version: 0,
+            ty: Type::Int, // signed!
+            span: span.clone(),
+        };
+        f.params.push(x_var.clone());
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            let t1 = SsaVar {
+                base: "_t1".into(),
+                version: 0,
+                ty: Type::Int,
+                span: span.clone(),
+            };
+            bb.insts.push(Inst {
+                dest: Some(t1),
+                kind: InstKind::Bin {
+                    op: BinOp::Div,
+                    l: Operand::Var(x_var),
+                    r: Operand::Int(4),
+                },
+                span: span.clone(),
+            });
+        }
+        let changed = strength_reduction(&mut f);
+        assert!(!changed, "signed Div must not be converted");
+        let bb = f.blocks.get("entry").unwrap();
+        match &bb.insts[0].kind {
+            InstKind::Bin { op: BinOp::Div, .. } => {}
+            other => panic!("Div should remain, got {other:?}"),
+        }
     }
 }
