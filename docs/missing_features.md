@@ -69,7 +69,7 @@
 | module ODR 检查 | BMF 序列化已实装，ODR 检查待后续 |
 | `virtual` 继承复杂场景 | 部分支持，复杂虚基类不验证 |
 | 标准库模板实参 | `std::vector<int>` 等模板实参语法无法直接使用 |
-| 动态 RTTI | 跨多态指针动态 RTTI 仍依赖 C 后端在 vtable 中写 typeinfo 字段，多文件链接场景受限 |
+| 动态 RTTI | 跨多态指针动态 RTTI 仍依赖 C 后端在 vtable 中写 typeinfo 字段 |
 | 继承成员访问 | C++ 多文件链接场景受 dcc C 后端 `__base_Base1` 字段访问 pre-existing 限制 |
 | `__dcc_mbr` 辅助定义 | 继承成员访问改写需要 C 后端支持 `__base_*` 字段访问 |
 
@@ -77,7 +77,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| `ptr_to_member` 多文件链接 | vtable 符号多文件链接场景重复定义 |
 | Windows 链接路径验证 | Windows 平台链接路径未实际验证 |
 | vDSO 集成 | 基础设施已有（`VdsoInfo` + `parse_vdso`），嵌入输出 layout + `.note.GNU-vdso` 节未完成 |
 | DSO symbol caching | `DsoCache` 已实现，链接器侧未接入（需先补 `-lxxx → libc.so` 解析） |

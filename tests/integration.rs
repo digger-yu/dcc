@@ -3760,6 +3760,62 @@ fn m17_volatile_member() {
     let _ = fs::remove_file(_obj);
 }
 
+/// M17.0: vtable/typeinfo/member-offset 符号多文件链接不重复定义
+/// 两个 TU 包含相同 class 定义，链接器应通过 weak 解析而非报 multiple definition
+#[test]
+#[cfg(unix)]
+fn m17_weak_vtable_multi_file_link() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    // 共享 class 定义（含 virtual + 数据成员 + 显式构造）
+    let class_def = "\
+class Foo {\n\
+public:\n\
+    Foo() : x(0) {}\n\
+    virtual int val() const { return 42; }\n\
+    int x;\n\
+};\n";
+    // TU1: 定义 Foo + helper() 使用 val() 和 x
+    let tu1 = format!(
+        "{class_def}\
+int helper() {{ Foo f; f.x = 1; return f.val(); }}\n"
+    );
+    // TU2: 同样定义 Foo + main() 也使用 val() 和 x
+    // 两个 TU 各自独立使用 Foo, 链接时验证 vtable/typeinfo 不冲突
+    // 不跨 TU 调用: C++ 前端尚不支持自由函数前向声明
+    let tu2 = format!(
+        "{class_def}\
+int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
+    );
+    let p1 = dir.join(format!("dcc-m17-weak-tu1-{pid}.cpp"));
+    let p2 = dir.join(format!("dcc-m17-weak-tu2-{pid}.cpp"));
+    let o1 = dir.join(format!("dcc-m17-weak-tu1-{pid}.o"));
+    let o2 = dir.join(format!("dcc-m17-weak-tu2-{pid}.o"));
+    let exe = dir.join(format!("dcc-m17-weak-{pid}"));
+    fs::write(&p1, &tu1).unwrap();
+    fs::write(&p2, &tu2).unwrap();
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    // 编译 TU1
+    let c1 = Command::new(dcc).args(["-c", "-o"]).arg(&o1).arg(&p1).output().expect("dcc");
+    let _ = fs::remove_file(&p1);
+    assert!(c1.status.success(), "tu1 compile: {}", String::from_utf8_lossy(&c1.stderr));
+    // 编译 TU2
+    let c2 = Command::new(dcc).args(["-c", "-o"]).arg(&o2).arg(&p2).output().expect("dcc");
+    let _ = fs::remove_file(&p2);
+    assert!(c2.status.success(), "tu2 compile: {}", String::from_utf8_lossy(&c2.stderr));
+    // 链接: 关键验证点 — 不报 multiple definition
+    let link = Command::new("gcc").args(["-o"]).arg(&exe).arg(&o1).arg(&o2).output().expect("gcc link");
+    let _ = fs::remove_file(&o1);
+    let _ = fs::remove_file(&o2);
+    let stderr = String::from_utf8_lossy(&link.stderr);
+    assert!(link.status.success(), "link failed (multiple definition?): {stderr}");
+    assert!(!stderr.contains("multiple definition"), "vtable/typeinfo 重复定义: {stderr}");
+    // 运行验证
+    let run = Command::new(&exe).output().expect("run");
+    let _ = fs::remove_file(&exe);
+    assert_eq!(run.status.code(), Some(0), "exit 0 (42 - 42 == 0)");
+}
+
 // =========================================================================
 // M18: C++ 标准库扩展 (filesystem / thread / mutex / chrono / expected /
 // flat_map / multi_index / regex / ranges / concepts / modules)

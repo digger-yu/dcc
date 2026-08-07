@@ -184,13 +184,14 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ 完整 concept 求值 | `sizeof(T)<=N` / `same_as<T,U>` / `derived_from<T,Base>`；解析 + 简化求值 |
 | dcc++ 协程 | `co_await` / `co_yield` / `co_return` Duff's device 状态机 + promise type 推导 |
 | dcc++ module BMF 序列化 | DCC_BMF_V1 文本格式；`to_bmf`/`from_bmf` round-trip |
-| dcc++ GCC 兼容运行时 | `__cxa_guard_acquire/release/abort` / `__dynamic_cast` / `initializer_list` |
+| dcc++ GCC 兼容运行时 | `__cxa_guard_acquire/release/abort` / `__dynamic_cast` / `initializer_list`（均 weak，多 TU 安全） |
 | dcc++ operator-> 重载链 | 类型名含 `Ptr` / `Wrapper` / `Iter` 识别 |
 | dcc++ 完整 RTTI dynamic_cast | 跨虚继承通过 vtable RTTI 查找 |
 | dcc++ typeid(e) 真 RTTI | `expr_static_class` 推断静态类，生成 `(&__dcc_ti_<class>)` 符号引用 |
 | dcc++ 构造委托 / 继承链 ctor | `using Base::Base;` 转发 |
 | dcc++ 成员函数指针 | `&Class::method` 降级为 `&_member_fn_<Class>_<method>` |
-| dcc++ `obj.*ptr_to_member` | `.*` 与 `->*` 语法，走 `__dcc_mbr_<class>_<member>` 偏移 |
+| dcc++ `obj.*ptr_to_member` | `.*` 与 `->*` 语法，走 `__dcc_mbr_<class>_<member>` 偏移（weak，多 TU 安全） |
+| dcc++ vtable/typeinfo 多文件链接 | `_ZTV` / `_ZTI` / `__dcc_mbr_*` 均 weak，多 TU 包含相同类定义不报 multiple definition |
 | dcc++ `__cxa_guard_*` 线程安全 init guard | 静态局部变量状态机 0/1/2 |
 | dcc++ std::initializer_list | `{1, 2, 3}` 降级为复合字面量 |
 | dcc++ 模板完整单态化 | `TemplateRegistry` 注册 + 缓存 + 偏特化匹配；模板-id `T<U>` 解析 |

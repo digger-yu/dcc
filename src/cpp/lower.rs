@@ -1168,6 +1168,9 @@ impl Lower {
                 if *is_noexcept {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
+                // 类体内定义的成员函数隐式 inline (Itanium ABI: weak linkage)
+                // 多 TU 包含相同类定义时不报 multiple definition
+                self.out.push_str("__attribute__((weak)) ");
                 // M17.0: volatile 成员函数 - 标记此函数; lower 端不区分 volatile
                 // (C 端 volatile 与 C++ volatile 语义在 ABI 上等价, 由 caller 决定
                 // this 访问的 volatile 属性).
@@ -1200,6 +1203,8 @@ impl Lower {
                 if *is_noexcept {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
+                // 类体内定义的构造函数隐式 inline (weak linkage)
+                self.out.push_str("__attribute__((weak)) ");
                 if *is_explicit {
                     // M17.0: explicit 标记不生成特殊代码 (C++ 端禁止隐式转换)
                     // 我们通过函数注释标记; C 端不强制 (没有隐式转换)
@@ -1222,6 +1227,8 @@ impl Lower {
                 if *is_noexcept {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
+                // 类体内定义的析构函数隐式 inline (weak linkage)
+                self.out.push_str("__attribute__((weak)) ");
                 self.current_class = Some(class_q);
                 self.emit_fn(&m, &MangleType::Void, &all_params, body);
                 let _ = is_virtual;
@@ -1271,6 +1278,8 @@ impl Lower {
                     let mut all_params: Vec<(String, MangleType)> =
                         vec![("this".to_string(), this_ty)];
                     all_params.extend(params.iter().cloned());
+                    // 类体内定义的运算符隐式 inline (weak linkage)
+                    self.out.push_str("__attribute__((weak)) ");
                     self.emit_fn(&m, ret, &all_params, body);
                 } else {
                     let param_tys: Vec<MangleType> =
@@ -1655,7 +1664,7 @@ impl Lower {
         for m in &c.members {
             if let CppDecl::MemberVar { name, .. } = m {
                 self.out.push_str(&format!(
-                    "size_t __dcc_mbr_{0}_{1}(void) {{ struct {0} __f; return (size_t)((char*)&__f.{1} - (char*)&__f); }}\n",
+                    "__attribute__((weak)) size_t __dcc_mbr_{0}_{1}(void) {{ struct {0} __f; return (size_t)((char*)&__f.{1} - (char*)&__f); }}\n",
                     qname, name,
                 ));
             }
@@ -1734,9 +1743,9 @@ impl Lower {
             "static __dcc_typeinfo_t __dcc_ti_{0} = {{ __dcc_ti_{0}_name }};\n",
             name
         ));
-        // Itanium _ZTI<Name> 兼容符号
+        // Itanium _ZTI<Name> 兼容符号 (weak: 多 TU 允许重复定义)
         self.out
-            .push_str(&format!("void* {} = (void*)&__dcc_ti_{};\n", zti, name));
+            .push_str(&format!("__attribute__((weak)) void* {} = (void*)&__dcc_ti_{};\n", zti, name));
     }
 
     /// 输出 vtable 数组与符号
@@ -1776,7 +1785,7 @@ impl Lower {
         self.out.push_str("    (void*)0\n");
         self.out.push_str("};\n");
         self.out
-            .push_str(&format!("void* {} = __dcc_vt_{};\n", ztv, name));
+            .push_str(&format!("__attribute__((weak)) void* {} = __dcc_vt_{};\n", ztv, name));
     }
 
     /// 输出 vtable 项
@@ -3031,6 +3040,20 @@ mod tests {
         assert!(s.contains("_ZTV"), "{}", s);
         // typeinfo 符号
         assert!(s.contains("_ZTI"), "{}", s);
+    }
+
+    #[test]
+    fn lower_vtable_typeinfo_are_weak() {
+        // Itanium C++ ABI: vtable/typeinfo 符号必须 weak, 否则多 TU 链接重复定义
+        let src = b"class Foo { public: virtual void f() {} int x; };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("__attribute__((weak)) void* _ZTV"), "vtable must weak: {}", s);
+        assert!(s.contains("__attribute__((weak)) void* _ZTI"), "typeinfo 必须 weak: {}", s);
+        assert!(s.contains("__attribute__((weak)) size_t __dcc_mbr_"), "member offset 必须 weak: {}", s);
     }
 
     #[test]
