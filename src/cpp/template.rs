@@ -47,6 +47,8 @@ pub struct TemplateRegistry {
     pub inst_cache: std::collections::HashMap<String, CppDecl>,
     /// 实例化顺序记录 (key 列表, 供 lower 按依赖序输出)
     pub inst_order: Vec<String>,
+    /// M26: 概念定义注册表 (concept name -> body_text)
+    pub concepts: std::collections::HashMap<String, String>,
 }
 
 /// 把 MangleType 编码为实例化缓存 key (与 C 标识符命名一致)
@@ -182,7 +184,9 @@ impl TemplateRegistry {
             for (pn, pa) in td.param_names.iter().zip(resolved.iter()) {
                 ctx.bind(pn.clone(), type_key(pa));
             }
-            if !crate::cpp::feature_degrade::evaluate_trait_condition(cond, &ctx).unwrap_or(true) {
+            // M26: 展开 requires 子句中的概念引用
+            let expanded = crate::cpp::feature_degrade::expand_concepts(cond, &self.concepts);
+            if !crate::cpp::feature_degrade::evaluate_trait_condition(&expanded, &ctx).unwrap_or(true) {
                 return None;
             }
         }

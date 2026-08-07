@@ -94,6 +94,8 @@ pub struct Lower {
     pub plain_fns: std::collections::HashSet<String>,
     /// M26: 待输出定义的函数模板实例化 (name, args)
     pub pending_fn_insts: std::collections::VecDeque<(String, Vec<MangleType>)>,
+    /// M26: 概念定义注册表 (concept name -> body_text)
+    pub concepts: std::collections::HashMap<String, String>,
 }
 
 /// M18.0: 检查 ident 是否是 C 关键字 (如 int/char/void/...), 不能作为 typedef 名
@@ -300,6 +302,7 @@ impl Lower {
             inst_emitted: std::collections::HashSet::new(),
             plain_fns: std::collections::HashSet::new(),
             pending_fn_insts: std::collections::VecDeque::new(),
+            concepts: std::collections::HashMap::new(),
         }
     }
     pub fn with_options(_opt: LowerOptions) -> Self {
@@ -634,6 +637,12 @@ impl Lower {
                         decl,
                     );
                 }
+            }
+            // M26: 概念定义注册 (concept Name = body_text)
+            CppDecl::Concept { name, body_text } => {
+                self.concepts.insert(name.clone(), body_text.clone());
+                // 同步注册到模板注册表 (供 requires 子句求值时展开)
+                self.templates.concepts.insert(name.clone(), body_text.clone());
             }
             _ => {
                 // M26: 普通声明扫描类型, 触发模板类实例化 (定义先于使用)
@@ -3344,6 +3353,22 @@ mod tests {
         ctx.bind("T".to_string(), "int".to_string());
         let c = Concept::parse("same_as<T, int>");
         assert!(c.evaluate(&ctx));
+    }
+
+    #[test]
+    fn m26_concept_sfinae_integration() {
+        // M26: concept 定义与 requires 子句联动
+        // concept Integral = sizeof(T) <= 4;
+        // template <typename T> requires Integral<T> T add(T a, T b) { return a + b; }
+        use crate::cpp::feature_degrade::expand_concepts;
+        let mut concepts = std::collections::HashMap::new();
+        concepts.insert("Integral".to_string(), "sizeof(T) <= 4".to_string());
+        // 展开 Integral<int> -> (sizeof(int) <= 4)
+        let expanded = expand_concepts("Integral<int>", &concepts);
+        assert!(expanded.contains("sizeof(int) <= 4"), "{}", expanded);
+        // 展开 Integral<T> -> (sizeof(T) <= 4)
+        let expanded = expand_concepts("Integral<T>", &concepts);
+        assert!(expanded.contains("sizeof(T) <= 4"), "{}", expanded);
     }
 
     #[test]

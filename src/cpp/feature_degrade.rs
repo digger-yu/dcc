@@ -272,6 +272,55 @@ pub fn evaluate_enable_if(text: &str, ctx: &SfinaeCtx) -> bool {
     true
 }
 
+/// M26: 展开 requires 子句中的概念引用
+/// 例如: `Integral<T>` -> `sizeof(T) <= 8` (如果 Integral 定义为 `sizeof(T) <= 8`)
+/// concepts: 概念名 -> 概念体文本的映射
+pub fn expand_concepts(cond: &str, concepts: &std::collections::HashMap<String, String>) -> String {
+    let mut result = cond.to_string();
+    // 简单启发式: 查找 `ConceptName<...>` 模式并替换
+    for (name, body) in concepts {
+        // 查找 `name<` 模式
+        let pattern = format!("{}<", name);
+        while let Some(start) = result.find(&pattern) {
+            // 找到匹配的 `>`
+            let after = &result[start + pattern.len() - 1..];
+            let mut depth = 0;
+            let mut end = 0;
+            for (i, c) in after.chars().enumerate() {
+                match c {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if end > 0 {
+                // 提取模板实参 (如 `T` 或 `int`)
+                let args_str = &after[1..end];
+                // 替换概念体中的类型形参 (简化: 只处理单形参)
+                let expanded = if args_str.contains(',') {
+                    // 多实参概念 (如 same_as<T, U>) - 保留原文
+                    body.clone()
+                } else {
+                    // 单实参概念 - 替换形参 T
+                    body.replace("T", args_str.trim())
+                };
+                // 替换原文中的概念引用
+                let full_match = &result[start..start + pattern.len() - 1 + end + 1];
+                result = result.replace(full_match, &format!("({})", expanded));
+            } else {
+                break;
+            }
+        }
+    }
+    result
+}
+
 /// 顶层 (尖括号/圆括号外) 查找子串位置, 处理 `<=` / `>=` 不计数
 fn find_top_level(s: &str, pat: &str) -> Option<usize> {
     let mut depth: i32 = 0;
