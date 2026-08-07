@@ -70,15 +70,16 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | 前缀 | 范围 | 子系统 | 源文件 |
 |------|------|--------|--------|
 | `E00xx` | 0001–0013 | Parser（语法/声明） | `src/parser.rs` |
-| `W00xx` | 0001 | Parser 警告 | `src/parser.rs` |
+| `W00xx` | 0001–0003 | Parser 警告 | `src/parser.rs`, `src/format_check.rs` |
 | `E01xx` | 0100–0102 | Driver（I/O、汇编） | `src/driver.rs` |
 | `E02xx` | 0200–0209 | Preprocessor（`#` 指令） | `src/preproc.rs` |
-| `E02xx` | 0200–0204 | **Link（`-r` 链接）** ⚠️ 与预处理共用号段 | `src/link.rs` |
 | `W02xx` | 0200 | Preprocessor 警告 | `src/preproc.rs` |
-| `E03xx` | 0300 | 目标/代码生成选项 | `src/driver.rs` |
+| `E03xx` | 0300–0310 | 目标/代码生成/链接 | `src/driver.rs`, `src/link/mod.rs` |
+| `E04xx` | 0401 | PCH（预编译头） | `src/preproc.rs` |
 | `E10xx` | 1001–1010 | Typed IR（语义/降级） | `src/ir.rs` |
-
-**⚠️ 号段重叠说明**：`E0200`–`E0204` 在 **预处理** 与 **链接** 中含义不同，需结合触发阶段（是否在 `-r` 链接路径）解读。后续版本可能将 Link 迁至 `E04xx`。
+| `W03xx` | 0301–0313 | 类型转换/OpenMP 警告 | `src/parser.rs`, `src/driver.rs` |
+| `W04xx` | 0400–0403 | PCH 警告 | `src/preproc.rs` |
+| `W10xx` | 1000 | 隐式声明警告 | `src/parser.rs` |
 
 **严重性**：
 
@@ -115,9 +116,9 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 
 ---
 
-## 4. Driver：`E0100`–`E0102`、`E0300`
+## 4. Driver：`E0100`–`E0102`、`E0300`–`E0310`
 
-驱动层：读源、写产物、调汇编器、目标选项。
+驱动层：读源、写产物、调汇编器、目标选项、代码生成后端。
 
 | 码 | 消息（典型） | 含义 | 触发条件 | Snapshot |
 |----|--------------|------|----------|----------|
@@ -125,12 +126,14 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0101** | `cannot write …` | 写文件失败 | `.o`/`.s`/`.d`/dep 文件写入失败 | `e0101.stderr.snap` |
 | **E0102** | `cannot invoke assembler` / `assembler failed` | 汇编器失败 | 调 `as` 失败或非零退出 | `e0102.stderr.snap` |
 | **E0300** | `floating-point code requires SSE…` | SSE 与浮点代码冲突 | `-mno-sse` 且 TU 含 float/double | `e0300.stderr.snap` |
+| **E0301** | `dcc C backend failed for …` / `cannot write …` | 代码生成后端失败或写输出失败 | dcc C 后端非零退出；输出文件写入失败 | — |
+| **E0310** | `a __global__ function '…' cannot also be __host__ or __device__` | CUDA 函数限定符冲突 | `__global__` 与 `__host__`/`__device__` 同时出现 | — |
 
 **CLI 形式的 E0100**：无输入文件时，`cli.rs` 直接输出 `dcc: error: no input file`（无 `[E0100]`），exit 2。语义等价于 Diagnostic E0100。
 
 ---
 
-## 5. Preprocessor：`E0200`–`E0209`、`W0200`
+## 5. Preprocessor：`E0200`–`E0209`、`E0401`、`W0200`、`W0400`–`W0403`
 
 `#` 指令与翻译阶段 3 错误。  
 **注意**：预处理错误在 Driver 中可能 **打印两次**（预处理阶段 + `main` 统一打印），snapshot 已锁定该行为。
@@ -147,26 +150,38 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0207** | `unterminated block comment` / `#embed` 语法 | 注释未闭合 / `#embed` 参数非法 | `/*` 未闭合；`#embed` 非文件路径 | `e0207.c` |
 | **E0208** | `source is not valid UTF-8` / `embed file not found` | 源编码 / embed 文件 | 非法 UTF-8 字节；`#embed` 找不到文件 | `e0208_utf8`、`e0208_embed.c` |
 | **E0209** | `cannot read forced include …` | 强制包含不可读 | `-include secret.h` 且读失败 | `e0209.c`（Unix） |
+| **E0401** | `failed to load PCH …` / `cannot read PCH file …` | PCH 加载失败 | 预编译头文件损坏或不可读 | — |
 
-### Preprocessor 警告：`W0200`
+### Preprocessor 警告：`W0200`、`W0400`–`W0403`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
 | **W0200** | `#warning …` | `#warning` 指令 | 源码中 `#warning msg` | — |
+| **W0400** | `PCH … is incompatible with current macro state` | PCH 不兼容 | 预编译头与当前宏状态冲突 | — |
+| **W0402** | `failed to write PCH …` | PCH 写入失败 | 磁盘满或权限问题 | — |
+| **W0403** | `PCH … not created due to preprocessing errors` | PCH 未创建 | 预处理阶段有错误 | — |
 
 ---
 
-## 6. Link（`-r`）：`E0200`–`E0204`
+## 6. Link（`-r`）：`E0301`–`E0304`
 
-可重定位链接 / LTO 合并路径（`src/link.rs`）。**与预处理同号不同义**。
+可重定位链接 / LTO 合并路径（`src/link/mod.rs`）。
+
+| 码 | 消息（典型） | 含义 | 触发条件 |
+|----|--------------|------|----------|
+| **E0301** | `cannot read input bundle: …` | 输入束读取失败 | 链接输入文件解析失败 |
+| **E0302** | `symbol resolution failed: …` | 符号解析错误 | 未定义符号或重复定义 |
+| **E0303** | `layout failed: …` | 布局计算失败 | ELF 布局构建错误 |
+| **E0304** | `relocation failed: …` | 重定位失败 | 应用重定位时出错 |
+
+**Legacy 链接器**（`src/link/legacy.rs`）仍使用 `E0200`–`E0203`：
 
 | 码 | 消息（典型） | 含义 | 触发条件 |
 |----|--------------|------|----------|
 | **E0200** | `no input files for link` | 链接无输入 | `dcc -r` 无 `.o` 输入 |
-| **E0201** | `cannot read …` | 无法读取 `.o` | 输入目标文件打开失败 |
+| **E0201** | `cannot read …` / `cannot write …` | 读写失败 | 输入/输出文件操作失败 |
 | **E0202** | `cannot invoke ld` / `ld -r failed` | `ld` 失败 | 未安装 binutils 或 `LD=` 路径无效 |
 | **E0203** | `cannot write LTO temp` / `objcopy failed…` | LTO 节注入失败 | 写临时文件或 `objcopy --update-section` 失败 |
-| **E0204** | `cannot invoke objcopy` / `objcopy failed to strip…` | dead symbol 剥离失败 | LTO `--strip-symbol` 路径失败 |
 
 ---
 
@@ -182,7 +197,7 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 | **E1002** | `IR function has no name` | 函数名为空 | `int () { return 0; }` 无名函数定义 | `e1002.c` |
 | **E1003** | `unsupported floating-point operation …` | 不支持的 float 运算 | 如 `float` 的 `%`、一元 `!`/`~`；支持 `+ - * /` 比较与 `&& \|\|` | `e1003.c` |
 | **E1004** | `cannot dereference a non-pointer expression` | 非法解引用 | `*x` 其中 `x` 非指针 | `e1004.c` |
-| **E1005** | `va_arg currently requires a va_list object` | `va_arg`  operand 非法 | 对非 `va_list` 对象做 `va_arg` | `e1005.c` |
+| **E1005** | `va_arg currently requires a va_list object` | `va_arg` operand 非法 | 对非 `va_list` 对象做 `va_arg` | `e1005.c` |
 | **E1006** | `global initializer for '…' is not a supported constant expression` | 全局初始化非常量 | `int g = main();`；支持整数/浮点字面量、`sizeof`/`offsetof`、cast、复合字面量、向量 `{1,2,3,4}` 等 | `e1006.c` |
 | **E1007** | `unsupported vector operation …` / `vector assignment …` | 向量运算/赋值不支持 | 向量仅支持标量逐元素 `+ - *`（非 XMM SIMD）；赋值右值须为向量表达式、InitList 或 cast | `e1007.c`、`vector_binop_non_ident.c` |
 | **E1008** | `unsupported complex operation …` | 复数运算不支持 | `_Complex float` 的 `%` 等 | `e1008.c` |
@@ -191,7 +206,35 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 
 ---
 
-## 8. CLI 非编号错误
+## 8. 警告码汇总
+
+### Parser 警告：`W0001`–`W0003`、`W1000`
+
+| 码 | 消息 | 含义 | 触发条件 | Snapshot |
+|----|------|------|----------|----------|
+| **W0001** | `type defaults to 'int' in declaration without a type specifier` | 隐式 int（GNU 兼容） | 仅有存储类：`static x;` | `w0001.c` |
+| **W0002** | `unknown type '…' treated as 'int' (-fpermissive)` | 未知类型降级为 int | `-fpermissive` 且遇到未声明 typedef | — |
+| **W0003** | `format attribute on '…' expects format string at argument …` 等 | printf/scanf 格式检查 | `__attribute__((format(printf,...)))` 参数不匹配 | — |
+| **W1000** | `implicit declaration of '…' (assumed int)` | 隐式函数声明 | 调用未声明的函数 | — |
+
+### 类型转换警告：`W0301`–`W0302`
+
+| 码 | 消息 | 含义 | 触发条件 |
+|----|------|------|----------|
+| **W0301** | `integer conversion from … to … bits may lose information` | 整数转换可能丢失信息 | 大类型赋值给小类型（如 `long` → `int`） |
+| **W0302** | `implicit conversion from … (use an explicit cast if intended)` | 隐式类型转换 | 需要显式 cast 的隐式转换 |
+
+### OpenMP 警告：`W0311`–`W0313`
+
+| 码 | 消息 | 含义 | 触发条件 |
+|----|------|------|----------|
+| **W0311** | `-fopenmp: '#pragma omp …' outside any function body; ignored` | 函数体外 OpenMP 指令 | `#pragma omp` 出现在全局作用域 |
+| **W0312** | `-fopenmp: unsupported OpenMP construct '#pragma omp …' in function` | 函数内不支持的 OpenMP | 函数体内遇到不支持的 OpenMP 构造 |
+| **W0313** | `-fopenmp: unsupported OpenMP construct '#pragma omp …'; ignored` | 不支持的 OpenMP 指令 | 一般性不支持的 OpenMP 构造 |
+
+---
+
+## 9. CLI 非编号错误
 
 `src/cli.rs` 中 `CliError`，格式固定为：
 
@@ -216,7 +259,7 @@ dcc: error: <message>
 
 ---
 
-## 9. Snapshot 回归
+## 10. Snapshot 回归
 
 | 项目 | 说明 |
 |------|------|
@@ -261,10 +304,10 @@ dcc: error: <message>
 
 ---
 
-## 10. 添加新错误码 checklist
+## 11. 添加新错误码 checklist
 
 1. 在对应子系统 `src/*.rs` 中使用 `Diagnostic::err` / `warn` 或 `err_here` / `warn_here`
-2. 选用未占用编号（避免与 Link/Preproc 的 `E02xx` 冲突，或更新本文档号段表）
+2. 选用未占用编号（参见 §2 号段表，注意 Legacy Link 仍用 `E02xx`）
 3. 在 `tests/fixtures/errors/` 添加最小触发 `.c` + 运行 snapshot 更新
 4. **更新本文档**对应表格行
 5. 若用户可见频率高，在 `docs/architecture.md` 保留一行链接即可
