@@ -408,6 +408,14 @@ impl Lowering {
                 bits: 8,
                 signed: false,
             },
+            Type::Char16 => ValueType::Integer {
+                bits: 16,
+                signed: false,
+            },
+            Type::Char32 => ValueType::Integer {
+                bits: 32,
+                signed: false,
+            },
             Type::Short => ValueType::Integer {
                 bits: 16,
                 signed: true,

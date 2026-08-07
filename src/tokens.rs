@@ -19,8 +19,12 @@ pub enum TokKind {
     FloatLit,      // 1.5 2.0f 3.14L
     StringLit,     // "abc"
     WideStringLit, // L"abc" (wchar_t string, UTF-32 on Linux)
+    Char16StringLit, // u"abc" (char16_t string)
+    Char32StringLit, // U"abc" (char32_t string)
     CharLit,       // 'a'
     WideCharLit,   // L'a' (wchar_t char literal, wchar_t on Linux = int/UTF-32)
+    Char16Lit,     // u'a' (char16_t char literal)
+    Char32Lit,     // U'a' (char32_t char literal)
     Ident,         // foo _x
     // 关键字
     KwInt,
@@ -59,6 +63,8 @@ pub enum TokKind {
     KwRegister,
     KwAtomic, // _Atomic
     KwBool,   // _Bool (C99)
+    KwChar16, // char16_t (C11)
+    KwChar32, // char32_t (C11)
     KwFract,
     KwAccum,   // _Fract, _Accum (定点数)
     KwComplex, // _Complex
@@ -264,6 +270,8 @@ impl<'a> Lexer<'a> {
                 "decltype" => TokKind::KwDecltype, // M17.0
                 "_Atomic" => TokKind::KwAtomic,
                 "_Bool" => TokKind::KwBool,
+                "char16_t" => TokKind::KwChar16,
+                "char32_t" => TokKind::KwChar32,
                 "_Fract" => TokKind::KwFract,
                 "_Accum" => TokKind::KwAccum,
                 "_Complex" | "__complex__" | "__complex" => TokKind::KwComplex,
@@ -340,6 +348,162 @@ impl<'a> Lexer<'a> {
                     .to_string();
                 let kind = if terminated {
                     TokKind::WideCharLit
+                } else {
+                    TokKind::Invalid
+                };
+                return Tok {
+                    kind,
+                    span: Span {
+                        file: self.file.clone(),
+                        line,
+                        col,
+                        len: (self.pos - start) as u32,
+                    },
+                    text,
+                };
+            }
+            // u"..." char16_t string literal
+            if text == "u" && self.peek() == Some(b'"') {
+                self.bump(); // consume opening '"'
+                let mut terminated = false;
+                while let Some(c) = self.peek() {
+                    if c == b'"' {
+                        self.bump();
+                        terminated = true;
+                        break;
+                    }
+                    if c == b'\n' || c == b'\r' {
+                        break;
+                    }
+                    if c == b'\\' {
+                        self.bump();
+                        self.bump();
+                        continue;
+                    }
+                    self.bump();
+                }
+                let text = std::str::from_utf8(&self.src[start..self.pos])
+                    .unwrap()
+                    .to_string();
+                let kind = if terminated {
+                    TokKind::Char16StringLit
+                } else {
+                    TokKind::Invalid
+                };
+                return Tok {
+                    kind,
+                    span: Span {
+                        file: self.file.clone(),
+                        line,
+                        col,
+                        len: (self.pos - start) as u32,
+                    },
+                    text,
+                };
+            }
+            // u'...' char16_t char literal
+            if text == "u" && self.peek() == Some(b'\'') {
+                self.bump(); // consume opening '\''
+                let mut terminated = false;
+                while let Some(c) = self.peek() {
+                    if c == b'\'' {
+                        self.bump();
+                        terminated = true;
+                        break;
+                    }
+                    if c == b'\n' || c == b'\r' {
+                        break;
+                    }
+                    if c == b'\\' {
+                        self.bump();
+                        self.bump();
+                        continue;
+                    }
+                    self.bump();
+                }
+                let text = std::str::from_utf8(&self.src[start..self.pos])
+                    .unwrap()
+                    .to_string();
+                let kind = if terminated {
+                    TokKind::Char16Lit
+                } else {
+                    TokKind::Invalid
+                };
+                return Tok {
+                    kind,
+                    span: Span {
+                        file: self.file.clone(),
+                        line,
+                        col,
+                        len: (self.pos - start) as u32,
+                    },
+                    text,
+                };
+            }
+            // U"..." char32_t string literal
+            if text == "U" && self.peek() == Some(b'"') {
+                self.bump(); // consume opening '"'
+                let mut terminated = false;
+                while let Some(c) = self.peek() {
+                    if c == b'"' {
+                        self.bump();
+                        terminated = true;
+                        break;
+                    }
+                    if c == b'\n' || c == b'\r' {
+                        break;
+                    }
+                    if c == b'\\' {
+                        self.bump();
+                        self.bump();
+                        continue;
+                    }
+                    self.bump();
+                }
+                let text = std::str::from_utf8(&self.src[start..self.pos])
+                    .unwrap()
+                    .to_string();
+                let kind = if terminated {
+                    TokKind::Char32StringLit
+                } else {
+                    TokKind::Invalid
+                };
+                return Tok {
+                    kind,
+                    span: Span {
+                        file: self.file.clone(),
+                        line,
+                        col,
+                        len: (self.pos - start) as u32,
+                    },
+                    text,
+                };
+            }
+            // U'...' char32_t char literal
+            if text == "U" && self.peek() == Some(b'\'') {
+                self.bump(); // consume opening '\''
+                let mut terminated = false;
+                while let Some(c) = self.peek() {
+                    if c == b'\'' {
+                        self.bump();
+                        terminated = true;
+                        break;
+                    }
+                    if c == b'\n' || c == b'\r' {
+                        break;
+                    }
+                    if c == b'\\' {
+                        self.bump();
+                        self.bump();
+                        continue;
+                    }
+                    self.bump();
+                }
+                let text = std::str::from_utf8(&self.src[start..self.pos])
+                    .unwrap()
+                    .to_string();
+                let kind = if terminated {
+                    TokKind::Char32Lit
                 } else {
                     TokKind::Invalid
                 };

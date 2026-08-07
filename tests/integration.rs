@@ -4441,6 +4441,22 @@ fn m23_attr_retain_used_compiles_and_runs() {
     let _ = fs::remove_file(exe);
 }
 
+// char16_t / char32_t (C11/C++11) 类型与字面量
+#[test]
+#[cfg(unix)]
+fn m26_char16_char32_compiles_and_runs() {
+    let src = include_str!("fixtures/c/char16_char32.c");
+    let (out, exe) = run_compile_and_run("m26-char16-char32", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "char16_t/char32_t size and value checks");
+    let _ = fs::remove_file(exe);
+}
+
 /// `double _Complex` 类型说明符 (C99 complex.h 形式)
 /// M26: 此前 parse_type_mode 第二 loop 的 KwDouble arm 带 `break;`
 /// 提前退出, 导致 `_Complex` 后续修饰符被外层误判为 declarator.

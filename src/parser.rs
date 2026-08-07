@@ -3590,6 +3590,16 @@ impl<'a> Parser<'a> {
                     self.advance();
                     break;
                 }
+                TokKind::KwChar16 => {
+                    base = Some(Type::Char16);
+                    self.advance();
+                    break;
+                }
+                TokKind::KwChar32 => {
+                    base = Some(Type::Char32);
+                    self.advance();
+                    break;
+                }
                 TokKind::KwFloat => {
                     base = Some(Type::Float);
                     self.advance();
@@ -4501,6 +4511,8 @@ impl<'a> Parser<'a> {
                 | TokKind::KwDecimal64
                 | TokKind::KwDecimal128
                 | TokKind::KwBool
+                | TokKind::KwChar16
+                | TokKind::KwChar32
                 | TokKind::KwInt128
                 | TokKind::KwUInt128
         ) || (self.cur.kind == TokKind::Ident
@@ -4563,6 +4575,8 @@ impl<'a> Parser<'a> {
                 | TokKind::KwDecimal64
                 | TokKind::KwDecimal128
                 | TokKind::KwBool
+                | TokKind::KwChar16
+                | TokKind::KwChar32
                 | TokKind::KwInt128
                 | TokKind::KwUInt128
         ) || (self.peek.kind == TokKind::Ident
@@ -5747,6 +5761,8 @@ impl<'a> Parser<'a> {
                 | TokKind::KwFract
                 | TokKind::KwAccum
                 | TokKind::KwBool
+                | TokKind::KwChar16
+                | TokKind::KwChar32
                 | TokKind::KwInt128
                 | TokKind::KwUInt128
         ) || (self.peek.kind == TokKind::Ident
@@ -5943,6 +5959,8 @@ impl<'a> Parser<'a> {
                                 | Type::Char
                                 | Type::SChar
                                 | Type::UChar
+                                | Type::Char16
+                                | Type::Char32
                                 | Type::Short
                                 | Type::UShort
                                 | Type::Int
@@ -6328,6 +6346,36 @@ impl<'a> Parser<'a> {
                     ty: Type::Ptr(Box::new(Type::Int)),
                 })
             }
+            // u"..." char16_t string literal
+            TokKind::Char16StringLit => {
+                let mut data = parse_char16_str(&self.cur.text);
+                self.advance();
+                while self.cur.kind == TokKind::Char16StringLit {
+                    data.extend(parse_char16_str(&self.cur.text));
+                    self.advance();
+                }
+                // pointer to char16_t
+                Some(Expr::String {
+                    data,
+                    span: sp,
+                    ty: Type::Ptr(Box::new(Type::Char16)),
+                })
+            }
+            // U"..." char32_t string literal
+            TokKind::Char32StringLit => {
+                let mut data = parse_char32_str(&self.cur.text);
+                self.advance();
+                while self.cur.kind == TokKind::Char32StringLit {
+                    data.extend(parse_char32_str(&self.cur.text));
+                    self.advance();
+                }
+                // pointer to char32_t
+                Some(Expr::String {
+                    data,
+                    span: sp,
+                    ty: Type::Ptr(Box::new(Type::Char32)),
+                })
+            }
             TokKind::CharLit => {
                 let v = parse_chr(&self.cur.text);
                 self.advance();
@@ -6354,6 +6402,38 @@ impl<'a> Parser<'a> {
                     v,
                     span: sp,
                     ty: Type::Int,
+                })
+            }
+            // u'x' char16_t character literal
+            TokKind::Char16Lit => {
+                let text = &self.cur.text;
+                let bytes = parse_char16_str(text);
+                let v = if bytes.len() >= 2 {
+                    u16::from_le_bytes([bytes[0], bytes[1]]) as u8
+                } else {
+                    0
+                };
+                self.advance();
+                Some(Expr::Char {
+                    v,
+                    span: sp,
+                    ty: Type::Char16,
+                })
+            }
+            // U'x' char32_t character literal
+            TokKind::Char32Lit => {
+                let text = &self.cur.text;
+                let bytes = parse_char32_str(text);
+                let v = if bytes.len() >= 4 {
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u8
+                } else {
+                    0
+                };
+                self.advance();
+                Some(Expr::Char {
+                    v,
+                    span: sp,
+                    ty: Type::Char32,
                 })
             }
             TokKind::Ident => {
@@ -6857,6 +6937,175 @@ fn parse_wide_str(raw: &str) -> Vec<u8> {
         } else {
             c as u32
         };
+        d.extend_from_slice(&cp.to_le_bytes());
+    }
+    // null terminator (4 bytes of zero)
+    d.extend_from_slice(&0u32.to_le_bytes());
+    d
+}
+
+/// Parse u"..." or u'...' char16_t literal to UTF-16LE bytes
+fn parse_char16_str(raw: &str) -> Vec<u8> {
+    // Strip u prefix and quotes: u"..." -> ...
+    let inner = if raw.starts_with("u\"") || raw.starts_with("u'") {
+        &raw[2..raw.len() - 1]
+    } else {
+        &raw[1..raw.len() - 1]
+    };
+    let mut d = vec![];
+    let mut it = inner.chars();
+    while let Some(c) = it.next() {
+        let cp = if c == '\\' {
+            match it.next() {
+                Some('n') => '\n' as u32,
+                Some('t') => '\t' as u32,
+                Some('r') => '\r' as u32,
+                Some('0') => 0,
+                Some('\\') => '\\' as u32,
+                Some('"') => '"' as u32,
+                Some('\'') => '\'' as u32,
+                Some('x') => {
+                    let mut val = 0u32;
+                    for _ in 0..2 {
+                        if let Some(h) = it.clone().next() {
+                            if let Some(d) = h.to_digit(16) {
+                                val = val * 16 + d;
+                                it.next();
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    val
+                }
+                Some('u') => {
+                    let mut val = 0u32;
+                    if it.next() == Some('{') {
+                        for _ in 0..4 {
+                            if let Some(h) = it.clone().next() {
+                                if h == '}' {
+                                    it.next();
+                                    break;
+                                }
+                                if let Some(d) = h.to_digit(16) {
+                                    val = val * 16 + d;
+                                    it.next();
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    val
+                }
+                Some(c) => c as u32,
+                None => '\\' as u32,
+            }
+        } else {
+            c as u32
+        };
+        // Encode as UTF-16LE (char16_t = 2 bytes)
+        if cp <= 0xFFFF {
+            d.extend_from_slice(&(cp as u16).to_le_bytes());
+        } else {
+            // Surrogate pair for code points > 0xFFFF
+            let cp = cp - 0x10000;
+            let high = 0xD800 + (cp >> 10);
+            let low = 0xDC00 + (cp & 0x3FF);
+            d.extend_from_slice(&(high as u16).to_le_bytes());
+            d.extend_from_slice(&(low as u16).to_le_bytes());
+        }
+    }
+    // null terminator (2 bytes of zero)
+    d.extend_from_slice(&0u16.to_le_bytes());
+    d
+}
+
+/// Parse U"..." or U'...' char32_t literal to UTF-32LE bytes
+fn parse_char32_str(raw: &str) -> Vec<u8> {
+    // Strip U prefix and quotes: U"..." -> ...
+    let inner = if raw.starts_with("U\"") || raw.starts_with("U'") {
+        &raw[2..raw.len() - 1]
+    } else {
+        &raw[1..raw.len() - 1]
+    };
+    let mut d = vec![];
+    let mut it = inner.chars();
+    while let Some(c) = it.next() {
+        let cp = if c == '\\' {
+            match it.next() {
+                Some('n') => '\n' as u32,
+                Some('t') => '\t' as u32,
+                Some('r') => '\r' as u32,
+                Some('0') => 0,
+                Some('\\') => '\\' as u32,
+                Some('"') => '"' as u32,
+                Some('\'') => '\'' as u32,
+                Some('x') => {
+                    let mut val = 0u32;
+                    for _ in 0..2 {
+                        if let Some(h) = it.clone().next() {
+                            if let Some(d) = h.to_digit(16) {
+                                val = val * 16 + d;
+                                it.next();
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    val
+                }
+                Some('u') => {
+                    let mut val = 0u32;
+                    if it.next() == Some('{') {
+                        for _ in 0..4 {
+                            if let Some(h) = it.clone().next() {
+                                if h == '}' {
+                                    it.next();
+                                    break;
+                                }
+                                if let Some(d) = h.to_digit(16) {
+                                    val = val * 16 + d;
+                                    it.next();
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    val
+                }
+                Some('U') => {
+                    let mut val = 0u32;
+                    for _ in 0..8 {
+                        if let Some(h) = it.clone().next() {
+                            if let Some(d) = h.to_digit(16) {
+                                val = val * 16 + d;
+                                it.next();
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    val
+                }
+                Some(c) => c as u32,
+                None => '\\' as u32,
+            }
+        } else {
+            c as u32
+        };
+        // Encode as UTF-32LE (char32_t = 4 bytes)
         d.extend_from_slice(&cp.to_le_bytes());
     }
     // null terminator (4 bytes of zero)

@@ -522,6 +522,8 @@ pub enum Type {
     Char,
     SChar,
     UChar,
+    Char16, // char16_t (C11/C++11, 16-bit)
+    Char32, // char32_t (C11/C++11, 32-bit)
     Short,
     UShort,
     Int,
@@ -578,8 +580,8 @@ impl Type {
         match self {
             Type::Void => 0,
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
-            Type::Short | Type::UShort => 2,
-            Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
+            Type::Char16 | Type::Short | Type::UShort => 2,
+            Type::Char32 | Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
             Type::Enum(_, _, under) => match under {
                 // C23 底层类型: enum E : unsigned char 用底层类型大小;
                 // 未指定时默认 int (4 字节); packed 编码为 Some(SChar) (1 字节)
@@ -609,8 +611,8 @@ impl Type {
         match self {
             Type::Void => 1,
             Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
-            Type::Short | Type::UShort => 2,
-            Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
+            Type::Char16 | Type::Short | Type::UShort => 2,
+            Type::Char32 | Type::Int | Type::UInt | Type::Float | Type::Fract | Type::Accum => 4,
             Type::Enum(_, _, under) => match under {
                 // C23 底层类型: enum E : unsigned char 用底层类型大小;
                 // 未指定时默认 int (4 字节); packed 编码为 Some(SChar) (1 字节)
@@ -646,6 +648,8 @@ impl Type {
                 | Type::Char
                 | Type::SChar
                 | Type::UChar
+                | Type::Char16
+                | Type::Char32
                 | Type::Short
                 | Type::UShort
                 | Type::Int
@@ -806,6 +810,8 @@ impl std::fmt::Display for Type {
             Type::Char => write!(f, "char"),
             Type::SChar => write!(f, "signed char"),
             Type::UChar => write!(f, "unsigned char"),
+            Type::Char16 => write!(f, "char16_t"),
+            Type::Char32 => write!(f, "char32_t"),
             Type::Short => write!(f, "short"),
             Type::UShort => write!(f, "unsigned short"),
             Type::Int => write!(f, "int"),
