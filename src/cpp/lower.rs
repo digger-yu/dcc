@@ -55,6 +55,8 @@ pub struct Lower {
     pub class_ctors: std::collections::HashMap<String, Vec<CppDecl>>,
     /// 已知类成员 (class -> [(name, type), ...])
     pub class_fields: std::collections::HashMap<String, Vec<(String, MangleType)>>,
+    /// 已知类基类 (class -> [BaseSpec, ...])
+    pub class_bases: std::collections::HashMap<String, Vec<crate::cpp::parser::BaseSpec>>,
     /// 局部变量 -> 类型映射 (用于 c.method() -> _ZN<Cls>3<method>Ev(&c))
     pub local_var_types: std::collections::HashMap<String, MangleType>,
     /// 形参 -> 类型映射
@@ -279,6 +281,7 @@ impl Lower {
             class_methods: std::collections::HashMap::new(),
             class_ctors: std::collections::HashMap::new(),
             class_fields: std::collections::HashMap::new(),
+            class_bases: std::collections::HashMap::new(),
             local_var_types: std::collections::HashMap::new(),
             param_var_types: std::collections::HashMap::new(),
             emitted_typedefs: std::collections::HashSet::new(),
@@ -1584,6 +1587,8 @@ impl Lower {
     fn lower_class(&mut self, c: &ClassDecl) {
         // M18.0: 用 qualified name 避免 namespace 内类与全局类冲突
         let qname = self.qualify_name(&c.name);
+        // Store base class information for inherited member access
+        self.class_bases.insert(c.name.clone(), c.bases.clone());
         // 阶段 1: 仅 struct 定义 (成员字段 + vptr)
         self.out.push_str(&format!("struct {} {{\n", qname));
         // 继承: 嵌入基类子结构
@@ -1739,8 +1744,9 @@ impl Lower {
         let ztv = mangle_vtable(name);
         self.out
             .push_str(&format!("static void* __dcc_vt_{}[] = {{\n", name));
+        // RTTI slot: pointer to typeinfo struct for dynamic typeid
         self.out
-            .push_str("    (void*)0,  /* RTTI offset (skip) */\n");
+            .push_str(&format!("    (void*)&__dcc_ti_{},  /* RTTI typeinfo pointer */\n", name));
         for m in members {
             if let CppDecl::MemberFn {
                 is_virtual: true,
@@ -2246,11 +2252,44 @@ impl Lower {
                 } else {
                     false
                 };
-                self.emit_expr(b);
-                if use_arrow {
-                    self.out.push_str(&format!("->{}", s));
+                
+                // Check if member is inherited from a base class
+                let inherited_base = if let Some(class) = self.lookup_var_class(b) {
+                    // Check if this class has base classes
+                    if let Some(bases) = self.class_bases.get(&class).cloned() {
+                        // Check if the member is in any base class
+                        let mut found_base = None;
+                        for base in &bases {
+                            if let Some(base_fields) = self.class_fields.get(&base.name) {
+                                if base_fields.iter().any(|(name, _)| name == s) {
+                                    found_base = Some(base.name.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        found_base
+                    } else {
+                        None
+                    }
                 } else {
-                    self.out.push_str(&format!(".{}", s));
+                    None
+                };
+                
+                self.emit_expr(b);
+                if let Some(base_name) = inherited_base {
+                    // Rewrite to b.__base_BaseName.s
+                    if use_arrow {
+                        self.out.push_str(&format!("->__base_{}.{}", base_name, s));
+                    } else {
+                        self.out.push_str(&format!(".__base_{}.{}", base_name, s));
+                    }
+                } else {
+                    // Not inherited or can't determine, use normal access
+                    if use_arrow {
+                        self.out.push_str(&format!("->{}", s));
+                    } else {
+                        self.out.push_str(&format!(".{}", s));
+                    }
                 }
             }
             CppExpr::PtrMember(b, s) => {

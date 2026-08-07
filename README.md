@@ -374,8 +374,6 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 | 后端 | libFuzzer 协议 / 拦截器接入未做 | LLVMFuzzerTestOneInput / 8-bit counters / PC table / malloc 拦截器未实现 |
 | 后端 | 浮点变参（v0–7 / fa0–fa7）未保存，stub 返回 0.0 | unimplemented §11 |
 | 后端 | 栈溢出变参（>8 个）未实装，返回 0 + 警告 | unimplemented §11 |
-| C++ | 跨多态指针动态 RTTI 需 vtable 中写 typeinfo 指针 | 当前 emit_vtable RTTI 槽为占位 0；静态 typeid 工作正常 |
-| C++ | 多文件链接场景受 dcc C 后端嵌套字段访问限制 | `__base_Base1` 字段生成方式与直接字段不同 (lower.rs#L1593) |
 | C++ | `obj.*ptr_to_member` 多文件链接可能触发重复定义 | lower.rs#L1653 生成完整函数定义，但每个 TU 都会 emit |
 | 链接 | Windows 本地无法完整验证链接路径（依赖 host `ld` / `objcopy`） | Windows 无等效工具链 |
 
