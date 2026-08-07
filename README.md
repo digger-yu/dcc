@@ -369,23 +369,24 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 
 | 范围 | 限制 | 跟踪 |
 |------|------|------|
-| 后端 | 多数组栈变量分配有重叠 bug | unimplemented §9 follow-up（M25 wchar_libc fixture 故意单 buffer 规避） |
-| 后端 | `_Complex` 字面量 `4.0i` 与 `__real__` / `__imag__` 关键字尚未实现 | unimplemented §9 |
-| 后端 | 16 字节 struct 传值 ABI 与 glibc 不一致 | unimplemented §9（M25 complex_libc fixture 显式声明 `double cproj(double)` 规避） |
-| 后端 | `struct sigaction` / `stack_t` 布局与 glibc 不一致（信号调用 segfault） | unimplemented §9（M25 signal_libc fixture 仅验证 libc 转发层） |
-| 后端 | dcc 对未声明的外部 sanitizer 函数不写入 `.symtab`/`.strtab` | unimplemented §9（M25 集成测试用 `-S` 检查汇编） |
+| 后端 | `_Complex` 算术运算 (如 `imag * 1.0i`) 结果错误 | 字面量/`__real__`/`__imag__` 已实现；算术运算待修复 |
 | 后端 | `*p = v` 的实际 store 仍是空操作；KASAN 桩本身正确 | unimplemented §3 |
-| 后端 | ARM MTE 标签插入未做（HWASAN 共享 KASAN 路径） | unimplemented §3 |
-| 后端 | 内核定制 shadow 范围未单独分发（`-fsanitize=kernel-address`） | unimplemented §3 |
-| 后端 | 跨函数 inline 合并（KCOV）未做 | unimplemented §3 |
-| 后端 | libFuzzer 协议 / 拦截器接入未做 | unimplemented §3 |
+| 后端 | ARM MTE 标签插入未做 (软件 tag 模式) | HWASAN 已使用 `__hwasan_*` 函数名 (commit 50c6e4c) |
+| 后端 | 内核定制 shadow 范围未单独分发（`-fsanitize=kernel-address`） | 与用户态共用同一 shadow 基址 |
+| 后端 | 跨函数 inline 合并（KCOV）未做 | 每函数独立 guard 数组 |
+| 后端 | libFuzzer 协议 / 拦截器接入未做 | LLVMFuzzerTestOneInput / 8-bit counters / PC table / malloc 拦截器未实现 |
 | 后端 | 浮点变参（v0–7 / fa0–fa7）未保存，stub 返回 0.0 | unimplemented §11 |
-| 后端 | 栈溢出变参（>8 个）未实装 | unimplemented §11 |
-| C++ | 跨多态指针动态 RTTI 仍依赖 C 后端在 vtable 中写 typeinfo 字段 | unimplemented §9 follow-up |
-| C++ | 多文件链接场景受 dcc C 后端 `__base_Base1` 字段访问 pre-existing 限制 | M25 note |
-| C++ | `obj.*ptr_to_member` 偏移常量 `__dcc_mbr_<class>_<member>` 需 runtime helper 定义 | M25 note（仅验证 dcc -c 路径） |
-| 链接 | Windows 本地无法完整验证链接路径（依赖 host `ld` / `objcopy`） | ADR-008 |
-| 测试 | 5 个 pre-existing LTO 集成测试在 origin/main 已失败，与本分支无关 | git worktree 已确认 |
+| 后端 | 栈溢出变参（>8 个）未实装，返回 0 + 警告 | unimplemented §11 |
+| C++ | 跨多态指针动态 RTTI 需 vtable 中写 typeinfo 指针 | 当前 emit_vtable RTTI 槽为占位 0；静态 typeid 工作正常 |
+| C++ | 多文件链接场景受 dcc C 后端嵌套字段访问限制 | `__base_Base1` 字段生成方式与直接字段不同 (lower.rs#L1593) |
+| C++ | `obj.*ptr_to_member` 偏移常量 `__dcc_mbr_<class>_<member>` 需 runtime helper 定义 | lower.rs#L1653 生成函数声明但不自动 emit 定义体 |
+| 链接 | Windows 本地无法完整验证链接路径（依赖 host `ld` / `objcopy`） | Windows 无等效工具链 |
+
+**已修复项目**（从限制列表移除）：
+- ✅ 多数组栈变量分配重叠 bug (commit 78e4eae)
+- ✅ 16 字节 struct 传值 ABI (验证通过)
+- ✅ `struct sigaction` / `stack_t` 布局 (commit c327d82)
+- ✅ LTO 集成测试失败 (当前 287 passed, 0 failed)
 
 ## 12. 引用文档
 
