@@ -10,9 +10,9 @@ use crate::ast::*;
 use crate::codegen::elf;
 use crate::codegen::elf::{
     ElfRela, ElfSection, ElfSym, R_X86_64_32, R_X86_64_32S, R_X86_64_64, R_X86_64_PC32,
-    R_X86_64_PLT32, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_PROGBITS, STB_GLOBAL,
-    STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION, STT_TLS,
-    STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
+    R_X86_64_PLT32, SHF_ALLOC, SHF_EXECINSTR, SHF_GNU_RETAIN, SHF_WRITE, SHN_UNDEF, SHT_PROGBITS,
+    STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE, STT_OBJECT,
+    STT_SECTION, STT_TLS, STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
 };
 use crate::const_eval;
 use crate::preproc::LineSpan;
@@ -1575,6 +1575,57 @@ impl Codegen {
                     );
                     continue;
                 }
+                // attribute((used)): 路由到独立节并标记 SHF_GNU_RETAIN
+                if v.is_used_attr && !v.is_thread_local {
+                    let sec_name = if v.init.is_some() {
+                        format!(".data.{}", v.name.name)
+                    } else {
+                        format!(".bss.{}", v.name.name)
+                    };
+                    let is_writable = true;
+                    let sec_idx = self.ensure_custom_section(&sec_name, false, is_writable);
+                    // 标记 SHF_GNU_RETAIN 防止 gc-sections 移除
+                    self.extra_sections[sec_idx].flags |= SHF_GNU_RETAIN;
+                    self.extra_sections[sec_idx].align =
+                        self.extra_sections[sec_idx].align.max(align as u64);
+                    if v.init.is_none() && self.extra_sections[sec_idx].data.is_empty() {
+                        self.extra_sections[sec_idx].ty = elf::SHT_NOBITS;
+                    } else if v.init.is_some() {
+                        self.extra_sections[sec_idx].ty = SHT_PROGBITS;
+                    }
+                    let sec = &mut self.extra_sections[sec_idx];
+                    let off = (sec.data.len() + align - 1) & !(align - 1);
+                    while sec.data.len() < off {
+                        sec.data.push(0);
+                    }
+                    let offset = sec.data.len() as u64;
+                    let mut has_init = false;
+                    if let Some(init) = &v.init {
+                        let is_float =
+                            matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                        if let Some(bytes) = Self::global_init_bytes(init, sz, is_float) {
+                            self.extra_sections[sec_idx].data.extend_from_slice(&bytes);
+                            has_init = true;
+                        }
+                    }
+                    if !has_init {
+                        for _ in 0..sz {
+                            self.extra_sections[sec_idx].data.push(0);
+                        }
+                    }
+                    self.globals.insert(
+                        v.name.name.clone(),
+                        GlobalVar {
+                            offset,
+                            size: sz,
+                            ty: v.ty.clone(),
+                            init: None,
+                            section: (sec_idx + 7) as u16,
+                            is_tls: false,
+                        },
+                    );
+                    continue;
+                }
                 // 自定义 section 变量: 路由到 extra_sections
                 if Self::is_custom_section_var(v) {
                     let sec_name = v.section.as_ref().unwrap().clone();
@@ -1963,6 +2014,10 @@ impl Codegen {
                     }
                     let sec_name = format!(".text.{}", f.name.name);
                     let sec_idx = self.ensure_custom_section(&sec_name, true, false);
+                    // attribute((used)): 标记 SHF_GNU_RETAIN 防止 gc-sections 移除
+                    if f.is_used_attr {
+                        self.extra_sections[sec_idx].flags |= SHF_GNU_RETAIN;
+                    }
                     let func_align = f.alignment.unwrap_or(16).max(1);
                     self.extra_sections[sec_idx].align =
                         self.extra_sections[sec_idx].align.max(func_align as u64);
