@@ -2,7 +2,7 @@
 # prepare0 窄目标验收：devicetable-offsets / bounds / modpost file2alias
 set -euo pipefail
 
-KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-6.6}"
+KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
 DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
 WORK="${WORK:-/tmp/dcc-prepare0-$$}"
 mkdir -p "$WORK"

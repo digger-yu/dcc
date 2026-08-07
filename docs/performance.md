@@ -2,7 +2,7 @@
 
 ## 目标
 
-在 ubuntu-latest 免费 runner 上 (2 cores, 7GB), 用 `defconfig -O2` 编 linux 6.6 内核:
+在 ubuntu-latest 免费 runner 上 (2 cores, 7GB), 用 `defconfig -O2` 编 linux 7.1 内核:
 - GCC: 30-60 分钟 (cold), 15-30 分钟 (warm)
 - DCC: 目标 < 30 分钟 cold, < 15 分钟 warm
 
@@ -56,7 +56,7 @@ T_dcc = T_gcc / (S_macro * S_header * S_type * S_opt * S_dbg * S_codegen * S_io)
 - **效果**: `devicetable-offsets.c` 等内核辅助文件通过编译
 
 每个 PR 触发 `bench-free` job:
-1. 浅克隆 linux-6.6
+1. 浅克隆 linux-7.1
 2. defconfig
 3. `make HOSTCC=... vmlinux` 三次: GCC baseline / DCC cold / DCC warm
 4. 写 summary 到 GitHub Step Summary

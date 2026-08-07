@@ -30,7 +30,7 @@
   - 附加：`bash scripts/archive/test_tr2.sh`、`bash scripts/archive/test_v3_cache.sh`
 
 - [ ] **4. 内核全树首次 `make CC=dcc` 编译至首个失败点**
-  - 验证：Linux 6.6 + `.config`；`make CC=dcc -k V=1 2>&1 | tee build.log`
+  - 验证：Linux 7.1 + `.config`；`make CC=dcc -k V=1 2>&1 | tee build.log`
   - 产出：结构化失败日志（第一个失败 TU + 错误信息）
 
 - [ ] **5. 迭代修复全树编译阻塞项**
@@ -65,8 +65,8 @@
   - 进展：脚本已用系统 vmlinuz 冒烟 **PASS**（2/2 配置）；dcc 自编译 bzImage 待步骤 6
   - 进展：`asm-offsets.c` **867→0 解析、0 语义、`.s` 已生成**（2026-07-17）
   - 进展：`-O2` **`goto found` 标签 DCE**、mini-asm `N:insn`/位操作指令（2026-07-17）
-  - 验收：`python3 scripts/test_asm_offsets.py`（本地 `~/linux-6.6` + dcc release）
-  - 阻塞：全树 `make CC=dcc` 仍待步骤 4–6；本地 gcc-15 亦无法完成 6.6 全树
+  - 验收：`python3 scripts/test_asm_offsets.py`（本地 `~/linux-7.1` + dcc release）
+  - 阻塞：全树 `make CC=dcc` 仍待步骤 4–6；本地 gcc-15 亦无法完成 7.1 全树
 
 ---
 

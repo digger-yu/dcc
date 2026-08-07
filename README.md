@@ -386,8 +386,8 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 | [`docs/cross_compile.md`](./docs/cross_compile.md) | 跨平台三元组 + 工具链命名 + 6 架构状态 |
 | [`docs/diagnostics.md`](./docs/diagnostics.md) | 错误码权威说明（E/W 码表 + 输出格式 + snapshot 回归 + 新增 checklist） |
 | [`docs/gcc_build_guide.md`](./docs/gcc_build_guide.md) | GCC 源码子集（libiberty / fixincludes / libdecnumber）+ libiberty 125/0/4 基线 |
-| [`docs/kernel_build_guide.md`](./docs/kernel_build_guide.md) | Linux 6.6 x86_64 编译全流程 + asm-offsets 验收 + modpost / pahole / objtool / QEMU 脚本 |
-| [`docs/missing_features.md`](./docs/missing_features.md) | Linux 6.6 缺失特性自动化证据 + 通过门禁 + 阻塞项 + libiberty + sanitizer + profiling |
+| [`docs/kernel_build_guide.md`](./docs/kernel_build_guide.md) | Linux 7.1 x86_64 编译全流程 + asm-offsets 验收 + modpost / pahole / objtool / QEMU 脚本 |
+| [`docs/missing_features.md`](./docs/missing_features.md) | Linux 7.1 缺失特性自动化证据 + 通过门禁 + 阻塞项 + libiberty + sanitizer + profiling |
 | [`docs/next_steps.md`](./docs/next_steps.md) | 20 步路线图 checklist（A 内核全树 / B 质量门禁 / C CI / D 编译器补洞 / E 性能 / F profiling） |
 | [`docs/performance.md`](./docs/performance.md) | 性能模型 + 加速来源 + 实测 + KPI |
 | [`docs/profiling.md`](./docs/profiling.md) | PGO / GCOV / AutoFDO / LBR / MemProf / TopdownL1 / Offloading 7 子系统详述 |

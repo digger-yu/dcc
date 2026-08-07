@@ -2,7 +2,7 @@
 """复现 current_thread_info 宏展开差异。"""
 import os, subprocess, tempfile
 
-KERNEL = os.path.expanduser("~/linux-6.6")
+KERNEL = os.path.expanduser("~/linux-7.1")
 DCC = os.path.expanduser("~/dcc-agent-linux66/target/release/dcc")
 FLAGS = (
     f"-nostdinc -I{KERNEL}/include -I{KERNEL}/arch/x86/include "

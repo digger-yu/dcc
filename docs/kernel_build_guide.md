@@ -1,6 +1,6 @@
 # DCC 手工编译 Linux 内核指南
 
-> 目标版本：**Linux 6.6 / x86_64**。本地验收目录：`./`。
+> 目标版本：**Linux 7.1 / x86_64**。本地验收目录：`./`。
 
 ## 当前进度（2026-07-17）
 
@@ -81,15 +81,15 @@ kconfig/fixdep 等宿主工具用 gcc 或 Rust fixdep）。步骤 7/10 需先产
 
 ### asm-offsets 验收（prepare0 步骤 4–5）
 
-Linux 6.6 x86_64 在 `prepare0` 中会编译 `arch/x86/kernel/asm-offsets.c` 生成
+Linux 7.1 x86_64 在 `prepare0` 中会编译 `arch/x86/kernel/asm-offsets.c` 生成
 `asm-offsets.s`（供后续提取结构体偏移常量）。
 
 ```bash
-# 本地 (内核树 ~/linux-6.6, dcc ~/dcc/target/release/dcc)
+# 本地 (内核树 ~/linux-7.1, dcc ~/dcc/target/release/dcc)
 python3 scripts/archive/test_asm_offsets.py
 
 # 或手动：读取 .asm-offsets.s.cmd 中的 gcc 命令，将 gcc 替换为 dcc 后执行
-cd ~/linux-6.6
+cd ~/linux-7.1
 dcc -Wp,-MMD,... -S -o arch/x86/kernel/asm-offsets.s arch/x86/kernel/asm-offsets.c
 ```
 
@@ -153,11 +153,11 @@ sudo apt install -y build-essential gcc make bc flex bison libssl-dev libelf-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 
-# Linux 内核源码 (6.1 版本)
+# Linux 内核源码 (7.1 版本)
 cd /usr/src
-sudo wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.tar.xz
-sudo tar xf linux-6.1.tar.xz
-sudo ln -s linux-6.1 linux   # 方便引用
+sudo wget https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.1.tar.xz
+sudo tar xf linux-7.1.tar.xz
+sudo ln -s linux-7.1 linux   # 方便引用
 ```
 
 ### 1.3 验证环境

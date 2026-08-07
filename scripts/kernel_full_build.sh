@@ -2,7 +2,7 @@
 # 内核全树 make CC=dcc 首跑（-k 继续至收集全部失败）
 set -euo pipefail
 
-KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-6.6}"
+KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
 DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
 LOG="${LOG:-$HOME/dcc-agent-linux66/build.log}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 8)}"

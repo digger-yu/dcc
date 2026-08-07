@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DCC_REPO="${DCC_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-6.6}"
+KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
 OUT="$KERNEL_DIR/scripts/basic/fixdep"
 
 echo "== install Rust fixdep =="

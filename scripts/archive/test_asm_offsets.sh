@@ -2,7 +2,7 @@
 # 用 dcc 单独编译 asm-offsets.c，验证 parser 修复
 set -euo pipefail
 
-KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-6.6}"
+KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
 DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
 CMD_FILE="$KERNEL_DIR/arch/x86/kernel/.asm-offsets.s.cmd"
 

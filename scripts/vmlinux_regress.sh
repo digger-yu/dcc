@@ -2,7 +2,7 @@
 # vmlinux 级 pahole / objtool 严格回归（需 ET_EXEC vmlinux）
 set -euo pipefail
 
-KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-6.6}"
+KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
 VMLINUX="${VMLINUX:-$KERNEL_DIR/vmlinux}"
 DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
 

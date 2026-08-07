@@ -6,7 +6,7 @@ import subprocess
 LINES = [32824, 39224, 68890, 68896]
 CTX = 3
 
-os.chdir(os.path.expanduser("~/linux-6.6"))
+os.chdir(os.path.expanduser("~/linux-7.1"))
 dcc = os.path.expanduser("~/dcc-agent-linux66/target/release/dcc")
 cmd_line = open("arch/x86/kernel/.asm-offsets.s.cmd").readline()
 cmd = cmd_line.split(":=", 1)[1].strip().replace("gcc", dcc, 1)

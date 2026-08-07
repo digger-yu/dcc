@@ -2,7 +2,7 @@
 import os
 import subprocess
 
-os.chdir(os.path.expanduser("~/linux-6.6"))
+os.chdir(os.path.expanduser("~/linux-7.1"))
 line = open("arch/x86/kernel/.asm-offsets.s.cmd").readline()
 cmd = line.split(":=", 1)[1].strip().replace("-S", "-E").replace(
     "arch/x86/kernel/asm-offsets.s", "/tmp/asm-offsets.i"

@@ -11,7 +11,7 @@ on:
       kernel_version:
         description: 'Linux kernel version'
         required: false
-        default: '6.6.3'
+        default: '7.1'
       optimization_level:
         description: 'Optimization level (O0/O1/O2/O3)'
         required: false
@@ -115,7 +115,7 @@ jobs:
       - name: Setup parameters
         id: params
         run: |
-          echo "kernel=${{ github.event.inputs.kernel_version || '6.6.3' }}" >> $GITHUB_OUTPUT
+          echo "kernel=${{ github.event.inputs.kernel_version || '7.1' }}" >> $GITHUB_OUTPUT
           echo "opt=${{ github.event.inputs.optimization_level || 'O2' }}" >> $GITHUB_OUTPUT
           echo "jobs=${{ github.event.inputs.parallel_jobs || '4' }}" >> $GITHUB_OUTPUT
           echo "runner=ubuntu-latest (2 cores, 7GB RAM)" >> $GITHUB_OUTPUT
@@ -130,7 +130,7 @@ jobs:
           KV=${{ steps.params.outputs.kernel }}
           echo "Downloading Linux kernel $KV..."
           START=$(date +%s)
-          wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KV}.tar.xz" -O /tmp/linux.tar.xz
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${KV}.tar.xz" -O /tmp/linux.tar.xz
           mkdir -p /tmp/kernel
           tar -xf /tmp/linux.tar.xz -C /tmp/kernel --strip-components=1
           END=$(date +%s)

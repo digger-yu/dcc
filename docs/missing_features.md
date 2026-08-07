@@ -4,7 +4,7 @@
 > 
 > 已支持特性详见 `docs/support_features.md`
 
-## 阻塞级（Linux 6.6 全树）
+## 阻塞级（Linux 7.1 全树）
 
 | 特性 | 当前状态 | 说明 |
 |------|----------|------|
@@ -108,7 +108,7 @@
 
 - 工作区：`~/dcc`
 - 编译流程：`cargo build --release` + `bash scripts/test_all.sh`
-- 内核树：`~/linux-6.6`，需已有 `.config`
+- 内核树：`~/linux-7.1`，需已有 `.config`
 - GCC 子集：`~/gcc-src` + `scripts/libiberty_combined.sh`（由 `cargo test --test integration` 驱动）
 - 内核全树：`scripts/kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物 SKIP）
 - QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` + bzImage）

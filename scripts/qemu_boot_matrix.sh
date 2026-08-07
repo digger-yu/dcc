@@ -2,7 +2,7 @@
 # QEMU 启动矩阵：defconfig 串口 / nographic，检测 boot log 无 panic
 set -euo pipefail
 
-KERNEL="${KERNEL:-$HOME/linux-6.6/arch/x86/boot/bzImage}"
+KERNEL="${KERNEL:-$HOME/linux-7.1/arch/x86/boot/bzImage}"
 DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
 TIMEOUT_SEC="${QEMU_TIMEOUT:-15}"
 

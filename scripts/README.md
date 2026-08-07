@@ -8,7 +8,7 @@
 | `ci-trigger.sh` | CI 触发 |
 | `bench.sh` / `bench_phase_e.sh` | 性能与阶段 E 基准 |
 
-## 内核 / Linux 6.6
+## 内核 / Linux 7.1
 
 | 脚本 | 用途 |
 |------|------|
