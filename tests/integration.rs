@@ -4766,47 +4766,38 @@ fn signal_libc_fixture_runs() {
     }
 }
 
-/// sigaction / sigaltstack libc 转发 (Section 11 P0.2) - 编译路径.
-/// 验证 dcc 能编译带 struct sigaction / stack_t 的代码, 且 .o 引用
-/// sigaction / sigaltstack 作为 undefined symbol (留给 host gcc 解析).
-/// 注: 运行时 segfault 是 dcc 现有 struct 布局 bug, 不在本测试覆盖范围.
+/// sigaction / sigaltstack libc 转发 (Section 11 P0.2) - 编译 + 运行时路径.
+/// 验证 dcc 能编译带 struct sigaction / stack_t 的代码, 且运行时
+/// sigaction/sigaltstack 调用成功 (退出码 0).
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn sigaction_sigaltstack_fixture_compiles() {
     let src = "\
 #include <signal.h>
+#include <stdlib.h>
 void handler(int s) { (void)s; }
 int main(void) {
     struct sigaction sa;
     sa.sa_handler = handler;
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
-    sigaction(10, &sa, (struct sigaction*)0);
+    sa.sa_restorer = 0;
+    if (sigaction(10, &sa, (struct sigaction*)0) != 0) return 1;
 
     stack_t ss;
-    ss.ss_sp = (void*)0;
+    ss.ss_sp = malloc(4096);
+    if (!ss.ss_sp) return 2;
     ss.ss_flags = 0;
-    ss.ss_size = 0;
-    sigaltstack(&ss, (stack_t*)0);
+    ss.ss_size = 4096;
+    if (sigaltstack(&ss, (stack_t*)0) != 0) return 3;
+    free(ss.ss_sp);
     return 0;
 }
 ";
-    let (output, object_path) = run_object_test("sigaction-fixture", src);
-    assert!(
-        output.status.success(),
-        "sigaction/sigaltstack compile failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // 确认 .o 引用 sigaction / sigaltstack 作为 undefined symbol.
-    let obj = fs::read(&object_path).unwrap_or_default();
-    let _ = fs::remove_file(&object_path);
-    for needle in [b"sigaction".as_slice(), b"sigaltstack".as_slice()] {
-        let found = obj.windows(needle.len()).any(|w| w == needle);
-        assert!(
-            found,
-            "fixture .o should reference {}",
-            String::from_utf8_lossy(needle)
-        );
+    let (compile, code) = run_host_link_and_run("sigaction-fixture", src);
+    if code != 0 {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        panic!("sigaction/sigaltstack fixture exit={code}, expected 0\ndcc stderr: {stderr}");
     }
 }
 
@@ -4941,9 +4932,7 @@ fn pch_create_then_include_compiles_and_runs() {
 /// (LLVM compiler-rt 符号名). runtime 时用户需链接 ubsan
 /// runtime, dcc 只 emit 调用. 测试只验证编译路径
 /// (Section 4.2 P1.2). 注: 用 -S 检查汇编而非 .o 的 strtab,
-/// 是因为 dcc 当前对未声明的外部函数 (如 sanitizer 桩) 不会
-/// 自动加到 .symtab / .strtab (Section 9 follow-up); 汇编层
-/// 已正确 emit 调用.
+/// 是因为 -S 路径更直接, 无需等待完整链接即可验证.
 #[test]
 fn ubsan_vla_bound_check_emitted() {
     let src = "\

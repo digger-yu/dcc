@@ -1,8 +1,6 @@
 // wchar_t wcs* / wmem* libc forwarding fixture (Section 11 P0.1).
 // Each step returns a non-zero value on failure; main() returns 0 on success.
 // wchar_t 在 Linux 为 4 字节 (int).
-// 注: 故意只用一个数组, 因为 dcc 当前的多数组栈变量分配有重叠 bug
-// (Section 9 follow-up), 与本测试无关.
 #include <wchar.h>
 
 int main(void) {

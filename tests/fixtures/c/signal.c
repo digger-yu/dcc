@@ -1,7 +1,6 @@
 // signal/sigaction/sigaltstack libc forwarding fixture (Section 11 P0.2).
-// 注: dcc 当前 struct sigaction / stack_t 布局有 bug (Section 9 follow-up),
-// 所以 fixture 只测运行时安全的 signal(); sigaction/sigaltstack 通过
-// 集成测试 verify .o 引用 + 可成功 compile (不在此 fixture 运行).
+// fixture 只测 signal(); sigaction/sigaltstack 运行时验证由集成测试
+// sigaction_sigaltstack_fixture_runs 覆盖.
 #include <signal.h>
 
 static int handler_calls;

@@ -248,7 +248,7 @@ AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节
 | KASAN (`-fsanitize=address`) | TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 `Deref/Index/ArrowMember` 与对应 `Assign` 之前插入 | dcc codegen 对 `Assign` LHS 仍仅支持 `Ident`；`*p = v` 的实际 store 是空操作（KASAN 桩本身正确） |
 | HWASAN (`-fsanitize=hwaddress`) | 同 KASAN（共享路径，函数名解析时分发） | ARM MTE 标签插入未做 |
 | KASAN-kernel (`-fsanitize=kernel-address`) | 同 KASAN | 内核定制 shadow 范围（`0xffff...`）未单独分发 |
-| UBSAN (`-fsanitize=undefined`) | TU init + `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 前 `__ubsan_handle_signed_integer_overflow(0, lhs)` | VLA bound / null deref / float cast trap 仍缺 |
+| UBSAN (`-fsanitize=undefined`) | TU init + `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 前 `__ubsan_handle_signed_integer_overflow(0, lhs)`；VLA bound 前 `__ubsan_handle_vla_bound_not_positive(bound)`；`Deref` 前 `__ubsan_handle_null_pointer_dereference`；float→int 前 `__ubsan_handle_float_cast_overflow` | — |
 | KCSAN (`-fsanitize=thread` / `kernel-kcsan`) | TU init + 每函数 `__kcsan_func_entry`；内存访问 watchpoint 与 KASAN 共享 load/store 通道 | 专用 `__kcsan_check_access` 路径未独立发出 |
 | KCOV (`-fsanitize-coverage`) | 每函数 `__sanitizer_cov_trace_pc` + `__dcc_cov_guards_N[16]` 计数器 + `__sanitizer_cov_trace_pc_guard` 在 if / while / do / for / case / label / goto 等边 | 跨函数 inline 合并未做 |
 | Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + 比较 `__sanitizer_cov_trace_cmp1/2/4/8` + switch dispatch `__sanitizer_cov_trace_switch` | libFuzzer 协议 / 拦截器接入未做 |
@@ -1183,7 +1183,7 @@ M19 关键改动:
 |------|------|
 | `setjmp` / `longjmp` | 🟢 (M24) 走 libc + 生成 DWARF CFI 兼容的寄存器保存表（CIE/FDE 修复 + DW_CFA_def_cfa + DW_CFA_offset） |
 | `alloca` | 🟢 (M23) `__builtin_alloca` codegen: sub rsp + 16 字节对齐 |
-| 信号 | 🟢 (M25) `sigaction` / `sigaltstack` / `signal` 在 link implicit undef 白名单, signal() 运行时验证; sigaction/sigaltstack 编入 .o 作为 undefined symbol, dcc 现有 struct sigaction / stack_t 布局有 bug 限制运行时 (Section 9 follow-up) |
+| 信号 | 🟢 (M25) `sigaction` / `sigaltstack` / `signal` 在 link implicit undef 白名单; signal() / sigaction() / sigaltstack() 运行时验证通过 |
 | TLS dtv / TLS 描述符（`gottpoff` / `tlsdesc`） | 🟢 (M25) AArch64 `emit_tlsdesc_access` 发出 adrp + ldr + add + blr 序列 + 3 个 R_AARCH64_TLSDESC_{ADR_PAGE21, LD64_LO12, ADD_LO12} 重定位, `emit_tls_ie_access` / `emit_tls_le_access` 走 Initial-Exec / Local-Exec 路径; ELF 常量里已定义扩展 TLSDESC 5 个 (R_AARCH64_TLSDESC_{OFF_G1, OFF_G0_NC, LDR, ADD, CALL}) 预留, 但 codegen 还未用到 (Section 9 follow-up); 运行时 `_dl_tlsdesc_resolve` 依赖 host glibc, dcc 自身不提供桩 |
 | atexit / `__cxa_atexit` | 🟢 (M22) `fini_dispatch.rs::FiniArrayBuilder` 按 priority 排序 |
 | `__attribute__((constructor(priority)))` | 🟢 (M23) 按 priority 排序（小数字先执行，默认 65535） |

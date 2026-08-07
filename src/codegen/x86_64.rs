@@ -3110,12 +3110,8 @@ impl Codegen {
                 }
             }
             // frame_size = 变量实际字节 + 16(保存寄存器) + temp_slots*8
-            let var_bytes: i32 = self
-                .var_map
-                .values()
-                .filter(|(_, ty)| !matches!(ty, Type::Void))
-                .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
-                .sum();
+            // 包含 padding 条目, 每个占 8 字节
+            let var_bytes: i32 = self.var_map.values().map(|_| 8).sum();
             let sc_slot = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
             let va_slots = if f.is_variadic {
                 if self.target.sse {
@@ -7885,17 +7881,12 @@ impl Codegen {
         }
         let slots = ty.size().div_ceil(8); // 向上对齐到 8 字节
         let slots = slots.max(1) as i32;
-        // 基于实际类型大小计算偏移 (过滤 padding 条目)
+        // 基于实际类型大小计算偏移 (包含 padding 条目, 每个占 8 字节)
         // 帧布局: r13+0 saved r13 / r13+8 ret addr / r13-(16+temp_slots*8) temp_slots
         //         / 变量(从此向下) / variadic reg_save_area 在 frame 底部.
         // 关键: 变量必须放在 temp_slots 区域下方, 否则会与 binop 临时槽
         // 冲突, 进一步破坏 va_list (ap.gp_offset / ap.reg_save_area 等) 读取.
-        let used: i32 = self
-            .var_map
-            .values()
-            .filter(|(_, ty)| !matches!(ty, Type::Void))
-            .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
-            .sum();
+        let used: i32 = self.var_map.values().map(|_| 8).sum();
         // 多槽变量: 数据区 [off, off+size) 向高地址延伸, 需把 off 下移
         // (slots-1)*8, 否则高槽会覆盖先前分配的变量 (如 16B vector 参数
         // 的高 8 字节踩上一个指针参数槽)
@@ -9160,15 +9151,11 @@ impl Codegen {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
                     let slots = v.ty.size().div_ceil(8).max(1) as i32;
-                    // 基于实际类型大小计算偏移 (过滤 padding 条目)
+                    // 基于实际类型大小计算偏移 (包含 padding 条目, 每个占 8 字节)
                     // 帧布局: temp_slots 区域在 r13+16 下方, 变量在 temp_slots 下方.
                     // 关键: 变量必须跳过 temp_slots, 否则会与 binop 临时槽冲突,
                     // 进一步破坏 va_list 字段 (ap.gp_offset 等).
-                    let used: i32 = var_map
-                        .values()
-                        .filter(|(_, ty)| !matches!(ty, Type::Void))
-                        .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
-                        .sum();
+                    let used: i32 = var_map.values().map(|_| 8).sum();
                     // 多槽变量同 register_var: off 下移 (slots-1)*8 预留自身空间
                     let mut off = -(used + 16 + temp_slots * 8) - (slots - 1) * 8;
                     while off + v.ty.size() as i32 > 0 {
@@ -9202,7 +9189,7 @@ impl Codegen {
             }
             // switch case 体中的局部变量 (含数组) 必须预注册, 否则
             // 帧上无槽位, var_offset 惰性分配仅 8 字节, 数组元素会
-            // 越界覆盖相邻变量 (多数组栈变量重叠 bug 的根源之一)
+            // 越界覆盖相邻变量
             Stmt::Switch { cases, .. } => {
                 for case in cases {
                     Self::pre_register_vars(var_map, &case.body.items, temp_slots);
