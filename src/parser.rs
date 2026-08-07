@@ -86,6 +86,9 @@ pub struct ParseOptions {
     pub cuda: bool,
     /// `-fhip`: 启用 HIP 函数限定符 (同 CUDA 拼写)
     pub hip: bool,
+    /// #pragma STDC FENV_ACCESS 状态: ON/DEFAULT 为 true.
+    /// 供 codegen 对浮点操作插入 volatile 语义.
+    pub fenv_access: bool,
 }
 
 impl ParsedAttrs {
@@ -1437,7 +1440,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        (Program { decls }, std::mem::take(&mut self.diags))
+        (Program { decls, fenv_access: self.opts.fenv_access }, std::mem::take(&mut self.diags))
     }
 
     fn parse_decl(&mut self) -> Option<Vec<Decl>> {

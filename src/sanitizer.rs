@@ -1923,6 +1923,7 @@ mod tests {
                 Decl::Func(empty_func("first")),
                 Decl::Func(empty_func("second")),
             ],
+            fenv_access: false,
         };
         let flags = SanitizerFlags {
             kasan: true,
@@ -1949,6 +1950,7 @@ mod tests {
     fn every_function_gets_kcsan_entry() {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("a")), Decl::Func(empty_func("b"))],
+            fenv_access: false,
         };
         instrument_program(
             &mut prog,
@@ -2026,6 +2028,7 @@ mod tests {
                 is_device: false,
                 is_host: false,
             })],
+            fenv_access: false,
         };
         instrument_program(
             &mut prog,
@@ -2111,6 +2114,7 @@ mod tests {
                 is_device: false,
                 is_host: false,
             })],
+            fenv_access: false,
         };
         let flags = SanitizerFlags {
             kasan: true,
@@ -2135,6 +2139,7 @@ mod tests {
     fn ubsan_wraps_division_by_zero() {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
         };
         // 替换 body 为 `return x / y;`
         let Decl::Func(f) = &mut prog.decls[0] else {
@@ -2185,6 +2190,7 @@ mod tests {
     fn ubsan_wraps_shift() {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2236,6 +2242,7 @@ mod tests {
     fn kasan_wraps_deref() {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2276,6 +2283,7 @@ mod tests {
     fn fuzzer_injects_compare_trace() {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2339,6 +2347,7 @@ mod tests {
         // __ubsan_handle_vla_bound_not_positive(n) 调用。
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2411,6 +2420,7 @@ mod tests {
         // *p 应同时插入 KASAN (若启用) 与 null 检查。
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2458,6 +2468,7 @@ mod tests {
         // (int)f 应插入 __ubsan_handle_float_cast_overflow 调用。
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2506,6 +2517,7 @@ mod tests {
         // __kcsan_check_access 而非 __asan_loadN。
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()

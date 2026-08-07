@@ -14,6 +14,9 @@ pub struct Ident {
 #[derive(Debug, Clone)]
 pub struct Program {
     pub decls: Vec<Decl>,
+    /// #pragma STDC FENV_ACCESS 状态: ON/DEFAULT 为 true.
+    /// 供 codegen 对浮点操作插入 volatile 语义.
+    pub fenv_access: bool,
 }
 
 #[derive(Debug, Clone)]

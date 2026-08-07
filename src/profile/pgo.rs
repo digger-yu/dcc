@@ -475,7 +475,7 @@ mod tests {
     fn instrument_program_inserts_call_at_body_top() {
         use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
         let span_zero = crate::diagnostics::Span::point("m.c", 1, 0);
-        let mut prog = Program { decls: vec![] };
+        let mut prog = Program { decls: vec![], fenv_access: false };
         let body = Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Int {
@@ -575,7 +575,7 @@ mod tests {
     fn instrument_program_noop_when_disabled() {
         use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
         let span_zero = crate::diagnostics::Span::point("m.c", 1, 0);
-        let mut prog = Program { decls: vec![] };
+        let mut prog = Program { decls: vec![], fenv_access: false };
         let body = Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Int {

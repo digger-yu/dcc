@@ -698,6 +698,7 @@ mod tests {
                 is_device: false,
                 is_host: false,
             })],
+            fenv_access: false,
         };
         let diags = check_program(&prog);
         assert!(diags.is_empty(), "expected no warnings, got: {diags:?}");
@@ -782,6 +783,7 @@ mod tests {
                 is_device: false,
                 is_host: false,
             })],
+            fenv_access: false,
         };
         let diags = check_program(&prog);
         assert!(!diags.is_empty(), "expected warning for missing args");

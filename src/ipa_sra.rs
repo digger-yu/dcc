@@ -1518,6 +1518,7 @@ mod tests {
 
         let mut prog = Program {
             decls: vec![f_func, main_func],
+            fenv_access: false,
         };
 
         let config = IpaSraConfig {

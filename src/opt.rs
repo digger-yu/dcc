@@ -975,6 +975,7 @@ mod tests {
                 is_device: false,
                 is_host: false,
             })],
+            fenv_access: false,
         };
         let mut module = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
@@ -1083,6 +1084,7 @@ mod tests {
                 is_device: false,
                 is_host: false,
             })],
+            fenv_access: false,
         };
         let mut module = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
@@ -1247,6 +1249,7 @@ mod tests {
         });
         let prog = Program {
             decls: vec![sq, main_fn],
+            fenv_access: false,
         };
         let mut module = ir::lower(prog).expect("lower");
         optimize(&mut module, 1);
@@ -1347,7 +1350,7 @@ mod tests {
             is_device: false,
             is_host: false,
         });
-        let prog = Program { decls: vec![func] };
+        let prog = Program { decls: vec![func], fenv_access: false };
         let mut module = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
         let body = &module.source().decls[0];

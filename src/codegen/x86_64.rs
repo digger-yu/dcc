@@ -177,6 +177,9 @@ pub struct Codegen {
     // 编译选项: 运行时检查 (-fbounds-check / -ftrapv)
     pub bounds_check: bool,
     pub trapv: bool,
+    /// #pragma STDC FENV_ACCESS: 浮点环境访问模式.
+    /// true 时浮点操作不得被重排或消除 (volatile 语义).
+    pub fenv_access: bool,
     asm_directives: Vec<String>,
     asm_directives_at: Vec<(u64, String)>,
     disasm_calls: HashMap<u64, String>,
@@ -566,6 +569,7 @@ impl Codegen {
             emit_cfi: false,
             bounds_check: false,
             trapv: false,
+            fenv_access: false,
             asm_directives: vec![],
             asm_directives_at: vec![],
             disasm_calls: HashMap::new(),
@@ -1097,6 +1101,7 @@ impl Codegen {
 
     pub fn compile(&mut self, module: &crate::ir::Module) {
         let prog = module.source();
+        self.fenv_access = prog.fenv_access;
         // 检查 __attribute__((error/warning/deprecated)): 扫描所有函数声明
         // 如果函数体中调用了这些函数，发射诊断信息
         let diag_fns: Vec<AttrDiagFn> = prog

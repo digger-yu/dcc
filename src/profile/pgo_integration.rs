@@ -373,7 +373,7 @@ mod tests {
     fn test_collect_func_names() {
         use crate::ast::{Block, FuncDecl, Ident, Program, Type};
         let span = crate::diagnostics::Span::point("t.c", 1, 1);
-        let mut prog = Program { decls: vec![] };
+        let mut prog = Program { decls: vec![], fenv_access: false };
         prog.decls.push(Decl::Func(FuncDecl {
             name: Ident { name: "foo".into(), span: span.clone() },
             ret_ty: Type::Int,

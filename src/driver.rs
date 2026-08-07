@@ -261,6 +261,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let weak_symbols = pp_out.weak_symbols;
     let include_deps = pp_out.deps;
     let pp_macros = pp_out.macros;
+    let fenv_access = pp_out.fenv_access;
     enrich_diags(&mut pp_diags, src, &file_name, input.parent());
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
@@ -341,6 +342,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             warn_implicit_decl: cfg.warn_implicit_decl,
             cuda: cfg.profile.offload.cuda,
             hip: cfg.profile.offload.hip,
+            fenv_access,
         },
     );
     drop(preprocessed);

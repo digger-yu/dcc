@@ -190,6 +190,9 @@ pub struct PreprocessOutput {
     /// `#pragma omp ...` 指令: (源文件, 源行号, 指令文本)。
     /// 无 -fopenmp 时 driver 忽略; 启用时用于收集 offload entry。
     pub openmp_pragmas: Vec<(String, u32, String)>,
+    /// #pragma STDC FENV_ACCESS 状态: ON/DEFAULT 为 true, OFF 为 false.
+    /// 供 codegen 决定是否对浮点操作插入 volatile 语义.
+    pub fenv_access: bool,
 }
 
 /// 预编译头 (PCH) 选项。
@@ -900,6 +903,7 @@ pub fn preprocess(
             .collect(),
         line_map: pp.line_map.clone(),
         openmp_pragmas: pp.openmp_pragmas.clone(),
+        fenv_access: pp.fenv_access,
     }
 }
 

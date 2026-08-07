@@ -509,6 +509,7 @@ mod tests {
                 is_device: false,
                 is_host: false,
             })],
+            fenv_access: false,
         };
         let mut module = ir::lower(prog).expect("lower");
         run(&mut module, 2);
