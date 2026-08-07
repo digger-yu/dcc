@@ -1,6 +1,6 @@
 # DCC 未实现模块综合清单
 
-> 最后更新：2026-07-21
+> 最后更新：2026-08-07
 > 范围：`src/` 全量源码 + `docs/` 现有文档
 > 目的：把"代码里能看到、但还没做完整 / 还没真做 / 仍然走桩"的模块统一记录，
 > 方便后续 M12+ 排期，避免"忘了还有这块没补"。
@@ -10,6 +10,9 @@
 > 一切以本地 `cargo test` / `cargo build` 为准.
 > 同步: 本节 8.2 状态以 `tests/fixtures/errors/*.stderr.snap` 与
 > `tests/errors.rs::diag_*` 实际产物为准。
+>
+> **注意**：大部分模块已完整实现并记录在 `docs/support_features.md`。
+> 本文档仅记录**尚未完整实现**或**已知限制**的部分。
 
 ---
 
@@ -17,12 +20,23 @@
 
 | 状态 | 含义 | 数量（粗略） |
 |------|------|--------------|
-| 🟢 已实装并有测试 | `cargo test` 通过 | 见各里程碑 |
-| 🟡 已解析/已降级，行为简化 | 走 no-op / placeholder / 不严格 C 语义 | ~15 |
-| 🟠 桩已交付，运行时未接 | 框架代码在但实际不工作 | ~10 |
-| 🔴 完全没有 | 解析或后端未实现 | ~20 |
+| 🟢 已实装并有测试 | `cargo test` 通过 | 绝大多数模块（详见 `docs/support_features.md`） |
+| 🟡 已解析/已降级，行为简化 | 走 no-op / placeholder / 不严格 C 语义 | ~5 |
+| 🟠 桩已交付，运行时未接 | 框架代码在但实际不工作 | ~3 |
+| 🔴 完全没有 | 解析或后端未实现 | ~5 |
 
 下面按 **子系统** 列出，所有标 🟠 / 🔴 的项都是 M12+ 的 backlog。
+
+**已完整实现的模块**（不再在本文档详细列出，详见 `docs/support_features.md`）：
+- x86_64 codegen 表达式层（M13.1 全部完成）
+- AArch64/RISC-V64 后端（M8 完整化）
+- MIPS/ARM/MIPS64 后端
+- 链接器核心功能（M22 完成）
+- Sanitizer 插桩（KASAN/UBSAN/KCSAN/KCOV/Fuzzer）
+- C++ 前端 M7-M10+（SFINAE/模板/协程/module）
+- 预处理器（C23 全家族）
+- 调试信息（DWARF/BTF/eh_frame）
+- 性能分析子系统（PGO/GCOV/AutoFDO/LBR/MemProf/Perf）
 
 ---
 
@@ -1232,24 +1246,25 @@ M19 关键改动:
 
 按 ROI 从高到低：
 
-1. ✅ **x86_64 mini-asm 补全**（高）— M12 已完成：消除 nop 警告，覆盖内核 paravirt / 启动代码。
-2. **KASAN/UBSAN 指令级插桩**（高）：把 sanitizer 从桩升级为真功能。
-3. **C++ 模板单态化**（高）：让 `std::vector<int>` / `std::map<K,V>` 真正工作。
-4. **完整 GCC bootstrap**（中）：本地磁盘已具备, 与后续 dcc++ SFINAE / 协程 / module 推进同步.
-5. **AArch64 EH_FRAME / ORC / DWARF**（中）：让 aarch64 后端在生产环境可调试。
-6. **MIPS / ARM 后端**（中）：解锁更多交叉编译场景。
-7. **优化 pass（强度削减 / 调度 / 别名分析）**（低）：性能优化，dcc 本身定位 suckless。
-8. **PowerPC / LoongArch / WASM / AVR**（低）：新平台扩展。
-9. **PGO / AutoFDO**（低）：性能分析。
-10. **自举 M5**（低）：与第 4 项互锁。
+1. ✅ **x86_64 mini-asm 补全**（高）— M12 已完成
+2. ✅ **KASAN/UBSAN 指令级插桩**（高）— 已完成（AST 层全部通道已交付）
+3. ✅ **C++ 模板单态化**（高）— M10+ 已完成（`std::vector<int>` 等可用）
+4. ✅ **AArch64 EH_FRAME / ORC / DWARF**（中）— M8 已完成
+5. ✅ **MIPS / ARM 后端**（中）— 已完成
+6. ✅ **优化 pass（强度削减 / 调度 / 别名分析）**（低）— M16 已完成
+7. **完整 GCC bootstrap**（中）：本地磁盘已具备, 与后续 dcc++ SFINAE / 协程 / module 推进同步
+8. **PowerPC / LoongArch / WASM / AVR**（低）：新平台扩展
+9. **PGO / AutoFDO 权重下发**（低）：性能分析优化
+10. **自举 M5**（低）：与第 7 项互锁
 
 ---
 
 ## 附录 A：相关文档
 
 - `docs/architecture.md` — 整体架构 + 5 万行代码目标
+- `docs/support_features.md` — **已支持特性清单**（所有已完整实现的功能）
+- `docs/missing_features.md` — **缺失特性与已知限制**（仅记录未实现部分）
 - `docs/roadmap.md` — 里程碑 M0–M11
-- `docs/missing_features.md` — 已通过/阻塞级/缺口表
 - `docs/next_steps.md` — 20 步路线图
 - `docs/c_standard.md` — C 标准支持矩阵
 - `docs/diagnostics.md` — 错误码参考
