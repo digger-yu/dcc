@@ -37,6 +37,24 @@ fn is_no_parse_file(s: &str) -> bool {
     ends_with(s, ".rlib") || ends_with(s, ".rmeta") || ends_with(s, ".so")
 }
 
+/// 反转义依赖文件中的路径 (GCC 用 `\` 转义空格/`#`/`:` 等).
+fn unescape_dep_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.clone().next().as_ref() {
+                if next != '\n' {
+                    out.push(chars.next().unwrap());
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn parse_config_file(content: &str, config_seen: &mut HashSet<String>) {
     let bytes = content.as_bytes();
     let mut i = 0;
@@ -142,26 +160,28 @@ fn parse_dep_file(content: &str, target: &str, out: &mut impl Write) -> io::Resu
         }
 
         let token = &p[..q];
+        // GCC 用 `\` 转义路径中的特殊字符, 读取文件前需反转义
+        let real_path = unescape_dep_path(token);
         let mut need_parse = false;
 
         if is_source {
             if !saw_any_target {
                 saw_any_target = true;
-                writeln!(out, "source_{target} := {token}\n")?;
+                writeln!(out, "source_{target} := {real_path}\n")?;
                 writeln!(out, "deps_{target} := \\")?;
                 need_parse = true;
             }
-        } else if !is_ignored_file(token) {
-            let hash = str_hash(token);
-            let key = (hash, token.to_string());
+        } else if !is_ignored_file(&real_path) {
+            let hash = str_hash(&real_path);
+            let key = (hash, real_path.clone());
             if file_seen.insert(key) {
-                writeln!(out, "  {token} \\")?;
+                writeln!(out, "  {real_path} \\")?;
                 need_parse = true;
             }
         }
 
-        if need_parse && !is_no_parse_file(token) && !is_system_path(token) {
-            if let Ok(buf) = fs::read_to_string(token) {
+        if need_parse && !is_no_parse_file(&real_path) && !is_system_path(&real_path) {
+            if let Ok(buf) = fs::read_to_string(&real_path) {
                 parse_config_file(&buf, &mut config_seen);
             }
         }
@@ -202,4 +222,61 @@ fn main() {
         std::process::exit(1);
     });
     out.flush().unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unescape_no_escapes() {
+        assert_eq!(unescape_dep_path("/usr/include/stdio.h"), "/usr/include/stdio.h");
+    }
+
+    #[test]
+    fn unescape_space() {
+        assert_eq!(unescape_dep_path("/my\\ path/file.h"), "/my path/file.h");
+    }
+
+    #[test]
+    fn unescape_hash() {
+        assert_eq!(unescape_dep_path("/a\\#b.h"), "/a#b.h");
+    }
+
+    #[test]
+    fn unescape_colon() {
+        assert_eq!(unescape_dep_path("/a\\:b.h"), "/a:b.h");
+    }
+
+    #[test]
+    fn unescape_multiple() {
+        assert_eq!(
+            unescape_dep_path("/a\\ b/c\\#d/e\\:f.h"),
+            "/a b/c#d/e:f.h"
+        );
+    }
+
+    #[test]
+    fn parse_dep_file_gcc_format() {
+        // GCC 格式: target: source \ \n dep1 \ \n dep2
+        let input = "foo.o: foo.c \\\n  bar.h \\\n  baz.h\n";
+        let mut out = Vec::new();
+        parse_dep_file(input, "foo.o", &mut out).unwrap();
+        let result = String::from_utf8(out).unwrap();
+        assert!(result.contains("source_foo.o := foo.c"));
+        assert!(result.contains("bar.h"));
+        assert!(result.contains("baz.h"));
+    }
+
+    #[test]
+    fn parse_dep_file_escaped_paths() {
+        // 转义空格的路径
+        let input = "foo.o: my\\ src.c \\\n  my\\ header.h\n";
+        let mut out = Vec::new();
+        parse_dep_file(input, "foo.o", &mut out).unwrap();
+        let result = String::from_utf8(out).unwrap();
+        // 反转义后应为实际路径
+        assert!(result.contains("my src.c"));
+        assert!(result.contains("my header.h"));
+    }
 }

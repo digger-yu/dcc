@@ -737,6 +737,89 @@ fn md_dependency_file_lists_includes() {
 }
 
 #[test]
+fn dep_file_uses_backslash_continuations() {
+    let dir = std::env::temp_dir();
+    let hdr = format!("dcc-depcont-hdr-{}.h", std::process::id());
+    let src_path = dir.join(format!("dcc-depcont-{}.c", std::process::id()));
+    let hdr_path = dir.join(&hdr);
+    let obj_path = dir.join(format!("dcc-depcont-{}.o", std::process::id()));
+    let dep_path = dir.join(format!("dcc-depcont-{}.d", std::process::id()));
+    fs::write(&hdr_path, "#define V 1\n").unwrap();
+    fs::write(
+        &src_path,
+        format!("#include \"{}\"\nint main(void) {{ return V; }}\n", hdr),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-MD", "-MF"])
+        .arg(&dep_path)
+        .args(["-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let dep_text = fs::read_to_string(&dep_path).unwrap_or_default();
+    let _ = fs::remove_file(&hdr_path);
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+    let _ = fs::remove_file(&dep_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // GCC 兼容格式: 所有非末行应以 \ 续行符结尾
+    let lines: Vec<&str> = dep_text.lines().collect();
+    if lines.len() > 1 {
+        for line in &lines[..lines.len() - 1] {
+            assert!(
+                line.ends_with('\\'),
+                "dep line should end with \\: {line:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dep_file_mp_emits_phony_targets() {
+    let dir = std::env::temp_dir();
+    let hdr = format!("dcc-depmp-hdr-{}.h", std::process::id());
+    let src_path = dir.join(format!("dcc-depmp-{}.c", std::process::id()));
+    let hdr_path = dir.join(&hdr);
+    let obj_path = dir.join(format!("dcc-depmp-{}.o", std::process::id()));
+    let dep_path = dir.join(format!("dcc-depmp-{}.d", std::process::id()));
+    fs::write(&hdr_path, "#define V 2\n").unwrap();
+    fs::write(
+        &src_path,
+        format!("#include \"{}\"\nint main(void) {{ return V; }}\n", hdr),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-MD", "-MP", "-MF"])
+        .arg(&dep_path)
+        .args(["-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let dep_text = fs::read_to_string(&dep_path).unwrap_or_default();
+    let _ = fs::remove_file(&hdr_path);
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+    let _ = fs::remove_file(&dep_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // -MP: 每个头文件应有 phony 目标 (hdr:)
+    assert!(
+        dep_text.contains(&format!("{}:", hdr)),
+        "-MP should emit phony target for header: {dep_text}"
+    );
+}
+
+#[test]
 fn sanitizer_metadata_section_emitted() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-san-{}.c", std::process::id()));

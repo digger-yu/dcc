@@ -510,33 +510,20 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 )]
             })?)
         };
-        writeln!(dep_out, "{}: {}", target, input.display()).map_err(|e| {
+        write_dep_file(
+            dep_out.as_mut(),
+            target,
+            &input.display().to_string(),
+            &deps,
+            cfg.dep_phony,
+        )
+        .map_err(|e| {
             vec![Diagnostic::err(
                 "E0101",
                 format!("cannot write dep file: {}", e),
                 crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
             )]
         })?;
-        for dep in &deps {
-            writeln!(dep_out, " {}", dep).map_err(|e| {
-                vec![Diagnostic::err(
-                    "E0101",
-                    format!("cannot write dep file: {}", e),
-                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
-                )]
-            })?;
-        }
-        if cfg.dep_phony {
-            for dep in &deps {
-                writeln!(dep_out, "\n{}:", dep).map_err(|e| {
-                    vec![Diagnostic::err(
-                        "E0101",
-                        format!("cannot write dep file: {}", e),
-                        crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
-                    )]
-                })?;
-            }
-        }
     }
 
     // AST -> typed IR -> validation
@@ -670,6 +657,78 @@ fn filter_user_deps(deps: Vec<String>, system_paths: &[std::path::PathBuf]) -> V
                 && !dep.starts_with("/usr/lib/gcc")
         })
         .collect()
+}
+
+/// 转义依赖文件路径中的 Make 特殊字符 (空格, `#`, `:` 等).
+/// GCC 对这些字符用 `\` 前缀转义, 使 Make 能正确解析.
+fn escape_dep_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 8);
+    for ch in path.chars() {
+        match ch {
+            ' ' | '\t' | '#' | ':' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// 写 GCC 兼容的 .d 依赖文件.
+///
+/// 格式:
+/// ```text
+/// target: source \
+///   dep1 \
+///   dep2 \
+///   dep3
+/// ```
+///
+/// - 用 `\` 行续符连接所有依赖, 使 Make 将其视为单条规则
+/// - 行宽超过 72 字符时折行 (与 GCC 行为一致)
+/// - 路径中特殊字符 (` `, `#`, `:`) 用 `\` 转义
+/// - `-MP` 时为每个头文件生成 phony 目标
+fn write_dep_file(
+    out: &mut dyn Write,
+    target: &str,
+    source: &str,
+    deps: &[String],
+    phony: bool,
+) -> io::Result<()> {
+    let esc_source = escape_dep_path(source);
+
+    // GCC 格式: 每个依赖独占一行, 用 `\` 续行符连接, 最后一个无续行符
+    // ```
+    // target: source \
+    //   dep1 \
+    //   dep2 \
+    //   dep3
+    // ```
+    if deps.is_empty() {
+        writeln!(out, "{}: {}", target, esc_source)?;
+    } else {
+        // 第一行: target: source \
+        writeln!(out, "{}: {} \\", target, esc_source)?;
+        // 中间依赖:  dep \
+        for dep in &deps[..deps.len() - 1] {
+            let esc_dep = escape_dep_path(dep);
+            writeln!(out, "  {} \\", esc_dep)?;
+        }
+        // 最后一个依赖 (无续行符)
+        let esc_dep = escape_dep_path(&deps[deps.len() - 1]);
+        writeln!(out, "  {}", esc_dep)?;
+    }
+
+    // -MP: 为每个依赖生成空 phony 目标 (防止删除头文件后 make 报错)
+    if phony {
+        for dep in deps {
+            let esc_dep = escape_dep_path(dep);
+            writeln!(out)?;
+            writeln!(out, "{}:", esc_dep)?;
+        }
+    }
+    Ok(())
 }
 
 /// 独立汇编驱动: 预处理 .S 后调用系统 `as`。
@@ -1584,4 +1643,112 @@ fn collect_offload_section(
 
     let out = if section.is_empty() { None } else { Some(section) };
     (out, diags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_dep_path_no_special() {
+        assert_eq!(escape_dep_path("/usr/include/stdio.h"), "/usr/include/stdio.h");
+    }
+
+    #[test]
+    fn escape_dep_path_with_space() {
+        assert_eq!(escape_dep_path("/my path/file.h"), "/my\\ path/file.h");
+    }
+
+    #[test]
+    fn escape_dep_path_with_hash() {
+        assert_eq!(escape_dep_path("/a#b.h"), "/a\\#b.h");
+    }
+
+    #[test]
+    fn escape_dep_path_with_colon() {
+        assert_eq!(escape_dep_path("/a:b.h"), "/a\\:b.h");
+    }
+
+    #[test]
+    fn write_dep_file_basic_format() {
+        let mut buf = Vec::new();
+        write_dep_file(
+            &mut buf,
+            "foo.o",
+            "foo.c",
+            &["bar.h".to_string(), "baz.h".to_string()],
+            false,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        // 第一行包含 target: source
+        assert!(out.starts_with("foo.o: foo.c"));
+        // 包含依赖
+        assert!(out.contains("bar.h"));
+        assert!(out.contains("baz.h"));
+        // 使用 \ 续行符
+        assert!(out.contains("\\\n"));
+    }
+
+    #[test]
+    fn write_dep_file_phony_targets() {
+        let mut buf = Vec::new();
+        write_dep_file(
+            &mut buf,
+            "foo.o",
+            "foo.c",
+            &["bar.h".to_string()],
+            true,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        // -MP: 每个依赖应有空 phony 目标
+        assert!(out.contains("\nbar.h:"));
+    }
+
+    #[test]
+    fn write_dep_file_line_wrapping() {
+        let mut buf = Vec::new();
+        // 构造足够长的路径使行宽超过 72
+        let long_dep = format!("{}{}", "/long/path/", "x".repeat(60));
+        write_dep_file(
+            &mut buf,
+            "foo.o",
+            "foo.c",
+            &[long_dep.clone()],
+            false,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        // 应包含续行符
+        assert!(out.contains("\\\n"));
+    }
+
+    #[test]
+    fn write_dep_file_make_parseable() {
+        // 验证输出可被 Make 正确解析: 所有依赖在同一规则中
+        let mut buf = Vec::new();
+        write_dep_file(
+            &mut buf,
+            "out.o",
+            "src.c",
+            &[
+                "inc/a.h".to_string(),
+                "inc/b.h".to_string(),
+                "inc/c.h".to_string(),
+            ],
+            false,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        // 所有依赖应通过 \ 连接, 不应出现裸新行分隔依赖
+        let lines: Vec<&str> = out.lines().collect();
+        // 除最后一行外, 每行应以 \ 结尾
+        for line in &lines[..lines.len().saturating_sub(1)] {
+            assert!(
+                line.ends_with('\\'),
+                "non-final line should end with \\: {line:?}"
+            );
+        }
+    }
 }
