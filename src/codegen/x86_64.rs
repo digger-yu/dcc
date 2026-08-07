@@ -11,8 +11,8 @@ use crate::codegen::elf;
 use crate::codegen::elf::{
     ElfRela, ElfSection, ElfSym, R_X86_64_32, R_X86_64_32S, R_X86_64_64, R_X86_64_PC32,
     R_X86_64_PLT32, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_PROGBITS, STB_GLOBAL,
-    STB_LOCAL, STB_WEAK, STT_FUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION, STT_TLS, STV_DEFAULT,
-    STV_HIDDEN, STV_PROTECTED,
+    STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION, STT_TLS,
+    STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
 };
 use crate::const_eval;
 use crate::preproc::LineSpan;
@@ -1412,13 +1412,19 @@ impl Codegen {
                 }
                 if let Some(&off) = self.labels.get(&f.name.name) {
                     let sz = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                    // ifunc 属性: 函数符号类型为 STT_GNU_IFUNC
+                    let sym_type = if f.ifunc_resolver.is_some() {
+                        STT_GNU_IFUNC
+                    } else {
+                        STT_FUNC
+                    };
                     self.symbols.push(ElfSym {
                         name: f.name.name.clone(),
                         section: 1,
                         value: off,
                         size: sz,
                         bind: if f.is_static { STB_LOCAL } else { STB_GLOBAL },
-                        ty: STT_FUNC,
+                        ty: sym_type,
                         visibility: Self::parse_visibility(&f.visibility),
                     });
                 }
@@ -2132,7 +2138,12 @@ impl Codegen {
                             } else {
                                 STB_GLOBAL
                             },
-                            ty: STT_FUNC,
+                            // ifunc 属性: 函数符号类型为 STT_GNU_IFUNC
+                            ty: if f.ifunc_resolver.is_some() {
+                                STT_GNU_IFUNC
+                            } else {
+                                STT_FUNC
+                            },
                             visibility: Self::parse_visibility(&f.visibility),
                         };
                         if f.is_static {

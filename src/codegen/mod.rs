@@ -108,6 +108,33 @@ pub fn emit(
                     });
                 }
             }
+            // ifunc 属性: 收集所有 ifunc 函数, 生成 .dcc.ifunc 节
+            // 格式: 每条记录 = u16 name_len + name bytes + u16 resolver_len + resolver bytes
+            if relocatable {
+                let mut ifunc_data = Vec::new();
+                let prog = module.source();
+                for decl in &prog.decls {
+                    if let crate::ast::Decl::Func(f) = decl {
+                        if let Some(resolver) = &f.ifunc_resolver {
+                            let name = f.name.name.as_bytes();
+                            let res = resolver.as_bytes();
+                            ifunc_data.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                            ifunc_data.extend_from_slice(name);
+                            ifunc_data.extend_from_slice(&(res.len() as u16).to_le_bytes());
+                            ifunc_data.extend_from_slice(res);
+                        }
+                    }
+                }
+                if !ifunc_data.is_empty() {
+                    cg.extra_sections.push(elf::ElfSection {
+                        name: ".dcc.ifunc".to_string(),
+                        data: ifunc_data,
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 1,
+                    });
+                }
+            }
             if lto_enabled {
                 // 嵌入 dcc 自有 IR 位码（供 src/link 多 TU LTO 使用）
                 // 旧版 .llvm.lto 文本摘要已废弃，统一使用 .dcc.lto DBC 位码格式

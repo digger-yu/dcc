@@ -284,6 +284,19 @@ pub fn link_from_bundle(
             layout.output_relas.push(r);
         }
     }
+    // 2.9b attribute((ifunc("resolver"))) 从 .dcc.ifunc 节收集 IFUNC 映射
+    // 并生成 R_X86_64_IRELATIVE 重定位
+    {
+        let (ifunc_table, ifunc_relas) = ifunc::collect_from_bundle(bundle, &layout);
+        for (name, &vaddr) in &ifunc_table.resolvers {
+            if cfg.verbose {
+                eprintln!("dcc-link: ifunc '{}' -> resolver @0x{:x}", name, vaddr);
+            }
+        }
+        for r in ifunc_relas {
+            layout.output_relas.push(r);
+        }
+    }
     // 2.10 为静态链接可执行文件合成 _start 桩 (如果没有 _start)
     ensure_start_stub(&mut layout);
     // 2.10.1 vDSO 集成: 嵌入 .text.vdso + .note.GNU-vdso + 符号

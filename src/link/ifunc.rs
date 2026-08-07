@@ -63,6 +63,73 @@ pub fn collect_ifuncs(layout: &Layout) -> IfuncTable {
     table
 }
 
+/// 从 .dcc.ifunc 节二进制载荷解析 ifunc 记录.
+/// 格式: 每条记录 = u16 name_len + name bytes + u16 resolver_len + resolver bytes
+/// 返回 Vec<(ifunc_name, resolver_name)>
+pub fn parse_dcc_ifunc_section(data: &[u8]) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut pos = 0;
+    while pos + 2 <= data.len() {
+        let name_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + name_len > data.len() {
+            break;
+        }
+        let name = std::str::from_utf8(&data[pos..pos + name_len])
+            .unwrap_or("")
+            .to_string();
+        pos += name_len;
+        if pos + 2 > data.len() {
+            break;
+        }
+        let res_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + res_len > data.len() {
+            break;
+        }
+        let resolver = std::str::from_utf8(&data[pos..pos + res_len])
+            .unwrap_or("")
+            .to_string();
+        pos += res_len;
+        if !name.is_empty() && !resolver.is_empty() {
+            entries.push((name, resolver));
+        }
+    }
+    entries
+}
+
+/// 从 InputBundle 解析 .dcc.ifunc 节获取 (ifunc_name, resolver_name) 映射,
+/// 再从 Layout 查找 resolver 的最终 vaddr, 注册到 IfuncTable.
+/// 返回 IfuncTable 和新增的 IRELATIVE 重定位.
+pub fn collect_from_bundle(
+    bundle: &super::InputBundle,
+    layout: &super::layout::Layout,
+) -> (IfuncTable, Vec<super::layout::OutputRela>) {
+    let mut table = IfuncTable::new();
+    // 1. 从 bundle 的 .dcc.ifunc 节解析 (ifunc_name, resolver_name) 对
+    let mut mappings: Vec<(String, String)> = Vec::new();
+    for obj in &bundle.objects {
+        for sec in &obj.sections {
+            if sec.name == ".dcc.ifunc" {
+                mappings.extend(parse_dcc_ifunc_section(&sec.data));
+            }
+        }
+    }
+    // 2. 对每个映射, 在 layout.symbols 查找 resolver 函数的 vaddr
+    for (ifunc_name, resolver_name) in &mappings {
+        let resolver_vaddr = layout
+            .symbols
+            .iter()
+            .find(|s| s.name == *resolver_name)
+            .map(|s| s.vaddr);
+        if let Some(vaddr) = resolver_vaddr {
+            table.register(ifunc_name, vaddr);
+        }
+    }
+    let relas = gen_irelative_relas(&table);
+    (table, relas)
+}
+
 /// 为 IFUNC 生成 .rela.dyn 记录 (R_X86_64_IRELATIVE)
 /// 动态链接器会在加载时调用 resolver 并把返回值写入对应 GOT 项
 pub fn gen_irelative_relas(table: &IfuncTable) -> Vec<OutputRela> {
@@ -105,5 +172,51 @@ mod tests {
         for r in &relas {
             assert_eq!(r.rel_type, R_X86_64_IRELATIVE);
         }
+    }
+
+    /// 编码辅助: 按 .dcc.ifunc 节格式序列化 (name, resolver) 对
+    fn encode_ifunc_section(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for (name, resolver) in entries {
+            let n = name.as_bytes();
+            let r = resolver.as_bytes();
+            data.extend_from_slice(&(n.len() as u16).to_le_bytes());
+            data.extend_from_slice(n);
+            data.extend_from_slice(&(r.len() as u16).to_le_bytes());
+            data.extend_from_slice(r);
+        }
+        data
+    }
+
+    #[test]
+    fn test_parse_dcc_ifunc_section_roundtrip() {
+        let entries = vec![("memcpy", "resolve_memcpy"), ("strlen", "resolve_strlen")];
+        let data = encode_ifunc_section(&entries);
+        let parsed = parse_dcc_ifunc_section(&data);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], ("memcpy".to_string(), "resolve_memcpy".to_string()));
+        assert_eq!(parsed[1], ("strlen".to_string(), "resolve_strlen".to_string()));
+    }
+
+    #[test]
+    fn test_parse_dcc_ifunc_section_empty() {
+        let parsed = parse_dcc_ifunc_section(&[]);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dcc_ifunc_section_truncated() {
+        // name_len 声明 100 字节但数据不足, 应安全截断
+        let data = [100u8, 0, b'a', b'b'];
+        let parsed = parse_dcc_ifunc_section(&data);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dcc_ifunc_section_single() {
+        let data = encode_ifunc_section(&[("foo", "bar")]);
+        let parsed = parse_dcc_ifunc_section(&data);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], ("foo".to_string(), "bar".to_string()));
     }
 }
