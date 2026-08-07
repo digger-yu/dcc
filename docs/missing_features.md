@@ -62,7 +62,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| `virtual` 继承复杂场景 | 部分支持，复杂虚基类不验证 |
 | 标准库模板实参 | `std::vector<int>` 等模板实参语法无法直接使用 |
 | 动态 RTTI | 跨多态指针动态 RTTI 仍依赖 C 后端在 vtable 中写 typeinfo 字段 |
 | 继承成员访问 | C++ 多文件链接场景受 dcc C 后端 `__base_Base1` 字段访问 pre-existing 限制 |

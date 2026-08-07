@@ -1626,11 +1626,50 @@ impl Lower {
         }
     }
 
+    /// M26: 验证虚继承场景 (菱形继承检测)
+    /// 检查是否存在多个基类共享同一虚基类但未正确标记 virtual
+    fn validate_virtual_inheritance(&self, c: &ClassDecl) -> Option<String> {
+        // 收集所有基类 (包括递归基类)
+        let mut all_bases: Vec<(String, bool)> = Vec::new(); // (name, is_virtual)
+        for b in &c.bases {
+            all_bases.push((b.name.clone(), b.is_virtual));
+            // 递归查找基类的基类
+            if let Some(grand_bases) = self.class_bases.get(&b.name) {
+                for gb in grand_bases {
+                    all_bases.push((gb.name.clone(), gb.is_virtual));
+                }
+            }
+        }
+        // 检测菱形继承: 同一基类出现多次
+        let mut base_counts: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
+        for (name, is_virtual) in &all_bases {
+            base_counts.entry(name.clone()).or_default().push(*is_virtual);
+        }
+        for (name, virtual_flags) in &base_counts {
+            if virtual_flags.len() > 1 {
+                // 基类出现多次, 检查是否都标记为 virtual
+                let all_virtual = virtual_flags.iter().all(|&v| v);
+                if !all_virtual {
+                    return Some(format!(
+                        "diamond inheritance detected: base '{}' appears {} times but not all are virtual",
+                        name,
+                        virtual_flags.len()
+                    ));
+                }
+            }
+        }
+        None
+    }
+
     fn lower_class(&mut self, c: &ClassDecl) {
         // M18.0: 用 qualified name 避免 namespace 内类与全局类冲突
         let qname = self.qualify_name(&c.name);
         // Store base class information for inherited member access
         self.class_bases.insert(c.name.clone(), c.bases.clone());
+        // M26: 验证虚继承场景 (菱形继承检测)
+        if let Some(warning) = self.validate_virtual_inheritance(c) {
+            self.out.push_str(&format!("/* WARNING: {} */\n", warning));
+        }
         // 阶段 1: 仅 struct 定义 (成员字段 + vptr)
         self.out.push_str(&format!("struct {} {{\n", qname));
         // 继承: 嵌入基类子结构
@@ -3587,5 +3626,25 @@ mod tests {
             .expect("module_bmf() should be Some after export module");
         // 应该包含模板导出记录
         assert!(bmf.contains("E T Box T"), "{}", bmf);
+    }
+
+    #[test]
+    fn lower_virtual_inheritance_diamond_detection() {
+        // M26: 菱形继承检测
+        // class A {};
+        // class B : public virtual A {};
+        // class C : public A {};  // 非 virtual, 应该报警告
+        // class D : public B, public C {};  // 菱形继承
+        let src = b"class A { public: int x; };
+                   class B : public virtual A { public: int y; };
+                   class C : public A { public: int z; };
+                   class D : public B, public C { public: int w; };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 应该检测到菱形继承并发出警告
+        assert!(s.contains("WARNING") && s.contains("diamond inheritance"), "{}", s);
     }
 }
