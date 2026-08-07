@@ -24,7 +24,9 @@ pub fn optimize(module: &mut Module, level: u8) {
         crate::loop_opt::run(module, level);
         // M16: 跨函数 DCE (call graph reachability)
         cross_function_dce(module);
-        // M16: 暂不跑新 SSA pass - rebuild_block 当前是 stub,会丢掉所有非终结符指令
+        // M16: SSA pass pipeline 已就绪 (strength reduction, IVOP, TCO 等),
+        // 但 rebuild_block 的 SSA->AST 转换尚未完全精确, 暂时跳过。
+        // 待 SSA->AST 重建器通过完整回归后再启用:
         // run_ssa_passes(module, level);
     }
 }

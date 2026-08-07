@@ -1164,10 +1164,39 @@ fn rebuild_bb(
             env.insert(phi_name(&phi.dest), src.clone());
         }
     }
-    // 1. 翻译指令
+    // 1. 翻译指令为 AST 赋值语句
     for inst in &bb.insts {
         if let Some(d) = &inst.dest {
             env.insert(d.name(), d.clone());
+        }
+        // 将 SSA 指令转换为 AST 赋值语句: `dest = expr`
+        if let Some(d) = &inst.dest {
+            let rhs = inst_to_expr(&inst.kind, env);
+            let assign = Expr::Assign {
+                op: crate::ast::BinOp::Add, // plain assign (no compound op)
+                l: Box::new(Expr::Ident {
+                    name: crate::ast::Ident {
+                        name: d.base.clone(),
+                        span: d.span.clone(),
+                    },
+                    span: d.span.clone(),
+                    ty: d.ty.clone(),
+                }),
+                r: Box::new(rhs),
+                span: inst.span.clone(),
+                ty: d.ty.clone(),
+            };
+            out.push(BlockItem::Stmt(Stmt::Expr {
+                e: assign,
+                span: inst.span.clone(),
+            }));
+        } else {
+            // 无 dest 的指令 (Store/Call 等) 也需输出
+            let e = inst_to_expr(&inst.kind, env);
+            out.push(BlockItem::Stmt(Stmt::Expr {
+                e,
+                span: inst.span.clone(),
+            }));
         }
     }
     // 2. 翻译 terminator -> AST 后, 继续后继
@@ -1285,6 +1314,116 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>) -> Expr {
         Operand::Phi(_) => Expr::Int {
             v: 0,
             span: Span::point("ssa", 0, 0),
+            ty: Type::Int,
+        },
+    }
+}
+
+/// 将 SSA 指令的 kind 转换为 AST 表达式 (右侧值)。
+fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
+    let sp = Span::point("ssa", 0, 0);
+    match kind {
+        InstKind::Bin { op, l, r } => Expr::Binop {
+            op: *op,
+            l: Box::new(operand_to_expr(l, env)),
+            r: Box::new(operand_to_expr(r, env)),
+            span: sp.clone(),
+            ty: Type::Int,
+        },
+        InstKind::Un { op, e } => Expr::Unary {
+            op: *op,
+            e: Box::new(operand_to_expr(e, env)),
+            span: sp.clone(),
+            ty: Type::Int,
+        },
+        InstKind::Cast { ty, e } => Expr::Cast {
+            ty: ty.clone(),
+            e: Box::new(operand_to_expr(e, env)),
+            span: sp.clone(),
+        },
+        InstKind::AddrOf { base } => Expr::AddrOf {
+            e: Box::new(Expr::Ident {
+                name: crate::ast::Ident {
+                    name: base.clone(),
+                    span: sp.clone(),
+                },
+                span: sp.clone(),
+                ty: Type::Void,
+            }),
+            span: sp.clone(),
+            ty: Type::Ptr(Box::new(Type::Void)),
+        },
+        InstKind::Load { e, ty } => Expr::Deref {
+            e: Box::new(operand_to_expr(e, env)),
+            span: sp.clone(),
+            ty: ty.clone(),
+        },
+        InstKind::Store { e, src } => Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Deref {
+                e: Box::new(operand_to_expr(e, env)),
+                span: sp.clone(),
+                ty: Type::Void,
+            }),
+            r: Box::new(operand_to_expr(src, env)),
+            span: sp.clone(),
+            ty: Type::Void,
+        },
+        InstKind::IndexLoad { arr, idx } => Expr::Index {
+            arr: Box::new(operand_to_expr(arr, env)),
+            idx: Box::new(operand_to_expr(idx, env)),
+            span: sp.clone(),
+            ty: Type::Int,
+        },
+        InstKind::IndexStore { arr, idx, src } => Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Index {
+                arr: Box::new(operand_to_expr(arr, env)),
+                idx: Box::new(operand_to_expr(idx, env)),
+                span: sp.clone(),
+                ty: Type::Int,
+            }),
+            r: Box::new(operand_to_expr(src, env)),
+            span: sp.clone(),
+            ty: Type::Void,
+        },
+        InstKind::Call { callee, args, ret_ty } => Expr::Call {
+            callee: Box::new(operand_to_expr(callee, env)),
+            args: args.iter().map(|a| operand_to_expr(a, env)).collect(),
+            span: sp.clone(),
+            ty: ret_ty.clone(),
+        },
+        InstKind::MemberLoad { obj, field, ty } => Expr::Member {
+            expr: Box::new(operand_to_expr(obj, env)),
+            field: crate::ast::Ident {
+                name: field.clone(),
+                span: sp.clone(),
+            },
+            span: sp.clone(),
+            ty: ty.clone(),
+            is_arrow: false,
+        },
+        InstKind::MemberStore { obj, field, src } => Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Member {
+                expr: Box::new(operand_to_expr(obj, env)),
+                field: crate::ast::Ident {
+                    name: field.clone(),
+                    span: sp.clone(),
+                },
+                span: sp.clone(),
+                ty: Type::Void,
+                is_arrow: false,
+            }),
+            r: Box::new(operand_to_expr(src, env)),
+            span: sp.clone(),
+            ty: Type::Void,
+        },
+        InstKind::Select { cond, then_, else_ } => Expr::Cond {
+            cond: Box::new(operand_to_expr(cond, env)),
+            then_: Box::new(operand_to_expr(then_, env)),
+            else_: Box::new(operand_to_expr(else_, env)),
+            span: sp.clone(),
             ty: Type::Int,
         },
     }
