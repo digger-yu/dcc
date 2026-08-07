@@ -396,12 +396,12 @@ M10+ SFINAE / partial spec / 完整 concept 求值 / operator-> 链 /
 |------|------|
 | 模板实例化 | 🟢 (M25) `src/cpp/template.rs` 完整单态化：`TemplateRegistry` 注册 class/function 模板及偏特化 (含 requires-clause 约束)；`instantiate` 按需实例化 + 缓存；`pick_best_specialization` 按 match score 选择最佳偏特化；解析模板-id 调用表达式 `T<U>`、模板局部变量声明、typeid 模板类型；每个实例化定义只 emit 一次 |
 | `obj.*ptr_to_member` (M8 简化) | 🟢 (M25) MemberStar / PtrMemberStar 路径实装, 解析 `.*` 与 `->*` 语法, 走 `__dcc_mbr_<class>_<member>` 偏移 |
-| `typeid(e)` (M8 简化) | 🟢 (M25) `CppExpr::Typeid` 和 `TypeidType` 走真 RTTI: `expr_static_class` 推断静态类, 生成 `(&__dcc_ti_<class>)` 符号引用, 替代 M8 stub `((_ZTI*)(((void*)e)->__vptr + 0))`; 跨多态指针动态 RTTI 需 vtable 中写 typeinfo 指针 (当前 emit_vtable RTTI 槽为占位 0), 留待后续实现 |
+| `typeid(e)` (M8 简化) | 🟢 (M25) `CppExpr::Typeid` 和 `TypeidType` 走真 RTTI: `expr_static_class` 推断静态类, 生成 `(&__dcc_ti_<class>)` 符号引用, 替代 M8 stub `((_ZTI*)(((void*)e)->__vptr + 0))`; 跨多态指针动态 RTTI 需 vtable 中写 typeinfo 指针 (当前 emit_vtable RTTI 槽为占位 0, lower.rs#L1743)。需实现: 在 `emit_vtable` 中生成 `(&__dcc_ti_<class>)` 而非 `(void*)0`, 并确保 typeinfo 符号在链接时可见 |
 | `auto` (M17 实装) | `infer_type` 真类型推导: int 字面量→Int, `"abc"`→`const char*` (`MangleType::Pointer(Int)`), 类名已知 → `MangleType::Class` |
 | `auto x = expr;` | M17 真推导: `Widget w(7)` 拆为 `Widget w; _ZN6WidgetC1Ei(&w, 7)` |
 | `decltype(expr)` (M17 实装) | 解析为 `MangleType::Int` 占位 (M17.0 简化) |
 | `decltype(auto)` (M17 实装) | 解析为 `MangleType::DecltypeAuto` 占位 |
-| `using Base::Base;` 继承链 ctor (M17 实装) | 类内 `using` 被 lower 接受, InheritingCtor 节点继续复用既有 lower; 多文件链接场景受 dcc C 后端嵌套字段访问限制 (`__base_Base1` 字段生成方式与直接字段不同, lower.rs#L1593) |
+| `using Base::Base;` 继承链 ctor (M17 实装) | 类内 `using` 被 lower 接受, InheritingCtor 节点继续复用既有 lower; 多文件链接场景受 dcc C 后端嵌套字段访问限制 (`__base_Base1` 字段生成方式与直接字段不同, lower.rs#L1593)。需实现: 在 C 后端添加嵌套字段访问支持, 或修改 lower 生成扁平字段而非嵌套 struct |
 | `co_yield` / `co_await` / `co_return` (M10+) | 🟢 (M25) `src/cpp/coroutine.rs`：Duff's device 状态机，per-function 变量 `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done`；`emit_fn` 包裹协程体为 switch 结构，case 0 入口 + resume labels 在每 suspend 点 |
 | `concept` / `requires` (M10+) | 解析为注释 + 简化求值；不与 SFINAE 完整联动 |
 | `module` / `import` (M10+) | 🟢 (M25) `src/cpp/bmf.rs`：DCC_BMF_V1 文本格式，lower 在 export module 声明后收集 exports；`ModuleInfo::to_bmf`/`from_bmf` round-trip；ODR 检查待后续 |
@@ -703,11 +703,12 @@ M19 关键改动:
 > - 新增 fixture `tests/fixtures/cpp/member_ptr_deref.cpp` +
 >   集成测试 `p2_1_member_ptr_dotstar`. 集成测试全部 PASS
 >   (当前 287 passed, 0 failed, 1 ignored).
-> - 运行时限制: 偏移常量 `__dcc_mbr_<class>_<member>` 需要
->   runtime helper 定义 (dcc C 后端 lower.rs#L1653 生成函数
->   声明但不自动 emit 定义体), 链接时会触发 implicit undef,
->   须用户链接自定义 stub 或改为用 host gcc 链接 (本集成
->   测试只验证 dcc -c 路径).
+> - 运行时限制: 偏移常量 `__dcc_mbr_<class>_<member>` 由
+>   lower.rs#L1653 生成完整函数定义 (计算 offsetof), 但
+>   该函数需在运行时调用, 非常量表达式。链接时须确保
+>   每个 TU 只定义一次 (当前每个 class 定义都会 emit),
+>   多文件链接可能触发重复定义错误。本集成测试只验证
+>   dcc -c 路径, 完整链接需 host gcc 或添加 weak 属性.
 > - Section 6 表格 `obj.*ptr_to_member` 行 不支持 → 🟢 (M25).
 
 > **M25 增量（2026-07-24）— Section 6 P2.2 typeid(e) 真 RTTI 取类型**：
