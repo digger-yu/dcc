@@ -376,17 +376,8 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 | 后端 | 栈溢出变参（>8 个）未实装，返回 0 + 警告 | unimplemented §11 |
 | C++ | 跨多态指针动态 RTTI 需 vtable 中写 typeinfo 指针 | 当前 emit_vtable RTTI 槽为占位 0；静态 typeid 工作正常 |
 | C++ | 多文件链接场景受 dcc C 后端嵌套字段访问限制 | `__base_Base1` 字段生成方式与直接字段不同 (lower.rs#L1593) |
-| C++ | `obj.*ptr_to_member` 偏移常量 `__dcc_mbr_<class>_<member>` 需 runtime helper 定义 | lower.rs#L1653 生成函数声明但不自动 emit 定义体 |
+| C++ | `obj.*ptr_to_member` 多文件链接可能触发重复定义 | lower.rs#L1653 生成完整函数定义，但每个 TU 都会 emit |
 | 链接 | Windows 本地无法完整验证链接路径（依赖 host `ld` / `objcopy`） | Windows 无等效工具链 |
-
-**已修复项目**（从限制列表移除）：
-- ✅ 多数组栈变量分配重叠 bug (commit 78e4eae)
-- ✅ 16 字节 struct 传值 ABI (验证通过)
-- ✅ `struct sigaction` / `stack_t` 布局 (commit c327d82)
-- ✅ `_Complex` 算术运算 (加/减/乘/除验证通过)
-- ✅ 内核 KASAN shadow 偏移 (内联计算 shadow = (addr >> 3) + 0xdffffc0000000000)
-- ✅ `*p = v` store 操作 (验证通过)
-- ✅ LTO 集成测试失败 (当前 287 passed, 0 failed)
 
 ## 12. 引用文档
 
