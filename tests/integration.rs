@@ -691,9 +691,10 @@ fn o1_constant_folding_emits_immediate() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // 新编码: REX.W + MOV r/m64, imm32 = [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]
     assert!(
-        obj.windows(5).any(|w| w == [0xB8, 0x05, 0x00, 0x00, 0x00]),
-        "expected mov $5, %eax after constant fold"
+        obj.windows(7).any(|w| w == [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]),
+        "expected mov $5, %rax after constant fold"
     );
 }
 

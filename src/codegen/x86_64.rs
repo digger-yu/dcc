@@ -7418,13 +7418,11 @@ impl Codegen {
 
     fn mov_imm(&mut self, reg: u8, v: i128) {
         if v >= i32::MIN as i128 && v <= i32::MAX as i128 {
-            if reg < 8 {
-                self.emit(&[0xb8 + reg]);
-                self.emit(&(v as i32).to_le_bytes());
-            } else {
-                self.emit(&[0x41, 0xb8 + (reg - 8)]);
-                self.emit(&(v as i32).to_le_bytes());
-            }
+            // 使用 MOV r/m64, imm32 (REX.W + 0xC7 /0) 符号扩展 32 位立即数到 64 位
+            // 避免 MOV r32, imm32 的零扩展导致负数比较错误
+            let rex = 0x48 + if reg >= 8 { 0x01 } else { 0 };
+            self.emit(&[rex, 0xC7, 0xC0 + (reg & 7)]);
+            self.emit(&(v as i32).to_le_bytes());
         } else {
             self.emit(&[0x48 + if reg >= 8 { 0x41 } else { 0 }]);
             self.emit(&[0xb8 + (reg & 7)]);
