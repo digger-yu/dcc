@@ -247,11 +247,11 @@ AArch64+RISC-V 重定位；GOT64；TLS 重定位；PIE/Shared 输出；动态节
 |-----------|----------|------|
 | KASAN (`-fsanitize=address`) | TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 `Deref/Index/ArrowMember` 与对应 `Assign` 之前插入 | dcc codegen 对 `Assign` LHS 仍仅支持 `Ident`；`*p = v` 的实际 store 是空操作（KASAN 桩本身正确） |
 | HWASAN (`-fsanitize=hwaddress`) | 同 KASAN 路径但使用 `__hwasan_loadN` / `__hwasan_storeN` 函数名 | ARM MTE 标签插入未做 (软件 tag 模式) |
-| KASAN-kernel (`-fsanitize=kernel-address`) | 同 KASAN | 内核定制 shadow 范围（`0xffff...`）未单独分发 |
+| KASAN-kernel (`-fsanitize=kernel-address`) | 同 KASAN 桩插入逻辑 | 内核 shadow 偏移 (0xdfffe9...) 未单独计算，与用户态共用同一 shadow 基址 |
 | UBSAN (`-fsanitize=undefined`) | TU init + `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 前 `__ubsan_handle_signed_integer_overflow(0, lhs)`；VLA bound 前 `__ubsan_handle_vla_bound_not_positive(bound)`；`Deref` 前 `__ubsan_handle_null_pointer_dereference`；float→int 前 `__ubsan_handle_float_cast_overflow` | — |
 | KCSAN (`-fsanitize=thread` / `kernel-kcsan`) | TU init + 每函数 `__kcsan_func_entry`；内存访问 watchpoint 与 KASAN 共享 load/store 通道 | 专用 `__kcsan_check_access` 路径未独立发出 |
-| KCOV (`-fsanitize-coverage`) | 每函数 `__sanitizer_cov_trace_pc` + `__dcc_cov_guards_N[16]` 计数器 + `__sanitizer_cov_trace_pc_guard` 在 if / while / do / for / case / label / goto 等边 | 跨函数 inline 合并未做 |
-| Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + 比较 `__sanitizer_cov_trace_cmp1/2/4/8` + switch dispatch `__sanitizer_cov_trace_switch` | libFuzzer 协议 / 拦截器接入未做 |
+| KCOV (`-fsanitize-coverage`) | 每函数 `__sanitizer_cov_trace_pc` + `__dcc_cov_guards_N[16]` 计数器 + `__sanitizer_cov_trace_pc_guard` 在 if / while / do / for / case / label / goto 等边 | 跨函数 inline 合并未做 (每函数独立 guard 数组) |
+| Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + 比较 `__sanitizer_cov_trace_cmp1/2/4/8` + switch dispatch `__sanitizer_cov_trace_switch` | libFuzzer 协议 (LLVMFuzzerTestOneInput / 8-bit counters / PC table / malloc 拦截器) 未实现 |
 
 实现位置：`src/sanitizer.rs::instrument_program()`，在 driver parse 之后、
 IR lower 之前由 AST walker 注入。CLI 由 `SanitizerFlags::from_args` 解析。
@@ -912,8 +912,8 @@ M19 关键改动:
 >     验证 3 次 `gen_va_arg_int` 发出 3 条 LDR W 指令,
 >     偏移按 0/8/16 递增, 且 `va_offs` 推进到 3.
 > - 限制: 当前实现仅支持前 8 个 GP 变参槽 (AAPCS64 x0..x7),
->   浮点变参 (v0..v7) 与栈溢出变参 (>8 个) 暂未实装,
->   留 Section 9 follow-up.
+>   浮点变参 (v0..v7) 返回 0.0 + 警告, 栈溢出变参 (>8 个)
+>   返回 0 + 警告。完整实现需保存浮点寄存器并处理栈溢出。
 > - Section 11 表格 `stdarg.h va_arg 跨平台` 行
 >   `🟠 x86-64 SysV 完整; aarch64 / riscv64 简化` →
 >   `🟠 x86-64 SysV 完整; aarch64 GP 槽 (x0..x7) 走保存区
