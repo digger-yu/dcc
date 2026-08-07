@@ -702,8 +702,8 @@ M19 关键改动:
 >   路径 (M17.0 阶段实装), 生成 C 代码
 >   `(*(int*)((char*)(obj) + __dcc_mbr_<class>_<member>))`.
 > - 新增 fixture `tests/fixtures/cpp/member_ptr_deref.cpp` +
->   集成测试 `p2_1_member_ptr_dotstar`. 198 个集成测试
->   0 失败 (除 6 个 pre-existing 失败).
+>   集成测试 `p2_1_member_ptr_dotstar`. 集成测试全部 PASS
+>   (当前 287 passed, 0 failed, 1 ignored).
 > - 运行时限制: 偏移常量 `__dcc_mbr_<class>_<member>` 需要
 >   runtime helper 定义 (dcc C 后端 lower.rs#L1653 生成函数
 >   声明但不自动 emit 定义体), 链接时会触发 implicit undef,
