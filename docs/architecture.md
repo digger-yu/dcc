@@ -21,8 +21,8 @@
    │ Parser     │    │ Codegen        │
    │ (tokens.rs │    │ (codegen/)     │
    │  ast.rs    │    │  ├ x86_64.rs   │
-   │  parser.rs)│    │  ├ aarch64.rs  │ ← M7 typed IR lowering
-   └─────┬──────┘    │  ├ riscv64.rs  │ ← M7 typed IR lowering
+   │  parser.rs)│    │  ├ aarch64.rs  │ ← typed IR lowering
+   └─────┬──────┘    │  ├ riscv64.rs  │ ← typed IR lowering
          │           │  └ elf.rs      │
          ▼           └────────────────┘
    ┌────────────┐
@@ -53,7 +53,7 @@
 | 峰值内存 | 解析+codegen 分阶段 | 解析后 drop(preprocessed) | 减少 ~8MB |
 | 类型错误恢复 | 硬错误终止 | 未知类型降级为 int + warning | 大型代码库连续编译 |
 
-## 类型表设计 (M3)
+## 类型表设计
 
 ```
 ~/.dcc/cache/<filehash>_<contenthash>  <-- 头文件预处理缓存
@@ -61,17 +61,17 @@
 
 缓存键 = FNV-1a(文件路径) + FNV-1a(内容哈希) + FNV-1a(宏表状态),
 值 = 预处理输出 + 头文件新增宏定义。
-- 自定义文本格式 `DCC_PREPROCESSOR_CACHE_V7` (M19 升级), 零外部依赖
+- 自定义文本格式 `DCC_PREPROCESSOR_CACHE_V7`, 零外部依赖
 - 头文件仅保存自身新增的宏, 避免宏状态污染
 - 内容变化时自动失效 (内容哈希不变 = 缓存命中)
 - 宏表变化时自动失效 (例如 `-D_FORTIFY_SOURCE=2` vs `=0`),
   因为 `hash_macro_state` 把按名排序的 name+body+params+variadic
   都纳入缓存键
-- M19 后 `macros.is_empty()` 不再触发 `expand_macros` 早退,
+- `macros.is_empty()` 不再触发 `expand_macros` 早退,
   保证 `__COUNTER__` / `__FILE__` / `__LINE__` 等特殊 token
   始终进入展开路径
 
-## 错误诊断 (M9)
+## 错误诊断
 
 所有 `Diagnostic` 携带:
 - file/line/col/len (精确到字符)
@@ -222,58 +222,16 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
    （生成 `.note.gnu.build-id` 段），`--no-undefined-version`（拒绝
    `.symver` 缺版本的符号引用，通过 `link/symver.rs` 完整版本表校验）。
 
-**M12+ GNU ld 兼容链接特性**（`link/link_opts.rs` + `link/symver.rs` +
+**GNU ld 兼容链接特性**（`link/link_opts.rs` + `link/symver.rs` +
 `link/target_clones.rs` + `link/fini_dispatch.rs`）：
 
-- `-z relro` / `-z relro=partial|full`：写 `PT_GNU_RELRO` 段，覆盖范围
-  由 `compute_relro_range` 计算（包含 `.got` / `.got.plt` / `.init_array`
-  / `.fini_array` / `.data.rel.ro`）。
-- `-z now` / `BIND_NOW`：在 `.dynamic` 写 `DT_FLAGS = DF_BIND_NOW`
-  (0x8) 和 `DT_FLAGS_1 = DF_1_NOW` (0x1)，关闭延迟绑定。
-- `-z lazy`：恢复 `DF_LAZY`（默认）。
-- `-z execstack` / `-z noexecstack`：控制 `PT_GNU_STACK` 的 `PF_X` 标志。
-- `-z max-page-size=N` / `-z common-page-size=N`：解析 K/M/G 后缀和
-  `0x` 前缀，控制 `PT_LOAD` 的 align 字段。
-- `-z pack-relative-relocs`：生成 `.gnu.pack.relocs` 段（SHT_GNU_RELR，
-  内核/RTOS 友好的 RELR 压缩）。
-- `-rpath <path>` / `-runpath <path>`：写 `DT_RPATH` (23, deprecated) /
-  `DT_RUNPATH` (29, glibc 推荐) 动态项。
-- `-fuse-ld=<name>`：选择链接器后端（`dcc` 内置 / `gold` / `lld` /
-  `bfd`），`DCC_FUSE_LD` 环境变量可覆盖。
-- `-fno-semantic-interposition` / `-fsemantic-interposition`：LTO 阶段
-  控制函数符号插入语义（`LinkConfig.no_semantic_interposition`）。
-- `--gdb-index`：生成 `.gdb_index` 节（最小占位：版本字符串 +
-  0 填充，GDB 可识别但内容不完整）。
-- `--compress-debug-sections=zlib|zstd`：占位，当前忽略。
-- `--lto-partition=N`：接受但忽略（单分区足够）。
-- `SHF_GNU_RETAIN` 标志（0x200000）：对 `.init` / `.fini` /
-  `.init_array` / `.fini_array` / `.text.startup` 等元数据节自动标记，
-  `gc-sections` 即使无显式引用也保留。
-- `gc_sections_root` 自动选根：除 `entry` 外接受 `-u <sym>` /
-  `-Wl,-u,<sym>` 显式根符号，根集合从 `entry` + `-u` + 用户指定符号
-  并集 + `.init`/`.fini`/`.init_array`/`.fini_array` 等始终 live 节
-  出发做引用图 BFS，软删除未被引用的节（`output_index = u32::MAX`，
-  `size = 0`）。
-- `.symver` 完整实现（`link/symver.rs::VersionTable`）：
-  - `add_symver(".symver memcpy,memcpy@GLIBC_2.14")` 解析
-    `name,alias@ver` 形式，区分 `@ver` 和 `@@ver`（hidden）。
-  - `gen_gnu_version(dynsym_names)` 生成 `.gnu.version` 节（每个
-    dynsym 一个 16-bit 索引，0=VER_NDX_LOCAL, 1=VER_NDX_GLOBAL, 2+=
-    版本化）。
-  - `gen_verdef()` 生成 `.gnu.version_d`（VERDEF 结构 + 字符串表）。
-  - `check_undef(refs)` 在 `--no-undefined-version` 模式下严格检查。
-- IFUNC `target_clones`（`link/target_clones.rs::TargetClonesTable`）：
-  - 解析 `__attribute__((target_clones("sse4.2,default")))` 字符串。
-  - 生成 STT_GNU_IFUNC 类型符号 + `R_X86_64_IRELATIVE` 重定位。
-  - Resolver 简化实现：直接返回 default 变体地址（无 CPU feature 探测）。
-- `__dso_handle` / `.fini_array` 调度（`link/fini_dispatch.rs`）：
-  - `__dso_handle` 指向 `.data` 起始。
-  - `FiniArrayBuilder` 收集 destructor 符号，按 priority 排序生成
-    `.fini_array` 数据。
-  - `ensure_fini_array_section` 在 layout 中添加缺失的 `.fini_array` 节。
-- `-r` 自研路径：新增 `OutputKind::Relocatable` + `write_elf_relocatable`
-  生成 ET_REL .o（简化：复用 ET_EXEC 写盘路径，改 e_type；完整
-  ET_REL 输出需独立写节头/重定位，见 TODO）。
+完整支持 `-z relro/now/lazy/execstack/noexecstack/max-page-size`、
+`-rpath`/`-runpath`、`-fuse-ld`、`--gdb-index`、`SHF_GNU_RETAIN`、
+`gc-sections` BFS 引用图裁剪、`.symver` 符号版本化（含 VERDEF/VERNEED
+生成）、IFUNC `target_clones`、`__dso_handle`/`.fini_array` 调度、
+`-r` 可重定位输出等。
+
+详见 `docs/support_features.md` 链接器特性列表。
 
 **重定位类型**（`relocate.rs`）：
 
@@ -293,21 +251,21 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
 本地验收：`cargo test link::`（50 用例）
 + `cargo test lto::`（7 用例）。
 
-## C++ 前端 M7（`src/cpp/`）
+## C++ 前端（`src/cpp/`）
 
-DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计原则：
+DCC 新增 C++ 子集前端，为 GCC bootstrap 做准备。设计原则：
 **不另起 IR**，而是把 C++ AST 降级（lower）到 DCC 现有的 C 风格声明，
 复用 C 前端 + 链接器整条链路。
 
 | 文件 | 职责 |
 |------|------|
-| `src/cpp/lexer.rs` | C++ token 流：扩展关键字 + `::` 标点 + M8 关键字（operator/namespace/try/catch/throw/...） |
-| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 + M8 (namespace/operator/inherit/lambda/template/try-catch) + M10+ (partial spec/using Base::Base/init list/static local) + M17 (decltype/auto/friend/noexcept/final/override/mutable/volatile/explicit/using-in-class) + M18 (multi-dim subscript `obj[i,j,k]` → `CppExpr::MultiIndex`) |
+| `src/cpp/lexer.rs` | C++ token 流：扩展关键字 + `::` 标点（operator/namespace/try/catch/throw/...） |
+| `src/cpp/parser.rs` | class / ctor / dtor / 成员函数 / 成员变量 / `this->x` 解析 + namespace/operator/inherit/lambda/template/try-catch + partial spec/using Base::Base/init list/static local + decltype/auto/friend/noexcept/final/override/mutable/volatile/explicit/using-in-class + multi-dim subscript `obj[i,j,k]` → `CppExpr::MultiIndex` |
 | `src/cpp/mangle.rs` | Itanium C++ ABI 名字修饰（`_ZN…C1E…` / `D1E` / `pl` / `_ZTV…` / `_ZTI…`） |
-| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身 + vtable/typeinfo/lambda/exception 降级 + M10+ cxa_guard/init_list/coroutine 状态机 + M18 多维下标改写为 `__dcc_multi_index_N`） |
-| `src/cpp/modules.rs` | C++20 Modules 占位 (M18)：已知 module 表 + `import X;` 改写策略；BMF 序列化由 `src/cpp/bmf.rs` 实装 |
-| `src/cpp/stdlib/headers/*` | 26 个 C++ 标准库头（M8-M18）：cstddef/cstdlib/cstring/cstdio/string/vector/iostream/memory/exception/stdexcept/typeinfo/initializer_list/utility/algorithm/map/functional + M18 chrono/thread/mutex/condition_variable/filesystem/expected/flat_map/regex/ranges |
-| `src/cpp/m10.rs` | M10+ 高级特性降级器：SFINAE / partial spec / concept 求值 / operator-> / dynamic_cast / 构造委托 / 成员函数指针 / __cxa_guard_ / initializer_list |
+| `src/cpp/lower.rs` | C++ AST → C 字符串（struct + 隐式 this 形参 + `_Znwm`/`_ZdlPv` 替身 + vtable/typeinfo/lambda/exception 降级 + cxa_guard/init_list/coroutine 状态机 + 多维下标改写为 `__dcc_multi_index_N`） |
+| `src/cpp/modules.rs` | C++20 Modules 占位：已知 module 表 + `import X;` 改写策略；BMF 序列化由 `src/cpp/bmf.rs` 实装 |
+| `src/cpp/stdlib/headers/*` | 26 个 C++ 标准库头：cstddef/cstdlib/cstring/cstdio/string/vector/iostream/memory/exception/stdexcept/typeinfo/initializer_list/utility/algorithm/map/functional + chrono/thread/mutex/condition_variable/filesystem/expected/flat_map/regex/ranges |
+| `src/cpp/m10.rs` | 高级特性降级器：SFINAE / partial spec / concept 求值 / operator-> / dynamic_cast / 构造委托 / 成员函数指针 / __cxa_guard_ / initializer_list |
 | `src/cpp/template.rs` | 模板完整单态化：注册 class/function 模板及偏特化 (含 requires-clause)；`instantiate` 按需实例化 + 缓存；`pick_best_specialization` 按 match score 选择最佳偏特化；模板-id 调用表达式 `T<U>`、模板局部变量声明、typeid 模板类型 |
 | `src/cpp/coroutine.rs` | 协程 Duff's device 状态机：`co_await`/`co_yield`/`co_return` 降级为 per-function `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done` 变量 + switch 结构 |
 | `src/cpp/bmf.rs` | Modules BMF 序列化：DCC_BMF_V1 文本格式 (module 名/import 列表/export 记录)；`ModuleInfo::to_bmf`/`from_bmf` round-trip |
@@ -330,129 +288,20 @@ DCC 在 M7 阶段新增 C++ 子集前端，为 GCC bootstrap 做准备。设计�
 - `template <typename T> ...` → 完整单态化 (src/cpp/template.rs)：按需实例化 + 缓存 + 偏特化匹配
 - `typeid(e)` / `dynamic_cast<T*>(e)` → `__dcc_typeinfo_t` 符号 / `__dynamic_cast` 辅助
 
-**M7 范围**：class、ctor、dtor、成员变量、成员函数、`this->x`、`::`、
-引用（→指针）、new/delete、MangleType 基本类型。
-**M8 范围**（新增）：
-- 命名空间（`namespace foo {}` / `using namespace bar` / `::name`）
-- 运算符重载（除 new/delete 外，含 `operator()` / `operator T`）
-- 继承（单 / 多 / 钻石继承）+ 虚函数 + vtable（`_ZTV<Name>`）+ typeinfo（`_ZTI<Name>`）
-- RTTI：`typeid(e)` / `dynamic_cast<T*>(e)` 解析 + `_ZTI` 符号
-- 异常：`try { ... } catch (T& e) { ... }` / `throw e` → Itanium zero-cost 降级（`__cxa_*` 调用）
-- Lambda：捕获列表 + 形参 + body → 匿名 `struct` + `operator()` 函数
-- 模板：`template <typename T>` 语法 + 实例化（简化：单态化）
-- constexpr / consteval：关键字识别（占位）
-- `std::complex` / `std::atomic` 风格标准库组件：依赖模板 + 运算符
+C++ 前端将 C++ 特性降级为 C 代码供后端消费。已实装：
 
-**M9 范围**（新增）：
-- **CLI 集成**：`dcc -x c++ foo.cpp` / `dcc foo.cpp`（按 `.cpp`/`.cc`/`.cxx`
-  扩展名自动识别）；`dcc -dump-ast` / `dcc -fsyntax-only` 模式
-- **C++ 词法补全**：C 关键字（`int` / `return` / `if` / `while` / ...）在 C++
-  源码里被识别为 `TokKind::KwInt` 等，不再被误作 `Ident`；全部复合操作符
-  `->` / `->*` / `--` / `-=` / `++` / `+=` / `<<` / `<<=` / `>>` / `>>=`
-  / `==` / `!=` / `<=` / `>=` / `&&` / `||` / `*=` / `/=` / `%=` / `^=`
-  / `|=` / `&=` / `...` 完整支持
-- **C++20 占位降级**：
-  - `module foo;` / `export module foo;` / `import <iostream>;` /
-    `import "header.h";` / `export { ... }` 降级为 no-op 注释
-  - `concept Name = ...;` / `requires ...` 降级为占位注释
-  - `co_await expr` / `co_yield expr` / `co_return expr` → Duff's device 状态机
-    (src/cpp/coroutine.rs)：per-function `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done`
-- **C++ → C 降级完善**：
-  - 局部变量声明 `T name;` / `T name = init;` / `T name(args);` 解析 + 降级
-    为 `struct T name;` 形式
-  - 构造初始化列表 `Foo() : x_(0), y_(1) {}` 解析 + 降级为
-    `((struct Foo*)this)->x_ = 0; ((struct Foo*)this)->y_ = 1;`
-  - 类内方法体对未限定成员访问 `n_` 自动改写为 `this->n_`
-  - `obj.method(args)` 改写为 `_ZN<Cls><Len><method>E<args>(&obj, args)` 形式
-    （M9 简化：仅在 `obj` 是已知类类型的局部变量时）
-  - 局部类类型变量声明时显式调用默认构造 `Counter c;` →
-    `struct Counter c; _ZN7CounterC1Ev(&c);`
-  - 顶层 `int main() {}` 末尾追加 C 端 trampoline
-    `int main() { return _ZN4mainEv(); }` 以让 libc 启动器找到 main
-  - 系统头 `stddef.h` / `stdint.h` 仅在确实使用 `new` / `delete` /
-    `throw` / `try` / `typeid` 时引入；否则用 `typedef unsigned long size_t;`
-    替代以保证 Windows 也能用
-- **DCC_CPP_KEEP_TMP**：环境变量；非空时把降级后的 C 文件写到指定路径
-  而不是临时目录，便于调试
+- 类/继承/虚函数/vtable/RTTI/异常处理/lambda（Itanium ABI 降级）
+- 模板完整单态化 + SFINAE + 偏特化 + concept 求值
+- 协程 Duff's device 状态机（`co_await`/`co_yield`/`co_return`）
+- Modules BMF 序列化 + GCC ABI 兼容运行时（`__cxa_guard_*`/`__dynamic_cast`）
+- 构造委托/继承链 ctor/成员函数指针/`std::initializer_list`
+- CLI 集成（`-x c++`/按扩展名自动识别）、C++20 占位降级
 
-**M9 不在范围**：SFINAE / partial specialization（`partial_sort`）/
-完整 concept 求值 / 协程挂起恢复 / module BMF 序列化 / 完整 GCC cc1/cc1plus
-bootstrap（受限于 `dcc` 自身 C++ 库支持度与本地磁盘空间；
-其中 SFINAE / partial spec / concepts / 协程 / module BMF 在 M10+ 已实装）。
+设计原则：所有特性均降级为 C 后端可直接消费的 C 代码；
+已通过 496 单元测试 + 255 集成测试。
 
-**M10+ 范围**（新增，已在 `src/cpp/m10.rs` + `src/cpp/template.rs` +
-`src/cpp/coroutine.rs` + `src/cpp/bmf.rs` + `src/cpp/gcc_compat.rs` 中实现）：
-- **SFINAE**（`substitution failure is not an error`）：
-  - `SfinaeCtx` 记录类型形参→实参绑定，`try_substitute` 替换失败时降级
-    为保留原 ident（pattern_matches 阶段判定非匹配）
-  - 模板形参未绑定时不报错，模板实例化阶段跳过该候选
-- **Partial specialization**：
-  - 解析 `template <typename T> class Foo<T*> { ... }` 为
-    `PartialSpec { params, pattern_text, decl }`
-  - `pattern_matches("T*", "int*")` 识别形参/实参；支持 `T*` / `T&` /
-    `const T` / 精确匹配
-- **Concept 求值**（`requires { ... }`）：
-  - 解析 `sizeof(T) <= N` / `same_as<T, U>` / `derived_from<T, Base>` /
-    `T::value` / 表达式约束
-  - `Concept::evaluate(&SfinaeCtx)` 替换形参后求值，返回 bool
-- **模板完整单态化**（`src/cpp/template.rs`）：
-  - `TemplateRegistry` 注册 class/function 模板及偏特化（含 requires-clause 约束）
-  - `instantiate` 按需实例化 + 缓存，每个实例化定义只 emit 一次
-  - `pick_best_specialization` 按 match score 选择最佳偏特化
-  - 解析模板-id 调用表达式 `T<U>`、模板局部变量声明、typeid 模板类型
-- **协程 Duff's device 状态机**（`src/cpp/coroutine.rs`）：
-  - `co_await expr` / `co_yield expr` / `co_return expr` 降级为 per-function
-    `<fn>_coro_state`/`<fn>_coro_value`/`<fn>_coro_done` 变量
-  - `emit_fn` 包裹协程体为 `switch(<fn>_coro_state)` 结构：
-    case 0 入口 + resume labels 在每 suspend 点
-- **Modules BMF 序列化**（`src/cpp/bmf.rs`）：
-  - DCC_BMF_V1 文本格式：module 名 / import 列表 / export 记录
-    (function/class/variable)
-  - `lower` 在 export module 声明后收集 exports
-  - `ModuleInfo::to_bmf` / `from_bmf` round-trip 辅助
-- **GCC ABI 兼容运行时**（`src/cpp/gcc_compat.rs`）：
-  - `__cxa_guard_acquire/release/abort` 静态局部初始化
-  - `__dcc_typeinfo_t` 用于 typeid 静态路径
-  - `__dynamic_cast` 辅助
-  - `initializer_list` 布局
-  - 成员指针偏移宏
-  - 运行时 idempotent 追加到降级 C 序言
-- **operator-> 重载链**：
-  - 类型名含 `Ptr`/`ptr`/`Wrapper`/`Iter`/`iter` 的局部变量在 `->`
-    访问时走 operator-> 链 (简化: 直接展开为 `obj->member`)
-- **RTTI 完整 dynamic_cast 跨虚继承**：
-  - `dynamic_cast<T*>(e)` 降级为 `((T*)__dynamic_cast((void*)(e), 0, 0, -1))`
-  - Itanium C++ ABI: 通过 vtable RTTI 查找 `_ZTV<T>` 偏移
-- **构造委托 / 继承链 ctor**：
-  - `using Base::Base;` 解析为 `InheritingCtor { class, base }`
-  - `CtorExpander::emit_inheriting(this, base)` 生成 wrapper 转发
-  - 构造委托 `Foo(int) : Foo() {}` 简化为注释 (M10 简化)
-- **成员函数指针** `&Class::method`：
-  - 解析为 `MemberPtr { class, name }`
-  - 降级为 `&_member_fn_<Class>_<method>` 形式 (M10 简化)
-- **C++ ABI 线程安全 init guard** `__cxa_guard_*`：
-  - 静态局部变量 `static T x = init;` 触发
-  - 降级为 `_cxa_guard_acquire(&_cxa_guard_x)` + 初始化 +
-    `_cxa_guard_release(&_cxa_guard_x)`
-  - 状态机: 未初始化(0) → 初始化中(1) → 已初始化(2)
-- **`std::initializer_list`** `{1, 2, 3}`：
-  - 解析为 `InitList(elems)` / `TypedInitList { ty, elems }`
-  - 降级为复合字面量 `((int[]){1, 2, 3})` 形式
-  - `InitList::emit_c()` 生成 `{ ptr, count, capacity }` 结构
-
-**M10+ 设计原则**：所有特性均降级为 dcc C 后端可直接消费的 C 代码；
-模板完整单态化 / 协程状态机 / Modules BMF 序列化 / GCC 兼容运行时
-均已实装并通过 496 单元测试 + 255 集成测试。
-对 GCC 真实 bootstrap 仍有部分受阻（受限于 dcc 自身 C++ 库 + 本地
-磁盘空间），但 M10+ 显著扩展了能直接编译的 C++ 模式范围。
-
-**限制**：C++ 子命令 (`dcc++` / `-x c++`) 在 M9 阶段已可端到端运行
-简单 C++ 源（含 class / 成员函数 / 构造初始化列表 / 局部类变量 /
-方法调用改写）；GCC 完整 bootstrap 仍部分受阻（M9 已解锁 C++ 端到端，
-M10+ 已实装模板完整单态化 / 协程 / module BMF / GCC 兼容运行时，
-cc1/cc1plus 仍受更复杂 C++ 模式阻碍 + 本地磁盘需要为 GCC
-源码约 1GB + 构建临时文件约 5GB 留足空间）；原因见
-`docs/missing_features.md` 的 C++ 前端状态表。
+限制：GCC 完整 bootstrap 仍部分受阻（cc1/cc1plus 受更复杂 C++ 模式阻碍）；
+原因见 `docs/missing_features.md` 的 C++ 前端状态表。
 
 ## x86-64 后端 ABI 约定
 
@@ -485,7 +334,7 @@ Parser 直接表示 `&&label`、`goto *expr` 和 `asm goto`。标签地址使用
 RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
 汇编器之前将 `%lN` / `%l[name]` 解析到函数内标签。
 
-M11.2 扩展：
+扩展：
 
 - **跨函数 computed goto**：`&&outer_label`（其他函数的命名标签）
   通过 `lea rax, [rip + label]` 加载 64-bit 绝对地址，再经
@@ -502,7 +351,7 @@ M11.2 扩展：
   适配 GNU 嵌套函数的静态链调用约定，配合 IR 一等公民的
   嵌套函数（nested function）支持。
 
-M11.3 扩展 — 内联 asm 约束全家族：
+扩展 — 内联 asm 约束全家族：
 
 - **约束解析**：`parse_asm_constraint_flags` 把约束字符串拆为
   `(is_output, is_inout, early_clobber, match_digit)` 四个标志。
@@ -561,315 +410,17 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   `rol`/`ror`、`prefetcht0/t1/t2/nta`、`movss`/`movsd`/`addss`/`addsd`、
   `xorps`/`xorpd`、`swapgs`/`invlpg`/`int3` 等；
   未识别指令 warning + nop 占位。
-- **M12 mini-asm 补全（高）** — 消除内核 paravirt / 启动代码的 nop 警告：
-  - **段寄存器**：解析 `%cs`/`%ds`/`%es`/`%fs`/`%gs`/`%ss` 6 个名字成
-    段号 + 0x26/0x2E/0x36/0x3E/0x64/0x65 前缀；`mov` 段寄存器支持
-    `8C /r` (read) / `8E /r` (write) 两条 ModR/M 路径；`push`/`pop` 段
-    走 `0x0F A0`/`0x0F A8` 系列；段寄存器 *不* 触发 REX
-    编码。`SymDisp` 内存 + 段前缀直接拼接段字节在 ModR/M 之前。
-  - **SymDisp 操作数**：新增 `AsmOperand::SymDisp(String, i32)`
-    表示 `sym(%rip)`，写回靠 `pending_data_rels`（不再用
-    `pending`，`pending` 仅给跳转用）；`jmp`/`jcc`/`call` 走
-    `movabs rax, sym` + `jmp *%rax`；`setcc`/`cmpxchg`/`xadd`/
-    `movzx`/`movsx`/`popcnt`/`movnt*`/`prefetch*`/`alu`/`test`/
-    `shift` 全部支持 SymDisp。`parse_asm_operand_str` 处理 `*` 前缀
-    把 `Sym` 升级为 `SymDisp`（间接跳转/调用）。
-  - **mov 增强**：`mov %gs:mem, reg` 走 8C /r；`mov reg, %gs:mem`
-    走 8E /r；`mov $imm64, mem` 走 `movabs rax, imm64` + `movq rax, mem`；
-    `movabs $imm64, %rax` 直接 REX.W + B8+rd。
-  - **push/pop 增强**：新增 `push`/`pushq`/`pushl`/`pushw` 与
-    `pop`/`popq`/`popl`/`popw` 6 个 AT&T 扩展助记符；立即数 >8 位
-    按符号扩展 32 位后 `68 id`；`pushq $imm64` 走
-    `movabs rax, imm64` + `push %rax`；`push %seg` 走 0x0F A8
-    1+seg*8。
-  - **ALU/test 增强**：`add/sub/and/or/xor/cmp $imm, mem`
-    走 `mov{abs,b} rax, imm` + ALU reg,mem；`test $imm, mem`
-    走 `test imm, rax` + `mov mem, rax`；`test $imm, %al/%ax`
-    直接 A8/A9。
-  - **shift 增强**：`shl/shr/sar/rol/ror $cl, reg_or_mem` 当
-    shift-amount 寄存器不是 `%cl`（如 `%r13`）时走
-    `mov %r13, %ecx` + D3 /4 编码；`shl $imm, mem` 走
-    `mov reg, mem` + `shl imm, reg` + `mov mem, reg`。
-  - **setcc 增强**：AH/BH/CH/DH 高 8 位目标跳过 REX 编码（与
-    gcc 行为一致；REX 会把 AH 转成 SPL 编码）；SymDisp mem 目标走
-    `setcc rax` + `mov mem, al`。
-  - **cmpxchg/xadd**：`cmpxchg %rax, mem` 走 `lock cmpxchg`；
-    `xadd` 走 `lock xadd`；非 rax 隐式操作数走 `mov mem, %rax` +
-    `lock cmpxchg` + 写回。
-  - **bswap**：拒绝 16 位操作数（与 gcc 一致 — 16 位 bswap 不存在）。
-  - **movnt/movntdq/movntps/movntpd**：加 NT store 编码（0F 2B /
-    0F E7 等），mem 目标走 SymDisp。
-  - **prefetch**：prefetcht0/t1/t2/nta 走 0F 18 /1-5；支持 SegMem
-    与 SymDisp `%rip` 寻址。
-  - **jmp/jcc/call 间接**：`jmp *%rax` / `call *%rax` 走 FF /4 或
-    FF /2；SymDisp mem 走 `movabs rax, sym` + `jmp/call *%rax`。
-  - **系统指令**：`wbinvd` (0F 09)、`invd` (0F 08)、`cpuid` (0F A2)、
-    `rdtsc` (0F 31)、`rdtscp` (0F 01 F9)、`rdpmc` (0F 33)、
-    `syscall` (0F 05)、`sysret` (0F 07)、`sysenter` (0F 34)、
-    `sysexit` (0F 35)、`swapgs` (0F 01 F8)、`stac`/`clac` (0F 01 CB/CA)、
-    `endbr64` (F3 0F 1E FA)、`endbr32` (F3 0F 1E FB)、`pause` (F3 90)、
-    `hlt` (F4)、`cli`/`sti` (FA/FB)、`cld`/`std` (FC/FD)、`clc`/`stc`/`cmc`
-    (F8/F9/F5)、`lahf`/`sahf` (9F/9E)、`pushf`/`popf` (9C/9D)、
-    `ud2` (0F 0B)、`int3` (CC)、`lfence`/`sfence`/`mfence`
-    (0F AE E8-EF)、`vmlaunch`/`vmresume`/`vmxoff` (0F 01 C4/C5/C4)、
-    `vmptrld`/`vmptrst`/`vmclear` (0F C7 /6/7/6)、
-    `vmread`/`vmwrite` (0F 78/79)。
-  - **FPU/XMM 保存**：`fxsave`/`fxrstor` (0F AE /0/1)、
-    `fnsave` (DD /6)、`fnstenv` (D9 /6)、`fnclex` (DB E2)、
-    `fninit` (DB E3)、`ldmxcsr` (0F AE /2)、`stmxcsr` (0F AE /3)；
-    FPU 加载走 `emit_asm_fpu_load`（带 SymDisp RIP-relative 支持）。
-  - **测试**：`tests/fixtures/c/asm_paravirt.c` 26 个用例覆盖
-    段寄存器、push/pop 段、imm64、shift $cl、setcc AH、间接
-    jmp、cpuid/rdtsc/wbinvd/invd、cli/sti/cld/clc/hlt、
-    stac/clac、swapgs、fxsave、imm64→mem、prefetch、int3、
-    pause、ud2、syscall、endbr64；`asm_paravirt_boot_compiles_-
-    without_nop_fallback` 在本地 Linux 上 PASS。
-  - **降级**：未识别指令仍走 `eprintln! warning` + 单字节 0x90
-    (`nop`) 占位；带行号和源位置信息以方便追踪（避免静默 nop）。
-- **M13 SIMD 指令子集补全（高）** — 完整实装 x86_64 SIMD 指令子集，
-  覆盖加密/科学计算/机器学习等场景的内联汇编：
-  - **VEX 编码基础设施**：新增 `emit_vex3_prefix` (C5)、`emit_vex4_prefix` (C4)
-    通用前缀编码；`emit_asm_vex_3op_reg` / `_mem` / `_imm8` / `_imm8_check` 等
-    通用 helper；AT&T 顺序 `(src1, src2, dst)` 与 imm-first 顺序 `(Imm, Reg, Reg)`
-    在 helper 内部自动重排，编码符合 Intel 规范。
-  - **EVEX 编码（AVX-512 简化）**：新增 `emit_evex_prefix` (62) 与
-    `emit_asm_evex_3op_reg` / `_2op`；当前覆盖 zmm 大小的 vmovdqu32/64、
-    vmovdqa32/64、vaddps/mulps 等基础路径；broadcast/mask/RC-SAES
-    全模式为后续工作。
-  - **SSE3/SSSE3/SSE4.1/SSE4.2 整数 SIMD**：`pshufb`/`pshufd/hw/lw`、
-    `pmulhrsw`/`pmullw`/`pmulld`/`pmuludq`/`pmuldq`/`pmaddubsw`/
-    `pmaddwd`、`pabsb/w/d`、`palignr`、`pblendw`、`phminposuw`、
-    `pminub/uw/sb/ud/sd`、`pmaxub/uw/sb/ud/sd`、`pcmpeqq`、
-    `pcmpgtq`、`pinsrb/d/q`、`pextrb/d/q`、`extractps`、`insertps`、
-    `pmovsxbw/bd/bq/wd/wq/dq`、`pmovzxbw/bd/bq/wd/wq/dq`、
-    `roundps/pd/ss/sd`、`crc32b/w/l/q`。
-  - **AVX/AVX2 浮点**：`vaddps`/`vaddpd`/`vmulps`/`vmulpd`/`vsubps`/
-    `vsubpd`/`vdivps`/`vdivpd`/`vminps`/`vmaxps`/`vminpd`/`vmaxpd`/
-    `vsqrtps`/`vsqrtpd`/`vandps`/`vandpd`/`vorps`/`vorpd`/`vxorps`/
-    `vxorpd`、`vaddss/sd`/`vmulss/sd`/`vsubss/sd`/`vdivss/sd`/
-    `vminss/maxss/minsd/maxsd`/`vsqrtss/sd`、`vshufps/pd`、
-    `vunpcklps/hps/lpd/hpd`、`vpermilps/pd`、`vbroadcastss/sd`/
-    `i128`、`vblendps/pd`、`vperm2f128/i128`、`vinsertf128/i128`、
-    `vextractf128/i128`。
-  - **AVX/AVX2 整数**：`vpaddb/w/d/q`/`vpsubb/w/d/q`/`vpmullw`/
-    `vpmulld`/`vpand`/`vpandn`/`vpor`/`vpxor`/`vpcmpeqb/w/d/q`/
-    `vpcmpgtb/w/d/q`/`vpshufd`/`vpshufb`/`vpminub/uw/sb/ud/sd`/
-    `vpmaxub/uw/sb/ud/sd`/`vpmuldq`/`vpmuludq`/`vpmulhrsw`/
-    `vpabsb/w/d`/`vpaddusb/sb`/`vpsubusb`/`vpsignb/w/d`/
-    `vphaddw/d/sw`/`vphsubw/d/sw`/`vpmaddwd`/`vpmaddubsw`/
-    `vpavgb/w`/`vpacksswb/dw`/`vpackuswb/dw`。
-  - **AVX 移动与杂项**：`vmovaps`/`vmovapd`/`vmovups`/`vmovupd`/
-    `vmovdqa`/`vmovdqu`（含 128/256 位）、`vzeroupper`/`vzeroall`、
-    `vpmovmskb`/`vmovmskps`/`vmovmskpd`。
-  - **AVX 转换**：`vcvtps2pd`/`vcvtpd2ps`/`vcvtss2si`/`vcvtsd2si`/
-    `vcvtsi2ss`/`vcvtsi2sd`。
-  - **AES-NI**：`aesenc`/`aesenclast`/`aesdec`/`aesdeclast`/
-    `aesimc`/`aeskeygenassist`（66 0F 38 DC-DF/DB/DE/DF 全部实装）。
-  - **SHA**：`sha1rnds4`/`sha1nexte`/`sha1msg1`/`sha1msg2`/
-    `sha256rnds2`/`sha256msg1`/`sha256msg2`。
-  - **FMA 4 操作数（AVX/FMA）**：`vfmadd132/213/231 {ps,pd,ss,sd}`、
-    `vfmsub132/213/231 {ps,pd,ss,sd}`、`vfnmadd132/213/231 {ps,pd,ss,sd}`、
-    `vfnmsub132/213/231 {ps,pd,ss,sd}` 共 32 个变体；通过
-    `emit_asm_fma_3op` 通用 helper 编码，AT&T 顺序 `(src1, src2, dst)`
-    内部自动重排。
-  - **F16C**：`vcvtph2ps`（VEX.128.66.0F38 13 /r）、`vcvtps2ph`
-    （VEX.128.66.0F3A 1D /r ib）。
-  - **TSX（Restricted Transactional Memory）**：`xbegin` rel16
-    （C7 F8 rel16）、`xend`（0F 01 D5）、`xabort` imm8（C6 F8 ib）、
-    `xtest`（0F 01 D6）；含 gcc AT&T 风格的标签相对寻址。
-  - **AMX tile 指令**：`ldtilecfg`（VEX.128.0F38 49 /0）、
-    `sttilecfg`（VEX.128.0F38 49 /1）、`tilezero`（VEX.128.F2.0F38 49 /0）、
-    `tileloadd`（VEX.128.F2.0F38 4B /0）、`tilestored`（VEX.128.F3.0F38 4B /0）、
-    `tdpbssd`/`tdpbusd`/`tdpbuud`/`tdpbf16ps`（VEX.128.F2.0F38 5E/50/51/5C）。
-  - **AVX-VNNI（神经网络点积）**：`vpdpbusd`（VEX.128.66.0F38 50 /r）、
-    `vpdpbssd`（VEX.128.66.0F38 51 /r）、`vpdpwssd`（VEX.128.66.0F38 52 /r）。
-  - **Mask 寄存器（k0-k7）**：`kmovw`（0F 90 /r）基础路径实装。
-  - **movd/movq 增强**：SSE/MMX `movd`（66 0F 6E/7E）显式
-    dispatch；`movq` 走通用 `emit_asm_mov` (size=64)。
-  - **2 操作数 VEX 形式**：`vunpcklps/hps/lpd/hpd` 等支持 AT&T
-    2 操作数形式（src, dst），通过专用 helper 编码 vvvv=dst。
-  - **测试**：`tests/fixtures/c/asm_avx.c` 30+ 个用例
-    覆盖 AES-NI、SHA、FMA 132/213/231、F16C、AVX 浮点 3 操作数、
-    AVX 标量、AVX 整数 3 操作数、AVX 移动与杂项、AVX-VNNI、
-    SSE3/SSSE3/SSE4.1/SSE4.2（含 GPR 源/目的的 pinsr/pextr）、
-    VPINSR/VPEXTR/VEXTRACT、TSX（xbegin/xabort）、AMX tile、
-    AVX 转换、AVX-512 EVEX `_z` 编码、256 位 vperm2f128/vinsertf128/
-    vextractf128 等；每个函数只测试一类指令子集（失败易定位）。
-    `asm_avx_aes_fma_tsx_compiles_without_nop_fallback` 在本地
-    Linux/Windows 上 PASS。
-  - **M13.2 增量（2026-07-21）**：
-    - `parse_asm_reg` 新增 `ymm0–15`/`zmm0–31`/`tmm0–7`/`k0–7`
-      （u8 标签 128=xmm/129=ymm/130=zmm/131=tmm/132=k）；
-    - 新增 `emit_asm_pinsr_imm8`/`emit_asm_pextr_imm8`/
-      `emit_asm_vpinsr_imm8`/`emit_asm_vpextr_imm8` helper，
-      正确编码 GPR/内存 ↔ XMM 的 SSE4.1/AVX 插入提取指令；
-    - AMX `tileloadd`/`tilestored` 兼容两种 AT&T 操作数顺序；
-    - 修复 imm8 类指令 inner 条件不匹配时静默漏发字节的 bug。
-  - **已知简化**：
-    - AVX-512 mask (`aaa`) / broadcast (`b`) / ER (`RC`/`RM`/`RD`/`RU`)
-      路由字段目前未区分（默认 000），适用于非掩码 / 非广播场景；
-      `vmovdqu32_z` 等占位编码可能与未来硬件需求不完全一致。
-    - 256 位 AVX 指令在 `(Reg, Reg)` arm 中以 `l: u8` 控制 VEX.L
-      位；后续可升级为 `l: u16` 统一 128/256/512。
-    - `vcvtsi2ss`/`vcvtsi2sd` GPR 源操作数（32 位 vs 64 位）当前
-      由 `w` 字段区分；GPR 内存源（cvt si2ss mem）未实装。
-  - **降级**：少数 AVX-512 复杂指令（`vfpclassps`/`vgetmants`/`vreduceps`
-    等）仍走 nop 警告；后续按需补全。
-- **M13.1 x86_64 codegen 表达式层补洞（高）** — 收尾 5 个历史跟踪文档中
-  第 1.2 节里长期挂账的 stub/简化，全部跑通测试用例：
-  - **float 取模（`%`）软件实装**：`gen_float_binop` 检测到 `BinOp::Mod`
-    不再走 `_ => return`（E1003）；改用 `divss/divsd` + `cvttss2si/cvttsd2si`
-    + `cvtsi2ss/cvtsi2sd` + `mulss/mulsd` + `subss/subsd` 计算
-    `l - trunc(l/r) * r`，零 libc 依赖；`ir.rs::FLOAT_BINOPS` 同步加入
-    `BinOp::Mod`；`call_label("fmodf/fmod")` 路径删除（dcc 无内置链接器，
-    非 `-c` 模式无法解析外部符号，新代码不再误用）。`test_float_mod.c`
-    6 个用例（float/double 基本、负数、整除、嵌套）本地 PASS。
-  - **int128 逻辑 `&&`/`||` 正确化**：`Expr::Binop` 优先在
-    `BinOp::AndAnd/OrOr` 处对左/右操作数在 `gen_expr_decay` 后追加
-    `or rdx, dst`（REX.W/REX.R 处理 dst≥8），合并 `rdx:dst`（高:低）后
-    再 `test rax, rax`；避免「高 1 低 0」被旧实现误判为 0 的 bug。
-    `gen_int128_binop` 中 `BinOp::AndAnd | OrOr => unreachable!` 路径
-    不再被触发。`test_int128_logical.c` 5 个用例（`(__int128)(1<<64)`、
-    零值、short-circuit）本地 PASS。
-  - **asm `x` 约束 XMM early-clobber**：GP 与 XMM 共用 0..15 编号空间，
-    旧实现只建一个 `input_reg_set` 判定冲突，XMM 路径直接 `continue`
-    跳过。现在 XMM 输入加入独立的 `input_xmm_set`，`prepare_asm_xmm_binding`
-    在输入/`+x` inout 时把 float 变量/表达式加载到指定 xmm（含全局
-    RIP-relative movss/movsd）；`writeback_asm_operand` 按 `xmm_width`
-    写回栈或全局，支持 xmm8–15；`=&x` early-clobber 在
-    `xmm_pool = [0..15]` 内选未被 XMM 输入占用的 XMM。
-  - **浮点字面量 rodata 解析**：原 stub 提到的「复杂 FP 字面量可能精度
-    偏差」经核实是误报。当前实现用 `v.to_le_bytes()` 直接写 IEEE 754
-    bit pattern 进 `.rodata`（f32 `*v as f32` 截位、long double 高 8
-    字节补零），`[rip+disp32]` 加载走 `float_refs` 重定位 + patch；任意
-    复杂字面量（`0x1.fffffffffffffp+1023` 等）零偏差。
-  - **跨函数 LEA**：`emit_lea_r13`（`[r13+off]`，frame 内变量）、
-    `emit_global_addr`（`[rip+disp32]`，全局符号/函数）、
-    `Expr::String`/`Expr::Float`（RIP-relative LEA/movsd/movss）三套
-    编码路径完整；`pending_data_rels`/`string_refs`/`float_refs` +
-    `patch_local_jumps` 阶段在非 `-c` 模式下也能把所有
-    `[rip+disp32]` 占位 0 改写为正确偏移，跨函数/跨节 LEA 均无需
-    后续人工 patch。全局数组下标 `Expr::Index` 对全局符号走
-    `emit_load_global_indexed`（单条 `[rip+disp32+idx*scale]` mov/movss/movsd），
-    替代 LEA+ADD 两步。
-  - **测试**：`tests/fixtures/c/float_mod.c`（6 用例）、
-    `tests/fixtures/c/int128_log.c`（5 用例）、
-    `tests/fixtures/c/asm_constr.c`（含 XMM `"x"`）、
-    `tests/fixtures/c/global_idx.c`（全局数组 RIP+SIB）；
-    `test_asm_goto_outputs.c`（3 用例覆盖 fall-through / taken / basic）本地
-    全部 PASS；`test_float_lit.c`/`test_hugeval.c`/`test_nan.c` 等 12 个
-    M11.2/11.3 已有测试无回归（`test_asm_constraints_ext` 在 M11.3 起即
-    失败于 `test_xmm_constraint`，属 pre-existing，本 M 不在范围）。
-- **M14 C 前端补洞：#pragma / attribute / atomic / MS 扩展** —
-  收尾历史跟踪文档第 4.1 节里 8 条长期挂账的简化项，
-  全链路贯穿 preproc → parser → codegen → link：
-  - **`#pragma pack(n)` 影响 struct 布局**：`preproc` 维护 `pack_stack` +
-    `pack_history: Vec<(u32, Option<usize>)>`，把每次 packing 变化按行号
-    记录；`preprocess` 函数返回 `PreprocessOutput` 结构（取代旧 tuple
-    返回），携带 `pack_history` + `weak_symbols`；`driver.rs` 把这两个
-    字段塞入新加的 `ParseOptions` 传给 parser；`Parser::pack_at_line(line)`
-    二分查找生效 packing；`layout_struct_with_pack` 新增
-    `max_align: Option<usize>` 参数把每个字段对齐 cap 到 `min(nat, n)`；
-    `parse_type_mode` 记下 `struct` 关键字所在行作为查询基准。
-    优先级：`__attribute__((packed))` > `#pragma pack(n)` > 自然对齐。
-  - **`_Pragma("...")` 等价 `#pragma ...`**：`_Pragma` 操作符与
-    `#pragma` 复用同一条 `process_directive` 通路，自动具备
-    `pack/weak/STDC/GCC diagnostic` 处理；包字符串经 `unescape_string`
-    反转义。
-  - **`#pragma weak name` + `__attribute__((weak))` 合并**：
-    `preproc` 收集到 `weak_symbols: HashSet<String>`；`ParseOptions` 把
-    集合带入 parser；`Parser::is_weak_symbol(name)` 暴露查询；
-    `VarDecl` / `FuncDecl` 创建时合并 `attrs.is_weak || pragma_weak`；
-    codegen 已有的 `STB_WEAK` 通路自动生效（`f.is_weak` →
-    `bind: STB_WEAK`）。
-  - **`__attribute__((returns_nonnull))` codegen**：
-    `codegen/x86_64.rs` 新增 `current_returns_nonnull: bool` 状态；
-    `compile_func` 入口处 `self.current_returns_nonnull = f.returns_nonnull`；
-    `gen_stmt` 遇到 `Stmt::Return { val: Some(e) }` 时若返回类型为
-    `Ptr` 或 `Func`，在 `emit_func_epilogue` 之前插入
-    `test rax, rax; jnz .ok; ud2; .ok:` 序列强制非空。
-  - **`__attribute__((target_clones(...)))` IFUNC resolver**：
-    解析为 `FuncDecl.target_clones: Vec<String>`；链接期
-    `link/target_clones.rs::TargetClonesTable::parse` 把变体名
-    `foo.sse4.2` / `foo.default` 入表；`gen_irelative_relas` 写
-    `STT_GNU_IFUNC` 符号 + `R_X86_64_IRELATIVE` 重定位。
-    静态可执行无 CPU feature 检测时，resolver 默认返回 default
-    变体地址。
-  - **freestanding 模式原子宏语义修正**：`preproc` 在
-    `freestanding=true` 时显式定义 `__STDC_HOSTED__=0` +
-    `__STDC_NO_ATOMICS__=1`（C11 §4/6 规定），且不预置
-    `atomic_store/atomic_load/atomic_exchange/atomic_fetch_*` /
-    `atomic_compare_exchange_strong` 等 C11 stdatomic 宏（与 Linux
-    内核 `arch/x86/include/asm/atomic.h` 等同名 inline 函数冲突，
-    误展开为 `__atomic_fetch_add(i, v, 5)` 会破坏声明）。
-    `__atomic_*` 内建 + `__ATOMIC_*` 常量仍保留供显式调用。
-  - **MS 扩展 `__declspec` 翻译**：`parse_type_mode` 解析
-    `__declspec(...)` 参数列表；`thread` → `decl_storage.is_thread_local = true`；
-    `noreturn` → `decl_attrs.is_cold = true; is_noinline = true`；
-    `align(N)` → `decl_attrs.alignment = max(cur, N)`；
-    `dllimport` / `dllexport` 接受但无 codegen 差异。
-  - **K&R 函数自动检测**：`parse_func_decl` 检测到 `(name1, name2, ...)`
-    形式（参数无类型）时设 `is_old_style = true`；codegen 走与 ANSI
-    相同的参数压栈路径。
-  - **测试**：`pragma_family_compile_and_run` +
-    `pragma_operator_compile_and_run`（覆盖 pack/weak/STDC/diagnostic）+ 
-    `kr_old_style_function`（K&R 风格）+ `ms_extensions_compile_and_run`
-    （__declspec 全家族）+ `attr_target_clones_compile_and_run` +
-    `attr_copy_returns_nonnull_compile_and_run`（含 returns_nonnull）+
-    `stdatomic_macros_hosted`（hosted 模式 atomic 宏）本地 PASS；
-    freestanding 模式通过 `preproc.rs` 单元测试验证
-    `__STDC_NO_ATOMICS__=1` 已设置。
-- **M15 const_eval 完整化 + 运行时检查**：补全历史跟踪文档中
-  第 4.2/4.3 节 7 条长期挂账项（浮点常量 / 字符串常量 / 地址常量 /
-  `__builtin_*` 折叠 / constexpr / `#embed` 字节数 / 严格类型 warning）
-  与 3 条运行时检查（`-fbounds-check` 数组越界 / `-ftrapv` 整数溢出
-  trap / 隐式指针整数转换 warning）：
-  - **`ConstValue` 枚举**：`const_eval.rs` 引入
-    `Int(i128) | Float(f64) | Str { data, label } | Addr { name, offset } | Bytes { data, label }`
-    五种值；`eval_full` 返回该枚举（保留旧 `eval() -> i128` API 作为
-    兼容封装，仅在 `ConstValue::Float` 上做 `f as i128` 截断）。所有
-    旧 parser/IR 调用点不变。
-  - **浮点常量算术**：`add_values/sub_values/mul_values/div_values`
-    增加 `Float<->Float` 与 `Int<->Float` 混合分支；
-    `cmp_values` 把 `lt/gt/le/ge/eq/ne` 全部提升到 f64 比较（整数通过
-    `as_float()` 走 i128→f64 转换；f64→i128 由 `as_int()` 负责）。
-  - **字符串字面量**：`Expr::String` 直接给出 `ConstValue::Str`，label
-    用 FNV-1a 64-bit 哈希（`const_str_id` 私有 helper），与 codegen
-    `string_pool` 标签格式互不耦合。
-  - **地址常量**：`Expr::AddrOf` 内部按子表达式分派 — `Ident` → `Addr{0}`、
-    `Index{ident, idx}` → 索引常量作为 `offset`、`LabelAddr` → `Addr{0}`。
-  - **`__builtin_*` 折叠**（parser 层）：`__builtin_strlen(s)` 把字符串
-    字面量折叠为整数长度；`__builtin_abs/labs/llabs` 走
-    `i128::wrapping_abs()`；`__builtin_bswap16/32/64` 走
-    `uN::swap_bytes()`；`__builtin_expect(cond, expect) → cond`；
-    `__builtin_popcount*` 走 `u64::count_ones()`。所有 builtin 折叠
-    都用 `const_eval::eval_int_lit` 解析参数 + `eval_full` 验证。
-  - **C23 constexpr 函数**：`parser` 在 declaration specifier 与
-    `parse_type_mode` 两处识别 `constexpr` 关键字并 `advance` 跳过；
-    不强制编译期求值，函数体走普通 codegen 路径。
-  - **`#embed` 字节数**：preproc 已展开为 `byte0, byte1, ..., byteN-1`
-    逗号分隔整数字节；`sizeof(embed_arr)` / `__builtin_strlen(embed_str)`
-    走 const_eval 求长度（与普通数组无差异）。
-  - **严格类型检查 warning**：parser 新增 `check_strict_conversion`，
-    cast 阶段按位宽比较检测：整型收窄（`char` 接收 0x100 等）报
-    `-Wint-truncation`；隐式指针↔整数转换报 `-Wint-conversion`。
-    警告不阻塞编译（按 warning 类别报告），遵循 GCC 类别命名。
-  - **`-fbounds-check`**：codegen `Expr::Index` 处理路径在 imul 后
-    插入 `cmp rcx, n*es; jb ok; call __ubsan_handle_out_of_bounds`；
-    n 溢出/0/未知大小 (`ArraySize::Var`) 时跳过检查。
-  - **`-ftrapv`**：codegen `Expr::Binop` 路径末尾追加
-    `jo .trap; jmp .ok; .trap: call __dcc_trapv_overflow; .ok:`；
-    覆盖 `Add/Sub/Mul/Div`（x86_64 OF=1 即有符号溢出）。`__dcc_trapv_overflow`
-    桩由用户链接 runtime helper（与现有 `__ubsan_*` 模式一致）。
-  - **测试**：6 个新增集成测试（`m15_float_const_eval` /
-    `m15_string_literal_and_concat` / `m15_address_const` /
-    `m15_builtin_fold` / `m15_strict_warning_compile` /
-    `m15_bounds_check_inrange` / `m15_constexpr_function`），12 个
-    const_eval 单元测试（`float_arithmetic_eval` /
-    `float_comparison_eval` / `int_float_mixed_eval` /
-    `string_literal_eval_returns_str_value` / `address_of_ident_eval` /
-    `address_of_index_eval` / `label_address_eval` /
-    `legacy_eval_truncates_float_to_int` + 4 个旧测试）全部 PASS。
+详见 `docs/support_features.md` 汇编与 SIMD 指令列表。
+- **C 前端补洞**：`#pragma pack/weak/STDC/diagnostic` 全家族、`_Pragma` 操作符、
+  `__attribute__((packed/weak/returns_nonnull/target_clones/cleanup/no_sanitize/copy/...))` 全族、
+  `__declspec` MS 扩展翻译、freestanding 原子宏语义修正、K&R 函数自动检测、
+  `_Static_assert` 字符串化（含 C23 单参形式）。
+- **const_eval 完整化 + 运行时检查**：`ConstValue` 五类型枚举（Int/Float/Str/Addr/Bytes）、
+  浮点/字符串/地址常量算术、`__builtin_*` 编译期折叠、C23 constexpr、
+  严格类型检查 warning（`-Wint-truncation`/`-Wint-conversion`）、
+  `-fbounds-check` 数组越界、`-ftrapv` 有符号溢出 trap。
+
+详见 `docs/support_features.md` C 前端与常量求值特性列表。
 - **SIMD/复数**：向量全局 `{…}` 逐元素 `.data`/`.rodata` 静态初始化（`gen_global_init_list`）；
   局部/rvalue 经帧底临时区 slot 传递；**标量逐元素** `+/-/*`（整数用 GP，
   浮点用标量 SSE，不用 XMM 向量指令）；
@@ -879,110 +430,52 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   `(int)(a+b)` 等 Cast 正确发射 `cvttss2si`；虚部清零用 `movss` 避免 64 位
   store 覆盖相邻实部；`mov_xmm` 仅在 xmm≥8 时加 REX。不支持表达式路径发射
   **ud2** 而非静默 `mov 0`。
-- **Builtins**：`__builtin_constant_p` 经 parser/opt/codegen 共享
-  `const_eval::is_constant`；`__builtin_object_size` 编译期折叠；
-  `__builtin_apply`/`return` SysV 子集；`__builtin_prefetch*` void no-op；
-  `__builtin_va_*`（start/end/copy/arg）走 SysV va_list 结构；
-  `__builtin_strcasecmp`/`__builtin_strncasecmp` 转发到 libc；
-  `__builtin_fma`/`fmaf`/`fmal` 调用 libm 同名函数（fmaf/fmal 走
-  F3 0F 10/11 `movss`，fma/fmal 走 F2 0F 10/11 `movsd`；
-  备份 arg0 至 xmm3 避免被 i=1/2 覆盖）；
-  `__builtin_rotateleft*`/`__builtin_rotateright*`（8/16/32/64 位宽
-  用 ROL/ROR + cl 编码，32 位先 mov 到 eax 再回写高寄存器）；
-  `__builtin_clrsb`/`clrsbl`/`clrsbll`（`clz(x ^ s_bits) - 1`，
-  32-bit 用 cdq/32-bit bsr，64-bit 用 cqo/64-bit bsr；
-  解决 bsr(0) 不可靠 ZF：先 `mov ecx/rcx, eax` 备份 `x ^ s_bits`，
-  `bsr eax, eax` 后 `test ecx/rcx, ecx/rcx` 覆盖 ZF，
-  `cmove eax, edx/rax, rdx`（sentinel=-1），
-  最后 `bits-2 - eax` 得 clrsb）；
-  `__builtin_overflow_p`/`__builtin_*_overflow` 用 SETO/SETB 标志；
-  `__builtin_bswap*`（16 位走 rol r16, 8 + movzx 零扩）；
-  `__builtin_clz`/`ctz`/`popcount`/`parity`；
-  `__builtin_bitreverse*`（固定次数移位循环，无外部依赖）；
-  `__builtin_frame_address`/`__builtin_return_address`（r13 帧链）；
-  `__builtin_types_compatible_p`/`__builtin_choose_expr`（parser
-  已折叠，codegen 兜底）；`__builtin_va_list`（类型别名）；
-  `__builtin_FILE`/`__builtin_LINE`/`__builtin_FUNCTION`/
-  `__builtin_FUNCSIG`/`__builtin_PRETTY_FUNCTION`；
-  `__builtin_offsetof`（M11.2）支持嵌套 struct / union / 数组下标 /
-  匿名 struct 成员访问，编译期折叠为字节偏移常量；
-  `__builtin_huge_val`/`huge_valf`/`huge_vall`（M11.2）按 IEEE 754
-  位模式 rodata 加载（double 0x7FF0000000000000 / float 0x7F800000 /
-  long double 0x7FFF8000000000000000），通过 `.rodata` 重定位在
-  ET_EXEC/ET_REL 模式下都正确；
-  `__builtin_nan`/`nanf`/`nanl`（M11.2）走 qNaN 编码
-  （double 0x7FF8000000000000，类比 huge_val 把尾数最高位置 1）；
-  `__builtin_isnan`/`isinf`/`finite`/`signbit`/`fpclassify`（M11.2）
-  对 NaN/Inf 位模式正确判定（`__builtin_isnan` 走 `xorps` 屏蔽符号
-  位 + `ucomisd` + `setnp` + `setne`；`__builtin_isinf` 用 `andps`
-  提取指数字段；`__builtin_signbit` 通过 `movmskpd` 取符号位）；
-  `__builtin_call_with_static_chain`（M11.2）按 SysV ABI 把 chain
-  写入 r10，并按 GP/XMM 寄存器约定（rdi/rsi/rdx/rcx/r8/r9 +
-  xmm0–xmm5）传递额外参数，多余参数压栈 + 间接 call；
-  `Expr::Unary Neg`（M11.2）浮点取负走恒常折叠（字面量直接生成
-  -v）+ 运行时 XOR 符号位（`movabs rax, 0x8000000000000000` + 
-  `movq xmm1, rax` + `pxor xmm0, xmm1`），避免之前对 `-1.0` 等
-  字面量错误地走 `neg rax` 路径；
-  `Expr::AddrOf` / `var_offset lea`（M11.2）REX.R 编码对 r10–r15
-  修复（之前写死 `rex = 0x49` 缺少 REX.R bit，导致 r10/r11/r12/r14/
-  r15 编码错位到 rdx/rcx/r8/r12/r13）；
+- **Builtins**：完整支持 `__builtin_constant_p`/`__builtin_object_size`/
+  `__builtin_va_*`/`__builtin_prefetch`/`__builtin_fma*`/
+  `__builtin_rotateleft*`/`__builtin_rotateright*`/`__builtin_clrsb*`/
+  `__builtin_overflow_p`/`__builtin_bswap*`/`__builtin_clz`/`ctz`/
+  `popcount`/`parity`/`bitreverse*`/`__builtin_frame_address`/
+  `__builtin_return_address`/`__builtin_types_compatible_p`/
+  `__builtin_choose_expr`/`__builtin_offsetof`/`__builtin_huge_val*`/
+  `__builtin_nan*`/`__builtin_isnan`/`isinf`/`finite`/`signbit`/
+  `fpclassify`/`__builtin_call_with_static_chain` 等。
   未知 `__builtin_*` warning + 零值（有返回值）或 **ud2**（void）。
+
+  详见 `docs/support_features.md` Builtins 列表。
 - **IR 内联**：`-O0+` 对 `always_inline` 单返回体内联；`-O1+` 完整 pass；
   `-O3` opportunistic 小 static 函数；`noinline` 阻止内联。
 - **SSA/GVN（`-O2+`）**：块内 GVN/CSE、拷贝传播、冗余局部合并。
 - **循环优化**：`-O2+` LICM；`-O3` 小 trip 展开与向量元素循环向量化。
 
-## AArch64 后端（`codegen/aarch64.rs`，M7）
+## AArch64 后端（`codegen/aarch64.rs`）
 
 - **入口**：`codegen::emit` 在 `--target aarch64-linux-gnu` 时选用 `Aarch64Codegen`。
 - **IR lowering**：遍历 `Module.functions` 与 `TypedExpr`；语句（`if`/`while`/`for`/`return`）
   对照 AST 与 `TypedStmt.nested` 保持控制流语义。
-- **已实现**：AAPCS64 整数/浮点/向量（基础 NEON `v0.4s`）表达式、`bl` 函数调用（
-  `R_AARCH64_CALL26`）、全局 `.rodata`、`ET_REL` `.o` 与 `ET_EXEC` hello
+- **ABI**：AAPCS64 整数/浮点/向量（基础 NEON `v0.4s`）表达式、
+  `bl` 函数调用（`R_AARCH64_CALL26`）、聚合类型参数 by-ref、
+  聚合返回值 > 16 字节走 sret、varargs 最小 spill。
+- **已实现**：`sdiv`/`msub` 整数除/取模、`lslv`/`lsrv` 移位、
+  `movz`+`movk` 64-bit 立即数、BL/ADR/LDR 范围校验、
+  HFA 同构浮点聚合分类、eh_frame/ORC/sanitizer 节、
+  DWARF/BTF 调试信息、CCMP/CSEL/CSINC/CSNEG 谓词指令、
+  双精度浮点比较、复杂寻址模式、缓存维护指令。
+- **全局 `.rodata`**、`ET_REL` `.o` 与 `ET_EXEC` hello
   （`_start` → `bl main` → `svc #0`）；`-S` 输出 GNU 汇编骨架。
-- **M7 增强（v0.7+）**：
-  - 真 `sdiv` / `msub` 实现整数除/取模（不再退化为 0）。
-  - 真 `lslv` / `lsrv` 实现左/右移位（先前编码 bit 21 错位，Rm=wzr）。
-  - 聚合类型参数 by-ref：local struct 通过 `add xN, sp, #off` 传地址。
-  - 聚合类型返回值 > 16 字节：caller 分配 `<sret>` local，x0 指向 sret 槽。
-  - varargs 最小：超过 8 个 GP 参数自动 spill 到 caller 栈。
-  - 通用 `mov_x_reg_imm` 支持 `movz`+`movk` 64-bit 立即数装入。
-- **M8 完整化（2026-07-21）**：
-  - BL ±128MiB 范围校验 (`bl_offset_in_range`) + `debug_assert`
-  - ADR ±1MiB 范围校验 + ADRP+ADD 退化路径 (`emit_adr_large`)
-  - LDR 字面量 ±1MiB 范围校验 + 对齐检查
-  - HFA（同构浮点聚合）：`classify_hfa` + `load_hfa_to_vregs` + `store_hfa_from_vregs`
-  - >16B struct sret：`memcpy_sp_to_x0` 逐块拷贝
-  - eh_frame / ORC / sanitizer 节：`.eh_frame` + `.orc_unwind_ip` + `.dcc.san_info`
-  - DWARF / BTF：`build_dwarf_full` 用 `ArchKind::AArch64` + `.BTF` 节
-  - 谓词指令：CCMP / CSEL / CSINC / CSNEG
-  - 双精度浮点比较：FCMP Dn,Dm / FCCMP
-  - 复杂寻址：后置/前置索引 + 扩展寄存器寻址
-  - 缓存维护：dc cvac/civac/cvau/ivac + ic ivau/iallu + dsb ish/sy + isb
 - **仍待完善**：NEON HFA >4 元素；大结构体嵌套返回多层调用链验证；TLS 重定位 `R_AARCH64_TLSDESC_*`。
 
-## RISC-V 64 后端（`codegen/riscv64.rs`，M7+M8）
+## RISC-V 64 后端（`codegen/riscv64.rs`）
 
 - **入口**：`codegen::emit` 在 `--target riscv64-linux-gnu` 时选用 `Riscv64Codegen`。
 - **能力与 AArch64 对齐**：整数/浮点/向量表达式、控制流、函数调用（`R_RISCV_JAL`）、
   全局 `.rodata`、`build_elf_riscv64` / `build_elf_rel_riscv64`。
-- **M7 增强（v0.7+）**：
-  - 真 RV64M 指令 `div` / `divu` / `rem` / `remu`（funct7=0000001, bit 25）。
-  - 真 RV64I 移位 `sll` / `srl` / `sra`（替代之前的 0）。
-  - 聚合类型参数 by-ref：local struct 通过 `addi aN, sp, #off` 传地址。
-  - 聚合类型返回值 > 16 字节：caller 分配 `<sret>` local，a0 指向 sret 槽。
-  - varargs 最小：超过 8 个 GP 参数自动 spill 到 caller 栈。
-  - 大立即数通过 `lui`+`addi` 序列；浮点运算为 RV64GC `f` 扩展子集。
-- **M8 完整化（2026-07-21）**：
-  - JAL ±1MiB 范围校验 (`jal_offset_in_range`) + `debug_assert`
-  - HFA 分类：`classify_rv_hfa` + `HfaInfo`（float/double 1–4 元素）
-  - >16B struct sret：`memcpy_sp_to_a0` 逐块拷贝
-  - eh_frame / ORC / sanitizer 节：`.eh_frame` + `.orc_unwind_ip` + `.dcc.san_info`
-  - DWARF / BTF：`build_dwarf_full` 用 `ArchKind::RiscV64` + `.BTF` 节
-  - 压缩指令 (C 扩展)：C.ADDI/C.NOP/C.LI/C.LW/C.SW/C.J/C.BEQZ 16-bit 编码
-  - FP D 扩展双精度：FLD/FSD/FADD.D/FSUB.D/FMUL.D/FDIV.D/FCVT/FSGNJ.D
-  - RVV 向量基础：VSETVLI/VLE32/VSE32/VADD.VV/VMUL.VV/VREDSUM.VS
-  - 特权指令/CSR：CSRRW/CSRRS/CSRRC/CSRRWI/MRET/SRET/WFI/SFENCE.VMA/FENCE
+- **ABI**：RV64M 整数除/取模、RV64I 移位、聚合类型参数 by-ref、
+  聚合返回值 > 16 字节走 sret、varargs 最小 spill、
+  大立即数 `lui`+`addi` 序列。
+- **已实现**：JAL 范围校验、HFA 分类、eh_frame/ORC/sanitizer 节、
+  DWARF/BTF 调试信息、压缩指令 (C 扩展) 16-bit 编码、
+  FP D 扩展双精度、RVV 向量基础（VSETVLI/VLE32/VSE32/VADD.VV/VMUL.VV）、
+  特权指令/CSR（CSRRW/CSRRS/CSRRC/MRET/SRET/WFI/SFENCE.VMA/FENCE）。
 - **仍待完善**：RVV 完整指令集（宽化/窄化/掩码/浮点向量）；压缩指令自动选择；
   D 扩展完整（FSQRT.D/FMIN.D/FMAX.D/比较指令）；Zicsr 全集合（CSRRSI/CSRRCI）。
 
@@ -1044,60 +537,18 @@ CLI 解析：`SanitizerFlags::from_args` 支持
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
 12 个 `sanitizer::tests` 单元测试。
 
-## C 前端补洞（M11.1，`src/parser.rs` + `src/preproc.rs`）
+## C 前端扩展语法（`src/parser.rs` + `src/preproc.rs`）
 
-M11.1 集中补齐 GCC/MSVC 在 C 前端的扩展语法与预处理指令，全部按
-"解析 → AST 留痕 → 当前阶段不破坏语义" 的原则实现，避免在跨 TU
-编译（libiberty / 内核 / GCC bootstrap）时出现语法错误。
+C 前端补齐 GCC/MSVC 扩展语法与预处理指令，按“解析 → AST 留痕 → 当前阶段不破坏语义”
+原则实现，避免跨 TU 编译（libiberty / 内核 / GCC bootstrap）时出现语法错误。
+主要特性：MS 扩展关键字（`__declspec`/`_ms_restrict`/`__pragma`）、
+`__attribute__` 全族（`cleanup`/`no_sanitize`/`target_clones`/`copy`/`returns_nonnull`）、
+`#pragma` 全家族（`pack`/`weak`/`STDC`/`diagnostic`）、`_Pragma` 操作符、
+`#warning`/`#error`、`_Static_assert` 字符串化（含 C23 单参形式）。
+AST 留痕通过 `VarDecl`/`FuncDecl` 新增字段（`no_sanitize`/`copy_fn`/
+`target_clones`/`returns_nonnull`）实现。
 
-### 解析层（`src/parser.rs`）
-
-- **MS 扩展关键字**：`parse_type_mode` 优先匹配 `__declspec(...)` /
-  `_ms_restrict` / `__pragma(...)` / `_Pragma(...)`；括号深度匹配跳过
-  整个参数段（如 `__declspec(align(8))`）。
-- **参数声明符**：`skip_ptr_qualifiers` 额外接受 `_ms_restrict` /
-  `_restrict`，覆盖 `int * _ms_restrict dst` 这类 MS-only 限定。
-- **`__attribute__` 全族**：
-  - `cleanup(fn)` → `VarDecl.cleanup_fn`，由 codegen 在变量离开作用域
-    时插入 `cleanup_fn(&var)`。
-  - `no_sanitize(...)` → `VarDecl.no_sanitize` / `FuncDecl.no_sanitize`，
-    sanitizer 阶段跳过对所有启用 sanitizer 的插桩。
-  - `target_clones(...)` → `FuncDecl.target_clones`，暂存以备 IFUNC
-    resolver 阶段使用。
-  - `copy(fn)` → 复用 `alias_name` 通道生成别名符号。
-  - `returns_nonnull` → `FuncDecl.returns_nonnull`（当前 noop 占位）。
-- **`_Static_assert` 字符串化**：`const_eval::ExprDebug` 把表达式渲染
-  为可读文本，失败消息附加 `evaluates to: <text>`；同时支持 C23
-  单参形式 `_Static_assert(expr)`。
-
-### 预处理层（`src/preproc.rs`）
-
-- **`#pragma` 全家族**：`process_directive` 派发到
-  `handle_pragma_pack` / `handle_pragma_weak` / `handle_pragma_stdc` /
-  `handle_pragma_diagnostic`，分别维护 `pack_stack: Vec<Option<usize>>` /
-  `weak_symbols: HashSet<String>` / `fenv_access: bool` / 诊断栈。
-- **`_Pragma` 操作符**：宏展开阶段遇到 `_Pragma("...")` 时把内部字符串
-  解码后推入 `pending_pragmas: RefCell<Vec<String>>`，在
-  `flush_active_source` 中按源序批量调用 `process_directive`，避免
-  `&self` / `&mut self` 借用冲突。
-- **`#warning` / `#error`**：与 `_Pragma` 走同一过程；`#error` 走 fatal
-  诊断中止编译，`#warning` 输出到 stderr。
-
-### AST 留痕（`src/ast.rs`）
-
-`VarDecl` / `FuncDecl` 新增字段：`no_sanitize: Vec<String>` /
-`copy_fn: Option<String>` / `target_clones: Vec<String>` /
-`returns_nonnull: bool`，现有 14 处构造点（`sanitizer.rs` /
-`opt.rs` / `ssa_gvn.rs`）同步更新。
-
-### 集成测试
-
-`tests/integration.rs` 新增 9 条 case 覆盖全部特性；fixture 放在
-`tests/fixtures/{ms_ext,attr_cleanup,attr_clones,
-attr_nosan,attr_copy,pragma_fam,
-pragma_op,user_diag,sassert_msg}.c`。
-
-## 自举 (M5)
+## 自举
 
 ```bash
 # 阶段 0: 用 rustc 编出 dcc0
@@ -1117,9 +568,9 @@ cp target/release/dcc bin/dcc0
 
 M0~M10 见根目录的 task 列表。
 
-## 优化 Pass 基础设施 M16（`src/ssa.rs` + `src/ssa_passes.rs`）
+## 优化 Pass 基础设施（`src/ssa.rs` + `src/ssa_passes.rs`）
 
-M16 阶段在 AST/typed IR 之上引入**轻量 SSA IR**，使大多数传统编译器优化
+在 AST/typed IR 之上引入**轻量 SSA IR**，使大多数传统编译器优化
 （强度削减、归纳变量、别名分析、SCCP、调度、TCO 等）有一致的工作面。
 设计上遵守 suckless 原则：零外部依赖、单一文件、按"结构化函数"子集
 跑全 SSA，含 goto/label/switch 的函数自动降级回原有 AST 路径。
@@ -1151,7 +602,7 @@ struct Function  { name, params, ret_ty, entry, blocks, block_order,
   为 AST（phi 退化为对原变量在 if/else 两侧的赋值，指令序列直接用
   `Ident` 占位引用），下游 codegen 仍走 AST 路径。
 
-### 15 个优化 Pass（M16 范围）
+### 15 个优化 Pass
 
 | # | Pass | 位置 | 关键作用 |
 |---|------|------|---------|
@@ -1199,7 +650,7 @@ cross_function_dce / sccp / loop_opt / tco / function_attr。
 `tests/integration.rs` 对应 `m16_*` 测试函数，在本地
 跑 `cargo test m16_` 验证。
 
-## M20 性能分析与插桩子系统（`src/profile/`）
+## 性能分析与插桩子系统（`src/profile/`）
 
 PGO / GCOV / AutoFDO / LBR / MemProf / Perf 事件 / Offloading 七个
 子系统的统一入口与配置：
@@ -1244,55 +695,5 @@ Expr::Call { __dcc_pgo_count_fn(idx) }))`，保证 PGO 计数先于 user code。
 形式，后续可换 `.dcc.offload` 二进制格式。`OffloadKind` 区分
 OmpTarget / OmpTargetSimd / Cuda / Hip 四类入口。
 
-**回归**：
-- 10 个模块单元测试（`src/profile/{gcov,pgo,autofdo,lbr,memprof,perf_event,offload}.rs`）
-- 11 个集成测试（`tests/profile.rs`）：`-fprofile-generate` /
-  `-fprofile-use` 缺路径 / `-fprofile-arcs` / `-ftest-coverage` /
-  `-frecord-profile` 缺路径 / `-fopenmp` / `-fopenmp-targets` /
-  `-fcuda -fhip` / `-fmemory-profile` / `-ftopdownmetrics` /
-  `-flbr-profile` 缺路径
-
 详见 `docs/profiling.md`。
-
-## M23 边角特性完整化（2026-07-21）
-
-本里程碑将所有 🟠/🔴 状态项实现或升级为 🟢（详见 `docs/support_features.md`）。
-
-### 属性/builtin/杂项（Section 11）
-
-| 模块 | 实现要点 |
-|------|----------|
-| `__attribute__((retain))` | AST `is_retain` + codegen SHF_GNU_RETAIN 节标记 |
-| `__attribute__((used))` | AST `is_used_attr` + codegen USED 符号标记 |
-| `__attribute__((flatten))` | AST `is_flatten` + codegen 调用视为 always_inline |
-| `__attribute__((error/warning/deprecated))` | AST 存储消息 + codegen 扫描调用点发射诊断 |
-| `__attribute__((ifunc("resolver")))` | AST `ifunc_resolver` + codegen STT_GNU_IFUNC |
-| `__attribute__((constructor(N)/destructor(N)))` | AST priority 字段 + codegen 按 priority 排序 |
-| `__builtin_debugtrap()` | codegen 发射 int3 (0xCC) |
-| `__builtin_assume_aligned(p, n)` | codegen 透传指针 |
-| `__builtin_alloca(size)` | codegen sub rsp + 16 字节对齐 |
-| `printf/scanf` 格式检查 | 完整 flag/width/precision/length/type 匹配 |
-| `char16_t`/`char32_t` + u""/U"" | 解析为 uint16/uint32 字符串 |
-| `L"..."` 宽字符 | 解析为 wchar_t 编码 |
-
-### RISC-V D 扩展 + Zicsr（Section 1.4）
-
-- D 扩展完整: FSQRT.D / FMIN.D / FMAX.D / FEQ.D / FLT.D / FLE.D
-- Zicsr 全集合: CSRRSI / CSRRCI 补齐（与既有 CSRRW/S/C + CSRRWI 合计 6 条）
-
-### C++ 前端增强（Section 6）
-
-- `CoroutinePromiseType`: 从协程返回类型推导 promise_type + C 兼容降级
-- `StaticDataMember`: Itanium ABI mangling (`_ZN<class><name>E`) + 定义/访问
-- 模板多参数偏特化: `instantiate_partial_spec` 支持多形参 pattern 匹配
-
-### 预处理器 locale/charset（Section 7）
-
-- `#pragma locale` 实际切换字符集: UTF-8/ASCII/ISO-8859-1
-- `Preprocessor.charset` 字段 + `PreprocessOutput.charset` 暴露
-
-### 文档更新（Section 8.1）
-
-- split-dwarf / gdb-index / DWARF line table 状态更新为 🟢
-- 全部 20+ 项从 🟠/🔴 升级为 🟢
 
