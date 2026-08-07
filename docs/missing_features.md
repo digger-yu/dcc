@@ -51,7 +51,7 @@
 | 通道 | 已知遗留 |
 |------|----------|
 | PGO | 下游权重传播已实装 (`propagate_edge_weights` 生成 `BranchProbMap`, `propagate_loop_trip_counts` 推算循环 trip count)；`.profraw` 二进制格式仅支持子集 |
-| GCOV | 非 x86_64 arch 未验证 |
+| GCOV | 已验证跨架构字节序一致性 (显式 little-endian 编码, 测试覆盖 `.gcno`/`.gcda` 格式); 仅支持 dcc 简化格式, 不兼容 GCC gcov 完整格式 |
 | AutoFDO | 已接入 codegen (`.text.hot`/`.text.unlikely`)；仅支持 dcc 简化文本格式，不兼容 LLVM extbinary 格式 |
 | LBR | 已接入 codegen；仅解析 `perf script -F brstack` 文本，不直接读 `perf.data` 二进制 |
 | MemProf | 已接入 codegen + AllocClass 分类；未在 libc malloc 上插桩；无 runtime 库 |

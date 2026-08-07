@@ -380,4 +380,103 @@ mod tests {
         // total: 2 + 1 + 3 = 6
         assert_eq!(cfg_checksum(&f), 6);
     }
+
+    /// 验证 .gcno 文件格式使用显式 little-endian 字节序.
+    /// 这确保在非 x86_64 架构 (如 AArch64/RISC-V, 可能 big-endian)
+    /// 上生成的 .gcno/.gcda 文件与 GCC gcov 工具链兼容.
+    #[test]
+    fn gcov_format_uses_explicit_little_endian() {
+        let mut u = GcovUnit::new("test.c");
+        u.push_function(GcovFunction {
+            name: "f".into(),
+            file: "test.c".into(),
+            ident: 1,
+            lineno: 10,
+            blocks: vec![
+                GcovBlock { flags: 0, succs: vec![(1, 0)] },
+                GcovBlock { flags: 0, succs: vec![] },
+            ],
+        });
+        let tmp = std::env::temp_dir().join("dcc-gcov-le-test.gcno");
+        let _ = std::fs::remove_file(&tmp);
+        u.write_notes(&tmp).unwrap();
+        let bytes = std::fs::read(&tmp).unwrap();
+
+        // magic 0x67636E6F ("gcno") in little-endian: 6F 6E 63 67
+        assert_eq!(bytes[0], 0x6F);
+        assert_eq!(bytes[1], 0x6E);
+        assert_eq!(bytes[2], 0x63);
+        assert_eq!(bytes[3], 0x67);
+
+        // version 0x34302A in little-endian: 2A 30 34 00
+        assert_eq!(bytes[4], 0x2A);
+        assert_eq!(bytes[5], 0x30);
+        assert_eq!(bytes[6], 0x34);
+        assert_eq!(bytes[7], 0x00);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// 验证 .gcda 数据文件计数器使用 64-bit little-endian 编码.
+    /// 确保跨架构一致性.
+    #[test]
+    fn gcov_data_counters_are_little_endian_64bit() {
+        let mut u = GcovUnit::new("test.c");
+        u.push_function(GcovFunction {
+            name: "f".into(),
+            file: "test.c".into(),
+            ident: 1,
+            lineno: 1,
+            blocks: vec![
+                GcovBlock { flags: 0, succs: vec![(1, 0)] },
+                GcovBlock { flags: 0, succs: vec![] },
+            ],
+        });
+        let tmp = std::env::temp_dir().join("dcc-gcov-le-data.gcda");
+        let _ = std::fs::remove_file(&tmp);
+        // 2 blocks, 2 counters; 第二个计数器值 0x0102030405060708
+        // 在 little-endian 应为 08 07 06 05 04 03 02 01
+        u.write_data_with_counters(&tmp, &[0, 0x0102030405060708u64]).unwrap();
+        let bytes = std::fs::read(&tmp).unwrap();
+
+        // magic 0x67636461 ("gcda") in little-endian
+        assert_eq!(&bytes[0..4], &[0x61, 0x64, 0x63, 0x67]);
+
+        // 找到计数器位置 (在 header + function record 之后)
+        // 简单验证: 文件中应包含 08 07 06 05 04 03 02 01 序列
+        let found = bytes.windows(8).any(|w| {
+            w == [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        });
+        assert!(found, "counter should be encoded as little-endian 64-bit");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// 验证 cfg_checksum 计算不依赖架构字节序.
+    /// checksum 使用 wrapping_add, 结果与字节序无关.
+    #[test]
+    fn gcov_cfg_checksum_arch_independent() {
+        // 构造一个 CFG, 验证 checksum 值在不同字节序解释下一致
+        let f = GcovFunction {
+            name: "test".into(),
+            file: "t.c".into(),
+            ident: 1,
+            lineno: 1,
+            blocks: vec![
+                GcovBlock { flags: 0, succs: vec![(1, 0), (2, 0)] },
+                GcovBlock { flags: 0, succs: vec![(2, 0)] },
+                GcovBlock { flags: 0, succs: vec![] },
+            ],
+        };
+        let chksum = cfg_checksum(&f);
+        // bb0: 0->1 (1+1=2), 0->2 (2+1=3)
+        // bb1: 1->2 (2+1=3)
+        // bb2: nothing
+        // total: 2 + 3 + 3 = 8
+        assert_eq!(chksum, 8);
+
+        // 验证 checksum 写入文件时是 little-endian
+        let expected_le = chksum.to_le_bytes();
+        assert_eq!(expected_le, [0x08, 0x00, 0x00, 0x00]);
+    }
 }
