@@ -871,6 +871,11 @@ fn eval_unop(op: UnOp, v: i128) -> Option<i128> {
 /// 跨函数 DCE: 给定函数集合 + 已知的入口 (main 或 extern), 标记可达函数,
 /// 删除不可达的 internal 函数 (FuncDecl)。
 pub fn cross_function_dce(funcs: &mut Vec<FuncDecl>, keep_extern: bool) -> bool {
+    // 没有 main 时无法确定入口, 保守跳过跨函数 DCE
+    let has_main = funcs.iter().any(|f| f.name.name == "main");
+    if !has_main {
+        return false;
+    }
     // 1. 建立正向调用图 (caller -> callees) - 用于 BFS 从 main 出发找到所有可达函数
     let mut callees: HashMap<String, Vec<String>> = HashMap::new();
     for f in funcs.iter() {
@@ -899,10 +904,16 @@ pub fn cross_function_dce(funcs: &mut Vec<FuncDecl>, keep_extern: bool) -> bool 
             }
         }
     }
-    // 3. 过滤
+    // 3. 过滤: 保留 extern (可能被外部 TU 引用)、标记 used/retain 的函数、
+    //    以及从入口可达的函数。不可达的 internal (static) 函数将被删除。
     let before = funcs.len();
     funcs.retain(|f| {
-        if f.is_static || f.is_extern {
+        // extern 声明: 可能被其他 TU 引用, 必须保留
+        if f.is_extern {
+            return true;
+        }
+        // 标记 used / retain / constructor / destructor 的函数不能删
+        if f.is_used_attr || f.is_retain || f.is_constructor || f.is_destructor {
             return true;
         }
         reachable.contains(&f.name.name)
@@ -1092,4 +1103,131 @@ fn operand_uses_op(o: &Operand) -> Vec<String> {
         v.push(x.name());
     }
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::*;
+    use crate::diagnostics::Span;
+
+    fn span() -> Span {
+        Span::point("t.c", 1, 1)
+    }
+
+    fn make_func(name: &str, is_static: bool, calls: Vec<&str>) -> FuncDecl {
+        let body_items: Vec<BlockItem> = calls
+            .iter()
+            .map(|c| {
+                BlockItem::Stmt(Stmt::Expr {
+                    e: Expr::Call {
+                        callee: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: c.to_string(),
+                                span: span(),
+                            },
+                            span: span(),
+                            ty: Type::Int,
+                        }),
+                        args: vec![],
+                        span: span(),
+                        ty: Type::Void,
+                    },
+                    span: span(),
+                })
+            })
+            .collect();
+        FuncDecl {
+            ret_ty: Type::Int,
+            name: Ident {
+                name: name.into(),
+                span: span(),
+            },
+            params: vec![],
+            body: Some(Block {
+                items: body_items,
+                span: span(),
+            }),
+            span: span(),
+            is_static,
+            is_extern: false,
+            is_variadic: false,
+            is_weak: false,
+            is_constructor: false,
+            is_destructor: false,
+            is_nested: false,
+            is_cold: false,
+            is_hot: false,
+            section: None,
+            alignment: None,
+            visibility: None,
+            alias_name: None,
+            upvars: vec![],
+            is_unused: false,
+            is_noinline: false,
+            is_always_inline: false,
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
+            ifunc_resolver: None,
+            is_global: false,
+            is_device: false,
+            is_host: false,
+        }
+    }
+
+    #[test]
+    fn dce_removes_unreachable_static_with_main() {
+        let mut funcs = vec![
+            make_func("main", false, vec!["helper"]),
+            make_func("helper", true, vec![]),
+            make_func("dead_func", true, vec![]),
+        ];
+        let changed = cross_function_dce(&mut funcs, true);
+        assert!(changed);
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.name.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(names.contains(&"helper"));
+        assert!(!names.contains(&"dead_func"), "unreachable static should be removed");
+    }
+
+    #[test]
+    fn dce_preserves_all_when_no_main() {
+        let mut funcs = vec![
+            make_func("foo", true, vec![]),
+            make_func("bar", false, vec![]),
+        ];
+        let changed = cross_function_dce(&mut funcs, true);
+        assert!(!changed, "no main -> skip DCE");
+        assert_eq!(funcs.len(), 2);
+    }
+
+    #[test]
+    fn dce_preserves_extern_and_used() {
+        let mut funcs = vec![
+            make_func("main", false, vec![]),
+            make_func("ext", false, vec![]),
+            make_func("dead_static", true, vec![]),
+        ];
+        // Mark ext as extern
+        funcs[1].is_extern = true;
+        let changed = cross_function_dce(&mut funcs, true);
+        assert!(changed);
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.name.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(names.contains(&"ext"), "extern must be preserved");
+        assert!(!names.contains(&"dead_static"));
+    }
 }
