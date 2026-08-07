@@ -440,6 +440,32 @@ impl Lower {
         None
     }
 
+    /// M26: 递归查找继承链中包含指定成员的基类
+    /// 返回完整 __base_ 访问链 (从直接基类到目标基类)
+    /// 例如 Child : Parent : GrandParent, 成员 x 在 GrandParent 中:
+    ///   返回 Some(vec!["Parent", "GrandParent"])
+    ///   调用方生成 c.__base_Parent.__base_GrandParent.x
+    fn find_inherited_base(&self, class: &str, member: &str) -> Option<Vec<String>> {
+        // 检查当前类的直接基类
+        if let Some(bases) = self.class_bases.get(class) {
+            for base in bases {
+                // 检查基类是否直接包含该成员
+                if let Some(base_fields) = self.class_fields.get(&base.name) {
+                    if base_fields.iter().any(|(name, _)| name == member) {
+                        return Some(vec![base.name.clone()]);
+                    }
+                }
+                // 递归检查基类的基类
+                if let Some(mut chain) = self.find_inherited_base(&base.name, member) {
+                    // 在链首插入直接基类名, 构成完整路径
+                    chain.insert(0, base.name.clone());
+                    return Some(chain);
+                }
+            }
+        }
+        None
+    }
+
     /// 从 MangleType 中提取类名 (支持 Pointer / Reference / Class 包装)
     /// M26: 模板类型 `Box<int>` 返回实例化类名 (方法调用 / typeid 用)
     fn extract_class(ty: &MangleType) -> Option<String> {
@@ -2357,35 +2383,24 @@ impl Lower {
                 };
                 
                 // Check if member is inherited from a base class
-                let inherited_base = if let Some(class) = self.lookup_var_class(b) {
-                    // Check if this class has base classes
-                    if let Some(bases) = self.class_bases.get(&class).cloned() {
-                        // Check if the member is in any base class
-                        let mut found_base = None;
-                        for base in &bases {
-                            if let Some(base_fields) = self.class_fields.get(&base.name) {
-                                if base_fields.iter().any(|(name, _)| name == s) {
-                                    found_base = Some(base.name.clone());
-                                    break;
-                                }
-                            }
-                        }
-                        found_base
-                    } else {
-                        None
-                    }
+                // M26: 递归查找继承链, 获取完整 __base_ 访问路径
+                let inherited_chain = if let Some(class) = self.lookup_var_class(b) {
+                    self.find_inherited_base(&class, s)
                 } else {
                     None
                 };
                 
                 self.emit_expr(b);
-                if let Some(base_name) = inherited_base {
-                    // Rewrite to b.__base_BaseName.s
-                    if use_arrow {
-                        self.out.push_str(&format!("->__base_{}.{}", base_name, s));
-                    } else {
-                        self.out.push_str(&format!(".__base_{}.{}", base_name, s));
+                if let Some(chain) = inherited_chain {
+                    // Rewrite to b.__base_Base1.__base_Base2...s
+                    for base_name in &chain {
+                        if use_arrow {
+                            self.out.push_str(&format!("->__base_{}", base_name));
+                        } else {
+                            self.out.push_str(&format!(".__base_{}", base_name));
+                        }
                     }
+                    self.out.push_str(&format!(".{}", s));
                 } else {
                     // Not inherited or can't determine, use normal access
                     if use_arrow {
@@ -3680,5 +3695,26 @@ mod tests {
         assert!(s.contains("__dcc_vt_Derived"), "{}", s);
         // vtable 应该包含 RTTI slot
         assert!(s.contains("RTTI typeinfo pointer"), "{}", s);
+    }
+
+    #[test]
+    fn lower_recursive_inherited_member_access() {
+        // M26: 递归继承成员访问
+        // GrandParent has member x, Parent inherits from GrandParent, Child inherits from Parent
+        // Accessing child.x should rewrite to child.__base_Parent.__base_GrandParent.x
+        let src = b"class GrandParent { public: int x; };
+                   class Parent : public GrandParent { public: int y; };
+                   class Child : public Parent { public: int z; };
+                   void f() { Child c; c.x = 1; c.y = 2; c.z = 3; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 应该包含继承子结构
+        assert!(s.contains("__base_GrandParent"), "{}", s);
+        assert!(s.contains("__base_Parent"), "{}", s);
+        // 成员访问应该通过完整 __base_ 路径
+        assert!(s.contains("__base_Parent.__base_GrandParent.x"), "{}", s);
     }
 }
