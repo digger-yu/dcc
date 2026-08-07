@@ -204,6 +204,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ 标准库模板实参 | `std::vector<int>` 等限定名模板实参语法解析 |
 | dcc++ 动态 RTTI | typeinfo/vtable 生成 + 继承虚方法检测 + RTTI slot |
 | dcc++ 继承成员访问 | 递归继承链查找 + `__base_BaseName` 路径改写 |
+| dcc++ `__dcc_mbr` 继承成员 | 继承成员偏移辅助函数 + `__base_` 链路径计算 |
 | dcc++ `auto` 类型推导 | int / `const char*` / class 真推导 |
 | dcc++ `decltype` / `decltype(auto)` | 解析 + 占位 |
 | dcc++ `operator new[]` / `delete[]` | Itanium ABI `_Znam` / `_ZdaPv` 符号 |

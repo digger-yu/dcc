@@ -466,6 +466,40 @@ impl Lower {
         None
     }
 
+    /// 检查类是否直接包含指定成员变量
+    fn has_direct_member(&self, class: &str, member: &str) -> bool {
+        if let Some(fields) = self.class_fields.get(class) {
+            return fields.iter().any(|(name, _)| name == member);
+        }
+        false
+    }
+
+    /// 递归收集类的所有成员变量 (包括继承的)
+    /// chain: 从派生类到当前基类的 __base_ 路径
+    /// 输出: members 中累积 (member_name, chain_snapshot) 对
+    fn collect_inherited_members_static(
+        class_bases: &std::collections::HashMap<String, Vec<BaseSpec>>,
+        class_fields: &std::collections::HashMap<String, Vec<(String, MangleType)>>,
+        class: &str,
+        chain: &mut Vec<String>,
+        members: &mut Vec<(String, Vec<String>)>,
+    ) {
+        // 先递归处理基类
+        if let Some(bases) = class_bases.get(class) {
+            for base in bases {
+                chain.push(base.name.clone());
+                Self::collect_inherited_members_static(class_bases, class_fields, &base.name, chain, members);
+                chain.pop();
+            }
+        }
+        // 再处理当前类的直接成员
+        if let Some(fields) = class_fields.get(class) {
+            for (name, _) in fields {
+                members.push((name.clone(), chain.clone()));
+            }
+        }
+    }
+
     /// 从 MangleType 中提取类名 (支持 Pointer / Reference / Class 包装)
     /// M26: 模板类型 `Box<int>` 返回实例化类名 (方法调用 / typeid 用)
     fn extract_class(ty: &MangleType) -> Option<String> {
@@ -1789,6 +1823,40 @@ impl Lower {
                 ));
             }
         }
+        // 继承成员也需要 __dcc_mbr: 通过 __base_ 链访问
+        // 收集所有继承成员 (去重, 避免多继承同名成员重复生成)
+        let mut inherited_mbrs: Vec<(String, String)> = Vec::new(); // (member_name, access_path)
+        let mut emitted_inherited_mbrs = std::collections::HashSet::new();
+        if let Some(bases) = self.class_bases.get(&c.name).cloned() {
+            for base in &bases {
+                let mut members = Vec::new();
+                // 初始 chain 包含直接基类名
+                let mut initial_chain = vec![base.name.clone()];
+                Self::collect_inherited_members_static(&self.class_bases, &self.class_fields, &base.name, &mut initial_chain, &mut members);
+                for (member_name, chain) in members {
+                    if emitted_inherited_mbrs.contains(member_name.as_str()) {
+                        continue;
+                    }
+                    emitted_inherited_mbrs.insert(member_name.clone());
+                    // 构建 __base_ 访问路径
+                    let mut access = String::new();
+                    for base_name in &chain {
+                        if !access.is_empty() {
+                            access.push('.');
+                        }
+                        access.push_str(&format!("__base_{}", base_name));
+                    }
+                    inherited_mbrs.push((member_name, access));
+                }
+            }
+        }
+        // 生成继承成员的 __dcc_mbr
+        for (member_name, access) in &inherited_mbrs {
+            self.out.push_str(&format!(
+                "__attribute__((weak)) size_t __dcc_mbr_{0}_{1}(void) {{ struct {0} __f; return (size_t)((char*)&__f.{2}.{1} - (char*)&__f); }}\n",
+                qname, member_name, access,
+            ));
+        }
         // 阶段 2: 成员函数体外定义
         for m in &c.members {
             self.lower_class_member_fn(m);
@@ -2841,7 +2909,7 @@ impl Lower {
                 self.out.push_str(&class);
                 self.out.push('_');
                 self.out.push_str(member);
-                self.out.push_str("))");
+                self.out.push_str("()))");
             }
             // M17.0: `obj->*ptr_to_member` 真解引用
             CppExpr::PtrMemberStar(obj, member) => {
@@ -3716,5 +3784,47 @@ mod tests {
         assert!(s.contains("__base_Parent"), "{}", s);
         // 成员访问应该通过完整 __base_ 路径
         assert!(s.contains("__base_Parent.__base_GrandParent.x"), "{}", s);
+    }
+
+    #[test]
+    fn lower_dcc_mbr_inherited_members() {
+        // __dcc_mbr 辅助定义: 继承成员也需要生成
+        // Derived 继承 Base 的成员 x, 应该有 __dcc_mbr_Derived_x
+        let src = b"class Base { public: int x; };
+                   class Derived : public Base { public: int y; };
+                   void f() { Derived d; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 直接成员的 __dcc_mbr
+        assert!(s.contains("__dcc_mbr_Derived_y"), "{}", s);
+        assert!(s.contains("__dcc_mbr_Base_x"), "{}", s);
+        // 继承成员的 __dcc_mbr (通过 __base_ 链访问)
+        assert!(s.contains("__dcc_mbr_Derived_x"), "{}", s);
+        // 继承成员的 __dcc_mbr 应该使用 __base_ 路径
+        assert!(s.contains("__f.__base_Base.x"), "{}", s);
+    }
+
+    #[test]
+    fn lower_dcc_mbr_recursive_inherited() {
+        // 三层继承: Child 的 __dcc_mbr 应该能访问 GrandParent 的成员
+        let src = b"class GrandParent { public: int x; };
+                   class Parent : public GrandParent { public: int y; };
+                   class Child : public Parent { public: int z; };
+                   void f() { Child c; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // Child 的继承成员 x (来自 GrandParent, 通过 Parent)
+        assert!(s.contains("__dcc_mbr_Child_x"), "{}", s);
+        // 应该使用完整 __base_ 链
+        assert!(s.contains("__f.__base_Parent.__base_GrandParent.x"), "{}", s);
+        // Child 的继承成员 y (来自 Parent)
+        assert!(s.contains("__dcc_mbr_Child_y"), "{}", s);
+        assert!(s.contains("__f.__base_Parent.y"), "{}", s);
     }
 }
