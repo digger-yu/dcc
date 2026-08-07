@@ -3195,12 +3195,8 @@ impl Codegen {
             if let Some(body) = &f.body {
                 Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots);
             }
-            let var_bytes: i32 = self
-                .var_map
-                .values()
-                .filter(|(_, ty)| !matches!(ty, Type::Void))
-                .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
-                .sum();
+            // 包含 padding 条目, 每个占 8 字节
+            let var_bytes: i32 = self.var_map.values().map(|_| 8).sum();
             let raw = var_bytes + 16 + temp_slots * 8 + 128 + self.stack_reserve_bytes();
             self.frame_size = ((raw + 15) / 16) * 16;
             self.vec_temp_off = -self.frame_size + 8;
@@ -7708,15 +7704,11 @@ impl Codegen {
         if let Some(&(off, _)) = self.var_map.get(name) {
             return off;
         }
-        // 基于实际类型大小计算偏移 (过滤 padding 条目)
-        // 变量放在保存寄存器下方: offset = -(used + 16)
-        let used: i32 = self
-            .var_map
-            .values()
-            .filter(|(_, ty)| !matches!(ty, Type::Void))
-            .map(|(_, ty)| ty.size().div_ceil(8) as i32 * 8)
-            .sum();
-        let off = -(used + 16);
+        // 懒分配路径: 变量未被 pre_register_vars 预注册
+        // 使用与 register_var 一致的 used 计算 (每个条目 8 字节)
+        // 并考虑 temp_slots 区域, 避免与 binop 临时槽冲突
+        let used: i32 = self.var_map.values().map(|_| 8).sum();
+        let off = -(used + 16 + self.temp_slots * 8);
         self.var_map.insert(name.to_string(), (off, Type::Int));
         off
     }

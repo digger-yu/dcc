@@ -589,8 +589,6 @@ M19 关键改动:
 > - 新增 integration test `wchar_libc_fixture_runs` 与 helper
 >   `run_host_link_and_run` (dcc -c + host gcc link + run).
 > - Section 11 表格 `wchar_t` 行 🟠 → 🟢 (M25)。
-> - 跟踪记录：dcc 现有多数组栈变量分配有重叠 bug (Section 9
->   follow-up)，本 fixture 故意只用单个 32 元素 buf 避开。
 
 > **M25 增量（2026-07-24）— Section 11 P0.2 signal libc 转发**：
 > - `src/link/resolve.rs` `is_implicit_undef` 白名单补齐
