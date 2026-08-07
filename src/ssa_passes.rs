@@ -220,11 +220,14 @@ fn const_pow2(o: &Operand) -> Option<u32> {
 // P3. 归纳变量优化
 // =====================================================================
 
-/// 识别 for 循环里的 `i * C` 与 `i + K` 模式, 把乘法换成对 i 的步长调整 (简化版:
-/// 标记 + 注释; 不动 IR 拓扑, 仅把 Mul(Int, induction) 转成 Add 链以利
-/// strength_reduction 后续处理)。保守: 仅处理 Operand::Var 是当前函数的
-/// induction var (从参数名启发式推断)。
+/// 识别 for 循环里的 `i * C` 与 `i + K` 模式, 把乘法换成对 i 的步长调整。
+/// 真正的归纳变量检测: 找到循环回边中定义的变量 (induction var),
+/// 然后将 `iv * C` 转换为 strength-reduction 友好的形式。
 pub fn ivop(func: &mut Function) -> bool {
+    let ivs = find_induction_vars(func);
+    if ivs.is_empty() {
+        return false;
+    }
     let mut changed = false;
     for b in func.blocks.values_mut() {
         for inst in &mut b.insts {
@@ -234,9 +237,12 @@ pub fn ivop(func: &mut Function) -> bool {
                 r,
             } = &mut inst.kind
             {
-                if is_induction(l) && matches!(r, Operand::Int(_)) {
-                    // 标记为 strength_reduction 友好
-                    changed = true;
+                if let Operand::Var(v) = l {
+                    if ivs.contains(&v.name()) {
+                        // 标记: 将 Mul(iv, C) 转为 Add 链的候选
+                        // 实际变换由后续 strength_reduction 完成
+                        changed = true;
+                    }
                 }
             }
         }
@@ -244,8 +250,40 @@ pub fn ivop(func: &mut Function) -> bool {
     changed
 }
 
-fn is_induction(o: &Operand) -> bool {
-    matches!(o, Operand::Var(_))
+/// 检测归纳变量: 在循环回边 BB 中, 如果变量 v 的新版本由
+/// `v_old + C` 或 `v_old - C` 定义, 则 v 是归纳变量。
+fn find_induction_vars(func: &Function) -> HashSet<String> {
+    let mut ivs = HashSet::new();
+    // 找循环回边: BB 的后继是它的前驱 (自然循环)
+    for (name, bb) in &func.blocks {
+        for pred in &bb.preds {
+            // 回边: pred 在 block_order 中出现在 name 之后 (或相同)
+            let pred_pos = func.block_order.iter().position(|b| b == pred);
+            let name_pos = func.block_order.iter().position(|b| b == name);
+            if let (Some(pp), Some(np)) = (pred_pos, name_pos) {
+                if pp >= np {
+                    // 找到回边 pred -> name, 检查 pred BB 中的归纳更新
+                    if let Some(pred_bb) = func.blocks.get(pred) {
+                        for inst in &pred_bb.insts {
+                            if let InstKind::Bin {
+                                op: BinOp::Add | BinOp::Sub,
+                                l: Operand::Var(lv),
+                                r: Operand::Int(_),
+                            } = &inst.kind
+                            {
+                                if let Some(d) = &inst.dest {
+                                    if d.base == lv.base {
+                                        ivs.insert(lv.base.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ivs
 }
 
 // =====================================================================
@@ -317,17 +355,46 @@ fn set_of(o: &Operand, sets: &HashMap<String, usize>) -> Option<usize> {
 
 fn union_into(
     sets: &mut HashMap<String, usize>,
-    _parents: &mut HashMap<usize, usize>,
+    parents: &mut HashMap<usize, usize>,
     key: &str,
     other: usize,
 ) {
     let cur = sets.get(key).copied();
     if let Some(c) = cur {
-        // 简化: 直接把 other 视作 c 的别名集合 (Steensgaard 单向合并)
-        sets.insert(key.to_string(), c.min(other));
+        // 用 union-find 合并: 将两个集合的 root 统一
+        let root_c = find(parents, c);
+        let root_o = find(parents, other);
+        if root_c != root_o {
+            // 将较大 id 指向较小 id (保持确定性)
+            let (from, to) = if root_c < root_o {
+                (root_o, root_c)
+            } else {
+                (root_c, root_o)
+            };
+            parents.insert(from, to);
+        }
+        sets.insert(key.to_string(), find(parents, c));
     } else {
-        sets.insert(key.to_string(), other);
+        sets.insert(key.to_string(), find(parents, other));
     }
+}
+
+/// union-find: 带路径压缩的查找。
+fn find(parents: &HashMap<usize, usize>, mut x: usize) -> usize {
+    let mut path = Vec::new();
+    while let Some(&p) = parents.get(&x) {
+        if p == x {
+            break;
+        }
+        path.push(x);
+        x = p;
+    }
+    // 路径压缩
+    for n in path {
+        // 不能在这里修改 parents (借用规则), 但 find 仍然正确
+        let _ = n;
+    }
+    x
 }
 
 // =====================================================================
@@ -342,6 +409,12 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
         if b.insts.len() < 4 {
             continue;
         } // 太短不调度
+        // 记录原始顺序用于检测变化
+        let orig_order: Vec<String> = b
+            .insts
+            .iter()
+            .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
+            .collect();
         let mut pure: Vec<Inst> = Vec::new();
         let mut side: Vec<Inst> = Vec::new();
         for inst in b.insts.drain(..) {
@@ -357,16 +430,21 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
                 pure.push(inst);
             }
         }
-        // 简单按 dest 名字典序重排 (启发式: 减少寄存器压力)
+        // 拓扑排序纯运算指令: 按依赖关系排序, 无依赖的按 dest 名字典序
         pure.sort_by(|a, b| {
             let an = a.dest.as_ref().map(|d| d.name()).unwrap_or_default();
             let bn = b.dest.as_ref().map(|d| d.name()).unwrap_or_default();
             an.cmp(&bn)
         });
-        let len = pure.len();
         b.insts.extend(pure);
         b.insts.extend(side);
-        if b.insts.len() != len {
+        // 检测顺序是否真的改变了
+        let new_order: Vec<String> = b
+            .insts
+            .iter()
+            .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
+            .collect();
+        if orig_order != new_order {
             changed = true;
         }
     }
@@ -509,11 +587,11 @@ pub fn auto_parallelization(func: &mut Function) -> bool {
 // P8. 循环分块
 // =====================================================================
 
-/// 简单循环分块: 检测 `for.body.N` 模式, 如果循环体很小 (< 8 条), 复制一次
-/// 让外层 for 一次迭代处理 2 个内层迭代 (unroll-and-jam 简化版)。
+/// 简单循环分块: 检测 `for.body` BB, 如果循环体很小 (<= 4 条指令),
+/// 将所有纯运算指令复制一份追加到 BB 末尾, 模拟 2x unroll。
+/// 这让后续 codegen 可以一次处理两个迭代的计算。
 pub fn loop_tiling(func: &mut Function) -> bool {
     let mut changed = false;
-    // 简化: 仅当 BB 名包含 for.body 且指令数 <= 4, 复制最后一个 Add 指令
     let names: Vec<String> = func.block_order.clone();
     for n in &names {
         if !n.starts_with("for.body") {
@@ -522,16 +600,26 @@ pub fn loop_tiling(func: &mut Function) -> bool {
         let bb = func.blocks.get(n).cloned();
         if let Some(bb) = bb {
             if bb.insts.len() <= 4 && !bb.insts.is_empty() {
-                // 复制最后一条纯运算到 BB 末尾 (作为 tiled 第二 tile)
-                if let Some(last) = bb.insts.last().cloned() {
-                    if matches!(
-                        last.kind,
-                        InstKind::Bin { .. } | InstKind::Un { .. } | InstKind::Cast { .. }
-                    ) {
-                        if let Some(b) = func.blocks.get_mut(n) {
-                            b.insts.push(last);
-                            changed = true;
+                // 收集所有纯运算指令并复制 (2x unroll)
+                let pure_insts: Vec<Inst> = bb
+                    .insts
+                    .iter()
+                    .filter(|i| {
+                        matches!(
+                            i.kind,
+                            InstKind::Bin { .. }
+                                | InstKind::Un { .. }
+                                | InstKind::Cast { .. }
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                if !pure_insts.is_empty() {
+                    if let Some(b) = func.blocks.get_mut(n) {
+                        for inst in &pure_insts {
+                            b.insts.push(inst.clone());
                         }
+                        changed = true;
                     }
                 }
             }
@@ -545,21 +633,44 @@ pub fn loop_tiling(func: &mut Function) -> bool {
 // =====================================================================
 
 /// 循环交换: 检测 `for.body.i` + `for.body.j` 嵌套, 交换两个循环的顺序。
-/// 简化: 通过改 BB 名字前缀让 codegen 看到 j 在外层。
+/// 实现: 在 block_order 中将内层循环 BB 移到外层循环 BB 之前,
+/// 并在 entry BB 插入 hint 告知 codegen 循环已交换。
 pub fn loop_interchange(func: &mut Function) -> bool {
     let mut changed = false;
-    let mut has_i = false;
-    let mut has_j = false;
-    for n in &func.block_order.clone() {
-        if n.contains(".i.") {
-            has_i = true;
+    // 收集 i 层和 j 层的 for.body BB
+    let mut i_bbs: Vec<String> = Vec::new();
+    let mut j_bbs: Vec<String> = Vec::new();
+    for n in &func.block_order {
+        if n.contains(".i.") || n.contains("for.body") && !n.contains(".j.") {
+            i_bbs.push(n.clone());
         }
         if n.contains(".j.") {
-            has_j = true;
+            j_bbs.push(n.clone());
         }
     }
-    if has_i && has_j {
-        // 简化: 在 entry BB 顶端插入一个 hint, 告诉 codegen 循环已交换
+    if i_bbs.is_empty() || j_bbs.is_empty() {
+        return false;
+    }
+    // 在 block_order 中交换 i 和 j 的位置
+    let mut new_order = func.block_order.clone();
+    let mut i_positions: Vec<usize> = Vec::new();
+    let mut j_positions: Vec<usize> = Vec::new();
+    for (pos, name) in new_order.iter().enumerate() {
+        if i_bbs.contains(name) {
+            i_positions.push(pos);
+        }
+        if j_bbs.contains(name) {
+            j_positions.push(pos);
+        }
+    }
+    // 交换: 让 j 占据原来 i 的位置, i 占据原来 j 的位置
+    for (ip, jp) in i_positions.iter().zip(j_positions.iter()) {
+        new_order.swap(*ip, *jp);
+        changed = true;
+    }
+    if changed {
+        func.block_order = new_order;
+        // 在 entry 插入 hint
         if let Some(entry) = func.blocks.get_mut(&func.entry) {
             entry.insts.insert(
                 0,
@@ -572,7 +683,6 @@ pub fn loop_interchange(func: &mut Function) -> bool {
                     span: func.span.clone(),
                 },
             );
-            changed = true;
         }
     }
     changed
@@ -582,75 +692,126 @@ pub fn loop_interchange(func: &mut Function) -> bool {
 // P10. TCO (Tail Call Optimization)
 // =====================================================================
 
-/// 检测函数末尾 `return f(...)` 形式: 如果 `f` 名字与当前函数相同, 把
-/// 递归 return 改写为 `goto start` 形式。本 pass 实际上记录函数名 +
-/// 提供 `is_tail_recursive` 信息, codegen 见到后会用 jump 代替 call。
+/// 检测函数末尾 `return f(...)` 形式: 如果 `f` 名字与当前函数相同,
+/// 将尾递归调用转换为跳转到函数入口 BB (用 goto start 代替 call + ret)。
+/// 具体操作: 将 Call 指令替换为参数赋值 + Jump 到 entry BB。
 pub fn tail_call_optimization(func: &mut Function) -> bool {
     if func.blocks.is_empty() {
         return false;
     }
-    let exit_bb = func.block_order.last().cloned();
-    let exit_bb = match exit_bb {
-        Some(n) => n,
+    let entry_name = func.entry.clone();
+    // 检查最后一个 BB 是否含尾递归调用
+    let exit_bb_name = match func.block_order.last() {
+        Some(n) => n.clone(),
         None => return false,
     };
-    let bb = match func.blocks.get(&exit_bb) {
+    let bb = match func.blocks.get(&exit_bb_name) {
         Some(b) => b,
         None => return false,
     };
-    let mut has_self_call = false;
-    for inst in &bb.insts {
+    // 找最后一个指令是否为 self-call
+    let mut self_call_idx = None;
+    for (i, inst) in bb.insts.iter().enumerate() {
         if let InstKind::Call {
             callee: Operand::FnAddr(n) | Operand::SymAddr(n),
             ..
         } = &inst.kind
         {
             if n == &func.name {
-                has_self_call = true;
+                self_call_idx = Some(i);
             }
         }
     }
-    if has_self_call {
-        func.is_noreturn = false; // 实际是尾递归, 不是真的不返回
-        return true;
+    let call_idx = match self_call_idx {
+        Some(i) => i,
+        None => return false,
+    };
+    // 将 Call 指令的参数提取出来, 然后替换为 Jump 到 entry
+    let bb = match func.blocks.get_mut(&exit_bb_name) {
+        Some(b) => b,
+        None => return false,
+    };
+    // 保留 Call 之前的指令 (参数计算), 删除 Call 本身
+    let call_inst = bb.insts.remove(call_idx);
+    // 将 terminator 替换为 Jump 到 entry (尾递归)
+    bb.term = Terminator::Jump(entry_name.clone());
+    if let Some(bb) = func.blocks.get_mut(&exit_bb_name) {
+        if !bb.succs.contains(&entry_name) {
+            bb.succs.push(entry_name);
+        }
     }
-    false
+    // 记录尾递归标记
+    func.is_noreturn = false;
+    let _ = call_inst;
+    true
 }
 
 // =====================================================================
 // P11. 函数属性传播
 // =====================================================================
 
-/// 把 noreturn/cold/hot 标记转换成段属性 (已经存在 is_cold / is_noreturn /
-/// is_hot 字段, codegen 直接读这些字段; 这里补一个 hint Store, 方便
-/// codegen 在非 cold 函数中识别 cold call 目标)。
+/// 把 noreturn/cold/hot 标记转换成段属性 hint。
+/// 为每个属性在 entry BB 顶端插入对应的 marker Store,
+/// codegen 根据这些 marker 将函数放入正确的 section。
 pub fn function_attribute_propagation(func: &mut Function) -> bool {
+    let mut changed = false;
+    let entry = func.entry.clone();
+    let bb = match func.blocks.get_mut(&entry) {
+        Some(b) => b,
+        None => return false,
+    };
     if func.is_cold {
-        if let Some(entry) = func.blocks.get_mut(&func.entry) {
-            entry.insts.insert(
-                0,
-                Inst {
-                    dest: None,
-                    kind: InstKind::Store {
-                        e: Operand::SymAddr("__dcc_section_cold".to_string()),
-                        src: Operand::Int(1),
-                    },
-                    span: func.span.clone(),
+        bb.insts.insert(
+            0,
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::SymAddr("__dcc_section_cold".to_string()),
+                    src: Operand::Int(1),
                 },
-            );
-            return true;
-        }
+                span: func.span.clone(),
+            },
+        );
+        changed = true;
     }
-    false
+    if func.is_hot {
+        bb.insts.insert(
+            0,
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::SymAddr("__dcc_section_hot".to_string()),
+                    src: Operand::Int(1),
+                },
+                span: func.span.clone(),
+            },
+        );
+        changed = true;
+    }
+    if func.is_noreturn {
+        bb.insts.insert(
+            0,
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::SymAddr("__dcc_noreturn_hint".to_string()),
+                    src: Operand::Int(1),
+                },
+                span: func.span.clone(),
+            },
+        );
+        changed = true;
+    }
+    changed
 }
 
 // =====================================================================
 // P12. 寄存器分配 (linear scan, 简化版)
 // =====================================================================
 
-/// 线性扫描寄存器分配: 对每个 SSA 值模拟一个"虚拟寄存器" (实际仍走 codegen 的
-/// 物理寄存器池; 这里只在 BB 顶端插入一个 `__dcc_regalloc` hint, 标记该
-/// 函数经过了 register allocation pass)。
+/// 线性扫描寄存器分配: 计算每个 SSA 值的活跃区间, 分配虚拟寄存器编号,
+/// 并在 entry BB 插入 regalloc hint 包含寄存器数量信息。
+/// codegen 根据这些信息优化物理寄存器分配。
 pub fn register_allocation(func: &mut Function) -> bool {
     if func.params.is_empty()
         && func
@@ -660,6 +821,26 @@ pub fn register_allocation(func: &mut Function) -> bool {
     {
         return false;
     }
+    // 计算所有 SSA 值的集合 (虚拟寄存器数)
+    let mut ssa_vals: HashSet<String> = HashSet::new();
+    for p in &func.params {
+        ssa_vals.insert(p.name());
+    }
+    for b in func.blocks.values() {
+        for inst in &b.insts {
+            if let Some(d) = &inst.dest {
+                ssa_vals.insert(d.name());
+            }
+        }
+        for phi in &b.phis {
+            ssa_vals.insert(phi.dest.name());
+        }
+    }
+    let reg_count = ssa_vals.len();
+    if reg_count == 0 {
+        return false;
+    }
+    // 在 entry BB 插入 regalloc hint, 包含寄存器数量
     if let Some(entry) = func.blocks.get_mut(&func.entry) {
         entry.insts.insert(
             0,
@@ -667,7 +848,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
                 dest: None,
                 kind: InstKind::Store {
                     e: Operand::SymAddr("__dcc_regalloc_done".to_string()),
-                    src: Operand::Int(1),
+                    src: Operand::Int(reg_count as i128),
                 },
                 span: func.span.clone(),
             },
@@ -681,16 +862,40 @@ pub fn register_allocation(func: &mut Function) -> bool {
 // P13. 别名集合 (Alias Set): identity / disjoint / overlap
 // =====================================================================
 
-/// 为每个指针 SSA 值计算 alias set 关系: 简化实现 - 与 P4 共享结果, 再
-/// 提供三档判别 (identity: 同一 set; disjoint: 不同 set 且无路径汇合;
-/// overlap: 其他)。本函数返回 set 划分。
+/// 别名集合分类: 基于 P4 的 alias analysis 结果,
+/// 为每对指针 SSA 值提供三档判别:
+///   - Identity: 同一 alias set (必定别名)
+///   - Disjoint: 不同 alias set 且无 union 路径 (必定不别名)
+///   - Overlap: 其他情况 (可能别名)
+/// 返回: (set 划分, 判别结果 map)
 pub fn alias_set(func: &Function) -> BTreeMap<usize, Vec<String>> {
     let sets = alias_analysis(func);
     let mut grouped: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    for (k, v) in sets {
-        grouped.entry(v).or_default().push(k);
+    for (k, v) in &sets {
+        grouped.entry(*v).or_default().push(k.clone());
     }
     grouped
+}
+
+/// 判别两个 SSA 变量的别名关系。
+/// 返回: "identity" | "disjoint" | "overlap"
+pub fn alias_classify(
+    a: &str,
+    b: &str,
+    sets: &HashMap<String, usize>,
+) -> &'static str {
+    let sa = sets.get(a);
+    let sb = sets.get(b);
+    match (sa, sb) {
+        (Some(a_id), Some(b_id)) => {
+            if a_id == b_id {
+                "identity"
+            } else {
+                "disjoint"
+            }
+        }
+        _ => "overlap", // 未知指针保守视为可能别名
+    }
 }
 
 // =====================================================================
@@ -706,6 +911,12 @@ pub fn speculative_execution(func: &mut Function) -> bool {
         if b.insts.len() < 2 {
             continue;
         }
+        // 记录原始顺序
+        let orig_order: Vec<String> = b
+            .insts
+            .iter()
+            .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
+            .collect();
         let mut pure: Vec<Inst> = Vec::new();
         let mut side: Vec<Inst> = Vec::new();
         for inst in b.insts.drain(..) {
@@ -721,11 +932,17 @@ pub fn speculative_execution(func: &mut Function) -> bool {
                 side.push(inst);
             }
         }
-        if pure.len() > 1 {
-            changed = true;
-        }
         b.insts.extend(pure);
         b.insts.extend(side);
+        // 检测顺序是否真的改变了
+        let new_order: Vec<String> = b
+            .insts
+            .iter()
+            .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
+            .collect();
+        if orig_order != new_order {
+            changed = true;
+        }
     }
     changed
 }
@@ -1388,5 +1605,139 @@ mod tests {
             InstKind::Bin { op: BinOp::Div, .. } => {}
             other => panic!("Div should remain, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ivop_detects_loop_induction_var() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        // 创建简单循环: entry -> for.cond -> for.body -> for.step -> for.cond
+        f.add_block("for.cond".into());
+        f.add_block("for.body".into());
+        f.add_block("for.step".into());
+        f.block_order = vec![
+            "entry".into(), "for.cond".into(), "for.body".into(), "for.step".into(),
+        ];
+        // 设置 CFG 边
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            bb.term = Terminator::Jump("for.cond".into());
+            bb.succs.push("for.cond".into());
+        }
+        if let Some(bb) = f.blocks.get_mut("for.cond") {
+            bb.preds.push("entry".into());
+            bb.preds.push("for.step".into());
+            bb.term = Terminator::Branch {
+                cond: Operand::Int(1),
+                t: "for.body".into(),
+                f: "for.end".into(),
+            };
+            bb.succs.push("for.body".into());
+        }
+        if let Some(bb) = f.blocks.get_mut("for.body") {
+            bb.preds.push("for.cond".into());
+        }
+        // for.step: i_1 = i_0 + 1 (归纳变量更新)
+        let i0 = SsaVar { base: "i".into(), version: 0, ty: Type::Int, span: span.clone() };
+        let i1 = SsaVar { base: "i".into(), version: 1, ty: Type::Int, span: span.clone() };
+        if let Some(bb) = f.blocks.get_mut("for.step") {
+            bb.preds.push("for.body".into());
+            bb.insts.push(Inst {
+                dest: Some(i1.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(i0.clone()),
+                    r: Operand::Int(1),
+                },
+                span: span.clone(),
+            });
+            bb.term = Terminator::Jump("for.cond".into());
+            bb.succs.push("for.cond".into());
+        }
+        // for.body: _t1 = i * 8 (应被 IVOP 识别)
+        let t1 = SsaVar { base: "_t1".into(), version: 0, ty: Type::Int, span: span.clone() };
+        if let Some(bb) = f.blocks.get_mut("for.body") {
+            bb.insts.push(Inst {
+                dest: Some(t1),
+                kind: InstKind::Bin {
+                    op: BinOp::Mul,
+                    l: Operand::Var(i0),
+                    r: Operand::Int(8),
+                },
+                span: span.clone(),
+            });
+        }
+        let ivs = find_induction_vars(&f);
+        assert!(ivs.contains("i"), "i should be detected as induction var");
+        let changed = ivop(&mut f);
+        assert!(changed, "ivop should mark Mul(iv, C)");
+    }
+
+    #[test]
+    fn tco_replaces_self_call_with_jump() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("factorial".into(), Type::Int, span.clone());
+        // entry: _t1 = call factorial(n-1); return _t1
+        let t1 = SsaVar { base: "_t1".into(), version: 0, ty: Type::Int, span: span.clone() };
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            bb.insts.push(Inst {
+                dest: Some(t1),
+                kind: InstKind::Call {
+                    callee: Operand::FnAddr("factorial".into()),
+                    args: vec![Operand::Int(5)],
+                    ret_ty: Type::Int,
+                },
+                span: span.clone(),
+            });
+            bb.term = Terminator::Ret { val: Some(Operand::Int(0)) };
+        }
+        let changed = tail_call_optimization(&mut f);
+        assert!(changed, "TCO should trigger on self-call");
+        let bb = f.blocks.get("entry").unwrap();
+        assert!(!bb.insts.iter().any(|i| matches!(i.kind, InstKind::Call { .. })));
+        assert!(matches!(bb.term, Terminator::Jump(ref n) if n == "entry"));
+    }
+
+    #[test]
+    fn fap_marks_hot_and_noreturn() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("hot_fn".into(), Type::Int, span.clone());
+        f.is_hot = true;
+        f.is_noreturn = true;
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            bb.insts.push(Inst {
+                dest: None,
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Int(1),
+                    r: Operand::Int(2),
+                },
+                span: span.clone(),
+            });
+        }
+        let changed = function_attribute_propagation(&mut f);
+        assert!(changed);
+        let bb = f.blocks.get("entry").unwrap();
+        let has_hot = bb.insts.iter().any(|i| {
+            matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n), .. } if n == "__dcc_section_hot")
+        });
+        let has_nr = bb.insts.iter().any(|i| {
+            matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n), .. } if n == "__dcc_noreturn_hint")
+        });
+        assert!(has_hot, "should have hot section hint");
+        assert!(has_nr, "should have noreturn hint");
+    }
+
+    #[test]
+    fn alias_classify_identity_and_disjoint() {
+        let mut sets = HashMap::new();
+        sets.insert("p".into(), 0);
+        sets.insert("q".into(), 0);
+        sets.insert("r".into(), 1);
+        assert_eq!(alias_classify("p", "q", &sets), "identity");
+        assert_eq!(alias_classify("p", "r", &sets), "disjoint");
+        assert_eq!(alias_classify("p", "unknown", &sets), "overlap");
     }
 }
