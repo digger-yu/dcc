@@ -26,7 +26,6 @@
 |------|------|
 | NEON 浮点聚合传参 > 4 元素 | 仅支持 1–4 元素 HFA |
 | 大结构体 > 16B 嵌套返回 | 仅单层 sret，未验证多层嵌套调用链 |
-| TLS 重定位 (`R_AARCH64_TLSDESC_*`) | 仅基础 `tpoff` 模型 |
 
 ### RISC-V64
 
@@ -45,9 +44,7 @@
 
 | 通道 | 已知遗留 |
 |------|----------|
-| KASAN / HWASAN | 16B 以上 / 非整型 load/store 走 `__asan_load`；MTE 标签插入未完全集成到 sanitizer 流程（AArch64 指令已实现） |
-| UBSAN | VLA bound、null deref、float cast 单独 trap 仍缺 |
-| KCSAN | 专用 `__kcsan_check_access` 路径未独立发出 |
+| HWASAN MTE | AArch64 MTE 指令编码已实现，但未集成到 sanitizer 流程（需函数 prologue tag 栈帧、指针标记、软件 tag 检查） |
 
 ## 性能分析子系统遗留
 
@@ -65,6 +62,13 @@
 
 | 限制 | 说明 |
 |------|------|
+| 模板基类 | 不支持 `class Foo : Base<T> {}` |
+| 模板友元 | 不支持 `friend class Foo<T>` |
+| `export template` | 注释占位，未实装 |
+| concept 与 SFINAE 联动 | concept 解析 + 简化求值已实装，但不与 SFINAE 完整联动 |
+| module ODR 检查 | BMF 序列化已实装，ODR 检查待后续 |
+| `virtual` 继承复杂场景 | 部分支持，复杂虚基类不验证 |
+| 标准库模板实参 | `std::vector<int>` 等模板实参语法无法直接使用 |
 | 动态 RTTI | 跨多态指针动态 RTTI 仍依赖 C 后端在 vtable 中写 typeinfo 字段，多文件链接场景受限 |
 | 继承成员访问 | C++ 多文件链接场景受 dcc C 后端 `__base_Base1` 字段访问 pre-existing 限制 |
 | `__dcc_mbr` 辅助定义 | 继承成员访问改写需要 C 后端支持 `__base_*` 字段访问 |
@@ -73,8 +77,8 @@
 
 | 限制 | 说明 |
 |------|------|
-| 浮点变参 | v0–7 / fa0–fa7 未保存 |
-| 栈溢出变参 | >8 个未实装 |
+| 浮点变参 | aarch64 v0–v7 / riscv64 fa0–fa7 未保存 |
+| 栈溢出变参 | >8 个变参未实装（aarch64/riscv64） |
 
 ## 链接器限制
 
@@ -82,6 +86,30 @@
 |------|------|
 | `ptr_to_member` 多文件链接 | vtable 符号多文件链接场景重复定义 |
 | Windows 链接路径验证 | Windows 平台链接路径未实际验证 |
+| vDSO 集成 | 基础设施已有（`VdsoInfo` + `parse_vdso`），嵌入输出 layout + `.note.GNU-vdso` 节未完成 |
+| DSO symbol caching | `DsoCache` 已实现，链接器侧未接入（需先补 `-lxxx → libc.so` 解析） |
+| 运行时 dynamic loader | 完全依赖 host `ld.so`（设计决策，非缺失） |
+
+## 交叉编译
+
+| 限制 | 说明 |
+|------|------|
+| 缺失平台 | Windows MSVC / Darwin (Mach-O) / WASM / AVR / MSP430 / Xtensa / PowerPC / LoongArch64 无 codegen |
+
+## 自举
+
+| 步骤 | 状态 |
+|------|------|
+| 步骤 2 (`dcc0 → dcc1`) | 未开始，需 dcc0 完整支持自身依赖（std 子集） |
+| 步骤 3 (`dcc1 → dcc2`) | 未开始 |
+
+## 运行时限制
+
+| 限制 | 说明 |
+|------|------|
+| dynamic loader | 完全依赖 host `ld.so`（设计决策） |
+| fenv 运行时调用 | `fesetround` / `fegetround` 等未提供，`FENV_ACCESS` 仍为纯语义状态 |
+| `double complex` 传值 ABI | `_Complex` 字面量/算术已实装，`double complex` 按值传 ABI 待后续 |
 
 ## 本地基线
 

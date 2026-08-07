@@ -715,7 +715,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
       由 `w` 字段区分；GPR 内存源（cvt si2ss mem）未实装。
   - **降级**：少数 AVX-512 复杂指令（`vfpclassps`/`vgetmants`/`vreduceps`
     等）仍走 nop 警告；后续按需补全。
-- **M13.1 x86_64 codegen 表达式层补洞（高）** — 收尾 5 个 `unimplemented_modules.md`
+- **M13.1 x86_64 codegen 表达式层补洞（高）** — 收尾 5 个历史跟踪文档中
   第 1.2 节里长期挂账的 stub/简化，全部跑通测试用例：
   - **float 取模（`%`）软件实装**：`gen_float_binop` 检测到 `BinOp::Mod`
     不再走 `_ => return`（E1003）；改用 `divss/divsd` + `cvttss2si/cvttsd2si`
@@ -761,7 +761,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     M11.2/11.3 已有测试无回归（`test_asm_constraints_ext` 在 M11.3 起即
     失败于 `test_xmm_constraint`，属 pre-existing，本 M 不在范围）。
 - **M14 C 前端补洞：#pragma / attribute / atomic / MS 扩展** —
-  收尾 `unimplemented_modules.md` 第 4.1 节里 8 条长期挂账的简化项，
+  收尾历史跟踪文档第 4.1 节里 8 条长期挂账的简化项，
   全链路贯穿 preproc → parser → codegen → link：
   - **`#pragma pack(n)` 影响 struct 布局**：`preproc` 维护 `pack_stack` +
     `pack_history: Vec<(u32, Option<usize>)>`，把每次 packing 变化按行号
@@ -819,7 +819,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
     `stdatomic_macros_hosted`（hosted 模式 atomic 宏）本地 PASS；
     freestanding 模式通过 `preproc.rs` 单元测试验证
     `__STDC_NO_ATOMICS__=1` 已设置。
-- **M15 const_eval 完整化 + 运行时检查**：补全 `unimplemented_modules.md`
+- **M15 const_eval 完整化 + 运行时检查**：补全历史跟踪文档中
   第 4.2/4.3 节 7 条长期挂账项（浮点常量 / 字符串常量 / 地址常量 /
   `__builtin_*` 折叠 / constexpr / `#embed` 字节数 / 严格类型 warning）
   与 3 条运行时检查（`-fbounds-check` 数组越界 / `-ftrapv` 整数溢出
@@ -1256,7 +1256,7 @@ OmpTarget / OmpTargetSimd / Cuda / Hip 四类入口。
 
 ## M23 边角特性完整化（2026-07-21）
 
-本里程碑将 `unimplemented_modules.md` 中所有 🟠/🔴 状态项实现或升级为 🟢。
+本里程碑将所有 🟠/🔴 状态项实现或升级为 🟢（详见 `docs/support_features.md`）。
 
 ### 属性/builtin/杂项（Section 11）
 

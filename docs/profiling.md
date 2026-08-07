@@ -489,5 +489,6 @@ parse / memprof parse + is_cold / topdown sum / offload json roundtrip。
 * `docs/roadmap.md` — 里程碑 M0–M19
 * `docs/architecture.md` — 整体架构
 * `docs/performance.md` — 性能模型 + 加速来源
-* `docs/unimplemented_modules.md` 第 8.3 节 — 当前 profile 状态
+* `docs/missing_features.md` — 缺失特性与已知限制
+* `docs/support_features.md` — 已支持特性清单
 * `src/profile/mod.rs` — `ProfileConfig` 定义

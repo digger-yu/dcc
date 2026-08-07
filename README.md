@@ -317,7 +317,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 
 ## 8. 不支持的功能
 
-完整清单见 [`docs/unimplemented_modules.md`](./docs/unimplemented_modules.md) / [`docs/missing_features.md`](./docs/missing_features.md)。
+完整清单见 [`docs/missing_features.md`](./docs/missing_features.md)。
 
 | 范围 | 缺口 | 备注 |
 |------|------|------|
@@ -392,4 +392,4 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 | [`docs/performance.md`](./docs/performance.md) | 性能模型 + 加速来源 + 实测 + KPI |
 | [`docs/profiling.md`](./docs/profiling.md) | PGO / GCOV / AutoFDO / LBR / MemProf / TopdownL1 / Offloading 7 子系统详述 |
 | [`docs/roadmap.md`](./docs/roadmap.md) | M0–M25 里程碑 + 后端能力矩阵 + 第一性原理设计决策 |
-| [`docs/unimplemented_modules.md`](./docs/unimplemented_modules.md) | 全量未实现模块清单（codegen / linker / sanitizer / C / C++ / preproc / debug / bootstrap） |
+| [`docs/support_features.md`](./docs/support_features.md) | 已支持特性全量清单（codegen / linker / sanitizer / C / C++ / preproc / debug / profiling） |
