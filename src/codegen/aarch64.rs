@@ -2102,6 +2102,73 @@ impl Aarch64Codegen {
         self.emit(&insn_add2.to_le_bytes());
     }
 
+    /// Optimized TLSDESC 访问序列 (binutils 2.33+ / glibc 2.33+)
+    /// 用 MOVW 对代替 ADRP, 消除页对齐限制并允许 linker 选择更短序列.
+    /// 序列: movz x0, #:tlsdesc_off_g1:var
+    ///       movk x0, #:tlsdesc_off_g0_nc:var
+    ///       ldr  x1, [x0]
+    ///       add  x0, x0, x1
+    ///       blr  x1
+    ///       mrs  x1, tpidr_el0
+    ///       add  x0, x0, x1
+    fn emit_tlsdesc_access_opt(&mut self, sym: &str) {
+        let idx = self.ensure_sym(sym);
+        // movz x0, #:tlsdesc_off_g1:var (R_AARCH64_TLSDESC_OFF_G1)
+        let insn_movz = 0xd2a00000u32; // movz x0, #0, lsl #16
+        self.emit(&insn_movz.to_le_bytes());
+        let movz_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: movz_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSDESC_OFF_G1,
+            addend: 0,
+        });
+        // movk x0, #:tlsdesc_off_g0_nc:var (R_AARCH64_TLSDESC_OFF_G0_NC)
+        let insn_movk = 0xf2800000u32; // movk x0, #0
+        self.emit(&insn_movk.to_le_bytes());
+        let movk_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: movk_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSDESC_OFF_G0_NC,
+            addend: 0,
+        });
+        // ldr x1, [x0] (R_AARCH64_TLSDESC_LDR — marker for ld.so)
+        let insn_ldr = 0xf9400001u32; // ldr x1, [x0]
+        self.emit(&insn_ldr.to_le_bytes());
+        let ldr_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: ldr_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSDESC_LDR,
+            addend: 0,
+        });
+        // add x0, x0, x1 (R_AARCH64_TLSDESC_ADD — marker for ld.so)
+        let insn_add = 0x8b010000u32; // add x0, x0, x1
+        self.emit(&insn_add.to_le_bytes());
+        let add_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: add_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSDESC_ADD,
+            addend: 0,
+        });
+        // blr x1 (R_AARCH64_TLSDESC_CALL — marker for ld.so)
+        let insn_blr = 0xd63f0020u32; // blr x1
+        self.emit(&insn_blr.to_le_bytes());
+        let blr_pos = self.pos() - 4;
+        self.relocations.push(ElfRela {
+            offset: blr_pos,
+            sym_index: idx,
+            rel_type: crate::codegen::elf::R_AARCH64_TLSDESC_CALL,
+            addend: 0,
+        });
+        // mrs x1, tpidr_el0
+        self.emit(&0xd53bd041u32.to_le_bytes());
+        // add x0, x0, x1
+        self.emit(&0x8b010000u32.to_le_bytes());
+    }
+
     /// Initial Exec TLS 访问: 通过 GOT 获取 tpoff
     /// 序列: adrp x0, :gottprel:var
     ///       ldr  x0, [x0, :gottprel_lo12:var]
@@ -2664,8 +2731,64 @@ mod tests {
             );
         }
     }
-
-    // M25: AArch64 va_list 寄存器保存区 单元测试
+    
+    // Optimized TLSDESC 序列单元测试 (MOVW 对 + 5 个新重定位)
+    // 验证 emit_tlsdesc_access_opt 发出:
+    //   movz x0, #0, lsl #16  (R_AARCH64_TLSDESC_OFF_G1)
+    //   movk x0, #0           (R_AARCH64_TLSDESC_OFF_G0_NC)
+    //   ldr  x1, [x0]         (R_AARCH64_TLSDESC_LDR)
+    //   add  x0, x0, x1       (R_AARCH64_TLSDESC_ADD)
+    //   blr  x1               (R_AARCH64_TLSDESC_CALL)
+    #[test]
+    fn aarch64_tlsdesc_opt_emits_5_relocations() {
+        use crate::codegen::elf::{
+            R_AARCH64_TLSDESC_ADD, R_AARCH64_TLSDESC_CALL, R_AARCH64_TLSDESC_LDR,
+            R_AARCH64_TLSDESC_OFF_G0_NC, R_AARCH64_TLSDESC_OFF_G1,
+        };
+        let mut cg = Aarch64Codegen::new(
+            crate::target::Target::resolve(
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
+            ),
+            true,
+        );
+        cg.emit_tlsdesc_access_opt("tls_opt_var");
+        // movz (0xd2a) + movk (0xf28) 指令检查
+        assert!(
+            cg.code.windows(4).any(|w| (w[3] & 0xff) == 0xd2),
+            "missing movz x0 insn"
+        );
+        assert!(
+            cg.code.windows(4).any(|w| (w[3] & 0xff) == 0xf2),
+            "missing movk x0 insn"
+        );
+        // 5 个 TLSDESC 重定位
+        let tlsdesc_rels: Vec<_> = cg
+            .relocations
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.rel_type,
+                    R_AARCH64_TLSDESC_OFF_G1
+                        | R_AARCH64_TLSDESC_OFF_G0_NC
+                        | R_AARCH64_TLSDESC_LDR
+                        | R_AARCH64_TLSDESC_ADD
+                        | R_AARCH64_TLSDESC_CALL
+                )
+            })
+            .collect();
+        assert_eq!(
+            tlsdesc_rels.len(),
+            5,
+            "expected 5 TLSDESC relocations, got {}",
+            tlsdesc_rels.len()
+        );
+        for r in &tlsdesc_rels {
+            let sym = &cg.symbols[r.sym_index as usize - 1];
+            assert_eq!(sym.name, "tls_opt_var");
+        }
+    }
+    
+    // M25: AArch64 va_list 寄存器保区 单元测试
     // 验证变参函数入口发出 8 条 str xn, [sp, #off] 保存指令.
     #[test]
     fn aarch64_va_save_area_stores_x0_through_x7() {
