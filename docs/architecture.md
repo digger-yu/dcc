@@ -170,6 +170,9 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
   旧路径 `link_relocatable_legacy` 保留 host `ld -r --gc-sections` 桥接。
 - **`-pie` / `-shared`**：输出 ET_DYN（PIE 或 `.so`），生成 `.dynamic`、
   `.dynsym`、`.dynstr`、`.rela.dyn`、`.rela.plt`、`.plt`、`.got`、`.got.plt`。
+  `-z ibt` 启用 CET/IBT 安全 PLT：PLT[0] 加 `endbr64`，函数条目放入
+  `.plt.sec`（每条 32B，含 `endbr64` + `jmp *GOT` + `push $idx` + `jmp PLT0`），
+  并生成 `.gnu.property` 节标记 `GNU_PROPERTY_X86_FEATURE_1_AND` (IBT/SHSTK)。
 - **`-flto` IR/bitcode LTO**：每 TU 末尾在 `.dcc.lto` 节写入自定义位码
   （魔数 `DBC` + 版本 1），链接时反序列化、做跨 TU dead-code 消除。
 
@@ -181,7 +184,7 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
 | `link/resolve.rs` | 跨 TU 符号解析：强 > 弱 > undef；隐式 undef 允许 libc weak | — |
 | `link/layout.rs` | 同名节合并 + 2 段布局（`R+X` / `R+W`） + 自定义节独立 | — |
 | `link/relocate.rs` | 重定位引擎：`PC32` / `PLT32` / `64` / `32` / `32S` / `GOTPCREL` / `GOT64` / `GOTOFF64` / `TPOFF64` / `TPOFF32` / AArch64（22 种）/ RISC-V（15 种） | — |
-| `link/plt_got.rs` | PLT/GOT 生成、`.dynamic`、`.dynsym`、`.rela.{dyn,plt}` | — |
+| `link/plt_got.rs` | PLT/GOT 生成、`.dynamic`、`.dynsym`、`.rela.{dyn,plt}`；CET/IBT `.plt.sec` 安全 PLT + `.gnu.property` | — |
 | `link/elf_exec.rs` | ET_EXEC 输出：ELF 头、PHDR、节头、`.symtab`、`.strtab`、`.gnu.hash`；多架构包装 (x86_64/AArch64/RISC-V/MIPS64/ARM) + PT_INTERP | — |
 | `link/elf_dyn.rs` | ET_DYN 输出：PIE / `.so` 共享库；多架构包装 (5 架构 × PIE/Shared) | — |
 | `link/gnu_hash.rs` | `.gnu.hash` TIE 压缩（bloom filter + buckets） | — |
@@ -190,7 +193,7 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
 | `link/ifunc.rs` | IFUNC（STT_GNU_IFUNC）解析 + `R_X86_64_IRELATIVE` 生成 | — |
 | `link/lto_bitcode.rs` | 自有 DBC 格式 IR 位码序列化 + 跨 TU DCE / 内联 / 常量传播 / DAE + LtoConfig 配置化 + Pass 7 no_semantic_interposition | — |
 | `link/legacy.rs` | `-r` 模式：优先内置路径 `link_relocatable_builtin`，旧路径 `link_relocatable_legacy` (host `ld -r`) | host `ld`（仅 legacy 路径） |
-| `link/link_opts.rs` | `-z relro/now/lazy/execstack/noexecstack/pack-relative-relocs/max-page-size=N`、RPATH/RUNPATH、-fuse-ld=、-fno-semantic-interposition、SHF_GNU_RETAIN | — |
+| `link/link_opts.rs` | `-z relro/now/lazy/execstack/noexecstack/ibt/shstk/pack-relative-relocs/max-page-size=N`、RPATH/RUNPATH、-fuse-ld=、-fno-semantic-interposition、SHF_GNU_RETAIN、`DCC_CET_IBT` 环境变量 | — |
 | `link/symver.rs` | `.symver` 完整版本表（VERDEF / VERNEED） + `--no-undefined-version` 严格检查 | — |
 | `link/target_clones.rs` | `__attribute__((target_clones(...)))` IFUNC resolver 多版本生成 | — |
 | `link/fini_dispatch.rs` | `__dso_handle` / `__cxa_atexit` / `atexit` / `.fini_array` 调度 | — |

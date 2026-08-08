@@ -38,12 +38,16 @@ pub enum OutputSectionKind {
     Got,
     GotPlt,
     Plt,
+    /// CET/IBT 安全 PLT 节 (endbr64 + jmp *GOT; push $idx; jmp PLT0)
+    PltSec,
     Dynamic,
     DynStr,
     DynSym,
     RelDyn,
     RelPlt,
     Note,
+    /// GNU property 节 (CET feature marking)
+    GnuProperty,
     /// 自定义节（保留 .text.foo 之类）
     Named(String),
 }
@@ -239,6 +243,7 @@ impl LayoutBuilder {
                             | OutputSectionKind::Init
                             | OutputSectionKind::Fini
                             | OutputSectionKind::Plt
+                            | OutputSectionKind::PltSec
                     ) {
                         0
                     } else {
@@ -412,6 +417,8 @@ impl LayoutBuilder {
                 OutputSectionKind::Got
                     | OutputSectionKind::GotPlt
                     | OutputSectionKind::Plt
+                    | OutputSectionKind::PltSec
+                    | OutputSectionKind::GnuProperty
                     | OutputSectionKind::RelDyn
                     | OutputSectionKind::RelPlt
                     | OutputSectionKind::Dynamic
@@ -651,6 +658,48 @@ impl LayoutBuilder {
             input_sections: Vec::new(),
         });
         idx_map.insert(OutputSectionKind::Plt, new_idx);
+
+        // CET/IBT 安全 PLT 节 (.plt.sec)
+        let new_idx = sections.len() as u32;
+        sections.push(OutputSection {
+            kind: OutputSectionKind::PltSec,
+            name: ".plt.sec".to_string(),
+            sh_name_off: 0,
+            ty: SHT_PROGBITS,
+            flags: SHF_ALLOC | SHF_EXECINSTR,
+            align: 16,
+            data: Vec::new(),
+            size: 0,
+            entsize: 0,
+            output_index: new_idx,
+            load_segment: 0,
+            vaddr: 0,
+            file_off: 0,
+            input_offsets: Vec::new(),
+            input_sections: Vec::new(),
+        });
+        idx_map.insert(OutputSectionKind::PltSec, new_idx);
+
+        // GNU property 节 (CET feature marking)
+        let new_idx = sections.len() as u32;
+        sections.push(OutputSection {
+            kind: OutputSectionKind::GnuProperty,
+            name: ".gnu.property".to_string(),
+            sh_name_off: 0,
+            ty: SHT_PROGBITS,
+            flags: SHF_ALLOC,
+            align: 8,
+            data: Vec::new(),
+            size: 0,
+            entsize: 0,
+            output_index: new_idx,
+            load_segment: 1,
+            vaddr: 0,
+            file_off: 0,
+            input_offsets: Vec::new(),
+            input_sections: Vec::new(),
+        });
+        idx_map.insert(OutputSectionKind::GnuProperty, new_idx);
 
         let new_idx = sections.len() as u32;
         sections.push(OutputSection {
@@ -1033,7 +1082,9 @@ fn classify_section(name: &str) -> Option<OutputSectionKind> {
 
 fn section_flags_for_kind(kind: OutputSectionKind) -> u32 {
     match kind {
-        OutputSectionKind::Text | OutputSectionKind::Plt => SHF_ALLOC | SHF_EXECINSTR,
+        OutputSectionKind::Text | OutputSectionKind::Plt | OutputSectionKind::PltSec => {
+            SHF_ALLOC | SHF_EXECINSTR
+        }
         OutputSectionKind::Rodata | OutputSectionKind::Init | OutputSectionKind::Fini => SHF_ALLOC,
         OutputSectionKind::Data
         | OutputSectionKind::Bss
@@ -1047,7 +1098,7 @@ fn section_flags_for_kind(kind: OutputSectionKind) -> u32 {
         OutputSectionKind::Tdata => SHF_ALLOC | SHF_WRITE | SHF_TLS,
         OutputSectionKind::Tbss => SHF_ALLOC | SHF_WRITE | SHF_TLS,
         OutputSectionKind::RelDyn | OutputSectionKind::RelPlt => SHF_ALLOC,
-        OutputSectionKind::Note => 0,
+        OutputSectionKind::Note | OutputSectionKind::GnuProperty => SHF_ALLOC,
         OutputSectionKind::Named(_) => 0,
     }
 }
@@ -1067,8 +1118,9 @@ fn section_align_for_kind(kind: OutputSectionKind) -> u64 {
         | OutputSectionKind::DynStr
         | OutputSectionKind::RelDyn
         | OutputSectionKind::RelPlt => 8,
-        OutputSectionKind::Plt => 16,
+        OutputSectionKind::Plt | OutputSectionKind::PltSec => 16,
         OutputSectionKind::Note => 4,
+        OutputSectionKind::GnuProperty => 8,
         OutputSectionKind::Named(_) => 1,
     }
 }
@@ -1088,12 +1140,14 @@ fn output_name(kind: OutputSectionKind) -> &'static str {
         OutputSectionKind::Got => ".got",
         OutputSectionKind::GotPlt => ".got.plt",
         OutputSectionKind::Plt => ".plt",
+        OutputSectionKind::PltSec => ".plt.sec",
         OutputSectionKind::Dynamic => ".dynamic",
         OutputSectionKind::DynStr => ".dynstr",
         OutputSectionKind::DynSym => ".dynsym",
         OutputSectionKind::RelDyn => ".rela.dyn",
         OutputSectionKind::RelPlt => ".rela.plt",
         OutputSectionKind::Note => ".note",
+        OutputSectionKind::GnuProperty => ".gnu.property",
         OutputSectionKind::Named(_) => "",
     }
 }

@@ -71,6 +71,10 @@ pub struct LinkOpts {
     pub compress_debug: Option<String>,
     /// -flto-partition=N
     pub lto_partitions: Option<u32>,
+    /// -z ibt: CET Indirect Branch Tracking (安全 PLT)
+    pub ibt: bool,
+    /// -z shstk: CET Shadow Stack
+    pub shstk: bool,
 }
 
 impl LinkOpts {
@@ -93,6 +97,10 @@ impl LinkOpts {
         // 允许 DCC_BIND_NOW=1
         if std::env::var("DCC_BIND_NOW").ok().as_deref() == Some("1") {
             opts.bind_now = true;
+        }
+        // 允许 DCC_CET_IBT=1 启用 CET/IBT 安全 PLT
+        if std::env::var("DCC_CET_IBT").ok().as_deref() == Some("1") {
+            opts.ibt = true;
         }
         opts
     }
@@ -138,7 +146,11 @@ impl LinkOpts {
                 }
             }
             // 已知但本阶段不实现的
-            "ibt" | "shstk" | "cet-report" | "cet-report=warning" | "cet-report=error"
+            "ibt" => self.ibt = true,
+            "noibt" => self.ibt = false,
+            "shstk" => self.shstk = true,
+            "noshstk" => self.shstk = false,
+            "cet-report" | "cet-report=warning" | "cet-report=error"
             | "force-bti" | "force-bti-warning" | "force-ibt" | "force-shstk"
             | "noseparate-code" | "separate-code" | "nodynamic-linker" | "dynamic-linker"
             | "initfirst" | "interpose" | "nodelete" | "nodump" | "origin" | "defs" | "undefs"
@@ -532,6 +544,21 @@ mod tests {
         let mut o = LinkOpts::default();
         o.parse_z("pack-relative-relocs");
         assert!(o.pack_relative_relocs);
+    }
+
+    #[test]
+    fn parse_z_ibt_shstk() {
+        let mut o = LinkOpts::default();
+        assert!(!o.ibt);
+        assert!(!o.shstk);
+        o.parse_z("ibt");
+        assert!(o.ibt);
+        o.parse_z("shstk");
+        assert!(o.shstk);
+        o.parse_z("noibt");
+        assert!(!o.ibt);
+        o.parse_z("noshstk");
+        assert!(!o.shstk);
     }
 
     #[test]

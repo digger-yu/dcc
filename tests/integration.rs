@@ -6512,3 +6512,79 @@ int main() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// =================== CET/IBT 安全 PLT ===================
+
+/// CET/IBT: -z ibt 编译 PIE 应生成 .plt.sec 节和 .gnu.property 节
+#[test]
+fn cet_ibt_plt_sec_and_gnu_property_sections() {
+    let (output, exe) = run_compile_and_run_flags(
+        "cet-ibt-plt",
+        "extern int puts(const char *);\nint main(void) { puts(\"hi\"); return 0; }",
+        &["-pie", "-fbuiltin-linker", "-z", "ibt"],
+    );
+    assert!(
+        output.status.success(),
+        "cet-ibt compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // readelf -S 检查 .plt.sec 和 .gnu.property 节
+    let readelf = Command::new("readelf")
+        .args(["-S"])
+        .arg(&exe)
+        .output()
+        .expect("readelf");
+    let sections = String::from_utf8_lossy(&readelf.stdout);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        sections.contains(".plt.sec"),
+        "expected .plt.sec section in ELF: {sections}"
+    );
+    assert!(
+        sections.contains(".gnu.property"),
+        "expected .gnu.property section in ELF: {sections}"
+    );
+}
+
+/// CET/IBT: 不使用 -z ibt 时 .plt.sec 应为空 (size=0), 函数条目在 .plt 中
+#[test]
+fn cet_no_ibt_plt_sec_empty() {
+    let (output, exe) = run_compile_and_run_flags(
+        "cet-noibt-plt",
+        "extern int puts(const char *);\nint main(void) { puts(\"hi\"); return 0; }",
+        &["-pie", "-fbuiltin-linker"],
+    );
+    assert!(
+        output.status.success(),
+        "noibt compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // readelf -S -W 宽输出: 每节一行, 字段含 size
+    let readelf = Command::new("readelf")
+        .args(["-S", "-W"])
+        .arg(&exe)
+        .output()
+        .expect("readelf");
+    let sections = String::from_utf8_lossy(&readelf.stdout);
+    let _ = fs::remove_file(&exe);
+    // 传统模式: .plt 必须存在且非空 (PLT[0] + 函数条目)
+    assert!(
+        sections.contains(".plt"),
+        "should have .plt section: {sections}"
+    );
+    // .plt.sec 若存在则 size 应为 0
+    for line in sections.lines() {
+        if line.contains(".plt.sec") {
+            // 宽格式: [Nr] name type addr off size entsize flags ...
+            // size 为第 6 个字段 (0-indexed: 5)
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() > 5 {
+                assert_eq!(
+                    fields[5], "000000",
+                    ".plt.sec should be empty without IBT: {line}"
+                );
+            }
+            break;
+        }
+    }
+}

@@ -271,7 +271,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `SHF_GNU_RETAIN` 节标志 | 元数据节自动打 `0x200000` |
 | `__dso_handle` / `.fini_array` 调度 | `FiniArrayBuilder` 收集 destructor 符号按 priority 排序 |
 | `-r` 自研路径 | `OutputKind::Relocatable` + `write_elf_relocatable` |
-| 共享库 lazy PLT | `plt_got.rs` 完整 .plt.sec/.plt.got 生成 |
+| 共享库 lazy PLT + CET/IBT 安全 PLT | `plt_got.rs` .plt/.plt.sec/.plt.got 生成；`-z ibt` 启用 endbr64 安全 PLT + `.gnu.property` CET 标记 |
 | 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节 |
 | vDSO 集成 | `--vdso=<path>` 解析 vDSO ELF，嵌入 `.text.vdso` + `.note.GNU-vdso` + 符号表 |
 | PIE/Shared 输出 | 多架构 `_start` 入口桩 |

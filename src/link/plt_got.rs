@@ -67,6 +67,9 @@ impl PltGots {
 ///   push $index                 ; 5 bytes
 ///   jmp PLT0                    ; 5 bytes
 ///                              = 16 bytes
+///
+/// CET/IBT 模式下 .plt 仅包含 PLT[0] (带 endbr64),
+/// 每个函数条目放入 .plt.sec 节。
 fn emit_plt_entry(
     plt_base_vaddr: u64,
     this_vaddr: u64,
@@ -90,26 +93,68 @@ fn emit_plt_entry(
     buf
 }
 
+/// CET/IBT 安全 PLT 条目 (放入 .plt.sec 节) 32 字节:
+///   endbr64                     ; 4 bytes (f3 0f 1e fa)
+///   jmp *GOT_ENTRY(%rip)        ; 6 bytes
+///   push $index                 ; 5 bytes
+///   jmp PLT0                    ; 5 bytes
+///   nop * 6                     ; 6 bytes padding
+///                              = 32 bytes (16-byte aligned)
+fn emit_plt_sec_entry(
+    plt0_vaddr: u64,
+    this_vaddr: u64,
+    got_entry_vaddr: u64,
+    index: u64,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32);
+    // endbr64
+    buf.extend_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]);
+    // jmp *GOT_ENTRY(%rip) -> ff 25 <disp32>
+    let disp = (got_entry_vaddr as i64) - (this_vaddr as i64 + 10);
+    buf.extend_from_slice(&[0xff, 0x25]);
+    buf.extend_from_slice(&(disp as i32).to_le_bytes());
+    // push $index
+    buf.push(0x68);
+    buf.extend_from_slice(&(index as i32).to_le_bytes());
+    // jmp PLT0
+    let plt0_disp = (plt0_vaddr as i64) - (this_vaddr as i64 + 26);
+    buf.push(0xe9);
+    buf.extend_from_slice(&(plt0_disp as i32).to_le_bytes());
+    // padding to 32 bytes
+    while buf.len() < 32 {
+        buf.push(0x66); // 2-byte NOP prefix
+        buf.push(0x90);
+    }
+    buf.truncate(32);
+    buf
+}
+
 /// PLT[0] 桩：32 字节
 ///   push *GOT[1](%rip)        ; 6 bytes
 ///   bnd jmp *GOT[2](%rip)     ; 6 bytes (bnd jmp: f2 ff 25 <disp32>)
 ///   nop dword ptr [rax+0]     ; 4 bytes (padding)
 ///   <padding>                 ; 16 bytes
-fn emit_plt0(plt0_vaddr: u64, got1_vaddr: u64, got2_vaddr: u64) -> Vec<u8> {
+///
+/// CET/IBT 模式: 开头插入 endbr64 (4 bytes), padding 减少 4 bytes
+fn emit_plt0(plt0_vaddr: u64, got1_vaddr: u64, got2_vaddr: u64, ibt: bool) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32);
+    if ibt {
+        // endbr64 (CET 间接分支跟踪标记)
+        buf.extend_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]);
+    }
     // push *GOT[1](%rip)
-    let disp1 = (got1_vaddr as i64) - (plt0_vaddr as i64 + 6);
+    let disp1 = (got1_vaddr as i64) - (plt0_vaddr as i64 + buf.len() as i64 + 6);
     buf.extend_from_slice(&[0xff, 0x35]);
     buf.extend_from_slice(&(disp1 as i32).to_le_bytes());
     // bnd jmp *GOT[2](%rip) = f2 ff 25 <disp32>
-    let disp2 = (got2_vaddr as i64) - (plt0_vaddr as i64 + 12);
+    let disp2 = (got2_vaddr as i64) - (plt0_vaddr as i64 + buf.len() as i64 + 6);
     buf.extend_from_slice(&[0xf2, 0xff, 0x25]);
     buf.extend_from_slice(&(disp2 as i32).to_le_bytes());
-    // padding 20 字节
-    buf.extend_from_slice(&[0x66, 0x90]); // nop
-    buf.extend_from_slice(&[0x66, 0x90]);
-    buf.extend_from_slice(&[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00]); // 7-byte nop
-    buf.extend_from_slice(&[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00]); // 7-byte nop
+    // padding 到 32 字节
+    while buf.len() < 32 {
+        buf.extend_from_slice(&[0x66, 0x90]); // 2-byte nop
+    }
+    buf.truncate(32);
     buf
 }
 
@@ -127,10 +172,13 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
     let plt_gots = PltGots::from_layout(layout);
     let n_plt = plt_gots.plt_funcs.len();
     let n_got_data = plt_gots.got_data.len();
+    let ibt = _opts.ibt;
 
     // 找各节
     let (
         plt_idx,
+        plt_sec_idx,
+        gnu_prop_idx,
         got_plt_idx,
         got_idx,
         dynsym_idx,
@@ -140,6 +188,8 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         dynamic_idx,
     ) = {
         let mut plt_i = None;
+        let mut plt_sec_i = None;
+        let mut gnu_prop_i = None;
         let mut got_plt_i = None;
         let mut got_i = None;
         let mut dynsym_i = None;
@@ -150,6 +200,8 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         for (i, s) in layout.sections.iter().enumerate() {
             match s.kind {
                 OutputSectionKind::Plt => plt_i = Some(i),
+                OutputSectionKind::PltSec => plt_sec_i = Some(i),
+                OutputSectionKind::GnuProperty => gnu_prop_i = Some(i),
                 OutputSectionKind::GotPlt => got_plt_i = Some(i),
                 OutputSectionKind::Got => got_i = Some(i),
                 OutputSectionKind::DynSym => dynsym_i = Some(i),
@@ -162,6 +214,8 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         }
         (
             plt_i.expect("PLT section missing"),
+            plt_sec_i.unwrap_or(0),
+            gnu_prop_i.unwrap_or(0),
             got_plt_i.expect("GOTPLT section missing"),
             got_i.unwrap_or(0),
             dynsym_i.expect("DYNSYM section missing"),
@@ -245,15 +299,59 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         }
         dynstr_data.push(0);
     }
-    // 生成 .plt
-    let mut plt_data = Vec::with_capacity(32 + 16 * n_plt);
+    // 生成 .plt (CET/IBT 模式下仅包含 PLT[0], 函数条目放入 .plt.sec)
+    let mut plt_data = Vec::with_capacity(32 + if ibt { 0 } else { 16 * n_plt });
     let got1 = got_plt_vaddr + 8;
     let got2 = got_plt_vaddr + 16;
-    plt_data.extend_from_slice(&emit_plt0(plt_vaddr, got1, got2));
-    for i in 0..n_plt {
-        let this = plt_vaddr + plt_data.len() as u64;
-        let got_entry = got_plt_vaddr + 24 + (i * 8) as u64;
-        plt_data.extend_from_slice(&emit_plt_entry(plt_vaddr, this, got_entry, i as u64));
+    plt_data.extend_from_slice(&emit_plt0(plt_vaddr, got1, got2, ibt));
+    if !ibt {
+        // 传统 PLT: 每个函数条目直接在 .plt 中
+        for i in 0..n_plt {
+            let this = plt_vaddr + plt_data.len() as u64;
+            let got_entry = got_plt_vaddr + 24 + (i * 8) as u64;
+            plt_data.extend_from_slice(&emit_plt_entry(plt_vaddr, this, got_entry, i as u64));
+        }
+    }
+    // 生成 .plt.sec (CET/IBT 安全 PLT 条目)
+    let mut plt_sec_data = Vec::new();
+    let plt_sec_vaddr = if plt_sec_idx > 0 && ibt {
+        layout.sections[plt_sec_idx].vaddr
+    } else {
+        0
+    };
+    if ibt && n_plt > 0 {
+        for i in 0..n_plt {
+            let this = plt_sec_vaddr + plt_sec_data.len() as u64;
+            let got_entry = got_plt_vaddr + 24 + (i * 8) as u64;
+            plt_sec_data
+                .extend_from_slice(&emit_plt_sec_entry(plt_vaddr, this, got_entry, i as u64));
+        }
+    }
+    // 生成 .gnu.property (CET feature marking)
+    // GNU_PROPERTY_X86_FEATURE_1_AND (0xc0000002):
+    //   GNU_PROPERTY_X86_FEATURE_1_IBT (0x1)
+    //   GNU_PROPERTY_X86_FEATURE_1_SHSTK (0x2)
+    let mut gnu_prop_data = Vec::new();
+    if ibt || _opts.shstk {
+        // Note header: name_size=4, desc_size=4, type=NT_GNU_PROPERTY_TYPE_0(5)
+        gnu_prop_data.extend_from_slice(b"GNU\0"); // name (4 bytes, aligned)
+        gnu_prop_data.extend_from_slice(&5u32.to_le_bytes()); // type = NT_GNU_PROPERTY_TYPE_0
+        gnu_prop_data.extend_from_slice(&16u32.to_le_bytes()); // data size (4+4+4+4)
+        // Property: GNU_PROPERTY_X86_FEATURE_1_AND (0xc0000002)
+        gnu_prop_data.extend_from_slice(&0xc0000002u32.to_le_bytes()); // pr_type
+        gnu_prop_data.extend_from_slice(&4u32.to_le_bytes()); // pr_datasz
+        let mut feature_bits: u32 = 0;
+        if ibt {
+            feature_bits |= 0x1; // GNU_PROPERTY_X86_FEATURE_1_IBT
+        }
+        if _opts.shstk {
+            feature_bits |= 0x2; // GNU_PROPERTY_X86_FEATURE_1_SHSTK
+        }
+        gnu_prop_data.extend_from_slice(&feature_bits.to_le_bytes());
+        // padding to 8-byte align
+        while gnu_prop_data.len() % 8 != 0 {
+            gnu_prop_data.push(0);
+        }
     }
     // 写 .dynamic
     let mut dynamic_data = Vec::new();
@@ -342,6 +440,18 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         plt.data = plt_data;
         plt.size = plt.data.len() as u64;
     }
+    // 写回 .plt.sec (CET/IBT)
+    if ibt && plt_sec_idx > 0 && !plt_sec_data.is_empty() {
+        let plt_sec = &mut layout.sections[plt_sec_idx];
+        plt_sec.data = plt_sec_data;
+        plt_sec.size = plt_sec.data.len() as u64;
+    }
+    // 写回 .gnu.property (CET feature marking)
+    if gnu_prop_idx > 0 && !gnu_prop_data.is_empty() {
+        let gnu_prop = &mut layout.sections[gnu_prop_idx];
+        gnu_prop.data = gnu_prop_data;
+        gnu_prop.size = gnu_prop.data.len() as u64;
+    }
     {
         let rel_plt = &mut layout.sections[rel_plt_idx];
         rel_plt.data = rela_plt_data;
@@ -384,5 +494,33 @@ mod tests {
         let disp = i32::from_le_bytes(entry[2..6].try_into().unwrap());
         assert_eq!(disp, 0x402010 - 0x401026);
         assert_eq!(entry.len(), 16);
+    }
+
+    #[test]
+    fn plt_sec_entry_starts_with_endbr64_and_correct_size() {
+        let entry = emit_plt_sec_entry(0x401000, 0x402000, 0x403010, 0);
+        assert_eq!(entry.len(), 32);
+        // endbr64 = f3 0f 1e fa
+        assert_eq!(&entry[0..4], &[0xf3, 0x0f, 0x1e, 0xfa]);
+        // jmp *GOT(%rip) opcode at offset 4..6
+        assert_eq!(&entry[4..6], &[0xff, 0x25]);
+        // push $0 at offset 10
+        assert_eq!(entry[10], 0x68);
+        // jmp PLT0 at offset 15
+        assert_eq!(entry[15], 0xe9);
+    }
+
+    #[test]
+    fn plt0_ibt_starts_with_endbr64() {
+        let plt0 = emit_plt0(0x401000, 0x402008, 0x402010, true);
+        assert_eq!(plt0.len(), 32);
+        assert_eq!(&plt0[0..4], &[0xf3, 0x0f, 0x1e, 0xfa]);
+    }
+
+    #[test]
+    fn plt0_no_ibt_no_endbr64() {
+        let plt0 = emit_plt0(0x401000, 0x402008, 0x402010, false);
+        assert_eq!(plt0.len(), 32);
+        assert_ne!(&plt0[0..4], &[0xf3, 0x0f, 0x1e, 0xfa]);
     }
 }
