@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-08 — 基于 `cargo test` 310 integration tests + 672 unit tests 全部通过
+> 最后更新：2026-08-08 — 基于 `cargo test` 319 integration tests + 685 unit tests 全部通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -123,7 +123,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 内联 asm 约束扩展 | `"i"` 立即数 / `"p"` 内存地址 / `"g"` 通用 / `"X"` 常量 / `"0..9"` 复用 / `"&"` early-clobber / 多重约束 `"rm"` / XMM `"x"` / `"Y"` / 数字标签 `"%"` / `offsetof` 约束 |
 | asm `x` 约束 XMM | 独立 `input_xmm_set` + `prepare_asm_xmm_binding` + `writeback_asm_operand` xmm8–15；early-clobber `xmm_pool` |
 | asm goto 行内 `#` 注释 | `tests/fixtures/c/asm_goto.c`；`jump_label.h` objtool 标注 |
-| asm goto 输出约束 | fall-through 路径写回，跳转路径保留原值 |
+| asm goto 输出约束 | fall-through 路径写回，跳转路径保留原值；跨函数 `&&label` + asm goto 混用触发 warning |
 | asm `%0` 约束 `"i"` 展开 | 带 `$` 前缀的 AT&T 立即数 |
 | Mini x86 asm 局部/C 标签 | `N:` / `N:insn` / `found:` |
 | Mini x86 asm 全指令覆盖 | `mov`（含段寄存器）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`sysenter`/`sysexit` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` |
@@ -313,11 +313,12 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 
 | 特性 | 说明 |
 |------|------|
-| 诊断 snapshot 格式锁定 | E0001-E0013 / E0100-E0102 / E0200-E0209 / E0300 / E1001-E1010 / W0001 / W0200 |
+| 诊断 snapshot 格式锁定 | E0001-E0013 / E0100-E0102 / E0200-E0209 / E0300 / E1001-E1010 / W0001 / W0004 / W0200 |
 | `-fdiagnostics-color` | `always` / `never` / `auto` |
 | `-fdiagnostics-format` | `github` / `clang` / `msvc` / `vi` / `sarif` |
 | `-fdiagnostics-show-template-tree` | 模板树显示 |
 | format 属性 | `format_check.rs`：`-Wformat` / `W0003` arity 检查 |
+| asm goto 标签验证 | `W0004`：asm 模板中引用的标签不在 goto label 列表中 |
 | 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002` + int |
 
 ## 杂项

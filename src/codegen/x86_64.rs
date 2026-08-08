@@ -4037,7 +4037,21 @@ impl Codegen {
                     resolved_asm =
                         resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
                 }
-                self.emit_inline_asm(
+                // 跨函数标签地址 + asm goto 混用警告:
+                // &&label 产生的地址仅在当前函数内有效; 若作为输入操作数
+                // 传给 asm goto, 跨函数边界使用会导致未定义行为。
+                for inp in inputs.iter() {
+                    if matches!(inp, Expr::LabelAddr { .. }) {
+                        self.asm_warn(
+                            "label address used in asm goto may be invalid \
+                             if the label is in a different function",
+                        );
+                        break;
+                    }
+                }
+                // GCC 语义: asm goto 输出约束写回仅 fall-through 路径生效;
+                // 跳转分支保留原值。
+                self.emit_inline_asm_goto(
                     &resolved_asm,
                     outputs,
                     output_names,
@@ -12538,6 +12552,64 @@ impl Codegen {
         }
         if clobbers.iter().any(|c| c == "memory") {
             // memory clobber: 编译器屏障，防止指令重排越过 asm
+            self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+        }
+    }
+
+    /// asm goto 专用: 与 emit_inline_asm 相同, 但输出写回仅 fall-through 路径生效。
+    /// GCC 语义: asm goto 输出约束写回仅 fall-through 路径生效;
+    /// 跳转分支保留原值。实现方式: asm 执行后直接写回输出;
+    /// 若 asm 内部跳转到 goto label, 控制流跳过写回代码, 变量保持初值。
+    fn emit_inline_asm_goto(
+        &mut self,
+        asm_str: &str,
+        outputs: &[Expr],
+        output_names: &[Option<String>],
+        output_constraints: &[String],
+        inputs: &[Expr],
+        input_names: &[Option<String>],
+        input_constraints: &[String],
+        clobbers: &[String],
+    ) {
+        let mut bindings = Vec::new();
+        let op_map = self.build_asm_operand_map(
+            outputs,
+            output_names,
+            output_constraints,
+            inputs,
+            input_names,
+            input_constraints,
+            &mut bindings,
+        );
+        let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
+            &asm_str[1..asm_str.len() - 1]
+        } else {
+            asm_str
+        };
+        let resolved_lines = AsmLocalLabels::expand_label_insn_lines(
+            s.split(['\n', ';'])
+                .map(|line| {
+                    self.resolve_asm_template(
+                        line.trim(),
+                        outputs,
+                        output_names,
+                        inputs,
+                        input_names,
+                        &op_map,
+                    )
+                })
+                .filter(|l| !l.trim().is_empty())
+                .collect::<Vec<_>>(),
+        );
+        self.emit_resolved_asm_lines(&resolved_lines, false);
+        // asm goto: fall-through 路径执行输出写回; 若 asm 内部跳转到 goto label,
+        // 控制流跳过此处的写回代码, 变量保持初值 (GCC 语义)。
+        for (i, binding) in bindings.iter().enumerate() {
+            if binding.is_output && !binding.is_mem && i < outputs.len() {
+                self.writeback_asm_operand(&outputs[i], binding.reg, binding.xmm_width);
+            }
+        }
+        if clobbers.iter().any(|c| c == "memory") {
             self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
         }
     }

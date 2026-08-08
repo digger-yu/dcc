@@ -346,8 +346,9 @@ RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
 - **asm goto 输出约束增强**：`asm goto (...) : "=r"(out) : ... : : lab1, lab2`
   中 `out` 的语义遵循 GCC：仅在 fall-through 路径上写回 `out`，
   跳转到任何 `goto` 标签时 `out` 保留调用方传入的旧值。
-  实现路径：跳板代码段把 `out` 当前值保存在 volatile 临时槽，
-  fall-through 时 `mov` 回调用方槽，跳转路径不写回。
+  实现路径：asm 执行后立即发射输出写回代码（与 `emit_inline_asm` 相同）；
+  fall-through 时写回代码执行，跳转时控制流跳过写回代码。
+  跨函数 `&&label` 作为 asm goto 输入操作数时触发 codegen 警告。
 - **`__builtin_call_with_static_chain(callee, chain, args...)`**：
   按 SysV AMD64 ABI 把 `chain` 写入 `%r10`（静态链寄存器），
   之后按 GP 寄存器约定（`rdi/rsi/rdx/rcx/r8/r9`）和 XMM 寄存器

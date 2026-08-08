@@ -607,6 +607,27 @@ fn w0001_implicit_int_warning_snapshot() {
     assert_snapshot("w0001", &normalized);
 }
 
+#[test]
+fn w0004_asm_goto_missing_label_warning_snapshot() {
+    let source = fixtures_dir().join("w0004.c");
+    let (stderr, status) = run_dcc(&["-std=gnu23", "-fsyntax-only"], &source);
+    let plain = stderr_text(&stderr);
+    assert!(
+        status == 0,
+        "W0004 asm goto missing label 仅警告，应编译成功，stderr:\n{plain}"
+    );
+    assert!(
+        plain.contains("warning[W0004]:"),
+        "stderr:\n{plain}"
+    );
+    assert!(
+        plain.contains("missing_label"),
+        "stderr should mention the missing label name:\n{plain}"
+    );
+    let normalized = normalize_stderr(&stderr, &source);
+    assert_snapshot("w0004", &normalized);
+}
+
 #[cfg(unix)]
 #[test]
 fn e0205_unreadable_include_snapshot() {

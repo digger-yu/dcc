@@ -2212,6 +2212,19 @@ fn asm_goto_hash_comment_compiles() {
     assert_eq!(run_exe(&exe), 0);
 }
 
+/// asm goto 输出约束写回语义: fall-through 路径写回, 跳转路径保留原值
+#[test]
+fn asm_goto_output_writeback() {
+    let source = include_str!("fixtures/c/asm_goto_outputs.c");
+    let (output, exe) = run_compile_and_run("asm-goto-output-writeback", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(run_exe(&exe), 0, "asm goto output writeback test failed");
+}
+
 /// 非 Ident 向量表达式：嵌套 binop 与 `v = v + w` 赋值
 #[test]
 fn vector_binop_non_ident_run_returns_zero() {

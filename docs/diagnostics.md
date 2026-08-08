@@ -209,13 +209,14 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 
 ## 8. 警告码汇总
 
-### Parser 警告：`W0001`–`W0003`、`W1000`
+### Parser 警告：`W0001`–`W0004`、`W1000`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
 | **W0001** | `type defaults to 'int' in declaration without a type specifier` | 隐式 int（GNU 兼容） | 仅有存储类：`static x;` | `w0001.c` |
 | **W0002** | `unknown type '…' treated as 'int' (-fpermissive)` | 未知类型降级为 int | `-fpermissive` 且遇到未声明 typedef | — |
 | **W0003** | `format attribute on '…' expects format string at argument …` 等 | printf/scanf 格式检查 | `__attribute__((format(printf,...)))` 参数不匹配 | — |
+| **W0004** | `asm goto references label '…' which is not in the label list` | asm 模板引用的标签不在 goto label 列表中 | `asm goto("jmp %l[missing]" : : : : real)` | `w0004.c` |
 | **W1000** | `implicit declaration of '…' (assumed int)` | 隐式函数声明 | 调用未声明的函数 | — |
 
 ### 类型转换警告：`W0301`–`W0302`

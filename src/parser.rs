@@ -5013,6 +5013,69 @@ impl<'a> Parser<'a> {
                         self.advance();
                         goto_labels = self.parse_asm_label_list();
                     }
+                    // 诊断: 检查 asm 模板中引用的标签是否都在 goto label 列表中
+                    {
+                        let label_names: std::collections::HashSet<&str> =
+                            goto_labels.iter().map(|l| l.name.as_str()).collect();
+                        let label_count = goto_labels.len();
+                        let op_count = outputs.len() + inputs.len();
+                        let mut pos = 0;
+                        let bytes = asm_str.as_bytes();
+                        while pos + 1 < bytes.len() {
+                            if bytes[pos] == b'%' && bytes[pos + 1] == b'l' {
+                                pos += 2;
+                                if pos < bytes.len() && bytes[pos] == b'[' {
+                                    // %l[name]: 命名标签引用
+                                    pos += 1;
+                                    let start = pos;
+                                    while pos < bytes.len() && bytes[pos] != b']' {
+                                        pos += 1;
+                                    }
+                                    let name = &asm_str[start..pos];
+                                    if pos < bytes.len() {
+                                        pos += 1; // skip ']'
+                                    }
+                                    if !name.is_empty() && !label_names.contains(name) {
+                                        self.warn_here(
+                                            "W0004",
+                                            format!(
+                                                "asm goto references label '{}' \
+                                                 which is not in the label list",
+                                                name
+                                            ),
+                                            Some("add the label to the goto label list"),
+                                        );
+                                    }
+                                } else if pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                                    // %lN: 数字标签引用
+                                    let start = pos;
+                                    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                                        pos += 1;
+                                    }
+                                    if let Ok(n) = asm_str[start..pos].parse::<usize>() {
+                                        // 标签索引: GCC 允许 %lN 和 %l(N+op_count)
+                                        // 两种形式引用同一个 goto label
+                                        let in_range = n < label_count
+                                            || (n >= op_count
+                                                && (n - op_count) < label_count);
+                                        if !in_range {
+                                            self.warn_here(
+                                                "W0004",
+                                                format!(
+                                                    "asm goto references label index {} \
+                                                     which is out of range (have {} labels)",
+                                                    n, label_count
+                                                ),
+                                                Some("check the label index or add missing labels"),
+                                            );
+                                        }
+                                    }
+                                }
+                            } else {
+                                pos += 1;
+                            }
+                        }
+                    }
                     if self.cur.kind == TokKind::RParen {
                         self.advance();
                     }

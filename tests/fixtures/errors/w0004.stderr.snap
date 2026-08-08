@@ -1,0 +1,5 @@
+warning[W0004]: asm goto references label 'missing_label' which is not in the label list
+  --> <file>:2:53
+   2 |	asm goto("jmp %l[missing_label]" : : : : real_label);
+     |                                                     ^
+  hint: add the label to the goto label list
