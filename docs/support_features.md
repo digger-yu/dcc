@@ -129,6 +129,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | Mini x86 asm 全指令覆盖 | `mov`（含段寄存器）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`sysenter`/`sysexit` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` |
 | SSE mov / SSE arith | xmm-xmm, mem-xmm, xmm-mem, SegMem 变体完整支持 |
 | mini-asm SIMD 扩展 | VEX/EVEX 前缀 + AVX/AVX2/AVX-512 + SSE3–4.2 + AES-NI/SHA + FMA/F16C + TSX + AMX + AVX-VNNI；`pinsr*` / `pextr*` GPR + `tmm` / `ymm` / `zmm` / `k` 寄存器 |
+| mini-asm 扩展操作数形式 | `rdrand`/`rdseed` 内存操作数；`ljmp`/`lcall` 间接内存 + `$off,$seg` 反序；`xbegin` rel32 + `xabort` 符号；AES-NI/SHA/pshuf*/palignr/pblendw/insertps/pshufw 内存源；`vextractps`/`vextractpd` 内存目标 |
 
 ## x86_64 codegen
 

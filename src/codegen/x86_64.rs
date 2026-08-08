@@ -13496,21 +13496,43 @@ impl Codegen {
             // PKRU: rdpkru 0F 01 EE, wrpkru 0F 01 EF
             "rdpkru" => self.emit(&[0x0F, 0x01, 0xEE]),
             "wrpkru" => self.emit(&[0x0F, 0x01, 0xEF]),
-            // rdrand: F3 0F C7 /6 (reg); rdseed: F3 0F C7 /7 (reg)
+            // rdrand: F3 0F C7 /6; rdseed: F3 0F C7 /7 (reg or mem)
             "rdrand" if ops.len() == 1 => {
-                if let AsmOperand::Reg(d, _) = &ops[0] {
-                    self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7)]);
-                } else {
-                    self.asm_warn("rdrand needs register operand, emitted as nop");
-                    self.emit(&[0x90]);
+                match &ops[0] {
+                    AsmOperand::Reg(d, _) => {
+                        self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7)]);
+                    }
+                    AsmOperand::Mem { disp, base, index, scale } => {
+                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xC7]);
+                        self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
+                    }
+                    AsmOperand::SegMem { seg: _, disp, base, index, scale } => {
+                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xC7]);
+                        self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
+                    }
+                    _ => {
+                        self.asm_warn("rdrand needs register or memory operand, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
                 }
             }
             "rdseed" if ops.len() == 1 => {
-                if let AsmOperand::Reg(d, _) = &ops[0] {
-                    self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7) | (1 << 3)]);
-                } else {
-                    self.asm_warn("rdseed needs register operand, emitted as nop");
-                    self.emit(&[0x90]);
+                match &ops[0] {
+                    AsmOperand::Reg(d, _) => {
+                        self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7) | (1 << 3)]);
+                    }
+                    AsmOperand::Mem { disp, base, index, scale } => {
+                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xC7]);
+                        self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
+                    }
+                    AsmOperand::SegMem { seg: _, disp, base, index, scale } => {
+                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xC7]);
+                        self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
+                    }
+                    _ => {
+                        self.asm_warn("rdseed needs register or memory operand, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
                 }
             }
             "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
@@ -13769,6 +13791,11 @@ impl Codegen {
                     self.emit(&[0xEA]);
                     self.emit(&(*off as i16).to_le_bytes());
                     self.emit(&(*seg as i16).to_le_bytes());
+                } else if let (AsmOperand::Imm(off), AsmOperand::Imm(seg)) = (&ops[0], &ops[1]) {
+                    // AT&T 反序: $off, $seg
+                    self.emit(&[0xEA]);
+                    self.emit(&(*off as i16).to_le_bytes());
+                    self.emit(&(*seg as i16).to_le_bytes());
                 } else {
                     self.asm_warn("ljmpw needs $seg, $off, emitted as nop");
                     self.emit(&[0x90]);
@@ -13779,13 +13806,28 @@ impl Codegen {
                     self.emit(&[0xEA]);
                     self.emit(&(*off as i32).to_le_bytes());
                     self.emit(&(*seg as i16).to_le_bytes());
+                } else if let (AsmOperand::Imm(off), AsmOperand::Imm(seg)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0xEA]);
+                    self.emit(&(*off as i32).to_le_bytes());
+                    self.emit(&(*seg as i16).to_le_bytes());
                 } else {
                     self.asm_warn("ljmpl needs $seg, $off, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
+            // ljmpw/ljmpl 间接形式: FF /5 (mem)
+            "ljmpw" if ops.len() == 1 => {
+                self.emit_asm_far_indirect(&ops[0], false, 16);
+            }
+            "ljmpl" if ops.len() == 1 => {
+                self.emit_asm_far_indirect(&ops[0], false, 32);
+            }
             "lcallw" if ops.len() == 2 => {
                 if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0x9A]);
+                    self.emit(&(*off as i16).to_le_bytes());
+                    self.emit(&(*seg as i16).to_le_bytes());
+                } else if let (AsmOperand::Imm(off), AsmOperand::Imm(seg)) = (&ops[0], &ops[1]) {
                     self.emit(&[0x9A]);
                     self.emit(&(*off as i16).to_le_bytes());
                     self.emit(&(*seg as i16).to_le_bytes());
@@ -13799,10 +13841,21 @@ impl Codegen {
                     self.emit(&[0x9A]);
                     self.emit(&(*off as i32).to_le_bytes());
                     self.emit(&(*seg as i16).to_le_bytes());
+                } else if let (AsmOperand::Imm(off), AsmOperand::Imm(seg)) = (&ops[0], &ops[1]) {
+                    self.emit(&[0x9A]);
+                    self.emit(&(*off as i32).to_le_bytes());
+                    self.emit(&(*seg as i16).to_le_bytes());
                 } else {
                     self.asm_warn("lcalll needs $seg, $off, emitted as nop");
                     self.emit(&[0x90]);
                 }
+            }
+            // lcallw/lcalll 间接形式: FF /3 (mem)
+            "lcallw" if ops.len() == 1 => {
+                self.emit_asm_far_indirect(&ops[0], true, 16);
+            }
+            "lcalll" if ops.len() == 1 => {
+                self.emit_asm_far_indirect(&ops[0], true, 32);
             }
 
             // 设置字节 (setcc)
@@ -13859,11 +13912,16 @@ impl Codegen {
             }
 
             // === TSX (Transactional Synchronization Extensions) ===
-            // xbegin rel16: C7 F8 iw
+            // xbegin rel16/rel32: C7 F8 iw/id
             "xbegin" if ops.len() == 1 => {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xC7, 0xF8]);
-                    self.emit(&(*v as i16).to_le_bytes());
+                    if *v >= i16::MIN as i64 && *v <= i16::MAX as i64 {
+                        self.emit(&(*v as i16).to_le_bytes());
+                    } else {
+                        // rel32 形式
+                        self.emit(&(*v as i32).to_le_bytes());
+                    }
                 } else if let AsmOperand::Sym(s) = &ops[0] {
                     let at = self.pos();
                     self.emit(&[0xC7, 0xF8, 0, 0]);
@@ -13881,6 +13939,10 @@ impl Codegen {
             "xabort" if ops.len() == 1 => {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xC6, 0xF8, *v as u8]);
+                } else if let AsmOperand::Sym(s) = &ops[0] {
+                    // 符号作为立即数: 解析为 0 (占位, 链接时重定位)
+                    let _ = s;
+                    self.emit(&[0xC6, 0xF8, 0x00]);
                 } else {
                     self.asm_warn("xabort needs imm8, emitted as nop");
                     self.emit(&[0x90]);
@@ -13911,15 +13973,17 @@ impl Codegen {
             }
             // aeskeygenassist xmm1, xmm2/m128, imm8 : 66 0F 3A DF /r ib
             "aeskeygenassist" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit(&[0xDF, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == 128 {
+                        self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 1, 0xDF, *imm);
+                    } else {
+                        self.asm_warn("aeskeygenassist dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("aeskeygenassist needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("aeskeygenassist needs imm, reg/mem, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -13927,15 +13991,17 @@ impl Codegen {
             // === SHA Extensions ===
             // sha1rnds4 xmm1, xmm2/m128, imm8 : 0F 3A CC /r ib
             "sha1rnds4" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 0);
-                        self.emit(&[0xCC, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == 128 {
+                        self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 0, 0xCC, *imm);
+                    } else {
+                        self.asm_warn("sha1rnds4 dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("sha1rnds4 needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("sha1rnds4 needs imm, reg/mem, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14175,41 +14241,92 @@ impl Codegen {
             }
             // pshufd xmm1, xmm2/m128, imm8 : 66 0F 70 /r ib
             "pshufd" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex3_prefix(*d, 0, 0, 1);
-                        self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == 128 {
+                        match src {
+                            AsmOperand::Reg(s, ss) if *ss == 128 => {
+                                self.emit_vex3_prefix(*d, 0, 0, 1);
+                                self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                            }
+                            AsmOperand::Mem { disp, base, index, scale } => {
+                                self.emit_vex3_prefix(*d, 0, 0, 1);
+                                self.emit(&[0x70]);
+                                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                                self.emit(&[*imm as u8]);
+                            }
+                            _ => {
+                                self.asm_warn("pshufd src must be xmm or mem, emitted as nop");
+                                self.emit(&[0x90]);
+                            }
+                        }
+                    } else {
+                        self.asm_warn("pshufd dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("pshufd needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("pshufd needs imm, xmm/mem, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             "pshufhw" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex3_prefix(*d, 0, 0, 3);
-                        self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == 128 {
+                        match src {
+                            AsmOperand::Reg(s, ss) if *ss == 128 => {
+                                self.emit_vex3_prefix(*d, 0, 0, 3);
+                                self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                            }
+                            AsmOperand::Mem { disp, base, index, scale } => {
+                                self.emit_vex3_prefix(*d, 0, 0, 3);
+                                self.emit(&[0x70]);
+                                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                                self.emit(&[*imm as u8]);
+                            }
+                            _ => {
+                                self.asm_warn("pshufhw src must be xmm or mem, emitted as nop");
+                                self.emit(&[0x90]);
+                            }
+                        }
+                    } else {
+                        self.asm_warn("pshufhw dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("pshufhw needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("pshufhw needs imm, xmm/mem, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             "pshuflw" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex3_prefix(*d, 0, 0, 2);
-                        self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == 128 {
+                        match src {
+                            AsmOperand::Reg(s, ss) if *ss == 128 => {
+                                self.emit_vex3_prefix(*d, 0, 0, 2);
+                                self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                            }
+                            AsmOperand::Mem { disp, base, index, scale } => {
+                                self.emit_vex3_prefix(*d, 0, 0, 2);
+                                self.emit(&[0x70]);
+                                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                                self.emit(&[*imm as u8]);
+                            }
+                            _ => {
+                                self.asm_warn("pshuflw src must be xmm or mem, emitted as nop");
+                                self.emit(&[0x90]);
+                            }
+                        }
+                    } else {
+                        self.asm_warn("pshuflw dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("pshuflw needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("pshuflw needs imm, xmm/mem, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14233,29 +14350,33 @@ impl Codegen {
             }
             // palignr xmm1, xmm2/m128, imm8 : 66 0F 3A 0F /r ib
             "palignr" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit(&[0x0F, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == 128 {
+                        self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 1, 0x0F, *imm);
+                    } else {
+                        self.asm_warn("palignr dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("palignr needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("palignr needs imm, reg/mem, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
             // pblendw xmm1, xmm2/m128, imm8 : 66 0F 3A 0E /r ib
             "pblendw" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit(&[0x0E, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == 128 {
+                        self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 1, 0x0E, *imm);
+                    } else {
+                        self.asm_warn("pblendw dst must be xmm, emitted as nop");
+                        self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("pblendw needs imm, reg, reg, emitted as nop");
+                    self.asm_warn("pblendw needs imm, reg/mem, reg, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14424,18 +14545,32 @@ impl Codegen {
             }
             // insertps xmm1, xmm2/m128, imm8 : 66 0F 3A 21 /r ib
             "insertps" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == 128 && *ds == 128 {
-                        self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit(&[0x21, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == 128 {
+                        match src {
+                            AsmOperand::Reg(s, ss) if *ss == 128 => {
+                                self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
+                                self.emit(&[0x21, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                            }
+                            AsmOperand::Mem { disp, base, index, scale } => {
+                                self.emit_vex4_prefix(*d, *base, 3, 0, 0, 0, 1);
+                                self.emit(&[0x21]);
+                                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                                self.emit(&[*imm as u8]);
+                            }
+                            _ => {
+                                self.asm_warn("insertps src must be xmm or mem, emitted as nop");
+                                self.emit(&[0x90]);
+                            }
+                        }
                     } else {
-                        self.asm_warn("insertps needs xmm operands, emitted as nop");
+                        self.asm_warn("insertps dst must be xmm, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("insertps needs imm, xmm, xmm, emitted as nop");
+                    self.asm_warn("insertps needs imm, xmm/mem, xmm, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14587,7 +14722,7 @@ impl Codegen {
                         self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("vextractps needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("vextractps needs imm, xmm, dst_reg/mem, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -14602,7 +14737,7 @@ impl Codegen {
                         self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("vextractpd needs imm, xmm, dst, emitted as nop");
+                    self.asm_warn("vextractpd needs imm, xmm, dst_reg/mem, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -15440,17 +15575,30 @@ impl Codegen {
             "punpcklwd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x61),
             "punpckldq" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x62),
             "pshufw" if ops.len() == 3 => {
-                if let (AsmOperand::Imm(imm), AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) =
+                if let (AsmOperand::Imm(imm), src, AsmOperand::Reg(d, ds)) =
                     (&ops[0], &ops[1], &ops[2])
                 {
-                    if *ss == ASM_REG_MMX && *ds == ASM_REG_MMX {
-                        self.emit(&[0x0F, 0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                    if *ds == ASM_REG_MMX {
+                        match src {
+                            AsmOperand::Reg(s, ss) if *ss == ASM_REG_MMX => {
+                                self.emit(&[0x0F, 0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
+                            }
+                            AsmOperand::Mem { disp, base, index, scale } => {
+                                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x70]);
+                                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                                self.emit(&[*imm as u8]);
+                            }
+                            _ => {
+                                self.asm_warn("pshufw src must be mmx or mem, emitted as nop");
+                                self.emit(&[0x90]);
+                            }
+                        }
                     } else {
-                        self.asm_warn("pshufw needs mmx registers, emitted as nop");
+                        self.asm_warn("pshufw dst must be mmx, emitted as nop");
                         self.emit(&[0x90]);
                     }
                 } else {
-                    self.asm_warn("pshufw needs imm, mmx, mmx, emitted as nop");
+                    self.asm_warn("pshufw needs imm, mmx/mem, mmx, emitted as nop");
                     self.emit(&[0x90]);
                 }
             }
@@ -19476,6 +19624,69 @@ impl Codegen {
             }
             _ => {
                 self.asm_warn("pextr dst must be gpr or mem, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// SSE/AVX 带 imm8 的 2 操作数指令 (reg-reg 或 reg-mem):
+    /// aeskeygenassist/sha1rnds4/palignr/pblendw 等
+    /// VEX 前缀参数: map, w, vvvv, l, pp; opcode; imm8
+    fn emit_asm_sse_2op_imm_mem(
+        &mut self,
+        dst: u8,
+        src: &AsmOperand,
+        map: u8,
+        w: u8,
+        vvvv: u8,
+        l: u8,
+        pp: u8,
+        opcode: u8,
+        imm: i64,
+    ) {
+        match src {
+            AsmOperand::Reg(s, ss) if *ss == 128 => {
+                self.emit_vex4_prefix(dst, *s, map, w, vvvv, l, pp);
+                self.emit(&[opcode, Self::modrm_reg_reg(dst, *s), imm as u8]);
+            }
+            AsmOperand::Mem {
+                disp,
+                base,
+                index,
+                scale,
+            } => {
+                self.emit_vex4_prefix(dst, *base, map, w, vvvv, l, pp);
+                self.emit(&[opcode]);
+                self.emit_asm_modrm_mem_only(dst, *disp, *base, *index, *scale);
+                self.emit(&[imm as u8]);
+            }
+            _ => {
+                self.asm_warn("src must be xmm or mem, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// 远跳转/远调用间接形式: FF /5 (ljmp) 或 FF /3 (lcall)
+    fn emit_asm_far_indirect(&mut self, op: &AsmOperand, is_call: bool, bits: u32) {
+        let ext = if is_call { 3 } else { 5 };
+        match op {
+            AsmOperand::Mem {
+                disp,
+                base,
+                index,
+                scale,
+            } => {
+                let _ = bits;
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xFF]);
+                self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+            }
+            _ => {
+                if is_call {
+                    self.asm_warn("lcall needs memory operand, emitted as nop");
+                } else {
+                    self.asm_warn("ljmp needs memory operand, emitted as nop");
+                }
                 self.emit(&[0x90]);
             }
         }

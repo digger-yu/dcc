@@ -2632,6 +2632,19 @@ fn asm_global_asm_compiles_without_nop_fallback() {
     );
 }
 
+/// 扩展操作数形式: rdrand/rdseed 内存 / 远控制流间接+反序 / TSX rel32 / AVX-imm 内存源 / MMX pshufw 内存 / AMX vextractps 内存目标
+#[test]
+fn asm_extended_forms_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_extended_forms.c");
+    let (output, _obj) = run_object_test("asm-extended-forms", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// 头文件中不支持的内联 asm 警告必须映射回真实源文件行号
 /// (而非预处理输出行号, 内核头文件可达几十万行, 虚高行号无法定位)。
 /// fixture: asm_warn_loc.h 第 6 行含 `leaq %c1(%%rip), %0`。
