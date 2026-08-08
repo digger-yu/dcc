@@ -387,8 +387,12 @@ RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
   失败时回退到 GP 寄存器并 `lea` 加载常量基址 + 字段偏移。
 - **模板替换**：`resolve_asm_template` 把 `op_map` 中的
   `%N` 占位符替换为 AT&T 形态 (`%rax` / `$305419896` /
-  `-16(%r13)`)；`asm_format_subst` 对寄存器名加 `%` 前缀、
-  对立即数原样 (已含 `$`)、对内存操作数原样 (含 `(`)。
+  `-16(%r13)`)；`asm_format_subst_safe` 对寄存器名加 `%` 前缀、
+  对立即数原样 (已含 `$`)、对含运算符的立即数加括号保护优先级；
+  `asm_reg_modifier_subst` 处理 `%b/%w/%h/%k/%q` 子寄存器修饰符；
+  `%a` 地址形式 (寄存器同名, 立即数/内存去前缀)；
+  `%P` 原始符号名 (去 `%` / `$` 前缀)；
+  `asm_replace_label_idx` 边界安全替换 `%lN` asm goto 标签。
 - **disasm**：`reg` 函数不再叠加 REX.B（由调用方按 REX.R / REX.B /
   REX.X 决定扩展位），避免 reg 字段被错当作 r/m 字段
   扩展（之前 rax 误显示为 r8，r8 误显示为 rax）。

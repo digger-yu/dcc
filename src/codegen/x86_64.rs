@@ -4055,12 +4055,16 @@ impl Codegen {
                 // 记录 asm 语句的源行号, 使 mini-asm 警告能附带源位置
                 self.current_asm_src_line = span.line;
                 // 将 GCC 的 %lN / %l[name] 占位符解析为 C 标签名。
+                // 使用数字边界检查防止 %l1 错误匹配 %l10 等多位索引。
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
-                    resolved_asm = resolved_asm.replace(&format!("%l{}", i), &label.name);
-                    resolved_asm =
-                        resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
+                    resolved_asm = Self::asm_replace_label_idx(&resolved_asm, i, &label.name);
+                    resolved_asm = Self::asm_replace_label_idx(
+                        &resolved_asm,
+                        label_base + i,
+                        &label.name,
+                    );
                     resolved_asm =
                         resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
                 }
@@ -12828,21 +12832,39 @@ impl Codegen {
         for (idx, op) in outputs.iter().chain(inputs.iter()).enumerate() {
             let key = format!("%{}", idx);
             if let Some(val) = op_map.get(&key) {
-                resolved = resolved.replace(&key, &Self::asm_format_subst(val));
-                // 修饰符变体: %bN %wN %hN %kN %qN %aN (对寄存器操作数)
-                for m in ['b', 'w', 'h', 'k', 'q', 'a'] {
+                resolved = resolved.replace(&key, &Self::asm_format_subst_safe(val));
+                // 修饰符变体: %bN %wN %hN %kN %qN %aN %PN (对寄存器操作数)
+                for m in ['b', 'w', 'h', 'k', 'q'] {
                     let mkey = format!("%{}{}", m, idx);
                     if resolved.contains(&mkey) {
                         if let Some(sub) = Self::asm_reg_modifier_subst(val, m) {
                             resolved = resolved.replace(&mkey, &sub);
-                        } else if m == 'a' {
-                            // %aN: 地址形式 (mem/imm 原样, 等价于普通替换)
-                            resolved = resolved.replace(&mkey, &Self::asm_format_subst(val));
                         }
                     }
                 }
+                // %aN: 地址形式 (寄存器同名, 立即数/内存去前缀)
+                let akey = format!("%a{}", idx);
+                if resolved.contains(&akey) {
+                    if let Some(sub) = Self::asm_reg_modifier_subst(val, 'a') {
+                        resolved = resolved.replace(&akey, &sub);
+                    } else {
+                        resolved = resolved.replace(&akey, &Self::asm_raw_operand(val));
+                    }
+                }
+                // %PN: 原始符号名 (去 % / $ 前缀)
+                let pkey = format!("%P{}", idx);
+                if resolved.contains(&pkey) {
+                    resolved = resolved.replace(&pkey, &Self::asm_raw_operand(val));
+                }
             } else if let Some(val) = Self::eval_asm_operand(op) {
                 resolved = resolved.replace(&key, &val);
+                // 修饰符形式: 纯数值 const 求值结果, %a/%P 直接输出数字
+                for m in ['a', 'P'] {
+                    let mkey = format!("%{}{}", m, idx);
+                    if resolved.contains(&mkey) {
+                        resolved = resolved.replace(&mkey, &val);
+                    }
+                }
             }
         }
         for (i, name) in output_names.iter().chain(input_names.iter()).enumerate() {
@@ -12850,7 +12872,7 @@ impl Codegen {
                 let key = format!("%[{n}]");
                 let num_key = format!("%{}", i);
                 if let Some(reg) = op_map.get(&num_key).or_else(|| op_map.get(&key)) {
-                    resolved = resolved.replace(&key, &Self::asm_format_subst(reg));
+                    resolved = resolved.replace(&key, &Self::asm_format_subst_safe(reg));
                     // 修饰符变体: %b[name] %w[name] %h[name] %k[name] %q[name]
                     for m in ['b', 'w', 'h', 'k', 'q'] {
                         let mkey = format!("%{}[{n}]", m);
@@ -12860,17 +12882,26 @@ impl Codegen {
                             }
                         }
                     }
-                    // %a[name]: 地址形式
+                    // %a[name]: 地址形式 (寄存器同名, 立即数/内存去前缀)
                     let akey = format!("%a[{n}]");
                     if resolved.contains(&akey) {
-                        resolved = resolved.replace(&akey, &Self::asm_format_subst(reg));
+                        if let Some(sub) = Self::asm_reg_modifier_subst(reg, 'a') {
+                            resolved = resolved.replace(&akey, &sub);
+                        } else {
+                            resolved = resolved.replace(&akey, &Self::asm_raw_operand(reg));
+                        }
+                    }
+                    // %P[name]: 原始符号名
+                    let pkey = format!("%P[{n}]");
+                    if resolved.contains(&pkey) {
+                        resolved = resolved.replace(&pkey, &Self::asm_raw_operand(reg));
                     }
                 }
             }
         }
         for (key, reg) in op_map {
             if key.starts_with("%[") {
-                resolved = resolved.replace(key, &Self::asm_format_subst(reg));
+                resolved = resolved.replace(key, &Self::asm_format_subst_safe(reg));
             }
         }
         Self::unescape_asm_template(&resolved)
@@ -13655,6 +13686,70 @@ impl Codegen {
     /// GNU 内联 asm 模板：`%%` 折叠为字面量 `%`（在 `%N` 占位符替换之后调用）
     fn unescape_asm_template(s: &str) -> String {
         s.replace("%%", "%")
+    }
+
+    /// 将 op_map 值转为 "raw" 形式: 去掉 AT&T 前缀 (% 寄存器 / $ 立即数)
+    /// 用于 %P / %a 修饰符 (符号名 / 地址引用)
+    fn asm_raw_operand(val: &str) -> String {
+        if let Some(stripped) = val.strip_prefix('%') {
+            stripped.to_string()
+        } else if let Some(stripped) = val.strip_prefix('$') {
+            stripped.to_string()
+        } else {
+            val.to_string()
+        }
+    }
+
+    /// 边界安全的 %lN 替换: 仅匹配 %lN 后不跟数字的实例,
+    /// 防止 %l1 错误匹配 %l10 等多位索引。
+    fn asm_replace_label_idx(s: &str, idx: usize, label_name: &str) -> String {
+        let pattern = format!("%l{}", idx);
+        let mut result = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(pos) = rest.find(&pattern) {
+            let end = pos + pattern.len();
+            // 边界检查: 后面不能跟数字
+            let next_char = rest[end..].chars().next();
+            if next_char.is_some_and(|c| c.is_ascii_digit()) {
+                // 不是完整匹配, 跳过这个位置
+                result.push_str(&rest[..end]);
+                rest = &rest[end..];
+            } else {
+                result.push_str(&rest[..pos]);
+                result.push_str(label_name);
+                rest = &rest[end..];
+            }
+        }
+        result.push_str(rest);
+        result
+    }
+
+    /// 判断立即数值是否包含算术运算符 (需要括号包裹以防止优先级错误折叠)
+    fn asm_imm_needs_parens(s: &str) -> bool {
+        let s = s.strip_prefix('$').unwrap_or(s);
+        if s.is_empty() {
+            return false;
+        }
+        // 跳过首字符 (可能是负号或数字), 然后检查是否有运算符
+        let bytes = s.as_bytes();
+        for i in 1..bytes.len() {
+            match bytes[i] {
+                b'+' | b'-' | b'*' | b'/' | b'|' | b'&' | b'^' => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// 格式化 asm 操作数替换值, 对含运算符的立即数表达式加括号保护优先级
+    fn asm_format_subst_safe(val: &str) -> String {
+        let base = Self::asm_format_subst(val);
+        if val.starts_with('$') && Self::asm_imm_needs_parens(val) {
+            // $(expr) 形式: 把 $ 移到括号外
+            format!("$({})", &val[1..])
+        } else {
+            base
+        }
     }
 
     /// 发射单条 AT&T 汇编指令

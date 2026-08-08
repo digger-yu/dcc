@@ -2675,6 +2675,65 @@ fn asm_extended_forms_compiles_without_nop_fallback() {
     );
 }
 
+/// asm 模板修饰符完整支持: %a (地址形式) / %P (原始符号名) / %l (标签)
+/// 包含: 立即数/寄存器/命名操作数修饰符 + 多位索引边界 + 立即数优先级
+#[test]
+fn asm_template_modifiers_compile_and_run() {
+    let source = include_str!("fixtures/c/asm_template_modifiers.c");
+    let (output, exe) = run_compile_and_run("asm-template-modifiers", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        run_exe(&exe),
+        0,
+        "asm template modifiers test failed"
+    );
+}
+
+/// %P / %a 修饰符对立即数输出纯数字 (无 $ 前缀): -S 文本验证
+#[test]
+fn asm_raw_modifiers_P_a_text_output() {
+    let source = include_str!("fixtures/c/asm_raw_modifiers.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-asm-raw-mod-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-asm-raw-mod-{}.s", std::process::id()));
+    std::fs::write(&source_path, source).expect("write C fixture");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let asm = std::fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&source_path);
+    let _ = std::fs::remove_file(&asm_path);
+    // %P0 对立即数 42 应输出 ".byte 42" 而非 ".byte $42"
+    assert!(
+        asm.contains(".byte 42") || asm.contains(".byte\t42"),
+        "%P modifier failed: expected '.byte 42' in asm output, got:\n{asm}"
+    );
+    // %a0 对立即数 99 应输出 ".byte 99"
+    assert!(
+        asm.contains(".byte 99") || asm.contains(".byte\t99"),
+        "%a modifier failed: expected '.byte 99' in asm output, got:\n{asm}"
+    );
+    // %P[val] 对 7 应输出 ".byte 7"
+    assert!(
+        asm.contains(".byte 7") || asm.contains(".byte\t7"),
+        "%P[name] modifier failed: expected '.byte 7' in asm output"
+    );
+    // %a[val] 对 11 应输出 ".byte 11"
+    assert!(
+        asm.contains(".byte 11") || asm.contains(".byte\t11"),
+        "%a[name] modifier failed: expected '.byte 11' in asm output"
+    );
+}
+
 /// 头文件中不支持的内联 asm 警告必须映射回真实源文件行号
 /// (而非预处理输出行号, 内核头文件可达几十万行, 虚高行号无法定位)。
 /// fixture: asm_warn_loc.h 第 6 行含 `leaq %c1(%%rip), %0`。
