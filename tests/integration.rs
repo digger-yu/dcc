@@ -4689,6 +4689,24 @@ fn asm_optimizer_preservation_compiles_and_runs() {
     }
 }
 
+/// asm 调试信息: -g 编译含 asm 的函数应产生有效 DWARF 信息
+#[test]
+fn asm_debug_info_compiles_with_g() {
+    let source = include_str!("fixtures/c/asm_debug_info.c");
+    let (output, exe) =
+        run_compile_and_run_flags("asm-debug-info", source, &["-g"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "asm debug info test failed");
+    }
+}
+
 // ====== M26: C23 预处理全家族端到端 ======
 // #elifdef / #elifndef 分支选择
 #[test]
