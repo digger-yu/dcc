@@ -120,6 +120,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 特性 | 说明 |
 |------|------|
 | 内联 asm 约束 | `"r"` / `"m"` / `"=r"` / `+m` / `memory` clobber |
+| 内联 asm 优化器集成 | SSA pipeline 跳过含 asm 的函数 (避免 SSA 重建丢失副作用); 指令调度将 asm memory clobber 视为调度屏障; 寄存器分配器统计 asm 寄存器压力; DCE 保留所有 asm (GCC 兼容) |
 | 内联 asm clobber 完整支持 | `"cc"` 条件码 (x86 静默接受) / `"memory"` 编译器屏障 (mfence) / `"st"`/`"st(N)"` x87 FPU 栈寄存器 / `"xmm0"`..`"xmm15"` 从 XMM 池排除 / GP 寄存器名 (如 `"rax"`/`"rbx"`/`"eax"` 等) 从 GP 池排除；`parse_clobber_registers` 解析并返回排除集合 |
 | 内联 asm 约束扩展 | `"i"` 立即数 / `"p"` 内存地址 / `"g"` 通用 / `"X"` 常量 / `"0..9"` 复用 / `"&"` early-clobber / 多重约束 `"rm"` / XMM `"x"` / `"Y"` / 数字标签 `"%"` / `offsetof` 约束 |
 | asm `x` 约束 XMM | 独立 `input_xmm_set` + `prepare_asm_xmm_binding` + `writeback_asm_operand` xmm8–15；early-clobber `xmm_pool` |

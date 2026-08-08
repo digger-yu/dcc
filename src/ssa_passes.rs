@@ -410,14 +410,17 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
             continue;
         } // 太短不调度
         // 保守: 有副作用指令时不做重排, 避免破坏数据依赖
+        // 包括: Store/Call/IndexStore/MemberStore, 以及 asm 内存屏障标记
         let has_side = b.insts.iter().any(|i| {
-            matches!(
-                i.kind,
+            match &i.kind {
                 InstKind::Store { .. }
-                    | InstKind::Call { .. }
-                    | InstKind::IndexStore { .. }
-                    | InstKind::MemberStore { .. }
-            )
+                | InstKind::Call { .. }
+                | InstKind::IndexStore { .. }
+                | InstKind::MemberStore { .. } => true,
+                // asm memory clobber 产生 Store 到 __dcc_asm_memory_barrier,
+                // 已被上面的 Store 分支捕获.
+                _ => false,
+            }
         });
         if has_side {
             continue;
@@ -822,8 +825,21 @@ pub fn register_allocation(func: &mut Function) -> bool {
     for p in &func.params {
         ssa_vals.insert(p.name());
     }
+    // 统计 asm 相关寄存器压力: asm 输出/输入会占用物理寄存器,
+    // 减少通用分配池可用寄存器数.
+    let mut asm_reg_pressure: usize = 0;
     for b in func.blocks.values() {
         for inst in &b.insts {
+            // asm memory barrier 标记不算寄存器压力
+            if let InstKind::Store {
+                e: Operand::SymAddr(name),
+                ..
+            } = &inst.kind
+            {
+                if name.starts_with("__dcc_asm_") {
+                    continue;
+                }
+            }
             if let Some(d) = &inst.dest {
                 ssa_vals.insert(d.name());
             }
@@ -836,7 +852,8 @@ pub fn register_allocation(func: &mut Function) -> bool {
     if reg_count == 0 {
         return false;
     }
-    // 在 entry BB 插入 regalloc hint, 包含寄存器数量
+    // 在 entry BB 插入 regalloc hint, 包含寄存器数量和 asm 压力
+    let total_pressure = reg_count + asm_reg_pressure;
     if let Some(entry) = func.blocks.get_mut(&func.entry) {
         entry.insts.insert(
             0,
@@ -844,7 +861,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
                 dest: None,
                 kind: InstKind::Store {
                     e: Operand::SymAddr("__dcc_regalloc_done".to_string()),
-                    src: Operand::Int(reg_count as i128),
+                    src: Operand::Int(total_pressure as i128),
                 },
                 span: func.span.clone(),
             },

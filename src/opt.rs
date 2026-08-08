@@ -18,6 +18,10 @@ pub fn optimize(module: &mut Module, level: u8) {
     function_inline(module, level);
     if level >= 2 {
         prune_dead_stores(module);
+        // Note: dead asm elimination is intentionally NOT performed.
+        // GCC treats all inline asm as potentially having unknown side effects,
+        // so DCE preserves asm statements even without outputs or clobbers.
+        // We follow this convention for compatibility.
         fold_constant_branches(module);
         eliminate_unreachable(module);
         crate::ssa_gvn::run(module, level);
@@ -108,6 +112,8 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
         Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
             expr_has_unsafe_ssa_pattern(e)
         }
+        // asm goto 和 asm 表达式包含无法 SSA 化的副作用
+        Stmt::AsmGoto { .. } => true,
         Stmt::If { cond, then_, else_, .. } => {
             expr_has_unsafe_ssa_pattern(cond)
                 || stmt_has_unsafe_ssa_pattern(then_)
@@ -134,6 +140,8 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
 fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
     match e {
         Expr::AddrOf { .. } | Expr::Deref { .. } | Expr::Index { .. } => true,
+        // asm 表达式包含无法 SSA 化的副作用
+        Expr::AsmExpr { .. } => true,
         Expr::Binop { l, r, .. } => {
             expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
         }

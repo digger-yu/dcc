@@ -4671,6 +4671,24 @@ fn asm_diag_validation_compiles_with_warnings() {
     );
 }
 
+/// asm 优化器保留: DCE 不消除无副作用无输出的 asm (GCC 兼容)
+#[test]
+fn asm_optimizer_preservation_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_optimizer_preservation.c");
+    let (output, exe) =
+        run_compile_and_run_flags("asm-optimizer-preservation", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "asm optimizer preservation test failed");
+    }
+}
+
 // ====== M26: C23 预处理全家族端到端 ======
 // #elifdef / #elifndef 分支选择
 #[test]
