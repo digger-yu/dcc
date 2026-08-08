@@ -371,7 +371,15 @@ RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
   `meta: (reg, xmm_w, is_out, is_mem, flags)` 记录每个操作数。
   - GP 池：`[0, 1, 2, 6, 7, 8, 9, 10, 11]` (rax/rcx/rdx/rsi/rdi/r8..r11)。
   - XMM 池：`[0..15]`，XMM 约束 `x` / `Y` 时 `xmm_width` 记录 32/64 位。
-  - `"&"` early-clobber 阶段：若输出寄存器与任一输入寄存器重叠，
+  - **Clobber 寄存器排除**：`parse_clobber_registers` 解析 clobber 列表，
+    把被 clobber 的 GP/XMM 寄存器加入 `input_reg_set` / `input_xmm_set`，
+    操作数分配时自动避让。支持：
+    - `"cc"` 条件码 (x86 静默接受)
+    - `"memory"` 编译器屏障 (调用方发 mfence)
+    - `"st"`/`"st(N)"` x87 FPU 栈寄存器 (计数但不进池)
+    - `"xmm0"`..`"xmm15"` 从 XMM 池排除
+    - GP 寄存器名 (如 `"rax"`/`"rbx"`/`"eax"` 等所有子宽度) 从 GP 池排除
+  - `"&"` early-clobber 阶段：若输出寄存器与任一输入寄存器（含 clobber 排除集）重叠，
     重新从 GP 池挑选并重新 emit `prepare_asm_binding` + 更新 `op_map`。
   - `"0..9"` 复用约束：复用先前操作数（`Slot::Reg`）的寄存器，
     但仍对当前操作数调 `prepare_asm_binding(expr, reg, is_output=false)`

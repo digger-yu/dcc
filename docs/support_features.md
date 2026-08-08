@@ -120,6 +120,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 特性 | 说明 |
 |------|------|
 | 内联 asm 约束 | `"r"` / `"m"` / `"=r"` / `+m` / `memory` clobber |
+| 内联 asm clobber 完整支持 | `"cc"` 条件码 (x86 静默接受) / `"memory"` 编译器屏障 (mfence) / `"st"`/`"st(N)"` x87 FPU 栈寄存器 / `"xmm0"`..`"xmm15"` 从 XMM 池排除 / GP 寄存器名 (如 `"rax"`/`"rbx"`/`"eax"` 等) 从 GP 池排除；`parse_clobber_registers` 解析并返回排除集合 |
 | 内联 asm 约束扩展 | `"i"` 立即数 / `"p"` 内存地址 / `"g"` 通用 / `"X"` 常量 / `"0..9"` 复用 / `"&"` early-clobber / 多重约束 `"rm"` / XMM `"x"` / `"Y"` / 数字标签 `"%"` / `offsetof` 约束 |
 | asm `x` 约束 XMM | 独立 `input_xmm_set` + `prepare_asm_xmm_binding` + `writeback_asm_operand` xmm8–15；early-clobber `xmm_pool` |
 | asm 段寄存器约束 `={gs}`/`={fs}` | `mov %seg, [r13+off]` (0x8C) 写回；`prepare_asm_seg_binding` 加载段寄存器值到内存 |

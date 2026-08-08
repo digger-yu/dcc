@@ -4618,6 +4618,25 @@ fn m19_pragma_locale_accepted() {
     let _ = fs::remove_file(exe);
 }
 
+// =================== 内联 asm clobber 完整支持 ===================
+
+/// 内联 asm clobber 完整支持: cc/memory/x87/xmm/GP 寄存器 clobber
+#[test]
+fn asm_clobber_full_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_clobber.c");
+    let (output, _exe) = run_compile_and_run("asm-clobber-full", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&_exe);
+        assert_eq!(rc, 0, "asm_clobber should return 0, got {rc}");
+    }
+}
+
 // ====== M26: C23 预处理全家族端到端 ======
 // #elifdef / #elifndef 分支选择
 #[test]

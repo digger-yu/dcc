@@ -11664,6 +11664,57 @@ impl Codegen {
         NAMES[idx % 8]
     }
 
+    /// 解析 clobber 列表, 返回需要从 GP/XMM 寄存器池排除的索引集合。
+    /// 同时返回 x87 clobber 计数 (st/st(0)..st(7)) 供调用方使用。
+    ///
+    /// 支持的 clobber 类型:
+    /// - "cc" → 条件码, x86 上无功能影响, 静默接受
+    /// - "memory" → 编译器屏障, 由调用方单独处理 (mfence)
+    /// - "st" / "st(0)".."st(7)" → x87 FPU 栈寄存器
+    /// - "xmm0".."xmm15" → XMM 寄存器, 从 XMM 池排除
+    /// - GP 寄存器名 (如 "rax", "rbx", "r8" 等) → 从 GP 池排除
+    fn parse_clobber_registers(
+        clobbers: &[String],
+    ) -> (
+        std::collections::HashSet<u8>, // GP 寄存器索引
+        std::collections::HashSet<u8>, // XMM 寄存器索引
+        u8,                            // x87 clobber 计数
+    ) {
+        let mut gp_set = std::collections::HashSet::new();
+        let mut xmm_set = std::collections::HashSet::new();
+        let mut x87_count: u8 = 0;
+
+        for c in clobbers {
+            let name = c.trim().to_lowercase();
+            // cc / memory: 特殊 clobber, 不进寄存器池
+            if name == "cc" || name == "memory" {
+                continue;
+            }
+            // x87: "st" / "st(0)".."st(7)"
+            if name == "st" || name.starts_with("st(") {
+                x87_count = x87_count.saturating_add(1);
+                continue;
+            }
+            // xmm0..xmm15
+            if let Some(idx) = name.strip_prefix("xmm") {
+                if let Ok(n) = idx.parse::<u8>() {
+                    if n < 16 {
+                        xmm_set.insert(n);
+                    }
+                }
+                continue;
+            }
+            // GP 寄存器 (所有子宽度: eax/rax/ax/al/ah 等都映射到同一物理寄存器)
+            if let Some((reg_idx, _bits, _sname)) = Self::parse_reg_name_bits(&name) {
+                gp_set.insert(reg_idx);
+                continue;
+            }
+            // 未知 clobber: 静默忽略 (GCC 兼容: 允许未知 clobber 字符串)
+        }
+
+        (gp_set, xmm_set, x87_count)
+    }
+
     /// 构建 asm 操作数映射: %N / %[name] → 寄存器名或内存操作数
     fn build_asm_operand_map(
         &mut self,
@@ -11673,6 +11724,7 @@ impl Codegen {
         inputs: &[Expr],
         input_names: &[Option<String>],
         input_constraints: &[String],
+        clobbers: &[String],
         bindings: &mut Vec<AsmOpBinding>,
     ) -> HashMap<String, String> {
         let mut map = HashMap::new();
@@ -11695,6 +11747,16 @@ impl Codegen {
         let mut input_reg_set: std::collections::HashSet<u8> = std::collections::HashSet::new();
         // XMM 输入独立集合: GP 与 XMM 共用 0..15 编号空间, 不能混在同一 set 里判断冲突
         let mut input_xmm_set: std::collections::HashSet<u8> = std::collections::HashSet::new();
+
+        // 解析 clobber 列表, 把被 clobber 的寄存器加入排除集合
+        let (clobber_gp, clobber_xmm, _x87_count) = Self::parse_clobber_registers(clobbers);
+        // clobber 的寄存器视为“已被占用”, 操作数分配时避让
+        for &r in &clobber_gp {
+            input_reg_set.insert(r);
+        }
+        for &x in &clobber_xmm {
+            input_xmm_set.insert(x);
+        }
 
         // ===== 处理 outputs =====
         for (op_idx, op) in outputs.iter().enumerate() {
@@ -11836,9 +11898,19 @@ impl Codegen {
                 }
             }
 
-            // XMM 寄存器约束
+            // XMM 寄存器约束 (避让 clobber 排除集)
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
-                let xi = idx % 16;
+                let xmm_pool: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+                let mut xi = idx % 16;
+                // 如果分配的 XMM 被 clobber 排除, 找一个未被排除的
+                if input_xmm_set.contains(&(xi as u8)) && !clobber_xmm.is_empty() {
+                    for &cand in &xmm_pool {
+                        if !input_xmm_set.contains(&cand) {
+                            xi = cand as usize;
+                            break;
+                        }
+                    }
+                }
                 let name = Self::asm_xmm_name(xi);
                 if is_inout {
                     self.prepare_asm_xmm_binding(op, xi as u8, true);
@@ -11863,9 +11935,18 @@ impl Codegen {
                 continue;
             }
 
-            // 默认: GP 寄存器
+            // 默认: GP 寄存器 (避让 clobber 排除集)
             let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
-            let chosen = gp_pool[idx % gp_pool.len()];
+            let mut chosen = gp_pool[idx % gp_pool.len()];
+            // 如果分配的寄存器被 clobber 排除, 找一个未被排除的
+            if input_reg_set.contains(&chosen) && !clobber_gp.is_empty() {
+                for &cand in &gp_pool {
+                    if !input_reg_set.contains(&cand) {
+                        chosen = cand;
+                        break;
+                    }
+                }
+            }
             let name = Self::gp_reg_name(chosen as usize);
             // +r (读写): 加载变量值; =r (只写): lea 地址 (将被 asm 覆写)
             self.prepare_asm_binding(op, chosen, !is_inout);
@@ -12983,6 +13064,7 @@ impl Codegen {
             inputs,
             input_names,
             input_constraints,
+            clobbers,
             &mut bindings,
         );
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
@@ -13034,6 +13116,7 @@ impl Codegen {
             inputs,
             input_names,
             input_constraints,
+            clobbers,
             &mut bindings,
         );
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
@@ -13091,6 +13174,7 @@ impl Codegen {
             inputs,
             input_names,
             input_constraints,
+            clobbers,
             &mut bindings,
         );
         let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
