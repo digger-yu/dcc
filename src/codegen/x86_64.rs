@@ -479,6 +479,443 @@ impl AsmLocalLabels {
     }
 }
 
+/// GCC asm 高级指令展开器: .rept/.endr/.irp/.irpc/.macro/.endm/.if/.else/.endif/.ifdef/.ifndef/.include/.intel_syntax/.att_syntax/.altmacro
+///
+/// 在 asm 模板行进入 mini-assembler 之前, 先做文本级预处理:
+/// - `.rept N` / `.endr`: 重复块 N 次
+/// - `.irp sym, v1, v2, ...` / `.endr`: 对每个值替换 sym 后展开块
+/// - `.irpc sym, chars` / `.endr`: 对每个字符替换 sym 后展开块
+/// - `.macro name [args]` / `.endm`: 定义宏; 后续行中 `name [args]` 调用时展开
+/// - `.include "file"`: 读入文件内容 (相对于源文件目录或 cwd)
+/// - `.if EXPR` / `.elseif EXPR` / `.else` / `.endif`: 条件汇编 (简单整数表达式)
+/// - `.ifdef SYM` / `.ifndef SYM`: 符号定义条件 (始终为 false, 因 asm 内无 .set 之外的符号表)
+/// - `.intel_syntax noprefix` / `.att_syntax`: 语法切换 (跟踪状态, 透传至 -S 输出)
+/// - `.altmacro` / `.noaltmacro`: 交替宏模式 (跟踪状态, 影响 % 参数前缀)
+struct AsmDirectiveExpander {
+    /// 已定义宏: name -> (参数名列表, 行列表)
+    macros: std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+    /// 是否处于 Intel 语法模式
+    intel_syntax: bool,
+    /// 是否处于 .altmacro 模式
+    alt_macro: bool,
+}
+
+impl AsmDirectiveExpander {
+    fn new() -> Self {
+        Self {
+            macros: std::collections::HashMap::new(),
+            intel_syntax: false,
+            alt_macro: false,
+        }
+    }
+
+    /// 展开 asm 字符串中的所有高级指令, 返回纯指令行列表
+    fn expand(&mut self, lines: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i].trim();
+            if line.is_empty() {
+                i += 1;
+                continue;
+            }
+            // .rept N ... .endr
+            if let Some(count) = Self::parse_rept(line) {
+                let (body, end_idx) = Self::collect_block(lines, i + 1, ".endr");
+                let expanded_body = self.expand(&body);
+                for _ in 0..count {
+                    out.extend(expanded_body.clone());
+                }
+                i = end_idx + 1;
+                continue;
+            }
+            // .irp sym, v1, v2, ... ... .endr
+            if let Some((sym, vals)) = Self::parse_irp(line) {
+                let (body, end_idx) = Self::collect_block(lines, i + 1, ".endr");
+                let expanded_body = self.expand(&body);
+                for val in &vals {
+                    for l in &expanded_body {
+                        out.push(l.replace(&format!("\\{sym}"), val).replace(&format!("\\({sym})"), val));
+                    }
+                }
+                i = end_idx + 1;
+                continue;
+            }
+            // .irpc sym, chars ... .endr
+            if let Some((sym, chars)) = Self::parse_irpc(line) {
+                let (body, end_idx) = Self::collect_block(lines, i + 1, ".endr");
+                let expanded_body = self.expand(&body);
+                for c in chars.chars() {
+                    for l in &expanded_body {
+                        out.push(l.replace(&format!("\\{sym}"), &c.to_string()).replace(&format!("\\({sym})"), &c.to_string()));
+                    }
+                }
+                i = end_idx + 1;
+                continue;
+            }
+            // .macro name [args] ... .endm
+            if let Some((name, args)) = Self::parse_macro_def(line) {
+                let (body, end_idx) = Self::collect_block(lines, i + 1, ".endm");
+                self.macros.insert(name.clone(), (args.clone(), body));
+                i = end_idx + 1;
+                continue;
+            }
+            // 宏调用: name [args]
+            if let Some(expanded) = self.try_expand_macro_call(line) {
+                out.extend(expanded);
+                i += 1;
+                continue;
+            }
+            // .include "file"
+            if let Some(path) = Self::parse_include(line) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let inc_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+                    let expanded = self.expand(&inc_lines);
+                    out.extend(expanded);
+                } else {
+                    // 文件不存在, 静默跳过 (GCC 兼容: .include 失败不报错)
+                }
+                i += 1;
+                continue;
+            }
+            // .if / .ifdef / .ifndef ... .else / .elseif ... .endif
+            if let Some(cond_result) = Self::parse_conditional(line) {
+                let (body, end_idx) = Self::collect_conditional_block(lines, i + 1, cond_result);
+                let expanded = self.expand(&body);
+                out.extend(expanded);
+                i = end_idx + 1;
+                continue;
+            }
+            // .intel_syntax noprefix / .att_syntax
+            if line == ".intel_syntax noprefix" || line == ".intel_syntax" {
+                self.intel_syntax = true;
+                out.push(line.to_string());
+                i += 1;
+                continue;
+            }
+            if line == ".att_syntax" || line == ".att_syntax prefix" {
+                self.intel_syntax = false;
+                out.push(line.to_string());
+                i += 1;
+                continue;
+            }
+            // .altmacro / .noaltmacro
+            if line == ".altmacro" {
+                self.alt_macro = true;
+                out.push(line.to_string());
+                i += 1;
+                continue;
+            }
+            if line == ".noaltmacro" {
+                self.alt_macro = false;
+                out.push(line.to_string());
+                i += 1;
+                continue;
+            }
+            // 普通行: 直接传递
+            out.push(line.to_string());
+            i += 1;
+        }
+        out
+    }
+
+    /// 解析 `.rept N` 返回重复次数
+    fn parse_rept(line: &str) -> Option<usize> {
+        let t = line.trim();
+        let rest = t.strip_prefix(".rept")?;
+        let rest = rest.trim();
+        rest.split_whitespace().next()?.parse().ok()
+    }
+
+    /// 解析 `.irp sym, v1, v2, ...` 返回 (符号名, 值列表)
+    fn parse_irp(line: &str) -> Option<(String, Vec<String>)> {
+        let t = line.trim();
+        let rest = t.strip_prefix(".irp")?;
+        let rest = rest.trim();
+        let mut parts = rest.splitn(2, ',');
+        let sym = parts.next()?.trim().to_string();
+        let vals_str = parts.next()?;
+        let vals: Vec<String> = vals_str.split(',').map(|s| s.trim().to_string()).collect();
+        Some((sym, vals))
+    }
+
+    /// 解析 `.irpc sym, chars` 返回 (符号名, 字符序列)
+    fn parse_irpc(line: &str) -> Option<(String, String)> {
+        let t = line.trim();
+        let rest = t.strip_prefix(".irpc")?;
+        let rest = rest.trim();
+        let mut parts = rest.splitn(2, ',');
+        let sym = parts.next()?.trim().to_string();
+        let chars = parts.next()?.trim().to_string();
+        Some((sym, chars))
+    }
+
+    /// 解析 `.macro name [arg1, arg2, ...]` 返回 (宏名, 参数名列表)
+    fn parse_macro_def(line: &str) -> Option<(String, Vec<String>)> {
+        let t = line.trim();
+        let rest = t.strip_prefix(".macro")?;
+        let rest = rest.trim();
+        // 收集宏名后的所有剩余文本
+        let mut parts = rest.splitn(2, |c: char| c.is_whitespace());
+        let name = parts.next()?.trim().to_string();
+        let args_rest = parts.next().unwrap_or("").trim();
+        let args: Vec<String> = if args_rest.is_empty() {
+            Vec::new()
+        } else {
+            args_rest.split(',').map(|s| s.trim().trim_start_matches('\\').to_string()).collect()
+        };
+        Some((name, args))
+    }
+
+    /// 尝试展开宏调用, 如果不是宏调用返回 None
+    fn try_expand_macro_call(&self, line: &str) -> Option<Vec<String>> {
+        let t = line.trim();
+        if t.starts_with('.') {
+            return None;
+        }
+        let mut parts = t.splitn(2, |c: char| c.is_whitespace());
+        let name = parts.next()?.trim();
+        if let Some((args_def, body)) = self.macros.get(name) {
+            let rest = parts.next().unwrap_or("").trim();
+            let call_args: Vec<String> = if rest.is_empty() {
+                Vec::new()
+            } else {
+                rest.split(',').map(|s| s.trim().to_string()).collect()
+            };
+            let mut result = Vec::new();
+            for l in body {
+                let mut expanded = l.clone();
+                for (i, arg_name) in args_def.iter().enumerate() {
+                    let val = call_args.get(i).cloned().unwrap_or_default();
+                    expanded = expanded.replace(&format!("\\{arg_name}"), &val);
+                    expanded = expanded.replace(&format!("\\({arg_name})"), &val);
+                }
+                result.push(expanded);
+            }
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    /// 解析 `.include "file"` 返回文件路径
+    fn parse_include(line: &str) -> Option<String> {
+        let t = line.trim();
+        let rest = t.strip_prefix(".include")?;
+        let rest = rest.trim();
+        let path = rest.trim_matches('"').to_string();
+        Some(path)
+    }
+
+    /// 解析条件指令, 返回条件结果 (true = 包含块, false = 跳过块)
+    fn parse_conditional(line: &str) -> Option<bool> {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix(".ifdef") {
+            // .ifdef: 始终 false (asm 内无符号表)
+            let _ = rest.trim();
+            return Some(false);
+        }
+        if let Some(rest) = t.strip_prefix(".ifndef") {
+            // .ifndef: 始终 true
+            let _ = rest.trim();
+            return Some(true);
+        }
+        if let Some(rest) = t.strip_prefix(".if") {
+            let rest = rest.trim();
+            // 简单整数表达式求值
+            return Some(Self::eval_simple_expr(rest));
+        }
+        None
+    }
+
+    /// 简单整数表达式求值 (支持: 数字, 0x前缀, +, -, *, /, |, &, ^, !, ==, !=, <, >, <=, >=)
+    fn eval_simple_expr(s: &str) -> bool {
+        let s = s.trim();
+        // 尝试解析为整数
+        if let Ok(v) = Self::eval_expr_value(s) {
+            return v != 0;
+        }
+        // 无法解析, 默认 false
+        false
+    }
+
+    /// 求值整数表达式 (简化版, 支持基本运算)
+    fn eval_expr_value(s: &str) -> Result<i64, ()> {
+        let s = s.trim().trim_end_matches(',');
+        // 处理括号
+        if s.starts_with('(') && s.ends_with(')') {
+            return Self::eval_expr_value(&s[1..s.len()-1]);
+        }
+        // 处理一元 !
+        if let Some(rest) = s.strip_prefix('!') {
+            let v = Self::eval_expr_value(rest)?;
+            return Ok(if v == 0 { 1 } else { 0 });
+        }
+        // 处理一元 -
+        if let Some(rest) = s.strip_prefix('-') {
+            if !rest.is_empty() && !rest.contains(|c: char| c == '+' || c == '-' || c == '*' || c == '/') {
+                let v = Self::eval_expr_value(rest)?;
+                return Ok(-v);
+            }
+        }
+        // 处理比较运算符 (低优先级)
+        for op in &["==", "!=", "<=", ">=", "<", ">"] {
+            if let Some(pos) = s.find(op) {
+                let left = Self::eval_expr_value(&s[..pos])?;
+                let right = Self::eval_expr_value(&s[pos+op.len()..])?;
+                return Ok(match *op {
+                    "==" => if left == right { 1 } else { 0 },
+                    "!=" => if left != right { 1 } else { 0 },
+                    "<=" => if left <= right { 1 } else { 0 },
+                    ">=" => if left >= right { 1 } else { 0 },
+                    "<" => if left < right { 1 } else { 0 },
+                    ">" => if left > right { 1 } else { 0 },
+                    _ => return Err(()),
+                });
+            }
+        }
+        // 处理 | & ^ (低优先级)
+        for op in &['|', '&', '^'] {
+            if let Some(pos) = s.rfind(*op) {
+                let left = Self::eval_expr_value(&s[..pos])?;
+                let right = Self::eval_expr_value(&s[pos+1..])?;
+                return Ok(match op {
+                    '|' => left | right,
+                    '&' => left & right,
+                    '^' => left ^ right,
+                    _ => return Err(()),
+                });
+            }
+        }
+        // 处理 + - (中优先级)
+        for op in &['+', '-'] {
+            if let Some(pos) = s.rfind(*op) {
+                if pos > 0 {
+                    let left = Self::eval_expr_value(&s[..pos])?;
+                    let right = Self::eval_expr_value(&s[pos+1..])?;
+                    return Ok(match op {
+                        '+' => left + right,
+                        '-' => left - right,
+                        _ => return Err(()),
+                    });
+                }
+            }
+        }
+        // 处理 * / (高优先级)
+        for op in &['*', '/'] {
+            if let Some(pos) = s.rfind(*op) {
+                if pos > 0 {
+                    let left = Self::eval_expr_value(&s[..pos])?;
+                    let right = Self::eval_expr_value(&s[pos+1..])?;
+                    return Ok(match op {
+                        '*' => left * right,
+                        '/' => if right != 0 { left / right } else { return Err(()); },
+                        _ => return Err(()),
+                    });
+                }
+            }
+        }
+        // 基本数字
+        Self::parse_number(s)
+    }
+
+    /// 解析数字 (支持 0x 前缀, 0b 前缀, 普通十进制)
+    fn parse_number(s: &str) -> Result<i64, ()> {
+        let s = s.trim();
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            i64::from_str_radix(hex, 16).map_err(|_| ())
+        } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+            i64::from_str_radix(bin, 2).map_err(|_| ())
+        } else {
+            s.parse().map_err(|_| ())
+        }
+    }
+
+    /// 收集块直到遇到 end_directive (处理嵌套)
+    fn collect_block(lines: &[String], start: usize, end_directive: &str) -> (Vec<String>, usize) {
+        let mut body = Vec::new();
+        let mut depth = 1;
+        let mut i = start;
+        while i < lines.len() {
+            let t = lines[i].trim();
+            // 检查嵌套开始
+            if t.starts_with(".rept") || t.starts_with(".irp") || t.starts_with(".irpc")
+                || t.starts_with(".macro") || t.starts_with(".if") || t.starts_with(".ifdef")
+                || t.starts_with(".ifndef")
+            {
+                depth += 1;
+                body.push(lines[i].clone());
+            } else if t == end_directive || t.starts_with(&format!("{end_directive} ")) {
+                depth -= 1;
+                if depth == 0 {
+                    return (body, i);
+                }
+                body.push(lines[i].clone());
+            } else {
+                body.push(lines[i].clone());
+            }
+            i += 1;
+        }
+        (body, lines.len())
+    }
+
+    /// 收集条件块 (.if/.elseif/.else/.endif), 返回 (选中块内容, endif 后行号)
+    fn collect_conditional_block(lines: &[String], start: usize, first_cond: bool) -> (Vec<String>, usize) {
+        let mut current_branch = Vec::new();
+        let mut selected_branch: Option<Vec<String>> = None;
+        let mut current_is_true = first_cond;
+        let mut depth = 1;
+        let mut i = start;
+        while i < lines.len() {
+            let t = lines[i].trim();
+            if t.starts_with(".if") || t.starts_with(".ifdef") || t.starts_with(".ifndef") {
+                depth += 1;
+                if depth == 2 {
+                    current_branch.push(lines[i].clone());
+                }
+            } else if t == ".endif" || t.starts_with(".endif ") {
+                depth -= 1;
+                if depth == 0 {
+                    // 结束: 如果还没选中且当前分支为 true, 选当前
+                    if selected_branch.is_none() && current_is_true {
+                        selected_branch = Some(current_branch);
+                    }
+                    return (selected_branch.unwrap_or_default(), i);
+                }
+                if depth == 1 {
+                    current_branch.push(lines[i].clone());
+                }
+            } else if depth == 1 && (t == ".else" || t.starts_with(".else ")) {
+                // 如果当前分支为 true 且还没选中, 选中它
+                if current_is_true && selected_branch.is_none() {
+                    selected_branch = Some(current_branch);
+                }
+                current_branch = Vec::new();
+                // .else 分支: 只有前面都没选中才可能为 true
+                current_is_true = selected_branch.is_none();
+            } else if depth == 1 && t.starts_with(".elseif") {
+                if current_is_true && selected_branch.is_none() {
+                    selected_branch = Some(current_branch);
+                }
+                current_branch = Vec::new();
+                // .elseif 条件暂不处理, 简化为 false
+                current_is_true = false;
+            } else {
+                if depth == 1 {
+                    current_branch.push(lines[i].clone());
+                }
+            }
+            i += 1;
+        }
+        // 未找到 .endif, 返回已收集的内容
+        if selected_branch.is_none() && current_is_true {
+            (current_branch, i)
+        } else {
+            (selected_branch.unwrap_or_default(), i)
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ParallelGlobalSnap {
     offset: u64,
@@ -13072,8 +13509,17 @@ impl Codegen {
         } else {
             asm_str
         };
+        // 先展开高级指令 (.rept/.macro/.if 等)
+        let raw_lines: Vec<String> = s.split(['\n', ';'])
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut expander = AsmDirectiveExpander::new();
+        let expanded_lines = expander.expand(&raw_lines);
+        // 再解析操作数占位符
         let resolved_lines = AsmLocalLabels::expand_label_insn_lines(
-            s.split(['\n', ';'])
+            expanded_lines
+                .iter()
                 .map(|line| {
                     self.resolve_asm_template(
                         line.trim(),
@@ -13124,8 +13570,17 @@ impl Codegen {
         } else {
             asm_str
         };
+        // 先展开高级指令 (.rept/.macro/.if 等)
+        let raw_lines: Vec<String> = s.split(['\n', ';'])
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut expander = AsmDirectiveExpander::new();
+        let expanded_lines = expander.expand(&raw_lines);
+        // 再解析操作数占位符
         let resolved_lines = AsmLocalLabels::expand_label_insn_lines(
-            s.split(['\n', ';'])
+            expanded_lines
+                .iter()
                 .map(|line| {
                     self.resolve_asm_template(
                         line.trim(),
@@ -13182,8 +13637,17 @@ impl Codegen {
         } else {
             asm_str
         };
+        // 先展开高级指令 (.rept/.macro/.if 等)
+        let raw_lines: Vec<String> = s.split(['\n', ';'])
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut expander = AsmDirectiveExpander::new();
+        let expanded_lines = expander.expand(&raw_lines);
+        // 再解析操作数占位符
         let resolved_lines = AsmLocalLabels::expand_label_insn_lines(
-            s.split(['\n', ';'])
+            expanded_lines
+                .iter()
                 .map(|line| {
                     self.resolve_asm_template(
                         line.trim(),

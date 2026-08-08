@@ -54,6 +54,9 @@ struct ParsedAttrs {
     deprecated_msg: Option<String>,
     /// __attribute__((ifunc("resolver")))
     ifunc_resolver: Option<String>,
+    /// __attribute__((asm_output("template"))) - GCC15 提案
+    /// 指定函数返回值的 asm 输出模板 (目前仅解析存储, 无 codegen 影响)
+    asm_output_template: Option<String>,
     /// __attribute__((vector_size(N)))
     vector_size: Option<usize>,
     /// CUDA/HIP 函数限定符: __global__ / __device__ / __host__
@@ -188,6 +191,9 @@ impl ParsedAttrs {
         }
         if other.ifunc_resolver.is_some() {
             self.ifunc_resolver = other.ifunc_resolver;
+        }
+        if other.asm_output_template.is_some() {
+            self.asm_output_template = other.asm_output_template.clone();
         }
         if other.vector_size.is_some() {
             self.vector_size = other.vector_size;
@@ -1011,6 +1017,18 @@ impl<'a> Parser<'a> {
                             self.advance();
                             if let Some(resolver) = self.parse_concatenated_string_lit() {
                                 attrs.ifunc_resolver = Some(resolver);
+                            }
+                            if self.cur.kind == TokKind::RParen {
+                                self.advance();
+                            }
+                        }
+                    }
+                    "asm_output" | "__asm_output__" => {
+                        self.advance();
+                        if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            if let Some(tmpl) = self.parse_concatenated_string_lit() {
+                                attrs.asm_output_template = Some(tmpl);
                             }
                             if self.cur.kind == TokKind::RParen {
                                 self.advance();
@@ -2101,6 +2119,7 @@ impl<'a> Parser<'a> {
                     warning_msg: attrs.warning_msg.clone(),
                     deprecated_msg: attrs.deprecated_msg.clone(),
                     ifunc_resolver: attrs.ifunc_resolver.clone(),
+                    asm_output_template: attrs.asm_output_template.clone(),
                     is_global: attrs.is_global,
                     is_device: attrs.is_device,
                     is_host: attrs.is_host,
@@ -2151,6 +2170,7 @@ impl<'a> Parser<'a> {
                     warning_msg: attrs.warning_msg.clone(),
                     deprecated_msg: attrs.deprecated_msg.clone(),
                     ifunc_resolver: attrs.ifunc_resolver.clone(),
+                    asm_output_template: attrs.asm_output_template.clone(),
                     is_global: attrs.is_global,
                     is_device: attrs.is_device,
                     is_host: attrs.is_host,
@@ -2480,6 +2500,7 @@ impl<'a> Parser<'a> {
                     warning_msg: None,
                     deprecated_msg: None,
                     ifunc_resolver: None,
+                    asm_output_template: None,
                     is_global: false,
                     is_device: false,
                     is_host: false,
@@ -2560,6 +2581,7 @@ impl<'a> Parser<'a> {
                 warning_msg: None,
                 deprecated_msg: None,
                 ifunc_resolver: None,
+                    asm_output_template: None,
                 is_global: false,
                 is_device: false,
                 is_host: false,

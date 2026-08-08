@@ -4637,6 +4637,23 @@ fn asm_clobber_full_compiles_and_runs() {
     }
 }
 
+/// GCC asm 高级特性: .rept/.irp/.irpc/.macro/.if/.ifdef/.intel_syntax/.altmacro/asm_output
+#[test]
+fn asm_advanced_features_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_advanced_features.c");
+    let (output, _exe) = run_compile_and_run("asm-advanced-features", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&_exe);
+        assert_eq!(rc, 0, "asm_advanced_features should return 0, got {rc}");
+    }
+}
+
 // ====== M26: C23 预处理全家族端到端 ======
 // #elifdef / #elifndef 分支选择
 #[test]

@@ -137,6 +137,14 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | SSE mov / SSE arith | xmm-xmm, mem-xmm, xmm-mem, SegMem 变体完整支持 |
 | mini-asm SIMD 扩展 | VEX/EVEX 前缀 + AVX/AVX2/AVX-512 + SSE3–4.2 + AES-NI/SHA + FMA/F16C + TSX + AMX + AVX-VNNI；`pinsr*` / `pextr*` GPR + `tmm` / `ymm` / `zmm` / `k` 寄存器 |
 | mini-asm 扩展操作数形式 | `rdrand`/`rdseed` 内存操作数；`ljmp`/`lcall` 间接内存 + `$off,$seg` 反序；`xbegin` rel32 + `xabort` 符号；AES-NI/SHA/pshuf*/palignr/pblendw/insertps/pshufw 内存源；`vextractps`/`vextractpd` 内存目标 |
+| asm `.rept`/`.endr` 重复块 | `AsmDirectiveExpander::parse_rept` 解析重复次数, 递归展开体内指令 |
+| asm `.irp`/`.irpc` 迭代块 | `.irp sym, v1, v2, ...` 按值列表迭代 / `.irpc sym, chars` 按字符迭代; 体内 `\sym` 替换为当前值 |
+| asm `.macro`/`.endm` 宏定义与调用 | `parse_macro_def` 解析参数列表, `try_expand_macro_call` 按调用参数替换 `\arg` / `\(arg)` 并展开 |
+| asm `.include "file"` | `parse_include` 读取文件内容并递归展开; 文件不存在时静默跳过 (GCC 兼容) |
+| asm `.if`/`.else`/`.endif` 条件汇编 | `parse_conditional` + `collect_conditional_block` 支持 `.if`/`.ifdef`/`.ifndef`/`.else`/`.elseif`/`.endif`; 简单整数表达式求值 (`eval_simple_expr`) |
+| asm `.intel_syntax`/`.att_syntax` 语法切换 | 识别并透传至 `-S` 输出; `AsmDirectiveExpander::intel_syntax` 状态跟踪 |
+| asm `.altmacro`/`.noaltmacro` 交替宏模式 | 识别并透传; `AsmDirectiveExpander::alt_macro` 状态跟踪 |
+| `asm_output` 属性 (GCC15) | `__attribute__((asm_output("...")))` 解析并存储到 `FuncDecl::asm_output_template`; 属性合并逻辑支持 |
 
 ## x86_64 codegen
 

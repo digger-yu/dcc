@@ -393,6 +393,7 @@ mod tests {
             dtor_priority: None, is_retain: false, is_used_attr: false,
             is_flatten: false, error_msg: None, warning_msg: None,
             deprecated_msg: None, ifunc_resolver: None,
+            asm_output_template: None,
             is_global: false, is_device: false, is_host: false,
         }));
         let names = collect_func_names(&prog);

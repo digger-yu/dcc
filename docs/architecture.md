@@ -445,6 +445,13 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 - **AT&T 行内注释**：`strip_asm_comment` 剥离 `#` 后注释，避免 asm goto
   `jmp %l[x] # objtool NOPs this` 将注释误当作标签名。
 - **模板转义**：`%%` 在 `%N` 占位符替换后折叠为 `%`（GNU 内联 asm 寄存器字面量）。
+- **高级 asm 指令预处理器**：`AsmDirectiveExpander` 在操作数替换之前对 asm 字符串进行文本级展开：
+  `.rept N`/`.endr` 重复块、`.irp sym, vals`/`.irpc sym, chars` 迭代块、
+  `.macro name args`/`.endm` 宏定义与调用（`\arg` 参数替换）、
+  `.include "file"` 文件包含（缺失静默跳过）、
+  `.if`/`.ifdef`/`.ifndef`/`.else`/`.endif` 条件汇编（简单整数表达式求值）、
+  `.intel_syntax`/`.att_syntax` 语法切换透传、`.altmacro`/`.noaltmacro` 模式透传。
+  `asm_output` 属性通过 `FuncDecl::asm_output_template` 存储并在属性合并时处理。
 - **指令子集**：除 mov/alu/jcc 外，含 `bt/bts/btr/btc`、`bsf/bsr/popcnt`、`bswap`、
   `movnti(l/q)`、`vmcall/vmmcall`、`shld/shrd`、`adc/sbb`、
   `cmpxchg`/`xadd`/`cmov` 内存操作数、`movzbl` 内存源、`setcc` 内存目标、

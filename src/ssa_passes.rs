@@ -1477,6 +1477,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
+                asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
