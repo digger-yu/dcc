@@ -6653,26 +6653,21 @@ int main(void) {
     let _ = fs::remove_file(exe);
 }
 
-// =================== MS __declspec(dllimport/dllexport) ===================
+// =================== __pragma ===================
 
-/// __declspec(dllimport) / __declspec(dllexport) 应被接受 (无 codegen 差异)
+/// __pragma(...) 应被接受 (无操作)
 #[test]
-fn ms_declspec_dllimport_dllexport_accepted() {
+fn ms_pragma_accepted_noop() {
     let src = "\
-__declspec(dllimport) int ext_var;
-__declspec(dllexport) int my_var = 42;
-__declspec(dllimport) void ext_fn(void);
-__declspec(dllexport) void my_fn(void) {}
-int main(void) {
-    my_var = 1;
-    my_fn();
-    return 0;
-}
+__pragma(message(\"hello\"))
+__pragma(pack(push, 1))
+__pragma(pack(pop))
+int main(void) { return 0; }
 ";
-    let (output, obj) = run_object_test("ms-declspec-dll", src);
+    let (output, obj) = run_object_test("ms-pragma-noop", src);
     assert!(
         output.status.success(),
-        "__declspec(dllimport/dllexport) should be accepted: {}",
+        "__pragma should be accepted as no-op: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let _ = fs::remove_file(obj);
