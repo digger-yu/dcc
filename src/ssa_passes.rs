@@ -410,7 +410,7 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
             continue;
         } // 太短不调度
         // 保守: 有副作用指令时不做重排, 避免破坏数据依赖
-        // 包括: Store/Call/IndexStore/MemberStore, 以及 asm 内存屏障标记
+        // 包括: Store/Call/IndexStore/MemberStore, 以及 asm 相关标记
         let has_side = b.insts.iter().any(|i| {
             match &i.kind {
                 InstKind::Store { .. }
@@ -419,6 +419,14 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
                 | InstKind::MemberStore { .. } => true,
                 // asm memory clobber 产生 Store 到 __dcc_asm_memory_barrier,
                 // 已被上面的 Store 分支捕获.
+                // 防御性检查: 任何 __dcc_asm_* 符号引用都视为调度屏障,
+                // 即使未来 SSA pipeline 对含 asm 函数开放也不会误重排.
+                InstKind::Bin { l, r, .. } => {
+                    operand_refs_asm(l) || operand_refs_asm(r)
+                }
+                InstKind::Un { e, .. } | InstKind::Load { e, .. } | InstKind::Cast { e, .. } => {
+                    operand_refs_asm(e)
+                }
                 _ => false,
             }
         });
@@ -830,13 +838,15 @@ pub fn register_allocation(func: &mut Function) -> bool {
     let mut asm_reg_pressure: usize = 0;
     for b in func.blocks.values() {
         for inst in &b.insts {
-            // asm memory barrier 标记不算寄存器压力
+            // asm memory barrier / memory clobber 标记: 每个标记代表一个
+            // asm 块占用的隐式寄存器 (mfence 等), 计入压力.
             if let InstKind::Store {
                 e: Operand::SymAddr(name),
                 ..
             } = &inst.kind
             {
                 if name.starts_with("__dcc_asm_") {
+                    asm_reg_pressure += 1;
                     continue;
                 }
             }
@@ -1359,6 +1369,16 @@ fn operand_uses(k: &InstKind) -> Vec<String> {
     let mut v = Vec::new();
     collect_uses(k, &mut v);
     v
+}
+
+/// 检查操作数是否引用 asm 相关符号 (__dcc_asm_* 前缀).
+/// 用于指令调度屏障检测: 任何涉及 asm 标记的操作数都视为副作用.
+fn operand_refs_asm(op: &Operand) -> bool {
+    match op {
+        Operand::SymAddr(name) => name.starts_with("__dcc_asm_"),
+        Operand::Var(v) => v.name().starts_with("__dcc_asm_"),
+        _ => false,
+    }
 }
 
 fn collect_uses(k: &InstKind, out: &mut Vec<String>) {

@@ -109,11 +109,11 @@
 
 ## 内联 asm 优化器集成
 
-| 缺失能力 | 当前行为 | 说明 |
-|-----------|----------|------|
-| asm 周围指令重排别名分析 | 仅 memory clobber 产生调度屏障 | 无 memory clobber 的 asm 不参与别名分析，可能导致不安全的重排 |
-| DCE 不消除无副作用无输出 asm | ✅ 已按 GCC 兼容行为保留 | 所有 inline asm 视为潜在副作用，DCE 不消除 |
-| 寄存器分配器 asm 统一规划 | 依赖硬编码 GP/XMM 池 | asm 输入输出占用的物理寄存器未与 SSA 寄存器分配统一建模 |
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| asm 周围指令重排别名分析 | ✅ 已实装 | 指令调度将任何 `__dcc_asm_*` 符号引用视为调度屏障; memory clobber 产生 Store 到 `__dcc_asm_memory_barrier` 被 Store 分支捕获; 防御性检查扩展到 Bin/Un/Load/Cast 操作数 |
+| DCE 不消除无副作用无输出 asm | ✅ GCC 兼容 | 所有 inline asm 视为潜在副作用，DCE 不消除 |
+| 寄存器分配器 asm 统一规划 | ✅ 已实装 | `register_allocation` 统计 asm 标记寄存器压力 (`asm_reg_pressure` 计入 `__dcc_asm_*` Store 数); 总压力 = SSA 值数 + asm 压力; codegen 侧 `parse_clobber_registers` 排除 clobbered 寄存器 |
 
 ## 内联 asm 调试信息
 
