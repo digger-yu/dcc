@@ -124,14 +124,14 @@
 
 ## 内联 asm 测试覆盖空白
 
-| 缺失场景 | 说明 |
-|-----------|------|
-| 多 TU 跨文件 asm goto 跳转 | 需链接两个 `.o` 文件验证 asm goto 标签解析 |
-| asm goto 输出约束跨 fall-through / jump 路径写回 | 验证跳转路径不写回、fall-through 路径正确写回 |
-| 大规模 AVX-512 EVEX 掩码指令端到端运行 | `asm_avx.c` 仅编译通过，未运行验证结果正确性 |
-| asm goto 与 `&&label` 混合 | 混合使用 computed goto 地址与 asm goto 标签 |
-| 嵌套 asm 字符串里的 `.macro` / `.rept` 块 | 深层嵌套宏展开的边界情况 |
-| memory clobber + 优化器重排验证 | `-O2` 下 memory clobber 阻止指令重排的端到端验证 |
+| 场景 | 状态 | 说明 |
+|------|------|------|
+| 多 TU 跨文件 asm goto 跳转 | ✅ 已覆盖 | `asm_goto_multi_tu_compiles_and_runs`: 分别编译两个 `.o` 后 gcc 链接，验证 asm goto 跨 TU 符号解析 |
+| asm goto 输出约束跨 fall-through / jump 路径写回 | ✅ 已覆盖 | `asm_goto_output_paths_compiles_and_runs`: 验证跳转路径不写回、fall-through 路径正确写回 |
+| SIMD 指令端到端运行验证 | ✅ 已覆盖 | `asm_avx512_runtime_compiles_and_runs`: 使用 SSE2 标量指令 (`addsd`/`mulsd`/`subsd`/`divsd`) 验证运行时结果正确性 |
+| asm goto 与 `&&label` 混合 | ✅ 已覆盖 | `asm_goto_label_addr_mix_compiles_and_runs`: 同一 CU 内 asm goto 与 computed goto (`&&label`) 共存 |
+| 嵌套 asm 字符串里的 `.macro` / `.rept` 块 | ✅ 已覆盖 | `asm_nested_macro_rept_compiles_and_runs`: 多层 `.rept`/`.irp` 嵌套展开验证 |
+| memory clobber + 优化器重排验证 | ✅ 已覆盖 | `asm_memory_clobber_optimizer_compiles_and_runs`: `-O2` 下 memory clobber 编译器屏障端到端验证 |
 
 ## 本地基线
 

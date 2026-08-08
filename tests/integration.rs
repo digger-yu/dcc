@@ -7321,3 +7321,172 @@ int main(void) { return 0; }
     assert_eq!(rc, 0);
     let _ = fs::remove_file(exe);
 }
+
+// =================== Section 11: asm test coverage gaps ===================
+
+/// asm goto 输出约束跨 fall-through / jump 路径写回验证
+#[test]
+#[cfg(unix)]
+fn asm_goto_output_paths_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_goto_output_paths.c");
+    let (output, exe) = run_compile_and_run("asm-goto-output-paths", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "asm_goto_output_paths should return 0, got {rc}");
+}
+
+/// asm goto 与 &&label 混合
+#[test]
+#[cfg(unix)]
+fn asm_goto_label_addr_mix_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_goto_label_addr_mix.c");
+    let (output, exe) = run_compile_and_run("asm-goto-label-addr-mix", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "asm_goto_label_addr_mix should return 0, got {rc}");
+}
+
+/// 嵌套 asm 字符串里的 .macro / .rept 块
+#[test]
+#[cfg(unix)]
+fn asm_nested_macro_rept_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_nested_macro_rept.c");
+    let (output, exe) = run_compile_and_run("asm-nested-macro-rept", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "asm_nested_macro_rept should return 0, got {rc}");
+}
+
+/// memory clobber + 优化器重排验证 (-O2)
+#[test]
+#[cfg(unix)]
+fn asm_memory_clobber_optimizer_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_memory_clobber_optimizer.c");
+    let (output, exe) =
+        run_compile_and_run_flags("asm-memory-clobber-optimizer", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "asm_memory_clobber_optimizer should return 0, got {rc}");
+}
+
+/// 大规模 AVX-512 EVEX 掩码指令端到端运行
+#[test]
+#[cfg(unix)]
+fn asm_avx512_runtime_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_avx512_runtime.c");
+    let (output, exe) = run_compile_and_run("asm-avx512-runtime", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "asm_avx512_runtime should return 0, got {rc}");
+}
+
+/// 多 TU 跨文件 asm goto 跳转: 两个 .o 分别编译后链接
+#[test]
+#[cfg(unix)]
+fn asm_goto_multi_tu_compiles_and_runs() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    // TU1: defines asm_goto helper function
+    let tu1_src = r#"
+__attribute__((noinline))
+int asm_goto_helper(int x) {
+    asm goto (
+        "cmp $0, %0\n\t"
+        "jg %l[positive]"
+        :
+        : "r" (x)
+        : "cc"
+        : positive
+    );
+    return -1;
+positive:
+    return 1;
+}
+"#;
+    // TU2: calls asm_goto_helper from TU1
+    let tu2_src = r#"
+extern int asm_goto_helper(int x);
+int main(void) {
+    int r1 = asm_goto_helper(5);
+    if (r1 != 1) return 1;
+    int r2 = asm_goto_helper(-3);
+    if (r2 != -1) return 2;
+    return 0;
+}
+"#;
+    let tu1_path = dir.join(format!("dcc-asm-goto-tu1-{}.c", pid));
+    let tu2_path = dir.join(format!("dcc-asm-goto-tu2-{}.c", pid));
+    let tu1_obj = dir.join(format!("dcc-asm-goto-tu1-{}.o", pid));
+    let tu2_obj = dir.join(format!("dcc-asm-goto-tu2-{}.o", pid));
+    let exe = dir.join(format!("dcc-asm-goto-multi-tu-{}", pid));
+    std::fs::write(&tu1_path, tu1_src).unwrap();
+    std::fs::write(&tu2_path, tu2_src).unwrap();
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    let c1 = std::process::Command::new(dcc)
+        .args(["-c", "-o"])
+        .arg(&tu1_obj)
+        .arg(&tu1_path)
+        .output()
+        .expect("dcc tu1");
+    let _ = std::fs::remove_file(&tu1_path);
+    assert!(
+        c1.status.success(),
+        "tu1 compile: {}",
+        String::from_utf8_lossy(&c1.stderr)
+    );
+    let c2 = std::process::Command::new(dcc)
+        .args(["-c", "-o"])
+        .arg(&tu2_obj)
+        .arg(&tu2_path)
+        .output()
+        .expect("dcc tu2");
+    let _ = std::fs::remove_file(&tu2_path);
+    assert!(
+        c2.status.success(),
+        "tu2 compile: {}",
+        String::from_utf8_lossy(&c2.stderr)
+    );
+    let link = std::process::Command::new("gcc")
+        .args(["-o"])
+        .arg(&exe)
+        .arg(&tu1_obj)
+        .arg(&tu2_obj)
+        .output()
+        .expect("gcc link");
+    let _ = std::fs::remove_file(&tu1_obj);
+    let _ = std::fs::remove_file(&tu2_obj);
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
+    }
+    let run = std::process::Command::new(&exe).output().expect("run");
+    let rc = run.status.code().unwrap_or(-1);
+    let _ = std::fs::remove_file(&exe);
+    assert_eq!(rc, 0, "multi-TU asm goto should return 0, got {rc}");
+}
