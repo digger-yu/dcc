@@ -138,7 +138,6 @@ pub fn emit(
             }
             if lto_enabled {
                 // 嵌入 dcc 自有 IR 位码（供 src/link 多 TU LTO 使用）
-                // 旧版 .llvm.lto 文本摘要已废弃，统一使用 .dcc.lto DBC 位码格式
                 let bc = crate::link::lto_bitcode::serialize_module(module, source_name);
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".dcc.lto".to_string(),
@@ -147,7 +146,10 @@ pub fn emit(
                     flags: 0,
                     align: 1,
                 });
-                // 同时输出 .llvm.lto 文本摘要, 兼容 GC-sections 探测和 ld -r 合并路径
+                // 同时输出 .llvm.lto 文本摘要，兼容：
+                //   1) GC-sections 探测（外部工具检查 .llvm.lto 判断是否有 LTO 信息）
+                //   2) ld -r 合并路径（lto.rs 读写 .llvm.lto 进行跨 TU 合并）
+                // 与 .dcc.lto DBC 位码并存，两者职责不同。
                 let funcs: Vec<(&str, u64, bool)> = module
                     .functions
                     .iter()

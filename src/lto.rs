@@ -1,8 +1,15 @@
 // src/lto.rs - 跨翻译单元 LTO 摘要容器
 //
-// 设计边界：仅维护 `.llvm.lto` 文本摘要（defined/referenced/size），供
-// `link.rs` 在 `ld -r --gc-sections` 后做 dead symbol 诊断与 objcopy strip。
-// 不做 IR/bitcode 级跨 TU 内联、常量传播或全局 DCE。
+// 设计边界：维护 `.llvm.lto` 文本摘要（defined/referenced/size），供：
+//   1) `link.rs` 在 `ld -r --gc-sections` 后做 dead symbol 诊断与 objcopy strip
+//   2) 外部工具（如 GCC ld）探测 LTO 信息
+//   3) `-r` 合并路径跨 TU 保留 LTO 元数据
+//
+// 注意：`.llvm.lto` 与 `.dcc.lto` (DBC 位码) 并存，两者职责不同：
+//   - `.llvm.lto`: 文本摘要，兼容外部工具和 ld -r 合并
+//   - `.dcc.lto`: DBC 位码，供自研链接器做 IR 级跨 TU 优化
+//
+// 不做 IR/bitcode 级跨 TU 内联、常量传播或全局 DCE（那是 .dcc.lto 的职责）。
 
 use std::collections::HashMap;
 
