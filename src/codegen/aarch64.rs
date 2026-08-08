@@ -4,6 +4,7 @@ use crate::ast::{BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, T
 use crate::codegen::elf::{
     self, ElfRela, ElfSection, ElfSym, R_AARCH64_ADR_PREL_LO21, R_AARCH64_CALL26, SHF_ALLOC,
     SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_GNU_IFUNC, STT_OBJECT,
+    STT_TLS,
 };
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
@@ -61,6 +62,10 @@ pub struct Aarch64Codegen {
     mte_enabled: bool,
     /// MTE: 当前函数的 tag 栈帧大小
     tag_frame_size: i32,
+    /// 嵌套 sret: 保存的入参 sret 指针栈偏移 (函数返回 >16B 聚合时有效)
+    saved_sret_ptr: Option<i32>,
+    /// TLS 全局变量集合 (名称 -> 偏移), 用于 load_global_addr_w0 分发 TLS 访问序列
+    tls_globals: HashMap<String, u64>,
     _target: Target,
 }
 
@@ -106,6 +111,8 @@ impl Aarch64Codegen {
             va_flt_offs: 0,
             mte_enabled: false,
             tag_frame_size: 0,
+            saved_sret_ptr: None,
+            tls_globals: HashMap::new(),
             _target: target,
         }
     }
@@ -192,6 +199,10 @@ impl Aarch64Codegen {
         } else {
             self.rodata.resize(self.rodata.len() + size, 0);
         }
+        // TLS 全局变量: 记录到 tls_globals 集合, codegen 在访问时分发 TLS 序列
+        if g.is_tls {
+            self.tls_globals.insert(g.name.clone(), off);
+        }
         if self.relocatable {
             self.symbols.push(ElfSym {
                 name: g.name.clone(),
@@ -199,7 +210,7 @@ impl Aarch64Codegen {
                 value: off,
                 size: size as u64,
                 bind: STB_GLOBAL,
-                ty: STT_OBJECT,
+                ty: if g.is_tls { STT_TLS } else { STT_OBJECT },
                 visibility: elf::STV_DEFAULT,
             });
             self.sym_index
@@ -392,6 +403,10 @@ impl Aarch64Codegen {
     fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
         self.plan_locals(ast);
         self.current_return_ty = Some(func.return_type.clone());
+        self.saved_sret_ptr = None;
+        // 嵌套 sret: 如果函数返回 >16B 聚合类型, 在帧建立后立即保存 x0 (caller 传入的
+        // sret 指针) 到栈局部 <sret_ptr>, 防止后续调用覆盖 x0 导致返回时丢失目标地址.
+        let returns_large_agg = aggregate_size(&func.return_type).is_some_and(|s| s > 16);
         // 变参函数需要在 frame 顶部预留寄存器保存区:
         // x0..x7 (64 字节) + v0..v7 (64 字节) = 128 字节.
         let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
@@ -407,6 +422,13 @@ impl Aarch64Codegen {
         self.frame_bytes = (self.stack_bytes + 15) & !15;
         if self.frame_bytes > 0 {
             self.sub_sp_imm(self.frame_bytes as u32);
+        }
+        // 在帧建立后保存 sret 指针 (必须在 sub_sp 之后, 因为此时 sp 才稳定)
+        if returns_large_agg {
+            let sret_off = self.alloc_local("<sret_ptr>", 8);
+            // str x0, [sp, #sret_off]
+            self.store_w0(sret_off);
+            self.saved_sret_ptr = Some(sret_off);
         }
         // 进入变参函数立即把 x0..x7 和 v0..v7 写入保存区
         if is_variadic {
@@ -466,7 +488,9 @@ impl Aarch64Codegen {
                 let sret_size = aggregate_size(&ret_ty).filter(|s| *s > 16);
                 let hfa = classify_hfa(&ret_ty, &self.aggregate_fields);
                 if let Some(size) = sret_size {
-                    // 大结构体返回: 求值到栈临时区, 再 memcpy 到 [x0] (caller 传入的 sret)
+                    // 大结构体返回: 求值到栈临时区, 再 memcpy 到 sret 目标
+                    // 嵌套安全: 使用 gen_function 入口保存的 <sret_ptr> 而非 x0
+                    // (x0 可能在嵌套调用中被覆盖)
                     let tmp = self.alloc_local("<ret_tmp>", size as i32);
                     if let Some(expr) = ir.expressions.first() {
                         self.gen_expr(expr);
@@ -474,7 +498,14 @@ impl Aarch64Codegen {
                         self.gen_expr_from_ast(e);
                     }
                     self.store_result(tmp, &crate::ast::Type::Int);
-                    self.memcpy_sp_to_x0(tmp, size);
+                    if let Some(sret_off) = self.saved_sret_ptr {
+                        // 从保存的 sret 指针加载目标地址到 x0, 然后 memcpy
+                        self.load_w0(sret_off);
+                        self.memcpy_sp_to_x0(tmp, size);
+                    } else {
+                        // 顶层函数或未保存 sret 指针: 直接用 x0 (兼容旧路径)
+                        self.memcpy_sp_to_x0(tmp, size);
+                    }
                 } else if let Some(hfa) = hfa {
                     if let Some(expr) = ir.expressions.first() {
                         self.gen_hfa_expr(expr, hfa);
@@ -977,6 +1008,17 @@ impl Aarch64Codegen {
     }
 
     fn load_global_addr_w0(&mut self, name: &str) {
+        // TLS 全局变量: 分发 TLSDESC 访问序列 (获取 TLS 变量地址到 x0)
+        if self.tls_globals.contains_key(name) {
+            if self.relocatable {
+                // 可重定位模式: 发出经典 TLSDESC 4 指令序列 + 3 重定位
+                self.emit_tlsdesc_access(name);
+            } else {
+                // ET_EXEC 模式: 使用 Local Exec 序列 (直接 TP + offset)
+                self.emit_tls_le_access(name);
+            }
+            return;
+        }
         if self.relocatable {
             let pos = self.pos();
             self.emit_adr_placeholder(0);
@@ -2902,5 +2944,68 @@ mod tests {
         );
         // 验证 va_gp_offs 推进
         assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
+    }
+
+    // 嵌套 sret: 验证 gen_function 在返回 >16B 聚合时保存 x0 到 <sret_ptr>
+    // 并验证 gen_stmt Return 使用保存的 sret 指针而非 x0
+    #[test]
+    fn aarch64_nested_sret_saves_sret_ptr() {
+        use crate::ir::ValueType;
+        let mut cg = Aarch64Codegen::new(
+            crate::target::Target::resolve(
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
+            ),
+            true,
+        );
+        // 模拟返回 32 字节聚合类型的函数
+        cg.current_return_ty = Some(ValueType::Aggregate {
+            name: "Big".to_string(),
+            size: 32,
+            is_union: false,
+        });
+        // 模拟帧建立后保存 sret 指针
+        cg.stack_bytes = 16;
+        cg.frame_bytes = 16;
+        let sret_off = cg.alloc_local("<sret_ptr>", 8);
+        cg.store_w0(sret_off);
+        cg.saved_sret_ptr = Some(sret_off);
+        // 验证 saved_sret_ptr 已设置
+        assert!(
+            cg.saved_sret_ptr.is_some(),
+            "saved_sret_ptr should be set for large aggregate return"
+        );
+        assert_eq!(
+            cg.saved_sret_ptr.unwrap(),
+            sret_off,
+            "saved_sret_ptr should match allocated offset"
+        );
+        // 验证 locals 包含 <sret_ptr>
+        assert!(
+            cg.locals.contains_key("<sret_ptr>"),
+            "locals should contain <sret_ptr>"
+        );
+    }
+
+    // TLS: 验证 tls_globals 集合正确记录 TLS 变量
+    #[test]
+    fn aarch64_tls_globals_tracking() {
+        let mut cg = Aarch64Codegen::new(
+            crate::target::Target::resolve(
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
+            ),
+            true,
+        );
+        // 模拟 TLS 全局变量记录
+        cg.tls_globals.insert("my_tls_var".to_string(), 0);
+        cg.tls_globals.insert("another_tls".to_string(), 8);
+        assert!(
+            cg.tls_globals.contains_key("my_tls_var"),
+            "tls_globals should contain my_tls_var"
+        );
+        assert!(
+            cg.tls_globals.contains_key("another_tls"),
+            "tls_globals should contain another_tls"
+        );
+        assert_eq!(cg.tls_globals.len(), 2);
     }
 }

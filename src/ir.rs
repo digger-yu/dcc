@@ -97,6 +97,7 @@ pub struct Global {
     pub ty: ValueType,
     pub initializer: Option<TypedExpr>,
     pub span: Span,
+    pub is_tls: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +158,7 @@ pub fn lower(source: ast::Program) -> Result<Module, Vec<Diagnostic>> {
                     ty: cx.lower_type(&v.ty, &v.span),
                     initializer: v.init.as_ref().map(|e| cx.lower_expr(e)),
                     span: v.span.clone(),
+                    is_tls: v.is_thread_local,
                 });
             }
             _ => {}

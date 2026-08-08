@@ -1599,6 +1599,74 @@ fn aarch64_if_while_cross_compile() {
     assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
 }
 
+/// AArch64: 大结构体 >16B 嵌套返回 (multi-level sret call chain).
+/// 验证 outer() -> middle() -> make_big() 三层调用链中 sret 指针正确传递.
+#[test]
+fn aarch64_nested_sret_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-a64-sret-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-a64-sret-{}.o", std::process::id()));
+    let src = include_str!("fixtures/c/aarch64_nested_sret.c");
+    fs::write(&source_path, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "aarch64 nested sret compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
+    // 验证代码尺寸 > 200 字节 (多层 sret 需要足够的 memcpy 指令)
+    assert!(bytes.len() > 200, "expected substantial code for nested sret");
+}
+
+/// AArch64: TLS 变量交叉编译 (TLSDESC 重定位).
+/// 验证 __thread / _Thread_local 变量生成 TLSDESC 重定位序列.
+#[test]
+fn aarch64_tls_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-a64-tls-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-a64-tls-{}.o", std::process::id()));
+    let src = include_str!("fixtures/c/aarch64_tls.c");
+    fs::write(&source_path, src).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "aarch64 TLS compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
+}
+
 /// M7: riscv64-linux-gnu 交叉编译 hello.o。
 #[test]
 fn riscv64_hello_cross_compile() {

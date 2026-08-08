@@ -571,6 +571,7 @@ fn deserialize_global(data: &[u8], cur: &mut usize) -> Result<Global, String> {
         ty,
         initializer: init,
         span: Span::point("", 0, 0),
+        is_tls: false,
     })
 }
 

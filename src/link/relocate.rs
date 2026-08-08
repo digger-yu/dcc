@@ -53,7 +53,12 @@ use crate::codegen::elf::{
     R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_CALL26, R_AARCH64_JUMP26, R_AARCH64_LDST16_ABS_LO12_NC,
     R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC, R_AARCH64_LDST8_ABS_LO12_NC,
     R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G2, R_AARCH64_MOVW_UABS_G3,
-    R_AARCH64_PREL64, R_ARM_ABS32, R_ARM_CALL, R_ARM_JUMP24, R_ARM_MOVT_ABS, R_ARM_MOVW_ABS_NC,
+    R_AARCH64_PREL64, R_AARCH64_TLSDESC_ADD, R_AARCH64_TLSDESC_ADD_LO12, R_AARCH64_TLSDESC_ADR_PAGE21,
+    R_AARCH64_TLSDESC_CALL, R_AARCH64_TLSDESC_LDR, R_AARCH64_TLSDESC_LD64_LO12,
+    R_AARCH64_TLSDESC_OFF_G0_NC, R_AARCH64_TLSDESC_OFF_G1,
+    R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21, R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC,
+    R_AARCH64_TLSLE_MOVW_TPREL_G0_NC, R_AARCH64_TLSLE_MOVW_TPREL_G1,
+    R_ARM_ABS32, R_ARM_CALL, R_ARM_JUMP24, R_ARM_MOVT_ABS, R_ARM_MOVW_ABS_NC,
     R_MIPS_26, R_MIPS_32, R_MIPS_64, R_MIPS_HI16, R_MIPS_LO16, R_RISCV_32, R_RISCV_32_PCREL,
     R_RISCV_64, R_RISCV_CALL, R_RISCV_CALL_PLT, R_RISCV_HI20, R_RISCV_LO12_I, R_RISCV_LO12_S,
     R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I, R_RISCV_PCREL_LO12_S, R_RISCV_TPOFF64,
@@ -357,6 +362,99 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     // 16-bit chunk 3: bits[63:48]
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm16 = ((s >> 48) & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                // AArch64 TLS 重定位
+                R_AARCH64_TLSDESC_ADR_PAGE21 => {
+                    // TLSDESC adrp: page(S+A) - page(P), 21-bit
+                    // 静态链接: 简化为 ADR_PREL_PG_HI21 语义
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = ((s & !0xfff).wrapping_sub(p & !0xfff)) as i64 >> 12;
+                    let immlo = (offset & 0x3) as u32;
+                    let immhi = ((offset >> 2) & 0x7ffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0x60ffffe0) | (immhi << 5) | (immlo << 29);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSDESC_LD64_LO12 => {
+                    // TLSDESC ldr: lo12(S+A), 12-bit unsigned scaled by 8
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm12 = ((s >> 3) & 0xfff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfff) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSDESC_ADD_LO12 => {
+                    // TLSDESC add: lo12(S+A), 12-bit unsigned
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm12 = (s & 0xfff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfff) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSDESC_OFF_G1 => {
+                    // TLSDESC MOVW: bits[31:16] of TLS offset
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSDESC_OFF_G0_NC => {
+                    // TLSDESC MOVK: bits[15:0] of TLS offset (no carry)
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = (s & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSDESC_LDR | R_AARCH64_TLSDESC_ADD | R_AARCH64_TLSDESC_CALL => {
+                    // Marker relocations: ld.so 识别用, 静态链接无需修改指令
+                }
+                R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 => {
+                    // TLS IE adrp: page(GOTTPREL(S+A)) - page(P)
+                    // 静态链接: 简化为直接 TP 偏移的页计算
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = ((s & !0xfff).wrapping_sub(p & !0xfff)) as i64 >> 12;
+                    let immlo = (offset & 0x3) as u32;
+                    let immhi = ((offset >> 2) & 0x7ffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0x60ffffe0) | (immhi << 5) | (immlo << 29);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC => {
+                    // TLS IE ldr: lo12 of GOTTPREL, scaled by 8
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm12 = ((s >> 3) & 0xfff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfff) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSLE_MOVW_TPREL_G1 => {
+                    // TLS LE MOVW: bits[31:16] of TP offset
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSLE_MOVW_TPREL_G0_NC => {
+                    // TLS LE MOVK: bits[15:0] of TP offset (no carry)
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = (s & 0xffff) as u32;
                     let inst =
                         u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & !0xffff) | imm16;

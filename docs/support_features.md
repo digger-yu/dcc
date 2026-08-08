@@ -150,7 +150,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 架构 | 状态 | 说明 |
 |------|------|------|
 | x86_64 | ✅ 完整 | 主后端 |
-| aarch64 | ✅ 完整 | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 |
+| aarch64 | ✅ 完整 | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 + 嵌套 sret (>16B 多层调用链) |
 | riscv64 | ✅ 完整 | 压缩指令 C 扩展 + FP D 扩展双精度 + RVV 向量基础 + 特权指令/CSR + JAL 范围校验 + HFA 分类 |
 | mips | ✅ 完整 | ELF32, big-endian, MIPS32 O32 ABI |
 | mips64 | ✅ 完整 | ELF64, big-endian, MIPS64 N64 ABI |
@@ -164,7 +164,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 特性 | 说明 |
 |------|------|
 | 聚合类型 by-ref | aarch64/riscv64 `gen_call` 检测 `ValueType::Aggregate` / `Array` / `Complex`，local 参数传地址 |
-| 聚合类型 sret 返回 | 返回 > 16 字节时 caller 分配 `<sret>` local；aarch64 `memcpy_sp_to_x0`；riscv64 `memcpy_sp_to_a0` |
+| 聚合类型 sret 返回 | 返回 > 16 字节时 caller 分配 `<sret>` local；aarch64 `memcpy_sp_to_x0`；riscv64 `memcpy_sp_to_a0`；aarch64 嵌套 sret 支持多层调用链 (gen_function 入口保存 x0 到 `<sret_ptr>`, return 时恢复) |
 | aarch64/riscv64 整数除/取模 | aarch64 `sdiv` + `msub`；riscv64 RV64M `div` / `rem` |
 | aarch64/riscv64 移位 | aarch64 `lslv` / `lsrv`；riscv64 `sll` / `srl` / `sra` |
 | aarch64 va_arg GP + float + 栈溢出 | x0..x7 + v0..v7 保存区 + 顺序读；>8 个变参从 caller 栈读取 |
@@ -276,11 +276,11 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | vDSO 集成 | `--vdso=<path>` 解析 vDSO ELF，嵌入 `.text.vdso` + `.note.GNU-vdso` + 符号表 |
 | PIE/Shared 输出 | 多架构 `_start` 入口桩 |
 | AArch64/RISC-V/MIPS/ARM ELF 输出 | `elf_exec.rs` 多架构包装函数 |
-| AArch64 重定位（22 种） | `ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_*` / `MOVW_UABS_*` 等 |
+| AArch64 重定位（33 种） | `ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_*` / `MOVW_UABS_*` / `TLSDESC_*` (8 种) / `TLSIE_*` (2 种) / `TLSLE_*` (2 种) |
 | RISC-V 重定位（15 种） | `64` / `32` / `CALL` / `PCREL_*` / `HI20` / `LO12_*` / `TPOFF*` 等 |
 | GOT64 大条目 | `R_X86_64_GOT64` / `R_X86_64_GOTOFF64` |
 | TLS 重定位 | `R_X86_64_TPOFF64` / `R_X86_64_TPOFF32` |
-| TLS codegen | `_Thread_local` → `.tdata` / `.tbss`、`STT_TLS`；AArch64 TLSDESC 序列 |
+| TLS codegen | `_Thread_local` → `.tdata` / `.tbss`、`STT_TLS`；AArch64 TLSDESC 经典序列 (3 重定位) + 优化序列 (5 重定位: OFF_G1/OFF_G0_NC/LDR/ADD/CALL) + IE/LE 序列；linker 全类型解析 |
 | ET_EXEC symtab | `build_elf_exec_x86_64` 输出 `.symtab` / `.strtab` |
 | wchar_t libc 转发 | wcs*/wmem* 11 个入口在 link implicit undef 白名单 |
 | signal libc 转发 | `sigaction` / `sigaltstack` / `signal` 白名单 |
@@ -326,7 +326,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `setjmp` / `longjmp` | libc + DWARF CFI 兼容寄存器保存表 |
 | `alloca` | `__builtin_alloca` codegen: sub rsp + 16 字节对齐 |
 | 信号 | `sigaction` / `sigaltstack` / `signal` 运行时验证通过 |
-| TLS dtv / TLS 描述符 | AArch64 TLSDESC 4 指令序列 + 3 重定位；IE/LE 路径 |
+| TLS dtv / TLS 描述符 | AArch64 TLSDESC 经典 4 指令序列 + 3 重定位 + 优化 MOVW 对 5 重定位；IE/LE 路径；linker 全类型支持 |
 | atexit / `__cxa_atexit` | `FiniArrayBuilder` 按 priority 排序 |
 | `printf` / `scanf` format string | 完整 flag/width/precision/length/type 匹配 + 指针类型验证 |
 | `wchar_t` / 宽字符字面量 `L"..."` | wcs*/wmem* libc 转发 |
