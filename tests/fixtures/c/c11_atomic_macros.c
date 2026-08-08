@@ -33,6 +33,30 @@ void test_fences(void) {
 int hosted_ok = 1;
 #endif
 
+/* ---- C11 7.17.6: ATOMIC_*_LOCK_FREE 宏 ---- */
+#if ATOMIC_BOOL_LOCK_FREE != 1
+#error "ATOMIC_BOOL_LOCK_FREE should be 1"
+#endif
+#if ATOMIC_CHAR_LOCK_FREE != 1
+#error "ATOMIC_CHAR_LOCK_FREE should be 1"
+#endif
+#if ATOMIC_SHORT_LOCK_FREE != 1
+#error "ATOMIC_SHORT_LOCK_FREE should be 1"
+#endif
+#if ATOMIC_INT_LOCK_FREE != 1
+#error "ATOMIC_INT_LOCK_FREE should be 1"
+#endif
+#if ATOMIC_LONG_LOCK_FREE != 1
+#error "ATOMIC_LONG_LOCK_FREE should be 1"
+#endif
+#if ATOMIC_LLONG_LOCK_FREE != 1
+#error "ATOMIC_LLONG_LOCK_FREE should be 1"
+#endif
+#if ATOMIC_POINTER_LOCK_FREE != 1
+#error "ATOMIC_POINTER_LOCK_FREE should be 1"
+#endif
+int lock_free_ok = ATOMIC_INT_LOCK_FREE;
+
 int main(void) {
     ai = 10;
     ab = 0;

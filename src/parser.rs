@@ -226,6 +226,7 @@ pub struct Parser<'a> {
     decl_auto_type: bool,                      // __auto_type：类型由初始化表达式推导
     allow_named_type: bool,                    // typeof 等上下文允许 Type::Named
     opts: ParseOptions,
+    shadow_counter: i32,                       // 嵌套块遮蔽重命名计数器
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -262,6 +263,7 @@ impl<'a> Parser<'a> {
             decl_auto_type: false,
             allow_named_type: false,
             opts,
+            shadow_counter: 0,
         };
         // C23 nullptr_t: 内置类型 (等价 nullptr 表达式所对应的 (void*)0)
         // 系统头 (glibc stddef.h) 若重复定义, register_typedef 按
@@ -4458,6 +4460,9 @@ impl<'a> Parser<'a> {
 
     fn parse_block(&mut self) -> Block {
         let mut items = vec![];
+        // 当前块的遮蔽重命名映射: 原名 -> 新名
+        // 仅在本块有效，不进入嵌套块 (嵌套块自行处理)
+        let mut shadow_map: Vec<(String, String)> = vec![];
         loop {
             if self.cur.kind == TokKind::RBrace || self.cur.kind == TokKind::Eof {
                 break;
@@ -4468,10 +4473,46 @@ impl<'a> Parser<'a> {
             }
             if self.cur.kind == TokKind::Ident && self.cur.text == "_Static_assert" {
                 let _ = self.parse_static_assert();
+            // MSVC 扩展 __pragma: 块级作用域内也接受 (无操作)
+            } else if self.cur.kind == TokKind::Ident && self.cur.text == "__pragma" {
+                self.advance();
+                if self.cur.kind == TokKind::LParen {
+                    self.advance();
+                    let mut depth = 1i32;
+                    while depth > 0 && self.cur.kind != TokKind::Eof {
+                        if self.cur.kind == TokKind::LParen {
+                            depth += 1;
+                        } else if self.cur.kind == TokKind::RParen {
+                            depth -= 1;
+                        }
+                        self.advance();
+                    }
+                }
             } else if self.is_decl_start() {
+                // 记录声明前的变量集，用于检测遮蔽
+                let pre_decl_locals: std::collections::HashSet<String> = if self.in_function {
+                    self.locals.keys().cloned().collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
                 match self.parse_decl() {
                     Some(ds) => {
                         for d in ds {
+                            // 嵌套块遮蔽: 如果声明的变量名在 parse_decl 前已存在,
+                            // 重命名为内部唯一名以避免 codegen var_map 冲突。
+                            let (d, new_mapping) = if self.in_function {
+                                self.rename_shadow_var(d, &pre_decl_locals)
+                            } else {
+                                (d, None)
+                            };
+                            // 应用已有的遮蔽映射到当前声明 (如初始化表达式引用了被遮蔽的变量)
+                            let mut d = d;
+                            if !shadow_map.is_empty() {
+                                Self::apply_shadow_map_decl(&mut d, &shadow_map);
+                            }
+                            if let Some((old, new)) = new_mapping {
+                                shadow_map.push((old, new));
+                            }
                             items.push(BlockItem::Decl(d));
                         }
                     }
@@ -4481,7 +4522,13 @@ impl<'a> Parser<'a> {
                 }
             } else {
                 match self.parse_stmt() {
-                    Some(s) => items.push(BlockItem::Stmt(s)),
+                    Some(mut s) => {
+                        // 应用遮蔽映射到语句中的变量引用
+                        if !shadow_map.is_empty() {
+                            Self::apply_shadow_map_stmt(&mut s, &shadow_map);
+                        }
+                        items.push(BlockItem::Stmt(s));
+                    }
                     None => {
                         self.advance();
                     }
@@ -4491,6 +4538,133 @@ impl<'a> Parser<'a> {
         Block {
             items,
             span: self.cur.span.clone(),
+        }
+    }
+
+    /// 嵌套块遮蔽重命名: 如果变量名在 parse_decl 前已存在于外层作用域,
+    /// 生成唯一内部名。返回 (可能重命名后的声明, 新增映射)。
+    fn rename_shadow_var(
+        &mut self,
+        decl: Decl,
+        pre_decl_locals: &std::collections::HashSet<String>,
+    ) -> (Decl, Option<(String, String)>) {
+        if let Decl::Var(ref v) = decl {
+            let name = &v.name.name;
+            // 检查名字是否在 parse_decl 前就存在 (即被遮蔽)
+            if pre_decl_locals.contains(name) {
+                // 生成唯一名
+                let new_name = format!("{}__dcc_shadow_{}", name, self.shadow_counter);
+                self.shadow_counter += 1;
+                let old_name = name.clone();
+                // 更新当前声明的名称
+                let mut v = v.clone();
+                v.name.name = new_name.clone();
+                // 添加新名到 self.locals (保留旧名, 以便 lookup 不报警告)
+                // shadow_map 会负责重命名后续引用
+                self.locals.insert(new_name.clone(), v.ty.clone());
+                return (Decl::Var(v), Some((old_name, new_name)));
+            }
+        }
+        (decl, None)
+    }
+
+    /// 应用遮蔽映射到声明 (重命名初始化表达式中的引用)
+    fn apply_shadow_map_decl(decl: &mut Decl, map: &[(String, String)]) {
+        if let Decl::Var(v) = decl {
+            if let Some(init) = &mut v.init {
+                Self::apply_shadow_map_expr(init, map);
+            }
+        }
+    }
+
+    /// 应用遮蔽映射到语句
+    fn apply_shadow_map_stmt(stmt: &mut Stmt, map: &[(String, String)]) {
+        match stmt {
+            Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
+                Self::apply_shadow_map_expr(e, map);
+            }
+            Stmt::Block { b, .. } => {
+                // 不进入嵌套块，它们自行处理遮蔽
+            }
+            Stmt::If { cond, then_, else_, .. } => {
+                Self::apply_shadow_map_expr(cond, map);
+                // 不进入 then_/else_ 块
+            }
+            Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
+                Self::apply_shadow_map_expr(cond, map);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                if let Some(s) = init {
+                    Self::apply_shadow_map_stmt(s, map);
+                }
+                if let Some(e) = cond {
+                    Self::apply_shadow_map_expr(e, map);
+                }
+                if let Some(e) = step {
+                    Self::apply_shadow_map_expr(e, map);
+                }
+            }
+            Stmt::Switch { expr, .. } => {
+                Self::apply_shadow_map_expr(expr, map);
+            }
+            _ => {}
+        }
+    }
+
+    /// 应用遮蔽映射到表达式 (重命名 Expr::Ident 引用)
+    fn apply_shadow_map_expr(expr: &mut Expr, map: &[(String, String)]) {
+        match expr {
+            Expr::Ident { name, .. } => {
+                for (old, new) in map {
+                    if name.name == *old {
+                        name.name = new.clone();
+                        break;
+                    }
+                }
+            }
+            Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+                Self::apply_shadow_map_expr(l, map);
+                Self::apply_shadow_map_expr(r, map);
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::apply_shadow_map_expr(callee, map);
+                for arg in args {
+                    Self::apply_shadow_map_expr(arg, map);
+                }
+            }
+            Expr::Unary { e, .. } | Expr::PreInc { e, .. } | Expr::PreDec { e, .. }
+            | Expr::PostInc { e, .. } | Expr::PostDec { e, .. } => {
+                Self::apply_shadow_map_expr(e, map);
+            }
+            Expr::Cast { e, .. } | Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => {
+                Self::apply_shadow_map_expr(e, map);
+            }
+            Expr::Deref { e, .. } | Expr::AddrOf { e, .. } => {
+                Self::apply_shadow_map_expr(e, map);
+            }
+            Expr::Index { arr, idx, .. } => {
+                Self::apply_shadow_map_expr(arr, map);
+                Self::apply_shadow_map_expr(idx, map);
+            }
+            Expr::Member { expr, .. } => {
+                Self::apply_shadow_map_expr(expr, map);
+            }
+            Expr::Cond { cond, then_, else_, .. } => {
+                Self::apply_shadow_map_expr(cond, map);
+                Self::apply_shadow_map_expr(then_, map);
+                Self::apply_shadow_map_expr(else_, map);
+            }
+            Expr::InitList { inits, .. } => {
+                for init in inits {
+                    match init {
+                        InitItem::Expr(e) => Self::apply_shadow_map_expr(e, map),
+                        InitItem::Designated { value, .. } => {
+                            Self::apply_shadow_map_expr(value, map);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4625,7 +4799,11 @@ impl<'a> Parser<'a> {
             }
             TokKind::LBrace => {
                 self.advance();
+                // C11 6.2.1: 嵌套块引入新作用域，保存/恢复 locals
+                // 使内层遮蔽 (shadow) 不影响外层变量的 codegen。
+                let saved_locals = self.locals.clone();
                 let b = self.parse_block();
+                self.locals = saved_locals;
                 if !self.expect(TokKind::RBrace, "'}'") {
                     return None;
                 }

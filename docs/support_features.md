@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-08 — 基于 `cargo test` 295 integration tests + 659 unit tests 全部通过
+> 最后更新：2026-08-08 — 基于 `cargo test` 310 integration tests + 672 unit tests 全部通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -238,7 +238,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | GNU 扩展 | 嵌套函数 / computed goto 跨函数 / `Expr::Unary` 浮点取负 / `AddrOf` REX.R 编码 / `_Complex` 字面量 / `__real__`/`__imag__` |
 | 嵌套块重声明 (C99 6.2.1) | 函数体内遮蔽允许 (不同类型不报 E0007)；文件作用域类型不匹配仍报 E0007 |
 | K&R 函数 | 解析自动检测 + `is_old_style` |
-| 预置 C11 `atomic_*` 宏 | hosted 模式预置 `atomic_int`/`atomic_bool`/`memory_order_*`/`atomic_thread_fence`/`kill_dependency` 等；freestanding 模式 `__STDC_HOSTED__=0` + `__STDC_NO_ATOMICS__=1` 且不预置 |
+| 预置 C11 `atomic_*` 宏 | hosted 模式预置 `atomic_int`/`atomic_bool`/`memory_order_*`/`atomic_thread_fence`/`kill_dependency`/`ATOMIC_*_LOCK_FREE` 等；freestanding 模式 `__STDC_HOSTED__=0` + `__STDC_NO_ATOMICS__=1` 且不预置 |
 
 ## 链接器
 

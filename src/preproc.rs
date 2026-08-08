@@ -669,6 +669,18 @@ pub fn preprocess(
     // （如 atomic_fetch_add(i,v) → __atomic_fetch_add(i,v,5) 破坏声明）。
     // __atomic_* 内建与 __ATOMIC_* 常量仍保留，供显式调用。
     // 不要在 hosted 模式下预置它们 (会破坏 glibc/userspace 中同名函数/宏的调用).
+    // C11 7.17.6: ATOMIC_*_LOCK_FREE 宏 — 0=never, 1=always, 2=sometimes
+    // x86_64 上所有标准整数原子类型均用原生指令实现，始终 lock-free。
+    pp.define_builtin("ATOMIC_BOOL_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_CHAR_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_CHAR16_T_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_CHAR32_T_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_WCHAR_T_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_SHORT_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_INT_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_LONG_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_LLONG_LOCK_FREE", "1");
+    pp.define_builtin("ATOMIC_POINTER_LOCK_FREE", "1");
     // 内存序别名 (memory_order_xxx 已在上面定义)
     // __attribute__: 不定义为宏, 让 token 透传到解析器处理
     // 解析器会识别 __attribute__ 并处理 vector_size 等属性

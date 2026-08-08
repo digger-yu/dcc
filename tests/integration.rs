@@ -6776,3 +6776,123 @@ int main(void) { return 0; }
     );
     let _ = fs::remove_file(obj);
 }
+
+// =================== 嵌套块重声明补充 ===================
+
+/// 嵌套块重声明: 内层块遮蔽全局变量 (不同类型不报 E0007)
+#[test]
+fn nested_block_redecl_shadows_global() {
+    let src = "\
+int x = 100;
+int main(void) {
+    {
+        double x = 3.14;
+        if (x > 3.0) return 0;
+    }
+    return x == 100 ? 0 : 1;
+}
+";
+    let (output, exe) = run_compile_and_run("nested-redecl-global", src);
+    assert!(
+        output.status.success(),
+        "nested block redecl shadowing global should compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "inner x=3.14 > 3.0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// 嵌套块重声明: 多层嵌套遮蔽
+#[test]
+fn nested_block_redecl_multi_level() {
+    let src = "\
+int main(void) {
+    int x = 1;
+    {
+        int x = 2;
+        {
+            int x = 3;
+            if (x != 3) return 1;
+        }
+        if (x != 2) return 2;
+    }
+    if (x != 1) return 3;
+    return 0;
+}
+";
+    let (output, exe) = run_compile_and_run("nested-redecl-multi", src);
+    assert!(
+        output.status.success(),
+        "multi-level nested redecl should compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "each scope should see its own x, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+// =================== __declspec(dllimport/dllexport) ===================
+
+/// __declspec(dllimport) / __declspec(dllexport) 应被接受
+#[test]
+fn ms_declspec_dllimport_dllexport() {
+    let src = "\
+__declspec(dllimport) int imp_var;
+__declspec(dllexport) int exp_var = 42;
+__declspec(dllimport) void imp_fn(void);
+__declspec(dllexport) void exp_fn(void) {}
+int main(void) {
+    exp_var = 10;
+    exp_fn();
+    return exp_var == 10 ? 0 : 1;
+}
+";
+    let (output, exe) = run_compile_and_run("ms-declspec-dll", src);
+    assert!(
+        output.status.success(),
+        "__declspec(dllimport/dllexport) should be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "declspec dll test should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+// =================== ATOMIC_*_LOCK_FREE 宏 ===================
+
+/// C11 ATOMIC_*_LOCK_FREE 宏应预置为 1 (x86_64 始终 lock-free)
+#[test]
+#[cfg(unix)]
+fn c11_atomic_lock_free_macros() {
+    let src = "\
+#if ATOMIC_BOOL_LOCK_FREE != 1
+#error ATOMIC_BOOL_LOCK_FREE
+#endif
+#if ATOMIC_CHAR_LOCK_FREE != 1
+#error ATOMIC_CHAR_LOCK_FREE
+#endif
+#if ATOMIC_INT_LOCK_FREE != 1
+#error ATOMIC_INT_LOCK_FREE
+#endif
+#if ATOMIC_LONG_LOCK_FREE != 1
+#error ATOMIC_LONG_LOCK_FREE
+#endif
+#if ATOMIC_LLONG_LOCK_FREE != 1
+#error ATOMIC_LLONG_LOCK_FREE
+#endif
+#if ATOMIC_POINTER_LOCK_FREE != 1
+#error ATOMIC_POINTER_LOCK_FREE
+#endif
+int main(void) { return 0; }
+";
+    let (output, exe) = run_compile_and_run("c11-atomic-lock-free", src);
+    assert!(
+        output.status.success(),
+        "ATOMIC_*_LOCK_FREE macros should be 1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0);
+    let _ = fs::remove_file(exe);
+}
