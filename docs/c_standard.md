@@ -146,7 +146,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 | `-std=cXX` | 严格 C 标准 | - |
 | `-ffreestanding` | 不假设标准库存在 | off (假设 hosted) |
 | `-fno-builtin` | 不使用 builtin | off |
-| `-fsanitize=address` | KASAN 桩：TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 load/store 前 | off |
+| `-fsanitize=address` | KASAN 桩：TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 load/store 前 + codegen 级栈/全局变量红区插桩 | off |
 | `-fsanitize=hwaddress` | HWASAN 桩：同 KASAN 路径（ARM MTE 标签未插入） | off |
 | `-fsanitize=undefined` | UBSAN 桩：div / shift / 有符号 overflow 前 `__ubsan_handle_*` | off |
 | `-fsanitize=thread` | KCSAN 桩：TU init + 每函数 entry，load/store 走 KASAN 通道 | off |

@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-07 — 基于 `cargo test` 287 integration tests + 554 unit tests 全部通过
+> 最后更新：2026-08-08 — 基于 `cargo test` 293 integration tests + 649 unit tests 全部通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -24,7 +24,7 @@
 
 | 通道 | 能力 |
 |------|------|
-| KASAN (`-fsanitize=address`) | TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 `Deref/Index/ArrowMember` 与对应 `Assign` LHS 之前插入；N > 16 走双参 `__asan_loadN(addr, size_t)` |
+| KASAN (`-fsanitize=address`) | TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 `Deref/Index/ArrowMember` 与对应 `Assign` LHS 之前插入；N > 16 走双参 `__asan_loadN(addr, size_t)`；codegen 级栈红区（每局部变量后 32B padding，帧分配后 `__asan_poison_memory_region` 毒化全帧 + `__asan_unpoison_memory_region` 逐变量解除毒化）+ 全局变量红区（.rodata 中每全局变量后追加 32B 零填充） |
 | HWASAN (`-fsanitize=hwaddress`) | 同 KASAN 路径但使用 `__hwasan_loadN` / `__hwasan_storeN` 函数名 |
 | KASAN-kernel (`-fsanitize=kernel-address`) | 内联 shadow 地址计算；x86_64: shadow = (addr >> 3) + 0xdffffc0000000000 |
 | UBSAN (`-fsanitize=undefined`) | `Div/Mod` / `Shl/Shr` / 有符号 `Add/Sub/Mul` / VLA bound / null deref / float cast overflow 全部前置 `__ubsan_handle_*` |

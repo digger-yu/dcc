@@ -875,6 +875,83 @@ fn sanitizer_prologue_in_all_functions() {
     );
 }
 
+/// KASAN 栈红区: -fsanitize=address 时函数入口应发射
+/// __asan_poison_memory_region 和 __asan_unpoison_memory_region 调用
+#[test]
+fn kasan_stack_redzone_poison_unpoison() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-kasan-stack-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-kasan-stack-{}.s", std::process::id()));
+    let source = "int f(void) { int x = 42; return x; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=address", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        asm.contains("__asan_poison_memory_region"),
+        "missing poison call: {asm}"
+    );
+    assert!(
+        asm.contains("__asan_unpoison_memory_region"),
+        "missing unpoison call: {asm}"
+    );
+}
+
+/// KASAN 全局变量红区: -fsanitize=address 时全局变量后应有 32 字节填充
+#[test]
+fn kasan_global_redzone_padding() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-kasan-glob-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-kasan-glob-{}.o", std::process::id()));
+    let source = "int x = 1;\nint y = 2;\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    // 编译无 KASAN
+    let out_normal = {
+        let p = dir.join(format!("dcc-kasan-glob-normal-{}.o", std::process::id()));
+        let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-c", "-o"])
+            .arg(&p)
+            .arg(&source_path)
+            .output()
+            .expect("run dcc");
+        assert!(o.status.success());
+        fs::metadata(&p).map(|m| m.len()).unwrap_or(0)
+    };
+    // 编译有 KASAN
+    let out_kasan = {
+        let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-fsanitize=address", "-c", "-o"])
+            .arg(&out_path)
+            .arg(&source_path)
+            .output()
+            .expect("run dcc");
+        assert!(
+            o.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0)
+    };
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&out_path);
+    // KASAN 输出应更大 (全局变量红区填充)
+    assert!(
+        out_kasan > out_normal,
+        "KASAN object ({out_kasan}) should be larger than normal ({out_normal}) due to global redzones"
+    );
+}
+
 #[test]
 fn eh_frame_with_frame_pointer() {
     let dir = std::env::temp_dir();

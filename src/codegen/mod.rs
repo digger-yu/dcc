@@ -46,6 +46,7 @@ pub fn emit(
             cg.emit_cfi = debug_level > 0 || target.frame_pointer;
             cg.bounds_check = bounds_check;
             cg.trapv = trapv;
+            cg.kasan = sanitizers.kasan;
             cg.compile(module);
             if emit_asm {
                 return cg.build_asm_output(module.source()).into_bytes();

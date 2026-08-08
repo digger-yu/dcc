@@ -517,7 +517,7 @@ Driver 在 parse 之后、IR lower 之前调用 `instrument_program()`，所有�
 | TU init | 首个有体函数前插入 `__asan_init` / `__hwasan_init` / `__ubsan_init` / `__kcsan_init` 各一次 | 重复 init |
 | 函数入口 | 每个有体函数（含嵌套函数）前插入 `__sanitizer_cov_trace_pc`（KCOV / Fuzzer）、`__kcsan_func_entry`（KCSAN） |  |
 | KCOV / Fuzzer 边覆盖 | 每函数声明 `static uint32_t __dcc_cov_guards_N[16]` + 调 `__sanitizer_cov_trace_pc_guard_init` 一次；然后在 `if/while/do/for/case/label/goto` 等边位置插入 `__sanitizer_cov_trace_pc_guard(&guards[i])` | 跨函数 inline 合并 |
-| KASAN / HWASAN | 任意 `Deref/Index/ArrowMember` load 前注入 `__asan_load1/2/4/8/16(&e)`；任意 LHS 为 `Deref/Index/ArrowMember` 的 `Assign` 前注入 `__asan_storeN(&lhs)`（取 LHS 的地址避免重复求值） | struct 16B 以上 / 非整型 load/store、MTE 标签 |
+| KASAN / HWASAN | 任意 `Deref/Index/ArrowMember` load 前注入 `__asan_load1/2/4/8/16(&e)`；任意 LHS 为 `Deref/Index/ArrowMember` 的 `Assign` 前注入 `__asan_storeN(&lhs)`（取 LHS 的地址避免重复求值）；codegen 级栈红区：`pre_register_vars` 每变量后追加 4×8B Void 占位槽 (32B redzone)，帧分配后 `__asan_poison_memory_region` 毒化全帧 + `__asan_unpoison_memory_region` 逐变量解除毒化；全局变量 .rodata 后追加 32B 零填充 | struct 16B 以上 / 非整型 load/store、MTE 标签 |
 | UBSAN | `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 在非常量折叠时前插 `__ubsan_handle_signed_integer_overflow(0, lhs)` | VLA bound、null deref、float cast 等 |
 | Fuzzer | 比较 `EqEq/Ne/Lt/Gt/Le/Ge/AndAnd/OrOr` 前 `__sanitizer_cov_trace_cmp1/2/4/8(a, b)`；switch dispatch 前 `__sanitizer_cov_trace_switch(val)` | 运行时拦截 / libFuzzer 协议 |
 | KCSAN | 每函数 entry stub；内存访问 watchpoint 与 KASAN 共享 `__asan_loadN/__asan_storeN` 注入位 | 专用 `__kcsan_check_access` 路径 |
@@ -535,6 +535,7 @@ CLI 解析：`SanitizerFlags::from_args` 支持
 - KCSAN 完整 watchpoint 仍走 KASAN 共享通道，未独立发 `__kcsan_check_access`。
 
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
+`kasan_stack_redzone_poison_unpoison`、`kasan_global_redzone_padding`、
 12 个 `sanitizer::tests` 单元测试。
 
 ## C 前端扩展语法（`src/parser.rs` + `src/preproc.rs`）

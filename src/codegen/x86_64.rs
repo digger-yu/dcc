@@ -174,9 +174,11 @@ pub struct Codegen {
     pub emit_asm_text: bool,
     pub debug_level: u8,
     pub emit_cfi: bool,
-    // 编译选项: 运行时检查 (-fbounds-check / -ftrapv)
+    // 编译选项: 运行时检查 (-fbounds-check / -ftrapv / -fsanitize=address)
     pub bounds_check: bool,
     pub trapv: bool,
+    /// KASAN: 栈/全局变量红区插桩
+    pub kasan: bool,
     /// #pragma STDC FENV_ACCESS: 浮点环境访问模式.
     /// true 时浮点操作不得被重排或消除 (volatile 语义).
     pub fenv_access: bool,
@@ -569,6 +571,7 @@ impl Codegen {
             emit_cfi: false,
             bounds_check: false,
             trapv: false,
+            kasan: false,
             fenv_access: false,
             asm_directives: vec![],
             asm_directives_at: vec![],
@@ -1283,6 +1286,12 @@ impl Codegen {
                         is_tls: false,
                     },
                 );
+                // KASAN 全局变量红区: 追加 32 字节零填充
+                if self.kasan {
+                    for _ in 0..32 {
+                        self.rodata.push(0);
+                    }
+                }
             }
         }
         let _rodata_size = self.rodata.len();
@@ -3061,10 +3070,12 @@ impl Codegen {
         }
         let temp_slots = (self.max_expr_depth as i32 + 1).max(2);
         self.temp_slots = temp_slots;
+        // KASAN 红区: 每个局部变量后追加 32 字节 (4 个 8 字节槽位)
+        let kasan_rz_slots: i32 = if self.kasan { 4 } else { 0 };
         if f.name.name != "main" || !self.relocatable {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方)
             if let Some(body) = &f.body {
-                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots);
+                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots);
             }
             // 注册参数到 var_map (偏移公式自动避开已注册的局部变量)
             // 记录命名参数数量 (va_start 需要)
@@ -3227,6 +3238,11 @@ impl Codegen {
                 // mov [r13 - 8], rax  → 存储在帧顶部
                 self.emit(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]);
             }
+            // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
+            if self.kasan && self.frame_size > 0 {
+                self.emit_kasan_stack_poison_all();
+                self.emit_kasan_stack_unpoison_vars();
+            }
             // 变参 reg save area 放在 frame 底部 (紧贴 rsp 之后).
             // 帧布局 (自下而上):
             //   r13+0 saved r13 / r13+8 ret addr
@@ -3275,7 +3291,7 @@ impl Codegen {
             }
         } else {
             if let Some(body) = &f.body {
-                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots);
+                Self::pre_register_vars(&mut self.var_map, &body.items, temp_slots, kasan_rz_slots);
             }
             // 包含 padding 条目, 每个占 8 字节
             let var_bytes: i32 = self.var_map.values().map(|_| 8).sum();
@@ -3292,6 +3308,11 @@ impl Codegen {
                 self.emit(&[0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]);
                 // mov [r13 - 8], rax  → 存储在帧顶部
                 self.emit(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]);
+            }
+            // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
+            if self.kasan && self.frame_size > 0 {
+                self.emit_kasan_stack_poison_all();
+                self.emit_kasan_stack_unpoison_vars();
             }
         }
         let ends_ret = if let Some(body) = &f.body {
@@ -7461,6 +7482,68 @@ impl Codegen {
         }
     }
 
+    // ===== KASAN 栈红区插桩 =====
+
+    /// KASAN: 毒化整个栈帧 (shadow bytes 设为 0xF8 = stack mid redzone)
+    /// 调用 __asan_poison_memory_region(addr, size)
+    /// addr = r13 - frame_size, size = frame_size
+    fn emit_kasan_stack_poison_all(&mut self) {
+        // lea rdi, [r13 - frame_size]  (帧基址)
+        let fs = self.frame_size;
+        if fs <= 127 {
+            // lea rdi, [r13 + imm8]
+            self.emit(&[0x4c, 0x8d, 0x7d, fs as u8 as i8 as u8]);
+        } else {
+            // lea rdi, [r13 + imm32]
+            self.emit(&[0x4c, 0x8d, 0xbd]);
+            self.emit(&fs.to_le_bytes());
+        }
+        // mov esi, frame_size
+        self.emit(&[0xbe]);
+        self.emit(&fs.to_le_bytes());
+        // call __asan_poison_memory_region (PLT)
+        self.emit_call_extern("__asan_poison_memory_region");
+    }
+
+    /// KASAN: 解除变量区域的毒化 (shadow bytes 设为 0)
+    /// 对 var_map 中每个非 Void 变量调用 __asan_unpoison_memory_region(addr, size)
+    fn emit_kasan_stack_unpoison_vars(&mut self) {
+        // 收集非 Void 变量 (跳过 padding 和红区占位)
+        let vars: Vec<(i32, usize)> = self
+            .var_map
+            .iter()
+            .filter(|(name, (_, ty))| {
+                !name.starts_with("__pad_")
+                    && !name.starts_with("__kasan_rz_")
+                    && *ty != Type::Void
+            })
+            .map(|(_, (off, ty))| (*off, ty.size()))
+            .collect();
+        for (off, sz) in vars {
+            // lea rdi, [r13 + off]
+            if off >= -128 && off <= 127 {
+                self.emit(&[0x4c, 0x8d, 0x7d, off as i8 as u8]);
+            } else {
+                self.emit(&[0x4c, 0x8d, 0xbd]);
+                self.emit(&off.to_le_bytes());
+            }
+            // mov esi, size
+            self.emit(&[0xbe]);
+            self.emit(&(sz as u32).to_le_bytes());
+            // call __asan_unpoison_memory_region
+            self.emit_call_extern("__asan_unpoison_memory_region");
+        }
+    }
+
+    /// 发射外部函数调用 (PLT 相对偏移占位, 由符号解析修补)
+    fn emit_call_extern(&mut self, name: &str) {
+        let at = self.pos();
+        self.emit(&[0xe8, 0, 0, 0, 0]); // call rel32 placeholder
+        let call_at = self.code.len() as u64 - 4;
+        self.disasm_calls.insert(call_at, name.to_string());
+        self.pending_func_rels.push((call_at, name.to_string()));
+    }
+
     /// 为 -fbounds-check 生成 libubsan OutOfBoundsData (gcc 布局):
     ///   SourceLocation { const char *Filename; u32 Line; u32 Column; }
     ///   const TypeDescriptor &ArrayType;  // offset 16, 打印类型名用
@@ -9267,17 +9350,14 @@ impl Codegen {
         var_map: &mut HashMap<String, (i32, Type)>,
         items: &[BlockItem],
         temp_slots: i32,
+        kasan_rz_slots: i32,
     ) {
         for item in items {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
                     let slots = v.ty.size().div_ceil(8).max(1) as i32;
-                    // 基于实际类型大小计算偏移 (包含 padding 条目, 每个占 8 字节)
-                    // 帧布局: temp_slots 区域在 r13+16 下方, 变量在 temp_slots 下方.
-                    // 关键: 变量必须跳过 temp_slots, 否则会与 binop 临时槽冲突,
-                    // 进一步破坏 va_list 字段 (ap.gp_offset 等).
                     let used: i32 = var_map.values().map(|_| 8).sum();
-                    // 多槽变量同 register_var: off 下移 (slots-1)*8 预留自身空间
+                    // KASAN 红区: 每个变量后追加 kasan_rz_slots 个 8 字节槽位
                     let mut off = -(used + 16 + temp_slots * 8) - (slots - 1) * 8;
                     while off + v.ty.size() as i32 > 0 {
                         off -= 8;
@@ -9290,30 +9370,33 @@ impl Codegen {
                         let pad_off = off - j * 8;
                         var_map.entry(pad).or_insert((pad_off, Type::Void));
                     }
+                    // KASAN 红区占位槽 (标记为 Void, 不参与实际存储)
+                    for j in 0..kasan_rz_slots {
+                        let rz_name = format!("__kasan_rz_{}_{}", v.name.name, j);
+                        let rz_off = off - slots * 8 - j * 8;
+                        var_map.entry(rz_name).or_insert((rz_off, Type::Void));
+                    }
                 }
-                BlockItem::Stmt(s) => Self::pre_register_stmt(var_map, s, temp_slots),
+                BlockItem::Stmt(s) => Self::pre_register_stmt(var_map, s, temp_slots, kasan_rz_slots),
                 _ => {}
             }
         }
     }
-    fn pre_register_stmt(var_map: &mut HashMap<String, (i32, Type)>, s: &Stmt, temp_slots: i32) {
+    fn pre_register_stmt(var_map: &mut HashMap<String, (i32, Type)>, s: &Stmt, temp_slots: i32, kasan_rz_slots: i32) {
         match s {
-            Stmt::Block { b, .. } => Self::pre_register_vars(var_map, &b.items, temp_slots),
+            Stmt::Block { b, .. } => Self::pre_register_vars(var_map, &b.items, temp_slots, kasan_rz_slots),
             Stmt::If { then_, else_, .. } => {
-                Self::pre_register_stmt(var_map, then_, temp_slots);
+                Self::pre_register_stmt(var_map, then_, temp_slots, kasan_rz_slots);
                 if let Some(e) = else_ {
-                    Self::pre_register_stmt(var_map, e, temp_slots);
+                    Self::pre_register_stmt(var_map, e, temp_slots, kasan_rz_slots);
                 }
             }
             Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
-                Self::pre_register_stmt(var_map, body, temp_slots);
+                Self::pre_register_stmt(var_map, body, temp_slots, kasan_rz_slots);
             }
-            // switch case 体中的局部变量 (含数组) 必须预注册, 否则
-            // 帧上无槽位, var_offset 惰性分配仅 8 字节, 数组元素会
-            // 越界覆盖相邻变量
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    Self::pre_register_vars(var_map, &case.body.items, temp_slots);
+                    Self::pre_register_vars(var_map, &case.body.items, temp_slots, kasan_rz_slots);
                 }
             }
             _ => {}
