@@ -68,7 +68,7 @@
 |------|------|
 | Windows 链接路径验证 | Windows 平台链接路径未实际验证 |
 | DSO symbol caching | `DsoCache` 已实现，链接器侧未接入（需先补 `-lxxx → libc.so` 解析） |
-| 运行时 dynamic loader | 完全依赖 host `ld.so`（设计决策，非缺失） |
+| 运行时 dynamic loader | 生成 ELF 依赖 host `ld.so`（设计决策）；dcc 自身可 musl 静态链接 |
 
 ## 交叉编译
 
@@ -87,7 +87,7 @@
 
 | 限制 | 说明 |
 |------|------|
-| dynamic loader | 完全依赖 host `ld.so`（设计决策） |
+| dynamic loader | 生成 ELF 依赖 host `ld.so`；dcc 自身可 musl 静态链接（见 `docs/static_build.md`） |
 | fenv 运行时调用 | `fesetround` / `fegetround` 等未提供，`FENV_ACCESS` 仍为纯语义状态 |
 | `double complex` 传值 ABI | `_Complex` 字面量/算术已实装，`double complex` 按值传 ABI 待后续 |
 

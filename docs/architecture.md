@@ -248,8 +248,9 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
   / `PCREL_LO12_I` / `PCREL_LO12_S` / `HI20` / `LO12_I` / `LO12_S`
   / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S`。
 
-**明确不做**：运行时 dynamic loader（`ld.so`）——完全依赖 host ld.so，
-这是设计决策而非缺失。vDSO 集成亦不在范围内。
+**运行时 dynamic loader**：dcc 生成的 ELF 依赖 host `ld.so`（设计决策）；
+dcc 自身可通过 musl 静态链接（见 `docs/static_build.md`），
+产出无 ld.so 依赖的单文件二进制。vDSO 集成亦不在范围内。
 
 本地验收：`cargo test link::`（50 用例）
 + `cargo test lto::`（7 用例）。

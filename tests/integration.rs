@@ -2918,6 +2918,45 @@ int sum(void) { return kernel_var + canonical_var; }
     let _ = fs::remove_file(obj);
 }
 
+// =================== static build config ===================
+
+/// .cargo/config.toml should exist with musl static linking config
+#[test]
+fn cargo_config_has_musl_static_linking() {
+    let config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".cargo/config.toml");
+    assert!(
+        config_path.exists(),
+        ".cargo/config.toml should exist for static linking support"
+    );
+    let content = fs::read_to_string(&config_path).expect("read .cargo/config.toml");
+    assert!(
+        content.contains("x86_64-unknown-linux-musl"),
+        "config should include x86_64 musl target"
+    );
+    assert!(
+        content.contains("+crt-static"),
+        "config should enable +crt-static for static linking"
+    );
+}
+
+/// build_static.sh script should exist and be executable
+#[test]
+#[cfg(unix)]
+fn static_build_script_exists() {
+    let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/build_static.sh");
+    assert!(
+        script_path.exists(),
+        "scripts/build_static.sh should exist"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::metadata(&script_path).expect("read script metadata");
+    let mode = metadata.permissions().mode();
+    assert!(
+        mode & 0o111 != 0,
+        "build_static.sh should be executable"
+    );
+}
+
 // =================== C23 constexpr ===================
 
 /// constexpr 与 static 组合应正确解析
