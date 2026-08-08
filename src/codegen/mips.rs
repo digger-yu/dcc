@@ -1,7 +1,10 @@
 // src/codegen/mips.rs - MIPS32 后端 (O32 ABI)
 
 use crate::ast::{BinOp, BlockItem, Decl, Expr, FuncDecl, Program, Stmt, UnOp};
-use crate::codegen::elf::{self, ElfRela, ElfSection, ElfSym, STB_GLOBAL, STT_FUNC};
+use crate::codegen::elf::{
+    self, ElfRela, ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL,
+    STT_FUNC, STT_GNU_IFUNC,
+};
 use crate::ir::{Function, Global, Module, TypedStmt, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
@@ -198,6 +201,11 @@ impl MipsCodegen {
             .insert(func.name.clone(), func_end - func_start);
 
         // 添加符号
+        let sym_type = if ast.and_then(|f| f.ifunc_resolver.as_ref()).is_some() {
+            STT_GNU_IFUNC
+        } else {
+            STT_FUNC
+        };
         let sym_idx = self.symbols.len() as u32;
         self.symbols.push(ElfSym {
             name: func.name.clone(),
@@ -205,10 +213,22 @@ impl MipsCodegen {
             value: func_start,
             size: func_end - func_start,
             bind: STB_GLOBAL,
-            ty: STT_FUNC,
+            ty: sym_type,
             visibility: 0,
         });
         self.sym_index.insert(func.name.clone(), sym_idx);
+
+        // attribute((used)): 发射 .used.<name> 节并标记 SHF_GNU_RETAIN
+        if ast.map(|f| f.is_used_attr).unwrap_or(false) {
+            let sec = ElfSection {
+                name: format!(".used.{}", func.name),
+                data: vec![],
+                ty: SHT_PROGBITS,
+                flags: SHF_ALLOC | SHF_GNU_RETAIN,
+                align: 1,
+            };
+            self.extra_sections.push(sec);
+        }
     }
 
     fn emit_epilogue(&mut self) {

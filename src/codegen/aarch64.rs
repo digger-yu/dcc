@@ -2,8 +2,8 @@
 
 use crate::ast::{BinOp, BlockItem, Decl, Expr, Field, FuncDecl, Program, Stmt, Type, UnOp};
 use crate::codegen::elf::{
-    self, ElfRela, ElfSection, ElfSym, R_AARCH64_ADR_PREL_LO21, R_AARCH64_CALL26, STB_GLOBAL,
-    STB_LOCAL, STT_FUNC, STT_OBJECT,
+    self, ElfRela, ElfSection, ElfSym, R_AARCH64_ADR_PREL_LO21, R_AARCH64_CALL26, SHF_ALLOC,
+    SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_GNU_IFUNC, STT_OBJECT,
 };
 use crate::ir::{ExprKind, ExprLiteral, Function, Global, Module, TypedExpr, TypedStmt, ValueType};
 use crate::target::Target;
@@ -268,11 +268,33 @@ impl Aarch64Codegen {
                 value: text_off,
                 size,
                 bind: STB_GLOBAL,
-                ty: STT_FUNC,
+                ty: if find_func(prog, &func.name)
+                    .and_then(|f| f.ifunc_resolver.as_ref())
+                    .is_some()
+                {
+                    STT_GNU_IFUNC
+                } else {
+                    STT_FUNC
+                },
                 visibility: elf::STV_DEFAULT,
             });
             self.sym_index
                 .insert(func.name.clone(), self.symbols.len() as u32);
+
+            // attribute((used)): 发射 .used.<name> 节并标记 SHF_GNU_RETAIN
+            if find_func(prog, &func.name)
+                .map(|f| f.is_used_attr)
+                .unwrap_or(false)
+            {
+                let sec = ElfSection {
+                    name: format!(".used.{}", func.name),
+                    data: vec![],
+                    ty: SHT_PROGBITS,
+                    flags: SHF_ALLOC | SHF_GNU_RETAIN,
+                    align: 1,
+                };
+                self.extra_sections.push(sec);
+            }
             text_off += size;
         }
     }
