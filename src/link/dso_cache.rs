@@ -55,7 +55,7 @@ impl CacheKey {
 }
 
 /// 线程安全的 DSO 缓存. 零参数构造; 调用方持有并跨 link invocation 复用.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DsoCache {
     map: HashMap<PathBuf, (CacheKey, Arc<DsoInfo>)>,
     hits: u64,

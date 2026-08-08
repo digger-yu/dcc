@@ -112,6 +112,8 @@ pub struct LinkConfig {
     pub dynamic_linker: Option<String>,
     /// vDSO ELF 文件路径 (--vdso=)，用于嵌入 vDSO 文本和符号
     pub vdso: Option<PathBuf>,
+    /// DSO 解析缓存 (跨 link invocation 复用, 按 path/mtime/size 去重)
+    pub dso_cache: dso_cache::DsoCache,
 }
 
 /// build-id 风格
@@ -168,6 +170,7 @@ impl Default for LinkConfig {
             arch: ArchKind::X86_64,
             dynamic_linker: None,
             vdso: None,
+            dso_cache: dso_cache::DsoCache::new(),
         }
     }
 }
@@ -353,6 +356,20 @@ pub fn link_from_bundle(
             output.display(),
             bytes.len()
         );
+        // DSO 缓存统计
+        let (hits, misses) = cfg.dso_cache.stats();
+        if hits + misses > 0 {
+            eprintln!(
+                "dcc-link: DSO cache: {} hits, {} misses ({:.1}% hit rate)",
+                hits,
+                misses,
+                if hits + misses > 0 {
+                    (hits as f64 / (hits + misses) as f64) * 100.0
+                } else {
+                    0.0
+                }
+            );
+        }
     }
     Ok(bytes)
 }

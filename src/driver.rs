@@ -1157,6 +1157,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         dynamic_linker: matches!(output_kind, link::OutputKind::PIE | link::OutputKind::Shared)
             .then(|| dynamic_linker_path(arch_from_target(&cfg.target))),
         vdso: cfg.vdso.clone(),
+        dso_cache: link::dso_cache::DsoCache::new(),
     };
     // 解析 .symver 指令: 从 raw_args 提取 __asm__(".symver ...") 模式
     // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:
