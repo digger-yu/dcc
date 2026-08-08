@@ -1341,6 +1341,16 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::RParen {
             self.advance();
         }
+        self.validate_asm_semantics(
+            &asm_str,
+            &outputs,
+            &output_names,
+            &output_constraints,
+            &inputs,
+            &input_names,
+            &input_constraints,
+            &sp,
+        );
         Some(Expr::AsmExpr {
             asm_str,
             outputs,
@@ -1438,6 +1448,210 @@ impl<'a> Parser<'a> {
             }
         }
         labels
+    }
+
+    /// 验证 asm 操作数的语义约束 (约束前缀、重名、类型匹配、占位符数量)
+    fn validate_asm_semantics(
+        &mut self,
+        asm_str: &str,
+        outputs: &[Expr],
+        output_names: &[Option<String>],
+        output_constraints: &[String],
+        inputs: &[Expr],
+        input_names: &[Option<String>],
+        input_constraints: &[String],
+        sp: &Span,
+    ) {
+        use std::collections::HashSet;
+        // 1. 输出约束必须含 '=' 或 '+' 前缀 (E0014)
+        for (i, c) in output_constraints.iter().enumerate() {
+            let stripped = c.trim();
+            if !stripped.starts_with('=') && !stripped.starts_with('+') {
+                self.diags.push(Diagnostic::err(
+                    "E0014",
+                    format!(
+                        "output operand {} constraint '{}' missing '=' or '+' prefix",
+                        i, c
+                    ),
+                    sp.clone(),
+                ).with_hint("add '=' for write-only or '+' for read-write output"));
+            }
+        }
+        // 2. 重复操作数名检测 (W0006)
+        let mut seen_names: HashSet<&str> = HashSet::new();
+        for name in output_names.iter().chain(input_names.iter()).flatten() {
+            if !name.is_empty() && !seen_names.insert(name.as_str()) {
+                self.diags.push(Diagnostic::warn(
+                    "W0006",
+                    format!("duplicate asm operand name '{}'", name),
+                    sp.clone(),
+                ).with_hint("each named operand must have a unique name"));
+            }
+        }
+        // 3. 命名/位置操作数混用检测 (W0007)
+        let all_names: Vec<&Option<String>> =
+            output_names.iter().chain(input_names.iter()).collect();
+        let has_named = all_names.iter().any(|n| n.is_some());
+        let has_unnamed = all_names.iter().any(|n| n.is_none());
+        if has_named && has_unnamed {
+            self.diags.push(Diagnostic::warn(
+                "W0007",
+                "mixing named and unnamed asm operands",
+                sp.clone(),
+            ).with_hint(
+                "name all operands or use positional references consistently",
+            ));
+        }
+        // 4. 约束与表达式类型不匹配 (W0005)
+        let all_exprs: Vec<&Expr> = outputs.iter().chain(inputs.iter()).collect();
+        let all_constraints: Vec<&String> =
+            output_constraints.iter().chain(input_constraints.iter()).collect();
+        for (expr, constraint) in all_exprs.iter().zip(all_constraints.iter()) {
+            let c = constraint.trim();
+            // 剥除前缀后取核心约束字母
+            let core = c.trim_start_matches(|ch: char| "=+&%".contains(ch));
+            if core.is_empty() {
+                continue;
+            }
+            let first = core.chars().next().unwrap();
+            let expr_ty = expr.ty();
+            let is_float = matches!(
+                expr_ty,
+                Type::Float | Type::Double | Type::LongDouble
+            );
+            // 浮点表达式绑定 GP 整数约束 'r'
+            if is_float && first == 'r' {
+                self.diags.push(Diagnostic::warn(
+                    "W0005",
+                    "impossible constraint: 'r' constraint with \
+                     floating-point operand",
+                    sp.clone(),
+                ).with_hint(
+                    "use 'x' for SSE or 'f' for x87 float operands",
+                ));
+            }
+            // 整数表达式绑定 XMM 约束 'x'/'y'
+            if !is_float && (first == 'x' || first == 'Y') {
+                self.diags.push(Diagnostic::warn(
+                    "W0005",
+                    format!(
+                        "impossible constraint: '{}' constraint with \
+                         integer/pointer operand",
+                        first
+                    ),
+                    sp.clone(),
+                ).with_hint(
+                    "use 'r' for integer operands, 'x' for float/vector",
+                ));
+            }
+        }
+        // 5. 模板占位符数量与操作数数量不匹配 (E0015)
+        let total_ops = outputs.len() + inputs.len();
+        let bytes = asm_str.as_bytes();
+        let mut pos = 0;
+        let mut max_idx: Option<usize> = None;
+        while pos < bytes.len() {
+            if bytes[pos] == b'%' {
+                pos += 1;
+                if pos >= bytes.len() {
+                    break;
+                }
+                // 跳过 %% 转义
+                if bytes[pos] == b'%' {
+                    pos += 1;
+                    continue;
+                }
+                // 跳过修饰符字母 (b/w/h/k/q/a/P)
+                let mut had_l_modifier = false;
+                while pos < bytes.len()
+                    && matches!(
+                        bytes[pos],
+                        b'b' | b'w' | b'h' | b'k' | b'q' | b'a' | b'P' | b'l'
+                    )
+                {
+                    if bytes[pos] == b'l' {
+                        had_l_modifier = true;
+                    }
+                    pos += 1;
+                    if pos >= bytes.len() {
+                        break;
+                    }
+                }
+                if pos >= bytes.len() {
+                    break;
+                }
+                if bytes[pos] == b'[' {
+                    // %l[name] 是 goto label 引用, 非操作数引用
+                    if had_l_modifier {
+                        // 跳过整个 %[...] 块
+                        while pos < bytes.len() && bytes[pos] != b']' {
+                            pos += 1;
+                        }
+                        if pos < bytes.len() {
+                            pos += 1; // skip ']'
+                        }
+                    } else {
+                        // 命名操作数引用 %[name]: 验证名称存在
+                        pos += 1;
+                        let start = pos;
+                        while pos < bytes.len() && bytes[pos] != b']' {
+                            pos += 1;
+                        }
+                        if pos < bytes.len() {
+                            pos += 1; // skip ']'
+                        }
+                        let name = &asm_str[start..pos.saturating_sub(1)];
+                        if !name.is_empty() {
+                            let all_names_flat: Vec<&str> = output_names
+                                .iter()
+                                .chain(input_names.iter())
+                                .filter_map(|n| n.as_deref())
+                                .collect();
+                            if !all_names_flat.contains(&name) {
+                                self.diags.push(Diagnostic::err(
+                                    "E0015",
+                                    format!(
+                                        "asm template references unnamed operand \
+                                         '%[{}]' which does not exist",
+                                        name
+                                    ),
+                                    sp.clone(),
+                                ).with_hint(
+                                    "check the operand name or add it to the list",
+                                ));
+                            }
+                        }
+                    }
+                } else if bytes[pos].is_ascii_digit() {
+                    let start = pos;
+                    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                        pos += 1;
+                    }
+                    if let Ok(idx) = asm_str[start..pos].parse::<usize>() {
+                        max_idx = Some(max_idx.map_or(idx, |m: usize| m.max(idx)));
+                    }
+                } else {
+                    pos += 1;
+                }
+            } else {
+                pos += 1;
+            }
+        }
+        if let Some(max) = max_idx {
+            if max >= total_ops && total_ops > 0 {
+                self.diags.push(Diagnostic::err(
+                    "E0015",
+                    format!(
+                        "asm template references operand %{} but only {} \
+                         operand(s) provided",
+                        max, total_ops
+                    ),
+                    sp.clone(),
+                ).with_hint(
+                    "add the missing operand or fix the template index",
+                ));
+            }
+        }
     }
 
     pub fn program(&mut self) -> (Program, Vec<Diagnostic>) {
@@ -5098,6 +5312,17 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
+                    // 语义校验: 约束前缀/重名/类型匹配/占位符数量
+                    self.validate_asm_semantics(
+                        &asm_str,
+                        &outputs,
+                        &output_names,
+                        &output_constraints,
+                        &inputs,
+                        &input_names,
+                        &input_constraints,
+                        &sp,
+                    );
                     if self.cur.kind == TokKind::RParen {
                         self.advance();
                     }

@@ -1,0 +1,5 @@
+error[E0014]: output operand 0 constraint 'r' missing '=' or '+' prefix
+  --> <file>:4:5
+   4 |    asm (
+     |     ^^^
+  hint: add '=' for write-only or '+' for read-write output

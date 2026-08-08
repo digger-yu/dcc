@@ -69,8 +69,8 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 
 | 前缀 | 范围 | 子系统 | 源文件 |
 |------|------|--------|--------|
-| `E00xx` | 0001–0013 | Parser（语法/声明） | `src/parser.rs` |
-| `W00xx` | 0001–0003 | Parser 警告 | `src/parser.rs`, `src/format_check.rs` |
+| `E00xx` | 0001–0015 | Parser（语法/声明） | `src/parser.rs` |
+| `W00xx` | 0001–0007 | Parser 警告 | `src/parser.rs`, `src/format_check.rs` |
 | `E01xx` | 0100–0102 | Driver（I/O、汇编） | `src/driver.rs` |
 | `E02xx` | 0200–0209 | Preprocessor（`#` 指令） | `src/preproc.rs` |
 | `W02xx` | 0200 | Preprocessor 警告 | `src/preproc.rs` |
@@ -88,7 +88,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 
 ---
 
-## 3. Parser：`E0001`–`E0013`
+## 3. Parser：`E0001`–`E0015`
 
 语法分析、声明与表达式层面的错误。
 
@@ -107,12 +107,17 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0011** | `division by zero…` / `not an integer constant expression` | 静态断言表达式非法 | `_Static_assert(1/0, …)` 等 | — | `e0011.c` |
 | **E0012** | `expected string literal in _Static_assert` | 断言消息非字符串 | `_Static_assert(1, 123)` | `the second argument must be a diagnostic string` | `e0012.c` |
 | **E0013** | `__builtin_choose_expr condition is not constant` | 选择表达式非常量 | 非常量条件传给 `__builtin_choose_expr` | — | `e0013.c` |
+| **E0014** | `output operand N constraint '…' missing '=' or '+' prefix` | 输出约束缺前缀 | asm 输出操作数约束未以 `=` 或 `+` 开头 | `add '=' for write-only or '+' for read-write output` | `e0014.c` |
+| **E0015** | `asm template references operand %N but only M operand(s) provided` / `asm template references unnamed operand '%[name]' which does not exist` | 模板占位符越界 | asm 模板引用的数字索引超出操作数范围，或命名操作数不存在 | `add the missing operand or fix the template index` | — |
 
-### Parser 警告：`W0001`
+### Parser 警告：`W0001`、`W0005`–`W0007`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
 | **W0001** | `type defaults to 'int' in declaration without a type specifier` | 隐式 int（GNU 兼容） | 仅有存储类：`static x;` | `w0001.c` |
+| **W0005** | `impossible constraint: 'r' constraint with floating-point operand` | 约束与类型不匹配 | asm 约束字母与操作数表达式类型不兼容（如浮点绑 `r`、整数绑 `x`） | `use 'x' for SSE or 'f' for x87 float operands` | — |
+| **W0006** | `duplicate asm operand name '…'` | 重复操作数名 | asm 语句中多个操作数使用相同的 `[name]` | `each named operand must have a unique name` | — |
+| **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | `name all operands or use positional references consistently` | — |
 
 ---
 

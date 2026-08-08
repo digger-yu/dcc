@@ -140,6 +140,14 @@ const CASES: &[ErrorCase] = &[
         fixture_ext: "c",
     },
     ErrorCase {
+        name: "e0014",
+        code: "E0014",
+        mode: Mode::SyntaxOnly,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
         name: "e0101",
         code: "E0101",
         mode: Mode::CompileObjectCustom,

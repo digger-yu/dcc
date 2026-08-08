@@ -173,7 +173,7 @@ void test_fxsave(long *buf) {
     // 直接用符号引用: dcc 内部对 +m 可能分配到 reg, 所以直接对 buf 的地址操作
     long addr = (long)buf;
     asm volatile(
-        "fxsave (%1)\n\t"
+        "fxsave (%0)\n\t"
         :
         : "r"(addr)
         : "memory"

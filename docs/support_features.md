@@ -328,12 +328,13 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 
 | 特性 | 说明 |
 |------|------|
-| 诊断 snapshot 格式锁定 | E0001-E0013 / E0100-E0102 / E0200-E0209 / E0300 / E1001-E1010 / W0001 / W0004 / W0200 |
+| 诊断 snapshot 格式锁定 | E0001-E0015 / E0100-E0102 / E0200-E0209 / E0300 / E1001-E1010 / W0001 / W0004-W0007 / W0200 |
 | `-fdiagnostics-color` | `always` / `never` / `auto` |
 | `-fdiagnostics-format` | `github` / `clang` / `msvc` / `vi` / `sarif` |
 | `-fdiagnostics-show-template-tree` | 模板树显示 |
 | format 属性 | `format_check.rs`：`-Wformat` / `W0003` arity 检查 |
 | asm goto 标签验证 | `W0004`：asm 模板中引用的标签不在 goto label 列表中 |
+| asm 语义校验 | `E0014`: 输出约束缺少 `=`/`+` 前缀; `E0015`: 模板占位符索引越界或命名操作数不存在; `W0005`: 约束与表达式类型不匹配 (如 `r` 约束绑浮点); `W0006`: 重复操作数名; `W0007`: 命名/位置操作数混用 |
 | 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002` + int |
 
 ## 杂项
