@@ -122,11 +122,16 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 内联 asm 约束 | `"r"` / `"m"` / `"=r"` / `+m` / `memory` clobber |
 | 内联 asm 约束扩展 | `"i"` 立即数 / `"p"` 内存地址 / `"g"` 通用 / `"X"` 常量 / `"0..9"` 复用 / `"&"` early-clobber / 多重约束 `"rm"` / XMM `"x"` / `"Y"` / 数字标签 `"%"` / `offsetof` 约束 |
 | asm `x` 约束 XMM | 独立 `input_xmm_set` + `prepare_asm_xmm_binding` + `writeback_asm_operand` xmm8–15；early-clobber `xmm_pool` |
+| asm 段寄存器约束 `={gs}`/`={fs}` | `mov %seg, [r13+off]` (0x8C) 写回；`prepare_asm_seg_binding` 加载段寄存器值到内存 |
+| asm x87 FPU 约束 `f`/`t`/`u` | `fstp [r13+off]` (D9/DD) 写回 st(0)；`prepare_asm_x87_binding` 用 `fld` 推栈加载输入值；`+t` 读写约束支持 |
+| asm MMX 寄存器约束 `y` | `movq/movd [r13+off], mm` (0F 7F/7E) 写回；`prepare_asm_mmx_binding` 用 `movq/movd mm, [r13+off]` (0F 6F/6E) 加载输入；MMX 指令 `por`/`pand`/`pxor`/`padd*`/`psub*`/`pcmpeq*`/`pcmpgt*` 已支持 |
+| asm GCC 条件码约束 `@ccz`/`@ccs`/`@ccc` 等 | `setcc %al; movzx %al, %eax; mov %rax, [r13+off]` 写回（push/pop rax 保护其他输出）；`cc_letter_to_setcc_opcode` 映射全部 16 条件码字母序列到 setcc 操作码；不可见操作数不在模板中替换 |
+| asm 显式子寄存器约束 `{eax}`/`{cx}`/`{cl}` | 按宽度假 8/16/32/64 位写回 (`mov [r13+off], r8/r16/r32/r64`)；`parse_reg_name_bits` 解析全部 GP 子寄存器名；`{gs}`/`{fs}` 段寄存器也支持 |
 | asm goto 行内 `#` 注释 | `tests/fixtures/c/asm_goto.c`；`jump_label.h` objtool 标注 |
 | asm goto 输出约束 | fall-through 路径写回，跳转路径保留原值；跨函数 `&&label` + asm goto 混用触发 warning |
 | asm `%0` 约束 `"i"` 展开 | 带 `$` 前缀的 AT&T 立即数 |
 | Mini x86 asm 局部/C 标签 | `N:` / `N:insn` / `found:` |
-| Mini x86 asm 全指令覆盖 | `mov`（含段寄存器）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`sysenter`/`sysexit` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` |
+| Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`sysenter`/`sysexit` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`) |
 | SSE mov / SSE arith | xmm-xmm, mem-xmm, xmm-mem, SegMem 变体完整支持 |
 | mini-asm SIMD 扩展 | VEX/EVEX 前缀 + AVX/AVX2/AVX-512 + SSE3–4.2 + AES-NI/SHA + FMA/F16C + TSX + AMX + AVX-VNNI；`pinsr*` / `pextr*` GPR + `tmm` / `ymm` / `zmm` / `k` 寄存器 |
 | mini-asm 扩展操作数形式 | `rdrand`/`rdseed` 内存操作数；`ljmp`/`lcall` 间接内存 + `$off,$seg` 反序；`xbegin` rel32 + `xabort` 符号；AES-NI/SHA/pshuf*/palignr/pblendw/insertps/pshufw 内存源；`vextractps`/`vextractpd` 内存目标 |

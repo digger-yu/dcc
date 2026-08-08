@@ -2469,6 +2469,23 @@ fn asm_constraints_ext_compiles_and_runs() {
     }
 }
 
+/// 约束系统扩展: 段寄存器/x87/MMX/条件码/显式子寄存器约束
+#[test]
+fn asm_constraint_ext2_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_constraint_ext2.c");
+    let (output, _exe) = run_compile_and_run("asm-constraint-ext2", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        let rc = run_exe(&_exe);
+        assert_eq!(rc, 0, "asm_constraint_ext2 should return 0, got {rc}");
+    }
+}
+
 /// M13.1: 全局数组 [rip+disp32+idx*scale] 单指令加载
 #[test]
 fn global_indexed_run_returns_zero() {

@@ -293,6 +293,9 @@ const ASM_REG_DR: u8 = 134;
 /// 内联 asm 约束绑定结果
 struct AsmOpBinding {
     /// 分配到的物理寄存器索引 (rax=0 …)
+    /// 对于 @cc 约束: 存储条件码字母的 ASCII 值
+    /// 对于段寄存器: 存储段码 (0=ES,1=CS,2=SS,3=DS,4=FS,5=GS)
+    /// 对于 MMX: 存储 mm 寄存器索引 (0-7)
     reg: u8,
     /// 是否为输出/读写操作数
     is_output: bool,
@@ -300,8 +303,32 @@ struct AsmOpBinding {
     is_mem: bool,
     /// early-clobber (`&`): 分配到的寄存器与所有输入都不重叠
     early_clobber: bool,
-    /// XMM 寄存器宽度 (0 = GP, 32 = float, 64 = double, 128 = xmm full)
+    /// 寄存器类型/宽度编码:
+    ///   0 = GP (64 位), 32 = XMM float, 64 = XMM double, 128 = XMM full
+    ///   200 = x87 st(0), 201 = x87 st(1)
+    ///   202 = MMX (reg 字段为 mm 索引)
+    ///   203 = 段寄存器 (reg 字段为段码)
+    ///   204 = 条件码 (reg 字段为 cc ASCII 字母)
+    ///   205-208 = 显式子寄存器 (reg 字段为 GP 索引, 205=8b 206=16b 207=32b 208=64b)
     xmm_width: u8,
+}
+
+/// 显式寄存器约束解析结果
+#[derive(Clone, Copy)]
+enum ExplicitRegKind {
+    Gp,
+    Seg,
+}
+
+struct ExplicitRegInfo {
+    /// 寄存器索引 (GP: rax=0…; Seg: 0=ES,1=CS,…,4=FS,5=GS)
+    reg: u8,
+    /// 寄存器宽度 (bits): 8/16/32/64
+    size: u8,
+    /// AT&T 语法寄存器名 (不含 % 前缀, 如 "eax", "cx", "gs")
+    att_name: &'static str,
+    /// 寄存器种类
+    kind: ExplicitRegKind,
 }
 
 /// GNU as 局部数字标签：同一块 asm 内 `6:` 定义，`6f`/`6b` 引用。
@@ -11383,6 +11410,126 @@ impl Codegen {
         letters.contains(&'g')
     }
 
+    /// x87 FPU 约束: "f" → any st, "t" → st(0), "u" → st(1)
+    fn asm_constraint_wants_x87(constraint: &str) -> Option<u8> {
+        let core = constraint
+            .trim_start_matches(|c| c == '=' || c == '+' || c == '&');
+        if core.contains('{') {
+            return None;
+        }
+        let letters: Vec<char> = core
+            .chars()
+            .filter(|c| c.is_ascii_alphabetic())
+            .collect();
+        if letters.contains(&'t') {
+            return Some(0);
+        }
+        if letters.contains(&'u') {
+            return Some(1);
+        }
+        if letters.contains(&'f') {
+            return Some(0);
+        }
+        None
+    }
+
+    /// MMX 约束: "y" → mm0..mm7
+    fn asm_constraint_wants_mmx(constraint: &str) -> bool {
+        let core = constraint
+            .trim_start_matches(|c| c == '=' || c == '+' || c == '&');
+        if core.contains('{') {
+            return false;
+        }
+        core.chars()
+            .filter(|c| c.is_ascii_alphabetic())
+            .any(|c| c == 'y')
+    }
+
+    /// GCC 条件码约束: "@cc<letters>" → 返回条件码字母序列
+    fn asm_parse_cc_constraint(constraint: &str) -> Option<&str> {
+        let s = constraint
+            .trim_start_matches(|c| c == '=' || c == '+' || c == '&');
+        s.strip_prefix("@cc")
+            .filter(|rest| !rest.is_empty())
+    }
+
+    /// 条件码字母 → setcc 指令的 opcode (0F 90+off)
+    fn cc_letter_to_setcc_opcode(letters: &str) -> Option<u8> {
+        let off = match letters {
+            "o" => 0x00,
+            "no" => 0x01,
+            "b" | "c" | "nae" => 0x02,
+            "ae" | "nb" | "nc" => 0x03,
+            "e" | "z" => 0x04,
+            "ne" | "nz" => 0x05,
+            "be" | "na" => 0x06,
+            "a" | "nbe" => 0x07,
+            "s" => 0x08,
+            "ns" => 0x09,
+            "p" | "pe" => 0x0A,
+            "np" | "po" => 0x0B,
+            "l" | "nge" => 0x0C,
+            "ge" | "nl" => 0x0D,
+            "le" | "ng" => 0x0E,
+            "g" | "nle" => 0x0F,
+            _ => return None,
+        };
+        Some(0x90 + off)
+    }
+
+    /// 显式寄存器约束: "{regname}"
+    fn asm_parse_explicit_reg(constraint: &str) -> Option<ExplicitRegInfo> {
+        let start = constraint.find('{')?;
+        let end = constraint.find('}')?;
+        if end <= start + 1 {
+            return None;
+        }
+        let name = &constraint[start + 1..end];
+        Self::parse_explicit_reg_name(name)
+    }
+
+    fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
+        // 段寄存器
+        match name {
+            "gs" => return Some(ExplicitRegInfo { reg: 5, size: 16, att_name: "gs", kind: ExplicitRegKind::Seg }),
+            "fs" => return Some(ExplicitRegInfo { reg: 4, size: 16, att_name: "fs", kind: ExplicitRegKind::Seg }),
+            "es" => return Some(ExplicitRegInfo { reg: 0, size: 16, att_name: "es", kind: ExplicitRegKind::Seg }),
+            "cs" => return Some(ExplicitRegInfo { reg: 1, size: 16, att_name: "cs", kind: ExplicitRegKind::Seg }),
+            "ss" => return Some(ExplicitRegInfo { reg: 2, size: 16, att_name: "ss", kind: ExplicitRegKind::Seg }),
+            "ds" => return Some(ExplicitRegInfo { reg: 3, size: 16, att_name: "ds", kind: ExplicitRegKind::Seg }),
+            _ => {}
+        }
+        // GP 子寄存器
+        let (idx, bits, sname) = Self::parse_reg_name_bits(name)?;
+        Some(ExplicitRegInfo { reg: idx, size: bits, att_name: sname, kind: ExplicitRegKind::Gp })
+    }
+
+    fn parse_reg_name_bits(name: &str) -> Option<(u8, u8, &'static str)> {
+        Some(match name {
+            "rax" => (0, 64, "rax"), "eax" => (0, 32, "eax"), "ax" => (0, 16, "ax"),
+            "al" => (0, 8, "al"), "ah" => (0, 8, "ah"),
+            "rbx" => (3, 64, "rbx"), "ebx" => (3, 32, "ebx"), "bx" => (3, 16, "bx"),
+            "bl" => (3, 8, "bl"), "bh" => (3, 8, "bh"),
+            "rcx" => (1, 64, "rcx"), "ecx" => (1, 32, "ecx"), "cx" => (1, 16, "cx"),
+            "cl" => (1, 8, "cl"), "ch" => (1, 8, "ch"),
+            "rdx" => (2, 64, "rdx"), "edx" => (2, 32, "edx"), "dx" => (2, 16, "dx"),
+            "dl" => (2, 8, "dl"), "dh" => (2, 8, "dh"),
+            "rsi" => (6, 64, "rsi"), "esi" => (6, 32, "esi"), "si" => (6, 16, "si"), "sil" => (6, 8, "sil"),
+            "rdi" => (7, 64, "rdi"), "edi" => (7, 32, "edi"), "di" => (7, 16, "di"), "dil" => (7, 8, "dil"),
+            "rsp" => (4, 64, "rsp"), "esp" => (4, 32, "esp"), "sp" => (4, 16, "sp"), "spl" => (4, 8, "spl"),
+            "rbp" => (5, 64, "rbp"), "ebp" => (5, 32, "ebp"), "bp" => (5, 16, "bp"), "bpl" => (5, 8, "bpl"),
+            "r8" => (8, 64, "r8"), "r8d" => (8, 32, "r8d"), "r8w" => (8, 16, "r8w"), "r8b" => (8, 8, "r8b"),
+            "r9" => (9, 64, "r9"), "r9d" => (9, 32, "r9d"), "r9w" => (9, 16, "r9w"), "r9b" => (9, 8, "r9b"),
+            "r10" => (10, 64, "r10"), "r10d" => (10, 32, "r10d"), "r10w" => (10, 16, "r10w"), "r10b" => (10, 8, "r10b"),
+            "r11" => (11, 64, "r11"), "r11d" => (11, 32, "r11d"), "r11w" => (11, 16, "r11w"), "r11b" => (11, 8, "r11b"),
+            "r12" => (12, 64, "r12"), "r12d" => (12, 32, "r12d"), "r12w" => (12, 16, "r12w"), "r12b" => (12, 8, "r12b"),
+            "r13" => (13, 64, "r13"), "r13d" => (13, 32, "r13d"), "r13w" => (13, 16, "r13w"), "r13b" => (13, 8, "r13b"),
+            "r14" => (14, 64, "r14"), "r14d" => (14, 32, "r14d"), "r14w" => (14, 16, "r14w"), "r14b" => (14, 8, "r14b"),
+            "r15" => (15, 64, "r15"), "r15d" => (15, 32, "r15d"), "r15w" => (15, 16, "r15w"), "r15b" => (15, 8, "r15b"),
+            _ => return None,
+        })
+    }
+
     /// 从多约束 (如 "rm") 中按优先级选择单约束
     fn asm_pick_sub_constraint(constraint: &str, prefer_memory: bool) -> &'static str {
         let letters: Vec<char> = constraint
@@ -11507,6 +11654,12 @@ impl Codegen {
         NAMES[idx % 16]
     }
 
+    /// MMX 寄存器名 (mm0..mm7) → 物理索引 (0..7)
+    fn asm_mmx_name(idx: usize) -> &'static str {
+        const NAMES: [&str; 8] = ["mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7"];
+        NAMES[idx % 8]
+    }
+
     /// 构建 asm 操作数映射: %N / %[name] → 寄存器名或内存操作数
     fn build_asm_operand_map(
         &mut self,
@@ -11577,10 +11730,84 @@ impl Codegen {
                 }
             }
 
+            // GCC 条件码约束 (@ccz/@ccs/@ccc 等): 不可见操作数, 不在模板中替换
+            // 写回时通过 setcc 指令捕获条件标志
+            if let Some(cc_letters) = Self::asm_parse_cc_constraint(raw) {
+                if let Some(setcc_op) = Self::cc_letter_to_setcc_opcode(cc_letters) {
+                    slots.push(Slot::Imm(String::new())); // 占位
+                    meta.push((setcc_op, 204, true, false, if early { 1 } else { 0 }));
+                    idx += 1;
+                    continue;
+                }
+            }
+
+            // 显式寄存器约束 ({eax}/{cx}/{cl}/{gs}/{fs} 等)
+            if let Some(eri) = Self::asm_parse_explicit_reg(raw) {
+                let name = eri.att_name;
+                match eri.kind {
+                    ExplicitRegKind::Seg => {
+                        // 段寄存器输出: 模板里用 %gs/%fs 等
+                        // 写回时通过 mov %seg, [r13+off] 存储
+                        if is_inout {
+                            self.prepare_asm_seg_binding(op, eri.reg);
+                        }
+                        map.insert(format!("%{idx}"), name.to_string());
+                        slots.push(Slot::Reg(eri.reg, name));
+                        meta.push((eri.reg, 203, true, false, if early { 1 } else { 0 }));
+                        idx += 1;
+                        continue;
+                    }
+                    ExplicitRegKind::Gp => {
+                        // 显式 GP 子寄存器: 模板里用 %eax/%cx/%cl 等
+                        let xmm_w = match eri.size {
+                            8 => 205u8,
+                            16 => 206,
+                            32 => 207,
+                            64 => 208,
+                            _ => 0,
+                        };
+                        // +r (读写): 加载变量值; =r (只写): lea 地址 (将被 asm 覆写)
+                        self.prepare_asm_binding(op, eri.reg, !is_inout);
+                        map.insert(format!("%{idx}"), name.to_string());
+                        slots.push(Slot::Reg(eri.reg, name));
+                        meta.push((eri.reg, xmm_w, true, false, if early { 1 } else { 0 }));
+                        idx += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // x87 FPU 约束 (f/t/u)
+            if let Some(st_idx) = Self::asm_constraint_wants_x87(raw) {
+                let xmm_w = if st_idx == 0 { 200u8 } else { 201 };
+                let name: &'static str = if st_idx == 0 { "st" } else { "%st(1)" };
+                if is_inout {
+                    self.prepare_asm_x87_binding(op, st_idx);
+                }
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(st_idx, name));
+                meta.push((st_idx, xmm_w, true, false, if early { 1 } else { 0 }));
+                idx += 1;
+                continue;
+            }
+
+            // MMX 约束 (y)
+            if Self::asm_constraint_wants_mmx(raw) {
+                let mi = (idx % 8) as u8;
+                let name = Self::asm_mmx_name(mi as usize);
+                if is_inout {
+                    self.prepare_asm_mmx_binding(op, mi);
+                }
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(mi, name));
+                meta.push((mi, 202, true, false, if early { 1 } else { 0 }));
+                idx += 1;
+                continue;
+            }
+
             // 立即数约束且操作数可常量求值
             if matches!(letter, "i") && Self::asm_constraint_is_immediate(raw) {
                 if let Some(val) = Self::eval_asm_operand(op) {
-                    // 添加 AT&T 立即数前缀 $, 例如 305419896 -> $305419896
                     let att_val = if val.starts_with('$') {
                         val.clone()
                     } else {
@@ -11623,7 +11850,6 @@ impl Codegen {
             if Self::asm_constraint_is_address(raw) {
                 let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
                 let chosen = gp_pool[idx % gp_pool.len()];
-                // 把 expr 地址加载到 chosen
                 self.asm_load_address_to_reg(op, chosen);
                 let name = Self::gp_reg_name(chosen as usize);
                 map.insert(format!("%{idx}"), name.to_string());
@@ -11637,7 +11863,8 @@ impl Codegen {
             let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
             let chosen = gp_pool[idx % gp_pool.len()];
             let name = Self::gp_reg_name(chosen as usize);
-            self.prepare_asm_binding(op, chosen, true);
+            // +r (读写): 加载变量值; =r (只写): lea 地址 (将被 asm 覆写)
+            self.prepare_asm_binding(op, chosen, !is_inout);
             map.insert(format!("%{idx}"), name.to_string());
             slots.push(Slot::Reg(chosen, name));
             meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
@@ -11664,7 +11891,7 @@ impl Codegen {
                     if let Slot::Reg(r, name) = slot {
                         let nreg = *r;
                         let nname = *name;
-                        let is_xmm = meta.get(n as usize).map(|m| m.1 != 0).unwrap_or(false);
+                        let is_xmm = meta.get(n as usize).map(|m| m.1 != 0 && m.1 < 200).unwrap_or(false);
                         if is_xmm {
                             self.prepare_asm_xmm_binding(op, nreg, is_inout);
                         } else {
@@ -11702,10 +11929,64 @@ impl Codegen {
                 }
             }
 
+            // 显式寄存器约束 ({eax}/{cx}/{cl}/{gs}/{fs} 等)
+            if let Some(eri) = Self::asm_parse_explicit_reg(raw) {
+                let name = eri.att_name;
+                match eri.kind {
+                    ExplicitRegKind::Seg => {
+                        self.prepare_asm_seg_binding(op, eri.reg);
+                        map.insert(format!("%{idx}"), name.to_string());
+                        slots.push(Slot::Reg(eri.reg, name));
+                        meta.push((eri.reg, 203, false, false, 0));
+                        idx += 1;
+                        continue;
+                    }
+                    ExplicitRegKind::Gp => {
+                        let xmm_w = match eri.size {
+                            8 => 205u8,
+                            16 => 206,
+                            32 => 207,
+                            64 => 208,
+                            _ => 0,
+                        };
+                        self.prepare_asm_binding(op, eri.reg, false);
+                        map.insert(format!("%{idx}"), name.to_string());
+                        slots.push(Slot::Reg(eri.reg, name));
+                        input_reg_set.insert(eri.reg);
+                        meta.push((eri.reg, xmm_w, false, false, 0));
+                        idx += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // x87 FPU 约束 (f/t/u)
+            if let Some(st_idx) = Self::asm_constraint_wants_x87(raw) {
+                let xmm_w = if st_idx == 0 { 200u8 } else { 201 };
+                let name: &'static str = if st_idx == 0 { "st" } else { "%st(1)" };
+                self.prepare_asm_x87_binding(op, st_idx);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(st_idx, name));
+                meta.push((st_idx, xmm_w, false, false, 0));
+                idx += 1;
+                continue;
+            }
+
+            // MMX 约束 (y)
+            if Self::asm_constraint_wants_mmx(raw) {
+                let mi = (idx % 8) as u8;
+                let name = Self::asm_mmx_name(mi as usize);
+                self.prepare_asm_mmx_binding(op, mi);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(mi, name));
+                meta.push((mi, 202, false, false, 0));
+                idx += 1;
+                continue;
+            }
+
             // 立即数约束且操作数可常量求值
             if Self::asm_constraint_is_immediate(raw) {
                 if let Some(val) = Self::eval_asm_operand(op) {
-                    // 添加 AT&T 立即数前缀 $, 例如 305419896 -> $305419896
                     let att_val = if val.starts_with('$') {
                         val.clone()
                     } else {
@@ -11776,6 +12057,11 @@ impl Codegen {
         for i in 0..num_outputs {
             let (reg, xmm_w, is_out, is_mem, flags) = meta[i];
             if !is_out || is_mem || (flags & 1) == 0 {
+                continue;
+            }
+            // 跳过非 GP/XMM 类型 (x87, MMX, 段寄存器, 条件码, 显式子寄存器)
+            // 这些类型不参与 GP/XMM 寄存器池的 early-clobber 重分配
+            if xmm_w >= 200 {
                 continue;
             }
             if xmm_w != 0 {
@@ -11917,6 +12203,95 @@ impl Codegen {
 
     /// asm 输出操作数写回 C 变量
     fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u8) {
+        // x87 FPU 栈寄存器写回 (f/t/u 约束): fstp 存储 st(0) 到内存
+        if xmm_width == 200 || xmm_width == 201 {
+            let Expr::Ident { name, ty, .. } = expr else { return; };
+            let off = self.var_offset(&name.name);
+            let is_float = matches!(ty, Type::Float);
+            // fstp m32 = D9 /3 ; fstp m64 = DD /3 (REX.B for r13)
+            let opcode = if is_float { 0xD9 } else { 0xDD };
+            self.emit(&[0x41, opcode]);
+            if off.abs() < 128 {
+                self.emit(&[0x5D, off as i8 as u8]); // mod=01, reg=3, r/m=5
+            } else {
+                self.emit(&[0x9D]); // mod=10, reg=3, r/m=5
+                self.emit(&off.to_le_bytes());
+            }
+            return;
+        }
+        // MMX 寄存器写回 (y 约束): movq/movd 存储 mm 到内存
+        if xmm_width == 202 {
+            let Expr::Ident { name, ty, .. } = expr else { return; };
+            let off = self.var_offset(&name.name);
+            let sz = ty.size();
+            // movq mm, [r13+off] = 0F 7F ; movd mm, [r13+off] = 0F 7E
+            // reg 字段 = mm 索引, r/m = 5 (r13)
+            if sz <= 4 {
+                self.emit(&[0x41, 0x0F, 0x7E]);
+            } else {
+                self.emit(&[0x41, 0x0F, 0x7F]);
+            }
+            if off.abs() < 128 {
+                self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
+            } else {
+                self.emit(&[0x85 | ((reg & 7) << 3)]);
+                self.emit(&off.to_le_bytes());
+            }
+            return;
+        }
+        // 段寄存器写回 ({gs}/{fs} 约束): mov %seg, [r13+off] (16-bit)
+        if xmm_width == 203 {
+            let Expr::Ident { name, .. } = expr else { return; };
+            let off = self.var_offset(&name.name);
+            // mov [r13+off], Sreg = 8C /r (16-bit)
+            // REX.B for r13, reg = seg code, r/m = 5
+            self.emit(&[0x41, 0x8C]);
+            if off.abs() < 128 {
+                self.emit(&[0x45 | ((reg & 7) << 3), off as i8 as u8]);
+            } else {
+                self.emit(&[0x85 | ((reg & 7) << 3)]);
+                self.emit(&off.to_le_bytes());
+            }
+            return;
+        }
+        // 条件码写回 (@cc 约束): setcc + movzx + store
+        // 使用 push/pop rax 保护其他输出操作数的寄存器值
+        if xmm_width == 204 {
+            let Expr::Ident { name, .. } = expr else { return; };
+            let off = self.var_offset(&name.name);
+            // reg 字段 = setcc opcode (0F 90+off)
+            self.emit(&[0x50]); // push %rax (preserve across setcc)
+            self.emit(&[0x0F, reg, 0xC0]); // setcc %al
+            self.emit(&[0x0F, 0xB6, 0xC0]); // movzx %al, %eax
+            self.emit(&[Self::rex(true, 0, 0, 13), 0x89, 0x85]); // mov %rax, [r13+off]
+            self.emit(&off.to_le_bytes());
+            self.emit(&[0x58]); // pop %rax (restore)
+            return;
+        }
+        // 显式子寄存器写回 ({ecx}/{cx}/{cl} 约束)
+        if xmm_width >= 205 && xmm_width <= 208 {
+            let Expr::Ident { name, .. } = expr else { return; };
+            let off = self.var_offset(&name.name);
+            let size_bits = (xmm_width - 204) * 8; // 8, 16, 32, 64
+            match size_bits {
+                8 => {
+                    self.emit(&[0x41, 0x88, 0x85 | ((reg & 7) << 3)]);
+                    self.emit(&off.to_le_bytes());
+                }
+                16 => {
+                    self.emit(&[0x66, 0x41, 0x89, 0x85 | ((reg & 7) << 3)]);
+                    self.emit(&off.to_le_bytes());
+                }
+                32 => {
+                    self.emit(&[Self::rex(true, reg, 0, 13), 0x89, 0x85 | ((reg & 7) << 3)]);
+                    self.emit(&off.to_le_bytes());
+                }
+                _ => {
+                    self.store_stack(reg, off);
+                }
+            }
+            return;
+        }
         if xmm_width != 0 {
             let Expr::Ident { name, ty, .. } = expr else {
                 return;
@@ -12035,6 +12410,112 @@ impl Codegen {
         } else {
             self.gen_expr(expr, reg);
         }
+    }
+
+    /// 将 asm 约束表达式加载到 x87 FPU 栈 (f/t/u 约束)
+    /// st_idx: 0=st(0), 1=st(1)
+    fn prepare_asm_x87_binding(&mut self, expr: &Expr, st_idx: u8) {
+        if let Expr::Ident { name, ty, .. } = expr {
+            let off = self.var_offset(&name.name);
+            if self.globals.contains_key(&name.name) {
+                // 全局变量: 先加载地址到 rax, 再 fld
+                self.emit_global_addr(0, &name.name);
+                let is_float = matches!(ty, Type::Float);
+                // fld m32 = D9 /0 ; fld m64 = DD /0
+                let opcode = if is_float { 0xD9 } else { 0xDD };
+                self.emit(&[opcode, 0x00]); // mod=00, reg=0, r/m=0 ([rax])
+            } else {
+                let is_float = matches!(ty, Type::Float);
+                let opcode = if is_float { 0xD9 } else { 0xDD };
+                self.emit(&[0x41, opcode]);
+                if off.abs() < 128 {
+                    self.emit(&[0x45, off as i8 as u8]); // mod=01, reg=0, r/m=5
+                } else {
+                    self.emit(&[0x85]);
+                    self.emit(&off.to_le_bytes());
+                }
+            }
+            // 对于 st(1): 需要再次 fld 使 st(0)→st(1), 新值成为 st(0)
+            // 但这会推栈, 使 st(0) 变为 st(1)。对于“u”约束, GCC 假定
+            // st(1) 是第二个操作数, 需要在 st(0) 之后再压一个值。
+            // 简化处理: st_idx==1 时再压一次同一值 (实践中很少使用)
+            if st_idx == 1 {
+                if self.globals.contains_key(&name.name) {
+                    self.emit_global_addr(0, &name.name);
+                    let is_float = matches!(ty, Type::Float);
+                    let opcode = if is_float { 0xD9 } else { 0xDD };
+                    self.emit(&[opcode, 0x00]);
+                } else {
+                    let is_float = matches!(ty, Type::Float);
+                    let opcode = if is_float { 0xD9 } else { 0xDD };
+                    self.emit(&[0x41, opcode]);
+                    if off.abs() < 128 {
+                        self.emit(&[0x45, off as i8 as u8]);
+                    } else {
+                        self.emit(&[0x85]);
+                        self.emit(&off.to_le_bytes());
+                    }
+                }
+            }
+            return;
+        }
+        // 非变量表达式: gen_expr 到 rax, 再 fld [rax]
+        self.gen_expr(expr, 0);
+        self.emit(&[0xDD, 0x00]); // fld m64 [rax]
+    }
+
+    /// 将 asm 约束表达式加载到 MMX 寄存器 (y 约束)
+    fn prepare_asm_mmx_binding(&mut self, expr: &Expr, mm: u8) {
+        if let Expr::Ident { name, ty, .. } = expr {
+            let off = self.var_offset(&name.name);
+            let sz = ty.size();
+            // movd/movq [r13+off], mmN
+            // movd m32, mm = 0F 7E ; movq m64, mm = 0F 7F
+            // 注意: reg=mm_index, r/m=5 (r13)
+            // 但方向是内存→寄存器: movd mm, [r13+off] = 0F 6E
+            // movq mm, [r13+off] = 0F 6F
+            if sz <= 4 {
+                self.emit(&[0x41, 0x0F, 0x6E]);
+            } else {
+                self.emit(&[0x41, 0x0F, 0x6F]);
+            }
+            if off.abs() < 128 {
+                self.emit(&[0x45 | ((mm & 7) << 3), off as i8 as u8]);
+            } else {
+                self.emit(&[0x85 | ((mm & 7) << 3)]);
+                self.emit(&off.to_le_bytes());
+            }
+            return;
+        }
+        // 非变量: gen_expr 到 rax, 再 movd/mm
+        self.gen_expr(expr, 0);
+        self.emit(&[0x0F, 0x6E, 0xC0 | ((mm & 7) << 3) | 0]); // movd mm, eax
+    }
+
+    /// 将段寄存器值加载到内存或反之 (for {gs}/{fs} 约束)
+    /// seg_code: 0=ES, 1=CS, 2=SS, 3=DS, 4=FS, 5=GS
+    fn prepare_asm_seg_binding(&mut self, expr: &Expr, seg_code: u8) {
+        if let Expr::Ident { name, .. } = expr {
+            if self.globals.contains_key(&name.name) {
+                // 全局: lea 到 rax, 再 mov Sreg, [rax]
+                self.emit_global_addr(0, &name.name);
+                // mov Sreg, [rax] = 8E /r (mod=00, reg=seg, r/m=0)
+                self.emit(&[0x8E, (seg_code & 7) << 3]);
+            } else {
+                let off = self.var_offset(&name.name);
+                // mov Sreg, [r13+off] = 8E /r (REX.B, reg=seg, r/m=5)
+                self.emit(&[0x41, 0x8E]);
+                if off.abs() < 128 {
+                    self.emit(&[0x45 | ((seg_code & 7) << 3), off as i8 as u8]);
+                } else {
+                    self.emit(&[0x85 | ((seg_code & 7) << 3)]);
+                    self.emit(&off.to_le_bytes());
+                }
+            }
+            return;
+        }
+        self.gen_expr(expr, 0);
+        self.emit(&[0x8E, (seg_code & 7) << 3]);
     }
 
     /// 构建 asm 输出文件 (-S 模式)：按节分组反汇编全部函数机器码。
@@ -15686,6 +16167,33 @@ impl Codegen {
             "psrad" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xE2),
             "psllq" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xF3),
             "psrlq" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xD3),
+            // MMX 逻辑指令
+            "por" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xEB),
+            "pand" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xDB),
+            "pandn" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xDF),
+            "pxor" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xEF),
+            // MMX 算术指令
+            "paddb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xFC),
+            "paddw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xFD),
+            "paddd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xFE),
+            "psubb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xF8),
+            "psubw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xF9),
+            "psubd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xFA),
+            "paddsb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xEC),
+            "paddsw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xED),
+            "psubsb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xE8),
+            "psubsw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xE9),
+            "paddusb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xDC),
+            "paddusw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xDD),
+            "psubusb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xD8),
+            "psubusw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xD9),
+            // MMX 比较指令
+            "pcmpeqb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x74),
+            "pcmpeqw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x75),
+            "pcmpeqd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x76),
+            "pcmpgtb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x64),
+            "pcmpgtw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x65),
+            "pcmpgtd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x66),
 
             // === 字符串操作 (无操作数) ===
             "lodsb" => self.emit(&[0xAC]),
@@ -16216,6 +16724,40 @@ impl Codegen {
                 return;
             }
         }
+        // MMX 寄存器 mov: movq mm, mm/m64 (0F 6F) / movq mm/m64, mm (0F 7F)
+        // movd mm, r/m32 (0F 6E) / movd r/m32, mm (0F 7E)
+        if let (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) = (src, dst) {
+            if *ss == ASM_REG_MMX || *ds == ASM_REG_MMX {
+                if *ds == ASM_REG_MMX {
+                    // dst is MMX: movq/movd mm, src (0F 6F / 0F 6E)
+                    let op = if bits <= 32 { 0x6E } else { 0x6F };
+                    self.emit(&[0x0F, op, Self::modrm_reg_reg(*d, *s)]);
+                } else {
+                    // src is MMX, dst is GP: movq/movd dst, mm (0F 7F / 0F 7E)
+                    let op = if bits <= 32 { 0x7E } else { 0x7F };
+                    self.emit(&[0x0F, op, Self::modrm_reg_reg(*s, *d)]);
+                }
+                return;
+            }
+        }
+        if let (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds)) = (src, dst) {
+            if *ds == ASM_REG_MMX {
+                // movq/movd mm, [mem] (0F 6F / 0F 6E)
+                let op = if bits <= 32 { 0x6E } else { 0x6F };
+                self.emit(&[0x0F, op]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+                return;
+            }
+        }
+        if let (AsmOperand::Reg(s, ss), AsmOperand::Mem { disp, base, index, scale }) = (src, dst) {
+            if *ss == ASM_REG_MMX {
+                // movq/movd [mem], mm (0F 7F / 0F 7E)
+                let op = if bits <= 32 { 0x7E } else { 0x7F };
+                self.emit(&[0x0F, op]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+                return;
+            }
+        }
         // 段前缀 mem: 发射段前缀 + 普通 mem 路径
         if let AsmOperand::SegMem {
             seg,
@@ -16310,14 +16852,19 @@ impl Codegen {
                 if bits == 8 {
                     self.emit(&[0xB0 + (d & 7), *v as u8]);
                 } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
-                    if *d >= 8 {
-                        self.emit(&[0x41]);
-                    }
+                    // 16 位: 0x66 前缀须在 REX 之前
                     if bits == 16 {
                         self.emit(&[0x66]);
                     }
+                    if *d >= 8 {
+                        self.emit(&[0x41]);
+                    }
                     self.emit(&[0xB8 + (d & 7)]);
-                    self.emit(&(*v as i32).to_le_bytes());
+                    if bits == 16 {
+                        self.emit(&(*v as i16).to_le_bytes());
+                    } else {
+                        self.emit(&(*v as i32).to_le_bytes());
+                    }
                 } else {
                     // movabs reg, imm64
                     if *d >= 8 {

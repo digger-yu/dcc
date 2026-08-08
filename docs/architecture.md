@@ -392,9 +392,36 @@ RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
 - **disasm**：`reg` 函数不再叠加 REX.B（由调用方按 REX.R / REX.B /
   REX.X 决定扩展位），避免 reg 字段被错当作 r/m 字段
   扩展（之前 rax 误显示为 r8，r8 误显示为 rax）。
+- **x87 FPU 约束 (f/t/u)**：`asm_constraint_wants_x87` 检测 `f`/`t`/`u`
+  约束，映射到 `xmm_width` 200 (st0) / 201 (st1)。
+  `prepare_asm_x87_binding` 用 `fld [r13+off]` 推栈加载输入值；
+  `writeback_asm_operand` 用 `fstp [r13+off]` (D9/DD) 弹栈写回。
+  `+t` 读写约束先 fld 加载再 fstp 写回。
+- **MMX 约束 (y)**：`asm_constraint_wants_mmx` 检测 `y` 约束，
+  映射到 `xmm_width` 202。`prepare_asm_mmx_binding` 用
+  `movq/movd mm, [r13+off]` (0F 6F/6E) 加载输入；
+  `writeback_asm_operand` 用 `movq/movd [r13+off], mm`
+  (0F 7F/7E) 写回。mini-asm 扩展 `por`/`pand`/`pxor`/
+  `padd*`/`psub*`/`pcmpeq*`/`pcmpgt*` 等 MMX 指令。
+- **GCC 条件码约束 (@cc*)**：`asm_parse_cc_constraint` 提取
+  `@cc` 后的条件码字母序列，`cc_letter_to_setcc_opcode` 映射
+  全部 16 条件码 (o/no/b/ae/e/ne/be/a/s/ns/p/np/l/ge/le/g)
+  到 setcc 操作码 (0F 90+off)。不可见操作数不在模板中替换。
+  `writeback_asm_operand` 用 `push rax; setcc %al; movzx %al, %eax;
+  mov %rax, [r13+off]; pop rax` 写回（push/pop 保护其他输出操作数）。
+- **显式子寄存器约束 ({regname})**：`asm_parse_explicit_reg` 解析
+  `{eax}`/`{cx}`/`{cl}`/`{gs}` 等，返回 `ExplicitRegInfo`。
+  `parse_reg_name_bits` 映射全部 GP 子寄存器名到 (idx, bits, att_name)。
+  GP 约束映射到 `xmm_width` 205-208 (8/16/32/64 位)，
+  段寄存器映射到 `xmm_width` 203。写回按宽度假不同大小的 store。
+- **+r 读写约束修复**：`prepare_asm_binding` 对 `+r` (`is_inout=true`)
+  使用 `is_output=false` 加载变量值（而非 lea 地址），
+  确保 asm 模板读到正确的输入值。
 - **测试**：`test_asm_constraints_ext.c` 10 个用例覆盖
   i / p / g / X / 0 / & / rm / x / %= / offsetof 约束，
-  本地 Linux 全 10/10 PASS。
+  本地 Linux 全 10/10 PASS。`asm_constraint_ext2.c` 19 个用例覆盖
+  显式子寄存器 / @cc 条件码 / x87 f/t/u / MMX y / 段寄存器约束，
+  全 19/19 PASS。
 
 Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 

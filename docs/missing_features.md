@@ -1,6 +1,6 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-08-08 — 基于 `cargo test` 319 integration tests + 685 unit tests 全部通过
+> 最后更新：2026-08-08 — 基于 `cargo test` 320 integration tests + 685 unit tests 全部通过
 > 
 > 已支持特性详见 `docs/support_features.md`
 
