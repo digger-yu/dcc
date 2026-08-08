@@ -3727,6 +3727,8 @@ impl<'a> Parser<'a> {
         match (base, uns, long, short) {
             (Some(Type::Void), ..) => Type::Void,
             (Some(Type::Bool), ..) => Type::Bool,
+            (Some(Type::Char16), ..) => Type::Char16,
+            (Some(Type::Char32), ..) => Type::Char32,
             (Some(Type::Int128), true, ..) => Type::UInt128,
             (Some(Type::Int128), false, ..) => Type::Int128,
             (Some(Type::UInt128), ..) => Type::UInt128,
