@@ -147,6 +147,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm `.intel_syntax`/`.att_syntax` 语法切换 | 识别并透传至 `-S` 输出; `AsmDirectiveExpander::intel_syntax` 状态跟踪 |
 | asm `.altmacro`/`.noaltmacro` 交替宏模式 | 识别并透传; `AsmDirectiveExpander::alt_macro` 状态跟踪 |
 | `asm_output` 属性 (GCC15) | `__attribute__((asm_output("...")))` 解析并存储到 `FuncDecl::asm_output_template`; 属性合并逻辑支持 |
+| 非 x86_64 后端 inline asm | aarch64/riscv64/mips/mips64/arm 后端完整处理 `Decl::GlobalAsm` / `Stmt::AsmGoto` / `Expr::AsmExpr`; `-S` 模式输出原始汇编文本到 `.text`; `-c` 模式发出警告 (无 mini-assembler，不编码机器码); 简化版模板占位符替换 `%N` / `%[name]` / `%%`; asm goto `%lN` / `%l[name]` 标签替换 |
 
 ## x86_64 codegen
 

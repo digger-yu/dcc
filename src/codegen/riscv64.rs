@@ -65,6 +65,10 @@ pub struct Riscv64Codegen {
     va_gp_offs: i32,
     /// 下一个 float va_arg 槽位索引 (0..7, 对应 fa0..fa7)
     va_flt_offs: i32,
+    /// 文件级 asm 原始文本行 (GlobalAsm)
+    raw_global_asm_lines: Vec<String>,
+    /// 函数级内联 asm 原始文本行: (函数名, 行列表)
+    raw_func_asm_lines: Vec<(String, Vec<String>)>,
     _target: Target,
 }
 
@@ -98,6 +102,8 @@ impl Riscv64Codegen {
             va_save_base_off: 0,
             va_gp_offs: 0,
             va_flt_offs: 0,
+            raw_global_asm_lines: Vec::new(),
+            raw_func_asm_lines: Vec::new(),
             _target: target,
         }
     }
@@ -216,6 +222,16 @@ impl Riscv64Codegen {
     }
 
     fn compile_exec(&mut self, module: &Module, prog: &Program) {
+        // 文件级 asm: 收集原始文本行
+        for decl in &prog.decls {
+            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, .. } = decl {
+                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+                for line in resolved.split('\n') {
+                    let t = line.trim();
+                    if !t.is_empty() { self.raw_global_asm_lines.push(t.to_string()); }
+                }
+            }
+        }
         self.label("_start");
         let jal_pos = self.pos();
         self.emit_jal_placeholder(1); // ra
@@ -241,6 +257,16 @@ impl Riscv64Codegen {
     }
 
     fn compile_rel(&mut self, module: &Module, prog: &Program) {
+        // 文件级 asm: 收集原始文本行
+        for decl in &prog.decls {
+            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, .. } = decl {
+                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+                for line in resolved.split('\n') {
+                    let t = line.trim();
+                    if !t.is_empty() { self.raw_global_asm_lines.push(t.to_string()); }
+                }
+            }
+        }
         let mut text_off = 0u64;
         for func in &module.functions {
             if find_func(prog, &func.name)
@@ -323,15 +349,83 @@ impl Riscv64Codegen {
             }
         }
         out.push_str("\t.text\n");
+        // 发射文件级 asm 原始文本
+        for line in &self.raw_global_asm_lines {
+            out.push_str(&format!("\t{line}\n"));
+        }
         for func in &module.functions {
             out.push_str(&format!("\t.globl {}\n", func.name));
             out.push_str(&format!("{}:\n", func.name));
+            // 发射函数级内联 asm 原始文本
+            for (fname, lines) in &self.raw_func_asm_lines {
+                if fname == &func.name || fname.starts_with("__inline_") {
+                    for line in lines {
+                        out.push_str(&format!("\t{line}\n"));
+                    }
+                }
+            }
             if let Some(size) = self.func_sizes.get(&func.name) {
                 out.push_str(&format!("\t// IR lowering, {} bytes\n", size));
             }
             out.push_str("\tret\n");
         }
         out
+    }
+
+    /// 简化版 asm 模板占位符替换: 仅处理 %N / %[name] / %% (无寄存器分配)
+    fn resolve_asm_template_simple(
+        asm_str: &str,
+        _outputs: &[Expr],
+        output_names: &[Option<String>],
+        _output_constraints: &[String],
+        _inputs: &[Expr],
+        input_names: &[Option<String>],
+        _input_constraints: &[String],
+    ) -> String {
+        let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
+            &asm_str[1..asm_str.len() - 1]
+        } else {
+            asm_str
+        };
+        let mut result = String::new();
+        let chars: Vec<char> = s.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '%' && i + 1 < chars.len() {
+                match chars[i + 1] {
+                    '%' => { result.push('%'); i += 2; }
+                    '[' => {
+                        if let Some(end) = chars[i+2..].iter().position(|&c| c == ']') {
+                            let name: String = chars[i+2..i+2+end].iter().collect();
+                            let all_names: Vec<&Option<String>> = output_names.iter().chain(input_names.iter()).collect();
+                            for (idx, n) in all_names.iter().enumerate() {
+                                if n.as_ref().map(|s| s.as_str()) == Some(&name) {
+                                    result.push_str(&format!("%{}", idx));
+                                    break;
+                                }
+                            }
+                            i += 2 + end + 1;
+                        } else {
+                            result.push(chars[i]);
+                            i += 1;
+                        }
+                    }
+                    c if c.is_ascii_digit() => {
+                        result.push('%');
+                        result.push(c);
+                        i += 2;
+                    }
+                    _ => {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                }
+            } else {
+                result.push(chars[i]);
+                i += 1;
+            }
+        }
+        result
     }
 
     fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
@@ -511,6 +605,19 @@ impl Riscv64Codegen {
                 for (item, nested_ir) in b.items.iter().zip(ir.nested.iter()) {
                     self.gen_block_item(item, nested_ir);
                 }
+            }
+            Stmt::AsmGoto { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, goto_labels, span, .. } => {
+                eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
+                let mut resolved_asm = asm_str.clone();
+                let label_base = outputs.len() + inputs.len();
+                for (i, label) in goto_labels.iter().enumerate().rev() {
+                    resolved_asm = resolved_asm.replace(&format!("%l{}", i), &label.name);
+                    resolved_asm = resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
+                    resolved_asm = resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
+                }
+                let resolved = Self::resolve_asm_template_simple(&resolved_asm, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                self.raw_func_asm_lines.push((self.source_name.clone(), lines));
             }
             _ => {}
         }
@@ -805,6 +912,14 @@ impl Riscv64Codegen {
                 if let Expr::Ident { name, .. } = callee.as_ref() {
                     self.emit_jal_to(&name.name);
                 }
+            }
+            Expr::AsmExpr { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, span, .. } => {
+                eprintln!("{}:{}: warning: inline asm on non-x86_64 target: result is 0", span.file, span.line);
+                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                self.raw_func_asm_lines.push((format!("__inline_{}", self.label_serial), lines));
+                self.label_serial += 1;
+                self.li_a0(0);
             }
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {

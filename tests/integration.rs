@@ -7490,3 +7490,90 @@ int main(void) {
     let _ = std::fs::remove_file(&exe);
     assert_eq!(rc, 0, "multi-TU asm goto should return 0, got {rc}");
 }
+
+/// 非 x86_64 后端 inline asm: GlobalAsm / AsmExpr / AsmGoto 不 panic
+/// 验证 aarch64/riscv64/mips/mips64/arm 后端在 -S 模式下正确处理内联汇编
+#[test]
+fn asm_non_x86_backend_S_mode_compiles() {
+    let source = include_str!("fixtures/c/asm_non_x86_targets.c");
+    let targets = [
+        "aarch64-linux-gnu",
+        "riscv64-linux-gnu",
+        "mips-linux-gnu",
+        "mips64-linux-gnuabi64",
+        "arm-linux-gnueabihf",
+    ];
+    for target in &targets {
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("dcc-asm-nonx86-S-{}-{}.c", target.replace('/', "-"), std::process::id()));
+        let asm_path = dir.join(format!("dcc-asm-nonx86-S-{}-{}.s", target.replace('/', "-"), std::process::id()));
+        fs::write(&src_path, source).expect("write C fixture");
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-S", "-o"])
+            .arg(&asm_path)
+            .arg(&src_path)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "target {}: -S mode failed: {}",
+            target,
+            stderr
+        );
+        // 验证 -S 输出包含 asm 文本
+        if asm_path.exists() {
+            let asm_content = fs::read_to_string(&asm_path).unwrap_or_default();
+            assert!(
+                asm_content.contains("nop") || asm_content.contains(".globl __test_global_asm_marker"),
+                "target {}: -S output should contain asm text, got:\n{}",
+                target,
+                &asm_content[..asm_content.len().min(500)]
+            );
+        }
+        let _ = fs::remove_file(&src_path);
+        let _ = fs::remove_file(&asm_path);
+    }
+}
+
+/// 非 x86_64 后端 inline asm: -c 模式不 panic，发出警告
+#[test]
+fn asm_non_x86_backend_c_mode_no_panic() {
+    let source = include_str!("fixtures/c/asm_non_x86_targets.c");
+    let targets = [
+        "aarch64-linux-gnu",
+        "riscv64-linux-gnu",
+        "mips-linux-gnu",
+        "mips64-linux-gnuabi64",
+        "arm-linux-gnueabihf",
+    ];
+    for target in &targets {
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("dcc-asm-nonx86-c-{}-{}.c", target.replace('/', "-"), std::process::id()));
+        let obj_path = dir.join(format!("dcc-asm-nonx86-c-{}-{}.o", target.replace('/', "-"), std::process::id()));
+        fs::write(&src_path, source).expect("write C fixture");
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj_path)
+            .arg(&src_path)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // -c 模式应该成功 (有警告但不 panic)
+        assert!(
+            output.status.success(),
+            "target {}: -c mode panicked: {}",
+            target,
+            stderr
+        );
+        // 应该包含关于非 x86_64 目标的警告
+        assert!(
+            stderr.contains("non-x86_64 target"),
+            "target {}: -c mode should warn about non-x86_64 target, stderr: {}",
+            target,
+            stderr
+        );
+        let _ = fs::remove_file(&src_path);
+        let _ = fs::remove_file(&obj_path);
+    }
+}
