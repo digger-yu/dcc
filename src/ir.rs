@@ -1048,6 +1048,24 @@ mod tests {
     }
 
     #[test]
+    fn float_bitwise_or_reports_e1003() {
+        let src = b"int main(void) { float a = 1, b = 2; return (int)(a | b); }\n";
+        let (program, _) = crate::parser::parse(src, "e1003.c");
+        let module = lower(program).expect("lower despite float or");
+        let err = validate(&module).expect_err("float or must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1003"), "{err:?}");
+    }
+
+    #[test]
+    fn complex_bitwise_or_reports_e1008() {
+        let src = b"int main(void) { _Complex float a = 1, b = 2; return (int)(a | b); }\n";
+        let (program, _) = crate::parser::parse(src, "e1008.c");
+        let module = lower(program).expect("lower despite complex or");
+        let err = validate(&module).expect_err("complex or must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1008"), "{err:?}");
+    }
+
+    #[test]
     fn resync_rebuilds_ir_after_ast_change() {
         let src = b"int main(void) { return 2 + 3; }\n";
         let (program, _) = crate::parser::parse(src, "resync.c");

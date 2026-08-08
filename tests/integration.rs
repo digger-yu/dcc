@@ -2918,6 +2918,23 @@ int sum(void) { return kernel_var + canonical_var; }
     let _ = fs::remove_file(obj);
 }
 
+// =================== C23 constexpr ===================
+
+/// constexpr 与 static 组合应正确解析
+#[test]
+fn c23_constexpr_static_compile_and_run() {
+    let source = include_str!("fixtures/c/c23_constexpr_static.c");
+    let (output, exe) = run_compile_and_run("c23-constexpr-static", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "constexpr_static should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 // =================== C23 constexpr 函数 ===================
 
 /// C23 constexpr 函数: 解析为声明说明符, 等价 inline + always_inline
