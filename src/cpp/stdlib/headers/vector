@@ -1,5 +1,5 @@
 // <vector> - dcc++ C++ 标准库
-// std::vector<T> (无模板实例化, 元素按字节存储 + 析构回调)
+// std::vector<T> — 类模板, 单态化由 M26 模板引擎完成
 
 extern "C" {
     struct dccpp_vector;
@@ -18,17 +18,15 @@ extern "C" {
 }
 
 namespace std {
+    template <class T>
     class vector {
     public:
-        vector() : p_(dccpp_vector_new(1, 0)) {}
-        vector(size_t elem_size) : p_(dccpp_vector_new(elem_size, 0)) {}
-        vector(size_t elem_size, void* dtor)
-            : p_(dccpp_vector_new(elem_size, dtor)) {}
+        vector() : p_(dccpp_vector_new(sizeof(T), 0)) {}
         ~vector() { dccpp_vector_free(p_); }
 
         vector(const vector& other) : p_(0) {
             size_t n = dccpp_vector_size(other.p_);
-            p_ = dccpp_vector_new(1, 0);
+            p_ = dccpp_vector_new(sizeof(T), 0);
             for (size_t i = 0; i < n; ++i) {
                 dccpp_vector_push_back_copy(p_, dccpp_vector_at((dccpp_vector*)other.p_, i));
             }
@@ -45,8 +43,8 @@ namespace std {
             return *this;
         }
 
-        void* at(size_t i) { return dccpp_vector_at(p_, i); }
-        const void* at(size_t i) const { return dccpp_vector_at((dccpp_vector*)p_, i); }
+        T* at(size_t i) { return (T*)dccpp_vector_at(p_, i); }
+        const T* at(size_t i) const { return (const T*)dccpp_vector_at((dccpp_vector*)p_, i); }
 
         size_t size() const  { return dccpp_vector_size(p_); }
         size_t capacity() const { return dccpp_vector_cap(p_); }
@@ -56,13 +54,13 @@ namespace std {
         void clear()           { dccpp_vector_clear(p_); }
         void resize(size_t n)  { dccpp_vector_resize(p_, n); }
 
-        void push_back_bytes(const void* elem) {
-            dccpp_vector_push_back_copy(p_, elem);
+        void push_back(const T& elem) {
+            dccpp_vector_push_back_copy(p_, (const void*)&elem);
         }
 
         void pop_back() { dccpp_vector_pop_back(p_); }
 
-        void* data() { return dccpp_vector_at(p_, 0); }
+        T* data() { return (T*)dccpp_vector_at(p_, 0); }
 
     private:
         dccpp_vector* p_;

@@ -6624,6 +6624,11 @@ impl<'a> CppParser<'a> {
                 }
                 i += 1;
             }
+            // M26: 限定名后的模板实参 `std::vector<int>`:
+            // 跳过 `<...>` 尖括号
+            if let Some(after) = self.skip_template_args_at(i) {
+                i = after;
+            }
         } else {
             // 第一个类型说明符
             let first = self.peek_token_at(i);
@@ -6856,7 +6861,67 @@ impl<'a> CppParser<'a> {
             let parts = self.parse_qualified_name()?;
             let last = parts.last().cloned().unwrap_or_default();
             // 用 last segment 当 Class 名 (lower 时根据 namespace ctx 还原)
-            let mut ty = MangleType::Class(last);
+            let mut ty = MangleType::Class(last.clone());
+            // M26: 限定名后的模板实参 `std::vector<int>`
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Lt,
+                    ..
+                }))
+            ) && self.looks_like_template_args_after_lt()
+            {
+                self.bump(); // 吞 `<`
+                let mut args = Vec::new();
+                loop {
+                    let arg = self.parse_mangle_type_depth(1)?;
+                    args.push(arg);
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Comma,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                        continue;
+                    }
+                    if self.deferred_gt > 0 {
+                        self.deferred_gt -= 1;
+                        break;
+                    }
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Gt,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                        break;
+                    }
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Shr,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                        self.deferred_gt += 1;
+                        break;
+                    }
+                    return Err(CppParseError::Unexpected(
+                        ">",
+                        format!("{:?}", self.peek),
+                        self.span(),
+                    ));
+                }
+                ty = MangleType::Template {
+                    name: last,
+                    args,
+                };
+            }
             // 跳过 const/volatile 后缀
             if self.at(CppKw::Const) {
                 self.bump();

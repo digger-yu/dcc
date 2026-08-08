@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-08 — 基于 `cargo test` 293 integration tests + 649 unit tests 全部通过
+> 最后更新：2026-08-08 — 基于 `cargo test` 295 integration tests + 649 unit tests 全部通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -201,7 +201,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ concept 与 SFINAE 联动 | concept 定义注册 + requires 子句展开 + SFINAE 约束过滤 |
 | dcc++ module ODR 检查 | `OdrChecker` 跨模块重复定义检测 + 冲突报告 |
 | dcc++ `virtual` 继承复杂场景 | 菱形继承检测 + 虚基类指针表达 + 警告报告 |
-| dcc++ 标准库模板实参 | `std::vector<int>` 等限定名模板实参语法解析 |
+| dcc++ 标准库模板实参 | `std::vector<int>` 等限定名模板实参语法解析 + 局部变量声明支持；std::vector<T> 为真正类模板，单态化由 `TemplateRegistry` 完成 |
 | dcc++ 动态 RTTI | typeinfo/vtable 生成 + 继承虚方法检测 + RTTI slot |
 | dcc++ 继承成员访问 | 递归继承链查找 + `__base_BaseName` 路径改写 |
 | dcc++ `__dcc_mbr` 继承成员 | 继承成员偏移辅助函数 + `__base_` 链路径计算 |

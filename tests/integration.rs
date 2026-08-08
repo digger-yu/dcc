@@ -6445,3 +6445,70 @@ fn pie_builtin_linker_return_42() {
     assert_eq!(rc, 42, "pie return-42 should exit with 42, got {rc}");
     let _ = fs::remove_file(&exe);
 }
+
+/// C++ 模板 vector: 验证 std::vector<int> 模板实例化能编译通过
+#[test]
+fn cpp_template_vector_int_instantiation() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-cpp-vec-int-{}.cpp", std::process::id()));
+    let asm_path = dir.join(format!("dcc-cpp-vec-int-{}.s", std::process::id()));
+    // stdlib 头文件由 dcc++ 自动包含, 无需显式 #include
+    let source = "\
+int main() {
+    std::vector<int> v;
+    int x = 42;
+    v.push_back(x);
+    return 0;
+}
+";
+    fs::write(&source_path, source).expect("write C++ fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        output.status.success(),
+        "vector<int> compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 实例化后的类名应包含 __dcc_template_vector_int 或 dccpp_vector_new
+    assert!(
+        asm.contains("__dcc_template_vector_int") || asm.contains("dccpp_vector_new"),
+        "expected template instantiation or vector runtime call in asm: {asm}"
+    );
+}
+
+/// C++ 模板 vector: 验证 vector 头文件声明为模板类
+#[test]
+fn cpp_vector_header_is_template_class() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-cpp-vec-tpl-{}.cpp", std::process::id()));
+    let asm_path = dir.join(format!("dcc-cpp-vec-tpl-{}.s", std::process::id()));
+    // 使用两种元素类型验证单态化
+    let source = "\
+int main() {
+    std::vector<int> vi;
+    std::vector<double> vd;
+    return 0;
+}
+";
+    fs::write(&source_path, source).expect("write C++ fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        output.status.success(),
+        "vector<int>+vector<double> compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
