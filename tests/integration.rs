@@ -6626,3 +6626,29 @@ fn c11_atomic_freestanding_no_atomics() {
     );
     let _ = fs::remove_file(exe);
 }
+
+// =================== 嵌套块重声明 ===================
+
+/// 嵌套块重声明: 内层块可遮蔽外层变量 (不同类型不报 E0007)
+#[test]
+fn nested_block_redecl_different_type_no_error() {
+    let src = "\
+int main(void) {
+    int x = 10;
+    {
+        double x = 3.14;
+        (void)x;
+    }
+    return (x == 10) ? 0 : 1;
+}
+";
+    let (output, exe) = run_compile_and_run("nested-redecl-shadow", src);
+    assert!(
+        output.status.success(),
+        "nested block redecl should compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "outer x should be 10, got {rc}");
+    let _ = fs::remove_file(exe);
+}
