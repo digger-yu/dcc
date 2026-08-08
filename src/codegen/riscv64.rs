@@ -1083,18 +1083,55 @@ impl Riscv64Codegen {
     // ===== RISC-V 指令编码 =====
 
     fn emit_addi(&mut self, rd: u8, rs1: u8, imm: i32) {
+        // 压缩指令自动选择: C.ADDI / C.LI / C.NOP
+        if imm == 0 && rd == rs1 {
+            // ADDI rd, rd, 0 => 不发射任何指令 (NOP 语义, 但 C.NOP 仅 rd=0)
+            // 实际上 ADDI x0, x0, 0 是标准 NOP, 其他情况保留 32-bit
+        } else if rs1 == 0 && rd != 0 && (-32..=31).contains(&imm) {
+            // LI => C.LI
+            self.emit_c_li(rd, imm as i8);
+            return;
+        } else if rd == rs1 && rd != 0 && (-32..=31).contains(&imm) && imm != 0 {
+            // ADDI rd, rd, imm => C.ADDI
+            self.emit_c_addi(rd, imm as i8);
+            return;
+        }
         let imm = imm as u32 & 0xfff;
         let insn = (imm << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x13;
         self.emit(&insn.to_le_bytes());
     }
 
     fn emit_lui(&mut self, rd: u8, imm: i32) {
+        // 压缩指令自动选择: C.LUI
+        // C.LUI: rd!=0, rd!=2, nzimm in -32..31, nzimm!=0
+        let nzimm = (imm & 0xfffff) as u32;
+        let signed_nzimm = if nzimm & 0x80000 != 0 {
+            // Sign-extend 20-bit to 32-bit
+            (nzimm as i32).wrapping_sub(0x100000)
+        } else {
+            nzimm as i32
+        };
+        if rd != 0 && rd != 2 && (-32..=31).contains(&signed_nzimm) && signed_nzimm != 0 {
+            self.emit_c_lui(rd, signed_nzimm as i8);
+            return;
+        }
         let imm = (imm as u32 & 0xfffff) << 12;
         let insn = imm | (rd as u32) << 7 | 0x37;
         self.emit(&insn.to_le_bytes());
     }
 
     fn emit_add(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        // 压缩指令自动选择: C.MV / C.ADD
+        if rs1 == 0 && rd != 0 && rs2 != 0 {
+            // ADD rd, x0, rs2 => C.MV rd, rs2
+            self.emit_c_mv(rd, rs2);
+            return;
+        }
+        if rd == rs1 && rd != 0 && rs2 != 0 {
+            // ADD rd, rd, rs2 => C.ADD rd, rs2
+            self.emit_c_add(rd, rs2);
+            return;
+        }
         let insn = ((rs2 as u32) << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x33;
         self.emit(&insn.to_le_bytes());
     }
@@ -1216,12 +1253,32 @@ impl Riscv64Codegen {
     }
 
     fn emit_lw(&mut self, rd: u8, rs1: u8, off: i32) {
+        // 压缩指令自动选择: C.LW
+        if (8..=15).contains(&rd)
+            && (8..=15).contains(&rs1)
+            && off >= 0
+            && off <= 124
+            && off % 4 == 0
+        {
+            self.emit_c_lw(rd - 8, rs1 - 8, off as u8);
+            return;
+        }
         let imm = off as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b010 << 12 | (rd as u32) << 7 | 0x03;
         self.emit(&insn.to_le_bytes());
     }
 
     fn emit_sw(&mut self, rs2: u8, rs1: u8, off: i32) {
+        // 压缩指令自动选择: C.SW
+        if (8..=15).contains(&rs2)
+            && (8..=15).contains(&rs1)
+            && off >= 0
+            && off <= 124
+            && off % 4 == 0
+        {
+            self.emit_c_sw(rs2 - 8, rs1 - 8, off as u8);
+            return;
+        }
         let imm = off as u32;
         let insn = ((imm >> 5) & 0x7f) << 25
             | (rs2 as u32) << 20
@@ -1408,6 +1465,76 @@ impl Riscv64Codegen {
             | ((off >> 6) & 3) << 5
             | ((off >> 1) & 7) << 2
             | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.LD rd', rs1', offset: CL 格式 (64-bit load, RV64)
+    fn emit_c_ld(&mut self, rd_prime: u8, rs1_prime: u8, offset: u8) {
+        debug_assert!(rd_prime < 8 && rs1_prime < 8);
+        let insn: u16 = 0b011 << 13
+            | (((offset >> 3) & 0x7) as u16) << 10
+            | ((rs1_prime & 7) as u16) << 7
+            | (((offset >> 6) & 3) as u16) << 5
+            | ((rd_prime & 7) as u16) << 2
+            | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.SD rs2', rs1', offset: CS 格式 (64-bit store, RV64)
+    fn emit_c_sd(&mut self, rs2_prime: u8, rs1_prime: u8, offset: u8) {
+        debug_assert!(rs2_prime < 8 && rs1_prime < 8);
+        let insn: u16 = 0b111 << 13
+            | (((offset >> 3) & 0x7) as u16) << 10
+            | ((rs1_prime & 7) as u16) << 7
+            | (((offset >> 6) & 3) as u16) << 5
+            | ((rs2_prime & 7) as u16) << 2
+            | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.MV rd, rs2 (rd != 0, rs2 != 0): CR 格式
+    fn emit_c_mv(&mut self, rd: u8, rs2: u8) {
+        debug_assert!(rd != 0 && rs2 != 0);
+        let insn: u16 = 0b100 << 12 | (rd as u16) << 7 | (rs2 as u16) << 2 | 0x02;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.ADD rd, rs2 (rd != 0, rs2 != 0): CR 格式, rd == rs1
+    fn emit_c_add(&mut self, rd: u8, rs2: u8) {
+        debug_assert!(rd != 0 && rs2 != 0);
+        let insn: u16 = 0b100 << 12 | 1 << 12 | (rd as u16) << 7 | (rs2 as u16) << 2 | 0x02;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.LUI rd, imm (rd != 0, rd != 2, imm != 0, -32..=31): CI 格式
+    fn emit_c_lui(&mut self, rd: u8, imm: i8) {
+        debug_assert!(rd != 0 && rd != 2 && imm != 0);
+        let imm = imm as u16;
+        let insn: u16 =
+            0b011 << 13 | ((imm >> 5) & 1) << 12 | (rd as u16) << 7 | (imm & 0x1f) << 2 | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.BNEZ rs1', offset: CB 格式, 8-bit signed offset
+    fn emit_c_bnez(&mut self, rs1_prime: u8, offset: i16) {
+        debug_assert!(rs1_prime < 8);
+        let off = offset as u16;
+        let insn: u16 = 0b111 << 13
+            | ((off >> 8) & 1) << 12
+            | ((off >> 3) & 3) << 10
+            | ((rs1_prime & 7) as u16) << 7
+            | ((off >> 6) & 3) << 5
+            | ((off >> 1) & 7) << 2
+            | 0x01;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// C.ADDIW rd, imm (rd != 0, -32..=31): CI 格式, RV64
+    fn emit_c_addiw(&mut self, rd: u8, imm: i8) {
+        debug_assert!(rd != 0);
+        let imm = imm as u16;
+        let insn: u16 =
+            0b001 << 13 | ((imm >> 5) & 1) << 12 | (rd as u16) << 7 | (imm & 0x1f) << 2 | 0x01;
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1995,84 +2122,6 @@ impl Riscv64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
-    // --- 压缩指令自动选择 ---
-
-    /// 尝试将 32-bit ADDI 压缩为 C.ADDI (16-bit)
-    /// 返回 true 如果成功发射压缩指令
-    fn try_compress_addi(&mut self, rd: u8, rs1: u8, imm: i32) -> bool {
-        // C.ADDI: rd==rs1, rd!=0, imm 6-bit signed (-32..31)
-        if rd == rs1 && rd != 0 && (-32..=31).contains(&imm) && imm != 0 {
-            self.emit_c_addi(rd, imm as i8);
-            return true;
-        }
-        false
-    }
-
-    /// 尝试将 32-bit LI 压缩为 C.LI
-    fn try_compress_li(&mut self, rd: u8, imm: i32) -> bool {
-        if rd != 0 && (-32..=31).contains(&imm) {
-            self.emit_c_li(rd, imm as i8);
-            return true;
-        }
-        false
-    }
-
-    /// 尝试将 32-bit LW 压缩为 C.LW
-    fn try_compress_lw(&mut self, rd: u8, rs1: u8, offset: u32) -> bool {
-        // C.LW: rd'/rs1' 只能是 x8-x15, offset 7-bit unsigned, 4-byte aligned
-        if (8..=15).contains(&rd)
-            && (8..=15).contains(&rs1)
-            && offset <= 124
-            && offset.is_multiple_of(4)
-        {
-            self.emit_c_lw(rd - 8, rs1 - 8, offset as u8);
-            return true;
-        }
-        false
-    }
-
-    /// 尝试将 32-bit SW 压缩为 C.SW
-    fn try_compress_sw(&mut self, rs2: u8, rs1: u8, offset: u32) -> bool {
-        if (8..=15).contains(&rs2)
-            && (8..=15).contains(&rs1)
-            && offset <= 124
-            && offset.is_multiple_of(4)
-        {
-            self.emit_c_sw(rs2 - 8, rs1 - 8, offset as u8);
-            return true;
-        }
-        false
-    }
-
-    /// 尝试将 32-bit JAL 压缩为 C.J
-    fn try_compress_jal(&mut self, offset: i32) -> bool {
-        // C.J: 12-bit signed offset, 2-byte aligned
-        if (-2048..=2047).contains(&offset) && offset % 2 == 0 {
-            self.emit_c_j(offset);
-            return true;
-        }
-        false
-    }
-
-    /// 尝试将 32-bit BEQ rs, x0 压缩为 C.BEQZ
-    fn try_compress_beqz(&mut self, rs1: u8, offset: i32) -> bool {
-        if (8..=15).contains(&rs1) && (-256..=255).contains(&offset) && offset % 2 == 0 {
-            self.emit_c_beqz(rs1 - 8, offset as i16);
-            return true;
-        }
-        false
-    }
-
-    /// 通用压缩判定: 给定一条 32-bit 指令的语义, 尝试发射 16-bit 版本
-    /// 返回 true 如果成功压缩
-    fn try_compress_insn(&mut self, rd: u8, rs1: u8, _rs2: u8, imm: i32, op: u8) -> bool {
-        match op {
-            0x13 => self.try_compress_addi(rd, rs1, imm), // ADDI
-            0x37 => self.try_compress_li(rd, imm),        // LUI/LI
-            _ => false,
-        }
-    }
-
     // ===== M8 新增: 特权指令 / CSR 访问 =====
 
     /// CSRRW rd, csr, rs1: 原子读写 CSR
@@ -2189,6 +2238,16 @@ impl Riscv64Codegen {
 
     /// LD rd, offset(rs1): 64-bit 整数加载
     fn emit_ld(&mut self, rd: u8, rs1: u8, off: i32) {
+        // 压缩指令自动选择: C.LD (RV64)
+        if (8..=15).contains(&rd)
+            && (8..=15).contains(&rs1)
+            && off >= 0
+            && off <= 248
+            && off % 8 == 0
+        {
+            self.emit_c_ld(rd - 8, rs1 - 8, off as u8);
+            return;
+        }
         let imm = off as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b011 << 12 | (rd as u32) << 7 | 0x03;
         self.emit(&insn.to_le_bytes());
@@ -2196,6 +2255,16 @@ impl Riscv64Codegen {
 
     /// SD rs2, offset(rs1): 64-bit 整数存储
     fn emit_sd(&mut self, rs2: u8, rs1: u8, off: i32) {
+        // 压缩指令自动选择: C.SD (RV64)
+        if (8..=15).contains(&rs2)
+            && (8..=15).contains(&rs1)
+            && off >= 0
+            && off <= 248
+            && off % 8 == 0
+        {
+            self.emit_c_sd(rs2 - 8, rs1 - 8, off as u8);
+            return;
+        }
         let imm = off as u32;
         let insn = ((imm >> 5) & 0x7f) << 25
             | (rs2 as u32) << 20
@@ -2659,5 +2728,132 @@ mod tests {
         assert_eq!(ld_count, 3, "expected 3 LD instructions, got {ld_count}");
         // 验证 va_gp_offs 推进
         assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
+    }
+
+    // ===== 压缩指令自动选择测试 =====
+
+    #[test]
+    fn riscv64_compress_addi_to_c_addi() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // ADDI x10, x10, 5 => C.ADDI x10, 5 (2 bytes)
+        cg.emit_addi(10, 10, 5);
+        assert_eq!(cg.code.len(), 2, "ADDI rd==rs1 should compress to C.ADDI (2 bytes)");
+        // Verify it's a valid C.ADDI: bits[1:0]=01, funct3[15:13]=000
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x01, "C.ADDI opcode should be 01");
+        assert_eq!((insn >> 13) & 0x7, 0, "C.ADDI funct3 should be 000");
+    }
+
+    #[test]
+    fn riscv64_compress_li_to_c_li() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // ADDI x10, x0, 20 => C.LI x10, 20 (2 bytes)
+        cg.emit_addi(10, 0, 20);
+        assert_eq!(cg.code.len(), 2, "LI should compress to C.LI (2 bytes)");
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x01, "C.LI opcode should be 01");
+        assert_eq!((insn >> 13) & 0x7, 0b010, "C.LI funct3 should be 010");
+    }
+
+    #[test]
+    fn riscv64_compress_lui_to_c_lui() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // LUI x10, 5 => C.LUI x10, 5 (2 bytes)
+        cg.emit_lui(10, 5);
+        assert_eq!(cg.code.len(), 2, "LUI with small imm should compress to C.LUI (2 bytes)");
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x01, "C.LUI opcode should be 01");
+        assert_eq!((insn >> 13) & 0x7, 0b011, "C.LUI funct3 should be 011");
+    }
+
+    #[test]
+    fn riscv64_compress_add_to_c_mv() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // ADD x10, x0, x11 => C.MV x10, x11 (2 bytes)
+        cg.emit_add(10, 0, 11);
+        assert_eq!(cg.code.len(), 2, "ADD rd, x0, rs2 should compress to C.MV (2 bytes)");
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x02, "C.MV opcode should be 10");
+    }
+
+    #[test]
+    fn riscv64_compress_add_to_c_add() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // ADD x10, x10, x11 => C.ADD x10, x11 (2 bytes)
+        cg.emit_add(10, 10, 11);
+        assert_eq!(cg.code.len(), 2, "ADD rd==rs1 should compress to C.ADD (2 bytes)");
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x02, "C.ADD opcode should be 10");
+    }
+
+    #[test]
+    fn riscv64_compress_lw_to_c_lw() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // LW x10, 8(x10) => C.LW x10', x10', 8 (2 bytes)
+        cg.emit_lw(10, 10, 8);
+        assert_eq!(cg.code.len(), 2, "LW with x8-x15 and aligned offset should compress to C.LW (2 bytes)");
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x00, "C.LW opcode should be 00");
+        assert_eq!((insn >> 13) & 0x7, 0b010, "C.LW funct3 should be 010");
+    }
+
+    #[test]
+    fn riscv64_compress_sw_to_c_sw() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // SW x10, 8(x10) => C.SW x10', x10', 8 (2 bytes)
+        cg.emit_sw(10, 10, 8);
+        assert_eq!(cg.code.len(), 2, "SW with x8-x15 and aligned offset should compress to C.SW (2 bytes)");
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x00, "C.SW opcode should be 00");
+        assert_eq!((insn >> 13) & 0x7, 0b110, "C.SW funct3 should be 110");
+    }
+
+    #[test]
+    fn riscv64_compress_ld_to_c_ld() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // LD x10, 16(x10) => C.LD x10', x10', 16 (2 bytes)
+        cg.emit_ld(10, 10, 16);
+        assert_eq!(cg.code.len(), 2, "LD with x8-x15 and aligned offset should compress to C.LD (2 bytes)");
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x01, "C.LD opcode should be 01");
+        assert_eq!((insn >> 13) & 0x7, 0b011, "C.LD funct3 should be 011");
+    }
+
+    #[test]
+    fn riscv64_compress_sd_to_c_sd() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // SD x10, 16(x10) => C.SD x10', x10', 16 (2 bytes)
+        cg.emit_sd(10, 10, 16);
+        assert_eq!(cg.code.len(), 2, "SD with x8-x15 and aligned offset should compress to C.SD (2 bytes)");
+        let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
+        assert_eq!(insn & 0x3, 0x01, "C.SD opcode should be 01");
+        assert_eq!((insn >> 13) & 0x7, 0b111, "C.SD funct3 should be 111");
+    }
+
+    #[test]
+    fn riscv64_no_compress_addi_out_of_range() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // ADDI x10, x10, 100 => 4 bytes (out of C.ADDI range -32..31)
+        cg.emit_addi(10, 10, 100);
+        assert_eq!(cg.code.len(), 4, "ADDI with large imm should not compress (4 bytes)");
+    }
+
+    #[test]
+    fn riscv64_no_compress_lw_wrong_regs() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
+        // LW x5, 8(x10) => 4 bytes (rd not in x8-x15)
+        cg.emit_lw(5, 10, 8);
+        assert_eq!(cg.code.len(), 4, "LW with rd not in x8-x15 should not compress (4 bytes)");
     }
 }

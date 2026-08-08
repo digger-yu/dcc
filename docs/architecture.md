@@ -477,10 +477,11 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   聚合返回值 > 16 字节走 sret、varargs 最小 spill、
   大立即数 `lui`+`addi` 序列。
 - **已实现**：JAL 范围校验、HFA 分类、eh_frame/ORC/sanitizer 节、
-  DWARF/BTF 调试信息、压缩指令 (C 扩展) 16-bit 编码、
+  DWARF/BTF 调试信息、压缩指令 (C 扩展) 16-bit 编码 + 自动 4→2 字节压缩优化
+  (C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.LW/C.SW/C.LD/C.SD)、
   FP D 扩展双精度、RVV 向量基础（VSETVLI/VLE32/VSE32/VADD.VV/VMUL.VV）、
   特权指令/CSR（CSRRW/CSRRS/CSRRC/MRET/SRET/WFI/SFENCE.VMA/FENCE）。
-- **仍待完善**：RVV 完整指令集（宽化/窄化/掩码/浮点向量）；压缩指令自动选择；
+- **仍待完善**：RVV 完整指令集（宽化/窄化/掩码/浮点向量）；
   D 扩展完整（FSQRT.D/FMIN.D/FMAX.D/比较指令）；Zicsr 全集合（CSRRSI/CSRRCI）。
 
 ## 测试脚本布局
