@@ -222,7 +222,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 
 | 特性 | 说明 |
 |------|------|
-| MS 扩展 | `__declspec(align/noreturn/thread/dllimport/dllexport)` / `_ms_restrict` / `__pragma` |
+| MS 扩展 | `__declspec(align/noreturn/thread/dllimport/dllexport)` 接受无 codegen 差异 / `_ms_restrict` / `__pragma` |
 | `__attribute__((cleanup(fn)))` | 变量离开作用域时插入 `cleanup_fn(&var)` |
 | `__attribute__((target_clones(...)))` | 链接期生成 STT_GNU_IFUNC 符号 + R_X86_64_IRELATIVE 重定位 |
 | `__attribute__((no_sanitize(...)))` | 按通道关闭 sanitizer 插桩 |

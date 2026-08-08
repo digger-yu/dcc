@@ -6652,3 +6652,28 @@ int main(void) {
     assert_eq!(rc, 0, "outer x should be 10, got {rc}");
     let _ = fs::remove_file(exe);
 }
+
+// =================== MS __declspec(dllimport/dllexport) ===================
+
+/// __declspec(dllimport) / __declspec(dllexport) 应被接受 (无 codegen 差异)
+#[test]
+fn ms_declspec_dllimport_dllexport_accepted() {
+    let src = "\
+__declspec(dllimport) int ext_var;
+__declspec(dllexport) int my_var = 42;
+__declspec(dllimport) void ext_fn(void);
+__declspec(dllexport) void my_fn(void) {}
+int main(void) {
+    my_var = 1;
+    my_fn();
+    return 0;
+}
+";
+    let (output, obj) = run_object_test("ms-declspec-dll", src);
+    assert!(
+        output.status.success(),
+        "__declspec(dllimport/dllexport) should be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(obj);
+}
