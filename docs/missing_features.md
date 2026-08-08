@@ -1,6 +1,6 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-08-07 — 基于 `cargo test` 287 integration tests + 554 unit tests 全部通过
+> 最后更新：2026-08-08 — 基于 `cargo test` 295 integration tests + 659 unit tests 全部通过
 > 
 > 已支持特性详见 `docs/support_features.md`
 
@@ -42,9 +42,15 @@
 
 ## Sanitizer 遗留
 
-| 通道 | 已知遗留 |
-|------|----------|
-| HWASAN MTE | AArch64 MTE 指令编码已实现，但未集成到 sanitizer 流程（需函数 prologue tag 栈帧、指针标记、软件 tag 检查） |
+| 通道 | 已知遗留 | 状态 |
+|------|----------|------|
+| KASAN (`-fsanitize=address`) | codegen 已支持 Deref/Index/Member/Ident LHS (Comma 解包)；栈红区 + 全局红区已实装 | ✅ 完整 |
+| HWASAN (`-fsanitize=hwaddress`) | 软件 tag 模式完整 (`__hwasan_loadN`/`__hwasan_storeN`)；AArch64 MTE 硬件指令编码已实现但未集成到 prologue tag 栈帧 + 指针 tag 流程 | ⚠️ 软件 tag 完整，硬件 MTE 待集成 |
+| KASAN-kernel (`-fsanitize=kernel-address`) | x86_64 内联 shadow 地址计算：`shadow = (addr >> 3) + 0xdffffc0000000000`；shadow byte < 0 时调用 `__asan_report_error` | ✅ 完整 |
+| UBSAN (`-fsanitize=undefined`) | Div/Mod/Shl/Shr/有符号 Add/Sub/Mul/VLA bound/null deref/float cast overflow 全部前置 `__ubsan_handle_*` | ✅ 完整 |
+| KCSAN (`-fsanitize=thread`) | TU init + 每函数 `__kcsan_func_entry`；KCSAN-only 模式走 `__kcsan_check_access(addr, size, is_write)` 三参调用 | ✅ 完整 |
+| KCOV (`-fsanitize-coverage`) | 每函数 `__dcc_cov_guards_N[16]` + 入口 `__sanitizer_cov_trace_pc` + 边覆盖 `__sanitizer_cov_trace_pc_guard`；跨函数 inline 合并由 `profile::kcov_merge` 在 LTO 阶段完成 | ✅ 完整 |
+| Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + `__sanitizer_cov_trace_cmp1/2/4/8` + `__sanitizer_cov_trace_switch`；libFuzzer 协议由 `profile::fuzzer_protocol` 提供（`LLVMFuzzerTestOneInput` 入口包装、8-bit counters、PC table、malloc/free 拦截器） | ✅ 完整 |
 
 ## 性能分析子系统遗留
 

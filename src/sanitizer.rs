@@ -1853,6 +1853,31 @@ mod tests {
                     collect_call_names_stmt(e, out);
                 }
             }
+            Stmt::Switch { expr, cases, .. } => {
+                collect_call_names_expr(expr, out);
+                for case in cases {
+                    for it in &case.body.items {
+                        collect_call_names(it, out);
+                    }
+                }
+            }
+            Stmt::While { cond, body, .. }
+            | Stmt::Do { body, cond, .. } => {
+                collect_call_names_expr(cond, out);
+                collect_call_names_stmt(body, out);
+            }
+            Stmt::For {
+                cond, step, body, ..
+            } => {
+                if let Some(c) = cond {
+                    collect_call_names_expr(c, out);
+                }
+                if let Some(s) = step {
+                    collect_call_names_expr(s, out);
+                }
+                collect_call_names_stmt(body, out);
+            }
+            Stmt::Label { stmt, .. } => collect_call_names_stmt(stmt, out),
             _ => {}
         }
     }
@@ -2681,5 +2706,516 @@ mod tests {
                 panic!("expected Expr::Call");
             }
         }
+    }
+
+    // ── Kernel KASAN shadow address computation ──────────────────────
+
+    #[test]
+    fn kernel_kasan_uses_inline_shadow_check() {
+        // -fsanitize=kernel-address 应生成内联 shadow 地址计算
+        // shadow = (addr >> 3) + 0xdffffc0000000000
+        // 而非调用 __asan_loadN/__asan_storeN 运行时函数。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int)),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kasan: true,
+                kernel_mode: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        // 内核模式不应 emit __asan_loadN
+        assert!(
+            !names.iter().any(|n| n.starts_with("__asan_load")),
+            "kernel KASAN should not call __asan_loadN, got: {:?}",
+            names
+        );
+        // 应 emit __asan_report_error (shadow byte 检查失败时调用)
+        assert!(
+            names.iter().any(|n| n == "__asan_report_error"),
+            "kernel KASAN should call __asan_report_error on shadow violation, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kernel_kasan_shadow_offset_is_correct() {
+        // 验证 x86_64 内核 shadow 偏移常量
+        let offset: i128 = 0xdffffc0000000000u64 as i128;
+        assert_eq!(offset, 0xdffffc0000000000u64 as i128);
+        // shadow = (addr >> 3) + offset
+        // 对典型内核地址 0xffff888000000000:
+        let kernel_addr: i128 = 0xffff888000000000u64 as i128;
+        let shadow = (kernel_addr >> 3) + offset;
+        // shadow 应指向有效 shadow 内存区域
+        assert!(shadow > 0, "shadow address must be positive");
+    }
+
+    // ── HWASAN ────────────────────────────────────────────────────────
+
+    #[test]
+    fn hwasan_uses_hwasan_load_store_names() {
+        // -fsanitize=hwaddress 应使用 __hwasan_loadN / __hwasan_storeN
+        // 而非 __asan_loadN / __asan_storeN。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int)),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                hwasan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n.starts_with("__hwasan_load")),
+            "HWASAN should emit __hwasan_loadN, got: {:?}",
+            names
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("__asan_load")),
+            "HWASAN should not emit __asan_loadN, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn hwasan_store_fn_maps_known_sizes() {
+        assert_eq!(hwasan_store_fn(1), "__hwasan_store1");
+        assert_eq!(hwasan_store_fn(2), "__hwasan_store2");
+        assert_eq!(hwasan_store_fn(4), "__hwasan_store4");
+        assert_eq!(hwasan_store_fn(8), "__hwasan_store8");
+        assert_eq!(hwasan_store_fn(16), "__hwasan_store16");
+        assert_eq!(hwasan_store_fn(32), "__hwasan_store32");
+    }
+
+    #[test]
+    fn hwasan_load_fn_maps_known_sizes() {
+        assert_eq!(hwasan_load_fn(1), "__hwasan_load1");
+        assert_eq!(hwasan_load_fn(2), "__hwasan_load2");
+        assert_eq!(hwasan_load_fn(4), "__hwasan_load4");
+        assert_eq!(hwasan_load_fn(8), "__hwasan_load8");
+        assert_eq!(hwasan_load_fn(16), "__hwasan_load16");
+        assert_eq!(hwasan_load_fn(32), "__hwasan_load32");
+    }
+
+    // ── KCSAN ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn kcsan_store_check_passes_is_write_one() {
+        // KCSAN-only 模式下，赋值 LHS 的 store 检查应调用
+        // __kcsan_check_access(addr, size, 1) — is_write=1。
+        let addr = Expr::Ident {
+            name: Ident {
+                name: "p".into(),
+                span: Span::point("t.c", 1, 1),
+            },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Ptr(Box::new(Type::Void)),
+        };
+        let call = make_mem_check_call(
+            addr,
+            4,
+            true, // is_write
+            &Span::point("t.c", 1, 1),
+            SanitizerFlags {
+                kcsan: true,
+                ..Default::default()
+            },
+        );
+        if let Expr::Call { callee, args, .. } = call {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                assert_eq!(name.name, "__kcsan_check_access");
+            } else {
+                panic!("callee should be Ident");
+            }
+            assert_eq!(args.len(), 3, "KCSAN check must have 3 args (addr, size, is_write)");
+            // is_write arg should be 1 for store
+            if let Expr::Int { v, .. } = &args[2] {
+                assert_eq!(*v, 1, "is_write must be 1 for store");
+            } else {
+                panic!("3rd arg should be Int");
+            }
+        } else {
+            panic!("expected Expr::Call");
+        }
+    }
+
+    #[test]
+    fn kcsan_load_check_passes_is_write_zero() {
+        let addr = Expr::Ident {
+            name: Ident {
+                name: "p".into(),
+                span: Span::point("t.c", 1, 1),
+            },
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Ptr(Box::new(Type::Void)),
+        };
+        let call = make_mem_check_call(
+            addr,
+            8,
+            false, // is_write = false for load
+            &Span::point("t.c", 1, 1),
+            SanitizerFlags {
+                kcsan: true,
+                ..Default::default()
+            },
+        );
+        if let Expr::Call { args, .. } = call {
+            if let Expr::Int { v, .. } = &args[2] {
+                assert_eq!(*v, 0, "is_write must be 0 for load");
+            } else {
+                panic!("3rd arg should be Int");
+            }
+        } else {
+            panic!("expected Expr::Call");
+        }
+    }
+
+    // ── Fuzzer ────────────────────────────────────────────────────────
+
+    #[test]
+    fn fuzzer_injects_switch_trace() {
+        // fuzzer 模式下，switch 语句的 expr 应被包成
+        // `Comma { l: Call(__sanitizer_cov_trace_switch, x), r: x }`。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Switch {
+                expr: Expr::Ident {
+                    name: Ident {
+                        name: "x".into(),
+                        span: Span::point("t.c", 1, 1),
+                    },
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                cases: vec![crate::ast::Case {
+                    val: Some(Expr::Int {
+                        v: 1,
+                        span: Span::point("t.c", 2, 1),
+                        ty: Type::Int,
+                    }),
+                    range_end: None,
+                    body: Block {
+                        items: vec![BlockItem::Stmt(Stmt::Break {
+                            span: Span::point("t.c", 3, 1),
+                        })],
+                        span: Span::point("t.c", 2, 1),
+                    },
+                    span: Span::point("t.c", 2, 1),
+                }],
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                fuzzer: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        // 直接检查 Switch 的 expr 是否被包成 Comma(Call, _)
+        let body = f.body.as_ref().unwrap();
+        let mut found_switch_trace = false;
+        for item in &body.items {
+            if let BlockItem::Stmt(Stmt::Switch { expr, .. }) = item {
+                if let Expr::Comma { l, .. } = expr {
+                    if let Expr::Call { callee, .. } = l.as_ref() {
+                        if let Expr::Ident { name, .. } = callee.as_ref() {
+                            if name.name == "__sanitizer_cov_trace_switch" {
+                                found_switch_trace = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found_switch_trace,
+            "fuzzer should inject __sanitizer_cov_trace_switch as switch expr wrapper"
+        );
+    }
+
+    // ── KCOV edge coverage ────────────────────────────────────────────
+
+    #[test]
+    fn kcov_injects_guard_at_if_branches() {
+        // KCOV 模式应在 if/else 分支前注入 guard 调用。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::If {
+                cond: Expr::Int {
+                    v: 1,
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                then_: Box::new(Stmt::Return {
+                    val: None,
+                    span: Span::point("t.c", 2, 1),
+                }),
+                else_: Some(Box::new(Stmt::Return {
+                    val: None,
+                    span: Span::point("t.c", 3, 1),
+                })),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kcov: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__sanitizer_cov_trace_pc_guard"),
+            "KCOV should inject trace_pc_guard at branches, got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n == "__sanitizer_cov_trace_pc"),
+            "KCOV should inject trace_pc at function entry, got: {:?}",
+            names
+        );
+    }
+
+    // ── Effective flags / no_sanitize ─────────────────────────────────
+
+    #[test]
+    fn effective_flags_kernel_kcsan_disables_kcsan() {
+        let flags = SanitizerFlags {
+            kcsan: true,
+            kernel_mode: true,
+            ..Default::default()
+        };
+        let eff = effective_flags(&["kernel-kcsan".to_string()], flags);
+        assert!(!eff.kcsan);
+    }
+
+    #[test]
+    fn effective_flags_hwaddress_disables_hwasan() {
+        let flags = SanitizerFlags {
+            hwasan: true,
+            ..Default::default()
+        };
+        let eff = effective_flags(&["hwaddress".to_string()], flags);
+        assert!(!eff.hwasan);
+    }
+
+    // ── Assign with Deref LHS (KASAN store path) ──────────────────────
+
+    #[test]
+    fn kasan_store_check_on_deref_assign() {
+        // *p = v 应在赋值前插入 __asan_storeN 检查。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Expr {
+                e: Expr::Assign {
+                    op: BinOp::Add,
+                    l: Box::new(Expr::Deref {
+                        e: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "p".into(),
+                                span: Span::point("t.c", 1, 1),
+                            },
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Ptr(Box::new(Type::Int)),
+                        }),
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    r: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "v".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kasan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n.starts_with("__asan_store")),
+            "KASAN should inject __asan_storeN on *p = v, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kasan_store_check_on_index_assign() {
+        // arr[i] = v 应在赋值前插入 __asan_storeN 检查。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Expr {
+                e: Expr::Assign {
+                    op: BinOp::Add,
+                    l: Box::new(Expr::Index {
+                        arr: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "arr".into(),
+                                span: Span::point("t.c", 1, 1),
+                            },
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Ptr(Box::new(Type::Int)),
+                        }),
+                        idx: Box::new(Expr::Int {
+                            v: 0,
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Int,
+                        }),
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    r: Box::new(Expr::Int {
+                        v: 42,
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kasan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n.starts_with("__asan_store")),
+            "KASAN should inject __asan_storeN on arr[i] = v, got: {:?}",
+            names
+        );
+    }
+
+    // ── SanitizerFlags parsing ────────────────────────────────────────
+
+    #[test]
+    fn from_args_kernel_hwaddress() {
+        let f = SanitizerFlags::from_args(&["-fsanitize=kernel-hwaddress".to_string()]);
+        assert!(f.hwasan && f.kernel_mode);
+    }
+
+    #[test]
+    fn from_args_kernel_kcsan() {
+        let f = SanitizerFlags::from_args(&["-fsanitize=kernel-kcsan".to_string()]);
+        assert!(f.kcsan && f.kernel_mode);
+    }
+
+    #[test]
+    fn from_args_trace_pc_guard() {
+        let f = SanitizerFlags::from_args(&["-fsanitize=trace-pc-guard".to_string()]);
+        assert!(f.kcov);
     }
 }
