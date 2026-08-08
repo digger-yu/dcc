@@ -6624,6 +6624,36 @@ fn cet_no_ibt_plt_sec_empty() {
     }
 }
 
+// =================== BIND_NOW .plt.got ===================
+
+/// BIND_NOW: -z now 编译 PIE 应生成 .plt.got 节 (GOT-resolved PLT)
+#[test]
+#[cfg(unix)]
+fn bind_now_plt_got_section() {
+    let (output, exe) = run_compile_and_run_flags(
+        "bind-now-plt-got",
+        "extern int puts(const char *);\nint main(void) { puts(\"hi\"); return 0; }",
+        &["-pie", "-fbuiltin-linker", "-z", "now"],
+    );
+    assert!(
+        output.status.success(),
+        "bind-now compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // readelf -S 检查 .plt.got 节
+    let readelf = Command::new("readelf")
+        .args(["-S"])
+        .arg(&exe)
+        .output()
+        .expect("readelf");
+    let sections = String::from_utf8_lossy(&readelf.stdout);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        sections.contains(".plt.got"),
+        "expected .plt.got section in ELF: {sections}"
+    );
+}
+
 // =================== C11 atomic 预置宏 ===================
 
 /// C11 hosted 模式: atomic_int / memory_order_* / atomic_thread_fence 等预置宏可用

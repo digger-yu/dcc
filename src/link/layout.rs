@@ -40,6 +40,8 @@ pub enum OutputSectionKind {
     Plt,
     /// CET/IBT 安全 PLT 节 (endbr64 + jmp *GOT; push $idx; jmp PLT0)
     PltSec,
+    /// GOT-resolved PLT 节 (BIND_NOW 模式, 直接 jmp *GOT 无 lazy stub)
+    PltGot,
     Dynamic,
     DynStr,
     DynSym,
@@ -244,6 +246,7 @@ impl LayoutBuilder {
                             | OutputSectionKind::Fini
                             | OutputSectionKind::Plt
                             | OutputSectionKind::PltSec
+                            | OutputSectionKind::PltGot
                     ) {
                         0
                     } else {
@@ -418,6 +421,7 @@ impl LayoutBuilder {
                     | OutputSectionKind::GotPlt
                     | OutputSectionKind::Plt
                     | OutputSectionKind::PltSec
+                    | OutputSectionKind::PltGot
                     | OutputSectionKind::GnuProperty
                     | OutputSectionKind::RelDyn
                     | OutputSectionKind::RelPlt
@@ -679,6 +683,27 @@ impl LayoutBuilder {
             input_sections: Vec::new(),
         });
         idx_map.insert(OutputSectionKind::PltSec, new_idx);
+
+        // GOT-resolved PLT 节 (.plt.got, BIND_NOW 模式)
+        let new_idx = sections.len() as u32;
+        sections.push(OutputSection {
+            kind: OutputSectionKind::PltGot,
+            name: ".plt.got".to_string(),
+            sh_name_off: 0,
+            ty: SHT_PROGBITS,
+            flags: SHF_ALLOC | SHF_EXECINSTR,
+            align: 16,
+            data: Vec::new(),
+            size: 0,
+            entsize: 0,
+            output_index: new_idx,
+            load_segment: 0,
+            vaddr: 0,
+            file_off: 0,
+            input_offsets: Vec::new(),
+            input_sections: Vec::new(),
+        });
+        idx_map.insert(OutputSectionKind::PltGot, new_idx);
 
         // GNU property 节 (CET feature marking)
         let new_idx = sections.len() as u32;
@@ -1082,9 +1107,10 @@ fn classify_section(name: &str) -> Option<OutputSectionKind> {
 
 fn section_flags_for_kind(kind: OutputSectionKind) -> u32 {
     match kind {
-        OutputSectionKind::Text | OutputSectionKind::Plt | OutputSectionKind::PltSec => {
-            SHF_ALLOC | SHF_EXECINSTR
-        }
+        OutputSectionKind::Text
+        | OutputSectionKind::Plt
+        | OutputSectionKind::PltSec
+        | OutputSectionKind::PltGot => SHF_ALLOC | SHF_EXECINSTR,
         OutputSectionKind::Rodata | OutputSectionKind::Init | OutputSectionKind::Fini => SHF_ALLOC,
         OutputSectionKind::Data
         | OutputSectionKind::Bss
@@ -1118,7 +1144,7 @@ fn section_align_for_kind(kind: OutputSectionKind) -> u64 {
         | OutputSectionKind::DynStr
         | OutputSectionKind::RelDyn
         | OutputSectionKind::RelPlt => 8,
-        OutputSectionKind::Plt | OutputSectionKind::PltSec => 16,
+        OutputSectionKind::Plt | OutputSectionKind::PltSec | OutputSectionKind::PltGot => 16,
         OutputSectionKind::Note => 4,
         OutputSectionKind::GnuProperty => 8,
         OutputSectionKind::Named(_) => 1,
@@ -1141,6 +1167,7 @@ fn output_name(kind: OutputSectionKind) -> &'static str {
         OutputSectionKind::GotPlt => ".got.plt",
         OutputSectionKind::Plt => ".plt",
         OutputSectionKind::PltSec => ".plt.sec",
+        OutputSectionKind::PltGot => ".plt.got",
         OutputSectionKind::Dynamic => ".dynamic",
         OutputSectionKind::DynStr => ".dynstr",
         OutputSectionKind::DynSym => ".dynsym",

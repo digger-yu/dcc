@@ -129,6 +129,24 @@ fn emit_plt_sec_entry(
     buf
 }
 
+/// GOT-resolved PLT 条目 (放入 .plt.got 节) 16 字节:
+/// BIND_NOW 模式下使用, 直接 jmp *GOT 无 lazy stub.
+///   jmp *GOT_ENTRY(%rip)        ; 6 bytes (ff 25 <disp32>)
+///   nop * 10                    ; 10 bytes padding
+///                              = 16 bytes
+fn emit_plt_got_entry(this_vaddr: u64, got_entry_vaddr: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16);
+    // jmp *GOT_ENTRY(%rip) -> ff 25 <disp32>
+    let disp = (got_entry_vaddr as i64) - (this_vaddr as i64 + 6);
+    buf.extend_from_slice(&[0xff, 0x25]);
+    buf.extend_from_slice(&(disp as i32).to_le_bytes());
+    // padding to 16 bytes with NOPs
+    while buf.len() < 16 {
+        buf.push(0x90);
+    }
+    buf
+}
+
 /// PLT[0] 桩：32 字节
 ///   push *GOT[1](%rip)        ; 6 bytes
 ///   bnd jmp *GOT[2](%rip)     ; 6 bytes (bnd jmp: f2 ff 25 <disp32>)
@@ -178,6 +196,7 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
     let (
         plt_idx,
         plt_sec_idx,
+        plt_got_idx,
         gnu_prop_idx,
         got_plt_idx,
         got_idx,
@@ -189,6 +208,7 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
     ) = {
         let mut plt_i = None;
         let mut plt_sec_i = None;
+        let mut plt_got_i = None;
         let mut gnu_prop_i = None;
         let mut got_plt_i = None;
         let mut got_i = None;
@@ -201,6 +221,7 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
             match s.kind {
                 OutputSectionKind::Plt => plt_i = Some(i),
                 OutputSectionKind::PltSec => plt_sec_i = Some(i),
+                OutputSectionKind::PltGot => plt_got_i = Some(i),
                 OutputSectionKind::GnuProperty => gnu_prop_i = Some(i),
                 OutputSectionKind::GotPlt => got_plt_i = Some(i),
                 OutputSectionKind::Got => got_i = Some(i),
@@ -215,6 +236,7 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         (
             plt_i.expect("PLT section missing"),
             plt_sec_i.unwrap_or(0),
+            plt_got_i.unwrap_or(0),
             gnu_prop_i.unwrap_or(0),
             got_plt_i.expect("GOTPLT section missing"),
             got_i.unwrap_or(0),
@@ -300,11 +322,13 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         dynstr_data.push(0);
     }
     // 生成 .plt (CET/IBT 模式下仅包含 PLT[0], 函数条目放入 .plt.sec)
-    let mut plt_data = Vec::with_capacity(32 + if ibt { 0 } else { 16 * n_plt });
+    // BIND_NOW 模式下 .plt 也仅包含 PLT[0], 函数条目放入 .plt.got
+    let bind_now = _opts.bind_now;
+    let mut plt_data = Vec::with_capacity(32 + if ibt || bind_now { 0 } else { 16 * n_plt });
     let got1 = got_plt_vaddr + 8;
     let got2 = got_plt_vaddr + 16;
     plt_data.extend_from_slice(&emit_plt0(plt_vaddr, got1, got2, ibt));
-    if !ibt {
+    if !ibt && !bind_now {
         // 传统 PLT: 每个函数条目直接在 .plt 中
         for i in 0..n_plt {
             let this = plt_vaddr + plt_data.len() as u64;
@@ -312,19 +336,33 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
             plt_data.extend_from_slice(&emit_plt_entry(plt_vaddr, this, got_entry, i as u64));
         }
     }
-    // 生成 .plt.sec (CET/IBT 安全 PLT 条目)
+    // 生成 .plt.sec (CET/IBT 安全 PLT 条目, 非 BIND_NOW 模式)
     let mut plt_sec_data = Vec::new();
-    let plt_sec_vaddr = if plt_sec_idx > 0 && ibt {
+    let plt_sec_vaddr = if plt_sec_idx > 0 && ibt && !bind_now {
         layout.sections[plt_sec_idx].vaddr
     } else {
         0
     };
-    if ibt && n_plt > 0 {
+    if ibt && !bind_now && n_plt > 0 {
         for i in 0..n_plt {
             let this = plt_sec_vaddr + plt_sec_data.len() as u64;
             let got_entry = got_plt_vaddr + 24 + (i * 8) as u64;
             plt_sec_data
                 .extend_from_slice(&emit_plt_sec_entry(plt_vaddr, this, got_entry, i as u64));
+        }
+    }
+    // 生成 .plt.got (BIND_NOW 模式: GOT-resolved PLT, 直接 jmp *GOT 无 lazy stub)
+    let mut plt_got_data = Vec::new();
+    let plt_got_vaddr = if plt_got_idx > 0 && bind_now {
+        layout.sections[plt_got_idx].vaddr
+    } else {
+        0
+    };
+    if bind_now && n_plt > 0 {
+        for i in 0..n_plt {
+            let this = plt_got_vaddr + plt_got_data.len() as u64;
+            let got_entry = got_plt_vaddr + 24 + (i * 8) as u64;
+            plt_got_data.extend_from_slice(&emit_plt_got_entry(this, got_entry));
         }
     }
     // 生成 .gnu.property (CET feature marking)
@@ -446,6 +484,12 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         plt_sec.data = plt_sec_data;
         plt_sec.size = plt_sec.data.len() as u64;
     }
+    // 写回 .plt.got (BIND_NOW)
+    if bind_now && plt_got_idx > 0 && !plt_got_data.is_empty() {
+        let plt_got = &mut layout.sections[plt_got_idx];
+        plt_got.data = plt_got_data;
+        plt_got.size = plt_got.data.len() as u64;
+    }
     // 写回 .gnu.property (CET feature marking)
     if gnu_prop_idx > 0 && !gnu_prop_data.is_empty() {
         let gnu_prop = &mut layout.sections[gnu_prop_idx];
@@ -522,5 +566,20 @@ mod tests {
         let plt0 = emit_plt0(0x401000, 0x402008, 0x402010, false);
         assert_eq!(plt0.len(), 32);
         assert_ne!(&plt0[0..4], &[0xf3, 0x0f, 0x1e, 0xfa]);
+    }
+
+    #[test]
+    fn plt_got_entry_has_correct_size_and_opcode() {
+        let entry = emit_plt_got_entry(0x401000, 0x402010);
+        assert_eq!(entry.len(), 16);
+        // jmp *GOT(%rip) = ff 25 <disp32>
+        assert_eq!(&entry[0..2], &[0xff, 0x25]);
+        // disp = 0x402010 - (0x401000 + 6) = 0x100a
+        let disp = i32::from_le_bytes(entry[2..6].try_into().unwrap());
+        assert_eq!(disp, 0x402010 - 0x401006);
+        // rest is NOP padding
+        for &b in &entry[6..16] {
+            assert_eq!(b, 0x90);
+        }
     }
 }
