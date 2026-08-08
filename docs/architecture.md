@@ -495,8 +495,8 @@ Driver 在 codegen 前执行 `lower → validate → opt → resync → validate
 
 | 阶段 | 职责 |
 |------|------|
-| `lower` | AST 降级为带 `ValueType` 的函数/全局图；全局初值过 `is_static_initializer`，违例报 **E1006** |
-| `validate` | 校验 float/vector/complex 二元/一元/赋值/条件/聚合/转换是否与 codegen 能力一致（**E1003/E1007/E1008**）；向量二元仅 Add/Sub/Mul |
+| `lower` | AST 降级为带 `ValueType` 的函数/全局图；全局初值过 `is_static_initializer`，违例报 **E1006**；另含 **E1001**（未解析类型）、**E1004**（非法解引用）、**E1005**（va_arg 非 va_list）、**E1009**（未知成员）、**E1010**（非聚合成员访问） |
+| `validate` | 校验 float/vector/complex 二元/一元/赋值/条件/聚合/转换是否与 codegen 能力一致；向量二元仅 Add/Sub/Mul。报 **E1002**（函数无名）、**E1003**（不支持的浮点运算）、**E1007**（向量运算/赋值）、**E1008**（复数运算） |
 | `opt` | 常量折叠、`-O0` 仍内联 `always_inline`、`-O1+` 函数内联、
   `-O2+` GVN/CSE/拷贝传播/LICM、`-O3` 循环展开与向量循环向量化；改写 AST |
 | `resync` | opt 后从 AST 重新 lower，使 IR 图与优化结果一致 |
