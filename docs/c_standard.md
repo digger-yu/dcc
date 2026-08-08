@@ -27,7 +27,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `_Static_assert` (解析器静默跳过)
 - `_Atomic` (基础类型表支持)
 - 匿名 struct/union
-- `<stdatomic.h>` 内建宏（hosted 模式预置 `atomic_*` → `__atomic_*`）
+- `<stdatomic.h>` 内建宏（hosted 模式预置 `atomic_int`/`atomic_bool`/`memory_order_*`/`atomic_thread_fence`/`atomic_signal_fence`/`kill_dependency`；freestanding 模式 `__STDC_HOSTED__=0` + `__STDC_NO_ATOMICS__=1` 且不预置）
 - `_Generic` 泛型选择表达式
 - `_Thread_local` / `__thread` 线程局部存储（`.tdata`/`.tbss` + `STT_TLS`）
 - `_Noreturn` 函数限定符 (解析器静默跳过)

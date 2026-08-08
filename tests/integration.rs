@@ -6588,3 +6588,41 @@ fn cet_no_ibt_plt_sec_empty() {
         }
     }
 }
+
+// =================== C11 atomic 预置宏 ===================
+
+/// C11 hosted 模式: atomic_int / memory_order_* / atomic_thread_fence 等预置宏可用
+#[test]
+#[cfg(unix)]
+fn c11_atomic_macros_hosted_compile_and_run() {
+    let source = include_str!("fixtures/c/c11_atomic_macros.c");
+    let (output, exe) = run_compile_and_run("c11-atomic-hosted", source);
+    assert!(
+        output.status.success(),
+        "c11 atomic hosted compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "c11_atomic_macros should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// C11 freestanding 模式: __STDC_HOSTED__=0, __STDC_NO_ATOMICS__=1
+#[test]
+#[cfg(unix)]
+fn c11_atomic_freestanding_no_atomics() {
+    let source = include_str!("fixtures/c/c11_atomic_freestanding.c");
+    let (output, exe) =
+        run_compile_and_run_flags("c11-atomic-freestanding", source, &["-ffreestanding"]);
+    assert!(
+        output.status.success(),
+        "freestanding compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(
+        rc, 0,
+        "freestanding should see __STDC_NO_ATOMICS__=1, got {rc}"
+    );
+    let _ = fs::remove_file(exe);
+}
