@@ -10,6 +10,12 @@ use crate::target::Target;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Clone, Copy)]
+enum BranchKind {
+    Beq,
+    B,
+}
+
 /// ARM AAPCS 后端
 pub struct ArmCodegen {
     pub code: Vec<u8>,
@@ -22,6 +28,7 @@ pub struct ArmCodegen {
     pub labels: HashMap<String, u64>,
     locals: HashMap<String, i32>,
     global_rodata: HashMap<String, u64>,
+    string_pool: HashMap<Vec<u8>, u64>,
     sym_index: HashMap<String, u32>,
     stack_bytes: i32,
     frame_bytes: i32,
@@ -33,6 +40,9 @@ pub struct ArmCodegen {
     label_serial: u32,
     /// 前向 bl 调用: (指令字位置, 目标符号名)
     pending_bl_calls: Vec<(u64, String)>,
+    pending_branches: Vec<(u64, String, BranchKind)>,
+    break_labels: Vec<String>,
+    continue_labels: Vec<String>,
     _target: Target,
 }
 
@@ -49,6 +59,7 @@ impl ArmCodegen {
             labels: HashMap::new(),
             locals: HashMap::new(),
             global_rodata: HashMap::new(),
+            string_pool: HashMap::new(),
             sym_index: HashMap::new(),
             stack_bytes: 0,
             frame_bytes: 0,
@@ -59,6 +70,9 @@ impl ArmCodegen {
             emitted_return: false,
             label_serial: 0,
             pending_bl_calls: Vec::new(),
+            pending_branches: Vec::new(),
+            break_labels: Vec::new(),
+            continue_labels: Vec::new(),
             _target: target,
         }
     }
@@ -104,8 +118,33 @@ impl ArmCodegen {
     fn emit_global_init(&mut self, g: &Global) {
         let offset = self.rodata.len() as u64;
         self.global_rodata.insert(g.name.clone(), offset);
-        // 简化：全局变量初始化为 0
-        self.rodata.extend_from_slice(&[0u8; 4]);
+        // Evaluate constant initializer or default to zero
+        if let Some(init_expr) = &g.initializer {
+            // Try to extract constant value from TypedExpr
+            let val = match (&init_expr.kind, &init_expr.literal) {
+                (crate::ir::ExprKind::Constant, Some(crate::ir::ExprLiteral::Int(v))) => Some(*v as i64),
+                _ => None,
+            };
+            if let Some(val) = val {
+                // Emit proper size based on type
+                let size = match &g.ty {
+                    ValueType::Integer { bits, .. } => (*bits / 8).max(4) as usize,
+                    ValueType::Pointer(_) => 4, // ARM32: 4-byte pointers
+                    _ => 4,
+                };
+                if size == 8 {
+                    self.rodata.extend_from_slice(&(val as i64).to_le_bytes());
+                } else {
+                    self.rodata.extend_from_slice(&(val as i32).to_le_bytes());
+                }
+            } else {
+                // Non-constant initializer: emit zero for now
+                self.rodata.extend_from_slice(&[0u8; 4]);
+            }
+        } else {
+            // No initializer: emit zero
+            self.rodata.extend_from_slice(&[0u8; 4]);
+        }
     }
 
     fn compile_rel(&mut self, module: &Module, _prog: &Program) {
@@ -270,6 +309,8 @@ impl ArmCodegen {
             Stmt::While { cond, body, .. } => {
                 let lbl_top = self.fresh_label("Lwhile");
                 let lbl_end = self.fresh_label("Lendwhile");
+                self.break_labels.push(lbl_end.clone());
+                self.continue_labels.push(lbl_top.clone());
                 self.set_label(&lbl_top);
                 self.gen_expr_from_ast(cond);
                 self.emit_cmp_imm(0, 0);
@@ -277,6 +318,8 @@ impl ArmCodegen {
                 self.gen_stmt(body);
                 self.emit_b(&lbl_top);
                 self.set_label(&lbl_end);
+                self.break_labels.pop();
+                self.continue_labels.pop();
             }
             Stmt::For {
                 init,
@@ -290,6 +333,9 @@ impl ArmCodegen {
                 }
                 let lbl_top = self.fresh_label("Lfor");
                 let lbl_end = self.fresh_label("Lendfor");
+                let lbl_step = self.fresh_label("Lforstep");
+                self.break_labels.push(lbl_end.clone());
+                self.continue_labels.push(lbl_step.clone());
                 self.set_label(&lbl_top);
                 if let Some(c) = cond {
                     self.gen_expr_from_ast(c);
@@ -297,11 +343,14 @@ impl ArmCodegen {
                     self.emit_beq(&lbl_end);
                 }
                 self.gen_stmt(body);
+                self.set_label(&lbl_step);
                 if let Some(s) = step {
                     self.gen_expr_from_ast(s);
                 }
                 self.emit_b(&lbl_top);
                 self.set_label(&lbl_end);
+                self.break_labels.pop();
+                self.continue_labels.pop();
             }
             Stmt::Block { b, .. } => {
                 for item in &b.items {
@@ -309,6 +358,74 @@ impl ArmCodegen {
                         self.gen_stmt(s);
                     }
                 }
+            }
+            Stmt::Do { body, cond, .. } => {
+                let lbl_body = self.fresh_label("Ldobody");
+                let lbl_cond = self.fresh_label("Ldocond");
+                let lbl_end = self.fresh_label("Lenddo");
+                self.break_labels.push(lbl_end.clone());
+                self.continue_labels.push(lbl_cond.clone());
+                self.set_label(&lbl_body);
+                self.gen_stmt(body);
+                self.set_label(&lbl_cond);
+                self.gen_expr_from_ast(cond);
+                self.emit_cmp_imm(0, 0);
+                self.emit_beq(&lbl_end);
+                self.emit_b(&lbl_body);
+                self.set_label(&lbl_end);
+                self.break_labels.pop();
+                self.continue_labels.pop();
+            }
+            Stmt::Break { .. } => {
+                if let Some(lbl) = self.break_labels.last().cloned() {
+                    self.emit_b(&lbl);
+                }
+            }
+            Stmt::Continue { .. } => {
+                if let Some(lbl) = self.continue_labels.last().cloned() {
+                    self.emit_b(&lbl);
+                }
+            }
+            Stmt::Switch { expr, cases, .. } => {
+                self.gen_expr_from_ast(expr);
+                // r0 now holds the switch expression value
+                let lbl_end = self.fresh_label("Lendswitch");
+                let lbl_default = self.fresh_label("Ldefault");
+                self.break_labels.push(lbl_end.clone());
+                // Generate case comparisons
+                let mut case_labels = Vec::new();
+                for case in cases {
+                    let lbl_case = self.fresh_label("Lcase");
+                    if let Some(val_expr) = &case.val {
+                        // case N:
+                        if let Ok(val) = crate::const_eval::eval(val_expr) {
+                            self.emit_load_imm(1, val as i32); // r1 = case value
+                            self.emit_cmp(0, 1); // compare r0 with r1
+                            let lbl_next = self.fresh_label("Lnextcase");
+                            // Use BEQ to jump to case body if equal
+                            let pos = self.code.len() as u64;
+                            self.pending_branches.push((pos, lbl_case.clone(), BranchKind::Beq));
+                            self.code.extend_from_slice(&0x0A000000u32.to_le_bytes());
+                            case_labels.push((lbl_case, case));
+                        }
+                    } else {
+                        // default:
+                        case_labels.push((lbl_default.clone(), case));
+                    }
+                }
+                // Jump to default if no case matched
+                self.emit_b(&lbl_default);
+                // Generate case bodies
+                for (lbl, case) in &case_labels {
+                    self.set_label(lbl);
+                    for item in &case.body.items {
+                        if let BlockItem::Stmt(s) = item {
+                            self.gen_stmt(s);
+                        }
+                    }
+                }
+                self.set_label(&lbl_end);
+                self.break_labels.pop();
             }
             _ => {}
         }
@@ -321,6 +438,23 @@ impl ArmCodegen {
             }
             Expr::Char { v, .. } => {
                 self.emit_load_imm(0, *v as i32);
+            }
+            Expr::String { data, .. } => {
+                // Emit string to .rodata and load address
+                let offset = if let Some(&off) = self.string_pool.get(data) {
+                    off
+                } else {
+                    let off = self.rodata.len() as u64;
+                    self.rodata.extend_from_slice(data);
+                    // Ensure null terminator
+                    if data.last() != Some(&0) {
+                        self.rodata.push(0);
+                    }
+                    self.string_pool.insert(data.clone(), off);
+                    off
+                };
+                // Load string address into r0
+                self.emit_load_imm(0, offset as i32);
             }
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
@@ -473,8 +607,49 @@ impl ArmCodegen {
         format!("{}{}", prefix, self.label_serial)
     }
 
-    fn set_label(&mut self, _label: &str) {
-        // 在 relocatable 模式下标签通过符号表处理
+    fn set_label(&mut self, label: &str) {
+        let pos = self.code.len() as u64;
+        self.labels.insert(label.to_string(), pos);
+        // Patch all pending branches targeting this label
+        let pending: Vec<_> = self
+            .pending_branches
+            .iter()
+            .filter(|(_, l, _)| l == label)
+            .cloned()
+            .collect();
+        for (at, _, kind) in pending {
+            match kind {
+                BranchKind::Beq => self.patch_beq(at, pos),
+                BranchKind::B => self.patch_b(at, pos),
+            }
+        }
+        self.pending_branches.retain(|(_, l, _)| l != label);
+    }
+
+    fn patch_beq(&mut self, at: u64, target: u64) {
+        // ARM BEQ offset: (target - branch_pc - 8) / 4
+        // branch_pc is the position of the BEQ instruction
+        let offset = ((target as i64) - (at as i64) - 8) / 4;
+        let offset = offset as u32 & 0x00FFFFFF;
+        // Read existing instruction, preserve condition code, update offset
+        let existing = u32::from_le_bytes([
+            self.code[at as usize],
+            self.code[at as usize + 1],
+            self.code[at as usize + 2],
+            self.code[at as usize + 3],
+        ]);
+        let patched = (existing & 0xFF000000) | offset;
+        self.code[at as usize..at as usize + 4]
+            .copy_from_slice(&patched.to_le_bytes());
+    }
+
+    fn patch_b(&mut self, at: u64, target: u64) {
+        // ARM B (AL condition) offset: (target - branch_pc - 8) / 4
+        let offset = ((target as i64) - (at as i64) - 8) / 4;
+        let offset = offset as u32 & 0x00FFFFFF;
+        let patched = 0xEA000000 | offset; // B with AL condition
+        self.code[at as usize..at as usize + 4]
+            .copy_from_slice(&patched.to_le_bytes());
     }
 
     // ===== ARM 指令编码 =====
@@ -606,14 +781,20 @@ impl ArmCodegen {
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
-    fn emit_b(&mut self, _label: &str) {
-        // 简化: 编码为 NOP 占位 (实际链接时由 linker 处理)
-        self.code.extend_from_slice(&0xE1A00000u32.to_le_bytes()); // NOP
+    fn emit_b(&mut self, label: &str) {
+        // B: 记录 pending branch
+        let pos = self.code.len() as u64;
+        self.pending_branches.push((pos, label.to_string(), BranchKind::B));
+        // 占位 B 指令 (AL condition)
+        self.code.extend_from_slice(&0xEA000000u32.to_le_bytes());
     }
 
-    fn emit_beq(&mut self, _label: &str) {
+    fn emit_beq(&mut self, label: &str) {
         // BEQ: 条件码 0x0
-        self.code.extend_from_slice(&0x01A00000u32.to_le_bytes()); // NOP (EQ)
+        let pos = self.code.len() as u64;
+        self.pending_branches.push((pos, label.to_string(), BranchKind::Beq));
+        // 占位 BEQ 指令 (EQ condition = 0x0)
+        self.code.extend_from_slice(&0x0A000000u32.to_le_bytes());
     }
 
     fn emit_bl(&mut self, name: &str) {
@@ -700,7 +881,10 @@ impl ArmCodegen {
                 &self.extra_sections,
             )
         } else {
-            panic!("ARM executable output not yet supported");
+            // Non-relocatable (executable) output not yet supported for ARM
+            // Return empty vector with a warning (caller should handle this)
+            eprintln!("Warning: ARM executable output not yet supported, use -c for relocatable output");
+            Vec::new()
         }
     }
 

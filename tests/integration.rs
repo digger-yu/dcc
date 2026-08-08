@@ -1734,6 +1734,172 @@ fn riscv64_ir_global_cross_compile() {
     assert!(bytes.len() > 64);
 }
 
+/// MIPS32 hello world cross-compile.
+#[test]
+fn mips_hello_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-mips-hello-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-mips-hello-{}.o", std::process::id()));
+    fs::write(&source_path, "int main(void) { return 42; }\n").expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "mips-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    // MIPS ELF e_machine = 8
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 8);
+}
+
+/// MIPS32 if/while control flow cross-compile.
+#[test]
+fn mips_if_while_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-mips-ifwhile-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-mips-ifwhile-{}.o", std::process::id()));
+    fs::write(
+        &source_path,
+        "int main(void) { int x = 10; if (x > 5) { x = x + 1; } while (x < 20) { x = x + 1; } return x; }\n",
+    )
+    .expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "mips-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+}
+
+/// ARM hello world cross-compile.
+#[test]
+fn arm_hello_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-arm-hello-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-arm-hello-{}.o", std::process::id()));
+    fs::write(&source_path, "int main(void) { return 42; }\n").expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "arm-linux-gnueabihf",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    // ARM ELF e_machine = 40
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 40);
+}
+
+/// ARM if/while control flow cross-compile.
+#[test]
+fn arm_if_while_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-arm-ifwhile-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-arm-ifwhile-{}.o", std::process::id()));
+    fs::write(
+        &source_path,
+        "int main(void) { int x = 10; if (x > 5) { x = x + 1; } while (x < 20) { x = x + 1; } return x; }\n",
+    )
+    .expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "arm-linux-gnueabihf",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+}
+
+/// MIPS64 hello world cross-compile.
+#[test]
+fn mips64_hello_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-mips64-hello-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-mips64-hello-{}.o", std::process::id()));
+    fs::write(&source_path, "int main(void) { return 42; }\n").expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "mips64-linux-gnuabi64",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    // MIPS64 ELF e_machine = 8
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 8);
+    // MIPS64 is 64-bit ELF (EI_CLASS = 2)
+    assert_eq!(bytes[4], 2);
+}
+
 /// static_call 语句表达式 + 尾随调用: ({ ... ;; expr })()
 #[test]
 fn stmt_expr_trailing_call_compiles() {

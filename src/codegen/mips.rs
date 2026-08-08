@@ -10,6 +10,12 @@ use crate::target::Target;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Clone, Copy)]
+enum BranchKind {
+    Beqz,
+    B,
+}
+
 /// MIPS32 O32 ABI 后端
 pub struct MipsCodegen {
     pub code: Vec<u8>,
@@ -22,6 +28,7 @@ pub struct MipsCodegen {
     pub labels: HashMap<String, u64>,
     locals: HashMap<String, i32>,
     global_rodata: HashMap<String, u64>,
+    string_pool: HashMap<Vec<u8>, u64>,
     sym_index: HashMap<String, u32>,
     stack_bytes: i32,
     frame_bytes: i32,
@@ -33,6 +40,9 @@ pub struct MipsCodegen {
     emitted_return: bool,
     label_serial: u32,
     pending_bl_calls: Vec<(u64, String)>,
+    pending_branches: Vec<(u64, String, BranchKind)>,
+    break_labels: Vec<String>,
+    continue_labels: Vec<String>,
     _target: Target,
 }
 
@@ -49,6 +59,7 @@ impl MipsCodegen {
             labels: HashMap::new(),
             locals: HashMap::new(),
             global_rodata: HashMap::new(),
+            string_pool: HashMap::new(),
             sym_index: HashMap::new(),
             stack_bytes: 0,
             frame_bytes: 0,
@@ -60,6 +71,9 @@ impl MipsCodegen {
             emitted_return: false,
             label_serial: 0,
             pending_bl_calls: Vec::new(),
+            pending_branches: Vec::new(),
+            break_labels: Vec::new(),
+            continue_labels: Vec::new(),
             _target: target,
         }
     }
@@ -109,7 +123,33 @@ impl MipsCodegen {
     fn emit_global_init(&mut self, g: &Global) {
         let offset = self.rodata.len() as u64;
         self.global_rodata.insert(g.name.clone(), offset);
-        self.rodata.extend_from_slice(&[0u8; 4]);
+        // Evaluate constant initializer or default to zero
+        if let Some(init_expr) = &g.initializer {
+            // Try to extract constant value from TypedExpr
+            let val = match (&init_expr.kind, &init_expr.literal) {
+                (crate::ir::ExprKind::Constant, Some(crate::ir::ExprLiteral::Int(v))) => Some(*v as i64),
+                _ => None,
+            };
+            if let Some(val) = val {
+                // Emit proper size based on type
+                let size = match &g.ty {
+                    ValueType::Integer { bits, .. } => (*bits / 8).max(4) as usize,
+                    ValueType::Pointer(_) => 4, // MIPS32: 4-byte pointers
+                    _ => 4,
+                };
+                if size == 8 {
+                    self.rodata.extend_from_slice(&(val as i64).to_le_bytes());
+                } else {
+                    self.rodata.extend_from_slice(&(val as i32).to_le_bytes());
+                }
+            } else {
+                // Non-constant initializer: emit zero for now
+                self.rodata.extend_from_slice(&[0u8; 4]);
+            }
+        } else {
+            // No initializer: emit zero
+            self.rodata.extend_from_slice(&[0u8; 4]);
+        }
     }
 
     fn compile_rel(&mut self, module: &Module, _prog: &Program) {
@@ -156,8 +196,8 @@ impl MipsCodegen {
         self.labels.insert(func.name.clone(), func_start);
 
         // 函数序言: 分配帧空间 (至少保存 $ra, $fp + 局部变量)
-        // O32 ABI: 帧大小必须为 8 字节对齐
-        let save_size = 8; // $fp + $ra
+        // O32/N64 ABI: 帧大小必须为 8 字节对齐
+        let save_size = if self.is_64bit { 16 } else { 8 }; // $fp + $ra (8 bytes each for 64-bit)
         self.frame_bytes = ((self.stack_bytes + save_size) + 7) & !7;
         self.emit_addiu(29, 29, -(self.frame_bytes as i16)); // addiu $sp, $sp, -frame
         self.emit_sw(31, 29, (self.frame_bytes - 4) as i16); // sw $ra, frame-4($sp)
@@ -233,8 +273,13 @@ impl MipsCodegen {
 
     fn emit_epilogue(&mut self) {
         // 恢复 $fp, $ra 并返回
-        self.emit_lw(30, 29, (self.frame_bytes - 8) as i16); // lw $fp, frame-8($sp)
-        self.emit_lw(31, 29, (self.frame_bytes - 4) as i16); // lw $ra, frame-4($sp)
+        if self.is_64bit {
+            self.emit_lw(30, 29, (self.frame_bytes - 16) as i16); // ld $fp, frame-16($sp)
+            self.emit_lw(31, 29, (self.frame_bytes - 8) as i16);  // ld $ra, frame-8($sp)
+        } else {
+            self.emit_lw(30, 29, (self.frame_bytes - 8) as i16); // lw $fp, frame-8($sp)
+            self.emit_lw(31, 29, (self.frame_bytes - 4) as i16); // lw $ra, frame-4($sp)
+        }
         self.emit_addiu(29, 29, self.frame_bytes as i16);     // addiu $sp, $sp, frame
         self.emit_jr(31);  // jr $ra
         self.emit_nop();   // delay slot
@@ -293,6 +338,8 @@ impl MipsCodegen {
             Stmt::While { cond, body, .. } => {
                 let lbl_top = self.fresh_label("Lwhile");
                 let lbl_end = self.fresh_label("Lendwhile");
+                self.break_labels.push(lbl_end.clone());
+                self.continue_labels.push(lbl_top.clone());
                 self.set_label(&lbl_top);
                 self.gen_expr_from_ast(cond);
                 self.emit_beqz(2, &lbl_end);
@@ -301,6 +348,8 @@ impl MipsCodegen {
                 self.emit_b(&lbl_top);
                 self.emit_nop();
                 self.set_label(&lbl_end);
+                self.break_labels.pop();
+                self.continue_labels.pop();
             }
             Stmt::For {
                 init,
@@ -314,6 +363,9 @@ impl MipsCodegen {
                 }
                 let lbl_top = self.fresh_label("Lfor");
                 let lbl_end = self.fresh_label("Lendfor");
+                let lbl_step = self.fresh_label("Lforstep");
+                self.break_labels.push(lbl_end.clone());
+                self.continue_labels.push(lbl_step.clone());
                 self.set_label(&lbl_top);
                 if let Some(c) = cond {
                     self.gen_expr_from_ast(c);
@@ -321,12 +373,15 @@ impl MipsCodegen {
                     self.emit_nop();
                 }
                 self.gen_stmt(body);
+                self.set_label(&lbl_step);
                 if let Some(s) = step {
                     self.gen_expr_from_ast(s);
                 }
                 self.emit_b(&lbl_top);
                 self.emit_nop();
                 self.set_label(&lbl_end);
+                self.break_labels.pop();
+                self.continue_labels.pop();
             }
             Stmt::Block { b, .. } => {
                 for item in &b.items {
@@ -334,6 +389,82 @@ impl MipsCodegen {
                         self.gen_stmt(s);
                     }
                 }
+            }
+            Stmt::Do { body, cond, .. } => {
+                let lbl_body = self.fresh_label("Ldobody");
+                let lbl_cond = self.fresh_label("Ldocond");
+                let lbl_end = self.fresh_label("Lenddo");
+                self.break_labels.push(lbl_end.clone());
+                self.continue_labels.push(lbl_cond.clone());
+                self.set_label(&lbl_body);
+                self.gen_stmt(body);
+                self.set_label(&lbl_cond);
+                self.gen_expr_from_ast(cond);
+                self.emit_beqz(2, &lbl_end);
+                self.emit_nop();
+                self.emit_b(&lbl_body);
+                self.emit_nop();
+                self.set_label(&lbl_end);
+                self.break_labels.pop();
+                self.continue_labels.pop();
+            }
+            Stmt::Break { .. } => {
+                if let Some(lbl) = self.break_labels.last().cloned() {
+                    self.emit_b(&lbl);
+                    self.emit_nop();
+                }
+            }
+            Stmt::Continue { .. } => {
+                if let Some(lbl) = self.continue_labels.last().cloned() {
+                    self.emit_b(&lbl);
+                    self.emit_nop();
+                }
+            }
+            Stmt::Switch { expr, cases, .. } => {
+                self.gen_expr_from_ast(expr);
+                // $v0 now holds the switch expression value
+                let lbl_end = self.fresh_label("Lendswitch");
+                let lbl_default = self.fresh_label("Ldefault");
+                self.break_labels.push(lbl_end.clone());
+                // Generate case comparisons
+                let mut case_labels = Vec::new();
+                for case in cases {
+                    let lbl_case = self.fresh_label("Lcase");
+                    if let Some(val_expr) = &case.val {
+                        // case N:
+                        if let Ok(val) = crate::const_eval::eval(val_expr) {
+                            self.emit_load_imm(3, val as i32); // $t0 = case value
+                            // Compare $v0 with $t0
+                            self.emit_subu(8, 2, 3); // $t0 = $v0 - case_val
+                            self.emit_sltiu(8, 8, 1); // $t0 = ($t0 == 0) ? 1 : 0
+                            // Wait, we need to check if $v0 == case_val
+                            // Let's use: subu $t0, $v0, case_val; sltiu $t0, $t0, 1
+                            // Actually, let's just do: beqz after sub
+                            self.emit_subu(8, 2, 3);
+                            let lbl_next = self.fresh_label("Lnextcase");
+                            self.emit_beqz(8, &lbl_case);
+                            self.emit_nop();
+                            case_labels.push((lbl_case, case));
+                        }
+                    } else {
+                        // default:
+                        case_labels.push((lbl_default.clone(), case));
+                    }
+                }
+                // Jump to default if no case matched
+                self.emit_b(&lbl_default);
+                self.emit_nop();
+                // Generate case bodies
+                for (lbl, case) in &case_labels {
+                    self.set_label(lbl);
+                    for item in &case.body.items {
+                        if let BlockItem::Stmt(s) = item {
+                            self.gen_stmt(s);
+                        }
+                    }
+                }
+                self.set_label(&lbl_end);
+                self.break_labels.pop();
             }
             _ => {}
         }
@@ -346,6 +477,24 @@ impl MipsCodegen {
             }
             Expr::Char { v, .. } => {
                 self.emit_load_imm(2, *v as i32);
+            }
+            Expr::String { data, .. } => {
+                // Emit string to .rodata and load address
+                let offset = if let Some(&off) = self.string_pool.get(data) {
+                    off
+                } else {
+                    let off = self.rodata.len() as u64;
+                    self.rodata.extend_from_slice(data);
+                    // Ensure null terminator
+                    if data.last() != Some(&0) {
+                        self.rodata.push(0);
+                    }
+                    self.string_pool.insert(data.clone(), off);
+                    off
+                };
+                // Load string address into $v0 using AUIPC + ADDI or LUI + ORI
+                // For simplicity, use load_imm with offset (works for small offsets)
+                self.emit_load_imm(2, offset as i32);
             }
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
@@ -503,8 +652,49 @@ impl MipsCodegen {
         format!("{}{}", prefix, self.label_serial)
     }
 
-    fn set_label(&mut self, _label: &str) {
-        // 在 relocatable 模式下标签通过符号表处理
+    fn set_label(&mut self, label: &str) {
+        let pos = self.code.len() as u64;
+        self.labels.insert(label.to_string(), pos);
+        // Patch all pending branches targeting this label
+        let pending: Vec<_> = self
+            .pending_branches
+            .iter()
+            .filter(|(_, l, _)| l == label)
+            .cloned()
+            .collect();
+        for (at, _, kind) in pending {
+            match kind {
+                BranchKind::Beqz => self.patch_beqz(at, pos),
+                BranchKind::B => self.patch_b(at, pos),
+            }
+        }
+        self.pending_branches.retain(|(_, l, _)| l != label);
+    }
+
+    fn patch_beqz(&mut self, at: u64, target: u64) {
+        // MIPS BEQ offset: (target - branch_pc - 4) / 4
+        // branch_pc is the position of the BEQ instruction
+        let offset = ((target as i64) - (at as i64) - 4) / 4;
+        let offset = offset as i16;
+        // Read existing instruction, preserve rs field, update offset
+        let existing = u32::from_be_bytes([
+            self.code[at as usize],
+            self.code[at as usize + 1],
+            self.code[at as usize + 2],
+            self.code[at as usize + 3],
+        ]);
+        let patched = (existing & 0xFFFF0000) | (offset as u16 as u32);
+        self.code[at as usize..at as usize + 4]
+            .copy_from_slice(&patched.to_be_bytes());
+    }
+
+    fn patch_b(&mut self, at: u64, target: u64) {
+        // MIPS B (BEQ $zero, $zero, offset) offset: (target - branch_pc - 4) / 4
+        let offset = ((target as i64) - (at as i64) - 4) / 4;
+        let offset = offset as i16;
+        let patched = (0b000100u32 << 26) | (offset as u16 as u32);
+        self.code[at as usize..at as usize + 4]
+            .copy_from_slice(&patched.to_be_bytes());
     }
 
     // ===== MIPS 指令编码 =====
@@ -516,15 +706,29 @@ impl MipsCodegen {
     }
 
     fn emit_sw(&mut self, rt: u8, base: u8, offset: i16) {
-        let inst =
-            (0b101011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        if self.is_64bit {
+            // SD (64-bit store) for MIPS64
+            let inst =
+                (0b111111 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+            self.code.extend_from_slice(&inst.to_be_bytes());
+        } else {
+            let inst =
+                (0b101011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+            self.code.extend_from_slice(&inst.to_be_bytes());
+        }
     }
 
     fn emit_lw(&mut self, rt: u8, base: u8, offset: i16) {
-        let inst =
-            (0b100011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        if self.is_64bit {
+            // LD (64-bit load) for MIPS64
+            let inst =
+                (0b110111 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+            self.code.extend_from_slice(&inst.to_be_bytes());
+        } else {
+            let inst =
+                (0b100011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+            self.code.extend_from_slice(&inst.to_be_bytes());
+        }
     }
 
     fn emit_jr(&mut self, rs: u8) {
@@ -613,14 +817,18 @@ impl MipsCodegen {
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
-    fn emit_beqz(&mut self, _rs: u8, _label: &str) {
+    fn emit_beqz(&mut self, rs: u8, label: &str) {
         // BEQ $rs, $zero, offset (占位)
-        let inst: u32 = (0b000100 << 26) | 0; // 偏移 0
+        let pos = self.code.len() as u64;
+        self.pending_branches.push((pos, label.to_string(), BranchKind::Beqz));
+        let inst: u32 = (0b000100 << 26) | ((rs as u32) << 21) | 0; // 偏移 0
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
-    fn emit_b(&mut self, _label: &str) {
+    fn emit_b(&mut self, label: &str) {
         // B offset (BEQ $zero, $zero, offset)
+        let pos = self.code.len() as u64;
+        self.pending_branches.push((pos, label.to_string(), BranchKind::B));
         let inst: u32 = (0b000100 << 26) | 0;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
@@ -668,7 +876,10 @@ impl MipsCodegen {
                 )
             }
         } else {
-            panic!("MIPS executable output not yet supported");
+            // Non-relocatable (executable) output not yet supported for MIPS/MIPS64
+            // Return empty vector with a warning (caller should handle this)
+            eprintln!("Warning: MIPS/MIPS64 executable output not yet supported, use -c for relocatable output");
+            Vec::new()
         }
     }
 

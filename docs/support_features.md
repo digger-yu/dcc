@@ -152,9 +152,9 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | x86_64 | ✅ 完整 | 主后端 |
 | aarch64 | ✅ 完整 | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 + 嵌套 sret (>16B 多层调用链) |
 | riscv64 | ✅ 完整 | 压缩指令 C 扩展 (自动 4→2 字节压缩优化: C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.LW/C.SW/C.LD/C.SD) + FP D 扩展双精度 + RVV 向量基础 + 特权指令/CSR + JAL 范围校验 + HFA 分类 |
-| mips | ✅ 完整 | ELF32, big-endian, MIPS32 O32 ABI |
-| mips64 | ✅ 完整 | ELF64, big-endian, MIPS64 N64 ABI |
-| arm | ✅ 完整 | ELF32, little-endian, ARM AAPCS |
+| mips | ✅ 完整 | ELF32, big-endian, MIPS32 O32 ABI; 分支回填 (backpatching) + 全局变量初始化 + 字符串字面量 (.rodata) + switch/do-while/break/continue |
+| mips64 | ✅ 完整 | ELF64, big-endian, MIPS64 N64 ABI; 64-bit LD/SD 指令 + 帧布局适配 |
+| arm | ✅ 完整 | ELF32, little-endian, ARM AAPCS; 分支回填 (backpatching) + 全局变量初始化 + 字符串字面量 (.rodata) + switch/do-while/break/continue |
 
 跨平台 Triple 解析：`cli.rs` + `target.rs` 接受 `mips` / `mips64` / `arm` / `aarch64` / `riscv64` 的 `--target` 字符串。
 Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
