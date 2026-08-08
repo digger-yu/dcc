@@ -1450,8 +1450,10 @@ impl<'a> Parser<'a> {
         }
         // C23 [[attributes]]: 静默跳过
         self.skip_std_attributes();
-        // constexpr: C23 编译期常量, 不影响代码生成, 静默跳过
+        // constexpr: C23 编译期常量函数, 等价 inline + always_inline.
+        // 不强制编译期求值, 仅设置 always_inline 提示.
         while self.cur.kind == TokKind::Ident && self.cur.text == "constexpr" {
+            self.decl_attrs.is_always_inline = true;
             self.advance();
             self.skip_std_attributes();
         }
@@ -2799,6 +2801,11 @@ impl<'a> Parser<'a> {
                 | TokKind::KwRestrict => {
                     self.advance();
                 }
+                // constexpr: C23 编译期常量函数, 等价 inline + always_inline
+                TokKind::Ident if self.cur.text == "constexpr" => {
+                    self.decl_attrs.is_always_inline = true;
+                    self.advance();
+                }
                 // C23 auto: 类型由初始化表达式推导（同 __auto_type）
                 TokKind::KwAuto => {
                     self.advance();
@@ -3091,8 +3098,9 @@ impl<'a> Parser<'a> {
                         ]),
                     ));
                 }
-                // constexpr: C23 编译期常量, 静默跳过
+                // constexpr: C23 编译期常量函数, 等价 inline + always_inline
                 TokKind::Ident if self.cur.text == "constexpr" => {
+                    self.decl_attrs.is_always_inline = true;
                     self.advance();
                 }
                 // ISO/IEC TS 18661 / GCC：_FloatN 二进制浮点类型
@@ -3685,8 +3693,9 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                // constexpr: 在第二个 loop 中也可能出现 (如 unsigned constexpr _BitInt)
+                // constexpr: C23 编译期常量函数, 等价 inline + always_inline
                 TokKind::Ident if self.cur.text == "constexpr" => {
+                    self.decl_attrs.is_always_inline = true;
                     self.advance();
                 }
                 _ => break,

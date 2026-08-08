@@ -153,7 +153,7 @@
 - **字符串字面量拼接**: 实际工作在 parser 层完成
   （`while TokKind::StringLit { data.extend(...) }`），const_eval 看到
   的是合并后的单个 `Expr::String`，无需在 const_eval 内重复。
-- **C23 constexpr 函数**: 仅作函数声明解析（`while "constexpr" { advance }`），
+- **C23 constexpr 函数**: 函数声明解析并设置 `is_always_inline` 属性，
   不强制编译期求值；与 `inline`/`__attribute__((always_inline))` 同等待遇，
   函数体走普通 codegen 路径。
 - **`#embed` 字节数**: preproc 已展开为逗号分隔整数字节；`sizeof` /

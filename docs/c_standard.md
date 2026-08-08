@@ -40,7 +40,7 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 
 - `typeof` (GCC 扩展标准化) ✅
 - `typeof_unqual` — ✅ 已实装 (去除限定符的 typeof)
-- `constexpr` — ✅ 已实装 (解析器静默跳过)
+- `constexpr` — ✅ 已实装 (函数声明等价 `inline` + `always_inline`，无强制编译期求值)
 - `bool` / `true` / `false` — ✅ 已实装 (C23 关键字, `-std=gnu23`/`c23` 启用)
 - `alignas` / `thread_local` — ✅ 已实装 (C23 关键字)
 - `nullptr` / `nullptr_t` — ✅ 已实装 (解析为 `(void*)0`, `nullptr_t` 为内置类型)

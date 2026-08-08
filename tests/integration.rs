@@ -2918,6 +2918,24 @@ int sum(void) { return kernel_var + canonical_var; }
     let _ = fs::remove_file(obj);
 }
 
+// =================== C23 constexpr 函数 ===================
+
+/// C23 constexpr 函数: 解析为声明说明符, 等价 inline + always_inline
+#[test]
+#[cfg(unix)]
+fn c23_constexpr_function_compile_and_run() {
+    let source = include_str!("fixtures/c/c23_constexpr.c");
+    let (output, exe) = run_compile_and_run("c23-constexpr", source);
+    assert!(
+        output.status.success(),
+        "c23 constexpr compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "c23_constexpr should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 /// `-dM`: 预处理后输出所有宏定义. Linux 内核的编译器探测脚本依赖此标志.
 /// 验证: dcc 内置宏 + 用户 -D 都在输出里.
 #[test]
