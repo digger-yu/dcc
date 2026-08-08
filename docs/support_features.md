@@ -131,7 +131,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm 显式子寄存器约束 `{eax}`/`{cx}`/`{cl}` | 按宽度假 8/16/32/64 位写回 (`mov [r13+off], r8/r16/r32/r64`)；`parse_reg_name_bits` 解析全部 GP 子寄存器名；`{gs}`/`{fs}` 段寄存器也支持 |
 | asm goto 行内 `#` 注释 | `tests/fixtures/c/asm_goto.c`；`jump_label.h` objtool 标注 |
 | asm goto 输出约束 | fall-through 路径写回，跳转路径保留原值；跨函数 `&&label` + asm goto 混用触发 warning |
-| asm 调试信息 | `-g` 下含 asm 的函数正常生成 DWARF 行号表 + DIEs；SSA pipeline 跳过含 asm 函数避免重建丢失行号映射；mini-asm 不发射 `.debug_insn` 扩展 (GDB step-into asm 体验受限，与 GCC 行为一致) |
+| asm 调试信息 | `-g` 下含 asm 的函数正常生成 DWARF 行号表 + DIEs；asm 块起始 PC 记录到 `asm_line_entries` 并生成精确 `.debug_line` 条目；SSA pipeline 跳过含 asm 函数避免重建丢失行号映射；mini-asm 不发射 `.debug_insn` 扩展 (GDB step-into asm 体验受限，与 GCC 行为一致) |
 | asm `%0` 约束 `"i"` 展开 | 带 `$` 前缀的 AT&T 立即数 |
 | asm 模板修饰符 `%a` / `%P` / `%l` | `%aN`/`%a[name]`: 地址形式 (寄存器同名, 立即数/内存去前缀); `%PN`/`%P[name]`: 原始符号名 (去 % / $ 前缀); `%lN`/`%l[name]`: asm goto 标签名 (边界安全多位索引); 立即数含运算符时自动加括号保护优先级 |
 | Mini x86 asm 局部/C 标签 | `N:` / `N:insn` / `found:` |

@@ -57,7 +57,67 @@ pub fn emit(
                     .iter()
                     .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
                     .collect();
-                let dbg = debug::build_dwarf(source_name, &funcs);
+                // 将 asm 块行号记录转换为 DWARF LineEntry
+                let asm_line_entries: Vec<debug::LineEntry> = cg
+                    .asm_line_entries
+                    .iter()
+                    .map(|&(pc_start, _pc_end, src_line)| debug::LineEntry {
+                        pc: pc_start,
+                        line: src_line,
+                        column: 1,
+                        file_idx: 0,
+                        discriminator: 0,
+                        is_stmt: true,
+                        basic_block: false,
+                    })
+                    .collect();
+                let mut dbg = debug::build_dwarf(source_name, &funcs);
+                // 如果有 asm 行号条目, 重新生成带行号的 DWARF
+                if !asm_line_entries.is_empty() {
+                    let cu = debug::CompileUnit {
+                        source_name: source_name.to_string(),
+                        comp_dir: None,
+                        producer: format!("dcc {}", env!("CARGO_PKG_VERSION")),
+                        language: 0x000C, // DW_LANG_C99
+                        functions: funcs
+                            .iter()
+                            .map(|(name, pc)| debug::DwarfFuncInfo {
+                                name: name.to_string(),
+                                linkage_name: None,
+                                low_pc: *pc,
+                                high_pc: *pc + cg.func_sizes.get(*name).copied().unwrap_or(16),
+                                decl_line: 0,
+                                decl_file_idx: 0,
+                                return_type: debug::DwarfType {
+                                    name: "void".to_string(),
+                                    byte_size: 0,
+                                    kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+                                },
+                                params: vec![],
+                                is_external: true,
+                                is_inline: false,
+                                is_declaration: false,
+                            })
+                            .collect(),
+                        globals: vec![],
+                        types: vec![],
+                        line_entries: asm_line_entries,
+                        line_files: vec![source_name.to_string()],
+                        line_dirs: vec![".".to_string()],
+                        low_pc: cg.asm_line_entries.first().map(|e| e.0).unwrap_or(0),
+                        high_pc: cg.asm_line_entries.last().map(|e| e.1).unwrap_or(0),
+                        func_ranges: funcs.iter().map(|(name, pc)| {
+                            (*pc, *pc + cg.func_sizes.get(*name).copied().unwrap_or(16))
+                        }).collect(),
+                        cfi_rows: vec![],
+                    };
+                    let opts = debug::DebugOptions {
+                        level: debug_level,
+                        source_name: source_name.to_string(),
+                        ..Default::default()
+                    };
+                    dbg = debug::build_dwarf_full(&cu, &opts);
+                }
                 cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".BTF".to_string(),

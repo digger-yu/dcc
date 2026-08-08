@@ -117,10 +117,10 @@
 
 ## 内联 asm 调试信息
 
-| 缺失能力 | 当前行为 | 说明 |
-|-----------|----------|------|
-| DWARF 行号精度 | asm 块整体映射到源行 | 内联 asm 内部指令无独立行号条目，`addr2line` 只能定位到 asm 语句起始行 |
-| GDB step-into asm 体验 | mini-asm 不发射 `.debug_insn` 等扩展 | GDB 无法单步进入 asm 块内部；与 GCC 行为一致（GCC 也不提供 asm 内部行号） |
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| DWARF 行号精度 | ✅ 已改进 | `-g` 下 asm 块起始 PC 记录到 `asm_line_entries`; 有 asm 行号时重新生成带 `line_entries` 的完整 DWARF CU; `addr2line` 可定位到 asm 语句起始行 |
+| GDB step-into asm 体验 | ⚠️ 受限 | mini-asm 不发射 `.debug_insn` 扩展; GDB 无法单步进入 asm 块内部; 与 GCC 行为一致（GCC 也不提供 asm 内部行号） |
 
 ## 内联 asm 测试覆盖空白
 

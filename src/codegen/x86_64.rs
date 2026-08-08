@@ -190,6 +190,9 @@ pub struct Codegen {
     func_asm_layout: HashMap<String, FuncAsmLayout>,
     pub source_name: String,
     pub parallel_codegen: bool,
+    /// asm 块 DWARF 行号记录: (pc_start, pc_end, src_line)
+    /// 用于在 -g 下生成精确的 .debug_line 条目
+    pub asm_line_entries: Vec<(u64, u64, u32)>,
     /// rodata 中被字符串初始化指针占位的变量名列表 (resolve 阶段修补绝对地址)
     rodata_string_init_globals: Vec<String>,
     /// rodata 中字符串初始化指针槽的偏移列表 (compile_exec/ET_EXEC 路径的
@@ -1043,6 +1046,7 @@ impl Codegen {
             disasm_data: HashMap::new(),
             global_asm_exports: HashSet::new(),
             func_asm_layout: HashMap::new(),
+            asm_line_entries: Vec::new(),
             current_asm_line: 0,
             current_asm_src_line: 0,
             line_map: Vec::new(),
@@ -13594,7 +13598,17 @@ impl Codegen {
                 .filter(|l| !l.trim().is_empty())
                 .collect::<Vec<_>>(),
         );
+        // 记录 asm 块起始 PC (用于 DWARF 行号表)
+        let asm_pc_start = self.code.len() as u64;
+        let asm_src_line = self.current_asm_src_line;
         self.emit_resolved_asm_lines(&resolved_lines, false);
+        // 记录 asm 块 DWARF 行号条目
+        if self.debug_level > 0 && asm_src_line > 0 {
+            let asm_pc_end = self.code.len() as u64;
+            if asm_pc_end > asm_pc_start {
+                self.asm_line_entries.push((asm_pc_start, asm_pc_end, asm_src_line));
+            }
+        }
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
                 self.writeback_asm_operand(&outputs[i], binding.reg, binding.xmm_width);
@@ -13661,7 +13675,17 @@ impl Codegen {
                 .filter(|l| !l.trim().is_empty())
                 .collect::<Vec<_>>(),
         );
+        // 记录 asm goto 块起始 PC (用于 DWARF 行号表)
+        let asm_pc_start = self.code.len() as u64;
+        let asm_src_line = self.current_asm_src_line;
         self.emit_resolved_asm_lines(&resolved_lines, false);
+        // 记录 asm goto 块 DWARF 行号条目
+        if self.debug_level > 0 && asm_src_line > 0 {
+            let asm_pc_end = self.code.len() as u64;
+            if asm_pc_end > asm_pc_start {
+                self.asm_line_entries.push((asm_pc_start, asm_pc_end, asm_src_line));
+            }
+        }
         // asm goto: fall-through 路径执行输出写回; 若 asm 内部跳转到 goto label,
         // 控制流跳过此处的写回代码, 变量保持初值 (GCC 语义)。
         for (i, binding) in bindings.iter().enumerate() {
