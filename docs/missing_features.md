@@ -95,6 +95,44 @@
 | fenv 运行时调用 | `fesetround` / `fegetround` 等未提供，`FENV_ACCESS` 仍为纯语义状态 |
 | `double complex` 传值 ABI | `_Complex` 字面量/算术已实装，`double complex` 按值传 ABI 待后续 |
 
+## 内联 asm 诊断与语义校验
+
+> 以下诊断 gap 为已知限制，当前不计划实现完整校验。`validate_asm_semantics` 已覆盖部分场景（E0014/E0015/W0005-W0007），但以下情况仍未严格处理。
+
+| 缺失校验 | 当前行为 | GCC 行为 | 说明 |
+|-----------|----------|----------|------|
+| 约束与表达式类型不匹配（如 `"r"` 绑浮点） | `W0005` 警告 | `error: impossible constraint` | dcc 仅发 warning 不阻塞编译；GCC 报 hard error |
+| 模板占位符数量与操作数数量不匹配 | `E0015` 仅检测索引越界 | 编译期 error | dcc 不检测 `%0..%N` 总数是否与实际操作数数量一致 |
+| 输出约束未配合 `=`/`+` 前缀 | `E0014` error | 编译期 error | 已实装但仅在前端校验；SSA/IR 层不重复检查 |
+| 命名操作数与位置操作数混用 | `W0007` warning | GCC 允许但有限制 | dcc 仅警告不强制；GCC 在混用 `[name]` 与 `%N` 时有更严格的上下文规则 |
+| 重复约束名 | `W0006` warning | 编译期 error | dcc 仅警告；GCC 对同名操作数报 hard error |
+
+## 内联 asm 优化器集成
+
+| 缺失能力 | 当前行为 | 说明 |
+|-----------|----------|------|
+| asm 周围指令重排别名分析 | 仅 memory clobber 产生调度屏障 | 无 memory clobber 的 asm 不参与别名分析，可能导致不安全的重排 |
+| DCE 不消除无副作用无输出 asm | ✅ 已按 GCC 兼容行为保留 | 所有 inline asm 视为潜在副作用，DCE 不消除 |
+| 寄存器分配器 asm 统一规划 | 依赖硬编码 GP/XMM 池 | asm 输入输出占用的物理寄存器未与 SSA 寄存器分配统一建模 |
+
+## 内联 asm 调试信息
+
+| 缺失能力 | 当前行为 | 说明 |
+|-----------|----------|------|
+| DWARF 行号精度 | asm 块整体映射到源行 | 内联 asm 内部指令无独立行号条目，`addr2line` 只能定位到 asm 语句起始行 |
+| GDB step-into asm 体验 | mini-asm 不发射 `.debug_insn` 等扩展 | GDB 无法单步进入 asm 块内部；与 GCC 行为一致（GCC 也不提供 asm 内部行号） |
+
+## 内联 asm 测试覆盖空白
+
+| 缺失场景 | 说明 |
+|-----------|------|
+| 多 TU 跨文件 asm goto 跳转 | 需链接两个 `.o` 文件验证 asm goto 标签解析 |
+| asm goto 输出约束跨 fall-through / jump 路径写回 | 验证跳转路径不写回、fall-through 路径正确写回 |
+| 大规模 AVX-512 EVEX 掩码指令端到端运行 | `asm_avx.c` 仅编译通过，未运行验证结果正确性 |
+| asm goto 与 `&&label` 混合 | 混合使用 computed goto 地址与 asm goto 标签 |
+| 嵌套 asm 字符串里的 `.macro` / `.rept` 块 | 深层嵌套宏展开的边界情况 |
+| memory clobber + 优化器重排验证 | `-O2` 下 memory clobber 阻止指令重排的端到端验证 |
+
 ## 本地基线
 
 - 工作区：`~/dcc`
