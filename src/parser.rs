@@ -2158,6 +2158,22 @@ impl<'a> Parser<'a> {
             self.advance(); // *
             return self.parse_func_ptr_inner(ty, leading_attrs, storage);
         }
+        // 函数指针带属性: type (__attribute__((...)) *name)(params)
+        // `(` 后跟 `__attribute__` 而非 `*`, 需跳过属性后判断
+        if self.cur.kind == TokKind::LParen
+            && self.peek.kind == TokKind::Ident
+            && self.peek.text == "__attribute__"
+        {
+            self.advance(); // (
+            let inner_attrs = self.parse_attributes();
+            if self.cur.kind == TokKind::Star {
+                // 确认是函数指针: (__attribute__(...) *name)
+                let merged = Self::merge_attrs(leading_attrs, inner_attrs);
+                self.advance(); // *
+                return self.parse_func_ptr_inner(ty, merged, storage);
+            }
+            // 不是函数指针, 继续正常声明流程 (属性已消费)
+        }
         // 限定符在基类型与 * 之间 (如 const, __seg_gs 等)
         self.skip_ptr_qualifiers();
         // void __attribute__(...) *fn(): 基本类型后的属性在 specifiers_only 路径下会残留
@@ -2930,7 +2946,8 @@ impl<'a> Parser<'a> {
             TokKind::Star => true,
             TokKind::Ident => !matches!(
                 self.peek.text.as_str(),
-                "__attribute__" | "__asm__" | "__asm" | "__volatile__" | "__const__"
+                "__attribute__" | "__asm__" | "__asm" | "asm"
+                    | "__volatile__" | "__const__"
             ),
             _ => false,
         }
@@ -4109,9 +4126,24 @@ impl<'a> Parser<'a> {
 
     fn parse_field_declarator(&mut self, spec: Type) -> (Type, String) {
         // 函数指针字段: type (*name)(params) / type (*name[N])(params)
+        // 也处理: type (__attribute__((...)) *name)(params)
+        let mut is_func_ptr = false;
         if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
             self.advance(); // (
             self.advance(); // *
+            is_func_ptr = true;
+        } else if self.cur.kind == TokKind::LParen
+            && self.peek.kind == TokKind::Ident
+            && self.peek.text == "__attribute__"
+        {
+            self.advance(); // (
+            self.skip_attributes();
+            if self.cur.kind == TokKind::Star {
+                self.advance(); // *
+                is_func_ptr = true;
+            }
+        }
+        if is_func_ptr {
             while matches!(
                 self.cur.kind,
                 TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
@@ -4511,9 +4543,23 @@ impl<'a> Parser<'a> {
             // 普通路径可能漏掉指针: parse_type 已含 *, 这里再吞一层 qual
             self.skip_ptr_qualifiers();
             // 嵌套函数指针参数: char *(*pfn)(const char *)
+            // 也处理: ret (__attribute__((...)) *name)(params)
+            let mut is_nested_fptr = false;
             if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                is_nested_fptr = true;
+            } else if self.cur.kind == TokKind::LParen
+                && self.peek.kind == TokKind::Ident
+                && self.peek.text == "__attribute__"
+            {
+                // 探测: 跳过属性后是否是 *
+                is_nested_fptr = true; // 先标记, 下面统一处理
+            }
+            if is_nested_fptr {
                 self.advance(); // (
-                self.advance(); // *
+                self.skip_attributes(); // 跳过 __attribute__((...))
+                if self.cur.kind == TokKind::Star {
+                    self.advance(); // *
+                }
                 while matches!(
                     self.cur.kind,
                     TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
@@ -4582,6 +4628,20 @@ impl<'a> Parser<'a> {
                 self.advance(); // ident
                 if self.cur.kind == TokKind::RParen {
                     self.advance();
+                }
+                // `void (cb)(struct inode *)`: 括号参数名后跟参数列表
+                // 等价于函数指针 `void (*cb)(struct inode *)`
+                if self.cur.kind == TokKind::LParen {
+                    self.advance(); // (
+                    let inner_params = self.parse_params()?;
+                    if !self.expect(TokKind::RParen, "')'") {
+                        return None;
+                    }
+                    let func_ty = Type::Func(
+                        Box::new(ty),
+                        inner_params.iter().map(|p| p.ty.clone()).collect(),
+                    );
+                    ty = Type::Ptr(Box::new(func_ty));
                 }
                 ps.push(Param {
                     ty,
