@@ -1371,8 +1371,7 @@ impl Riscv64Codegen {
         // 压缩指令自动选择: C.LW
         if (8..=15).contains(&rd)
             && (8..=15).contains(&rs1)
-            && off >= 0
-            && off <= 124
+            && (0..=124).contains(&off)
             && off % 4 == 0
         {
             self.emit_c_lw(rd - 8, rs1 - 8, off as u8);
@@ -1387,8 +1386,7 @@ impl Riscv64Codegen {
         // 压缩指令自动选择: C.SW
         if (8..=15).contains(&rs2)
             && (8..=15).contains(&rs1)
-            && off >= 0
-            && off <= 124
+            && (0..=124).contains(&off)
             && off % 4 == 0
         {
             self.emit_c_sw(rs2 - 8, rs1 - 8, off as u8);
@@ -2356,8 +2354,7 @@ impl Riscv64Codegen {
         // 压缩指令自动选择: C.LD (RV64)
         if (8..=15).contains(&rd)
             && (8..=15).contains(&rs1)
-            && off >= 0
-            && off <= 248
+            && (0..=248).contains(&off)
             && off % 8 == 0
         {
             self.emit_c_ld(rd - 8, rs1 - 8, off as u8);
@@ -2373,8 +2370,7 @@ impl Riscv64Codegen {
         // 压缩指令自动选择: C.SD (RV64)
         if (8..=15).contains(&rs2)
             && (8..=15).contains(&rs1)
-            && off >= 0
-            && off <= 248
+            && (0..=248).contains(&off)
             && off % 8 == 0
         {
             self.emit_c_sd(rs2 - 8, rs1 - 8, off as u8);

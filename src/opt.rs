@@ -63,7 +63,7 @@ fn run_ssa_passes(module: &mut Module, level: u8) {
 
 /// 检测函数体是否包含循环 (while/for/do-while)。
 fn func_has_loop(f: &FuncDecl) -> bool {
-    f.body.as_ref().is_some_and(|b| block_has_loop(b))
+    f.body.as_ref().is_some_and(block_has_loop)
 }
 
 fn block_has_loop(b: &Block) -> bool {
@@ -90,9 +90,10 @@ fn stmt_has_loop(s: &Stmt) -> bool {
 ///   - 取址操作 (&x)
 ///   - 指针解引用 (*p)
 ///   - 数组索引 (a[i])
+///
 /// 这些模式涉及地址计算, SSA 重建可能产生错误的地址/栈操作.
 fn func_has_unsafe_ssa_pattern(f: &FuncDecl) -> bool {
-    f.body.as_ref().is_some_and(|b| block_has_unsafe_ssa_pattern(b))
+    f.body.as_ref().is_some_and(block_has_unsafe_ssa_pattern)
 }
 
 fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
@@ -100,7 +101,7 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
         BlockItem::Decl(Decl::Var(v)) => {
             // 数组类型声明
             matches!(v.ty, crate::ast::Type::Array(_, _))
-                || v.init.as_ref().is_some_and(|e| expr_has_unsafe_ssa_pattern(e))
+                || v.init.as_ref().is_some_and(expr_has_unsafe_ssa_pattern)
         }
         BlockItem::Stmt(s) => stmt_has_unsafe_ssa_pattern(s),
         _ => false,
@@ -125,8 +126,8 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
         }
         Stmt::For { init, cond, step, body, .. } => {
             init.as_ref().is_some_and(|i| stmt_has_unsafe_ssa_pattern(i))
-                || cond.as_ref().is_some_and(|c| expr_has_unsafe_ssa_pattern(c))
-                || step.as_ref().is_some_and(|s| expr_has_unsafe_ssa_pattern(s))
+                || cond.as_ref().is_some_and(expr_has_unsafe_ssa_pattern)
+                || step.as_ref().is_some_and(expr_has_unsafe_ssa_pattern)
                 || stmt_has_unsafe_ssa_pattern(body)
         }
         Stmt::Switch { expr, cases, .. } => {
@@ -153,7 +154,7 @@ fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
         }
         Expr::Call { callee, args, .. } => {
             expr_has_unsafe_ssa_pattern(callee)
-                || args.iter().any(|a| expr_has_unsafe_ssa_pattern(a))
+                || args.iter().any(expr_has_unsafe_ssa_pattern)
         }
         Expr::Assign { l, r, .. } => {
             expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)

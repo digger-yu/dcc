@@ -1060,7 +1060,7 @@ impl Builder {
 
 fn lower_lvalue(
     l: &Expr,
-    op: &BinOp,
+    _op: &BinOp,
     src: Operand,
     span: &Span,
     ty: &Type,
@@ -1082,7 +1082,7 @@ fn lower_lvalue(
         // creating extra temporaries.
         let v_clone = v.clone();
         match &src {
-            Operand::Var(src_var) => {
+            Operand::Var(_src_var) => {
                 // Source is already a variable - emit direct copy
                 b.emit(Inst {
                     dest: Some(v_clone.clone()),
@@ -1372,6 +1372,7 @@ fn phi_name(v: &SsaVar) -> String {
 ///   - register_allocation: `__dcc_regalloc_done`
 ///   - auto_parallelization: `__dcc_parallel_hint`
 ///   - pgo: `__dcc_hot_hint` / `__dcc_cold_hint`
+///
 /// 在 SSA→AST 重建时必须丢弃, 否则会生成对不存在全局变量的访问.
 fn is_pass_hint_inst(kind: &InstKind) -> bool {
     if let InstKind::Store { e: Operand::SymAddr(name), .. } = kind {
@@ -1466,7 +1467,7 @@ fn rebuild_bb(
             let cond_e = resolve_operand(cond, env, subst);
             let mut then_items: Vec<BlockItem> = Vec::new();
             let mut then_env = env.clone();
-            let mut then_subst = subst.clone();
+            let then_subst = subst.clone();
             rebuild_bb(
                 t,
                 func,
@@ -1477,7 +1478,7 @@ fn rebuild_bb(
             );
             let mut else_items: Vec<BlockItem> = Vec::new();
             let mut else_env = env.clone();
-            let mut else_subst = subst.clone();
+            let else_subst = subst.clone();
             rebuild_bb(
                 f,
                 func,

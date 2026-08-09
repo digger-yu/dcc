@@ -756,7 +756,7 @@ impl AsmDirectiveExpander {
         }
         // 处理一元 -
         if let Some(rest) = s.strip_prefix('-') {
-            if !rest.is_empty() && !rest.contains(|c: char| c == '+' || c == '-' || c == '*' || c == '/') {
+            if !rest.is_empty() && !rest.contains(['+', '-', '*', '/']) {
                 let v = Self::eval_expr_value(rest)?;
                 return Ok(-v);
             }
@@ -807,15 +807,14 @@ impl AsmDirectiveExpander {
         // 处理 * / (高优先级)
         for op in &['*', '/'] {
             if let Some(pos) = s.rfind(*op) {
-                if pos > 0 {
-                    let left = Self::eval_expr_value(&s[..pos])?;
-                    let right = Self::eval_expr_value(&s[pos+1..])?;
-                    return Ok(match op {
-                        '*' => left * right,
-                        '/' => if right != 0 { left / right } else { return Err(()); },
-                        _ => return Err(()),
-                    });
-                }
+                if pos == 0 { continue; }
+                let left = Self::eval_expr_value(&s[..pos])?;
+                let right = Self::eval_expr_value(&s[pos+1..])?;
+                return Ok(match op {
+                    '*' => left * right,
+                    '/' if right != 0 => left / right,
+                    _ => return Err(()),
+                });
             }
         }
         // 基本数字
@@ -8007,7 +8006,7 @@ impl Codegen {
             .collect();
         for (off, sz) in vars {
             // lea rdi, [r13 + off]
-            if off >= -128 && off <= 127 {
+            if (-128..=127).contains(&off) {
                 self.emit(&[0x4c, 0x8d, 0x7d, off as i8 as u8]);
             } else {
                 self.emit(&[0x4c, 0x8d, 0xbd]);
@@ -8023,7 +8022,7 @@ impl Codegen {
 
     /// 发射外部函数调用 (PLT 相对偏移占位, 由符号解析修补)
     fn emit_call_extern(&mut self, name: &str) {
-        let at = self.pos();
+        let _at = self.pos();
         self.emit(&[0xe8, 0, 0, 0, 0]); // call rel32 placeholder
         let call_at = self.code.len() as u64 - 4;
         self.disasm_calls.insert(call_at, name.to_string());
@@ -11858,7 +11857,7 @@ impl Codegen {
     /// x87 FPU 约束: "f" → any st, "t" → st(0), "u" → st(1)
     fn asm_constraint_wants_x87(constraint: &str) -> Option<u8> {
         let core = constraint
-            .trim_start_matches(|c| c == '=' || c == '+' || c == '&');
+            .trim_start_matches(['=', '+', '&']);
         if core.contains('{') {
             return None;
         }
@@ -11881,7 +11880,7 @@ impl Codegen {
     /// MMX 约束: "y" → mm0..mm7
     fn asm_constraint_wants_mmx(constraint: &str) -> bool {
         let core = constraint
-            .trim_start_matches(|c| c == '=' || c == '+' || c == '&');
+            .trim_start_matches(['=', '+', '&']);
         if core.contains('{') {
             return false;
         }
@@ -11893,7 +11892,7 @@ impl Codegen {
     /// GCC 条件码约束: "@cc<letters>" → 返回条件码字母序列
     fn asm_parse_cc_constraint(constraint: &str) -> Option<&str> {
         let s = constraint
-            .trim_start_matches(|c| c == '=' || c == '+' || c == '&');
+            .trim_start_matches(['=', '+', '&']);
         s.strip_prefix("@cc")
             .filter(|rest| !rest.is_empty())
     }
@@ -12795,7 +12794,7 @@ impl Codegen {
             return;
         }
         // 显式子寄存器写回 ({ecx}/{cx}/{cl} 约束)
-        if xmm_width >= 205 && xmm_width <= 208 {
+        if (205..=208).contains(&xmm_width) {
             let Expr::Ident { name, .. } = expr else { return; };
             let off = self.var_offset(&name.name);
             let size_bits = (xmm_width - 204) * 8; // 8, 16, 32, 64
@@ -13015,7 +13014,7 @@ impl Codegen {
         }
         // 非变量: gen_expr 到 rax, 再 movd/mm
         self.gen_expr(expr, 0);
-        self.emit(&[0x0F, 0x6E, 0xC0 | ((mm & 7) << 3) | 0]); // movd mm, eax
+        self.emit(&[0x0F, 0x6E, 0xC0 | ((mm & 7) << 3)]); // movd mm, eax
     }
 
     /// 将段寄存器值加载到内存或反之 (for {gs}/{fs} 约束)
@@ -14304,8 +14303,8 @@ impl Codegen {
         }
         // 跳过首字符 (可能是负号或数字), 然后检查是否有运算符
         let bytes = s.as_bytes();
-        for i in 1..bytes.len() {
-            match bytes[i] {
+        for b in bytes.iter().skip(1) {
+            match b {
                 b'+' | b'-' | b'*' | b'/' | b'|' | b'&' | b'^' => return true,
                 _ => {}
             }
@@ -15011,11 +15010,6 @@ impl Codegen {
                     self.emit(&[0xEA]);
                     self.emit(&(*off as i16).to_le_bytes());
                     self.emit(&(*seg as i16).to_le_bytes());
-                } else if let (AsmOperand::Imm(off), AsmOperand::Imm(seg)) = (&ops[0], &ops[1]) {
-                    // AT&T 反序: $off, $seg
-                    self.emit(&[0xEA]);
-                    self.emit(&(*off as i16).to_le_bytes());
-                    self.emit(&(*seg as i16).to_le_bytes());
                 } else {
                     self.asm_warn("ljmpw needs $seg, $off, emitted as nop");
                     self.emit(&[0x90]);
@@ -15023,10 +15017,6 @@ impl Codegen {
             }
             "ljmpl" if ops.len() == 2 => {
                 if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
-                    self.emit(&[0xEA]);
-                    self.emit(&(*off as i32).to_le_bytes());
-                    self.emit(&(*seg as i16).to_le_bytes());
-                } else if let (AsmOperand::Imm(off), AsmOperand::Imm(seg)) = (&ops[0], &ops[1]) {
                     self.emit(&[0xEA]);
                     self.emit(&(*off as i32).to_le_bytes());
                     self.emit(&(*seg as i16).to_le_bytes());
@@ -15047,10 +15037,6 @@ impl Codegen {
                     self.emit(&[0x9A]);
                     self.emit(&(*off as i16).to_le_bytes());
                     self.emit(&(*seg as i16).to_le_bytes());
-                } else if let (AsmOperand::Imm(off), AsmOperand::Imm(seg)) = (&ops[0], &ops[1]) {
-                    self.emit(&[0x9A]);
-                    self.emit(&(*off as i16).to_le_bytes());
-                    self.emit(&(*seg as i16).to_le_bytes());
                 } else {
                     self.asm_warn("lcallw needs $seg, $off, emitted as nop");
                     self.emit(&[0x90]);
@@ -15058,10 +15044,6 @@ impl Codegen {
             }
             "lcalll" if ops.len() == 2 => {
                 if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
-                    self.emit(&[0x9A]);
-                    self.emit(&(*off as i32).to_le_bytes());
-                    self.emit(&(*seg as i16).to_le_bytes());
-                } else if let (AsmOperand::Imm(off), AsmOperand::Imm(seg)) = (&ops[0], &ops[1]) {
                     self.emit(&[0x9A]);
                     self.emit(&(*off as i32).to_le_bytes());
                     self.emit(&(*seg as i16).to_le_bytes());

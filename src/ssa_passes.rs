@@ -233,16 +233,14 @@ pub fn ivop(func: &mut Function) -> bool {
         for inst in &mut b.insts {
             if let InstKind::Bin {
                 op: BinOp::Mul,
-                l,
-                r,
+                l: Operand::Var(v),
+                r: _,
             } = &mut inst.kind
             {
-                if let Operand::Var(v) = l {
-                    if ivs.contains(&v.name()) {
-                        // 标记: 将 Mul(iv, C) 转为 Add 链的候选
-                        // 实际变换由后续 strength_reduction 完成
-                        changed = true;
-                    }
+                if ivs.contains(&v.name()) {
+                    // 标记: 将 Mul(iv, C) 转为 Add 链的候选
+                    // 实际变换由后续 strength_reduction 完成
+                    changed = true;
                 }
             }
         }
@@ -890,6 +888,7 @@ pub fn register_allocation(func: &mut Function) -> bool {
 ///   - Identity: 同一 alias set (必定别名)
 ///   - Disjoint: 不同 alias set 且无 union 路径 (必定不别名)
 ///   - Overlap: 其他情况 (可能别名)
+///
 /// 返回: (set 划分, 判别结果 map)
 pub fn alias_set(func: &Function) -> BTreeMap<usize, Vec<String>> {
     let sets = alias_analysis(func);

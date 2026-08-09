@@ -1451,6 +1451,7 @@ impl<'a> Parser<'a> {
     }
 
     /// 验证 asm 操作数的语义约束 (约束前缀、重名、类型匹配、占位符数量)
+    #[allow(clippy::too_many_arguments)]
     fn validate_asm_semantics(
         &mut self,
         asm_str: &str,
@@ -4819,17 +4820,17 @@ impl<'a> Parser<'a> {
             Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
                 Self::apply_shadow_map_expr(e, map);
             }
-            Stmt::Block { b, .. } => {
+            Stmt::Block { .. } => {
                 // 不进入嵌套块，它们自行处理遮蔽
             }
-            Stmt::If { cond, then_, else_, .. } => {
+            Stmt::If { cond, .. } => {
                 Self::apply_shadow_map_expr(cond, map);
                 // 不进入 then_/else_ 块
             }
-            Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
+            Stmt::While { cond, .. } | Stmt::Do { cond, .. } => {
                 Self::apply_shadow_map_expr(cond, map);
             }
-            Stmt::For { init, cond, step, body, .. } => {
+            Stmt::For { init, cond, step, .. } => {
                 if let Some(s) = init {
                     Self::apply_shadow_map_stmt(s, map);
                 }

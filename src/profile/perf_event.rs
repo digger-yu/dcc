@@ -62,6 +62,7 @@ impl TopdownL1 {
 
 /// TopdownL2 二阶展开 (每个 L1 槽的子分类)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(non_camel_case_types)]
 pub enum TopdownL2 {
     // Retiring 子分类
     retiring_base,
@@ -261,7 +262,7 @@ impl PerfRecord {
     }
 
     /// 序列化为 dcc 文本格式
-    pub fn to_string(&self) -> String {
+    pub fn serialize(&self) -> String {
         let mut out = String::from("# dcc perf_event v1\n");
         for (name, &count) in &self.events {
             out.push_str(&format!("event {} {}\n", name, count));
@@ -385,7 +386,7 @@ mod tests {
         r.add_topdown(TopdownL1::Retiring, 40);
         r.add_topdown(TopdownL1::BackendBound, 60);
         r.add_topdown_l2(TopdownL2::memory_bound, 40);
-        let text = r.to_string();
+        let text = r.serialize();
         let r2 = PerfRecord::from_str(&text).unwrap();
         assert_eq!(r2.events, r.events);
         assert_eq!(r2.topdown_l1, r.topdown_l1);

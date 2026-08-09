@@ -171,7 +171,7 @@ impl AutoFdoProfile {
     }
 
     /// 序列化为 dcc 文本格式
-    pub fn to_string(&self) -> String {
+    pub fn serialize(&self) -> String {
         let mut out = String::from("# dcc autofdo v1\n");
         for (name, &count) in &self.func_samples {
             out.push_str(&format!("func {} {}\n", name, count));
@@ -269,7 +269,7 @@ mod tests {
         p.func_samples.insert("main".into(), 100);
         p.line_samples.insert(("main".into(), 5, 1), 4);
         p.calls.insert(("main".into(), "foo".into()), 10);
-        let text = p.to_string();
+        let text = p.serialize();
         let p2 = AutoFdoProfile::from_str(&text).unwrap();
         assert_eq!(p2.func_samples, p.func_samples);
         assert_eq!(p2.line_samples, p.line_samples);

@@ -222,7 +222,7 @@ impl MemProfData {
     }
 
     /// 序列化为 dcc 文本格式
-    pub fn to_string(&self) -> String {
+    pub fn serialize(&self) -> String {
         let mut out = String::from("# dcc memprof v1\n");
         for (stack, &count) in &self.alloc_counts {
             let frames = stack.join(" -> ");
@@ -344,7 +344,7 @@ mod tests {
             4096,
         );
         d.dealloc_counts.insert(vec!["free".into()], 50);
-        let text = d.to_string();
+        let text = d.serialize();
         let d2 = MemProfData::from_str(&text).unwrap();
         assert_eq!(d2.alloc_counts, d.alloc_counts);
         assert_eq!(d2.alloc_bytes, d.alloc_bytes);

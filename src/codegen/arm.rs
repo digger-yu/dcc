@@ -207,7 +207,7 @@ impl ArmCodegen {
                     _ => 4,
                 };
                 if size == 8 {
-                    self.rodata.extend_from_slice(&(val as i64).to_le_bytes());
+                    self.rodata.extend_from_slice(&(val as i32 as i64).to_le_bytes());
                 } else {
                     self.rodata.extend_from_slice(&(val as i32).to_le_bytes());
                 }
@@ -475,7 +475,7 @@ impl ArmCodegen {
                         if let Ok(val) = crate::const_eval::eval(val_expr) {
                             self.emit_load_imm(1, val as i32); // r1 = case value
                             self.emit_cmp(0, 1); // compare r0 with r1
-                            let lbl_next = self.fresh_label("Lnextcase");
+                            let _lbl_next = self.fresh_label("Lnextcase");
                             // Use BEQ to jump to case body if equal
                             let pos = self.code.len() as u64;
                             self.pending_branches.push((pos, lbl_case.clone(), BranchKind::Beq));
@@ -780,9 +780,9 @@ impl ArmCodegen {
 
     fn emit_load_imm(&mut self, rd: u8, val: i32) {
         // 简化: 使用 MOV + MVN 处理小/大整数
-        if val >= 0 && val < 256 {
+        if (0..256).contains(&val) {
             self.emit_mov_imm(rd, val as u8);
-        } else if val < 0 && val >= -256 {
+        } else if (-256..0).contains(&val) {
             // MVN rd, #(|val|-1)
             let inst = 0xE3E00000 | ((rd as u32) << 12) | ((-val - 1) as u32 & 0xFF);
             self.code.extend_from_slice(&inst.to_le_bytes());

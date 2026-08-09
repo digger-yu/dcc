@@ -230,7 +230,7 @@ impl MipsCodegen {
                     _ => 4,
                 };
                 if size == 8 {
-                    self.rodata.extend_from_slice(&(val as i64).to_le_bytes());
+                    self.rodata.extend_from_slice(&(val as i32 as i64).to_le_bytes());
                 } else {
                     self.rodata.extend_from_slice(&(val as i32).to_le_bytes());
                 }
@@ -533,7 +533,7 @@ impl MipsCodegen {
                             // Let's use: subu $t0, $v0, case_val; sltiu $t0, $t0, 1
                             // Actually, let's just do: beqz after sub
                             self.emit_subu(8, 2, 3);
-                            let lbl_next = self.fresh_label("Lnextcase");
+                            let _lbl_next = self.fresh_label("Lnextcase");
                             self.emit_beqz(8, &lbl_case);
                             self.emit_nop();
                             case_labels.push((lbl_case, case));
@@ -604,9 +604,8 @@ impl MipsCodegen {
             Expr::Ident { name, .. } => {
                 if let Some(&off) = self.locals.get(&name.name) {
                     self.emit_load_v0(off);
-                } else if self.global_rodata.contains_key(&name.name) {
-                    self.emit_load_imm(2, 0);
                 } else {
+                    // global or external: load 0 as placeholder
                     self.emit_load_imm(2, 0);
                 }
             }
@@ -627,7 +626,8 @@ impl MipsCodegen {
                 match op {
                     UnOp::Neg => {
                         // neg $v0 = subu $v0, $zero, $v0
-                        let inst = (0b000000 << 26) | (0u32 << 21) | (2u32 << 16) | (2u32 << 11) | (0b100011);
+                        // R-type: opcode=0 (implicit), rs=$zero(0), rt=$v0(2), rd=$v0(2), funct=SUBU
+                        let inst: u32 = (2u32 << 11) | 0b100011;
                         self.code.extend_from_slice(&inst.to_be_bytes());
                     }
                     UnOp::Not => {
@@ -636,7 +636,8 @@ impl MipsCodegen {
                     }
                     UnOp::BitNot => {
                         // nor $v0, $v0, $zero
-                        let inst = (0b000000 << 26) | (2u32 << 21) | (0u32 << 16) | (2u32 << 11) | (0b100111);
+                        // R-type: rs=$v0(2), rt=$zero(0), rd=$v0(2), funct=NOR
+                        let inst: u32 = (2u32 << 21) | (2u32 << 11) | 0b100111;
                         self.code.extend_from_slice(&inst.to_be_bytes());
                     }
                     UnOp::Plus => {}
@@ -704,25 +705,26 @@ impl MipsCodegen {
                 self.emit_mfhi(2); // $v0 = remainder
             }
             BinOp::And => {
-                let inst = (0b000000 << 26) | (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100100;
+                // R-type: rs=$t0(8), rt=$v0(2), rd=$v0(2), funct=AND
+                let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100100;
                 self.code.extend_from_slice(&inst.to_be_bytes());
             }
             BinOp::Or => {
-                let inst = (0b000000 << 26) | (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100101;
+                let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100101;
                 self.code.extend_from_slice(&inst.to_be_bytes());
             }
             BinOp::Xor => {
-                let inst = (0b000000 << 26) | (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100110;
+                let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100110;
                 self.code.extend_from_slice(&inst.to_be_bytes());
             }
             BinOp::Shl => {
                 // sllv $v0, $t0, $v0
-                let inst = (0b000000 << 26) | (2u32 << 21) | (8u32 << 16) | (2u32 << 11) | 0b000100;
+                let inst: u32 = (2u32 << 21) | (8u32 << 16) | (2u32 << 11) | 0b000100;
                 self.code.extend_from_slice(&inst.to_be_bytes());
             }
             BinOp::Shr => {
                 // srav $v0, $t0, $v0
-                let inst = (0b000000 << 26) | (2u32 << 21) | (8u32 << 16) | (2u32 << 11) | 0b000111;
+                let inst: u32 = (2u32 << 21) | (8u32 << 16) | (2u32 << 11) | 0b000111;
                 self.code.extend_from_slice(&inst.to_be_bytes());
             }
             BinOp::Lt => self.emit_slt(2, 8, 2),
@@ -748,13 +750,13 @@ impl MipsCodegen {
                 // both non-zero?
                 self.emit_sltu(8, 0, 8); // $t0 = (lhs != 0)
                 self.emit_sltu(2, 0, 2); // $v0 = (rhs != 0)
-                let inst = (0b000000 << 26) | (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100100;
+                let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100100;
                 self.code.extend_from_slice(&inst.to_be_bytes()); // and
             }
             BinOp::OrOr => {
                 self.emit_sltu(8, 0, 8);
                 self.emit_sltu(2, 0, 2);
-                let inst = (0b000000 << 26) | (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100101;
+                let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100101;
                 self.code.extend_from_slice(&inst.to_be_bytes()); // or
             }
         }
@@ -854,7 +856,7 @@ impl MipsCodegen {
     }
 
     fn emit_load_imm(&mut self, rt: u8, val: i32) {
-        if val >= -32768 && val <= 32767 {
+        if (-32768..=32767).contains(&val) {
             self.emit_addiu(rt, 0, val as i16);
         } else {
             // 使用 lui + ori 加载大整数
@@ -872,13 +874,14 @@ impl MipsCodegen {
     }
 
     fn emit_addu(&mut self, rd: u8, rs: u8, rt: u8) {
-        let inst = (0b000000 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16)
+        // R-type: opcode=0 (implicit), funct=ADDU
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16)
             | ((rd as u32) << 11) | 0b100001;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     fn emit_subu(&mut self, rd: u8, rs: u8, rt: u8) {
-        let inst = (0b000000 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16)
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16)
             | ((rd as u32) << 11) | 0b100011;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
@@ -886,13 +889,13 @@ impl MipsCodegen {
     fn emit_mul_r(&mut self, rd: u8, rs: u8, rt: u8) {
         // MUL rd, rs, rt (MIPS32r2 专用指令, 或回退到 mult+mflo)
         // 使用 mult + mflo 保证兼容性
-        let inst = (0b000000 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16);
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16);
         self.code.extend_from_slice(&inst.to_be_bytes()); // mult rs, rt
         self.emit_mflo(rd);
     }
 
     fn emit_div(&mut self, rs: u8, rt: u8) {
-        let inst = (0b000000 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | 0b010010;
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | 0b010010;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -907,13 +910,13 @@ impl MipsCodegen {
     }
 
     fn emit_slt(&mut self, rd: u8, rs: u8, rt: u8) {
-        let inst = (0b000000 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16)
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16)
             | ((rd as u32) << 11) | 0b101010;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     fn emit_sltu(&mut self, rd: u8, rs: u8, rt: u8) {
-        let inst = (0b000000 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16)
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16)
             | ((rd as u32) << 11) | 0b101011;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
@@ -934,7 +937,7 @@ impl MipsCodegen {
         // BEQ $rs, $zero, offset (占位)
         let pos = self.code.len() as u64;
         self.pending_branches.push((pos, label.to_string(), BranchKind::Beqz));
-        let inst: u32 = (0b000100 << 26) | ((rs as u32) << 21) | 0; // 偏移 0
+        let inst: u32 = (0b000100 << 26) | ((rs as u32) << 21); // offset=0 placeholder
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -942,7 +945,7 @@ impl MipsCodegen {
         // B offset (BEQ $zero, $zero, offset)
         let pos = self.code.len() as u64;
         self.pending_branches.push((pos, label.to_string(), BranchKind::B));
-        let inst: u32 = (0b000100 << 26) | 0;
+        let inst: u32 = 0b000100 << 26; // BEQ $zero, $zero, offset=0
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
