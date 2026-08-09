@@ -1137,8 +1137,8 @@ impl Preprocessor {
     /// 对累积的活跃源码块做宏展开并写入输出
     ///
     /// `spans` 与 `src` 中的行一一对应: (phys_start, phys_end)。
-    /// 展开结果逐行写出; 空行/注释行也输出, 续接覆盖的物理行补空行,
-    /// 保证输出行号与输入物理行号一一对应 (SourceLoc 对齐)。
+    /// 展开结果逐行写出; 空行/注释行跳过, 不输出空行填充。
+    /// 行号追踪由 line_map 负责, 不再保持输出行号与源行号物理对齐。
     fn flush_active_source(&mut self, src: &mut String, spans: &mut Vec<(u32, u32)>) {
         let out_start = self.out_lines + 1;
         let phys_lines: Vec<u32> = spans.iter().map(|&(s, _)| s).collect();
@@ -1151,16 +1151,10 @@ impl Preprocessor {
                 if !line.ends_with('\n') {
                     self.push_out("\n");
                 }
-            } else {
-                // 空行/纯注释行: 保留行号
-                self.push_out("\n");
             }
-            // 逻辑行覆盖多个物理行时补空行, 保持行数守恒
-            for _ in phys_start..phys_end {
-                self.push_out("\n");
-            }
+            // 不再补空行填充多物理行
         }
-        // 兜底: 展开结果行数多于输入行数时 (理论不发生) 写全
+        // 兆底: 展开结果行数多于输入行数时写全
         for line in lines.iter().skip(spans.len()) {
             if !line.is_empty() {
                 self.push_out(line);
@@ -1168,8 +1162,6 @@ impl Preprocessor {
             }
         }
         // 把展开阶段累积的 _Pragma 字符串批量应用
-        // 顺序与源中出现顺序一致; 行号用收集时记录的 out 行号,
-        // 这样 pack_history 与 parser 的 lex.line 严格对齐
         let pending: Vec<(String, u32)> = std::mem::take(&mut *self.pending_pragmas.borrow_mut());
         for (p, line_no) in pending {
             self.apply_pragma_string(&p, line_no);
@@ -1188,19 +1180,16 @@ impl Preprocessor {
         spans.clear();
     }
 
-    /// 向输出写入空行, 使输出行号与输入物理行号保持一致 (SourceLoc 对齐)。
-    /// 逻辑行覆盖 [start, end] 的物理行时, 每个物理行占一行。
+    /// 不再输出空行填充。
+    /// 行号追踪由 line_map 负责, 此处只记录映射关系。
     fn preserve_lines(&mut self, start: u32, end: u32) {
         let out_start = self.out_lines + 1;
-        let count = end - start + 1;
-        for _ in start..=end {
-            self.push_out("\n");
-        }
+        // 不发空行, 只记录 line_map 以便后续行号反查
         self.line_map.push(LineSpan {
             out_start,
             file: self.file.clone(),
             src_start: start,
-            count,
+            count: 0, // 无实际输出行
         });
     }
 

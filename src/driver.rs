@@ -909,6 +909,10 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
     })?;
 
     let mut cmd = Command::new("as");
+    // -m32 需要传 --32 给系统汇编器 (如 vdso32 构建)
+    if cfg.m32 {
+        cmd.arg("--32");
+    }
     for opt in &cfg.as_options {
         for part in opt.split(',') {
             if !part.is_empty() {
@@ -943,6 +947,49 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
         )]);
     }
     eprintln!("dcc: wrote {}", cfg.output.display());
+
+    // .S 文件也需要生成依赖文件 (-MMD / -MD)
+    if cfg.gen_dep {
+        let dep_path = cfg.dep_file.as_ref().unwrap_or(&cfg.output);
+        let target = cfg
+            .dep_target
+            .as_deref()
+            .unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+        let deps: Vec<String> = if cfg.dep_mmd_only {
+            filter_user_deps(include_deps, &cfg.system_paths)
+        } else {
+            include_deps
+        };
+        if dep_path.to_str() != Some("-") {
+            if let Some(parent) = dep_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            let mut dep_out = fs::File::create(dep_path).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write {}: {}", dep_path.display(), e),
+                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                )]
+            })?;
+            write_dep_file(
+                &mut dep_out,
+                target,
+                &input.display().to_string(),
+                &deps,
+                cfg.dep_phony,
+            )
+            .map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write dep file: {}", e),
+                    crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                )]
+            })?;
+        }
+    }
+
     Ok(())
 }
 

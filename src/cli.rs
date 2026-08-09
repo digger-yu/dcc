@@ -52,6 +52,7 @@ pub struct Config {
     pub sanitizers: SanitizerFlags,
     pub input_lang: InputLang,
     pub as_options: Vec<String>, // -Wa, 传递给汇编器的选项
+    pub m32: bool,               // -m32: 32 位目标, 传 --32 给 as
     pub parallel_codegen: bool,  // -O2+ 默认多线程并行 emit（DCC_NO_PARALLEL=1 关闭）
     pub permissive: bool,        // -fpermissive：未知 typedef 降级为 int
     pub raw_args: Vec<String>,   // 原始参数（sanitizer/LTO 探测）
@@ -397,6 +398,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut no_function_sections = false;
     let mut input_lang = InputLang::C;
     let mut as_options: Vec<String> = vec![];
+    let mut m32 = false;
     let mut relocatable_link = false; // 仅 -r 置位；-c 只产出 .o 不进入 link.rs
     let mut output_kind = LinkerOutputKind::Executable;
     let mut built_link = false;
@@ -1145,10 +1147,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             // -Wshadow=*: 接受但忽略
             a if a.starts_with("-Wshadow") => {}
             "-P" => {} // 抑制 #line 指令，DCC 预处理器本身就不输出它们
+            "-C" => {} // GCC -C: 预处理保留注释 (内核 linker script 使用)
             // -W* 警告选项 - 忽略
             a if a.starts_with("-W") => {}
-            // -m* 机器选项 - 忽略
-            a if a.starts_with("-m") => {}
+            // -m* 机器选项
+            "-m32" => m32 = true,
+            a if a.starts_with("-m") => {} // 其余 -m* 忽略
             // -fipa-sra: 启用/禁用跨过程标量替换
             "-fipa-sra" => ipa_sra.enabled = true,
             "-fno-ipa-sra" => ipa_sra.enabled = false,
@@ -1455,6 +1459,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sanitizers: SanitizerFlags::from_args(args),
             input_lang,
             as_options,
+            m32,
             parallel_codegen,
             permissive,
             raw_args: args.to_vec(),
@@ -1534,6 +1539,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sanitizers: SanitizerFlags::from_args(args),
             input_lang,
             as_options,
+            m32,
             parallel_codegen,
             permissive,
             raw_args: args.to_vec(),
