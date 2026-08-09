@@ -22,6 +22,9 @@ config.log
 config.status
 Makefile
 
+# Perf profiling
+perf.data
+
 # Scratch / debug temp files
 .scratch/
 

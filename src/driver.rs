@@ -322,6 +322,47 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 };
             }
         }
+        // -E 模式下也需要生成依赖文件 (如 kernel 的 module.lds.S 预处理)
+        if cfg.gen_dep {
+            let dep_path = cfg.dep_file.as_ref().unwrap_or(&cfg.output);
+            let target = cfg
+                .dep_target
+                .as_deref()
+                .unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+            let deps: Vec<String> = if cfg.dep_mmd_only {
+                filter_user_deps(include_deps, &cfg.system_paths)
+            } else {
+                include_deps
+            };
+            if dep_path.to_str() != Some("-") {
+                if let Some(parent) = dep_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                }
+                let mut dep_out = fs::File::create(dep_path).map_err(|e| {
+                    vec![Diagnostic::err(
+                        "E0101",
+                        format!("cannot write {}: {}", dep_path.display(), e),
+                        crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                    )]
+                })?;
+                write_dep_file(
+                    &mut dep_out,
+                    target,
+                    &input.display().to_string(),
+                    &deps,
+                    cfg.dep_phony,
+                )
+                .map_err(|e| {
+                    vec![Diagnostic::err(
+                        "E0101",
+                        format!("cannot write dep file: {}", e),
+                        crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                    )]
+                })?;
+            }
+        }
         return Ok(());
     }
 
@@ -714,11 +755,21 @@ fn write_dep_file(
     //   dep2 \
     //   dep3
     // ```
+    // 源文件是 `-` (stdin) 时不包含它, 避免 fixdep 尝试打开无效路径
+    let include_source = source != "-";
     if deps.is_empty() {
-        writeln!(out, "{}: {}", target, esc_source)?;
+        if include_source {
+            writeln!(out, "{}: {}", target, esc_source)?;
+        } else {
+            writeln!(out, "{}:", target)?;
+        }
     } else {
-        // 第一行: target: source \
-        writeln!(out, "{}: {} \\", target, esc_source)?;
+        // 第一行: target: source \ 或 target: \
+        if include_source {
+            writeln!(out, "{}: {} \\", target, esc_source)?;
+        } else {
+            writeln!(out, "{}: \\", target)?;
+        }
         // 中间依赖:  dep \
         for dep in &deps[..deps.len() - 1] {
             let esc_dep = escape_dep_path(dep);
@@ -764,13 +815,79 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
+    let include_deps = pp_out.deps;
     enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
     }
 
     if cfg.preprocess_only {
-        print!("{}", preprocessed);
+        // -E 模式: 写到 -o 指定的文件 (或 stdout)
+        let mut pp_out: Box<dyn Write> = if cfg.output_explicit && cfg.output.to_str() != Some("-") {
+            let path = &cfg.output;
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            Box::new(fs::File::create(path).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write {}: {}", path.display(), e),
+                    crate::diagnostics::Span::point(&path.display().to_string(), 0, 0),
+                )]
+            })?)
+        } else {
+            Box::new(io::stdout())
+        };
+        write!(pp_out, "{}", preprocessed).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("write error: {}", e),
+                crate::diagnostics::Span::point("", 0, 0),
+            )]
+        })?;
+        // 生成依赖文件 (如 kernel 的 module.lds.S 预处理)
+        if cfg.gen_dep {
+            let dep_path = cfg.dep_file.as_ref().unwrap_or(&cfg.output);
+            let target = cfg
+                .dep_target
+                .as_deref()
+                .unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+            let deps: Vec<String> = if cfg.dep_mmd_only {
+                filter_user_deps(include_deps, &cfg.system_paths)
+            } else {
+                include_deps
+            };
+            if dep_path.to_str() != Some("-") {
+                if let Some(parent) = dep_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                }
+                let mut dep_out = fs::File::create(dep_path).map_err(|e| {
+                    vec![Diagnostic::err(
+                        "E0101",
+                        format!("cannot write {}: {}", dep_path.display(), e),
+                        crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                    )]
+                })?;
+                write_dep_file(
+                    &mut dep_out,
+                    target,
+                    &input.display().to_string(),
+                    &deps,
+                    cfg.dep_phony,
+                )
+                .map_err(|e| {
+                    vec![Diagnostic::err(
+                        "E0101",
+                        format!("cannot write dep file: {}", e),
+                        crate::diagnostics::Span::point(&dep_path.display().to_string(), 0, 0),
+                    )]
+                })?;
+            }
+        }
         return Ok(());
     }
 
