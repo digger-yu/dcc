@@ -1,6 +1,6 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-08-08 — 基于 `cargo test` 326 integration tests + 685 unit tests 全部通过
+> 最后更新：2026-08-09 — 基于 `cargo test` 337 integration tests + 685 unit tests 全部通过
 > 
 > 已支持特性详见 `docs/support_features.md`
 
@@ -30,7 +30,7 @@
 
 | 模块 | 现状 |
 |------|------|
-| RVV 完整指令集 | 仅基础 VSETVLI/LOAD/STORE/ADD/MUL/REDUCE，缺宽化/窄化/掩码/浮点向量 |
+| RVV 完整指令集 | ✅ 已完整: VSETVLI/VSETIVLI + LOAD/STORE (8/16/32/64) + ADD/SUB/MUL + AND/OR/XOR + SLL/SRL/SRA + 宽化 (VWADD/VWSUB/VWMUL/VWMULU) + 窄化 (VNSRL/VNSRA) + 掩码 (VMAND/VMOR/VMXOR/VMNOT) + 浮点向量 (VFADD/VFSUB/VFMUL/VFDIV/VFMADD/VFMIN/VFMAX) + VREDUCE |
 
 ### x86_64 mini-asm
 
@@ -71,7 +71,7 @@
 | 限制 | 说明 |
 |------|------|
 | Windows 链接路径验证 | Windows 平台链接路径未实际验证 |
-| DSO symbol caching | `DsoCache` 已实现，链接器侧未接入（需先补 `-lxxx → libc.so` 解析） |
+| DSO symbol caching | `DsoCache` 已实现并接入 linker (`dso_cache` 字段 + stats 统计) |
 | 运行时 dynamic loader | 生成 ELF 依赖 host `ld.so`（设计决策）；dcc 自身可 musl 静态链接 |
 
 ## 交叉编译

@@ -47,6 +47,10 @@ pub struct ArmCodegen {
     raw_global_asm_lines: Vec<String>,
     /// 函数级内联 asm 原始文本行: (函数名, 行列表)
     raw_func_asm_lines: Vec<(String, Vec<String>)>,
+    /// exec 模式入口地址
+    entry: u64,
+    /// exec 模式 _start 中 BL main 的指令位置
+    start_call_pos: Option<u64>,
     _target: Target,
 }
 
@@ -79,6 +83,8 @@ impl ArmCodegen {
             continue_labels: Vec::new(),
             raw_global_asm_lines: Vec::new(),
             raw_func_asm_lines: Vec::new(),
+            entry: if relocatable { 0 } else { 0x400000 + 52 + 32 },
+            start_call_pos: None,
             _target: target,
         }
     }
@@ -120,6 +126,58 @@ impl ArmCodegen {
         }
         if self.relocatable {
             self.compile_rel(module, prog);
+        } else {
+            self.compile_exec(module, prog);
+        }
+    }
+
+    fn compile_exec(&mut self, module: &Module, prog: &Program) {
+        // _start: BL main (placeholder)
+        let start_pos = self.code.len() as u64;
+        self.labels.insert("_start".to_string(), start_pos);
+        // BL placeholder (will be patched to main)
+        let bl_pos = self.code.len() as u64;
+        self.start_call_pos = Some(bl_pos);
+        self.code.extend_from_slice(&0xEB000000u32.to_le_bytes()); // BL offset=0
+        // r0 already has main's return value
+        // mov r7, #1 (__NR_exit)
+        self.emit_mov_imm(7, 1);
+        // svc #0
+        let svc_inst: u32 = 0xEF000000; // SVC #0
+        self.code.extend_from_slice(&svc_inst.to_le_bytes());
+        // Compile functions
+        for func in &module.functions {
+            let has_body = prog.decls.iter().find_map(|d| match d {
+                Decl::Func(f) if f.name.name == func.name => Some(f),
+                _ => None,
+            }).and_then(|f| f.body.as_ref()).is_some();
+            if !has_body { continue; }
+            self.gen_function(func, prog.decls.iter().find_map(|d| match d {
+                Decl::Func(f) if f.name.name == func.name => Some(f),
+                _ => None,
+            }));
+            // Patch BL to main
+            if func.name == "main" {
+                if let Some(bl_pos) = self.start_call_pos {
+                    if let Some(&main_addr) = self.labels.get("main") {
+                        self.patch_b(bl_pos, main_addr); // BL uses same offset encoding as B
+                    }
+                }
+            }
+        }
+        // Finalize pending branches
+        self.finalize_branches();
+    }
+
+    fn finalize_branches(&mut self) {
+        let pending: Vec<_> = self.pending_branches.drain(..).collect();
+        for (at, label, kind) in pending {
+            if let Some(&target) = self.labels.get(&label) {
+                match kind {
+                    BranchKind::Beq => self.patch_beq(at, target),
+                    BranchKind::B => self.patch_b(at, target),
+                }
+            }
         }
     }
 
@@ -918,10 +976,7 @@ impl ArmCodegen {
                 &self.extra_sections,
             )
         } else {
-            // Non-relocatable (executable) output not yet supported for ARM
-            // Return empty vector with a warning (caller should handle this)
-            eprintln!("Warning: ARM executable output not yet supported, use -c for relocatable output");
-            Vec::new()
+            elf::build_elf32_exec_arm(&self.code, &self.rodata, self.entry as u32)
         }
     }
 

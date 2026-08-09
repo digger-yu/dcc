@@ -7577,3 +7577,55 @@ fn asm_non_x86_backend_c_mode_no_panic() {
         let _ = fs::remove_file(&obj_path);
     }
 }
+
+/// MIPS/ARM/MIPS64/AArch64/RISC-V64 -c 模式生成有效 ELF (relocatable)
+#[test]
+fn non_x86_c_mode_produces_valid_elf() {
+    let source = r#"int main(void) { return 0; }"#;
+    let targets = [
+        ("aarch64-linux-gnu", 183),      // EM_AARCH64
+        ("riscv64-linux-gnu", 243),       // EM_RISCV
+        ("mips-linux-gnu", 8),            // EM_MIPS
+        ("mips64-linux-gnuabi64", 8),     // EM_MIPS
+        ("arm-linux-gnueabihf", 40),      // EM_ARM
+    ];
+    for (target, _em) in &targets {
+        let dir = std::env::temp_dir();
+        let src_path = dir.join(format!("dcc-elf-{}-{}.c", target.replace('/', "-"), std::process::id()));
+        let obj_path = dir.join(format!("dcc-elf-{}-{}.o", target.replace('/', "-"), std::process::id()));
+        fs::write(&src_path, source).expect("write C fixture");
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj_path)
+            .arg(&src_path)
+            .output()
+            .expect("run dcc");
+        assert!(
+            output.status.success(),
+            "target {}: -c mode failed: {}",
+            target,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Verify ELF magic
+        let elf_bytes = fs::read(&obj_path).expect("read output");
+        assert!(
+            elf_bytes.len() >= 4 && elf_bytes[0..4] == [0x7f, b'E', b'L', b'F'],
+            "target {}: output is not a valid ELF, got {} bytes",
+            target,
+            elf_bytes.len()
+        );
+        // Verify ELF class (32/64 bit)
+        let elf_class = elf_bytes[4];
+        match *target {
+            "mips-linux-gnu" | "arm-linux-gnueabihf" => {
+                assert_eq!(elf_class, 1, "target {}: should be ELF32", target);
+            }
+            "aarch64-linux-gnu" | "riscv64-linux-gnu" | "mips64-linux-gnuabi64" => {
+                assert_eq!(elf_class, 2, "target {}: should be ELF64", target);
+            }
+            _ => {}
+        }
+        let _ = fs::remove_file(&src_path);
+        let _ = fs::remove_file(&obj_path);
+    }
+}

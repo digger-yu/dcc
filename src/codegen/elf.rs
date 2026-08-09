@@ -2161,6 +2161,96 @@ pub fn build_elf32_arm(
     )
 }
 
+/// MIPS32 ET_EXEC (ELF32, big-endian)
+pub fn build_elf32_exec_mips(code: &[u8], rodata: &[u8], entry: u32) -> Vec<u8> {
+    let rodata_off = align_up(code.len(), 8);
+    let mut combined = Vec::with_capacity(rodata_off + rodata.len());
+    combined.extend_from_slice(code);
+    pad_to(&mut combined, rodata_off);
+    combined.extend_from_slice(rodata);
+    let data = &combined;
+    let mut out = Vec::with_capacity(data.len() + 128);
+    // ELF header (52 bytes, big-endian)
+    out.extend_from_slice(&ELFMAG);
+    out.push(ELFCLASS32);
+    out.push(ELFDATA2MSB);
+    out.push(EV_CURRENT);
+    out.push(0); // ei_osabi
+    out.extend_from_slice(&[0u8; 8]); // ei_pad
+    out.extend_from_slice(&ET_EXEC.to_be_bytes());
+    out.extend_from_slice(&EM_MIPS.to_be_bytes());
+    out.extend_from_slice(&1u32.to_be_bytes()); // e_version
+    out.extend_from_slice(&entry.to_be_bytes()); // e_entry
+    out.extend_from_slice(&52u32.to_be_bytes()); // e_phoff
+    out.extend_from_slice(&0u32.to_be_bytes()); // e_shoff
+    out.extend_from_slice(&0u32.to_be_bytes()); // e_flags
+    out.extend_from_slice(&52u16.to_be_bytes()); // e_ehsize
+    out.extend_from_slice(&32u16.to_be_bytes()); // e_phentsize
+    out.extend_from_slice(&1u16.to_be_bytes()); // e_phnum
+    out.extend_from_slice(&0u16.to_be_bytes()); // e_shentsize
+    out.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
+    out.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
+    // Program header (32 bytes, big-endian)
+    let p_vaddr: u32 = 0x400000;
+    let p_filesz = (52 + 32) as u32 + data.len() as u32;
+    out.extend_from_slice(&PT_LOAD.to_be_bytes());
+    out.extend_from_slice(&7u32.to_be_bytes()); // p_flags (R|W|X)
+    out.extend_from_slice(&0u32.to_be_bytes()); // p_offset
+    out.extend_from_slice(&p_vaddr.to_be_bytes()); // p_vaddr
+    out.extend_from_slice(&p_vaddr.to_be_bytes()); // p_paddr
+    out.extend_from_slice(&p_filesz.to_be_bytes()); // p_filesz
+    out.extend_from_slice(&p_filesz.to_be_bytes()); // p_memsz
+    out.extend_from_slice(&0x1000u32.to_be_bytes()); // p_align
+    // Code + rodata
+    out.extend_from_slice(data);
+    out
+}
+
+/// ARM ET_EXEC (ELF32, little-endian)
+pub fn build_elf32_exec_arm(code: &[u8], rodata: &[u8], entry: u32) -> Vec<u8> {
+    let rodata_off = align_up(code.len(), 8);
+    let mut combined = Vec::with_capacity(rodata_off + rodata.len());
+    combined.extend_from_slice(code);
+    pad_to(&mut combined, rodata_off);
+    combined.extend_from_slice(rodata);
+    let data = &combined;
+    let mut out = Vec::with_capacity(data.len() + 128);
+    // ELF header (52 bytes, little-endian)
+    out.extend_from_slice(&ELFMAG);
+    out.push(ELFCLASS32);
+    out.push(ELFDATA2LSB);
+    out.push(EV_CURRENT);
+    out.push(0); // ei_osabi
+    out.extend_from_slice(&[0u8; 8]); // ei_pad
+    out.extend_from_slice(&ET_EXEC.to_le_bytes());
+    out.extend_from_slice(&EM_ARM.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    out.extend_from_slice(&entry.to_le_bytes()); // e_entry
+    out.extend_from_slice(&52u32.to_le_bytes()); // e_phoff
+    out.extend_from_slice(&0u32.to_le_bytes()); // e_shoff
+    out.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    out.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
+    out.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize
+    out.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_shentsize
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+    // Program header (32 bytes, little-endian)
+    let p_vaddr: u32 = 0x400000;
+    let p_filesz = (52 + 32) as u32 + data.len() as u32;
+    out.extend_from_slice(&PT_LOAD.to_le_bytes());
+    out.extend_from_slice(&7u32.to_le_bytes()); // p_flags (R|W|X)
+    out.extend_from_slice(&0u32.to_le_bytes()); // p_offset
+    out.extend_from_slice(&p_vaddr.to_le_bytes()); // p_vaddr
+    out.extend_from_slice(&p_vaddr.to_le_bytes()); // p_paddr
+    out.extend_from_slice(&p_filesz.to_le_bytes()); // p_filesz
+    out.extend_from_slice(&p_filesz.to_le_bytes()); // p_memsz
+    out.extend_from_slice(&0x1000u32.to_le_bytes()); // p_align
+    // Code + rodata
+    out.extend_from_slice(data);
+    out
+}
+
 /// ELF32 section header (40 bytes)
 fn write_section_header32(
     out: &mut Vec<u8>,

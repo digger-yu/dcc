@@ -47,6 +47,10 @@ pub struct MipsCodegen {
     raw_global_asm_lines: Vec<String>,
     /// 函数级内联 asm 原始文本行: (函数名, 行列表)
     raw_func_asm_lines: Vec<(String, Vec<String>)>,
+    /// exec 模式入口地址
+    entry: u64,
+    /// exec 模式 _start 中 JAL main 的指令位置
+    start_call_pos: Option<u64>,
     _target: Target,
 }
 
@@ -80,6 +84,8 @@ impl MipsCodegen {
             continue_labels: Vec::new(),
             raw_global_asm_lines: Vec::new(),
             raw_func_asm_lines: Vec::new(),
+            entry: if relocatable { 0 } else { 0x400000 + 52 + 32 },
+            start_call_pos: None,
             _target: target,
         }
     }
@@ -125,6 +131,76 @@ impl MipsCodegen {
         }
         if self.relocatable {
             self.compile_rel(module, prog);
+        } else {
+            self.compile_exec(module, prog);
+        }
+    }
+
+    fn compile_exec(&mut self, module: &Module, prog: &Program) {
+        // _start: JAL main (placeholder) + NOP delay slot
+        let start_pos = self.code.len() as u64;
+        self.labels.insert("_start".to_string(), start_pos);
+        // JAL placeholder (target = 0, will be patched)
+        let jal_pos = self.code.len() as u64;
+        self.start_call_pos = Some(jal_pos);
+        let inst: u32 = 0b000011 << 26; // JAL with target 0
+        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_nop(); // delay slot
+        // move $a0, $v0 (save main return value)
+        self.emit_addu(4, 2, 0); // addu $a0, $v0, $zero
+        // li $v0, 4001 (__NR_exit)
+        self.emit_load_imm(2, 4001);
+        // syscall
+        let syscall_inst: u32 = 0b000000 << 26; // SPECIAL
+        let syscall_inst = syscall_inst | 0b001000; // opcode 0.12 = syscall
+        self.code.extend_from_slice(&syscall_inst.to_be_bytes());
+        // Compile functions
+        for func in &module.functions {
+            let has_body = prog.decls.iter().find_map(|d| match d {
+                Decl::Func(f) if f.name.name == func.name => Some(f),
+                _ => None,
+            }).and_then(|f| f.body.as_ref()).is_some();
+            if !has_body { continue; }
+            self.gen_function(func, prog.decls.iter().find_map(|d| match d {
+                Decl::Func(f) if f.name.name == func.name => Some(f),
+                _ => None,
+            }));
+            // Patch JAL to main
+            if func.name == "main" {
+                if let Some(jal_pos) = self.start_call_pos {
+                    if let Some(&main_addr) = self.labels.get("main") {
+                        self.patch_jal(jal_pos, main_addr);
+                    }
+                }
+            }
+        }
+        // Finalize pending branches
+        self.finalize_branches();
+    }
+
+    fn patch_jal(&mut self, at: u64, target: u64) {
+        // MIPS JAL: target28 = target & 0x0FFFFFFF, instr[25:0] = target28 >> 2
+        let target28 = (target & 0x0FFFFFFF) as u32;
+        let existing = u32::from_be_bytes([
+            self.code[at as usize],
+            self.code[at as usize + 1],
+            self.code[at as usize + 2],
+            self.code[at as usize + 3],
+        ]);
+        let patched = (existing & 0xFC000000) | (target28 >> 2);
+        self.code[at as usize..at as usize + 4]
+            .copy_from_slice(&patched.to_be_bytes());
+    }
+
+    fn finalize_branches(&mut self) {
+        let pending: Vec<_> = self.pending_branches.drain(..).collect();
+        for (at, label, kind) in pending {
+            if let Some(&target) = self.labels.get(&label) {
+                match kind {
+                    BranchKind::Beqz => self.patch_beqz(at, target),
+                    BranchKind::B => self.patch_b(at, target),
+                }
+            }
         }
     }
 
@@ -913,10 +989,7 @@ impl MipsCodegen {
                 )
             }
         } else {
-            // Non-relocatable (executable) output not yet supported for MIPS/MIPS64
-            // Return empty vector with a warning (caller should handle this)
-            eprintln!("Warning: MIPS/MIPS64 executable output not yet supported, use -c for relocatable output");
-            Vec::new()
+            elf::build_elf32_exec_mips(&self.code, &self.rodata, self.entry as u32)
         }
     }
 
