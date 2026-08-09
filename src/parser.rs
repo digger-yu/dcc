@@ -498,7 +498,10 @@ impl<'a> Parser<'a> {
     fn typeof_operand_is_type_form(&self) -> bool {
         if self.cur.kind == TokKind::Ident {
             match self.cur.text.as_str() {
-                "_Generic" | "nullptr" | "sizeof" | "__builtin_choose_expr" => return false,
+                "_Generic" | "nullptr" | "sizeof" | "__builtin_choose_expr"
+                | "__builtin_offsetof" | "offsetof"
+                | "__alignof__" | "_Alignof" | "__alignof"
+                | "__builtin_types_compatible_p" => return false,
                 _ => {}
             }
             let n = self.cur.text.clone();
