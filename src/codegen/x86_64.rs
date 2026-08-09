@@ -213,6 +213,8 @@ struct PendingJump {
     at: u64,
     target: String,
     kind: JumpKind,
+    /// push $label: imm32 = absolute address (not PC-relative)
+    is_push_imm: bool,
 }
 #[derive(PartialEq)]
 enum JumpKind {
@@ -1382,6 +1384,7 @@ impl Codegen {
             at,
             target: target.into(),
             kind,
+            is_push_imm: false,
         });
     }
 
@@ -1396,12 +1399,17 @@ impl Codegen {
                 .get(&p.target)
                 .unwrap_or_else(|| panic!("unresolved label: {}", p.target));
             let off = p.at as usize;
-            let (rel_from, rel_off) = match p.kind {
-                JumpKind::Jmp => (p.at + 5, off + 1),
-                _ => (p.at + 6, off + 2),
-            }; // Jmp=5字节, Jcc=6字节
-            let rel = (dst as i64) - (rel_from as i64);
-            self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+            if p.is_push_imm {
+                // push $label: imm32 = absolute address (lower 32 bits)
+                self.code[off..off + 4].copy_from_slice(&(dst as i32).to_le_bytes());
+            } else {
+                let (rel_from, rel_off) = match p.kind {
+                    JumpKind::Jmp => (p.at + 5, off + 1),
+                    _ => (p.at + 6, off + 2),
+                }; // Jmp=5字节, Jcc=6字节
+                let rel = (dst as i64) - (rel_from as i64);
+                self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+            }
         }
         // 修补 RIP-relative 字符串引用 (LEA dst, [RIP+disp32])
         for (code_pos, data) in self.string_refs.drain(..) {
@@ -3307,12 +3315,17 @@ impl Codegen {
                 .get(&p.target)
                 .unwrap_or_else(|| panic!("unresolved label: {}", p.target));
             let off = p.at as usize;
-            let (rel_from, rel_off) = match p.kind {
-                JumpKind::Jmp => (p.at + 5, off + 1),
-                _ => (p.at + 6, off + 2),
-            };
-            let rel = (dst as i64) - (rel_from as i64);
-            self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+            if p.is_push_imm {
+                // push $label: imm32 = absolute address (lower 32 bits)
+                self.code[off..off + 4].copy_from_slice(&(dst as i32).to_le_bytes());
+            } else {
+                let (rel_from, rel_off) = match p.kind {
+                    JumpKind::Jmp => (p.at + 5, off + 1),
+                    _ => (p.at + 6, off + 2),
+                };
+                let rel = (dst as i64) - (rel_from as i64);
+                self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+            }
         }
     }
 
@@ -3900,6 +3913,7 @@ impl Codegen {
                 at,
                 target: l.into(),
                 kind: JumpKind::Jmp,
+                is_push_imm: false,
             });
         }
     }
@@ -13353,8 +13367,9 @@ impl Codegen {
         for (idx, op) in outputs.iter().chain(inputs.iter()).enumerate() {
             let key = format!("%{}", idx);
             if let Some(val) = op_map.get(&key) {
-                resolved = resolved.replace(&key, &Self::asm_format_subst_safe(val));
-                // 修饰符变体: %bN %wN %hN %kN %qN %aN %PN (对寄存器操作数)
+                // 先处理修饰符变体 (长模式), 再处理裸 %N, 避免 %0 子串
+                // 匹配破坏 %q0 / %b0 等占位符.
+                // 寄存器修饰符: %bN %wN %hN %kN %qN
                 for m in ['b', 'w', 'h', 'k', 'q'] {
                     let mkey = format!("%{}{}", m, idx);
                     if resolved.contains(&mkey) {
@@ -13362,6 +13377,11 @@ impl Codegen {
                             resolved = resolved.replace(&mkey, &sub);
                         }
                     }
+                }
+                // %cN: 常量形式 (去 $ 前缀, 同 %P 但对立即数)
+                let ckey = format!("%c{}", idx);
+                if resolved.contains(&ckey) {
+                    resolved = resolved.replace(&ckey, &Self::asm_raw_operand(val));
                 }
                 // %aN: 地址形式 (寄存器同名, 立即数/内存去前缀)
                 let akey = format!("%a{}", idx);
@@ -13377,15 +13397,17 @@ impl Codegen {
                 if resolved.contains(&pkey) {
                     resolved = resolved.replace(&pkey, &Self::asm_raw_operand(val));
                 }
+                // 最后替换裸 %N
+                resolved = resolved.replace(&key, &Self::asm_format_subst_safe(val));
             } else if let Some(val) = Self::eval_asm_operand(op) {
-                resolved = resolved.replace(&key, &val);
-                // 修饰符形式: 纯数值 const 求值结果, %a/%P 直接输出数字
-                for m in ['a', 'P'] {
+                // 修饰符形式: 纯数值 const 求值结果, %a/%P/%c 直接输出数字
+                for m in ['a', 'P', 'c'] {
                     let mkey = format!("%{}{}", m, idx);
                     if resolved.contains(&mkey) {
                         resolved = resolved.replace(&mkey, &val);
                     }
                 }
+                resolved = resolved.replace(&key, &val);
             }
         }
         for (i, name) in output_names.iter().chain(input_names.iter()).enumerate() {
@@ -13402,6 +13424,11 @@ impl Codegen {
                                 resolved = resolved.replace(&mkey, &sub);
                             }
                         }
+                    }
+                    // %c[name]: 常量形式 (去 $ 前缀)
+                    let ckey = format!("%c[{n}]");
+                    if resolved.contains(&ckey) {
+                        resolved = resolved.replace(&ckey, &Self::asm_raw_operand(reg));
                     }
                     // %a[name]: 地址形式 (寄存器同名, 立即数/内存去前缀)
                     let akey = format!("%a[{n}]");
@@ -13431,9 +13458,37 @@ impl Codegen {
     /// 发射已替换操作数后的 asm 模板行（含 GNU 局部数字标签）
     fn emit_resolved_asm_lines(&mut self, resolved_lines: &[String], is_global: bool) {
         let locals = AsmLocalLabels::scan(resolved_lines);
+        // Track .pushsection/.popsection to skip non-text sections
+        // (e.g. .altinstructions, .altinstr_replacement, __bug_table).
+        let mut skip_depth: u32 = 0;
         for (i, resolved) in resolved_lines.iter().enumerate() {
             let trimmed = resolved.trim();
             if trimmed.is_empty() {
+                continue;
+            }
+            // .pushsection to non-text section: enter skip mode
+            if trimmed.starts_with(".pushsection") {
+                let sec_name = trimmed
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim_end_matches(',');
+                if !sec_name.starts_with(".text") && !sec_name.is_empty() {
+                    skip_depth += 1;
+                    continue;
+                }
+            }
+            // .popsection: leave skip mode if in non-text section
+            if trimmed == ".popsection" && skip_depth > 0 {
+                skip_depth -= 1;
+                continue;
+            }
+            // Skip lines in non-text sections, but still register numeric labels
+            // so that references from other skipped sections don't panic.
+            if skip_depth > 0 {
+                if let Some(name) = locals.name_at(i) {
+                    self.label(name);
+                }
                 continue;
             }
             // 数字局部标签 N:
@@ -14052,7 +14107,8 @@ impl Codegen {
             } else if let Ok(v) = rest.parse::<i64>() {
                 return AsmOperand::Imm(v);
             }
-            return AsmOperand::None;
+            // $label (e.g. $1f, $1b) — local label reference
+            return AsmOperand::Sym(rest.to_string());
         }
         // 寄存器: %reg 或裸 rax/rbx 等
         if s.starts_with('%') {
@@ -14226,8 +14282,11 @@ impl Codegen {
                 true
             }
             ".byte" => {
-                if let Some(v) = parts.get(1).and_then(|s| Self::parse_asm_imm_token(s)) {
-                    self.emit(&[(v & 0xFF) as u8]);
+                // .byte val1, val2, ... — emit each byte value
+                for &tok in parts.iter().skip(1) {
+                    if let Some(v) = Self::parse_asm_imm_token(tok) {
+                        self.emit(&[(v & 0xFF) as u8]);
+                    }
                 }
                 true
             }
@@ -15131,6 +15190,7 @@ impl Codegen {
                         at,
                         target: s.clone(),
                         kind: JumpKind::Je,
+                        is_push_imm: false,
                     });
                 } else {
                     self.asm_warn("xbegin needs label or imm, emitted as nop");
@@ -17214,6 +17274,18 @@ impl Codegen {
                     self.emit(&[0x50]); // push %rax
                 }
             }
+            AsmOperand::Sym(label) => {
+                // push $label: 编码为 push imm32 + 重定位
+                self.emit(&[0x68]);
+                self.emit(&[0x00, 0x00, 0x00, 0x00]);
+                let pos = self.pos() - 4;
+                self.pending.push(PendingJump {
+                    at: pos,
+                    target: label.clone(),
+                    kind: JumpKind::Jmp,
+                    is_push_imm: true,
+                });
+            }
             AsmOperand::Mem {
                 disp,
                 base,
@@ -17233,6 +17305,13 @@ impl Codegen {
                 let (_code, pfx) = Self::seg_meta(*seg);
                 self.emit(&[pfx, Self::rex(false, 0, index.unwrap_or(0), *base), 0xFF]);
                 self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
+            }
+            AsmOperand::SymDisp(sym, _) => {
+                // push sym(%rip): FF 35 disp32
+                self.emit(&[Self::rex(false, 0, 0, 0), 0xFF, 0x35]);
+                self.emit(&[0x00, 0x00, 0x00, 0x00]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
             }
             _ => {
                 self.asm_warn("unsupported push operand pattern, emitted as nop");
@@ -17909,6 +17988,13 @@ impl Codegen {
                     self.emit(&disp.to_le_bytes());
                 }
             }
+        } else if let (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, _)) = (src, dst) {
+            // lea sym(%rip), %reg: 8D /r mod=00 r/m=101 + disp32 (reloc)
+            let w = bits == 64;
+            self.emit(&[Self::rex(w, *d, 0, 0), 0x8D]);
+            self.emit_asm_modrm_mem_only(*d, 0, ASM_BASE_RIP, None, 1);
+            let pos = self.pos() - 4;
+            self.pending_data_rels.push((pos, sym.clone()));
         } else {
             self.asm_warn("unsupported lea operand pattern, emitted as nop");
             self.emit(&[0x90]);
@@ -18703,11 +18789,12 @@ impl Codegen {
     }
 
     /// 0F 01 /m 系统指令（invlpg 等）
-    /// invpcid: 66 0F 38 82 /r (reg, m128)
-    /// AT&T: invpcid %reg, mem → src 是寄存器, dst 是内存
+    /// invpcid: 66 0F 38 82 /r
+    /// AT&T 语法: invpcid mem, reg → ops[0] 是内存 (desc), ops[1] 是寄存器 (type)
     fn emit_asm_invpcid(&mut self, src: &AsmOperand, dst: &AsmOperand) {
-        if let AsmOperand::Reg(d, _) = src {
-            match dst {
+        // AT&T invpcid desc, type — src=mem(desc), dst=reg(type)
+        if let AsmOperand::Reg(d, _) = dst {
+            match src {
                 AsmOperand::Mem {
                     disp,
                     base,
@@ -19672,6 +19759,7 @@ impl Codegen {
                     at: self.pos() - 4,
                     target: label.clone(),
                     kind: JumpKind::Jmp,
+                    is_push_imm: false,
                 });
                 self.emit(&[0xFF, 0xE0]); // jmp *%rax
             }
@@ -19742,6 +19830,7 @@ impl Codegen {
                     at,
                     target: label.clone(),
                     kind,
+                    is_push_imm: false,
                 });
             }
             AsmOperand::Imm(v) => {
@@ -19770,6 +19859,7 @@ impl Codegen {
                     at: self.pos() - 4,
                     target: label.clone(),
                     kind: JumpKind::Jmp,
+                    is_push_imm: false,
                 });
                 self.emit(&[0xFF, 0xD0]); // call *%rax
             }
@@ -20358,8 +20448,9 @@ impl Codegen {
         }
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                let r = Self::rex(w, *d, 0, *s);
+                if r != 0x40 { self.emit(&[r]); }
                 self.emit(&[
-                    Self::rex(w, *d, 0, *s),
                     0x0F,
                     opcode,
                     Self::modrm_reg_reg(*d, *s),
@@ -20377,7 +20468,9 @@ impl Codegen {
                 if bits == 16 {
                     self.emit(&[0x66]);
                 }
-                self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, opcode]);
+                let r = Self::rex(w, *d, index.unwrap_or(0), *base);
+                if r != 0x40 { self.emit(&[r]); }
+                self.emit(&[0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {
@@ -20415,8 +20508,9 @@ impl Codegen {
         }
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
+                let r = Self::rex(w, *d, 0, *s);
+                if r != 0x40 { self.emit(&[r]); }
                 self.emit(&[
-                    Self::rex(w, *d, 0, *s),
                     0xF3,
                     0x0F,
                     0xB8,
@@ -20435,12 +20529,9 @@ impl Codegen {
                 if bits == 16 {
                     self.emit(&[0x66]);
                 }
-                self.emit(&[
-                    Self::rex(w, *d, index.unwrap_or(0), *base),
-                    0xF3,
-                    0x0F,
-                    0xB8,
-                ]);
+                let r = Self::rex(w, *d, index.unwrap_or(0), *base);
+                if r != 0x40 { self.emit(&[r]); }
+                self.emit(&[0xF3, 0x0F, 0xB8]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             _ => {

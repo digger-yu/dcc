@@ -102,7 +102,7 @@ unsigned short sldt_test(void) {
 /* invpcid */
 void invpcid_test(void) {
 	unsigned long desc[2] = {0, 0};
-	asm volatile("invpcid %0, %1" :: "r"(0UL), "m"(desc[0]) : "memory");
+	asm volatile("invpcid %1, %0" :: "r"(0UL), "m"(desc[0]) : "memory");
 }
 
 /* repe 前缀 (repe scasb 等) */

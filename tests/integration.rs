@@ -2545,6 +2545,20 @@ fn asm_kernel_ext_compiles_without_nop_fallback() {
     );
 }
 
+/// Kernel asm features: .byte multi-value, .pushsection skip,
+/// popcnt REX fix, push $label
+#[test]
+fn asm_kernel_features_byte_pushsection_popcnt() {
+    let source = include_str!("fixtures/c/asm_kernel_features.c");
+    let (output, _obj) = run_object_test("asm-kernel-features", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+}
+
 /// mini-asm 补全 (高): 段寄存器 / 系统指令 / 内核启动 / 虚拟化指令
 #[test]
 fn asm_paravirt_boot_compiles_without_nop_fallback() {
