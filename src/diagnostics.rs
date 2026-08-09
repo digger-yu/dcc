@@ -725,7 +725,8 @@ fn dedup_diags(diags: &[Diagnostic]) -> Vec<Diagnostic> {
     out
 }
 
-/// 错误风暴上限: 单次编译最多输出 50 条诊断, 超出时抑制并提示
+/// 错误风暴上限: 单次编译最多输出 50 条警告, 超出时抑制并提示;
+/// 错误 (Error) 永远不被抑制, 确保用户始终能看到全部编译错误。
 const MAX_DIAGS: usize = 50;
 
 /// 把一组 diagnostic 按 cfg 输出到 stderr
@@ -735,15 +736,23 @@ pub fn print_all(diags: &[Diagnostic], cfg: &DiagnosticsConfig) {
         eprintln!("{}", render_sarif(&filtered).trim_end());
         return;
     }
-    for (i, d) in filtered.iter().enumerate() {
-        if i >= MAX_DIAGS {
-            eprintln!(
-                "error: too many diagnostics, suppressing {} more",
-                filtered.len() - i
-            );
-            break;
+    let mut warning_count = 0;
+    let mut suppressed = 0;
+    for d in &filtered {
+        if matches!(d.sev, Severity::Warning) {
+            warning_count += 1;
+            if warning_count > MAX_DIAGS {
+                suppressed += 1;
+                continue;
+            }
         }
         d.print_with(cfg);
+    }
+    if suppressed > 0 {
+        eprintln!(
+            "error: too many warnings, suppressing {} more",
+            suppressed
+        );
     }
 }
 

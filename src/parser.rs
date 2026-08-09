@@ -1628,8 +1628,11 @@ impl<'a> Parser<'a> {
                     while pos < bytes.len() && bytes[pos].is_ascii_digit() {
                         pos += 1;
                     }
-                    if let Ok(idx) = asm_str[start..pos].parse::<usize>() {
-                        max_idx = Some(max_idx.map_or(idx, |m: usize| m.max(idx)));
+                    // %lN 是 goto label 引用, 不计入普通操作数索引
+                    if !had_l_modifier {
+                        if let Ok(idx) = asm_str[start..pos].parse::<usize>() {
+                            max_idx = Some(max_idx.map_or(idx, |m: usize| m.max(idx)));
+                        }
                     }
                 } else {
                     pos += 1;
