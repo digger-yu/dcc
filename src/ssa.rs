@@ -82,12 +82,16 @@ pub enum InstKind {
     /// `dest = obj.field`
     MemberLoad {
         obj: Operand,
+        /// 基址表达式的类型 (用于 SSA→AST 重建时保留正确的结构体类型)
+        obj_ty: Type,
         field: String,
         ty: Type,
     },
     /// `obj.field = src`
     MemberStore {
         obj: Operand,
+        /// 基址表达式的类型
+        obj_ty: Type,
         field: String,
         src: Operand,
     },
@@ -616,10 +620,15 @@ impl Builder {
                 ty,
                 is_arrow,
             } => {
+                let obj_ty = expr.ty();
                 let obj = self.lower_expr(expr);
                 let dest = target.unwrap_or_else(|| self.fresh("mem", ty.clone(), span));
                 if *is_arrow {
-                    // *obj.field
+                    // *obj.field: 先解引用指针, 再访问成员
+                    let deref_ty = match &obj_ty {
+                        Type::Ptr(inner) => inner.as_ref().clone(),
+                        other => other.clone(),
+                    };
                     let inner = self.fresh("deref", Type::Ptr(Box::new(ty.clone())), span);
                     self.emit(Inst {
                         dest: Some(inner.clone()),
@@ -633,6 +642,7 @@ impl Builder {
                         dest: Some(dest.clone()),
                         kind: InstKind::MemberLoad {
                             obj: Operand::Var(inner),
+                            obj_ty: deref_ty,
                             field: field.name.clone(),
                             ty: ty.clone(),
                         },
@@ -643,6 +653,7 @@ impl Builder {
                         dest: Some(dest.clone()),
                         kind: InstKind::MemberLoad {
                             obj,
+                            obj_ty: obj_ty.clone(),
                             field: field.name.clone(),
                             ty: ty.clone(),
                         },
@@ -1142,8 +1153,13 @@ fn lower_lvalue(
         ..
     } = l
     {
+        let obj_ty = expr.ty();
         let obj = b.lower_expr(expr);
         if *is_arrow {
+            let deref_ty = match &obj_ty {
+                Type::Ptr(inner) => inner.as_ref().clone(),
+                other => other.clone(),
+            };
             let inner = b.fresh("deref", Type::Ptr(Box::new(ty.clone())), span);
             b.emit(Inst {
                 dest: Some(inner.clone()),
@@ -1157,6 +1173,7 @@ fn lower_lvalue(
                 dest: None,
                 kind: InstKind::MemberStore {
                     obj: Operand::Var(inner),
+                    obj_ty: deref_ty,
                     field: field.name.clone(),
                     src,
                 },
@@ -1167,6 +1184,7 @@ fn lower_lvalue(
                 dest: None,
                 kind: InstKind::MemberStore {
                     obj,
+                    obj_ty: obj_ty.clone(),
                     field: field.name.clone(),
                     src,
                 },
@@ -1346,7 +1364,7 @@ pub fn rebuild_block(func: &Function) -> Block {
                     });
                     if is_temp && use_count <= 1 {
                         let resolved =
-                            inst_to_expr_resolved(&inst.kind, &subst);
+                            inst_to_expr_resolved(&inst.kind, &subst, &inst.span);
                         subst.insert(ssa_name, Some(resolved));
                     } else {
                         subst.insert(ssa_name, None);
@@ -1424,7 +1442,7 @@ fn rebuild_bb(
                 continue;
             }
             // 发射赋值: base_name = resolved_rhs
-            let rhs = inst_to_expr_resolved(&inst.kind, subst);
+            let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
             let assign = Expr::Assign {
                 op: crate::ast::BinOp::Add,
                 l: Box::new(Expr::Ident {
@@ -1444,7 +1462,7 @@ fn rebuild_bb(
                 span: inst.span.clone(),
             }));
         } else {
-            let e = inst_to_expr_resolved(&inst.kind, subst);
+            let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span);
             out.push(BlockItem::Stmt(Stmt::Expr {
                 e,
                 span: inst.span.clone(),
@@ -1551,12 +1569,26 @@ fn resolve_operand(
     }
 }
 
+/// SSA 重建时修正基址表达式的类型。
+/// 当 SSA 变量的类型与原始结构体类型不一致时 (如变量被简化为 int),
+/// 用原始类型覆盖, 确保后续 IR lowering 能正确解析成员访问。
+fn set_expr_ty_if_compatible(expr: &mut Expr, desired_ty: &Type) {
+    // 只对 Ident / Deref 等叶子节点修正类型; 复杂表达式保留其计算类型
+    match expr {
+        Expr::Ident { ty, .. } => { *ty = desired_ty.clone(); }
+        Expr::Deref { ty, .. } => { *ty = desired_ty.clone(); }
+        _ => {}
+    }
+}
+
 /// 将 SSA 指令转换为 AST 表达式, 同时应用内联替换。
+/// `inst_span` 是原始 SSA 指令的 span, 用于保留源码位置信息。
 fn inst_to_expr_resolved(
     kind: &InstKind,
     subst: &HashMap<String, Option<Expr>>,
+    inst_span: &Span,
 ) -> Expr {
-    let sp = Span::point("ssa", 0, 0);
+    let sp = inst_span.clone();
     let fake_env: HashMap<String, SsaVar> = HashMap::new();
     match kind {
         InstKind::Bin { op, l, r } => Expr::Binop {
@@ -1632,32 +1664,41 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: ret_ty.clone(),
         },
-        InstKind::MemberLoad { obj, field, ty } => Expr::Member {
-            expr: Box::new(resolve_operand(obj, &fake_env, subst)),
-            field: crate::ast::Ident {
-                name: field.clone(),
-                span: sp.clone(),
-            },
-            span: sp.clone(),
-            ty: ty.clone(),
-            is_arrow: false,
-        },
-        InstKind::MemberStore { obj, field, src } => Expr::Assign {
-            op: BinOp::Add,
-            l: Box::new(Expr::Member {
-                expr: Box::new(resolve_operand(obj, &fake_env, subst)),
+        InstKind::MemberLoad { obj, obj_ty, field, ty } => {
+            let mut base = resolve_operand(obj, &fake_env, subst);
+            // 重建时修正基址类型: SSA 变量可能丢失了原始结构体类型
+            set_expr_ty_if_compatible(&mut base, obj_ty);
+            Expr::Member {
+                expr: Box::new(base),
                 field: crate::ast::Ident {
                     name: field.clone(),
                     span: sp.clone(),
                 },
                 span: sp.clone(),
-                ty: Type::Void,
+                ty: ty.clone(),
                 is_arrow: false,
-            }),
-            r: Box::new(resolve_operand(src, &fake_env, subst)),
-            span: sp.clone(),
-            ty: Type::Void,
-        },
+            }
+        }
+        InstKind::MemberStore { obj, obj_ty, field, src } => {
+            let mut base = resolve_operand(obj, &fake_env, subst);
+            set_expr_ty_if_compatible(&mut base, obj_ty);
+            Expr::Assign {
+                op: BinOp::Add,
+                l: Box::new(Expr::Member {
+                    expr: Box::new(base),
+                    field: crate::ast::Ident {
+                        name: field.clone(),
+                        span: sp.clone(),
+                    },
+                    span: sp.clone(),
+                    ty: Type::Void,
+                    is_arrow: false,
+                }),
+                r: Box::new(resolve_operand(src, &fake_env, subst)),
+                span: sp.clone(),
+                ty: Type::Void,
+            }
+        }
         InstKind::Select { cond, then_, else_ } => Expr::Cond {
             cond: Box::new(resolve_operand(cond, &fake_env, subst)),
             then_: Box::new(resolve_operand(then_, &fake_env, subst)),
@@ -1917,32 +1958,40 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             span: sp.clone(),
             ty: ret_ty.clone(),
         },
-        InstKind::MemberLoad { obj, field, ty } => Expr::Member {
-            expr: Box::new(operand_to_expr(obj, env)),
-            field: crate::ast::Ident {
-                name: field.clone(),
-                span: sp.clone(),
-            },
-            span: sp.clone(),
-            ty: ty.clone(),
-            is_arrow: false,
-        },
-        InstKind::MemberStore { obj, field, src } => Expr::Assign {
-            op: BinOp::Add,
-            l: Box::new(Expr::Member {
-                expr: Box::new(operand_to_expr(obj, env)),
+        InstKind::MemberLoad { obj, obj_ty, field, ty } => {
+            let mut base = operand_to_expr(obj, env);
+            set_expr_ty_if_compatible(&mut base, obj_ty);
+            Expr::Member {
+                expr: Box::new(base),
                 field: crate::ast::Ident {
                     name: field.clone(),
                     span: sp.clone(),
                 },
                 span: sp.clone(),
-                ty: Type::Void,
+                ty: ty.clone(),
                 is_arrow: false,
-            }),
-            r: Box::new(operand_to_expr(src, env)),
-            span: sp.clone(),
-            ty: Type::Void,
-        },
+            }
+        }
+        InstKind::MemberStore { obj, obj_ty, field, src } => {
+            let mut base = operand_to_expr(obj, env);
+            set_expr_ty_if_compatible(&mut base, obj_ty);
+            Expr::Assign {
+                op: BinOp::Add,
+                l: Box::new(Expr::Member {
+                    expr: Box::new(base),
+                    field: crate::ast::Ident {
+                        name: field.clone(),
+                        span: sp.clone(),
+                    },
+                    span: sp.clone(),
+                    ty: Type::Void,
+                    is_arrow: false,
+                }),
+                r: Box::new(operand_to_expr(src, env)),
+                span: sp.clone(),
+                ty: Type::Void,
+            }
+        }
         InstKind::Select { cond, then_, else_ } => Expr::Cond {
             cond: Box::new(operand_to_expr(cond, env)),
             then_: Box::new(operand_to_expr(then_, env)),

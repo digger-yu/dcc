@@ -1098,7 +1098,7 @@ mod tests {
             })],
             fenv_access: false,
         };
-        let mut module = ir::lower(prog).expect("lower");
+        let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
         let body = &module.source().decls[0];
         if let Decl::Func(f) = body {
@@ -1208,7 +1208,7 @@ mod tests {
             })],
             fenv_access: false,
         };
-        let mut module = ir::lower(prog).expect("lower");
+        let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
         let body = &module.source().decls[0];
         if let Decl::Func(f) = body {
@@ -1375,7 +1375,7 @@ mod tests {
             decls: vec![sq, main_fn],
             fenv_access: false,
         };
-        let mut module = ir::lower(prog).expect("lower");
+        let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 1);
         let main_body = match &module.source().decls[1] {
             Decl::Func(f) => f.body.as_ref().unwrap(),
@@ -1476,7 +1476,7 @@ mod tests {
             is_host: false,
         });
         let prog = Program { decls: vec![func], fenv_access: false };
-        let mut module = ir::lower(prog).expect("lower");
+        let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
         let body = &module.source().decls[0];
         if let Decl::Func(f) = body {

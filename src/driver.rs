@@ -529,9 +529,16 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // AST -> typed IR -> validation
-    let mut module = ir::lower(prog).map_err(|d| {
+    let (mut module, ir_warnings) = ir::lower(prog).map_err(|d| {
         remap_enrich(d, &line_map, src, &file_name, input.parent())
     })?;
+    // Print IR-lowering warnings (e.g. W1004/W1009/W1010 from implicit
+    // function declarations) after remapping spans back to source.
+    let ir_warnings = remap_enrich(ir_warnings, &line_map, src, &file_name, input.parent());
+    for w in &ir_warnings {
+        w.print_with(&dcfg);
+    }
+    diags.extend(ir_warnings);
     ir::validate(&module).map_err(|d| {
         remap_enrich(d, &line_map, src, &file_name, input.parent())
     })?;

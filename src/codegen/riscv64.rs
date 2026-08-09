@@ -2522,7 +2522,7 @@ mod tests {
         let (program, diags) =
             crate::parser::parse(b"int main(void) { return 10 + 32; }\n", "rv.c");
         assert!(diags.is_empty(), "{diags:?}");
-        let module = lower(program).expect("lower");
+        let (module, _) = lower(program).expect("lower");
         validate(&module).expect("validate");
         let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
@@ -2544,7 +2544,7 @@ mod tests {
             "rv.c",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        let module = lower(program).expect("lower");
+        let (module, _) = lower(program).expect("lower");
         validate(&module).expect("validate");
         let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
@@ -2570,7 +2570,7 @@ mod tests {
             "rv.c",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        let module = lower(program).expect("lower");
+        let (module, _) = lower(program).expect("lower");
         validate(&module).expect("validate");
         let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
@@ -2594,7 +2594,7 @@ mod tests {
             "rv.c",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        let module = lower(program).expect("lower");
+        let (module, _) = lower(program).expect("lower");
         validate(&module).expect("validate");
         let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);

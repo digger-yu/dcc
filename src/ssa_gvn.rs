@@ -512,7 +512,7 @@ mod tests {
             })],
             fenv_access: false,
         };
-        let mut module = ir::lower(prog).expect("lower");
+        let (mut module, _) = ir::lower(prog).expect("lower");
         run(&mut module, 2);
         let body = match &module.source().decls[0] {
             Decl::Func(f) => f.body.as_ref().unwrap(),
