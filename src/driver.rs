@@ -802,12 +802,19 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
         )]
     })?;
 
+    // GCC 兼容: 处理 .S 文件时自动定义 __ASSEMBLER__
+    // 内核头文件用 #ifndef __ASSEMBLER__ 保护 C 代码, 防止泄漏到汇编输出
+    let mut asm_defines = cfg.defines.clone();
+    if !asm_defines.iter().any(|(k, _)| k == "__ASSEMBLER__") {
+        asm_defines.push(("__ASSEMBLER__".to_string(), Some("1".to_string())));
+    }
+
     let pp_out = preproc::preprocess(
         &src,
         &file_name,
         &cfg.include_paths,
         &cfg.system_paths,
-        &cfg.defines,
+        &asm_defines,
         cfg.std,
         &cfg.force_includes,
         cfg.freestanding,
