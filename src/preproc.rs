@@ -1090,23 +1090,18 @@ impl Preprocessor {
             self.cur_line = ll.phys_start;
             // 记录原始源行文本 (未去注释), 供诊断 source_line 附着
             self.cur_source_line = Some(ll.text.trim_end().to_string());
+
             // C translation phase 3 removes comments before preprocessing
-            // directives are recognized and before macro expansion.  Doing
-            // this afterwards lets quotes in comments alter lexical state.
+            // directives are recognized and before macro expansion.
             let phase3 = self.strip_comments_line(&ll.text);
             let trimmed = phase3.trim();
 
             if trimmed.starts_with('#') {
-                // 宏调用可能跨越 #ifdef/#endif 边界（如 struct_group(headers, ...)），
-                // 如果 active_source 有未闭合的 (，不 flush，继续累积直到宏调用闭合。
                 if !active_source.is_empty() && !self.has_unclosed_paren(&active_source) {
                     self.flush_active_source(&mut active_source, &mut active_spans);
                 }
                 let out_len_before = self.out.len();
                 self.process_directive(trimmed, ll.phys_start);
-                // 指令行若不产生输出 (#define/#if/#error/#pragma 等), 以空行
-                // 占位, 保证输出行号与输入物理行号一一对应;
-                // #include/#include_next/#embed 自产输出, 无需占位。
                 if self.out.len() == out_len_before {
                     self.preserve_lines(ll.phys_start, ll.phys_end);
                 }
@@ -1115,7 +1110,6 @@ impl Preprocessor {
                 active_source.push('\n');
                 active_spans.push((ll.phys_start, ll.phys_end));
             } else {
-                // 非激活行 (#if 0 块等): 以空行占位保持行号对齐
                 self.preserve_lines(ll.phys_start, ll.phys_end);
             }
         }
@@ -2883,12 +2877,13 @@ impl Preprocessor {
                         j += 1;
                     }
                     if j < len && chars[j] == '(' {
+                        let paren_start = j;
                         j += 1;
                         while j < len && chars[j].is_whitespace() {
                             j += 1;
                         }
                         if j < len && chars[j] == '"' {
-                            // 提取字符串内容
+                            // 直接字符串字面量: _Pragma("...")
                             j += 1;
                             let content_start = j;
                             while j < len && chars[j] != '"' {
@@ -2910,21 +2905,50 @@ impl Preprocessor {
                                 j += 1;
                             } // 跳过 )
                             i = j;
-                            // _Pragma 是 expr, 在展开阶段不能改状态。
-                            // 我们把它的字符串收集起来, 待外层 &mut self 方法批量应用
-                            // 同时记录当前 out 的行号, 这样 pack_history 与 parser 的 lex.line 对齐
                             if let Ok(mut v) = self.pending_pragmas.try_borrow_mut() {
                                 v.push((pragma_text, self.count_out_lines()));
                             }
                             continue;
                         }
+                        // 非直接字符串: _Pragma(expr) — 先提取参数并展开宏
+                        // 提取括号内完整参数 (处理嵌套括号)
+                        let arg_start = paren_start + 1;
+                        let mut depth = 1;
+                        let mut k = arg_start;
+                        while k < len && depth > 0 {
+                            if chars[k] == '(' { depth += 1; }
+                            else if chars[k] == ')' { depth -= 1; }
+                            if depth > 0 { k += 1; }
+                        }
+                        let arg_text: String = chars[arg_start..k].iter().collect();
+                        // 展开宏参数 (用当前行号构造 phys_lines)
+                        let cur_line = map.line(nl);
+                        let expanded = self.expand_macros(arg_text.trim(), &[cur_line]);
+                        let expanded_trimmed = expanded.trim();
+                        if expanded_trimmed.starts_with('"') && expanded_trimmed.ends_with('"') && expanded_trimmed.len() >= 2 {
+                            // 展开结果是字符串字面量
+                            let inner = &expanded_trimmed[1..expanded_trimmed.len()-1];
+                            let pragma_text = Self::unescape_string(inner);
+                            i = k + 1; // 跳过 )
+                            if let Ok(mut v) = self.pending_pragmas.try_borrow_mut() {
+                                v.push((pragma_text, self.count_out_lines()));
+                            }
+                            continue;
+                        }
+                        // 展开后仍非字符串, 跳过
+                        i = k + 1;
+                        continue;
                     }
                     // 解析失败, 跳过整个 _Pragma(...) 表达式
                     let mut j = i;
-                    while j < len && chars[j] != ')' {
-                        j += 1;
-                    }
-                    if j < len {
+                    let mut depth = 0;
+                    while j < len {
+                        if chars[j] == '(' { depth += 1; }
+                        else if chars[j] == ')' {
+                            if depth == 0 { j += 1; break; }
+                            depth -= 1;
+                            if depth == 0 { j += 1; break; }
+                        }
                         j += 1;
                     }
                     i = j;
@@ -3737,7 +3761,10 @@ impl Preprocessor {
     /// 将参数值转为字符串字面量 (转义 " 和 \；换行/连续空白折叠为单空格，符合 C # 规则)
     fn stringify_arg(arg: &str) -> String {
         let collapsed: String = arg.split_whitespace().collect::<Vec<_>>().join(" ");
-        let escaped = collapsed.replace('\\', "\\\\").replace('"', "\\\"");
+        // 与 GCC 一致: # 操作符只转义 `"`, 不转义 `\`.
+        // GCC 的 # 不会对 \ 做双写, 这对内核 .S 文件中 GAS 参数引用 (如 \reg)
+        // 经 __stringify 展开后保持单反斜杠至关重要.
+        let escaped = collapsed.replace('"', "\\\"");
         format!("\"{}\"", escaped)
     }
 
@@ -7131,3 +7158,4 @@ n\
         assert!(output.contains("int y = 99;"), "output: {output}");
     }
 }
+

@@ -127,23 +127,17 @@ pub fn emit(
                     align: 4,
                 });
             }
-            if cg.emit_cfi && relocatable {
+            if cg.emit_cfi && relocatable && target.unwind_tables {
                 // dcc 输出 .eh_frame FDE 需带 .rela.eh_frame relocations 才能在 ld 链接时
                 // 正确解析 PC begin / PC range. 之前 (M15 阶段) 临时跳过是因 R_X86_64_PC32
                 // 未生成, 报 "PHDR segment not covered by LOAD segment". 现 relocation 已
                 // 正常生成 (.rela.eh_frame, 见 mod.rs 下方), 这里默认恢复 .eh_frame 输出,
                 // setjmp / longjmp / C++ 异常等栈展开路径可正确恢复 callee-saved 寄存器.
+                // 注意: -fno-asynchronous-unwind-tables 时不生成 .eh_frame (内核等场景).
                 let frames: Vec<debug::FuncFrame> = cg.func_frames(module);
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".eh_frame".to_string(),
                     data: debug::build_eh_frame(&frames),
-                    ty: elf::SHT_PROGBITS,
-                    flags: elf::SHF_ALLOC,
-                    align: 8,
-                });
-                cg.extra_sections.push(elf::ElfSection {
-                    name: ".orc_unwind_ip".to_string(),
-                    data: debug::build_orc_unwind_ip(&frames),
                     ty: elf::SHT_PROGBITS,
                     flags: elf::SHF_ALLOC,
                     align: 8,
@@ -333,19 +327,12 @@ pub fn emit(
                     align: 4,
                 });
             }
-            if relocatable {
+            if relocatable && target.unwind_tables {
                 let frames = cg.func_frames(module);
                 if !frames.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
                         name: ".eh_frame".to_string(),
                         data: debug::build_eh_frame_with_arch(&frames, debug::ArchKind::AArch64),
-                        ty: elf::SHT_PROGBITS,
-                        flags: elf::SHF_ALLOC,
-                        align: 8,
-                    });
-                    cg.push_extra_section(elf::ElfSection {
-                        name: ".orc_unwind_ip".to_string(),
-                        data: debug::build_orc_unwind_ip(&frames),
                         ty: elf::SHT_PROGBITS,
                         flags: elf::SHF_ALLOC,
                         align: 8,
@@ -449,19 +436,12 @@ pub fn emit(
                     align: 4,
                 });
             }
-            if relocatable {
+            if relocatable && target.unwind_tables {
                 let frames = cg.func_frames(module);
                 if !frames.is_empty() {
                     cg.push_extra_section(elf::ElfSection {
                         name: ".eh_frame".to_string(),
                         data: debug::build_eh_frame_with_arch(&frames, debug::ArchKind::RiscV64),
-                        ty: elf::SHT_PROGBITS,
-                        flags: elf::SHF_ALLOC,
-                        align: 8,
-                    });
-                    cg.push_extra_section(elf::ElfSection {
-                        name: ".orc_unwind_ip".to_string(),
-                        data: debug::build_orc_unwind_ip(&frames),
                         ty: elf::SHT_PROGBITS,
                         flags: elf::SHF_ALLOC,
                         align: 8,

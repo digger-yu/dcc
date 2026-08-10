@@ -34,6 +34,7 @@ pub struct Target {
     pub frame_pointer: bool,
     pub sse: bool,
     pub stack_protector: bool,
+    pub unwind_tables: bool,
 }
 
 impl Target {
@@ -62,6 +63,7 @@ impl Target {
             frame_pointer: false,
             sse: true,
             stack_protector: false,
+            unwind_tables: true,
         }
     }
 

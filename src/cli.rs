@@ -46,6 +46,7 @@ pub struct Config {
     pub frame_pointer: bool,
     pub sse: bool,
     pub stack_protector: bool, // -fstack-protector / -fstack-protector-all
+    pub unwind_tables: bool,   // -fno-asynchronous-unwind-tables / -fno-unwind-tables
     pub debug_level: u8,       // 0=off (g0), 1=g1, 2=g2, 3=g3
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
@@ -392,6 +393,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut frame_pointer = false;
     let mut sse = true;
     let mut stack_protector = false;
+    let mut unwind_tables = true;
     let mut debug_level: u8 = 0;
     let mut lto_enabled = false;
     let mut function_sections = false;
@@ -1115,14 +1117,15 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-mindirect-branch=thunk-extern"
             | "-mrecord-mcount"
             | "-mpreferred-stack-boundary=2"
-            | "-fno-asynchronous-unwind-tables"
-            | "-fno-unwind-tables"
             | "-fno-plt"
             | "-fno-strict-overflow"
             | "-ftrivial-auto-var-init=zero"
             | "-falign-jumps=1"
             | "-falign-loops=1"
             | "-fshort-wchar" => {}
+            "-fno-asynchronous-unwind-tables" | "-fno-unwind-tables" => {
+                unwind_tables = false;
+            }
             // GCC 警告/诊断类选项 - 接受但忽略
             "-pedantic"
             | "-pedantic-errors"
@@ -1453,6 +1456,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             frame_pointer,
             sse,
             stack_protector,
+            unwind_tables,
             debug_level,
             lto_enabled,
             function_sections,
@@ -1533,6 +1537,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             frame_pointer,
             sse,
             stack_protector,
+            unwind_tables,
             debug_level,
             lto_enabled,
             function_sections,

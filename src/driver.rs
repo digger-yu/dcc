@@ -601,6 +601,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let mut target = Target::resolve(&cfg.target);
     target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
     target.set_stack_protector(cfg.stack_protector);
+    target.unwind_tables = cfg.unwind_tables;
     if !target.sse {
         // 精确检测 IR 中是否真的使用浮点类型/字面量, 避免把含
         // double_xxx 标识符(如内核 double_rq_lock)的 Debug 串误判为浮点

@@ -531,6 +531,11 @@ impl<'a> Parser<'a> {
             self.advance();
             return true;
         }
+        // DEBUG: show actual token for line mapping diagnosis
+        if std::env::var("DCC_DEBUG_PARSE").is_ok() {
+            eprintln!("DEBUG-PARSE: expected {} got {:?} text={:?} line={} col={} file={}",
+                what, self.cur.kind, self.cur.text, self.cur.span.line, self.cur.span.col, self.cur.span.file);
+        }
         self.err_here(
             "E0001",
             format!("expected {}, got {:?}", what, self.cur.kind),
@@ -552,21 +557,10 @@ impl<'a> Parser<'a> {
             while depth > 0 && self.cur.kind != TokKind::Eof {
                 if self.cur.kind == TokKind::LParen {
                     depth += 1;
-                }
-                if self.cur.kind == TokKind::RParen {
+                } else if self.cur.kind == TokKind::RParen {
                     depth -= 1;
-                    self.advance();
-                    if depth == 0 {
-                        break;
-                    }
-                } else if depth == 1 {
-                    // 只剩最外层 ')' 未配对: 当前 token 不是 ')' 说明
-                    // 属性列表已结束 (如 `__attribute__((packed))` 后紧跟
-                    // 声明名), 必须停止, 否则会吞掉后续 token
-                    break;
-                } else {
-                    self.advance();
                 }
+                self.advance();
             }
         }
     }
@@ -592,19 +586,10 @@ impl<'a> Parser<'a> {
                 }
                 if self.cur.kind == TokKind::LParen {
                     depth += 1;
-                }
-                if self.cur.kind == TokKind::RParen {
+                } else if self.cur.kind == TokKind::RParen {
                     depth -= 1;
-                    self.advance();
-                    if depth == 0 {
-                        break;
-                    }
-                } else if depth == 1 {
-                    // 同上: 属性列表结束, 避免吞掉后续 token
-                    break;
-                } else {
-                    self.advance();
                 }
+                self.advance();
             }
         }
         packed
@@ -1492,20 +1477,7 @@ impl<'a> Parser<'a> {
                 ).with_hint("each named operand must have a unique name"));
             }
         }
-        // 3. 命名/位置操作数混用检测 (W0007)
-        let all_names: Vec<&Option<String>> =
-            output_names.iter().chain(input_names.iter()).collect();
-        let has_named = all_names.iter().any(|n| n.is_some());
-        let has_unnamed = all_names.iter().any(|n| n.is_none());
-        if has_named && has_unnamed {
-            self.diags.push(Diagnostic::warn(
-                "W0007",
-                "mixing named and unnamed asm operands",
-                sp.clone(),
-            ).with_hint(
-                "name all operands or use positional references consistently",
-            ));
-        }
+        // 3. 命名/位置操作数混用: GNU C 合法语法, 内核大量使用, 不报警
         // 4. 约束与表达式类型不匹配 (W0005)
         let all_exprs: Vec<&Expr> = outputs.iter().chain(inputs.iter()).collect();
         let all_constraints: Vec<&String> =
@@ -2853,6 +2825,32 @@ impl<'a> Parser<'a> {
         if !self.expect(TokKind::RParen, "')'") {
             return None;
         }
+        // 处理 `(*name)[N]` 形式: 指向数组的指针 (局部变量)
+        // 例如: pmd_t (*early_pgts)[512] = ...;
+        let outer_array_sizes = {
+            let mut sizes = Vec::new();
+            while self.cur.kind == TokKind::LBracket {
+                self.advance();
+                let arr_size = if self.cur.kind != TokKind::RBracket {
+                    let e = self.parse_expr()?;
+                    if let Ok(v) = crate::const_eval::eval(&e) {
+                        ArraySize::Const(v.max(0) as usize)
+                    } else {
+                        match &e {
+                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                            _ => ArraySize::Var(Box::new(e)),
+                        }
+                    }
+                } else {
+                    ArraySize::Const(0)
+                };
+                if !self.expect(TokKind::RBracket, "']'") {
+                    return None;
+                }
+                sizes.push(arr_size);
+            }
+            sizes
+        };
         if self.cur.kind == TokKind::LParen {
             self.advance();
             let params = self.parse_params()?;
@@ -2905,9 +2903,20 @@ impl<'a> Parser<'a> {
             })]);
         }
         // 不是函数指针, 只是带括号的指针变量 (罕见)
+        // 处理 `(*name)[N]` 形式: 指向数组的指针
         self.skip_attributes();
         self.skip_asm_label();
-        let ptr_ty = Type::Ptr(Box::new(ty));
+        let ptr_ty = if !outer_array_sizes.is_empty() {
+            // 先构造内层数组类型: Array(ty, N1, N2, ...)
+            let mut inner_ty = ty;
+            for sz in outer_array_sizes.into_iter().rev() {
+                inner_ty = Type::Array(Box::new(inner_ty), sz);
+            }
+            // 然后构造指针类型: Ptr(inner_array)
+            Type::Ptr(Box::new(inner_ty))
+        } else {
+            Type::Ptr(Box::new(ty))
+        };
         let init = if self.cur.kind == TokKind::Assign {
             self.advance();
             Some(self.parse_expr_bp(2)?)
@@ -4185,6 +4194,31 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::RParen {
                 self.advance();
             }
+            // 处理 `(*name)[N]` 形式: 指向数组的指针
+            // 例如: pmd_t (*early_pgts)[512] = ...;
+            let mut outer_array_sizes = Vec::new();
+            while self.cur.kind == TokKind::LBracket {
+                self.advance();
+                let arr_size = if self.cur.kind != TokKind::RBracket {
+                    let e = self.parse_expr().unwrap_or(Expr::Int {
+                        v: 0,
+                        span: Span::point("", 0, 0),
+                        ty: Type::Int,
+                    });
+                    if let Ok(v) = crate::const_eval::eval(&e) {
+                        ArraySize::Const(v.max(0) as usize)
+                    } else {
+                        match &e {
+                            Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                            _ => ArraySize::Var(Box::new(e)),
+                        }
+                    }
+                } else {
+                    ArraySize::Const(0)
+                };
+                let _ = self.expect(TokKind::RBracket, "']'");
+                outer_array_sizes.push(arr_size);
+            }
             let ty = if self.cur.kind == TokKind::LParen {
                 self.advance();
                 let params = self.parse_params().unwrap_or_default();
@@ -4201,11 +4235,28 @@ impl<'a> Parser<'a> {
                 }
                 ty
             } else {
-                let mut ty = Type::Ptr(Box::new(spec));
-                for sz in array_sizes.into_iter().rev() {
-                    ty = Type::Array(Box::new(ty), sz);
+                // 处理 `(*name)[N]` 形式: 指向数组的指针
+                // 类型构造: Ptr(Array(spec, N)) 而非 Array(Ptr(spec), N)
+                if !outer_array_sizes.is_empty() {
+                    // 先构造内层数组类型: Array(spec, N1, N2, ...)
+                    let mut inner_ty = spec;
+                    for sz in outer_array_sizes.into_iter().rev() {
+                        inner_ty = Type::Array(Box::new(inner_ty), sz);
+                    }
+                    // 然后构造指针类型: Ptr(inner_array)
+                    let mut ty = Type::Ptr(Box::new(inner_ty));
+                    // 最后处理 (*name[N]) 形式的内层数组
+                    for sz in array_sizes.into_iter().rev() {
+                        ty = Type::Array(Box::new(ty), sz);
+                    }
+                    ty
+                } else {
+                    let mut ty = Type::Ptr(Box::new(spec));
+                    for sz in array_sizes.into_iter().rev() {
+                        ty = Type::Array(Box::new(ty), sz);
+                    }
+                    ty
                 }
-                ty
             };
             (ty, nm)
         } else {
@@ -7029,12 +7080,15 @@ impl<'a> Parser<'a> {
                     });
                 }
                 // 未声明标识符警告 (排除 __builtin_ 前缀的特殊标识符)
+                // 内核 __compiletime_assert_* 由 BUILD_BUG_ON 系列宏生成,
+                // 是故意不声明的编译期断言占位符, 不应产生警告。
                 if self.opts.warn_implicit_decl
                     && !self.locals.contains_key(&t)
                     && !self.globals.contains_key(&t)
                     && !self.typedefs.contains_key(&t)
                     && !self.enum_consts.contains_key(&t)
                     && !t.starts_with("__builtin_")
+                    && !t.starts_with("__compiletime_assert_")
                 {
                     self.warn_here(
                         "W1000",

@@ -963,12 +963,14 @@ pub fn build_elf_rel_x86_64(
     // [11+N+M] .shstrtab
     let n_extra = extra_sections.len() as u16;
     let n_extra_rela = extra_rela_sections.len() as u16;
+    let has_rela_data = !data_relocations.is_empty();
+    let rela_data_adj = if has_rela_data { 1 } else { 0 };
     let _sh_rela: u16 = 7 + n_extra + n_extra_rela;
     let _sh_rela_data: u16 = 8 + n_extra + n_extra_rela;
-    let sh_symtab: u16 = 9 + n_extra + n_extra_rela;
-    let sh_strtab: u16 = 10 + n_extra + n_extra_rela;
-    let sh_shstrtab: u16 = 11 + n_extra + n_extra_rela;
-    let shnum: u16 = 12 + n_extra + n_extra_rela;
+    let sh_symtab: u16 = 8 + n_extra + n_extra_rela + rela_data_adj;
+    let sh_strtab: u16 = 9 + n_extra + n_extra_rela + rela_data_adj;
+    let sh_shstrtab: u16 = 10 + n_extra + n_extra_rela + rela_data_adj;
+    let shnum: u16 = 11 + n_extra + n_extra_rela + rela_data_adj;
 
     // 构建 .shstrtab (节名字符串表)
     let shstrtab = build_shstrtab_with_tls(extra_sections, extra_rela_sections);
@@ -1122,8 +1124,10 @@ pub fn build_elf_rel_x86_64(
     out.extend_from_slice(&rela_data);
 
     // ===== .rela.data =====
-    pad_to(&mut out, rela_data_off as usize);
-    out.extend_from_slice(&rela_data_data);
+    if has_rela_data {
+        pad_to(&mut out, rela_data_off as usize);
+        out.extend_from_slice(&rela_data_data);
+    }
 
     // ===== .symtab =====
     pad_to(&mut out, symtab_off as usize);
@@ -1294,19 +1298,21 @@ pub fn build_elf_rel_x86_64(
     );
 
     // [.rela.data]
-    write_section_header(
-        &mut out,
-        rela_data_name_off,
-        SHT_RELA,
-        SHF_INFO_LINK,
-        0,
-        rela_data_off,
-        rela_data_data.len() as u64,
-        sh_symtab as u32,
-        3,
-        8,
-        24, // sh_info=3 → .data 节索引
-    );
+    if has_rela_data {
+        write_section_header(
+            &mut out,
+            rela_data_name_off,
+            SHT_RELA,
+            SHF_INFO_LINK,
+            0,
+            rela_data_off,
+            rela_data_data.len() as u64,
+            sh_symtab as u32,
+            3,
+            8,
+            24, // sh_info=3 → .data 节索引
+        );
+    }
 
     // [.symtab]
     write_section_header(

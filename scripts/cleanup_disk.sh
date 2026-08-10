@@ -168,8 +168,26 @@ fi
 clean_dcc_cache() {
     echo -e "${YELLOW}[1/6] 清理 ~/.dcc/ ...${NC}"
     if [[ -d "$DCC_CACHE" ]]; then
-        rm -rf "$DCC_CACHE"
-        echo -e "  ${GREEN}已删除${NC} $DCC_CACHE"
+        # 先尝试直接删除；若因权限/不可变标志等失败，回退到逐层清理
+        if rm -rf "$DCC_CACHE" 2>/dev/null; then
+            echo -e "  ${GREEN}已删除${NC} $DCC_CACHE"
+        else
+            echo "  直接删除失败，尝试逐层清理..."
+            # 优先处理不可写目录：先恢复写权限
+            chmod -R u+w "$DCC_CACHE" 2>/dev/null || true
+            rm -rf "$DCC_CACHE" 2>/dev/null || {
+                # 最后手段：清空内容但保留目录壳
+                find "$DCC_CACHE" -mindepth 1 -delete 2>/dev/null || true
+                if [[ "$(ls -A "$DCC_CACHE" 2>/dev/null)" ]]; then
+                    echo -e "  ${RED}警告: 部分文件无法删除（可能被其他进程占用或设置了不可变标志）${NC}"
+                    echo -e "  ${RED}       请检查: lsattr $DCC_CACHE 或 lsof +D $DCC_CACHE${NC}"
+                else
+                    echo -e "  ${GREEN}已清空内容${NC} $DCC_CACHE"
+                fi
+                return
+            }
+            echo -e "  ${GREEN}已删除${NC} $DCC_CACHE"
+        fi
     else
         echo "  跳过（目录不存在）"
     fi

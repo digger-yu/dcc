@@ -4157,6 +4157,10 @@ impl Codegen {
                 }
             } else {
                 self.gen_expr_decay(arg, 0);
+                // 零大小类型 (如空结构体) 无 ABI 槽位, 只求值不传参
+                if arg_locs.is_empty() {
+                    continue;
+                }
                 match arg_locs[0] {
                     ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
                     loc => {
