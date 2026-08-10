@@ -2377,6 +2377,19 @@ fn asm_cmpxchg_mem_compiles() {
     );
 }
 
+/// inline asm: cmpxchg8b 32-bit atomic (64-bit operand)
+#[test]
+fn asm_cmpxchg8b_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_cmpxchg8b.c");
+    let (output, _obj) = run_object_test("asm-cmpxchg8b", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {

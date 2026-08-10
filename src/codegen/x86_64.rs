@@ -15166,6 +15166,8 @@ impl Codegen {
             }
             // cmpxchg16b: 0F C7 /1, 仅内存操作数 (需 lock 前缀)
             "cmpxchg16b" if ops.len() == 1 => self.emit_asm_cmpxchg16b(&ops[0]),
+            // cmpxchg8b: 0F C7 /1 (无 REX), 仅内存操作数 (32 位原子)
+            "cmpxchg8b" if ops.len() == 1 => self.emit_asm_cmpxchg8b(&ops[0]),
 
             // 特殊寄存器
             "rdmsr" => self.emit(&[0x0F, 0x32]),
@@ -20423,6 +20425,51 @@ impl Codegen {
             }
             _ => {
                 self.asm_warn("cmpxchg16b requires a memory operand, emitted as nop");
+                self.emit(&[0x90]);
+            }
+        }
+    }
+
+    /// cmpxchg8b: 0F C7 /1 (无 REX), 操作数必须为内存 (32 位原子, 64-bit 操作数)
+    fn emit_asm_cmpxchg8b(&mut self, op: &AsmOperand) {
+        match op {
+            AsmOperand::Mem {
+                disp,
+                base,
+                index,
+                scale,
+            } => {
+                let rex = Self::rex(false, 0, index.unwrap_or(0), *base);
+                if rex != 0x40 {
+                    self.emit(&[rex]);
+                }
+                self.emit(&[0x0F, 0xC7]);
+                self.emit_asm_modrm_mem_only(1, *disp, *base, *index, *scale);
+            }
+            AsmOperand::SegMem {
+                seg,
+                disp,
+                base,
+                index,
+                scale,
+            } => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                let rex = Self::rex(false, 0, index.unwrap_or(0), *base);
+                self.emit(&[pfx]);
+                if rex != 0x40 {
+                    self.emit(&[rex]);
+                }
+                self.emit(&[0x0F, 0xC7]);
+                self.emit_asm_modrm_mem_only(1, *disp, *base, *index, *scale);
+            }
+            AsmOperand::SymDisp(sym, _) => {
+                // RIP-relative: 0F C7 /1 mod=00 r/m=101 + disp32
+                self.emit(&[0x0F, 0xC7, 0x0D, 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
+            _ => {
+                self.asm_warn("cmpxchg8b requires a memory operand, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
