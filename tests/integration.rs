@@ -2390,6 +2390,19 @@ fn asm_cmpxchg8b_compiles_without_nop_fallback() {
     );
 }
 
+/// inline asm: pushfl/popfl/iret/iretl aliases
+#[test]
+fn asm_pushfl_iret_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_pushfl_iret.c");
+    let (output, _obj) = run_object_test("asm-pushfl-iret", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {

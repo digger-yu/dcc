@@ -14765,6 +14765,7 @@ impl Codegen {
             "insb" => self.emit(&[0x6C]),
             "insw" => self.emit(&[0x66, 0x6D]),
             "insl" => self.emit(&[0x6D]),
+            "iret" | "iretl" => self.emit(&[0xCF]),
             "iretq" => self.emit(&[0x48, 0xCF]),
             // 位扫描: tzcnt/lzcnt = F3 + bsf/bsr
             "tzcnt" if ops.len() == 2 => {
@@ -14853,8 +14854,8 @@ impl Codegen {
             "cmc" => self.emit(&[0xF5]),
             "lahf" => self.emit(&[0x9F]),
             "sahf" => self.emit(&[0x9E]),
-            "pushf" => self.emit(&[0x9C]),
-            "popf" => self.emit(&[0x9D]),
+            "pushf" | "pushfl" => self.emit(&[0x9C]),
+            "popf" | "popfl" => self.emit(&[0x9D]),
             "pushfq" => self.emit(&[0x9C]),
             "popfq" => self.emit(&[0x9D]),
             "stac" => self.emit(&[0x0F, 0x01, 0xCB]),
