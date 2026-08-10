@@ -142,6 +142,22 @@ pub fn emit(
                     flags: elf::SHF_ALLOC,
                     align: 8,
                 });
+                // ORC unwind 信息: .orc_unwind_ip + .orc_unwind 节区对
+                // 内核 objtool/ORC 解包器需要这对节区进行栈展开
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".orc_unwind_ip".to_string(),
+                    data: debug::build_orc_unwind_ip(&frames),
+                    ty: elf::SHT_PROGBITS,
+                    flags: elf::SHF_ALLOC,
+                    align: 4,
+                });
+                cg.extra_sections.push(elf::ElfSection {
+                    name: ".orc_unwind".to_string(),
+                    data: debug::build_orc_unwind(&frames),
+                    ty: elf::SHT_PROGBITS,
+                    flags: elf::SHF_ALLOC,
+                    align: 8,
+                });
             }
             if sanitizers.any() {
                 cg.extra_sections.push(elf::ElfSection {

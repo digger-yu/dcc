@@ -2062,16 +2062,61 @@ pub fn build_eh_frame_with_arch(functions: &[FuncFrame], arch: ArchKind) -> Vec<
     eh
 }
 
-/// ORC 元数据：写入各函数 PC（objtool 探测用）
+/// ORC 元数据：构建 .orc_unwind_ip 节区 (4 字节 PC 偏移数组，已排序)
+/// 每个条目是相对于 .text 节起始的 4 字节偏移。
 pub fn build_orc_unwind_ip(functions: &[FuncFrame]) -> Vec<u8> {
-    let mut orc = Vec::new();
+    let mut data = Vec::with_capacity(functions.len() * 4);
     for func in functions {
-        orc.extend_from_slice(&func.pc.to_le_bytes());
+        // PC 已经是 .text 内偏移
+        data.extend_from_slice(&(func.pc as u32).to_le_bytes());
     }
-    if orc.is_empty() {
-        orc.extend_from_slice(&[0u8; 8]);
+    if data.is_empty() {
+        data.extend_from_slice(&0u32.to_le_bytes());
     }
-    orc
+    data
+}
+
+/// ORC 元数据：构建 .orc_unwind 节区 (8 字节 ORC 条目数组)
+/// 每个条目对应 .orc_unwind_ip 中相同索引的 PC。
+///
+/// struct orc_entry (8 bytes, packed bitfields):
+///   sp_offset: s16, bp_offset: s16,
+///   sp_reg: u4, bp_reg: u4, type: u4, signal: u1, pad: u3
+///
+/// 布局 (little-endian):
+///   byte 0..1: sp_offset (s16)
+///   byte 2..3: bp_offset (s16)
+///   byte 4:    (bp_reg << 4) | sp_reg
+///   byte 5:    (pad << 5) | (signal << 4) | type
+///   byte 6..7: reserved (0)
+pub fn build_orc_unwind(functions: &[FuncFrame]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(functions.len() * 8);
+    for func in functions {
+        let has_cfi = !func.cfi_ops.is_empty();
+        // 默认: CFA = rsp + 8 (无 frame pointer)
+        // 有 CFI 时: CFA = rbp + 16 (有 frame pointer)
+        let (sp_offset, bp_offset, sp_reg, bp_reg) = if has_cfi {
+            // Frame pointer 模式: sp_reg=RSP_BP(6), bp_reg=undefined
+            // sp_offset = 8 (return address at CFA-8)
+            // bp_offset = -16 (saved rbp at CFA-16)
+            (8i16, -16i16, 0u8, 6u8)
+        } else {
+            // 简单模式: CFA = rsp + 8
+            (8i16, 0i16, 0u8, 0u8)
+        };
+        let orc_type: u8 = 0; // UNWIND_TYPE_HINT (default)
+        let signal: u8 = 0;
+        // Pack into 8 bytes
+        data.extend_from_slice(&sp_offset.to_le_bytes());
+        data.extend_from_slice(&bp_offset.to_le_bytes());
+        data.push((bp_reg << 4) | (sp_reg & 0xf));
+        data.push((signal << 4) | (orc_type & 0xf));
+        data.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    }
+    if data.is_empty() {
+        data.resize(8, 0);
+    }
+    data
 }
 
 // ============================================================================

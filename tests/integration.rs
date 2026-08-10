@@ -2468,6 +2468,39 @@ fn asm_pushsection_data_compiles_with_sections() {
     );
 }
 
+/// ORC unwind info: .orc_unwind_ip + .orc_unwind sections generated with -g -c
+#[test]
+fn orc_unwind_sections_present_in_object() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-orc-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-orc-{}.o", std::process::id()));
+    let source = "int foo(void) { return 42; }\nint bar(int x) { return x + 1; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-c", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&out_path);
+    let obj_str = String::from_utf8_lossy(&obj);
+    assert!(
+        obj_str.contains(".orc_unwind_ip"),
+        "missing .orc_unwind_ip section"
+    );
+    assert!(
+        obj_str.contains(".orc_unwind"),
+        "missing .orc_unwind section"
+    );
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {
