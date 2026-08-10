@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-09 — 基于 `cargo test` 337 integration tests + 685 unit tests 全部通过
+> 最后更新：2026-08-10 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -17,7 +17,7 @@
 | 预处理 forced-include 注释安全 | `tests/fixtures/c/comment.h` |
 | mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
 | DWARF + BTF（含 struct） | `-g` 生成 `.debug_*` + `.BTF`（含 `dcc_probe` STRUCT 类型） |
-| objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`、`.orc_unwind_ip` |
+| objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame` |
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
 
 ## Sanitizer 插桩
@@ -65,10 +65,10 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 宏展开涂蓝 / 防栈溢出 | `nested_function_macro_*`；缓存 V7；深度上限 |
 | `_Generic` + 三元控制表达式 | `tests/fixtures/c/generic_tern.c` |
 | `_Generic` 指针精确匹配 | `tests/fixtures/c/generic_ptr.c`；按 pointee 匹配 |
-| 宏 `#` / `##` 字符串化 | `preproc` 单测 `stringify_collapses_*`；条件 token 拼接 |
+| 宏 `#` / `##` 字符串化 | `preproc` 单测 `stringify_collapses_*`；条件 token 拼接；`#` 操作符只转义 `"` 不转义 `\` (与 GCC 一致，内核 `__stringify(\reg)` 正确展开) |
 | `__VA_OPT__` (C++20 / C23) | 空参整段移除，非空展开 content，嵌套按内→外顺序消解 |
 | `__COUNTER__` | 单调递增，跨宏嵌套共享 preproc 状态；在 `#if` 中可被求值 |
-| `_Pragma` 操作符 | C99 `_Pragma("string")` 与 `#pragma` 共享同一条 `process_directive` 通路 |
+| `_Pragma` 操作符 | C99 `_Pragma("string")` 与 `#pragma` 共享同一条 `process_directive` 通路；`_Pragma(expr)` 支持宏展开后为字符串字面量 |
 | `#pragma` 全家族 | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS` / `GCC diagnostic` / `once` / `comment` / `locale` |
 | `#pragma pack` 影响 struct 布局 | `preproc.pack_history` 携带行号；`Parser::pack_at_line(line)` 二分查找；`layout_struct_with_pack(max_align)` cap 到 `min(nat, n)` |
 | `#pragma STDC FENV_ACCESS` | ON/OFF/DEFAULT 三态；FP_CONTRACT / CX_LIMITED_RANGE 静默 noop |
@@ -257,6 +257,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | GNU 扩展 | 嵌套函数 / computed goto 跨函数 / `Expr::Unary` 浮点取负 / `AddrOf` REX.R 编码 / `_Complex` 字面量 / `__real__`/`__imag__` |
 | 嵌套块重声明 (C99 6.2.1) | 函数体内遮蔽允许 (不同类型不报 E0007)；文件作用域类型不匹配仍报 E0007 |
 | K&R 函数 | 解析自动检测 + `is_old_style` |
+| `(*name)[N]` 指针到数组声明符 | `pmd_t (*early_pgts)[512]` 形式；局部变量 + 全局变量 |
+| `__auto_type` / C23 `auto` 类型推导 | 由初始化表达式推导类型；支持多声明符 |
 | 预置 C11 `atomic_*` 宏 | hosted 模式预置 `atomic_int`/`atomic_bool`/`memory_order_*`/`atomic_thread_fence`/`kill_dependency`/`ATOMIC_*_LOCK_FREE` 等；freestanding 模式 `__STDC_HOSTED__=0` + `__STDC_NO_ATOMICS__=1` 且不预置 |
 
 ## 链接器
@@ -322,7 +324,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | DWARF v4 | x86_64 / AArch64 / RISC-V 全部架构 |
 | `.BTF` | x86_64（struct dcc_probe）/ AArch64 / RISC-V |
 | `.eh_frame` | CIE + FDE；setjmp CFI 寄存器保存表 |
-| `.orc_unwind_ip` | x86_64 / AArch64 / RISC-V |
+| `.orc_unwind_ip` | 函数已定义 (`debug::build_orc_unwind_ip`)，待接入 codegen |
 | DWARF line table | `-g1` 下自动去重 |
 | DWARF type info | 位域成员 `DW_AT_bit_size` + `DW_AT_bit_offset` |
 | `-gsplit-dwarf` / `-gpubnames` | `.dwo` 文件生成 |
@@ -339,6 +341,32 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | asm goto 标签验证 | `W0004`：asm 模板中引用的标签不在 goto label 列表中 |
 | asm 语义校验 | `E0014`: 输出约束缺少 `=`/`+` 前缀; `E0015`: 模板占位符索引越界或命名操作数不存在; `W0005`: 约束与表达式类型不匹配 (如 `r` 约束绑浮点); `W0006`: 重复操作数名; `W0007`: 命名/位置操作数混用 |
 | 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002` + int |
+
+## 内联 asm 优化器集成
+
+| 能力 | 说明 |
+|------|------|
+| asm 周围指令重排别名分析 | 指令调度将任何 `__dcc_asm_*` 符号引用视为调度屏障; memory clobber 产生 Store 到 `__dcc_asm_memory_barrier` 被 Store 分支捕获; 防御性检查扩展到 Bin/Un/Load/Cast 操作数 |
+| DCE 不消除无副作用无输出 asm | 所有 inline asm 视为潜在副作用，DCE 不消除 (GCC 兼容) |
+| 寄存器分配器 asm 统一规划 | `register_allocation` 统计 asm 标记寄存器压力 (`asm_reg_pressure` 计入 `__dcc_asm_*` Store 数); 总压力 = SSA 值数 + asm 压力; codegen 侧 `parse_clobber_registers` 排除 clobbered 寄存器 |
+
+## 内联 asm 调试信息
+
+| 能力 | 说明 |
+|------|------|
+| DWARF 行号精度 | `-g` 下 asm 块起始 PC 记录到 `asm_line_entries`; 有 asm 行号时重新生成带 `line_entries` 的完整 DWARF CU; `addr2line` 可定位到 asm 语句起始行 |
+| GDB step-into asm 体验 | mini-asm 不发射 `.debug_insn` 扩展; GDB 无法单步进入 asm 块内部; 与 GCC 行为一致 |
+
+## 内联 asm 测试覆盖
+
+| 场景 | 说明 |
+|------|------|
+| 多 TU 跨文件 asm goto 跳转 | `asm_goto_multi_tu_compiles_and_runs`: 分别编译两个 `.o` 后 gcc 链接，验证 asm goto 跨 TU 符号解析 |
+| asm goto 输出约束跨路径写回 | `asm_goto_output_paths_compiles_and_runs`: 验证跳转路径不写回、fall-through 路径正确写回 |
+| SIMD 指令端到端运行验证 | `asm_avx512_runtime_compiles_and_runs`: 使用 SSE2 标量指令验证运行时结果正确性 |
+| asm goto 与 `&&label` 混合 | `asm_goto_label_addr_mix_compiles_and_runs`: 同一 CU 内 asm goto 与 computed goto 共存 |
+| 嵌套 asm `.macro` / `.rept` 块 | `asm_nested_macro_rept_compiles_and_runs`: 多层 `.rept`/`.irp` 嵌套展开验证 |
+| memory clobber + 优化器重排 | `asm_memory_clobber_optimizer_compiles_and_runs`: `-O2` 下 memory clobber 编译器屏障端到端验证 |
 
 ## 杂项
 

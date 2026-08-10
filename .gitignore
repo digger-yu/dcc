@@ -35,6 +35,7 @@ bin/
 a.out
 core
 core.*
+build.log
 hello
 arith
 control
