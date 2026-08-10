@@ -14996,11 +14996,17 @@ impl Codegen {
             "shldl" if ops.len() == 3 => {
                 self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], true, 32)
             }
+            "shldw" if ops.len() == 3 => {
+                self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], true, 16)
+            }
             "shrd" | "shrdq" if ops.len() == 3 => {
                 self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], false, 64)
             }
             "shrdl" if ops.len() == 3 => {
                 self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], false, 32)
+            }
+            "shrdw" if ops.len() == 3 => {
+                self.emit_asm_shld_shrd(&ops[0], &ops[1], &ops[2], false, 16)
             }
             "bt" | "btq" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xA3, 64),
             "btl" if ops.len() == 2 => self.emit_asm_bit(&ops[0], &ops[1], 0xA3, 32),
@@ -19549,7 +19555,8 @@ impl Codegen {
             self.emit(&[0x66]);
         }
         match (src, dst, count) {
-            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _), AsmOperand::Reg(c, _)) if *c == 1 => {
+            // shld %cl, %src, %dst: src=Reg(%cl), dst=Reg(src), count=Reg(dst)
+            (AsmOperand::Reg(c, _), AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) if *c == 1 => {
                 self.emit(&[
                     Self::rex(w, *s, 0, *d),
                     0x0F,
@@ -19557,7 +19564,8 @@ impl Codegen {
                     Self::modrm_reg_reg(*s, *d),
                 ]);
             }
-            (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _), AsmOperand::Imm(v)) => {
+            // shld $imm, %src, %dst: src=Imm(count), dst=Reg(src), count=Reg(dst)
+            (AsmOperand::Imm(v), AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
                 self.emit(&[
                     Self::rex(w, *s, 0, *d),
                     0x0F,

@@ -2429,6 +2429,19 @@ fn asm_bare_in_out_compiles_without_nop_fallback() {
     );
 }
 
+/// shldw/shrdw 16-bit double precision shift
+#[test]
+fn asm_shldw_shrdw_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_shldw_shrdw.c");
+    let (output, _obj) = run_object_test("asm-shldw-shrdw", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {
