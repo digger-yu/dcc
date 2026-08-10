@@ -2501,6 +2501,23 @@ fn orc_unwind_sections_present_in_object() {
     );
 }
 
+/// function symbol size: weak/static/alias functions should have non-zero st_size
+#[test]
+fn func_symbol_size_non_zero_for_defined_functions() {
+    let source = include_str!("fixtures/c/func_symbol_size.c");
+    let (output, obj_path) = run_object_test("func-symbol-size", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    // Read the object file and verify it contains symbol names
+    let obj_data = std::fs::read(&obj_path).expect("read object file");
+    let obj_str = String::from_utf8_lossy(&obj_data);
+    assert!(obj_str.contains("weak_func"), "missing weak_func symbol");
+    assert!(obj_str.contains("static_func"), "missing static_func symbol");
+    assert!(obj_str.contains("real_func"), "missing real_func symbol");
+    assert!(obj_str.contains("alias_func"), "missing alias_func symbol");
+    let _ = std::fs::remove_file(&obj_path);
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {

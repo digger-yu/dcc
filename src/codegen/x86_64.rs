@@ -1695,6 +1695,20 @@ impl Codegen {
         args
     }
 
+    /// 当 func_sizes 中无记录时，回退计算函数大小:
+    /// 取下一个函数起始位置与当前函数起始之差，或到代码缓冲区末尾。
+    fn compute_func_size_fallback(&self, _name: &str, func_start: u64) -> u64 {
+        // 收集所有函数起始位置，找到当前函数之后的下一个函数
+        let mut all_starts: Vec<u64> = self.labels.values().copied().collect();
+        all_starts.sort();
+        // 找到 func_start 之后的下一个起始位置
+        let next_start = all_starts.iter()
+            .find(|&&s| s > func_start)
+            .copied()
+            .unwrap_or(self.code.len() as u64);
+        next_start.saturating_sub(func_start)
+    }
+
     fn jmp_rel32(&mut self, target: &str, kind: JumpKind) {
         let at = self.pos();
         if kind == JumpKind::Jmp {
@@ -1911,7 +1925,10 @@ impl Codegen {
             .iter()
             .filter_map(|f| {
                 let pc = *self.labels.get(&f.name)?;
-                let sz = *self.func_sizes.get(&f.name)? as u32;
+                let sz = self.func_sizes.get(&f.name)
+                    .copied()
+                    .unwrap_or_else(|| self.compute_func_size_fallback(&f.name, pc))
+                    as u32;
                 let cfi_ops = if self.emit_cfi {
                     self.build_cfi_ops()
                 } else {
@@ -2793,7 +2810,8 @@ impl Codegen {
                         continue;
                     }
                     if let Some(&func_start) = self.labels.get(&f.name.name) {
-                        let func_size = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                        let func_size = self.func_sizes.get(&f.name.name).copied()
+                            .unwrap_or_else(|| self.compute_func_size_fallback(&f.name.name, func_start));
                         if func_size == 0 {
                             continue;
                         }
@@ -2842,7 +2860,8 @@ impl Codegen {
                     continue;
                 }
                 if let Some(&func_start) = self.labels.get(&f.name.name) {
-                    let func_size = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                    let func_size = self.func_sizes.get(&f.name.name).copied()
+                        .unwrap_or_else(|| self.compute_func_size_fallback(&f.name.name, func_start));
                     if func_size == 0 {
                         continue;
                     }
@@ -3008,7 +3027,8 @@ impl Codegen {
                     }
                     // 先处理顶层函数自身
                     if let Some(&func_start) = self.labels.get(&f.name.name) {
-                        let func_size = self.func_sizes.get(&f.name.name).copied().unwrap_or(0);
+                        let func_size = self.func_sizes.get(&f.name.name).copied()
+                            .unwrap_or_else(|| self.compute_func_size_fallback(&f.name.name, func_start));
                         let (sec_idx, sym_value) =
                             if let Some(&(si, off)) = custom_func_offsets.get(&f.name.name) {
                                 (si, off)
@@ -3045,7 +3065,8 @@ impl Codegen {
                     for func in &nested {
                         if let Some(&func_start) = self.labels.get(&func.name.name) {
                             let func_size =
-                                self.func_sizes.get(&func.name.name).copied().unwrap_or(0);
+                                self.func_sizes.get(&func.name.name).copied()
+                                    .unwrap_or_else(|| self.compute_func_size_fallback(&func.name.name, func_start));
                             let (sec_idx, sym_value) = if let Some(&(si, off)) =
                                 custom_func_offsets.get(&func.name.name)
                             {
@@ -3549,7 +3570,8 @@ impl Codegen {
                 Some(s) => *s,
                 None => continue,
             };
-            let size = self.func_sizes.get(&name).copied().unwrap_or(0);
+            let size = self.func_sizes.get(&name).copied()
+                .unwrap_or_else(|| self.compute_func_size_fallback(&name, start));
             if size == 0 {
                 continue;
             }
