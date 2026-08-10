@@ -2416,6 +2416,19 @@ fn asm_cmov_full_compiles_without_nop_fallback() {
     );
 }
 
+/// inline asm: bare in/out + memory-indirect port forms
+#[test]
+fn asm_bare_in_out_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_bare_in_out.c");
+    let (output, _obj) = run_object_test("asm-bare-in-out", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {

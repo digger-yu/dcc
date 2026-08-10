@@ -14767,6 +14767,9 @@ impl Codegen {
             "inb" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 8),
             "inw" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 16),
             "inl" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 32),
+            // 裸 in/out (无后缀): 默认 32 位, 支持立即数/DX/内存间接端口
+            "in" if ops.len() == 2 => self.emit_asm_in_bare(&ops[0], &ops[1]),
+            "out" if ops.len() == 2 => self.emit_asm_out_bare(&ops[0], &ops[1]),
             "insb" => self.emit(&[0x6C]),
             "insw" => self.emit(&[0x66, 0x6D]),
             "insl" => self.emit(&[0x6D]),
@@ -18740,7 +18743,7 @@ impl Codegen {
         }
     }
 
-    /// outb/outw/outl: 端口为立即数 (E6/E7) 或 DX (EE/EF)
+    /// outb/outw/outl: 端口为立即数 (E6/E7) 或 DX (EE/EF) 或内存间接
     fn emit_asm_out(&mut self, val: &AsmOperand, port: &AsmOperand, bits: u8) {
         match port {
             AsmOperand::Imm(p) if *p >= 0 && *p <= 0xFFFF => {
@@ -18762,6 +18765,35 @@ impl Codegen {
                     self.emit(&[0xEF]);
                 }
             }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                // 内存间接端口: movzwl mem, %edx + out DX
+                self.emit(&[
+                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    0x0F,
+                    0xB7,
+                ]);
+                self.emit_asm_modrm_mem_only(2, *disp, *base, *index, *scale);
+                if bits == 8 {
+                    self.emit(&[0xEE]);
+                } else if bits == 16 {
+                    self.emit(&[0x66, 0xEF]);
+                } else {
+                    self.emit(&[0xEF]);
+                }
+            }
+            AsmOperand::SymDisp(sym, _) => {
+                // 符号内存间接端口: movzwl sym(%rip), %edx + out DX
+                self.emit(&[0x0F, 0xB7, 0x15, 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+                if bits == 8 {
+                    self.emit(&[0xEE]);
+                } else if bits == 16 {
+                    self.emit(&[0x66, 0xEF]);
+                } else {
+                    self.emit(&[0xEF]);
+                }
+            }
             _ => {
                 self.asm_warn("unsupported out port operand, emitted as nop");
                 self.emit(&[0x90]);
@@ -18770,7 +18802,7 @@ impl Codegen {
         let _ = val;
     }
 
-    /// inb/inw/inl: 端口为立即数 (E4/E5) 或 DX (EC/ED), 目标固定 AL/AX/EAX
+    /// inb/inw/inl: 端口为立即数 (E4/E5) 或 DX (EC/ED) 或内存间接
     fn emit_asm_in(&mut self, port: &AsmOperand, val: &AsmOperand, bits: u8) {
         match port {
             AsmOperand::Imm(p) if *p >= 0 && *p <= 0xFFFF => {
@@ -18792,12 +18824,51 @@ impl Codegen {
                     self.emit(&[0xED]);
                 }
             }
+            AsmOperand::Mem { disp, base, index, scale } => {
+                // 内存间接端口: movzwl mem, %edx + in DX
+                self.emit(&[
+                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    0x0F,
+                    0xB7,
+                ]);
+                self.emit_asm_modrm_mem_only(2, *disp, *base, *index, *scale);
+                if bits == 8 {
+                    self.emit(&[0xEC]);
+                } else if bits == 16 {
+                    self.emit(&[0x66, 0xED]);
+                } else {
+                    self.emit(&[0xED]);
+                }
+            }
+            AsmOperand::SymDisp(sym, _) => {
+                // 符号内存间接端口: movzwl sym(%rip), %edx + in DX
+                self.emit(&[0x0F, 0xB7, 0x15, 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+                if bits == 8 {
+                    self.emit(&[0xEC]);
+                } else if bits == 16 {
+                    self.emit(&[0x66, 0xED]);
+                } else {
+                    self.emit(&[0xED]);
+                }
+            }
             _ => {
                 self.asm_warn("unsupported in port operand, emitted as nop");
                 self.emit(&[0x90]);
             }
         }
         let _ = val;
+    }
+
+    /// 裸 in (无后缀): 默认 32 位, 支持立即数/DX/内存间接端口
+    fn emit_asm_in_bare(&mut self, port: &AsmOperand, val: &AsmOperand) {
+        self.emit_asm_in(port, val, 32);
+    }
+
+    /// 裸 out (无后缀): 默认 32 位, 支持立即数/DX/内存间接端口
+    fn emit_asm_out_bare(&mut self, val: &AsmOperand, port: &AsmOperand) {
+        self.emit_asm_out(val, port, 32);
     }
 
     /// 0F 01 /m 系统指令（invlpg 等）
