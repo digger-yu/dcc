@@ -14472,6 +14472,13 @@ impl Codegen {
         match mnemonic {
             // 无操作数指令
             "nop" => self.emit(&[0x90]),
+            // 裸段前缀作为独立指令 (旧式汇编风格)
+            "ds" => self.emit(&[0x3E]),
+            "es" => self.emit(&[0x26]),
+            "cs" => self.emit(&[0x2E]),
+            "ss" => self.emit(&[0x36]),
+            "fs" => self.emit(&[0x64]),
+            "gs" => self.emit(&[0x65]),
             "ret" | "retq" => self.emit(&[0xC3]),
             "leave" | "leaveq" => self.emit(&[0xC9]),
             "cdq" => self.emit(&[0x99]),
