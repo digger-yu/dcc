@@ -170,6 +170,9 @@ pub struct Codegen {
     cleanup_vars: Vec<(String, String)>,
     // 额外 .rela 节 (用于 .init_array/.fini_array 等)
     pub extra_rela_sections: Vec<elf::ExtraRelaSection>,
+    // .pushsection 非文本节数据收集
+    pushsection_stack: Vec<usize>,
+    pending_custom_sec_rels: Vec<CustomSecRel>,
     // -S 汇编文本输出
     pub emit_asm_text: bool,
     pub debug_level: u8,
@@ -334,6 +337,15 @@ struct ExplicitRegInfo {
     att_name: &'static str,
     /// 寄存器种类
     kind: ExplicitRegKind,
+}
+
+/// .pushsection 非文本节数据收集: 待解析的符号引用重定位
+struct CustomSecRel {
+    sec_idx: usize,
+    offset: u64,
+    symbol: String,
+    rel_type: u32,
+    addend: i64,
 }
 
 /// GNU as 局部数字标签：同一块 asm 内 `6:` 定义，`6f`/`6b` 引用。
@@ -1034,6 +1046,8 @@ impl Codegen {
             data_relocations: vec![],
             cleanup_vars: vec![],
             extra_rela_sections: vec![],
+            pushsection_stack: vec![],
+            pending_custom_sec_rels: vec![],
             emit_asm_text: false,
             debug_level: 0,
             emit_cfi: false,
@@ -1359,6 +1373,326 @@ impl Codegen {
         });
         self.custom_sec_indices.insert(name.to_string(), idx);
         idx
+    }
+
+    /// .pushsection 块内的数据指令解析与发射
+    fn emit_pushsection_data(
+        &mut self,
+        trimmed: &str,
+        sec_idx: usize,
+        locals: &AsmLocalLabels,
+        line_idx: usize,
+        numeric_label_map: &std::collections::HashMap<String, String>,
+    ) {
+        let sec = &mut self.extra_sections[sec_idx];
+        // 标签定义 (N: 或 name:)
+        if let Some(rest) = trimmed.strip_suffix(':') {
+            let label = rest.trim();
+            if !label.is_empty() && !Self::is_asm_directive(label) {
+                self.label(label);
+            }
+            return;
+        }
+        if !trimmed.starts_with('.') {
+            return;
+        }
+        let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+        let directive = parts[0];
+        let args_str = if parts.len() > 1 { parts[1].trim() } else { "" };
+        match directive {
+            ".byte" => {
+                for expr in Self::split_asm_args(args_str) {
+                    let (val, sym) = Self::parse_asm_data_expr(
+                        expr.trim(), locals, line_idx, numeric_label_map,
+                    );
+                    if let Some((sym_name, rel_type, addend)) = sym {
+                        let off = self.extra_sections[sec_idx].data.len() as u64;
+                        self.pending_custom_sec_rels.push(CustomSecRel {
+                            sec_idx, offset: off,
+                            symbol: sym_name, rel_type, addend,
+                        });
+                    }
+                    self.extra_sections[sec_idx].data.push(val as u8);
+                }
+            }
+            ".short" | ".word" | ".2byte" => {
+                for expr in Self::split_asm_args(args_str) {
+                    let (val, sym) = Self::parse_asm_data_expr(
+                        expr.trim(), locals, line_idx, numeric_label_map,
+                    );
+                    if let Some((sym_name, rel_type, addend)) = sym {
+                        let off = self.extra_sections[sec_idx].data.len() as u64;
+                        self.pending_custom_sec_rels.push(CustomSecRel {
+                            sec_idx, offset: off,
+                            symbol: sym_name, rel_type, addend,
+                        });
+                    }
+                    self.extra_sections[sec_idx].data.extend_from_slice(&(val as u16).to_le_bytes());
+                }
+            }
+            ".int" | ".long" | ".4byte" => {
+                for expr in Self::split_asm_args(args_str) {
+                    let (val, sym) = Self::parse_asm_data_expr(
+                        expr.trim(), locals, line_idx, numeric_label_map,
+                    );
+                    if let Some((sym_name, rel_type, addend)) = sym {
+                        let off = self.extra_sections[sec_idx].data.len() as u64;
+                        self.pending_custom_sec_rels.push(CustomSecRel {
+                            sec_idx, offset: off,
+                            symbol: sym_name, rel_type, addend,
+                        });
+                    }
+                    self.extra_sections[sec_idx].data.extend_from_slice(&(val as u32).to_le_bytes());
+                }
+            }
+            ".quad" | ".8byte" => {
+                for expr in Self::split_asm_args(args_str) {
+                    let (val, sym) = Self::parse_asm_data_expr(
+                        expr.trim(), locals, line_idx, numeric_label_map,
+                    );
+                    if let Some((sym_name, rel_type, addend)) = sym {
+                        let off = self.extra_sections[sec_idx].data.len() as u64;
+                        self.pending_custom_sec_rels.push(CustomSecRel {
+                            sec_idx, offset: off,
+                            symbol: sym_name,
+                            rel_type: elf::R_X86_64_64,
+                            addend,
+                        });
+                    }
+                    self.extra_sections[sec_idx].data.extend_from_slice(&(val as u64).to_le_bytes());
+                }
+            }
+            ".asciz" | ".string" => {
+                let s = Self::parse_asm_quoted_string(args_str);
+                self.extra_sections[sec_idx].data.extend_from_slice(s.as_bytes());
+                self.extra_sections[sec_idx].data.push(0);
+            }
+            ".ascii" => {
+                let s = Self::parse_asm_quoted_string(args_str);
+                self.extra_sections[sec_idx].data.extend_from_slice(s.as_bytes());
+            }
+            ".align" | ".balign" => {
+                if let Ok(a) = args_str.split(',').next()
+                    .unwrap_or("").trim().parse::<usize>()
+                {
+                    if a > 0 {
+                        let len = self.extra_sections[sec_idx].data.len();
+                        let aligned = (len + a - 1) & !(a - 1);
+                        self.extra_sections[sec_idx].data.resize(aligned, 0);
+                    }
+                }
+            }
+            ".p2align" => {
+                if let Ok(p) = args_str.split(',').next()
+                    .unwrap_or("").trim().parse::<u32>()
+                {
+                    let a = 1usize << p;
+                    let len = self.extra_sections[sec_idx].data.len();
+                    let aligned = (len + a - 1) & !(a - 1);
+                    self.extra_sections[sec_idx].data.resize(aligned, 0);
+                }
+            }
+            ".zero" => {
+                if let Ok(n) = args_str.trim().parse::<usize>() {
+                    let cur_len = self.extra_sections[sec_idx].data.len();
+                    self.extra_sections[sec_idx].data.resize(cur_len + n, 0);
+                }
+            }
+            _ => {} // 未知指令，静默跳过
+        }
+    }
+
+    /// 解析 pushsection 数据表达式，返回 (数值, 符号引用信息)
+    /// 符号引用: Some((symbol_name, rel_type, addend))
+    fn parse_asm_data_expr(
+        expr: &str,
+        locals: &AsmLocalLabels,
+        line_idx: usize,
+        numeric_label_map: &std::collections::HashMap<String, String>,
+    ) -> (i64, Option<(String, u32, i64)>) {
+        let expr = expr.trim();
+        if expr.is_empty() {
+            return (0, None);
+        }
+        // 查找 '-' 和 '+' 操作符 (不在引号/括号内)
+        let (expr_before, op, expr_after) =
+            Self::find_expr_operator(expr);
+        if let Some(op) = op {
+            let left = expr_before.trim();
+            let right = expr_after.trim();
+            // symbol - . → PC32, addend=0
+            if right == "." {
+                let sym = Self::resolve_asm_data_symbol(
+                    left, locals, line_idx, numeric_label_map,
+                );
+                return (0, Some((sym, elf::R_X86_64_PC32, 0)));
+            }
+            // symbol + N → PC32, addend=N (或绝对引用 + addend)
+            if op == '+' {
+                if let Ok(n) = right.parse::<i64>() {
+                    let sym = Self::resolve_asm_data_symbol(
+                        left, locals, line_idx, numeric_label_map,
+                    );
+                    return (0, Some((sym, elf::R_X86_64_32, n)));
+                }
+            }
+            // symbol - number → PC32 with negative addend
+            if op == '-' {
+                if let Ok(n) = right.parse::<i64>() {
+                    let sym = Self::resolve_asm_data_symbol(
+                        left, locals, line_idx, numeric_label_map,
+                    );
+                    return (0, Some((sym, elf::R_X86_64_PC32, -n)));
+                }
+            }
+        }
+        // 纯符号引用 (无算术)
+        let (val, is_sym) = Self::parse_asm_expr_atom(
+            expr, locals, line_idx, numeric_label_map,
+        );
+        if is_sym {
+            let sym = Self::resolve_asm_data_symbol(
+                expr, locals, line_idx, numeric_label_map,
+            );
+            return (0, Some((sym, elf::R_X86_64_32, 0)));
+        }
+        (val, None)
+    }
+
+    /// 查找表达式中的顶层 '+' 或 '-' 操作符
+    fn find_expr_operator(expr: &str) -> (&str, Option<char>, &str) {
+        let bytes = expr.as_bytes();
+        let mut depth = 0i32;
+        let mut in_quote = false;
+        // 从右向左扫描，找到最右边的 +/- (不在括号/引号内)
+        for i in (0..bytes.len()).rev() {
+            match bytes[i] {
+                b'"' => in_quote = !in_quote,
+                b')' if !in_quote => depth += 1,
+                b'(' if !in_quote => depth -= 1,
+                b'+' | b'-' if !in_quote && depth == 0 && i > 0 => {
+                    return (&expr[..i], Some(bytes[i] as char), &expr[i+1..]);
+                }
+                _ => {}
+            }
+        }
+        (expr, None, "")
+    }
+
+    /// 解析表达式原子: 数字字面量或符号引用
+    fn parse_asm_expr_atom(
+        expr: &str,
+        locals: &AsmLocalLabels,
+        line_idx: usize,
+        numeric_label_map: &std::collections::HashMap<String, String>,
+    ) -> (i64, bool) {
+        let expr = expr.trim();
+        if expr == "." {
+            return (0, false);
+        }
+        // 数字标签引用: Nb 或 Nf
+        if expr.len() >= 2 {
+            let last = expr.as_bytes()[expr.len() - 1];
+            if last == b'b' || last == b'f' {
+                let num_str = &expr[..expr.len() - 1];
+                if num_str.chars().all(|c| c.is_ascii_digit()) && !num_str.is_empty() {
+                    return (0, true); // 符号引用
+                }
+            }
+        }
+        // 纯数字
+        if let Some(hex) = expr.strip_prefix("0x").or_else(|| expr.strip_prefix("0X")) {
+            if let Ok(v) = i64::from_str_radix(hex, 16) {
+                return (v, false);
+            }
+        }
+        if let Ok(v) = expr.parse::<i64>() {
+            return (v, false);
+        }
+        // 其他符号名
+        if !expr.is_empty() {
+            return (0, true);
+        }
+        (0, false)
+    }
+
+    /// 解析符号名 (用于重定位)
+    fn resolve_asm_data_symbol(
+        expr: &str,
+        locals: &AsmLocalLabels,
+        line_idx: usize,
+        numeric_label_map: &std::collections::HashMap<String, String>,
+    ) -> String {
+        let expr = expr.trim();
+        // 数字标签: Nb 或 Nf
+        if expr.len() >= 2 {
+            let last = expr.as_bytes()[expr.len() - 1];
+            if last == b'b' || last == b'f' {
+                let num_str = &expr[..expr.len() - 1];
+                if num_str.chars().all(|c| c.is_ascii_digit()) && !num_str.is_empty() {
+                    // 通过 locals 查找内部名
+                    let num: u32 = num_str.parse().unwrap_or(0);
+                    if let Some(name) = locals.resolve(num, last as char, line_idx) {
+                        return name.to_string();
+                    }
+                    // 回退到 numeric_label_map
+                    if let Some(name) = numeric_label_map.get(num_str) {
+                        return name.clone();
+                    }
+                    return format!(".Lasm_local_{}_0", num_str);
+                }
+            }
+        }
+        expr.to_string()
+    }
+
+    /// 解析引号字符串
+    fn parse_asm_quoted_string(s: &str) -> String {
+        let s = s.trim();
+        if s.starts_with('"') {
+            let end = s[1..].find('"').map(|p| p + 1).unwrap_or(s.len());
+            let inner = &s[1..end];
+            let mut result = String::new();
+            let mut chars = inner.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    match chars.next() {
+                        Some('n') => result.push('\n'),
+                        Some('t') => result.push('\t'),
+                        Some('\\') => result.push('\\'),
+                        Some('"') => result.push('"'),
+                        Some('0') => result.push('\0'),
+                        Some(other) => { result.push('\\'); result.push(other); }
+                        None => result.push('\\'),
+                    }
+                } else {
+                    result.push(c);
+                }
+            }
+            return result;
+        }
+        s.to_string()
+    }
+
+    /// 分割逗号分隔的参数列表 (尊重引号)
+    fn split_asm_args(s: &str) -> Vec<&str> {
+        let mut args = Vec::new();
+        let mut start = 0;
+        let mut in_quote = false;
+        for (i, c) in s.char_indices() {
+            match c {
+                '"' => in_quote = !in_quote,
+                ',' if !in_quote => {
+                    args.push(&s[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        if start < s.len() {
+            args.push(&s[start..]);
+        }
+        args
     }
 
     fn jmp_rel32(&mut self, target: &str, kind: JumpKind) {
@@ -2831,6 +3165,25 @@ impl Codegen {
             });
         }
 
+        // .pushsection 非文本节: 为数字标签引用创建本地符号
+        for rel in &self.pending_custom_sec_rels {
+            if !self.sym_index.contains_key(&rel.symbol) {
+                if let Some(&pos) = self.labels.get(&rel.symbol) {
+                    let idx = local_syms.len() as u32 + self.symbols.len() as u32;
+                    local_syms.push(ElfSym {
+                        name: rel.symbol.clone(),
+                        section: 1, // .text
+                        value: pos,
+                        size: 0,
+                        bind: STB_LOCAL,
+                        ty: STT_NOTYPE,
+                        visibility: STV_DEFAULT,
+                    });
+                    let _ = idx;
+                }
+            }
+        }
+
         // 构建最终符号表: STN_UNDEF + locals + globals
         self.symbols.clear();
         self.sym_index.clear();
@@ -2853,6 +3206,37 @@ impl Codegen {
             let idx = self.symbols.len() as u32;
             self.symbols.push(sym.clone());
             self.sym_index.insert(sym.name.clone(), idx);
+        }
+
+        // .pushsection 非文本节: 创建重定位条目
+        let mut custom_sec_relas: std::collections::HashMap<usize, Vec<ElfRela>> =
+            std::collections::HashMap::new();
+        for rel in self.pending_custom_sec_rels.drain(..) {
+            let sym_idx = self.sym_index.get(&rel.symbol).copied().unwrap_or(0);
+            // 计算在自定义节内的绝对偏移
+            let abs_offset = rel.offset;
+            let rela = ElfRela {
+                offset: abs_offset,
+                sym_index: sym_idx,
+                rel_type: rel.rel_type,
+                addend: rel.addend,
+            };
+            custom_sec_relas.entry(rel.sec_idx).or_default().push(rela);
+        }
+        for (sec_idx, relocations) in custom_sec_relas {
+            let rela_name = format!(".rela{}", self.extra_sections[sec_idx].name);
+            let target_sec_index = 7 + sec_idx as u32;
+            if let Some(existing) = self.extra_rela_sections.iter_mut()
+                .find(|r| r.target_sec_index == target_sec_index)
+            {
+                existing.relocations.extend(relocations);
+            } else {
+                self.extra_rela_sections.push(elf::ExtraRelaSection {
+                    name: rela_name,
+                    relocations,
+                    target_sec_index,
+                });
+            }
         }
 
         // Phase 3: 构建重定位 (使用正确的符号索引)
@@ -13462,15 +13846,18 @@ impl Codegen {
     /// 发射已替换操作数后的 asm 模板行（含 GNU 局部数字标签）
     fn emit_resolved_asm_lines(&mut self, resolved_lines: &[String], is_global: bool) {
         let locals = AsmLocalLabels::scan(resolved_lines);
-        // Track .pushsection/.popsection to skip non-text sections
-        // (e.g. .altinstructions, .altinstr_replacement, __bug_table).
+        // Track .pushsection/.popsection: collect data into custom sections
+        // (e.g. .altinstructions, __bug_table, __ex_table, .fixup).
         let mut skip_depth: u32 = 0;
+        // 数字标签映射: "N" → 内部名 (用于 pushsection 数据中的符号引用)
+        let mut numeric_label_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for (i, resolved) in resolved_lines.iter().enumerate() {
             let trimmed = resolved.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            // .pushsection to non-text section: enter skip mode
+            // .pushsection: 非文本节 → 收集数据; 文本节 → 正常处理
             if trimmed.starts_with(".pushsection") {
                 let sec_name = trimmed
                     .split_whitespace()
@@ -13478,17 +13865,39 @@ impl Codegen {
                     .unwrap_or("")
                     .trim_end_matches(',');
                 if !sec_name.starts_with(".text") && !sec_name.is_empty() {
-                    skip_depth += 1;
+                    // 解析 flags
+                    let is_writable = trimmed.contains('"')
+                        && (trimmed.contains('w') || trimmed.contains('W'));
+                    let sec_idx = self.ensure_custom_section(
+                        sec_name, false, is_writable,
+                    );
+                    self.pushsection_stack.push(sec_idx);
                     continue;
                 }
             }
-            // .popsection: leave skip mode if in non-text section
-            if trimmed == ".popsection" && skip_depth > 0 {
-                skip_depth -= 1;
+            // .popsection: 退出 pushsection 模式
+            if trimmed.starts_with(".popsection") {
+                if !self.pushsection_stack.is_empty() {
+                    self.pushsection_stack.pop();
+                } else if skip_depth > 0 {
+                    skip_depth -= 1;
+                }
                 continue;
             }
-            // Skip lines in non-text sections, but still register numeric labels
-            // so that references from other skipped sections don't panic.
+            // 在 pushsection 块内: 收集数据到自定义节
+            if !self.pushsection_stack.is_empty() {
+                let sec_idx = *self.pushsection_stack.last().unwrap();
+                // 仍然注册数字标签
+                if let Some(name) = locals.name_at(i) {
+                    self.label(name);
+                    numeric_label_map
+                        .insert(name.split('_').nth(3).unwrap_or("0").to_string(), name.to_string());
+                }
+                self.emit_pushsection_data(trimmed, sec_idx, &locals, i, &numeric_label_map);
+                continue;
+            }
+            // Skip lines in non-text sections (legacy fallback), but still
+            // register numeric labels so references don't panic.
             if skip_depth > 0 {
                 if let Some(name) = locals.name_at(i) {
                     self.label(name);

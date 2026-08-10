@@ -2455,6 +2455,19 @@ fn asm_bare_seg_prefix_compiles_without_nop_fallback() {
     );
 }
 
+/// .pushsection non-text section data collection (__bug_table, __ex_table)
+#[test]
+fn asm_pushsection_data_compiles_with_sections() {
+    let source = include_str!("fixtures/c/asm_pushsection_data.c");
+    let (output, _obj) = run_object_test("asm-pushsection-data", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {
