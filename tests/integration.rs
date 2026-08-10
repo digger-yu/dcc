@@ -2403,6 +2403,19 @@ fn asm_pushfl_iret_compiles_without_nop_fallback() {
     );
 }
 
+/// inline asm: cmov full condition codes + width suffix aliases
+#[test]
+fn asm_cmov_full_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_cmov_full.c");
+    let (output, _obj) = run_object_test("asm-cmov-full", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {

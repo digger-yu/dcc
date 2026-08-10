@@ -14640,15 +14640,20 @@ impl Codegen {
                 };
                 self.emit_asm_xchg(&ops[0], &ops[1], bits);
             }
-            "cmovz" | "cmovze" | "cmove" if ops.len() == 2 => {
-                self.emit_asm_cmov(&ops[0], &ops[1], 0x44)
+            // cmov 全系列条件码 + 可选宽度后缀 (w/l/q)
+            m if m.starts_with("cmov") && ops.len() == 2 => {
+                let cond = &m[4..];
+                let (cc, bits) = Self::parse_cmov_cond(cond);
+                if let Some(cc) = cc {
+                    self.emit_asm_cmov(&ops[0], &ops[1], cc, bits);
+                } else {
+                    self.asm_warn(&format!(
+                        "unsupported cmov condition '{}', emitted as nop",
+                        cond
+                    ));
+                    self.emit(&[0x90]);
+                }
             }
-            "cmovnz" | "cmovne" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x45),
-            "cmova" | "cmovnbe" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x47),
-            "cmovl" | "cmovnge" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4C),
-            "cmovg" | "cmovnle" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4F),
-            "cmovle" | "cmovng" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4E),
-            "cmovge" | "cmovnl" if ops.len() == 2 => self.emit_asm_cmov(&ops[0], &ops[1], 0x4D),
 
             // 算术
             "add" | "addq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 64),
@@ -20190,11 +20195,56 @@ impl Codegen {
         }
     }
 
-    fn emit_asm_cmov(&mut self, src: &AsmOperand, dst: &AsmOperand, cc: u8) {
+    /// cmov 条件码 + 可选宽度后缀解析
+    /// 返回 (Some(opcode_byte), bits) 或 (None, 64) 表示无效条件
+    fn parse_cmov_cond(cond: &str) -> (Option<u8>, u8) {
+        // 剥离可选宽度后缀 w/l/q
+        let (cc_str, bits) = if let Some(stripped) = cond.strip_suffix('w') {
+            (stripped, 16u8)
+        } else if let Some(stripped) = cond.strip_suffix('l') {
+            (stripped, 32u8)
+        } else if let Some(stripped) = cond.strip_suffix('q') {
+            (stripped, 64u8)
+        } else {
+            (cond, 64u8)
+        };
+        let cc = match cc_str {
+            "z" | "ze" | "e" => 0x44,
+            "nz" | "ne" => 0x45,
+            "a" | "nbe" => 0x47,
+            "ae" | "nb" | "nc" => 0x43,
+            "b" | "c" | "nae" => 0x42,
+            "be" | "na" => 0x46,
+            "l" | "nge" => 0x4C,
+            "le" | "ng" => 0x4E,
+            "g" | "nle" => 0x4F,
+            "ge" | "nl" => 0x4D,
+            "s" => 0x48,
+            "ns" => 0x49,
+            "o" => 0x40,
+            "no" => 0x41,
+            "p" | "pe" => 0x4A,
+            "np" | "po" => 0x4B,
+            _ => return (None, bits),
+        };
+        (Some(cc), bits)
+    }
+
+    fn emit_asm_cmov(
+        &mut self,
+        src: &AsmOperand,
+        dst: &AsmOperand,
+        cc: u8,
+        bits: u8,
+    ) {
+        let w = bits == 64;
+        if bits == 16 {
+            self.emit(&[0x66]);
+        }
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
                 self.emit(&[
-                    Self::rex(true, *d, 0, *s),
+                    Self::rex(w, *d, 0, *s),
                     0x0F,
                     cc,
                     Self::modrm_reg_reg(*d, *s),
@@ -20209,7 +20259,7 @@ impl Codegen {
                 },
                 AsmOperand::Reg(d, _),
             ) => {
-                self.emit(&[Self::rex(true, *d, index.unwrap_or(0), *base), 0x0F, cc]);
+                self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, cc]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             (
@@ -20221,7 +20271,7 @@ impl Codegen {
                     scale,
                 },
             ) => {
-                self.emit(&[Self::rex(true, *s, index.unwrap_or(0), *base), 0x0F, cc]);
+                self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, cc]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             _ => self.emit(&[0x90]),
