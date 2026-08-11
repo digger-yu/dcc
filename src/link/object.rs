@@ -510,7 +510,7 @@ mod tests {
         );
         let parsed = parse_object(&obj, "min.o").expect("parse");
         assert_eq!(parsed.machine, 62);
-        assert_eq!(parsed.sections.len(), 12); // 1 null + 6 standard + 3 rela + symtab + strtab + shstrtab
+        assert_eq!(parsed.sections.len(), 11); // 1 null + 6 standard + 1 rela.text + symtab + strtab + shstrtab
         let answer = parsed
             .symbols
             .iter()
