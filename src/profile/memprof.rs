@@ -8,15 +8,32 @@
 //     `cold_alloc` / `not_lifetime_extended` / `hinted` 等属性注入
 //     到 IR (通常是 `__attribute__((malloc("cold")))`)
 //
-// dcc 简化文本格式:
+// dcc 文本格式:
 //   # dcc memprof v1
 //   alloc <frames...> = <count> <bytes>
 //   lifetime <alloc_frames> -> <dealloc_frames> = <bytes>
 //   dealloc <frames...> = <count>
 //
+// dcc 二进制格式 (.memprofdata):
+//   magic    : "MEMPROFD" 8 bytes
+//   version  : u32 LE (1)
+//   n_allocs : u32 LE
+//   alloc[]  : n_frames(u32) frames[](len(u32) + bytes) count(u64) bytes(u64)
+//   n_life   : u32 LE
+//   life[]   : alloc_frames(...) dealloc_frames(...) lifetime_bytes(u64)
+//   n_deallocs: u32 LE
+//   dealloc[]: n_frames(u32) frames(...) count(u64)
+//
+// malloc 插桩:
+//   codegen 在 malloc/calloc/realloc/new 调用前插入
+//   `__dcc_memprof_alloc_record(size, return_addr)`
+//   在 free/delete 调用前插入 `__dcc_memprof_free_record(ptr, return_addr)`
+//   runtime 库收集 callstack + size + lifetime 数据
+//
 // 已接入 driver → ProfileWeights → codegen (cold 函数下沉 .text.unlikely).
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -95,10 +112,14 @@ impl MemProfData {
         Self::default()
     }
 
-    /// 从文件路径解析
+    /// 从文件路径解析 (自动检测文本/二进制格式)
     pub fn read(path: &Path) -> io::Result<Self> {
-        let mut s = String::new();
-        std::fs::File::open(path)?.read_to_string(&mut s)?;
+        let data = fs::read(path)?;
+        if data.len() >= 8 && &data[0..8] == b"MEMPROFD" {
+            return Self::read_binary(&data);
+        }
+        let s = String::from_utf8(data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Self::from_str(&s)
     }
 
@@ -240,6 +261,222 @@ impl MemProfData {
         }
         out
     }
+
+    /// 序列化为 dcc 二进制格式 (.memprofdata)
+    pub fn write_binary(&self, out: &Path) -> io::Result<usize> {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"MEMPROFD");
+        buf.extend_from_slice(&1u32.to_le_bytes()); // version
+        // allocs
+        buf.extend_from_slice(&(self.alloc_counts.len() as u32).to_le_bytes());
+        for (stack, &count) in &self.alloc_counts {
+            buf.extend_from_slice(&(stack.len() as u32).to_le_bytes());
+            for frame in stack {
+                let bytes = frame.as_bytes();
+                buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(bytes);
+            }
+            buf.extend_from_slice(&count.to_le_bytes());
+            let bytes = self.alloc_bytes.get(stack).copied().unwrap_or(0);
+            buf.extend_from_slice(&bytes.to_le_bytes());
+        }
+        // lifetime
+        buf.extend_from_slice(&(self.lifetime.len() as u32).to_le_bytes());
+        for ((a, d), &bytes) in &self.lifetime {
+            buf.extend_from_slice(&(a.len() as u32).to_le_bytes());
+            for frame in a {
+                let fb = frame.as_bytes();
+                buf.extend_from_slice(&(fb.len() as u32).to_le_bytes());
+                buf.extend_from_slice(fb);
+            }
+            buf.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            for frame in d {
+                let fb = frame.as_bytes();
+                buf.extend_from_slice(&(fb.len() as u32).to_le_bytes());
+                buf.extend_from_slice(fb);
+            }
+            buf.extend_from_slice(&bytes.to_le_bytes());
+        }
+        // deallocs
+        buf.extend_from_slice(&(self.dealloc_counts.len() as u32).to_le_bytes());
+        for (stack, &count) in &self.dealloc_counts {
+            buf.extend_from_slice(&(stack.len() as u32).to_le_bytes());
+            for frame in stack {
+                let bytes = frame.as_bytes();
+                buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(bytes);
+            }
+            buf.extend_from_slice(&count.to_le_bytes());
+        }
+
+        if let Some(parent) = out.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+        fs::write(out, &buf)?;
+        Ok(buf.len())
+    }
+
+    /// 从 dcc 二进制格式解析
+    pub fn read_binary(data: &[u8]) -> io::Result<Self> {
+        if data.len() < 12 || &data[0..8] != b"MEMPROFD" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad memprofdata magic",
+            ));
+        }
+        let _version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        let mut off = 12;
+        let mut d = Self::default();
+        // allocs
+        let n_allocs = read_u32(data, &mut off)? as usize;
+        for _ in 0..n_allocs {
+            let n_frames = read_u32(data, &mut off)? as usize;
+            let mut stack = Vec::with_capacity(n_frames);
+            for _ in 0..n_frames {
+                let frame = read_string(data, &mut off)?;
+                stack.push(frame);
+            }
+            let count = read_u64(data, &mut off)?;
+            let bytes = read_u64(data, &mut off)?;
+            *d.alloc_counts.entry(stack.clone()).or_insert(0) += count;
+            *d.alloc_bytes.entry(stack).or_insert(0) += bytes;
+        }
+        // lifetime
+        let n_life = read_u32(data, &mut off)? as usize;
+        for _ in 0..n_life {
+            let n_a = read_u32(data, &mut off)? as usize;
+            let mut a = Vec::with_capacity(n_a);
+            for _ in 0..n_a {
+                a.push(read_string(data, &mut off)?);
+            }
+            let n_d = read_u32(data, &mut off)? as usize;
+            let mut de = Vec::with_capacity(n_d);
+            for _ in 0..n_d {
+                de.push(read_string(data, &mut off)?);
+            }
+            let bytes = read_u64(data, &mut off)?;
+            *d.lifetime.entry((a, de)).or_insert(0) += bytes;
+        }
+        // deallocs
+        let n_deallocs = read_u32(data, &mut off)? as usize;
+        for _ in 0..n_deallocs {
+            let n_frames = read_u32(data, &mut off)? as usize;
+            let mut stack = Vec::with_capacity(n_frames);
+            for _ in 0..n_frames {
+                stack.push(read_string(data, &mut off)?);
+            }
+            let count = read_u64(data, &mut off)?;
+            *d.dealloc_counts.entry(stack).or_insert(0) += count;
+        }
+        Ok(d)
+    }
+}
+
+/// malloc 插桩器: 生成对 runtime 库函数的调用
+pub struct MemProfInstrumentor;
+
+impl MemProfInstrumentor {
+    /// 返回需要在 malloc 调用前插入的函数调用
+    /// `__dcc_memprof_alloc_record(size, return_addr)`
+    pub fn alloc_record_call(size_expr: &str, return_addr_expr: &str) -> String {
+        format!(
+            "__dcc_memprof_alloc_record({}, {})",
+            size_expr, return_addr_expr
+        )
+    }
+
+    /// 返回需要在 free 调用前插入的函数调用
+    /// `__dcc_memprof_free_record(ptr, return_addr)`
+    pub fn free_record_call(ptr_expr: &str, return_addr_expr: &str) -> String {
+        format!(
+            "__dcc_memprof_free_record({}, {})",
+            ptr_expr, return_addr_expr
+        )
+    }
+
+    /// 返回需要链接的 runtime 函数列表
+    pub fn runtime_symbols() -> Vec<&'static str> {
+        vec![
+            "__dcc_memprof_alloc_record",
+            "__dcc_memprof_free_record",
+            "__dcc_memprof_init",
+            "__dcc_memprof_flush",
+        ]
+    }
+}
+
+/// MemProf runtime 库接口定义
+pub struct MemProfRuntime;
+
+impl MemProfRuntime {
+    /// 生成 runtime 库的 C 代码桩 (用于链接)
+    pub fn generate_runtime_stub() -> String {
+        r#"/* dcc memprof runtime stub */
+#include <stdint.h>
+#include <stdlib.h>
+
+static int _dcc_memprof_initialized = 0;
+
+void __dcc_memprof_init(void) {
+    if (_dcc_memprof_initialized) return;
+    _dcc_memprof_initialized = 1;
+    atexit(__dcc_memprof_flush);
+}
+
+void __dcc_memprof_alloc_record(uint64_t size, void *return_addr) {
+    __dcc_memprof_init();
+    /* TODO: record alloc site with callstack */
+    (void)size;
+    (void)return_addr;
+}
+
+void __dcc_memprof_free_record(void *ptr, void *return_addr) {
+    __dcc_memprof_init();
+    /* TODO: record dealloc site with callstack */
+    (void)ptr;
+    (void)return_addr;
+}
+
+void __dcc_memprof_flush(void) {
+    if (!_dcc_memprof_initialized) return;
+    /* TODO: write .memprofdata file */
+    _dcc_memprof_initialized = 0;
+}
+"#
+        .to_string()
+    }
+}
+
+fn read_u32(data: &[u8], off: &mut usize) -> io::Result<u32> {
+    if *off + 4 > data.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated u32"));
+    }
+    let v = u32::from_le_bytes(data[*off..*off + 4].try_into().unwrap());
+    *off += 4;
+    Ok(v)
+}
+
+fn read_u64(data: &[u8], off: &mut usize) -> io::Result<u64> {
+    if *off + 8 > data.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated u64"));
+    }
+    let v = u64::from_le_bytes(data[*off..*off + 8].try_into().unwrap());
+    *off += 8;
+    Ok(v)
+}
+
+fn read_string(data: &[u8], off: &mut usize) -> io::Result<String> {
+    let len = read_u32(data, off)? as usize;
+    if *off + len > data.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated string"));
+    }
+    let s = std::str::from_utf8(&data[*off..*off + len])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .to_string();
+    *off += len;
+    Ok(s)
 }
 
 #[cfg(test)]
@@ -387,5 +624,92 @@ mod tests {
         assert!(!c.instrument);
         assert!(c.use_file.is_none());
         assert_eq!(c.cold_threshold, 5);
+    }
+
+    /// Binary format roundtrip.
+    #[test]
+    fn memprof_binary_roundtrip() {
+        let mut d = MemProfData::default();
+        d.alloc_counts
+            .insert(vec!["main".into(), "malloc".into()], 100);
+        d.alloc_bytes
+            .insert(vec!["main".into(), "malloc".into()], 4096);
+        d.lifetime.insert(
+            (vec!["main".into(), "malloc".into()], vec!["free".into()]),
+            4096,
+        );
+        d.dealloc_counts.insert(vec!["free".into()], 50);
+
+        let tmp = std::env::temp_dir().join("dcc-memprof-bin.memprofdata");
+        let _ = std::fs::remove_file(&tmp);
+        let n = d.write_binary(&tmp).unwrap();
+        assert!(n > 12);
+
+        let d2 = MemProfData::read(&tmp).unwrap();
+        assert_eq!(d2.alloc_counts, d.alloc_counts);
+        assert_eq!(d2.alloc_bytes, d.alloc_bytes);
+        assert_eq!(d2.lifetime, d.lifetime);
+        assert_eq!(d2.dealloc_counts, d.dealloc_counts);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Binary format rejects bad magic.
+    #[test]
+    fn memprof_binary_rejects_bad_magic() {
+        let result = MemProfData::read_binary(b"BADMAGIC\x01\x00\x00\x00");
+        assert!(result.is_err());
+    }
+
+    /// read() auto-detects text vs binary.
+    #[test]
+    fn memprof_read_auto_detects_format() {
+        // Text file
+        let tmp_txt = std::env::temp_dir().join("dcc-memprof-auto.txt");
+        std::fs::write(&tmp_txt, b"alloc main = 10 100\n").unwrap();
+        let d1 = MemProfData::read(&tmp_txt).unwrap();
+        assert_eq!(d1.alloc_counts.get(&vec!["main".into()]), Some(&10));
+        let _ = std::fs::remove_file(&tmp_txt);
+
+        // Binary file
+        let tmp_bin = std::env::temp_dir().join("dcc-memprof-auto.bin");
+        let mut d = MemProfData::default();
+        d.alloc_counts.insert(vec!["test".into()], 5);
+        d.alloc_bytes.insert(vec!["test".into()], 200);
+        d.write_binary(&tmp_bin).unwrap();
+        let d2 = MemProfData::read(&tmp_bin).unwrap();
+        assert_eq!(d2.alloc_counts.get(&vec!["test".into()]), Some(&5));
+        let _ = std::fs::remove_file(&tmp_bin);
+    }
+
+    /// MemProfInstrumentor generates correct call strings.
+    #[test]
+    fn memprof_instrumentor_calls() {
+        let alloc_call = MemProfInstrumentor::alloc_record_call("size", "__ret");
+        assert!(alloc_call.contains("__dcc_memprof_alloc_record"));
+        assert!(alloc_call.contains("size"));
+        let free_call = MemProfInstrumentor::free_record_call("ptr", "__ret");
+        assert!(free_call.contains("__dcc_memprof_free_record"));
+        assert!(free_call.contains("ptr"));
+    }
+
+    /// MemProfInstrumentor lists runtime symbols.
+    #[test]
+    fn memprof_runtime_symbols() {
+        let syms = MemProfInstrumentor::runtime_symbols();
+        assert!(syms.contains(&"__dcc_memprof_alloc_record"));
+        assert!(syms.contains(&"__dcc_memprof_free_record"));
+        assert!(syms.contains(&"__dcc_memprof_init"));
+        assert!(syms.contains(&"__dcc_memprof_flush"));
+    }
+
+    /// MemProfRuntime generates C stub code.
+    #[test]
+    fn memprof_runtime_stub_generation() {
+        let code = MemProfRuntime::generate_runtime_stub();
+        assert!(code.contains("__dcc_memprof_alloc_record"));
+        assert!(code.contains("__dcc_memprof_free_record"));
+        assert!(code.contains("__dcc_memprof_init"));
+        assert!(code.contains("__dcc_memprof_flush"));
+        assert!(code.contains("atexit"));
     }
 }

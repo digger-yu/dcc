@@ -26,7 +26,7 @@
 | `profile::pgo` | `src/profile/pgo.rs` | 🟢 端到端 (`.profraw` v2 + AST 插桩) | `-fprofile-generate` / `-fprofile-use` |
 | `profile::autofdo` | `src/profile/autofdo.rs` | 🟢 端到端 (文本 + 二进制 + discriminator) | `-fauto-profile=` / `-fprofile-sample-use=` |
 | `profile::lbr` | `src/profile/lbr.rs` | 🟢 端到端 (文本 + perf.data 二进制) | `-flbr-profile=` |
-| `profile::memprof` | `src/profile/memprof.rs` | 🟡 配置 + 数据结构 | `-fmemory-profile` / `-fmemory-profile-use=` |
+| `profile::memprof` | `src/profile/memprof.rs` | 🟢 端到端 (文本 + 二进制 + 插桩 + runtime) | `-fmemory-profile` / `-fmemory-profile-use=` |
 | `profile::perf_event` | `src/profile/perf_event.rs` | 🟡 TopdownL1 数据结构 | `-ftopdownmetrics` |
 | `profile::offload` | `src/profile/offload.rs` | 🟢 二进制 `.dcc.offload` + entry 收集 | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` |
 
@@ -326,18 +326,41 @@ MemProf 是 LLVM 18+ 的内存采样器，与 PGO/AutoFDO 并列，但关注堆�
   `not_lifetime_extended` / `hinted` 等属性注入到 IR (通常是
   `__attribute__((malloc("cold")))`)
 
-dcc 当前仅定义配置 + 数据结构 + 简化读取器。
-不在 libc malloc 上插桩 (那需要弱符号覆盖, 当前没有 runtime 库)。
+dcc 当前实现：配置 + 数据结构 + 文本/二进制读取器 + malloc 插桩 + runtime 库。
 
-### 5.2 简化格式
+### 5.2 文本格式
 
 ```
-# header
+# dcc memprof v1
 alloc <frames...> = <count> <bytes>
-lifetime <alloc_frames...> -> <dealloc_frames...> = <bytes>
+lifetime <alloc_frames...> => <dealloc_frames...> = <bytes>
+dealloc <frames...> = <count>
 ```
 
-### 5.3 `is_cold` 启发
+### 5.3 二进制格式 (.memprofdata)
+
+```
+magic    : "MEMPROFD" 8 bytes
+version  : u32 LE (1)
+n_allocs : u32 LE
+alloc[]  : n_frames(u32) frames[](len(u32)+bytes) count(u64) bytes(u64)
+n_life   : u32 LE
+life[]   : alloc_frames(...) dealloc_frames(...) bytes(u64)
+n_deallocs: u32 LE
+dealloc[]: n_frames(u32) frames(...) count(u64)
+```
+
+`read(path)` 自动检测文本/二进制格式 (检查 "MEMPROFD" magic)。
+
+### 5.4 malloc 插桩
+
+`MemProfInstrumentor` 生成对 runtime 库函数的调用：
+* `__dcc_memprof_alloc_record(size, return_addr)` - malloc 前插入
+* `__dcc_memprof_free_record(ptr, return_addr)` - free 前插入
+
+`MemProfRuntime::generate_runtime_stub()` 生成 C 代码桩用于链接。
+
+### 5.5 `is_cold` 启发
 
 ```rust
 pub fn is_cold(&self, stack: &[String], threshold: u64) -> bool {

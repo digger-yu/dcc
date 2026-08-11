@@ -79,7 +79,7 @@
 | ~~GCOV~~ | ✅ 完整格式支持: read_notes/read_data 读取器 + 行级覆盖率报告 (GcovReport) + GCC gcov-9 layout 兼容 |
 | ~~AutoFDO~~ | ✅ 二进制格式 + discriminator 支持: write_binary/read_binary + disc 记录 + 自动检测文本/二进制 |
 | ~~LBR~~ | ✅ perf.data 二进制 LBR 记录解析: read_perf_data_binary + PERF_RECORD_SAMPLE branch_stack + 自动检测文本/二进制 + serialize |
-| MemProf | 未在 libc malloc 上插桩；无 runtime 库 |
+| ~~MemProf~~ | ✅ malloc 插桩 + runtime 库接口: MemProfInstrumentor + MemProfRuntime + 二进制 .memprofdata 格式 + 自动检测 |
 | Perf 事件 | 仅支持 `perf stat` 文本输出，不读 `perf.data` 二进制 |
 | Offloading | 实际 CUDA/ROCm driver 链接未实装 |
 
