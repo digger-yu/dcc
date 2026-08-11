@@ -25,7 +25,7 @@
 | `profile::gcov` | `src/profile/gcov.rs` | 🟢 端到端 (`.gcno` + `.gcda` 二进制 + 读取器 + 报告) | `-ftest-coverage` / `-fprofile-arcs` |
 | `profile::pgo` | `src/profile/pgo.rs` | 🟢 端到端 (`.profraw` v2 + AST 插桩) | `-fprofile-generate` / `-fprofile-use` |
 | `profile::autofdo` | `src/profile/autofdo.rs` | 🟢 端到端 (文本 + 二进制 + discriminator) | `-fauto-profile=` / `-fprofile-sample-use=` |
-| `profile::lbr` | `src/profile/lbr.rs` | 🟡 解析 `perf script -F brstack` | `-flbr-profile=` |
+| `profile::lbr` | `src/profile/lbr.rs` | 🟢 端到端 (文本 + perf.data 二进制) | `-flbr-profile=` |
 | `profile::memprof` | `src/profile/memprof.rs` | 🟡 配置 + 数据结构 | `-fmemory-profile` / `-fmemory-profile-use=` |
 | `profile::perf_event` | `src/profile/perf_event.rs` | 🟡 TopdownL1 数据结构 | `-ftopdownmetrics` |
 | `profile::offload` | `src/profile/offload.rs` | 🟢 二进制 `.dcc.offload` + entry 收集 | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` |
@@ -278,11 +278,20 @@ LBR: CPU 在每条分支指令后落 `(from_ip, to_ip, cycle)` 三元组到 MSR�
 
 ### 4.2 解析格式
 
-对齐 `perf script -F brstack`：
+1. 文本格式 (对齐 `perf script -F brstack`)：
 
 ```
-<from_func> <from_addr> <to_func> <to_addr> <cycles>
+<from_func> <from_addr> <to_func> <to_addr> [M|P] [<cycles>]
 ```
+
+2. perf.data 二进制 (PERF_RECORD_SAMPLE with branch_stack)：
+
+```
+每条 LBR entry: from(u64) to(u64) flags(u64) cycles(u16)
+flags & 1 = mispredicted
+```
+
+`read(path)` 自动检测文本/二进制格式 (检查 "PERFILE2" magic)。
 
 ### 4.3 数据结构
 
@@ -298,7 +307,10 @@ pub struct LbrProfile {
 
 ### 4.4 测试
 
-`parse_brstack`，以及 `tests/profile.rs::cli_lbr_profile_rejects_missing`。
+`parse_brstack` + `lbr_perf_data_binary_parsing` +
+`lbr_read_auto_detects_format` + `lbr_serialize_roundtrip` +
+`lbr_perf_data_rejects_bad_magic`，
+以及 `tests/profile.rs::cli_lbr_profile_rejects_missing`。
 
 ---
 

@@ -10,13 +10,16 @@
 //   * LBR stack 深度有限 (典型 16/32 条)
 //   * 跨函数调用 / 中断会污染样本
 //
-// 数据格式 (perf script -F brstack):
-//   <from_func> <from_addr> <to_func> <to_addr> [<mispred>|<pred>] [<cycles>]
-//   简化: `func1 0xADDR1 func2 0xADDR2 [cycles]`
+// 数据格式:
+// 1. perf script -F brstack 文本:
+//    <from_func> <from_addr> <to_func> <to_addr> [<mispred>|<pred>] [<cycles>]
+// 2. perf.data 二进制 (PERF_RECORD_SAMPLE with branch_stack):
+//    每条 LBR entry: from(u64) to(u64) flags(u64) cycles(u16)
 //
 // 已接入 driver → ProfileWeights → codegen (.text.hot / .text.unlikely).
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{self, BufRead};
 use std::path::Path;
 
@@ -61,6 +64,20 @@ pub struct LbrSummary {
 impl LbrProfile {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// 从文件路径解析 (自动检测文本 brstack 或 perf.data 二进制)
+    pub fn read(path: &Path) -> io::Result<Self> {
+        let data = fs::read(path)?;
+        // Check for perf.data magic "PERFILE2"
+        if data.len() >= 8 && &data[0..8] == b"PERFILE2" {
+            return Self::read_perf_data_binary(&data);
+        }
+        // Otherwise treat as text brstack
+        let s = String::from_utf8(data).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })?;
+        Self::from_str(&s)
     }
 
     /// 从文件路径解析 `perf script -F brstack` 输出
@@ -233,6 +250,136 @@ impl LbrProfile {
             .unwrap_or(0);
         mispred as f64 / total as f64
     }
+
+    /// 从 perf.data 二进制解析 LBR 记录.
+    /// perf.data 格式: magic("PERFILE2") + header + attrs + records
+    /// PERF_RECORD_SAMPLE (type=9) 含 branch_stack:
+    ///   nr(u64) + entries[]: from(u64) to(u64) flags(u64) cycles(u16)
+    pub fn read_perf_data_binary(data: &[u8]) -> io::Result<Self> {
+        if data.len() < 8 || &data[0..8] != b"PERFILE2" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not a perf.data file",
+            ));
+        }
+        let mut profile = LbrProfile::default();
+        // Parse header to find record offset
+        if data.len() < 32 {
+            return Ok(profile);
+        }
+        let header_size = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+        let attr_size = u64::from_le_bytes(data[16..24].try_into().unwrap()) as usize;
+        let n_attrs = u64::from_le_bytes(data[24..32].try_into().unwrap()) as usize;
+
+        // Skip to data section (simplified: assume fixed offset)
+        // Real perf.data has complex header with feature sections
+        let mut off = header_size.max(32);
+        // Skip attr table
+        off += n_attrs * attr_size.max(64);
+        // Align to 8 bytes
+        off = (off + 7) & !7;
+
+        // Parse records
+        while off + 8 <= data.len() {
+            // perf_event_header: type(u32) misc(u16) size(u16)
+            let rec_type = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            let rec_size = u16::from_le_bytes(data[off + 6..off + 8].try_into().unwrap()) as usize;
+            if rec_size < 8 || off + rec_size > data.len() {
+                break;
+            }
+            // PERF_RECORD_SAMPLE = 9
+            if rec_type == 9 {
+                // Sample record: skip sample_id, look for branch_stack
+                // Simplified: scan for branch_stack pattern
+                let mut pos = off + 8; // skip header
+                // Skip sample_id (pid, tid, time, etc.) - variable size
+                // In practice, branch_stack comes after fixed fields
+                // For simplicity, look for nr field followed by valid entries
+                while pos + 24 <= off + rec_size {
+                    let nr = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+                    if nr > 0 && nr < 100 && pos + 8 + nr as usize * 26 <= off + rec_size {
+                        // Likely branch_stack
+                        let mut entry_off = pos + 8;
+                        for _ in 0..nr {
+                            let from = u64::from_le_bytes(
+                                data[entry_off..entry_off + 8].try_into().unwrap(),
+                            );
+                            let to = u64::from_le_bytes(
+                                data[entry_off + 8..entry_off + 16].try_into().unwrap(),
+                            );
+                            let flags = u64::from_le_bytes(
+                                data[entry_off + 16..entry_off + 24].try_into().unwrap(),
+                            );
+                            let cycles = if entry_off + 26 <= off + rec_size {
+                                Some(u16::from_le_bytes(
+                                    data[entry_off + 24..entry_off + 26].try_into().unwrap(),
+                                ) as u64)
+                            } else {
+                                None
+                            };
+                            let mispredicted = (flags & 1) != 0;
+                            // Use addresses as function names (hex)
+                            let from_func = format!("0x{:x}", from);
+                            let to_func = format!("0x{:x}", to);
+                            *profile
+                                .edges
+                                .entry((from_func.clone(), to_func.clone()))
+                                .or_insert(0) += 1;
+                            if mispredicted {
+                                *profile
+                                    .mispred_edges
+                                    .entry((from_func.clone(), to_func.clone()))
+                                    .or_insert(0) += 1;
+                            }
+                            if let Some(c) = cycles {
+                                *profile
+                                    .edge_cycles
+                                    .entry((from_func.clone(), to_func.clone()))
+                                    .or_insert(0) += c;
+                            }
+                            if profile.detailed_edges.len() < 10000 {
+                                profile.detailed_edges.push(LbrEdge {
+                                    from_func,
+                                    from_addr: from,
+                                    to_func,
+                                    to_addr: to,
+                                    mispredicted,
+                                    cycles,
+                                });
+                            }
+                            entry_off += 26;
+                        }
+                        break;
+                    }
+                    pos += 8;
+                }
+            }
+            off += rec_size;
+        }
+        profile.finalize();
+        Ok(profile)
+    }
+
+    /// 序列化为文本格式 (与 brstack 兼容)
+    pub fn serialize(&self) -> String {
+        let mut out = String::new();
+        for edge in &self.detailed_edges {
+            out.push_str(&format!(
+                "{} 0x{:x} {} 0x{:x}",
+                edge.from_func, edge.from_addr, edge.to_func, edge.to_addr
+            ));
+            if edge.mispredicted {
+                out.push_str(" M");
+            } else {
+                out.push_str(" P");
+            }
+            if let Some(c) = edge.cycles {
+                out.push_str(&format!(" {}", c));
+            }
+            out.push('\n');
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -340,5 +487,95 @@ mod tests {
         let s = p.summary();
         assert_eq!(s.total_edges, 0);
         assert_eq!(s.unique_edges, 0);
+    }
+
+    /// perf.data binary LBR parsing with synthetic data.
+    #[test]
+    fn lbr_perf_data_binary_parsing() {
+        // Build a minimal perf.data with one PERF_RECORD_SAMPLE
+        let mut data: Vec<u8> = Vec::new();
+        // Header: magic + header_size + attr_size + n_attrs
+        data.extend_from_slice(b"PERFILE2");
+        data.extend_from_slice(&104u64.to_le_bytes()); // header_size
+        data.extend_from_slice(&64u64.to_le_bytes()); // attr_size
+        data.extend_from_slice(&0u64.to_le_bytes()); // n_attrs
+        // Pad header to 104 bytes
+        data.resize(104, 0);
+
+        // PERF_RECORD_SAMPLE record
+        let rec_start = data.len();
+        data.extend_from_slice(&9u32.to_le_bytes()); // type = PERF_RECORD_SAMPLE
+        data.extend_from_slice(&0u16.to_le_bytes()); // misc
+        // size placeholder (will fill later)
+        let size_pos = data.len();
+        data.extend_from_slice(&0u16.to_le_bytes()); // size at offset 6
+        // branch_stack: nr=2, then 2 entries
+        data.extend_from_slice(&2u64.to_le_bytes()); // nr = 2
+        // Entry 1: from=0x1000, to=0x2000, flags=0, cycles=100
+        data.extend_from_slice(&0x1000u64.to_le_bytes());
+        data.extend_from_slice(&0x2000u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // flags
+        data.extend_from_slice(&100u16.to_le_bytes()); // cycles
+        // Entry 2: from=0x2000, to=0x3000, flags=1 (mispred), cycles=200
+        data.extend_from_slice(&0x2000u64.to_le_bytes());
+        data.extend_from_slice(&0x3000u64.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes()); // flags (mispred)
+        data.extend_from_slice(&200u16.to_le_bytes()); // cycles
+        // Fill in record size
+        let rec_size = (data.len() - rec_start) as u16;
+        data[size_pos..size_pos + 2].copy_from_slice(&rec_size.to_le_bytes());
+
+        let p = LbrProfile::read_perf_data_binary(&data).unwrap();
+        assert!(p.detailed_edges.len() >= 2);
+        assert_eq!(p.detailed_edges[0].from_addr, 0x1000);
+        assert_eq!(p.detailed_edges[0].to_addr, 0x2000);
+        assert!(!p.detailed_edges[0].mispredicted);
+        assert_eq!(p.detailed_edges[0].cycles, Some(100));
+        assert!(p.detailed_edges[1].mispredicted);
+    }
+
+    /// read() auto-detects text vs binary format.
+    #[test]
+    fn lbr_read_auto_detects_format() {
+        // Text file
+        let tmp_txt = std::env::temp_dir().join("dcc-lbr-auto.txt");
+        std::fs::write(&tmp_txt, b"main 0x1000 foo 0x2000 5\n").unwrap();
+        let p1 = LbrProfile::read(&tmp_txt).unwrap();
+        assert_eq!(p1.hot_edge_count("main", "foo"), 1);
+        let _ = std::fs::remove_file(&tmp_txt);
+
+        // Binary file (perf.data magic)
+        let tmp_bin = std::env::temp_dir().join("dcc-lbr-auto.bin");
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(b"PERFILE2");
+        data.resize(200, 0);
+        std::fs::write(&tmp_bin, &data).unwrap();
+        let p2 = LbrProfile::read(&tmp_bin).unwrap();
+        // Empty but valid
+        assert_eq!(p2.summary().total_edges, 0);
+        let _ = std::fs::remove_file(&tmp_bin);
+    }
+
+    /// serialize() produces text output compatible with brstack.
+    #[test]
+    fn lbr_serialize_roundtrip() {
+        let p = LbrProfile::from_str(
+            "main 0x1000 foo 0x2000 M 100\nfoo 0x2000 bar 0x3000 P 200\n",
+        )
+        .unwrap();
+        let text = p.serialize();
+        assert!(text.contains("main 0x1000 foo 0x2000 M 100"));
+        assert!(text.contains("foo 0x2000 bar 0x3000 P 200"));
+        // Parse back
+        let p2 = LbrProfile::from_str(&text).unwrap();
+        assert_eq!(p2.hot_edge_count("main", "foo"), 1);
+        assert_eq!(p2.hot_edge_count("foo", "bar"), 1);
+    }
+
+    /// perf.data rejects non-perf files.
+    #[test]
+    fn lbr_perf_data_rejects_bad_magic() {
+        let result = LbrProfile::read_perf_data_binary(b"NOTPERF!");
+        assert!(result.is_err());
     }
 }
