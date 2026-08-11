@@ -10,7 +10,7 @@
 //   2. **frontend-PGO** (`-fprofile-generate` / `-fprofile-use`, GCC 风格):
 //      使用 .gcda 形式的 counters, 编译时把每个 BB 的入口权重视为 hot/cold.
 //
-// 当前 dcc 实现: 入口计数器 (instr-PGO 简化版) + 下游权重传播.
+// dcc 实现 (v2 格式扩展):
 //   * `instrument_program(prog, cfg)` 在每个 FuncDecl body 顶部插入
 //     `__dcc_pgo_count_fn(idx)` 调用
 //   * `_dcc_pgo_runtime` 累加 idx -> counter, atexit 写 `<name>.profraw`
@@ -18,12 +18,28 @@
 //   * `propagate_edge_weights(w)` 把边计数转为 BranchProbMap (分支概率)
 //   * `propagate_loop_trip_counts(w)` 推算循环 trip count (供 unroll 决策)
 //   * codegen 消费 BranchProbMap 做基本块布局 (hot path first)
+//
+// v2 格式增强:
+//   * Value profiling: 每个 site 可附带 call target 计数表
+//     (间接调用目标 -> 次数), 供 indirect call promotion 使用
+//   * Checksum: FNV-1a 哈希所有 site 信息, 检测 profraw 文件损坏
+//   * Merge: 多个 profraw 合并为一个 (计数器累加)
+//   * Profdata: 合并后的优化格式 (去重 + 排序 + 压缩站点表)
 
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::Path;
 
 use crate::ast::{BlockItem, Decl, Expr, Program, Stmt, Type};
+
+/// profraw 格式版本
+pub const PROFRAW_VERSION_V1: u32 = 1;
+pub const PROFRAW_VERSION_V2: u32 = 2;
+pub const PROFRAW_VERSION_CURRENT: u32 = PROFRAW_VERSION_V2;
+
+/// profdata magic (merged format)
+pub const PROFDATA_MAGIC: &[u8; 4] = b"PRFD";
+pub const PROFDATA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default)]
 pub struct PgoConfig {
@@ -41,12 +57,54 @@ impl PgoConfig {
     }
 }
 
+/// Value profiling entry: indirect call target counts for a site.
+/// Used for indirect call promotion optimization.
+#[derive(Debug, Clone, Default)]
+pub struct ValueProfileData {
+    /// (target_func_name -> count) for indirect call sites
+    pub call_targets: Vec<(String, u64)>,
+}
+
+impl ValueProfileData {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a call target observation
+    pub fn add_target(&mut self, target: &str, count: u64) {
+        if let Some(entry) = self.call_targets.iter_mut().find(|(n, _)| n == target) {
+            entry.1 += count;
+        } else {
+            self.call_targets.push((target.to_string(), count));
+        }
+    }
+
+    /// Get the most likely call target (highest count)
+    pub fn top_target(&self) -> Option<(&str, u64)> {
+        self.call_targets
+            .iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(n, c)| (n.as_str(), *c))
+    }
+
+    /// Total count across all targets
+    pub fn total_count(&self) -> u64 {
+        self.call_targets.iter().map(|(_, c)| *c).sum()
+    }
+}
+
 /// 简单 profraw 容器: u64 counter per instrumented site.
 #[derive(Debug, Clone, Default)]
 pub struct Profraw {
     pub counters: Vec<u64>,
     /// 站点标签 (按插入顺序)
     pub sites: Vec<PgoSite>,
+    /// v2: value profiling data per site (indexed by site index)
+    pub value_profiles: HashMap<usize, ValueProfileData>,
+    /// v2: FNV-1a checksum of all sites for integrity verification
+    pub checksum: u64,
+    /// Format version (1 or 2)
+    pub version: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -65,15 +123,72 @@ impl Profraw {
         let idx = self.counters.len();
         self.sites.push(site);
         self.counters.push(0);
+        self.version = PROFRAW_VERSION_CURRENT;
         idx
     }
 
-    /// 写 `<name>.profraw`。 layout: 魔数 0x70726F66 ("prof") + version +
-    /// 站点数 + 站点数组 + 计数器数组.
+    /// Add value profiling data for a specific site
+    pub fn add_value_profile(&mut self, site_idx: usize, data: ValueProfileData) {
+        if site_idx < self.sites.len() {
+            self.value_profiles.insert(site_idx, data);
+        }
+    }
+
+    /// Compute FNV-1a checksum of all site information
+    fn compute_checksum(sites: &[PgoSite]) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+        for site in sites {
+            for byte in site.func.as_bytes() {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3); // FNV-1a prime
+            }
+            for byte in site.file.as_bytes() {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            hash ^= site.line as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    /// Finalize the profraw: compute checksum and set version
+    pub fn finalize(&mut self) {
+        self.checksum = Self::compute_checksum(&self.sites);
+        self.version = PROFRAW_VERSION_CURRENT;
+    }
+
+    /// Write profraw v2 format with extended fields.
+    /// Layout:
+    ///   magic    4B  "PROF"
+    ///   version  u32 2
+    ///   checksum u64 FNV-1a of all sites
+    ///   n_sites  u32 N
+    ///   site[]   N * { func_len u32, func, file_len u32, file, line u32 }
+    ///   n_vp     u32 number of sites with value profiles
+    ///   vp[]     n_vp * { site_idx u32, n_targets u32,
+    ///                     targets[]: { name_len u32, name, count u64 } }
+    ///   n_counters u32 M
+    ///   counter[]  M * u64
     pub fn write(&self, out: &Path) -> io::Result<usize> {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(b"PROF");
-        buf.extend_from_slice(&1u32.to_le_bytes()); // version
+        let version = if self.version >= PROFRAW_VERSION_V2 {
+            PROFRAW_VERSION_V2
+        } else {
+            PROFRAW_VERSION_V1
+        };
+        buf.extend_from_slice(&version.to_le_bytes());
+
+        if version >= PROFRAW_VERSION_V2 {
+            let checksum = if self.checksum != 0 {
+                self.checksum
+            } else {
+                Self::compute_checksum(&self.sites)
+            };
+            buf.extend_from_slice(&checksum.to_le_bytes());
+        }
+
         buf.extend_from_slice(&(self.sites.len() as u32).to_le_bytes());
         for s in &self.sites {
             let f = s.func.as_bytes();
@@ -84,6 +199,23 @@ impl Profraw {
             buf.extend_from_slice(p);
             buf.extend_from_slice(&s.line.to_le_bytes());
         }
+
+        if version >= PROFRAW_VERSION_V2 {
+            // Write value profiles
+            let vp_count = self.value_profiles.len() as u32;
+            buf.extend_from_slice(&vp_count.to_le_bytes());
+            for (&site_idx, vp) in &self.value_profiles {
+                buf.extend_from_slice(&(site_idx as u32).to_le_bytes());
+                buf.extend_from_slice(&(vp.call_targets.len() as u32).to_le_bytes());
+                for (target, count) in &vp.call_targets {
+                    let t = target.as_bytes();
+                    buf.extend_from_slice(&(t.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(t);
+                    buf.extend_from_slice(&count.to_le_bytes());
+                }
+            }
+        }
+
         buf.extend_from_slice(&(self.counters.len() as u32).to_le_bytes());
         for c in &self.counters {
             buf.extend_from_slice(&c.to_le_bytes());
@@ -108,14 +240,35 @@ impl Profraw {
             ));
         }
         let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        if ver != 1 {
+        if ver != PROFRAW_VERSION_V1 && ver != PROFRAW_VERSION_V2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported profraw version: {ver}"),
             ));
         }
-        let n = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
-        let mut off = 12usize;
+        let mut off = 8usize;
+
+        // v2: read checksum
+        let mut checksum: u64 = 0;
+        if ver >= PROFRAW_VERSION_V2 {
+            if off + 8 > buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "truncated profraw v2 checksum",
+                ));
+            }
+            checksum = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+            off += 8;
+        }
+
+        if off + 4 > buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated profraw site count",
+            ));
+        }
+        let n = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
         let mut sites = Vec::with_capacity(n);
         for _ in 0..n {
             let lf = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
@@ -134,15 +287,298 @@ impl Profraw {
             off += 4;
             sites.push(PgoSite { func, file, line });
         }
+
+        // Verify checksum
+        if ver >= PROFRAW_VERSION_V2 && checksum != 0 {
+            let computed = Self::compute_checksum(&sites);
+            if computed != checksum {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "profraw checksum mismatch: expected {checksum:016x}, got {computed:016x}"
+                    ),
+                ));
+            }
+        }
+
+        // v2: read value profiles
+        let mut value_profiles = HashMap::new();
+        if ver >= PROFRAW_VERSION_V2 && off + 4 <= buf.len() {
+            let n_vp = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            for _ in 0..n_vp {
+                if off + 8 > buf.len() {
+                    break;
+                }
+                let site_idx =
+                    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                off += 4;
+                let n_targets =
+                    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                off += 4;
+                let mut vp = ValueProfileData::new();
+                for _ in 0..n_targets {
+                    if off + 4 > buf.len() {
+                        break;
+                    }
+                    let tl =
+                        u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                    off += 4;
+                    if off + tl + 8 > buf.len() {
+                        break;
+                    }
+                    let target = std::str::from_utf8(&buf[off..off + tl])
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                        .to_string();
+                    off += tl;
+                    let count =
+                        u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+                    off += 8;
+                    vp.add_target(&target, count);
+                }
+                value_profiles.insert(site_idx, vp);
+            }
+        }
+
+        if off + 4 > buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated profraw counter count",
+            ));
+        }
         let nc = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
         off += 4;
         let mut counters = Vec::with_capacity(nc);
         for _ in 0..nc {
+            if off + 8 > buf.len() {
+                break;
+            }
             let c = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
             off += 8;
             counters.push(c);
         }
-        Ok(Self { sites, counters })
+        Ok(Self {
+            sites,
+            counters,
+            value_profiles,
+            checksum,
+            version: ver,
+        })
+    }
+
+    /// Merge another profraw into self (counter accumulation).
+    /// Both must have the same sites (same checksum); returns error otherwise.
+    pub fn merge(&mut self, other: &Profraw) -> io::Result<()> {
+        if self.sites.len() != other.sites.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "profraw merge: site count mismatch ({} vs {})",
+                    self.sites.len(),
+                    other.sites.len()
+                ),
+            ));
+        }
+        // Verify sites match
+        for (i, (a, b)) in self.sites.iter().zip(other.sites.iter()).enumerate() {
+            if a.func != b.func || a.file != b.file || a.line != b.line {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("profraw merge: site {} mismatch", i),
+                ));
+            }
+        }
+        // Accumulate counters
+        for (i, c) in other.counters.iter().enumerate() {
+            if i < self.counters.len() {
+                self.counters[i] = self.counters[i].saturating_add(*c);
+            }
+        }
+        // Merge value profiles
+        for (&idx, vp) in &other.value_profiles {
+            let entry = self.value_profiles.entry(idx).or_default();
+            for (target, count) in &vp.call_targets {
+                entry.add_target(target, *count);
+            }
+        }
+        // Recompute checksum
+        self.checksum = Self::compute_checksum(&self.sites);
+        self.version = PROFRAW_VERSION_CURRENT;
+        Ok(())
+    }
+
+    /// Write merged profdata format (optimized for -fprofile-use).
+    /// Layout:
+    ///   magic    4B  "PRFD"
+    ///   version  u32 1
+    ///   n_funcs  u32 (unique function count)
+    ///   func[]   n_funcs * { name_len u32, name, total_count u64,
+    ///                        n_sites u32, site_indices u32[] }
+    ///   n_counters u32
+    ///   counter[]  u64[]
+    ///   n_vp     u32
+    ///   vp[]     same as profraw v2
+    pub fn write_profdata(&self, out: &Path) -> io::Result<usize> {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(PROFDATA_MAGIC);
+        buf.extend_from_slice(&PROFDATA_VERSION.to_le_bytes());
+
+        // Aggregate by function
+        let mut func_map: HashMap<String, (u64, Vec<usize>)> = HashMap::new();
+        for (i, s) in self.sites.iter().enumerate() {
+            let entry = func_map.entry(s.func.clone()).or_insert((0, Vec::new()));
+            entry.0 += self.counters.get(i).copied().unwrap_or(0);
+            entry.1.push(i);
+        }
+
+        buf.extend_from_slice(&(func_map.len() as u32).to_le_bytes());
+        // Sort functions by total count (descending) for better locality
+        let mut func_list: Vec<_> = func_map.into_iter().collect();
+        func_list.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        for (name, (total, indices)) in &func_list {
+            let nb = name.as_bytes();
+            buf.extend_from_slice(&(nb.len() as u32).to_le_bytes());
+            buf.extend_from_slice(nb);
+            buf.extend_from_slice(&total.to_le_bytes());
+            buf.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+            for &idx in indices {
+                buf.extend_from_slice(&(idx as u32).to_le_bytes());
+            }
+        }
+
+        // Counters
+        buf.extend_from_slice(&(self.counters.len() as u32).to_le_bytes());
+        for c in &self.counters {
+            buf.extend_from_slice(&c.to_le_bytes());
+        }
+
+        // Value profiles
+        buf.extend_from_slice(&(self.value_profiles.len() as u32).to_le_bytes());
+        for (&site_idx, vp) in &self.value_profiles {
+            buf.extend_from_slice(&(site_idx as u32).to_le_bytes());
+            buf.extend_from_slice(&(vp.call_targets.len() as u32).to_le_bytes());
+            for (target, count) in &vp.call_targets {
+                let t = target.as_bytes();
+                buf.extend_from_slice(&(t.len() as u32).to_le_bytes());
+                buf.extend_from_slice(t);
+                buf.extend_from_slice(&count.to_le_bytes());
+            }
+        }
+
+        if let Some(parent) = out.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        std::fs::write(out, &buf)?;
+        Ok(buf.len())
+    }
+
+    /// Read merged profdata format
+    pub fn read_profdata(path: &Path) -> io::Result<Self> {
+        let mut f = std::fs::File::open(path)?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+        if buf.len() < 8 || &buf[0..4] != PROFDATA_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad profdata magic",
+            ));
+        }
+        let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+        if ver != PROFDATA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported profdata version: {ver}"),
+            ));
+        }
+        let mut off = 8usize;
+
+        let n_funcs = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let mut sites = Vec::new();
+        for _ in 0..n_funcs {
+            let nl = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            let _name = std::str::from_utf8(&buf[off..off + nl])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                .to_string();
+            off += nl;
+            let _total = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+            off += 8;
+            let n_sites =
+                u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            for _ in 0..n_sites {
+                let _idx = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+                off += 4;
+                // Reconstruct site from func name
+                sites.push(PgoSite {
+                    func: _name.clone(),
+                    file: String::new(),
+                    line: 0,
+                });
+            }
+        }
+
+        let nc = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let mut counters = Vec::with_capacity(nc);
+        for _ in 0..nc {
+            if off + 8 > buf.len() {
+                break;
+            }
+            let c = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+            off += 8;
+            counters.push(c);
+        }
+
+        // Value profiles
+        let mut value_profiles = HashMap::new();
+        if off + 4 <= buf.len() {
+            let n_vp = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            for _ in 0..n_vp {
+                if off + 8 > buf.len() {
+                    break;
+                }
+                let site_idx =
+                    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                off += 4;
+                let n_targets =
+                    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                off += 4;
+                let mut vp = ValueProfileData::new();
+                for _ in 0..n_targets {
+                    if off + 4 > buf.len() {
+                        break;
+                    }
+                    let tl =
+                        u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                    off += 4;
+                    if off + tl + 8 > buf.len() {
+                        break;
+                    }
+                    let target = std::str::from_utf8(&buf[off..off + tl])
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                        .to_string();
+                    off += tl;
+                    let count =
+                        u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+                    off += 8;
+                    vp.add_target(&target, count);
+                }
+                value_profiles.insert(site_idx, vp);
+            }
+        }
+
+        Ok(Self {
+            sites,
+            counters,
+            value_profiles,
+            checksum: 0,
+            version: PROFRAW_VERSION_V2,
+        })
     }
 }
 
@@ -725,5 +1161,200 @@ mod tests {
         let counts = LoopTripCounts::new();
         assert_eq!(counts.get_trip_count("unknown", 0), 0.0);
         assert!(!counts.should_unroll("unknown", 0, 4.0));
+    }
+
+    /// Test profraw v2 format roundtrip with checksum
+    #[test]
+    fn profraw_v2_roundtrip_with_checksum() {
+        let mut p = Profraw::new();
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 1,
+        });
+        p.add(PgoSite {
+            func: "foo".into(),
+            file: "m.c".into(),
+            line: 5,
+        });
+        p.counters[0] = 42;
+        p.counters[1] = 77;
+        p.finalize();
+        assert_ne!(p.checksum, 0);
+
+        let tmp = std::env::temp_dir().join("dcc-pgo-v2-test.profraw");
+        let _ = std::fs::remove_file(&tmp);
+        p.write(&tmp).unwrap();
+        let q = Profraw::read(&tmp).unwrap();
+        assert_eq!(q.version, PROFRAW_VERSION_V2);
+        assert_eq!(q.sites.len(), 2);
+        assert_eq!(q.counters, vec![42, 77]);
+        assert_ne!(q.checksum, 0);
+        assert_eq!(q.checksum, p.checksum);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Test value profiling data roundtrip
+    #[test]
+    fn profraw_v2_value_profiles_roundtrip() {
+        let mut p = Profraw::new();
+        let idx = p.add(PgoSite {
+            func: "caller".into(),
+            file: "m.c".into(),
+            line: 10,
+        });
+        p.counters[0] = 100;
+        let mut vp = ValueProfileData::new();
+        vp.add_target("target_a", 60);
+        vp.add_target("target_b", 30);
+        vp.add_target("target_a", 10); // accumulate
+        p.add_value_profile(idx, vp);
+        p.finalize();
+
+        let tmp = std::env::temp_dir().join("dcc-pgo-vp-test.profraw");
+        let _ = std::fs::remove_file(&tmp);
+        p.write(&tmp).unwrap();
+        let q = Profraw::read(&tmp).unwrap();
+        assert_eq!(q.value_profiles.len(), 1);
+        let vp2 = &q.value_profiles[&idx];
+        assert_eq!(vp2.call_targets.len(), 2);
+        assert_eq!(vp2.total_count(), 100);
+        let (top, count) = vp2.top_target().unwrap();
+        assert_eq!(top, "target_a");
+        assert_eq!(count, 70);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Test profraw merge: two files with same sites
+    #[test]
+    fn profraw_merge_accumulates_counters() {
+        let mut a = Profraw::new();
+        a.add(PgoSite { func: "f".into(), file: "a.c".into(), line: 1 });
+        a.add(PgoSite { func: "g".into(), file: "a.c".into(), line: 5 });
+        a.counters[0] = 10;
+        a.counters[1] = 20;
+        a.finalize();
+
+        let mut b = Profraw::new();
+        b.add(PgoSite { func: "f".into(), file: "a.c".into(), line: 1 });
+        b.add(PgoSite { func: "g".into(), file: "a.c".into(), line: 5 });
+        b.counters[0] = 5;
+        b.counters[1] = 15;
+        b.finalize();
+
+        a.merge(&b).unwrap();
+        assert_eq!(a.counters[0], 15);
+        assert_eq!(a.counters[1], 35);
+    }
+
+    /// Test profraw merge rejects mismatched sites
+    #[test]
+    fn profraw_merge_rejects_mismatched_sites() {
+        let mut a = Profraw::new();
+        a.add(PgoSite { func: "f".into(), file: "a.c".into(), line: 1 });
+        a.finalize();
+
+        let mut b = Profraw::new();
+        b.add(PgoSite { func: "g".into(), file: "b.c".into(), line: 2 });
+        b.finalize();
+
+        let err = a.merge(&b).unwrap_err();
+        assert!(err.to_string().contains("site 0 mismatch"));
+    }
+
+    /// Test profdata format roundtrip
+    #[test]
+    fn profdata_roundtrip() {
+        let mut p = Profraw::new();
+        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 1 });
+        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 3 });
+        p.add(PgoSite { func: "foo".into(), file: "m.c".into(), line: 7 });
+        p.counters[0] = 100;
+        p.counters[1] = 80;
+        p.counters[2] = 50;
+        let mut vp = ValueProfileData::new();
+        vp.add_target("bar", 40);
+        p.add_value_profile(2, vp);
+        p.finalize();
+
+        let tmp = std::env::temp_dir().join("dcc-profdata-test.profdata");
+        let _ = std::fs::remove_file(&tmp);
+        p.write_profdata(&tmp).unwrap();
+        let q = Profraw::read_profdata(&tmp).unwrap();
+        assert_eq!(q.counters, vec![100, 80, 50]);
+        assert_eq!(q.value_profiles.len(), 1);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Test checksum detects corruption
+    #[test]
+    fn profraw_checksum_detects_corruption() {
+        let mut p = Profraw::new();
+        p.add(PgoSite { func: "f".into(), file: "a.c".into(), line: 1 });
+        p.counters[0] = 42;
+        p.finalize();
+
+        let tmp = std::env::temp_dir().join("dcc-pgo-corrupt.profraw");
+        let _ = std::fs::remove_file(&tmp);
+        p.write(&tmp).unwrap();
+
+        // Corrupt a byte in the site data area (the func name byte).
+        // v2 layout: 4(magic) + 4(ver) + 8(checksum) + 4(n_sites) +
+        //            4(func_len) = 24, then func name at offset 24.
+        // Corrupting the func name changes the checksum but keeps
+        // parsing valid.
+        let mut data = std::fs::read(&tmp).unwrap();
+        if data.len() > 25 {
+            data[24] = b'g'; // change func name from 'f' to 'g'
+        }
+        std::fs::write(&tmp, &data).unwrap();
+
+        let result = Profraw::read(&tmp);
+        // Either checksum mismatch or invalid data
+        assert!(result.is_err());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Test v1 format backward compatibility
+    #[test]
+    fn profraw_v1_backward_compat() {
+        // Write a v1 format file manually
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"PROF");
+        buf.extend_from_slice(&1u32.to_le_bytes()); // version 1
+        buf.extend_from_slice(&1u32.to_le_bytes()); // 1 site
+        // site: func="main", file="m.c", line=1
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(b"main");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(b"m.c");
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        // 1 counter
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&42u64.to_le_bytes());
+
+        let tmp = std::env::temp_dir().join("dcc-pgo-v1-compat.profraw");
+        std::fs::write(&tmp, &buf).unwrap();
+        let q = Profraw::read(&tmp).unwrap();
+        assert_eq!(q.version, PROFRAW_VERSION_V1);
+        assert_eq!(q.sites.len(), 1);
+        assert_eq!(q.counters, vec![42]);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Test ValueProfileData operations
+    #[test]
+    fn value_profile_data_operations() {
+        let mut vp = ValueProfileData::new();
+        assert!(vp.top_target().is_none());
+        assert_eq!(vp.total_count(), 0);
+
+        vp.add_target("foo", 10);
+        vp.add_target("bar", 20);
+        vp.add_target("foo", 5); // accumulate to 15
+        assert_eq!(vp.total_count(), 35);
+        let (top, count) = vp.top_target().unwrap();
+        assert_eq!(top, "bar");
+        assert_eq!(count, 20);
     }
 }

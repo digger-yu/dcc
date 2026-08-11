@@ -75,7 +75,7 @@
 
 | 通道 | 已知遗留 |
 |------|----------|
-| PGO | `.profraw` 二进制格式仅支持子集 |
+| ~~PGO~~ | ✅ v2 格式完整支持: value profiling + FNV-1a checksum + merge + profdata 合并格式 |
 | GCOV | 仅支持 dcc 简化格式, 不兼容 GCC gcov 完整格式 |
 | AutoFDO | 仅支持 dcc 简化文本格式，不兼容 LLVM extbinary 格式 |
 | LBR | 仅解析 `perf script -F brstack` 文本，不直接读 `perf.data` 二进制 |

@@ -23,7 +23,7 @@
 |--------|------|----------|----------|
 | `profile::mod` | `src/profile/mod.rs` | 🟢 配置聚合 | — |
 | `profile::gcov` | `src/profile/gcov.rs` | 🟢 端到端 (`.gcno` + `.gcda` 二进制) | `-ftest-coverage` / `-fprofile-arcs` |
-| `profile::pgo` | `src/profile/pgo.rs` | 🟢 端到端 (`.profraw` + AST 插桩) | `-fprofile-generate` / `-fprofile-use` |
+| `profile::pgo` | `src/profile/pgo.rs` | 🟢 端到端 (`.profraw` v2 + AST 插桩) | `-fprofile-generate` / `-fprofile-use` |
 | `profile::autofdo` | `src/profile/autofdo.rs` | 🟡 数据结构 + 极简 parser | `-fauto-profile=` / `-fprofile-sample-use=` |
 | `profile::lbr` | `src/profile/lbr.rs` | 🟡 解析 `perf script -F brstack` | `-flbr-profile=` |
 | `profile::memprof` | `src/profile/memprof.rs` | 🟡 配置 + 数据结构 | `-fmemory-profile` / `-fmemory-profile-use=` |
@@ -52,11 +52,12 @@ dcc 当前实现：入口计数器 (instr-PGO 简化版)。
 * 传播接口 `pgo::use_counts(prog, counts)` 留给后端，当前仅落
   `PgoWeights: HashMap<func_name, u64>` 备查
 
-### 1.2 `.profraw` 文件格式
+### 1.2 `.profraw` 文件格式 (v2)
 
 ```
 magic        : "PROF"         4 字节
-version      : u32 LE         1
+version      : u32 LE         2 (v2 支持 checksum + value profiling)
+checksum     : u64 LE         FNV-1a 哈希所有 site 信息
 n_sites      : u32 LE         N
 site[]       :                N × {
    func_len : u32 LE
@@ -65,16 +66,32 @@ site[]       :                N × {
    file     : UTF-8 bytes
    line     : u32 LE
 }
+n_vp         : u32 LE         含 value profile 的站点数
+vp[]         :                n_vp × {
+   site_idx : u32 LE
+   n_targets: u32 LE
+   targets[]: { name_len u32, name UTF-8, count u64 }
+}
 n_counters   : u32 LE         M
 counter[]    : u64 LE         M
 ```
+
+v1 格式向后兼容: 读取器同时支持 v1 (无 checksum/vp) 和 v2。
 
 字段释义：
 - `site` 记录每个 instrument 点的 (函数名, 源文件, 行号)，用于
   把 counter 反向映射到 IR 节点
 - `counter[i]` 是 `site[i]` 的入口执行计数
+- `checksum` 是 FNV-1a 哈希所有 site 信息，检测文件损坏
+- `vp[]` 记录间接调用目标计数，供 indirect call promotion 优化
 
-实现：`src/profile/pgo.rs::Profraw::write/read`。
+v2 增强操作:
+* `Profraw::merge(&mut self, other)` 合并多个 profraw (计数器累加)
+* `Profraw::write_profdata(out)` 写出合并优化格式 (.profdata)
+* `Profraw::read_profdata(path)` 读取 .profdata 格式
+* `ValueProfileData` 间接调用目标计数表
+
+实现：`src/profile/pgo.rs::Profraw::write/read/write_profdata/read_profdata`。
 测试：`Profraw::profraw_roundtrip` + `PgoWeights::weights_aggregate_by_func`，
 以及 `tests/profile.rs::cli_profile_generate_is_accepted`。
 
@@ -462,10 +479,6 @@ parse / memprof parse + is_cold / topdown sum / offload json roundtrip。
 
 ## 9. 已知限制与后续工作
 
-* **真实插桩路径未接 codegen**：`pgo::instrument_program` 改写了 AST，
-  但 driver / codegen 阶段尚未在每个函数 prologue emit `inc <counter>`
-  或调用 `__dcc_pgo_count_fn`。当前 `-fprofile-generate` 编译能过，
-  但运行期不会自动落 `.profraw`，需用户在入口手动调用。
 * **AutoFDO / LBR / MemProf 权重不下发到 codegen**：数据结构 + parser
   就绪，但 hot/cold 重排 / inliner hint / `__attribute__((malloc))`
   属性注入等下游通路还在 backlog。
