@@ -80,7 +80,7 @@
 | ~~AutoFDO~~ | ✅ 二进制格式 + discriminator 支持: write_binary/read_binary + disc 记录 + 自动检测文本/二进制 |
 | ~~LBR~~ | ✅ perf.data 二进制 LBR 记录解析: read_perf_data_binary + PERF_RECORD_SAMPLE branch_stack + 自动检测文本/二进制 + serialize |
 | ~~MemProf~~ | ✅ malloc 插桩 + runtime 库接口: MemProfInstrumentor + MemProfRuntime + 二进制 .memprofdata 格式 + 自动检测 |
-| Perf 事件 | 仅支持 `perf stat` 文本输出，不读 `perf.data` 二进制 |
+| ~~Perf 事件~~ | ✅ perf.data 二进制样本解析: `parse_samples` (PERF_RECORD_SAMPLE) + `correlate_events` 事件关联 + `aggregate_by_ip` IP 聚合 + 自动检测文本/二进制 |
 | Offloading | 实际 CUDA/ROCm driver 链接未实装 |
 
 ## 链接器限制

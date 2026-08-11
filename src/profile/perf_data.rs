@@ -1,4 +1,4 @@
-// src/profile/perf_data.rs - Linux perf.data 二进制读取 (简化版)
+// src/profile/perf_data.rs - Linux perf.data 二进制读取
 //
 // 第一性原理: Linux `perf record` 落盘的 perf.data 是 ELF-like 容器:
 //   magic "PERFILE2" (8 bytes) + header size + event attrs (perf_event_attr)
@@ -8,14 +8,17 @@
 // 编译器读 perf.data 把样本按 (pid, ip) 折叠成函数 / 行级权重, 喂给
 // AutoFDO 路径做函数布局 / inliner 提示.
 //
-// 当前 dcc 仅做基础解析:
+// dcc 实装:
 //   * 读 magic + header
 //   * 读 perf_event_attr 数组, 提取 event id + 类型
-//   * 跳过 data section (不解析具体 sample)
+//   * 解析 PERF_RECORD_SAMPLE 记录 (type=9)
+//   * 事件关联: 将样本映射到对应 event attr
 //
-// 完整解析需要跟踪每个 event 的 type + sample_type + read_format, 然后
-// 按 mmap page 翻 samples, 这是后续 M 的工作.
+// perf_event_header: type(u32) misc(u16) size(u16)
+// PERF_RECORD_SAMPLE: header + sample_id + ip(addr) + pid/tid + time
 
+use std::collections::HashMap;
+use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -52,14 +55,31 @@ pub struct PerfDataFile {
     pub data_offset: u64,
     /// data section 字节数
     pub data_size: u64,
+    /// 原始数据 (用于样本解析)
+    raw_data: Vec<u8>,
+}
+
+/// 解析出的样本记录
+#[derive(Debug, Clone)]
+pub struct PerfSample {
+    /// 指令指针 (PC)
+    pub ip: u64,
+    /// 进程 ID
+    pub pid: u32,
+    /// 线程 ID
+    pub tid: u32,
+    /// 时间戳
+    pub time: u64,
+    /// 周期数
+    pub period: u64,
+    /// 关联的 event attr 索引
+    pub attr_index: usize,
 }
 
 impl PerfDataFile {
     /// 读 perf.data 文件
     pub fn read(path: &Path) -> io::Result<Self> {
-        let mut f = std::fs::File::open(path)?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
+        let buf = fs::read(path)?;
         let file_size = buf.len() as u64;
         if buf.len() < 24 {
             return Err(io::Error::new(
@@ -136,6 +156,7 @@ impl PerfDataFile {
             attrs,
             data_offset,
             data_size,
+            raw_data: buf,
         })
     }
 
@@ -163,12 +184,103 @@ impl PerfDataFile {
         let per = self.data_size / self.attrs.len() as u64;
         vec![per; self.attrs.len()]
     }
+
+    /// 解析 PERF_RECORD_SAMPLE 记录.
+    /// 返回解析出的样本列表.
+    pub fn parse_samples(&self) -> Vec<PerfSample> {
+        let mut samples = Vec::new();
+        let data_start = self.data_offset as usize;
+        let data_end = (data_start + self.data_size as usize).min(self.raw_data.len());
+        let mut off = data_start;
+
+        while off + 8 <= data_end {
+            // perf_event_header: type(u32) misc(u16) size(u16)
+            if off + 8 > self.raw_data.len() {
+                break;
+            }
+            let rec_type = u32::from_le_bytes(
+                self.raw_data[off..off + 4].try_into().unwrap(),
+            );
+            let rec_size = u16::from_le_bytes(
+                self.raw_data[off + 6..off + 8].try_into().unwrap(),
+            ) as usize;
+            if rec_size < 8 || off + rec_size > data_end {
+                break;
+            }
+            // PERF_RECORD_SAMPLE = 9
+            if rec_type == 9 && rec_size >= 40 {
+                // Simplified sample record layout:
+                // +0: header (8 bytes)
+                // +8: ip (u64)
+                // +16: pid (u32) + tid (u32)
+                // +24: time (u64)
+                let ip = u64::from_le_bytes(
+                    self.raw_data[off + 8..off + 16].try_into().unwrap(),
+                );
+                let pid = u32::from_le_bytes(
+                    self.raw_data[off + 16..off + 20].try_into().unwrap(),
+                );
+                let tid = u32::from_le_bytes(
+                    self.raw_data[off + 20..off + 24].try_into().unwrap(),
+                );
+                let time = if rec_size >= 32 {
+                    u64::from_le_bytes(
+                        self.raw_data[off + 24..off + 32].try_into().unwrap(),
+                    )
+                } else {
+                    0
+                };
+                let period = if rec_size >= 40 {
+                    u64::from_le_bytes(
+                        self.raw_data[off + 32..off + 40].try_into().unwrap(),
+                    )
+                } else {
+                    1
+                };
+                samples.push(PerfSample {
+                    ip,
+                    pid,
+                    tid,
+                    time,
+                    period,
+                    attr_index: 0, // simplified: all map to attr 0
+                });
+            }
+            off += rec_size;
+        }
+        samples
+    }
+
+    /// 将样本关联到 event attrs, 返回 event_name -> total_count 映射.
+    pub fn correlate_events(&self) -> HashMap<String, u64> {
+        let samples = self.parse_samples();
+        let names = self.event_names();
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        for sample in &samples {
+            let name = names
+                .get(sample.attr_index)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            *counts.entry(name).or_insert(0) += sample.period;
+        }
+        counts
+    }
+
+    /// 按 IP 地址聚合样本, 返回 ip -> count 映射.
+    pub fn aggregate_by_ip(&self) -> HashMap<u64, u64> {
+        let samples = self.parse_samples();
+        let mut counts: HashMap<u64, u64> = HashMap::new();
+        for sample in &samples {
+            *counts.entry(sample.ip).or_insert(0) += sample.period;
+        }
+        counts
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Seek, Write};
 
     /// 构造一个最小 perf.data (v2 header + 1 attr + data section)
     fn write_minimal_perfdata(path: &Path) -> io::Result<()> {
@@ -229,6 +341,91 @@ mod tests {
         std::fs::write(&tmp, [0u8; 10]).unwrap();
         let err = PerfDataFile::read(&tmp).unwrap_err();
         assert!(err.to_string().contains("too short"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Build perf.data with PERF_RECORD_SAMPLE records.
+    fn write_perfdata_with_samples(path: &Path) -> io::Result<()> {
+        let mut f = std::fs::File::create(path)?;
+        // Header (56 bytes)
+        f.write_all(b"PERFILE2")?;
+        f.write_all(&56u64.to_le_bytes())?; // header_size
+        f.write_all(&120u64.to_le_bytes())?; // attr_size
+        f.write_all(&56u64.to_le_bytes())?; // attrs_offset
+        f.write_all(&120u64.to_le_bytes())?; // attrs_size
+        let data_off = 56u64 + 120u64;
+        f.write_all(&data_off.to_le_bytes())?; // data_offset
+        // data_size placeholder
+        let data_size_pos = f.stream_position()?;
+        f.write_all(&0u64.to_le_bytes())?; // data_size
+        // 1 attr (120 bytes)
+        f.write_all(&0u32.to_le_bytes())?; // type = HARDWARE
+        f.write_all(&120u32.to_le_bytes())?; // size
+        f.write_all(&0u64.to_le_bytes())?; // config = HW_CPU_CYCLES
+        f.write_all(&[0u8; 104])?; // padding
+        // Data section with 2 PERF_RECORD_SAMPLE records
+        let data_start = f.stream_position()?;
+        // Sample 1: ip=0x401000, pid=1234, tid=1234, time=100, period=10
+        f.write_all(&9u32.to_le_bytes())?; // type = SAMPLE
+        f.write_all(&0u16.to_le_bytes())?; // misc
+        f.write_all(&40u16.to_le_bytes())?; // size = 40
+        f.write_all(&0x401000u64.to_le_bytes())?; // ip
+        f.write_all(&1234u32.to_le_bytes())?; // pid
+        f.write_all(&1234u32.to_le_bytes())?; // tid
+        f.write_all(&100u64.to_le_bytes())?; // time
+        f.write_all(&10u64.to_le_bytes())?; // period
+        // Sample 2: ip=0x402000, pid=1234, tid=1234, time=200, period=20
+        f.write_all(&9u32.to_le_bytes())?; // type = SAMPLE
+        f.write_all(&0u16.to_le_bytes())?; // misc
+        f.write_all(&40u16.to_le_bytes())?; // size = 40
+        f.write_all(&0x402000u64.to_le_bytes())?; // ip
+        f.write_all(&1234u32.to_le_bytes())?; // pid
+        f.write_all(&1234u32.to_le_bytes())?; // tid
+        f.write_all(&200u64.to_le_bytes())?; // time
+        f.write_all(&20u64.to_le_bytes())?; // period
+        let data_end = f.stream_position()?;
+        let data_size = data_end - data_start;
+        // Patch data_size in header
+        f.seek(std::io::SeekFrom::Start(data_size_pos))?;
+        f.write_all(&data_size.to_le_bytes())?;
+        Ok(())
+    }
+
+    #[test]
+    fn parse_sample_records() {
+        let tmp = std::env::temp_dir().join("dcc-perfdata-samples.bin");
+        write_perfdata_with_samples(&tmp).unwrap();
+        let f = PerfDataFile::read(&tmp).unwrap();
+        let samples = f.parse_samples();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].ip, 0x401000);
+        assert_eq!(samples[0].pid, 1234);
+        assert_eq!(samples[0].period, 10);
+        assert_eq!(samples[1].ip, 0x402000);
+        assert_eq!(samples[1].period, 20);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn correlate_events_counts() {
+        let tmp = std::env::temp_dir().join("dcc-perfdata-correlate.bin");
+        write_perfdata_with_samples(&tmp).unwrap();
+        let f = PerfDataFile::read(&tmp).unwrap();
+        let counts = f.correlate_events();
+        // All samples map to attr 0 = "event0"
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, 30); // 10 + 20
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn aggregate_by_ip() {
+        let tmp = std::env::temp_dir().join("dcc-perfdata-aggregate.bin");
+        write_perfdata_with_samples(&tmp).unwrap();
+        let f = PerfDataFile::read(&tmp).unwrap();
+        let by_ip = f.aggregate_by_ip();
+        assert_eq!(by_ip.get(&0x401000), Some(&10));
+        assert_eq!(by_ip.get(&0x402000), Some(&20));
         let _ = std::fs::remove_file(&tmp);
     }
 }

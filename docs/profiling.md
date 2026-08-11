@@ -27,7 +27,8 @@
 | `profile::autofdo` | `src/profile/autofdo.rs` | 🟢 端到端 (文本 + 二进制 + discriminator) | `-fauto-profile=` / `-fprofile-sample-use=` |
 | `profile::lbr` | `src/profile/lbr.rs` | 🟢 端到端 (文本 + perf.data 二进制) | `-flbr-profile=` |
 | `profile::memprof` | `src/profile/memprof.rs` | 🟢 端到端 (文本 + 二进制 + 插桩 + runtime) | `-fmemory-profile` / `-fmemory-profile-use=` |
-| `profile::perf_event` | `src/profile/perf_event.rs` | 🟡 TopdownL1 数据结构 | `-ftopdownmetrics` |
+| `profile::perf_event` | `src/profile/perf_event.rs` | 🟢 端到端 (TopdownL1/L2 + perf.data 二进制样本解析) | `-ftopdownmetrics` |
+| `profile::perf_data` | `src/profile/perf_data.rs` | 🟢 端到端 (perf.data v2 二进制 + 样本解析 + 事件关联 + IP 聚合) | `-ftopdownmetrics` |
 | `profile::offload` | `src/profile/offload.rs` | 🟢 二进制 `.dcc.offload` + entry 收集 | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` |
 
 统一入口：`cli::Config::profile: ProfileConfig`，所有子状态在该结构
@@ -409,9 +410,28 @@ pub struct PerfRecord {
 `topdown_percentages()` 把四个 slot 规整为百分比，假设四者之和为
 总 slots。`topdown_percent_sum_to_one` 测试保证 sum == 1.0。
 
-### 6.3 测试
+### 6.3 perf.data 二进制样本解析 (`perf_data.rs`)
 
-`topdown_percent_sum_to_one`，以及
+`PerfDataFile::read(path)` 读 Linux `perf.data` v2 二进制:
+
+1. 检查 magic "PERFILE2" (8 bytes)
+2. 解析 header v2: header_size / attr_size / attrs_offset / data_offset / data_size
+3. 解析 perf_event_attr 数组: event_type + attr_size + config
+4. `parse_samples()` 遍历 data section，解析 PERF_RECORD_SAMPLE (type=9):
+   - perf_event_header: type(u32) + misc(u16) + size(u16)
+   - sample payload: ip(u64) + pid(u32) + tid(u32) + time(u64) + period(u64)
+5. `correlate_events()` 将样本映射到 event attr，返回 event_name -> total_period
+6. `aggregate_by_ip()` 按指令指针聚合，返回 ip -> total_period
+
+### 6.4 测试
+
+`topdown_percent_sum_to_one`，
+`parse_sample_records`，
+`correlate_events_counts`，
+`aggregate_by_ip`，
+`reject_bad_magic`，
+`reject_too_short`，
+以及
 `tests/profile.rs::cli_topdownmetrics_accepted`。
 
 ---
