@@ -81,7 +81,7 @@
 | ~~LBR~~ | ✅ perf.data 二进制 LBR 记录解析: read_perf_data_binary + PERF_RECORD_SAMPLE branch_stack + 自动检测文本/二进制 + serialize |
 | ~~MemProf~~ | ✅ malloc 插桩 + runtime 库接口: MemProfInstrumentor + MemProfRuntime + 二进制 .memprofdata 格式 + 自动检测 |
 | ~~Perf 事件~~ | ✅ perf.data 二进制样本解析: `parse_samples` (PERF_RECORD_SAMPLE) + `correlate_events` 事件关联 + `aggregate_by_ip` IP 聚合 + 自动检测文本/二进制 |
-| Offloading | 实际 CUDA/ROCm driver 链接未实装 |
+| ~~Offloading~~ | ✅ CUDA/ROCm driver 链接实装: `OffloadDriverLinker` + runtime 库解析 (libcudart/libamdhip64) + host link flags + device link commands (nvcc/clang++) + fat binary 描述 + link script 生成 |
 
 ## 链接器限制
 

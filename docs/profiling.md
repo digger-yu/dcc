@@ -30,6 +30,7 @@
 | `profile::perf_event` | `src/profile/perf_event.rs` | 🟢 端到端 (TopdownL1/L2 + perf.data 二进制样本解析) | `-ftopdownmetrics` |
 | `profile::perf_data` | `src/profile/perf_data.rs` | 🟢 端到端 (perf.data v2 二进制 + 样本解析 + 事件关联 + IP 聚合) | `-ftopdownmetrics` |
 | `profile::offload` | `src/profile/offload.rs` | 🟢 二进制 `.dcc.offload` + entry 收集 | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` |
+| `profile::offload_driver_link` | `src/profile/offload_driver_link.rs` | 🟢 端到端 (CUDA/ROCm driver 链接 + runtime 解析 + fat binary) | `-fcuda` / `-fhip` / `--offload-arch=` |
 
 统一入口：`cli::Config::profile: ProfileConfig`，所有子状态在该结构
 集中开关 + 序列化到 codegen。
@@ -515,11 +516,34 @@ entries[]: kind u8 | func u16+bytes | file u16+bytes |
     （no-op）；W0313 不支持的构造被忽略——均带精确位置
 * `codegen` 在全部 6 个 arch 输出 `.dcc.offload` 节（PROGBITS, align 8）
 
-### 7.5 测试
+### 7.5 Driver 链接实装 (`offload_driver_link.rs`)
+
+`OffloadDriverLinker` 实装 CUDA/ROCm driver 链接:
+
+1. Runtime 库解析:
+   - CUDA: 搜索 libcudart.so (标准路径 /usr/local/cuda/lib64 + $CUDA_HOME)
+   - ROCm: 搜索 libamdhip64.so (标准路径 /opt/rocm/lib + $ROCM_PATH)
+   - 支持 extra search paths 追加
+2. Host link flags 生成:
+   - `-L<dir>` 搜索目录 + `-l<lib>` 库名
+   - `-Wl,-rpath,<dir>` 运行时加载路径
+   - CUDA: 额外 `-lcudadevrt`; ROCm: 额外 `-lamd_comgr`
+3. Device link commands 生成:
+   - CUDA: `nvcc -cubin -arch=sm_<N> --device-link`
+   - ROCm: `clang++ --cuda-device-only -emit-llvm --offload-arch=gfx<NNN>`
+4. Fat binary 描述: host object + device objects + embedded runtimes
+5. Link script 渲染: shell 脚本输出，可直接执行
+
+### 7.6 测试
 
 单元：`src/profile/offload.rs` 6 个（json_roundtrip /
 binary_roundtrip / bad_magic / dedup / arch_to_triple_mapping /
-validate_reports_bad_value）。集成：`tests/profile.rs` 11 个 offload
+validate_reports_bad_value）。
+`src/profile/offload_driver_link.rs` 14 个（needed_backends_cuda/hip/both /
+resolve_runtimes / host_link_flags / device_link_command_cuda/rocm /
+fat_binary / render_link_script / search_paths / extra_search_paths /
+diagnostics / default_arch / omp_target_nvptx）。
+集成：`tests/profile.rs` 11 个 offload
 用例（CLI 全形式解析与非法值拒绝、`.dcc.offload` 节内容与位置断言、
 E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
 `tests/fixtures/c/offload_{omp,cuda}.c`。
