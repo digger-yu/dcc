@@ -24,7 +24,7 @@
 | `profile::mod` | `src/profile/mod.rs` | 🟢 配置聚合 | — |
 | `profile::gcov` | `src/profile/gcov.rs` | 🟢 端到端 (`.gcno` + `.gcda` 二进制 + 读取器 + 报告) | `-ftest-coverage` / `-fprofile-arcs` |
 | `profile::pgo` | `src/profile/pgo.rs` | 🟢 端到端 (`.profraw` v2 + AST 插桩) | `-fprofile-generate` / `-fprofile-use` |
-| `profile::autofdo` | `src/profile/autofdo.rs` | 🟡 数据结构 + 极简 parser | `-fauto-profile=` / `-fprofile-sample-use=` |
+| `profile::autofdo` | `src/profile/autofdo.rs` | 🟢 端到端 (文本 + 二进制 + discriminator) | `-fauto-profile=` / `-fprofile-sample-use=` |
 | `profile::lbr` | `src/profile/lbr.rs` | 🟡 解析 `perf script -F brstack` | `-flbr-profile=` |
 | `profile::memprof` | `src/profile/memprof.rs` | 🟡 配置 + 数据结构 | `-fmemory-profile` / `-fmemory-profile-use=` |
 | `profile::perf_event` | `src/profile/perf_event.rs` | 🟡 TopdownL1 数据结构 | `-ftopdownmetrics` |
@@ -205,17 +205,39 @@ AutoFDO 用 perf sample (或 LLVM `xray`、或 AutoFDO 工具) 收集 PC 样本�
 * 不受 LBR stack 深度限制
 * 可以聚合多进程 / 长时间窗口
 
-dcc 当前仅定义数据结构 + 极简 text-format parser，权重不下发到 codegen。
+dcc 当前实现：数据结构 + text-format parser + 二进制格式 + discriminator。
+已接入 driver → ProfileWeights → codegen (.text.hot / .text.unlikely)。
 
-### 3.2 简化格式
+### 3.2 文本格式
 
 ```
-# header
+# dcc autofdo v1
 func <name> <total>
 line <name> <line> <col> <samples>
+calls <caller> <callee> <count>
+disc <name> <line> <discriminator> <samples>
 ```
 
-### 3.3 桶化阈值 (与 LLVM AutoFDO 对齐)
+`disc` 记录支持 discriminator: 区分同一行内不同基本块 (如分支目标)。
+
+### 3.3 二进制格式
+
+```
+magic    : "AFDO" 4 bytes
+version  : u32 LE (2)
+n_funcs  : u32 LE
+func[]   : name_len(u32) name(u8*) samples(u64)
+n_lines  : u32 LE
+line[]   : name_len(u32) name(u8*) line(u32) col(u32) samples(u64)
+n_calls  : u32 LE
+calls[]  : caller_len(u32) caller(u8*) callee_len(u32) callee(u8*) count(u64)
+n_discs  : u32 LE
+disc[]   : name_len(u32) name(u8*) line(u32) disc(u32) samples(u64)
+```
+
+`read(path)` 自动检测文本/二进制格式 (检查 "AFDO" magic)。
+
+### 3.4 桶化阈值 (与 LLVM AutoFDO 对齐)
 
 ```rust
 pub fn bucketize(&self) -> HashMap<String, Hotness> {
@@ -229,10 +251,13 @@ pub fn bucketize(&self) -> HashMap<String, Hotness> {
 }
 ```
 
-### 3.4 测试
+### 3.5 测试
 
-`parse_minimal_profile` + `bucketize_thresholds`，以及
-`tests/profile.rs::cli_auto_profile`（待加）。
+`parse_minimal_profile` + `bucketize_thresholds` +
+`autofdo_binary_roundtrip` + `autofdo_parse_discriminator_records` +
+`autofdo_discriminators_for_line` + `autofdo_binary_rejects_bad_magic` +
+`autofdo_merge_with_discriminators` + `autofdo_text_roundtrip_with_discriminators`，
+以及 `tests/profile.rs::cli_auto_profile`。
 
 ---
 
