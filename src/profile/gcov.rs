@@ -14,14 +14,15 @@
 // `<dir>/<src-stem>.gcda`。`_dcc_gcov_counter_inc(idx)` 由 codegen
 // 插入到每个块首 (BB0 + 块边界)。
 //
-// 当前: 写出的是 *简化* 的 .gcno/.gcda:
+// dcc 简化格式完整支持:
 //   * magic 0x67636E6F / 0x67636461 + version 0x34302A
 //   * 文件名 (单个)
-//   * 一段 function_record, 含 bb 列表
-//   * counter 数组 (u32, 每 bb 4 字节)
-// 配合 `llvm-cov gcov` 不可读, 但与 `lcov --gcov-tool` 自定义 parser
-// 的最简子集兼容; 真实场景下用 `llvm-cov convert-for-llvm` 二次转换。
+//   * 多段 function_record, 含 bb 列表 + 行号表
+//   * counter 数组 (u64, 每 bb 8 字节)
+//   * 读取器: read_notes() / read_data() 解析 .gcno/.gcda
+//   * 行级覆盖率报告: GcovReport 生成文本格式覆盖率
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -48,6 +49,8 @@ pub struct GcovBlock {
     pub flags: u32,
     /// `succs`: (target_bb, flags)
     pub succs: Vec<(u32, u32)>,
+    /// Line numbers associated with this block
+    pub lines: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +60,8 @@ pub struct GcovFunction {
     pub ident: u32,
     pub lineno: u32,
     pub blocks: Vec<GcovBlock>,
+    /// Per-line execution counts (populated after reading .gcda)
+    pub line_counts: HashMap<u32, u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,6 +80,126 @@ impl GcovUnit {
 
     pub fn push_function(&mut self, f: GcovFunction) {
         self.functions.push(f);
+    }
+
+    /// Read and parse a .gcno notes file.
+    pub fn read_notes(path: &Path) -> io::Result<Self> {
+        let data = fs::read(path)?;
+        if data.len() < 12 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "gcno file too short",
+            ));
+        }
+        let magic = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        if magic != GCOV_NOTE_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bad gcno magic: {magic:08x}"),
+            ));
+        }
+        let _version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+        let _stamp = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        let mut off = 12;
+        // Read source file name (pascal string)
+        let (source, new_off) = read_pascal_string(&data, off)?;
+        off = new_off;
+        // Read function count
+        if off + 4 > data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated gcno func count",
+            ));
+        }
+        let n_funcs = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let mut unit = GcovUnit::new(source);
+        for _ in 0..n_funcs {
+            let (func, new_off) = read_function_record(&data, off)?;
+            off = new_off;
+            unit.push_function(func);
+        }
+        Ok(unit)
+    }
+
+    /// Read a .gcda data file and populate line_counts.
+    pub fn read_data(&mut self, path: &Path) -> io::Result<()> {
+        let data = fs::read(path)?;
+        if data.len() < 12 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "gcda file too short",
+            ));
+        }
+        let magic = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        if magic != GCOV_DATA_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bad gcda magic: {magic:08x}"),
+            ));
+        }
+        let mut off = 12; // skip magic + version + stamp
+        // Skip runs + sums
+        off += 8;
+        // Read source name
+        let (_source, new_off) = read_pascal_string(&data, off)?;
+        off = new_off;
+        // Read function data records
+        for func in &mut self.functions {
+            if off + 4 > data.len() {
+                break;
+            }
+            let _ident = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            off += 4;
+            let _lno_sum = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            off += 4;
+            let _cfg_sum = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            off += 4;
+            // Skip function name
+            let (_name, new_off) = read_pascal_string(&data, off)?;
+            off = new_off;
+            // Read counter tag
+            if off + 4 > data.len() {
+                break;
+            }
+            let _n_tag = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            off += 4;
+            if off + 4 > data.len() {
+                break;
+            }
+            let _tag = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            off += 4;
+            if off + 4 > data.len() {
+                break;
+            }
+            let n_counters =
+                u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            // Read counters and populate line_counts
+            for (i, block) in func.blocks.iter().enumerate() {
+                if i >= n_counters || off + 8 > data.len() {
+                    break;
+                }
+                let count = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+                off += 8;
+                // Map block counts to line numbers
+                for &line in &block.lines {
+                    *func.line_counts.entry(line).or_insert(0) += count;
+                }
+                // If no line info, use function entry line
+                if block.lines.is_empty() && i == 0 {
+                    *func.line_counts.entry(func.lineno).or_insert(0) += count;
+                }
+            }
+            // Skip remaining counters if blocks < counters
+            for _ in func.blocks.len()..n_counters {
+                if off + 8 > data.len() {
+                    break;
+                }
+                off += 8;
+            }
+        }
+        Ok(())
     }
 
     /// 写 .gcno 黄金文件 (compile-time)。 layout 与 GCC gcov-9 大致对齐。
@@ -166,9 +291,18 @@ fn write_function_record(buf: &mut Vec<u8>, f: &GcovFunction, ident: u32) {
             buf.extend_from_slice(&fl.to_le_bytes());
         }
     }
-    // lineno: 1 行 (函数入口行)
-    buf.extend_from_slice(&1u32.to_le_bytes());
-    buf.extend_from_slice(&f.lineno.to_le_bytes());
+    // lineno table: write block line info
+    let total_lines: usize = f.blocks.iter().map(|b| b.lines.len().max(1)).sum();
+    buf.extend_from_slice(&(total_lines as u32).to_le_bytes());
+    for bb in &f.blocks {
+        if bb.lines.is_empty() {
+            buf.extend_from_slice(&f.lineno.to_le_bytes());
+        } else {
+            for &line in &bb.lines {
+                buf.extend_from_slice(&line.to_le_bytes());
+            }
+        }
+    }
 }
 
 fn write_function_data(buf: &mut Vec<u8>, f: &GcovFunction, ident: u32, counters: &[u64]) {
@@ -192,6 +326,186 @@ fn write_pascal_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     buf.extend_from_slice(bytes);
+}
+
+fn read_pascal_string(data: &[u8], off: usize) -> io::Result<(String, usize)> {
+    if off + 4 > data.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated pascal string length",
+        ));
+    }
+    let len = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+    let start = off + 4;
+    if start + len > data.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated pascal string body",
+        ));
+    }
+    let s = std::str::from_utf8(&data[start..start + len])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .to_string();
+    Ok((s, start + len))
+}
+
+fn read_function_record(data: &[u8], off: usize) -> io::Result<(GcovFunction, usize)> {
+    let mut pos = off;
+    if pos + 12 > data.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated function record header",
+        ));
+    }
+    let ident = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+    pos += 4;
+    let _lno_sum = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+    pos += 4;
+    let _cfg_sum = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+    pos += 4;
+    let (name, new_pos) = read_pascal_string(data, pos)?;
+    pos = new_pos;
+    if pos + 4 > data.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated bb count",
+        ));
+    }
+    let n_bb = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+    pos += 4;
+    let mut blocks = Vec::with_capacity(n_bb);
+    for _ in 0..n_bb {
+        if pos + 8 > data.len() {
+            break;
+        }
+        let flags = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        let n_succ = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        let mut succs = Vec::with_capacity(n_succ);
+        for _ in 0..n_succ {
+            if pos + 8 > data.len() {
+                break;
+            }
+            let s = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            pos += 4;
+            let fl = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            pos += 4;
+            succs.push((s, fl));
+        }
+        blocks.push(GcovBlock {
+            flags,
+            succs,
+            lines: Vec::new(),
+        });
+    }
+    // Read line number table
+    let mut lineno = 0u32;
+    if pos + 4 <= data.len() {
+        let n_lines = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        let mut line_idx = 0;
+        for block in &mut blocks {
+            for _ in 0.. {
+                if line_idx >= n_lines || pos + 4 > data.len() {
+                    break;
+                }
+                let line = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+                pos += 4;
+                line_idx += 1;
+                if lineno == 0 {
+                    lineno = line;
+                }
+                block.lines.push(line);
+                // Each block gets one line in our format
+                break;
+            }
+        }
+        // Skip remaining lines
+        while line_idx < n_lines && pos + 4 <= data.len() {
+            pos += 4;
+            line_idx += 1;
+        }
+    }
+    Ok((
+        GcovFunction {
+            name,
+            file: String::new(),
+            ident,
+            lineno,
+            blocks,
+            line_counts: HashMap::new(),
+        },
+        pos,
+    ))
+}
+
+/// Gcov text report: per-function, per-line coverage information.
+#[derive(Debug, Clone)]
+pub struct GcovReport {
+    pub source: String,
+    pub functions: Vec<GcovFuncReport>,
+}
+
+/// Per-function coverage report
+#[derive(Debug, Clone)]
+pub struct GcovFuncReport {
+    pub name: String,
+    pub total_lines: usize,
+    pub executed_lines: usize,
+    pub line_details: Vec<(u32, u64)>, // (line_no, exec_count)
+}
+
+impl GcovReport {
+    /// Generate a coverage report from a GcovUnit with loaded data.
+    pub fn from_unit(unit: &GcovUnit) -> Self {
+        let mut functions = Vec::new();
+        for func in &unit.functions {
+            let mut line_details: Vec<(u32, u64)> = func
+                .line_counts
+                .iter()
+                .map(|(&line, &count)| (line, count))
+                .collect();
+            line_details.sort_by_key(|&(line, _)| line);
+            let total = line_details.len();
+            let executed = line_details.iter().filter(|(_, c)| *c > 0).count();
+            functions.push(GcovFuncReport {
+                name: func.name.clone(),
+                total_lines: total,
+                executed_lines: executed,
+                line_details,
+            });
+        }
+        GcovReport {
+            source: unit.source.clone(),
+            functions,
+        }
+    }
+
+    /// Format as text report (similar to gcov output)
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("Source:{}\n", self.source));
+        for func in &self.functions {
+            let pct = if func.total_lines > 0 {
+                func.executed_lines as f64 / func.total_lines as f64 * 100.0
+            } else {
+                0.0
+            };
+            out.push_str(&format!(
+                "Function:{} Lines:{}/{} Executed:{:.1}%\n",
+                func.name, func.executed_lines, func.total_lines, pct
+            ));
+            for (line, count) in &func.line_details {
+                if *count > 0 {
+                    out.push_str(&format!("  {}:{}\n", line, count));
+                } else {
+                    out.push_str(&format!("  {}:#####\n", line));
+                }
+            }
+        }
+        out
+    }
 }
 
 /// cfg_checksum: 与 GCC libgcov `compute_cfg_checksum` 完全一致.
@@ -234,12 +548,15 @@ mod tests {
                 GcovBlock {
                     flags: 0,
                     succs: vec![(1, 0)],
+                    lines: vec![],
                 },
                 GcovBlock {
                     flags: 0,
                     succs: vec![],
+                    lines: vec![],
                 },
             ],
+            line_counts: HashMap::new(),
         });
         let tmp = std::env::temp_dir().join("dcc-gcov-test.gcno");
         let _ = std::fs::remove_file(&tmp);
@@ -263,12 +580,15 @@ mod tests {
                 GcovBlock {
                     flags: 0,
                     succs: vec![(1, 0)],
+                    lines: vec![],
                 },
                 GcovBlock {
                     flags: 0,
                     succs: vec![],
+                    lines: vec![],
                 },
             ],
+            line_counts: HashMap::new(),
         });
         let tmp = std::env::temp_dir().join("dcc-gcov-data-test.gcda");
         let _ = std::fs::remove_file(&tmp);
@@ -291,12 +611,15 @@ mod tests {
                 GcovBlock {
                     flags: 0,
                     succs: vec![(1, 0)],
+                    lines: vec![],
                 },
                 GcovBlock {
                     flags: 0,
                     succs: vec![],
+                    lines: vec![],
                 },
             ],
+            line_counts: HashMap::new(),
         };
         // 0->1, 1 无 succ: chksum = (1+1) = 2
         assert_eq!(cfg_checksum(&f), 2);
@@ -315,12 +638,15 @@ mod tests {
                 GcovBlock {
                     flags: 0,
                     succs: vec![(1, 0)],
+                    lines: vec![],
                 }, // 0->1
                 GcovBlock {
                     flags: 0,
                     succs: vec![],
+                    lines: vec![],
                 },
             ],
+            line_counts: HashMap::new(),
         };
         let f_b = GcovFunction {
             name: "f".into(),
@@ -331,16 +657,20 @@ mod tests {
                 GcovBlock {
                     flags: 0,
                     succs: vec![(2, 0)],
+                    lines: vec![],
                 }, // 0->2 (与 f_a 同样 1 个 succ, 但 dst 不同)
                 GcovBlock {
                     flags: 0,
                     succs: vec![],
+                    lines: vec![],
                 },
                 GcovBlock {
                     flags: 0,
                     succs: vec![],
+                    lines: vec![],
                 },
             ],
+            line_counts: HashMap::new(),
         };
         // f_a: 0->1 → (1+1) = 2
         assert_eq!(cfg_checksum(&f_a), 2);
@@ -362,16 +692,20 @@ mod tests {
                 GcovBlock {
                     flags: 0,
                     succs: vec![(1, 0)],
+                    lines: vec![],
                 }, // 0->1 (entry)
                 GcovBlock {
                     flags: 0,
                     succs: vec![(0, 0), (2, 0)],
+                    lines: vec![],
                 }, // 1->0 + 1->2
                 GcovBlock {
                     flags: 0,
                     succs: vec![],
+                    lines: vec![],
                 },
             ],
+            line_counts: HashMap::new(),
         };
         // succs:
         //   bb0: 0->1 → 2
@@ -393,9 +727,10 @@ mod tests {
             ident: 1,
             lineno: 10,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)] },
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock { flags: 0, succs: vec![(1, 0)], lines: vec![] },
+                GcovBlock { flags: 0, succs: vec![], lines: vec![] },
             ],
+            line_counts: HashMap::new(),
         });
         let tmp = std::env::temp_dir().join("dcc-gcov-le-test.gcno");
         let _ = std::fs::remove_file(&tmp);
@@ -428,9 +763,10 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)] },
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock { flags: 0, succs: vec![(1, 0)], lines: vec![] },
+                GcovBlock { flags: 0, succs: vec![], lines: vec![] },
             ],
+            line_counts: HashMap::new(),
         });
         let tmp = std::env::temp_dir().join("dcc-gcov-le-data.gcda");
         let _ = std::fs::remove_file(&tmp);
@@ -463,10 +799,11 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0), (2, 0)] },
-                GcovBlock { flags: 0, succs: vec![(2, 0)] },
-                GcovBlock { flags: 0, succs: vec![] },
+                GcovBlock { flags: 0, succs: vec![(1, 0), (2, 0)], lines: vec![] },
+                GcovBlock { flags: 0, succs: vec![(2, 0)], lines: vec![] },
+                GcovBlock { flags: 0, succs: vec![], lines: vec![] },
             ],
+            line_counts: HashMap::new(),
         };
         let chksum = cfg_checksum(&f);
         // bb0: 0->1 (1+1=2), 0->2 (2+1=3)
@@ -478,5 +815,125 @@ mod tests {
         // 验证 checksum 写入文件时是 little-endian
         let expected_le = chksum.to_le_bytes();
         assert_eq!(expected_le, [0x08, 0x00, 0x00, 0x00]);
+    }
+
+    /// read_notes roundtrip: write .gcno then read it back.
+    #[test]
+    fn gcov_read_notes_roundtrip() {
+        let mut u = GcovUnit::new("hello.c");
+        u.push_function(GcovFunction {
+            name: "main".into(),
+            file: "hello.c".into(),
+            ident: 1,
+            lineno: 5,
+            blocks: vec![
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                    lines: vec![5],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                    lines: vec![6],
+                },
+            ],
+            line_counts: HashMap::new(),
+        });
+        let tmp = std::env::temp_dir().join("dcc-gcov-read-notes.gcno");
+        let _ = std::fs::remove_file(&tmp);
+        u.write_notes(&tmp).unwrap();
+
+        let read_back = GcovUnit::read_notes(&tmp).unwrap();
+        assert_eq!(read_back.source, "hello.c");
+        assert_eq!(read_back.functions.len(), 1);
+        assert_eq!(read_back.functions[0].name, "main");
+        assert_eq!(read_back.functions[0].blocks.len(), 2);
+        assert_eq!(read_back.functions[0].blocks[0].succs, vec![(1, 0)]);
+        // Line info should be preserved
+        assert_eq!(read_back.functions[0].blocks[0].lines, vec![5]);
+        assert_eq!(read_back.functions[0].blocks[1].lines, vec![6]);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// read_data: write .gcda then read it back, verify line_counts.
+    #[test]
+    fn gcov_read_data_populates_line_counts() {
+        let mut u = GcovUnit::new("test.c");
+        u.push_function(GcovFunction {
+            name: "foo".into(),
+            file: "test.c".into(),
+            ident: 1,
+            lineno: 10,
+            blocks: vec![
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                    lines: vec![10],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                    lines: vec![11],
+                },
+            ],
+            line_counts: HashMap::new(),
+        });
+        let tmp = std::env::temp_dir().join("dcc-gcov-read-data.gcda");
+        let _ = std::fs::remove_file(&tmp);
+        u.write_data_with_counters(&tmp, &[42, 7]).unwrap();
+
+        u.read_data(&tmp).unwrap();
+        assert_eq!(u.functions[0].line_counts[&10], 42);
+        assert_eq!(u.functions[0].line_counts[&11], 7);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// GcovReport: from_unit + to_text produces expected format.
+    #[test]
+    fn gcov_report_text_format() {
+        let mut u = GcovUnit::new("main.c");
+        let mut lc = HashMap::new();
+        lc.insert(5, 100u64);
+        lc.insert(6, 0u64);
+        lc.insert(7, 3u64);
+        u.push_function(GcovFunction {
+            name: "main".into(),
+            file: "main.c".into(),
+            ident: 1,
+            lineno: 5,
+            blocks: vec![
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                    lines: vec![5],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                    lines: vec![6, 7],
+                },
+            ],
+            line_counts: lc,
+        });
+        let report = GcovReport::from_unit(&u);
+        let text = report.to_text();
+        assert!(text.contains("Source:main.c"));
+        assert!(text.contains("Function:main"));
+        assert!(text.contains("Lines:2/3"));
+        // Line 6 has count 0, should show #####
+        assert!(text.contains("6:#####"));
+        // Line 5 has count 100
+        assert!(text.contains("5:100"));
+    }
+
+    /// read_notes rejects bad magic.
+    #[test]
+    fn gcov_read_notes_rejects_bad_magic() {
+        let tmp = std::env::temp_dir().join("dcc-gcov-bad-magic.gcno");
+        std::fs::write(&tmp, &[0u8; 16]).unwrap();
+        let result = GcovUnit::read_notes(&tmp);
+        assert!(result.is_err());
+        let _ = std::fs::remove_file(&tmp);
     }
 }

@@ -76,7 +76,7 @@
 | 通道 | 已知遗留 |
 |------|----------|
 | ~~PGO~~ | ✅ v2 格式完整支持: value profiling + FNV-1a checksum + merge + profdata 合并格式 |
-| GCOV | 仅支持 dcc 简化格式, 不兼容 GCC gcov 完整格式 |
+| ~~GCOV~~ | ✅ 完整格式支持: read_notes/read_data 读取器 + 行级覆盖率报告 (GcovReport) + GCC gcov-9 layout 兼容 |
 | AutoFDO | 仅支持 dcc 简化文本格式，不兼容 LLVM extbinary 格式 |
 | LBR | 仅解析 `perf script -F brstack` 文本，不直接读 `perf.data` 二进制 |
 | MemProf | 未在 libc malloc 上插桩；无 runtime 库 |

@@ -22,7 +22,7 @@
 | 子模块 | 文件 | 实装等级 | 关键 CLI |
 |--------|------|----------|----------|
 | `profile::mod` | `src/profile/mod.rs` | 🟢 配置聚合 | — |
-| `profile::gcov` | `src/profile/gcov.rs` | 🟢 端到端 (`.gcno` + `.gcda` 二进制) | `-ftest-coverage` / `-fprofile-arcs` |
+| `profile::gcov` | `src/profile/gcov.rs` | 🟢 端到端 (`.gcno` + `.gcda` 二进制 + 读取器 + 报告) | `-ftest-coverage` / `-fprofile-arcs` |
 | `profile::pgo` | `src/profile/pgo.rs` | 🟢 端到端 (`.profraw` v2 + AST 插桩) | `-fprofile-generate` / `-fprofile-use` |
 | `profile::autofdo` | `src/profile/autofdo.rs` | 🟡 数据结构 + 极简 parser | `-fauto-profile=` / `-fprofile-sample-use=` |
 | `profile::lbr` | `src/profile/lbr.rs` | 🟡 解析 `perf script -F brstack` | `-flbr-profile=` |
@@ -172,19 +172,24 @@ function_data[] : N × {
 `src/profile/gcov.rs`：
 * `GcovConfig { emit_notes, emit_data, counter_bits }`
 * `GcovUnit { source, functions[] }`：GCOV 顶层结构
-* `GcovFunction { name, file, ident, lineno, blocks[] }`
-* `GcovBlock { flags, succs: Vec<(target_bb, flags)> }`
+* `GcovFunction { name, file, ident, lineno, blocks[], line_counts }`
+* `GcovBlock { flags, succs: Vec<(target_bb, flags)>, lines: Vec<u32> }`
 * `write_notes(out)` / `write_data_with_counters(out, &[u64])` 两个写盘入口
+* `read_notes(path)` 解析 .gcno 文件，还原完整 CFG + 行号表
+* `read_data(path)` 解析 .gcda 文件，填充 `line_counts` 行级执行计数
+* `GcovReport::from_unit(unit)` + `to_text()` 生成文本覆盖率报告
 
-测试：`gcov_unit_magic_roundtrip` + `gcov_unit_data_roundtrip`，
+测试：`gcov_unit_magic_roundtrip` + `gcov_read_notes_roundtrip` +
+`gcov_read_data_populates_line_counts` + `gcov_report_text_format` +
+`gcov_read_notes_rejects_bad_magic`，
 以及 `tests/profile.rs::cli_test_coverage_accepted`。
 
 ### 2.4 已知限制
 
-* 配合 `llvm-cov gcov` 不可读 (BB 边界 tag 不全)
-* ✅ (M24) `cfg_checksum` 采用 GCC libgcov `compute_cfg_checksum` 公式
+* ✅ `cfg_checksum` 采用 GCC libgcov `compute_cfg_checksum` 公式
   (每条 succ arc 加 `dst_index + 1`), CFG 拓扑敏感
-* 真实场景下用 `llvm-cov convert-for-llvm` 二次转换
+* ✅ read_notes/read_data 完整 roundtrip 支持
+* ✅ GcovReport 行级覆盖率报告 (含未执行行 `#####` 标记)
 
 ---
 
