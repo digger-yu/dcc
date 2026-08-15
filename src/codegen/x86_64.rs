@@ -17453,10 +17453,11 @@ impl Codegen {
                 self.emit_asm_evex_2op(&ops[0], &ops[1], 512, 1, 1, 0x6F, 1)
             }
             // vaddps zmm : 0F 58 (map=1, w=0)
+            // AT&T 顺序: (src1, src2, dst) -> dst=ops[2], v(src1)=ops[0], b(src2)=ops[1]
             "vaddps_z" if ops.len() == 3 => self.emit_asm_evex_3op_reg(
-                if let AsmOperand::Reg(d, _) = &ops[0] { *d } else { 0 },
+                if let AsmOperand::Reg(d, _) = &ops[2] { *d } else { 0 },
+                if let AsmOperand::Reg(s, _) = &ops[0] { *s } else { 0 },
                 if let AsmOperand::Reg(s, _) = &ops[1] { *s } else { 0 },
-                if let AsmOperand::Reg(s, _) = &ops[2] { *s } else { 0 },
                 512,
                 0,
                 1,
@@ -17464,9 +17465,9 @@ impl Codegen {
                 0,
             ),
             "vmulps_z" if ops.len() == 3 => self.emit_asm_evex_3op_reg(
-                if let AsmOperand::Reg(d, _) = &ops[0] { *d } else { 0 },
+                if let AsmOperand::Reg(d, _) = &ops[2] { *d } else { 0 },
+                if let AsmOperand::Reg(s, _) = &ops[0] { *s } else { 0 },
                 if let AsmOperand::Reg(s, _) = &ops[1] { *s } else { 0 },
-                if let AsmOperand::Reg(s, _) = &ops[2] { *s } else { 0 },
                 512,
                 0,
                 1,
@@ -22196,11 +22197,13 @@ impl Codegen {
         let r2 = if r >= 16 { 0u8 } else { 1u8 };
         let b_inv = if b >= 8 { 0u8 } else { 1u8 };
         let v_inv = (!v) & 0x0F;
+        // V' 位 (P2 bit3) = ~v[4]: 高位移位, 缺失会导致 src1 解码到 zmm16-31
+        let v4 = if v >= 16 { 0u8 } else { 1u8 };
         self.emit(&[
             0x62,
             (r_inv << 7) | (1u8 << 6) | (b_inv << 5) | (r2 << 4) | (map & 0x0F),
             (w << 7) | (v_inv << 3) | (1u8 << 2) | (pp & 0x03),
-            (l << 5) | (mask & 0x07),
+            (l << 5) | (v4 << 3) | (mask & 0x07),
         ]);
     }
 
