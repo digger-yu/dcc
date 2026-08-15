@@ -28,6 +28,23 @@ fn run_object_test(name: &str, source: &str) -> (std::process::Output, std::path
     (output, object_path)
 }
 
+fn run_asm_output_test(name: &str, source: &str) -> (std::process::Output, String) {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-{name}-{}.s", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    (output, asm_text)
+}
+
 /// 编译为可执行文件并返回路径（Linux 远程测试用）
 fn run_compile_and_run(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
     run_compile_and_run_flags(name, source, &[])
@@ -520,6 +537,82 @@ int main(void) {\n\
     assert!(
         asm_text.contains(".ascii \"->SIZE_usb_device_id $8 sizeof(struct usb_device_id)\""),
         "asm output: {asm_text}"
+    );
+}
+
+#[test]
+fn asm_register_planner_avoids_gp_clobbers() {
+    let source = "int f(int x) { int out; asm(\".ascii \\\"gp %0 %1\\\"\" : \"=r\"(out) : \"r\"(x) : \"rax\"); return out; }\n";
+    let (output, asm_text) = run_asm_output_test("asm-gp-plan", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ascii_line = asm_text
+        .lines()
+        .find(|line| line.contains(".ascii \"gp "))
+        .unwrap_or_else(|| panic!("missing resolved inline asm line: {asm_text}"));
+    assert!(
+        !ascii_line.contains("%rax"),
+        "planner should avoid rax clobber in inline asm operands: {ascii_line}"
+    );
+}
+
+#[test]
+fn asm_register_planner_avoids_xmm_clobbers() {
+    let source = "double f(double x) { double out; asm(\".ascii \\\"xmm %0 %1\\\"\" : \"=x\"(out) : \"x\"(x) : \"xmm0\"); return out; }\n";
+    let (output, asm_text) = run_asm_output_test("asm-xmm-plan", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ascii_line = asm_text
+        .lines()
+        .find(|line| line.contains(".ascii \"xmm "))
+        .unwrap_or_else(|| panic!("missing resolved inline asm line: {asm_text}"));
+    assert!(
+        !ascii_line.contains("%xmm0"),
+        "planner should avoid xmm0 clobber in inline asm operands: {ascii_line}"
+    );
+}
+
+#[test]
+fn asm_register_planner_reassigns_early_clobber_outputs() {
+    let source = "int f(int x) { int out; asm(\".ascii \\\"early %0 %1\\\"\" : \"=&r\"(out) : \"{rax}\"(x)); return out; }\n";
+    let (output, asm_text) = run_asm_output_test("asm-early-plan", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ascii_line = asm_text
+        .lines()
+        .find(|line| line.contains(".ascii \"early "))
+        .unwrap_or_else(|| panic!("missing resolved inline asm line: {asm_text}"));
+    assert!(
+        ascii_line.contains("%rax") && !ascii_line.contains("early %rax %rax"),
+        "early-clobber output should not overlap explicit rax input: {ascii_line}"
+    );
+}
+
+#[test]
+fn asm_register_planner_respects_fixed_gp_constraints() {
+    let source = "int f(int x) { int out; asm(\".ascii \\\"fixed %0 %1\\\"\" : \"=a\"(out) : \"D\"(x)); return out; }\n";
+    let (output, asm_text) = run_asm_output_test("asm-fixed-plan", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ascii_line = asm_text
+        .lines()
+        .find(|line| line.contains(".ascii \"fixed "))
+        .unwrap_or_else(|| panic!("missing resolved inline asm line: {asm_text}"));
+    assert!(
+        ascii_line.contains("fixed %rax %rdi"),
+        "planner should honor fixed a/D constraints: {ascii_line}"
     );
 }
 

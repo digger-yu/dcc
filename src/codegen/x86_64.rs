@@ -342,6 +342,188 @@ struct ExplicitRegInfo {
     kind: ExplicitRegKind,
 }
 
+#[derive(Clone, Copy)]
+enum AsmRegUse {
+    Input,
+    Output,
+}
+
+struct AsmRegisterPlanner {
+    used_gp: HashSet<u8>,
+    used_xmm: HashSet<u8>,
+    used_mmx: HashSet<u8>,
+    input_gp: HashSet<u8>,
+    input_xmm: HashSet<u8>,
+    clobber_gp: HashSet<u8>,
+    clobber_xmm: HashSet<u8>,
+}
+
+impl AsmRegisterPlanner {
+    const GP_POOL: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+    const GP_LEGACY_POOL: [u8; 4] = [0, 3, 1, 2];
+    const XMM_POOL: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    const MMX_POOL: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+
+    fn new(clobber_gp: &HashSet<u8>, clobber_xmm: &HashSet<u8>) -> Self {
+        Self {
+            used_gp: clobber_gp.clone(),
+            used_xmm: clobber_xmm.clone(),
+            used_mmx: HashSet::new(),
+            input_gp: HashSet::new(),
+            input_xmm: HashSet::new(),
+            clobber_gp: clobber_gp.clone(),
+            clobber_xmm: clobber_xmm.clone(),
+        }
+    }
+
+    fn alloc_gp(&mut self, seed: usize, use_kind: AsmRegUse) -> u8 {
+        let reg = Self::pick(&Self::GP_POOL, &self.used_gp, &self.clobber_gp, seed, None)
+            .unwrap_or(Self::GP_POOL[seed % Self::GP_POOL.len()]);
+        self.reserve_gp(reg, use_kind);
+        reg
+    }
+
+    fn alloc_gp_for_constraint(
+        &mut self,
+        constraint: &str,
+        seed: usize,
+        use_kind: AsmRegUse,
+    ) -> Option<(u8, bool)> {
+        let core = constraint.trim_start_matches(['=', '+', '&', '%']);
+        if core.contains('{') || core.starts_with("@cc") {
+            return None;
+        }
+        let letters: Vec<char> = core.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        if letters.iter().any(|c| matches!(c, 'r' | 'R' | 'g')) {
+            return None;
+        }
+        let fixed = if letters.contains(&'a') {
+            Some(0)
+        } else if letters.contains(&'b') {
+            Some(3)
+        } else if letters.contains(&'c') {
+            Some(1)
+        } else if letters.contains(&'d') {
+            Some(2)
+        } else if letters.contains(&'S') {
+            Some(6)
+        } else if letters.contains(&'D') {
+            Some(7)
+        } else {
+            None
+        };
+        if let Some(reg) = fixed {
+            self.reserve_gp(reg, use_kind);
+            return Some((reg, true));
+        }
+        if letters.iter().any(|c| matches!(c, 'q' | 'Q')) {
+            let reg = Self::pick(
+                &Self::GP_LEGACY_POOL,
+                &self.used_gp,
+                &self.clobber_gp,
+                seed,
+                None,
+            )
+            .unwrap_or(Self::GP_LEGACY_POOL[seed % Self::GP_LEGACY_POOL.len()]);
+            self.reserve_gp(reg, use_kind);
+            return Some((reg, false));
+        }
+        None
+    }
+
+    fn alloc_xmm(&mut self, seed: usize, use_kind: AsmRegUse) -> u8 {
+        let reg = Self::pick(&Self::XMM_POOL, &self.used_xmm, &self.clobber_xmm, seed, None)
+            .unwrap_or(Self::XMM_POOL[seed % Self::XMM_POOL.len()]);
+        self.reserve_xmm(reg, use_kind);
+        reg
+    }
+
+    fn alloc_mmx(&mut self, seed: usize) -> u8 {
+        let reg = Self::pick(&Self::MMX_POOL, &self.used_mmx, &HashSet::new(), seed, None)
+            .unwrap_or(Self::MMX_POOL[seed % Self::MMX_POOL.len()]);
+        self.used_mmx.insert(reg);
+        reg
+    }
+
+    fn reserve_gp(&mut self, reg: u8, use_kind: AsmRegUse) {
+        self.used_gp.insert(reg);
+        if matches!(use_kind, AsmRegUse::Input) {
+            self.input_gp.insert(reg);
+        }
+    }
+
+    fn reserve_xmm(&mut self, reg: u8, use_kind: AsmRegUse) {
+        self.used_xmm.insert(reg);
+        if matches!(use_kind, AsmRegUse::Input) {
+            self.input_xmm.insert(reg);
+        }
+    }
+
+    fn input_gp_contains(&self, reg: u8) -> bool {
+        self.input_gp.contains(&reg)
+    }
+
+    fn input_xmm_contains(&self, reg: u8) -> bool {
+        self.input_xmm.contains(&reg)
+    }
+
+    fn reassign_early_gp(&mut self, old: u8, seed: usize) -> Option<u8> {
+        if !self.input_gp.contains(&old) && !self.clobber_gp.contains(&old) {
+            self.used_gp.remove(&old);
+        }
+        let reg = Self::pick(
+            &Self::GP_POOL,
+            &self.used_gp,
+            &self.clobber_gp,
+            seed,
+            Some(&self.input_gp),
+        )?;
+        self.used_gp.insert(reg);
+        Some(reg)
+    }
+
+    fn reassign_early_xmm(&mut self, old: u8, seed: usize) -> Option<u8> {
+        if !self.input_xmm.contains(&old) && !self.clobber_xmm.contains(&old) {
+            self.used_xmm.remove(&old);
+        }
+        let reg = Self::pick(
+            &Self::XMM_POOL,
+            &self.used_xmm,
+            &self.clobber_xmm,
+            seed,
+            Some(&self.input_xmm),
+        )?;
+        self.used_xmm.insert(reg);
+        Some(reg)
+    }
+
+    fn pick(
+        pool: &[u8],
+        used: &HashSet<u8>,
+        clobbered: &HashSet<u8>,
+        seed: usize,
+        avoid: Option<&HashSet<u8>>,
+    ) -> Option<u8> {
+        for step in 0..pool.len() {
+            let reg = pool[(seed + step) % pool.len()];
+            if used.contains(&reg) || clobbered.contains(&reg) {
+                continue;
+            }
+            if avoid.is_some_and(|set| set.contains(&reg)) {
+                continue;
+            }
+            return Some(reg);
+        }
+        for &reg in pool {
+            if clobbered.contains(&reg) || avoid.is_some_and(|set| set.contains(&reg)) {
+                continue;
+            }
+            return Some(reg);
+        }
+        None
+    }
+}
+
 /// .pushsection 非文本节数据收集: 待解析的符号引用重定位
 struct CustomSecRel {
     sec_idx: usize,
@@ -12572,36 +12754,6 @@ impl Codegen {
         }
     }
 
-    /// 按约束为特定字母选择寄存器名
-    fn asm_reg_for_constraint(constraint: &str, idx: usize) -> &'static str {
-        let letters: Vec<char> = constraint
-            .chars()
-            .filter(|c| c.is_ascii_alphabetic())
-            .collect();
-        if letters.contains(&'a') {
-            return "rax";
-        }
-        if letters.contains(&'b') {
-            return "rbx";
-        }
-        if letters.contains(&'c') {
-            return "rcx";
-        }
-        if letters.contains(&'d') {
-            return "rdx";
-        }
-        if letters.contains(&'S') {
-            return "rsi";
-        }
-        if letters.contains(&'D') {
-            return "rdi";
-        }
-        if letters.contains(&'q') || letters.contains(&'Q') {
-            return ["rax", "rbx", "rcx", "rdx"][idx % 4];
-        }
-        ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"][idx % 9]
-    }
-
     fn asm_name_to_reg_index(name: &str) -> u8 {
         match name {
             "rax" => 0,
@@ -12714,20 +12866,9 @@ impl Codegen {
         let mut meta: Vec<(u8, u8, bool, bool, u8)> = Vec::new(); // (reg, xmm_width, is_output, is_mem, flags_raw)
                                                                   // flags_raw: bit 0 = early_clobber
 
-        // 先扫一遍输入, 收集输入寄存器集合 (用于 early-clobber 输出避让)
-        let mut input_reg_set: std::collections::HashSet<u8> = std::collections::HashSet::new();
-        // XMM 输入独立集合: GP 与 XMM 共用 0..15 编号空间, 不能混在同一 set 里判断冲突
-        let mut input_xmm_set: std::collections::HashSet<u8> = std::collections::HashSet::new();
-
-        // 解析 clobber 列表, 把被 clobber 的寄存器加入排除集合
+        // 解析 clobber 列表, 把被 clobber 的寄存器加入统一规划器的排除集合。
         let (clobber_gp, clobber_xmm, _x87_count) = Self::parse_clobber_registers(clobbers);
-        // clobber 的寄存器视为“已被占用”, 操作数分配时避让
-        for &r in &clobber_gp {
-            input_reg_set.insert(r);
-        }
-        for &x in &clobber_xmm {
-            input_xmm_set.insert(x);
-        }
+        let mut planner = AsmRegisterPlanner::new(&clobber_gp, &clobber_xmm);
 
         // ===== 处理 outputs =====
         for (op_idx, op) in outputs.iter().enumerate() {
@@ -12753,7 +12894,7 @@ impl Codegen {
                         Slot::Reg(r, name) => {
                             let nreg = *r;
                             map.insert(format!("%{idx}"), (*name).to_string());
-                            input_reg_set.insert(nreg);
+                            planner.reserve_gp(nreg, AsmRegUse::Output);
                             meta.push((nreg, 0, true, false, 0));
                         }
                     }
@@ -12805,6 +12946,7 @@ impl Codegen {
                         };
                         // +r (读写): 加载变量值; =r (只写): lea 地址 (将被 asm 覆写)
                         self.prepare_asm_binding(op, eri.reg, !is_inout);
+                        planner.reserve_gp(eri.reg, AsmRegUse::Output);
                         map.insert(format!("%{idx}"), name.to_string());
                         slots.push(Slot::Reg(eri.reg, name));
                         meta.push((eri.reg, xmm_w, true, false, if early { 1 } else { 0 }));
@@ -12830,7 +12972,7 @@ impl Codegen {
 
             // MMX 约束 (y)
             if Self::asm_constraint_wants_mmx(raw) {
-                let mi = (idx % 8) as u8;
+                let mi = planner.alloc_mmx(idx);
                 let name = Self::asm_mmx_name(mi as usize);
                 if is_inout {
                     self.prepare_asm_mmx_binding(op, mi);
@@ -12869,34 +13011,23 @@ impl Codegen {
                 }
             }
 
-            // XMM 寄存器约束 (避让 clobber 排除集)
+            // XMM 寄存器约束
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
-                let xmm_pool: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-                let mut xi = idx % 16;
-                // 如果分配的 XMM 被 clobber 排除, 找一个未被排除的
-                if input_xmm_set.contains(&(xi as u8)) && !clobber_xmm.is_empty() {
-                    for &cand in &xmm_pool {
-                        if !input_xmm_set.contains(&cand) {
-                            xi = cand as usize;
-                            break;
-                        }
-                    }
-                }
-                let name = Self::asm_xmm_name(xi);
+                let xi = planner.alloc_xmm(idx, AsmRegUse::Output);
+                let name = Self::asm_xmm_name(xi as usize);
                 if is_inout {
-                    self.prepare_asm_xmm_binding(op, xi as u8, true);
+                    self.prepare_asm_xmm_binding(op, xi, true);
                 }
                 map.insert(format!("%{idx}"), name.to_string());
-                slots.push(Slot::Reg(xi as u8, name));
-                meta.push((xi as u8, xmm_bits, true, false, if early { 1 } else { 0 }));
+                slots.push(Slot::Reg(xi, name));
+                meta.push((xi, xmm_bits, true, false, if early { 1 } else { 0 }));
                 idx += 1;
                 continue;
             }
 
             // 内存地址 (p): lea 到一个 GP 寄存器, 模板里就是 %reg
             if Self::asm_constraint_is_address(raw) {
-                let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
-                let chosen = gp_pool[idx % gp_pool.len()];
+                let chosen = planner.alloc_gp(idx, AsmRegUse::Output);
                 self.asm_load_address_to_reg(op, chosen);
                 let name = Self::gp_reg_name(chosen as usize);
                 map.insert(format!("%{idx}"), name.to_string());
@@ -12906,18 +13037,8 @@ impl Codegen {
                 continue;
             }
 
-            // 默认: GP 寄存器 (避让 clobber 排除集)
-            let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
-            let mut chosen = gp_pool[idx % gp_pool.len()];
-            // 如果分配的寄存器被 clobber 排除, 找一个未被排除的
-            if input_reg_set.contains(&chosen) && !clobber_gp.is_empty() {
-                for &cand in &gp_pool {
-                    if !input_reg_set.contains(&cand) {
-                        chosen = cand;
-                        break;
-                    }
-                }
-            }
+            // 默认: GP 寄存器
+            let chosen = planner.alloc_gp(idx, AsmRegUse::Output);
             let name = Self::gp_reg_name(chosen as usize);
             // +r (读写): 加载变量值; =r (只写): lea 地址 (将被 asm 覆写)
             self.prepare_asm_binding(op, chosen, !is_inout);
@@ -12956,9 +13077,9 @@ impl Codegen {
                         }
                         map.insert(format!("%{idx}"), nname.to_string());
                         if is_xmm {
-                            input_xmm_set.insert(nreg);
+                            planner.reserve_xmm(nreg, AsmRegUse::Input);
                         } else {
-                            input_reg_set.insert(nreg);
+                            planner.reserve_gp(nreg, AsmRegUse::Input);
                         }
                         meta.push((nreg, if is_xmm { 128 } else { 0 }, false, false, 0));
                         slots.push(Slot::Reg(nreg, nname));
@@ -13008,7 +13129,7 @@ impl Codegen {
                         self.prepare_asm_binding(op, eri.reg, false);
                         map.insert(format!("%{idx}"), name.to_string());
                         slots.push(Slot::Reg(eri.reg, name));
-                        input_reg_set.insert(eri.reg);
+                        planner.reserve_gp(eri.reg, AsmRegUse::Input);
                         meta.push((eri.reg, xmm_w, false, false, 0));
                         idx += 1;
                         continue;
@@ -13030,7 +13151,7 @@ impl Codegen {
 
             // MMX 约束 (y)
             if Self::asm_constraint_wants_mmx(raw) {
-                let mi = (idx % 8) as u8;
+                let mi = planner.alloc_mmx(idx);
                 let name = Self::asm_mmx_name(mi as usize);
                 self.prepare_asm_mmx_binding(op, mi);
                 map.insert(format!("%{idx}"), name.to_string());
@@ -13069,46 +13190,52 @@ impl Codegen {
 
             // XMM
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
-                let xi = idx % 16;
-                let name = Self::asm_xmm_name(xi);
-                self.prepare_asm_xmm_binding(op, xi as u8, is_inout);
+                let xi = planner.alloc_xmm(idx, AsmRegUse::Input);
+                let name = Self::asm_xmm_name(xi as usize);
+                self.prepare_asm_xmm_binding(op, xi, is_inout);
                 map.insert(format!("%{idx}"), name.to_string());
-                slots.push(Slot::Reg(xi as u8, name));
-                input_xmm_set.insert(xi as u8);
-                meta.push((xi as u8, xmm_bits, false, false, 0));
+                slots.push(Slot::Reg(xi, name));
+                meta.push((xi, xmm_bits, false, false, 0));
+                idx += 1;
+                continue;
+            }
+
+            // 固定 GP 字母约束 (a/b/c/d/S/D/q/Q)
+            if let Some((chosen, _fixed)) =
+                planner.alloc_gp_for_constraint(raw, idx, AsmRegUse::Input)
+            {
+                let name = Self::gp_reg_name(chosen as usize);
+                self.prepare_asm_binding(op, chosen, false);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(chosen, name));
+                meta.push((chosen, 0, false, false, 0));
                 idx += 1;
                 continue;
             }
 
             // 内存地址 (p)
             if Self::asm_constraint_is_address(raw) {
-                let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
-                let chosen = gp_pool[idx % gp_pool.len()];
+                let chosen = planner.alloc_gp(idx, AsmRegUse::Input);
                 self.asm_load_address_to_reg(op, chosen);
                 let name = Self::gp_reg_name(chosen as usize);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
-                input_reg_set.insert(chosen);
                 meta.push((chosen, 0, false, false, 0));
                 idx += 1;
                 continue;
             }
 
             // GP 寄存器
-            let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
-            let chosen = gp_pool[idx % gp_pool.len()];
+            let chosen = planner.alloc_gp(idx, AsmRegUse::Input);
             let name = Self::gp_reg_name(chosen as usize);
             self.prepare_asm_binding(op, chosen, false);
             map.insert(format!("%{idx}"), name.to_string());
             slots.push(Slot::Reg(chosen, name));
-            input_reg_set.insert(chosen);
             meta.push((chosen, 0, false, false, 0));
             idx += 1;
         }
 
         // ===== early-clobber: 输出寄存器不能与任何输入寄存器重叠 =====
-        let gp_pool: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
-        let xmm_pool: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         let num_outputs = outputs.len();
         for i in 0..num_outputs {
             let (reg, xmm_w, is_out, is_mem, flags) = meta[i];
@@ -13122,76 +13249,46 @@ impl Codegen {
             }
             if xmm_w != 0 {
                 // XMM 输出 + early-clobber: 找一个未被 XMM 输入占用的 XMM
-                if !input_xmm_set.contains(&reg) {
+                if !planner.input_xmm_contains(reg) {
                     continue;
                 }
-                for &cand in &xmm_pool {
-                    if !input_xmm_set.contains(&cand) {
-                        let new_name = Self::asm_xmm_name(cand as usize);
-                        let key = format!("%{i}");
-                        if let Some(op) = outputs.get(i) {
-                            let raw = output_constraints
-                                .get(i)
-                                .map(String::as_str)
-                                .unwrap_or("=r");
-                            let (_, is_inout, _, _) = Self::parse_asm_constraint_flags(raw);
-                            if is_inout {
-                                self.prepare_asm_xmm_binding(op, cand, true);
-                            }
+                if let Some(cand) = planner.reassign_early_xmm(reg, i) {
+                    let new_name = Self::asm_xmm_name(cand as usize);
+                    let key = format!("%{i}");
+                    if let Some(op) = outputs.get(i) {
+                        let raw = output_constraints
+                            .get(i)
+                            .map(String::as_str)
+                            .unwrap_or("=r");
+                        let (_, is_inout, _, _) = Self::parse_asm_constraint_flags(raw);
+                        if is_inout {
+                            self.prepare_asm_xmm_binding(op, cand, true);
                         }
-                        map.insert(key.clone(), new_name.to_string());
-                        slots[i] = Slot::Reg(cand, new_name);
-                        meta[i] = (cand, xmm_w, true, false, flags);
-                        break;
                     }
+                    map.insert(key, new_name.to_string());
+                    slots[i] = Slot::Reg(cand, new_name);
+                    meta[i] = (cand, xmm_w, true, false, flags);
                 }
                 continue;
             }
-            if !input_reg_set.contains(&reg) {
+            if !planner.input_gp_contains(reg) {
                 continue;
             }
             // 找一个不冲突的 GP
-            for &cand in &gp_pool {
-                if !input_reg_set.contains(&cand) {
-                    let new_name = Self::gp_reg_name(cand as usize);
-                    // 替换 map 中对应的 %N 条目
-                    let key = format!("%{i}");
-                    if let Some(old) = map.get(&key).cloned() {
-                        // 重新 prepare_asm_binding 到新寄存器
-                        if let Some(op) = outputs.get(i) {
-                            self.prepare_asm_binding(op, cand, true);
-                        }
-                        map.insert(key.clone(), new_name.to_string());
-                        slots[i] = Slot::Reg(
-                            cand,
-                            match slots[i] {
-                                Slot::Reg(_, _) => {
-                                    // 取一个静态名: 用 cand 处的名字
-                                    let n: &'static str = match cand {
-                                        0 => "rax",
-                                        1 => "rcx",
-                                        2 => "rdx",
-                                        3 => "rbx",
-                                        4 => "rsp",
-                                        5 => "rbp",
-                                        6 => "rsi",
-                                        7 => "rdi",
-                                        8 => "r8",
-                                        9 => "r9",
-                                        10 => "r10",
-                                        11 => "r11",
-                                        _ => "rax",
-                                    };
-                                    n
-                                }
-                                _ => unreachable!(),
-                            },
-                        );
-                        let _ = old;
-                    }
-                    meta[i] = (cand, 0, true, false, flags);
-                    break;
+            if let Some(cand) = planner.reassign_early_gp(reg, i) {
+                let new_name = Self::gp_reg_name(cand as usize);
+                let key = format!("%{i}");
+                if let Some(op) = outputs.get(i) {
+                    let raw = output_constraints
+                        .get(i)
+                        .map(String::as_str)
+                        .unwrap_or("=r");
+                    let (_, is_inout, _, _) = Self::parse_asm_constraint_flags(raw);
+                    self.prepare_asm_binding(op, cand, !is_inout);
                 }
+                map.insert(key, new_name.to_string());
+                slots[i] = Slot::Reg(cand, new_name);
+                meta[i] = (cand, 0, true, false, flags);
             }
         }
 
