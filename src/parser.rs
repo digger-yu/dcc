@@ -1632,7 +1632,28 @@ impl<'a> Parser<'a> {
                 ).with_hint("each named operand must have a unique name"));
             }
         }
-        // 3. 命名/位置操作数混用: GNU C 合法语法, 内核大量使用, 不报警
+        // 3. 命名/位置操作数混用 (W0007):
+        //    同一 asm 语句中部分操作数带 [name]、部分不带时告警, 提示
+        //    统一风格, 避免模板用 %[name] 引用未命名的操作数导致
+        //    "undefined named operand" (GCC 对模板引用未定义名字会报错).
+        //    GNU C 虽允许混用, 但按 docs/diagnostics.md W0007 定义诊断.
+        let all_names: Vec<&Option<String>> =
+            output_names.iter().chain(input_names.iter()).collect();
+        let has_named = all_names
+            .iter()
+            .any(|n| n.as_ref().map_or(false, |s| !s.is_empty()));
+        let has_unnamed = all_names
+            .iter()
+            .any(|n| n.as_ref().map_or(true, |s| s.is_empty()));
+        if has_named && has_unnamed {
+            self.diags.push(Diagnostic::warn(
+                "W0007",
+                "mixing named and unnamed asm operands",
+                sp.clone(),
+            ).with_hint(
+                "name all operands or use positional references consistently",
+            ));
+        }
         // 4. 约束与表达式类型不匹配 (W0005)
         let all_exprs: Vec<&Expr> = outputs.iter().chain(inputs.iter()).collect();
         let all_constraints: Vec<&String> =
