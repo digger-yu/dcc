@@ -5109,11 +5109,11 @@ fn asm_diag_validation_compiles_with_warnings() {
     let source = include_str!("fixtures/c/asm_diag_validation.c");
     let (output, _exe) = run_compile_and_run("asm-diag-validation", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // 应产生 W0005/W0006/E0015 诊断但编译仍可完成 (E0015 为 error
-    // 但仅在占位符越界时触发; 此处 fixture 含 error 故预期失败)
+    // 应产生 W0005/E0015/E0016 诊断但编译仍可完成 (E0015/E0016 为 error
+    // 但仅在占位符越界/重复名时触发; 此处 fixture 含 error 故预期失败)
     // 改为仅检查 stderr 含预期诊断码
     assert!(
-        stderr.contains("W0006") || stderr.contains("W0005")
+        stderr.contains("E0016") || stderr.contains("W0005")
             || stderr.contains("E0015"),
         "expected asm diagnostic warnings, stderr: {}",
         stderr

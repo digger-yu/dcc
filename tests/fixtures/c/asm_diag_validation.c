@@ -7,7 +7,7 @@ int main(void) {
     int x = 0, y = 0;
     float f = 1.0f;
 
-    /* W0006: duplicate operand name */
+    /* E0016: duplicate operand name */
     asm (
         "mov %0, %0"
         : [val] "=r" (x)

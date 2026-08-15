@@ -1621,12 +1621,12 @@ impl<'a> Parser<'a> {
                 ).with_hint("add '=' for write-only or '+' for read-write output"));
             }
         }
-        // 2. 重复操作数名检测 (W0006)
+        // 2. 重复操作数名检测 (E0016, 对齐 GCC "duplicate 'asm' operand name")
         let mut seen_names: HashSet<&str> = HashSet::new();
         for name in output_names.iter().chain(input_names.iter()).flatten() {
             if !name.is_empty() && !seen_names.insert(name.as_str()) {
-                self.diags.push(Diagnostic::warn(
-                    "W0006",
+                self.diags.push(Diagnostic::err(
+                    "E0016",
                     format!("duplicate asm operand name '{}'", name),
                     sp.clone(),
                 ).with_hint("each named operand must have a unique name"));

@@ -109,14 +109,14 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0013** | `__builtin_choose_expr condition is not constant` | 选择表达式非常量 | 非常量条件传给 `__builtin_choose_expr` | — | `e0013.c` |
 | **E0014** | `output operand N constraint '…' missing '=' or '+' prefix` | 输出约束缺前缀 | asm 输出操作数约束未以 `=` 或 `+` 开头 | `add '=' for write-only or '+' for read-write output` | `e0014.c` |
 | **E0015** | `asm template references operand %N but only M operand(s) provided` / `asm template references unnamed operand '%[name]' which does not exist` / `matching constraint references invalid operand number 'N' for input operand I` / `matching constraint digit 'N' not allowed in output operand I constraint` | 模板占位符越界 / 匹配约束越界 | asm 模板引用的数字索引超出操作数范围，或命名操作数不存在；或输入约束中的匹配数字（matching constraint digit）引用不存在的输出操作数；或输出约束中错误地使用匹配数字 | `add the missing operand or fix the template index` 等 | — |
+| **E0016** | `duplicate asm operand name '…'` | 重复操作数名 | asm 语句中多个操作数使用相同的 `[name]` | `each named operand must have a unique name` | — |
 
-### Parser 警告：`W0001`、`W0005`–`W0007`
+### Parser 警告：`W0001`、`W0005`、`W0007`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
 | **W0001** | `type defaults to 'int' in declaration without a type specifier` | 隐式 int（GNU 兼容） | 仅有存储类：`static x;` | `w0001.c` |
 | **W0005** | `impossible constraint: 'r' constraint with floating-point operand` | 约束与类型不匹配 | asm 约束字母与操作数表达式类型不兼容（如浮点绑 `r`、整数绑 `x`） | `use 'x' for SSE or 'f' for x87 float operands` | — |
-| **W0006** | `duplicate asm operand name '…'` | 重复操作数名 | asm 语句中多个操作数使用相同的 `[name]` | `each named operand must have a unique name` | — |
 | **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | `name all operands or use positional references consistently` | — |
 
 ---
