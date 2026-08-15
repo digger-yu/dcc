@@ -593,6 +593,13 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         })?;
     }
 
+    let mut asm_diags = codegen::validate_inline_asm_constraints(&module);
+    if !asm_diags.is_empty() {
+        remap_diags(&mut asm_diags, &line_map);
+        enrich_diags(&mut asm_diags, src, &file_name, input.parent());
+        return Err(asm_diags);
+    }
+
     if cfg.syntax_only {
         return Ok(());
     }

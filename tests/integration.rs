@@ -617,6 +617,69 @@ fn asm_register_planner_respects_fixed_gp_constraints() {
 }
 
 #[test]
+fn asm_constraint_type_mismatch_rejects_float_gp_input() {
+    let source = "int f(double x) { asm(\"\" : : \"r\"(x)); return 0; }\n";
+    let (output, object_path) = run_object_test("asm-constraint-float-r-input", source);
+    let _ = fs::remove_file(object_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "compile should fail");
+    assert!(
+        stderr.contains("impossible constraint") && stderr.contains("'r'"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn asm_constraint_type_mismatch_rejects_float_gp_input_syntax_only() {
+    let source = "int f(double x) { asm(\"\" : : \"r\"(x)); return 0; }\n";
+    let output = run_syntax_test("asm-constraint-float-r-input-syntax", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "syntax-only compile should fail");
+    assert!(
+        stderr.contains("impossible constraint") && stderr.contains("'r'"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn asm_constraint_type_mismatch_rejects_float_gp_output() {
+    let source = "double f(void) { double out; asm(\"\" : \"=r\"(out)); return out; }\n";
+    let (output, object_path) = run_object_test("asm-constraint-float-r-output", source);
+    let _ = fs::remove_file(object_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "compile should fail");
+    assert!(
+        stderr.contains("impossible constraint") && stderr.contains("'=r'"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn asm_constraint_type_mismatch_rejects_float_rm_input() {
+    let source = "int f(double x) { asm(\"\" : : \"rm\"(x)); return 0; }\n";
+    let (output, object_path) = run_object_test("asm-constraint-float-rm-input", source);
+    let _ = fs::remove_file(object_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "compile should fail");
+    assert!(
+        stderr.contains("impossible constraint") && stderr.contains("'rm'"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn asm_constraint_type_validation_allows_matching_operands() {
+    let source = "int f(int x, double d) { int y; double z; asm(\"\" : \"=r\"(y), \"=x\"(z) : \"r\"(x), \"x\"(d), \"m\"(d)); return y; }\n";
+    let (output, object_path) = run_object_test("asm-constraint-matching", source);
+    let _ = fs::remove_file(object_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn o2_dce_preserves_outputless_inline_asm() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-o2-asm-dce-{}.c", std::process::id()));
