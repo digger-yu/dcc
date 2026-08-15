@@ -21,6 +21,7 @@ Thumbs.db
 config.log
 config.status
 Makefile
+!Makefile
 
 # Perf profiling
 perf.data

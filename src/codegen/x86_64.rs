@@ -1384,7 +1384,6 @@ impl Codegen {
         line_idx: usize,
         numeric_label_map: &std::collections::HashMap<String, String>,
     ) {
-        let sec = &mut self.extra_sections[sec_idx];
         // 标签定义 (N: 或 name:)
         if let Some(rest) = trimmed.strip_suffix(':') {
             let label = rest.trim();
@@ -1450,7 +1449,7 @@ impl Codegen {
                     let (val, sym) = Self::parse_asm_data_expr(
                         expr.trim(), locals, line_idx, numeric_label_map,
                     );
-                    if let Some((sym_name, rel_type, addend)) = sym {
+                    if let Some((sym_name, _rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
                             sec_idx, offset: off,
@@ -1582,9 +1581,9 @@ impl Codegen {
     /// 解析表达式原子: 数字字面量或符号引用
     fn parse_asm_expr_atom(
         expr: &str,
-        locals: &AsmLocalLabels,
-        line_idx: usize,
-        numeric_label_map: &std::collections::HashMap<String, String>,
+        _locals: &AsmLocalLabels,
+        _line_idx: usize,
+        _numeric_label_map: &std::collections::HashMap<String, String>,
     ) -> (i64, bool) {
         let expr = expr.trim();
         if expr == "." {
@@ -1649,9 +1648,9 @@ impl Codegen {
     /// 解析引号字符串
     fn parse_asm_quoted_string(s: &str) -> String {
         let s = s.trim();
-        if s.starts_with('"') {
-            let end = s[1..].find('"').map(|p| p + 1).unwrap_or(s.len());
-            let inner = &s[1..end];
+        if let Some(stripped) = s.strip_prefix('"') {
+            let end = stripped.find('"').unwrap_or(stripped.len());
+            let inner = &stripped[..end];
             let mut result = String::new();
             let mut chars = inner.chars();
             while let Some(c) = chars.next() {
@@ -4324,6 +4323,21 @@ impl Codegen {
         }
     }
 
+    fn jmp_external(&mut self, l: &str) {
+        let at = self.pos();
+        self.emit(&[0xE9, 0, 0, 0, 0]);
+        if self.relocatable {
+            self.pending_func_rels.push((at + 1, l.to_string()));
+        } else {
+            self.pending.push(PendingJump {
+                at,
+                target: l.into(),
+                kind: JumpKind::Jmp,
+                is_push_imm: false,
+            });
+        }
+    }
+
     /// Lower one SysV AMD64 call.  Outgoing stack arguments occupy the lowest
     /// addresses, temporary register staging follows them, and the complete
     /// area is rounded to 16 bytes so `%rsp` is aligned immediately before call.
@@ -4598,7 +4612,11 @@ impl Codegen {
             self.call_label(name);
         } else {
             self.load_rsp_qword(11, callee_stage.unwrap());
-            self.emit(&[0x49, 0xFF, 0xD3]);
+            if self.target.indirect_branch_thunk_extern {
+                self.call_label("__x86_indirect_call_thunk_r11");
+            } else {
+                self.emit(&[0x49, 0xFF, 0xD3]);
+            }
         }
         self.emit_add_rsp(frame_bytes);
     }
@@ -8481,7 +8499,7 @@ impl Codegen {
             d.extend_from_slice(name.as_bytes());
             d.push(b'\'');
             d.push(0);
-            while d.len() % 8 != 0 {
+            while !d.len().is_multiple_of(8) {
                 d.push(0);
             }
             d
@@ -10103,7 +10121,11 @@ impl Codegen {
         if self.target.frame_pointer {
             self.emit(&[0x5D]); // pop rbp
         }
-        self.emit(&[0xc3]); // ret
+        if self.target.function_return_thunk_extern {
+            self.jmp_external("__x86_return_thunk");
+        } else {
+            self.emit(&[0xc3]); // ret
+        }
     }
 
     /// 初始化 SysV AMD64 va_list 结构 (24 字节)。
@@ -13901,8 +13923,8 @@ impl Codegen {
             if trimmed.starts_with(".popsection") {
                 if !self.pushsection_stack.is_empty() {
                     self.pushsection_stack.pop();
-                } else if skip_depth > 0 {
-                    skip_depth -= 1;
+                } else {
+                    skip_depth = skip_depth.saturating_sub(1);
                 }
                 continue;
             }
@@ -22098,7 +22120,6 @@ impl Codegen {
         diag_fns: &[AttrDiagFn<'a>],
         _caller: &str,
     ) {
-        use crate::ast::Stmt;
         match s {
             Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
                 Self::check_attr_diagnostics_expr(e, diag_fns, _caller);
@@ -22144,7 +22165,6 @@ impl Codegen {
         diag_fns: &[AttrDiagFn<'a>],
         _caller: &str,
     ) {
-        use crate::ast::Expr;
         if let Expr::Call { callee, args, .. } = e {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 for (fname, err, warn, dep) in diag_fns {

@@ -3,11 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DCC_REPO="${DCC_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
-DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
+DCC="${DCC:-$DCC_REPO/target/release/dcc}"
 WRAPPER="${WRAPPER:-$SCRIPT_DIR/dcc-host-wrapper.sh}"
 HOSTCC="${HOSTCC:-$WRAPPER}"
-DCC_REPO="${DCC_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 echo "== DCC prepare0 full-chain check =="
 echo "kernel: $KERNEL_DIR"

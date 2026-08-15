@@ -469,7 +469,6 @@ fn recompute_section_vaddrs(layout: &mut crate::link::layout::Layout) {
 /// 支持 x86_64, aarch64, riscv64, arm 架构 (MIPS 暂未实现).
 fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
     use crate::codegen::elf::{STB_GLOBAL, STT_FUNC};
-    use crate::debug::ArchKind;
     use crate::link::layout::{OutputSectionKind, OutputSymbol};
     // 如果已存在 _start 或不是可执行文件, 跳过
     // PIE 同样需要入口桩: _start 桩全部由 PC-relative 指令构成, 位置无关。
@@ -630,7 +629,6 @@ fn embed_vdso(
 ) -> Result<(), Vec<Diagnostic>> {
     use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_NOTE, SHT_PROGBITS, STB_GLOBAL, STT_FUNC};
     use crate::link::layout::{OutputSection, OutputSectionKind, OutputSymbol};
-    use crate::link::vdso;
 
     // 1. 解析 vDSO ELF
     let info = vdso::parse_vdso(vdso_path).map_err(|e| {

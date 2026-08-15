@@ -171,18 +171,84 @@ fn cross_function_dce(module: &mut Module) {
     let prog = module.source_mut();
     let mut funcs: Vec<FuncDecl> = Vec::new();
     let mut others: Vec<Decl> = Vec::new();
+    let mut extra_roots = Vec::new();
     for d in prog.decls.drain(..) {
         match d {
             Decl::Func(f) => funcs.push(f),
+            Decl::Var(v) => {
+                if let Some(init) = &v.init {
+                    collect_global_func_roots(init, &mut extra_roots);
+                }
+                others.push(Decl::Var(v));
+            }
+            Decl::GlobalAsm { ref outputs, ref inputs, .. } => {
+                for e in outputs.iter().chain(inputs.iter()) {
+                    collect_global_func_roots(e, &mut extra_roots);
+                }
+                others.push(d);
+            }
             other => others.push(other),
         }
     }
-    crate::ssa_passes::cross_function_dce(&mut funcs, true);
+    crate::ssa_passes::cross_function_dce_with_roots(&mut funcs, true, &extra_roots);
     let mut all: Vec<Decl> = others;
     for f in funcs {
         all.push(Decl::Func(f));
     }
     prog.decls = all;
+}
+
+fn collect_global_func_roots(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Ident { name, ty, .. } => {
+            if matches!(ty, crate::ast::Type::Func(_, _)) {
+                out.push(name.name.clone());
+            }
+        }
+        Expr::AddrOf { e, .. } => collect_global_func_roots(e, out),
+        Expr::Cast { e, .. }
+        | Expr::Unary { e, .. }
+        | Expr::SizeofExpr { e, .. }
+        | Expr::AlignofExpr { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
+        | Expr::PreDec { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. }
+        | Expr::VaArg { ap: e, .. } => collect_global_func_roots(e, out),
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+            collect_global_func_roots(l, out);
+            collect_global_func_roots(r, out);
+        }
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            collect_global_func_roots(cond, out);
+            collect_global_func_roots(then_, out);
+            collect_global_func_roots(else_, out);
+        }
+        Expr::Index { arr, idx, .. } => {
+            collect_global_func_roots(arr, out);
+            collect_global_func_roots(idx, out);
+        }
+        Expr::Member { expr, .. } => collect_global_func_roots(expr, out),
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            for init in inits {
+                match init {
+                    crate::ast::InitItem::Expr(e) => collect_global_func_roots(e, out),
+                    crate::ast::InitItem::Designated { value, .. } => collect_global_func_roots(value, out),
+                }
+            }
+        }
+        Expr::AsmExpr { outputs, inputs, .. } => {
+            for e in outputs.iter().chain(inputs.iter()) {
+                collect_global_func_roots(e, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn fold_constants(module: &mut Module) {
@@ -468,7 +534,7 @@ fn fold_branches_block(items: &mut Vec<BlockItem>) {
     while i < items.len() {
         let fold_if = matches!(
             items.get(i),
-            Some(BlockItem::Stmt(Stmt::If { cond, .. })) if const_eval::eval(
+            Some(BlockItem::Stmt(Stmt::If { .. })) if const_eval::eval(
                 match items.get(i) {
                     Some(BlockItem::Stmt(Stmt::If { cond, .. })) => cond,
                     _ => unreachable!(),
@@ -1168,7 +1234,7 @@ mod tests {
                     span: Span::point("t.c", 1, 1),
                 }),
                 span: Span::point("t.c", 1, 1),
-                is_static: true,
+                is_static: false,
                 is_extern: false,
                 is_variadic: false,
                 is_weak: false,
@@ -1437,7 +1503,7 @@ mod tests {
                 span: span.clone(),
             }),
             span: span.clone(),
-            is_static: true,
+            is_static: false,
             is_extern: false,
             is_variadic: false,
             is_weak: false,

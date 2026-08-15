@@ -588,8 +588,10 @@ mod tests {
     use crate::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
 
     fn make_cuda_config() -> (OffloadConfig, OffloadSection) {
-        let mut config = OffloadConfig::default();
-        config.cuda = true;
+        let mut config = OffloadConfig {
+            cuda: true,
+            ..OffloadConfig::default()
+        };
         config.target_archs.push("sm_80".to_string());
 
         let mut section = OffloadSection::new();
@@ -607,8 +609,10 @@ mod tests {
     }
 
     fn make_hip_config() -> (OffloadConfig, OffloadSection) {
-        let mut config = OffloadConfig::default();
-        config.hip = true;
+        let mut config = OffloadConfig {
+            hip: true,
+            ..OffloadConfig::default()
+        };
         config.target_archs.push("gfx906".to_string());
 
         let mut section = OffloadSection::new();
@@ -643,9 +647,11 @@ mod tests {
 
     #[test]
     fn needed_backends_both() {
-        let mut config = OffloadConfig::default();
-        config.cuda = true;
-        config.hip = true;
+        let config = OffloadConfig {
+            cuda: true,
+            hip: true,
+            ..OffloadConfig::default()
+        };
 
         let mut section = OffloadSection::new();
         section.add_entry(OffloadEntry {

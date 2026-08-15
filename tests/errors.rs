@@ -647,15 +647,11 @@ fn w0004_asm_goto_missing_label_warning_snapshot() {
 #[cfg(unix)]
 #[test]
 fn e0205_unreadable_include_snapshot() {
-    use std::os::unix::fs::PermissionsExt;
-
-    // 使用 dcc-secret-<eXXXX>-<pid> 命名的临时目录, 便于 normalize_stderr 折叠
+    // 使用目录作为 include 目标，root 环境下也会稳定触发 read_to_string 失败。
     let dir = std::env::temp_dir().join(format!("dcc-secret-e0205-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create temp dir");
     let secret = dir.join("secret.h");
-    fs::write(&secret, "int secret;\n").expect("write secret.h");
-    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).expect("chmod");
+    fs::create_dir_all(&secret).expect("create secret.h directory");
 
     let fixtures = fixtures_dir();
     let source = fixtures.join("e0205.c");
@@ -664,8 +660,6 @@ fn e0205_unreadable_include_snapshot() {
         &source,
     );
 
-    // 恢复权限后再清理
-    let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(0o600));
     let _ = fs::remove_dir_all(&dir);
     assert!(status != 0);
     assert!(
@@ -679,15 +673,11 @@ fn e0205_unreadable_include_snapshot() {
 #[cfg(unix)]
 #[test]
 fn e0209_force_include_unreadable_snapshot() {
-    use std::os::unix::fs::PermissionsExt;
-
-    // 使用 dcc-secret-<eXXXX>-<pid> 命名的临时目录, 便于 normalize_stderr 折叠
+    // 使用目录作为 forced include 目标，root 环境下也会稳定失败。
     let dir = std::env::temp_dir().join(format!("dcc-secret-e0209-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create temp dir");
     let secret = dir.join("secret.h");
-    fs::write(&secret, "int secret;\n").expect("write secret.h");
-    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).expect("chmod");
+    fs::create_dir_all(&secret).expect("create secret.h directory");
 
     let fixtures = fixtures_dir();
     let source = fixtures.join("e0209.c");
@@ -701,8 +691,6 @@ fn e0209_force_include_unreadable_snapshot() {
         &source,
     );
 
-    // 恢复权限后再清理, 避免 Permission denied 干扰
-    let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(0o600));
     let _ = fs::remove_dir_all(&dir);
     assert!(status != 0);
     assert!(

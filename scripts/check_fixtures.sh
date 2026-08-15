@@ -5,6 +5,7 @@
 # 退出码: 0 (全部存在), 1 (有缺失)
 
 set -euo pipefail
+set +H
 
 errors=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +51,8 @@ for test_file in "$REPO_ROOT"/tests/*.rs; do
         line_num=$((line_num + 1))
 
         # ── Pattern 1: include_str!("fixtures/...") ──
-        if [[ "$line" =~ include_str!\(\"fixtures/([^\"]+)\"\) ]]; then
+            regex_include_str='include_str!\("fixtures/([^"]+)"\)'
+            if [[ "$line" =~ $regex_include_str ]]; then
             rel="${BASH_REMATCH[1]}"
             check_file "tests/fixtures/$rel" "$basename:$line_num" || errors=$((errors + 1))
         fi

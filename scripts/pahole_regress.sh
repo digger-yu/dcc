@@ -2,7 +2,8 @@
 # pahole/BTF 回归：编译带 -g 的 .o 并用 pahole 或 llvm-objdump 探测 BTF
 set -euo pipefail
 
-DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
+DCC_REPO="${DCC_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+DCC="${DCC:-$DCC_REPO/target/release/dcc}"
 WORK="${WORK:-/tmp/dcc-pahole-$$}"
 mkdir -p "$WORK"
 

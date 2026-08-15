@@ -581,6 +581,22 @@ pub struct EnumDef {
 }
 
 impl Type {
+    fn aggregate_align_from_offsets(fields: &[Field]) -> usize {
+        let mut align = fields.iter().map(|f| f.ty.align()).max().unwrap_or(1).max(1);
+        for f in fields {
+            let nat = f.ty.align().max(1);
+            if nat > 1 && f.offset % nat != 0 {
+                let observed = if f.offset == 0 {
+                    1
+                } else {
+                    1usize << f.offset.trailing_zeros()
+                };
+                align = align.min(observed.max(1).min(nat));
+            }
+        }
+        align.max(1)
+    }
+
     pub fn size(&self) -> usize {
         match self {
             Type::Void => 0,
@@ -606,8 +622,24 @@ impl Type {
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.size() * 2,
             Type::Atomic(inner) => inner.size(),
-            Type::Struct(_, fields) => fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0),
-            Type::Union(_, fields) => fields.iter().map(|f| f.ty.size()).max().unwrap_or(0),
+            Type::Struct(_, fields) => {
+                let size = fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0);
+                let align = Self::aggregate_align_from_offsets(fields);
+                if align > 1 {
+                    (size + align - 1) & !(align - 1)
+                } else {
+                    size
+                }
+            }
+            Type::Union(_, fields) => {
+                let size = fields.iter().map(|f| f.ty.size()).max().unwrap_or(0);
+                let align = Self::aggregate_align_from_offsets(fields);
+                if align > 1 {
+                    (size + align - 1) & !(align - 1)
+                } else {
+                    size
+                }
+            }
             _ => 8,
         }
     }
@@ -637,8 +669,8 @@ impl Type {
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.align(),
             Type::Atomic(inner) => inner.align(),
-            Type::Struct(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
-            Type::Union(_, fields) => fields.iter().map(|f| f.ty.align()).max().unwrap_or(1),
+            Type::Struct(_, fields) => Self::aggregate_align_from_offsets(fields),
+            Type::Union(_, fields) => Self::aggregate_align_from_offsets(fields),
             _ => 8,
         }
     }

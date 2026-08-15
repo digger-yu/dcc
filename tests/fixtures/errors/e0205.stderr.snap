@@ -1,4 +1,4 @@
-error[E0205]: cannot read <secret.h>: Permission denied (os error 13)
+error[E0205]: cannot read <secret.h>: Is a directory (os error 21)
   --> <file>:1:1
    1 |#include "<secret.h>"
      | ^

@@ -3,9 +3,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
-DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
 DCC_REPO="${DCC_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
+DCC="${DCC:-$DCC_REPO/target/release/dcc}"
 HOST_LD="${HOST_LD:-gcc}"
 MOD="$KERNEL_DIR/scripts/mod"
 WORK="${WORK:-/tmp/dcc-modpost-$$}"

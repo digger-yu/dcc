@@ -1134,25 +1134,39 @@ impl Preprocessor {
     /// 展开结果逐行写出; 空行/注释行跳过, 不输出空行填充。
     /// 行号追踪由 line_map 负责, 不再保持输出行号与源行号物理对齐。
     fn flush_active_source(&mut self, src: &mut String, spans: &mut Vec<(u32, u32)>) {
-        let out_start = self.out_lines + 1;
         let phys_lines: Vec<u32> = spans.iter().map(|&(s, _)| s).collect();
         let expanded = self.expand_macros(src, &phys_lines);
         let lines: Vec<&str> = expanded.split('\n').collect();
-        for (i, &(phys_start, phys_end)) in spans.iter().enumerate() {
+        for (i, &(phys_start, _phys_end)) in spans.iter().enumerate() {
             let line = lines.get(i).copied().unwrap_or("");
             if !line.trim().is_empty() {
+                let out_start = self.out_lines + 1;
                 self.push_out(line);
                 if !line.ends_with('\n') {
                     self.push_out("\n");
                 }
+                self.line_map.push(LineSpan {
+                    out_start,
+                    file: self.file.clone(),
+                    src_start: phys_start,
+                    count: 1,
+                });
             }
             // 不再补空行填充多物理行
         }
-        // 兆底: 展开结果行数多于输入行数时写全
+        // 兜底: 展开结果行数多于输入行数时写全，并映射到最后一个源行。
+        let fallback_src = spans.last().map(|&(s, _)| s).unwrap_or(1);
         for line in lines.iter().skip(spans.len()) {
             if !line.is_empty() {
+                let out_start = self.out_lines + 1;
                 self.push_out(line);
                 self.push_out("\n");
+                self.line_map.push(LineSpan {
+                    out_start,
+                    file: self.file.clone(),
+                    src_start: fallback_src,
+                    count: 1,
+                });
             }
         }
         // 把展开阶段累积的 _Pragma 字符串批量应用
@@ -1160,23 +1174,13 @@ impl Preprocessor {
         for (p, line_no) in pending {
             self.apply_pragma_string(&p, line_no);
         }
-        // 记录行号映射区间
-        let actual_count = self.out_lines - out_start + 1;
-        if actual_count > 0 {
-            self.line_map.push(LineSpan {
-                out_start,
-                file: self.file.clone(),
-                src_start: spans[0].0,
-                count: actual_count,
-            });
-        }
         src.clear();
         spans.clear();
     }
 
     /// 不再输出空行填充。
     /// 行号追踪由 line_map 负责, 此处只记录映射关系。
-    fn preserve_lines(&mut self, start: u32, end: u32) {
+    fn preserve_lines(&mut self, start: u32, _end: u32) {
         let out_start = self.out_lines + 1;
         // 不发空行, 只记录 line_map 以便后续行号反查
         self.line_map.push(LineSpan {

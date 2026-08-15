@@ -1189,30 +1189,48 @@ fn eval_unop(op: UnOp, v: i128) -> Option<i128> {
 // 跨函数 DCE: 在 module 层面做, 由 driver 调用 (不放在 run)
 // =====================================================================
 
-/// 跨函数 DCE: 给定函数集合 + 已知的入口 (main 或 extern), 标记可达函数,
-/// 删除不可达的 internal 函数 (FuncDecl)。
+/// 跨函数 DCE: 给定函数集合 + 已知的入口，标记可达函数，
+/// 删除不可达的 internal static 函数 (FuncDecl)。
 pub fn cross_function_dce(funcs: &mut Vec<FuncDecl>, keep_extern: bool) -> bool {
-    // 没有 main 时无法确定入口, 保守跳过跨函数 DCE
-    let has_main = funcs.iter().any(|f| f.name.name == "main");
-    if !has_main {
-        return false;
-    }
-    // 1. 建立正向调用图 (caller -> callees) - 用于 BFS 从 main 出发找到所有可达函数
+    cross_function_dce_with_roots(funcs, keep_extern, &[])
+}
+
+pub fn cross_function_dce_with_roots(
+    funcs: &mut Vec<FuncDecl>,
+    keep_extern: bool,
+    extra_roots: &[String],
+) -> bool {
+    let func_names: HashSet<String> = funcs.iter().map(|f| f.name.name.clone()).collect();
     let mut callees: HashMap<String, Vec<String>> = HashMap::new();
+    let mut address_taken: HashSet<String> = HashSet::new();
     for f in funcs.iter() {
-        callees.insert(f.name.name.clone(), collect_call_targets(f));
+        let (calls, addrs) = collect_func_refs(f, &func_names);
+        callees.insert(f.name.name.clone(), calls);
+        address_taken.extend(addrs);
     }
-    // 2. 从入口 (main / 标记 noreturn-extern) 做可达性 BFS
+
     let mut reachable: HashSet<String> = HashSet::new();
     let mut stack: Vec<String> = Vec::new();
     for f in funcs.iter() {
-        if f.is_extern && keep_extern {
+        if (keep_extern && !f.is_static)
+            || f.name.name == "main"
+            || f.is_extern
+            || f.is_used_attr
+            || f.is_retain
+            || f.is_constructor
+            || f.is_destructor
+            || address_taken.contains(&f.name.name)
+        {
             stack.push(f.name.name.clone());
         }
     }
-    if let Some(main) = funcs.iter().find(|f| f.name.name == "main") {
-        stack.push(main.name.name.clone());
+
+    for root in extra_roots {
+        if func_names.contains(root) {
+            stack.push(root.clone());
+        }
     }
+
     while let Some(name) = stack.pop() {
         if !reachable.insert(name.clone()) {
             continue;
@@ -1225,15 +1243,12 @@ pub fn cross_function_dce(funcs: &mut Vec<FuncDecl>, keep_extern: bool) -> bool 
             }
         }
     }
-    // 3. 过滤: 保留 extern (可能被外部 TU 引用)、标记 used/retain 的函数、
-    //    以及从入口可达的函数。不可达的 internal (static) 函数将被删除。
+
     let before = funcs.len();
     funcs.retain(|f| {
-        // extern 声明: 可能被其他 TU 引用, 必须保留
-        if f.is_extern {
+        if !f.is_static {
             return true;
         }
-        // 标记 used / retain / constructor / destructor 的函数不能删
         if f.is_used_attr || f.is_retain || f.is_constructor || f.is_destructor {
             return true;
         }
@@ -1242,30 +1257,35 @@ pub fn cross_function_dce(funcs: &mut Vec<FuncDecl>, keep_extern: bool) -> bool 
     funcs.len() != before
 }
 
-fn collect_call_targets(f: &FuncDecl) -> Vec<String> {
+fn collect_func_refs(f: &FuncDecl, func_names: &HashSet<String>) -> (Vec<String>, HashSet<String>) {
     let body = match &f.body {
         Some(b) => b,
-        None => return Vec::new(),
+        None => return (Vec::new(), HashSet::new()),
     };
-    let mut out = Vec::new();
-    walk_block(body, &mut out);
-    out
+    let mut calls = Vec::new();
+    let mut address_taken = HashSet::new();
+    walk_block_refs(body, func_names, &mut calls, &mut address_taken);
+    (calls, address_taken)
 }
 
-fn walk_block(b: &crate::ast::Block, out: &mut Vec<String>) {
+fn walk_block_refs(
+    b: &crate::ast::Block,
+    func_names: &HashSet<String>,
+    calls: &mut Vec<String>,
+    address_taken: &mut HashSet<String>,
+) {
     use crate::ast::{BlockItem, Decl};
     for item in &b.items {
         match item {
-            BlockItem::Stmt(s) => walk_stmt(s, out),
+            BlockItem::Stmt(s) => walk_stmt_refs(s, func_names, calls, address_taken),
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b2) = &f.body {
-                    walk_block(b2, out);
+                    walk_block_refs(b2, func_names, calls, address_taken);
                 }
             }
             BlockItem::Decl(Decl::Var(v)) => {
-                // 变量初始化表达式中的调用也要计入调用图
                 if let Some(init) = &v.init {
-                    walk_expr(init, out);
+                    walk_expr_refs(init, func_names, calls, address_taken);
                 }
             }
             _ => {}
@@ -1273,23 +1293,30 @@ fn walk_block(b: &crate::ast::Block, out: &mut Vec<String>) {
     }
 }
 
-fn walk_stmt(s: &Stmt, out: &mut Vec<String>) {
+fn walk_stmt_refs(
+    s: &Stmt,
+    func_names: &HashSet<String>,
+    calls: &mut Vec<String>,
+    address_taken: &mut HashSet<String>,
+) {
     match s {
-        Stmt::Return { val: Some(e), .. } => walk_expr(e, out),
+        Stmt::Return { val: Some(e), .. } => {
+            walk_expr_refs(e, func_names, calls, address_taken)
+        }
         Stmt::Return { val: None, .. } => {}
-        Stmt::Expr { e, .. } => walk_expr(e, out),
+        Stmt::Expr { e, .. } => walk_expr_refs(e, func_names, calls, address_taken),
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            walk_expr(cond, out);
-            walk_stmt(then_, out);
+            walk_expr_refs(cond, func_names, calls, address_taken);
+            walk_stmt_refs(then_, func_names, calls, address_taken);
             if let Some(e) = else_ {
-                walk_stmt(e, out);
+                walk_stmt_refs(e, func_names, calls, address_taken);
             }
         }
         Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
-            walk_expr(cond, out);
-            walk_stmt(body, out);
+            walk_expr_refs(cond, func_names, calls, address_taken);
+            walk_stmt_refs(body, func_names, calls, address_taken);
         }
         Stmt::For {
             init,
@@ -1299,67 +1326,131 @@ fn walk_stmt(s: &Stmt, out: &mut Vec<String>) {
             ..
         } => {
             if let Some(i) = init {
-                walk_stmt(i, out);
+                walk_stmt_refs(i, func_names, calls, address_taken);
             }
             if let Some(c) = cond {
-                walk_expr(c, out);
+                walk_expr_refs(c, func_names, calls, address_taken);
             }
             if let Some(s) = step {
-                walk_expr(s, out);
+                walk_expr_refs(s, func_names, calls, address_taken);
             }
-            walk_stmt(body, out);
+            walk_stmt_refs(body, func_names, calls, address_taken);
         }
-        Stmt::Block { b, .. } => walk_block(b, out),
+        Stmt::Block { b, .. } => walk_block_refs(b, func_names, calls, address_taken),
         Stmt::Switch { expr, cases, .. } => {
-            walk_expr(expr, out);
+            walk_expr_refs(expr, func_names, calls, address_taken);
             for c in cases {
-                walk_block(&c.body, out);
+                walk_block_refs(&c.body, func_names, calls, address_taken);
+            }
+        }
+        Stmt::AsmGoto { outputs, inputs, .. } => {
+            for e in outputs.iter().chain(inputs.iter()) {
+                walk_expr_refs(e, func_names, calls, address_taken);
             }
         }
         _ => {}
     }
 }
 
-fn walk_expr(e: &crate::ast::Expr, out: &mut Vec<String>) {
+fn walk_init_refs(
+    init: &crate::ast::InitItem,
+    func_names: &HashSet<String>,
+    calls: &mut Vec<String>,
+    address_taken: &mut HashSet<String>,
+) {
+    match init {
+        crate::ast::InitItem::Expr(e) => walk_expr_refs(e, func_names, calls, address_taken),
+        crate::ast::InitItem::Designated { designator, value } => {
+            walk_designator_refs(designator, func_names, calls, address_taken);
+            walk_expr_refs(value, func_names, calls, address_taken);
+        }
+    }
+}
+
+fn walk_designator_refs(
+    designator: &crate::ast::Designator,
+    func_names: &HashSet<String>,
+    calls: &mut Vec<String>,
+    address_taken: &mut HashSet<String>,
+) {
+    match designator {
+        crate::ast::Designator::Index(e) => walk_expr_refs(e, func_names, calls, address_taken),
+        crate::ast::Designator::Range(l, r) => {
+            walk_expr_refs(l, func_names, calls, address_taken);
+            walk_expr_refs(r, func_names, calls, address_taken);
+        }
+        crate::ast::Designator::Chain(items) => {
+            for item in items {
+                walk_designator_refs(item, func_names, calls, address_taken);
+            }
+        }
+        crate::ast::Designator::Field(_) => {}
+    }
+}
+
+fn walk_expr_refs(
+    e: &crate::ast::Expr,
+    func_names: &HashSet<String>,
+    calls: &mut Vec<String>,
+    address_taken: &mut HashSet<String>,
+) {
     use crate::ast::Expr;
     match e {
+        Expr::Ident { name, .. } => {
+            if func_names.contains(&name.name) {
+                address_taken.insert(name.name.clone());
+            }
+        }
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
-                out.push(name.name.clone());
+                calls.push(name.name.clone());
+            } else {
+                walk_expr_refs(callee, func_names, calls, address_taken);
             }
             for a in args {
-                walk_expr(a, out);
+                walk_expr_refs(a, func_names, calls, address_taken);
             }
         }
-        Expr::Binop { l, r, .. } => {
-            walk_expr(l, out);
-            walk_expr(r, out);
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+            walk_expr_refs(l, func_names, calls, address_taken);
+            walk_expr_refs(r, func_names, calls, address_taken);
         }
-        Expr::Unary { e, .. } => walk_expr(e, out),
-        Expr::Cast { e, .. } => walk_expr(e, out),
-        Expr::Assign { l, r, .. } => {
-            walk_expr(l, out);
-            walk_expr(r, out);
-        }
+        Expr::Unary { e, .. }
+        | Expr::Cast { e, .. }
+        | Expr::SizeofExpr { e, .. }
+        | Expr::AlignofExpr { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
+        | Expr::PreDec { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. }
+        | Expr::VaArg { ap: e, .. } => walk_expr_refs(e, func_names, calls, address_taken),
         Expr::Cond {
             cond, then_, else_, ..
         } => {
-            walk_expr(cond, out);
-            walk_expr(then_, out);
-            walk_expr(else_, out);
-        }
-        Expr::Comma { l, r, .. } => {
-            walk_expr(l, out);
-            walk_expr(r, out);
+            walk_expr_refs(cond, func_names, calls, address_taken);
+            walk_expr_refs(then_, func_names, calls, address_taken);
+            walk_expr_refs(else_, func_names, calls, address_taken);
         }
         Expr::Index { arr, idx, .. } => {
-            walk_expr(arr, out);
-            walk_expr(idx, out);
+            walk_expr_refs(arr, func_names, calls, address_taken);
+            walk_expr_refs(idx, func_names, calls, address_taken);
         }
-        Expr::Member { expr, .. } => walk_expr(expr, out),
-        Expr::Deref { e, .. } => walk_expr(e, out),
-        Expr::AddrOf { e, .. } => walk_expr(e, out),
-        Expr::StmtExpr { block, .. } => walk_block(block, out),
+        Expr::Member { expr, .. } => walk_expr_refs(expr, func_names, calls, address_taken),
+        Expr::StmtExpr { block, .. } => walk_block_refs(block, func_names, calls, address_taken),
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            for init in inits {
+                walk_init_refs(init, func_names, calls, address_taken);
+            }
+        }
+        Expr::AsmExpr { outputs, inputs, .. } => {
+            for e in outputs.iter().chain(inputs.iter()) {
+                walk_expr_refs(e, func_names, calls, address_taken);
+            }
+        }
         _ => {}
     }
 }
@@ -1536,14 +1627,16 @@ mod tests {
     }
 
     #[test]
-    fn dce_preserves_all_when_no_main() {
+    fn dce_removes_unreachable_static_without_main() {
         let mut funcs = vec![
             make_func("foo", true, vec![]),
             make_func("bar", false, vec![]),
         ];
         let changed = cross_function_dce(&mut funcs, true);
-        assert!(!changed, "no main -> skip DCE");
-        assert_eq!(funcs.len(), 2);
+        assert!(changed, "unreferenced static can be dropped without main");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.name.as_str()).collect();
+        assert!(!names.contains(&"foo"));
+        assert!(names.contains(&"bar"));
     }
 
     #[test]

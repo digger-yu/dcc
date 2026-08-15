@@ -373,20 +373,22 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
                 ));
             }
         }
-        ExprKind::Cast if let Some(src) = expr.children.first() => {
-            if is_vector_ty(&src.ty) && !is_vector_ty(&expr.ty) {
-                diagnostics.push(Diagnostic::err(
-                    "E1007",
-                    "unsupported cast from vector type",
-                    expr.span.clone(),
-                ));
-            }
-            if is_complex_ty(&src.ty) && is_vector_ty(&expr.ty) {
-                diagnostics.push(Diagnostic::err(
-                    "E1008",
-                    "unsupported cast from complex to vector",
-                    expr.span.clone(),
-                ));
+        ExprKind::Cast => {
+            if let Some(src) = expr.children.first() {
+                if is_vector_ty(&src.ty) && !is_vector_ty(&expr.ty) {
+                    diagnostics.push(Diagnostic::err(
+                        "E1007",
+                        "unsupported cast from vector type",
+                        expr.span.clone(),
+                    ));
+                }
+                if is_complex_ty(&src.ty) && is_vector_ty(&expr.ty) {
+                    diagnostics.push(Diagnostic::err(
+                        "E1008",
+                        "unsupported cast from complex to vector",
+                        expr.span.clone(),
+                    ));
+                }
             }
         }
         ExprKind::Aggregate => {

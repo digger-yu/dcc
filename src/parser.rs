@@ -6408,6 +6408,7 @@ impl<'a> Parser<'a> {
                     // __builtin_va_arg(ap, type): 第二个参数是类型名
                     if let Expr::Ident { name, .. } = &callee_expr {
                         if name.name == "__builtin_va_arg" {
+                            let va_arg_span = name.span.clone();
                             let ap = self.parse_expr_bp(2)?;
                             if !self.expect(TokKind::Comma, "','") {
                                 return None;
@@ -6419,7 +6420,7 @@ impl<'a> Parser<'a> {
                             e = Expr::VaArg {
                                 ap: Box::new(ap),
                                 ty: arg_ty,
-                                span: sp.clone(),
+                                span: va_arg_span,
                             };
                             continue;
                         }

@@ -2,7 +2,8 @@
 # objtool/ORC 回归：验证 .eh_frame FDE 与 .orc_unwind_ip（无 objtool 时用 readelf）
 set -euo pipefail
 
-DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
+DCC_REPO="${DCC_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+DCC="${DCC:-$DCC_REPO/target/release/dcc}"
 WORK="${WORK:-/tmp/dcc-objtool-$$}"
 mkdir -p "$WORK"
 

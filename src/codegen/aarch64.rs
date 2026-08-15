@@ -2946,11 +2946,11 @@ mod tests {
         cg.emit_tlsdesc_access_opt("tls_opt_var");
         // movz (0xd2a) + movk (0xf28) 指令检查
         assert!(
-            cg.code.windows(4).any(|w| (w[3] & 0xff) == 0xd2),
+            cg.code.windows(4).any(|w| w[3] == 0xd2),
             "missing movz x0 insn"
         );
         assert!(
-            cg.code.windows(4).any(|w| (w[3] & 0xff) == 0xf2),
+            cg.code.windows(4).any(|w| w[3] == 0xf2),
             "missing movk x0 insn"
         );
         // 5 个 TLSDESC 重定位

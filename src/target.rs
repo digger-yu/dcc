@@ -35,6 +35,8 @@ pub struct Target {
     pub sse: bool,
     pub stack_protector: bool,
     pub unwind_tables: bool,
+    pub function_return_thunk_extern: bool,
+    pub indirect_branch_thunk_extern: bool,
 }
 
 impl Target {
@@ -64,6 +66,8 @@ impl Target {
             sse: true,
             stack_protector: false,
             unwind_tables: true,
+            function_return_thunk_extern: false,
+            indirect_branch_thunk_extern: false,
         }
     }
 

@@ -2985,15 +2985,26 @@ mod tests {
         let body = f.body.as_ref().unwrap();
         let mut found_switch_trace = false;
         for item in &body.items {
-            if let BlockItem::Stmt(Stmt::Switch { expr, .. }) = item {
-                if let Expr::Comma { l, .. } = expr {
-                    if let Expr::Call { callee, .. } = l.as_ref() {
-                        if let Expr::Ident { name, .. } = callee.as_ref() {
-                            if name.name == "__sanitizer_cov_trace_switch" {
-                                found_switch_trace = true;
-                            }
-                        }
-                    }
+            if let BlockItem::Stmt(Stmt::Switch {
+                expr:
+                    Expr::Comma {
+                        l,
+                        ..
+                    },
+                ..
+            }) = item
+            {
+                let is_trace_switch = matches!(
+                    l.as_ref(),
+                    Expr::Call { callee, .. }
+                        if matches!(
+                            callee.as_ref(),
+                            Expr::Ident { name, .. }
+                                if name.name == "__sanitizer_cov_trace_switch"
+                        )
+                );
+                if is_trace_switch {
+                    found_switch_trace = true;
                 }
             }
         }

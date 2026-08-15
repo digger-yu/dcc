@@ -2053,7 +2053,7 @@ pub fn build_eh_frame_with_arch(functions: &[FuncFrame], arch: ArchKind) -> Vec<
             eh.extend_from_slice(&func.cfi_ops);
         }
         // FDE 整体按 8 字节对齐 (address_size = 8 的目标也对齐到 8)
-        while eh.len() % 8 != 0 {
+        while !eh.len().is_multiple_of(8) {
             eh.push(0);
         }
         let fde_len = (eh.len() - fde_start - 4) as u32;

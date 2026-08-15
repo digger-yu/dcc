@@ -114,7 +114,9 @@ fn split_invariants(body: &mut Block, loop_var: Option<&str>) -> Vec<BlockItem> 
 fn is_invariant_item(item: &BlockItem, loop_var: Option<&str>) -> bool {
     match item {
         BlockItem::Decl(Decl::Var(v)) => {
-            v.init.as_ref().is_none_or(|e| !expr_mentions(e, loop_var))
+            v.init
+                .as_ref()
+                .is_none_or(|e| !expr_mentions(e, loop_var))
         }
         BlockItem::Stmt(Stmt::Expr { e, .. }) => match e {
             Expr::Assign { l, r, .. } => !expr_mentions(l, loop_var) && !expr_mentions(r, loop_var),

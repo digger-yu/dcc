@@ -2,18 +2,22 @@
 # 内核全树 make CC=dcc 首跑（-k 继续至收集全部失败）
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DCC_REPO="${DCC_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
-DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
-LOG="${LOG:-$HOME/dcc-agent-linux66/build.log}"
+DCC="${DCC:-$DCC_REPO/target/release/dcc}"
+LOG="${LOG:-$DCC_REPO/build.log}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 8)}"
 
 cd "$KERNEL_DIR"
 
 # 避免 syncconfig 交互阻塞（CONFIG_CFI_CLANG 等新选项）
 if [[ -f scripts/config ]]; then
-    scripts/config --disable CONFIG_CFI_CLANG 2>/dev/null || true
-    make olddefconfig
-    yes '' | make syncconfig >/dev/null 2>&1 || true
+    scripts/config --disable CFI_CLANG 2>/dev/null || true
+    scripts/config --disable CFI 2>/dev/null || true
+    yes '' | make CC="$DCC" HOSTCC=gcc oldconfig >/dev/null || true
+    make CC="$DCC" HOSTCC=gcc olddefconfig
+    make CC="$DCC" HOSTCC=gcc include/generated/autoconf.h
 fi
 
 # 恢复 syncconfig 误删的 autoconf（若存在 .config）

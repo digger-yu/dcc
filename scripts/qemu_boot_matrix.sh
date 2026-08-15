@@ -3,7 +3,8 @@
 set -euo pipefail
 
 KERNEL="${KERNEL:-$HOME/linux-7.1/arch/x86/boot/bzImage}"
-DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
+DCC_REPO="${DCC_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+DCC="${DCC:-$DCC_REPO/target/release/dcc}"
 TIMEOUT_SEC="${QEMU_TIMEOUT:-15}"
 
 echo "== DCC QEMU boot matrix =="

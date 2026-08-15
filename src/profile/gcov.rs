@@ -406,10 +406,7 @@ fn read_function_record(data: &[u8], off: usize) -> io::Result<(GcovFunction, us
         pos += 4;
         let mut line_idx = 0;
         for block in &mut blocks {
-            for _ in 0.. {
-                if line_idx >= n_lines || pos + 4 > data.len() {
-                    break;
-                }
+            if line_idx < n_lines && pos + 4 <= data.len() {
                 let line = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
                 pos += 4;
                 line_idx += 1;
@@ -417,8 +414,6 @@ fn read_function_record(data: &[u8], off: usize) -> io::Result<(GcovFunction, us
                     lineno = line;
                 }
                 block.lines.push(line);
-                // Each block gets one line in our format
-                break;
             }
         }
         // Skip remaining lines
@@ -931,7 +926,7 @@ mod tests {
     #[test]
     fn gcov_read_notes_rejects_bad_magic() {
         let tmp = std::env::temp_dir().join("dcc-gcov-bad-magic.gcno");
-        std::fs::write(&tmp, &[0u8; 16]).unwrap();
+        std::fs::write(&tmp, [0u8; 16]).unwrap();
         let result = GcovUnit::read_notes(&tmp);
         assert!(result.is_err());
         let _ = std::fs::remove_file(&tmp);

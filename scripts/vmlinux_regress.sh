@@ -4,7 +4,8 @@ set -euo pipefail
 
 KERNEL_DIR="${KERNEL_DIR:-$HOME/linux-7.1}"
 VMLINUX="${VMLINUX:-$KERNEL_DIR/vmlinux}"
-DCC="${DCC:-$HOME/dcc-agent-linux66/target/release/dcc}"
+DCC_REPO="${DCC_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+DCC="${DCC:-$DCC_REPO/target/release/dcc}"
 
 echo "== DCC vmlinux pahole/objtool regression =="
 echo "vmlinux: $VMLINUX"

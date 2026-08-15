@@ -1,7 +1,9 @@
 #!/bin/bash
 # DCC 全量回归测试 — 在 Linux 上运行
-export PATH=/home/ds/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-cd ~/dcc-debug
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 cargo build 2>/dev/null || { echo "构建失败"; exit 1; }
 
 PASS=0; FAIL=0

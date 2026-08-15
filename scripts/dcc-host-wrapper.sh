@@ -3,6 +3,7 @@
 set -euo pipefail
 
 DCC_BIN="${DCC_BIN:-dcc}"
+DCC_REPO="${DCC_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HOST_LD="${HOST_LD:-gcc}"
 
 filter_args() {
@@ -54,11 +55,11 @@ src="${args[-1]}"
 if [[ -n "$out" && "$src" == *.c ]]; then
     # fixdep：dcc -c 生成 .d，二进制用 Rust fixdep
     if [[ "$(basename "$src")" == "fixdep.c" ]]; then
-        fixdep_bin="${DCC_REPO:-$HOME/dcc-agent-linux66}/target/release/fixdep"
+        fixdep_bin="$DCC_REPO/target/release/fixdep"
         if [[ ! -x "$fixdep_bin" && -f "$HOME/.cargo/env" ]]; then
             # shellcheck disable=SC1091
             source "$HOME/.cargo/env"
-            (cd "${DCC_REPO:-$HOME/dcc-agent-linux66}" && cargo build --release --bin fixdep --quiet) || true
+            (cd "$DCC_REPO" && cargo build --release --bin fixdep --quiet) || true
         fi
         compile=()
         depfile=""

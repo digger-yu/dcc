@@ -1,4 +1,4 @@
-error[E0209]: cannot read forced include /tmp/<tmpdir><secret.h>: Permission denied (os error 13)
+error[E0209]: cannot read forced include /tmp/<tmpdir><secret.h>: Is a directory (os error 21)
   --> /tmp/<tmpdir><secret.h>:1:1
    1 |int main(void) { return 0; }
      | ^

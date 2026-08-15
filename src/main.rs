@@ -7,6 +7,8 @@ use std::env;
 use std::process::ExitCode;
 
 mod ast;
+#[cfg(test)]
+mod ast_tests;
 mod bootstrap;
 mod cli;
 mod codegen;

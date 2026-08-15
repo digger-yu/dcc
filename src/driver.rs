@@ -602,6 +602,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
     target.set_stack_protector(cfg.stack_protector);
     target.unwind_tables = cfg.unwind_tables;
+    target.function_return_thunk_extern = cfg.function_return_thunk_extern;
+    target.indirect_branch_thunk_extern = cfg.indirect_branch_thunk_extern;
     if !target.sse {
         // 精确检测 IR 中是否真的使用浮点类型/字面量, 避免把含
         // double_xxx 标识符(如内核 double_rq_lock)的 Debug 串误判为浮点
@@ -1897,7 +1899,7 @@ mod tests {
             &mut buf,
             "foo.o",
             "foo.c",
-            &[long_dep.clone()],
+            std::slice::from_ref(&long_dep),
             false,
         )
         .unwrap();

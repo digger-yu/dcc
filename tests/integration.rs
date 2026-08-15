@@ -2850,7 +2850,7 @@ fn asm_template_modifiers_compile_and_run() {
 
 /// %P / %a 修饰符对立即数输出纯数字 (无 $ 前缀): -S 文本验证
 #[test]
-fn asm_raw_modifiers_P_a_text_output() {
+fn asm_raw_modifiers_p_a_text_output() {
     let source = include_str!("fixtures/c/asm_raw_modifiers.c");
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-asm-raw-mod-{}.c", std::process::id()));
@@ -7649,7 +7649,7 @@ int main(void) {
 /// 非 x86_64 后端 inline asm: GlobalAsm / AsmExpr / AsmGoto 不 panic
 /// 验证 aarch64/riscv64/mips/mips64/arm 后端在 -S 模式下正确处理内联汇编
 #[test]
-fn asm_non_x86_backend_S_mode_compiles() {
+fn asm_non_x86_backend_s_mode_compiles() {
     let source = include_str!("fixtures/c/asm_non_x86_targets.c");
     let targets = [
         "aarch64-linux-gnu",

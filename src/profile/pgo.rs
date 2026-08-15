@@ -434,7 +434,7 @@ impl Profraw {
         buf.extend_from_slice(&(func_map.len() as u32).to_le_bytes());
         // Sort functions by total count (descending) for better locality
         let mut func_list: Vec<_> = func_map.into_iter().collect();
-        func_list.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        func_list.sort_by_key(|(_, (total, _))| std::cmp::Reverse(*total));
         for (name, (total, indices)) in &func_list {
             let nb = name.as_bytes();
             buf.extend_from_slice(&(nb.len() as u32).to_le_bytes());

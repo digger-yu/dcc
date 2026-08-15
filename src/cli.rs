@@ -47,6 +47,8 @@ pub struct Config {
     pub sse: bool,
     pub stack_protector: bool, // -fstack-protector / -fstack-protector-all
     pub unwind_tables: bool,   // -fno-asynchronous-unwind-tables / -fno-unwind-tables
+    pub function_return_thunk_extern: bool,
+    pub indirect_branch_thunk_extern: bool,
     pub debug_level: u8,       // 0=off (g0), 1=g1, 2=g2, 3=g3
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
@@ -394,6 +396,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut sse = true;
     let mut stack_protector = false;
     let mut unwind_tables = true;
+    let mut function_return_thunk_extern = false;
+    let mut indirect_branch_thunk_extern = false;
     let mut debug_level: u8 = 0;
     let mut lto_enabled = false;
     let mut function_sections = false;
@@ -477,10 +481,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 output_kind = LinkerOutputKind::PIE;
                 built_link = true;
             }
-            "-shared" | "-fpic" | "-fPIC" => {
+            "-shared" => {
                 output_kind = LinkerOutputKind::Shared;
                 built_link = true;
             }
+            "-fpic" | "-fPIC" => {}
             "--pie" => {
                 output_kind = LinkerOutputKind::PIE;
                 built_link = true;
@@ -1091,9 +1096,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-fstack-protector" | "-fstack-protector-all" | "-fstack-protector-strong" => {
                 stack_protector = true
             }
+            "-fno-stack-protector" => {
+                stack_protector = false;
+            }
             // Linux 内核编译常用的 GCC flags - 忽略但接受
             "-fno-pic"
-            | "-fno-stack-protector"
             | "-fno-strict-aliasing"
             | "-fno-common"
             | "-fno-delete-null-pointer-checks"
@@ -1114,7 +1121,6 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-pg"
             | "-pthread"
             | "-mcmodel=kernel"
-            | "-mindirect-branch=thunk-extern"
             | "-mrecord-mcount"
             | "-mpreferred-stack-boundary=2"
             | "-fno-plt"
@@ -1125,6 +1131,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-fshort-wchar" => {}
             "-fno-asynchronous-unwind-tables" | "-fno-unwind-tables" => {
                 unwind_tables = false;
+            }
+            "-mfunction-return=thunk-extern" => {
+                function_return_thunk_extern = true;
+            }
+            "-mfunction-return=keep" => {
+                function_return_thunk_extern = false;
+            }
+            "-mindirect-branch=thunk-extern" => {
+                indirect_branch_thunk_extern = true;
+            }
+            "-mindirect-branch=keep" => {
+                indirect_branch_thunk_extern = false;
             }
             // GCC 警告/诊断类选项 - 接受但忽略
             "-pedantic"
@@ -1457,6 +1475,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sse,
             stack_protector,
             unwind_tables,
+            function_return_thunk_extern,
+            indirect_branch_thunk_extern,
             debug_level,
             lto_enabled,
             function_sections,
@@ -1538,6 +1558,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sse,
             stack_protector,
             unwind_tables,
+            function_return_thunk_extern,
+            indirect_branch_thunk_extern,
             debug_level,
             lto_enabled,
             function_sections,
@@ -1676,6 +1698,60 @@ mod tests {
         let args = vec!["-Wp,--silently-lost".to_string(), "input.c".to_string()];
         let err = parse(&args).expect_err("unsupported -Wp options must not be ignored");
         assert!(err.msg.contains("unsupported preprocessor option"));
+    }
+
+    #[test]
+    fn c_with_fpic_stays_compile_only() {
+        let args = vec![
+            "-c".to_string(),
+            "-fpic".to_string(),
+            "-o".to_string(),
+            "out.o".to_string(),
+            "input.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("-c -fpic should parse");
+        assert!(cfg.relocatable);
+        assert!(!cfg.built_link);
+        assert!(!cfg.link_mode);
+    }
+
+    #[test]
+    fn c_with_fpic_uppercase_stays_compile_only() {
+        let args = vec![
+            "-c".to_string(),
+            "-fPIC".to_string(),
+            "-o".to_string(),
+            "out.o".to_string(),
+            "input.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("-c -fPIC should parse");
+        assert!(cfg.relocatable);
+        assert!(!cfg.built_link);
+        assert!(!cfg.link_mode);
+    }
+
+    #[test]
+    fn later_fno_stack_protector_disables_stack_protector() {
+        let args = vec![
+            "-fstack-protector-strong".to_string(),
+            "-fno-stack-protector".to_string(),
+            "-c".to_string(),
+            "input.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("stack protector flags should parse");
+        assert!(!cfg.stack_protector);
+    }
+
+    #[test]
+    fn later_stack_protector_reenables_stack_protector() {
+        let args = vec![
+            "-fno-stack-protector".to_string(),
+            "-fstack-protector-strong".to_string(),
+            "-c".to_string(),
+            "input.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("stack protector flags should parse");
+        assert!(cfg.stack_protector);
     }
 
     #[test]

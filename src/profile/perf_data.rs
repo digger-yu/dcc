@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
 pub const PERF_DATA_MAGIC: &[u8; 8] = b"PERFILE2";
