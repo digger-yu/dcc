@@ -28,6 +28,8 @@ pub fn optimize(module: &mut Module, level: u8) {
         crate::loop_opt::run(module, level);
         // M16: 跨函数 DCE (call graph reachability)
         cross_function_dce(module);
+    }
+    if level >= 2 {
         // M16: SSA pass pipeline (strength reduction, IVOP, TCO, etc.)
         run_ssa_passes(module, level);
     }
@@ -141,8 +143,9 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
 fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
     match e {
         Expr::AddrOf { .. } | Expr::Deref { .. } | Expr::Index { .. } => true,
-        // asm 表达式包含无法 SSA 化的副作用
-        Expr::AsmExpr { .. } => true,
+        // Inline asm 已显式表示为 SSA 节点。调度器使用其 clobber
+        // 元数据判断哪些指令可以跨越 asm。
+        Expr::AsmExpr { .. } => false,
         Expr::Binop { l, r, .. } => {
             expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
         }

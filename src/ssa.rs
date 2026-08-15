@@ -101,6 +101,20 @@ pub enum InstKind {
         then_: Operand,
         else_: Operand,
     },
+    /// GNU inline asm。输入使用 SSA operand，便于调度器保留数据依赖；
+    /// 输出保留为 AST lvalue，SSA→AST 重建后交给后端处理。
+    InlineAsm {
+        asm_str: String,
+        outputs: Vec<Expr>,
+        output_names: Vec<Option<String>>,
+        output_constraints: Vec<String>,
+        output_vars: Vec<SsaVar>,
+        inputs: Vec<Operand>,
+        input_names: Vec<Option<String>>,
+        input_constraints: Vec<String>,
+        clobbers: Vec<String>,
+        ty: Type,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -756,6 +770,66 @@ impl Builder {
             },
             Expr::AlignofTy { ty, .. } => Operand::Int(ty.align() as i128),
             Expr::AlignofExpr { e, .. } => Operand::Int(e.ty().align() as i128),
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                clobbers,
+                span,
+                ty,
+            } => {
+                let mut input_ops: Vec<Operand> = inputs.iter().map(|e| self.lower_expr(e)).collect();
+                let mut output_vars = Vec::new();
+                for (idx, out) in outputs.iter().enumerate() {
+                    if output_constraints
+                        .get(idx)
+                        .is_some_and(|c| c.contains('+'))
+                    {
+                        input_ops.push(self.lower_expr(out));
+                    }
+                    if let Expr::Ident { name, ty, .. } = out {
+                        let v = SsaVar {
+                            base: name.name.clone(),
+                            version: self.next_version(&name.name),
+                            ty: ty.clone(),
+                            span: span.clone(),
+                        };
+                        self.define(v.clone());
+                        output_vars.push(v);
+                    }
+                }
+                let dest = if matches!(ty, Type::Void) {
+                    None
+                } else {
+                    Some(target.unwrap_or_else(|| self.fresh("asm", ty.clone(), span)))
+                };
+                self.emit(Inst {
+                    dest: dest.clone(),
+                    kind: InstKind::InlineAsm {
+                        asm_str: asm_str.clone(),
+                        outputs: outputs.clone(),
+                        output_names: output_names.clone(),
+                        output_constraints: output_constraints.clone(),
+                        output_vars,
+                        inputs: input_ops,
+                        input_names: input_names.clone(),
+                        input_constraints: input_constraints.clone(),
+                        clobbers: clobbers.clone(),
+                        ty: ty.clone(),
+                    },
+                    span: span.clone(),
+                });
+                if let Some(d) = dest {
+                    self.define(d.clone());
+                    Operand::Var(d)
+                } else {
+                    Operand::Void
+                }
+            }
             _ => Operand::Void, // 简化: 复杂 expr (CompoundLit, StmtExpr, LabelAddr, VaArg) 降级
         }
     }
@@ -1706,6 +1780,53 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: Type::Int,
         },
+        InstKind::InlineAsm {
+            asm_str,
+            outputs,
+            output_names,
+            output_constraints,
+            inputs,
+            input_names,
+            input_constraints,
+            clobbers,
+            ty,
+            output_vars,
+            ..
+        } => {
+            let resolved_outputs = outputs
+                .iter()
+                .enumerate()
+                .map(|(idx, output)| {
+                    output_vars
+                        .get(idx)
+                        .map(|v| Expr::Ident {
+                            name: crate::ast::Ident {
+                                name: v.base.clone(),
+                                span: v.span.clone(),
+                            },
+                            span: v.span.clone(),
+                            ty: v.ty.clone(),
+                        })
+                        .unwrap_or_else(|| output.clone())
+                })
+                .collect();
+            Expr::AsmExpr {
+                asm_str: asm_str.clone(),
+                outputs: resolved_outputs,
+                output_names: output_names.clone(),
+                output_constraints: output_constraints.clone(),
+                inputs: inputs
+                    .iter()
+                    .take(input_names.len())
+                    .map(|o| resolve_operand(o, &fake_env, subst))
+                    .collect(),
+                input_names: input_names.clone(),
+                input_constraints: input_constraints.clone(),
+                clobbers: clobbers.clone(),
+                span: sp.clone(),
+                ty: ty.clone(),
+            }
+        }
     }
 }
 
@@ -1747,6 +1868,11 @@ fn collect_op_uses(kind: &InstKind, out: &mut HashSet<String>) {
             collect_op_uses_op(cond, out);
             collect_op_uses_op(then_, out);
             collect_op_uses_op(else_, out);
+        }
+        InstKind::InlineAsm { inputs, .. } => {
+            for input in inputs {
+                collect_op_uses_op(input, out);
+            }
         }
         _ => {}
     }
@@ -1797,6 +1923,11 @@ fn op_count_in_kind(kind: &InstKind, name: &str) -> usize {
             count += op_count_in_op(cond, name);
             count += op_count_in_op(then_, name);
             count += op_count_in_op(else_, name);
+        }
+        InstKind::InlineAsm { inputs, .. } => {
+            for input in inputs {
+                count += op_count_in_op(input, name);
+            }
         }
         _ => {}
     }
@@ -1998,6 +2129,33 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             else_: Box::new(operand_to_expr(else_, env)),
             span: sp.clone(),
             ty: Type::Int,
+        },
+        InstKind::InlineAsm {
+            asm_str,
+            outputs,
+            output_names,
+            output_constraints,
+            inputs,
+            input_names,
+            input_constraints,
+            clobbers,
+            ty,
+            ..
+        } => Expr::AsmExpr {
+            asm_str: asm_str.clone(),
+            outputs: outputs.clone(),
+            output_names: output_names.clone(),
+            output_constraints: output_constraints.clone(),
+            inputs: inputs
+                .iter()
+                .take(input_names.len())
+                .map(|a| operand_to_expr(a, env))
+                .collect(),
+            input_names: input_names.clone(),
+            input_constraints: input_constraints.clone(),
+            clobbers: clobbers.clone(),
+            span: sp.clone(),
+            ty: ty.clone(),
         },
     }
 }

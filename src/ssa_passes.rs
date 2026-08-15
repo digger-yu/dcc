@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{BinOp, FuncDecl, Stmt, Type, UnOp};
+use crate::ast::{BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, Stmt, Type, UnOp};
 use crate::ssa::{Function, Inst, InstKind, Operand, Terminator};
 
 /// 调度 pipeline 入口: 在 -O2 / -O3 时由 `opt::optimize` 调用。
@@ -399,61 +399,234 @@ fn find(parents: &HashMap<usize, usize>, mut x: usize) -> usize {
 // P5. 指令调度 (list scheduling within basic block)
 // =====================================================================
 
-/// 在每个 BB 内做局部 list scheduling: 调整纯运算指令顺序, 让无依赖的
-/// 指令交错 (LL/CD 风格: 简单拓扑序)。返回是否改动了指令顺序。
+/// 在每个 BB 内做局部 list scheduling。调度器显式建模 SSA def-use、
+/// 内存顺序和 inline asm clobber：`memory` clobber 只作为内存屏障，
+/// 非 `memory` asm 不阻止无关可移动指令跨越。
 pub fn instruction_scheduling(func: &mut Function) -> bool {
     let mut changed = false;
     for b in func.blocks.values_mut() {
-        if b.insts.len() < 4 {
-            continue;
-        } // 太短不调度
-        // 保守: 有副作用指令时不做重排, 避免破坏数据依赖
-        // 包括: Store/Call/IndexStore/MemberStore, 以及 asm 相关标记
-        let has_side = b.insts.iter().any(|i| {
-            match &i.kind {
-                InstKind::Store { .. }
-                | InstKind::Call { .. }
-                | InstKind::IndexStore { .. }
-                | InstKind::MemberStore { .. } => true,
-                // asm memory clobber 产生 Store 到 __dcc_asm_memory_barrier,
-                // 已被上面的 Store 分支捕获.
-                // 防御性检查: 任何 __dcc_asm_* 符号引用都视为调度屏障,
-                // 即使未来 SSA pipeline 对含 asm 函数开放也不会误重排.
-                InstKind::Bin { l, r, .. } => {
-                    operand_refs_asm(l) || operand_refs_asm(r)
-                }
-                InstKind::Un { e, .. } | InstKind::Load { e, .. } | InstKind::Cast { e, .. } => {
-                    operand_refs_asm(e)
-                }
-                _ => false,
-            }
-        });
-        if has_side {
+        if b.insts.len() < 2 {
             continue;
         }
-        // 记录原始顺序用于检测变化
-        let orig_order: Vec<String> = b
-            .insts
-            .iter()
-            .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
-            .collect();
-        // 全部是纯运算指令, 按 dest 名字典序排序
-        b.insts.sort_by(|a, b| {
-            let an = a.dest.as_ref().map(|d| d.name()).unwrap_or_default();
-            let bn = b.dest.as_ref().map(|d| d.name()).unwrap_or_default();
-            an.cmp(&bn)
-        });
-        // 检测顺序是否真的改变了
-        let new_order: Vec<String> = b
-            .insts
-            .iter()
-            .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
-            .collect();
-        if orig_order != new_order {
-            changed = true;
+        let Some(order) = schedule_block(&b.insts) else {
+            continue;
+        };
+        if order.iter().copied().eq(0..b.insts.len()) {
+            continue;
         }
+        let old = b.insts.clone();
+        b.insts = order.into_iter().map(|i| old[i].clone()).collect();
+        changed = true;
     }
     changed
+}
+
+fn schedule_block(insts: &[Inst]) -> Option<Vec<usize>> {
+    let n = insts.len();
+    let mut succ: Vec<HashSet<usize>> = (0..n).map(|_| HashSet::new()).collect();
+    let mut indeg = vec![0usize; n];
+
+    let mut add_edge = |from: usize, to: usize| {
+        if from != to && succ[from].insert(to) {
+            indeg[to] += 1;
+        }
+    };
+
+    // SSA 值依赖，包括 inline asm 输入和 output vars。
+    let mut last_def: HashMap<String, usize> = HashMap::new();
+    for (idx, inst) in insts.iter().enumerate() {
+        for used in operand_uses(&inst.kind) {
+            if let Some(&def_idx) = last_def.get(&used) {
+                add_edge(def_idx, idx);
+            }
+        }
+        for def in inst_defs(inst) {
+            if let Some(&prev_def) = last_def.get(&def) {
+                add_edge(prev_def, idx);
+            }
+            last_def.insert(def, idx);
+        }
+    }
+
+    let mut last_base_def: HashMap<String, usize> = HashMap::new();
+    for (idx, inst) in insts.iter().enumerate() {
+        for base in inst_def_bases(inst) {
+            if let Some(&prev_def) = last_base_def.get(&base) {
+                add_edge(prev_def, idx);
+            }
+            last_base_def.insert(base, idx);
+        }
+    }
+
+    // 保持内存读不移动到更早的内存操作之前；它们仍可向下跨越
+    // 后续非 memory asm，这正是该调度器需要释放的场景。
+    for (idx, inst) in insts.iter().enumerate() {
+        if inst_reads_memory(&inst.kind) {
+            for before in 0..idx {
+                if inst_is_memory_ordered(&insts[before].kind) {
+                    add_edge(before, idx);
+                }
+            }
+        }
+    }
+
+    // 无别名分析时，内存操作保持源码顺序。inline asm 只有在包含
+    // `memory` clobber 或显式内存约束时才进入该链，因此非 memory
+    // asm 不是全局内存屏障。
+    let mut last_memory: Option<usize> = None;
+    for (idx, inst) in insts.iter().enumerate() {
+        if inst_is_memory_ordered(&inst.kind) {
+            if let Some(prev) = last_memory {
+                add_edge(prev, idx);
+            }
+            last_memory = Some(idx);
+        }
+    }
+
+    // 保留可观察副作用和 volatile-like asm 之间的相对顺序。
+    // 这仍允许独立值计算围绕 asm 移动。
+    let mut last_side_effect: Option<usize> = None;
+    for (idx, inst) in insts.iter().enumerate() {
+        if inst_is_side_effecting(&inst.kind) {
+            if let Some(prev) = last_side_effect {
+                add_edge(prev, idx);
+            }
+            last_side_effect = Some(idx);
+        }
+    }
+
+    // 非 asm 副作用维持为完整本地屏障，匹配此前对 call/store 的
+    // 保守行为。inline asm 则只在 def-use 或内存规则要求时作为屏障。
+    for (idx, inst) in insts.iter().enumerate() {
+        if inst_is_full_barrier(&inst.kind) {
+            for before in 0..idx {
+                add_edge(before, idx);
+            }
+            for after in idx + 1..n {
+                add_edge(idx, after);
+            }
+        }
+    }
+
+    let mut selected = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    for _ in 0..n {
+        let next = (0..n)
+            .filter(|&i| !selected[i] && indeg[i] == 0)
+            .min_by(|&a, &b| schedule_key(&insts[a], a).cmp(&schedule_key(&insts[b], b)))?;
+        selected[next] = true;
+        order.push(next);
+        for to in succ[next].clone() {
+            indeg[to] -= 1;
+        }
+    }
+    Some(order)
+}
+
+fn schedule_key(inst: &Inst, idx: usize) -> (u8, String, usize) {
+    let class = if inst_is_movable_value(&inst.kind) {
+        0
+    } else if matches!(inst.kind, InstKind::InlineAsm { .. }) {
+        1
+    } else {
+        2
+    };
+    let name = inst
+        .dest
+        .as_ref()
+        .map(|d| d.name())
+        .unwrap_or_else(|| format!("~{idx:08}"));
+    (class, name, idx)
+}
+
+fn inst_defs(inst: &Inst) -> Vec<String> {
+    let mut defs = Vec::new();
+    if let Some(d) = &inst.dest {
+        defs.push(d.name());
+    }
+    if let InstKind::InlineAsm { output_vars, .. } = &inst.kind {
+        defs.extend(output_vars.iter().map(|v| v.name()));
+    }
+    defs
+}
+
+fn inst_def_bases(inst: &Inst) -> Vec<String> {
+    let mut defs = Vec::new();
+    if let Some(d) = &inst.dest {
+        defs.push(d.base.clone());
+    }
+    if let InstKind::InlineAsm { output_vars, .. } = &inst.kind {
+        defs.extend(output_vars.iter().map(|v| v.base.clone()));
+    }
+    defs
+}
+
+fn inst_is_movable_value(kind: &InstKind) -> bool {
+    matches!(
+        kind,
+        InstKind::Bin { .. }
+            | InstKind::Un { .. }
+            | InstKind::Cast { .. }
+            | InstKind::AddrOf { .. }
+            | InstKind::Load { .. }
+            | InstKind::IndexLoad { .. }
+            | InstKind::MemberLoad { .. }
+            | InstKind::Select { .. }
+    )
+}
+
+fn inst_reads_memory(kind: &InstKind) -> bool {
+    matches!(
+        kind,
+        InstKind::Load { .. } | InstKind::IndexLoad { .. } | InstKind::MemberLoad { .. }
+    )
+}
+
+fn inst_is_full_barrier(kind: &InstKind) -> bool {
+    matches!(
+        kind,
+        InstKind::Store { .. }
+            | InstKind::IndexStore { .. }
+            | InstKind::MemberStore { .. }
+            | InstKind::Call { .. }
+    )
+}
+
+fn inst_is_side_effecting(kind: &InstKind) -> bool {
+    inst_is_full_barrier(kind) || matches!(kind, InstKind::InlineAsm { .. })
+}
+
+fn inst_is_memory_ordered(kind: &InstKind) -> bool {
+    match kind {
+        InstKind::Load { .. }
+        | InstKind::Store { .. }
+        | InstKind::IndexLoad { .. }
+        | InstKind::IndexStore { .. }
+        | InstKind::MemberLoad { .. }
+        | InstKind::MemberStore { .. }
+        | InstKind::Call { .. } => true,
+        InstKind::InlineAsm {
+            clobbers,
+            input_constraints,
+            output_constraints,
+            ..
+        } => {
+            asm_has_memory_clobber(clobbers)
+                || asm_constraints_touch_memory(input_constraints)
+                || asm_constraints_touch_memory(output_constraints)
+        }
+        _ => false,
+    }
+}
+
+fn asm_has_memory_clobber(clobbers: &[String]) -> bool {
+    clobbers
+        .iter()
+        .any(|c| c.trim_matches('"') == "memory")
+}
+
+fn asm_constraints_touch_memory(constraints: &[String]) -> bool {
+    constraints.iter().any(|c| c.contains('m'))
 }
 
 // =====================================================================
@@ -942,6 +1115,7 @@ pub fn speculative_execution(func: &mut Function) -> bool {
                     | InstKind::Call { .. }
                     | InstKind::IndexStore { .. }
                     | InstKind::MemberStore { .. }
+                    | InstKind::InlineAsm { .. }
             )
         });
         if has_side {
@@ -1121,6 +1295,11 @@ fn replace_op_in_inst(k: &mut InstKind, consts: &HashMap<String, i128>) {
             replace_op(cond, consts);
             replace_op(then_, consts);
             replace_op(else_, consts);
+        }
+        InstKind::InlineAsm { inputs, .. } => {
+            for input in inputs {
+                replace_op(input, consts);
+            }
         }
         _ => {}
     }
@@ -1509,6 +1688,163 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
             add_op(then_, out);
             add_op(else_, out);
         }
+        InstKind::InlineAsm { inputs, outputs, .. } => {
+            for input in inputs {
+                add_op(input, out);
+            }
+            for output in outputs {
+                collect_expr_uses(output, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_expr_uses(e: &Expr, out: &mut Vec<String>) {
+    match e {
+        Expr::Ident { name, .. } => out.push(name.name.clone()),
+        Expr::Unary { e, .. }
+        | Expr::Cast { e, .. }
+        | Expr::SizeofExpr { e, .. }
+        | Expr::AlignofExpr { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
+        | Expr::PreDec { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. }
+        | Expr::VaArg { ap: e, .. } => collect_expr_uses(e, out),
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+            collect_expr_uses(l, out);
+            collect_expr_uses(r, out);
+        }
+        Expr::Index { arr, idx, .. } => {
+            collect_expr_uses(arr, out);
+            collect_expr_uses(idx, out);
+        }
+        Expr::Member { expr, .. } => collect_expr_uses(expr, out),
+        Expr::Call { callee, args, .. } => {
+            collect_expr_uses(callee, out);
+            for arg in args {
+                collect_expr_uses(arg, out);
+            }
+        }
+        Expr::Cond { cond, then_, else_, .. } => {
+            collect_expr_uses(cond, out);
+            collect_expr_uses(then_, out);
+            collect_expr_uses(else_, out);
+        }
+        Expr::StmtExpr { block, .. } => {
+            for item in &block.items {
+                collect_block_item_uses(item, out);
+            }
+        }
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            for init in inits {
+                collect_init_uses(init, out);
+            }
+        }
+        Expr::AsmExpr { outputs, inputs, .. } => {
+            for expr in outputs.iter().chain(inputs.iter()) {
+                collect_expr_uses(expr, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_init_uses(init: &InitItem, out: &mut Vec<String>) {
+    match init {
+        InitItem::Expr(e) => collect_expr_uses(e, out),
+        InitItem::Designated { designator, value } => {
+            collect_designator_uses(designator, out);
+            collect_expr_uses(value, out);
+        }
+    }
+}
+
+fn collect_designator_uses(designator: &Designator, out: &mut Vec<String>) {
+    match designator {
+        Designator::Index(e) => collect_expr_uses(e, out),
+        Designator::Range(first, last) => {
+            collect_expr_uses(first, out);
+            collect_expr_uses(last, out);
+        }
+        Designator::Chain(items) => {
+            for item in items {
+                collect_designator_uses(item, out);
+            }
+        }
+        Designator::Field(_) => {}
+    }
+}
+
+fn collect_block_item_uses(item: &BlockItem, out: &mut Vec<String>) {
+    match item {
+        BlockItem::Decl(Decl::Var(v)) => {
+            if let Some(init) = &v.init {
+                collect_expr_uses(init, out);
+            }
+        }
+        BlockItem::Stmt(stmt) => collect_stmt_uses(stmt, out),
+        _ => {}
+    }
+}
+
+fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
+    match stmt {
+        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => collect_expr_uses(e, out),
+        Stmt::If { cond, then_, else_, .. } => {
+            collect_expr_uses(cond, out);
+            collect_stmt_uses(then_, out);
+            if let Some(stmt) = else_ {
+                collect_stmt_uses(stmt, out);
+            }
+        }
+        Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
+            collect_expr_uses(cond, out);
+            collect_stmt_uses(body, out);
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(init) = init {
+                collect_stmt_uses(init, out);
+            }
+            if let Some(cond) = cond {
+                collect_expr_uses(cond, out);
+            }
+            if let Some(step) = step {
+                collect_expr_uses(step, out);
+            }
+            collect_stmt_uses(body, out);
+        }
+        Stmt::Switch { expr, cases, .. } => {
+            collect_expr_uses(expr, out);
+            for case in cases {
+                if let Some(val) = &case.val {
+                    collect_expr_uses(val, out);
+                }
+                if let Some(range_end) = &case.range_end {
+                    collect_expr_uses(range_end, out);
+                }
+                for item in &case.body.items {
+                    collect_block_item_uses(item, out);
+                }
+            }
+        }
+        Stmt::Block { b, .. } => {
+            for item in &b.items {
+                collect_block_item_uses(item, out);
+            }
+        }
+        Stmt::Label { stmt, .. } => collect_stmt_uses(stmt, out),
+        Stmt::GotoIndirect { expr, .. } => collect_expr_uses(expr, out),
+        Stmt::AsmGoto { outputs, inputs, .. } => {
+            for expr in outputs.iter().chain(inputs.iter()) {
+                collect_expr_uses(expr, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1882,6 +2218,189 @@ mod tests {
         });
         assert!(has_hot, "should have hot section hint");
         assert!(has_nr, "should have noreturn hint");
+    }
+
+    #[test]
+    fn scheduling_moves_pure_inst_across_non_memory_asm() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        let z = SsaVar { base: "z".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let a = SsaVar { base: "a".into(), version: 1, ty: Type::Int, span: span.clone() };
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            bb.insts.push(Inst {
+                dest: None,
+                kind: InstKind::InlineAsm {
+                    asm_str: "nop".into(),
+                    outputs: vec![],
+                    output_names: vec![],
+                    output_constraints: vec![],
+                    output_vars: vec![],
+                    inputs: vec![],
+                    input_names: vec![],
+                    input_constraints: vec![],
+                    clobbers: vec!["cc".into()],
+                    ty: Type::Void,
+                },
+                span: span.clone(),
+            });
+            bb.insts.push(Inst {
+                dest: Some(z.clone()),
+                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(1), r: Operand::Int(2) },
+                span: span.clone(),
+            });
+            bb.insts.push(Inst {
+                dest: Some(a.clone()),
+                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(3), r: Operand::Int(4) },
+                span: span.clone(),
+            });
+        }
+        assert!(instruction_scheduling(&mut f));
+        let bb = f.blocks.get("entry").unwrap();
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
+        assert_eq!(bb.insts[1].dest.as_ref().map(|v| v.name()), Some("z_1".into()));
+        assert!(matches!(bb.insts[2].kind, InstKind::InlineAsm { .. }));
+    }
+
+    #[test]
+    fn scheduling_keeps_loads_around_memory_clobber_asm() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        let z = SsaVar { base: "z".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let a = SsaVar { base: "a".into(), version: 1, ty: Type::Int, span: span.clone() };
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            bb.insts.push(Inst {
+                dest: Some(z.clone()),
+                kind: InstKind::Load { e: Operand::SymAddr("p".into()), ty: Type::Int },
+                span: span.clone(),
+            });
+            bb.insts.push(Inst {
+                dest: None,
+                kind: InstKind::InlineAsm {
+                    asm_str: "".into(),
+                    outputs: vec![],
+                    output_names: vec![],
+                    output_constraints: vec![],
+                    output_vars: vec![],
+                    inputs: vec![],
+                    input_names: vec![],
+                    input_constraints: vec![],
+                    clobbers: vec!["memory".into()],
+                    ty: Type::Void,
+                },
+                span: span.clone(),
+            });
+            bb.insts.push(Inst {
+                dest: Some(a.clone()),
+                kind: InstKind::Load { e: Operand::SymAddr("q".into()), ty: Type::Int },
+                span: span.clone(),
+            });
+        }
+        assert!(!instruction_scheduling(&mut f));
+        let bb = f.blocks.get("entry").unwrap();
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("z_1".into()));
+        assert!(matches!(bb.insts[1].kind, InstKind::InlineAsm { .. }));
+        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
+    }
+
+    #[test]
+    fn scheduling_allows_pure_inst_across_memory_clobber_asm() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        let z = SsaVar { base: "z".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let a = SsaVar { base: "a".into(), version: 1, ty: Type::Int, span: span.clone() };
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            bb.insts.push(Inst {
+                dest: Some(z.clone()),
+                kind: InstKind::Load { e: Operand::SymAddr("p".into()), ty: Type::Int },
+                span: span.clone(),
+            });
+            bb.insts.push(Inst {
+                dest: None,
+                kind: InstKind::InlineAsm {
+                    asm_str: "".into(),
+                    outputs: vec![],
+                    output_names: vec![],
+                    output_constraints: vec![],
+                    output_vars: vec![],
+                    inputs: vec![],
+                    input_names: vec![],
+                    input_constraints: vec![],
+                    clobbers: vec!["memory".into()],
+                    ty: Type::Void,
+                },
+                span: span.clone(),
+            });
+            bb.insts.push(Inst {
+                dest: Some(a.clone()),
+                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(1), r: Operand::Int(2) },
+                span: span.clone(),
+            });
+        }
+        assert!(instruction_scheduling(&mut f));
+        let bb = f.blocks.get("entry").unwrap();
+        let pos_load = bb
+            .insts
+            .iter()
+            .position(|i| i.dest.as_ref().is_some_and(|v| v.name() == "z_1"))
+            .unwrap();
+        let pos_asm = bb
+            .insts
+            .iter()
+            .position(|i| matches!(i.kind, InstKind::InlineAsm { .. }))
+            .unwrap();
+        let pos_pure = bb
+            .insts
+            .iter()
+            .position(|i| i.dest.as_ref().is_some_and(|v| v.name() == "a_1"))
+            .unwrap();
+        assert!(pos_load < pos_asm, "memory clobber must keep earlier load before asm");
+        assert!(pos_pure < pos_asm, "pure instruction may cross memory-clobber asm");
+    }
+
+    #[test]
+    fn scheduling_honors_asm_input_and_output_dependencies() {
+        use crate::ssa::*;
+        let span = crate::diagnostics::Span::point("t.c", 1, 1);
+        let mut f = Function::new("test".into(), Type::Int, span.clone());
+        let input = SsaVar { base: "x".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let output = SsaVar { base: "y".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let use_output = SsaVar { base: "a".into(), version: 1, ty: Type::Int, span: span.clone() };
+        if let Some(bb) = f.blocks.get_mut("entry") {
+            bb.insts.push(Inst {
+                dest: Some(input.clone()),
+                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(1), r: Operand::Int(2) },
+                span: span.clone(),
+            });
+            bb.insts.push(Inst {
+                dest: None,
+                kind: InstKind::InlineAsm {
+                    asm_str: "mov %1, %0".into(),
+                    outputs: vec![Expr::Ident { name: Ident { name: "y".into(), span: span.clone() }, span: span.clone(), ty: Type::Int }],
+                    output_names: vec![None],
+                    output_constraints: vec!["=r".into()],
+                    output_vars: vec![output.clone()],
+                    inputs: vec![Operand::Var(input.clone())],
+                    input_names: vec![None],
+                    input_constraints: vec!["r".into()],
+                    clobbers: vec![],
+                    ty: Type::Void,
+                },
+                span: span.clone(),
+            });
+            bb.insts.push(Inst {
+                dest: Some(use_output.clone()),
+                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Var(output.clone()), r: Operand::Int(1) },
+                span: span.clone(),
+            });
+        }
+        assert!(!instruction_scheduling(&mut f));
+        let bb = f.blocks.get("entry").unwrap();
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("x_1".into()));
+        assert!(matches!(bb.insts[1].kind, InstKind::InlineAsm { .. }));
+        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
     }
 
     #[test]
