@@ -49,6 +49,7 @@ pub struct Config {
     pub unwind_tables: bool,   // -fno-asynchronous-unwind-tables / -fno-unwind-tables
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
+    pub patchable_function_entry: Option<(usize, usize)>,
     pub debug_level: u8,       // 0=off (g0), 1=g1, 2=g2, 3=g3
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
@@ -398,6 +399,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut unwind_tables = true;
     let mut function_return_thunk_extern = false;
     let mut indirect_branch_thunk_extern = false;
+    let mut patchable_function_entry = None;
     let mut debug_level: u8 = 0;
     let mut lto_enabled = false;
     let mut function_sections = false;
@@ -1138,6 +1140,32 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-mfunction-return=keep" => {
                 function_return_thunk_extern = false;
             }
+            a if a.starts_with("-fpatchable-function-entry=") => {
+                let spec = a
+                    .strip_prefix("-fpatchable-function-entry=")
+                    .unwrap_or_default();
+                let parts: Vec<&str> = spec.split(',').collect();
+                if parts.is_empty()
+                    || parts.len() > 2
+                    || parts.iter().any(|p| p.is_empty())
+                {
+                    return Err(CliError::new("invalid -fpatchable-function-entry value"));
+                }
+                let n = parts[0]
+                    .parse::<usize>()
+                    .map_err(|_| CliError::new("invalid -fpatchable-function-entry N"))?;
+                let m = if parts.len() == 2 {
+                    parts[1]
+                        .parse::<usize>()
+                        .map_err(|_| CliError::new("invalid -fpatchable-function-entry M"))?
+                } else {
+                    0
+                };
+                if m > n {
+                    return Err(CliError::new("-fpatchable-function-entry M must be <= N"));
+                }
+                patchable_function_entry = Some((n, m));
+            }
             "-mindirect-branch=thunk-extern" => {
                 indirect_branch_thunk_extern = true;
             }
@@ -1477,6 +1505,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             unwind_tables,
             function_return_thunk_extern,
             indirect_branch_thunk_extern,
+            patchable_function_entry,
             debug_level,
             lto_enabled,
             function_sections,
@@ -1560,6 +1589,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             unwind_tables,
             function_return_thunk_extern,
             indirect_branch_thunk_extern,
+            patchable_function_entry,
             debug_level,
             lto_enabled,
             function_sections,
@@ -1752,6 +1782,29 @@ mod tests {
         ];
         let cfg = parse(&args).expect("stack protector flags should parse");
         assert!(cfg.stack_protector);
+    }
+
+    #[test]
+    fn patchable_function_entry_parses_and_rejects_invalid_values() {
+        let cfg = parse(&[
+            "-fpatchable-function-entry=16,8".to_string(),
+            "-c".to_string(),
+            "input.c".to_string(),
+        ])
+        .expect("valid patchable entry should parse");
+        assert_eq!(cfg.patchable_function_entry, Some((16, 8)));
+
+        for flag in [
+            "-fpatchable-function-entry=",
+            "-fpatchable-function-entry=abc",
+            "-fpatchable-function-entry=16,abc",
+            "-fpatchable-function-entry=16,17",
+            "-fpatchable-function-entry=16,8,1",
+        ] {
+            let err = parse(&[flag.to_string(), "input.c".to_string()])
+                .expect_err("invalid patchable entry should fail");
+            assert!(err.msg.contains("patchable-function-entry"));
+        }
     }
 
     #[test]

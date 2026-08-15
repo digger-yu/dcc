@@ -37,6 +37,7 @@ pub struct Target {
     pub unwind_tables: bool,
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
+    pub patchable_function_entry: Option<(usize, usize)>,
 }
 
 impl Target {
@@ -68,6 +69,7 @@ impl Target {
             unwind_tables: true,
             function_return_thunk_extern: false,
             indirect_branch_thunk_extern: false,
+            patchable_function_entry: None,
         }
     }
 

@@ -118,6 +118,7 @@ pub struct Codegen {
     // 可重定位模式 (.o)
     pub relocatable: bool,
     pub function_sections: bool, // -ffunction-sections：每函数独立 .text.<name> 节
+    patchable_function_entry: Option<(usize, usize)>,
     pub symbols: Vec<ElfSym>,
     sym_index: HashMap<String, u32>,
     pub relocations: Vec<ElfRela>,
@@ -161,6 +162,8 @@ pub struct Codegen {
     label_addr_refs: Vec<(u64, String)>,
     // register asm 变量绑定: 变量名 → 寄存器编号
     reg_bindings: HashMap<String, u8>,
+    // file-scope register asm 变量绑定: 每个函数入口恢复
+    global_reg_bindings: HashMap<String, u8>,
     // data 节 64 位符号引用重定位: (data_section_offset, symbol_name)
     /// (data_off, symbol, custom_sec, rel_type, addend) — addend 用于 &arr[i] 等
     pending_data64_rels: Vec<(u64, String, Option<usize>, u32, i64)>,
@@ -955,6 +958,7 @@ struct ParallelEmitCtx {
     nested_funcs: HashMap<String, Vec<(String, i32)>>,
     func_param_types: HashMap<String, Vec<Type>>,
     defined_funcs: HashSet<String>,
+    global_reg_bindings: HashMap<String, u8>,
     rodata: Vec<u8>,
     string_pool: HashMap<Vec<u8>, u64>,
     text_align: u64,
@@ -964,6 +968,7 @@ struct ParallelEmitCtx {
 struct FuncEmitChunk {
     name: String,
     code: Vec<u8>,
+    entry_offset: u64,
     size: u64,
     string_refs: Vec<(u64, Vec<u8>)>,
     float_refs: Vec<(u64, u64)>,
@@ -977,6 +982,7 @@ struct FuncEmitChunk {
 
 impl Codegen {
     pub fn new(target: Target) -> Self {
+        let patchable_function_entry = target.patchable_function_entry;
         Self {
             code: vec![],
             entry: 0,
@@ -1004,6 +1010,7 @@ impl Codegen {
             vla_total_size: 0,
             relocatable: false,
             function_sections: false,
+            patchable_function_entry,
             symbols: vec![],
             sym_index: HashMap::new(),
             relocations: vec![],
@@ -1042,6 +1049,7 @@ impl Codegen {
             upvar_offsets: HashMap::new(),
             label_addr_refs: vec![],
             reg_bindings: HashMap::new(),
+            global_reg_bindings: HashMap::new(),
             pending_data64_rels: vec![],
             data_relocations: vec![],
             cleanup_vars: vec![],
@@ -1331,6 +1339,8 @@ impl Codegen {
             "dl" | "dh" | "dx" | "edx" | "rdx" | "%rdx" | "%edx" | "%dx" => Some(2),
             "sil" | "si" | "esi" | "rsi" | "%rsi" | "%esi" | "%si" => Some(6),
             "dil" | "di" | "edi" | "rdi" | "%rdi" | "%edi" | "%di" => Some(7),
+            "spl" | "sp" | "esp" | "rsp" | "%rsp" | "%esp" | "%sp" => Some(4),
+            "bpl" | "bp" | "ebp" | "rbp" | "%rbp" | "%ebp" | "%bp" => Some(5),
             "r8" | "r8d" | "r8w" | "r8b" | "%r8" => Some(8),
             "r9" | "r9d" | "r9w" | "r9b" | "%r9" => Some(9),
             "r10" | "r10d" | "r10w" | "r10b" | "%r10" => Some(10),
@@ -1701,11 +1711,20 @@ impl Codegen {
         let mut all_starts: Vec<u64> = self.labels.values().copied().collect();
         all_starts.sort();
         // 找到 func_start 之后的下一个起始位置
-        let next_start = all_starts.iter()
+        let next_start = all_starts
+            .iter()
             .find(|&&s| s > func_start)
             .copied()
             .unwrap_or(self.code.len() as u64);
         next_start.saturating_sub(func_start)
+    }
+
+    fn function_emitted_start(&self, func_start: u64) -> u64 {
+        let prefix_len = self
+            .patchable_function_entry
+            .map(|(n, m)| m.min(n) as u64)
+            .unwrap_or(0);
+        func_start.saturating_sub(prefix_len)
     }
 
     fn jmp_rel32(&mut self, target: &str, kind: JumpKind) {
@@ -2369,6 +2388,12 @@ impl Codegen {
         // 收集全局变量 → .data / .bss (或自定义 section)
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
+                if let Some(ref reg_name) = v.register_name {
+                    if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
+                        self.global_reg_bindings.insert(v.name.name.clone(), reg_idx);
+                    }
+                    continue;
+                }
                 let sz = v.ty.size().max(1);
                 let align = v.alignment.unwrap_or(v.ty.align()).max(1);
                 if v.is_extern && v.init.is_none() {
@@ -2788,8 +2813,8 @@ impl Codegen {
 
         // 后处理: 将自定义 section 函数的代码从 .text 提取到 extra_sections
         // 记录函数在自定义 section 内的偏移 (用于符号表)
-        let mut custom_func_offsets: HashMap<String, (u16, u64)> = HashMap::new(); // func_name → (section_idx+5, offset_in_section)
-        let mut custom_func_ranges: Vec<(u64, u64, usize, u64)> = vec![]; // text start,size,extra idx,section offset
+        let mut custom_func_offsets: HashMap<String, (u16, u64)> = HashMap::new(); // func_name → (section_idx+5, symbol_offset)
+        let mut custom_func_ranges: Vec<(u64, u64, u64, usize, u64)> = vec![]; // entry,text start,size,extra idx,section offset
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_none() {
@@ -2814,6 +2839,8 @@ impl Codegen {
                         if func_size == 0 {
                             continue;
                         }
+                        let emitted_start = self.function_emitted_start(func_start);
+                        let emitted_size = func_size + (func_start - emitted_start);
                         let sec_idx = self.ensure_custom_section(sec_name, true, false);
                         let func_align = f.alignment.unwrap_or(16).max(1);
                         self.extra_sections[sec_idx].align =
@@ -2822,17 +2849,25 @@ impl Codegen {
                             & !(func_align - 1);
                         self.extra_sections[sec_idx].data.resize(aligned, 0);
                         let sec_off = self.extra_sections[sec_idx].data.len() as u64;
-                        // 从 .text 拷贝代码到自定义节
-                        let code_slice = self.code
-                            [func_start as usize..(func_start + func_size) as usize]
+                        // 从 .text 拷贝代码到自定义节，包含 patchable entry 前缀。
+                        let code_slice = self.code[emitted_start as usize
+                            ..(emitted_start + emitted_size) as usize]
                             .to_vec();
                         self.extra_sections[sec_idx]
                             .data
                             .extend_from_slice(&code_slice);
                         // 暂时保留 .text 原代码；resolve() 修补本地跳转后会重新复制。
-                        custom_func_ranges.push((func_start, func_size, sec_idx, sec_off));
-                        custom_func_offsets
-                            .insert(f.name.name.clone(), ((sec_idx + 7) as u16, sec_off));
+                        custom_func_ranges.push((
+                            func_start,
+                            emitted_start,
+                            emitted_size,
+                            sec_idx,
+                            sec_off,
+                        ));
+                        custom_func_offsets.insert(
+                            f.name.name.clone(),
+                            ((sec_idx + 7) as u16, sec_off + (func_start - emitted_start)),
+                        );
                     }
                 }
             }
@@ -2864,6 +2899,8 @@ impl Codegen {
                     if func_size == 0 {
                         continue;
                     }
+                    let emitted_start = self.function_emitted_start(func_start);
+                    let emitted_size = func_size + (func_start - emitted_start);
                     let sec_name = format!(".text.{}", f.name.name);
                     let sec_idx = self.ensure_custom_section(&sec_name, true, false);
                     // attribute((used)): 标记 SHF_GNU_RETAIN 防止 gc-sections 移除
@@ -2877,14 +2914,23 @@ impl Codegen {
                         & !(func_align - 1);
                     self.extra_sections[sec_idx].data.resize(aligned, 0);
                     let sec_off = self.extra_sections[sec_idx].data.len() as u64;
-                    let code_slice =
-                        self.code[func_start as usize..(func_start + func_size) as usize].to_vec();
+                    let code_slice = self.code
+                        [emitted_start as usize..(emitted_start + emitted_size) as usize]
+                        .to_vec();
                     self.extra_sections[sec_idx]
                         .data
                         .extend_from_slice(&code_slice);
-                    custom_func_ranges.push((func_start, func_size, sec_idx, sec_off));
-                    custom_func_offsets
-                        .insert(f.name.name.clone(), ((sec_idx + 7) as u16, sec_off));
+                    custom_func_ranges.push((
+                        func_start,
+                        emitted_start,
+                        emitted_size,
+                        sec_idx,
+                        sec_off,
+                    ));
+                    custom_func_offsets.insert(
+                        f.name.name.clone(),
+                        ((sec_idx + 7) as u16, sec_off + (func_start - emitted_start)),
+                    );
                 }
             }
         }
@@ -2915,6 +2961,9 @@ impl Codegen {
         };
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
+                if v.register_name.is_some() {
+                    continue;
+                }
                 if v.is_extern && v.init.is_none() && var_has_definition(&v.name.name) {
                     continue;
                 }
@@ -3511,11 +3560,13 @@ impl Codegen {
         let mut custom_relas: HashMap<usize, Vec<ElfRela>> = HashMap::new();
         let mut text_relas = vec![];
         for mut rel in self.relocations.drain(..) {
-            if let Some((start, _, sec_idx, sec_off)) = custom_func_ranges
+            if let Some((_, emitted_start, _emitted_size, sec_idx, sec_off)) = custom_func_ranges
                 .iter()
-                .find(|(start, size, _, _)| rel.offset >= *start && rel.offset < *start + *size)
+                .find(|(_, emitted_start, emitted_size, _, _)| {
+                    rel.offset >= *emitted_start && rel.offset < *emitted_start + *emitted_size
+                })
             {
-                rel.offset = *sec_off + (rel.offset - *start);
+                rel.offset = *sec_off + (rel.offset - *emitted_start);
                 custom_relas.entry(*sec_idx).or_default().push(rel);
             } else {
                 text_relas.push(rel);
@@ -3545,22 +3596,30 @@ impl Codegen {
 
         // 解析内部跳转 (本地标签)，再把最终机器码覆盖到自定义节副本。
         self.resolve(0);
-        for (start, size, sec_idx, sec_off) in &custom_func_ranges {
-            let src = self.code[*start as usize..(*start + *size) as usize].to_vec();
+        for (_, emitted_start, emitted_size, sec_idx, sec_off) in &custom_func_ranges {
+            let src = self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
+                .to_vec();
             let dst_start = *sec_off as usize;
-            let dst_end = dst_start + *size as usize;
+            let dst_end = dst_start + *emitted_size as usize;
             self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[*start as usize..(*start + *size) as usize].fill(0);
+            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize].fill(0);
         }
         self.finalize_func_asm_layout(prog, &custom_func_ranges);
     }
 
     /// 在 resolve 后捕获每个函数的最终机器码与所属节。
-    fn finalize_func_asm_layout(&mut self, prog: &Program, custom: &[(u64, u64, usize, u64)]) {
+    fn finalize_func_asm_layout(
+        &mut self,
+        prog: &Program,
+        custom: &[(u64, u64, u64, usize, u64)],
+    ) {
         let mut custom_by_start: HashMap<u64, (String, usize, u64)> = HashMap::new();
-        for (start, _size, sec_idx, sec_off) in custom {
+        for (entry_start, emitted_start, _emitted_size, sec_idx, sec_off) in custom {
             let sec_name = self.extra_sections[*sec_idx].name.clone();
-            custom_by_start.insert(*start, (sec_name, *sec_idx, *sec_off));
+            custom_by_start.insert(
+                *entry_start,
+                (sec_name, *sec_idx, *sec_off + (*entry_start - *emitted_start)),
+            );
         }
         let mut names = Vec::new();
         Self::collect_all_funcs(prog, &mut names);
@@ -3675,6 +3734,7 @@ impl Codegen {
             nested_funcs: self.nested_funcs.clone(),
             func_param_types: self.func_param_types.clone(),
             defined_funcs: self.defined_funcs.clone(),
+            global_reg_bindings: self.global_reg_bindings.clone(),
             rodata: self.rodata.clone(),
             string_pool: self.string_pool.clone(),
             text_align: self.text_align,
@@ -3707,6 +3767,7 @@ impl Codegen {
         cg.nested_funcs = ctx.nested_funcs;
         cg.func_param_types = ctx.func_param_types;
         cg.defined_funcs = ctx.defined_funcs;
+        cg.global_reg_bindings = ctx.global_reg_bindings;
         cg.rodata = ctx.rodata;
         cg.string_pool = ctx.string_pool;
         cg.text_align = ctx.text_align;
@@ -3743,9 +3804,11 @@ impl Codegen {
             .get(&f.name.name)
             .copied()
             .unwrap_or(cg.code.len() as u64);
+        let entry_offset = cg.labels.get(&f.name.name).copied().unwrap_or(0);
         FuncEmitChunk {
             name: f.name.name.clone(),
             code: cg.code,
+            entry_offset,
             size,
             string_refs: cg.string_refs,
             float_refs: cg.float_refs,
@@ -3763,7 +3826,8 @@ impl Codegen {
             self.code.push(0x90);
         }
         let base = self.pos();
-        self.labels.insert(chunk.name.clone(), base);
+        self.labels
+            .insert(chunk.name.clone(), base + chunk.entry_offset);
         self.func_sizes.insert(chunk.name.clone(), chunk.size);
         self.code.extend_from_slice(&chunk.code);
         for (pos, data) in chunk.string_refs {
@@ -3921,6 +3985,7 @@ impl Codegen {
         self.var_map.clear();
         self.vla_offsets.clear();
         self.reg_bindings.clear();
+        self.reg_bindings.extend(self.global_reg_bindings.clone());
         self.cleanup_vars.clear();
         self.sret_depth = 0;
         self.vla_total_size = 0;
@@ -3933,13 +3998,33 @@ impl Codegen {
                 self.upvar_offsets.insert(name.clone(), *off);
             }
         }
-        let func_align = f.alignment.unwrap_or(1).max(1);
+        let min_align = self
+            .patchable_function_entry
+            .map(|(n, _)| n.max(1))
+            .unwrap_or(1);
+        let func_align = f.alignment.unwrap_or(1).max(min_align).max(1);
         self.text_align = self.text_align.max(func_align as u64);
         while !self.code.len().is_multiple_of(func_align) {
             self.code.push(0x90);
         }
-        let func_start = self.pos();
-        self.label(&f.name.name);
+        let func_start = if let Some((n, m)) = self.patchable_function_entry {
+            let prefix_len = m.min(n);
+            let suffix_len = n.saturating_sub(prefix_len);
+            self.text_align = self.text_align.max(n.max(1) as u64);
+            for _ in 0..prefix_len {
+                self.code.push(0x90);
+            }
+            let func_start = self.pos();
+            self.label(&f.name.name);
+            for _ in 0..suffix_len {
+                self.code.push(0x90);
+            }
+            func_start
+        } else {
+            let func_start = self.pos();
+            self.label(&f.name.name);
+            func_start
+        };
         if self.target.frame_pointer {
             self.emit(&[0x55]); // push rbp
         }

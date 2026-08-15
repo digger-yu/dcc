@@ -1558,6 +1558,120 @@ fn parallel_codegen_o2_multi_function() {
     );
 }
 
+#[test]
+#[cfg(unix)]
+fn patchable_entry_function_sections_keep_prefix() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let source_path = dir.join(format!("dcc-patchable-{pid}.c"));
+    let object_path = dir.join(format!("dcc-patchable-{pid}.o"));
+    fs::write(&source_path, "int foo(void) { return 1; }\n").expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "-c",
+            "-ffunction-sections",
+            "-fpatchable-function-entry=16,16",
+            "-o",
+        ])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let sym = Command::new("readelf")
+        .args(["-s"])
+        .arg(&object_path)
+        .output()
+        .expect("readelf");
+    assert!(sym.status.success(), "readelf -s failed");
+    let symtab = String::from_utf8_lossy(&sym.stdout);
+    let foo_line = symtab
+        .lines()
+        .find(|line| line.split_whitespace().last() == Some("foo"))
+        .unwrap_or_else(|| panic!("missing foo symbol: {symtab}"));
+    let value = foo_line.split_whitespace().nth(1).unwrap_or("0");
+    assert_eq!(
+        u64::from_str_radix(value, 16).unwrap(),
+        16,
+        "foo should point after the 16-byte patchable prefix: {foo_line}"
+    );
+
+    let dump = Command::new("objdump")
+        .args(["-s", "-j", ".text.foo"])
+        .arg(&object_path)
+        .output()
+        .expect("objdump");
+    assert!(dump.status.success(), "objdump .text.foo failed");
+    let bytes = String::from_utf8_lossy(&dump.stdout)
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>();
+    assert!(
+        bytes.contains("90909090909090909090909090909090"),
+        "missing 16-byte nop prefix in .text.foo: {}",
+        String::from_utf8_lossy(&dump.stdout)
+    );
+    let _ = fs::remove_file(&object_path);
+}
+
+#[test]
+#[cfg(unix)]
+fn parallel_codegen_keeps_file_scope_register_asm_binding() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let source_path = dir.join(format!("dcc-regasm-{pid}.c"));
+    let object_path = dir.join(format!("dcc-regasm-{pid}.o"));
+    fs::write(
+        &source_path,
+        "register unsigned long current_stack_pointer asm(\"rsp\");\n\
+         unsigned long foo(void) { return current_stack_pointer; }\n\
+         unsigned long bar(void) { return current_stack_pointer + 1; }\n",
+    )
+    .expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .env_remove("DCC_NO_PARALLEL")
+        .args(["-O2", "-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sym = Command::new("readelf")
+        .args(["-s"])
+        .arg(&object_path)
+        .output()
+        .expect("readelf");
+    assert!(sym.status.success(), "readelf -s failed");
+    let symtab = String::from_utf8_lossy(&sym.stdout);
+    assert!(
+        !symtab.contains("current_stack_pointer"),
+        "file-scope register asm variable must not emit a symbol: {symtab}"
+    );
+    let dump = Command::new("objdump")
+        .args(["-d"])
+        .arg(&object_path)
+        .output()
+        .expect("objdump");
+    assert!(dump.status.success(), "objdump -d failed");
+    let disasm = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        disasm.contains("%rsp,%rax") || disasm.contains("%rsp, %rax"),
+        "file-scope register asm read should move rsp into rax: {disasm}"
+    );
+    let _ = fs::remove_file(&object_path);
+}
+
 /// M7: aarch64 if/while 控制流交叉编译。
 #[test]
 fn aarch64_if_while_cross_compile() {
