@@ -524,6 +524,30 @@ int main(void) {\n\
 }
 
 #[test]
+fn o2_dce_preserves_outputless_inline_asm() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-o2-asm-dce-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-o2-asm-dce-{}.s", std::process::id()));
+    let source = "int main(void) { asm(\"nop\"); return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(asm_text.contains("nop"), "asm output: {asm_text}");
+}
+
+#[test]
 fn mmd_excludes_isystem_headers_from_depfile() {
     let dir = std::env::temp_dir();
     let inc = dir.join(format!("dcc-mmd-inc-{}", std::process::id()));

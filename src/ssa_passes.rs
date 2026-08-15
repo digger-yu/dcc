@@ -94,6 +94,9 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
                     true
                 }
             }
+            // inline asm 即使没有输出、clobber 或显式输入，也可能包含
+            // 用户需要保留的不可见副作用，DCE 不能把它当 pure 指令删除。
+            InstKind::InlineAsm { .. } => true,
             _ => true,
         });
         if b.insts.len() != before {
