@@ -12475,11 +12475,11 @@ impl Codegen {
     /// 解析 GCC asm 约束前缀 (= 输出, + 读写, & early-clobber)
     /// 返回 (is_output, is_inout, early_clobber, match_digit)
     /// match_digit: Some(n) 表示 "与第 n 个操作数共用寄存器", None 表示无
-    fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u8>) {
+    fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u32>) {
         let mut is_output = false;
         let mut is_inout = false;
         let mut early = false;
-        let mut match_digit: Option<u8> = None;
+        let mut match_digit: Option<u32> = None;
         let mut s = constraint.trim();
         while !s.is_empty() {
             match s.chars().next() {
@@ -12498,10 +12498,17 @@ impl Codegen {
                 }
                 Some('%') => {
                     s = &s[1..];
-                } // 数字标签计数约束, 模板替换处理
+                }
                 Some(c) if c.is_ascii_digit() => {
-                    match_digit = Some(c.to_digit(10).unwrap() as u8);
-                    s = &s[1..];
+                    let mut val: u32 = 0;
+                    while let Some(d) = s.chars().next() {
+                        if !d.is_ascii_digit() {
+                            break;
+                        }
+                        val = val.wrapping_mul(10).wrapping_add(d.to_digit(10).unwrap());
+                        s = &s[1..];
+                    }
+                    match_digit = Some(val);
                 }
                 _ => break,
             }

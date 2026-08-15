@@ -1438,6 +1438,50 @@ impl<'a> Parser<'a> {
         labels
     }
 
+    /// 解析 GCC asm 约束前缀 (= 输出, + 读写, & early-clobber)
+    /// 返回 (is_output, is_inout, early_clobber, match_digit)
+    /// match_digit: Some(n) 表示 "与第 n 个操作数共用寄存器", None 表示无
+    fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u32>) {
+        let mut is_output = false;
+        let mut is_inout = false;
+        let mut early = false;
+        let mut match_digit: Option<u32> = None;
+        let mut s = constraint.trim();
+        while !s.is_empty() {
+            match s.chars().next() {
+                Some('=') => {
+                    is_output = true;
+                    s = &s[1..];
+                }
+                Some('+') => {
+                    is_output = true;
+                    is_inout = true;
+                    s = &s[1..];
+                }
+                Some('&') => {
+                    early = true;
+                    s = &s[1..];
+                }
+                Some('%') => {
+                    s = &s[1..];
+                }
+                Some(c) if c.is_ascii_digit() => {
+                    let mut val: u32 = 0;
+                    while let Some(d) = s.chars().next() {
+                        if !d.is_ascii_digit() {
+                            break;
+                        }
+                        val = val.wrapping_mul(10).wrapping_add(d.to_digit(10).unwrap());
+                        s = &s[1..];
+                    }
+                    match_digit = Some(val);
+                }
+                _ => break,
+            }
+        }
+        (is_output, is_inout, early, match_digit)
+    }
+
     /// 验证 asm 操作数的语义约束 (约束前缀、重名、类型匹配、占位符数量)
     #[allow(clippy::too_many_arguments)]
     fn validate_asm_semantics(
@@ -1452,6 +1496,117 @@ impl<'a> Parser<'a> {
         sp: &Span,
     ) {
         use std::collections::HashSet;
+        let output_count = outputs.len();
+        let total_ops = output_count + inputs.len();
+
+        // 0.0 约束数组 vs 表达式数组长度不匹配 (防御性: parse_asm_operand_list 异常分支)
+        if output_constraints.len() != output_names.len() || output_names.len() != output_count {
+            let expected = output_count;
+            if output_constraints.len() != expected {
+                self.diags.push(Diagnostic::err(
+                    "E0014",
+                    format!(
+                        "asm output constraint count ({}) != output operand count ({})",
+                        output_constraints.len(), expected
+                    ),
+                    sp.clone(),
+                ));
+            }
+            if output_names.len() != expected {
+                self.diags.push(Diagnostic::err(
+                    "E0014",
+                    format!(
+                        "asm output name count ({}) != output operand count ({})",
+                        output_names.len(), expected
+                    ),
+                    sp.clone(),
+                ));
+            }
+        }
+        let input_count = inputs.len();
+        if input_constraints.len() != input_names.len() || input_names.len() != input_count {
+            if input_constraints.len() != input_count {
+                self.diags.push(Diagnostic::err(
+                    "E0014",
+                    format!(
+                        "asm input constraint count ({}) != input operand count ({})",
+                        input_constraints.len(), input_count
+                    ),
+                    sp.clone(),
+                ));
+            }
+            if input_names.len() != input_count {
+                self.diags.push(Diagnostic::err(
+                    "E0014",
+                    format!(
+                        "asm input name count ({}) != input operand count ({})",
+                        input_names.len(), input_count
+                    ),
+                    sp.clone(),
+                ));
+            }
+        }
+
+        // 0. 匹配约束 (matching constraint) 数字越界检测 (E0015)
+        //    输入约束中的数字 (如 "0", "1") 表示与对应编号操作数共用寄存器.
+        //    GNU C 要求: 匹配约束编号必须 < total_ops (全局有效), 且 GCC
+        //    进一步要求输入的匹配约束必须引用输出操作数 (< output_count).
+        for (input_idx, constraint) in input_constraints.iter().enumerate() {
+            let (_, _, _, match_digit) = Self::parse_asm_constraint_flags(constraint);
+            if let Some(n) = match_digit {
+                let n_usize = n as usize;
+                // GCC: 匹配约束必须引用输出操作数 (即 < output_count)
+                if n_usize >= output_count {
+                    self.diags.push(Diagnostic::err(
+                        "E0015",
+                        format!(
+                            "matching constraint references invalid operand number '{}' for input operand {}",
+                            n, input_idx
+                        ),
+                        sp.clone(),
+                    ).with_hint(
+                        if output_count == 0 {
+                            "no output operands defined; matching constraints require outputs".into()
+                        } else {
+                            format!(
+                                "matching constraint digits must reference an output operand (0 to {}); use a regular constraint if you intended an independent input",
+                                output_count.saturating_sub(1)
+                            )
+                        }
+                    ));
+                }
+                // 即使 n < output_count, 也额外做一次全局越界防御 (未来兼容其他模式)
+                if n_usize >= total_ops {
+                    self.diags.push(Diagnostic::err(
+                        "E0015",
+                        format!(
+                            "matching constraint references operand {} but only {} operand(s) provided",
+                            n, total_ops
+                        ),
+                        sp.clone(),
+                    ).with_hint(
+                        "add the missing operand or fix the matching constraint digit"
+                    ));
+                }
+            }
+        }
+        // 输出约束中的匹配约束: 输出本身不应带匹配数字 (GCC 同样报错)
+        for (output_idx, constraint) in output_constraints.iter().enumerate() {
+            let (_, _, _, match_digit) = Self::parse_asm_constraint_flags(constraint);
+            if let Some(n) = match_digit {
+                self.diags.push(Diagnostic::err(
+                    "E0015",
+                    format!(
+                        "matching constraint digit '{}' not allowed in output operand {} constraint",
+                        n, output_idx
+                    ),
+                    sp.clone(),
+                ).with_hint(
+                    "output operands already define their own number; use '+' for read-write output instead"
+                ));
+            }
+        }
+
         // 1. 输出约束必须含 '=' 或 '+' 前缀 (E0014)
         for (i, c) in output_constraints.iter().enumerate() {
             let stripped = c.trim();

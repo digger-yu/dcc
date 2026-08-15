@@ -108,7 +108,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0012** | `expected string literal in _Static_assert` | 断言消息非字符串 | `_Static_assert(1, 123)` | `the second argument must be a diagnostic string` | `e0012.c` |
 | **E0013** | `__builtin_choose_expr condition is not constant` | 选择表达式非常量 | 非常量条件传给 `__builtin_choose_expr` | — | `e0013.c` |
 | **E0014** | `output operand N constraint '…' missing '=' or '+' prefix` | 输出约束缺前缀 | asm 输出操作数约束未以 `=` 或 `+` 开头 | `add '=' for write-only or '+' for read-write output` | `e0014.c` |
-| **E0015** | `asm template references operand %N but only M operand(s) provided` / `asm template references unnamed operand '%[name]' which does not exist` | 模板占位符越界 | asm 模板引用的数字索引超出操作数范围，或命名操作数不存在 | `add the missing operand or fix the template index` | — |
+| **E0015** | `asm template references operand %N but only M operand(s) provided` / `asm template references unnamed operand '%[name]' which does not exist` / `matching constraint references invalid operand number 'N' for input operand I` / `matching constraint digit 'N' not allowed in output operand I constraint` | 模板占位符越界 / 匹配约束越界 | asm 模板引用的数字索引超出操作数范围，或命名操作数不存在；或输入约束中的匹配数字（matching constraint digit）引用不存在的输出操作数；或输出约束中错误地使用匹配数字 | `add the missing operand or fix the template index` 等 | — |
 
 ### Parser 警告：`W0001`、`W0005`–`W0007`
 

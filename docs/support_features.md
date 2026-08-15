@@ -339,7 +339,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `-fdiagnostics-show-template-tree` | 模板树显示 |
 | format 属性 | `format_check.rs`：`-Wformat` / `W0003` arity 检查 |
 | asm goto 标签验证 | `W0004`：asm 模板中引用的标签不在 goto label 列表中 |
-| asm 语义校验 | `E0014`: 输出约束缺少 `=`/`+` 前缀; `E0015`: 模板占位符索引越界或命名操作数不存在; `W0005`: 约束与表达式类型不匹配 (如 `r` 约束绑浮点); `W0006`: 重复操作数名; `W0007`: 命名/位置操作数混用 |
+| asm 语义校验 | `E0014`: 输出约束缺少 `=`/`+` 前缀; `E0015`: 模板占位符索引越界、命名操作数不存在、输入匹配约束(matching constraint digit)引用无效操作数编号、输出约束中禁止匹配数字; `W0005`: 约束与表达式类型不匹配 (如 `r` 约束绑浮点); `W0006`: 重复操作数名; `W0007`: 命名/位置操作数混用 |
 | 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002` + int |
 
 ## 内联 asm 优化器集成

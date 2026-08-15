@@ -208,6 +208,101 @@ fn validate_inline_asm_operands(
     span: &Span,
     diags: &mut Vec<Diagnostic>,
 ) {
+    let output_count = outputs.len();
+    let total_ops = output_count + inputs.len();
+
+    // 0. 防御性长度检查: 约束数组 vs 表达式数组不匹配
+    if output_constraints.len() != output_count {
+        diags.push(Diagnostic::err(
+            "E0014",
+            format!(
+                "asm output constraint count ({}) != output operand count ({})",
+                output_constraints.len(),
+                output_count
+            ),
+            span.clone(),
+        ));
+    }
+    if input_constraints.len() != inputs.len() {
+        diags.push(Diagnostic::err(
+            "E0014",
+            format!(
+                "asm input constraint count ({}) != input operand count ({})",
+                input_constraints.len(),
+                inputs.len()
+            ),
+            span.clone(),
+        ));
+    }
+
+    // 1. 输出约束必须含 '=' 或 '+' 前缀 (E0014) — parser 层校验的第二道防线
+    for (i, c) in output_constraints.iter().enumerate() {
+        let stripped = c.trim();
+        if !stripped.starts_with('=') && !stripped.starts_with('+') {
+            diags.push(Diagnostic::err(
+                "E0014",
+                format!(
+                    "output operand {} constraint '{}' missing '=' or '+' prefix",
+                    i, c
+                ),
+                span.clone(),
+            ).with_hint("add '=' for write-only or '+' for read-write output"));
+        }
+    }
+
+    // 2. 匹配约束 (matching constraint) 数字越界检测 (E0015)
+    for (input_idx, constraint) in input_constraints.iter().enumerate() {
+        let (_, _, _, match_digit) = parse_asm_constraint_flags(constraint);
+        if let Some(n) = match_digit {
+            let n_usize = n as usize;
+            if n_usize >= output_count {
+                diags.push(Diagnostic::err(
+                    "E0015",
+                    format!(
+                        "matching constraint references invalid operand number '{}' for input operand {}",
+                        n, input_idx
+                    ),
+                    span.clone(),
+                ).with_hint(
+                    if output_count == 0 {
+                        "no output operands defined; matching constraints require outputs".into()
+                    } else {
+                        format!(
+                            "matching constraint digits must reference an output operand (0 to {})",
+                            output_count.saturating_sub(1)
+                        )
+                    }
+                ));
+            }
+            if n_usize >= total_ops {
+                diags.push(Diagnostic::err(
+                    "E0015",
+                    format!(
+                        "matching constraint references operand {} but only {} operand(s) provided",
+                        n, total_ops
+                    ),
+                    span.clone(),
+                ));
+            }
+        }
+    }
+    for (output_idx, constraint) in output_constraints.iter().enumerate() {
+        let (_, _, _, match_digit) = parse_asm_constraint_flags(constraint);
+        if let Some(n) = match_digit {
+            diags.push(Diagnostic::err(
+                "E0015",
+                format!(
+                    "matching constraint digit '{}' not allowed in output operand {} constraint",
+                    n, output_idx
+                ),
+                span.clone(),
+            ).with_hint(
+                "output operands already define their own number; use '+' for read-write output instead"
+            ));
+        }
+    }
+
+    // 3. 类型校验 (E0310) — 原始功能
     for (idx, expr) in outputs.iter().enumerate() {
         let constraint = output_constraints.get(idx).map(String::as_str).unwrap_or("=r");
         let effective = matched_constraint(
@@ -277,11 +372,11 @@ fn validate_inline_asm_operand(
     );
 }
 
-fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u8>) {
+fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u32>) {
     let mut is_output = false;
     let mut is_inout = false;
     let mut early = false;
-    let mut match_digit = None;
+    let mut match_digit: Option<u32> = None;
     let mut s = constraint.trim();
     while !s.is_empty() {
         match s.chars().next() {
@@ -300,8 +395,15 @@ fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u8>
             }
             Some('%') => s = &s[1..],
             Some(c) if c.is_ascii_digit() => {
-                match_digit = Some(c.to_digit(10).unwrap() as u8);
-                s = &s[1..];
+                let mut val: u32 = 0;
+                while let Some(d) = s.chars().next() {
+                    if !d.is_ascii_digit() {
+                        break;
+                    }
+                    val = val.wrapping_mul(10).wrapping_add(d.to_digit(10).unwrap());
+                    s = &s[1..];
+                }
+                match_digit = Some(val);
             }
             _ => break,
         }
