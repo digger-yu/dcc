@@ -257,10 +257,17 @@ const FLOAT_BINOPS: &[BinOp] = &[
 ];
 
 /// 与 codegen SIMD 向量路径一致的二元运算符集合。
-const VECTOR_BINOPS: &[BinOp] = &[BinOp::Add, BinOp::Sub, BinOp::Mul];
+const VECTOR_BINOPS: &[BinOp] = &[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div];
 
 /// 与 codegen 复数路径一致的二元运算符集合。
-const COMPLEX_BINOPS: &[BinOp] = &[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div];
+const COMPLEX_BINOPS: &[BinOp] = &[
+    BinOp::Add,
+    BinOp::Sub,
+    BinOp::Mul,
+    BinOp::Div,
+    BinOp::EqEq,
+    BinOp::Ne,
+];
 
 fn is_float_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Float { .. })

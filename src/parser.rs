@@ -1246,6 +1246,7 @@ impl<'a> Parser<'a> {
     fn index_result_type(base: &Expr) -> Type {
         match base.ty() {
             Type::Ptr(inner) | Type::Array(inner, _) => (*inner).clone(),
+            Type::Vector(inner, _) => (*inner).clone(),
             _ => int_t(),
         }
     }
