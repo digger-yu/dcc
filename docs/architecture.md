@@ -480,8 +480,8 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   同尺寸 vector/scalar、vector/vector、complex/vector cast 走帧内 bitcast 临时槽；
   `_Complex` add/sub/mul/div（SSE 标量）；`parser` 对复数二元结果保留 `Type::Complex` 以便
   `(int)(a+b)` 等 Cast 正确发射 `cvttss2si`；虚部清零用 `movss` 避免 64 位
-  store 覆盖相邻实部；`mov_xmm` 仅在 xmm≥8 时加 REX。不支持表达式路径发射
-  **ud2** 而非静默 `mov 0`。
+  store 覆盖相邻实部；`mov_xmm` 仅在 xmm≥8 时加 REX。不支持表达式路径输出
+  带源位置 warning，并发射 **ud2** 而非静默 `mov 0`。
 - **Builtins**：完整支持 `__builtin_constant_p`/`__builtin_object_size`/
   `__builtin_va_*`/`__builtin_prefetch`/`__builtin_fma*`/
   `__builtin_rotateleft*`/`__builtin_rotateright*`/`__builtin_clrsb*`/

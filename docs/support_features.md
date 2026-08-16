@@ -165,6 +165,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | apply/return | `__builtin_apply` / `__builtin_return` |
 | return thunk | `-mfunction-return=thunk-extern` 将 C 函数尾声、空 global asm 函数和 mini-asm `ret`/`retq` 发射为外部 `__x86_return_thunk` 跳转；`-mfunction-return=keep` 保留裸 `ret` |
 | prefetch | `__builtin_prefetch` no-op |
+| unknown expression fallback | unsupported expression / 非标量 InitList rvalue 输出带源位置 warning，并发射 `ud2` 后清零目标寄存器，避免静默返回 0 |
 
 ## 多架构支持
 

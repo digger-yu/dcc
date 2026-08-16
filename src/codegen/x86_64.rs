@@ -1383,6 +1383,88 @@ impl Codegen {
         }
     }
 
+    fn expr_warn(&self, e: &Expr, msg: &str) {
+        eprintln!("{}", self.expr_warning(e, msg));
+    }
+
+    fn expr_warning(&self, e: &Expr, msg: &str) -> String {
+        let span = Self::expr_span(e);
+        let (file, line, col) = self.expr_src_pos(span);
+        if line > 0 && col > 0 {
+            format!("{}:{}:{}: warning: {}", file, line, col, msg)
+        } else if line > 0 {
+            format!("{}:{}: warning: {}", file, line, msg)
+        } else {
+            format!("{}: warning: {}", file, msg)
+        }
+    }
+
+    fn expr_src_pos(&self, span: &crate::diagnostics::Span) -> (String, u32, u32) {
+        let fallback_file = if span.file.is_empty() {
+            self.source_name.clone()
+        } else {
+            span.file.clone()
+        };
+        let line = span.line;
+        if line == 0 || self.line_map.is_empty() {
+            return (fallback_file, line, span.col);
+        }
+        let idx = self.line_map.partition_point(|s| s.out_start <= line);
+        if let Some(ls) = idx.checked_sub(1).and_then(|i| self.line_map.get(i)) {
+            if line < ls.out_start + ls.count {
+                return (
+                    ls.file.clone(),
+                    ls.src_start + (line - ls.out_start),
+                    span.col,
+                );
+            }
+            return (ls.file.clone(), line, span.col);
+        }
+        if let Some(first) = self.line_map.first() {
+            return (first.file.clone(), first.src_start.max(1), span.col);
+        }
+        (fallback_file, line, span.col)
+    }
+
+    fn expr_span(e: &Expr) -> &crate::diagnostics::Span {
+        match e {
+            Expr::Int { span, .. }
+            | Expr::Float { span, .. }
+            | Expr::ComplexLit { span, .. }
+            | Expr::Real { span, .. }
+            | Expr::Imag { span, .. }
+            | Expr::String { span, .. }
+            | Expr::Char { span, .. }
+            | Expr::Ident { span, .. }
+            | Expr::Binop { span, .. }
+            | Expr::Unary { span, .. }
+            | Expr::Call { span, .. }
+            | Expr::Assign { span, .. }
+            | Expr::Cond { span, .. }
+            | Expr::Cast { span, .. }
+            | Expr::SizeofTy { span, .. }
+            | Expr::SizeofExpr { span, .. }
+            | Expr::Index { span, .. }
+            | Expr::Member { span, .. }
+            | Expr::AddrOf { span, .. }
+            | Expr::Deref { span, .. }
+            | Expr::PostInc { span, .. }
+            | Expr::PostDec { span, .. }
+            | Expr::PreInc { span, .. }
+            | Expr::PreDec { span, .. }
+            | Expr::CompoundLit { span, .. }
+            | Expr::InitList { span, .. }
+            | Expr::AlignofTy { span, .. }
+            | Expr::AlignofExpr { span, .. }
+            | Expr::StmtExpr { span, .. }
+            | Expr::Comma { span, .. }
+            | Expr::AsmExpr { span, .. }
+            | Expr::LabelAddr { span, .. }
+            | Expr::VaArg { span, .. }
+            | Expr::Offsetof { span, .. } => span,
+        }
+    }
+
     /// 把当前 asm 语句的预处理输出行号映射回 (源文件, 源行号)。
     /// 映射失败时回退到 source_name + 原始行号。
     fn asm_src_pos(&self) -> (String, u32) {
@@ -7510,13 +7592,19 @@ impl Codegen {
                         self.mov_imm(dst, 0);
                     }
                 } else {
-                    eprintln!("dcc: codegen unsupported InitList rvalue for {:?}", e.ty());
+                    self.expr_warn(
+                        e,
+                        &format!(
+                            "codegen unsupported InitList rvalue for {:?}; emitted as ud2",
+                            e.ty()
+                        ),
+                    );
                     self.emit(&[0x0F, 0x0B]); // ud2
                     self.mov_imm(dst, 0);
                 }
             }
             _ => {
-                eprintln!("dcc: codegen skip unsupported expr (ud2)");
+                self.expr_warn(e, "codegen unsupported expression; emitted as ud2");
                 self.emit(&[0x0F, 0x0B]); // ud2
                 self.mov_imm(dst, 0);
             }
@@ -7559,7 +7647,11 @@ impl Codegen {
                 }
             }
             Type::Complex(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {
-                let pfx = if matches!(inner.as_ref(), Type::Float) { 0xF3 } else { 0xF2 };
+                let pfx = if matches!(inner.as_ref(), Type::Float) {
+                    0xF3
+                } else {
+                    0xF2
+                };
                 let inner_sz = inner.size() as i32;
                 let result_off = -self.frame_size + 8;
                 self.emit_xmm_r13_disp(pfx, 0x10, 0, src_off);
@@ -7598,7 +7690,11 @@ impl Codegen {
         self.gen_expr(e, 0);
         match src_ty {
             Type::Complex(ref inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {
-                let pfx = if matches!(inner.as_ref(), Type::Float) { 0xF3 } else { 0xF2 };
+                let pfx = if matches!(inner.as_ref(), Type::Float) {
+                    0xF3
+                } else {
+                    0xF2
+                };
                 self.emit_xmm_r13_disp(pfx, 0x11, 0, dst_off);
                 self.gen_complex_imag_into_xmm0(e, inner);
                 self.emit_xmm_r13_disp(pfx, 0x11, 0, dst_off + inner.size() as i32);
@@ -24422,5 +24518,65 @@ impl Codegen {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Abi, Arch, Os, TargetTriple};
+    use crate::diagnostics::Span;
+    use std::sync::Arc;
+
+    fn x86_codegen() -> Codegen {
+        let triple = TargetTriple {
+            arch: Arch::X86_64,
+            vendor: "unknown".into(),
+            os: Os::Linux,
+            abi: Abi::Gnu,
+        };
+        let mut cg = Codegen::new(Target::resolve(&triple));
+        cg.source_name = "fallback.c".into();
+        cg
+    }
+
+    #[test]
+    fn unsupported_initlist_rvalue_warns_and_emits_ud2() {
+        let span = Span::point("fallback.c", 7, 13);
+        let ty = Type::Struct(
+            "S".into(),
+            Arc::new(vec![Field {
+                name: "x".into(),
+                ty: Type::Int,
+                offset: 0,
+                bit_width: None,
+                bit_offset: 0,
+            }]),
+        );
+        let expr = Expr::InitList {
+            inits: vec![InitItem::Expr(Expr::Int {
+                v: 1,
+                span: span.clone(),
+                ty: Type::Int,
+            })],
+            span,
+            ty,
+        };
+        let mut cg = x86_codegen();
+        let warning = cg.expr_warning(
+            &expr,
+            &format!(
+                "codegen unsupported InitList rvalue for {:?}; emitted as ud2",
+                expr.ty()
+            ),
+        );
+
+        assert!(warning.contains("fallback.c:7:13: warning: codegen unsupported InitList rvalue"));
+        cg.gen_expr(&expr, 0);
+        assert!(
+            cg.code.windows(2).any(|bytes| bytes == [0x0F, 0x0B]),
+            "unsupported InitList rvalue must emit ud2, code={:x?}",
+            cg.code
+        );
     }
 }

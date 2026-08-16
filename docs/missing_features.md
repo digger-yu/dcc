@@ -30,7 +30,6 @@ objtool 的解码/验证模型完全一致。
 |------|------|
 | complex/vector cast 边界 | 支持同尺寸 vector/scalar、vector/vector、complex/vector bitcast；不同尺寸或未枚举转换仍由 validator 拒绝 |
 | unknown `__builtin_*` explicit fallback | 未识别 builtin 明确降级：有返回值时返回 0，`void` 返回时发 `ud2` 并 warning；表达式/语句上下文均有测试契约 |
-| unknown expression fallback | x86_64 codegen 对 unsupported expr / InitList rvalue 仍会诊断并发 `ud2` |
 | permissive unknown type/function | `-fpermissive` 与隐式函数声明仍会 warning 后按 `int` 继续，未达到严格 GCC/Clang 诊断等价 |
 | asm goto 标签诊断 | 模板标签索引越界或标签不在 goto 列表中仍为 W0004 warning，不阻断 |
 | asm 约束类型校验 | 约束与表达式类型不匹配（如 `"r"` 绑定浮点）仍为 W0005 warning；GCC 为 `impossible constraint` error |
