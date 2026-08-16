@@ -11855,9 +11855,12 @@ impl Codegen {
     }
 
     /// __builtin_* 系列内置函数 codegen: 返回 true 表示已处理
-    /// 语句上下文中未识别的 __builtin_*：warning + ud2
+    /// 语句上下文中未识别的 __builtin_*：按返回类型降级
     fn gen_unknown_builtin_stmt(&mut self, e: &Expr) -> bool {
-        let Expr::Call { callee, args, .. } = e else {
+        let Expr::Call {
+            callee, args, ty, ..
+        } = e
+        else {
             return false;
         };
         let Expr::Ident { name, .. } = callee.as_ref() else {
@@ -11870,10 +11873,15 @@ impl Codegen {
             return true;
         }
         eprintln!(
-            "warning: unsupported __builtin_ function '{}', emitted as ud2",
-            name.name
+            "warning: unsupported __builtin_ function '{}', emitted as {}",
+            name.name,
+            if matches!(ty, Type::Void) { "ud2" } else { "zero" }
         );
-        self.emit(&[0x0F, 0x0B]); // ud2
+        if matches!(ty, Type::Void) {
+            self.emit(&[0x0F, 0x0B]); // ud2
+        } else {
+            self.mov_imm(0, 0);
+        }
         true
     }
 

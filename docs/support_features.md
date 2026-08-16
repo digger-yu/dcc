@@ -87,7 +87,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | Builtin | 实现 |
 |---------|------|
 | `__builtin_constant_p` / inline 属性 | `tests/fixtures/c/constp.c`、`tests/fixtures/c/inline.c` |
-| 未知 `__builtin_*` ud2 | void → ud2，其余 → 零值 + warning |
+| 未知 `__builtin_*` 降级 | 表达式/语句上下文均按返回类型处理：void → ud2，其余 → 零值 + warning |
 | `__builtin_va_start/end/copy/arg` | SysV va_list 结构（r13 帧链 + 24 字节槽） |
 | `__builtin_strcasecmp` / `strncasecmp` | 转发到 libc |
 | `__builtin_fma` / `fmaf` / `fmal` | 调 libm 对应函数 |

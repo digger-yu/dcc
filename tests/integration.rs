@@ -3892,17 +3892,22 @@ fn unknown_builtin_warning_zero_and_ud2() {
     let _ = fs::remove_file(source_path);
     assert!(output.status.success(), "stderr: {stderr}");
     assert!(
-        stderr.contains("unsupported __builtin_"),
-        "expected warning for unknown builtin: {stderr}"
+        stderr.contains("unsupported __builtin_") && stderr.contains("emitted as zero"),
+        "expected zero fallback warning for unknown non-void builtin: {stderr}"
+    );
+    assert!(
+        stderr.contains("unsupported __builtin_") && stderr.contains("emitted as ud2"),
+        "expected ud2 fallback warning for unknown void builtin: {stderr}"
     );
     let disasm = Command::new("objdump")
         .args(["-d", object_path.to_str().unwrap()])
         .output()
         .expect("objdump");
     let text = String::from_utf8_lossy(&disasm.stdout);
-    assert!(
-        text.contains("ud2"),
-        "void unknown __builtin_ should emit ud2, disasm:\n{text}"
+    let ud2_count = text.matches("ud2").count();
+    assert_eq!(
+        ud2_count, 1,
+        "only void unknown __builtin_ should emit ud2, disasm:\n{text}"
     );
     let _ = fs::remove_file(object_path);
 }
