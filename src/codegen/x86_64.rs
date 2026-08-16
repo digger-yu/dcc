@@ -4965,7 +4965,13 @@ impl Codegen {
         match s {
             Stmt::Return { val, .. } => {
                 if let Some(e) = val {
-                    let ret_ty = e.ty();
+                    // 数组表达式在返回值上下文中衰减为指针
+                    // (int *f() { int a[4]; return a; } → 返回 &a)。
+                    // 若不衰减, 12B+ 数组会误走聚合按值返回路径 (读内容)。
+                    let ret_ty = match e.ty() {
+                        Type::Array(elem, _) => Type::Ptr(elem),
+                        t => t,
+                    };
                     let ret_sz = ret_ty.size();
                     // A1: 内存返回 (sret) — 聚合/长双精度整体写入 rdi 指向的缓冲区
                     if Self::needs_memory_return(&ret_ty) && self.current_sret_offset.is_some() {
@@ -5376,6 +5382,12 @@ impl Codegen {
             Expr::Int { v, .. } => self.mov_imm(dst, *v),
             Expr::Char { v, .. } => self.mov_imm(dst, *v as i128),
             Expr::Ident { name, ty, .. } => {
+                if matches!(ty, Type::Array(_, _)) {
+                    // 数组标识符在值上下文中衰减为首元素地址 (C 数组到指针
+                    // 转换): int *p = arr; / return arr; / x ? arr1 : arr2。
+                    // 此前直接 gen_expr 会误读 a[0] 的值 (mov 而非 lea)。
+                    return self.gen_expr_decay(e, dst);
+                }
                 if matches!(ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
                     // 函数名作为值: 退化为函数地址
                     self.emit_func_addr(dst, &name.name);

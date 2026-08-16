@@ -6429,6 +6429,57 @@ int main(void) {
     assert_eq!(rc, 0, "incdec memory lvalue runtime mismatch, rc = {rc}");
 }
 
+/// 数组到指针衰减 (array-to-pointer decay) 回归: 值上下文中数组标识符
+/// 必须衰减为首元素地址, 而非读取 a[0] 的值。
+/// 覆盖: 局部/全局/static 数组初始化、函数实参、条件表达式、字符串、
+/// 以及 8B/16B 数组作为指针函数返回值 (16B 走聚合路径需显式衰减)。
+#[test]
+fn array_decay_value_contexts() {
+    let src = "\
+int g[2] = {10, 20};
+static int arr_static[2] = {7, 8};
+int *return_global(void) { return g; }
+int *return_local8(void) { int a[2] = {5, 6}; return a; }
+int *return_local16(void) { int a[4] = {7, 8, 9, 10}; return a; }
+int use_arr(int *p) { return p[0]; }
+int main(void) {
+    // 局部数组初始化衰减
+    int a[3] = {1, 2, 3};
+    int *q = a;
+    if (q != a) return 1;
+    // 全局数组初始化衰减
+    int *p = g;
+    if (p != g) return 2;
+    // 全局数组作为函数实参 (隐式衰减)
+    if (use_arr(g) != 10) return 3;
+    // 字符串字面量初始化
+    char *s = \"hi\";
+    if (s[0] != 'h' || s[1] != 'i') return 4;
+    // 函数返回数组地址 (8B 数组, 走标量返回路径)
+    if (return_global() != g) return 5;
+    if (*return_local8() != 5) return 6;
+    // 16B 数组返回: 必须衰减为指针, 不能按聚合值返回 (读内容)
+    if (*return_local16() != 7) return 7;
+    // static 数组初始化衰减
+    int *sp = arr_static;
+    if (sp != arr_static) return 8;
+    // 条件表达式中数组衰减
+    int *c = 1 ? g : a;
+    if (c != g) return 9;
+    return 0;
+}
+";
+    let (out, exe) = run_compile_and_run("array-decay", src);
+    assert!(
+        out.status.success(),
+        "array decay compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "array decay runtime mismatch, rc = {rc}");
+}
+
 /// P2.1: C++ `obj.*ptr_to_member` 和 `obj->*ptr_to_member` 解析
 /// + codegen (Section 6). 验证 dcc 解析器接受 `.*` 单 token
 ///   (lexer 产生 TokKind::DotStar) 和 `->*` (`->` + `*` 两 token),
