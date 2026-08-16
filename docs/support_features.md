@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-10 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
+> 最后更新：2026-08-16 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -43,9 +43,9 @@
 | GCOV | `-ftest-coverage` / `-fprofile-arcs`；`.gcno` notes + `.gcda` data 二进制（与 GCC gcov-9 layout 对齐）；`cfg_checksum` 采用 GCC libgcov 公式；显式 little-endian 字节序 (跨架构兼容)；`read_notes()` / `read_data()` 读取器解析 .gcno/.gcda；行级覆盖率报告 `GcovReport` + `to_text()` 文本输出 |
 | AutoFDO | `-fauto-profile=` / `-fprofile-sample-use=`；text parser + inline calls 链解析 + `bucketize` 按阈值分 Hot/Warm/Cold + `merge` 合并 + `summary` 统计 + roundtrip 序列化；二进制格式 `write_binary`/`read_binary` (magic "AFDO" + version 2) + discriminator 支持 (`disc` 记录 + `discriminators_for` 查询) + 自动检测文本/二进制；通过 `ProfileWeights` 聚合，hot 函数下沉到 `.text.hot` 段 |
 | LBR | `-flbr-profile=`；解析 `perf script -F brstack` 文本 (含 mispredict/cycles 解析) + inbound/outbound 边查询 + `mispred_rate` 错误预测率 + `merge` 合并 + `summary` 统计 + `serialize` 文本输出；perf.data 二进制 LBR 记录解析 (`read_perf_data_binary` + PERF_RECORD_SAMPLE branch_stack) + 自动检测文本/二进制；通过 `ProfileWeights` 聚合 |
-| MemProf | `-fmemory-profile` / `-fmemory-profile-use=`；text parser + `AllocClass` 分类 (Hot/Normal/Cold/Ephemeral) + lifetime 分析 + `dealloc` 解析 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；二进制格式 `write_binary`/`read_binary` (.memprofdata magic "MEMPROFD") + 自动检测文本/二进制；malloc 插桩 `MemProfInstrumentor` (`__dcc_memprof_alloc_record`/`__dcc_memprof_free_record`) + runtime 库 `MemProfRuntime` (C stub 生成)；冷分配栈对应函数下沉到 `.text.unlikely` 段 |
+| MemProf | `-fmemory-profile` / `-fmemory-profile-use=`；text parser + `AllocClass` 分类 (Hot/Normal/Cold/Ephemeral) + lifetime 分析 + `dealloc` 解析 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；二进制格式 `write_binary`/`read_binary` (.memprofdata magic "MEMPROFD") + 自动检测文本/二进制；malloc 插桩 `MemProfInstrumentor` (`__dcc_memprof_alloc_record`/`__dcc_memprof_free_record`)；冷分配栈对应函数下沉到 `.text.unlikely` 段 |
 | Perf 事件 / TopdownL1 | `-ftopdownmetrics`；`TopdownL1` 四槽枚举 + `TopdownL2` 八子分类展开 + `perf stat` 文本解析 + `topdown_percentages()` + `primary_bottleneck()` 瓶颈诊断 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；`PerfDataFile` 读 Linux `perf.data` v2 二进制 (magic "PERFILE2" + header + event attrs) + `parse_samples` 解析 PERF_RECORD_SAMPLE (ip/pid/tid/time/period) + `correlate_events` 样本关联到 event attr + `aggregate_by_ip` IP 聚合 |
-| Offloading | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=`；`OffloadConfig` 全形式解析；`OffloadSection` 二进制序列化；codegen 全 arch 输出 `.dcc.offload` ELF 节 + device codegen (PTX/AMDGCN)；`OffloadRuntimeLoader` 读 `.dcc.offload` 节 + kernel launch 接口 + runtime 可用性检查 + 诊断输出；`OffloadDriverLinker` CUDA/ROCm driver 链接实装: runtime 库解析 (libcudart.so/libamdhip64.so 搜索标准路径 + 环境变量) + host link flags (-L/-l/-Wl,-rpath) + device link commands (nvcc -cubin / clang++ --cuda-device-only) + fat binary 描述 + link script 生成 |
+| Offloading metadata / driver link | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=`；`OffloadConfig` 全形式解析；`OffloadSection` 二进制序列化；全 arch 输出 `.dcc.offload` ELF 节；`OffloadRuntimeLoader` 可读取 `.dcc.offload` 并暴露 kernel launch 诊断接口；`OffloadDriverLinker` 生成 CUDA/ROCm host link flags、device link commands、fat binary 描述与 link script |
 | 跨源权重聚合 | `ProfileWeights` 聚合 4 源 PGO/AutoFDO/LBR/MemProf，输出统一 hot/cold func 集合；`FuncDecl.is_hot` 控制 `.text.hot` / `.text.unlikely` 段切换 |
 
 CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile=file` / `-flbr-profile=file` / `-ftest-coverage` / `-fprofile-arcs` / `-ftopdownmetrics` / `-fmemory-profile` / `-fopenmp` / `-fcuda` / `-fhip` / `-fopenmp-targets=triple,...` / `--offload-arch=triple`。
@@ -135,7 +135,8 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm `%0` 约束 `"i"` 展开 | 带 `$` 前缀的 AT&T 立即数 |
 | asm 模板修饰符 `%a` / `%P` / `%l` | `%aN`/`%a[name]`: 地址形式 (寄存器同名, 立即数/内存去前缀); `%PN`/`%P[name]`: 原始符号名 (去 % / $ 前缀); `%lN`/`%l[name]`: asm goto 标签名 (边界安全多位索引); 立即数含运算符时自动加括号保护优先级 |
 | Mini x86 asm 局部/C 标签 | `N:` / `N:insn` / `found:` |
-| Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`sysenter`/`sysexit` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`) |
+| Mini x86 asm Linux legacy aliases | `cmpxchg8b` / `pushfl` / `popfl` / `iret` / `iretl` / 全条件码 `cmov*`（含宽度后缀别名）/ 裸 `in`/`out` / memory-indirect port / `shldw` / `shrdw` / 裸段前缀已覆盖；`tests/integration.rs` 固化不再降级为 nop |
+| Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg`/`cmpxchg8b` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`iret`/`iretl`/`iretq`/`sysenter`/`sysexit` / `pushf`/`pushfl`/`pushfq`/`popf`/`popfl`/`popfq` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`) |
 | SSE mov / SSE arith | xmm-xmm, mem-xmm, xmm-mem, SegMem 变体完整支持 |
 | mini-asm SIMD 扩展 | VEX/EVEX 前缀 + AVX/AVX2/AVX-512 + SSE3–4.2 + AES-NI/SHA + FMA/F16C + TSX + AMX + AVX-VNNI；`pinsr*` / `pextr*` GPR + `tmm` / `ymm` / `zmm` / `k` 寄存器 |
 | mini-asm 扩展操作数形式 | `rdrand`/`rdseed` 内存操作数；`ljmp`/`lcall` 间接内存 + `$off,$seg` 反序；`xbegin` rel32 + `xabort` 符号；AES-NI/SHA/pshuf*/palignr/pblendw/insertps/pshufw 内存源；`vextractps`/`vextractpd` 内存目标 |
@@ -169,8 +170,8 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 架构 | 状态 | 说明 |
 |------|------|------|
 | x86_64 | ✅ 完整 | 主后端 |
-| aarch64 | ✅ 完整 | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 + 嵌套 sret (>16B 多层调用链) |
-| riscv64 | ✅ 完整 | 压缩指令 C 扩展 (自动 4→2 字节压缩优化: C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.LW/C.SW/C.LD/C.SD) + FP D 扩展双精度 + RVV 完整向量指令集 (宽化/窄化/掩码/浮点向量) + 特权指令/CSR + JAL 范围校验 + HFA 分类 |
+| aarch64 | ✅ 完整（compile/ELF 层） | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 + 嵌套 sret (>16B 多层调用链) |
+| riscv64 | ✅ 完整（compile/ELF 层） | 压缩指令 C 扩展 (自动 4→2 字节压缩优化: C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.LW/C.SW/C.LD/C.SD) + FP D 扩展双精度 + RVV 完整向量指令集 (宽化/窄化/掩码/浮点向量) + 特权指令/CSR + JAL 范围校验 + HFA 分类 |
 | mips | ✅ 完整 | ELF32, big-endian, MIPS32 O32 ABI; ET_EXEC 可执行 + ET_REL 可重定位; 分支回填 + 全局变量初始化 + 字符串字面量 (.rodata) + switch/do-while/break/continue |
 | mips64 | ✅ 完整 | ELF64, big-endian, MIPS64 N64 ABI; ET_EXEC 可执行 + ET_REL 可重定位; 64-bit LD/SD 指令 + 帧布局适配 |
 | arm | ✅ 完整 | ELF32, little-endian, ARM AAPCS; ET_EXEC 可执行 + ET_REL 可重定位; 分支回填 + 全局变量初始化 + 字符串字面量 (.rodata) + switch/do-while/break/continue |
