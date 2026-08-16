@@ -198,6 +198,8 @@ pub struct Codegen {
     disasm_calls: HashMap<u64, String>,
     disasm_data: HashMap<u64, String>,
     global_asm_exports: HashSet<String>,
+    asm_func_symbols: HashSet<String>,
+    asm_last_text_label: Option<(String, u64)>,
     func_asm_layout: HashMap<String, FuncAsmLayout>,
     pub source_name: String,
     pub parallel_codegen: bool,
@@ -1329,6 +1331,8 @@ impl Codegen {
             disasm_calls: HashMap::new(),
             disasm_data: HashMap::new(),
             global_asm_exports: HashSet::new(),
+            asm_func_symbols: HashSet::new(),
+            asm_last_text_label: None,
             func_asm_layout: HashMap::new(),
             asm_line_entries: Vec::new(),
             current_asm_line: 0,
@@ -3425,15 +3429,21 @@ impl Codegen {
         }
 
         // 函数定义符号 (包括嵌套函数)
-        for name in &self.global_asm_exports {
-            if let Some(&off) = self.labels.get(name) {
-                // 汇编 .globl 导出的函数: 计算 size, 否则 st_size=0
-                // 会让 objtool/内核链接脚本无法确定函数边界
+        let asm_func_names: std::collections::BTreeSet<String> = self
+            .asm_func_symbols
+            .iter()
+            .chain(self.global_asm_exports.iter())
+            .cloned()
+            .collect();
+        for name in asm_func_names {
+            if let Some(&off) = self.labels.get(&name) {
+                // 汇编 .type/@function 或 .globl 导出的函数: 计算 size,
+                // 否则 st_size=0 会让 objtool 无法确定函数边界。
                 let size = self
                     .func_sizes
-                    .get(name)
+                    .get(&name)
                     .copied()
-                    .unwrap_or_else(|| self.compute_func_size_fallback(name, off));
+                    .unwrap_or_else(|| self.compute_func_size_fallback(&name, off));
                 let (section, value) = self
                     .pushsection_code_ranges
                     .iter()
@@ -3442,15 +3452,24 @@ impl Codegen {
                         ((*sec_idx + 7) as u16, *sec_off + (off - *start))
                     })
                     .unwrap_or((1u16, off));
-                global_syms.push(ElfSym {
+                let sym = ElfSym {
                     name: name.clone(),
                     section,
                     value,
                     size,
-                    bind: STB_GLOBAL,
+                    bind: if self.global_asm_exports.contains(&name) {
+                        STB_GLOBAL
+                    } else {
+                        STB_LOCAL
+                    },
                     ty: STT_FUNC,
                     visibility: STV_DEFAULT,
-                });
+                };
+                if self.global_asm_exports.contains(&name) {
+                    global_syms.push(sym);
+                } else {
+                    local_syms.push(sym);
+                }
             }
         }
         for decl in &prog.decls {
@@ -4082,7 +4101,8 @@ impl Codegen {
             let dst_start = *sec_off as usize;
             let dst_end = dst_start + *emitted_size as usize;
             self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize].fill(0x90);
+            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
+                .fill(0x90);
         }
         // 可执行 pushsection (.fixup/.altinstr_replacement) 代码区间同样搬迁
         for (emitted_start, emitted_size, sec_idx, sec_off) in &self.pushsection_code_ranges {
@@ -4091,7 +4111,8 @@ impl Codegen {
             let dst_start = *sec_off as usize;
             let dst_end = dst_start + *emitted_size as usize;
             self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize].fill(0x90);
+            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
+                .fill(0x90);
         }
         self.finalize_func_asm_layout(prog, &custom_func_ranges);
     }
@@ -15430,6 +15451,9 @@ impl Codegen {
     /// 发射已替换操作数后的 asm 模板行（含 GNU 局部数字标签）
     fn emit_resolved_asm_lines(&mut self, resolved_lines: &[String], is_global: bool) {
         let locals = AsmLocalLabels::scan(resolved_lines);
+        if is_global {
+            self.asm_last_text_label = None;
+        }
         // Track .pushsection/.popsection: collect data into custom sections
         // (e.g. .altinstructions, __bug_table, __ex_table, .fixup).
         let mut skip_depth: u32 = 0;
@@ -15496,12 +15520,15 @@ impl Codegen {
                     // 标签与跳转在 .text 坐标解析, 退出时整体搬迁.
                     if trimmed.starts_with(".globl ") || trimmed.starts_with(".global ") {
                         if let Some(sym) = trimmed.split_whitespace().nth(1) {
-                            self.global_asm_exports
-                                .insert(sym.trim_end_matches(',').to_string());
+                            self.global_asm_exports.insert(Self::asm_symbol_name(sym));
                         }
                         continue;
                     }
-                    if trimmed.starts_with(".size ") {
+                    if trimmed.split_whitespace().next() == Some(".type") {
+                        self.record_asm_type_directive(trimmed);
+                        continue;
+                    }
+                    if trimmed.split_whitespace().next() == Some(".size") {
                         self.record_asm_size_directive(trimmed);
                         continue;
                     }
@@ -15511,6 +15538,9 @@ impl Codegen {
                     }
                     if let Some(label) = Self::parse_asm_named_label(trimmed) {
                         self.label(label);
+                        if is_global {
+                            self.record_asm_text_label(label);
+                        }
                         let has_body = trimmed
                             .split_once(':')
                             .map(|(_, rest)| !rest.trim().is_empty())
@@ -15570,17 +15600,24 @@ impl Codegen {
                 && (trimmed.starts_with(".globl ") || trimmed.starts_with(".global "))
             {
                 if let Some(sym) = trimmed.split_whitespace().nth(1) {
-                    self.global_asm_exports.insert(sym.trim_end_matches(',').to_string());
+                    self.global_asm_exports.insert(Self::asm_symbol_name(sym));
                 }
                 continue;
             }
-            if !self.emit_asm_text && trimmed.starts_with(".size ") {
+            if !self.emit_asm_text && trimmed.split_whitespace().next() == Some(".type") {
+                self.record_asm_type_directive(trimmed);
+                continue;
+            }
+            if !self.emit_asm_text && trimmed.split_whitespace().next() == Some(".size") {
                 self.record_asm_size_directive(trimmed);
                 continue;
             }
             // 命名标签 foo:（含 . 局部标签如 .slowpath:，排除 directive）
             if let Some(label) = Self::parse_asm_named_label(trimmed) {
                 self.label(label);
+                if is_global {
+                    self.record_asm_text_label(label);
+                }
                 continue;
             }
             if self.emit_asm_text && trimmed.starts_with('.') {
@@ -15589,6 +15626,9 @@ impl Codegen {
             let subbed = locals.substitute(trimmed, i);
             self.current_asm_line = i + 1;
             self.emit_asm_line(&subbed);
+        }
+        if is_global && !self.emit_asm_text {
+            self.finish_pending_empty_asm_function();
         }
     }
 
@@ -16317,22 +16357,65 @@ impl Codegen {
         Some(label)
     }
 
+    fn asm_symbol_name(raw: &str) -> String {
+        raw.trim()
+            .trim_end_matches(',')
+            .trim_matches('"')
+            .to_string()
+    }
+
+    fn record_asm_type_directive(&mut self, line: &str) {
+        let rest = line.trim().strip_prefix(".type").unwrap_or("").trim();
+        let Some((name, ty)) = rest.split_once(',') else {
+            return;
+        };
+        let name = Self::asm_symbol_name(name);
+        if name.is_empty() || !ty.contains("function") {
+            return;
+        }
+        self.asm_func_symbols.insert(name);
+    }
+
+    fn asm_symbol_is_function(&self, name: &str) -> bool {
+        self.asm_func_symbols.contains(name) || self.global_asm_exports.contains(name)
+    }
+
+    fn record_asm_text_label(&mut self, label: &str) {
+        self.asm_last_text_label = Some((label.to_string(), self.pos()));
+    }
+
+    fn finish_empty_asm_function(&mut self, name: &str, start: u64) {
+        if self.pos() != start || !self.asm_symbol_is_function(name) {
+            return;
+        }
+        self.emit(&[0xC3]);
+        self.func_sizes.insert(name.to_string(), 1);
+    }
+
+    fn finish_pending_empty_asm_function(&mut self) {
+        let Some((name, start)) = self.asm_last_text_label.clone() else {
+            return;
+        };
+        if self.func_sizes.contains_key(&name) {
+            return;
+        }
+        self.finish_empty_asm_function(&name, start);
+    }
+
     fn record_asm_size_directive(&mut self, line: &str) {
         let rest = line.trim().strip_prefix(".size").unwrap_or("").trim();
         let Some((name, expr)) = rest.split_once(',') else {
             return;
         };
-        let name = name.trim();
-        let expr = expr.trim();
-        let Some(base) = expr.strip_prefix(". - ").map(str::trim) else {
-            return;
-        };
-        if base != name {
+        let name = Self::asm_symbol_name(name);
+        let expr = expr.trim().replace(' ', "");
+        if expr != format!(".-{name}") {
             return;
         }
-        if let Some(&start) = self.labels.get(name) {
+        if let Some(&start) = self.labels.get(&name) {
+            self.finish_empty_asm_function(&name, start);
             self.func_sizes
-                .insert(name.to_string(), self.pos().saturating_sub(start));
+                .insert(name.clone(), self.pos().saturating_sub(start));
         }
     }
 

@@ -3063,6 +3063,44 @@ fn func_symbol_size_non_zero_for_defined_functions() {
     let _ = std::fs::remove_file(&obj_path);
 }
 
+/// 空的 asm 函数符号也必须有可定位的起始指令。
+#[test]
+fn asm_empty_function_symbol_gets_starting_instruction() {
+    let source = r#"
+asm(".type _context_unsafe_alias, @function\n"
+    "_context_unsafe_alias:\n"
+    ".size _context_unsafe_alias, .-_context_unsafe_alias\n"
+    ".type empty_inline_alias, @function\n"
+    "empty_inline_alias:\n");
+"#;
+    let (output, obj_path) = run_object_test("asm-empty-func-symbol", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+
+    let obj_data = std::fs::read(&obj_path).expect("read object file");
+    let funcs = elf64_func_symbols(&obj_data);
+    let names: std::collections::HashMap<String, u64> =
+        funcs.iter().map(|(n, _, s)| (n.clone(), *s)).collect();
+    for want in ["_context_unsafe_alias", "empty_inline_alias"] {
+        let sz = names
+            .get(want)
+            .unwrap_or_else(|| panic!("missing STT_FUNC symbol {want}"));
+        assert_eq!(*sz, 1, "empty asm function {want} should be a ret");
+    }
+    let dump = Command::new("objdump")
+        .args(["-d"])
+        .arg(&obj_path)
+        .output()
+        .expect("objdump");
+    assert!(dump.status.success(), "objdump -d failed");
+    let disasm = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        disasm.contains("<_context_unsafe_alias>:") && disasm.contains("ret"),
+        "empty asm function must disassemble to a real instruction: {disasm}"
+    );
+    let _ = std::fs::remove_file(&obj_path);
+}
+
 /// mini-asm 扩展：bts/btr/btc/bsf/bsr/popcnt/bswap/movnt/lock/rep/伪指令
 #[test]
 fn asm_extended_compiles_without_nop_fallback() {
