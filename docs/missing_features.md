@@ -61,7 +61,7 @@
 
 | 通道 | 已知遗留 |
 |------|----------|
-| HWASAN (`-fsanitize=hwaddress`) | 软件 tag 模式完整；AArch64 MTE 硬件 tag 待集成到 prologue tag 栈帧 + 指针 tag 流程 |
+| ~~HWASAN (`-fsanitize=hwaddress`)~~ | ✅ 软件 tag 模式完整；AArch64 MTE 硬件 tag 已集成: prologue tag 栈帧 (IRG/ADDG/STG 逐 granule 打 tag) + 指针 tag 流程 (sp 携带本帧随机 tag, 局部地址自动继承; 调用点 untag/retag, epilogue 恢复 x19 并清除 tag) |
 
 ## 性能分析子系统遗留
 

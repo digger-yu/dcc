@@ -583,14 +583,25 @@ CLI 解析：`SanitizerFlags::from_args` 支持
 宿主链接时 `-fsanitize=kernel-address` / `kernel-hwaddress` 不透传
 `-fsanitize=address` / `-fsanitize=hwaddress`（内核运行时自提供）。
 
+AArch64 MTE 硬件 tag 模式（`-fsanitize=hwaddress` + `--target aarch64-*`）：
+codegen 级 `Aarch64Codegen` 在函数 prologue 发射 tag 栈帧：
+`sub sp` → `irg x16, sp`（随机 tag）→ `addg sp, x16, #0, #0`（sp 携带本帧 tag，
+局部地址经 `mov_x_reg_sp_off`/`[sp,#off]` 自动继承该 tag，即指针 tag 流程）
+→ 逐 16B granule `stg x16, [sp, #off]` 写入 tag → `str x19` 保存入参
+callee-saved x19 → `x19 = 带 tag 帧基址`。每个调用点（直接调用 / TLSDESC
+blr）先 `and sp, x19, #mask` 清除 tag 再进入外部代码，返回后
+`mov sp, x19` 恢复；epilogue 恢复 x19 并 `and sp, sp, #mask` 清 tag 后释放帧。
+MTE 指令编码按 ARMv8.5-A 规范（与 LLVM `armv8.5a-mte.s` 已知编码逐字节对齐）。
+
 已知遗留：
-- HWASAN AArch64 MTE 硬件 tag 模式（prologue tag 栈帧 + 指针 tag 流程）
-  未接入，软件 tag 模式完整。
+- 无（HWASAN 软件 tag 模式 + AArch64 MTE 硬件 tag 模式均已接入）。
 
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
 `kasan_stack_redzone_poison_unpoison`、`kasan_global_redzone_padding`、
 `kernel_kasan_inline_shadow_report_emitted`、`kcsan_with_kasan_emits_both_checks`、
 `kasan_store_check_on_postinc_deref_emitted`、`incdec_memory_lvalue_runtime`、
+`mte_emitter_encodings_match_arm_spec`、`hwasan_mte_prologue_emits_tag_frame`、
+`hwasan_mte_call_site_untag_retag`、`no_mte_no_tag_instructions`、
 46 个 `sanitizer::tests` 单元测试。
 
 ## C 前端扩展语法（`src/parser.rs` + `src/preproc.rs`）

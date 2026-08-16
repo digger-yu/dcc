@@ -779,6 +779,9 @@ pub fn emit(
         crate::cli::Arch::AArch64 => {
             let mut cg = aarch64::Aarch64Codegen::new(target.clone(), relocatable || emit_asm);
             cg.set_source_name(source_name);
+            // HWASAN (-fsanitize=hwaddress) 在 AArch64 上启用 MTE 硬件 tag:
+            // prologue tag 栈帧 + 指针 tag 流程由后端直接发射 IRG/ADDG/STG。
+            cg.set_mte_enabled(sanitizers.hwasan);
             if emit_asm {
                 cg.compile(module);
                 return cg.build_asm_output(module).into_bytes();

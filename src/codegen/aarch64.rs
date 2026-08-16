@@ -62,6 +62,8 @@ pub struct Aarch64Codegen {
     mte_enabled: bool,
     /// MTE: 当前函数的 tag 栈帧大小
     tag_frame_size: i32,
+    /// MTE: 帧内保存入参 x19 (callee-saved) 的槽位偏移, 0 表示未启用
+    mte_save_off: i32,
     /// 嵌套 sret: 保存的入参 sret 指针栈偏移 (函数返回 >16B 聚合时有效)
     saved_sret_ptr: Option<i32>,
     /// TLS 全局全局变量集合 (名称 -> 偏移), 用于 load_global_addr_w0 分发 TLS 访问序列
@@ -115,6 +117,7 @@ impl Aarch64Codegen {
             va_flt_offs: 0,
             mte_enabled: false,
             tag_frame_size: 0,
+            mte_save_off: 0,
             saved_sret_ptr: None,
             tls_globals: HashMap::new(),
             raw_global_asm_lines: Vec::new(),
@@ -125,6 +128,29 @@ impl Aarch64Codegen {
 
     pub fn set_source_name(&mut self, name: impl Into<String>) {
         self.source_name = name.into();
+    }
+
+    /// 启用/禁用 AArch64 MTE 硬件 tag (HWASAN 栈帧 tag 模式)。
+    /// 由 `-fsanitize=hwaddress` 在 AArch64 目标上触发。
+    pub fn set_mte_enabled(&mut self, on: bool) {
+        self.mte_enabled = on;
+    }
+
+    /// MTE 调用点前缀: 调用外部 (非 MTE) 代码前清除 sp 的 tag。
+    /// `and sp, x19, #0x00ffffffffffffff` (x19 = 本帧带 tag 的帧基址)
+    fn mte_untag_sp_for_call(&mut self) {
+        self.emit(&0x9280de7fu32.to_le_bytes());
+    }
+
+    /// MTE 调用点后缀: 调用返回后恢复本帧 tag。
+    /// `add sp, x19, #0` (mov sp, x19)
+    fn mte_retag_sp_after_call(&mut self) {
+        self.emit(&0x9100027fu32.to_le_bytes());
+    }
+
+    /// 当前函数是否需要 MTE tag 栈帧 (prologue 打 tag / 调用点 untag-retag)。
+    fn mte_active(&self) -> bool {
+        self.mte_enabled && self.frame_bytes > 0
     }
 
     pub fn push_extra_section(&mut self, sec: ElfSection) {
@@ -513,9 +539,35 @@ impl Aarch64Codegen {
         } else {
             self.va_save_base_off = 0;
         }
+        // MTE (HWASAN 硬件 tag): 为 callee-saved x19 预留槽位, 该槽位计入帧内,
+        // 因此只要函数有栈内容 (局部/变参保存区) 就会产生可打 tag 的帧。
+        if self.mte_enabled && self.stack_bytes > 0 {
+            self.mte_save_off = self.alloc_local("<mte_x19_save>", 8);
+        } else {
+            self.mte_save_off = 0;
+        }
         self.frame_bytes = (self.stack_bytes + 15) & !15;
         if self.frame_bytes > 0 {
             self.sub_sp_imm(self.frame_bytes as u32);
+        }
+        // MTE (HWASAN 硬件 tag): prologue tag 栈帧 + 指针 tag 流程。
+        //   1) irg  x16, sp          : 随机 tag 写入 x16 (地址不变)
+        //   2) addg sp, x16, #0, #0  : sp 携带本帧随机 tag, 由 sp 派生的所有
+        //      局部地址 (mov_x_reg_sp_off / [sp,#off]) 自动继承该 tag
+        //   3) stg  x16, [sp, #g*16] : 为每个 16B tag granule 写入本帧 tag,
+        //      使带 tag 的 sp 访问通过硬件 tag 检查 (STG 本身是 unchecked access)
+        //   4) str  x19, [sp, #off]  : 保存入参 x19 (本函数占用 callee-saved 需归还)
+        //   5) add  x19, sp, #0      : x19 = 带 tag 的帧基址, 供调用点 untag/retag
+        if self.mte_active() {
+            self.tag_frame_size = self.frame_bytes;
+            self.emit_irg(16, 31); // irg x16, sp
+            self.emit_addg(31, 16, 0, 0); // addg sp, x16, #0, #0
+            let granules = (self.frame_bytes as u32) / 16;
+            for g in 0..granules {
+                self.emit_stg(16, 31, g); // stg x16, [sp, #g*16]
+            }
+            self.str_xt_sp(19, self.mte_save_off); // str x19, [sp, #mte_save_off]
+            self.emit_add_imm_x(19, 31, 0); // add x19, sp, #0 (mov x19, sp)
         }
         // 在帧建立后保存 sret 指针 (必须在 sub_sp 之后, 因为此时 sp 才稳定)
         if returns_large_agg {
@@ -1600,7 +1652,14 @@ impl Aarch64Codegen {
     }
 
     fn ret(&mut self) {
-        if self.frame_bytes > 0 {
+        if self.mte_active() {
+            // MTE 收尾: 恢复入参 x19, 清除 sp 的 tag, 再释放帧。
+            // 返回时 sp 为 untagged, 调用方 (MTE 函数) 会通过其 x19 恢复自身 tag,
+            // 非 MTE 调用方 (_start / libc) 本就期望 untagged sp。
+            self.ldr_xt_sp(19, self.mte_save_off); // ldr x19, [sp, #mte_save_off]
+            self.emit(&0x9280dfffu32.to_le_bytes()); // and sp, sp, #0x00ffffffffffffff
+            self.add_sp_imm(self.frame_bytes as u32);
+        } else if self.frame_bytes > 0 {
             self.add_sp_imm(self.frame_bytes as u32);
         }
         self.emit(&[0xc0, 0x03, 0x5f, 0xd6]);
@@ -1620,6 +1679,12 @@ impl Aarch64Codegen {
     }
 
     fn emit_bl_to(&mut self, name: &str) {
+        // MTE 调用点: 调用前清除 sp 的 tag (外部非 MTE 代码按 untagged sp 运行),
+        // 返回后通过 x19 恢复本帧 tag, 保证后续 [sp,#off] 局部访问通过硬件检查。
+        let untag = self.mte_active();
+        if untag {
+            self.mte_untag_sp_for_call();
+        }
         if let Some(&target) = self.labels.get(name) {
             let pos = self.pos();
             self.emit_bl_placeholder();
@@ -1638,6 +1703,9 @@ impl Aarch64Codegen {
             let pos = self.pos();
             self.emit_bl_placeholder();
             self.pending_bl_calls.push((pos, name.to_string()));
+        }
+        if untag {
+            self.mte_retag_sp_after_call();
         }
     }
 
@@ -2284,8 +2352,14 @@ impl Aarch64Codegen {
             addend: 0,
         });
         // blr x1 (TLSDESC call)
+        if self.mte_active() {
+            self.mte_untag_sp_for_call();
+        }
         let insn_blr = 0xd63f0020u32; // blr x1
         self.emit(&insn_blr.to_le_bytes());
+        if self.mte_active() {
+            self.mte_retag_sp_after_call();
+        }
         // mrs x1, tpidr_el0
         let insn_mrs = 0xd53bd041u32; // mrs x1, tpidr_el0
         self.emit(&insn_mrs.to_le_bytes());
@@ -2346,8 +2420,14 @@ impl Aarch64Codegen {
             addend: 0,
         });
         // blr x1 (R_AARCH64_TLSDESC_CALL — marker for ld.so)
+        if self.mte_active() {
+            self.mte_untag_sp_for_call();
+        }
         let insn_blr = 0xd63f0020u32; // blr x1
         self.emit(&insn_blr.to_le_bytes());
+        if self.mte_active() {
+            self.mte_retag_sp_after_call();
+        }
         let blr_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
             offset: blr_pos,
@@ -2475,60 +2555,81 @@ impl Aarch64Codegen {
     }
 
     /// MTE: Generate Random Tag (IRG)
-    /// Generates a random tag and inserts it into the top byte of Xd
-    /// Encoding: 0x9AC03000 | (Rd) | (Rn << 5)
+    /// `irg xd, xn`: 保留 xn 的低 56 位地址, 把随机 Logical Address Tag 写入高字节.
+    /// 编码 (ARMv8.5 Data-processing 2 source with tags, Rm 固定为 XZR):
+    ///   `1 0 0 1 1 0 1 0 1 1 0 Rm 0 0 0 1 0 0 Rn Rd`
+    ///   = 0x9AC00000 | (Rm << 16) | (0b000100 << 10) | (Rn << 5) | Rd
+    /// 参考 LLVM armv8.5a-mte.s: irg x0, sp -> 0x9adf13e0
     pub fn emit_irg(&mut self, rd: u8, rn: u8) {
-        let insn = 0x9ac03000u32 | ((rd as u32) & 0x1f) | (((rn as u32) & 0x1f) << 5);
+        let insn = 0x9ac00000u32
+            | (0x1f << 16) // Rm = XZR (省略第二源操作数)
+            | (0b000100 << 10)
+            | (((rn as u32) & 0x1f) << 5)
+            | ((rd as u32) & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
-    /// MTE: Add Tag with Offset (ADDG)
-    /// Adds offset to tag address, creating new tagged pointer
-    /// Encoding: 0x9AC01000 | (Rd) | (Rn << 5) | (offset << 10)
-    pub fn emit_addg(&mut self, rd: u8, rn: u8, offset: u32) {
-        let insn = 0x9ac01000u32 
-            | ((rd as u32) & 0x1f) 
+    /// MTE: Add with Tag (ADDG)
+    /// `addg xd, xn, #uimm6, #uimm4`: 地址加 uimm6*16, tag 加 uimm4.
+    /// 编码 (Add/subtract with tags):
+    ///   `1 0 0 1 0 0 0 1 1 0 imm6 (0)(0) imm4 Rn Rd`
+    ///   = 0x91800000 | (imm6 << 16) | (imm4 << 10) | (Rn << 5) | Rd
+    /// 参考 LLVM armv8.5a-mte.s: addg sp, x2, #32, #3 -> 0x91820c5f
+    pub fn emit_addg(&mut self, rd: u8, rn: u8, imm6: u32, imm4: u32) {
+        let insn = 0x91800000u32
+            | ((imm6 & 0x3f) << 16)
+            | ((imm4 & 0xf) << 10)
             | (((rn as u32) & 0x1f) << 5)
-            | ((offset & 0xff) << 10);
+            | ((rd as u32) & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
-    /// MTE: Subtract Tag with Offset (SUBG)
-    /// Subtracts offset from tag address
-    /// Encoding: 0x9AC01800 | (Rd) | (Rn << 5) | (offset << 10)
-    pub fn emit_subg(&mut self, rd: u8, rn: u8, offset: u32) {
-        let insn = 0x9ac01800u32 
-            | ((rd as u32) & 0x1f) 
+    /// MTE: Subtract with Tag (SUBG)
+    /// `subg xd, xn, #uimm6, #uimm4`: 地址减 uimm6*16, tag 减 uimm4.
+    /// 编码: 与 ADDG 相同但 bit30 置位
+    ///   = 0xD1800000 | (imm6 << 16) | (imm4 << 10) | (Rn << 5) | Rd
+    /// 参考 LLVM armv8.5a-mte.s: subg x0, x1, #0, #1 -> 0xd1800420
+    pub fn emit_subg(&mut self, rd: u8, rn: u8, imm6: u32, imm4: u32) {
+        let insn = 0xd1800000u32
+            | ((imm6 & 0x3f) << 16)
+            | ((imm4 & 0xf) << 10)
             | (((rn as u32) & 0x1f) << 5)
-            | ((offset & 0xff) << 10);
+            | ((rd as u32) & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
-    /// MTE: Store Tag (STG)
-    /// Stores tag from Xt to memory at [Xn, #offset]
-    /// Encoding: 0xD9200000 | (Rt) | (Rn << 5) | (offset << 10)
-    pub fn emit_stg(&mut self, rt: u8, rn: u8, offset: u32) {
-        let insn = 0xd9200000u32 
-            | ((rt as u32) & 0x1f) 
+    /// MTE: Store Allocation Tag (STG, signed-offset 形式)
+    /// `stg xt, [xn, #imm9*16]`: 把 xt 顶字节的 tag 写入 [xn+off] 所在 16B granule
+    /// 的 tag 内存. imm9 是有符号 granule 偏移 (乘 16, 范围 -256..255).
+    /// 编码 (Store tag, signed offset):
+    ///   `1 1 0 1 1 0 0 1 0 0 1 imm9 1 0 Rn Rt`
+    ///   = 0xD9200000 | (imm9 << 12) | (0b10 << 10) | (Rn << 5) | Rt
+    /// 参考 LLVM armv8.5a-mte.s: stg x3, [sp, #16] -> 0xd9201be3
+    pub fn emit_stg(&mut self, rt: u8, rn: u8, imm9: u32) {
+        let insn = 0xd9200000u32
+            | ((imm9 & 0x1ff) << 12)
+            | (0b10 << 10)
             | (((rn as u32) & 0x1f) << 5)
-            | ((offset & 0xff) << 10);
+            | ((rt as u32) & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
-    /// MTE: Load Tag (LDG)
-    /// Loads tag from memory at [Xn, #offset] into top byte of Xt
-    /// Encoding: 0xD9600000 | (Rt) | (Rn << 5) | (offset << 10)
-    pub fn emit_ldg(&mut self, rt: u8, rn: u8, offset: u32) {
-        let insn = 0xd9600000u32 
-            | ((rt as u32) & 0x1f) 
+    /// MTE: Load Allocation Tag (LDG, signed-offset 形式)
+    /// `ldg xt, [xn, #imm9*16]`: 读出 [xn+off] 所在 granule 的 tag, 合并进 xt 高字节.
+    /// 编码:
+    ///   `1 1 0 1 1 0 0 1 0 1 1 imm9 0 0 Rn Rt`
+    ///   = 0xD9600000 | (imm9 << 12) | (Rn << 5) | Rt
+    pub fn emit_ldg(&mut self, rt: u8, rn: u8, imm9: u32) {
+        let insn = 0xd9600000u32
+            | ((imm9 & 0x1ff) << 12)
             | (((rn as u32) & 0x1f) << 5)
-            | ((offset & 0xff) << 10);
+            | ((rt as u32) & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
     /// MTE: Set PSTATE.TCO (Tag Check Override)
-    /// Disables/enables tag checking
-    /// Encoding: 0xD500401F | (value << 3)
+    /// 注意: 当前编码对应 SPSel 选择器, 保留用于显式禁用 tag 检查的扩展点,
+    /// 未在 prologue tag 栈帧流程中使用.
     pub fn emit_settco(&mut self, value: bool) {
         let insn = 0xd500401fu32 | ((value as u32) << 3);
         self.emit(&insn.to_le_bytes());
@@ -3135,5 +3236,123 @@ mod tests {
             "tls_globals should contain another_tls"
         );
         assert_eq!(cg.tls_globals.len(), 2);
+    }
+
+    // HWASAN AArch64 MTE: 验证 IRG/ADDG/SUBG/STG/LDG 编码与 ARM 规范一致
+    // (参考 LLVM llvm/test/MC/AArch64/armv8.5a-mte.s 的已知编码)
+    #[test]
+    fn mte_emitter_encodings_match_arm_spec() {
+        let mut cg = Aarch64Codegen::new(
+            crate::target::Target::resolve(
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
+            ),
+            true,
+        );
+        cg.emit_irg(0, 1); // irg x0, x1 -> LLVM: [0x20,0x10,0xdf,0x9a]
+        cg.emit_irg(0, 31); // irg x0, sp -> LLVM: [0xe0,0x13,0xdf,0x9a]
+        cg.emit_irg(16, 31); // irg x16, sp
+        cg.emit_addg(0, 1, 0, 1); // addg x0, x1, #0, #1 -> LLVM: [0x20,0x04,0x80,0x91]
+        cg.emit_addg(31, 16, 0, 0); // addg sp, x16, #0, #0
+        cg.emit_subg(0, 1, 0, 1); // subg x0, x1, #0, #1 -> LLVM: [0x20,0x04,0x80,0xd1]
+        cg.emit_stg(3, 31, 1); // stg x3, [sp, #16] -> LLVM: [0xe3,0x1b,0x20,0xd9]
+        cg.emit_stg(16, 31, 0); // stg x16, [sp, #0]
+        cg.emit_ldg(0, 0, 0); // ldg x0, [x0]
+        let code = &cg.code;
+        let find = |bytes: [u8; 4]| {
+            code.windows(4)
+                .any(|w| w == &bytes)
+        };
+        assert!(find([0x20, 0x10, 0xdf, 0x9a]), "irg x0, x1");
+        assert!(find([0xe0, 0x13, 0xdf, 0x9a]), "irg x0, sp");
+        assert!(find([0xf0, 0x13, 0xdf, 0x9a]), "irg x16, sp");
+        assert!(find([0x20, 0x04, 0x80, 0x91]), "addg x0, x1, #0, #1");
+        assert!(find([0x1f, 0x02, 0x80, 0x91]), "addg sp, x16, #0, #0");
+        assert!(find([0x20, 0x04, 0x80, 0xd1]), "subg x0, x1, #0, #1");
+        assert!(find([0xe3, 0x1b, 0x20, 0xd9]), "stg x3, [sp, #16]");
+        assert!(find([0xf0, 0x0b, 0x20, 0xd9]), "stg x16, [sp, #0]");
+        assert!(find([0x00, 0x00, 0x60, 0xd9]), "ldg x0, [x0]");
+    }
+
+    // HWASAN AArch64 MTE: 验证 gen_function prologue 发射 tag 栈帧序列
+    // (irg + addg + stg*N + str x19 + mov x19,sp) 与 epilogue 的
+    // ldr x19 + and sp,sp,#mask + add sp 恢复序列
+    #[test]
+    fn hwasan_mte_prologue_emits_tag_frame() {
+        let (program, diags) = crate::parser::parse(
+            b"int main(void) { int a = 1; int b = 2; return a + b; }\n",
+            "mte.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let (module, _) = crate::ir::lower(program).expect("lower");
+        crate::ir::validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("aarch64-linux-gnu").expect("triple");
+        let mut cg = Aarch64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.set_mte_enabled(true);
+        cg.compile(&module);
+        let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == &bytes);
+        // prologue: irg x16, sp
+        assert!(find([0xf0, 0x13, 0xdf, 0x9a]), "prologue missing irg x16, sp");
+        // prologue: addg sp, x16, #0, #0
+        assert!(find([0x1f, 0x02, 0x80, 0x91]), "prologue missing addg sp, x16, #0, #0");
+        // prologue: stg x16, [sp, #0] 与 stg x16, [sp, #16] (帧 32B = 2 granule)
+        assert!(find([0xf0, 0x0b, 0x20, 0xd9]), "prologue missing stg x16, [sp, #0]");
+        assert!(find([0xf0, 0x1b, 0x20, 0xd9]), "prologue missing stg x16, [sp, #16]");
+        // prologue: str x19, [sp, #16] (保存入参 x19, 槽位 off=16)
+        assert!(find([0xf3, 0x0b, 0x00, 0xf9]), "prologue missing str x19, [sp, #16]");
+        // prologue: add x19, sp, #0 (mov x19, sp)
+        assert!(find([0xf3, 0x03, 0x00, 0x91]), "prologue missing add x19, sp, #0");
+        // epilogue: ldr x19, [sp, #16]
+        assert!(find([0xf3, 0x0b, 0x40, 0xf9]), "epilogue missing ldr x19, [sp, #16]");
+        // epilogue: and sp, sp, #0x00ffffffffffffff (untag)
+        assert!(find([0xff, 0xdf, 0x80, 0x92]), "epilogue missing and sp, sp, #mask");
+        // 记录 tag 栈帧大小
+        assert_eq!(cg.tag_frame_size, 32, "tag_frame_size should be frame size");
+    }
+
+    // HWASAN AArch64 MTE: 验证调用点对 sp 做 untag / retag,
+    // 使外部 (非 MTE) callee 以 untagged sp 运行, 返回后恢复本帧 tag
+    #[test]
+    fn hwasan_mte_call_site_untag_retag() {
+        let (program, diags) = crate::parser::parse(
+            b"extern int callee(int);\nint main(void) { int a = 5; return callee(a); }\n",
+            "mte2.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let (module, _) = crate::ir::lower(program).expect("lower");
+        crate::ir::validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("aarch64-linux-gnu").expect("triple");
+        let mut cg = Aarch64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.set_mte_enabled(true);
+        cg.compile(&module);
+        // 调用点前缀: and sp, x19, #0x00ffffffffffffff
+        assert!(
+            cg.code.windows(4).any(|w| w == &[0x7f, 0xde, 0x80, 0x92]),
+            "call site missing and sp, x19, #mask"
+        );
+        // 调用点后缀: add sp, x19, #0 (mov sp, x19)
+        assert!(
+            cg.code.windows(4).any(|w| w == &[0x7f, 0x02, 0x00, 0x91]),
+            "call site missing add sp, x19, #0"
+        );
+    }
+
+    // HWASAN AArch64 MTE: 未启用 hwasan 时不得发射任何 MTE tag 指令
+    #[test]
+    fn no_mte_no_tag_instructions() {
+        let (program, diags) = crate::parser::parse(
+            b"int main(void) { int a = 1; int b = 2; return a + b; }\n",
+            "nomte.c",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let (module, _) = crate::ir::lower(program).expect("lower");
+        crate::ir::validate(&module).expect("validate");
+        let triple = crate::cli::TargetTriple::parse("aarch64-linux-gnu").expect("triple");
+        let mut cg = Aarch64Codegen::new(crate::target::Target::resolve(&triple), true);
+        cg.compile(&module);
+        let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == &bytes);
+        assert!(!find([0xf0, 0x13, 0xdf, 0x9a]), "unexpected irg x16, sp");
+        assert!(!find([0xf0, 0x0b, 0x20, 0xd9]), "unexpected stg");
+        assert!(!find([0xff, 0xdf, 0x80, 0x92]), "unexpected and sp, sp, #mask");
+        assert_eq!(cg.tag_frame_size, 0, "tag_frame_size should stay 0 without MTE");
     }
 }

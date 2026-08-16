@@ -113,7 +113,7 @@
 | 取值 | 状态 |
 |------|------|
 | `address` / `kernel-address` | KASAN 桩（TU init + load/store 通道） |
-| `hwaddress` | HWASAN 桩（共享 KASAN 路径，ARM MTE 未做） |
+| `hwaddress` | HWASAN 桩（共享 KASAN 路径）；AArch64 目标上启用 MTE 硬件 tag 模式（prologue tag 栈帧 + 指针 tag 流程） |
 | `undefined` | UBSAN 桩（div / shift / 有符号 overflow / null deref / float cast / VLA bound） |
 | `thread` / `kernel-thread` / `kernel-kcsan` | KCSAN 桩（每函数 entry，专用 `__kcsan_check_access`） |
 | `fuzzer` | KCOV + cmp/switch 追踪 |
@@ -369,7 +369,7 @@ ABI 接受 `gnu` / `musl` / `eabi` / `eabihf` / `msvc` / `darwin`。
 
 | 范围 | 限制 | 跟踪 |
 |------|------|------|
-| 后端 | ARM MTE 标签插入未完全集成 | AArch64 MTE 指令已实现 (IRG/ADDG/SUBG/STG/LDG/SETTCO)，待集成到 sanitizer 流程 |
+| 后端 | ARM MTE 标签插入已完整集成 | AArch64 MTE 指令 (IRG/ADDG/SUBG/STG/LDG) + prologue tag 栈帧 + 调用点/收尾 untag-retag 已接入 HWASAN 流程 |
 | 后端 | 浮点变参（v0–7 / fa0–fa7）未保存，stub 返回 0.0 | unimplemented §11 |
 | 后端 | 栈溢出变参（>8 个）未实装，返回 0 + 警告 | unimplemented §11 |
 | C++ | `obj.*ptr_to_member` 多文件链接可能触发重复定义 | lower.rs#L1653 生成完整函数定义，但每个 TU 都会 emit |
