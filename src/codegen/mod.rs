@@ -11,7 +11,7 @@ pub mod riscv64;
 pub mod x86_64;
 
 use crate::ast::{Block, BlockItem, Decl, Designator, Expr, InitItem, Program, Stmt, Type};
-use crate::const_eval;
+use crate::const_eval::{self, ConstValue};
 use crate::debug;
 use crate::diagnostics::{Diagnostic, Span};
 use crate::ir::Module;
@@ -502,7 +502,7 @@ fn constraint_allows_type(
 
     let selected = asm_pick_sub_constraint(core, is_inout);
     if selected == "i" && asm_constraint_is_immediate(core) {
-        return !is_output && const_eval::eval(expr).is_ok();
+        return !is_output && (asm_expr_can_be_immediate(expr) || is_int_or_ptr);
     }
     if asm_constraint_prefers_memory(core, is_inout) {
         return true;
@@ -542,6 +542,14 @@ fn asm_constraint_is_immediate(constraint: &str) -> bool {
     constraint
         .chars()
         .any(|c| matches!(c, 'i' | 'n' | 'I' | 'N' | 'M' | 'X' | 'E'))
+}
+
+fn asm_expr_can_be_immediate(expr: &Expr) -> bool {
+    match const_eval::eval_full(expr) {
+        Ok(ConstValue::Int(_)) | Ok(ConstValue::Float(_)) | Ok(ConstValue::Addr { .. }) => true,
+        Ok(ConstValue::Str { .. }) | Ok(ConstValue::Bytes { .. }) => true,
+        Err(_) => false,
+    }
 }
 
 fn asm_pick_sub_constraint(constraint: &str, prefer_memory: bool) -> &'static str {

@@ -14,7 +14,7 @@ use crate::codegen::elf::{
     STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION,
     STT_TLS, STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
 };
-use crate::const_eval;
+use crate::const_eval::{self, ConstValue};
 use crate::preproc::LineSpan;
 use crate::target::Target;
 use std::collections::{HashMap, HashSet};
@@ -123,6 +123,7 @@ pub struct Codegen {
     sym_index: HashMap<String, u32>,
     pub relocations: Vec<ElfRela>,
     pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
+    pending_code_rels: Vec<PendingCodeRel>, // asm 数据伪指令/外部跳转: 通用 code relocation
     pending_func_addr_rels: Vec<(u64, String)>, // 函数地址取址 (GOTPCREL)
     defined_funcs: HashSet<String>,        // 本 TU 中有函数体的函数名
     pending_data_rels: Vec<(u64, String)>, // (disp32_pos, var_name) - 全局变量重定位
@@ -537,6 +538,15 @@ impl AsmRegisterPlanner {
 /// .pushsection 非文本节数据收集: 待解析的符号引用重定位
 struct CustomSecRel {
     sec_idx: usize,
+    offset: u64,
+    symbol: String,
+    rel_type: u32,
+    addend: i64,
+}
+
+/// .text / executable pushsection 内数据伪指令产生的延迟重定位。
+#[derive(Clone)]
+struct PendingCodeRel {
     offset: u64,
     symbol: String,
     rel_type: u32,
@@ -1220,6 +1230,7 @@ struct FuncEmitChunk {
     string_refs: Vec<(u64, Vec<u8>)>,
     float_refs: Vec<(u64, u64)>,
     pending_func_rels: Vec<(u64, String)>,
+    pending_code_rels: Vec<PendingCodeRel>,
     pending_func_addr_rels: Vec<(u64, String)>,
     pending_data_rels: Vec<(u64, String)>,
     pending_sib_data_rels: Vec<(u64, String)>,
@@ -1262,6 +1273,7 @@ impl Codegen {
             sym_index: HashMap::new(),
             relocations: vec![],
             pending_func_rels: vec![],
+            pending_code_rels: vec![],
             pending_func_addr_rels: vec![],
             defined_funcs: HashSet::new(),
             pending_data_rels: vec![],
@@ -2040,12 +2052,25 @@ impl Codegen {
         for (p, name) in &self.pending_data_rels {
             self.disasm_data.insert(*p, name.clone());
         }
-        // 修补跳转
-        for p in self.pending.drain(..) {
-            let dst = *self
-                .labels
-                .get(&p.target)
-                .unwrap_or_else(|| panic!("unresolved label: {}", p.target));
+        // 修补跳转；ET_REL 下最终仍未解析的符号降级为 PC32 relocation。
+        let pending = std::mem::take(&mut self.pending);
+        for p in pending {
+            let Some(&dst) = self.labels.get(&p.target) else {
+                if self.relocatable && !p.is_push_imm {
+                    let rel_off = match p.kind {
+                        JumpKind::Jmp => p.at + 1,
+                        _ => p.at + 2,
+                    };
+                    self.pending_code_rels.push(PendingCodeRel {
+                        offset: rel_off,
+                        symbol: p.target,
+                        rel_type: R_X86_64_PC32,
+                        addend: -4,
+                    });
+                    continue;
+                }
+                panic!("unresolved label: {}", p.target);
+            };
             let off = p.at as usize;
             if p.is_push_imm {
                 // push $label: imm32 = absolute address (lower 32 bits)
@@ -3293,6 +3318,11 @@ impl Codegen {
             }
         }
 
+        // 所有标签已发射完成后, 先修补本地跳转, 并把最终仍未解析
+        // 的 asm 符号跳转转换为 pending code relocation。符号表收集
+        // 依赖 pending_code_rels 中的外部符号, 所以必须先于 Phase 2。
+        self.patch_local_jumps();
+
         // Phase 2: 收集所有符号 (正确顺序: STN_UNDEF → LOCAL → GLOBAL)
         // 先收集到临时 vec, 然后排序构建最终 symtab
         let mut local_syms: Vec<ElfSym> = vec![];
@@ -3404,10 +3434,18 @@ impl Codegen {
                     .get(name)
                     .copied()
                     .unwrap_or_else(|| self.compute_func_size_fallback(name, off));
+                let (section, value) = self
+                    .pushsection_code_ranges
+                    .iter()
+                    .find(|(start, range_size, _, _)| off >= *start && off < *start + *range_size)
+                    .map(|(start, _range_size, sec_idx, sec_off)| {
+                        ((*sec_idx + 7) as u16, *sec_off + (off - *start))
+                    })
+                    .unwrap_or((1u16, off));
                 global_syms.push(ElfSym {
                     name: name.clone(),
-                    section: 1,
-                    value: off,
+                    section,
+                    value,
                     size,
                     bind: STB_GLOBAL,
                     ty: STT_FUNC,
@@ -3547,6 +3585,30 @@ impl Codegen {
         for s in global_syms.iter().chain(local_syms.iter()) {
             known_syms.insert(s.name.clone());
         }
+        for rel in &self.pending_code_rels {
+            if let Some(&pos) = self.labels.get(&rel.symbol) {
+                if !known_syms.contains(&rel.symbol) {
+                    let (section, value) = self
+                        .pushsection_code_ranges
+                        .iter()
+                        .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
+                        .map(|(start, _size, sec_idx, sec_off)| {
+                            ((*sec_idx + 7) as u16, *sec_off + (pos - *start))
+                        })
+                        .unwrap_or((1u16, pos));
+                    local_syms.push(ElfSym {
+                        name: rel.symbol.clone(),
+                        section,
+                        value,
+                        size: 0,
+                        bind: STB_LOCAL,
+                        ty: STT_NOTYPE,
+                        visibility: STV_DEFAULT,
+                    });
+                    known_syms.insert(rel.symbol.clone());
+                }
+            }
+        }
         let mut implicit_und: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (_, name) in self
             .pending_func_rels
@@ -3564,6 +3626,23 @@ impl Codegen {
                     size: 0,
                     bind: STB_GLOBAL,
                     ty: STT_FUNC,
+                    visibility: STV_DEFAULT,
+                });
+            }
+        }
+
+        for rel in &self.pending_code_rels {
+            if self.labels.contains_key(&rel.symbol) {
+                continue;
+            }
+            if !known_syms.contains(&rel.symbol) && implicit_und.insert(rel.symbol.clone()) {
+                global_syms.push(ElfSym {
+                    name: rel.symbol.clone(),
+                    section: SHN_UNDEF,
+                    value: 0,
+                    size: 0,
+                    bind: STB_GLOBAL,
+                    ty: STT_NOTYPE,
                     visibility: STV_DEFAULT,
                 });
             }
@@ -3766,6 +3845,15 @@ impl Codegen {
                 sym_index: sym_idx,
                 rel_type,
                 addend: -4,
+            });
+        }
+        for rel in self.pending_code_rels.drain(..) {
+            let sym_idx = self.sym_index.get(&rel.symbol).copied().unwrap_or(0);
+            self.relocations.push(ElfRela {
+                offset: rel.offset,
+                sym_index: sym_idx,
+                rel_type: rel.rel_type,
+                addend: rel.addend,
             });
         }
 
@@ -3988,14 +4076,13 @@ impl Codegen {
         }
 
         // 解析内部跳转 (本地标签)，再把最终机器码覆盖到自定义节副本。
-        self.resolve(0);
         for (_, emitted_start, emitted_size, sec_idx, sec_off) in &custom_func_ranges {
             let src = self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
                 .to_vec();
             let dst_start = *sec_off as usize;
             let dst_end = dst_start + *emitted_size as usize;
             self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize].fill(0);
+            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize].fill(0x90);
         }
         // 可执行 pushsection (.fixup/.altinstr_replacement) 代码区间同样搬迁
         for (emitted_start, emitted_size, sec_idx, sec_off) in &self.pushsection_code_ranges {
@@ -4004,7 +4091,7 @@ impl Codegen {
             let dst_start = *sec_off as usize;
             let dst_end = dst_start + *emitted_size as usize;
             self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize].fill(0);
+            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize].fill(0x90);
         }
         self.finalize_func_asm_layout(prog, &custom_func_ranges);
     }
@@ -4180,11 +4267,25 @@ impl Codegen {
     }
 
     fn patch_local_jumps(&mut self) {
-        for p in self.pending.drain(..) {
-            let dst = *self
-                .labels
-                .get(&p.target)
-                .unwrap_or_else(|| panic!("unresolved label: {}", p.target));
+        let pending = std::mem::take(&mut self.pending);
+        for p in pending {
+            let Some(&dst) = self.labels.get(&p.target) else {
+                if self.relocatable && !p.is_push_imm {
+                    let rel_off = match p.kind {
+                        JumpKind::Jmp => p.at + 1,
+                        _ => p.at + 2,
+                    };
+                    self.pending_code_rels.push(PendingCodeRel {
+                        offset: rel_off,
+                        symbol: p.target,
+                        rel_type: R_X86_64_PC32,
+                        addend: -4,
+                    });
+                    continue;
+                }
+                self.pending.push(p);
+                continue;
+            };
             let off = p.at as usize;
             if p.is_push_imm {
                 // push $label: imm32 = absolute address (lower 32 bits)
@@ -4218,6 +4319,7 @@ impl Codegen {
             string_refs: cg.string_refs,
             float_refs: cg.float_refs,
             pending_func_rels: cg.pending_func_rels,
+            pending_code_rels: cg.pending_code_rels,
             pending_func_addr_rels: cg.pending_func_addr_rels,
             pending_data_rels: cg.pending_data_rels,
             pending_sib_data_rels: cg.pending_sib_data_rels,
@@ -4243,6 +4345,10 @@ impl Codegen {
         }
         for (pos, sym) in chunk.pending_func_rels {
             self.pending_func_rels.push((base + pos, sym));
+        }
+        for mut rel in chunk.pending_code_rels {
+            rel.offset += base;
+            self.pending_code_rels.push(rel);
         }
         for (pos, sym) in chunk.pending_func_addr_rels {
             self.pending_func_addr_rels.push((base + pos, sym));
@@ -14196,8 +14302,12 @@ impl Codegen {
                 if let Some(val) = Self::eval_asm_operand(op) {
                     let att_val = if val.starts_with('$') {
                         val.clone()
-                    } else {
+                    } else if val.starts_with('-')
+                        || val.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    {
                         format!("${val}")
+                    } else {
+                        val.clone()
                     };
                     map.insert(format!("%{idx}"), att_val.clone());
                     slots.push(Slot::Imm(att_val));
@@ -14376,8 +14486,12 @@ impl Codegen {
                 if let Some(val) = Self::eval_asm_operand(op) {
                     let att_val = if val.starts_with('$') {
                         val.clone()
-                    } else {
+                    } else if val.starts_with('-')
+                        || val.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    {
                         format!("${val}")
+                    } else {
+                        val.clone()
                     };
                     map.insert(format!("%{idx}"), att_val.clone());
                     slots.push(Slot::Imm(att_val));
@@ -15060,10 +15174,18 @@ impl Codegen {
         }
     }
 
-    /// 求值 asm 操作数 (用于 "i" 约束的立即数替换)
+    /// 求值 asm 操作数 (用于 "i" 约束的立即数/符号替换)
     fn eval_asm_operand(expr: &Expr) -> Option<String> {
-        if let Ok(v) = const_eval::eval(expr) {
-            return Some(v.to_string());
+        match const_eval::eval_full(expr) {
+            Ok(ConstValue::Int(v)) => return Some(v.to_string()),
+            Ok(ConstValue::Float(f)) => return Some((f as i128).to_string()),
+            Ok(ConstValue::Addr { name, offset }) => {
+                return Some(Self::format_asm_symbol_immediate(&name, offset));
+            }
+            Ok(ConstValue::Str { label, .. }) | Ok(ConstValue::Bytes { label, .. }) => {
+                return Some(label);
+            }
+            Err(_) => {}
         }
         if let Expr::Offsetof { ty, member, .. } = expr {
             return Some(Self::compute_offset(ty, member).to_string());
@@ -15071,19 +15193,35 @@ impl Codegen {
         None
     }
 
+    fn format_asm_symbol_immediate(name: &str, offset: i128) -> String {
+        match offset.cmp(&0) {
+            std::cmp::Ordering::Greater => format!("{name}+{offset}"),
+            std::cmp::Ordering::Less => format!("{name}{offset}"),
+            std::cmp::Ordering::Equal => name.to_string(),
+        }
+    }
+
     /// 将 op_map 值格式化为 AT&T 操作数字符串
     fn asm_format_subst(val: &str) -> String {
-        // 内存操作数 (含 '('), 立即数 (以 $ 开头), 偏移 (以 - 开头), 或纯数字:
-        // 直接使用, 不加 % 前缀
+        // 内存操作数 (含 '('), 立即数 (以 $ 开头), 偏移 (以 - 开头),
+        // 纯数字或符号立即数: 直接使用, 不加 % 前缀
         if val.contains('(')
             || val.starts_with('$')
             || val.starts_with('-')
             || val.chars().next().is_some_and(|c| c.is_ascii_digit())
+            || Self::asm_symbolic_operand(val)
         {
             val.to_string()
         } else {
             format!("%{val}")
         }
+    }
+
+    fn asm_symbolic_operand(val: &str) -> bool {
+        val.chars()
+            .next()
+            .is_some_and(|c| c == '.' || c == '_' || c.is_ascii_alphabetic())
+            && Self::parse_asm_reg(&format!("%{val}")).is_none()
     }
 
     /// 由寄存器索引生成指定宽度的 AT&T 寄存器名 (含 % 前缀)
@@ -15356,9 +15494,30 @@ impl Codegen {
                 if is_exec {
                     // 可执行 pushsection: 指令/数据全部发射到 self.code,
                     // 标签与跳转在 .text 坐标解析, 退出时整体搬迁.
+                    if trimmed.starts_with(".globl ") || trimmed.starts_with(".global ") {
+                        if let Some(sym) = trimmed.split_whitespace().nth(1) {
+                            self.global_asm_exports
+                                .insert(sym.trim_end_matches(',').to_string());
+                        }
+                        continue;
+                    }
+                    if trimmed.starts_with(".size ") {
+                        self.record_asm_size_directive(trimmed);
+                        continue;
+                    }
                     if let Some(name) = locals.name_at(i) {
                         self.label(name);
                         continue;
+                    }
+                    if let Some(label) = Self::parse_asm_named_label(trimmed) {
+                        self.label(label);
+                        let has_body = trimmed
+                            .split_once(':')
+                            .map(|(_, rest)| !rest.trim().is_empty())
+                            .unwrap_or(false);
+                        if !has_body {
+                            continue;
+                        }
                     }
                     let subbed = locals.substitute(trimmed, i);
                     self.current_asm_line = i + 1;
@@ -15411,21 +15570,18 @@ impl Codegen {
                 && (trimmed.starts_with(".globl ") || trimmed.starts_with(".global "))
             {
                 if let Some(sym) = trimmed.split_whitespace().nth(1) {
-                    self.global_asm_exports
-                        .insert(sym.trim_end_matches(':').to_string());
+                    self.global_asm_exports.insert(sym.trim_end_matches(',').to_string());
                 }
                 continue;
             }
+            if !self.emit_asm_text && trimmed.starts_with(".size ") {
+                self.record_asm_size_directive(trimmed);
+                continue;
+            }
             // 命名标签 foo:（含 . 局部标签如 .slowpath:，排除 directive）
-            if let Some(label) = trimmed.strip_suffix(':') {
-                let label = AsmLocalLabels::strip_asm_comment(label).trim();
-                if !label.is_empty()
-                    && !label.chars().all(|c| c.is_ascii_digit())
-                    && !Self::is_asm_directive(label)
-                {
-                    self.label(label);
-                    continue;
-                }
+            if let Some(label) = Self::parse_asm_named_label(trimmed) {
+                self.label(label);
+                continue;
             }
             if self.emit_asm_text && trimmed.starts_with('.') {
                 continue;
@@ -16146,6 +16302,91 @@ impl Codegen {
         }
     }
 
+    /// 解析命名标签。支持 `foo:` 和 `foo: insn`，排除数字局部标签与伪指令。
+    fn parse_asm_named_label(line: &str) -> Option<&str> {
+        let line = AsmLocalLabels::strip_asm_comment(line).trim();
+        let (label, _) = line.split_once(':')?;
+        let label = label.trim();
+        if label.is_empty()
+            || label.chars().all(|c| c.is_ascii_digit())
+            || Self::is_asm_directive(label)
+            || label.contains([' ', '\t', '%', '(', ')'])
+        {
+            return None;
+        }
+        Some(label)
+    }
+
+    fn record_asm_size_directive(&mut self, line: &str) {
+        let rest = line.trim().strip_prefix(".size").unwrap_or("").trim();
+        let Some((name, expr)) = rest.split_once(',') else {
+            return;
+        };
+        let name = name.trim();
+        let expr = expr.trim();
+        let Some(base) = expr.strip_prefix(". - ").map(str::trim) else {
+            return;
+        };
+        if base != name {
+            return;
+        }
+        if let Some(&start) = self.labels.get(name) {
+            self.func_sizes
+                .insert(name.to_string(), self.pos().saturating_sub(start));
+        }
+    }
+
+    fn emit_asm_code_data_directive(&mut self, args: &str, size: usize) {
+        for expr in Self::split_asm_args(args) {
+            let expr = expr.trim();
+            let off = self.pos();
+            if let Some((symbol, addend)) = Self::parse_asm_pc_relative_long(expr) {
+                self.pending_code_rels.push(PendingCodeRel {
+                    offset: off,
+                    symbol,
+                    rel_type: R_X86_64_PC32,
+                    addend,
+                });
+                self.emit(&vec![0u8; size]);
+                continue;
+            }
+            if let Some(v) = Self::parse_asm_imm_token(expr) {
+                let bytes = v.to_le_bytes();
+                self.emit(&bytes[..size]);
+            } else if size == 4 && !expr.is_empty() {
+                self.pending_code_rels.push(PendingCodeRel {
+                    offset: off,
+                    symbol: expr.to_string(),
+                    rel_type: R_X86_64_32,
+                    addend: 0,
+                });
+                self.emit(&[0u8; 4]);
+            } else {
+                self.emit(&vec![0u8; size]);
+            }
+        }
+    }
+
+    fn parse_asm_pc_relative_long(expr: &str) -> Option<(String, i64)> {
+        let expr = expr.trim();
+        let (left, right) = expr.split_once('-')?;
+        let symbol = left.trim();
+        if symbol.is_empty() || symbol == "." {
+            return None;
+        }
+        let right = right.trim().replace(' ', "");
+        let addend = match right.as_str() {
+            "." => 0,
+            "(.+4)" => -4,
+            r if r.starts_with('.') => {
+                let n = r.strip_prefix(".+")?.parse::<i64>().ok()?;
+                -n
+            }
+            r => -r.parse::<i64>().ok()?,
+        };
+        Some((symbol.to_string(), addend))
+    }
+
     /// 处理 GAS 伪指令（-c 模式下静默跳过或填充，避免降级为 nop 警告）
     fn emit_asm_directive(&mut self, line: &str) -> bool {
         let t = line.trim();
@@ -16175,21 +16416,24 @@ impl Codegen {
                 }
                 true
             }
-            ".long" => {
-                self.emit(&[0u8; 4]);
+            ".int" | ".long" | ".4byte" => {
+                let args = t[parts[0].len()..].trim();
+                self.emit_asm_code_data_directive(args, 4);
                 true
             }
-            ".quad" => {
-                self.emit(&[0u8; 8]);
+            ".quad" | ".8byte" => {
+                let args = t[parts[0].len()..].trim();
+                self.emit_asm_code_data_directive(args, 8);
+                true
+            }
+            ".short" | ".word" | ".2byte" => {
+                let args = t[parts[0].len()..].trim();
+                self.emit_asm_code_data_directive(args, 2);
                 true
             }
             ".byte" => {
-                // .byte val1, val2, ... — emit each byte value
-                for &tok in parts.iter().skip(1) {
-                    if let Some(v) = Self::parse_asm_imm_token(tok) {
-                        self.emit(&[(v & 0xFF) as u8]);
-                    }
-                }
+                let args = t[parts[0].len()..].trim();
+                self.emit_asm_code_data_directive(args, 1);
                 true
             }
             ".asciz" | ".string" => {
@@ -21950,21 +22194,28 @@ impl Codegen {
         }
     }
 
+    fn asm_rel32_symbol(&mut self, label: &str, opcode_len: u64) {
+        let disp_off = self.pos() - 4;
+        let at = disp_off + 4 - opcode_len;
+        self.pending.push(PendingJump {
+            at,
+            target: label.to_string(),
+            kind: JumpKind::Jmp,
+            is_push_imm: false,
+        });
+    }
+
     fn emit_asm_jmp(&mut self, op: &AsmOperand) {
         match op {
             AsmOperand::Sym(label) => {
-                self.jmp_rel32(label, JumpKind::Jmp);
+                self.emit(&[0xE9, 0, 0, 0, 0]);
+                self.asm_rel32_symbol(label, 5);
             }
             AsmOperand::SymDisp(label, _off) => {
                 // jmp *sym@PLT 或 jmp *sym: 走 RIP-relative 间接
                 // 模拟方式: lea rax, [rip+label]; jmp *rax
                 self.emit(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]);
-                self.pending.push(PendingJump {
-                    at: self.pos() - 4,
-                    target: label.clone(),
-                    kind: JumpKind::Jmp,
-                    is_push_imm: false,
-                });
+                self.asm_rel32_symbol(label, 7);
                 self.emit(&[0xFF, 0xE0]); // jmp *%rax
             }
             AsmOperand::Reg(r, _) => {
@@ -22059,12 +22310,7 @@ impl Codegen {
             AsmOperand::SymDisp(label, _off) => {
                 // call *sym@PLT: lea rax, [rip+label]; call *rax
                 self.emit(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]);
-                self.pending.push(PendingJump {
-                    at: self.pos() - 4,
-                    target: label.clone(),
-                    kind: JumpKind::Jmp,
-                    is_push_imm: false,
-                });
+                self.asm_rel32_symbol(label, 7);
                 self.emit(&[0xFF, 0xD0]); // call *%rax
             }
             AsmOperand::Reg(r, _) => {
