@@ -14,12 +14,25 @@ fn run_syntax_test(name: &str, source: &str) -> std::process::Output {
 }
 
 fn run_object_test(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
+    run_object_test_flags(name, source, &[])
+}
+
+fn run_object_test_flags(
+    name: &str,
+    source: &str,
+    extra_flags: &[&str],
+) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
     let object_path = dir.join(format!("dcc-{name}-{}.o", std::process::id()));
     fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-c", "-o"])
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-c");
+    for flag in extra_flags {
+        cmd.arg(flag);
+    }
+    let output = cmd
+        .arg("-o")
         .arg(&object_path)
         .arg(&source_path)
         .output()
@@ -121,6 +134,48 @@ fn elf64_sections(data: &[u8]) -> std::collections::HashMap<String, (u32, u32, u
         }
     }
     map
+}
+
+/// 极简 ELF64 节区数据提取：按节名返回 section payload。
+fn elf64_section_data<'a>(data: &'a [u8], section: &str) -> Option<&'a [u8]> {
+    fn read_cstr(b: &[u8]) -> String {
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf8_lossy(&b[..end]).to_string()
+    }
+    if data.len() < 64 {
+        return None;
+    }
+    let e_shoff = u64::from_le_bytes(data[40..48].try_into().ok()?) as usize;
+    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().ok()?) as usize;
+    let e_shnum = u16::from_le_bytes(data[60..62].try_into().ok()?) as usize;
+    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().ok()?) as usize;
+    if e_shentsize < 64 || e_shoff + e_shentsize * e_shnum > data.len() {
+        return None;
+    }
+    let shstr = e_shoff + e_shstrndx * e_shentsize;
+    let shstr_off = u64::from_le_bytes(data[shstr + 24..shstr + 32].try_into().ok()?) as usize;
+    let shstr_size = u64::from_le_bytes(data[shstr + 32..shstr + 40].try_into().ok()?) as usize;
+    if shstr_off + shstr_size > data.len() {
+        return None;
+    }
+    for i in 0..e_shnum {
+        let off = e_shoff + i * e_shentsize;
+        let name_off = u32::from_le_bytes(data[off..off + 4].try_into().ok()?) as usize;
+        if shstr_off + name_off >= data.len() {
+            continue;
+        }
+        let name = read_cstr(&data[shstr_off + name_off..]);
+        if name != section {
+            continue;
+        }
+        let sec_off = u64::from_le_bytes(data[off + 24..off + 32].try_into().ok()?) as usize;
+        let sec_size = u64::from_le_bytes(data[off + 32..off + 40].try_into().ok()?) as usize;
+        if sec_off + sec_size > data.len() {
+            return None;
+        }
+        return Some(&data[sec_off..sec_off + sec_size]);
+    }
+    None
 }
 
 /// 极简 ELF64 符号表解析: 返回定义型函数符号 (STT_FUNC, 有节) 的
@@ -517,6 +572,37 @@ fn s_output_disassembles_function_body() {
         "expected folded return in disasm: {asm_text}"
     );
     assert!(asm_text.contains("ret"), "asm output: {asm_text}");
+}
+
+#[test]
+fn s_output_disassembles_return_thunk_symbol() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-s-rethunk-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-s-rethunk-{}.s", std::process::id()));
+    let source = "int main(void) { return 0; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-mfunction-return=thunk-extern", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        asm_text.contains("jmp __x86_return_thunk"),
+        "return thunk target should be symbolic in -S output: {asm_text}"
+    );
+    assert!(
+        !asm_text.lines().any(|line| line.trim() == "ret"),
+        "rethunk -S output must not contain naked ret: {asm_text}"
+    );
 }
 
 #[test]
@@ -3148,6 +3234,66 @@ asm(".type _context_unsafe_alias, @function\n"
     assert!(
         disasm.contains("<_context_unsafe_alias>:") && disasm.contains("ret"),
         "empty asm function must disassemble to a real instruction: {disasm}"
+    );
+    let _ = fs::remove_file(&obj_path);
+}
+
+#[test]
+fn function_return_thunk_avoids_naked_ret_in_c_and_asm() {
+    let source = r#"
+asm(".globl empty_asm_func\n"
+    ".type empty_asm_func, @function\n"
+    "empty_asm_func:\n"
+    ".size empty_asm_func, .-empty_asm_func\n");
+int normal_return(int x) { return x + 1; }
+void inline_asm_return(void) { asm volatile("ret"); }
+"#;
+    let (output, obj_path) = run_object_test_flags(
+        "function-return-thunk",
+        source,
+        &["-mfunction-return=thunk-extern"],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+
+    let dump = Command::new("objdump")
+        .args(["-d", "-r"])
+        .arg(&obj_path)
+        .output()
+        .expect("objdump");
+    assert!(dump.status.success(), "objdump -d -r failed");
+    let disasm = String::from_utf8_lossy(&dump.stdout);
+    let has_naked_ret = disasm.lines().any(|line| {
+        let insn = line.split('\t').last().unwrap_or("").trim();
+        insn == "ret" || insn == "retq"
+    });
+    assert!(
+        !has_naked_ret,
+        "rethunk .text must not contain naked ret: {disasm}"
+    );
+    assert!(
+        disasm.contains("__x86_return_thunk"),
+        "missing return thunk relocation: {disasm}"
+    );
+    assert!(
+        disasm.matches("__x86_return_thunk").count() >= 3,
+        "normal, empty asm, and inline asm returns should thunk: {disasm}"
+    );
+    let _ = std::fs::remove_file(&obj_path);
+}
+
+#[test]
+fn function_return_keep_preserves_plain_ret() {
+    let source = "int normal_return(int x) { return x + 1; }\n";
+    let (output, obj_path) =
+        run_object_test_flags("function-return-keep", source, &["-mfunction-return=keep"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let obj_data = std::fs::read(&obj_path).expect("read object file");
+    let text = elf64_section_data(&obj_data, ".text").expect("missing .text");
+    assert!(
+        text.contains(&0xC3),
+        "keep mode should preserve plain ret bytes"
     );
     let _ = std::fs::remove_file(&obj_path);
 }

@@ -20,7 +20,6 @@
 | 指令解码失败 | objtool 无法解码 dcc 生成的部分指令序列 (`can't decode instruction`) |
 | 函数起始定位失败 | `_context_unsafe_alias()` 等空函数/内联函数 objtool 无法定位 (`can't find starting instruction`) |
 | 跳转目标缺失 | 个别函数内跳转目标地址 objtool 无法解析 (`can't find jump dest instruction`) |
-| MITIGATION_RETHUNK | objtool 检测到非标准 ret 模式 (`'naked' return found in MITIGATION_RETHUNK build`) |
 
 根因：dcc 的 x86 编码、函数边界和跳转目标信息仍未与内核
 objtool 的解码/验证模型完全一致。
@@ -65,7 +64,7 @@ objtool 的解码/验证模型完全一致。
 | `-Wp,*` 子选项 | 仅白名单支持；未知预处理器透传选项会报 unsupported |
 | `-x` 语言集 | 仅支持 assembler/assembler-with-cpp/C/C++ 等少数输入语言 |
 | unknown sanitizer name | 未知 `-fsanitize=` 名称未形成严格诊断契约，存在被忽略的路径 |
-| 内核 wrapper 过滤 flags | `arch_x86_compile.sh` 仍过滤 dcc 未实现的内核 flags，如 `-fstack-clash-protection`、`-fpatchable-function-entry`、`-ftrivial-auto-var-init`、retpoline/return thunk flags、`-mrecord-mcount`、`-mfentry`、`-pg` 等 |
+| 内核 wrapper 过滤 flags | `arch_x86_compile.sh` 仍过滤 dcc 未实现的内核 flags，如 `-fstack-clash-protection`、`-ftrivial-auto-var-init`、`-mrecord-mcount`、`-mfentry`、`-pg` 等 |
 | host wrapper stub depfile | `dcc-host-wrapper.sh` 在 fixdep 依赖生成失败时会写 stub `.d`，可能隐藏 host C gap |
 
 ## 链接器 / 对象文件限制

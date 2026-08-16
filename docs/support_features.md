@@ -17,7 +17,7 @@
 | 预处理 forced-include 注释安全 | `tests/fixtures/c/comment.h` |
 | mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
 | DWARF + BTF（含 struct） | `-g` 生成 `.debug_*` + `.BTF`（含 `dcc_probe` STRUCT 类型） |
-| objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame` |
+| objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`；`-mfunction-return=thunk-extern` 下函数尾声、空 global asm 函数和 mini-asm `ret` 均跳转 `__x86_return_thunk`，避免 MITIGATION_RETHUNK 裸 `ret` |
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
 
 ## Sanitizer 插桩
@@ -163,6 +163,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 跨函数 LEA | `[r13+off]` + RIP-relative + `emit_load_global_indexed` |
 | object_size FORTIFY | `__builtin_object_size` + `__builtin___memcpy_chk` 等 |
 | apply/return | `__builtin_apply` / `__builtin_return` |
+| return thunk | `-mfunction-return=thunk-extern` 将 C 函数尾声、空 global asm 函数和 mini-asm `ret`/`retq` 发射为外部 `__x86_return_thunk` 跳转；`-mfunction-return=keep` 保留裸 `ret` |
 | prefetch | `__builtin_prefetch` no-op |
 
 ## 多架构支持

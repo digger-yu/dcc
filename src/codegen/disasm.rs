@@ -339,13 +339,11 @@ impl<'a> Dec<'a> {
             0xE9 => {
                 self.take();
                 let rel = self.take_i32()?;
+                let sym = self.calls.get(&(off + 1)).cloned();
+                let target = sym.unwrap_or_else(|| self.rel_target(rel, off + 5));
                 Some((
                     self.pos - start,
-                    format!(
-                        "{}jmp {}",
-                        Self::prefix_str(&pfx),
-                        self.rel_target(rel, off + 5)
-                    ),
+                    format!("{}jmp {target}", Self::prefix_str(&pfx)),
                 ))
             }
             0x31 if self.code.get(self.pos) == Some(&0xC0) => {

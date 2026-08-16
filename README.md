@@ -341,7 +341,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 
 **中期（质量门禁 / 补洞）**
 
-- vmlinux 工具链（pahole BTF / objtool check）非 SKIP 验证；QEMU 启动矩阵至少一种配置 PASS。
+- vmlinux 工具链（pahole BTF / objtool check）非 SKIP 验证；QEMU 启动矩阵至少一种配置 PASS（MITIGATION_RETHUNK 裸 `ret` 已由 `-mfunction-return=thunk-extern` 覆盖）。
 - C++ concept SFINAE 完整联动；模板基类/友元；多平台 binary。
 - LTO `no_semantic-interposition` Pass 7 完整化。
 

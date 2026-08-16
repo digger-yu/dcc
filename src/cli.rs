@@ -1805,6 +1805,26 @@ mod tests {
     }
 
     #[test]
+    fn function_return_thunk_flags_parse_last_wins() {
+        let cfg = parse(&[
+            "-mfunction-return=thunk-extern".to_string(),
+            "-c".to_string(),
+            "input.c".to_string(),
+        ])
+        .expect("return thunk flag should parse");
+        assert!(cfg.function_return_thunk_extern);
+
+        let cfg = parse(&[
+            "-mfunction-return=thunk-extern".to_string(),
+            "-mfunction-return=keep".to_string(),
+            "-c".to_string(),
+            "input.c".to_string(),
+        ])
+        .expect("keep should parse after thunk");
+        assert!(!cfg.function_return_thunk_extern);
+    }
+
+    #[test]
     fn multiple_c_sources_cannot_link_to_exe() {
         let args = vec![
             "-o".to_string(),

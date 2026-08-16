@@ -5042,6 +5042,7 @@ impl Codegen {
     fn jmp_external(&mut self, l: &str) {
         let at = self.pos();
         self.emit(&[0xE9, 0, 0, 0, 0]);
+        self.disasm_calls.insert(at + 1, l.to_string());
         if self.relocatable {
             self.pending_func_rels.push((at + 1, l.to_string()));
         } else {
@@ -5053,6 +5054,14 @@ impl Codegen {
                 next_ip: at + 5,
                 is_push_imm: false,
             });
+        }
+    }
+
+    fn emit_return_tail(&mut self) {
+        if self.target.function_return_thunk_extern {
+            self.jmp_external("__x86_return_thunk");
+        } else {
+            self.emit(&[0xC3]);
         }
     }
 
@@ -11418,11 +11427,7 @@ impl Codegen {
         if self.target.frame_pointer {
             self.emit(&[0x5D]); // pop rbp
         }
-        if self.target.function_return_thunk_extern {
-            self.jmp_external("__x86_return_thunk");
-        } else {
-            self.emit(&[0xc3]); // ret
-        }
+        self.emit_return_tail();
     }
 
     /// 初始化 SysV AMD64 va_list 结构 (24 字节)。
@@ -16471,8 +16476,9 @@ impl Codegen {
         if self.pos() != start || !self.asm_symbol_is_function(name) {
             return;
         }
-        self.emit(&[0xC3]);
-        self.func_sizes.insert(name.to_string(), 1);
+        self.emit_return_tail();
+        self.func_sizes
+            .insert(name.to_string(), self.pos().saturating_sub(start));
     }
 
     fn finish_pending_empty_asm_function(&mut self) {
@@ -16782,7 +16788,7 @@ impl Codegen {
             "ss" => self.emit(&[0x36]),
             "fs" => self.emit(&[0x64]),
             "gs" => self.emit(&[0x65]),
-            "ret" | "retq" => self.emit(&[0xC3]),
+            "ret" | "retq" => self.emit_return_tail(),
             "leave" | "leaveq" => self.emit(&[0xC9]),
             "cdq" => self.emit(&[0x99]),
             "cdqe" => self.emit(&[0x48, 0x98]),
