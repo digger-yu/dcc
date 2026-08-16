@@ -85,6 +85,106 @@ fn run_exe(path: &std::path::Path) -> i32 {
         .unwrap_or(-1)
 }
 
+/// 极简 ELF64 节头解析: 返回 (节名 → (sh_type, sh_flags, sh_size)).
+/// 仅用于验证 .o 的自定义节/ORC 结构, 不依赖外部 readelf.
+fn elf64_sections(data: &[u8]) -> std::collections::HashMap<String, (u32, u32, u64)> {
+    fn read_cstr(b: &[u8]) -> String {
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf8_lossy(&b[..end]).to_string()
+    }
+    let mut map = std::collections::HashMap::new();
+    if data.len() < 64 {
+        return map;
+    }
+    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
+    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
+    if e_shentsize < 64 || e_shoff as usize + e_shentsize * e_shnum > data.len() {
+        return map;
+    }
+    let shstr = e_shoff as usize + e_shstrndx * e_shentsize;
+    let shstr_off = u64::from_le_bytes(data[shstr + 24..shstr + 32].try_into().unwrap()) as usize;
+    let shstr_size = u64::from_le_bytes(data[shstr + 32..shstr + 40].try_into().unwrap()) as usize;
+    if shstr_off + shstr_size > data.len() {
+        return map;
+    }
+    for i in 0..e_shnum {
+        let off = e_shoff as usize + i * e_shentsize;
+        let name_off = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        let ty = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap());
+        let flags = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap()) as u32;
+        let size = u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap());
+        if shstr_off + name_off < data.len() {
+            let name = read_cstr(&data[shstr_off + name_off..]);
+            map.insert(name, (ty, flags, size));
+        }
+    }
+    map
+}
+
+/// 极简 ELF64 符号表解析: 返回定义型函数符号 (STT_FUNC, 有节) 的
+/// (名称, st_value, st_size). 用于验证函数符号 st_size 非零.
+fn elf64_func_symbols(data: &[u8]) -> Vec<(String, u64, u64)> {
+    fn read_cstr(b: &[u8]) -> String {
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf8_lossy(&b[..end]).to_string()
+    }
+    let mut out = Vec::new();
+    if data.len() < 64 {
+        return out;
+    }
+    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
+    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
+    if e_shentsize < 64 || e_shoff as usize + e_shentsize * e_shnum > data.len() {
+        return out;
+    }
+    let shstr = e_shoff as usize + e_shstrndx * e_shentsize;
+    let shstr_off = u64::from_le_bytes(data[shstr + 24..shstr + 32].try_into().unwrap()) as usize;
+    let shstr_size = u64::from_le_bytes(data[shstr + 32..shstr + 40].try_into().unwrap()) as usize;
+    if shstr_off + shstr_size > data.len() {
+        return out;
+    }
+    let mut symtab = None; // (offset, size, entsize)
+    let mut strtab_off = 0usize;
+    for i in 0..e_shnum {
+        let off = e_shoff as usize + i * e_shentsize;
+        let name_off = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        let name = read_cstr(&data[shstr_off + name_off..]);
+        if name == ".symtab" {
+            let size = u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap());
+            let entsize = u64::from_le_bytes(data[off + 56..off + 64].try_into().unwrap());
+            let sec_off = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap());
+            symtab = Some((sec_off, size, entsize));
+        } else if name == ".strtab" {
+            strtab_off = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap()) as usize;
+        }
+    }
+    let Some((sec_off, size, entsize)) = symtab else {
+        return out;
+    };
+    if entsize < 24 || sec_off as usize + size as usize > data.len() {
+        return out;
+    }
+    let n = size / entsize;
+    for i in 0..n {
+        let off = sec_off as usize + i as usize * entsize as usize;
+        let st_name = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        let st_info = data[off + 4];
+        let st_type = st_info & 0xf;
+        let st_shndx = u16::from_le_bytes(data[off + 6..off + 8].try_into().unwrap());
+        let st_value = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
+        let st_size = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+        if st_type == 2 && st_shndx != 0 && st_shndx != 0xfff1 && st_name > 0 {
+            let name = read_cstr(&data[strtab_off + st_name..]);
+            out.push((name, st_value, st_size));
+        }
+    }
+    out
+}
+
 /// C++ 前端集成测试: 编译 .cpp 到 .o (m17_* fixture 用)
 /// 与 run_object_test 类似, 但显式写 .cpp 扩展名以触发 C++ 前端.
 fn run_cpp_object_test(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
@@ -2762,7 +2862,60 @@ fn asm_pushsection_data_compiles_with_sections() {
     );
 }
 
+/// 可执行 .pushsection (.fixup / .altinstr_replacement): 代码必须汇编进
+/// 自定义节 (非丢弃/非泄漏到 .text), 且节头带 SHF_EXECINSTR ("ax") 标志.
+#[test]
+fn asm_pushsection_exec_code_lands_in_custom_section() {
+    let source = include_str!("fixtures/c/asm_pushsection_exec.c");
+    let (output, obj_path) = run_object_test("asm-pushsection-exec", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+    let obj = std::fs::read(&obj_path).expect("read object file");
+    let _ = std::fs::remove_file(&obj_path);
+    let secs = elf64_sections(&obj);
+    // .fixup 含 mov + ret 机器码, 必须非零且可执行
+    let (ty, flags, size) = secs
+        .get(".fixup")
+        .copied()
+        .expect("missing .fixup section");
+    assert_eq!(ty, 1, ".fixup must be SHT_PROGBITS");
+    assert!(
+        flags & 0x4 != 0,
+        ".fixup must have SHF_EXECINSTR (got flags {flags:#x})"
+    );
+    assert!(size >= 5, ".fixup code dropped (size {size})");
+    // .altinstr_replacement 含 nop, 非零且可执行
+    let (_, flags, size) = secs
+        .get(".altinstr_replacement")
+        .copied()
+        .expect("missing .altinstr_replacement section");
+    assert!(
+        flags & 0x4 != 0,
+        ".altinstr_replacement must have SHF_EXECINSTR (got flags {flags:#x})"
+    );
+    assert!(size >= 1, ".altinstr_replacement code dropped (size {size})");
+    // 数据节引用替换代码标签: .altinstructions 需要重定位节
+    assert!(
+        secs.contains_key(".rela.altinstructions"),
+        "missing .rela.altinstructions (label ref into .altinstr_replacement)"
+    );
+    // 数据节数据非零: __ex_table/.altinstructions 条目必须输出
+    for sec in ["__ex_table", ".altinstructions"] {
+        let (_, _, size) = secs.get(sec).copied().unwrap_or_else(|| {
+            panic!("missing {sec} section (pushsection data dropped)")
+        });
+        assert!(size > 0, "{sec} data dropped (size {size})");
+    }
+}
+
 /// ORC unwind info: .orc_unwind_ip + .orc_unwind sections generated with -g -c
+/// 校验: 节区对存在, .orc_unwind_ip 条目带 .rela.orc_unwind_ip PC32 重定位,
+/// .orc_unwind 条目为 6 字节 packed orc_entry (内核 unwind_init 要求
+/// orc_size % sizeof(struct orc_entry) == 0).
 #[test]
 fn orc_unwind_sections_present_in_object() {
     let dir = std::env::temp_dir();
@@ -2784,18 +2937,69 @@ fn orc_unwind_sections_present_in_object() {
     let obj = fs::read(&out_path).unwrap_or_default();
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&out_path);
-    let obj_str = String::from_utf8_lossy(&obj);
+    let secs = elf64_sections(&obj);
+    let (_ip_ty, _ip_flags, ip_size) = secs
+        .get(".orc_unwind_ip")
+        .copied()
+        .expect("missing .orc_unwind_ip section");
+    let (_u_ty, _u_flags, orc_size) = secs
+        .get(".orc_unwind")
+        .copied()
+        .expect("missing .orc_unwind section");
     assert!(
-        obj_str.contains(".orc_unwind_ip"),
-        "missing .orc_unwind_ip section"
+        secs.contains_key(".rela.orc_unwind_ip"),
+        "missing .rela.orc_unwind_ip relocation section"
+    );
+    // 每函数一个 4 字节 IP 条目
+    assert!(ip_size >= 8 && ip_size % 4 == 0, "bad .orc_unwind_ip size {ip_size}");
+    // 每个 6 字节 packed orc_entry; 两个函数 + 结束哨兵
+    assert!(orc_size >= 12 && orc_size % 6 == 0, "bad .orc_unwind size {orc_size}");
+}
+
+/// 内核构建门控: -fno-asynchronous-unwind-tables (unwind_tables=false) 关闭
+/// .eh_frame 后, ORC 节区对仍须输出 — 内核 ORC 解包器的唯一栈展开来源.
+#[test]
+fn orc_sections_emitted_when_unwind_tables_disabled() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-orc-kernel-{}.c", std::process::id()));
+    let out_path = dir.join(format!("dcc-orc-kernel-{}.o", std::process::id()));
+    let source = "int foo(void) { return 42; }\nint bar(int x) { return x + 1; }\n";
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fno-asynchronous-unwind-tables", "-o"])
+        .arg(&out_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let obj = fs::read(&out_path).unwrap_or_default();
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&out_path);
+    let secs = elf64_sections(&obj);
+    assert!(
+        secs.contains_key(".orc_unwind_ip"),
+        "kernel build missing .orc_unwind_ip"
     );
     assert!(
-        obj_str.contains(".orc_unwind"),
-        "missing .orc_unwind section"
+        secs.contains_key(".orc_unwind"),
+        "kernel build missing .orc_unwind"
+    );
+    assert!(
+        secs.contains_key(".rela.orc_unwind_ip"),
+        "kernel build missing .rela.orc_unwind_ip"
+    );
+    assert!(
+        !secs.contains_key(".eh_frame"),
+        "kernel build should not emit .eh_frame with -fno-asynchronous-unwind-tables"
     );
 }
 
 /// function symbol size: weak/static/alias functions should have non-zero st_size
+/// objtool/内核依赖正确的函数边界 (st_size 为 0 会破坏函数边界定位)
 #[test]
 fn func_symbol_size_non_zero_for_defined_functions() {
     let source = include_str!("fixtures/c/func_symbol_size.c");
@@ -2809,6 +3013,19 @@ fn func_symbol_size_non_zero_for_defined_functions() {
     assert!(obj_str.contains("static_func"), "missing static_func symbol");
     assert!(obj_str.contains("real_func"), "missing real_func symbol");
     assert!(obj_str.contains("alias_func"), "missing alias_func symbol");
+    // 定义型函数符号 (weak/static/global/alias) st_size 必须非零
+    let funcs = elf64_func_symbols(&obj_data);
+    let names: std::collections::HashMap<String, u64> =
+        funcs.iter().map(|(n, _, s)| (n.clone(), *s)).collect();
+    for want in ["weak_func", "static_func", "real_func", "alias_func", "caller"] {
+        let sz = names
+            .get(want)
+            .unwrap_or_else(|| panic!("missing STT_FUNC symbol {want}"));
+        assert!(
+            *sz > 0,
+            "defined function {want} has zero st_size (breaks objtool function boundary)"
+        );
+    }
     let _ = std::fs::remove_file(&obj_path);
 }
 

@@ -1,6 +1,6 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-08-10 — 基于 Linux 7.1 全树编译 + `cargo test` 全量通过
+> 最后更新：2026-08-16 — 基于 Linux 7.1 全树编译 + `cargo test` 全量通过
 >
 > 已支持特性详见 `docs/support_features.md`
 
@@ -38,14 +38,6 @@
 | `in`/`out` 非标准操作数模式 | 端口为内存间接形式 | 仅支持立即数端口和 DX 端口 |
 | `shldw` / `shrdw` | 16 位双精度移位 | 仅支持 `shld`/`shldq`/`shldl` 和 `shrd`/`shrdq`/`shrdl` |
 | 裸 `ds` 段前缀作为独立指令 | 旧式汇编风格 | 仅支持 `ds` 作为其他指令的前缀修饰 |
-
-### x86_64 codegen 内核关键缺陷
-
-| 问题 | 说明 |
-|------|------|
-| `.pushsection` 非文本节区数据丢失 | `.pushsection .altinstructions` / `__bug_table` / `.fixup` / `__ex_table` 等数据被完全跳过，不输出到 .o 文件 |
-| ORC  unwind 信息未生成 | `build_orc_unwind_ip` 函数已定义但从未调用；内核 ORC 解包器需要 `.orc_unwind_ip` + `.orc_unwind` 节区对 |
-| 函数符号 size 可能为零 | 部分 weak/alias 符号 `st_size=0`，objtool 依赖正确的函数边界 |
 
 ### AArch64
 

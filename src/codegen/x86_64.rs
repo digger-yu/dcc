@@ -176,6 +176,10 @@ pub struct Codegen {
     // .pushsection 非文本节数据收集
     pushsection_stack: Vec<usize>,
     pending_custom_sec_rels: Vec<CustomSecRel>,
+    /// 可执行 pushsection (.fixup / .altinstr_replacement) 栈: (sec_idx, self.code 起始偏移)
+    pushsection_exec_stack: Vec<(usize, u64)>,
+    /// 可执行 pushsection 代码区间: (text 起始偏移, size, extra_sections 索引, 节内偏移)
+    pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
     // -S 汇编文本输出
     pub emit_asm_text: bool,
     pub debug_level: u8,
@@ -1238,6 +1242,8 @@ impl Codegen {
             extra_rela_sections: vec![],
             pushsection_stack: vec![],
             pending_custom_sec_rels: vec![],
+            pushsection_exec_stack: vec![],
+            pushsection_code_ranges: vec![],
             emit_asm_text: false,
             debug_level: 0,
             emit_cfi: false,
@@ -1565,6 +1571,21 @@ impl Codegen {
         });
         self.custom_sec_indices.insert(name.to_string(), idx);
         idx
+    }
+
+    /// 解析 `.pushsection name, "flags"` 中的 flags (a/w/x 等), 返回 (is_writable, is_exec)
+    fn parse_pushsection_flags(line: &str) -> (bool, bool) {
+        let mut is_writable = false;
+        let mut is_exec = false;
+        if let Some(q_start) = line.find('"') {
+            let after = &line[q_start + 1..];
+            if let Some(q_len) = after.find('"') {
+                let flags = &after[..q_len];
+                is_writable = flags.contains('w') || flags.contains('W');
+                is_exec = flags.contains('x') || flags.contains('X');
+            }
+        }
+        (is_writable, is_exec)
     }
 
     /// .pushsection 块内的数据指令解析与发射
@@ -2137,6 +2158,58 @@ impl Codegen {
                 Some(crate::debug::FuncFrame::with_cfi(pc, sz, cfi_ops))
             })
             .collect()
+    }
+
+    /// 构建内核 ORC unwind 节区对: `.orc_unwind_ip` (s32 数组, 每个条目带
+    /// R_X86_64_PC32 重定位, 以 .text section 符号为基址) + `.orc_unwind`
+    /// (6 字节 packed orc_entry 数组) + `.rela.orc_unwind_ip`.
+    ///
+    /// 内核构建用 `-fno-asynchronous-unwind-tables` 关闭 .eh_frame 后, ORC
+    /// 是内核 ORC 解包器的唯一栈展开来源. 条目按 PC 排序 (二进制搜索要求).
+    pub fn build_orc_sections(&mut self, module: &crate::ir::Module) {
+        let mut frames = self.func_frames(module);
+        if frames.is_empty() {
+            return;
+        }
+        // 内核 orc 表需按 IP 排序 (__orc_find 二分查找)
+        frames.sort_by_key(|f| f.pc);
+        let Some(&text_sym_idx) = self.sym_index.get(".text") else {
+            return;
+        };
+        let ip_sec_idx = self.extra_sections.len();
+        let mut ip_data = Vec::with_capacity(frames.len() * 4);
+        let mut ip_relas = Vec::with_capacity(frames.len());
+        for f in &frames {
+            let off = ip_data.len() as u64;
+            ip_data.extend_from_slice(&0u32.to_le_bytes()); // 占位, 由链接重定位填充
+            // R_X86_64_PC32: *entry = S(.text) + A(pc) - P(条目地址);
+            // 运行时 orc_ip() = P + *entry = 最终 .text 基址 + pc = 函数真实地址
+            ip_relas.push(ElfRela {
+                offset: off,
+                sym_index: text_sym_idx,
+                rel_type: elf::R_X86_64_PC32,
+                addend: f.pc as i64,
+            });
+        }
+        self.extra_sections.push(ElfSection {
+            name: ".orc_unwind_ip".to_string(),
+            data: ip_data,
+            ty: SHT_PROGBITS,
+            flags: SHF_ALLOC,
+            align: 4,
+        });
+        self.extra_rela_sections.push(elf::ExtraRelaSection {
+            name: ".rela.orc_unwind_ip".to_string(),
+            relocations: ip_relas,
+            target_sec_index: (7 + ip_sec_idx) as u32,
+        });
+        self.extra_sections.push(ElfSection {
+            name: ".orc_unwind".to_string(),
+            data: crate::debug::build_orc_unwind(&frames),
+            ty: SHT_PROGBITS,
+            flags: SHF_ALLOC,
+            align: 2,
+        });
     }
 
     pub fn compile(&mut self, module: &crate::ir::Module) {
@@ -3232,13 +3305,20 @@ impl Codegen {
         // 函数定义符号 (包括嵌套函数)
         for name in &self.global_asm_exports {
             if let Some(&off) = self.labels.get(name) {
+                // 汇编 .globl 导出的函数: 计算 size, 否则 st_size=0
+                // 会让 objtool/内核链接脚本无法确定函数边界
+                let size = self
+                    .func_sizes
+                    .get(name)
+                    .copied()
+                    .unwrap_or_else(|| self.compute_func_size_fallback(name, off));
                 global_syms.push(ElfSym {
                     name: name.clone(),
                     section: 1,
                     value: off,
-                    size: 0,
+                    size,
                     bind: STB_GLOBAL,
-                    ty: STT_NOTYPE,
+                    ty: STT_FUNC,
                     visibility: STV_DEFAULT,
                 });
             }
@@ -3416,15 +3496,39 @@ impl Codegen {
             });
         }
 
+        // .text section 符号 (LOCAL): ORC unwind 的 .rela.orc_unwind_ip 需要
+        // PC32 重定位以 .text section 符号为基址 (与 objtool 输出一致)
+        if !self.code.is_empty() {
+            local_syms.push(ElfSym {
+                name: ".text".to_string(),
+                section: 1,
+                value: 0,
+                size: self.code.len() as u64,
+                bind: STB_LOCAL,
+                ty: STT_SECTION,
+                visibility: STV_DEFAULT,
+            });
+        }
+
         // .pushsection 非文本节: 为数字标签引用创建本地符号
         for rel in &self.pending_custom_sec_rels {
             if !self.sym_index.contains_key(&rel.symbol) {
                 if let Some(&pos) = self.labels.get(&rel.symbol) {
+                    // 若标签位于可执行 pushsection (.fixup/.altinstr_replacement)
+                    // 代码区间内, 符号需指向自定义节而非 .text (代码已搬迁).
+                    let (section, value) = self
+                        .pushsection_code_ranges
+                        .iter()
+                        .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
+                        .map(|(start, _size, sec_idx, sec_off)| {
+                            ((*sec_idx + 7) as u16, *sec_off + (pos - *start))
+                        })
+                        .unwrap_or((1u16, pos));
                     let idx = local_syms.len() as u32 + self.symbols.len() as u32;
                     local_syms.push(ElfSym {
                         name: rel.symbol.clone(),
-                        section: 1, // .text
-                        value: pos,
+                        section,
+                        value,
                         size: 0,
                         bind: STB_LOCAL,
                         ty: STT_NOTYPE,
@@ -3741,15 +3845,20 @@ impl Codegen {
         // 将源地址位于自定义函数中的重定位移入对应 .rela.<section>。
         let mut custom_relas: HashMap<usize, Vec<ElfRela>> = HashMap::new();
         let mut text_relas = vec![];
+        // 待搬迁区间: 自定义函数 + 可执行 pushsection 代码 (text start, size, sec_idx, sec_off)
+        let move_ranges: Vec<(u64, u64, usize, u64)> = custom_func_ranges
+            .iter()
+            .map(|(_, s, e, i, o)| (*s, *e, *i, *o))
+            .chain(self.pushsection_code_ranges.iter().copied())
+            .collect();
         for mut rel in self.relocations.drain(..) {
-            if let Some((_, emitted_start, _emitted_size, sec_idx, sec_off)) = custom_func_ranges
+            if let Some((emitted_start, _size, sec_idx, sec_off)) = move_ranges
                 .iter()
-                .find(|(_, emitted_start, emitted_size, _, _)| {
-                    rel.offset >= *emitted_start && rel.offset < *emitted_start + *emitted_size
-                })
+                .find(|(s, e, _, _)| rel.offset >= *s && rel.offset < *s + *e)
+                .copied()
             {
-                rel.offset = *sec_off + (rel.offset - *emitted_start);
-                custom_relas.entry(*sec_idx).or_default().push(rel);
+                rel.offset = sec_off + (rel.offset - emitted_start);
+                custom_relas.entry(sec_idx).or_default().push(rel);
             } else {
                 text_relas.push(rel);
             }
@@ -3779,6 +3888,15 @@ impl Codegen {
         // 解析内部跳转 (本地标签)，再把最终机器码覆盖到自定义节副本。
         self.resolve(0);
         for (_, emitted_start, emitted_size, sec_idx, sec_off) in &custom_func_ranges {
+            let src = self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
+                .to_vec();
+            let dst_start = *sec_off as usize;
+            let dst_end = dst_start + *emitted_size as usize;
+            self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
+            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize].fill(0);
+        }
+        // 可执行 pushsection (.fixup/.altinstr_replacement) 代码区间同样搬迁
+        for (emitted_start, emitted_size, sec_idx, sec_off) in &self.pushsection_code_ranges {
             let src = self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
                 .to_vec();
             let dst_start = *sec_off as usize;
@@ -14610,18 +14728,38 @@ impl Codegen {
                     .unwrap_or("")
                     .trim_end_matches(',');
                 if !sec_name.starts_with(".text") && !sec_name.is_empty() {
-                    // 解析 flags
-                    let is_writable = trimmed.contains('"')
-                        && (trimmed.contains('w') || trimmed.contains('W'));
+                    // 解析 flags ("ax" → 可执行, "aw" → 可写)
+                    let (is_writable, is_exec) = Self::parse_pushsection_flags(trimmed);
                     let sec_idx = self.ensure_custom_section(
-                        sec_name, false, is_writable,
+                        sec_name, is_exec, is_writable,
                     );
+                    // 可执行节 (.fixup/.altinstr_replacement): 代码先发射到
+                    // self.code, .popsection 时记录区间, 最终整体搬迁到自定义节.
+                    if is_exec {
+                        self.pushsection_exec_stack
+                            .push((sec_idx, self.code.len() as u64));
+                    }
                     self.pushsection_stack.push(sec_idx);
                     continue;
                 }
             }
             // .popsection: 退出 pushsection 模式
             if trimmed.starts_with(".popsection") {
+                if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
+                    // 记录可执行节的代码区间, 供最终搬迁到自定义节
+                    let size = self.code.len() as u64 - start;
+                    if size > 0 {
+                        let align = self.extra_sections[sec_idx].align.max(16);
+                        let len = self.extra_sections[sec_idx].data.len();
+                        let aligned = (len + align as usize - 1) & !(align as usize - 1);
+                        self.extra_sections[sec_idx].data.resize(aligned, 0);
+                        let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                        self.extra_sections[sec_idx]
+                            .data
+                            .resize((sec_off + size) as usize, 0);
+                        self.pushsection_code_ranges.push((start, size, sec_idx, sec_off));
+                    }
+                }
                 if !self.pushsection_stack.is_empty() {
                     self.pushsection_stack.pop();
                 } else {
@@ -14632,6 +14770,23 @@ impl Codegen {
             // 在 pushsection 块内: 收集数据到自定义节
             if !self.pushsection_stack.is_empty() {
                 let sec_idx = *self.pushsection_stack.last().unwrap();
+                let is_exec = self.extra_sections[sec_idx].flags & elf::SHF_EXECINSTR != 0;
+                if is_exec {
+                    // 可执行 pushsection: 指令/数据全部发射到 self.code,
+                    // 标签与跳转在 .text 坐标解析, 退出时整体搬迁.
+                    if let Some(name) = locals.name_at(i) {
+                        self.label(name);
+                        continue;
+                    }
+                    let subbed = locals.substitute(trimmed, i);
+                    self.current_asm_line = i + 1;
+                    if subbed.trim().starts_with('.') {
+                        self.emit_asm_directive(&subbed);
+                    } else {
+                        self.emit_asm_line(&subbed);
+                    }
+                    continue;
+                }
                 // 仍然注册数字标签
                 if let Some(name) = locals.name_at(i) {
                     self.label(name);

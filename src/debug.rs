@@ -2076,45 +2076,47 @@ pub fn build_orc_unwind_ip(functions: &[FuncFrame]) -> Vec<u8> {
     data
 }
 
-/// ORC 元数据：构建 .orc_unwind 节区 (8 字节 ORC 条目数组)
+/// ORC 元数据：构建 .orc_unwind 节区 (6 字节 packed orc_entry 数组)
 /// 每个条目对应 .orc_unwind_ip 中相同索引的 PC。
 ///
-/// struct orc_entry (8 bytes, packed bitfields):
+/// struct orc_entry (arch/x86/include/asm/orc_types.h, __packed, 6 字节):
 ///   sp_offset: s16, bp_offset: s16,
-///   sp_reg: u4, bp_reg: u4, type: u4, signal: u1, pad: u3
+///   sp_reg: u4, bp_reg: u4, type: u3, signal: u1
 ///
 /// 布局 (little-endian):
 ///   byte 0..1: sp_offset (s16)
 ///   byte 2..3: bp_offset (s16)
 ///   byte 4:    (bp_reg << 4) | sp_reg
-///   byte 5:    (pad << 5) | (signal << 4) | type
-///   byte 6..7: reserved (0)
+///   byte 5:    (signal << 3) | type
+///
+/// 注意: 必须与 objtool/内核 ORC 解包器期望的 6 字节大小一致 —
+/// unwind_init() 校验 orc_size % sizeof(struct orc_entry) == 0,
+/// 多出的字节会让表解析错位.
 pub fn build_orc_unwind(functions: &[FuncFrame]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(functions.len() * 8);
+    // 内核 ORC 寄存器/类型枚举 (asm/orc_types.h)
+    const ORC_REG_SP: u8 = 3;
+    const ORC_REG_BP: u8 = 4;
+    const ORC_TYPE_CALL: u8 = 2;
+    let mut data = Vec::with_capacity(functions.len() * 6);
     for func in functions {
         let has_cfi = !func.cfi_ops.is_empty();
-        // 默认: CFA = rsp + 8 (无 frame pointer)
-        // 有 CFI 时: CFA = rbp + 16 (有 frame pointer)
-        let (sp_offset, bp_offset, sp_reg, bp_reg) = if has_cfi {
-            // Frame pointer 模式: sp_reg=RSP_BP(6), bp_reg=undefined
-            // sp_offset = 8 (return address at CFA-8)
-            // bp_offset = -16 (saved rbp at CFA-16)
-            (8i16, -16i16, 0u8, 6u8)
+        // 无 frame pointer: CFA = rsp + 8 (返回地址在 CFA-8)
+        // 有 CFI (frame pointer): CFA = rbp + 16 (保存的 rbp 在 CFA-16)
+        let (sp_offset, sp_reg, bp_offset, bp_reg) = if has_cfi {
+            (16i16, ORC_REG_BP, 0i16, 0u8)
         } else {
-            // 简单模式: CFA = rsp + 8
-            (8i16, 0i16, 0u8, 0u8)
+            (8i16, ORC_REG_SP, 0i16, 0u8)
         };
-        let orc_type: u8 = 0; // UNWIND_TYPE_HINT (default)
+        let orc_type: u8 = ORC_TYPE_CALL;
         let signal: u8 = 0;
-        // Pack into 8 bytes
+        // Pack into 6 bytes (little-endian bitfields: 低地址低位)
         data.extend_from_slice(&sp_offset.to_le_bytes());
         data.extend_from_slice(&bp_offset.to_le_bytes());
         data.push((bp_reg << 4) | (sp_reg & 0xf));
-        data.push((signal << 4) | (orc_type & 0xf));
-        data.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        data.push((signal << 3) | (orc_type & 0x7));
     }
     if data.is_empty() {
-        data.resize(8, 0);
+        data.resize(6, 0);
     }
     data
 }

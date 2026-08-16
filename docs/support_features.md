@@ -324,7 +324,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | DWARF v4 | x86_64 / AArch64 / RISC-V 全部架构 |
 | `.BTF` | x86_64（struct dcc_probe）/ AArch64 / RISC-V |
 | `.eh_frame` | CIE + FDE；setjmp CFI 寄存器保存表 |
-| `.orc_unwind_ip` | 函数已定义 (`debug::build_orc_unwind_ip`)，待接入 codegen |
+| `.orc_unwind_ip` / `.orc_unwind` | 内核 ORC 解包器节区对：`.orc_unwind_ip` 条目带 `R_X86_64_PC32` 重定位（以 `.text` section 符号为基址，与 objtool 输出一致），`.orc_unwind` 为 6 字节 packed `orc_entry`；`-fno-asynchronous-unwind-tables`（内核）或 `-g` 时输出 |
 | DWARF line table | `-g1` 下自动去重 |
 | DWARF type info | 位域成员 `DW_AT_bit_size` + `DW_AT_bit_offset` |
 | `-gsplit-dwarf` / `-gpubnames` | `.dwo` 文件生成 |
