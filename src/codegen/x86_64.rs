@@ -1763,6 +1763,16 @@ impl Codegen {
         (is_writable, is_exec)
     }
 
+    fn pad_custom_section_to(&mut self, sec_idx: usize, len: usize) {
+        let section = &mut self.extra_sections[sec_idx];
+        let fill = if section.flags & elf::SHF_EXECINSTR != 0 {
+            0x90
+        } else {
+            0
+        };
+        section.data.resize(len, fill);
+    }
+
     /// .pushsection 块内的数据指令解析与发射
     fn emit_pushsection_data(
         &mut self,
@@ -1885,7 +1895,7 @@ impl Codegen {
                     if a > 0 {
                         let len = self.extra_sections[sec_idx].data.len();
                         let aligned = (len + a - 1) & !(a - 1);
-                        self.extra_sections[sec_idx].data.resize(aligned, 0);
+                        self.pad_custom_section_to(sec_idx, aligned);
                     }
                 }
             }
@@ -1900,7 +1910,7 @@ impl Codegen {
                     let a = 1usize << p;
                     let len = self.extra_sections[sec_idx].data.len();
                     let aligned = (len + a - 1) & !(a - 1);
-                    self.extra_sections[sec_idx].data.resize(aligned, 0);
+                    self.pad_custom_section_to(sec_idx, aligned);
                 }
             }
             ".zero" => {
@@ -3312,7 +3322,7 @@ impl Codegen {
                             self.extra_sections[sec_idx].align.max(func_align as u64);
                         let aligned = (self.extra_sections[sec_idx].data.len() + func_align - 1)
                             & !(func_align - 1);
-                        self.extra_sections[sec_idx].data.resize(aligned, 0);
+                        self.pad_custom_section_to(sec_idx, aligned);
                         let sec_off = self.extra_sections[sec_idx].data.len() as u64;
                         // 从 .text 拷贝代码到自定义节，包含 patchable entry 前缀。
                         let code_slice = self.code
@@ -3382,7 +3392,7 @@ impl Codegen {
                         self.extra_sections[sec_idx].align.max(func_align as u64);
                     let aligned = (self.extra_sections[sec_idx].data.len() + func_align - 1)
                         & !(func_align - 1);
-                    self.extra_sections[sec_idx].data.resize(aligned, 0);
+                    self.pad_custom_section_to(sec_idx, aligned);
                     let sec_off = self.extra_sections[sec_idx].data.len() as u64;
                     let code_slice = self.code
                         [emitted_start as usize..(emitted_start + emitted_size) as usize]
@@ -15858,11 +15868,9 @@ impl Codegen {
                         let align = self.extra_sections[sec_idx].align.max(16);
                         let len = self.extra_sections[sec_idx].data.len();
                         let aligned = (len + align as usize - 1) & !(align as usize - 1);
-                        self.extra_sections[sec_idx].data.resize(aligned, 0);
+                        self.pad_custom_section_to(sec_idx, aligned);
                         let sec_off = self.extra_sections[sec_idx].data.len() as u64;
-                        self.extra_sections[sec_idx]
-                            .data
-                            .resize((sec_off + size) as usize, 0);
+                        self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
                         self.pushsection_code_ranges
                             .push((start, size, sec_idx, sec_off));
                     }

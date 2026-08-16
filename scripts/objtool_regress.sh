@@ -33,11 +33,8 @@ fi
 
 if command -v objtool >/dev/null 2>&1; then
     echo "-- objtool check"
-    if objtool check "$OBJ" 2>&1; then
-        echo "PASS: objtool check"
-    else
-        echo "WARN: objtool reported issues (sections present)"
-    fi
+    objtool check "$OBJ"
+    echo "PASS: objtool check"
 else
     echo "SKIP: objtool not installed; eh_frame/ORC sections verified via readelf"
 fi

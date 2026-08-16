@@ -1,6 +1,6 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-08-16 — 基于源码、测试与脚本的只读审计
+> 最后更新：2026-08-17 — 基于源码、测试与脚本的只读审计
 >
 > 已支持特性详见 `docs/support_features.md`。本文件只记录仍不支持、
 > 明确降级、仍为 stub/no-op，或缺少测试契约的项目。
@@ -11,18 +11,7 @@
 |------|------|
 | dcc 编译器错误 | ✅ 零错误 (E0001/E0102/E0300/E0301 已清零) |
 | 成功产出 .o 文件 | 133+ 个 (defconfig x86_64) |
-| 剩余阻塞 | objtool 兼容性与严格内核 E2E 门禁 |
-
-### objtool 兼容性（核心阻塞）
-
-| 问题 | 说明 |
-|------|------|
-| 指令解码失败 | objtool 无法解码 dcc 生成的部分指令序列 (`can't decode instruction`) |
-| 函数起始定位失败 | `_context_unsafe_alias()` 等空函数/内联函数 objtool 无法定位 (`can't find starting instruction`) |
-| 跳转目标缺失 | 个别函数内跳转目标地址 objtool 无法解析 (`can't find jump dest instruction`) |
-
-根因：dcc 的 x86 编码、函数边界和跳转目标信息仍未与内核
-objtool 的解码/验证模型完全一致。
+| 剩余阻塞 | 严格内核 E2E 门禁 |
 
 ## C 前端 / IR 语义限制
 
@@ -38,7 +27,6 @@ objtool 的解码/验证模型完全一致。
 | 限制 | 说明 |
 |------|------|
 | mini-asm 未知指令 | 未识别 mnemonic 或已识别指令的不合法操作数仍 warning 后发 `nop`，不是 hard error |
-| objtool consumer compatibility | 部分可执行对象仍无法通过 objtool 解码、函数边界和 ret 模式验证 |
 | sanitizer runtime 依赖 | ASAN/UBSAN/KCSAN 等主要只负责插桩；运行时库与实际 report 行为不由 dcc 完整提供 |
 
 ### AArch64 / RISC-V / MIPS / ARM
@@ -127,13 +115,11 @@ objtool 的解码/验证模型完全一致。
 | kernel object corpus | 固化若干真实内核 `.o` 样本，覆盖 `arch/x86/kernel`、`kernel/sched`、`lib/` |
 | stale CI paths | 校验 CI/examples 使用当前存在的 examples 路径，避免引用历史根目录 fixture |
 
-### objtool / ORC / x86 mini-asm
+### x86 mini-asm
 
 | 缺口 | 建议测试 |
 |------|----------|
-| objtool known failures | 为 `can't decode instruction`、`can't find starting instruction`、`can't find jump dest instruction`、rethunk naked return 增加最小 xfail fixture |
 | byte-level asm | 对 Linux legacy mini-asm 指令增加反汇编/字节级断言，而不只检查 “未 emitted as nop” |
-| ORC consumer | 增加 objtool strict 单对象测试，验证 ORC/函数边界可被 objtool 消费 |
 
 ### Sanitizer
 

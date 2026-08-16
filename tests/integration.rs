@@ -3313,6 +3313,30 @@ asm(".type _context_unsafe_alias, @function\n"
 }
 
 #[test]
+fn executable_pushsection_alignment_padding_is_nop() {
+    let source = r#"
+asm(".pushsection .fixup, \"ax\"\n"
+    ".byte 0xcc\n"
+    ".p2align 4\n"
+    ".byte 0xc3\n"
+    ".popsection\n");
+int main(void) { return 0; }
+"#;
+    let (output, obj_path) = run_object_test("exec-pushsection-nop-pad", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let obj_data = std::fs::read(&obj_path).expect("read object file");
+    let fixup = elf64_section_data(&obj_data, ".fixup").expect("missing .fixup");
+    assert_eq!(fixup.first(), Some(&0xcc));
+    assert_eq!(fixup.last(), Some(&0xc3));
+    assert!(
+        fixup[1..fixup.len() - 1].iter().all(|&b| b == 0x90),
+        "executable section padding must be decodable nops: {fixup:02x?}"
+    );
+    let _ = std::fs::remove_file(&obj_path);
+}
+
+#[test]
 fn function_return_thunk_avoids_naked_ret_in_c_and_asm() {
     let source = r#"
 asm(".globl empty_asm_func\n"
