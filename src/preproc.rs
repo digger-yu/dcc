@@ -601,13 +601,17 @@ pub fn preprocess(
     // (内核构建通常带 nolibc, 不需要); 用户可在 -D 中手动设置
     // __COUNTER__ / __INCLUDE_LEVEL__ 在宏展开阶段特殊处理
     // (不放入 macros, 避免被通用替换逻辑误吃)
+    // <stdatomic.h> 内建宏定义 (C11): 仅在 hosted 模式预置。
+    // freestanding 模式 (__STDC_NO_ATOMICS__=1) 不预置 — Linux 内核自带
+    // 同名的 atomic_* / atomic_thread_fence / kill_dependency 内联函数与宏,
+    // 预置会与它们冲突 (见上方 __STDC_NO_ATOMICS__ 注释)。
+    if !freestanding {
     pp.define_builtin("memory_order_relaxed", "0");
     pp.define_builtin("memory_order_consume", "1");
     pp.define_builtin("memory_order_acquire", "2");
     pp.define_builtin("memory_order_release", "3");
     pp.define_builtin("memory_order_acq_rel", "4");
     pp.define_builtin("memory_order_seq_cst", "5");
-    // <stdatomic.h> 内建宏定义 (C11)
     // 原子类型 (简化: 展开为等价非原子类型, _Atomic 由类型系统处理)
     pp.define_builtin("atomic_int", "int");
     pp.define_builtin("atomic_uint", "unsigned int");
@@ -626,6 +630,11 @@ pub fn preprocess(
     pp.define_builtin("atomic_size_t", "unsigned long");
     pp.define_builtin("atomic_ptrdiff_t", "long");
     pp.define_builtin("atomic_wchar_t", "int");
+    // C11 7.17.6 其余强制类型宏 (与 __INTMAX_TYPE__/__UINTMAX_TYPE__ 对应)
+    pp.define_builtin("atomic_char16_t", "unsigned short");
+    pp.define_builtin("atomic_char32_t", "unsigned int");
+    pp.define_builtin("atomic_intmax_t", "long int");
+    pp.define_builtin("atomic_uintmax_t", "long unsigned int");
     pp.define_builtin("atomic_float", "float");
     pp.define_builtin("atomic_double", "double");
     pp.define_builtin("atomic_long_double", "long double");
@@ -681,6 +690,7 @@ pub fn preprocess(
     pp.define_builtin("ATOMIC_LONG_LOCK_FREE", "1");
     pp.define_builtin("ATOMIC_LLONG_LOCK_FREE", "1");
     pp.define_builtin("ATOMIC_POINTER_LOCK_FREE", "1");
+    } // !freestanding: C11 <stdatomic.h> 宏仅 hosted 模式预置
     // 内存序别名 (memory_order_xxx 已在上面定义)
     // __attribute__: 不定义为宏, 让 token 透传到解析器处理
     // 解析器会识别 __attribute__ 并处理 vector_size 等属性

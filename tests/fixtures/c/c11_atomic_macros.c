@@ -8,6 +8,10 @@ atomic_int   ai = 42;
 atomic_bool  ab = 1;
 atomic_long  al = 100L;
 atomic_size_t asz = 0;
+atomic_char16_t ac16 = 0;
+atomic_char32_t ac32 = 0;
+atomic_intmax_t aimax = 0;
+atomic_uintmax_t auimax = 0;
 
 /* ---- 内存序常量 ---- */
 int mo_relaxed = memory_order_relaxed;   /* 0 */
