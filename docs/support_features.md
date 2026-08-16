@@ -385,6 +385,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `stdatomic.h` 全部 | `atomic_flag` / `atomic_signal_fence` / `atomic_thread_fence` |
 | 浮点环境 (`fenv.h`) | `fegetround`/`fesetround`/`feclearexcept`/`feraiseexcept`/`fetestexcept`/`fegetexceptflag`/`fesetexceptflag`/`fetestexceptflag`/`fegetenv`/`fesetenv`/`feholdexcept`/`feupdateenv` 内联为 MXCSR/x87 指令 (不依赖 libm)；`pragma STDC FENV_ACCESS` ON/OFF/DEFAULT 驱动 opt 阶段浮点折叠开关 |
 | 复杂数学函数 | `cproj` / `cabs` / `carg` 走 libm |
+| executable `.pushsection` jump targets | `.fixup` / `.altinstr_replacement` code moved from `.text` keeps valid PC32 relocations for objtool jump-destination checks |
 | per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |
 | jump_label 静态 key 声明 | `_DECLARE_STATIC_KEY_0/1` |
 | rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |

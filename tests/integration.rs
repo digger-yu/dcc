@@ -2921,6 +2921,13 @@ fn asm_pushsection_exec_code_lands_in_custom_section() {
         secs.contains_key(".rela.altinstructions"),
         "missing .rela.altinstructions (label ref into .altinstr_replacement)"
     );
+    // .fixup jumps back into .text in common kernel fault-handler
+    // patterns.  That must be represented with a relocation so objtool can
+    // resolve the final jump target after the section is moved.
+    assert!(
+        secs.contains_key(".rela.fixup"),
+        "missing .rela.fixup for executable pushsection jump target"
+    );
     // 数据节数据非零: __ex_table/.altinstructions 条目必须输出
     for sec in ["__ex_table", ".altinstructions"] {
         let (_, _, size) = secs
@@ -2929,6 +2936,50 @@ fn asm_pushsection_exec_code_lands_in_custom_section() {
             .unwrap_or_else(|| panic!("missing {sec} section (pushsection data dropped)"));
         assert!(size > 0, "{sec} data dropped (size {size})");
     }
+}
+
+#[test]
+fn asm_numeric_labels_are_scoped_per_block() {
+    let source = r#"
+int first(int x) {
+    asm volatile(
+        "1: cmpl $0, %0\n\t"
+        "   je 1f\n\t"
+        "   addl $1, %0\n\t"
+        "1:"
+        : "+r"(x));
+    return x;
+}
+
+int second(int x) {
+    asm volatile(
+        "1: cmpl $0, %0\n\t"
+        "   je 1f\n\t"
+        "   addl $2, %0\n\t"
+        "1:"
+        : "+r"(x));
+    return x;
+}
+"#;
+    let (output, obj_path) = run_object_test("asm-numeric-label-scope", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let dump = Command::new("objdump")
+        .args(["-dr"])
+        .arg(&obj_path)
+        .output()
+        .expect("objdump");
+    let _ = std::fs::remove_file(&obj_path);
+    assert!(dump.status.success(), "objdump -dr failed");
+    let disasm = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        disasm.contains("<first>:") && disasm.contains("<second>:"),
+        "missing function disassembly: {disasm}"
+    );
+    assert!(
+        disasm.contains("<first+") && disasm.contains("<second+"),
+        "numeric jumps should target labels inside each function: {disasm}"
+    );
 }
 
 /// ORC unwind info: .orc_unwind_ip + .orc_unwind sections generated with -g -c

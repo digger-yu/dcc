@@ -222,14 +222,20 @@ struct FuncAsmLayout {
     text_start: u64,
 }
 
+#[derive(Clone)]
 struct PendingJump {
+    /// 原始 self.code 中的指令起始偏移。
     at: u64,
     target: String,
     kind: JumpKind,
+    /// disp32/imm32 字段在原始 self.code 中的偏移。
+    disp_offset: u64,
+    /// PC-relative 指令的下一条指令偏移。
+    next_ip: u64,
     /// push $label: imm32 = absolute address (not PC-relative)
     is_push_imm: bool,
 }
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum JumpKind {
     Jmp,
     Je,
@@ -538,6 +544,7 @@ impl AsmRegisterPlanner {
 }
 
 /// .pushsection 非文本节数据收集: 待解析的符号引用重定位
+#[derive(Clone)]
 struct CustomSecRel {
     sec_idx: usize,
     offset: u64,
@@ -562,14 +569,14 @@ struct AsmLocalLabels {
 }
 
 impl AsmLocalLabels {
-    fn scan(lines: &[String]) -> Self {
+    fn scan(lines: &[String], scope: u32) -> Self {
         let mut defs = Vec::new();
         let mut serial: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
         for (i, line) in lines.iter().enumerate() {
             let t = line.trim();
             if let Some(num) = Self::parse_numeric_label(t) {
                 let n = serial.entry(num).or_insert(0);
-                let name = format!(".Lasm_local_{num}_{n}");
+                let name = format!(".Lasm_local_{scope}_{num}_{n}");
                 *n += 1;
                 defs.push((i, num, name));
             }
@@ -1229,6 +1236,8 @@ struct FuncEmitChunk {
     code: Vec<u8>,
     entry_offset: u64,
     size: u64,
+    labels: HashMap<String, u64>,
+    pending: Vec<PendingJump>,
     string_refs: Vec<(u64, Vec<u8>)>,
     float_refs: Vec<(u64, u64)>,
     pending_func_rels: Vec<(u64, String)>,
@@ -1237,6 +1246,10 @@ struct FuncEmitChunk {
     pending_data_rels: Vec<(u64, String)>,
     pending_sib_data_rels: Vec<(u64, String)>,
     label_addr_refs: Vec<(u64, String)>,
+    pending_custom_sec_rels: Vec<CustomSecRel>,
+    pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
+    extra_sections: Vec<elf::ElfSection>,
+    custom_sec_indices: HashMap<String, usize>,
     disasm_calls: HashMap<u64, String>,
 }
 
@@ -1943,7 +1956,7 @@ impl Codegen {
                     if let Some(name) = numeric_label_map.get(num_str) {
                         return name.clone();
                     }
-                    return format!(".Lasm_local_{}_0", num_str);
+                    return format!(".Lasm_local_0_{}_0", num_str);
                 }
             }
         }
@@ -2048,6 +2061,8 @@ impl Codegen {
             at,
             target: target.into(),
             kind,
+            disp_offset: if kind == JumpKind::Jmp { at + 1 } else { at + 2 },
+            next_ip: if kind == JumpKind::Jmp { at + 5 } else { at + 6 },
             is_push_imm: false,
         });
     }
@@ -2061,10 +2076,7 @@ impl Codegen {
         for p in pending {
             let Some(&dst) = self.labels.get(&p.target) else {
                 if self.relocatable && !p.is_push_imm {
-                    let rel_off = match p.kind {
-                        JumpKind::Jmp => p.at + 1,
-                        _ => p.at + 2,
-                    };
+                    let rel_off = p.disp_offset;
                     self.pending_code_rels.push(PendingCodeRel {
                         offset: rel_off,
                         symbol: p.target,
@@ -2075,16 +2087,13 @@ impl Codegen {
                 }
                 panic!("unresolved label: {}", p.target);
             };
-            let off = p.at as usize;
+            let off = p.disp_offset as usize;
             if p.is_push_imm {
                 // push $label: imm32 = absolute address (lower 32 bits)
                 self.code[off..off + 4].copy_from_slice(&(dst as i32).to_le_bytes());
             } else {
-                let (rel_from, rel_off) = match p.kind {
-                    JumpKind::Jmp => (p.at + 5, off + 1),
-                    _ => (p.at + 6, off + 2),
-                }; // Jmp=5字节, Jcc=6字节
-                let rel = (dst as i64) - (rel_from as i64);
+                let rel = (dst as i64) - (p.next_ip as i64);
+                let rel_off = p.disp_offset as usize;
                 self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
             }
         }
@@ -3322,10 +3331,16 @@ impl Codegen {
             }
         }
 
+        let move_ranges: Vec<(u64, u64, usize, u64)> = custom_func_ranges
+            .iter()
+            .map(|(_, s, e, i, o)| (*s, *e, *i, *o))
+            .chain(self.pushsection_code_ranges.iter().copied())
+            .collect();
+
         // 所有标签已发射完成后, 先修补本地跳转, 并把最终仍未解析
         // 的 asm 符号跳转转换为 pending code relocation。符号表收集
         // 依赖 pending_code_rels 中的外部符号, 所以必须先于 Phase 2。
-        self.patch_local_jumps();
+        self.patch_local_jumps(&move_ranges);
 
         // Phase 2: 收集所有符号 (正确顺序: STN_UNDEF → LOCAL → GLOBAL)
         // 先收集到临时 vec, 然后排序构建最终 symtab
@@ -4287,15 +4302,22 @@ impl Codegen {
         cg
     }
 
-    fn patch_local_jumps(&mut self) {
+    fn final_text_loc(pos: u64, move_ranges: &[(u64, u64, usize, u64)]) -> (u16, u64) {
+        move_ranges
+            .iter()
+            .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
+            .map(|(start, _size, sec_idx, sec_off)| {
+                ((*sec_idx + 7) as u16, *sec_off + (pos - *start))
+            })
+            .unwrap_or((1u16, pos))
+    }
+
+    fn patch_local_jumps(&mut self, move_ranges: &[(u64, u64, usize, u64)]) {
         let pending = std::mem::take(&mut self.pending);
         for p in pending {
             let Some(&dst) = self.labels.get(&p.target) else {
                 if self.relocatable && !p.is_push_imm {
-                    let rel_off = match p.kind {
-                        JumpKind::Jmp => p.at + 1,
-                        _ => p.at + 2,
-                    };
+                    let rel_off = p.disp_offset;
                     self.pending_code_rels.push(PendingCodeRel {
                         offset: rel_off,
                         symbol: p.target,
@@ -4307,17 +4329,29 @@ impl Codegen {
                 self.pending.push(p);
                 continue;
             };
-            let off = p.at as usize;
+            let off = p.disp_offset as usize;
             if p.is_push_imm {
                 // push $label: imm32 = absolute address (lower 32 bits)
                 self.code[off..off + 4].copy_from_slice(&(dst as i32).to_le_bytes());
             } else {
-                let (rel_from, rel_off) = match p.kind {
-                    JumpKind::Jmp => (p.at + 5, off + 1),
-                    _ => (p.at + 6, off + 2),
-                };
-                let rel = (dst as i64) - (rel_from as i64);
-                self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+                let (src_sec, src_at) = Self::final_text_loc(p.at, move_ranges);
+                let src_next = src_at + (p.next_ip - p.at);
+                let (dst_sec, dst_pos) = Self::final_text_loc(dst, move_ranges);
+                let rel_off = p.disp_offset as usize;
+                if src_sec == dst_sec {
+                    let rel = (dst_pos as i64) - (src_next as i64);
+                    self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+                } else if self.relocatable {
+                    self.pending_code_rels.push(PendingCodeRel {
+                        offset: p.disp_offset,
+                        symbol: p.target,
+                        rel_type: R_X86_64_PC32,
+                        addend: -4,
+                    });
+                } else {
+                    let rel = (dst as i64) - (p.next_ip as i64);
+                    self.code[rel_off..rel_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+                }
             }
         }
     }
@@ -4325,7 +4359,6 @@ impl Codegen {
     fn emit_func_chunk(ctx: ParallelEmitCtx, f: FuncDecl, prog: &Program) -> FuncEmitChunk {
         let mut cg = Self::codegen_from_parallel(ctx);
         cg.compile_func(&f, prog);
-        cg.patch_local_jumps();
         let size = cg
             .func_sizes
             .get(&f.name.name)
@@ -4337,6 +4370,8 @@ impl Codegen {
             code: cg.code,
             entry_offset,
             size,
+            labels: cg.labels,
+            pending: cg.pending,
             string_refs: cg.string_refs,
             float_refs: cg.float_refs,
             pending_func_rels: cg.pending_func_rels,
@@ -4345,6 +4380,10 @@ impl Codegen {
             pending_data_rels: cg.pending_data_rels,
             pending_sib_data_rels: cg.pending_sib_data_rels,
             label_addr_refs: cg.label_addr_refs,
+            pending_custom_sec_rels: cg.pending_custom_sec_rels,
+            pushsection_code_ranges: cg.pushsection_code_ranges,
+            extra_sections: cg.extra_sections,
+            custom_sec_indices: cg.custom_sec_indices,
             disasm_calls: cg.disasm_calls,
         }
     }
@@ -4356,6 +4395,9 @@ impl Codegen {
         let base = self.pos();
         self.labels
             .insert(chunk.name.clone(), base + chunk.entry_offset);
+        for (name, off) in &chunk.labels {
+            self.labels.insert(name.clone(), base + *off);
+        }
         self.func_sizes.insert(chunk.name.clone(), chunk.size);
         self.code.extend_from_slice(&chunk.code);
         for (pos, data) in chunk.string_refs {
@@ -4363,6 +4405,12 @@ impl Codegen {
         }
         for (pos, off) in chunk.float_refs {
             self.float_refs.push((base + pos, off));
+        }
+        for mut p in chunk.pending {
+            p.at += base;
+            p.disp_offset += base;
+            p.next_ip += base;
+            self.pending.push(p);
         }
         for (pos, sym) in chunk.pending_func_rels {
             self.pending_func_rels.push((base + pos, sym));
@@ -4382,6 +4430,30 @@ impl Codegen {
         }
         for (pos, lbl) in chunk.label_addr_refs {
             self.label_addr_refs.push((base + pos, lbl));
+        }
+        let mut sec_map = HashMap::new();
+        for extra in chunk.extra_sections {
+            let old_idx = sec_map.len();
+            let sec_idx = self.ensure_custom_section(
+                &extra.name,
+                extra.flags & elf::SHF_EXECINSTR != 0,
+                extra.flags & elf::SHF_WRITE != 0,
+            );
+            self.extra_sections[sec_idx].align =
+                self.extra_sections[sec_idx].align.max(extra.align);
+            sec_map.insert(old_idx, sec_idx);
+        }
+        for mut rel in chunk.pending_custom_sec_rels {
+            if let Some(&sec_idx) = sec_map.get(&rel.sec_idx) {
+                rel.sec_idx = sec_idx;
+                self.pending_custom_sec_rels.push(rel);
+            }
+        }
+        for (start, size, old_sec_idx, sec_off) in chunk.pushsection_code_ranges {
+            if let Some(&sec_idx) = sec_map.get(&old_sec_idx) {
+                self.pushsection_code_ranges
+                    .push((base + start, size, sec_idx, sec_off));
+            }
         }
         for (pos, name) in chunk.disasm_calls {
             self.disasm_calls.insert(base + pos, name);
@@ -4960,6 +5032,8 @@ impl Codegen {
                 at,
                 target: l.into(),
                 kind: JumpKind::Jmp,
+                disp_offset: at + 1,
+                next_ip: at + 5,
                 is_push_imm: false,
             });
         }
@@ -4975,6 +5049,8 @@ impl Codegen {
                 at,
                 target: l.into(),
                 kind: JumpKind::Jmp,
+                disp_offset: at + 1,
+                next_ip: at + 5,
                 is_push_imm: false,
             });
         }
@@ -15450,7 +15526,9 @@ impl Codegen {
 
     /// 发射已替换操作数后的 asm 模板行（含 GNU 局部数字标签）
     fn emit_resolved_asm_lines(&mut self, resolved_lines: &[String], is_global: bool) {
-        let locals = AsmLocalLabels::scan(resolved_lines);
+        let scope = self.next_label;
+        self.next_label += 1;
+        let locals = AsmLocalLabels::scan(resolved_lines, scope);
         if is_global {
             self.asm_last_text_label = None;
         }
@@ -16351,6 +16429,11 @@ impl Codegen {
             || label.chars().all(|c| c.is_ascii_digit())
             || Self::is_asm_directive(label)
             || label.contains([' ', '\t', '%', '(', ')'])
+            || label
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
         {
             return None;
         }
@@ -17511,11 +17594,13 @@ impl Codegen {
                     }
                 } else if let AsmOperand::Sym(s) = &ops[0] {
                     let at = self.pos();
-                    self.emit(&[0xC7, 0xF8, 0, 0]);
+                    self.emit(&[0xC7, 0xF8, 0, 0, 0, 0]);
                     self.pending.push(PendingJump {
                         at,
                         target: s.clone(),
-                        kind: JumpKind::Je,
+                        kind: JumpKind::Jmp,
+                        disp_offset: at + 2,
+                        next_ip: at + 6,
                         is_push_imm: false,
                     });
                 } else {
@@ -19653,6 +19738,8 @@ impl Codegen {
                     at: pos,
                     target: label.clone(),
                     kind: JumpKind::Jmp,
+                    disp_offset: pos,
+                    next_ip: 0,
                     is_push_imm: true,
                 });
             }
@@ -22284,6 +22371,8 @@ impl Codegen {
             at,
             target: label.to_string(),
             kind: JumpKind::Jmp,
+            disp_offset: disp_off,
+            next_ip: disp_off + 4,
             is_push_imm: false,
         });
     }
@@ -22368,6 +22457,8 @@ impl Codegen {
                     at,
                     target: label.clone(),
                     kind,
+                    disp_offset: at + 2,
+                    next_ip: at + 6,
                     is_push_imm: false,
                 });
             }
