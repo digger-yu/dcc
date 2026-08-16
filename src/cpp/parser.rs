@@ -3558,7 +3558,7 @@ impl<'a> CppParser<'a> {
         let mut full_name = name.clone();
         while matches!(&self.peek, Some(CppTok::ColonColon(_))) {
             self.bump(); // 吞 `::`
-            // 读取下一部分标识符
+                         // 读取下一部分标识符
             if let Some(CppTok::C(Tok {
                 kind: TokKind::Ident,
                 text,
@@ -3849,7 +3849,7 @@ impl<'a> CppParser<'a> {
             ) && self.looks_like_template_args_after_lt()
             {
                 self.bump(); // 吞 `<`
-                // 跳过模板实参 (不存储, friend 声明不影响 lower)
+                             // 跳过模板实参 (不存储, friend 声明不影响 lower)
                 let mut depth = 1;
                 while depth > 0 {
                     if matches!(
@@ -6917,10 +6917,7 @@ impl<'a> CppParser<'a> {
                         self.span(),
                     ));
                 }
-                ty = MangleType::Template {
-                    name: last,
-                    args,
-                };
+                ty = MangleType::Template { name: last, args };
             }
             // 跳过 const/volatile 后缀
             if self.at(CppKw::Const) {

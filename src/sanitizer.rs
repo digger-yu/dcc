@@ -670,7 +670,7 @@ fn instrument_expr(
             instrument_expr(e, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
         }
-        | Expr::String { .. }
+        Expr::String { .. }
         | Expr::SizeofTy { .. }
         | Expr::AlignofTy { .. }
         | Expr::Offsetof { .. }
@@ -1339,12 +1339,7 @@ fn make_asan_call(
 /// `poisoned_g = (need > 8g) && (v_g >= 128 || (v_g > 0 && need - 8g > v_g))`。
 /// (`v_g >= 128` 即负值毒化;`v_g > 0` 且覆盖超过可达前缀即部分毒化越界)
 /// 任一 granule 毒化即调 `__asan_report_loadN/storeN(addr)`。
-fn make_kernel_kasan_check(
-    addr: Expr,
-    size: usize,
-    is_write: bool,
-    span: &Span,
-) -> Expr {
+fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span) -> Expr {
     // KASAN shadow offset for x86_64 kernel
     const KASAN_SHADOW_OFFSET: i128 = 0xdffffc0000000000u64 as i128;
 
@@ -1386,7 +1381,12 @@ fn make_kernel_kasan_check(
         // 读取 granule g 的 shadow 字节 (零扩展, 值域 0..=255)
         let vg = Expr::Deref {
             e: Box::new(Expr::Cast {
-                e: Box::new(bop(BinOp::Add, shadow_base.clone(), ul(g as i128), Type::ULong)),
+                e: Box::new(bop(
+                    BinOp::Add,
+                    shadow_base.clone(),
+                    ul(g as i128),
+                    Type::ULong,
+                )),
                 ty: Type::Ptr(Box::new(Type::UChar)),
                 span: span.clone(),
             }),
@@ -1847,7 +1847,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
@@ -1936,8 +1936,7 @@ mod tests {
                     }
                 }
             }
-            Stmt::While { cond, body, .. }
-            | Stmt::Do { body, cond, .. } => {
+            Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
                 collect_call_names_expr(cond, out);
                 collect_call_names_stmt(body, out);
             }
@@ -3100,7 +3099,11 @@ mod tests {
             } else {
                 panic!("callee should be Ident");
             }
-            assert_eq!(args.len(), 3, "KCSAN check must have 3 args (addr, size, is_write)");
+            assert_eq!(
+                args.len(),
+                3,
+                "KCSAN check must have 3 args (addr, size, is_write)"
+            );
             // is_write arg should be 1 for store
             if let Expr::Int { v, .. } = &args[2] {
                 assert_eq!(*v, 1, "is_write must be 1 for store");
@@ -3366,11 +3369,7 @@ mod tests {
         let mut found_switch_trace = false;
         for item in &body.items {
             if let BlockItem::Stmt(Stmt::Switch {
-                expr:
-                    Expr::Comma {
-                        l,
-                        ..
-                    },
+                expr: Expr::Comma { l, .. },
                 ..
             }) = item
             {

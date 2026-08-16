@@ -321,17 +321,19 @@ mod tests {
 
     #[test]
     fn parse_topdown_l2() {
-        let r = PerfRecord::from_str(
-            "topdown_l2 branch_mispredict 15\ntopdown_l2 memory_bound 10\n",
-        )
-        .unwrap();
+        let r =
+            PerfRecord::from_str("topdown_l2 branch_mispredict 15\ntopdown_l2 memory_bound 10\n")
+                .unwrap();
         assert_eq!(r.topdown_l2.get(&TopdownL2::branch_mispredict), Some(&15));
         assert_eq!(r.topdown_l2.get(&TopdownL2::memory_bound), Some(&10));
     }
 
     #[test]
     fn l2_parent_mapping() {
-        assert_eq!(TopdownL2::branch_mispredict.parent(), TopdownL1::BadSpeculation);
+        assert_eq!(
+            TopdownL2::branch_mispredict.parent(),
+            TopdownL1::BadSpeculation
+        );
         assert_eq!(TopdownL2::memory_bound.parent(), TopdownL1::BackendBound);
         assert_eq!(TopdownL2::fetch_latency.parent(), TopdownL1::FrontendBound);
         assert_eq!(TopdownL2::retiring_base.parent(), TopdownL1::Retiring);
@@ -418,9 +420,18 @@ mod tests {
 
     #[test]
     fn topdown_from_str_aliases() {
-        assert_eq!(TopdownL1::from_str("badspec"), Some(TopdownL1::BadSpeculation));
-        assert_eq!(TopdownL1::from_str("frontend"), Some(TopdownL1::FrontendBound));
-        assert_eq!(TopdownL1::from_str("backend"), Some(TopdownL1::BackendBound));
+        assert_eq!(
+            TopdownL1::from_str("badspec"),
+            Some(TopdownL1::BadSpeculation)
+        );
+        assert_eq!(
+            TopdownL1::from_str("frontend"),
+            Some(TopdownL1::FrontendBound)
+        );
+        assert_eq!(
+            TopdownL1::from_str("backend"),
+            Some(TopdownL1::BackendBound)
+        );
         assert_eq!(TopdownL1::from_str("unknown"), None);
     }
 }

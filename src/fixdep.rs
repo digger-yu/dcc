@@ -230,7 +230,10 @@ mod tests {
 
     #[test]
     fn unescape_no_escapes() {
-        assert_eq!(unescape_dep_path("/usr/include/stdio.h"), "/usr/include/stdio.h");
+        assert_eq!(
+            unescape_dep_path("/usr/include/stdio.h"),
+            "/usr/include/stdio.h"
+        );
     }
 
     #[test]
@@ -250,10 +253,7 @@ mod tests {
 
     #[test]
     fn unescape_multiple() {
-        assert_eq!(
-            unescape_dep_path("/a\\ b/c\\#d/e\\:f.h"),
-            "/a b/c#d/e:f.h"
-        );
+        assert_eq!(unescape_dep_path("/a\\ b/c\\#d/e\\:f.h"), "/a b/c#d/e:f.h");
     }
 
     #[test]

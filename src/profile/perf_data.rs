@@ -198,12 +198,9 @@ impl PerfDataFile {
             if off + 8 > self.raw_data.len() {
                 break;
             }
-            let rec_type = u32::from_le_bytes(
-                self.raw_data[off..off + 4].try_into().unwrap(),
-            );
-            let rec_size = u16::from_le_bytes(
-                self.raw_data[off + 6..off + 8].try_into().unwrap(),
-            ) as usize;
+            let rec_type = u32::from_le_bytes(self.raw_data[off..off + 4].try_into().unwrap());
+            let rec_size =
+                u16::from_le_bytes(self.raw_data[off + 6..off + 8].try_into().unwrap()) as usize;
             if rec_size < 8 || off + rec_size > data_end {
                 break;
             }
@@ -214,26 +211,16 @@ impl PerfDataFile {
                 // +8: ip (u64)
                 // +16: pid (u32) + tid (u32)
                 // +24: time (u64)
-                let ip = u64::from_le_bytes(
-                    self.raw_data[off + 8..off + 16].try_into().unwrap(),
-                );
-                let pid = u32::from_le_bytes(
-                    self.raw_data[off + 16..off + 20].try_into().unwrap(),
-                );
-                let tid = u32::from_le_bytes(
-                    self.raw_data[off + 20..off + 24].try_into().unwrap(),
-                );
+                let ip = u64::from_le_bytes(self.raw_data[off + 8..off + 16].try_into().unwrap());
+                let pid = u32::from_le_bytes(self.raw_data[off + 16..off + 20].try_into().unwrap());
+                let tid = u32::from_le_bytes(self.raw_data[off + 20..off + 24].try_into().unwrap());
                 let time = if rec_size >= 32 {
-                    u64::from_le_bytes(
-                        self.raw_data[off + 24..off + 32].try_into().unwrap(),
-                    )
+                    u64::from_le_bytes(self.raw_data[off + 24..off + 32].try_into().unwrap())
                 } else {
                     0
                 };
                 let period = if rec_size >= 40 {
-                    u64::from_le_bytes(
-                        self.raw_data[off + 32..off + 40].try_into().unwrap(),
-                    )
+                    u64::from_le_bytes(self.raw_data[off + 32..off + 40].try_into().unwrap())
                 } else {
                     1
                 };
@@ -355,15 +342,15 @@ mod tests {
         f.write_all(&120u64.to_le_bytes())?; // attrs_size
         let data_off = 56u64 + 120u64;
         f.write_all(&data_off.to_le_bytes())?; // data_offset
-        // data_size placeholder
+                                               // data_size placeholder
         let data_size_pos = f.stream_position()?;
         f.write_all(&0u64.to_le_bytes())?; // data_size
-        // 1 attr (120 bytes)
+                                           // 1 attr (120 bytes)
         f.write_all(&0u32.to_le_bytes())?; // type = HARDWARE
         f.write_all(&120u32.to_le_bytes())?; // size
         f.write_all(&0u64.to_le_bytes())?; // config = HW_CPU_CYCLES
         f.write_all(&[0u8; 104])?; // padding
-        // Data section with 2 PERF_RECORD_SAMPLE records
+                                   // Data section with 2 PERF_RECORD_SAMPLE records
         let data_start = f.stream_position()?;
         // Sample 1: ip=0x401000, pid=1234, tid=1234, time=100, period=10
         f.write_all(&9u32.to_le_bytes())?; // type = SAMPLE
@@ -374,7 +361,7 @@ mod tests {
         f.write_all(&1234u32.to_le_bytes())?; // tid
         f.write_all(&100u64.to_le_bytes())?; // time
         f.write_all(&10u64.to_le_bytes())?; // period
-        // Sample 2: ip=0x402000, pid=1234, tid=1234, time=200, period=20
+                                            // Sample 2: ip=0x402000, pid=1234, tid=1234, time=200, period=20
         f.write_all(&9u32.to_le_bytes())?; // type = SAMPLE
         f.write_all(&0u16.to_le_bytes())?; // misc
         f.write_all(&40u16.to_le_bytes())?; // size = 40

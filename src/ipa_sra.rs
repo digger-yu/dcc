@@ -153,7 +153,9 @@ fn collect_accessed_fields_rec(expr: &Expr, param_name: &str, fields: &mut Vec<S
             collect_accessed_fields_rec(l, param_name, fields);
             collect_accessed_fields_rec(r, param_name, fields);
         }
-        Expr::PostInc { e, .. } | Expr::PostDec { e, .. } | Expr::PreInc { e, .. }
+        Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
         | Expr::PreDec { e, .. } => {
             collect_accessed_fields_rec(e, param_name, fields);
         }
@@ -174,12 +176,10 @@ fn has_address_taken_in_expr(expr: &Expr, param_name: &str) -> bool {
         }
         Expr::Member { expr: e, .. } => has_address_taken_in_expr(e, param_name),
         Expr::Assign { l, r, .. } => {
-            has_address_taken_in_expr(l, param_name)
-                || has_address_taken_in_expr(r, param_name)
+            has_address_taken_in_expr(l, param_name) || has_address_taken_in_expr(r, param_name)
         }
         Expr::Binop { l, r, .. } => {
-            has_address_taken_in_expr(l, param_name)
-                || has_address_taken_in_expr(r, param_name)
+            has_address_taken_in_expr(l, param_name) || has_address_taken_in_expr(r, param_name)
         }
         Expr::Unary { e, .. } => has_address_taken_in_expr(e, param_name),
         Expr::Cast { e, .. } => has_address_taken_in_expr(e, param_name),
@@ -192,18 +192,20 @@ fn has_address_taken_in_expr(expr: &Expr, param_name: &str) -> bool {
         }
         Expr::Call { callee, args, .. } => {
             has_address_taken_in_expr(callee, param_name)
-                || args.iter().any(|a| has_address_taken_in_expr(a, param_name))
+                || args
+                    .iter()
+                    .any(|a| has_address_taken_in_expr(a, param_name))
         }
         Expr::Index { arr, idx, .. } => {
-            has_address_taken_in_expr(arr, param_name)
-                || has_address_taken_in_expr(idx, param_name)
+            has_address_taken_in_expr(arr, param_name) || has_address_taken_in_expr(idx, param_name)
         }
         Expr::Deref { e, .. } => has_address_taken_in_expr(e, param_name),
         Expr::Comma { l, r, .. } => {
-            has_address_taken_in_expr(l, param_name)
-                || has_address_taken_in_expr(r, param_name)
+            has_address_taken_in_expr(l, param_name) || has_address_taken_in_expr(r, param_name)
         }
-        Expr::PostInc { e, .. } | Expr::PostDec { e, .. } | Expr::PreInc { e, .. }
+        Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
         | Expr::PreDec { e, .. } => has_address_taken_in_expr(e, param_name),
         _ => false,
     }
@@ -229,11 +231,24 @@ fn has_address_taken_in_stmt(stmt: &Stmt, param_name: &str) -> bool {
                 || has_address_taken_in_stmt(body, param_name)
         }
         Stmt::For {
-            init, cond, step, body, ..
+            init,
+            cond,
+            step,
+            body,
+            ..
         } => {
-            (init.as_ref().map(|i| has_address_taken_in_stmt(i, param_name)).unwrap_or(false))
-                || cond.as_ref().map(|c| has_address_taken_in_expr(c, param_name)).unwrap_or(false)
-                || step.as_ref().map(|s| has_address_taken_in_expr(s, param_name)).unwrap_or(false)
+            (init
+                .as_ref()
+                .map(|i| has_address_taken_in_stmt(i, param_name))
+                .unwrap_or(false))
+                || cond
+                    .as_ref()
+                    .map(|c| has_address_taken_in_expr(c, param_name))
+                    .unwrap_or(false)
+                || step
+                    .as_ref()
+                    .map(|s| has_address_taken_in_expr(s, param_name))
+                    .unwrap_or(false)
                 || has_address_taken_in_stmt(body, param_name)
         }
         Stmt::Block { b, .. } => b
@@ -242,9 +257,12 @@ fn has_address_taken_in_stmt(stmt: &Stmt, param_name: &str) -> bool {
             .any(|item| has_address_taken_in_block_item(item, param_name)),
         Stmt::Switch { expr, cases, .. } => {
             has_address_taken_in_expr(expr, param_name)
-                || cases
-                    .iter()
-                    .any(|c| c.body.items.iter().any(|i| has_address_taken_in_block_item(i, param_name)))
+                || cases.iter().any(|c| {
+                    c.body
+                        .items
+                        .iter()
+                        .any(|i| has_address_taken_in_block_item(i, param_name))
+                })
         }
         _ => false,
     }
@@ -294,7 +312,11 @@ fn collect_accessed_fields_in_stmt(stmt: &Stmt, param_name: &str, fields: &mut V
             collect_accessed_fields_in_stmt(body, param_name, fields);
         }
         Stmt::For {
-            init, cond, step, body, ..
+            init,
+            cond,
+            step,
+            body,
+            ..
         } => {
             if let Some(i) = init {
                 collect_accessed_fields_in_stmt(i, param_name, fields);
@@ -428,7 +450,13 @@ fn replace_param_refs_in_expr(
     field_var_map: &HashMap<String, String>,
 ) {
     match expr {
-        Expr::Member { expr: e, field, span, ty, .. } => {
+        Expr::Member {
+            expr: e,
+            field,
+            span,
+            ty,
+            ..
+        } => {
             if let Expr::Ident { name, .. } = e.as_ref() {
                 if name.name == param_name {
                     if let Some(var_name) = field_var_map.get(&field.name) {
@@ -490,7 +518,9 @@ fn replace_param_refs_in_expr(
             replace_param_refs_in_expr(l, param_name, field_var_map);
             replace_param_refs_in_expr(r, param_name, field_var_map);
         }
-        Expr::PostInc { e, .. } | Expr::PostDec { e, .. } | Expr::PreInc { e, .. }
+        Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
         | Expr::PreDec { e, .. } => {
             replace_param_refs_in_expr(e, param_name, field_var_map);
         }
@@ -527,7 +557,11 @@ fn replace_param_refs_in_stmt(
             replace_param_refs_in_stmt(body, param_name, field_var_map);
         }
         Stmt::For {
-            init, cond, step, body, ..
+            init,
+            cond,
+            step,
+            body,
+            ..
         } => {
             if let Some(i) = init {
                 replace_param_refs_in_stmt(i, param_name, field_var_map);
@@ -587,10 +621,7 @@ fn rewrite_function_params(
     all_fields: &[(String, Type)],
 ) -> Vec<(String, Type)> {
     // 构建 field_name -> ty 的映射
-    let field_map: HashMap<&str, &Type> = all_fields
-        .iter()
-        .map(|(n, t)| (n.as_str(), t))
-        .collect();
+    let field_map: HashMap<&str, &Type> = all_fields.iter().map(|(n, t)| (n.as_str(), t)).collect();
 
     let mut new_params: Vec<Param> = Vec::new();
     for (i, param) in func.params.iter().enumerate() {
@@ -644,10 +675,7 @@ fn inject_scalar_locals(
     all_fields: &[(String, Type)],
     span: &Span,
 ) {
-    let field_map: HashMap<&str, &Type> = all_fields
-        .iter()
-        .map(|(n, t)| (n.as_str(), t))
-        .collect();
+    let field_map: HashMap<&str, &Type> = all_fields.iter().map(|(n, t)| (n.as_str(), t)).collect();
 
     // 声明局部变量: 使用原结构体类型
     let local_decl = Decl::Var(crate::ast::VarDecl {
@@ -754,10 +782,8 @@ fn rewrite_call_args(
             let struct_arg = args.remove(param_idx);
 
             // 展开: 为每个被访问字段生成 Member 表达式, 插入到 args 中
-            let field_map: HashMap<&str, &Type> = all_fields
-                .iter()
-                .map(|(n, t)| (n.as_str(), t))
-                .collect();
+            let field_map: HashMap<&str, &Type> =
+                all_fields.iter().map(|(n, t)| (n.as_str(), t)).collect();
 
             for field_name in accessed_fields {
                 if let Some(field_ty) = field_map.get(field_name.as_str()) {
@@ -795,21 +821,32 @@ fn rewrite_call_args(
             let c3 = rewrite_call_args(else_, func_name, param_idx, accessed_fields, all_fields);
             c1 || c2 || c3
         }
-        Expr::Unary { e, .. } => rewrite_call_args(e, func_name, param_idx, accessed_fields, all_fields),
-        Expr::Cast { e, .. } => rewrite_call_args(e, func_name, param_idx, accessed_fields, all_fields),
+        Expr::Unary { e, .. } => {
+            rewrite_call_args(e, func_name, param_idx, accessed_fields, all_fields)
+        }
+        Expr::Cast { e, .. } => {
+            rewrite_call_args(e, func_name, param_idx, accessed_fields, all_fields)
+        }
         Expr::Index { arr, idx, .. } => {
             let c1 = rewrite_call_args(arr, func_name, param_idx, accessed_fields, all_fields);
             let c2 = rewrite_call_args(idx, func_name, param_idx, accessed_fields, all_fields);
             c1 || c2
         }
-        Expr::Deref { e, .. } => rewrite_call_args(e, func_name, param_idx, accessed_fields, all_fields),
+        Expr::Deref { e, .. } => {
+            rewrite_call_args(e, func_name, param_idx, accessed_fields, all_fields)
+        }
         Expr::Comma { l, r, .. } => {
             let c1 = rewrite_call_args(l, func_name, param_idx, accessed_fields, all_fields);
             let c2 = rewrite_call_args(r, func_name, param_idx, accessed_fields, all_fields);
             c1 || c2
         }
-        Expr::Int { .. } | Expr::Float { .. } | Expr::String { .. }
-        | Expr::Char { .. } | Expr::Ident { .. } | Expr::Member { .. } | Expr::AddrOf { .. } => false,
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::String { .. }
+        | Expr::Char { .. }
+        | Expr::Ident { .. }
+        | Expr::Member { .. }
+        | Expr::AddrOf { .. } => false,
         _ => false,
     }
 }
@@ -833,24 +870,33 @@ fn rewrite_call_args_in_stmt(
             cond, then_, else_, ..
         } => {
             let c1 = rewrite_call_args(cond, func_name, param_idx, accessed_fields, all_fields);
-            let c2 = rewrite_call_args_in_stmt(then_, func_name, param_idx, accessed_fields, all_fields);
+            let c2 =
+                rewrite_call_args_in_stmt(then_, func_name, param_idx, accessed_fields, all_fields);
             let c3 = else_
                 .as_mut()
-                .map(|e| rewrite_call_args_in_stmt(e, func_name, param_idx, accessed_fields, all_fields))
+                .map(|e| {
+                    rewrite_call_args_in_stmt(e, func_name, param_idx, accessed_fields, all_fields)
+                })
                 .unwrap_or(false);
             c1 || c2 || c3
         }
         Stmt::While { cond, body, .. } | Stmt::Do { body, cond, .. } => {
             let c1 = rewrite_call_args(cond, func_name, param_idx, accessed_fields, all_fields);
-            let c2 = rewrite_call_args_in_stmt(body, func_name, param_idx, accessed_fields, all_fields);
+            let c2 =
+                rewrite_call_args_in_stmt(body, func_name, param_idx, accessed_fields, all_fields);
             c1 || c2
         }
         Stmt::For {
-            init, cond, step, body, ..
+            init,
+            cond,
+            step,
+            body,
+            ..
         } => {
             let mut changed = false;
             if let Some(i) = init {
-                changed |= rewrite_call_args_in_stmt(i, func_name, param_idx, accessed_fields, all_fields);
+                changed |=
+                    rewrite_call_args_in_stmt(i, func_name, param_idx, accessed_fields, all_fields);
             }
             if let Some(c) = cond {
                 changed |= rewrite_call_args(c, func_name, param_idx, accessed_fields, all_fields);
@@ -858,7 +904,8 @@ fn rewrite_call_args_in_stmt(
             if let Some(s) = step {
                 changed |= rewrite_call_args(s, func_name, param_idx, accessed_fields, all_fields);
             }
-            changed |= rewrite_call_args_in_stmt(body, func_name, param_idx, accessed_fields, all_fields);
+            changed |=
+                rewrite_call_args_in_stmt(body, func_name, param_idx, accessed_fields, all_fields);
             changed
         }
         Stmt::Block { b, .. } => {
@@ -875,7 +922,8 @@ fn rewrite_call_args_in_stmt(
             changed
         }
         Stmt::Switch { expr, cases, .. } => {
-            let mut changed = rewrite_call_args(expr, func_name, param_idx, accessed_fields, all_fields);
+            let mut changed =
+                rewrite_call_args(expr, func_name, param_idx, accessed_fields, all_fields);
             for c in cases {
                 for item in &mut c.body.items {
                     changed |= rewrite_call_args_in_block_item(
@@ -913,17 +961,15 @@ fn rewrite_call_args_in_block_item(
             .body
             .as_mut()
             .map(|b| {
-                b.items
-                    .iter_mut()
-                    .any(|item| {
-                        rewrite_call_args_in_block_item(
-                            item,
-                            func_name,
-                            param_idx,
-                            accessed_fields,
-                            all_fields,
-                        )
-                    })
+                b.items.iter_mut().any(|item| {
+                    rewrite_call_args_in_block_item(
+                        item,
+                        func_name,
+                        param_idx,
+                        accessed_fields,
+                        all_fields,
+                    )
+                })
             })
             .unwrap_or(false),
         _ => false,
@@ -985,12 +1031,7 @@ pub fn run_ipa_sra(prog: &mut Program, config: &IpaSraConfig) {
                 let field_map: HashMap<String, String> = analysis
                     .accessed_fields
                     .iter()
-                    .map(|f| {
-                        (
-                            f.clone(),
-                            scalar_param_name(&analysis.param_name, f),
-                        )
-                    })
+                    .map(|f| (f.clone(), scalar_param_name(&analysis.param_name, f)))
                     .collect();
                 for item in &mut body.items {
                     replace_param_refs_in_block_item(item, &analysis.param_name, &field_map);
@@ -1453,10 +1494,7 @@ mod tests {
                                 span: span_zero(),
                             },
                             span: span_zero(),
-                            ty: Type::Func(
-                                Box::new(int_ty()),
-                                vec![struct_ty.clone()],
-                            ),
+                            ty: Type::Func(Box::new(int_ty()), vec![struct_ty.clone()]),
                         }),
                         args: vec![Expr::CompoundLit {
                             ty: struct_ty.clone(),
@@ -1538,7 +1576,11 @@ mod tests {
             assert_eq!(f.params.len(), 1, "f 应有 1 个标量参数");
             // 参数名应为 p_x
             if let Some(name) = &f.params[0].name {
-                assert!(name.name.contains("p_x"), "参数名应包含 p_x, 实际: {}", name.name);
+                assert!(
+                    name.name.contains("p_x"),
+                    "参数名应包含 p_x, 实际: {}",
+                    name.name
+                );
             }
         } else {
             panic!("第一个 decl 应为 Func");

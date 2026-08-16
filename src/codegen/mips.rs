@@ -121,11 +121,31 @@ impl MipsCodegen {
         self.emit_globals(module);
         // 文件级 asm: 收集原始文本行
         for decl in &prog.decls {
-            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, .. } = decl {
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+            if let Decl::GlobalAsm {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                ..
+            } = decl
+            {
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
                 for line in resolved.split('\n') {
                     let t = line.trim();
-                    if !t.is_empty() { self.raw_global_asm_lines.push(t.to_string()); }
+                    if !t.is_empty() {
+                        self.raw_global_asm_lines.push(t.to_string());
+                    }
                 }
             }
         }
@@ -146,9 +166,9 @@ impl MipsCodegen {
         let inst: u32 = 0b000011 << 26; // JAL with target 0
         self.code.extend_from_slice(&inst.to_be_bytes());
         self.emit_nop(); // delay slot
-        // move $a0, $v0 (save main return value)
+                         // move $a0, $v0 (save main return value)
         self.emit_addu(4, 2, 0); // addu $a0, $v0, $zero
-        // li $v0, 4001 (__NR_exit)
+                                 // li $v0, 4001 (__NR_exit)
         self.emit_load_imm(2, 4001);
         // syscall
         let syscall_inst: u32 = 0b000000 << 26; // SPECIAL
@@ -156,15 +176,25 @@ impl MipsCodegen {
         self.code.extend_from_slice(&syscall_inst.to_be_bytes());
         // Compile functions
         for func in &module.functions {
-            let has_body = prog.decls.iter().find_map(|d| match d {
-                Decl::Func(f) if f.name.name == func.name => Some(f),
-                _ => None,
-            }).and_then(|f| f.body.as_ref()).is_some();
-            if !has_body { continue; }
-            self.gen_function(func, prog.decls.iter().find_map(|d| match d {
-                Decl::Func(f) if f.name.name == func.name => Some(f),
-                _ => None,
-            }));
+            let has_body = prog
+                .decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Func(f) if f.name.name == func.name => Some(f),
+                    _ => None,
+                })
+                .and_then(|f| f.body.as_ref())
+                .is_some();
+            if !has_body {
+                continue;
+            }
+            self.gen_function(
+                func,
+                prog.decls.iter().find_map(|d| match d {
+                    Decl::Func(f) if f.name.name == func.name => Some(f),
+                    _ => None,
+                }),
+            );
             // Patch JAL to main
             if func.name == "main" {
                 if let Some(jal_pos) = self.start_call_pos {
@@ -188,8 +218,7 @@ impl MipsCodegen {
             self.code[at as usize + 3],
         ]);
         let patched = (existing & 0xFC000000) | (target28 >> 2);
-        self.code[at as usize..at as usize + 4]
-            .copy_from_slice(&patched.to_be_bytes());
+        self.code[at as usize..at as usize + 4].copy_from_slice(&patched.to_be_bytes());
     }
 
     fn finalize_branches(&mut self) {
@@ -219,7 +248,9 @@ impl MipsCodegen {
         if let Some(init_expr) = &g.initializer {
             // Try to extract constant value from TypedExpr
             let val = match (&init_expr.kind, &init_expr.literal) {
-                (crate::ir::ExprKind::Constant, Some(crate::ir::ExprLiteral::Int(v))) => Some(*v as i64),
+                (crate::ir::ExprKind::Constant, Some(crate::ir::ExprLiteral::Int(v))) => {
+                    Some(*v as i64)
+                }
                 _ => None,
             };
             if let Some(val) = val {
@@ -230,7 +261,8 @@ impl MipsCodegen {
                     _ => 4,
                 };
                 if size == 8 {
-                    self.rodata.extend_from_slice(&(val as i32 as i64).to_le_bytes());
+                    self.rodata
+                        .extend_from_slice(&(val as i32 as i64).to_le_bytes());
                 } else {
                     self.rodata.extend_from_slice(&(val as i32).to_le_bytes());
                 }
@@ -367,14 +399,14 @@ impl MipsCodegen {
         // 恢复 $fp, $ra 并返回
         if self.is_64bit {
             self.emit_lw(30, 29, (self.frame_bytes - 16) as i16); // ld $fp, frame-16($sp)
-            self.emit_lw(31, 29, (self.frame_bytes - 8) as i16);  // ld $ra, frame-8($sp)
+            self.emit_lw(31, 29, (self.frame_bytes - 8) as i16); // ld $ra, frame-8($sp)
         } else {
             self.emit_lw(30, 29, (self.frame_bytes - 8) as i16); // lw $fp, frame-8($sp)
             self.emit_lw(31, 29, (self.frame_bytes - 4) as i16); // lw $ra, frame-4($sp)
         }
-        self.emit_addiu(29, 29, self.frame_bytes as i16);     // addiu $sp, $sp, frame
-        self.emit_jr(31);  // jr $ra
-        self.emit_nop();   // delay slot
+        self.emit_addiu(29, 29, self.frame_bytes as i16); // addiu $sp, $sp, frame
+        self.emit_jr(31); // jr $ra
+        self.emit_nop(); // delay slot
         self.emitted_return = true;
     }
 
@@ -408,10 +440,7 @@ impl MipsCodegen {
                 self.gen_expr_from_ast(e);
             }
             Stmt::If {
-                cond,
-                then_,
-                else_,
-                ..
+                cond, then_, else_, ..
             } => {
                 self.gen_expr_from_ast(cond);
                 let lbl_else = self.fresh_label("Lelse");
@@ -526,12 +555,12 @@ impl MipsCodegen {
                         // case N:
                         if let Ok(val) = crate::const_eval::eval(val_expr) {
                             self.emit_load_imm(3, val as i32); // $t0 = case value
-                            // Compare $v0 with $t0
+                                                               // Compare $v0 with $t0
                             self.emit_subu(8, 2, 3); // $t0 = $v0 - case_val
                             self.emit_sltiu(8, 8, 1); // $t0 = ($t0 == 0) ? 1 : 0
-                            // Wait, we need to check if $v0 == case_val
-                            // Let's use: subu $t0, $v0, case_val; sltiu $t0, $t0, 1
-                            // Actually, let's just do: beqz after sub
+                                                      // Wait, we need to check if $v0 == case_val
+                                                      // Let's use: subu $t0, $v0, case_val; sltiu $t0, $t0, 1
+                                                      // Actually, let's just do: beqz after sub
                             self.emit_subu(8, 2, 3);
                             let _lbl_next = self.fresh_label("Lnextcase");
                             self.emit_beqz(8, &lbl_case);
@@ -558,18 +587,44 @@ impl MipsCodegen {
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
             }
-            Stmt::AsmGoto { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, goto_labels, span, .. } => {
+            Stmt::AsmGoto {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                goto_labels,
+                span,
+                ..
+            } => {
                 eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
                     resolved_asm = resolved_asm.replace(&format!("%l{}", i), &label.name);
-                    resolved_asm = resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
-                    resolved_asm = resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
                 }
-                let resolved = Self::resolve_asm_template_simple(&resolved_asm, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
-                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-                self.raw_func_asm_lines.push((self.source_name.clone(), lines));
+                let resolved = Self::resolve_asm_template_simple(
+                    &resolved_asm,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
+                let lines: Vec<String> = resolved
+                    .split('\n')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                self.raw_func_asm_lines
+                    .push((self.source_name.clone(), lines));
             }
             _ => {}
         }
@@ -672,11 +727,37 @@ impl MipsCodegen {
                     }
                 }
             }
-            Expr::AsmExpr { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, span, .. } => {
-                eprintln!("{}:{}: warning: inline asm on non-x86_64 target: result is 0", span.file, span.line);
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
-                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-                self.raw_func_asm_lines.push((format!("__inline_{}", self.label_serial), lines));
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                span,
+                ..
+            } => {
+                eprintln!(
+                    "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
+                    span.file, span.line
+                );
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
+                let lines: Vec<String> = resolved
+                    .split('\n')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                self.raw_func_asm_lines
+                    .push((format!("__inline_{}", self.label_serial), lines));
                 self.label_serial += 1;
                 self.emit_load_imm(2, 0);
             }
@@ -799,8 +880,7 @@ impl MipsCodegen {
             self.code[at as usize + 3],
         ]);
         let patched = (existing & 0xFFFF0000) | (offset as u16 as u32);
-        self.code[at as usize..at as usize + 4]
-            .copy_from_slice(&patched.to_be_bytes());
+        self.code[at as usize..at as usize + 4].copy_from_slice(&patched.to_be_bytes());
     }
 
     fn patch_b(&mut self, at: u64, target: u64) {
@@ -808,8 +888,7 @@ impl MipsCodegen {
         let offset = ((target as i64) - (at as i64) - 4) / 4;
         let offset = offset as i16;
         let patched = (0b000100u32 << 26) | (offset as u16 as u32);
-        self.code[at as usize..at as usize + 4]
-            .copy_from_slice(&patched.to_be_bytes());
+        self.code[at as usize..at as usize + 4].copy_from_slice(&patched.to_be_bytes());
     }
 
     // ===== MIPS 指令编码 =====
@@ -823,12 +902,16 @@ impl MipsCodegen {
     fn emit_sw(&mut self, rt: u8, base: u8, offset: i16) {
         if self.is_64bit {
             // SD (64-bit store) for MIPS64
-            let inst =
-                (0b111111 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+            let inst = (0b111111 << 26)
+                | ((base as u32) << 21)
+                | ((rt as u32) << 16)
+                | (offset as u16 as u32);
             self.code.extend_from_slice(&inst.to_be_bytes());
         } else {
-            let inst =
-                (0b101011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+            let inst = (0b101011 << 26)
+                | ((base as u32) << 21)
+                | ((rt as u32) << 16)
+                | (offset as u16 as u32);
             self.code.extend_from_slice(&inst.to_be_bytes());
         }
     }
@@ -836,12 +919,16 @@ impl MipsCodegen {
     fn emit_lw(&mut self, rt: u8, base: u8, offset: i16) {
         if self.is_64bit {
             // LD (64-bit load) for MIPS64
-            let inst =
-                (0b110111 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+            let inst = (0b110111 << 26)
+                | ((base as u32) << 21)
+                | ((rt as u32) << 16)
+                | (offset as u16 as u32);
             self.code.extend_from_slice(&inst.to_be_bytes());
         } else {
-            let inst =
-                (0b100011 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
+            let inst = (0b100011 << 26)
+                | ((base as u32) << 21)
+                | ((rt as u32) << 16)
+                | (offset as u16 as u32);
             self.code.extend_from_slice(&inst.to_be_bytes());
         }
     }
@@ -867,7 +954,8 @@ impl MipsCodegen {
             self.code.extend_from_slice(&inst.to_be_bytes());
             if lo != 0 {
                 // ORI rt, rt, lo
-                let inst = (0b001101 << 26) | ((rt as u32) << 21) | ((rt as u32) << 16) | (lo as u32);
+                let inst =
+                    (0b001101 << 26) | ((rt as u32) << 21) | ((rt as u32) << 16) | (lo as u32);
                 self.code.extend_from_slice(&inst.to_be_bytes());
             }
         }
@@ -875,14 +963,12 @@ impl MipsCodegen {
 
     fn emit_addu(&mut self, rd: u8, rs: u8, rt: u8) {
         // R-type: opcode=0 (implicit), funct=ADDU
-        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16)
-            | ((rd as u32) << 11) | 0b100001;
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0b100001;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     fn emit_subu(&mut self, rd: u8, rs: u8, rt: u8) {
-        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16)
-            | ((rd as u32) << 11) | 0b100011;
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0b100011;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -910,14 +996,12 @@ impl MipsCodegen {
     }
 
     fn emit_slt(&mut self, rd: u8, rs: u8, rt: u8) {
-        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16)
-            | ((rd as u32) << 11) | 0b101010;
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0b101010;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     fn emit_sltu(&mut self, rd: u8, rs: u8, rt: u8) {
-        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16)
-            | ((rd as u32) << 11) | 0b101011;
+        let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0b101011;
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
@@ -928,15 +1012,15 @@ impl MipsCodegen {
     }
 
     fn emit_xori(&mut self, rt: u8, rs: u8, imm: u16) {
-        let inst =
-            (0b001110 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | (imm as u32);
+        let inst = (0b001110 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | (imm as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
     fn emit_beqz(&mut self, rs: u8, label: &str) {
         // BEQ $rs, $zero, offset (占位)
         let pos = self.code.len() as u64;
-        self.pending_branches.push((pos, label.to_string(), BranchKind::Beqz));
+        self.pending_branches
+            .push((pos, label.to_string(), BranchKind::Beqz));
         let inst: u32 = (0b000100 << 26) | ((rs as u32) << 21); // offset=0 placeholder
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
@@ -944,7 +1028,8 @@ impl MipsCodegen {
     fn emit_b(&mut self, label: &str) {
         // B offset (BEQ $zero, $zero, offset)
         let pos = self.code.len() as u64;
-        self.pending_branches.push((pos, label.to_string(), BranchKind::B));
+        self.pending_branches
+            .push((pos, label.to_string(), BranchKind::B));
         let inst: u32 = 0b000100 << 26; // BEQ $zero, $zero, offset=0
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
@@ -1053,11 +1138,15 @@ impl MipsCodegen {
         while i < chars.len() {
             if chars[i] == '%' && i + 1 < chars.len() {
                 match chars[i + 1] {
-                    '%' => { result.push('%'); i += 2; }
+                    '%' => {
+                        result.push('%');
+                        i += 2;
+                    }
                     '[' => {
-                        if let Some(end) = chars[i+2..].iter().position(|&c| c == ']') {
-                            let name: String = chars[i+2..i+2+end].iter().collect();
-                            let all_names: Vec<&Option<String>> = output_names.iter().chain(input_names.iter()).collect();
+                        if let Some(end) = chars[i + 2..].iter().position(|&c| c == ']') {
+                            let name: String = chars[i + 2..i + 2 + end].iter().collect();
+                            let all_names: Vec<&Option<String>> =
+                                output_names.iter().chain(input_names.iter()).collect();
                             for (idx, n) in all_names.iter().enumerate() {
                                 if n.as_ref().map(|s| s.as_str()) == Some(&name) {
                                     result.push_str(&format!("%{}", idx));
@@ -1132,7 +1221,10 @@ mod tests {
         let mut cg = MipsCodegen::new(target, true);
         let func = Function {
             name: "f".to_string(),
-            return_type: ValueType::Integer { bits: 32, signed: true },
+            return_type: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             params: vec![],
             body: vec![],
             span: crate::diagnostics::Span::point("t.c", 1, 1),

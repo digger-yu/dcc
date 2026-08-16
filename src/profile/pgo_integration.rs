@@ -18,9 +18,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::ast::{Decl, Program};
 use super::pgo::{PgoWeights, Profraw};
 use super::weights::ProfileWeights;
+use crate::ast::{Decl, Program};
 
 /// PGO 集成配置
 #[derive(Debug, Clone)]
@@ -207,15 +207,9 @@ impl PgoIntegrationContext {
 
     /// 为 IPA-SRA 提供决策提示: 如果调用者是 hot 而 callee 是 cold,
     /// 建议不拆分 (避免 hot 路径上的额外参数传递开销)
-    pub fn should_split_for_ipa_sra(
-        &self,
-        callee_name: &str,
-        caller_name: Option<&str>,
-    ) -> bool {
+    pub fn should_split_for_ipa_sra(&self, callee_name: &str, caller_name: Option<&str>) -> bool {
         let callee_hot = self.is_hot(callee_name);
-        let caller_hot = caller_name
-            .map(|n| self.is_hot(n))
-            .unwrap_or(false);
+        let caller_hot = caller_name.map(|n| self.is_hot(n)).unwrap_or(false);
 
         // hot 函数调用 cold 函数: 不拆分 (hot 路径不关心 cold 的优化)
         if caller_hot && !callee_hot {
@@ -373,28 +367,59 @@ mod tests {
     fn test_collect_func_names() {
         use crate::ast::{Block, FuncDecl, Ident, Program, Type};
         let span = crate::diagnostics::Span::point("t.c", 1, 1);
-        let mut prog = Program { decls: vec![], fenv_access: false };
+        let mut prog = Program {
+            decls: vec![],
+            fenv_access: false,
+        };
         prog.decls.push(Decl::Func(FuncDecl {
-            name: Ident { name: "foo".into(), span: span.clone() },
+            name: Ident {
+                name: "foo".into(),
+                span: span.clone(),
+            },
             ret_ty: Type::Int,
             params: vec![],
-            body: Some(Block { items: vec![], span: span.clone() }),
+            body: Some(Block {
+                items: vec![],
+                span: span.clone(),
+            }),
             span: span.clone(),
-            is_static: true, is_extern: false, is_variadic: false,
-            is_weak: false, is_constructor: false, is_destructor: false,
-            is_nested: false, is_cold: false, is_hot: false,
-            section: None, alignment: None, visibility: None,
-            alias_name: None, upvars: vec![], is_unused: false,
-            is_noinline: false, is_always_inline: false,
-            is_old_style: false, format_kind: None,
-            format_string_idx: None, format_first_arg: None,
-            no_sanitize: vec![], target_clones: vec![],
-            returns_nonnull: false, ctor_priority: None,
-            dtor_priority: None, is_retain: false, is_used_attr: false,
-            is_flatten: false, error_msg: None, warning_msg: None,
-            deprecated_msg: None, ifunc_resolver: None,
+            is_static: true,
+            is_extern: false,
+            is_variadic: false,
+            is_weak: false,
+            is_constructor: false,
+            is_destructor: false,
+            is_nested: false,
+            is_cold: false,
+            is_hot: false,
+            section: None,
+            alignment: None,
+            visibility: None,
+            alias_name: None,
+            upvars: vec![],
+            is_unused: false,
+            is_noinline: false,
+            is_always_inline: false,
+            is_old_style: false,
+            format_kind: None,
+            format_string_idx: None,
+            format_first_arg: None,
+            no_sanitize: vec![],
+            target_clones: vec![],
+            returns_nonnull: false,
+            ctor_priority: None,
+            dtor_priority: None,
+            is_retain: false,
+            is_used_attr: false,
+            is_flatten: false,
+            error_msg: None,
+            warning_msg: None,
+            deprecated_msg: None,
+            ifunc_resolver: None,
             asm_output_template: None,
-            is_global: false, is_device: false, is_host: false,
+            is_global: false,
+            is_device: false,
+            is_host: false,
         }));
         let names = collect_func_names(&prog);
         assert_eq!(names, vec!["foo"]);

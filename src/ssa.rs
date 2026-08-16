@@ -450,7 +450,11 @@ impl Builder {
                 if let Some(t) = target {
                     self.emit(Inst {
                         dest: Some(t.clone()),
-                        kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(*v), r: Operand::Int(0) },
+                        kind: InstKind::Bin {
+                            op: BinOp::Add,
+                            l: Operand::Int(*v),
+                            r: Operand::Int(0),
+                        },
                         span: t.span.clone(),
                     });
                     self.define(t.clone());
@@ -462,7 +466,11 @@ impl Builder {
                 if let Some(t) = target {
                     self.emit(Inst {
                         dest: Some(t.clone()),
-                        kind: InstKind::Bin { op: BinOp::Add, l: Operand::Float(*v), r: Operand::Int(0) },
+                        kind: InstKind::Bin {
+                            op: BinOp::Add,
+                            l: Operand::Float(*v),
+                            r: Operand::Int(0),
+                        },
                         span: t.span.clone(),
                     });
                     self.define(t.clone());
@@ -520,11 +528,20 @@ impl Builder {
                 self.define(dest.clone());
                 Operand::Var(dest)
             }
-            Expr::Assign { op: _, l, r, span, ty } => {
+            Expr::Assign {
+                op: _,
+                l,
+                r,
+                span,
+                ty,
+            } => {
                 // 对简单标识符赋值: 直接将 rhs 写入目标变量,
                 // 避免 lower_lvalue 产生多余的 copy 指令导致 SSA 重复定义。
                 // 注: 复合赋值 (+= 等) 已在 parser 中展开为 a = a op rhs。
-                if let Expr::Ident { name, ty: var_ty, .. } = l.as_ref() {
+                if let Expr::Ident {
+                    name, ty: var_ty, ..
+                } = l.as_ref()
+                {
                     let new_v = SsaVar {
                         base: name.name.clone(),
                         version: self.next_version(&name.name),
@@ -693,7 +710,9 @@ impl Builder {
             }
             Expr::AddrOf { e, span, ty: _ } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
-                    let dest = target.unwrap_or_else(|| self.fresh("addr", Type::Ptr(Box::new(Type::Void)), span));
+                    let dest = target.unwrap_or_else(|| {
+                        self.fresh("addr", Type::Ptr(Box::new(Type::Void)), span)
+                    });
                     self.emit(Inst {
                         dest: Some(dest.clone()),
                         kind: InstKind::AddrOf {
@@ -782,13 +801,11 @@ impl Builder {
                 span,
                 ty,
             } => {
-                let mut input_ops: Vec<Operand> = inputs.iter().map(|e| self.lower_expr(e)).collect();
+                let mut input_ops: Vec<Operand> =
+                    inputs.iter().map(|e| self.lower_expr(e)).collect();
                 let mut output_vars = Vec::new();
                 for (idx, out) in outputs.iter().enumerate() {
-                    if output_constraints
-                        .get(idx)
-                        .is_some_and(|c| c.contains('+'))
-                    {
+                    if output_constraints.get(idx).is_some_and(|c| c.contains('+')) {
                         input_ops.push(self.lower_expr(out));
                     }
                     if let Expr::Ident { name, ty, .. } = out {
@@ -1352,8 +1369,7 @@ pub fn rebuild_block(func: &Function) -> Block {
     let mut env: HashMap<String, SsaVar> = HashMap::new();
 
     // 1. 只声明原始局部变量 (不声明 SSA 临时变量)
-    let param_names: HashSet<String> =
-        func.params.iter().map(|p| p.base.clone()).collect();
+    let param_names: HashSet<String> = func.params.iter().map(|p| p.base.clone()).collect();
     for name in &func.original_locals {
         if param_names.contains(name) {
             continue;
@@ -1439,12 +1455,10 @@ pub fn rebuild_block(func: &Function) -> Block {
                     // 有副作用的临时结果 (如返回值被丢弃的 Call) 在
                     // use_count==0 时不允许内联: 表达式存入 subst 后没有任何
                     // 使用点消费, 重建时会被跳过, 副作用随之丢失.
-                    let side_effect_unused =
-                        use_count == 0 && inst_has_side_effect(&inst.kind);
+                    let side_effect_unused = use_count == 0 && inst_has_side_effect(&inst.kind);
                     let inlineable = is_temp && use_count <= 1 && !side_effect_unused;
                     if inlineable {
-                        let resolved =
-                            inst_to_expr_resolved(&inst.kind, &subst, &inst.span);
+                        let resolved = inst_to_expr_resolved(&inst.kind, &subst, &inst.span);
                         subst.insert(ssa_name, Some(resolved));
                     } else {
                         subst.insert(ssa_name, None);
@@ -1473,7 +1487,11 @@ fn phi_name(v: &SsaVar) -> String {
 ///
 /// 在 SSA→AST 重建时必须丢弃, 否则会生成对不存在全局变量的访问.
 fn is_pass_hint_inst(kind: &InstKind) -> bool {
-    if let InstKind::Store { e: Operand::SymAddr(name), .. } = kind {
+    if let InstKind::Store {
+        e: Operand::SymAddr(name),
+        ..
+    } = kind
+    {
         name.starts_with("__dcc_")
     } else {
         false
@@ -1671,8 +1689,12 @@ fn resolve_operand(
 fn set_expr_ty_if_compatible(expr: &mut Expr, desired_ty: &Type) {
     // 只对 Ident / Deref 等叶子节点修正类型; 复杂表达式保留其计算类型
     match expr {
-        Expr::Ident { ty, .. } => { *ty = desired_ty.clone(); }
-        Expr::Deref { ty, .. } => { *ty = desired_ty.clone(); }
+        Expr::Ident { ty, .. } => {
+            *ty = desired_ty.clone();
+        }
+        Expr::Deref { ty, .. } => {
+            *ty = desired_ty.clone();
+        }
         _ => {}
     }
 }
@@ -1751,7 +1773,11 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: Type::Void,
         },
-        InstKind::Call { callee, args, ret_ty } => Expr::Call {
+        InstKind::Call {
+            callee,
+            args,
+            ret_ty,
+        } => Expr::Call {
             callee: Box::new(resolve_operand(callee, &fake_env, subst)),
             args: args
                 .iter()
@@ -1760,7 +1786,12 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: ret_ty.clone(),
         },
-        InstKind::MemberLoad { obj, obj_ty, field, ty } => {
+        InstKind::MemberLoad {
+            obj,
+            obj_ty,
+            field,
+            ty,
+        } => {
             let mut base = resolve_operand(obj, &fake_env, subst);
             // 重建时修正基址类型: SSA 变量可能丢失了原始结构体类型
             set_expr_ty_if_compatible(&mut base, obj_ty);
@@ -1775,7 +1806,12 @@ fn inst_to_expr_resolved(
                 is_arrow: false,
             }
         }
-        InstKind::MemberStore { obj, obj_ty, field, src } => {
+        InstKind::MemberStore {
+            obj,
+            obj_ty,
+            field,
+            src,
+        } => {
             let mut base = resolve_operand(obj, &fake_env, subst);
             set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Assign {
@@ -2105,13 +2141,22 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
             span: sp.clone(),
             ty: Type::Void,
         },
-        InstKind::Call { callee, args, ret_ty } => Expr::Call {
+        InstKind::Call {
+            callee,
+            args,
+            ret_ty,
+        } => Expr::Call {
             callee: Box::new(operand_to_expr(callee, env)),
             args: args.iter().map(|a| operand_to_expr(a, env)).collect(),
             span: sp.clone(),
             ty: ret_ty.clone(),
         },
-        InstKind::MemberLoad { obj, obj_ty, field, ty } => {
+        InstKind::MemberLoad {
+            obj,
+            obj_ty,
+            field,
+            ty,
+        } => {
             let mut base = operand_to_expr(obj, env);
             set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Member {
@@ -2125,7 +2170,12 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>) -> Expr {
                 is_arrow: false,
             }
         }
-        InstKind::MemberStore { obj, obj_ty, field, src } => {
+        InstKind::MemberStore {
+            obj,
+            obj_ty,
+            field,
+            src,
+        } => {
             let mut base = operand_to_expr(obj, env);
             set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Assign {
@@ -2309,7 +2359,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
@@ -2390,7 +2440,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
@@ -2455,7 +2505,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,

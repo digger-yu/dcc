@@ -1554,7 +1554,8 @@ fn write_line_entry(
         && line_advance <= max_line_incr
         && pc_advance <= min_insn as u64
         && adjusted >= 0
-        && adjusted < line_range as i64 * 2 // sanity: fits in reasonable range
+        && adjusted < line_range as i64 * 2
+    // sanity: fits in reasonable range
     {
         let opcode = opcode_base as i64 + adjusted;
         if opcode >= opcode_base as i64 && opcode <= 255 {
@@ -2875,7 +2876,7 @@ mod tests {
                 basic_block: false,
             },
             LineEntry {
-                pc: 0, // pc_advance = 0
+                pc: 0,   // pc_advance = 0
                 line: 3, // line_advance = 2, in [-5, 8]
                 column: 0,
                 file_idx: 0,
@@ -2917,7 +2918,7 @@ mod tests {
                 basic_block: false,
             },
             LineEntry {
-                pc: 1, // pc_advance = 1 = min_insn (x86)
+                pc: 1,   // pc_advance = 1 = min_insn (x86)
                 line: 3, // line_advance = 2, in [-5, 8]
                 column: 0,
                 file_idx: 0,

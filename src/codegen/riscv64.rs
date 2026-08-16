@@ -224,11 +224,31 @@ impl Riscv64Codegen {
     fn compile_exec(&mut self, module: &Module, prog: &Program) {
         // 文件级 asm: 收集原始文本行
         for decl in &prog.decls {
-            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, .. } = decl {
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+            if let Decl::GlobalAsm {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                ..
+            } = decl
+            {
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
                 for line in resolved.split('\n') {
                     let t = line.trim();
-                    if !t.is_empty() { self.raw_global_asm_lines.push(t.to_string()); }
+                    if !t.is_empty() {
+                        self.raw_global_asm_lines.push(t.to_string());
+                    }
                 }
             }
         }
@@ -259,11 +279,31 @@ impl Riscv64Codegen {
     fn compile_rel(&mut self, module: &Module, prog: &Program) {
         // 文件级 asm: 收集原始文本行
         for decl in &prog.decls {
-            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, .. } = decl {
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+            if let Decl::GlobalAsm {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                ..
+            } = decl
+            {
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
                 for line in resolved.split('\n') {
                     let t = line.trim();
-                    if !t.is_empty() { self.raw_global_asm_lines.push(t.to_string()); }
+                    if !t.is_empty() {
+                        self.raw_global_asm_lines.push(t.to_string());
+                    }
                 }
             }
         }
@@ -393,11 +433,15 @@ impl Riscv64Codegen {
         while i < chars.len() {
             if chars[i] == '%' && i + 1 < chars.len() {
                 match chars[i + 1] {
-                    '%' => { result.push('%'); i += 2; }
+                    '%' => {
+                        result.push('%');
+                        i += 2;
+                    }
                     '[' => {
-                        if let Some(end) = chars[i+2..].iter().position(|&c| c == ']') {
-                            let name: String = chars[i+2..i+2+end].iter().collect();
-                            let all_names: Vec<&Option<String>> = output_names.iter().chain(input_names.iter()).collect();
+                        if let Some(end) = chars[i + 2..].iter().position(|&c| c == ']') {
+                            let name: String = chars[i + 2..i + 2 + end].iter().collect();
+                            let all_names: Vec<&Option<String>> =
+                                output_names.iter().chain(input_names.iter()).collect();
                             for (idx, n) in all_names.iter().enumerate() {
                                 if n.as_ref().map(|s| s.as_str()) == Some(&name) {
                                     result.push_str(&format!("%{}", idx));
@@ -606,18 +650,44 @@ impl Riscv64Codegen {
                     self.gen_block_item(item, nested_ir);
                 }
             }
-            Stmt::AsmGoto { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, goto_labels, span, .. } => {
+            Stmt::AsmGoto {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                goto_labels,
+                span,
+                ..
+            } => {
                 eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
                     resolved_asm = resolved_asm.replace(&format!("%l{}", i), &label.name);
-                    resolved_asm = resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
-                    resolved_asm = resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
                 }
-                let resolved = Self::resolve_asm_template_simple(&resolved_asm, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
-                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-                self.raw_func_asm_lines.push((self.source_name.clone(), lines));
+                let resolved = Self::resolve_asm_template_simple(
+                    &resolved_asm,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
+                let lines: Vec<String> = resolved
+                    .split('\n')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                self.raw_func_asm_lines
+                    .push((self.source_name.clone(), lines));
             }
             _ => {}
         }
@@ -913,11 +983,37 @@ impl Riscv64Codegen {
                     self.emit_jal_to(&name.name);
                 }
             }
-            Expr::AsmExpr { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, span, .. } => {
-                eprintln!("{}:{}: warning: inline asm on non-x86_64 target: result is 0", span.file, span.line);
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
-                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-                self.raw_func_asm_lines.push((format!("__inline_{}", self.label_serial), lines));
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                span,
+                ..
+            } => {
+                eprintln!(
+                    "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
+                    span.file, span.line
+                );
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
+                let lines: Vec<String> = resolved
+                    .split('\n')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                self.raw_func_asm_lines
+                    .push((format!("__inline_{}", self.label_serial), lines));
                 self.label_serial += 1;
                 self.li_a0(0);
             }
@@ -2849,7 +2945,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // ADDI x10, x10, 5 => C.ADDI x10, 5 (2 bytes)
         cg.emit_addi(10, 10, 5);
-        assert_eq!(cg.code.len(), 2, "ADDI rd==rs1 should compress to C.ADDI (2 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            2,
+            "ADDI rd==rs1 should compress to C.ADDI (2 bytes)"
+        );
         // Verify it's a valid C.ADDI: bits[1:0]=01, funct3[15:13]=000
         let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
         assert_eq!(insn & 0x3, 0x01, "C.ADDI opcode should be 01");
@@ -2874,7 +2974,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // LUI x10, 5 => C.LUI x10, 5 (2 bytes)
         cg.emit_lui(10, 5);
-        assert_eq!(cg.code.len(), 2, "LUI with small imm should compress to C.LUI (2 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            2,
+            "LUI with small imm should compress to C.LUI (2 bytes)"
+        );
         let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
         assert_eq!(insn & 0x3, 0x01, "C.LUI opcode should be 01");
         assert_eq!((insn >> 13) & 0x7, 0b011, "C.LUI funct3 should be 011");
@@ -2886,7 +2990,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // ADD x10, x0, x11 => C.MV x10, x11 (2 bytes)
         cg.emit_add(10, 0, 11);
-        assert_eq!(cg.code.len(), 2, "ADD rd, x0, rs2 should compress to C.MV (2 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            2,
+            "ADD rd, x0, rs2 should compress to C.MV (2 bytes)"
+        );
         let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
         assert_eq!(insn & 0x3, 0x02, "C.MV opcode should be 10");
     }
@@ -2897,7 +3005,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // ADD x10, x10, x11 => C.ADD x10, x11 (2 bytes)
         cg.emit_add(10, 10, 11);
-        assert_eq!(cg.code.len(), 2, "ADD rd==rs1 should compress to C.ADD (2 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            2,
+            "ADD rd==rs1 should compress to C.ADD (2 bytes)"
+        );
         let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
         assert_eq!(insn & 0x3, 0x02, "C.ADD opcode should be 10");
     }
@@ -2908,7 +3020,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // LW x10, 8(x10) => C.LW x10', x10', 8 (2 bytes)
         cg.emit_lw(10, 10, 8);
-        assert_eq!(cg.code.len(), 2, "LW with x8-x15 and aligned offset should compress to C.LW (2 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            2,
+            "LW with x8-x15 and aligned offset should compress to C.LW (2 bytes)"
+        );
         let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
         assert_eq!(insn & 0x3, 0x00, "C.LW opcode should be 00");
         assert_eq!((insn >> 13) & 0x7, 0b010, "C.LW funct3 should be 010");
@@ -2920,7 +3036,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // SW x10, 8(x10) => C.SW x10', x10', 8 (2 bytes)
         cg.emit_sw(10, 10, 8);
-        assert_eq!(cg.code.len(), 2, "SW with x8-x15 and aligned offset should compress to C.SW (2 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            2,
+            "SW with x8-x15 and aligned offset should compress to C.SW (2 bytes)"
+        );
         let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
         assert_eq!(insn & 0x3, 0x00, "C.SW opcode should be 00");
         assert_eq!((insn >> 13) & 0x7, 0b110, "C.SW funct3 should be 110");
@@ -2932,7 +3052,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // LD x10, 16(x10) => C.LD x10', x10', 16 (2 bytes)
         cg.emit_ld(10, 10, 16);
-        assert_eq!(cg.code.len(), 2, "LD with x8-x15 and aligned offset should compress to C.LD (2 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            2,
+            "LD with x8-x15 and aligned offset should compress to C.LD (2 bytes)"
+        );
         let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
         assert_eq!(insn & 0x3, 0x01, "C.LD opcode should be 01");
         assert_eq!((insn >> 13) & 0x7, 0b011, "C.LD funct3 should be 011");
@@ -2944,7 +3068,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // SD x10, 16(x10) => C.SD x10', x10', 16 (2 bytes)
         cg.emit_sd(10, 10, 16);
-        assert_eq!(cg.code.len(), 2, "SD with x8-x15 and aligned offset should compress to C.SD (2 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            2,
+            "SD with x8-x15 and aligned offset should compress to C.SD (2 bytes)"
+        );
         let insn = u16::from_le_bytes([cg.code[0], cg.code[1]]);
         assert_eq!(insn & 0x3, 0x01, "C.SD opcode should be 01");
         assert_eq!((insn >> 13) & 0x7, 0b111, "C.SD funct3 should be 111");
@@ -2956,7 +3084,11 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // ADDI x10, x10, 100 => 4 bytes (out of C.ADDI range -32..31)
         cg.emit_addi(10, 10, 100);
-        assert_eq!(cg.code.len(), 4, "ADDI with large imm should not compress (4 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            4,
+            "ADDI with large imm should not compress (4 bytes)"
+        );
     }
 
     #[test]
@@ -2965,6 +3097,10 @@ mod tests {
         let mut cg = Riscv64Codegen::new(crate::target::Target::resolve(&triple), true);
         // LW x5, 8(x10) => 4 bytes (rd not in x8-x15)
         cg.emit_lw(5, 10, 8);
-        assert_eq!(cg.code.len(), 4, "LW with rd not in x8-x15 should not compress (4 bytes)");
+        assert_eq!(
+            cg.code.len(),
+            4,
+            "LW with rd not in x8-x15 should not compress (4 bytes)"
+        );
     }
 }

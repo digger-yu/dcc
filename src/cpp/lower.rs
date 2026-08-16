@@ -488,7 +488,13 @@ impl Lower {
         if let Some(bases) = class_bases.get(class) {
             for base in bases {
                 chain.push(base.name.clone());
-                Self::collect_inherited_members_static(class_bases, class_fields, &base.name, chain, members);
+                Self::collect_inherited_members_static(
+                    class_bases,
+                    class_fields,
+                    &base.name,
+                    chain,
+                    members,
+                );
                 chain.pop();
             }
         }
@@ -702,7 +708,9 @@ impl Lower {
             CppDecl::Concept { name, body_text } => {
                 self.concepts.insert(name.clone(), body_text.clone());
                 // 同步注册到模板注册表 (供 requires 子句求值时展开)
-                self.templates.concepts.insert(name.clone(), body_text.clone());
+                self.templates
+                    .concepts
+                    .insert(name.clone(), body_text.clone());
             }
             _ => {
                 // M26: 普通声明扫描类型, 触发模板类实例化 (定义先于使用)
@@ -1701,9 +1709,13 @@ impl Lower {
             }
         }
         // 检测菱形继承: 同一基类出现多次
-        let mut base_counts: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
+        let mut base_counts: std::collections::HashMap<String, Vec<bool>> =
+            std::collections::HashMap::new();
         for (name, is_virtual) in &all_bases {
-            base_counts.entry(name.clone()).or_default().push(*is_virtual);
+            base_counts
+                .entry(name.clone())
+                .or_default()
+                .push(*is_virtual);
         }
         for (name, virtual_flags) in &base_counts {
             if virtual_flags.len() > 1 {
@@ -1768,9 +1780,9 @@ impl Lower {
             if let Some(base_bases) = self.class_bases.get(&b.name) {
                 // 递归检查基类的基类
                 base_bases.iter().any(|bb| {
-                    self.class_bases.get(&bb.name).is_some_and(|bbs| {
-                        bbs.iter().any(|bbb| bbb.is_virtual)
-                    })
+                    self.class_bases
+                        .get(&bb.name)
+                        .is_some_and(|bbs| bbs.iter().any(|bbb| bbb.is_virtual))
                 })
             } else {
                 false
@@ -1832,7 +1844,13 @@ impl Lower {
                 let mut members = Vec::new();
                 // 初始 chain 包含直接基类名
                 let mut initial_chain = vec![base.name.clone()];
-                Self::collect_inherited_members_static(&self.class_bases, &self.class_fields, &base.name, &mut initial_chain, &mut members);
+                Self::collect_inherited_members_static(
+                    &self.class_bases,
+                    &self.class_fields,
+                    &base.name,
+                    &mut initial_chain,
+                    &mut members,
+                );
                 for (member_name, chain) in members {
                     if emitted_inherited_mbrs.contains(member_name.as_str()) {
                         continue;
@@ -1932,8 +1950,10 @@ impl Lower {
             name
         ));
         // Itanium _ZTI<Name> 兼容符号 (weak: 多 TU 允许重复定义)
-        self.out
-            .push_str(&format!("__attribute__((weak)) void* {} = (void*)&__dcc_ti_{};\n", zti, name));
+        self.out.push_str(&format!(
+            "__attribute__((weak)) void* {} = (void*)&__dcc_ti_{};\n",
+            zti, name
+        ));
     }
 
     /// 输出 vtable 数组与符号
@@ -1942,8 +1962,10 @@ impl Lower {
         self.out
             .push_str(&format!("static void* __dcc_vt_{}[] = {{\n", name));
         // RTTI slot: pointer to typeinfo struct for dynamic typeid
-        self.out
-            .push_str(&format!("    (void*)&__dcc_ti_{},  /* RTTI typeinfo pointer */\n", name));
+        self.out.push_str(&format!(
+            "    (void*)&__dcc_ti_{},  /* RTTI typeinfo pointer */\n",
+            name
+        ));
         for m in members {
             if let CppDecl::MemberFn {
                 is_virtual: true,
@@ -1972,8 +1994,10 @@ impl Lower {
         }
         self.out.push_str("    (void*)0\n");
         self.out.push_str("};\n");
-        self.out
-            .push_str(&format!("__attribute__((weak)) void* {} = __dcc_vt_{};\n", ztv, name));
+        self.out.push_str(&format!(
+            "__attribute__((weak)) void* {} = __dcc_vt_{};\n",
+            ztv, name
+        ));
     }
 
     /// 输出 vtable 项
@@ -2449,7 +2473,7 @@ impl Lower {
                 } else {
                     false
                 };
-                
+
                 // Check if member is inherited from a base class
                 // M26: 递归查找继承链, 获取完整 __base_ 访问路径
                 let inherited_chain = if let Some(class) = self.lookup_var_class(b) {
@@ -2457,7 +2481,7 @@ impl Lower {
                 } else {
                     None
                 };
-                
+
                 self.emit_expr(b);
                 if let Some(chain) = inherited_chain {
                     // Rewrite to b.__base_Base1.__base_Base2...s
@@ -3259,9 +3283,21 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        assert!(s.contains("__attribute__((weak)) void* _ZTV"), "vtable must weak: {}", s);
-        assert!(s.contains("__attribute__((weak)) void* _ZTI"), "typeinfo 必须 weak: {}", s);
-        assert!(s.contains("__attribute__((weak)) size_t __dcc_mbr_"), "member offset 必须 weak: {}", s);
+        assert!(
+            s.contains("__attribute__((weak)) void* _ZTV"),
+            "vtable must weak: {}",
+            s
+        );
+        assert!(
+            s.contains("__attribute__((weak)) void* _ZTI"),
+            "typeinfo 必须 weak: {}",
+            s
+        );
+        assert!(
+            s.contains("__attribute__((weak)) size_t __dcc_mbr_"),
+            "member offset 必须 weak: {}",
+            s
+        );
     }
 
     #[test]
@@ -3742,7 +3778,11 @@ mod tests {
         l.lower_decls(&decls);
         let s = l.finish();
         // 应该检测到菱形继承并发出警告
-        assert!(s.contains("WARNING") && s.contains("diamond inheritance"), "{}", s);
+        assert!(
+            s.contains("WARNING") && s.contains("diamond inheritance"),
+            "{}",
+            s
+        );
     }
 
     #[test]
@@ -3822,7 +3862,11 @@ mod tests {
         // Child 的继承成员 x (来自 GrandParent, 通过 Parent)
         assert!(s.contains("__dcc_mbr_Child_x"), "{}", s);
         // 应该使用完整 __base_ 链
-        assert!(s.contains("__f.__base_Parent.__base_GrandParent.x"), "{}", s);
+        assert!(
+            s.contains("__f.__base_Parent.__base_GrandParent.x"),
+            "{}",
+            s
+        );
         // Child 的继承成员 y (来自 Parent)
         assert!(s.contains("__dcc_mbr_Child_y"), "{}", s);
         assert!(s.contains("__f.__base_Parent.y"), "{}", s);

@@ -28,8 +28,14 @@ impl CallGraph {
 
     /// Add a call edge from caller to callee
     pub fn add_edge(&mut self, caller: &str, callee: &str) {
-        self.callees.entry(caller.to_string()).or_default().insert(callee.to_string());
-        self.callers.entry(callee.to_string()).or_default().insert(caller.to_string());
+        self.callees
+            .entry(caller.to_string())
+            .or_default()
+            .insert(callee.to_string());
+        self.callers
+            .entry(callee.to_string())
+            .or_default()
+            .insert(caller.to_string());
     }
 
     /// Mark a function as inlined
@@ -70,23 +76,30 @@ impl GlobalGuardIndex {
     }
 
     /// Allocate guards for a function, merging if inlined
-    pub fn allocate_guards(&mut self, func: &str, requested_guards: u32, is_inlined: bool) -> (String, u32) {
+    pub fn allocate_guards(
+        &mut self,
+        func: &str,
+        requested_guards: u32,
+        is_inlined: bool,
+    ) -> (String, u32) {
         if is_inlined {
             // For inlined functions, merge into caller's guard array
             let caller = self.find_caller_for_func(func);
             if let Some(caller_name) = caller {
                 // Compute merge result without holding borrow
-                let merge_info = if let Some((array_name, count)) = self.func_guards.get(&caller_name) {
-                    Some((array_name.clone(), *count))
-                } else {
-                    None
-                };
+                let merge_info =
+                    if let Some((array_name, count)) = self.func_guards.get(&caller_name) {
+                        Some((array_name.clone(), *count))
+                    } else {
+                        None
+                    };
                 if let Some((array_name, base_id)) = merge_info {
                     // Update caller's count
                     let new_count = base_id + requested_guards;
                     self.func_guards.get_mut(&caller_name).unwrap().1 = new_count;
                     // Record the inlined function's mapping
-                    self.func_guards.insert(func.to_string(), (array_name.clone(), base_id));
+                    self.func_guards
+                        .insert(func.to_string(), (array_name.clone(), base_id));
                     self.merged_arrays.insert(array_name, new_count);
                     return (self.func_guards[func].0.clone(), base_id);
                 }
@@ -96,8 +109,10 @@ impl GlobalGuardIndex {
         // Allocate new guard array for this function
         let array_name = format!("__dcc_cov_guards_global_{}", self.next_global_id);
         self.next_global_id += 1;
-        self.func_guards.insert(func.to_string(), (array_name.clone(), requested_guards));
-        self.merged_arrays.insert(array_name.clone(), requested_guards);
+        self.func_guards
+            .insert(func.to_string(), (array_name.clone(), requested_guards));
+        self.merged_arrays
+            .insert(array_name.clone(), requested_guards);
         (array_name, 0)
     }
 
@@ -116,7 +131,7 @@ impl GlobalGuardIndex {
 /// Generate weak hook calls for inlined functions
 pub fn generate_weak_hooks(call_graph: &CallGraph, func: &str) -> Vec<String> {
     let mut hooks = Vec::new();
-    
+
     // If this function is inlined, generate weak hooks for its callees
     if call_graph.is_inlined(func) {
         if let Some(callees) = call_graph.get_callees(func) {
@@ -126,7 +141,7 @@ pub fn generate_weak_hooks(call_graph: &CallGraph, func: &str) -> Vec<String> {
             }
         }
     }
-    
+
     hooks
 }
 
@@ -136,7 +151,7 @@ pub fn merge_kcov_guards(
     func_guard_counts: &HashMap<String, u32>,
 ) -> GlobalGuardIndex {
     let mut index = GlobalGuardIndex::new();
-    
+
     // Process non-inlined functions first to ensure callers are allocated
     // before inlined callees try to merge into them
     for (func, &count) in func_guard_counts {
@@ -149,7 +164,7 @@ pub fn merge_kcov_guards(
             index.allocate_guards(func, count, true);
         }
     }
-    
+
     index
 }
 
@@ -162,7 +177,7 @@ mod tests {
         let mut cg = CallGraph::new();
         cg.add_edge("main", "foo");
         cg.add_edge("foo", "bar");
-        
+
         assert!(cg.get_callees("main").unwrap().contains("foo"));
         assert!(cg.get_callers("foo").unwrap().contains("main"));
         assert!(cg.get_callees("foo").unwrap().contains("bar"));
@@ -173,7 +188,7 @@ mod tests {
         let mut cg = CallGraph::new();
         cg.add_edge("main", "foo");
         cg.mark_inlined("foo");
-        
+
         assert!(cg.is_inlined("foo"));
         assert!(!cg.is_inlined("main"));
     }
@@ -181,12 +196,12 @@ mod tests {
     #[test]
     fn test_global_guard_allocation() {
         let mut index = GlobalGuardIndex::new();
-        
+
         // Allocate guards for non-inlined function
         let (arr1, base1) = index.allocate_guards("main", 4, false);
         assert_eq!(base1, 0);
         assert!(arr1.contains("__dcc_cov_guards_global_"));
-        
+
         // Allocate guards for another function
         let (arr2, base2) = index.allocate_guards("foo", 3, false);
         assert_eq!(base2, 0);
@@ -199,7 +214,7 @@ mod tests {
         cg.add_edge("main", "foo");
         cg.add_edge("main", "bar");
         cg.mark_inlined("main");
-        
+
         let hooks = generate_weak_hooks(&cg, "main");
         assert_eq!(hooks.len(), 2);
         assert!(hooks.contains(&"__sanitizer_cov_weak_hook_foo".to_string()));
@@ -211,13 +226,13 @@ mod tests {
         let mut cg = CallGraph::new();
         cg.add_edge("main", "foo");
         cg.mark_inlined("foo");
-        
+
         let mut func_counts = HashMap::new();
         func_counts.insert("main".to_string(), 4);
         func_counts.insert("foo".to_string(), 2);
-        
+
         let index = merge_kcov_guards(&cg, &func_counts);
-        
+
         // Both functions should have guard allocations
         assert!(index.get_guards("main").is_some());
         assert!(index.get_guards("foo").is_some());

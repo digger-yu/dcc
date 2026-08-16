@@ -50,7 +50,14 @@ fn validate_inline_asm_decl(decl: &Decl, diags: &mut Vec<Diagnostic>) {
             input_constraints,
             span,
             ..
-        } => validate_inline_asm_operands(outputs, output_constraints, inputs, input_constraints, span, diags),
+        } => validate_inline_asm_operands(
+            outputs,
+            output_constraints,
+            inputs,
+            input_constraints,
+            span,
+            diags,
+        ),
         _ => {}
     }
 }
@@ -72,7 +79,9 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
             }
         }
         Stmt::Expr { e, .. } => validate_inline_asm_expr(e, diags),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             validate_inline_asm_expr(cond, diags);
             validate_inline_asm_stmt(then_, diags);
             if let Some(e) = else_ {
@@ -83,7 +92,13 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
             validate_inline_asm_expr(cond, diags);
             validate_inline_asm_stmt(body, diags);
         }
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(init) = init {
                 validate_inline_asm_stmt(init, diags);
             }
@@ -110,8 +125,22 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
                 validate_inline_asm_block(&case.body, diags);
             }
         }
-        Stmt::AsmGoto { outputs, output_constraints, inputs, input_constraints, span, .. } => {
-            validate_inline_asm_operands(outputs, output_constraints, inputs, input_constraints, span, diags);
+        Stmt::AsmGoto {
+            outputs,
+            output_constraints,
+            inputs,
+            input_constraints,
+            span,
+            ..
+        } => {
+            validate_inline_asm_operands(
+                outputs,
+                output_constraints,
+                inputs,
+                input_constraints,
+                span,
+                diags,
+            );
         }
         Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } => {}
     }
@@ -141,7 +170,9 @@ fn validate_inline_asm_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) {
                 validate_inline_asm_expr(arg, diags);
             }
         }
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             validate_inline_asm_expr(cond, diags);
             validate_inline_asm_expr(then_, diags);
             validate_inline_asm_expr(else_, diags);
@@ -157,8 +188,22 @@ fn validate_inline_asm_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) {
                 validate_inline_asm_init(init, diags);
             }
         }
-        Expr::AsmExpr { outputs, output_constraints, inputs, input_constraints, span, .. } => {
-            validate_inline_asm_operands(outputs, output_constraints, inputs, input_constraints, span, diags);
+        Expr::AsmExpr {
+            outputs,
+            output_constraints,
+            inputs,
+            input_constraints,
+            span,
+            ..
+        } => {
+            validate_inline_asm_operands(
+                outputs,
+                output_constraints,
+                inputs,
+                input_constraints,
+                span,
+                diags,
+            );
         }
         Expr::VaArg { ap, .. } => validate_inline_asm_expr(ap, diags),
         Expr::Int { .. }
@@ -239,14 +284,17 @@ fn validate_inline_asm_operands(
     for (i, c) in output_constraints.iter().enumerate() {
         let stripped = c.trim();
         if !stripped.starts_with('=') && !stripped.starts_with('+') {
-            diags.push(Diagnostic::err(
-                "E0014",
-                format!(
-                    "output operand {} constraint '{}' missing '=' or '+' prefix",
-                    i, c
-                ),
-                span.clone(),
-            ).with_hint("add '=' for write-only or '+' for read-write output"));
+            diags.push(
+                Diagnostic::err(
+                    "E0014",
+                    format!(
+                        "output operand {} constraint '{}' missing '=' or '+' prefix",
+                        i, c
+                    ),
+                    span.clone(),
+                )
+                .with_hint("add '=' for write-only or '+' for read-write output"),
+            );
         }
     }
 
@@ -304,7 +352,10 @@ fn validate_inline_asm_operands(
 
     // 3. 类型校验 (E0310) — 原始功能
     for (idx, expr) in outputs.iter().enumerate() {
-        let constraint = output_constraints.get(idx).map(String::as_str).unwrap_or("=r");
+        let constraint = output_constraints
+            .get(idx)
+            .map(String::as_str)
+            .unwrap_or("=r");
         let effective = matched_constraint(
             constraint,
             output_constraints,
@@ -315,7 +366,10 @@ fn validate_inline_asm_operands(
         validate_inline_asm_operand(expr, effective, true, span, diags);
     }
     for (idx, expr) in inputs.iter().enumerate() {
-        let constraint = input_constraints.get(idx).map(String::as_str).unwrap_or("r");
+        let constraint = input_constraints
+            .get(idx)
+            .map(String::as_str)
+            .unwrap_or("r");
         let effective = matched_constraint(
             constraint,
             output_constraints,
@@ -368,7 +422,9 @@ fn validate_inline_asm_operand(
             ),
             span.clone(),
         )
-        .with_hint("use an XMM/x87 constraint for floating-point operands or change the expression type"),
+        .with_hint(
+            "use an XMM/x87 constraint for floating-point operands or change the expression type",
+        ),
     );
 }
 
@@ -454,7 +510,10 @@ fn constraint_allows_type(
     if letters.iter().any(|c| matches!(c, 'x' | 'Y')) {
         return is_float;
     }
-    if letters.iter().any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D')) {
+    if letters
+        .iter()
+        .any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'))
+    {
         return is_int_or_ptr;
     }
     if letters.contains(&'p') {
@@ -468,9 +527,14 @@ fn constraint_allows_type(
 }
 
 fn asm_constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
-    let letters: Vec<char> = constraint.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    let letters: Vec<char> = constraint
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .collect();
     let has_m = letters.contains(&'m');
-    let has_r = letters.iter().any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'));
+    let has_r = letters
+        .iter()
+        .any(|c| matches!(c, 'r' | 'R' | 'q' | 'Q' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D'));
     has_m && (!has_r || is_inout)
 }
 
@@ -481,7 +545,10 @@ fn asm_constraint_is_immediate(constraint: &str) -> bool {
 }
 
 fn asm_pick_sub_constraint(constraint: &str, prefer_memory: bool) -> &'static str {
-    let letters: Vec<char> = constraint.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    let letters: Vec<char> = constraint
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .collect();
     if prefer_memory && letters.contains(&'m') {
         return "m";
     }
@@ -494,8 +561,7 @@ fn asm_pick_sub_constraint(constraint: &str, prefer_memory: bool) -> &'static st
     if letters.iter().any(|c| {
         matches!(
             c,
-            'i' | 'n' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'X' | 'E' | 'F'
-                | 'G' | 'H' | 's'
+            'i' | 'n' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'X' | 'E' | 'F' | 'G' | 'H' | 's'
         )
     }) {
         return "i";
@@ -513,10 +579,18 @@ fn explicit_constraint_allows_type(constraint: &str, ty: &Type) -> bool {
     let Some(end) = constraint[start + 1..].find('}') else {
         return true;
     };
-    let reg = constraint[start + 1..start + 1 + end].trim().trim_start_matches('%').to_ascii_lowercase();
+    let reg = constraint[start + 1..start + 1 + end]
+        .trim()
+        .trim_start_matches('%')
+        .to_ascii_lowercase();
     let is_float = asm_type_is_float_like(ty);
     let is_int_or_ptr = asm_type_is_integer_like(ty);
-    if reg.starts_with("xmm") || reg.starts_with("ymm") || reg.starts_with("zmm") || reg == "st" || reg.starts_with("st(") {
+    if reg.starts_with("xmm")
+        || reg.starts_with("ymm")
+        || reg.starts_with("zmm")
+        || reg == "st"
+        || reg.starts_with("st(")
+    {
         return is_float;
     }
     if reg.starts_with("mm") {
@@ -623,9 +697,12 @@ pub fn emit(
                         line_dirs: vec![".".to_string()],
                         low_pc: cg.asm_line_entries.first().map(|e| e.0).unwrap_or(0),
                         high_pc: cg.asm_line_entries.last().map(|e| e.1).unwrap_or(0),
-                        func_ranges: funcs.iter().map(|(name, pc)| {
-                            (*pc, *pc + cg.func_sizes.get(*name).copied().unwrap_or(16))
-                        }).collect(),
+                        func_ranges: funcs
+                            .iter()
+                            .map(|(name, pc)| {
+                                (*pc, *pc + cg.func_sizes.get(*name).copied().unwrap_or(16))
+                            })
+                            .collect(),
                         cfi_rows: vec![],
                     };
                     let opts = debug::DebugOptions {

@@ -232,7 +232,7 @@ pub struct Parser<'a> {
     decl_auto_type: bool,                      // __auto_type：类型由初始化表达式推导
     allow_named_type: bool,                    // typeof 等上下文允许 Type::Named
     opts: ParseOptions,
-    shadow_counter: i32,                       // 嵌套块遮蔽重命名计数器
+    shadow_counter: i32, // 嵌套块遮蔽重命名计数器
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -498,9 +498,15 @@ impl<'a> Parser<'a> {
     fn typeof_operand_is_type_form(&self) -> bool {
         if self.cur.kind == TokKind::Ident {
             match self.cur.text.as_str() {
-                "_Generic" | "nullptr" | "sizeof" | "__builtin_choose_expr"
-                | "__builtin_offsetof" | "offsetof"
-                | "__alignof__" | "_Alignof" | "__alignof"
+                "_Generic"
+                | "nullptr"
+                | "sizeof"
+                | "__builtin_choose_expr"
+                | "__builtin_offsetof"
+                | "offsetof"
+                | "__alignof__"
+                | "_Alignof"
+                | "__alignof"
                 | "__builtin_types_compatible_p" => return false,
                 _ => {}
             }
@@ -533,8 +539,15 @@ impl<'a> Parser<'a> {
         }
         // DEBUG: show actual token for line mapping diagnosis
         if std::env::var("DCC_DEBUG_PARSE").is_ok() {
-            eprintln!("DEBUG-PARSE: expected {} got {:?} text={:?} line={} col={} file={}",
-                what, self.cur.kind, self.cur.text, self.cur.span.line, self.cur.span.col, self.cur.span.file);
+            eprintln!(
+                "DEBUG-PARSE: expected {} got {:?} text={:?} line={} col={} file={}",
+                what,
+                self.cur.kind,
+                self.cur.text,
+                self.cur.span.line,
+                self.cur.span.col,
+                self.cur.span.file
+            );
         }
         self.err_here(
             "E0001",
@@ -1508,7 +1521,8 @@ impl<'a> Parser<'a> {
                     "E0014",
                     format!(
                         "asm output constraint count ({}) != output operand count ({})",
-                        output_constraints.len(), expected
+                        output_constraints.len(),
+                        expected
                     ),
                     sp.clone(),
                 ));
@@ -1518,7 +1532,8 @@ impl<'a> Parser<'a> {
                     "E0014",
                     format!(
                         "asm output name count ({}) != output operand count ({})",
-                        output_names.len(), expected
+                        output_names.len(),
+                        expected
                     ),
                     sp.clone(),
                 ));
@@ -1531,7 +1546,8 @@ impl<'a> Parser<'a> {
                     "E0014",
                     format!(
                         "asm input constraint count ({}) != input operand count ({})",
-                        input_constraints.len(), input_count
+                        input_constraints.len(),
+                        input_count
                     ),
                     sp.clone(),
                 ));
@@ -1541,7 +1557,8 @@ impl<'a> Parser<'a> {
                     "E0014",
                     format!(
                         "asm input name count ({}) != input operand count ({})",
-                        input_names.len(), input_count
+                        input_names.len(),
+                        input_count
                     ),
                     sp.clone(),
                 ));
@@ -1612,25 +1629,31 @@ impl<'a> Parser<'a> {
         for (i, c) in output_constraints.iter().enumerate() {
             let stripped = c.trim();
             if !stripped.starts_with('=') && !stripped.starts_with('+') {
-                self.diags.push(Diagnostic::err(
-                    "E0014",
-                    format!(
-                        "output operand {} constraint '{}' missing '=' or '+' prefix",
-                        i, c
-                    ),
-                    sp.clone(),
-                ).with_hint("add '=' for write-only or '+' for read-write output"));
+                self.diags.push(
+                    Diagnostic::err(
+                        "E0014",
+                        format!(
+                            "output operand {} constraint '{}' missing '=' or '+' prefix",
+                            i, c
+                        ),
+                        sp.clone(),
+                    )
+                    .with_hint("add '=' for write-only or '+' for read-write output"),
+                );
             }
         }
         // 2. 重复操作数名检测 (E0016, 对齐 GCC "duplicate 'asm' operand name")
         let mut seen_names: HashSet<&str> = HashSet::new();
         for name in output_names.iter().chain(input_names.iter()).flatten() {
             if !name.is_empty() && !seen_names.insert(name.as_str()) {
-                self.diags.push(Diagnostic::err(
-                    "E0016",
-                    format!("duplicate asm operand name '{}'", name),
-                    sp.clone(),
-                ).with_hint("each named operand must have a unique name"));
+                self.diags.push(
+                    Diagnostic::err(
+                        "E0016",
+                        format!("duplicate asm operand name '{}'", name),
+                        sp.clone(),
+                    )
+                    .with_hint("each named operand must have a unique name"),
+                );
             }
         }
         // 3. 命名/位置操作数混用 (W0007):
@@ -1647,18 +1670,17 @@ impl<'a> Parser<'a> {
             .iter()
             .any(|n| n.as_ref().map_or(true, |s| s.is_empty()));
         if has_named && has_unnamed {
-            self.diags.push(Diagnostic::warn(
-                "W0007",
-                "mixing named and unnamed asm operands",
-                sp.clone(),
-            ).with_hint(
-                "name all operands or use positional references consistently",
-            ));
+            self.diags.push(
+                Diagnostic::warn("W0007", "mixing named and unnamed asm operands", sp.clone())
+                    .with_hint("name all operands or use positional references consistently"),
+            );
         }
         // 4. 约束与表达式类型不匹配 (W0005)
         let all_exprs: Vec<&Expr> = outputs.iter().chain(inputs.iter()).collect();
-        let all_constraints: Vec<&String> =
-            output_constraints.iter().chain(input_constraints.iter()).collect();
+        let all_constraints: Vec<&String> = output_constraints
+            .iter()
+            .chain(input_constraints.iter())
+            .collect();
         for (expr, constraint) in all_exprs.iter().zip(all_constraints.iter()) {
             let c = constraint.trim();
             // 剥除前缀后取核心约束字母
@@ -1668,34 +1690,33 @@ impl<'a> Parser<'a> {
             }
             let first = core.chars().next().unwrap();
             let expr_ty = expr.ty();
-            let is_float = matches!(
-                expr_ty,
-                Type::Float | Type::Double | Type::LongDouble
-            );
+            let is_float = matches!(expr_ty, Type::Float | Type::Double | Type::LongDouble);
             // 浮点表达式绑定 GP 整数约束 'r'
             if is_float && first == 'r' {
-                self.diags.push(Diagnostic::warn(
-                    "W0005",
-                    "impossible constraint: 'r' constraint with \
+                self.diags.push(
+                    Diagnostic::warn(
+                        "W0005",
+                        "impossible constraint: 'r' constraint with \
                      floating-point operand",
-                    sp.clone(),
-                ).with_hint(
-                    "use 'x' for SSE or 'f' for x87 float operands",
-                ));
+                        sp.clone(),
+                    )
+                    .with_hint("use 'x' for SSE or 'f' for x87 float operands"),
+                );
             }
             // 整数表达式绑定 XMM 约束 'x'/'y'
             if !is_float && (first == 'x' || first == 'Y') {
-                self.diags.push(Diagnostic::warn(
-                    "W0005",
-                    format!(
-                        "impossible constraint: '{}' constraint with \
+                self.diags.push(
+                    Diagnostic::warn(
+                        "W0005",
+                        format!(
+                            "impossible constraint: '{}' constraint with \
                          integer/pointer operand",
-                        first
-                    ),
-                    sp.clone(),
-                ).with_hint(
-                    "use 'r' for integer operands, 'x' for float/vector",
-                ));
+                            first
+                        ),
+                        sp.clone(),
+                    )
+                    .with_hint("use 'r' for integer operands, 'x' for float/vector"),
+                );
             }
         }
         // 5. 模板占位符数量与操作数数量不匹配 (E0015)
@@ -1761,17 +1782,18 @@ impl<'a> Parser<'a> {
                                 .filter_map(|n| n.as_deref())
                                 .collect();
                             if !all_names_flat.contains(&name) {
-                                self.diags.push(Diagnostic::err(
-                                    "E0015",
-                                    format!(
-                                        "asm template references unnamed operand \
+                                self.diags.push(
+                                    Diagnostic::err(
+                                        "E0015",
+                                        format!(
+                                            "asm template references unnamed operand \
                                          '%[{}]' which does not exist",
-                                        name
-                                    ),
-                                    sp.clone(),
-                                ).with_hint(
-                                    "check the operand name or add it to the list",
-                                ));
+                                            name
+                                        ),
+                                        sp.clone(),
+                                    )
+                                    .with_hint("check the operand name or add it to the list"),
+                                );
                             }
                         }
                     }
@@ -1795,17 +1817,18 @@ impl<'a> Parser<'a> {
         }
         if let Some(max) = max_idx {
             if max >= total_ops && total_ops > 0 {
-                self.diags.push(Diagnostic::err(
-                    "E0015",
-                    format!(
-                        "asm template references operand %{} but only {} \
+                self.diags.push(
+                    Diagnostic::err(
+                        "E0015",
+                        format!(
+                            "asm template references operand %{} but only {} \
                          operand(s) provided",
-                        max, total_ops
-                    ),
-                    sp.clone(),
-                ).with_hint(
-                    "add the missing operand or fix the template index",
-                ));
+                            max, total_ops
+                        ),
+                        sp.clone(),
+                    )
+                    .with_hint("add the missing operand or fix the template index"),
+                );
             }
         }
     }
@@ -1830,7 +1853,13 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        (Program { decls, fenv_access: self.opts.fenv_access }, std::mem::take(&mut self.diags))
+        (
+            Program {
+                decls,
+                fenv_access: self.opts.fenv_access,
+            },
+            std::mem::take(&mut self.diags),
+        )
     }
 
     fn parse_decl(&mut self) -> Option<Vec<Decl>> {
@@ -2967,7 +2996,7 @@ impl<'a> Parser<'a> {
                 warning_msg: None,
                 deprecated_msg: None,
                 ifunc_resolver: None,
-                    asm_output_template: None,
+                asm_output_template: None,
                 is_global: false,
                 is_device: false,
                 is_host: false,
@@ -3132,8 +3161,7 @@ impl<'a> Parser<'a> {
             TokKind::Star => true,
             TokKind::Ident => !matches!(
                 self.peek.text.as_str(),
-                "__attribute__" | "__asm__" | "__asm" | "asm"
-                    | "__volatile__" | "__const__"
+                "__attribute__" | "__asm__" | "__asm" | "asm" | "__volatile__" | "__const__"
             ),
             _ => false,
         }
@@ -5124,7 +5152,9 @@ impl<'a> Parser<'a> {
             Stmt::While { cond, .. } | Stmt::Do { cond, .. } => {
                 Self::apply_shadow_map_expr(cond, map);
             }
-            Stmt::For { init, cond, step, .. } => {
+            Stmt::For {
+                init, cond, step, ..
+            } => {
                 if let Some(s) = init {
                     Self::apply_shadow_map_stmt(s, map);
                 }
@@ -5163,8 +5193,11 @@ impl<'a> Parser<'a> {
                     Self::apply_shadow_map_expr(arg, map);
                 }
             }
-            Expr::Unary { e, .. } | Expr::PreInc { e, .. } | Expr::PreDec { e, .. }
-            | Expr::PostInc { e, .. } | Expr::PostDec { e, .. } => {
+            Expr::Unary { e, .. }
+            | Expr::PreInc { e, .. }
+            | Expr::PreDec { e, .. }
+            | Expr::PostInc { e, .. }
+            | Expr::PostDec { e, .. } => {
                 Self::apply_shadow_map_expr(e, map);
             }
             Expr::Cast { e, .. } | Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => {
@@ -5180,7 +5213,9 @@ impl<'a> Parser<'a> {
             Expr::Member { expr, .. } => {
                 Self::apply_shadow_map_expr(expr, map);
             }
-            Expr::Cond { cond, then_, else_, .. } => {
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => {
                 Self::apply_shadow_map_expr(cond, map);
                 Self::apply_shadow_map_expr(then_, map);
                 Self::apply_shadow_map_expr(else_, map);
@@ -5587,8 +5622,7 @@ impl<'a> Parser<'a> {
                                         // 标签索引: GCC 允许 %lN 和 %l(N+op_count)
                                         // 两种形式引用同一个 goto label
                                         let in_range = n < label_count
-                                            || (n >= op_count
-                                                && (n - op_count) < label_count);
+                                            || (n >= op_count && (n - op_count) < label_count);
                                         if !in_range {
                                             self.warn_here(
                                                 "W0004",
@@ -7072,7 +7106,9 @@ impl<'a> Parser<'a> {
                     (false, 0) => Type::Int,
                 };
                 // C99 虚数后缀: 3i / 3j → _Complex int 虚数字面量 (实部 0)
-                let is_imag = suffix.chars().any(|c| c == 'i' || c == 'I' || c == 'j' || c == 'J');
+                let is_imag = suffix
+                    .chars()
+                    .any(|c| c == 'i' || c == 'I' || c == 'j' || c == 'J');
                 self.advance();
                 if is_imag {
                     Some(Expr::ComplexLit {
@@ -7089,12 +7125,15 @@ impl<'a> Parser<'a> {
                 let s = &self.cur.text;
                 // 虚数后缀 i/I/j/J 在类型后缀 F/L 之后 (1.0if / 1.0iF / 4.0i)
                 let s_clean = s.trim_end_matches(['f', 'F', 'l', 'L']);
-                let is_imag = s_clean
-                    .ends_with('i')
+                let is_imag = s_clean.ends_with('i')
                     || s_clean.ends_with('I')
                     || s_clean.ends_with('j')
                     || s_clean.ends_with('J');
-                let v_s = if is_imag { &s_clean[..s_clean.len() - 1] } else { s_clean };
+                let v_s = if is_imag {
+                    &s_clean[..s_clean.len() - 1]
+                } else {
+                    s_clean
+                };
                 let v: f64 = v_s.parse().unwrap_or(0.0);
                 let ty = if s.ends_with('f') || s.ends_with('F') {
                     Type::Float

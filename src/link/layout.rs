@@ -337,8 +337,7 @@ impl LayoutBuilder {
                 input_offsets: Vec::new(),
                 input_sections: Vec::new(),
             });
-            section_index_by_kind
-                .insert(OutputSectionKind::Named(".interp".into()), new_idx);
+            section_index_by_kind.insert(OutputSectionKind::Named(".interp".into()), new_idx);
         }
 
         // 填充数据并计算 input_offsets

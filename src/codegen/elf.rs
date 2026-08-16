@@ -2196,7 +2196,7 @@ pub fn build_elf32_exec_mips(code: &[u8], rodata: &[u8], entry: u32) -> Vec<u8> 
     out.extend_from_slice(&0u16.to_be_bytes()); // e_shentsize
     out.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
     out.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
-    // Program header (32 bytes, big-endian)
+                                                // Program header (32 bytes, big-endian)
     let p_vaddr: u32 = 0x400000;
     let p_filesz = (52 + 32) as u32 + data.len() as u32;
     out.extend_from_slice(&PT_LOAD.to_be_bytes());
@@ -2207,7 +2207,7 @@ pub fn build_elf32_exec_mips(code: &[u8], rodata: &[u8], entry: u32) -> Vec<u8> 
     out.extend_from_slice(&p_filesz.to_be_bytes()); // p_filesz
     out.extend_from_slice(&p_filesz.to_be_bytes()); // p_memsz
     out.extend_from_slice(&0x1000u32.to_be_bytes()); // p_align
-    // Code + rodata
+                                                     // Code + rodata
     out.extend_from_slice(data);
     out
 }
@@ -2241,7 +2241,7 @@ pub fn build_elf32_exec_arm(code: &[u8], rodata: &[u8], entry: u32) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_le_bytes()); // e_shentsize
     out.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     out.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
-    // Program header (32 bytes, little-endian)
+                                                // Program header (32 bytes, little-endian)
     let p_vaddr: u32 = 0x400000;
     let p_filesz = (52 + 32) as u32 + data.len() as u32;
     out.extend_from_slice(&PT_LOAD.to_le_bytes());
@@ -2252,7 +2252,7 @@ pub fn build_elf32_exec_arm(code: &[u8], rodata: &[u8], entry: u32) -> Vec<u8> {
     out.extend_from_slice(&p_filesz.to_le_bytes()); // p_filesz
     out.extend_from_slice(&p_filesz.to_le_bytes()); // p_memsz
     out.extend_from_slice(&0x1000u32.to_le_bytes()); // p_align
-    // Code + rodata
+                                                     // Code + rodata
     out.extend_from_slice(data);
     out
 }

@@ -15,17 +15,17 @@ pub struct Tok {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokKind {
     // 字面量
-    Number,        // 123 0x7b 0b101 0o17
-    FloatLit,      // 1.5 2.0f 3.14L
-    StringLit,     // "abc"
-    WideStringLit, // L"abc" (wchar_t string, UTF-32 on Linux)
+    Number,          // 123 0x7b 0b101 0o17
+    FloatLit,        // 1.5 2.0f 3.14L
+    StringLit,       // "abc"
+    WideStringLit,   // L"abc" (wchar_t string, UTF-32 on Linux)
     Char16StringLit, // u"abc" (char16_t string)
     Char32StringLit, // U"abc" (char32_t string)
-    CharLit,       // 'a'
-    WideCharLit,   // L'a' (wchar_t char literal, wchar_t on Linux = int/UTF-32)
-    Char16Lit,     // u'a' (char16_t char literal)
-    Char32Lit,     // U'a' (char32_t char literal)
-    Ident,         // foo _x
+    CharLit,         // 'a'
+    WideCharLit,     // L'a' (wchar_t char literal, wchar_t on Linux = int/UTF-32)
+    Char16Lit,       // u'a' (char16_t char literal)
+    Char32Lit,       // U'a' (char32_t char literal)
+    Ident,           // foo _x
     // 关键字
     KwInt,
     KwChar,

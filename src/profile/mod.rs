@@ -30,9 +30,9 @@ pub mod memprof;
 pub mod offload;
 pub mod offload_driver_link;
 pub mod perf_data;
-pub mod pgo_integration;
 pub mod perf_event;
 pub mod pgo;
+pub mod pgo_integration;
 pub mod weights;
 
 use std::path::{Path, PathBuf};

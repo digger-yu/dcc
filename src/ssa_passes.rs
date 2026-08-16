@@ -190,9 +190,7 @@ fn build_ssa_type_map(func: &Function) -> HashMap<String, Type> {
 fn operand_is_unsigned(o: &Operand, ty_map: &HashMap<String, Type>) -> bool {
     match o {
         Operand::Int(v) => *v >= 0,
-        Operand::Var(v) => ty_map
-            .get(&v.name())
-            .is_some_and(is_unsigned_ty),
+        Operand::Var(v) => ty_map.get(&v.name()).is_some_and(is_unsigned_ty),
         _ => false,
     }
 }
@@ -623,9 +621,7 @@ fn inst_is_memory_ordered(kind: &InstKind) -> bool {
 }
 
 fn asm_has_memory_clobber(clobbers: &[String]) -> bool {
-    clobbers
-        .iter()
-        .any(|c| c.trim_matches('"') == "memory")
+    clobbers.iter().any(|c| c.trim_matches('"') == "memory")
 }
 
 fn asm_constraints_touch_memory(constraints: &[String]) -> bool {
@@ -788,9 +784,7 @@ pub fn loop_tiling(func: &mut Function) -> bool {
                     .filter(|i| {
                         matches!(
                             i.kind,
-                            InstKind::Bin { .. }
-                                | InstKind::Un { .. }
-                                | InstKind::Cast { .. }
+                            InstKind::Bin { .. } | InstKind::Un { .. } | InstKind::Cast { .. }
                         )
                     })
                     .cloned()
@@ -1077,11 +1071,7 @@ pub fn alias_set(func: &Function) -> BTreeMap<usize, Vec<String>> {
 
 /// 判别两个 SSA 变量的别名关系。
 /// 返回: "identity" | "disjoint" | "overlap"
-pub fn alias_classify(
-    a: &str,
-    b: &str,
-    sets: &HashMap<String, usize>,
-) -> &'static str {
+pub fn alias_classify(a: &str, b: &str, sets: &HashMap<String, usize>) -> &'static str {
     let sa = sets.get(a);
     let sb = sets.get(b);
     match (sa, sb) {
@@ -1222,10 +1212,14 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
         }
         match &b.term {
             Terminator::Ret { val: Some(o) } => {
-                for u in operand_uses_op(o) { used.insert(u); }
+                for u in operand_uses_op(o) {
+                    used.insert(u);
+                }
             }
             Terminator::Branch { cond, .. } => {
-                for u in operand_uses_op(cond) { used.insert(u); }
+                for u in operand_uses_op(cond) {
+                    used.insert(u);
+                }
             }
             _ => {}
         }
@@ -1482,9 +1476,7 @@ fn walk_stmt_refs(
     address_taken: &mut HashSet<String>,
 ) {
     match s {
-        Stmt::Return { val: Some(e), .. } => {
-            walk_expr_refs(e, func_names, calls, address_taken)
-        }
+        Stmt::Return { val: Some(e), .. } => walk_expr_refs(e, func_names, calls, address_taken),
         Stmt::Return { val: None, .. } => {}
         Stmt::Expr { e, .. } => walk_expr_refs(e, func_names, calls, address_taken),
         Stmt::If {
@@ -1525,7 +1517,9 @@ fn walk_stmt_refs(
                 walk_block_refs(&c.body, func_names, calls, address_taken);
             }
         }
-        Stmt::AsmGoto { outputs, inputs, .. } => {
+        Stmt::AsmGoto {
+            outputs, inputs, ..
+        } => {
             for e in outputs.iter().chain(inputs.iter()) {
                 walk_expr_refs(e, func_names, calls, address_taken);
             }
@@ -1628,7 +1622,9 @@ fn walk_expr_refs(
                 walk_init_refs(init, func_names, calls, address_taken);
             }
         }
-        Expr::AsmExpr { outputs, inputs, .. } => {
+        Expr::AsmExpr {
+            outputs, inputs, ..
+        } => {
             for e in outputs.iter().chain(inputs.iter()) {
                 walk_expr_refs(e, func_names, calls, address_taken);
             }
@@ -1691,7 +1687,9 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
             add_op(then_, out);
             add_op(else_, out);
         }
-        InstKind::InlineAsm { inputs, outputs, .. } => {
+        InstKind::InlineAsm {
+            inputs, outputs, ..
+        } => {
             for input in inputs {
                 add_op(input, out);
             }
@@ -1734,7 +1732,9 @@ fn collect_expr_uses(e: &Expr, out: &mut Vec<String>) {
                 collect_expr_uses(arg, out);
             }
         }
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             collect_expr_uses(cond, out);
             collect_expr_uses(then_, out);
             collect_expr_uses(else_, out);
@@ -1749,7 +1749,9 @@ fn collect_expr_uses(e: &Expr, out: &mut Vec<String>) {
                 collect_init_uses(init, out);
             }
         }
-        Expr::AsmExpr { outputs, inputs, .. } => {
+        Expr::AsmExpr {
+            outputs, inputs, ..
+        } => {
             for expr in outputs.iter().chain(inputs.iter()) {
                 collect_expr_uses(expr, out);
             }
@@ -1799,7 +1801,9 @@ fn collect_block_item_uses(item: &BlockItem, out: &mut Vec<String>) {
 fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
     match stmt {
         Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => collect_expr_uses(e, out),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             collect_expr_uses(cond, out);
             collect_stmt_uses(then_, out);
             if let Some(stmt) = else_ {
@@ -1810,7 +1814,13 @@ fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
             collect_expr_uses(cond, out);
             collect_stmt_uses(body, out);
         }
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(init) = init {
                 collect_stmt_uses(init, out);
             }
@@ -1843,7 +1853,9 @@ fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
         }
         Stmt::Label { stmt, .. } => collect_stmt_uses(stmt, out),
         Stmt::GotoIndirect { expr, .. } => collect_expr_uses(expr, out),
-        Stmt::AsmGoto { outputs, inputs, .. } => {
+        Stmt::AsmGoto {
+            outputs, inputs, ..
+        } => {
             for expr in outputs.iter().chain(inputs.iter()) {
                 collect_expr_uses(expr, out);
             }
@@ -1943,7 +1955,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
@@ -1962,7 +1974,10 @@ mod tests {
         let names: Vec<&str> = funcs.iter().map(|f| f.name.name.as_str()).collect();
         assert!(names.contains(&"main"));
         assert!(names.contains(&"helper"));
-        assert!(!names.contains(&"dead_func"), "unreachable static should be removed");
+        assert!(
+            !names.contains(&"dead_func"),
+            "unreachable static should be removed"
+        );
     }
 
     #[test]
@@ -2052,12 +2067,20 @@ mod tests {
         let bb = f.blocks.get("entry").unwrap();
         // Mul 8 -> Shl 3
         match &bb.insts[0].kind {
-            InstKind::Bin { op: BinOp::Shl, r: Operand::Int(3), .. } => {}
+            InstKind::Bin {
+                op: BinOp::Shl,
+                r: Operand::Int(3),
+                ..
+            } => {}
             other => panic!("expected Shl 3, got {other:?}"),
         }
         // Div 4 -> Shr 2 (UInt is unsigned)
         match &bb.insts[1].kind {
-            InstKind::Bin { op: BinOp::Shr, r: Operand::Int(2), .. } => {}
+            InstKind::Bin {
+                op: BinOp::Shr,
+                r: Operand::Int(2),
+                ..
+            } => {}
             other => panic!("expected Shr 2, got {other:?}"),
         }
     }
@@ -2110,7 +2133,10 @@ mod tests {
         f.add_block("for.body".into());
         f.add_block("for.step".into());
         f.block_order = vec![
-            "entry".into(), "for.cond".into(), "for.body".into(), "for.step".into(),
+            "entry".into(),
+            "for.cond".into(),
+            "for.body".into(),
+            "for.step".into(),
         ];
         // 设置 CFG 边
         if let Some(bb) = f.blocks.get_mut("entry") {
@@ -2131,8 +2157,18 @@ mod tests {
             bb.preds.push("for.cond".into());
         }
         // for.step: i_1 = i_0 + 1 (归纳变量更新)
-        let i0 = SsaVar { base: "i".into(), version: 0, ty: Type::Int, span: span.clone() };
-        let i1 = SsaVar { base: "i".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let i0 = SsaVar {
+            base: "i".into(),
+            version: 0,
+            ty: Type::Int,
+            span: span.clone(),
+        };
+        let i1 = SsaVar {
+            base: "i".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
         if let Some(bb) = f.blocks.get_mut("for.step") {
             bb.preds.push("for.body".into());
             bb.insts.push(Inst {
@@ -2148,7 +2184,12 @@ mod tests {
             bb.succs.push("for.cond".into());
         }
         // for.body: _t1 = i * 8 (应被 IVOP 识别)
-        let t1 = SsaVar { base: "_t1".into(), version: 0, ty: Type::Int, span: span.clone() };
+        let t1 = SsaVar {
+            base: "_t1".into(),
+            version: 0,
+            ty: Type::Int,
+            span: span.clone(),
+        };
         if let Some(bb) = f.blocks.get_mut("for.body") {
             bb.insts.push(Inst {
                 dest: Some(t1),
@@ -2172,7 +2213,12 @@ mod tests {
         let span = crate::diagnostics::Span::point("t.c", 1, 1);
         let mut f = Function::new("factorial".into(), Type::Int, span.clone());
         // entry: _t1 = call factorial(n-1); return _t1
-        let t1 = SsaVar { base: "_t1".into(), version: 0, ty: Type::Int, span: span.clone() };
+        let t1 = SsaVar {
+            base: "_t1".into(),
+            version: 0,
+            ty: Type::Int,
+            span: span.clone(),
+        };
         if let Some(bb) = f.blocks.get_mut("entry") {
             bb.insts.push(Inst {
                 dest: Some(t1),
@@ -2183,12 +2229,17 @@ mod tests {
                 },
                 span: span.clone(),
             });
-            bb.term = Terminator::Ret { val: Some(Operand::Int(0)) };
+            bb.term = Terminator::Ret {
+                val: Some(Operand::Int(0)),
+            };
         }
         let changed = tail_call_optimization(&mut f);
         assert!(changed, "TCO should trigger on self-call");
         let bb = f.blocks.get("entry").unwrap();
-        assert!(!bb.insts.iter().any(|i| matches!(i.kind, InstKind::Call { .. })));
+        assert!(!bb
+            .insts
+            .iter()
+            .any(|i| matches!(i.kind, InstKind::Call { .. })));
         assert!(matches!(bb.term, Terminator::Jump(ref n) if n == "entry"));
     }
 
@@ -2228,8 +2279,18 @@ mod tests {
         use crate::ssa::*;
         let span = crate::diagnostics::Span::point("t.c", 1, 1);
         let mut f = Function::new("test".into(), Type::Int, span.clone());
-        let z = SsaVar { base: "z".into(), version: 1, ty: Type::Int, span: span.clone() };
-        let a = SsaVar { base: "a".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let z = SsaVar {
+            base: "z".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
+        let a = SsaVar {
+            base: "a".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
         if let Some(bb) = f.blocks.get_mut("entry") {
             bb.insts.push(Inst {
                 dest: None,
@@ -2249,19 +2310,33 @@ mod tests {
             });
             bb.insts.push(Inst {
                 dest: Some(z.clone()),
-                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(1), r: Operand::Int(2) },
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Int(1),
+                    r: Operand::Int(2),
+                },
                 span: span.clone(),
             });
             bb.insts.push(Inst {
                 dest: Some(a.clone()),
-                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(3), r: Operand::Int(4) },
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Int(3),
+                    r: Operand::Int(4),
+                },
                 span: span.clone(),
             });
         }
         assert!(instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
-        assert_eq!(bb.insts[1].dest.as_ref().map(|v| v.name()), Some("z_1".into()));
+        assert_eq!(
+            bb.insts[0].dest.as_ref().map(|v| v.name()),
+            Some("a_1".into())
+        );
+        assert_eq!(
+            bb.insts[1].dest.as_ref().map(|v| v.name()),
+            Some("z_1".into())
+        );
         assert!(matches!(bb.insts[2].kind, InstKind::InlineAsm { .. }));
     }
 
@@ -2270,12 +2345,25 @@ mod tests {
         use crate::ssa::*;
         let span = crate::diagnostics::Span::point("t.c", 1, 1);
         let mut f = Function::new("test".into(), Type::Int, span.clone());
-        let z = SsaVar { base: "z".into(), version: 1, ty: Type::Int, span: span.clone() };
-        let a = SsaVar { base: "a".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let z = SsaVar {
+            base: "z".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
+        let a = SsaVar {
+            base: "a".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
         if let Some(bb) = f.blocks.get_mut("entry") {
             bb.insts.push(Inst {
                 dest: Some(z.clone()),
-                kind: InstKind::Load { e: Operand::SymAddr("p".into()), ty: Type::Int },
+                kind: InstKind::Load {
+                    e: Operand::SymAddr("p".into()),
+                    ty: Type::Int,
+                },
                 span: span.clone(),
             });
             bb.insts.push(Inst {
@@ -2296,15 +2384,24 @@ mod tests {
             });
             bb.insts.push(Inst {
                 dest: Some(a.clone()),
-                kind: InstKind::Load { e: Operand::SymAddr("q".into()), ty: Type::Int },
+                kind: InstKind::Load {
+                    e: Operand::SymAddr("q".into()),
+                    ty: Type::Int,
+                },
                 span: span.clone(),
             });
         }
         assert!(!instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("z_1".into()));
+        assert_eq!(
+            bb.insts[0].dest.as_ref().map(|v| v.name()),
+            Some("z_1".into())
+        );
         assert!(matches!(bb.insts[1].kind, InstKind::InlineAsm { .. }));
-        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
+        assert_eq!(
+            bb.insts[2].dest.as_ref().map(|v| v.name()),
+            Some("a_1".into())
+        );
     }
 
     #[test]
@@ -2312,12 +2409,25 @@ mod tests {
         use crate::ssa::*;
         let span = crate::diagnostics::Span::point("t.c", 1, 1);
         let mut f = Function::new("test".into(), Type::Int, span.clone());
-        let z = SsaVar { base: "z".into(), version: 1, ty: Type::Int, span: span.clone() };
-        let a = SsaVar { base: "a".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let z = SsaVar {
+            base: "z".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
+        let a = SsaVar {
+            base: "a".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
         if let Some(bb) = f.blocks.get_mut("entry") {
             bb.insts.push(Inst {
                 dest: Some(z.clone()),
-                kind: InstKind::Load { e: Operand::SymAddr("p".into()), ty: Type::Int },
+                kind: InstKind::Load {
+                    e: Operand::SymAddr("p".into()),
+                    ty: Type::Int,
+                },
                 span: span.clone(),
             });
             bb.insts.push(Inst {
@@ -2338,7 +2448,11 @@ mod tests {
             });
             bb.insts.push(Inst {
                 dest: Some(a.clone()),
-                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(1), r: Operand::Int(2) },
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Int(1),
+                    r: Operand::Int(2),
+                },
                 span: span.clone(),
             });
         }
@@ -2359,8 +2473,14 @@ mod tests {
             .iter()
             .position(|i| i.dest.as_ref().is_some_and(|v| v.name() == "a_1"))
             .unwrap();
-        assert!(pos_load < pos_asm, "memory clobber must keep earlier load before asm");
-        assert!(pos_pure < pos_asm, "pure instruction may cross memory-clobber asm");
+        assert!(
+            pos_load < pos_asm,
+            "memory clobber must keep earlier load before asm"
+        );
+        assert!(
+            pos_pure < pos_asm,
+            "pure instruction may cross memory-clobber asm"
+        );
     }
 
     #[test]
@@ -2368,20 +2488,46 @@ mod tests {
         use crate::ssa::*;
         let span = crate::diagnostics::Span::point("t.c", 1, 1);
         let mut f = Function::new("test".into(), Type::Int, span.clone());
-        let input = SsaVar { base: "x".into(), version: 1, ty: Type::Int, span: span.clone() };
-        let output = SsaVar { base: "y".into(), version: 1, ty: Type::Int, span: span.clone() };
-        let use_output = SsaVar { base: "a".into(), version: 1, ty: Type::Int, span: span.clone() };
+        let input = SsaVar {
+            base: "x".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
+        let output = SsaVar {
+            base: "y".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
+        let use_output = SsaVar {
+            base: "a".into(),
+            version: 1,
+            ty: Type::Int,
+            span: span.clone(),
+        };
         if let Some(bb) = f.blocks.get_mut("entry") {
             bb.insts.push(Inst {
                 dest: Some(input.clone()),
-                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Int(1), r: Operand::Int(2) },
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Int(1),
+                    r: Operand::Int(2),
+                },
                 span: span.clone(),
             });
             bb.insts.push(Inst {
                 dest: None,
                 kind: InstKind::InlineAsm {
                     asm_str: "mov %1, %0".into(),
-                    outputs: vec![Expr::Ident { name: Ident { name: "y".into(), span: span.clone() }, span: span.clone(), ty: Type::Int }],
+                    outputs: vec![Expr::Ident {
+                        name: Ident {
+                            name: "y".into(),
+                            span: span.clone(),
+                        },
+                        span: span.clone(),
+                        ty: Type::Int,
+                    }],
                     output_names: vec![None],
                     output_constraints: vec!["=r".into()],
                     output_vars: vec![output.clone()],
@@ -2395,15 +2541,25 @@ mod tests {
             });
             bb.insts.push(Inst {
                 dest: Some(use_output.clone()),
-                kind: InstKind::Bin { op: BinOp::Add, l: Operand::Var(output.clone()), r: Operand::Int(1) },
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(output.clone()),
+                    r: Operand::Int(1),
+                },
                 span: span.clone(),
             });
         }
         assert!(!instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("x_1".into()));
+        assert_eq!(
+            bb.insts[0].dest.as_ref().map(|v| v.name()),
+            Some("x_1".into())
+        );
         assert!(matches!(bb.insts[1].kind, InstKind::InlineAsm { .. }));
-        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
+        assert_eq!(
+            bb.insts[2].dest.as_ref().map(|v| v.name()),
+            Some("a_1".into())
+        );
     }
 
     #[test]

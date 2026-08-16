@@ -455,7 +455,11 @@ pub fn link_with_lto(
 /// 节 size/data 变化 (如动态节填充、入口桩追加) 后重算 vaddr,
 /// 并同步重算符号 vaddr (vaddr = section.vaddr + value)。
 fn recompute_section_vaddrs(layout: &mut crate::link::layout::Layout) {
-    crate::link::layout::assign_section_addrs(&mut layout.sections, layout.base_addr, layout.file_base);
+    crate::link::layout::assign_section_addrs(
+        &mut layout.sections,
+        layout.base_addr,
+        layout.file_base,
+    );
     for sym in &mut layout.symbols {
         let si = sym.section as usize;
         if sym.section != 0 && si < layout.sections.len() {
@@ -522,7 +526,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
                 0xe0, 0x03, 0x00, 0xaa, // mov x0, xzr
                 0xe1, 0x03, 0x00, 0xaa, // mov x1, xzr
                 0xe2, 0x03, 0x00, 0xaa, // mov x2, xzr
-                0, 0, 0, 0,             // bl main (placeholder)
+                0, 0, 0, 0, // bl main (placeholder)
                 0xa8, 0x0b, 0x80, 0xd2, // mov x8, #93
                 0x01, 0x00, 0x00, 0xd4, // svc #0
             ];
@@ -540,7 +544,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
                 0x13, 0x05, 0x00, 0x00, // addi a0, x0, 0
                 0x93, 0x05, 0x00, 0x00, // addi a1, x0, 0
                 0x13, 0x06, 0x00, 0x00, // addi a2, x0, 0
-                0, 0, 0, 0,             // jal ra, main (placeholder)
+                0, 0, 0, 0, // jal ra, main (placeholder)
                 0x93, 0x08, 0xd0, 0x05, // addi a7, x0, 93
                 0x73, 0x00, 0x00, 0x00, // ecall
             ];
@@ -574,7 +578,7 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
                 0x00, 0x00, 0xa0, 0xe3, // mov r0, #0
                 0x01, 0x00, 0xa0, 0xe3, // mov r1, #0
                 0x02, 0x00, 0xa0, 0xe3, // mov r2, #0
-                0, 0, 0, 0,             // bl main (placeholder)
+                0, 0, 0, 0, // bl main (placeholder)
                 0x01, 0x70, 0xa0, 0xe3, // mov r7, #1
                 0x00, 0x00, 0x00, 0xef, // svc #0
             ];
@@ -627,12 +631,17 @@ fn embed_vdso(
     vdso_path: &Path,
     verbose: bool,
 ) -> Result<(), Vec<Diagnostic>> {
-    use crate::codegen::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_NOTE, SHT_PROGBITS, STB_GLOBAL, STT_FUNC};
+    use crate::codegen::elf::{
+        SHF_ALLOC, SHF_EXECINSTR, SHT_NOTE, SHT_PROGBITS, STB_GLOBAL, STT_FUNC,
+    };
     use crate::link::layout::{OutputSection, OutputSectionKind, OutputSymbol};
 
     // 1. 解析 vDSO ELF
     let info = vdso::parse_vdso(vdso_path).map_err(|e| {
-        diag("E0305", format!("failed to parse vDSO '{}': {}", vdso_path.display(), e))
+        diag(
+            "E0305",
+            format!("failed to parse vDSO '{}': {}", vdso_path.display(), e),
+        )
     })?;
 
     if verbose {
@@ -915,7 +924,18 @@ mod tests {
         out[60..62].copy_from_slice(&5u16.to_le_bytes());
         out[62..64].copy_from_slice(&4u16.to_le_bytes());
 
-        let write_sh = |buf: &mut Vec<u8>, idx: usize, name_off: u32, sh_type: u32, flags: u64, addr: u64, offset: u64, size: u64, link: u32, info: u32, addralign: u64, entsize: u64| {
+        let write_sh = |buf: &mut Vec<u8>,
+                        idx: usize,
+                        name_off: u32,
+                        sh_type: u32,
+                        flags: u64,
+                        addr: u64,
+                        offset: u64,
+                        size: u64,
+                        link: u32,
+                        info: u32,
+                        addralign: u64,
+                        entsize: u64| {
             let base = sh_off + idx * 64;
             buf[base..base + 4].copy_from_slice(&name_off.to_le_bytes());
             buf[base + 4..base + 8].copy_from_slice(&sh_type.to_le_bytes());
@@ -929,10 +949,62 @@ mod tests {
             buf[base + 56..base + 64].copy_from_slice(&entsize.to_le_bytes());
         };
         write_sh(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-        write_sh(&mut out, 1, 1, elf::SHT_PROGBITS, 0x6, 0, text_off as u64, text.len() as u64, 0, 0, 1, 0);
-        write_sh(&mut out, 2, 7, elf::SHT_SYMTAB, 0, 0, symtab_off as u64, 48, 3, 1, 8, 24);
-        write_sh(&mut out, 3, 15, elf::SHT_STRTAB, 0, 0, strtab_off as u64, strtab.len() as u64, 0, 0, 1, 0);
-        write_sh(&mut out, 4, 23, elf::SHT_STRTAB, 0, 0, shstrtab_off as u64, shstrtab.len() as u64, 0, 0, 1, 0);
+        write_sh(
+            &mut out,
+            1,
+            1,
+            elf::SHT_PROGBITS,
+            0x6,
+            0,
+            text_off as u64,
+            text.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        );
+        write_sh(
+            &mut out,
+            2,
+            7,
+            elf::SHT_SYMTAB,
+            0,
+            0,
+            symtab_off as u64,
+            48,
+            3,
+            1,
+            8,
+            24,
+        );
+        write_sh(
+            &mut out,
+            3,
+            15,
+            elf::SHT_STRTAB,
+            0,
+            0,
+            strtab_off as u64,
+            strtab.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        );
+        write_sh(
+            &mut out,
+            4,
+            23,
+            elf::SHT_STRTAB,
+            0,
+            0,
+            shstrtab_off as u64,
+            shstrtab.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        );
 
         // 写 vDSO 到临时文件
         let dir = std::env::temp_dir();
@@ -946,25 +1018,23 @@ mod tests {
             arch: crate::debug::ArchKind::X86_64,
             base_addr: 0x400000,
             file_base: 0x1000,
-            sections: vec![
-                crate::link::layout::OutputSection {
-                    kind: crate::link::layout::OutputSectionKind::Text,
-                    name: ".text".into(),
-                    sh_name_off: 0,
-                    ty: elf::SHT_PROGBITS,
-                    flags: elf::SHF_ALLOC | elf::SHF_EXECINSTR,
-                    align: 16,
-                    data: vec![0xc3], // ret
-                    size: 1,
-                    entsize: 0,
-                    output_index: 0,
-                    load_segment: 0,
-                    vaddr: 0x401000,
-                    file_off: 0x1000,
-                    input_offsets: Vec::new(),
-                    input_sections: Vec::new(),
-                },
-            ],
+            sections: vec![crate::link::layout::OutputSection {
+                kind: crate::link::layout::OutputSectionKind::Text,
+                name: ".text".into(),
+                sh_name_off: 0,
+                ty: elf::SHT_PROGBITS,
+                flags: elf::SHF_ALLOC | elf::SHF_EXECINSTR,
+                align: 16,
+                data: vec![0xc3], // ret
+                size: 1,
+                entsize: 0,
+                output_index: 0,
+                load_segment: 0,
+                vaddr: 0x401000,
+                file_off: 0x1000,
+                input_offsets: Vec::new(),
+                input_sections: Vec::new(),
+            }],
             segments: Vec::new(),
             symbols: Vec::new(),
             entry: 0x401000,
@@ -993,8 +1063,14 @@ mod tests {
         assert!(vdso_note.size > 0);
 
         // 验证: vDSO 符号存在
-        let vdso_sym = layout.symbols.iter().find(|s| s.name == "__vdso_clock_gettime");
-        assert!(vdso_sym.is_some(), "__vdso_clock_gettime symbol should exist");
+        let vdso_sym = layout
+            .symbols
+            .iter()
+            .find(|s| s.name == "__vdso_clock_gettime");
+        assert!(
+            vdso_sym.is_some(),
+            "__vdso_clock_gettime symbol should exist"
+        );
         let vdso_sym = vdso_sym.unwrap();
         assert_eq!(vdso_sym.bind, elf::STB_GLOBAL);
         assert_eq!(vdso_sym.ty, elf::STT_FUNC);

@@ -194,8 +194,14 @@ mod tests {
         let data = encode_ifunc_section(&entries);
         let parsed = parse_dcc_ifunc_section(&data);
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0], ("memcpy".to_string(), "resolve_memcpy".to_string()));
-        assert_eq!(parsed[1], ("strlen".to_string(), "resolve_strlen".to_string()));
+        assert_eq!(
+            parsed[0],
+            ("memcpy".to_string(), "resolve_memcpy".to_string())
+        );
+        assert_eq!(
+            parsed[1],
+            ("strlen".to_string(), "resolve_strlen".to_string())
+        );
     }
 
     #[test]

@@ -606,98 +606,98 @@ pub fn preprocess(
     // 同名的 atomic_* / atomic_thread_fence / kill_dependency 内联函数与宏,
     // 预置会与它们冲突 (见上方 __STDC_NO_ATOMICS__ 注释)。
     if !freestanding {
-    pp.define_builtin("memory_order_relaxed", "0");
-    pp.define_builtin("memory_order_consume", "1");
-    pp.define_builtin("memory_order_acquire", "2");
-    pp.define_builtin("memory_order_release", "3");
-    pp.define_builtin("memory_order_acq_rel", "4");
-    pp.define_builtin("memory_order_seq_cst", "5");
-    // 原子类型 (简化: 展开为等价非原子类型, _Atomic 由类型系统处理)
-    pp.define_builtin("atomic_int", "int");
-    pp.define_builtin("atomic_uint", "unsigned int");
-    pp.define_builtin("atomic_long", "long");
-    pp.define_builtin("atomic_ulong", "unsigned long");
-    pp.define_builtin("atomic_llong", "long long");
-    pp.define_builtin("atomic_ullong", "unsigned long long");
-    pp.define_builtin("atomic_short", "short");
-    pp.define_builtin("atomic_ushort", "unsigned short");
-    pp.define_builtin("atomic_char", "char");
-    pp.define_builtin("atomic_schar", "signed char");
-    pp.define_builtin("atomic_uchar", "unsigned char");
-    pp.define_builtin("atomic_bool", "_Bool");
-    pp.define_builtin("atomic_intptr", "long");
-    pp.define_builtin("atomic_uintptr", "unsigned long");
-    pp.define_builtin("atomic_size_t", "unsigned long");
-    pp.define_builtin("atomic_ptrdiff_t", "long");
-    pp.define_builtin("atomic_wchar_t", "int");
-    // C11 7.17.6 其余强制类型宏 (与 __INTMAX_TYPE__/__UINTMAX_TYPE__ 对应)
-    pp.define_builtin("atomic_char16_t", "unsigned short");
-    pp.define_builtin("atomic_char32_t", "unsigned int");
-    pp.define_builtin("atomic_intmax_t", "long int");
-    pp.define_builtin("atomic_uintmax_t", "long unsigned int");
-    pp.define_builtin("atomic_float", "float");
-    pp.define_builtin("atomic_double", "double");
-    pp.define_builtin("atomic_long_double", "long double");
-    // kill_dependency: 返回参数
-    pp.macros.insert(
-        "kill_dependency".to_string(),
-        MacroDef {
-            params: Some(vec!["y".to_string()]),
-            body: "(y)".to_string(),
-            variadic: false,
-        },
-    );
-    // atomic_thread_fence: 跨线程全屏障, emit  mfence + lock 序
-    // 对应 GCC __atomic_thread_fence(MEMORY_ORDER): hardware fence
-    // 注: dcc 当前不跨函数优化, 整个函数都是一应连续. 主依赖
-    // codegen 把 __ATOMIC_SEQ_CST 序列化为 mfence 序列.
-    // 实现: emit 一个 volatile 空 asm + memory 寄存器clobber, 防止
-    // 编译器重排外尧访存. 这只是编译器屏障 (ompiler barrier),
-    // 不是硬件屏障; 硬件序由 mfence 等交互.
-    pp.macros.insert(
-        "atomic_thread_fence".to_string(),
-        MacroDef {
-            params: Some(vec!["order".to_string()]),
-            body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(),
-            variadic: false,
-        },
-    );
-    // atomic_signal_fence: 编译期屏障, 防止编译器重排. 不同于
-    // atomic_thread_fence, 不需要硬件序, 只需阻止本地优化.
-    // 实现: 空 asm volatile 块 + memory 寄存器clobber.
-    pp.macros.insert(
-        "atomic_signal_fence".to_string(),
-        MacroDef {
-            params: Some(vec!["order".to_string()]),
-            body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(),
-            variadic: false,
-        },
-    );
-    // 注意: 不预置 atomic_store/atomic_fetch_add 等 C11 stdatomic 宏。
-    // Linux 内核 atomic-instrumented.h 等同名 inline 函数会被误展开
-    // （如 atomic_fetch_add(i,v) → __atomic_fetch_add(i,v,5) 破坏声明）。
-    // __atomic_* 内建与 __ATOMIC_* 常量仍保留，供显式调用。
-    // 不要在 hosted 模式下预置它们 (会破坏 glibc/userspace 中同名函数/宏的调用).
-    // C11 7.17.6: ATOMIC_*_LOCK_FREE 宏 — 0=never, 1=always, 2=sometimes
-    // x86_64 上所有标准整数原子类型均用原生指令实现，始终 lock-free。
-    pp.define_builtin("ATOMIC_BOOL_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_CHAR_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_CHAR16_T_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_CHAR32_T_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_WCHAR_T_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_SHORT_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_INT_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_LONG_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_LLONG_LOCK_FREE", "1");
-    pp.define_builtin("ATOMIC_POINTER_LOCK_FREE", "1");
+        pp.define_builtin("memory_order_relaxed", "0");
+        pp.define_builtin("memory_order_consume", "1");
+        pp.define_builtin("memory_order_acquire", "2");
+        pp.define_builtin("memory_order_release", "3");
+        pp.define_builtin("memory_order_acq_rel", "4");
+        pp.define_builtin("memory_order_seq_cst", "5");
+        // 原子类型 (简化: 展开为等价非原子类型, _Atomic 由类型系统处理)
+        pp.define_builtin("atomic_int", "int");
+        pp.define_builtin("atomic_uint", "unsigned int");
+        pp.define_builtin("atomic_long", "long");
+        pp.define_builtin("atomic_ulong", "unsigned long");
+        pp.define_builtin("atomic_llong", "long long");
+        pp.define_builtin("atomic_ullong", "unsigned long long");
+        pp.define_builtin("atomic_short", "short");
+        pp.define_builtin("atomic_ushort", "unsigned short");
+        pp.define_builtin("atomic_char", "char");
+        pp.define_builtin("atomic_schar", "signed char");
+        pp.define_builtin("atomic_uchar", "unsigned char");
+        pp.define_builtin("atomic_bool", "_Bool");
+        pp.define_builtin("atomic_intptr", "long");
+        pp.define_builtin("atomic_uintptr", "unsigned long");
+        pp.define_builtin("atomic_size_t", "unsigned long");
+        pp.define_builtin("atomic_ptrdiff_t", "long");
+        pp.define_builtin("atomic_wchar_t", "int");
+        // C11 7.17.6 其余强制类型宏 (与 __INTMAX_TYPE__/__UINTMAX_TYPE__ 对应)
+        pp.define_builtin("atomic_char16_t", "unsigned short");
+        pp.define_builtin("atomic_char32_t", "unsigned int");
+        pp.define_builtin("atomic_intmax_t", "long int");
+        pp.define_builtin("atomic_uintmax_t", "long unsigned int");
+        pp.define_builtin("atomic_float", "float");
+        pp.define_builtin("atomic_double", "double");
+        pp.define_builtin("atomic_long_double", "long double");
+        // kill_dependency: 返回参数
+        pp.macros.insert(
+            "kill_dependency".to_string(),
+            MacroDef {
+                params: Some(vec!["y".to_string()]),
+                body: "(y)".to_string(),
+                variadic: false,
+            },
+        );
+        // atomic_thread_fence: 跨线程全屏障, emit  mfence + lock 序
+        // 对应 GCC __atomic_thread_fence(MEMORY_ORDER): hardware fence
+        // 注: dcc 当前不跨函数优化, 整个函数都是一应连续. 主依赖
+        // codegen 把 __ATOMIC_SEQ_CST 序列化为 mfence 序列.
+        // 实现: emit 一个 volatile 空 asm + memory 寄存器clobber, 防止
+        // 编译器重排外尧访存. 这只是编译器屏障 (ompiler barrier),
+        // 不是硬件屏障; 硬件序由 mfence 等交互.
+        pp.macros.insert(
+            "atomic_thread_fence".to_string(),
+            MacroDef {
+                params: Some(vec!["order".to_string()]),
+                body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(),
+                variadic: false,
+            },
+        );
+        // atomic_signal_fence: 编译期屏障, 防止编译器重排. 不同于
+        // atomic_thread_fence, 不需要硬件序, 只需阻止本地优化.
+        // 实现: 空 asm volatile 块 + memory 寄存器clobber.
+        pp.macros.insert(
+            "atomic_signal_fence".to_string(),
+            MacroDef {
+                params: Some(vec!["order".to_string()]),
+                body: "__asm__ volatile(\"\" ::: \"memory\")".to_string(),
+                variadic: false,
+            },
+        );
+        // 注意: 不预置 atomic_store/atomic_fetch_add 等 C11 stdatomic 宏。
+        // Linux 内核 atomic-instrumented.h 等同名 inline 函数会被误展开
+        // （如 atomic_fetch_add(i,v) → __atomic_fetch_add(i,v,5) 破坏声明）。
+        // __atomic_* 内建与 __ATOMIC_* 常量仍保留，供显式调用。
+        // 不要在 hosted 模式下预置它们 (会破坏 glibc/userspace 中同名函数/宏的调用).
+        // C11 7.17.6: ATOMIC_*_LOCK_FREE 宏 — 0=never, 1=always, 2=sometimes
+        // x86_64 上所有标准整数原子类型均用原生指令实现，始终 lock-free。
+        pp.define_builtin("ATOMIC_BOOL_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_CHAR_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_CHAR16_T_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_CHAR32_T_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_WCHAR_T_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_SHORT_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_INT_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_LONG_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_LLONG_LOCK_FREE", "1");
+        pp.define_builtin("ATOMIC_POINTER_LOCK_FREE", "1");
     } // !freestanding: C11 <stdatomic.h> 宏仅 hosted 模式预置
-    // 内存序别名 (memory_order_xxx 已在上面定义)
-    // __attribute__: 不定义为宏, 让 token 透传到解析器处理
-    // 解析器会识别 __attribute__ 并处理 vector_size 等属性
-    // __has_attribute / __has_builtin / __has_feature: 不在宏表中定义, 在展开时特殊处理
-    // 这样可以在宏展开路径和 #if 路径都返回正确值
-    // GCC 接受 `__attribute` (无尾部双下划线) 作为 `__attribute__` 的简写。
-    // kernel 7.1 的 __noinstr_section() 误用此写法, 故加入映射.
+      // 内存序别名 (memory_order_xxx 已在上面定义)
+      // __attribute__: 不定义为宏, 让 token 透传到解析器处理
+      // 解析器会识别 __attribute__ 并处理 vector_size 等属性
+      // __has_attribute / __has_builtin / __has_feature: 不在宏表中定义, 在展开时特殊处理
+      // 这样可以在宏展开路径和 #if 路径都返回正确值
+      // GCC 接受 `__attribute` (无尾部双下划线) 作为 `__attribute__` 的简写。
+      // kernel 7.1 的 __noinstr_section() 误用此写法, 故加入映射.
     pp.macros.insert(
         "__attribute".to_string(),
         MacroDef {
@@ -2036,7 +2036,8 @@ impl Preprocessor {
                                 if !cached_line_spans.is_empty() {
                                     // 缓存携带精确子区间: 相对偏移还原为绝对输出行号,
                                     // 使头文件内 (含嵌套 include) 的每一行都能映射回源位置
-                                    for (rel_out_start, file, src_start, count) in cached_line_spans {
+                                    for (rel_out_start, file, src_start, count) in cached_line_spans
+                                    {
                                         if count > 0 {
                                             self.line_map.push(LineSpan {
                                                 out_start: cached_out_start + rel_out_start,
@@ -2930,18 +2931,26 @@ impl Preprocessor {
                         let mut depth = 1;
                         let mut k = arg_start;
                         while k < len && depth > 0 {
-                            if chars[k] == '(' { depth += 1; }
-                            else if chars[k] == ')' { depth -= 1; }
-                            if depth > 0 { k += 1; }
+                            if chars[k] == '(' {
+                                depth += 1;
+                            } else if chars[k] == ')' {
+                                depth -= 1;
+                            }
+                            if depth > 0 {
+                                k += 1;
+                            }
                         }
                         let arg_text: String = chars[arg_start..k].iter().collect();
                         // 展开宏参数 (用当前行号构造 phys_lines)
                         let cur_line = map.line(nl);
                         let expanded = self.expand_macros(arg_text.trim(), &[cur_line]);
                         let expanded_trimmed = expanded.trim();
-                        if expanded_trimmed.starts_with('"') && expanded_trimmed.ends_with('"') && expanded_trimmed.len() >= 2 {
+                        if expanded_trimmed.starts_with('"')
+                            && expanded_trimmed.ends_with('"')
+                            && expanded_trimmed.len() >= 2
+                        {
                             // 展开结果是字符串字面量
-                            let inner = &expanded_trimmed[1..expanded_trimmed.len()-1];
+                            let inner = &expanded_trimmed[1..expanded_trimmed.len() - 1];
                             let pragma_text = Self::unescape_string(inner);
                             i = k + 1; // 跳过 )
                             if let Ok(mut v) = self.pending_pragmas.try_borrow_mut() {
@@ -2957,11 +2966,18 @@ impl Preprocessor {
                     let mut j = i;
                     let mut depth = 0;
                     while j < len {
-                        if chars[j] == '(' { depth += 1; }
-                        else if chars[j] == ')' {
-                            if depth == 0 { j += 1; break; }
+                        if chars[j] == '(' {
+                            depth += 1;
+                        } else if chars[j] == ')' {
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
                             depth -= 1;
-                            if depth == 0 { j += 1; break; }
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
                         }
                         j += 1;
                     }
@@ -7088,7 +7104,9 @@ n\
             &PchOptions::default(),
         );
         assert!(
-            out.diags.iter().any(|d| d.code == "W0200" && d.msg.contains("this is a warning")),
+            out.diags
+                .iter()
+                .any(|d| d.code == "W0200" && d.msg.contains("this is a warning")),
             "expected W0200, got: {:?}",
             out.diags
         );
@@ -7130,7 +7148,9 @@ n\
             &PchOptions::default(),
         );
         assert!(
-            out.diags.iter().any(|d| d.code == "E0203" && d.msg.contains("boom")),
+            out.diags
+                .iter()
+                .any(|d| d.code == "E0203" && d.msg.contains("boom")),
             "expected E0203, got: {:?}",
             out.diags
         );
@@ -7172,4 +7192,3 @@ n\
         assert!(output.contains("int y = 99;"), "output: {output}");
     }
 }
-

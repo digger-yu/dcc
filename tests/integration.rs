@@ -973,7 +973,8 @@ fn o1_constant_folding_emits_immediate() {
     );
     // 新编码: REX.W + MOV r/m64, imm32 = [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]
     assert!(
-        obj.windows(7).any(|w| w == [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]),
+        obj.windows(7)
+            .any(|w| w == [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]),
         "expected mov $5, %rax after constant fold"
     );
 }
@@ -2025,7 +2026,10 @@ fn aarch64_nested_sret_cross_compile() {
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
     // 验证代码尺寸 > 200 字节 (多层 sret 需要足够的 memcpy 指令)
-    assert!(bytes.len() > 200, "expected substantial code for nested sret");
+    assert!(
+        bytes.len() > 200,
+        "expected substantial code for nested sret"
+    );
 }
 
 /// AArch64: TLS 变量交叉编译 (TLSDESC 重定位).
@@ -2892,10 +2896,7 @@ fn asm_pushsection_exec_code_lands_in_custom_section() {
     let _ = std::fs::remove_file(&obj_path);
     let secs = elf64_sections(&obj);
     // .fixup 含 mov + ret 机器码, 必须非零且可执行
-    let (ty, flags, size) = secs
-        .get(".fixup")
-        .copied()
-        .expect("missing .fixup section");
+    let (ty, flags, size) = secs.get(".fixup").copied().expect("missing .fixup section");
     assert_eq!(ty, 1, ".fixup must be SHT_PROGBITS");
     assert!(
         flags & 0x4 != 0,
@@ -2911,7 +2912,10 @@ fn asm_pushsection_exec_code_lands_in_custom_section() {
         flags & 0x4 != 0,
         ".altinstr_replacement must have SHF_EXECINSTR (got flags {flags:#x})"
     );
-    assert!(size >= 1, ".altinstr_replacement code dropped (size {size})");
+    assert!(
+        size >= 1,
+        ".altinstr_replacement code dropped (size {size})"
+    );
     // 数据节引用替换代码标签: .altinstructions 需要重定位节
     assert!(
         secs.contains_key(".rela.altinstructions"),
@@ -2919,9 +2923,10 @@ fn asm_pushsection_exec_code_lands_in_custom_section() {
     );
     // 数据节数据非零: __ex_table/.altinstructions 条目必须输出
     for sec in ["__ex_table", ".altinstructions"] {
-        let (_, _, size) = secs.get(sec).copied().unwrap_or_else(|| {
-            panic!("missing {sec} section (pushsection data dropped)")
-        });
+        let (_, _, size) = secs
+            .get(sec)
+            .copied()
+            .unwrap_or_else(|| panic!("missing {sec} section (pushsection data dropped)"));
         assert!(size > 0, "{sec} data dropped (size {size})");
     }
 }
@@ -2965,9 +2970,15 @@ fn orc_unwind_sections_present_in_object() {
         "missing .rela.orc_unwind_ip relocation section"
     );
     // 每函数一个 4 字节 IP 条目
-    assert!(ip_size >= 8 && ip_size % 4 == 0, "bad .orc_unwind_ip size {ip_size}");
+    assert!(
+        ip_size >= 8 && ip_size % 4 == 0,
+        "bad .orc_unwind_ip size {ip_size}"
+    );
     // 每个 6 字节 packed orc_entry; 两个函数 + 结束哨兵
-    assert!(orc_size >= 12 && orc_size % 6 == 0, "bad .orc_unwind size {orc_size}");
+    assert!(
+        orc_size >= 12 && orc_size % 6 == 0,
+        "bad .orc_unwind size {orc_size}"
+    );
 }
 
 /// 内核构建门控: -fno-asynchronous-unwind-tables (unwind_tables=false) 关闭
@@ -3024,14 +3035,23 @@ fn func_symbol_size_non_zero_for_defined_functions() {
     let obj_data = std::fs::read(&obj_path).expect("read object file");
     let obj_str = String::from_utf8_lossy(&obj_data);
     assert!(obj_str.contains("weak_func"), "missing weak_func symbol");
-    assert!(obj_str.contains("static_func"), "missing static_func symbol");
+    assert!(
+        obj_str.contains("static_func"),
+        "missing static_func symbol"
+    );
     assert!(obj_str.contains("real_func"), "missing real_func symbol");
     assert!(obj_str.contains("alias_func"), "missing alias_func symbol");
     // 定义型函数符号 (weak/static/global/alias) st_size 必须非零
     let funcs = elf64_func_symbols(&obj_data);
     let names: std::collections::HashMap<String, u64> =
         funcs.iter().map(|(n, _, s)| (n.clone(), *s)).collect();
-    for want in ["weak_func", "static_func", "real_func", "alias_func", "caller"] {
+    for want in [
+        "weak_func",
+        "static_func",
+        "real_func",
+        "alias_func",
+        "caller",
+    ] {
         let sz = names
             .get(want)
             .unwrap_or_else(|| panic!("missing STT_FUNC symbol {want}"));
@@ -3366,11 +3386,7 @@ fn asm_template_modifiers_compile_and_run() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        run_exe(&exe),
-        0,
-        "asm template modifiers test failed"
-    );
+    assert_eq!(run_exe(&exe), 0, "asm template modifiers test failed");
 }
 
 /// %P / %a 修饰符对立即数输出纯数字 (无 $ 前缀): -S 文本验证
@@ -3427,7 +3443,10 @@ fn asm_warning_location_maps_to_real_source_line() {
     fs::write(&hdr_path, hdr).expect("write header fixture");
     fs::write(
         &src_path,
-        format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr_path.display()),
+        format!(
+            "#include \"{}\"\nint main(void) {{ return 0; }}\n",
+            hdr_path.display()
+        ),
     )
     .expect("write C fixture");
     let obj_path = dir.join(format!("{tag}.o"));
@@ -3440,7 +3459,10 @@ fn asm_warning_location_maps_to_real_source_line() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stderr: {stderr}");
     // 警告必须落在头文件第 6 行 (asm 语句), 而不是预处理输出行号
-    let expect = format!("{}:6: warning: unsupported lea operand pattern", hdr_path.display());
+    let expect = format!(
+        "{}:6: warning: unsupported lea operand pattern",
+        hdr_path.display()
+    );
     assert!(
         stderr.contains(&expect),
         "expected precise asm warning location {expect:?}, got: {stderr}"
@@ -3461,11 +3483,13 @@ fn asm_warning_location_stable_across_header_cache_replay() {
     let obj_path = dir.join(format!("{tag}.o"));
     let home_dir = dir.join(format!("{tag}-home"));
     fs::create_dir_all(&home_dir).expect("create temp HOME");
-    fs::write(&hdr_path, include_str!("fixtures/c/asm_warn_loc.h"))
-        .expect("write header fixture");
+    fs::write(&hdr_path, include_str!("fixtures/c/asm_warn_loc.h")).expect("write header fixture");
     fs::write(
         &src_path,
-        format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr_path.display()),
+        format!(
+            "#include \"{}\"\nint main(void) {{ return 0; }}\n",
+            hdr_path.display()
+        ),
     )
     .expect("write C fixture");
     let run = || {
@@ -3489,7 +3513,10 @@ fn asm_warning_location_stable_across_header_cache_replay() {
         hot_err.trim(),
         "cold/hot cache warning mismatch"
     );
-    let expect = format!("{}:6: warning: unsupported lea operand pattern", hdr_path.display());
+    let expect = format!(
+        "{}:6: warning: unsupported lea operand pattern",
+        hdr_path.display()
+    );
     assert!(
         hot_err.contains(&expect),
         "expected precise asm warning location {expect:?}, got: {hot_err}"
@@ -3959,18 +3986,13 @@ fn cargo_config_has_musl_static_linking() {
 #[test]
 #[cfg(unix)]
 fn static_build_script_exists() {
-    let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/build_static.sh");
-    assert!(
-        script_path.exists(),
-        "scripts/build_static.sh should exist"
-    );
+    let script_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/build_static.sh");
+    assert!(script_path.exists(), "scripts/build_static.sh should exist");
     use std::os::unix::fs::PermissionsExt;
     let metadata = fs::metadata(&script_path).expect("read script metadata");
     let mode = metadata.permissions().mode();
-    assert!(
-        mode & 0o111 != 0,
-        "build_static.sh should be executable"
-    );
+    assert!(mode & 0o111 != 0, "build_static.sh should be executable");
 }
 
 // =================== C23 constexpr ===================
@@ -5046,20 +5068,50 @@ int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
     fs::write(&p2, &tu2).unwrap();
     let dcc = env!("CARGO_BIN_EXE_dcc");
     // 编译 TU1
-    let c1 = Command::new(dcc).args(["-c", "-o"]).arg(&o1).arg(&p1).output().expect("dcc");
+    let c1 = Command::new(dcc)
+        .args(["-c", "-o"])
+        .arg(&o1)
+        .arg(&p1)
+        .output()
+        .expect("dcc");
     let _ = fs::remove_file(&p1);
-    assert!(c1.status.success(), "tu1 compile: {}", String::from_utf8_lossy(&c1.stderr));
+    assert!(
+        c1.status.success(),
+        "tu1 compile: {}",
+        String::from_utf8_lossy(&c1.stderr)
+    );
     // 编译 TU2
-    let c2 = Command::new(dcc).args(["-c", "-o"]).arg(&o2).arg(&p2).output().expect("dcc");
+    let c2 = Command::new(dcc)
+        .args(["-c", "-o"])
+        .arg(&o2)
+        .arg(&p2)
+        .output()
+        .expect("dcc");
     let _ = fs::remove_file(&p2);
-    assert!(c2.status.success(), "tu2 compile: {}", String::from_utf8_lossy(&c2.stderr));
+    assert!(
+        c2.status.success(),
+        "tu2 compile: {}",
+        String::from_utf8_lossy(&c2.stderr)
+    );
     // 链接: 关键验证点 — 不报 multiple definition
-    let link = Command::new("gcc").args(["-o"]).arg(&exe).arg(&o1).arg(&o2).output().expect("gcc link");
+    let link = Command::new("gcc")
+        .args(["-o"])
+        .arg(&exe)
+        .arg(&o1)
+        .arg(&o2)
+        .output()
+        .expect("gcc link");
     let _ = fs::remove_file(&o1);
     let _ = fs::remove_file(&o2);
     let stderr = String::from_utf8_lossy(&link.stderr);
-    assert!(link.status.success(), "link failed (multiple definition?): {stderr}");
-    assert!(!stderr.contains("multiple definition"), "vtable/typeinfo 重复定义: {stderr}");
+    assert!(
+        link.status.success(),
+        "link failed (multiple definition?): {stderr}"
+    );
+    assert!(
+        !stderr.contains("multiple definition"),
+        "vtable/typeinfo 重复定义: {stderr}"
+    );
     // 运行验证
     let run = Command::new(&exe).output().expect("run");
     let _ = fs::remove_file(&exe);
@@ -5344,8 +5396,7 @@ fn asm_diag_validation_compiles_with_warnings() {
     // 但仅在占位符越界/重复名时触发; 此处 fixture 含 error 故预期失败)
     // 改为仅检查 stderr 含预期诊断码
     assert!(
-        stderr.contains("E0016") || stderr.contains("W0005")
-            || stderr.contains("E0015"),
+        stderr.contains("E0016") || stderr.contains("W0005") || stderr.contains("E0015"),
         "expected asm diagnostic warnings, stderr: {}",
         stderr
     );
@@ -5355,8 +5406,7 @@ fn asm_diag_validation_compiles_with_warnings() {
 #[test]
 fn asm_optimizer_preservation_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_optimizer_preservation.c");
-    let (output, exe) =
-        run_compile_and_run_flags("asm-optimizer-preservation", source, &["-O2"]);
+    let (output, exe) = run_compile_and_run_flags("asm-optimizer-preservation", source, &["-O2"]);
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -5373,8 +5423,7 @@ fn asm_optimizer_preservation_compiles_and_runs() {
 #[test]
 fn asm_debug_info_compiles_with_g() {
     let source = include_str!("fixtures/c/asm_debug_info.c");
-    let (output, exe) =
-        run_compile_and_run_flags("asm-debug-info", source, &["-g"]);
+    let (output, exe) = run_compile_and_run_flags("asm-debug-info", source, &["-g"]);
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -8304,15 +8353,17 @@ fn asm_nested_macro_rept_compiles_and_runs() {
 #[cfg(unix)]
 fn asm_memory_clobber_optimizer_compiles_and_runs() {
     let source = include_str!("fixtures/c/asm_memory_clobber_optimizer.c");
-    let (output, exe) =
-        run_compile_and_run_flags("asm-memory-clobber-optimizer", source, &["-O2"]);
+    let (output, exe) = run_compile_and_run_flags("asm-memory-clobber-optimizer", source, &["-O2"]);
     assert!(
         output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let rc = run_exe(&exe);
-    assert_eq!(rc, 0, "asm_memory_clobber_optimizer should return 0, got {rc}");
+    assert_eq!(
+        rc, 0,
+        "asm_memory_clobber_optimizer should return 0, got {rc}"
+    );
 }
 
 /// 大规模 AVX-512 EVEX 掩码指令端到端运行
@@ -8435,8 +8486,16 @@ fn asm_non_x86_backend_s_mode_compiles() {
     ];
     for target in &targets {
         let dir = std::env::temp_dir();
-        let src_path = dir.join(format!("dcc-asm-nonx86-S-{}-{}.c", target.replace('/', "-"), std::process::id()));
-        let asm_path = dir.join(format!("dcc-asm-nonx86-S-{}-{}.s", target.replace('/', "-"), std::process::id()));
+        let src_path = dir.join(format!(
+            "dcc-asm-nonx86-S-{}-{}.c",
+            target.replace('/', "-"),
+            std::process::id()
+        ));
+        let asm_path = dir.join(format!(
+            "dcc-asm-nonx86-S-{}-{}.s",
+            target.replace('/', "-"),
+            std::process::id()
+        ));
         fs::write(&src_path, source).expect("write C fixture");
         let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
             .args(["--target", target, "-S", "-o"])
@@ -8455,7 +8514,8 @@ fn asm_non_x86_backend_s_mode_compiles() {
         if asm_path.exists() {
             let asm_content = fs::read_to_string(&asm_path).unwrap_or_default();
             assert!(
-                asm_content.contains("nop") || asm_content.contains(".globl __test_global_asm_marker"),
+                asm_content.contains("nop")
+                    || asm_content.contains(".globl __test_global_asm_marker"),
                 "target {}: -S output should contain asm text, got:\n{}",
                 target,
                 &asm_content[..asm_content.len().min(500)]
@@ -8479,8 +8539,16 @@ fn asm_non_x86_backend_c_mode_no_panic() {
     ];
     for target in &targets {
         let dir = std::env::temp_dir();
-        let src_path = dir.join(format!("dcc-asm-nonx86-c-{}-{}.c", target.replace('/', "-"), std::process::id()));
-        let obj_path = dir.join(format!("dcc-asm-nonx86-c-{}-{}.o", target.replace('/', "-"), std::process::id()));
+        let src_path = dir.join(format!(
+            "dcc-asm-nonx86-c-{}-{}.c",
+            target.replace('/', "-"),
+            std::process::id()
+        ));
+        let obj_path = dir.join(format!(
+            "dcc-asm-nonx86-c-{}-{}.o",
+            target.replace('/', "-"),
+            std::process::id()
+        ));
         fs::write(&src_path, source).expect("write C fixture");
         let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
             .args(["--target", target, "-c", "-o"])
@@ -8513,16 +8581,24 @@ fn asm_non_x86_backend_c_mode_no_panic() {
 fn non_x86_c_mode_produces_valid_elf() {
     let source = r#"int main(void) { return 0; }"#;
     let targets = [
-        ("aarch64-linux-gnu", 183),      // EM_AARCH64
-        ("riscv64-linux-gnu", 243),       // EM_RISCV
-        ("mips-linux-gnu", 8),            // EM_MIPS
-        ("mips64-linux-gnuabi64", 8),     // EM_MIPS
-        ("arm-linux-gnueabihf", 40),      // EM_ARM
+        ("aarch64-linux-gnu", 183),   // EM_AARCH64
+        ("riscv64-linux-gnu", 243),   // EM_RISCV
+        ("mips-linux-gnu", 8),        // EM_MIPS
+        ("mips64-linux-gnuabi64", 8), // EM_MIPS
+        ("arm-linux-gnueabihf", 40),  // EM_ARM
     ];
     for (target, _em) in &targets {
         let dir = std::env::temp_dir();
-        let src_path = dir.join(format!("dcc-elf-{}-{}.c", target.replace('/', "-"), std::process::id()));
-        let obj_path = dir.join(format!("dcc-elf-{}-{}.o", target.replace('/', "-"), std::process::id()));
+        let src_path = dir.join(format!(
+            "dcc-elf-{}-{}.c",
+            target.replace('/', "-"),
+            std::process::id()
+        ));
+        let obj_path = dir.join(format!(
+            "dcc-elf-{}-{}.o",
+            target.replace('/', "-"),
+            std::process::id()
+        ));
         fs::write(&src_path, source).expect("write C fixture");
         let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
             .args(["--target", target, "-c", "-o"])

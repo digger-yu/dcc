@@ -204,10 +204,8 @@ impl OffloadDriverLinker {
             for name in &lib_names {
                 let path = dir.join(name);
                 if path.exists() {
-                    self.diagnostics.push(format!(
-                        "note: found CUDA runtime at {}",
-                        path.display()
-                    ));
+                    self.diagnostics
+                        .push(format!("note: found CUDA runtime at {}", path.display()));
                     return ResolvedRuntime {
                         backend: OffloadBackend::Cuda,
                         library_path: path,
@@ -241,20 +239,14 @@ impl OffloadDriverLinker {
     /// Resolve ROCm runtime library
     fn resolve_rocm_runtime(&mut self) -> ResolvedRuntime {
         let search_dirs = self.rocm_search_dirs();
-        let lib_names = [
-            "libamdhip64.so",
-            "libamdhip64.so.5",
-            "libamdhip64.so.6",
-        ];
+        let lib_names = ["libamdhip64.so", "libamdhip64.so.5", "libamdhip64.so.6"];
 
         for dir in &search_dirs {
             for name in &lib_names {
                 let path = dir.join(name);
                 if path.exists() {
-                    self.diagnostics.push(format!(
-                        "note: found ROCm runtime at {}",
-                        path.display()
-                    ));
+                    self.diagnostics
+                        .push(format!("note: found ROCm runtime at {}", path.display()));
                     return ResolvedRuntime {
                         backend: OffloadBackend::Rocm,
                         library_path: path,
@@ -396,10 +388,7 @@ impl OffloadDriverLinker {
                 .clone()
                 .unwrap_or_else(|| default_arch_for_backend(backend));
 
-            groups
-                .entry((backend, arch))
-                .or_default()
-                .push(entry);
+            groups.entry((backend, arch)).or_default().push(entry);
         }
 
         for ((backend, arch), entries) in &groups {
@@ -520,7 +509,11 @@ impl OffloadDriverLinker {
 
         // Device link commands
         for cmd in &result.device_link_commands {
-            script.push_str(&format!("# {} device link for {}\n", cmd.backend.as_str(), cmd.arch));
+            script.push_str(&format!(
+                "# {} device link for {}\n",
+                cmd.backend.as_str(),
+                cmd.arch
+            ));
             script.push_str(&cmd.driver);
             for flag in &cmd.flags {
                 script.push_str(&format!(" {}", flag));
@@ -565,10 +558,7 @@ fn estimate_binary_size(
     let mut size: u64 = 0;
 
     // Host object: try to get actual size, else estimate
-    size += host_object
-        .metadata()
-        .map(|m| m.len())
-        .unwrap_or(64 * 1024);
+    size += host_object.metadata().map(|m| m.len()).unwrap_or(64 * 1024);
 
     // Device objects: estimate 32KB each
     size += device_objects.len() as u64 * 32 * 1024;
@@ -755,7 +745,9 @@ mod tests {
         let (config, section) = make_cuda_config();
         let linker = OffloadDriverLinker::new(config, section);
         let dirs = linker.cuda_search_dirs();
-        assert!(dirs.iter().any(|p| p == &PathBuf::from("/usr/local/cuda/lib64")));
+        assert!(dirs
+            .iter()
+            .any(|p| p == &PathBuf::from("/usr/local/cuda/lib64")));
     }
 
     #[test]

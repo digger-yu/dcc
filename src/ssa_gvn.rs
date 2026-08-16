@@ -346,7 +346,8 @@ fn gvn_key_string(e: &Expr, fenv_access: bool) -> Option<String> {
         // 修改而不同); 整数纯运算仍可参与值编号.
         Expr::Binop { op, l, r, ty, .. }
             if is_gvn_pure_op(*op)
-                && (!fenv_access || !matches!(ty, Type::Float | Type::Double | Type::LongDouble)) =>
+                && (!fenv_access
+                    || !matches!(ty, Type::Float | Type::Double | Type::LongDouble)) =>
         {
             Some(format!(
                 "b:{op:?}:{}:{}",

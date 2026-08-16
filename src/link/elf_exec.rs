@@ -129,7 +129,8 @@ pub fn write_elf_internal(
     // bias, 缺失时 l_addr=0, 所有 D_PTR 解析出未加 bias 的地址 (运行段错误)。
     let has_relro = link_opts::compute_relro_range(layout).is_some();
     let has_interp = layout.dynamic_linker.is_some();
-    let nphdr = 1 + if layout.has_dynamic { 4u16 } else { 3u16 }
+    let nphdr = 1
+        + if layout.has_dynamic { 4u16 } else { 3u16 }
         + if has_relro { 1u16 } else { 0u16 }
         + if has_interp { 1u16 } else { 0u16 };
     let phdr_off = 64u64;
@@ -209,7 +210,7 @@ pub fn write_elf_internal(
 
     // 6. 写 PHDR
     let mut phdr_cursor = phdr_off as usize;
-    // PT_PHDR: 指向本程序头表自身。p_vaddr = base_addr + 64 (ELF 头后), 
+    // PT_PHDR: 指向本程序头表自身。p_vaddr = base_addr + 64 (ELF 头后),
     // 使 ld.so 的 l_addr = AT_PHDR - p_vaddr 等于实际 load bias。
     write_phdr(
         out,
@@ -306,12 +307,8 @@ pub fn write_elf_internal(
             .sections
             .iter()
             .position(|s| s.kind == OutputSectionKind::Dynamic);
-        let dyn_vaddr = dyn_idx
-            .map(|i| layout.sections[i].vaddr)
-            .unwrap_or(0);
-        let dyn_filesz = dyn_idx
-            .map(|i| layout.sections[i].size)
-            .unwrap_or(0);
+        let dyn_vaddr = dyn_idx.map(|i| layout.sections[i].vaddr).unwrap_or(0);
+        let dyn_filesz = dyn_idx.map(|i| layout.sections[i].size).unwrap_or(0);
         let dyn_fileoff = dyn_idx
             .map(|i| section_offsets.get(i).copied().unwrap_or(0))
             .unwrap_or(0);
@@ -332,13 +329,8 @@ pub fn write_elf_internal(
     if let Some(ref interp) = layout.dynamic_linker {
         // interp 字符串已经在节数据中写入 (通过 .interp 节)
         // 此处只写 PHDR (用实际节偏移)
-        let interp_idx = layout
-            .sections
-            .iter()
-            .position(|s| s.name == ".interp");
-        let interp_vaddr = interp_idx
-            .map(|i| layout.sections[i].vaddr)
-            .unwrap_or(0);
+        let interp_idx = layout.sections.iter().position(|s| s.name == ".interp");
+        let interp_vaddr = interp_idx.map(|i| layout.sections[i].vaddr).unwrap_or(0);
         let interp_filesz = (interp.len() + 1) as u64; // +1 for NUL
         let interp_fileoff = interp_idx
             .map(|i| section_offsets.get(i).copied().unwrap_or(0))

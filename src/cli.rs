@@ -18,9 +18,9 @@ pub enum InputLang {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub inputs: Vec<PathBuf>,
-    pub output: PathBuf, // 默认 a.out
+    pub output: PathBuf,       // 默认 a.out
     pub output_explicit: bool, // -o 是否由用户显式指定
-    pub opt: u8,         // 0..3
+    pub opt: u8,               // 0..3
     pub std: StdMode,
     pub target: TargetTriple,
     pub freestanding: bool,
@@ -50,7 +50,7 @@ pub struct Config {
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
     pub patchable_function_entry: Option<(usize, usize)>,
-    pub debug_level: u8,       // 0=off (g0), 1=g1, 2=g2, 3=g3
+    pub debug_level: u8, // 0=off (g0), 1=g1, 2=g2, 3=g3
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
     pub sanitizers: SanitizerFlags,
@@ -1145,10 +1145,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     .strip_prefix("-fpatchable-function-entry=")
                     .unwrap_or_default();
                 let parts: Vec<&str> = spec.split(',').collect();
-                if parts.is_empty()
-                    || parts.len() > 2
-                    || parts.iter().any(|p| p.is_empty())
-                {
+                if parts.is_empty() || parts.len() > 2 || parts.iter().any(|p| p.is_empty()) {
                     return Err(CliError::new("invalid -fpatchable-function-entry value"));
                 }
                 let n = parts[0]

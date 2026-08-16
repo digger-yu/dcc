@@ -89,9 +89,8 @@ impl AutoFdoProfile {
         if data.len() >= 4 && &data[0..4] == AFDO_BINARY_MAGIC {
             return Self::read_binary(&data);
         }
-        let s = String::from_utf8(data).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, e)
-        })?;
+        let s =
+            String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Self::from_str(&s)
     }
 
@@ -367,10 +366,7 @@ fn read_binary_string(data: &[u8], off: &mut usize) -> io::Result<String> {
 
 fn read_u32(data: &[u8], off: &mut usize) -> io::Result<u32> {
     if *off + 4 > data.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated u32",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated u32"));
     }
     let v = u32::from_le_bytes(data[*off..*off + 4].try_into().unwrap());
     *off += 4;
@@ -379,10 +375,7 @@ fn read_u32(data: &[u8], off: &mut usize) -> io::Result<u32> {
 
 fn read_u64(data: &[u8], off: &mut usize) -> io::Result<u64> {
     if *off + 8 > data.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "truncated u64",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated u64"));
     }
     let v = u64::from_le_bytes(data[*off..*off + 8].try_into().unwrap());
     *off += 8;
@@ -406,10 +399,8 @@ mod tests {
 
     #[test]
     fn parse_calls() {
-        let p = AutoFdoProfile::from_str(
-            "func main 100\nfunc helper 50\ncalls main helper 30\n",
-        )
-        .unwrap();
+        let p = AutoFdoProfile::from_str("func main 100\nfunc helper 50\ncalls main helper 30\n")
+            .unwrap();
         assert_eq!(p.calls.get(&("main".into(), "helper".into())), Some(&30));
         let callers = p.callers_of("helper");
         assert_eq!(callers.len(), 1);
@@ -509,10 +500,8 @@ mod tests {
         p.func_samples.insert("foo".into(), 20);
         p.line_samples.insert(("main".into(), 5, 1), 40);
         p.calls.insert(("main".into(), "foo".into()), 15);
-        p.discriminated_samples
-            .insert(("main".into(), 10, 0), 30);
-        p.discriminated_samples
-            .insert(("main".into(), 10, 1), 20);
+        p.discriminated_samples.insert(("main".into(), 10, 0), 30);
+        p.discriminated_samples.insert(("main".into(), 10, 1), 20);
 
         let tmp = std::env::temp_dir().join("dcc-autofdo-bin.afdo");
         let _ = std::fs::remove_file(&tmp);
@@ -552,12 +541,9 @@ mod tests {
     #[test]
     fn autofdo_discriminators_for_line() {
         let mut p = AutoFdoProfile::default();
-        p.discriminated_samples
-            .insert(("main".into(), 10, 0), 30);
-        p.discriminated_samples
-            .insert(("main".into(), 10, 1), 20);
-        p.discriminated_samples
-            .insert(("main".into(), 15, 0), 5);
+        p.discriminated_samples.insert(("main".into(), 10, 0), 30);
+        p.discriminated_samples.insert(("main".into(), 10, 1), 20);
+        p.discriminated_samples.insert(("main".into(), 15, 0), 5);
 
         let discs = p.discriminators_for("main", 10);
         assert_eq!(discs.len(), 2);
@@ -576,13 +562,10 @@ mod tests {
     #[test]
     fn autofdo_merge_with_discriminators() {
         let mut a = AutoFdoProfile::default();
-        a.discriminated_samples
-            .insert(("f".into(), 5, 0), 10);
+        a.discriminated_samples.insert(("f".into(), 5, 0), 10);
         let mut b = AutoFdoProfile::default();
-        b.discriminated_samples
-            .insert(("f".into(), 5, 0), 20);
-        b.discriminated_samples
-            .insert(("f".into(), 5, 1), 15);
+        b.discriminated_samples.insert(("f".into(), 5, 0), 20);
+        b.discriminated_samples.insert(("f".into(), 5, 1), 15);
         a.merge(&b);
         assert_eq!(a.discriminated_samples.get(&("f".into(), 5, 0)), Some(&30));
         assert_eq!(a.discriminated_samples.get(&("f".into(), 5, 1)), Some(&15));
@@ -593,10 +576,8 @@ mod tests {
     fn autofdo_text_roundtrip_with_discriminators() {
         let mut p = AutoFdoProfile::default();
         p.func_samples.insert("main".into(), 100);
-        p.discriminated_samples
-            .insert(("main".into(), 10, 0), 30);
-        p.discriminated_samples
-            .insert(("main".into(), 10, 1), 20);
+        p.discriminated_samples.insert(("main".into(), 10, 0), 30);
+        p.discriminated_samples.insert(("main".into(), 10, 1), 20);
         let text = p.serialize();
         let p2 = AutoFdoProfile::from_str(&text).unwrap();
         assert_eq!(p2.discriminated_samples, p.discriminated_samples);

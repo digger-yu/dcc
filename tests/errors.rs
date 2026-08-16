@@ -561,7 +561,10 @@ fn diagnostic_error_snapshots() {
         // 内核构建中隐式函数声明导致的类型错误. 这些情况下编译器
         // 不再中止, 而是输出警告继续编译.
         if matches!(case.name, "e1004" | "e1009" | "e1010") {
-            eprintln!("[skip] {}: downgraded to warning for kernel builds", case.name);
+            eprintln!(
+                "[skip] {}: downgraded to warning for kernel builds",
+                case.name
+            );
             continue;
         }
 
@@ -632,10 +635,7 @@ fn w0004_asm_goto_missing_label_warning_snapshot() {
         status == 0,
         "W0004 asm goto missing label 仅警告，应编译成功，stderr:\n{plain}"
     );
-    assert!(
-        plain.contains("warning[W0004]:"),
-        "stderr:\n{plain}"
-    );
+    assert!(plain.contains("warning[W0004]:"), "stderr:\n{plain}");
     assert!(
         plain.contains("missing_label"),
         "stderr should mention the missing label name:\n{plain}"

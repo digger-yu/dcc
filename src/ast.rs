@@ -582,7 +582,12 @@ pub struct EnumDef {
 
 impl Type {
     fn aggregate_align_from_offsets(fields: &[Field]) -> usize {
-        let mut align = fields.iter().map(|f| f.ty.align()).max().unwrap_or(1).max(1);
+        let mut align = fields
+            .iter()
+            .map(|f| f.ty.align())
+            .max()
+            .unwrap_or(1)
+            .max(1);
         for f in fields {
             let nat = f.ty.align().max(1);
             if nat > 1 && f.offset % nat != 0 {

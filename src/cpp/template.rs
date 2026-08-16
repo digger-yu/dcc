@@ -186,7 +186,9 @@ impl TemplateRegistry {
             }
             // M26: 展开 requires 子句中的概念引用
             let expanded = crate::cpp::feature_degrade::expand_concepts(cond, &self.concepts);
-            if !crate::cpp::feature_degrade::evaluate_trait_condition(&expanded, &ctx).unwrap_or(true) {
+            if !crate::cpp::feature_degrade::evaluate_trait_condition(&expanded, &ctx)
+                .unwrap_or(true)
+            {
                 return None;
             }
         }

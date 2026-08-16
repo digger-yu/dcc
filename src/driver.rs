@@ -274,7 +274,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if cfg.preprocess_only {
         // 构建输出目标: -o 显式指定时写文件, 否则写 stdout.
         // -o - 与不指定 -o 一样走 stdout (与 GCC 行为一致).
-        let mut pp_out: Box<dyn Write> = if cfg.output_explicit && cfg.output.to_str() != Some("-") {
+        let mut pp_out: Box<dyn Write> = if cfg.output_explicit && cfg.output.to_str() != Some("-")
+        {
             let path = &cfg.output;
             if let Some(parent) = path.parent() {
                 if !parent.as_os_str().is_empty() {
@@ -472,14 +473,20 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             let pgo_cfg = crate::profile::pgo_integration::PgoIntegrationConfig {
                 enabled: true,
                 opt_level: cfg.opt,
-                profile_path: cfg.profile.pgo_use.as_ref().map(|p| p.display().to_string()),
+                profile_path: cfg
+                    .profile
+                    .pgo_use
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
                 inline_hints: cfg.profile.pgo_inline,
                 ipa_sra_hints: cfg.profile.pgo_ipa_sra,
                 hot_threshold: cfg.profile.pgo_hot_threshold,
                 cold_threshold: cfg.profile.pgo_cold_threshold,
             };
             let ctx = crate::profile::pgo_integration::PgoIntegrationContext::from_sources(
-                &pgo_weights, &profile_weights, &pgo_cfg,
+                &pgo_weights,
+                &profile_weights,
+                &pgo_cfg,
             );
             // 应用 hot/cold 标记到函数声明
             crate::profile::pgo_integration::apply_pgo_hotness(&mut prog, &ctx);
@@ -570,9 +577,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // AST -> typed IR -> validation
-    let (mut module, ir_warnings) = ir::lower(prog).map_err(|d| {
-        remap_enrich(d, &line_map, src, &file_name, input.parent())
-    })?;
+    let (mut module, ir_warnings) =
+        ir::lower(prog).map_err(|d| remap_enrich(d, &line_map, src, &file_name, input.parent()))?;
     // Print IR-lowering warnings (e.g. W1004/W1009/W1010 from implicit
     // function declarations) after remapping spans back to source.
     let ir_warnings = remap_enrich(ir_warnings, &line_map, src, &file_name, input.parent());
@@ -580,17 +586,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         w.print_with(&dcfg);
     }
     diags.extend(ir_warnings);
-    ir::validate(&module).map_err(|d| {
-        remap_enrich(d, &line_map, src, &file_name, input.parent())
-    })?;
+    ir::validate(&module)
+        .map_err(|d| remap_enrich(d, &line_map, src, &file_name, input.parent()))?;
     crate::opt::optimize(&mut module, cfg.opt);
     if cfg.opt > 0 {
-        ir::resync(&mut module).map_err(|d| {
-            remap_enrich(d, &line_map, src, &file_name, input.parent())
-        })?;
-        ir::validate(&module).map_err(|d| {
-            remap_enrich(d, &line_map, src, &file_name, input.parent())
-        })?;
+        ir::resync(&mut module)
+            .map_err(|d| remap_enrich(d, &line_map, src, &file_name, input.parent()))?;
+        ir::validate(&module)
+            .map_err(|d| remap_enrich(d, &line_map, src, &file_name, input.parent()))?;
     }
 
     let mut asm_diags = codegen::validate_inline_asm_constraints(&module);
@@ -841,7 +844,8 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
 
     if cfg.preprocess_only {
         // -E 模式: 写到 -o 指定的文件 (或 stdout)
-        let mut pp_out: Box<dyn Write> = if cfg.output_explicit && cfg.output.to_str() != Some("-") {
+        let mut pp_out: Box<dyn Write> = if cfg.output_explicit && cfg.output.to_str() != Some("-")
+        {
             let path = &cfg.output;
             if let Some(parent) = path.parent() {
                 if !parent.as_os_str().is_empty() {
@@ -1271,11 +1275,8 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         if is_obj {
             inputs.push(inp.clone());
         } else {
-            let tmp_o = std::env::temp_dir().join(format!(
-                "dcc-builtlink-{}-{}.o",
-                std::process::id(),
-                i
-            ));
+            let tmp_o =
+                std::env::temp_dir().join(format!("dcc-builtlink-{}-{}.o", std::process::id(), i));
             let mut c = cfg.clone();
             c.output = tmp_o.clone();
             c.relocatable = true;
@@ -1343,8 +1344,11 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         arch: arch_from_target(&cfg.target),
         // PIE/.so 需要 PT_INTERP 让动态链接器处理 GOT/重定位;
         // TODO: parse from -Wl,--dynamic-linker=
-        dynamic_linker: matches!(output_kind, link::OutputKind::PIE | link::OutputKind::Shared)
-            .then(|| dynamic_linker_path(arch_from_target(&cfg.target))),
+        dynamic_linker: matches!(
+            output_kind,
+            link::OutputKind::PIE | link::OutputKind::Shared
+        )
+        .then(|| dynamic_linker_path(arch_from_target(&cfg.target))),
         vdso: cfg.vdso.clone(),
         dso_cache: link::dso_cache::DsoCache::new(),
     };
@@ -1845,7 +1849,10 @@ mod tests {
 
     #[test]
     fn escape_dep_path_no_special() {
-        assert_eq!(escape_dep_path("/usr/include/stdio.h"), "/usr/include/stdio.h");
+        assert_eq!(
+            escape_dep_path("/usr/include/stdio.h"),
+            "/usr/include/stdio.h"
+        );
     }
 
     #[test]
@@ -1887,14 +1894,7 @@ mod tests {
     #[test]
     fn write_dep_file_phony_targets() {
         let mut buf = Vec::new();
-        write_dep_file(
-            &mut buf,
-            "foo.o",
-            "foo.c",
-            &["bar.h".to_string()],
-            true,
-        )
-        .unwrap();
+        write_dep_file(&mut buf, "foo.o", "foo.c", &["bar.h".to_string()], true).unwrap();
         let out = String::from_utf8(buf).unwrap();
         // -MP: 每个依赖应有空 phony 目标
         assert!(out.contains("\nbar.h:"));

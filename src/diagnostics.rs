@@ -749,10 +749,7 @@ pub fn print_all(diags: &[Diagnostic], cfg: &DiagnosticsConfig) {
         d.print_with(cfg);
     }
     if suppressed > 0 {
-        eprintln!(
-            "error: too many warnings, suppressing {} more",
-            suppressed
-        );
+        eprintln!("error: too many warnings, suppressing {} more", suppressed);
     }
 }
 

@@ -270,11 +270,31 @@ impl Aarch64Codegen {
     fn compile_exec(&mut self, module: &Module, prog: &Program) {
         // 文件级 asm: 收集原始文本行
         for decl in &prog.decls {
-            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, .. } = decl {
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+            if let Decl::GlobalAsm {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                ..
+            } = decl
+            {
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
                 for line in resolved.split('\n') {
                     let t = line.trim();
-                    if !t.is_empty() { self.raw_global_asm_lines.push(t.to_string()); }
+                    if !t.is_empty() {
+                        self.raw_global_asm_lines.push(t.to_string());
+                    }
                 }
             }
         }
@@ -304,11 +324,31 @@ impl Aarch64Codegen {
     fn compile_rel(&mut self, module: &Module, prog: &Program) {
         // 文件级 asm: 收集原始文本行
         for decl in &prog.decls {
-            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, .. } = decl {
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+            if let Decl::GlobalAsm {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                ..
+            } = decl
+            {
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
                 for line in resolved.split('\n') {
                     let t = line.trim();
-                    if !t.is_empty() { self.raw_global_asm_lines.push(t.to_string()); }
+                    if !t.is_empty() {
+                        self.raw_global_asm_lines.push(t.to_string());
+                    }
                 }
             }
         }
@@ -485,11 +525,15 @@ impl Aarch64Codegen {
         while i < chars.len() {
             if chars[i] == '%' && i + 1 < chars.len() {
                 match chars[i + 1] {
-                    '%' => { result.push('%'); i += 2; }
+                    '%' => {
+                        result.push('%');
+                        i += 2;
+                    }
                     '[' => {
-                        if let Some(end) = chars[i+2..].iter().position(|&c| c == ']') {
-                            let name: String = chars[i+2..i+2+end].iter().collect();
-                            let all_names: Vec<&Option<String>> = output_names.iter().chain(input_names.iter()).collect();
+                        if let Some(end) = chars[i + 2..].iter().position(|&c| c == ']') {
+                            let name: String = chars[i + 2..i + 2 + end].iter().collect();
+                            let all_names: Vec<&Option<String>> =
+                                output_names.iter().chain(input_names.iter()).collect();
                             for (idx, n) in all_names.iter().enumerate() {
                                 if n.as_ref().map(|s| s.as_str()) == Some(&name) {
                                     result.push_str(&format!("%{}", idx));
@@ -755,27 +799,56 @@ impl Aarch64Codegen {
                     self.gen_block_item(item, nested_ir);
                 }
             }
-            Stmt::AsmGoto { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, goto_labels, span, .. } => {
+            Stmt::AsmGoto {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                goto_labels,
+                span,
+                ..
+            } => {
                 // 非 x86_64 后端: 收集原始 asm 文本用于 -S 输出, -c 模式发出警告
                 eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
                     resolved_asm = resolved_asm.replace(&format!("%l{}", i), &label.name);
-                    resolved_asm = resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
-                    resolved_asm = resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
                 }
-                let resolved = Self::resolve_asm_template_simple(&resolved_asm, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+                let resolved = Self::resolve_asm_template_simple(
+                    &resolved_asm,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
                 let func_name = self.source_name.clone();
-                let entry = self.raw_func_asm_lines.last_mut()
+                let entry = self
+                    .raw_func_asm_lines
+                    .last_mut()
                     .filter(|(n, _)| n == &func_name);
                 if let Some((_, lines)) = entry {
                     for line in resolved.split('\n') {
                         let t = line.trim();
-                        if !t.is_empty() { lines.push(t.to_string()); }
+                        if !t.is_empty() {
+                            lines.push(t.to_string());
+                        }
                     }
                 } else {
-                    let lines = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                    let lines = resolved
+                        .split('\n')
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
                     self.raw_func_asm_lines.push((func_name, lines));
                 }
             }
@@ -1167,13 +1240,39 @@ impl Aarch64Codegen {
                     self.emit_bl_to(&name.name);
                 }
             }
-            Expr::AsmExpr { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, span, .. } => {
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                span,
+                ..
+            } => {
                 // 非 x86_64 后端: 收集原始 asm 文本, 结果视为 0
-                eprintln!("{}:{}: warning: inline asm on non-x86_64 target: result is 0", span.file, span.line);
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
-                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                eprintln!(
+                    "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
+                    span.file, span.line
+                );
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
+                let lines: Vec<String> = resolved
+                    .split('\n')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
                 // 关联到当前函数 (使用 source_name 作为临时 key, gen_function 会覆盖)
-                self.raw_func_asm_lines.push((format!("__inline_{}", self.label_serial), lines));
+                self.raw_func_asm_lines
+                    .push((format!("__inline_{}", self.label_serial), lines));
                 self.label_serial += 1;
                 self.mov_w0_imm(0);
             }
@@ -3024,7 +3123,7 @@ mod tests {
             );
         }
     }
-    
+
     // Optimized TLSDESC 序列单元测试 (MOVW 对 + 5 个新重定位)
     // 验证 emit_tlsdesc_access_opt 发出:
     //   movz x0, #0, lsl #16  (R_AARCH64_TLSDESC_OFF_G1)
@@ -3080,7 +3179,7 @@ mod tests {
             assert_eq!(sym.name, "tls_opt_var");
         }
     }
-    
+
     // M25: AArch64 va_list 寄存器保区 单元测试
     // 验证变参函数入口发出 8 条 str xn, [sp, #off] 保存指令.
     #[test]
@@ -3258,10 +3357,7 @@ mod tests {
         cg.emit_stg(16, 31, 0); // stg x16, [sp, #0]
         cg.emit_ldg(0, 0, 0); // ldg x0, [x0]
         let code = &cg.code;
-        let find = |bytes: [u8; 4]| {
-            code.windows(4)
-                .any(|w| w == &bytes)
-        };
+        let find = |bytes: [u8; 4]| code.windows(4).any(|w| w == &bytes);
         assert!(find([0x20, 0x10, 0xdf, 0x9a]), "irg x0, x1");
         assert!(find([0xe0, 0x13, 0xdf, 0x9a]), "irg x0, sp");
         assert!(find([0xf0, 0x13, 0xdf, 0x9a]), "irg x16, sp");
@@ -3291,20 +3387,44 @@ mod tests {
         cg.compile(&module);
         let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == &bytes);
         // prologue: irg x16, sp
-        assert!(find([0xf0, 0x13, 0xdf, 0x9a]), "prologue missing irg x16, sp");
+        assert!(
+            find([0xf0, 0x13, 0xdf, 0x9a]),
+            "prologue missing irg x16, sp"
+        );
         // prologue: addg sp, x16, #0, #0
-        assert!(find([0x1f, 0x02, 0x80, 0x91]), "prologue missing addg sp, x16, #0, #0");
+        assert!(
+            find([0x1f, 0x02, 0x80, 0x91]),
+            "prologue missing addg sp, x16, #0, #0"
+        );
         // prologue: stg x16, [sp, #0] 与 stg x16, [sp, #16] (帧 32B = 2 granule)
-        assert!(find([0xf0, 0x0b, 0x20, 0xd9]), "prologue missing stg x16, [sp, #0]");
-        assert!(find([0xf0, 0x1b, 0x20, 0xd9]), "prologue missing stg x16, [sp, #16]");
+        assert!(
+            find([0xf0, 0x0b, 0x20, 0xd9]),
+            "prologue missing stg x16, [sp, #0]"
+        );
+        assert!(
+            find([0xf0, 0x1b, 0x20, 0xd9]),
+            "prologue missing stg x16, [sp, #16]"
+        );
         // prologue: str x19, [sp, #16] (保存入参 x19, 槽位 off=16)
-        assert!(find([0xf3, 0x0b, 0x00, 0xf9]), "prologue missing str x19, [sp, #16]");
+        assert!(
+            find([0xf3, 0x0b, 0x00, 0xf9]),
+            "prologue missing str x19, [sp, #16]"
+        );
         // prologue: add x19, sp, #0 (mov x19, sp)
-        assert!(find([0xf3, 0x03, 0x00, 0x91]), "prologue missing add x19, sp, #0");
+        assert!(
+            find([0xf3, 0x03, 0x00, 0x91]),
+            "prologue missing add x19, sp, #0"
+        );
         // epilogue: ldr x19, [sp, #16]
-        assert!(find([0xf3, 0x0b, 0x40, 0xf9]), "epilogue missing ldr x19, [sp, #16]");
+        assert!(
+            find([0xf3, 0x0b, 0x40, 0xf9]),
+            "epilogue missing ldr x19, [sp, #16]"
+        );
         // epilogue: and sp, sp, #0x00ffffffffffffff (untag)
-        assert!(find([0xff, 0xdf, 0x80, 0x92]), "epilogue missing and sp, sp, #mask");
+        assert!(
+            find([0xff, 0xdf, 0x80, 0x92]),
+            "epilogue missing and sp, sp, #mask"
+        );
         // 记录 tag 栈帧大小
         assert_eq!(cg.tag_frame_size, 32, "tag_frame_size should be frame size");
     }
@@ -3352,7 +3472,13 @@ mod tests {
         let find = |bytes: [u8; 4]| cg.code.windows(4).any(|w| w == &bytes);
         assert!(!find([0xf0, 0x13, 0xdf, 0x9a]), "unexpected irg x16, sp");
         assert!(!find([0xf0, 0x0b, 0x20, 0xd9]), "unexpected stg");
-        assert!(!find([0xff, 0xdf, 0x80, 0x92]), "unexpected and sp, sp, #mask");
-        assert_eq!(cg.tag_frame_size, 0, "tag_frame_size should stay 0 without MTE");
+        assert!(
+            !find([0xff, 0xdf, 0x80, 0x92]),
+            "unexpected and sp, sp, #mask"
+        );
+        assert_eq!(
+            cg.tag_frame_size, 0,
+            "tag_frame_size should stay 0 without MTE"
+        );
     }
 }

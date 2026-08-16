@@ -80,8 +80,7 @@ fn stmt_has_loop(s: &Stmt) -> bool {
         Stmt::While { .. } | Stmt::For { .. } | Stmt::Do { .. } => true,
         Stmt::Block { b, .. } => block_has_loop(b),
         Stmt::If { then_, else_, .. } => {
-            stmt_has_loop(then_)
-                || else_.as_ref().is_some_and(|e| stmt_has_loop(e))
+            stmt_has_loop(then_) || else_.as_ref().is_some_and(|e| stmt_has_loop(e))
         }
         _ => false,
     }
@@ -112,22 +111,31 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
 
 fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
     match s {
-        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
-            expr_has_unsafe_ssa_pattern(e)
-        }
+        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => expr_has_unsafe_ssa_pattern(e),
         // asm goto 和 asm 表达式包含无法 SSA 化的副作用
         Stmt::AsmGoto { .. } => true,
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             expr_has_unsafe_ssa_pattern(cond)
                 || stmt_has_unsafe_ssa_pattern(then_)
-                || else_.as_ref().is_some_and(|e| stmt_has_unsafe_ssa_pattern(e))
+                || else_
+                    .as_ref()
+                    .is_some_and(|e| stmt_has_unsafe_ssa_pattern(e))
         }
         Stmt::Block { b, .. } => block_has_unsafe_ssa_pattern(b),
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             expr_has_unsafe_ssa_pattern(cond) || stmt_has_unsafe_ssa_pattern(body)
         }
-        Stmt::For { init, cond, step, body, .. } => {
-            init.as_ref().is_some_and(|i| stmt_has_unsafe_ssa_pattern(i))
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
+            init.as_ref()
+                .is_some_and(|i| stmt_has_unsafe_ssa_pattern(i))
                 || cond.as_ref().is_some_and(expr_has_unsafe_ssa_pattern)
                 || step.as_ref().is_some_and(expr_has_unsafe_ssa_pattern)
                 || stmt_has_unsafe_ssa_pattern(body)
@@ -150,14 +158,15 @@ fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
             expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
         }
         Expr::Unary { e, .. } | Expr::Cast { e, .. } => expr_has_unsafe_ssa_pattern(e),
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             expr_has_unsafe_ssa_pattern(cond)
                 || expr_has_unsafe_ssa_pattern(then_)
                 || expr_has_unsafe_ssa_pattern(else_)
         }
         Expr::Call { callee, args, .. } => {
-            expr_has_unsafe_ssa_pattern(callee)
-                || args.iter().any(expr_has_unsafe_ssa_pattern)
+            expr_has_unsafe_ssa_pattern(callee) || args.iter().any(expr_has_unsafe_ssa_pattern)
         }
         Expr::Assign { l, r, .. } => {
             expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
@@ -184,7 +193,11 @@ fn cross_function_dce(module: &mut Module) {
                 }
                 others.push(Decl::Var(v));
             }
-            Decl::GlobalAsm { ref outputs, ref inputs, .. } => {
+            Decl::GlobalAsm {
+                ref outputs,
+                ref inputs,
+                ..
+            } => {
                 for e in outputs.iter().chain(inputs.iter()) {
                     collect_global_func_roots(e, &mut extra_roots);
                 }
@@ -241,11 +254,15 @@ fn collect_global_func_roots(expr: &Expr, out: &mut Vec<String>) {
             for init in inits {
                 match init {
                     crate::ast::InitItem::Expr(e) => collect_global_func_roots(e, out),
-                    crate::ast::InitItem::Designated { value, .. } => collect_global_func_roots(value, out),
+                    crate::ast::InitItem::Designated { value, .. } => {
+                        collect_global_func_roots(value, out)
+                    }
                 }
             }
         }
-        Expr::AsmExpr { outputs, inputs, .. } => {
+        Expr::AsmExpr {
+            outputs, inputs, ..
+        } => {
             for e in outputs.iter().chain(inputs.iter()) {
                 collect_global_func_roots(e, out);
             }
@@ -1030,7 +1047,13 @@ fn inline_expr(
                 }
             }
             Expr::Call {
-                callee: Box::new(inline_expr(*callee, funcs, level, caller_flatten, fenv_access)),
+                callee: Box::new(inline_expr(
+                    *callee,
+                    funcs,
+                    level,
+                    caller_flatten,
+                    fenv_access,
+                )),
                 args: args
                     .into_iter()
                     .map(|a| inline_expr(a, funcs, level, caller_flatten, fenv_access))
@@ -1059,9 +1082,27 @@ fn inline_expr(
             span,
             ty,
         } => Expr::Cond {
-            cond: Box::new(inline_expr(*cond, funcs, level, caller_flatten, fenv_access)),
-            then_: Box::new(inline_expr(*then_, funcs, level, caller_flatten, fenv_access)),
-            else_: Box::new(inline_expr(*else_, funcs, level, caller_flatten, fenv_access)),
+            cond: Box::new(inline_expr(
+                *cond,
+                funcs,
+                level,
+                caller_flatten,
+                fenv_access,
+            )),
+            then_: Box::new(inline_expr(
+                *then_,
+                funcs,
+                level,
+                caller_flatten,
+                fenv_access,
+            )),
+            else_: Box::new(inline_expr(
+                *else_,
+                funcs,
+                level,
+                caller_flatten,
+                fenv_access,
+            )),
             span,
             ty,
         },
@@ -1419,7 +1460,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
@@ -1488,7 +1529,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
@@ -1592,12 +1633,15 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
         });
-        let prog = Program { decls: vec![func], fenv_access: false };
+        let prog = Program {
+            decls: vec![func],
+            fenv_access: false,
+        };
         let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
         let body = &module.source().decls[0];

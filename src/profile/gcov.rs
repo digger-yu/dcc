@@ -139,7 +139,7 @@ impl GcovUnit {
             ));
         }
         let mut off = 12; // skip magic + version + stamp
-        // Skip runs + sums
+                          // Skip runs + sums
         off += 8;
         // Read source name
         let (_source, new_off) = read_pascal_string(&data, off)?;
@@ -172,8 +172,7 @@ impl GcovUnit {
             if off + 4 > data.len() {
                 break;
             }
-            let n_counters =
-                u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+            let n_counters = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
             off += 4;
             // Read counters and populate line_counts
             for (i, block) in func.blocks.iter().enumerate() {
@@ -722,8 +721,16 @@ mod tests {
             ident: 1,
             lineno: 10,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)], lines: vec![] },
-                GcovBlock { flags: 0, succs: vec![], lines: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                    lines: vec![],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                    lines: vec![],
+                },
             ],
             line_counts: HashMap::new(),
         });
@@ -758,8 +765,16 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0)], lines: vec![] },
-                GcovBlock { flags: 0, succs: vec![], lines: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                    lines: vec![],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                    lines: vec![],
+                },
             ],
             line_counts: HashMap::new(),
         });
@@ -767,7 +782,8 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
         // 2 blocks, 2 counters; 第二个计数器值 0x0102030405060708
         // 在 little-endian 应为 08 07 06 05 04 03 02 01
-        u.write_data_with_counters(&tmp, &[0, 0x0102030405060708u64]).unwrap();
+        u.write_data_with_counters(&tmp, &[0, 0x0102030405060708u64])
+            .unwrap();
         let bytes = std::fs::read(&tmp).unwrap();
 
         // magic 0x67636461 ("gcda") in little-endian
@@ -775,9 +791,9 @@ mod tests {
 
         // 找到计数器位置 (在 header + function record 之后)
         // 简单验证: 文件中应包含 08 07 06 05 04 03 02 01 序列
-        let found = bytes.windows(8).any(|w| {
-            w == [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
-        });
+        let found = bytes
+            .windows(8)
+            .any(|w| w == [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]);
         assert!(found, "counter should be encoded as little-endian 64-bit");
 
         let _ = std::fs::remove_file(&tmp);
@@ -794,9 +810,21 @@ mod tests {
             ident: 1,
             lineno: 1,
             blocks: vec![
-                GcovBlock { flags: 0, succs: vec![(1, 0), (2, 0)], lines: vec![] },
-                GcovBlock { flags: 0, succs: vec![(2, 0)], lines: vec![] },
-                GcovBlock { flags: 0, succs: vec![], lines: vec![] },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0), (2, 0)],
+                    lines: vec![],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(2, 0)],
+                    lines: vec![],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                    lines: vec![],
+                },
             ],
             line_counts: HashMap::new(),
         };

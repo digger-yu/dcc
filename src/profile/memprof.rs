@@ -118,8 +118,8 @@ impl MemProfData {
         if data.len() >= 8 && &data[0..8] == b"MEMPROFD" {
             return Self::read_binary(&data);
         }
-        let s = String::from_utf8(data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let s =
+            String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Self::from_str(&s)
     }
 
@@ -171,7 +171,12 @@ impl MemProfData {
     }
 
     /// 分类分配点
-    pub fn classify(&self, stack: &[String], cold_threshold: u64, hot_threshold: u64) -> AllocClass {
+    pub fn classify(
+        &self,
+        stack: &[String],
+        cold_threshold: u64,
+        hot_threshold: u64,
+    ) -> AllocClass {
         let count = self.alloc_counts.get(stack).copied().unwrap_or(0);
         // 检查是否 ephemeral (有极短 lifetime)
         let is_ephemeral = self.lifetime.iter().any(|((a, _), bytes)| {
@@ -267,7 +272,7 @@ impl MemProfData {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(b"MEMPROFD");
         buf.extend_from_slice(&1u32.to_le_bytes()); // version
-        // allocs
+                                                    // allocs
         buf.extend_from_slice(&(self.alloc_counts.len() as u32).to_le_bytes());
         for (stack, &count) in &self.alloc_counts {
             buf.extend_from_slice(&(stack.len() as u32).to_le_bytes());
@@ -470,7 +475,10 @@ fn read_u64(data: &[u8], off: &mut usize) -> io::Result<u64> {
 fn read_string(data: &[u8], off: &mut usize) -> io::Result<String> {
     let len = read_u32(data, off)? as usize;
     if *off + len > data.len() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated string"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated string",
+        ));
     }
     let s = std::str::from_utf8(&data[*off..*off + len])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
@@ -511,10 +519,7 @@ mod tests {
 
     #[test]
     fn parse_accumulates_duplicates() {
-        let d = MemProfData::from_str(
-            "alloc main = 10 100\nalloc main = 20 200\n",
-        )
-        .unwrap();
+        let d = MemProfData::from_str("alloc main = 10 100\nalloc main = 20 200\n").unwrap();
         assert_eq!(d.alloc_counts.get(&vec!["main".into()]), Some(&30));
         assert_eq!(d.alloc_bytes.get(&vec!["main".into()]), Some(&300));
     }
@@ -526,7 +531,10 @@ mod tests {
         d.alloc_counts.insert(vec!["normal_alloc".into()], 50);
         d.alloc_counts.insert(vec!["cold_alloc".into()], 2);
         assert_eq!(d.classify(&["hot_alloc".into()], 5, 100), AllocClass::Hot);
-        assert_eq!(d.classify(&["normal_alloc".into()], 5, 100), AllocClass::Normal);
+        assert_eq!(
+            d.classify(&["normal_alloc".into()], 5, 100),
+            AllocClass::Normal
+        );
         assert_eq!(d.classify(&["cold_alloc".into()], 5, 100), AllocClass::Cold);
     }
 
@@ -574,8 +582,10 @@ mod tests {
     #[test]
     fn roundtrip_to_string() {
         let mut d = MemProfData::default();
-        d.alloc_counts.insert(vec!["main".into(), "malloc".into()], 100);
-        d.alloc_bytes.insert(vec!["main".into(), "malloc".into()], 4096);
+        d.alloc_counts
+            .insert(vec!["main".into(), "malloc".into()], 100);
+        d.alloc_bytes
+            .insert(vec!["main".into(), "malloc".into()], 4096);
         d.lifetime.insert(
             (vec!["main".into(), "malloc".into()], vec!["free".into()]),
             4096,

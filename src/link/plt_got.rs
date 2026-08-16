@@ -375,7 +375,7 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         gnu_prop_data.extend_from_slice(b"GNU\0"); // name (4 bytes, aligned)
         gnu_prop_data.extend_from_slice(&5u32.to_le_bytes()); // type = NT_GNU_PROPERTY_TYPE_0
         gnu_prop_data.extend_from_slice(&16u32.to_le_bytes()); // data size (4+4+4+4)
-        // Property: GNU_PROPERTY_X86_FEATURE_1_AND (0xc0000002)
+                                                               // Property: GNU_PROPERTY_X86_FEATURE_1_AND (0xc0000002)
         gnu_prop_data.extend_from_slice(&0xc0000002u32.to_le_bytes()); // pr_type
         gnu_prop_data.extend_from_slice(&4u32.to_le_bytes()); // pr_datasz
         let mut feature_bits: u32 = 0;

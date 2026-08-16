@@ -718,7 +718,10 @@ impl Lowering {
                         // 降级为 warning: 内核复杂头文件中结构体可能不完整
                         self.diagnostics.push(Diagnostic::warn(
                             "W1009",
-                            format!("unknown aggregate member '{}' (incomplete struct?)", field.name),
+                            format!(
+                                "unknown aggregate member '{}' (incomplete struct?)",
+                                field.name
+                            ),
                             field.span.clone(),
                         ));
                     }

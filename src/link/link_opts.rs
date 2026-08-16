@@ -150,11 +150,11 @@ impl LinkOpts {
             "noibt" => self.ibt = false,
             "shstk" => self.shstk = true,
             "noshstk" => self.shstk = false,
-            "cet-report" | "cet-report=warning" | "cet-report=error"
-            | "force-bti" | "force-bti-warning" | "force-ibt" | "force-shstk"
-            | "noseparate-code" | "separate-code" | "nodynamic-linker" | "dynamic-linker"
-            | "initfirst" | "interpose" | "nodelete" | "nodump" | "origin" | "defs" | "undefs"
-            | "muldefs" | "nocopyreloc" | "nosymtab" | "symtab" | "nocombreloc" | "combreloc"
+            "cet-report" | "cet-report=warning" | "cet-report=error" | "force-bti"
+            | "force-bti-warning" | "force-ibt" | "force-shstk" | "noseparate-code"
+            | "separate-code" | "nodynamic-linker" | "dynamic-linker" | "initfirst"
+            | "interpose" | "nodelete" | "nodump" | "origin" | "defs" | "undefs" | "muldefs"
+            | "nocopyreloc" | "nosymtab" | "symtab" | "nocombreloc" | "combreloc"
             | "nocap-relocs" | "cap-relocs" | "text" | "notext" | "rodynamic" | "norodynamic" => {
                 // 静默接受
             }

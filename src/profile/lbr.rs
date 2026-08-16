@@ -74,9 +74,8 @@ impl LbrProfile {
             return Self::read_perf_data_binary(&data);
         }
         // Otherwise treat as text brstack
-        let s = String::from_utf8(data).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, e)
-        })?;
+        let s =
+            String::from_utf8(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Self::from_str(&s)
     }
 
@@ -143,7 +142,10 @@ impl LbrProfile {
         }
 
         // 更新边计数
-        *self.edges.entry((from_func.clone(), to_func.clone())).or_insert(0) += 1;
+        *self
+            .edges
+            .entry((from_func.clone(), to_func.clone()))
+            .or_insert(0) += 1;
 
         // 更新 mispredict 统计
         if mispredicted {
@@ -292,9 +294,9 @@ impl LbrProfile {
                 // Sample record: skip sample_id, look for branch_stack
                 // Simplified: scan for branch_stack pattern
                 let mut pos = off + 8; // skip header
-                // Skip sample_id (pid, tid, time, etc.) - variable size
-                // In practice, branch_stack comes after fixed fields
-                // For simplicity, look for nr field followed by valid entries
+                                       // Skip sample_id (pid, tid, time, etc.) - variable size
+                                       // In practice, branch_stack comes after fixed fields
+                                       // For simplicity, look for nr field followed by valid entries
                 while pos + 24 <= off + rec_size {
                     let nr = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
                     if nr > 0 && nr < 100 && pos + 8 + nr as usize * 26 <= off + rec_size {
@@ -399,10 +401,8 @@ mod tests {
 
     #[test]
     fn parse_with_mispredict() {
-        let p = LbrProfile::from_str(
-            "main 0x1000 foo 0x2000 M 10\nmain 0x1000 foo 0x2000 P 8\n",
-        )
-        .unwrap();
+        let p = LbrProfile::from_str("main 0x1000 foo 0x2000 M 10\nmain 0x1000 foo 0x2000 P 8\n")
+            .unwrap();
         assert_eq!(p.hot_edge_count("main", "foo"), 2);
         assert_eq!(
             p.mispred_edges.get(&("main".into(), "foo".into())),
@@ -414,7 +414,8 @@ mod tests {
 
     #[test]
     fn parse_with_cycles() {
-        let p = LbrProfile::from_str("main 0x1000 foo 0x2000 100\nmain 0x1000 foo 0x2000 200\n").unwrap();
+        let p = LbrProfile::from_str("main 0x1000 foo 0x2000 100\nmain 0x1000 foo 0x2000 200\n")
+            .unwrap();
         assert_eq!(
             p.edge_cycles.get(&("main".into(), "foo".into())),
             Some(&300)
@@ -423,10 +424,8 @@ mod tests {
 
     #[test]
     fn inbound_outbound_edges() {
-        let p = LbrProfile::from_str(
-            "a 0x0 c 0x0\nb 0x0 c 0x0\nb 0x0 c 0x0\nc 0x0 d 0x0\n",
-        )
-        .unwrap();
+        let p =
+            LbrProfile::from_str("a 0x0 c 0x0\nb 0x0 c 0x0\nb 0x0 c 0x0\nc 0x0 d 0x0\n").unwrap();
         let inbound = p.inbound_edges("c");
         assert_eq!(inbound.len(), 2);
         let outbound = p.outbound_edges("c");
@@ -499,29 +498,29 @@ mod tests {
         data.extend_from_slice(&104u64.to_le_bytes()); // header_size
         data.extend_from_slice(&64u64.to_le_bytes()); // attr_size
         data.extend_from_slice(&0u64.to_le_bytes()); // n_attrs
-        // Pad header to 104 bytes
+                                                     // Pad header to 104 bytes
         data.resize(104, 0);
 
         // PERF_RECORD_SAMPLE record
         let rec_start = data.len();
         data.extend_from_slice(&9u32.to_le_bytes()); // type = PERF_RECORD_SAMPLE
         data.extend_from_slice(&0u16.to_le_bytes()); // misc
-        // size placeholder (will fill later)
+                                                     // size placeholder (will fill later)
         let size_pos = data.len();
         data.extend_from_slice(&0u16.to_le_bytes()); // size at offset 6
-        // branch_stack: nr=2, then 2 entries
+                                                     // branch_stack: nr=2, then 2 entries
         data.extend_from_slice(&2u64.to_le_bytes()); // nr = 2
-        // Entry 1: from=0x1000, to=0x2000, flags=0, cycles=100
+                                                     // Entry 1: from=0x1000, to=0x2000, flags=0, cycles=100
         data.extend_from_slice(&0x1000u64.to_le_bytes());
         data.extend_from_slice(&0x2000u64.to_le_bytes());
         data.extend_from_slice(&0u64.to_le_bytes()); // flags
         data.extend_from_slice(&100u16.to_le_bytes()); // cycles
-        // Entry 2: from=0x2000, to=0x3000, flags=1 (mispred), cycles=200
+                                                       // Entry 2: from=0x2000, to=0x3000, flags=1 (mispred), cycles=200
         data.extend_from_slice(&0x2000u64.to_le_bytes());
         data.extend_from_slice(&0x3000u64.to_le_bytes());
         data.extend_from_slice(&1u64.to_le_bytes()); // flags (mispred)
         data.extend_from_slice(&200u16.to_le_bytes()); // cycles
-        // Fill in record size
+                                                       // Fill in record size
         let rec_size = (data.len() - rec_start) as u16;
         data[size_pos..size_pos + 2].copy_from_slice(&rec_size.to_le_bytes());
 
@@ -559,10 +558,8 @@ mod tests {
     /// serialize() produces text output compatible with brstack.
     #[test]
     fn lbr_serialize_roundtrip() {
-        let p = LbrProfile::from_str(
-            "main 0x1000 foo 0x2000 M 100\nfoo 0x2000 bar 0x3000 P 200\n",
-        )
-        .unwrap();
+        let p = LbrProfile::from_str("main 0x1000 foo 0x2000 M 100\nfoo 0x2000 bar 0x3000 P 200\n")
+            .unwrap();
         let text = p.serialize();
         assert!(text.contains("main 0x1000 foo 0x2000 M 100"));
         assert!(text.contains("foo 0x2000 bar 0x3000 P 200"));

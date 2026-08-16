@@ -11,8 +11,8 @@ use crate::codegen::elf;
 use crate::codegen::elf::{
     ElfRela, ElfSection, ElfSym, R_X86_64_32, R_X86_64_32S, R_X86_64_64, R_X86_64_PC32,
     R_X86_64_PLT32, SHF_ALLOC, SHF_EXECINSTR, SHF_GNU_RETAIN, SHF_WRITE, SHN_UNDEF, SHT_PROGBITS,
-    STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE, STT_OBJECT,
-    STT_SECTION, STT_TLS, STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
+    STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION,
+    STT_TLS, STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
 };
 use crate::const_eval;
 use crate::preproc::LineSpan;
@@ -436,8 +436,14 @@ impl AsmRegisterPlanner {
     }
 
     fn alloc_xmm(&mut self, seed: usize, use_kind: AsmRegUse) -> u8 {
-        let reg = Self::pick(&Self::XMM_POOL, &self.used_xmm, &self.clobber_xmm, seed, None)
-            .unwrap_or(Self::XMM_POOL[seed % Self::XMM_POOL.len()]);
+        let reg = Self::pick(
+            &Self::XMM_POOL,
+            &self.used_xmm,
+            &self.clobber_xmm,
+            seed,
+            None,
+        )
+        .unwrap_or(Self::XMM_POOL[seed % Self::XMM_POOL.len()]);
         self.reserve_xmm(reg, use_kind);
         reg
     }
@@ -741,7 +747,10 @@ impl AsmDirectiveExpander {
                 let expanded_body = self.expand(&body);
                 for val in &vals {
                     for l in &expanded_body {
-                        out.push(l.replace(&format!("\\{sym}"), val).replace(&format!("\\({sym})"), val));
+                        out.push(
+                            l.replace(&format!("\\{sym}"), val)
+                                .replace(&format!("\\({sym})"), val),
+                        );
                     }
                 }
                 i = end_idx + 1;
@@ -753,7 +762,10 @@ impl AsmDirectiveExpander {
                 let expanded_body = self.expand(&body);
                 for c in chars.chars() {
                     for l in &expanded_body {
-                        out.push(l.replace(&format!("\\{sym}"), &c.to_string()).replace(&format!("\\({sym})"), &c.to_string()));
+                        out.push(
+                            l.replace(&format!("\\{sym}"), &c.to_string())
+                                .replace(&format!("\\({sym})"), &c.to_string()),
+                        );
                     }
                 }
                 i = end_idx + 1;
@@ -868,7 +880,10 @@ impl AsmDirectiveExpander {
         let args: Vec<String> = if args_rest.is_empty() {
             Vec::new()
         } else {
-            args_rest.split(',').map(|s| s.trim().trim_start_matches('\\').to_string()).collect()
+            args_rest
+                .split(',')
+                .map(|s| s.trim().trim_start_matches('\\').to_string())
+                .collect()
         };
         Some((name, args))
     }
@@ -950,7 +965,7 @@ impl AsmDirectiveExpander {
         let s = s.trim().trim_end_matches(',');
         // 处理括号
         if s.starts_with('(') && s.ends_with(')') {
-            return Self::eval_expr_value(&s[1..s.len()-1]);
+            return Self::eval_expr_value(&s[1..s.len() - 1]);
         }
         // 处理一元 !
         if let Some(rest) = s.strip_prefix('!') {
@@ -968,14 +983,50 @@ impl AsmDirectiveExpander {
         for op in &["==", "!=", "<=", ">=", "<", ">"] {
             if let Some(pos) = s.find(op) {
                 let left = Self::eval_expr_value(&s[..pos])?;
-                let right = Self::eval_expr_value(&s[pos+op.len()..])?;
+                let right = Self::eval_expr_value(&s[pos + op.len()..])?;
                 return Ok(match *op {
-                    "==" => if left == right { 1 } else { 0 },
-                    "!=" => if left != right { 1 } else { 0 },
-                    "<=" => if left <= right { 1 } else { 0 },
-                    ">=" => if left >= right { 1 } else { 0 },
-                    "<" => if left < right { 1 } else { 0 },
-                    ">" => if left > right { 1 } else { 0 },
+                    "==" => {
+                        if left == right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    "!=" => {
+                        if left != right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    "<=" => {
+                        if left <= right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    ">=" => {
+                        if left >= right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    "<" => {
+                        if left < right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    ">" => {
+                        if left > right {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     _ => return Err(()),
                 });
             }
@@ -984,7 +1035,7 @@ impl AsmDirectiveExpander {
         for op in &['|', '&', '^'] {
             if let Some(pos) = s.rfind(*op) {
                 let left = Self::eval_expr_value(&s[..pos])?;
-                let right = Self::eval_expr_value(&s[pos+1..])?;
+                let right = Self::eval_expr_value(&s[pos + 1..])?;
                 return Ok(match op {
                     '|' => left | right,
                     '&' => left & right,
@@ -998,7 +1049,7 @@ impl AsmDirectiveExpander {
             if let Some(pos) = s.rfind(*op) {
                 if pos > 0 {
                     let left = Self::eval_expr_value(&s[..pos])?;
-                    let right = Self::eval_expr_value(&s[pos+1..])?;
+                    let right = Self::eval_expr_value(&s[pos + 1..])?;
                     return Ok(match op {
                         '+' => left + right,
                         '-' => left - right,
@@ -1010,9 +1061,11 @@ impl AsmDirectiveExpander {
         // 处理 * / (高优先级)
         for op in &['*', '/'] {
             if let Some(pos) = s.rfind(*op) {
-                if pos == 0 { continue; }
+                if pos == 0 {
+                    continue;
+                }
                 let left = Self::eval_expr_value(&s[..pos])?;
-                let right = Self::eval_expr_value(&s[pos+1..])?;
+                let right = Self::eval_expr_value(&s[pos + 1..])?;
                 return Ok(match op {
                     '*' => left * right,
                     '/' if right != 0 => left / right,
@@ -1044,8 +1097,12 @@ impl AsmDirectiveExpander {
         while i < lines.len() {
             let t = lines[i].trim();
             // 检查嵌套开始
-            if t.starts_with(".rept") || t.starts_with(".irp") || t.starts_with(".irpc")
-                || t.starts_with(".macro") || t.starts_with(".if") || t.starts_with(".ifdef")
+            if t.starts_with(".rept")
+                || t.starts_with(".irp")
+                || t.starts_with(".irpc")
+                || t.starts_with(".macro")
+                || t.starts_with(".if")
+                || t.starts_with(".ifdef")
                 || t.starts_with(".ifndef")
             {
                 depth += 1;
@@ -1065,7 +1122,11 @@ impl AsmDirectiveExpander {
     }
 
     /// 收集条件块 (.if/.elseif/.else/.endif), 返回 (选中块内容, endif 后行号)
-    fn collect_conditional_block(lines: &[String], start: usize, first_cond: bool) -> (Vec<String>, usize) {
+    fn collect_conditional_block(
+        lines: &[String],
+        start: usize,
+        first_cond: bool,
+    ) -> (Vec<String>, usize) {
         let mut current_branch = Vec::new();
         let mut selected_branch: Option<Vec<String>> = None;
         let mut current_is_true = first_cond;
@@ -1614,14 +1675,16 @@ impl Codegen {
         match directive {
             ".byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym) = Self::parse_asm_data_expr(
-                        expr.trim(), locals, line_idx, numeric_label_map,
-                    );
+                    let (val, sym) =
+                        Self::parse_asm_data_expr(expr.trim(), locals, line_idx, numeric_label_map);
                     if let Some((sym_name, rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
-                            sec_idx, offset: off,
-                            symbol: sym_name, rel_type, addend,
+                            sec_idx,
+                            offset: off,
+                            symbol: sym_name,
+                            rel_type,
+                            addend,
                         });
                     }
                     self.extra_sections[sec_idx].data.push(val as u8);
@@ -1629,63 +1692,81 @@ impl Codegen {
             }
             ".short" | ".word" | ".2byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym) = Self::parse_asm_data_expr(
-                        expr.trim(), locals, line_idx, numeric_label_map,
-                    );
+                    let (val, sym) =
+                        Self::parse_asm_data_expr(expr.trim(), locals, line_idx, numeric_label_map);
                     if let Some((sym_name, rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
-                            sec_idx, offset: off,
-                            symbol: sym_name, rel_type, addend,
+                            sec_idx,
+                            offset: off,
+                            symbol: sym_name,
+                            rel_type,
+                            addend,
                         });
                     }
-                    self.extra_sections[sec_idx].data.extend_from_slice(&(val as u16).to_le_bytes());
+                    self.extra_sections[sec_idx]
+                        .data
+                        .extend_from_slice(&(val as u16).to_le_bytes());
                 }
             }
             ".int" | ".long" | ".4byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym) = Self::parse_asm_data_expr(
-                        expr.trim(), locals, line_idx, numeric_label_map,
-                    );
+                    let (val, sym) =
+                        Self::parse_asm_data_expr(expr.trim(), locals, line_idx, numeric_label_map);
                     if let Some((sym_name, rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
-                            sec_idx, offset: off,
-                            symbol: sym_name, rel_type, addend,
+                            sec_idx,
+                            offset: off,
+                            symbol: sym_name,
+                            rel_type,
+                            addend,
                         });
                     }
-                    self.extra_sections[sec_idx].data.extend_from_slice(&(val as u32).to_le_bytes());
+                    self.extra_sections[sec_idx]
+                        .data
+                        .extend_from_slice(&(val as u32).to_le_bytes());
                 }
             }
             ".quad" | ".8byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym) = Self::parse_asm_data_expr(
-                        expr.trim(), locals, line_idx, numeric_label_map,
-                    );
+                    let (val, sym) =
+                        Self::parse_asm_data_expr(expr.trim(), locals, line_idx, numeric_label_map);
                     if let Some((sym_name, _rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
-                            sec_idx, offset: off,
+                            sec_idx,
+                            offset: off,
                             symbol: sym_name,
                             rel_type: elf::R_X86_64_64,
                             addend,
                         });
                     }
-                    self.extra_sections[sec_idx].data.extend_from_slice(&(val as u64).to_le_bytes());
+                    self.extra_sections[sec_idx]
+                        .data
+                        .extend_from_slice(&(val as u64).to_le_bytes());
                 }
             }
             ".asciz" | ".string" => {
                 let s = Self::parse_asm_quoted_string(args_str);
-                self.extra_sections[sec_idx].data.extend_from_slice(s.as_bytes());
+                self.extra_sections[sec_idx]
+                    .data
+                    .extend_from_slice(s.as_bytes());
                 self.extra_sections[sec_idx].data.push(0);
             }
             ".ascii" => {
                 let s = Self::parse_asm_quoted_string(args_str);
-                self.extra_sections[sec_idx].data.extend_from_slice(s.as_bytes());
+                self.extra_sections[sec_idx]
+                    .data
+                    .extend_from_slice(s.as_bytes());
             }
             ".align" | ".balign" => {
-                if let Ok(a) = args_str.split(',').next()
-                    .unwrap_or("").trim().parse::<usize>()
+                if let Ok(a) = args_str
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .parse::<usize>()
                 {
                     if a > 0 {
                         let len = self.extra_sections[sec_idx].data.len();
@@ -1695,8 +1776,12 @@ impl Codegen {
                 }
             }
             ".p2align" => {
-                if let Ok(p) = args_str.split(',').next()
-                    .unwrap_or("").trim().parse::<u32>()
+                if let Ok(p) = args_str
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .parse::<u32>()
                 {
                     let a = 1usize << p;
                     let len = self.extra_sections[sec_idx].data.len();
@@ -1727,45 +1812,36 @@ impl Codegen {
             return (0, None);
         }
         // 查找 '-' 和 '+' 操作符 (不在引号/括号内)
-        let (expr_before, op, expr_after) =
-            Self::find_expr_operator(expr);
+        let (expr_before, op, expr_after) = Self::find_expr_operator(expr);
         if let Some(op) = op {
             let left = expr_before.trim();
             let right = expr_after.trim();
             // symbol - . → PC32, addend=0
             if right == "." {
-                let sym = Self::resolve_asm_data_symbol(
-                    left, locals, line_idx, numeric_label_map,
-                );
+                let sym = Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
                 return (0, Some((sym, elf::R_X86_64_PC32, 0)));
             }
             // symbol + N → PC32, addend=N (或绝对引用 + addend)
             if op == '+' {
                 if let Ok(n) = right.parse::<i64>() {
-                    let sym = Self::resolve_asm_data_symbol(
-                        left, locals, line_idx, numeric_label_map,
-                    );
+                    let sym =
+                        Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
                     return (0, Some((sym, elf::R_X86_64_32, n)));
                 }
             }
             // symbol - number → PC32 with negative addend
             if op == '-' {
                 if let Ok(n) = right.parse::<i64>() {
-                    let sym = Self::resolve_asm_data_symbol(
-                        left, locals, line_idx, numeric_label_map,
-                    );
+                    let sym =
+                        Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
                     return (0, Some((sym, elf::R_X86_64_PC32, -n)));
                 }
             }
         }
         // 纯符号引用 (无算术)
-        let (val, is_sym) = Self::parse_asm_expr_atom(
-            expr, locals, line_idx, numeric_label_map,
-        );
+        let (val, is_sym) = Self::parse_asm_expr_atom(expr, locals, line_idx, numeric_label_map);
         if is_sym {
-            let sym = Self::resolve_asm_data_symbol(
-                expr, locals, line_idx, numeric_label_map,
-            );
+            let sym = Self::resolve_asm_data_symbol(expr, locals, line_idx, numeric_label_map);
             return (0, Some((sym, elf::R_X86_64_32, 0)));
         }
         (val, None)
@@ -1783,7 +1859,7 @@ impl Codegen {
                 b')' if !in_quote => depth += 1,
                 b'(' if !in_quote => depth -= 1,
                 b'+' | b'-' if !in_quote && depth == 0 && i > 0 => {
-                    return (&expr[..i], Some(bytes[i] as char), &expr[i+1..]);
+                    return (&expr[..i], Some(bytes[i] as char), &expr[i + 1..]);
                 }
                 _ => {}
             }
@@ -1874,7 +1950,10 @@ impl Codegen {
                         Some('\\') => result.push('\\'),
                         Some('"') => result.push('"'),
                         Some('0') => result.push('\0'),
-                        Some(other) => { result.push('\\'); result.push(other); }
+                        Some(other) => {
+                            result.push('\\');
+                            result.push(other);
+                        }
                         None => result.push('\\'),
                     }
                 } else {
@@ -2064,8 +2143,7 @@ impl Codegen {
                     let str_off =
                         u64::from_le_bytes(self.code[code_off..code_off + 8].try_into().unwrap());
                     let abs_addr = rodata_start + str_off;
-                    self.code[code_off..code_off + 8]
-                        .copy_from_slice(&abs_addr.to_le_bytes());
+                    self.code[code_off..code_off + 8].copy_from_slice(&abs_addr.to_le_bytes());
                 }
             }
         }
@@ -2078,8 +2156,7 @@ impl Codegen {
                 let str_off =
                     u64::from_le_bytes(self.code[code_off..code_off + 8].try_into().unwrap());
                 let abs_addr = rodata_start + str_off;
-                self.code[code_off..code_off + 8]
-                    .copy_from_slice(&abs_addr.to_le_bytes());
+                self.code[code_off..code_off + 8].copy_from_slice(&abs_addr.to_le_bytes());
             }
         }
         // 修补 &&label 地址引用 (LEA reg, [RIP+disp32])
@@ -2146,7 +2223,9 @@ impl Codegen {
             .iter()
             .filter_map(|f| {
                 let pc = *self.labels.get(&f.name)?;
-                let sz = self.func_sizes.get(&f.name)
+                let sz = self
+                    .func_sizes
+                    .get(&f.name)
                     .copied()
                     .unwrap_or_else(|| self.compute_func_size_fallback(&f.name, pc))
                     as u32;
@@ -2182,8 +2261,8 @@ impl Codegen {
         for f in &frames {
             let off = ip_data.len() as u64;
             ip_data.extend_from_slice(&0u32.to_le_bytes()); // 占位, 由链接重定位填充
-            // R_X86_64_PC32: *entry = S(.text) + A(pc) - P(条目地址);
-            // 运行时 orc_ip() = P + *entry = 最终 .text 基址 + pc = 函数真实地址
+                                                            // R_X86_64_PC32: *entry = S(.text) + A(pc) - P(条目地址);
+                                                            // 运行时 orc_ip() = P + *entry = 最终 .text 基址 + pc = 函数真实地址
             ip_relas.push(ElfRela {
                 offset: off,
                 sym_index: text_sym_idx,
@@ -2645,7 +2724,8 @@ impl Codegen {
             if let Decl::Var(v) = decl {
                 if let Some(ref reg_name) = v.register_name {
                     if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
-                        self.global_reg_bindings.insert(v.name.name.clone(), reg_idx);
+                        self.global_reg_bindings
+                            .insert(v.name.name.clone(), reg_idx);
                     }
                     continue;
                 }
@@ -2791,8 +2871,11 @@ impl Codegen {
                                     let str_off = *self.string_pool.get(&data).unwrap();
                                     let cur = self.extra_sections[sec_idx].data.len();
                                     self.extra_sections[sec_idx].data.resize(cur + 8, 0);
-                                    self.pending_data_rodata_rels
-                                        .push((cur as u64, str_off, Some(sec_idx)));
+                                    self.pending_data_rodata_rels.push((
+                                        cur as u64,
+                                        str_off,
+                                        Some(sec_idx),
+                                    ));
                                     has_init = true;
                                 } else {
                                     self.extra_sections[sec_idx].data.extend_from_slice(data);
@@ -2928,8 +3011,7 @@ impl Codegen {
                                 let str_off = *self.string_pool.get(&data).unwrap();
                                 let ref_off = self.data_section.len() as u64;
                                 self.data_section.resize(ref_off as usize + 8, 0);
-                                self.pending_data_rodata_rels
-                                    .push((ref_off, str_off, None));
+                                self.pending_data_rodata_rels.push((ref_off, str_off, None));
                             } else {
                                 self.data_section.extend_from_slice(data);
                                 for _ in data.len()..sz {
@@ -3089,8 +3171,13 @@ impl Codegen {
                         continue;
                     }
                     if let Some(&func_start) = self.labels.get(&f.name.name) {
-                        let func_size = self.func_sizes.get(&f.name.name).copied()
-                            .unwrap_or_else(|| self.compute_func_size_fallback(&f.name.name, func_start));
+                        let func_size =
+                            self.func_sizes
+                                .get(&f.name.name)
+                                .copied()
+                                .unwrap_or_else(|| {
+                                    self.compute_func_size_fallback(&f.name.name, func_start)
+                                });
                         if func_size == 0 {
                             continue;
                         }
@@ -3105,8 +3192,8 @@ impl Codegen {
                         self.extra_sections[sec_idx].data.resize(aligned, 0);
                         let sec_off = self.extra_sections[sec_idx].data.len() as u64;
                         // 从 .text 拷贝代码到自定义节，包含 patchable entry 前缀。
-                        let code_slice = self.code[emitted_start as usize
-                            ..(emitted_start + emitted_size) as usize]
+                        let code_slice = self.code
+                            [emitted_start as usize..(emitted_start + emitted_size) as usize]
                             .to_vec();
                         self.extra_sections[sec_idx]
                             .data
@@ -3149,8 +3236,13 @@ impl Codegen {
                     continue;
                 }
                 if let Some(&func_start) = self.labels.get(&f.name.name) {
-                    let func_size = self.func_sizes.get(&f.name.name).copied()
-                        .unwrap_or_else(|| self.compute_func_size_fallback(&f.name.name, func_start));
+                    let func_size =
+                        self.func_sizes
+                            .get(&f.name.name)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                self.compute_func_size_fallback(&f.name.name, func_start)
+                            });
                     if func_size == 0 {
                         continue;
                     }
@@ -3337,8 +3429,13 @@ impl Codegen {
                     }
                     // 先处理顶层函数自身
                     if let Some(&func_start) = self.labels.get(&f.name.name) {
-                        let func_size = self.func_sizes.get(&f.name.name).copied()
-                            .unwrap_or_else(|| self.compute_func_size_fallback(&f.name.name, func_start));
+                        let func_size =
+                            self.func_sizes
+                                .get(&f.name.name)
+                                .copied()
+                                .unwrap_or_else(|| {
+                                    self.compute_func_size_fallback(&f.name.name, func_start)
+                                });
                         let (sec_idx, sym_value) =
                             if let Some(&(si, off)) = custom_func_offsets.get(&f.name.name) {
                                 (si, off)
@@ -3374,9 +3471,13 @@ impl Codegen {
                     // 再处理嵌套函数
                     for func in &nested {
                         if let Some(&func_start) = self.labels.get(&func.name.name) {
-                            let func_size =
-                                self.func_sizes.get(&func.name.name).copied()
-                                    .unwrap_or_else(|| self.compute_func_size_fallback(&func.name.name, func_start));
+                            let func_size = self
+                                .func_sizes
+                                .get(&func.name.name)
+                                .copied()
+                                .unwrap_or_else(|| {
+                                    self.compute_func_size_fallback(&func.name.name, func_start)
+                                });
                             let (sec_idx, sym_value) = if let Some(&(si, off)) =
                                 custom_func_offsets.get(&func.name.name)
                             {
@@ -3446,8 +3547,7 @@ impl Codegen {
         for s in global_syms.iter().chain(local_syms.iter()) {
             known_syms.insert(s.name.clone());
         }
-        let mut implicit_und: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut implicit_und: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (_, name) in self
             .pending_func_rels
             .iter()
@@ -3581,7 +3681,9 @@ impl Codegen {
         for (sec_idx, relocations) in custom_sec_relas {
             let rela_name = format!(".rela{}", self.extra_sections[sec_idx].name);
             let target_sec_index = 7 + sec_idx as u32;
-            if let Some(existing) = self.extra_rela_sections.iter_mut()
+            if let Some(existing) = self
+                .extra_rela_sections
+                .iter_mut()
                 .find(|r| r.target_sec_index == target_sec_index)
             {
                 existing.relocations.extend(relocations);
@@ -3908,17 +4010,17 @@ impl Codegen {
     }
 
     /// 在 resolve 后捕获每个函数的最终机器码与所属节。
-    fn finalize_func_asm_layout(
-        &mut self,
-        prog: &Program,
-        custom: &[(u64, u64, u64, usize, u64)],
-    ) {
+    fn finalize_func_asm_layout(&mut self, prog: &Program, custom: &[(u64, u64, u64, usize, u64)]) {
         let mut custom_by_start: HashMap<u64, (String, usize, u64)> = HashMap::new();
         for (entry_start, emitted_start, _emitted_size, sec_idx, sec_off) in custom {
             let sec_name = self.extra_sections[*sec_idx].name.clone();
             custom_by_start.insert(
                 *entry_start,
-                (sec_name, *sec_idx, *sec_off + (*entry_start - *emitted_start)),
+                (
+                    sec_name,
+                    *sec_idx,
+                    *sec_off + (*entry_start - *emitted_start),
+                ),
             );
         }
         let mut names = Vec::new();
@@ -3928,7 +4030,10 @@ impl Codegen {
                 Some(s) => *s,
                 None => continue,
             };
-            let size = self.func_sizes.get(&name).copied()
+            let size = self
+                .func_sizes
+                .get(&name)
+                .copied()
                 .unwrap_or_else(|| self.compute_func_size_fallback(&name, start));
             if size == 0 {
                 continue;
@@ -4370,15 +4475,16 @@ impl Codegen {
             for p in f.params.iter() {
                 if let Some(nm) = &p.name {
                     // __int128 / 大聚合体按 8 字节块占用 GP 寄存器或栈槽
-                    let is_agg_param = matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
-                        || (matches!(
-                            &p.ty,
-                            Type::Struct(_, _)
-                                | Type::Union(_, _)
-                                | Type::Array(_, ArraySize::Const(_))
-                                | Type::Atomic(_)
-                                | Type::Vector(_, _)
-                        ) && p.ty.size() > 8);
+                    let is_agg_param =
+                        matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
+                            || (matches!(
+                                &p.ty,
+                                Type::Struct(_, _)
+                                    | Type::Union(_, _)
+                                    | Type::Array(_, ArraySize::Const(_))
+                                    | Type::Atomic(_)
+                                    | Type::Vector(_, _)
+                            ) && p.ty.size() > 8);
                     if is_agg_param {
                         let classes = Self::abi_classes(&p.ty);
                         let chunks = p.ty.size().div_ceil(8);
@@ -4413,10 +4519,8 @@ impl Codegen {
                                         self.variadic_named_fp += 1;
                                     }
                                     AbiClass::Memory => {
-                                        stack_param_stores.push((
-                                            stack_arg_idx,
-                                            off + (c as i32 * 8),
-                                        ));
+                                        stack_param_stores
+                                            .push((stack_arg_idx, off + (c as i32 * 8)));
                                         stack_arg_idx += 1;
                                     }
                                 }
@@ -4424,10 +4528,7 @@ impl Codegen {
                         } else {
                             // 寄存器不足: SysV revert 语义, 整个参数放栈, 游标不推进
                             for c in 0..chunks {
-                                stack_param_stores.push((
-                                    stack_arg_idx,
-                                    off + (c as i32 * 8),
-                                ));
+                                stack_param_stores.push((stack_arg_idx, off + (c as i32 * 8)));
                                 stack_arg_idx += 1;
                             }
                             self.variadic_named_gp += need_gp as i32;
@@ -4446,8 +4547,7 @@ impl Codegen {
                         stack_param_stores.push((stack_arg_idx, off));
                         stack_param_stores.push((stack_arg_idx + 1, off + 8));
                         stack_arg_idx += 2;
-                    } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse
-                    {
+                    } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse {
                         let used: i32 = self
                             .var_map
                             .values()
@@ -4842,14 +4942,16 @@ impl Codegen {
                 .and_then(|ps| ps.get(arg_idx))
                 .cloned();
             let effective_ty = param_ty.unwrap_or_else(|| arg.ty());
-            let aggregate = matches!(effective_ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
-                || matches!(
-                    effective_ty,
-                    Type::Struct(_, _)
-                        | Type::Union(_, _)
-                        | Type::Array(_, ArraySize::Const(_))
-                        | Type::Atomic(_)
-                );
+            let aggregate = matches!(
+                effective_ty,
+                Type::Int128 | Type::UInt128 | Type::Complex(_)
+            ) || matches!(
+                effective_ty,
+                Type::Struct(_, _)
+                    | Type::Union(_, _)
+                    | Type::Array(_, ArraySize::Const(_))
+                    | Type::Atomic(_)
+            );
             if matches!(effective_ty, Type::Vector(_, _)) {
                 // vector 实参: 按 GP 8 字节块传递 (dcc 内部标量化约定)
                 // 1. 取 vector 数据地址到 rax
@@ -4925,7 +5027,10 @@ impl Codegen {
                             // 复杂表达式: 先物化到 result_off, 再逐分量加载
                             self.gen_expr(arg, 0);
                             let result_off = -self.frame_size + 8;
-                            self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off + chunk_off);
+                            self.emit_xmm0_r13_disp(
+                                &[pfx, 0x41, 0x0F, 0x10],
+                                result_off + chunk_off,
+                            );
                         }
                         // 存储到 staging 或栈槽
                         match *loc {
@@ -4940,31 +5045,31 @@ impl Codegen {
                         }
                     }
                 } else {
-                for (chunk, loc) in arg_locs.iter().enumerate() {
-                    if let Expr::Ident { name, .. } = arg {
-                        if self.globals.contains_key(&name.name) {
-                            self.emit_global_addr(11, &name.name);
-                            self.emit(&[0x49, 0x8B, 0x83]);
-                            self.emit(&((chunk * 8) as i32).to_le_bytes());
+                    for (chunk, loc) in arg_locs.iter().enumerate() {
+                        if let Expr::Ident { name, .. } = arg {
+                            if self.globals.contains_key(&name.name) {
+                                self.emit_global_addr(11, &name.name);
+                                self.emit(&[0x49, 0x8B, 0x83]);
+                                self.emit(&((chunk * 8) as i32).to_le_bytes());
+                            } else {
+                                let var_off = self.var_offset(&name.name) + (chunk * 8) as i32;
+                                self.load_stack(0, var_off);
+                            }
                         } else {
-                            let var_off = self.var_offset(&name.name) + (chunk * 8) as i32;
-                            self.load_stack(0, var_off);
+                            self.gen_expr(arg, 0);
+                            if chunk == 1 {
+                                self.mov(0, 2);
+                            }
                         }
-                    } else {
-                        self.gen_expr(arg, 0);
-                        if chunk == 1 {
-                            self.mov(0, 2);
-                        }
-                    }
-                    match *loc {
-                        ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
-                        _ => {
-                            self.store_rsp_qword(0, stage);
-                            staged.push((*loc, stage));
-                            stage += 8;
+                        match *loc {
+                            ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
+                            _ => {
+                                self.store_rsp_qword(0, stage);
+                                staged.push((*loc, stage));
+                                stage += 8;
+                            }
                         }
                     }
-                }
                 }
             } else if matches!(effective_ty, Type::LongDouble) {
                 // A2: long double (SysV Memory 类) — 16 字节整体在栈上传递
@@ -5407,11 +5512,8 @@ impl Codegen {
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
                     resolved_asm = Self::asm_replace_label_idx(&resolved_asm, i, &label.name);
-                    resolved_asm = Self::asm_replace_label_idx(
-                        &resolved_asm,
-                        label_base + i,
-                        &label.name,
-                    );
+                    resolved_asm =
+                        Self::asm_replace_label_idx(&resolved_asm, label_base + i, &label.name);
                     resolved_asm =
                         resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
                 }
@@ -5485,10 +5587,8 @@ impl Codegen {
                                 self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                             } else if let Type::Complex(inner) = &v.ty {
                                 self.gen_complex_init(&v.name.name, inner, init);
-                            } else if matches!(
-                                &v.ty,
-                                Type::Float | Type::Double | Type::LongDouble
-                            ) {
+                            } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble)
+                            {
                                 // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
                                 self.gen_expr(init, 0);
                                 // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
@@ -5798,7 +5898,10 @@ impl Codegen {
                 // 先执行 check 调用, 再对真实 lvalue 走 store 路径, 否则
                 // 形态匹配失败会导致 store 静默丢失 (KASAN 下 *p = v 空操作)
                 let mut lv: &Expr = l.as_ref();
-                while let Expr::Comma { l: check, r: inner, .. } = lv {
+                while let Expr::Comma {
+                    l: check, r: inner, ..
+                } = lv
+                {
                     self.gen_expr(check, 0);
                     lv = inner.as_ref();
                 }
@@ -5937,7 +6040,7 @@ impl Codegen {
                         self.push(0); // save addr
                         self.gen_expr(r, 0); // rax = val
                         self.pop(1); // rcx = addr
-                        // 浮点元素: 值在 xmm0, 用 movss/movsd 存储
+                                     // 浮点元素: 值在 xmm0, 用 movss/movsd 存储
                         if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
                             self.emit_scalar_to_xmm0_if_needed(r, elem_ty);
                             if matches!(elem_ty, Type::Float) {
@@ -5996,7 +6099,7 @@ impl Codegen {
                     self.push(0); // save addr
                     self.gen_expr(r, 0); // rax = val
                     self.pop(1); // rcx = addr
-                    // 浮点指向: 值在 xmm0, 用 movsd/movss 存储
+                                 // 浮点指向: 值在 xmm0, 用 movsd/movss 存储
                     if matches!(&assign_l_ty, Type::Float | Type::Double | Type::LongDouble) {
                         self.emit_scalar_to_xmm0_if_needed(r, &assign_l_ty);
                         if matches!(assign_l_ty, Type::Float) {
@@ -6147,59 +6250,59 @@ impl Codegen {
                         }
                     }
                 } else if let Expr::Real { e: ce, .. } | Expr::Imag { e: ce, .. } = lv {
-                // __real__/__imag__ 赋值: 写 _Complex 变量的分量.
-                // 分量偏移: 实部 0, 虚部 +inner_sz (LongDouble 为 -8-inner_sz)
-                let is_real = matches!(lv, Expr::Real { .. });
-                let inner = match ce.ty() {
-                    Type::Complex(i) => i.as_ref().clone(),
-                    _ => Type::Double,
-                };
-                let inner_sz = inner.size() as i32;
-                let is_float_inner =
-                    matches!(inner, Type::Float | Type::Double | Type::LongDouble);
-                let part_off = if is_real {
-                    0
-                } else if matches!(inner, Type::LongDouble) {
-                    -8 - inner_sz
-                } else {
-                    inner_sz
-                };
-                if self.gen_lvalue_addr(ce, 0) {
-                    self.push(0); // 保存目标地址
-                    self.gen_expr(r, 0); // 值 (浮点: xmm0)
-                    self.pop(1); // rcx = 目标地址
-                    if is_float_inner {
-                        self.emit_scalar_to_xmm0_if_needed(r, &inner);
-                        let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                        self.emit(&[pfx, 0x0F, 0x11]); // movss/movsd [rcx+disp], xmm0
-                        if part_off == 0 {
-                            self.emit(&[0x01]);
-                        } else if part_off.abs() < 128 {
-                            self.emit(&[0x41, part_off as u8]);
+                    // __real__/__imag__ 赋值: 写 _Complex 变量的分量.
+                    // 分量偏移: 实部 0, 虚部 +inner_sz (LongDouble 为 -8-inner_sz)
+                    let is_real = matches!(lv, Expr::Real { .. });
+                    let inner = match ce.ty() {
+                        Type::Complex(i) => i.as_ref().clone(),
+                        _ => Type::Double,
+                    };
+                    let inner_sz = inner.size() as i32;
+                    let is_float_inner =
+                        matches!(inner, Type::Float | Type::Double | Type::LongDouble);
+                    let part_off = if is_real {
+                        0
+                    } else if matches!(inner, Type::LongDouble) {
+                        -8 - inner_sz
+                    } else {
+                        inner_sz
+                    };
+                    if self.gen_lvalue_addr(ce, 0) {
+                        self.push(0); // 保存目标地址
+                        self.gen_expr(r, 0); // 值 (浮点: xmm0)
+                        self.pop(1); // rcx = 目标地址
+                        if is_float_inner {
+                            self.emit_scalar_to_xmm0_if_needed(r, &inner);
+                            let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                            self.emit(&[pfx, 0x0F, 0x11]); // movss/movsd [rcx+disp], xmm0
+                            if part_off == 0 {
+                                self.emit(&[0x01]);
+                            } else if part_off.abs() < 128 {
+                                self.emit(&[0x41, part_off as u8]);
+                            } else {
+                                self.emit(&[0x81]);
+                                self.emit(&part_off.to_le_bytes());
+                            }
                         } else {
-                            self.emit(&[0x81]);
-                            self.emit(&part_off.to_le_bytes());
+                            // 整数分量: 值在 rax, 按内型宽度存储
+                            if part_off != 0 {
+                                self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
+                                self.emit(&part_off.to_le_bytes());
+                            }
+                            match inner.size() {
+                                1 => self.emit(&[0x88, 0x01]),
+                                2 => self.emit(&[0x66, 0x89, 0x01]),
+                                4 => self.emit(&[0x89, 0x01]),
+                                _ => self.emit(&[0x48, 0x89, 0x01]),
+                            }
                         }
                     } else {
-                        // 整数分量: 值在 rax, 按内型宽度存储
-                        if part_off != 0 {
-                            self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
-                            self.emit(&part_off.to_le_bytes());
-                        }
-                        match inner.size() {
-                            1 => self.emit(&[0x88, 0x01]),
-                            2 => self.emit(&[0x66, 0x89, 0x01]),
-                            4 => self.emit(&[0x89, 0x01]),
-                            _ => self.emit(&[0x48, 0x89, 0x01]),
-                        }
+                        // 非 lvalue (如 __imag__ (a+b)): 不可赋值, 仅求值右操作数
+                        self.gen_expr(r, 0);
                     }
-                } else {
-                    // 非 lvalue (如 __imag__ (a+b)): 不可赋值, 仅求值右操作数
-                    self.gen_expr(r, 0);
                 }
             }
-        }
-        Expr::Unary { op, e, .. } => {
+            Expr::Unary { op, e, .. } => {
                 // 浮点字面量取负: 编译期折叠, 直接生成相反值的 Float 表达式
                 if matches!(op, UnOp::Neg) {
                     if let Expr::Float { v, ty, span, .. } = e.as_ref() {
@@ -6581,7 +6684,9 @@ impl Codegen {
                     (src @ (Type::Int | Type::Long | Type::Char | Type::Short), Type::Float) => {
                         // cvtsi2ss xmm0, dst (F3 0F 2A /r)
                         let wide = matches!(src, Type::Long | Type::LongLong);
-                        let rex = 0x40 | (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x01 } else { 0 });
+                        let rex = 0x40
+                            | (if wide { 0x08 } else { 0 })
+                            | (if dst >= 8 { 0x01 } else { 0 });
                         self.emit(&[0xF3, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
                     }
                     (
@@ -6590,7 +6695,9 @@ impl Codegen {
                     ) => {
                         // cvtsi2sd xmm0, dst (F2 0F 2A /r)
                         let wide = matches!(src, Type::Long | Type::LongLong);
-                        let rex = 0x40 | (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x01 } else { 0 });
+                        let rex = 0x40
+                            | (if wide { 0x08 } else { 0 })
+                            | (if dst >= 8 { 0x01 } else { 0 });
                         self.emit(&[0xF2, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]);
                     }
                     // float/double → int
@@ -6599,7 +6706,9 @@ impl Codegen {
                     (Type::Float, Type::Int | Type::Long | Type::Char | Type::Short) => {
                         // cvttss2si dst, xmm0 (F3 0F 2C /r)
                         let wide = matches!(ty, Type::Long | Type::LongLong);
-                        let rex = 0x40 | (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
+                        let rex = 0x40
+                            | (if wide { 0x08 } else { 0 })
+                            | (if dst >= 8 { 0x04 } else { 0 });
                         self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
                     }
                     (
@@ -6608,7 +6717,9 @@ impl Codegen {
                     ) => {
                         // cvttsd2si dst, xmm0 (F2 0F 2C /r)
                         let wide = matches!(ty, Type::Long | Type::LongLong);
-                        let rex = 0x40 | (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
+                        let rex = 0x40
+                            | (if wide { 0x08 } else { 0 })
+                            | (if dst >= 8 { 0x04 } else { 0 });
                         self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
                     }
                     (Type::Complex(inner), Type::Int | Type::Long | Type::Char | Type::Short) => {
@@ -8321,7 +8432,10 @@ impl Codegen {
         // 先执行 check 调用, 再对真实 lvalue 做读-改-写, 否则
         // 形态匹配失败会静默丢失自增/自减。
         let mut lv: &Expr = e;
-        while let Expr::Comma { l: check, r: inner, .. } = lv {
+        while let Expr::Comma {
+            l: check, r: inner, ..
+        } = lv
+        {
             self.gen_expr(check, 0);
             lv = inner.as_ref();
         }
@@ -8336,7 +8450,10 @@ impl Codegen {
             if !is_pre {
                 self.pop(dst);
             } // 后缀: 恢复旧值到 dst
-        } else if matches!(lv, Expr::Deref { .. } | Expr::Index { .. } | Expr::Member { .. }) {
+        } else if matches!(
+            lv,
+            Expr::Deref { .. } | Expr::Index { .. } | Expr::Member { .. }
+        ) {
             // 内存 lvalue: (*p)++ / a[i]-- / s->f++
             let mem_sz = inner_ty.size().max(1);
             if !self.gen_lvalue_addr(lv, 0) {
@@ -9109,9 +9226,7 @@ impl Codegen {
             .var_map
             .iter()
             .filter(|(name, (_, ty))| {
-                !name.starts_with("__pad_")
-                    && !name.starts_with("__kasan_rz_")
-                    && *ty != Type::Void
+                !name.starts_with("__pad_") && !name.starts_with("__kasan_rz_") && *ty != Type::Void
             })
             .map(|(_, (off, ty))| (*off, ty.size()))
             .collect();
@@ -9179,7 +9294,8 @@ impl Codegen {
             .extend_from_slice(&mk_desc(idx_ty, &Self::ubsan_type_name(idx_ty)));
         // 数组类型描述符 (ArrayType): 数组非标量 → TK_Unknown, 仅打印
         let arr_desc_off = self.rodata.len() as u64;
-        self.rodata.extend_from_slice(&mk_desc(elem_ty, arr_type_name));
+        self.rodata
+            .extend_from_slice(&mk_desc(elem_ty, arr_type_name));
         // 文件名字符串 → string_pool (跨调用去重)
         let file_bytes = span.file.as_bytes().to_vec();
         if !self.string_pool.contains_key(&file_bytes) {
@@ -10008,10 +10124,7 @@ impl Codegen {
                     self.emit(&[pfx, 0x0F, 0x10, 0xC1]); // movss/movsd xmm0, xmm1
                 } else {
                     let result_off = -self.frame_size + 8;
-                    self.emit_xmm0_r13_disp(
-                        &[pfx, 0x49, 0x0F, 0x10],
-                        result_off + inner_sz,
-                    );
+                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off + inner_sz);
                 }
             }
         } else {
@@ -10079,7 +10192,8 @@ impl Codegen {
         // lea r11, [rip + disp32] (RIP-relative, 链接时修补 PC 相对位移)
         let lea_pos = self.pos();
         self.emit(&[0x4C, 0x8D, 0x1D, 0, 0, 0, 0]);
-        self.pending_data_rels.push((lea_pos + 3, global.to_string()));
+        self.pending_data_rels
+            .push((lea_pos + 3, global.to_string()));
         let sib = (scale << 6) | ((idx_reg & 7) << 3) | 3; // base=r11 (REX.B)
         let modrm = 0x04; // mod=00, rm=100 (SIB), reg 字段在下方按目标寄存器填充
         let is_float = matches!(elem_ty, Type::Float);
@@ -10407,8 +10521,7 @@ impl Codegen {
         };
         let inner_sz = inner_ty.size() as i32;
         let is_float = matches!(inner_ty, Type::Float);
-        let is_float_inner =
-            matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble);
+        let is_float_inner = matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble);
         let total_sz = inner_sz * 2;
         let save_sz = total_sz * 2;
         let result_off = -self.frame_size + 8;
@@ -10511,8 +10624,7 @@ impl Codegen {
                 //         [rsp+total]=r.real, [rsp+total+inner]=r.imag
                 let false_label = self.fresh_label();
                 let end_label = self.fresh_label();
-                let float_inner =
-                    matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble);
+                let float_inner = matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble);
                 let r_imag_slot = total_sz + inner_sz;
                 if float_inner {
                     // 浮点 complex: ucomi 比较实虚部
@@ -10882,7 +10994,13 @@ impl Codegen {
         let dst_off = self.var_offset(dst_name);
         // 特殊处理: 源是函数调用 (走完整 SysV ABI: 参数分类/暂存/返回值)
         let mut call_sret_handled = false;
-        if let Expr::Call { callee, args, ty: call_ty, .. } = r {
+        if let Expr::Call {
+            callee,
+            args,
+            ty: call_ty,
+            ..
+        } = r
+        {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 if Self::needs_memory_return(call_ty) {
                     // sret 返回: 分配隐藏指针槽, 调用后从槽拷贝到目标变量
@@ -11284,14 +11402,23 @@ impl Codegen {
                         var_map.entry(rz_name).or_insert((rz_off, Type::Void));
                     }
                 }
-                BlockItem::Stmt(s) => Self::pre_register_stmt(var_map, s, temp_slots, kasan_rz_slots),
+                BlockItem::Stmt(s) => {
+                    Self::pre_register_stmt(var_map, s, temp_slots, kasan_rz_slots)
+                }
                 _ => {}
             }
         }
     }
-    fn pre_register_stmt(var_map: &mut HashMap<String, (i32, Type)>, s: &Stmt, temp_slots: i32, kasan_rz_slots: i32) {
+    fn pre_register_stmt(
+        var_map: &mut HashMap<String, (i32, Type)>,
+        s: &Stmt,
+        temp_slots: i32,
+        kasan_rz_slots: i32,
+    ) {
         match s {
-            Stmt::Block { b, .. } => Self::pre_register_vars(var_map, &b.items, temp_slots, kasan_rz_slots),
+            Stmt::Block { b, .. } => {
+                Self::pre_register_vars(var_map, &b.items, temp_slots, kasan_rz_slots)
+            }
             Stmt::If { then_, else_, .. } => {
                 Self::pre_register_stmt(var_map, then_, temp_slots, kasan_rz_slots);
                 if let Some(e) = else_ {
@@ -12739,18 +12866,9 @@ impl Codegen {
             // 内联为 MXCSR / x87 指令序列, 不依赖 libm (host 链接缺 -lm
             // 会 undefined reference; freestanding 无 libc). 用户在本 TU
             // 自行定义同名函数时 (defined_funcs 命中) 回退到普通调用.
-            "fegetround"
-            | "fesetround"
-            | "feclearexcept"
-            | "feraiseexcept"
-            | "fetestexcept"
-            | "fegetexceptflag"
-            | "fesetexceptflag"
-            | "fetestexceptflag"
-            | "fegetenv"
-            | "fesetenv"
-            | "feholdexcept"
-            | "feupdateenv"
+            "fegetround" | "fesetround" | "feclearexcept" | "feraiseexcept" | "fetestexcept"
+            | "fegetexceptflag" | "fesetexceptflag" | "fetestexceptflag" | "fegetenv"
+            | "fesetenv" | "feholdexcept" | "feupdateenv"
                 if !self.defined_funcs.contains(name) =>
             {
                 return self.gen_fenv_builtin(name, args, dst);
@@ -12987,13 +13105,13 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], 7); // rdi = envp
-                // rcx = 旧 SSE 异常标志
+                                            // rcx = 旧 SSE 异常标志
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
                 self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
                 self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
                 self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
                 self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
-                // 恢复环境 (同 fesetenv 内联)
+                                                   // 恢复环境 (同 fesetenv 内联)
                 let l_default = self.fresh_label();
                 let l_done = self.fresh_label();
                 self.emit(&[0x48, 0x83, 0xFF, 0xFF]); // cmp rdi, -1
@@ -13570,15 +13688,11 @@ impl Codegen {
 
     /// x87 FPU 约束: "f" → any st, "t" → st(0), "u" → st(1)
     fn asm_constraint_wants_x87(constraint: &str) -> Option<u8> {
-        let core = constraint
-            .trim_start_matches(['=', '+', '&']);
+        let core = constraint.trim_start_matches(['=', '+', '&']);
         if core.contains('{') {
             return None;
         }
-        let letters: Vec<char> = core
-            .chars()
-            .filter(|c| c.is_ascii_alphabetic())
-            .collect();
+        let letters: Vec<char> = core.chars().filter(|c| c.is_ascii_alphabetic()).collect();
         if letters.contains(&'t') {
             return Some(0);
         }
@@ -13593,8 +13707,7 @@ impl Codegen {
 
     /// MMX 约束: "y" → mm0..mm7
     fn asm_constraint_wants_mmx(constraint: &str) -> bool {
-        let core = constraint
-            .trim_start_matches(['=', '+', '&']);
+        let core = constraint.trim_start_matches(['=', '+', '&']);
         if core.contains('{') {
             return false;
         }
@@ -13605,10 +13718,8 @@ impl Codegen {
 
     /// GCC 条件码约束: "@cc<letters>" → 返回条件码字母序列
     fn asm_parse_cc_constraint(constraint: &str) -> Option<&str> {
-        let s = constraint
-            .trim_start_matches(['=', '+', '&']);
-        s.strip_prefix("@cc")
-            .filter(|rest| !rest.is_empty())
+        let s = constraint.trim_start_matches(['=', '+', '&']);
+        s.strip_prefix("@cc").filter(|rest| !rest.is_empty())
     }
 
     /// 条件码字母 → setcc 指令的 opcode (0F 90+off)
@@ -13649,41 +13760,136 @@ impl Codegen {
     fn parse_explicit_reg_name(name: &str) -> Option<ExplicitRegInfo> {
         // 段寄存器
         match name {
-            "gs" => return Some(ExplicitRegInfo { reg: 5, size: 16, att_name: "gs", kind: ExplicitRegKind::Seg }),
-            "fs" => return Some(ExplicitRegInfo { reg: 4, size: 16, att_name: "fs", kind: ExplicitRegKind::Seg }),
-            "es" => return Some(ExplicitRegInfo { reg: 0, size: 16, att_name: "es", kind: ExplicitRegKind::Seg }),
-            "cs" => return Some(ExplicitRegInfo { reg: 1, size: 16, att_name: "cs", kind: ExplicitRegKind::Seg }),
-            "ss" => return Some(ExplicitRegInfo { reg: 2, size: 16, att_name: "ss", kind: ExplicitRegKind::Seg }),
-            "ds" => return Some(ExplicitRegInfo { reg: 3, size: 16, att_name: "ds", kind: ExplicitRegKind::Seg }),
+            "gs" => {
+                return Some(ExplicitRegInfo {
+                    reg: 5,
+                    size: 16,
+                    att_name: "gs",
+                    kind: ExplicitRegKind::Seg,
+                })
+            }
+            "fs" => {
+                return Some(ExplicitRegInfo {
+                    reg: 4,
+                    size: 16,
+                    att_name: "fs",
+                    kind: ExplicitRegKind::Seg,
+                })
+            }
+            "es" => {
+                return Some(ExplicitRegInfo {
+                    reg: 0,
+                    size: 16,
+                    att_name: "es",
+                    kind: ExplicitRegKind::Seg,
+                })
+            }
+            "cs" => {
+                return Some(ExplicitRegInfo {
+                    reg: 1,
+                    size: 16,
+                    att_name: "cs",
+                    kind: ExplicitRegKind::Seg,
+                })
+            }
+            "ss" => {
+                return Some(ExplicitRegInfo {
+                    reg: 2,
+                    size: 16,
+                    att_name: "ss",
+                    kind: ExplicitRegKind::Seg,
+                })
+            }
+            "ds" => {
+                return Some(ExplicitRegInfo {
+                    reg: 3,
+                    size: 16,
+                    att_name: "ds",
+                    kind: ExplicitRegKind::Seg,
+                })
+            }
             _ => {}
         }
         // GP 子寄存器
         let (idx, bits, sname) = Self::parse_reg_name_bits(name)?;
-        Some(ExplicitRegInfo { reg: idx, size: bits, att_name: sname, kind: ExplicitRegKind::Gp })
+        Some(ExplicitRegInfo {
+            reg: idx,
+            size: bits,
+            att_name: sname,
+            kind: ExplicitRegKind::Gp,
+        })
     }
 
     fn parse_reg_name_bits(name: &str) -> Option<(u8, u8, &'static str)> {
         Some(match name {
-            "rax" => (0, 64, "rax"), "eax" => (0, 32, "eax"), "ax" => (0, 16, "ax"),
-            "al" => (0, 8, "al"), "ah" => (0, 8, "ah"),
-            "rbx" => (3, 64, "rbx"), "ebx" => (3, 32, "ebx"), "bx" => (3, 16, "bx"),
-            "bl" => (3, 8, "bl"), "bh" => (3, 8, "bh"),
-            "rcx" => (1, 64, "rcx"), "ecx" => (1, 32, "ecx"), "cx" => (1, 16, "cx"),
-            "cl" => (1, 8, "cl"), "ch" => (1, 8, "ch"),
-            "rdx" => (2, 64, "rdx"), "edx" => (2, 32, "edx"), "dx" => (2, 16, "dx"),
-            "dl" => (2, 8, "dl"), "dh" => (2, 8, "dh"),
-            "rsi" => (6, 64, "rsi"), "esi" => (6, 32, "esi"), "si" => (6, 16, "si"), "sil" => (6, 8, "sil"),
-            "rdi" => (7, 64, "rdi"), "edi" => (7, 32, "edi"), "di" => (7, 16, "di"), "dil" => (7, 8, "dil"),
-            "rsp" => (4, 64, "rsp"), "esp" => (4, 32, "esp"), "sp" => (4, 16, "sp"), "spl" => (4, 8, "spl"),
-            "rbp" => (5, 64, "rbp"), "ebp" => (5, 32, "ebp"), "bp" => (5, 16, "bp"), "bpl" => (5, 8, "bpl"),
-            "r8" => (8, 64, "r8"), "r8d" => (8, 32, "r8d"), "r8w" => (8, 16, "r8w"), "r8b" => (8, 8, "r8b"),
-            "r9" => (9, 64, "r9"), "r9d" => (9, 32, "r9d"), "r9w" => (9, 16, "r9w"), "r9b" => (9, 8, "r9b"),
-            "r10" => (10, 64, "r10"), "r10d" => (10, 32, "r10d"), "r10w" => (10, 16, "r10w"), "r10b" => (10, 8, "r10b"),
-            "r11" => (11, 64, "r11"), "r11d" => (11, 32, "r11d"), "r11w" => (11, 16, "r11w"), "r11b" => (11, 8, "r11b"),
-            "r12" => (12, 64, "r12"), "r12d" => (12, 32, "r12d"), "r12w" => (12, 16, "r12w"), "r12b" => (12, 8, "r12b"),
-            "r13" => (13, 64, "r13"), "r13d" => (13, 32, "r13d"), "r13w" => (13, 16, "r13w"), "r13b" => (13, 8, "r13b"),
-            "r14" => (14, 64, "r14"), "r14d" => (14, 32, "r14d"), "r14w" => (14, 16, "r14w"), "r14b" => (14, 8, "r14b"),
-            "r15" => (15, 64, "r15"), "r15d" => (15, 32, "r15d"), "r15w" => (15, 16, "r15w"), "r15b" => (15, 8, "r15b"),
+            "rax" => (0, 64, "rax"),
+            "eax" => (0, 32, "eax"),
+            "ax" => (0, 16, "ax"),
+            "al" => (0, 8, "al"),
+            "ah" => (0, 8, "ah"),
+            "rbx" => (3, 64, "rbx"),
+            "ebx" => (3, 32, "ebx"),
+            "bx" => (3, 16, "bx"),
+            "bl" => (3, 8, "bl"),
+            "bh" => (3, 8, "bh"),
+            "rcx" => (1, 64, "rcx"),
+            "ecx" => (1, 32, "ecx"),
+            "cx" => (1, 16, "cx"),
+            "cl" => (1, 8, "cl"),
+            "ch" => (1, 8, "ch"),
+            "rdx" => (2, 64, "rdx"),
+            "edx" => (2, 32, "edx"),
+            "dx" => (2, 16, "dx"),
+            "dl" => (2, 8, "dl"),
+            "dh" => (2, 8, "dh"),
+            "rsi" => (6, 64, "rsi"),
+            "esi" => (6, 32, "esi"),
+            "si" => (6, 16, "si"),
+            "sil" => (6, 8, "sil"),
+            "rdi" => (7, 64, "rdi"),
+            "edi" => (7, 32, "edi"),
+            "di" => (7, 16, "di"),
+            "dil" => (7, 8, "dil"),
+            "rsp" => (4, 64, "rsp"),
+            "esp" => (4, 32, "esp"),
+            "sp" => (4, 16, "sp"),
+            "spl" => (4, 8, "spl"),
+            "rbp" => (5, 64, "rbp"),
+            "ebp" => (5, 32, "ebp"),
+            "bp" => (5, 16, "bp"),
+            "bpl" => (5, 8, "bpl"),
+            "r8" => (8, 64, "r8"),
+            "r8d" => (8, 32, "r8d"),
+            "r8w" => (8, 16, "r8w"),
+            "r8b" => (8, 8, "r8b"),
+            "r9" => (9, 64, "r9"),
+            "r9d" => (9, 32, "r9d"),
+            "r9w" => (9, 16, "r9w"),
+            "r9b" => (9, 8, "r9b"),
+            "r10" => (10, 64, "r10"),
+            "r10d" => (10, 32, "r10d"),
+            "r10w" => (10, 16, "r10w"),
+            "r10b" => (10, 8, "r10b"),
+            "r11" => (11, 64, "r11"),
+            "r11d" => (11, 32, "r11d"),
+            "r11w" => (11, 16, "r11w"),
+            "r11b" => (11, 8, "r11b"),
+            "r12" => (12, 64, "r12"),
+            "r12d" => (12, 32, "r12d"),
+            "r12w" => (12, 16, "r12w"),
+            "r12b" => (12, 8, "r12b"),
+            "r13" => (13, 64, "r13"),
+            "r13d" => (13, 32, "r13d"),
+            "r13w" => (13, 16, "r13w"),
+            "r13b" => (13, 8, "r13b"),
+            "r14" => (14, 64, "r14"),
+            "r14d" => (14, 32, "r14d"),
+            "r14w" => (14, 16, "r14w"),
+            "r14b" => (14, 8, "r14b"),
+            "r15" => (15, 64, "r15"),
+            "r15d" => (15, 32, "r15d"),
+            "r15w" => (15, 16, "r15w"),
+            "r15b" => (15, 8, "r15b"),
             _ => return None,
         })
     }
@@ -14069,7 +14275,10 @@ impl Codegen {
                     if let Slot::Reg(r, name) = slot {
                         let nreg = *r;
                         let nname = *name;
-                        let is_xmm = meta.get(n as usize).map(|m| m.1 != 0 && m.1 < 200).unwrap_or(false);
+                        let is_xmm = meta
+                            .get(n as usize)
+                            .map(|m| m.1 != 0 && m.1 < 200)
+                            .unwrap_or(false);
                         if is_xmm {
                             self.prepare_asm_xmm_binding(op, nreg, is_inout);
                         } else {
@@ -14359,7 +14568,9 @@ impl Codegen {
     fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u8) {
         // x87 FPU 栈寄存器写回 (f/t/u 约束): fstp 存储 st(0) 到内存
         if xmm_width == 200 || xmm_width == 201 {
-            let Expr::Ident { name, ty, .. } = expr else { return; };
+            let Expr::Ident { name, ty, .. } = expr else {
+                return;
+            };
             let off = self.var_offset(&name.name);
             let is_float = matches!(ty, Type::Float);
             // fstp m32 = D9 /3 ; fstp m64 = DD /3 (REX.B for r13)
@@ -14375,7 +14586,9 @@ impl Codegen {
         }
         // MMX 寄存器写回 (y 约束): movq/movd 存储 mm 到内存
         if xmm_width == 202 {
-            let Expr::Ident { name, ty, .. } = expr else { return; };
+            let Expr::Ident { name, ty, .. } = expr else {
+                return;
+            };
             let off = self.var_offset(&name.name);
             let sz = ty.size();
             // movq mm, [r13+off] = 0F 7F ; movd mm, [r13+off] = 0F 7E
@@ -14395,7 +14608,9 @@ impl Codegen {
         }
         // 段寄存器写回 ({gs}/{fs} 约束): mov %seg, [r13+off] (16-bit)
         if xmm_width == 203 {
-            let Expr::Ident { name, .. } = expr else { return; };
+            let Expr::Ident { name, .. } = expr else {
+                return;
+            };
             let off = self.var_offset(&name.name);
             // mov [r13+off], Sreg = 8C /r (16-bit)
             // REX.B for r13, reg = seg code, r/m = 5
@@ -14411,7 +14626,9 @@ impl Codegen {
         // 条件码写回 (@cc 约束): setcc + movzx + store
         // 使用 push/pop rax 保护其他输出操作数的寄存器值
         if xmm_width == 204 {
-            let Expr::Ident { name, .. } = expr else { return; };
+            let Expr::Ident { name, .. } = expr else {
+                return;
+            };
             let off = self.var_offset(&name.name);
             // reg 字段 = setcc opcode (0F 90+off)
             self.emit(&[0x50]); // push %rax (preserve across setcc)
@@ -14424,7 +14641,9 @@ impl Codegen {
         }
         // 显式子寄存器写回 ({ecx}/{cx}/{cl} 约束)
         if (205..=208).contains(&xmm_width) {
-            let Expr::Ident { name, .. } = expr else { return; };
+            let Expr::Ident { name, .. } = expr else {
+                return;
+            };
             let off = self.var_offset(&name.name);
             let size_bits = (xmm_width - 204) * 8; // 8, 16, 32, 64
             match size_bits {
@@ -15094,9 +15313,7 @@ impl Codegen {
                 if !sec_name.starts_with(".text") && !sec_name.is_empty() {
                     // 解析 flags ("ax" → 可执行, "aw" → 可写)
                     let (is_writable, is_exec) = Self::parse_pushsection_flags(trimmed);
-                    let sec_idx = self.ensure_custom_section(
-                        sec_name, is_exec, is_writable,
-                    );
+                    let sec_idx = self.ensure_custom_section(sec_name, is_exec, is_writable);
                     // 可执行节 (.fixup/.altinstr_replacement): 代码先发射到
                     // self.code, .popsection 时记录区间, 最终整体搬迁到自定义节.
                     if is_exec {
@@ -15121,7 +15338,8 @@ impl Codegen {
                         self.extra_sections[sec_idx]
                             .data
                             .resize((sec_off + size) as usize, 0);
-                        self.pushsection_code_ranges.push((start, size, sec_idx, sec_off));
+                        self.pushsection_code_ranges
+                            .push((start, size, sec_idx, sec_off));
                     }
                 }
                 if !self.pushsection_stack.is_empty() {
@@ -15154,8 +15372,10 @@ impl Codegen {
                 // 仍然注册数字标签
                 if let Some(name) = locals.name_at(i) {
                     self.label(name);
-                    numeric_label_map
-                        .insert(name.split('_').nth(3).unwrap_or("0").to_string(), name.to_string());
+                    numeric_label_map.insert(
+                        name.split('_').nth(3).unwrap_or("0").to_string(),
+                        name.to_string(),
+                    );
                 }
                 self.emit_pushsection_data(trimmed, sec_idx, &locals, i, &numeric_label_map);
                 continue;
@@ -15245,7 +15465,8 @@ impl Codegen {
             asm_str
         };
         // 先展开高级指令 (.rept/.macro/.if 等)
-        let raw_lines: Vec<String> = s.split(['\n', ';'])
+        let raw_lines: Vec<String> = s
+            .split(['\n', ';'])
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
@@ -15306,7 +15527,8 @@ impl Codegen {
             asm_str
         };
         // 先展开高级指令 (.rept/.macro/.if 等)
-        let raw_lines: Vec<String> = s.split(['\n', ';'])
+        let raw_lines: Vec<String> = s
+            .split(['\n', ';'])
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
@@ -15337,7 +15559,8 @@ impl Codegen {
         if self.debug_level > 0 && asm_src_line > 0 {
             let asm_pc_end = self.code.len() as u64;
             if asm_pc_end > asm_pc_start {
-                self.asm_line_entries.push((asm_pc_start, asm_pc_end, asm_src_line));
+                self.asm_line_entries
+                    .push((asm_pc_start, asm_pc_end, asm_src_line));
             }
         }
         for (i, binding) in bindings.iter().enumerate() {
@@ -15383,7 +15606,8 @@ impl Codegen {
             asm_str
         };
         // 先展开高级指令 (.rept/.macro/.if 等)
-        let raw_lines: Vec<String> = s.split(['\n', ';'])
+        let raw_lines: Vec<String> = s
+            .split(['\n', ';'])
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
@@ -15414,7 +15638,8 @@ impl Codegen {
         if self.debug_level > 0 && asm_src_line > 0 {
             let asm_pc_end = self.code.len() as u64;
             if asm_pc_end > asm_pc_start {
-                self.asm_line_entries.push((asm_pc_start, asm_pc_end, asm_src_line));
+                self.asm_line_entries
+                    .push((asm_pc_start, asm_pc_end, asm_src_line));
             }
         }
         // asm goto: fall-through 路径执行输出写回; 若 asm 内部跳转到 goto label,
@@ -16077,14 +16302,9 @@ impl Codegen {
             || line.starts_with("repz\t")
         {
             (Some(0xF3u8), line[4..].trim())
-        } else if line.starts_with("repnz ")
-            || line.starts_with("repnz\t")
-        {
+        } else if line.starts_with("repnz ") || line.starts_with("repnz\t") {
             (Some(0xF2u8), line[6..].trim())
-        } else if line.starts_with("repe ")
-            || line.starts_with("repe\t")
-            || line == "repe"
-        {
+        } else if line.starts_with("repe ") || line.starts_with("repe\t") || line == "repe" {
             // repe 与 repz 同义: F3 前缀 (不是 F2)
             (Some(0xF3u8), line.strip_prefix("repe").unwrap_or("").trim())
         } else {
@@ -16207,36 +16427,76 @@ impl Codegen {
             // x87 控制 (无操作数)
             "fninit" => self.emit(&[0xDB, 0xE3]),
             // x87 加载/存储 (单操作数: 内存或 st(i))
-            "fld" | "flds" | "fldl" | "fldt" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 0, false),
-            "fst" | "fsts" | "fstl" | "fstt" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 2, false),
-            "fstp" | "fstps" | "fstpl" | "fstpt" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 3, false),
+            "fld" | "flds" | "fldl" | "fldt" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD9, 0, false)
+            }
+            "fst" | "fsts" | "fstl" | "fstt" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD9, 2, false)
+            }
+            "fstp" | "fstps" | "fstpl" | "fstpt" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD9, 3, false)
+            }
             "fldcw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 5, false),
             "fnstcw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD9, 7, true),
             "fnstsw" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 7, false), // stsw 的编码: DF E0 (ax) 或 DD E0(mem)
             // 整数加载/存储
-            "fild" | "fildl" | "filds" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 0, false),
-            "fist" | "fistl" | "fists" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 2, false),
-            "fistp" | "fistpl" | "fistps" | "fistpq" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDB, 3, false),
+            "fild" | "fildl" | "filds" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xDB, 0, false)
+            }
+            "fist" | "fistl" | "fists" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xDB, 2, false)
+            }
+            "fistp" | "fistpl" | "fistps" | "fistpq" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xDB, 3, false)
+            }
             // BCD 加载/存储
             "fbld" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 4, false),
             "fbstp" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDF, 6, false),
             // x87 算术 (单操作数: st(i) 或内存)
-            "fadd" | "fadds" | "faddl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 0, false),
-            "fmul" | "fmuls" | "fmull" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 1, false),
-            "fsub" | "fsubs" | "fsubl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 4, false),
-            "fsubr" | "fsubrs" | "fsubrl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 5, false),
-            "fdiv" | "fdivs" | "fdivl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 6, false),
-            "fdivr" | "fdivrs" | "fdivrl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 7, false),
+            "fadd" | "fadds" | "faddl" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD8, 0, false)
+            }
+            "fmul" | "fmuls" | "fmull" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD8, 1, false)
+            }
+            "fsub" | "fsubs" | "fsubl" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD8, 4, false)
+            }
+            "fsubr" | "fsubrs" | "fsubrl" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD8, 5, false)
+            }
+            "fdiv" | "fdivs" | "fdivl" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD8, 6, false)
+            }
+            "fdivr" | "fdivrs" | "fdivrl" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD8, 7, false)
+            }
             // x87 双精度内存算术
-            "fadd" | "fadds" | "faddl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 0, 0xD8, 0),
-            "fmul" | "fmuls" | "fmull" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 1, 0xD8, 1),
-            "fsub" | "fsubs" | "fsubl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 4, 0xD8, 4),
-            "fsubr" | "fsubrs" | "fsubrl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 5, 0xD8, 5),
-            "fdiv" | "fdivs" | "fdivl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 6, 0xD8, 6),
-            "fdivr" | "fdivrs" | "fdivrl" if ops.len() == 2 => self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 7, 0xD8, 7),
+            "fadd" | "fadds" | "faddl" if ops.len() == 2 => {
+                self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 0, 0xD8, 0)
+            }
+            "fmul" | "fmuls" | "fmull" if ops.len() == 2 => {
+                self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 1, 0xD8, 1)
+            }
+            "fsub" | "fsubs" | "fsubl" if ops.len() == 2 => {
+                self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 4, 0xD8, 4)
+            }
+            "fsubr" | "fsubrs" | "fsubrl" if ops.len() == 2 => {
+                self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 5, 0xD8, 5)
+            }
+            "fdiv" | "fdivs" | "fdivl" if ops.len() == 2 => {
+                self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 6, 0xD8, 6)
+            }
+            "fdivr" | "fdivrs" | "fdivrl" if ops.len() == 2 => {
+                self.emit_asm_x87_st(&ops[0], &ops[1], 0xDC, 7, 0xD8, 7)
+            }
             // x87 比较 (单操作数 st(i))
-            "fcom" | "fcoms" | "fcoml" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 2, false),
-            "fcomp" | "fcomps" | "fcompl" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xD8, 3, false),
+            "fcom" | "fcoms" | "fcoml" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD8, 2, false)
+            }
+            "fcomp" | "fcomps" | "fcompl" if ops.len() == 1 => {
+                self.emit_asm_x87_mem(&ops[0], 0xD8, 3, false)
+            }
             "pause" => self.emit(&[0xF3, 0x90]),
             "mfence" => self.emit(&[0x0F, 0xAE, 0xF0]),
             "lfence" => self.emit(&[0x0F, 0xAE, 0xE8]),
@@ -16468,44 +16728,82 @@ impl Codegen {
             "rdpkru" => self.emit(&[0x0F, 0x01, 0xEE]),
             "wrpkru" => self.emit(&[0x0F, 0x01, 0xEF]),
             // rdrand: F3 0F C7 /6; rdseed: F3 0F C7 /7 (reg or mem)
-            "rdrand" if ops.len() == 1 => {
-                match &ops[0] {
-                    AsmOperand::Reg(d, _) => {
-                        self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7)]);
-                    }
-                    AsmOperand::Mem { disp, base, index, scale } => {
-                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xC7]);
-                        self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
-                    }
-                    AsmOperand::SegMem { seg: _, disp, base, index, scale } => {
-                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xC7]);
-                        self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
-                    }
-                    _ => {
-                        self.asm_warn("rdrand needs register or memory operand, emitted as nop");
-                        self.emit(&[0x90]);
-                    }
+            "rdrand" if ops.len() == 1 => match &ops[0] {
+                AsmOperand::Reg(d, _) => {
+                    self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7)]);
                 }
-            }
-            "rdseed" if ops.len() == 1 => {
-                match &ops[0] {
-                    AsmOperand::Reg(d, _) => {
-                        self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7) | (1 << 3)]);
-                    }
-                    AsmOperand::Mem { disp, base, index, scale } => {
-                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xC7]);
-                        self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
-                    }
-                    AsmOperand::SegMem { seg: _, disp, base, index, scale } => {
-                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0xF3, 0x0F, 0xC7]);
-                        self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
-                    }
-                    _ => {
-                        self.asm_warn("rdseed needs register or memory operand, emitted as nop");
-                        self.emit(&[0x90]);
-                    }
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                } => {
+                    self.emit(&[
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
+                        0xF3,
+                        0x0F,
+                        0xC7,
+                    ]);
+                    self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
                 }
-            }
+                AsmOperand::SegMem {
+                    seg: _,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                } => {
+                    self.emit(&[
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
+                        0xF3,
+                        0x0F,
+                        0xC7,
+                    ]);
+                    self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
+                }
+                _ => {
+                    self.asm_warn("rdrand needs register or memory operand, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            },
+            "rdseed" if ops.len() == 1 => match &ops[0] {
+                AsmOperand::Reg(d, _) => {
+                    self.emit(&[0xF3, 0x0F, 0xC7, 0xC0 | (d & 7) | (1 << 3)]);
+                }
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                } => {
+                    self.emit(&[
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
+                        0xF3,
+                        0x0F,
+                        0xC7,
+                    ]);
+                    self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
+                }
+                AsmOperand::SegMem {
+                    seg: _,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                } => {
+                    self.emit(&[
+                        Self::rex(false, 0, index.unwrap_or(0), *base),
+                        0xF3,
+                        0x0F,
+                        0xC7,
+                    ]);
+                    self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
+                }
+                _ => {
+                    self.asm_warn("rdseed needs register or memory operand, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            },
             "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
             "invlpga" => self.emit(&[0x0F, 0x01, 0xDF]),
             "swapgs" => self.emit(&[0x0F, 0x01, 0xF8]),
@@ -17213,7 +17511,12 @@ impl Codegen {
                                 self.emit_vex3_prefix(*d, 0, 0, 1);
                                 self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                             }
-                            AsmOperand::Mem { disp, base, index, scale } => {
+                            AsmOperand::Mem {
+                                disp,
+                                base,
+                                index,
+                                scale,
+                            } => {
                                 self.emit_vex3_prefix(*d, 0, 0, 1);
                                 self.emit(&[0x70]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
@@ -17243,7 +17546,12 @@ impl Codegen {
                                 self.emit_vex3_prefix(*d, 0, 0, 3);
                                 self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                             }
-                            AsmOperand::Mem { disp, base, index, scale } => {
+                            AsmOperand::Mem {
+                                disp,
+                                base,
+                                index,
+                                scale,
+                            } => {
                                 self.emit_vex3_prefix(*d, 0, 0, 3);
                                 self.emit(&[0x70]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
@@ -17273,7 +17581,12 @@ impl Codegen {
                                 self.emit_vex3_prefix(*d, 0, 0, 2);
                                 self.emit(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                             }
-                            AsmOperand::Mem { disp, base, index, scale } => {
+                            AsmOperand::Mem {
+                                disp,
+                                base,
+                                index,
+                                scale,
+                            } => {
                                 self.emit_vex3_prefix(*d, 0, 0, 2);
                                 self.emit(&[0x70]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
@@ -17517,7 +17830,12 @@ impl Codegen {
                                 self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
                                 self.emit(&[0x21, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                             }
-                            AsmOperand::Mem { disp, base, index, scale } => {
+                            AsmOperand::Mem {
+                                disp,
+                                base,
+                                index,
+                                scale,
+                            } => {
                                 self.emit_vex4_prefix(*d, *base, 3, 0, 0, 0, 1);
                                 self.emit(&[0x21]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
@@ -18547,8 +18865,17 @@ impl Codegen {
                             AsmOperand::Reg(s, ss) if *ss == ASM_REG_MMX => {
                                 self.emit(&[0x0F, 0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                             }
-                            AsmOperand::Mem { disp, base, index, scale } => {
-                                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x70]);
+                            AsmOperand::Mem {
+                                disp,
+                                base,
+                                index,
+                                scale,
+                            } => {
+                                self.emit(&[
+                                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                                    0x0F,
+                                    0x70,
+                                ]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                                 self.emit(&[*imm as u8]);
                             }
@@ -18880,7 +19207,14 @@ impl Codegen {
             "adcx" if ops.len() == 2 => {
                 if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
                     if *s <= 15 && *d <= 15 {
-                        self.emit(&[Self::rex(false, *d, 0, *s), 0x66, 0x0F, 0x38, 0xF6, Self::modrm_reg_reg(*d, *s)]);
+                        self.emit(&[
+                            Self::rex(false, *d, 0, *s),
+                            0x66,
+                            0x0F,
+                            0x38,
+                            0xF6,
+                            Self::modrm_reg_reg(*d, *s),
+                        ]);
                     } else {
                         self.asm_warn("adcx needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
@@ -18894,7 +19228,14 @@ impl Codegen {
             "adox" if ops.len() == 2 => {
                 if let (AsmOperand::Reg(s, _ss), AsmOperand::Reg(d, _ds)) = (&ops[0], &ops[1]) {
                     if *s <= 15 && *d <= 15 {
-                        self.emit(&[Self::rex(false, *d, 0, *s), 0xF3, 0x0F, 0x38, 0xF6, Self::modrm_reg_reg(*d, *s)]);
+                        self.emit(&[
+                            Self::rex(false, *d, 0, *s),
+                            0xF3,
+                            0x0F,
+                            0x38,
+                            0xF6,
+                            Self::modrm_reg_reg(*d, *s),
+                        ]);
                     } else {
                         self.asm_warn("adox needs GPR operands, emitted as nop");
                         self.emit(&[0x90]);
@@ -19170,7 +19511,16 @@ impl Codegen {
                 return;
             }
         }
-        if let (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds)) = (src, dst) {
+        if let (
+            AsmOperand::Mem {
+                disp,
+                base,
+                index,
+                scale,
+            },
+            AsmOperand::Reg(d, ds),
+        ) = (src, dst)
+        {
             if *ds == ASM_REG_MMX {
                 // movq/movd mm, [mem] (0F 6F / 0F 6E)
                 let op = if bits <= 32 { 0x6E } else { 0x6F };
@@ -19179,7 +19529,16 @@ impl Codegen {
                 return;
             }
         }
-        if let (AsmOperand::Reg(s, ss), AsmOperand::Mem { disp, base, index, scale }) = (src, dst) {
+        if let (
+            AsmOperand::Reg(s, ss),
+            AsmOperand::Mem {
+                disp,
+                base,
+                index,
+                scale,
+            },
+        ) = (src, dst)
+        {
             if *ss == ASM_REG_MMX {
                 // movq/movd [mem], mm (0F 7F / 0F 7E)
                 let op = if bits <= 32 { 0x7E } else { 0x7F };
@@ -20452,13 +20811,14 @@ impl Codegen {
                     self.emit(&[0xEF]);
                 }
             }
-            AsmOperand::Mem { disp, base, index, scale } => {
+            AsmOperand::Mem {
+                disp,
+                base,
+                index,
+                scale,
+            } => {
                 // 内存间接端口: movzwl mem, %edx + out DX
-                self.emit(&[
-                    Self::rex(false, 0, index.unwrap_or(0), *base),
-                    0x0F,
-                    0xB7,
-                ]);
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0xB7]);
                 self.emit_asm_modrm_mem_only(2, *disp, *base, *index, *scale);
                 if bits == 8 {
                     self.emit(&[0xEE]);
@@ -20511,13 +20871,14 @@ impl Codegen {
                     self.emit(&[0xED]);
                 }
             }
-            AsmOperand::Mem { disp, base, index, scale } => {
+            AsmOperand::Mem {
+                disp,
+                base,
+                index,
+                scale,
+            } => {
                 // 内存间接端口: movzwl mem, %edx + in DX
-                self.emit(&[
-                    Self::rex(false, 0, index.unwrap_or(0), *base),
-                    0x0F,
-                    0xB7,
-                ]);
+                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0xB7]);
                 self.emit_asm_modrm_mem_only(2, *disp, *base, *index, *scale);
                 if bits == 8 {
                     self.emit(&[0xEC]);
@@ -20665,7 +21026,12 @@ impl Codegen {
                     self.emit(&[esc, 0xC0 | (ext << 3) | (r & 7)]);
                 }
             }
-            AsmOperand::Mem { disp, base, index, scale } => {
+            AsmOperand::Mem {
+                disp,
+                base,
+                index,
+                scale,
+            } => {
                 self.emit(&[esc]);
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             }
@@ -20678,7 +21044,15 @@ impl Codegen {
 
     /// x87 双操作数栈算术: 处理 st(i), st 和 st, st(i) 两种形式
     /// rev_esc/rev_ext 用于 st(i),st 形式 (反向), fwd_esc/fwd_ext 用于 st,st(i) 形式
-    fn emit_asm_x87_st(&mut self, src: &AsmOperand, dst: &AsmOperand, rev_esc: u8, rev_ext: u8, fwd_esc: u8, fwd_ext: u8) {
+    fn emit_asm_x87_st(
+        &mut self,
+        src: &AsmOperand,
+        dst: &AsmOperand,
+        rev_esc: u8,
+        rev_ext: u8,
+        fwd_esc: u8,
+        fwd_ext: u8,
+    ) {
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
                 // AT&T: fadd %st(1), %st  →  st = st + st(1)
@@ -20706,9 +21080,15 @@ impl Codegen {
             {
                 self.emit(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
             }
-            (AsmOperand::Mem { disp, base, index, scale }, AsmOperand::Reg(d, ds))
-                if *ds == ASM_REG_MMX =>
-            {
+            (
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+                AsmOperand::Reg(d, ds),
+            ) if *ds == ASM_REG_MMX => {
                 self.emit(&[0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
@@ -20754,7 +21134,14 @@ impl Codegen {
     /// opcode: 单字节操作码 (如 0xAE, 0xDD, 0xD9)
     /// ext: modrm.reg 字段
     /// has_0f: 是否带 0F 前缀
-    fn emit_asm_fpu_load(&mut self, op: &AsmOperand, opcode: u8, ext: u8, has_0f: bool, rex_w: bool) {
+    fn emit_asm_fpu_load(
+        &mut self,
+        op: &AsmOperand,
+        opcode: u8,
+        ext: u8,
+        has_0f: bool,
+        rex_w: bool,
+    ) {
         if let AsmOperand::Mem {
             disp,
             base,
@@ -21256,13 +21643,31 @@ impl Codegen {
                 ]);
             }
             // shldq $imm, %src, (%mem): src=Imm(count), dst=Reg(src), count=Mem(dst)
-            (AsmOperand::Imm(v), AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) => {
+            (
+                AsmOperand::Imm(v),
+                AsmOperand::Reg(s, _),
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+            ) => {
                 self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, op_imm]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
                 self.emit(&[*v as u8]);
             }
             // shldq %cl, %src, (%mem): src=Reg(%cl), dst=Reg(src), count=Mem(dst)
-            (AsmOperand::Reg(c, _), AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) if *c == 1 => {
+            (
+                AsmOperand::Reg(c, _),
+                AsmOperand::Reg(s, _),
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+            ) if *c == 1 => {
                 self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, op]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
@@ -21337,18 +21742,45 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             // SegMem dst: 发射段前缀后走普通 mem 路径
-            (AsmOperand::Imm(v), AsmOperand::SegMem { seg, disp, base, index, scale }) => {
+            (
+                AsmOperand::Imm(v),
+                AsmOperand::SegMem {
+                    seg,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+            ) => {
                 let (_code, pfx) = Self::seg_meta(*seg);
                 self.emit(&[pfx, Self::rex(w, 0, index.unwrap_or(0), *base), 0x0F, 0xBA]);
                 let ext = match opcode {
-                    0xA3 => 4, 0xAB => 5, 0xB3 => 6, 0xBB => 7, _ => 4,
+                    0xA3 => 4,
+                    0xAB => 5,
+                    0xB3 => 6,
+                    0xBB => 7,
+                    _ => 4,
                 };
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
                 self.emit(&[*v as u8]);
             }
-            (AsmOperand::Reg(s, _), AsmOperand::SegMem { seg, disp, base, index, scale }) => {
+            (
+                AsmOperand::Reg(s, _),
+                AsmOperand::SegMem {
+                    seg,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+            ) => {
                 let (_code, pfx) = Self::seg_meta(*seg);
-                self.emit(&[pfx, Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
+                self.emit(&[
+                    pfx,
+                    Self::rex(w, *s, index.unwrap_or(0), *base),
+                    0x0F,
+                    opcode,
+                ]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             _ => {
@@ -21990,13 +22422,7 @@ impl Codegen {
         (Some(cc), bits)
     }
 
-    fn emit_asm_cmov(
-        &mut self,
-        src: &AsmOperand,
-        dst: &AsmOperand,
-        cc: u8,
-        bits: u8,
-    ) {
+    fn emit_asm_cmov(&mut self, src: &AsmOperand, dst: &AsmOperand, cc: u8, bits: u8) {
         let w = bits == 64;
         if bits == 16 {
             self.emit(&[0x66]);
@@ -22311,12 +22737,10 @@ impl Codegen {
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
                 let r = Self::rex(w, *d, 0, *s);
-                if r != 0x40 { self.emit(&[r]); }
-                self.emit(&[
-                    0x0F,
-                    opcode,
-                    Self::modrm_reg_reg(*d, *s),
-                ]);
+                if r != 0x40 {
+                    self.emit(&[r]);
+                }
+                self.emit(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]);
             }
             (
                 AsmOperand::Mem {
@@ -22331,7 +22755,9 @@ impl Codegen {
                     self.emit(&[0x66]);
                 }
                 let r = Self::rex(w, *d, index.unwrap_or(0), *base);
-                if r != 0x40 { self.emit(&[r]); }
+                if r != 0x40 {
+                    self.emit(&[r]);
+                }
                 self.emit(&[0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
@@ -22371,13 +22797,10 @@ impl Codegen {
         match (src, dst) {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
                 let r = Self::rex(w, *d, 0, *s);
-                if r != 0x40 { self.emit(&[r]); }
-                self.emit(&[
-                    0xF3,
-                    0x0F,
-                    0xB8,
-                    Self::modrm_reg_reg(*d, *s),
-                ]);
+                if r != 0x40 {
+                    self.emit(&[r]);
+                }
+                self.emit(&[0xF3, 0x0F, 0xB8, Self::modrm_reg_reg(*d, *s)]);
             }
             (
                 AsmOperand::Mem {
@@ -22392,7 +22815,9 @@ impl Codegen {
                     self.emit(&[0x66]);
                 }
                 let r = Self::rex(w, *d, index.unwrap_or(0), *base);
-                if r != 0x40 { self.emit(&[r]); }
+                if r != 0x40 {
+                    self.emit(&[r]);
+                }
                 self.emit(&[0xF3, 0x0F, 0xB8]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
@@ -23100,7 +23525,16 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             }
             // SegMem → Reg: 段前缀 + VEX + mem
-            (AsmOperand::SegMem { seg, disp, base, index, scale }, AsmOperand::Reg(d, ds)) if *ds == 128 => {
+            (
+                AsmOperand::SegMem {
+                    seg,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+                AsmOperand::Reg(d, ds),
+            ) if *ds == 128 => {
                 let (_code, pfx) = Self::seg_meta(*seg);
                 self.emit(&[pfx]);
                 if map == 1 {
@@ -23112,7 +23546,16 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             // Reg → SegMem: 段前缀 + VEX + mem
-            (AsmOperand::Reg(s, ss), AsmOperand::SegMem { seg, disp, base, index, scale }) if *ss == 128 => {
+            (
+                AsmOperand::Reg(s, ss),
+                AsmOperand::SegMem {
+                    seg,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+            ) if *ss == 128 => {
                 let (_code, pfx) = Self::seg_meta(*seg);
                 self.emit(&[pfx]);
                 if map == 1 {

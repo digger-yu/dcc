@@ -310,19 +310,16 @@ impl Profraw {
                 if off + 8 > buf.len() {
                     break;
                 }
-                let site_idx =
-                    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                let site_idx = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
                 off += 4;
-                let n_targets =
-                    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                let n_targets = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
                 off += 4;
                 let mut vp = ValueProfileData::new();
                 for _ in 0..n_targets {
                     if off + 4 > buf.len() {
                         break;
                     }
-                    let tl =
-                        u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                    let tl = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
                     off += 4;
                     if off + tl + 8 > buf.len() {
                         break;
@@ -331,8 +328,7 @@ impl Profraw {
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                         .to_string();
                     off += tl;
-                    let count =
-                        u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+                    let count = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
                     off += 8;
                     vp.add_target(&target, count);
                 }
@@ -506,8 +502,7 @@ impl Profraw {
             off += nl;
             let _total = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
             off += 8;
-            let n_sites =
-                u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+            let n_sites = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
             off += 4;
             for _ in 0..n_sites {
                 let _idx = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
@@ -542,19 +537,16 @@ impl Profraw {
                 if off + 8 > buf.len() {
                     break;
                 }
-                let site_idx =
-                    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                let site_idx = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
                 off += 4;
-                let n_targets =
-                    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                let n_targets = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
                 off += 4;
                 let mut vp = ValueProfileData::new();
                 for _ in 0..n_targets {
                     if off + 4 > buf.len() {
                         break;
                     }
-                    let tl =
-                        u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+                    let tl = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
                     off += 4;
                     if off + tl + 8 > buf.len() {
                         break;
@@ -563,8 +555,7 @@ impl Profraw {
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                         .to_string();
                     off += tl;
-                    let count =
-                        u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+                    let count = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
                     off += 8;
                     vp.add_target(&target, count);
                 }
@@ -684,10 +675,8 @@ impl PgoWeights {
                 let dst_local = dst_idx - sorted[0].0;
                 // 边计数取 min(src_cnt, dst_cnt) 防止不一致
                 let edge_cnt = src_cnt.min(dst_cnt);
-                w.edge_counts.insert(
-                    (func.clone(), src_local as u32, dst_local as u32),
-                    edge_cnt,
-                );
+                w.edge_counts
+                    .insert((func.clone(), src_local as u32, dst_local as u32), edge_cnt);
                 let _ = src_cnt; // 保留源计数供后续扩展
             }
         }
@@ -753,7 +742,10 @@ pub fn propagate_edge_weights(weights: &PgoWeights) -> BranchProbMap {
     // 按函数分组边
     let mut func_edges: HashMap<String, Vec<(u32, u32, u64)>> = HashMap::new();
     for ((func, src, dst), &cnt) in &weights.edge_counts {
-        func_edges.entry(func.clone()).or_default().push((*src, *dst, cnt));
+        func_edges
+            .entry(func.clone())
+            .or_default()
+            .push((*src, *dst, cnt));
     }
 
     for (func, edges) in &func_edges {
@@ -774,7 +766,8 @@ pub fn propagate_edge_weights(weights: &PgoWeights) -> BranchProbMap {
                 };
                 let true_cnt = sorted[0].1; // 较小 dst = true (fall-through)
                 let false_cnt = sorted[1].1; // 较大 dst = false (jump target)
-                map.branch_weights.insert((func.clone(), *src), (true_cnt, false_cnt));
+                map.branch_weights
+                    .insert((func.clone(), *src), (true_cnt, false_cnt));
             }
         }
     }
@@ -820,7 +813,10 @@ pub fn propagate_loop_trip_counts(weights: &PgoWeights) -> LoopTripCounts {
     // 按函数分组边
     let mut func_edges: HashMap<String, Vec<(u32, u32, u64)>> = HashMap::new();
     for ((func, src, dst), &cnt) in &weights.edge_counts {
-        func_edges.entry(func.clone()).or_default().push((*src, *dst, cnt));
+        func_edges
+            .entry(func.clone())
+            .or_default()
+            .push((*src, *dst, cnt));
     }
 
     for (func, edges) in &func_edges {
@@ -911,7 +907,10 @@ mod tests {
     fn instrument_program_inserts_call_at_body_top() {
         use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
         let span_zero = crate::diagnostics::Span::point("m.c", 1, 0);
-        let mut prog = Program { decls: vec![], fenv_access: false };
+        let mut prog = Program {
+            decls: vec![],
+            fenv_access: false,
+        };
         let body = Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Int {
@@ -961,7 +960,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
@@ -1012,7 +1011,10 @@ mod tests {
     fn instrument_program_noop_when_disabled() {
         use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
         let span_zero = crate::diagnostics::Span::point("m.c", 1, 0);
-        let mut prog = Program { decls: vec![], fenv_access: false };
+        let mut prog = Program {
+            decls: vec![],
+            fenv_access: false,
+        };
         let body = Block {
             items: vec![BlockItem::Stmt(Stmt::Return {
                 val: Some(Expr::Int {
@@ -1062,7 +1064,7 @@ mod tests {
             warning_msg: None,
             deprecated_msg: None,
             ifunc_resolver: None,
-                asm_output_template: None,
+            asm_output_template: None,
             is_global: false,
             is_device: false,
             is_host: false,
@@ -1091,12 +1093,24 @@ mod tests {
     fn with_edge_counts_computes_edges() {
         let mut p = Profraw::new();
         // main 函数有 3 个 sites (BB0, BB1, BB2)
-        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 1 });
-        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 2 });
-        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 3 });
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 1,
+        });
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 2,
+        });
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 3,
+        });
         p.counters[0] = 100; // BB0 执行 100 次
-        p.counters[1] = 80;  // BB1 执行 80 次
-        p.counters[2] = 60;  // BB2 执行 60 次
+        p.counters[1] = 80; // BB1 执行 80 次
+        p.counters[2] = 60; // BB2 执行 60 次
 
         let w = PgoWeights::with_edge_counts(&p);
         // edge(BB0->BB1) = min(100, 80) = 80
@@ -1110,8 +1124,8 @@ mod tests {
     fn propagate_edge_weights_branch_prob() {
         let mut w = PgoWeights::default();
         // foo 函数: BB0 有 2 条出边 -> BB1 (true), BB2 (false)
-        w.edge_counts.insert(("foo".into(), 0, 1), 90);  // true 分支
-        w.edge_counts.insert(("foo".into(), 0, 2), 10);  // false 分支
+        w.edge_counts.insert(("foo".into(), 0, 1), 90); // true 分支
+        w.edge_counts.insert(("foo".into(), 0, 2), 10); // false 分支
 
         let map = propagate_edge_weights(&w);
         let (t, f) = map.get_weight("foo", 0);
@@ -1141,9 +1155,9 @@ mod tests {
         let mut w = PgoWeights::default();
         // loop 函数: BB0 (entry) -> BB1 (header)
         //           BB1 -> BB2 (body), BB1 -> BB1 (back-edge, 循环 10 次)
-        w.edge_counts.insert(("loop".into(), 0, 1), 10);  // entry
+        w.edge_counts.insert(("loop".into(), 0, 1), 10); // entry
         w.edge_counts.insert(("loop".into(), 1, 2), 100); // body
-        w.edge_counts.insert(("loop".into(), 1, 1), 90);  // back-edge (90 次回到 header)
+        w.edge_counts.insert(("loop".into(), 1, 1), 90); // back-edge (90 次回到 header)
 
         let counts = propagate_loop_trip_counts(&w);
         // trip_count = back_edge_count / entry_count = 90 / 10 = 9.0
@@ -1229,15 +1243,31 @@ mod tests {
     #[test]
     fn profraw_merge_accumulates_counters() {
         let mut a = Profraw::new();
-        a.add(PgoSite { func: "f".into(), file: "a.c".into(), line: 1 });
-        a.add(PgoSite { func: "g".into(), file: "a.c".into(), line: 5 });
+        a.add(PgoSite {
+            func: "f".into(),
+            file: "a.c".into(),
+            line: 1,
+        });
+        a.add(PgoSite {
+            func: "g".into(),
+            file: "a.c".into(),
+            line: 5,
+        });
         a.counters[0] = 10;
         a.counters[1] = 20;
         a.finalize();
 
         let mut b = Profraw::new();
-        b.add(PgoSite { func: "f".into(), file: "a.c".into(), line: 1 });
-        b.add(PgoSite { func: "g".into(), file: "a.c".into(), line: 5 });
+        b.add(PgoSite {
+            func: "f".into(),
+            file: "a.c".into(),
+            line: 1,
+        });
+        b.add(PgoSite {
+            func: "g".into(),
+            file: "a.c".into(),
+            line: 5,
+        });
         b.counters[0] = 5;
         b.counters[1] = 15;
         b.finalize();
@@ -1251,11 +1281,19 @@ mod tests {
     #[test]
     fn profraw_merge_rejects_mismatched_sites() {
         let mut a = Profraw::new();
-        a.add(PgoSite { func: "f".into(), file: "a.c".into(), line: 1 });
+        a.add(PgoSite {
+            func: "f".into(),
+            file: "a.c".into(),
+            line: 1,
+        });
         a.finalize();
 
         let mut b = Profraw::new();
-        b.add(PgoSite { func: "g".into(), file: "b.c".into(), line: 2 });
+        b.add(PgoSite {
+            func: "g".into(),
+            file: "b.c".into(),
+            line: 2,
+        });
         b.finalize();
 
         let err = a.merge(&b).unwrap_err();
@@ -1266,9 +1304,21 @@ mod tests {
     #[test]
     fn profdata_roundtrip() {
         let mut p = Profraw::new();
-        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 1 });
-        p.add(PgoSite { func: "main".into(), file: "m.c".into(), line: 3 });
-        p.add(PgoSite { func: "foo".into(), file: "m.c".into(), line: 7 });
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 1,
+        });
+        p.add(PgoSite {
+            func: "main".into(),
+            file: "m.c".into(),
+            line: 3,
+        });
+        p.add(PgoSite {
+            func: "foo".into(),
+            file: "m.c".into(),
+            line: 7,
+        });
         p.counters[0] = 100;
         p.counters[1] = 80;
         p.counters[2] = 50;
@@ -1290,7 +1340,11 @@ mod tests {
     #[test]
     fn profraw_checksum_detects_corruption() {
         let mut p = Profraw::new();
-        p.add(PgoSite { func: "f".into(), file: "a.c".into(), line: 1 });
+        p.add(PgoSite {
+            func: "f".into(),
+            file: "a.c".into(),
+            line: 1,
+        });
         p.counters[0] = 42;
         p.finalize();
 
@@ -1323,7 +1377,7 @@ mod tests {
         buf.extend_from_slice(b"PROF");
         buf.extend_from_slice(&1u32.to_le_bytes()); // version 1
         buf.extend_from_slice(&1u32.to_le_bytes()); // 1 site
-        // site: func="main", file="m.c", line=1
+                                                    // site: func="main", file="m.c", line=1
         buf.extend_from_slice(&4u32.to_le_bytes());
         buf.extend_from_slice(b"main");
         buf.extend_from_slice(&3u32.to_le_bytes());

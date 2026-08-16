@@ -116,11 +116,31 @@ impl ArmCodegen {
         self.emit_globals(module);
         // 文件级 asm: 收集原始文本行
         for decl in &prog.decls {
-            if let Decl::GlobalAsm { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, .. } = decl {
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
+            if let Decl::GlobalAsm {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                ..
+            } = decl
+            {
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
                 for line in resolved.split('\n') {
                     let t = line.trim();
-                    if !t.is_empty() { self.raw_global_asm_lines.push(t.to_string()); }
+                    if !t.is_empty() {
+                        self.raw_global_asm_lines.push(t.to_string());
+                    }
                 }
             }
         }
@@ -139,23 +159,33 @@ impl ArmCodegen {
         let bl_pos = self.code.len() as u64;
         self.start_call_pos = Some(bl_pos);
         self.code.extend_from_slice(&0xEB000000u32.to_le_bytes()); // BL offset=0
-        // r0 already has main's return value
-        // mov r7, #1 (__NR_exit)
+                                                                   // r0 already has main's return value
+                                                                   // mov r7, #1 (__NR_exit)
         self.emit_mov_imm(7, 1);
         // svc #0
         let svc_inst: u32 = 0xEF000000; // SVC #0
         self.code.extend_from_slice(&svc_inst.to_le_bytes());
         // Compile functions
         for func in &module.functions {
-            let has_body = prog.decls.iter().find_map(|d| match d {
-                Decl::Func(f) if f.name.name == func.name => Some(f),
-                _ => None,
-            }).and_then(|f| f.body.as_ref()).is_some();
-            if !has_body { continue; }
-            self.gen_function(func, prog.decls.iter().find_map(|d| match d {
-                Decl::Func(f) if f.name.name == func.name => Some(f),
-                _ => None,
-            }));
+            let has_body = prog
+                .decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Func(f) if f.name.name == func.name => Some(f),
+                    _ => None,
+                })
+                .and_then(|f| f.body.as_ref())
+                .is_some();
+            if !has_body {
+                continue;
+            }
+            self.gen_function(
+                func,
+                prog.decls.iter().find_map(|d| match d {
+                    Decl::Func(f) if f.name.name == func.name => Some(f),
+                    _ => None,
+                }),
+            );
             // Patch BL to main
             if func.name == "main" {
                 if let Some(bl_pos) = self.start_call_pos {
@@ -196,7 +226,9 @@ impl ArmCodegen {
         if let Some(init_expr) = &g.initializer {
             // Try to extract constant value from TypedExpr
             let val = match (&init_expr.kind, &init_expr.literal) {
-                (crate::ir::ExprKind::Constant, Some(crate::ir::ExprLiteral::Int(v))) => Some(*v as i64),
+                (crate::ir::ExprKind::Constant, Some(crate::ir::ExprLiteral::Int(v))) => {
+                    Some(*v as i64)
+                }
                 _ => None,
             };
             if let Some(val) = val {
@@ -207,7 +239,8 @@ impl ArmCodegen {
                     _ => 4,
                 };
                 if size == 8 {
-                    self.rodata.extend_from_slice(&(val as i32 as i64).to_le_bytes());
+                    self.rodata
+                        .extend_from_slice(&(val as i32 as i64).to_le_bytes());
                 } else {
                     self.rodata.extend_from_slice(&(val as i32).to_le_bytes());
                 }
@@ -362,10 +395,7 @@ impl ArmCodegen {
                 self.gen_expr_from_ast(e);
             }
             Stmt::If {
-                cond,
-                then_,
-                else_,
-                ..
+                cond, then_, else_, ..
             } => {
                 self.gen_expr_from_ast(cond);
                 let lbl_else = self.fresh_label("Lelse");
@@ -478,7 +508,8 @@ impl ArmCodegen {
                             let _lbl_next = self.fresh_label("Lnextcase");
                             // Use BEQ to jump to case body if equal
                             let pos = self.code.len() as u64;
-                            self.pending_branches.push((pos, lbl_case.clone(), BranchKind::Beq));
+                            self.pending_branches
+                                .push((pos, lbl_case.clone(), BranchKind::Beq));
                             self.code.extend_from_slice(&0x0A000000u32.to_le_bytes());
                             case_labels.push((lbl_case, case));
                         }
@@ -501,18 +532,44 @@ impl ArmCodegen {
                 self.set_label(&lbl_end);
                 self.break_labels.pop();
             }
-            Stmt::AsmGoto { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, goto_labels, span, .. } => {
+            Stmt::AsmGoto {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                goto_labels,
+                span,
+                ..
+            } => {
                 eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
                     resolved_asm = resolved_asm.replace(&format!("%l{}", i), &label.name);
-                    resolved_asm = resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
-                    resolved_asm = resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
+                    resolved_asm =
+                        resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
                 }
-                let resolved = Self::resolve_asm_template_simple(&resolved_asm, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
-                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-                self.raw_func_asm_lines.push((self.source_name.clone(), lines));
+                let resolved = Self::resolve_asm_template_simple(
+                    &resolved_asm,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
+                let lines: Vec<String> = resolved
+                    .split('\n')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                self.raw_func_asm_lines
+                    .push((self.source_name.clone(), lines));
             }
             _ => {}
         }
@@ -558,7 +615,7 @@ impl ArmCodegen {
                 self.emit_push(vec![0]); // push r0 (lhs)
                 self.gen_expr_from_ast(r);
                 self.emit_pop(vec![1]); // pop r1 (lhs)
-                // r0 = rhs, r1 = lhs
+                                        // r0 = rhs, r1 = lhs
                 self.emit_binop(*op);
             }
             Expr::Unary { op, e, .. } => {
@@ -604,11 +661,37 @@ impl ArmCodegen {
                     }
                 }
             }
-            Expr::AsmExpr { asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints, span, .. } => {
-                eprintln!("{}:{}: warning: inline asm on non-x86_64 target: result is 0", span.file, span.line);
-                let resolved = Self::resolve_asm_template_simple(asm_str, outputs, output_names, output_constraints, inputs, input_names, input_constraints);
-                let lines: Vec<String> = resolved.split('\n').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-                self.raw_func_asm_lines.push((format!("__inline_{}", self.label_serial), lines));
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                span,
+                ..
+            } => {
+                eprintln!(
+                    "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
+                    span.file, span.line
+                );
+                let resolved = Self::resolve_asm_template_simple(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                );
+                let lines: Vec<String> = resolved
+                    .split('\n')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                self.raw_func_asm_lines
+                    .push((format!("__inline_{}", self.label_serial), lines));
                 self.label_serial += 1;
                 self.emit_load_imm(0, 0);
             }
@@ -624,9 +707,9 @@ impl ArmCodegen {
 
     fn emit_binop(&mut self, op: BinOp) {
         match op {
-            BinOp::Add => self.emit_add(0, 1, 0),     // add r0, r1, r0
-            BinOp::Sub => self.emit_sub(0, 1, 0),     // sub r0, r1, r0
-            BinOp::Mul => self.emit_mul(0, 1, 0),     // mul r0, r1, r0
+            BinOp::Add => self.emit_add(0, 1, 0), // add r0, r1, r0
+            BinOp::Sub => self.emit_sub(0, 1, 0), // sub r0, r1, r0
+            BinOp::Mul => self.emit_mul(0, 1, 0), // mul r0, r1, r0
             BinOp::Div => {
                 // 简化: 调用 __aeabi_idiv (需要链接库)
                 // 这里先做简单处理
@@ -642,8 +725,8 @@ impl ArmCodegen {
                 self.emit_push(vec![0]); // save quotient
                 self.emit_pop(vec![1]); // pop divisor to r1
                 self.emit_pop(vec![0]); // pop dividend to r0
-                // r0 = quotient, r1 = divisor (need to recompute)
-                // 简化: 直接返回 0
+                                        // r0 = quotient, r1 = divisor (need to recompute)
+                                        // 简化: 直接返回 0
                 self.emit_pop(vec![14]);
                 self.emit_load_imm(0, 0);
             }
@@ -734,8 +817,7 @@ impl ArmCodegen {
             self.code[at as usize + 3],
         ]);
         let patched = (existing & 0xFF000000) | offset;
-        self.code[at as usize..at as usize + 4]
-            .copy_from_slice(&patched.to_le_bytes());
+        self.code[at as usize..at as usize + 4].copy_from_slice(&patched.to_le_bytes());
     }
 
     fn patch_b(&mut self, at: u64, target: u64) {
@@ -743,8 +825,7 @@ impl ArmCodegen {
         let offset = ((target as i64) - (at as i64) - 8) / 4;
         let offset = offset as u32 & 0x00FFFFFF;
         let patched = 0xEA000000 | offset; // B with AL condition
-        self.code[at as usize..at as usize + 4]
-            .copy_from_slice(&patched.to_le_bytes());
+        self.code[at as usize..at as usize + 4].copy_from_slice(&patched.to_le_bytes());
     }
 
     // ===== ARM 指令编码 =====
@@ -879,7 +960,8 @@ impl ArmCodegen {
     fn emit_b(&mut self, label: &str) {
         // B: 记录 pending branch
         let pos = self.code.len() as u64;
-        self.pending_branches.push((pos, label.to_string(), BranchKind::B));
+        self.pending_branches
+            .push((pos, label.to_string(), BranchKind::B));
         // 占位 B 指令 (AL condition)
         self.code.extend_from_slice(&0xEA000000u32.to_le_bytes());
     }
@@ -887,7 +969,8 @@ impl ArmCodegen {
     fn emit_beq(&mut self, label: &str) {
         // BEQ: 条件码 0x0
         let pos = self.code.len() as u64;
-        self.pending_branches.push((pos, label.to_string(), BranchKind::Beq));
+        self.pending_branches
+            .push((pos, label.to_string(), BranchKind::Beq));
         // 占位 BEQ 指令 (EQ condition = 0x0)
         self.code.extend_from_slice(&0x0A000000u32.to_le_bytes());
     }
@@ -1039,11 +1122,15 @@ impl ArmCodegen {
         while i < chars.len() {
             if chars[i] == '%' && i + 1 < chars.len() {
                 match chars[i + 1] {
-                    '%' => { result.push('%'); i += 2; }
+                    '%' => {
+                        result.push('%');
+                        i += 2;
+                    }
                     '[' => {
-                        if let Some(end) = chars[i+2..].iter().position(|&c| c == ']') {
-                            let name: String = chars[i+2..i+2+end].iter().collect();
-                            let all_names: Vec<&Option<String>> = output_names.iter().chain(input_names.iter()).collect();
+                        if let Some(end) = chars[i + 2..].iter().position(|&c| c == ']') {
+                            let name: String = chars[i + 2..i + 2 + end].iter().collect();
+                            let all_names: Vec<&Option<String>> =
+                                output_names.iter().chain(input_names.iter()).collect();
                             for (idx, n) in all_names.iter().enumerate() {
                                 if n.as_ref().map(|s| s.as_str()) == Some(&name) {
                                     result.push_str(&format!("%{}", idx));
@@ -1118,11 +1205,15 @@ mod tests {
 
     #[test]
     fn arm_gen_simple_return() {
-        let target = Target::resolve(&crate::cli::TargetTriple::parse("arm-linux-gnueabihf").unwrap());
+        let target =
+            Target::resolve(&crate::cli::TargetTriple::parse("arm-linux-gnueabihf").unwrap());
         let mut cg = ArmCodegen::new(target, true);
         let func = Function {
             name: "f".to_string(),
-            return_type: ValueType::Integer { bits: 32, signed: true },
+            return_type: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
             params: vec![],
             body: vec![],
             span: crate::diagnostics::Span::point("t.c", 1, 1),
