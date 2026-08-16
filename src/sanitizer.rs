@@ -634,8 +634,16 @@ fn instrument_expr(
         | Expr::PreDec { e, .. }
         | Expr::PostInc { e, .. }
         | Expr::PostDec { e, .. } => {
+            // ++/-- 是读-改-写: 先对操作数走 load 检查 (instrument_expr),
+            // 再为内存目标补一个 store 检查 (地址取插桩前的 lvalue)。
+            let target_kind = if flags.needs_load_store_check() || flags.needs_kcsan_check() {
+                classify_store_target(e)
+            } else {
+                None
+            };
+            let lhs = e.as_ref().clone();
             instrument_expr(e, flags, ctx, guard_var, guard_base);
-            ExprKind::Trivial
+            ExprKind::IncDec(target_kind, Box::new(lhs))
         }
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
             for item in inits.iter_mut() {
@@ -766,6 +774,13 @@ fn instrument_expr(
             }
         }
         ExprKind::Assign(None) => {}
+        ExprKind::IncDec(Some(check_kind), lhs) => {
+            // 对 ++/-- 内存目标 (Deref/Index/ArrowMember) 补 store 检查:
+            // 用插桩前 lvalue 的地址作入参, 检查在自增/自减求值前执行。
+            let wrapped = wrap_with_mem_check_assign(&lhs, expr, check_kind, &span, flags);
+            *expr = wrapped;
+        }
+        ExprKind::IncDec(None, _) => {}
     }
 }
 
@@ -778,6 +793,7 @@ enum ExprKind {
     Index(usize),
     ArrowMember(usize),
     Assign(Option<MemCheckKind>),
+    IncDec(Option<MemCheckKind>, Box<Expr>),
 }
 
 fn expr_span(e: &Expr) -> Span {
@@ -1147,15 +1163,8 @@ fn wrap_with_mem_check(
         MemCheckKind::Load(sz) | MemCheckKind::Store(sz) => sz,
     };
     let is_write = matches!(kind, MemCheckKind::Store(_));
-    // KCSAN-only 与 KASAN-only 是互斥选项;若同时启用则 KASAN 优先
-    // (KASAN 覆盖 KCSAN 的所有检测并提供更细粒度的诊断)。
-    let call = make_mem_check_call(addr_expr, size, is_write, span, flags);
-    Expr::Comma {
-        l: Box::new(call),
-        r: Box::new(expr.clone()),
-        span: span.clone(),
-        ty: inner_ty,
-    }
+    let checks = make_mem_check_calls(addr_expr, size, is_write, span, flags);
+    chain_mem_checks(checks, expr.clone(), span, inner_ty)
 }
 
 /// 赋值专用:用 LHS 的 AddrOf 作为检查入参 (避免 AddrOf(Assign) 的
@@ -1178,72 +1187,94 @@ fn wrap_with_mem_check_assign(
         MemCheckKind::Load(sz) | MemCheckKind::Store(sz) => sz,
     };
     let is_write = matches!(kind, MemCheckKind::Store(_));
-    let _ = kind; // 静音未使用
-    let call = make_mem_check_call(addr_expr, size, is_write, span, flags);
-    Expr::Comma {
-        l: Box::new(call),
-        r: Box::new(assign.clone()),
+    let checks = make_mem_check_calls(addr_expr, size, is_write, span, flags);
+    chain_mem_checks(checks, assign.clone(), span, inner_ty)
+}
+
+/// 把若干顺序执行的检查调用链成 `(c1, (c2, ... (cN, inner)))`。
+fn chain_mem_checks(checks: Vec<Expr>, inner: Expr, span: &Span, ty: Type) -> Expr {
+    let mut acc = inner;
+    for c in checks.into_iter().rev() {
+        acc = Expr::Comma {
+            l: Box::new(c),
+            r: Box::new(acc),
+            span: span.clone(),
+            ty: ty.clone(),
+        };
+    }
+    acc
+}
+
+/// 根据当前启用的 sanitizer 生成内存访问检查调用列表 (按序执行)。
+///
+/// - KCSAN: `__kcsan_check_access(addr, size, is_write)` — 数据竞争检测,
+///   与 KASAN 相互独立, 二者可同时启用 (KCSAN 查竞争, KASAN 查越界/UAF)。
+/// - KASAN/HWASAN user mode: `__asan_loadN` / `__asan_storeN` 运行时函数。
+/// - KASAN kernel mode: 内联 shadow 地址计算 (shadow = (addr >> 3) + offset)。
+fn make_mem_check_calls(
+    addr: Expr,
+    size: usize,
+    is_write: bool,
+    span: &Span,
+    flags: SanitizerFlags,
+) -> Vec<Expr> {
+    let mut out = Vec::new();
+    if flags.kcsan {
+        out.push(make_kcsan_check_call(addr.clone(), size, is_write, span));
+    }
+    if flags.kasan || flags.hwasan {
+        if flags.kasan && flags.kernel_mode {
+            // 内核模式 KASAN: 内联 shadow 地址计算 (x86_64)
+            out.push(make_kernel_kasan_check(addr, size, is_write, span));
+        } else {
+            out.push(make_asan_call(addr, size, is_write, span, flags));
+        }
+    }
+    out
+}
+
+/// `__kcsan_check_access(addr, size, is_write)` 三参调用
+/// (LLVM runtime 签名: const volatile void*, size_t, int)。
+fn make_kcsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: "__kcsan_check_access".to_string(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(
+                Box::new(Type::Void),
+                vec![Type::Ptr(Box::new(Type::Void)), Type::ULong, Type::Int],
+            ),
+        }),
+        args: vec![
+            addr,
+            Expr::Int {
+                v: size as i128,
+                span: span.clone(),
+                ty: Type::ULong,
+            },
+            Expr::Int {
+                v: if is_write { 1 } else { 0 },
+                span: span.clone(),
+                ty: Type::Int,
+            },
+        ],
         span: span.clone(),
-        ty: inner_ty,
+        ty: Type::Void,
     }
 }
 
-/// 根据当前启用的 sanitizer 选择正确的内存检查函数。
-///
-/// - KASAN kernel mode: 内联 shadow 地址计算 (shadow = (addr >> 3) + offset)
-/// - KASAN/HWASAN user mode:  `__asan_loadN` / `__asan_storeN` 运行时函数
-/// - KCSAN only:                       `__kcsan_check_access(addr, size, is_write)`
-///
-/// KASAN 优先 (它提供更细粒度的诊断, KCSAN 仅是数据竞争检测)。
-fn make_mem_check_call(
+/// `__asan_loadN/storeN(addr[, size])` 运行时调用。
+/// N ≤ 16 单参;N > 16 或聚合类型双参 `(addr, size_t)`。
+fn make_asan_call(
     addr: Expr,
     size: usize,
     is_write: bool,
     span: &Span,
     flags: SanitizerFlags,
 ) -> Expr {
-    let kasan_active = flags.kasan || flags.hwasan;
-    
-    // 内核模式 KASAN: 内联 shadow 地址计算
-    // x86_64: shadow = (addr >> 3) + 0xdffffc0000000000
-    // 这样内核不需要提供 __asan_loadN/__asan_storeN 运行时函数
-    if flags.kasan && flags.kernel_mode {
-        return make_kernel_kasan_check(addr, size, is_write, span);
-    }
-    
-    if !kasan_active && flags.kcsan {
-        // KCSAN-only 路径: emit __kcsan_check_access(addr, size, is_write)
-        // LLVM 运行时签名: void __kcsan_check_access(const volatile void *ptr,
-        //                                          size_t size, int is_write)
-        return Expr::Call {
-            callee: Box::new(Expr::Ident {
-                name: Ident {
-                    name: "__kcsan_check_access".to_string(),
-                    span: span.clone(),
-                },
-                span: span.clone(),
-                ty: Type::Func(
-                    Box::new(Type::Void),
-                    vec![Type::Ptr(Box::new(Type::Void)), Type::ULong, Type::Int],
-                ),
-            }),
-            args: vec![
-                addr,
-                Expr::Int {
-                    v: size as i128,
-                    span: span.clone(),
-                    ty: Type::ULong,
-                },
-                Expr::Int {
-                    v: if is_write { 1 } else { 0 },
-                    span: span.clone(),
-                    ty: Type::Int,
-                },
-            ],
-            span: span.clone(),
-            ty: Type::Void,
-        };
-    }
     let fn_name = if is_write {
         if flags.hwasan {
             hwasan_store_fn(size)
@@ -1257,13 +1288,12 @@ fn make_mem_check_call(
             kasan_load_fn(size)
         }
     };
-    // P1.1: 16 字节以下用单参 `__asan_loadN(addr)`,16 字节以上或
-    // 聚合类型用双参 `__asan_loadN(addr, size_t)`. LLVM 运行时
-    // 期望的签名 (asan_interface.h):
+    // 16 字节以下用单参 `__asan_loadN(addr)`, 16 字节以上或聚合类型用
+    // 双参 `__asan_loadN(addr, size_t)`. LLVM 运行时期望的签名
+    // (asan_interface.h):
     //   void __asan_loadN(void const volatile *addr)         N in {1,2,4,8,16}
     //   void __asan_loadN(void const volatile *addr, size_t size)  N > 16
-    // 同理 store. 运行时须提供匹配的 __asan_load24 / __asan_load32 /
-    // __asan_load64 / __asan_loadN 等符号. dcc 这边只 emit 调用.
+    // 同理 store. 运行时须提供匹配的 __asan_load24 / __asan_load32 等符号.
     let args = if size > 16 && size != 0 {
         vec![
             addr,
@@ -1296,93 +1326,134 @@ fn make_mem_check_call(
     }
 }
 
-/// 内核模式 KASAN 内联 shadow 检查
-/// 
-/// x86_64: shadow = (addr >> 3) + 0xdffffc0000000000
-/// 生成代码: 
-///   shadow = (addr >> 3) + KASAN_SHADOW_OFFSET
-///   shadow_byte = *shadow
-///   shadow_byte < 0 ? __asan_report_error(addr) : 0
-/// 
-/// 简化版: 只检查 shadow byte 是否为负 (poisoned), 不检查具体访问大小
+/// 内核模式 KASAN 内联 shadow 检查 (x86_64)。
+///
+/// 每个 shadow 字节覆盖 8 字节 granule:
+/// - `0`: 整 granule 可访问
+/// - `1..7`: 仅前 N 字节可访问
+/// - `>= 128` (即负的 signed 值): 已毒化
+///
+/// 对访问 `[addr, addr+size)` (size 为编译期常量), 记
+/// `need = (addr & 7) + size` (以 granule 首字节为原点的末偏移),
+/// granule g 的 shadow 值 `v_g = *(u8*)(shadow + (addr >> 3) + g)`:
+/// `poisoned_g = (need > 8g) && (v_g >= 128 || (v_g > 0 && need - 8g > v_g))`。
+/// (`v_g >= 128` 即负值毒化;`v_g > 0` 且覆盖超过可达前缀即部分毒化越界)
+/// 任一 granule 毒化即调 `__asan_report_loadN/storeN(addr)`。
 fn make_kernel_kasan_check(
     addr: Expr,
-    _size: usize,
-    _is_write: bool,
+    size: usize,
+    is_write: bool,
     span: &Span,
 ) -> Expr {
     // KASAN shadow offset for x86_64 kernel
     const KASAN_SHADOW_OFFSET: i128 = 0xdffffc0000000000u64 as i128;
-    
+
+    let ul = |v: i128| Expr::Int {
+        v,
+        span: span.clone(),
+        ty: Type::ULong,
+    };
+    let bop = |op: BinOp, l: Expr, r: Expr, ty: Type| Expr::Binop {
+        op,
+        l: Box::new(l),
+        r: Box::new(r),
+        span: span.clone(),
+        ty,
+    };
+    let cmp = |op: BinOp, l: Expr, r: Expr| bop(op, l, r, Type::Int);
+
+    // 统一把地址转成无符号整型再参与位运算 (codegen 对同尺寸 cast 是 no-op)
+    let addr_u = Expr::Cast {
+        e: Box::new(addr.clone()),
+        ty: Type::ULong,
+        span: span.clone(),
+    };
     // shadow_addr = (addr >> 3) + KASAN_SHADOW_OFFSET
-    let addr_shifted = Expr::Binop {
-        op: BinOp::Shr,
-        l: Box::new(addr.clone()),
-        r: Box::new(Expr::Int {
-            v: 3,
+    let shadow_idx = bop(BinOp::Shr, addr_u.clone(), ul(3), Type::ULong);
+    let shadow_base = bop(BinOp::Add, shadow_idx, ul(KASAN_SHADOW_OFFSET), Type::ULong);
+    // need = (addr & 7) + size
+    let need = bop(
+        BinOp::Add,
+        bop(BinOp::And, addr_u, ul(7), Type::ULong),
+        ul(size as i128),
+        Type::ULong,
+    );
+
+    // 访问可能触及的 granule 数: need 最大 size + 7
+    let granules = (size + 14) / 8;
+    let mut poisoned: Option<Expr> = None;
+    for g in 0..granules {
+        // 读取 granule g 的 shadow 字节 (零扩展, 值域 0..=255)
+        let vg = Expr::Deref {
+            e: Box::new(Expr::Cast {
+                e: Box::new(bop(BinOp::Add, shadow_base.clone(), ul(g as i128), Type::ULong)),
+                ty: Type::Ptr(Box::new(Type::UChar)),
+                span: span.clone(),
+            }),
             span: span.clone(),
-            ty: Type::ULong,
-        }),
-        span: span.clone(),
-        ty: Type::ULong,
-    };
-    
-    let shadow_addr = Expr::Binop {
-        op: BinOp::Add,
-        l: Box::new(addr_shifted),
-        r: Box::new(Expr::Int {
-            v: KASAN_SHADOW_OFFSET,
-            span: span.clone(),
-            ty: Type::ULong,
-        }),
-        span: span.clone(),
-        ty: Type::ULong,
-    };
-    
-    // shadow_byte = *(signed char*)shadow_addr
-    let shadow_byte = Expr::Deref {
-        e: Box::new(Expr::Cast {
-            e: Box::new(shadow_addr),
-            ty: Type::Ptr(Box::new(Type::Char)),
-            span: span.clone(),
-        }),
-        span: span.clone(),
-        ty: Type::Char,
-    };
-    
-    // shadow_byte < 0
-    let check = Expr::Binop {
-        op: BinOp::Lt,
-        l: Box::new(shadow_byte),
-        r: Box::new(Expr::Int {
-            v: 0,
-            span: span.clone(),
-            ty: Type::Char,
-        }),
-        span: span.clone(),
-        ty: Type::Int,
-    };
-    
+            ty: Type::UChar,
+        };
+        // 本 granule 毒化判定:
+        //   v >= 128 (负值) 或 (v > 0 && need - 8g > v)
+        let pg = cmp(
+            BinOp::OrOr,
+            cmp(BinOp::Gt, vg.clone(), ul(127)),
+            cmp(
+                BinOp::AndAnd,
+                cmp(BinOp::Gt, vg.clone(), ul(0)),
+                cmp(
+                    BinOp::Gt,
+                    bop(BinOp::Sub, need.clone(), ul((8 * g) as i128), Type::ULong),
+                    Expr::Cast {
+                        e: Box::new(vg),
+                        ty: Type::ULong,
+                        span: span.clone(),
+                    },
+                ),
+            ),
+        );
+        // 仅当 need > 8g 时 granule g 被触及 (g=0 恒触及, 跳过条件)
+        let term = if g == 0 {
+            pg
+        } else {
+            cmp(
+                BinOp::AndAnd,
+                cmp(BinOp::Gt, need.clone(), ul((8 * g) as i128)),
+                pg,
+            )
+        };
+        poisoned = Some(match poisoned {
+            None => term,
+            Some(acc) => cmp(BinOp::OrOr, acc, term),
+        });
+    }
+
+    let report_name = format!(
+        "__asan_report_{}{}",
+        if is_write { "store" } else { "load" },
+        size
+    );
     let report_call = Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident {
-                name: "__asan_report_error".to_string(),
+                name: report_name,
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(
-                Box::new(Type::Void),
-                vec![Type::Ptr(Box::new(Type::Void))],
-            ),
+            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
         }),
         args: vec![addr],
         span: span.clone(),
         ty: Type::Void,
     };
-    
-    // Use ternary operator: check ? report_call : 0
+
+    // poisoned ? report_call(addr) : 0
     Expr::Cond {
-        cond: Box::new(check),
+        cond: Box::new(poisoned.unwrap_or_else(|| Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        })),
         then_: Box::new(report_call),
         else_: Box::new(Expr::Int {
             v: 0,
@@ -1627,12 +1698,15 @@ fn guard_call_stmt(guard_var: &str, idx: u32, span: &Span) -> BlockItem {
 }
 
 /// TU 级一次性 init (不含 per-function coverage)。
+/// 内核模式 (-fsanitize=kernel-address / kernel-hwaddress) 不发射
+/// `__asan_init` / `__hwasan_init`: 内核运行时由 KASAN/KCSAN 自身初始化,
+/// 编译器只负责访存检查 (内联 shadow) 与报告, 避免未定义符号。
 fn tu_init_calls(flags: SanitizerFlags, span: &Span) -> Vec<BlockItem> {
     let mut out = Vec::new();
-    if flags.kasan {
+    if flags.kasan && !flags.kernel_mode {
         out.push(sanitizer_call("__asan_init", span));
     }
-    if flags.hwasan {
+    if flags.hwasan && !flags.kernel_mode {
         out.push(sanitizer_call("__hwasan_init", span));
     }
     if flags.ubsan {
@@ -2659,7 +2733,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Ptr(Box::new(Type::Void)),
         };
-        let call = make_mem_check_call(
+        let call = make_mem_check_calls(
             addr,
             24,
             false,
@@ -2668,7 +2742,10 @@ mod tests {
                 kasan: true,
                 ..Default::default()
             },
-        );
+        )
+        .into_iter()
+        .next()
+        .unwrap();
         if let Expr::Call { callee, args, .. } = call {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 assert_eq!(name.name, "__asan_load24");
@@ -2693,7 +2770,7 @@ mod tests {
             ty: Type::Ptr(Box::new(Type::Void)),
         };
         for &sz in &[1usize, 2, 4, 8, 16] {
-            let call = make_mem_check_call(
+            let call = make_mem_check_calls(
                 addr.clone(),
                 sz,
                 false,
@@ -2702,7 +2779,10 @@ mod tests {
                     kasan: true,
                     ..Default::default()
                 },
-            );
+            )
+            .into_iter()
+            .next()
+            .unwrap();
             if let Expr::Call { args, .. } = call {
                 assert_eq!(args.len(), 1, "size {} should emit single arg", sz);
             } else {
@@ -2761,10 +2841,141 @@ mod tests {
             "kernel KASAN should not call __asan_loadN, got: {:?}",
             names
         );
-        // 应 emit __asan_report_error (shadow byte 检查失败时调用)
+        // 4 字节 int 解引用 → __asan_report_load4 (shadow 违规时调用)
         assert!(
-            names.iter().any(|n| n == "__asan_report_error"),
-            "kernel KASAN should call __asan_report_error on shadow violation, got: {:?}",
+            names.iter().any(|n| n == "__asan_report_load4"),
+            "kernel KASAN should call __asan_report_load4 on shadow violation, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kernel_kasan_shadow_check_is_size_aware() {
+        // 完整 shadow 检查应感知访问大小: 8 字节 double 解引用报告
+        // __asan_report_load8, 且检查表达式按 size 覆盖对应 granule。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Double)),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Double,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kasan: true,
+                kernel_mode: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__asan_report_load8"),
+            "kernel KASAN should report load8 for a double deref, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kernel_kasan_store_reports_store_size() {
+        // *p = v (kernel mode) 应报告 __asan_report_store4。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Expr {
+                e: Expr::Assign {
+                    op: BinOp::Add,
+                    l: Box::new(Expr::Deref {
+                        e: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "p".into(),
+                                span: Span::point("t.c", 1, 1),
+                            },
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Ptr(Box::new(Type::Int)),
+                        }),
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    r: Box::new(Expr::Int {
+                        v: 42,
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kasan: true,
+                kernel_mode: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__asan_report_store4"),
+            "kernel KASAN should report store4 for *p = v, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kernel_kasan_skips_user_mode_tu_init() {
+        // 内核模式由内核自初始化 KASAN: 不发射 __asan_init / __hwasan_init。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kasan: true,
+                kernel_mode: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            !names.iter().any(|n| n == "__asan_init"),
+            "kernel KASAN must not emit user-mode __asan_init, got: {:?}",
             names
         );
     }
@@ -2870,7 +3081,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Ptr(Box::new(Type::Void)),
         };
-        let call = make_mem_check_call(
+        let call = make_mem_check_calls(
             addr,
             4,
             true, // is_write
@@ -2879,7 +3090,10 @@ mod tests {
                 kcsan: true,
                 ..Default::default()
             },
-        );
+        )
+        .into_iter()
+        .next()
+        .unwrap();
         if let Expr::Call { callee, args, .. } = call {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 assert_eq!(name.name, "__kcsan_check_access");
@@ -2908,7 +3122,7 @@ mod tests {
             span: Span::point("t.c", 1, 1),
             ty: Type::Ptr(Box::new(Type::Void)),
         };
-        let call = make_mem_check_call(
+        let call = make_mem_check_calls(
             addr,
             8,
             false, // is_write = false for load
@@ -2917,7 +3131,10 @@ mod tests {
                 kcsan: true,
                 ..Default::default()
             },
-        );
+        )
+        .into_iter()
+        .next()
+        .unwrap();
         if let Expr::Call { args, .. } = call {
             if let Expr::Int { v, .. } = &args[2] {
                 assert_eq!(*v, 0, "is_write must be 0 for load");
@@ -2927,6 +3144,169 @@ mod tests {
         } else {
             panic!("expected Expr::Call");
         }
+    }
+
+    #[test]
+    fn kcsan_and_kasan_coexist_emit_both_checks() {
+        // KCSAN 与 KASAN 同时启用时, 同一访存应同时发射
+        // __kcsan_check_access 与 __asan_loadN (竞争检测 + 越界检测互补)。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int)),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kasan: true,
+                kcsan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__asan_load4"),
+            "KASAN load check missing when KCSAN coexists: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n == "__kcsan_check_access"),
+            "KCSAN check missing when KASAN coexists: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kasan_store_check_on_incdec_deref() {
+        // (*p)++ 是读-改-写: KASAN 下应在自增前发射 __asan_store4。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Expr {
+                e: Expr::PostInc {
+                    e: Box::new(Expr::Deref {
+                        e: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "p".into(),
+                                span: Span::point("t.c", 1, 1),
+                            },
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Ptr(Box::new(Type::Int)),
+                        }),
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kasan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n.starts_with("__asan_store")),
+            "KASAN should inject __asan_storeN before (*p)++, got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n.starts_with("__asan_load")),
+            "KASAN should also inject __asan_loadN for the read part of (*p)++, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn kcsan_store_check_on_incdec_index() {
+        // a[i]-- (KCSAN-only) 应在自减前发射 __kcsan_check_access(addr,4,1)。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Expr {
+                e: Expr::PreDec {
+                    e: Box::new(Expr::Index {
+                        arr: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "arr".into(),
+                                span: Span::point("t.c", 1, 1),
+                            },
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Ptr(Box::new(Type::Int)),
+                        }),
+                        idx: Box::new(Expr::Int {
+                            v: 0,
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Int,
+                        }),
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                },
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                kcsan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__kcsan_check_access"),
+            "KCSAN should inject __kcsan_check_access before a[i]--, got: {:?}",
+            names
+        );
     }
 
     // ── Fuzzer ────────────────────────────────────────────────────────

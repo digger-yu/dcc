@@ -6272,6 +6272,163 @@ int main(void) { int x = 42; return f(&x); }
     );
 }
 
+/// P1.5: 完整内核 KASAN shadow 检查. -fsanitize=kernel-address 应内联
+/// shadow 地址计算 (shadow = (addr >> 3) + 0xdffffc0000000000) 并在
+/// shadow 字节毒化时调用 __asan_report_loadN (size 感知), 而不是调用
+/// 用户态 __asan_loadN/__asan_storeN 运行时函数.
+#[test]
+fn kernel_kasan_inline_shadow_report_emitted() {
+    let src = "\
+int f(int *p) { return *p; }
+";
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-kasan-kernel-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-kasan-kernel-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write kernel kasan fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=kernel-address", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "kernel-address compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    // 4 字节 int 解引用 → shadow 违规时调 __asan_report_load4
+    assert!(
+        asm.contains("call __asan_report_load4"),
+        "kernel KASAN should inline shadow check + report_load4, asm:\n{}",
+        asm
+    );
+    // 不应调用用户态运行时检查函数
+    assert!(
+        !asm.contains("call __asan_load4") && !asm.contains("call __asan_store"),
+        "kernel KASAN must not emit user-mode __asan_loadN/__asan_storeN:\n{}",
+        asm
+    );
+    // 内核运行时自初始化 KASAN, 不发射用户态 __asan_init
+    assert!(
+        !asm.contains("call __asan_init"),
+        "kernel KASAN must not emit user-mode __asan_init:\n{}",
+        asm
+    );
+}
+
+/// P1.5: KCSAN 与 KASAN 可同时启用. 同一访存应同时发射
+/// __kcsan_check_access 与 __asan_loadN.
+#[test]
+fn kcsan_with_kasan_emits_both_checks() {
+    let src = "\
+int f(int *p) { return *p; }
+";
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-kcsan-kasan-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-kcsan-kasan-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write kcsan+kasan fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=address,thread", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "address,thread compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        asm.contains("call __asan_load4"),
+        "KASAN load check missing when KCSAN coexists:\n{}",
+        asm
+    );
+    assert!(
+        asm.contains("call __kcsan_check_access"),
+        "KCSAN check missing when KASAN coexists:\n{}",
+        asm
+    );
+}
+
+/// P1.5: 自增/自减内存目标 (*p)++ / a[i]-- 是读-改-写, KASAN 下应
+/// 同时发射 __asan_loadN 与 __asan_storeN.
+#[test]
+fn kasan_store_check_on_postinc_deref_emitted() {
+    let src = "\
+void f(int *p) { (*p)++; }
+";
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-kasan-incdec-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-kasan-incdec-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write incdec fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=address", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "incdec + asan compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    assert!(
+        asm.contains("call __asan_store4"),
+        "KASAN should emit __asan_store4 before (*p)++, asm:\n{}",
+        asm
+    );
+    assert!(
+        asm.contains("call __asan_load4"),
+        "KASAN should emit __asan_load4 for the read part of (*p)++, asm:\n{}",
+        asm
+    );
+}
+
+/// 内存 lvalue 自增/自减 codegen 运行期验证: (*p)++ / a[i]-- /
+/// p->f++ / 前缀+后缀 + 指针步长, 均应产生真实读-改-写.
+#[test]
+fn incdec_memory_lvalue_runtime() {
+    let src = "\
+int main(void) {
+    int a[4] = {1, 2, 3, 4};
+    int *p = &a[1];
+    (*p)++;          // a[1] = 3
+    a[2]--;          // a[2] = 2
+    ++a[0];          // a[0] = 2
+    int old = a[3]++; // old = 4, a[3] = 5
+    if (a[0] != 2 || a[1] != 3 || a[2] != 2 || a[3] != 5 || old != 4)
+        return 1;
+    struct S { int f; } s = {7};
+    struct S *sp = &s;
+    sp->f++;         // s.f = 8
+    if (s.f != 8) return 2;
+    // 指针自增: 步长 = 元素大小
+    int *q = &a[0];
+    q++;             // q = &a[1]
+    if (*q != 3) return 3;
+    return 0;
+}
+";
+    let (out, exe) = run_compile_and_run("incdec-mem-lvalue", src);
+    assert!(
+        out.status.success(),
+        "incdec memory lvalue compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "incdec memory lvalue runtime mismatch, rc = {rc}");
+}
+
 /// P2.1: C++ `obj.*ptr_to_member` 和 `obj->*ptr_to_member` 解析
 /// + codegen (Section 6). 验证 dcc 解析器接受 `.*` 单 token
 ///   (lexer 产生 TokKind::DotStar) 和 `->*` (`->` + `*` 两 token),

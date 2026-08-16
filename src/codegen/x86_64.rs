@@ -8166,30 +8166,73 @@ impl Codegen {
         } else {
             1
         };
-        if let Expr::Ident { name, .. } = e {
+        // sanitizer 插桩可能把操作数包成 Comma(check, lvalue):
+        // 先执行 check 调用, 再对真实 lvalue 做读-改-写, 否则
+        // 形态匹配失败会静默丢失自增/自减。
+        let mut lv: &Expr = e;
+        while let Expr::Comma { l: check, r: inner, .. } = lv {
+            self.gen_expr(check, 0);
+            lv = inner.as_ref();
+        }
+        if let Expr::Ident { name, .. } = lv {
             let off = self.var_offset(&name.name);
             self.load_stack(dst, off);
             if !is_pre {
                 self.push(dst);
             } // 后缀: 保存旧值
-              // add/sub imm32 (0x81 /0 for add, 0x81 /5 for sub)
-            let modrm_base = if is_inc {
-                0xC0u8 | ((dst & 7) << 3)
-            } else {
-                0xE8u8 | ((dst & 7) << 3)
-            };
-            if dst < 8 {
-                self.emit(&[0x48, 0x81, modrm_base]);
-                self.emit(&step.to_le_bytes());
-            } else {
-                self.emit(&[0x49, 0x81, modrm_base]);
-                self.emit(&step.to_le_bytes());
-            }
+            self.emit_inc_dec_reg(dst, is_inc, step);
             self.store_stack(dst, off);
             if !is_pre {
                 self.pop(dst);
             } // 后缀: 恢复旧值到 dst
+        } else if matches!(lv, Expr::Deref { .. } | Expr::Index { .. } | Expr::Member { .. }) {
+            // 内存 lvalue: (*p)++ / a[i]-- / s->f++
+            let mem_sz = inner_ty.size().max(1);
+            if !self.gen_lvalue_addr(lv, 0) {
+                return;
+            }
+            self.push(0); // 保存地址
+            self.emit_load_mem_typed(mem_sz, &inner_ty); // rax = 值 (按类型符号/零扩展)
+            if !is_pre {
+                self.push(0); // 后缀: 保存旧值 (栈: [旧值, 地址])
+            }
+            self.emit_inc_dec_reg(0, is_inc, step);
+            // 逆序恢复: 旧值(若有) → 地址
+            if is_pre {
+                self.pop(1); // rcx = 地址
+            } else {
+                self.pop(2); // rdx = 旧值
+                self.pop(1); // rcx = 地址
+            }
+            match mem_sz {
+                1 => self.emit(&[0x88, 0x01]),       // mov byte [rcx], al
+                2 => self.emit(&[0x66, 0x89, 0x01]), // mov word [rcx], ax
+                4 => self.emit(&[0x89, 0x01]),       // mov dword [rcx], eax
+                _ => self.emit(&[0x48, 0x89, 0x01]), // mov qword [rcx], rax
+            }
+            if is_pre {
+                if dst != 0 {
+                    self.mov(dst, 0); // 前缀: dst = 新值
+                }
+            } else if dst != 2 {
+                self.mov(dst, 2); // 后缀: dst = 旧值
+            }
         }
+    }
+
+    /// `add/sub dst, imm32` (0x81 /0 add, 0x81 /5 sub)。
+    fn emit_inc_dec_reg(&mut self, dst: u8, is_inc: bool, step: i32) {
+        let modrm_base = if is_inc {
+            0xC0u8 | ((dst & 7) << 3)
+        } else {
+            0xE8u8 | ((dst & 7) << 3)
+        };
+        if dst < 8 {
+            self.emit(&[0x48, 0x81, modrm_base]);
+        } else {
+            self.emit(&[0x49, 0x81, modrm_base]);
+        }
+        self.emit(&step.to_le_bytes());
     }
 
     // 浮点运算: SSE 指令 (addsd/sd, subsd, mulsd, divsd, ucomisd)

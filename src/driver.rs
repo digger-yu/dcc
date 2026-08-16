@@ -1503,10 +1503,12 @@ fn host_sanitizer_flags(cfg: &Config) -> Vec<String> {
     if cfg.bounds_check || cfg.sanitizers.ubsan {
         v.push("-fsanitize=undefined".to_string());
     }
-    if cfg.sanitizers.kasan {
+    // 内核模式 (-fsanitize=kernel-address / kernel-hwaddress) 内联 shadow
+    // 检查, 运行时由内核提供, 不链接宿主 asan/hwasan 运行时。
+    if cfg.sanitizers.kasan && !cfg.sanitizers.kernel_mode {
         v.push("-fsanitize=address".to_string());
     }
-    if cfg.sanitizers.hwasan {
+    if cfg.sanitizers.hwasan && !cfg.sanitizers.kernel_mode {
         v.push("-fsanitize=hwaddress".to_string());
     }
     if cfg.sanitizers.fuzzer {

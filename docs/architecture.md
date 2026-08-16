@@ -566,29 +566,32 @@ Driver 在 parse 之后、IR lower 之前调用 `instrument_program()`，所有�
 
 | 层级 / 通道 | 行为 | 显式不做的部分 |
 |------|------|----------|
-| TU init | 首个有体函数前插入 `__asan_init` / `__hwasan_init` / `__ubsan_init` / `__kcsan_init` 各一次 | 重复 init |
+| TU init | 首个有体函数前插入 `__asan_init` / `__hwasan_init` / `__ubsan_init` / `__kcsan_init` 各一次；内核模式（`kernel-address` / `kernel-hwaddress`）不发射 `__asan_init` / `__hwasan_init`（内核自初始化 KASAN） | 重复 init |
 | 函数入口 | 每个有体函数（含嵌套函数）前插入 `__sanitizer_cov_trace_pc`（KCOV / Fuzzer）、`__kcsan_func_entry`（KCSAN） |  |
 | KCOV / Fuzzer 边覆盖 | 每函数声明 `static uint32_t __dcc_cov_guards_N[16]` + 调 `__sanitizer_cov_trace_pc_guard_init` 一次；然后在 `if/while/do/for/case/label/goto` 等边位置插入 `__sanitizer_cov_trace_pc_guard(&guards[i])` | 跨函数 inline 合并 |
-| KASAN / HWASAN | 任意 `Deref/Index/ArrowMember` load 前注入 `__asan_load1/2/4/8/16(&e)`；任意 LHS 为 `Deref/Index/ArrowMember` 的 `Assign` 前注入 `__asan_storeN(&lhs)`（取 LHS 的地址避免重复求值）；codegen 级栈红区：`pre_register_vars` 每变量后追加 4×8B Void 占位槽 (32B redzone)，帧分配后 `__asan_poison_memory_region` 毒化全帧 + `__asan_unpoison_memory_region` 逐变量解除毒化；全局变量 .rodata 后追加 32B 零填充 | struct 16B 以上 / 非整型 load/store、MTE 标签 |
-| UBSAN | `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 在非常量折叠时前插 `__ubsan_handle_signed_integer_overflow(0, lhs)` | VLA bound、null deref、float cast 等 |
+| KASAN / HWASAN | 任意 `Deref/Index/ArrowMember` load 前注入 `__asan_load1/2/4/8/16(&e)`（>16B 走双参 `__asan_loadN(addr, size)`）；任意 LHS 为 `Deref/Index/ArrowMember` 的 `Assign` / `PreInc/PreDec/PostInc/PostDec` 前注入 `__asan_storeN(&lhs)`（取 LHS 的地址避免重复求值）；codegen 级栈红区：`pre_register_vars` 每变量后追加 4×8B Void 占位槽 (32B redzone)，帧分配后 `__asan_poison_memory_region` 毒化全帧 + `__asan_unpoison_memory_region` 逐变量解除毒化；全局变量 .rodata 后追加 32B 零填充 | MTE 标签 |
+| KASAN-kernel（内联 shadow） | `-fsanitize=kernel-address` 不调 `__asan_loadN/__asan_storeN`，改发内联 shadow 检查：`need = (addr & 7) + size`，逐 granule 读 `*(u8*)(shadow + (addr >> 3) + g)`，`v >= 128 || (v > 0 && need - 8g > v)` 即毒化，调用 `__asan_report_loadN/storeN(addr)`（size 感知 + granule 边界感知，x86_64 shadow 偏移 `0xdffffc0000000000`） |  |
+| UBSAN | `Div/Mod` 前 `__ubsan_handle_divrem_overflow(0, divisor)`；`Shl/Shr` 前 `__ubsan_handle_shift_out_of_bounds(0, shift_amt)`；有符号 `Add/Sub/Mul` 在非常量折叠时前插 `__ubsan_handle_signed_integer_overflow(0, lhs)`；VLA bound、null deref、float→int cast overflow 均插 `__ubsan_handle_*` |  |
 | Fuzzer | 比较 `EqEq/Ne/Lt/Gt/Le/Ge/AndAnd/OrOr` 前 `__sanitizer_cov_trace_cmp1/2/4/8(a, b)`；switch dispatch 前 `__sanitizer_cov_trace_switch(val)` | 运行时拦截 / libFuzzer 协议 |
-| KCSAN | 每函数 entry stub；内存访问 watchpoint 与 KASAN 共享 `__asan_loadN/__asan_storeN` 注入位 | 专用 `__kcsan_check_access` 路径 |
+| KCSAN | 每函数 entry stub + `__kcsan_func_entry`；每次访存独立发 `__kcsan_check_access(addr, size, is_write)`，与 KASAN 相互独立可共存（KCSAN 查数据竞争，KASAN 查越界/UAF） |  |
 | 元数据 | codegen 写 `.dcc.san_info`（`DCC_SAN\0` + v2 + kasan/hwasan/ubsan/kcsan/kcov/fuzzer 各 1 字节） |  |
 | `no_sanitize("address"/"undefined"/"thread"/"all")` | 按通道在函数级关闭：KASAN / UBSAN / KCSAN 通道分别被屏蔽；KCOV / Fuzzer 不受影响（coverage 仅反馈，无语义影响） |  |
 
 CLI 解析：`SanitizerFlags::from_args` 支持
 `-fsanitize=address,undefined,thread,hwaddress,fuzzer,coverage`
 （含 `kernel-address` / `kernel-kcsan` 别名）与 `-fsanitize-coverage`。
+宿主链接时 `-fsanitize=kernel-address` / `kernel-hwaddress` 不透传
+`-fsanitize=address` / `-fsanitize=hwaddress`（内核运行时自提供）。
 
 已知遗留：
-- dcc codegen 对 `Expr::Assign` 当前仅支持 LHS 为 `Ident`；`*p = v` /
-  `a[i] = v` / `p->f = v` 的实际 store 仍是空操作，但 KASAN store 桩
-  已正确插入到 store 之前（仅 codegen 部分缺失）。
-- KCSAN 完整 watchpoint 仍走 KASAN 共享通道，未独立发 `__kcsan_check_access`。
+- HWASAN AArch64 MTE 硬件 tag 模式（prologue tag 栈帧 + 指针 tag 流程）
+  未接入，软件 tag 模式完整。
 
 回归：`sanitizer_metadata_section_emitted`、`sanitizer_prologue_in_all_functions`、
 `kasan_stack_redzone_poison_unpoison`、`kasan_global_redzone_padding`、
-12 个 `sanitizer::tests` 单元测试。
+`kernel_kasan_inline_shadow_report_emitted`、`kcsan_with_kasan_emits_both_checks`、
+`kasan_store_check_on_postinc_deref_emitted`、`incdec_memory_lvalue_runtime`、
+46 个 `sanitizer::tests` 单元测试。
 
 ## C 前端扩展语法（`src/parser.rs` + `src/preproc.rs`）
 

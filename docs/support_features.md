@@ -24,16 +24,16 @@
 
 | 通道 | 能力 |
 |------|------|
-| KASAN (`-fsanitize=address`) | TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 `Deref/Index/ArrowMember` 与对应 `Assign` LHS 之前插入；N > 16 走双参 `__asan_loadN(addr, size_t)`；codegen 级栈红区（每局部变量后 32B padding，帧分配后 `__asan_poison_memory_region` 毒化全帧 + `__asan_unpoison_memory_region` 逐变量解除毒化）+ 全局变量红区（.rodata 中每全局变量后追加 32B 零填充） |
+| KASAN (`-fsanitize=address`) | TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 `Deref/Index/ArrowMember` load、对应 `Assign` LHS 以及 `PreInc/PreDec/PostInc/PostDec` 内存目标（读-改-写）之前插入；N > 16 走双参 `__asan_loadN(addr, size_t)`；codegen 级栈红区（每局部变量后 32B padding，帧分配后 `__asan_poison_memory_region` 毒化全帧 + `__asan_unpoison_memory_region` 逐变量解除毒化）+ 全局变量红区（.rodata 中每全局变量后追加 32B 零填充） |
 | HWASAN (`-fsanitize=hwaddress`) | 同 KASAN 路径但使用 `__hwasan_loadN` / `__hwasan_storeN` 函数名 |
-| KASAN-kernel (`-fsanitize=kernel-address`) | 内联 shadow 地址计算；x86_64: shadow = (addr >> 3) + 0xdffffc0000000000 |
+| KASAN-kernel (`-fsanitize=kernel-address`) | 完整内联 shadow 检查（不调用户态运行时）：x86_64 shadow = (addr >> 3) + 0xdffffc0000000000；逐 8B granule 校验 shadow 字节（`v >= 128` 毒化 / `v > 0 && need > v` 部分毒化越界，need = (addr & 7) + size），违规调 `__asan_report_loadN/storeN(addr)`；不发射 `__asan_init`（内核自初始化） |
 | UBSAN (`-fsanitize=undefined`) | `Div/Mod` / `Shl/Shr` / 有符号 `Add/Sub/Mul` / VLA bound / null deref / float cast overflow 全部前置 `__ubsan_handle_*` |
-| KCSAN (`-fsanitize=thread`) | TU init + 每函数 `__kcsan_func_entry`；KCSAN-only 模式走 `__kcsan_check_access(addr, size, is_write)` 三参调用 |
+| KCSAN (`-fsanitize=thread`) | TU init + 每函数 `__kcsan_func_entry`；每次访存独立发 `__kcsan_check_access(addr, size, is_write)` 三参调用，与 KASAN 可同时启用（竞争检测 + 越界检测互补） |
 | KCOV (`-fsanitize-coverage`) | 每函数 `__dcc_cov_guards_N[16]` 计数器 + 入口 `__sanitizer_cov_trace_pc` + 边覆盖 `__sanitizer_cov_trace_pc_guard` + 跨函数 inline 合并 (`profile::kcov_merge`) |
 | Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + `__sanitizer_cov_trace_cmp1/2/4/8` + `__sanitizer_cov_trace_switch` + libFuzzer 协议（`LLVMFuzzerTestOneInput` 入口包装、8-bit counters、PC table、malloc/free 拦截器） |
 | no_sanitize | `address` / `kernel-address` / `hwaddress` / `undefined` / `thread` / `kernel-kcsan` / `all` 按通道关闭；KCOV / Fuzzer 不受 `no_sanitize` 影响 |
 
-实现：`src/sanitizer.rs` `instrument_program()`，所有通道在 driver parse 之后、IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用。`.dcc.san_info` 节版本 v2。
+实现：`src/sanitizer.rs` `instrument_program()`，所有通道在 driver parse 之后、IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用；codegen 侧 `gen_inc_dec` 支持 Deref/Index/Member 内存 lvalue 读-改-写（`(*p)++` 等）。`.dcc.san_info` 节版本 v2。
 
 ## 性能分析子系统
 

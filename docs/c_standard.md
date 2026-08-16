@@ -126,10 +126,13 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - **Sanitizer（AST 层完整桩）**：`-fsanitize=address|undefined|thread|hwaddress|fuzzer|kernel-*`、
   `-fsanitize=a,b` 组合、`-fsanitize-coverage`。Driver 在 IR lower 前于
   AST 插桩：TU 级 `__asan_init` / `__hwasan_init` / `__ubsan_init` /
-  `__kcsan_init` 仅在首个有体函数前各插入一次；每个有体函数（含嵌套函数）
+  `__kcsan_init` 仅在首个有体函数前各插入一次（内核模式不发射
+  `__asan_init` / `__hwasan_init`）；每个有体函数（含嵌套函数）
   入口插入 `__sanitizer_cov_trace_pc`（coverage）与 `__kcsan_func_entry`
-  （KCSAN）；表达式层在 `Deref/Index/ArrowMember` 与对应 `Assign` LHS
-  之前注入 `__asan_load1/2/4/8/16` / `__asan_storeN`；`Div/Mod` /
+  （KCSAN）；表达式层在 `Deref/Index/ArrowMember` 与对应 `Assign` LHS、
+  `PreInc/PreDec/PostInc/PostDec` 内存目标之前注入
+  `__asan_load1/2/4/8/16` / `__asan_storeN`；`kernel-address` 走内联
+  shadow 检查 + `__asan_report_loadN/storeN`；`Div/Mod` /
   `Shl/Shr` / 有符号 `Add/Sub/Mul` 之前注入 `__ubsan_handle_*`；比较
   之前注入 `__sanitizer_cov_trace_cmp1/2/4/8`；switch dispatch 之前
   `__sanitizer_cov_trace_switch`；KCOV 在每个 `if/while/do/for/case/label/goto`
@@ -146,10 +149,11 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 | `-std=cXX` | 严格 C 标准 | - |
 | `-ffreestanding` | 不假设标准库存在 | off (假设 hosted) |
 | `-fno-builtin` | 不使用 builtin | off |
-| `-fsanitize=address` | KASAN 桩：TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 load/store 前 + codegen 级栈/全局变量红区插桩 | off |
+| `-fsanitize=address` | KASAN 桩：TU init + `__asan_load1/2/4/8/16` / `__asan_storeN` 在 load/store（含 `(*p)++` 读-改-写）前 + codegen 级栈/全局变量红区插桩 | off |
 | `-fsanitize=hwaddress` | HWASAN 桩：同 KASAN 路径（ARM MTE 标签未插入） | off |
-| `-fsanitize=undefined` | UBSAN 桩：div / shift / 有符号 overflow 前 `__ubsan_handle_*` | off |
-| `-fsanitize=thread` | KCSAN 桩：TU init + 每函数 entry，load/store 走 KASAN 通道 | off |
+| `-fsanitize=undefined` | UBSAN 桩：div / shift / 有符号 overflow / VLA bound / null deref / float cast 前 `__ubsan_handle_*` | off |
+| `-fsanitize=thread` | KCSAN 桩：TU init + 每函数 entry + 每次访存独立 `__kcsan_check_access(addr, size, is_write)`，可与 KASAN 共存 | off |
+| `-fsanitize=kernel-address` | 内联 shadow 检查（x86_64: shadow = (addr >> 3) + 0xdffffc0000000000）+ `__asan_report_loadN/storeN`，无用户态运行时依赖 | off |
 | `-fsanitize=fuzzer` | Fuzzer：KCOV + `__sanitizer_cov_trace_cmpN` + `__sanitizer_cov_trace_switch` | off |
 | `-fsanitize-coverage` | KCOV：`__sanitizer_cov_trace_pc` + 边覆盖 guard 计数器 | off |
 
