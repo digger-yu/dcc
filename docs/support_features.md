@@ -133,7 +133,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm goto 输出约束 | fall-through 路径写回，跳转路径保留原值；跨函数 `&&label` + asm goto 混用触发 warning |
 | asm 调试信息 | `-g` 下含 asm 的函数正常生成 DWARF 行号表 + DIEs；asm 块起始 PC 记录到 `asm_line_entries` 并生成精确 `.debug_line` 条目；SSA pipeline 跳过含 asm 函数避免重建丢失行号映射；mini-asm 不发射 `.debug_insn` 扩展 (GDB step-into asm 体验受限，与 GCC 行为一致) |
 | asm `%0` 约束 `"i"` 展开 | 带 `$` 前缀的 AT&T 立即数 |
-| asm 模板修饰符 `%a` / `%P` / `%l` | `%aN`/`%a[name]`: 地址形式 (寄存器同名, 立即数/内存去前缀); `%PN`/`%P[name]`: 原始符号名 (去 % / $ 前缀); `%lN`/`%l[name]`: asm goto 标签名 (边界安全多位索引); 立即数含运算符时自动加括号保护优先级 |
+| asm 模板修饰符 `%a` / `%P` / `%l` | `%aN`/`%a[name]`: 地址形式 (寄存器同名, 立即数/内存去前缀); `%PN`/`%P[name]`: 原始符号名 (去 % / $ 前缀); `%lN`/`%l[name]`: asm goto 标签名 (边界安全多位索引，索引越界走 W0004 warning); 立即数含运算符时自动加括号保护优先级 |
 | Mini x86 asm 局部/C 标签 | `N:` / `N:insn` / `found:` |
 | Mini x86 asm Linux legacy aliases | `cmpxchg8b` / `pushfl` / `popfl` / `iret` / `iretl` / 全条件码 `cmov*`（含宽度后缀别名）/ 裸 `in`/`out` / memory-indirect port / `shldw` / `shrdw` / 裸段前缀已覆盖；`tests/integration.rs` 固化不再降级为 nop |
 | Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg`/`cmpxchg8b` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`iret`/`iretl`/`iretq`/`sysenter`/`sysexit` / `pushf`/`pushfl`/`pushfq`/`popf`/`popfl`/`popfq` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`) |

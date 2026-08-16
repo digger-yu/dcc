@@ -3,3 +3,8 @@ warning[W0004]: asm goto references label 'missing_label' which is not in the la
    2 |	asm goto("jmp %l[missing_label]" : : : : real_label);
      |                                                     ^
   hint: add the label to the goto label list
+warning[W0004]: asm goto references label index 2 which is out of range (have 1 labels)
+  --> <file>:8:39
+   8 |	asm goto("jmp %l2" : : : : only_label);
+     |                                       ^
+  hint: check the label index or add missing labels

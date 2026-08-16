@@ -223,7 +223,7 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 | **W0001** | `type defaults to 'int' in declaration without a type specifier` | 隐式 int（GNU 兼容） | 仅有存储类：`static x;` | `w0001.c` |
 | **W0002** | `unknown type '…' treated as 'int' (-fpermissive)` | 未知类型降级为 int | `-fpermissive` 且遇到未声明 typedef | — |
 | **W0003** | `format attribute on '…' expects format string at argument …` 等 | printf/scanf 格式检查 | `__attribute__((format(printf,...)))` 参数不匹配 | — |
-| **W0004** | `asm goto references label '…' which is not in the label list` | asm 模板引用的标签不在 goto label 列表中 | `asm goto("jmp %l[missing]" : : : : real)` | `w0004.c` |
+| **W0004** | `asm goto references label '…' which is not in the label list` / `asm goto references label index … which is out of range` | asm 模板引用的标签不在 goto label 列表中，或 `%lN` 标签索引越界 | `asm goto("jmp %l[missing]" : : : : real)` / `asm goto("jmp %l2" : : : : only)` | `w0004.c` |
 | **W0005** | `impossible constraint: 'r' constraint with floating-point operand` | 约束与类型不匹配 | asm 约束字母与操作数表达式类型不兼容（如浮点绑 `r`、整数绑 `x`） | — |
 | **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | — |
 | **W1000** | `implicit declaration of '…' (assumed int)` | 宽松模式隐式函数声明 | C89/GNU89，或 `-fpermissive` 下调用未声明函数 | — |

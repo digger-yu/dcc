@@ -1489,6 +1489,84 @@ impl<'a> Parser<'a> {
         labels
     }
 
+    /// 验证 asm goto 模板中的 `%lN` / `%l[name]` 标签引用。
+    ///
+    /// 这些诊断必须保持 warning: Linux 内核等代码可能通过配置或
+    /// 宏展开产生暂不可解析的 asm goto 标签引用，dcc 应继续解析。
+    fn validate_asm_goto_labels(&mut self, asm_str: &str, goto_labels: &[Ident], op_count: usize) {
+        use std::collections::HashSet;
+
+        let label_names: HashSet<&str> = goto_labels.iter().map(|l| l.name.as_str()).collect();
+        let label_count = goto_labels.len();
+        let mut pos = 0;
+        let bytes = asm_str.as_bytes();
+
+        while pos < bytes.len() {
+            if bytes[pos] != b'%' {
+                pos += 1;
+                continue;
+            }
+
+            pos += 1;
+            if pos >= bytes.len() {
+                break;
+            }
+            if bytes[pos] == b'%' {
+                pos += 1;
+                continue;
+            }
+            if bytes[pos] != b'l' {
+                pos += 1;
+                continue;
+            }
+
+            pos += 1;
+            if pos < bytes.len() && bytes[pos] == b'[' {
+                // %l[name]: 命名标签引用
+                pos += 1;
+                let start = pos;
+                while pos < bytes.len() && bytes[pos] != b']' {
+                    pos += 1;
+                }
+                let name = &asm_str[start..pos];
+                if pos < bytes.len() {
+                    pos += 1; // skip ']'
+                }
+                if !name.is_empty() && !label_names.contains(name) {
+                    self.warn_here(
+                        "W0004",
+                        format!(
+                            "asm goto references label '{}' which is not in the label list",
+                            name
+                        ),
+                        Some("add the label to the goto label list"),
+                    );
+                }
+            } else if pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                // %lN: 数字标签引用。支持 dcc 历史兼容的 label-local
+                // 索引 N，也支持 GCC 的全操作数索引 op_count + N。
+                let start = pos;
+                while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                    pos += 1;
+                }
+                let idx_text = &asm_str[start..pos];
+                let in_range = idx_text.parse::<usize>().ok().is_some_and(|n| {
+                    n < label_count || n.checked_sub(op_count).is_some_and(|i| i < label_count)
+                });
+                if !in_range {
+                    self.warn_here(
+                        "W0004",
+                        format!(
+                            "asm goto references label index {} which is out of range (have {} labels)",
+                            idx_text, label_count
+                        ),
+                        Some("check the label index or add missing labels"),
+                    );
+                }
+            }
+        }
+    }
+
     /// 解析 GCC asm 约束前缀 (= 输出, + 读写, & early-clobber)
     /// 返回 (is_output, is_inout, early_clobber, match_digit)
     /// match_digit: Some(n) 表示 "与第 n 个操作数共用寄存器", None 表示无
@@ -5618,68 +5696,13 @@ impl<'a> Parser<'a> {
                         self.advance();
                         goto_labels = self.parse_asm_label_list();
                     }
-                    // 诊断: 检查 asm 模板中引用的标签是否都在 goto label 列表中
-                    {
-                        let label_names: std::collections::HashSet<&str> =
-                            goto_labels.iter().map(|l| l.name.as_str()).collect();
-                        let label_count = goto_labels.len();
-                        let op_count = outputs.len() + inputs.len();
-                        let mut pos = 0;
-                        let bytes = asm_str.as_bytes();
-                        while pos + 1 < bytes.len() {
-                            if bytes[pos] == b'%' && bytes[pos + 1] == b'l' {
-                                pos += 2;
-                                if pos < bytes.len() && bytes[pos] == b'[' {
-                                    // %l[name]: 命名标签引用
-                                    pos += 1;
-                                    let start = pos;
-                                    while pos < bytes.len() && bytes[pos] != b']' {
-                                        pos += 1;
-                                    }
-                                    let name = &asm_str[start..pos];
-                                    if pos < bytes.len() {
-                                        pos += 1; // skip ']'
-                                    }
-                                    if !name.is_empty() && !label_names.contains(name) {
-                                        self.warn_here(
-                                            "W0004",
-                                            format!(
-                                                "asm goto references label '{}' \
-                                                 which is not in the label list",
-                                                name
-                                            ),
-                                            Some("add the label to the goto label list"),
-                                        );
-                                    }
-                                } else if pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                                    // %lN: 数字标签引用
-                                    let start = pos;
-                                    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-                                        pos += 1;
-                                    }
-                                    if let Ok(n) = asm_str[start..pos].parse::<usize>() {
-                                        // 标签索引: GCC 允许 %lN 和 %l(N+op_count)
-                                        // 两种形式引用同一个 goto label
-                                        let in_range = n < label_count
-                                            || (n >= op_count && (n - op_count) < label_count);
-                                        if !in_range {
-                                            self.warn_here(
-                                                "W0004",
-                                                format!(
-                                                    "asm goto references label index {} \
-                                                     which is out of range (have {} labels)",
-                                                    n, label_count
-                                                ),
-                                                Some("check the label index or add missing labels"),
-                                            );
-                                        }
-                                    }
-                                }
-                            } else {
-                                pos += 1;
-                            }
-                        }
-                    }
+                    // 诊断: 检查 asm 模板中引用的标签是否都在 goto label 列表中。
+                    // 越界/缺失保持 W0004 warning，不阻断后续解析。
+                    self.validate_asm_goto_labels(
+                        &asm_str,
+                        &goto_labels,
+                        outputs.len() + inputs.len(),
+                    );
                     // 语义校验: 约束前缀/重名/类型匹配/占位符数量
                     self.validate_asm_semantics(
                         &asm_str,
