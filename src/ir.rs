@@ -306,18 +306,45 @@ fn is_supported_float_cast(from: &ValueType, to: &ValueType) -> bool {
     )
 }
 
+fn value_type_size(ty: &ValueType) -> usize {
+    match ty {
+        ValueType::Void => 0,
+        ValueType::Integer { bits, .. } | ValueType::Float { bits } => (*bits as usize) / 8,
+        ValueType::Pointer(_) | ValueType::Function { .. } => 8,
+        ValueType::Array(inner, Some(n)) | ValueType::Vector(inner, n) => value_type_size(inner) * *n,
+        ValueType::Array(_, None) => 8,
+        ValueType::Aggregate { size, .. } => *size,
+        ValueType::Complex(inner) => value_type_size(inner) * 2,
+    }
+}
+
+fn same_size_bitcast(from: &ValueType, to: &ValueType) -> bool {
+    value_type_size(from) == value_type_size(to)
+}
+
 fn is_supported_vector_cast(from: &ValueType, to: &ValueType, src_kind: &ExprKind) -> bool {
     if from == to || matches!(to, ValueType::Void) {
         return true;
     }
-    matches!(to, ValueType::Vector(_, _)) && matches!(src_kind, ExprKind::Aggregate)
+    if matches!(to, ValueType::Vector(_, _)) && matches!(src_kind, ExprKind::Aggregate) {
+        return true;
+    }
+    if !same_size_bitcast(from, to) {
+        return false;
+    }
+    matches!(from, ValueType::Vector(_, _) | ValueType::Complex(_))
+        || matches!(to, ValueType::Vector(_, _))
 }
 
 fn is_supported_complex_cast(from: &ValueType, to: &ValueType) -> bool {
     if from == to || matches!(to, ValueType::Void) {
         return true;
     }
-    is_complex_ty(from) && is_signed_integer_ty(to)
+    if is_complex_ty(from) && is_signed_integer_ty(to) {
+        return true;
+    }
+    same_size_bitcast(from, to)
+        && (matches!(from, ValueType::Vector(_, _)) || matches!(to, ValueType::Vector(_, _)))
 }
 
 fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
@@ -1147,6 +1174,21 @@ mod tests {
         let (program, _) = crate::parser::parse(src, "vector-cast-init.c");
         let (module, _) = lower(program).expect("vector initializer cast should lower");
         validate(&module).expect("vector initializer cast should validate");
+    }
+
+    #[test]
+    fn same_size_vector_and_complex_casts_validate() {
+        let src = b"typedef int v2si __attribute__((vector_size(8)));\n\
+                     int main(void) {\n\
+                         v2si v = {0x3f800000, 0x40000000};\n\
+                         float _Complex z = (float _Complex)v;\n\
+                         v2si w = (v2si)z;\n\
+                         unsigned long long bits = (unsigned long long)w;\n\
+                         return (int)bits;\n\
+                     }\n";
+        let (program, _) = crate::parser::parse(src, "complex-vector-cast.c");
+        let (module, _) = lower(program).expect("same-size vector/complex casts should lower");
+        validate(&module).expect("same-size vector/complex casts should validate");
     }
 
     #[test]

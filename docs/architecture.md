@@ -477,6 +477,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   浮点用标量 SSE，不用 XMM 向量指令）；
   向量 `arr[i]` 读写经 LEA 取栈/全局基址再按元素偏移寻址（非指针 load）；
   非 Ident 向量（binop、compound literal、InitList）经 `gen_vector_to_temp` 物化；
+  同尺寸 vector/scalar、vector/vector、complex/vector cast 走帧内 bitcast 临时槽；
   `_Complex` add/sub/mul/div（SSE 标量）；`parser` 对复数二元结果保留 `Type::Complex` 以便
   `(int)(a+b)` 等 Cast 正确发射 `cvttss2si`；虚部清零用 `movss` 避免 64 位
   store 覆盖相邻实部；`mov_xmm` 仅在 xmm≥8 时加 REX。不支持表达式路径发射

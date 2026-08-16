@@ -1361,10 +1361,13 @@ impl Codegen {
 
     /// -mno-red-zone 时禁止使用红区，帧上额外保留 128 字节。
     fn stack_reserve_bytes(&self) -> i32 {
+        // 向量/bitcast 临时槽需要 3 个 16 字节槽: slot0 是
+        // vector 结果约定, slot1/2 用于同尺寸重解释 cast。
+        let vector_scratch = 48;
         if self.target.red_zone {
-            0
+            vector_scratch
         } else {
-            128
+            128 + vector_scratch
         }
     }
 
@@ -4944,8 +4947,9 @@ impl Codegen {
                                         | Type::Atomic(_)
                                 ) && v.ty.size() > 8;
                                 if is_vec_init {
-                                    self.gen_expr(init, 0);
-                                    self.gen_vector_store(&v.name.name);
+                                    let dst_ty = v.ty.clone();
+                                    let dst_name = v.name.name.clone();
+                                    self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                                 } else if is_agg {
                                     // struct/array 初始化: 整体拷贝
                                     let dst_ty = v.ty.clone();
@@ -5791,8 +5795,9 @@ impl Codegen {
                                     | Type::Atomic(_)
                             ) && v.ty.size() > 8;
                             if matches!(&v.ty, Type::Vector(_, _)) {
-                                self.gen_expr(init, 0);
-                                self.gen_vector_store(&v.name.name);
+                                let dst_ty = v.ty.clone();
+                                let dst_name = v.name.name.clone();
+                                self.gen_aggregate_assign(&dst_name, &dst_ty, init);
                             } else if is_agg {
                                 let dst_ty = v.ty.clone();
                                 let dst_name = v.name.name.clone();
@@ -6858,6 +6863,9 @@ impl Codegen {
                     return;
                 }
                 let src_ty = e.ty();
+                if self.gen_same_size_bitcast(e, ty, dst) {
+                    return;
+                }
                 // 数组在 cast 中 decay 为首元素地址, 如 (const __m128i *) buf.
                 // 直接 gen_expr 会误读数组内容 (mov 而非 lea).
                 if matches!(src_ty, Type::Array(_, _)) && self.gen_lvalue_addr(e, dst) {
@@ -7533,6 +7541,94 @@ impl Codegen {
             rex |= 0x01;
         }
         self.emit(&[0x66, rex, 0x0F, 0x6E, 0xC0 | ((xmm & 7) << 3) | (gp & 7)]);
+    }
+
+    fn copy_r13_bytes(&mut self, src_off: i32, dst_off: i32, size: usize) {
+        self.emit_lea_r13(6, src_off);
+        self.emit_lea_r13(7, dst_off);
+        self.mov_imm(1, size as i128);
+        self.emit(&[0xFC, 0xF3, 0xA4]);
+    }
+
+    fn load_bits_from_slot(&mut self, ty: &Type, src_off: i32, dst: u8) {
+        match ty {
+            Type::Vector(_, _) => {
+                let toff = self.vector_temp_base(0, ty.size());
+                if toff != src_off {
+                    self.copy_r13_bytes(src_off, toff, ty.size());
+                }
+            }
+            Type::Complex(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {
+                let pfx = if matches!(inner.as_ref(), Type::Float) { 0xF3 } else { 0xF2 };
+                let inner_sz = inner.size() as i32;
+                let result_off = -self.frame_size + 8;
+                self.emit_xmm_r13_disp(pfx, 0x10, 0, src_off);
+                self.emit_xmm_r13_disp(pfx, 0x11, 0, result_off);
+                self.emit_xmm_r13_disp(pfx, 0x10, 1, src_off + inner_sz);
+                self.emit_xmm_r13_disp(pfx, 0x11, 1, result_off + inner_sz);
+                self.emit_xmm_r13_disp(pfx, 0x10, 0, result_off);
+            }
+            Type::Complex(_) | Type::Int128 | Type::UInt128 => {
+                self.load_stack(dst, src_off);
+                if ty.size() > 8 {
+                    self.load_stack(2, src_off + 8);
+                }
+            }
+            Type::Float => self.load_stack_xmm(0, src_off, 4, true),
+            Type::Double | Type::LongDouble => self.load_stack_xmm(0, src_off, 8, false),
+            _ => self.load_stack_sized(dst, src_off, ty.size().min(8)),
+        }
+    }
+
+    fn materialize_bits_to_slot(&mut self, e: &Expr, dst_off: i32) {
+        let src_ty = e.ty();
+        if matches!(src_ty, Type::Vector(_, _)) {
+            self.gen_vector_to_temp(e, 1);
+            let src_off = self.vector_temp_base(1, src_ty.size());
+            self.copy_r13_bytes(src_off, dst_off, src_ty.size());
+            return;
+        }
+        if self.gen_lvalue_addr(e, 0) {
+            self.emit(&[0x48, 0x89, 0xC6]);
+            self.emit_lea_r13(7, dst_off);
+            self.mov_imm(1, src_ty.size() as i128);
+            self.emit(&[0xFC, 0xF3, 0xA4]);
+            return;
+        }
+        self.gen_expr(e, 0);
+        match src_ty {
+            Type::Complex(ref inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {
+                let pfx = if matches!(inner.as_ref(), Type::Float) { 0xF3 } else { 0xF2 };
+                self.emit_xmm_r13_disp(pfx, 0x11, 0, dst_off);
+                self.gen_complex_imag_into_xmm0(e, inner);
+                self.emit_xmm_r13_disp(pfx, 0x11, 0, dst_off + inner.size() as i32);
+            }
+            Type::Float => self.store_xmm32_stack(0, dst_off),
+            Type::Double | Type::LongDouble => self.store_xmm64_stack(0, dst_off),
+            Type::Complex(_) | Type::Int128 | Type::UInt128 => {
+                self.store_stack(0, dst_off);
+                if src_ty.size() > 8 {
+                    self.store_stack(2, dst_off + 8);
+                }
+            }
+            _ => self.emit_store(0, dst_off, src_ty.size().min(8)),
+        }
+    }
+
+    fn gen_same_size_bitcast(&mut self, from: &Expr, to: &Type, dst: u8) -> bool {
+        let src_ty = from.ty();
+        if src_ty.size() != to.size() {
+            return false;
+        }
+        if !matches!(src_ty, Type::Vector(_, _) | Type::Complex(_))
+            && !matches!(to, Type::Vector(_, _) | Type::Complex(_))
+        {
+            return false;
+        }
+        let slot_off = self.vector_temp_base(2, src_ty.size().max(to.size()));
+        self.materialize_bits_to_slot(from, slot_off);
+        self.load_bits_from_slot(to, slot_off, dst);
+        true
     }
 
     fn emit_scalar_to_xmm0_if_needed(&mut self, expr: &Expr, elem_ty: &Type) {
@@ -11258,36 +11354,42 @@ impl Codegen {
             }
         };
         if !got_src {
-            // _Complex 浮点 rvalue (非 Call/Ident): 求值后实部在 xmm0,
-            // 虚部在 [r13+result_off+inner_sz] (binop/取负/字面量物化
-            // 位置), 直接分存两分量, 不走 rax 单槽 + rep movsb 通用路径
-            if let Type::Complex(inner) = dst_ty {
-                if matches!(
-                    inner.as_ref(),
-                    Type::Float | Type::Double | Type::LongDouble
-                ) {
-                    self.gen_expr(r, 0);
-                    self.gen_float_store_at(dst_off, inner);
-                    self.gen_complex_imag_into_xmm0(r, inner);
-                    let inner_sz = inner.size() as i32;
-                    let imag_base = if matches!(inner.as_ref(), Type::LongDouble) {
-                        dst_off - 8 - inner_sz
-                    } else {
-                        dst_off + inner_sz
-                    };
-                    self.gen_float_store_at(imag_base, inner);
-                    return;
+            if matches!(dst_ty, Type::Vector(_, _)) {
+                self.gen_expr(r, 0);
+                let temp_off = self.vector_temp_base(0, sz);
+                self.emit_lea_r13(6, temp_off);
+            } else {
+                // _Complex 浮点 rvalue (非 Call/Ident): 求值后实部在 xmm0,
+                // 虚部在 [r13+result_off+inner_sz] (binop/取负/字面量物化
+                // 位置), 直接分存两分量, 不走 rax 单槽 + rep movsb 通用路径
+                if let Type::Complex(inner) = dst_ty {
+                    if matches!(
+                        inner.as_ref(),
+                        Type::Float | Type::Double | Type::LongDouble
+                    ) {
+                        self.gen_expr(r, 0);
+                        self.gen_float_store_at(dst_off, inner);
+                        self.gen_complex_imag_into_xmm0(r, inner);
+                        let inner_sz = inner.size() as i32;
+                        let imag_base = if matches!(inner.as_ref(), Type::LongDouble) {
+                            dst_off - 8 - inner_sz
+                        } else {
+                            dst_off + inner_sz
+                        };
+                        self.gen_float_store_at(imag_base, inner);
+                        return;
+                    }
                 }
+                // 通用路径: 求值表达式, 存到帧临时区, 然后拷贝
+                self.gen_expr(r, 0);
+                // 使用目标变量槽上方的安全临时区域
+                let temp_off = dst_off - ((sz + 7) & !7) as i32; // 在目标下方留临时空间
+                self.store_stack(0, temp_off);
+                if sz > 8 {
+                    self.store_stack(2, temp_off + 8); // rdx = 第二部分
+                }
+                self.emit_lea_r13(6, temp_off); // rsi = 源 (reg 6 = rsi)
             }
-            // 通用路径: 求值表达式, 存到帧临时区, 然后拷贝
-            self.gen_expr(r, 0);
-            // 使用目标变量槽上方的安全临时区域
-            let temp_off = dst_off - ((sz + 7) & !7) as i32; // 在目标下方留临时空间
-            self.store_stack(0, temp_off);
-            if sz > 8 {
-                self.store_stack(2, temp_off + 8); // rdx = 第二部分
-            }
-            self.emit_lea_r13(6, temp_off); // rsi = 源 (reg 6 = rsi)
         }
         // 2. 取目标地址到 rdi
         self.emit_lea_r13(7, dst_off); // rdi = 目标地址
