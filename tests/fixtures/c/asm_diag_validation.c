@@ -1,13 +1,13 @@
 /* Test: asm diagnostic validation
- * Covers: output prefix, duplicate names, type mismatch, placeholder count
- * Expected: multiple warnings/errors from the semantic validator
+ * Covers: duplicate names, type mismatch, missing/invalid placeholders
+ * Expected: warnings only; unsupported mini-asm lines become nop
  */
 
 int main(void) {
     int x = 0, y = 0;
     float f = 1.0f;
 
-    /* E0016: duplicate operand name */
+    /* W0008: duplicate operand name */
     asm (
         "mov %0, %0"
         : [val] "=r" (x)
@@ -21,12 +21,28 @@ int main(void) {
         : "r" (f)
     );
 
-    /* E0015: placeholder index out of range */
+    /* W0008: placeholder index out of range */
     asm (
         "mov %0, %2"
         : "=r" (x)
         : "r" (y)
     );
+
+    /* W0008: missing named placeholder */
+    asm (
+        "mov %[missing], %0"
+        : "=r" (x)
+    );
+
+    /* W0008: placeholder index out of range */
+    asm (
+        "mov %2, %0"
+        : "=r" (x)
+        : "r" (y)
+    );
+
+    /* recognized integer mnemonic with illegal XMM operand: warning + nop */
+    asm volatile("mov %xmm0, %rax");
 
     return 0;
 }

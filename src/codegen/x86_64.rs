@@ -15546,6 +15546,11 @@ impl Codegen {
 
     /// 将 op_map 值格式化为 AT&T 操作数字符串
     fn asm_format_subst(val: &str) -> String {
+        // 缺失操作数占位符会被保留为 `%[name]` / `%N`; 这些不是
+        // mini-asm 可编码操作数, 让指令整体走 warning + nop fallback。
+        if val.starts_with("%[") || val.starts_with('%') {
+            return val.to_string();
+        }
         // 内存操作数 (含 '('), 立即数 (以 $ 开头), 偏移 (以 - 开头),
         // 纯数字或符号立即数: 直接使用, 不加 % 前缀
         if val.contains('(')
@@ -15565,6 +15570,40 @@ impl Codegen {
             .next()
             .is_some_and(|c| c == '.' || c == '_' || c.is_ascii_alphabetic())
             && Self::parse_asm_reg(&format!("%{val}")).is_none()
+    }
+
+    fn asm_has_unresolved_operand(line: &str) -> bool {
+        line.contains("%[")
+            || line
+                .as_bytes()
+                .windows(2)
+                .any(|w| w[0] == b'%' && w[1].is_ascii_digit())
+    }
+
+    fn asm_reg_is_gpr(sz: u8) -> bool {
+        sz <= 64
+    }
+
+    fn asm_operand_has_non_gpr_reg(op: &AsmOperand) -> bool {
+        matches!(op, AsmOperand::Reg(_, sz) if !Self::asm_reg_is_gpr(*sz))
+    }
+
+    fn asm_operands_have_non_gpr_regs(ops: &[&AsmOperand]) -> bool {
+        ops.iter().any(|op| Self::asm_operand_has_non_gpr_reg(op))
+    }
+
+    fn emit_unsupported_asm_operands(&mut self, context: &str) {
+        self.asm_warn(&format!(
+            "unsupported {context} operand pattern, emitted as nop"
+        ));
+        self.emit(&[0x90]);
+    }
+
+    fn warn_unresolved_asm_operand(&mut self, line: &str, asm_line: usize) {
+        self.asm_warn(&format!(
+            "unsupported inline asm operand pattern '{}' (asm line {}), emitted as nop",
+            line, asm_line
+        ));
     }
 
     /// 由寄存器索引生成指定宽度的 AT&T 寄存器名 (含 % 前缀)
@@ -15875,7 +15914,10 @@ impl Codegen {
                     }
                     let subbed = locals.substitute(trimmed, i);
                     self.current_asm_line = i + 1;
-                    if subbed.trim().starts_with('.') {
+                    if Self::asm_has_unresolved_operand(&subbed) {
+                        self.warn_unresolved_asm_operand(&subbed, i + 1);
+                        self.emit(&[0x90]);
+                    } else if subbed.trim().starts_with('.') {
                         self.emit_asm_directive(&subbed);
                     } else {
                         self.emit_asm_line(&subbed);
@@ -16950,6 +16992,11 @@ impl Codegen {
         if self.emit_asm_directive(&line) {
             return;
         }
+        if Self::asm_has_unresolved_operand(&line) {
+            self.warn_unresolved_asm_operand(&line, self.current_asm_line);
+            self.emit(&[0x90]);
+            return;
+        }
         // 处理前缀: lock, rep, repz, repnz, 段前缀 (ds/cs/ss/es/fs/gs)
         let (prefix, rest) = if line.starts_with("lock ") || line.starts_with("lock\t") {
             (Some(0xF0u8), line[5..].trim())
@@ -17213,7 +17260,7 @@ impl Codegen {
             "movl" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 32),
             "movw" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 16),
             // movd: 32-bit 整数与 xmm 之间的传送 (66 0F 6E / 66 0F 7E)
-            "movd" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 32),
+            "movd" if ops.len() == 2 => self.emit_asm_movd(&ops[0], &ops[1]),
             "movb" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 8),
             "movzbl" if ops.len() == 2 => self.emit_asm_movzx(&ops[0], &ops[1], 8, 32),
             "movzbq" if ops.len() == 2 => self.emit_asm_movzx(&ops[0], &ops[1], 8, 64),
@@ -20074,7 +20121,43 @@ impl Codegen {
     }
 
     fn emit_asm_mov(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        self.emit_asm_mov_inner(src, dst, bits, false);
+    }
+
+    fn emit_asm_movd(&mut self, src: &AsmOperand, dst: &AsmOperand) {
+        self.emit_asm_mov_inner(src, dst, 32, true);
+    }
+
+    fn emit_asm_mov_inner(
+        &mut self,
+        src: &AsmOperand,
+        dst: &AsmOperand,
+        bits: u8,
+        allow_xmm: bool,
+    ) {
         let w = bits == 64;
+        if Self::asm_operands_have_non_gpr_regs(&[src, dst]) {
+            let special_mov = matches!(
+                (src, dst),
+                (AsmOperand::Reg(_, ASM_REG_MMX), _)
+                    | (_, AsmOperand::Reg(_, ASM_REG_MMX))
+                    | (AsmOperand::Reg(_, ASM_REG_CR), AsmOperand::Reg(_, _))
+                    | (AsmOperand::Reg(_, _), AsmOperand::Reg(_, ASM_REG_CR))
+                    | (AsmOperand::Reg(_, ASM_REG_DR), AsmOperand::Reg(_, _))
+                    | (AsmOperand::Reg(_, _), AsmOperand::Reg(_, ASM_REG_DR))
+            );
+            let xmm_movd = allow_xmm
+                && matches!(
+                    (src, dst),
+                    (AsmOperand::Reg(_, ASM_REG_XMM), AsmOperand::Reg(_, sz))
+                        | (AsmOperand::Reg(_, sz), AsmOperand::Reg(_, ASM_REG_XMM))
+                        if Self::asm_reg_is_gpr(*sz)
+                );
+            if !special_mov && !xmm_movd {
+                self.emit_unsupported_asm_operands("mov");
+                return;
+            }
+        }
         // 段寄存器读写: 0x8C /r (mov r/m16, Sreg) / 0x8E /r (mov Sreg, r/m16)
         if let (AsmOperand::Reg(s, _), AsmOperand::Seg(seg)) = (src, dst) {
             if bits == 64 {
@@ -20654,6 +20737,10 @@ impl Codegen {
     }
 
     fn emit_asm_lea(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        if Self::asm_operand_has_non_gpr_reg(dst) {
+            self.emit_unsupported_asm_operands("lea");
+            return;
+        }
         if let (
             AsmOperand::Mem {
                 disp,
@@ -20725,6 +20812,10 @@ impl Codegen {
 
     fn emit_asm_alu(&mut self, src: &AsmOperand, dst: &AsmOperand, op: u8, bits: u8) {
         let w = bits == 64;
+        if Self::asm_operands_have_non_gpr_regs(&[src, dst]) {
+            self.emit_unsupported_asm_operands("ALU");
+            return;
+        }
         // 段前缀 mem: emit 段前缀 + 普通 mem ALU
         if let AsmOperand::SegMem {
             seg,
@@ -22989,6 +23080,10 @@ impl Codegen {
 
     fn emit_asm_xchg(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
         let w = bits == 64;
+        if Self::asm_operands_have_non_gpr_regs(&[src, dst]) {
+            self.emit_unsupported_asm_operands("xchg");
+            return;
+        }
         // xchg 编码: 8位 86 /r, 16位 66 86 /r, 32位 87 /r, 64位 REX.W 87 /r
         let opcode = if bits == 8 { 0x86 } else { 0x87 };
         // 段前缀 mem
@@ -23127,7 +23222,10 @@ impl Codegen {
                 self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, cc]);
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
-            _ => self.emit(&[0x90]),
+            _ => {
+                self.asm_warn("unsupported cmov operand pattern, emitted as nop");
+                self.emit(&[0x90]);
+            }
         }
     }
 

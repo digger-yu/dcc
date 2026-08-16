@@ -88,7 +88,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 
 ---
 
-## 3. Parser：`E0001`–`E0015`
+## 3. Parser：`E0001`–`E0017`
 
 语法分析、声明与表达式层面的错误。
 
@@ -108,17 +108,18 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0012** | `expected string literal in _Static_assert` | 断言消息非字符串 | `_Static_assert(1, 123)` | `the second argument must be a diagnostic string` | `e0012.c` |
 | **E0013** | `__builtin_choose_expr condition is not constant` | 选择表达式非常量 | 非常量条件传给 `__builtin_choose_expr` | — | `e0013.c` |
 | **E0014** | `output operand N constraint '…' missing '=' or '+' prefix` | 输出约束缺前缀 | asm 输出操作数约束未以 `=` 或 `+` 开头 | `add '=' for write-only or '+' for read-write output` | `e0014.c` |
-| **E0015** | `asm template references operand %N but only M operand(s) provided` / `asm template references unnamed operand '%[name]' which does not exist` / `matching constraint references invalid operand number 'N' for input operand I` / `matching constraint digit 'N' not allowed in output operand I constraint` | 模板占位符越界 / 匹配约束越界 | asm 模板引用的数字索引超出操作数范围，或命名操作数不存在；或输入约束中的匹配数字（matching constraint digit）引用不存在的输出操作数；或输出约束中错误地使用匹配数字 | `add the missing operand or fix the template index` 等 | — |
-| **E0016** | `duplicate asm operand name '…'` | 重复操作数名 | asm 语句中多个操作数使用相同的 `[name]` | `each named operand must have a unique name` | — |
+| **E0015** | — | 预留：旧 asm 操作数 hard error 已降级 | asm 模板缺失/越界操作数与 matching constraint 数字问题现在按 **W0008** warning 处理，并由 mini-asm 发 `nop` fallback | — | — |
+| **E0016** | — | 预留：旧重复 asm 操作数名 hard error 已降级 | 重复 `[name]` 现在按 **W0008** warning 处理，并由 mini-asm 发 `nop` fallback | — | — |
 | **E0017** | `implicit declaration of function '…'` | 严格标准下的隐式函数声明 | C99+ / GNU99+ 模式中调用未声明函数，且未启用 `-fpermissive` | `declare the function before use or pass -fpermissive` | — |
 
-### Parser 警告：`W0001`、`W0005`、`W0007`
+### Parser 警告：`W0001`、`W0005`、`W0007`、`W0008`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
 | **W0001** | `type defaults to 'int' in declaration without a type specifier` | 隐式 int（GNU 兼容） | 仅有存储类：`static x;` | `w0001.c` |
 | **W0005** | `impossible constraint: asm constraint '…' does not match expression type '…'` | 约束与类型不匹配 | asm 约束与操作数表达式类型不兼容（如浮点绑 `r`/`rm`、整数绑 `x`）且按 dcc 兼容策略仅告警不中断；GCC 通常报 `impossible constraint` error | `use an XMM/x87 constraint for floating-point operands or change the expression type` | — |
 | **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | `name all operands or use positional references consistently` | — |
+| **W0008** | `asm template references operand %N but only M operand(s) provided; emitted as nop` / `asm template references unnamed operand '%[name]' which does not exist; emitted as nop` / `duplicate asm operand name '…'; emitted as nop if used` / `matching constraint references …; emitted as nop if used` | mini-asm 非法操作数降级 | 模板占位符缺失/越界、matching constraint 数字无效、重复 `[name]` 等原先 hard error 的 asm 操作数问题 | `add the missing operand or fix the template index` 等 | — |
 | **W1000** | `implicit declaration of '…' (assumed int)` | 宽松模式隐式函数声明 | C89/GNU89，或 `-fpermissive` 下调用未声明函数 | — |
 
 ---
@@ -216,7 +217,7 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 
 ## 8. 警告码汇总
 
-### Parser 警告：`W0001`–`W0007`、`W1000`
+### Parser 警告：`W0001`–`W0008`、`W1000`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
@@ -226,6 +227,7 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 | **W0004** | `asm goto references label '…' which is not in the label list` / `asm goto references label index … which is out of range` | asm 模板引用的标签不在 goto label 列表中，或 `%lN` 标签索引越界 | `asm goto("jmp %l[missing]" : : : : real)` / `asm goto("jmp %l2" : : : : only)` | `w0004.c` |
 | **W0005** | `impossible constraint: asm constraint '…' does not match expression type '…'` | 约束与类型不匹配 | asm 约束与操作数表达式类型不兼容（如浮点绑 `r`/`rm`、整数绑 `x`），dcc 仅告警不中断；GCC 通常报 `impossible constraint` error | — |
 | **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | — |
+| **W0008** | `…; emitted as nop` | mini-asm 非法操作数降级 | 模板操作数缺失/越界、matching constraint 数字无效、重复 asm 操作数名等 | — |
 | **W1000** | `implicit declaration of '…' (assumed int)` | 宽松模式隐式函数声明 | C89/GNU89，或 `-fpermissive` 下调用未声明函数 | — |
 
 ### 类型转换警告：`W0301`–`W0302`

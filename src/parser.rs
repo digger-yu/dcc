@@ -1680,40 +1680,38 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // 0. 匹配约束 (matching constraint) 数字越界检测 (E0015)
+        // 0. 匹配约束 (matching constraint) 数字越界检测 (W0008)
         //    输入约束中的数字 (如 "0", "1") 表示与对应编号操作数共用寄存器.
-        //    GNU C 要求: 匹配约束编号必须 < total_ops (全局有效), 且 GCC
-        //    进一步要求输入的匹配约束必须引用输出操作数 (< output_count).
+        //    mini-asm 兼容策略: 这些原本由 GCC hard error 的非法操作数
+        //    不阻断编译, 交给后端 warning + nop fallback 继续发射.
         for (input_idx, constraint) in input_constraints.iter().enumerate() {
             let (_, _, _, match_digit) = Self::parse_asm_constraint_flags(constraint);
             if let Some(n) = match_digit {
                 let n_usize = n as usize;
-                // GCC: 匹配约束必须引用输出操作数 (即 < output_count)
                 if n_usize >= output_count {
-                    self.diags.push(Diagnostic::err(
-                        "E0015",
+                    self.diags.push(Diagnostic::warn(
+                        "W0008",
                         format!(
-                            "matching constraint references invalid operand number '{}' for input operand {}",
+                            "matching constraint references invalid operand number '{}' for input operand {}; emitted as nop if used",
                             n, input_idx
                         ),
                         sp.clone(),
                     ).with_hint(
                         if output_count == 0 {
-                            "no output operands defined; matching constraints require outputs".into()
+                            "no output operands defined; matching constraints normally require outputs".into()
                         } else {
                             format!(
-                                "matching constraint digits must reference an output operand (0 to {}); use a regular constraint if you intended an independent input",
+                                "matching constraint digits normally reference an output operand (0 to {}); use a regular constraint if you intended an independent input",
                                 output_count.saturating_sub(1)
                             )
                         }
                     ));
                 }
-                // 即使 n < output_count, 也额外做一次全局越界防御 (未来兼容其他模式)
                 if n_usize >= total_ops {
-                    self.diags.push(Diagnostic::err(
-                        "E0015",
+                    self.diags.push(Diagnostic::warn(
+                        "W0008",
                         format!(
-                            "matching constraint references operand {} but only {} operand(s) provided",
+                            "matching constraint references operand {} but only {} operand(s) provided; emitted as nop if used",
                             n, total_ops
                         ),
                         sp.clone(),
@@ -1723,14 +1721,14 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        // 输出约束中的匹配约束: 输出本身不应带匹配数字 (GCC 同样报错)
+        // 输出约束中的匹配约束: 输出本身不应带匹配数字.
         for (output_idx, constraint) in output_constraints.iter().enumerate() {
             let (_, _, _, match_digit) = Self::parse_asm_constraint_flags(constraint);
             if let Some(n) = match_digit {
-                self.diags.push(Diagnostic::err(
-                    "E0015",
+                self.diags.push(Diagnostic::warn(
+                    "W0008",
                     format!(
-                        "matching constraint digit '{}' not allowed in output operand {} constraint",
+                        "matching constraint digit '{}' not allowed in output operand {} constraint; emitted as nop if used",
                         n, output_idx
                     ),
                     sp.clone(),
@@ -1757,14 +1755,17 @@ impl<'a> Parser<'a> {
                 );
             }
         }
-        // 2. 重复操作数名检测 (E0016, 对齐 GCC "duplicate 'asm' operand name")
+        // 2. 重复操作数名检测 (W0008, 对齐 mini-asm warning+nop 策略)
         let mut seen_names: HashSet<&str> = HashSet::new();
         for name in output_names.iter().chain(input_names.iter()).flatten() {
             if !name.is_empty() && !seen_names.insert(name.as_str()) {
                 self.diags.push(
-                    Diagnostic::err(
-                        "E0016",
-                        format!("duplicate asm operand name '{}'", name),
+                    Diagnostic::warn(
+                        "W0008",
+                        format!(
+                            "duplicate asm operand name '{}'; emitted as nop if used",
+                            name
+                        ),
                         sp.clone(),
                     )
                     .with_hint("each named operand must have a unique name"),
@@ -1792,7 +1793,7 @@ impl<'a> Parser<'a> {
         }
         // 4. 约束与表达式类型不匹配 (W0005) 在 codegen 层统一完成，
         //    以 matched constraint、多重约束和显式寄存器分类为准。
-        // 5. 模板占位符数量与操作数数量不匹配 (E0015)
+        // 5. 模板占位符数量与操作数数量不匹配 (W0008)
         let total_ops = outputs.len() + inputs.len();
         let bytes = asm_str.as_bytes();
         let mut pos = 0;
@@ -1856,11 +1857,11 @@ impl<'a> Parser<'a> {
                                 .collect();
                             if !all_names_flat.contains(&name) {
                                 self.diags.push(
-                                    Diagnostic::err(
-                                        "E0015",
+                                    Diagnostic::warn(
+                                        "W0008",
                                         format!(
                                             "asm template references unnamed operand \
-                                         '%[{}]' which does not exist",
+                                         '%[{}]' which does not exist; emitted as nop",
                                             name
                                         ),
                                         sp.clone(),
@@ -1891,11 +1892,11 @@ impl<'a> Parser<'a> {
         if let Some(max) = max_idx {
             if max >= total_ops && total_ops > 0 {
                 self.diags.push(
-                    Diagnostic::err(
-                        "E0015",
+                    Diagnostic::warn(
+                        "W0008",
                         format!(
                             "asm template references operand %{} but only {} \
-                         operand(s) provided",
+                         operand(s) provided; emitted as nop",
                             max, total_ops
                         ),
                         sp.clone(),

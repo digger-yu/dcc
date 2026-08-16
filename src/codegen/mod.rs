@@ -298,35 +298,37 @@ fn validate_inline_asm_operands(
         }
     }
 
-    // 2. 匹配约束 (matching constraint) 数字越界检测 (E0015)
+    // 2. 匹配约束 (matching constraint) 数字越界检测 (W0008)
+    //    mini-asm 兼容策略: 非法 asm 操作数只告警，不阻断后端
+    //    warning + nop fallback。
     for (input_idx, constraint) in input_constraints.iter().enumerate() {
         let (_, _, _, match_digit) = parse_asm_constraint_flags(constraint);
         if let Some(n) = match_digit {
             let n_usize = n as usize;
             if n_usize >= output_count {
-                diags.push(Diagnostic::err(
-                    "E0015",
+                diags.push(Diagnostic::warn(
+                    "W0008",
                     format!(
-                        "matching constraint references invalid operand number '{}' for input operand {}",
+                        "matching constraint references invalid operand number '{}' for input operand {}; emitted as nop if used",
                         n, input_idx
                     ),
                     span.clone(),
                 ).with_hint(
                     if output_count == 0 {
-                        "no output operands defined; matching constraints require outputs".into()
+                        "no output operands defined; matching constraints normally require outputs".into()
                     } else {
                         format!(
-                            "matching constraint digits must reference an output operand (0 to {})",
+                            "matching constraint digits normally reference an output operand (0 to {})",
                             output_count.saturating_sub(1)
                         )
                     }
                 ));
             }
             if n_usize >= total_ops {
-                diags.push(Diagnostic::err(
-                    "E0015",
+                diags.push(Diagnostic::warn(
+                    "W0008",
                     format!(
-                        "matching constraint references operand {} but only {} operand(s) provided",
+                        "matching constraint references operand {} but only {} operand(s) provided; emitted as nop if used",
                         n, total_ops
                     ),
                     span.clone(),
@@ -337,10 +339,10 @@ fn validate_inline_asm_operands(
     for (output_idx, constraint) in output_constraints.iter().enumerate() {
         let (_, _, _, match_digit) = parse_asm_constraint_flags(constraint);
         if let Some(n) = match_digit {
-            diags.push(Diagnostic::err(
-                "E0015",
+            diags.push(Diagnostic::warn(
+                "W0008",
                 format!(
-                    "matching constraint digit '{}' not allowed in output operand {} constraint",
+                    "matching constraint digit '{}' not allowed in output operand {} constraint; emitted as nop if used",
                     n, output_idx
                 ),
                 span.clone(),
