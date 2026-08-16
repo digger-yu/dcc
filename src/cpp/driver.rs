@@ -93,6 +93,7 @@ pub fn compile_cpp(
     // 调 dcc 编译
     let mut cmd = Command::new(dcc_bin);
     cmd.arg("-c");
+    cmd.arg("-fpermissive");
     cmd.arg(format!("-O{}", opt_level));
     for inc in include_paths {
         cmd.arg("-I").arg(inc);

@@ -343,7 +343,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | format 属性 | `format_check.rs`：`-Wformat` / `W0003` arity 检查 |
 | asm goto 标签验证 | `W0004`：asm 模板中引用的标签不在 goto label 列表中 |
 | asm 语义校验 | `E0014`: 输出约束缺少 `=`/`+` 前缀; `E0015`: 模板占位符索引越界、命名操作数不存在、输入匹配约束(matching constraint digit)引用无效操作数编号、输出约束中禁止匹配数字; `E0016`: 重复操作数名; `W0005`: 约束与表达式类型不匹配 (如 `r` 约束绑浮点); `W0007`: 命名/位置操作数混用 |
-| 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002` + int |
+| 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002` + int；C99/GNU99+ 未声明用户函数调用默认 `E0017`，`-fpermissive` 或 C89/GNU89 → `W1000` + int；`__builtin_*` / `__atomic_*` / `__sync_*` 仍按编译器内建处理 |
 
 ## 内联 asm 优化器集成
 

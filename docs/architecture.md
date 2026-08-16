@@ -151,6 +151,9 @@ TLS 变量经 `_start` 中 `arch_prctl(ARCH_SET_FS)` 绑定 FS 段。
 
 Driver 在 parse 后运行 `format_check::check_program`（`-Wformat` / `W0003`）。
 未知 typedef 默认 **E0009**；`-fpermissive` 降级为 `int` + **W0002**。
+C99/GNU99+ 下未声明函数调用默认 **E0017**；C89/GNU89 或
+`-fpermissive` 保留 `int` 降级 + **W1000**。dcc++ 降级到内部 C 后
+会显式以 `-fpermissive` 编译，以兼容当前 C++ lowering 产生的前向调用。
 hosted 模式（非 `-ffreestanding`）预置 C11 `atomic_*` 宏。
 
 自定义代码节中的重定位会从 `.rela.text` 迁移到对应 relocation section；

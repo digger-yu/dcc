@@ -48,7 +48,7 @@
 | `--target <triple>` | 目标三元组（见 §4） |
 | `-std=<mode>` | C 标准模式（见 §3.1） |
 | `-ffreestanding` | 不假设 libc/CRT |
-| `-fpermissive` | 未知 typedef 降级为 `int`（W0002） |
+| `-fpermissive` | 未知 typedef 降级为 `int`（W0002），C99/GNU99+ 未声明用户函数调用降级为 `int`（W1000） |
 | `-fsyntax-only` | 只跑解析与语义检查 |
 | `-pipe` | 接受（no-op） |
 | `-dump-ast` | 打印 AST 后退出 |

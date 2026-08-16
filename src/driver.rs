@@ -368,6 +368,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     // 解析
+    let allow_implicit_function_decl = cfg.permissive
+        || matches!(
+            cfg.std,
+            crate::cli::StdMode::C89 | crate::cli::StdMode::Gnu89
+        );
     let (mut prog, mut diags) = parser::parse_with_opts(
         preprocessed.as_bytes(),
         &file_name,
@@ -381,6 +386,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 cfg.std,
                 crate::cli::StdMode::C23 | crate::cli::StdMode::Gnu23
             ),
+            allow_implicit_function_decl,
             warn_implicit_decl: cfg.warn_implicit_decl,
             cuda: cfg.profile.offload.cuda,
             hip: cfg.profile.offload.hip,
@@ -1164,6 +1170,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     })?;
     let mut cmd = Command::new(&dcc_bin);
     cmd.arg("-c");
+    cmd.arg("-fpermissive");
     cmd.arg(format!("-O{}", cfg.opt));
     cmd.arg(format!("-std={}", cfg.std.as_str()));
     for inc in &cfg.include_paths {
@@ -1190,7 +1197,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
 
     if cfg.verbose {
         eprintln!(
-            "dcc: dcc -c -O{} -o {} {}",
+            "dcc: dcc -c -fpermissive -O{} -o {} {}",
             cfg.opt,
             cfg.output.display(),
             tmp.display()

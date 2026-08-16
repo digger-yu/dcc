@@ -4,6 +4,7 @@ struct thread_info {
 	unsigned long flags;
 	unsigned long syscall_work;
 };
+int const_test_bit(int nr, unsigned long *addr);
 #define bitop(op, nr, addr) \
 	((__builtin_constant_p(nr) ? const##op(nr, addr) : op(nr, addr)))
 #define _test_bit(nr, addr) (addr)

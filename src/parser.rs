@@ -83,7 +83,9 @@ pub struct ParseOptions {
     /// typeof_unqual 等 C23 关键字生效; 非 C23 模式保持普通标识符语义
     /// (兼容 `typedef _Bool bool;` 与 gnu11 内核代码)
     pub is_c23: bool,
-    /// `-Wimplicit-declaration`: 未声明标识符警告
+    /// C89/GNU89 或 `-fpermissive`: 允许隐式函数声明降级为 int。
+    pub allow_implicit_function_decl: bool,
+    /// `-Wimplicit-declaration`: 未声明函数调用警告
     pub warn_implicit_decl: bool,
     /// `-fcuda`: 启用 CUDA 函数限定符 (__global__/__device__/__host__)
     pub cuda: bool,
@@ -1192,6 +1194,41 @@ impl<'a> Parser<'a> {
             break;
         }
         attrs
+    }
+
+    fn note_implicit_function_call(&mut self, name: &Ident) {
+        if self.locals.contains_key(&name.name)
+            || self.globals.contains_key(&name.name)
+            || self.typedefs.contains_key(&name.name)
+            || self.enum_consts.contains_key(&name.name)
+            || name.name.starts_with("__builtin_")
+            || name.name.starts_with("__atomic_")
+            || name.name.starts_with("__sync_")
+            || name.name.starts_with("__compiletime_assert_")
+        {
+            return;
+        }
+        if self.opts.allow_implicit_function_decl {
+            if self.opts.warn_implicit_decl {
+                self.diags.push(
+                    Diagnostic::warn(
+                        "W1000",
+                        format!("implicit declaration of '{}' (assumed int)", name.name),
+                        name.span.clone(),
+                    )
+                    .with_hint("add a declaration before use"),
+                );
+            }
+        } else {
+            self.diags.push(
+                Diagnostic::err(
+                    "E0017",
+                    format!("implicit declaration of function '{}'", name.name),
+                    name.span.clone(),
+                )
+                .with_hint("declare the function before use or pass -fpermissive"),
+            );
+        }
     }
 
     fn lookup_ident_type(&self, name: &str) -> Type {
@@ -2433,18 +2470,20 @@ impl<'a> Parser<'a> {
             // 函数声明后: 解析 __attribute__ 和 __asm__ 标签
             let post_attrs = self.skip_post_decl_modifiers();
             let attrs = Self::merge_attrs(pre_attrs, post_attrs);
-            // 检测是否是嵌套函数 (在外层函数体内)
-            let is_nested_func = self.in_function;
-            let parent_locals = if is_nested_func {
-                self.locals.clone()
-            } else {
-                HashMap::new()
-            };
             // 进入函数: 从全局变量表恢复, 清除局部变量
             let func_ty = Type::Func(
                 Box::new(ty.clone()),
                 params.iter().map(|p| p.ty.clone()).collect(),
             );
+            // 检测是否是嵌套函数 (在外层函数体内)
+            let is_nested_func = self.in_function;
+            let parent_locals = if is_nested_func {
+                let mut parent_locals = self.locals.clone();
+                parent_locals.insert(name_for_decl.name.clone(), func_ty.clone());
+                parent_locals
+            } else {
+                HashMap::new()
+            };
             if !is_nested_func {
                 self.globals.insert(name_for_decl.name.clone(), func_ty);
             }
@@ -7016,6 +7055,9 @@ impl<'a> Parser<'a> {
                     if !self.expect(TokKind::RParen, "')'") {
                         return None;
                     }
+                    if let Expr::Ident { name, .. } = &callee_expr {
+                        self.note_implicit_function_call(name);
+                    }
                     let call_ty = self.call_result_type(&callee_expr);
                     e = Expr::Call {
                         callee: Box::new(callee_expr),
@@ -7295,23 +7337,6 @@ impl<'a> Parser<'a> {
                         span: sp,
                         ty: cty,
                     });
-                }
-                // 未声明标识符警告 (排除 __builtin_ 前缀的特殊标识符)
-                // 内核 __compiletime_assert_* 由 BUILD_BUG_ON 系列宏生成,
-                // 是故意不声明的编译期断言占位符, 不应产生警告。
-                if self.opts.warn_implicit_decl
-                    && !self.locals.contains_key(&t)
-                    && !self.globals.contains_key(&t)
-                    && !self.typedefs.contains_key(&t)
-                    && !self.enum_consts.contains_key(&t)
-                    && !t.starts_with("__builtin_")
-                    && !t.starts_with("__compiletime_assert_")
-                {
-                    self.warn_here(
-                        "W1000",
-                        format!("implicit declaration of '{}' (assumed int)", t),
-                        Some("add a declaration before use"),
-                    );
                 }
                 let id = Ident {
                     name: t,

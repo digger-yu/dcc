@@ -4714,6 +4714,117 @@ fn permissive_unknown_typedef_warns() {
 }
 
 #[test]
+fn implicit_function_decl_is_error_by_default() {
+    let output = run_syntax_test(
+        "implicit-func-strict",
+        "int main(void) { return missing_func(1); }\n",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "implicit function should fail");
+    assert!(stderr.contains("E0017"), "expected E0017: {stderr}");
+    assert!(
+        stderr.contains("implicit declaration of function 'missing_func'"),
+        "expected function name in diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn implicit_function_decl_error_ignores_wno_in_modern_std() {
+    let src = "int main(void) { return missing_func(1); }\n";
+    let path = std::env::temp_dir().join(format!("dcc-wno-func-{}.c", std::process::id()));
+    fs::write(&path, src).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "-std=gnu23",
+            "-Wno-implicit-function-declaration",
+            "-fsyntax-only",
+        ])
+        .arg(&path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "strict mode must still error");
+    assert!(stderr.contains("E0017"), "expected E0017: {stderr}");
+}
+
+#[test]
+fn permissive_implicit_function_decl_warns_and_continues() {
+    let src = "int main(void) { return missing_func(1); }\n";
+    let path = std::env::temp_dir().join(format!("dcc-perm-func-{}.c", std::process::id()));
+    fs::write(&path, src).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fpermissive", "-fsyntax-only"])
+        .arg(&path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "permissive implicit function should not error: {stderr}"
+    );
+    assert!(stderr.contains("W1000"), "expected W1000: {stderr}");
+    assert!(
+        stderr.contains("implicit declaration of 'missing_func'"),
+        "expected warning name: {stderr}"
+    );
+}
+
+#[test]
+fn gnu89_implicit_function_decl_warns_and_continues() {
+    let src = "int main(void) { return missing_func(1); }\n";
+    let path = std::env::temp_dir().join(format!("dcc-gnu89-func-{}.c", std::process::id()));
+    fs::write(&path, src).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu89", "-fsyntax-only"])
+        .arg(&path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "gnu89 implicit function should not error: {stderr}"
+    );
+    assert!(stderr.contains("W1000"), "expected W1000: {stderr}");
+}
+
+#[test]
+fn compiler_builtin_atomic_call_is_not_implicit_function_error() {
+    let output = run_syntax_test(
+        "atomic-builtin-strict",
+        "int x;\nint main(void) { __atomic_store_n(&x, 7, __ATOMIC_SEQ_CST); return __atomic_load_n(&x, __ATOMIC_SEQ_CST); }\n",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "atomic builtin should compile: {stderr}"
+    );
+    assert!(
+        !stderr.contains("E0017") && !stderr.contains("W1000"),
+        "atomic builtin should not be an implicit function diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn unknown_variable_read_is_not_implicit_function_warning() {
+    let output = run_syntax_test(
+        "unknown-variable-read",
+        "int main(void) { return missing_variable; }\n",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "unknown variable read still falls back to int: {stderr}"
+    );
+    assert!(
+        !stderr.contains("W1000") && !stderr.contains("E0017"),
+        "non-call identifier should not use implicit function diagnostics: {stderr}"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn exec_elf_has_symtab() {
     let src = "int g = 1; int main(void) { return g; }\n";

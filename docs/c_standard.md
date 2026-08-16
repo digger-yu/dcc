@@ -123,6 +123,9 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - ELF 的 section/weak/visibility 属性作用于 `-c`/`-r` 可重定位输出；
   ET_EXEC 输出含 `.symtab`/`.strtab` 与函数/全局符号。
 - `-fpermissive`：未知 typedef 降级为 `int` 并发出 `W0002`（默认严格 `E0009`）。
+  在 C99/GNU99 及更新标准中，未声明函数调用默认报 `E0017`；
+  `-fpermissive` 或 C89/GNU89 模式保留 `W1000` + `int` 降级。
+  dcc++ 降级到内部 C 后仍以 `-fpermissive` 编译生成的兼容 C。
 - **Sanitizer（AST 层完整桩）**：`-fsanitize=address|undefined|thread|hwaddress|fuzzer|kernel-*`、
   `-fsanitize=a,b` 组合、`-fsanitize-coverage`。Driver 在 IR lower 前于
   AST 插桩：TU 级 `__asan_init` / `__hwasan_init` / `__ubsan_init` /

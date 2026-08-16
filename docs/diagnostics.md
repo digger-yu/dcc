@@ -110,6 +110,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0014** | `output operand N constraint '…' missing '=' or '+' prefix` | 输出约束缺前缀 | asm 输出操作数约束未以 `=` 或 `+` 开头 | `add '=' for write-only or '+' for read-write output` | `e0014.c` |
 | **E0015** | `asm template references operand %N but only M operand(s) provided` / `asm template references unnamed operand '%[name]' which does not exist` / `matching constraint references invalid operand number 'N' for input operand I` / `matching constraint digit 'N' not allowed in output operand I constraint` | 模板占位符越界 / 匹配约束越界 | asm 模板引用的数字索引超出操作数范围，或命名操作数不存在；或输入约束中的匹配数字（matching constraint digit）引用不存在的输出操作数；或输出约束中错误地使用匹配数字 | `add the missing operand or fix the template index` 等 | — |
 | **E0016** | `duplicate asm operand name '…'` | 重复操作数名 | asm 语句中多个操作数使用相同的 `[name]` | `each named operand must have a unique name` | — |
+| **E0017** | `implicit declaration of function '…'` | 严格标准下的隐式函数声明 | C99+ / GNU99+ 模式中调用未声明函数，且未启用 `-fpermissive` | `declare the function before use or pass -fpermissive` | — |
 
 ### Parser 警告：`W0001`、`W0005`、`W0007`
 
@@ -118,6 +119,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **W0001** | `type defaults to 'int' in declaration without a type specifier` | 隐式 int（GNU 兼容） | 仅有存储类：`static x;` | `w0001.c` |
 | **W0005** | `impossible constraint: 'r' constraint with floating-point operand` | 约束与类型不匹配 | asm 约束字母与操作数表达式类型不兼容（如浮点绑 `r`、整数绑 `x`） | `use 'x' for SSE or 'f' for x87 float operands` | — |
 | **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | `name all operands or use positional references consistently` | — |
+| **W1000** | `implicit declaration of '…' (assumed int)` | 宽松模式隐式函数声明 | C89/GNU89，或 `-fpermissive` 下调用未声明函数 | — |
 
 ---
 
@@ -214,7 +216,7 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 
 ## 8. 警告码汇总
 
-### Parser 警告：`W0001`–`W0004`、`W1000`
+### Parser 警告：`W0001`–`W0007`、`W1000`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
@@ -222,7 +224,9 @@ AST 降级到 Typed IR 及验证阶段的语义错误（通常需 `-c` 或完整
 | **W0002** | `unknown type '…' treated as 'int' (-fpermissive)` | 未知类型降级为 int | `-fpermissive` 且遇到未声明 typedef | — |
 | **W0003** | `format attribute on '…' expects format string at argument …` 等 | printf/scanf 格式检查 | `__attribute__((format(printf,...)))` 参数不匹配 | — |
 | **W0004** | `asm goto references label '…' which is not in the label list` | asm 模板引用的标签不在 goto label 列表中 | `asm goto("jmp %l[missing]" : : : : real)` | `w0004.c` |
-| **W1000** | `implicit declaration of '…' (assumed int)` | 隐式函数声明 | 调用未声明的函数 | — |
+| **W0005** | `impossible constraint: 'r' constraint with floating-point operand` | 约束与类型不匹配 | asm 约束字母与操作数表达式类型不兼容（如浮点绑 `r`、整数绑 `x`） | — |
+| **W0007** | `mixing named and unnamed asm operands` | 命名/位置混用 | asm 语句中部分操作数有 `[name]` 部分没有 | — |
+| **W1000** | `implicit declaration of '…' (assumed int)` | 宽松模式隐式函数声明 | C89/GNU89，或 `-fpermissive` 下调用未声明函数 | — |
 
 ### 类型转换警告：`W0301`–`W0302`
 

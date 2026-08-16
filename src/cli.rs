@@ -755,8 +755,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-Wno-int-conversion" => warn_int_conversion = false,
             "-Wint-truncation" => warn_int_truncation = true,
             "-Wno-int-truncation" => warn_int_truncation = false,
-            "-Wimplicit-declaration" => warn_implicit_decl = true,
-            "-Wno-implicit-declaration" => warn_implicit_decl = false,
+            "-Wimplicit-declaration" | "-Wimplicit-function-declaration" => {
+                warn_implicit_decl = true
+            }
+            "-Wno-implicit-declaration" | "-Wno-implicit-function-declaration" => {
+                warn_implicit_decl = false
+            }
             // ====== PGO / GCOV / AutoFDO / LBR / MemProf ======
             "-fprofile-generate" => {
                 profile.pgo_generate = Some(std::path::PathBuf::from("."));
