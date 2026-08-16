@@ -28,8 +28,7 @@ objtool 的解码/验证模型完全一致。
 
 | 限制 | 说明 |
 |------|------|
-| IR float/vector/complex 操作集合有限 | validator 只允许已枚举操作；未支持的 float/vector/complex binop/unop/cast 仍报 E1003/E1007/E1008 |
-| complex/vector cast 缺口 | complex→vector、vector 相关 cast 仍被 validator 拒绝 |
+| complex/vector cast 缺口 | complex→vector、vector 非 initializer cast 仍被 validator 拒绝 |
 | unknown `__builtin_*` | 未识别 builtin 仍降级：有返回值时返回 0，`void` 返回时发 `ud2` 并 warning |
 | unknown expression fallback | x86_64 codegen 对 unsupported expr / InitList rvalue 仍会诊断并发 `ud2` |
 | permissive unknown type/function | `-fpermissive` 与隐式函数声明仍会 warning 后按 `int` 继续，未达到严格 GCC/Clang 诊断等价 |

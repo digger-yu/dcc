@@ -154,9 +154,9 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 
 | 特性 | 说明 |
 |------|------|
-| 向量/SIMD | 全局 SIMD 向量复制 + 浮点 SIMD 标量逐元素 + 非 Ident 向量 rvalue |
-| 复数 | `_Complex` 算术完整支持 + 字面量 + `__real__` / `__imag__` 关键字 |
-| float 取模 | 软件 fmod = l - trunc(l/r) * r，零 libc 依赖 |
+| 向量/SIMD | 全局 SIMD 向量复制 + 浮点 SIMD 标量逐元素 + 非 Ident 向量 rvalue；IR validator 对 binop/unop/cast 使用显式白名单 |
+| 复数 | `_Complex` 算术完整支持 + 字面量 + `__real__` / `__imag__` 关键字；IR validator 对 binop/unop/cast 使用显式白名单 |
+| float 取模 | 软件 fmod = l - trunc(l/r) * r，零 libc 依赖；float validator 支持 `%` 并拒绝未枚举运算/转换 |
 | int128 `&&` / `||` | `or rdx, dst` 合并高 64 位后再 test |
 | 全局数组 RIP+SIB | `emit_load_global_indexed`：`[rip+disp32+idx*scale]` 单指令加载 |
 | 浮点字面量 rodata | `v.to_le_bytes()` 直接写入 `.rodata`，IEEE 754 精确 |

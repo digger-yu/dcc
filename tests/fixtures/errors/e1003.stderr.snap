@@ -1,2 +1,4 @@
-error[E1003]: unsupported floating-point operation Mod
+error[E1003]: unsupported floating-point operation Or
   --> <file>:1:56
+   1 |int main(void) { float a = 1, b = 2; return (int)(a | b); }
+     |                                                        ^

@@ -550,13 +550,6 @@ fn diagnostic_error_snapshots() {
         let source = dir.join(format!("{}.{}", case.name, case.fixture_ext));
         assert!(source.exists(), "缺少 fixture {}", source.display());
 
-        // 已知问题: e1003 (浮点取模) 编译器目前未拒绝, 暂跳过回归.
-        // 见 docs/diagnostics.md E1003 注释.
-        if case.name == "e1003" {
-            eprintln!("[skip] {}: known compiler issue", case.name);
-            continue;
-        }
-
         // e1004/e1009/e1010 已降级为警告 (W1004/W1009/W1010), 以支持
         // 内核构建中隐式函数声明导致的类型错误. 这些情况下编译器
         // 不再中止, 而是输出警告继续编译.

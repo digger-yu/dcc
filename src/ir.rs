@@ -256,8 +256,14 @@ const FLOAT_BINOPS: &[BinOp] = &[
     BinOp::OrOr,
 ];
 
+/// 与 codegen 浮点路径一致的一元运算符集合。
+const FLOAT_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus];
+
 /// 与 codegen SIMD 向量路径一致的二元运算符集合。
 const VECTOR_BINOPS: &[BinOp] = &[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div];
+
+/// 当前没有 codegen 支持的向量一元运算符。
+const VECTOR_UNOPS: &[UnOp] = &[];
 
 /// 与 codegen 复数路径一致的二元运算符集合。
 const COMPLEX_BINOPS: &[BinOp] = &[
@@ -269,8 +275,15 @@ const COMPLEX_BINOPS: &[BinOp] = &[
     BinOp::Ne,
 ];
 
+/// 与 codegen 复数路径一致的一元运算符集合。
+const COMPLEX_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus];
+
 fn is_float_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Float { .. })
+}
+
+fn is_signed_integer_ty(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Integer { signed: true, .. })
 }
 
 fn is_vector_ty(ty: &ValueType) -> bool {
@@ -279,6 +292,32 @@ fn is_vector_ty(ty: &ValueType) -> bool {
 
 fn is_complex_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Complex(_))
+}
+
+fn is_supported_float_cast(from: &ValueType, to: &ValueType) -> bool {
+    if from == to || matches!(to, ValueType::Void) {
+        return true;
+    }
+    matches!(
+        (from, to),
+        (ValueType::Float { .. }, ValueType::Float { .. })
+            | (ValueType::Float { .. }, ValueType::Integer { .. })
+            | (ValueType::Integer { .. }, ValueType::Float { .. })
+    )
+}
+
+fn is_supported_vector_cast(from: &ValueType, to: &ValueType, src_kind: &ExprKind) -> bool {
+    if from == to || matches!(to, ValueType::Void) {
+        return true;
+    }
+    matches!(to, ValueType::Vector(_, _)) && matches!(src_kind, ExprKind::Aggregate)
+}
+
+fn is_supported_complex_cast(from: &ValueType, to: &ValueType) -> bool {
+    if from == to || matches!(to, ValueType::Void) {
+        return true;
+    }
+    is_complex_ty(from) && is_signed_integer_ty(to)
 }
 
 fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
@@ -311,21 +350,21 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
         }
         ExprKind::Unary(op) => {
             if let Some(operand) = expr.children.first() {
-                if is_float_ty(&operand.ty) && !matches!(op, UnOp::Neg | UnOp::Plus) {
+                if is_float_ty(&operand.ty) && !FLOAT_UNOPS.contains(&op) {
                     diagnostics.push(Diagnostic::err(
                         "E1003",
                         format!("unsupported floating-point unary operation {:?}", op),
                         expr.span.clone(),
                     ));
                 }
-                if is_vector_ty(&operand.ty) {
+                if is_vector_ty(&operand.ty) && !VECTOR_UNOPS.contains(&op) {
                     diagnostics.push(Diagnostic::err(
                         "E1007",
                         format!("unsupported vector unary operation {:?}", op),
                         expr.span.clone(),
                     ));
                 }
-                if is_complex_ty(&operand.ty) && !matches!(op, UnOp::Neg | UnOp::Plus) {
+                if is_complex_ty(&operand.ty) && !COMPLEX_UNOPS.contains(&op) {
                     diagnostics.push(Diagnostic::err(
                         "E1008",
                         format!("unsupported complex unary operation {:?}", op),
@@ -382,17 +421,30 @@ fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
         }
         ExprKind::Cast => {
             if let Some(src) = expr.children.first() {
-                if is_vector_ty(&src.ty) && !is_vector_ty(&expr.ty) {
+                if (is_float_ty(&src.ty) || is_float_ty(&expr.ty))
+                    && !is_supported_float_cast(&src.ty, &expr.ty)
+                {
                     diagnostics.push(Diagnostic::err(
-                        "E1007",
-                        "unsupported cast from vector type",
+                        "E1003",
+                        "unsupported cast involving floating-point type",
                         expr.span.clone(),
                     ));
                 }
-                if is_complex_ty(&src.ty) && is_vector_ty(&expr.ty) {
+                if (is_vector_ty(&src.ty) || is_vector_ty(&expr.ty))
+                    && !is_supported_vector_cast(&src.ty, &expr.ty, &src.kind)
+                {
+                    diagnostics.push(Diagnostic::err(
+                        "E1007",
+                        "unsupported cast involving vector type",
+                        expr.span.clone(),
+                    ));
+                }
+                if (is_complex_ty(&src.ty) || is_complex_ty(&expr.ty))
+                    && !is_supported_complex_cast(&src.ty, &expr.ty)
+                {
                     diagnostics.push(Diagnostic::err(
                         "E1008",
-                        "unsupported cast from complex to vector",
+                        "unsupported cast involving complex type",
                         expr.span.clone(),
                     ));
                 }
@@ -1086,6 +1138,43 @@ mod tests {
         let (program, _) = crate::parser::parse(src, "vector-assign.c");
         let (module, _) = lower(program).expect("vector assign binop should lower");
         validate(&module).expect("vector assign from binop should validate");
+    }
+
+    #[test]
+    fn vector_cast_from_initializer_validates() {
+        let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
+                     int main(void) { v4si v = (v4si){1,2,3,4}; return v[0]; }\n";
+        let (program, _) = crate::parser::parse(src, "vector-cast-init.c");
+        let (module, _) = lower(program).expect("vector initializer cast should lower");
+        validate(&module).expect("vector initializer cast should validate");
+    }
+
+    #[test]
+    fn float_to_pointer_cast_reports_e1003() {
+        let src = b"int main(void) { float f = 1; return (int)(long)(void *)f; }\n";
+        let (program, _) = crate::parser::parse(src, "float-cast.c");
+        let (module, _) = lower(program).expect("lower despite float pointer cast");
+        let err = validate(&module).expect_err("float pointer cast must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1003"), "{err:?}");
+    }
+
+    #[test]
+    fn vector_unary_plus_reports_e1007() {
+        let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
+                     int main(void) { v4si v = {1,2,3,4}; return (+v)[0]; }\n";
+        let (program, _) = crate::parser::parse(src, "vector-unary.c");
+        let (module, _) = lower(program).expect("lower despite vector unary plus");
+        let err = validate(&module).expect_err("vector unary plus must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+    }
+
+    #[test]
+    fn complex_to_unsigned_cast_reports_e1008() {
+        let src = b"int main(void) { _Complex float z = 1; return (unsigned)z; }\n";
+        let (program, _) = crate::parser::parse(src, "complex-cast.c");
+        let (module, _) = lower(program).expect("lower despite complex unsigned cast");
+        let err = validate(&module).expect_err("complex unsigned cast must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1008"), "{err:?}");
     }
 
     #[test]
