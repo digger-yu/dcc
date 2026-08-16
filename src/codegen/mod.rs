@@ -350,7 +350,7 @@ fn validate_inline_asm_operands(
         }
     }
 
-    // 3. 类型校验 (E0310) — 原始功能
+    // 3. 类型校验 (W0005) — 与 parser 层保持 warning 语义
     for (idx, expr) in outputs.iter().enumerate() {
         let constraint = output_constraints
             .get(idx)
@@ -379,6 +379,27 @@ fn validate_inline_asm_operands(
         .unwrap_or(constraint);
         validate_inline_asm_operand(expr, effective, false, span, diags);
     }
+}
+
+fn push_asm_type_mismatch_warning(
+    constraint: &str,
+    ty: &Type,
+    span: &Span,
+    diags: &mut Vec<Diagnostic>,
+) {
+    diags.push(
+        Diagnostic::warn(
+            "W0005",
+            format!(
+                "impossible constraint: asm constraint '{}' does not match expression type '{}'",
+                constraint, ty
+            ),
+            span.clone(),
+        )
+        .with_hint(
+            "use an XMM/x87 constraint for floating-point operands or change the expression type",
+        ),
+    );
 }
 
 fn matched_constraint<'a>(
@@ -413,19 +434,7 @@ fn validate_inline_asm_operand(
     if constraint_allows_type(constraint, &ty, is_output, is_inout, expr) {
         return;
     }
-    diags.push(
-        Diagnostic::err(
-            "E0310",
-            format!(
-                "impossible constraint: asm constraint '{}' does not match expression type '{}'",
-                constraint, ty
-            ),
-            span.clone(),
-        )
-        .with_hint(
-            "use an XMM/x87 constraint for floating-point operands or change the expression type",
-        ),
-    );
+    push_asm_type_mismatch_warning(constraint, &ty, span, diags);
 }
 
 fn parse_asm_constraint_flags(constraint: &str) -> (bool, bool, bool, Option<u32>) {

@@ -606,7 +606,16 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     if !asm_diags.is_empty() {
         remap_diags(&mut asm_diags, &line_map);
         enrich_diags(&mut asm_diags, src, &file_name, input.parent());
-        return Err(asm_diags);
+        let asm_has_err = asm_diags.iter().any(|d| matches!(d.sev, Severity::Error));
+        if asm_has_err {
+            return Err(asm_diags);
+        }
+        for d in &asm_diags {
+            if matches!(d.sev, Severity::Warning) {
+                d.print_with(&dcfg);
+            }
+        }
+        diags.extend(asm_diags);
     }
 
     if cfg.syntax_only {

@@ -1790,50 +1790,8 @@ impl<'a> Parser<'a> {
                     .with_hint("name all operands or use positional references consistently"),
             );
         }
-        // 4. 约束与表达式类型不匹配 (W0005)
-        let all_exprs: Vec<&Expr> = outputs.iter().chain(inputs.iter()).collect();
-        let all_constraints: Vec<&String> = output_constraints
-            .iter()
-            .chain(input_constraints.iter())
-            .collect();
-        for (expr, constraint) in all_exprs.iter().zip(all_constraints.iter()) {
-            let c = constraint.trim();
-            // 剥除前缀后取核心约束字母
-            let core = c.trim_start_matches(|ch: char| "=+&%".contains(ch));
-            if core.is_empty() {
-                continue;
-            }
-            let first = core.chars().next().unwrap();
-            let expr_ty = expr.ty();
-            let is_float = matches!(expr_ty, Type::Float | Type::Double | Type::LongDouble);
-            // 浮点表达式绑定 GP 整数约束 'r'
-            if is_float && first == 'r' {
-                self.diags.push(
-                    Diagnostic::warn(
-                        "W0005",
-                        "impossible constraint: 'r' constraint with \
-                     floating-point operand",
-                        sp.clone(),
-                    )
-                    .with_hint("use 'x' for SSE or 'f' for x87 float operands"),
-                );
-            }
-            // 整数表达式绑定 XMM 约束 'x'/'y'
-            if !is_float && (first == 'x' || first == 'Y') {
-                self.diags.push(
-                    Diagnostic::warn(
-                        "W0005",
-                        format!(
-                            "impossible constraint: '{}' constraint with \
-                         integer/pointer operand",
-                            first
-                        ),
-                        sp.clone(),
-                    )
-                    .with_hint("use 'r' for integer operands, 'x' for float/vector"),
-                );
-            }
-        }
+        // 4. 约束与表达式类型不匹配 (W0005) 在 codegen 层统一完成，
+        //    以 matched constraint、多重约束和显式寄存器分类为准。
         // 5. 模板占位符数量与操作数数量不匹配 (E0015)
         let total_ops = outputs.len() + inputs.len();
         let bytes = asm_str.as_bytes();

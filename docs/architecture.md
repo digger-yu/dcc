@@ -432,6 +432,11 @@ RIP-relative LEA，计算 goto 发射间接 `jmp`，`asm goto` 在 Mini x86
 - **+r 读写约束修复**：`prepare_asm_binding` 对 `+r` (`is_inout=true`)
   使用 `is_output=false` 加载变量值（而非 lea 地址），
   确保 asm 模板读到正确的输入值。
+- **约束类型校验**：`codegen::validate_inline_asm_constraints` 在 IR
+  降级后遍历 `Decl::GlobalAsm` / `Stmt::AsmGoto` / `Expr::AsmExpr`，
+  按 matched constraint、多重约束、显式寄存器和 x87/MMX/XMM 分类验证
+  操作数类型；不兼容时统一发 `W0005` warning 并继续编译，保持 dcc
+  兼容策略（GCC 对同类输入通常报 `impossible constraint` error）。
 - **测试**：`test_asm_constraints_ext.c` 10 个用例覆盖
   i / p / g / X / 0 / & / rm / x / %= / offsetof 约束，
   本地 Linux 全 10/10 PASS。`asm_constraint_ext2.c` 19 个用例覆盖

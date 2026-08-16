@@ -803,52 +803,72 @@ fn asm_register_planner_respects_fixed_gp_constraints() {
 }
 
 #[test]
-fn asm_constraint_type_mismatch_rejects_float_gp_input() {
+fn asm_constraint_type_mismatch_warns_float_gp_input() {
     let source = "int f(double x) { asm(\"\" : : \"r\"(x)); return 0; }\n";
     let (output, object_path) = run_object_test("asm-constraint-float-r-input", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "compile should fail");
     assert!(
-        stderr.contains("impossible constraint") && stderr.contains("'r'"),
+        output.status.success(),
+        "compile should warn but succeed: {stderr}"
+    );
+    assert!(
+        stderr.contains("W0005")
+            && stderr.contains("impossible constraint")
+            && stderr.contains("'r'"),
         "stderr: {stderr}"
     );
 }
 
 #[test]
-fn asm_constraint_type_mismatch_rejects_float_gp_input_syntax_only() {
+fn asm_constraint_type_mismatch_warns_float_gp_input_syntax_only() {
     let source = "int f(double x) { asm(\"\" : : \"r\"(x)); return 0; }\n";
     let output = run_syntax_test("asm-constraint-float-r-input-syntax", source);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "syntax-only compile should fail");
     assert!(
-        stderr.contains("impossible constraint") && stderr.contains("'r'"),
+        output.status.success(),
+        "syntax-only compile should warn but succeed: {stderr}"
+    );
+    assert!(
+        stderr.contains("W0005")
+            && stderr.contains("impossible constraint")
+            && stderr.contains("'r'"),
         "stderr: {stderr}"
     );
 }
 
 #[test]
-fn asm_constraint_type_mismatch_rejects_float_gp_output() {
+fn asm_constraint_type_mismatch_warns_float_gp_output() {
     let source = "double f(void) { double out; asm(\"\" : \"=r\"(out)); return out; }\n";
     let (output, object_path) = run_object_test("asm-constraint-float-r-output", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "compile should fail");
     assert!(
-        stderr.contains("impossible constraint") && stderr.contains("'=r'"),
+        output.status.success(),
+        "compile should warn but succeed: {stderr}"
+    );
+    assert!(
+        stderr.contains("W0005")
+            && stderr.contains("impossible constraint")
+            && stderr.contains("'=r'"),
         "stderr: {stderr}"
     );
 }
 
 #[test]
-fn asm_constraint_type_mismatch_rejects_float_rm_input() {
+fn asm_constraint_type_mismatch_warns_float_rm_input() {
     let source = "int f(double x) { asm(\"\" : : \"rm\"(x)); return 0; }\n";
     let (output, object_path) = run_object_test("asm-constraint-float-rm-input", source);
     let _ = fs::remove_file(object_path);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "compile should fail");
     assert!(
-        stderr.contains("impossible constraint") && stderr.contains("'rm'"),
+        output.status.success(),
+        "compile should warn but succeed: {stderr}"
+    );
+    assert!(
+        stderr.contains("W0005")
+            && stderr.contains("impossible constraint")
+            && stderr.contains("'rm'"),
         "stderr: {stderr}"
     );
 }
@@ -862,6 +882,60 @@ fn asm_constraint_type_validation_allows_matching_operands() {
         output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn asm_constraint_type_mismatch_warns_integer_xmm_input() {
+    let source = "int f(int x) { asm(\"\" : : \"x\"(x)); return x; }\n";
+    let (output, object_path) = run_object_test("asm-constraint-int-x-input", source);
+    let _ = fs::remove_file(object_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "compile should warn but succeed: {stderr}"
+    );
+    assert!(
+        stderr.contains("W0005")
+            && stderr.contains("impossible constraint")
+            && stderr.contains("'x'"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn asm_constraint_type_mismatch_warns_explicit_gp_float_input() {
+    let source = "int f(double x) { asm(\"\" : : \"{rax}\"(x)); return 0; }\n";
+    let (output, object_path) = run_object_test("asm-constraint-float-explicit-gp", source);
+    let _ = fs::remove_file(object_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "compile should warn but succeed: {stderr}"
+    );
+    assert!(
+        stderr.contains("W0005")
+            && stderr.contains("impossible constraint")
+            && stderr.contains("'{rax}'"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn asm_constraint_type_mismatch_warns_matching_float_to_gp_output() {
+    let source = "int f(double x) { int y; asm(\"\" : \"=r\"(y) : \"0\"(x)); return y; }\n";
+    let (output, object_path) = run_object_test("asm-constraint-float-match-gp", source);
+    let _ = fs::remove_file(object_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "compile should warn but succeed: {stderr}"
+    );
+    assert!(
+        stderr.contains("W0005")
+            && stderr.contains("impossible constraint")
+            && stderr.contains("'=r'"),
+        "stderr: {stderr}"
     );
 }
 

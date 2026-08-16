@@ -14824,10 +14824,45 @@ impl Codegen {
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
                 let xi = planner.alloc_xmm(idx, AsmRegUse::Input);
                 let name = Self::asm_xmm_name(xi as usize);
-                self.prepare_asm_xmm_binding(op, xi, is_inout);
+                if matches!(op.ty(), Type::Float | Type::Double | Type::LongDouble) {
+                    self.prepare_asm_xmm_binding(op, xi, is_inout);
+                } else {
+                    // W0005 兼容路径：约束要求 XMM 但表达式是整数/指针。
+                    // 为保持 warning-only 语义，按整数位型加载到 GP 后
+                    // movq/movd 进 XMM，避免把 GP 当 XMM 直接使用而崩溃。
+                    self.prepare_asm_binding(op, 0, false);
+                    if op.ty().size() <= 4 {
+                        self.emit(&[0x66]);
+                        if xi >= 8 {
+                            self.emit(&[0x44]);
+                        }
+                        self.emit(&[0x0F, 0x6E, 0xC0 | ((xi & 7) << 3)]);
+                    } else {
+                        self.emit(&[0x66]);
+                        let rex = 0x48 | if xi >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x0F, 0x6E, 0xC0 | ((xi & 7) << 3)]);
+                    }
+                }
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(xi, name));
                 meta.push((xi, xmm_bits, false, false, 0));
+                idx += 1;
+                continue;
+            }
+
+            if matches!(op.ty(), Type::Float | Type::Double | Type::LongDouble) {
+                let xi = planner.alloc_xmm(idx, AsmRegUse::Input);
+                let name = Self::asm_xmm_name(xi as usize);
+                self.prepare_asm_xmm_binding(op, xi, is_inout);
+                map.insert(format!("%{idx}"), name.to_string());
+                slots.push(Slot::Reg(xi, name));
+                meta.push((
+                    xi,
+                    if matches!(op.ty(), Type::Float) { 32 } else { 64 },
+                    false,
+                    false,
+                    0,
+                ));
                 idx += 1;
                 continue;
             }
