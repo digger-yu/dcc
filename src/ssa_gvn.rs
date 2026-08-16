@@ -13,21 +13,23 @@ pub fn run(module: &mut Module, level: u8) {
     if level < 2 {
         return;
     }
+    // FENV_ACCESS ON: 浮点运算依赖运行时舍入模式/异常标志, 不能跨表达式 CSE.
+    let fenv_access = module.source().fenv_access;
     let prog = module.source_mut();
-    gvn_program(prog);
+    gvn_program(prog, fenv_access);
 }
 
-fn gvn_program(prog: &mut Program) {
+fn gvn_program(prog: &mut Program, fenv_access: bool) {
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
             if let Some(body) = &mut f.body {
-                gvn_block(body);
+                gvn_block(body, fenv_access);
             }
         }
     }
 }
 
-fn gvn_block(block: &mut Block) {
+fn gvn_block(block: &mut Block, fenv_access: bool) {
     let mut avail: HashMap<String, String> = HashMap::new();
     let mut copies: HashMap<String, String> = HashMap::new();
     for item in &mut block.items {
@@ -35,7 +37,7 @@ fn gvn_block(block: &mut Block) {
             BlockItem::Decl(Decl::Var(v)) => {
                 if let Some(init) = &mut v.init {
                     propagate_copies_expr(init, &copies);
-                    if let Some(key) = gvn_key_string(init) {
+                    if let Some(key) = gvn_key_string(init, fenv_access) {
                         if let Some(prev) = avail.get(&key) {
                             *init = ident_expr(prev, init.ty());
                             copies.insert(v.name.name.clone(), prev.clone());
@@ -45,7 +47,7 @@ fn gvn_block(block: &mut Block) {
                     }
                 }
             }
-            BlockItem::Stmt(s) => gvn_stmt(s, &mut avail, &mut copies),
+            BlockItem::Stmt(s) => gvn_stmt(s, &mut avail, &mut copies, fenv_access),
             _ => {}
         }
     }
@@ -56,6 +58,7 @@ fn gvn_stmt(
     s: &mut Stmt,
     avail: &mut HashMap<String, String>,
     copies: &mut HashMap<String, String>,
+    fenv_access: bool,
 ) {
     match s {
         Stmt::Return { val: Some(e), .. } => propagate_copies_expr(e, copies),
@@ -63,7 +66,7 @@ fn gvn_stmt(
             if let Expr::Assign { l, r, .. } = e {
                 if let Expr::Ident { name, .. } = l.as_ref() {
                     propagate_copies_expr(r, copies);
-                    if let Some(key) = gvn_key_string(r) {
+                    if let Some(key) = gvn_key_string(r, fenv_access) {
                         if let Some(prev) = avail.get(&key) {
                             **r = ident_expr(prev, r.ty());
                             copies.insert(name.name.clone(), prev.clone());
@@ -82,18 +85,18 @@ fn gvn_stmt(
             cond, then_, else_, ..
         } => {
             propagate_copies_expr(cond, copies);
-            gvn_stmt(then_, avail, copies);
+            gvn_stmt(then_, avail, copies, fenv_access);
             if let Some(e) = else_ {
-                gvn_stmt(e, avail, copies);
+                gvn_stmt(e, avail, copies, fenv_access);
             }
         }
-        Stmt::Block { b, .. } => gvn_block(b),
+        Stmt::Block { b, .. } => gvn_block(b, fenv_access),
         Stmt::While { cond, body, .. } => {
             propagate_copies_expr(cond, copies);
-            gvn_stmt(body, avail, copies);
+            gvn_stmt(body, avail, copies, fenv_access);
         }
         Stmt::Do { body, cond, .. } => {
-            gvn_stmt(body, avail, copies);
+            gvn_stmt(body, avail, copies, fenv_access);
             propagate_copies_expr(cond, copies);
         }
         Stmt::For {
@@ -104,7 +107,7 @@ fn gvn_stmt(
             ..
         } => {
             if let Some(i) = init {
-                gvn_stmt(i, avail, copies);
+                gvn_stmt(i, avail, copies, fenv_access);
             }
             if let Some(c) = cond {
                 propagate_copies_expr(c, copies);
@@ -112,7 +115,7 @@ fn gvn_stmt(
             if let Some(st) = step {
                 propagate_copies_expr(st, copies);
             }
-            gvn_stmt(body, avail, copies);
+            gvn_stmt(body, avail, copies, fenv_access);
         }
         _ => {}
     }
@@ -335,16 +338,25 @@ fn propagate_copies_expr(e: &mut Expr, copies: &HashMap<String, String>) {
     }
 }
 
-fn gvn_key_string(e: &Expr) -> Option<String> {
+fn gvn_key_string(e: &Expr, fenv_access: bool) -> Option<String> {
     match e {
         Expr::Int { v, .. } => Some(format!("i:{v}")),
         Expr::Ident { name, .. } => Some(format!("v:{}", name.name)),
-        Expr::Binop { op, l, r, .. } if is_gvn_pure_op(*op) => Some(format!(
-            "b:{op:?}:{}:{}",
-            gvn_key_string(l)?,
-            gvn_key_string(r)?
-        )),
-        Expr::Unary { op, e: inner, .. } => Some(format!("u:{op:?}:{}", gvn_key_string(inner)?)),
+        // FENV_ACCESS ON 时浮点运算不得 CSE (舍入模式/异常标志可能因环境
+        // 修改而不同); 整数纯运算仍可参与值编号.
+        Expr::Binop { op, l, r, ty, .. }
+            if is_gvn_pure_op(*op)
+                && (!fenv_access || !matches!(ty, Type::Float | Type::Double | Type::LongDouble)) =>
+        {
+            Some(format!(
+                "b:{op:?}:{}:{}",
+                gvn_key_string(l, fenv_access)?,
+                gvn_key_string(r, fenv_access)?
+            ))
+        }
+        Expr::Unary { op, e: inner, .. } => {
+            Some(format!("u:{op:?}:{}", gvn_key_string(inner, fenv_access)?))
+        }
         _ => None,
     }
 }

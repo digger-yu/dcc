@@ -71,7 +71,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `_Pragma` 操作符 | C99 `_Pragma("string")` 与 `#pragma` 共享同一条 `process_directive` 通路；`_Pragma(expr)` 支持宏展开后为字符串字面量 |
 | `#pragma` 全家族 | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS` / `GCC diagnostic` / `once` / `comment` / `locale` |
 | `#pragma pack` 影响 struct 布局 | `preproc.pack_history` 携带行号；`Parser::pack_at_line(line)` 二分查找；`layout_struct_with_pack(max_align)` cap 到 `min(nat, n)` |
-| `#pragma STDC FENV_ACCESS` | ON/OFF/DEFAULT 三态；FP_CONTRACT / CX_LIMITED_RANGE 静默 noop |
+| `#pragma STDC FENV_ACCESS` | ON/OFF/DEFAULT 三态；ON 时 opt 禁用浮点常量折叠/GVN-CSE（舍入模式可被运行时修改）；FP_CONTRACT / CX_LIMITED_RANGE 静默 noop |
 | 字符集 / locale (C23) | `default`/`reset`/`"POSIX"`/`"UTF-8"`/`"ISO-8859-1"` 字符集切换 |
 | 预定义宏 | `__linux__` / `__x86_64__` / `__GNUC__` / `__amd64` / `__PIC__` / `__PIE__` 等完整集合 |
 | `__has_include` / `__has_attribute` / `__has_builtin` / `__has_c_attribute` / `__has_embed` | 编译期求值 |
@@ -382,7 +382,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `char16_t` / `char32_t` (C11/C++11) | uint16/uint32 + u""/U"" 字符串 |
 | 原子混合大小 | `__atomic_*` 1/2 字节变体（lock xadd/xchg/cmpxchg 8/16 位） |
 | `stdatomic.h` 全部 | `atomic_flag` / `atomic_signal_fence` / `atomic_thread_fence` |
-| 浮点环境 (`fenv.h`) | `pragma STDC FENV_ACCESS` ON/OFF/DEFAULT |
+| 浮点环境 (`fenv.h`) | `fegetround`/`fesetround`/`feclearexcept`/`feraiseexcept`/`fetestexcept`/`fegetexceptflag`/`fesetexceptflag`/`fetestexceptflag`/`fegetenv`/`fesetenv`/`feholdexcept`/`feupdateenv` 内联为 MXCSR/x87 指令 (不依赖 libm)；`pragma STDC FENV_ACCESS` ON/OFF/DEFAULT 驱动 opt 阶段浮点折叠开关 |
 | 复杂数学函数 | `cproj` / `cabs` / `carg` 走 libm |
 | per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |
 | jump_label 静态 key 声明 | `_DECLARE_STATIC_KEY_0/1` |

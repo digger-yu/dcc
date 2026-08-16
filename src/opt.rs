@@ -256,26 +256,29 @@ fn collect_global_func_roots(expr: &Expr, out: &mut Vec<String>) {
 
 fn fold_constants(module: &mut Module) {
     let prog = module.source_mut();
-    fold_program(prog);
+    // FENV_ACCESS ON 时浮点运算依赖运行时舍入模式, 编译期折叠会改变语义
+    // (C99 F.8): 折叠器跳过浮点二元运算折叠.
+    let fenv_access = prog.fenv_access;
+    fold_program(prog, fenv_access);
 }
 
-fn fold_program(prog: &mut Program) {
+fn fold_program(prog: &mut Program, fenv_access: bool) {
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
             if let Some(body) = &mut f.body {
-                fold_block(&mut body.items);
+                fold_block(&mut body.items, fenv_access);
             }
         }
     }
 }
 
-fn fold_block(items: &mut [BlockItem]) {
+fn fold_block(items: &mut [BlockItem], fenv_access: bool) {
     for item in items.iter_mut() {
         match item {
-            BlockItem::Stmt(s) => fold_stmt(s),
+            BlockItem::Stmt(s) => fold_stmt(s, fenv_access),
             BlockItem::Decl(Decl::Var(v)) => {
                 if let Some(init) = &mut v.init {
-                    *init = fold_expr(init.clone());
+                    *init = fold_expr(init.clone(), fenv_access);
                 }
             }
             _ => {}
@@ -283,20 +286,20 @@ fn fold_block(items: &mut [BlockItem]) {
     }
 }
 
-fn fold_stmt(s: &mut Stmt) {
+fn fold_stmt(s: &mut Stmt, fenv_access: bool) {
     match s {
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            *cond = fold_expr(cond.clone());
-            fold_stmt(then_);
+            *cond = fold_expr(cond.clone(), fenv_access);
+            fold_stmt(then_, fenv_access);
             if let Some(e) = else_ {
-                fold_stmt(e);
+                fold_stmt(e, fenv_access);
             }
         }
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
-            *cond = fold_expr(cond.clone());
-            fold_stmt(body);
+            *cond = fold_expr(cond.clone(), fenv_access);
+            fold_stmt(body, fenv_access);
         }
         Stmt::For {
             init,
@@ -306,45 +309,50 @@ fn fold_stmt(s: &mut Stmt) {
             ..
         } => {
             if let Some(c) = cond {
-                *c = fold_expr(c.clone());
+                *c = fold_expr(c.clone(), fenv_access);
             }
             if let Some(st) = step {
-                *st = fold_expr(st.clone());
+                *st = fold_expr(st.clone(), fenv_access);
             }
             if let Some(i) = init {
-                fold_stmt(i);
+                fold_stmt(i, fenv_access);
             }
-            fold_stmt(body);
+            fold_stmt(body, fenv_access);
         }
         Stmt::Return { val: Some(e), .. } => {
-            *e = fold_expr(e.clone());
+            *e = fold_expr(e.clone(), fenv_access);
         }
-        Stmt::Expr { e, .. } => *e = fold_expr(e.clone()),
-        Stmt::Block { b, .. } => fold_block(&mut b.items),
+        Stmt::Expr { e, .. } => *e = fold_expr(e.clone(), fenv_access),
+        Stmt::Block { b, .. } => fold_block(&mut b.items, fenv_access),
         _ => {}
     }
 }
 
-fn fold_expr(e: Expr) -> Expr {
+fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
     let e = match e {
         Expr::Binop { op, l, r, span, ty } => {
-            let l = Box::new(fold_expr(*l));
-            let r = Box::new(fold_expr(*r));
+            let l = Box::new(fold_expr(*l, fenv_access));
+            let r = Box::new(fold_expr(*r, fenv_access));
             if let (Expr::Int { v: lv, .. }, Expr::Int { v: rv, .. }) = (l.as_ref(), r.as_ref()) {
                 if let Some(v) = eval_binop(op, *lv, *rv) {
                     return Expr::Int { v, span, ty };
                 }
             }
-            if let (Expr::Float { v: lv, .. }, Expr::Float { v: rv, .. }) = (l.as_ref(), r.as_ref())
-            {
-                if let Some(v) = eval_float_binop(op, *lv, *rv) {
-                    return Expr::Float { v, span, ty };
+            // FENV_ACCESS ON: 不折叠浮点常量运算 (舍入模式可能被 fesetround
+            // 在运行时改变, 编译期折叠将按默认舍入求值, 语义错误).
+            if !fenv_access {
+                if let (Expr::Float { v: lv, .. }, Expr::Float { v: rv, .. }) =
+                    (l.as_ref(), r.as_ref())
+                {
+                    if let Some(v) = eval_float_binop(op, *lv, *rv) {
+                        return Expr::Float { v, span, ty };
+                    }
                 }
             }
             Expr::Binop { op, l, r, span, ty }
         }
         Expr::Unary { op, e, span, ty } => {
-            let e = Box::new(fold_expr(*e));
+            let e = Box::new(fold_expr(*e, fenv_access));
             if let Expr::Int { v, .. } = e.as_ref() {
                 if let Some(v) = eval_unary(op, *v) {
                     return Expr::Int { v, span, ty };
@@ -368,8 +376,11 @@ fn fold_expr(e: Expr) -> Expr {
                 }
             }
             Expr::Call {
-                callee: Box::new(fold_expr(*callee)),
-                args: args.into_iter().map(fold_expr).collect(),
+                callee: Box::new(fold_expr(*callee, fenv_access)),
+                args: args
+                    .into_iter()
+                    .map(|a| fold_expr(a, fenv_access))
+                    .collect(),
                 span,
                 ty,
             }
@@ -498,10 +509,11 @@ fn prune_stmt(s: &mut Stmt) {
 /// -O2: 常量条件分支折叠（DCE 的一种）。
 fn fold_constant_branches(module: &mut Module) {
     let prog = module.source_mut();
+    let fenv_access = prog.fenv_access;
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
             if let Some(body) = &mut f.body {
-                fold_branches_block(&mut body.items);
+                fold_branches_block(&mut body.items, fenv_access);
             }
         }
     }
@@ -532,7 +544,7 @@ fn block_has_label(b: &Block) -> bool {
     })
 }
 
-fn fold_branches_block(items: &mut Vec<BlockItem>) {
+fn fold_branches_block(items: &mut Vec<BlockItem>, fenv_access: bool) {
     let mut i = 0;
     while i < items.len() {
         let fold_if = matches!(
@@ -587,7 +599,7 @@ fn fold_branches_block(items: &mut Vec<BlockItem>) {
                 };
                 match taken {
                     Stmt::Block { mut b, .. } => {
-                        fold_branches_block(&mut b.items);
+                        fold_branches_block(&mut b.items, fenv_access);
                         for it in b.items.into_iter().rev() {
                             items.insert(i, it);
                         }
@@ -597,27 +609,27 @@ fn fold_branches_block(items: &mut Vec<BlockItem>) {
                 }
             }
         } else if let BlockItem::Stmt(s) = &mut items[i] {
-            fold_branches_stmt(s);
+            fold_branches_stmt(s, fenv_access);
         }
         i += 1;
     }
 }
 
-fn fold_branches_stmt(s: &mut Stmt) {
+fn fold_branches_stmt(s: &mut Stmt, fenv_access: bool) {
     match s {
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            *cond = fold_expr(cond.clone());
-            fold_branches_stmt(then_);
+            *cond = fold_expr(cond.clone(), fenv_access);
+            fold_branches_stmt(then_, fenv_access);
             if let Some(e) = else_ {
-                fold_branches_stmt(e);
+                fold_branches_stmt(e, fenv_access);
             }
         }
         Stmt::While {
             cond, body, span, ..
         } => {
-            *cond = fold_expr(cond.clone());
+            *cond = fold_expr(cond.clone(), fenv_access);
             if let Ok(v) = const_eval::eval(cond) {
                 if v == 0 && !stmt_has_label(body) {
                     *s = Stmt::Block {
@@ -630,9 +642,9 @@ fn fold_branches_stmt(s: &mut Stmt) {
                     return;
                 }
             }
-            fold_branches_stmt(body);
+            fold_branches_stmt(body, fenv_access);
         }
-        Stmt::Block { b, .. } => fold_branches_block(&mut b.items),
+        Stmt::Block { b, .. } => fold_branches_block(&mut b.items, fenv_access),
         Stmt::For {
             init,
             cond,
@@ -641,7 +653,7 @@ fn fold_branches_stmt(s: &mut Stmt) {
             ..
         } => {
             if let Some(c) = cond {
-                *c = fold_expr(c.clone());
+                *c = fold_expr(c.clone(), fenv_access);
                 if let Ok(v) = const_eval::eval(c) {
                     if v == 0 && !stmt_has_label(body) {
                         if let Some(i) = init.take() {
@@ -663,9 +675,9 @@ fn fold_branches_stmt(s: &mut Stmt) {
                 }
             }
             if let Some(i) = init {
-                fold_branches_stmt(i);
+                fold_branches_stmt(i, fenv_access);
             }
-            fold_branches_stmt(body);
+            fold_branches_stmt(body, fenv_access);
         }
         _ => {}
     }
@@ -760,6 +772,7 @@ fn dce_block_in_stmt(s: &mut Stmt) {
 /// `flatten` 属性: 函数体内所有调用均视为 always_inline。
 fn function_inline(module: &mut Module, level: u8) {
     let prog = module.source_mut();
+    let fenv_access = prog.fenv_access;
     let funcs: HashMap<String, FuncDecl> = prog
         .decls
         .iter()
@@ -775,7 +788,7 @@ fn function_inline(module: &mut Module, level: u8) {
         if let Decl::Func(f) = decl {
             let caller_flatten = f.is_flatten;
             if let Some(body) = &mut f.body {
-                inline_calls_in_block(body, &funcs, level, caller_flatten);
+                inline_calls_in_block(body, &funcs, level, caller_flatten, fenv_access);
             }
         }
     }
@@ -790,13 +803,16 @@ fn inline_calls_in_block(
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
     caller_flatten: bool,
+    fenv_access: bool,
 ) {
     for item in &mut body.items {
         match item {
-            BlockItem::Stmt(s) => inline_calls_in_stmt(s, funcs, level, caller_flatten),
+            BlockItem::Stmt(s) => {
+                inline_calls_in_stmt(s, funcs, level, caller_flatten, fenv_access)
+            }
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &mut f.body {
-                    inline_calls_in_block(b, funcs, level, caller_flatten);
+                    inline_calls_in_block(b, funcs, level, caller_flatten, fenv_access);
                 }
             }
             _ => {}
@@ -809,24 +825,29 @@ fn inline_calls_in_stmt(
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
     caller_flatten: bool,
+    fenv_access: bool,
 ) {
     match s {
         Stmt::Return { val: Some(e), .. } => {
-            *e = inline_expr(e.clone(), funcs, level, caller_flatten);
+            *e = inline_expr(e.clone(), funcs, level, caller_flatten, fenv_access);
         }
-        Stmt::Expr { e, .. } => *e = inline_expr(e.clone(), funcs, level, caller_flatten),
+        Stmt::Expr { e, .. } => {
+            *e = inline_expr(e.clone(), funcs, level, caller_flatten, fenv_access)
+        }
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            *cond = inline_expr(cond.clone(), funcs, level, caller_flatten);
-            inline_calls_in_stmt(then_, funcs, level, caller_flatten);
+            *cond = inline_expr(cond.clone(), funcs, level, caller_flatten, fenv_access);
+            inline_calls_in_stmt(then_, funcs, level, caller_flatten, fenv_access);
             if let Some(e) = else_ {
-                inline_calls_in_stmt(e, funcs, level, caller_flatten);
+                inline_calls_in_stmt(e, funcs, level, caller_flatten, fenv_access);
             }
         }
-        Stmt::Block { b, .. } => inline_calls_in_block(b, funcs, level, caller_flatten),
+        Stmt::Block { b, .. } => {
+            inline_calls_in_block(b, funcs, level, caller_flatten, fenv_access)
+        }
         Stmt::While { body, .. } | Stmt::Do { body, .. } => {
-            inline_calls_in_stmt(body, funcs, level, caller_flatten)
+            inline_calls_in_stmt(body, funcs, level, caller_flatten, fenv_access)
         }
         Stmt::For {
             init,
@@ -836,15 +857,15 @@ fn inline_calls_in_stmt(
             ..
         } => {
             if let Some(c) = cond {
-                *c = inline_expr(c.clone(), funcs, level, caller_flatten);
+                *c = inline_expr(c.clone(), funcs, level, caller_flatten, fenv_access);
             }
             if let Some(st) = step {
-                *st = inline_expr(st.clone(), funcs, level, caller_flatten);
+                *st = inline_expr(st.clone(), funcs, level, caller_flatten, fenv_access);
             }
             if let Some(i) = init {
-                inline_calls_in_stmt(i, funcs, level, caller_flatten);
+                inline_calls_in_stmt(i, funcs, level, caller_flatten, fenv_access);
             }
-            inline_calls_in_stmt(body, funcs, level, caller_flatten);
+            inline_calls_in_stmt(body, funcs, level, caller_flatten, fenv_access);
         }
         _ => {}
     }
@@ -992,6 +1013,7 @@ fn inline_expr(
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
     caller_flatten: bool,
+    fenv_access: bool,
 ) -> Expr {
     let e = match e {
         Expr::Call {
@@ -1004,14 +1026,14 @@ fn inline_expr(
                 if let Some(inlined) =
                     try_inline_call(&name.name, &args, funcs, level, caller_flatten)
                 {
-                    return inline_expr(inlined, funcs, level, caller_flatten);
+                    return inline_expr(inlined, funcs, level, caller_flatten, fenv_access);
                 }
             }
             Expr::Call {
-                callee: Box::new(inline_expr(*callee, funcs, level, caller_flatten)),
+                callee: Box::new(inline_expr(*callee, funcs, level, caller_flatten, fenv_access)),
                 args: args
                     .into_iter()
-                    .map(|a| inline_expr(a, funcs, level, caller_flatten))
+                    .map(|a| inline_expr(a, funcs, level, caller_flatten, fenv_access))
                     .collect(),
                 span,
                 ty,
@@ -1019,14 +1041,14 @@ fn inline_expr(
         }
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op,
-            l: Box::new(inline_expr(*l, funcs, level, caller_flatten)),
-            r: Box::new(inline_expr(*r, funcs, level, caller_flatten)),
+            l: Box::new(inline_expr(*l, funcs, level, caller_flatten, fenv_access)),
+            r: Box::new(inline_expr(*r, funcs, level, caller_flatten, fenv_access)),
             span,
             ty,
         },
         Expr::Unary { op, e, span, ty } => Expr::Unary {
             op,
-            e: Box::new(inline_expr(*e, funcs, level, caller_flatten)),
+            e: Box::new(inline_expr(*e, funcs, level, caller_flatten, fenv_access)),
             span,
             ty,
         },
@@ -1037,15 +1059,15 @@ fn inline_expr(
             span,
             ty,
         } => Expr::Cond {
-            cond: Box::new(inline_expr(*cond, funcs, level, caller_flatten)),
-            then_: Box::new(inline_expr(*then_, funcs, level, caller_flatten)),
-            else_: Box::new(inline_expr(*else_, funcs, level, caller_flatten)),
+            cond: Box::new(inline_expr(*cond, funcs, level, caller_flatten, fenv_access)),
+            then_: Box::new(inline_expr(*then_, funcs, level, caller_flatten, fenv_access)),
+            else_: Box::new(inline_expr(*else_, funcs, level, caller_flatten, fenv_access)),
             span,
             ty,
         },
         other => other,
     };
-    fold_expr(e)
+    fold_expr(e, fenv_access)
 }
 
 fn is_side_effect_free(e: &Expr) -> bool {
@@ -1177,6 +1199,37 @@ mod tests {
                 BlockItem::Stmt(Stmt::Return { .. })
             ));
         }
+    }
+
+    #[test]
+    fn o2_float_fold_respects_fenv_access() {
+        let float_expr = || Expr::Binop {
+            op: BinOp::Add,
+            l: Box::new(Expr::Float {
+                v: 1.5,
+                span: Span::point("t.c", 1, 1),
+                ty: Type::Double,
+            }),
+            r: Box::new(Expr::Float {
+                v: 2.25,
+                span: Span::point("t.c", 1, 1),
+                ty: Type::Double,
+            }),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Double,
+        };
+        // 默认 (FENV_ACCESS OFF): 浮点常量运算被折叠
+        let folded = fold_expr(float_expr(), false);
+        assert!(
+            matches!(folded, Expr::Float { v, .. } if (v - 3.75).abs() < 1e-12),
+            "float binop should fold without FENV_ACCESS, got {folded:?}"
+        );
+        // FENV_ACCESS ON: 保留运行时二元运算 (舍入模式可能在运行时改变)
+        let kept = fold_expr(float_expr(), true);
+        assert!(
+            matches!(kept, Expr::Binop { .. }),
+            "float binop must not fold under FENV_ACCESS, got {kept:?}"
+        );
     }
 
     #[test]

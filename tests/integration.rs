@@ -5750,22 +5750,44 @@ fn wide_char_literal_run_returns_zero() {
     assert_eq!(rc, 0, "wide_char_literal should return 0, got {rc}");
 }
 
-/// fenv.h 函数 pass-through (Section 11.2)
-/// 验证 feclearexcept / fegetround / fesetround / feraiseexcept
-/// / fetestexcept 等被 dcc 发射为外部符号, 走 libc / libm.
-/// 编译为 -c 后, 用 nm 检查符号表.
+/// fenv.h 运行时调用 (Section 11.2)
+/// feclearexcept / fegetround / fesetround / feraiseexcept / fetestexcept
+/// 由 dcc 内联为 MXCSR 指令序列, 不依赖 libm 符号 (host 链接无需 -lm,
+/// freestanding 场景可用). 编译并运行, 期望返回 0.
 #[test]
-fn fenv_pass_through_emits_external_symbols() {
+fn fenv_runtime_calls_compile_and_run() {
     let source = include_str!("fixtures/c/fenv.c");
-    let (output, object_path) = run_object_test("fenv-pass-through", source);
+    let (output, exe) = run_compile_and_run("fenv-runtime", source);
     assert!(
         output.status.success(),
         "compile stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let obj = fs::read(&object_path).unwrap_or_default();
-    let _ = fs::remove_file(&object_path);
-    let bytes = obj;
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "fenv runtime calls should return 0, got {rc}");
+}
+
+/// fenv 调用内联验证: 编译为汇编后, 函数体内是 stmxcsr/ldmxcsr
+/// 指令序列 (0F AE /2 /3), 且不存在 `call fe*` 外部调用.
+/// (注意: .o 符号表会包含 fenv.h 中声明但未定义函数的 UND 项,
+/// 因此只能依据重定位/汇编文本判断是否内联.)
+#[test]
+fn fenv_runtime_calls_are_inlined() {
+    let source = include_str!("fixtures/c/fenv.c");
+    let (output, asm_text) = run_asm_output_test("fenv-inlined", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // stmxcsr/ldmxcsr 操作码组 (0F AE): 内联的 MXCSR 访问
+    assert!(
+        asm_text.contains(".byte 0xae"),
+        "assembly should inline MXCSR ops, got:\n{}",
+        asm_text
+    );
+    // 不应出现对 fenv 外部函数的 call
     for name in &[
         "feclearexcept",
         "fegetround",
@@ -5773,13 +5795,33 @@ fn fenv_pass_through_emits_external_symbols() {
         "feraiseexcept",
         "fetestexcept",
     ] {
-        let needle = name.as_bytes();
         assert!(
-            bytes.windows(needle.len()).any(|w| w == needle),
-            "object file should contain fenv symbol {name}, got {} bytes",
-            bytes.len()
+            !asm_text.contains(&format!("call {name}")),
+            "assembly should not call external fenv symbol {name}, got:\n{}",
+            asm_text
         );
     }
+}
+
+/// FENV_ACCESS 运行时语义 (Section 11.2)
+/// #pragma STDC FENV_ACCESS ON + -O2: 浮点运算不被编译期折叠 (舍入模式
+/// 在运行时被 fesetround 改变), fesetround 调用不被 SSA 重建丢弃.
+/// 编译运行期望返回 0.
+#[test]
+fn fenv_access_rounding_mode_affects_runtime_arith() {
+    let source = include_str!("fixtures/c/fenv_round.c");
+    let (output, exe) = run_compile_and_run_flags("fenv-rounding", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        rc, 0,
+        "rounding mode should affect runtime division under FENV_ACCESS, got {rc}"
+    );
 }
 
 /// 复杂数学函数 pass-through (Section 11.2)
@@ -5813,8 +5855,8 @@ fn cmath_pass_through_emits_external_symbols() {
 
 /// fenv pragma STDC FENV_ACCESS 解析 (Section 11.2)
 /// 验证 #pragma STDC FENV_ACCESS ON/OFF/DEFAULT 不会破坏编译.
-/// pragma 状态在 dcc preproc 中由 fenv_access 字段记录, 但 codegen
-/// 仍允许 fenv 函数被发射 (运行时语义依赖 libc).
+/// pragma 状态在 dcc preproc 中由 fenv_access 字段记录, 并驱动
+/// opt 阶段的浮点折叠开关与 fenv 调用的内联提供.
 #[test]
 fn fenv_pragma_parses_without_error() {
     let dir = std::env::temp_dir();

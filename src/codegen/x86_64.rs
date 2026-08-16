@@ -12656,6 +12656,291 @@ impl Codegen {
                 self.mov_imm(dst, 0);
                 true
             }
+            // fenv.h 运行时调用 (C11 7.6): fegetround / fesetround 等
+            // 内联为 MXCSR / x87 指令序列, 不依赖 libm (host 链接缺 -lm
+            // 会 undefined reference; freestanding 无 libc). 用户在本 TU
+            // 自行定义同名函数时 (defined_funcs 命中) 回退到普通调用.
+            "fegetround"
+            | "fesetround"
+            | "feclearexcept"
+            | "feraiseexcept"
+            | "fetestexcept"
+            | "fegetexceptflag"
+            | "fesetexceptflag"
+            | "fetestexceptflag"
+            | "fegetenv"
+            | "fesetenv"
+            | "feholdexcept"
+            | "feupdateenv"
+                if !self.defined_funcs.contains(name) =>
+            {
+                return self.gen_fenv_builtin(name, args, dst);
+            }
+            _ => false,
+        }
+    }
+
+    /// fenv.h 运行时调用内联实现 (x86-64, C11 7.6 / C99 F.8)。
+    ///
+    /// SSE 浮点异常标志在 MXCSR 低 6 位 (0x01=invalid, 0x02=denorm,
+    /// 0x04=div-by-zero, 0x08=overflow, 0x10=underflow, 0x20=inexact),
+    /// 舍入模式在 MXCSR 位 13-14 (0x0/0x2000/0x4000/0x6000)。dcc 的浮点
+    /// 运算走 SSE, 因此舍入/异常以 MXCSR 为准; fenv_t 布局与 glibc x86-64
+    /// 对齐 (fnstenv 28 字节 + offset 28 的 __mxcsr)。所有函数返回 int,
+    /// 失败路径 (参数不齐) 按 0 处理。
+    fn gen_fenv_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
+        match name {
+            // fegetround(): 返回当前舍入模式 (FE_TONEAREST=0, FE_DOWNWARD=0x400, ...)
+            "fegetround" => {
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x04, 0x24]); // mov eax, [rsp]
+                self.emit(&[0x25, 0x00, 0x60, 0x00, 0x00]); // and eax, 0x6000
+                self.emit(&[0xC1, 0xE8, 0x03]); // shr eax, 3 → 控制字位 10-11
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // fesetround(mode): 设置 MXCSR 舍入位 13-14, 返回 0
+            "fesetround" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // rax = mode
+                self.emit(&[0x25, 0x00, 0x0C, 0x00, 0x00]); // and eax, 0xC00
+                self.emit(&[0xC1, 0xE0, 0x03]); // shl eax, 3 → MXCSR 位 13-14
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                self.emit(&[0x81, 0xE1, 0xFF, 0x9F, 0xFF, 0xFF]); // and ecx, 0xFFFF9FFF
+                self.emit(&[0x09, 0xC1]); // or ecx, eax
+                self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
+            // feclearexcept(excepts): 清除 MXCSR 中选中的异常标志, 返回 0
+            "feclearexcept" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // rax = excepts
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0xF7, 0xD0]); // not eax
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                self.emit(&[0x21, 0xC1]); // and ecx, eax
+                self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
+            // feraiseexcept(excepts): 置位 MXCSR 中选中的异常标志, 返回 0
+            "feraiseexcept" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // rax = excepts
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                self.emit(&[0x09, 0xC1]); // or ecx, eax
+                self.emit(&[0x89, 0x0C, 0x24]); // mov [rsp], ecx
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
+            // fetestexcept(excepts): 返回 MXCSR 中选中异常标志的位与
+            "fetestexcept" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 0); // rax = excepts
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
+                self.emit(&[0x21, 0xC1]); // and ecx, eax
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov(0, 1); // rax = rcx
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // fegetexceptflag(flagp, excepts): 保存选中标志到 *flagp (u16), 返回 0
+            "fegetexceptflag" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 7); // rdi = flagp
+                self.gen_expr(&args[1], 0); // rax = excepts
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
+                self.emit(&[0x21, 0xC1]); // and ecx, eax
+                self.emit(&[0x66, 0x89, 0x0F]); // mov [rdi], cx
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
+            // fesetexceptflag(flagp, excepts): 从 *flagp 恢复选中标志, 返回 0
+            "fesetexceptflag" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 7); // rdi = flagp
+                self.gen_expr(&args[1], 0); // rax = excepts
+                self.emit(&[0x0F, 0xB7, 0x0F]); // movzx ecx, word [rdi]
+                self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x21, 0xC1]); // and ecx, eax → ecx = *flagp & excepts
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x14, 0x24]); // mov edx, [rsp]
+                self.emit(&[0x09, 0xCA]); // or edx, ecx (置位选中标志)
+                self.emit(&[0x89, 0x14, 0x24]); // mov [rsp], edx
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
+            // fetestexceptflag(flagp, excepts) (C23): 返回 *flagp 中选中标志
+            "fetestexceptflag" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 7); // rdi = flagp
+                self.emit(&[0x0F, 0xB7, 0x0F]); // movzx ecx, word [rdi]
+                self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
+                self.gen_expr(&args[1], 0); // rax = excepts
+                self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
+                self.emit(&[0x21, 0xC1]); // and ecx, eax
+                self.mov(0, 1); // rax = rcx
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // fegetenv(envp): fnstenv [rdi] + stmxcsr [rdi+28] (glibc fenv_t 布局)
+            "fegetenv" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 7); // rdi = envp
+                self.emit(&[0xD9, 0x37]); // fnstenv [rdi]
+                self.emit(&[0x0F, 0xAE, 0x5F, 0x1C]); // stmxcsr [rdi+0x1C]
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
+            // fesetenv(envp): fldenv + ldmxcsr; FE_DFL_ENV (-1) 恢复默认环境
+            "fesetenv" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 7); // rdi = envp
+                let l_default = self.fresh_label();
+                let l_done = self.fresh_label();
+                self.emit(&[0x48, 0x83, 0xFF, 0xFF]); // cmp rdi, -1
+                self.jmp_rel32(&l_default, JumpKind::Je);
+                self.emit(&[0xD9, 0x27]); // fldenv [rdi]
+                self.emit(&[0x0F, 0xAE, 0x57, 0x1C]); // ldmxcsr [rdi+0x1C]
+                self.jmp_rel32(&l_done, JumpKind::Jmp);
+                self.label(&l_default);
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x66, 0xC7, 0x04, 0x24, 0x7F, 0x03]); // mov word [rsp], 0x037F
+                self.emit(&[0xD9, 0x2C, 0x24]); // fldcw [rsp]
+                self.emit(&[0xC7, 0x04, 0x24, 0x80, 0x1F, 0x00, 0x00]); // mov dword [rsp], 0x1F80
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.label(&l_done);
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
+            // feholdexcept(envp): 保存环境, 清除异常标志并屏蔽全部异常, 返回 0
+            "feholdexcept" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 7); // rdi = envp
+                self.emit(&[0xD9, 0x37]); // fnstenv [rdi]
+                self.emit(&[0x0F, 0xAE, 0x5F, 0x1C]); // stmxcsr [rdi+0x1C]
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x04, 0x24]); // mov eax, [rsp]
+                self.emit(&[0x25, 0xC0, 0xFF, 0xFF, 0xFF]); // and eax, ~0x3F
+                self.emit(&[0x0D, 0x80, 0x1F, 0x00, 0x00]); // or eax, 0x1F80 (mask all)
+                self.emit(&[0x89, 0x04, 0x24]); // mov [rsp], eax
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0xD9, 0x3C, 0x24]); // fnstcw [rsp]
+                self.emit(&[0x66, 0x8B, 0x04, 0x24]); // mov ax, [rsp]
+                self.emit(&[0x66, 0x83, 0xC8, 0x3F]); // or ax, 0x3F
+                self.emit(&[0x66, 0x89, 0x04, 0x24]); // mov [rsp], ax
+                self.emit(&[0xD9, 0x2C, 0x24]); // fldcw [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
+            // feupdateenv(envp): 保存旧异常标志, 恢复环境, 再置位旧标志, 返回 0
+            "feupdateenv" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 7); // rdi = envp
+                // rcx = 旧 SSE 异常标志
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x0C, 0x24]); // mov ecx, [rsp]
+                self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                // 恢复环境 (同 fesetenv 内联)
+                let l_default = self.fresh_label();
+                let l_done = self.fresh_label();
+                self.emit(&[0x48, 0x83, 0xFF, 0xFF]); // cmp rdi, -1
+                self.jmp_rel32(&l_default, JumpKind::Je);
+                self.emit(&[0xD9, 0x27]); // fldenv [rdi]
+                self.emit(&[0x0F, 0xAE, 0x57, 0x1C]); // ldmxcsr [rdi+0x1C]
+                self.jmp_rel32(&l_done, JumpKind::Jmp);
+                self.label(&l_default);
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x66, 0xC7, 0x04, 0x24, 0x7F, 0x03]); // mov word [rsp], 0x037F
+                self.emit(&[0xD9, 0x2C, 0x24]); // fldcw [rsp]
+                self.emit(&[0xC7, 0x04, 0x24, 0x80, 0x1F, 0x00, 0x00]); // mov dword [rsp], 0x1F80
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.label(&l_done);
+                // 在新环境中置位旧标志
+                self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
+                self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
+                self.emit(&[0x8B, 0x04, 0x24]); // mov eax, [rsp]
+                self.emit(&[0x09, 0xC8]); // or eax, ecx
+                self.emit(&[0x89, 0x04, 0x24]); // mov [rsp], eax
+                self.emit(&[0x0F, 0xAE, 0x14, 0x24]); // ldmxcsr [rsp]
+                self.emit(&[0x48, 0x83, 0xC4, 8]); // add rsp, 8
+                self.mov_imm(dst, 0); // 返回 0
+                true
+            }
             _ => false,
         }
     }

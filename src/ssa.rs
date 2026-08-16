@@ -1436,7 +1436,13 @@ pub fn rebuild_block(func: &Function) -> Block {
                         }
                         count
                     });
-                    if is_temp && use_count <= 1 {
+                    // 有副作用的临时结果 (如返回值被丢弃的 Call) 在
+                    // use_count==0 时不允许内联: 表达式存入 subst 后没有任何
+                    // 使用点消费, 重建时会被跳过, 副作用随之丢失.
+                    let side_effect_unused =
+                        use_count == 0 && inst_has_side_effect(&inst.kind);
+                    let inlineable = is_temp && use_count <= 1 && !side_effect_unused;
+                    if inlineable {
                         let resolved =
                             inst_to_expr_resolved(&inst.kind, &subst, &inst.span);
                         subst.insert(ssa_name, Some(resolved));
@@ -1472,6 +1478,19 @@ fn is_pass_hint_inst(kind: &InstKind) -> bool {
     } else {
         false
     }
+}
+
+/// 指令是否带有不可消除的副作用 (Call / Store / InlineAsm 等)。
+/// SSA→AST 重建时, 即使其结果未被使用也不能整条丢弃。
+fn inst_has_side_effect(kind: &InstKind) -> bool {
+    matches!(
+        kind,
+        InstKind::Call { .. }
+            | InstKind::Store { .. }
+            | InstKind::IndexStore { .. }
+            | InstKind::MemberStore { .. }
+            | InstKind::InlineAsm { .. }
+    )
 }
 
 fn rebuild_bb(
@@ -1511,8 +1530,11 @@ fn rebuild_bb(
         if let Some(d) = &inst.dest {
             env.insert(d.name(), d.clone());
             let ssa_name = d.name();
-            // 如果被标记为内联, 跳过赋值 (表达式已在 subst 中)
-            if subst.get(&ssa_name).is_some_and(|v| v.is_some()) {
+            // 如果被标记为内联, 跳过赋值 (表达式已在 subst 中)。
+            // 有副作用的指令 (如返回值被丢弃的 Call) 只在确实有使用点时
+            // 允许内联——结果未使用 (use_count==0) 时 subst 里存的表达式
+            // 没有任何使用点消费, 跳过会导致副作用丢失 (fesetround 被删).
+            if let Some(Some(_)) = subst.get(&ssa_name) {
                 continue;
             }
             // 发射赋值: base_name = resolved_rhs

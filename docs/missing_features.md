@@ -100,7 +100,6 @@
 | 限制 | 说明 |
 |------|------|
 | dynamic loader | 生成 ELF 依赖 host `ld.so`；dcc 自身可 musl 静态链接（见 `docs/static_build.md`） |
-| fenv 运行时调用 | `fesetround` / `fegetround` 等未提供，`FENV_ACCESS` 仍为纯语义状态 |
 | `double complex` 传值 ABI | `_Complex` 字面量/算术已实装，`double complex` 按值传 ABI 待后续 |
 
 ## 内联 asm 诊断与语义校验
