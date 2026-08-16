@@ -4889,6 +4889,23 @@ impl Codegen {
                     };
                     let is_f32 = matches!(&effective_ty, Type::Complex(inner) if matches!(inner.as_ref(), Type::Float));
                     let pfx: u8 = if is_f32 { 0xF3 } else { 0xF2 };
+                    if let Expr::Call { .. } = arg {
+                        self.gen_expr(arg, 0);
+                        for (chunk, loc) in arg_locs.iter().enumerate() {
+                            let src_xmm = chunk as u8;
+                            match *loc {
+                                ArgLoc::Stack(off) => {
+                                    self.emit_xmm_store_rsp(pfx, src_xmm, off);
+                                }
+                                _ => {
+                                    self.emit_xmm_store_rsp(pfx, src_xmm, stage);
+                                    staged.push((*loc, stage));
+                                    stage += 8;
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     for (chunk, loc) in arg_locs.iter().enumerate() {
                         let chunk_off = (chunk as i32) * inner_sz;
                         if let Expr::Ident { name, .. } = arg {
@@ -5095,59 +5112,63 @@ impl Codegen {
                     if Self::needs_memory_return(&ret_ty) && self.current_sret_offset.is_some() {
                         self.gen_sret_return(e, &ret_ty);
                     } else {
-                    let is_agg_ret = matches!(
-                        &ret_ty,
-                        Type::Struct(_, _)
-                            | Type::Union(_, _)
-                            | Type::Array(_, ArraySize::Const(_))
-                            | Type::Complex(_)
-                            | Type::Atomic(_)
-                            | Type::Vector(_, _)
-                    ) && ret_sz > 8;
-                    if is_agg_ret {
-                        // struct 返回: 加载到 rax[:rdx]
-                        if let Expr::Ident { name, .. } = &e {
-                            let off = self.var_offset(&name.name);
-                            self.load_stack(0, off); // rax = 前 8 字节
-                            if ret_sz > 8 {
-                                self.load_stack(2, off + 8); // rdx = 后 8 字节
-                            }
-                        } else if matches!(ret_ty, Type::Vector(_, _)) {
-                            // vector 返回: lvalue 直接取地址, rvalue 先物化到临时槽
-                            if self.gen_lvalue_addr(e, 0) {
-                                self.emit(&[0x48, 0x8B, 0x50, 0x08]); // mov rdx, [rax+8]
-                                self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                        let is_agg_ret = matches!(
+                            &ret_ty,
+                            Type::Struct(_, _)
+                                | Type::Union(_, _)
+                                | Type::Array(_, ArraySize::Const(_))
+                                | Type::Complex(_)
+                                | Type::Atomic(_)
+                                | Type::Vector(_, _)
+                        ) && ret_sz > 8;
+                        if is_agg_ret {
+                            if let Type::Complex(inner) = &ret_ty {
+                                if matches!(inner.as_ref(), Type::Float | Type::Double) {
+                                    self.gen_complex_sse_return(e, inner);
+                                } else {
+                                    self.gen_expr(e, 0);
+                                    let result_off = -self.frame_size + 8;
+                                    self.load_stack(0, result_off);
+                                    if ret_sz > 8 {
+                                        self.load_stack(2, result_off + 8);
+                                    }
+                                }
                             } else {
-                                self.gen_expr(e, 0); // 物化到向量临时槽 0
-                                let toff = self.vector_temp_base(0, ret_sz);
-                                self.load_stack(0, toff);
-                                self.load_stack(2, toff + 8);
+                                // struct 返回: 加载到 rax[:rdx]
+                                if let Expr::Ident { name, .. } = &e {
+                                    let off = self.var_offset(&name.name);
+                                    self.load_stack(0, off); // rax = 前 8 字节
+                                    if ret_sz > 8 {
+                                        self.load_stack(2, off + 8); // rdx = 后 8 字节
+                                    }
+                                } else if matches!(ret_ty, Type::Vector(_, _)) {
+                                    // vector 返回: lvalue 直接取地址, rvalue 先物化到临时槽
+                                    if self.gen_lvalue_addr(e, 0) {
+                                        self.emit(&[0x48, 0x8B, 0x50, 0x08]); // mov rdx, [rax+8]
+                                        self.emit(&[0x48, 0x8B, 0x00]); // mov rax, [rax]
+                                    } else {
+                                        self.gen_expr(e, 0); // 物化到向量临时槽 0
+                                        let toff = self.vector_temp_base(0, ret_sz);
+                                        self.load_stack(0, toff);
+                                        self.load_stack(2, toff + 8);
+                                    }
+                                } else {
+                                    self.gen_expr(e, 0);
+                                }
+                                // SysV: SSE 类 eightbyte 返回在 xmm0/xmm1 (而非 rax/rdx),
+                                // 如 struct {double,double}. _Complex float/double 已由
+                                // gen_complex_sse_return 直接填充返回寄存器。
+                                let ret_classes = Self::abi_classes(&ret_ty);
+                                for (c, cls) in ret_classes.iter().enumerate() {
+                                    if *cls == AbiClass::Sse {
+                                        let src = if c == 0 { 0u8 } else { 2u8 };
+                                        self.emit_movq_gp_to_xmm(c as u8, src);
+                                    }
+                                }
                             }
                         } else {
                             self.gen_expr(e, 0);
-                            // _Complex: gen_expr 结果在 result_off (内存), 需加载到 rax/rdx
-                            if matches!(ret_ty, Type::Complex(_)) {
-                                let result_off = -self.frame_size + 8;
-                                self.load_stack(0, result_off); // rax = 实部
-                                if ret_sz > 8 {
-                                    self.load_stack(2, result_off + 8); // rdx = 虚部
-                                }
-                            }
                         }
-                    } else {
-                        self.gen_expr(e, 0);
-                    }
-                    // SysV: SSE 类 eightbyte 返回在 xmm0/xmm1 (而非 rax/rdx),
-                    // 如 _Complex double / struct {double,double}
-                    if is_agg_ret {
-                        let ret_classes = Self::abi_classes(&ret_ty);
-                        for (c, cls) in ret_classes.iter().enumerate() {
-                            if *cls == AbiClass::Sse {
-                                let src = if c == 0 { 0u8 } else { 2u8 };
-                                self.emit_movq_gp_to_xmm(c as u8, src);
-                            }
-                        }
-                    }
                     }
                     // __attribute__((returns_nonnull)): 返回前检查 rax 非空.
                     // 若为 0 触发 UD2 (执行未定义指令) 立即 abort.
@@ -10231,6 +10252,58 @@ impl Codegen {
         }
     }
 
+    fn emit_xmm_r13_disp(&mut self, pfx: u8, op: u8, xmm: u8, off: i32) {
+        let rex = 0x41 | if xmm >= 8 { 0x04 } else { 0 };
+        self.emit(&[pfx, rex, 0x0F, op]);
+        if (-128..=127).contains(&off) {
+            self.emit(&[0x45 | ((xmm & 7) << 3), off as i8 as u8]);
+        } else {
+            self.emit(&[0x85 | ((xmm & 7) << 3)]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
+    fn emit_xmm_rax_disp(&mut self, pfx: u8, xmm: u8, off: i32) {
+        let rex = if xmm >= 8 { Some(0x44) } else { None };
+        if let Some(rex) = rex {
+            self.emit(&[pfx, rex, 0x0F, 0x10]);
+        } else {
+            self.emit(&[pfx, 0x0F, 0x10]);
+        }
+        let reg = (xmm & 7) << 3;
+        if off == 0 {
+            self.emit(&[reg]);
+        } else if (-128..=127).contains(&off) {
+            self.emit(&[0x40 | reg, off as i8 as u8]);
+        } else {
+            self.emit(&[0x80 | reg]);
+            self.emit(&off.to_le_bytes());
+        }
+    }
+
+    fn gen_complex_sse_return(&mut self, e: &Expr, inner: &Type) {
+        let inner_sz = inner.size() as i32;
+        let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+        if matches!(e, Expr::Call { .. }) {
+            self.gen_expr(e, 0);
+            return;
+        }
+        if self.gen_lvalue_addr(e, 0) {
+            self.emit_xmm_rax_disp(pfx, 0, 0);
+            if inner_sz == 4 {
+                return;
+            }
+            self.emit_xmm_rax_disp(pfx, 1, inner_sz);
+            return;
+        }
+        self.gen_expr(e, 0);
+        let result_off = -self.frame_size + 8;
+        self.emit_xmm_r13_disp(pfx, 0x10, 0, result_off);
+        if inner_sz != 4 {
+            self.emit_xmm_r13_disp(pfx, 0x10, 1, result_off + inner_sz);
+        }
+    }
+
     /// 求值 r 之后 (实部已在 xmm0), 把 _Complex 的虚部分量载入 xmm0。
     /// - r 为 _Complex rvalue: 物化在 [r13+result_off+inner_sz] (binop/取负/字面量);
     ///   Call 的 SSE 返回值虚部在 xmm1
@@ -10520,6 +10593,12 @@ impl Codegen {
             Expr::Binop { .. } => {
                 self.gen_expr(e, 0);
                 self.copy_complex_from_result_to_rsp(result_off, rsp_slot, inner_sz, is_float);
+            }
+            Expr::Call { .. } => {
+                let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+                self.gen_expr(e, 0);
+                self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                self.emit(&[pfx, 0x0F, 0x11, 0x4C, 0x24, (rsp_slot + inner_sz) as u8]);
             }
             _ => {
                 if matches!(e.ty(), Type::Complex(_)) {

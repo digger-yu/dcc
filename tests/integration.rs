@@ -2686,6 +2686,20 @@ fn complex_div_run_returns_zero() {
     assert_eq!(rc, 0, "complex_div should return 0, got {rc}");
 }
 
+/// double _Complex SysV AMD64 by-value argument and return ABI.
+#[test]
+fn double_complex_abi_run_returns_zero() {
+    let source = include_str!("fixtures/c/complex_abi.c");
+    let (output, exe) = run_compile_and_run("double-complex-abi", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "double_complex_abi should return 0, got {rc}");
+}
+
 /// __builtin_object_size 编译期折叠
 #[test]
 fn object_size_builtin_run_returns_zero() {
