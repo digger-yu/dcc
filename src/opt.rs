@@ -1229,6 +1229,8 @@ mod tests {
                 is_host: false,
             })],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
@@ -1370,6 +1372,8 @@ mod tests {
                 is_host: false,
             })],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);
@@ -1537,6 +1541,8 @@ mod tests {
         let prog = Program {
             decls: vec![sq, main_fn],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 1);
@@ -1641,6 +1647,8 @@ mod tests {
         let prog = Program {
             decls: vec![func],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let (mut module, _) = ir::lower(prog).expect("lower");
         optimize(&mut module, 2);

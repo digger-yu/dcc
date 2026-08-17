@@ -17,6 +17,12 @@ pub struct Program {
     /// #pragma STDC FENV_ACCESS 状态: ON/DEFAULT 为 true.
     /// 供 codegen 对浮点操作插入 volatile 语义.
     pub fenv_access: bool,
+    /// #pragma STDC FP_CONTRACT 状态: ON 为 true.
+    /// true 时 codegen 可把 `a*b+c` 收缩为融合乘加.
+    pub fp_contract: bool,
+    /// #pragma STDC CX_LIMITED_RANGE 状态: ON 为 true.
+    /// true 时 complex 除法使用有限范围公式.
+    pub cx_limited_range: bool,
 }
 
 #[derive(Debug, Clone)]

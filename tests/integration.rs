@@ -41,6 +41,20 @@ fn run_object_test_flags(
     (output, object_path)
 }
 
+fn readelf_relocations(path: &std::path::Path) -> String {
+    let output = Command::new("readelf")
+        .args(["-r"])
+        .arg(path)
+        .output()
+        .expect("readelf -r");
+    assert!(
+        output.status.success(),
+        "readelf -r failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 fn run_asm_output_test(name: &str, source: &str) -> (std::process::Output, String) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
@@ -3087,6 +3101,114 @@ fn complex_div_run_returns_zero() {
     );
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "complex_div should return 0, got {rc}");
+}
+
+#[test]
+fn stdc_fp_contract_controls_fma_codegen() {
+    let on = r#"
+#pragma STDC FP_CONTRACT ON
+double f(double a, double b, double c) { return a * b + c; }
+"#;
+    let off = r#"
+#pragma STDC FP_CONTRACT OFF
+double f(double a, double b, double c) { return a * b + c; }
+"#;
+    let (on_out, on_obj) = run_object_test("stdc-fp-contract-on", on);
+    assert!(
+        on_out.status.success(),
+        "FP_CONTRACT ON compile stderr: {}",
+        String::from_utf8_lossy(&on_out.stderr)
+    );
+    let on_relocs = readelf_relocations(&on_obj);
+    assert!(
+        on_relocs.contains(" fma") || on_relocs.contains(" fma "),
+        "FP_CONTRACT ON should lower a*b+c through fma: {on_relocs}"
+    );
+    let _ = fs::remove_file(&on_obj);
+
+    let (off_out, off_obj) = run_object_test("stdc-fp-contract-off", off);
+    assert!(
+        off_out.status.success(),
+        "FP_CONTRACT OFF compile stderr: {}",
+        String::from_utf8_lossy(&off_out.stderr)
+    );
+    let off_relocs = readelf_relocations(&off_obj);
+    assert!(
+        !off_relocs.contains(" fma") && !off_relocs.contains(" fma "),
+        "FP_CONTRACT OFF must not contract through fma: {off_relocs}"
+    );
+    let _ = fs::remove_file(&off_obj);
+}
+
+#[test]
+fn stdc_cx_limited_range_controls_complex_arithmetic_codegen() {
+    let on_div = r#"
+#pragma STDC CX_LIMITED_RANGE ON
+double _Complex f(double _Complex a, double _Complex b) { return a / b; }
+"#;
+    let off_div = r#"
+#pragma STDC CX_LIMITED_RANGE OFF
+double _Complex f(double _Complex a, double _Complex b) { return a / b; }
+"#;
+    let on_mul = r#"
+#pragma STDC CX_LIMITED_RANGE ON
+double _Complex f(double _Complex a, double _Complex b) { return a * b; }
+"#;
+    let off_mul = r#"
+#pragma STDC CX_LIMITED_RANGE OFF
+double _Complex f(double _Complex a, double _Complex b) { return a * b; }
+"#;
+    let (on_out, on_obj) = run_object_test("stdc-cx-limited-div-on", on_div);
+    assert!(
+        on_out.status.success(),
+        "CX_LIMITED_RANGE ON compile stderr: {}",
+        String::from_utf8_lossy(&on_out.stderr)
+    );
+    let on_relocs = readelf_relocations(&on_obj);
+    assert!(
+        !on_relocs.contains("__divdc3"),
+        "CX_LIMITED_RANGE ON should use inline limited formula: {on_relocs}"
+    );
+    let _ = fs::remove_file(&on_obj);
+
+    let (off_out, off_obj) = run_object_test("stdc-cx-limited-div-off", off_div);
+    assert!(
+        off_out.status.success(),
+        "CX_LIMITED_RANGE OFF compile stderr: {}",
+        String::from_utf8_lossy(&off_out.stderr)
+    );
+    let off_relocs = readelf_relocations(&off_obj);
+    assert!(
+        off_relocs.contains("__divdc3"),
+        "CX_LIMITED_RANGE OFF should use range-safe helper: {off_relocs}"
+    );
+    let _ = fs::remove_file(&off_obj);
+
+    let (on_mul_out, on_mul_obj) = run_object_test("stdc-cx-limited-mul-on", on_mul);
+    assert!(
+        on_mul_out.status.success(),
+        "CX_LIMITED_RANGE ON mul compile stderr: {}",
+        String::from_utf8_lossy(&on_mul_out.stderr)
+    );
+    let on_mul_relocs = readelf_relocations(&on_mul_obj);
+    assert!(
+        !on_mul_relocs.contains("__muldc3"),
+        "CX_LIMITED_RANGE ON should inline limited multiply: {on_mul_relocs}"
+    );
+    let _ = fs::remove_file(&on_mul_obj);
+
+    let (off_mul_out, off_mul_obj) = run_object_test("stdc-cx-limited-mul-off", off_mul);
+    assert!(
+        off_mul_out.status.success(),
+        "CX_LIMITED_RANGE OFF mul compile stderr: {}",
+        String::from_utf8_lossy(&off_mul_out.stderr)
+    );
+    let off_mul_relocs = readelf_relocations(&off_mul_obj);
+    assert!(
+        off_mul_relocs.contains("__muldc3"),
+        "CX_LIMITED_RANGE OFF should use range-safe multiply helper: {off_mul_relocs}"
+    );
+    let _ = fs::remove_file(&off_mul_obj);
 }
 
 /// double _Complex SysV AMD64 by-value argument and return ABI.

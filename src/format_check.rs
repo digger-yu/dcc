@@ -700,6 +700,8 @@ mod tests {
                 is_host: false,
             })],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let diags = check_program(&prog);
         assert!(diags.is_empty(), "expected no warnings, got: {diags:?}");
@@ -786,6 +788,8 @@ mod tests {
                 is_host: false,
             })],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let diags = check_program(&prog);
         assert!(!diags.is_empty(), "expected warning for missing args");

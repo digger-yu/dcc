@@ -370,6 +370,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         prog.decls.push(Decl::Func(FuncDecl {
             name: Ident {

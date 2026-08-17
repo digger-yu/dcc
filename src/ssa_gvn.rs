@@ -524,6 +524,8 @@ mod tests {
                 is_host: false,
             })],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let (mut module, _) = ir::lower(prog).expect("lower");
         run(&mut module, 2);

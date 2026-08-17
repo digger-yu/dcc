@@ -195,6 +195,10 @@ pub struct Codegen {
     /// #pragma STDC FENV_ACCESS: 浮点环境访问模式.
     /// true 时浮点操作不得被重排或消除 (volatile 语义).
     pub fenv_access: bool,
+    /// #pragma STDC FP_CONTRACT: true 时允许融合乘加收缩.
+    pub fp_contract: bool,
+    /// #pragma STDC CX_LIMITED_RANGE: true 时 complex 除法使用有限范围公式.
+    pub cx_limited_range: bool,
     asm_directives: Vec<String>,
     asm_directives_at: Vec<(u64, String)>,
     disasm_calls: HashMap<u64, String>,
@@ -1341,6 +1345,8 @@ impl Codegen {
             trapv: false,
             kasan: false,
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
             asm_directives: vec![],
             asm_directives_at: vec![],
             disasm_calls: HashMap::new(),
@@ -2440,6 +2446,8 @@ impl Codegen {
     pub fn compile(&mut self, module: &crate::ir::Module) {
         let prog = module.source();
         self.fenv_access = prog.fenv_access;
+        self.fp_contract = prog.fp_contract;
+        self.cx_limited_range = prog.cx_limited_range;
         // 检查 __attribute__((error/warning/deprecated)): 扫描所有函数声明
         // 如果函数体中调用了这些函数，发射诊断信息
         let diag_fns: Vec<AttrDiagFn> = prog
@@ -6054,8 +6062,11 @@ impl Codegen {
                     }
                     return;
                 }
-                // 浮点运算: 使用 SSE 指令
+                // 浮点运算: 使用 SSE 指令；FP_CONTRACT ON 时允许 a*b+c 收缩.
                 if matches!(l.ty(), Type::Float | Type::Double | Type::LongDouble) {
+                    if self.fp_contract && self.try_gen_fp_contract(*op, l, r, dst) {
+                        return;
+                    }
                     self.gen_float_binop(*op, l, r);
                     return;
                 }
@@ -9047,6 +9058,64 @@ impl Codegen {
         self.emit(&[prefix, 0x0F, opcode, 0xC1]);
     }
 
+    fn try_gen_fp_contract(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) -> bool {
+        if !matches!(op, BinOp::Add | BinOp::Sub) {
+            return false;
+        }
+        let ty = l.ty();
+        if !matches!(ty, Type::Float | Type::Double | Type::LongDouble) || r.ty() != ty {
+            return false;
+        }
+        let (mul_l, mul_r, addend, add_neg) = match op {
+            BinOp::Add => match (l, r) {
+                (
+                    Expr::Binop {
+                        op: BinOp::Mul,
+                        l: a,
+                        r: b,
+                        ..
+                    },
+                    c,
+                ) => (a.as_ref(), b.as_ref(), c, false),
+                (
+                    c,
+                    Expr::Binop {
+                        op: BinOp::Mul,
+                        l: a,
+                        r: b,
+                        ..
+                    },
+                ) => (a.as_ref(), b.as_ref(), c, false),
+                _ => return false,
+            },
+            BinOp::Sub => match l {
+                Expr::Binop {
+                    op: BinOp::Mul,
+                    l: a,
+                    r: b,
+                    ..
+                } => (a.as_ref(), b.as_ref(), r, true),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let mut args = vec![mul_l.clone(), mul_r.clone(), addend.clone()];
+        if add_neg {
+            args[2] = Expr::Unary {
+                op: UnOp::Neg,
+                e: Box::new(args[2].clone()),
+                span: Self::expr_span(addend).clone(),
+                ty: addend.ty(),
+            };
+        }
+        let builtin = match ty {
+            Type::Float => "__builtin_fmaf",
+            Type::LongDouble => "__builtin_fmal",
+            _ => "__builtin_fma",
+        };
+        self.gen_builtin(builtin, &args, dst)
+    }
+
     // 浮点比较: ucomisd + setcc -> al -> movzx rax, al
     fn gen_float_cmp(&mut self, op: BinOp, ty: &Type) {
         let is_float = matches!(ty, Type::Float);
@@ -10984,53 +11053,33 @@ impl Codegen {
                 self.emit(&[load_prefix, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]);
             }
             BinOp::Mul => {
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]);
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]);
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
-                let r_imag_slot = total_sz + inner_sz;
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
-                self.emit(&[0x66, 0x0F, 0x28, 0xE0]);
-                self.emit(&[load_prefix, 0x0F, op_mul, 0xE2]);
-                self.emit(&[0x66, 0x0F, 0x28, 0xE9]);
-                self.emit(&[load_prefix, 0x0F, op_mul, 0xEB]);
-                self.emit(&[load_prefix, 0x0F, op_sub, 0xE5]);
-                self.emit(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]);
-                self.emit(&[0x66, 0x0F, 0x28, 0xE0]);
-                self.emit(&[load_prefix, 0x0F, op_mul, 0xE3]);
-                self.emit(&[0x66, 0x0F, 0x28, 0xE9]);
-                self.emit(&[load_prefix, 0x0F, op_mul, 0xEA]);
-                self.emit(&[load_prefix, 0x0F, op_add, 0xE5]);
-                self.emit(&[load_prefix, 0x0F, 0x11, 0x64, 0x24, inner_sz as u8]);
+                if matches!(inner_ty, Type::Float | Type::Double) && !self.cx_limited_range {
+                    self.emit_complex_mul_call(is_float, inner_sz);
+                } else {
+                    self.emit_complex_mul_limited(
+                        load_prefix,
+                        op_add,
+                        op_sub,
+                        op_mul,
+                        inner_sz,
+                        total_sz,
+                    );
+                }
             }
             BinOp::Div => {
-                // (a+bi)/(c+di): real=(ac+bd)/den, imag=(bc-ad)/den, den=c²+d²
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]); // xmm0=a
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]); // xmm1=b
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]); // xmm2=c
-                let r_imag_slot = total_sz + inner_sz;
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]); // xmm3=d
-                                                                                      // xmm6 = c² + d²
-                self.mov_xmm(6, 2);
-                self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(6, 6)]);
-                self.mov_xmm(7, 3);
-                self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 7)]);
-                self.emit(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(6, 7)]);
-                // xmm4 = (a*c + b*d) / den
-                self.mov_xmm(4, 0);
-                self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(4, 2)]);
-                self.mov_xmm(7, 1);
-                self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 3)]);
-                self.emit(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(4, 7)]);
-                self.emit(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(4, 6)]);
-                self.emit(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]);
-                // xmm7 = (b*c - a*d) / den
-                self.mov_xmm(7, 1);
-                self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 2)]);
-                self.mov_xmm(5, 0);
-                self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(5, 3)]);
-                self.emit(&[load_prefix, 0x0F, op_sub, Self::modrm_reg_reg(7, 5)]);
-                self.emit(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(7, 6)]);
-                self.emit(&[load_prefix, 0x0F, 0x11, 0x7C, 0x24, inner_sz as u8]);
+                if matches!(inner_ty, Type::Float | Type::Double) && !self.cx_limited_range {
+                    self.emit_complex_div_call(is_float, inner_sz);
+                } else {
+                    self.emit_complex_div_limited(
+                        load_prefix,
+                        op_add,
+                        op_sub,
+                        op_mul,
+                        op_div,
+                        inner_sz,
+                        total_sz,
+                    );
+                }
             }
             BinOp::EqEq | BinOp::Ne => {
                 // _Complex 比较: a==b ⟺ real(a)==real(b) && imag(a)==imag(b)
@@ -11101,6 +11150,105 @@ impl Codegen {
             // 整数内型: 实部载入 rax (gen_complex_init 直接 store_stack)
             self.load_stack(0, result_off);
         }
+    }
+
+    fn emit_complex_mul_call(&mut self, is_float: bool, inner_sz: i32) {
+        let helper = if is_float { "__mulsc3" } else { "__muldc3" };
+        let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+        let r_imag_slot = inner_sz * 3;
+        self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
+        self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
+        self.emit(&[pfx, 0x0F, 0x10, 0x54, 0x24, (inner_sz * 2) as u8]);
+        self.emit(&[pfx, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
+        self.emit_call_extern(helper);
+        if is_float {
+            self.emit(&[0x66, 0x0F, 0xD6, 0x04, 0x24]);
+        } else {
+            self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+            self.emit(&[pfx, 0x0F, 0x11, 0x4C, 0x24, inner_sz as u8]);
+        }
+    }
+
+    fn emit_complex_mul_limited(
+        &mut self,
+        load_prefix: u8,
+        op_add: u8,
+        op_sub: u8,
+        op_mul: u8,
+        inner_sz: i32,
+        total_sz: i32,
+    ) {
+        self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]);
+        self.emit(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]);
+        self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
+        let r_imag_slot = total_sz + inner_sz;
+        self.emit(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
+        self.emit(&[0x66, 0x0F, 0x28, 0xE0]);
+        self.emit(&[load_prefix, 0x0F, op_mul, 0xE2]);
+        self.emit(&[0x66, 0x0F, 0x28, 0xE9]);
+        self.emit(&[load_prefix, 0x0F, op_mul, 0xEB]);
+        self.emit(&[load_prefix, 0x0F, op_sub, 0xE5]);
+        self.emit(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]);
+        self.emit(&[0x66, 0x0F, 0x28, 0xE0]);
+        self.emit(&[load_prefix, 0x0F, op_mul, 0xE3]);
+        self.emit(&[0x66, 0x0F, 0x28, 0xE9]);
+        self.emit(&[load_prefix, 0x0F, op_mul, 0xEA]);
+        self.emit(&[load_prefix, 0x0F, op_add, 0xE5]);
+        self.emit(&[load_prefix, 0x0F, 0x11, 0x64, 0x24, inner_sz as u8]);
+    }
+
+    fn emit_complex_div_call(&mut self, is_float: bool, inner_sz: i32) {
+        let helper = if is_float { "__divsc3" } else { "__divdc3" };
+        let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+        let r_imag_slot = inner_sz * 3;
+        self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
+        self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
+        self.emit(&[pfx, 0x0F, 0x10, 0x54, 0x24, (inner_sz * 2) as u8]);
+        self.emit(&[pfx, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
+        self.emit_call_extern(helper);
+        if is_float {
+            self.emit(&[0x66, 0x0F, 0xD6, 0x04, 0x24]);
+        } else {
+            self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+            self.emit(&[pfx, 0x0F, 0x11, 0x4C, 0x24, inner_sz as u8]);
+        }
+    }
+
+    fn emit_complex_div_limited(
+        &mut self,
+        load_prefix: u8,
+        op_add: u8,
+        op_sub: u8,
+        op_mul: u8,
+        op_div: u8,
+        inner_sz: i32,
+        total_sz: i32,
+    ) {
+        // (a+bi)/(c+di): real=(ac+bd)/den, imag=(bc-ad)/den, den=c²+d².
+        self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]);
+        self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
+        self.emit(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]);
+        let r_imag_slot = total_sz + inner_sz;
+        self.emit(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
+        self.mov_xmm(6, 2);
+        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(6, 6)]);
+        self.mov_xmm(7, 3);
+        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 7)]);
+        self.emit(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(6, 7)]);
+        self.mov_xmm(4, 0);
+        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(4, 2)]);
+        self.mov_xmm(7, 1);
+        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 3)]);
+        self.emit(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(4, 7)]);
+        self.emit(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(4, 6)]);
+        self.emit(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]);
+        self.mov_xmm(7, 1);
+        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 2)]);
+        self.mov_xmm(5, 0);
+        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(5, 3)]);
+        self.emit(&[load_prefix, 0x0F, op_sub, Self::modrm_reg_reg(7, 5)]);
+        self.emit(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(7, 6)]);
+        self.emit(&[load_prefix, 0x0F, 0x11, 0x7C, 0x24, inner_sz as u8]);
     }
 
     /// 将复数操作数写入 [rsp+slot]（实部）与 [rsp+slot+inner_sz]（虚部）

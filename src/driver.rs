@@ -262,6 +262,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let include_deps = pp_out.deps;
     let pp_macros = pp_out.macros;
     let fenv_access = pp_out.fenv_access;
+    let fp_contract = pp_out.fp_contract;
+    let cx_limited_range = pp_out.cx_limited_range;
     enrich_diags(&mut pp_diags, src, &file_name, input.parent());
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
@@ -391,6 +393,8 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             cuda: cfg.profile.offload.cuda,
             hip: cfg.profile.offload.hip,
             fenv_access,
+            fp_contract,
+            cx_limited_range,
         },
     );
     drop(preprocessed);

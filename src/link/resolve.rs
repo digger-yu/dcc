@@ -280,6 +280,7 @@ fn is_implicit_undef(name: &str) -> bool {
         // 转发到 libm/glibc; freestanding 链接器无法解析, 但允许作为
         // implicit undefined 以让测试编译通过 (运行时由 libc 提供).
         "strcasecmp" | "strncasecmp" | "fma" | "fmaf" | "fmal" |
+        "__mulsc3" | "__muldc3" | "__divsc3" | "__divdc3" |
         // wchar_t 字符串/内存库 (Section 11 P0.1): wcscpy/wcscmp/wcslen/wcschr/
         // wcsncmp/wcsrchr/wcscat/wmemcpy/wmemmove/wmemset/wmemcmp.
         "wcscpy" | "wcscat" | "wcscmp" | "wcsncmp" | "wcslen" | "wcschr" | "wcsrchr" |

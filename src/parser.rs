@@ -94,6 +94,10 @@ pub struct ParseOptions {
     /// #pragma STDC FENV_ACCESS 状态: ON/DEFAULT 为 true.
     /// 供 codegen 对浮点操作插入 volatile 语义.
     pub fenv_access: bool,
+    /// #pragma STDC FP_CONTRACT 状态: ON 为 true.
+    pub fp_contract: bool,
+    /// #pragma STDC CX_LIMITED_RANGE 状态: ON 为 true.
+    pub cx_limited_range: bool,
 }
 
 impl ParsedAttrs {
@@ -1931,6 +1935,8 @@ impl<'a> Parser<'a> {
             Program {
                 decls,
                 fenv_access: self.opts.fenv_access,
+                fp_contract: self.opts.fp_contract,
+                cx_limited_range: self.opts.cx_limited_range,
             },
             std::mem::take(&mut self.diags),
         )

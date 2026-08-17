@@ -2112,6 +2112,8 @@ mod tests {
                 Decl::Func(empty_func("second")),
             ],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let flags = SanitizerFlags {
             kasan: true,
@@ -2139,6 +2141,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("a")), Decl::Func(empty_func("b"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         instrument_program(
             &mut prog,
@@ -2218,6 +2222,8 @@ mod tests {
                 is_host: false,
             })],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         instrument_program(
             &mut prog,
@@ -2305,6 +2311,8 @@ mod tests {
                 is_host: false,
             })],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let flags = SanitizerFlags {
             kasan: true,
@@ -2330,6 +2338,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         // 替换 body 为 `return x / y;`
         let Decl::Func(f) = &mut prog.decls[0] else {
@@ -2381,6 +2391,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2433,6 +2445,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2474,6 +2488,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2538,6 +2554,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2611,6 +2629,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2659,6 +2679,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2708,6 +2730,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2890,6 +2914,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2945,6 +2971,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -2992,6 +3020,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -3049,6 +3079,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         instrument_program(
             &mut prog,
@@ -3091,6 +3123,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -3248,6 +3282,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -3301,6 +3337,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -3356,6 +3394,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -3415,6 +3455,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -3495,6 +3537,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -3572,6 +3616,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()
@@ -3631,6 +3677,8 @@ mod tests {
         let mut prog = Program {
             decls: vec![Decl::Func(empty_func("f"))],
             fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
         };
         let Decl::Func(f) = &mut prog.decls[0] else {
             panic!()

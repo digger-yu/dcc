@@ -38,7 +38,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| `#pragma STDC FP_CONTRACT` / `CX_LIMITED_RANGE` | 当前仅接受为 no-op，未影响浮点收缩或 complex range 语义 |
 | PCH 降级 | 宏状态 hash 不一致、写入失败或有预处理错误时 warning 后回退，不作为 hard failure |
 | `-Wp,*` 子选项 | 仅白名单支持；未知预处理器透传选项会报 unsupported |
 | `-x` 语言集 | 仅支持 assembler/assembler-with-cpp/C/C++ 等少数输入语言 |

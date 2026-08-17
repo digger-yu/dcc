@@ -95,6 +95,10 @@ pub struct Preprocessor {
     pub weak_symbols: HashSet<String>,
     /// #pragma STDC FENV_ACCESS 状态
     pub fenv_access: bool,
+    /// #pragma STDC FP_CONTRACT 状态: ON 为 true, OFF/DEFAULT 为 false.
+    pub fp_contract: bool,
+    /// #pragma STDC CX_LIMITED_RANGE 状态: ON 为 true, OFF/DEFAULT 为 false.
+    pub cx_limited_range: bool,
     /// 收集在展开阶段遇到的 _Pragma 操作符, 待外层 &mut self 方法批量处理
     pending_pragmas: RefCell<Vec<(String, u32)>>,
     /// 本轮 expand_macros 实际展开过的宏名 (跨嵌套调用累积),
@@ -193,6 +197,12 @@ pub struct PreprocessOutput {
     /// #pragma STDC FENV_ACCESS 状态: ON/DEFAULT 为 true, OFF 为 false.
     /// 供 codegen 决定是否对浮点操作插入 volatile 语义.
     pub fenv_access: bool,
+    /// #pragma STDC FP_CONTRACT 状态: ON 为 true, OFF/DEFAULT 为 false.
+    /// 供 codegen 决定是否允许收缩 `a*b+c` 为融合乘加.
+    pub fp_contract: bool,
+    /// #pragma STDC CX_LIMITED_RANGE 状态: ON 为 true, OFF/DEFAULT 为 false.
+    /// 供 codegen 切换 _Complex 除法的有限范围公式.
+    pub cx_limited_range: bool,
 }
 
 /// 预编译头 (PCH) 选项。
@@ -473,6 +483,8 @@ pub fn preprocess(
         pack_history: vec![(0, None)],
         weak_symbols: HashSet::new(),
         fenv_access: false,
+        fp_contract: false,
+        cx_limited_range: false,
         counter: 0,
         pending_pragmas: RefCell::new(Vec::new()),
         expanded_macros: RefCell::new(HashSet::new()),
@@ -926,6 +938,8 @@ pub fn preprocess(
         line_map: pp.line_map.clone(),
         openmp_pragmas: pp.openmp_pragmas.clone(),
         fenv_access: pp.fenv_access,
+        fp_contract: pp.fp_contract,
+        cx_limited_range: pp.cx_limited_range,
     }
 }
 
@@ -2586,13 +2600,13 @@ impl Preprocessor {
 
     /// 处理 #pragma STDC FENV_ACCESS / FP_CONTRACT / CX_LIMITED_RANGE
     /// 这三个 C99 标准 STDC pragma 都以 `ON` / `OFF` / `DEFAULT`
-    /// 三个状态中之一为参数, dcc 现阶段将它们作为 noop 接受:
-    /// * FENV_ACCESS: 记录到 self.fenv_access, 供 codegen 阶段
-    ///   决定是否插入 `volatile` 以防止浮点环境访问被优化
-    ///   (dcc 仍将其作为纯语义状态, 不发警告)
-    /// * FP_CONTRACT / CX_LIMITED_RANGE: 仅接受不存储, 不发警告
-    ///   未知状态值 (`MAYBE` 等) 发出 W0001 警告, 避免静默拼写错误
-    ///   污染语义状态.
+    /// 三个状态中之一为参数, dcc 将状态记录到 Program 语义选项:
+    /// * FENV_ACCESS: ON/DEFAULT 开启, OFF 关闭
+    /// * FP_CONTRACT: ON 允许收缩 `a*b+c`, OFF/DEFAULT 禁止
+    /// * CX_LIMITED_RANGE: ON 允许有限范围 complex 公式, OFF/DEFAULT
+    ///   保持保守公式
+    /// 未知状态值 (`MAYBE` 等) 发出 W0001 警告, 避免静默拼写错误
+    /// 污染语义状态.
     ///
     /// `line_no` 是 `_Pragma` / 直接 `#pragma` 所在源行号; 直接
     /// `#pragma` 调用时由 `process_directive` 传 0, 此处自动取
@@ -2623,9 +2637,39 @@ impl Preprocessor {
                     ));
                 }
             }
+        } else if kind.eq_ignore_ascii_case("FP_CONTRACT") {
+            match state.as_str() {
+                "ON" => self.fp_contract = true,
+                "OFF" | "DEFAULT" => self.fp_contract = false,
+                _ => {
+                    self.diags.push(Diagnostic::warn(
+                        "W0001",
+                        format!(
+                            "unknown STDC FP_CONTRACT state `{}`; \
+                                 expected ON, OFF, or DEFAULT",
+                            state_raw
+                        ),
+                        Span::point(&self.file, line, 1),
+                    ));
+                }
+            }
+        } else if kind.eq_ignore_ascii_case("CX_LIMITED_RANGE") {
+            match state.as_str() {
+                "ON" => self.cx_limited_range = true,
+                "OFF" | "DEFAULT" => self.cx_limited_range = false,
+                _ => {
+                    self.diags.push(Diagnostic::warn(
+                        "W0001",
+                        format!(
+                            "unknown STDC CX_LIMITED_RANGE state `{}`; \
+                                 expected ON, OFF, or DEFAULT",
+                            state_raw
+                        ),
+                        Span::point(&self.file, line, 1),
+                    ));
+                }
+            }
         }
-        // FP_CONTRACT / CX_LIMITED_RANGE 接受为 noop
-        // (dcc codegen 暂不区分, 不发警告)
     }
 
     /// 处理 #pragma GCC diagnostic
@@ -5794,18 +5838,15 @@ n\
         );
     }
 
-    /// P4.1: #pragma STDC FP_CONTRACT / CX_LIMITED_RANGE 接受为 noop,
-    /// 不发警告 (它们与 FENV_ACCESS 一样是 C99 标准的 STDC 子句,
-    /// dcc codegen 暂不区分, 走静默 noop 路径).
+    /// P4.1: #pragma STDC FP_CONTRACT / CX_LIMITED_RANGE 记录语义状态，
+    /// 不发警告；ON 开启，OFF/DEFAULT 关闭。
     #[test]
     fn pragma_stdc_fp_contract_cx_limited_accepted() {
-        let out = preprocess(
+        let on = preprocess(
             b"#pragma STDC FP_CONTRACT ON\n\
-              #pragma STDC FP_CONTRACT OFF\n\
               #pragma STDC CX_LIMITED_RANGE ON\n\
-              #pragma STDC CX_LIMITED_RANGE OFF\n\
               int x = 0;\n",
-            "p4_1_fp.c",
+            "p4_1_fp_on.c",
             &[],
             &[],
             &[],
@@ -5815,11 +5856,39 @@ n\
             &PchOptions::default(),
         );
         assert!(
-            out.diags.is_empty(),
-            "FP_CONTRACT/CX_LIMITED_RANGE must be silent: {:?}",
-            out.diags
+            on.diags.is_empty(),
+            "STDC pragmas must be silent: {:?}",
+            on.diags
         );
-        assert!(out.text.contains("int x = 0;"), "output: {}", out.text);
+        assert!(on.fp_contract, "FP_CONTRACT ON should set state");
+        assert!(on.cx_limited_range, "CX_LIMITED_RANGE ON should set state");
+
+        let default = preprocess(
+            b"#pragma STDC FP_CONTRACT DEFAULT\n\
+              #pragma STDC CX_LIMITED_RANGE DEFAULT\n\
+              int x = 0;\n",
+            "p4_1_fp_default.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+        );
+        assert!(
+            default.diags.is_empty(),
+            "STDC pragmas must be silent: {:?}",
+            default.diags
+        );
+        assert!(
+            !default.fp_contract,
+            "FP_CONTRACT DEFAULT should clear state"
+        );
+        assert!(
+            !default.cx_limited_range,
+            "CX_LIMITED_RANGE DEFAULT should clear state"
+        );
     }
 
     /// M19: _FORTIFY_SOURCE 改变时, include 缓存必须按新值重新计算
