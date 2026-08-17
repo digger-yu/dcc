@@ -82,7 +82,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 模块化 include guards | C23 `#pragma once`；重复 include 去重 |
 | 宏递归展开防护 | V7 include cache |
 | 依赖文件 -MD / -MMD / -MP | GCC 兼容格式 (`\` 续行 + 路径转义 + `-MP` phony 目标)；fixdep 支持转义路径反转义 |
-| 增量预处理 (PCH) | `-fpch-include=` / `-fpch-create=` / `-fpch-include-only=`；`PchBundle` 序列化 + 宏状态哈希校验 |
+| 增量预处理 (PCH) | `-fpch-include=` / `-fpch-create=` / `-fpch-include-only=`；`PchBundle` 序列化 + 宏状态哈希校验；加载/写入失败、hash 不一致和预处理错误均 warning 后回退 |
 
 ## GCC Builtin
 

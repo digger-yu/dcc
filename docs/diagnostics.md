@@ -75,7 +75,6 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | `E02xx` | 0200–0209 | Preprocessor（`#` 指令） | `src/preproc.rs` |
 | `W02xx` | 0200 | Preprocessor 警告 | `src/preproc.rs` |
 | `E03xx` | 0300–0311 | 目标/代码生成/链接 | `src/driver.rs`, `src/codegen/x86_64.rs`, `src/link/mod.rs` |
-| `E04xx` | 0401 | PCH（预编译头） | `src/preproc.rs` |
 | `E10xx` | 1001–1010 | Typed IR（语义/降级） | `src/ir.rs` |
 | `W03xx` | 0301–0313 | 类型转换/OpenMP 警告 | `src/parser.rs`, `src/driver.rs` |
 | `W04xx` | 0400–0403 | PCH 警告 | `src/preproc.rs` |
@@ -142,7 +141,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 
 ---
 
-## 5. Preprocessor：`E0200`–`E0209`、`E0401`、`W0200`、`W0400`–`W0403`
+## 5. Preprocessor：`E0200`–`E0209`、`W0200`、`W0400`–`W0403`
 
 `#` 指令与翻译阶段 3 错误。  
 **注意**：预处理错误在 Driver 中可能 **打印两次**（预处理阶段 + `main` 统一打印），snapshot 已锁定该行为。
@@ -159,16 +158,16 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0207** | `unterminated block comment` / `#embed` 语法 | 注释未闭合 / `#embed` 参数非法 | `/*` 未闭合；`#embed` 非文件路径 | `e0207.c` |
 | **E0208** | `source is not valid UTF-8` / `embed file not found` | 源编码 / embed 文件 | 非法 UTF-8 字节；`#embed` 找不到文件 | `e0208_utf8`、`e0208_embed.c` |
 | **E0209** | `cannot read forced include …` | 强制包含不可读 | `-include secret.h` 且读失败 | `e0209.c`（Unix） |
-| **E0401** | `failed to load PCH …` / `cannot read PCH file …` | PCH 加载失败 | 预编译头文件损坏或不可读 | — |
 
 ### Preprocessor 警告：`W0200`、`W0400`–`W0403`
 
 | 码 | 消息 | 含义 | 触发条件 | Snapshot |
 |----|------|------|----------|----------|
 | **W0200** | `#warning …` | `#warning` 指令 | 源码中 `#warning msg` | — |
-| **W0400** | `PCH … is incompatible with current macro state` | PCH 不兼容 | 预编译头与当前宏状态冲突 | — |
-| **W0402** | `failed to write PCH …` | PCH 写入失败 | 磁盘满或权限问题 | — |
-| **W0403** | `PCH … not created due to preprocessing errors` | PCH 未创建 | 预处理阶段有错误 | — |
+| **W0400** | `PCH … is incompatible with current macro state` | PCH 不兼容并回退 | 预编译头与当前宏状态冲突 | — |
+| **W0401** | `failed to load PCH …` / `cannot read PCH file …` | PCH 加载失败并回退 | 预编译头文件损坏、版本不兼容或不可读 | — |
+| **W0402** | `failed to write PCH …` | PCH 写入失败并回退 | 磁盘满、权限问题或目标目录不存在 | — |
+| **W0403** | `PCH … not created due to preprocessing errors` | PCH 未创建 | 预处理阶段已有错误，跳过半状态 PCH 写出 | — |
 
 ---
 

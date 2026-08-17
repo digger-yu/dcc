@@ -7333,6 +7333,111 @@ fn pch_create_then_include_compiles_and_runs() {
     let _ = fs::remove_file(&exe_nopch);
 }
 
+/// PCH 降级: 加载失败应仅输出 warning, 并按普通无 PCH 路径继续。
+#[test]
+fn pch_missing_include_warns_and_compiles() {
+    use std::env;
+    use std::fs;
+    use std::process::Command;
+
+    let dir = env::temp_dir();
+    let source_path = dir.join(format!("dcc-pch-missing-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-pch-missing-{}.o", std::process::id()));
+    let missing_pch = dir.join(format!("dcc-pch-missing-{}.pch", std::process::id()));
+    fs::write(&source_path, b"int main(void) { return 0; }\n").expect("write source");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg(format!("-fpch-include={}", missing_pch.display()))
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -fpch-include missing");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "missing PCH must not fail; stderr: {}",
+        stderr
+    );
+    assert!(stderr.contains("W0401"), "stderr: {stderr}");
+    assert!(object_path.exists(), "object should be produced");
+
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&object_path);
+}
+
+/// PCH 降级: 写入失败应仅输出 warning, 编译产物仍正常生成。
+#[test]
+fn pch_create_write_failure_warns_and_compiles() {
+    use std::env;
+    use std::fs;
+    use std::process::Command;
+
+    let dir = env::temp_dir();
+    let source_path = dir.join(format!("dcc-pch-writefail-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-pch-writefail-{}.o", std::process::id()));
+    let pch_path = dir
+        .join(format!("dcc-pch-writefail-missing-{}", std::process::id()))
+        .join("out.pch");
+    fs::write(&source_path, b"#define A 1\nint x = A;\n").expect("write source");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg(format!("-fpch-create={}", pch_path.display()))
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -fpch-create write failure");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "PCH write failure must not fail; stderr: {}",
+        stderr
+    );
+    assert!(stderr.contains("W0402"), "stderr: {stderr}");
+    assert!(object_path.exists(), "object should be produced");
+    assert!(!pch_path.exists(), "PCH file should not be created");
+
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&object_path);
+}
+
+/// PCH 降级: 预处理错误仍是原错误, 但 PCH 创建跳过以 warning 告知。
+#[test]
+fn pch_create_preproc_error_warns_without_pch() {
+    use std::env;
+    use std::fs;
+    use std::process::Command;
+
+    let dir = env::temp_dir();
+    let source_path = dir.join(format!("dcc-pch-preerr-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-pch-preerr-{}.o", std::process::id()));
+    let pch_path = dir.join(format!("dcc-pch-preerr-{}.pch", std::process::id()));
+    fs::write(&source_path, b"#error broken\nint x;\n").expect("write source");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg(format!("-fpch-create={}", pch_path.display()))
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc -fpch-create with preproc error");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "original preprocessor error should still fail"
+    );
+    assert!(stderr.contains("E0203"), "stderr: {stderr}");
+    assert!(stderr.contains("W0403"), "stderr: {stderr}");
+    assert!(!pch_path.exists(), "PCH file should not be created");
+
+    let _ = fs::remove_file(&source_path);
+    let _ = fs::remove_file(&object_path);
+}
+
 /// P1.2: VLA bound UBSAN trap. 编译带 VLA 的代码, 验证
 /// 生成的汇编中插入 `call __ubsan_handle_vla_bound_not_positive`
 /// (LLVM compiler-rt 符号名). runtime 时用户需链接 ubsan

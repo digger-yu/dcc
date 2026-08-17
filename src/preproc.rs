@@ -216,6 +216,8 @@ pub struct PreprocessOutput {
 pub struct PchOptions {
     /// `-fpch-include=<file>`: 预处理开始前先加载此 PCH。
     /// 加载成功时其保存的宏表 / 输出文本会作为基线, 然后继续处理 TU 源。
+    /// 加载失败、损坏或与当前宏状态不兼容时仅发 warning, 并回退为
+    /// 普通无 PCH 预处理路径。
     pub include: Option<String>,
     /// `-fpch-create=<file>`: 预处理完成后将当前状态 (输出文本 + 宏表)
     /// 序列化到此路径。`create_after` 为 true 时, 仅当 TU 主文件全部
@@ -808,69 +810,62 @@ pub fn preprocess(
         pp.force_include(fi);
     }
 
-    // PCH 加载: 在 -include / 用户 -D 之后, TU 主源之前注入
-    if let Some(ref pch_path) = pch_opts.include {
-        match fs::read_to_string(pch_path) {
-            Ok(content) => match PchBundle::deserialize(&content) {
-                Ok(bundle) => {
-                    // 完整性: TU 侧当前宏表 hash (进入 TU 主源前的快照) 应等于
-                    // PCH 创建时进入源前的快照. 这是 dcc 简化等价于 GCC 的
-                    // PCH timestamp + checksum: 不一致时回退到无 PCH, 强制
-                    // 完整重处理.
-                    let cur_macro_hash = pp.hash_macro_state();
-                    if cur_macro_hash == bundle.macro_hash {
-                        bundle.apply(&mut pp);
-                    } else {
-                        // 不兼容: 报告诊断, 静默继续无 PCH 处理
+    // PCH 加载: 在 -include / 用户 -D 之后, TU 主源之前注入。
+    // PCH 是加速路径: 读取失败、格式损坏或 hash 不匹配都只发 warning,
+    // 然后按普通无 PCH 路径继续预处理当前 TU。
+    {
+        let mut try_load_pch = |pch_path: &str| {
+            match fs::read_to_string(pch_path) {
+                Ok(content) => match PchBundle::deserialize(&content) {
+                    Ok(bundle) => {
+                        // 完整性: TU 侧当前宏表 hash (进入 TU 主源前的快照) 应等于
+                        // PCH 创建时进入源前的快照. 这是 dcc 简化等价于 GCC 的
+                        // PCH timestamp + checksum: 不一致时回退到无 PCH, 强制
+                        // 完整重处理.
+                        let cur_macro_hash = pp.hash_macro_state();
+                        if cur_macro_hash == bundle.macro_hash {
+                            bundle.apply(&mut pp);
+                        } else {
+                            pp.diags.push(Diagnostic::warn(
+                                "W0400",
+                                format!(
+                                    "PCH {} is incompatible with current macro state \
+                                    (saved hash {:x}, current {:x}); falling back without PCH",
+                                    pch_path, bundle.macro_hash, cur_macro_hash
+                                ),
+                                Span::point(file, 1, 1),
+                            ));
+                        }
+                    }
+                    Err(e) => {
                         pp.diags.push(Diagnostic::warn(
-                            "W0400",
+                            "W0401",
                             format!(
-                                "PCH {} is incompatible with current macro state \
-                                    (saved hash {:x}, current {:x}); ignoring",
-                                pch_path, bundle.macro_hash, cur_macro_hash
+                                "failed to load PCH {}: {}; falling back without PCH",
+                                pch_path, e
                             ),
                             Span::point(file, 1, 1),
                         ));
                     }
-                }
+                },
                 Err(e) => {
-                    pp.diags.push(Diagnostic::err(
-                        "E0401",
-                        format!("failed to load PCH {}: {}", pch_path, e),
+                    pp.diags.push(Diagnostic::warn(
+                        "W0401",
+                        format!(
+                            "cannot read PCH file {}: {}; falling back without PCH",
+                            pch_path, e
+                        ),
                         Span::point(file, 1, 1),
                     ));
                 }
-            },
-            Err(e) => {
-                pp.diags.push(Diagnostic::err(
-                    "E0401",
-                    format!("cannot read PCH file {}: {}", pch_path, e),
-                    Span::point(file, 1, 1),
-                ));
             }
+        };
+
+        if let Some(ref pch_path) = pch_opts.include {
+            try_load_pch(pch_path);
         }
-    }
-    if let Some(ref pch_path) = pch_opts.include_only {
-        match fs::read_to_string(pch_path) {
-            Ok(content) => match PchBundle::deserialize(&content) {
-                Ok(bundle) => {
-                    bundle.apply(&mut pp);
-                }
-                Err(e) => {
-                    pp.diags.push(Diagnostic::err(
-                        "E0401",
-                        format!("failed to load PCH {}: {}", pch_path, e),
-                        Span::point(file, 1, 1),
-                    ));
-                }
-            },
-            Err(e) => {
-                pp.diags.push(Diagnostic::err(
-                    "E0401",
-                    format!("cannot read PCH file {}: {}", pch_path, e),
-                    Span::point(file, 1, 1),
-                ));
-            }
+        if let Some(ref pch_path) = pch_opts.include_only {
+            try_load_pch(pch_path);
         }
     }
 
@@ -881,7 +876,6 @@ pub fn preprocess(
 
     pp.process_text(text, file);
     let text_output = pp.out.clone();
-    let pch_diags: Vec<Diagnostic> = pp.diags.clone();
     let pch_deps: Vec<String> = pp.deps.clone();
     let pch_pack_history: Vec<(u32, Option<usize>)> = pp.pack_history.clone();
     let pch_weak_symbols: std::collections::HashSet<String> = pp.weak_symbols.clone();
@@ -925,7 +919,7 @@ pub fn preprocess(
 
     PreprocessOutput {
         text: text_output,
-        diags: pch_diags,
+        diags: pp.diags.clone(),
         deps: pch_deps,
         pack_history: pch_pack_history,
         weak_symbols: pch_weak_symbols,
@@ -6265,7 +6259,7 @@ n\
     }
 
     #[test]
-    fn pch_missing_file_emits_error() {
+    fn pch_missing_file_warns_and_falls_back() {
         let include_opts = PchOptions {
             include: Some("/nonexistent/path/foo.pch".to_string()),
             create: None,
@@ -6282,13 +6276,24 @@ n\
             false,
             &include_opts,
         );
-        let has_err = out.diags.iter().any(|d| d.code == "E0401");
-        assert!(has_err, "expected E0401, got: {:?}", out.diags);
+        assert!(
+            out.diags.iter().any(|d| d.code == "W0401"),
+            "expected W0401, got: {:?}",
+            out.diags
+        );
+        assert!(
+            out.diags
+                .iter()
+                .all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
+            "missing PCH must not be fatal: {:?}",
+            out.diags
+        );
+        assert!(out.text.contains("int x"), "fallback output: {}", out.text);
     }
 
     #[test]
-    fn pch_magic_mismatch_rejected() {
-        // 构造一个非 PCH 文件, 加载应失败
+    fn pch_magic_mismatch_warns_and_falls_back() {
+        // 构造一个非 PCH 文件, 加载应降级为 warning 后继续处理 TU
         let dir = pch_test_dir("badmagic");
         let bad = dir.join("bad.pch");
         std::fs::write(&bad, "not a pch file\n").unwrap();
@@ -6309,12 +6314,92 @@ n\
             false,
             &include_opts,
         );
-        let has_err = out.diags.iter().any(|d| d.code == "E0401");
         assert!(
-            has_err,
-            "expected E0401 for bad magic, got: {:?}",
+            out.diags.iter().any(|d| d.code == "W0401"),
+            "expected W0401 for bad magic, got: {:?}",
             out.diags
         );
+        assert!(
+            out.diags
+                .iter()
+                .all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
+            "bad PCH must not be fatal: {:?}",
+            out.diags
+        );
+        assert!(out.text.contains("int x"), "fallback output: {}", out.text);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pch_create_write_failure_warns_and_keeps_output() {
+        let dir = pch_test_dir("writefail");
+        let pch_path = dir.join("missing-parent").join("x.pch");
+        let opts = PchOptions {
+            include: None,
+            create: Some(pch_path.to_string_lossy().into_owned()),
+            include_only: None,
+        };
+        let out = preprocess(
+            b"#define A 1\nint x = A;\n",
+            "x.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &opts,
+        );
+        assert!(
+            out.diags.iter().any(|d| d.code == "W0402"),
+            "expected W0402, got: {:?}",
+            out.diags
+        );
+        assert!(
+            out.diags
+                .iter()
+                .all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
+            "write failure must not be fatal: {:?}",
+            out.diags
+        );
+        assert!(out.text.contains("int x = 1"), "output: {}", out.text);
+        assert!(!pch_path.exists(), "PCH file should not be created");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pch_create_after_preproc_error_warns_and_does_not_write() {
+        let dir = pch_test_dir("preprocerr");
+        let pch_path = dir.join("x.pch");
+        let opts = PchOptions {
+            include: None,
+            create: Some(pch_path.to_string_lossy().into_owned()),
+            include_only: None,
+        };
+        let out = preprocess(
+            b"#error broken\nint x;\n",
+            "x.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &opts,
+        );
+        assert!(
+            out.diags.iter().any(|d| d.code == "E0203"),
+            "expected original preprocessor error, got: {:?}",
+            out.diags
+        );
+        assert!(
+            out.diags.iter().any(|d| d.code == "W0403"),
+            "expected W0403, got: {:?}",
+            out.diags
+        );
+        assert!(!pch_path.exists(), "PCH file should not be created");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

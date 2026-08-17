@@ -295,10 +295,11 @@
   - 段寄存器：`__SEG_GS` / `__SEG_FS`。
 - **C23 `#pragma locale`**：接受 `default` / `"POSIX"` / `reset`
   三种形式并静默忽略，不切字符集。完全 locale 切换仍依赖 libc。
-- **include 缓存自动失效**：include 缓存版本从 V6 → V7，
+- **include/PCH 缓存自动失效与降级**：include 缓存版本从 V6 → V7，
   `hash_macro_state` 把宏表（按名排序的 name+body+params+
   variadic XOR）纳入缓存键；`-D_FORTIFY_SOURCE=2` 与 `=0` 在
-  同一文件下会失配缓存，自动重算。
+  同一文件下会失配缓存，自动重算。PCH hash 不一致、加载失败、
+  写入失败或预处理错误均只发 W040x warning，并回退到无 PCH 路径。
 - **expand 早退修复**：`expand_macros` 不再因
   `macros.is_empty()` 早退，确保 `__COUNTER__` / `__FILE__` /
   `__LINE__` 等特殊 token 始终进入展开路径。

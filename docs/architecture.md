@@ -64,9 +64,9 @@
 - 自定义文本格式 `DCC_PREPROCESSOR_CACHE_V7`, 零外部依赖
 - 头文件仅保存自身新增的宏, 避免宏状态污染
 - 内容变化时自动失效 (内容哈希不变 = 缓存命中)
-- 宏表变化时自动失效 (例如 `-D_FORTIFY_SOURCE=2` vs `=0`),
-  因为 `hash_macro_state` 把按名排序的 name+body+params+variadic
-  都纳入缓存键
+- 宏表变化时 PCH 会发 `W0400` 并回退为普通预处理；PCH 文件
+  不可读、损坏、写出失败或预处理错误均只发 `W0401`/`W0402`/
+  `W0403` warning，不作为编译 hard failure
 - `macros.is_empty()` 不再触发 `expand_macros` 早退,
   保证 `__COUNTER__` / `__FILE__` / `__LINE__` 等特殊 token
   始终进入展开路径

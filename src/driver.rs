@@ -46,8 +46,9 @@ fn ir_stmt_uses_float(s: &ir::TypedStmt) -> bool {
 }
 
 /// 把预处理器阶段产生的非致命诊断打印到 stderr。
-/// PCH 不兼容 (W0400) / 缓存写失败 (W0402) 等场景会被转储; 错误会通过
-/// 调用方已有的错误检查路径处理 (Err(pp_diags) → main.rs 输出).
+/// PCH 不兼容 (W0400)、PCH 加载回退 (W0401)、缓存写失败
+/// (W0402) 等场景会被转储; 错误会通过调用方已有的错误检查路径处理
+/// (Err(pp_diags) → main.rs 输出)。
 /// 设计: 与 parser/sanitizer 警告保持视觉一致, 但不重复 main.rs 的
 /// 统一错误输出逻辑 (本函数只针对 warning 级别).
 fn emit_preproc_warnings(diags: &[Diagnostic]) {
@@ -860,6 +861,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
     }
+    emit_preproc_warnings(&pp_diags);
 
     if cfg.preprocess_only {
         // -E 模式: 写到 -o 指定的文件 (或 stdout)
@@ -1068,6 +1070,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
             return Err(pp_diags);
         }
+        emit_preproc_warnings(&pp_diags);
         // -o 显式指定时写文件, 否则写 stdout (-o - 走 stdout)
         if cfg.output_explicit && cfg.output.to_str() != Some("-") {
             let path = &cfg.output;
@@ -1131,6 +1134,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);
     }
+    emit_preproc_warnings(&pp_diags);
 
     // 2. C++ lex + parse + lower
     let mut parser = CppParser::new(pp_out.text.as_bytes(), &file_name);

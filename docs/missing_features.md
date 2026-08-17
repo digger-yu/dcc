@@ -38,7 +38,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| PCH 降级 | 宏状态 hash 不一致、写入失败或有预处理错误时 warning 后回退，不作为 hard failure |
 | `-Wp,*` 子选项 | 仅白名单支持；未知预处理器透传选项会报 unsupported |
 | `-x` 语言集 | 仅支持 assembler/assembler-with-cpp/C/C++ 等少数输入语言 |
 | unknown sanitizer name | 未知 `-fsanitize=` 名称未形成严格诊断契约，存在被忽略的路径 |
@@ -140,7 +139,7 @@
 | 缺口 | 建议测试 |
 |------|----------|
 | Linux header graph | 用 `compiler_types.h`、`rwonce.h`、generated `autoconf.h` 等真实内核头做预处理 E2E |
-| PCH negative | 覆盖 hash mismatch、版本不兼容、损坏 PCH、写入失败的 snapshot |
+| PCH negative | 覆盖更多版本不兼容和平台权限失败的 snapshot |
 | depfile/fixdep | 增加空格、反斜杠、转义路径、`-MP` phony 与 fixdep 反解析联动测试 |
 | `#error/#warning` | 增加多格式诊断 snapshot 和宏展开后消息测试 |
 
