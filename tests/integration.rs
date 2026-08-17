@@ -1020,6 +1020,31 @@ fn asm_constraint_type_mismatch_warns_matching_float_to_gp_output() {
 }
 
 #[test]
+fn mini_asm_unknown_mnemonic_is_hard_error() {
+    let source = "void f(void) { __asm__ volatile (\"notarealinsn\"); }\n";
+    let (output, object_path) = run_object_test("mini-asm-unknown-mnemonic", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "compile should fail: {stderr}");
+    assert!(stderr.contains("E0311"), "stderr: {stderr}");
+    assert!(stderr.contains("notarealinsn"), "stderr: {stderr}");
+    assert!(!object_path.exists(), "hard error should not write object");
+}
+
+#[test]
+fn mini_asm_invalid_operands_is_hard_error() {
+    let source = "void f(void) { __asm__ volatile (\"rdrand $1\"); }\n";
+    let (output, object_path) = run_object_test("mini-asm-invalid-operands", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "compile should fail: {stderr}");
+    assert!(stderr.contains("E0311"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("rdrand needs register or memory operand"),
+        "stderr: {stderr}"
+    );
+    assert!(!object_path.exists(), "hard error should not write object");
+}
+
+#[test]
 fn o2_dce_preserves_outputless_inline_asm() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-o2-asm-dce-{}.c", std::process::id()));

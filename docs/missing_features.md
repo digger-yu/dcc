@@ -24,9 +24,7 @@
 
 ### x86_64
 
-| 限制 | 说明 |
-|------|------|
-| mini-asm 未知指令 | 未识别 mnemonic 或已识别指令的不合法操作数仍 warning 后发 `nop`，不是 hard error |
+当前无单独记录的 x86_64 codegen 限制。
 
 ### AArch64 / RISC-V / MIPS / ARM
 

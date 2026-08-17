@@ -15,6 +15,7 @@ use crate::codegen::elf::{
     STT_TLS, STV_DEFAULT, STV_HIDDEN, STV_PROTECTED,
 };
 use crate::const_eval::{self, ConstValue};
+use crate::diagnostics::{Diagnostic, Span};
 use crate::preproc::LineSpan;
 use crate::target::Target;
 use std::collections::{HashMap, HashSet};
@@ -81,6 +82,7 @@ pub struct Codegen {
     pub labels: HashMap<String, u64>,
     current_asm_line: usize,
     current_asm_src_line: u32,
+    pub diagnostics: Vec<Diagnostic>,
     /// 预处理输出行号 → 源文件位置的映射 (诊断定位用)
     pub line_map: Vec<LineSpan>,
     pending: Vec<PendingJump>,
@@ -1350,6 +1352,7 @@ impl Codegen {
             asm_line_entries: Vec::new(),
             current_asm_line: 0,
             current_asm_src_line: 0,
+            diagnostics: Vec::new(),
             line_map: Vec::new(),
             source_name: String::new(),
             parallel_codegen: false,
@@ -1371,12 +1374,22 @@ impl Codegen {
         }
     }
 
-    /// mini-asm 警告: 附带源文件名与 asm 语句所在行号, 方便定位内核等
+    /// mini-asm 诊断: 附带源文件名与 asm 语句所在行号，方便定位内核等
     /// 大型 TU 中不被支持的内联汇编指令。
-    /// current_asm_src_line 是预处理输出行号, 经 line_map 映射回源文件。
-    fn asm_warn(&self, msg: &str) {
+    /// current_asm_src_line 是预处理输出行号，经 line_map 映射回源文件。
+    fn asm_warn(&mut self, msg: &str) {
         let (file, line) = self.asm_src_pos();
-        if line > 0 {
+        if msg.contains("emitted as nop") {
+            let msg = msg
+                .replace(", emitted as nop if used", "")
+                .replace("; emitted as nop if used", "")
+                .replace("; emitted as nop", "")
+                .replace(", emitted as nop", "");
+            let span = Span::point(&file, line, 1);
+            let mut diag = Diagnostic::err("E0311", msg, span);
+            diag.hint = Some("fix the mini-asm mnemonic or operand pattern".to_string());
+            self.diagnostics.push(diag);
+        } else if line > 0 {
             eprintln!("{}:{}: warning: {}", file, line, msg);
         } else {
             eprintln!("{}: warning: {}", file, msg);

@@ -74,7 +74,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | `E01xx` | 0100–0102 | Driver（I/O、汇编） | `src/driver.rs` |
 | `E02xx` | 0200–0209 | Preprocessor（`#` 指令） | `src/preproc.rs` |
 | `W02xx` | 0200 | Preprocessor 警告 | `src/preproc.rs` |
-| `E03xx` | 0300–0310 | 目标/代码生成/链接 | `src/driver.rs`, `src/link/mod.rs` |
+| `E03xx` | 0300–0311 | 目标/代码生成/链接 | `src/driver.rs`, `src/codegen/x86_64.rs`, `src/link/mod.rs` |
 | `E04xx` | 0401 | PCH（预编译头） | `src/preproc.rs` |
 | `E10xx` | 1001–1010 | Typed IR（语义/降级） | `src/ir.rs` |
 | `W03xx` | 0301–0313 | 类型转换/OpenMP 警告 | `src/parser.rs`, `src/driver.rs` |
@@ -124,7 +124,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 
 ---
 
-## 4. Driver：`E0100`–`E0102`、`E0300`–`E0310`
+## 4. Driver：`E0100`–`E0102`、`E0300`–`E0311`
 
 驱动层：读源、写产物、调汇编器、目标选项、代码生成后端。
 
@@ -136,6 +136,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0300** | `floating-point code requires SSE…` | SSE 与浮点代码冲突 | `-mno-sse` 且 TU 含 float/double | `e0300.stderr.snap` |
 | **E0301** | `dcc C backend failed for …` / `cannot write …` | 代码生成后端失败或写输出失败 | dcc C 后端非零退出；输出文件写入失败 | — |
 | **E0310** | `a __global__ function '…' cannot also be __host__ or __device__` | CUDA 函数限定符冲突 | `__global__` 与 `__host__`/`__device__` 同时出现 | — |
+| **E0311** | `unsupported inline asm instruction …` / `… needs …` | mini-asm 编码失败 | 未识别 mnemonic 或已识别指令的不合法操作数 | `mini_asm_*_is_hard_error` 测试 |
 
 **CLI 形式的 E0100**：无输入文件时，`cli.rs` 直接输出 `dcc: error: no input file`（无 `[E0100]`），exit 2。语义等价于 Diagnostic E0100。
 

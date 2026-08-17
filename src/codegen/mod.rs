@@ -642,8 +642,8 @@ pub fn emit(
     trapv: bool,
     offload: Option<&crate::profile::offload::OffloadSection>,
     line_map: &[LineSpan],
-) -> Vec<u8> {
-    match target.arch {
+) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    Ok(match target.arch {
         crate::cli::Arch::X86_64 => {
             let mut cg = x86_64::Codegen::new(target.clone());
             cg.relocatable = relocatable || emit_asm;
@@ -658,8 +658,11 @@ pub fn emit(
             cg.trapv = trapv;
             cg.kasan = sanitizers.kasan;
             cg.compile(module);
+            if !cg.diagnostics.is_empty() {
+                return Err(cg.diagnostics);
+            }
             if emit_asm {
-                return cg.build_asm_output(module.source()).into_bytes();
+                return Ok(cg.build_asm_output(module.source()).into_bytes());
             }
             if debug_level > 0 && relocatable {
                 let funcs: Vec<(&str, u64)> = module
@@ -880,7 +883,7 @@ pub fn emit(
             cg.set_mte_enabled(sanitizers.hwasan);
             if emit_asm {
                 cg.compile(module);
-                return cg.build_asm_output(module).into_bytes();
+                return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
@@ -989,7 +992,7 @@ pub fn emit(
             cg.set_source_name(source_name);
             if emit_asm {
                 cg.compile(module);
-                return cg.build_asm_output(module).into_bytes();
+                return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
@@ -1098,7 +1101,7 @@ pub fn emit(
             cg.set_source_name(source_name);
             if emit_asm {
                 cg.compile(module);
-                return cg.build_asm_output(module).into_bytes();
+                return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
@@ -1200,7 +1203,7 @@ pub fn emit(
             cg.set_source_name(source_name);
             if emit_asm {
                 cg.compile(module);
-                return cg.build_asm_output(module).into_bytes();
+                return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
@@ -1302,7 +1305,7 @@ pub fn emit(
             cg.set_source_name(source_name);
             if emit_asm {
                 cg.compile(module);
-                return cg.build_asm_output(module).into_bytes();
+                return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
@@ -1402,5 +1405,5 @@ pub fn emit(
         a => {
             panic!("{}", a.backend_missing_msg());
         }
-    }
+    })
 }
