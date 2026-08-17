@@ -98,6 +98,56 @@ fn run_exe(path: &std::path::Path) -> i32 {
         .unwrap_or(-1)
 }
 
+fn tool_exists(name: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn qemu_runtime_target(
+    name: &str,
+    target: &str,
+    qemu: &str,
+    expected: i32,
+    source: &str,
+) -> Option<()> {
+    if !tool_exists(qemu) {
+        eprintln!("skip {target} runtime: {qemu} not found");
+        return None;
+    }
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
+    let exe_path = dir.join(format!("dcc-{name}-{}", std::process::id()));
+    fs::write(&source_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", target, "-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    assert!(
+        output.status.success(),
+        "target {target}: compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new(qemu)
+        .arg(&exe_path)
+        .output()
+        .expect("run qemu");
+    let _ = fs::remove_file(&exe_path);
+    assert_eq!(
+        run.status.code().unwrap_or(-1),
+        expected,
+        "target {target}: runtime stderr={} stdout={}",
+        String::from_utf8_lossy(&run.stderr),
+        String::from_utf8_lossy(&run.stdout)
+    );
+    Some(())
+}
+
 /// 极简 ELF64 节头解析: 返回 (节名 → (sh_type, sh_flags, sh_size)).
 /// 仅用于验证 .o 的自定义节/ORC 结构, 不依赖外部 readelf.
 fn elf64_sections(data: &[u8]) -> std::collections::HashMap<String, (u32, u32, u64)> {
@@ -9363,5 +9413,77 @@ fn non_x86_c_mode_produces_valid_elf() {
         }
         let _ = fs::remove_file(&src_path);
         let _ = fs::remove_file(&obj_path);
+    }
+}
+
+#[test]
+fn aarch64_vector_expression_codegen_covers_non_binop_paths() {
+    let source = r#"
+typedef int v4si __attribute__((vector_size(16)));
+v4si id(v4si x) { return x; }
+v4si make(void) { return (v4si){1, 2, 3, 4}; }
+int main(void) {
+    v4si a = make();
+    v4si b = id(a);
+    v4si c = 1 ? b : (v4si){9, 9, 9, 9};
+    b = c;
+    return b[0] + b[1] + b[2] + b[3];
+}
+"#;
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-aarch64-vec-{}.c", std::process::id()));
+    let obj_path = dir.join(format!("dcc-aarch64-vec-{}.o", std::process::id()));
+    fs::write(&src_path, source).expect("write C fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src_path);
+    assert!(
+        output.status.success(),
+        "aarch64 vector compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&obj_path).expect("read output");
+    let _ = fs::remove_file(&obj_path);
+    let words: Vec<u32> = bytes
+        .windows(4)
+        .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+        .collect();
+    let has_dup = words.iter().any(|&w| w == 0x4e04_0c00);
+    let has_str_q0 = words.iter().any(|&w| w & 0xffc0_03ff == 0x3d80_03e0);
+    let has_ldr_q0 = words.iter().any(|&w| w & 0xffc0_03ff == 0x3dc0_03e0);
+    assert!(
+        has_dup && has_str_q0 && has_ldr_q0,
+        "aarch64 vector object should contain dup/str q0/ldr q0 paths"
+    );
+}
+
+#[test]
+fn non_x86_qemu_runtime_matrix_runs_when_available() {
+    let source = r#"
+int main(void) {
+    int x = 3;
+    if (x == 3) x = x * 7;
+    return x - 16;
+}
+"#;
+    let targets = [
+        ("aarch64-linux-gnu", "qemu-aarch64"),
+        ("riscv64-linux-gnu", "qemu-riscv64"),
+        ("mips-linux-gnu", "qemu-mips"),
+        ("mips64-linux-gnuabi64", "qemu-mips64"),
+        ("arm-linux-gnueabihf", "qemu-arm"),
+    ];
+    let mut runnable = 0;
+    for (target, qemu) in targets {
+        if qemu_runtime_target("qemu-runtime", target, qemu, 5, source).is_some() {
+            runnable += 1;
+        }
+    }
+    if runnable == 0 {
+        eprintln!("skip non-x86 QEMU runtime matrix: no qemu-user binaries found");
     }
 }

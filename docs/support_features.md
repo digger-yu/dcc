@@ -382,6 +382,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `alloca` | `__builtin_alloca` codegen: sub rsp + 16 字节对齐 |
 | 信号 | `sigaction` / `sigaltstack` / `signal` 运行时验证通过 |
 | TLS dtv / TLS 描述符 | AArch64 TLSDESC 经典 4 指令序列 + 3 重定位 + 优化 MOVW 对 5 重定位；IE/LE 路径；linker 全类型支持 |
+| AArch64 vector 表达式 | 支持 16B vector 局部槽位、aggregate initializer、local load/store、call/return 参数、assignment、cast、conditional、lane index 和二元算术/按位路径；覆盖非二元表达式不再落到零值 fallback |
+| non-x86 QEMU runtime matrix | `non_x86_qemu_runtime_matrix_runs_when_available` 在 `qemu-aarch64`、`qemu-riscv64`、`qemu-mips`、`qemu-mips64`、`qemu-arm` 存在时运行 hello/control-flow 语义门禁，缺少 qemu-user 时显式 skip |
 | atexit / `__cxa_atexit` | `FiniArrayBuilder` 按 priority 排序 |
 | `printf` / `scanf` format string | 完整 flag/width/precision/length/type 匹配 + 指针类型验证 |
 | `wchar_t` / 宽字符字面量 `L"..."` | wcs*/wmem* libc 转发 |

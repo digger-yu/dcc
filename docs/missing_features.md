@@ -157,7 +157,7 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| QEMU runtime matrix | aarch64/riscv64/arm/mips/mips64 至少覆盖 hello、control-flow、aggregate ABI、va_arg |
+| QEMU runtime 扩展 | aarch64/riscv64/arm/mips/mips64 已有 hello/control-flow 语义门禁；继续扩展 aggregate ABI、va_arg、TLS 等场景 |
 | aggregate/HFA ABI | 增加 AArch64 HFA 1–8 元素、>8 fallback，以及 RISC-V HFA 1–4、>4 fallback 测试 |
 | non-x86 inline asm | 增加 `-S` 文本保留测试与 `-c` expected-fail/diagnostic 测试 |
 | unsupported targets | 对 Windows MSVC、Darwin、WASM、AVR、MSP430、Xtensa、PowerPC、LoongArch64 增加稳定负向测试 |

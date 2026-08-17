@@ -83,6 +83,14 @@ struct HfaInfo {
     total_size: usize,
 }
 
+fn local_stack_size(ty: &Type) -> i32 {
+    if matches!(ty, Type::Vector(_, _)) {
+        16
+    } else {
+        ty.size().max(4) as i32
+    }
+}
+
 impl Aarch64Codegen {
     pub fn new(target: Target, relocatable: bool) -> Self {
         Self {
@@ -649,16 +657,21 @@ impl Aarch64Codegen {
         };
         for item in &body.items {
             if let BlockItem::Decl(Decl::Var(v)) = item {
-                self.alloc_local(&v.name.name, v.ty.size().max(4) as i32);
+                self.alloc_local(&v.name.name, local_stack_size(&v.ty));
             }
         }
+        self.alloc_local("<vec_lit>", 16);
     }
 
     fn gen_block_item(&mut self, item: &BlockItem, ir: &TypedStmt) {
         match item {
             BlockItem::Stmt(s) => self.gen_stmt(s, ir),
             BlockItem::Decl(Decl::Var(v)) => {
-                let off = self.alloc_local(&v.name.name, v.ty.size().max(4) as i32);
+                let off = self
+                    .locals
+                    .get(&v.name.name)
+                    .copied()
+                    .unwrap_or_else(|| self.alloc_local(&v.name.name, local_stack_size(&v.ty)));
                 if let Some(expr) = ir.expressions.first() {
                     self.gen_expr(expr);
                     self.store_result(off, &v.ty);
@@ -911,8 +924,14 @@ impl Aarch64Codegen {
                 return true;
             }
             ExprKind::Cast if !expr.children.is_empty() => {
-                self.gen_expr(&expr.children[0]);
-                self.truncate_w0_to(&expr.ty);
+                let child = &expr.children[0];
+                if is_vector_ty(&child.ty) {
+                    self.gen_vector_expr(child);
+                    self.extract_vector_lane_w0(0);
+                } else {
+                    self.gen_expr(child);
+                    self.truncate_w0_to(&expr.ty);
+                }
                 return true;
             }
             ExprKind::VaArg { ap } => {
@@ -920,7 +939,7 @@ impl Aarch64Codegen {
                 self.gen_va_arg_int(ap);
                 return true;
             }
-            ExprKind::Call if !expr.children.is_empty() => {
+            ExprKind::Call => {
                 self.gen_call(expr);
                 return true;
             }
@@ -935,6 +954,18 @@ impl Aarch64Codegen {
                 self.mov_w0_w14();
                 self.cmp_w15_zero();
                 self.csel_w0_w0_w1_ne();
+                return true;
+            }
+            ExprKind::Index if expr.children.len() >= 2 && is_vector_ty(&expr.children[0].ty) => {
+                self.gen_vector_expr(&expr.children[0]);
+                let idx = expr.children[1]
+                    .literal
+                    .and_then(|lit| match lit {
+                        ExprLiteral::Int(v) => Some(v as usize),
+                        ExprLiteral::Float(_) => None,
+                    })
+                    .unwrap_or(0);
+                self.extract_vector_lane_w0(idx);
                 return true;
             }
             _ => self.mov_w0_imm(0),
@@ -1021,14 +1052,20 @@ impl Aarch64Codegen {
                     } else {
                         self.str_dt_sp(0, stack_arg_off);
                     }
+                    stack_arg_off += 8;
+                } else if is_vector_ty(&arg.ty) {
+                    self.str_q0_sp(stack_arg_off);
+                    stack_arg_off += 16;
                 } else {
                     self.store_w0(stack_arg_off);
+                    stack_arg_off += 8;
                 }
-                stack_arg_off += 8;
             } else {
                 self.gen_expr(arg);
                 if is_float_ty(&arg.ty) {
                     self.mov_v_reg_s0(reg_idx as u8);
+                } else if is_vector_ty(&arg.ty) {
+                    self.mov_v_reg_v0(reg_idx as u8);
                 } else {
                     self.mov_w_reg_w0(reg_idx as u8);
                 }
@@ -1176,14 +1213,66 @@ impl Aarch64Codegen {
     fn gen_vector_expr(&mut self, expr: &TypedExpr) -> bool {
         match expr.kind {
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
-                self.gen_vector_operand(&expr.children[0]);
+                self.gen_vector_expr(&expr.children[1]);
                 self.mov_v1_v0();
-                self.gen_vector_operand(&expr.children[1]);
+                self.gen_vector_expr(&expr.children[0]);
                 self.vector_binop_v0_v1(op);
                 return true;
             }
-            ExprKind::Constant | ExprKind::Aggregate => {
-                self.zero_v0();
+            ExprKind::Local(ref name) => {
+                if let Some(&off) = self.locals.get(name) {
+                    self.ldr_q0_sp(off);
+                } else {
+                    self.zero_v0();
+                }
+                return true;
+            }
+            ExprKind::Constant => {
+                if let Some(ExprLiteral::Int(v)) = expr.literal {
+                    self.mov_w0_imm(trunc_i32(v));
+                    self.dup_v0_4s_w0();
+                } else {
+                    self.zero_v0();
+                }
+                return true;
+            }
+            ExprKind::Aggregate => {
+                self.materialize_vector_aggregate(expr);
+                return true;
+            }
+            ExprKind::Cast if !expr.children.is_empty() => {
+                let child = &expr.children[0];
+                if is_vector_ty(&child.ty) {
+                    self.gen_vector_expr(child);
+                } else {
+                    self.gen_expr(child);
+                    self.dup_v0_4s_w0();
+                }
+                return true;
+            }
+            ExprKind::Assign if expr.children.len() >= 2 => {
+                self.gen_vector_expr(&expr.children[1]);
+                if let ExprKind::Local(ref name) = expr.children[0].kind {
+                    if let Some(&off) = self.locals.get(name) {
+                        self.str_q0_sp(off);
+                    }
+                }
+                return true;
+            }
+            ExprKind::Call if !expr.children.is_empty() => {
+                self.gen_call(expr);
+                return true;
+            }
+            ExprKind::Conditional if expr.children.len() >= 3 => {
+                let false_label = self.fresh_label("Lvec_false");
+                let end_label = self.fresh_label("Lvec_end");
+                self.gen_expr(&expr.children[0]);
+                self.cbz_w0(&false_label);
+                self.gen_vector_expr(&expr.children[1]);
+                self.b(&end_label);
+                self.label(&false_label);
+                self.gen_vector_expr(&expr.children[2]);
+                self.label(&end_label);
                 return true;
             }
             _ => {
@@ -1194,13 +1283,22 @@ impl Aarch64Codegen {
     }
 
     fn gen_vector_operand(&mut self, expr: &TypedExpr) {
-        if let Some(ExprLiteral::Int(v)) = expr.literal {
-            self.mov_w0_imm(trunc_i32(v));
-            self.emit(&[0x20, 0x00, 0x08, 0x4e]); // dup v0.4s, w0
-            return;
+        self.gen_vector_expr(expr);
+    }
+
+    fn materialize_vector_aggregate(&mut self, expr: &TypedExpr) {
+        let off = self
+            .locals
+            .get("<vec_lit>")
+            .copied()
+            .unwrap_or_else(|| self.alloc_local("<vec_lit>", 16));
+        self.zero_v0();
+        self.str_q0_sp(off);
+        for (i, child) in expr.children.iter().take(4).enumerate() {
+            self.gen_expr(child);
+            self.str_wt_sp(0, off + (i as i32) * 4);
         }
-        let _ = self.gen_expr(expr);
-        self.emit(&[0x20, 0x00, 0x08, 0x4e]);
+        self.ldr_q0_sp(off);
     }
 
     fn gen_expr_from_ast(&mut self, expr: &Expr) {
@@ -1325,15 +1423,18 @@ impl Aarch64Codegen {
     fn store_result(&mut self, off: i32, ty: &crate::ast::Type) {
         if matches!(ty, Type::Float | Type::Double) {
             self.str_s0_sp(off);
+        } else if matches!(ty, Type::Vector(_, _)) {
+            self.str_q0_sp(off);
         } else {
             self.store_w0(off);
         }
     }
 
     fn alloc_local(&mut self, name: &str, bytes: i32) -> i32 {
-        let aligned = (bytes + 7) & !7;
-        let off = self.stack_bytes;
-        self.stack_bytes += aligned;
+        let align = if bytes >= 16 { 16 } else { 8 };
+        let off = (self.stack_bytes + align - 1) & !(align - 1);
+        let aligned = (bytes + align - 1) & !(align - 1);
+        self.stack_bytes = off + aligned;
         self.locals.insert(name.to_string(), off);
         off
     }
@@ -1637,6 +1738,40 @@ impl Aarch64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    fn str_qt_sp(&mut self, reg: u8, off: i32) {
+        debug_assert!(
+            off >= 0 && off % 16 == 0 && off <= 65520,
+            "str_qt_sp: off must be non-neg 16-byte aligned, got {off}"
+        );
+        let imm12 = ((off / 16) as u32) & 0xfff;
+        let insn = 0x3d80_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn ldr_qt_sp(&mut self, reg: u8, off: i32) {
+        debug_assert!(
+            off >= 0 && off % 16 == 0 && off <= 65520,
+            "ldr_qt_sp: off must be non-neg 16-byte aligned, got {off}"
+        );
+        let imm12 = ((off / 16) as u32) & 0xfff;
+        let insn = 0x3dc0_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn str_q0_sp(&mut self, off: i32) {
+        self.str_qt_sp(0, off);
+    }
+
+    fn ldr_q0_sp(&mut self, off: i32) {
+        self.ldr_qt_sp(0, off);
+    }
+
+    fn extract_vector_lane_w0(&mut self, idx: usize) {
+        let lane = (idx & 3) as u32;
+        let insn = 0x0e04_3c00u32 | (lane << 11);
+        self.emit(&insn.to_le_bytes());
+    }
+
     fn mov_w14_w0(&mut self) {
         self.emit(&[0xee, 0x03, 0x80, 0x2a]);
     }
@@ -1657,6 +1792,18 @@ impl Aarch64Codegen {
     fn mov_v_reg_s0(&mut self, reg: u8) {
         let insn = 0x1e204000u32 | ((reg as u32 & 7) << 5);
         self.emit(&insn.to_le_bytes());
+    }
+
+    fn mov_v_reg_v0(&mut self, reg: u8) {
+        if reg == 0 {
+            return;
+        }
+        let insn = 0x4ea0_1c00u32 | ((reg as u32 & 0x1f) << 0);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn dup_v0_4s_w0(&mut self) {
+        self.emit(&[0x00, 0x0c, 0x04, 0x4e]);
     }
 
     fn mov_s1_s0(&mut self) {
