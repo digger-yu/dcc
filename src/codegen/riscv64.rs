@@ -840,13 +840,20 @@ impl Riscv64Codegen {
             } else if sret_reg_idx + i >= 8 {
                 // varargs: 溢出的实参压栈 (M7 最小)
                 self.gen_expr(arg);
-                self.store_a0(stack_arg_off);
+                if let ValueType::Float { bits } = &arg.ty {
+                    if *bits <= 32 {
+                        self.emit_fsw(10, 2, stack_arg_off);
+                    } else {
+                        self.emit_fsd(10, 2, stack_arg_off);
+                    }
+                } else {
+                    self.store_a0(stack_arg_off);
+                }
                 stack_arg_off += 8;
             } else {
                 self.gen_expr(arg);
-                if is_float_ty(&arg.ty) {
-                    // 简化: 浮点参数走 GP 寄存器 (M7 最小)
-                    self.mv_a_reg((sret_reg_idx + i) as u8);
+                if let ValueType::Float { bits } = &arg.ty {
+                    self.mv_fa_reg((sret_reg_idx + i) as u8, *bits);
                 } else {
                     self.mv_a_reg((sret_reg_idx + i) as u8);
                 }
@@ -922,13 +929,9 @@ impl Riscv64Codegen {
                 self.gen_va_arg_float(ap);
                 return true;
             }
-            // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
-            // 例: 浮点 Call 在 IR 中 children[0] 是 callee, 不再与 va_arg 混清.
-            ExprKind::Call => {
-                eprintln!(
-                    "warning: zero-arg float call not yet supported on riscv64, emitting 0.0"
-                );
-                self.li_a0(0);
+            // 浮点返回值沿用普通调用路径；RISC-V ABI 约定结果留在 fa0。
+            ExprKind::Call if !expr.children.is_empty() => {
+                self.gen_call(expr);
                 return true;
             }
             _ => {
@@ -1173,6 +1176,15 @@ impl Riscv64Codegen {
     fn mv_a_reg(&mut self, idx: u8) {
         let rd = 10 + idx;
         self.emit_addi(rd, 10, 0);
+    }
+
+    fn mv_fa_reg(&mut self, idx: u8, bits: u16) {
+        let rd = 10 + idx;
+        if bits <= 32 {
+            self.emit_fsgnj_s(rd, 10, 10);
+        } else {
+            self.emit_fsgnj_d(rd, 10, 10);
+        }
     }
 
     // M7 修复: 计算 sp + off 的地址到指定 a 寄存器
@@ -1768,6 +1780,18 @@ impl Riscv64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// FSW rs2, offset(rs1): S 格式, 32-bit 浮点存储 (F 扩展)
+    fn emit_fsw(&mut self, rs2: u8, rs1: u8, off: i32) {
+        let imm = off as u32;
+        let insn = ((imm >> 5) & 0x7f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b010 << 12
+            | (imm & 0x1f) << 7
+            | 0x27;
+        self.emit(&insn.to_le_bytes());
+    }
+
     /// FADD.D fd, fs1, fs2: R 格式, funct7=0000001
     fn emit_fadd_d(&mut self, fd: u8, fs1: u8, fs2: u8) {
         let insn =
@@ -1894,6 +1918,13 @@ impl Riscv64Codegen {
     /// FMV.X.D rd, fs1: 浮点寄存器移动到整数寄存器 (64-bit)
     fn emit_fmv_x_d(&mut self, rd: u8, fs1: u8) {
         let insn = ((fs1 as u32) << 15) | (rd as u32) << 7 | 0b1110000 << 25 | 0x53;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FSGNJ.S fd, fs1, fs2: 单精度符号注入
+    fn emit_fsgnj_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
+        let insn =
+            ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0010000 << 25 | 0x53;
         self.emit(&insn.to_le_bytes());
     }
 

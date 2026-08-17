@@ -2305,6 +2305,47 @@ fn aarch64_tls_cross_compile() {
     assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
 }
 
+/// AArch64: 浮点返回函数调用应走真实 `bl`, 不再 warning 后返回 0.0。
+#[test]
+fn aarch64_float_call_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-a64-float-call-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-a64-float-call-{}.o", std::process::id()));
+    fs::write(
+        &source_path,
+        "double callee(double x) { return x; }\n\
+         double main(void) { return callee(1.5); }\n",
+    )
+    .expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("float call not yet supported"),
+        "float call fallback warning should not be emitted: {stderr}"
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 183);
+    assert!(
+        bytes.windows(4).any(|w| w[3] & 0xfc == 0x94),
+        "expected at least one AArch64 BL instruction"
+    );
+}
+
 /// M7: riscv64-linux-gnu 交叉编译 hello.o。
 #[test]
 fn riscv64_hello_cross_compile() {
@@ -2334,6 +2375,49 @@ fn riscv64_hello_cross_compile() {
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
     assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 243);
+}
+
+/// RISC-V: 浮点返回函数调用应走真实 `jal`, 不再 warning 后返回 0.0。
+#[test]
+fn riscv64_float_call_cross_compile() {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-rv-float-call-{}.c", std::process::id()));
+    let object_path = dir.join(format!("dcc-rv-float-call-{}.o", std::process::id()));
+    fs::write(
+        &source_path,
+        "double callee(double x) { return x; }\n\
+         double main(void) { return callee(1.5); }\n",
+    )
+    .expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "riscv64-linux-gnu",
+            "-c",
+            "-O0",
+            "-o",
+            object_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("float call not yet supported"),
+        "float call fallback warning should not be emitted: {stderr}"
+    );
+    let bytes = fs::read(&object_path).expect("read object");
+    let _ = fs::remove_file(&object_path);
+    assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 243);
+    assert!(
+        bytes
+            .windows(4)
+            .any(|w| w[0] == 0xef && w[1] & 0x0f == 0x00),
+        "expected at least one RISC-V JAL instruction"
+    );
 }
 
 /// M7: riscv64 typed IR 二元表达式与全局 rodata。

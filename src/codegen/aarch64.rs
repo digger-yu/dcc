@@ -1015,7 +1015,15 @@ impl Aarch64Codegen {
                 self.mov_x_reg_imm(target_reg, 0);
             } else if reg_idx >= 8 {
                 self.gen_expr(arg);
-                self.store_w0(stack_arg_off);
+                if let ValueType::Float { bits } = &arg.ty {
+                    if *bits <= 32 {
+                        self.str_s0_sp(stack_arg_off);
+                    } else {
+                        self.str_dt_sp(0, stack_arg_off);
+                    }
+                } else {
+                    self.store_w0(stack_arg_off);
+                }
                 stack_arg_off += 8;
             } else {
                 self.gen_expr(arg);
@@ -1145,13 +1153,9 @@ impl Aarch64Codegen {
                 self.gen_va_arg_float(ap);
                 return true;
             }
-            // M11 修复: 防止 gen_expr <-> gen_float_expr 无限递归
-            // 例: 浮点 Call 在 IR 中 children[0] 是 callee, 不再与 va_arg 混清.
-            ExprKind::Call => {
-                eprintln!(
-                    "warning: zero-arg float call not yet supported on aarch64, emitting 0.0"
-                );
-                self.load_float_s0(0.0);
+            // 浮点返回值沿用普通调用路径；AAPCS64 约定结果留在 s0/d0。
+            ExprKind::Call if !expr.children.is_empty() => {
+                self.gen_call(expr);
                 return true;
             }
             _ => {

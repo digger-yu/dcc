@@ -32,7 +32,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| 浮点函数调用 | AArch64/RISC-V 的浮点表达式 codegen 遇到 `ExprKind::Call` 仍 warning 并返回 `0.0` |
 | 非 x86 inline asm | 非 x86 后端可在 `-S` 保留 asm 文本和简化占位符替换；`-c` 路径没有完整 mini-assembler 机器码语义 |
 | AArch64 vector 表达式 | 向量 codegen 仍主要覆盖二元/常量路径，其他形式可能落到零值 fallback |
 | 多架构运行验证 | aarch64/riscv64/mips/mips64/arm 多数测试仍是 compile/ELF 产物验证，缺 QEMU runtime 语义门禁 |

@@ -527,7 +527,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
 ## RISC-V 64 后端（`codegen/riscv64.rs`）
 
 - **入口**：`codegen::emit` 在 `--target riscv64-linux-gnu` 时选用 `Riscv64Codegen`。
-- **能力与 AArch64 对齐**：整数/浮点/向量表达式、控制流、函数调用（`R_RISCV_JAL`）、
+- **能力与 AArch64 对齐**：整数/浮点/向量表达式、控制流、函数调用（含浮点返回值保留在 `fa0`，`R_RISCV_JAL`）、
   全局 `.rodata`、`build_elf_riscv64` / `build_elf_rel_riscv64`。
 - **ABI**：RV64M 整数除/取模、RV64I 移位、聚合类型参数 by-ref、
   聚合返回值 > 16 字节走 sret、varargs 最小 spill、
