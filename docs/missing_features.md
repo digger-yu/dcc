@@ -27,7 +27,6 @@
 | 限制 | 说明 |
 |------|------|
 | mini-asm 未知指令 | 未识别 mnemonic 或已识别指令的不合法操作数仍 warning 后发 `nop`，不是 hard error |
-| sanitizer runtime 依赖 | ASAN/UBSAN/KCSAN 等主要只负责插桩；运行时库与实际 report 行为不由 dcc 完整提供 |
 
 ### AArch64 / RISC-V / MIPS / ARM
 

@@ -178,6 +178,31 @@ fn elf64_section_data<'a>(data: &'a [u8], section: &str) -> Option<&'a [u8]> {
     None
 }
 
+fn elf64_dynamic_needed(data: &[u8]) -> Vec<String> {
+    fn read_dyn_cstr(b: &[u8]) -> String {
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf8_lossy(&b[..end]).to_string()
+    }
+    let Some(dynamic) = elf64_section_data(data, ".dynamic") else {
+        return Vec::new();
+    };
+    let Some(dynstr) = elf64_section_data(data, ".dynstr") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ent in dynamic.chunks_exact(16) {
+        let tag = u64::from_le_bytes(ent[0..8].try_into().unwrap());
+        let val = u64::from_le_bytes(ent[8..16].try_into().unwrap()) as usize;
+        if tag == 0 {
+            break;
+        }
+        if tag == 1 && val < dynstr.len() {
+            out.push(read_dyn_cstr(&dynstr[val..]));
+        }
+    }
+    out
+}
+
 /// 极简 ELF64 符号表解析: 返回定义型函数符号 (STT_FUNC, 有节) 的
 /// (名称, st_value, st_size). 用于验证函数符号 st_size 非零.
 fn elf64_func_symbols(data: &[u8]) -> Vec<(String, u64, u64)> {
@@ -235,6 +260,61 @@ fn elf64_func_symbols(data: &[u8]) -> Vec<(String, u64, u64)> {
         if st_type == 2 && st_shndx != 0 && st_shndx != 0xfff1 && st_name > 0 {
             let name = read_cstr(&data[strtab_off + st_name..]);
             out.push((name, st_value, st_size));
+        }
+    }
+    out
+}
+
+fn elf64_undefined_symbols(data: &[u8]) -> Vec<String> {
+    fn read_cstr(b: &[u8]) -> String {
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf8_lossy(&b[..end]).to_string()
+    }
+    let mut out = Vec::new();
+    if data.len() < 64 {
+        return out;
+    }
+    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
+    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
+    if e_shentsize < 64 || e_shoff as usize + e_shentsize * e_shnum > data.len() {
+        return out;
+    }
+    let shstr = e_shoff as usize + e_shstrndx * e_shentsize;
+    let shstr_off = u64::from_le_bytes(data[shstr + 24..shstr + 32].try_into().unwrap()) as usize;
+    let shstr_size = u64::from_le_bytes(data[shstr + 32..shstr + 40].try_into().unwrap()) as usize;
+    if shstr_off + shstr_size > data.len() {
+        return out;
+    }
+    let mut symtab = None;
+    let mut strtab_off = 0usize;
+    for i in 0..e_shnum {
+        let off = e_shoff as usize + i * e_shentsize;
+        let name_off = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        let name = read_cstr(&data[shstr_off + name_off..]);
+        if name == ".symtab" {
+            let size = u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap());
+            let entsize = u64::from_le_bytes(data[off + 56..off + 64].try_into().unwrap());
+            let sec_off = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap());
+            symtab = Some((sec_off, size, entsize));
+        } else if name == ".strtab" {
+            strtab_off = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap()) as usize;
+        }
+    }
+    let Some((sec_off, size, entsize)) = symtab else {
+        return out;
+    };
+    if entsize < 24 || sec_off as usize + size as usize > data.len() {
+        return out;
+    }
+    let n = size / entsize;
+    for i in 0..n {
+        let off = sec_off as usize + i as usize * entsize as usize;
+        let st_name = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        let st_shndx = u16::from_le_bytes(data[off + 6..off + 8].try_into().unwrap());
+        if st_shndx == 0 && st_name > 0 {
+            out.push(read_cstr(&data[strtab_off + st_name..]));
         }
     }
     out
@@ -5091,6 +5171,93 @@ fn m15_bounds_check_oob_diag() {
     );
 }
 
+#[test]
+#[cfg(unix)]
+fn sanitizer_large_asan_uses_libasan_generic_symbols() {
+    let source = r#"
+struct Big { long a; long b; long c; };
+struct Big load_big(struct Big *p) {
+    return *p;
+}
+"#;
+    let (output, object_path) = run_object_test_flags(
+        "sanitizer-large-asan-generic",
+        source,
+        &["-fsanitize=address"],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let object_data = std::fs::read(&object_path).expect("read object");
+    let symbols = elf64_undefined_symbols(&object_data);
+    assert!(
+        symbols.iter().any(|s| s == "__asan_loadN"),
+        "large access must use libasan generic loadN symbol: {symbols:?}"
+    );
+    assert!(
+        !symbols.iter().any(|s| s == "__asan_load24"),
+        "large access must not invent size-specific libasan symbols: {symbols:?}"
+    );
+    let _ = std::fs::remove_file(&object_path);
+}
+
+#[test]
+#[cfg(unix)]
+fn sanitizer_host_link_adds_runtime_flags() {
+    let source = "int main(void) { return 0; }\n";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let source_path = dir.join(format!("dcc-san-hostlink-{pid}.c"));
+    let exe_path = dir.join(format!("dcc-san-hostlink-{pid}"));
+    fs::write(&source_path, source).expect("write sanitizer fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-v", "-fsanitize=address,undefined", "-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("-fsanitize=address") && stderr.contains("-fsanitize=undefined"),
+        "host cc link must receive sanitizer runtime flags: {stderr}"
+    );
+    let run = Command::new(&exe_path).output().expect("run sanitizer exe");
+    let _ = fs::remove_file(&exe_path);
+    assert!(run.status.success(), "runtime status: {:?}", run.status.code());
+}
+
+#[test]
+#[cfg(unix)]
+fn sanitizer_builtin_pie_records_runtime_needed() {
+    let source = "int main(void) { int a = 1; int *p = &a; return *p - 1; }\n";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let source_path = dir.join(format!("dcc-san-pie-{pid}.c"));
+    let exe_path = dir.join(format!("dcc-san-pie-{pid}"));
+    fs::write(&source_path, source).expect("write sanitizer fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-pie", "-fsanitize=address,undefined", "-o"])
+        .arg(&exe_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&source_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let exe_data = std::fs::read(&exe_path).expect("read pie output");
+    let _ = fs::remove_file(&exe_path);
+    let needed = elf64_dynamic_needed(&exe_data);
+    assert!(
+        needed.iter().any(|n| n == "libasan.so"),
+        "PIE sanitizer link should record libasan.so: {needed:?}"
+    );
+    assert!(
+        needed.iter().any(|n| n == "libubsan.so"),
+        "PIE sanitizer link should record libubsan.so: {needed:?}"
+    );
+}
+
 /// 16 字节 struct 传值 ABI: struct {double,double} 走 xmm0:xmm1,
 /// struct {long,long} 走 rdi:rsi, SSE 类返回值经 xmm0:xmm1
 #[test]
@@ -6931,7 +7098,7 @@ int main(void) { return f(4); }
 }
 
 /// P1.3: Null deref UBSAN trap. 编译通过指针解引用的代码,
-/// 验证生成的汇编中插入 `call __ubsan_handle_null_pointer_dereference`
+/// 验证生成的汇编中插入 `call __ubsan_handle_type_mismatch_v1`
 /// (LLVM compiler-rt 符号名). runtime 时用户需链接 ubsan
 /// runtime, dcc 只 emit 调用. 测试只验证编译路径
 /// (Section 4.2 P1.3). 用 -S 检查汇编原因同 P1.2.
@@ -6959,7 +7126,7 @@ int main(void) { int x = 42; return f(&x); }
     );
     let asm = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(&asm_path);
-    let needle = "call __ubsan_handle_null_pointer_dereference";
+    let needle = "call __ubsan_handle_type_mismatch_v1";
     assert!(
         asm.contains(needle),
         "null deref ubsan stub should be called in asm, but `{}` not found in:\n{}",
@@ -7006,20 +7173,19 @@ int main(void) { return f(3.14); }
     );
 }
 
-/// P1.5: __kcsan_check_access 专用路径. 编译 KCSAN-only 代码
-/// (只启 -fsanitize=thread, 不启 -fsanitize=address), 验证生成的
-/// 汇编中插入 `call __kcsan_check_access`, 而不是走 KASAN 的
-/// `__asan_loadN` / `__asan_storeN` (Section 4.2 P1.5).
+/// P1.5: user-mode ThreadSanitizer path. 编译 TSan-only 代码
+/// (`-fsanitize=thread`, 不启 address), 验证生成的汇编中插入
+/// libtsan-compatible `__tsan_readN`, 而不是走 KASAN runtime。
 #[test]
-fn kcsan_only_emits_kcsan_check_access() {
+fn tsan_only_emits_tsan_access() {
     let src = "\
 int f(int *p) { return *p; }
 int main(void) { int x = 42; return f(&x); }
 ";
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-kcsan-only-{}.c", std::process::id()));
-    let asm_path = dir.join(format!("dcc-kcsan-only-{}.s", std::process::id()));
-    fs::write(&source_path, src).expect("write kcsan fixture");
+    let source_path = dir.join(format!("dcc-tsan-only-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-tsan-only-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write tsan fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-fsanitize=thread", "-S", "-o"])
         .arg(&asm_path)
@@ -7029,22 +7195,22 @@ int main(void) { int x = 42; return f(&x); }
     let _ = fs::remove_file(&source_path);
     assert!(
         output.status.success(),
-        "kcsan-only compile failed: {}",
+        "tsan-only compile failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let asm = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(&asm_path);
-    let kcsan_needle = "call __kcsan_check_access";
+    let tsan_needle = "call __tsan_read4";
     assert!(
-        asm.contains(kcsan_needle),
-        "kcsan access check should be called in asm, but `{}` not found in:\n{}",
-        kcsan_needle,
+        asm.contains(tsan_needle),
+        "tsan access check should be called in asm, but `{}` not found in:\n{}",
+        tsan_needle,
         asm
     );
     // 同时确认 KASAN 路径没有被启用 (没有 __asan_loadN 调用).
     assert!(
         !asm.contains("call __asan_load") && !asm.contains("call __asan_store"),
-        "KASAN path must not be emitted when only KCSAN is enabled:\n{}",
+        "KASAN path must not be emitted when only TSan is enabled:\n{}",
         asm
     );
 }
@@ -7096,17 +7262,17 @@ int f(int *p) { return *p; }
     );
 }
 
-/// P1.5: KCSAN 与 KASAN 可同时启用. 同一访存应同时发射
-/// __kcsan_check_access 与 __asan_loadN.
+/// P1.5: user-mode TSan 与 KASAN 可同时启用. 同一访存应同时发射
+/// __tsan_readN 与 __asan_loadN.
 #[test]
-fn kcsan_with_kasan_emits_both_checks() {
+fn tsan_with_kasan_emits_both_checks() {
     let src = "\
 int f(int *p) { return *p; }
 ";
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-kcsan-kasan-{}.c", std::process::id()));
-    let asm_path = dir.join(format!("dcc-kcsan-kasan-{}.s", std::process::id()));
-    fs::write(&source_path, src).expect("write kcsan+kasan fixture");
+    let source_path = dir.join(format!("dcc-tsan-kasan-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-tsan-kasan-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write tsan+kasan fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-fsanitize=address,thread", "-S", "-o"])
         .arg(&asm_path)
@@ -7123,12 +7289,12 @@ int f(int *p) { return *p; }
     let _ = fs::remove_file(&asm_path);
     assert!(
         asm.contains("call __asan_load4"),
-        "KASAN load check missing when KCSAN coexists:\n{}",
+        "KASAN load check missing when TSan coexists:\n{}",
         asm
     );
     assert!(
-        asm.contains("call __kcsan_check_access"),
-        "KCSAN check missing when KASAN coexists:\n{}",
+        asm.contains("call __tsan_read4"),
+        "TSan check missing when KASAN coexists:\n{}",
         asm
     );
 }

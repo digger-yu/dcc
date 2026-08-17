@@ -1307,6 +1307,29 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         LinkerOutputKind::PIE => link::OutputKind::PIE,
         LinkerOutputKind::Shared => link::OutputKind::Shared,
     };
+    let mut needed_libs: Vec<String> = cfg
+        .link_libs
+        .iter()
+        .map(|s| format!("lib{}.so", s))
+        .collect();
+    let mut allowed_undef = vec![
+        "memcpy".into(),
+        "memmove".into(),
+        "memset".into(),
+        "memcmp".into(),
+        "printf".into(),
+        "puts".into(),
+        "exit".into(),
+        "abort".into(),
+        "malloc".into(),
+        "free".into(),
+        "__stack_chk_fail".into(),
+        "__cxa_atexit".into(),
+        "__cxa_finalize".into(),
+        "_start".into(),
+        "main".into(),
+    ];
+    push_sanitizer_link_deps(cfg, &mut needed_libs, &mut allowed_undef);
     let mut link_cfg = link::LinkConfig {
         output_kind,
         lto: cfg.linker_lto,
@@ -1321,30 +1344,10 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         }),
         base_addr: 0x400000,
         soname: cfg.soname.clone(),
-        needed: cfg
-            .link_libs
-            .iter()
-            .map(|s| format!("lib{}.so", s))
-            .collect(),
+        needed: needed_libs,
         strip_debug: false,
         gc_sections: true,
-        allowed_undef: vec![
-            "memcpy".into(),
-            "memmove".into(),
-            "memset".into(),
-            "memcmp".into(),
-            "printf".into(),
-            "puts".into(),
-            "exit".into(),
-            "abort".into(),
-            "malloc".into(),
-            "free".into(),
-            "__stack_chk_fail".into(),
-            "__cxa_atexit".into(),
-            "__cxa_finalize".into(),
-            "_start".into(),
-            "main".into(),
-        ],
+        allowed_undef,
         exclude_libs: cfg.exclude_libs.clone(),
         build_id: cfg.build_id,
         no_undefined_version: cfg.no_undefined_version,
@@ -1514,27 +1517,196 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     link_result
 }
 
+fn add_unique_string(v: &mut Vec<String>, value: impl Into<String>) {
+    let value = value.into();
+    if !v.iter().any(|s| s == &value) {
+        v.push(value);
+    }
+}
+
+/// 用户态 sanitizer 插桩依赖宿主 sanitizer runtime。
+///
+/// - host cc 路径通过 `-fsanitize=*` 让 cc 选择 crt/runtime。
+/// - 内置动态链接器路径通过 DT_NEEDED + allowed undef 暴露给 ld.so。
+/// - `-c` / `-S` 不触发链接, 保留 relocatable undefined runtime 符号。
+/// - kernel-* sanitizer 由内核运行时提供, 不链接宿主 asan/hwasan。
+fn sanitizer_link_deps(cfg: &Config) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut cc_flags = Vec::new();
+    let mut libs = Vec::new();
+    let mut undefs = Vec::new();
+
+    fn add_runtime_dep(
+        libs: &mut Vec<String>,
+        cc_flags: &mut Vec<String>,
+        undefs: &mut Vec<String>,
+        lib: Option<&str>,
+        syms: &[&str],
+        flag: Option<&str>,
+    ) {
+        if let Some(lib) = lib {
+            add_unique_string(libs, lib);
+        }
+        if let Some(flag) = flag {
+            add_unique_string(cc_flags, flag);
+        }
+        for sym in syms {
+            add_unique_string(undefs, *sym);
+        }
+    }
+
+    macro_rules! add_lib {
+        ($lib:expr, $syms:expr, $flag:expr $(,)?) => {
+            add_runtime_dep(
+                &mut libs,
+                &mut cc_flags,
+                &mut undefs,
+                Some($lib),
+                $syms,
+                $flag,
+            )
+        };
+    }
+
+    if cfg.bounds_check || cfg.sanitizers.ubsan {
+        add_lib!(
+            "ubsan",
+            &[
+                "__ubsan_handle_divrem_overflow",
+                "__ubsan_handle_shift_out_of_bounds",
+                "__ubsan_handle_add_overflow",
+                "__ubsan_handle_sub_overflow",
+                "__ubsan_handle_mul_overflow",
+                "__ubsan_handle_negate_overflow",
+                "__ubsan_handle_vla_bound_not_positive",
+                "__ubsan_handle_type_mismatch_v1",
+                "__ubsan_handle_float_cast_overflow",
+            ],
+            Some("-fsanitize=undefined"),
+        );
+    }
+    if cfg.sanitizers.kasan && !cfg.sanitizers.kernel_mode {
+        add_lib!(
+            "asan",
+            &[
+                "__asan_init",
+                "__asan_load1",
+                "__asan_load2",
+                "__asan_load4",
+                "__asan_load8",
+                "__asan_load16",
+                "__asan_loadN",
+                "__asan_store1",
+                "__asan_store2",
+                "__asan_store4",
+                "__asan_store8",
+                "__asan_store16",
+                "__asan_storeN",
+                "__asan_poison_memory_region",
+                "__asan_unpoison_memory_region",
+            ],
+            Some("-fsanitize=address"),
+        );
+    }
+    if cfg.sanitizers.hwasan && !cfg.sanitizers.kernel_mode {
+        add_lib!(
+            "hwasan",
+            &[
+                "__hwasan_init",
+                "__hwasan_load1",
+                "__hwasan_load2",
+                "__hwasan_load4",
+                "__hwasan_load8",
+                "__hwasan_load16",
+                "__hwasan_loadN",
+                "__hwasan_store1",
+                "__hwasan_store2",
+                "__hwasan_store4",
+                "__hwasan_store8",
+                "__hwasan_store16",
+                "__hwasan_storeN",
+            ],
+            Some("-fsanitize=hwaddress"),
+        );
+    }
+    if cfg.sanitizers.kcsan && !cfg.sanitizers.kernel_mode {
+        add_lib!(
+            "tsan",
+            &[
+                "__tsan_init",
+                "__tsan_func_entry",
+                "__tsan_read1",
+                "__tsan_read2",
+                "__tsan_read4",
+                "__tsan_read8",
+                "__tsan_read16",
+                "__tsan_read_range",
+                "__tsan_write1",
+                "__tsan_write2",
+                "__tsan_write4",
+                "__tsan_write8",
+                "__tsan_write16",
+                "__tsan_write_range",
+            ],
+            Some("-fsanitize=thread"),
+        );
+    }
+    if cfg.sanitizers.kcsan && cfg.sanitizers.kernel_mode {
+        add_runtime_dep(
+            &mut libs,
+            &mut cc_flags,
+            &mut undefs,
+            None,
+            &[
+                "__kcsan_init",
+                "__kcsan_func_entry",
+                "__kcsan_check_access",
+            ],
+            None,
+        );
+    }
+    if cfg.sanitizers.fuzzer || cfg.sanitizers.kcov {
+        add_lib!(
+            "asan",
+            &[
+                "__sanitizer_cov_trace_pc",
+                "__sanitizer_cov_trace_pc_guard",
+                "__sanitizer_cov_trace_pc_guard_init",
+                "__sanitizer_cov_trace_cmp1",
+                "__sanitizer_cov_trace_cmp2",
+                "__sanitizer_cov_trace_cmp4",
+                "__sanitizer_cov_trace_cmp8",
+                "__sanitizer_cov_trace_switch",
+            ],
+            None,
+        );
+    }
+    if cfg.sanitizers.fuzzer {
+        add_unique_string(&mut cc_flags, "-fsanitize=fuzzer");
+    }
+
+    (cc_flags, libs, undefs)
+}
+
+fn push_sanitizer_link_deps(
+    cfg: &Config,
+    needed_libs: &mut Vec<String>,
+    allowed_undef: &mut Vec<String>,
+) {
+    let (_, libs, undefs) = sanitizer_link_deps(cfg);
+    for lib in libs {
+        add_unique_string(needed_libs, format!("lib{lib}.so"));
+    }
+    for sym in undefs {
+        add_unique_string(allowed_undef, sym);
+    }
+}
+
 /// sanitizer 插桩产生的 __asan_* / __ubsan_* 调用符号由宿主运行时库提供:
 /// 把对应的 `-fsanitize=*` 透传给 host cc, 否则链接报 undefined reference
 /// (此前这些符号不写入 .o, 链接“成功”但 call 落到地址 0, 运行即段错误)。
-/// kernel-* / kcov 系列无宿主运行时, 不透传。
+/// kernel-* sanitizer 不透传宿主 asan/hwasan 运行时。
 fn host_sanitizer_flags(cfg: &Config) -> Vec<String> {
-    let mut v = Vec::new();
-    if cfg.bounds_check || cfg.sanitizers.ubsan {
-        v.push("-fsanitize=undefined".to_string());
-    }
-    // 内核模式 (-fsanitize=kernel-address / kernel-hwaddress) 内联 shadow
-    // 检查, 运行时由内核提供, 不链接宿主 asan/hwasan 运行时。
-    if cfg.sanitizers.kasan && !cfg.sanitizers.kernel_mode {
-        v.push("-fsanitize=address".to_string());
-    }
-    if cfg.sanitizers.hwasan && !cfg.sanitizers.kernel_mode {
-        v.push("-fsanitize=hwaddress".to_string());
-    }
-    if cfg.sanitizers.fuzzer {
-        v.push("-fsanitize=fuzzer".to_string());
-    }
-    v
+    sanitizer_link_deps(cfg).0
 }
 
 /// 调 host `cc` 把单 .o 链成可执行。传递 --sysroot= 与 -l 列表。

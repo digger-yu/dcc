@@ -255,6 +255,7 @@ pub fn link_from_bundle(
     builder.keep_debug = !cfg.strip_debug;
     builder.gc_sections_root = cfg.gc_sections_root.clone();
     builder.dynamic_linker = cfg.dynamic_linker.clone();
+    builder.needed = cfg.needed.clone();
     let mut layout = builder
         .build(bundle, &resolved)
         .map_err(|e| diag("E0303", e))?;
@@ -1042,6 +1043,7 @@ mod tests {
             has_dynamic: false,
             n_locals: 0,
             output_relas: Vec::new(),
+            needed: Vec::new(),
             dynamic_linker: None,
         };
 

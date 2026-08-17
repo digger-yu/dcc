@@ -321,6 +321,12 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
         }
         dynstr_data.push(0);
     }
+    for name in &layout.needed {
+        for byte in name.bytes() {
+            dynstr_data.push(byte);
+        }
+        dynstr_data.push(0);
+    }
     // 生成 .plt (CET/IBT 模式下仅包含 PLT[0], 函数条目放入 .plt.sec)
     // BIND_NOW 模式下 .plt 也仅包含 PLT[0], 函数条目放入 .plt.got
     let bind_now = _opts.bind_now;
@@ -397,7 +403,18 @@ pub fn fill_plt_got_with_opts(layout: &mut Layout, _opts: &LinkOpts, pie_relas: 
     let rela_plt_size = rela_plt_data.len() as u64;
     let rela_dyn_size = rela_dyn_data.len() as u64;
     // DT_NEEDED (1) - 每个 DT_NEEDED 一个, value 指向 .dynstr 中的字符串
-    // dcc 简化: 用 layout.soname / layout.needed
+    let mut needed_off = 1usize;
+    for name in &plt_gots.plt_funcs {
+        needed_off += name.len() + 1;
+    }
+    for name in &plt_gots.got_data {
+        needed_off += name.len() + 1;
+    }
+    for name in &layout.needed {
+        dynamic_data.extend_from_slice(&1u64.to_le_bytes());
+        dynamic_data.extend_from_slice(&(needed_off as u64).to_le_bytes());
+        needed_off += name.len() + 1;
+    }
     // DT_STRTAB = 5
     dynamic_data.extend_from_slice(&5u64.to_le_bytes());
     dynamic_data.extend_from_slice(&dynstr_vaddr.to_le_bytes());

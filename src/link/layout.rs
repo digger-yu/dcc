@@ -132,6 +132,8 @@ pub struct Layout {
     pub n_locals: u32,
     /// FlatRela 在应用后被转化为已修复的字节
     pub output_relas: Vec<OutputRela>,
+    /// 动态依赖库名 (`DT_NEEDED` 条目, 例如 `libasan.so`)。
+    pub needed: Vec<String>,
     /// 自定义动态链接器路径 (-Wl,--dynamic-linker=)
     pub dynamic_linker: Option<String>,
 }
@@ -174,6 +176,8 @@ pub struct LayoutBuilder {
     pub keep_debug: bool,
     /// gc_sections 根符号集 (除 entry 外的额外根)
     pub gc_sections_root: Vec<String>,
+    /// DT_NEEDED entries propagated from LinkConfig.
+    pub needed: Vec<String>,
     /// 自定义动态链接器路径
     pub dynamic_linker: Option<String>,
 }
@@ -192,6 +196,7 @@ impl LayoutBuilder {
             emit_dynamic: false,
             keep_debug: true,
             gc_sections_root: Vec::new(),
+            needed: Vec::new(),
             dynamic_linker: None,
         }
     }
@@ -398,6 +403,7 @@ impl LayoutBuilder {
             has_dynamic: self.emit_dynamic,
             n_locals,
             output_relas,
+            needed: self.needed.clone(),
             dynamic_linker: self.dynamic_linker.clone(),
         })
     }

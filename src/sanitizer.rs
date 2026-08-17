@@ -12,12 +12,16 @@
 //   * UB (除零 / 移位 / 整数溢出): 用 `Expr::Comma` 在表达式之前
 //     插入 `__ubsan_handle_divrem_overflow` /
 //     `__ubsan_handle_shift_out_of_bounds` /
-//     `__ubsan_handle_signed_integer_overflow` 之一。
-//   * KCSAN: 每个访存表达式前置 `__kcsan_check_access(addr, size, is_write)`。
+//     `__ubsan_handle_add/sub/mul/negate_overflow` 之一。
+//   * Thread sanitizer: user-mode `-fsanitize=thread` emits libtsan-compatible
+//     `__tsan_*` callbacks; `kernel-kcsan` keeps kernel `__kcsan_*` callbacks.
 //   * KCOV/Fuzzer: 边覆盖使用每函数 guard 计数器 (`uint32_t __dcc_cov_guards[N]`),
 //     入口 + 每个块开始 emit `__sanitizer_cov_trace_pc_guard(guard_idx)`;
 //     比较回调使用 `__sanitizer_cov_trace_cmp1/2/4/8(arg0, arg1)`;
 //     switch 调度使用 `__sanitizer_cov_trace_switch(arg, cases[0..N])`。
+// - 运行时库: 用户态 address / undefined / thread / fuzzer 覆盖
+//   由 driver 在最终链接阶段自动追加 sanitizer runtime；`-c` / `-S`
+//   仍只留下可重定位 runtime 调用。内核模式 sanitizer 不链接宿主库。
 // - 选通: KASAN/UBSAN/KCSAN 完全禁用时不插入;部分启用时仅插入对应调用。
 // - no_sanitize: 函数级 `__attribute__((no_sanitize("address")))` 等会
 //   关闭对应 sanitizer 通道。
@@ -560,12 +564,12 @@ fn instrument_expr(
         }
         Expr::Deref { e, ty, .. } => {
             instrument_expr(e, flags, ctx, guard_var, guard_base);
-            ExprKind::Deref(ty.size().max(1))
+            ExprKind::Deref(ty.size().max(1), e.as_ref().clone())
         }
         Expr::Index { arr, idx, ty, .. } => {
             instrument_expr(arr, flags, ctx, guard_var, guard_base);
             instrument_expr(idx, flags, ctx, guard_var, guard_base);
-            ExprKind::Index(ty.size().max(1))
+            ExprKind::Index(ty.size().max(1), arr.as_ref().clone())
         }
         Expr::Member {
             expr: base,
@@ -575,7 +579,7 @@ fn instrument_expr(
         } => {
             instrument_expr(base, flags, ctx, guard_var, guard_base);
             if *is_arrow {
-                ExprKind::ArrowMember(ty.size().max(1))
+                ExprKind::ArrowMember(ty.size().max(1), base.as_ref().clone())
             } else {
                 ExprKind::Trivial
             }
@@ -697,39 +701,37 @@ fn instrument_expr(
         }
         ExprKind::Unary(op, ty) => {
             if flags.needs_ubsan() && matches!(op, UnOp::Neg) && is_signed_int(&ty) {
-                let wrapped = wrap_with_ubsan_check(expr, "signed_integer_overflow", &span);
+                let wrapped = wrap_with_ubsan_check(expr, "negate_overflow", &span);
                 *expr = wrapped;
             }
         }
-        ExprKind::Deref(sz) => {
-            if flags.needs_load_store_check() || flags.needs_kcsan_check() {
-                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
-                *expr = wrapped;
-            }
-            // UBSAN null deref check: 与 KASAN/KCSAN 并存, 但单独
-            // 通过 wrapper (在 KASAN wrapper 之前再包一层)。
-            if flags.needs_ubsan() {
-                let wrapped = wrap_with_null_check(expr, &span);
-                *expr = wrapped;
-            }
-        }
-        ExprKind::Index(sz) => {
+        ExprKind::Deref(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
                 let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
                 *expr = wrapped;
             }
             if flags.needs_ubsan() {
-                let wrapped = wrap_with_null_check(expr, &span);
+                let wrapped = wrap_with_null_check(expr, &ptr, &span);
                 *expr = wrapped;
             }
         }
-        ExprKind::ArrowMember(sz) => {
+        ExprKind::Index(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
                 let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
                 *expr = wrapped;
             }
             if flags.needs_ubsan() {
-                let wrapped = wrap_with_null_check(expr, &span);
+                let wrapped = wrap_with_null_check(expr, &ptr, &span);
+                *expr = wrapped;
+            }
+        }
+        ExprKind::ArrowMember(sz, ptr) => {
+            if flags.needs_load_store_check() || flags.needs_kcsan_check() {
+                let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
+                *expr = wrapped;
+            }
+            if flags.needs_ubsan() {
+                let wrapped = wrap_with_null_check(expr, &ptr, &span);
                 *expr = wrapped;
             }
         }
@@ -789,9 +791,9 @@ enum ExprKind {
     Trivial,
     Binop(BinOp),
     Unary(UnOp, Type),
-    Deref(usize),
-    Index(usize),
-    ArrowMember(usize),
+    Deref(usize, Expr),
+    Index(usize, Expr),
+    ArrowMember(usize, Expr),
     Assign(Option<MemCheckKind>),
     IncDec(Option<MemCheckKind>, Box<Expr>),
 }
@@ -939,8 +941,13 @@ fn try_wrap_ubsan(expr: &Expr, op: BinOp) -> Option<Expr> {
         BinOp::Add | BinOp::Sub | BinOp::Mul => {
             if let Expr::Binop { l, r, .. } = expr {
                 if is_signed_int(&l.ty()) && is_signed_int(&r.ty()) && !is_const_arith(expr) {
-                    let wrapped =
-                        wrap_with_ubsan_check_arg(expr, l, "signed_integer_overflow", &span);
+                    let kind = match op {
+                        BinOp::Add => "add_overflow",
+                        BinOp::Sub => "sub_overflow",
+                        BinOp::Mul => "mul_overflow",
+                        _ => unreachable!(),
+                    };
+                    let wrapped = wrap_with_ubsan_check_arg(expr, l, kind, &span);
                     return Some(wrapped);
                 }
             }
@@ -981,19 +988,26 @@ fn vla_bound_check(bound: Box<Expr>, span: &Span) -> Expr {
     }
 }
 
-/// 生成 `__ubsan_handle_null_pointer_dereference()` 调用表达式。
-/// 无参数 (运行时由 caller frame 反查地址)。
+/// 生成 `__ubsan_handle_type_mismatch_v1(0)` 调用表达式。
+/// libubsan 没有独立 null-deref 入口；空指针解引用通过 type_mismatch_v1 report。
 fn null_deref_check(span: &Span) -> Expr {
     Expr::Call {
         callee: Box::new(Expr::Ident {
             name: Ident {
-                name: "__ubsan_handle_null_pointer_dereference".to_string(),
+                name: "__ubsan_handle_type_mismatch_v1".to_string(),
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(Box::new(Type::Void), vec![]),
+            ty: Type::Func(
+                Box::new(Type::Void),
+                vec![Type::Ptr(Box::new(Type::Void))],
+            ),
         }),
-        args: vec![],
+        args: vec![Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }],
         span: span.clone(),
         ty: Type::Void,
     }
@@ -1207,8 +1221,9 @@ fn chain_mem_checks(checks: Vec<Expr>, inner: Expr, span: &Span, ty: Type) -> Ex
 
 /// 根据当前启用的 sanitizer 生成内存访问检查调用列表 (按序执行)。
 ///
-/// - KCSAN: `__kcsan_check_access(addr, size, is_write)` — 数据竞争检测,
-///   与 KASAN 相互独立, 二者可同时启用 (KCSAN 查竞争, KASAN 查越界/UAF)。
+/// - ThreadSanitizer user mode: `__tsan_readN/writeN(addr)` or
+///   `__tsan_read_range/write_range(addr, size)`.
+/// - KCSAN kernel mode: `__kcsan_check_access(addr, size, is_write)`.
 /// - KASAN/HWASAN user mode: `__asan_loadN` / `__asan_storeN` 运行时函数。
 /// - KASAN kernel mode: 内联 shadow 地址计算 (shadow = (addr >> 3) + offset)。
 fn make_mem_check_calls(
@@ -1220,7 +1235,11 @@ fn make_mem_check_calls(
 ) -> Vec<Expr> {
     let mut out = Vec::new();
     if flags.kcsan {
-        out.push(make_kcsan_check_call(addr.clone(), size, is_write, span));
+        if flags.kernel_mode {
+            out.push(make_kcsan_check_call(addr.clone(), size, is_write, span));
+        } else {
+            out.push(make_tsan_check_call(addr.clone(), size, is_write, span));
+        }
     }
     if flags.kasan || flags.hwasan {
         if flags.kasan && flags.kernel_mode {
@@ -1231,6 +1250,54 @@ fn make_mem_check_calls(
         }
     }
     out
+}
+
+/// libtsan-compatible memory access callback.
+fn make_tsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) -> Expr {
+    let fn_name = match (is_write, size) {
+        (false, 1) => "__tsan_read1",
+        (false, 2) => "__tsan_read2",
+        (false, 4) => "__tsan_read4",
+        (false, 8) => "__tsan_read8",
+        (false, 16) => "__tsan_read16",
+        (false, _) => "__tsan_read_range",
+        (true, 1) => "__tsan_write1",
+        (true, 2) => "__tsan_write2",
+        (true, 4) => "__tsan_write4",
+        (true, 8) => "__tsan_write8",
+        (true, 16) => "__tsan_write16",
+        (true, _) => "__tsan_write_range",
+    };
+    let args = if matches!(size, 1 | 2 | 4 | 8 | 16) {
+        vec![addr]
+    } else {
+        vec![
+            addr,
+            Expr::Int {
+                v: size as i128,
+                span: span.clone(),
+                ty: Type::ULong,
+            },
+        ]
+    };
+    let param_tys = if matches!(size, 1 | 2 | 4 | 8 | 16) {
+        vec![Type::Ptr(Box::new(Type::Void))]
+    } else {
+        vec![Type::Ptr(Box::new(Type::Void)), Type::ULong]
+    };
+    Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: fn_name.to_string(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(Box::new(Type::Void), param_tys),
+        }),
+        args,
+        span: span.clone(),
+        ty: Type::Void,
+    }
 }
 
 /// `__kcsan_check_access(addr, size, is_write)` 三参调用
@@ -1267,7 +1334,8 @@ fn make_kcsan_check_call(addr: Expr, size: usize, is_write: bool, span: &Span) -
 }
 
 /// `__asan_loadN/storeN(addr[, size])` 运行时调用。
-/// N ≤ 16 单参;N > 16 或聚合类型双参 `(addr, size_t)`。
+/// N in {1,2,4,8,16} 使用固定大小接口；其他大小使用
+/// `__asan_loadN(addr, size_t)` / `__asan_storeN(addr, size_t)` 通用接口。
 fn make_asan_call(
     addr: Expr,
     size: usize,
@@ -1288,13 +1356,12 @@ fn make_asan_call(
             kasan_load_fn(size)
         }
     };
-    // 16 字节以下用单参 `__asan_loadN(addr)`, 16 字节以上或聚合类型用
-    // 双参 `__asan_loadN(addr, size_t)`. LLVM 运行时期望的签名
-    // (asan_interface.h):
-    //   void __asan_loadN(void const volatile *addr)         N in {1,2,4,8,16}
-    //   void __asan_loadN(void const volatile *addr, size_t size)  N > 16
-    // 同理 store. 运行时须提供匹配的 __asan_load24 / __asan_load32 等符号.
-    let args = if size > 16 && size != 0 {
+    // libasan/hwasan 只提供固定大小 {1,2,4,8,16} 单参接口；
+    // 其他大小走通用 N 接口并携带 size_t 第二参。
+    let has_fixed_size_runtime = matches!(size, 1 | 2 | 4 | 8 | 16);
+    let args = if has_fixed_size_runtime {
+        vec![addr]
+    } else {
         vec![
             addr,
             Expr::Int {
@@ -1303,13 +1370,11 @@ fn make_asan_call(
                 ty: Type::ULong,
             },
         ]
-    } else {
-        vec![addr]
     };
-    let param_tys = if size > 16 && size != 0 {
-        vec![Type::Ptr(Box::new(Type::Void)), Type::ULong]
-    } else {
+    let param_tys = if has_fixed_size_runtime {
         vec![Type::Ptr(Box::new(Type::Void))]
+    } else {
+        vec![Type::Ptr(Box::new(Type::Void)), Type::ULong]
     };
     Expr::Call {
         callee: Box::new(Expr::Ident {
@@ -1465,13 +1530,33 @@ fn make_kernel_kasan_check(addr: Expr, size: usize, is_write: bool, span: &Span)
     }
 }
 
-/// 把 `expr` 包成 `(null_check, expr)`,其中 `null_check` 是
-/// `__ubsan_handle_null_pointer_dereference()` 调用。
-fn wrap_with_null_check(expr: &Expr, span: &Span) -> Expr {
+/// 把 `expr` 包成 `(ptr == 0 ? null_check : 0, expr)`。
+fn wrap_with_null_check(expr: &Expr, ptr: &Expr, span: &Span) -> Expr {
     let inner_ty = expr.ty();
-    let null_call = null_deref_check(span);
+    let cond = Expr::Binop {
+        op: BinOp::EqEq,
+        l: Box::new(ptr.clone()),
+        r: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
+    let null_check = Expr::Cond {
+        cond: Box::new(cond),
+        then_: Box::new(null_deref_check(span)),
+        else_: Box::new(Expr::Int {
+            v: 0,
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        span: span.clone(),
+        ty: Type::Int,
+    };
     Expr::Comma {
-        l: Box::new(null_call),
+        l: Box::new(null_check),
         r: Box::new(expr.clone()),
         span: span.clone(),
         ty: inner_ty,
@@ -1485,12 +1570,8 @@ fn kasan_load_fn(sz: usize) -> String {
         4 => "__asan_load4".to_string(),
         8 => "__asan_load8".to_string(),
         16 => "__asan_load16".to_string(),
-        // P1.1: 16 字节以上或聚合类型的 KASAN load 检查
-        // (Section 4.2) - 走 `__asan_loadN` + size 第二参的
-        // 通用 variant. LLVM 运行时接口对 N>16 的情况提供
-        // `__asan_load(addr, size)` 形式. 这里 emit N=实际 size
-        // 的形式以与 task 描述一致, 并以 size 作为第二参.
-        n => format!("__asan_load{}", n),
+        // 其他大小使用 libasan 的通用 `__asan_loadN(addr, size)`。
+        _ => "__asan_loadN".to_string(),
     }
 }
 
@@ -1501,7 +1582,7 @@ fn hwasan_load_fn(sz: usize) -> String {
         4 => "__hwasan_load4".to_string(),
         8 => "__hwasan_load8".to_string(),
         16 => "__hwasan_load16".to_string(),
-        n => format!("__hwasan_load{}", n),
+        _ => "__hwasan_loadN".to_string(),
     }
 }
 
@@ -1512,8 +1593,8 @@ fn kasan_store_fn(sz: usize) -> String {
         4 => "__asan_store4".to_string(),
         8 => "__asan_store8".to_string(),
         16 => "__asan_store16".to_string(),
-        // P1.1: 16 字节以上或聚合类型的 KASAN store 检查.
-        n => format!("__asan_store{}", n),
+        // 其他大小使用 libasan 的通用 `__asan_storeN(addr, size)`。
+        _ => "__asan_storeN".to_string(),
     }
 }
 
@@ -1524,7 +1605,7 @@ fn hwasan_store_fn(sz: usize) -> String {
         4 => "__hwasan_store4".to_string(),
         8 => "__hwasan_store8".to_string(),
         16 => "__hwasan_store16".to_string(),
-        n => format!("__hwasan_store{}", n),
+        _ => "__hwasan_storeN".to_string(),
     }
 }
 
@@ -1698,9 +1779,9 @@ fn guard_call_stmt(guard_var: &str, idx: u32, span: &Span) -> BlockItem {
 }
 
 /// TU 级一次性 init (不含 per-function coverage)。
-/// 内核模式 (-fsanitize=kernel-address / kernel-hwaddress) 不发射
-/// `__asan_init` / `__hwasan_init`: 内核运行时由 KASAN/KCSAN 自身初始化,
-/// 编译器只负责访存检查 (内联 shadow) 与报告, 避免未定义符号。
+/// 内核模式 (-fsanitize=kernel-address / kernel-hwaddress / kernel-kcsan)
+/// 不发射用户态 asan/hwasan/tsan init: 内核运行时自初始化,
+/// 编译器只负责访存检查 (内联 shadow / kcsan callbacks) 与报告。
 fn tu_init_calls(flags: SanitizerFlags, span: &Span) -> Vec<BlockItem> {
     let mut out = Vec::new();
     if flags.kasan && !flags.kernel_mode {
@@ -1710,10 +1791,14 @@ fn tu_init_calls(flags: SanitizerFlags, span: &Span) -> Vec<BlockItem> {
         out.push(sanitizer_call("__hwasan_init", span));
     }
     if flags.ubsan {
-        out.push(sanitizer_call("__ubsan_init", span));
+        // libubsan 没有必需的 TU init 入口；各 handler 懒初始化。
     }
     if flags.kcsan {
-        out.push(sanitizer_call("__kcsan_init", span));
+        if flags.kernel_mode {
+            out.push(sanitizer_call("__kcsan_init", span));
+        } else {
+            out.push(sanitizer_call("__tsan_init", span));
+        }
     }
     out
 }
@@ -1725,7 +1810,11 @@ fn func_entry_calls(flags: SanitizerFlags, span: &Span) -> Vec<BlockItem> {
         out.push(sanitizer_call("__sanitizer_cov_trace_pc", span));
     }
     if flags.kcsan {
-        out.push(sanitizer_call("__kcsan_func_entry", span));
+        if flags.kernel_mode {
+            out.push(sanitizer_call("__kcsan_func_entry", span));
+        } else {
+            out.push(sanitizer_call("__tsan_func_entry", span));
+        }
     }
     out
 }
@@ -2232,7 +2321,7 @@ mod tests {
         // 函数入口 coverage 仍保留 (KCOV 不受 no_sanitize 控制)
         assert!(names.iter().any(|n| n == "__sanitizer_cov_trace_pc"));
         assert!(!names.iter().any(|n| n == "__asan_init"));
-        assert!(!names.iter().any(|n| n == "__ubsan_init"));
+        assert!(!names.iter().any(|n| n == "__ubsan_handle_type_mismatch_v1"));
         assert!(!names.iter().any(|n| n == "__kcsan_init"));
     }
 
@@ -2558,7 +2647,7 @@ mod tests {
         assert!(
             names
                 .iter()
-                .any(|n| n == "__ubsan_handle_null_pointer_dereference"),
+                .any(|n| n == "__ubsan_handle_type_mismatch_v1"),
             "null check missing: calls = {:?}",
             names
         );
@@ -2645,6 +2734,7 @@ mod tests {
             &mut prog,
             SanitizerFlags {
                 kcsan: true,
+                kernel_mode: true,
                 ..Default::default()
             },
         );
@@ -2696,10 +2786,10 @@ mod tests {
     // `__asan_loadN(addr, size)` 双参 variant.
     #[test]
     fn kasan_load_fn_emits_generic_for_aggregate_sizes() {
-        assert_eq!(kasan_load_fn(24), "__asan_load24");
-        assert_eq!(kasan_load_fn(32), "__asan_load32");
-        assert_eq!(kasan_load_fn(48), "__asan_load48");
-        assert_eq!(kasan_load_fn(64), "__asan_load64");
+        assert_eq!(kasan_load_fn(24), "__asan_loadN");
+        assert_eq!(kasan_load_fn(32), "__asan_loadN");
+        assert_eq!(kasan_load_fn(48), "__asan_loadN");
+        assert_eq!(kasan_load_fn(64), "__asan_loadN");
     }
 
     // P1.1: store 侧 16 字节以下函数名映射。
@@ -2715,10 +2805,10 @@ mod tests {
     // P1.1: store 侧 16 字节以上走 `__asan_storeN` 通用名。
     #[test]
     fn kasan_store_fn_emits_generic_for_aggregate_sizes() {
-        assert_eq!(kasan_store_fn(24), "__asan_store24");
-        assert_eq!(kasan_store_fn(32), "__asan_store32");
-        assert_eq!(kasan_store_fn(48), "__asan_store48");
-        assert_eq!(kasan_store_fn(64), "__asan_store64");
+        assert_eq!(kasan_store_fn(24), "__asan_storeN");
+        assert_eq!(kasan_store_fn(32), "__asan_storeN");
+        assert_eq!(kasan_store_fn(48), "__asan_storeN");
+        assert_eq!(kasan_store_fn(64), "__asan_storeN");
     }
 
     // P1.1: 16 字节以上 emit 双参调用 (addr + size).
@@ -2747,7 +2837,7 @@ mod tests {
         .unwrap();
         if let Expr::Call { callee, args, .. } = call {
             if let Expr::Ident { name, .. } = callee.as_ref() {
-                assert_eq!(name.name, "__asan_load24");
+                assert_eq!(name.name, "__asan_loadN");
             } else {
                 panic!("callee should be Ident");
             }
@@ -3053,7 +3143,7 @@ mod tests {
         assert_eq!(hwasan_store_fn(4), "__hwasan_store4");
         assert_eq!(hwasan_store_fn(8), "__hwasan_store8");
         assert_eq!(hwasan_store_fn(16), "__hwasan_store16");
-        assert_eq!(hwasan_store_fn(32), "__hwasan_store32");
+        assert_eq!(hwasan_store_fn(32), "__hwasan_storeN");
     }
 
     #[test]
@@ -3063,7 +3153,7 @@ mod tests {
         assert_eq!(hwasan_load_fn(4), "__hwasan_load4");
         assert_eq!(hwasan_load_fn(8), "__hwasan_load8");
         assert_eq!(hwasan_load_fn(16), "__hwasan_load16");
-        assert_eq!(hwasan_load_fn(32), "__hwasan_load32");
+        assert_eq!(hwasan_load_fn(32), "__hwasan_loadN");
     }
 
     // ── KCSAN ─────────────────────────────────────────────────────────
@@ -3087,6 +3177,7 @@ mod tests {
             &Span::point("t.c", 1, 1),
             SanitizerFlags {
                 kcsan: true,
+                kernel_mode: true,
                 ..Default::default()
             },
         )
@@ -3132,6 +3223,7 @@ mod tests {
             &Span::point("t.c", 1, 1),
             SanitizerFlags {
                 kcsan: true,
+                kernel_mode: true,
                 ..Default::default()
             },
         )
@@ -3183,6 +3275,7 @@ mod tests {
             SanitizerFlags {
                 kasan: true,
                 kcsan: true,
+                kernel_mode: true,
                 ..Default::default()
             },
         );
@@ -3191,8 +3284,8 @@ mod tests {
         };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(
-            names.iter().any(|n| n == "__asan_load4"),
-            "KASAN load check missing when KCSAN coexists: {:?}",
+            names.iter().any(|n| n == "__asan_report_load4"),
+            "KASAN report check missing when KCSAN coexists: {:?}",
             names
         );
         assert!(
@@ -3298,6 +3391,7 @@ mod tests {
             &mut prog,
             SanitizerFlags {
                 kcsan: true,
+                kernel_mode: true,
                 ..Default::default()
             },
         );

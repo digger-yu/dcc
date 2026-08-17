@@ -870,6 +870,7 @@ mod tests {
             has_dynamic: false,
             n_locals: 1,
             output_relas: relas,
+            needed: vec![],
             dynamic_linker: None,
             arch: crate::debug::ArchKind::X86_64,
         };

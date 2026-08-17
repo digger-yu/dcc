@@ -624,6 +624,7 @@ mod tests {
             has_dynamic: false,
             n_locals: 0,
             output_relas: vec![],
+            needed: vec![],
             dynamic_linker: None,
             arch: crate::debug::ArchKind::X86_64,
         };

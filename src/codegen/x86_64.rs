@@ -9615,16 +9615,9 @@ impl Codegen {
     /// 调用 __asan_poison_memory_region(addr, size)
     /// addr = r13 - frame_size, size = frame_size
     fn emit_kasan_stack_poison_all(&mut self) {
-        // lea rdi, [r13 - frame_size]  (帧基址)
+        // rdi = r13 - frame_size (帧基址)
         let fs = self.frame_size;
-        if fs <= 127 {
-            // lea rdi, [r13 + imm8]
-            self.emit(&[0x4c, 0x8d, 0x7d, fs as u8 as i8 as u8]);
-        } else {
-            // lea rdi, [r13 + imm32]
-            self.emit(&[0x4c, 0x8d, 0xbd]);
-            self.emit(&fs.to_le_bytes());
-        }
+        self.emit_lea_r13(7, -fs);
         // mov esi, frame_size
         self.emit(&[0xbe]);
         self.emit(&fs.to_le_bytes());
@@ -9645,13 +9638,7 @@ impl Codegen {
             .map(|(_, (off, ty))| (*off, ty.size()))
             .collect();
         for (off, sz) in vars {
-            // lea rdi, [r13 + off]
-            if (-128..=127).contains(&off) {
-                self.emit(&[0x4c, 0x8d, 0x7d, off as i8 as u8]);
-            } else {
-                self.emit(&[0x4c, 0x8d, 0xbd]);
-                self.emit(&off.to_le_bytes());
-            }
+            self.emit_lea_r13(7, off);
             // mov esi, size
             self.emit(&[0xbe]);
             self.emit(&(sz as u32).to_le_bytes());
