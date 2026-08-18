@@ -4694,6 +4694,45 @@ fn static_build_script_exists() {
     assert!(mode & 0o111 != 0, "build_static.sh should be executable");
 }
 
+#[test]
+#[cfg(unix)]
+fn host_wrapper_rejects_unknown_wp_option() {
+    let script_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/dcc-host-wrapper.sh");
+    let output = Command::new("bash")
+        .arg(script_path)
+        .args(["-c", "-Wp,--silently-lost", "input.c"])
+        .output()
+        .expect("run dcc-host-wrapper.sh");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("unsupported preprocessor option in -Wp"));
+}
+
+#[test]
+#[cfg(unix)]
+fn host_wrapper_accepts_whitelisted_wp_options() {
+    let script_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/dcc-host-wrapper.sh");
+    let output = Command::new("bash")
+        .arg(script_path)
+        .args(["-c", "-Wp,-MMD,/tmp/main.d,-MT,main.o,-MP", "input.c"])
+        .env("DCC_BIN", "echo")
+        .output()
+        .expect("run dcc-host-wrapper.sh");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(stdout.contains("-MD"), "stdout: {stdout}");
+    assert!(stdout.contains("-MF"), "stdout: {stdout}");
+    assert!(stdout.contains("/tmp/main.d"), "stdout: {stdout}");
+    assert!(stdout.contains("-MT"), "stdout: {stdout}");
+    assert!(stdout.contains("main.o"), "stdout: {stdout}");
+    assert!(stdout.contains("-MP"), "stdout: {stdout}");
+}
+
 // =================== C23 constexpr ===================
 
 /// constexpr 与 static 组合应正确解析

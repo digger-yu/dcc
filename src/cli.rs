@@ -671,15 +671,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-L") || a.starts_with("-l") || a.starts_with("-T") => {} // 内联形式
             // -Wl,* : 传递给链接器的选项
             a if a.starts_with("-Wl,") => {} // 忽略
-            // -Wp,* : 传递给预处理器的选项
+            // -Wp,* : 仅白名单预处理器子选项；未知项报错，避免静默丢参
+            "-Wp" => return Err(CliError::new("empty -Wp option")),
             a if a.starts_with("-Wp,") => {
                 let opts: Vec<&str> = a[4..].split(',').collect();
-                if opts.is_empty() || opts[0].is_empty() {
+                if opts.is_empty() || opts.iter().any(|option| option.is_empty()) {
                     return Err(CliError::new("empty -Wp option"));
                 }
                 let mut j = 0;
                 while j < opts.len() {
-                    match opts[j] {
+                    let option = opts[j];
+                    match option {
                         "-MD" => {
                             gen_dep = true;
                             dep_mmd_only = false;
@@ -704,7 +706,6 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                             dep_file = Some(PathBuf::from(value));
                         }
                         "-MT" | "-MQ" => {
-                            let option = opts[j];
                             j += 1;
                             let value = opts.get(j).ok_or_else(|| {
                                 CliError::new(&format!("missing arg after -Wp,{}", option))
@@ -713,6 +714,18 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                         }
                         "-MP" => {
                             dep_phony = true;
+                        }
+                        "-D" => {
+                            j += 1;
+                            let def = opts
+                                .get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-D"))?;
+                            if let Some(eq) = def.find('=') {
+                                defines
+                                    .push((def[..eq].to_string(), Some(def[eq + 1..].to_string())));
+                            } else {
+                                defines.push(((*def).to_string(), Some("1".to_string())));
+                            }
                         }
                         option if option.starts_with("-D") && option.len() > 2 => {
                             let def = &option[2..];
@@ -723,9 +736,43 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                                 defines.push((def.to_string(), Some("1".to_string())));
                             }
                         }
+                        "-I" => {
+                            j += 1;
+                            let path = opts
+                                .get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-I"))?;
+                            include_paths.push(PathBuf::from(path));
+                        }
                         option if option.starts_with("-I") && option.len() > 2 => {
                             include_paths.push(PathBuf::from(&option[2..]));
                         }
+                        "-include" => {
+                            j += 1;
+                            let file = opts
+                                .get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-include"))?;
+                            force_includes.push((*file).to_string());
+                        }
+                        option if option.starts_with("-include") && option.len() > 8 => {
+                            force_includes.push(option[8..].to_string());
+                        }
+                        "-isystem" => {
+                            j += 1;
+                            let path = opts
+                                .get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-isystem"))?;
+                            system_paths.push(PathBuf::from(path));
+                        }
+                        option if option.starts_with("-isystem") && option.len() > 8 => {
+                            system_paths.push(PathBuf::from(&option[8..]));
+                        }
+                        "-U" => {
+                            j += 1;
+                            opts.get(j)
+                                .ok_or_else(|| CliError::new("missing arg after -Wp,-U"))?;
+                        }
+                        option if option.starts_with("-U") && option.len() > 2 => {}
+                        "-P" | "-C" | "-nostdinc" => {}
                         option => {
                             return Err(CliError::new(&format!(
                                 "unsupported preprocessor option in -Wp: {}",
@@ -1722,6 +1769,38 @@ mod tests {
 
         assert!(cfg.gen_dep);
         assert_eq!(cfg.dep_file, Some(PathBuf::from("scripts/mod/.empty.o.d")));
+    }
+
+    #[test]
+    fn wp_whitelisted_split_options_are_applied() {
+        let args = vec![
+            "-Wp,-MMD,deps/main.d,-MT,main.o,-MP".to_string(),
+            "-Wp,-I,include,-D,VALUE=7".to_string(),
+            "-Wp,-include,forced.h,-isystem,sysroot/include".to_string(),
+            "-Wp,-U,OLD,-P,-C,-nostdinc".to_string(),
+            "input.c".to_string(),
+        ];
+        let cfg = parse(&args).expect("whitelisted -Wp options should parse");
+
+        assert!(cfg.gen_dep);
+        assert!(cfg.dep_mmd_only);
+        assert!(cfg.dep_phony);
+        assert_eq!(cfg.dep_file, Some(PathBuf::from("deps/main.d")));
+        assert_eq!(cfg.dep_target, Some("main.o".to_string()));
+        assert_eq!(cfg.include_paths, vec![PathBuf::from("include")]);
+        assert_eq!(cfg.system_paths, vec![PathBuf::from("sysroot/include")]);
+        assert_eq!(cfg.force_includes, vec!["forced.h".to_string()]);
+        assert_eq!(
+            cfg.defines,
+            vec![("VALUE".to_string(), Some("7".to_string()))]
+        );
+    }
+
+    #[test]
+    fn wp_empty_sub_option_is_rejected() {
+        let args = vec!["-Wp,-MMD,,dep.d".to_string(), "input.c".to_string()];
+        let err = parse(&args).expect_err("empty -Wp sub-options must not parse");
+        assert!(err.msg.contains("empty -Wp option"));
     }
 
     #[test]

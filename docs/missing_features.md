@@ -38,7 +38,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| `-Wp,*` 子选项 | 仅白名单支持；未知预处理器透传选项会报 unsupported |
 | `-x` 语言集 | 仅支持 assembler/assembler-with-cpp/C/C++ 等少数输入语言 |
 | unknown sanitizer name | 未知 `-fsanitize=` 名称未形成严格诊断契约，存在被忽略的路径 |
 | 内核 wrapper 过滤 flags | `arch_x86_compile.sh` 仍过滤 dcc 未实现的内核 flags，如 `-fstack-clash-protection`、`-ftrivial-auto-var-init`、`-mrecord-mcount`、`-mfentry`、`-pg` 等 |

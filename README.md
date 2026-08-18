@@ -72,7 +72,7 @@
 | `-include <file>` | 强制包含 |
 | `-MD` / `-MMD` | 生成 `.d` 依赖文件 |
 | `-MF <file>` / `-MT <tgt>` / `-MQ <tgt>` / `-MP` | 依赖文件参数 |
-| `-Wp,<opts>` | 预处理器参数透传 |
+| `-Wp,<opts>` | 预处理器参数透传；仅白名单支持：`-MD`、`-MMD`、`-MF`、`-MT`、`-MQ`、`-MP`、`-D`、`-I`、`-include`、`-isystem`、`-U`、`-P`、`-C`、`-nostdinc`；未知子选项报 `unsupported` |
 | `-Wa,<opts>` | 汇编器参数透传 |
 | `-Wl,<opts>` | 链接器参数透传（无 `-fuse-ld` 时走 host） |
 | `-fpch-create=<f>` / `-fpch-include=<f>` / `-fpch-include-only=<f>` | 预编译头（M19） |
