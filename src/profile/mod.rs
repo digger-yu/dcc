@@ -56,6 +56,8 @@ pub struct ProfileConfig {
     pub memprof_use: Option<PathBuf>,
     /// `--fprofile-list[=file]` 输出函数级别 perf 概要
     pub profile_list: Option<PathBuf>,
+    /// `-fprofile-values`: enable block-level value sampling
+    pub value_sampling: bool,
     /// `-ftopdownmetrics`  (TopdownL1 metrics 输出)
     pub topdown_metrics: bool,
     /// `-fopenmp` / `-fopenmp=simd` / `-foffload-...`

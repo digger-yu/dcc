@@ -517,9 +517,10 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // `__dcc_pgo_count_fn(idx)` 调用. 运行期由用户提供的 runtime helper
     // (或 dcc 内置桩) 累加 idx -> counter, atexit 写 `<name>.profraw`.
     // 权重读回 (`-fprofile-use`) 仅解析 .profraw, 不修改 codegen.
-    if cfg.profile.pgo_generate.is_some() {
+    if cfg.profile.pgo_generate.is_some() || cfg.profile.value_sampling {
         let pgo_cfg = profile::pgo::PgoConfig {
-            generate: true,
+            generate: cfg.profile.pgo_generate.is_some(),
+            value_sampling: cfg.profile.value_sampling,
             use_file: cfg
                 .profile
                 .pgo_use

@@ -38,8 +38,6 @@
 
 | 限制 | 说明 |
 |------|------|
-| 内核 wrapper 过滤 flags | `arch_x86_compile.sh` 仍过滤少数 dcc 未实现的内核 flags；已保留并透传 `-fstack-clash-protection`、`-ftrivial-auto-var-init`、`-mrecord-mcount`、`-mfentry`、`-pg` 等常见 flags |
-
 ## 链接器 / 对象文件限制
 
 | 限制 | 说明 |
@@ -55,7 +53,7 @@
 
 | 通道 | 已知遗留 |
 |------|----------|
-| `-fprofile-values` | CLI 接受但当前为 no-op，缺块级 value sampling |
+| `-fprofile-values` | 已支持函数入口 value sampling 插桩，并生成 `__dcc_pgo_value_sample` 调用；完整运行时 value histogram 仍需外部 runtime 支持 |
 | GCOV runtime | `.gcno/.gcda` 读写与报告结构存在，但运行后真实 counter 更新的端到端路径仍未形成硬门禁 |
 | MemProf runtime | `MemProfRuntime` 仍生成 C stub；alloc/free/flush 中 callstack 记录与 `.memprofdata` 写出为 TODO |
 | Offload device codegen | CUDA/HIP/OpenMP target 设备端 PTX/AMDGCN 仍是 kernel stub (`ret` / `s_endpgm`) |

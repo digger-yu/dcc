@@ -45,6 +45,8 @@ pub const PROFDATA_VERSION: u32 = 1;
 pub struct PgoConfig {
     /// `-fprofile-instr-generate[=dir]`
     pub generate: bool,
+    /// `-fprofile-values`: instrument basic-block value sampling sites
+    pub value_sampling: bool,
     /// `-fprofile-instr-use=file`
     pub use_file: Option<String>,
     /// 输出目录 (默认与源码同目录)
@@ -575,7 +577,7 @@ impl Profraw {
 
 /// AST 改写: 在每个函数入口插入 `__dcc_pgo_count_fn(idx)` 调用
 pub fn instrument_program(prog: &mut Program, cfg: &PgoConfig) {
-    if !cfg.generate {
+    if !cfg.generate && !cfg.value_sampling {
         return;
     }
     let mut idx: u32 = 0;
@@ -608,18 +610,45 @@ pub fn instrument_program(prog: &mut Program, cfg: &PgoConfig) {
                 span: f.span.clone(),
                 ty: Type::Void,
             };
-            // 包成 expr-stmt, push 到 body 顶部
             if let Some(body) = &mut f.body {
-                body.items.insert(
-                    0,
-                    BlockItem::Stmt(Stmt::Expr {
-                        e: call,
+                if cfg.value_sampling {
+                    let sample = Expr::Call {
+                        callee: Box::new(Expr::Ident {
+                            name: crate::ast::Ident {
+                                name: "__dcc_pgo_value_sample".into(),
+                                span: f.span.clone(),
+                            },
+                            span: f.span.clone(),
+                            ty: Type::Void,
+                        }),
+                        args: vec![Expr::Int {
+                            v: idx as i128,
+                            span: f.span.clone(),
+                            ty: Type::Int,
+                        }],
                         span: f.span.clone(),
-                    }),
-                );
+                        ty: Type::Void,
+                    };
+                    body.items.insert(
+                        0,
+                        BlockItem::Stmt(Stmt::Expr {
+                            e: sample,
+                            span: f.span.clone(),
+                        }),
+                    );
+                }
+                if cfg.generate {
+                    body.items.insert(
+                        0,
+                        BlockItem::Stmt(Stmt::Expr {
+                            e: call,
+                            span: f.span.clone(),
+                        }),
+                    );
+                }
             }
             idx += 1;
-            let _ = site; // site 由 codegen 在另一通路落 .gcov/.profraw 索引
+            let _ = site;
         }
     }
 }
@@ -899,7 +928,90 @@ mod tests {
         assert_eq!(w.count_of("foo"), 9);
     }
 
-    /// 验证 instrument_program 会在每个有 body 的函数顶部插入
+    #[test]
+    fn instrument_program_value_sampling_inserts_site_call() {
+        use crate::ast::{Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
+        let span = crate::diagnostics::Span::point("v.c", 1, 0);
+        let mut prog = Program {
+            decls: vec![Decl::Func(FuncDecl {
+                name: Ident {
+                    name: "main".into(),
+                    span: span.clone(),
+                },
+                ret_ty: Type::Int,
+                params: vec![],
+                body: Some(Block {
+                    items: vec![],
+                    span: span.clone(),
+                }),
+                span: span.clone(),
+                is_extern: false,
+                is_static: false,
+                is_unused: false,
+                is_cold: false,
+                is_hot: false,
+                is_noinline: false,
+                is_always_inline: false,
+                is_variadic: false,
+                is_constructor: false,
+                is_destructor: false,
+                is_weak: false,
+                is_nested: false,
+                upvars: vec![],
+                is_old_style: false,
+                format_kind: None,
+                format_string_idx: None,
+                format_first_arg: None,
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
+                ifunc_resolver: None,
+                asm_output_template: None,
+                is_global: false,
+                is_device: false,
+                is_host: false,
+                section: None,
+                alignment: None,
+                alias_name: None,
+                visibility: None,
+            })],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        instrument_program(
+            &mut prog,
+            &PgoConfig {
+                generate: false,
+                value_sampling: true,
+                use_file: None,
+                out_dir: None,
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!("expected function");
+        };
+        let BlockItem::Stmt(Stmt::Expr { e, .. }) = &f.body.as_ref().unwrap().items[0] else {
+            panic!("expected sampling statement");
+        };
+        let Expr::Call { callee, args, .. } = e else {
+            panic!("expected sampling call");
+        };
+        let Expr::Ident { name, .. } = callee.as_ref() else {
+            panic!("expected sampling callee");
+        };
+        assert_eq!(name.name, "__dcc_pgo_value_sample");
+        assert_eq!(args.len(), 1);
+    }
+
     /// `__dcc_pgo_count_fn(idx)` 调用. 这是 PGO "codegen 阶段自动
     /// emit 计数器" 的前端桥: AST 改写后被 IR lower 与 codegen
     /// 消费, 最终 emit 为 `call __dcc_pgo_count_fn` 指令.
@@ -975,6 +1087,7 @@ mod tests {
         // call __dcc_pgo_count_fn(0)  +  return 0
         let cfg = PgoConfig {
             generate: true,
+            value_sampling: false,
             use_file: None,
             out_dir: None,
         };
@@ -1079,6 +1192,7 @@ mod tests {
         }));
         let cfg = PgoConfig {
             generate: false,
+            value_sampling: false,
             use_file: None,
             out_dir: None,
         };
