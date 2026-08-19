@@ -268,6 +268,7 @@ dcc: error: <message>
 | `relocatable link (-r) requires object (.o) inputs…` | `-r` 误用于 `.c` 源文件 |
 | `unsupported -x language: …` | 不支持的语言 |
 | `unsupported preprocessor option in -Wp: …` | `-Wp,*` 包含非白名单子选项 |
+| `unsupported sanitizer: …` | `-fsanitize=` 包含未支持的 sanitizer 名称 |
 
 退出码：**2**（与 Diagnostic 错误的 exit 1 区分）。
 

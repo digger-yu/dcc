@@ -30,6 +30,7 @@ use crate::ast::{
     ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program, Stmt, Type,
     UnOp, VarDecl,
 };
+use crate::cli::CliError;
 use crate::diagnostics::Span;
 
 /// 启用的 sanitizer 标志 (与 GCC `-fsanitize=*` 子集对应)。
@@ -54,27 +55,28 @@ pub struct SanitizerFlags {
 impl SanitizerFlags {
     /// 从 `-fsanitize=*` / `-fsanitize-coverage` 等 CLI 字符串解析。
     /// 接受 `addr,undefined` 形式与 `kernel-*` / `hwaddress` 变体。
-    pub fn from_args(args: &[String]) -> Self {
+    pub fn from_args(args: &[String]) -> Result<Self, CliError> {
         let mut f = Self::default();
         for a in args {
-            Self::apply_flag(a, &mut f);
+            Self::apply_flag(a, &mut f)?;
         }
-        f
+        Ok(f)
     }
 
-    fn apply_flag(arg: &str, f: &mut Self) {
+    fn apply_flag(arg: &str, f: &mut Self) -> Result<(), CliError> {
         if let Some(rest) = arg.strip_prefix("-fsanitize=") {
             for part in rest.split(',') {
-                Self::apply_sanitize_name(part.trim(), f);
+                Self::apply_sanitize_name(part.trim(), f)?;
             }
-            return;
+            return Ok(());
         }
         if arg == "-fsanitize-coverage" || arg.contains("sanitize-coverage") {
             f.kcov = true;
         }
+        Ok(())
     }
 
-    fn apply_sanitize_name(name: &str, f: &mut Self) {
+    fn apply_sanitize_name(name: &str, f: &mut Self) -> Result<(), CliError> {
         match name {
             "address" => f.kasan = true,
             "kernel-address" => {
@@ -95,8 +97,9 @@ impl SanitizerFlags {
             "fuzzer" => f.fuzzer = true,
             "coverage" | "trace-pc" | "trace-pc-guard" => f.kcov = true,
             _ if name.contains("coverage") => f.kcov = true,
-            _ => {}
+            _ => return Err(CliError::new(&format!("unsupported sanitizer: {}", name))),
         }
+        Ok(())
     }
 
     /// 是否启用了任何 sanitizer。
@@ -2090,17 +2093,26 @@ mod tests {
     }
 
     #[test]
+    fn from_args_rejects_unknown_sanitizer() {
+        let err = SanitizerFlags::from_args(&["-fsanitize=not-a-sanitizer".to_string()])
+            .expect_err("unknown sanitizer must be rejected");
+        assert!(err.msg.contains("unsupported sanitizer: not-a-sanitizer"));
+    }
+
+    #[test]
     fn from_args_parses_combined_sanitize() {
         let f = SanitizerFlags::from_args(&[
             "-fsanitize=address,undefined".to_string(),
             "-fsanitize-coverage".to_string(),
-        ]);
+        ])
+        .expect("known sanitizers should parse");
         assert!(f.kasan && f.ubsan && f.kcov);
     }
 
     #[test]
     fn from_args_recognizes_hwasan_and_fuzzer() {
-        let f = SanitizerFlags::from_args(&["-fsanitize=hwaddress,fuzzer".to_string()]);
+        let f = SanitizerFlags::from_args(&["-fsanitize=hwaddress,fuzzer".to_string()])
+            .expect("known sanitizers should parse");
         assert!(f.hwasan && f.fuzzer);
     }
 
@@ -3738,19 +3750,22 @@ mod tests {
 
     #[test]
     fn from_args_kernel_hwaddress() {
-        let f = SanitizerFlags::from_args(&["-fsanitize=kernel-hwaddress".to_string()]);
+        let f = SanitizerFlags::from_args(&["-fsanitize=kernel-hwaddress".to_string()])
+            .expect("known sanitizer should parse");
         assert!(f.hwasan && f.kernel_mode);
     }
 
     #[test]
     fn from_args_kernel_kcsan() {
-        let f = SanitizerFlags::from_args(&["-fsanitize=kernel-kcsan".to_string()]);
+        let f = SanitizerFlags::from_args(&["-fsanitize=kernel-kcsan".to_string()])
+            .expect("known sanitizer should parse");
         assert!(f.kcsan && f.kernel_mode);
     }
 
     #[test]
     fn from_args_trace_pc_guard() {
-        let f = SanitizerFlags::from_args(&["-fsanitize=trace-pc-guard".to_string()]);
+        let f = SanitizerFlags::from_args(&["-fsanitize=trace-pc-guard".to_string()])
+            .expect("known sanitizer should parse");
         assert!(f.kcov);
     }
 }
