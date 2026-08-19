@@ -39,7 +39,6 @@
 | 限制 | 说明 |
 |------|------|
 | 内核 wrapper 过滤 flags | `arch_x86_compile.sh` 仍过滤少数 dcc 未实现的内核 flags；已保留并透传 `-fstack-clash-protection`、`-ftrivial-auto-var-init`、`-mrecord-mcount`、`-mfentry`、`-pg` 等常见 flags |
-| host wrapper stub depfile | `dcc-host-wrapper.sh` 在 fixdep 依赖生成失败时会写 stub `.d`，可能隐藏 host C gap |
 
 ## 链接器 / 对象文件限制
 

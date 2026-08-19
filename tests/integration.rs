@@ -4,12 +4,15 @@ use std::process::Command;
 #[test]
 #[cfg(unix)]
 fn arch_x86_wrapper_preserves_supported_kernel_flags() {
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts/arch_x86_compile.sh");
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/arch_x86_compile.sh");
     let temp = std::env::temp_dir().join(format!("dcc-arch-wrapper-{}", std::process::id()));
     fs::create_dir_all(temp.join("arch/x86/kernel")).expect("create wrapper fixture");
-    fs::write(temp.join("arch/x86/kernel/foo.c"), "int foo(void) { return 0; }\n")
-        .expect("write wrapper source fixture");
+    fs::write(
+        temp.join("arch/x86/kernel/foo.c"),
+        "int foo(void) { return 0; }\n",
+    )
+    .expect("write wrapper source fixture");
     let cmd_file = temp.join("arch/x86/kernel/.foo.o.cmd");
     fs::write(
         &cmd_file,
@@ -25,7 +28,11 @@ fn arch_x86_wrapper_preserves_supported_kernel_flags() {
         .expect("run arch wrapper");
     let log = fs::read_to_string(temp.join("out.log")).unwrap_or_default();
     let _ = fs::remove_dir_all(&temp);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(log.contains("-fstack-clash-protection"), "log: {log}");
     assert!(log.contains("-ftrivial-auto-var-init=zero"), "log: {log}");
     assert!(log.contains("-mrecord-mcount"), "log: {log}");
@@ -33,7 +40,6 @@ fn arch_x86_wrapper_preserves_supported_kernel_flags() {
     assert!(log.contains("-pg"), "log: {log}");
     assert!(log.contains("-falign-loops=1"), "log: {log}");
 }
-
 
 fn run_syntax_test(name: &str, source: &str) -> std::process::Output {
     let path = std::env::temp_dir().join(format!("dcc-{name}-{}.c", std::process::id()));
@@ -4746,6 +4752,33 @@ fn host_wrapper_rejects_unknown_wp_option() {
 
 #[test]
 #[cfg(unix)]
+fn host_wrapper_fixdep_failure_does_not_write_stub_depfile() {
+    let script_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/dcc-host-wrapper.sh");
+    let temp = std::env::temp_dir().join(format!("dcc-fixdep-failure-{}", std::process::id()));
+    fs::create_dir_all(&temp).expect("create fixdep fixture");
+    let depfile = temp.join("fixdep.d");
+    let output_path = temp.join("fixdep");
+    let source_path = temp.join("fixdep.c");
+    fs::write(&source_path, "int main(void) { return 0; }\n").expect("write fixdep source");
+    let output = Command::new("bash")
+        .arg(script_path)
+        .args(["-c", "-o"])
+        .arg(&output_path)
+        .arg(format!("-Wp,-MMD,{}", depfile.display()))
+        .arg(&source_path)
+        .env("DCC_BIN", "false")
+        .output()
+        .expect("run dcc-host-wrapper.sh");
+    assert!(!output.status.success());
+    assert!(
+        !depfile.exists(),
+        "failed fixdep must not create stub depfile"
+    );
+    let _ = fs::remove_dir_all(&temp);
+}
+#[test]
+#[cfg(unix)]
 fn host_wrapper_accepts_whitelisted_wp_options() {
     let script_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/dcc-host-wrapper.sh");
@@ -5578,7 +5611,11 @@ fn sanitizer_host_link_adds_runtime_flags() {
     );
     let run = Command::new(&exe_path).output().expect("run sanitizer exe");
     let _ = fs::remove_file(&exe_path);
-    assert!(run.status.success(), "runtime status: {:?}", run.status.code());
+    assert!(
+        run.status.success(),
+        "runtime status: {:?}",
+        run.status.code()
+    );
 }
 
 #[test]

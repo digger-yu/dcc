@@ -155,11 +155,10 @@ if [[ -n "$out" && "$src" == *.c ]]; then
         fi
         depfile="$DCC_HOST_WRAPPER_DEPFILE"
         # 仅生成依赖文件（src 已在 compile 末尾）
+        # 依赖生成失败必须让 host 构建失败，避免伪造不完整的依赖文件。
         if ! "$DCC_BIN" "${compile[@]}"; then
-            echo "WARN: dcc -MD for fixdep.c failed; writing stub .fixdep.d" >&2
-            if [[ -n "$depfile" ]]; then
-                printf '%s: %s\n' "$out" "$src" >"$depfile"
-            fi
+            echo "ERROR: dcc -MD for fixdep.c failed" >&2
+            exit 1
         fi
         if [[ -n "$depfile" && -f "$depfile" ]]; then
             sed -i 's| /dev/null| '"$out"'|g; s|^/dev/null|'"$out"'|' "$depfile" 2>/dev/null || true
