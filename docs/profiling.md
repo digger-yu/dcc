@@ -636,7 +636,7 @@ E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
 
 ## 8. 集成测试
 
-文件：`tests/profile.rs`，共 13 个测试：
+文件：`tests/profile.rs`，共 24 个测试（下表 13 个 CLI/门禁用例 + §7.6 的 11 个 offload 用例）：
 
 | 测试 | 覆盖 |
 |------|------|
@@ -666,9 +666,11 @@ cargo test --test profile
 cargo test --bin dcc profile
 ```
 
-共 10 个，覆盖：profraw roundtrip / weights aggregate / gcov notes
-magic / gcov data roundtrip / autofdo parse + bucketize / lbr brstack
-parse / memprof parse + is_cold / topdown sum / offload json roundtrip。
+共 154 个（`cargo test --bin dcc profile`），覆盖：profraw roundtrip /
+weights aggregate / gcov notes magic + 插桩 + 运行时 + data roundtrip /
+autofdo parse + bucketize / lbr brstack parse / memprof parse +
+runtime 生成 + binary roundtrip / device codegen (PTX/AMDGCN) +
+runtime dispatch / topdown sum / offload json roundtrip。
 
 ---
 
