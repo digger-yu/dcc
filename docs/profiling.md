@@ -386,13 +386,32 @@ dealloc[]: n_frames(u32) frames(...) count(u64)
 
 `read(path)` 自动检测文本/二进制格式 (检查 "MEMPROFD" magic)。
 
-### 5.4 malloc 插桩
+### 5.4 malloc 插桩与运行时
 
-`MemProfInstrumentor` 生成对 runtime 库函数的调用：
-* `__dcc_memprof_alloc_record(size, return_addr)` - malloc 前插入
-* `__dcc_memprof_free_record(ptr, return_addr)` - free 前插入
+`MemProfInstrumentor` 生成对 runtime 库函数的调用（分配器拦截，
+与 LLVM MemProf / ASan 一致）：
 
-`MemProfRuntime::generate_runtime_stub()` 生成 C 代码桩用于链接。
+* `__dcc_memprof_alloc_record(size, return_addr)` - 替换 `malloc(size)`
+  （内部调用 libc malloc 并返回指针）
+* `__dcc_memprof_free_record(ptr, return_addr)` - 替换 `free(ptr)`
+  （记录 dealloc site + lifetime 后释放）
+
+`MemProfRuntime::generate_runtime()` 生成真实 C 运行时（无 TODO 桩）：
+* `_mp_stack_capture` 用带约束的帧指针回绕采集 callstack（安全处理
+  dcc 用 r13 作帧指针的调用方）
+* alloc/free 记录 (alloc_site -> count/bytes)、(dealloc_site -> count)，
+  active 分配表把 free 配对回 alloc site 得到 lifetime
+* 静态数组存储，不调用 malloc，避免与插桩互相递归
+* `__dcc_memprof_flush` 写 `.memprofdata` 二进制（布局与
+  `MemProfData::write_binary` 一致，可由 `-fmemory-profile-use=` 读回）；
+  输出路径 `DCC_MEMPROF_OUT`，缺省当前目录 `memprof.memprofdata`
+
+driver 接线：`-fmemory-profile` 编译时落盘 `<src-stem>.memprofc.c`
+（运行时 C 源码），`-fsyntax-only` 不产出。
+
+端到端门禁 `tests/profile.rs::memprof_runtime_end_to_end_gate`：
+编译 -> 校验 `.memprofc.c` -> 链接 -> 运行 -> 解析 `.memprofdata`
+断言 count/bytes/lifetime 值。
 
 ### 5.5 `is_cold` 启发
 
@@ -584,7 +603,7 @@ E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
 
 ## 8. 集成测试
 
-文件：`tests/profile.rs`，共 12 个测试：
+文件：`tests/profile.rs`，共 13 个测试：
 
 | 测试 | 覆盖 |
 |------|------|
@@ -598,6 +617,7 @@ E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
 | `cli_fopenmp_targets_accepted` | `-fopenmp-targets=nvptx64-nvidia-cuda` 接受 |
 | `cli_fcuda_and_fhip_accepted` | `-fcuda -fhip` 接受 |
 | `cli_fmemprof_accepted` | `-fmemory-profile` 接受 |
+| `memprof_runtime_end_to_end_gate` | MemProf 端到端硬门禁：编译 → `.memprofc.c` → 链接 → 运行 → `.memprofdata` count/bytes/lifetime 断言 |
 | `cli_topdownmetrics_accepted` | `-ftopdownmetrics` 接受 |
 | `cli_lbr_profile_rejects_missing` | `-flbr-profile` 无 path 报错 |
 

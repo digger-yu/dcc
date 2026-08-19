@@ -263,6 +263,129 @@ fn cli_fmemprof_accepted() {
     assert!(status.success());
 }
 
+/// MemProf 运行时端到端硬门禁: -fmemory-profile 落盘运行时 C ->
+/// 链接 -> 运行 (alloc/free/flush 记录 callstack + lifetime) ->
+/// 解析 .memprofdata 校验 count/bytes/lifetime 值。
+#[test]
+fn memprof_runtime_end_to_end_gate() {
+    let dir = std::env::temp_dir().join(format!("dcc-memprof-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("mp.c");
+    std::fs::write(
+        &src,
+        b"void *__dcc_memprof_alloc_record(unsigned long size, void *ret);\n\
+          void __dcc_memprof_free_record(void *ptr, void *ret);\n\
+          int main(void) {\n\
+              void *a = __dcc_memprof_alloc_record(1024, __builtin_return_address(0));\n\
+              void *b = __dcc_memprof_alloc_record(64, __builtin_return_address(0));\n\
+              __dcc_memprof_free_record(a, __builtin_return_address(0));\n\
+              return (a && b) ? 0 : 1;\n\
+          }\n",
+    )
+    .expect("写源文件");
+
+    // 1) dcc 编译: -fmemory-profile 必须产出 .memprofc.c
+    let status = dcc()
+        .current_dir(&dir)
+        .args(["-std=gnu23", "-fmemory-profile", "-c"])
+        .arg(src.file_name().unwrap())
+        .args(["-o", "mp.o"])
+        .status()
+        .expect("运行 dcc");
+    assert!(status.success(), "memprof 编译必须成功");
+    assert!(dir.join("mp.memprofc.c").exists(), "应产出运行时 C");
+
+    // 2) 链接并运行, 输出 .memprofdata
+    let cc_ok = Command::new("cc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !cc_ok {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let link = Command::new("cc")
+        .current_dir(&dir)
+        .args(["-O0", "mp.o", "mp.memprofc.c", "-o", "mp"])
+        .status()
+        .expect("运行 cc 链接");
+    assert!(link.success(), "链接 memprof 运行时必须成功");
+    let out_path = dir.join("out.memprofdata");
+    let run = Command::new("./mp")
+        .current_dir(&dir)
+        .env("DCC_MEMPROF_OUT", &out_path)
+        .status()
+        .expect("运行被测程序");
+    assert!(run.success(), "被测程序应正常退出");
+
+    // 3) 解析 .memprofdata 二进制并校验
+    let data = std::fs::read(&out_path).expect("应产出 .memprofdata");
+    assert_eq!(&data[0..8], b"MEMPROFD", "magic 应为 MEMPROFD");
+    let mut p = 8usize;
+    let rd32 = |p: &mut usize| {
+        let v = u32::from_le_bytes(data[*p..*p + 4].try_into().unwrap());
+        *p += 4;
+        v
+    };
+    let rd64 = |p: &mut usize| {
+        let v = u64::from_le_bytes(data[*p..*p + 8].try_into().unwrap());
+        *p += 8;
+        v
+    };
+    let rd_str = |p: &mut usize| {
+        let n = rd32(p) as usize;
+        let s = String::from_utf8_lossy(&data[*p..*p + n]).into_owned();
+        *p += n;
+        s
+    };
+    let rd_stack = |p: &mut usize| {
+        let n = rd32(p) as usize;
+        let mut frames = Vec::with_capacity(n);
+        for _ in 0..n {
+            frames.push(rd_str(p));
+        }
+        frames
+    };
+    assert_eq!(rd32(&mut p), 1, "version 应为 1");
+
+    let n_allocs = rd32(&mut p);
+    assert!(n_allocs >= 1, "应有 alloc site");
+    let mut found_alloc = false;
+    for _ in 0..n_allocs {
+        let frames = rd_stack(&mut p);
+        let count = rd64(&mut p);
+        let bytes = rd64(&mut p);
+        if !frames.is_empty() && count == 2 && bytes == 1088 {
+            found_alloc = true;
+        }
+    }
+    assert!(found_alloc, "同一 callstack 两次分配应合并: count=2 bytes=1088");
+
+    let n_life = rd32(&mut p);
+    assert!(n_life >= 1, "应有 lifetime 记录");
+    let mut life_bytes = 0u64;
+    for _ in 0..n_life {
+        let _a = rd_stack(&mut p);
+        let _d = rd_stack(&mut p);
+        life_bytes += rd64(&mut p);
+    }
+    assert_eq!(life_bytes, 1024, "仅被 free 的 1024 字节计入 lifetime");
+
+    let n_de = rd32(&mut p);
+    assert!(n_de >= 1, "应有 dealloc site");
+    let mut de_count = 0u64;
+    for _ in 0..n_de {
+        let _frames = rd_stack(&mut p);
+        de_count += rd64(&mut p);
+    }
+    assert_eq!(de_count, 1, "free 只调用一次");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn cli_topdownmetrics_accepted() {
     let src = profile_src();

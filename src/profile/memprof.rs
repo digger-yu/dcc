@@ -24,11 +24,12 @@
 //   n_deallocs: u32 LE
 //   dealloc[]: n_frames(u32) frames(...) count(u64)
 //
-// malloc 插桩:
-//   codegen 在 malloc/calloc/realloc/new 调用前插入
-//   `__dcc_memprof_alloc_record(size, return_addr)`
-//   在 free/delete 调用前插入 `__dcc_memprof_free_record(ptr, return_addr)`
-//   runtime 库收集 callstack + size + lifetime 数据
+// malloc 插桩 (分配器拦截):
+//   codegen 把 `malloc(size)` 改写为 `__dcc_memprof_alloc_record(size,
+//   return_addr)` (返回指针), 把 `free(p)` 改写为
+//   `__dcc_memprof_free_record(p, return_addr)`
+//   runtime 库收集 callstack + size + lifetime 数据, atexit 写
+//   `.memprofdata` (二进制格式见上)。
 //
 // 已接入 driver → ProfileWeights → codegen (cold 函数下沉 .text.unlikely).
 
@@ -383,8 +384,9 @@ impl MemProfData {
 pub struct MemProfInstrumentor;
 
 impl MemProfInstrumentor {
-    /// 返回需要在 malloc 调用前插入的函数调用
-    /// `__dcc_memprof_alloc_record(size, return_addr)`
+    /// 返回替换 malloc 调用的表达式。
+    /// `__dcc_memprof_alloc_record(size, return_addr)` 内部调用 libc
+    /// malloc 并返回指针, 因此插桩直接把 `malloc(x)` 改写为该调用。
     pub fn alloc_record_call(size_expr: &str, return_addr_expr: &str) -> String {
         format!(
             "__dcc_memprof_alloc_record({}, {})",
@@ -392,8 +394,10 @@ impl MemProfInstrumentor {
         )
     }
 
-    /// 返回需要在 free 调用前插入的函数调用
-    /// `__dcc_memprof_free_record(ptr, return_addr)`
+    /// 返回替换 free 调用的调用。
+    /// `__dcc_memprof_free_record(ptr, return_addr)` 记录 dealloc site
+    /// 与 lifetime 后自行调用 libc free, 因此插桩直接把 `free(p)`
+    /// 改写为该调用。
     pub fn free_record_call(ptr_expr: &str, return_addr_expr: &str) -> String {
         format!(
             "__dcc_memprof_free_record({}, {})",
@@ -416,13 +420,182 @@ impl MemProfInstrumentor {
 pub struct MemProfRuntime;
 
 impl MemProfRuntime {
-    /// 生成 runtime 库的 C 代码桩 (用于链接)
-    pub fn generate_runtime_stub() -> String {
-        r#"/* dcc memprof runtime stub */
+    /// 生成 runtime 库的 C 代码 (用于链接)。
+    ///
+    /// 与 GCOV/PGO 运行时不同, MemProf 采用 "分配器拦截" 模式 (与
+    /// LLVM MemProf / ASan 一致): 插桩把 `malloc(size)` 改写为
+    /// `__dcc_memprof_alloc_record(size, ret)` (返回指针), 把
+    /// `free(p)` 改写为 `__dcc_memprof_free_record(p, ret)`。运行时
+    /// 内部直接调用 libc 的 malloc/free, 不会被二次插桩。
+    ///
+    /// 记录的数据:
+    ///   * alloc site  (callstack -> count, bytes)
+    ///   * dealloc site (callstack -> count)
+    ///   * lifetime   ((alloc_stack, dealloc_stack) -> bytes, 由
+    ///     active 分配表把 free 配对回对应的 alloc site)
+    ///
+    /// 全部使用静态数组 (无 malloc), 避免与插桩代码互相递归。
+    /// `.memprofdata` 二进制布局与 `MemProfData::write_binary` /
+    /// `read_binary` 完全一致, 可由 `-fmemory-profile-use=` 读回。
+    /// 输出路径: `DCC_MEMPROF_OUT` 环境变量, 缺省当前目录
+    /// `memprof.memprofdata`。
+    pub fn generate_runtime() -> String {
+        r#"/* dcc memprof runtime - generated code */
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+#define _MP_MAX_STACK    8
+#define _MP_MAX_SITES    256
+#define _MP_MAX_ACTIVE   256
+#define _MP_MAX_LIFE     512
+#define _MP_MAX_DEALLOC  256
 
 static int _dcc_memprof_initialized = 0;
+
+struct _mp_stack {
+    int n;
+    uint64_t frames[_MP_MAX_STACK];
+};
+
+struct _mp_site {
+    struct _mp_stack stack;
+    uint64_t count;
+    uint64_t bytes;
+    int in_use;
+};
+
+struct _mp_active {
+    void *ptr;
+    uint64_t size;
+    int site_idx;
+    int in_use;
+};
+
+struct _mp_life {
+    int a_idx;
+    int d_idx;
+    uint64_t bytes;
+    int in_use;
+};
+
+struct _mp_dealloc {
+    struct _mp_stack stack;
+    uint64_t count;
+    int in_use;
+};
+
+static struct _mp_site _mp_sites[_MP_MAX_SITES];
+static struct _mp_active _mp_active[_MP_MAX_ACTIVE];
+static struct _mp_life _mp_life[_MP_MAX_LIFE];
+static struct _mp_dealloc _mp_deallocs[_MP_MAX_DEALLOC];
+
+static void _mp_stack_capture(struct _mp_stack *s, void *ret) {
+    s->n = 0;
+    s->frames[s->n++] = (uint64_t)(uintptr_t)ret;
+    /*
+     * 手动帧指针回绕 (x86_64 SysV: [fp] = 前驱 fp, [fp+8] = 返回地址)。
+     * 不能用 __builtin_return_address(N>0) 链式回绕: dcc 生成的调用方
+     * 用 r13 而非 rbp 作帧指针, 链式回绕会读到垃圾地址并段错误。
+     * 这里用 "新 fp 严格递减 + 步长 <= 4MB" 双重约束保证安全。
+     */
+#if defined(__x86_64__)
+    void **fp = (void **)__builtin_frame_address(0);
+    while (s->n < _MP_MAX_STACK && fp) {
+        void *ra = fp[1];
+        void *nxt = fp[0];
+        if (!ra || !nxt) break;
+        if ((uintptr_t)nxt >= (uintptr_t)fp) break;
+        if ((uintptr_t)fp - (uintptr_t)nxt > (uintptr_t)(4 * 1024 * 1024)) break;
+        s->frames[s->n++] = (uint64_t)(uintptr_t)ra;
+        fp = (void **)nxt;
+    }
+#endif
+}
+
+static uint64_t _mp_stack_hash(const struct _mp_stack *s) {
+    uint64_t h = 1469598103934665603ull; /* FNV-1a offset basis */
+    for (int i = 0; i < s->n; i++) {
+        uint64_t f = s->frames[i];
+        for (int b = 0; b < 8; b++) {
+            h ^= (f >> (8 * b)) & 0xff;
+            h *= 1099511628211ull; /* FNV-1a prime */
+        }
+    }
+    h ^= (uint64_t)s->n;
+    return h;
+}
+
+static int _mp_stack_eq(const struct _mp_stack *a, const struct _mp_stack *b) {
+    if (a->n != b->n) return 0;
+    return memcmp(a->frames, b->frames, sizeof(uint64_t) * (size_t)a->n) == 0;
+}
+
+static int _mp_find_site(const struct _mp_stack *s) {
+    uint64_t h = _mp_stack_hash(s);
+    for (int i = 0; i < _MP_MAX_SITES; i++) {
+        if (!_mp_sites[i].in_use) continue;
+        if (_mp_stack_hash(&_mp_sites[i].stack) != h) continue;
+        if (_mp_stack_eq(&_mp_sites[i].stack, s)) return i;
+    }
+    return -1;
+}
+
+static int _mp_new_site(const struct _mp_stack *s) {
+    for (int i = 0; i < _MP_MAX_SITES; i++) {
+        if (!_mp_sites[i].in_use) {
+            _mp_sites[i].stack = *s;
+            _mp_sites[i].count = 0;
+            _mp_sites[i].bytes = 0;
+            _mp_sites[i].in_use = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int _mp_find_dealloc(const struct _mp_stack *s) {
+    for (int i = 0; i < _MP_MAX_DEALLOC; i++) {
+        if (!_mp_deallocs[i].in_use) continue;
+        if (_mp_stack_eq(&_mp_deallocs[i].stack, s)) return i;
+    }
+    return -1;
+}
+
+static int _mp_new_dealloc(const struct _mp_stack *s) {
+    for (int i = 0; i < _MP_MAX_DEALLOC; i++) {
+        if (!_mp_deallocs[i].in_use) {
+            _mp_deallocs[i].stack = *s;
+            _mp_deallocs[i].count = 0;
+            _mp_deallocs[i].in_use = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void _mp_record_lifetime(int a_idx, int d_idx, uint64_t bytes) {
+    for (int i = 0; i < _MP_MAX_LIFE; i++) {
+        if (_mp_life[i].in_use && _mp_life[i].a_idx == a_idx
+            && _mp_life[i].d_idx == d_idx) {
+            _mp_life[i].bytes += bytes;
+            return;
+        }
+    }
+    for (int i = 0; i < _MP_MAX_LIFE; i++) {
+        if (!_mp_life[i].in_use) {
+            _mp_life[i].a_idx = a_idx;
+            _mp_life[i].d_idx = d_idx;
+            _mp_life[i].bytes = bytes;
+            _mp_life[i].in_use = 1;
+            return;
+        }
+    }
+}
+
+void __dcc_memprof_init(void);
+void __dcc_memprof_flush(void);
 
 void __dcc_memprof_init(void) {
     if (_dcc_memprof_initialized) return;
@@ -430,23 +603,138 @@ void __dcc_memprof_init(void) {
     atexit(__dcc_memprof_flush);
 }
 
-void __dcc_memprof_alloc_record(uint64_t size, void *return_addr) {
+/* 拦截 malloc: 记录 (alloc site, size), 注册 active 分配, 返回指针 */
+void *__dcc_memprof_alloc_record(uint64_t size, void *return_addr) {
     __dcc_memprof_init();
-    /* TODO: record alloc site with callstack */
-    (void)size;
-    (void)return_addr;
+    void *p = malloc((size_t)size);
+    if (!p) return NULL;
+    struct _mp_stack st;
+    _mp_stack_capture(&st, return_addr);
+    int idx = _mp_find_site(&st);
+    if (idx < 0) idx = _mp_new_site(&st);
+    if (idx >= 0) {
+        _mp_sites[idx].count++;
+        _mp_sites[idx].bytes += size;
+        for (int i = 0; i < _MP_MAX_ACTIVE; i++) {
+            if (!_mp_active[i].in_use) {
+                _mp_active[i].ptr = p;
+                _mp_active[i].size = size;
+                _mp_active[i].site_idx = idx;
+                _mp_active[i].in_use = 1;
+                break;
+            }
+        }
+    }
+    return p;
 }
 
+/* 拦截 free: 记录 dealloc site + lifetime, 释放内存 */
 void __dcc_memprof_free_record(void *ptr, void *return_addr) {
     __dcc_memprof_init();
-    /* TODO: record dealloc site with callstack */
-    (void)ptr;
-    (void)return_addr;
+    struct _mp_stack st;
+    _mp_stack_capture(&st, return_addr);
+    int d_idx = _mp_find_dealloc(&st);
+    if (d_idx < 0) d_idx = _mp_new_dealloc(&st);
+    if (d_idx >= 0) _mp_deallocs[d_idx].count++;
+
+    for (int i = 0; i < _MP_MAX_ACTIVE; i++) {
+        if (_mp_active[i].in_use && _mp_active[i].ptr == ptr) {
+            int a_idx = _mp_active[i].site_idx;
+            uint64_t sz = _mp_active[i].size;
+            _mp_active[i].in_use = 0;
+            if (a_idx >= 0 && d_idx >= 0) _mp_record_lifetime(a_idx, d_idx, sz);
+            break;
+        }
+    }
+    free(ptr);
+}
+
+static void _mp_wr32(FILE *f, uint32_t v) {
+    unsigned char b[4] = {
+        (unsigned char)(v & 0xff),
+        (unsigned char)((v >> 8) & 0xff),
+        (unsigned char)((v >> 16) & 0xff),
+        (unsigned char)((v >> 24) & 0xff),
+    };
+    fwrite(b, 1, 4, f);
+}
+
+static void _mp_wr64(FILE *f, uint64_t v) {
+    unsigned char b[8];
+    for (int i = 0; i < 8; i++) {
+        b[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+    }
+    fwrite(b, 1, 8, f);
+}
+
+static void _mp_wr_str(FILE *f, const char *s) {
+    uint32_t len = (uint32_t)strlen(s);
+    _mp_wr32(f, len);
+    fwrite(s, 1, len, f);
+}
+
+static void _mp_wr_stack(FILE *f, const struct _mp_stack *s) {
+    char buf[32];
+    _mp_wr32(f, (uint32_t)s->n);
+    for (int i = 0; i < s->n; i++) {
+        snprintf(buf, sizeof buf, "0x%016lx", (unsigned long)s->frames[i]);
+        _mp_wr_str(f, buf);
+    }
+}
+
+static const char *_mp_output_path(void) {
+    static char buf[1024];
+    const char *out = getenv("DCC_MEMPROF_OUT");
+    if (out && *out) {
+        snprintf(buf, sizeof buf, "%s", out);
+        return buf;
+    }
+    snprintf(buf, sizeof buf, "memprof.memprofdata");
+    return buf;
 }
 
 void __dcc_memprof_flush(void) {
     if (!_dcc_memprof_initialized) return;
-    /* TODO: write .memprofdata file */
+    FILE *f = fopen(_mp_output_path(), "wb");
+    if (!f) return;
+    fwrite("MEMPROFD", 1, 8, f);
+    _mp_wr32(f, 1); /* version */
+
+    int n_allocs = 0;
+    for (int i = 0; i < _MP_MAX_SITES; i++) {
+        if (_mp_sites[i].in_use) n_allocs++;
+    }
+    _mp_wr32(f, (uint32_t)n_allocs);
+    for (int i = 0; i < _MP_MAX_SITES; i++) {
+        if (!_mp_sites[i].in_use) continue;
+        _mp_wr_stack(f, &_mp_sites[i].stack);
+        _mp_wr64(f, _mp_sites[i].count);
+        _mp_wr64(f, _mp_sites[i].bytes);
+    }
+
+    int n_life = 0;
+    for (int i = 0; i < _MP_MAX_LIFE; i++) {
+        if (_mp_life[i].in_use) n_life++;
+    }
+    _mp_wr32(f, (uint32_t)n_life);
+    for (int i = 0; i < _MP_MAX_LIFE; i++) {
+        if (!_mp_life[i].in_use) continue;
+        _mp_wr_stack(f, &_mp_sites[_mp_life[i].a_idx].stack);
+        _mp_wr_stack(f, &_mp_deallocs[_mp_life[i].d_idx].stack);
+        _mp_wr64(f, _mp_life[i].bytes);
+    }
+
+    int n_deallocs = 0;
+    for (int i = 0; i < _MP_MAX_DEALLOC; i++) {
+        if (_mp_deallocs[i].in_use) n_deallocs++;
+    }
+    _mp_wr32(f, (uint32_t)n_deallocs);
+    for (int i = 0; i < _MP_MAX_DEALLOC; i++) {
+        if (!_mp_deallocs[i].in_use) continue;
+        _mp_wr_stack(f, &_mp_deallocs[i].stack);
+        _mp_wr64(f, _mp_deallocs[i].count);
+    }
+    fclose(f);
     _dcc_memprof_initialized = 0;
 }
 "#
@@ -712,14 +1000,30 @@ mod tests {
         assert!(syms.contains(&"__dcc_memprof_flush"));
     }
 
-    /// MemProfRuntime generates C stub code.
+    /// MemProfRuntime generates real C runtime code (no TODO stubs):
+    /// callstack capture, active-alloc tracking, lifetime pairing and
+    /// .memprofdata binary output must all be present.
     #[test]
-    fn memprof_runtime_stub_generation() {
-        let code = MemProfRuntime::generate_runtime_stub();
+    fn memprof_runtime_generates_real_code() {
+        let code = MemProfRuntime::generate_runtime();
+        assert!(!code.contains("TODO"), "runtime 不应是 stub");
         assert!(code.contains("__dcc_memprof_alloc_record"));
         assert!(code.contains("__dcc_memprof_free_record"));
         assert!(code.contains("__dcc_memprof_init"));
         assert!(code.contains("__dcc_memprof_flush"));
         assert!(code.contains("atexit"));
+        // callstack 采集
+        assert!(code.contains("__builtin_return_address"));
+        assert!(code.contains("_mp_stack_capture"));
+        // active 分配表 + lifetime 配对
+        assert!(code.contains("_mp_active"));
+        assert!(code.contains("_mp_record_lifetime"));
+        // .memprofdata 写出
+        assert!(code.contains("MEMPROFD"));
+        assert!(code.contains("fopen"));
+        assert!(code.contains("DCC_MEMPROF_OUT"));
+        // 拦截式 ABI: alloc 返回指针, free 内部释放
+        assert!(code.contains("void *__dcc_memprof_alloc_record"));
+        assert!(code.contains("free(ptr)"));
     }
 }

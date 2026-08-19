@@ -577,6 +577,27 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
 
+    // MemProf: -fmemory-profile 时落盘运行时 C (`<stem>.memprofc.c`)。
+    // 运行时实现 callstack 采集 + lifetime 配对 + .memprofdata 写出,
+    // 供链接到被测程序 (插桩改写 malloc/free 为 __dcc_memprof_*_record)。
+    // 仅 -fsyntax-only 时不产出文件。
+    if cfg.profile.memprof && !cfg.syntax_only {
+        let memprof_stem = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("a")
+            .to_string();
+        let memprof_rt = crate::profile::memprof::MemProfRuntime::generate_runtime();
+        let rt_path = PathBuf::from(format!("{memprof_stem}.memprofc.c"));
+        if let Err(e) = fs::write(&rt_path, memprof_rt) {
+            return Err(vec![Diagnostic::err(
+                "E0101",
+                format!("cannot write {}: {}", rt_path.display(), e),
+                crate::diagnostics::Span::point(&rt_path.display().to_string(), 0, 0),
+            )]);
+        }
+    }
+
     // 跨数据源权重下发: 加载 4 个 profile 源 (PGO/AutoFDO/LBR/MemProf),
     // 聚合为 ProfileWeights, 写入每个 FuncDecl 的 is_cold / is_hot 字段,
     // 让 codegen 把 hot 函数放到 .text.hot, cold 函数放到 .text.unlikely.
