@@ -182,9 +182,15 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         )]
     })?;
 
-    // .S / -x assembler-with-cpp: 预处理 + 系统汇编器
-    if matches!(cfg.input_lang, InputLang::AssemblerWithCpp)
-        || input.extension().map(|e| e == "S").unwrap_or(false)
+    // -x assembler / assembler-with-cpp 以及 .s/.S 使用系统汇编器
+    if matches!(
+        cfg.input_lang,
+        InputLang::Assembler | InputLang::AssemblerWithCpp
+    ) || input
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e, "s" | "S"))
+        .unwrap_or(false)
     {
         return run_assembler_driver(&cfg, input);
     }
@@ -836,27 +842,36 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
         )]
     })?;
 
-    // GCC 兼容: 处理 .S 文件时自动定义 __ASSEMBLER__
-    // 内核头文件用 #ifndef __ASSEMBLER__ 保护 C 代码, 防止泄漏到汇编输出
-    let mut asm_defines = cfg.defines.clone();
-    if !asm_defines.iter().any(|(k, _)| k == "__ASSEMBLER__") {
-        asm_defines.push(("__ASSEMBLER__".to_string(), Some("1".to_string())));
-    }
+    let (preprocessed, include_deps, mut pp_diags) =
+        if matches!(cfg.input_lang, InputLang::Assembler)
+            || input.extension().and_then(|e| e.to_str()) == Some("s")
+        {
+            (
+                String::from_utf8_lossy(&src).into_owned(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else {
+            // GCC 兼容: 处理 .S 文件时自动定义 __ASSEMBLER__
+            // 内核头文件用 #ifndef __ASSEMBLER__ 保护 C 代码
+            let mut asm_defines = cfg.defines.clone();
+            if !asm_defines.iter().any(|(k, _)| k == "__ASSEMBLER__") {
+                asm_defines.push(("__ASSEMBLER__".to_string(), Some("1".to_string())));
+            }
 
-    let pp_out = preproc::preprocess(
-        &src,
-        &file_name,
-        &cfg.include_paths,
-        &cfg.system_paths,
-        &asm_defines,
-        cfg.std,
-        &cfg.force_includes,
-        cfg.freestanding,
-        &cfg.pch_opts,
-    );
-    let mut pp_diags = pp_out.diags;
-    let preprocessed = pp_out.text;
-    let include_deps = pp_out.deps;
+            let pp_out = preproc::preprocess(
+                &src,
+                &file_name,
+                &cfg.include_paths,
+                &cfg.system_paths,
+                &asm_defines,
+                cfg.std,
+                &cfg.force_includes,
+                cfg.freestanding,
+                &cfg.pch_opts,
+            );
+            (pp_out.text, pp_out.deps, pp_out.diags)
+        };
     enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
     if pp_diags.iter().any(|d| matches!(d.sev, Severity::Error)) {
         return Err(pp_diags);

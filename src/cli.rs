@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub enum InputLang {
     C,
     Cpp,
+    Assembler,
     AssemblerWithCpp,
 }
 
@@ -1047,9 +1048,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     .get(i)
                     .ok_or_else(|| CliError::new("missing arg after -x"))?;
                 input_lang = match lang.as_str() {
-                    "assembler-with-cpp" | "assembler" => InputLang::AssemblerWithCpp,
+                    "assembler" => InputLang::Assembler,
+                    "assembler-with-cpp" => InputLang::AssemblerWithCpp,
                     "c" | "c-header" => InputLang::C,
-                    "c++" | "cpp" | "cxx" => InputLang::Cpp,
+                    "c++" | "cpp" | "cxx" | "c++-header" | "c++-system-header"
+                    | "c++-user-header" => InputLang::Cpp,
                     other => {
                         return Err(CliError::new(&format!(
                             "unsupported -x language: {}",
@@ -1755,9 +1758,41 @@ impl CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{parse, InputLang};
     use std::path::PathBuf;
 
+    #[test]
+    fn x_language_aliases_are_supported() {
+        for (lang, expected) in [
+            ("assembler", InputLang::Assembler),
+            ("assembler-with-cpp", InputLang::AssemblerWithCpp),
+            ("c", InputLang::C),
+            ("c-header", InputLang::C),
+            ("c++", InputLang::Cpp),
+            ("cpp", InputLang::Cpp),
+            ("cxx", InputLang::Cpp),
+            ("c++-header", InputLang::Cpp),
+            ("c++-system-header", InputLang::Cpp),
+            ("c++-user-header", InputLang::Cpp),
+        ] {
+            let args = vec!["-x".to_string(), lang.to_string(), "input".to_string()];
+            let cfg = parse(&args).expect("supported -x language should parse");
+            assert_eq!(cfg.input_lang, expected, "language: {lang}");
+        }
+    }
+
+    #[test]
+    fn x_unknown_language_is_rejected() {
+        let args = vec!["-x".to_string(), "fortran".to_string(), "input".to_string()];
+        let err = parse(&args).expect_err("unsupported -x language must fail");
+        assert!(err.msg.contains("unsupported -x language: fortran"));
+    }
+    #[test]
+    fn x_missing_language_is_rejected() {
+        let args = vec!["-x".to_string(), "input".to_string()];
+        let err = parse(&args).expect_err("missing -x language must fail");
+        assert!(err.msg.contains("unsupported -x language: input"));
+    }
     #[test]
     fn wp_kbuild_dependency_form_is_forwarded() {
         let args = vec![

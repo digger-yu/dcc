@@ -44,7 +44,7 @@
 | `-S` | 输出 `.s` 汇编文本，不汇编 |
 | `-E` | 只做预处理，stdout 输出 |
 | `-o <file>` | 输出路径，默认 `a.out` |
-| `-x <lang>` | 强制输入语言 `c` / `c++` / `assembler-with-cpp` |
+| `-x <lang>` | 强制输入语言：`c` / `c-header`、`c++` / `cpp` / `cxx` / C++ headers、`assembler` / `assembler-with-cpp` |
 | `--target <triple>` | 目标三元组（见 §4） |
 | `-std=<mode>` | C 标准模式（见 §3.1） |
 | `-ffreestanding` | 不假设 libc/CRT |
