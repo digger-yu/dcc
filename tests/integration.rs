@@ -1,6 +1,40 @@
 use std::fs;
 use std::process::Command;
 
+#[test]
+#[cfg(unix)]
+fn arch_x86_wrapper_preserves_supported_kernel_flags() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/arch_x86_compile.sh");
+    let temp = std::env::temp_dir().join(format!("dcc-arch-wrapper-{}", std::process::id()));
+    fs::create_dir_all(temp.join("arch/x86/kernel")).expect("create wrapper fixture");
+    fs::write(temp.join("arch/x86/kernel/foo.c"), "int foo(void) { return 0; }\n")
+        .expect("write wrapper source fixture");
+    let cmd_file = temp.join("arch/x86/kernel/.foo.o.cmd");
+    fs::write(
+        &cmd_file,
+        "savedcmd_arch/x86/kernel/foo.o := cc -fstack-clash-protection -ftrivial-auto-var-init=zero -mrecord-mcount -mfentry -pg -falign-loops=1 -c -o foo.o foo.c\n",
+    )
+    .expect("write wrapper command fixture");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg(&temp)
+        .env("DCC", "echo")
+        .env("OUT_LOG", temp.join("out.log"))
+        .output()
+        .expect("run arch wrapper");
+    let log = fs::read_to_string(temp.join("out.log")).unwrap_or_default();
+    let _ = fs::remove_dir_all(&temp);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(log.contains("-fstack-clash-protection"), "log: {log}");
+    assert!(log.contains("-ftrivial-auto-var-init=zero"), "log: {log}");
+    assert!(log.contains("-mrecord-mcount"), "log: {log}");
+    assert!(log.contains("-mfentry"), "log: {log}");
+    assert!(log.contains("-pg"), "log: {log}");
+    assert!(log.contains("-falign-loops=1"), "log: {log}");
+}
+
+
 fn run_syntax_test(name: &str, source: &str) -> std::process::Output {
     let path = std::env::temp_dir().join(format!("dcc-{name}-{}.c", std::process::id()));
     fs::write(&path, source).expect("write C fixture");

@@ -59,22 +59,14 @@ for a in $COMMON_FLAGS; do
         -fdiagnostics-show-context=*|\
         -fdiagnostics-show-inlining-chain|\
         -fmin-function-alignment=*|\
-        -fstack-clash-protection|\
-        -fpatchable-function-entry=*|\
         -fharden-sls=*|\
-        -ftrivial-auto-var-init=*|\
         -fzero-call-used-regs=*|\
         -fconserve-stack|\
         -fstrict-flex-arrays=*|\
         -fno-builtin-wcslen|\
-        -falign-loops=*|\
-        -falign-jumps=*|\
-        -mrecord-mcount|\
-        -mfentry|\
         -mstack-protector-guard-reg=*|\
         -mstack-protector-guard-symbol=*|\
         -mharden-sls=*|\
-        -pg|\
         -mno-sse*|-mno-mmx|-mno-3dnow*|-mno-avx*|-mno-sse4*)
             continue ;;
         *)
