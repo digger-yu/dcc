@@ -30,9 +30,13 @@ pub struct DeviceCodegenResult {
 ///   2. Parses offload entries (kernel name, device triple, arch)
 ///   3. On kernel launch, looks up device runtime and dispatches
 ///
-/// Current status: Provides dispatch interface with diagnostics when
-/// device runtime is not available. Actual CUDA/ROCm driver integration
-/// requires linking against libcuda.so / libamdhip64.so at runtime.
+/// Runtime probing: `check_runtime` actually dlopen()s the driver shared
+/// library (libcuda.so.1 / libamdhip64.so) and calls its init entry
+/// (cuInit / hipInit) to decide Available / InitFailed / NotFound.
+/// Kernel dispatch: `launch_kernel` resolves cuModuleLoadData /
+/// cuModuleGetFunction / cuLaunchKernel (or the hip_* equivalents)
+/// through dlsym and launches the loaded device code with the grid/block
+/// geometry from `KernelLaunchParams`.
 #[derive(Debug, Clone, Default)]
 pub struct OffloadRuntimeLoader {
     /// Loaded offload entries from `.dcc.offload` section
@@ -41,6 +45,9 @@ pub struct OffloadRuntimeLoader {
     pub runtime_status: HashMap<String, RuntimeStatus>,
     /// Diagnostics from loading/dispatch
     pub diagnostics: Vec<String>,
+    /// Device triple -> compiled device code bytes (cubin / hsaco),
+    /// loaded by the host before launch.
+    pub device_code: HashMap<String, Vec<u8>>,
 }
 
 /// Runtime availability status for a device triple
@@ -157,26 +164,38 @@ impl OffloadRuntimeLoader {
         }
     }
 
-    /// Check if a device runtime is available for the given triple.
-    /// This is a stub that always returns NotFound (no actual driver check).
+    /// 注入已编译的设备代码 (cubin / hsaco bytes) 供 launch 时加载。
+    pub fn set_device_code(&mut self, triple: &str, code: Vec<u8>) {
+        self.device_code.insert(triple.to_string(), code);
+    }
+
+    /// 从文件加载设备代码 (cubin / hsaco)。
+    pub fn load_device_code_from_file(&mut self, triple: &str, path: &std::path::Path) -> std::io::Result<()> {
+        let bytes = std::fs::read(path)?;
+        self.device_code.insert(triple.to_string(), bytes);
+        Ok(())
+    }
+
+    /// 注入 runtime 探测结果 (测试 / 宿主显式声明 driver 状态用)。
+    pub fn set_runtime_status(&mut self, triple: &str, status: RuntimeStatus) {
+        self.runtime_status.insert(triple.to_string(), status);
+    }
+
+    /// 探测指定 triple 的设备 runtime 是否可用。
+    ///
+    /// 真实探测: dlopen 对应 driver 共享库 (libcuda.so.1 / libamdhip64.so)
+    /// 并调用其 init 入口 (cuInit / hipInit)。返回 Available /
+    /// InitFailed / NotFound。
     pub fn check_runtime(&mut self, triple: &str) -> RuntimeStatus {
         let status = if triple.contains("nvptx") {
-            // Would check for libcuda.so / CUDA driver
-            self.diagnostics.push(format!(
-                "note: CUDA runtime not available (libcuda.so not found); \
-                 kernel launches to '{}' will fail",
-                triple
-            ));
-            RuntimeStatus::NotFound
+            probe_cuda_runtime(triple, &mut self.diagnostics)
         } else if triple.contains("amdgcn") {
-            // Would check for libamdhip64.so / ROCm driver
+            probe_rocm_runtime(triple, &mut self.diagnostics)
+        } else {
             self.diagnostics.push(format!(
-                "note: ROCm runtime not available (libamdhip64.so not found); \
-                 kernel launches to '{}' will fail",
+                "note: no driver probe defined for triple '{}'",
                 triple
             ));
-            RuntimeStatus::NotFound
-        } else {
             RuntimeStatus::NotFound
         };
         self.runtime_status.insert(triple.to_string(), status);
@@ -190,13 +209,13 @@ impl OffloadRuntimeLoader {
 
     /// Launch a kernel on the device.
     ///
-    /// Returns KernelLaunchResult indicating success or failure reason.
-    /// Currently always returns RuntimeNotAvailable since no actual
-    /// device runtime is linked.
+    /// 流程: 找到 entry -> 探测 runtime 状态 -> 已加载设备代码 -> 通过
+    /// driver API (cuLaunchKernel / hipLaunchKernel) 实际分发。driver
+    /// 不可用或未加载设备代码时返回具体失败原因。
     pub fn launch_kernel(&mut self, params: &KernelLaunchParams) -> KernelLaunchResult {
         // Find the kernel entry
         let entry = match self.find_entry(&params.func_name) {
-            Some(e) => e,
+            Some(e) => e.clone(),
             None => {
                 return KernelLaunchResult::KernelNotFound(params.func_name.clone());
             }
@@ -219,9 +238,55 @@ impl OffloadRuntimeLoader {
             return KernelLaunchResult::RuntimeNotAvailable(triple);
         }
 
-        // Would dispatch to actual device runtime here
-        // For now, this path is unreachable since check_runtime always returns NotFound
-        KernelLaunchResult::Failed("device dispatch not implemented".into())
+        // Runtime 可用: 分发给实际 driver
+        if triple.contains("nvptx") {
+            self.dispatch_cuda(&entry, params)
+        } else if triple.contains("amdgcn") {
+            self.dispatch_rocm(&entry, params)
+        } else {
+            KernelLaunchResult::Failed(format!(
+                "no device dispatcher for triple '{}'",
+                triple
+            ))
+        }
+    }
+
+    /// 通过 CUDA driver API 分发 kernel launch。
+    fn dispatch_cuda(&mut self, entry: &OffloadEntry, params: &KernelLaunchParams) -> KernelLaunchResult {
+        let triple = entry.device_triple.clone();
+        let code = match self.device_code.get(&triple) {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ => {
+                return KernelLaunchResult::Failed(format!(
+                    "no device code (cubin) loaded for '{}'; use set_device_code or \
+                     load_device_code_from_file",
+                    triple
+                ));
+            }
+        };
+        match cuda_launch(&entry.func, &code, params) {
+            Ok(()) => KernelLaunchResult::Success,
+            Err(msg) => KernelLaunchResult::Failed(msg),
+        }
+    }
+
+    /// 通过 ROCm driver API 分发 kernel launch。
+    fn dispatch_rocm(&mut self, entry: &OffloadEntry, params: &KernelLaunchParams) -> KernelLaunchResult {
+        let triple = entry.device_triple.clone();
+        let code = match self.device_code.get(&triple) {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ => {
+                return KernelLaunchResult::Failed(format!(
+                    "no device code (hsaco) loaded for '{}'; use set_device_code or \
+                     load_device_code_from_file",
+                    triple
+                ));
+            }
+        };
+        match rocm_launch(&entry.func, &code, params) {
+            Ok(()) => KernelLaunchResult::Success,
+            Err(msg) => KernelLaunchResult::Failed(msg),
+        }
     }
 
     /// Get all registered kernel names.
@@ -236,6 +301,336 @@ impl OffloadRuntimeLoader {
             .filter(|e| e.device_triple == triple)
             .collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// CUDA / ROCm driver FFI (dlopen / dlsym)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod ffi {
+    use std::ffi::{c_char, c_int, c_void};
+
+    #[link(name = "dl")]
+    extern "C" {
+        pub fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+        pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        pub fn dlclose(handle: *mut c_void) -> c_int;
+    }
+
+    pub const RTLD_NOW: c_int = 2;
+}
+
+/// 尝试 dlopen 一个共享库, 返回句柄或错误消息。
+#[cfg(target_os = "linux")]
+fn dlopen_lib(names: &[&str]) -> Result<*mut std::ffi::c_void, String> {
+    use std::ffi::CString;
+    for name in names {
+        let Ok(cname) = CString::new(*name) else {
+            continue;
+        };
+        let h = unsafe { ffi::dlopen(cname.as_ptr(), ffi::RTLD_NOW) };
+        if !h.is_null() {
+            return Ok(h);
+        }
+    }
+    Err(names.join(" / "))
+}
+
+/// dlsym 解析符号并转成目标函数指针。
+#[cfg(target_os = "linux")]
+unsafe fn dlsym_fn<T>(handle: *mut std::ffi::c_void, symbol: &str) -> Option<T> {
+    use std::ffi::CString;
+    let Ok(csym) = CString::new(symbol) else {
+        return None;
+    };
+    let p = ffi::dlsym(handle, csym.as_ptr());
+    if p.is_null() {
+        None
+    } else {
+        Some(std::mem::transmute_copy(&p))
+    }
+}
+
+/// 探测 CUDA driver: dlopen libcuda 并调用 cuInit(0)。
+fn probe_cuda_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatus {
+    #[cfg(target_os = "linux")]
+    {
+        let handle = match dlopen_lib(&["libcuda.so.1", "libcuda.so"]) {
+            Ok(h) => h,
+            Err(names) => {
+                diags.push(format!(
+                    "note: CUDA runtime not available for '{}' (cannot load {}); \
+                     kernel launches will fail",
+                    triple, names
+                ));
+                return RuntimeStatus::NotFound;
+            }
+        };
+        let init: Option<unsafe extern "C" fn(u32) -> i32> = unsafe { dlsym_fn(handle, "cuInit") };
+        let Some(init) = init else {
+            diags.push(format!(
+                "note: CUDA driver for '{}' found but cuInit symbol missing",
+                triple
+            ));
+            unsafe { ffi::dlclose(handle) };
+            return RuntimeStatus::InitFailed;
+        };
+        let rc = unsafe { init(0) };
+        unsafe { ffi::dlclose(handle) };
+        if rc == 0 {
+            diags.push(format!(
+                "note: CUDA runtime available for '{}' (cuInit ok)",
+                triple
+            ));
+            RuntimeStatus::Available
+        } else {
+            diags.push(format!(
+                "note: CUDA driver for '{}' found but cuInit failed (rc={})",
+                triple, rc
+            ));
+            RuntimeStatus::InitFailed
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        diags.push(format!(
+            "note: CUDA runtime not available for '{}' (driver probing is Linux-only)",
+            triple
+        ));
+        RuntimeStatus::NotFound
+    }
+}
+
+/// 探测 ROCm driver: dlopen libamdhip64 并调用 hipInit(0)。
+fn probe_rocm_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatus {
+    #[cfg(target_os = "linux")]
+    {
+        let handle = match dlopen_lib(&["libamdhip64.so.6", "libamdhip64.so.5", "libamdhip64.so"]) {
+            Ok(h) => h,
+            Err(names) => {
+                diags.push(format!(
+                    "note: ROCm runtime not available for '{}' (cannot load {}); \
+                     kernel launches will fail",
+                    triple, names
+                ));
+                return RuntimeStatus::NotFound;
+            }
+        };
+        let init: Option<unsafe extern "C" fn(u32) -> i32> = unsafe { dlsym_fn(handle, "hipInit") };
+        let Some(init) = init else {
+            diags.push(format!(
+                "note: ROCm driver for '{}' found but hipInit symbol missing",
+                triple
+            ));
+            unsafe { ffi::dlclose(handle) };
+            return RuntimeStatus::InitFailed;
+        };
+        let rc = unsafe { init(0) };
+        unsafe { ffi::dlclose(handle) };
+        if rc == 0 {
+            diags.push(format!(
+                "note: ROCm runtime available for '{}' (hipInit ok)",
+                triple
+            ));
+            RuntimeStatus::Available
+        } else {
+            diags.push(format!(
+                "note: ROCm driver for '{}' found but hipInit failed (rc={})",
+                triple, rc
+            ));
+            RuntimeStatus::InitFailed
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        diags.push(format!(
+            "note: ROCm runtime not available for '{}' (driver probing is Linux-only)",
+            triple
+        ));
+        RuntimeStatus::NotFound
+    }
+}
+
+/// 通过 CUDA driver API 真正启动 kernel。
+///
+/// 解析 cuModuleLoadData / cuModuleGetFunction / cuLaunchKernel 后:
+/// 加载 cubin, 按名字取 kernel function, 以 grid/block/args 调
+/// cuLaunchKernel。
+#[cfg(target_os = "linux")]
+fn cuda_launch(func: &str, cubin: &[u8], params: &KernelLaunchParams) -> Result<(), String> {
+    use std::ffi::CString;
+    let handle = dlopen_lib(&["libcuda.so.1", "libcuda.so"])
+        .map_err(|names| format!("cannot load CUDA driver ({})", names))?;
+    let result = (|| {
+        unsafe {
+            let load_mod: Option<
+                unsafe extern "C" fn(*mut *mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
+            > = dlsym_fn(handle, "cuModuleLoadData");
+            let get_fn: Option<
+                unsafe extern "C" fn(
+                    *mut *mut std::ffi::c_void,
+                    *mut std::ffi::c_void,
+                    *const std::ffi::c_char,
+                ) -> i32,
+            > = dlsym_fn(handle, "cuModuleGetFunction");
+            let launch: Option<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    *mut std::ffi::c_void,
+                    *mut *const std::ffi::c_void,
+                    *mut *const std::ffi::c_void,
+                ) -> i32,
+            > = dlsym_fn(handle, "cuLaunchKernel");
+            let (Some(load_mod), Some(get_fn), Some(launch)) =
+                (load_mod, get_fn, launch)
+            else {
+                return Err("CUDA driver symbols missing (cuModuleLoadData / \
+                            cuModuleGetFunction / cuLaunchKernel)"
+                    .to_string());
+            };
+            let mut module: *mut std::ffi::c_void = std::ptr::null_mut();
+            let rc = load_mod(&mut module, cubin.as_ptr() as *const std::ffi::c_void);
+            if rc != 0 {
+                return Err(format!("cuModuleLoadData failed (rc={rc})"));
+            }
+            let mut kernel: *mut std::ffi::c_void = std::ptr::null_mut();
+            let Ok(cfunc) = CString::new(func) else {
+                return Err("kernel name contains NUL".to_string());
+            };
+            let rc = get_fn(&mut kernel, module, cfunc.as_ptr());
+            if rc != 0 {
+                return Err(format!("cuModuleGetFunction('{func}') failed (rc={rc})"));
+            }
+            // kernel args: 每个 arg 的地址
+            let mut arg_ptrs: Vec<*const std::ffi::c_void> = params
+                .args
+                .iter()
+                .map(|a| a.as_ptr() as *const std::ffi::c_void)
+                .collect();
+            let (gx, gy, gz) = params.grid_dim;
+            let (bx, by, bz) = params.block_dim;
+            let rc = launch(
+                kernel,
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+                params.shared_mem as u32,
+                std::ptr::null_mut(), // stream
+                arg_ptrs.as_mut_ptr(),
+                std::ptr::null_mut(), // extra
+            );
+            if rc != 0 {
+                return Err(format!("cuLaunchKernel('{func}') failed (rc={rc})"));
+            }
+            Ok(())
+        }
+    })();
+    unsafe { ffi::dlclose(handle) };
+    result
+}
+
+/// 通过 ROCm driver API 真正启动 kernel。
+#[cfg(target_os = "linux")]
+fn rocm_launch(func: &str, hsaco: &[u8], params: &KernelLaunchParams) -> Result<(), String> {
+    use std::ffi::CString;
+    let handle = dlopen_lib(&["libamdhip64.so.6", "libamdhip64.so.5", "libamdhip64.so"])
+        .map_err(|names| format!("cannot load ROCm driver ({})", names))?;
+    let result = (|| {
+        unsafe {
+            let load_mod: Option<
+                unsafe extern "C" fn(*mut *mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
+            > = dlsym_fn(handle, "hipModuleLoadData");
+            let get_fn: Option<
+                unsafe extern "C" fn(
+                    *mut *mut std::ffi::c_void,
+                    *mut std::ffi::c_void,
+                    *const std::ffi::c_char,
+                ) -> i32,
+            > = dlsym_fn(handle, "hipModuleGetFunction");
+            let launch: Option<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    *mut std::ffi::c_void,
+                    *mut *const std::ffi::c_void,
+                    *mut *const std::ffi::c_void,
+                ) -> i32,
+            > = dlsym_fn(handle, "hipLaunchKernel");
+            let (Some(load_mod), Some(get_fn), Some(launch)) =
+                (load_mod, get_fn, launch)
+            else {
+                return Err("ROCm driver symbols missing (hipModuleLoadData / \
+                            hipModuleGetFunction / hipLaunchKernel)"
+                    .to_string());
+            };
+            let mut module: *mut std::ffi::c_void = std::ptr::null_mut();
+            let rc = load_mod(&mut module, hsaco.as_ptr() as *const std::ffi::c_void);
+            if rc != 0 {
+                return Err(format!("hipModuleLoadData failed (rc={rc})"));
+            }
+            let mut kernel: *mut std::ffi::c_void = std::ptr::null_mut();
+            let Ok(cfunc) = CString::new(func) else {
+                return Err("kernel name contains NUL".to_string());
+            };
+            let rc = get_fn(&mut kernel, module, cfunc.as_ptr());
+            if rc != 0 {
+                return Err(format!("hipModuleGetFunction('{func}') failed (rc={rc})"));
+            }
+            let mut arg_ptrs: Vec<*const std::ffi::c_void> = params
+                .args
+                .iter()
+                .map(|a| a.as_ptr() as *const std::ffi::c_void)
+                .collect();
+            let (gx, gy, gz) = params.grid_dim;
+            let (bx, by, bz) = params.block_dim;
+            let rc = launch(
+                kernel,
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+                params.shared_mem as u32,
+                std::ptr::null_mut(), // stream
+                arg_ptrs.as_mut_ptr(),
+                std::ptr::null_mut(), // extra
+            );
+            if rc != 0 {
+                return Err(format!("hipLaunchKernel('{func}') failed (rc={rc})"));
+            }
+            Ok(())
+        }
+    })();
+    unsafe { ffi::dlclose(handle) };
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cuda_launch(func: &str, _code: &[u8], _params: &KernelLaunchParams) -> Result<(), String> {
+    Err(format!("CUDA launch of '{func}' is Linux-only"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rocm_launch(func: &str, _code: &[u8], _params: &KernelLaunchParams) -> Result<(), String> {
+    Err(format!("ROCm launch of '{func}' is Linux-only"))
 }
 
 /// Generate device code for all offload entries
@@ -526,7 +921,7 @@ mod tests {
     }
 
     /// Test runtime loader: kernel launch returns RuntimeNotAvailable
-    /// since no actual CUDA/ROCm driver is linked
+    /// when the driver is genuinely absent (real dlopen probe).
     #[test]
     fn test_runtime_loader_kernel_launch_not_available() {
         let mut section = OffloadSection::new();
@@ -543,11 +938,16 @@ mod tests {
         let mut loader = OffloadRuntimeLoader::new();
         loader.load_from_section(&section);
 
-        // Explicitly check runtime to populate diagnostics
+        // Explicitly check runtime: real probe (dlopen libcuda) on this
+        // machine has no CUDA driver, so it must be NotFound.
         let status = loader.check_runtime("nvptx64-nvidia-cuda");
         assert!(!status.is_available());
         assert!(!loader.diagnostics.is_empty());
-        assert!(loader.diagnostics[0].contains("CUDA runtime not available"));
+        assert!(
+            loader.diagnostics[0].contains("CUDA runtime not available"),
+            "{}",
+            loader.diagnostics[0]
+        );
 
         let params = KernelLaunchParams::new("my_kernel")
             .grid(256, 1, 1)
@@ -559,6 +959,83 @@ mod tests {
                 assert_eq!(triple, "nvptx64-nvidia-cuda");
             }
             _ => panic!("expected RuntimeNotAvailable, got {:?}", result),
+        }
+    }
+
+    /// Test runtime loader: ROCm probe reports NotFound without a driver.
+    #[test]
+    fn test_runtime_loader_probe_rocm_missing() {
+        let status = probe_rocm_runtime("amdgcn-amd-amdhsa", &mut Vec::new());
+        assert!(!status.is_available());
+    }
+
+    /// Test runtime loader: with an injected Available runtime status and
+    /// device code, launch proceeds to the real driver dispatch path
+    /// (dlopen libcuda) instead of returning RuntimeNotAvailable.
+    #[test]
+    fn test_runtime_loader_dispatch_reaches_driver() {
+        let mut section = OffloadSection::new();
+        section.add_entry(OffloadEntry {
+            kind: OffloadKind::Cuda,
+            func: "vec_add".into(),
+            file: "k.cu".into(),
+            line: 1,
+            col: 1,
+            device_triple: "nvptx64-nvidia-cuda".into(),
+            arch: None,
+        });
+
+        let mut loader = OffloadRuntimeLoader::new();
+        loader.load_from_section(&section);
+        // 显式注入 Available (模拟探测成功), 并提供 device code
+        loader.set_runtime_status("nvptx64-nvidia-cuda", RuntimeStatus::Available);
+        loader.set_device_code("nvptx64-nvidia-cuda", b"fake cubin bytes".to_vec());
+
+        let params = KernelLaunchParams::new("vec_add")
+            .grid(1, 1, 1)
+            .block(32, 1, 1)
+            .arg(&10u32);
+
+        let result = loader.launch_kernel(&params);
+        // 无真实 GPU 驱动: 分发路径应尝试 dlopen libcuda 并失败,
+        // 而非停留在 RuntimeNotAvailable。
+        match result {
+            KernelLaunchResult::Failed(msg) => {
+                assert!(
+                    msg.contains("CUDA driver") || msg.contains("libcuda"),
+                    "分发应到达 driver 层: {msg}"
+                );
+            }
+            other => panic!("expected Failed at driver dispatch, got {:?}", other),
+        }
+    }
+
+    /// Test runtime loader: launch without loaded device code fails fast
+    /// with a clear message.
+    #[test]
+    fn test_runtime_loader_dispatch_requires_device_code() {
+        let mut section = OffloadSection::new();
+        section.add_entry(OffloadEntry {
+            kind: OffloadKind::Cuda,
+            func: "vec_add".into(),
+            file: "k.cu".into(),
+            line: 1,
+            col: 1,
+            device_triple: "nvptx64-nvidia-cuda".into(),
+            arch: None,
+        });
+
+        let mut loader = OffloadRuntimeLoader::new();
+        loader.load_from_section(&section);
+        loader.set_runtime_status("nvptx64-nvidia-cuda", RuntimeStatus::Available);
+
+        let params = KernelLaunchParams::new("vec_add");
+        let result = loader.launch_kernel(&params);
+        match result {
+            KernelLaunchResult::Failed(msg) => {
+                assert!(msg.contains("no device code (cubin)"), "{msg}");
+            }
+            other => panic!("expected Failed without device code, got {:?}", other),
         }
     }
 

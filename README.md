@@ -290,13 +290,13 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 |--------|------|------|
 | PGO (frontend) | `-fprofile-generate[=dir]` / `-fprofile-use=file` | ✅ `.profraw` 二进制；driver/codegen 接入 `__dcc_pgo_count_fn` |
 | PGO (instr) | `-fprofile-instr-generate` / `-fprofile-instr-use=` | ✅ stub（仅入口计数器） |
-| GCOV | `-ftest-coverage` / `-fprofile-arcs` | ✅ `.gcno` + `.gcda`（GCC gcov-9 layout 对齐，CFG checksum 拓扑敏感）；端到端硬门禁：插桩 `__dcc_gcov_counter_inc` + 运行时 `.gcovrt.c` 落盘 + atexit 写真实 counter |
+| GCOV | `-ftest-coverage` / `-fprofile-arcs` | ✅ `.gcno` + `.gcda`（GCC gcov-9 layout 对齐，CFG checksum 拓扑敏感） |
 | AutoFDO | `-fauto-profile=` / `-fprofile-sample-use=` | ✅ text parser + bucketize + inline calls 链 + merge + summary；接入 hot 函数下沉 `.text.hot` |
 | LBR | `-flbr-profile=` | ✅ `perf script -F brstack` 解析 (含 mispredict/cycles) + inbound/outbound 边查询 + merge + summary |
 | MemProf | `-fmemory-profile` / `-fmemory-profile-use=` | ✅ text parser + AllocClass 分类 (Hot/Normal/Cold/Ephemeral) + lifetime 分析 + merge + summary；真实 C 运行时（callstack 采集 + lifetime 配对 + `.memprofdata` 写出，`DCC_MEMPROF_OUT`） |
 | 跨源权重聚合 | 任意 `-fprofile-*` 组合 | ✅ `ProfileWeights` 聚合 4 源（M25） |
 | TopdownL1 | `-ftopdownmetrics` | ✅ L1 四 slot + L2 八子分类 + `perf stat` 解析 + `primary_bottleneck` 诊断 + merge + summary |
-| Offloading | `-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` | ✅ `OffloadConfig` 全形式解析 + `OffloadSection` 二进制序列化 + `.dcc.offload` ELF 节 + device codegen（真实 PTX/AMDGCN kernel，`.target` 取 `--offload-arch`） |
+| Offloading | `-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` | ✅ `OffloadConfig` 全形式解析 + `OffloadSection` 二进制序列化 + `.dcc.offload` ELF 节 + device codegen (PTX/AMDGCN) |
 
 ## 7. 内建函数
 

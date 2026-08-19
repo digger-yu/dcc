@@ -581,6 +581,22 @@ entries[]: kind u8 | func u16+bytes | file u16+bytes |
   id，`global_load_dword` 读入、`v_add` 求和、`global_store_dword`
   写回，`s_endpgm` 结束。
 
+### 7.4c Runtime dispatch (`device_codegen.rs::OffloadRuntimeLoader`)
+
+`check_runtime(triple)` 做真实 driver 探测：dlopen `libcuda.so.1` /
+`libamdhip64.so` 并调用 `cuInit(0)` / `hipInit(0)`，按结果返回
+`Available` / `InitFailed` / `NotFound`（带诊断消息）。
+
+`launch_kernel(params)` 在 runtime Available 时真正分发：
+* 通过 dlsym 解析 `cuModuleLoadData` / `cuModuleGetFunction` /
+  `cuLaunchKernel`（ROCm 对应 `hipModuleLoadData` /
+  `hipModuleGetFunction` / `hipLaunchKernel`）
+* 加载已注入的设备代码（`set_device_code` /
+  `load_device_code_from_file`，cubin / hsaco），按 kernel 名取
+  function，以 grid/block/args/shared 几何调 driver API
+* 未加载设备代码 / 符号缺失 / 调用失败均返回带原因的
+  `KernelLaunchResult::Failed`
+
 ### 7.5 Driver 链接实装 (`offload_driver_link.rs`)
 
 `OffloadDriverLinker` 实装 CUDA/ROCm driver 链接:
@@ -658,9 +674,10 @@ parse / memprof parse + is_cold / topdown sum / offload json roundtrip。
 * **AutoFDO / LBR / MemProf 权重不下发到 codegen**：数据结构 + parser
   就绪，但 hot/cold 重排 / inliner hint / `__attribute__((malloc))`
   属性注入等下游通路还在 backlog。
-* **Offloading device dispatch 未实装**：device codegen 已生成真实
-  PTX/AMDGCN kernel（vec-add 体），但 host 侧 runtime loader 的
-  driver 探测与 kernel launch 分发仍是占位（见 §7.4b / roadmap）。
+* **Offloading 需真实 GPU driver 才能端到端验证**：device codegen
+  生成真实 PTX/AMDGCN kernel，runtime loader 已实装 driver 探测与
+  kernel launch 分发（dlopen + cuInit/hipInit + cuLaunchKernel），
+  但 CI 无 GPU 时只能验证到 "driver 不存在" / 分发路径可达。
 * **AArch64 / RISC-V profile 后端**：当前 PGO / GCOV 计数器仅在
   x86_64 上验证 layout，其它 arch 待补。
 * **.dcc.offload 二进制格式**：当前是 JSON，binary 序列化待定。
@@ -668,7 +685,7 @@ parse / memprof parse + is_cold / topdown sum / offload json roundtrip。
 后续 milestone (M21+ 候选)：
 * AutoFDO 权重 → 函数布局 / inliner 提示
 * MemProf `is_cold` → `__attribute__((malloc))` 注入
-* Offloading 至少完成 OpenMP `target` 的 device dispatch stub
+* MemProf malloc/free 插桩接入 driver（改写 malloc/free 调用）
 * AArch64 / RISC-V profile runtime helper
 
 ---
