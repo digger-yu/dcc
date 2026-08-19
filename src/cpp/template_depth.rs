@@ -1,19 +1,16 @@
-//! 模板嵌套深度限制 (M18.x)
+//! 模板嵌套深度限制。
 //!
-//! C++ 模板实例化 `T<U<...>>` 在 dcc 中由 parse_mangle_type 递归解析,
-//! 嵌套深度不受控时存在两个隐患:
-//!   1. `looks_like_template_args_after_lt` 每层递归都克隆 lexer 向前
-//!      扫描, 深度 n 时总开销 O(n^2); 实测数万层嵌套会让编译挂起;
-//!   2. 递归解析本身可能触发栈溢出.
+//! C++ 模板实例化 `T<U<...>>` 在 dcc 中由 `parse_mangle_type`
+//! 递归解析。为与 GCC 的默认 `-ftemplate-depth=900` 保持兼容，
+//! dcc 采用相同的默认上限；这也避免真实 GCC 源码在解析阶段因
+//! 过低的实现限制而被拒绝。
 //!
-//! 主流 C++ 编译器均有默认深度限制: GCC -ftemplate-depth 默认 900,
-//! clang 默认 1024. dcc 作为简化实现取 128: 真实代码嵌套模板极少
-//! 超过此值 (STL 容器组合通常 < 8 层), 同时足以防御上述两类问题.
+//! 解析器仍会在超过此上限时诊断，防止恶意输入导致递归栈耗尽。
 
-/// 最大模板嵌套深度 (解析层)
-pub const MAX_TEMPLATE_DEPTH: u32 = 128;
+/// GCC 默认的最大模板嵌套深度。
+pub const MAX_TEMPLATE_DEPTH: u32 = 900;
 
-/// 深度超限错误消息
+/// 深度超限错误消息。
 pub fn depth_error_msg(depth: u32) -> String {
     format!(
         "template nesting depth {} exceeds limit {}",
@@ -25,9 +22,15 @@ pub fn depth_error_msg(depth: u32) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn matches_gcc_default_depth() {
+        assert_eq!(MAX_TEMPLATE_DEPTH, 900);
+    }
+
+    #[test]
     fn error_message_mentions_depth() {
-        let msg = depth_error_msg(129);
-        assert!(msg.contains("129"), "{}", msg);
+        let msg = depth_error_msg(MAX_TEMPLATE_DEPTH + 1);
+        assert!(msg.contains("901"), "{}", msg);
         assert!(msg.contains("depth"), "{}", msg);
     }
 }

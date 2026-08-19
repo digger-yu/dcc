@@ -7970,7 +7970,7 @@ fn p2_3_template_arg_syntax() {
     );
 }
 
-/// M18.x: 模板嵌套深度限制 - 正常深度 (≤ MAX_TEMPLATE_DEPTH=128)
+/// M18.x: 模板嵌套深度限制 - 正常深度 (≤ MAX_TEMPLATE_DEPTH)
 /// 应在类型上下文 (形参) 与表达式上下文 (局部声明) 都能编译;
 /// 同时覆盖深层嵌套 `>>` 拆 token 的正确闭合 (template_depth.cpp).
 #[test]
@@ -7986,20 +7986,21 @@ fn m18_template_depth_ok() {
     );
 }
 
-/// M18.x: 模板嵌套深度超限 (200 层 > 128) 应报模板深度错误
-/// (C0004) 而非挂起/栈溢出 (修复前 50000 层嵌套会让编译超时).
+/// M18.x: 模板嵌套深度超限 (MAX_TEMPLATE_DEPTH + 1) 应报模板深度错误
+/// (C0004), 而非挂起/栈溢出。
 #[test]
 #[cfg(unix)]
 fn m18_template_depth_limit_enforced() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-cpp-depth-limit-{}.cpp", std::process::id()));
     let object_path = dir.join(format!("dcc-cpp-depth-limit-{}.o", std::process::id()));
-    // 200 层嵌套模板作为形参类型 (走 parse_mangle_type 深度检查)
+    // 超过默认模板深度作为形参类型 (走 parse_mangle_type 深度检查)
+    let depth = 901usize; // MAX_TEMPLATE_DEPTH (900) + 1
     let mut src = String::from("template <class T> struct Wrap { T v; };\n");
     src.push_str("int take(");
-    src.push_str(&"Wrap<".repeat(200));
+    src.push_str(&"Wrap<".repeat(depth));
     src.push_str("int");
-    src.push_str(&">".repeat(200));
+    src.push_str(&">".repeat(depth));
     src.push_str("* p) { return p != 0; }\n");
     src.push_str("int main() { return 0; }\n");
     fs::write(&source_path, &src).expect("write C++ fixture");
