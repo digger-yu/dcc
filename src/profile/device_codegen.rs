@@ -19,6 +19,8 @@ pub struct DeviceCodegenResult {
     pub device_code: HashMap<String, String>,
     /// Diagnostics/warnings
     pub diagnostics: Vec<String>,
+    /// Hard errors: 未知 device triple 等 (调用方应视为 codegen 失败)
+    pub errors: Vec<String>,
 }
 
 /// Offload runtime loader: reads `.dcc.offload` sections and dispatches
@@ -634,10 +636,17 @@ fn rocm_launch(func: &str, _code: &[u8], _params: &KernelLaunchParams) -> Result
 }
 
 /// Generate device code for all offload entries
+///
+/// 已知 device triple (nvptx* / amdgcn*) 生成对应 PTX/AMDGCN kernel;
+/// 空 triple 表示 host fallback (OpenMP 未指定 -fopenmp-targets),
+/// 静默跳过 (不需要设备代码); 未知非空 triple 是硬错误 —— 写入
+/// `errors`, 不产出该目标的设备代码, 避免 "请求了设备目标却拿到
+/// 纯 host 二进制" 的静默降级。
 pub fn generate_device_code(section: &OffloadSection) -> DeviceCodegenResult {
     let mut result = DeviceCodegenResult {
         device_code: HashMap::new(),
         diagnostics: Vec::new(),
+        errors: Vec::new(),
     };
 
     // Group entries by device triple
@@ -655,9 +664,13 @@ pub fn generate_device_code(section: &OffloadSection) -> DeviceCodegenResult {
             generate_ptx_code(entries)
         } else if triple.contains("amdgcn") {
             generate_amdgcn_code(entries)
+        } else if triple.is_empty() {
+            // host fallback: OpenMP 未指定 -fopenmp-targets, 无需设备代码
+            continue;
         } else {
-            result.diagnostics.push(format!(
-                "warning: unsupported device triple '{}', skipping codegen",
+            result.errors.push(format!(
+                "error: unsupported device triple '{}' (expected nvptx* / amdgcn*); \
+                 refusing to skip device codegen silently",
                 triple
             ));
             continue;
@@ -860,6 +873,62 @@ mod tests {
         assert_eq!(result.device_code.len(), 2);
         assert!(result.device_code.contains_key("nvptx64-nvidia-cuda"));
         assert!(result.device_code.contains_key("amdgcn-amd-amdhsa"));
+        assert!(result.errors.is_empty());
+    }
+
+    /// 未知 device triple 必须是硬错误 (写入 errors), 而不是
+    /// warning 后静默跳过设备 codegen。
+    #[test]
+    fn test_unsupported_triple_is_hard_error() {
+        let mut section = OffloadSection::new();
+        section.add_entry(OffloadEntry {
+            kind: OffloadKind::Cuda,
+            func: "k1".into(),
+            file: "k.cu".into(),
+            line: 1,
+            col: 1,
+            device_triple: "sparc-unknown-linux".into(),
+            arch: None,
+        });
+        section.add_entry(OffloadEntry {
+            kind: OffloadKind::Cuda,
+            func: "k2".into(),
+            file: "k.cu".into(),
+            line: 2,
+            col: 1,
+            device_triple: "nvptx64-nvidia-cuda".into(),
+            arch: None,
+        });
+
+        let result = generate_device_code(&section);
+        assert!(!result.errors.is_empty(), "未知 triple 应报错");
+        assert!(
+            result.errors[0].contains("sparc-unknown-linux"),
+            "错误消息应含非法 triple: {}",
+            result.errors[0]
+        );
+        // 已知 triple 仍正常生成
+        assert!(result.device_code.contains_key("nvptx64-nvidia-cuda"));
+        assert!(!result.device_code.contains_key("sparc-unknown-linux"));
+    }
+
+    /// 空 triple (OpenMP host fallback) 静默跳过, 不算错误。
+    #[test]
+    fn test_empty_triple_host_fallback_skipped() {
+        let mut section = OffloadSection::new();
+        section.add_entry(OffloadEntry {
+            kind: OffloadKind::OmpTarget,
+            func: "kern".into(),
+            file: "k.c".into(),
+            line: 1,
+            col: 1,
+            device_triple: String::new(),
+            arch: None,
+        });
+
+        let result = generate_device_code(&section);
+        assert!(result.errors.is_empty());
+        assert!(result.device_code.is_empty());
     }
 
     /// Test runtime loader: load from OffloadSection and query entries

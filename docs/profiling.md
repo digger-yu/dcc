@@ -580,6 +580,9 @@ entries[]: kind u8 | func u16+bytes | file u16+bytes |
   从 kernarg 段 (s[4:5]) 加载 a/b/c 指针，v0 为线性全局 work-item
   id，`global_load_dword` 读入、`v_add` 求和、`global_store_dword`
   写回，`s_endpgm` 结束。
+* **未知 device triple 是硬错误**：`generate_device_code` 对非空且
+  未知的 triple 写入 `result.errors`（不静默跳过）；空 triple 表示
+  OpenMP host fallback，静默跳过。
 
 ### 7.4c Runtime dispatch (`device_codegen.rs::OffloadRuntimeLoader`)
 
