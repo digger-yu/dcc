@@ -296,7 +296,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 | MemProf | `-fmemory-profile` / `-fmemory-profile-use=` | ✅ text parser + AllocClass 分类 (Hot/Normal/Cold/Ephemeral) + lifetime 分析 + merge + summary；真实 C 运行时（callstack 采集 + lifetime 配对 + `.memprofdata` 写出，`DCC_MEMPROF_OUT`） |
 | 跨源权重聚合 | 任意 `-fprofile-*` 组合 | ✅ `ProfileWeights` 聚合 4 源（M25） |
 | TopdownL1 | `-ftopdownmetrics` | ✅ L1 四 slot + L2 八子分类 + `perf stat` 解析 + `primary_bottleneck` 诊断 + merge + summary |
-| Offloading | `-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` | ✅ `OffloadConfig` 全形式解析 + `OffloadSection` 二进制序列化 + `.dcc.offload` ELF 节 + device codegen (PTX/AMDGCN) |
+| Offloading | `-fopenmp` / `-fopenmp=simd` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=` | ✅ `OffloadConfig` 全形式解析 + `OffloadSection` 二进制序列化 + `.dcc.offload` ELF 节 + device codegen（真实 PTX/AMDGCN kernel，`.target` 取 `--offload-arch`） |
 
 ## 7. 内建函数
 

@@ -567,6 +567,20 @@ entries[]: kind u8 | func u16+bytes | file u16+bytes |
     （no-op）；W0313 不支持的构造被忽略——均带精确位置
 * `codegen` 在全部 6 个 arch 输出 `.dcc.offload` 节（PROGBITS, align 8）
 
+### 7.4b Device codegen (`device_codegen.rs`)
+
+`generate_device_code(section)` 为每个 device triple 生成真实设备代码
+（不再是裸 `ret` / `s_endpgm` stub）：
+
+* **PTX (CUDA/HIP/OpenMP target)**：`.version 7.0` + `.target` 取自
+  `--offload-arch=`（sm_*，缺省 sm_35）。每个 `.visible .entry` 含
+  完整 kernel 体：`ctaid.x * ntid.x + tid.x` 计算线性全局线程 id，
+  `ld.global` 读 b[i]/c[i]，`add` 求和，`st.global` 写回 a[i]。
+* **AMDGCN (HIP/OpenMP target)**：GCN kernel ABI —— `s_load_dwordx2`
+  从 kernarg 段 (s[4:5]) 加载 a/b/c 指针，v0 为线性全局 work-item
+  id，`global_load_dword` 读入、`v_add` 求和、`global_store_dword`
+  写回，`s_endpgm` 结束。
+
 ### 7.5 Driver 链接实装 (`offload_driver_link.rs`)
 
 `OffloadDriverLinker` 实装 CUDA/ROCm driver 链接:
@@ -644,8 +658,9 @@ parse / memprof parse + is_cold / topdown sum / offload json roundtrip。
 * **AutoFDO / LBR / MemProf 权重不下发到 codegen**：数据结构 + parser
   就绪，但 hot/cold 重排 / inliner hint / `__attribute__((malloc))`
   属性注入等下游通路还在 backlog。
-* **Offloading 设备后端未实装**：只接受 `-fcuda` / `-fhip` /
-  `-fopenmp-targets=` 选项并存元数据，device codegen 路径不存在。
+* **Offloading device dispatch 未实装**：device codegen 已生成真实
+  PTX/AMDGCN kernel（vec-add 体），但 host 侧 runtime loader 的
+  driver 探测与 kernel launch 分发仍是占位（见 §7.4b / roadmap）。
 * **AArch64 / RISC-V profile 后端**：当前 PGO / GCOV 计数器仅在
   x86_64 上验证 layout，其它 arch 待补。
 * **.dcc.offload 二进制格式**：当前是 JSON，binary 序列化待定。
