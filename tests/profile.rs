@@ -85,6 +85,120 @@ fn cli_test_coverage_accepted() {
     assert!(status.success());
 }
 
+/// GCOV 端到端硬门禁: 编译 -> 落盘 .gcno/.gcovrt.c -> 运行 ->
+/// 运行时把真实 counter 写入 .gcda -> 解析并校验 counter 值。
+///
+/// 任何一环断裂 (插桩不生效 / .gcno 不落盘 / 运行时 .gcda 写出失败 /
+/// counter 偏移与 .gcda 布局不一致) 都会让本测试失败。
+#[test]
+fn gcov_end_to_end_counter_gate() {
+    let dir = std::env::temp_dir().join(format!("dcc-gcov-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("loop_sum.c");
+    std::fs::write(
+        &src,
+        b"int add(int a, int b) { return a + b; }\n\
+          int main(void) {\n\
+              int s = 0;\n\
+              for (int i = 0; i < 10; i++) s = add(s, i);\n\
+              return s == 45 ? 0 : 1;\n\
+          }\n",
+    )
+    .expect("写源文件");
+
+    // 1) dcc 编译: -ftest-coverage -fprofile-arcs 必须产出 .gcno + .gcovrt.c
+    let status = dcc()
+        .current_dir(&dir)
+        .args(["-std=gnu23", "-ftest-coverage", "-fprofile-arcs", "-c"])
+        .arg(src.file_name().unwrap())
+        .args(["-o", "loop_sum.o"])
+        .status()
+        .expect("运行 dcc");
+    assert!(status.success(), "gcov 插桩编译必须成功");
+    assert!(dir.join("loop_sum.gcno").exists(), "应产出 .gcno");
+    assert!(dir.join("loop_sum.gcovrt.c").exists(), "应产出运行时 C");
+
+    // 2) 用 host cc 链接运行时并运行
+    let cc_ok = Command::new("cc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !cc_ok {
+        let _ = std::fs::remove_dir_all(&dir);
+        return; // 无 host cc 的环境跳过链接阶段, 编译侧断言已执行
+    }
+    let link = Command::new("cc")
+        .current_dir(&dir)
+        .args(["-O0", "loop_sum.o", "loop_sum.gcovrt.c", "-o", "loop_sum"])
+        .status()
+        .expect("运行 cc 链接");
+    assert!(link.success(), "链接 gcov 运行时必须成功");
+    let run = Command::new("./loop_sum")
+        .current_dir(&dir)
+        .status()
+        .expect("运行被测程序");
+    assert!(run.success(), "被测程序应正常退出");
+
+    // 3) 解析 .gcda, 校验真实 counter 值
+    let data = std::fs::read(dir.join("loop_sum.gcda")).expect("应产出 .gcda");
+    assert!(data.len() > 24, ".gcda 太短");
+    assert_eq!(&data[0..4], &[0x61, 0x64, 0x63, 0x67], ".gcda magic 应为 'gcda'");
+
+    // 布局: magic/version/stamp(12) + runs/sums(8) + source(pascal)
+    let mut p = 20usize;
+    let slen = u32::from_le_bytes(data[p..p + 4].try_into().unwrap()) as usize;
+    p += 4 + slen;
+    let mut counters: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
+    while p + 16 <= data.len() {
+        let _ident = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
+        p += 4;
+        let _lno = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
+        p += 4;
+        let _cfg = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
+        p += 4;
+        let nlen = u32::from_le_bytes(data[p..p + 4].try_into().unwrap()) as usize;
+        p += 4;
+        if p + nlen > data.len() {
+            break;
+        }
+        let name = String::from_utf8_lossy(&data[p..p + nlen]).into_owned();
+        p += nlen;
+        let _n_tag = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
+        p += 4;
+        let _tag = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
+        p += 4;
+        if p + 4 > data.len() {
+            break;
+        }
+        let nc = u32::from_le_bytes(data[p..p + 4].try_into().unwrap()) as usize;
+        p += 4;
+        if p + 8 * nc > data.len() {
+            break;
+        }
+        let mut cs = Vec::with_capacity(nc);
+        for _ in 0..nc {
+            cs.push(u64::from_le_bytes(data[p..p + 8].try_into().unwrap()));
+            p += 8;
+        }
+        counters.insert(name, cs);
+    }
+
+    // add 被循环调用 10 次: entry + return 两块各 10
+    let add = counters.get("add").unwrap_or_else(|| panic!(".gcda 缺少 add: {counters:?}"));
+    assert_eq!(add.len(), 2, "add 应有 2 个 counter: {add:?}");
+    assert_eq!(add[0], 10, "add entry counter 应为 10: {add:?}");
+    assert_eq!(add[1], 10, "add return counter 应为 10: {add:?}");
+    // main: entry + decl + for + return 四块各 1
+    let main = counters.get("main").unwrap_or_else(|| panic!(".gcda 缺少 main: {counters:?}"));
+    assert_eq!(main.len(), 4, "main 应有 4 个 counter: {main:?}");
+    assert!(main.iter().all(|&c| c == 1), "main 各块应执行 1 次: {main:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn cli_record_profile_rejects_missing_path() {
     // -frecord-profile 必须带 dir; 无后续 arg 才报错

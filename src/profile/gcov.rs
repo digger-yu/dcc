@@ -22,6 +22,8 @@
 //   * 读取器: read_notes() / read_data() 解析 .gcno/.gcda
 //   * 行级覆盖率报告: GcovReport 生成文本格式覆盖率
 
+use crate::ast::{BlockItem, Decl, Expr, Program, Stmt, Type};
+use crate::diagnostics::Span;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -41,6 +43,13 @@ impl Default for GcovConfig {
             emit_data: false,
             counter_bits: 32,
         }
+    }
+}
+
+impl GcovConfig {
+    /// 是否启用任何 GCOV 相关插桩 (`-ftest-coverage` / `-fprofile-arcs`)。
+    pub fn is_active(&self) -> bool {
+        self.emit_notes || self.emit_data
     }
 }
 
@@ -258,6 +267,433 @@ impl GcovUnit {
 
 fn sum_blocks_before(u: &GcovUnit, idx: usize) -> usize {
     u.functions.iter().take(idx).map(|f| f.blocks.len()).sum()
+}
+
+/// 从 AST 构建 GCOV 单元并在基本块入口插入 counter 自增调用。
+///
+/// 块模型 (线性近似): 每个函数 = 1 个 entry 块 + 每顶层语句 1 个块,
+/// 块按语句顺序串成一条链 (block i -> block i+1)。行号表收集每个块
+/// 覆盖到的语句起始行。返回的 `GcovUnit` 描述整个程序的 CFG 布局,
+/// 供 `.gcno` 落盘与运行时 C 代码 (`GcovRuntime::generate_c`) 使用。
+///
+/// 插桩: 每个块的入口插入 `__dcc_gcov_counter_inc(idx)` 调用, idx 与
+/// 块索引一一对应。运行时按相同顺序把计数器写入 `.gcda`, 从而完成
+/// "编译 -> 运行 -> counter 更新 -> 报告" 的端到端闭环。
+pub fn instrument_program(prog: &mut Program, source_name: &str, cfg: &GcovConfig) -> GcovUnit {
+    let mut unit = GcovUnit::new(source_name);
+    if !cfg.is_active() {
+        return unit;
+    }
+    // counter idx 全局递增: 运行时按函数顺序 (sum of blocks before) 把
+    // counter 数组写入 .gcda, 与这里的全局 idx 一一对应。
+    let mut idx: u32 = 0;
+    for d in &mut prog.decls {
+        let f = match d {
+            Decl::Func(f) => f,
+            _ => continue,
+        };
+        if f.body.is_none() {
+            continue;
+        }
+        let span = f.span.clone();
+        let n_items = f.body.as_ref().unwrap().items.len();
+        // entry 块 + 每顶层语句一块
+        let mut blocks = Vec::with_capacity(n_items + 1);
+        blocks.push(GcovBlock {
+            flags: 0,
+            succs: if n_items == 0 {
+                vec![]
+            } else {
+                vec![(1, 0)]
+            },
+            lines: vec![span.line],
+        });
+        for (i, item) in f.body.as_ref().unwrap().items.iter().enumerate() {
+            let mut lines = Vec::new();
+            collect_item_lines(item, &mut lines);
+            let succ = if i + 1 < n_items {
+                vec![(i as u32 + 2, 0)]
+            } else {
+                vec![]
+            };
+            blocks.push(GcovBlock {
+                flags: 0,
+                succs: succ,
+                lines,
+            });
+        }
+        let func = GcovFunction {
+            name: f.name.name.clone(),
+            file: span.file.clone(),
+            ident: 0,
+            lineno: span.line,
+            blocks,
+            line_counts: HashMap::new(),
+        };
+        // 插入 counter 自增调用: entry counter 在 body 顶部, 每条语句
+        // 的 counter 插在其正前方。
+        insert_counter_call(&mut f.body, 0, idx, &span);
+        idx += 1;
+        for i in 0..n_items {
+            insert_counter_call(&mut f.body, i + 1, idx, &span);
+            idx += 1;
+        }
+        unit.push_function(func);
+    }
+    unit
+}
+
+/// 收集一个 BlockItem 覆盖的源行号 (语句起始行 + 嵌套语句)。
+fn collect_item_lines(item: &BlockItem, out: &mut Vec<u32>) {
+    match item {
+        BlockItem::Stmt(s) => collect_stmt_lines(s, out),
+        BlockItem::Decl(d) => {
+            let sp = match d {
+                Decl::Var(v) => &v.span,
+                Decl::Func(f) => &f.span,
+                Decl::StructDef(s) => &s.span,
+                Decl::UnionDef(s) => &s.span,
+                Decl::EnumDef(e) => &e.span,
+                Decl::Typedef { span, .. } => span,
+                Decl::GlobalAsm { span, .. } => span,
+            };
+            out.push(sp.line);
+        }
+    }
+}
+
+fn collect_stmt_lines(s: &Stmt, out: &mut Vec<u32>) {
+    out.push(stmt_span(s).line);
+    match s {
+        Stmt::Return { val, .. } => {
+            if let Some(e) = val {
+                out.push(expr_span(e).line);
+            }
+        }
+        Stmt::Expr { e, .. } => out.push(expr_span(e).line),
+        Stmt::If {
+            cond,
+            then_,
+            else_,
+            ..
+        } => {
+            out.push(expr_span(cond).line);
+            collect_stmt_lines(then_, out);
+            if let Some(e) = else_ {
+                collect_stmt_lines(e, out);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            out.push(expr_span(cond).line);
+            collect_stmt_lines(body, out);
+        }
+        Stmt::Do { body, cond, .. } => {
+            collect_stmt_lines(body, out);
+            out.push(expr_span(cond).line);
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                collect_stmt_lines(i, out);
+            }
+            if let Some(c) = cond {
+                out.push(expr_span(c).line);
+            }
+            if let Some(s) = step {
+                out.push(expr_span(s).line);
+            }
+            collect_stmt_lines(body, out);
+        }
+        Stmt::Block { b, .. } => {
+            for it in &b.items {
+                collect_item_lines(it, out);
+            }
+        }
+        Stmt::GotoIndirect { expr, .. } => out.push(expr_span(expr).line),
+        Stmt::Label { stmt, .. } => collect_stmt_lines(stmt, out),
+        Stmt::Switch { expr, cases, .. } => {
+            out.push(expr_span(expr).line);
+            for c in cases {
+                if let Some(v) = &c.val {
+                    out.push(expr_span(v).line);
+                }
+                if let Some(r) = &c.range_end {
+                    out.push(expr_span(r).line);
+                }
+                for it in &c.body.items {
+                    collect_item_lines(it, out);
+                }
+            }
+        }
+        Stmt::AsmGoto {
+            inputs, outputs, ..
+        } => {
+            for e in inputs {
+                out.push(expr_span(e).line);
+            }
+            for e in outputs {
+                out.push(expr_span(e).line);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn stmt_span(s: &Stmt) -> &Span {
+    match s {
+        Stmt::Return { span, .. }
+        | Stmt::Expr { span, .. }
+        | Stmt::If { span, .. }
+        | Stmt::While { span, .. }
+        | Stmt::Do { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::Block { span, .. }
+        | Stmt::Break { span }
+        | Stmt::Continue { span }
+        | Stmt::Goto { span, .. }
+        | Stmt::GotoIndirect { span, .. }
+        | Stmt::Label { span, .. }
+        | Stmt::Switch { span, .. }
+        | Stmt::AsmGoto { span, .. } => span,
+    }
+}
+
+fn expr_span(e: &Expr) -> &Span {
+    use Expr::*;
+    match e {
+        Int { span, .. }
+        | Float { span, .. }
+        | ComplexLit { span, .. }
+        | Real { span, .. }
+        | Imag { span, .. }
+        | String { span, .. }
+        | Char { span, .. }
+        | Ident { span, .. }
+        | Binop { span, .. }
+        | Unary { span, .. }
+        | Call { span, .. }
+        | Assign { span, .. }
+        | Cond { span, .. }
+        | Cast { span, .. }
+        | SizeofTy { span, .. }
+        | SizeofExpr { span, .. }
+        | Index { span, .. }
+        | Member { span, .. }
+        | AddrOf { span, .. }
+        | Deref { span, .. }
+        | PostInc { span, .. }
+        | PostDec { span, .. }
+        | PreInc { span, .. }
+        | PreDec { span, .. }
+        | CompoundLit { span, .. }
+        | InitList { span, .. }
+        | AlignofTy { span, .. }
+        | AlignofExpr { span, .. }
+        | StmtExpr { span, .. }
+        | Comma { span, .. }
+        | AsmExpr { span, .. }
+        | LabelAddr { span, .. }
+        | VaArg { span, .. }
+        | Offsetof { span, .. } => span,
+    }
+}
+
+/// 构造 `__dcc_gcov_counter_inc(idx)` 调用表达式。
+fn counter_call(idx: u32, span: &Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: crate::ast::Ident {
+                name: "__dcc_gcov_counter_inc".into(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Void,
+        }),
+        args: vec![Expr::Int {
+            v: idx as i128,
+            span: span.clone(),
+            ty: Type::Int,
+        }],
+        span: span.clone(),
+        ty: Type::Void,
+    }
+}
+
+/// 在函数 body 的 `pos` 位置插入 counter 自增语句。
+fn insert_counter_call(body: &mut Option<crate::ast::Block>, pos: usize, idx: u32, span: &Span) {
+    if let Some(b) = body {
+        b.items.insert(
+            pos,
+            BlockItem::Stmt(Stmt::Expr {
+                e: counter_call(idx, span),
+                span: span.clone(),
+            }),
+        );
+    }
+}
+
+/// GCOV 运行时库: 生成可链接的 C 代码。
+///
+/// 职责 (对应 GCC libgcc/libgcov):
+///   * `__dcc_gcov_init`         注册 atexit 回调
+///   * `__dcc_gcov_counter_inc`  自增 counter 数组
+///   * `__dcc_gcov_exit`         把计数器写成 `.gcda` (GCC gcov-9 布局)
+///
+/// `.gcda` 文件名与 GCC 一致: `<src-stem>.gcda` (当前目录), 目录可用
+/// `GCOV_PREFIX` 环境变量覆盖。文件布局与 `GcovUnit::write_data_with_counters`
+/// 完全一致, 可被 `read_data` / `gcov-tool` 读取。
+pub struct GcovRuntime;
+
+impl GcovRuntime {
+    pub fn generate_c(unit: &GcovUnit) -> String {
+        let source = c_escape(&unit.source);
+        let stem = Path::new(&unit.source)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("a");
+        let stem = c_escape(stem);
+        let n_counters: usize = unit.functions.iter().map(|f| f.blocks.len()).sum();
+
+        let mut funcs = String::new();
+        for (i, f) in unit.functions.iter().enumerate() {
+            funcs.push_str(&format!(
+                "    {{ {}, {}, {}, \"{}\" }},\n",
+                i as u32 + 1,
+                cfg_checksum(f),
+                f.blocks.len(),
+                c_escape(&f.name),
+            ));
+        }
+
+        format!(
+            r#"/* dcc gcov runtime - generated for {source} */
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define _DCC_GCOV_DATA_MAGIC 0x67636461u
+#define _DCC_GCOV_VERSION    0x34302Au
+#define _DCC_GCOV_ARC_TAG    0x01u
+
+static const char _dcc_gcov_source[] = "{source}";
+static const char _dcc_gcov_stem[] = "{stem}";
+
+struct _dcc_gcov_func {{
+    uint32_t ident;
+    uint32_t cfg_sum;
+    uint32_t n_counters;
+    const char *name;
+}};
+
+static const struct _dcc_gcov_func _dcc_gcov_funcs[] = {{
+{funcs}}};
+
+static uint64_t _dcc_gcov_counters[{n_counters}] = {{0}};
+static int _dcc_gcov_active = 0;
+
+void __dcc_gcov_init(void);
+void __dcc_gcov_exit(void);
+
+void __dcc_gcov_init(void) {{
+    if (_dcc_gcov_active) return;
+    _dcc_gcov_active = 1;
+    atexit(__dcc_gcov_exit);
+}}
+
+void __dcc_gcov_counter_inc(uint32_t idx) {{
+    __dcc_gcov_init();
+    if (idx < {n_counters}) _dcc_gcov_counters[idx]++;
+}}
+
+static void _dcc_gcov_wr32(FILE *f, uint32_t v) {{
+    unsigned char b[4] = {{
+        (unsigned char)(v & 0xff),
+        (unsigned char)((v >> 8) & 0xff),
+        (unsigned char)((v >> 16) & 0xff),
+        (unsigned char)((v >> 24) & 0xff),
+    }};
+    fwrite(b, 1, 4, f);
+}}
+
+static void _dcc_gcov_wr64(FILE *f, uint64_t v) {{
+    unsigned char b[8];
+    for (int i = 0; i < 8; i++) {{
+        b[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+    }}
+    fwrite(b, 1, 8, f);
+}}
+
+static void _dcc_gcov_wr_str(FILE *f, const char *s) {{
+    uint32_t len = (uint32_t)strlen(s);
+    _dcc_gcov_wr32(f, len);
+    fwrite(s, 1, len, f);
+}}
+
+static void _dcc_gcov_output_path(char *buf, size_t n) {{
+    const char *prefix = getenv("GCOV_PREFIX");
+    if (prefix && *prefix) {{
+        snprintf(buf, n, "%s/%s.gcda", prefix, _dcc_gcov_stem);
+    }} else {{
+        snprintf(buf, n, "%s.gcda", _dcc_gcov_stem);
+    }}
+}}
+
+void __dcc_gcov_exit(void) {{
+    if (!_dcc_gcov_active) return;
+    char path[1024];
+    _dcc_gcov_output_path(path, sizeof path);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    _dcc_gcov_wr32(f, _DCC_GCOV_DATA_MAGIC);
+    _dcc_gcov_wr32(f, _DCC_GCOV_VERSION);
+    _dcc_gcov_wr32(f, 0);       /* stamp */
+    _dcc_gcov_wr32(f, 1);       /* runs */
+    _dcc_gcov_wr32(f, 0);       /* sums */
+    _dcc_gcov_wr_str(f, _dcc_gcov_source);
+    uint32_t off = 0;
+    for (uint32_t i = 0; i < sizeof(_dcc_gcov_funcs) / sizeof(_dcc_gcov_funcs[0]); i++) {{
+        const struct _dcc_gcov_func *g = &_dcc_gcov_funcs[i];
+        _dcc_gcov_wr32(f, g->ident);
+        _dcc_gcov_wr32(f, 0);   /* lno_sum */
+        _dcc_gcov_wr32(f, g->cfg_sum);
+        _dcc_gcov_wr_str(f, g->name);
+        _dcc_gcov_wr32(f, 1);   /* n_tag */
+        _dcc_gcov_wr32(f, _DCC_GCOV_ARC_TAG);
+        _dcc_gcov_wr32(f, g->n_counters);
+        for (uint32_t j = 0; j < g->n_counters; j++) {{
+            _dcc_gcov_wr64(f, _dcc_gcov_counters[off + j]);
+        }}
+        off += g->n_counters;
+    }}
+    _dcc_gcov_wr32(f, 0);
+    fclose(f);
+    _dcc_gcov_active = 0;
+}}
+"#
+        )
+    }
+}
+
+/// C 字符串字面量转义。
+fn c_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 const GCOV_NOTE_MAGIC: u32 = 0x6763_6E6F; // "gcno"
@@ -958,5 +1394,247 @@ mod tests {
         let result = GcovUnit::read_notes(&tmp);
         assert!(result.is_err());
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// instrument_program: 函数 body 被插入 counter 自增调用, 返回的单元
+    /// 块数与插入的调用数一致。
+    #[test]
+    fn gcov_instrument_program_inserts_counter_calls() {
+        use crate::ast::{Block, BlockItem, Decl, FuncDecl, Ident, Program, Stmt, Type};
+        let span = crate::diagnostics::Span::point("t.c", 1, 0);
+        let body = Block {
+            items: vec![
+                BlockItem::Stmt(Stmt::Expr {
+                    e: Expr::Int {
+                        v: 1,
+                        span: span.clone(),
+                        ty: Type::Int,
+                    },
+                    span: span.clone(),
+                }),
+                BlockItem::Stmt(Stmt::Return {
+                    val: Some(Expr::Int {
+                        v: 0,
+                        span: span.clone(),
+                        ty: Type::Int,
+                    }),
+                    span: span.clone(),
+                }),
+            ],
+            span: span.clone(),
+        };
+        let mut prog = Program {
+            decls: vec![Decl::Func(FuncDecl {
+                name: Ident {
+                    name: "f".into(),
+                    span: span.clone(),
+                },
+                ret_ty: Type::Int,
+                params: vec![],
+                body: Some(body),
+                span: span.clone(),
+                is_extern: false,
+                is_static: false,
+                is_unused: false,
+                is_cold: false,
+                is_hot: false,
+                is_noinline: false,
+                is_always_inline: false,
+                is_variadic: false,
+                is_constructor: false,
+                is_destructor: false,
+                is_weak: false,
+                is_nested: false,
+                upvars: vec![],
+                is_old_style: false,
+                format_kind: None,
+                format_string_idx: None,
+                format_first_arg: None,
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
+                ifunc_resolver: None,
+                asm_output_template: None,
+                is_global: false,
+                is_device: false,
+                is_host: false,
+                section: None,
+                alignment: None,
+                alias_name: None,
+                visibility: None,
+            })],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let cfg = GcovConfig {
+            emit_notes: true,
+            emit_data: true,
+            counter_bits: 64,
+        };
+        let unit = instrument_program(&mut prog, "t.c", &cfg);
+        // 2 条顶层语句 + entry = 3 块
+        assert_eq!(unit.functions.len(), 1);
+        assert_eq!(unit.functions[0].blocks.len(), 3);
+        // body 现在有 3 条 counter 调用 (0, 1, 2)
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!("expected function");
+        };
+        let items = f.body.as_ref().unwrap().items.clone();
+        let mut calls = Vec::new();
+        for item in &items {
+            if let BlockItem::Stmt(Stmt::Expr { e, .. }) = item {
+                if let Expr::Call { callee, args, .. } = e {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        if name.name == "__dcc_gcov_counter_inc" {
+                            let Expr::Int { v, .. } = &args[0] else {
+                                continue;
+                            };
+                            calls.push(*v);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(calls, vec![0, 1, 2]);
+    }
+
+    /// instrument_program: counter idx 跨函数全局递增, 与运行时按
+    /// 函数顺序写 .gcda 的偏移一致。
+    #[test]
+    fn gcov_instrument_uses_global_counter_indices() {
+        use crate::ast::{Block, BlockItem, Decl, FuncDecl, Ident, Program, Stmt, Type};
+        let span = crate::diagnostics::Span::point("t.c", 1, 0);
+        let mk = |name: &str, span: &crate::diagnostics::Span| {
+            Decl::Func(FuncDecl {
+                name: Ident {
+                    name: name.into(),
+                    span: span.clone(),
+                },
+                ret_ty: Type::Int,
+                params: vec![],
+                body: Some(Block {
+                    items: vec![BlockItem::Stmt(Stmt::Return {
+                        val: Some(Expr::Int {
+                            v: 0,
+                            span: span.clone(),
+                            ty: Type::Int,
+                        }),
+                        span: span.clone(),
+                    })],
+                    span: span.clone(),
+                }),
+                span: span.clone(),
+                is_extern: false,
+                is_static: false,
+                is_unused: false,
+                is_cold: false,
+                is_hot: false,
+                is_noinline: false,
+                is_always_inline: false,
+                is_variadic: false,
+                is_constructor: false,
+                is_destructor: false,
+                is_weak: false,
+                is_nested: false,
+                upvars: vec![],
+                is_old_style: false,
+                format_kind: None,
+                format_string_idx: None,
+                format_first_arg: None,
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
+                ifunc_resolver: None,
+                asm_output_template: None,
+                is_global: false,
+                is_device: false,
+                is_host: false,
+                section: None,
+                alignment: None,
+                alias_name: None,
+                visibility: None,
+            })
+        };
+        let mut prog = Program {
+            decls: vec![mk("f", &span), mk("g", &span)],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let cfg = GcovConfig {
+            emit_notes: true,
+            emit_data: true,
+            counter_bits: 64,
+        };
+        let unit = instrument_program(&mut prog, "t.c", &cfg);
+        assert_eq!(unit.functions.len(), 2);
+        // f: 2 块 (entry + return), g: 2 块 -> 总 4 个 counter
+        let total: usize = unit.functions.iter().map(|f| f.blocks.len()).sum();
+        assert_eq!(total, 4);
+        // g 的 entry counter 应为 2 (f 占用 0,1)
+        let Decl::Func(g) = &prog.decls[1] else {
+            panic!("expected function");
+        };
+        let BlockItem::Stmt(Stmt::Expr { e, .. }) = &g.body.as_ref().unwrap().items[0] else {
+            panic!("expected expr stmt");
+        };
+        let Expr::Call { args, .. } = e else {
+            panic!("expected call");
+        };
+        let Expr::Int { v, .. } = &args[0] else {
+            panic!("expected int arg");
+        };
+        assert_eq!(*v, 2);
+    }
+
+    /// GcovRuntime::generate_c: 生成无 TODO 的真实运行时, 含 counter
+    /// 数组、函数元数据表与 atexit 注册。
+    #[test]
+    fn gcov_runtime_generates_real_c() {
+        let mut u = GcovUnit::new("main.c");
+        u.push_function(GcovFunction {
+            name: "main".into(),
+            file: "main.c".into(),
+            ident: 1,
+            lineno: 5,
+            blocks: vec![
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![(1, 0)],
+                    lines: vec![5],
+                },
+                GcovBlock {
+                    flags: 0,
+                    succs: vec![],
+                    lines: vec![6],
+                },
+            ],
+            line_counts: HashMap::new(),
+        });
+        let code = GcovRuntime::generate_c(&u);
+        assert!(!code.contains("TODO"), "runtime 不应是 stub");
+        assert!(code.contains("__dcc_gcov_counter_inc"));
+        assert!(code.contains("__dcc_gcov_exit"));
+        assert!(code.contains("atexit(__dcc_gcov_exit)"));
+        assert!(code.contains("_dcc_gcov_counters[2]"));
+        assert!(code.contains("\"main\""));
+        assert!(code.contains("_DCC_GCOV_DATA_MAGIC"));
     }
 }

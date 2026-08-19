@@ -186,7 +186,39 @@ function_data[] : N × {
 `gcov_read_notes_rejects_bad_magic`，
 以及 `tests/profile.rs::cli_test_coverage_accepted`。
 
-### 2.4 已知限制
+### 2.4 插桩与运行时（端到端硬门禁）
+
+`.gcno`/`.gcda` 读写器之上，dcc 补齐了完整闭环：
+
+* `instrument_program(prog, source, cfg)`：在每个函数构造
+  "entry 块 + 每顶层语句一块" 的线性 CFG，块入口插入
+  `__dcc_gcov_counter_inc(idx)` 调用（idx 全局递增，与运行时
+  写 `.gcda` 的块偏移一致）；同时返回 `GcovUnit` 供 `.gcno` 落盘
+  与运行时生成。
+* driver 接线：`-ftest-coverage` / `-fprofile-arcs` 编译时落盘
+  `<src-stem>.gcno` 与 `<src-stem>.gcovrt.c`（运行时 C 源码），
+  `-fsyntax-only` 不产出任何文件。
+* `GcovRuntime::generate_c(unit)`：生成真实运行时（对应 GCC
+  libgcc/libgcov）——`__dcc_gcov_counter_inc` 自增数组、
+  `__dcc_gcov_init` 注册 `atexit`、`__dcc_gcov_exit` 把计数器按
+  gcov-9 布局写成 `<src-stem>.gcda`（目录可由 `GCOV_PREFIX` 覆盖）。
+  文件与 `GcovUnit::write_data_with_counters` 布局完全一致，
+  可被 `read_data` / `gcov-tool` 读取。
+
+端到端流程：
+
+```bash
+dcc -std=gnu23 -ftest-coverage -fprofile-arcs -c foo.c -o foo.o
+cc foo.o foo.gcovrt.c -o foo
+./foo                    # 运行时写 foo.gcda (真实 counter)
+```
+
+硬门禁测试 `tests/profile.rs::gcov_end_to_end_counter_gate`：
+编译 -> 校验 `.gcno`/`.gcovrt.c` 落盘 -> 链接 -> 运行 ->
+解析 `.gcda` 并断言 counter 值（循环 10 次 → 被调函数 entry
+counter == 10），任何一环断裂即失败。
+
+### 2.5 已知限制
 
 * ✅ `cfg_checksum` 采用 GCC libgcov `compute_cfg_checksum` 公式
   (每条 succ arc 加 `dst_index + 1`), CFG 拓扑敏感
@@ -552,7 +584,7 @@ E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
 
 ## 8. 集成测试
 
-文件：`tests/profile.rs`，共 11 个测试：
+文件：`tests/profile.rs`，共 12 个测试：
 
 | 测试 | 覆盖 |
 |------|------|
@@ -560,6 +592,7 @@ E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
 | `cli_profile_use_missing_path_rejects` | `-fprofile-use` 无 path 报错 |
 | `cli_emit_asm_still_works_with_profile` | `-fprofile-arcs` + `-fsyntax-only` 共存 |
 | `cli_test_coverage_accepted` | `-ftest-coverage` 接受 |
+| `gcov_end_to_end_counter_gate` | GCOV 端到端硬门禁：编译 → `.gcno`/`.gcovrt.c` → 链接 → 运行 → `.gcda` counter 断言 |
 | `cli_record_profile_rejects_missing_path` | `-frecord-profile` 无 path 报错 |
 | `cli_fopenmp_accepted` | `-fopenmp` 接受 |
 | `cli_fopenmp_targets_accepted` | `-fopenmp-targets=nvptx64-nvidia-cuda` 接受 |
@@ -598,7 +631,6 @@ parse / memprof parse + is_cold / topdown sum / offload json roundtrip。
 * **.dcc.offload 二进制格式**：当前是 JSON，binary 序列化待定。
 
 后续 milestone (M21+ 候选)：
-* 把 `instrument_program` 接到 driver 的 `post_parse` 钩子，真正落计数
 * AutoFDO 权重 → 函数布局 / inliner 提示
 * MemProf `is_cold` → `__attribute__((malloc))` 注入
 * Offloading 至少完成 OpenMP `target` 的 device dispatch stub

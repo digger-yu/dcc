@@ -535,6 +535,48 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         profile::pgo::instrument_program(&mut prog, &pgo_cfg);
     }
 
+    // GCOV: -ftest-coverage (notes) / -fprofile-arcs (arc counters)。
+    // 在每个函数的基本块入口插入 `__dcc_gcov_counter_inc(idx)` 调用,
+    // 同时落盘 `.gcno` 与运行时 C (`<stem>.gcovrt.c`)。程序运行后由
+    // 运行时在 atexit 阶段把真实 counter 写成 `.gcda`, 与 GCC libgcov
+    // 行为一致。仅 `-fsyntax-only` 时不产出任何文件。
+    if (cfg.profile.gcov || cfg.profile.profile_arcs) && !cfg.syntax_only {
+        let gcov_cfg = crate::profile::gcov::GcovConfig {
+            emit_notes: cfg.profile.gcov,
+            emit_data: cfg.profile.profile_arcs,
+            counter_bits: if cfg.profile.profile_arcs { 64 } else { 32 },
+        };
+        let mut gcov_unit =
+            crate::profile::gcov::instrument_program(&mut prog, &file_name, &gcov_cfg);
+        // 行号表从预处理输出坐标映射回源文件坐标
+        remap_gcov_lines(&mut gcov_unit, &line_map);
+        let gcov_stem = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("a")
+            .to_string();
+        if cfg.profile.gcov {
+            let gcno = PathBuf::from(format!("{gcov_stem}.gcno"));
+            if let Err(e) = gcov_unit.write_notes(&gcno) {
+                return Err(vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write {}: {}", gcno.display(), e),
+                    crate::diagnostics::Span::point(&gcno.display().to_string(), 0, 0),
+                )]);
+            }
+        }
+        // 运行时 C 始终生成: 没有它 counter 自增调用无法链接
+        let gcov_rt = crate::profile::gcov::GcovRuntime::generate_c(&gcov_unit);
+        let rt_path = PathBuf::from(format!("{gcov_stem}.gcovrt.c"));
+        if let Err(e) = fs::write(&rt_path, gcov_rt) {
+            return Err(vec![Diagnostic::err(
+                "E0101",
+                format!("cannot write {}: {}", rt_path.display(), e),
+                crate::diagnostics::Span::point(&rt_path.display().to_string(), 0, 0),
+            )]);
+        }
+    }
+
     // 跨数据源权重下发: 加载 4 个 profile 源 (PGO/AutoFDO/LBR/MemProf),
     // 聚合为 ProfileWeights, 写入每个 FuncDecl 的 is_cold / is_hot 字段,
     // 让 codegen 把 hot 函数放到 .text.hot, cold 函数放到 .text.unlikely.
@@ -1864,6 +1906,20 @@ fn remap_span(span: &mut crate::diagnostics::Span, line_map: &[LineSpan]) {
     if let Some(first) = line_map.first() {
         span.file = first.file.clone();
         span.line = first.src_start.max(1);
+    }
+}
+
+/// 把 GCOV 单元内所有块的行号从预处理输出坐标映射回源文件坐标,
+/// 使 `.gcno` / 覆盖率报告指向真实源码行。
+fn remap_gcov_lines(unit: &mut crate::profile::gcov::GcovUnit, line_map: &[LineSpan]) {
+    for f in &mut unit.functions {
+        for b in &mut f.blocks {
+            for l in &mut b.lines {
+                let mut sp = crate::diagnostics::Span::point(&f.file, *l, 1);
+                remap_span(&mut sp, line_map);
+                *l = sp.line;
+            }
+        }
     }
 }
 

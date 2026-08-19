@@ -290,7 +290,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 |--------|------|------|
 | PGO (frontend) | `-fprofile-generate[=dir]` / `-fprofile-use=file` | ✅ `.profraw` 二进制；driver/codegen 接入 `__dcc_pgo_count_fn` |
 | PGO (instr) | `-fprofile-instr-generate` / `-fprofile-instr-use=` | ✅ stub（仅入口计数器） |
-| GCOV | `-ftest-coverage` / `-fprofile-arcs` | ✅ `.gcno` + `.gcda`（GCC gcov-9 layout 对齐，CFG checksum 拓扑敏感） |
+| GCOV | `-ftest-coverage` / `-fprofile-arcs` | ✅ `.gcno` + `.gcda`（GCC gcov-9 layout 对齐，CFG checksum 拓扑敏感）；端到端硬门禁：插桩 `__dcc_gcov_counter_inc` + 运行时 `.gcovrt.c` 落盘 + atexit 写真实 counter |
 | AutoFDO | `-fauto-profile=` / `-fprofile-sample-use=` | ✅ text parser + bucketize + inline calls 链 + merge + summary；接入 hot 函数下沉 `.text.hot` |
 | LBR | `-flbr-profile=` | ✅ `perf script -F brstack` 解析 (含 mispredict/cycles) + inbound/outbound 边查询 + merge + summary |
 | MemProf | `-fmemory-profile` / `-fmemory-profile-use=` | ✅ text parser + AllocClass 分类 (Hot/Normal/Cold/Ephemeral) + lifetime 分析 + merge + summary |
