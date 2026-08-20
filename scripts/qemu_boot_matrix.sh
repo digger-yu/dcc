@@ -12,6 +12,10 @@ echo "compiler: $DCC"
 echo "kernel:   $KERNEL"
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    if [[ "${REQUIRE_QEMU_BOOT:-0}" == "1" ]]; then
+        echo "FAIL: qemu-system-x86_64 not installed"
+        exit 1
+    fi
     echo "SKIP: qemu-system-x86_64 not installed"
     exit 0
 fi
@@ -61,9 +65,9 @@ run_matrix() {
         echo "PASS: $name — ran ${TIMEOUT_SEC}s without panic (timeout OK)"
         pass=$((pass + 1))
     else
-        echo "WARN: $name — no boot string (rc=$rc); check $log"
+        echo "FAIL: $name — no required boot log string (rc=$rc); check $log"
         tail -10 "$log"
-        pass=$((pass + 1))
+        fail=$((fail + 1))
     fi
     rm -f "$log"
 }

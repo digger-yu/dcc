@@ -771,6 +771,76 @@ fn strict_kernel_scripts_reject_missing_artifacts() {
 
 #[test]
 #[cfg(unix)]
+fn strict_qemu_boot_requires_qemu_and_boot_log() {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn make_executable(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("write fake tool");
+        let mut perms = fs::metadata(path).expect("stat fake tool").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod fake tool");
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp = std::env::temp_dir().join(format!("dcc-strict-qemu-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).expect("create qemu fixture dir");
+    fs::write(temp.join("bzImage"), "fake kernel image\n").expect("write fake bzImage");
+
+    let missing_qemu = Command::new("/bin/bash")
+        .arg(root.join("scripts/qemu_boot_matrix.sh"))
+        .env("KERNEL", temp.join("bzImage"))
+        .env("PATH", &temp)
+        .env("REQUIRE_QEMU_BOOT", "1")
+        .output()
+        .expect("run qemu_boot_matrix.sh without qemu");
+    let stdout = String::from_utf8_lossy(&missing_qemu.stdout);
+    assert!(!missing_qemu.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("FAIL: qemu-system-x86_64 not installed"));
+    assert!(!stdout.contains("SKIP:"));
+
+    make_executable(
+        &temp.join("qemu-system-x86_64"),
+        "#!/bin/sh\nprintf 'early console only\\n'\n",
+    );
+    let tool_path = format!(
+        "{}:{}",
+        temp.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let no_boot_log = Command::new("/bin/bash")
+        .arg(root.join("scripts/qemu_boot_matrix.sh"))
+        .env("KERNEL", temp.join("bzImage"))
+        .env("PATH", &tool_path)
+        .env("REQUIRE_QEMU_BOOT", "1")
+        .env("QEMU_TIMEOUT", "1")
+        .output()
+        .expect("run qemu_boot_matrix.sh with missing boot strings");
+    let stdout = String::from_utf8_lossy(&no_boot_log.stdout);
+    assert!(!no_boot_log.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("FAIL: nographic-serial"), "stdout: {stdout}");
+    assert!(stdout.contains("no required boot log string"), "stdout: {stdout}");
+
+    make_executable(
+        &temp.join("qemu-system-x86_64"),
+        "#!/bin/sh\nprintf 'Linux version 7.1.0-dcc\\nBooting Linux on physical CPU 0x0\\n'\n",
+    );
+    let boot_ok = Command::new("/bin/bash")
+        .arg(root.join("scripts/qemu_boot_matrix.sh"))
+        .env("KERNEL", temp.join("bzImage"))
+        .env("PATH", &tool_path)
+        .env("REQUIRE_QEMU_BOOT", "1")
+        .output()
+        .expect("run qemu_boot_matrix.sh with boot strings");
+    let stdout = String::from_utf8_lossy(&boot_ok.stdout);
+    assert!(boot_ok.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("PASS: QEMU matrix"), "stdout: {stdout}");
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+#[test]
+#[cfg(unix)]
 fn strict_vmlinux_regress_requires_debug_tools() {
     use std::os::unix::fs::PermissionsExt;
 
