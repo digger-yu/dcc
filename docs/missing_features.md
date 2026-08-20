@@ -73,7 +73,7 @@
 | coroutine 语义 | ~~parser/lower 存在状态机路径，但仍有占位和语义覆盖缺口~~ → ✅ 已实现：`co_yield`/`co_return`/`co_await` 降级为 Duff's device 状态机（`switch(<fn>_coro_state)` + `case N` 恢复标签），状态/返回槽/完成标志声明为文件作用域 static 全局以跨调用保持（dcc C 后端不支持函数内 static 局部），通过运行时集成测试（M26.2） |
 | virtual inheritance | ~~菱形/虚基复杂布局仍以 warning/注释降级，不是完整 Itanium ABI 虚继承布局~~ → ✅ 已实现：传递虚基 DFS 去重、`__vbptr` + `__vbt_<C>` vbtable（vbase_offset 项，第 0 项为 0）、虚基子对象嵌入对象尾部、自动默认 ctor 初始化 vbptr 并调用虚基 ctor、成员访问与上转型经 vbtable 运行时 this-adjust、`(Base*)&obj` 指向虚基子对象（M26.3）；同时修复 dcc C 后端 `ptr->field` 成员访问丢失字段偏移/宽度的预存 bug |
 | `noexcept(expr)` | ~~当前直接降级为常量 true~~ → ✅ 已实现：分析表达式抛异常可能性（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛）（M26.1） |
-| template depth | 默认深度 128，低于 GCC/Clang 常见上限 |
+| template depth | ~~默认深度 128，低于 GCC/Clang 常见上限~~ → ✅ 已提升至 `MAX_TEMPLATE_DEPTH = 900`（`src/cpp/template_depth.rs`），与 GCC 默认模板嵌套深度一致（Clang 为 1024），含深度超限诊断与单测 |
 
 ## 交叉编译 / 缺失平台
 
