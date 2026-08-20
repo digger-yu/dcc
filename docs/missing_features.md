@@ -64,7 +64,7 @@
 
 | 限制 | 说明 |
 |------|------|
-| GCC 完整 bootstrap | cc1/cc1plus 未完成真实 bootstrap 验证；当前只覆盖可选 GCC source 子集测试 |
+| GCC 完整 bootstrap | cc1/cc1plus 尚未全量构建收敛（完整 C++ 前端仍受限）；已实装可复现的 xfail/ignore 门禁脚本 `scripts/cc1plus_bootstrap.sh`（M26.6）：以 dcc 为 CC/CXX configure + `make -k all-gcc`，产出对象数/错误数/首批失败文件进度报告，退出码 0（SKIP/收敛）或 2（xfail）；由 `gcc_cc1plus_bootstrap_gate` 集成测试（`--features gcc_src` + `GCC_SRC`）驱动 |
 | C++20 modules | ~~`import` 仍等价 include；无 BMIP 二进制缓存、真实跨 TU module import、private fragment 或 partitions~~ → ✅ 已实现：BMF 文本接口（BMIP 缓存）经 `--emit-module-file=foo.bmf` 写出；`import foo;` 从 BMF 生成 extern 声明 + 类布局并注册名字（跨 TU 真实链接）；`module :private;` 私有片段终止导出收集；`export module name:part;` 分区 + `import :part;` 分区导入（`P`/`X` 记录）与合并（M26.4） |
 | C++ ODR 集成 | ~~`OdrChecker` 存在，但不等于完整 module/link pipeline ODR enforcement~~ → ✅ 已实现：OdrChecker 接入 driver 编译管线（M26.5）——本模块导出与所有已加载导入模块（含 partition）的导出按实体名比对函数签名（完整 C 声明文本，含 Itanium 符号）/类布局文本，同名不同定义报 `E0103 ODR violations` 并拒绝编译；同名同定义放行 |
 | C++ enum lowering | ~~enum 仍降级为 `typedef int`~~ → ✅ 已实现：真实 C enum + 枚举值 + scoped 标记 + 可选底层类型 + 匿名枚举（M26.1） |
@@ -161,7 +161,7 @@
 | semantic run tests | SFINAE 失败路径、partial specialization 优先级、concept reject、dynamic_cast 虚继承负向应 compile+link+run |
 | modules | BMF 跨 TU import / partition / private fragment 已覆盖（m26_module_* 集成测试）；ODR 冲突拒绝与同名同定义放行已覆盖（m26_odr_* 集成测试） |
 | coroutine | 覆盖 `co_await`/`co_yield`/`co_return` 状态机运行语义和错误路径 |
-| GCC bootstrap | 增加可复现的 cc1/cc1plus configure/build xfail 或 ignore 门禁脚本 |
+| GCC bootstrap | ~~增加可复现的 cc1/cc1plus configure/build xfail 或 ignore 门禁脚本~~ → ✅ 已实装 `scripts/cc1plus_bootstrap.sh` + `gcc_cc1plus_bootstrap_gate` 集成测试（M26.6），输出进度报告跟踪收敛 |
 
 ### Linker / ELF / debug info
 

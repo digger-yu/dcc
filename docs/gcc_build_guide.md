@@ -2,7 +2,7 @@
 
 > 最终目标仍是 Linux 内核；短期用 GCC 树中的**纯 C**子集（`libiberty`、
 > `fixincludes` 等）暴露 dcc 与现代 glibc/GNU C 的差距。
-> 最后更新：2026-07-21。
+> 最后更新：2026-08-20。
 > 调试环境：本地 Ubuntu (已安装, 磁盘充足), 不再依赖远端 SSH.
 
 ## 范围说明
@@ -12,9 +12,28 @@
 | 目标 | 用 `dcc -c` 编译 GCC 源码树中仍以 C 为主的组件 |
 | 首选子集 | `libiberty/*.c`（主机工具库，纯 C） |
 | 扩展子集 | `fixincludes/*.c`（fixinc 工具链，纯 C） |
+| 主体门禁 | `scripts/cc1plus_bootstrap.sh`（M26.6）：以 dcc 为 CC/CXX 配置并构建 cc1/cc1plus，产出进度报告跟踪 bootstrap 收敛（xfail 门禁） |
 | 非目标（现阶段） | 完整 GCC bootstrap；GCC 主体为 **C++**，dcc 无 C++ 前端 |
 | `libdecnumber` | 源文件为 **include 单元**，须按 DECPMAX 宏组合，单文件 `-c` 跳过 |
 | 调试环境 | 本地 Ubuntu, 磁盘充足, `~/gcc-src` 稀疏克隆在本地 |
+
+## cc1/cc1plus bootstrap 门禁
+
+```bash
+# 需要完整 GCC 源码树 (gcc/ 子目录), 建议全量克隆 (约 1-2GB 稀疏):
+git clone --depth 1 https://github.com/gcc-mirror/gcc.git ~/gcc-src
+cd ~/dcc && cargo build --release
+
+# 运行门禁 (无源码树时 SKIP 退出 0):
+GCC_SRC=~/gcc-src bash scripts/cc1plus_bootstrap.sh
+# 退出码: 0 = SKIP 或 cc1/cc1plus 全量构建 (收敛); 2 = xfail (记录差距)
+# 报告: $GCC_SRC/../dcc-bootstrap-build/cc1plus_progress.txt
+#   (对象数 / 错误数 / 首批失败文件, 用于度量 dcc 对 GCC 主体的收敛)
+
+# 通过 cargo 集成测试驱动 (需 --features gcc_src + GCC_SRC 环境变量):
+GCC_SRC=~/gcc-src cargo test --release --features gcc_src \
+  --test integration gcc_cc1plus_bootstrap_gate
+```
 
 ## 本地探测
 

@@ -661,6 +661,53 @@ fn libdecnumber_combined_tu_compiles() {
     );
 }
 
+/// M26.6: cc1/cc1plus bootstrap 门禁契约验证.
+/// 仅在 --features gcc_src + GCC_SRC 指向真实 GCC 源码树时执行;
+/// 本地/CI 无源码树直接 SKIP. 契约:
+///   - 退出码 0 (SKIP 或 cc1/cc1plus 全量构建收敛) 或 2 (xfail) 都算通过
+///   - xfail 时必须产出进度报告 cc1plus_progress.txt (对象数/错误数/
+///     首批失败文件), 供跟踪 dcc 对 GCC 主体的 bootstrap 收敛
+#[test]
+#[cfg_attr(not(feature = "gcc_src"), ignore = "needs GCC source tree (--features gcc_src + GCC_SRC)")]
+fn gcc_cc1plus_bootstrap_gate() {
+    let gcc_src = match std::env::var("GCC_SRC") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => return, // 没设 GCC_SRC 就当 SKIP
+    };
+    if !gcc_src.join("gcc").exists() {
+        return;
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/cc1plus_bootstrap.sh");
+    let build_dir = std::env::temp_dir().join(format!("dcc-cc1plus-gate-{}", std::process::id()));
+    let output = Command::new("bash")
+        .arg(&script)
+        .env("GCC_SRC", &gcc_src)
+        .env("DCC", env!("CARGO_BIN_EXE_dcc"))
+        .env("BUILD_DIR", &build_dir)
+        .env("TIMEOUT", "300") // 门禁内限时; 契约验证不要求完整构建
+        .output()
+        .expect("run cc1plus bootstrap gate");
+    let status = output.status.code().unwrap_or(-1);
+    // 0 = SKIP/收敛; 2 = xfail 且已产出进度报告; 其他 = 环境错误
+    assert!(
+        status == 0 || status == 2,
+        "gate exit={} stdout={} stderr={}",
+        status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if status == 2 {
+        let report = build_dir.join("cc1plus_progress.txt");
+        assert!(
+            report.exists(),
+            "xfail gate must emit cc1plus_progress.txt"
+        );
+        let text = fs::read_to_string(&report).unwrap();
+        assert!(text.contains("cc1plus bootstrap gate: xfail"), "{}", text);
+    }
+    let _ = fs::remove_dir_all(&build_dir);
+}
+
 #[test]
 fn enum_trailing_comma_parses() {
     let output = run_syntax_test(
