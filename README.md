@@ -143,7 +143,7 @@ C++ 走"降级到 C"路径（`src/cpp/lower.rs`），Itanium ABI 名字修饰，
 | 范围 | 状态 | 覆盖 |
 |------|------|------|
 | 类与对象 | ✅ | class / struct / ctor / dtor / 成员函数 / 成员变量 / `this->` / 引用→指针 |
-| 继承 | ✅ | 单 / 多 / 钻石；虚函数 + vtable（`_ZTV`）+ RTTI（`_ZTI`） |
+| 继承 | ✅ | 单 / 多 / 钻石；虚函数 + vtable（`_ZTV`）+ RTTI（`_ZTI`）；虚继承（M26.3）：vbtable + `__vbptr` + 尾部虚基子对象 + 经 vbtable 的 this-adjust（菱形共享） |
 | 运算符 | ✅ | 命名空间 / operator / Itanium 编码（`pl`/`mi`/`dv`/...） |
 | 异常 | ✅ | `try`/`catch`/`throw` → `__cxa_*` 桩 |
 | Lambda | ✅ | 匿名 `__lambda_N` + `operator()` |

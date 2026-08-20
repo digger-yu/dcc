@@ -104,6 +104,23 @@ pub struct Lower {
     pub pending_fn_insts: std::collections::VecDeque<(String, Vec<MangleType>)>,
     /// M26: 概念定义注册表 (concept name -> body_text)
     pub concepts: std::collections::HashMap<String, String>,
+    /// M26.3: 虚继承: 类的传递虚基列表 (DFS 首次出现顺序, 去重)
+    pub transitive_vbases: std::collections::HashMap<String, Vec<String>>,
+    /// M26.3: 虚继承: 类的 vbtable (vbase_offset 项, 相对本类 __vbptr 字段偏移;
+    /// 第 0 项恒为 0, 即 vbptr 自身)
+    pub vbase_tables: std::collections::HashMap<String, Vec<i64>>,
+    /// M26.3: 虚继承: 模拟类布局, 记录字段/子对象名 -> 字节偏移
+    /// (供 vbtable 常量计算; 与 C struct 实际布局一致才可链接)
+    pub field_offsets: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, i64>,
+    >,
+    /// M26.3: 模拟类大小 (字节)
+    pub class_sizes: std::collections::HashMap<String, i64>,
+    /// M26.3: 模拟类对齐 (字节)
+    pub class_aligns: std::collections::HashMap<String, i64>,
+    /// M26.3: 多态类 (有虚函数/虚析构, 或继承多态基类) - 决定 __vptr 布局
+    pub class_polymorphic: std::collections::HashSet<String>,
 }
 
 /// M18.0: 检查 ident 是否是 C 关键字 (如 int/char/void/...), 不能作为 typedef 名
@@ -319,6 +336,12 @@ impl Lower {
             plain_fns: std::collections::HashSet::new(),
             pending_fn_insts: std::collections::VecDeque::new(),
             concepts: std::collections::HashMap::new(),
+            transitive_vbases: std::collections::HashMap::new(),
+            vbase_tables: std::collections::HashMap::new(),
+            field_offsets: std::collections::HashMap::new(),
+            class_sizes: std::collections::HashMap::new(),
+            class_aligns: std::collections::HashMap::new(),
+            class_polymorphic: std::collections::HashSet::new(),
         }
     }
     pub fn with_options(_opt: LowerOptions) -> Self {
@@ -637,6 +660,11 @@ impl Lower {
         // 先递归处理基类
         if let Some(bases) = class_bases.get(class) {
             for base in bases {
+                // M26.3: 虚基成员经 vbtable 运行时调整, 静态 __base_ 链无效,
+                // 跳过 (成员指针指向虚基成员由 __dcc_mbr_<派生> 不覆盖).
+                if base.is_virtual {
+                    continue;
+                }
                 chain.push(base.name.clone());
                 Self::collect_inherited_members_static(
                     class_bases,
@@ -770,6 +798,14 @@ impl Lower {
         for d in decls {
             self.collect_classes(d);
         }
+        // M26.3: 虚继承预遍历 - 构建完整 class_bases, 计算传递虚基列表、
+        // 多态标记与模拟布局 (vbtable 常量偏移; 必须与 C struct 实际布局一致)
+        for d in decls {
+            self.collect_class_bases(d);
+        }
+        self.compute_transitive_vbases();
+        self.compute_polymorphic_flags();
+        self.compute_class_layouts();
         // M26.1: 收集 noexcept 函数名 (noexcept(expr) 求值用)
         for d in decls {
             self.collect_noexcept_fns(d);
@@ -879,6 +915,367 @@ impl Lower {
                 self.scan_decl_types(d);
             }
         }
+    }
+
+    // ===== M26.3: 虚继承 (Itanium ABI 布局) =====
+
+    /// 递归收集所有类的基类信息 (完整 class_bases), 并登记自有虚函数类.
+    /// 先于实际 lower 运行, 保证任意声明顺序下都能计算虚基布局.
+    fn collect_class_bases(&mut self, d: &CppDecl) {
+        match d {
+            CppDecl::Class(c) => {
+                let qname = self.qualify_name(&c.name);
+                self.class_bases.insert(qname.clone(), c.bases.clone());
+                // 自有虚函数/虚析构 -> 多态 (vptr 布局依据)
+                let own_virt = c.members.iter().any(|m| {
+                    matches!(
+                        m,
+                        CppDecl::MemberFn {
+                            is_virtual: true,
+                            ..
+                        } | CppDecl::Dtor {
+                            is_virtual: true,
+                            ..
+                        }
+                    )
+                });
+                if own_virt {
+                    self.class_polymorphic.insert(qname);
+                }
+                for m in &c.members {
+                    if let CppDecl::Class(nested) = m {
+                        let nq = self.qualify_name(&nested.name);
+                        self.class_bases.insert(nq, nested.bases.clone());
+                    }
+                }
+            }
+            CppDecl::Namespace { name, body } => {
+                if let Some(n) = name {
+                    self.ns.stack.push(n.clone());
+                }
+                for x in body {
+                    self.collect_class_bases(x);
+                }
+                if name.is_some() {
+                    self.ns.stack.pop();
+                }
+            }
+            CppDecl::Template { decl, .. } => {
+                self.collect_class_bases(decl);
+            }
+            CppDecl::ExportBlock(body) => {
+                for x in body {
+                    self.collect_class_bases(x);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 类名 -> 注册表 key (resolve_class_name 的健壮回退)
+    fn cls_key(&self, n: &str) -> String {
+        let r = self.resolve_class_name(n);
+        if r.is_empty() {
+            n.to_string()
+        } else {
+            r
+        }
+    }
+
+    /// 计算每个类的传递虚基列表 (DFS 首次出现顺序, 去重).
+    /// Itanium ABI: 虚基顺序 = 继承图深度优先先左后右遍历的首次出现顺序.
+    fn compute_transitive_vbases(&mut self) {
+        let mut result: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let keys: Vec<String> = self.class_bases.keys().cloned().collect();
+        for k in keys {
+            let mut out: Vec<String> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut stack: Vec<(String, bool)> = self.class_bases[&k]
+                .iter()
+                .map(|b| (self.cls_key(&b.name), b.is_virtual))
+                .collect();
+            stack.reverse();
+            while let Some((cur, is_v)) = stack.pop() {
+                if is_v {
+                    if !seen.insert(cur.clone()) {
+                        continue; // 已访问的虚基: 跳过其子树 (去重)
+                    }
+                    out.push(cur.clone());
+                }
+                // 无论是否虚基都递归收集其虚基
+                if let Some(bases) = self.class_bases.get(&cur).cloned() {
+                    let mut children: Vec<(String, bool)> = bases
+                        .iter()
+                        .map(|b| (self.cls_key(&b.name), b.is_virtual))
+                        .collect();
+                    children.reverse();
+                    stack.extend(children);
+                }
+            }
+            if !out.is_empty() {
+                result.insert(k.clone(), out);
+            }
+        }
+        self.transitive_vbases = result;
+    }
+
+    /// 多态类标记补全: 与既有 lower_class 的 vptr 规则一致
+    /// (`has_virt = 自有虚函数 || 有基类`), 保证布局模拟与实际 struct 一致.
+    fn compute_polymorphic_flags(&mut self) {
+        let keys: Vec<String> = self.class_bases.keys().cloned().collect();
+        for k in keys {
+            if let Some(bases) = self.class_bases.get(&k) {
+                if !bases.is_empty() {
+                    self.class_polymorphic.insert(k);
+                }
+            }
+        }
+    }
+
+    /// 类型对齐 (System V x86_64 规则; 必须与 C struct 实际布局一致)
+    fn ty_align(&self, ty: &MangleType) -> i64 {
+        match ty {
+            MangleType::Bool
+            | MangleType::Char
+            | MangleType::Schar
+            | MangleType::Uchar => 1,
+            MangleType::Short | MangleType::Ushort => 2,
+            MangleType::Int | MangleType::Uint | MangleType::Float => 4,
+            MangleType::Long
+            | MangleType::Ulong
+            | MangleType::LongLong
+            | MangleType::UlongLong
+            | MangleType::Double => 8,
+            MangleType::LongDouble => 16,
+            MangleType::Pointer(_) | MangleType::Reference(_) => 8,
+            MangleType::Class(n) => *self.class_aligns.get(&self.cls_key(n)).unwrap_or(&8),
+            MangleType::Template { name, args } => {
+                *self
+                    .class_aligns
+                    .get(&instantiated_class_name(name, args))
+                    .unwrap_or(&8)
+            }
+            _ => 8,
+        }
+    }
+
+    /// 类型大小 (System V x86_64 规则)
+    fn ty_size(&self, ty: &MangleType) -> i64 {
+        match ty {
+            MangleType::Bool
+            | MangleType::Char
+            | MangleType::Schar
+            | MangleType::Uchar => 1,
+            MangleType::Short | MangleType::Ushort => 2,
+            MangleType::Int | MangleType::Uint | MangleType::Float => 4,
+            MangleType::Long
+            | MangleType::Ulong
+            | MangleType::LongLong
+            | MangleType::UlongLong
+            | MangleType::Double => 8,
+            MangleType::LongDouble => 16,
+            MangleType::Pointer(_) | MangleType::Reference(_) => 8,
+            MangleType::Class(n) => *self.class_sizes.get(&self.cls_key(n)).unwrap_or(&8),
+            MangleType::Template { name, args } => {
+                *self
+                    .class_sizes
+                    .get(&instantiated_class_name(name, args))
+                    .unwrap_or(&8)
+            }
+            _ => 8,
+        }
+    }
+
+    fn align_up(v: i64, a: i64) -> i64 {
+        if a <= 1 {
+            return v;
+        }
+        (v + a - 1) / a * a
+    }
+
+    /// 计算所有已注册类的模拟布局 (大小/对齐/字段偏移 + vbtable 常量).
+    /// 基类先于派生类定义时一轮完成; 否则多轮迭代直到收敛.
+    fn compute_class_layouts(&mut self) {
+        let mut pending: Vec<String> = self.class_bases.keys().cloned().collect();
+        let mut rounds = 0;
+        while !pending.is_empty() && rounds < 64 {
+            rounds += 1;
+            let mut next = Vec::new();
+            for k in pending {
+                if !self.compute_layout_for(&k) {
+                    next.push(k);
+                }
+            }
+            pending = next;
+        }
+    }
+
+    /// 计算单个类布局; 依赖基类布局未就绪时返回 false.
+    fn compute_layout_for(&mut self, k: &str) -> bool {
+        if self.class_sizes.contains_key(k) {
+            return true;
+        }
+        let Some(bases) = self.class_bases.get(k).cloned() else {
+            return true;
+        };
+        for b in &bases {
+            let bk = self.cls_key(&b.name);
+            if bk != k && !self.class_sizes.contains_key(&bk) {
+                return false;
+            }
+        }
+        let mut off: i64 = 0;
+        let mut max_align: i64 = 1;
+        let mut offs: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        // 1. 非虚直接基类子对象
+        for b in &bases {
+            if b.is_virtual {
+                continue;
+            }
+            let bk = self.cls_key(&b.name);
+            let sz = self.class_sizes.get(&bk).copied().unwrap_or(8);
+            let al = self.class_aligns.get(&bk).copied().unwrap_or(8);
+            off = Self::align_up(off, al);
+            if al > max_align {
+                max_align = al;
+            }
+            offs.insert(format!("__base_{}", b.name), off);
+            off += sz;
+        }
+        // 2. vptr (多态类)
+        if self.class_polymorphic.contains(k) {
+            off = Self::align_up(off, 8);
+            max_align = max_align.max(8);
+            offs.insert("__vptr".to_string(), off);
+            off += 8;
+        }
+        // 3. vbptr + 自有成员 + 虚基子对象
+        let vbs = self.transitive_vbases.get(k).cloned().unwrap_or_default();
+        let mut vbptr_off: i64 = -1;
+        if !vbs.is_empty() {
+            off = Self::align_up(off, 8);
+            max_align = max_align.max(8);
+            vbptr_off = off;
+            offs.insert("__vbptr".to_string(), off);
+            off += 8;
+        }
+        // 4. 自有成员
+        if let Some(fields) = self.class_fields.get(k).cloned() {
+            for (name, ty) in fields {
+                let al = self.ty_align(&ty);
+                let sz = self.ty_size(&ty);
+                off = Self::align_up(off, al);
+                if al > max_align {
+                    max_align = al;
+                }
+                offs.insert(name, off);
+                off += sz;
+            }
+        }
+        // 5. 虚基子对象 (传递虚基, DFS 顺序)
+        let mut vbase_offsets: Vec<(String, i64)> = Vec::new();
+        for vb in &vbs {
+            let sz = self.class_sizes.get(vb).copied().unwrap_or(8);
+            let al = self.class_aligns.get(vb).copied().unwrap_or(8);
+            off = Self::align_up(off, al);
+            if al > max_align {
+                max_align = al;
+            }
+            offs.insert(format!("__vb_{}", vb), off);
+            vbase_offsets.push((vb.clone(), off));
+            off += sz;
+        }
+        let size = Self::align_up(off, max_align);
+        // vbtable: [0, off(VB_i) - off(__vbptr), ...]
+        let mut table: Vec<i64> = vec![0];
+        if vbptr_off >= 0 {
+            for (_, vo) in &vbase_offsets {
+                table.push(vo - vbptr_off);
+            }
+        }
+        self.class_sizes.insert(k.to_string(), size);
+        self.class_aligns.insert(k.to_string(), max_align);
+        self.field_offsets.insert(k.to_string(), offs);
+        if table.len() > 1 {
+            self.vbase_tables.insert(k.to_string(), table);
+        }
+        true
+    }
+
+    /// 虚基成员访问: 查找 member 属于哪个传递虚基 (及在该虚基内的非虚
+    /// `__base_` 链). 返回 (虚基 key, vbtable 索引, 虚基内链).
+    fn vbase_member_access(&self, class: &str, member: &str) -> Option<(String, usize, Vec<String>)> {
+        let ck = self.cls_key(class);
+        let vbs = self.transitive_vbases.get(&ck)?;
+        for (i, vb) in vbs.iter().enumerate() {
+            if let Some(chain) = self.member_in_or_below(vb, member) {
+                return Some((vb.clone(), i + 1, chain));
+            }
+        }
+        None
+    }
+
+    /// member 是否属于 class 的直接成员或其非虚基类祖先 (返回 __base_ 链)
+    fn member_in_or_below(&self, class: &str, member: &str) -> Option<Vec<String>> {
+        if self
+            .class_fields
+            .get(class)
+            .map(|f| f.iter().any(|(n, _)| n == member))
+            .unwrap_or(false)
+        {
+            return Some(vec![]);
+        }
+        if let Some(bases) = self.class_bases.get(class) {
+            for b in bases {
+                if b.is_virtual {
+                    continue;
+                }
+                if let Some(mut chain) = self.member_in_or_below(&self.cls_key(&b.name), member) {
+                    chain.insert(0, b.name.clone());
+                    return Some(chain);
+                }
+            }
+        }
+        None
+    }
+
+    /// 输出虚基成员访问: `((struct VB*)((char*)&OBJ.__vbptr + OBJ.__vbptr[IDX]))->...`
+    /// obj 是对象/指针表达式; use_arrow 决定用 `->__vbptr` 还是 `.__vbptr`.
+    /// tail 是虚基内的非虚 `__base_` 链 (空 = 成员直接在虚基内).
+    fn emit_vbase_member(
+        &mut self,
+        obj: &CppExpr,
+        use_arrow: bool,
+        vb: &str,
+        idx: usize,
+        tail: &[String],
+        member: &str,
+    ) {
+        let vb_c = self.mangle_to_c_ns(&MangleType::Class(vb.to_string()));
+        self.out.push_str(&format!("(({}*)((char*)&", vb_c));
+        self.emit_expr(obj);
+        self.out.push_str(if use_arrow { "->__vbptr + " } else { ".__vbptr + " });
+        self.emit_expr(obj);
+        self.out.push_str(if use_arrow { "->__vbptr[" } else { ".__vbptr[" });
+        self.out.push_str(&idx.to_string());
+        self.out.push_str("]))");
+        for (i, b) in tail.iter().enumerate() {
+            if i == 0 {
+                self.out.push_str(&format!("->__base_{}", b));
+            } else {
+                self.out.push_str(&format!(".__base_{}", b));
+            }
+        }
+        self.out.push_str(&format!("->{}", member));
+    }
+
+    /// 多态类虚基 this-adjust 上转型: 目标类型 VB 是否为源类 S 的传递虚基
+    fn vbase_upcast_target(&self, vb: &str, src_class: &str) -> Option<usize> {
+        let ck = self.cls_key(src_class);
+        let vbs = self.transitive_vbases.get(&ck)?;
+        let vbk = self.cls_key(vb);
+        vbs.iter().position(|v| *v == vbk).map(|i| i + 1)
     }
 
     /// M26.1: 递归收集 noexcept 函数名, 供 `noexcept(expr)` 求值.
@@ -1996,57 +2393,33 @@ impl Lower {
         }
     }
 
-    /// M26: 验证虚继承场景 (菱形继承检测)
-    /// 检查是否存在多个基类共享同一虚基类但未正确标记 virtual
-    fn validate_virtual_inheritance(&self, c: &ClassDecl) -> Option<String> {
-        // 收集所有基类 (包括递归基类)
-        let mut all_bases: Vec<(String, bool)> = Vec::new(); // (name, is_virtual)
-        for b in &c.bases {
-            all_bases.push((b.name.clone(), b.is_virtual));
-            // 递归查找基类的基类
-            if let Some(grand_bases) = self.class_bases.get(&b.name) {
-                for gb in grand_bases {
-                    all_bases.push((gb.name.clone(), gb.is_virtual));
-                }
-            }
-        }
-        // 检测菱形继承: 同一基类出现多次
-        let mut base_counts: std::collections::HashMap<String, Vec<bool>> =
-            std::collections::HashMap::new();
-        for (name, is_virtual) in &all_bases {
-            base_counts
-                .entry(name.clone())
-                .or_default()
-                .push(*is_virtual);
-        }
-        for (name, virtual_flags) in &base_counts {
-            if virtual_flags.len() > 1 {
-                // 基类出现多次, 检查是否都标记为 virtual
-                let all_virtual = virtual_flags.iter().all(|&v| v);
-                if !all_virtual {
-                    return Some(format!(
-                        "diamond inheritance detected: base '{}' appears {} times but not all are virtual",
-                        name,
-                        virtual_flags.len()
-                    ));
-                }
-            }
-        }
-        None
-    }
-
+    /// M26.3: 虚继承已由预遍历 (compute_transitive_vbases / compute_class_layouts)
+    /// 降级为 Itanium ABI 布局: 传递虚基子对象嵌入对象尾部, `__vbptr` 指向
+    /// 每类 `__vbt_<C>` vbtable (vbase_offset 项), 成员访问/上转型经
+    /// vbtable 运行时 this-adjust.
     fn lower_class(&mut self, c: &ClassDecl) {
         // M18.0: 用 qualified name 避免 namespace 内类与全局类冲突
         let qname = self.qualify_name(&c.name);
         // Store base class information for inherited member access
-        self.class_bases.insert(c.name.clone(), c.bases.clone());
-        // M26: 验证虚继承场景 (菱形继承检测)
-        if let Some(warning) = self.validate_virtual_inheritance(c) {
-            self.out.push_str(&format!("/* WARNING: {} */\n", warning));
+        self.class_bases.insert(qname.clone(), c.bases.clone());
+        // M26.3: 传递虚基列表与 vbtable (预遍历已计算)
+        let vbs = self.transitive_vbases.get(&qname).cloned().unwrap_or_default();
+        let vtable = self.vbase_tables.get(&qname).cloned().unwrap_or_default();
+        // 阶段 0: 虚基 vbtable (vbase_offset 项, 第 0 项恒为 0)
+        if !vbs.is_empty() {
+            self.out.push_str(&format!(
+                "static long __vbt_{}[] = {{ {} }};\n",
+                qname,
+                vtable
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
-        // 阶段 1: 仅 struct 定义 (成员字段 + vptr)
+        // 阶段 1: 仅 struct 定义 (成员字段 + vptr + vbptr + 虚基子对象)
         self.out.push_str(&format!("struct {} {{\n", qname));
-        // 继承: 嵌入基类子结构
+        // 继承: 嵌入非虚基类子结构 (虚基子对象在尾部统一嵌入)
         for b in &c.bases {
             // 模板基类: 先实例化, 然后用实例化后的类名
             let base_c_name = if let Some(ref targs) = b.template_args {
@@ -2059,41 +2432,17 @@ impl Lower {
             if !b.is_virtual {
                 self.out
                     .push_str(&format!("    struct {} __base_{};\n", base_c_name, b.name));
-            } else {
-                // 虚基类: 简化使用指针
-                self.out
-                    .push_str(&format!("    struct {}* __vb_{};\n", base_c_name, b.name));
             }
+            // M26.3: 虚基不再用指针占位; 子对象在尾部统一嵌入
         }
-        // 检查是否有 virtual 方法 -> 添加 vptr
-        let has_virt = c.members.iter().any(|m| {
-            matches!(
-                m,
-                CppDecl::MemberFn {
-                    is_virtual: true,
-                    ..
-                } | CppDecl::Dtor {
-                    is_virtual: true,
-                    ..
-                }
-            )
-        }) || c.bases.iter().any(|b| {
-            // M26: 检查基类是否有 virtual 方法 (继承虚方法)
-            if let Some(base_bases) = self.class_bases.get(&b.name) {
-                // 递归检查基类的基类
-                base_bases.iter().any(|bb| {
-                    self.class_bases
-                        .get(&bb.name)
-                        .is_some_and(|bbs| bbs.iter().any(|bbb| bbb.is_virtual))
-                })
-            } else {
-                false
-            }
-        });
-        // M26: 简化检查 - 如果任何基类存在, 认为可能有继承的虚方法
-        let has_virt = has_virt || !c.bases.is_empty();
+        // 检查是否有 virtual 方法 -> 添加 vptr (M26.3: 与布局模拟一致)
+        let has_virt = self.class_polymorphic.contains(&qname);
         if has_virt {
             self.out.push_str("    void* __vptr;\n");
+        }
+        // M26.3: 虚基指针 (vbptr) - 位于 vptr 之后, 指向 __vbt_<C>
+        if !vbs.is_empty() {
+            self.out.push_str("    long* __vbptr;\n");
         }
         for m in &c.members {
             match m {
@@ -2109,7 +2458,31 @@ impl Lower {
                 _ => {} // 成员函数 / 构造 / 析构 -> 阶段 2
             }
         }
+        // M26.3: 虚基子对象嵌入尾部 (传递虚基, DFS 顺序, 去重 - 菱形共享)
+        for vb in &vbs {
+            let vb_c = self.mangle_to_c_ns(&MangleType::Class(vb.clone()));
+            self.out
+                .push_str(&format!("    {} __vb_{};\n", vb_c, vb));
+        }
         self.out.push_str("};\n");
+        // M26.3: 无用户 ctor 且含虚基 -> 自动生成默认 ctor:
+        //   1) this->__vbptr = __vbt_<C>   (vbtable 指针初始化)
+        //   2) 依次调用虚基 ctor (共享基类只初始化一次)
+        if !vbs.is_empty() && !c.members.iter().any(|m| matches!(m, CppDecl::Ctor { .. })) {
+            let n = NestedName::from_dotted(vec![qname.clone()]);
+            let m = mangle_ctor(&n, &[], 1);
+            self.out
+                .push_str(&format!("void {} (struct {}* this) {{\n", m, qname));
+            self.out
+                .push_str(&format!("    this->__vbptr = (long*)__vbt_{};\n", qname));
+            for vb in &vbs {
+                let n_vb = NestedName::from_dotted(vec![vb.clone()]);
+                let m_vb = mangle_ctor(&n_vb, &[], 1);
+                self.out
+                    .push_str(&format!("    {}(&this->__vb_{});\n", m_vb, vb));
+            }
+            self.out.push_str("}\n");
+        }
         // M18.0: 同时输出 typedef 让 unqualified 类名可作为类型
         // 例如 `std::duration` -> `typedef struct std_duration duration;`
         // 这样测试代码可以直接用 `duration ms(100);` 而 C 也能识别.
@@ -2143,6 +2516,10 @@ impl Lower {
         let mut emitted_inherited_mbrs = std::collections::HashSet::new();
         if let Some(bases) = self.class_bases.get(&c.name).cloned() {
             for base in &bases {
+                // M26.3: 虚基成员经 vbtable 运行时调整, 静态 __base_ 链无效, 跳过
+                if base.is_virtual {
+                    continue;
+                }
                 let mut members = Vec::new();
                 // 初始 chain 包含直接基类名
                 let mut initial_chain = vec![base.name.clone()];
@@ -2762,6 +3139,12 @@ impl Lower {
             CppExpr::Ident(s) => {
                 // 当前在类方法内, 且 s 是该类的成员, 改写为 this->s
                 if let Some(cls) = &self.current_class {
+                    // M26.3: 虚基成员 -> vbtable this-adjust 访问
+                    if let Some((vb, idx, tail)) = self.vbase_member_access(cls, s) {
+                        let this_expr = CppExpr::This;
+                        self.emit_vbase_member(&this_expr, true, &vb, idx, &tail, s);
+                        return;
+                    }
                     if let Some(fields) = self.class_fields.get(cls) {
                         if fields.iter().any(|(n, _)| n == s) {
                             self.out.push_str(&format!("this->{}", s));
@@ -2772,7 +3155,17 @@ impl Lower {
                 self.out.push_str(s);
             }
             CppExpr::This => self.out.push_str("this"),
-            CppExpr::ThisMember(s) => self.out.push_str(&format!("this->{}", s)),
+            CppExpr::ThisMember(s) => {
+                // M26.3: 虚基成员 -> vbtable this-adjust 访问
+                if let Some(cls) = &self.current_class {
+                    if let Some((vb, idx, tail)) = self.vbase_member_access(cls, s) {
+                        let this_expr = CppExpr::This;
+                        self.emit_vbase_member(&this_expr, true, &vb, idx, &tail, s);
+                        return;
+                    }
+                }
+                self.out.push_str(&format!("this->{}", s));
+            }
             CppExpr::QualifiedAccess(_, s) => self.out.push_str(s),
             CppExpr::Member(b, s) => {
                 // M18.0: 若 b 是指针/引用类型 (e.g. const path& 参数, 或 dccpp_* 指针),
@@ -2782,6 +3175,14 @@ impl Lower {
                 } else {
                     false
                 };
+
+                // M26.3: 虚基成员 -> vbtable this-adjust 访问 (优先于 __base_ 链)
+                if let Some(class) = self.lookup_var_class(b) {
+                    if let Some((vb, idx, tail)) = self.vbase_member_access(&class, s) {
+                        self.emit_vbase_member(b, use_arrow, &vb, idx, &tail, s);
+                        return;
+                    }
+                }
 
                 // Check if member is inherited from a base class
                 // M26: 递归查找继承链, 获取完整 __base_ 访问路径
@@ -2812,6 +3213,13 @@ impl Lower {
                 }
             }
             CppExpr::PtrMember(b, s) => {
+                // M26.3: 虚基成员 -> vbtable this-adjust 访问 (指针 obj 用 ->)
+                if let Some(class) = self.lookup_var_class(b) {
+                    if let Some((vb, idx, tail)) = self.vbase_member_access(&class, s) {
+                        self.emit_vbase_member(b, true, &vb, idx, &tail, s);
+                        return;
+                    }
+                }
                 // M10+: operator-> 重载链
                 // 若 base 是 PtrLike 类型 (Ptr/Wrapper/Iter/ptr/iter/iter 名字),
                 // 展开为 base.operator->()->s
@@ -3134,6 +3542,43 @@ impl Lower {
                 self.emit_expr(e);
             }
             CppExpr::Cast(ty, e) => {
+                // M26.3: 虚基 this-adjust 上转型: (Base*)&obj / (Base*)p / (Base)obj
+                // 目标是源类的传递虚基时, 指针需经 vbtable 调整到虚基子对象
+                let vb_name = match ty {
+                    MangleType::Class(vb) => Some(vb.clone()),
+                    MangleType::Pointer(inner) => match &**inner {
+                        MangleType::Class(vb) => Some(vb.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(vb) = vb_name {
+                    let (obj_expr, use_arrow) = match &**e {
+                        CppExpr::AddrOf(inner) | CppExpr::Ref(inner) => (&**inner, false),
+                        _ => (&**e, true),
+                    };
+                    if let Some(src) = self.lookup_var_class(obj_expr) {
+                        if let Some(idx) = self.vbase_upcast_target(&vb, &src) {
+                            self.out.push_str(&format!("(({})", self.mangle_to_c_ns(ty)));
+                            self.out.push_str("((char*)&");
+                            self.emit_expr(obj_expr);
+                            self.out.push_str(if use_arrow {
+                                "->__vbptr + "
+                            } else {
+                                ".__vbptr + "
+                            });
+                            self.emit_expr(obj_expr);
+                            self.out.push_str(if use_arrow {
+                                "->__vbptr["
+                            } else {
+                                ".__vbptr["
+                            });
+                            self.out.push_str(&idx.to_string());
+                            self.out.push_str("]))");
+                            return;
+                        }
+                    }
+                }
                 self.out.push_str(&format!("({})", self.mangle_to_c_ns(ty)));
                 self.emit_expr(e);
             }
@@ -4094,11 +4539,11 @@ mod tests {
 
     #[test]
     fn lower_virtual_inheritance_diamond_detection() {
-        // M26: 菱形继承检测
+        // M26.3: 菱形虚继承 -> Itanium ABI 布局 (vbtable + vbptr + 尾部虚基子对象)
         // class A {};
         // class B : public virtual A {};
-        // class C : public A {};  // 非 virtual, 应该报警告
-        // class D : public B, public C {};  // 菱形继承
+        // class C : public A {};   // 非 virtual
+        // class D : public B, public C {};  // 混合菱形
         let src = b"class A { public: int x; };
                    class B : public virtual A { public: int y; };
                    class C : public A { public: int z; };
@@ -4108,12 +4553,48 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         let s = l.finish();
-        // 应该检测到菱形继承并发出警告
-        assert!(
-            s.contains("WARNING") && s.contains("diamond inheritance"),
-            "{}",
-            s
-        );
+        // 不再输出 warning/注释降级; B 的虚基 A 以 vbtable + __vb_ 子对象表达
+        assert!(!s.contains("WARNING"), "{}", s);
+        assert!(s.contains("__vbt_B"), "{}", s);
+        assert!(s.contains("long* __vbptr;"), "{}", s);
+        assert!(s.contains("struct A __vb_A;"), "{}", s);
+        // D 同时嵌入 B/C 两个非虚基 (C 的 A 保持非虚副本)
+        assert!(s.contains("__base_B"), "{}", s);
+        assert!(s.contains("__base_C"), "{}", s);
+    }
+
+    #[test]
+    fn lower_virtual_inheritance_diamond_layout() {
+        // M26.3: 经典菱形 - 共享虚基 Base 只出现一次 (去重), vbtable 偏移正确
+        let src = b"struct Base { int b; };
+                   struct Mid1 : virtual Base { int m1; };
+                   struct Mid2 : virtual Base { int m2; };
+                   struct Final : virtual Mid1, virtual Mid2 { int f; };
+                   int use(Final fo) { return fo.b + fo.m1 + fo.m2 + fo.f; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        // 传递虚基 DFS 顺序: [Mid1, Base, Mid2]
+        let vbs = l.transitive_vbases.get("Final").cloned().unwrap_or_default();
+        assert_eq!(vbs, vec!["Mid1".to_string(), "Base".to_string(), "Mid2".to_string()]);
+        // vbtable 前 4 项: 0(自身) + 3 个虚基
+        let tbl = l.vbase_tables.get("Final").cloned().unwrap_or_default();
+        assert_eq!(tbl.len(), 4, "tbl={:?}", tbl);
+        // 布局: vptr@0, vbptr@8, f@16, __vb_Mid1@24, __vb_Base@48, __vb_Mid2@56
+        let offs = l.field_offsets.get("Final").cloned().unwrap_or_default();
+        assert_eq!(*offs.get("__vptr").unwrap_or(&-1), 0);
+        assert_eq!(*offs.get("__vbptr").unwrap_or(&-1), 8);
+        assert_eq!(*offs.get("__vb_Mid1").unwrap_or(&-1), 24);
+        assert_eq!(*offs.get("__vb_Base").unwrap_or(&-1), 48);
+        assert_eq!(*offs.get("__vb_Mid2").unwrap_or(&-1), 56);
+        let s = l.finish();
+        // 自动 ctor: vbptr 初始化 + 虚基 ctor 调用
+        assert!(s.contains("_ZN5FinalC1Ev"), "{}", s);
+        assert!(s.contains("this->__vbptr = (long*)__vbt_Final;"), "{}", s);
+        assert!(s.contains("_ZN4BaseC1Ev(&this->__vb_Base);"), "{}", s);
+        // 虚基成员访问经 vbtable: fo.b -> __vbptr[2]
+        assert!(s.contains("__vbptr[2]"), "{}", s);
     }
 
     #[test]

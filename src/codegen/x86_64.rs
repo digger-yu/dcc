@@ -6452,16 +6452,27 @@ impl Codegen {
                 {
                     // struct.field = val 或 ptr->field = val
                     // 1. 查找字段信息 (支持匿名 struct/union)
-                    let field_info =
-                        if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty() {
+                    //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
+                    let expr_ty = expr.ty();
+                    let target_ty = if *is_arrow {
+                        if let Type::Ptr(p) = &expr_ty {
+                            (*p).as_ref().clone()
+                        } else {
+                            expr_ty
+                        }
+                    } else {
+                        expr_ty
+                    };
+                    let field_info = match &target_ty {
+                        Type::Struct(_, fields) | Type::Union(_, fields) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
                                 let mut fc = f.clone();
                                 fc.offset += extra;
                                 fc
                             })
-                        } else {
-                            None
-                        };
+                        }
+                        _ => None,
+                    };
                     let is_bitfield = field_info.as_ref().is_some_and(|f| f.bit_width.is_some());
                     // 2. 计算目标地址
                     if *is_arrow {
@@ -7376,16 +7387,27 @@ impl Codegen {
                             self.gen_expr(expr, dst);
                         }
                     }
-                    let field_info =
-                        if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty() {
+                    // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
+                    let expr_ty = expr.ty();
+                    let target_ty = if *is_arrow {
+                        if let Type::Ptr(p) = &expr_ty {
+                            (*p).as_ref().clone()
+                        } else {
+                            expr_ty
+                        }
+                    } else {
+                        expr_ty
+                    };
+                    let field_info = match &target_ty {
+                        Type::Struct(_, fields) | Type::Union(_, fields) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
                                 let mut fc = f.clone();
                                 fc.offset += extra;
                                 fc
                             })
-                        } else {
-                            None
-                        };
+                        }
+                        _ => None,
+                    };
                     if let Some(ref f) = field_info {
                         let field_off = f.offset as i32;
                         if field_off != 0 {
@@ -7474,16 +7496,27 @@ impl Codegen {
                     }
                 }
                 // 2. 查找字段信息 (支持匿名 struct/union), 加上字段偏移
-                let field_info =
-                    if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty() {
+                //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
+                let expr_ty = expr.ty();
+                let target_ty = if *is_arrow {
+                    if let Type::Ptr(p) = &expr_ty {
+                        (*p).as_ref().clone()
+                    } else {
+                        expr_ty
+                    }
+                } else {
+                    expr_ty
+                };
+                let field_info = match &target_ty {
+                    Type::Struct(_, fields) | Type::Union(_, fields) => {
                         find_field(fields, &field.name).map(|(f, extra)| {
                             let mut fc = f.clone();
                             fc.offset += extra;
                             fc
                         })
-                    } else {
-                        None
-                    };
+                    }
+                    _ => None,
+                };
                 if let Some(ref f) = field_info {
                     let field_off = f.offset as i32;
                     if field_off != 0 {
@@ -11495,11 +11528,22 @@ impl Codegen {
                 } else if !self.gen_lvalue_addr(expr, dst) {
                     return false;
                 }
-                let field_off = if let Type::Struct(_, fields) | Type::Union(_, fields) = &expr.ty()
-                {
-                    find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
+                // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
+                let expr_ty = expr.ty();
+                let target_ty = if *is_arrow {
+                    if let Type::Ptr(p) = &expr_ty {
+                        (*p).as_ref().clone()
+                    } else {
+                        expr_ty
+                    }
                 } else {
-                    None
+                    expr_ty
+                };
+                let field_off = match &target_ty {
+                    Type::Struct(_, fields) | Type::Union(_, fields) => {
+                        find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
+                    }
+                    _ => None,
                 };
                 if let Some(off) = field_off {
                     let off = off as i32;

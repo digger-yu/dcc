@@ -9001,6 +9001,92 @@ fn m26_coroutine_runtime() {
 
 #[test]
 #[cfg(unix)]
+fn m26_virtual_inheritance_runtime() {
+    // 菱形虚继承 Itanium ABI 布局: vbtable + vbptr + 尾部共享虚基子对象,
+    // 成员访问与上转型经 vbtable this-adjust; dcc -c + host gcc 链接运行.
+    let src = include_str!("fixtures/cpp/virtual_inheritance.cpp");
+    let (out, obj) = run_cpp_object_test("m26-virtual-inheritance", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp-virtual-inheritance-{}", std::process::id()));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run virtual-inheritance binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn c_arrow_member_store_offset_and_width() {
+    // 回归测试: `ptr->field = val` 必须按字段偏移与宽度存储.
+    // (虚继承实现中发现 dcc C 后端对 `->` 成员赋值退化为 4 字节 + 偏移 0)
+    let src = r#"
+struct S { int a; long x; };
+void f(struct S* p) { p->x = 5; }
+int main(void) {
+    struct S s; s.a = 1; s.x = 0;
+    f(&s);
+    if (s.x != 5) return 1;
+    if (s.a != 1) return 2;
+    return 0;
+}
+"#;
+    let (out, obj) = run_object_test("arrow-member-store", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-arrow-member-store-{}", std::process::id()));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run arrow-member-store binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn m26_gcc_compat_runtime() {
     let src = include_str!("fixtures/cpp/gcc_compat.cpp");
     let (out, _obj) = run_cpp_object_test("m26-gcc-compat", src);
