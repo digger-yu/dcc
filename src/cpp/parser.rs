@@ -362,6 +362,8 @@ pub enum CppStmt {
 #[derive(Debug, Clone)]
 pub enum CppExpr {
     IntLit(i64),
+    /// M26.1: 浮点字面量, 保留源文本 (含 0x/指数/后缀) 供 lower 透传.
+    FloatLit(String),
     StrLit(String),
     Ident(String),
     This,
@@ -586,6 +588,25 @@ impl<'a> CppParser<'a> {
     /// 当前 token 是否为指定 C token 种类.
     fn at_tok(&self, kind: TokKind) -> bool {
         matches!(&self.peek, Some(CppTok::C(Tok { kind: k, .. })) if *k == kind)
+    }
+
+    /// 当前 token 是否是 `[`.
+    fn peek_is_lbracket(&self) -> bool {
+        self.at_tok(TokKind::LBracket)
+    }
+
+    /// 期望指定 C token 并消耗; 不匹配时返回 Unexpected 错误.
+    fn expect_tok(&mut self, kind: TokKind) -> Result<(), CppParseError> {
+        if self.at_tok(kind) {
+            self.bump();
+            Ok(())
+        } else {
+            Err(CppParseError::Unexpected(
+                "expected token",
+                format!("{:?}", self.peek),
+                self.span(),
+            ))
+        }
     }
 
     /// 取 token 的源文本 (C token 用 text; 关键字用关键字名).
@@ -2145,16 +2166,18 @@ impl<'a> CppParser<'a> {
                     // M11 stdlib: `T& operator=()` - 返回引用的 operator
                     // 必须确保 & 后面是 `operator` 关键字, 不是普通 ident
                     // (避免 `ostream& cout();` 这种自由函数被误判)
+                    // M26.1: 引用成员 `T& m_;` 保留类型 T (不再丢失为占位)
+                    let ty_text = if let Some(CppTok::C(Tok { text, .. })) = &self.peek {
+                        text.clone()
+                    } else {
+                        String::new()
+                    };
                     self.bump(); // 跳过 T
                     self.bump(); // 跳过 &
                     if matches!(&self.peek, Some(CppTok::Kw(CppKw::Operator, _))) {
                         return self.parse_operator_fn();
                     }
                     // M18.0: `T& m_;` 类内引用成员变量
-                    // 第一个 ident 是 type, 第二个是 name
-                    let ty = MangleType::Class("_".into());
-                    // 这里 type 信息已经丢失, 用 `_` 占位; lower 时按 var 解析.
-                    let _ = ty;
                     if let Some(CppTok::C(Tok {
                         kind: TokKind::Ident,
                         text,
@@ -2163,7 +2186,7 @@ impl<'a> CppParser<'a> {
                     {
                         let name = text.clone();
                         self.bump();
-                        // 默认初始化 0; lower 时用 placeholder
+                        // 默认初始化 0; lower 时引用降级为指针
                         if matches!(
                             &self.peek,
                             Some(CppTok::C(Tok {
@@ -2174,9 +2197,7 @@ impl<'a> CppParser<'a> {
                             self.bump();
                         }
                         return Ok(CppDecl::MemberVar {
-                            ty: MangleType::Reference(Box::new(MangleType::Class(
-                                "__ref__".into(),
-                            ))),
+                            ty: MangleType::Reference(Box::new(MangleType::Class(ty_text))),
                             name,
                             is_mutable: false,
                         });
@@ -2704,46 +2725,41 @@ impl<'a> CppParser<'a> {
                 }
             }
         }
-        // 形式 B: type-kw operator...  (例: int operator==(...))
-        if matches!(
-            self.peek_token_at(j),
-            Some(CppTok::C(Tok {
-                kind: TokKind::KwConst | TokKind::KwVolatile,
-                ..
-            }))
-        ) {
-            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(j + 2) {
-                return true;
-            }
-        }
-        if matches!(
-            self.peek_token_at(j),
-            Some(CppTok::C(Tok {
-                kind: TokKind::KwInt
-                    | TokKind::KwChar
-                    | TokKind::KwShort
-                    | TokKind::KwLong
-                    | TokKind::KwVoid
-                    | TokKind::KwFloat
-                    | TokKind::KwDouble
-                    | TokKind::KwSigned
-                    | TokKind::KwUnsigned
-                    | TokKind::KwStruct
-                    | TokKind::KwUnion
-                    | TokKind::KwEnum
-                    | TokKind::KwInline
-                    | TokKind::KwBool
-                    | TokKind::KwAuto
-                    | TokKind::KwAtomic
-                    | TokKind::KwRestrict,
-                ..
-            }))
-        ) {
-            if let Some(CppTok::Kw(CppKw::Operator, _)) = self.peek_token_at(j + 1) {
-                return true;
+        // M26.1: 形式 B/C: 类型关键字开头, 中间可有 * / & / const / 类型 token,
+        // 之后是 `operator`. 例: `int operator+`, `void* operator new`,
+        // `const T& operator=`.
+        if self.is_type_start_token(self.peek_token_at(j)) {
+            let mut k = j + 1;
+            for _ in 0..5 {
+                match self.peek_token_at(k) {
+                    Some(CppTok::Kw(CppKw::Operator, _)) => return true,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Star | TokKind::Amp,
+                        ..
+                    })) => k += 1,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Ident,
+                        ..
+                    })) => k += 1,
+                    Some(CppTok::C(Tok { kind: ty, .. })) if is_c_type_kw(ty) => k += 1,
+                    Some(CppTok::Kw(
+                        CppKw::Const | CppKw::Volatile | CppKw::Static,
+                        _,
+                    )) => k += 1,
+                    _ => break,
+                }
             }
         }
         false
+    }
+
+    /// 是否类型起始 token (C 类型关键字 或 C++ const/volatile).
+    fn is_type_start_token(&self, tok: Option<CppTok>) -> bool {
+        match tok {
+            Some(CppTok::C(Tok { kind, .. })) => is_c_type_kw(kind),
+            Some(CppTok::Kw(CppKw::Const | CppKw::Volatile, _)) => true,
+            _ => false,
+        }
     }
 
     /// 解析运算符重载函数
@@ -3022,6 +3038,24 @@ impl<'a> CppParser<'a> {
             if let Some(op) = Operator::from_token(s1) {
                 return Ok(op);
             }
+        }
+        // M26.1: `operator new` / `operator delete` (含 `[]` 数组形式)
+        // 注意: t1 已被上面的 if-let 部分移走, 这里回看保存的 peek.
+        if matches!(&saved, Some(CppTok::Kw(CppKw::New, _))) {
+            if self.peek_is_lbracket() {
+                self.bump(); // [
+                let _ = self.expect_tok(TokKind::RBracket)?;
+                return Ok(Operator::NewArr);
+            }
+            return Ok(Operator::New);
+        }
+        if matches!(&saved, Some(CppTok::Kw(CppKw::Delete, _))) {
+            if self.peek_is_lbracket() {
+                self.bump(); // [
+                let _ = self.expect_tok(TokKind::RBracket)?;
+                return Ok(Operator::DeleteArr);
+            }
+            return Ok(Operator::Delete);
         }
         let _ = saved;
         Err(CppParseError::Unsupported("operator name", self.span()))
@@ -5774,7 +5808,14 @@ impl<'a> CppParser<'a> {
             ..
         })) = &self.peek
         {
-            let v: i64 = text.parse().unwrap_or(0);
+            // M26.1: 区分浮点字面量与整数字面量; 整数支持 0x/0b/0o 前缀与
+            // u/l/ll 等后缀 (之前 text.parse::<i64>() 只支持十进制, 其余全变 0).
+            if is_float_number(text) {
+                let t = text.clone();
+                self.bump();
+                return Ok(CppExpr::FloatLit(t));
+            }
+            let v = parse_int_text(text);
             self.bump();
             return Ok(CppExpr::IntLit(v));
         }
@@ -5809,7 +5850,8 @@ impl<'a> CppParser<'a> {
         {
             let s = strip_quotes(text);
             self.bump();
-            let v = s.chars().next().unwrap_or('\0') as i64;
+            // M26.1: 支持转义字符 (\n \t \\ \' \" \0 \xNN 等), 之前只取首个字符.
+            let v = char_lit_value(&s);
             return Ok(CppExpr::IntLit(v));
         }
         if let Some(CppTok::C(Tok {
@@ -7313,6 +7355,89 @@ fn strip_quotes(s: &str) -> String {
     }
 }
 
+/// M26.1: 是否 C 类型关键字 token.
+fn is_c_type_kw(kind: TokKind) -> bool {
+    matches!(
+        kind,
+        TokKind::KwInt
+            | TokKind::KwChar
+            | TokKind::KwShort
+            | TokKind::KwLong
+            | TokKind::KwVoid
+            | TokKind::KwFloat
+            | TokKind::KwDouble
+            | TokKind::KwSigned
+            | TokKind::KwUnsigned
+            | TokKind::KwStruct
+            | TokKind::KwUnion
+            | TokKind::KwEnum
+            | TokKind::KwInline
+            | TokKind::KwBool
+            | TokKind::KwAuto
+            | TokKind::KwAtomic
+            | TokKind::KwRestrict
+            | TokKind::KwConst
+            | TokKind::KwVolatile
+            | TokKind::KwStatic
+    )
+}
+
+/// M26.1: 解析字符字面量值 (含转义). 失败返回 0.
+fn char_lit_value(s: &str) -> i64 {
+    let mut chars = s.chars();
+    let Some(c) = chars.next() else {
+        return 0;
+    };
+    if c != '\\' {
+        return c as i64;
+    }
+    // 转义序列
+    match chars.next() {
+        Some('n') => 0x0a,
+        Some('t') => 0x09,
+        Some('r') => 0x0d,
+        Some('0') => 0x00,
+        Some('\\') => 0x5c,
+        Some('\'') => 0x27,
+        Some('"') => 0x22,
+        Some('a') => 0x07,
+        Some('b') => 0x08,
+        Some('f') => 0x0c,
+        Some('v') => 0x0b,
+        Some('x') => {
+            let hex: String = chars.take_while(|c| c.is_ascii_hexdigit()).collect();
+            i64::from_str_radix(&hex, 16).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+/// M26.1: 数字字面量是否浮点 (含 `.` / 指数 `e`/`E` / 后缀 `f`/`F`).
+fn is_float_number(text: &str) -> bool {
+    let t = text.trim_end_matches(['u', 'U', 'l', 'L', 'f', 'F']);
+    t.contains('.') || t.contains('e') || t.contains('E')
+}
+
+/// M26.1: 解析整数数字字面量 (支持 0x/0b/0o 前缀与 u/l/ll 后缀).
+/// 失败时返回 0 (与旧行为一致, 但旧行为对合法 C++ 字面量几乎全部失败).
+fn parse_int_text(text: &str) -> i64 {
+    let t = text.trim_end_matches(['u', 'U', 'l', 'L']);
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return i64::from_str_radix(hex, 16).unwrap_or(0);
+    }
+    if let Some(oct) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return i64::from_str_radix(oct, 8).unwrap_or(0);
+    }
+    if let Some(bin) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        return i64::from_str_radix(bin, 2).unwrap_or(0);
+    }
+    // 旧的 8 进制写法 `0755`
+    if t.len() > 1 && t.starts_with('0') {
+        return i64::from_str_radix(&t[1..], 8).unwrap_or(0);
+    }
+    t.parse().unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7550,6 +7675,82 @@ mod tests {
             }
             other => panic!("expected Enum, got {:?}", other),
         }
+    }
+
+    // M26.1: 数字 / 字符字面量解析 (hex/oct/bin/float/转义)
+    #[test]
+    fn parse_number_literals_hex_oct_bin() {
+        let src = b"int f() {
+            int a = 0x41; int b = 0755; int c = 0b1010; int d = 42ULL;
+            char n = '\\n'; char h = '\\x41'; double x = 1.5;
+            return (int)(a + b + c + d + n + h + (int)x);
+        }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        // 解析成功且字面量值正确
+        match &d[0] {
+            CppDecl::FreeFn { body, .. } => {
+                // 简化验证: 找 IntLit 值
+                let mut vals: Vec<i64> = vec![];
+                let mut stmts: Vec<&CppStmt> = body.stmts.iter().collect();
+                while let Some(s) = stmts.pop() {
+                    match s {
+                        CppStmt::LocalVar { init: Some(e), .. } => {
+                            if let CppExpr::IntLit(v) = e {
+                                vals.push(*v);
+                            }
+                        }
+                        CppStmt::Return(Some(CppExpr::IntLit(v))) => vals.push(*v),
+                        _ => {}
+                    }
+                }
+                assert!(vals.contains(&65), "hex 0x41: {:?}", vals);
+                assert!(vals.contains(&493), "oct 0755: {:?}", vals);
+                assert!(vals.contains(&10), "bin 0b1010: {:?}", vals);
+                assert!(vals.contains(&42), "suffix 42ULL: {:?}", vals);
+                assert!(vals.contains(&10), "\\n: {:?}", vals);
+                assert!(vals.contains(&65), "\\x41: {:?}", vals);
+            }
+            other => panic!("expected FreeFn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_reference_member_keeps_type() {
+        let src = b"class Holder { public: Widget& ref; };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        match &d[0] {
+            CppDecl::Class(c) => match &c.members[0] {
+                CppDecl::MemberVar { ty, name, .. } => {
+                    assert_eq!(name, "ref");
+                    assert!(matches!(
+                        ty,
+                        MangleType::Reference(inner) if matches!(&**inner, MangleType::Class(n) if n == "Widget")
+                    ));
+                }
+                other => panic!("expected MemberVar, got {:?}", other),
+            },
+            other => panic!("expected Class, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_operator_new_delete_names() {
+        let src = b"class A {
+            public:
+              void* operator new(unsigned long sz);
+              void operator delete(void* p);
+              int* operator new[](unsigned long sz);
+              void operator delete[](void* p);
+        };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level();
+        assert!(
+            d.is_ok(),
+            "parse failed: {:?}",
+            d.as_ref().map(|v| v[0].clone())
+        );
     }
 
     // M18.1: T<U1, U2, ...> 模板实参语法解析

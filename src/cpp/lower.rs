@@ -373,6 +373,8 @@ impl Lower {
     fn infer_type(&self, e: &CppExpr, is_decltype_auto: bool) -> MangleType {
         let ty = match e {
             CppExpr::IntLit(_) => MangleType::Int,
+            // M26.1: 浮点字面量推导为 double
+            CppExpr::FloatLit(_) => MangleType::Double,
             CppExpr::StrLit(_) => MangleType::Pointer(Box::new(MangleType::Char)),
             CppExpr::StrConcat(_) => MangleType::Pointer(Box::new(MangleType::Char)),
             CppExpr::Ident(n) => {
@@ -478,6 +480,7 @@ impl Lower {
     fn expr_can_throw(&self, e: &CppExpr) -> bool {
         match e {
             CppExpr::IntLit(_)
+            | CppExpr::FloatLit(_)
             | CppExpr::StrLit(_)
             | CppExpr::Ident(_)
             | CppExpr::This
@@ -2741,6 +2744,8 @@ impl Lower {
     fn emit_expr(&mut self, e: &CppExpr) {
         match e {
             CppExpr::IntLit(v) => self.out.push_str(&v.to_string()),
+            // M26.1: 浮点字面量原样透传 (含 0x / 指数 / 后缀)
+            CppExpr::FloatLit(s) => self.out.push_str(s),
             CppExpr::StrLit(s) => self.out.push_str(&format!("\"{}\"", s)),
             CppExpr::StrConcat(parts) => {
                 self.out.push('"');

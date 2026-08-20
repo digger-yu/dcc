@@ -275,6 +275,11 @@ pub enum Operator {
     CastTo(MangleType),
     // 特殊
     Comma,
+    // M26.1: 分配 / 释放运算符 (类成员 operator new/delete)
+    New,
+    Delete,
+    NewArr,
+    DeleteArr,
 }
 
 impl Operator {
@@ -324,6 +329,11 @@ impl Operator {
             Self::AddrOf => "ad",
             Self::Comma => "cm",
             Self::CastTo(_) => "cv",
+            // M26.1: Itanium ABI operator new/delete 编码
+            Self::New => "nw",
+            Self::Delete => "dl",
+            Self::NewArr => "na",
+            Self::DeleteArr => "da",
         }
     }
 

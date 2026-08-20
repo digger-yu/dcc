@@ -8852,6 +8852,43 @@ fn m26_enum_semantics_runtime() {
 
 #[test]
 #[cfg(unix)]
+fn m26_member_parser_runtime() {
+    // 引用成员 + operator new/delete + hex/oct/bin/float/转义字面量.
+    let src = include_str!("fixtures/cpp/member_parser.cpp");
+    let (out, obj) = run_cpp_object_test("m26-member-parser", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp-member-parser-{}", std::process::id()));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run member-parser binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn m26_auto_deduction_runtime() {
     // auto 从 函数调用 / 成员调用 / 成员访问 / new 推导真实类型.
     let src = include_str!("fixtures/cpp/auto_deduction.cpp");

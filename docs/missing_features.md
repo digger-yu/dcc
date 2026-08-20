@@ -69,7 +69,7 @@
 | C++ ODR 集成 | `OdrChecker` 存在，但不等于完整 module/link pipeline ODR enforcement |
 | C++ enum lowering | ~~enum 仍降级为 `typedef int`~~ → ✅ 已实现：真实 C enum + 枚举值 + scoped 标记 + 可选底层类型 + 匿名枚举（M26.1） |
 | `auto` / `decltype(auto)` | ~~类型推导对调用、成员调用和复杂表达式仍保守降级为 int/Unknown~~ → ✅ 已实现：函数返回类型注册表 + 成员调用/成员字段类型推导 + `new T`→`T*`；自由函数调用改为与定义一致的 mangled 名（M26.1） |
-| class member parser | 部分类成员、引用成员、operator name 和表达式形式仍返回 `Unsupported` |
+| class member parser | ~~部分类成员、引用成员、operator name 和表达式形式仍返回 `Unsupported`~~ → ✅ 已实现：引用成员保留类型、`operator new/delete([])` 名称解析（Itanium `nw`/`dl`/`na`/`da`）、`Type* operator` 起始探测、hex/oct/bin/带后缀整数、转义字符、浮点字面量（M26.1） |
 | coroutine 语义 | parser/lower 存在状态机路径，但仍有占位和语义覆盖缺口 |
 | virtual inheritance | 菱形/虚基复杂布局仍以 warning/注释降级，不是完整 Itanium ABI 虚继承布局 |
 | `noexcept(expr)` | ~~当前直接降级为常量 true~~ → ✅ 已实现：分析表达式抛异常可能性（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛）（M26.1） |
