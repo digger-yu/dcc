@@ -17,7 +17,7 @@
 
 use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};
 use crate::cpp::coroutine::{
-    body_has_coro, coro_fn_epilogue, coro_fn_prologue, coro_return, coro_suspend,
+    body_has_coro, coro_fn_decls, coro_fn_epilogue, coro_fn_prologue, coro_return, coro_suspend,
 };
 use crate::cpp::gcc_compat::runtime_prologue as gcc_runtime_prologue;
 use crate::cpp::mangle::{
@@ -2319,6 +2319,18 @@ impl Lower {
         for (n, t) in params {
             self.param_var_types.insert(n.clone(), t.clone());
         }
+        // M26: 协程真状态机 (Duff's device) - body 含 co_await/co_yield/co_return
+        // 时包裹 switch(<fn>_coro_state) { case 0: ... }, 每个挂起点生成恢复标签
+        let is_coro = body_has_coro(body);
+        if is_coro {
+            let ret_c = self.mangle_to_c_ns(ret);
+            self.coro_var = mangled.to_string();
+            self.coro_ret_c = ret_c.clone();
+            self.coro_state = 0;
+            // 状态变量声明为文件作用域 static 全局 (跨调用保持;
+            // dcc C 后端不支持函数内 static 局部, 见 coroutine.rs)
+            self.out.push_str(&coro_fn_decls(mangled, &ret_c));
+        }
         self.out
             .push_str(&format!("{} {} (", self.mangle_to_c_ns(ret), mangled));
         for (i, (n, t)) in params.iter().enumerate() {
@@ -2329,15 +2341,8 @@ impl Lower {
                 .push_str(&format!("{} {}", self.mangle_to_c_ns(t), n));
         }
         self.out.push_str(") {\n");
-        // M26: 协程真状态机 (Duff's device) - body 含 co_await/co_yield/co_return
-        // 时包裹 switch(<fn>_coro_state) { case 0: ... }, 每个挂起点生成恢复标签
-        let is_coro = body_has_coro(body);
         if is_coro {
-            let ret_c = self.mangle_to_c_ns(ret);
-            self.coro_var = mangled.to_string();
-            self.coro_ret_c = ret_c.clone();
-            self.coro_state = 0;
-            self.out.push_str(&coro_fn_prologue(mangled, &ret_c));
+            self.out.push_str(&coro_fn_prologue(mangled));
         }
         for s in &body.stmts {
             self.emit_stmt(s);

@@ -4,9 +4,11 @@
 //! Duff's device 状态机 (switch + case 标签混排):
 //!
 //! ```c
+//! // 文件作用域: 状态变量跨调用保持 (dcc C 后端不支持函数内 static)
 //! static int <fn>_coro_state = 0;
 //! static <ret> <fn>_coro_value;
 //! static int <fn>_coro_done = 0;
+//! <ret> <fn>(...) {
 //! switch (<fn>_coro_state) {
 //! case 0:
 //!     ...body...
@@ -17,6 +19,7 @@
 //!     ...
 //! }
 //! return 0;
+//! }
 //! ```
 //!
 //! 设计原则:
@@ -24,7 +27,9 @@
 //!    避免多协程函数互相干扰.
 //! 2. 每次挂起递增状态号; `case N+1:` 紧跟挂起代码, 恢复时从下一条
 //!    语句继续执行 (与 Duff's device 相同).
-//! 3. 不依赖 lower 上下文, 纯字符串生成; 表达式由 lower 先渲染为
+//! 3. 状态/返回槽/完成标志声明为文件作用域 static 全局 (见
+//!    `coro_fn_decls`), 不依赖 C 后端的函数内 static 局部变量支持.
+//! 4. 不依赖 lower 上下文, 纯字符串生成; 表达式由 lower 先渲染为
 //!    C 文本再传入.
 
 use crate::cpp::parser::{CppBody, CppStmt};
@@ -69,15 +74,24 @@ fn stmt_has_coro(s: &CppStmt) -> bool {
     }
 }
 
-/// 协程函数前导: per-function 状态变量 + switch 开头 + 初始入口 case 0.
+/// 协程函数的文件作用域状态变量声明 (在函数定义之前输出).
+/// 状态/返回槽/完成标志需要跨调用保持, 故声明为 per-function 命名的
+/// 文件作用域 static 全局; dcc C 后端不支持函数内 static 局部变量
+/// (会退化为普通栈局部, 每次调用重置), 文件作用域则正确保持.
 /// `ret_c` 是返回类型的 C 字符串 ("void" 时省略返回槽变量).
-pub fn coro_fn_prologue(fn_name: &str, ret_c: &str) -> String {
+pub fn coro_fn_decls(fn_name: &str, ret_c: &str) -> String {
     let mut s = format!("static int {} = 0;\n", coro_state_var(fn_name));
     if ret_c != "void" {
         s.push_str(&format!("static {} {};\n", ret_c, coro_value_var(fn_name)));
     }
     s.push_str(&format!("static int {} = 0;\n", coro_done_var(fn_name)));
-    s.push_str(&format!("switch ({}) {{\n", coro_state_var(fn_name)));
+    s
+}
+
+/// 协程函数前导: switch 开头 + 初始入口 case 0.
+/// 状态变量声明见 `coro_fn_decls`, 由 lower 在函数定义前输出.
+pub fn coro_fn_prologue(fn_name: &str) -> String {
+    let mut s = format!("switch ({}) {{\n", coro_state_var(fn_name));
     s.push_str("case 0:\n");
     s
 }
@@ -218,14 +232,27 @@ mod tests {
     }
 
     #[test]
+    fn coro_fn_decls_emits_file_scope_statics() {
+        let d = coro_fn_decls("_Z1fv", "int");
+        assert!(d.contains("static int _Z1fv_coro_state = 0;"), "{}", d);
+        assert!(d.contains("static int _Z1fv_coro_value;"), "{}", d);
+        assert!(d.contains("static int _Z1fv_coro_done = 0;"), "{}", d);
+        assert!(!d.contains("switch"), "{}", d);
+    }
+
+    #[test]
+    fn coro_fn_decls_void_skips_value_slot() {
+        let d = coro_fn_decls("_Z1fv", "void");
+        assert!(!d.contains("_coro_value"), "{}", d);
+    }
+
+    #[test]
     fn prologue_epilogue_pair_forms_valid_switch() {
-        let p = coro_fn_prologue("_Z1fv", "int");
+        let p = coro_fn_prologue("_Z1fv");
         let e = coro_fn_epilogue("int");
-        assert!(p.contains("static int _Z1fv_coro_state = 0;"), "{}", p);
-        assert!(p.contains("static int _Z1fv_coro_value;"), "{}", p);
-        assert!(p.contains("static int _Z1fv_coro_done = 0;"), "{}", p);
         assert!(p.contains("switch (_Z1fv_coro_state) {"), "{}", p);
         assert!(p.contains("case 0:"), "{}", p);
+        assert!(!p.contains("static"), "{}", p);
         assert_eq!(e, "}\nreturn 0;\n");
     }
 }
