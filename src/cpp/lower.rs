@@ -51,6 +51,9 @@ pub struct Lower {
     pub classes: Vec<String>,
     /// M26: 已知 enum 类型集合 (lower 时输出真实 C enum; 类型引用不前缀 struct)
     pub enum_types: std::collections::HashSet<String>,
+    /// M26.1: noexcept 函数名集合 (自由函数用函数名; 成员用 `Class::method`)
+    /// `noexcept(expr)` 求值时查被调函数是否 noexcept.
+    pub noexcept_fns: std::collections::HashSet<String>,
     /// 已知类方法 (class -> [method_name, ...])
     pub class_methods: std::collections::HashMap<String, Vec<String>>,
     /// M17.0: 已知类 ctor (class -> [CppDecl::Ctor, ...]) - 供 using Base::Base 真 wrapper
@@ -288,6 +291,7 @@ impl Lower {
             ns: NamespaceCtx::default(),
             classes: vec![],
             enum_types: std::collections::HashSet::new(),
+            noexcept_fns: std::collections::HashSet::new(),
             class_methods: std::collections::HashMap::new(),
             class_ctors: std::collections::HashMap::new(),
             class_fields: std::collections::HashMap::new(),
@@ -427,6 +431,107 @@ impl Lower {
         // (is_decltype_auto 与 is_decltype 在本路径上行为一致)
         let _ = is_decltype_auto;
         ty
+    }
+
+    /// M26.1: 表达式求值是否会抛异常 (`noexcept(expr)` 编译期谓词).
+    /// 规则 (近似 C++ 标准):
+    /// - 字面量 / 标识符 / 内建运算 / 成员访问 / sizeof / cast: 不抛
+    /// - `throw` 表达式: 抛
+    /// - 函数调用: 被调函数 noexcept 则不抛; 否则可能抛
+    /// - `new` / `new[]`: 可能抛 (bad_alloc)
+    /// - `dynamic_cast` / 多态 `typeid`: 可能抛 (bad_cast / bad_typeid)
+    /// - 子表达式递归
+    fn expr_can_throw(&self, e: &CppExpr) -> bool {
+        match e {
+            CppExpr::IntLit(_)
+            | CppExpr::StrLit(_)
+            | CppExpr::Ident(_)
+            | CppExpr::This
+            | CppExpr::ThisMember(_)
+            | CppExpr::MemberPtr { .. }
+            | CppExpr::TemplateIdent { .. }
+            | CppExpr::Sizeof(_)
+            | CppExpr::TypeidType(_)
+            | CppExpr::StrConcat(_)
+            | CppExpr::Lambda(_) => false,
+            CppExpr::New(..) | CppExpr::NewArr { .. } => true,
+            CppExpr::PlacementNew { ptr, ty: _, args } => {
+                self.expr_can_throw(ptr) || args.iter().any(|a| self.expr_can_throw(a))
+            }
+            CppExpr::DynamicCast { expr, .. } => {
+                // dynamic_cast 到引用类型会抛 bad_cast
+                true
+            }
+            CppExpr::Typeid(x) => {
+                // 多态表达式 typeid 可能抛 bad_typeid
+                self.expr_can_throw(x) || self.is_polymorphic_expr(x)
+            }
+            CppExpr::Member(o, _)
+            | CppExpr::PtrMember(o, _)
+            | CppExpr::MemberStar(o, _)
+            | CppExpr::PtrMemberStar(o, _)
+            | CppExpr::UnaryOp(_, o)
+            | CppExpr::Ref(o)
+            | CppExpr::AddrOf(o)
+            | CppExpr::Delete(o)
+            | CppExpr::DeleteArr(o)
+            | CppExpr::Noexcept(o) => self.expr_can_throw(o),
+            CppExpr::BinOp(_, l, r) => {
+                self.expr_can_throw(l) || self.expr_can_throw(r)
+            }
+            CppExpr::Ternary { cond, then, els } => {
+                self.expr_can_throw(cond)
+                    || self.expr_can_throw(then)
+                    || self.expr_can_throw(els)
+            }
+            CppExpr::Comma(es) => es.iter().any(|x| self.expr_can_throw(x)),
+            CppExpr::Cast(_, x)
+            | CppExpr::StaticCast { expr: x, .. }
+            | CppExpr::ConstCast { expr: x, .. }
+            | CppExpr::ReinterpretCast { expr: x, .. } => self.expr_can_throw(x),
+            CppExpr::Call(f, args) => {
+                if args.iter().any(|a| self.expr_can_throw(a)) {
+                    return true;
+                }
+                self.call_target_can_throw(f)
+            }
+            CppExpr::OpCall { args, .. } => {
+                // 内建运算符不抛 (parser 只对重载运算符产生 OpCall);
+                // 重载运算符是函数调用, 保守视为可抛.
+                true
+            }
+            CppExpr::InitList(es) => es.iter().any(|x| self.expr_can_throw(x)),
+            CppExpr::TypedInitList { elems, .. } => {
+                elems.iter().any(|x| self.expr_can_throw(x))
+            }
+            CppExpr::MultiIndex(o, idxs) => {
+                self.expr_can_throw(o) || idxs.iter().any(|x| self.expr_can_throw(x))
+            }
+            CppExpr::QualifiedAccess(_, _) => false,
+        }
+    }
+
+    /// 被调函数是否可能抛异常 (noexcept 集合查询).
+    fn call_target_can_throw(&self, f: &CppExpr) -> bool {
+        match f {
+            CppExpr::Ident(name) => !self.noexcept_fns.contains(name),
+            CppExpr::Member(o, m) | CppExpr::PtrMember(o, m) => {
+                if let Some(class) = self.lookup_var_class(o) {
+                    let key = format!("{}::{}", class, m);
+                    !self.noexcept_fns.contains(&key)
+                } else {
+                    // 未知接收者: 保守视为可抛
+                    true
+                }
+            }
+            CppExpr::QualifiedAccess(_, _) => true,
+            _ => true,
+        }
+    }
+
+    /// 启发式: 表达式是否为 class 类型 - typeid 抛 bad_typeid 判定用.
+    fn is_polymorphic_expr(&self, e: &CppExpr) -> bool {
+        matches!(self.infer_type(e, false), MangleType::Class(_))
     }
 
     /// 查找表达式 (通常是 Ident 或 Member) 对应的类名 (M9: 仅局部变量)
@@ -628,6 +733,10 @@ impl Lower {
         for d in decls {
             self.collect_classes(d);
         }
+        // M26.1: 收集 noexcept 函数名 (noexcept(expr) 求值用)
+        for d in decls {
+            self.collect_noexcept_fns(d);
+        }
         // 第二次遍历: 实际降级
         for d in decls {
             self.lower_decl(d);
@@ -727,6 +836,68 @@ impl Lower {
                 }
                 self.scan_decl_types(d);
             }
+        }
+    }
+
+    /// M26.1: 递归收集 noexcept 函数名, 供 `noexcept(expr)` 求值.
+    /// 自由函数以函数名登记; 成员/构造/析构以 `Class::name` 登记.
+    fn collect_noexcept_fns(&mut self, d: &CppDecl) {
+        match d {
+            CppDecl::FreeFn {
+                name, is_noexcept, ..
+            } => {
+                if *is_noexcept {
+                    self.noexcept_fns.insert(name.clone());
+                }
+            }
+            CppDecl::MemberFn {
+                class,
+                name,
+                is_noexcept,
+                ..
+            } => {
+                if *is_noexcept {
+                    self.noexcept_fns
+                        .insert(format!("{}::{}", class, name));
+                }
+            }
+            CppDecl::Ctor {
+                class,
+                is_noexcept,
+                ..
+            } => {
+                if *is_noexcept {
+                    self.noexcept_fns.insert(format!("{}::ctor", class));
+                }
+            }
+            CppDecl::Dtor {
+                class,
+                is_noexcept,
+                ..
+            } => {
+                if *is_noexcept {
+                    self.noexcept_fns.insert(format!("{}::dtor", class));
+                }
+            }
+            CppDecl::Namespace { body, .. } => {
+                for x in body {
+                    self.collect_noexcept_fns(x);
+                }
+            }
+            CppDecl::Class(c) => {
+                for m in &c.members {
+                    self.collect_noexcept_fns(m);
+                }
+            }
+            CppDecl::Template { decl, .. } => {
+                self.collect_noexcept_fns(decl);
+            }
+            CppDecl::ExportBlock(body) => {
+                for x in body {
+                    self.collect_noexcept_fns(x);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1203,6 +1374,7 @@ impl Lower {
                 name,
                 params,
                 body,
+                is_noexcept,
             } => {
                 let n = NestedName::from_dotted(vec![self.qualify_name(name)]);
                 let m = mangle_member_function(&n, &[], ret);
@@ -1214,6 +1386,10 @@ impl Lower {
                         signature: self.fn_signature_c(ret, params),
                         layout: None,
                     });
+                }
+                // M26.1: noexcept 函数体按声明输出 __attribute__((nothrow))
+                if *is_noexcept {
+                    self.out.push_str("__attribute__((nothrow)) ");
                 }
                 self.emit_fn(&m, ret, params, body);
             }
@@ -2981,10 +3157,14 @@ impl Lower {
                 self.out.push_str(member);
                 self.out.push_str("()))");
             }
-            // M17.0: `noexcept(expr)` 编译期 bool -> 我们用 1 (true) 占位
-            // 实际规则: noexcept 谓词检查 expr 及其操作是否可能抛, 这里简化为 1
-            CppExpr::Noexcept(_) => {
-                self.out.push('1');
+            // M17.0: `noexcept(expr)` 编译期 bool.
+            // M26.1: 分析 expr 是否可能抛异常, 输出 0/1 (不再恒为 true).
+            CppExpr::Noexcept(e) => {
+                if self.expr_can_throw(e) {
+                    self.out.push('0');
+                } else {
+                    self.out.push('1');
+                }
             }
             // M18.0: C++23 多维下标 `obj[i, j, k]` 改写为
             // `__dcc_multi_index_N(obj, i, j, k)` C 辅助函数
@@ -3854,6 +4034,50 @@ mod tests {
         l.lower_decls(&decls);
         let s = l.finish();
         assert!(s.contains("typedef enum { X = 7 } ns_E;"), "{}", s);
+    }
+
+    #[test]
+    fn lower_noexcept_expr_analyzes_throwing() {
+        // M26.1: noexcept(expr) 不再恒为 true
+        let src = b"int maybe(int x);
+                   int safe_fn(int x) noexcept { return x; }
+                   class Widget {
+                     public:
+                       Widget() {}
+                       int safe() noexcept { return 1; }
+                       int risky();
+                   };
+                   int f() {
+                     int x = 1;
+                     Widget w;
+                     int r = 0;
+                     if (!noexcept(x)) r |= 1;
+                     if (!noexcept(1 + 2)) r |= 2;
+                     if (!noexcept(safe_fn(1))) r |= 4;
+                     if (noexcept(maybe(1))) r |= 8;
+                     if (noexcept(new int)) r |= 16;
+                     if (!noexcept(w.safe())) r |= 32;
+                     if (noexcept(w.risky())) r |= 64;
+                     if (!noexcept((int)1.5)) r |= 128;
+                     return r;
+                   }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 不抛异常 -> 1: 变量 / 内建运算 / noexcept 函数 / noexcept 成员 / cast
+        assert!(s.contains("if (!1) {\nr|=1;"), "{}", s);
+        assert!(s.contains("r|=2;"), "{}", s);
+        assert!(s.contains("r|=4;"), "{}", s);
+        assert!(s.contains("r|=32;"), "{}", s);
+        assert!(s.contains("r|=128;"), "{}", s);
+        // 可能抛 -> 0: 普通函数 / new / 普通成员
+        assert!(s.contains("if (0) {\nr|=8;"), "{}", s);
+        assert!(s.contains("r|=16;"), "{}", s);
+        assert!(s.contains("r|=64;"), "{}", s);
+        // noexcept 函数定义应带 nothrow 属性
+        assert!(s.contains("__attribute__((nothrow)) int _ZN7safe_fnEv"), "{}", s);
     }
 
     #[test]

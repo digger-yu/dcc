@@ -157,6 +157,8 @@ pub enum CppDecl {
         name: String,
         params: Vec<(String, MangleType)>,
         body: CppBody,
+        /// M26.1: `noexcept` / `noexcept(expr)` 修饰 - 异常不外传
+        is_noexcept: bool,
     },
     /// 类外成员函数定义
     MemberFn {
@@ -3973,6 +3975,7 @@ impl<'a> CppParser<'a> {
                 name: String::new(),
                 params: vec![],
                 body: CppBody::default(),
+                is_noexcept: false,
             });
         }
         // `friend <type> <name>(args) [const] [{...} | ;]`
@@ -3986,7 +3989,7 @@ impl<'a> CppParser<'a> {
         } else {
             false
         };
-        let _spec = self.skip_specifiers();
+        let spec = self.skip_specifiers();
         // 函数体 或 ;
         if matches!(
             &self.peek,
@@ -4001,6 +4004,7 @@ impl<'a> CppParser<'a> {
                 name,
                 params,
                 body: CppBody::default(),
+                is_noexcept: spec.is_noexcept,
             });
         }
         let body = self.parse_body()?;
@@ -4009,6 +4013,7 @@ impl<'a> CppParser<'a> {
             name,
             params,
             body,
+            is_noexcept: spec.is_noexcept,
         })
     }
 
@@ -4074,6 +4079,8 @@ impl<'a> CppParser<'a> {
         let name = self.expect_ident()?;
         let params = self.parse_param_list()?;
         self.skip_cv_qual();
+        // M26.1: 自由函数 noexcept 修饰 (noexcept / noexcept(expr))
+        let spec = self.skip_specifiers();
         // M18.0: 函数声明 (无 body) `int foo(...);` 接受为声明, 不强制 body
         if matches!(
             &self.peek,
@@ -4088,6 +4095,7 @@ impl<'a> CppParser<'a> {
                 name,
                 params,
                 body: CppBody::default(),
+                is_noexcept: spec.is_noexcept,
             });
         }
         let body = self.parse_body()?;
@@ -4096,6 +4104,7 @@ impl<'a> CppParser<'a> {
             name,
             params,
             body,
+            is_noexcept: spec.is_noexcept,
         })
     }
 

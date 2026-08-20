@@ -72,7 +72,7 @@
 | class member parser | 部分类成员、引用成员、operator name 和表达式形式仍返回 `Unsupported` |
 | coroutine 语义 | parser/lower 存在状态机路径，但仍有占位和语义覆盖缺口 |
 | virtual inheritance | 菱形/虚基复杂布局仍以 warning/注释降级，不是完整 Itanium ABI 虚继承布局 |
-| `noexcept(expr)` | 当前直接降级为常量 true，不分析表达式抛异常可能性 |
+| `noexcept(expr)` | ~~当前直接降级为常量 true~~ → ✅ 已实现：分析表达式抛异常可能性（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛）（M26.1） |
 | template depth | 默认深度 128，低于 GCC/Clang 常见上限 |
 
 ## 交叉编译 / 缺失平台

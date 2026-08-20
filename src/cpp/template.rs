@@ -608,6 +608,7 @@ pub fn substitute_decl(
             name,
             params: ps,
             body,
+            is_noexcept,
         } => CppDecl::FreeFn {
             ret: substitute_type(ret, params, args),
             name: name.clone(),
@@ -616,6 +617,7 @@ pub fn substitute_decl(
                 .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
                 .collect(),
             body: substitute_body(body, params, args),
+            is_noexcept: *is_noexcept,
         },
         CppDecl::MemberFn {
             class,
@@ -901,6 +903,7 @@ mod tests {
             body: CppBody {
                 stmts: vec![CppStmt::Return(Some(CppExpr::Ident("a".to_string())))],
             },
+            is_noexcept: false,
         };
         let targs = TemplateArgs {
             params: vec![
@@ -935,6 +938,7 @@ mod tests {
             body: CppBody {
                 stmts: vec![CppStmt::Return(Some(CppExpr::IntLit(42)))],
             },
+            is_noexcept: false,
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {
@@ -959,6 +963,7 @@ mod tests {
             body: CppBody {
                 stmts: vec![CppStmt::Return(Some(CppExpr::Ident("x".to_string())))],
             },
+            is_noexcept: false,
         };
         let targs = TemplateArgs {
             params: vec![crate::cpp::parser::TemplateParam {

@@ -150,7 +150,7 @@ C++ 走"降级到 C"路径（`src/cpp/lower.rs`），Itanium ABI 名字修饰，
 | 模板 | ✅ | 解析 + 完整单态化 (src/cpp/template.rs)：注册/实例化缓存/偏特化匹配/模板-id 调用解析；496 单元测试 + 255 集成测试 |
 | SFINAE / concepts / coroutine | ✅ | `SfinaeCtx` 替换失败不报错；概念求值；`co_await`/`co_yield`/`co_return` Duff's device 状态机 (src/cpp/coroutine.rs) |
 | modules | ✅ | BMF 序列化 (src/cpp/bmf.rs)：DCC_BMF_V1 文本格式，`to_bmf`/`from_bmf` round-trip；ODR 检查待后续 |
-| C++17 修饰 | ✅ | `decltype` / `auto` 真推导 / `friend` / `noexcept` / `final` / `override` / `mutable` / `volatile` 成员函数 / `explicit` / `if constexpr` / `using Base::Base` 构造委托 |
+| C++17 修饰 | ✅ | `decltype` / `auto` 真推导 / `friend` / `noexcept` / `noexcept(expr)` 抛异常可能性分析 / `final` / `override` / `mutable` / `volatile` 成员函数 / `explicit` / `if constexpr` / `using Base::Base` 构造委托 |
 | 枚举 | ✅ | `enum`/`enum class`/`enum struct` 保留枚举值 + scoped 标记 + 可选底层类型 (`: type`) + 匿名枚举；降级为真实 C enum（非 `typedef int`） |
 | C++20/23 库 | ✅ | `std::filesystem` / `thread` / `mutex` / `condition_variable` / `chrono` / `expected` / `flat_map` / `regex`（子集）/ `ranges` / `views` / 多维下标 / placement new / `new T[n]` / `operator new[]` / `delete[]` |
 | GCC 兼容 | ✅ | `obj.*ptr_to_member` / `typeid(e)` 真 RTTI / 模板实参 `T<U>` / 跨虚继承 `dynamic_cast` / `__cxa_guard_*` / `std::initializer_list` / `__dcc_typeinfo_t` / `__dynamic_cast` / 成员指针偏移宏 (src/cpp/gcc_compat.rs) |
