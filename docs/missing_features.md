@@ -98,7 +98,7 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| strict full build | 增加显式 strict 模式，要求 `vmlinux`、`bzImage`、modpost、pahole、objtool 全部失败即失败，不允许 SKIP |
+| strict full build | ✅ 已实装 `STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh`：`vmlinux`、`bzImage`、modpost、pahole、objtool 均为硬门禁，缺产物/缺工具/非零退出不再 SKIP |
 | QEMU boot | 在产物存在时把 `qemu_boot_matrix.sh` 接入硬门禁，并断言 boot log 关键字符串 |
 | kernel object corpus | 固化若干真实内核 `.o` 样本，覆盖 `arch/x86/kernel`、`kernel/sched`、`lib/` |
 | stale CI paths | 校验 CI/examples 使用当前存在的 examples 路径，避免引用历史根目录 fixture |
@@ -187,5 +187,7 @@
 - 编译流程：`cargo build --release` + `bash scripts/test_all.sh`
 - 内核树：`~/linux-7.1`，需已有 `.config`
 - GCC 子集：`~/gcc-src` + `scripts/libiberty_combined.sh`（由 `cargo test --test integration` 驱动）
-- 内核全树：`scripts/kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物默认 SKIP）
+- 内核全树：`scripts/kernel_full_check.sh`（默认保留缺产物 SKIP；
+  `STRICT_FULL_BUILD=1` 要求 vmlinux / bzImage / modpost / pahole / objtool
+  全部硬通过）
 - QEMU：`scripts/qemu_boot_matrix.sh`（需 `qemu-system-x86_64` + bzImage）

@@ -12,7 +12,7 @@
 
 | 脚本 | 用途 |
 |------|------|
-| `kernel_full_check.sh` | modpost / QEMU / vmlinux 编排 |
+| `kernel_full_check.sh` | modpost / QEMU / vmlinux 编排；`STRICT_FULL_BUILD=1` 禁止核心门禁 SKIP |
 | `kernel_full_build.sh` | 全树构建 |
 | `kernel_build_smoke.sh` / `kernel_phase_b_check.sh` | smoke / phase B |
 | `prepare0_check.sh` / `prepare0_full.sh` | prepare0 窄/全链路 |

@@ -44,7 +44,13 @@ bash scripts/kernel_phase_b_check.sh          # modpost + prepare0 → PASS
 bash scripts/vmlinux_regress.sh               # 无 vmlinux 时 SKIP
 bash scripts/qemu_boot_matrix.sh              # 无 bzImage 时 SKIP
 BUILD_BZIMAGE=1 BUILD_VMLINUX=1 bash scripts/kernel_build_smoke.sh  # 全树 smoke
+STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh  # strict: 禁止核心门禁 SKIP
 ```
+
+`STRICT_FULL_BUILD=1` 会强制启用 `BUILD_VMLINUX=1` 与 `BUILD_BZIMAGE=1`，
+并要求 `modpost` 三个 TU 全部由 dcc 编译、`vmlinux` / `bzImage` 产物存在，
+且 `pahole` / `objtool` 必须安装并通过检查；上述核心门禁出现缺失产物、
+缺失工具、非零退出或复用旧 modpost 的情况都会返回失败，不再按 SKIP 处理。
 
 | 脚本 | 用途 |
 |------|------|

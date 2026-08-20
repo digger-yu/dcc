@@ -55,5 +55,7 @@ bash scripts/update_error_snapshots.sh
 ## 5. Linux 内核回归（可选）
 
 在已经 clone Linux 7.1 源码树 + 已有 `.config` 的开发机上，可依次跑
-`scripts/kernel_full_check.sh`（modpost / QEMU / vmlinux，缺产物
-时 SKIP）。详见 `docs/kernel_build_guide.md`。
+`scripts/kernel_full_check.sh`（默认 modpost / QEMU / vmlinux，缺产物时 SKIP）。
+需要硬门禁时运行 `STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh`，
+它会强制构建并要求 `vmlinux`、`bzImage`、modpost、pahole、objtool 全部通过。
+详见 `docs/kernel_build_guide.md`。

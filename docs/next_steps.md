@@ -193,7 +193,8 @@
 
 ```bash
 bash scripts/test_all.sh                  # 含 cargo test + 集成 + profile + errors
-bash scripts/kernel_full_check.sh         # modpost / QEMU / vmlinux（缺产物 SKIP）
+bash scripts/kernel_full_check.sh         # 默认门禁：缺产物 SKIP
+STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh  # strict 硬门禁
 BUILD_BZIMAGE=1 bash scripts/kernel_full_check.sh   # 步骤 6 启用时
 ```
 
