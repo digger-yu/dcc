@@ -281,8 +281,13 @@ pub enum CppDecl {
     Typedef,
     /// M18.0: 空占位声明 (enum / 修饰后无实际声明时使用)
     Empty,
-    /// M18.0: enum 占位声明, name 为枚举名 (lower 输出 `typedef int <name>;`)
-    EnumPlaceholder(String),
+    /// C++ enum declaration with scoped members and optional underlying type.
+    Enum {
+        name: String,
+        scoped: bool,
+        underlying: Option<String>,
+        variants: Vec<(String, Option<String>)>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -574,6 +579,20 @@ impl<'a> CppParser<'a> {
     #[allow(dead_code)]
     fn at_c_kw(&self, _kind: TokKind) -> bool {
         matches!(&self.peek, Some(CppTok::C(Tok { .. })))
+    }
+
+    /// 当前 token 是否为指定 C token 种类.
+    fn at_tok(&self, kind: TokKind) -> bool {
+        matches!(&self.peek, Some(CppTok::C(Tok { kind: k, .. })) if *k == kind)
+    }
+
+    /// 取 token 的源文本 (C token 用 text; 关键字用关键字名).
+    fn token_text(&self, t: &CppTok) -> String {
+        match t {
+            CppTok::C(Tok { text, .. }) => text.clone(),
+            CppTok::Kw(kw, _) => kw.as_str().to_string(),
+            CppTok::ColonColon(_) => "::".to_string(),
+        }
     }
 
     fn expect_ident(&mut self) -> Result<String, CppParseError> {
@@ -2481,17 +2500,19 @@ impl<'a> CppParser<'a> {
         Ok(CppDecl::Typedef)
     }
 
-    /// M18.0: 解析 `enum [class] Name { ... };` 占位声明.
-    /// 简化: 消耗整段 enum 声明, 记录 enum 名, lower 输出
-    /// `typedef int <name>;` 以保证后续引用该 enum 类型时类型存在.
+    /// Parse `enum [class] Name [: underlying] { ... };` and retain
+    /// enumerator names and initializer token text for lowering.
     fn parse_enum_decl(&mut self) -> Result<CppDecl, CppParseError> {
         // 跳过 `enum`
         self.bump();
-        // 跳过 `class` (scoped enum)
-        if self.at(CppKw::Class) {
+        // Consume `class` or `struct` for a scoped enum.
+        let scoped = if self.at(CppKw::Class) || self.at_tok(TokKind::KwStruct) {
             self.bump();
-        }
-        // 收集 enum 名 (ident)
+            true
+        } else {
+            false
+        };
+        // Collect the enum name when present.
         let name = if let Some(CppTok::C(Tok {
             kind: TokKind::Ident,
             text,
@@ -2509,27 +2530,20 @@ impl<'a> CppParser<'a> {
         {
             self.bump();
         }
-        // 跳过 `: type` (enum base)
-        if matches!(
-            &self.peek,
-            Some(CppTok::C(Tok {
-                kind: TokKind::Colon,
-                ..
-            }))
-        ) {
+        let mut underlying = None;
+        // Preserve the underlying type spelling up to the opening brace.
+        if self.at_tok(TokKind::Colon) {
             self.bump();
-            while let Some(t) = &self.peek.clone() {
-                if matches!(
-                    t,
-                    CppTok::C(Tok {
-                        kind: TokKind::LBrace,
-                        ..
-                    })
-                ) {
+            let mut parts = Vec::new();
+            while !self.at_tok(TokKind::LBrace) {
+                if let Some(tok) = self.peek.clone() {
+                    parts.push(self.token_text(&tok));
+                    self.bump();
+                } else {
                     break;
                 }
-                self.bump();
             }
+            underlying = Some(parts.join(" "));
         }
         // 必须有 `{`
         if !matches!(
@@ -2545,32 +2559,85 @@ impl<'a> CppParser<'a> {
                 self.span(),
             ));
         }
-        // 消耗整个 body
         self.bump(); // {
+        // Parse the enumerator list: `name [= init-expr]`, comma separated,
+        // terminated by the matching `}`.  Initializer token text is kept so
+        // the lowerer can re-emit the constant expression verbatim.
+        let mut variants: Vec<(String, Option<String>)> = Vec::new();
         let mut depth = 1i32;
+        let mut cur_name: Option<String> = None;
+        let mut cur_init: Option<Vec<String>> = None;
         while let Some(t) = self.peek.clone() {
-            match t {
+            let open = matches!(
+                &t,
                 CppTok::C(Tok {
-                    kind: TokKind::LBrace,
+                    kind: TokKind::LParen | TokKind::LBracket | TokKind::LBrace,
                     ..
-                }) => {
-                    self.bump();
-                    depth += 1;
-                }
+                })
+            );
+            let close = matches!(
+                &t,
+                CppTok::C(Tok {
+                    kind: TokKind::RParen | TokKind::RBracket | TokKind::RBrace,
+                    ..
+                })
+            );
+            match &t {
                 CppTok::C(Tok {
                     kind: TokKind::RBrace,
                     ..
-                }) => {
+                }) if depth == 1 => {
+                    // 枚举列表结束
                     self.bump();
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
+                    break;
+                }
+                _ => {}
+            }
+            // 所有括号种类都计入 depth, 保证 init 表达式内的逗号不会切分 enumerator.
+            if open {
+                depth += 1;
+            } else if close {
+                depth -= 1;
+            }
+            match &t {
+                CppTok::C(Tok {
+                    kind: TokKind::Comma,
+                    ..
+                }) if depth == 1 => {
+                    if let Some(n) = cur_name.take() {
+                        variants.push((n, cur_init.take().map(|v| v.join(" "))));
                     }
+                    cur_init = None;
+                    self.bump();
+                }
+                CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    text,
+                    ..
+                }) if cur_name.is_none() && depth == 1 => {
+                    cur_name = Some(text.clone());
+                    self.bump();
+                }
+                CppTok::C(Tok {
+                    kind: TokKind::Assign,
+                    ..
+                }) if cur_name.is_some() && depth == 1 => {
+                    cur_init = Some(Vec::new());
+                    self.bump();
                 }
                 _ => {
+                    if cur_init.is_some() {
+                        cur_init
+                            .as_mut()
+                            .unwrap()
+                            .push(self.token_text(&t));
+                    }
                     self.bump();
                 }
             }
+        }
+        if let Some(n) = cur_name.take() {
+            variants.push((n, cur_init.take().map(|v| v.join(" "))));
         }
         // 跳过 `;`
         if matches!(
@@ -2582,7 +2649,12 @@ impl<'a> CppParser<'a> {
         ) {
             self.bump();
         }
-        Ok(CppDecl::EnumPlaceholder(name))
+        Ok(CppDecl::Enum {
+            name,
+            scoped,
+            underlying,
+            variants,
+        })
     }
 
     /// 判断当前位置是否是 `Type operator ... (...)`
@@ -7382,6 +7454,93 @@ mod tests {
         let mut p = CppParser::new(src, "test.cpp");
         let d = p.parse_top_level().unwrap();
         assert!(d.len() == 1);
+    }
+
+    // M26: enum 保留枚举名 + 枚举值 + 底层类型 + scoped 标记
+    #[test]
+    fn parse_enum_keeps_variants() {
+        let src = b"enum Color { RED, GREEN = 5, BLUE };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        match &d[0] {
+            CppDecl::Enum {
+                name,
+                scoped,
+                underlying,
+                variants,
+            } => {
+                assert_eq!(name, "Color");
+                assert!(!scoped);
+                assert!(underlying.is_none());
+                assert_eq!(
+                    variants,
+                    &vec![
+                        ("RED".to_string(), None),
+                        ("GREEN".to_string(), Some("5".to_string())),
+                        ("BLUE".to_string(), None),
+                    ]
+                );
+            }
+            other => panic!("expected Enum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_enum_scoped_with_underlying() {
+        let src = b"enum class Scoped : unsigned char { A = 1, B = A + 2 };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        match &d[0] {
+            CppDecl::Enum {
+                name,
+                scoped,
+                underlying,
+                variants,
+            } => {
+                assert_eq!(name, "Scoped");
+                assert!(scoped);
+                assert_eq!(underlying.as_deref(), Some("unsigned char"));
+                assert_eq!(variants.len(), 2);
+                assert_eq!(variants[0], ("A".to_string(), Some("1".to_string())));
+                // 初始化表达式保留 token 文本 (含前值引用)
+                assert_eq!(variants[1], ("B".to_string(), Some("A + 2".to_string())));
+            }
+            other => panic!("expected Enum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_enum_anonymous() {
+        let src = b"enum { ANON_X = 42 };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        match &d[0] {
+            CppDecl::Enum {
+                name,
+                variants,
+                ..
+            } => {
+                assert_eq!(name, "_anon");
+                assert_eq!(variants, &vec![("ANON_X".to_string(), Some("42".to_string()))]);
+            }
+            other => panic!("expected Enum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_enum_initializer_with_parens_keeps_comma() {
+        // 初始化表达式内的逗号不应切分 enumerator
+        let src = b"enum E { A = f(1, 2), B = 3 };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let d = p.parse_top_level().unwrap();
+        match &d[0] {
+            CppDecl::Enum { variants, .. } => {
+                assert_eq!(variants.len(), 2);
+                assert_eq!(variants[0], ("A".to_string(), Some("f ( 1 , 2 )".to_string())));
+                assert_eq!(variants[1], ("B".to_string(), Some("3".to_string())));
+            }
+            other => panic!("expected Enum, got {:?}", other),
+        }
     }
 
     // M18.1: T<U1, U2, ...> 模板实参语法解析

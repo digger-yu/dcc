@@ -8815,6 +8815,43 @@ fn m26_modules_bmf() {
 
 #[test]
 #[cfg(unix)]
+fn m26_enum_semantics_runtime() {
+    // enum 保留枚举值 + scoped + 底层类型; dcc -c 后 host gcc 链接并运行.
+    let src = include_str!("fixtures/cpp/enum_semantics.cpp");
+    let (out, obj) = run_cpp_object_test("m26-enum-semantics", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp-enum-semantics-{}", std::process::id()));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run enum binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn m26_gcc_compat_runtime() {
     let src = include_str!("fixtures/cpp/gcc_compat.cpp");
     let (out, _obj) = run_cpp_object_test("m26-gcc-compat", src);

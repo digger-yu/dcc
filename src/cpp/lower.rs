@@ -49,6 +49,8 @@ pub struct Lower {
     pub ns: NamespaceCtx,
     /// 已知类集合 (用于 typeid / dynamic_cast)
     pub classes: Vec<String>,
+    /// M26: 已知 enum 类型集合 (lower 时输出真实 C enum; 类型引用不前缀 struct)
+    pub enum_types: std::collections::HashSet<String>,
     /// 已知类方法 (class -> [method_name, ...])
     pub class_methods: std::collections::HashMap<String, Vec<String>>,
     /// M17.0: 已知类 ctor (class -> [CppDecl::Ctor, ...]) - 供 using Base::Base 真 wrapper
@@ -260,6 +262,11 @@ impl Lower {
     fn mangle_to_c_ns(&self, ty: &MangleType) -> String {
         match ty {
             MangleType::Class(n) => {
+                // M26: enum 类型已降级为 `typedef enum {...} ns_E;`, 类型引用
+                // 直接使用 typedef 名, 不再前缀 `struct `.
+                if self.enum_types.contains(n) {
+                    return self.qualify_name(n);
+                }
                 if !self.ns.stack.is_empty() && !n.contains('_') {
                     let q = format!("{}_{}", self.ns.stack.join("_"), n);
                     format!("struct {}", q)
@@ -280,6 +287,7 @@ impl Lower {
             opt: LowerOptions::default(),
             ns: NamespaceCtx::default(),
             classes: vec![],
+            enum_types: std::collections::HashSet::new(),
             class_methods: std::collections::HashMap::new(),
             class_ctors: std::collections::HashMap::new(),
             class_fields: std::collections::HashMap::new(),
@@ -1680,16 +1688,42 @@ impl Lower {
             CppDecl::Empty => {
                 /* M18.0: enum / 修饰后无实际声明时使用, 不产生 C 输出. */
             }
-            CppDecl::EnumPlaceholder(name) => {
-                // M18.0: 输出 `typedef int <name>;` 保证后续 `file_type x;` 类型存在.
-                // 不在 dcc C 后端用 real enum, 因为 dcc C 暂不支持 enum 完整特性.
-                // 命名空间类 enum 已经被 namespace 限定后处理, 这里只输出 typedef.
-                let prefixed = if !self.ns.stack.is_empty() && !name.contains('_') {
-                    format!("{}_{}", self.ns.stack.join("_"), name)
+            CppDecl::Enum {
+                name,
+                scoped,
+                underlying,
+                variants,
+            } => {
+                // M18.0+: 保留枚举类型语义: 枚举名 + 枚举值 + 可选的底层类型.
+                // 降级为真实 C enum, 枚举常量名不加重名 (C++ 端 `E::A` 在
+                // lower 时只取末段, 见 QualifiedAccess 分支).
+                if name != "_anon" {
+                    // 先登记类型名, 让后续类型引用 (`sizeof(E)` / `E var`) 不前缀 struct.
+                    self.enum_types.insert(name.clone());
+                }
+                let prefixed = self.qualify_name(name);
+                let mut body = String::new();
+                for (i, (vname, vinit)) in variants.iter().enumerate() {
+                    if i > 0 {
+                        body.push_str(", ");
+                    }
+                    body.push_str(vname);
+                    if let Some(init) = vinit {
+                        body.push_str(&format!(" = {}", init));
+                    }
+                }
+                let _ = scoped; // scoped 只影响名字可见性; 降级后枚举常量统一可见
+                if name == "_anon" {
+                    // 匿名枚举: 只需要常量, 不需要类型名.
+                    self.out.push_str(&format!("enum {{ {} }};\n", body));
+                } else if let Some(ut) = underlying {
+                    // C23 enum 底层类型: 尽可能保留 sizeof / 值域语义.
+                    self.out
+                        .push_str(&format!("typedef enum : {} {{ {} }} {};\n", ut, body, prefixed));
                 } else {
-                    name.clone()
-                };
-                self.out.push_str(&format!("typedef int {};\n", prefixed));
+                    self.out
+                        .push_str(&format!("typedef enum {{ {} }} {};\n", body, prefixed));
+                }
             }
         }
     }
@@ -2224,7 +2258,7 @@ impl Lower {
                 // 生成 guard 变量名: _ZStL<len>name<suffix> (Itanium 风格, 但简化)
                 let _mangle = format!("_ZStL{}{}_thread_local_", name.len(), name);
                 self.out
-                    .push_str(&format!("static {} {};\n", mangle_to_c(ty), name));
+                    .push_str(&format!("static {} {};\n", self.mangle_to_c_ns(ty), name));
                 self.out
                     .push_str(&format!("static unsigned char _cxa_guard_{} = 0;\n", name));
                 self.out.push_str(&format!(
@@ -3783,6 +3817,43 @@ mod tests {
             "{}",
             s
         );
+    }
+
+    #[test]
+    fn lower_enum_emits_real_c_enum() {
+        // M26: enum 保留枚举值语义, 不再降级为 typedef int
+        let src = b"enum Color { RED, GREEN = 5, BLUE };
+                   enum class Scoped : unsigned char { A = 1, B = A + 2 };
+                   enum { ANON_X = 42 };";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 枚举值保留
+        assert!(s.contains("RED"), "{}", s);
+        assert!(s.contains("GREEN = 5"), "{}", s);
+        assert!(s.contains("BLUE"), "{}", s);
+        // scoped + 底层类型保留
+        assert!(s.contains("typedef enum : unsigned char { A = 1, B = A + 2 } Scoped;"), "{}", s);
+        // 匿名枚举只产常量, 不产类型名
+        assert!(s.contains("enum { ANON_X = 42 };"), "{}", s);
+        // 不应再出现 typedef int 降级
+        assert!(!s.contains("typedef int Color"), "{}", s);
+        assert!(!s.contains("typedef int Scoped"), "{}", s);
+    }
+
+    #[test]
+    fn lower_enum_namespace_prefixed() {
+        // 命名空间内的 enum 类型名加 ns 前缀, 与类/函数一致
+        let src = b"namespace ns { enum E { X = 7 }; }
+                   int f() { return ns::E::X; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("typedef enum { X = 7 } ns_E;"), "{}", s);
     }
 
     #[test]
