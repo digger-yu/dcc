@@ -12,6 +12,10 @@ echo "vmlinux: $VMLINUX"
 echo "dcc:     $DCC"
 
 if [[ ! -f "$VMLINUX" ]]; then
+    if [[ "${REQUIRE_VMLINUX:-0}" == "1" ]]; then
+        echo "FAIL: vmlinux not found"
+        exit 1
+    fi
     echo "SKIP: vmlinux not found — run:"
     echo "  BUILD_VMLINUX=1 bash scripts/kernel_build_smoke.sh"
     exit 0
@@ -43,6 +47,9 @@ if command -v pahole >/dev/null 2>&1; then
         fail=$((fail + 1))
     fi
     rm -f "$PAHOLE_OUT"
+elif [[ "${REQUIRE_PAHOLE:-0}" == "1" ]]; then
+    echo "FAIL: pahole not installed"
+    exit 1
 else
     echo "SKIP: pahole not installed"
 fi
@@ -62,12 +69,22 @@ if command -v objtool >/dev/null 2>&1; then
         echo "PASS: objtool check vmlinux (zero CRITICAL)"
         pass=$((pass + 1))
     else
-        echo "WARN: objtool exit $rc without CRITICAL (review log)"
-        tail -15 "$OBJ_OUT"
-        pass=$((pass + 1))
+        if [[ "${REQUIRE_OBJTOOL:-0}" == "1" ]]; then
+            echo "FAIL: objtool exit $rc on vmlinux"
+            tail -15 "$OBJ_OUT"
+            fail=$((fail + 1))
+        else
+            echo "WARN: objtool exit $rc without CRITICAL (review log)"
+            tail -15 "$OBJ_OUT"
+            pass=$((pass + 1))
+        fi
     fi
     rm -f "$OBJ_OUT"
 else
+    if [[ "${REQUIRE_OBJTOOL:-0}" == "1" ]]; then
+        echo "FAIL: objtool not installed"
+        exit 1
+    fi
     echo "SKIP: objtool not installed"
 fi
 

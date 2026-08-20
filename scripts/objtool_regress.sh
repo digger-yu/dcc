@@ -36,6 +36,10 @@ if command -v objtool >/dev/null 2>&1; then
     objtool check "$OBJ"
     echo "PASS: objtool check"
 else
+    if [[ "${REQUIRE_OBJTOOL:-0}" == "1" ]]; then
+        echo "FAIL: objtool not installed"
+        exit 1
+    fi
     echo "SKIP: objtool not installed; eh_frame/ORC sections verified via readelf"
 fi
 

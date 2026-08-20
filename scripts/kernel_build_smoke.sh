@@ -17,6 +17,12 @@ echo "dcc:    $DCC"
 echo "jobs:   $JOBS"
 
 if [[ ! -d "$KERNEL_DIR" ]]; then
+    if [[ "${REQUIRE_KERNEL_DIR:-0}" == "1" \
+        || "${REQUIRE_VMLINUX:-0}" == "1" \
+        || "${REQUIRE_BZIMAGE:-0}" == "1" ]]; then
+        echo "FAIL: kernel tree missing"
+        exit 1
+    fi
     echo "SKIP: kernel tree missing"
     exit 0
 fi
@@ -56,6 +62,9 @@ if [[ "$BUILD_VMLINUX" == "1" ]]; then
         echo "FAIL: vmlinux not produced"
         exit 1
     fi
+elif [[ "${REQUIRE_VMLINUX:-0}" == "1" ]]; then
+    echo "FAIL: vmlinux build required"
+    exit 1
 else
     echo "SKIP: vmlinux (set BUILD_VMLINUX=1)"
 fi
@@ -69,6 +78,9 @@ if [[ "$BUILD_BZIMAGE" == "1" ]]; then
         echo "FAIL: bzImage not produced"
         exit 1
     fi
+elif [[ "${REQUIRE_BZIMAGE:-0}" == "1" ]]; then
+    echo "FAIL: bzImage build required"
+    exit 1
 else
     echo "SKIP: bzImage (set BUILD_BZIMAGE=1)"
 fi

@@ -17,6 +17,10 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
 fi
 
 if [[ ! -f "$KERNEL" ]]; then
+    if [[ "${REQUIRE_BZIMAGE:-0}" == "1" ]]; then
+        echo "FAIL: bzImage not found"
+        exit 1
+    fi
     echo "SKIP: bzImage not found — run:"
     echo "  BUILD_BZIMAGE=1 bash scripts/kernel_build_smoke.sh"
     exit 0

@@ -15,6 +15,10 @@ echo "dcc:    $DCC"
 echo "kernel: $KERNEL_DIR"
 
 if [[ ! -d "$MOD" ]]; then
+    if [[ "${STRICT_MODPOST:-0}" == "1" ]]; then
+        echo "FAIL: $MOD missing"
+        exit 1
+    fi
     echo "SKIP: $MOD missing"
     exit 0
 fi
@@ -78,11 +82,20 @@ for src in modpost file2alias sumversion; do
         echo "  PASS: $src.c"
         dcc_ok=$((dcc_ok + 1))
     else
-        echo "  SKIP: $src.c (dcc host C gap)"
+        if [[ "${STRICT_MODPOST:-0}" == "1" ]]; then
+            echo "  FAIL: $src.c (strict modpost requires dcc)"
+        else
+            echo "  SKIP: $src.c (dcc host C gap)"
+        fi
         head -3 "$WORK/${src}.err" | sed 's/\x1b\[[0-9;]*m//g'
         dcc_fail=$((dcc_fail + 1))
     fi
 done
+
+if [[ "${STRICT_MODPOST:-0}" == "1" && $dcc_ok -ne 3 ]]; then
+    echo "FAIL: strict modpost requires all 3 TUs via dcc ($dcc_ok/3)"
+    exit 1
+fi
 
 if [[ $dcc_ok -lt 1 ]]; then
     echo "FAIL: no modpost TU compiled with dcc"

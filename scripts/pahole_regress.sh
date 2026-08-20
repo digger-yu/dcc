@@ -28,14 +28,25 @@ if command -v pahole >/dev/null 2>&1; then
     echo "-- pahole --btf_dump"
     if pahole --btf_dump "$OBJ" 2>&1 | grep -qi 'dcc_probe\|STRUCT'; then
         echo "PASS: pahole parsed BTF struct"
+    elif [[ "${REQUIRE_PAHOLE:-0}" == "1" ]]; then
+        echo "FAIL: pahole ran but struct name not found"
+        exit 1
     else
         echo "WARN: pahole ran but struct name not found (BTF section present)"
     fi
 elif command -v llvm-objdump >/dev/null 2>&1; then
+    if [[ "${REQUIRE_PAHOLE:-0}" == "1" ]]; then
+        echo "FAIL: pahole not installed"
+        exit 1
+    fi
     echo "-- llvm-objdump section headers"
     llvm-objdump -h "$OBJ" | grep -q '\.BTF'
     echo "PASS: BTF section visible to llvm-objdump"
 else
+    if [[ "${REQUIRE_PAHOLE:-0}" == "1" ]]; then
+        echo "FAIL: pahole not installed"
+        exit 1
+    fi
     echo "SKIP: pahole/llvm-objdump not installed; .BTF present"
 fi
 
