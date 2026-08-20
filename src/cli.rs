@@ -38,6 +38,7 @@ pub struct Config {
     pub force_includes: Vec<String>,          // -include file: 强制包含文件
     pub pch_opts: crate::preproc::PchOptions, // PCH (预编译头): -fpch-include / -fpch-create
     pub syntax_only: bool,                    // -fsyntax-only: 只做语法检查, 不生成代码
+    pub emit_module_file: Option<PathBuf>,    // --emit-module-file=foo.bmf: 输出模块接口 (BMF)
     pub dep_file: Option<PathBuf>,            // -MF: 依赖文件输出路径
     pub dep_target: Option<String>,           // -MT/-MQ: 依赖文件中的目标名
     pub gen_dep: bool,                        // -MD/-MMD: 是否生成依赖文件
@@ -388,6 +389,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut force_includes: Vec<String> = vec![];
     let mut pch_opts = crate::preproc::PchOptions::default();
     let mut syntax_only = false;
+    let mut emit_module_file: Option<PathBuf> = None;
     let mut dep_file: Option<PathBuf> = None;
     let mut dep_target: Option<String> = None;
     let mut gen_dep = false;
@@ -1270,6 +1272,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-fpch-include-only=") => {
                 pch_opts.include_only = Some(a[19..].to_string());
             }
+            // M26.4: --emit-module-file=foo.bmf - 编译 export module 时输出模块接口
+            a if a.starts_with("--emit-module-file=") => {
+                emit_module_file = Some(PathBuf::from(a["--emit-module-file=".len()..].to_string()));
+            }
             // -f* 其他选项 - 忽略
             a if a.starts_with("-f") => {}
             // -std=* 已经处理过了
@@ -1544,6 +1550,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             force_includes,
             pch_opts,
             syntax_only,
+            emit_module_file,
             dep_file,
             dep_target,
             gen_dep,
@@ -1628,6 +1635,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             force_includes,
             pch_opts,
             syntax_only,
+            emit_module_file: None,
             dep_file,
             dep_target,
             gen_dep,

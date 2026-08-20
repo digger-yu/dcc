@@ -65,7 +65,7 @@
 | 限制 | 说明 |
 |------|------|
 | GCC 完整 bootstrap | cc1/cc1plus 未完成真实 bootstrap 验证；当前只覆盖可选 GCC source 子集测试 |
-| C++20 modules | `import` 仍等价 include；无 BMIP 二进制缓存、真实跨 TU module import、private fragment 或 partitions |
+| C++20 modules | ~~`import` 仍等价 include；无 BMIP 二进制缓存、真实跨 TU module import、private fragment 或 partitions~~ → ✅ 已实现：BMF 文本接口（BMIP 缓存）经 `--emit-module-file=foo.bmf` 写出；`import foo;` 从 BMF 生成 extern 声明 + 类布局并注册名字（跨 TU 真实链接）；`module :private;` 私有片段终止导出收集；`export module name:part;` 分区 + `import :part;` 分区导入（`P`/`X` 记录）与合并（M26.4） |
 | C++ ODR 集成 | `OdrChecker` 存在，但不等于完整 module/link pipeline ODR enforcement |
 | C++ enum lowering | ~~enum 仍降级为 `typedef int`~~ → ✅ 已实现：真实 C enum + 枚举值 + scoped 标记 + 可选底层类型 + 匿名枚举（M26.1） |
 | `auto` / `decltype(auto)` | ~~类型推导对调用、成员调用和复杂表达式仍保守降级为 int/Unknown~~ → ✅ 已实现：函数返回类型注册表 + 成员调用/成员字段类型推导 + `new T`→`T*`；自由函数调用改为与定义一致的 mangled 名（M26.1） |
@@ -159,7 +159,7 @@
 | 缺口 | 建议测试 |
 |------|----------|
 | semantic run tests | SFINAE 失败路径、partial specialization 优先级、concept reject、dynamic_cast 虚继承负向应 compile+link+run |
-| modules | BMF 导入、真实跨 TU import、ODR 冲突、private fragment/partition expected-fail |
+| modules | BMF 跨 TU import / partition / private fragment 已覆盖（m26_module_* 集成测试）；ODR 冲突 expected-fail 仍待接入 |
 | coroutine | 覆盖 `co_await`/`co_yield`/`co_return` 状态机运行语义和错误路径 |
 | GCC bootstrap | 增加可复现的 cc1/cc1plus configure/build xfail 或 ignore 门禁脚本 |
 

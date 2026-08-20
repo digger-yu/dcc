@@ -121,6 +121,13 @@ pub struct Lower {
     pub class_aligns: std::collections::HashMap<String, i64>,
     /// M26.3: 多态类 (有虚函数/虚析构, 或继承多态基类) - 决定 __vptr 布局
     pub class_polymorphic: std::collections::HashSet<String>,
+    /// M26.4: 导入的模块接口 (BMF), 由 driver 预加载; `import foo;` 据此
+    /// 生成 extern 声明并注册名字, 而非当作 `#include <foo>`
+    pub imported_modules: Vec<crate::cpp::bmf::BmfModule>,
+    /// M26.4: 当前模块分区名 (`export module foo:part;` -> Some("part"))
+    pub module_partition: Option<String>,
+    /// M26.4: 当前模块导入的分区列表 (`import :part;`)
+    pub module_part_imports: Vec<String>,
 }
 
 /// M18.0: 检查 ident 是否是 C 关键字 (如 int/char/void/...), 不能作为 typedef 名
@@ -342,6 +349,9 @@ impl Lower {
             class_sizes: std::collections::HashMap::new(),
             class_aligns: std::collections::HashMap::new(),
             class_polymorphic: std::collections::HashSet::new(),
+            imported_modules: vec![],
+            module_partition: None,
+            module_part_imports: vec![],
         }
     }
     pub fn with_options(_opt: LowerOptions) -> Self {
@@ -1838,17 +1848,19 @@ impl Lower {
             CppDecl::Class(c) => {
                 // M26: BMF - export module 后的类记为导出 (含成员布局)
                 if self.module_collect {
+                    // M26.4: layout 记单行 C struct 字段体 (`int x; double y;`),
+                    // import 端直接拼成 `struct <name> { <body> };`
                     let layout = c
                         .members
                         .iter()
                         .filter_map(|m| match m {
                             CppDecl::MemberVar { ty, name, .. } => {
-                                Some(format!("{}:{}", name, self.mangle_to_c_ns(ty)))
+                                Some(format!("{} {};", self.mangle_to_c_ns(ty), name))
                             }
                             _ => None,
                         })
                         .collect::<Vec<_>>()
-                        .join(", ");
+                        .join(" ");
                     self.module_exports.push(BmfExport {
                         kind: BmfKind::Class,
                         name: c.name.clone(),
@@ -1871,8 +1883,10 @@ impl Lower {
                 if self.module_collect && name != "main" {
                     self.module_exports.push(BmfExport {
                         kind: BmfKind::Function,
-                        name: m.clone(),
-                        signature: self.fn_signature_c(ret, params),
+                        // M26.4: name 记源码名 (import 端注册用); signature 记
+                        // 完整 C 声明文本 `ret mangled(args)` (含 Itanium 符号)
+                        name: name.clone(),
+                        signature: self.fn_decl_c(&m, ret, params),
                         layout: None,
                     });
                 }
@@ -1910,6 +1924,15 @@ impl Lower {
                 let this_ty = MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
                 let mut all_params: Vec<(String, MangleType)> = vec![("this".to_string(), this_ty)];
                 all_params.extend(params.iter().cloned());
+                // M26.4: BMF - 导出成员函数 (import 端声明 + class_methods 注册)
+                if self.module_collect {
+                    self.module_exports.push(BmfExport {
+                        kind: BmfKind::Function,
+                        name: format!("{}::{}", class, name),
+                        signature: self.fn_decl_c(&m, ret, &all_params),
+                        layout: None,
+                    });
+                }
                 if *is_virtual {
                     // 输出 vtable 项
                     // M17.0: final / override / volatile 标记影响 vtable 项语义
@@ -1951,6 +1974,15 @@ impl Lower {
                 let this_ty = MangleType::Pointer(Box::new(MangleType::Class(class_q.clone())));
                 let mut all_params: Vec<(String, MangleType)> = vec![("this".to_string(), this_ty)];
                 all_params.extend(params.iter().cloned());
+                // M26.4: BMF - 导出构造函数 (import 端 extern + 类注册)
+                if self.module_collect {
+                    self.module_exports.push(BmfExport {
+                        kind: BmfKind::Function,
+                        name: format!("{}::ctor", class),
+                        signature: self.fn_decl_c(&m, &MangleType::Void, &all_params),
+                        layout: None,
+                    });
+                }
                 if *is_noexcept {
                     self.out.push_str("__attribute__((nothrow)) ");
                 }
@@ -2216,25 +2248,52 @@ impl Lower {
                     if let Some(n) = name {
                         self.module_name = n.clone();
                     }
+                    // M26.4: 分区模块 `export module foo:part;`
+                    if let Some(p) = partition {
+                        self.module_partition = Some(p.clone());
+                    }
                     self.module_collect = true;
                 }
+            }
+            CppDecl::PrivateFragment => {
+                // M26.4: `module :private;` - 之后的声明不导出
+                self.module_collect = false;
+                self.out
+                    .push_str("/* dcc C++ module :private (M26.4): exports end here */\n");
             }
             CppDecl::Import { path } => {
                 // M26: BMF - 记录 import 依赖 (module 收集模式下)
                 if self.module_collect {
                     self.module_imports.push(path.join("::"));
                 }
-                // M18.1: 尝试把 import 解析为 C 头文件:
-                //   - path 仅 1 段且像文件路径 (e.g. "iostream" / "std")
-                //     → 输出 /* dcc C++ import (M9): iostream */
-                //   - path 含 `header` 形式 (M18.1) 或单段以 .h/.hpp 结尾
-                //     → emit `#include <header>` 或 `#include "header"`
-                // 当前实现: 检测 path 末端是 "<file>" / "\"file\"" 字面量
-                // (parser 在 `import <foo>;` 时记 path = vec!["foo"], 尖括号
-                // 头为单段名; `import "header.h";` 也是单段). 因此
-                // 单段非命名空间路径 → 视为 C include; 其它 → 注释占位.
+                // M26.4: 分区导入 `import :part;` - 并入本模块导出
+                if path.len() == 1 && path[0].starts_with(':') {
+                    let part = &path[0][1..];
+                    let found = self
+                        .imported_modules
+                        .iter()
+                        .find(|m| m.partition.as_deref() == Some(part))
+                        .cloned();
+                    if let Some(bmf) = found {
+                        self.module_part_imports.push(part.to_string());
+                        self.emit_imported_module_decls(&bmf);
+                        return;
+                    }
+                    self.out.push_str(&format!(
+                        "/* dcc C++ import :{} (partition bmf not found) */\n",
+                        part
+                    ));
+                    return;
+                }
+                // M26.4: 常规 `import foo;` - 若能找到 foo.bmf (driver 预加载),
+                // 生成 extern 声明 + 注册名字; 否则回退为 include / 注释占位.
                 if path.len() == 1 {
                     let p = &path[0];
+                    if let Some(bmf) = self.imported_modules.iter().find(|m| m.name == *p).cloned()
+                    {
+                        self.emit_imported_module_decls(&bmf);
+                        return;
+                    }
                     if p.contains('.') || p.chars().all(|c| c.is_alphanumeric() || c == '_') {
                         // 单段且像 header (含扩展名或纯标识符) → 当作 `#include <p>`
                         self.out.push_str(&format!("#include <{}>\n", p));
@@ -3798,6 +3857,89 @@ impl Lower {
         format!("{}({})", self.mangle_to_c_ns(ret), args.join(", "))
     }
 
+    /// M26.4: 完整 C 函数声明文本 (BMF 导出/导入): `ret mangled(arg1, arg2)`
+    /// 含 Itanium mangled 符号, import 端直接 `extern <此文本>;`
+    fn fn_decl_c(&self, mangled: &str, ret: &MangleType, params: &[(String, MangleType)]) -> String {
+        let args: Vec<String> = params.iter().map(|(_, t)| self.mangle_to_c_ns(t)).collect();
+        format!("{} {}({})", self.mangle_to_c_ns(ret), mangled, args.join(", "))
+    }
+
+    /// M26.4: 注入导入模块 (BMF) 的 C 声明, 并注册名字供调用点降级:
+    ///   - 函数: `extern <decl>;` + 注册 srcname (plain_fns / fn_ret_types)
+    ///   - 类:   `struct <name> { <body> };` + typedef + 注册类/字段
+    ///   - 成员函数 (name `Class::method` / `Class::ctor`): extern + 注册方法
+    ///   - 变量: `extern <decl>;`
+    fn emit_imported_module_decls(&mut self, bmf: &BmfModule) {
+        self.out
+            .push_str(&format!("/* import module {} */\n", bmf.name));
+        // 先输出所有类定义 (成员 extern 可能引用 struct 类型)
+        for e in &bmf.exports {
+            if let BmfKind::Class = e.kind {
+                self.emit_imported_class(e);
+            }
+        }
+        for e in &bmf.exports {
+            match e.kind {
+                BmfKind::Function => {
+                    // name 为源码名 或 `Class::method` / `Class::ctor`
+                    if e.name.contains("::") {
+                        let (cls, method) = e.name.split_once("::").unwrap();
+                        if method != "ctor" {
+                            self.class_methods
+                                .entry(cls.to_string())
+                                .or_default()
+                                .push(method.to_string());
+                        }
+                    } else {
+                        self.plain_fns.insert(e.name.clone());
+                        let ret = infer_c_decl_ret_type(&e.signature);
+                        self.fn_ret_types.insert(e.name.clone(), ret);
+                    }
+                    self.out.push_str(&format!("extern {};\n", e.signature));
+                }
+                BmfKind::Class => {
+                    // 已在第一遍输出
+                }
+                BmfKind::Variable => {
+                    self.out.push_str(&format!("extern {};\n", e.signature));
+                }
+                BmfKind::Template => {
+                    self.out
+                        .push_str(&format!("/* import template {} */\n", e.name));
+                }
+            }
+        }
+    }
+
+    /// M26.4: 输出导入类的 struct 定义并注册
+    fn emit_imported_class(&mut self, e: &BmfExport) {
+        let name = &e.name;
+        if !self.classes.contains(name) {
+            self.classes.push(name.clone());
+        }
+        let body = e.layout.as_deref().unwrap_or("");
+        self.out
+            .push_str(&format!("struct {} {{ {} }};\n", name, body));
+        if !self.emitted_typedefs.contains(name.as_str()) && !is_c_keyword(name) {
+            self.emitted_typedefs.insert(name.clone());
+            self.out
+                .push_str(&format!("typedef struct {} {};\n", name, name));
+        }
+        // 字段注册 (body 形如 `int x; double y;`), 供 this->x / 继承查找
+        let mut fields = Vec::new();
+        for part in body.split(';') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let toks: Vec<&str> = part.split_whitespace().collect();
+            if let Some(fname) = toks.last() {
+                fields.push((fname.to_string(), c_decl_type_to_mangle(&toks[..toks.len() - 1].join(" "))));
+            }
+        }
+        self.class_fields.insert(name.clone(), fields);
+    }
+
     /// M26: 模块接口序列化 (BMF 文本). 无 export module 声明时返回 None.
     pub fn module_bmf(&self) -> Option<String> {
         if self.module_name.is_empty() {
@@ -3808,9 +3950,63 @@ impl Lower {
                 name: self.module_name.clone(),
                 exports: self.module_exports.clone(),
                 imports: self.module_imports.clone(),
+                partition: self.module_partition.clone(),
+                part_imports: self.module_part_imports.clone(),
             }
             .serialize(),
         )
+    }
+}
+
+/// M26.4: 从 C 声明文本推导函数返回类型 (`int _ZN6answerEv()` -> Int)
+fn infer_c_decl_ret_type(decl: &str) -> MangleType {
+    let head = decl.trim_start();
+    // 取第一个 token 前 (含 struct/unsigned 等多词类型)
+    let mut toks = head.split_whitespace();
+    let first = toks.next().unwrap_or("int");
+    match first {
+        "void" => MangleType::Void,
+        "char" => MangleType::Char,
+        "double" => MangleType::Double,
+        "float" => MangleType::Float,
+        "short" => MangleType::Short,
+        "long" => {
+            if head.starts_with("long long") {
+                MangleType::LongLong
+            } else {
+                MangleType::Long
+            }
+        }
+        "unsigned" => MangleType::Uint,
+        "struct" => MangleType::Class(
+            toks.next().unwrap_or("").trim_end_matches('*').to_string(),
+        ),
+        _ => MangleType::Int,
+    }
+}
+
+/// M26.4: C 类型文本 -> MangleType (import 端字段注册用, 尽力而为)
+fn c_decl_type_to_mangle(ty: &str) -> MangleType {
+    let t = ty.trim();
+    if let Some(rest) = t.strip_prefix("struct ") {
+        return MangleType::Class(rest.trim().to_string());
+    }
+    if t.ends_with('*') {
+        return MangleType::Pointer(Box::new(c_decl_type_to_mangle(&t[..t.len() - 1].trim())));
+    }
+    match t {
+        "void" => MangleType::Void,
+        "char" => MangleType::Char,
+        "int" => MangleType::Int,
+        "double" => MangleType::Double,
+        "float" => MangleType::Float,
+        "short" => MangleType::Short,
+        "long" => MangleType::Long,
+        "long long" => MangleType::LongLong,
+        "unsigned" => MangleType::Uint,
+        "unsigned long" => MangleType::Ulong,
+        "unsigned long long" => MangleType::UlongLong,
+        _ => MangleType::Int,
     }
 }
 
@@ -4516,8 +4712,8 @@ mod tests {
             .expect("module_bmf() should be Some after export module");
         assert!(bmf.starts_with("DCC_BMF_V1\nM mymod\n"), "{}", bmf);
         assert!(bmf.contains("I other"), "{}", bmf);
-        assert!(bmf.contains("E F _ZN6answerEv int(int)"), "{}", bmf);
-        assert!(bmf.contains("E C Widget id:int"), "{}", bmf);
+        assert!(bmf.contains("E F answer int _ZN6answerEv(int)"), "{}", bmf);
+        assert!(bmf.contains("E C Widget int id;"), "{}", bmf);
     }
 
     #[test]

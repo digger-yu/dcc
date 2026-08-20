@@ -9039,6 +9039,199 @@ fn m26_virtual_inheritance_runtime() {
 
 #[test]
 #[cfg(unix)]
+fn m26_module_cross_tu_import() {
+    // M26.4: 跨 TU module import.
+    // 导出 TU (export module) 经 --emit-module-file 写出 BMF 接口;
+    // 导入 TU (import mymod) 从 BMF 生成 extern 声明 + 类布局;
+    // dcc -c 两个 TU 后 host gcc 链接运行.
+    let dir = std::env::temp_dir().join(format!("dcc-mod-tu-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let mod_path = dir.join("mymod.cpp");
+    let mod_obj = dir.join("mymod.o");
+    let bmf_path = dir.join("mymod.bmf");
+    let main_path = dir.join("main.cpp");
+    let main_obj = dir.join("main.o");
+    let exe = dir.join("main");
+
+    let module_src = r#"export module mymod;
+export int answer() { return 42; }
+export int twice(int x) { return x * 2; }
+export class Widget {
+public:
+    int id;
+    Widget(int v) { id = v; }
+    int get() { return id; }
+};
+module :private;
+int hidden_helper() { return 1; }
+"#;
+    fs::write(&mod_path, module_src).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&mod_obj)
+        .arg(&mod_path)
+        .arg(format!("--emit-module-file={}", bmf_path.display()))
+        .output()
+        .expect("run dcc on module TU");
+    assert!(
+        out.status.success(),
+        "module compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(bmf_path.exists(), "BMF interface not emitted");
+    let bmf_text = fs::read_to_string(&bmf_path).unwrap();
+    // 导出记录: 自由函数 + 类布局 + 成员函数/ctor; 私有片段声明不导出
+    assert!(bmf_text.contains("E F answer"), "{}", bmf_text);
+    assert!(bmf_text.contains("E F twice"), "{}", bmf_text);
+    assert!(bmf_text.contains("E C Widget"), "{}", bmf_text);
+    assert!(bmf_text.contains("Widget::ctor"), "{}", bmf_text);
+    assert!(bmf_text.contains("Widget::get"), "{}", bmf_text);
+    assert!(!bmf_text.contains("hidden_helper"), "{}", bmf_text);
+
+    let main_src = r#"import mymod;
+int main() {
+    if (twice(answer()) != 84) return 1;
+    Widget w(7);
+    if (w.get() != 7) return 2;
+    if (w.id != 7) return 3;
+    return 0;
+}
+"#;
+    fs::write(&main_path, main_src).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&main_obj)
+        .arg(&main_path)
+        .output()
+        .expect("run dcc on import TU");
+    assert!(
+        out.status.success(),
+        "import compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let link = Command::new("gcc")
+        .arg(&mod_obj)
+        .arg(&main_obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&exe).output().expect("run module binary");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn m26_module_partition_import() {
+    // M26.4: module partition 跨 TU.
+    // part TU `export module mymod:part;` -> mymod.part.bmf (P 行);
+    // primary TU `export module mymod; import :part;` -> mymod.bmf (X 行),
+    // 分区导出并入; main `import mymod;` 链接全部三个对象文件.
+    let dir = std::env::temp_dir().join(format!("dcc-mod-part-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let part_path = dir.join("part.cpp");
+    let part_obj = dir.join("part.o");
+    let part_bmf = dir.join("mymod.part.bmf");
+    let prim_path = dir.join("prim.cpp");
+    let prim_obj = dir.join("prim.o");
+    let prim_bmf = dir.join("mymod.bmf");
+    let main_path = dir.join("main.cpp");
+    let main_obj = dir.join("main.o");
+    let exe = dir.join("main");
+
+    // 分区 TU
+    fs::write(&part_path, "export module mymod:part;\nexport int pfn() { return 7; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&part_obj)
+        .arg(&part_path)
+        .arg(format!("--emit-module-file={}", part_bmf.display()))
+        .output()
+        .expect("run dcc on partition TU");
+    assert!(
+        out.status.success(),
+        "partition compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let part_text = fs::read_to_string(&part_bmf).unwrap();
+    assert!(part_text.contains("M mymod"), "{}", part_text);
+    assert!(part_text.contains("P part"), "{}", part_text);
+    assert!(part_text.contains("E F pfn"), "{}", part_text);
+
+    // primary TU (导入分区, 再导出)
+    fs::write(
+        &prim_path,
+        "export module mymod;\nimport :part;\nexport int get() { return pfn(); }\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&prim_obj)
+        .arg(&prim_path)
+        .arg(format!("--emit-module-file={}", prim_bmf.display()))
+        .output()
+        .expect("run dcc on primary TU");
+    assert!(
+        out.status.success(),
+        "primary compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let prim_text = fs::read_to_string(&prim_bmf).unwrap();
+    assert!(prim_text.contains("M mymod"), "{}", prim_text);
+    assert!(prim_text.contains("X part"), "{}", prim_text);
+    assert!(prim_text.contains("E F get"), "{}", prim_text);
+
+    // 导入 TU
+    fs::write(&main_path, "import mymod;\nint main() { return get() != 7; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&main_obj)
+        .arg(&main_path)
+        .output()
+        .expect("run dcc on import TU");
+    assert!(
+        out.status.success(),
+        "import compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let link = Command::new("gcc")
+        .arg(&part_obj)
+        .arg(&prim_obj)
+        .arg(&main_obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&exe).output().expect("run partition binary");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn c_arrow_member_store_offset_and_width() {
     // 回归测试: `ptr->field = val` 必须按字段偏移与宽度存储.
     // (虚继承实现中发现 dcc C 后端对 `->` 成员赋值退化为 4 字节 + 偏移 0)

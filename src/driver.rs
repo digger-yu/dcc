@@ -1220,8 +1220,24 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     let decls = parser
         .parse_top_level()
         .map_err(|e| vec![e.to_diag(&file_name)])?;
+    // M26.4: 解析 import / export module, 加载 BMF 模块接口 (跨 TU import)
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(p) = input.parent() {
+        search_dirs.push(p.to_path_buf());
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if !search_dirs.contains(&cwd) {
+            search_dirs.push(cwd);
+        }
+    }
+    search_dirs.extend(cfg.include_paths.iter().cloned());
+    search_dirs.extend(cfg.system_paths.iter().cloned());
+    let imported = crate::cpp::modules::load_imported_modules(&decls, &search_dirs);
     let mut lower = Lower::new();
+    lower.imported_modules = imported;
     lower.lower_decls(&decls);
+    // M26.4: export module 时生成 BMF 文本 (--emit-module-file 写出)
+    let module_bmf = lower.module_bmf();
     let c_src = lower.finish();
 
     // -dump-ast: 打印 C++ AST 后退出
@@ -1233,6 +1249,27 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     // -fsyntax-only: 只跑 lower, 不调 dcc 编译
     if cfg.syntax_only {
         return Ok(());
+    }
+
+    // M26.4: 写出模块接口文件 (BMIP 缓存: 供后续 TU import)
+    if let Some(bmf_text) = module_bmf {
+        if let Some(out_path) = &cfg.emit_module_file {
+            if let Some(parent) = out_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            fs::write(out_path, bmf_text).map_err(|e| {
+                vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write module file {}: {}", out_path.display(), e),
+                    crate::diagnostics::Span::point("", 0, 0),
+                )]
+            })?;
+            if cfg.verbose {
+                eprintln!("dcc: wrote {}", out_path.display());
+            }
+        }
     }
 
     // 3. 写临时 .c

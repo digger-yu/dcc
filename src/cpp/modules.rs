@@ -1,45 +1,81 @@
-//! C++20 Modules 占位 (M18).
-//!
-//! 标准 C++ Modules (import / export / module) 的真实实现需要:
-//!   1. 一个分离的 BMIP (Binary Module Interface) 文件格式
-//!   2. 头文件输入到 BMIP 的预解析器
-//!   3. 链接器对 BMIF 的合并支持
-//!   4. ODR 检查
-//!
-//! dcc++ 当前没有 BMIP 实现, 但保留以下结构化占位, 以便后续
-//! M19+ 在不改 API 的前提下替换实现:
+//! C++20 Modules (M18 占位 -> M26.4 真实化).
 //!
 //! ## 已支持的语法层
-//! - `module;` (global module fragment 起始, M9 占位)
-//! - `export module name;` (module declaration, M9 占位)
-//! - `export { ... }` (export block, M9 占位)
-//! - `import name;` (import 头, M9 占位 - 当前等同于 #include)
+//! - `module;` (global module fragment)
+//! - `export module name;` (module declaration)
+//! - `export module name:part;` (partition module declaration)
+//! - `export { ... }` (export block)
+//! - `import name;` (module import)
+//! - `import :part;` (partition import, 并入本模块导出)
 //! - `export import name;` (re-export)
+//! - `module :private;` (private fragment, 终止导出收集)
 //!
-//! ## 限制
-//! - 无 BMIP 二进制缓存
-//! - 跨 translation unit 不做 ODR 检查
+//! ## M26.4: BMIP 缓存 (BMF 文本接口)
+//! - `--emit-module-file=foo.bmf`: 导出 TU 编译时写出模块接口 (DCC_BMF_V1)
+//! - `import foo;`: 在搜索目录解析 `foo.bmf`, 注入 extern 声明 + 类布局
+//! - `import :part;`: 解析 `<模块名>.<分区>.bmf` (`P`/`X` 记录), 分区导出并入
+//! - 找不到 BMF 时回退为 `#include <foo>` (旧行为)
+//!
+//! ## 剩余限制
+//! - 跨 translation unit 的 ODR 冲突检测仍未接入生产 pipeline (见 odr.rs)
 //! - `import <header>` 行为等同 `#include <header>`
-//! - 不支持 `module :private;` 私有片段 (M19+)
-//! - 不支持 partitions (`module :part1`)
-//!
-//! ## 用法示例
-//! ```cpp
-//! module;
-//! #include <cstdio>
-//! export module mymod;
-//! export int answer() { return 42; }
-//! ```
-//! 编译: `dcc++ -c mymod.cpp -o mymod.o` 然后在主程序
-//! `import mymod;` 当前等价于 `#include "mymod.h"`.
-//!
-//! ## M19+ 计划
-//! 1. 实现 BMF 序列化 (类 RIIR, 记录函数签名 + 类型布局)
-//! 2. 链接时按 module 名合并 BMF
-//! 3. `--emit-module-file=foo.bmf` 选项
-//! 4. ODR 冲突检测
 
 use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};
+use crate::cpp::parser::CppDecl;
+
+/// M26.4: 从声明树收集 `import` / `export module`, 在搜索目录中解析并
+/// 加载 BMF 模块接口文件:
+///   - `import foo;`    -> `foo.bmf`
+///   - `import :part;`  -> `<当前模块名>.part.bmf`
+/// 找不到时静默跳过 (lower 端回退为 include / 注释占位).
+pub fn load_imported_modules(decls: &[CppDecl], search_dirs: &[std::path::PathBuf]) -> Vec<BmfModule> {
+    let mut imports: Vec<String> = Vec::new();
+    let mut module_name = String::new();
+    for d in decls {
+        match d {
+            CppDecl::Import { path } => {
+                if path.len() == 1 {
+                    imports.push(path[0].clone());
+                }
+            }
+            CppDecl::Module {
+                name: Some(n),
+                partition,
+                ..
+            } => {
+                // 只有 export module 是当前 TU 的模块名; 但分区导入解析
+                // 需要它, 这里记录最后一个有名字的 module 声明
+                if module_name.is_empty() {
+                    module_name = n.clone();
+                }
+                let _ = partition;
+            }
+            _ => {}
+        }
+    }
+    let mut out: Vec<BmfModule> = Vec::new();
+    for imp in imports {
+        let fname = if let Some(part) = imp.strip_prefix(':') {
+            // 分区导入: <模块名>.<分区>.bmf
+            if module_name.is_empty() {
+                continue;
+            }
+            format!("{}.{}.bmf", module_name, part)
+        } else {
+            format!("{}.bmf", imp)
+        };
+        for dir in search_dirs {
+            let p = dir.join(&fname);
+            if let Ok(text) = std::fs::read_to_string(&p) {
+                if let Some(m) = BmfModule::parse(&text) {
+                    out.push(m);
+                }
+                break;
+            }
+        }
+    }
+    out
+}
 
 /// 模块声明缓存 (M19+ 真实化时填充)
 #[derive(Debug, Clone, Default)]
@@ -66,6 +102,7 @@ impl ModuleInfo {
                 })
                 .collect(),
             imports: self.imports.clone(),
+            ..Default::default()
         }
     }
 

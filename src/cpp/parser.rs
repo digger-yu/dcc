@@ -274,6 +274,8 @@ pub enum CppDecl {
     /// C++20 import 声明 (M9: 占位, 立即展开为 no-op)
     /// `import foo;` / `import <iostream>;` / `import "header.h";`
     Import { path: Vec<String> },
+    /// M26.4: `module :private;` 私有片段 - 之后的声明不导出
+    PrivateFragment,
     /// C++20 export 块声明 (M9: 占位, 立即展开为 no-op)
     ExportBlock(Vec<CppDecl>),
     /// M11: extern "C" { ... } 块 (M18: 透传原文到 lower 输出)
@@ -1381,7 +1383,7 @@ impl<'a> CppParser<'a> {
         Ok(CppDecl::Using { is_namespace, path })
     }
 
-    /// 解析 `module foo;` / `module foo:part1;` / `module;` / `export module foo;` (M9 占位)
+    /// 解析 `module foo;` / `module foo:part1;` / `module;` / `module :private;` / `export module foo;` (M9 占位)
     fn parse_module_decl(&mut self) -> Result<CppDecl, CppParseError> {
         let is_export = false; // 顶层 parse_decl 不带 export 前缀
         self.expect_kw(CppKw::Module)?;
@@ -1394,6 +1396,45 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
+            // M26.4: `module :private;` - 私有片段 (之后声明不导出)
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Colon,
+                    ..
+                }))
+            ) {
+                self.bump(); // 吃掉 ':'
+                if self.at(CppKw::Private) {
+                    self.bump();
+                    if matches!(
+                        &self.peek,
+                        Some(CppTok::C(Tok {
+                            kind: TokKind::Semi,
+                            ..
+                        }))
+                    ) {
+                        self.bump();
+                    }
+                    return Ok(CppDecl::PrivateFragment);
+                }
+                // `module :part;` 无名分区声明 (标准中少见于主模块接口)
+                partition = Some(self.expect_ident()?);
+                if matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Semi,
+                        ..
+                    }))
+                ) {
+                    self.bump();
+                }
+                return Ok(CppDecl::Module {
+                    name,
+                    partition,
+                    is_export,
+                });
+            }
             if let Some(CppTok::C(Tok {
                 kind: TokKind::Ident,
                 text,
@@ -1435,10 +1476,20 @@ impl<'a> CppParser<'a> {
         })
     }
 
-    /// 解析 `import foo;` / `import <iostream>;` / `import "header.h";` (M9 占位)
+    /// 解析 `import foo;` / `import <iostream>;` / `import "header.h";` / `import :part;` (M9 占位)
     fn parse_import_decl(&mut self) -> Result<CppDecl, CppParseError> {
         self.expect_kw(CppKw::Import)?;
         let path = if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Colon,
+                ..
+            }))
+        ) {
+            // M26.4: `import :part;` - 分区导入 (path 记作 ":part")
+            self.bump(); // ':'
+            vec![format!(":{}", self.expect_ident()?)]
+        } else if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
                 kind: TokKind::Lt,
@@ -7092,19 +7143,28 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            // 简化: 仅支持空参 `int x();` 或单参 `int x(0);`
+            // 简化: 支持 `int x();` / `int x(0);` / 类直接初始化 `Widget w(7)`
             self.bump();
-            let init = if !matches!(
+            let mut args: Vec<CppExpr> = Vec::new();
+            if !matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {
                     kind: TokKind::RParen,
                     ..
                 }))
             ) {
-                Some(self.parse_expr()?)
-            } else {
-                None
-            };
+                args.push(self.parse_expr()?);
+                while matches!(
+                    &self.peek,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Comma,
+                        ..
+                    }))
+                ) {
+                    self.bump();
+                    args.push(self.parse_expr()?);
+                }
+            }
             if !matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {
@@ -7128,6 +7188,16 @@ impl<'a> CppParser<'a> {
             ) {
                 self.bump();
             }
+            // M26.4: 类类型直接初始化 `Widget w(7)` 包成 ctor 调用
+            // Call(Ident("Widget"), [7]), 让 lower 走 ctor 路径而非普通赋值.
+            let init = match &ty {
+                MangleType::Class(cls) if !args.is_empty() => Some(CppExpr::Call(
+                    Box::new(CppExpr::Ident(cls.clone())),
+                    args,
+                )),
+                _ if args.len() == 1 => Some(args.into_iter().next().unwrap()),
+                _ => None,
+            };
             return if is_static {
                 Ok(CppStmt::StaticLocal { ty, name, init })
             } else {
