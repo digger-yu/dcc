@@ -34,7 +34,7 @@ jobs:
 
       - name: Compile hello.c
         run: |
-          ./bin/dcc -std=gnu23 -o hello examples/hello.c
+          ./bin/dcc -std=gnu23 -o hello examples/basics/hello.c
           chmod +x hello
           rc=0; ./hello || rc=$?
           echo "exit code: $rc"
@@ -42,7 +42,7 @@ jobs:
 
       - name: Compile arith.c
         run: |
-          ./bin/dcc -std=gnu23 -o arith examples/arith.c
+          ./bin/dcc -std=gnu23 -o arith examples/basics/arith.c
           chmod +x arith
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
@@ -50,7 +50,7 @@ jobs:
 
       - name: Compile control.c
         run: |
-          ./bin/dcc -std=gnu23 -o control examples/control.c
+          ./bin/dcc -std=gnu23 -o control examples/basics/control_flow.c
           chmod +x control
           rc=0; ./control || rc=$?
           echo "control exit: $rc"
@@ -58,15 +58,15 @@ jobs:
 
       - name: Compile call.c
         run: |
-          ./bin/dcc -std=gnu23 -o call examples/call.c
+          ./bin/dcc -std=gnu23 -o call examples/pointers/call_by_assign.c
           chmod +x call
           rc=0; ./call || rc=$?
           echo "call exit: $rc"
-          test $rc -eq 42
+          test $rc -eq 20
 
       - name: Test error diagnostics
         run: |
-          out=$(./bin/dcc -std=gnu23 -o /tmp/should_fail examples/bad.c 2>&1 || true)
+          out=$(./bin/dcc -std=gnu23 -o /tmp/should_fail examples/advanced/bad_syntax.c 2>&1 || true)
           echo "$out" | head -20
           echo "$out" | grep -q 'error\[E0006\]'
           echo "$out" | grep -q 'hint:'
@@ -85,4 +85,4 @@ jobs:
           echo "| hello.c | 42 | $hello_rc | $([ $hello_rc -eq 42 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
           echo "| arith.c | 23 | $arith_rc | $([ $arith_rc -eq 23 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
           echo "| control.c | 100 | $control_rc | $([ $control_rc -eq 100 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
-          echo "| call.c | 42 | $call_rc | $([ $call_rc -eq 42 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| call.c | 20 | $call_rc | $([ $call_rc -eq 20 ] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
