@@ -68,7 +68,7 @@
 | C++20 modules | `import` 仍等价 include；无 BMIP 二进制缓存、真实跨 TU module import、private fragment 或 partitions |
 | C++ ODR 集成 | `OdrChecker` 存在，但不等于完整 module/link pipeline ODR enforcement |
 | C++ enum lowering | ~~enum 仍降级为 `typedef int`~~ → ✅ 已实现：真实 C enum + 枚举值 + scoped 标记 + 可选底层类型 + 匿名枚举（M26.1） |
-| `auto` / `decltype(auto)` | 类型推导对调用、成员调用和复杂表达式仍保守降级为 int/Unknown |
+| `auto` / `decltype(auto)` | ~~类型推导对调用、成员调用和复杂表达式仍保守降级为 int/Unknown~~ → ✅ 已实现：函数返回类型注册表 + 成员调用/成员字段类型推导 + `new T`→`T*`；自由函数调用改为与定义一致的 mangled 名（M26.1） |
 | class member parser | 部分类成员、引用成员、operator name 和表达式形式仍返回 `Unsupported` |
 | coroutine 语义 | parser/lower 存在状态机路径，但仍有占位和语义覆盖缺口 |
 | virtual inheritance | 菱形/虚基复杂布局仍以 warning/注释降级，不是完整 Itanium ABI 虚继承布局 |

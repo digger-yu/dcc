@@ -54,6 +54,9 @@ pub struct Lower {
     /// M26.1: noexcept 函数名集合 (自由函数用函数名; 成员用 `Class::method`)
     /// `noexcept(expr)` 求值时查被调函数是否 noexcept.
     pub noexcept_fns: std::collections::HashSet<String>,
+    /// M26.1: 函数返回类型注册表 (自由函数用函数名; 成员用 `Class::method`).
+    /// `auto x = foo()` / `auto y = obj.m()` 推导返回类型用.
+    pub fn_ret_types: std::collections::HashMap<String, MangleType>,
     /// 已知类方法 (class -> [method_name, ...])
     pub class_methods: std::collections::HashMap<String, Vec<String>>,
     /// M17.0: 已知类 ctor (class -> [CppDecl::Ctor, ...]) - 供 using Base::Base 真 wrapper
@@ -292,6 +295,7 @@ impl Lower {
             classes: vec![],
             enum_types: std::collections::HashSet::new(),
             noexcept_fns: std::collections::HashSet::new(),
+            fn_ret_types: std::collections::HashMap::new(),
             class_methods: std::collections::HashMap::new(),
             class_ctors: std::collections::HashMap::new(),
             class_fields: std::collections::HashMap::new(),
@@ -364,13 +368,8 @@ impl Lower {
     /// - auto: 从 init 表达式的"值类别 + 类型" 去引用 + 去顶层 cv -> 推导
     /// - decltype(auto): 完整保留 decltype(expr) 的规则
     ///
-    /// 简化实现: 我们不做完整 cv / 引用推导, 只覆盖常见情形:
-    /// - 字面量: int / char* / 等
-    /// - Ident: 查 local_var_types / param_var_types, 若是 Class 则为值类型
-    /// - 函数调用: 保守返回 int
-    /// - new T / NewArr: 返回 MangleType::Class(T) (指针)
-    /// - 类构造: 返回 Class
-    /// - decltype(auto): 同上, 但保留引用包装
+    /// M26.1 增强: 调用 / 成员调用 / 成员访问 / new 均查真实类型注册表,
+    /// 不再全部保守降级为 int / Unknown.
     fn infer_type(&self, e: &CppExpr, is_decltype_auto: bool) -> MangleType {
         let ty = match e {
             CppExpr::IntLit(_) => MangleType::Int,
@@ -393,13 +392,19 @@ impl Lower {
             CppExpr::BinOp(_, l, _) => self.infer_type(l, is_decltype_auto),
             CppExpr::Cast(t, _) => t.clone(),
             CppExpr::Call(f, _) => {
-                if let CppExpr::Member(_, name) = &**f {
-                    // 形如 obj.method() -> 推断为方法返回类型 (我们没有完整符号解析, 用 int 占位)
-                    let _ = name;
-                    MangleType::Int
+                if let CppExpr::Member(_, method) = &**f {
+                    // M26.1: 成员调用 `obj.method()` -> 查方法返回类型注册表
+                    self.member_call_ret_type(f, method)
+                        .unwrap_or(MangleType::Int)
+                } else if let CppExpr::PtrMember(_, method) = &**f {
+                    self.member_call_ret_type(f, method)
+                        .unwrap_or(MangleType::Int)
                 } else if let CppExpr::Ident(name) = &**f {
-                    // 类构造 `Widget(7)`: 名字是已知类 -> Class(name)
-                    if self.classes.contains(name) {
+                    // M26.1: 先查已声明的函数返回类型 (`auto x = foo()`)
+                    if let Some(ret) = self.fn_ret_types.get(name) {
+                        ret.clone()
+                    } else if self.classes.contains(name) {
+                        // 类构造 `Widget(7)`: 名字是已知类 -> Class(name)
                         MangleType::Class(name.clone())
                     } else {
                         // C 函数: 已知一些返回类型
@@ -415,10 +420,17 @@ impl Lower {
                     MangleType::Int
                 }
             }
-            CppExpr::New(_, _) | CppExpr::NewArr { .. } | CppExpr::PlacementNew { .. } => {
-                MangleType::Pointer(Box::new(MangleType::Class("Unknown".to_string())))
+            CppExpr::New(ty, _) | CppExpr::PlacementNew { ty, .. } => {
+                // M26.1: new T -> T* (不再 Unknown)
+                MangleType::Pointer(Box::new(MangleType::Class(ty.clone())))
             }
-            CppExpr::Member(_, _) | CppExpr::PtrMember(_, _) => MangleType::Int,
+            CppExpr::NewArr { ty, .. } => {
+                MangleType::Pointer(Box::new(MangleType::Class(ty.clone())))
+            }
+            CppExpr::Member(o, m) | CppExpr::PtrMember(o, m) => {
+                // M26.1: `auto x = obj.field` -> 查类成员类型
+                self.member_field_type(o, m).unwrap_or(MangleType::Int)
+            }
             CppExpr::Ternary { then, .. } => self.infer_type(then, is_decltype_auto),
             // M18.0: 多维下标返回元素类型 (与单下标一致)
             CppExpr::MultiIndex(obj, _) => self.infer_type(obj, is_decltype_auto),
@@ -431,6 +443,28 @@ impl Lower {
         // (is_decltype_auto 与 is_decltype 在本路径上行为一致)
         let _ = is_decltype_auto;
         ty
+    }
+
+    /// M26.1: 成员调用 `obj.method()` / `obj->method()` 的返回类型.
+    fn member_call_ret_type(&self, f: &CppExpr, method: &str) -> Option<MangleType> {
+        let obj = match f {
+            CppExpr::Member(o, _) | CppExpr::PtrMember(o, _) => o,
+            _ => return None,
+        };
+        let class = self.lookup_var_class(obj)?;
+        self.fn_ret_types
+            .get(&format!("{}::{}", class, method))
+            .cloned()
+    }
+
+    /// M26.1: 成员访问 `obj.field` / `obj->field` 的字段类型.
+    fn member_field_type(&self, obj: &CppExpr, field: &str) -> Option<MangleType> {
+        let class = self.lookup_var_class(obj)?;
+        let fields = self.class_fields.get(&class)?;
+        fields
+            .iter()
+            .find(|(n, _)| n == field)
+            .map(|(_, ty)| ty.clone())
     }
 
     /// M26.1: 表达式求值是否会抛异常 (`noexcept(expr)` 编译期谓词).
@@ -737,6 +771,11 @@ impl Lower {
         for d in decls {
             self.collect_noexcept_fns(d);
         }
+        // M26.1: 收集函数返回类型 (auto 变量推导用; 先于 collect_noexcept
+        // 之后运行, 因为 resolve_class_name 依赖 class_methods)
+        for d in decls {
+            self.collect_fn_ret_types(d);
+        }
         // 第二次遍历: 实际降级
         for d in decls {
             self.lower_decl(d);
@@ -895,6 +934,56 @@ impl Lower {
             CppDecl::ExportBlock(body) => {
                 for x in body {
                     self.collect_noexcept_fns(x);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// M26.1: 递归收集函数返回类型, 供 `auto x = foo()` 推导.
+    /// 自由函数 key = 函数名; 成员 key = `Class::method` (Class 为解析后的
+    /// qualified 名, 与 lookup_var_class / class_methods 的 key 一致).
+    fn collect_fn_ret_types(&mut self, d: &CppDecl) {
+        match d {
+            CppDecl::FreeFn { name, ret, .. } => {
+                self.fn_ret_types.insert(name.clone(), ret.clone());
+            }
+            CppDecl::MemberFn {
+                class,
+                name,
+                ret,
+                ..
+            } => {
+                let cls = self.resolve_class_name(class);
+                self.fn_ret_types
+                    .insert(format!("{}::{}", cls, name), ret.clone());
+            }
+            CppDecl::Ctor { class, .. } => {
+                let cls = self.resolve_class_name(class);
+                self.fn_ret_types
+                    .insert(format!("{}::ctor", cls), MangleType::Class(cls));
+            }
+            CppDecl::Dtor { class, .. } => {
+                let cls = self.resolve_class_name(class);
+                self.fn_ret_types
+                    .insert(format!("{}::dtor", cls), MangleType::Void);
+            }
+            CppDecl::Namespace { body, .. } => {
+                for x in body {
+                    self.collect_fn_ret_types(x);
+                }
+            }
+            CppDecl::Class(c) => {
+                for m in &c.members {
+                    self.collect_fn_ret_types(m);
+                }
+            }
+            CppDecl::Template { decl, .. } => {
+                self.collect_fn_ret_types(decl);
+            }
+            CppDecl::ExportBlock(body) => {
+                for x in body {
+                    self.collect_fn_ret_types(x);
                 }
             }
             _ => {}
@@ -2809,6 +2898,24 @@ impl Lower {
                         }
                         // 推导失败 (SFINAE): 回退普通调用
                     }
+                    // M26.1: 用户定义的自由函数调用 -> mangled 名, 与定义一致
+                    // (修复: 之前定义 mangled 但调用 unmangled, 链接必失败)
+                    if self.plain_fns.contains(fname)
+                        && self.fn_ret_types.contains_key(fname)
+                    {
+                        let n = NestedName::from_dotted(vec![self.qualify_name(fname)]);
+                        let m = mangle_member_function(&n, &[], &MangleType::Void);
+                        self.out.push_str(&m);
+                        self.out.push('(');
+                        for (i, a) in args.iter().enumerate() {
+                            if i > 0 {
+                                self.out.push_str(", ");
+                            }
+                            self.emit_expr(a);
+                        }
+                        self.out.push(')');
+                        return;
+                    }
                 }
                 // 方法调用改写: obj.method(args) -> _ZN<Cls><Len><method>E<args>(&obj, args)
                 // 也支持 obj->method() (e.g. const path& p; p->c_str() 等)
@@ -4078,6 +4185,62 @@ mod tests {
         assert!(s.contains("r|=64;"), "{}", s);
         // noexcept 函数定义应带 nothrow 属性
         assert!(s.contains("__attribute__((nothrow)) int _ZN7safe_fnEv"), "{}", s);
+    }
+
+    #[test]
+    fn lower_auto_deduces_call_member_and_new() {
+        // M26.1: auto 变量从 函数调用 / 成员调用 / 成员访问 / new 推导真实类型
+        let src = b"double get_double() { return 0; }
+                   char* get_str() { return 0; }
+                   class Widget {
+                     public:
+                       int id;
+                       double weight;
+                       Widget() {}
+                       int get_id() { return id; }
+                       double get_weight() { return weight; }
+                   };
+                   int f() {
+                     auto d = get_double();
+                     auto s = get_str();
+                     auto p = new Widget;
+                     Widget w;
+                     auto fid = w.id;
+                     auto fw = w.weight;
+                     auto mid = w.get_id();
+                     auto mw = w.get_weight();
+                     return (int)d + (int)fw + (int)mw;
+                   }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 函数返回类型注册表: auto d / auto s
+        assert!(s.contains("double d = _ZN10get_doubleEv();"), "{}", s);
+        assert!(s.contains("char* s = _ZN7get_strEv();"), "{}", s);
+        // new T -> T*
+        assert!(s.contains("struct Widget* p = "), "{}", s);
+        // 成员字段: w.id -> int, w.weight -> double
+        assert!(s.contains("int fid = w.id;"), "{}", s);
+        assert!(s.contains("double fw = w.weight;"), "{}", s);
+        // 成员调用: w.get_id() -> int, w.get_weight() -> double
+        assert!(s.contains("int mid = _ZN6Widget6get_idEv(&w);"), "{}", s);
+        assert!(s.contains("double mw = _ZN6Widget10get_weightEv(&w);"), "{}", s);
+    }
+
+    #[test]
+    fn lower_free_fn_call_uses_mangled_name() {
+        // M26.1: 自由函数调用与定义使用同一 mangled 名 (修复链接失败)
+        let src = b"int add(int a, int b) { return a + b; }
+                   int f() { return add(1, 2); }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        assert!(s.contains("int _ZN3addEv (int a, int b)"), "{}", s);
+        assert!(s.contains("return _ZN3addEv(1, 2);"), "{}", s);
     }
 
     #[test]
