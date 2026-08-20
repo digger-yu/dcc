@@ -709,6 +709,136 @@ fn gcc_cc1plus_bootstrap_gate() {
 }
 
 #[test]
+#[cfg(unix)]
+fn strict_full_build_exports_required_kernel_gates() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/kernel_full_check.sh");
+    let text = fs::read_to_string(script).expect("read kernel_full_check.sh");
+
+    assert!(text.contains("STRICT_FULL_BUILD"), "{text}");
+    assert!(text.contains("BUILD_BZIMAGE=\"1\""), "{text}");
+    assert!(text.contains("BUILD_VMLINUX=\"1\""), "{text}");
+    assert!(text.contains("REQUIRE_BZIMAGE=\"1\""), "{text}");
+    assert!(text.contains("REQUIRE_VMLINUX=\"1\""), "{text}");
+    assert!(text.contains("REQUIRE_PAHOLE=\"1\""), "{text}");
+    assert!(text.contains("REQUIRE_OBJTOOL=\"1\""), "{text}");
+    assert!(text.contains("STRICT_MODPOST=\"1\""), "{text}");
+}
+
+#[test]
+#[cfg(unix)]
+fn strict_kernel_scripts_reject_missing_artifacts() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp = std::env::temp_dir().join(format!(
+        "dcc-strict-kernel-missing-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp);
+
+    let smoke = Command::new("/bin/bash")
+        .arg(root.join("scripts/kernel_build_smoke.sh"))
+        .env("KERNEL_DIR", &temp)
+        .env("REQUIRE_KERNEL_DIR", "1")
+        .output()
+        .expect("run kernel_build_smoke.sh");
+    let smoke_stdout = String::from_utf8_lossy(&smoke.stdout);
+    assert!(!smoke.status.success(), "stdout: {smoke_stdout}");
+    assert!(smoke_stdout.contains("FAIL: kernel tree missing"));
+    assert!(!smoke_stdout.contains("SKIP:"));
+
+    let modpost = Command::new("/bin/bash")
+        .arg(root.join("scripts/modpost_link.sh"))
+        .env("KERNEL_DIR", &temp)
+        .env("STRICT_MODPOST", "1")
+        .output()
+        .expect("run modpost_link.sh");
+    let modpost_stdout = String::from_utf8_lossy(&modpost.stdout);
+    assert!(!modpost.status.success(), "stdout: {modpost_stdout}");
+    assert!(modpost_stdout.contains("FAIL:"));
+    assert!(!modpost_stdout.contains("SKIP:"));
+
+    let vmlinux = Command::new("/bin/bash")
+        .arg(root.join("scripts/vmlinux_regress.sh"))
+        .env("VMLINUX", temp.join("vmlinux"))
+        .env("REQUIRE_VMLINUX", "1")
+        .output()
+        .expect("run vmlinux_regress.sh");
+    let vmlinux_stdout = String::from_utf8_lossy(&vmlinux.stdout);
+    assert!(!vmlinux.status.success(), "stdout: {vmlinux_stdout}");
+    assert!(vmlinux_stdout.contains("FAIL: vmlinux not found"));
+    assert!(!vmlinux_stdout.contains("SKIP:"));
+}
+
+#[test]
+#[cfg(unix)]
+fn strict_vmlinux_regress_requires_debug_tools() {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn make_executable(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("write fake tool");
+        let mut perms = fs::metadata(path).expect("stat fake tool").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod fake tool");
+    }
+
+    fn link_tool(dir: &std::path::Path, name: &str) {
+        let src = ["/usr/bin", "/bin"]
+            .iter()
+            .map(|base| std::path::Path::new(base).join(name))
+            .find(|candidate| candidate.exists())
+            .unwrap_or_else(|| panic!("missing host tool {name}"));
+        std::os::unix::fs::symlink(src, dir.join(name)).expect("link host tool");
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp = std::env::temp_dir().join(format!(
+        "dcc-strict-vmlinux-tools-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).expect("create fake tool dir");
+    fs::write(temp.join("vmlinux"), "not really elf\n").expect("write vmlinux fixture");
+
+    for tool in ["grep", "head", "tail", "mktemp", "rm"] {
+        link_tool(&temp, tool);
+    }
+    make_executable(
+        &temp.join("readelf"),
+        "#!/bin/sh\nprintf '  Type:                              EXEC (Executable file)\\n'\n",
+    );
+
+    let missing_pahole = Command::new("/bin/bash")
+        .arg(root.join("scripts/vmlinux_regress.sh"))
+        .env("VMLINUX", temp.join("vmlinux"))
+        .env("PATH", &temp)
+        .env("REQUIRE_PAHOLE", "1")
+        .output()
+        .expect("run vmlinux_regress.sh without pahole");
+    let stdout = String::from_utf8_lossy(&missing_pahole.stdout);
+    assert!(!missing_pahole.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("FAIL: pahole not installed"));
+    assert!(!stdout.contains("SKIP:"));
+
+    make_executable(
+        &temp.join("pahole"),
+        "#!/bin/sh\nprintf 'STRUCT dcc_probe\\n'\n",
+    );
+    let missing_objtool = Command::new("/bin/bash")
+        .arg(root.join("scripts/vmlinux_regress.sh"))
+        .env("VMLINUX", temp.join("vmlinux"))
+        .env("PATH", &temp)
+        .env("REQUIRE_OBJTOOL", "1")
+        .output()
+        .expect("run vmlinux_regress.sh without objtool");
+    let stdout = String::from_utf8_lossy(&missing_objtool.stdout);
+    assert!(!missing_objtool.status.success(), "stdout: {stdout}");
+    assert!(stdout.contains("FAIL: objtool not installed"));
+    assert!(!stdout.contains("SKIP:"));
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+#[test]
 fn enum_trailing_comma_parses() {
     let output = run_syntax_test(
         "enum-trailing-comma",
