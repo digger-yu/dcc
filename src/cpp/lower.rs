@@ -3956,6 +3956,20 @@ impl Lower {
             .serialize(),
         )
     }
+
+    /// M26.5: 跨 TU ODR 检查 - 把本模块导出与所有已加载导入模块的导出
+    /// 注册进 OdrChecker, 返回格式化的违规信息; None 表示无违规.
+    ///
+    /// 判定依据: 同名实体的函数签名 (完整 C 声明文本, 含 Itanium 符号)
+    /// 或类布局文本必须一致; 不一致视为 ODR 冲突.
+    pub fn odr_check(&self) -> Option<String> {
+        let mut checker = crate::cpp::modules::OdrChecker::new();
+        checker.register_module(&self.module_name, &self.module_exports);
+        for m in &self.imported_modules {
+            checker.register_module(&m.name, &m.exports);
+        }
+        checker.check_and_format()
+    }
 }
 
 /// M26.4: 从 C 声明文本推导函数返回类型 (`int _ZN6answerEv()` -> Int)
@@ -4714,6 +4728,99 @@ mod tests {
         assert!(bmf.contains("I other"), "{}", bmf);
         assert!(bmf.contains("E F answer int _ZN6answerEv(int)"), "{}", bmf);
         assert!(bmf.contains("E C Widget int id;"), "{}", bmf);
+    }
+
+    #[test]
+    fn lower_odr_check_conflicting_imports() {
+        // M26.5: 两个导入模块导出同名函数但定义不同 -> ODR 违规
+        let mut l = Lower::new();
+        l.imported_modules = vec![
+            BmfModule {
+                name: "mod_a".to_string(),
+                exports: vec![BmfExport {
+                    kind: BmfKind::Function,
+                    name: "foo".to_string(),
+                    signature: "int _ZN3fooEv()".to_string(),
+                    layout: None,
+                }],
+                imports: vec![],
+                partition: None,
+                part_imports: vec![],
+            },
+            BmfModule {
+                name: "mod_b".to_string(),
+                exports: vec![BmfExport {
+                    kind: BmfKind::Function,
+                    name: "foo".to_string(),
+                    signature: "int _ZN3fooEi(int)".to_string(),
+                    layout: None,
+                }],
+                imports: vec![],
+                partition: None,
+                part_imports: vec![],
+            },
+        ];
+        let msg = l.odr_check().expect("conflict should be reported");
+        assert!(msg.contains("ODR violations"), "{}", msg);
+        assert!(msg.contains("foo"), "{}", msg);
+        assert!(msg.contains("mod_a"), "{}", msg);
+        assert!(msg.contains("mod_b"), "{}", msg);
+    }
+
+    #[test]
+    fn lower_odr_check_identical_definitions_ok() {
+        // M26.5: 同名同定义 (签名一致) 不算 ODR 违规
+        let mut l = Lower::new();
+        let exports = vec![BmfExport {
+            kind: BmfKind::Function,
+            name: "foo".to_string(),
+            signature: "int _ZN3fooEv()".to_string(),
+            layout: None,
+        }];
+        l.imported_modules = vec![
+            BmfModule {
+                name: "mod_a".to_string(),
+                exports: exports.clone(),
+                imports: vec![],
+                partition: None,
+                part_imports: vec![],
+            },
+            BmfModule {
+                name: "mod_b".to_string(),
+                exports,
+                imports: vec![],
+                partition: None,
+                part_imports: vec![],
+            },
+        ];
+        assert!(l.odr_check().is_none());
+    }
+
+    #[test]
+    fn lower_odr_check_own_module_exports() {
+        // M26.5: 本模块导出与导入模块导出冲突也被检查
+        let mut l = Lower::new();
+        l.module_name = "my".to_string();
+        l.module_exports = vec![BmfExport {
+            kind: BmfKind::Class,
+            name: "Widget".to_string(),
+            signature: String::new(),
+            layout: Some("int id;".to_string()),
+        }];
+        l.imported_modules = vec![BmfModule {
+            name: "other".to_string(),
+            exports: vec![BmfExport {
+                kind: BmfKind::Class,
+                name: "Widget".to_string(),
+                signature: String::new(),
+                layout: Some("double id;".to_string()),
+            }],
+            imports: vec![],
+            partition: None,
+            part_imports: vec![],
+        }];
+        let msg = l.odr_check().expect("conflict should be reported");
+        assert!(msg.contains("Widget"), "{}", msg);
     }
 
     #[test]

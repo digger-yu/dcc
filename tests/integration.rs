@@ -9232,6 +9232,94 @@ fn m26_module_partition_import() {
 
 #[test]
 #[cfg(unix)]
+fn m26_odr_conflict_rejected() {
+    // M26.5: 两个模块导出同名 `foo` 但定义 (签名) 不同, 同时 import 二者
+    // 时 driver 必须报 E0103 ODR violations, 而不是静默生成代码.
+    let dir = std::env::temp_dir().join(format!("dcc-odr-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+
+    // 模块 A: foo() 返回 int
+    fs::write(&dir.join("moda.cpp"), "export module moda;\nexport int foo() { return 1; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("moda.o"))
+        .arg(dir.join("moda.cpp"))
+        .arg(format!("--emit-module-file={}", dir.join("moda.bmf").display()))
+        .output()
+        .expect("run dcc on moda");
+    assert!(out.status.success(), "moda: {}", String::from_utf8_lossy(&out.stderr));
+
+    // 模块 B: foo(int) 接受参数, 与模块 A 的 foo 同名不同定义
+    fs::write(&dir.join("modb.cpp"), "export module modb;\nexport int foo(int x) { return x; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("modb.o"))
+        .arg(dir.join("modb.cpp"))
+        .arg(format!("--emit-module-file={}", dir.join("modb.bmf").display()))
+        .output()
+        .expect("run dcc on modb");
+    assert!(out.status.success(), "modb: {}", String::from_utf8_lossy(&out.stderr));
+
+    // 导入 TU 同时 import moda + modb -> ODR 冲突必须被拒绝
+    fs::write(&dir.join("main.cpp"), "import moda;\nimport modb;\nint main() { return 0; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("main.o"))
+        .arg(dir.join("main.cpp"))
+        .output()
+        .expect("run dcc on import TU");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!out.status.success(), "ODR conflict should be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("ODR violations"), "stderr: {}", stderr);
+    assert!(stderr.contains("foo"), "stderr: {}", stderr);
+    assert!(stderr.contains("moda") && stderr.contains("modb"), "stderr: {}", stderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn m26_odr_identical_imports_ok() {
+    // M26.5: 两个模块导出同名同定义 (签名一致) 的 foo, 同时 import 不报错
+    let dir = std::env::temp_dir().join(format!("dcc-odr-ok-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+
+    fs::write(&dir.join("moda.cpp"), "export module moda;\nexport int foo() { return 1; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("moda.o"))
+        .arg(dir.join("moda.cpp"))
+        .arg(format!("--emit-module-file={}", dir.join("moda.bmf").display()))
+        .output()
+        .expect("run dcc on moda");
+    assert!(out.status.success(), "moda: {}", String::from_utf8_lossy(&out.stderr));
+
+    fs::write(&dir.join("modb.cpp"), "export module modb;\nexport int foo() { return 2; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("modb.o"))
+        .arg(dir.join("modb.cpp"))
+        .arg(format!("--emit-module-file={}", dir.join("modb.bmf").display()))
+        .output()
+        .expect("run dcc on modb");
+    assert!(out.status.success(), "modb: {}", String::from_utf8_lossy(&out.stderr));
+
+    fs::write(&dir.join("main.cpp"), "import moda;\nimport modb;\nint main() { return 0; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("main.o"))
+        .arg(dir.join("main.cpp"))
+        .output()
+        .expect("run dcc on import TU");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "identical ODR definitions must pass: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn c_arrow_member_store_offset_and_width() {
     // 回归测试: `ptr->field = val` 必须按字段偏移与宽度存储.
     // (虚继承实现中发现 dcc C 后端对 `->` 成员赋值退化为 4 字节 + 偏移 0)

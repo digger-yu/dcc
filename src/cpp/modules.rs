@@ -15,9 +15,9 @@
 //! - `import foo;`: 在搜索目录解析 `foo.bmf`, 注入 extern 声明 + 类布局
 //! - `import :part;`: 解析 `<模块名>.<分区>.bmf` (`P`/`X` 记录), 分区导出并入
 //! - 找不到 BMF 时回退为 `#include <foo>` (旧行为)
+//! - M26.5: 跨 TU ODR 检查 (本模块导出 vs 导入模块导出, 同名不同定义报错)
 //!
 //! ## 剩余限制
-//! - 跨 translation unit 的 ODR 冲突检测仍未接入生产 pipeline (见 odr.rs)
 //! - `import <header>` 行为等同 `#include <header>`
 
 use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};

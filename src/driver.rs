@@ -1238,6 +1238,14 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     lower.lower_decls(&decls);
     // M26.4: export module 时生成 BMF 文本 (--emit-module-file 写出)
     let module_bmf = lower.module_bmf();
+    // M26.5: 跨 TU ODR 检查 - 本模块导出与导入模块导出同名不同定义即报错
+    if let Some(msg) = lower.odr_check() {
+        return Err(vec![Diagnostic::err(
+            "E0103",
+            msg,
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]);
+    }
     let c_src = lower.finish();
 
     // -dump-ast: 打印 C++ AST 后退出
