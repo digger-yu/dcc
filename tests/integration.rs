@@ -13237,3 +13237,42 @@ fn windows_darwin_triple_accepted_but_outputs_elf() {
     }
     let _ = fs::remove_file(&src);
 }
+
+// ====== Semantic run tests: enum + type traits ======
+#[test]
+#[cfg(unix)]
+fn semantic_enum_type_traits_runtime() {
+    // Semantic run test: enum values, scoped enum, sizeof type properties
+    // dcc -c + host gcc link + execute
+    let src = include_str!("fixtures/cpp/semantic_run.cpp");
+    let (out, obj) = run_cpp_object_test("semantic-enum-runtime", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp-semantic-enum-runtime-{}", std::process::id()));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run semantic binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
