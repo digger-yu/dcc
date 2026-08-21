@@ -8083,6 +8083,96 @@ fn m27_fortify_memcpy_chk_links_correctly() {
     );
 }
 
+// ====== M27: low-level builtins 汇编/运行时断言 ======
+/// __builtin_trap 应发射 ud2 指令
+#[test]
+#[cfg(unix)]
+fn m27_builtin_trap_emits_ud2() {
+    use std::process::Command;
+    let src = include_str!("fixtures/c/m27_trap_test.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-m27-trap-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-m27-trap-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write source");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(asm_text.contains("ud2"), "trap should emit ud2: {}", asm_text);
+}
+
+/// __builtin_debugtrap 应发射 int3 指令 (0xcc)
+#[test]
+#[cfg(unix)]
+fn m27_builtin_debugtrap_emits_int3() {
+    use std::process::Command;
+    let src = include_str!("fixtures/c/m27_debugtrap_test.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-m27-debugtrap-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-m27-debugtrap-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write source");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        asm_text.contains("0xcc") || asm_text.contains("int3"),
+        "debugtrap should emit int3 (0xcc): {}",
+        asm_text
+    );
+}
+
+/// __builtin_unreachable 应发射 ud2 指令
+#[test]
+#[cfg(unix)]
+fn m27_builtin_unreachable_emits_ud2() {
+    use std::process::Command;
+    let src = include_str!("fixtures/c/m27_unreachable_test.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-m27-unreachable-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-m27-unreachable-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write source");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(asm_text.contains("ud2"), "unreachable should emit ud2: {}", asm_text);
+}
+
+/// low-level builtins: assume_aligned, alloca, frame_address, return_address 运行时测试
+#[test]
+#[cfg(unix)]
+fn m27_lowlevel_builtins_runtime() {
+    let src = include_str!("fixtures/c/m27_lowlevel_builtins.c");
+    let (out, exe) = run_compile_and_run("m27-lowlevel-builtins", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "low-level builtins runtime test failed");
+    let _ = fs::remove_file(exe);
+}
+
 // char16_t / char32_t (C11/C++11) 类型与字面量
 #[test]
 #[cfg(unix)]
