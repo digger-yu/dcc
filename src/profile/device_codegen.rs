@@ -355,7 +355,7 @@ unsafe fn dlsym_fn<T>(handle: *mut std::ffi::c_void, symbol: &str) -> Option<T> 
 }
 
 /// 探测 CUDA driver: dlopen libcuda 并调用 cuInit(0)。
-fn probe_cuda_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatus {
+pub fn probe_cuda_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatus {
     #[cfg(target_os = "linux")]
     {
         let handle = match dlopen_lib(&["libcuda.so.1", "libcuda.so"]) {
@@ -405,7 +405,7 @@ fn probe_cuda_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatus {
 }
 
 /// 探测 ROCm driver: dlopen libamdhip64 并调用 hipInit(0)。
-fn probe_rocm_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatus {
+pub fn probe_rocm_runtime(triple: &str, diags: &mut Vec<String>) -> RuntimeStatus {
     #[cfg(target_os = "linux")]
     {
         let handle = match dlopen_lib(&["libamdhip64.so.6", "libamdhip64.so.5", "libamdhip64.so"]) {

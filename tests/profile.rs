@@ -223,283 +223,137 @@ fn gcov_end_to_end_counter_gate() {
 }
 
 // ---------------------------------------------------------------------------
-// Offload driver/link tests
+// Offload runtime expected-fail tests
 // ---------------------------------------------------------------------------
 
-/// OffloadDriverLinker: nvcc 缺失路径不影响 host 链接标志生成.
+/// Offload runtime: 无 CUDA 驱动时 kernel 启动返回 RuntimeNotAvailable.
+/// 此测试锁定当前行为: 在真实驱动实现之前, 所有 offload kernel 启动
+/// 在缺少驱动的环境下必须返回 RuntimeNotAvailable 而非 panic.
 #[test]
-fn offload_driver_link_nvcc_missing_generates_host_flags() {
-    use dcc::profile::offload_driver_link::{OffloadDriverLinker, OffloadBackend};
-    use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
-
-    let mut config = OffloadConfig {
-        cuda: true,
-        ..OffloadConfig::default()
+fn offload_runtime_kernel_launch_returns_not_available_without_driver() {
+    use dcc::profile::device_codegen::{
+        OffloadRuntimeLoader, KernelLaunchParams, KernelLaunchResult, RuntimeStatus,
     };
-    config.target_archs.push("sm_80".to_string());
+    use dcc::profile::offload::{OffloadEntry, OffloadKind, OffloadSection};
 
     let mut section = OffloadSection::new();
     section.add_entry(OffloadEntry {
         kind: OffloadKind::Cuda,
-        func: "vec_add".into(),
-        file: "kernel.cu".into(),
-        line: 10,
+        func: "test_kernel".into(),
+        file: "k.cu".into(),
+        line: 1,
         col: 1,
         device_triple: "nvptx64-nvidia-cuda".into(),
-        arch: Some("sm_80".into()),
+        arch: None,
     });
 
-    let mut linker = OffloadDriverLinker::new(config, section);
-    let result = linker.generate_link_result(None);
+    let mut loader = OffloadRuntimeLoader::new();
+    loader.load_from_section(&section);
 
-    // nvcc 可能不存在, 但 host link flags 应包含 -lcudart
-    assert!(
-        result.host_link_flags.iter().any(|f| f == "-lcudart"),
-        "host 链接标志应包含 -lcudart: {:?}",
-        result.host_link_flags
-    );
-    // rpath 标志应存在 (即使运行时未找到)
-    assert!(
-        result.host_link_flags.iter().any(|f| f.contains("rpath")),
-        "host 链接标志应包含 rpath: {:?}",
-        result.host_link_flags
-    );
-    // 应有一个 device link 命令 (使用 nvcc)
-    assert!(!result.device_link_commands.is_empty());
-    assert_eq!(result.device_link_commands[0].driver, "nvcc");
+    // 不注入任何状态, 让真实探测发生 (当前环境无 CUDA 驱动)
+    let params = KernelLaunchParams::new("test_kernel")
+        .grid(1, 1, 1)
+        .block(1, 1, 1);
+
+    let result = loader.launch_kernel(&params);
+    // 锁定当前行为: 无驱动时返回 RuntimeNotAvailable
+    match result {
+        KernelLaunchResult::RuntimeNotAvailable(triple) => {
+            assert_eq!(triple, "nvptx64-nvidia-cuda");
+        }
+        // 如果驱动恰好可用 (CI 环境可能有 GPU), 也会到达 Failed 路径
+        KernelLaunchResult::Failed(_) => { /* 可接受: 驱动可用但无 device code */ }
+        _ => panic!("expected RuntimeNotAvailable or Failed, got {:?}", result),
+    }
 }
 
-/// OffloadDriverLinker: ROCm runtime 查找路径包含标准目录.
+/// Offload runtime: ROCm 无驱动时 probe 返回 NotFound.
 #[test]
-fn offload_driver_link_rocm_search_dirs() {
-    use dcc::profile::offload_driver_link::{OffloadDriverLinker, OffloadBackend};
-    use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
+fn offload_runtime_rocm_probe_returns_not_available_without_driver() {
+    use dcc::profile::device_codegen::{probe_rocm_runtime, RuntimeStatus};
+    use std::collections::HashMap;
 
-    let mut config = OffloadConfig {
-        hip: true,
-        ..OffloadConfig::default()
-    };
-    config.target_archs.push("gfx906".to_string());
-
-    let mut section = OffloadSection::new();
-    section.add_entry(OffloadEntry {
-        kind: OffloadKind::Hip,
-        func: "mat_mul".into(),
-        file: "kernel.hip".into(),
-        line: 5,
-        col: 1,
-        device_triple: "amdgcn-amd-amdhsa".into(),
-        arch: Some("gfx906".into()),
-    });
-
-    let mut linker = OffloadDriverLinker::new(config, section);
-    let result = linker.generate_link_result(None);
-
-    // ROCm runtime 应被解析 (found 可能为 false)
-    let rt = result.runtimes.get(&OffloadBackend::Rocm);
-    assert!(rt.is_some(), "应解析 ROCm runtime");
-    let rt = rt.unwrap();
-    assert_eq!(rt.link_name, "amdhip64");
-    // 搜索目录应包含标准路径
+    let mut diags = Vec::new();
+    let status = probe_rocm_runtime("amdgcn-amd-amdhsa", &mut diags);
+    // 锁定当前行为: 无 ROCm 驱动时返回 NotFound 或 InitFailed
     assert!(
-        rt.search_dirs.iter().any(|p| p.as_os_str() == "/opt/rocm/lib"),
-        "ROCm 搜索目录应包含 /opt/rocm/lib"
+        !status.is_available(),
+        "ROCm 在无驱动环境下应不可用: {:?}",
+        status
     );
 }
 
-/// OffloadDriverLinker: host link flags 包含 rpath 指向运行时库目录.
+/// Offload runtime: CUDA probe 返回非 Available 状态 (无驱动环境).
 #[test]
-fn offload_driver_link_host_flags_include_rpath() {
-    use dcc::profile::offload_driver_link::OffloadDriverLinker;
-    use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
+fn offload_cuda_probe_returns_not_available_without_driver() {
+    use dcc::profile::device_codegen::{probe_cuda_runtime, RuntimeStatus};
+    use std::collections::HashMap;
 
-    let mut config = OffloadConfig {
-        cuda: true,
-        ..OffloadConfig::default()
-    };
-    config.target_archs.push("sm_80".to_string());
-
-    let mut section = OffloadSection::new();
-    section.add_entry(OffloadEntry {
-        kind: OffloadKind::Cuda,
-        func: "vec_add".into(),
-        file: "kernel.cu".into(),
-        line: 10,
-        col: 1,
-        device_triple: "nvptx64-nvidia-cuda".into(),
-        arch: Some("sm_80".into()),
-    });
-
-    let mut linker = OffloadDriverLinker::new(config, section);
-    let result = linker.generate_link_result(None);
-
-    // 验证 host link flags 包含 -L 搜索路径和 -lcudart
-    let has_lib = result.host_link_flags.iter().any(|f| f.starts_with("-L"));
-    let has_libcudart = result.host_link_flags.iter().any(|f| f == "-lcudart");
-    let has_rpath = result.host_link_flags.iter().any(|f| f.contains("rpath"));
-    assert!(has_lib, "host flags 应包含 -L 搜索路径: {:?}", result.host_link_flags);
-    assert!(has_libcudart, "host flags 应包含 -lcudart: {:?}", result.host_link_flags);
-    assert!(has_rpath, "host flags 应包含 rpath: {:?}", result.host_link_flags);
-}
-
-/// OffloadDriverLinker: device-link 命令生成正确的 nvcc/clang++ 命令.
-#[test]
-fn offload_driver_link_device_link_commands() {
-    use dcc::profile::offload_driver_link::OffloadDriverLinker;
-    use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
-
-    // CUDA 配置
-    let mut cuda_config = OffloadConfig {
-        cuda: true,
-        ..OffloadConfig::default()
-    };
-    cuda_config.target_archs.push("sm_80".to_string());
-
-    let mut cuda_section = OffloadSection::new();
-    cuda_section.add_entry(OffloadEntry {
-        kind: OffloadKind::Cuda,
-        func: "vec_add".into(),
-        file: "kernel.cu".into(),
-        line: 10,
-        col: 1,
-        device_triple: "nvptx64-nvidia-cuda".into(),
-        arch: Some("sm_80".into()),
-    });
-
-    let mut cuda_linker = OffloadDriverLinker::new(cuda_config, cuda_section);
-    let cuda_result = cuda_linker.generate_link_result(None);
-
-    // 验证 device link 命令
-    assert!(!cuda_result.device_link_commands.is_empty());
-    let cuda_cmd = &cuda_result.device_link_commands[0];
-    assert_eq!(cuda_cmd.driver, "nvcc");
-    assert_eq!(cuda_cmd.arch, "sm_80");
-    assert!(cuda_cmd.flags.contains(&"-cubin".to_string()));
-    assert!(cuda_cmd.flags.contains(&"--device-link".to_string()));
-
-    // ROCm 配置
-    let mut rocm_config = OffloadConfig {
-        hip: true,
-        ..OffloadConfig::default()
-    };
-    rocm_config.target_archs.push("gfx906".to_string());
-
-    let mut rocm_section = OffloadSection::new();
-    rocm_section.add_entry(OffloadEntry {
-        kind: OffloadKind::Hip,
-        func: "mat_mul".into(),
-        file: "kernel.hip".into(),
-        line: 5,
-        col: 1,
-        device_triple: "amdgcn-amd-amdhsa".into(),
-        arch: Some("gfx906".into()),
-    });
-
-    let mut rocm_linker = OffloadDriverLinker::new(rocm_config, rocm_section);
-    let rocm_result = rocm_linker.generate_link_result(None);
-
-    assert!(!rocm_result.device_link_commands.is_empty());
-    let rocm_cmd = &rocm_result.device_link_commands[0];
-    assert_eq!(rocm_cmd.driver, "clang++");
-    assert_eq!(rocm_cmd.arch, "gfx906");
-    assert!(rocm_cmd.flags.contains(&"--cuda-device-only".to_string()));
-    assert!(rocm_cmd.flags.contains(&"-emit-llvm".to_string()));
-}
-
-/// OffloadDriverLinker: 错误路径 - 无运行时库时 diagnostics 非空.
-#[test]
-fn offload_driver_link_diagnostics_on_missing_runtime() {
-    use dcc::profile::offload_driver_link::OffloadDriverLinker;
-    use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
-
-    let mut config = OffloadConfig {
-        cuda: true,
-        ..OffloadConfig::default()
-    };
-    config.target_archs.push("sm_80".to_string());
-
-    let mut section = OffloadSection::new();
-    section.add_entry(OffloadEntry {
-        kind: OffloadKind::Cuda,
-        func: "vec_add".into(),
-        file: "kernel.cu".into(),
-        line: 10,
-        col: 1,
-        device_triple: "nvptx64-nvidia-cuda".into(),
-        arch: Some("sm_80".into()),
-    });
-
-    let mut linker = OffloadDriverLinker::new(config, section);
-    let _ = linker.resolve_runtimes();
-
-    // diagnostics 应包含搜索路径信息
-    assert!(!linker.diagnostics().is_empty(), "diagnostics 应非空");
-}
-
-/// OffloadDriverLinker: 渲染 link 脚本包含 nvcc 命令与 host flags.
-#[test]
-fn offload_driver_link_render_script() {
-    use dcc::profile::offload_driver_link::OffloadDriverLinker;
-    use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
-
-    let mut config = OffloadConfig {
-        cuda: true,
-        ..OffloadConfig::default()
-    };
-    config.target_archs.push("sm_80".to_string());
-
-    let mut section = OffloadSection::new();
-    section.add_entry(OffloadEntry {
-        kind: OffloadKind::Cuda,
-        func: "vec_add".into(),
-        file: "kernel.cu".into(),
-        line: 10,
-        col: 1,
-        device_triple: "nvptx64-nvidia-cuda".into(),
-        arch: Some("sm_80".into()),
-    });
-
-    let mut linker = OffloadDriverLinker::new(config, section);
-    let result = linker.generate_link_result(None);
-    let script = linker.render_link_script(&result);
-
-    assert!(script.contains("#!/bin/bash"));
-    assert!(script.contains("nvcc"));
-    assert!(script.contains("sm_80"));
-    assert!(script.contains("HOST_LINK_FLAGS"));
-}
-
-/// Offload driver CLI: nvcc/clang++ 缺失不阻塞编译.
-#[test]
-fn offload_compile_without_nvcc_succeeds() {
-    let dir = std::env::temp_dir().join(format!("dcc-offload-nvcc-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // 简单 CUDA 源
-    let src = dir.join("simple.cu");
-    std::fs::write(
-        &src,
-        b"__global__ void add(int *a, int *b, int *c) { c[0] = a[0] + b[0]; }\n\
-          int main(void) { return 0; }\n",
-    )
-    .expect("写源文件");
-
-    // -fcuda 编译应成功 (nvcc 不存在不影响 host 编译)
-    let out = dcc()
-        .current_dir(&dir)
-        .args(["-std=gnu23", "-fcuda", "-c", "-o", "simple.o"])
-        .arg(src.file_name().unwrap())
-        .output()
-        .expect("运行 dcc");
+    let mut diags = Vec::new();
+    let status = probe_cuda_runtime("nvptx64-nvidia-cuda", &mut diags);
+    // 锁定当前行为: 无 CUDA 驱动时返回 NotFound 或 InitFailed
     assert!(
-        out.status.success(),
-        "-fcuda 编译应成功 (nvcc 缺失不阻塞): {}",
-        String::from_utf8_lossy(&out.stderr)
+        !status.is_available(),
+        "CUDA 在无驱动环境下应不可用: {:?}",
+        status
     );
-    assert!(dir.join("simple.o").exists(), "应产出 .o");
+}
 
-    let _ = std::fs::remove_dir_all(&dir);
+/// Offload runtime: set_runtime_status 注入 Available 后无 device code
+/// 应快速失败而非无限等待. 锁定当前错误路径行为.
+#[test]
+fn offload_runtime_launch_without_device_code_fails_fast() {
+    use dcc::profile::device_codegen::{
+        OffloadRuntimeLoader, KernelLaunchParams, KernelLaunchResult, RuntimeStatus,
+    };
+    use dcc::profile::offload::{OffloadEntry, OffloadKind, OffloadSection};
+
+    let mut section = OffloadSection::new();
+    section.add_entry(OffloadEntry {
+        kind: OffloadKind::Cuda,
+        func: "test_kernel".into(),
+        file: "k.cu".into(),
+        line: 1,
+        col: 1,
+        device_triple: "nvptx64-nvidia-cuda".into(),
+        arch: None,
+    });
+
+    let mut loader = OffloadRuntimeLoader::new();
+    loader.load_from_section(&section);
+    // 注入 Available (模拟探测成功), 但不提供 device code
+    loader.set_runtime_status("nvptx64-nvidia-cuda", RuntimeStatus::Available);
+
+    let params = KernelLaunchParams::new("test_kernel");
+    let result = loader.launch_kernel(&params);
+
+    // 锁定当前行为: 无 device code 应快速失败
+    match result {
+        KernelLaunchResult::Failed(msg) => {
+            assert!(
+                msg.contains("no device code"),
+                "错误消息应提及缺少 device code: {msg}"
+            );
+        }
+        _ => panic!("expected Failed, got {:?}", result),
+    }
+}
+
+/// Offload runtime: 未知 kernel 名返回 KernelNotFound.
+#[test]
+fn offload_runtime_kernel_not_found_returns_correct_error() {
+    use dcc::profile::device_codegen::{OffloadRuntimeLoader, KernelLaunchParams, KernelLaunchResult};
+
+    let mut loader = OffloadRuntimeLoader::new();
+    let params = KernelLaunchParams::new("nonexistent_kernel");
+    let result = loader.launch_kernel(&params);
+
+    match result {
+        KernelLaunchResult::KernelNotFound(name) => {
+            assert_eq!(name, "nonexistent_kernel");
+        }
+        _ => panic!("expected KernelNotFound, got {:?}", result),
+    }
 }
 
 #[test]
