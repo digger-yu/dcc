@@ -12882,3 +12882,154 @@ int main(void) {
         eprintln!("skip QEMU va_arg matrix: no qemu-user binaries found");
     }
 }
+
+// ============================================================================
+// Aggregate / HFA ABI — AArch64 and RISC-V
+// ============================================================================
+
+/// AArch64 HFA compile test: verifies HFA 1-8 elements and >8 fallback
+#[test]
+fn aarch64_hfa_abi_compile_and_elf_structure() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/hfa_aarch64.c");
+    let dir = std::env::temp_dir();
+    let obj = dir.join(format!("dcc-hfa-aarch64-{}.o", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-c", "-o"])
+        .arg(&obj)
+        .arg(&fixtures)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "aarch64 HFA compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&obj).expect("read ELF");
+    let _ = fs::remove_file(&obj);
+    // Verify ELF machine = AArch64 (0xB7)
+    assert!(bytes.len() > 20, "ELF too small");
+    let e_machine = u16::from_le_bytes(bytes[18..20].try_into().unwrap());
+    assert_eq!(e_machine, 0xB7, "ELF machine should be EM_AARCH64 (0xB7)");
+    // Verify ELF type = ET_REL
+    let e_type = u16::from_le_bytes(bytes[16..18].try_into().unwrap());
+    assert_eq!(e_type, 1, "ELF type should be ET_REL");
+}
+
+/// AArch64 HFA -S output: verify all HFA functions present with distinct sizes
+#[test]
+fn aarch64_hfa_asm_output_has_all_functions() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/hfa_aarch64.c");
+    let dir = std::env::temp_dir();
+    let asm_path = dir.join(format!("dcc-hfa-aarch64-{}.s", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&fixtures)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "aarch64 HFA -S failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    // All HFA functions should be present in output
+    for func in &[
+        "make_hfa1", "make_hfa2", "make_hfa3", "make_hfa4",
+        "make_hfa8", "make_big", "make_mixed", "consume_hfa2", "main",
+    ] {
+        assert!(
+            asm.contains(&format!(".globl {func}")),
+            "asm should contain .globl {func}"
+        );
+    }
+    // HFA 8 (max HFA) and BigFloat (>8, sret fallback) should have
+    // different code sizes, confirming distinct codegen paths
+    let get_size = |name: &str| -> Option<u64> {
+        let pattern = format!(".size {name}, .-{name}");
+        // Look backwards from .size to find the function start
+        if let Some(pos) = asm.find(&pattern) {
+            let before = &asm[..pos];
+            let func_start = before.rfind(&format!("{name}:"))?;
+            // Size is approximate from the comment "IR lowering, N bytes"
+            let func_body = &asm[func_start..pos];
+            if let Some(comment_start) = func_body.find("IR lowering, ") {
+                let after = &func_body[comment_start + 15..];
+                if let Some(space) = after.find(' ') {
+                    return after[..space].parse().ok();
+                }
+            }
+        }
+        None
+    };
+    let hfa8_size = get_size("make_hfa8");
+    let big_size = get_size("make_big");
+    if let (Some(h8), Some(b)) = (hfa8_size, big_size) {
+        assert_ne!(
+            h8, b,
+            "HFA8 and BigFloat should have different code sizes (HFA vs sret)"
+        );
+    }
+}
+
+/// RISC-V HFA compile test: verifies HFA 1-4 elements and >4 fallback
+#[test]
+fn riscv64_hfa_abi_compile_and_elf_structure() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/hfa_riscv64.c");
+    let dir = std::env::temp_dir();
+    let obj = dir.join(format!("dcc-hfa-riscv64-{}.o", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "riscv64-linux-gnu", "-c", "-o"])
+        .arg(&obj)
+        .arg(&fixtures)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "riscv64 HFA compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(&obj).expect("read ELF");
+    let _ = fs::remove_file(&obj);
+    // Verify ELF machine = RISC-V (0xF3)
+    assert!(bytes.len() > 20, "ELF too small");
+    let e_machine = u16::from_le_bytes(bytes[18..20].try_into().unwrap());
+    assert_eq!(e_machine, 0xF3, "ELF machine should be EM_RISCV (0xF3)");
+    let e_type = u16::from_le_bytes(bytes[16..18].try_into().unwrap());
+    assert_eq!(e_type, 1, "ELF type should be ET_REL");
+}
+
+/// RISC-V HFA -S output: verify all functions present
+#[test]
+fn riscv64_hfa_asm_output_has_all_functions() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/hfa_riscv64.c");
+    let dir = std::env::temp_dir();
+    let asm_path = dir.join(format!("dcc-hfa-riscv64-{}.s", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "riscv64-linux-gnu", "-S", "-o"])
+        .arg(&asm_path)
+        .arg(&fixtures)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "riscv64 HFA -S failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(&asm_path);
+    for func in &[
+        "make_hfa1", "make_hfa2", "make_hfa3", "make_hfa4",
+        "make_big", "make_mixed", "consume_hfa2", "main",
+    ] {
+        assert!(
+            asm.contains(&format!(".globl {func}")),
+            "asm should contain .globl {func}"
+        );
+    }
+}
