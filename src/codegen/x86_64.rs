@@ -6835,6 +6835,20 @@ impl Codegen {
                         // 已成功生成原子指令
                     } else if self.gen_builtin(&name_name, args, dst) {
                         // 已成功处理 __builtin_* 函数
+                    } else if Self::is_fortify_builtin(&name_name) {
+                        // Linux FORTIFY: __builtin___memcpy_chk 等 FORTIFY 宏族展开后
+                        // 带有 __builtin_ 前缀, 但实际应链接到 libc 的 __*_chk 符号.
+                        // 剥离前缀后按普通函数调用处理.
+                        let real_name = &name_name["__builtin_".len()..];
+                        self.emit_sysv_call(Some(&real_name), None, args, sret_off);
+                        if let Some(off) = sret_off {
+                            self.emit_lea_r13(0, off);
+                            if dst != 0 {
+                                self.mov(dst, 0);
+                            }
+                        } else if dst != 0 {
+                            self.mov(dst, 0);
+                        }
                     } else if name_name.starts_with("__builtin_") {
                         eprintln!(
                             "warning: unsupported __builtin_ function '{}', emitted as {}",
@@ -12170,6 +12184,15 @@ impl Codegen {
         if self.gen_builtin(&name.name, args, 0) {
             return true;
         }
+        // Linux FORTIFY: __builtin___memcpy_chk 等 FORTIFY 宏族展开后
+        // 带有 __builtin_ 前缀, 但实际应链接到 libc 的 __*_chk 符号.
+        // 语句上下文中也需剥离前缀后按普通函数调用处理.
+        if Self::is_fortify_builtin(&name.name) {
+            let real_name = &name.name["__builtin_".len()..];
+            // 按 SysV ABI 发射函数调用: 参数已按约定准备, 直接 call
+            self.call_label(&real_name);
+            return true;
+        }
         eprintln!(
             "warning: unsupported __builtin_ function '{}', emitted as {}",
             name.name,
@@ -12181,6 +12204,37 @@ impl Codegen {
             self.mov_imm(0, 0);
         }
         true
+    }
+
+    /// 判断是否为 Linux FORTIFY 内置函数.
+    ///
+    /// 当 `_FORTIFY_SOURCE > 0` 时, 系统头文件会将 memcpy/memset 等函数
+    /// 宏展开为 `__builtin___memcpy_chk` 等形式. 这些带有 `__builtin_` 前缀
+    /// 的调用在链接时应解析到 libc 的 `__*_chk` 符号.
+    ///
+    /// 常见 FORTIFY builtin 包括:
+    /// - `__builtin___memcpy_chk`
+    /// - `__builtin___memmove_chk`
+    /// - `__builtin___memset_chk`
+    /// - `__builtin___strcpy_chk`
+    /// - `__builtin___strncpy_chk`
+    /// - `__builtin___strcat_chk`
+    /// - `__builtin___strncat_chk`
+    /// - `__builtin___sprintf_chk`
+    /// - `__builtin___snprintf_chk`
+    /// - `__builtin___vsprintf_chk`
+    /// - `__builtin___vsnprintf_chk`
+    /// - `__builtin___printf_chk`
+    /// - `__builtin___fprintf_chk`
+    /// - `__builtin___vprintf_chk`
+    /// - `__builtin___vfprintf_chk`
+    /// - `__builtin___gets_chk`
+    /// - `__builtin___fgets_chk`
+    /// - `__builtin___fread_chk`
+    /// - `__builtin___fwrite_chk`
+    #[inline]
+    fn is_fortify_builtin(name: &str) -> bool {
+        name.starts_with("__builtin___") && name.ends_with("_chk")
     }
 
     fn gen_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {

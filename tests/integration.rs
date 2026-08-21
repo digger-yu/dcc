@@ -8054,6 +8054,35 @@ fn m23_attr_retain_used_compiles_and_runs() {
     let _ = fs::remove_file(exe);
 }
 
+// ====== M27: Linux FORTIFY __builtin___*_chk 链接行为 ======
+/// Linux FORTIFY: __builtin___memcpy_chk 应剥离前缀链接到 __memcpy_chk
+#[test]
+#[cfg(unix)]
+fn m27_fortify_memcpy_chk_links_correctly() {
+    use std::process::Command;
+    let src = include_str!("fixtures/c/m27_fortify_chk.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-m27-fortify-{}.c", std::process::id()));
+    let asm_path = dir.join(format!("dcc-m27-fortify-{}.s", std::process::id()));
+    fs::write(&source_path, src).expect("write source");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o"])
+        .arg(&asm_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(asm_path);
+    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    // 汇编中应出现 call __memcpy_chk (不带 __builtin_ 前缀)
+    assert!(
+        asm_text.contains("call __memcpy_chk"),
+        "FORTIFY builtin should strip prefix: {}",
+        asm_text
+    );
+}
+
 // char16_t / char32_t (C11/C++11) 类型与字面量
 #[test]
 #[cfg(unix)]
