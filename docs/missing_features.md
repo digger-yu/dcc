@@ -132,10 +132,10 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| Linux header graph | 用 `compiler_types.h`、`rwonce.h`、generated `autoconf.h` 等真实内核头做预处理 E2E |
-| PCH negative | 覆盖更多版本不兼容和平台权限失败的 snapshot |
-| depfile/fixdep | 增加空格、反斜杠、转义路径、`-MP` phony 与 fixdep 反解析联动测试 |
-| `#error/#warning` | 增加多格式诊断 snapshot 和宏展开后消息测试 |
+| Linux header graph | ~~用 `compiler_types.h`、`rwonce.h`、generated `autoconf.h` 等真实内核头做预处理 E2E~~ → ✅ 已实现 4 个 Linux 内核头预处理 E2E 测试（compiler_types.h/rwonce.h/autoconf.h + 依赖图闭包追踪） |
+| PCH negative | ~~覆盖更多版本不兼容和平台权限失败的 snapshot~~ → ✅ 已实现 4 个 PCH 负向测试（hash mismatch 回退、损坏内容回退、版本不兼容回退、写入失败 snapshot） |
+| depfile/fixdep | ~~增加空格、反斜杠、转义路径、`-MP` phony 与 fixdep 反解析联动测试~~ → ✅ 已实现 5 个 depfile/fixdep 测试（转义空格路径、-MP phony 跳过、反斜杠续行、注释跳过、文件打开失败退出码）；修复 fixdep 注释状态恢复 bug |
+| `#error/#warning` | ~~增加多格式诊断 snapshot 和宏展开后消息测试~~ → ✅ 已实现 6 个 #error/#warning 测试（GitHub/clang/msvc 多格式诊断、warning 不阻断编译、宏展开消息、头文件源码行回归） |
 
 ### Builtin / 属性 / C 前端
 

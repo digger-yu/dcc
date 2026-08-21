@@ -38,7 +38,7 @@ fn is_no_parse_file(s: &str) -> bool {
 }
 
 /// 反转义依赖文件中的路径 (GCC 用 `\` 转义空格/`#`/`:` 等).
-fn unescape_dep_path(s: &str) -> String {
+pub fn unescape_dep_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -96,7 +96,7 @@ fn parse_config_file(content: &str, config_seen: &mut HashSet<String>) {
     }
 }
 
-fn parse_dep_file(content: &str, target: &str, out: &mut impl Write) -> io::Result<()> {
+pub fn parse_dep_file(content: &str, target: &str, out: &mut impl Write) -> io::Result<()> {
     let mut p = content;
     let mut saw_any_target = false;
     let mut is_target = true;
@@ -109,12 +109,23 @@ fn parse_dep_file(content: &str, target: &str, out: &mut impl Write) -> io::Resu
         match ch {
             b'#' => {
                 p = &p[1..];
-                while !p.is_empty() && !p.starts_with('\n') {
-                    if p.starts_with('\\') {
+                // 注释不影响状态: 跳过整行 (含续行), 恢复之前的 is_target/is_source
+                let was_target = is_target;
+                let was_source = is_source;
+                while !p.is_empty() {
+                    if p.starts_with("\\\n") {
+                        p = &p[2..];
+                        continue;
+                    }
+                    if p.starts_with('\n') {
                         p = &p[1..];
+                        break;
                     }
                     p = &p[1..];
                 }
+                // 恢复注释前的状态 (若在续行中则保持依赖列表状态)
+                is_target = was_target;
+                is_source = was_source;
                 continue;
             }
             b' ' | b'\t' => {
