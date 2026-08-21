@@ -13156,3 +13156,84 @@ fn non_x86_asm_arm_mips_warn_on_inline_asm_expr() {
         );
     }
 }
+
+// ============================================================================
+// Unsupported target architectures — negative tests
+// ============================================================================
+
+/// Unsupported arch targets produce "unknown arch" error
+#[test]
+fn unsupported_target_arch_rejected() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!(
+        "dcc-unsup-arch-{}.c",
+        std::process::id()
+    ));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    let unsupported = [
+        ("wasm32-unknown-unknown", "wasm32"),
+        ("avr-unknown-unknown", "avr"),
+        ("msp430-unknown-unknown", "msp430"),
+        ("xtensa-unknown-unknown", "xtensa"),
+        ("powerpc64-unknown-linux-gnu", "powerpc64"),
+        ("loongarch64-unknown-linux-gnu", "loongarch64"),
+    ];
+    for (triple, arch_name) in unsupported {
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", triple, "-fsyntax-only"])
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "target {triple} should be rejected"
+        );
+        assert!(
+            stderr.contains(&format!("unknown arch: {arch_name}")),
+            "target {triple}: stderr should mention unknown arch; stderr={stderr}"
+        );
+    }
+    let _ = fs::remove_file(&src);
+}
+
+/// Windows MSVC / Darwin triples are parsed (x86_64 backend) but output ELF
+#[test]
+fn windows_darwin_triple_accepted_but_outputs_elf() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!(
+        "dcc-unsup-os-{}.c",
+        std::process::id()
+    ));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    let cases = [
+        ("x86_64-pc-windows-msvc", "MSVC"),
+        ("x86_64-apple-darwin", "Darwin"),
+    ];
+    for (triple, label) in cases {
+        let obj = dir.join(format!(
+            "dcc-unsup-os-{}-{}.o",
+            label.to_lowercase(),
+            std::process::id()
+        ));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", triple, "-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(
+            output.status.success(),
+            "{label} triple should parse (x86_64 backend); stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Output is ELF, not COFF/Mach-O
+        let bytes = fs::read(&obj).expect("read obj");
+        let _ = fs::remove_file(&obj);
+        assert!(
+            bytes.len() >= 4 && &bytes[0..4] == b"\x7fELF",
+            "{label}: output should be ELF format"
+        );
+    }
+    let _ = fs::remove_file(&src);
+}
