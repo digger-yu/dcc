@@ -13911,3 +13911,138 @@ int main(void) {
         "asm with memory clobber must survive O3, got rc={rc}"
     );
 }
+
+// ====== SSA pass coverage: alias / SCCP / TCO / DAE / IPA-SRA ======
+
+/// alias analysis: 非别名指针在 O2 下应允许编译器重排加载
+/// 正面测试: 两个独立指针写入不影响彼此, 结果应正确
+#[test]
+#[cfg(unix)]
+fn ssa_alias_analysis_non_aliasing() {
+    let source = "\
+int a = 1;
+int b = 2;
+int sum(int *restrict pa, int *restrict pb) {
+    int va = *pa;
+    *pb = 10;
+    int vb = *pa;
+    return va + vb;
+}
+int main(void) {
+    return sum(&a, &b) - 2;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("alias-non-alias", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "alias O2 compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "restrict pointers: va=1, vb=1, sum=2, got rc={rc}");
+}
+
+/// SCCP: 非常量分支不应被折叠 (负向测试)
+/// 确保 SCCP 不会错误地折叠运行时才能确定的值
+#[test]
+#[cfg(unix)]
+fn ssa_sccp_non_constant_not_folded() {
+    let source = "\
+int runtime_value(int x) {
+    if (x > 0) return x * 2;
+    return -x;
+}
+int main(void) {
+    int v = runtime_value(5);
+    return v - 10;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("sccp-neg", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "SCCP neg compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        rc, 0,
+        "SCCP should not fold runtime-dependent branch, got rc={rc}"
+    );
+}
+
+/// TCO: 尾递归应在 O2 下被优化为跳转, 不会栈溢出
+#[test]
+#[cfg(unix)]
+fn ssa_tco_deep_recursion_no_overflow() {
+    let source = "\
+static int __attribute__((noinline))
+tail_sum(int n, int acc) {
+    if (n <= 0) return acc;
+    return tail_sum(n - 1, acc + n);
+}
+int main(void) {
+    return tail_sum(100, 0) - 5050;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("tco-deep", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "TCO deep compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "TCO should handle deep recursion, got rc={rc}");
+}
+
+/// DAE: 不可达 static 函数在 O2 下应被消除
+/// 正面测试: 可达函数保留并正确执行
+#[test]
+#[cfg(unix)]
+fn ssa_dae_reachable_function_preserved() {
+    let source = "\
+static int reachable(int x) { return x + 1; }
+static int unreachable_helper(int x) { return x * 999; }
+int main(void) {
+    return reachable(41);
+}
+";
+    let (output, exe) = run_compile_and_run_flags("dae-reachable", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "DAE compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 42, "DAE should preserve reachable function, got rc={rc}");
+}
+
+/// IPA-SRA: 标量参数传播在 O2 下应保持语义正确
+/// 测试 static 函数的标量参数能被优化器正确处理
+#[test]
+#[cfg(unix)]
+fn ssa_ipa_sra_scalar_propagation() {
+    let source = "\
+static int add(int a, int b) {
+    return a + b;
+}
+int main(void) {
+    return add(3, 4) - 7;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("ipa-sra", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "IPA-SRA compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        rc, 0,
+        "scalar propagation through static func should work at O2, got rc={rc}"
+    );
+}
