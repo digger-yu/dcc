@@ -390,7 +390,10 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 信号 | `sigaction` / `sigaltstack` / `signal` 运行时验证通过 |
 | TLS dtv / TLS 描述符 | AArch64 TLSDESC 经典 4 指令序列 + 3 重定位 + 优化 MOVW 对 5 重定位；IE/LE 路径；linker 全类型支持 |
 | AArch64 vector 表达式 | 支持 16B vector 局部槽位、aggregate initializer、local load/store、call/return 参数、assignment、cast、conditional、lane index 和二元算术/按位路径；覆盖非二元表达式不再落到零值 fallback |
-| non-x86 QEMU runtime matrix | `non_x86_qemu_runtime_matrix_runs_when_available` 在 `qemu-aarch64`、`qemu-riscv64`、`qemu-mips`、`qemu-mips64`、`qemu-arm` 存在时运行 hello/control-flow 语义门禁，缺少 qemu-user 时显式 skip |
+| non-x86 QEMU runtime matrix | `non_x86_qemu_runtime_matrix_runs_when_available` + 四个扩展测试（`non_x86_qemu_runtime_hello/control_flow/aggregate_abi/va_arg`）在 `qemu-aarch64`、`qemu-riscv64`、`qemu-mips`、`qemu-mips64`、`qemu-arm` 存在时运行 hello、control-flow、aggregate ABI、va_arg 语义门禁，缺少 qemu-user 时显式 skip |
+| AArch64/RISC-V HFA ABI | AArch64 HFA 1–8 元素 + >8 sret fallback（`aarch64_hfa_abi_compile_and_elf_structure` / `aarch64_hfa_asm_output_has_all_functions`）；RISC-V HFA 1–4 + >4 sret fallback（`riscv64_hfa_abi_compile_and_elf_structure` / `riscv64_hfa_asm_output_has_all_functions`）；ELF machine/type 验证 |
+| non-x86 inline asm 测试 | `-S` 全局 asm 文本保留验证五架构（`non_x86_asm_minus_s_preserves_global_asm_text`）；`-c` asm goto 警告验证（`non_x86_asm_minus_c_warns_on_asm_goto`）；arm/mips/mips64 asm 表达式警告（`non_x86_asm_arm_mips_warn_on_inline_asm_expr`） |
+| unsupported target 负向测试 | 6 个未知架构 (wasm32/avr/msp430/xtensa/powerpc64/loongarch64) `unknown arch` 错误验证（`unsupported_target_arch_rejected`）；Windows MSVC/Darwin triple 解析接受但 ELF 输出验证（`windows_darwin_triple_accepted_but_outputs_elf`） |
 | atexit / `__cxa_atexit` | `FiniArrayBuilder` 按 priority 排序 |
 | `printf` / `scanf` format string | 完整 flag/width/precision/length/type 匹配 + 指针类型验证 |
 | `wchar_t` / 宽字符字面量 `L"..."` | wcs*/wmem* libc 转发 |

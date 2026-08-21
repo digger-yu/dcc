@@ -149,10 +149,10 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| QEMU runtime 扩展 | aarch64/riscv64/arm/mips/mips64 已有 hello/control-flow 语义门禁；继续扩展 aggregate ABI、va_arg、TLS 等场景 |
-| aggregate/HFA ABI | 增加 AArch64 HFA 1–8 元素、>8 fallback，以及 RISC-V HFA 1–4、>4 fallback 测试 |
-| non-x86 inline asm | 增加 `-S` 文本保留测试与 `-c` expected-fail/diagnostic 测试 |
-| unsupported targets | 对 Windows MSVC、Darwin、WASM、AVR、MSP430、Xtensa、PowerPC、LoongArch64 增加稳定负向测试 |
+| QEMU runtime 扩展 | ~~aarch64/riscv64/arm/mips/mips64 已有 hello/control-flow 语义门禁；继续扩展 aggregate ABI、va_arg、TLS 等场景~~ → ✅ 已实现：hello、control-flow、aggregate ABI、va_arg 四个独立 QEMU runtime 矩阵测试（`non_x86_qemu_runtime_hello/control_flow/aggregate_abi/va_arg`），覆盖 aarch64/riscv64/arm/mips/mips64 五架构 |
+| aggregate/HFA ABI | ~~增加 AArch64 HFA 1–8 元素、>8 fallback，以及 RISC-V HFA 1–4、>4 fallback 测试~~ → ✅ 已实现：AArch64 HFA 1/2/3/4/8 元素 + >8 sret fallback + 混合类型 fallback（`aarch64_hfa_abi_compile_and_elf_structure` / `aarch64_hfa_asm_output_has_all_functions`）；RISC-V HFA 1/2/3/4 + >4 sret fallback（`riscv64_hfa_abi_compile_and_elf_structure` / `riscv64_hfa_asm_output_has_all_functions`） |
+| non-x86 inline asm | ~~增加 `-S` 文本保留测试与 `-c` expected-fail/diagnostic 测试~~ → ✅ 已实现：`-S` 全局 asm 文本保留验证五架构（`non_x86_asm_minus_s_preserves_global_asm_text`）；`-c` asm goto 警告验证五架构（`non_x86_asm_minus_c_warns_on_asm_goto`）；arm/mips/mips64 额外 asm 表达式警告验证（`non_x86_asm_arm_mips_warn_on_inline_asm_expr`） |
+| unsupported targets | ~~对 Windows MSVC、Darwin、WASM、AVR、MSP430、Xtensa、PowerPC、LoongArch64 增加稳定负向测试~~ → ✅ 已实现：6 个未知架构负向测试 wasm32/avr/msp430/xtensa/powerpc64/loongarch64 验证 `unknown arch` 错误（`unsupported_target_arch_rejected`）；Windows MSVC/Darwin triple 解析接受但输出 ELF 格式验证（`windows_darwin_triple_accepted_but_outputs_elf`） |
 
 ### C++ / GCC bootstrap
 
