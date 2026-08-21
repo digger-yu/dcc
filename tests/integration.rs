@@ -13756,3 +13756,66 @@ fn dwarf_debug_str_contains_function_names() {
         ".debug_str should contain function name 'my_debug_str_test_func'"
     );
 }
+
+// ====== compressed debug sections: zlib/zstd CLI acceptance ======
+
+/// compressed debug: -Wa,--compress-debug-sections=zlib 应被 CLI 接受
+#[test]
+fn compress_debug_zlib_cli_accepted() {
+    let (output, obj) = run_object_test_flags(
+        "compress-zlib",
+        "int main(void) { return 0; }\n",
+        &["-g", "-Wa,--compress-debug-sections=zlib"],
+    );
+    let _ = fs::remove_file(&obj);
+    assert!(
+        output.status.success(),
+        "-Wa,--compress-debug-sections=zlib should be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// compressed debug: -Wl,--compress-debug-sections=zlib 应被链接器 CLI 接受
+#[test]
+#[cfg(unix)]
+fn compress_debug_zstd_linker_cli_accepted() {
+    let (output, exe) = run_compile_and_run_flags(
+        "compress-zstd-link",
+        "int main(void) { return 0; }",
+        &["-g", "-pie", "-fbuiltin-linker", "-Wl,--compress-debug-sections=zstd"],
+    );
+    let _ = fs::remove_file(&exe);
+    assert!(
+        output.status.success(),
+        "-Wl,--compress-debug-sections=zstd should be accepted: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// compressed debug: -Wl,--compress-debug-sections=none 应被接受且不改变输出
+#[test]
+#[cfg(unix)]
+fn compress_debug_none_preserves_uncompressed() {
+    let (output_none, exe_none) = run_compile_and_run_flags(
+        "compress-none",
+        "int main(void) { return 0; }",
+        &["-g", "-pie", "-fbuiltin-linker", "-Wl,--compress-debug-sections=none"],
+    );
+    assert!(
+        output_none.status.success(),
+        "compress=none should succeed: {}",
+        String::from_utf8_lossy(&output_none.stderr)
+    );
+    // 验证输出文件存在且包含 debug 节
+    let readelf = Command::new("readelf")
+        .args(["-S"])
+        .arg(&exe_none)
+        .output()
+        .expect("readelf -S");
+    let sections = String::from_utf8_lossy(&readelf.stdout);
+    let _ = fs::remove_file(&exe_none);
+    assert!(
+        sections.contains(".debug_info"),
+        "compress=none should preserve .debug_info: {sections}"
+    );
+}
