@@ -106,12 +106,16 @@ fn apply_sysroot(mut cfg: Config) -> Config {
 fn apply_profile_weights(prog: &mut crate::ast::Program, prof: &profile::ProfileConfig) {
     use crate::ast::Decl;
 
-    // 1) PGO: 读 .profraw
+    // 1) PGO: 读 .profraw 或 .profdata (GCC/Clang 风格合并后的 profile)
+    //    先按 profraw ("PROF" magic) 尝试; 若失败则按 profdata ("PRFD" magic)
+    //    尝试, 与 "compile → run → profraw → merge/profdata → profile-use"
+    //    端到端流程对齐.
     let pgo_w = prof
         .pgo_use
         .as_ref()
         .and_then(|p| {
             profile::pgo::Profraw::read(p)
+                .or_else(|_| profile::pgo::Profraw::read_profdata(p))
                 .ok()
                 .map(|p| profile::pgo::PgoWeights::from_profraw(&p))
         })

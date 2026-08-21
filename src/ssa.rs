@@ -1324,7 +1324,7 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     }
     let mut func = Function::new(f.name.name.clone(), f.ret_ty.clone(), f.span.clone());
     func.is_cold = f.is_cold;
-    func.is_hot = false; // FuncDecl 暂无 hot 字段
+    func.is_hot = f.is_hot;
     func.is_noreturn = false;
     // Collect original local variable names for rebuild_block
     collect_local_decls(&body.items, &mut func.original_locals);
@@ -1486,6 +1486,8 @@ fn phi_name(v: &SsaVar) -> String {
 ///   - pgo: `__dcc_hot_hint` / `__dcc_cold_hint`
 ///
 /// 在 SSA→AST 重建时必须丢弃, 否则会生成对不存在全局变量的访问.
+/// 但 section 标记 (`__dcc_section_hot` / `__dcc_section_cold`) 除外:
+/// 它们需要被保留为符号引用, 供 codegen 把热/冷函数放入不同 section.
 fn is_pass_hint_inst(kind: &InstKind) -> bool {
     if let InstKind::Store {
         e: Operand::SymAddr(name),
@@ -1493,6 +1495,7 @@ fn is_pass_hint_inst(kind: &InstKind) -> bool {
     } = kind
     {
         name.starts_with("__dcc_")
+            && !name.starts_with("__dcc_section_")
     } else {
         false
     }
