@@ -13819,3 +13819,95 @@ fn compress_debug_none_preserves_uncompressed() {
         "compress=none should preserve .debug_info: {sections}"
     );
 }
+
+// ====== kernel-sensitive opt regression: volatile/barrier/asm clobber ======
+
+/// volatile: O2 不应消除 volatile 变量的写和读
+#[test]
+#[cfg(unix)]
+fn kernel_opt_volatile_not_eliminated_at_o2() {
+    let source = "\
+volatile int flag = 0;
+int main(void) {
+    flag = 1;
+    return flag - 1;
+}
+";
+    // O2
+    let (output, exe) = run_compile_and_run_flags("volatile-o2", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "volatile O2 compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "volatile write/read must survive O2, got rc={rc}");
+    let _ = fs::remove_file(&exe);
+    // O3
+    let (output, exe) = run_compile_and_run_flags("volatile-o3", source, &["-O3"]);
+    assert!(
+        output.status.success(),
+        "volatile O3 compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "volatile write/read must survive O3, got rc={rc}");
+}
+
+/// barrier: asm volatile("" ::: "memory") 应阻止编译器重排序访存
+#[test]
+#[cfg(unix)]
+fn kernel_opt_barrier_prevents_reordering_at_o2() {
+    let source = "\
+int x = 0;
+int y = 0;
+int main(void) {
+    x = 1;
+    __asm__ volatile(\"\" ::: \"memory\");
+    y = 1;
+    return (x + y) - 2;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("barrier-o2", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "barrier O2 compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        rc, 0,
+        "barrier must prevent reordering at O2, got rc={rc}"
+    );
+}
+
+/// inline asm memory clobber: O3 不应消除带 memory clobber 的 asm 块
+#[test]
+#[cfg(unix)]
+fn kernel_opt_asm_memory_clobber_preserved_at_o3() {
+    // 使用空 asm + memory clobber 作为编译器屏障, 验证 O3 不消除
+    let source = "\
+int counter = 0;
+int main(void) {
+    counter = 10;
+    __asm__ volatile(\"\" ::: \"memory\");
+    counter = counter + 1;
+    __asm__ volatile(\"\" ::: \"memory\");
+    return counter - 11;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("asm-clobber-o3", source, &["-O3"]);
+    assert!(
+        output.status.success(),
+        "asm clobber O3 compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        rc, 0,
+        "asm with memory clobber must survive O3, got rc={rc}"
+    );
+}
