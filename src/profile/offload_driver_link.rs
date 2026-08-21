@@ -339,19 +339,35 @@ impl OffloadDriverLinker {
                 OffloadBackend::Cuda => {
                     // CUDA needs -lcudadevrt for device runtime
                     flags.push("-lcudadevrt".to_string());
-                    // Add rpath for runtime loading
+                    // Add rpath for runtime loading: always add from search dirs
+                    // so the runtime linker can find the shared library at runtime
+                    // even if it wasn't found at compile time.
+                    for dir in &rt.search_dirs {
+                        flags.push(format!("-Wl,-rpath,{}", dir.display()));
+                    }
+                    // Also add the actual library path's parent if found
                     if rt.found {
                         if let Some(parent) = rt.library_path.parent() {
-                            flags.push(format!("-Wl,-rpath,{}", parent.display()));
+                            let parent_str = parent.display().to_string();
+                            if !flags.iter().any(|f| f == &format!("-Wl,-rpath,{}", parent_str)) {
+                                flags.push(format!("-Wl,-rpath,{}", parent.display()));
+                            }
                         }
                     }
                 }
                 OffloadBackend::Rocm => {
                     // ROCm needs -lamd_comgr for compiler library
                     flags.push("-lamd_comgr".to_string());
+                    // Add rpath for runtime loading: always add from search dirs
+                    for dir in &rt.search_dirs {
+                        flags.push(format!("-Wl,-rpath,{}", dir.display()));
+                    }
                     if rt.found {
                         if let Some(parent) = rt.library_path.parent() {
-                            flags.push(format!("-Wl,-rpath,{}", parent.display()));
+                            let parent_str = parent.display().to_string();
+                            if !flags.iter().any(|f| f == &format!("-Wl,-rpath,{}", parent_str)) {
+                                flags.push(format!("-Wl,-rpath,{}", parent.display()));
+                            }
                         }
                     }
                 }
