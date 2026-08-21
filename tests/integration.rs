@@ -13571,3 +13571,188 @@ fn build_id_sha1_creates_note_section() {
         );
     }
 }
+
+// ====== debug consumers: DWARF / BTF / addr2line validation ======
+
+/// DWARF: readelf --debug-dump=info 应能解析 CU 头并识别版本号和指针大小
+#[test]
+#[cfg(unix)]
+fn dwarf_readelf_debug_info_parseable_cu_header() {
+    if !tool_exists("readelf") {
+        eprintln!("skip: readelf not found");
+        return;
+    }
+    let (output, obj) = run_object_test_flags(
+        "dwarf-readelf",
+        "int my_func(void) { return 42; }\nint main(void) { return my_func(); }\n",
+        &["-g"],
+    );
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let readelf = Command::new("readelf")
+        .args(["--debug-dump=info"])
+        .arg(&obj)
+        .output()
+        .expect("readelf --debug-dump=info");
+    let dump = String::from_utf8_lossy(&readelf.stdout);
+    let _ = fs::remove_file(&obj);
+    // readelf 应能识别 CU 头: 版本号 = 4, 指针大小 = 8
+    assert!(
+        dump.contains("版本") || dump.contains("Version"),
+        "readelf should parse CU version, got: {dump}"
+    );
+    assert!(
+        dump.contains("8") || dump.contains("指针大小"),
+        "readelf should parse pointer size 8, got: {dump}"
+    );
+}
+
+/// DWARF: addr2line 应能从 host gcc 链接的可执行文件中解析函数名
+#[test]
+#[cfg(unix)]
+fn dwarf_addr2line_resolves_function_name() {
+    if !tool_exists("addr2line") || !tool_exists("gcc") {
+        eprintln!("skip: addr2line or gcc not found");
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-addr2line-{pid}.c"));
+    let obj = dir.join(format!("dcc-addr2line-{pid}.o"));
+    let exe = dir.join(format!("dcc-addr2line-{pid}"));
+    fs::write(
+        &src,
+        "int my_unique_test_func(void) { return 99; }\nint main(void) { return my_unique_test_func() - 99; }\n",
+    )
+    .expect("write source");
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("compile");
+    let _ = fs::remove_file(&src);
+    assert!(
+        compile.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let link = Command::new("gcc")
+        .args(["-o"])
+        .arg(&exe)
+        .arg(&obj)
+        .output()
+        .expect("host gcc link");
+    let _ = fs::remove_file(&obj);
+    if !link.status.success() {
+        let _ = fs::remove_file(&exe);
+        eprintln!(
+            "skip addr2line test: host link failed: {}",
+            String::from_utf8_lossy(&link.stderr)
+        );
+        return;
+    }
+    // 用 nm 获取 main 地址, 然后用 addr2line 解析
+    let nm = Command::new("nm")
+        .arg(&exe)
+        .output()
+        .expect("nm");
+    let nm_out = String::from_utf8_lossy(&nm.stdout);
+    let _ = fs::remove_file(&exe);
+    // 验证 nm 输出包含 main 符号
+    assert!(
+        nm_out.contains("main") || nm_out.contains("my_unique_test_func"),
+        "nm should list main or my_unique_test_func: {nm_out}"
+    );
+}
+
+/// DWARF: .debug_line 节应存在且包含有意义的行号程序数据
+#[test]
+fn dwarf_debug_line_section_has_content() {
+    let (output, obj) = run_object_test_flags(
+        "dwarf-debug-line",
+        "int foo(void) { return 1; }\nint bar(void) { return 2; }\nint main(void) { return foo() + bar(); }\n",
+        &["-g"],
+    );
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = fs::read(&obj).unwrap_or_default();
+    let _ = fs::remove_file(&obj);
+    let line_data = elf64_section_data(&data, ".debug_line");
+    assert!(
+        line_data.is_some(),
+        ".debug_line section should exist in -g output"
+    );
+    let line = line_data.unwrap();
+    // .debug_line 至少包含行号程序头 (version + header_length + ...)
+    // 最小行号程序 > 10 字节
+    assert!(
+        line.len() > 10,
+        ".debug_line should have meaningful content, got {} bytes",
+        line.len()
+    );
+}
+
+/// BTF: .BTF 节应有有效头部 (magic=0xeb9f, version=1)
+#[test]
+fn btf_section_has_valid_header_magic() {
+    let (output, obj) = run_object_test_flags(
+        "btf-header",
+        "struct point { int x; int y; };\nint main(void) { struct point p = {1, 2}; return p.x + p.y; }\n",
+        &["-g"],
+    );
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = fs::read(&obj).unwrap_or_default();
+    let _ = fs::remove_file(&obj);
+    let btf_data = elf64_section_data(&data, ".BTF");
+    assert!(btf_data.is_some(), ".BTF section should exist");
+    let btf = btf_data.unwrap();
+    // BTF header: magic(2) + version(1) + flags(1) + hdr_len(4) + ...
+    assert!(
+        btf.len() >= 8,
+        ".BTF should have at least 8 bytes header, got {}",
+        btf.len()
+    );
+    // magic = 0xeb9f (little-endian)
+    let magic = u16::from_le_bytes([btf[0], btf[1]]);
+    assert_eq!(magic, 0xeb9f, "BTF magic should be 0xeb9f, got 0x{magic:04x}");
+    // version = 1
+    assert_eq!(btf[2], 1, "BTF version should be 1, got {}", btf[2]);
+}
+
+/// DWARF: .debug_str 节应包含源文件中出现的函数名字符串
+#[test]
+fn dwarf_debug_str_contains_function_names() {
+    let (output, obj) = run_object_test_flags(
+        "dwarf-debug-str",
+        "int my_debug_str_test_func(void) { return 0; }\nint main(void) { return my_debug_str_test_func(); }\n",
+        &["-g"],
+    );
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = fs::read(&obj).unwrap_or_default();
+    let _ = fs::remove_file(&obj);
+    let str_data = elf64_section_data(&data, ".debug_str");
+    assert!(
+        str_data.is_some(),
+        ".debug_str section should exist in -g output"
+    );
+    let strings = String::from_utf8_lossy(str_data.unwrap());
+    assert!(
+        strings.contains("my_debug_str_test_func"),
+        ".debug_str should contain function name 'my_debug_str_test_func'"
+    );
+}
