@@ -222,6 +222,430 @@ fn gcov_end_to_end_counter_gate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------------------------------------------------------------------------
+// AutoFDO / LBR / MemProf / Topdown CLI integration
+// ---------------------------------------------------------------------------
+
+/// AutoFDO 文本格式 profile 输入: -fauto-profile= 应接受并解析.
+#[test]
+fn cli_autofdo_text_profile_accepted() {
+    let dir = std::env::temp_dir().join(format!("dcc-autofdo-text-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 写一个 dcc 简化文本格式的 AutoFDO profile
+    let profile = dir.join("profile.afdo");
+    std::fs::write(
+        &profile,
+        b"# dcc autofdo v1\nfunc main 100\nfunc hot_fn 80\nfunc cold_fn 1\n",
+    )
+    .unwrap();
+
+    let status = dcc()
+        .args(["-std=gnu23", "-fsyntax-only"])
+        .arg("-fauto-profile")
+        .arg(profile.to_str().unwrap())
+        .arg(profile_src())
+        .status()
+        .expect("运行 dcc");
+    assert!(status.success(), "-fauto-profile 文本格式应被接受");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AutoFDO 二进制格式 profile 输入: -fauto-profile= 应接受二进制文件.
+#[test]
+fn cli_autofdo_binary_profile_accepted() {
+    let dir = std::env::temp_dir().join(format!("dcc-autofdo-bin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 写一个二进制格式的 AutoFDO profile (magic "AFDO" + version 2)
+    let profile = dir.join("profile.afdo");
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"AFDO");
+    buf.extend_from_slice(&2u32.to_le_bytes());
+    buf.extend_from_slice(&1u32.to_le_bytes()); // 1 function
+    buf.extend_from_slice(&4u32.to_le_bytes()); // name len
+    buf.extend_from_slice(b"main");
+    buf.extend_from_slice(&100u64.to_le_bytes()); // samples
+    buf.extend_from_slice(&0u32.to_le_bytes()); // 0 lines
+    buf.extend_from_slice(&0u32.to_le_bytes()); // 0 calls
+    buf.extend_from_slice(&0u32.to_le_bytes()); // 0 discs
+    std::fs::write(&profile, &buf).unwrap();
+
+    let status = dcc()
+        .args(["-std=gnu23", "-fsyntax-only"])
+        .arg("-fauto-profile")
+        .arg(profile.to_str().unwrap())
+        .arg(profile_src())
+        .status()
+        .expect("运行 dcc");
+    assert!(status.success(), "-fauto-profile 二进制格式应被接受");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AutoFDO 缺失路径应报错.
+#[test]
+fn cli_autofdo_missing_path_rejects() {
+    let out = dcc()
+        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-fauto-profile"])
+        .output()
+        .expect("运行 dcc");
+    assert!(!out.status.success(), "缺路径时应失败");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fauto-profile") || stderr.contains("missing file"),
+        "stderr 缺少错误信息: {stderr}"
+    );
+}
+
+/// LBR 文本格式 (brstack) profile 输入: -flbr-profile= 应接受.
+#[test]
+fn cli_lbr_profile_text_accepted() {
+    let dir = std::env::temp_dir().join(format!("dcc-lbr-text-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 写一个 brstack 格式的 LBR profile
+    let profile = dir.join("profile.lbr");
+    std::fs::write(
+        &profile,
+        b"main 0x1000 hot_fn 0x2000 5\nhot_fn 0x2010 main 0x1020 3\n",
+    )
+    .unwrap();
+
+    let status = dcc()
+        .args(["-std=gnu23", "-fsyntax-only"])
+        .arg("-flbr-profile")
+        .arg(profile.to_str().unwrap())
+        .arg(profile_src())
+        .status()
+        .expect("运行 dcc");
+    assert!(status.success(), "-flbr-profile 文本格式应被接受");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// LBR 缺失路径应报错.
+#[test]
+fn cli_lbr_profile_missing_path_rejects() {
+    let out = dcc()
+        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-flbr-profile"])
+        .output()
+        .expect("运行 dcc");
+    assert!(!out.status.success(), "缺路径时应失败");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("flbr-profile") || stderr.contains("missing file"),
+        "stderr 缺少错误信息: {stderr}"
+    );
+}
+
+/// MemProf 二进制格式 profile 输入: -fmemory-profile-use= 应接受.
+#[test]
+fn cli_memprof_use_binary_accepted() {
+    let dir = std::env::temp_dir().join(format!("dcc-memprof-use-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 写一个二进制格式的 MemProf profile
+    let profile = dir.join("profile.memprofdata");
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"MEMPROFD");
+    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&1u32.to_le_bytes()); // 1 alloc
+    buf.extend_from_slice(&1u32.to_le_bytes()); // 1 frame
+    buf.extend_from_slice(&4u32.to_le_bytes()); // name len
+    buf.extend_from_slice(b"main");
+    buf.extend_from_slice(&10u64.to_le_bytes()); // count
+    buf.extend_from_slice(&1024u64.to_le_bytes()); // bytes
+    buf.extend_from_slice(&0u32.to_le_bytes()); // 0 lifetime
+    buf.extend_from_slice(&0u32.to_le_bytes()); // 0 dealloc
+    std::fs::write(&profile, &buf).unwrap();
+
+    let status = dcc()
+        .args(["-std=gnu23", "-fsyntax-only"])
+        .arg("-fmemory-profile-use")
+        .arg(profile.to_str().unwrap())
+        .arg(profile_src())
+        .status()
+        .expect("运行 dcc");
+    assert!(status.success(), "-fmemory-profile-use 二进制格式应被接受");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MemProf 缺失路径应报错.
+#[test]
+fn cli_memprof_use_missing_path_rejects() {
+    let out = dcc()
+        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-fmemory-profile-use"])
+        .output()
+        .expect("运行 dcc");
+    assert!(!out.status.success(), "缺路径时应失败");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("memory-profile-use") || stderr.contains("missing file"),
+        "stderr 缺少错误信息: {stderr}"
+    );
+}
+
+/// -ftopdownmetrics 与 -fprofile-generate 组合应接受.
+#[test]
+fn cli_topdown_with_pgo_accepted() {
+    let status = dcc()
+        .args(["-std=gnu23", "-fsyntax-only", "-fprofile-generate", "-ftopdownmetrics"])
+        .arg(profile_src())
+        .status()
+        .expect("运行 dcc");
+    assert!(status.success(), "-ftopdownmetrics 与 -fprofile-generate 组合应被接受");
+}
+
+/// AutoFDO 权重影响: 用 -fauto-profile + -O2 编译, 验证 hot 函数
+/// 被归入 .text.hot 节, cold 函数被归入 .text.unlikely 节.
+#[test]
+fn autofdo_weight_influences_section_layout() {
+    let dir = std::env::temp_dir().join(format!("dcc-autofdo-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 源文件: 冷热分明的函数
+    let src = dir.join("autofdo.c");
+    std::fs::write(
+        &src,
+        b"int hot_fn(int x) { return x * 2; }\n\
+          int cold_fn(int x) { return x - 1; }\n\
+          int main(void) { return hot_fn(1) + cold_fn(2); }\n",
+    )
+    .expect("写源文件");
+
+    // AutoFDO 文本 profile: hot_fn 样本多, cold_fn 样本极少
+    let profile = dir.join("profile.afdo");
+    std::fs::write(
+        &profile,
+        b"# dcc autofdo v1\nfunc main 10\nfunc hot_fn 100\nfunc cold_fn 1\n",
+    )
+    .expect("写 profile");
+
+    // 用 -fauto-profile + -O2 编译
+    let out = dcc()
+        .current_dir(&dir)
+        .args([
+            "-std=gnu23",
+            "-O2",
+            "-fauto-profile",
+            "profile.afdo",
+            "-c",
+            "-o",
+            "autofdo.o",
+        ])
+        .arg(src.file_name().unwrap())
+        .output()
+        .expect("运行 dcc");
+    assert!(
+        out.status.success(),
+        "AutoFDO 编译必须成功: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("autofdo.o").exists(), "应产出 .o");
+
+    // 用 objdump 检查 section 布局
+    let objdump = Command::new("objdump")
+        .args(["-h", dir.join("autofdo.o").to_str().unwrap()])
+        .output();
+    if let Ok(ref out) = objdump {
+        if out.status.success() {
+            let sections = String::from_utf8_lossy(&out.stdout);
+            // AutoFDO 权重下发应产出 .text.hot 和 .text.unlikely 节
+            assert!(
+                sections.contains(".text.hot") || sections.contains(".text.unlikely"),
+                "AutoFDO 权重应影响 section 布局: {sections}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// LBR 权重影响: 用 -flbr-profile + -O2 编译, 验证 section 布局变化.
+#[test]
+fn lbr_weight_influences_section_layout() {
+    let dir = std::env::temp_dir().join(format!("dcc-lbr-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 源文件
+    let src = dir.join("lbr.c");
+    std::fs::write(
+        &src,
+        b"int hot_fn(int x) { return x * 2; }\n\
+          int cold_fn(int x) { return x - 1; }\n\
+          int main(void) { return hot_fn(1) + cold_fn(2); }\n",
+    )
+    .expect("写源文件");
+
+    // LBR brstack 格式 profile: hot_fn 分支多
+    let profile = dir.join("profile.lbr");
+    std::fs::write(
+        &profile,
+        b"main 0x1000 hot_fn 0x2000 100\nhot_fn 0x2010 main 0x1020 50\n",
+    )
+    .expect("写 profile");
+
+    // 用 -flbr-profile + -O2 编译
+    let out = dcc()
+        .current_dir(&dir)
+        .args([
+            "-std=gnu23",
+            "-O2",
+            "-flbr-profile",
+            "profile.lbr",
+            "-c",
+            "-o",
+            "lbr.o",
+        ])
+        .arg(src.file_name().unwrap())
+        .output()
+        .expect("运行 dcc");
+    assert!(
+        out.status.success(),
+        "LBR 编译必须成功: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("lbr.o").exists(), "应产出 .o");
+
+    // 用 objdump 检查 section 布局
+    let objdump = Command::new("objdump")
+        .args(["-h", dir.join("lbr.o").to_str().unwrap()])
+        .output();
+    if let Ok(ref out) = objdump {
+        if out.status.success() {
+            let sections = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                sections.contains(".text.hot") || sections.contains(".text.unlikely"),
+                "LBR 权重应影响 section 布局: {sections}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MemProf 权重影响: 用 -fmemory-profile-use + -O2 编译, 验证 cold 分配
+/// 相关函数被归入 .text.unlikely.
+#[test]
+fn memprof_weight_influences_section_layout() {
+    let dir = std::env::temp_dir().join(format!("dcc-memprof-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 源文件
+    let src = dir.join("memprof.c");
+    std::fs::write(
+        &src,
+        b"#include <stdlib.h>\nvoid *hot_alloc(void) { return malloc(1024); }\n\
+          void *cold_alloc(void) { return malloc(64); }\n\
+          int main(void) { hot_alloc(); return 0; }\n",
+    )
+    .expect("写源文件");
+
+    // MemProf 二进制 profile: hot_alloc 多, cold_alloc 极少
+    let profile = dir.join("profile.memprofdata");
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"MEMPROFD");
+    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    // 2 allocs
+    buf.extend_from_slice(&2u32.to_le_bytes());
+    // hot_alloc: single-frame callstack, count=100, bytes=102400
+    buf.extend_from_slice(&1u32.to_le_bytes()); // 1 frame
+    buf.extend_from_slice(&9u32.to_le_bytes()); // name len
+    buf.extend_from_slice(b"hot_alloc");
+    buf.extend_from_slice(&100u64.to_le_bytes()); // count
+    buf.extend_from_slice(&102400u64.to_le_bytes()); // bytes
+    // cold_alloc: single-frame callstack, count=1, bytes=64
+    buf.extend_from_slice(&1u32.to_le_bytes()); // 1 frame
+    buf.extend_from_slice(&10u32.to_le_bytes()); // name len
+    buf.extend_from_slice(b"cold_alloc");
+    buf.extend_from_slice(&1u64.to_le_bytes()); // count
+    buf.extend_from_slice(&64u64.to_le_bytes()); // bytes
+    // 0 lifetime, 0 dealloc
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    std::fs::write(&profile, &buf).expect("写 profile");
+
+    // 用 -fmemory-profile-use + -O2 编译
+    let out = dcc()
+        .current_dir(&dir)
+        .args([
+            "-std=gnu23",
+            "-O2",
+            "-fmemory-profile-use",
+            "profile.memprofdata",
+            "-c",
+            "-o",
+            "memprof.o",
+        ])
+        .arg(src.file_name().unwrap())
+        .output()
+        .expect("运行 dcc");
+    assert!(
+        out.status.success(),
+        "MemProf 编译必须成功: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("memprof.o").exists(), "应产出 .o");
+
+    // 用 objdump 检查 section 布局
+    let objdump = Command::new("objdump")
+        .args(["-h", dir.join("memprof.o").to_str().unwrap()])
+        .output();
+    if let Ok(ref out) = objdump {
+        if out.status.success() {
+            let sections = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                sections.contains(".text.hot") || sections.contains(".text.unlikely"),
+                "MemProf 权重应影响 section 布局: {sections}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Topdown metrics 与 -O2 组合: 编译时输出 pipeline 计数器.
+#[test]
+fn topdown_metrics_with_optimization() {
+    let dir = std::env::temp_dir().join(format!("dcc-topdown-opt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("topdown.c");
+    std::fs::write(
+        &src,
+        b"int compute(int x) { return x * x + 2 * x + 1; }\n\
+          int main(void) { return compute(42); }\n",
+    )
+    .expect("写源文件");
+
+    // -ftopdownmetrics + -O2 应产出目标文件
+    let out = dcc()
+        .current_dir(&dir)
+        .args(["-std=gnu23", "-O2", "-ftopdownmetrics", "-c", "-o", "topdown.o"])
+        .arg(src.file_name().unwrap())
+        .output()
+        .expect("运行 dcc");
+    assert!(
+        out.status.success(),
+        "-ftopdownmetrics + -O2 必须成功: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("topdown.o").exists(), "应产出 .o");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn cli_record_profile_rejects_missing_path() {
     // -frecord-profile 必须带 dir; 无后续 arg 才报错

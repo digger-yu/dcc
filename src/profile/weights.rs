@@ -179,6 +179,12 @@ impl ProfileWeights {
         for (_, t) in self.lbr_edges.keys() {
             s.insert(t.clone());
         }
+        // Also include functions from MemProf cold callstacks
+        for stack in &self.memprof_cold_sites {
+            for func in stack {
+                s.insert(func.clone());
+            }
+        }
         s
     }
 
