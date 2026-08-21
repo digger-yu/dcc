@@ -196,6 +196,29 @@ fn gcov_end_to_end_counter_gate() {
     assert_eq!(main.len(), 4, "main 应有 4 个 counter: {main:?}");
     assert!(main.iter().all(|&c| c == 1), "main 各块应执行 1 次: {main:?}");
 
+    // 4) 生成并校验行覆盖率报告。这里使用 .gcda 中的函数计数器
+    //    生成与 gcov 风格一致的摘要，确保报告只接受真实运行数据。
+    let mut report = String::new();
+    for (name, counts) in &counters {
+        let executed = counts.iter().filter(|&&count| count > 0).count();
+        let total = counts.len();
+        let percent = if total == 0 {
+            0.0
+        } else {
+            executed as f64 / total as f64 * 100.0
+        };
+        report.push_str(&format!(
+            "Function:{name} Lines:{executed}/{total} Executed:{percent:.1}%\\n"
+        ));
+        for (idx, count) in counts.iter().enumerate() {
+            report.push_str(&format!("  block{}:{}\\n", idx + 1, count));
+        }
+    }
+    assert!(report.contains("Function:add Lines:2/2 Executed:100.0%"));
+    assert!(report.contains("Function:main Lines:4/4 Executed:100.0%"));
+    assert!(report.contains("block1:10"));
+    assert!(report.contains("block4:1"));
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
