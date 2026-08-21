@@ -13033,3 +13033,126 @@ fn riscv64_hfa_asm_output_has_all_functions() {
         );
     }
 }
+
+// ============================================================================
+// Non-x86 inline asm — -S text preservation and -c warning diagnostics
+// ============================================================================
+
+/// Non-x86 -S: global asm text is preserved in assembly output
+#[test]
+fn non_x86_asm_minus_s_preserves_global_asm_text() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/asm_non_x86_preserve.c");
+    let targets = [
+        "aarch64-linux-gnu",
+        "riscv64-linux-gnu",
+        "arm-linux-gnueabihf",
+        "mips-linux-gnu",
+        "mips64-linux-gnuabi64",
+    ];
+    for target in targets {
+        let dir = std::env::temp_dir();
+        let asm_path =
+            dir.join(format!("dcc-nonx86-asm-{}-{}.s", target.replace('-', "_"), std::process::id()));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-S", "-o"])
+            .arg(&asm_path)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc");
+        assert!(
+            output.status.success(),
+            "target {target}: -S should succeed; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+        let _ = fs::remove_file(&asm_path);
+        // Global asm marker must be preserved in -S output
+        assert!(
+            asm.contains("__dcc_non_x86_asm_marker"),
+            "target {target}: -S output should preserve global asm marker"
+        );
+        // All functions should be present
+        for func in &["test_asm_expr", "test_asm_stmt", "test_asm_goto", "test_named"] {
+            assert!(
+                asm.contains(&format!(".globl {func}")),
+                "target {target}: -S output should contain .globl {func}"
+            );
+        }
+    }
+}
+
+/// Non-x86 -c: asm goto produces warning on non-x86 targets
+#[test]
+fn non_x86_asm_minus_c_warns_on_asm_goto() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/asm_non_x86_preserve.c");
+    let targets = [
+        "aarch64-linux-gnu",
+        "riscv64-linux-gnu",
+        "arm-linux-gnueabihf",
+        "mips-linux-gnu",
+        "mips64-linux-gnuabi64",
+    ];
+    for target in targets {
+        let dir = std::env::temp_dir();
+        let obj_path =
+            dir.join(format!("dcc-nonx86-asm-c-{}-{}.o", target.replace('-', "_"), std::process::id()));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj_path)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = fs::remove_file(&obj_path);
+        // Compilation should succeed (warning, not error)
+        assert!(
+            output.status.success(),
+            "target {target}: -c should succeed with warnings; stderr={stderr}"
+        );
+        // asm goto warning must be present
+        assert!(
+            stderr.contains("asm goto on non-x86_64 target"),
+            "target {target}: -c stderr should warn about asm goto; stderr={stderr}"
+        );
+    }
+}
+
+/// Non-x86 -c: arm/mips/mips64 produce additional inline asm expression warnings
+#[test]
+fn non_x86_asm_arm_mips_warn_on_inline_asm_expr() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/asm_non_x86_preserve.c");
+    // arm/mips/mips64 backends emit extra "result is 0" warnings
+    // for inline asm expressions; aarch64/riscv64 handle them silently
+    let targets_with_expr_warnings = [
+        "arm-linux-gnueabihf",
+        "mips-linux-gnu",
+        "mips64-linux-gnuabi64",
+    ];
+    for target in targets_with_expr_warnings {
+        let dir = std::env::temp_dir();
+        let obj_path = dir.join(format!(
+            "dcc-nonx86-expr-{}-{}.o",
+            target.replace('-', "_"),
+            std::process::id()
+        ));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj_path)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = fs::remove_file(&obj_path);
+        assert!(
+            output.status.success(),
+            "target {target}: -c should succeed; stderr={stderr}"
+        );
+        assert!(
+            stderr.contains("inline asm on non-x86_64 target"),
+            "target {target}: should warn about inline asm result; stderr={stderr}"
+        );
+    }
+}
