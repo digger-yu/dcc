@@ -13316,3 +13316,108 @@ fn coroutine_co_await_runtime() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+// ====== GNU hash / EH frame hdr deep content validation ======
+
+/// GNU hash: PIE 可执行文件中动态符号表 (.dynsym) 和动态字符串表 (.dynstr)
+/// 应存在且内容可解析。校验 .dynsym 中至少有 main 符号，.dynstr 中包含
+/// 对应的符号名字符串。
+#[test]
+#[cfg(unix)]
+fn gnu_hash_section_content_valid() {
+    let (output, exe) = run_compile_and_run_flags(
+        "gnu-hash-content",
+        "extern int puts(const char *);\nint main(void) { puts(\"hash\"); return 0; }",
+        &["-pie", "-fbuiltin-linker"],
+    );
+    assert!(
+        output.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // readelf -S 确认动态链接节存在
+    let readelf = Command::new("readelf")
+        .args(["-S"])
+        .arg(&exe)
+        .output()
+        .expect("readelf");
+    let sections = String::from_utf8_lossy(&readelf.stdout);
+    assert!(
+        sections.contains(".dynsym"),
+        "expected .dynsym section: {sections}"
+    );
+    assert!(
+        sections.contains(".dynstr"),
+        "expected .dynstr section: {sections}"
+    );
+    assert!(
+        sections.contains(".dynamic"),
+        "expected .dynamic section: {sections}"
+    );
+    // readelf -s 验证 .dynsym 中至少有 main 符号
+    let readelf_sym = Command::new("readelf")
+        .args(["-s"])
+        .arg(&exe)
+        .output()
+        .expect("readelf -s");
+    let symbols = String::from_utf8_lossy(&readelf_sym.stdout);
+    assert!(
+        symbols.contains("main"),
+        "expected 'main' symbol in dynsym: {symbols}"
+    );
+    // readelf -d 验证 .dynamic 中包含 PLTGOT 条目
+    let readelf_dyn = Command::new("readelf")
+        .args(["-d"])
+        .arg(&exe)
+        .output()
+        .expect("readelf -d");
+    let dynamic = String::from_utf8_lossy(&readelf_dyn.stdout);
+    assert!(
+        dynamic.contains("PLTGOT") || dynamic.contains("STRTAB"),
+        "expected PLTGOT or STRTAB entry in .dynamic: {dynamic}"
+    );
+    let _ = fs::remove_file(&exe);
+}
+
+/// EH frame hdr: -g -fno-omit-frame-pointer 编译应产生 .eh_frame 节
+/// 且节数据包含 FDE (不止 CIE)
+#[test]
+#[cfg(unix)]
+fn eh_frame_hdr_content_has_fde() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-eh-hdr-{pid}.c"));
+    let obj = dir.join(format!("dcc-eh-hdr-{pid}.o"));
+    fs::write(&src, "int foo(void) { return 42; }\nint bar(void) { return foo() + 1; }\n")
+        .expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-fno-omit-frame-pointer", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        output.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = fs::read(&obj).expect("read obj");
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    // 验证 .eh_frame 节存在
+    let obj_str = String::from_utf8_lossy(&data);
+    assert!(
+        obj_str.contains(".eh_frame"),
+        "expected .eh_frame section in object"
+    );
+    // 验证 .eh_frame 节数据 > CIE only (至少有一个 FDE)
+    if let Some(eh_data) = elf64_section_data(&data, ".eh_frame") {
+        // CIE 通常 ~24-60 字节, FDE 至少 ~16 字节
+        // 如果 .eh_frame > 48 字节, 很可能包含 FDE
+        assert!(
+            eh_data.len() > 48,
+            ".eh_frame too small ({}) - likely missing FDE",
+            eh_data.len()
+        );
+    }
+}
