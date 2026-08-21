@@ -1001,10 +1001,7 @@ fn null_deref_check(span: &Span) -> Expr {
                 span: span.clone(),
             },
             span: span.clone(),
-            ty: Type::Func(
-                Box::new(Type::Void),
-                vec![Type::Ptr(Box::new(Type::Void))],
-            ),
+            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
         }),
         args: vec![Expr::Int {
             v: 0,
@@ -2160,6 +2157,7 @@ mod tests {
             &mut prog,
             SanitizerFlags {
                 kcsan: true,
+                kernel_mode: true,
                 ..Default::default()
             },
         );
@@ -2677,9 +2675,7 @@ mod tests {
         };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(
-            names
-                .iter()
-                .any(|n| n == "__ubsan_handle_type_mismatch_v1"),
+            names.iter().any(|n| n == "__ubsan_handle_type_mismatch_v1"),
             "null check missing: calls = {:?}",
             names
         );

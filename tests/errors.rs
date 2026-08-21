@@ -568,8 +568,7 @@ fn diagnostic_error_snapshots() {
             // 契约: stderr 应包含对应的警告码
             let warn_code = case.code.replace('E', "W");
             assert!(
-                plain.contains(&warn_code)
-                    || plain.contains("warning"),
+                plain.contains(&warn_code) || plain.contains("warning"),
                 "known-fail {}: stderr should contain warning {}, got:\n{plain}",
                 case.name,
                 warn_code

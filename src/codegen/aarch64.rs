@@ -1798,7 +1798,7 @@ impl Aarch64Codegen {
         if reg == 0 {
             return;
         }
-        let insn = 0x4ea0_1c00u32 | ((reg as u32 & 0x1f) << 0);
+        let insn = 0x4ea0_1c00u32 | (reg as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -3547,7 +3547,7 @@ mod tests {
             find([0x1f, 0x02, 0x80, 0x91]),
             "prologue missing addg sp, x16, #0, #0"
         );
-        // prologue: stg x16, [sp, #0] 与 stg x16, [sp, #16] (帧 32B = 2 granule)
+        // prologue: stg x16, [sp, #0] 与 stg x16, [sp, #16] (帧 40B, granules = 40/16 = 2)
         assert!(
             find([0xf0, 0x0b, 0x20, 0xd9]),
             "prologue missing stg x16, [sp, #0]"
@@ -3556,28 +3556,28 @@ mod tests {
             find([0xf0, 0x1b, 0x20, 0xd9]),
             "prologue missing stg x16, [sp, #16]"
         );
-        // prologue: str x19, [sp, #16] (保存入参 x19, 槽位 off=16)
+        // prologue: str x19, [sp, #32] (保存入参 x19, <vec_lit> at 16, mte_save at 32)
         assert!(
-            find([0xf3, 0x0b, 0x00, 0xf9]),
-            "prologue missing str x19, [sp, #16]"
+            find([0xf3, 0x13, 0x00, 0xf9]),
+            "prologue missing str x19, [sp, #32]"
         );
         // prologue: add x19, sp, #0 (mov x19, sp)
         assert!(
             find([0xf3, 0x03, 0x00, 0x91]),
             "prologue missing add x19, sp, #0"
         );
-        // epilogue: ldr x19, [sp, #16]
+        // epilogue: ldr x19, [sp, #32]
         assert!(
-            find([0xf3, 0x0b, 0x40, 0xf9]),
-            "epilogue missing ldr x19, [sp, #16]"
+            find([0xf3, 0x13, 0x40, 0xf9]),
+            "epilogue missing ldr x19, [sp, #32]"
         );
         // epilogue: and sp, sp, #0x00ffffffffffffff (untag)
         assert!(
             find([0xff, 0xdf, 0x80, 0x92]),
             "epilogue missing and sp, sp, #mask"
         );
-        // 记录 tag 栈帧大小
-        assert_eq!(cg.tag_frame_size, 32, "tag_frame_size should be frame size");
+        // 记录 tag 栈帧大小 (frame_bytes = (40+15)&!15 = 48)
+        assert_eq!(cg.tag_frame_size, 48, "tag_frame_size should be frame size");
     }
 
     // HWASAN AArch64 MTE: 验证调用点对 sp 做 untag / retag,

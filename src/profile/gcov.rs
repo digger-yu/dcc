@@ -301,11 +301,7 @@ pub fn instrument_program(prog: &mut Program, source_name: &str, cfg: &GcovConfi
         let mut blocks = Vec::with_capacity(n_items + 1);
         blocks.push(GcovBlock {
             flags: 0,
-            succs: if n_items == 0 {
-                vec![]
-            } else {
-                vec![(1, 0)]
-            },
+            succs: if n_items == 0 { vec![] } else { vec![(1, 0)] },
             lines: vec![span.line],
         });
         for (i, item) in f.body.as_ref().unwrap().items.iter().enumerate() {
@@ -372,10 +368,7 @@ fn collect_stmt_lines(s: &Stmt, out: &mut Vec<u32>) {
         }
         Stmt::Expr { e, .. } => out.push(expr_span(e).line),
         Stmt::If {
-            cond,
-            then_,
-            else_,
-            ..
+            cond, then_, else_, ..
         } => {
             out.push(expr_span(cond).line);
             collect_stmt_lines(then_, out);

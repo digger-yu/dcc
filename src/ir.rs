@@ -311,7 +311,9 @@ fn value_type_size(ty: &ValueType) -> usize {
         ValueType::Void => 0,
         ValueType::Integer { bits, .. } | ValueType::Float { bits } => (*bits as usize) / 8,
         ValueType::Pointer(_) | ValueType::Function { .. } => 8,
-        ValueType::Array(inner, Some(n)) | ValueType::Vector(inner, n) => value_type_size(inner) * *n,
+        ValueType::Array(inner, Some(n)) | ValueType::Vector(inner, n) => {
+            value_type_size(inner) * *n
+        }
         ValueType::Array(_, None) => 8,
         ValueType::Aggregate { size, .. } => *size,
         ValueType::Complex(inner) => value_type_size(inner) * 2,

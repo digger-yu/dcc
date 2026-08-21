@@ -1274,7 +1274,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             // M26.4: --emit-module-file=foo.bmf - 编译 export module 时输出模块接口
             a if a.starts_with("--emit-module-file=") => {
-                emit_module_file = Some(PathBuf::from(a["--emit-module-file=".len()..].to_string()));
+                emit_module_file =
+                    Some(PathBuf::from(a["--emit-module-file=".len()..].to_string()));
             }
             // -f* 其他选项 - 忽略
             a if a.starts_with("-f") => {}

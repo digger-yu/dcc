@@ -111,10 +111,7 @@ pub struct Lower {
     pub vbase_tables: std::collections::HashMap<String, Vec<i64>>,
     /// M26.3: 虚继承: 模拟类布局, 记录字段/子对象名 -> 字节偏移
     /// (供 vbtable 常量计算; 与 C struct 实际布局一致才可链接)
-    pub field_offsets: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, i64>,
-    >,
+    pub field_offsets: std::collections::HashMap<String, std::collections::HashMap<String, i64>>,
     /// M26.3: 模拟类大小 (字节)
     pub class_sizes: std::collections::HashMap<String, i64>,
     /// M26.3: 模拟类对齐 (字节)
@@ -528,7 +525,7 @@ impl Lower {
             CppExpr::PlacementNew { ptr, ty: _, args } => {
                 self.expr_can_throw(ptr) || args.iter().any(|a| self.expr_can_throw(a))
             }
-            CppExpr::DynamicCast { expr, .. } => {
+            CppExpr::DynamicCast { .. } => {
                 // dynamic_cast 到引用类型会抛 bad_cast
                 true
             }
@@ -546,13 +543,9 @@ impl Lower {
             | CppExpr::Delete(o)
             | CppExpr::DeleteArr(o)
             | CppExpr::Noexcept(o) => self.expr_can_throw(o),
-            CppExpr::BinOp(_, l, r) => {
-                self.expr_can_throw(l) || self.expr_can_throw(r)
-            }
+            CppExpr::BinOp(_, l, r) => self.expr_can_throw(l) || self.expr_can_throw(r),
             CppExpr::Ternary { cond, then, els } => {
-                self.expr_can_throw(cond)
-                    || self.expr_can_throw(then)
-                    || self.expr_can_throw(els)
+                self.expr_can_throw(cond) || self.expr_can_throw(then) || self.expr_can_throw(els)
             }
             CppExpr::Comma(es) => es.iter().any(|x| self.expr_can_throw(x)),
             CppExpr::Cast(_, x)
@@ -565,15 +558,13 @@ impl Lower {
                 }
                 self.call_target_can_throw(f)
             }
-            CppExpr::OpCall { args, .. } => {
+            CppExpr::OpCall { .. } => {
                 // 内建运算符不抛 (parser 只对重载运算符产生 OpCall);
                 // 重载运算符是函数调用, 保守视为可抛.
                 true
             }
             CppExpr::InitList(es) => es.iter().any(|x| self.expr_can_throw(x)),
-            CppExpr::TypedInitList { elems, .. } => {
-                elems.iter().any(|x| self.expr_can_throw(x))
-            }
+            CppExpr::TypedInitList { elems, .. } => elems.iter().any(|x| self.expr_can_throw(x)),
             CppExpr::MultiIndex(o, idxs) => {
                 self.expr_can_throw(o) || idxs.iter().any(|x| self.expr_can_throw(x))
             }
@@ -1046,10 +1037,7 @@ impl Lower {
     /// 类型对齐 (System V x86_64 规则; 必须与 C struct 实际布局一致)
     fn ty_align(&self, ty: &MangleType) -> i64 {
         match ty {
-            MangleType::Bool
-            | MangleType::Char
-            | MangleType::Schar
-            | MangleType::Uchar => 1,
+            MangleType::Bool | MangleType::Char | MangleType::Schar | MangleType::Uchar => 1,
             MangleType::Short | MangleType::Ushort => 2,
             MangleType::Int | MangleType::Uint | MangleType::Float => 4,
             MangleType::Long
@@ -1060,12 +1048,10 @@ impl Lower {
             MangleType::LongDouble => 16,
             MangleType::Pointer(_) | MangleType::Reference(_) => 8,
             MangleType::Class(n) => *self.class_aligns.get(&self.cls_key(n)).unwrap_or(&8),
-            MangleType::Template { name, args } => {
-                *self
-                    .class_aligns
-                    .get(&instantiated_class_name(name, args))
-                    .unwrap_or(&8)
-            }
+            MangleType::Template { name, args } => *self
+                .class_aligns
+                .get(&instantiated_class_name(name, args))
+                .unwrap_or(&8),
             _ => 8,
         }
     }
@@ -1073,10 +1059,7 @@ impl Lower {
     /// 类型大小 (System V x86_64 规则)
     fn ty_size(&self, ty: &MangleType) -> i64 {
         match ty {
-            MangleType::Bool
-            | MangleType::Char
-            | MangleType::Schar
-            | MangleType::Uchar => 1,
+            MangleType::Bool | MangleType::Char | MangleType::Schar | MangleType::Uchar => 1,
             MangleType::Short | MangleType::Ushort => 2,
             MangleType::Int | MangleType::Uint | MangleType::Float => 4,
             MangleType::Long
@@ -1087,12 +1070,10 @@ impl Lower {
             MangleType::LongDouble => 16,
             MangleType::Pointer(_) | MangleType::Reference(_) => 8,
             MangleType::Class(n) => *self.class_sizes.get(&self.cls_key(n)).unwrap_or(&8),
-            MangleType::Template { name, args } => {
-                *self
-                    .class_sizes
-                    .get(&instantiated_class_name(name, args))
-                    .unwrap_or(&8)
-            }
+            MangleType::Template { name, args } => *self
+                .class_sizes
+                .get(&instantiated_class_name(name, args))
+                .unwrap_or(&8),
             _ => 8,
         }
     }
@@ -1215,7 +1196,11 @@ impl Lower {
 
     /// 虚基成员访问: 查找 member 属于哪个传递虚基 (及在该虚基内的非虚
     /// `__base_` 链). 返回 (虚基 key, vbtable 索引, 虚基内链).
-    fn vbase_member_access(&self, class: &str, member: &str) -> Option<(String, usize, Vec<String>)> {
+    fn vbase_member_access(
+        &self,
+        class: &str,
+        member: &str,
+    ) -> Option<(String, usize, Vec<String>)> {
         let ck = self.cls_key(class);
         let vbs = self.transitive_vbases.get(&ck)?;
         for (i, vb) in vbs.iter().enumerate() {
@@ -1265,9 +1250,11 @@ impl Lower {
         let vb_c = self.mangle_to_c_ns(&MangleType::Class(vb.to_string()));
         self.out.push_str(&format!("(({}*)((char*)&", vb_c));
         self.emit_expr(obj);
-        self.out.push_str(if use_arrow { "->__vbptr + " } else { ".__vbptr + " });
+        self.out
+            .push_str(if use_arrow { "->__vbptr + " } else { ".__vbptr + " });
         self.emit_expr(obj);
-        self.out.push_str(if use_arrow { "->__vbptr[" } else { ".__vbptr[" });
+        self.out
+            .push_str(if use_arrow { "->__vbptr[" } else { ".__vbptr[" });
         self.out.push_str(&idx.to_string());
         self.out.push_str("]))");
         for (i, b) in tail.iter().enumerate() {
@@ -1306,23 +1293,18 @@ impl Lower {
                 ..
             } => {
                 if *is_noexcept {
-                    self.noexcept_fns
-                        .insert(format!("{}::{}", class, name));
+                    self.noexcept_fns.insert(format!("{}::{}", class, name));
                 }
             }
             CppDecl::Ctor {
-                class,
-                is_noexcept,
-                ..
+                class, is_noexcept, ..
             } => {
                 if *is_noexcept {
                     self.noexcept_fns.insert(format!("{}::ctor", class));
                 }
             }
             CppDecl::Dtor {
-                class,
-                is_noexcept,
-                ..
+                class, is_noexcept, ..
             } => {
                 if *is_noexcept {
                     self.noexcept_fns.insert(format!("{}::dtor", class));
@@ -1359,10 +1341,7 @@ impl Lower {
                 self.fn_ret_types.insert(name.clone(), ret.clone());
             }
             CppDecl::MemberFn {
-                class,
-                name,
-                ret,
-                ..
+                class, name, ret, ..
             } => {
                 let cls = self.resolve_class_name(class);
                 self.fn_ret_types
@@ -2442,8 +2421,10 @@ impl Lower {
                     self.out.push_str(&format!("enum {{ {} }};\n", body));
                 } else if let Some(ut) = underlying {
                     // C23 enum 底层类型: 尽可能保留 sizeof / 值域语义.
-                    self.out
-                        .push_str(&format!("typedef enum : {} {{ {} }} {};\n", ut, body, prefixed));
+                    self.out.push_str(&format!(
+                        "typedef enum : {} {{ {} }} {};\n",
+                        ut, body, prefixed
+                    ));
                 } else {
                     self.out
                         .push_str(&format!("typedef enum {{ {} }} {};\n", body, prefixed));
@@ -2462,7 +2443,11 @@ impl Lower {
         // Store base class information for inherited member access
         self.class_bases.insert(qname.clone(), c.bases.clone());
         // M26.3: 传递虚基列表与 vbtable (预遍历已计算)
-        let vbs = self.transitive_vbases.get(&qname).cloned().unwrap_or_default();
+        let vbs = self
+            .transitive_vbases
+            .get(&qname)
+            .cloned()
+            .unwrap_or_default();
         let vtable = self.vbase_tables.get(&qname).cloned().unwrap_or_default();
         // 阶段 0: 虚基 vbtable (vbase_offset 项, 第 0 项恒为 0)
         if !vbs.is_empty() {
@@ -2520,8 +2505,7 @@ impl Lower {
         // M26.3: 虚基子对象嵌入尾部 (传递虚基, DFS 顺序, 去重 - 菱形共享)
         for vb in &vbs {
             let vb_c = self.mangle_to_c_ns(&MangleType::Class(vb.clone()));
-            self.out
-                .push_str(&format!("    {} __vb_{};\n", vb_c, vb));
+            self.out.push_str(&format!("    {} __vb_{};\n", vb_c, vb));
         }
         self.out.push_str("};\n");
         // M26.3: 无用户 ctor 且含虚基 -> 自动生成默认 ctor:
@@ -3377,9 +3361,7 @@ impl Lower {
                     }
                     // M26.1: 用户定义的自由函数调用 -> mangled 名, 与定义一致
                     // (修复: 之前定义 mangled 但调用 unmangled, 链接必失败)
-                    if self.plain_fns.contains(fname)
-                        && self.fn_ret_types.contains_key(fname)
-                    {
+                    if self.plain_fns.contains(fname) && self.fn_ret_types.contains_key(fname) {
                         let n = NestedName::from_dotted(vec![self.qualify_name(fname)]);
                         let m = mangle_member_function(&n, &[], &MangleType::Void);
                         self.out.push_str(&m);
@@ -3618,7 +3600,8 @@ impl Lower {
                     };
                     if let Some(src) = self.lookup_var_class(obj_expr) {
                         if let Some(idx) = self.vbase_upcast_target(&vb, &src) {
-                            self.out.push_str(&format!("(({})", self.mangle_to_c_ns(ty)));
+                            self.out
+                                .push_str(&format!("(({})", self.mangle_to_c_ns(ty)));
                             self.out.push_str("((char*)&");
                             self.emit_expr(obj_expr);
                             self.out.push_str(if use_arrow {
@@ -3627,11 +3610,8 @@ impl Lower {
                                 ".__vbptr + "
                             });
                             self.emit_expr(obj_expr);
-                            self.out.push_str(if use_arrow {
-                                "->__vbptr["
-                            } else {
-                                ".__vbptr["
-                            });
+                            self.out
+                                .push_str(if use_arrow { "->__vbptr[" } else { ".__vbptr[" });
                             self.out.push_str(&idx.to_string());
                             self.out.push_str("]))");
                             return;
@@ -3859,9 +3839,19 @@ impl Lower {
 
     /// M26.4: 完整 C 函数声明文本 (BMF 导出/导入): `ret mangled(arg1, arg2)`
     /// 含 Itanium mangled 符号, import 端直接 `extern <此文本>;`
-    fn fn_decl_c(&self, mangled: &str, ret: &MangleType, params: &[(String, MangleType)]) -> String {
+    fn fn_decl_c(
+        &self,
+        mangled: &str,
+        ret: &MangleType,
+        params: &[(String, MangleType)],
+    ) -> String {
         let args: Vec<String> = params.iter().map(|(_, t)| self.mangle_to_c_ns(t)).collect();
-        format!("{} {}({})", self.mangle_to_c_ns(ret), mangled, args.join(", "))
+        format!(
+            "{} {}({})",
+            self.mangle_to_c_ns(ret),
+            mangled,
+            args.join(", ")
+        )
     }
 
     /// M26.4: 注入导入模块 (BMF) 的 C 声明, 并注册名字供调用点降级:
@@ -3934,7 +3924,10 @@ impl Lower {
             }
             let toks: Vec<&str> = part.split_whitespace().collect();
             if let Some(fname) = toks.last() {
-                fields.push((fname.to_string(), c_decl_type_to_mangle(&toks[..toks.len() - 1].join(" "))));
+                fields.push((
+                    fname.to_string(),
+                    c_decl_type_to_mangle(&toks[..toks.len() - 1].join(" ")),
+                ));
             }
         }
         self.class_fields.insert(name.clone(), fields);
@@ -3992,9 +3985,7 @@ fn infer_c_decl_ret_type(decl: &str) -> MangleType {
             }
         }
         "unsigned" => MangleType::Uint,
-        "struct" => MangleType::Class(
-            toks.next().unwrap_or("").trim_end_matches('*').to_string(),
-        ),
+        "struct" => MangleType::Class(toks.next().unwrap_or("").trim_end_matches('*').to_string()),
         _ => MangleType::Int,
     }
 }
@@ -4879,8 +4870,15 @@ mod tests {
         let mut l = Lower::new();
         l.lower_decls(&decls);
         // 传递虚基 DFS 顺序: [Mid1, Base, Mid2]
-        let vbs = l.transitive_vbases.get("Final").cloned().unwrap_or_default();
-        assert_eq!(vbs, vec!["Mid1".to_string(), "Base".to_string(), "Mid2".to_string()]);
+        let vbs = l
+            .transitive_vbases
+            .get("Final")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            vbs,
+            vec!["Mid1".to_string(), "Base".to_string(), "Mid2".to_string()]
+        );
         // vbtable 前 4 项: 0(自身) + 3 个虚基
         let tbl = l.vbase_tables.get("Final").cloned().unwrap_or_default();
         assert_eq!(tbl.len(), 4, "tbl={:?}", tbl);
@@ -4916,7 +4914,11 @@ mod tests {
         assert!(s.contains("GREEN = 5"), "{}", s);
         assert!(s.contains("BLUE"), "{}", s);
         // scoped + 底层类型保留
-        assert!(s.contains("typedef enum : unsigned char { A = 1, B = A + 2 } Scoped;"), "{}", s);
+        assert!(
+            s.contains("typedef enum : unsigned char { A = 1, B = A + 2 } Scoped;"),
+            "{}",
+            s
+        );
         // 匿名枚举只产常量, 不产类型名
         assert!(s.contains("enum { ANON_X = 42 };"), "{}", s);
         // 不应再出现 typedef int 降级
@@ -4978,7 +4980,11 @@ mod tests {
         assert!(s.contains("r|=16;"), "{}", s);
         assert!(s.contains("r|=64;"), "{}", s);
         // noexcept 函数定义应带 nothrow 属性
-        assert!(s.contains("__attribute__((nothrow)) int _ZN7safe_fnEv"), "{}", s);
+        assert!(
+            s.contains("__attribute__((nothrow)) int _ZN7safe_fnEv"),
+            "{}",
+            s
+        );
     }
 
     #[test]
@@ -5020,7 +5026,11 @@ mod tests {
         assert!(s.contains("double fw = w.weight;"), "{}", s);
         // 成员调用: w.get_id() -> int, w.get_weight() -> double
         assert!(s.contains("int mid = _ZN6Widget6get_idEv(&w);"), "{}", s);
-        assert!(s.contains("double mw = _ZN6Widget10get_weightEv(&w);"), "{}", s);
+        assert!(
+            s.contains("double mw = _ZN6Widget10get_weightEv(&w);"),
+            "{}",
+            s
+        );
     }
 
     #[test]

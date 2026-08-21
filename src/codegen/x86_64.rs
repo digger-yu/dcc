@@ -5907,11 +5907,7 @@ impl Codegen {
                                     | Type::Array(_, ArraySize::Const(_))
                                     | Type::Atomic(_)
                             ) && v.ty.size() > 8;
-                            if matches!(&v.ty, Type::Vector(_, _)) {
-                                let dst_ty = v.ty.clone();
-                                let dst_name = v.name.name.clone();
-                                self.gen_aggregate_assign(&dst_name, &dst_ty, init);
-                            } else if is_agg {
+                            if matches!(&v.ty, Type::Vector(_, _)) || is_agg {
                                 let dst_ty = v.ty.clone();
                                 let dst_name = v.name.name.clone();
                                 self.gen_aggregate_assign(&dst_name, &dst_ty, init);
@@ -6840,7 +6836,7 @@ impl Codegen {
                         // 带有 __builtin_ 前缀, 但实际应链接到 libc 的 __*_chk 符号.
                         // 剥离前缀后按普通函数调用处理.
                         let real_name = &name_name["__builtin_".len()..];
-                        self.emit_sysv_call(Some(&real_name), None, args, sret_off);
+                        self.emit_sysv_call(Some(real_name), None, args, sret_off);
                         if let Some(off) = sret_off {
                             self.emit_lea_r13(0, off);
                             if dst != 0 {
@@ -12190,7 +12186,7 @@ impl Codegen {
         if Self::is_fortify_builtin(&name.name) {
             let real_name = &name.name["__builtin_".len()..];
             // 按 SysV ABI 发射函数调用: 参数已按约定准备, 直接 call
-            self.call_label(&real_name);
+            self.call_label(real_name);
             return true;
         }
         eprintln!(
@@ -13541,7 +13537,7 @@ impl Codegen {
             | "fesetenv" | "feholdexcept" | "feupdateenv"
                 if !self.defined_funcs.contains(name) =>
             {
-                return self.gen_fenv_builtin(name, args, dst);
+                self.gen_fenv_builtin(name, args, dst)
             }
             _ => false,
         }

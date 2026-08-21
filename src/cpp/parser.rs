@@ -2634,9 +2634,9 @@ impl<'a> CppParser<'a> {
             ));
         }
         self.bump(); // {
-        // Parse the enumerator list: `name [= init-expr]`, comma separated,
-        // terminated by the matching `}`.  Initializer token text is kept so
-        // the lowerer can re-emit the constant expression verbatim.
+                     // Parse the enumerator list: `name [= init-expr]`, comma separated,
+                     // terminated by the matching `}`.  Initializer token text is kept so
+                     // the lowerer can re-emit the constant expression verbatim.
         let mut variants: Vec<(String, Option<String>)> = Vec::new();
         let mut depth = 1i32;
         let mut cur_name: Option<String> = None;
@@ -2700,11 +2700,8 @@ impl<'a> CppParser<'a> {
                     self.bump();
                 }
                 _ => {
-                    if cur_init.is_some() {
-                        cur_init
-                            .as_mut()
-                            .unwrap()
-                            .push(self.token_text(&t));
+                    if let Some(init) = cur_init.as_mut() {
+                        init.push(self.token_text(&t));
                     }
                     self.bump();
                 }
@@ -2793,10 +2790,7 @@ impl<'a> CppParser<'a> {
                         ..
                     })) => k += 1,
                     Some(CppTok::C(Tok { kind: ty, .. })) if is_c_type_kw(ty) => k += 1,
-                    Some(CppTok::Kw(
-                        CppKw::Const | CppKw::Volatile | CppKw::Static,
-                        _,
-                    )) => k += 1,
+                    Some(CppTok::Kw(CppKw::Const | CppKw::Volatile | CppKw::Static, _)) => k += 1,
                     _ => break,
                 }
             }
@@ -3095,7 +3089,7 @@ impl<'a> CppParser<'a> {
         if matches!(&saved, Some(CppTok::Kw(CppKw::New, _))) {
             if self.peek_is_lbracket() {
                 self.bump(); // [
-                let _ = self.expect_tok(TokKind::RBracket)?;
+                self.expect_tok(TokKind::RBracket)?;
                 return Ok(Operator::NewArr);
             }
             return Ok(Operator::New);
@@ -3103,7 +3097,7 @@ impl<'a> CppParser<'a> {
         if matches!(&saved, Some(CppTok::Kw(CppKw::Delete, _))) {
             if self.peek_is_lbracket() {
                 self.bump(); // [
-                let _ = self.expect_tok(TokKind::RBracket)?;
+                self.expect_tok(TokKind::RBracket)?;
                 return Ok(Operator::DeleteArr);
             }
             return Ok(Operator::Delete);
@@ -7191,10 +7185,9 @@ impl<'a> CppParser<'a> {
             // M26.4: 类类型直接初始化 `Widget w(7)` 包成 ctor 调用
             // Call(Ident("Widget"), [7]), 让 lower 走 ctor 路径而非普通赋值.
             let init = match &ty {
-                MangleType::Class(cls) if !args.is_empty() => Some(CppExpr::Call(
-                    Box::new(CppExpr::Ident(cls.clone())),
-                    args,
-                )),
+                MangleType::Class(cls) if !args.is_empty() => {
+                    Some(CppExpr::Call(Box::new(CppExpr::Ident(cls.clone())), args))
+                }
                 _ if args.len() == 1 => Some(args.into_iter().next().unwrap()),
                 _ => None,
             };
@@ -7719,13 +7712,12 @@ mod tests {
         let mut p = CppParser::new(src, "test.cpp");
         let d = p.parse_top_level().unwrap();
         match &d[0] {
-            CppDecl::Enum {
-                name,
-                variants,
-                ..
-            } => {
+            CppDecl::Enum { name, variants, .. } => {
                 assert_eq!(name, "_anon");
-                assert_eq!(variants, &vec![("ANON_X".to_string(), Some("42".to_string()))]);
+                assert_eq!(
+                    variants,
+                    &vec![("ANON_X".to_string(), Some("42".to_string()))]
+                );
             }
             other => panic!("expected Enum, got {:?}", other),
         }
@@ -7740,7 +7732,10 @@ mod tests {
         match &d[0] {
             CppDecl::Enum { variants, .. } => {
                 assert_eq!(variants.len(), 2);
-                assert_eq!(variants[0], ("A".to_string(), Some("f ( 1 , 2 )".to_string())));
+                assert_eq!(
+                    variants[0],
+                    ("A".to_string(), Some("f ( 1 , 2 )".to_string()))
+                );
                 assert_eq!(variants[1], ("B".to_string(), Some("3".to_string())));
             }
             other => panic!("expected Enum, got {:?}", other),

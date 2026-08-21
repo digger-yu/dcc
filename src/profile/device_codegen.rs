@@ -172,7 +172,11 @@ impl OffloadRuntimeLoader {
     }
 
     /// 从文件加载设备代码 (cubin / hsaco)。
-    pub fn load_device_code_from_file(&mut self, triple: &str, path: &std::path::Path) -> std::io::Result<()> {
+    pub fn load_device_code_from_file(
+        &mut self,
+        triple: &str,
+        path: &std::path::Path,
+    ) -> std::io::Result<()> {
         let bytes = std::fs::read(path)?;
         self.device_code.insert(triple.to_string(), bytes);
         Ok(())
@@ -246,15 +250,16 @@ impl OffloadRuntimeLoader {
         } else if triple.contains("amdgcn") {
             self.dispatch_rocm(&entry, params)
         } else {
-            KernelLaunchResult::Failed(format!(
-                "no device dispatcher for triple '{}'",
-                triple
-            ))
+            KernelLaunchResult::Failed(format!("no device dispatcher for triple '{}'", triple))
         }
     }
 
     /// 通过 CUDA driver API 分发 kernel launch。
-    fn dispatch_cuda(&mut self, entry: &OffloadEntry, params: &KernelLaunchParams) -> KernelLaunchResult {
+    fn dispatch_cuda(
+        &mut self,
+        entry: &OffloadEntry,
+        params: &KernelLaunchParams,
+    ) -> KernelLaunchResult {
         let triple = entry.device_triple.clone();
         let code = match self.device_code.get(&triple) {
             Some(c) if !c.is_empty() => c.clone(),
@@ -273,7 +278,11 @@ impl OffloadRuntimeLoader {
     }
 
     /// 通过 ROCm driver API 分发 kernel launch。
-    fn dispatch_rocm(&mut self, entry: &OffloadEntry, params: &KernelLaunchParams) -> KernelLaunchResult {
+    fn dispatch_rocm(
+        &mut self,
+        entry: &OffloadEntry,
+        params: &KernelLaunchParams,
+    ) -> KernelLaunchResult {
         let triple = entry.device_triple.clone();
         let code = match self.device_code.get(&triple) {
             Some(c) if !c.is_empty() => c.clone(),
@@ -491,9 +500,7 @@ fn cuda_launch(func: &str, cubin: &[u8], params: &KernelLaunchParams) -> Result<
                     *mut *const std::ffi::c_void,
                 ) -> i32,
             > = dlsym_fn(handle, "cuLaunchKernel");
-            let (Some(load_mod), Some(get_fn), Some(launch)) =
-                (load_mod, get_fn, launch)
-            else {
+            let (Some(load_mod), Some(get_fn), Some(launch)) = (load_mod, get_fn, launch) else {
                 return Err("CUDA driver symbols missing (cuModuleLoadData / \
                             cuModuleGetFunction / cuLaunchKernel)"
                     .to_string());
@@ -575,9 +582,7 @@ fn rocm_launch(func: &str, hsaco: &[u8], params: &KernelLaunchParams) -> Result<
                     *mut *const std::ffi::c_void,
                 ) -> i32,
             > = dlsym_fn(handle, "hipLaunchKernel");
-            let (Some(load_mod), Some(get_fn), Some(launch)) =
-                (load_mod, get_fn, launch)
-            else {
+            let (Some(load_mod), Some(get_fn), Some(launch)) = (load_mod, get_fn, launch) else {
                 return Err("ROCm driver symbols missing (hipModuleLoadData / \
                             hipModuleGetFunction / hipLaunchKernel)"
                     .to_string());

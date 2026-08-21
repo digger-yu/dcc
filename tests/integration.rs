@@ -668,7 +668,10 @@ fn libdecnumber_combined_tu_compiles() {
 ///   - xfail 时必须产出进度报告 cc1plus_progress.txt (对象数/错误数/
 ///     首批失败文件), 供跟踪 dcc 对 GCC 主体的 bootstrap 收敛
 #[test]
-#[cfg_attr(not(feature = "gcc_src"), ignore = "needs GCC source tree (--features gcc_src + GCC_SRC)")]
+#[cfg_attr(
+    not(feature = "gcc_src"),
+    ignore = "needs GCC source tree (--features gcc_src + GCC_SRC)"
+)]
 fn gcc_cc1plus_bootstrap_gate() {
     let gcc_src = match std::env::var("GCC_SRC") {
         Ok(p) => std::path::PathBuf::from(p),
@@ -677,7 +680,8 @@ fn gcc_cc1plus_bootstrap_gate() {
     if !gcc_src.join("gcc").exists() {
         return;
     }
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/cc1plus_bootstrap.sh");
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/cc1plus_bootstrap.sh");
     let build_dir = std::env::temp_dir().join(format!("dcc-cc1plus-gate-{}", std::process::id()));
     let output = Command::new("bash")
         .arg(&script)
@@ -698,10 +702,7 @@ fn gcc_cc1plus_bootstrap_gate() {
     );
     if status == 2 {
         let report = build_dir.join("cc1plus_progress.txt");
-        assert!(
-            report.exists(),
-            "xfail gate must emit cc1plus_progress.txt"
-        );
+        assert!(report.exists(), "xfail gate must emit cc1plus_progress.txt");
         let text = fs::read_to_string(&report).unwrap();
         assert!(text.contains("cc1plus bootstrap gate: xfail"), "{}", text);
     }
@@ -711,8 +712,8 @@ fn gcc_cc1plus_bootstrap_gate() {
 #[test]
 #[cfg(unix)]
 fn strict_full_build_exports_required_kernel_gates() {
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts/kernel_full_check.sh");
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/kernel_full_check.sh");
     let text = fs::read_to_string(script).expect("read kernel_full_check.sh");
 
     assert!(text.contains("STRICT_FULL_BUILD"), "{text}");
@@ -729,10 +730,8 @@ fn strict_full_build_exports_required_kernel_gates() {
 #[cfg(unix)]
 fn strict_kernel_scripts_reject_missing_artifacts() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let temp = std::env::temp_dir().join(format!(
-        "dcc-strict-kernel-missing-{}",
-        std::process::id()
-    ));
+    let temp =
+        std::env::temp_dir().join(format!("dcc-strict-kernel-missing-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp);
 
     let smoke = Command::new("/bin/bash")
@@ -818,8 +817,14 @@ fn strict_qemu_boot_requires_qemu_and_boot_log() {
         .expect("run qemu_boot_matrix.sh with missing boot strings");
     let stdout = String::from_utf8_lossy(&no_boot_log.stdout);
     assert!(!no_boot_log.status.success(), "stdout: {stdout}");
-    assert!(stdout.contains("FAIL: nographic-serial"), "stdout: {stdout}");
-    assert!(stdout.contains("no required boot log string"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("FAIL: nographic-serial"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("no required boot log string"),
+        "stdout: {stdout}"
+    );
 
     make_executable(
         &temp.join("qemu-system-x86_64"),
@@ -861,10 +866,8 @@ fn strict_vmlinux_regress_requires_debug_tools() {
     }
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let temp = std::env::temp_dir().join(format!(
-        "dcc-strict-vmlinux-tools-{}",
-        std::process::id()
-    ));
+    let temp =
+        std::env::temp_dir().join(format!("dcc-strict-vmlinux-tools-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp).expect("create fake tool dir");
     fs::write(temp.join("vmlinux"), "not really elf\n").expect("write vmlinux fixture");
@@ -5419,10 +5422,7 @@ fn strict_qemu_boot_matrix_gates_on_artifacts() {
     }
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let temp = std::env::temp_dir().join(format!(
-        "dcc-qemu-gate-{}",
-        std::process::id()
-    ));
+    let temp = std::env::temp_dir().join(format!("dcc-qemu-gate-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp).expect("create qemu fixture dir");
     fs::write(temp.join("bzImage"), "fake kernel image\n").expect("write fake bzImage");
@@ -5437,7 +5437,10 @@ fn strict_qemu_boot_matrix_gates_on_artifacts() {
         .expect("run qemu_boot_matrix.sh without qemu");
     let stdout = String::from_utf8_lossy(&missing_qemu.stdout);
     assert!(!missing_qemu.status.success(), "stdout: {stdout}");
-    assert!(stdout.contains("FAIL: qemu-system-x86_64 not installed"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("FAIL: qemu-system-x86_64 not installed"),
+        "stdout: {stdout}"
+    );
     assert!(!stdout.contains("SKIP:"), "stdout: {stdout}");
 
     // 有 qemu 但 boot log 缺少关键字符串 → FAIL
@@ -5460,8 +5463,14 @@ fn strict_qemu_boot_matrix_gates_on_artifacts() {
         .expect("run qemu_boot_matrix.sh with missing boot strings");
     let stdout = String::from_utf8_lossy(&no_boot_log.stdout);
     assert!(!no_boot_log.status.success(), "stdout: {stdout}");
-    assert!(stdout.contains("FAIL: nographic-serial"), "stdout: {stdout}");
-    assert!(stdout.contains("no required boot log string"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("FAIL: nographic-serial"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("no required boot log string"),
+        "stdout: {stdout}"
+    );
 
     // qemu 输出完整 boot log → PASS
     make_executable(
@@ -5502,7 +5511,11 @@ fn kernel_object_corpus_arch_x86_kernel() {
             let obj = fs::read(&path).expect("read object file");
             assert!(obj.len() >= 4, "object too small: {path:?}");
             // ELF 魔数: 0x7f, 'E', 'L', 'F'
-            assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F'], "missing ELF magic in {path:?}");
+            assert_eq!(
+                &obj[0..4],
+                &[0x7f, b'E', b'L', b'F'],
+                "missing ELF magic in {path:?}"
+            );
             // x86_64 machine type (0x3e) 出现在 e_machine 字段 (偏移 18)
             if obj.len() >= 20 {
                 let machine = u16::from_le_bytes([obj[18], obj[19]]);
@@ -5530,7 +5543,11 @@ fn kernel_object_corpus_kernel_sched() {
         if path.extension().map_or(false, |e| e == "o") {
             let obj = fs::read(&path).expect("read object file");
             assert!(obj.len() >= 4, "object too small: {path:?}");
-            assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F'], "missing ELF magic in {path:?}");
+            assert_eq!(
+                &obj[0..4],
+                &[0x7f, b'E', b'L', b'F'],
+                "missing ELF magic in {path:?}"
+            );
         }
     }
 }
@@ -5550,7 +5567,11 @@ fn kernel_object_corpus_lib() {
         if path.extension().map_or(false, |e| e == "o") {
             let obj = fs::read(&path).expect("read object file");
             assert!(obj.len() >= 4, "object too small: {path:?}");
-            assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F'], "missing ELF magic in {path:?}");
+            assert_eq!(
+                &obj[0..4],
+                &[0x7f, b'E', b'L', b'F'],
+                "missing ELF magic in {path:?}"
+            );
         }
     }
 }
@@ -5847,11 +5868,19 @@ fn orc_consumer_objtool_strict_single_object() {
     // 校验 ORC 节区存在
     let obj = fs::read(&obj_path).expect("read object file");
     let secs = elf64_sections(&obj);
-    assert!(secs.contains_key(".orc_unwind_ip"), "missing .orc_unwind_ip");
+    assert!(
+        secs.contains_key(".orc_unwind_ip"),
+        "missing .orc_unwind_ip"
+    );
     assert!(secs.contains_key(".orc_unwind"), "missing .orc_unwind");
 
     // 如果有 objtool, 用 strict 模式检查
-    if Command::new("sh").args(["-c", "command -v objtool"]).status().map(|s| s.success()).unwrap_or(false) {
+    if Command::new("sh")
+        .args(["-c", "command -v objtool"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
         let check = Command::new("objtool")
             .args(["check", "--orc", obj_path.to_str().unwrap()])
             .output()
@@ -5886,7 +5915,13 @@ fn orc_consumer_function_boundaries_objtool() {
     let funcs = elf64_func_symbols(&obj_data);
     let names: std::collections::HashMap<String, u64> =
         funcs.iter().map(|(n, _, s)| (n.clone(), *s)).collect();
-    for want in ["weak_func", "static_func", "real_func", "alias_func", "caller"] {
+    for want in [
+        "weak_func",
+        "static_func",
+        "real_func",
+        "alias_func",
+        "caller",
+    ] {
         let sz = names
             .get(want)
             .unwrap_or_else(|| panic!("missing STT_FUNC symbol {want}"));
@@ -5967,7 +6002,9 @@ fn ubsan_runtime_division_by_zero() {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path).output().expect("run UBSAN div binary");
+        let _ = Command::new(&exe_path)
+            .output()
+            .expect("run UBSAN div binary");
         let _ = fs::remove_file(&exe_path);
     }
 }
@@ -5997,7 +6034,9 @@ fn ubsan_runtime_shift_overflow() {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path).output().expect("run UBSAN shift binary");
+        let _ = Command::new(&exe_path)
+            .output()
+            .expect("run UBSAN shift binary");
         let _ = fs::remove_file(&exe_path);
     }
 }
@@ -6027,7 +6066,9 @@ fn ubsan_runtime_vla() {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path).output().expect("run UBSAN VLA binary");
+        let _ = Command::new(&exe_path)
+            .output()
+            .expect("run UBSAN VLA binary");
         let _ = fs::remove_file(&exe_path);
     }
 }
@@ -6057,7 +6098,9 @@ fn ubsan_runtime_null_dereference() {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path).output().expect("run UBSAN null binary");
+        let _ = Command::new(&exe_path)
+            .output()
+            .expect("run UBSAN null binary");
         let _ = fs::remove_file(&exe_path);
     }
 }
@@ -6087,7 +6130,9 @@ fn ubsan_runtime_float_cast() {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path).output().expect("run UBSAN float cast binary");
+        let _ = Command::new(&exe_path)
+            .output()
+            .expect("run UBSAN float cast binary");
         let _ = fs::remove_file(&exe_path);
     }
 }
@@ -6100,7 +6145,8 @@ fn kcsan_runtime_race_instrumentation() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-kcsan-{}.c", std::process::id()));
     let asm_path = dir.join(format!("dcc-kcsan-{}.s", std::process::id()));
-    let source = "int shared = 0;\nvoid writer(void) { shared = 1; }\nint reader(void) { return shared; }\n";
+    let source =
+        "int shared = 0;\nvoid writer(void) { shared = 1; }\nint reader(void) { return shared; }\n";
     fs::write(&source_path, source).expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-fsanitize=thread", "-S", "-o"])
@@ -6438,10 +6484,15 @@ fn unknown_sanitizer_negative_diagnostic() {
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(obj_path);
     // 未知 sanitizer 应导致编译失败
-    assert!(!output.status.success(), "unknown sanitizer should be rejected");
+    assert!(
+        !output.status.success(),
+        "unknown sanitizer should be rejected"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unknown") || stderr.contains("sanitizer") || stderr.contains("unsupported"),
+        stderr.contains("unknown")
+            || stderr.contains("sanitizer")
+            || stderr.contains("unsupported"),
         "unknown sanitizer should produce diagnostic: {stderr}"
     );
 }
@@ -8074,7 +8125,11 @@ fn m27_fortify_memcpy_chk_links_correctly() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     // 汇编中应出现 call __memcpy_chk (不带 __builtin_ 前缀)
     assert!(
         asm_text.contains("call __memcpy_chk"),
@@ -8103,8 +8158,16 @@ fn m27_builtin_trap_emits_ud2() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(asm_text.contains("ud2"), "trap should emit ud2: {}", asm_text);
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        asm_text.contains("ud2"),
+        "trap should emit ud2: {}",
+        asm_text
+    );
 }
 
 /// __builtin_debugtrap 应发射 int3 指令 (0xcc)
@@ -8126,7 +8189,11 @@ fn m27_builtin_debugtrap_emits_int3() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         asm_text.contains("0xcc") || asm_text.contains("int3"),
         "debugtrap should emit int3 (0xcc): {}",
@@ -8153,8 +8220,16 @@ fn m27_builtin_unreachable_emits_ud2() {
     let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(asm_path);
-    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(asm_text.contains("ud2"), "unreachable should emit ud2: {}", asm_text);
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        asm_text.contains("ud2"),
+        "unreachable should emit ud2: {}",
+        asm_text
+    );
 }
 
 /// low-level builtins: assume_aligned, alloca, frame_address, return_address 运行时测试
@@ -8196,7 +8271,11 @@ fn m27_attr_alias_runtime() {
 fn m27_attr_alias_symbol_exists() {
     let src = include_str!("fixtures/c/m27_attr_alias.c");
     let (out, obj) = run_object_test("m27-attr-alias-obj", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // 用 readelf 验证符号表
     let output = std::process::Command::new("readelf")
         .args(["-s", obj.to_str().unwrap()])
@@ -8238,7 +8317,12 @@ fn m27_attr_error_emits_error() {
     let obj_path = dir.join(format!("dcc-m27-attr-error-{}.o", std::process::id()));
     fs::write(&source_path, src).expect("write source");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-c", "-o", obj_path.to_str().unwrap(), source_path.to_str().unwrap()])
+        .args([
+            "-c",
+            "-o",
+            obj_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ])
         .output()
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
@@ -8287,7 +8371,11 @@ fn m27_attr_ifunc_with_builtin_linker() {
 fn m27_attr_ifunc_symbol_type_is_ifunc() {
     let src = include_str!("fixtures/c/m27_attr_ifunc.c");
     let (out, obj) = run_object_test("m27-attr-ifunc-obj", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // 用 readelf 验证符号表
     let output = std::process::Command::new("readelf")
         .args(["-s", obj.to_str().unwrap()])
@@ -8342,7 +8430,11 @@ fn m27_attr_alias_target_missing_compiles() {
 fn m27_attr_retain_symbol_exists() {
     let src = include_str!("fixtures/c/attr_retain.c");
     let (out, obj) = run_object_test("m27-attr-retain-obj", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // 用 readelf 验证符号表
     let output = std::process::Command::new("readelf")
         .args(["-s", obj.to_str().unwrap()])
@@ -8362,7 +8454,11 @@ fn m27_attr_retain_symbol_exists() {
 fn m27_attr_used_symbol_exists() {
     let src = include_str!("fixtures/c/attr_used.c");
     let (out, obj) = run_object_test("m27-attr-used-obj", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // 用 readelf 验证符号表
     let output = std::process::Command::new("readelf")
         .args(["-s", obj.to_str().unwrap()])
@@ -10677,7 +10773,10 @@ fn m26_virtual_inheritance_runtime() {
         String::from_utf8_lossy(&out.stderr)
     );
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!("dcc-cpp-virtual-inheritance-{}", std::process::id()));
+    let exe = dir.join(format!(
+        "dcc-cpp-virtual-inheritance-{}",
+        std::process::id()
+    ));
     let link = std::process::Command::new("gcc")
         .arg(&obj)
         .arg("-o")
@@ -10817,7 +10916,11 @@ fn m26_module_partition_import() {
     let exe = dir.join("main");
 
     // 分区 TU
-    fs::write(&part_path, "export module mymod:part;\nexport int pfn() { return 7; }\n").unwrap();
+    fs::write(
+        &part_path,
+        "export module mymod:part;\nexport int pfn() { return 7; }\n",
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(&part_obj)
@@ -10859,7 +10962,11 @@ fn m26_module_partition_import() {
     assert!(prim_text.contains("E F get"), "{}", prim_text);
 
     // 导入 TU
-    fs::write(&main_path, "import mymod;\nint main() { return get() != 7; }\n").unwrap();
+    fs::write(
+        &main_path,
+        "import mymod;\nint main() { return get() != 7; }\n",
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(&main_obj)
@@ -10904,29 +11011,55 @@ fn m26_odr_conflict_rejected() {
     fs::create_dir_all(&dir).unwrap();
 
     // 模块 A: foo() 返回 int
-    fs::write(&dir.join("moda.cpp"), "export module moda;\nexport int foo() { return 1; }\n").unwrap();
+    fs::write(
+        &dir.join("moda.cpp"),
+        "export module moda;\nexport int foo() { return 1; }\n",
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("moda.o"))
         .arg(dir.join("moda.cpp"))
-        .arg(format!("--emit-module-file={}", dir.join("moda.bmf").display()))
+        .arg(format!(
+            "--emit-module-file={}",
+            dir.join("moda.bmf").display()
+        ))
         .output()
         .expect("run dcc on moda");
-    assert!(out.status.success(), "moda: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "moda: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // 模块 B: foo(int) 接受参数, 与模块 A 的 foo 同名不同定义
-    fs::write(&dir.join("modb.cpp"), "export module modb;\nexport int foo(int x) { return x; }\n").unwrap();
+    fs::write(
+        &dir.join("modb.cpp"),
+        "export module modb;\nexport int foo(int x) { return x; }\n",
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("modb.o"))
         .arg(dir.join("modb.cpp"))
-        .arg(format!("--emit-module-file={}", dir.join("modb.bmf").display()))
+        .arg(format!(
+            "--emit-module-file={}",
+            dir.join("modb.bmf").display()
+        ))
         .output()
         .expect("run dcc on modb");
-    assert!(out.status.success(), "modb: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "modb: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // 导入 TU 同时 import moda + modb -> ODR 冲突必须被拒绝
-    fs::write(&dir.join("main.cpp"), "import moda;\nimport modb;\nint main() { return 0; }\n").unwrap();
+    fs::write(
+        &dir.join("main.cpp"),
+        "import moda;\nimport modb;\nint main() { return 0; }\n",
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("main.o"))
@@ -10938,7 +11071,11 @@ fn m26_odr_conflict_rejected() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("ODR violations"), "stderr: {}", stderr);
     assert!(stderr.contains("foo"), "stderr: {}", stderr);
-    assert!(stderr.contains("moda") && stderr.contains("modb"), "stderr: {}", stderr);
+    assert!(
+        stderr.contains("moda") && stderr.contains("modb"),
+        "stderr: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -10948,27 +11085,53 @@ fn m26_odr_identical_imports_ok() {
     let dir = std::env::temp_dir().join(format!("dcc-odr-ok-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
 
-    fs::write(&dir.join("moda.cpp"), "export module moda;\nexport int foo() { return 1; }\n").unwrap();
+    fs::write(
+        &dir.join("moda.cpp"),
+        "export module moda;\nexport int foo() { return 1; }\n",
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("moda.o"))
         .arg(dir.join("moda.cpp"))
-        .arg(format!("--emit-module-file={}", dir.join("moda.bmf").display()))
+        .arg(format!(
+            "--emit-module-file={}",
+            dir.join("moda.bmf").display()
+        ))
         .output()
         .expect("run dcc on moda");
-    assert!(out.status.success(), "moda: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "moda: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    fs::write(&dir.join("modb.cpp"), "export module modb;\nexport int foo() { return 2; }\n").unwrap();
+    fs::write(
+        &dir.join("modb.cpp"),
+        "export module modb;\nexport int foo() { return 2; }\n",
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("modb.o"))
         .arg(dir.join("modb.cpp"))
-        .arg(format!("--emit-module-file={}", dir.join("modb.bmf").display()))
+        .arg(format!(
+            "--emit-module-file={}",
+            dir.join("modb.bmf").display()
+        ))
         .output()
         .expect("run dcc on modb");
-    assert!(out.status.success(), "modb: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "modb: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    fs::write(&dir.join("main.cpp"), "import moda;\nimport modb;\nint main() { return 0; }\n").unwrap();
+    fs::write(
+        &dir.join("main.cpp"),
+        "import moda;\nimport modb;\nint main() { return 0; }\n",
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
         .arg(dir.join("main.o"))
@@ -12195,9 +12358,8 @@ int main(void) {{ return mtrr_enabled(); }}
 #[test]
 fn linux_header_graph_dependency_closure() {
     let kernel_include = std::path::Path::new("/usr/src/linux-hwe-7.0-headers-7.0.0-28/include");
-    let generated_include = std::path::Path::new(
-        "/usr/src/linux-headers-7.0.0-28-generic/include/generated",
-    );
+    let generated_include =
+        std::path::Path::new("/usr/src/linux-headers-7.0.0-28-generic/include/generated");
     let compiler_types = kernel_include.join("linux/compiler_types.h");
     let autoconf = generated_include.join("autoconf.h");
     if !compiler_types.exists() || !autoconf.exists() {
@@ -12243,9 +12405,7 @@ int main(void) {{
     let dep_text = fs::read_to_string(&dep).unwrap_or_default();
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dep);
-    let _ = fs::remove_file(
-        &dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())),
-    );
+    let _ = fs::remove_file(&dir.join(format!("dcc-linux-hdr-graph-{}.o", std::process::id())));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -12288,10 +12448,12 @@ fn pch_negative_hash_mismatch_with_define() {
         .output()
         .expect("run PCH create");
     let _ = fs::remove_file(&create_src);
-    let _ = fs::remove_file(
-        &dir.join(format!("dcc-pch-neg-create-{}.o", std::process::id())),
+    let _ = fs::remove_file(&dir.join(format!("dcc-pch-neg-create-{}.o", std::process::id())));
+    assert!(
+        create_out.status.success(),
+        "PCH create: {}",
+        String::from_utf8_lossy(&create_out.stderr)
     );
-    assert!(create_out.status.success(), "PCH create: {}", String::from_utf8_lossy(&create_out.stderr));
 
     // 用不同 -D 加载 PCH (宏表 hash 不匹配)
     fs::write(&src, "int x = PCH_VALUE;\n").expect("write source");
@@ -12307,15 +12469,16 @@ fn pch_negative_hash_mismatch_with_define() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&pch);
-    let _ = fs::remove_file(
-        &dir.join(format!("dcc-pch-neg-{}.o", std::process::id())),
-    );
+    let _ = fs::remove_file(&dir.join(format!("dcc-pch-neg-{}.o", std::process::id())));
 
     assert!(
         out.status.success(),
         "hash mismatch must not be fatal; stderr: {stderr}"
     );
-    assert!(stderr.contains("W0400"), "expected W0400 for hash mismatch: {stderr}");
+    assert!(
+        stderr.contains("W0400"),
+        "expected W0400 for hash mismatch: {stderr}"
+    );
 }
 
 /// PCH 损坏内容 (非合法 PCH 格式): 验证 W0401 warning 回退
@@ -12342,15 +12505,16 @@ fn pch_negative_corrupted_content() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&pch);
-    let _ = fs::remove_file(
-        &dir.join(format!("dcc-pch-corrupt-{}.o", std::process::id())),
-    );
+    let _ = fs::remove_file(&dir.join(format!("dcc-pch-corrupt-{}.o", std::process::id())));
 
     assert!(
         out.status.success(),
         "corrupted PCH must not be fatal; stderr: {stderr}"
     );
-    assert!(stderr.contains("W0401"), "expected W0401 for corrupted PCH: {stderr}");
+    assert!(
+        stderr.contains("W0401"),
+        "expected W0401 for corrupted PCH: {stderr}"
+    );
 }
 
 /// PCH 版本不兼容 (模拟旧版本 PCH 魔数): 验证回退路径
@@ -12377,15 +12541,16 @@ fn pch_negative_version_incompatibility() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&pch);
-    let _ = fs::remove_file(
-        &dir.join(format!("dcc-pch-ver-{}.o", std::process::id())),
-    );
+    let _ = fs::remove_file(&dir.join(format!("dcc-pch-ver-{}.o", std::process::id())));
 
     assert!(
         out.status.success(),
         "version mismatch must not be fatal; stderr: {stderr}"
     );
-    assert!(stderr.contains("W0401"), "expected W0401 for version mismatch: {stderr}");
+    assert!(
+        stderr.contains("W0401"),
+        "expected W0401 for version mismatch: {stderr}"
+    );
 }
 
 /// PCH 写入失败 snapshot: 父目录不存在时写 PCH 应发 warning 但不阻塞编译
@@ -12414,16 +12579,20 @@ fn pch_negative_write_failure_snapshot() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_file(&src);
-    let _ = fs::remove_file(
-        &dir.join(format!("dcc-pch-wf-{}.o", std::process::id())),
-    );
+    let _ = fs::remove_file(&dir.join(format!("dcc-pch-wf-{}.o", std::process::id())));
 
     assert!(
         out.status.success(),
         "PCH write failure must not be fatal; stderr: {stderr}"
     );
-    assert!(stderr.contains("W0402"), "expected W0402 for write failure: {stderr}");
-    assert!(!pch.exists(), "PCH file should not be created on write failure");
+    assert!(
+        stderr.contains("W0402"),
+        "expected W0402 for write failure: {stderr}"
+    );
+    assert!(
+        !pch.exists(),
+        "PCH file should not be created on write failure"
+    );
 }
 
 // ============================================================================
@@ -12433,8 +12602,6 @@ fn pch_negative_write_failure_snapshot() {
 /// fixdep 反解析: 路径含空格 (GCC 转义格式) 应正确还原
 #[test]
 fn fixdep_unescape_paths_with_spaces() {
-    use std::io::Write;
-
     let temp = std::env::temp_dir().join(format!("dcc-fixdep-space-{}", std::process::id()));
     fs::create_dir_all(&temp).expect("create temp");
 
@@ -12478,7 +12645,10 @@ fn fixdep_skips_mp_phony_targets() {
     assert!(result.contains("baz.h"), "result: {result}");
     // phony 条目本身不应产生额外的 source_ 前缀
     let source_count = result.matches("source_").count();
-    assert_eq!(source_count, 1, "should have exactly one source entry: {result}");
+    assert_eq!(
+        source_count, 1,
+        "should have exactly one source entry: {result}"
+    );
 }
 
 /// depfile 反斜杠续行 + 转义路径综合测试
@@ -12498,7 +12668,11 @@ fn depfile_backslash_continuation_with_escaped_paths() {
     // 头文件名含特殊字符
     let hdr = inc.join("my header.h");
     fs::write(&hdr, "#define VAL 42\n").expect("write header");
-    fs::write(&src, "#include \"my header.h\"\nint main(void) { return VAL; }\n").expect("write source");
+    fs::write(
+        &src,
+        "#include \"my header.h\"\nint main(void) { return VAL; }\n",
+    )
+    .expect("write source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-MMD", "-MF"])
@@ -12596,9 +12770,15 @@ fn error_diag_github_format_caret_and_source() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "#error must fail");
     // GitHub 默认格式: 应有 --> 指向源码行
-    assert!(stderr.contains("-->"), "github format should have caret: {stderr}");
+    assert!(
+        stderr.contains("-->"),
+        "github format should have caret: {stderr}"
+    );
     assert!(stderr.contains("E0203"), "should have E0203 code: {stderr}");
-    assert!(stderr.contains("this is a test error"), "msg should be included: {stderr}");
+    assert!(
+        stderr.contains("this is a test error"),
+        "msg should be included: {stderr}"
+    );
 }
 
 /// #error 诊断: --diagnostics-format=msvc 应输出 file(line,col): error 格式
@@ -12649,7 +12829,10 @@ fn error_diag_clang_format() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "#error must fail");
     // clang 格式应有 caret 行
-    assert!(stderr.contains('^'), "clang format should have caret: {stderr}");
+    assert!(
+        stderr.contains('^'),
+        "clang format should have caret: {stderr}"
+    );
 }
 
 /// #warning 诊断: 多格式下均为 warning 不阻断编译
@@ -12718,9 +12901,19 @@ fn error_in_header_carries_header_source_line_regression() {
     let hdr = dir.join(format!("dcc-err-hdr-{}.h", std::process::id()));
     let src = dir.join(format!("dcc-err-hdr-src-{}.c", std::process::id()));
 
-    fs::write(&hdr, "#ifndef FOO_H\n#define FOO_H\n#error stop in header\n#endif\n").expect("write header");
-    fs::write(&src, format!("#include \"{}\"\nint main(void) {{ return 0; }}\n", hdr.display()))
-        .expect("write source");
+    fs::write(
+        &hdr,
+        "#ifndef FOO_H\n#define FOO_H\n#error stop in header\n#endif\n",
+    )
+    .expect("write header");
+    fs::write(
+        &src,
+        format!(
+            "#include \"{}\"\nint main(void) {{ return 0; }}\n",
+            hdr.display()
+        ),
+    )
+    .expect("write source");
 
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-fsyntax-only")
@@ -12890,8 +13083,8 @@ int main(void) {
 /// AArch64 HFA compile test: verifies HFA 1-8 elements and >8 fallback
 #[test]
 fn aarch64_hfa_abi_compile_and_elf_structure() {
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/c/hfa_aarch64.c");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/hfa_aarch64.c");
     let dir = std::env::temp_dir();
     let obj = dir.join(format!("dcc-hfa-aarch64-{}.o", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -12919,8 +13112,8 @@ fn aarch64_hfa_abi_compile_and_elf_structure() {
 /// AArch64 HFA -S output: verify all HFA functions present with distinct sizes
 #[test]
 fn aarch64_hfa_asm_output_has_all_functions() {
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/c/hfa_aarch64.c");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/hfa_aarch64.c");
     let dir = std::env::temp_dir();
     let asm_path = dir.join(format!("dcc-hfa-aarch64-{}.s", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -12938,8 +13131,15 @@ fn aarch64_hfa_asm_output_has_all_functions() {
     let _ = fs::remove_file(&asm_path);
     // All HFA functions should be present in output
     for func in &[
-        "make_hfa1", "make_hfa2", "make_hfa3", "make_hfa4",
-        "make_hfa8", "make_big", "make_mixed", "consume_hfa2", "main",
+        "make_hfa1",
+        "make_hfa2",
+        "make_hfa3",
+        "make_hfa4",
+        "make_hfa8",
+        "make_big",
+        "make_mixed",
+        "consume_hfa2",
+        "main",
     ] {
         assert!(
             asm.contains(&format!(".globl {func}")),
@@ -12978,8 +13178,8 @@ fn aarch64_hfa_asm_output_has_all_functions() {
 /// RISC-V HFA compile test: verifies HFA 1-4 elements and >4 fallback
 #[test]
 fn riscv64_hfa_abi_compile_and_elf_structure() {
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/c/hfa_riscv64.c");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/hfa_riscv64.c");
     let dir = std::env::temp_dir();
     let obj = dir.join(format!("dcc-hfa-riscv64-{}.o", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -13006,8 +13206,8 @@ fn riscv64_hfa_abi_compile_and_elf_structure() {
 /// RISC-V HFA -S output: verify all functions present
 #[test]
 fn riscv64_hfa_asm_output_has_all_functions() {
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/c/hfa_riscv64.c");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/hfa_riscv64.c");
     let dir = std::env::temp_dir();
     let asm_path = dir.join(format!("dcc-hfa-riscv64-{}.s", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -13024,8 +13224,14 @@ fn riscv64_hfa_asm_output_has_all_functions() {
     let asm = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(&asm_path);
     for func in &[
-        "make_hfa1", "make_hfa2", "make_hfa3", "make_hfa4",
-        "make_big", "make_mixed", "consume_hfa2", "main",
+        "make_hfa1",
+        "make_hfa2",
+        "make_hfa3",
+        "make_hfa4",
+        "make_big",
+        "make_mixed",
+        "consume_hfa2",
+        "main",
     ] {
         assert!(
             asm.contains(&format!(".globl {func}")),
@@ -13052,8 +13258,11 @@ fn non_x86_asm_minus_s_preserves_global_asm_text() {
     ];
     for target in targets {
         let dir = std::env::temp_dir();
-        let asm_path =
-            dir.join(format!("dcc-nonx86-asm-{}-{}.s", target.replace('-', "_"), std::process::id()));
+        let asm_path = dir.join(format!(
+            "dcc-nonx86-asm-{}-{}.s",
+            target.replace('-', "_"),
+            std::process::id()
+        ));
         let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
             .args(["--target", target, "-S", "-o"])
             .arg(&asm_path)
@@ -13073,7 +13282,12 @@ fn non_x86_asm_minus_s_preserves_global_asm_text() {
             "target {target}: -S output should preserve global asm marker"
         );
         // All functions should be present
-        for func in &["test_asm_expr", "test_asm_stmt", "test_asm_goto", "test_named"] {
+        for func in &[
+            "test_asm_expr",
+            "test_asm_stmt",
+            "test_asm_goto",
+            "test_named",
+        ] {
             assert!(
                 asm.contains(&format!(".globl {func}")),
                 "target {target}: -S output should contain .globl {func}"
@@ -13096,8 +13310,11 @@ fn non_x86_asm_minus_c_warns_on_asm_goto() {
     ];
     for target in targets {
         let dir = std::env::temp_dir();
-        let obj_path =
-            dir.join(format!("dcc-nonx86-asm-c-{}-{}.o", target.replace('-', "_"), std::process::id()));
+        let obj_path = dir.join(format!(
+            "dcc-nonx86-asm-c-{}-{}.o",
+            target.replace('-', "_"),
+            std::process::id()
+        ));
         let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
             .args(["--target", target, "-c", "-o"])
             .arg(&obj_path)
@@ -13165,10 +13382,7 @@ fn non_x86_asm_arm_mips_warn_on_inline_asm_expr() {
 #[test]
 fn unsupported_target_arch_rejected() {
     let dir = std::env::temp_dir();
-    let src = dir.join(format!(
-        "dcc-unsup-arch-{}.c",
-        std::process::id()
-    ));
+    let src = dir.join(format!("dcc-unsup-arch-{}.c", std::process::id()));
     fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
     let unsupported = [
         ("wasm32-unknown-unknown", "wasm32"),
@@ -13201,10 +13415,7 @@ fn unsupported_target_arch_rejected() {
 #[test]
 fn windows_darwin_triple_accepted_but_outputs_elf() {
     let dir = std::env::temp_dir();
-    let src = dir.join(format!(
-        "dcc-unsup-os-{}.c",
-        std::process::id()
-    ));
+    let src = dir.join(format!("dcc-unsup-os-{}.c", std::process::id()));
     fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
     let cases = [
         ("x86_64-pc-windows-msvc", "MSVC"),
@@ -13252,7 +13463,10 @@ fn semantic_enum_type_traits_runtime() {
         String::from_utf8_lossy(&out.stderr)
     );
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!("dcc-cpp-semantic-enum-runtime-{}", std::process::id()));
+    let exe = dir.join(format!(
+        "dcc-cpp-semantic-enum-runtime-{}",
+        std::process::id()
+    ));
     let link = std::process::Command::new("gcc")
         .arg(&obj)
         .arg("-o")
@@ -13292,7 +13506,10 @@ fn coroutine_co_await_runtime() {
         String::from_utf8_lossy(&out.stderr)
     );
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!("dcc-cpp-coroutine-coawait-runtime-{}", std::process::id()));
+    let exe = dir.join(format!(
+        "dcc-cpp-coroutine-coawait-runtime-{}",
+        std::process::id()
+    ));
     let link = std::process::Command::new("gcc")
         .arg(&obj)
         .arg("-o")
@@ -13388,8 +13605,11 @@ fn eh_frame_hdr_content_has_fde() {
     let pid = std::process::id();
     let src = dir.join(format!("dcc-eh-hdr-{pid}.c"));
     let obj = dir.join(format!("dcc-eh-hdr-{pid}.o"));
-    fs::write(&src, "int foo(void) { return 42; }\nint bar(void) { return foo() + 1; }\n")
-        .expect("write src");
+    fs::write(
+        &src,
+        "int foo(void) { return 42; }\nint bar(void) { return foo() + 1; }\n",
+    )
+    .expect("write src");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-g", "-fno-omit-frame-pointer", "-c", "-o"])
         .arg(&obj)
@@ -13656,10 +13876,7 @@ fn dwarf_addr2line_resolves_function_name() {
         return;
     }
     // 用 nm 获取 main 地址, 然后用 addr2line 解析
-    let nm = Command::new("nm")
-        .arg(&exe)
-        .output()
-        .expect("nm");
+    let nm = Command::new("nm").arg(&exe).output().expect("nm");
     let nm_out = String::from_utf8_lossy(&nm.stdout);
     let _ = fs::remove_file(&exe);
     // 验证 nm 输出包含 main 符号
@@ -13725,7 +13942,10 @@ fn btf_section_has_valid_header_magic() {
     );
     // magic = 0xeb9f (little-endian)
     let magic = u16::from_le_bytes([btf[0], btf[1]]);
-    assert_eq!(magic, 0xeb9f, "BTF magic should be 0xeb9f, got 0x{magic:04x}");
+    assert_eq!(
+        magic, 0xeb9f,
+        "BTF magic should be 0xeb9f, got 0x{magic:04x}"
+    );
     // version = 1
     assert_eq!(btf[2], 1, "BTF version should be 1, got {}", btf[2]);
 }
@@ -13782,7 +14002,12 @@ fn compress_debug_zstd_linker_cli_accepted() {
     let (output, exe) = run_compile_and_run_flags(
         "compress-zstd-link",
         "int main(void) { return 0; }",
-        &["-g", "-pie", "-fbuiltin-linker", "-Wl,--compress-debug-sections=zstd"],
+        &[
+            "-g",
+            "-pie",
+            "-fbuiltin-linker",
+            "-Wl,--compress-debug-sections=zstd",
+        ],
     );
     let _ = fs::remove_file(&exe);
     assert!(
@@ -13799,7 +14024,12 @@ fn compress_debug_none_preserves_uncompressed() {
     let (output_none, exe_none) = run_compile_and_run_flags(
         "compress-none",
         "int main(void) { return 0; }",
-        &["-g", "-pie", "-fbuiltin-linker", "-Wl,--compress-debug-sections=none"],
+        &[
+            "-g",
+            "-pie",
+            "-fbuiltin-linker",
+            "-Wl,--compress-debug-sections=none",
+        ],
     );
     assert!(
         output_none.status.success(),
@@ -13877,10 +14107,7 @@ int main(void) {
     );
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
-    assert_eq!(
-        rc, 0,
-        "barrier must prevent reordering at O2, got rc={rc}"
-    );
+    assert_eq!(rc, 0, "barrier must prevent reordering at O2, got rc={rc}");
 }
 
 /// inline asm memory clobber: O3 不应消除带 memory clobber 的 asm 块
@@ -14017,7 +14244,10 @@ int main(void) {
     );
     let rc = run_exe(&exe);
     let _ = fs::remove_file(&exe);
-    assert_eq!(rc, 42, "DAE should preserve reachable function, got rc={rc}");
+    assert_eq!(
+        rc, 42,
+        "DAE should preserve reachable function, got rc={rc}"
+    );
 }
 
 /// IPA-SRA: 标量参数传播在 O2 下应保持语义正确
@@ -14062,13 +14292,9 @@ fn xfail_unknown_sanitizer_produces_diagnostic() {
         .expect("run dcc");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let _ = fs::remove_file(&src);
+    assert!(!output.status.success(), "unknown sanitizer should fail");
     assert!(
-        !output.status.success(),
-        "unknown sanitizer should fail"
-    );
-    assert!(
-        stderr.contains("unsupported sanitizer")
-            || stderr.contains("unknown sanitizer"),
+        stderr.contains("unsupported sanitizer") || stderr.contains("unknown sanitizer"),
         "stderr should mention unsupported sanitizer: {stderr}"
     );
 }
@@ -14088,8 +14314,10 @@ fn xfail_unknown_offload_triple_diagnostic() {
     let _ = fs::remove_file(&src);
     // 未知 triple 应产生警告或错误
     assert!(
-        stderr.contains("unknown") || stderr.contains("unsupported")
-            || stderr.contains("warning") || !output.status.success(),
+        stderr.contains("unknown")
+            || stderr.contains("unsupported")
+            || stderr.contains("warning")
+            || !output.status.success(),
         "unknown offload triple should produce diagnostic: {stderr}"
     );
 }

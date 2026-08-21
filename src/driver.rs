@@ -1792,11 +1792,7 @@ fn sanitizer_link_deps(cfg: &Config) -> (Vec<String>, Vec<String>, Vec<String>) 
             &mut cc_flags,
             &mut undefs,
             None,
-            &[
-                "__kcsan_init",
-                "__kcsan_func_entry",
-                "__kcsan_check_access",
-            ],
+            &["__kcsan_init", "__kcsan_func_entry", "__kcsan_check_access"],
             None,
         );
     }

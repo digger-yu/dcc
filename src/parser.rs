@@ -1785,10 +1785,10 @@ impl<'a> Parser<'a> {
             output_names.iter().chain(input_names.iter()).collect();
         let has_named = all_names
             .iter()
-            .any(|n| n.as_ref().map_or(false, |s| !s.is_empty()));
+            .any(|n| n.as_ref().is_some_and(|s| !s.is_empty()));
         let has_unnamed = all_names
             .iter()
-            .any(|n| n.as_ref().map_or(true, |s| s.is_empty()));
+            .any(|n| n.as_ref().is_none_or(|s| s.is_empty()));
         if has_named && has_unnamed {
             self.diags.push(
                 Diagnostic::warn("W0007", "mixing named and unnamed asm operands", sp.clone())

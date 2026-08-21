@@ -349,7 +349,10 @@ impl OffloadDriverLinker {
                     if rt.found {
                         if let Some(parent) = rt.library_path.parent() {
                             let parent_str = parent.display().to_string();
-                            if !flags.iter().any(|f| f == &format!("-Wl,-rpath,{}", parent_str)) {
+                            if !flags
+                                .iter()
+                                .any(|f| f == &format!("-Wl,-rpath,{}", parent_str))
+                            {
                                 flags.push(format!("-Wl,-rpath,{}", parent.display()));
                             }
                         }
@@ -365,7 +368,10 @@ impl OffloadDriverLinker {
                     if rt.found {
                         if let Some(parent) = rt.library_path.parent() {
                             let parent_str = parent.display().to_string();
-                            if !flags.iter().any(|f| f == &format!("-Wl,-rpath,{}", parent_str)) {
+                            if !flags
+                                .iter()
+                                .any(|f| f == &format!("-Wl,-rpath,{}", parent_str))
+                            {
                                 flags.push(format!("-Wl,-rpath,{}", parent.display()));
                             }
                         }

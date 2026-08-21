@@ -1494,8 +1494,7 @@ fn is_pass_hint_inst(kind: &InstKind) -> bool {
         ..
     } = kind
     {
-        name.starts_with("__dcc_")
-            && !name.starts_with("__dcc_section_")
+        name.starts_with("__dcc_") && !name.starts_with("__dcc_section_")
     } else {
         false
     }

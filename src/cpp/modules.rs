@@ -28,7 +28,10 @@ use crate::cpp::parser::CppDecl;
 ///   - `import foo;`    -> `foo.bmf`
 ///   - `import :part;`  -> `<当前模块名>.part.bmf`
 /// 找不到时静默跳过 (lower 端回退为 include / 注释占位).
-pub fn load_imported_modules(decls: &[CppDecl], search_dirs: &[std::path::PathBuf]) -> Vec<BmfModule> {
+pub fn load_imported_modules(
+    decls: &[CppDecl],
+    search_dirs: &[std::path::PathBuf],
+) -> Vec<BmfModule> {
     let mut imports: Vec<String> = Vec::new();
     let mut module_name = String::new();
     for d in decls {

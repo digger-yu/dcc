@@ -145,13 +145,18 @@ fn gcov_end_to_end_counter_gate() {
     // 3) 解析 .gcda, 校验真实 counter 值
     let data = std::fs::read(dir.join("loop_sum.gcda")).expect("应产出 .gcda");
     assert!(data.len() > 24, ".gcda 太短");
-    assert_eq!(&data[0..4], &[0x61, 0x64, 0x63, 0x67], ".gcda magic 应为 'gcda'");
+    assert_eq!(
+        &data[0..4],
+        &[0x61, 0x64, 0x63, 0x67],
+        ".gcda magic 应为 'gcda'"
+    );
 
     // 布局: magic/version/stamp(12) + runs/sums(8) + source(pascal)
     let mut p = 20usize;
     let slen = u32::from_le_bytes(data[p..p + 4].try_into().unwrap()) as usize;
     p += 4 + slen;
-    let mut counters: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
+    let mut counters: std::collections::HashMap<String, Vec<u64>> =
+        std::collections::HashMap::new();
     while p + 16 <= data.len() {
         let _ident = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
         p += 4;
@@ -187,14 +192,21 @@ fn gcov_end_to_end_counter_gate() {
     }
 
     // add 被循环调用 10 次: entry + return 两块各 10
-    let add = counters.get("add").unwrap_or_else(|| panic!(".gcda 缺少 add: {counters:?}"));
+    let add = counters
+        .get("add")
+        .unwrap_or_else(|| panic!(".gcda 缺少 add: {counters:?}"));
     assert_eq!(add.len(), 2, "add 应有 2 个 counter: {add:?}");
     assert_eq!(add[0], 10, "add entry counter 应为 10: {add:?}");
     assert_eq!(add[1], 10, "add return counter 应为 10: {add:?}");
     // main: entry + decl + for + return 四块各 1
-    let main = counters.get("main").unwrap_or_else(|| panic!(".gcda 缺少 main: {counters:?}"));
+    let main = counters
+        .get("main")
+        .unwrap_or_else(|| panic!(".gcda 缺少 main: {counters:?}"));
     assert_eq!(main.len(), 4, "main 应有 4 个 counter: {main:?}");
-    assert!(main.iter().all(|&c| c == 1), "main 各块应执行 1 次: {main:?}");
+    assert!(
+        main.iter().all(|&c| c == 1),
+        "main 各块应执行 1 次: {main:?}"
+    );
 
     // 4) 生成并校验行覆盖率报告。这里使用 .gcda 中的函数计数器
     //    生成与 gcov 风格一致的摘要，确保报告只接受真实运行数据。
@@ -381,7 +393,13 @@ fn cli_memprof_use_binary_accepted() {
 #[test]
 fn cli_memprof_use_missing_path_rejects() {
     let out = dcc()
-        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-fmemory-profile-use"])
+        .args([
+            "-std=gnu23",
+            "-c",
+            "-o",
+            "/dev/null",
+            "-fmemory-profile-use",
+        ])
         .output()
         .expect("运行 dcc");
     assert!(!out.status.success(), "缺路径时应失败");
@@ -396,11 +414,19 @@ fn cli_memprof_use_missing_path_rejects() {
 #[test]
 fn cli_topdown_with_pgo_accepted() {
     let status = dcc()
-        .args(["-std=gnu23", "-fsyntax-only", "-fprofile-generate", "-ftopdownmetrics"])
+        .args([
+            "-std=gnu23",
+            "-fsyntax-only",
+            "-fprofile-generate",
+            "-ftopdownmetrics",
+        ])
         .arg(profile_src())
         .status()
         .expect("运行 dcc");
-    assert!(status.success(), "-ftopdownmetrics 与 -fprofile-generate 组合应被接受");
+    assert!(
+        status.success(),
+        "-ftopdownmetrics 与 -fprofile-generate 组合应被接受"
+    );
 }
 
 /// AutoFDO 权重影响: 用 -fauto-profile + -O2 编译, 验证 hot 函数
@@ -556,7 +582,7 @@ fn memprof_weight_influences_section_layout() {
     let mut buf = Vec::new();
     buf.extend_from_slice(b"MEMPROFD");
     buf.extend_from_slice(&1u32.to_le_bytes()); // version
-    // 2 allocs
+                                                // 2 allocs
     buf.extend_from_slice(&2u32.to_le_bytes());
     // hot_alloc: single-frame callstack, count=100, bytes=102400
     buf.extend_from_slice(&1u32.to_le_bytes()); // 1 frame
@@ -564,13 +590,13 @@ fn memprof_weight_influences_section_layout() {
     buf.extend_from_slice(b"hot_alloc");
     buf.extend_from_slice(&100u64.to_le_bytes()); // count
     buf.extend_from_slice(&102400u64.to_le_bytes()); // bytes
-    // cold_alloc: single-frame callstack, count=1, bytes=64
+                                                     // cold_alloc: single-frame callstack, count=1, bytes=64
     buf.extend_from_slice(&1u32.to_le_bytes()); // 1 frame
     buf.extend_from_slice(&10u32.to_le_bytes()); // name len
     buf.extend_from_slice(b"cold_alloc");
     buf.extend_from_slice(&1u64.to_le_bytes()); // count
     buf.extend_from_slice(&64u64.to_le_bytes()); // bytes
-    // 0 lifetime, 0 dealloc
+                                                 // 0 lifetime, 0 dealloc
     buf.extend_from_slice(&0u32.to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes());
     std::fs::write(&profile, &buf).expect("写 profile");
@@ -632,7 +658,14 @@ fn topdown_metrics_with_optimization() {
     // -ftopdownmetrics + -O2 应产出目标文件
     let out = dcc()
         .current_dir(&dir)
-        .args(["-std=gnu23", "-O2", "-ftopdownmetrics", "-c", "-o", "topdown.o"])
+        .args([
+            "-std=gnu23",
+            "-O2",
+            "-ftopdownmetrics",
+            "-c",
+            "-o",
+            "topdown.o",
+        ])
         .arg(src.file_name().unwrap())
         .output()
         .expect("运行 dcc");
@@ -653,8 +686,8 @@ fn topdown_metrics_with_optimization() {
 /// OffloadDriverLinker: nvcc 缺失路径不影响 host 链接标志生成.
 #[test]
 fn offload_driver_link_nvcc_missing_generates_host_flags() {
-    use dcc::profile::offload_driver_link::{OffloadDriverLinker, OffloadBackend};
     use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
+    use dcc::profile::offload_driver_link::OffloadDriverLinker;
 
     let mut config = OffloadConfig {
         cuda: true,
@@ -696,8 +729,8 @@ fn offload_driver_link_nvcc_missing_generates_host_flags() {
 /// OffloadDriverLinker: ROCm runtime 查找路径包含标准目录.
 #[test]
 fn offload_driver_link_rocm_search_dirs() {
-    use dcc::profile::offload_driver_link::{OffloadDriverLinker, OffloadBackend};
     use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
+    use dcc::profile::offload_driver_link::{OffloadBackend, OffloadDriverLinker};
 
     let mut config = OffloadConfig {
         hip: true,
@@ -726,7 +759,9 @@ fn offload_driver_link_rocm_search_dirs() {
     assert_eq!(rt.link_name, "amdhip64");
     // 搜索目录应包含标准路径
     assert!(
-        rt.search_dirs.iter().any(|p| p.as_os_str() == "/opt/rocm/lib"),
+        rt.search_dirs
+            .iter()
+            .any(|p| p.as_os_str() == "/opt/rocm/lib"),
         "ROCm 搜索目录应包含 /opt/rocm/lib"
     );
 }
@@ -734,8 +769,8 @@ fn offload_driver_link_rocm_search_dirs() {
 /// OffloadDriverLinker: host link flags 包含 rpath 指向运行时库目录.
 #[test]
 fn offload_driver_link_host_flags_include_rpath() {
-    use dcc::profile::offload_driver_link::OffloadDriverLinker;
     use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
+    use dcc::profile::offload_driver_link::OffloadDriverLinker;
 
     let mut config = OffloadConfig {
         cuda: true,
@@ -761,16 +796,28 @@ fn offload_driver_link_host_flags_include_rpath() {
     let has_lib = result.host_link_flags.iter().any(|f| f.starts_with("-L"));
     let has_libcudart = result.host_link_flags.iter().any(|f| f == "-lcudart");
     let has_rpath = result.host_link_flags.iter().any(|f| f.contains("rpath"));
-    assert!(has_lib, "host flags 应包含 -L 搜索路径: {:?}", result.host_link_flags);
-    assert!(has_libcudart, "host flags 应包含 -lcudart: {:?}", result.host_link_flags);
-    assert!(has_rpath, "host flags 应包含 rpath: {:?}", result.host_link_flags);
+    assert!(
+        has_lib,
+        "host flags 应包含 -L 搜索路径: {:?}",
+        result.host_link_flags
+    );
+    assert!(
+        has_libcudart,
+        "host flags 应包含 -lcudart: {:?}",
+        result.host_link_flags
+    );
+    assert!(
+        has_rpath,
+        "host flags 应包含 rpath: {:?}",
+        result.host_link_flags
+    );
 }
 
 /// OffloadDriverLinker: device-link 命令生成正确的 nvcc/clang++ 命令.
 #[test]
 fn offload_driver_link_device_link_commands() {
-    use dcc::profile::offload_driver_link::OffloadDriverLinker;
     use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
+    use dcc::profile::offload_driver_link::OffloadDriverLinker;
 
     // CUDA 配置
     let mut cuda_config = OffloadConfig {
@@ -833,8 +880,8 @@ fn offload_driver_link_device_link_commands() {
 /// OffloadDriverLinker: 错误路径 - 无运行时库时 diagnostics 非空.
 #[test]
 fn offload_driver_link_diagnostics_on_missing_runtime() {
-    use dcc::profile::offload_driver_link::OffloadDriverLinker;
     use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
+    use dcc::profile::offload_driver_link::OffloadDriverLinker;
 
     let mut config = OffloadConfig {
         cuda: true,
@@ -863,8 +910,8 @@ fn offload_driver_link_diagnostics_on_missing_runtime() {
 /// OffloadDriverLinker: 渲染 link 脚本包含 nvcc 命令与 host flags.
 #[test]
 fn offload_driver_link_render_script() {
-    use dcc::profile::offload_driver_link::OffloadDriverLinker;
     use dcc::profile::offload::{OffloadConfig, OffloadEntry, OffloadKind, OffloadSection};
+    use dcc::profile::offload_driver_link::OffloadDriverLinker;
 
     let mut config = OffloadConfig {
         cuda: true,
@@ -936,7 +983,7 @@ fn offload_compile_without_nvcc_succeeds() {
 #[test]
 fn offload_runtime_kernel_launch_returns_not_available_without_driver() {
     use dcc::profile::device_codegen::{
-        OffloadRuntimeLoader, KernelLaunchParams, KernelLaunchResult, RuntimeStatus,
+        KernelLaunchParams, KernelLaunchResult, OffloadRuntimeLoader,
     };
     use dcc::profile::offload::{OffloadEntry, OffloadKind, OffloadSection};
 
@@ -974,8 +1021,7 @@ fn offload_runtime_kernel_launch_returns_not_available_without_driver() {
 /// Offload runtime: ROCm 无驱动时 probe 返回 NotFound.
 #[test]
 fn offload_runtime_rocm_probe_returns_not_available_without_driver() {
-    use dcc::profile::device_codegen::{probe_rocm_runtime, RuntimeStatus};
-    use std::collections::HashMap;
+    use dcc::profile::device_codegen::probe_rocm_runtime;
 
     let mut diags = Vec::new();
     let status = probe_rocm_runtime("amdgcn-amd-amdhsa", &mut diags);
@@ -990,8 +1036,7 @@ fn offload_runtime_rocm_probe_returns_not_available_without_driver() {
 /// Offload runtime: CUDA probe 返回非 Available 状态 (无驱动环境).
 #[test]
 fn offload_cuda_probe_returns_not_available_without_driver() {
-    use dcc::profile::device_codegen::{probe_cuda_runtime, RuntimeStatus};
-    use std::collections::HashMap;
+    use dcc::profile::device_codegen::probe_cuda_runtime;
 
     let mut diags = Vec::new();
     let status = probe_cuda_runtime("nvptx64-nvidia-cuda", &mut diags);
@@ -1008,7 +1053,7 @@ fn offload_cuda_probe_returns_not_available_without_driver() {
 #[test]
 fn offload_runtime_launch_without_device_code_fails_fast() {
     use dcc::profile::device_codegen::{
-        OffloadRuntimeLoader, KernelLaunchParams, KernelLaunchResult, RuntimeStatus,
+        KernelLaunchParams, KernelLaunchResult, OffloadRuntimeLoader, RuntimeStatus,
     };
     use dcc::profile::offload::{OffloadEntry, OffloadKind, OffloadSection};
 
@@ -1046,7 +1091,9 @@ fn offload_runtime_launch_without_device_code_fails_fast() {
 /// Offload runtime: 未知 kernel 名返回 KernelNotFound.
 #[test]
 fn offload_runtime_kernel_not_found_returns_correct_error() {
-    use dcc::profile::device_codegen::{OffloadRuntimeLoader, KernelLaunchParams, KernelLaunchResult};
+    use dcc::profile::device_codegen::{
+        KernelLaunchParams, KernelLaunchResult, OffloadRuntimeLoader,
+    };
 
     let mut loader = OffloadRuntimeLoader::new();
     let params = KernelLaunchParams::new("nonexistent_kernel");
@@ -1223,7 +1270,10 @@ fn memprof_runtime_end_to_end_gate() {
             found_alloc = true;
         }
     }
-    assert!(found_alloc, "同一 callstack 两次分配应合并: count=2 bytes=1088");
+    assert!(
+        found_alloc,
+        "同一 callstack 两次分配应合并: count=2 bytes=1088"
+    );
 
     let n_life = rd32(&mut p);
     assert!(n_life >= 1, "应有 lifetime 记录");
@@ -1767,8 +1817,14 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
     // 按 instrument_program 的插入顺序: hot_fn(0), warm_fn(1), cold_fn(2), main(3)
     let runtime_src = dir.join("pgo_rt.c");
     let runtime_code = pgo_runtime_template()
-        .replace("__PGO_SITE_FUNCS__", "{\"hot_fn\",\"warm_fn\",\"cold_fn\",\"main\"}")
-        .replace("__PGO_SITE_FILES__", "{\"pgo_e2e.c\",\"pgo_e2e.c\",\"pgo_e2e.c\",\"pgo_e2e.c\"}")
+        .replace(
+            "__PGO_SITE_FUNCS__",
+            "{\"hot_fn\",\"warm_fn\",\"cold_fn\",\"main\"}",
+        )
+        .replace(
+            "__PGO_SITE_FILES__",
+            "{\"pgo_e2e.c\",\"pgo_e2e.c\",\"pgo_e2e.c\",\"pgo_e2e.c\"}",
+        )
         .replace("__PGO_SITE_LINES__", "{1,2,3,4}")
         .replace("__PGO_OUT_PATH__", "\"pgo_e2e.profraw\"");
     std::fs::write(&runtime_src, runtime_code).expect("写 PGO 运行时");
@@ -1781,7 +1837,11 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
         .args(["-o", "pgo_e2e.o"])
         .output()
         .expect("运行 dcc");
-    assert!(out.status.success(), "PGO 插桩编译必须成功: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "PGO 插桩编译必须成功: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(dir.join("pgo_e2e.o").exists(), "应产出 .o");
 
     // 2) 用 host cc 链接 PGO 运行时并运行
@@ -1806,10 +1866,12 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
         .output()
         .expect("运行被测程序");
     if !run.status.success() {
-        eprintln!("程序运行失败: exit={:?}, stdout={:?}, stderr={:}",
+        eprintln!(
+            "程序运行失败: exit={:?}, stdout={:?}, stderr={:}",
             run.status.code(),
             String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr));
+            String::from_utf8_lossy(&run.stderr)
+        );
         // 检查 profraw 是否已生成 (atexit 可能已执行)
         let profraw_check = dir.join("pgo_e2e.profraw");
         eprintln!("profraw 文件存在: {}", profraw_check.exists());
@@ -1901,7 +1963,7 @@ fn pgo_end_to_end_profraw_merge_profdata_use_gate() {
     let merge_profraw = |p1: &[u8], p2: &[u8]| -> Vec<u8> {
         // 解析 p1 的 counters
         let mut off = 16usize; // magic(4) + version(4) + checksum(8)
-        // n_sites
+                               // n_sites
         let n_sites = u32::from_le_bytes(p1[off..off + 4].try_into().unwrap()) as usize;
         off += 4;
         // skip sites

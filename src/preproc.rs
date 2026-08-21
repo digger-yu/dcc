@@ -141,7 +141,7 @@ struct CondState {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct MacroDef {
+pub struct MacroDef {
     params: Option<Vec<String>>, // None = object-like, Some = function-like
     body: String,
     /// 可变参数: true 表示末尾有 ...
