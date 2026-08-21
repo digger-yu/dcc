@@ -13276,3 +13276,43 @@ fn semantic_enum_type_traits_runtime() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+// ====== Coroutine co_await runtime test ======
+#[test]
+#[cfg(unix)]
+fn coroutine_co_await_runtime() {
+    // Coroutine co_await state machine runtime test
+    // Verifies: co_await suspends and resumes correctly
+    // dcc -c + host gcc link + execute
+    let src = include_str!("fixtures/cpp/coroutine_co_await.cpp");
+    let (out, obj) = run_cpp_object_test("coroutine-coawait-runtime", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp-coroutine-coawait-runtime-{}", std::process::id()));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(
+        link.status.success(),
+        "link: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run coroutine binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
