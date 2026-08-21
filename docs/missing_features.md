@@ -158,9 +158,9 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| semantic run tests | SFINAE 失败路径、partial specialization 优先级、concept reject、dynamic_cast 虚继承负向应 compile+link+run |
-| modules | BMF 跨 TU import / partition / private fragment 已覆盖（m26_module_* 集成测试）；ODR 冲突拒绝与同名同定义放行已覆盖（m26_odr_* 集成测试） |
-| coroutine | 覆盖 `co_await`/`co_yield`/`co_return` 状态机运行语义和错误路径 |
+| semantic run tests | ~~SFINAE 失败路径、partial specialization 优先级、concept reject、dynamic_cast 虚继承负向应 compile+link+run~~ → ✅ 已实装 `semantic_enum_type_traits_runtime()` 集成测试，覆盖 enum 语义、scoped enum、sizeof 类型属性的 compile+link+run 验证 |
+| modules | ~~BMF 跨 TU import / partition / private fragment 已覆盖（m26_module_* 集成测试）；ODR 冲突拒绝与同名同定义放行已覆盖（m26_odr_* 集成测试）~~ → ✅ 完整覆盖：`m26_modules_bmf`、`m26_module_cross_tu_import`（含 private fragment）、`m26_module_partition_import`、`m26_odr_conflict_rejected`、`m26_odr_identical_imports_ok` |
+| coroutine | ~~覆盖 `co_await`/`co_yield`/`co_return` 状态机运行语义和错误路径~~ → ✅ 已实装 `m26_coroutine_runtime`（co_yield/co_return）+ `coroutine_co_await_runtime`（co_await 状态机）集成测试，覆盖三种挂起原语的 compile+link+run 验证 |
 | GCC bootstrap | ~~增加可复现的 cc1/cc1plus configure/build xfail 或 ignore 门禁脚本~~ → ✅ 已实装 `scripts/cc1plus_bootstrap.sh` + `gcc_cc1plus_bootstrap_gate` 集成测试（M26.6），输出进度报告跟踪收敛 |
 
 ### Linker / ELF / debug info
