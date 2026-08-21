@@ -122,11 +122,11 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| PGO E2E | compile → run → profraw → merge/profdata → profile-use，并验证优化或 section/layout 可观测变化 |
-| GCOV E2E | 运行程序后校验 `.gcda` counter 非零与报告行覆盖率 |
-| AutoFDO/LBR/MemProf/Topdown | 增加文本+二进制 profile 输入的 CLI 集成与权重影响测试 |
-| Offload driver/link | 覆盖 nvcc/clang++ 缺失、runtime 查找、host link flags/rpath、device-link 命令与错误路径 |
-| Offload runtime | 增加 expected-fail 测试，锁定当前 `RuntimeNotAvailable` 行为直到真正实现 |
+| PGO E2E | ~~compile → run → profraw → merge/profdata → profile-use，并验证优化或 section/layout 可观测变化~~ → ✅ 已实现 `pgo_end_to_end_profraw_merge_profdata_use_gate` 集成测试（M26.7） |
+| GCOV E2E | ~~运行程序后校验 `.gcda` counter 非零与报告行覆盖率~~ → ✅ 已实现 `gcov_end_to_end_counter_gate` 集成测试（M26.7） |
+| AutoFDO/LBR/MemProf/Topdown | ~~增加文本+二进制 profile 输入的 CLI 集成与权重影响测试~~ → ✅ 已实现 CLI 接受测试 + 权重影响 section 布局测试（M26.7） |
+| Offload driver/link | ~~覆盖 nvcc/clang++ 缺失、runtime 查找、host link flags/rpath、device-link 命令与错误路径~~ → ✅ 已实现 7 个 OffloadDriverLinker 集成测试（M26.7） |
+| Offload runtime | ~~增加 expected-fail 测试，锁定当前 `RuntimeNotAvailable` 行为直到真正实现~~ → ✅ 已实现 5 个 expected-fail 测试锁定当前行为（M26.7） |
 
 ### 预处理 / PCH / 依赖文件
 
