@@ -141,9 +141,9 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| Linux FORTIFY | 覆盖真实 `__builtin___memcpy_chk` 等 FORTIFY 宏族展开与链接行为 |
-| low-level builtins | 对 `trap`、`debugtrap`、`unreachable`、`assume_aligned`、`alloca`、`static_chain`、`frame_address`、`return_address` 增加汇编或运行时断言 |
-| attributes | 对 alias/ifunc/retain/used/error/warning/deprecated/constructor priority 增加负向与链接后符号测试 |
+| Linux FORTIFY | ~~覆盖真实 `__builtin___memcpy_chk` 等 FORTIFY 宏族展开与链接行为~~ → ✅ 已实现：`__builtin___*_chk` 识别并剥离 `__builtin_` 前缀，链接到 libc 的 `__*_chk` 符号；`m27_fortify_memcpy_chk_links_correctly` 验证汇编输出 `call __memcpy_chk` |
+| low-level builtins | ~~对 `trap`、`debugtrap`、`unreachable`、`assume_aligned`、`alloca`、`static_chain`、`frame_address`、`return_address` 增加汇编或运行时断言~~ → ✅ 已实现：`trap`→`ud2`、`debugtrap`→`int3`、`unreachable`→`ud2`、`assume_aligned` 原样返回、`alloca` 动态栈分配、`frame_address` 返回 r13、`return_address` 返回地址；`m27_builtin_trap_emits_ud2`、`m27_builtin_debugtrap_emits_int3`、`m27_builtin_unreachable_emits_ud2`、`m27_lowlevel_builtins_runtime` 覆盖 |
+| attributes | ~~对 alias/ifunc/retain/used/error/warning/deprecated/constructor priority 增加负向与链接后符号测试~~ → ✅ 已实现：alias 运行时+符号表验证 (`m27_attr_alias_runtime`/`m27_attr_alias_symbol_exists`)、ifunc 符号类型验证 (`m27_attr_ifunc_symbol_type_is_ifunc`)、retain/used 链接后符号验证 (`m27_attr_retain_symbol_exists`/`m27_attr_used_symbol_exists`)、error/warning 负向诊断 (`m27_attr_error_emits_error`/`m27_attr_warning_emits_warning`)、constructor priority 排序 (`m23_attr_ctor_priority_orders_correctly`/`m27_attr_ctor_priority_compiles`)、alias 负向 (`m27_attr_alias_target_missing_compiles`) |
 
 ### 多架构
 
