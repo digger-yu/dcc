@@ -12735,3 +12735,150 @@ fn error_in_header_carries_header_source_line_regression() {
     assert!(!output.status.success(), "header #error must fail");
     assert!(stderr.contains("E0203"), "should have E0203: {stderr}");
 }
+
+// ============================================================================
+// QEMU runtime matrix — expanded scenarios
+// ============================================================================
+
+/// QEMU runtime: hello — simple return value (exits with code 42)
+#[test]
+fn non_x86_qemu_runtime_hello() {
+    let source = r#"
+int main(void) {
+    return 42;
+}
+"#;
+    let targets = [
+        ("aarch64-linux-gnu", "qemu-aarch64"),
+        ("riscv64-linux-gnu", "qemu-riscv64"),
+        ("mips-linux-gnu", "qemu-mips"),
+        ("mips64-linux-gnuabi64", "qemu-mips64"),
+        ("arm-linux-gnueabihf", "qemu-arm"),
+    ];
+    let mut runnable = 0;
+    for (target, qemu) in targets {
+        if qemu_runtime_target("qemu-hello", target, qemu, 42, source).is_some() {
+            runnable += 1;
+        }
+    }
+    if runnable == 0 {
+        eprintln!("skip QEMU hello matrix: no qemu-user binaries found");
+    }
+}
+
+/// QEMU runtime: control-flow — if/else, loops, switch
+#[test]
+fn non_x86_qemu_runtime_control_flow() {
+    let source = r#"
+int main(void) {
+    int sum = 0;
+    for (int i = 1; i <= 10; i++) {
+        if (i % 2 == 0)
+            sum += i;
+        else
+            sum -= 1;
+    }
+    /* sum = (2+4+6+8+10) - 5*1 = 30 - 5 = 25 */
+    switch (sum) {
+    case 25: return 100;
+    default: return 0;
+    }
+}
+"#;
+    let targets = [
+        ("aarch64-linux-gnu", "qemu-aarch64"),
+        ("riscv64-linux-gnu", "qemu-riscv64"),
+        ("mips-linux-gnu", "qemu-mips"),
+        ("mips64-linux-gnuabi64", "qemu-mips64"),
+        ("arm-linux-gnueabihf", "qemu-arm"),
+    ];
+    let mut runnable = 0;
+    for (target, qemu) in targets {
+        if qemu_runtime_target("qemu-ctrl", target, qemu, 100, source).is_some() {
+            runnable += 1;
+        }
+    }
+    if runnable == 0 {
+        eprintln!("skip QEMU control-flow matrix: no qemu-user binaries found");
+    }
+}
+
+/// QEMU runtime: aggregate ABI — struct passing and returning
+#[test]
+fn non_x86_qemu_runtime_aggregate_abi() {
+    let source = r#"
+struct Point { int x; int y; };
+struct Point make_point(int x, int y) {
+    struct Point p;
+    p.x = x;
+    p.y = y;
+    return p;
+}
+int add_point(struct Point p) {
+    return p.x + p.y;
+}
+int main(void) {
+    struct Point p = make_point(17, 25);
+    return add_point(p);
+}
+"#;
+    let targets = [
+        ("aarch64-linux-gnu", "qemu-aarch64"),
+        ("riscv64-linux-gnu", "qemu-riscv64"),
+        ("mips-linux-gnu", "qemu-mips"),
+        ("mips64-linux-gnuabi64", "qemu-mips64"),
+        ("arm-linux-gnueabihf", "qemu-arm"),
+    ];
+    let mut runnable = 0;
+    for (target, qemu) in targets {
+        if qemu_runtime_target("qemu-agg", target, qemu, 42, source).is_some() {
+            runnable += 1;
+        }
+    }
+    if runnable == 0 {
+        eprintln!("skip QEMU aggregate ABI matrix: no qemu-user binaries found");
+    }
+}
+
+/// QEMU runtime: va_arg — variadic function with integer args
+#[test]
+fn non_x86_qemu_runtime_va_arg() {
+    let source = r#"
+typedef __builtin_va_list va_list;
+#define va_start(ap, last) __builtin_va_start(ap, last)
+#define va_arg(ap, type)   __builtin_va_arg(ap, type)
+#define va_end(ap)         __builtin_va_end(ap)
+
+int sum_n(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    int total = 0;
+    for (int i = 0; i < n; i++) {
+        total += va_arg(ap, int);
+    }
+    va_end(ap);
+    return total;
+}
+int main(void) {
+    /* 3+7+11+13+19 = 53, return 53 - 11 = 42 */
+    int r = sum_n(5, 3, 7, 11, 13, 19);
+    return r - 11;
+}
+"#;
+    let targets = [
+        ("aarch64-linux-gnu", "qemu-aarch64"),
+        ("riscv64-linux-gnu", "qemu-riscv64"),
+        ("mips-linux-gnu", "qemu-mips"),
+        ("mips64-linux-gnuabi64", "qemu-mips64"),
+        ("arm-linux-gnueabihf", "qemu-arm"),
+    ];
+    let mut runnable = 0;
+    for (target, qemu) in targets {
+        if qemu_runtime_target("qemu-vaarg", target, qemu, 42, source).is_some() {
+            runnable += 1;
+        }
+    }
+    if runnable == 0 {
+        eprintln!("skip QEMU va_arg matrix: no qemu-user binaries found");
+    }
+}
