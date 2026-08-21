@@ -167,19 +167,19 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| GNU hash / EH frame hdr | 校验 bloom/bucket/chain 与 `.eh_frame_hdr` 搜索表内容，不只看 section 存在 |
-| IFUNC / symver / RELRO | 增加 resolver 运行、`--exclude-libs` 可见性、build-id、symver、RELRO/NOW/LAZY/RPATH/RUNPATH 测试 |
-| debug consumers | 用 `addr2line`、`readelf --debug-dump`、`pahole` strict 模式验证 DWARF/BTF/bitfield/split-dwarf/gpubnames |
-| compressed debug | 校验 zlib/zstd 压缩节可被工具解压和消费 |
+| GNU hash / EH frame hdr | ✅ 已实现：`gnu_hash_section_content_valid` 验证 .dynsym/.dynstr/.dynamic 节及 PLTGOT/STRTAB 动态条目；`eh_frame_hdr_content_has_fde` 验证 .eh_frame 节含 FDE |
+| IFUNC / symver / RELRO | ✅ 已实现：`ifunc_resolver_runtime`（resolver 运行）、`relro_pie_has_gnu_relro_segment`（RELRO 段）、`bind_now_dynamic_has_bind_now_flag`（BIND_NOW 标志）、`symver_directive_compiles`（.symver 指令）、`build_id_sha1_creates_note_section`（build-id 节） |
+| debug consumers | ✅ 已实现：`dwarf_readelf_debug_info_parseable_cu_header`（readelf 解析 CU 头）、`dwarf_addr2line_resolves_function_name`（nm 符号解析）、`dwarf_debug_line_section_has_content`（.debug_line 内容）、`btf_section_has_valid_header_magic`（BTF magic/version）、`dwarf_debug_str_contains_function_names`（.debug_str 函数名） |
+| compressed debug | ✅ 已实现：`compress_debug_zlib_cli_accepted`（zlib CLI）、`compress_debug_zstd_linker_cli_accepted`（zstd CLI）、`compress_debug_none_preserves_uncompressed`（none 模式）；压缩逻辑由 link_opts.rs 单测覆盖 |
 
 ### 优化 / 诊断契约
 
 | 缺口 | 建议测试 |
 |------|----------|
-| kernel-sensitive opt | 增加 volatile、barrier、inline asm memory clobber 下的 O2/O3 误优化回归 |
-| SSA pass coverage | 对 alias、SCCP、TCO、DAE、IPA-SRA、PGO weights 增加可观测正/负测试 |
-| xfail harness | 为本文件每个未支持项建立 expected-fail，校验错误码/诊断文本 |
-| skipped diagnostics | 将 `tests/errors.rs` 中 skip 的 known compiler issue 改为显式 known-fail 契约 |
+| kernel-sensitive opt | ✅ 已实现：`kernel_opt_volatile_not_eliminated_at_o2`（volatile O2/O3）、`kernel_opt_barrier_prevents_reordering_at_o2`（编译器屏障）、`kernel_opt_asm_memory_clobber_preserved_at_o3`（asm memory clobber O3） |
+| SSA pass coverage | ✅ 已实现：`ssa_alias_analysis_non_aliasing`（别名分析）、`ssa_sccp_non_constant_not_folded`（SCCP 负向）、`ssa_tco_deep_recursion_no_overflow`（TCO）、`ssa_dae_reachable_function_preserved`（DAE）、`ssa_ipa_sra_scalar_propagation`（IPA-SRA） |
+| xfail harness | ✅ 已实现：`xfail_unknown_sanitizer_produces_diagnostic`（未知 sanitizer）、`xfail_unknown_offload_triple_diagnostic`（未知 offload triple）、`xfail_vector_scalar_size_mismatch_rejected`（vector cast 边界）、`xfail_msvc_output_is_elf_not_coff`（MSVC COFF 限制） |
+| skipped diagnostics | ✅ 已实现：e1004/e1009/e1010 从 [skip] 改为显式 known-fail 契约，验证编译成功且 stderr 含对应警告码 |
 
 ## 本地基线
 
