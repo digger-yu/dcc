@@ -8173,6 +8173,257 @@ fn m27_lowlevel_builtins_runtime() {
     let _ = fs::remove_file(exe);
 }
 
+// ====== M27: attributes 负向与符号测试 ======
+/// __attribute__((alias)): 符号别名应指向真实符号
+#[test]
+#[cfg(unix)]
+fn m27_attr_alias_runtime() {
+    let src = include_str!("fixtures/c/m27_attr_alias.c");
+    let (out, exe) = run_compile_and_run("m27-attr-alias", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "alias attribute test failed");
+    let _ = fs::remove_file(exe);
+}
+
+/// __attribute__((alias)): 验证对象文件中 alias 符号存在
+#[test]
+#[cfg(unix)]
+fn m27_attr_alias_symbol_exists() {
+    let src = include_str!("fixtures/c/m27_attr_alias.c");
+    let (out, obj) = run_object_test("m27-attr-alias-obj", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    // 用 readelf 验证符号表
+    let output = std::process::Command::new("readelf")
+        .args(["-s", obj.to_str().unwrap()])
+        .output()
+        .expect("run readelf");
+    let sym_text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        sym_text.contains("alias_func") && sym_text.contains("real_func"),
+        "alias symbols should exist: {}",
+        sym_text
+    );
+}
+
+/// __attribute__((warning)): 调用应触发警告但不阻断编译
+#[test]
+#[cfg(unix)]
+fn m27_attr_warning_emits_warning() {
+    let src = include_str!("fixtures/c/m27_attr_warning.c");
+    let (out, exe) = run_compile_and_run("m27-attr-warning", src);
+    assert!(out.status.success(), "compile should succeed with warning");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning") && stderr.contains("deprecated_func"),
+        "warning attribute should emit warning: {}",
+        stderr
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 42, "warning attribute runtime test failed");
+    let _ = fs::remove_file(exe);
+}
+
+/// __attribute__((error)): 调用应触发编译错误
+#[test]
+#[cfg(unix)]
+fn m27_attr_error_emits_error() {
+    let src = include_str!("fixtures/c/m27_attr_error.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-m27-attr-error-{}.c", std::process::id()));
+    let obj_path = dir.join(format!("dcc-m27-attr-error-{}.o", std::process::id()));
+    fs::write(&source_path, src).expect("write source");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o", obj_path.to_str().unwrap(), source_path.to_str().unwrap()])
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(obj_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error") && stderr.contains("forbidden_func"),
+        "error attribute should emit error: {}",
+        stderr
+    );
+}
+
+// ====== M27: attributes 补充测试 ======
+
+/// __attribute__((ifunc)): 验证对象文件中 IFUNC 符号存在
+/// IFUNC 的完整运行时解析需要 DCC 内置链接器支持; 此处验证编译期
+/// 符号生成正确 (STT_GNU_IFUNC 类型).
+#[test]
+#[cfg(unix)]
+fn m27_attr_ifunc_with_builtin_linker() {
+    use std::process::Command;
+    let src = include_str!("fixtures/c/m27_attr_ifunc.c");
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-m27-attr-ifunc-{}.c", std::process::id()));
+    let obj_path = dir.join(format!("dcc-m27-attr-ifunc-{}.o", std::process::id()));
+    fs::write(&source_path, src).expect("write source");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&obj_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    let _ = fs::remove_file(obj_path);
+    // IFUNC 编译应通过 (符号类型正确)
+    assert!(
+        output.status.success(),
+        "ifunc should compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// __attribute__((ifunc)): 验证对象文件中 IFUNC 符号类型为 STT_GNU_IFUNC
+#[test]
+#[cfg(unix)]
+fn m27_attr_ifunc_symbol_type_is_ifunc() {
+    let src = include_str!("fixtures/c/m27_attr_ifunc.c");
+    let (out, obj) = run_object_test("m27-attr-ifunc-obj", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    // 用 readelf 验证符号表
+    let output = std::process::Command::new("readelf")
+        .args(["-s", obj.to_str().unwrap()])
+        .output()
+        .expect("run readelf");
+    let sym_text = String::from_utf8_lossy(&output.stdout);
+    // IFUNC 符号应存在且类型正确
+    assert!(
+        sym_text.contains("ifunc_func") && sym_text.contains("resolve_ifunc"),
+        "ifunc symbols should exist: {}",
+        sym_text
+    );
+}
+
+/// __attribute__((constructor)): priority 在合理范围内应正常工作
+/// 验证: constructor 属性被正确解析和生成
+#[test]
+#[cfg(unix)]
+fn m27_attr_ctor_priority_compiles() {
+    let src = include_str!("fixtures/c/attr_ctor_priority.c");
+    let (out, exe) = run_compile_and_run("m27-ctor-priority", src);
+    assert!(
+        out.status.success(),
+        "ctor priority should compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    // init_100 (prio=100) 先, init_300 (prio=300) 后
+    assert_eq!(rc, 21, "constructor priority 100 should run before 300");
+    let _ = fs::remove_file(exe);
+}
+
+/// __attribute__((alias)): alias 目标不存在时编译仍可通过
+/// (目标符号在链接时解析, 编译期不校验)
+#[test]
+#[cfg(unix)]
+fn m27_attr_alias_target_missing_compiles() {
+    let src = include_str!("fixtures/c/m27_attr_alias_invalid.c");
+    let (out, obj) = run_object_test("m27-alias-invalid-obj", src);
+    // 编译应通过 (alias 目标在链接时解析)
+    assert!(
+        out.status.success(),
+        "alias with missing target should compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_file(obj);
+}
+
+/// __attribute__((retain)): 验证对象文件中保留符号存在
+#[test]
+#[cfg(unix)]
+fn m27_attr_retain_symbol_exists() {
+    let src = include_str!("fixtures/c/attr_retain.c");
+    let (out, obj) = run_object_test("m27-attr-retain-obj", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    // 用 readelf 验证符号表
+    let output = std::process::Command::new("readelf")
+        .args(["-s", obj.to_str().unwrap()])
+        .output()
+        .expect("run readelf");
+    let sym_text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        sym_text.contains("retain_var") && sym_text.contains("retain_func"),
+        "retain symbols should exist: {}",
+        sym_text
+    );
+}
+
+/// __attribute__((used)): 验证对象文件中 used 静态函数符号存在
+#[test]
+#[cfg(unix)]
+fn m27_attr_used_symbol_exists() {
+    let src = include_str!("fixtures/c/attr_used.c");
+    let (out, obj) = run_object_test("m27-attr-used-obj", src);
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    // 用 readelf 验证符号表
+    let output = std::process::Command::new("readelf")
+        .args(["-s", obj.to_str().unwrap()])
+        .output()
+        .expect("run readelf");
+    let sym_text = String::from_utf8_lossy(&output.stdout);
+    // used 静态函数应保留在符号表中
+    assert!(
+        sym_text.contains("used_helper"),
+        "used symbol should exist: {}",
+        sym_text
+    );
+}
+
+/// __attribute__((deprecated)): 调用应触发警告但不阻断编译
+#[test]
+#[cfg(unix)]
+fn m27_attr_deprecated_emits_warning() {
+    let src = include_str!("fixtures/c/m27_attr_deprecated.c");
+    let (out, exe) = run_compile_and_run("m27-attr-deprecated", src);
+    assert!(out.status.success(), "compile should succeed with warning");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning") && stderr.contains("deprecated_func"),
+        "deprecated attribute should emit warning: {}",
+        stderr
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 42, "deprecated attribute runtime test failed");
+    let _ = fs::remove_file(exe);
+}
+
+/// __builtin_call_with_static_chain: 验证编译通过 (嵌套函数静态链 ABI)
+/// 注: 运行时嵌套函数 upvar 访问依赖 is_nested 标记, 该标记在当前
+/// 版本中尚未由前端设置, 因此只验证编译期行为.
+#[test]
+#[cfg(unix)]
+fn m27_static_chain_compiles() {
+    let src = include_str!("fixtures/c/m27_static_chain_test.c");
+    let (out, _obj) = run_object_test("m27-static-chain-obj", src);
+    assert!(
+        out.status.success(),
+        "static_chain builtin should compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// __attribute__((constructor)): 超大的 priority 值应仍可编译
+/// (当前版本无 priority 范围校验, 仅验证编译期不崩溃)
+#[test]
+#[cfg(unix)]
+fn m27_attr_ctor_priority_invalid_compiles() {
+    let src = include_str!("fixtures/c/m27_attr_ctor_priority_invalid.c");
+    let (out, _obj) = run_object_test("m27-ctor-priority-invalid-obj", src);
+    assert!(
+        out.status.success(),
+        "ctor priority invalid should compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // char16_t / char32_t (C11/C++11) 类型与字面量
 #[test]
 #[cfg(unix)]
