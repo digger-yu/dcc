@@ -6519,34 +6519,42 @@ int main(void) { int x = 7; return hot_path(&x) ? 0 : 1; }\n";
 
 // ---------- unknown sanitizer ----------
 
-/// unknown sanitizer: 未知 sanitizer 名称的负向诊断测试.
-/// dcc 应对未知 sanitizer 名称输出诊断并拒绝编译.
+/// unknown sanitizer: 未知 sanitizer/coverage 名称的负向诊断测试.
+/// dcc 应输出明确 unsupported sanitizer 诊断并拒绝产生目标文件.
 #[test]
 fn unknown_sanitizer_negative_diagnostic() {
-    let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-unknown-san-{}.c", std::process::id()));
-    let obj_path = dir.join(format!("dcc-unknown-san-{}.o", std::process::id()));
-    let source = "int main(void) { return 0; }\n";
-    fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=unknown-sanitizer-name", "-c", "-o"])
-        .arg(&obj_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let _ = fs::remove_file(source_path);
-    let _ = fs::remove_file(obj_path);
-    // 未知 sanitizer 应导致编译失败
-    assert!(
-        !output.status.success(),
-        "unknown sanitizer should be rejected"
+    fn assert_unknown_flag(flag: &str, expected: &str) {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let source_path = dir.join(format!("dcc-unknown-san-{pid}.c"));
+        let obj_path = dir.join(format!("dcc-unknown-san-{pid}.o"));
+        let source = "int main(void) { return 0; }\n";
+        fs::write(&source_path, source).expect("write C fixture");
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args([flag, "-c", "-o"])
+            .arg(&obj_path)
+            .arg(&source_path)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let produced_obj = obj_path.exists();
+        let _ = fs::remove_file(source_path);
+        let _ = fs::remove_file(obj_path);
+        assert!(!output.status.success(), "{flag} should be rejected");
+        assert!(
+            stderr.contains(expected),
+            "{flag} should produce exact unsupported diagnostic: {stderr}"
+        );
+        assert!(!produced_obj, "{flag} should not produce an object file");
+    }
+
+    assert_unknown_flag(
+        "-fsanitize=unknown-sanitizer-name",
+        "unsupported sanitizer: unknown-sanitizer-name",
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unknown")
-            || stderr.contains("sanitizer")
-            || stderr.contains("unsupported"),
-        "unknown sanitizer should produce diagnostic: {stderr}"
+    assert_unknown_flag(
+        "-fsanitize-coverage=unknown-coverage-mode",
+        "unsupported sanitizer coverage: unknown-coverage-mode",
     );
 }
 
@@ -14376,26 +14384,6 @@ int main(void) {
 }
 
 // ====== xfail harness: expected-fail for known unsupported features ======
-
-/// xfail: 未知 sanitizer 名称应产生明确错误诊断
-#[test]
-fn xfail_unknown_sanitizer_produces_diagnostic() {
-    let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-xfail-san-{}.c", std::process::id()));
-    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=unknown_sanitize", "-c"])
-        .arg(&src)
-        .output()
-        .expect("run dcc");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let _ = fs::remove_file(&src);
-    assert!(!output.status.success(), "unknown sanitizer should fail");
-    assert!(
-        stderr.contains("unsupported sanitizer") || stderr.contains("unknown sanitizer"),
-        "stderr should mention unsupported sanitizer: {stderr}"
-    );
-}
 
 /// xfail: 未知 offload triple 应产生警告或错误
 #[test]
