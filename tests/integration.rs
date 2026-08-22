@@ -11431,6 +11431,36 @@ fn pie_builtin_linker_return_42() {
     let _ = fs::remove_file(&exe);
 }
 
+/// PIE 输出依赖 host dynamic loader: ELF 中必须含 PT_INTERP/.interp。
+#[test]
+fn pie_builtin_linker_emits_interp_segment() {
+    let (output, exe) = run_compile_and_run_flags(
+        "pie-interp",
+        "int main(void) { return 0; }",
+        &["-pie", "-fbuiltin-linker"],
+    );
+    assert!(
+        output.status.success(),
+        "pie compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let readelf = Command::new("readelf")
+        .args(["-l"])
+        .arg(&exe)
+        .output()
+        .expect("readelf -l");
+    let phdrs = String::from_utf8_lossy(&readelf.stdout);
+    let _ = fs::remove_file(&exe);
+    assert!(readelf.status.success(), "readelf failed: {phdrs}");
+    assert!(phdrs.contains("INTERP"), "missing PT_INTERP: {phdrs}");
+    assert!(
+        phdrs.contains("Requesting program interpreter")
+            && (phdrs.contains("ld-linux") || phdrs.contains("ld.so")),
+        "missing host dynamic loader path: {phdrs}"
+    );
+}
+
 /// C++ 模板 vector: 验证 std::vector<int> 模板实例化能编译通过
 #[test]
 fn cpp_template_vector_int_instantiation() {

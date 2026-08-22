@@ -46,6 +46,7 @@
 | MemProf | `-fmemory-profile` / `-fmemory-profile-use=`；text parser + `AllocClass` 分类 (Hot/Normal/Cold/Ephemeral) + lifetime 分析 + `dealloc` 解析 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；二进制格式 `write_binary`/`read_binary` (.memprofdata magic "MEMPROFD") + 自动检测文本/二进制；malloc 插桩 `MemProfInstrumentor` (`__dcc_memprof_alloc_record`/`__dcc_memprof_free_record`)；冷分配栈对应函数下沉到 `.text.unlikely` 段 |
 | Perf 事件 / TopdownL1 | `-ftopdownmetrics`；`TopdownL1` 四槽枚举 + `TopdownL2` 八子分类展开 + `perf stat` 文本解析 + `topdown_percentages()` + `primary_bottleneck()` 瓶颈诊断 + `merge` 合并 + `summary` 统计 + roundtrip 序列化；`PerfDataFile` 读 Linux `perf.data` v2 二进制 (magic "PERFILE2" + header + event attrs) + `parse_samples` 解析 PERF_RECORD_SAMPLE (ip/pid/tid/time/period) + `correlate_events` 样本关联到 event attr + `aggregate_by_ip` IP 聚合 |
 | Offloading metadata / driver link | `-fopenmp[=...]` / `-fcuda` / `-fhip` / `-fopenmp-targets=` / `--offload-arch=`；`OffloadConfig` 全形式解析；`OffloadSection` 二进制序列化；全 arch 输出 `.dcc.offload` ELF 节；`OffloadRuntimeLoader` 可读取 `.dcc.offload` 并暴露 kernel launch 诊断接口；`OffloadDriverLinker` 生成 CUDA/ROCm host link flags、device link commands、fat binary 描述与 link script |
+| LTO/offload/profile 格式版本 | `.llvm.lto` summary v1、`.dcc.offload` v1、profraw v2、profdata v1、AutoFDO text v1/binary v2、MemProf text v1/binary v1 均只接受当前版本，错版返回 unsupported-version 错误 |
 | 跨源权重聚合 | `ProfileWeights` 聚合 4 源 PGO/AutoFDO/LBR/MemProf，输出统一 hot/cold func 集合；`FuncDecl.is_hot` 控制 `.text.hot` / `.text.unlikely` 段切换 |
 
 CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile=file` / `-flbr-profile=file` / `-ftest-coverage` / `-fprofile-arcs` / `-ftopdownmetrics` / `-fmemory-profile` / `-fopenmp` / `-fcuda` / `-fhip` / `-fopenmp-targets=triple,...` / `--offload-arch=triple`。
@@ -282,6 +283,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 特性 | 说明 |
 |------|------|
 | 跨 TU LTO | `-flto` 生成 `.llvm.lto`；`-r` 多 `.o` 经内置路径合并 |
+| `.llvm.lto` 摘要版本 | `.llvm.lto` 使用 `DCC_LTO\0` + version 1，解析器拒绝非当前版本 |
 | LTO dead symbol 剔除 | `-ffunction-sections` + `ld --gc-sections` + objcopy strip |
 | LTO 跨函数内联 | cost model：≤4 语句 / 4 表达式 / 无递归 |
 | LTO 跨 TU 常量传播 | 跨 TU `global constant` 初始化值合并 |
@@ -289,6 +291,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | LTO 4 pass 增强 | `LtoConfig` 配置化 + Pass 7 no_semantic_interposition |
 | LTO IPA-SRA / PGO 集成 | `src/ipa_sra.rs` + `src/profile/pgo_integration.rs` |
 | `gc_sections_root` 自动选根 | 无显式根时自动选所有 STB_GLOBAL/STB_WEAK 符号 |
+| object reader 输入边界 | 只接受 ELF64 little-endian ET_REL 且 machine 为 x86_64/AArch64/RISC-V；ELF32、big-endian 或其它 machine 严格报错 |
+| relocation 支持边界 | 按当前架构白名单分发 relocation；未枚举或错架构命名空间的 relocation 返回 `UnsupportedType` |
 | `.gnu.hash` TIE 压缩 | ELF 64-bit GNU hash（bloom filter + buckets + chain） |
 | `.eh_frame_hdr` 搜索表 | 二分搜索表（按 initial_location 排序） |
 | IFUNC 解析 | `STT_GNU_IFUNC` → `R_X86_64_IRELATIVE` 重定位 |
@@ -297,7 +301,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `--build-id=sha1/uuid/md5/none` | 内置 SHA-1 / MD5 / UUID v4 写 `.note.gnu.build-id` |
 | `--no-undefined-version` | 缺版本 `.symver` 引用 → 错误 |
 | `.symver` 完整版本表 | `.gnu.version` 16-bit 索引表 + `.gnu.version_d` VERDEF |
-| `-z relro` / `-z now` / `-z lazy` / `-z execstack` / `-z noexecstack` | 段处理完整 |
+| `-z relro` / `-z now` / `-z lazy` / `-z execstack` / `-z noexecstack` | 段处理完整；未知或参数非法的 `-z` 选项严格报错 |
+| `-z ibt` / `-z shstk` | CET/IBT/SHSTK 开关进入 `.gnu.property` 与安全 PLT 配置 |
 | `-z max-page-size` / `-z common-page-size` | 解析 K/M/G 后缀 |
 | `-z pack-relative-relocs` | 生成 `.gnu.pack.relocs` 段（SHT_GNU_RELR） |
 | `-rpath` / `-rpath-link` / `-runpath` | `.dynamic` 写 `DT_RPATH` / `DT_RUNPATH` |
@@ -309,7 +314,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `__dso_handle` / `.fini_array` 调度 | `FiniArrayBuilder` 收集 destructor 符号按 priority 排序 |
 | `-r` 自研路径 | `OutputKind::Relocatable` + `write_elf_relocatable` |
 | 共享库 PLT (lazy/CET/BIND_NOW) | `plt_got.rs` .plt (lazy) / .plt.sec (CET/IBT) / .plt.got (BIND_NOW) 生成；`-z ibt` 启用 endbr64 安全 PLT + `.gnu.property` CET 标记；`-z now` 启用 GOT-resolved PLT 无 lazy stub |
-| 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节 |
+| 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节；生成的 PIE/动态 ELF 依赖 host `ld.so`，dcc 自身可用 musl 静态链接 |
 | vDSO 集成 | `--vdso=<path>` 解析 vDSO ELF，嵌入 `.text.vdso` + `.note.GNU-vdso` + 符号表 |
 | PIE/Shared 输出 | 多架构 `_start` 入口桩 |
 | AArch64/RISC-V/MIPS/ARM ELF 输出 | `elf_exec.rs` 多架构包装函数 |
@@ -396,7 +401,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | non-x86 QEMU runtime matrix | `non_x86_qemu_runtime_matrix_runs_when_available` + 四个扩展测试（`non_x86_qemu_runtime_hello/control_flow/aggregate_abi/va_arg`）在 `qemu-aarch64`、`qemu-riscv64`、`qemu-mips`、`qemu-mips64`、`qemu-arm` 存在时运行 hello、control-flow、aggregate ABI、va_arg 语义门禁，缺少 qemu-user 时显式 skip |
 | AArch64/RISC-V HFA ABI | AArch64 HFA 1–8 元素 + >8 sret fallback（`aarch64_hfa_abi_compile_and_elf_structure` / `aarch64_hfa_asm_output_has_all_functions`）；RISC-V HFA 1–4 + >4 sret fallback（`riscv64_hfa_abi_compile_and_elf_structure` / `riscv64_hfa_asm_output_has_all_functions`）；ELF machine/type 验证 |
 | non-x86 inline asm 测试 | `-S` 全局 asm 文本保留验证五架构（`non_x86_asm_minus_s_preserves_global_asm_text`）；`-c` asm goto 警告验证（`non_x86_asm_minus_c_warns_on_asm_goto`）；arm/mips/mips64 asm 表达式警告（`non_x86_asm_arm_mips_warn_on_inline_asm_expr`） |
-| unsupported target 负向测试 | 6 个未知架构 (wasm32/avr/msp430/xtensa/powerpc64/loongarch64) `unknown arch` 错误验证（`unsupported_target_arch_rejected`）；Windows MSVC/Darwin triple 解析接受但 ELF 输出验证（`windows_darwin_triple_accepted_but_outputs_elf`） |
+| unsupported target 负向测试 | 6 个未知架构 (wasm32/avr/msp430/xtensa/powerpc64/loongarch64) `unknown arch` 错误验证（`unsupported_target_arch_rejected`）；Windows MSVC/Darwin triple 解析接受但 ELF 输出验证（`windows_darwin_triple_accepted_but_outputs_elf`），锁定当前非 COFF/Mach-O 平台边界 |
 | atexit / `__cxa_atexit` | `FiniArrayBuilder` 按 priority 排序 |
 | `printf` / `scanf` format string | 完整 flag/width/precision/length/type 匹配 + 指针类型验证 |
 | `wchar_t` / 宽字符字面量 `L"..."` | wcs*/wmem* libc 转发 |

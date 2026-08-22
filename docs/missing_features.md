@@ -17,12 +17,8 @@
 
 | 限制 | 说明 |
 |------|------|
-| 输入对象架构 | object reader 只接受 ELF64 且 machine 为 x86_64/AArch64/RISC-V；MIPS/ARM 等对象链接路径仍不完整 |
-| relocation 覆盖 | 未枚举 relocation type 仍返回 `UnsupportedType` |
-| `-z` 选项 | 部分 `-z` 选项仅静默接受或忽略；未知 `-z` 未形成严格错误 |
-| LTO/offload/profile 格式版本 | `.llvm.lto`、`.dcc.offload`、profraw/profdata/autofdo 等只支持当前固定版本 |
-| Windows 链接路径 | Windows 平台链接路径未实际验证 |
-| dynamic loader | 生成 ELF 依赖 host `ld.so`（设计决策）；dcc 自身可 musl 静态链接 |
+| MIPS/ARM 对象链接路径 | object reader 当前只接收 ELF64 little-endian 且 machine 为 x86_64/AArch64/RISC-V；MIPS/ARM 仍保留 codegen/ELF 输出能力，跨对象 reader/link 路径未完成 |
+| Windows 链接路径 | Windows MSVC triple 可解析并生成 ELF 目标文件；COFF/MSVC ABI codegen/link 与原生 Windows 链接尚未验证 |
 
 ## 性能分析 / Offload 限制
 

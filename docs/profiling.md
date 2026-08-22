@@ -78,7 +78,7 @@ n_counters   : u32 LE         M
 counter[]    : u64 LE         M
 ```
 
-v1 格式向后兼容: 读取器同时支持 v1 (无 checksum/vp) 和 v2。
+读取器只接受当前 v2；v1 和未来版本均返回 unsupported-version 错误。
 
 字段释义：
 - `site` 记录每个 instrument 点的 (函数名, 源文件, 行号)，用于
@@ -269,7 +269,9 @@ n_discs  : u32 LE
 disc[]   : name_len(u32) name(u8*) line(u32) disc(u32) samples(u64)
 ```
 
-`read(path)` 自动检测文本/二进制格式 (检查 "AFDO" magic)。
+`read(path)` 自动检测文本/二进制格式 (检查 "AFDO" magic)。文本头
+`# dcc autofdo v1` 与二进制 version 2 均为固定当前版本；其它版本
+返回 unsupported-version 错误。
 
 ### 3.4 桶化阈值 (与 LLVM AutoFDO 对齐)
 
@@ -384,7 +386,9 @@ n_deallocs: u32 LE
 dealloc[]: n_frames(u32) frames(...) count(u64)
 ```
 
-`read(path)` 自动检测文本/二进制格式 (检查 "MEMPROFD" magic)。
+`read(path)` 自动检测文本/二进制格式 (检查 "MEMPROFD" magic)。文本头
+`# dcc memprof v1` 与 `.memprofdata` version 1 均为固定当前版本；
+其它版本返回 unsupported-version 错误。
 
 ### 5.4 malloc 插桩与运行时
 

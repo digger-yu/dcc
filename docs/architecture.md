@@ -183,7 +183,7 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
 |------|------|------|
 | `cli.rs` | 区分 `-c` / `-r` / `-pie` / `-shared` / `-fbuiltin-linker` / `-Wl,-soname=…` | — |
 | `link/mod.rs` | 链接器入口 + 多架构 `_start` 桩合成（`ensure_start_stub`）：无可执行入口时自动生成 `_start` 调用 `main` 并 `exit` | — |
-| `link/object.rs` | 解析 ELF ET_REL 目标文件：节、符号、`.rela.*` 重定位 | — |
+| `link/object.rs` | 解析 ELF64 little-endian ET_REL 目标文件：节、符号、`.rela.*` 重定位；输入 machine 仅接受 x86_64/AArch64/RISC-V | — |
 | `link/resolve.rs` | 跨 TU 符号解析：强 > 弱 > undef；隐式 undef 允许 libc weak | — |
 | `link/layout.rs` | 同名节合并 + 2 段布局（`R+X` / `R+W`） + 自定义节独立 | — |
 | `link/relocate.rs` | 重定位引擎：`PC32` / `PLT32` / `64` / `32` / `32S` / `GOTPCREL` / `GOT64` / `GOTOFF64` / `TPOFF64` / `TPOFF32` / AArch64（22 种）/ RISC-V（15 种） | — |
@@ -208,7 +208,9 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
 3. `LayoutBuilder` 按同名节合并并分配虚拟地址（`layout.rs`）。
 4. 动态构建 PLT/GOT 与 `.dynamic` 节（`plt_got.rs`，仅 `-pie`/`-shared`）。
 5. 若无可执行入口，自动合成多架构 `_start` 桩（`ensure_start_stub`，支持 x86_64/AArch64/RISC-V64/ARM）。
-6. `apply_relocations` 写入最终字节；动态重定向分离到 `.rela.dyn` / `.rela.plt`。
+6. `apply_relocations` 先按当前架构白名单校验 relocation type；未枚举
+   或错架构命名空间的类型返回 `UnsupportedType`，随后写入最终字节并
+   把动态重定向分离到 `.rela.dyn` / `.rela.plt`。
 7. `write_elf_*` 按架构分发写出 ET_EXEC / ET_DYN / ET_REL。
 
 **IR/Bitcode LTO 管线**（`lto_bitcode.rs`）：
@@ -232,10 +234,11 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
 `link/target_clones.rs` + `link/fini_dispatch.rs`）：
 
 完整支持 `-z relro/now/lazy/execstack/noexecstack/max-page-size`、
-`-rpath`/`-runpath`、`-fuse-ld`、`--gdb-index`、`SHF_GNU_RETAIN`、
-`gc-sections` BFS 引用图裁剪、`.symver` 符号版本化（含 VERDEF/VERNEED
-生成）、IFUNC `target_clones`、`__dso_handle`/`.fini_array` 调度、
-`-r` 可重定位输出等。
+`-z common-page-size`、`-z ibt/shstk`、`-rpath`/`-runpath`、`-fuse-ld`、
+`--gdb-index`、`SHF_GNU_RETAIN`、`gc-sections` BFS 引用图裁剪、
+`.symver` 符号版本化（含 VERDEF/VERNEED 生成）、IFUNC
+`target_clones`、`__dso_handle`/`.fini_array` 调度、`-r` 可重定位输出等。
+未知或参数非法的 `-z` 选项严格报错，不再静默接受。
 
 详见 `docs/support_features.md` 链接器特性列表。
 
@@ -251,9 +254,10 @@ DCC 现已内置完整的多架构链接器（`src/link/`，支持 x86_64/AArch6
   / `PCREL_LO12_I` / `PCREL_LO12_S` / `HI20` / `LO12_I` / `LO12_S`
   / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S`。
 
-**运行时 dynamic loader**：dcc 生成的 ELF 依赖 host `ld.so`（设计决策）；
-dcc 自身可通过 musl 静态链接（见 `docs/static_build.md`），
-产出无 ld.so 依赖的单文件二进制。vDSO 集成亦不在范围内。
+**运行时 dynamic loader**：dcc 生成的 PIE/动态 ELF 依赖 host `ld.so`
+（设计决策），并通过 `PT_INTERP` / `.interp` 固化加载器路径；dcc 自身
+可通过 musl 静态链接（见 `docs/static_build.md`），产出无 ld.so 依赖
+的单文件二进制。vDSO 集成亦不在范围内。
 
 本地验收：`cargo test link::`（50 用例）
 + `cargo test lto::`（7 用例）。
