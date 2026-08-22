@@ -152,6 +152,51 @@ fn run_exe(path: &std::path::Path) -> i32 {
         .unwrap_or(-1)
 }
 
+#[cfg(unix)]
+fn run_sanitized_binary(
+    name: &str,
+    source: &str,
+    flags: &[&str],
+) -> (std::process::Output, std::process::Output, String, std::path::PathBuf) {
+    let (compile, exe_path) = run_compile_and_run_flags(name, source, flags);
+    assert!(
+        compile.status.success(),
+        "dcc should compile {name}: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&exe_path)
+        .output()
+        .unwrap_or_else(|e| panic!("run {name} binary: {e}"));
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    (compile, run, log, exe_path)
+}
+
+#[cfg(unix)]
+fn assert_runtime_fails_with(run: &std::process::Output, log: &str, needles: &[&str]) {
+    assert!(
+        !run.status.success(),
+        "sanitized binary should fail at runtime, rc={:?}, log={log}",
+        run.status.code()
+    );
+    assert!(
+        needles.iter().any(|needle| log.contains(needle)),
+        "runtime log should contain one of {needles:?}: {log}"
+    );
+}
+
+#[cfg(unix)]
+fn assert_exit_code(run: &std::process::Output, code: i32, log: &str) {
+    assert_eq!(
+        run.status.code().unwrap_or(-1),
+        code,
+        "unexpected sanitizer handler exit code, log={log}"
+    );
+}
+
 fn tool_exists(name: &str) -> bool {
     Command::new("sh")
         .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
@@ -5966,238 +6011,177 @@ fn orc_consumer_function_boundaries_objtool() {
 
 // ---------- Sanitizer runtime negative tests ----------
 
-/// KASAN 越界: -fsanitize=address 时数组越界应触发 runtime 诊断.
-/// 链接后运行验证 KASAN 插桩生效.
+/// KASAN 越界: -fsanitize=address 时 heap 越界应触发 runtime 诊断.
+/// 链接后运行验证 libasan 报告真实的越界访问.
 #[test]
 #[cfg(unix)]
 fn kasan_runtime_out_of_bounds() {
-    let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-kasan-oob-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-kasan-oob-{}", std::process::id()));
-    let source = "int f(void) { int arr[4]; return arr[10]; }\nint main(void) { return f(); }\n";
-    fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=address", "-std=gnu23", "-o"])
-        .arg(&exe_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "dcc should compile KASAN OOB fixture: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let source = "extern void *malloc(unsigned long);\n\
+int main(void) {\n\
+    int *p = (int *)malloc(4);\n\
+    return p[2];\n\
+}\n";
+    let (_, run, log, exe_path) = run_sanitized_binary(
+        "kasan-oob",
+        source,
+        &["-fsanitize=address"],
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let run = Command::new(&exe_path)
-            .output()
-            .expect("run KASAN OOB binary");
-        let stdout = String::from_utf8_lossy(&run.stdout);
-        let stderr = String::from_utf8_lossy(&run.stderr);
-        // KASAN 应报告越界错误 (asan 输出到 stderr)
-        let _combined = format!("{}{}", stdout, stderr);
-        // 只要 KASAN 插桩成功, 运行时会触发错误; 如果未触发, 至少验证编译通过
-        assert!(
-            run.status.code().is_some(),
-            "KASAN OOB binary should run (may crash with asan report)"
-        );
-        let _ = fs::remove_file(&exe_path);
-    }
+    assert_runtime_fails_with(&run, &log, &["AddressSanitizer", "ERROR"]);
+    assert!(
+        log.contains("use-after-poison")
+            || log.contains("heap-buffer-overflow")
+            || log.contains("unknown-crash"),
+        "KASAN OOB log should identify an ASAN memory fault: {log}"
+    );
+    let _ = fs::remove_file(&exe_path);
 }
 
-/// UBSAN div/mod: -fsanitize=undefined 除零应触发 runtime 诊断.
+/// UBSAN div/mod: 除零和取模零均应调用 divrem runtime handler.
 #[test]
 #[cfg(unix)]
 fn ubsan_runtime_division_by_zero() {
-    let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-ubsan-div-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-ubsan-div-{}", std::process::id()));
-    let source = "int f(int x) { return 42 / x; }\nint main(void) { return f(0); }\n";
-    fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=undefined", "-std=gnu23", "-o"])
-        .arg(&exe_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "dcc should compile UBSAN div fixture: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let div_source = "extern void exit(int);\n\
+__attribute__((no_sanitize(\"undefined\")))\n\
+void __ubsan_handle_divrem_overflow(void *data, long rhs) {\n\
+    (void)data;\n\
+    exit(rhs == 0 ? 91 : 90);\n\
+}\n\
+int f(int x) { return 42 / x; }\n\
+int main(void) { return f(0); }\n";
+    let (_, div_run, div_log, div_exe) = run_sanitized_binary(
+        "ubsan-div",
+        div_source,
+        &["-fsanitize=undefined"],
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path)
-            .output()
-            .expect("run UBSAN div binary");
-        let _ = fs::remove_file(&exe_path);
-    }
+    assert_exit_code(&div_run, 91, &div_log);
+    let _ = fs::remove_file(&div_exe);
+
+    let mod_source = "extern void exit(int);\n\
+__attribute__((no_sanitize(\"undefined\")))\n\
+void __ubsan_handle_divrem_overflow(void *data, long rhs) {\n\
+    (void)data;\n\
+    exit(rhs == 0 ? 96 : 90);\n\
+}\n\
+int f(int x) { return 42 % x; }\n\
+int main(void) { return f(0); }\n";
+    let (_, mod_run, mod_log, mod_exe) = run_sanitized_binary(
+        "ubsan-mod",
+        mod_source,
+        &["-fsanitize=undefined"],
+    );
+    assert_exit_code(&mod_run, 96, &mod_log);
+    let _ = fs::remove_file(&mod_exe);
 }
 
-/// UBSAN shift: 位移溢出应触发 runtime 诊断.
+/// UBSAN shift: 位移溢出应调用 shift runtime handler.
 #[test]
 #[cfg(unix)]
 fn ubsan_runtime_shift_overflow() {
-    let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-ubsan-shift-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-ubsan-shift-{}", std::process::id()));
-    let source = "int f(int x) { return 1 << x; }\nint main(void) { return f(32); }\n";
-    fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=undefined", "-std=gnu23", "-o"])
-        .arg(&exe_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "dcc should compile UBSAN shift fixture: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let source = "extern void exit(int);\n\
+__attribute__((no_sanitize(\"undefined\")))\n\
+void __ubsan_handle_shift_out_of_bounds(void *data, long rhs) {\n\
+    (void)data;\n\
+    exit(rhs == 32 ? 92 : 90);\n\
+}\n\
+int f(int x) { return 1 << x; }\n\
+int main(void) { return f(32); }\n";
+    let (_, run, log, exe_path) = run_sanitized_binary(
+        "ubsan-shift",
+        source,
+        &["-fsanitize=undefined"],
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path)
-            .output()
-            .expect("run UBSAN shift binary");
-        let _ = fs::remove_file(&exe_path);
-    }
+    assert_exit_code(&run, 92, &log);
+    let _ = fs::remove_file(&exe_path);
 }
 
-/// UBSAN VLA: 变长数组边界检查.
+/// UBSAN VLA: 非正变长数组边界应调用 VLA runtime handler.
 #[test]
 #[cfg(unix)]
 fn ubsan_runtime_vla() {
-    let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-ubsan-vla-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-ubsan-vla-{}", std::process::id()));
-    let source = "int f(int n) { int arr[n]; return arr[0]; }\nint main(void) { return f(-1); }\n";
-    fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=undefined", "-std=gnu23", "-o"])
-        .arg(&exe_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "dcc should compile UBSAN VLA fixture: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let source = "extern void exit(int);\n\
+__attribute__((no_sanitize(\"undefined\")))\n\
+void __ubsan_handle_vla_bound_not_positive(long bound) {\n\
+    exit(bound < 1 ? 93 : 90);\n\
+}\n\
+int zero;\n\
+int f(int n) { int arr[n]; return n; }\n\
+int main(void) { return f(zero); }\n";
+    let (_, run, log, exe_path) = run_sanitized_binary(
+        "ubsan-vla",
+        source,
+        &["-fsanitize=undefined"],
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path)
-            .output()
-            .expect("run UBSAN VLA binary");
-        let _ = fs::remove_file(&exe_path);
-    }
+    assert_exit_code(&run, 93, &log);
+    let _ = fs::remove_file(&exe_path);
 }
 
-/// UBSAN null: 空指针解引用应触发 runtime 诊断.
+/// UBSAN null: 空指针解引用应调用 type_mismatch runtime handler.
 #[test]
 #[cfg(unix)]
 fn ubsan_runtime_null_dereference() {
-    let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-ubsan-null-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-ubsan-null-{}", std::process::id()));
-    let source = "int f(int *p) { return *p; }\nint main(void) { return f(0); }\n";
-    fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=undefined", "-std=gnu23", "-o"])
-        .arg(&exe_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "dcc should compile UBSAN null fixture: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let source = "extern void exit(int);\n\
+__attribute__((no_sanitize(\"undefined\")))\n\
+void __ubsan_handle_type_mismatch_v1(void *data) {\n\
+    (void)data;\n\
+    exit(94);\n\
+}\n\
+int f(int *p) { return *p; }\n\
+int main(void) { return f(0); }\n";
+    let (_, run, log, exe_path) = run_sanitized_binary(
+        "ubsan-null",
+        source,
+        &["-fsanitize=undefined"],
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path)
-            .output()
-            .expect("run UBSAN null binary");
-        let _ = fs::remove_file(&exe_path);
-    }
+    assert_exit_code(&run, 94, &log);
+    let _ = fs::remove_file(&exe_path);
 }
 
-/// UBSAN float-cast: 浮点转换溢出应触发 runtime 诊断.
+/// UBSAN float-cast: 浮点转换溢出应调用 float-cast runtime handler.
 #[test]
 #[cfg(unix)]
 fn ubsan_runtime_float_cast() {
-    let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-ubsan-float-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-ubsan-float-{}", std::process::id()));
-    let source = "int f(float x) { return (int)x; }\nint main(void) { return f(1e20f); }\n";
-    fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=undefined", "-std=gnu23", "-o"])
-        .arg(&exe_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let _ = fs::remove_file(source_path);
-    assert!(
-        output.status.success(),
-        "dcc should compile UBSAN float cast fixture: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let source = "extern void exit(int);\n\
+__attribute__((no_sanitize(\"undefined\")))\n\
+void __ubsan_handle_float_cast_overflow(float v, int lo, int hi) {\n\
+    (void)lo;\n\
+    exit(v > hi ? 95 : 90);\n\
+}\n\
+int f(float x) { return (int)x; }\n\
+int main(void) { return f(1e20f); }\n";
+    let (_, run, log, exe_path) = run_sanitized_binary(
+        "ubsan-float",
+        source,
+        &["-fsanitize=undefined"],
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
-        let _ = Command::new(&exe_path)
-            .output()
-            .expect("run UBSAN float cast binary");
-        let _ = fs::remove_file(&exe_path);
-    }
+    assert_exit_code(&run, 95, &log);
+    let _ = fs::remove_file(&exe_path);
 }
 
-/// KCSAN 竞态: -fsanitize=thread 竞态检测插桩.
-/// 验证生成的汇编中插入 __tsan_init/__tsan_func_entry 等 TSAN 符号.
+/// KCSAN 竞态: kernel-kcsan 路径链接后应调用访问检查 handler.
 #[test]
 #[cfg(unix)]
 fn kcsan_runtime_race_instrumentation() {
-    let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-kcsan-{}.c", std::process::id()));
-    let asm_path = dir.join(format!("dcc-kcsan-{}.s", std::process::id()));
-    let source =
-        "int shared = 0;\nvoid writer(void) { shared = 1; }\nint reader(void) { return shared; }\n";
-    fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=thread", "-S", "-o"])
-        .arg(&asm_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let asm_text = fs::read_to_string(&asm_path).unwrap_or_default();
-    let _ = fs::remove_file(source_path);
-    let _ = fs::remove_file(asm_path);
-    assert!(
-        output.status.success(),
-        "dcc should compile KCSAN fixture: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let source = "extern void exit(int);\n\
+int shared;\n\
+__attribute__((no_sanitize(\"thread\")))\n\
+void __kcsan_init(void) {}\n\
+__attribute__((no_sanitize(\"thread\")))\n\
+void __kcsan_func_entry(void) {}\n\
+__attribute__((no_sanitize(\"thread\")))\n\
+void __kcsan_check_access(void *addr, unsigned long size, int is_write) {\n\
+    (void)addr;\n\
+    if (size == 4 && is_write) exit(97);\n\
+}\n\
+void writer(int *p) { *p = 1; }\n\
+int reader(int *p) { return *p; }\n\
+int main(void) { writer(&shared); return reader(&shared); }\n";
+    let (_, run, log, exe_path) = run_sanitized_binary(
+        "kcsan-race",
+        source,
+        &["-fsanitize=kernel-kcsan"],
     );
-    // TSAN 插桩应产生 __tsan_init/__tsan_func_entry 等符号
-    assert!(
-        asm_text.contains("__tsan"),
-        "KCSAN instrumentation should emit __tsan calls: {asm_text}"
-    );
+    assert_exit_code(&run, 97, &log);
+    let _ = fs::remove_file(&exe_path);
 }
 
 // ---------- HWASAN/MTE AArch64 ----------
