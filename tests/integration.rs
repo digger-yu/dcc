@@ -282,6 +282,44 @@ fn elf64_section_data<'a>(data: &'a [u8], section: &str) -> Option<&'a [u8]> {
     None
 }
 
+fn compile_legacy_asm_object(name: &str, source: &str) -> (Vec<u8>, String) {
+    let (output, obj_path) = run_object_test(name, source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+
+    let obj = fs::read(&obj_path).expect("read object file");
+    let text = elf64_section_data(&obj, ".text")
+        .expect("missing .text section")
+        .to_vec();
+    let dump = Command::new("objdump")
+        .args(["-d"])
+        .arg(&obj_path)
+        .output()
+        .expect("objdump");
+    let _ = fs::remove_file(&obj_path);
+    assert!(dump.status.success(), "objdump -d failed");
+    let disasm = String::from_utf8_lossy(&dump.stdout).into_owned();
+    (text, disasm)
+}
+
+fn assert_bytes_present(text: &[u8], needle: &[u8], label: &str) {
+    assert!(
+        text.windows(needle.len()).any(|w| w == needle),
+        "missing {label} bytes {needle:02x?} in .text {text:02x?}"
+    );
+}
+
+fn assert_disasm_present(disasm: &str, needle: &str) {
+    assert!(
+        disasm.contains(needle),
+        "missing disassembly pattern `{needle}`:\n{disasm}"
+    );
+}
+
 fn elf64_dynamic_needed(data: &[u8]) -> Vec<String> {
     fn read_dyn_cstr(b: &[u8]) -> String {
         let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
@@ -3601,28 +3639,23 @@ fn asm_cmpxchg_mem_compiles() {
 
 /// inline asm: cmpxchg8b 32-bit atomic (64-bit operand)
 #[test]
-fn asm_cmpxchg8b_compiles_without_nop_fallback() {
+fn asm_cmpxchg8b_has_opcode_and_disassembly() {
     let source = include_str!("fixtures/c/asm_cmpxchg8b.c");
-    let (output, _obj) = run_object_test("asm-cmpxchg8b", source);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    let (text, disasm) = compile_legacy_asm_object("asm-cmpxchg8b", source);
+    assert_bytes_present(&text, &[0xf0, 0x0f, 0xc7, 0x0d], "lock cmpxchg8b");
+    assert_disasm_present(&disasm, "lock cmpxchg8b");
 }
 
 /// inline asm: pushfl/popfl/iret/iretl aliases
 #[test]
-fn asm_pushfl_iret_compiles_without_nop_fallback() {
+fn asm_pushfl_iret_has_opcode_and_disassembly() {
     let source = include_str!("fixtures/c/asm_pushfl_iret.c");
-    let (output, _obj) = run_object_test("asm-pushfl-iret", source);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    let (text, disasm) = compile_legacy_asm_object("asm-pushfl-iret", source);
+    assert_bytes_present(&text, &[0x9c, 0x58, 0x9c, 0x9d], "pushfl/popq/pushfl/popfl");
+    assert_bytes_present(&text, &[0xcf, 0xcf], "iret/iretl");
+    assert_disasm_present(&disasm, "pushf");
+    assert_disasm_present(&disasm, "popf");
+    assert_disasm_present(&disasm, "iret");
 }
 
 /// inline asm: cmov full condition codes + width suffix aliases
@@ -3640,41 +3673,51 @@ fn asm_cmov_full_compiles_without_nop_fallback() {
 
 /// inline asm: bare in/out + memory-indirect port forms
 #[test]
-fn asm_bare_in_out_compiles_without_nop_fallback() {
+fn asm_bare_in_out_has_opcode_and_disassembly() {
     let source = include_str!("fixtures/c/asm_bare_in_out.c");
-    let (output, _obj) = run_object_test("asm-bare-in-out", source);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    let (text, disasm) = compile_legacy_asm_object("asm-bare-in-out", source);
+    assert_bytes_present(&text, &[0xe5, 0x80], "in immediate port");
+    assert_bytes_present(&text, &[0xe7, 0x80], "out immediate port");
+    assert_bytes_present(&text, &[0xed, 0xef], "in/out dx dword port");
+    assert_bytes_present(&text, &[0xec], "in dx byte port");
+    assert_bytes_present(&text, &[0xee], "out dx byte port");
+    assert_disasm_present(&disasm, "in     $0x80,%eax");
+    assert_disasm_present(&disasm, "out    %eax,$0x80");
+    assert_disasm_present(&disasm, "in     (%dx),%eax");
+    assert_disasm_present(&disasm, "out    %al,(%dx)");
 }
 
 /// shldw/shrdw 16-bit double precision shift
 #[test]
-fn asm_shldw_shrdw_compiles_without_nop_fallback() {
+fn asm_shldw_shrdw_has_opcode_and_disassembly() {
     let source = include_str!("fixtures/c/asm_shldw_shrdw.c");
-    let (output, _obj) = run_object_test("asm-shldw-shrdw", source);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    let (text, disasm) = compile_legacy_asm_object("asm-shldw-shrdw", source);
+    assert_bytes_present(&text, &[0x66, 0x40, 0x0f, 0xa4], "shldw immediate");
+    assert_bytes_present(&text, &[0x66, 0x40, 0x0f, 0xac], "shrdw immediate");
+    assert_bytes_present(&text, &[0x66, 0x40, 0x0f, 0xa5], "shldw cl");
+    assert_bytes_present(&text, &[0x66, 0x40, 0x0f, 0xad], "shrdw cl");
+    assert_disasm_present(&disasm, "shld $0x4");
+    assert_disasm_present(&disasm, "shrd $0x3");
+    assert_disasm_present(&disasm, "shld %cl");
+    assert_disasm_present(&disasm, "shrd %cl");
 }
 
 /// bare segment prefix as standalone instruction (old-style asm)
 #[test]
-fn asm_bare_seg_prefix_compiles_without_nop_fallback() {
+fn asm_bare_seg_prefix_has_opcode_and_disassembly() {
     let source = include_str!("fixtures/c/asm_bare_seg_prefix.c");
-    let (output, _obj) = run_object_test("asm-bare-seg-prefix", source);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr: {stderr}");
-    assert!(
-        !stderr.contains("emitted as nop"),
-        "unexpected nop fallback: {stderr}"
-    );
+    let (text, disasm) = compile_legacy_asm_object("asm-bare-seg-prefix", source);
+    for (bytes, label) in [
+        ([0x3e, 0x90], "ds nop"),
+        ([0x26, 0x90], "es nop"),
+        ([0x2e, 0x90], "cs nop"),
+        ([0x36, 0x90], "ss nop"),
+        ([0x64, 0x90], "fs nop"),
+        ([0x65, 0x90], "gs nop"),
+    ] {
+        assert_bytes_present(&text, &bytes, label);
+        assert_disasm_present(&disasm, label);
+    }
 }
 
 /// .pushsection non-text section data collection (__bug_table, __ex_table)
