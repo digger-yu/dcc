@@ -67,6 +67,7 @@ use crate::codegen::elf::{
     R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_RELATIVE, R_X86_64_TPOFF32, R_X86_64_TPOFF64,
     SHF_WRITE,
 };
+use crate::debug::ArchKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelocError {
@@ -144,7 +145,10 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
     for (sec_idx, rs) in by_section {
         for r in rs {
             // 区分静态 / 动态重定位
-            if needs_dyn_rela(r.rel_type) {
+            if !is_supported_reloc_for_arch(layout.arch, r.rel_type) {
+                return Err(RelocError::UnsupportedType(r.rel_type));
+            }
+            if needs_dyn_rela(layout.arch, r.rel_type) {
                 if r.rel_type == R_X86_64_JUMP_SLOT {
                     dyn_plt_relas.push(r);
                 } else {
@@ -183,44 +187,40 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                 }
             };
             let sec = &mut layout.sections[s_idx];
-            // 64-bit 重定位 (R_X86_64_64 / GOT64 / GOTOFF64 / TPOFF64) 需要 8 字节
-            let needs_8 = matches!(
-                r_type,
-                R_X86_64_64 | R_X86_64_GOT64 | R_X86_64_GOTOFF64 | R_X86_64_TPOFF64
-            );
-            if needs_8 && r_offset + 8 > sec_data_len {
-                return Err(RelocError::OutOfRange);
-            }
-            if !needs_8 && r_offset + 4 > sec_data_len {
+            // 64-bit 重定位和指令对重定位需要更宽的修补窗口。
+            let patch_width = relocation_patch_width(layout.arch, r_type);
+            if r_offset + patch_width > sec_data_len {
                 return Err(RelocError::OutOfRange);
             }
             // 1. x86-64 通用重定位
-            // 注: 不同架构的 relocation type 数值可能撞车 (如 R_X86_64_64=1 与 R_RISCV_32=1),
-            // layout 实际上只装一种 arch 的重定位, 故此处 match 看似 overlap 实则安全.
+            // 不同架构的 relocation type 数值可能撞车，所有分支都按
+            // layout.arch 做命名空间过滤，未枚举类型保持 UnsupportedType。
             #[allow(clippy::match_overlapping_arm)]
             match r_type {
-                R_X86_64_64 => {
+                R_X86_64_64 if layout.arch == ArchKind::X86_64 => {
                     if r_offset + 8 > sec_data_len {
                         return Err(RelocError::OutOfRange);
                     }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_PC32 | R_X86_64_PLT32 | R_X86_64_GOTPCREL => {
+                R_X86_64_PC32 | R_X86_64_PLT32 | R_X86_64_GOTPCREL
+                    if layout.arch == ArchKind::X86_64 =>
+                {
                     let p = s_vaddr + r_offset as u64;
                     let value =
                         ((s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p)) as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_32 => {
+                R_X86_64_32 if layout.arch == ArchKind::X86_64 => {
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_32S => {
+                R_X86_64_32S if layout.arch == ArchKind::X86_64 => {
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as i64 as i32 as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_GOT64 => {
+                R_X86_64_GOT64 if layout.arch == ArchKind::X86_64 => {
                     // 64-bit GOT entry address (S + A)
                     if r_offset + 8 > sec_data_len {
                         return Err(RelocError::OutOfRange);
@@ -228,7 +228,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_GOTOFF64 => {
+                R_X86_64_GOTOFF64 if layout.arch == ArchKind::X86_64 => {
                     // 64-bit GOT-relative: S + A - GOT base
                     // 这里假设 GOT base = s_sym_vaddr 已经被设置 (在 plt_got 中分配)
                     // 简化实现：与 GOT64 相同 — 由调用方负责 GOT base
@@ -238,7 +238,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_TPOFF64 => {
+                R_X86_64_TPOFF64 if layout.arch == ArchKind::X86_64 => {
                     // TLS thread-pointer 偏移: S + A - FS base
                     // 静态链接: 我们用 S + A 作为 thread-local 偏移
                     if r_offset + 8 > sec_data_len {
@@ -247,13 +247,13 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_TPOFF32 => {
+                R_X86_64_TPOFF32 if layout.arch == ArchKind::X86_64 => {
                     // TLS thread-pointer 32-bit 偏移 (sign-extended)
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as i64 as i32 as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_RELATIVE | R_X86_64_IRELATIVE => {
-                }
+                R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_RELATIVE | R_X86_64_IRELATIVE
+                    if layout.arch == ArchKind::X86_64 => {}
                 // 2. AArch64 重定位
                 R_AARCH64_ABS64 => {
                     // 64-bit 绝对
@@ -461,23 +461,23 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 // 3. RISC-V 重定位
-                R_RISCV_64 => {
+                R_RISCV_64 if layout.arch == ArchKind::RiscV64 => {
                     if r_offset + 8 > sec_data_len {
                         return Err(RelocError::OutOfRange);
                     }
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
-                R_RISCV_32 => {
+                R_RISCV_32 if layout.arch == ArchKind::RiscV64 => {
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                R_RISCV_32_PCREL => {
+                R_RISCV_32_PCREL if layout.arch == ArchKind::RiscV64 => {
                     let p = s_vaddr + r_offset as u64;
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                R_RISCV_CALL | R_RISCV_CALL_PLT => {
+                R_RISCV_CALL | R_RISCV_CALL_PLT if layout.arch == ArchKind::RiscV64 => {
                     // auipc + jalr pair: 8 字节, imm = (S+A-P)
                     // 高 20 位写入 auipc 的 imm, 低 12 位写入 jalr 的 imm
                     let p = s_vaddr + r_offset as u64;
@@ -496,7 +496,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst1 = (inst1 & !0xfff00000) | ((imm_lo as u32) << 20);
                     sec.data[r_offset + 4..r_offset + 8].copy_from_slice(&new_inst1.to_le_bytes());
                 }
-                R_RISCV_PCREL_HI20 => {
+                R_RISCV_PCREL_HI20 if layout.arch == ArchKind::RiscV64 => {
                     // auipc: imm[31:12] = ((S+A-P) + 0x800) >> 12
                     let p = s_vaddr + r_offset as u64;
                     let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
@@ -506,7 +506,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & !0xfffff000) | ((imm_hi as u32) << 12);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_RISCV_PCREL_LO12_I => {
+                R_RISCV_PCREL_LO12_I if layout.arch == ArchKind::RiscV64 => {
                     // I-type: imm[11:0] = (S+A-P) & 0xfff
                     let p = s_vaddr + r_offset as u64;
                     let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
@@ -516,7 +516,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & !0xfff00000) | ((imm_lo as u32) << 20);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_RISCV_PCREL_LO12_S => {
+                R_RISCV_PCREL_LO12_S if layout.arch == ArchKind::RiscV64 => {
                     // S-type: imm[11:0] split as imm[11:5] @ bits[31:25] and imm[4:0] @ bits[11:7]
                     let p = s_vaddr + r_offset as u64;
                     let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
@@ -528,7 +528,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                         | (((imm_lo as u32) & 0x1f) << 7);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_RISCV_HI20 => {
+                R_RISCV_HI20 if layout.arch == ArchKind::RiscV64 => {
                     // 绝对高 20 位
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_hi = ((s + 0x800) >> 12) & 0xfffff;
@@ -537,7 +537,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & !0xfffff000) | ((imm_hi as u32) << 12);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_RISCV_LO12_I => {
+                R_RISCV_LO12_I if layout.arch == ArchKind::RiscV64 => {
                     // 绝对低 12 位 I-type
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = s & 0xfff;
@@ -546,7 +546,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & !0xfff00000) | ((imm_lo as u32) << 20);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_RISCV_LO12_S => {
+                R_RISCV_LO12_S if layout.arch == ArchKind::RiscV64 => {
                     // 绝对低 12 位 S-type
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = s & 0xfff;
@@ -557,7 +557,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                         | (((imm_lo as u32) & 0x1f) << 7);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_RISCV_TPOFF64 => {
+                R_RISCV_TPOFF64 if layout.arch == ArchKind::RiscV64 => {
                     // TLS: 64-bit thread pointer offset
                     if r_offset + 8 > sec_data_len {
                         return Err(RelocError::OutOfRange);
@@ -565,7 +565,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
-                R_RISCV_TPREL_HI20 => {
+                R_RISCV_TPREL_HI20 if layout.arch == ArchKind::RiscV64 => {
                     // TLS: 高 20 位
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_hi = ((s + 0x800) >> 12) & 0xfffff;
@@ -574,7 +574,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & !0xfffff000) | ((imm_hi as u32) << 12);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_RISCV_TPREL_LO12_I => {
+                R_RISCV_TPREL_LO12_I if layout.arch == ArchKind::RiscV64 => {
                     // TLS: 低 12 位 I-type
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = s & 0xfff;
@@ -583,7 +583,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & !0xfff00000) | ((imm_lo as u32) << 20);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_RISCV_TPREL_LO12_S => {
+                R_RISCV_TPREL_LO12_S if layout.arch == ArchKind::RiscV64 => {
                     // TLS: 低 12 位 S-type
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = s & 0xfff;
@@ -595,7 +595,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 // 4. MIPS 重定位
-                R_MIPS_26 => {
+                R_MIPS_26 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
                     // J-type: target = (S + A) >> 2, 26-bit
                     let target = (s_sym_vaddr.wrapping_add(r_addend as u64)) >> 2;
                     let inst =
@@ -603,7 +603,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & 0xFC000000) | ((target as u32) & 0x03FFFFFF);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
                 }
-                R_MIPS_HI16 => {
+                R_MIPS_HI16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
                     // 高 16 位: (S + A) >> 16
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_hi = ((s >> 16) & 0xffff) as u32;
@@ -612,7 +612,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & 0xFFFF0000) | imm_hi;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
                 }
-                R_MIPS_LO16 => {
+                R_MIPS_LO16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
                     // 低 16 位: (S + A) & 0xffff
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm_lo = (s & 0xffff) as u32;
@@ -621,23 +621,23 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & 0xFFFF0000) | imm_lo;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
                 }
-                R_MIPS_32 => {
+                R_MIPS_32 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
                     // 32-bit 绝对
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_be_bytes());
                 }
-                R_MIPS_64 => {
+                R_MIPS_64 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
                     // 64-bit 绝对
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_be_bytes());
                 }
                 // 5. ARM 重定位
-                R_ARM_ABS32 => {
+                R_ARM_ABS32 if layout.arch == ArchKind::Arm => {
                     // 32-bit 绝对
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                R_ARM_CALL | R_ARM_JUMP24 => {
+                R_ARM_CALL | R_ARM_JUMP24 if layout.arch == ArchKind::Arm => {
                     // 24-bit PC 相对: offset = (S + A - P) >> 2
                     let p = s_vaddr + r_offset as u64;
                     let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p);
@@ -647,7 +647,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & 0xFF000000) | (imm24 as u32);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_ARM_MOVW_ABS_NC => {
+                R_ARM_MOVW_ABS_NC if layout.arch == ArchKind::Arm => {
                     // 16-bit 低 16 位: imm16 = (S + A) & 0xffff
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm16 = (s & 0xffff) as u32;
@@ -658,7 +658,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & 0xFFF0F000) | (imm4 << 16) | imm12;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
-                R_ARM_MOVT_ABS => {
+                R_ARM_MOVT_ABS if layout.arch == ArchKind::Arm => {
                     // 16-bit 高 16 位: imm16 = (S + A) >> 16
                     let s = s_sym_vaddr.wrapping_add(r_addend as u64);
                     let imm16 = ((s >> 16) & 0xffff) as u32;
@@ -680,16 +680,118 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
     })
 }
 
+#[derive(Debug)]
 pub struct DynamicRelocs {
     pub rela_dyn: Vec<OutputRela>,
     pub rela_plt: Vec<OutputRela>,
 }
 
-fn needs_dyn_rela(rel_type: u32) -> bool {
-    matches!(
-        rel_type,
-        R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_RELATIVE | R_X86_64_IRELATIVE
-    )
+fn needs_dyn_rela(arch: ArchKind, rel_type: u32) -> bool {
+    arch == ArchKind::X86_64
+        && matches!(
+            rel_type,
+            R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_RELATIVE | R_X86_64_IRELATIVE
+        )
+}
+
+fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
+    match arch {
+        ArchKind::X86_64 => matches!(
+            rel_type,
+            R_X86_64_64
+                | R_X86_64_PC32
+                | R_X86_64_PLT32
+                | R_X86_64_GLOB_DAT
+                | R_X86_64_JUMP_SLOT
+                | R_X86_64_RELATIVE
+                | R_X86_64_GOTPCREL
+                | R_X86_64_32
+                | R_X86_64_32S
+                | R_X86_64_TPOFF64
+                | R_X86_64_GOT64
+                | R_X86_64_TPOFF32
+                | R_X86_64_GOTOFF64
+                | R_X86_64_IRELATIVE
+        ),
+        ArchKind::AArch64 => matches!(
+            rel_type,
+            R_AARCH64_ABS64
+                | R_AARCH64_PREL64
+                | R_AARCH64_CALL26
+                | R_AARCH64_JUMP26
+                | R_AARCH64_ADR_PREL_LO21
+                | R_AARCH64_ADR_PREL_PG_HI21
+                | R_AARCH64_ADD_ABS_LO12_NC
+                | R_AARCH64_LDST64_ABS_LO12_NC
+                | R_AARCH64_LDST32_ABS_LO12_NC
+                | R_AARCH64_LDST16_ABS_LO12_NC
+                | R_AARCH64_LDST8_ABS_LO12_NC
+                | R_AARCH64_MOVW_UABS_G0
+                | R_AARCH64_MOVW_UABS_G1
+                | R_AARCH64_MOVW_UABS_G2
+                | R_AARCH64_MOVW_UABS_G3
+                | R_AARCH64_TLSDESC_ADR_PAGE21
+                | R_AARCH64_TLSDESC_LD64_LO12
+                | R_AARCH64_TLSDESC_ADD_LO12
+                | R_AARCH64_TLSDESC_OFF_G1
+                | R_AARCH64_TLSDESC_OFF_G0_NC
+                | R_AARCH64_TLSDESC_LDR
+                | R_AARCH64_TLSDESC_ADD
+                | R_AARCH64_TLSDESC_CALL
+                | R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21
+                | R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC
+                | R_AARCH64_TLSLE_MOVW_TPREL_G1
+                | R_AARCH64_TLSLE_MOVW_TPREL_G0_NC
+        ),
+        ArchKind::RiscV64 => matches!(
+            rel_type,
+            R_RISCV_64
+                | R_RISCV_32
+                | R_RISCV_32_PCREL
+                | R_RISCV_CALL
+                | R_RISCV_CALL_PLT
+                | R_RISCV_PCREL_HI20
+                | R_RISCV_PCREL_LO12_I
+                | R_RISCV_PCREL_LO12_S
+                | R_RISCV_HI20
+                | R_RISCV_LO12_I
+                | R_RISCV_LO12_S
+                | R_RISCV_TPOFF64
+                | R_RISCV_TPREL_HI20
+                | R_RISCV_TPREL_LO12_I
+                | R_RISCV_TPREL_LO12_S
+        ),
+        ArchKind::Mips | ArchKind::Mips64 => matches!(
+            rel_type,
+            R_MIPS_26 | R_MIPS_HI16 | R_MIPS_LO16 | R_MIPS_32 | R_MIPS_64
+        ),
+        ArchKind::Arm => matches!(
+            rel_type,
+            R_ARM_ABS32 | R_ARM_CALL | R_ARM_JUMP24 | R_ARM_MOVW_ABS_NC | R_ARM_MOVT_ABS
+        ),
+    }
+}
+
+fn relocation_patch_width(arch: ArchKind, rel_type: u32) -> usize {
+    match arch {
+        ArchKind::X86_64 => match rel_type {
+            R_X86_64_64 | R_X86_64_GOT64 | R_X86_64_GOTOFF64 | R_X86_64_TPOFF64 => 8,
+            _ => 4,
+        },
+        ArchKind::AArch64 => match rel_type {
+            R_AARCH64_ABS64 | R_AARCH64_PREL64 => 8,
+            _ => 4,
+        },
+        ArchKind::RiscV64 => match rel_type {
+            R_RISCV_64 | R_RISCV_TPOFF64 | R_RISCV_CALL | R_RISCV_CALL_PLT => 8,
+            _ => 4,
+        },
+        ArchKind::Mips | ArchKind::Mips64 => match rel_type {
+            R_MIPS_64 => 8,
+            _ => 4,
+        },
+        ArchKind::Arm => 4,
+    }
 }
 
 fn apply_one(sec: &mut OutputSection, r: OutputRela, layout: &Layout) -> Result<(), RelocError> {
@@ -876,6 +978,103 @@ mod tests {
         };
         apply_relocations(&mut layout).expect("apply");
         layout
+    }
+
+    fn apply_one_test_reloc(arch: ArchKind, rel_type: u32) -> Result<DynamicRelocs, RelocError> {
+        let mut layout = Layout {
+            is_pie: false,
+            is_shared: false,
+            base_addr: 0x400000,
+            file_base: 0,
+            sections: vec![
+                OutputSection {
+                    kind: OutputSectionKind::Text,
+                    name: "".into(),
+                    sh_name_off: 0,
+                    ty: SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                    data: vec![],
+                    size: 0,
+                    entsize: 0,
+                    output_index: 0,
+                    load_segment: 0,
+                    vaddr: 0,
+                    file_off: 0,
+                    input_offsets: vec![],
+                    input_sections: vec![],
+                },
+                OutputSection {
+                    kind: OutputSectionKind::Text,
+                    name: ".text".into(),
+                    sh_name_off: 0,
+                    ty: SHT_PROGBITS,
+                    flags: SHF_ALLOC | SHF_EXECINSTR,
+                    align: 16,
+                    data: vec![0; 8],
+                    size: 8,
+                    entsize: 0,
+                    output_index: 1,
+                    load_segment: 0,
+                    vaddr: 0x401000,
+                    file_off: 0x120,
+                    input_offsets: vec![],
+                    input_sections: vec![],
+                },
+            ],
+            segments: vec![],
+            symbols: vec![
+                OutputSymbol {
+                    name: "".into(),
+                    value: 0,
+                    vaddr: 0,
+                    size: 0,
+                    bind: 0,
+                    ty: 0,
+                    kind: 0,
+                    visibility: 0,
+                    section: 0,
+                    shndx_if_section: 0,
+                },
+                OutputSymbol {
+                    name: "target".into(),
+                    value: 0,
+                    vaddr: 0x401004,
+                    size: 0,
+                    bind: STB_GLOBAL,
+                    ty: STT_FUNC,
+                    kind: STT_FUNC,
+                    visibility: 0,
+                    section: 1,
+                    shndx_if_section: 0,
+                },
+            ],
+            entry: 0x401000,
+            has_symtab: true,
+            has_dynamic: false,
+            n_locals: 1,
+            output_relas: vec![OutputRela {
+                section: 1,
+                offset: 0,
+                sym: 1,
+                rel_type,
+                addend: 0,
+                _name: String::new(),
+            }],
+            needed: vec![],
+            dynamic_linker: None,
+            arch,
+        };
+        apply_relocations(&mut layout)
+    }
+
+    #[test]
+    fn unsupported_relocation_types_return_unsupported_type() {
+        let err = apply_one_test_reloc(ArchKind::X86_64, R_AARCH64_CALL26).unwrap_err();
+        assert_eq!(err, RelocError::UnsupportedType(R_AARCH64_CALL26));
+
+        let err = apply_one_test_reloc(ArchKind::AArch64, R_X86_64_PC32).unwrap_err();
+        assert_eq!(err, RelocError::UnsupportedType(R_X86_64_PC32));
     }
 
     #[test]

@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::codegen::elf::{
-    ELFCLASS64, ELFMAG, EM_AARCH64, EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_NOBITS, SHT_NULL,
-    SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
+    ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_AARCH64, EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_NOBITS,
+    SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
 };
 
 /// 从 .o 文件节头表中读出的原始字段:
@@ -108,6 +108,11 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
     if data[4] != ELFCLASS64 {
         return Err(ObjectError {
             msg: format!("{}: only ELF64 supported", name),
+        });
+    }
+    if data[5] != ELFDATA2LSB {
+        return Err(ObjectError {
+            msg: format!("{}: only little-endian ELF64 supported", name),
         });
     }
     let machine = u16::from_le_bytes(data[18..20].try_into().unwrap());
@@ -544,6 +549,41 @@ mod tests {
         );
         let p2 = parse_object(&empty, "empty.o").expect("parse empty");
         assert!(p2.symbols.is_empty());
+    }
+
+    #[test]
+    fn rejects_unsupported_object_classes_and_machines() {
+        let arm32 = elf::build_elf32_arm(&[0], &[], &[], &[], &[], &[]);
+        let err = parse_object(&arm32, "arm32.o").unwrap_err();
+        assert!(err.to_string().contains("only ELF64 supported"));
+
+        let mut mips64 = elf::build_elf_rel_x86_64(
+            &[0],
+            &[],
+            &[],
+            0,
+            &[],
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        mips64[18..20].copy_from_slice(&elf::EM_MIPS.to_le_bytes());
+        let err = parse_object(&mips64, "mips64.o").unwrap_err();
+        assert!(err.to_string().contains("unsupported e_machine=8"));
+
+        let aarch64 = elf::build_elf_rel_aarch64(&[0], &[], &[], &[], &[], &[]);
+        assert!(parse_object(&aarch64, "aarch64.o").is_ok());
+
+        let riscv64 = elf::build_elf_rel_riscv64(&[0], &[], &[], &[], &[], &[]);
+        assert!(parse_object(&riscv64, "riscv64.o").is_ok());
     }
 
     #[test]
