@@ -105,7 +105,7 @@ pub struct Profraw {
     pub value_profiles: HashMap<usize, ValueProfileData>,
     /// v2: FNV-1a checksum of all sites for integrity verification
     pub checksum: u64,
-    /// Format version (1 or 2)
+    /// Current profraw format version.
     pub version: u32,
 }
 
@@ -175,21 +175,14 @@ impl Profraw {
     pub fn write(&self, out: &Path) -> io::Result<usize> {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(b"PROF");
-        let version = if self.version >= PROFRAW_VERSION_V2 {
-            PROFRAW_VERSION_V2
-        } else {
-            PROFRAW_VERSION_V1
-        };
-        buf.extend_from_slice(&version.to_le_bytes());
+        buf.extend_from_slice(&PROFRAW_VERSION_CURRENT.to_le_bytes());
 
-        if version >= PROFRAW_VERSION_V2 {
-            let checksum = if self.checksum != 0 {
-                self.checksum
-            } else {
-                Self::compute_checksum(&self.sites)
-            };
-            buf.extend_from_slice(&checksum.to_le_bytes());
-        }
+        let checksum = if self.checksum != 0 {
+            self.checksum
+        } else {
+            Self::compute_checksum(&self.sites)
+        };
+        buf.extend_from_slice(&checksum.to_le_bytes());
 
         buf.extend_from_slice(&(self.sites.len() as u32).to_le_bytes());
         for s in &self.sites {
@@ -202,19 +195,17 @@ impl Profraw {
             buf.extend_from_slice(&s.line.to_le_bytes());
         }
 
-        if version >= PROFRAW_VERSION_V2 {
-            // Write value profiles
-            let vp_count = self.value_profiles.len() as u32;
-            buf.extend_from_slice(&vp_count.to_le_bytes());
-            for (&site_idx, vp) in &self.value_profiles {
-                buf.extend_from_slice(&(site_idx as u32).to_le_bytes());
-                buf.extend_from_slice(&(vp.call_targets.len() as u32).to_le_bytes());
-                for (target, count) in &vp.call_targets {
-                    let t = target.as_bytes();
-                    buf.extend_from_slice(&(t.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(t);
-                    buf.extend_from_slice(&count.to_le_bytes());
-                }
+        // Write value profiles
+        let vp_count = self.value_profiles.len() as u32;
+        buf.extend_from_slice(&vp_count.to_le_bytes());
+        for (&site_idx, vp) in &self.value_profiles {
+            buf.extend_from_slice(&(site_idx as u32).to_le_bytes());
+            buf.extend_from_slice(&(vp.call_targets.len() as u32).to_le_bytes());
+            for (target, count) in &vp.call_targets {
+                let t = target.as_bytes();
+                buf.extend_from_slice(&(t.len() as u32).to_le_bytes());
+                buf.extend_from_slice(t);
+                buf.extend_from_slice(&count.to_le_bytes());
             }
         }
 
@@ -242,7 +233,7 @@ impl Profraw {
             ));
         }
         let ver = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        if ver != PROFRAW_VERSION_V1 && ver != PROFRAW_VERSION_V2 {
+        if ver != PROFRAW_VERSION_CURRENT {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported profraw version: {ver}"),
@@ -250,18 +241,15 @@ impl Profraw {
         }
         let mut off = 8usize;
 
-        // v2: read checksum
-        let mut checksum: u64 = 0;
-        if ver >= PROFRAW_VERSION_V2 {
-            if off + 8 > buf.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "truncated profraw v2 checksum",
-                ));
-            }
-            checksum = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-            off += 8;
+        // Read checksum.
+        if off + 8 > buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated profraw checksum",
+            ));
         }
+        let checksum = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        off += 8;
 
         if off + 4 > buf.len() {
             return Err(io::Error::new(
@@ -291,7 +279,7 @@ impl Profraw {
         }
 
         // Verify checksum
-        if ver >= PROFRAW_VERSION_V2 && checksum != 0 {
+        if checksum != 0 {
             let computed = Self::compute_checksum(&sites);
             if computed != checksum {
                 return Err(io::Error::new(
@@ -303,9 +291,9 @@ impl Profraw {
             }
         }
 
-        // v2: read value profiles
+        // Read value profiles.
         let mut value_profiles = HashMap::new();
-        if ver >= PROFRAW_VERSION_V2 && off + 4 <= buf.len() {
+        if off + 4 <= buf.len() {
             let n_vp = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
             off += 4;
             for _ in 0..n_vp {
@@ -1487,30 +1475,32 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    /// Test v1 format backward compatibility
+    /// Test old profraw versions are rejected.
     #[test]
-    fn profraw_v1_backward_compat() {
-        // Write a v1 format file manually
+    fn profraw_rejects_unsupported_version() {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(b"PROF");
-        buf.extend_from_slice(&1u32.to_le_bytes()); // version 1
-        buf.extend_from_slice(&1u32.to_le_bytes()); // 1 site
-                                                    // site: func="main", file="m.c", line=1
-        buf.extend_from_slice(&4u32.to_le_bytes());
-        buf.extend_from_slice(b"main");
-        buf.extend_from_slice(&3u32.to_le_bytes());
-        buf.extend_from_slice(b"m.c");
-        buf.extend_from_slice(&1u32.to_le_bytes());
-        // 1 counter
-        buf.extend_from_slice(&1u32.to_le_bytes());
-        buf.extend_from_slice(&42u64.to_le_bytes());
+        buf.extend_from_slice(&PROFRAW_VERSION_V1.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
 
-        let tmp = std::env::temp_dir().join("dcc-pgo-v1-compat.profraw");
+        let tmp = std::env::temp_dir().join("dcc-pgo-v1-reject.profraw");
         std::fs::write(&tmp, &buf).unwrap();
-        let q = Profraw::read(&tmp).unwrap();
-        assert_eq!(q.version, PROFRAW_VERSION_V1);
-        assert_eq!(q.sites.len(), 1);
-        assert_eq!(q.counters, vec![42]);
+        let err = Profraw::read(&tmp).unwrap_err();
+        assert!(err.to_string().contains("unsupported profraw version"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn profdata_rejects_unsupported_version() {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(PROFDATA_MAGIC);
+        buf.extend_from_slice(&(PROFDATA_VERSION + 1).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+
+        let tmp = std::env::temp_dir().join("dcc-profdata-v2-reject.profdata");
+        std::fs::write(&tmp, &buf).unwrap();
+        let err = Profraw::read_profdata(&tmp).unwrap_err();
+        assert!(err.to_string().contains("unsupported profdata version"));
         let _ = std::fs::remove_file(&tmp);
     }
 

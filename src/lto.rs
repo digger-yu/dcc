@@ -13,6 +13,10 @@
 
 use std::collections::HashMap;
 
+/// Current `.llvm.lto` summary payload version.
+const LTO_SUMMARY_MAGIC: &[u8; 8] = b"DCC_LTO\0";
+const LTO_SUMMARY_VERSION: u8 = 1;
+
 /// 单个函数在 LTO 阶段的摘要。
 #[derive(Debug, Clone, Default)]
 pub struct FunctionSummary {
@@ -77,7 +81,8 @@ pub fn is_lto_enabled(args: &[String]) -> bool {
 /// 将 LTO 摘要序列化为链接器可消费的节载荷（文本 JSON 子集）。
 pub fn serialize_summary(unit: &LtoUnit) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"DCC_LTO\0");
+    out.extend_from_slice(LTO_SUMMARY_MAGIC);
+    out.push(LTO_SUMMARY_VERSION);
     out.extend_from_slice(unit.path.as_bytes());
     out.push(0);
     for (name, s) in &unit.functions {
@@ -89,10 +94,13 @@ pub fn serialize_summary(unit: &LtoUnit) -> Vec<u8> {
 
 /// 从 .llvm.lto / .dcc.lto 节载荷解析摘要（供链接器探测）。
 pub fn parse_summary(data: &[u8]) -> Option<LtoUnit> {
-    if !data.starts_with(b"DCC_LTO\0") {
+    if !data.starts_with(LTO_SUMMARY_MAGIC) {
         return None;
     }
-    let rest = &data[8..];
+    if data.get(8).copied()? != LTO_SUMMARY_VERSION {
+        return None;
+    }
+    let rest = &data[9..];
     let nul = rest.iter().position(|&b| b == 0)?;
     let path = String::from_utf8_lossy(&rest[..nul]).to_string();
     let mut unit = LtoUnit {
@@ -198,10 +206,20 @@ mod tests {
     fn serialize_and_parse_roundtrip() {
         let unit = build_unit("foo.c", &[("bar", 64, true), ("baz", 0, false)]);
         let data = serialize_summary(&unit);
+        assert_eq!(&data[..8], LTO_SUMMARY_MAGIC);
+        assert_eq!(data[8], LTO_SUMMARY_VERSION);
         let parsed = parse_summary(&data).expect("parse LTO summary");
         assert_eq!(parsed.path, "foo.c");
         assert!(parsed.functions["bar"].defined);
         assert!(!parsed.functions["baz"].defined);
+    }
+
+    #[test]
+    fn parse_summary_rejects_unsupported_version() {
+        let unit = build_unit("foo.c", &[("bar", 64, true)]);
+        let mut data = serialize_summary(&unit);
+        data[8] = LTO_SUMMARY_VERSION + 1;
+        assert!(parse_summary(&data).is_none());
     }
 
     #[test]

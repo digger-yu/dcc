@@ -392,6 +392,16 @@ mod tests {
     }
 
     #[test]
+    fn offload_binary_rejects_unsupported_version() {
+        let mut s = OffloadSection::new();
+        s.add_entry(sample_entry());
+        let mut bin = s.to_binary();
+        bin[8] = OFFLOAD_FORMAT_VERSION + 1;
+        let err = OffloadSection::from_binary(&bin).unwrap_err();
+        assert!(err.contains("unsupported .dcc.offload version"), "{err}");
+    }
+
+    #[test]
     fn offload_add_entry_dedups() {
         let mut s = OffloadSection::new();
         s.add_entry(sample_entry());

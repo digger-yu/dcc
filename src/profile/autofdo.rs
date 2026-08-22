@@ -77,6 +77,7 @@ pub struct AutoFdoSummary {
 
 const AFDO_BINARY_MAGIC: &[u8; 4] = b"AFDO";
 const AFDO_BINARY_VERSION: u32 = 2;
+const AFDO_TEXT_VERSION: u32 = 1;
 
 impl AutoFdoProfile {
     pub fn empty() -> Self {
@@ -103,7 +104,22 @@ impl AutoFdoProfile {
         let mut p = AutoFdoProfile::default();
         for line in input.lines() {
             let l = line.trim();
-            if l.is_empty() || l.starts_with('#') {
+            if l.is_empty() {
+                continue;
+            }
+            if let Some(rest) = l.strip_prefix("# dcc autofdo v") {
+                let version = rest.trim().parse::<u32>().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "bad autofdo text version")
+                })?;
+                if version != AFDO_TEXT_VERSION {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unsupported autofdo text version: {version}"),
+                    ));
+                }
+                continue;
+            }
+            if l.starts_with('#') {
                 continue;
             }
             let mut it = l.split_whitespace();
@@ -287,7 +303,7 @@ impl AutoFdoProfile {
             ));
         }
         let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
-        if version > AFDO_BINARY_VERSION {
+        if version != AFDO_BINARY_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported autofdo version: {version}"),
@@ -389,12 +405,21 @@ mod tests {
     #[test]
     fn parse_minimal_profile() {
         let p = AutoFdoProfile::from_str(
-            "# dcc autofdo v0\nfunc main 100\nfunc foo 10\nline main 5 1 4\n",
+            "# dcc autofdo v1\nfunc main 100\nfunc foo 10\nline main 5 1 4\n",
         )
         .unwrap();
         assert_eq!(p.func_samples.get("main"), Some(&100));
         assert_eq!(p.func_samples.get("foo"), Some(&10));
         assert_eq!(p.line_samples.get(&("main".into(), 5, 1)), Some(&4));
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_text_version() {
+        let err = AutoFdoProfile::from_str("# dcc autofdo v0\nfunc main 100\n").unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported autofdo text version"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -556,6 +581,16 @@ mod tests {
     fn autofdo_binary_rejects_bad_magic() {
         let result = AutoFdoProfile::read_binary(b"XXXX\x02\x00\x00\x00");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn autofdo_binary_rejects_unsupported_version() {
+        let mut data = Vec::new();
+        data.extend_from_slice(AFDO_BINARY_MAGIC);
+        data.extend_from_slice(&(AFDO_BINARY_VERSION - 1).to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        let err = AutoFdoProfile::read_binary(&data).unwrap_err();
+        assert!(err.to_string().contains("unsupported autofdo version"));
     }
 
     /// Merge includes discriminated samples.

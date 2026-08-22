@@ -38,6 +38,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+const MEMPROF_BINARY_MAGIC: &[u8; 8] = b"MEMPROFD";
+const MEMPROF_FORMAT_VERSION: u32 = 1;
+const MEMPROF_TEXT_VERSION: u32 = 1;
+
 /// MemProf 配置
 #[derive(Debug, Clone, Default)]
 pub struct MemProfConfig {
@@ -116,7 +120,7 @@ impl MemProfData {
     /// 从文件路径解析 (自动检测文本/二进制格式)
     pub fn read(path: &Path) -> io::Result<Self> {
         let data = fs::read(path)?;
-        if data.len() >= 8 && &data[0..8] == b"MEMPROFD" {
+        if data.len() >= 8 && &data[0..8] == MEMPROF_BINARY_MAGIC {
             return Self::read_binary(&data);
         }
         let s =
@@ -132,7 +136,22 @@ impl MemProfData {
         let mut d = Self::default();
         for line in input.lines() {
             let l = line.trim();
-            if l.is_empty() || l.starts_with('#') {
+            if l.is_empty() {
+                continue;
+            }
+            if let Some(rest) = l.strip_prefix("# dcc memprof v") {
+                let version = rest.trim().parse::<u32>().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "bad memprof text version")
+                })?;
+                if version != MEMPROF_TEXT_VERSION {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unsupported memprof text version: {version}"),
+                    ));
+                }
+                continue;
+            }
+            if l.starts_with('#') {
                 continue;
             }
             if let Some(rest) = l.strip_prefix("alloc ") {
@@ -271,9 +290,9 @@ impl MemProfData {
     /// 序列化为 dcc 二进制格式 (.memprofdata)
     pub fn write_binary(&self, out: &Path) -> io::Result<usize> {
         let mut buf: Vec<u8> = Vec::new();
-        buf.extend_from_slice(b"MEMPROFD");
-        buf.extend_from_slice(&1u32.to_le_bytes()); // version
-                                                    // allocs
+        buf.extend_from_slice(MEMPROF_BINARY_MAGIC);
+        buf.extend_from_slice(&MEMPROF_FORMAT_VERSION.to_le_bytes());
+        // allocs
         buf.extend_from_slice(&(self.alloc_counts.len() as u32).to_le_bytes());
         for (stack, &count) in &self.alloc_counts {
             buf.extend_from_slice(&(stack.len() as u32).to_le_bytes());
@@ -326,13 +345,19 @@ impl MemProfData {
 
     /// 从 dcc 二进制格式解析
     pub fn read_binary(data: &[u8]) -> io::Result<Self> {
-        if data.len() < 12 || &data[0..8] != b"MEMPROFD" {
+        if data.len() < 12 || &data[0..8] != MEMPROF_BINARY_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "bad memprofdata magic",
             ));
         }
-        let _version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        if version != MEMPROF_FORMAT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported memprofdata version: {version}"),
+            ));
+        }
         let mut off = 12;
         let mut d = Self::default();
         // allocs
@@ -956,6 +981,20 @@ mod tests {
     fn memprof_binary_rejects_bad_magic() {
         let result = MemProfData::read_binary(b"BADMAGIC\x01\x00\x00\x00");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn memprof_rejects_unsupported_versions() {
+        let text = MemProfData::from_str("# dcc memprof v0\nalloc main = 10 100\n");
+        let err = text.unwrap_err();
+        assert!(err.to_string().contains("unsupported memprof text version"));
+
+        let mut data = Vec::new();
+        data.extend_from_slice(MEMPROF_BINARY_MAGIC);
+        data.extend_from_slice(&(MEMPROF_FORMAT_VERSION + 1).to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        let err = MemProfData::read_binary(&data).unwrap_err();
+        assert!(err.to_string().contains("unsupported memprofdata version"));
     }
 
     /// read() auto-detects text vs binary.
