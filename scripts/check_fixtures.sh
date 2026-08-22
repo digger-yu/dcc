@@ -40,6 +40,22 @@ extract_join() {
     [[ "$line" =~ \.join\(\"([^\"]+\.(c|s))\"\) ]] && echo "${BASH_REMATCH[1]}" || true
 }
 
+check_example_ref() {
+    local rel_path="$1"
+    local source_ref="$2"
+
+    if [[ ! "$rel_path" =~ ^examples/ ]]; then
+        return 0
+    fi
+
+    local full_path="$REPO_ROOT/$rel_path"
+    if [[ ! -f "$full_path" ]]; then
+        echo "❌ MISSING EXAMPLE: $rel_path (referenced in $source_ref)"
+        return 1
+    fi
+    return 0
+}
+
 echo "=== 扫描 tests/*.rs 中的 fixture 引用 ==="
 
 for test_file in "$REPO_ROOT"/tests/*.rs; do
@@ -73,10 +89,19 @@ for test_file in "$REPO_ROOT"/tests/*.rs; do
         # ── Pattern 3: .join("filename.c") / .join("filename.s") ──
         if [[ "$line" =~ \.join\(\"([^\"]+\.(c|s))\"\) ]]; then
             filename="${BASH_REMATCH[1]}"
-            # 检查两个可能的 fixture 位置
+            # 检查 fixture 相对路径和 repo 相对路径两种写法
+            candidates=()
+            if [[ "$filename" == tests/fixtures/* ]]; then
+                candidates+=("$filename")
+            elif [[ "$filename" == fixtures/* ]]; then
+                candidates+=("tests/${filename}")
+            else
+                candidates+=("tests/fixtures/$filename")
+                candidates+=("tests/fixtures/errors/$filename")
+            fi
             found=false
-            for prefix in "tests/fixtures" "tests/fixtures/errors"; do
-                if [[ -f "$REPO_ROOT/$prefix/$filename" ]]; then
+            for candidate in "${candidates[@]}"; do
+                if [[ -f "$REPO_ROOT/$candidate" ]]; then
                     found=true
                     break
                 fi
@@ -86,20 +111,38 @@ for test_file in "$REPO_ROOT"/tests/*.rs; do
                 if echo "$line" | grep -qP '(fixture|profile_src)'; then
                     # 检查是否故意缺失（如 does_not_exist.c）
                     any_intentional=false
-                    for prefix in "tests/fixtures" "tests/fixtures/errors"; do
-                        if [[ -v INTENTIONALLY_MISSING["$prefix/$filename"] ]]; then
+                    for candidate in "${candidates[@]}"; do
+                        if [[ -v INTENTIONALLY_MISSING["$candidate"] ]]; then
                             any_intentional=true
                             break
                         fi
                     done
                     if ! $any_intentional; then
-                        echo "❌ MISSING: $filename (in tests/fixtures/ or tests/fixtures/errors/), referenced in $basename:$line_num"
+                        echo "❌ MISSING: $filename (fixture path candidate missing), referenced in $basename:$line_num"
                         errors=$((errors + 1))
                     fi
                 fi
             fi
         fi
     done < "$test_file"
+done
+
+echo "=== 扫描 CI/scripts 中的 examples 引用 ==="
+for source_file in \
+    "$REPO_ROOT"/.github/workflows/*.yml \
+    "$REPO_ROOT"/.github/workflows/*.yaml \
+    "$REPO_ROOT"/scripts/*.sh; do
+    [[ -f "$source_file" ]] || continue
+    rel_source="${source_file#$REPO_ROOT/}"
+    line_num=0
+    while IFS= read -r line; do
+        line_num=$((line_num + 1))
+        while [[ "$line" =~ (examples/[A-Za-z0-9_./-]+\.(c|cpp)) ]]; do
+            rel="${BASH_REMATCH[1]}"
+            check_example_ref "$rel" "$rel_source:$line_num" || errors=$((errors + 1))
+            line="${line#*$rel}"
+        done
+    done < "$source_file"
 done
 
 echo ""

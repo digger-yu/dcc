@@ -33,7 +33,7 @@ EOF
 objdump -d "$TMP/fold.o" | grep -E 'mov.*\$0x2a|mov.*\$0x42' && echo "O2 fold OK"
 
 echo "[4] aarch64 hello"
-"$DCC" --target aarch64-linux-gnu -c -o "$TMP/a64.o" examples/hello.c
+"$DCC" --target aarch64-linux-gnu -c -o "$TMP/a64.o" examples/basics/hello.c
 readelf -h "$TMP/a64.o" | grep -q 'AArch64' && echo "aarch64 OK"
 
 echo "=== done ==="

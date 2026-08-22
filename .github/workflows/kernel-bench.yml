@@ -74,10 +74,17 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/bin/dcc
           DCC=$GITHUB_WORKSPACE/bin/dcc
           PASS=0; FAIL=0
-          for test in hello:42 arith:23 control:100 call:42; do
-            name=${test%%:*}; expected=${test##*:}
-            echo "--- Testing $name.c (expect $expected) ---"
-            $DCC -std=gnu23 -o /tmp/$name examples/$name.c 2>&1
+          for test in \
+            examples/basics/hello.c:42:hello \
+            examples/basics/arith.c:23:arith \
+            examples/basics/control_flow.c:100:control \
+            examples/pointers/function_call.c:42:call; do
+            source=${test%%:*}
+            rest=${test#*:}
+            expected=${rest%%:*}
+            name=${rest##*:}
+            echo "--- Testing $source (expect $expected) ---"
+            $DCC -std=gnu23 -o /tmp/$name "$source" 2>&1
             chmod +x /tmp/$name
             rc=0; /tmp/$name || rc=$?
             if [ $rc -eq $expected ]; then
