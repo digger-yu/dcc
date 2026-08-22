@@ -1,13 +1,12 @@
 // src/profile/device_codegen.rs - Device code generation for offloading
 //
 // Generates device-side code (PTX for NVIDIA, AMDGCN for AMD) from
-// offload entries. Currently generates stub implementations that can
-// be linked with the host binary.
+// offload entries. The generated kernels include real device memory
+// loads, arithmetic, and stores rather than empty return stubs.
 //
 // Runtime loader: `OffloadRuntimeLoader` reads `.dcc.offload` sections
-// from ELF binaries and dispatches kernel launches to device runtimes.
-// Currently provides a dispatch interface with diagnostics when device
-// runtime is not available (no CUDA/ROCm driver installed).
+// from ELF binaries, probes CUDA/ROCm driver runtimes, and dispatches
+// kernel launches through the resolved driver APIs when available.
 
 use crate::profile::offload::{OffloadEntry, OffloadSection};
 use std::collections::HashMap;

@@ -43,16 +43,18 @@
 
 | 形式 | CLI | 数据格式 | 解析器 | 权重传播 |
 |------|-----|----------|--------|----------|
-| instr-PGO (LLVM 风格) | `-fprofile-instr-generate[=dir]` / `-fprofile-instr-use=file` | `.profraw` / `.profdata` | dcc 自家二进制 | stub |
-| frontend-PGO (GCC 风格) | `-fprofile-generate[=dir]` / `-fprofile-use=file` | `.gcda` | GCOV 路径 (见 §2) | stub |
+| instr-PGO (LLVM 风格) | `-fprofile-instr-generate[=dir]` / `-fprofile-instr-use=file` | `.profraw` / `.profdata` | dcc 自家二进制 | PgoWeights / branch prob / trip count |
+| frontend-PGO (GCC 风格) | `-fprofile-generate[=dir]` / `-fprofile-use=file` | `.profraw` v2 (`-fprofile-values`) / GCOV `.gcda` | PGO + GCOV 路径 | PgoWeights / GCOV report |
 
-dcc 当前实现：入口计数器 (instr-PGO 简化版)。
+dcc 当前实现：入口计数器 + value histogram（instr-PGO 简化版）。
 * `instrument_program(prog, cfg)` 在每个 `FuncDecl` body 顶部插入
-  `__dcc_pgo_count_fn(idx)` 调用
-* `_dcc_pgo_runtime` 累加 `idx -> counter`，`atexit` 写 `<name>.profraw`
-* 读回 (`Profraw::read`) 仅解析 `u64` 数组，不做权重传播
-* 传播接口 `pgo::use_counts(prog, counts)` 留给后端，当前仅落
-  `PgoWeights: HashMap<func_name, u64>` 备查
+  `__dcc_pgo_count_fn(idx)` 和/或 `__dcc_pgo_value_sample(idx)` 调用
+* driver 在启用 `-fprofile-generate` 或 `-fprofile-values` 时自动落盘
+  `<stem>.pgort.c`；运行时注册 `atexit`，写 `<stem>.profraw` v2
+* `.profraw` v2 同时包含 site metadata、entry counters 和
+  value profile section，可由 `Profraw::read` / `merge` / `profdata` 读取
+* 传播接口 `pgo::use_counts(prog, counts)` 与 `PgoWeights` 供后端使用，
+  edge weights 可继续推导 branch probability 与 loop trip count
 
 ### 1.2 `.profraw` 文件格式 (v2)
 
@@ -94,15 +96,18 @@ v2 增强操作:
 * `ValueProfileData` 间接调用目标计数表
 
 实现：`src/profile/pgo.rs::Profraw::write/read/write_profdata/read_profdata`。
-测试：`Profraw::profraw_roundtrip` + `PgoWeights::weights_aggregate_by_func`，
-以及 `tests/profile.rs::cli_profile_generate_is_accepted`。
+测试：`Profraw::profraw_roundtrip` + `PgoWeights::weights_aggregate_by_func` +
+`pgo_runtime_generates_value_histogram_writer`，以及
+`tests/profile.rs::pgo_profile_values_generates_runtime_histogram_gate` /
+`pgo_end_to_end_profraw_merge_profdata_use_gate`。
 
 ### 1.3 配置项 (`ProfileConfig`)
 
 ```rust
-pub pgo_generate:  Option<PathBuf>,  // -fprofile-generate[=dir]
-pub pgo_use:       Option<PathBuf>,  // -fprofile-use=file
-pub profile_arcs:  bool,             // -fprofile-arcs
+pub pgo_generate:   Option<PathBuf>,  // -fprofile-generate[=dir]
+pub pgo_use:        Option<PathBuf>,  // -fprofile-use=file
+pub value_sampling: bool,             // -fprofile-values
+pub profile_arcs:   bool,             // -fprofile-arcs
 ```
 
 `any_instrumentation()` / `any_use()` / `gcda_path()` 三方法把以上
@@ -640,7 +645,7 @@ E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
 
 ## 8. 集成测试
 
-文件：`tests/profile.rs`，共 24 个测试（下表 13 个 CLI/门禁用例 + §7.6 的 11 个 offload 用例）：
+共 50 个集成测试（含 CLI、PGO、GCOV、MemProf 与 offload 门禁用例）：
 
 | 测试 | 覆盖 |
 |------|------|
@@ -648,6 +653,7 @@ E0310 / W0311-13 位置、HIP arch 映射），fixtures 为
 | `cli_profile_use_missing_path_rejects` | `-fprofile-use` 无 path 报错 |
 | `cli_emit_asm_still_works_with_profile` | `-fprofile-arcs` + `-fsyntax-only` 共存 |
 | `cli_test_coverage_accepted` | `-ftest-coverage` 接受 |
+| `pgo_profile_values_generates_runtime_histogram_gate` | `-fprofile-values` 端到端硬门禁：编译 → `.pgort.c` → 链接 → 运行 → `.profraw` value histogram 断言 |
 | `gcov_end_to_end_counter_gate` | GCOV 端到端硬门禁：编译 → `.gcno`/`.gcovrt.c` → 链接 → 运行 → `.gcda` counter 断言 |
 | `cli_record_profile_rejects_missing_path` | `-frecord-profile` 无 path 报错 |
 | `cli_fopenmp_accepted` | `-fopenmp` 接受 |

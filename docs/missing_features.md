@@ -20,17 +20,6 @@
 | MIPS/ARM 对象链接路径 | object reader 当前只接收 ELF64 little-endian 且 machine 为 x86_64/AArch64/RISC-V；MIPS/ARM 仍保留 codegen/ELF 输出能力，跨对象 reader/link 路径未完成 |
 | Windows 链接路径 | Windows MSVC triple 可解析并生成 ELF 目标文件；COFF/MSVC ABI codegen/link 与原生 Windows 链接尚未验证 |
 
-## 性能分析 / Offload 限制
-
-| 通道 | 已知遗留 |
-|------|----------|
-| `-fprofile-values` | 完整运行时 value histogram 仍需外部 runtime 支持 |
-| GCOV runtime | `.gcno/.gcda` 读写与报告结构存在，但运行后真实 counter 更新的端到端路径仍未形成硬门禁 |
-| MemProf runtime | `MemProfRuntime` 仍生成 C stub；alloc/free/flush 中 callstack 记录与 `.memprofdata` 写出为 TODO |
-| Offload device codegen | CUDA/HIP/OpenMP target 设备端 PTX/AMDGCN 仍是 kernel stub (`ret` / `s_endpgm`) |
-| Offload runtime dispatch | `OffloadRuntimeLoader::check_runtime` 总是 `NotFound`，kernel launch 返回 `RuntimeNotAvailable`，未真正调 CUDA/ROCm driver |
-| unsupported device triple | 未知 device triple warning 后跳过 device codegen |
-
 ## 交叉编译 / 缺失平台
 
 | 缺失平台 | 说明 |

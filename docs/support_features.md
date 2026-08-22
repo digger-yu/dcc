@@ -39,7 +39,7 @@
 
 | 通道 | 能力 |
 |------|------|
-| PGO instrument | `-fprofile-generate` / `-fprofile-use`；`Profraw` v2 二进制 roundtrip (FNV-1a checksum 完整性校验 + value profiling 间接调用目标计数 + `merge` 多文件合并 + `profdata` 合并优化格式)；driver.rs 接入 `pgo::instrument_program`，codegen 自动 emit `call __dcc_pgo_count_fn`；`PgoWeights` 聚合 func 入口计数 + edge 计数 (`with_edge_counts`)；`propagate_edge_weights` 生成 `BranchProbMap` (分支概率)；`propagate_loop_trip_counts` 推算循环 trip count (供 unroll 决策) |
+| PGO instrument | `-fprofile-generate` / `-fprofile-use` / `-fprofile-values`；`Profraw` v2 二进制 roundtrip (FNV-1a checksum 完整性校验 + value profiling 目标计数 + `merge` 多文件合并 + `profdata` 合并优化格式)；driver.rs 接入 `pgo::instrument_program` 并自动生成 `<stem>.pgort.c`；codegen 自动 emit `call __dcc_pgo_count_fn` / `__dcc_pgo_value_sample`；运行后写出真实 counter 与 value histogram；`PgoWeights` 聚合 func 入口计数 + edge 计数 (`with_edge_counts`)；`propagate_edge_weights` 生成 `BranchProbMap` (分支概率)；`propagate_loop_trip_counts` 推算循环 trip count (供 unroll 决策) |
 | GCOV | `-ftest-coverage` / `-fprofile-arcs`；`.gcno` notes + `.gcda` data 二进制（与 GCC gcov-9 layout 对齐）；`cfg_checksum` 采用 GCC libgcov 公式；显式 little-endian 字节序 (跨架构兼容)；`read_notes()` / `read_data()` 读取器解析 .gcno/.gcda；行级覆盖率报告 `GcovReport` + `to_text()` 文本输出 |
 | AutoFDO | `-fauto-profile=` / `-fprofile-sample-use=`；text parser + inline calls 链解析 + `bucketize` 按阈值分 Hot/Warm/Cold + `merge` 合并 + `summary` 统计 + roundtrip 序列化；二进制格式 `write_binary`/`read_binary` (magic "AFDO" + version 2) + discriminator 支持 (`disc` 记录 + `discriminators_for` 查询) + 自动检测文本/二进制；通过 `ProfileWeights` 聚合，hot 函数下沉到 `.text.hot` 段 |
 | LBR | `-flbr-profile=`；解析 `perf script -F brstack` 文本 (含 mispredict/cycles 解析) + inbound/outbound 边查询 + `mispred_rate` 错误预测率 + `merge` 合并 + `summary` 统计 + `serialize` 文本输出；perf.data 二进制 LBR 记录解析 (`read_perf_data_binary` + PERF_RECORD_SAMPLE branch_stack) + 自动检测文本/二进制；通过 `ProfileWeights` 聚合 |
@@ -87,7 +87,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | x86 kernel wrapper flags | `arch_x86_compile.sh` 透传 `-fstack-clash-protection`、`-ftrivial-auto-var-init=*`、`-mrecord-mcount`、`-mfentry`、`-pg`、`-falign-loops=*`、`-falign-jumps=*` 等常见内核编译 flags |
 | `-x` 输入语言集 | CLI 支持 `c`/`c-header`、`c++`/`cpp`/`cxx` 及 C++ header 别名，并区分 `assembler`（原始汇编）与 `assembler-with-cpp`（预处理汇编） |
 | host wrapper dependency errors | `dcc-host-wrapper.sh` fails the host build when fixdep dependency generation fails instead of writing a stub `.d` file |
-| `-fprofile-values` | 启用 PGO value sampling 插桩，在函数入口生成 `__dcc_pgo_value_sample(site)` 调用，并与 profraw value profile 数据结构对接 |
+| `-fprofile-values` | 启用 PGO value sampling 插桩，在函数入口生成 `__dcc_pgo_value_sample(site)` 调用；driver 自动落盘 `<stem>.pgort.c`，运行时维护 per-site value histogram 并写入 profraw v2 的 value profile section |
 | 增量预处理 (PCH) | `-fpch-include=` / `-fpch-create=` / `-fpch-include-only=`；`PchBundle` 序列化 + 宏状态哈希校验；加载/写入失败、hash 不一致和预处理错误均 warning 后回退 |
 | Linux 内核头预处理 E2E | `compiler_types.h` / `rwonce.h` / `autoconf.h` 真实内核头预处理 + 依赖图闭包追踪（`linux_header_compiler_types_preprocess_e2e` / `linux_header_rwonce_preprocess_e2e` / `linux_header_autoconf_preprocess_e2e` / `linux_header_graph_dependency_closure`） |
 
