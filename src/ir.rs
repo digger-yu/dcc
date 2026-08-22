@@ -282,10 +282,6 @@ fn is_float_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Float { .. })
 }
 
-fn is_signed_integer_ty(ty: &ValueType) -> bool {
-    matches!(ty, ValueType::Integer { signed: true, .. })
-}
-
 fn is_vector_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Vector(_, _))
 }
@@ -324,6 +320,24 @@ fn same_size_bitcast(from: &ValueType, to: &ValueType) -> bool {
     value_type_size(from) == value_type_size(to)
 }
 
+fn is_supported_vector_scalar_bitcast_ty(ty: &ValueType) -> bool {
+    match ty {
+        ValueType::Integer { bits, .. } => matches!(*bits, 8 | 16 | 32 | 64 | 128),
+        ValueType::Float { bits } => matches!(*bits, 32 | 64),
+        _ => false,
+    }
+}
+
+fn is_supported_complex_integer_cast(ty: &ValueType) -> bool {
+    matches!(
+        ty,
+        ValueType::Integer {
+            bits: 8 | 16 | 32 | 64,
+            signed: true
+        }
+    )
+}
+
 fn is_supported_vector_cast(from: &ValueType, to: &ValueType, src_kind: &ExprKind) -> bool {
     if from == to || matches!(to, ValueType::Void) {
         return true;
@@ -334,19 +348,30 @@ fn is_supported_vector_cast(from: &ValueType, to: &ValueType, src_kind: &ExprKin
     if !same_size_bitcast(from, to) {
         return false;
     }
-    matches!(from, ValueType::Vector(_, _) | ValueType::Complex(_))
-        || matches!(to, ValueType::Vector(_, _))
+    match (from, to) {
+        (ValueType::Vector(_, _), ValueType::Vector(_, _)) => true,
+        (ValueType::Vector(_, _), ValueType::Complex(_))
+        | (ValueType::Complex(_), ValueType::Vector(_, _)) => true,
+        (ValueType::Vector(_, _), other) | (other, ValueType::Vector(_, _)) => {
+            is_supported_vector_scalar_bitcast_ty(other)
+        }
+        _ => false,
+    }
 }
 
 fn is_supported_complex_cast(from: &ValueType, to: &ValueType) -> bool {
     if from == to || matches!(to, ValueType::Void) {
         return true;
     }
-    if is_complex_ty(from) && is_signed_integer_ty(to) {
+    if is_complex_ty(from) && is_supported_complex_integer_cast(to) {
         return true;
     }
     same_size_bitcast(from, to)
-        && (matches!(from, ValueType::Vector(_, _)) || matches!(to, ValueType::Vector(_, _)))
+        && matches!(
+            (from, to),
+            (ValueType::Complex(_), ValueType::Vector(_, _))
+                | (ValueType::Vector(_, _), ValueType::Complex(_))
+        )
 }
 
 fn validate_expr(expr: &TypedExpr, diagnostics: &mut Vec<Diagnostic>) {
@@ -1191,6 +1216,71 @@ mod tests {
         let (program, _) = crate::parser::parse(src, "complex-vector-cast.c");
         let (module, _) = lower(program).expect("same-size vector/complex casts should lower");
         validate(&module).expect("same-size vector/complex casts should validate");
+    }
+
+    #[test]
+    fn same_size_vector_scalar_casts_validate() {
+        let src = b"typedef unsigned char v8qi __attribute__((vector_size(8)));\n\
+                     int main(void) {\n\
+                         v8qi v = {1,2,3,4,5,6,7,8};\n\
+                         unsigned long long bits = (unsigned long long)v;\n\
+                         v8qi w = (v8qi)bits;\n\
+                         return w[0];\n\
+                     }\n";
+        let (program, _) = crate::parser::parse(src, "vector-scalar-cast.c");
+        let (module, _) = lower(program).expect("same-size vector/scalar casts should lower");
+        validate(&module).expect("same-size vector/scalar casts should validate");
+    }
+
+    #[test]
+    fn different_size_vector_scalar_cast_reports_e1007() {
+        let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
+                     int main(void) { v4si v = {1,2,3,4}; return (long long)v; }\n";
+        let (program, _) = crate::parser::parse(src, "vector-scalar-size-mismatch.c");
+        let (module, _) = lower(program).expect("lower despite vector/scalar mismatch");
+        let err = validate(&module).expect_err("different-size vector/scalar cast must fail");
+        assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+    }
+
+    #[test]
+    fn unsupported_same_size_vector_pointer_cast_reports_e1007() {
+        let src = b"typedef long long v1di __attribute__((vector_size(8)));\n\
+                     int main(void) { v1di v = {1}; return (long)(void *)v; }\n";
+        let (program, _) = crate::parser::parse(src, "vector-pointer-cast.c");
+        let (module, _) = lower(program).expect("lower despite vector/pointer cast");
+        let err = validate(&module).expect_err("vector/pointer cast must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+    }
+
+    #[test]
+    fn different_size_complex_vector_cast_reports_e1007_and_e1008() {
+        let src = b"typedef int v4si __attribute__((vector_size(16)));\n\
+                     int main(void) { float _Complex z = 1; v4si v = (v4si)z; return v[0]; }\n";
+        let (program, _) = crate::parser::parse(src, "complex-vector-size-mismatch.c");
+        let (module, _) = lower(program).expect("lower despite complex/vector mismatch");
+        let err = validate(&module).expect_err("different-size complex/vector cast must fail");
+        assert!(err.iter().any(|d| d.code == "E1007"), "{err:?}");
+        assert!(err.iter().any(|d| d.code == "E1008"), "{err:?}");
+    }
+
+    #[test]
+    fn unsupported_complex_int128_cast_reports_e1008() {
+        let src = b"int main(void) { _Complex double z = 1; return (int)((__int128)z); }\n";
+        let (program, _) = crate::parser::parse(src, "complex-int128-cast.c");
+        let (module, _) = lower(program).expect("lower despite complex/int128 cast");
+        let err = validate(&module).expect_err("complex to int128 cast must fail validation");
+        assert!(err.iter().any(|d| d.code == "E1008"), "{err:?}");
+    }
+
+    #[test]
+    fn complex_to_signed_integer_casts_validate() {
+        let src = b"int main(void) {\n\
+                         _Complex double z = 1;\n\
+                         return (signed char)z + (short)z + (int)z + (long)z;\n\
+                     }\n";
+        let (program, _) = crate::parser::parse(src, "complex-signed-int-cast.c");
+        let (module, _) = lower(program).expect("complex to signed integer casts should lower");
+        validate(&module).expect("complex to signed integer casts should validate");
     }
 
     #[test]
