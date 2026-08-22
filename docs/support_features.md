@@ -95,7 +95,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | Builtin | 实现 |
 |---------|------|
 | `__builtin_constant_p` / inline 属性 | `tests/fixtures/c/constp.c`、`tests/fixtures/c/inline.c` |
-| 未知 `__builtin_*` 降级 | 表达式/语句上下文均按返回类型处理：void → ud2，其余 → 零值 + warning |
+| 未知 `__builtin_*` 降级 | 表达式/语句上下文均按返回类型处理：`void` → `ud2`，其余 → ABI 正确零值 + warning；覆盖整数、浮点、vector 与 sret 返回，`tests/fixtures/c/unk_builtin.c` + `unknown_builtin_warning_zero_and_ud2` 固化契约 |
 | `__builtin_va_start/end/copy/arg` | SysV va_list 结构（r13 帧链 + 24 字节槽） |
 | `__builtin_strcasecmp` / `strncasecmp` | 转发到 libc |
 | `__builtin_fma` / `fmaf` / `fmal` | 调 libm 对应函数 |
@@ -164,8 +164,8 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 
 | 特性 | 说明 |
 |------|------|
-| 向量/SIMD | 全局 SIMD 向量复制 + 浮点 SIMD 标量逐元素 + 非 Ident 向量 rvalue + 同尺寸 vector/scalar、vector/vector、complex/vector cast；IR validator 对 binop/unop/cast 使用显式白名单 |
-| 复数 | `_Complex` 算术完整支持 + 字面量 + `__real__` / `__imag__` 关键字；IR validator 对 binop/unop/cast 使用显式白名单 |
+| 向量/SIMD | 全局 SIMD 向量复制 + 浮点 SIMD 标量逐元素 + 非 Ident 向量 rvalue + 同尺寸 vector/scalar、vector/vector、complex/vector cast；IR validator 对 binop/unop/cast 使用显式白名单，并用 E1007/E1008 测试拒绝不同尺寸或未枚举转换 |
+| 复数 | `_Complex` 算术完整支持 + 字面量 + `__real__` / `__imag__` 关键字；IR validator 对 binop/unop/cast 使用显式白名单，并固化 complex/vector 同尺寸边界与 complex→signed integer 枚举转换 |
 | float 取模 | 软件 fmod = l - trunc(l/r) * r，零 libc 依赖；float validator 支持 `%` 并拒绝未枚举运算/转换 |
 | int128 `&&` / `||` | `or rdx, dst` 合并高 64 位后再 test |
 | 全局数组 RIP+SIB | `emit_load_global_indexed`：`[rip+disp32+idx*scale]` 单指令加载 |

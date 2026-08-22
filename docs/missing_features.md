@@ -5,13 +5,6 @@
 > 已支持特性详见 `docs/support_features.md`。本文件只记录仍不支持、
 > 明确降级、仍为 stub/no-op，或缺少测试契约的项目。
 
-## C 前端 / IR 语义限制
-
-| 限制 | 说明 |
-|------|------|
-| complex/vector cast 边界 | 不同尺寸或未枚举转换仍由 validator 拒绝 |
-| unknown `__builtin_*` explicit fallback | 未识别 builtin 明确降级：有返回值时返回 0，`void` 返回时发 `ud2` 并 warning；表达式/语句上下文均有测试契约 |
-
 ## 后端 codegen 限制
 
 ### AArch64 / RISC-V / MIPS / ARM
