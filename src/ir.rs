@@ -966,11 +966,15 @@ fn is_static_initializer(expr: &Expr) -> bool {
             Ok(_) => is_static_initializer(else_),
             Err(_) => false,
         },
-        // &ident / &arr[const] / &ident.field...: 链接期可重定位常量
+        // &ident / &arr[const] / &ident.field... / &(struct T){...}: 链接期可重定位常量
         Expr::AddrOf { e, .. } => match e.as_ref() {
             Expr::Ident { .. } | Expr::String { .. } => true,
+            // &(struct T){ .field = val, ... }: 复合字面量地址 (C99 静态存储期)
+            Expr::CompoundLit { inits, .. } => inits.iter().all(|item| match item {
+                InitItem::Expr(e) => is_static_initializer(e),
+                InitItem::Designated { value, .. } => is_static_initializer(value),
+            }),
             Expr::Index { arr, idx, .. } => {
-                // &arr[i] / &ident.field[i]...: 链接期可重定位常量
                 let base_ok = match arr.as_ref() {
                     Expr::Ident { .. } => true,
                     Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
@@ -978,7 +982,6 @@ fn is_static_initializer(expr: &Expr) -> bool {
                 };
                 base_ok && const_eval::eval(idx).is_ok()
             }
-            // &ident.field / &ident.field.field... : 链接期可重定位常量
             Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
             _ => false,
         },
@@ -988,16 +991,14 @@ fn is_static_initializer(expr: &Expr) -> bool {
         e @ Expr::Member { expr, .. } if matches!(e.ty(), Type::Array(..)) => {
             is_addr_of_member_ok(expr)
         }
-        // 数组到指针衰减: arr + const / &arr[i] 的等价形式
+        // 地址算术: 指针 + 整数 / 整数 + 指针 / 指针 - 整数
+        // 也覆盖 (unsigned long)&var + sizeof(var) - const 等内核模式
         Expr::Binop {
-            op: BinOp::Add,
+            op: BinOp::Add | BinOp::Sub,
             l,
             r,
             ..
-        } => {
-            (matches!(l.as_ref(), Expr::Ident { .. }) && const_eval::eval(r).is_ok())
-                || (matches!(r.as_ref(), Expr::Ident { .. }) && const_eval::eval(l).is_ok())
-        }
+        } => is_static_initializer(l) && is_static_initializer(r),
         Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
             inits.iter().all(|item| {
                 match item {
@@ -1037,6 +1038,15 @@ fn is_addr_of_member_ok(e: &Expr) -> bool {
         Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
         // cpumask_bits(&mask) 等宏展开为 (&mask)->bits: 先对基址取址再访问成员
         Expr::AddrOf { e, .. } => is_addr_of_member_ok(e),
+        // arr[const].field...: 数组下标 + 成员访问链
+        Expr::Index { arr, idx, .. } => {
+            let base_ok = match arr.as_ref() {
+                Expr::Ident { .. } => true,
+                Expr::Member { expr, .. } => is_addr_of_member_ok(expr),
+                _ => false,
+            };
+            base_ok && const_eval::eval(idx).is_ok()
+        }
         _ => false,
     }
 }

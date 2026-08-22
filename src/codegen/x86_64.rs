@@ -13908,37 +13908,29 @@ impl Codegen {
     /// 计算结构体成员偏移 (用于 __builtin_offsetof)
     fn compute_offset(ty: &Type, member: &str) -> usize {
         let fields = match ty {
-            Type::Struct(_, fields) => fields,
-            Type::Union(_, _fields) => {
-                // union: 所有成员偏移都是 0
-                return 0;
-            }
+            Type::Struct(_, fields) | Type::Union(_, fields) => fields,
             _ => return 0,
         };
         let parts: Vec<&str> = member.split('.').collect();
         let mut offset = 0usize;
         let mut current_fields = fields.as_ref();
         for (i, part) in parts.iter().enumerate() {
-            let part = if part.contains('[') {
+            let name = if part.contains('[') {
                 &part[..part.find('[').unwrap()]
             } else {
                 part
             };
-            let mut found = false;
-            for field in current_fields.iter() {
-                if field.name == *part {
-                    offset += field.offset;
-                    if i < parts.len() - 1 {
-                        // 嵌套: 进入子结构
-                        if let Type::Struct(_, sub_fields) = &field.ty {
-                            current_fields = sub_fields.as_ref();
-                        }
+            // 使用 find_field 支持匿名 struct/union 成员穿透查找
+            if let Some((field, inner_off)) = find_field(current_fields, name) {
+                offset += field.offset + inner_off;
+                if i < parts.len() - 1 {
+                    if let Type::Struct(_, sub) | Type::Union(_, sub) = &field.ty {
+                        current_fields = sub.as_ref();
+                    } else {
+                        break;
                     }
-                    found = true;
-                    break;
                 }
-            }
-            if !found {
+            } else {
                 break;
             }
         }

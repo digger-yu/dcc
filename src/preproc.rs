@@ -1155,22 +1155,30 @@ impl Preprocessor {
         let phys_lines: Vec<u32> = spans.iter().map(|&(s, _)| s).collect();
         let expanded = self.expand_macros(src, &phys_lines);
         let lines: Vec<&str> = expanded.split('\n').collect();
+        // 收集含 _Pragma 的源行号 (展开后变空), 需要输出占位行以保持行号同步
+        let pragma_lines: std::collections::HashSet<u32> = {
+            let pending = self.pending_pragmas.borrow();
+            pending.iter().map(|&(_, line_no)| line_no).collect()
+        };
         for (i, &(phys_start, _phys_end)) in spans.iter().enumerate() {
             let line = lines.get(i).copied().unwrap_or("");
+            // 始终输出占位行以保持输出行号与源行号同步
+            // (注释行/空行/_Pragma 行均需占位)
+            let out_start = self.out_lines + 1;
             if !line.trim().is_empty() {
-                let out_start = self.out_lines + 1;
                 self.push_out(line);
                 if !line.ends_with('\n') {
                     self.push_out("\n");
                 }
-                self.line_map.push(LineSpan {
-                    out_start,
-                    file: self.file.clone(),
-                    src_start: phys_start,
-                    count: 1,
-                });
+            } else {
+                self.push_out("\n");
             }
-            // 不再补空行填充多物理行
+            self.line_map.push(LineSpan {
+                out_start,
+                file: self.file.clone(),
+                src_start: phys_start,
+                count: 1,
+            });
         }
         // 兜底: 展开结果行数多于输入行数时写全，并映射到最后一个源行。
         let fallback_src = spans.last().map(|&(s, _)| s).unwrap_or(1);
@@ -2475,13 +2483,13 @@ impl Preprocessor {
         }
         // 记录到 pack_history, 供 parser 按位置查询
         // out_line 是当前输出 (预处理后) 的行号, 与 parser 的 lex.line 对齐
+        let current_out_line = if line_no > 0 { line_no } else { self.count_out_lines() };
         if self.pack_history.last().map(|(_, p)| *p) != Some(new_pack) {
             // 计算当前输出已经写入的行数
             let prev_last = self.pack_history.last().map(|(l, _)| *l).unwrap_or(0);
-            // 优先使用调用方提供的行号 (_Pragma 时机);
-            // 否则使用当前 out 的行数 (直接 #pragma 的常见情形)
-            let current_out_line = if line_no > 0 { line_no } else { self.count_out_lines() };
-            // 只有当行号真正增加时才记录 (避免同一行多次)
+            // 仅当行号严格递增时记录, 避免同行号后写入的 pack 覆盖先前的;
+            // _Pragma 已改用源行号记录 (见 pending_pragmas push), 保证
+            // 不同源行的 pack 变更有不同行号.
             if current_out_line > prev_last {
                 self.pack_history.push((current_out_line, new_pack));
             }
@@ -2959,7 +2967,7 @@ impl Preprocessor {
                             } // 跳过 )
                             i = j;
                             if let Ok(mut v) = self.pending_pragmas.try_borrow_mut() {
-                                v.push((pragma_text, self.count_out_lines()));
+                                v.push((pragma_text, map.line(nl).max(1)));
                             }
                             continue;
                         }
@@ -2992,7 +3000,7 @@ impl Preprocessor {
                             let pragma_text = Self::unescape_string(inner);
                             i = k + 1; // 跳过 )
                             if let Ok(mut v) = self.pending_pragmas.try_borrow_mut() {
-                                v.push((pragma_text, self.count_out_lines()));
+                                v.push((pragma_text, map.line(nl).max(1)));
                             }
                             continue;
                         }

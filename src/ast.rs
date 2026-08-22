@@ -636,11 +636,12 @@ impl Type {
             Type::Struct(_, fields) => {
                 let size = fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0);
                 let align = Self::aggregate_align_from_offsets(fields);
-                if align > 1 {
+                let aligned = if align > 1 {
                     (size + align - 1) & !(align - 1)
                 } else {
                     size
-                }
+                };
+                aligned
             }
             Type::Union(_, fields) => {
                 let size = fields.iter().map(|f| f.ty.size()).max().unwrap_or(0);

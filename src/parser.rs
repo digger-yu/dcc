@@ -4750,37 +4750,33 @@ impl<'a> Parser<'a> {
                 };
                 // 数组/名字后的 __attribute__((aligned(...))) 等
                 self.skip_attributes();
-                // C 语言中 `struct existing_type;` (无字段名的现有类型引用)
-                // 不是匿名成员，只是前向声明，不应贡献大小。GCC/Clang 会
-                // 发出 "declaration does not declare anything" 警告并忽略。
-                // 仅当类型无标签名 (匿名内联定义 `struct { ... };`) 时才
-                // 作为 C11 匿名成员处理 (字段展平到父结构)。
-                if nm.is_empty() {
-                    let is_named_tag = match &ty {
-                        Type::Struct(name, _)
-                        | Type::Union(name, _)
-                        | Type::Enum(name, _, _) => !name.is_empty(),
-                        _ => false,
-                    };
-                    if is_named_tag {
-                        // 跳过此字段，不添加到 fields
-                        if self.cur.kind == TokKind::Comma {
-                            self.advance();
-                            continue;
-                        }
-                        if self.cur.kind == TokKind::Semi {
-                            self.advance();
-                        }
-                        break;
+                // C11 匿名 struct/union 成员: 无字段名时作为匿名成员,
+                // 贡献大小并展平字段到父结构。包括:
+                //   struct { ... };     — 匿名内联定义 (标签名为空)
+                //   struct tag { ... }; — 匿名引用已有标签 (标签名非空)
+                // GCC/Clang 均支持两种形式。find_field() 已实现对
+                // name 为空的 struct/union 字段做递归穿透查找。
+                // 注意: 此处不再区分 is_named_tag, 统一添加为匿名成员。
+                // 
+                // 但要区分: `struct tag;` (仅有类型声明，无字段名) 不应贡献大小。
+                // GCC 对此发出 "declaration does not declare anything" 警告。
+                // 仅当 struct/union 的标签名为空 (匿名定义) 或字段名非空时才添加。
+                let should_add = match &ty {
+                    Type::Struct(tag, _) | Type::Union(tag, _) => {
+                        // 标签名为空 (匿名 struct/union 定义) 或字段名非空
+                        tag.is_empty() || !nm.is_empty()
                     }
+                    _ => true, // 非 struct/union 类型总是添加
+                };
+                if should_add {
+                    fs.push(Field {
+                        name: nm,
+                        ty,
+                        offset: 0,
+                        bit_width: bw,
+                        bit_offset: 0,
+                    });
                 }
-                fs.push(Field {
-                    name: nm,
-                    ty,
-                    offset: 0,
-                    bit_width: bw,
-                    bit_offset: 0,
-                });
                 if self.cur.kind == TokKind::Comma {
                     self.advance();
                     continue;
@@ -6593,6 +6589,40 @@ impl<'a> Parser<'a> {
                 }
                 if !self.expect(TokKind::RParen, "')'") {
                     return None;
+                }
+                // (type){...} 被 is_cast() 拦截, 但实际是复合字面量而非 cast
+                if self.cur.kind == TokKind::LBrace {
+                    self.advance(); // 跳过 {
+                    let mut inits = Vec::new();
+                    while self.cur.kind != TokKind::RBrace {
+                        let item = if self.cur.kind == TokKind::Dot
+                            || self.cur.kind == TokKind::LBracket
+                        {
+                            let designator = self.parse_designator()?;
+                            if !self.expect(TokKind::Assign, "'='") {
+                                return None;
+                            }
+                            let value = self.parse_expr_bp(2)?;
+                            InitItem::Designated { designator, value }
+                        } else {
+                            let e = self.parse_expr_bp(2)?;
+                            InitItem::Expr(e)
+                        };
+                        inits.push(item);
+                        if self.cur.kind == TokKind::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    if !self.expect(TokKind::RBrace, "'}'") {
+                        return None;
+                    }
+                    return Some(Expr::CompoundLit {
+                        ty,
+                        inits,
+                        span: sp,
+                    });
                 }
                 let e = self.parse_unary()?;
                 // 严格类型检查: 整数截断 / 整数↔指针转换
