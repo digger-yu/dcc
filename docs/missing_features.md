@@ -1,6 +1,6 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-08-22 — 基于源码、测试与脚本的只读审计
+> 最后更新：2026-08-22 — 基于当前源码、测试与脚本审计
 >
 > 已支持特性详见 `docs/support_features.md`。本文件只记录仍不支持、
 > 明确降级、仍为 stub/no-op，或缺少测试契约的项目。
@@ -38,20 +38,6 @@
 | 步骤 3 (`dcc1 → dcc2`) | 未开始 |
 
 ## 缺失测试用例
-
-### Linux 内核全树 / CI 门禁
-
-| 缺口 | 建议测试 |
-|------|----------|
-| QEMU boot | 在产物存在时把 `qemu_boot_matrix.sh` 接入硬门禁，并断言 boot log 关键字符串 |
-| kernel object corpus | 固化若干真实内核 `.o` 样本，覆盖 `arch/x86/kernel`、`kernel/sched`、`lib/` |
-| stale CI paths | 校验 CI/examples 使用当前存在的 examples 路径，避免引用历史根目录 fixture |
-
-### x86 mini-asm
-
-| 缺口 | 建议测试 |
-|------|----------|
-| byte-level asm | 对 Linux legacy mini-asm 指令增加反汇编/字节级断言，而不只检查 “未 emitted as nop” |
 
 ### Sanitizer
 

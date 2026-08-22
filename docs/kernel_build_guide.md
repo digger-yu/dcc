@@ -2,7 +2,7 @@
 
 > 目标版本：**Linux 7.1 / x86_64**。本地验收目录：`./`。
 
-## 当前进度（2026-07-17）
+## 当前进度（2026-08-22）
 
 | 阶段 | 状态 |
 |------|------|
@@ -16,7 +16,7 @@
 | modpost `file2alias.c` 单 TU | ✅ |
 | LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
 | `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc 三 TU（modpost/file2alias/sumversion） |
-| 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ⚠️ 脚本就绪 | 步骤 6–7/10 需 `BUILD_*=1`；无产物 SKIP |
+| 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ⚠️ 脚本就绪 | 步骤 6–7/10 需 `BUILD_*=1`；无产物默认 SKIP，已有 bzImage 后 QEMU 为硬门禁 |
 
 ### 本地一键验证
 
@@ -42,7 +42,7 @@ bash scripts/objtool_regress.sh
 # 本地（脚本须 LF；Windows scp 后执行 perl -pi -e 's/\x0d//g' scripts/*.sh）
 bash scripts/kernel_phase_b_check.sh          # modpost + prepare0 → PASS
 bash scripts/vmlinux_regress.sh               # 无 vmlinux 时 SKIP
-bash scripts/qemu_boot_matrix.sh              # 无 bzImage 时 SKIP
+bash scripts/qemu_boot_matrix.sh              # 无 bzImage 时 SKIP；有 bzImage 时硬门禁
 BUILD_BZIMAGE=1 BUILD_VMLINUX=1 bash scripts/kernel_build_smoke.sh  # 全树 smoke
 STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh  # strict: 禁止核心门禁 SKIP
 ```
@@ -60,9 +60,9 @@ STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh  # strict: 禁止核心门
 | `prepare0_full.sh` | prepare0 全链路（等价窄目标 + modpost） |
 | `kernel_phase_b_check.sh` | 阶段 B 编排 |
 | `pahole_regress.sh` / `objtool_regress.sh` | 单 TU BTF / eh_frame 回归 |
-| `qemu_boot_matrix.sh` | QEMU 加载 bzImage（无镜像 SKIP） |
+| `qemu_boot_matrix.sh` | QEMU 加载 bzImage；无镜像默认 SKIP，镜像存在后要求 QEMU 与 boot log 关键字符串通过 |
 | `vmlinux_regress.sh` | pahole -J / objtool check vmlinux |
-| `kernel_full_check.sh` | 编排 modpost + QEMU + vmlinux（非阻塞） |
+| `kernel_full_check.sh` | 编排 modpost + QEMU + vmlinux；strict 模式禁止核心门禁 SKIP，默认模式已有产物仍会执行对应门禁 |
 
 ### LTO 与 dead symbol 剔除
 
