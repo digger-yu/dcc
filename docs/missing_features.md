@@ -1,43 +1,25 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-08-17 — 基于源码、测试与脚本的只读审计
+> 最后更新：2026-08-22 — 基于源码、测试与脚本的只读审计
 >
 > 已支持特性详见 `docs/support_features.md`。本文件只记录仍不支持、
 > 明确降级、仍为 stub/no-op，或缺少测试契约的项目。
-
-## Linux 7.1 全树编译状态
-
-| 指标 | 状态 |
-|------|------|
-| dcc 编译器错误 | ✅ 零错误 (E0001/E0102/E0300/E0301 已清零) |
-| 成功产出 .o 文件 | 133+ 个 (defconfig x86_64) |
-| 剩余阻塞 | 严格内核 E2E 门禁 |
 
 ## C 前端 / IR 语义限制
 
 | 限制 | 说明 |
 |------|------|
-| complex/vector cast 边界 | 支持同尺寸 vector/scalar、vector/vector、complex/vector bitcast；不同尺寸或未枚举转换仍由 validator 拒绝 |
+| complex/vector cast 边界 | 不同尺寸或未枚举转换仍由 validator 拒绝 |
 | unknown `__builtin_*` explicit fallback | 未识别 builtin 明确降级：有返回值时返回 0，`void` 返回时发 `ud2` 并 warning；表达式/语句上下文均有测试契约 |
 
 ## 后端 codegen 限制
-
-### x86_64
-
-当前无单独记录的 x86_64 codegen 限制。
 
 ### AArch64 / RISC-V / MIPS / ARM
 
 | 限制 | 说明 |
 |------|------|
 | 非 x86 inline asm | 非 x86 后端可在 `-S` 保留 asm 文本和简化占位符替换；`-c` 路径没有完整 mini-assembler 机器码语义 |
-| AArch64 vector 表达式 | 向量 codegen 仍主要覆盖二元/常量路径，其他形式可能落到零值 fallback |
-| 多架构运行验证 | aarch64/riscv64/mips/mips64/arm 多数测试仍是 compile/ELF 产物验证，缺 QEMU runtime 语义门禁 |
 
-## 预处理 / CLI / 内核 wrapper 限制
-
-| 限制 | 说明 |
-|------|------|
 ## 链接器 / 对象文件限制
 
 | 限制 | 说明 |
@@ -53,27 +35,12 @@
 
 | 通道 | 已知遗留 |
 |------|----------|
-| `-fprofile-values` | 已支持函数入口 value sampling 插桩，并生成 `__dcc_pgo_value_sample` 调用；完整运行时 value histogram 仍需外部 runtime 支持 |
+| `-fprofile-values` | 完整运行时 value histogram 仍需外部 runtime 支持 |
 | GCOV runtime | `.gcno/.gcda` 读写与报告结构存在，但运行后真实 counter 更新的端到端路径仍未形成硬门禁 |
 | MemProf runtime | `MemProfRuntime` 仍生成 C stub；alloc/free/flush 中 callstack 记录与 `.memprofdata` 写出为 TODO |
 | Offload device codegen | CUDA/HIP/OpenMP target 设备端 PTX/AMDGCN 仍是 kernel stub (`ret` / `s_endpgm`) |
 | Offload runtime dispatch | `OffloadRuntimeLoader::check_runtime` 总是 `NotFound`，kernel launch 返回 `RuntimeNotAvailable`，未真正调 CUDA/ROCm driver |
 | unsupported device triple | 未知 device triple warning 后跳过 device codegen |
-
-## C++ 前端 / GCC bootstrap 限制
-
-| 限制 | 说明 |
-|------|------|
-| GCC 完整 bootstrap | cc1/cc1plus 尚未全量构建收敛（完整 C++ 前端仍受限）；已实装可复现的 xfail/ignore 门禁脚本 `scripts/cc1plus_bootstrap.sh`（M26.6）：以 dcc 为 CC/CXX configure + `make -k all-gcc`，产出对象数/错误数/首批失败文件进度报告，退出码 0（SKIP/收敛）或 2（xfail）；由 `gcc_cc1plus_bootstrap_gate` 集成测试（`--features gcc_src` + `GCC_SRC`）驱动 |
-| C++20 modules | ~~`import` 仍等价 include；无 BMIP 二进制缓存、真实跨 TU module import、private fragment 或 partitions~~ → ✅ 已实现：BMF 文本接口（BMIP 缓存）经 `--emit-module-file=foo.bmf` 写出；`import foo;` 从 BMF 生成 extern 声明 + 类布局并注册名字（跨 TU 真实链接）；`module :private;` 私有片段终止导出收集；`export module name:part;` 分区 + `import :part;` 分区导入（`P`/`X` 记录）与合并（M26.4） |
-| C++ ODR 集成 | ~~`OdrChecker` 存在，但不等于完整 module/link pipeline ODR enforcement~~ → ✅ 已实现：OdrChecker 接入 driver 编译管线（M26.5）——本模块导出与所有已加载导入模块（含 partition）的导出按实体名比对函数签名（完整 C 声明文本，含 Itanium 符号）/类布局文本，同名不同定义报 `E0103 ODR violations` 并拒绝编译；同名同定义放行 |
-| C++ enum lowering | ~~enum 仍降级为 `typedef int`~~ → ✅ 已实现：真实 C enum + 枚举值 + scoped 标记 + 可选底层类型 + 匿名枚举（M26.1） |
-| `auto` / `decltype(auto)` | ~~类型推导对调用、成员调用和复杂表达式仍保守降级为 int/Unknown~~ → ✅ 已实现：函数返回类型注册表 + 成员调用/成员字段类型推导 + `new T`→`T*`；自由函数调用改为与定义一致的 mangled 名（M26.1） |
-| class member parser | ~~部分类成员、引用成员、operator name 和表达式形式仍返回 `Unsupported`~~ → ✅ 已实现：引用成员保留类型、`operator new/delete([])` 名称解析（Itanium `nw`/`dl`/`na`/`da`）、`Type* operator` 起始探测、hex/oct/bin/带后缀整数、转义字符、浮点字面量（M26.1） |
-| coroutine 语义 | ~~parser/lower 存在状态机路径，但仍有占位和语义覆盖缺口~~ → ✅ 已实现：`co_yield`/`co_return`/`co_await` 降级为 Duff's device 状态机（`switch(<fn>_coro_state)` + `case N` 恢复标签），状态/返回槽/完成标志声明为文件作用域 static 全局以跨调用保持（dcc C 后端不支持函数内 static 局部），通过运行时集成测试（M26.2） |
-| virtual inheritance | ~~菱形/虚基复杂布局仍以 warning/注释降级，不是完整 Itanium ABI 虚继承布局~~ → ✅ 已实现：传递虚基 DFS 去重、`__vbptr` + `__vbt_<C>` vbtable（vbase_offset 项，第 0 项为 0）、虚基子对象嵌入对象尾部、自动默认 ctor 初始化 vbptr 并调用虚基 ctor、成员访问与上转型经 vbtable 运行时 this-adjust、`(Base*)&obj` 指向虚基子对象（M26.3）；同时修复 dcc C 后端 `ptr->field` 成员访问丢失字段偏移/宽度的预存 bug |
-| `noexcept(expr)` | ~~当前直接降级为常量 true~~ → ✅ 已实现：分析表达式抛异常可能性（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛）（M26.1） |
-| template depth | ~~默认深度 128，低于 GCC/Clang 常见上限~~ → ✅ 已提升至 `MAX_TEMPLATE_DEPTH = 900`（`src/cpp/template_depth.rs`），与 GCC 默认模板嵌套深度一致（Clang 为 1024），含深度超限诊断与单测 |
 
 ## 交叉编译 / 缺失平台
 
@@ -98,7 +65,6 @@
 
 | 缺口 | 建议测试 |
 |------|----------|
-| strict full build | ✅ 已实装 `STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh`：`vmlinux`、`bzImage`、modpost、pahole、objtool 均为硬门禁，缺产物/缺工具/非零退出不再 SKIP |
 | QEMU boot | 在产物存在时把 `qemu_boot_matrix.sh` 接入硬门禁，并断言 boot log 关键字符串 |
 | kernel object corpus | 固化若干真实内核 `.o` 样本，覆盖 `arch/x86/kernel`、`kernel/sched`、`lib/` |
 | stale CI paths | 校验 CI/examples 使用当前存在的 examples 路径，避免引用历史根目录 fixture |
@@ -117,69 +83,6 @@
 | HWASAN/MTE | 增加 AArch64 `irg/addg/stg` 汇编断言和软件 tag 路径测试 |
 | KCOV/Fuzzer | 覆盖 `trace_cmp*`、`trace_switch`、8-bit counters、PC table、`no_sanitize` 与 KCOV/Fuzzer 交互 |
 | unknown sanitizer | 增加未知 sanitizer 名称的负向诊断测试 |
-
-### Profile / GCOV / Offload
-
-| 缺口 | 建议测试 |
-|------|----------|
-| PGO E2E | ~~compile → run → profraw → merge/profdata → profile-use，并验证优化或 section/layout 可观测变化~~ → ✅ 已实现 `pgo_end_to_end_profraw_merge_profdata_use_gate` 集成测试（M26.7） |
-| GCOV E2E | ~~运行程序后校验 `.gcda` counter 非零与报告行覆盖率~~ → ✅ 已实现 `gcov_end_to_end_counter_gate` 集成测试（M26.7） |
-| AutoFDO/LBR/MemProf/Topdown | ~~增加文本+二进制 profile 输入的 CLI 集成与权重影响测试~~ → ✅ 已实现 CLI 接受测试 + 权重影响 section 布局测试（M26.7） |
-| Offload driver/link | ~~覆盖 nvcc/clang++ 缺失、runtime 查找、host link flags/rpath、device-link 命令与错误路径~~ → ✅ 已实现 7 个 OffloadDriverLinker 集成测试（M26.7） |
-| Offload runtime | ~~增加 expected-fail 测试，锁定当前 `RuntimeNotAvailable` 行为直到真正实现~~ → ✅ 已实现 5 个 expected-fail 测试锁定当前行为（M26.7） |
-
-### 预处理 / PCH / 依赖文件
-
-| 缺口 | 建议测试 |
-|------|----------|
-| Linux header graph | ~~用 `compiler_types.h`、`rwonce.h`、generated `autoconf.h` 等真实内核头做预处理 E2E~~ → ✅ 已实现 4 个 Linux 内核头预处理 E2E 测试（compiler_types.h/rwonce.h/autoconf.h + 依赖图闭包追踪） |
-| PCH negative | ~~覆盖更多版本不兼容和平台权限失败的 snapshot~~ → ✅ 已实现 4 个 PCH 负向测试（hash mismatch 回退、损坏内容回退、版本不兼容回退、写入失败 snapshot） |
-| depfile/fixdep | ~~增加空格、反斜杠、转义路径、`-MP` phony 与 fixdep 反解析联动测试~~ → ✅ 已实现 5 个 depfile/fixdep 测试（转义空格路径、-MP phony 跳过、反斜杠续行、注释跳过、文件打开失败退出码）；修复 fixdep 注释状态恢复 bug |
-| `#error/#warning` | ~~增加多格式诊断 snapshot 和宏展开后消息测试~~ → ✅ 已实现 6 个 #error/#warning 测试（GitHub/clang/msvc 多格式诊断、warning 不阻断编译、宏展开消息、头文件源码行回归） |
-
-### Builtin / 属性 / C 前端
-
-| 缺口 | 建议测试 |
-|------|----------|
-| Linux FORTIFY | ~~覆盖真实 `__builtin___memcpy_chk` 等 FORTIFY 宏族展开与链接行为~~ → ✅ 已实现：`__builtin___*_chk` 识别并剥离 `__builtin_` 前缀，链接到 libc 的 `__*_chk` 符号；`m27_fortify_memcpy_chk_links_correctly` 验证汇编输出 `call __memcpy_chk` |
-| low-level builtins | ~~对 `trap`、`debugtrap`、`unreachable`、`assume_aligned`、`alloca`、`static_chain`、`frame_address`、`return_address` 增加汇编或运行时断言~~ → ✅ 已实现：`trap`→`ud2`、`debugtrap`→`int3`、`unreachable`→`ud2`、`assume_aligned` 原样返回、`alloca` 动态栈分配、`frame_address` 返回 r13、`return_address` 返回地址；`m27_builtin_trap_emits_ud2`、`m27_builtin_debugtrap_emits_int3`、`m27_builtin_unreachable_emits_ud2`、`m27_lowlevel_builtins_runtime` 覆盖 |
-| attributes | ~~对 alias/ifunc/retain/used/error/warning/deprecated/constructor priority 增加负向与链接后符号测试~~ → ✅ 已实现：alias 运行时+符号表验证 (`m27_attr_alias_runtime`/`m27_attr_alias_symbol_exists`)、ifunc 符号类型验证 (`m27_attr_ifunc_symbol_type_is_ifunc`)、retain/used 链接后符号验证 (`m27_attr_retain_symbol_exists`/`m27_attr_used_symbol_exists`)、error/warning 负向诊断 (`m27_attr_error_emits_error`/`m27_attr_warning_emits_warning`)、constructor priority 排序 (`m23_attr_ctor_priority_orders_correctly`/`m27_attr_ctor_priority_compiles`)、alias 负向 (`m27_attr_alias_target_missing_compiles`) |
-
-### 多架构
-
-| 缺口 | 建议测试 |
-|------|----------|
-| QEMU runtime 扩展 | ~~aarch64/riscv64/arm/mips/mips64 已有 hello/control-flow 语义门禁；继续扩展 aggregate ABI、va_arg、TLS 等场景~~ → ✅ 已实现：hello、control-flow、aggregate ABI、va_arg 四个独立 QEMU runtime 矩阵测试（`non_x86_qemu_runtime_hello/control_flow/aggregate_abi/va_arg`），覆盖 aarch64/riscv64/arm/mips/mips64 五架构 |
-| aggregate/HFA ABI | ~~增加 AArch64 HFA 1–8 元素、>8 fallback，以及 RISC-V HFA 1–4、>4 fallback 测试~~ → ✅ 已实现：AArch64 HFA 1/2/3/4/8 元素 + >8 sret fallback + 混合类型 fallback（`aarch64_hfa_abi_compile_and_elf_structure` / `aarch64_hfa_asm_output_has_all_functions`）；RISC-V HFA 1/2/3/4 + >4 sret fallback（`riscv64_hfa_abi_compile_and_elf_structure` / `riscv64_hfa_asm_output_has_all_functions`） |
-| non-x86 inline asm | ~~增加 `-S` 文本保留测试与 `-c` expected-fail/diagnostic 测试~~ → ✅ 已实现：`-S` 全局 asm 文本保留验证五架构（`non_x86_asm_minus_s_preserves_global_asm_text`）；`-c` asm goto 警告验证五架构（`non_x86_asm_minus_c_warns_on_asm_goto`）；arm/mips/mips64 额外 asm 表达式警告验证（`non_x86_asm_arm_mips_warn_on_inline_asm_expr`） |
-| unsupported targets | ~~对 Windows MSVC、Darwin、WASM、AVR、MSP430、Xtensa、PowerPC、LoongArch64 增加稳定负向测试~~ → ✅ 已实现：6 个未知架构负向测试 wasm32/avr/msp430/xtensa/powerpc64/loongarch64 验证 `unknown arch` 错误（`unsupported_target_arch_rejected`）；Windows MSVC/Darwin triple 解析接受但输出 ELF 格式验证（`windows_darwin_triple_accepted_but_outputs_elf`） |
-
-### C++ / GCC bootstrap
-
-| 缺口 | 建议测试 |
-|------|----------|
-| semantic run tests | ~~SFINAE 失败路径、partial specialization 优先级、concept reject、dynamic_cast 虚继承负向应 compile+link+run~~ → ✅ 已实装 `semantic_enum_type_traits_runtime()` 集成测试，覆盖 enum 语义、scoped enum、sizeof 类型属性的 compile+link+run 验证 |
-| modules | ~~BMF 跨 TU import / partition / private fragment 已覆盖（m26_module_* 集成测试）；ODR 冲突拒绝与同名同定义放行已覆盖（m26_odr_* 集成测试）~~ → ✅ 完整覆盖：`m26_modules_bmf`、`m26_module_cross_tu_import`（含 private fragment）、`m26_module_partition_import`、`m26_odr_conflict_rejected`、`m26_odr_identical_imports_ok` |
-| coroutine | ~~覆盖 `co_await`/`co_yield`/`co_return` 状态机运行语义和错误路径~~ → ✅ 已实装 `m26_coroutine_runtime`（co_yield/co_return）+ `coroutine_co_await_runtime`（co_await 状态机）集成测试，覆盖三种挂起原语的 compile+link+run 验证 |
-| GCC bootstrap | ~~增加可复现的 cc1/cc1plus configure/build xfail 或 ignore 门禁脚本~~ → ✅ 已实装 `scripts/cc1plus_bootstrap.sh` + `gcc_cc1plus_bootstrap_gate` 集成测试（M26.6），输出进度报告跟踪收敛 |
-
-### Linker / ELF / debug info
-
-| 缺口 | 建议测试 |
-|------|----------|
-| GNU hash / EH frame hdr | ✅ 已实现：`gnu_hash_section_content_valid` 验证 .dynsym/.dynstr/.dynamic 节及 PLTGOT/STRTAB 动态条目；`eh_frame_hdr_content_has_fde` 验证 .eh_frame 节含 FDE |
-| IFUNC / symver / RELRO | ✅ 已实现：`ifunc_resolver_runtime`（resolver 运行）、`relro_pie_has_gnu_relro_segment`（RELRO 段）、`bind_now_dynamic_has_bind_now_flag`（BIND_NOW 标志）、`symver_directive_compiles`（.symver 指令）、`build_id_sha1_creates_note_section`（build-id 节） |
-| debug consumers | ✅ 已实现：`dwarf_readelf_debug_info_parseable_cu_header`（readelf 解析 CU 头）、`dwarf_addr2line_resolves_function_name`（nm 符号解析）、`dwarf_debug_line_section_has_content`（.debug_line 内容）、`btf_section_has_valid_header_magic`（BTF magic/version）、`dwarf_debug_str_contains_function_names`（.debug_str 函数名） |
-| compressed debug | ✅ 已实现：`compress_debug_zlib_cli_accepted`（zlib CLI）、`compress_debug_zstd_linker_cli_accepted`（zstd CLI）、`compress_debug_none_preserves_uncompressed`（none 模式）；压缩逻辑由 link_opts.rs 单测覆盖 |
-
-### 优化 / 诊断契约
-
-| 缺口 | 建议测试 |
-|------|----------|
-| kernel-sensitive opt | ✅ 已实现：`kernel_opt_volatile_not_eliminated_at_o2`（volatile O2/O3）、`kernel_opt_barrier_prevents_reordering_at_o2`（编译器屏障）、`kernel_opt_asm_memory_clobber_preserved_at_o3`（asm memory clobber O3） |
-| SSA pass coverage | ✅ 已实现：`ssa_alias_analysis_non_aliasing`（别名分析）、`ssa_sccp_non_constant_not_folded`（SCCP 负向）、`ssa_tco_deep_recursion_no_overflow`（TCO）、`ssa_dae_reachable_function_preserved`（DAE）、`ssa_ipa_sra_scalar_propagation`（IPA-SRA） |
-| xfail harness | ✅ 已实现：`xfail_unknown_sanitizer_produces_diagnostic`（未知 sanitizer）、`xfail_unknown_offload_triple_diagnostic`（未知 offload triple）、`xfail_vector_scalar_size_mismatch_rejected`（vector cast 边界）、`xfail_msvc_output_is_elf_not_coff`（MSVC COFF 限制） |
-| skipped diagnostics | ✅ 已实现：e1004/e1009/e1010 从 [skip] 改为显式 known-fail 契约，验证编译成功且 stderr 含对应警告码 |
 
 ## 本地基线
 

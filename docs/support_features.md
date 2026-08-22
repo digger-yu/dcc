@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-16 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
+> 最后更新：2026-08-22 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -88,6 +88,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | host wrapper dependency errors | `dcc-host-wrapper.sh` fails the host build when fixdep dependency generation fails instead of writing a stub `.d` file |
 | `-fprofile-values` | 启用 PGO value sampling 插桩，在函数入口生成 `__dcc_pgo_value_sample(site)` 调用，并与 profraw value profile 数据结构对接 |
 | 增量预处理 (PCH) | `-fpch-include=` / `-fpch-create=` / `-fpch-include-only=`；`PchBundle` 序列化 + 宏状态哈希校验；加载/写入失败、hash 不一致和预处理错误均 warning 后回退 |
+| Linux 内核头预处理 E2E | `compiler_types.h` / `rwonce.h` / `autoconf.h` 真实内核头预处理 + 依赖图闭包追踪（`linux_header_compiler_types_preprocess_e2e` / `linux_header_rwonce_preprocess_e2e` / `linux_header_autoconf_preprocess_e2e` / `linux_header_graph_dependency_closure`） |
 
 ## GCC Builtin
 
@@ -120,7 +121,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__builtin_assume_aligned` | 透传指针，codegen 优化对齐 |
 | `__builtin_expect_with_probability` | 字面量首参编译期折叠 |
 | `__builtin_strlen` / `abs` / `labs` / `llabs` / `expect` / `popcount*` | 编译期折叠 |
-| GCC Builtin 完整化 | object_size FORTIFY、apply/return、prefetch no-op、未知 builtin warning |
+| `__builtin___memcpy_chk` / `memmove_chk` / `memset_chk` / `strcpy_chk` / `strncpy_chk` / `strcat_chk` / `strncat_chk` | Linux FORTIFY：识别 `__builtin___*_chk` 并剥离 `__builtin_` 前缀，链接到 libc `__*_chk` 符号；汇编输出 `call __memcpy_chk` |
 
 ## 内联汇编
 
@@ -233,18 +234,19 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ `export template` | `export template <T> class Foo` 模板导出 + BMF 序列化 |
 | dcc++ concept 与 SFINAE 联动 | concept 定义注册 + requires 子句展开 + SFINAE 约束过滤 |
 | dcc++ module ODR 检查 | `OdrChecker` 跨模块重复定义检测 + 冲突报告 |
-| dcc++ `virtual` 继承复杂场景 | 菱形继承检测 + 虚基类指针表达 + 警告报告 |
+| dcc++ `virtual` 继承完整布局 | 传递虚基 DFS 去重、`__vbptr` + `__vbt_<C>` vbtable（vbase_offset 项）、虚基子对象嵌入对象尾部、自动默认 ctor 初始化 vbptr 并调用虚基 ctor、成员访问与上转型经 vbtable 运行时 this-adjust；同时修复 dcc C 后端 `ptr->field` 成员访问偏移 bug |
 | dcc++ 标准库模板实参 | `std::vector<int>` 等限定名模板实参语法解析 + 局部变量声明支持；std::vector<T> 为真正类模板，单态化由 `TemplateRegistry` 完成 |
 | dcc++ 动态 RTTI | typeinfo/vtable 生成 + 继承虚方法检测 + RTTI slot |
 | dcc++ 继承成员访问 | 递归继承链查找 + `__base_BaseName` 路径改写 |
 | dcc++ `__dcc_mbr` 继承成员 | 继承成员偏移辅助函数 + `__base_` 链路径计算 |
 | dcc++ `auto` 类型推导 | int / `const char*` / class 真推导 |
-| dcc++ `decltype` / `decltype(auto)` | 解析 + 占位 |
+| dcc++ `decltype` / `decltype(auto)` | 函数返回类型注册表 + 成员调用/成员字段类型推导 + `new T`→`T*`；自由函数调用改为与定义一致的 mangled 名 |
 | dcc++ `operator new[]` / `delete[]` | Itanium ABI `_Znam` / `_ZdaPv` 符号 |
 | dcc++ `new T[n]` 数组分配 | `CppExpr::NewArr` + `_Znam` |
 | dcc++ `placement new` | `new (ptr) T(args)` 原地构造 |
 | dcc++ `static` 类成员 | C `static` 字段 + Itanium ABI mangling |
-| C++ 修饰符 | `noexcept` / `final` / `override` / `mutable` / `volatile` / `explicit` / `friend` / `alignas` / `alignof` |
+| C++ 修饰符 | `noexcept` / `noexcept(expr)` 异常可能性分析（函数调用查 noexcept 注册表、`new`/`dynamic_cast`/多态 `typeid` 视为可抛、内建运算/字面量/cast 不抛） / `final` / `override` / `mutable` / `volatile` / `explicit` / `friend` / `alignas` / `alignof` |
+| 模板嵌套深度 | `MAX_TEMPLATE_DEPTH = 900`（`src/cpp/template_depth.rs`），与 GCC 默认一致（Clang 为 1024），含深度超限诊断 |
 | `if constexpr` | 编译期分支：const_eval 在 lower 端选分支 |
 | C++ 标准库扩展 | `<chrono>` / `<thread>` / `<mutex>` / `<condition_variable>` / `<filesystem>` / `<expected>` / `<flat_map>` / `<regex>` / `<ranges>` |
 | C++23 多维下标 | `obj[i,j,k]` → `__dcc_multi_index_N` |
