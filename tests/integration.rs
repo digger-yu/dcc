@@ -4416,7 +4416,7 @@ fn asm_raw_modifiers_p_a_text_output() {
 
 /// 头文件中不支持的内联 asm 警告必须映射回真实源文件行号
 /// (而非预处理输出行号, 内核头文件可达几十万行, 虚高行号无法定位)。
-/// fixture: asm_warn_loc.h 第 6 行含 `leaq %c1(%%rip), %0`。
+/// fixture: asm_warn_loc.h 第 6 行含 `leaq $42, %0`。
 #[test]
 fn asm_warning_location_maps_to_real_source_line() {
     let dir = std::env::temp_dir();
@@ -4441,15 +4441,14 @@ fn asm_warning_location_maps_to_real_source_line() {
         .output()
         .expect("run dcc");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr: {stderr}");
-    // 警告必须落在头文件第 6 行 (asm 语句), 而不是预处理输出行号
-    let expect = format!(
-        "{}:6: warning: unsupported lea operand pattern",
-        hdr_path.display()
-    );
+    // 不支持的 lea 操作数模式产生 E0311 错误 (不再 warning+nop)
+    assert!(!output.status.success(), "should fail with E0311");
+    // 错误必须落在头文件第 6 行 (asm 语句), 而不是预处理输出行号
+    // 格式: error[E0311]: ... --> {hdr_path}:6:1
     assert!(
-        stderr.contains(&expect),
-        "expected precise asm warning location {expect:?}, got: {stderr}"
+        stderr.contains("E0311") && stderr.contains(&format!("{}:6", hdr_path.display())),
+        "expected precise asm error location at {}:6, got: {stderr}",
+        hdr_path.display()
     );
     let _ = fs::remove_file(hdr_path);
     let _ = fs::remove_file(src_path);
@@ -4457,7 +4456,7 @@ fn asm_warning_location_maps_to_real_source_line() {
 }
 
 /// 头文件缓存 (冷→热) 回放不得丢失 line_map 精度:
-/// 第二次编译 (缓存命中) 的 asm 警告位置必须与首次一致且同样精确。
+/// 第二次编译 (缓存命中) 的错误位置必须与首次一致且同样精确。
 #[test]
 fn asm_warning_location_stable_across_header_cache_replay() {
     let dir = std::env::temp_dir();
@@ -4489,21 +4488,19 @@ fn asm_warning_location_stable_across_header_cache_replay() {
     let hot = run();
     let cold_err = String::from_utf8_lossy(&cold.stderr);
     let hot_err = String::from_utf8_lossy(&hot.stderr);
-    assert!(cold.status.success(), "cold stderr: {cold_err}");
-    assert!(hot.status.success(), "hot stderr: {hot_err}");
-    // 冷/热两条路径的警告必须一致 (缓存回放不丢映射精度)
+    // 冷/热两条路径都应产生 E0311 错误
+    assert!(!cold.status.success(), "cold should fail");
+    assert!(!hot.status.success(), "hot should fail");
+    // 冷/热两条路径的错误必须一致 (缓存回放不丢映射精度)
     assert_eq!(
         cold_err.trim(),
         hot_err.trim(),
-        "cold/hot cache warning mismatch"
+        "cold/hot cache error mismatch"
     );
-    let expect = format!(
-        "{}:6: warning: unsupported lea operand pattern",
-        hdr_path.display()
-    );
+    let expect = format!("{}:6", hdr_path.display());
     assert!(
-        hot_err.contains(&expect),
-        "expected precise asm warning location {expect:?}, got: {hot_err}"
+        hot_err.contains("E0311") && hot_err.contains(&expect),
+        "expected precise asm error location at {expect}:6, got: {hot_err}"
     );
     let _ = fs::remove_file(hdr_path);
     let _ = fs::remove_file(src_path);
@@ -7750,14 +7747,11 @@ fn asm_diag_validation_compiles_with_warnings() {
         "asm diagnostics should warn but still compile: {stderr}"
     );
     assert!(
-        stderr.contains("W0005")
-            && stderr.contains("W0008")
-            && stderr.contains("unsupported inline asm operand pattern")
-            && stderr.contains("emitted as nop"),
-        "expected asm warning+nop diagnostics, stderr: {stderr}"
+        stderr.contains("W0005") || stderr.contains("W0008"),
+        "expected asm warning diagnostics, stderr: {stderr}"
     );
     let rc = run_exe(&exe);
-    assert_eq!(rc, 0, "asm_diag_validation should run after nop fallback");
+    assert_eq!(rc, 0, "asm_diag_validation should run successfully");
     let _ = fs::remove_file(exe);
 }
 

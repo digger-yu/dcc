@@ -16058,6 +16058,8 @@ impl Codegen {
                 resolved = resolved.replace(key, &Self::asm_format_subst_safe(reg));
             }
         }
+        // %= : GCC 唯一数字标签替换 (每条 asm 语句一个唯一数字)
+        resolved = Self::substitute_asm_unique_number(&resolved, self.next_label as u64);
         Self::unescape_asm_template(&resolved)
     }
 
@@ -16282,6 +16284,8 @@ impl Codegen {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
+        // 合并独立成行的前缀 (lock/rep/repz/repnz/repe) 与下一条指令
+        let raw_lines = Self::merge_standalone_prefixes(raw_lines);
         let mut expander = AsmDirectiveExpander::new();
         let expanded_lines = expander.expand(&raw_lines);
         // 再解析操作数占位符
@@ -16344,6 +16348,8 @@ impl Codegen {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
+        // 合并独立成行的前缀 (lock/rep/repz/repnz/repe) 与下一条指令
+        let raw_lines = Self::merge_standalone_prefixes(raw_lines);
         let mut expander = AsmDirectiveExpander::new();
         let expanded_lines = expander.expand(&raw_lines);
         // 再解析操作数占位符
@@ -16423,6 +16429,8 @@ impl Codegen {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
+        // 合并独立成行的前缀 (lock/rep/repz/repnz/repe) 与下一条指令
+        let raw_lines = Self::merge_standalone_prefixes(raw_lines);
         let mut expander = AsmDirectiveExpander::new();
         let expanded_lines = expander.expand(&raw_lines);
         // 再解析操作数占位符
@@ -17167,6 +17175,37 @@ impl Codegen {
     /// GNU 内联 asm 模板：`%%` 折叠为字面量 `%`（在 `%N` 占位符替换之后调用）
     fn unescape_asm_template(s: &str) -> String {
         s.replace("%%", "%")
+    }
+
+    /// 合并独立成行的前缀 (lock/rep/repz/repnz/repe) 与下一条指令.
+    /// GCC 允许 "lock; addl ..." 写法, 按 ; 分割后 lock 独占一行,
+    /// 需要与前缀后的第一条指令合并为一行.
+    fn merge_standalone_prefixes(lines: Vec<String>) -> Vec<String> {
+        let prefixes = ["lock", "rep", "repz", "repnz", "repe"];
+        let mut result = Vec::with_capacity(lines.len());
+        let mut i = 0;
+        while i < lines.len() {
+            let trimmed = lines[i].trim().to_lowercase();
+            if prefixes.contains(&trimmed.as_str()) && i + 1 < lines.len() {
+                // 前缀独占一行: 与下一行合并
+                let mut merged = lines[i].trim().to_string();
+                merged.push_str(" ");
+                merged.push_str(lines[i + 1].trim());
+                result.push(merged);
+                i += 2;
+            } else {
+                result.push(lines[i].clone());
+                i += 1;
+            }
+        }
+        result
+    }
+
+    /// 替换 asm 中的 `%=` 为唯一数字标签.
+    /// GCC 语义: `%=` 在每条 asm 语句中替换为一个唯一数字,
+    /// 用于生成局部标签避免冲突.
+    fn substitute_asm_unique_number(s: &str, unique_id: u64) -> String {
+        s.replace("%=", &unique_id.to_string())
     }
 
     /// 将 op_map 值转为 "raw" 形式: 去掉 AT&T 前缀 (% 寄存器 / $ 立即数)
@@ -23585,6 +23624,18 @@ impl Codegen {
                 }
                 self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, opcode]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            (AsmOperand::Reg(s, _), AsmOperand::SymDisp(sym, disp)) => {
+                // cmpxchg reg, sym(%rip): 0F B1 /r with RIP-relative memory
+                self.emit(&[Self::rex(w, *s, 0, 0), 0x0F, opcode]);
+                self.emit_asm_modrm_mem_only(*s, *disp, ASM_BASE_RIP, None, 1);
+                let pos = self.pos() - 4;
+                self.pending_code_rels.push(PendingCodeRel {
+                    offset: pos,
+                    symbol: sym.clone(),
+                    rel_type: R_X86_64_PC32,
+                    addend: -4,
+                });
             }
             _ => {
                 self.asm_warn("unsupported cmpxchg operand pattern, emitted as nop");
