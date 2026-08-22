@@ -517,10 +517,9 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         None
     };
 
-    // PGO 插桩（AST 层）: -fprofile-generate 时在每个函数体顶部插入
-    // `__dcc_pgo_count_fn(idx)` 调用. 运行期由用户提供的 runtime helper
-    // (或 dcc 内置桩) 累加 idx -> counter, atexit 写 `<name>.profraw`.
-    // 权重读回 (`-fprofile-use`) 仅解析 .profraw, 不修改 codegen.
+    // PGO 插桩（AST 层）: -fprofile-generate / -fprofile-values
+    // 在每个函数体顶部插入 counter/value sampling 调用。编译时同时
+    // 落盘 `<stem>.pgort.c`, 运行后由内置 runtime 写 profraw v2。
     if cfg.profile.pgo_generate.is_some() || cfg.profile.value_sampling {
         let pgo_cfg = profile::pgo::PgoConfig {
             generate: cfg.profile.pgo_generate.is_some(),
@@ -537,6 +536,33 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 .map(|p| p.display().to_string()),
         };
         profile::pgo::instrument_program(&mut prog, &pgo_cfg);
+        if !cfg.syntax_only {
+            let pgo_stem = input
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("a")
+                .to_string();
+            let profraw_dir = cfg
+                .profile
+                .pgo_generate
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."));
+            let profraw = profraw_dir.join(format!("{pgo_stem}.profraw"));
+            if let Some(parent) = profraw.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            let pgo_rt = crate::profile::pgo::PgoRuntime::generate_c(&prog, &file_name, &profraw);
+            let rt_path = PathBuf::from(format!("{pgo_stem}.pgort.c"));
+            if let Err(e) = fs::write(&rt_path, pgo_rt) {
+                return Err(vec![Diagnostic::err(
+                    "E0101",
+                    format!("cannot write {}: {}", rt_path.display(), e),
+                    crate::diagnostics::Span::point(&rt_path.display().to_string(), 0, 0),
+                )]);
+            }
+        }
     }
 
     // GCOV: -ftest-coverage (notes) / -fprofile-arcs (arc counters)。

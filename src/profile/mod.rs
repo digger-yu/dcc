@@ -87,7 +87,11 @@ pub struct ProfileConfig {
 impl ProfileConfig {
     /// 是否启用任何分析相关插桩
     pub fn any_instrumentation(&self) -> bool {
-        self.pgo_generate.is_some() || self.gcov || self.profile_arcs || self.memprof
+        self.pgo_generate.is_some()
+            || self.value_sampling
+            || self.gcov
+            || self.profile_arcs
+            || self.memprof
     }
     /// 是否启用任何使用概要的优化
     pub fn any_use(&self) -> bool {

@@ -1675,8 +1675,103 @@ fn offload_hip_emits_section_with_amd_triple() {
 // PGO E2E: compile → run → profraw → merge/profdata → profile-use
 // ---------------------------------------------------------------------------
 
-/// PGO 运行时 C 模板: 在测试中提供, 因为 dcc 当前不自动生成 PGO 运行时
-/// (与 GCOV/MemProf 不同). 该模板:
+/// -fprofile-values 端到端硬门禁: 编译器必须自动生成 PGO runtime,
+/// 运行后 runtime 必须把 value histogram 写入 profraw v2。
+#[test]
+fn pgo_profile_values_generates_runtime_histogram_gate() {
+    let dir = std::env::temp_dir().join(format!("dcc-pgo-values-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("pgo_values.c");
+    std::fs::write(
+        &src,
+        b"int hot_fn(int x) { return x + 1; }\n\
+          int cold_fn(int x) { return x - 1; }\n\
+          int main(void) {\n\
+              int s = 0;\n\
+              for (int i = 0; i < 3; i++) s += hot_fn(i);\n\
+              s += cold_fn(7);\n\
+              return s == 12 ? 0 : 1;\n\
+          }\n",
+    )
+    .expect("写源文件");
+
+    let out = dcc()
+        .current_dir(&dir)
+        .args(["-std=gnu23", "-fprofile-values", "-c"])
+        .arg(src.file_name().unwrap())
+        .args(["-o", "pgo_values.o"])
+        .output()
+        .expect("运行 dcc");
+    assert!(
+        out.status.success(),
+        "-fprofile-values 编译必须成功: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("pgo_values.o").exists(), "应产出 .o");
+    assert!(
+        dir.join("pgo_values.pgort.c").exists(),
+        "应自动产出 PGO runtime C"
+    );
+
+    let cc_ok = Command::new("cc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !cc_ok {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+
+    let link = Command::new("cc")
+        .current_dir(&dir)
+        .args([
+            "-O0",
+            "pgo_values.o",
+            "pgo_values.pgort.c",
+            "-o",
+            "pgo_values",
+        ])
+        .status()
+        .expect("运行 cc 链接");
+    assert!(link.success(), "链接自动生成的 PGO runtime 必须成功");
+
+    let run = Command::new("./pgo_values")
+        .current_dir(&dir)
+        .status()
+        .expect("运行被测程序");
+    assert!(run.success(), "被测程序应正常退出");
+
+    let profraw_path = dir.join("pgo_values.profraw");
+    assert!(profraw_path.exists(), "运行后应产出 .profraw");
+    let profraw = dcc::profile::pgo::Profraw::read(&profraw_path).expect("读取 profraw");
+    assert_eq!(profraw.version, dcc::profile::pgo::PROFRAW_VERSION_CURRENT);
+    assert_eq!(profraw.sites.len(), 3, "应记录三个函数站点");
+    assert_eq!(profraw.counters.len(), 3, "counter 数量应与站点一致");
+    assert!(
+        profraw.counters.iter().all(|&count| count == 0),
+        "仅 -fprofile-values 不应注入 entry counters: {:?}",
+        profraw.counters
+    );
+
+    let mut totals = std::collections::HashMap::new();
+    for vp in profraw.value_profiles.values() {
+        for (target, count) in &vp.call_targets {
+            totals.insert(target.clone(), *count);
+        }
+    }
+    assert_eq!(totals.get("hot_fn"), Some(&3));
+    assert_eq!(totals.get("cold_fn"), Some(&1));
+    assert_eq!(totals.get("main"), Some(&1));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// PGO counter 运行时 C 模板: 供下方 merge/profile-use gate 固定
+/// 站点元数据与 counter 值。`-fprofile-values` 的自动 runtime 由上方
+/// `pgo_profile_values_generates_runtime_histogram_gate` 覆盖。该模板:
 ///   * 维护全局计数器数组
 ///   * `__dcc_pgo_count_fn(idx)` 自增对应计数器
 ///   * atexit 回调把计数器写成 `.profraw` 二进制 (v2 格式, 含 checksum)

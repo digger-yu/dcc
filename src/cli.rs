@@ -876,7 +876,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 profile.profile_arcs = false;
             }
             "-fbranch-probabilities" => { /* 兼容 GCC: 默认与 -fprofile-use 配对使用 */ }
-            "-fprofile-values" => { /* TODO: 块级值采样, 当前 no-op */ }
+            "-fprofile-values" => {
+                profile.value_sampling = true;
+            }
+            "-fno-profile-values" => {
+                profile.value_sampling = false;
+            }
             "-fprofile-list" => {
                 if let Some(next) = args.get(i + 1) {
                     if !next.starts_with('-') {
@@ -1882,6 +1887,26 @@ mod tests {
         assert!(cfg.relocatable);
         assert!(!cfg.built_link);
         assert!(!cfg.link_mode);
+    }
+
+    #[test]
+    fn profile_values_flag_toggles_value_sampling() {
+        let cfg = parse(&[
+            "-fprofile-values".to_string(),
+            "-c".to_string(),
+            "input.c".to_string(),
+        ])
+        .expect("-fprofile-values should parse");
+        assert!(cfg.profile.value_sampling);
+
+        let cfg = parse(&[
+            "-fprofile-values".to_string(),
+            "-fno-profile-values".to_string(),
+            "-c".to_string(),
+            "input.c".to_string(),
+        ])
+        .expect("-fno-profile-values should parse");
+        assert!(!cfg.profile.value_sampling);
     }
 
     #[test]

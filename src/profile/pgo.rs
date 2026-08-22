@@ -26,7 +26,8 @@
 //   * Merge: 多个 profraw 合并为一个 (计数器累加)
 //   * Profdata: 合并后的优化格式 (去重 + 排序 + 压缩站点表)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as FmtWrite;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -565,22 +566,22 @@ impl Profraw {
 
 /// AST 改写: 在每个函数入口插入 `__dcc_pgo_count_fn(idx)` 调用
 pub fn instrument_program(prog: &mut Program, cfg: &PgoConfig) {
+    let sites = collect_runtime_sites(prog);
+    instrument_program_with_sites(prog, cfg, &sites);
+}
+
+pub fn instrument_program_with_sites(prog: &mut Program, cfg: &PgoConfig, sites: &[PgoSite]) {
     if !cfg.generate && !cfg.value_sampling {
         return;
     }
     let mut idx: u32 = 0;
+    let site_names: HashSet<&str> = sites.iter().map(|s| s.func.as_str()).collect();
     for d in &mut prog.decls {
         if let Decl::Func(f) = d {
-            if f.body.is_none() {
+            if f.body.is_none() || !site_names.contains(f.name.name.as_str()) {
                 continue;
             }
             // 复用函数体首项插入, 保证 PGO 计数先于任何 user code.
-            let site = PgoSite {
-                func: f.name.name.clone(),
-                file: f.span.file.clone(),
-                line: f.span.line,
-            };
-            // idx 仅供运行时分发, 这里以 span.line 作为值.
             let call = Expr::Call {
                 callee: Box::new(Expr::Ident {
                     name: crate::ast::Ident {
@@ -636,9 +637,216 @@ pub fn instrument_program(prog: &mut Program, cfg: &PgoConfig) {
                 }
             }
             idx += 1;
-            let _ = site;
         }
     }
+}
+
+pub struct PgoRuntime;
+
+impl PgoRuntime {
+    /// Generate a C runtime that records function counters and
+    /// `-fprofile-values` site histograms into profraw v2.
+    pub fn generate_c(prog: &Program, source_name: &str, out_path: &Path) -> String {
+        let sites = collect_runtime_sites(prog);
+        let count = sites.len().max(1);
+        let funcs = c_array_strings(sites.iter().map(|s| s.func.as_str()));
+        let files = c_array_strings(sites.iter().map(|s| s.file.as_str()));
+        let lines = sites
+            .iter()
+            .map(|s| s.line.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let out = c_escape(&out_path.display().to_string());
+        let source = c_escape(source_name);
+        format!(
+            r#"#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define DCC_PGO_SITE_COUNT {count}u
+#define DCC_PGO_MAX_VALUE_SITES {count}u
+#define DCC_PGO_MAX_VALUE_TARGETS 16u
+
+static const char *_dcc_pgo_source = "{source}";
+static const char *_dcc_pgo_funcs[DCC_PGO_SITE_COUNT] = {{ {funcs} }};
+static const char *_dcc_pgo_files[DCC_PGO_SITE_COUNT] = {{ {files} }};
+static const uint32_t _dcc_pgo_lines[DCC_PGO_SITE_COUNT] = {{ {lines} }};
+static uint64_t _dcc_pgo_counters[DCC_PGO_SITE_COUNT];
+static int _dcc_pgo_initialized;
+static const char *_dcc_pgo_out_path = "{out}";
+
+struct _dcc_pgo_value_target {{
+    const char *name;
+    uint64_t count;
+}};
+
+struct _dcc_pgo_value_site {{
+    uint32_t in_use;
+    uint32_t n_targets;
+    struct _dcc_pgo_value_target targets[DCC_PGO_MAX_VALUE_TARGETS];
+}};
+
+static struct _dcc_pgo_value_site _dcc_pgo_values[DCC_PGO_MAX_VALUE_SITES];
+
+static void _dcc_pgo_write_profraw(void);
+
+static void __dcc_pgo_init(void) {{
+    if (_dcc_pgo_initialized) return;
+    _dcc_pgo_initialized = 1;
+    atexit(_dcc_pgo_write_profraw);
+}}
+
+static uint64_t _dcc_pgo_fnv1a_bytes(uint64_t h, const unsigned char *p,
+                                      size_t n) {{
+    for (size_t i = 0; i < n; i++) {{
+        h ^= (uint64_t)p[i];
+        h *= 0x100000001b3ULL;
+    }}
+    return h;
+}}
+
+static uint64_t _dcc_pgo_checksum(void) {{
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (uint32_t i = 0; i < DCC_PGO_SITE_COUNT; i++) {{
+        h = _dcc_pgo_fnv1a_bytes(h, (const unsigned char *)_dcc_pgo_funcs[i],
+                                 strlen(_dcc_pgo_funcs[i]));
+        h = _dcc_pgo_fnv1a_bytes(h, (const unsigned char *)_dcc_pgo_files[i],
+                                 strlen(_dcc_pgo_files[i]));
+        h ^= (uint64_t)_dcc_pgo_lines[i];
+        h *= 0x100000001b3ULL;
+    }}
+    return h;
+}}
+
+static void _dcc_pgo_wr32(FILE *f, uint32_t v) {{
+    unsigned char b[4] = {{
+        (unsigned char)(v & 0xff),
+        (unsigned char)((v >> 8) & 0xff),
+        (unsigned char)((v >> 16) & 0xff),
+        (unsigned char)((v >> 24) & 0xff),
+    }};
+    fwrite(b, 1, 4, f);
+}}
+
+static void _dcc_pgo_wr64(FILE *f, uint64_t v) {{
+    unsigned char b[8];
+    for (int i = 0; i < 8; i++) b[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+    fwrite(b, 1, 8, f);
+}}
+
+static void _dcc_pgo_wrstr(FILE *f, const char *s) {{
+    uint32_t n = (uint32_t)strlen(s);
+    _dcc_pgo_wr32(f, n);
+    fwrite(s, 1, n, f);
+}}
+
+void __dcc_pgo_count_fn(uint32_t idx) {{
+    __dcc_pgo_init();
+    if (idx < DCC_PGO_SITE_COUNT) _dcc_pgo_counters[idx]++;
+}}
+
+void __dcc_pgo_value_sample(uint32_t idx) {{
+    __dcc_pgo_init();
+    if (idx >= DCC_PGO_MAX_VALUE_SITES) return;
+    struct _dcc_pgo_value_site *site = &_dcc_pgo_values[idx];
+    site->in_use = 1;
+    const char *target = _dcc_pgo_funcs[idx];
+    for (uint32_t i = 0; i < site->n_targets; i++) {{
+        if (strcmp(site->targets[i].name, target) == 0) {{
+            site->targets[i].count++;
+            return;
+        }}
+    }}
+    if (site->n_targets < DCC_PGO_MAX_VALUE_TARGETS) {{
+        site->targets[site->n_targets].name = target;
+        site->targets[site->n_targets].count = 1;
+        site->n_targets++;
+    }}
+}}
+
+static void _dcc_pgo_write_profraw(void) {{
+    if (!_dcc_pgo_initialized) return;
+    FILE *f = fopen(_dcc_pgo_out_path, "wb");
+    if (!f) return;
+    fwrite("PROF", 1, 4, f);
+    _dcc_pgo_wr32(f, 2u);
+    _dcc_pgo_wr64(f, _dcc_pgo_checksum());
+    _dcc_pgo_wr32(f, DCC_PGO_SITE_COUNT);
+    for (uint32_t i = 0; i < DCC_PGO_SITE_COUNT; i++) {{
+        _dcc_pgo_wrstr(f, _dcc_pgo_funcs[i]);
+        _dcc_pgo_wrstr(f, _dcc_pgo_files[i]);
+        _dcc_pgo_wr32(f, _dcc_pgo_lines[i]);
+    }}
+    uint32_t n_vp = 0;
+    for (uint32_t i = 0; i < DCC_PGO_MAX_VALUE_SITES; i++) {{
+        if (_dcc_pgo_values[i].in_use && _dcc_pgo_values[i].n_targets) n_vp++;
+    }}
+    _dcc_pgo_wr32(f, n_vp);
+    for (uint32_t i = 0; i < DCC_PGO_MAX_VALUE_SITES; i++) {{
+        if (!_dcc_pgo_values[i].in_use || !_dcc_pgo_values[i].n_targets) continue;
+        _dcc_pgo_wr32(f, i);
+        _dcc_pgo_wr32(f, _dcc_pgo_values[i].n_targets);
+        for (uint32_t j = 0; j < _dcc_pgo_values[i].n_targets; j++) {{
+            _dcc_pgo_wrstr(f, _dcc_pgo_values[i].targets[j].name);
+            _dcc_pgo_wr64(f, _dcc_pgo_values[i].targets[j].count);
+        }}
+    }}
+    _dcc_pgo_wr32(f, DCC_PGO_SITE_COUNT);
+    for (uint32_t i = 0; i < DCC_PGO_SITE_COUNT; i++) {{
+        _dcc_pgo_wr64(f, _dcc_pgo_counters[i]);
+    }}
+    fclose(f);
+    _dcc_pgo_initialized = 0;
+}}
+"#
+        )
+    }
+}
+
+fn collect_runtime_sites(prog: &Program) -> Vec<PgoSite> {
+    let mut sites = Vec::new();
+    for d in &prog.decls {
+        if let Decl::Func(f) = d {
+            if f.body.is_some() {
+                sites.push(PgoSite {
+                    func: f.name.name.clone(),
+                    file: f.span.file.clone(),
+                    line: f.span.line,
+                });
+            }
+        }
+    }
+    sites
+}
+
+fn c_array_strings<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for (i, value) in values.enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(&mut out, "\"{}\"", c_escape(value));
+    }
+    out
+}
+
+fn c_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(&mut out, "\\x{:02x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// PGO 权重: 来自 profraw 的 per-function 计数聚合 (供后续 IR/CFG 优化读取).
@@ -1312,6 +1520,74 @@ mod tests {
         assert_ne!(q.checksum, 0);
         assert_eq!(q.checksum, p.checksum);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn pgo_runtime_generates_value_histogram_writer() {
+        use crate::ast::{Block, Decl, FuncDecl, Ident, Program, Type};
+        let span = crate::diagnostics::Span::point("rt.c", 3, 0);
+        let prog = Program {
+            decls: vec![Decl::Func(FuncDecl {
+                name: Ident {
+                    name: "sampled".into(),
+                    span: span.clone(),
+                },
+                ret_ty: Type::Int,
+                params: vec![],
+                body: Some(Block {
+                    items: vec![],
+                    span: span.clone(),
+                }),
+                span,
+                is_extern: false,
+                is_static: false,
+                is_unused: false,
+                is_cold: false,
+                is_hot: false,
+                is_noinline: false,
+                is_always_inline: false,
+                is_variadic: false,
+                is_constructor: false,
+                is_destructor: false,
+                is_weak: false,
+                is_nested: false,
+                upvars: vec![],
+                is_old_style: false,
+                format_kind: None,
+                format_string_idx: None,
+                format_first_arg: None,
+                no_sanitize: vec![],
+                target_clones: vec![],
+                returns_nonnull: false,
+                ctor_priority: None,
+                dtor_priority: None,
+                is_retain: false,
+                is_used_attr: false,
+                is_flatten: false,
+                error_msg: None,
+                warning_msg: None,
+                deprecated_msg: None,
+                ifunc_resolver: None,
+                asm_output_template: None,
+                is_global: false,
+                is_device: false,
+                is_host: false,
+                section: None,
+                alignment: None,
+                alias_name: None,
+                visibility: None,
+            })],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+
+        let code = PgoRuntime::generate_c(&prog, "rt.c", Path::new("rt.profraw"));
+        assert!(code.contains("__dcc_pgo_value_sample"));
+        assert!(code.contains("DCC_PGO_MAX_VALUE_TARGETS"));
+        assert!(code.contains("_dcc_pgo_values"));
+        assert!(code.contains("sampled"));
+        assert!(code.contains("rt.profraw"));
     }
 
     /// Test value profiling data roundtrip
