@@ -3501,22 +3501,28 @@ mod tests {
         cg.emit_irg(0, 1); // irg x0, x1 -> LLVM: [0x20,0x10,0xdf,0x9a]
         cg.emit_irg(0, 31); // irg x0, sp -> LLVM: [0xe0,0x13,0xdf,0x9a]
         cg.emit_irg(16, 31); // irg x16, sp
+        cg.emit_irg(17, 18); // irg x17, x18
         cg.emit_addg(0, 1, 0, 1); // addg x0, x1, #0, #1 -> LLVM: [0x20,0x04,0x80,0x91]
         cg.emit_addg(31, 16, 0, 0); // addg sp, x16, #0, #0
+        cg.emit_addg(31, 2, 2, 3); // addg sp, x2, #32, #3
         cg.emit_subg(0, 1, 0, 1); // subg x0, x1, #0, #1 -> LLVM: [0x20,0x04,0x80,0xd1]
         cg.emit_stg(3, 31, 1); // stg x3, [sp, #16] -> LLVM: [0xe3,0x1b,0x20,0xd9]
         cg.emit_stg(16, 31, 0); // stg x16, [sp, #0]
+        cg.emit_stg(7, 8, 0x1ff); // stg x7, [x8, #-16]
         cg.emit_ldg(0, 0, 0); // ldg x0, [x0]
         let code = &cg.code;
         let find = |bytes: [u8; 4]| code.windows(4).any(|w| w == &bytes);
         assert!(find([0x20, 0x10, 0xdf, 0x9a]), "irg x0, x1");
         assert!(find([0xe0, 0x13, 0xdf, 0x9a]), "irg x0, sp");
         assert!(find([0xf0, 0x13, 0xdf, 0x9a]), "irg x16, sp");
+        assert!(find([0x51, 0x12, 0xdf, 0x9a]), "irg x17, x18");
         assert!(find([0x20, 0x04, 0x80, 0x91]), "addg x0, x1, #0, #1");
         assert!(find([0x1f, 0x02, 0x80, 0x91]), "addg sp, x16, #0, #0");
+        assert!(find([0x5f, 0x0c, 0x82, 0x91]), "addg sp, x2, #32, #3");
         assert!(find([0x20, 0x04, 0x80, 0xd1]), "subg x0, x1, #0, #1");
         assert!(find([0xe3, 0x1b, 0x20, 0xd9]), "stg x3, [sp, #16]");
         assert!(find([0xf0, 0x0b, 0x20, 0xd9]), "stg x16, [sp, #0]");
+        assert!(find([0x07, 0xf9, 0x3f, 0xd9]), "stg x7, [x8, #-16]");
         assert!(find([0x00, 0x00, 0x60, 0xd9]), "ldg x0, [x0]");
     }
 

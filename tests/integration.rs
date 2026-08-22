@@ -6292,14 +6292,14 @@ fn hwasan_mte_aarch64_stg_asm() {
 }
 
 /// HWASAN/MTE: 软件 tag 路径测试.
-/// -fsanitize=hwaddress 时函数入口应发射 __hwasan_init 调用.
+/// -fsanitize=hwaddress 时应发射 init 与 HWASAN load/store 回调.
 #[test]
 #[cfg(unix)]
 fn hwasan_software_tag_path() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-hwasan-tag-{}.c", std::process::id()));
     let asm_path = dir.join(format!("dcc-hwasan-tag-{}.s", std::process::id()));
-    let source = "void f(int *p) { (void)p; }\nint main(void) { int x; f(&x); return 0; }\n";
+    let source = "int f(int *p) { *p = 7; return *p; }\nint main(void) { int x; return f(&x); }\n";
     fs::write(&source_path, source).expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-fsanitize=hwaddress", "-S", "-o"])
@@ -6315,10 +6315,21 @@ fn hwasan_software_tag_path() {
         "dcc should compile HWASAN tag fixture: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // HWASAN 应插桩 __hwasan_init 调用
     assert!(
         asm_text.contains("__hwasan_init"),
         "HWASAN should emit __hwasan_init call: {asm_text}"
+    );
+    assert!(
+        asm_text.contains("__hwasan_store4"),
+        "HWASAN should emit store tag checks: {asm_text}"
+    );
+    assert!(
+        asm_text.contains("__hwasan_load4"),
+        "HWASAN should emit load tag checks: {asm_text}"
+    );
+    assert!(
+        !asm_text.contains("__asan_load") && !asm_text.contains("__asan_store"),
+        "HWASAN path should not use ASAN callbacks: {asm_text}"
     );
 }
 

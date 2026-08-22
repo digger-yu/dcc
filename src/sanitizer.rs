@@ -3138,21 +3138,48 @@ mod tests {
             panic!()
         };
         f.body = Some(Block {
-            items: vec![BlockItem::Stmt(Stmt::Return {
-                val: Some(Expr::Deref {
-                    e: Box::new(Expr::Ident {
-                        name: Ident {
-                            name: "p".into(),
+            items: vec![
+                BlockItem::Stmt(Stmt::Expr {
+                    e: Expr::Assign {
+                        op: BinOp::Add,
+                        l: Box::new(Expr::Deref {
+                            e: Box::new(Expr::Ident {
+                                name: Ident {
+                                    name: "p".into(),
+                                    span: Span::point("t.c", 1, 1),
+                                },
+                                span: Span::point("t.c", 1, 1),
+                                ty: Type::Ptr(Box::new(Type::Int)),
+                            }),
                             span: Span::point("t.c", 1, 1),
-                        },
+                            ty: Type::Int,
+                        }),
+                        r: Box::new(Expr::Int {
+                            v: 7,
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Int,
+                        }),
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Int)),
+                        ty: Type::Int,
+                    },
+                    span: Span::point("t.c", 1, 1),
+                }),
+                BlockItem::Stmt(Stmt::Return {
+                    val: Some(Expr::Deref {
+                        e: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "p".into(),
+                                span: Span::point("t.c", 1, 1),
+                            },
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Ptr(Box::new(Type::Int)),
+                        }),
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
                     }),
                     span: Span::point("t.c", 1, 1),
-                    ty: Type::Int,
                 }),
-                span: Span::point("t.c", 1, 1),
-            })],
+            ],
             span: Span::point("t.c", 1, 1),
         });
         instrument_program(
@@ -3167,13 +3194,23 @@ mod tests {
         };
         let names = call_names_in_block(f.body.as_ref().unwrap());
         assert!(
-            names.iter().any(|n| n.starts_with("__hwasan_load")),
-            "HWASAN should emit __hwasan_loadN, got: {:?}",
+            names.iter().any(|n| n == "__hwasan_load4"),
+            "HWASAN should emit __hwasan_load4, got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n == "__hwasan_store4"),
+            "HWASAN should emit __hwasan_store4, got: {:?}",
             names
         );
         assert!(
             !names.iter().any(|n| n.starts_with("__asan_load")),
             "HWASAN should not emit __asan_loadN, got: {:?}",
+            names
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("__asan_store")),
+            "HWASAN should not emit __asan_storeN, got: {:?}",
             names
         );
     }
