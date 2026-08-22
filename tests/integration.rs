@@ -811,7 +811,6 @@ fn strict_qemu_boot_requires_qemu_and_boot_log() {
         .arg(root.join("scripts/qemu_boot_matrix.sh"))
         .env("KERNEL", temp.join("bzImage"))
         .env("PATH", &tool_path)
-        .env("REQUIRE_QEMU_BOOT", "1")
         .env("QEMU_TIMEOUT", "1")
         .output()
         .expect("run qemu_boot_matrix.sh with missing boot strings");
@@ -5438,7 +5437,22 @@ fn strict_qemu_boot_matrix_gates_on_artifacts() {
     fs::create_dir_all(&temp).expect("create qemu fixture dir");
     fs::write(temp.join("bzImage"), "fake kernel image\n").expect("write fake bzImage");
 
-    // 缺 qemu 且 REQUIRE_QEMU_BOOT=1 → FAIL
+    // 有 bzImage 产物时默认把 QEMU boot 当作硬门禁.
+    let default_missing_qemu = Command::new("/bin/bash")
+        .arg(root.join("scripts/qemu_boot_matrix.sh"))
+        .env("KERNEL", temp.join("bzImage"))
+        .env("PATH", &temp)
+        .output()
+        .expect("run qemu_boot_matrix.sh without explicit gate");
+    let stdout = String::from_utf8_lossy(&default_missing_qemu.stdout);
+    assert!(!default_missing_qemu.status.success(), "stdout: {stdout}");
+    assert!(
+        stdout.contains("FAIL: qemu-system-x86_64 not installed"),
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains("SKIP:"), "stdout: {stdout}");
+
+    // REQUIRE_QEMU_BOOT=1 也继续显式硬失败.
     let missing_qemu = Command::new("/bin/bash")
         .arg(root.join("scripts/qemu_boot_matrix.sh"))
         .env("KERNEL", temp.join("bzImage"))

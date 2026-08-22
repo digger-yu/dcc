@@ -11,22 +11,25 @@ echo "== DCC QEMU boot matrix =="
 echo "compiler: $DCC"
 echo "kernel:   $KERNEL"
 
-if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    if [[ "${REQUIRE_QEMU_BOOT:-0}" == "1" ]]; then
-        echo "FAIL: qemu-system-x86_64 not installed"
-        exit 1
-    fi
-    echo "SKIP: qemu-system-x86_64 not installed"
-    exit 0
-fi
-
 if [[ ! -f "$KERNEL" ]]; then
-    if [[ "${REQUIRE_BZIMAGE:-0}" == "1" ]]; then
+    if [[ "${REQUIRE_BZIMAGE:-0}" == "1" || "${REQUIRE_QEMU_BOOT:-0}" == "1" ]]; then
         echo "FAIL: bzImage not found"
         exit 1
     fi
     echo "SKIP: bzImage not found — run:"
     echo "  BUILD_BZIMAGE=1 bash scripts/kernel_build_smoke.sh"
+    exit 0
+fi
+
+# Once a bootable artifact exists, QEMU becomes a hard gate by default.
+REQUIRE_QEMU_BOOT="${REQUIRE_QEMU_BOOT:-1}"
+
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    if [[ "$REQUIRE_QEMU_BOOT" == "1" ]]; then
+        echo "FAIL: qemu-system-x86_64 not installed"
+        exit 1
+    fi
+    echo "SKIP: qemu-system-x86_64 not installed"
     exit 0
 fi
 
@@ -61,9 +64,8 @@ run_matrix() {
         echo "PASS: $name — boot log seen"
         pass=$((pass + 1))
     elif [[ $rc -eq 124 ]]; then
-        # timeout 无 panic 且 QEMU 已启动 — 冒烟通过
-        echo "PASS: $name — ran ${TIMEOUT_SEC}s without panic (timeout OK)"
-        pass=$((pass + 1))
+        echo "FAIL: $name — timed out without required boot log string"
+        fail=$((fail + 1))
     else
         echo "FAIL: $name — no required boot log string (rc=$rc); check $log"
         tail -10 "$log"
