@@ -36,6 +36,8 @@
 | Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + `__sanitizer_cov_trace_cmp1/2/4/8` + `__sanitizer_cov_trace_switch` + libFuzzer 协议（`LLVMFuzzerTestOneInput` 入口包装、8-bit counters、PC table、malloc/free 拦截器） |
 | no_sanitize | `address` / `kernel-address` / `hwaddress` / `undefined` / `thread` / `kernel-kcsan` / `all` 按通道关闭；KCOV / Fuzzer 不受 `no_sanitize` 影响 |
 
+测试证据：`tests/integration.rs` 覆盖 KASAN 越界、UBSAN div/mod/shift/VLA/null/float-cast、KCSAN 竞态、HWASAN 软件 tag、KCOV/Fuzzer `trace_cmp*` / `trace_switch` / 8-bit counters / PC table / `no_sanitize` 交互，以及未知 sanitizer / coverage 名称负向诊断；`src/codegen/aarch64.rs` 覆盖 AArch64 MTE `irg` / `addg` / `stg` 字节级断言。
+
 实现：`src/sanitizer.rs` `instrument_program()`，所有通道在 driver parse 之后、IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用；codegen 侧 `gen_inc_dec` 支持 Deref/Index/Member 内存 lvalue 读-改-写（`(*p)++` 等）。`.dcc.san_info` 节版本 v2。
 
 ## 性能分析子系统

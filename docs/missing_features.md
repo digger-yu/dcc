@@ -37,17 +37,6 @@
 | 步骤 2 (`dcc0 → dcc1`) | 未开始，需 dcc0 完整支持自身依赖（std 子集） |
 | 步骤 3 (`dcc1 → dcc2`) | 未开始 |
 
-## 缺失测试用例
-
-### Sanitizer
-
-| 缺口 | 建议测试 |
-|------|----------|
-| runtime negative tests | 增加 KASAN 越界、UBSAN div/mod/shift/VLA/null/float-cast、KCSAN 竞态的运行时/链接后测试 |
-| HWASAN/MTE | 增加 AArch64 `irg/addg/stg` 汇编断言和软件 tag 路径测试 |
-| KCOV/Fuzzer | 覆盖 `trace_cmp*`、`trace_switch`、8-bit counters、PC table、`no_sanitize` 与 KCOV/Fuzzer 交互 |
-| unknown sanitizer | 增加未知 sanitizer 名称的负向诊断测试 |
-
 ## 本地基线
 
 - 工作区：`~/dcc`
