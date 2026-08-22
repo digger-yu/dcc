@@ -3795,7 +3795,13 @@ impl Preprocessor {
     /// # 字符串化: # param → "param_value"
     fn handle_stringify(&self, body: &str, params: &[String], args: &[String]) -> String {
         let mut result = body.to_string();
-        for (i, param) in params.iter().enumerate() {
+        // 按参数名长度降序排列, 避免短参数名 (如 class) 误匹配长参数名
+        // (如 class_shift) 的前缀. 但即便如此仍需词边界检查, 因为替换后
+        // 文本会变化, 降序仅降低冲突概率而非完全消除.
+        let mut indexed_params: Vec<(usize, &String)> = params.iter().enumerate().collect();
+        indexed_params.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        for (i, param) in &indexed_params {
+            let i = *i;
             if i >= args.len() {
                 continue;
             }
@@ -3814,8 +3820,17 @@ impl Preprocessor {
                         search_from = pos + 1;
                         continue;
                     }
-                    let stringified = Self::stringify_arg(&args[i]);
+                    // 词边界检查: 参数名后不能紧跟标识符字符 (字母/数字/_),
+                    // 否则 #class 会误匹配 #class_shift 中的前缀
                     let end = pos + pat.len();
+                    if end < result.len() {
+                        let next_byte = result.as_bytes()[end];
+                        if next_byte.is_ascii_alphanumeric() || next_byte == b'_' {
+                            search_from = pos + 1;
+                            continue;
+                        }
+                    }
+                    let stringified = Self::stringify_arg(&args[i]);
                     result = format!("{}{}{}", &result[..pos], stringified, &result[end..]);
                     // 替换后 search_from 前进 (基于原 body 长度, 这里 result 变短,
                     // 新位置以原本的 pos 作为起点继续)

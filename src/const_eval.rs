@@ -95,6 +95,36 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                     offset: off,
                 })
             }
+            // &global_struct.member: 地址常量表达式 (C 标准 6.6.9)
+            // 用于全局/静态初始化器，如 `const T *p = &global.field;`
+            Expr::Member { expr, field, is_arrow, .. } => {
+                if *is_arrow {
+                    // arrow 形式 `ptr->field` 需要先解引用指针，暂不支持
+                    return Err(ConstEvalError::NotConstant);
+                }
+                // 递归求基地址: 必须是 &ident.field1.field2... 形式
+                let base_addr = match eval_full(&Expr::AddrOf {
+                    e: expr.clone(),
+                    ty: Type::Ptr(Box::new(expr.ty())),
+                    span: crate::diagnostics::Span::point("", 0, 0),
+                })? {
+                    ConstValue::Addr { name, offset } => (name, offset),
+                    _ => return Err(ConstEvalError::NotConstant),
+                };
+                // 计算字段在结构体内的偏移
+                let field_offset = match &expr.ty() {
+                    Type::Struct(_, fields) | Type::Union(_, fields) => {
+                        crate::ast::find_field(fields, &field.name)
+                            .map(|(f, extra_off)| f.offset + extra_off)
+                            .ok_or(ConstEvalError::NotConstant)?
+                    }
+                    _ => return Err(ConstEvalError::NotConstant),
+                };
+                Ok(ConstValue::Addr {
+                    name: base_addr.0,
+                    offset: base_addr.1 + field_offset as i128,
+                })
+            }
             _ => Err(ConstEvalError::NotConstant),
         },
         Expr::LabelAddr { label, .. } => Ok(ConstValue::Addr {

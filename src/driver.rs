@@ -761,13 +761,15 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         if let Some(mut span) = sse_span {
             // 将 span 从预处理文本行号映射回源文件
             remap_span(&mut span, &line_map);
-            let mut diags = vec![Diagnostic::err(
-                "E0300",
-                "floating-point code requires SSE on the SysV AMD64 target; remove -mno-sse",
+            // 内核 FPU 子系统显式使用 float/double, 即使 -mno-sse 也应允许编译
+            // 降级为警告而非硬错误, 让后端处理代码生成
+            let mut diags = vec![Diagnostic::warn(
+                "W0300",
+                "floating-point code with -mno-sse; x87 may be used for FP operations",
                 span,
             )];
             enrich_diags(&mut diags, src, &file_name, input.parent());
-            return Err(diags);
+            // 不阻断编译, 继续后续流程
         }
     }
 

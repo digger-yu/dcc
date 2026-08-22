@@ -288,7 +288,7 @@ impl<'a> Parser<'a> {
         self.cur = std::mem::replace(&mut self.peek, self.lex.next());
     }
 
-    /// 解包指针/数组外层后比较 struct/union 标签是否兼容
+    /// 解包指针/数组外层后比较 struct/union/enum 标签是否兼容
     /// 同标签且任一方不完整 (或字段完全相同) 即视为兼容类型
     fn tag_compatible(a: &Type, b: &Type) -> bool {
         fn unwrap(t: &Type) -> &Type {
@@ -304,6 +304,10 @@ impl<'a> Parser<'a> {
             }
             (Type::Union(an, af), Type::Union(bn, bf)) => {
                 an == bn && (af.is_empty() || bf.is_empty() || af == bf)
+            }
+            // enum 同标签兼容: 前向声明 (空 values) 与完整定义视为同一类型
+            (Type::Enum(an, av, _), Type::Enum(bn, bv, _)) => {
+                an == bn && (av.is_empty() || bv.is_empty() || av == bv)
             }
             _ => false,
         }
@@ -3274,8 +3278,78 @@ impl<'a> Parser<'a> {
         // 限定符可在基类型与 * 之间 (C 声明符语法); 也可出现地址空间限定符
         self.skip_ptr_qualifiers();
         let ty = self.parse_ptr_suffix(ty);
+        // 抽象函数指针声明符: `(*)(params)` 形式 (无变量名的函数指针类型)
+        // 例如: void (*)(struct pt_regs *) 在 __builtin_types_compatible_p 中
+        let ty = self.try_parse_abstract_func_ptr(ty);
         // 数组后缀: `int [N]`, `int []` (C99 柔性数组), `(int)[N]`
         self.parse_array_suffix(ty)
+    }
+
+    /// 尝试解析抽象函数指针声明符: `(*)(params)`
+    /// 匹配模式: 当前 token 为 `(`, peek 为 `*`, 再后面为 `)` 或限定符后跟 `)`
+    /// 仅匹配无名形式 (抽象声明符), 不匹配 `(*name)(params)` 形式
+    fn try_parse_abstract_func_ptr(&mut self, mut ty: Type) -> Type {
+        if self.cur.kind != TokKind::LParen || self.peek.kind != TokKind::Star {
+            return ty;
+        }
+        // 保存解析器状态, 以便在不是抽象函数指针时恢复
+        let saved_cur = self.cur.clone();
+        let saved_peek = self.peek.clone();
+        let saved_pos = self.lex.pos;
+        let saved_line = self.lex.line;
+        let saved_col = self.lex.col;
+
+        self.advance(); // (
+        self.advance(); // *
+        // 跳过可能的 const/volatile/restrict 限定符
+        while matches!(
+            self.cur.kind,
+            TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
+        ) {
+            self.advance();
+        }
+        // 跳过可能的地址空间属性 __attribute__((...))
+        if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
+            self.skip_attributes();
+        }
+        // 如果有标识符, 说明是命名声明符如 (*func), 不是抽象函数指针类型
+        // 恢复解析器状态并返回
+        if self.cur.kind == TokKind::Ident {
+            self.cur = saved_cur;
+            self.peek = saved_peek;
+            self.lex.pos = saved_pos;
+            self.lex.line = saved_line;
+            self.lex.col = saved_col;
+            return ty;
+        }
+        if self.cur.kind != TokKind::RParen {
+            // 不是抽象函数指针, 恢复状态
+            self.cur = saved_cur;
+            self.peek = saved_peek;
+            self.lex.pos = saved_pos;
+            self.lex.line = saved_line;
+            self.lex.col = saved_col;
+            return ty;
+        }
+        self.advance(); // )
+        // 现在期望 `(params)` 形式的函数参数列表
+        if self.cur.kind != TokKind::LParen {
+            // 不是函数指针, 可能只是指针抽象 `(*)`
+            ty = Type::Ptr(Box::new(ty));
+            return ty;
+        }
+        self.advance(); // (
+        let params = self.parse_params().unwrap_or_default();
+        if self.cur.kind == TokKind::RParen {
+            self.advance();
+        }
+        let func_ty = Type::Func(
+            Box::new(ty),
+            params.iter().map(|p| p.ty.clone()).collect(),
+        );
+        ty = Type::Ptr(Box::new(func_ty));
+        // 可能后面还有函数指针后缀
+        self.try_parse_abstract_func_ptr(ty)
     }
 
     /// 解析类型后的数组后缀: `int`, `int [N]`, `int [N][M]`, `int []`.
@@ -4676,6 +4750,30 @@ impl<'a> Parser<'a> {
                 };
                 // 数组/名字后的 __attribute__((aligned(...))) 等
                 self.skip_attributes();
+                // C 语言中 `struct existing_type;` (无字段名的现有类型引用)
+                // 不是匿名成员，只是前向声明，不应贡献大小。GCC/Clang 会
+                // 发出 "declaration does not declare anything" 警告并忽略。
+                // 仅当类型无标签名 (匿名内联定义 `struct { ... };`) 时才
+                // 作为 C11 匿名成员处理 (字段展平到父结构)。
+                if nm.is_empty() {
+                    let is_named_tag = match &ty {
+                        Type::Struct(name, _)
+                        | Type::Union(name, _)
+                        | Type::Enum(name, _, _) => !name.is_empty(),
+                        _ => false,
+                    };
+                    if is_named_tag {
+                        // 跳过此字段，不添加到 fields
+                        if self.cur.kind == TokKind::Comma {
+                            self.advance();
+                            continue;
+                        }
+                        if self.cur.kind == TokKind::Semi {
+                            self.advance();
+                        }
+                        break;
+                    }
+                }
                 fs.push(Field {
                     name: nm,
                     ty,
@@ -5352,6 +5450,8 @@ impl<'a> Parser<'a> {
                 | TokKind::KwInt128
                 | TokKind::KwUInt128
         ) || (self.cur.kind == TokKind::Ident
+            // 局部变量遮蔽 typedef: 若同名局部变量存在，不应视为类型起始
+            && !self.locals.contains_key(&self.cur.text)
             && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs, self.opts.is_c23))
     }
 
@@ -5376,6 +5476,8 @@ impl<'a> Parser<'a> {
             || (self.cur.kind == TokKind::Ident
                 && self.cur.text != "_Generic"
                 && self.cur.text != "nullptr"
+                // 局部变量遮蔽 typedef 时不应视为声明起始
+                && !self.locals.contains_key(&self.cur.text)
                 && Self::is_type_specifier_ident(&self.cur.text, &self.typedefs, self.opts.is_c23)
                 && matches!(self.peek.kind, TokKind::Ident | TokKind::Star))
     }
