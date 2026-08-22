@@ -6336,7 +6336,7 @@ fn hwasan_software_tag_path() {
 // ---------- KCOV/Fuzzer ----------
 
 /// KCOV/Fuzzer: trace_cmp* 插桩.
-/// -fsanitize-coverage=trace-cmp 应产生 coverage 插桩调用 (trace_pc).
+/// -fsanitize-coverage=trace-cmp 应产生 compare 与 PC/guard coverage 调用.
 #[test]
 #[cfg(unix)]
 fn kcov_fuzzer_trace_cmp() {
@@ -6359,10 +6359,17 @@ fn kcov_fuzzer_trace_cmp() {
         "dcc should compile KCOV trace-cmp fixture: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // trace-cmp 应产生 __sanitizer_cov_trace_pc 等 coverage 调用
+    assert!(
+        asm_text.contains("__sanitizer_cov_trace_cmp4"),
+        "trace-cmp should emit __sanitizer_cov_trace_cmp4: {asm_text}"
+    );
     assert!(
         asm_text.contains("__sanitizer_cov_trace_pc"),
-        "trace-cmp should emit __sanitizer_cov_trace_pc calls: {asm_text}"
+        "trace-cmp should still emit trace_pc entry calls: {asm_text}"
+    );
+    assert!(
+        asm_text.contains("__sanitizer_cov_trace_pc_guard"),
+        "trace-cmp should still emit edge guard calls: {asm_text}"
     );
 }
 
@@ -6390,8 +6397,12 @@ fn kcov_fuzzer_trace_switch() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        asm_text.contains("trace_switch") || asm_text.contains("trace_pc"),
-        "trace-switch should emit coverage calls: {asm_text}"
+        asm_text.contains("__sanitizer_cov_trace_switch"),
+        "trace-switch should emit __sanitizer_cov_trace_switch: {asm_text}"
+    );
+    assert!(
+        asm_text.contains("__sanitizer_cov_trace_pc"),
+        "trace-switch should still emit trace_pc entry calls: {asm_text}"
     );
 }
 
@@ -6419,10 +6430,13 @@ fn kcov_fuzzer_8bit_counters() {
         "dcc should compile KCOV 8bit-counters fixture: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // 8-bit counters 应产生 coverage 插桩调用
     assert!(
-        asm_text.contains("__sanitizer_cov"),
-        "8bit-counters should emit __sanitizer_cov calls: {asm_text}"
+        asm_text.contains("__sanitizer_cov_8bit_counters_init"),
+        "8bit-counters should emit counter init callback: {asm_text}"
+    );
+    assert!(
+        asm_text.contains("__sanitizer_cov_trace_pc_guard"),
+        "8bit-counters should emit edge guard callbacks: {asm_text}"
     );
 }
 
@@ -6450,25 +6464,30 @@ fn kcov_fuzzer_pc_table() {
         "dcc should compile KCOV pc-table fixture: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // PC table 应产生 coverage 插桩调用
     assert!(
-        asm_text.contains("__sanitizer_cov"),
-        "pc-table should emit __sanitizer_cov calls: {asm_text}"
+        asm_text.contains("__sanitizer_cov_pcs_init"),
+        "pc-table should emit PC table init callback: {asm_text}"
+    );
+    assert!(
+        asm_text.contains("__sanitizer_cov_trace_pc_guard"),
+        "pc-table should emit edge guard callbacks: {asm_text}"
     );
 }
 
 /// KCOV/Fuzzer: no_sanitize 与 KCOV/Fuzzer 交互.
-/// no_sanitize 属性应跳过 sanitizer 插桩.
+/// no_sanitize("address") 应只关闭 ASAN，保留 KCOV/Fuzzer coverage.
 #[test]
 #[cfg(unix)]
 fn kcov_fuzzer_no_sanitize_interaction() {
-    let source = include_str!("fixtures/c/attr_nosan.c");
+    let source = "__attribute__((no_sanitize(\"address\")))\n\
+int hot_path(int *p) { return *p == 7; }\n\
+int main(void) { int x = 7; return hot_path(&x) ? 0 : 1; }\n";
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-kcov-nosan-{}.c", std::process::id()));
     let asm_path = dir.join(format!("dcc-kcov-nosan-{}.s", std::process::id()));
     fs::write(&source_path, source).expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-fsanitize=address", "-S", "-o"])
+        .args(["-fsanitize=address,fuzzer", "-S", "-o"])
         .arg(&asm_path)
         .arg(&source_path)
         .output()
@@ -6481,12 +6500,20 @@ fn kcov_fuzzer_no_sanitize_interaction() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // no_sanitize 函数应跳过 sanitizer 插桩
-    // 验证 hot_path 函数没有 __asan 插桩 (而 main 可能有)
-    // 这里只验证编译通过且 asm 文件存在
+    let hot_start = asm_text.find("hot_path:").expect("hot_path label");
+    let main_start = asm_text.find("main:").expect("main label");
+    let hot_asm = &asm_text[hot_start..main_start];
     assert!(
-        !asm_text.is_empty(),
-        "no_sanitize interaction should produce assembly output"
+        hot_asm.contains("__sanitizer_cov_trace_pc"),
+        "no_sanitize(address) should keep KCOV/Fuzzer entry coverage: {hot_asm}"
+    );
+    assert!(
+        hot_asm.contains("__sanitizer_cov_trace_cmp4"),
+        "no_sanitize(address) should keep fuzzer compare coverage: {hot_asm}"
+    );
+    assert!(
+        !hot_asm.contains("__asan_load"),
+        "no_sanitize(address) should suppress ASAN loads in hot_path: {hot_asm}"
     );
 }
 

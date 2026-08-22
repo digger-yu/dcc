@@ -1834,6 +1834,8 @@ fn sanitizer_link_deps(cfg: &Config) -> (Vec<String>, Vec<String>, Vec<String>) 
                 "__sanitizer_cov_trace_cmp4",
                 "__sanitizer_cov_trace_cmp8",
                 "__sanitizer_cov_trace_switch",
+                "__sanitizer_cov_8bit_counters_init",
+                "__sanitizer_cov_pcs_init",
             ],
             None,
         );

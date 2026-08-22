@@ -48,6 +48,14 @@ pub struct SanitizerFlags {
     pub kcsan: bool,
     /// `-fsanitize-coverage` (trace-pc / trace-pc-guard)
     pub kcov: bool,
+    /// `-fsanitize-coverage=trace-cmp` compare callbacks.
+    pub cov_trace_cmp: bool,
+    /// `-fsanitize-coverage=trace-switch` switch callbacks.
+    pub cov_trace_switch: bool,
+    /// `-fsanitize-coverage=8bit-counters` counter init callbacks.
+    pub cov_8bit_counters: bool,
+    /// `-fsanitize-coverage=pc-table` PC table init callbacks.
+    pub cov_pc_table: bool,
     /// `-fsanitize=fuzzer` (san-coverage + compare + switch)
     pub fuzzer: bool,
 }
@@ -70,8 +78,44 @@ impl SanitizerFlags {
             }
             return Ok(());
         }
-        if arg == "-fsanitize-coverage" || arg.contains("sanitize-coverage") {
+        if let Some(rest) = arg.strip_prefix("-fsanitize-coverage=") {
+            for part in rest.split(',') {
+                Self::apply_coverage_name(part.trim(), f)?;
+            }
+            return Ok(());
+        }
+        if arg == "-fsanitize-coverage" {
             f.kcov = true;
+        }
+        Ok(())
+    }
+
+    fn apply_coverage_name(name: &str, f: &mut Self) -> Result<(), CliError> {
+        match name {
+            "trace-pc" | "trace-pc-guard" | "coverage" => f.kcov = true,
+            "trace-cmp" => {
+                f.kcov = true;
+                f.cov_trace_cmp = true;
+            }
+            "trace-switch" => {
+                f.kcov = true;
+                f.cov_trace_switch = true;
+            }
+            "8bit-counters" => {
+                f.kcov = true;
+                f.cov_8bit_counters = true;
+            }
+            "pc-table" => {
+                f.kcov = true;
+                f.cov_pc_table = true;
+            }
+            "" => {}
+            _ => {
+                return Err(CliError::new(&format!(
+                    "unsupported sanitizer coverage: {}",
+                    name
+                )))
+            }
         }
         Ok(())
     }
@@ -94,9 +138,13 @@ impl SanitizerFlags {
                 f.kcsan = true;
                 f.kernel_mode = true;
             }
-            "fuzzer" => f.fuzzer = true,
+            "fuzzer" => {
+                f.fuzzer = true;
+                f.kcov = true;
+                f.cov_trace_cmp = true;
+                f.cov_trace_switch = true;
+            }
             "coverage" | "trace-pc" | "trace-pc-guard" => f.kcov = true,
-            _ if name.contains("coverage") => f.kcov = true,
             _ => return Err(CliError::new(&format!("unsupported sanitizer: {}", name))),
         }
         Ok(())
@@ -104,12 +152,26 @@ impl SanitizerFlags {
 
     /// 是否启用了任何 sanitizer。
     pub fn any(&self) -> bool {
-        self.kasan || self.hwasan || self.ubsan || self.kcsan || self.kcov || self.fuzzer
+        self.kasan
+            || self.hwasan
+            || self.ubsan
+            || self.kcsan
+            || self.kcov
+            || self.cov_trace_cmp
+            || self.cov_trace_switch
+            || self.cov_8bit_counters
+            || self.cov_pc_table
+            || self.fuzzer
     }
 
     /// TU 级 init 是否需要在首个函数前插入。
     pub fn needs_tu_init(&self) -> bool {
-        self.kasan || self.hwasan || self.ubsan || self.kcsan
+        self.kasan
+            || self.hwasan
+            || self.ubsan
+            || self.kcsan
+            || self.cov_8bit_counters
+            || self.cov_pc_table
     }
 
     /// KASAN / HWASAN load/store 检查。
@@ -117,19 +179,19 @@ impl SanitizerFlags {
         self.kasan || self.hwasan
     }
 
-    /// 比较回调 (fuzzer)。
+    /// 比较回调 (trace-cmp / fuzzer)。
     pub fn needs_compare_trace(&self) -> bool {
-        self.fuzzer
+        self.cov_trace_cmp || self.fuzzer
     }
 
     /// switch 调度 trace。
     pub fn needs_switch_trace(&self) -> bool {
-        self.fuzzer
+        self.cov_trace_switch || self.fuzzer
     }
 
     /// 边覆盖 guard 计数器 (trace-pc-guard)。
     pub fn needs_edge_coverage(&self) -> bool {
-        self.kcov || self.fuzzer
+        self.kcov || self.cov_8bit_counters || self.cov_pc_table || self.fuzzer
     }
 
     /// KCSAN 内存访问 watchpoint。
@@ -217,6 +279,10 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, ctx: &mut Instrum
             ubsan: func_flags.ubsan,
             kcsan: func_flags.kcsan,
             kcov: false,
+            cov_trace_cmp: false,
+            cov_trace_switch: false,
+            cov_8bit_counters: func_flags.cov_8bit_counters,
+            cov_pc_table: func_flags.cov_pc_table,
             fuzzer: false,
         };
         prologue.extend(tu_init_calls(pending_func_init, &span));
@@ -1800,6 +1866,12 @@ fn tu_init_calls(flags: SanitizerFlags, span: &Span) -> Vec<BlockItem> {
             out.push(sanitizer_call("__tsan_init", span));
         }
     }
+    if flags.cov_8bit_counters {
+        out.push(sanitizer_call("__sanitizer_cov_8bit_counters_init", span));
+    }
+    if flags.cov_pc_table {
+        out.push(sanitizer_call("__sanitizer_cov_pcs_init", span));
+    }
     out
 }
 
@@ -2104,6 +2176,22 @@ mod tests {
         ])
         .expect("known sanitizers should parse");
         assert!(f.kasan && f.ubsan && f.kcov);
+    }
+
+    #[test]
+    fn from_args_parses_coverage_suboptions() {
+        let f = SanitizerFlags::from_args(&[
+            "-fsanitize-coverage=trace-cmp,trace-switch,8bit-counters,pc-table".to_string(),
+        ])
+        .expect("known coverage sanitizers should parse");
+        assert!(f.kcov);
+        assert!(f.cov_trace_cmp);
+        assert!(f.cov_trace_switch);
+        assert!(f.cov_8bit_counters);
+        assert!(f.cov_pc_table);
+        assert!(f.needs_compare_trace());
+        assert!(f.needs_switch_trace());
+        assert!(f.needs_edge_coverage());
     }
 
     #[test]
