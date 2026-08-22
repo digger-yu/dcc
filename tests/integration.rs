@@ -5518,87 +5518,50 @@ fn strict_qemu_boot_matrix_gates_on_artifacts() {
 
 // ---------- kernel object corpus ----------
 
-/// kernel object corpus: 固化若干真实内核 .o 样本,
-/// 覆盖 arch/x86/kernel、kernel/sched、lib/ 目录结构.
-/// 校验: 每个 .o 必须包含有效的 ELF 魔数与目标架构标记.
+fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("tests/fixtures/corpus").join(rel);
+    let obj = fs::read(&path).unwrap_or_else(|e| panic!("missing corpus object {path:?}: {e}"));
+    assert!(obj.len() >= 64, "object too small: {path:?}");
+    assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F'], "bad ELF magic: {path:?}");
+    assert_eq!(obj[4], 2, "expected ELF64 class: {path:?}");
+    assert_eq!(obj[5], 1, "expected little-endian ELF: {path:?}");
+    let kind = u16::from_le_bytes([obj[16], obj[17]]);
+    let machine = u16::from_le_bytes([obj[18], obj[19]]);
+    assert_eq!(kind, 1, "expected ET_REL object: {path:?}");
+    assert_eq!(machine, 0x3e, "expected EM_X86_64 object: {path:?}");
+
+    let sections = elf64_sections(&obj);
+    for section in [".text", ".symtab", ".strtab", ".orc_unwind", ".orc_unwind_ip"] {
+        let (_, _, size) = sections
+            .get(section)
+            .unwrap_or_else(|| panic!("missing section {section} in {path:?}"));
+        assert!(*size > 0, "empty section {section} in {path:?}");
+    }
+
+    let funcs = elf64_func_symbols(&obj);
+    assert!(
+        funcs.iter().any(|(name, _, size)| name == expected_symbol && *size > 0),
+        "missing expected function {expected_symbol} in {path:?}: {funcs:?}"
+    );
+}
+
+/// kernel object corpus: 固化真实 Linux arch/x86/kernel .o 样本.
 #[test]
 fn kernel_object_corpus_arch_x86_kernel() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let corpus_dir = root.join("tests/fixtures/corpus/arch/x86/kernel");
-    if !corpus_dir.exists() {
-        eprintln!("SKIP: kernel object corpus not seeded at {corpus_dir:?}");
-        return;
-    }
-    let entries = fs::read_dir(&corpus_dir).expect("read corpus dir");
-    for entry in entries {
-        let path = entry.expect("read dir entry").path();
-        if path.extension().map_or(false, |e| e == "o") {
-            let obj = fs::read(&path).expect("read object file");
-            assert!(obj.len() >= 4, "object too small: {path:?}");
-            // ELF 魔数: 0x7f, 'E', 'L', 'F'
-            assert_eq!(
-                &obj[0..4],
-                &[0x7f, b'E', b'L', b'F'],
-                "missing ELF magic in {path:?}"
-            );
-            // x86_64 machine type (0x3e) 出现在 e_machine 字段 (偏移 18)
-            if obj.len() >= 20 {
-                let machine = u16::from_le_bytes([obj[18], obj[19]]);
-                assert_eq!(
-                    machine, 0x3e,
-                    "expected x86_64 EM_X86_64 in {path:?}, got {machine:#x}"
-                );
-            }
-        }
-    }
+    assert_kernel_corpus_object("arch/x86/kernel/io_delay.o", "native_io_delay");
 }
 
-/// kernel object corpus: kernel/sched 目录样本.
+/// kernel object corpus: 固化真实 Linux kernel/sched .o 样本.
 #[test]
 fn kernel_object_corpus_kernel_sched() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let corpus_dir = root.join("tests/fixtures/corpus/kernel/sched");
-    if !corpus_dir.exists() {
-        eprintln!("SKIP: kernel object corpus not seeded at {corpus_dir:?}");
-        return;
-    }
-    let entries = fs::read_dir(&corpus_dir).expect("read corpus dir");
-    for entry in entries {
-        let path = entry.expect("read dir entry").path();
-        if path.extension().map_or(false, |e| e == "o") {
-            let obj = fs::read(&path).expect("read object file");
-            assert!(obj.len() >= 4, "object too small: {path:?}");
-            assert_eq!(
-                &obj[0..4],
-                &[0x7f, b'E', b'L', b'F'],
-                "missing ELF magic in {path:?}"
-            );
-        }
-    }
+    assert_kernel_corpus_object("kernel/sched/fair.o", "pick_next_task_fair");
 }
 
-/// kernel object corpus: lib/ 目录样本.
+/// kernel object corpus: 固化真实 Linux lib/ .o 样本.
 #[test]
 fn kernel_object_corpus_lib() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let corpus_dir = root.join("tests/fixtures/corpus/lib");
-    if !corpus_dir.exists() {
-        eprintln!("SKIP: kernel object corpus not seeded at {corpus_dir:?}");
-        return;
-    }
-    let entries = fs::read_dir(&corpus_dir).expect("read corpus dir");
-    for entry in entries {
-        let path = entry.expect("read dir entry").path();
-        if path.extension().map_or(false, |e| e == "o") {
-            let obj = fs::read(&path).expect("read object file");
-            assert!(obj.len() >= 4, "object too small: {path:?}");
-            assert_eq!(
-                &obj[0..4],
-                &[0x7f, b'E', b'L', b'F'],
-                "missing ELF magic in {path:?}"
-            );
-        }
-    }
+    assert_kernel_corpus_object("lib/clz_ctz.o", "__clzdi2");
 }
 
 // ---------- objtool known failures xfail ----------

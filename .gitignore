@@ -32,6 +32,7 @@ perf.data
 # DCC artifacts
 bin/
 *.o
+!tests/fixtures/corpus/**/*.o
 *.exe
 a.out
 core
