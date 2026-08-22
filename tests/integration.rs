@@ -4656,6 +4656,20 @@ fn unknown_builtin_warning_zero_and_ud2() {
         "only void unknown __builtin_ should emit ud2, disasm:\n{text}"
     );
     let _ = fs::remove_file(object_path);
+
+    let (run_output, exe) = run_compile_and_run("unknown-builtin-runtime", source);
+    let run_stderr = String::from_utf8_lossy(&run_output.stderr);
+    assert!(
+        run_output.status.success(),
+        "runtime compile stderr: {run_stderr}"
+    );
+    assert!(
+        run_stderr.contains("unsupported __builtin_") && run_stderr.contains("emitted as zero"),
+        "runtime compile should warn about zero fallback: {run_stderr}"
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "unknown non-void builtins should return zero");
+    let _ = fs::remove_file(exe);
 }
 
 /// 通用工具：编译一个 C 源文件并返回 output + 可执行路径

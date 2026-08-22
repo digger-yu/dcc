@@ -6846,16 +6846,7 @@ impl Codegen {
                             self.mov(dst, 0);
                         }
                     } else if name_name.starts_with("__builtin_") {
-                        eprintln!(
-                            "warning: unsupported __builtin_ function '{}', emitted as {}",
-                            name_name,
-                            if matches!(ty, Type::Void) { "ud2" } else { "zero" }
-                        );
-                        if matches!(ty, Type::Void) {
-                            self.emit(&[0x0F, 0x0B]); // ud2
-                        } else {
-                            self.mov_imm(dst, 0);
-                        }
+                        self.gen_unknown_builtin_fallback(&name_name, ty, dst, sret_off);
                     } else {
                         self.emit_sysv_call(Some(&name_name), None, args, sret_off);
                         if let Some(off) = sret_off {
@@ -11618,6 +11609,10 @@ impl Codegen {
         } = r
         {
             if let Expr::Ident { name, .. } = callee.as_ref() {
+                if name.name.starts_with("__builtin_") && !Self::is_fortify_builtin(&name.name) {
+                    self.gen_unknown_builtin_fallback(&name.name, call_ty, 0, Some(dst_off));
+                    return;
+                }
                 if Self::needs_memory_return(call_ty) {
                     // sret 返回: 分配隐藏指针槽, 调用后从槽拷贝到目标变量
                     let sret_off = self.alloc_sret_slot(call_ty.size());
@@ -12189,17 +12184,78 @@ impl Codegen {
             self.call_label(real_name);
             return true;
         }
+        self.gen_unknown_builtin_fallback(&name.name, ty, 0, None);
+        true
+    }
+
+    fn gen_unknown_builtin_fallback(
+        &mut self,
+        name: &str,
+        ty: &Type,
+        dst: u8,
+        sret_off: Option<i32>,
+    ) {
         eprintln!(
             "warning: unsupported __builtin_ function '{}', emitted as {}",
-            name.name,
+            name,
             if matches!(ty, Type::Void) { "ud2" } else { "zero" }
         );
         if matches!(ty, Type::Void) {
             self.emit(&[0x0F, 0x0B]); // ud2
-        } else {
-            self.mov_imm(0, 0);
+            return;
         }
-        true
+        self.emit_zero_value(ty, dst, sret_off);
+    }
+
+    fn emit_zero_value(&mut self, ty: &Type, dst: u8, sret_off: Option<i32>) {
+        if let Some(off) = sret_off {
+            self.mov_imm(0, 0);
+            self.zero_mem(off, ty.size().max(1));
+            self.emit_lea_r13(0, off);
+            if dst != 0 {
+                self.mov(dst, 0);
+            }
+            return;
+        }
+        match ty {
+            Type::Void => {}
+            Type::Float | Type::Double | Type::LongDouble => {
+                self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                if dst != 0 {
+                    self.mov_imm(dst, 0);
+                }
+            }
+            Type::Complex(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {
+                self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                self.emit(&[0x0F, 0x57, 0xC9]); // xorps xmm1, xmm1
+                let result_off = -self.frame_size + 8;
+                let pfx = if matches!(inner.as_ref(), Type::Float) {
+                    0xF3u8
+                } else {
+                    0xF2u8
+                };
+                let inner_sz = inner.size() as i32;
+                self.emit_xmm_r13_disp(pfx, 0x11, 0, result_off);
+                self.emit_xmm_r13_disp(pfx, 0x11, 1, result_off + inner_sz);
+                if dst != 0 {
+                    self.mov_imm(dst, 0);
+                }
+            }
+            Type::Vector(_, _) => {
+                let off = self.vector_temp_base(0, ty.size());
+                self.mov_imm(0, 0);
+                self.mov_imm(2, 0);
+                self.zero_mem(off, ty.size().max(1));
+                if dst != 0 {
+                    self.mov_imm(dst, 0);
+                }
+            }
+            Type::Int128 | Type::UInt128 | Type::Complex(_) => {
+                self.mov_imm(dst, 0);
+                self.mov_imm(2, 0);
+            }
+            _ => self.mov_imm(dst, 0),
+        }
     }
 
     /// 判断是否为 Linux FORTIFY 内置函数.
