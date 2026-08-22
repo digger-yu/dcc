@@ -13693,6 +13693,24 @@ fn ifunc_resolver_runtime() {
     assert_eq!(rc, 0, "ifunc resolver should return 0, got {rc}");
 }
 
+#[test]
+fn unsupported_z_options_are_errors() {
+    for z in ["origin", "unknown-dcc-option"] {
+        let (output, exe) = run_compile_and_run_flags(
+            &format!("bad-z-{z}"),
+            "int main(void) { return 0; }",
+            &["-fbuiltin-linker", "-z", z],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = fs::remove_file(&exe);
+        assert!(!output.status.success(), "-z {z} should fail");
+        assert!(
+            stderr.contains("unsupported -z option"),
+            "missing unsupported -z diagnostic for {z}: {stderr}"
+        );
+    }
+}
+
 /// RELRO: -z relro PIE 应生成 GNU_RELRO 段
 #[test]
 #[cfg(unix)]

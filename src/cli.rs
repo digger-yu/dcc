@@ -1499,7 +1499,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         let parallel_codegen = opt >= 2 && std::env::var("DCC_NO_PARALLEL").is_err();
         let mut all_link_opts = crate::link::link_opts::LinkOpts::from_env();
         for z in &link_opts_z {
-            all_link_opts.parse_z(z);
+            all_link_opts.parse_z(z).map_err(|e| CliError::new(&e))?;
         }
         if no_semantic_interposition {
             all_link_opts.no_semantic_interposition = true;

@@ -105,9 +105,9 @@ impl LinkOpts {
         opts
     }
 
-    /// 解析 -z key[=value] / -z key
-    /// 返回 Ok(true) 表示继续, Ok(false) 表示跳过 (e.g. 未知 -z 选项 → 静默)
-    pub fn parse_z(&mut self, opt: &str) {
+    /// 解析 -z key[=value] / -z key。
+    /// 返回错误表示该 -z 选项当前没有显式语义或参数非法。
+    pub fn parse_z(&mut self, opt: &str) -> Result<(), String> {
         // -z 接 a / b / 立即 / "opt1 opt2" 形式
         // GCC/ld 都接受 -z relro / -z relro=full / -z relro=partial
         let (key, val) = if let Some(eq) = opt.find('=') {
@@ -121,7 +121,7 @@ impl LinkOpts {
                 match val {
                     None | Some("full") => self.relro_partial = false,
                     Some("partial") => self.relro_partial = true,
-                    _ => {}
+                    Some(v) => return Err(format!("unsupported -z relro mode '{v}'")),
                 }
             }
             "norelro" => self.relro = false,
@@ -132,36 +132,22 @@ impl LinkOpts {
             "pack-relative-relocs" => self.pack_relative_relocs = true,
             "nopack-relative-relocs" => self.pack_relative_relocs = false,
             "max-page-size" => {
-                if let Some(v) = val {
-                    if let Ok(n) = parse_size(v) {
-                        self.max_page_size = n;
-                    }
-                }
+                let v = val.ok_or_else(|| "missing value for -z max-page-size".to_string())?;
+                self.max_page_size = parse_size(v)
+                    .map_err(|_| format!("invalid value for -z max-page-size: {v}"))?;
             }
             "common-page-size" => {
-                if let Some(v) = val {
-                    if let Ok(n) = parse_size(v) {
-                        self.common_page_size = n;
-                    }
-                }
+                let v = val.ok_or_else(|| "missing value for -z common-page-size".to_string())?;
+                self.common_page_size = parse_size(v)
+                    .map_err(|_| format!("invalid value for -z common-page-size: {v}"))?;
             }
-            // 已知但本阶段不实现的
             "ibt" => self.ibt = true,
             "noibt" => self.ibt = false,
             "shstk" => self.shstk = true,
             "noshstk" => self.shstk = false,
-            "cet-report" | "cet-report=warning" | "cet-report=error" | "force-bti"
-            | "force-bti-warning" | "force-ibt" | "force-shstk" | "noseparate-code"
-            | "separate-code" | "nodynamic-linker" | "dynamic-linker" | "initfirst"
-            | "interpose" | "nodelete" | "nodump" | "origin" | "defs" | "undefs" | "muldefs"
-            | "nocopyreloc" | "nosymtab" | "symtab" | "nocombreloc" | "combreloc"
-            | "nocap-relocs" | "cap-relocs" | "text" | "notext" | "rodynamic" | "norodynamic" => {
-                // 静默接受
-            }
-            _ => {
-                // 未知 -z 选项: 静默忽略
-            }
+            other => return Err(format!("unsupported -z option '{other}'")),
         }
+        Ok(())
     }
 }
 
@@ -509,40 +495,40 @@ mod tests {
     #[test]
     fn parse_z_relro_variants() {
         let mut o = LinkOpts::default();
-        o.parse_z("relro");
+        o.parse_z("relro").unwrap();
         assert!(o.relro);
         assert!(!o.relro_partial);
-        o.parse_z("relro=partial");
+        o.parse_z("relro=partial").unwrap();
         assert!(o.relro);
         assert!(o.relro_partial);
-        o.parse_z("relro=full");
+        o.parse_z("relro=full").unwrap();
         assert!(!o.relro_partial);
     }
 
     #[test]
     fn parse_z_now_lazy() {
         let mut o = LinkOpts::default();
-        o.parse_z("now");
+        o.parse_z("now").unwrap();
         assert!(o.bind_now);
-        o.parse_z("lazy");
+        o.parse_z("lazy").unwrap();
         assert!(!o.bind_now);
     }
 
     #[test]
     fn parse_z_max_page_size() {
         let mut o = LinkOpts::default();
-        o.parse_z("max-page-size=0x4000");
+        o.parse_z("max-page-size=0x4000").unwrap();
         assert_eq!(o.max_page_size, 0x4000);
-        o.parse_z("max-page-size=4K");
+        o.parse_z("max-page-size=4K").unwrap();
         assert_eq!(o.max_page_size, 4 * 1024);
-        o.parse_z("max-page-size=2M");
+        o.parse_z("max-page-size=2M").unwrap();
         assert_eq!(o.max_page_size, 2 * 1024 * 1024);
     }
 
     #[test]
     fn parse_z_pack_relocs() {
         let mut o = LinkOpts::default();
-        o.parse_z("pack-relative-relocs");
+        o.parse_z("pack-relative-relocs").unwrap();
         assert!(o.pack_relative_relocs);
     }
 
@@ -551,14 +537,24 @@ mod tests {
         let mut o = LinkOpts::default();
         assert!(!o.ibt);
         assert!(!o.shstk);
-        o.parse_z("ibt");
+        o.parse_z("ibt").unwrap();
         assert!(o.ibt);
-        o.parse_z("shstk");
+        o.parse_z("shstk").unwrap();
         assert!(o.shstk);
-        o.parse_z("noibt");
+        o.parse_z("noibt").unwrap();
         assert!(!o.ibt);
-        o.parse_z("noshstk");
+        o.parse_z("noshstk").unwrap();
         assert!(!o.shstk);
+    }
+
+    #[test]
+    fn parse_z_rejects_unsupported_and_bad_values() {
+        let mut o = LinkOpts::default();
+        assert!(o.parse_z("origin").is_err());
+        assert!(o.parse_z("unknown-dcc-option").is_err());
+        assert!(o.parse_z("max-page-size").is_err());
+        assert!(o.parse_z("max-page-size=bogus").is_err());
+        assert!(o.parse_z("relro=bogus").is_err());
     }
 
     #[test]
