@@ -554,8 +554,8 @@ pub enum Type {
     Ptr(Box<Type>),
     Array(Box<Type>, ArraySize),
     Vector(Box<Type>, usize), // SIMD 向量: (元素类型, 元素个数)
-    Struct(String, Arc<Vec<Field>>),
-    Union(String, Arc<Vec<Field>>),
+    Struct(String, Arc<Vec<Field>>, usize), // (name, fields, align)
+    Union(String, Arc<Vec<Field>>, usize),   // (name, fields, align)
     Enum(String, Arc<Vec<(String, i64)>>, Option<Box<Type>>), // (name, values, C23 底层类型: None=默认 int, Some(t)=底层类型, packed 编码为 Some(SChar))
     Func(Box<Type>, Vec<Type>),
     Named(String),
@@ -613,6 +613,20 @@ impl Type {
         align.max(1)
     }
 
+    /// Compute struct/union alignment from fields.
+    /// - Packed (sentinel `\0__packed__`): 1
+    /// - Otherwise: max of field natural alignments, capped by `pack` if any
+    pub fn compute_struct_align(fields: &[Field], packed: bool, pack: Option<usize>) -> usize {
+        if packed {
+            return 1;
+        }
+        let max_field = fields.iter().map(|f| f.ty.align()).max().unwrap_or(1).max(1);
+        match pack {
+            Some(n) if n < max_field => n,
+            _ => max_field,
+        }
+    }
+
     pub fn size(&self) -> usize {
         match self {
             Type::Void => 0,
@@ -638,20 +652,18 @@ impl Type {
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.size() * 2,
             Type::Atomic(inner) => inner.size(),
-            Type::Struct(_, fields) => {
+            Type::Struct(_, fields, align) => {
                 let size = fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0);
-                let align = Self::aggregate_align_from_offsets(fields);
-                let aligned = if align > 1 {
+                let aligned = if *align > 1 {
                     (size + align - 1) & !(align - 1)
                 } else {
                     size
                 };
                 aligned
             }
-            Type::Union(_, fields) => {
+            Type::Union(_, fields, align) => {
                 let size = fields.iter().map(|f| f.ty.size()).max().unwrap_or(0);
-                let align = Self::aggregate_align_from_offsets(fields);
-                if align > 1 {
+                if *align > 1 {
                     (size + align - 1) & !(align - 1)
                 } else {
                     size
@@ -686,8 +698,8 @@ impl Type {
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.align(),
             Type::Atomic(inner) => inner.align(),
-            Type::Struct(_, fields) => Self::aggregate_align_from_offsets(fields),
-            Type::Union(_, fields) => Self::aggregate_align_from_offsets(fields),
+            Type::Struct(_, _, align) => *align,
+            Type::Union(_, _, align) => *align,
             _ => 8,
         }
     }
@@ -926,8 +938,8 @@ impl std::fmt::Display for Type {
                 n * inner.size() * 8,
                 inner
             ),
-            Type::Struct(name, _) => write!(f, "struct {}", name),
-            Type::Union(name, _) => write!(f, "union {}", name),
+            Type::Struct(name, _, _) => write!(f, "struct {}", name),
+            Type::Union(name, _, _) => write!(f, "union {}", name),
             Type::Enum(name, _, _) => write!(f, "enum {}", name),
             Type::Func(ret, params) => {
                 write!(f, "(")?;
@@ -955,7 +967,7 @@ pub fn find_field<'a>(fields: &'a [Field], name: &str) -> Option<(&'a Field, usi
     // 2. 递归查找匿名 struct/union 字段
     for f in fields.iter() {
         if f.name.is_empty() {
-            if let Type::Struct(_, inner) | Type::Union(_, inner) = &f.ty {
+            if let Type::Struct(_, inner, _) | Type::Union(_, inner, _) = &f.ty {
                 if let Some((found, inner_off)) = find_field(inner, name) {
                     return Some((found, f.offset + inner_off));
                 }

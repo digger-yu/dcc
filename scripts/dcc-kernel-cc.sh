@@ -92,14 +92,9 @@ for ((i = n - 1; i >= 0; i--)); do
 done
 
 base="$(basename "$src" 2>/dev/null || true)"
-case "$base" in
-    asm-offsets.c|bounds.c|*-offsets.c)
-        # 基础设施文件: 直接交给 gcc
-        out=()
-        filter_clang_flags out "${args[@]}"
-        exec gcc "${out[@]}"
-        ;;
-esac
+# 基础设施文件 (asm-offsets.c, bounds.c 等) 也用 dcc 编译,
+# 因为内核头文件依赖 -fms-anonymous-structs 等 GCC 不支持的扩展
+# (旧方案: 交给 gcc 但过滤 -fms-anonymous-structs 导致匿名结构体字段丢失)
 
 # 链接步骤: 委托给 gcc (dcc 内置链接器不能解析内核外部符号)
 if is_link_step "$@"; then

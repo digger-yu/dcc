@@ -30,7 +30,7 @@ fn resolve_designator(ty: &Type, d: &Designator) -> Option<(usize, usize, Type)>
     match d {
         Designator::Field(name) => {
             let fields = match ty {
-                Type::Struct(_, fs) | Type::Union(_, fs) => fs.as_ref(),
+                Type::Struct(_, fs, _) | Type::Union(_, fs, _) => fs.as_ref(),
                 _ => return None,
             };
             let f = fields.iter().find(|f| f.name == name.name)?;
@@ -1595,7 +1595,7 @@ impl Codegen {
             // _Complex float/double: 两个 eightbyte 均为 SSE (SysV,
             // 与 gcc ubsan.cc 一致), 保持初始 [Sse, Sse]
             Type::Complex(inner) if matches!(inner.as_ref(), Type::Float | Type::Double) => {}
-            Type::Struct(_, fields) => {
+            Type::Struct(_, fields, _) => {
                 for field in fields.iter() {
                     if !Self::classify_at(&field.ty, base + field.offset, classes) {
                         return false;
@@ -1603,7 +1603,7 @@ impl Codegen {
                 }
                 return true;
             }
-            Type::Union(_, fields) => {
+            Type::Union(_, fields, _) => {
                 for field in fields.iter() {
                     if !Self::classify_at(&field.ty, base, classes) {
                         return false;
@@ -4794,8 +4794,8 @@ impl Codegen {
                         matches!(&p.ty, Type::Int128 | Type::UInt128 | Type::Complex(_))
                             || (matches!(
                                 &p.ty,
-                                Type::Struct(_, _)
-                                    | Type::Union(_, _)
+                                Type::Struct(_, _, _)
+                                    | Type::Union(_, _, _)
                                     | Type::Array(_, ArraySize::Const(_))
                                     | Type::Atomic(_)
                                     | Type::Vector(_, _)
@@ -5054,8 +5054,8 @@ impl Codegen {
                                 let is_vec_init = matches!(&v.ty, Type::Vector(_, _));
                                 let is_agg = matches!(
                                     &v.ty,
-                                    Type::Struct(_, _)
-                                        | Type::Union(_, _)
+                                    Type::Struct(_, _, _)
+                                        | Type::Union(_, _, _)
                                         | Type::Array(_, ArraySize::Const(_))
                                         | Type::Atomic(_)
                                 ) && v.ty.size() > 8;
@@ -5276,8 +5276,8 @@ impl Codegen {
                 Type::Int128 | Type::UInt128 | Type::Complex(_)
             ) || matches!(
                 effective_ty,
-                Type::Struct(_, _)
-                    | Type::Union(_, _)
+                Type::Struct(_, _, _)
+                    | Type::Union(_, _, _)
                     | Type::Array(_, ArraySize::Const(_))
                     | Type::Atomic(_)
             );
@@ -5548,8 +5548,8 @@ impl Codegen {
                     } else {
                         let is_agg_ret = matches!(
                             &ret_ty,
-                            Type::Struct(_, _)
-                                | Type::Union(_, _)
+                            Type::Struct(_, _, _)
+                                | Type::Union(_, _, _)
                                 | Type::Array(_, ArraySize::Const(_))
                                 | Type::Complex(_)
                                 | Type::Atomic(_)
@@ -5902,8 +5902,8 @@ impl Codegen {
                         } else {
                             let is_agg = matches!(
                                 &v.ty,
-                                Type::Struct(_, _)
-                                    | Type::Union(_, _)
+                                Type::Struct(_, _, _)
+                                    | Type::Union(_, _, _)
                                     | Type::Array(_, ArraySize::Const(_))
                                     | Type::Atomic(_)
                             ) && v.ty.size() > 8;
@@ -6256,8 +6256,8 @@ impl Codegen {
                     let sz = l_ty.size();
                     let is_aggregate = matches!(
                         l_ty,
-                        Type::Struct(_, _)
-                            | Type::Union(_, _)
+                        Type::Struct(_, _, _)
+                            | Type::Union(_, _, _)
                             | Type::Array(_, ArraySize::Const(_))
                             | Type::Atomic(_)
                     ) && sz > 8;
@@ -6460,7 +6460,7 @@ impl Codegen {
                         expr_ty
                     };
                     let field_info = match &target_ty {
-                        Type::Struct(_, fields) | Type::Union(_, fields) => {
+                        Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
                                 let mut fc = f.clone();
                                 fc.offset += extra;
@@ -7400,7 +7400,7 @@ impl Codegen {
                         expr_ty
                     };
                     let field_info = match &target_ty {
-                        Type::Struct(_, fields) | Type::Union(_, fields) => {
+                        Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                             find_field(fields, &field.name).map(|(f, extra)| {
                                 let mut fc = f.clone();
                                 fc.offset += extra;
@@ -7509,7 +7509,7 @@ impl Codegen {
                     expr_ty
                 };
                 let field_info = match &target_ty {
-                    Type::Struct(_, fields) | Type::Union(_, fields) => {
+                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                         find_field(fields, &field.name).map(|(f, extra)| {
                             let mut fc = f.clone();
                             fc.offset += extra;
@@ -7856,7 +7856,7 @@ impl Codegen {
         let var_off = self.var_offset(var_name);
         if matches!(
             ty,
-            Type::Array(_, _) | Type::Vector(_, _) | Type::Struct(_, _) | Type::Union(_, _)
+            Type::Array(_, _) | Type::Vector(_, _) | Type::Struct(_, _, _) | Type::Union(_, _, _)
         ) {
             self.gen_init_list_at(var_off, ty, inits);
         } else if let Some(InitItem::Expr(e)) = inits.first() {
@@ -7994,7 +7994,7 @@ impl Codegen {
                     }
                 }
             }
-            Type::Struct(_, fields) | Type::Union(_, fields) => {
+            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                 // struct 初始化: struct Point p = {1, 2} 或 {.x = 1, .y = 2}
                 // 或链式: {.u.x = 1} / {.key.dd_key_true = ...}
                 let mut field_idx = 0;
@@ -8246,7 +8246,7 @@ impl Codegen {
                     }
                 }
             }
-            Type::Struct(_, fields) | Type::Union(_, fields) => {
+            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                 let total_size = ty.size();
                 data.resize(total_size, 0);
                 let mut field_idx = 0;
@@ -11541,7 +11541,7 @@ impl Codegen {
                     expr_ty
                 };
                 let field_off = match &target_ty {
-                    Type::Struct(_, fields) | Type::Union(_, fields) => {
+                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                         find_field(fields, &field.name).map(|(f, extra)| f.offset + extra)
                     }
                     _ => None,
@@ -13908,7 +13908,7 @@ impl Codegen {
     /// 计算结构体成员偏移 (用于 __builtin_offsetof)
     fn compute_offset(ty: &Type, member: &str) -> usize {
         let fields = match ty {
-            Type::Struct(_, fields) | Type::Union(_, fields) => fields,
+            Type::Struct(_, fields, _) | Type::Union(_, fields, _) => fields,
             _ => return 0,
         };
         let parts: Vec<&str> = member.split('.').collect();
@@ -13924,7 +13924,7 @@ impl Codegen {
             if let Some((field, inner_off)) = find_field(current_fields, name) {
                 offset += field.offset + inner_off;
                 if i < parts.len() - 1 {
-                    if let Type::Struct(_, sub) | Type::Union(_, sub) = &field.ty {
+                    if let Type::Struct(_, sub, _) | Type::Union(_, sub, _) = &field.ty {
                         current_fields = sub.as_ref();
                     } else {
                         break;
@@ -25034,6 +25034,7 @@ mod tests {
                 bit_width: None,
                 bit_offset: 0,
             }]),
+            4, // align: Int = 4
         );
         let expr = Expr::InitList {
             inits: vec![InitItem::Expr(Expr::Int {

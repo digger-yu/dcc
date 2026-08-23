@@ -225,7 +225,7 @@ pub struct Parser<'a> {
     diags: Vec<Diagnostic>,
     finished: bool,
     typedefs: HashMap<String, Type>,
-    struct_defs: HashMap<String, (Arc<Vec<Field>>, bool)>,
+    struct_defs: HashMap<String, (Arc<Vec<Field>>, bool, usize)>,
     enum_defs: HashMap<String, EnumDef>,
     enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
     locals: HashMap<String, Type>,             // 变量名 → 类型 (函数内会清除)
@@ -299,10 +299,10 @@ impl<'a> Parser<'a> {
             }
         }
         match (unwrap(a), unwrap(b)) {
-            (Type::Struct(an, af), Type::Struct(bn, bf)) => {
+            (Type::Struct(an, af, _), Type::Struct(bn, bf, _)) => {
                 an == bn && (af.is_empty() || bf.is_empty() || af == bf)
             }
-            (Type::Union(an, af), Type::Union(bn, bf)) => {
+            (Type::Union(an, af, _), Type::Union(bn, bf, _)) => {
                 an == bn && (af.is_empty() || bf.is_empty() || af == bf)
             }
             // enum 同标签兼容: 前向声明 (空 values) 与完整定义视为同一类型
@@ -1282,13 +1282,13 @@ impl<'a> Parser<'a> {
             base.ty()
         };
         match aggregate {
-            Type::Struct(ref name, ref fields) | Type::Union(ref name, ref fields) => {
+            Type::Struct(ref name, ref fields, _) | Type::Union(ref name, ref fields, _) => {
                 // 仅当嵌入字段为空（前向声明）时才查 struct_defs；
                 // 匿名 struct 名同为 ""，不能覆盖已嵌入的正确字段。
                 let resolved = if fields.is_empty() {
                     self.struct_defs
                         .get(name)
-                        .map(|(f, _)| f.as_ref())
+                        .map(|(f, _, _)| f.as_ref())
                         .unwrap_or(fields.as_ref())
                 } else {
                     fields.as_ref()
@@ -2213,7 +2213,7 @@ impl<'a> Parser<'a> {
             // 直接吃掉分号返回空 decl, 避免后面误调 parse_var_or_func.
             if matches!(
                 ty,
-                Type::Struct(_, _) | Type::Union(_, _) | Type::Enum(_, _, _)
+                Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Enum(_, _, _)
             ) && self.cur.kind == TokKind::Semi
             {
                 self.advance();
@@ -2352,7 +2352,7 @@ impl<'a> Parser<'a> {
         let struct_name = if enabled { "static_key_true" } else { "static_key_false" };
         if !self.struct_defs.contains_key(struct_name) {
             self.struct_defs
-                .insert(struct_name.to_string(), (Arc::new(vec![]), false));
+                .insert(struct_name.to_string(), (Arc::new(vec![]), false, 4));
         }
         if !self.expect(TokKind::LParen, "'('") {
             return None;
@@ -2378,7 +2378,7 @@ impl<'a> Parser<'a> {
         if !self.expect(TokKind::Semi, "';'") {
             return None;
         }
-        let ty = Type::Struct(struct_name.to_string(), Arc::new(vec![]));
+        let ty = Type::Struct(struct_name.to_string(), Arc::new(vec![]), 8);
         self.globals.insert(name.name.clone(), ty.clone());
         Some(vec![Decl::Var(VarDecl {
             ty,
@@ -3728,6 +3728,7 @@ impl<'a> Parser<'a> {
                                 bit_offset: 0,
                             },
                         ]),
+                        8, // va_list align: max field = ptr (8)
                     ));
                 }
                 // constexpr: C23 编译期常量函数, 等价 inline + always_inline
@@ -3975,32 +3976,49 @@ impl<'a> Parser<'a> {
                         });
                     }
                 }
+                // 计算并存储结构体对齐值
+                let struct_align = if pack {
+                    1
+                } else {
+                    let pragma_pack = self.pack_at_line(struct_line);
+                    let max_field = fields.iter().map(|f| f.ty.align()).max().unwrap_or(1).max(1);
+                    match pragma_pack {
+                        Some(n) if n < max_field => n,
+                        _ => max_field,
+                    }
+                };
+                // __attribute__((aligned(n))) 可提升对齐
+                let struct_align = if let Some(a) = align_n {
+                    struct_align.max(a)
+                } else {
+                    struct_align
+                };
                 let fields_rc = Arc::new(fields);
                 self.struct_defs
-                    .insert(nm.clone(), (Arc::clone(&fields_rc), is_u));
+                    .insert(nm.clone(), (Arc::clone(&fields_rc), is_u, struct_align));
                 let ty = if is_u {
-                    Type::Union(nm, fields_rc)
+                    Type::Union(nm, fields_rc, struct_align)
                 } else {
-                    Type::Struct(nm, fields_rc)
+                    Type::Struct(nm, fields_rc, struct_align)
                 };
                 return Some(self.finish_type(ty, specifiers_only));
             } else if !nm.is_empty() {
-                if let Some((f, _)) = self.struct_defs.get(&nm) {
+                if let Some((f, _, a)) = self.struct_defs.get(&nm) {
                     let ty = if is_u {
-                        Type::Union(nm, Arc::clone(f))
+                        Type::Union(nm, Arc::clone(f), *a)
                     } else {
-                        Type::Struct(nm, Arc::clone(f))
+                        Type::Struct(nm, Arc::clone(f), *a)
                     };
                     return Some(self.finish_type(ty, specifiers_only));
                 }
                 // 不完整类型: 登记占位，待后续定义补全字段
                 let empty = Arc::new(vec![]);
                 self.struct_defs
-                    .insert(nm.clone(), (Arc::clone(&empty), is_u));
+                    .insert(nm.clone(), (Arc::clone(&empty), is_u, 0));
                 let ty = if is_u {
-                    Type::Union(nm, empty)
+                    Type::Union(nm, empty, 0)
                 } else {
-                    Type::Struct(nm, empty)
+                    Type::Struct(nm, empty, 0)
                 };
                 return Some(self.finish_type(ty, specifiers_only));
             }
@@ -4372,7 +4390,7 @@ impl<'a> Parser<'a> {
 
     fn resolve_base(&self, base: Option<Type>, uns: bool, long: u8, short: bool) -> Type {
         if let Some(
-            ty @ (Type::Struct(_, _) | Type::Union(_, _) | Type::Enum(_, _, _) | Type::Atomic(_)),
+            ty @ (Type::Struct(_, _, _) | Type::Union(_, _, _) | Type::Enum(_, _, _) | Type::Atomic(_)),
         ) = base
         {
             return ty;
@@ -4677,7 +4695,7 @@ impl<'a> Parser<'a> {
             // (内核 struct_group(..., MEMBERS...) 展开丢失尾 `;` 后常出
             // 现这种状态)。
             let nm = if self.cur.kind == TokKind::Ident
-                && !(matches!(ty, Type::Struct(_, _) | Type::Union(_, _))
+                && !(matches!(ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
                     && Self::is_type_specifier_ident(
                         &self.cur.text,
                         &self.typedefs,
@@ -4777,7 +4795,7 @@ impl<'a> Parser<'a> {
                 //   - 标签名非空 + 字段名为空 + 类型无字段: 纯前向声明
                 //     (如 `struct incomplete;`), 不贡献大小, 跳过
                 let should_add = match &ty {
-                    Type::Struct(tag, fields) | Type::Union(tag, fields) => {
+                    Type::Struct(tag, fields, _) | Type::Union(tag, fields, _) => {
                         tag.is_empty() || !nm.is_empty() || !fields.is_empty()
                     }
                     _ => true, // 非 struct/union 类型总是添加
@@ -6981,7 +6999,7 @@ impl<'a> Parser<'a> {
                                 Type::Ptr(_) | Type::Func(_, _) => 3,
                                 Type::Float | Type::Double | Type::LongDouble => 4,
                                 Type::Complex(_) => 5,
-                                Type::Struct(_, _) | Type::Union(_, _) => 6,
+                                Type::Struct(_, _, _) | Type::Union(_, _, _) => 6,
                                 Type::Array(_, _) => 7,
                                 Type::Vector(_, _) => 9,
                                 Type::Enum(_, _, _) => 10,
@@ -7799,8 +7817,8 @@ impl<'a> Parser<'a> {
             (Type::Void, Type::Void) => true,
             (Type::Fract, Type::Fract) => true,
             (Type::Accum, Type::Accum) => true,
-            (Type::Struct(na, _), Type::Struct(nb, _)) => na == nb,
-            (Type::Union(na, _), Type::Union(nb, _)) => na == nb,
+            (Type::Struct(na, _, _), Type::Struct(nb, _, _)) => na == nb,
+            (Type::Union(na, _, _), Type::Union(nb, _, _)) => na == nb,
             (Type::Enum(na, _, _), Type::Enum(nb, _, _)) => na == nb,
             _ => a == b,
         }

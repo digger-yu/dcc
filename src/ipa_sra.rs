@@ -68,13 +68,13 @@ struct StructParamAnalysis {
 
 /// 判断类型是否为按值传递的 struct/union
 fn is_aggregate_by_value(ty: &Type) -> bool {
-    matches!(ty, Type::Struct(_, _) | Type::Union(_, _))
+    matches!(ty, Type::Struct(_, _, _) | Type::Union(_, _, _))
 }
 
 /// 从参数类型中提取字段列表
 fn extract_fields(ty: &Type) -> Vec<(String, Type)> {
     match ty {
-        Type::Struct(_, fields) | Type::Union(_, fields) => fields
+        Type::Struct(_, fields, _) | Type::Union(_, fields, _) => fields
             .iter()
             .filter(|f| f.bit_width.is_none()) // 跳过位域
             .map(|f| (f.name.clone(), f.ty.clone()))
@@ -1082,21 +1082,22 @@ mod tests {
     }
 
     fn make_struct_type(name: &str, fields: Vec<(&str, Type)>) -> Type {
+        let field_vec: Vec<Field> = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, (n, t))| Field {
+                name: n.to_string(),
+                ty: t,
+                offset: i * 4,
+                bit_width: None,
+                bit_offset: 0,
+            })
+            .collect();
+        let align = field_vec.iter().map(|f| f.ty.align()).max().unwrap_or(1);
         Type::Struct(
             name.to_string(),
-            std::sync::Arc::new(
-                fields
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (n, t))| Field {
-                        name: n.to_string(),
-                        ty: t,
-                        offset: i * 4,
-                        bit_width: None,
-                        bit_offset: 0,
-                    })
-                    .collect(),
-            ),
+            std::sync::Arc::new(field_vec),
+            align,
         )
     }
 

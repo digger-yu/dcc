@@ -597,12 +597,12 @@ impl Lowering {
                     _ => None,
                 },
             ),
-            Type::Struct(name, _) => ValueType::Aggregate {
+            Type::Struct(name, _, _) => ValueType::Aggregate {
                 name: name.clone(),
                 size: ty.size(),
                 is_union: false,
             },
-            Type::Union(name, _) => ValueType::Aggregate {
+            Type::Union(name, _, _) => ValueType::Aggregate {
                 name: name.clone(),
                 size: ty.size(),
                 is_union: true,
@@ -817,7 +817,7 @@ impl Lowering {
                 } else {
                     base.ty()
                 };
-                if let Type::Struct(_, fields) | Type::Union(_, fields) = aggregate {
+                if let Type::Struct(_, fields, _) | Type::Union(_, fields, _) = aggregate {
                     if let Some((found, _)) = ast::find_field(&fields, &field.name) {
                         ty = self.lower_type(&found.ty, &field.span);
                     } else if !fields.is_empty() {
@@ -1125,7 +1125,7 @@ mod tests {
         if let Decl::Var(v) = &program.decls[0] {
             assert!(v.is_extern);
             assert_eq!(v.name.name, "init_on_alloc");
-            assert!(matches!(v.ty, Type::Struct(ref n, _) if n == "static_key_false"));
+            assert!(matches!(v.ty, Type::Struct(ref n, _, _) if n == "static_key_false"));
         } else {
             panic!("expected VarDecl, got {:?}", program.decls[0]);
         }

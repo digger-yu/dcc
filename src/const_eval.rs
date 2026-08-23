@@ -113,7 +113,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
                 };
                 // 计算字段在结构体内的偏移
                 let field_offset = match &expr.ty() {
-                    Type::Struct(_, fields) | Type::Union(_, fields) => {
+                    Type::Struct(_, fields, _) | Type::Union(_, fields, _) => {
                         crate::ast::find_field(fields, &field.name)
                             .map(|(f, extra_off)| f.offset + extra_off)
                             .ok_or(ConstEvalError::NotConstant)?
@@ -474,8 +474,8 @@ pub fn eval_int_lit(s: &str) -> Option<i128> {
 /// __builtin_offsetof(type, member) 编译期偏移
 fn offsetof_member(ty: &Type, member: &str) -> usize {
     match ty {
-        Type::Union(_, _) => 0,
-        Type::Struct(_, fields) => {
+        Type::Union(_, _, _) => 0,
+        Type::Struct(_, fields, _) => {
             let parts: Vec<&str> = member.split('.').collect();
             let mut offset = 0usize;
             let mut current_fields = fields.as_ref();
@@ -488,7 +488,7 @@ fn offsetof_member(ty: &Type, member: &str) -> usize {
                 if let Some((field, inner_off)) = find_field(current_fields, name) {
                     offset += field.offset + inner_off;
                     if i < parts.len() - 1 {
-                        if let Type::Struct(_, sub) | Type::Union(_, sub) = &field.ty {
+                        if let Type::Struct(_, sub, _) | Type::Union(_, sub, _) = &field.ty {
                             current_fields = sub.as_ref();
                         }
                     }
@@ -720,10 +720,10 @@ fn object_size_of(expr: &Expr, mode: i128) -> Option<i128> {
             };
             match (*is_arrow, expr.ty()) {
                 (true, Type::Ptr(inner)) => match inner.as_ref() {
-                    Type::Struct(_, f) | Type::Union(_, f) => lookup(f.as_ref()),
+                    Type::Struct(_, f, _) | Type::Union(_, f, _) => lookup(f.as_ref()),
                     _ => None,
                 },
-                (false, Type::Struct(_, f) | Type::Union(_, f)) => lookup(f.as_ref()),
+                (false, Type::Struct(_, f, _) | Type::Union(_, f, _)) => lookup(f.as_ref()),
                 _ => None,
             }
         }
