@@ -99,22 +99,32 @@ SIZES+=("$s")
 LABELS+=("${CYAN}~/.dcc/${NC}  (预处理缓存 + 全局类型缓存)")
 DETAILS+=("路径: $DCC_CACHE")
 
-# 2) /tmp/dcc-*
+# 2) /tmp/dcc-* 及 /tmp/dcc_cache_*
 s=$(glob_size /tmp -maxdepth 1 -name 'dcc-*')
+s2=$(glob_size /tmp -maxdepth 1 -name 'dcc_cache_*')
+s=$((s + s2))
 n=$(count_files /tmp -maxdepth 1 -name 'dcc-*')
+n2=$(count_files /tmp -maxdepth 1 -name 'dcc_cache_*')
+n=$((n + n2))
 SIZES+=("$s")
 LABELS+=("${CYAN}/tmp/dcc-*${NC}  (driver 临时 asm / cpp / link + 脚本工作目录)")
-DETAILS+=("$n 项: dcc-asm-*.s / dcc-cpp-*.c / dcc-builtlink-*.o / dcc-hostlink-*.o / dcc-{prepare0,pahole,objtool,modpost}-* / dcc-kernel-features-*")
+DETAILS+=("$n 项: dcc-asm-*.s / dcc-cpp-*.c / dcc-builtlink-*.o / dcc_cache_dep_* / dcc_cache_err_*")
 
-# 3) /tmp 杂项（测试二进制、内核编译日志、PCH、旧探针文件）
+# 3) /tmp 杂项（测试二进制、内核编译日志、PCH、调试产物等）
 tmp_misc=0
-for pat in 't_*' 'kernel_dcc_files.txt' 'kernel_dir_compile.log' 'dcc-pch-*' 'regex_fresh.*' 't_*.c' 't_*.o'; do
+for pat in 't_*' 'kernel_dcc_files.txt' 'kernel_dir_compile.log' \
+           'kernel_build*.log' 'dcc-pch-*' 'regex_fresh.*' \
+           't_*.c' 't_*.o' \
+           '*.o' '*.s' '*.log' \
+           'avx512_*' 'asm_*' 'bf*' 'a[0-9]' \
+           'build_policy*' 'noinitramfs*' \
+           '*_test_output.log' '*_test.log'; do
     s=$(glob_size /tmp -maxdepth 1 -name "$pat")
     tmp_misc=$((tmp_misc + s))
 done
 SIZES+=("$tmp_misc")
-LABELS+=("${CYAN}/tmp 杂项${NC}  (测试二进制 / 内核编译日志 / PCH / 旧探针)")
-DETAILS+=("t_* / kernel_dcc_files.txt / kernel_dir_compile.log / dcc-pch-* / regex_fresh.*")
+LABELS+=("${CYAN}/tmp 杂项${NC}  (调试 .o/.s / 内核日志 / PCH / 测试产物)")
+DETAILS+=("*.o / *.s / kernel_build*.log / avx512_* / test_* / dcc-pch-* 等")
 
 # 4) 工作区 profile / coverage 文件
 prof_size=0
@@ -199,9 +209,9 @@ clean_dcc_cache() {
 }
 
 clean_tmp_dcc() {
-    echo -e "${YELLOW}[2/6] 清理 /tmp/dcc-* ...${NC}"
+    echo -e "${YELLOW}[2/6] 清理 /tmp/dcc-* 及 /tmp/dcc_cache_* ...${NC}"
     local n=0
-    for f in /tmp/dcc-*; do
+    for f in /tmp/dcc-* /tmp/dcc_cache_*; do
         [[ -e "$f" ]] || continue
         rm -rf "$f"
         n=$((n + 1))
@@ -213,8 +223,13 @@ clean_tmp_misc() {
     echo -e "${YELLOW}[3/6] 清理 /tmp 杂项 ...${NC}"
     local n=0
     for pat in '/tmp/t_[0-9a-zA-Z_-]*' '/tmp/kernel_dcc_files.txt' \
-               '/tmp/kernel_dir_compile.log' '/tmp/dcc-pch-*' \
-               '/tmp/regex_fresh.*'; do
+               '/tmp/kernel_dir_compile.log' '/tmp/kernel_build*.log' \
+               '/tmp/dcc-pch-*' '/tmp/regex_fresh.*' \
+               '/tmp/*.o' '/tmp/*.s' '/tmp/*.log' \
+               '/tmp/avx512_*' '/tmp/asm_*' \
+               '/tmp/bf' '/tmp/bf2' '/tmp/a1' '/tmp/a2' \
+               '/tmp/build_policy*' '/tmp/noinitramfs*' \
+               '/tmp/*_test_output.log' '/tmp/*_test.log'; do
         for f in $pat; do
             [[ -e "$f" ]] || continue
             rm -rf "$f"

@@ -4274,23 +4274,35 @@ impl Codegen {
 
         // 解析内部跳转 (本地标签)，再把最终机器码覆盖到自定义节副本。
         for (_, emitted_start, emitted_size, sec_idx, sec_off) in &custom_func_ranges {
-            let src = self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
-                .to_vec();
+            let src_start = *emitted_start as usize;
+            let src_end = (*emitted_start + *emitted_size) as usize;
+            // Skip if already moved (parallel codegen: chunk already placed
+            // correct code in extra_sections, leaving NOPs in .text)
+            let src = &self.code[src_start..src_end];
+            if src.iter().all(|&b| b == 0x90) {
+                continue;
+            }
+            let src = src.to_vec();
             let dst_start = *sec_off as usize;
             let dst_end = dst_start + *emitted_size as usize;
             self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
-                .fill(0x90);
+            self.code[src_start..src_end].fill(0x90);
         }
         // 可执行 pushsection (.fixup/.altinstr_replacement) 代码区间同样搬迁
         for (emitted_start, emitted_size, sec_idx, sec_off) in &self.pushsection_code_ranges {
-            let src = self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
-                .to_vec();
+            let src_start = *emitted_start as usize;
+            let src_end = (*emitted_start + *emitted_size) as usize;
+            // Skip if already moved (parallel codegen: chunk's compile_rel
+            // already moved code to extra_sections, leaving NOPs in .text)
+            let src = &self.code[src_start..src_end];
+            if src.iter().all(|&b| b == 0x90) {
+                continue;
+            }
+            let src = src.to_vec();
             let dst_start = *sec_off as usize;
             let dst_end = dst_start + *emitted_size as usize;
             self.extra_sections[*sec_idx].data[dst_start..dst_end].copy_from_slice(&src);
-            self.code[*emitted_start as usize..(*emitted_start + *emitted_size) as usize]
-                .fill(0x90);
+            self.code[src_start..src_end].fill(0x90);
         }
         self.finalize_func_asm_layout(prog, &custom_func_ranges);
     }
@@ -5702,7 +5714,11 @@ impl Codegen {
                 let lend = self.fresh_label();
                 self.jmp_rel32(&le, JumpKind::Je);
                 self.gen_stmt(then_);
-                self.jmp_rel32(&lend, JumpKind::Jmp);
+                // Skip dead jmp when then-body ends with return
+                let then_ends_ret = Self::stmt_ends_with_return(then_);
+                if !then_ends_ret {
+                    self.jmp_rel32(&lend, JumpKind::Jmp);
+                }
                 self.label(&le);
                 if let Some(el) = else_ {
                     self.gen_stmt(el);
@@ -12133,12 +12149,30 @@ impl Codegen {
     fn ends_with_return(items: &[BlockItem]) -> bool {
         match items.last() {
             Some(BlockItem::Stmt(Stmt::Return { .. })) => true,
+            Some(BlockItem::Stmt(Stmt::Break { .. })) => true,
+            Some(BlockItem::Stmt(Stmt::Continue { .. })) => true,
             Some(BlockItem::Stmt(Stmt::Block { b, .. })) => Self::ends_with_return(&b.items),
             Some(BlockItem::Stmt(Stmt::If { then_, else_, .. })) => {
                 Self::ends_with_return(&[BlockItem::Stmt(*then_.clone())])
                     && else_
                         .as_ref()
                         .is_some_and(|e| Self::ends_with_return(&[BlockItem::Stmt(*e.clone())]))
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a single statement ends with a return (unconditional control
+    // transfer).  Used to avoid emitting dead `jmp lend` after if-then.
+    fn stmt_ends_with_return(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return { .. } => true,
+            Stmt::Break { .. } => true,
+            Stmt::Continue { .. } => true,
+            Stmt::Block { b, .. } => Self::ends_with_return(&b.items),
+            Stmt::If { then_, else_, .. } => {
+                Self::stmt_ends_with_return(then_)
+                    && else_.as_ref().is_some_and(|e| Self::stmt_ends_with_return(e))
             }
             _ => false,
         }
@@ -16227,21 +16261,33 @@ impl Codegen {
             }
             // .popsection: 退出 pushsection 模式
             if trimmed.starts_with(".popsection") {
-                if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
-                    // 记录可执行节的代码区间, 供最终搬迁到自定义节
-                    let size = self.code.len() as u64 - start;
-                    if size > 0 {
-                        let align = self.extra_sections[sec_idx].align.max(16);
-                        let len = self.extra_sections[sec_idx].data.len();
-                        let aligned = (len + align as usize - 1) & !(align as usize - 1);
-                        self.pad_custom_section_to(sec_idx, aligned);
-                        let sec_off = self.extra_sections[sec_idx].data.len() as u64;
-                        self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
-                        self.pushsection_code_ranges
-                            .push((start, size, sec_idx, sec_off));
+                // Determine if the section being closed is executable.
+                // The exec_stack only tracks exec sections, but pushsection_stack
+                // tracks ALL non-text sections. A nested non-exec pushsection inside
+                // an exec pushsection must NOT pop the exec stack.
+                let top_is_exec = self
+                    .pushsection_stack
+                    .last()
+                    .map(|&idx| self.extra_sections[idx].flags & elf::SHF_EXECINSTR != 0)
+                    .unwrap_or(false);
+                if top_is_exec {
+                    if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
+                        // 记录可执行节的代码区间, 供最终搬迁到自定义节
+                        let size = self.code.len() as u64 - start;
+                        if size > 0 {
+                            let align = self.extra_sections[sec_idx].align.max(16);
+                            let len = self.extra_sections[sec_idx].data.len();
+                            let aligned = (len + align as usize - 1) & !(align as usize - 1);
+                            self.pad_custom_section_to(sec_idx, aligned);
+                            let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                            self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
+                            self.pushsection_code_ranges
+                                .push((start, size, sec_idx, sec_off));
+                        }
                     }
-                }
-                if !self.pushsection_stack.is_empty() {
+                    self.pushsection_stack.pop();
+                } else if !self.pushsection_stack.is_empty() {
+                    // Non-exec pushsection closing: just pop the regular stack
                     self.pushsection_stack.pop();
                 } else {
                     skip_depth = skip_depth.saturating_sub(1);

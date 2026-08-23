@@ -617,6 +617,221 @@ impl<'a> Parser<'a> {
         }
         packed
     }
+
+    /// Parse a constant expression inside `__attribute__((aligned(...)))`.
+    /// Supports: numeric literals, `sizeof(type)`, `sizeof(expr)`,
+    /// and simple binary ops (`*`, `+`, `-`) between them.
+    fn parse_aligned_expr(&mut self, depth: &mut i32) -> Option<usize> {
+        let result = self.parse_aligned_term(depth);
+        // Handle +, -, <<, >> at this level
+        loop {
+            if self.cur.kind == TokKind::Plus {
+                self.advance();
+                let rhs = self.parse_aligned_term(depth);
+                if let (Some(l), Some(r)) = (result, rhs) {
+                    return self.parse_aligned_rest(depth, l + r);
+                }
+                return self.parse_aligned_rest(depth, result.unwrap_or(0));
+            } else if self.cur.kind == TokKind::Minus {
+                self.advance();
+                let rhs = self.parse_aligned_term(depth);
+                if let (Some(l), Some(r)) = (result, rhs) {
+                    return self.parse_aligned_rest(depth, l - r);
+                }
+                return self.parse_aligned_rest(depth, result.unwrap_or(0));
+            } else if self.cur.kind == TokKind::Shl {
+                self.advance();
+                let rhs = self.parse_aligned_term(depth);
+                if let (Some(l), Some(r)) = (result, rhs) {
+                    return self.parse_aligned_rest(depth, l << r);
+                }
+                return self.parse_aligned_rest(depth, result.unwrap_or(0));
+            } else if self.cur.kind == TokKind::Shr {
+                self.advance();
+                let rhs = self.parse_aligned_term(depth);
+                if let (Some(l), Some(r)) = (result, rhs) {
+                    return self.parse_aligned_rest(depth, l >> r);
+                }
+                return self.parse_aligned_rest(depth, result.unwrap_or(0));
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    fn parse_aligned_rest(&mut self, depth: &mut i32, acc: usize) -> Option<usize> {
+        if self.cur.kind == TokKind::Plus {
+            self.advance();
+            let rhs = self.parse_aligned_term(depth);
+            return self.parse_aligned_rest(depth, acc + rhs.unwrap_or(0));
+        } else if self.cur.kind == TokKind::Minus {
+            self.advance();
+            let rhs = self.parse_aligned_term(depth);
+            return self.parse_aligned_rest(depth, acc - rhs.unwrap_or(0));
+        } else if self.cur.kind == TokKind::Shl {
+            self.advance();
+            let rhs = self.parse_aligned_term(depth);
+            return self.parse_aligned_rest(depth, acc << rhs.unwrap_or(0));
+        } else if self.cur.kind == TokKind::Shr {
+            self.advance();
+            let rhs = self.parse_aligned_term(depth);
+            return self.parse_aligned_rest(depth, acc >> rhs.unwrap_or(0));
+        }
+        Some(acc)
+    }
+
+    fn parse_aligned_term(&mut self, depth: &mut i32) -> Option<usize> {
+        let mut result = self.parse_aligned_atom(depth);
+        while self.cur.kind == TokKind::Star || self.cur.kind == TokKind::Slash {
+            let op = self.cur.kind;
+            self.advance();
+            let rhs = self.parse_aligned_atom(depth);
+            if let (Some(l), Some(r)) = (result, rhs) {
+                result = if op == TokKind::Star { Some(l * r) } else if r != 0 { Some(l / r) } else { Some(l) };
+            }
+        }
+        result
+    }
+
+    fn parse_aligned_atom(&mut self, depth: &mut i32) -> Option<usize> {
+        // sizeof(type) or sizeof expr
+        if self.cur.kind == TokKind::KwSizeof
+            || (self.cur.kind == TokKind::Ident && self.cur.text == "sizeof")
+        {
+            self.advance();
+            if self.cur.kind == TokKind::LParen {
+                self.advance();
+                *depth += 1;
+                // Try to parse as sizeof(type)
+                let ty = self.parse_type_name();
+                let sz = ty.map(|t| t.size()).unwrap_or(8);
+                // Consume closing ')'
+                if self.cur.kind == TokKind::RParen {
+                    self.advance();
+                    *depth -= 1;
+                }
+                return Some(sz);
+            }
+            return Some(8); // fallback
+        }
+        // __alignof__(type) or __alignof__ expr
+        if self.cur.kind == TokKind::KwAlignof {
+            self.advance();
+            if self.cur.kind == TokKind::LParen {
+                self.advance();
+                *depth += 1;
+                let ty = self.parse_type_name();
+                let al = ty.map(|t| t.align()).unwrap_or(8);
+                if self.cur.kind == TokKind::RParen {
+                    self.advance();
+                    *depth -= 1;
+                }
+                return Some(al);
+            }
+            return Some(8); // fallback
+        }
+        // Numeric literal
+        if self.cur.kind == TokKind::Number {
+            let v = parse_int_lit(&self.cur.text);
+            self.advance();
+            return if v > 0 { Some(v as usize) } else { Some(1) };
+        }
+        // Parenthesized sub-expression
+        if self.cur.kind == TokKind::LParen {
+            self.advance();
+            *depth += 1;
+            let v = self.parse_aligned_expr(depth);
+            if self.cur.kind == TokKind::RParen {
+                self.advance();
+                *depth -= 1;
+            }
+            return v;
+        }
+        // Unknown token – skip it
+        self.advance();
+        None
+    }
+
+    /// Try to parse a type name (for sizeof(type) inside attributes).
+    fn parse_type_name(&mut self) -> Option<Type> {
+        // Simple type keyword matching
+        let base = match self.cur.text.as_str() {
+            "void" => { self.advance(); Some(Type::Void) }
+            "char" => { self.advance(); Some(Type::Char) }
+            "signed" => {
+                self.advance();
+                if self.cur.text == "char" { self.advance(); Some(Type::SChar) }
+                else if self.cur.text == "int" || self.cur.text == "long" {
+                    // signed int / signed long
+                    if self.cur.text == "long" {
+                        self.advance();
+                        if self.cur.text == "long" { self.advance(); Some(Type::LongLong) }
+                        else { Some(Type::Long) }
+                    } else { self.advance(); Some(Type::Int) }
+                } else { Some(Type::Int) }
+            }
+            "unsigned" => {
+                self.advance();
+                if self.cur.text == "char" { self.advance(); Some(Type::UChar) }
+                else if self.cur.text == "short" { self.advance(); Some(Type::UShort) }
+                else if self.cur.text == "long" {
+                    self.advance();
+                    if self.cur.text == "long" { self.advance(); Some(Type::ULongLong) }
+                    else { Some(Type::ULong) }
+                } else if self.cur.text == "int" { self.advance(); Some(Type::UInt) }
+                else { Some(Type::UInt) }
+            }
+            "short" => { self.advance(); Some(Type::Short) }
+            "int" => { self.advance(); Some(Type::Int) }
+            "long" => {
+                self.advance();
+                if self.cur.text == "long" { self.advance(); Some(Type::LongLong) }
+                else if self.cur.text == "double" { self.advance(); Some(Type::LongDouble) }
+                else { Some(Type::Long) }
+            }
+            "__int128" | "__int128_t" => { self.advance(); Some(Type::Int128) }
+            "float" => { self.advance(); Some(Type::Float) }
+            "double" => { self.advance(); Some(Type::Double) }
+            "long" => { self.advance(); Some(Type::Long) }
+            _ => {
+                // Try struct/union/enum name
+                if self.cur.text == "struct" || self.cur.text == "union" || self.cur.text == "enum" {
+                    let is_struct = self.cur.text.clone();
+                    self.advance();
+                    let name = self.cur.text.clone();
+                    self.advance();
+                    // Look up the type
+                    let key = format!("{} {}", is_struct, name);
+                    if let Some((fields, is_u, _align)) = self.struct_defs.get(&key) {
+                        if *is_u {
+                            Some(Type::Union(key, Arc::clone(fields), 1))
+                        } else {
+                            Some(Type::Struct(key, Arc::clone(fields), 1))
+                        }
+                    } else {
+                        Some(Type::Named(key))
+                    }
+                } else {
+                    // Try typedef name
+                    let name = self.cur.text.clone();
+                    if let Some(ty) = self.typedefs.get(&name).cloned() {
+                        self.advance();
+                        Some(ty)
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        // Handle pointer suffix
+        let mut ty = base?;
+        while self.cur.kind == TokKind::Star {
+            self.advance();
+            ty = Type::Ptr(Box::new(ty));
+        }
+        Some(ty)
+    }
     /// C usual arithmetic conversions: determine common type for integer binops
     fn usual_arith_type(a: &Type, b: &Type) -> Type {
         use Type::*;
@@ -3869,6 +4084,90 @@ impl<'a> Parser<'a> {
             } else {
                 String::new()
             };
+            // If the "name" is __attribute__, it's a post-body type attribute,
+            // not a variable name.  Parse it to extract packed/aligned, then
+            // continue looking for the struct body '{'.
+            // e.g.: struct page { ... } __attribute__((__aligned__(N)));
+            // Here the attribute is actually after '}', but since there is no
+            // explicit struct name token, the parser encounters __attribute__
+            // in the name position.
+            let nm = if nm == "__attribute__" {
+                // Parse post-body __attribute__((...)) blocks
+                while self.cur.kind == TokKind::LParen {
+                    self.advance(); // (
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance(); // (
+                    }
+                    let mut depth = 2i32;
+                    while depth > 0 && self.cur.kind != TokKind::Eof {
+                        if depth == 2 && self.cur.kind == TokKind::Ident {
+                            let aname =
+                                self.cur.text.trim_matches('_').to_string();
+                            if aname == "packed" {
+                                pack = true;
+                            }
+                            if aname == "aligned" {
+                                self.advance();
+                                if self.cur.kind == TokKind::LParen {
+                                    self.advance();
+                                    let mut ad = 0i32;
+                                    align_n = self
+                                        .parse_aligned_expr(&mut ad);
+                                    // Skip remaining tokens inside
+                                    // aligned(...)
+                                    while ad > 0
+                                        && self.cur.kind != TokKind::Eof
+                                    {
+                                        if self.cur.kind
+                                            == TokKind::LParen
+                                        {
+                                            ad += 1;
+                                        } else if self.cur.kind
+                                            == TokKind::RParen
+                                        {
+                                            ad -= 1;
+                                            if ad == 0 { break; }
+                                        }
+                                        self.advance();
+                                    }
+                                    // Consume ')' closing aligned(...)
+                                    if self.cur.kind == TokKind::RParen {
+                                        self.advance();
+                                    }
+                                    continue;
+                                } else if align_n.is_none() {
+                                    align_n = Some(16);
+                                }
+                            }
+                        }
+                        if self.cur.kind == TokKind::LParen {
+                            depth += 1;
+                        }
+                        if self.cur.kind == TokKind::RParen {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        self.advance();
+                    }
+                    if self.cur.kind == TokKind::RParen {
+                        self.advance();
+                    }
+                }
+                // After attributes, check for actual struct name
+                if self.cur.kind == TokKind::Ident
+                    && self.cur.text != "__attribute__"
+                {
+                    let n = self.cur.text.clone();
+                    self.advance();
+                    n
+                } else {
+                    String::new()
+                }
+            } else {
+                nm
+            };
             if self.cur.kind == TokKind::LBrace {
                 self.advance();
                 let fields = self.parse_fields();
@@ -3900,23 +4199,28 @@ impl<'a> Parser<'a> {
                                 if aname == "aligned" {
                                     self.advance();
                                     if self.cur.kind == TokKind::LParen {
-                                        self.advance(); // consume '(' after 'aligned'
-                                        depth += 1; // account for the consumed '('
-                                        if self.cur.kind == TokKind::Number {
-                                            let v = parse_int_lit(&self.cur.text);
-                                            if v > 0 {
-                                                align_n = Some(v as usize);
+                                        self.advance();
+                                        let mut ad = 0i32;
+                                        align_n = self.parse_aligned_expr(&mut ad);
+                                        // Skip remaining tokens inside aligned(...)
+                                        while ad > 0 && self.cur.kind != TokKind::Eof {
+                                            if self.cur.kind == TokKind::LParen {
+                                                ad += 1;
+                                            } else if self.cur.kind == TokKind::RParen {
+                                                ad -= 1;
+                                                if ad == 0 { break; }
                                             }
                                             self.advance();
                                         }
-                                        // non-numeric arg (e.g. sizeof(void *)):
-                                        // fall through to depth-tracker;
-                                        // depth +1 accounts for the '(' we consumed,
-                                        // so paren counting stays correct.
+                                        // Consume ')' closing aligned(...)
+                                        // so outer depth-tracking is not confused
+                                        if self.cur.kind == TokKind::RParen {
+                                            self.advance();
+                                        }
+                                        continue; // skip outer depth-tracking
                                     } else if align_n.is_none() {
                                         align_n = Some(16);
                                     }
-                                    // no continue: let depth-tracker consume remaining parens
                                 }
                             }
                             if self.cur.kind == TokKind::LParen {
@@ -3954,28 +4258,10 @@ impl<'a> Parser<'a> {
                     let max_align = self.pack_at_line(struct_line);
                     Type::layout_struct_with_pack(&mut fields, is_u, max_align);
                 }
-                if let Some(a) = align_n {
-                    for f in fields.iter_mut() {
-                        f.offset = (f.offset + a - 1) & !(a - 1);
-                    }
-                    let cur_size = fields.last().map(|f| f.offset + f.ty.size()).unwrap_or(0);
-                    let aligned_size = (cur_size + a - 1) & !(a - 1);
-                    let max_field_align = fields.iter().map(|f| f.ty.align()).max().unwrap_or(1);
-                    if aligned_size > cur_size || max_field_align < a {
-                        let sentinel_ty = if a <= 8 {
-                            Type::Ptr(Box::new(Type::Char))
-                        } else {
-                            Type::Int128
-                        };
-                        fields.push(Field {
-                            name: String::new(),
-                            ty: sentinel_ty,
-                            offset: aligned_size,
-                            bit_width: None,
-                            bit_offset: 0,
-                        });
-                    }
-                }
+                // __attribute__((aligned(n))) only raises the struct's
+                // overall alignment requirement; it does NOT realign each
+                // field. The size() method already rounds up the final size
+                // to the struct alignment.
                 // 计算并存储结构体对齐值
                 let struct_align = if pack {
                     1
