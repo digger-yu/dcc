@@ -84,6 +84,9 @@ pub const STT_TLS: u8 = 6;
 pub const SHN_UNDEF: u16 = 0;
 
 // x86-64 重定位类型
+pub const R_X86_64_NONE: u32 = 0;
+pub const R_X86_64_8: u32 = 0;
+pub const R_X86_64_16: u32 = 3;
 pub const R_X86_64_64: u32 = 1;
 pub const R_X86_64_PC32: u32 = 2;
 pub const R_X86_64_PLT32: u32 = 4; // 用于函数调用 (PIE 兼容)

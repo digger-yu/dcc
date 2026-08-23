@@ -759,13 +759,11 @@ pub fn emit(
                     align: 8,
                 });
             }
-            // ORC unwind 信息: .orc_unwind_ip + .orc_unwind 节区对
-            // 内核 ORC 解包器需要这对节区进行栈展开. 内核构建用
-            // -fno-asynchronous-unwind-tables (unwind_tables=false) 关闭 .eh_frame,
-            // 此时 ORC 是内核解包器的唯一栈展开来源; -g 调试构建也一并输出.
-            if relocatable && (!target.unwind_tables || cg.emit_cfi) {
-                cg.build_orc_sections(module);
-            }
+            // ORC unwind 信息: 由 objtool --orc 生成, dcc 不再生成
+            // 避免与 objtool 冲突 ("file already has .orc_unwind section")
+            // if relocatable && (!target.unwind_tables || cg.emit_cfi) {
+            //     cg.build_orc_sections(module);
+            // }
             if sanitizers.any() {
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".dcc.san_info".to_string(),

@@ -280,7 +280,7 @@ E0001–E0013（Parser）、E0100–E0102 / E0300（Driver）、E0200–E0209
 | 项 | 状态 |
 |----|------|
 | DWARF v4 | ✅ x86_64 / aarch64 / riscv64 |
-| `.BTF` / `.eh_frame` + CFI / `.orc_unwind_ip` | ✅ x86_64（M24 setjmp FDE 含 `DW_CFA_*` ops）；其它架构 placeholder |
+| `.BTF` / `.eh_frame` + CFI | ✅ x86_64（M24 setjmp FDE 含 `DW_CFA_*` ops）；其它架构 placeholder；ORC 由 objtool 统一生成 |
 | DWARF line table | ✅ M24 增强：相邻同源同行条目在 `-g1` 下自动去重 |
 | 位域 DWARF | ✅ `DW_AT_bit_size` + `DW_AT_bit_offset`（M24） |
 | `-gsplit-dwarf` / `.gdb_index` | ✅ `.dwo` 文件生成 + 最小 `.gdb_index` 占位（GDB 可识别） |

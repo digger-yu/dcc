@@ -1957,7 +1957,8 @@ fn eh_frame_with_frame_pointer() {
     );
     let obj_str = String::from_utf8_lossy(&obj);
     assert!(obj_str.contains(".eh_frame"), "missing .eh_frame");
-    assert!(obj_str.contains(".orc_unwind_ip"), "missing .orc_unwind_ip");
+    // ORC 由 objtool 生成, dcc 只负责 .eh_frame
+    assert!(!obj_str.contains(".orc_unwind_ip"), "dcc should not emit .orc_unwind_ip");
 }
 
 #[test]
@@ -3880,12 +3881,11 @@ int second(int x) {
     );
 }
 
-/// ORC unwind info: .orc_unwind_ip + .orc_unwind sections generated with -g -c
-/// 校验: 节区对存在, .orc_unwind_ip 条目带 .rela.orc_unwind_ip PC32 重定位,
-/// .orc_unwind 条目为 6 字节 packed orc_entry (内核 unwind_init 要求
-/// orc_size % sizeof(struct orc_entry) == 0).
+/// ORC unwind 信息现由 objtool 生成, dcc 不再输出 .orc_unwind / .orc_unwind_ip.
+/// 回归保护: 确保 dcc 不会意外重新生成 ORC 节区, 避免与 objtool 冲突
+/// ("file already has .orc_unwind section").
 #[test]
-fn orc_unwind_sections_present_in_object() {
+fn orc_unwind_sections_not_emitted_by_dcc() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-orc-{}.c", std::process::id()));
     let out_path = dir.join(format!("dcc-orc-{}.o", std::process::id()));
@@ -3906,34 +3906,25 @@ fn orc_unwind_sections_present_in_object() {
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&out_path);
     let secs = elf64_sections(&obj);
-    let (_ip_ty, _ip_flags, ip_size) = secs
-        .get(".orc_unwind_ip")
-        .copied()
-        .expect("missing .orc_unwind_ip section");
-    let (_u_ty, _u_flags, orc_size) = secs
-        .get(".orc_unwind")
-        .copied()
-        .expect("missing .orc_unwind section");
+    // ORC 节区由 objtool 负责生成, dcc 不应输出
     assert!(
-        secs.contains_key(".rela.orc_unwind_ip"),
-        "missing .rela.orc_unwind_ip relocation section"
+        !secs.contains_key(".orc_unwind_ip"),
+        "dcc should not emit .orc_unwind_ip (objtool handles ORC)"
     );
-    // 每函数一个 4 字节 IP 条目
     assert!(
-        ip_size >= 8 && ip_size % 4 == 0,
-        "bad .orc_unwind_ip size {ip_size}"
+        !secs.contains_key(".orc_unwind"),
+        "dcc should not emit .orc_unwind (objtool handles ORC)"
     );
-    // 每个 6 字节 packed orc_entry; 两个函数 + 结束哨兵
     assert!(
-        orc_size >= 12 && orc_size % 6 == 0,
-        "bad .orc_unwind size {orc_size}"
+        !secs.contains_key(".rela.orc_unwind_ip"),
+        "dcc should not emit .rela.orc_unwind_ip (objtool handles ORC)"
     );
 }
 
-/// 内核构建门控: -fno-asynchronous-unwind-tables (unwind_tables=false) 关闭
-/// .eh_frame 后, ORC 节区对仍须输出 — 内核 ORC 解包器的唯一栈展开来源.
+/// 内核构建门控: -fno-asynchronous-unwind-tables 关闭 .eh_frame 后,
+/// dcc 不应输出 ORC 节区 — ORC 由 objtool 统一生成, 避免节区冲突.
 #[test]
-fn orc_sections_emitted_when_unwind_tables_disabled() {
+fn orc_sections_not_emitted_when_unwind_tables_disabled() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-orc-kernel-{}.c", std::process::id()));
     let out_path = dir.join(format!("dcc-orc-kernel-{}.o", std::process::id()));
@@ -3954,17 +3945,18 @@ fn orc_sections_emitted_when_unwind_tables_disabled() {
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&out_path);
     let secs = elf64_sections(&obj);
+    // ORC 节区由 objtool 负责, dcc 不应输出
     assert!(
-        secs.contains_key(".orc_unwind_ip"),
-        "kernel build missing .orc_unwind_ip"
+        !secs.contains_key(".orc_unwind_ip"),
+        "dcc should not emit .orc_unwind_ip (objtool handles ORC)"
     );
     assert!(
-        secs.contains_key(".orc_unwind"),
-        "kernel build missing .orc_unwind"
+        !secs.contains_key(".orc_unwind"),
+        "dcc should not emit .orc_unwind (objtool handles ORC)"
     );
     assert!(
-        secs.contains_key(".rela.orc_unwind_ip"),
-        "kernel build missing .rela.orc_unwind_ip"
+        !secs.contains_key(".rela.orc_unwind_ip"),
+        "dcc should not emit .rela.orc_unwind_ip (objtool handles ORC)"
     );
     assert!(
         !secs.contains_key(".eh_frame"),
@@ -5917,9 +5909,8 @@ fn byte_level_asm_frame_header_encoding() {
 
 // ---------- ORC consumer objtool strict ----------
 
-/// ORC consumer: objtool strict 单对象测试,
-/// 验证 ORC/函数边界可被 objtool 消费.
-/// 用 objtool check 单个 .o 文件, 校验无 ORC 相关错误.
+/// ORC 现由 objtool 统一生成, dcc 不再输出 ORC 节区.
+/// 此测试验证: dcc 编译的 .o 文件不含 ORC 节区, 且 objtool 可正常处理.
 #[test]
 #[cfg(unix)]
 fn orc_consumer_objtool_strict_single_object() {
@@ -5941,16 +5932,19 @@ fn orc_consumer_objtool_strict_single_object() {
     );
     let _ = fs::remove_file(source_path);
 
-    // 校验 ORC 节区存在
+    // dcc 不再生成 ORC 节区, 由 objtool 统一处理
     let obj = fs::read(&obj_path).expect("read object file");
     let secs = elf64_sections(&obj);
     assert!(
-        secs.contains_key(".orc_unwind_ip"),
-        "missing .orc_unwind_ip"
+        !secs.contains_key(".orc_unwind_ip"),
+        "dcc should not emit .orc_unwind_ip (objtool handles ORC)"
     );
-    assert!(secs.contains_key(".orc_unwind"), "missing .orc_unwind");
+    assert!(
+        !secs.contains_key(".orc_unwind"),
+        "dcc should not emit .orc_unwind (objtool handles ORC)"
+    );
 
-    // 如果有 objtool, 用 strict 模式检查
+    // 如果有 objtool, 确认其可正常处理 dcc 输出的 .o 文件
     if Command::new("sh")
         .args(["-c", "command -v objtool"])
         .status()
@@ -5958,19 +5952,17 @@ fn orc_consumer_objtool_strict_single_object() {
         .unwrap_or(false)
     {
         let check = Command::new("objtool")
-            .args(["check", "--orc", obj_path.to_str().unwrap()])
+            .args(["check", obj_path.to_str().unwrap()])
             .output()
             .expect("run objtool check");
-        let stdout = String::from_utf8_lossy(&check.stdout);
         let stderr = String::from_utf8_lossy(&check.stderr);
-        // objtool check 返回 0 表示无错误; ORC 相关错误会出现在 stderr
-        // 注意: objtool 对 .o 文件的 check 可能因其他原因非零, 这里只断言无 ORC 错误
+        // objtool 不应报致命错误 (缺少 ORC 不算致命, 它会自行生成)
         assert!(
-            !stderr.contains("ORC") && !stdout.contains("ORC"),
-            "objtool should not report ORC errors: stdout={stdout}, stderr={stderr}"
+            !stderr.contains("fatal"),
+            "objtool should not report fatal errors: stderr={stderr}"
         );
     } else {
-        eprintln!("SKIP: objtool not installed; ORC sections verified via readelf");
+        eprintln!("SKIP: objtool not installed");
     }
 
     let _ = fs::remove_file(obj_path);

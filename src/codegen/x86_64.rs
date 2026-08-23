@@ -183,6 +183,8 @@ pub struct Codegen {
     pushsection_exec_stack: Vec<(usize, u64)>,
     /// 可执行 pushsection 代码区间: (text 起始偏移, size, extra_sections 索引, 节内偏移)
     pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
+    /// 延迟解析: pushsection 数据中标签差值表达式 (前向引用)
+    deferred_pushsection_fixups: Vec<DeferredPushsectionFixup>,
     // -S 汇编文本输出
     pub emit_asm_text: bool,
     pub debug_level: u8,
@@ -557,6 +559,16 @@ struct CustomSecRel {
     symbol: String,
     rel_type: u32,
     addend: i64,
+}
+
+/// 延迟解析: pushsection 数据中两个标签差值表达式 (前向引用)
+#[derive(Clone)]
+struct DeferredPushsectionFixup {
+    sec_idx: usize,
+    data_offset: usize,
+    left_label: String,
+    right_label: String,
+    byte_size: usize, // 1 for .byte, 2 for .short
 }
 
 /// .text / executable pushsection 内数据伪指令产生的延迟重定位。
@@ -1338,6 +1350,7 @@ impl Codegen {
             pending_custom_sec_rels: vec![],
             pushsection_exec_stack: vec![],
             pushsection_code_ranges: vec![],
+            deferred_pushsection_fixups: vec![],
             emit_asm_text: false,
             debug_level: 0,
             emit_cfi: false,
@@ -1818,9 +1831,18 @@ impl Codegen {
         match directive {
             ".byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym) =
-                        Self::parse_asm_data_expr(expr.trim(), locals, line_idx, numeric_label_map);
-                    if let Some((sym_name, rel_type, addend)) = sym {
+                    let (val, sym, deferred) =
+                        Self::parse_asm_data_expr(expr.trim(), &self.labels, locals, line_idx, numeric_label_map);
+                    if let Some((left_label, right_label)) = deferred {
+                        let data_offset = self.extra_sections[sec_idx].data.len();
+                        self.deferred_pushsection_fixups.push(DeferredPushsectionFixup {
+                            sec_idx,
+                            data_offset,
+                            left_label,
+                            right_label,
+                            byte_size: 1,
+                        });
+                    } else if let Some((sym_name, rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
                             sec_idx,
@@ -1835,9 +1857,18 @@ impl Codegen {
             }
             ".short" | ".word" | ".2byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym) =
-                        Self::parse_asm_data_expr(expr.trim(), locals, line_idx, numeric_label_map);
-                    if let Some((sym_name, rel_type, addend)) = sym {
+                    let (val, sym, deferred) =
+                        Self::parse_asm_data_expr(expr.trim(), &self.labels, locals, line_idx, numeric_label_map);
+                    if let Some((left_label, right_label)) = deferred {
+                        let data_offset = self.extra_sections[sec_idx].data.len();
+                        self.deferred_pushsection_fixups.push(DeferredPushsectionFixup {
+                            sec_idx,
+                            data_offset,
+                            left_label,
+                            right_label,
+                            byte_size: 2,
+                        });
+                    } else if let Some((sym_name, rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
                             sec_idx,
@@ -1854,8 +1885,9 @@ impl Codegen {
             }
             ".int" | ".long" | ".4byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym) =
-                        Self::parse_asm_data_expr(expr.trim(), locals, line_idx, numeric_label_map);
+                    let (val, sym, _deferred) =
+                        Self::parse_asm_data_expr(expr.trim(), &self.labels, locals, line_idx, numeric_label_map);
+                    // .long sym-sym deferred: should not happen for 4-byte (use PC32 instead)
                     if let Some((sym_name, rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
@@ -1873,8 +1905,8 @@ impl Codegen {
             }
             ".quad" | ".8byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym) =
-                        Self::parse_asm_data_expr(expr.trim(), locals, line_idx, numeric_label_map);
+                    let (val, sym, _deferred) =
+                        Self::parse_asm_data_expr(expr.trim(), &self.labels, locals, line_idx, numeric_label_map);
                     if let Some((sym_name, _rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
@@ -1944,15 +1976,17 @@ impl Codegen {
 
     /// 解析 pushsection 数据表达式，返回 (数值, 符号引用信息)
     /// 符号引用: Some((symbol_name, rel_type, addend))
+    /// 延迟标签差值: Some((left_label, right_label))
     fn parse_asm_data_expr(
         expr: &str,
+        labels: &HashMap<String, u64>,
         locals: &AsmLocalLabels,
         line_idx: usize,
         numeric_label_map: &std::collections::HashMap<String, String>,
-    ) -> (i64, Option<(String, u32, i64)>) {
+    ) -> (i64, Option<(String, u32, i64)>, Option<(String, String)>) {
         let expr = expr.trim();
         if expr.is_empty() {
-            return (0, None);
+            return (0, None, None);
         }
         // 查找 '-' 和 '+' 操作符 (不在引号/括号内)
         let (expr_before, op, expr_after) = Self::find_expr_operator(expr);
@@ -1962,32 +1996,45 @@ impl Codegen {
             // symbol - . → PC32, addend=0
             if right == "." {
                 let sym = Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
-                return (0, Some((sym, elf::R_X86_64_PC32, 0)));
+                return (0, Some((sym, elf::R_X86_64_PC32, 0)), None);
             }
             // symbol + N → PC32, addend=N (或绝对引用 + addend)
             if op == '+' {
                 if let Ok(n) = right.parse::<i64>() {
                     let sym =
                         Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
-                    return (0, Some((sym, elf::R_X86_64_32, n)));
+                    return (0, Some((sym, elf::R_X86_64_32, n)), None);
                 }
             }
             // symbol - number → PC32 with negative addend
+            // symbol - symbol → compute difference if both labels are known
             if op == '-' {
                 if let Ok(n) = right.parse::<i64>() {
                     let sym =
                         Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
-                    return (0, Some((sym, elf::R_X86_64_PC32, -n)));
+                    return (0, Some((sym, elf::R_X86_64_PC32, -n)), None);
                 }
+                // Both operands are symbols: resolve and compute difference
+                let left_sym =
+                    Self::resolve_asm_data_symbol(left, locals, line_idx, numeric_label_map);
+                let right_sym =
+                    Self::resolve_asm_data_symbol(right, locals, line_idx, numeric_label_map);
+                if let (Some(&lv), Some(&rv)) =
+                    (labels.get(&left_sym), labels.get(&right_sym))
+                {
+                    return ((lv as i64) - (rv as i64), None, None);
+                }
+                // Forward reference: defer resolution
+                return (0, None, Some((left_sym, right_sym)));
             }
         }
         // 纯符号引用 (无算术)
         let (val, is_sym) = Self::parse_asm_expr_atom(expr, locals, line_idx, numeric_label_map);
         if is_sym {
             let sym = Self::resolve_asm_data_symbol(expr, locals, line_idx, numeric_label_map);
-            return (0, Some((sym, elf::R_X86_64_32, 0)));
+            return (0, Some((sym, elf::R_X86_64_32, 0)), None);
         }
-        (val, None)
+        (val, None, None)
     }
 
     /// 查找表达式中的顶层 '+' 或 '-' 操作符
@@ -4548,6 +4595,8 @@ impl Codegen {
             self.label_addr_refs.push((base + pos, lbl));
         }
         let mut sec_map = HashMap::new();
+        // old_chunk_idx → (global_sec_idx, data_offset_delta)
+        let mut sec_data_delta: Vec<(usize, u64)> = Vec::new();
         for extra in chunk.extra_sections {
             let old_idx = sec_map.len();
             let sec_idx = self.ensure_custom_section(
@@ -4557,18 +4606,36 @@ impl Codegen {
             );
             self.extra_sections[sec_idx].align =
                 self.extra_sections[sec_idx].align.max(extra.align);
+            // Append chunk section data directly (no alignment padding)
+            // SHF_MERGE sections require exact entry size multiples.
+            let delta = self.extra_sections[sec_idx].data.len() as u64;
+            self.extra_sections[sec_idx]
+                .data
+                .extend_from_slice(&extra.data);
             sec_map.insert(old_idx, sec_idx);
+            sec_data_delta.push((old_idx, delta));
         }
         for mut rel in chunk.pending_custom_sec_rels {
             if let Some(&sec_idx) = sec_map.get(&rel.sec_idx) {
+                let delta = sec_data_delta
+                    .iter()
+                    .find(|(old, _)| *old == rel.sec_idx)
+                    .map(|(_, d)| *d)
+                    .unwrap_or(0);
                 rel.sec_idx = sec_idx;
+                rel.offset += delta;
                 self.pending_custom_sec_rels.push(rel);
             }
         }
         for (start, size, old_sec_idx, sec_off) in chunk.pushsection_code_ranges {
             if let Some(&sec_idx) = sec_map.get(&old_sec_idx) {
+                let delta = sec_data_delta
+                    .iter()
+                    .find(|(old, _)| *old == old_sec_idx)
+                    .map(|(_, d)| *d)
+                    .unwrap_or(0);
                 self.pushsection_code_ranges
-                    .push((base + start, size, sec_idx, sec_off));
+                    .push((base + start, size, sec_idx, sec_off + delta));
             }
         }
         for (pos, name) in chunk.disasm_calls {
@@ -16132,11 +16199,18 @@ impl Codegen {
             }
             // .pushsection: 非文本节 → 收集数据; 文本节 → 正常处理
             if trimmed.starts_with(".pushsection") {
-                let sec_name = trimmed
+                // 解析 section name: 第二个 whitespace token, 截取逗号前部分
+                // .pushsection name, "flags", type, entsize
+                // .pushsection name "flags"  (无逗号)
+                let second_token = trimmed
                     .split_whitespace()
                     .nth(1)
+                    .unwrap_or("");
+                let sec_name = second_token
+                    .split(',')
+                    .next()
                     .unwrap_or("")
-                    .trim_end_matches(',');
+                    .trim();
                 if !sec_name.starts_with(".text") && !sec_name.is_empty() {
                     // 解析 flags ("ax" → 可执行, "aw" → 可写)
                     let (is_writable, is_exec) = Self::parse_pushsection_flags(trimmed);
@@ -16293,8 +16367,35 @@ impl Codegen {
             self.current_asm_line = i + 1;
             self.emit_asm_line(&subbed);
         }
+        // Resolve deferred pushsection fixups (forward label references)
+        self.resolve_deferred_pushsection_fixups();
         if is_global && !self.emit_asm_text {
             self.finish_pending_empty_asm_function();
+        }
+    }
+
+    /// 解析延迟的 pushsection 标签差值表达式 (前向引用)
+    fn resolve_deferred_pushsection_fixups(&mut self) {
+        let fixups = std::mem::take(&mut self.deferred_pushsection_fixups);
+        for fixup in fixups {
+            let lv = self.labels.get(&fixup.left_label).copied();
+            let rv = self.labels.get(&fixup.right_label).copied();
+            if let (Some(lv), Some(rv)) = (lv, rv) {
+                let diff = (lv as i64) - (rv as i64);
+                let data = &mut self.extra_sections[fixup.sec_idx].data;
+                match fixup.byte_size {
+                    1 => {
+                        data[fixup.data_offset] = diff as u8;
+                    }
+                    2 => {
+                        let bytes = (diff as u16).to_le_bytes();
+                        data[fixup.data_offset..fixup.data_offset + 2]
+                            .copy_from_slice(&bytes);
+                    }
+                    _ => {}
+                }
+            }
+            // If labels still not found, leave as 0 (shouldn't happen in normal flow)
         }
     }
 
