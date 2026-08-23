@@ -3936,6 +3936,18 @@ impl<'a> Parser<'a> {
                 }
                 if pack {
                     Type::layout_struct_packed(&mut fields, is_u);
+                    // Packed union: 添加零宽度哨兵字段, 使 aggregate_align_from_offsets
+                    // 能检测到该 union 是 packed 的 (对齐为 1 而非自然对齐).
+                    // 哨兵 bit_width=Some(0) 不影响 size() 计算 (union size = max field size).
+                    if is_u {
+                        fields.push(Field {
+                            name: "\0__packed__".into(),
+                            ty: Type::UChar,
+                            offset: 0,
+                            bit_width: Some(0),
+                            bit_offset: 0,
+                        });
+                    }
                 } else {
                     // 优先级: __attribute__((packed)) > 当前 #pragma pack(n) > 自然对齐
                     let max_align = self.pack_at_line(struct_line);
@@ -4756,15 +4768,17 @@ impl<'a> Parser<'a> {
                 //   struct tag { ... }; — 匿名引用已有标签 (标签名非空)
                 // GCC/Clang 均支持两种形式。find_field() 已实现对
                 // name 为空的 struct/union 字段做递归穿透查找。
-                // 注意: 此处不再区分 is_named_tag, 统一添加为匿名成员。
-                // 
-                // 但要区分: `struct tag;` (仅有类型声明，无字段名) 不应贡献大小。
-                // GCC 对此发出 "declaration does not declare anything" 警告。
-                // 仅当 struct/union 的标签名为空 (匿名定义) 或字段名非空时才添加。
+                //
+                // 区分:
+                //   - 标签名为空 (匿名内联定义): 总是添加
+                //   - 字段名非空: 普通命名字段, 添加
+                //   - 标签名非空 + 字段名为空 + 类型有字段: 匿名引用已有
+                //     完整类型 (如 `struct __filename_head;`), 添加
+                //   - 标签名非空 + 字段名为空 + 类型无字段: 纯前向声明
+                //     (如 `struct incomplete;`), 不贡献大小, 跳过
                 let should_add = match &ty {
-                    Type::Struct(tag, _) | Type::Union(tag, _) => {
-                        // 标签名为空 (匿名 struct/union 定义) 或字段名非空
-                        tag.is_empty() || !nm.is_empty()
+                    Type::Struct(tag, fields) | Type::Union(tag, fields) => {
+                        tag.is_empty() || !nm.is_empty() || !fields.is_empty()
                     }
                     _ => true, // 非 struct/union 类型总是添加
                 };

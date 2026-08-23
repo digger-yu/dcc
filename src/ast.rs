@@ -588,6 +588,11 @@ pub struct EnumDef {
 
 impl Type {
     fn aggregate_align_from_offsets(fields: &[Field]) -> usize {
+        // Packed union 哨兵: 零宽度位域字段名 "\0__packed__" 表示该
+        // union 使用了 __attribute__((packed)). 此时对齐为 1.
+        if fields.iter().any(|f| f.name == "\0__packed__") {
+            return 1;
+        }
         let mut align = fields
             .iter()
             .map(|f| f.ty.align())
@@ -823,12 +828,45 @@ impl Type {
             }
         } else {
             let mut off = 0usize;
+            let mut bit_pos: u32 = 0; // 当前存储单元内已用位数
+            let mut container_bits: u32 = 0; // 当前存储单元总位数
             for f in fields.iter_mut() {
                 if let Some(bw) = f.bit_width {
+                    let container_ty_bits = (f.ty.size() * 8) as u32;
+                    // 零宽度位域: 对齐到下一个容器边界
+                    if bw == 0 {
+                        if container_bits > 0 {
+                            off += (container_bits / 8) as usize;
+                        }
+                        container_bits = 0;
+                        bit_pos = 0;
+                        f.offset = off;
+                        f.bit_offset = 0;
+                        continue;
+                    }
+                    // 容器类型变化或首个位域: 开始新存储单元
+                    if container_bits == 0 || container_ty_bits != container_bits {
+                        if container_bits > 0 {
+                            off += (container_bits / 8) as usize;
+                        }
+                        container_bits = container_ty_bits;
+                        bit_pos = 0;
+                    }
+                    // 当前单元放不下: 推进到下一单元
+                    if bit_pos + bw > container_bits {
+                        off += (container_bits / 8) as usize;
+                        bit_pos = 0;
+                    }
                     f.offset = off;
-                    f.bit_offset = 0; // 简化: packed 下位域从字节边界开始
-                    off += (bw as usize).div_ceil(8);
+                    f.bit_offset = bit_pos;
+                    bit_pos += bw;
                 } else {
+                    // 非位域字段: 刷新未用完的位域存储单元
+                    if container_bits > 0 {
+                        off += (container_bits / 8) as usize;
+                        container_bits = 0;
+                        bit_pos = 0;
+                    }
                     f.offset = off;
                     off += f.ty.size();
                 }

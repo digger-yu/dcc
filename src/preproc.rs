@@ -2487,11 +2487,22 @@ impl Preprocessor {
         if self.pack_history.last().map(|(_, p)| *p) != Some(new_pack) {
             // 计算当前输出已经写入的行数
             let prev_last = self.pack_history.last().map(|(l, _)| *l).unwrap_or(0);
-            // 仅当行号严格递增时记录, 避免同行号后写入的 pack 覆盖先前的;
-            // _Pragma 已改用源行号记录 (见 pending_pragmas push), 保证
-            // 不同源行的 pack 变更有不同行号.
-            if current_out_line > prev_last {
-                self.pack_history.push((current_out_line, new_pack));
+            // 记录条件:
+            // 1. 行号严格递增 → 正常记录
+            // 2. 同行号但新值为 None (pack 重置) → 覆盖前一条,
+            //    解决 #pragma pack(1) 和 #pragma pack() 之间无输出
+            //    导致重置被丢弃的问题 (如 ACPI 头文件).
+            if current_out_line > prev_last
+                || (current_out_line == prev_last && new_pack.is_none())
+            {
+                // 同行号重置: 覆盖前一条 (pack(1) → 等效为无操作)
+                if current_out_line == prev_last {
+                    if let Some(last) = self.pack_history.last_mut() {
+                        *last = (current_out_line, new_pack);
+                    }
+                } else {
+                    self.pack_history.push((current_out_line, new_pack));
+                }
             }
         }
     }

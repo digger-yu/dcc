@@ -7,6 +7,11 @@
 #   bash scripts/cleanup_disk.sh --all    # 全量清理（含 Rust target/）
 #   bash scripts/cleanup_disk.sh --dry    # 仅显示占用，不删除
 #
+# 重要提示:
+#   在更新 dcc 源码（特别是 parser.rs、preproc.rs、ast.rs）后，
+#   必须运行此脚本清理缓存（至少清理项 1），否则旧缓存可能导致
+#   编译结果不一致。因为缓存键不包含 dcc 编译器本身的哈希。
+#
 # 清理项:
 #   1. ~/.dcc/cache/          — dcc 预处理缓存（可达 40+ GB）
 #   2. /tmp/dcc-*             — dcc driver 与脚本的临时文件/工作目录
