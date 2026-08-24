@@ -732,6 +732,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let mut target = Target::resolve(&cfg.target);
     target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
     target.kernel_code_model = cfg.kernel_code_model;
+    target.auto_var_init_zero = cfg.auto_var_init_zero;
     target.set_stack_protector(cfg.stack_protector);
     target.unwind_tables = cfg.unwind_tables;
     target.function_return_thunk_extern = cfg.function_return_thunk_extern;

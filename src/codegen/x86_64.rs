@@ -1668,6 +1668,36 @@ impl Codegen {
         self.emit(&(bytes as u32).to_le_bytes());
     }
 
+    /// -ftrivial-auto-var-init=zero: 零初始化栈帧
+    /// 使用 rep stosq 指令快速清零 (rcx = frame_size/8, rdi = rsp, rax = 0)
+    fn emit_zero_init_frame(&mut self, frame_size: usize) {
+        if frame_size == 0 {
+            return;
+        }
+        // 保存 rcx, rdi, rax (它们可能在后续代码中使用)
+        // push rax; push rcx; push rdi
+        self.emit(&[0x50]); // push rax
+        self.emit(&[0x51]); // push rcx
+        self.emit(&[0x57]); // push rdi
+
+        // xor eax, eax (rax = 0)
+        self.emit(&[0x31, 0xC0]);
+        // mov rcx, frame_size / 8
+        self.emit(&[0x48, 0xB9]);
+        self.emit(&((frame_size / 8) as u64).to_le_bytes());
+        // lea rdi, [r13 - frame_size] (帧底部)
+        // REX.W+B (0x49) + LEA (8D) + ModRM (BD: mod=10, reg=rdi, rm=r13)
+        self.emit(&[0x49, 0x8D, 0xBD]);
+        self.emit(&(-(frame_size as i32)).to_le_bytes());
+        // rep stosq: F3 48 AB
+        self.emit(&[0xF3, 0x48, 0xAB]);
+
+        // 恢复 rdi, rcx, rax
+        self.emit(&[0x5F]); // pop rdi
+        self.emit(&[0x59]); // pop rcx
+        self.emit(&[0x58]); // pop rax
+    }
+
     fn store_rsp_qword(&mut self, reg: u8, off: usize) {
         let rex = 0x48 | if reg >= 8 { 0x04 } else { 0 };
         self.emit(&[rex, 0x89]);
@@ -5020,6 +5050,10 @@ impl Codegen {
                 self.emit(&[0x48, 0x81, 0xec]);
                 self.emit(&self.frame_size.to_le_bytes());
             }
+            // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
+            if self.target.auto_var_init_zero && self.frame_size > 0 {
+                self.emit_zero_init_frame(self.frame_size as usize);
+            }
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
             if self.target.stack_protector && self.frame_size >= 8 {
                 // mov rax, fs:[0x28]  → 加载 canary
@@ -5100,6 +5134,10 @@ impl Codegen {
             if self.frame_size > 0 {
                 self.emit(&[0x48, 0x81, 0xec]);
                 self.emit(&self.frame_size.to_le_bytes());
+            }
+            // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
+            if self.target.auto_var_init_zero && self.frame_size > 0 {
+                self.emit_zero_init_frame(self.frame_size as usize);
             }
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
             if self.target.stack_protector && self.frame_size >= 8 {
