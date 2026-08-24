@@ -10465,6 +10465,59 @@ fn m3_7_weak_symbols() {
     assert_eq!(code, 0, "weak symbol checks failed (exit={code})");
 }
 
+/// Symbol resolution: undefined, weak, and tentative definition handling.
+/// Verifies nm shows correct symbol table entries:
+/// - W (weak) for weak undefined symbols
+/// - T (text) for strong function definitions
+/// - D/R (data/rodata) for strong variable definitions
+#[test]
+#[cfg(unix)]
+fn symbol_resolve_nm_verification() {
+    let src = include_str!("fixtures/c/symbol_resolve.c");
+    let (out, exe) = run_compile_and_run_flags("sym-resolve", src, &[]);
+    assert!(
+        out.status.success(),
+        "symbol_resolve compile/link failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Run the executable
+    let code = run_exe(&exe);
+    assert_eq!(code, 0, "symbol_resolve runtime failed (exit={code})");
+    // Verify symbol table with nm
+    let nm_output = Command::new("nm")
+        .arg(&exe)
+        .output()
+        .expect("run nm");
+    let nm_str = String::from_utf8_lossy(&nm_output.stdout);
+    // Strong function should be in T (text) section
+    assert!(
+        nm_str.lines().any(|l| l.contains("required_func") && l.contains('T')),
+        "required_func should be T (text): {nm_str}"
+    );
+    // Strong variable should be in D (data) section
+    assert!(
+        nm_str.lines().any(|l| l.contains("required_var") && (l.contains('D') || l.contains('R'))),
+        "required_var should be D/R (data/rodata): {nm_str}"
+    );
+    // Weak undefined symbols should show as W/w (weak) or U (undefined)
+    assert!(
+        nm_str.lines().any(|l| {
+            l.contains("optional_func")
+                && (l.contains('W') || l.contains('w') || l.contains('U'))
+        }),
+        "optional_func should be W/w (weak) or U (undefined): {nm_str}"
+    );
+    assert!(
+        nm_str.lines().any(|l| {
+            l.contains("optional_var")
+                && (l.contains('W') || l.contains('w') || l.contains('V')
+                    || l.contains('v') || l.contains('U'))
+        }),
+        "optional_var should be W/w/V/v (weak) or U (undefined): {nm_str}"
+    );
+    let _ = fs::remove_file(&exe);
+}
+
 /// M3.8: visibility control - hidden/default/protected.
 #[test]
 #[cfg(unix)]
