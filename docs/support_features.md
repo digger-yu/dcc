@@ -296,7 +296,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | LTO 4 pass 增强 | `LtoConfig` 配置化 + Pass 7 no_semantic_interposition |
 | LTO IPA-SRA / PGO 集成 | `src/ipa_sra.rs` + `src/profile/pgo_integration.rs` |
 | `gc_sections_root` 自动选根 | 无显式根时自动选所有 STB_GLOBAL/STB_WEAK 符号 |
-| object reader 输入边界 | 接受 ELF64 little-endian (x86_64/AArch64/RISC-V) 和 ELF32 (MIPS big-endian/ARM little-endian) ET_REL；支持 SHT_REL 和 SHT_RELA 重定位；ELF32 符号表 16 字节/条目，ELF64 24 字节/条目 |
+| object reader 输入边界 | 接受 ELF64 little-endian (x86_64/AArch64/RISC-V) 和 ELF32 (MIPS big-endian/ARM little-endian) ET_REL；支持 SHT_REL 和 SHT_RELA 重定位；ELF32 符号表 16 字节/条目，ELF64 24 字节/条目；同时接受 COFF/PE AMD64 目标文件 (machine 0x8664)，自动检测格式 |
+| Windows COFF codegen | `--target x86_64-pc-windows-msvc` 生成 COFF/PE AMD64 可重定位目标文件；`src/codegen/coff.rs` 实现 COFF 文件头、节头、符号表、重定位表和字符串表；节名映射 (.text/.rdata/.data/.bss/.rdata$T/.bss$T)；COFF 重定位类型 (ADDR64/ADDR32/ADDR32NB/REL32)；符号存储类映射；object reader 可解析 COFF 输入 |
 | relocation 支持边界 | 按当前架构白名单分发 relocation；未枚举或错架构命名空间的 relocation 返回 `UnsupportedType` |
 | `.gnu.hash` TIE 压缩 | ELF 64-bit GNU hash（bloom filter + buckets + chain） |
 | `.eh_frame_hdr` 搜索表 | 二分搜索表（按 initial_location 排序） |
@@ -406,7 +407,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | non-x86 QEMU runtime matrix | `non_x86_qemu_runtime_matrix_runs_when_available` + 四个扩展测试（`non_x86_qemu_runtime_hello/control_flow/aggregate_abi/va_arg`）在 `qemu-aarch64`、`qemu-riscv64`、`qemu-mips`、`qemu-mips64`、`qemu-arm` 存在时运行 hello、control-flow、aggregate ABI、va_arg 语义门禁，缺少 qemu-user 时显式 skip |
 | AArch64/RISC-V HFA ABI | AArch64 HFA 1–8 元素 + >8 sret fallback（`aarch64_hfa_abi_compile_and_elf_structure` / `aarch64_hfa_asm_output_has_all_functions`）；RISC-V HFA 1–4 + >4 sret fallback（`riscv64_hfa_abi_compile_and_elf_structure` / `riscv64_hfa_asm_output_has_all_functions`）；ELF machine/type 验证 |
 | non-x86 inline asm 测试 | `-S` 全局 asm 文本保留验证五架构（`non_x86_asm_minus_s_preserves_global_asm_text`）；`-c` asm goto 警告验证（`non_x86_asm_minus_c_warns_on_asm_goto`）；arm/mips/mips64 asm 表达式警告（`non_x86_asm_arm_mips_warn_on_inline_asm_expr`）；约束解析寄存器名替换验证四架构（`non_x86_asm_constraint_resolution_minus_s`）；memory clobber 屏障五架构（`non_x86_asm_memory_clobber_barrier`） |
-| unsupported target 负向测试 | 6 个未知架构 (wasm32/avr/msp430/xtensa/powerpc64/loongarch64) `unknown arch` 错误验证（`unsupported_target_arch_rejected`）；Windows MSVC/Darwin triple 解析接受但 ELF 输出验证（`windows_darwin_triple_accepted_but_outputs_elf`），锁定当前非 COFF/Mach-O 平台边界 |
+| unsupported target 负向测试 | 6 个未知架构 (wasm32/avr/msp430/xtensa/powerpc64/loongarch64) `unknown arch` 错误验证（`unsupported_target_arch_rejected`）；Windows MSVC COFF 输出 + Darwin ELF 输出验证（`windows_darwin_triple_object_format`），Windows MSVC 生成 COFF AMD64 目标文件，Darwin 仍输出 ELF |
 | atexit / `__cxa_atexit` | `FiniArrayBuilder` 按 priority 排序 |
 | `printf` / `scanf` format string | 完整 flag/width/precision/length/type 匹配 + 指针类型验证 |
 | `wchar_t` / 宽字符字面量 `L"..."` | wcs*/wmem* libc 转发 |

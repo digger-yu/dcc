@@ -13,13 +13,12 @@
 
 | 限制 | 说明 |
 |------|------|
-| Windows COFF 链接路径 | Windows MSVC triple 可解析并生成 ELF64 目标文件，object reader 可接受；COFF 格式 codegen/link 与原生 Windows 链接尚未实现 |
+| COFF 原生 Windows 链接 | COFF 目标文件可生成并可被 object reader 解析；但原生 Windows PE 可执行文件链接（生成 .exe）尚未实现 |
 
 ## 交叉编译 / 缺失平台
 
 | 缺失平台 | 说明 |
 |----------|------|
-| Windows MSVC | 无 COFF/MSVC ABI codegen/link 验证 |
 | Darwin / Mach-O | 无 Mach-O 对象与链接支持 |
 | WASM | 无 wasm32/wasm64 codegen |
 | AVR / MSP430 / Xtensa | 无 embedded backend |
