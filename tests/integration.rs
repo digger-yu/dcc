@@ -13454,6 +13454,85 @@ fn non_x86_asm_arm_mips_warn_on_inline_asm_expr() {
     }
 }
 
+/// Non-x86 -S: enhanced constraint resolution produces real register names
+#[test]
+fn non_x86_asm_constraint_resolution_minus_s() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/asm_non_x86_constraints.c");
+    let targets = [
+        ("aarch64-linux-gnu", "w"),     // AArch64 uses w0-w15
+        ("riscv64-linux-gnu", "a"),     // RISC-V uses a0-a7
+        ("arm-linux-gnueabihf", "r"),   // ARM uses r0-r3
+        ("mips-linux-gnu", "$"),        // MIPS uses $v0, $t0, etc.
+    ];
+    for (target, reg_prefix) in targets {
+        let dir = std::env::temp_dir();
+        let asm_path = dir.join(format!(
+            "dcc-nonx86-constraint-{}-{}.s",
+            target.replace('-', "_"),
+            std::process::id()
+        ));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-S", "-o"])
+            .arg(&asm_path)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "target {target}: -S should succeed; stderr={stderr}"
+        );
+        let asm = fs::read_to_string(&asm_path).unwrap_or_default();
+        let _ = fs::remove_file(&asm_path);
+        // The asm output should contain architecture-specific register names
+        // (not bare %0, %1 placeholders)
+        assert!(
+            asm.contains(reg_prefix),
+            "target {target}: -S output should contain arch register prefix '{reg_prefix}'; asm={asm}"
+        );
+        // Global asm marker should be present
+        assert!(
+            asm.contains("__dcc_asm_constraint_test"),
+            "target {target}: -S output should preserve global asm marker"
+        );
+    }
+}
+
+/// Non-x86 -c: memory clobber emits architecture barrier instruction
+#[test]
+fn non_x86_asm_memory_clobber_barrier() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/asm_non_x86_constraints.c");
+    let targets = [
+        "aarch64-linux-gnu",
+        "riscv64-linux-gnu",
+        "arm-linux-gnueabihf",
+        "mips-linux-gnu",
+        "mips64-linux-gnuabi64",
+    ];
+    for target in targets {
+        let dir = std::env::temp_dir();
+        let obj_path = dir.join(format!(
+            "dcc-nonx86-barrier-{}-{}.o",
+            target.replace('-', "_"),
+            std::process::id()
+        ));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj_path)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = fs::remove_file(&obj_path);
+        assert!(
+            output.status.success(),
+            "target {target}: -c should succeed with memory clobber; stderr={stderr}"
+        );
+    }
+}
+
 // ============================================================================
 // Unsupported target architectures — negative tests
 // ============================================================================
