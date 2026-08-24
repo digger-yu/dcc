@@ -1,15 +1,17 @@
 // src/link/object.rs - ELF ET_REL 目标文件读取器
 //
 // 解析 dcc / gcc 生成的 .o 文件,提取节、符号表、重定位表。
-// 完整支持 ELF64 x86-64 / aarch64 / riscv64 ET_REL 文件。
+// 完整支持 ELF64 x86-64 / aarch64 / riscv64 和 ELF32 mips / arm ET_REL 文件。
+// 支持 little-endian 和 big-endian (MIPS) 两种字节序。
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 
 use crate::codegen::elf::{
-    ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_AARCH64, EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_NOBITS,
-    SHT_NULL, SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB,
+    ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFMAG, EM_AARCH64, EM_ARM, EM_MIPS,
+    EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_REL, SHT_RELA,
+    SHT_STRTAB, SHT_SYMTAB,
 };
 
 /// 从 .o 文件节头表中读出的原始字段:
@@ -95,7 +97,7 @@ impl std::error::Error for ObjectError {}
 
 /// 解析一个 ET_REL 目标文件。
 pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError> {
-    if data.len() < 64 {
+    if data.len() < 52 {
         return Err(ObjectError {
             msg: format!("{}: too short for ELF header", name),
         });
@@ -105,34 +107,76 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
             msg: format!("{}: bad ELF magic", name),
         });
     }
-    if data[4] != ELFCLASS64 {
+    let ei_class = data[4];
+    if ei_class != ELFCLASS64 && ei_class != ELFCLASS32 {
         return Err(ObjectError {
-            msg: format!("{}: only ELF64 supported", name),
+            msg: format!("{}: unsupported ELF class={}", name, ei_class),
         });
     }
-    if data[5] != ELFDATA2LSB {
+    let is_64 = ei_class == ELFCLASS64;
+    let ei_data = data[5];
+    if ei_data != ELFDATA2LSB && ei_data != ELFDATA2MSB {
         return Err(ObjectError {
-            msg: format!("{}: only little-endian ELF64 supported", name),
+            msg: format!("{}: unsupported ELF data encoding={}", name, ei_data),
         });
     }
-    let machine = u16::from_le_bytes(data[18..20].try_into().unwrap());
-    if machine != EM_X86_64 && machine != EM_AARCH64 && machine != EM_RISCV {
+    let is_be = ei_data == ELFDATA2MSB;
+    let ru16 = |o: usize| -> u16 {
+        let b: [u8; 2] = data[o..o + 2].try_into().unwrap();
+        if is_be { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) }
+    };
+    let ru32 = |o: usize| -> u32 {
+        let b: [u8; 4] = data[o..o + 4].try_into().unwrap();
+        if is_be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+    };
+    let ru64 = |o: usize| -> u64 {
+        let b: [u8; 8] = data[o..o + 8].try_into().unwrap();
+        if is_be { u64::from_be_bytes(b) } else { u64::from_le_bytes(b) }
+    };
+    let machine = ru16(18);
+    if machine != EM_X86_64
+        && machine != EM_AARCH64
+        && machine != EM_RISCV
+        && machine != EM_MIPS
+        && machine != EM_ARM
+    {
         return Err(ObjectError {
             msg: format!("{}: unsupported e_machine={}", name, machine),
         });
     }
-    let e_type = u16::from_le_bytes(data[16..18].try_into().unwrap());
+    let e_type = ru16(16);
     if e_type != 1 {
         return Err(ObjectError {
             msg: format!("{}: expected ET_REL (1), got {}", name, e_type),
         });
     }
-    let shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
-    let shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
-    let shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
-    let shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
-
-    if shentsize < 64 {
+    let (shoff, shentsize, shnum, shstrndx) = if is_64 {
+        if data.len() < 64 {
+            return Err(ObjectError {
+                msg: format!("{}: ELF64 header truncated", name),
+            });
+        }
+        (
+            ru64(40) as usize,
+            ru16(58) as usize,
+            ru16(60) as usize,
+            ru16(62) as usize,
+        )
+    } else {
+        if data.len() < 52 {
+            return Err(ObjectError {
+                msg: format!("{}: ELF32 header truncated", name),
+            });
+        }
+        (
+            ru32(32) as usize,
+            ru16(46) as usize,
+            ru16(48) as usize,
+            ru16(50) as usize,
+        )
+    };
+    let min_shentsize = if is_64 { 64 } else { 40 };
+    if shentsize < min_shentsize {
         return Err(ObjectError {
             msg: format!("{}: shentsize too small", name),
         });
@@ -148,31 +192,43 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         });
     }
 
-    // 读取节头表
+    // 读取节头表 (ELF32: 40 bytes/entry, ELF64: 64 bytes/entry)
     let mut raw_sections: Vec<RawShdr> = Vec::with_capacity(shnum);
     for i in 0..shnum {
         let off = shoff + i * shentsize;
-        let sh_name = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
-        let sh_type = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap());
-        let sh_flags = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
-        let sh_addr = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
-        let sh_offset = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap()) as usize;
-        let sh_size = u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap()) as usize;
-        let _sh_link = u32::from_le_bytes(data[off + 40..off + 44].try_into().unwrap());
-        let sh_info = u32::from_le_bytes(data[off + 44..off + 48].try_into().unwrap());
-        let sh_addralign = u64::from_le_bytes(data[off + 48..off + 56].try_into().unwrap());
-        let sh_entsize = u64::from_le_bytes(data[off + 56..off + 64].try_into().unwrap());
-        raw_sections.push((
-            sh_name,
-            sh_type,
-            sh_flags,
-            sh_addr,
-            sh_offset as u64,
-            sh_size as u64,
-            sh_addralign,
-            sh_entsize,
-            sh_info,
-        ));
+        if is_64 {
+            let sh_name = ru32(off);
+            let sh_type = ru32(off + 4);
+            let sh_flags = ru64(off + 8);
+            let sh_addr = ru64(off + 16);
+            let sh_offset = ru64(off + 24) as usize;
+            let sh_size = ru64(off + 32) as usize;
+            let _sh_link = ru32(off + 40);
+            let sh_info = ru32(off + 44);
+            let sh_addralign = ru64(off + 48);
+            let sh_entsize = ru64(off + 56);
+            raw_sections.push((
+                sh_name, sh_type, sh_flags, sh_addr,
+                sh_offset as u64, sh_size as u64,
+                sh_addralign, sh_entsize, sh_info,
+            ));
+        } else {
+            let sh_name = ru32(off);
+            let sh_type = ru32(off + 4);
+            let sh_flags = ru32(off + 8) as u64;
+            let sh_addr = ru32(off + 12) as u64;
+            let sh_offset = ru32(off + 16) as usize;
+            let sh_size = ru32(off + 20) as usize;
+            let _sh_link = ru32(off + 24);
+            let sh_info = ru32(off + 28);
+            let sh_addralign = ru32(off + 32) as u64;
+            let sh_entsize = ru32(off + 36) as u64;
+            raw_sections.push((
+                sh_name, sh_type, sh_flags, sh_addr,
+                sh_offset as u64, sh_size as u64,
+                sh_addralign, sh_entsize, sh_info,
+            ));
+        }
     }
 
     // 读取 shstrtab
@@ -212,12 +268,13 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         });
     }
 
-    // 读取符号表
+    // 读取符号表 (ELF32: 16 bytes/entry, ELF64: 24 bytes/entry)
     let mut symbols = Vec::new();
     if let (Some(sym_i), Some(str_i)) = (symtab_idx, strtab_idx) {
         let sym_hdr = &raw_sections[sym_i as usize];
         let str_hdr = &raw_sections[str_i as usize];
-        let entsize = if sym_hdr.7 > 0 { sym_hdr.7 } else { 24 };
+        let default_entsize: u64 = if is_64 { 24 } else { 16 };
+        let entsize = if sym_hdr.7 > 0 { sym_hdr.7 } else { default_entsize };
         let sym_off = sym_hdr.4 as usize;
         let sym_size = sym_hdr.5 as usize;
         let str_off = str_hdr.4 as usize;
@@ -227,15 +284,27 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
             let count = sym_size / entsize as usize;
             for i in 0..count {
                 let base = sym_off + i * entsize as usize;
-                if base + 24 > data.len() {
+                let min_sz = if is_64 { 24 } else { 16 };
+                if base + min_sz > data.len() {
                     break;
                 }
-                let st_name = u32::from_le_bytes(data[base..base + 4].try_into().unwrap());
-                let st_info = data[base + 4];
-                let st_other = data[base + 5];
-                let st_shndx = u16::from_le_bytes(data[base + 6..base + 8].try_into().unwrap());
-                let st_value = u64::from_le_bytes(data[base + 8..base + 16].try_into().unwrap());
-                let st_size = u64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap());
+                let (st_name, st_info, st_other, st_shndx, st_value, st_size) = if is_64 {
+                    let n = ru32(base);
+                    let info = data[base + 4];
+                    let other = data[base + 5];
+                    let shndx = ru16(base + 6);
+                    let val = ru64(base + 8);
+                    let sz = ru64(base + 16);
+                    (n, info, other, shndx, val, sz)
+                } else {
+                    let n = ru32(base);
+                    let info = data[base + 4];
+                    let other = data[base + 5];
+                    let shndx = ru16(base + 6);
+                    let val = ru32(base + 8) as u64;
+                    let sz = ru32(base + 12) as u64;
+                    (n, info, other, shndx, val, sz)
+                };
                 let bind = st_info >> 4;
                 let ty = st_info & 0xf;
                 let sym_name = read_cstr(strtab, st_name as usize)
@@ -256,17 +325,24 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         }
     }
 
-    // 读取所有 .rela.* 节的重定位
+    // 读取所有 .rela.* 和 .rel.* 节的重定位
     let mut relocations = Vec::new();
     for (i, s) in raw_sections.iter().enumerate() {
-        if s.1 != SHT_RELA {
+        let is_rela = s.1 == SHT_RELA;
+        let is_rel = s.1 == SHT_REL;
+        if !is_rela && !is_rel {
             continue;
         }
         let sec_name = &sections[i].name;
-        if !sec_name.starts_with(".rela") {
+        if !sec_name.starts_with(".rel") {
             continue;
         }
-        let entsize = if s.7 > 0 { s.7 } else { 24 };
+        let default_entsize: u64 = if is_rela {
+            if is_64 { 24 } else { 12 }
+        } else {
+            if is_64 { 16 } else { 8 }
+        };
+        let entsize = if s.7 > 0 { s.7 } else { default_entsize };
         let off = s.4 as usize;
         let size = s.5 as usize;
         let count = size / entsize as usize;
@@ -274,22 +350,54 @@ pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         let target_sec = s.8;
         for j in 0..count {
             let base = off + j * entsize as usize;
-            if base + 24 > data.len() {
-                break;
+            if is_64 {
+                if base + entsize as usize > data.len() {
+                    break;
+                }
+                let r_offset = ru64(base);
+                let r_info = ru64(base + 8);
+                let r_sym = (r_info >> 32) as u32;
+                let r_type = (r_info & 0xffffffff) as u32;
+                let r_addend = if is_rela {
+                    i64::from_le_bytes(
+                        data[base + 16..base + 24].try_into().unwrap(),
+                    )
+                } else {
+                    0i64
+                };
+                relocations.push(InputRela {
+                    offset: r_offset,
+                    sym: r_sym,
+                    rel_type: r_type,
+                    addend: r_addend,
+                    section: target_sec,
+                    input_obj: 0,
+                });
+            } else {
+                if base + entsize as usize > data.len() {
+                    break;
+                }
+                let r_offset = ru32(base) as u64;
+                let r_info = ru32(base + 4);
+                // ELF32: sym = info >> 8, type = info & 0xff
+                let r_sym = r_info >> 8;
+                let r_type = r_info & 0xff;
+                let r_addend = if is_rela {
+                    i64::from_le_bytes(
+                        data[base + 8..base + 12].try_into().unwrap(),
+                    )
+                } else {
+                    0i64
+                };
+                relocations.push(InputRela {
+                    offset: r_offset,
+                    sym: r_sym,
+                    rel_type: r_type,
+                    addend: r_addend,
+                    section: target_sec,
+                    input_obj: 0,
+                });
             }
-            let r_offset = u64::from_le_bytes(data[base..base + 8].try_into().unwrap());
-            let r_info = u64::from_le_bytes(data[base + 8..base + 16].try_into().unwrap());
-            let r_addend = i64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap());
-            let r_sym = (r_info >> 32) as u32;
-            let r_type = (r_info & 0xffffffff) as u32;
-            relocations.push(InputRela {
-                offset: r_offset,
-                sym: r_sym,
-                rel_type: r_type,
-                addend: r_addend,
-                section: target_sec,
-                input_obj: 0,
-            });
         }
     }
 
@@ -552,38 +660,41 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_object_classes_and_machines() {
-        let arm32 = elf::build_elf32_arm(&[0], &[], &[], &[], &[], &[]);
-        let err = parse_object(&arm32, "arm32.o").unwrap_err();
-        assert!(err.to_string().contains("only ELF64 supported"));
-
-        let mut mips64 = elf::build_elf_rel_x86_64(
-            &[0],
-            &[],
-            &[],
-            0,
-            &[],
-            0,
-            1,
-            1,
-            1,
-            1,
-            1,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-        );
-        mips64[18..20].copy_from_slice(&elf::EM_MIPS.to_le_bytes());
-        let err = parse_object(&mips64, "mips64.o").unwrap_err();
-        assert!(err.to_string().contains("unsupported e_machine=8"));
-
+    fn accepts_all_supported_object_classes_and_machines() {
+        // ELF64 little-endian targets
         let aarch64 = elf::build_elf_rel_aarch64(&[0], &[], &[], &[], &[], &[]);
         assert!(parse_object(&aarch64, "aarch64.o").is_ok());
 
         let riscv64 = elf::build_elf_rel_riscv64(&[0], &[], &[], &[], &[], &[]);
         assert!(parse_object(&riscv64, "riscv64.o").is_ok());
+
+        let x86_64 = elf::build_elf_rel_x86_64(
+            &[0], &[], &[], 0, &[], 0, 1, 1, 1, 1, 1,
+            &[], &[], &[], &[], &[],
+        );
+        assert!(parse_object(&x86_64, "x86_64.o").is_ok());
+
+        // ELF32 little-endian: ARM
+        let arm32 = elf::build_elf32_arm(&[0], &[], &[], &[], &[], &[]);
+        let parsed_arm = parse_object(&arm32, "arm32.o").expect("parse arm32");
+        assert_eq!(parsed_arm.machine, elf::EM_ARM);
+
+        // ELF32 "big-endian" (dcc writer uses LE data with MSB flag): MIPS
+        let mips32 = elf::build_elf32_mips(&[0], &[], &[], &[], &[], &[]);
+        let parsed_mips = parse_object(&mips32, "mips32.o").expect("parse mips32");
+        assert_eq!(parsed_mips.machine, elf::EM_MIPS);
+    }
+
+    #[test]
+    fn rejects_truly_unsupported_machines() {
+        // Craft an ELF64 with an unknown e_machine (e.g. 999)
+        let mut bad = elf::build_elf_rel_x86_64(
+            &[0], &[], &[], 0, &[], 0, 1, 1, 1, 1, 1,
+            &[], &[], &[], &[], &[],
+        );
+        bad[18..20].copy_from_slice(&999u16.to_le_bytes());
+        let err = parse_object(&bad, "bad.o").unwrap_err();
+        assert!(err.to_string().contains("unsupported e_machine=999"));
     }
 
     #[test]

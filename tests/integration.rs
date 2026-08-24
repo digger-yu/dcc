@@ -2946,8 +2946,8 @@ fn mips_hello_cross_compile() {
     let bytes = fs::read(&object_path).expect("read object");
     let _ = fs::remove_file(&object_path);
     assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
-    // MIPS ELF e_machine = 8
-    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 8);
+    // MIPS ELF e_machine = 8 (big-endian)
+    assert_eq!(u16::from_be_bytes([bytes[18], bytes[19]]), 8);
 }
 
 /// MIPS32 if/while control flow cross-compile.
@@ -14528,4 +14528,73 @@ fn xfail_msvc_output_is_elf_not_coff() {
         bytes.len() >= 4 && &bytes[0..4] == b"\x7fELF",
         "known limitation: MSVC target outputs ELF, not COFF"
     );
+}
+
+/// MIPS/ARM ELF32 object files can be parsed by the object reader
+#[test]
+fn mips_arm_elf32_object_reader_accepts() {
+    let targets = [
+        ("mips-linux-gnu", 8u16, "MIPS"),
+        ("arm-linux-gnueabihf", 40u16, "ARM"),
+    ];
+    for (target, expected_machine, label) in targets {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("dcc-objreader-{}-{}.c", label, std::process::id()));
+        let obj = dir.join(format!("dcc-objreader-{}-{}.o", label, std::process::id()));
+        fs::write(&src, "int foo(void) { return 7; }\n").expect("write");
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{label}: -c should succeed; stderr={stderr}"
+        );
+        let bytes = fs::read(&obj).expect("read object");
+        let _ = fs::remove_file(&obj);
+        let _ = fs::remove_file(&src);
+        // Verify ELF magic
+        assert_eq!(&bytes[0..4], b"\x7fELF", "{label}: ELF magic");
+        // Verify ELF class = ELF32
+        assert_eq!(bytes[4], 1, "{label}: ELFCLASS32");
+        // Verify e_machine
+        let ei_data = bytes[5];
+        let machine = if ei_data == 2 {
+            u16::from_be_bytes([bytes[18], bytes[19]])
+        } else {
+            u16::from_le_bytes([bytes[18], bytes[19]])
+        };
+        assert_eq!(machine, expected_machine, "{label}: e_machine");
+    }
+}
+
+/// Windows MSVC triple outputs ELF (not COFF) and object reader accepts it
+#[test]
+fn windows_msvc_elf_object_reader_accepts() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-win-objreader-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-win-objreader-{}.o", std::process::id()));
+    fs::write(&src, "int bar(void) { return 3; }\n").expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "x86_64-pc-windows-msvc", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "Windows MSVC -c should succeed; stderr={stderr}"
+    );
+    let bytes = fs::read(&obj).expect("read object");
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&src);
+    // Verify ELF magic (known limitation: outputs ELF, not COFF)
+    assert_eq!(&bytes[0..4], b"\x7fELF", "Windows: ELF magic");
+    // Verify e_machine = EM_X86_64
+    let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+    assert_eq!(machine, 62, "Windows: e_machine should be x86_64");
 }

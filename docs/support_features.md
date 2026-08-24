@@ -296,7 +296,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | LTO 4 pass 增强 | `LtoConfig` 配置化 + Pass 7 no_semantic_interposition |
 | LTO IPA-SRA / PGO 集成 | `src/ipa_sra.rs` + `src/profile/pgo_integration.rs` |
 | `gc_sections_root` 自动选根 | 无显式根时自动选所有 STB_GLOBAL/STB_WEAK 符号 |
-| object reader 输入边界 | 只接受 ELF64 little-endian ET_REL 且 machine 为 x86_64/AArch64/RISC-V；ELF32、big-endian 或其它 machine 严格报错 |
+| object reader 输入边界 | 接受 ELF64 little-endian (x86_64/AArch64/RISC-V) 和 ELF32 (MIPS big-endian/ARM little-endian) ET_REL；支持 SHT_REL 和 SHT_RELA 重定位；ELF32 符号表 16 字节/条目，ELF64 24 字节/条目 |
 | relocation 支持边界 | 按当前架构白名单分发 relocation；未枚举或错架构命名空间的 relocation 返回 `UnsupportedType` |
 | `.gnu.hash` TIE 压缩 | ELF 64-bit GNU hash（bloom filter + buckets + chain） |
 | `.eh_frame_hdr` 搜索表 | 二分搜索表（按 initial_location 排序） |

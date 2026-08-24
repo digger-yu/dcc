@@ -17,8 +17,7 @@
 
 | 限制 | 说明 |
 |------|------|
-| MIPS/ARM 对象链接路径 | object reader 当前只接收 ELF64 little-endian 且 machine 为 x86_64/AArch64/RISC-V；MIPS/ARM 仍保留 codegen/ELF 输出能力，跨对象 reader/link 路径未完成 |
-| Windows 链接路径 | Windows MSVC triple 可解析并生成 ELF 目标文件；COFF/MSVC ABI codegen/link 与原生 Windows 链接尚未验证 |
+| Windows COFF 链接路径 | Windows MSVC triple 可解析并生成 ELF64 目标文件，object reader 可接受；COFF 格式 codegen/link 与原生 Windows 链接尚未实现 |
 
 ## 交叉编译 / 缺失平台
 

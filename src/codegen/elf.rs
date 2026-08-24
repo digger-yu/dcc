@@ -48,6 +48,7 @@ pub const SHT_PROGBITS: u32 = 1;
 pub const SHT_SYMTAB: u32 = 2;
 pub const SHT_STRTAB: u32 = 3;
 pub const SHT_RELA: u32 = 4;
+pub const SHT_REL: u32 = 9;
 pub const SHT_HASH: u32 = 5;
 pub const SHT_DYNAMIC: u32 = 6;
 pub const SHT_NOTE: u32 = 7;
@@ -1853,6 +1854,13 @@ fn build_elf32_rel_generic(
     rodata_relocations: &[ElfRela],
     extra_sections: &[ElfSection],
 ) -> Vec<u8> {
+    let is_be = ei_data == ELFDATA2MSB;
+    let mut ew_u16 = |v: u16| -> [u8; 2] {
+        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+    };
+    let mut ew_u32 = |v: u32| -> [u8; 4] {
+        if is_be { v.to_be_bytes() } else { v.to_le_bytes() }
+    };
     let mut shstr = vec![0u8];
     let mut strtab = vec![0u8];
     let sec_name_off = |buf: &mut Vec<u8>, name: &str| -> u32 {
@@ -1890,33 +1898,33 @@ fn build_elf32_rel_generic(
 
     // ELF32 symtab: 16 bytes per entry
     let mut symtab = Vec::new();
-    symtab.extend_from_slice(&0u32.to_le_bytes());
+    symtab.extend_from_slice(&ew_u32(0));     // st_name
     symtab.push(0); // st_info
     symtab.push(0); // st_other
-    symtab.extend_from_slice(&0u16.to_le_bytes()); // st_shndx
-    symtab.extend_from_slice(&0u32.to_le_bytes()); // st_value
-    symtab.extend_from_slice(&0u32.to_le_bytes()); // st_size
+    symtab.extend_from_slice(&ew_u16(0));     // st_shndx
+    symtab.extend_from_slice(&ew_u32(0));     // st_value
+    symtab.extend_from_slice(&ew_u32(0));     // st_size
     for (i, sym) in symbols.iter().enumerate() {
-        symtab.extend_from_slice(&sym_name_off[i + 1].to_le_bytes());
+        symtab.extend_from_slice(&ew_u32(sym_name_off[i + 1]));
         symtab.push((sym.bind << 4) | sym.ty);
         symtab.push(sym.visibility);
-        symtab.extend_from_slice(&sym.section.to_le_bytes());
-        symtab.extend_from_slice(&(sym.value as u32).to_le_bytes());
-        symtab.extend_from_slice(&(sym.size as u32).to_le_bytes());
+        symtab.extend_from_slice(&ew_u16(sym.section));
+        symtab.extend_from_slice(&ew_u32(sym.value as u32));
+        symtab.extend_from_slice(&ew_u32(sym.size as u32));
     }
 
     // ELF32 Rel: 8 bytes per entry (no addend)
     let mut rel_text = Vec::new();
     for rel in relocations {
-        rel_text.extend_from_slice(&(rel.offset as u32).to_le_bytes());
+        rel_text.extend_from_slice(&ew_u32(rel.offset as u32));
         let info = (rel.sym_index << 8) | rel.rel_type;
-        rel_text.extend_from_slice(&info.to_le_bytes());
+        rel_text.extend_from_slice(&ew_u32(info));
     }
     let mut rel_rodata = Vec::new();
     for rel in rodata_relocations {
-        rel_rodata.extend_from_slice(&(rel.offset as u32).to_le_bytes());
+        rel_rodata.extend_from_slice(&ew_u32(rel.offset as u32));
         let info = (rel.sym_index << 8) | rel.rel_type;
-        rel_rodata.extend_from_slice(&info.to_le_bytes());
+        rel_rodata.extend_from_slice(&ew_u32(info));
     }
 
     let header_size = 52usize;
@@ -1971,19 +1979,19 @@ fn build_elf32_rel_generic(
     out.push(EV_CURRENT);
     out.push(0); // ei_osabi
     out.extend_from_slice(&[0u8; 8]); // ei_pad
-    out.extend_from_slice(&ET_REL.to_le_bytes());
-    out.extend_from_slice(&e_machine.to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes()); // e_version
-    out.extend_from_slice(&0u32.to_le_bytes()); // e_entry
-    out.extend_from_slice(&0u32.to_le_bytes()); // e_phoff
-    out.extend_from_slice(&(shoff as u32).to_le_bytes()); // e_shoff
-    out.extend_from_slice(&0u32.to_le_bytes()); // e_flags
-    out.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
-    out.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
-    out.extend_from_slice(&0u16.to_le_bytes()); // e_phnum
-    out.extend_from_slice(&40u16.to_le_bytes()); // e_shentsize
-    out.extend_from_slice(&(n_sections as u16).to_le_bytes()); // e_shnum
-    out.extend_from_slice(&(shstrtab_idx as u16).to_le_bytes()); // e_shstrndx
+    out.extend_from_slice(&ew_u16(ET_REL));
+    out.extend_from_slice(&ew_u16(e_machine));
+    out.extend_from_slice(&ew_u32(1)); // e_version
+    out.extend_from_slice(&ew_u32(0)); // e_entry
+    out.extend_from_slice(&ew_u32(0)); // e_phoff
+    out.extend_from_slice(&ew_u32(shoff as u32)); // e_shoff
+    out.extend_from_slice(&ew_u32(0)); // e_flags
+    out.extend_from_slice(&ew_u16(52)); // e_ehsize
+    out.extend_from_slice(&ew_u16(0)); // e_phentsize
+    out.extend_from_slice(&ew_u16(0)); // e_phnum
+    out.extend_from_slice(&ew_u16(40)); // e_shentsize
+    out.extend_from_slice(&ew_u16(n_sections as u16)); // e_shnum
+    out.extend_from_slice(&ew_u16(shstrtab_idx as u16)); // e_shstrndx
 
     pad_to(&mut out, text_off);
     out.extend_from_slice(text);
@@ -2014,7 +2022,7 @@ fn build_elf32_rel_generic(
     let _rel_rodata_idx = if rel_rodata.is_empty() { 0 } else { rel_text_idx + 1 };
 
     // Section headers (40 bytes each for ELF32)
-    write_section_header32(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    write_section_header32(&mut out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, is_be);
     write_section_header32(
         &mut out,
         text_name,
@@ -2027,6 +2035,7 @@ fn build_elf32_rel_generic(
         0,
         4,
         0,
+        is_be,
     );
     if !rodata.is_empty() {
         write_section_header32(
@@ -2041,6 +2050,7 @@ fn build_elf32_rel_generic(
             0,
             4,
             0,
+            is_be,
         );
     }
     write_section_header32(
@@ -2055,6 +2065,7 @@ fn build_elf32_rel_generic(
         1,
         4,
         16,
+        is_be,
     );
     write_section_header32(
         &mut out,
@@ -2068,6 +2079,7 @@ fn build_elf32_rel_generic(
         0,
         1,
         0,
+        is_be,
     );
     write_section_header32(
         &mut out,
@@ -2081,11 +2093,12 @@ fn build_elf32_rel_generic(
         0,
         1,
         0,
+        is_be,
     );
     write_section_header32(
         &mut out,
         rel_text_name,
-        SHT_RELA,
+        SHT_REL,
         SHF_INFO_LINK,
         0,
         rel_text_off as u32,
@@ -2094,12 +2107,13 @@ fn build_elf32_rel_generic(
         1,
         4,
         8,
+        is_be,
     );
     if !rel_rodata.is_empty() {
         write_section_header32(
             &mut out,
             rel_rodata_name,
-            SHT_RELA,
+            SHT_REL,
             SHF_INFO_LINK,
             0,
             rel_rodata_off as u32,
@@ -2108,6 +2122,7 @@ fn build_elf32_rel_generic(
             rodata_idx as u32,
             4,
             8,
+            is_be,
         );
     }
     for (name, off, sec) in &extra_layout {
@@ -2123,6 +2138,7 @@ fn build_elf32_rel_generic(
             0,
             sec.align.max(1) as u32,
             0,
+            is_be,
         );
     }
     out
@@ -2260,7 +2276,7 @@ pub fn build_elf32_exec_arm(code: &[u8], rodata: &[u8], entry: u32) -> Vec<u8> {
     out
 }
 
-/// ELF32 section header (40 bytes)
+/// ELF32 section header (40 bytes), endianness-aware
 fn write_section_header32(
     out: &mut Vec<u8>,
     sh_name: u32,
@@ -2273,16 +2289,21 @@ fn write_section_header32(
     sh_info: u32,
     sh_addralign: u32,
     sh_entsize: u32,
+    is_be: bool,
 ) {
-    out.extend_from_slice(&sh_name.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_type.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_flags.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_addr.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_offset.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_size.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_link.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_info.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_addralign.to_le_bytes()); // 4
-    out.extend_from_slice(&sh_entsize.to_le_bytes()); // 4
-                                                      // Total: 40 bytes
+    macro_rules! ew { ($v:expr, $n:literal) => {
+        if is_be { out.extend_from_slice(&$v.to_be_bytes()) }
+        else     { out.extend_from_slice(&$v.to_le_bytes()) }
+    }}
+    ew!(sh_name, 4);       // 4
+    ew!(sh_type, 4);       // 4
+    ew!(sh_flags, 4);      // 4
+    ew!(sh_addr, 4);       // 4
+    ew!(sh_offset, 4);     // 4
+    ew!(sh_size, 4);       // 4
+    ew!(sh_link, 4);       // 4
+    ew!(sh_info, 4);       // 4
+    ew!(sh_addralign, 4);  // 4
+    ew!(sh_entsize, 4);    // 4
+                           // Total: 40 bytes
 }
