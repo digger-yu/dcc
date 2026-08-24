@@ -1,6 +1,9 @@
 // src/codegen/mips.rs - MIPS32 后端 (O32 ABI)
 
 use crate::ast::{BinOp, BlockItem, Decl, Expr, FuncDecl, Program, Stmt, UnOp};
+use crate::codegen::asm_constraints::{
+    self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
+};
 use crate::codegen::elf::{
     self, ElfRela, ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL,
     STT_FUNC, STT_GNU_IFUNC,
@@ -119,27 +122,24 @@ impl MipsCodegen {
     pub fn compile(&mut self, module: &Module) {
         let prog = module.source();
         self.emit_globals(module);
-        // 文件级 asm: 收集原始文本行
+        // 文件级 asm: 收集原始文本行 (增强版约束解析 + 寄存器名替换)
         for decl in &prog.decls {
             if let Decl::GlobalAsm {
                 asm_str,
-                outputs,
                 output_names,
                 output_constraints,
-                inputs,
                 input_names,
                 input_constraints,
                 ..
             } = decl
             {
-                let resolved = Self::resolve_asm_template_simple(
+                let resolved = Self::resolve_asm_template_enhanced(
                     asm_str,
-                    outputs,
-                    output_names,
                     output_constraints,
-                    inputs,
-                    input_names,
                     input_constraints,
+                    output_names,
+                    input_names,
+                    &[],
                 );
                 for line in resolved.split('\n') {
                     let t = line.trim();
@@ -589,10 +589,10 @@ impl MipsCodegen {
             }
             Stmt::AsmGoto {
                 asm_str,
-                outputs,
+                outputs: _,
                 output_names,
                 output_constraints,
-                inputs,
+                inputs: _,
                 input_names,
                 input_constraints,
                 goto_labels,
@@ -600,23 +600,17 @@ impl MipsCodegen {
                 ..
             } => {
                 eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
-                let mut resolved_asm = asm_str.clone();
-                let label_base = outputs.len() + inputs.len();
-                for (i, label) in goto_labels.iter().enumerate().rev() {
-                    resolved_asm = resolved_asm.replace(&format!("%l{}", i), &label.name);
-                    resolved_asm =
-                        resolved_asm.replace(&format!("%l{}", label_base + i), &label.name);
-                    resolved_asm =
-                        resolved_asm.replace(&format!("%l[{}]", label.name), &label.name);
-                }
-                let resolved = Self::resolve_asm_template_simple(
-                    &resolved_asm,
-                    outputs,
-                    output_names,
+                let label_pairs: Vec<(String, String)> = goto_labels
+                    .iter()
+                    .map(|l| (l.name.clone(), l.name.clone()))
+                    .collect();
+                let resolved = Self::resolve_asm_template_enhanced(
+                    asm_str,
                     output_constraints,
-                    inputs,
-                    input_names,
                     input_constraints,
+                    output_names,
+                    input_names,
+                    &label_pairs,
                 );
                 let lines: Vec<String> = resolved
                     .split('\n')
@@ -729,12 +723,13 @@ impl MipsCodegen {
             }
             Expr::AsmExpr {
                 asm_str,
-                outputs,
+                outputs: _,
                 output_names,
                 output_constraints,
-                inputs,
+                inputs: _,
                 input_names,
                 input_constraints,
+                clobbers,
                 span,
                 ..
             } => {
@@ -742,14 +737,13 @@ impl MipsCodegen {
                     "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
                     span.file, span.line
                 );
-                let resolved = Self::resolve_asm_template_simple(
+                let resolved = Self::resolve_asm_template_enhanced(
                     asm_str,
-                    outputs,
-                    output_names,
                     output_constraints,
-                    inputs,
-                    input_names,
                     input_constraints,
+                    output_names,
+                    input_names,
+                    &[],
                 );
                 let lines: Vec<String> = resolved
                     .split('\n')
@@ -759,6 +753,10 @@ impl MipsCodegen {
                 self.raw_func_asm_lines
                     .push((format!("__inline_{}", self.label_serial), lines));
                 self.label_serial += 1;
+                // memory clobber: 发射 SYNC 编译器屏障
+                if clobbers.iter().any(|c| c == "memory") {
+                    self.emit_sync();
+                }
                 self.emit_load_imm(2, 0);
             }
             _ => {
@@ -1117,64 +1115,38 @@ impl MipsCodegen {
         out
     }
 
-    /// 简化版 asm 模板占位符替换: 仅处理 %N / %[name] / %% (无寄存器分配)
-    fn resolve_asm_template_simple(
+    /// 增强版 asm 模板占位符替换: 使用共享约束解析器分配寄存器并替换为实际寄存器名
+    fn resolve_asm_template_enhanced(
         asm_str: &str,
-        _outputs: &[Expr],
+        output_constraints: &[String],
+        input_constraints: &[String],
         output_names: &[Option<String>],
-        _output_constraints: &[String],
-        _inputs: &[Expr],
         input_names: &[Option<String>],
-        _input_constraints: &[String],
+        goto_labels: &[(String, String)],
     ) -> String {
-        let s = if asm_str.starts_with('"') && asm_str.ends_with('"') && asm_str.len() >= 2 {
-            &asm_str[1..asm_str.len() - 1]
-        } else {
-            asm_str
-        };
-        let mut result = String::new();
-        let chars: Vec<char> = s.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == '%' && i + 1 < chars.len() {
-                match chars[i + 1] {
-                    '%' => {
-                        result.push('%');
-                        i += 2;
-                    }
-                    '[' => {
-                        if let Some(end) = chars[i + 2..].iter().position(|&c| c == ']') {
-                            let name: String = chars[i + 2..i + 2 + end].iter().collect();
-                            let all_names: Vec<&Option<String>> =
-                                output_names.iter().chain(input_names.iter()).collect();
-                            for (idx, n) in all_names.iter().enumerate() {
-                                if n.as_ref().map(|s| s.as_str()) == Some(&name) {
-                                    result.push_str(&format!("%{}", idx));
-                                    break;
-                                }
-                            }
-                            i += 2 + end + 1;
-                        } else {
-                            result.push(chars[i]);
-                            i += 1;
-                        }
-                    }
-                    c if c.is_ascii_digit() => {
-                        result.push('%');
-                        result.push(c);
-                        i += 2;
-                    }
-                    _ => {
-                        result.push(chars[i]);
-                        i += 1;
-                    }
-                }
-            } else {
-                result.push(chars[i]);
-                i += 1;
-            }
-        }
-        result
+        let pool = asm_constraints::mips_reg_pool();
+        let operands = resolve_asm_operands(
+            output_constraints,
+            input_constraints,
+            output_names,
+            input_names,
+            &pool,
+        );
+        resolve_asm_template_enhanced(
+            asm_str,
+            &operands,
+            output_names,
+            input_names,
+            goto_labels,
+            AsmArch::Mips,
+            false,
+        )
+    }
+
+    /// SYNC 指令 — 内存屏障 (memory clobber 编译器屏障)
+    fn emit_sync(&mut self) {
+        // SYNC: opcode=0, funct=0x0F => 0x0000000F
+        self.code.extend_from_slice(&[0x00, 0x00, 0x00, 0x0F]);
     }
 }
 
