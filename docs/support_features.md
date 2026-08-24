@@ -89,7 +89,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 宏递归展开防护 | V7 include cache |
 | 依赖文件 -MD / -MMD / -MP | GCC 兼容格式 (`\` 续行 + 路径转义 + `-MP` phony 目标)；fixdep 支持转义路径反转义 |
 | `-Wp,*` 子选项白名单 | CLI 与 `dcc-host-wrapper.sh` 仅白名单支持预处理器子选项，未知项报 unsupported |
-| x86 kernel wrapper flags | `arch_x86_compile.sh` 透传 `-fstack-clash-protection`、`-ftrivial-auto-var-init=*`、`-mrecord-mcount`、`-mfentry`、`-pg`、`-falign-loops=*`、`-falign-jumps=*` 等常见内核编译 flags |
+| x86 kernel wrapper flags | `arch_x86_compile.sh` 透传 `-fstack-clash-protection`、`-mrecord-mcount`、`-mfentry`、`-pg`、`-falign-loops=*`、`-falign-jumps=*` 等常见内核编译 flags；`-mno-sse`/`-mcmodel=kernel`/`-ftrivial-auto-var-init=zero` 已完整实现 |
 | `-x` 输入语言集 | CLI 支持 `c`/`c-header`、`c++`/`cpp`/`cxx` 及 C++ header 别名，并区分 `assembler`（原始汇编）与 `assembler-with-cpp`（预处理汇编） |
 | host wrapper dependency errors | `dcc-host-wrapper.sh` fails the host build when fixdep dependency generation fails instead of writing a stub `.d` file |
 | `-fprofile-values` | 启用 PGO value sampling 插桩，在函数入口生成 `__dcc_pgo_value_sample(site)` 调用；driver 自动落盘 `<stem>.pgort.c`，运行时维护 per-site value histogram 并写入 profraw v2 的 value profile section |
@@ -183,6 +183,9 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | return thunk | `-mfunction-return=thunk-extern` 将 C 函数尾声、空 global asm 函数和 mini-asm `ret`/`retq` 发射为外部 `__x86_return_thunk` 跳转；`-mfunction-return=keep` 保留裸 `ret` |
 | prefetch | `__builtin_prefetch` no-op |
 | unknown expression fallback | unsupported expression / 非标量 InitList rvalue 输出带源位置 warning，并发射 `ud2` 后清零目标寄存器，避免静默返回 0 |
+| `-mno-sse` x87 FPU 回退 | 内核中断上下文禁用 XMM 寄存器，浮点运算使用 x87 FPU 指令 (fld/fstp/faddp/fsubrp/fmulp/fdivrp/fucomip)；降级为 W0300 警告而非硬错误 |
+| `-mcmodel=kernel` 代码模型 | 内核运行在 -2GB 高地址空间，定义 `__code_model_kernel__` 宏；外部函数地址使用直接 PC-relative 而非 GOT 间接寻址 |
+| `-ftrivial-auto-var-init=zero` | 安全特性，CONFIG_INIT_STACK_ALL_ZERO 依赖；使用 rep stosq 零初始化整个栈帧 |
 
 ## 多架构支持
 
