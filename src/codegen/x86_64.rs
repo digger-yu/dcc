@@ -17972,6 +17972,12 @@ impl Codegen {
                     ]);
                     self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
                 }
+                AsmOperand::Sym(sym) | AsmOperand::SymDisp(sym, _) => {
+                    // RIP-relative: F3 0F C7 /6 with modrm = 0x35
+                    self.emit(&[0x48, 0xF3, 0x0F, 0xC7, 0x35, 0, 0, 0, 0]);
+                    let pos = self.pos() - 4;
+                    self.pending_data_rels.push((pos, sym.clone()));
+                }
                 _ => {
                     self.asm_warn("rdrand needs register or memory operand, emitted as nop");
                     self.emit(&[0x90]);
@@ -18009,6 +18015,12 @@ impl Codegen {
                         0xC7,
                     ]);
                     self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
+                }
+                AsmOperand::Sym(sym) | AsmOperand::SymDisp(sym, _) => {
+                    // RIP-relative: F3 0F C7 /7 with modrm = 0x3D
+                    self.emit(&[0x48, 0xF3, 0x0F, 0xC7, 0x3D, 0, 0, 0, 0]);
+                    let pos = self.pos() - 4;
+                    self.pending_data_rels.push((pos, sym.clone()));
                 }
                 _ => {
                     self.asm_warn("rdseed needs register or memory operand, emitted as nop");
@@ -18254,42 +18266,82 @@ impl Codegen {
             // 远跳转/远调用/远返回 (far jumps/calls/returns)
             "retf" | "retfw" | "retfl" | "retfq" if ops.is_empty() => self.emit(&[0xCB]),
             "retf" | "retfw" | "retfl" | "retfq" if ops.len() == 1 => {
-                if let AsmOperand::Imm(v) = &ops[0] {
-                    self.emit(&[0xCA]);
-                    self.emit(&(*v as i16).to_le_bytes());
-                } else {
-                    self.asm_warn("retf needs imm16, emitted as nop");
-                    self.emit(&[0x90]);
+                match &ops[0] {
+                    AsmOperand::Imm(v) => {
+                        self.emit(&[0xCA]);
+                        self.emit(&(*v as i16).to_le_bytes());
+                    }
+                    AsmOperand::Sym(sym) | AsmOperand::SymDisp(sym, _) => {
+                        // retf $sym: CA iw with link-time relocation
+                        self.emit(&[0xCA, 0x00, 0x00]);
+                        let pos = self.pos() - 2;
+                        self.pending_data_rels.push((pos, sym.clone()));
+                    }
+                    _ => {
+                        self.asm_warn("retf needs imm16, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
                 }
             }
             "lret" | "lretw" | "lretl" | "lretq" if ops.is_empty() => self.emit(&[0xCB]),
             "lret" | "lretw" | "lretl" | "lretq" if ops.len() == 1 => {
-                if let AsmOperand::Imm(v) = &ops[0] {
-                    self.emit(&[0xCA]);
-                    self.emit(&(*v as i16).to_le_bytes());
-                } else {
-                    self.asm_warn("lret needs imm16, emitted as nop");
-                    self.emit(&[0x90]);
+                match &ops[0] {
+                    AsmOperand::Imm(v) => {
+                        self.emit(&[0xCA]);
+                        self.emit(&(*v as i16).to_le_bytes());
+                    }
+                    AsmOperand::Sym(sym) | AsmOperand::SymDisp(sym, _) => {
+                        // lret $sym: CA iw with link-time relocation
+                        self.emit(&[0xCA, 0x00, 0x00]);
+                        let pos = self.pos() - 2;
+                        self.pending_data_rels.push((pos, sym.clone()));
+                    }
+                    _ => {
+                        self.asm_warn("lret needs imm16, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
                 }
             }
             "ljmpw" if ops.len() == 2 => {
-                if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
-                    self.emit(&[0xEA]);
-                    self.emit(&(*off as i16).to_le_bytes());
-                    self.emit(&(*seg as i16).to_le_bytes());
-                } else {
-                    self.asm_warn("ljmpw needs $seg, $off, emitted as nop");
-                    self.emit(&[0x90]);
+                match (&ops[0], &ops[1]) {
+                    (AsmOperand::Imm(seg), AsmOperand::Imm(off)) => {
+                        self.emit(&[0xEA]);
+                        self.emit(&(*off as i16).to_le_bytes());
+                        self.emit(&(*seg as i16).to_le_bytes());
+                    }
+                    (AsmOperand::Imm(seg), AsmOperand::Sym(off_sym))
+                    | (AsmOperand::Imm(seg), AsmOperand::SymDisp(off_sym, _)) => {
+                        self.emit(&[0xEA]);
+                        self.emit(&[0x00, 0x00]);
+                        self.emit(&(*seg as i16).to_le_bytes());
+                        let pos = self.pos() - 4;
+                        self.pending_data_rels.push((pos, off_sym.clone()));
+                    }
+                    _ => {
+                        self.asm_warn("ljmpw needs $seg, $off, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
                 }
             }
             "ljmpl" if ops.len() == 2 => {
-                if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
-                    self.emit(&[0xEA]);
-                    self.emit(&(*off as i32).to_le_bytes());
-                    self.emit(&(*seg as i16).to_le_bytes());
-                } else {
-                    self.asm_warn("ljmpl needs $seg, $off, emitted as nop");
-                    self.emit(&[0x90]);
+                match (&ops[0], &ops[1]) {
+                    (AsmOperand::Imm(seg), AsmOperand::Imm(off)) => {
+                        self.emit(&[0xEA]);
+                        self.emit(&(*off as i32).to_le_bytes());
+                        self.emit(&(*seg as i16).to_le_bytes());
+                    }
+                    (AsmOperand::Imm(seg), AsmOperand::Sym(off_sym))
+                    | (AsmOperand::Imm(seg), AsmOperand::SymDisp(off_sym, _)) => {
+                        self.emit(&[0xEA]);
+                        self.emit(&[0x00, 0x00, 0x00, 0x00]);
+                        self.emit(&(*seg as i16).to_le_bytes());
+                        let pos = self.pos() - 6;
+                        self.pending_data_rels.push((pos, off_sym.clone()));
+                    }
+                    _ => {
+                        self.asm_warn("ljmpl needs $seg, $off, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
                 }
             }
             // ljmpw/ljmpl 间接形式: FF /5 (mem)
@@ -18300,23 +18352,45 @@ impl Codegen {
                 self.emit_asm_far_indirect(&ops[0], false, 32);
             }
             "lcallw" if ops.len() == 2 => {
-                if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
-                    self.emit(&[0x9A]);
-                    self.emit(&(*off as i16).to_le_bytes());
-                    self.emit(&(*seg as i16).to_le_bytes());
-                } else {
-                    self.asm_warn("lcallw needs $seg, $off, emitted as nop");
-                    self.emit(&[0x90]);
+                match (&ops[0], &ops[1]) {
+                    (AsmOperand::Imm(seg), AsmOperand::Imm(off)) => {
+                        self.emit(&[0x9A]);
+                        self.emit(&(*off as i16).to_le_bytes());
+                        self.emit(&(*seg as i16).to_le_bytes());
+                    }
+                    (AsmOperand::Imm(seg), AsmOperand::Sym(off_sym))
+                    | (AsmOperand::Imm(seg), AsmOperand::SymDisp(off_sym, _)) => {
+                        self.emit(&[0x9A]);
+                        self.emit(&[0x00, 0x00]);
+                        self.emit(&(*seg as i16).to_le_bytes());
+                        let pos = self.pos() - 4;
+                        self.pending_data_rels.push((pos, off_sym.clone()));
+                    }
+                    _ => {
+                        self.asm_warn("lcallw needs $seg, $off, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
                 }
             }
             "lcalll" if ops.len() == 2 => {
-                if let (AsmOperand::Imm(seg), AsmOperand::Imm(off)) = (&ops[0], &ops[1]) {
-                    self.emit(&[0x9A]);
-                    self.emit(&(*off as i32).to_le_bytes());
-                    self.emit(&(*seg as i16).to_le_bytes());
-                } else {
-                    self.asm_warn("lcalll needs $seg, $off, emitted as nop");
-                    self.emit(&[0x90]);
+                match (&ops[0], &ops[1]) {
+                    (AsmOperand::Imm(seg), AsmOperand::Imm(off)) => {
+                        self.emit(&[0x9A]);
+                        self.emit(&(*off as i32).to_le_bytes());
+                        self.emit(&(*seg as i16).to_le_bytes());
+                    }
+                    (AsmOperand::Imm(seg), AsmOperand::Sym(off_sym))
+                    | (AsmOperand::Imm(seg), AsmOperand::SymDisp(off_sym, _)) => {
+                        self.emit(&[0x9A]);
+                        self.emit(&[0x00, 0x00, 0x00, 0x00]);
+                        self.emit(&(*seg as i16).to_le_bytes());
+                        let pos = self.pos() - 6;
+                        self.pending_data_rels.push((pos, off_sym.clone()));
+                    }
+                    _ => {
+                        self.asm_warn("lcalll needs $seg, $off, emitted as nop");
+                        self.emit(&[0x90]);
+                    }
                 }
             }
             // lcallw/lcalll 间接形式: FF /3 (mem)
@@ -18702,6 +18776,24 @@ impl Codegen {
                         self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
                         self.emit(&[*imm as u8]);
                     }
+                } else if let (
+                    AsmOperand::Imm(imm),
+                    AsmOperand::Reg(s, ss),
+                    AsmOperand::SymDisp(sym, _),
+                )
+                | (
+                    AsmOperand::Imm(imm),
+                    AsmOperand::Reg(s, ss),
+                    AsmOperand::Sym(sym),
+                ) = (&ops[0], &ops[1], &ops[2])
+                {
+                    if *ss == 128 {
+                        // RIP-relative dest: mod=00 r/m=101
+                        self.emit_vex4_prefix(*s, 0, 3, 0, 0, 0, 1);
+                        self.emit(&[0x1D, 0x05 | ((s & 7) << 3), 0, 0, 0, 0, *imm as u8]);
+                        let pos = self.pos() - 5;
+                        self.pending_data_rels.push((pos, sym.clone()));
+                    }
                 } else {
                     self.asm_warn("vcvtps2ph needs imm, reg, reg/mem, emitted as nop");
                     self.emit(&[0x90]);
@@ -18734,6 +18826,12 @@ impl Codegen {
                                 self.emit(&[0x70]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                                 self.emit(&[*imm as u8]);
+                            }
+                            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                                self.emit_vex3_prefix(*d, 0, 0, 1);
+                                self.emit(&[0x70, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]);
+                                let pos = self.pos() - 5;
+                                self.pending_data_rels.push((pos, sym.clone()));
                             }
                             _ => {
                                 self.asm_warn("pshufd src must be xmm or mem, emitted as nop");
@@ -18770,6 +18868,12 @@ impl Codegen {
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                                 self.emit(&[*imm as u8]);
                             }
+                            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                                self.emit_vex3_prefix(*d, 0, 0, 3);
+                                self.emit(&[0x70, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]);
+                                let pos = self.pos() - 5;
+                                self.pending_data_rels.push((pos, sym.clone()));
+                            }
                             _ => {
                                 self.asm_warn("pshufhw src must be xmm or mem, emitted as nop");
                                 self.emit(&[0x90]);
@@ -18804,6 +18908,12 @@ impl Codegen {
                                 self.emit(&[0x70]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                                 self.emit(&[*imm as u8]);
+                            }
+                            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                                self.emit_vex3_prefix(*d, 0, 0, 2);
+                                self.emit(&[0x70, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]);
+                                let pos = self.pos() - 5;
+                                self.pending_data_rels.push((pos, sym.clone()));
                             }
                             _ => {
                                 self.asm_warn("pshuflw src must be xmm or mem, emitted as nop");
@@ -19053,6 +19163,12 @@ impl Codegen {
                                 self.emit(&[0x21]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                                 self.emit(&[*imm as u8]);
+                            }
+                            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                                self.emit_vex4_prefix(*d, 0, 3, 0, 0, 0, 1);
+                                self.emit(&[0x21, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]);
+                                let pos = self.pos() - 5;
+                                self.pending_data_rels.push((pos, sym.clone()));
                             }
                             _ => {
                                 self.asm_warn("insertps src must be xmm or mem, emitted as nop");
@@ -20091,6 +20207,12 @@ impl Codegen {
                                 ]);
                                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                                 self.emit(&[*imm as u8]);
+                            }
+                            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                                // RIP-relative source: mod=00 r/m=101
+                                self.emit(&[0x0F, 0x70, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]);
+                                let pos = self.pos() - 5;
+                                self.pending_data_rels.push((pos, sym.clone()));
                             }
                             _ => {
                                 self.asm_warn("pshufw src must be mmx or mem, emitted as nop");
@@ -24527,6 +24649,13 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(dst_xmm, *disp, *base, *index, *scale);
                 self.emit(&[imm as u8]);
             }
+            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                // RIP-relative source: mod=00 r/m=101
+                self.emit_vex4_prefix(dst_xmm, 0, 3, w, 0, 0, 1);
+                self.emit(&[opcode, 0x05 | ((dst_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]);
+                let pos = self.pos() - 5;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
             _ => {
                 self.asm_warn("pinsr src must be gpr or mem, emitted as nop");
                 self.emit(&[0x90]);
@@ -24551,6 +24680,13 @@ impl Codegen {
                 self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(src_xmm, *disp, *base, *index, *scale);
                 self.emit(&[imm as u8]);
+            }
+            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                // RIP-relative dest: mod=00 r/m=101
+                self.emit_vex4_prefix(src_xmm, 0, 3, w, 0, 0, 1);
+                self.emit(&[opcode, 0x05 | ((src_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]);
+                let pos = self.pos() - 5;
+                self.pending_data_rels.push((pos, sym.clone()));
             }
             _ => {
                 self.asm_warn("pextr dst must be gpr or mem, emitted as nop");
@@ -24589,6 +24725,17 @@ impl Codegen {
                 self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(dst, *disp, *base, *index, *scale);
                 self.emit(&[imm as u8]);
+            }
+            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                // RIP-relative source: mod=00 r/m=101
+                if map == 1 {
+                    self.emit_vex3_prefix(dst, 0, l, pp);
+                } else {
+                    self.emit_vex4_prefix(dst, 0, map, w, vvvv, l, pp);
+                }
+                self.emit(&[opcode, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0, imm as u8]);
+                let pos = self.pos() - 5;
+                self.pending_data_rels.push((pos, sym.clone()));
             }
             _ => {
                 self.asm_warn("src must be xmm or mem, emitted as nop");
@@ -24648,6 +24795,13 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(dst, *disp, *base, *index, *scale);
                 self.emit(&[imm as u8]);
             }
+            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                // RIP-relative source: mod=00 r/m=101
+                self.emit_vex4_prefix(dst, 0, 3, w, vvvv, 0, 1);
+                self.emit(&[opcode, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0, imm as u8]);
+                let pos = self.pos() - 5;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
             _ => {
                 self.asm_warn("vpinsr src must be gpr or mem, emitted as nop");
                 self.emit(&[0x90]);
@@ -24672,6 +24826,13 @@ impl Codegen {
                 self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(src_xmm, *disp, *base, *index, *scale);
                 self.emit(&[imm as u8]);
+            }
+            AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
+                // RIP-relative dest: mod=00 r/m=101
+                self.emit_vex4_prefix(src_xmm, 0, 3, w, 0, 0, 1);
+                self.emit(&[opcode, 0x05 | ((src_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]);
+                let pos = self.pos() - 5;
+                self.pending_data_rels.push((pos, sym.clone()));
             }
             _ => {
                 self.asm_warn("vpextr dst must be gpr or mem, emitted as nop");
