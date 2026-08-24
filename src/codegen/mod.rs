@@ -4,6 +4,7 @@
 pub mod aarch64;
 pub mod arm;
 pub mod asm_constraints;
+pub mod coff;
 pub mod disasm;
 pub mod elf;
 pub mod mini_asm;
@@ -845,24 +846,45 @@ pub fn emit(
                 });
             }
             if relocatable {
-                elf::build_elf_rel_x86_64(
-                    &cg.code,
-                    &cg.rodata,
-                    &cg.data_section,
-                    cg.bss_size,
-                    &cg.tdata_section,
-                    cg.tbss_size,
-                    cg.text_align,
-                    cg.data_align,
-                    cg.bss_align,
-                    cg.tdata_align,
-                    cg.tbss_align,
-                    &cg.symbols,
-                    &cg.relocations,
-                    &cg.extra_sections,
-                    &cg.data_relocations,
-                    &cg.extra_rela_sections,
-                )
+                if target.triple.os == crate::cli::Os::Windows {
+                    coff::build_coff_rel_x86_64(
+                        &cg.code,
+                        &cg.rodata,
+                        &cg.data_section,
+                        cg.bss_size,
+                        &cg.tdata_section,
+                        cg.tbss_size,
+                        cg.text_align,
+                        cg.data_align,
+                        cg.bss_align,
+                        cg.tdata_align,
+                        cg.tbss_align,
+                        &cg.symbols,
+                        &cg.relocations,
+                        &cg.extra_sections,
+                        &cg.data_relocations,
+                        &cg.extra_rela_sections,
+                    )
+                } else {
+                    elf::build_elf_rel_x86_64(
+                        &cg.code,
+                        &cg.rodata,
+                        &cg.data_section,
+                        cg.bss_size,
+                        &cg.tdata_section,
+                        cg.tbss_size,
+                        cg.text_align,
+                        cg.data_align,
+                        cg.bss_align,
+                        cg.tdata_align,
+                        cg.tbss_align,
+                        &cg.symbols,
+                        &cg.relocations,
+                        &cg.extra_sections,
+                        &cg.data_relocations,
+                        &cg.extra_rela_sections,
+                    )
+                }
             } else {
                 elf::build_elf_exec_x86_64(
                     &cg.code,
