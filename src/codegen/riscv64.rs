@@ -72,6 +72,8 @@ pub struct Riscv64Codegen {
     raw_global_asm_lines: Vec<String>,
     /// 函数级内联 asm 原始文本行: (函数名, 行列表)
     raw_func_asm_lines: Vec<(String, Vec<String>)>,
+    /// -S 模式标志: true 时保留 asm 文本输出, false 时编码机器码
+    asm_text_mode: bool,
     _target: Target,
 }
 
@@ -107,12 +109,32 @@ impl Riscv64Codegen {
             va_flt_offs: 0,
             raw_global_asm_lines: Vec::new(),
             raw_func_asm_lines: Vec::new(),
+            asm_text_mode: false,
             _target: target,
         }
     }
 
     pub fn set_source_name(&mut self, name: impl Into<String>) {
         self.source_name = name.into();
+    }
+
+    pub fn set_asm_text_mode(&mut self, v: bool) {
+        self.asm_text_mode = v;
+    }
+
+    /// Encode resolved asm text into machine code and emit to code buffer.
+    fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
+        let lines = crate::codegen::mini_asm::parse_asm_lines(resolved);
+        let (bytes, had_unrecognized) =
+            crate::codegen::mini_asm::encode_asm_lines_for_arch(&lines, "riscv64", true);
+        if had_unrecognized {
+            eprintln!(
+                "{}:{}: warning: unrecognized inline asm instruction on riscv64 target, \
+                 encoded nop placeholder",
+                span_file, span_line
+            );
+        }
+        self.code.extend_from_slice(&bytes);
     }
 
     pub fn push_extra_section(&mut self, sec: ElfSection) {
@@ -627,7 +649,6 @@ impl Riscv64Codegen {
                 span,
                 ..
             } => {
-                eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
                 let label_pairs: Vec<(String, String)> = goto_labels
                     .iter()
                     .map(|l| (l.name.clone(), l.name.clone()))
@@ -640,13 +661,18 @@ impl Riscv64Codegen {
                     input_names,
                     &label_pairs,
                 );
-                let lines: Vec<String> = resolved
-                    .split('\n')
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect();
-                self.raw_func_asm_lines
-                    .push((self.source_name.clone(), lines));
+                if self.asm_text_mode {
+                    eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
+                    let lines: Vec<String> = resolved
+                        .split('\n')
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    self.raw_func_asm_lines
+                        .push((self.source_name.clone(), lines));
+                } else {
+                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
+                }
             }
             _ => {}
         }
@@ -957,10 +983,6 @@ impl Riscv64Codegen {
                 span,
                 ..
             } => {
-                eprintln!(
-                    "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
-                    span.file, span.line
-                );
                 let resolved = Self::resolve_asm_template_enhanced(
                     asm_str,
                     output_constraints,
@@ -969,14 +991,22 @@ impl Riscv64Codegen {
                     input_names,
                     &[],
                 );
-                let lines: Vec<String> = resolved
-                    .split('\n')
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect();
-                self.raw_func_asm_lines
-                    .push((format!("__inline_{}", self.label_serial), lines));
-                self.label_serial += 1;
+                if self.asm_text_mode {
+                    eprintln!(
+                        "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
+                        span.file, span.line
+                    );
+                    let lines: Vec<String> = resolved
+                        .split('\n')
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    self.raw_func_asm_lines
+                        .push((format!("__inline_{}", self.label_serial), lines));
+                    self.label_serial += 1;
+                } else {
+                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
+                }
                 // memory clobber: 发射 FENCE 编译器屏障
                 if clobbers.iter().any(|c| c == "memory") {
                     self.emit_fence();

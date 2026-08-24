@@ -75,6 +75,8 @@ pub struct Aarch64Codegen {
     raw_global_asm_lines: Vec<String>,
     /// 函数级内联 asm 原始文本行: (函数名, 行列表)
     raw_func_asm_lines: Vec<(String, Vec<String>)>,
+    /// -S 模式标志: true 时保留 asm 文本输出, false 时编码机器码
+    asm_text_mode: bool,
     _target: Target,
 }
 
@@ -133,12 +135,33 @@ impl Aarch64Codegen {
             tls_globals: HashMap::new(),
             raw_global_asm_lines: Vec::new(),
             raw_func_asm_lines: Vec::new(),
+            asm_text_mode: false,
             _target: target,
         }
     }
 
     pub fn set_source_name(&mut self, name: impl Into<String>) {
         self.source_name = name.into();
+    }
+
+    pub fn set_asm_text_mode(&mut self, v: bool) {
+        self.asm_text_mode = v;
+    }
+
+    /// Encode resolved asm text into machine code and emit to code buffer.
+    /// Used in -c mode to produce actual machine code for inline asm.
+    fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
+        let lines = crate::codegen::mini_asm::parse_asm_lines(resolved);
+        let (bytes, had_unrecognized) =
+            crate::codegen::mini_asm::encode_asm_lines_for_arch(&lines, "aarch64", false);
+        if had_unrecognized {
+            eprintln!(
+                "{}:{}: warning: unrecognized inline asm instruction on aarch64 target, \
+                 encoded nop placeholder",
+                span_file, span_line
+            );
+        }
+        self.code.extend_from_slice(&bytes);
     }
 
     /// 启用/禁用 AArch64 MTE 硬件 tag (HWASAN 栈帧 tag 模式)。
@@ -789,8 +812,6 @@ impl Aarch64Codegen {
                 span,
                 ..
             } => {
-                // 非 x86_64 后端: 收集原始 asm 文本用于 -S 输出, -c 模式发出警告
-                eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
                 // 构建 goto 标签映射 (用于增强版模板替换)
                 let label_pairs: Vec<(String, String)> = goto_labels
                     .iter()
@@ -804,25 +825,32 @@ impl Aarch64Codegen {
                     input_names,
                     &label_pairs,
                 );
-                let func_name = self.source_name.clone();
-                let entry = self
-                    .raw_func_asm_lines
-                    .last_mut()
-                    .filter(|(n, _)| n == &func_name);
-                if let Some((_, lines)) = entry {
-                    for line in resolved.split('\n') {
-                        let t = line.trim();
-                        if !t.is_empty() {
-                            lines.push(t.to_string());
+                if self.asm_text_mode {
+                    // -S 模式: 收集原始 asm 文本用于输出
+                    eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
+                    let func_name = self.source_name.clone();
+                    let entry = self
+                        .raw_func_asm_lines
+                        .last_mut()
+                        .filter(|(n, _)| n == &func_name);
+                    if let Some((_, lines)) = entry {
+                        for line in resolved.split('\n') {
+                            let t = line.trim();
+                            if !t.is_empty() {
+                                lines.push(t.to_string());
+                            }
                         }
+                    } else {
+                        let lines = resolved
+                            .split('\n')
+                            .map(|l| l.trim().to_string())
+                            .filter(|l| !l.is_empty())
+                            .collect();
+                        self.raw_func_asm_lines.push((func_name, lines));
                     }
                 } else {
-                    let lines = resolved
-                        .split('\n')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    self.raw_func_asm_lines.push((func_name, lines));
+                    // -c 模式: mini-assembler 编码机器码
+                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
                 }
             }
             _ => {}
@@ -1314,12 +1342,6 @@ impl Aarch64Codegen {
                 span,
                 ..
             } => {
-                // 非 x86_64 后端: 增强版约束解析 + 寄存器名替换
-                // -c 模式无 mini-assembler, asm 文本仅保留在 -S 输出
-                eprintln!(
-                    "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
-                    span.file, span.line
-                );
                 let resolved = Self::resolve_asm_template_enhanced(
                     asm_str,
                     output_constraints,
@@ -1328,15 +1350,24 @@ impl Aarch64Codegen {
                     input_names,
                     &[],
                 );
-                let lines: Vec<String> = resolved
-                    .split('\n')
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect();
-                // 关联到当前函数 (使用 source_name 作为临时 key, gen_function 会覆盖)
-                self.raw_func_asm_lines
-                    .push((format!("__inline_{}", self.label_serial), lines));
-                self.label_serial += 1;
+                if self.asm_text_mode {
+                    // -S 模式: 保留 asm 文本输出
+                    eprintln!(
+                        "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
+                        span.file, span.line
+                    );
+                    let lines: Vec<String> = resolved
+                        .split('\n')
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    self.raw_func_asm_lines
+                        .push((format!("__inline_{}", self.label_serial), lines));
+                    self.label_serial += 1;
+                } else {
+                    // -c 模式: mini-assembler 编码机器码
+                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
+                }
                 // memory clobber: 发射 DMB 编译器屏障
                 if clobbers.iter().any(|c| c == "memory") {
                     self.emit_dmb_ish();

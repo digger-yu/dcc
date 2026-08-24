@@ -21,6 +21,10 @@ impl Mips64Codegen {
         self.inner.set_source_name(name);
     }
 
+    pub fn set_asm_text_mode(&mut self, v: bool) {
+        self.inner.set_asm_text_mode(v);
+    }
+
     pub fn push_extra_section(&mut self, sec: crate::codegen::elf::ElfSection) {
         self.inner.push_extra_section(sec);
     }

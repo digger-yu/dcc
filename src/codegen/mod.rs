@@ -878,6 +878,7 @@ pub fn emit(
         crate::cli::Arch::AArch64 => {
             let mut cg = aarch64::Aarch64Codegen::new(target.clone(), relocatable || emit_asm);
             cg.set_source_name(source_name);
+            cg.set_asm_text_mode(emit_asm);
             // HWASAN (-fsanitize=hwaddress) 在 AArch64 上启用 MTE 硬件 tag:
             // prologue tag 栈帧 + 指针 tag 流程由后端直接发射 IRG/ADDG/STG。
             cg.set_mte_enabled(sanitizers.hwasan);
@@ -990,6 +991,7 @@ pub fn emit(
         crate::cli::Arch::RiscV64 => {
             let mut cg = riscv64::Riscv64Codegen::new(target.clone(), relocatable || emit_asm);
             cg.set_source_name(source_name);
+            cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
                 return Ok(cg.build_asm_output(module).into_bytes());
@@ -1099,6 +1101,7 @@ pub fn emit(
         crate::cli::Arch::Mips => {
             let mut cg = mips::MipsCodegen::new(target.clone(), relocatable || emit_asm);
             cg.set_source_name(source_name);
+            cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
                 return Ok(cg.build_asm_output(module).into_bytes());
@@ -1201,6 +1204,7 @@ pub fn emit(
         crate::cli::Arch::Mips64 => {
             let mut cg = mips64::Mips64Codegen::new(target.clone(), relocatable || emit_asm);
             cg.set_source_name(source_name);
+            cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
                 return Ok(cg.build_asm_output(module).into_bytes());
@@ -1303,6 +1307,7 @@ pub fn emit(
         crate::cli::Arch::Arm => {
             let mut cg = arm::ArmCodegen::new(target.clone(), relocatable || emit_asm);
             cg.set_source_name(source_name);
+            cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
                 return Ok(cg.build_asm_output(module).into_bytes());
