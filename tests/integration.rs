@@ -13568,39 +13568,53 @@ fn unsupported_target_arch_rejected() {
     let _ = fs::remove_file(&src);
 }
 
-/// Windows MSVC / Darwin triples are parsed (x86_64 backend) but output ELF
+/// Windows MSVC outputs COFF; Darwin triple still outputs ELF
 #[test]
-fn windows_darwin_triple_accepted_but_outputs_elf() {
+fn windows_darwin_triple_object_format() {
     let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-unsup-os-{}.c", std::process::id()));
+    let src = dir.join(format!("dcc-objfmt-{}.c", std::process::id()));
     fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
-    let cases = [
-        ("x86_64-pc-windows-msvc", "MSVC"),
-        ("x86_64-apple-darwin", "Darwin"),
-    ];
-    for (triple, label) in cases {
-        let obj = dir.join(format!(
-            "dcc-unsup-os-{}-{}.o",
-            label.to_lowercase(),
-            std::process::id()
-        ));
+    // Windows MSVC -> COFF
+    {
+        let obj = dir.join(format!("dcc-objfmt-msvc-{}.o", std::process::id()));
         let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-            .args(["--target", triple, "-c", "-o"])
+            .args(["--target", "x86_64-pc-windows-msvc", "-c", "-o"])
             .arg(&obj)
             .arg(&src)
             .output()
             .expect("run dcc");
         assert!(
             output.status.success(),
-            "{label} triple should parse (x86_64 backend); stderr={}",
+            "MSVC triple should compile; stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
-        // Output is ELF, not COFF/Mach-O
         let bytes = fs::read(&obj).expect("read obj");
         let _ = fs::remove_file(&obj);
+        // COFF AMD64: machine = 0x8664
+        assert!(bytes.len() >= 20, "COFF header >= 20 bytes");
+        let machine = u16::from_le_bytes([bytes[0], bytes[1]]);
+        assert_eq!(machine, 0x8664, "MSVC: COFF AMD64 machine");
+    }
+    // Darwin -> ELF (Mach-O not yet implemented)
+    {
+        let obj = dir.join(format!("dcc-objfmt-darwin-{}.o", std::process::id()));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", "x86_64-apple-darwin", "-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(
+            output.status.success(),
+            "Darwin triple should compile; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read obj");
+        let _ = fs::remove_file(&obj);
+        // Output is ELF (Mach-O not implemented)
         assert!(
             bytes.len() >= 4 && &bytes[0..4] == b"\x7fELF",
-            "{label}: output should be ELF format"
+            "Darwin: output should be ELF (Mach-O not yet supported)"
         );
     }
     let _ = fs::remove_file(&src);
@@ -14500,12 +14514,12 @@ fn xfail_vector_scalar_size_mismatch_rejected() {
     );
 }
 
-/// xfail: Windows MSVC COFF 输出应为 ELF (已知限制)
+/// Windows MSVC target outputs COFF format (not ELF)
 #[test]
-fn xfail_msvc_output_is_elf_not_coff() {
+fn windows_msvc_output_is_coff() {
     let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-xfail-msvc-{}.c", std::process::id()));
-    let obj = dir.join(format!("dcc-xfail-msvc-{}.o", std::process::id()));
+    let src = dir.join(format!("dcc-msvc-coff-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-msvc-coff-{}.o", std::process::id()));
     fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["--target", "x86_64-pc-windows-msvc", "-c", "-o"])
@@ -14521,10 +14535,20 @@ fn xfail_msvc_output_is_elf_not_coff() {
     let bytes = fs::read(&obj).unwrap_or_default();
     let _ = fs::remove_file(&obj);
     let _ = fs::remove_file(&src);
-    // 已知限制: 输出 ELF 而非 COFF
+    // COFF AMD64: first 2 bytes = 0x8664 (IMAGE_FILE_MACHINE_AMD64)
     assert!(
-        bytes.len() >= 4 && &bytes[0..4] == b"\x7fELF",
-        "known limitation: MSVC target outputs ELF, not COFF"
+        bytes.len() >= 20,
+        "COFF object should have at least 20-byte header"
+    );
+    let machine = u16::from_le_bytes([bytes[0], bytes[1]]);
+    assert_eq!(
+        machine, 0x8664,
+        "MSVC target should output COFF AMD64 format"
+    );
+    // Verify it's NOT ELF
+    assert!(
+        bytes.len() < 4 || &bytes[0..4] != b"\x7fELF",
+        "MSVC target should output COFF, not ELF"
     );
 }
 
@@ -14569,12 +14593,12 @@ fn mips_arm_elf32_object_reader_accepts() {
     }
 }
 
-/// Windows MSVC triple outputs ELF (not COFF) and object reader accepts it
+/// Windows MSVC triple outputs COFF and object reader accepts it
 #[test]
-fn windows_msvc_elf_object_reader_accepts() {
+fn windows_msvc_coff_object_reader_accepts() {
     let dir = std::env::temp_dir();
-    let src = dir.join(format!("dcc-win-objreader-{}.c", std::process::id()));
-    let obj = dir.join(format!("dcc-win-objreader-{}.o", std::process::id()));
+    let src = dir.join(format!("dcc-win-coff-objreader-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-win-coff-objreader-{}.o", std::process::id()));
     fs::write(&src, "int bar(void) { return 3; }\n").expect("write");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["--target", "x86_64-pc-windows-msvc", "-c", "-o"])
@@ -14590,9 +14614,19 @@ fn windows_msvc_elf_object_reader_accepts() {
     let bytes = fs::read(&obj).expect("read object");
     let _ = fs::remove_file(&obj);
     let _ = fs::remove_file(&src);
-    // Verify ELF magic (known limitation: outputs ELF, not COFF)
-    assert_eq!(&bytes[0..4], b"\x7fELF", "Windows: ELF magic");
-    // Verify e_machine = EM_X86_64
-    let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
-    assert_eq!(machine, 62, "Windows: e_machine should be x86_64");
+    // Verify COFF AMD64 magic
+    assert!(bytes.len() >= 20, "COFF header should be >= 20 bytes");
+    let machine = u16::from_le_bytes([bytes[0], bytes[1]]);
+    assert_eq!(machine, 0x8664, "Windows: COFF machine should be AMD64");
+    // Verify number of sections > 0
+    let num_secs = u16::from_le_bytes([bytes[2], bytes[3]]);
+    assert!(num_secs >= 1, "Windows: should have at least .text section");
+    // Verify symbol table pointer is valid
+    let symtab_ptr = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let num_syms = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+    assert!(num_syms >= 1, "Windows: should have at least 1 symbol");
+    assert!(
+        symtab_ptr as usize + num_syms as usize * 18 <= bytes.len(),
+        "Windows: symbol table should be within file bounds"
+    );
 }
