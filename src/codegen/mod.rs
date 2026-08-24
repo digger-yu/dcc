@@ -6,6 +6,7 @@ pub mod arm;
 pub mod asm_constraints;
 pub mod disasm;
 pub mod elf;
+pub mod mini_asm;
 pub mod mips;
 pub mod mips64;
 pub mod riscv64;

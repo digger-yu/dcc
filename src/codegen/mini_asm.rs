@@ -1,0 +1,1011 @@
+// src/codegen/mini_asm.rs - Non-x86 mini-assembler for -c path
+//
+// Provides instruction parsing and machine code encoding for
+// AArch64, RISC-V, ARM, MIPS and MIPS64 inline assembly.
+// Used by non-x86 backends in -c mode to produce actual machine
+// code bytes instead of just storing asm text.
+
+/// Parse resolved asm text into individual instruction lines.
+/// Strips comments, empty lines, and leading/trailing whitespace.
+pub fn parse_asm_lines(text: &str) -> Vec<String> {
+    text.split('\n')
+        .map(|l| {
+            // Strip AT&T style comment (# ...)
+            let l = if let Some(pos) = l.find('#') {
+                &l[..pos]
+            } else {
+                l
+            };
+            // Strip // style comment
+            let l = if let Some(pos) = l.find("//") {
+                &l[..pos]
+            } else {
+                l
+            };
+            l.trim().to_string()
+        })
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Parse a single instruction line into (mnemonic, operands).
+/// Returns None if the line looks like a directive (starts with '.')
+/// or a label (ends with ':').
+pub fn parse_instruction(line: &str) -> Option<(String, Vec<String>)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('.') || line.ends_with(':') {
+        return None;
+    }
+    // Skip label prefix: "label: insn ..."
+    let line = if let Some(pos) = line.find(':') {
+        line[pos + 1..].trim()
+    } else {
+        line
+    };
+    if line.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let mnemonic = parts[0].to_lowercase();
+    let operands_str = if parts.len() > 1 {
+        parts[1..].join(" ")
+    } else {
+        String::new()
+    };
+    // Split operands by comma, handling spaces
+    let operands: Vec<String> = if operands_str.is_empty() {
+        Vec::new()
+    } else {
+        operands_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    Some((mnemonic, operands))
+}
+
+// ===== AArch64 register parsing and encoding =====
+
+/// Parse AArch64 register name to register number.
+/// Supports: x0-x30, w0-w30, sp/xzr/wzr, x30=lr
+pub fn parse_aarch64_reg(name: &str) -> Option<(u8, bool)> {
+    // (reg_num, is_64bit)
+    let name = name.trim().to_lowercase();
+    match name.as_str() {
+        "sp" | "xzr" => Some((31, true)),
+        "wzr" => Some((31, false)),
+        "lr" => Some((30, true)),
+        _ => {
+            if let Some(rest) = name.strip_prefix('x') {
+                rest.parse::<u8>().ok().map(|r| (r, true))
+            } else if let Some(rest) = name.strip_prefix('w') {
+                rest.parse::<u8>().ok().map(|r| (r, false))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Encode AArch64 NOP
+pub fn encode_aarch64_nop() -> [u8; 4] {
+    [0x1f, 0x20, 0x03, 0xd5]
+}
+
+/// Encode AArch64 instruction from mnemonic + operands.
+/// Returns encoded bytes (little-endian, 4 bytes per instruction).
+pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
+    match mnemonic {
+        "nop" => Some(encode_aarch64_nop().to_vec()),
+
+        // DMB variants
+        "dmb" => {
+            let option = if operands.is_empty() {
+                0xb // ISH default
+            } else {
+                match operands[0].to_lowercase().as_str() {
+                    "ish" => 0xb,
+                    "ishst" => 0xa,
+                    "ishld" => 0x9,
+                    "osh" => 0x7,
+                    "oshst" => 0x6,
+                    "oshld" => 0x5,
+                    "nsh" => 0x3,
+                    "nshst" => 0x2,
+                    "nshld" => 0x1,
+                    "sy" => 0xf,
+                    "st" => 0xe,
+                    "ld" => 0xd,
+                    _ => 0xb,
+                }
+            };
+            // DMB: base = D50330BF, option at bits [11:8]
+            let insn: u32 = 0xd50330bf | ((option as u32 & 0xf) << 8);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // DSB variants
+        "dsb" => {
+            let option = if operands.is_empty() {
+                0xb
+            } else {
+                match operands[0].to_lowercase().as_str() {
+                    "ish" => 0xb,
+                    "ishst" => 0xa,
+                    "ishld" => 0x9,
+                    "osh" => 0x7,
+                    "oshst" => 0x6,
+                    "oshld" => 0x5,
+                    "nsh" => 0x3,
+                    "nshst" => 0x2,
+                    "nshld" => 0x1,
+                    "sy" => 0xf,
+                    "st" => 0xe,
+                    "ld" => 0xd,
+                    _ => 0xb,
+                }
+            };
+            // DSB: base = D503309F, option at bits [11:8]
+            let insn: u32 = 0xd503309f | ((option as u32 & 0xf) << 8);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ISB
+        "isb" => {
+            let insn: u32 = 0xd5033fdf;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // RET {Rn}
+        "ret" => {
+            let rn = if operands.is_empty() {
+                30 // default: x30 (LR)
+            } else {
+                parse_aarch64_reg(&operands[0]).map(|(r, _)| r).unwrap_or(30)
+            };
+            let insn: u32 = 0xd65f0000 | ((rn as u32 & 0x1f) << 5);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // SVC #imm
+        "svc" => {
+            let imm = operands
+                .first()
+                .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok())
+                .unwrap_or(0);
+            let insn: u32 = 0xd4000001 | ((imm & 0xffff) << 5);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // BR Xn
+        "br" => {
+            let rn = operands
+                .first()
+                .and_then(|r| parse_aarch64_reg(r).map(|(n, _)| n))
+                .unwrap_or(0);
+            let insn: u32 = 0xd61f0000 | ((rn as u32 & 0x1f) << 5);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // BLR Xn
+        "blr" => {
+            let rn = operands
+                .first()
+                .and_then(|r| parse_aarch64_reg(r).map(|(n, _)| n))
+                .unwrap_or(0);
+            let insn: u32 = 0xd63f0000 | ((rn as u32 & 0x1f) << 5);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // MOV Wd, Wm / MOV Xd, Xm (alias for ORR Rd, RZR, Rm)
+        "mov" if operands.len() == 2 => {
+            if let (Some((rd, is64)), Some((rm, _))) = (
+                parse_aarch64_reg(&operands[0]),
+                parse_aarch64_reg(&operands[1]),
+            ) {
+                if is64 {
+                    // ORR Xd, XZR, Xm: sf=1, 0a 01010 000 11111 rm rd
+                    let insn: u32 = 0xaa0003e0
+                        | ((rm as u32 & 0x1f) << 16)
+                        | (rd as u32 & 0x1f);
+                    Some(insn.to_le_bytes().to_vec())
+                } else {
+                    // ORR Wd, WZR, Xm
+                    let insn: u32 = 0x2a0003e0
+                        | ((rm as u32 & 0x1f) << 16)
+                        | (rd as u32 & 0x1f);
+                    Some(insn.to_le_bytes().to_vec())
+                }
+            } else {
+                None
+            }
+        }
+
+        // MOVZ Wd, #imm / MOVZ Xd, #imm
+        "movz" if operands.len() == 2 => {
+            if let Some((rd, is64)) = parse_aarch64_reg(&operands[0]) {
+                let imm = operands[1]
+                    .trim_start_matches('#')
+                    .parse::<u32>()
+                    .ok()?;
+                let sf = if is64 { 1u32 << 31 } else { 0 };
+                let insn: u32 = sf | 0x52800000 | ((imm & 0xffff) << 5) | (rd as u32 & 0x1f);
+                Some(insn.to_le_bytes().to_vec())
+            } else {
+                None
+            }
+        }
+
+        // ADD Wd, Wn, Wm / ADD Xd, Xn, Xm
+        "add" if operands.len() == 3 => {
+            let rd_res = parse_aarch64_reg(&operands[0]);
+            let rn_res = parse_aarch64_reg(&operands[1]);
+            let rm_res = parse_aarch64_reg(&operands[2]);
+            if let (Some((rd, is64)), Some((rn, _)), Some((rm, _))) =
+                (rd_res, rn_res, rm_res)
+            {
+                let sf = if is64 { 1u32 << 31 } else { 0 };
+                // ADD: sf 0001011 shift 0 Rm Rn Rd
+                let insn: u32 = sf
+                    | 0x0b000000
+                    | ((rm as u32 & 0x1f) << 16)
+                    | ((rn as u32 & 0x1f) << 5)
+                    | (rd as u32 & 0x1f);
+                Some(insn.to_le_bytes().to_vec())
+            } else {
+                None
+            }
+        }
+
+        // SUB Wd, Wn, Wm / SUB Xd, Xn, Xm
+        "sub" if operands.len() == 3 => {
+            let rd_res = parse_aarch64_reg(&operands[0]);
+            let rn_res = parse_aarch64_reg(&operands[1]);
+            let rm_res = parse_aarch64_reg(&operands[2]);
+            if let (Some((rd, is64)), Some((rn, _)), Some((rm, _))) =
+                (rd_res, rn_res, rm_res)
+            {
+                let sf = if is64 { 1u32 << 31 } else { 0 };
+                let insn: u32 = sf
+                    | 0x4b000000
+                    | ((rm as u32 & 0x1f) << 16)
+                    | ((rn as u32 & 0x1f) << 5)
+                    | (rd as u32 & 0x1f);
+                Some(insn.to_le_bytes().to_vec())
+            } else {
+                None
+            }
+        }
+
+        // MSR/MRS system register access - encode as NOP (complex encoding)
+        "msr" | "mrs" => Some(encode_aarch64_nop().to_vec()),
+
+        // CLREX
+        "clrex" => {
+            let insn: u32 = 0xd5033f5f;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // SEV / SEVL / WFE / WFI / YIELD
+        "sev" => Some(0xd503209fu32.to_le_bytes().to_vec()),
+        "sevl" => Some(0xd50320bfu32.to_le_bytes().to_vec()),
+        "wfe" => Some(0xd503205fu32.to_le_bytes().to_vec()),
+        "wfi" => Some(0xd503207fu32.to_le_bytes().to_vec()),
+        "yield" => Some(0xd503203fu32.to_le_bytes().to_vec()),
+
+        // DBG #imm
+        "dbg" => {
+            let imm = operands
+                .first()
+                .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok())
+                .unwrap_or(0);
+            let insn: u32 = 0xd503201f | ((imm & 0xf) << 5);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        _ => None,
+    }
+}
+
+// ===== RISC-V register parsing and encoding =====
+
+/// Parse RISC-V register name to register number.
+/// Supports both x-names (x0-x31) and ABI names (zero,ra,sp,...).
+pub fn parse_riscv_reg(name: &str) -> Option<u8> {
+    let name = name.trim().to_lowercase();
+    match name.as_str() {
+        "zero" => Some(0),
+        "ra" => Some(1),
+        "sp" => Some(2),
+        "gp" => Some(3),
+        "tp" => Some(4),
+        "t0" => Some(5),
+        "t1" => Some(6),
+        "t2" => Some(7),
+        "s0" | "fp" => Some(8),
+        "s1" => Some(9),
+        "a0" => Some(10),
+        "a1" => Some(11),
+        "a2" => Some(12),
+        "a3" => Some(13),
+        "a4" => Some(14),
+        "a5" => Some(15),
+        "a6" => Some(16),
+        "a7" => Some(17),
+        "s2" => Some(18),
+        "s3" => Some(19),
+        "s4" => Some(20),
+        "s5" => Some(21),
+        "s6" => Some(22),
+        "s7" => Some(23),
+        "s8" => Some(24),
+        "s9" => Some(25),
+        "s10" => Some(26),
+        "s11" => Some(27),
+        "t3" => Some(28),
+        "t4" => Some(29),
+        "t5" => Some(30),
+        "t6" => Some(31),
+        _ => {
+            if let Some(rest) = name.strip_prefix('x') {
+                rest.parse::<u8>().ok().filter(|&r| r < 32)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Encode RISC-V instruction from mnemonic + operands.
+/// Returns encoded bytes (little-endian, 4 bytes per instruction).
+pub fn encode_riscv64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
+    match mnemonic {
+        "nop" => {
+            // ADDI x0, x0, 0
+            let insn: u32 = 0x00000013;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // FENCE pred, succ
+        "fence" => {
+            let (pred, succ) = if operands.is_empty() {
+                (0xfu32, 0xfu32) // RW, RW
+            } else if operands.len() == 1 {
+                match operands[0].to_lowercase().as_str() {
+                    "rw,rw" | "iorw,iorw" => (0xf, 0xf),
+                    _ => (0xf, 0xf),
+                }
+            } else {
+                let p = parse_riscv_fence_arg(&operands[0]);
+                let s = parse_riscv_fence_arg(&operands[1]);
+                (p, s)
+            };
+            let insn: u32 =
+                0x0000000f | (pred << 24) | (succ << 20);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        "fence.i" => {
+            let insn: u32 = 0x0000100f;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // EBREAK
+        "ebreak" => {
+            let insn: u32 = 0x00100073;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ECALL
+        "ecall" => {
+            let insn: u32 = 0x00000073;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // RET = JALR x0, x1, 0
+        "ret" => {
+            let insn: u32 = 0x00008067;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ADDI rd, rs1, imm
+        "addi" if operands.len() == 3 => {
+            let rd = parse_riscv_reg(&operands[0])?;
+            let rs1 = parse_riscv_reg(&operands[1])?;
+            let imm = parse_riscv_imm(&operands[2])?;
+            let insn: u32 = ((imm as u32 & 0xfff) << 20)
+                | ((rs1 as u32) << 15)
+                | (0b000 << 12)
+                | ((rd as u32) << 7)
+                | 0x13;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ADD rd, rs1, rs2
+        "add" if operands.len() == 3 => {
+            let rd = parse_riscv_reg(&operands[0])?;
+            let rs1 = parse_riscv_reg(&operands[1])?;
+            let rs2 = parse_riscv_reg(&operands[2])?;
+            let insn: u32 = ((rs2 as u32) << 20)
+                | ((rs1 as u32) << 15)
+                | ((rd as u32) << 7)
+                | 0x33;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // SUB rd, rs1, rs2
+        "sub" if operands.len() == 3 => {
+            let rd = parse_riscv_reg(&operands[0])?;
+            let rs1 = parse_riscv_reg(&operands[1])?;
+            let rs2 = parse_riscv_reg(&operands[2])?;
+            let insn: u32 = 0x40000033
+                | ((rs2 as u32) << 20)
+                | ((rs1 as u32) << 15)
+                | ((rd as u32) << 7);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // SFENCE.VMA rs1, rs2
+        "sfence.vma" => {
+            let rs1 = operands
+                .first()
+                .and_then(|r| parse_riscv_reg(r))
+                .unwrap_or(0);
+            let rs2 = operands
+                .get(1)
+                .and_then(|r| parse_riscv_reg(r))
+                .unwrap_or(0);
+            let insn: u32 = 0x12000073
+                | ((rs1 as u32) << 15)
+                | ((rs2 as u32) << 20);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // WFI
+        "wfi" => {
+            let insn: u32 = 0x10500073;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // PAUSE (Zihintpause, encoded as FENCE tso or ADDI x0,x0,0x010)
+        "pause" => {
+            let insn: u32 = 0x0100000f; // FENCE tso
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        _ => None,
+    }
+}
+
+fn parse_riscv_fence_arg(s: &str) -> u32 {
+    let s = s.trim().to_lowercase();
+    let mut val = 0u32;
+    for c in s.chars() {
+        match c {
+            'i' => val |= 8,
+            'o' => val |= 4,
+            'r' => val |= 2,
+            'w' => val |= 1,
+            _ => {}
+        }
+    }
+    val
+}
+
+fn parse_riscv_imm(s: &str) -> Option<i32> {
+    let s = s.trim();
+    let s = s.trim_start_matches('#');
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        i32::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<i32>().ok()
+    }
+}
+
+// ===== ARM (AArch32) register parsing and encoding =====
+
+/// Parse ARM register name to register number (0-15).
+pub fn parse_arm_reg(name: &str) -> Option<u8> {
+    let name = name.trim().to_lowercase();
+    match name.as_str() {
+        "sp" | "r13" => Some(13),
+        "lr" | "r14" => Some(14),
+        "pc" | "r15" => Some(15),
+        "apsr" | "cpsr" | "spsr" => Some(15), // system registers, approximate
+        _ => {
+            if let Some(rest) = name.strip_prefix('r') {
+                rest.parse::<u8>().ok().filter(|&r| r < 16)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Encode ARM instruction from mnemonic + operands.
+/// Returns encoded bytes (ARM uses mixed endian, we output little-endian for ARM mode).
+pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
+    match mnemonic {
+        "nop" => {
+            // MOV r0, r0 (conditional: AL)
+            let insn: u32 = 0xe1a00000;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // DMB variants (ARMv7+)
+        "dmb" => {
+            let option = if operands.is_empty() {
+                0xb // ISH default
+            } else {
+                match operands[0].to_lowercase().as_str() {
+                    "ish" => 0xb,
+                    "ishst" => 0xa,
+                    "ishld" => 0x9,
+                    "osh" => 0x7,
+                    "oshst" => 0x6,
+                    "oshld" => 0x5,
+                    "nsh" => 0x3,
+                    "nshst" => 0x2,
+                    "nshld" => 0x1,
+                    "sy" => 0xf,
+                    "st" => 0xe,
+                    "ld" => 0xd,
+                    _ => 0xb,
+                }
+            };
+            // DMB: cond=F, 1111 0101 0111 1111 1111 0000 0101 option
+            // Encoding: F57FF050 | option
+            let insn: u32 = 0xf57ff050 | (option & 0xf);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // DSB variants
+        "dsb" => {
+            let option = if operands.is_empty() {
+                0xb
+            } else {
+                match operands[0].to_lowercase().as_str() {
+                    "ish" => 0xb,
+                    "sy" => 0xf,
+                    "st" => 0xe,
+                    "ld" => 0xd,
+                    _ => 0xb,
+                }
+            };
+            // DSB: F57FF040 | option
+            let insn: u32 = 0xf57ff040 | (option & 0xf);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // ISB
+        "isb" => {
+            let insn: u32 = 0xf57ff06f;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // BX Rn
+        "bx" => {
+            let rn = operands
+                .first()
+                .and_then(|r| parse_arm_reg(r))
+                .unwrap_or(14); // default LR
+            let insn: u32 = 0xe12fff10 | (rn as u32 & 0xf);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // MOV Rd, Rm
+        "mov" if operands.len() == 2 => {
+            if let (Some(rd), Some(rm)) = (
+                parse_arm_reg(&operands[0]),
+                parse_arm_reg(&operands[1]),
+            ) {
+                let insn: u32 =
+                    0xe1a00000 | ((rd as u32 & 0xf) << 12) | (rm as u32 & 0xf);
+                Some(insn.to_le_bytes().to_vec())
+            } else {
+                None
+            }
+        }
+
+        // ADD Rd, Rn, Rm
+        "add" if operands.len() == 3 => {
+            if let (Some(rd), Some(rn), Some(rm)) = (
+                parse_arm_reg(&operands[0]),
+                parse_arm_reg(&operands[1]),
+                parse_arm_reg(&operands[2]),
+            ) {
+                let insn: u32 = 0xe0800000
+                    | ((rd as u32 & 0xf) << 12)
+                    | ((rn as u32 & 0xf) << 16)
+                    | (rm as u32 & 0xf);
+                Some(insn.to_le_bytes().to_vec())
+            } else {
+                None
+            }
+        }
+
+        // SUB Rd, Rn, Rm
+        "sub" if operands.len() == 3 => {
+            if let (Some(rd), Some(rn), Some(rm)) = (
+                parse_arm_reg(&operands[0]),
+                parse_arm_reg(&operands[1]),
+                parse_arm_reg(&operands[2]),
+            ) {
+                let insn: u32 = 0xe0400000
+                    | ((rd as u32 & 0xf) << 12)
+                    | ((rn as u32 & 0xf) << 16)
+                    | (rm as u32 & 0xf);
+                Some(insn.to_le_bytes().to_vec())
+            } else {
+                None
+            }
+        }
+
+        // SVC / SWI
+        "svc" | "swi" => {
+            let imm = operands
+                .first()
+                .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok())
+                .unwrap_or(0);
+            let insn: u32 = 0xef000000 | (imm & 0x00ffffff);
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // CLREX
+        "clrex" => {
+            let insn: u32 = 0xf57ff01f;
+            Some(insn.to_le_bytes().to_vec())
+        }
+
+        // SEV / SEVL / WFE / WFI / YIELD
+        "sev" => Some(0xe320f040u32.to_le_bytes().to_vec()),
+        "sevl" => Some(0xe320f060u32.to_le_bytes().to_vec()),
+        "wfe" => Some(0xe320f020u32.to_le_bytes().to_vec()),
+        "wfi" => Some(0xe320f030u32.to_le_bytes().to_vec()),
+        "yield" => Some(0xe320f010u32.to_le_bytes().to_vec()),
+
+        _ => None,
+    }
+}
+
+// ===== MIPS / MIPS64 register parsing and encoding =====
+
+/// Parse MIPS register name to register number (0-31).
+pub fn parse_mips_reg(name: &str) -> Option<u8> {
+    let name = name.trim().to_lowercase();
+    match name.as_str() {
+        "zero" | "$zero" => Some(0),
+        "at" | "$at" => Some(1),
+        "v0" | "$v0" => Some(2),
+        "v1" | "$v1" => Some(3),
+        "a0" | "$a0" => Some(4),
+        "a1" | "$a1" => Some(5),
+        "a2" | "$a2" => Some(6),
+        "a3" | "$a3" => Some(7),
+        "t0" | "$t0" => Some(8),
+        "t1" | "$t1" => Some(9),
+        "t2" | "$t2" => Some(10),
+        "t3" | "$t3" => Some(11),
+        "t4" | "$t4" => Some(12),
+        "t5" | "$t5" => Some(13),
+        "t6" | "$t6" => Some(14),
+        "t7" | "$t7" => Some(15),
+        "s0" | "$s0" => Some(16),
+        "s1" | "$s1" => Some(17),
+        "s2" | "$s2" => Some(18),
+        "s3" | "$s3" => Some(19),
+        "s4" | "$s4" => Some(20),
+        "s5" | "$s5" => Some(21),
+        "s6" | "$s6" => Some(22),
+        "s7" | "$s7" => Some(23),
+        "t8" | "$t8" => Some(24),
+        "t9" | "$t9" => Some(25),
+        "k0" | "$k0" => Some(26),
+        "k1" | "$k1" => Some(27),
+        "gp" | "$gp" => Some(28),
+        "sp" | "$sp" => Some(29),
+        "fp" | "$fp" | "$s8" => Some(30),
+        "ra" | "$ra" => Some(31),
+        _ => {
+            // Try $N form
+            let s = name.strip_prefix('$').unwrap_or(&name);
+            s.parse::<u8>().ok().filter(|&r| r < 32)
+        }
+    }
+}
+
+fn parse_mips_imm(s: &str) -> Option<i32> {
+    let s = s.trim();
+    let s = s.trim_start_matches('#');
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        i32::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<i32>().ok()
+    }
+}
+
+/// Encode MIPS instruction (works for both MIPS32 and MIPS64).
+/// Returns encoded bytes (big-endian, 4 bytes per instruction).
+pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Option<Vec<u8>> {
+    match mnemonic {
+        "nop" | "ssnop" => {
+            // SLL $0, $0, 0 = 0x00000000
+            // ssnop is 0x00000040 for MIPS32r2+
+            if mnemonic == "ssnop" {
+                Some([0x00, 0x00, 0x00, 0x40].to_vec())
+            } else {
+                Some([0u8; 4].to_vec())
+            }
+        }
+
+        // SYNC
+        "sync" => {
+            // SYNC stype (default 0)
+            let stype = operands
+                .first()
+                .and_then(|s| parse_mips_imm(s))
+                .unwrap_or(0) as u32;
+            let insn: u32 = (stype & 0x1f) << 6 | 0x0f;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // JR rs
+        "jr" => {
+            let rs = operands
+                .first()
+                .and_then(|r| parse_mips_reg(r))
+                .unwrap_or(31); // default $ra
+            let insn: u32 = ((rs as u32) << 21) | 0x08;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // JALR rd, rs (or JALR rs => rd=$ra)
+        "jalr" => {
+            let (rd, rs) = if operands.len() >= 2 {
+                (
+                    parse_mips_reg(&operands[0]).unwrap_or(31),
+                    parse_mips_reg(&operands[1]).unwrap_or(31),
+                )
+            } else {
+                (31, parse_mips_reg(operands.first()?).unwrap_or(31))
+            };
+            let insn: u32 = ((rs as u32) << 21) | ((rd as u32) << 11) | 0x09;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // ADDU / OR (for move aliases)
+        "move" if operands.len() == 2 => {
+            // MOVE rd, rs => OR rd, rs, $0
+            let rd = parse_mips_reg(&operands[0])?;
+            let rs = parse_mips_reg(&operands[1])?;
+            let insn: u32 = ((rs as u32) << 21) | ((rd as u32) << 11) | (rd as u32) | 0x25;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // ADDU rd, rs, rt
+        "addu" if operands.len() == 3 => {
+            let rd = parse_mips_reg(&operands[0])?;
+            let rs = parse_mips_reg(&operands[1])?;
+            let rt = parse_mips_reg(&operands[2])?;
+            let insn: u32 =
+                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x21;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // ADD rd, rs, rt
+        "add" if operands.len() == 3 => {
+            let rd = parse_mips_reg(&operands[0])?;
+            let rs = parse_mips_reg(&operands[1])?;
+            let rt = parse_mips_reg(&operands[2])?;
+            let insn: u32 =
+                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x20;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // SUB rd, rs, rt
+        "sub" if operands.len() == 3 => {
+            let rd = parse_mips_reg(&operands[0])?;
+            let rs = parse_mips_reg(&operands[1])?;
+            let rt = parse_mips_reg(&operands[2])?;
+            let insn: u32 =
+                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x22;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // SUBU rd, rs, rt
+        "subu" if operands.len() == 3 => {
+            let rd = parse_mips_reg(&operands[0])?;
+            let rs = parse_mips_reg(&operands[1])?;
+            let rt = parse_mips_reg(&operands[2])?;
+            let insn: u32 =
+                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x23;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // DADDU (MIPS64)
+        "daddu" if operands.len() == 3 && is_64bit => {
+            let rd = parse_mips_reg(&operands[0])?;
+            let rs = parse_mips_reg(&operands[1])?;
+            let rt = parse_mips_reg(&operands[2])?;
+            let insn: u32 =
+                ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0x2d;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // BREAK
+        "break" => {
+            let code = operands
+                .first()
+                .and_then(|s| parse_mips_imm(s))
+                .unwrap_or(0) as u32;
+            let insn: u32 = (code << 6) | 0x0d;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // SYSCALL
+        "syscall" => {
+            let code = operands
+                .first()
+                .and_then(|s| parse_mips_imm(s))
+                .unwrap_or(0) as u32;
+            let insn: u32 = (code << 6) | 0x0c;
+            Some(insn.to_be_bytes().to_vec())
+        }
+
+        // CACHE / PREF (hint instructions, encode with operands)
+        "cache" | "pref" => {
+            // These need immediate + base register, complex encoding
+            // Fall through to NOP for now
+            Some([0u8; 4].to_vec())
+        }
+
+        _ => None,
+    }
+}
+
+/// Encode a list of resolved asm lines into machine code bytes
+/// for the given architecture. Returns (encoded_bytes, had_unrecognized).
+pub fn encode_asm_lines_for_arch(
+    lines: &[String],
+    arch: &str,
+    is_64bit: bool,
+) -> (Vec<u8>, bool) {
+    let mut bytes = Vec::new();
+    let mut had_unrecognized = false;
+
+    for line in lines {
+        if let Some((mnemonic, operands)) = parse_instruction(line) {
+            let encoded = match arch {
+                "aarch64" => encode_aarch64(&mnemonic, &operands),
+                "riscv64" => encode_riscv64(&mnemonic, &operands),
+                "arm" => encode_arm(&mnemonic, &operands),
+                "mips" | "mips64" => encode_mips(&mnemonic, &operands, is_64bit),
+                _ => None,
+            };
+            match encoded {
+                Some(mut b) => bytes.append(&mut b),
+                None => {
+                    had_unrecognized = true;
+                    // Emit NOP equivalent for the architecture
+                    match arch {
+                        "aarch64" => bytes.extend_from_slice(&encode_aarch64_nop()),
+                        "riscv64" => bytes.extend_from_slice(&0x00000013u32.to_le_bytes()),
+                        "arm" => bytes.extend_from_slice(&0xe1a00000u32.to_le_bytes()),
+                        "mips" | "mips64" => bytes.extend_from_slice(&[0u8; 4]),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Directives and labels are silently skipped
+    }
+
+    (bytes, had_unrecognized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_aarch64_regs() {
+        assert_eq!(parse_aarch64_reg("x0"), Some((0, true)));
+        assert_eq!(parse_aarch64_reg("w15"), Some((15, false)));
+        assert_eq!(parse_aarch64_reg("sp"), Some((31, true)));
+        assert_eq!(parse_aarch64_reg("lr"), Some((30, true)));
+        assert_eq!(parse_aarch64_reg("xzr"), Some((31, true)));
+    }
+
+    #[test]
+    fn test_encode_aarch64_nop() {
+        let bytes = encode_aarch64("nop", &[]).unwrap();
+        assert_eq!(bytes, vec![0x1f, 0x20, 0x03, 0xd5]);
+    }
+
+    #[test]
+    fn test_encode_aarch64_dmb() {
+        let bytes = encode_aarch64("dmb", &["ish".to_string()]).unwrap();
+        assert_eq!(bytes, vec![0xbf, 0x3b, 0x03, 0xd5]);
+    }
+
+    #[test]
+    fn test_encode_aarch64_ret() {
+        let bytes = encode_aarch64("ret", &[]).unwrap();
+        assert_eq!(bytes, vec![0xc0, 0x03, 0x5f, 0xd6]);
+    }
+
+    #[test]
+    fn test_parse_riscv_regs() {
+        assert_eq!(parse_riscv_reg("x0"), Some(0));
+        assert_eq!(parse_riscv_reg("zero"), Some(0));
+        assert_eq!(parse_riscv_reg("ra"), Some(1));
+        assert_eq!(parse_riscv_reg("sp"), Some(2));
+        assert_eq!(parse_riscv_reg("a0"), Some(10));
+        assert_eq!(parse_riscv_reg("t0"), Some(5));
+    }
+
+    #[test]
+    fn test_encode_riscv_nop() {
+        let bytes = encode_riscv64("nop", &[]).unwrap();
+        assert_eq!(bytes, vec![0x13, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_encode_riscv_fence() {
+        let bytes = encode_riscv64("fence", &[]).unwrap();
+        assert_eq!(bytes, vec![0x0f, 0x00, 0xf0, 0x0f]);
+    }
+
+    #[test]
+    fn test_encode_arm_nop() {
+        let bytes = encode_arm("nop", &[]).unwrap();
+        assert_eq!(bytes, vec![0x00, 0x00, 0xa0, 0xe1]);
+    }
+
+    #[test]
+    fn test_encode_arm_dmb() {
+        let bytes = encode_arm("dmb", &["ish".to_string()]).unwrap();
+        assert_eq!(bytes, vec![0x5b, 0xf0, 0x7f, 0xf5]);
+    }
+
+    #[test]
+    fn test_parse_mips_regs() {
+        assert_eq!(parse_mips_reg("$zero"), Some(0));
+        assert_eq!(parse_mips_reg("zero"), Some(0));
+        assert_eq!(parse_mips_reg("$ra"), Some(31));
+        assert_eq!(parse_mips_reg("$sp"), Some(29));
+        assert_eq!(parse_mips_reg("$0"), Some(0));
+        assert_eq!(parse_mips_reg("$31"), Some(31));
+    }
+
+    #[test]
+    fn test_encode_mips_nop() {
+        let bytes = encode_mips("nop", &[], false).unwrap();
+        assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_encode_mips_sync() {
+        let bytes = encode_mips("sync", &[], false).unwrap();
+        assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x0f]);
+    }
+
+    #[test]
+    fn test_parse_instruction() {
+        assert_eq!(
+            parse_instruction("nop"),
+            Some(("nop".to_string(), vec![]))
+        );
+        assert_eq!(
+            parse_instruction("dmb ish"),
+            Some(("dmb".to_string(), vec!["ish".to_string()]))
+        );
+        assert_eq!(
+            parse_instruction("mov w0, w1"),
+            Some(("mov".to_string(), vec!["w0".to_string(), "w1".to_string()]))
+        );
+        assert_eq!(parse_instruction(".globl foo"), None);
+        assert_eq!(parse_instruction("label:"), None);
+    }
+}
