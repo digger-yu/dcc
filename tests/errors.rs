@@ -553,8 +553,10 @@ fn diagnostic_error_snapshots() {
         // e1004/e1009/e1010 已降级为警告 (W1004/W1009/W1010), 以支持
         // 内核构建中隐式函数声明导致的类型错误. 这些情况下编译器
         // 不再中止, 而是输出警告继续编译.
+        // e0300 已降级为警告 (W0300), 以支持内核 -mno-sse 模式下的浮点代码
+        // 使用 x87 FPU 编译. 编译器输出警告继续编译.
         // known-fail 契约: 验证这些 case 产出警告而非错误.
-        if matches!(case.name, "e1004" | "e1009" | "e1010") {
+        if matches!(case.name, "e1004" | "e1009" | "e1010" | "e0300") {
             let arg_strings = dcc_args_for(case);
             let args: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
             let (stderr, status) = run_dcc(&args, &source);

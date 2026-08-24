@@ -376,6 +376,11 @@ impl<'a> Dec<'a> {
             }
             0x0F => self.decode_two_byte(start, &pfx),
             0x41 | 0x49 | 0x4C | 0x48 => self.decode_rex(start, &pfx),
+            // x87 FPU instructions (0xD8-0xDF)
+            0xD8..=0xDF => {
+                let opcode = self.take()?; // 先取 opcode
+                self.decode_x87(start, opcode)
+            }
             _ => self.decode_legacy(start, &pfx),
         }
     }
@@ -647,6 +652,157 @@ impl<'a> Dec<'a> {
                 self.pos = start + 1;
                 None
             }
+        }
+    }
+
+    /// 解码 x87 FPU 指令 (0xD8-0xDF)
+    fn decode_x87(&mut self, start: usize, opcode: u8) -> Option<(usize, String)> {
+        let modrm = self.take()?;
+        let mod_ = modrm >> 6;
+        let reg = (modrm >> 3) & 7;
+        let rm = modrm & 7;
+
+        // 特殊处理: 寄存器-寄存器 指令 (mod=3, 特定 opcode)
+        if mod_ == 3 {
+            // DE 前缀的寄存器运算指令
+            if opcode == 0xDE {
+                let mnemonic = match reg {
+                    0 => "faddp",
+                    1 => "fmulp",
+                    4 => "fsubp",
+                    5 => "fsubrp",
+                    6 => "fdivp",
+                    7 => "fdivrp",
+                    _ => "f???",
+                };
+                return Some((self.pos - start, format!("{} %st({}), %st", mnemonic, rm)));
+            }
+            // DF E9: fucomip
+            if opcode == 0xDF && modrm == 0xE9 {
+                return Some((self.pos - start, "fucomip %st(1), %st".into()));
+            }
+            // D9 前缀的特殊指令
+            if opcode == 0xD9 {
+                match modrm {
+                    0xE0 => return Some((self.pos - start, "fchs".into())),
+                    0xE8 => return Some((self.pos - start, "fld1".into())),
+                    0xEE => return Some((self.pos - start, "fldz".into())),
+                    0xD0 => return Some((self.pos - start, "fnop".into())),
+                    _ => {}
+                }
+            }
+        }
+
+        // 内存操作数解码 - 手动解码 modrm 的内存部分
+        let mem = self.decode_x87_mem(mod_, rm)?;
+
+        let mnemonic = match opcode {
+            0xD8 => match reg {
+                0 => "fadds",
+                1 => "fmuls",
+                4 => "fsubs",
+                5 => "fsubrs",
+                6 => "fdivs",
+                7 => "fdivrs",
+                _ => "f???",
+            },
+            0xD9 => match reg {
+                0 => "flds",
+                2 => "fstps",
+                3 => "fstps",
+                _ => "f???",
+            },
+            0xDA => "fi???",
+            0xDB => match reg {
+                0 => "fildl",
+                _ => "f???",
+            },
+            0xDC => match reg {
+                0 => "faddl",
+                1 => "fmull",
+                4 => "fsubl",
+                5 => "fsubrl",
+                6 => "fdivl",
+                7 => "fdivrl",
+                _ => "f???",
+            },
+            0xDD => match reg {
+                0 => "fldl",
+                2 => "fstpl",
+                3 => "fstpl",
+                _ => "f???",
+            },
+            0xDE => match reg {
+                0 => "faddp",
+                1 => "fmulp",
+                4 => "fsubp",
+                5 => "fsubrp",
+                6 => "fdivp",
+                7 => "fdivrp",
+                _ => "f???",
+            },
+            0xDF => match reg {
+                5 => "fucomip",
+                _ => "f???",
+            },
+            _ => "f???",
+        };
+
+        Some((self.pos - start, format!("{} {}", mnemonic, mem)))
+    }
+
+    /// 解码 x87 内存操作数 (简化版，专门处理 r13 基址)
+    fn decode_x87_mem(&mut self, mod_: u8, rm: u8) -> Option<String> {
+        // 处理 SIB 字节情况 (rm=4 表示有 SIB)
+        if rm == 4 {
+            let sib = self.take()?;
+            let base = sib & 7;
+            let _index = (sib >> 3) & 7;
+            let _scale = sib >> 6;
+            // 对于我们的用例，index=4 表示无索引
+            let disp = match mod_ {
+                0 => {
+                    if base == 5 {
+                        // [rip+disp32]
+                        let d = self.take_i32()?;
+                        return Some(format!("{}(%rip)", d));
+                    } else {
+                        0i32
+                    }
+                }
+                1 => self.take_i8()? as i32,
+                2 => self.take_i32()?,
+                _ => 0,
+            };
+            let base_reg = if base == 5 { "%rbp" } else { REG64[base as usize] };
+            if disp == 0 {
+                return Some(format!("({})", base_reg));
+            }
+            return Some(format!("{}({})", disp, base_reg));
+        }
+
+        // 非 SIB 情况
+        let disp = match mod_ {
+            0 => {
+                if rm == 5 {
+                    // [rip+disp32]
+                    let d = self.take_i32()?;
+                    return Some(format!("{}(%rip)", d));
+                } else {
+                    0i32
+                }
+            }
+            1 => self.take_i8()? as i32,
+            2 => self.take_i32()?,
+            _ => return Some(REG64[rm as usize].to_string()),
+        };
+
+        // rm=5 with mod!=0 表示 r13
+        let base_reg = if rm == 5 { "%r13" } else { REG64[rm as usize] };
+        if disp == 0 {
+            Some(format!("({})", base_reg))
+        } else {
+            Some(format!("{}({})", disp, base_reg))
         }
     }
 }

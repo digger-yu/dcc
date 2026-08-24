@@ -763,12 +763,16 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             remap_span(&mut span, &line_map);
             // 内核 FPU 子系统显式使用 float/double, 即使 -mno-sse 也应允许编译
             // 降级为警告而非硬错误, 让后端处理代码生成
-            let mut diags = vec![Diagnostic::warn(
+            let mut w = vec![Diagnostic::warn(
                 "W0300",
                 "floating-point code with -mno-sse; x87 may be used for FP operations",
                 span,
             )];
-            enrich_diags(&mut diags, src, &file_name, input.parent());
+            enrich_diags(&mut w, src, &file_name, input.parent());
+            for d in &w {
+                d.print_with(&dcfg);
+            }
+            diags.extend(w);
             // 不阻断编译, 继续后续流程
         }
     }
