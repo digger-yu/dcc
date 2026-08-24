@@ -121,6 +121,8 @@ pub struct Config {
     pub sysroot: Option<PathBuf>,
     /// --vdso=<path>: vDSO ELF 文件路径, 嵌入输出 layout 的 .text.vdso 节
     pub vdso: Option<PathBuf>,
+    /// -T <script>: 链接器脚本路径
+    pub linker_script: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -446,6 +448,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut bootstrap_compare: Option<PathBuf> = None;
     let mut sysroot: Option<PathBuf> = None;
     let mut vdso: Option<PathBuf> = None;
+    let mut linker_script: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -668,10 +671,19 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 link_libs.push(a[2..].to_string());
             }
             // -L, -l, -T 等链接器选项
-            "-L" | "-l" | "-T" => {
+            "-L" | "-l" => {
                 i += 1;
             } // 跳过参数
-            a if a.starts_with("-L") || a.starts_with("-l") || a.starts_with("-T") => {} // 内联形式
+            "-T" => {
+                i += 1;
+                if let Some(path) = args.get(i) {
+                    linker_script = Some(PathBuf::from(path));
+                }
+            }
+            a if a.starts_with("-L") || a.starts_with("-l") => {} // 内联形式
+            a if a.starts_with("-T") => {
+                linker_script = Some(PathBuf::from(&a[2..]));
+            }
             // -Wl,* : 传递给链接器的选项
             a if a.starts_with("-Wl,") => {} // 忽略
             // -Wp,* : 仅白名单预处理器子选项；未知项报错，避免静默丢参
@@ -1608,6 +1620,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             bootstrap_compare: bootstrap_compare.clone(),
             sysroot: sysroot.clone(),
             vdso: vdso.clone(),
+            linker_script: linker_script.clone(),
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -1693,6 +1706,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             bootstrap_compare,
             sysroot,
             vdso,
+            linker_script,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

@@ -31,6 +31,7 @@ pub mod ifunc;
 pub mod layout;
 pub mod legacy;
 pub mod link_opts;
+pub mod linker_script;
 pub mod lto_bitcode;
 pub mod object;
 pub mod plt_got;
@@ -114,6 +115,8 @@ pub struct LinkConfig {
     pub vdso: Option<PathBuf>,
     /// DSO 解析缓存 (跨 link invocation 复用, 按 path/mtime/size 去重)
     pub dso_cache: dso_cache::DsoCache,
+    /// 链接器脚本路径 (-T script.lds)
+    pub linker_script: Option<PathBuf>,
 }
 
 /// build-id 风格
@@ -171,6 +174,7 @@ impl Default for LinkConfig {
             dynamic_linker: None,
             vdso: None,
             dso_cache: dso_cache::DsoCache::new(),
+            linker_script: None,
         }
     }
 }
