@@ -146,7 +146,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm 显式子寄存器约束 `{eax}`/`{cx}`/`{cl}` | 按宽度假 8/16/32/64 位写回 (`mov [r13+off], r8/r16/r32/r64`)；`parse_reg_name_bits` 解析全部 GP 子寄存器名；`{gs}`/`{fs}` 段寄存器也支持 |
 | asm goto 行内 `#` 注释 | `tests/fixtures/c/asm_goto.c`；`jump_label.h` objtool 标注 |
 | asm goto 输出约束 | fall-through 路径写回，跳转路径保留原值；跨函数 `&&label` + asm goto 混用触发 warning |
-| asm 调试信息 | `-g` 下含 asm 的函数正常生成 DWARF 行号表 + DIEs；asm 块起始 PC 记录到 `asm_line_entries` 并生成精确 `.debug_line` 条目；SSA pipeline 跳过含 asm 函数避免重建丢失行号映射；mini-asm 不发射 `.debug_insn` 扩展 (GDB step-into asm 体验受限，与 GCC 行为一致) |
+| asm 调试信息 | `-g` 下含 asm 的函数正常生成 DWARF 行号表 + DIEs；asm 块起始 PC 记录到 `asm_line_entries` 并生成精确 `.debug_line` 条目；asm 块内每条指令生成独立 `.debug_line` 条目 (`asm_insn_debug_entries`)，使用 `DW_LNE_set_discriminator` 区分同一源行的不同指令，使 GDB 能单步进入 asm 块内部；SSA pipeline 跳过含 asm 函数避免重建丢失行号映射 |
 | asm `%0` 约束 `"i"` 展开 | 带 `$` 前缀的 AT&T 立即数 |
 | asm 模板修饰符 `%a` / `%P` / `%l` | `%aN`/`%a[name]`: 地址形式 (寄存器同名, 立即数/内存去前缀); `%PN`/`%P[name]`: 原始符号名 (去 % / $ 前缀); `%lN`/`%l[name]`: asm goto 标签名 (边界安全多位索引，索引越界走 W0004 warning); 立即数含运算符时自动加括号保护优先级 |
 | Mini x86 asm 局部/C 标签 | `N:` / `N:insn` / `found:` |
@@ -353,7 +353,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `.BTF` | x86_64（struct dcc_probe）/ AArch64 / RISC-V |
 | `.eh_frame` | CIE + FDE；setjmp CFI 寄存器保存表 |
 | `.orc_unwind_ip` / `.orc_unwind` | 由 objtool 统一生成，dcc 不输出（避免 "file already has .orc_unwind section" 冲突） |
-| DWARF line table | `-g1` 下自动去重 |
+| DWARF line table | `-g1` 下自动去重; `DW_LNE_set_discriminator` 支持同 PC 多行条目 (asm 逐指令调试) |
 | DWARF type info | 位域成员 `DW_AT_bit_size` + `DW_AT_bit_offset` |
 | `-gsplit-dwarf` / `-gpubnames` | `.dwo` 文件生成 |
 
@@ -383,7 +383,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 能力 | 说明 |
 |------|------|
 | DWARF 行号精度 | `-g` 下 asm 块起始 PC 记录到 `asm_line_entries`; 有 asm 行号时重新生成带 `line_entries` 的完整 DWARF CU; `addr2line` 可定位到 asm 语句起始行 |
-| GDB step-into asm 体验 | mini-asm 不发射 `.debug_insn` 扩展; GDB 无法单步进入 asm 块内部; 与 GCC 行为一致 |
+| GDB step-into asm 体验 | asm 块内每条指令生成独立 `.debug_line` 条目 (`asm_insn_debug_entries`); 块级条目 `is_stmt=true` 标记语句边界, 后续指令 `is_stmt=false` + 递增 discriminator; `write_line_entry` 支持 `DW_LNE_set_discriminator` 扩展操作码; GDB 可单步进入 asm 块内部每条指令 |
 
 ## 内联 asm 测试覆盖
 
@@ -395,6 +395,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | asm goto 与 `&&label` 混合 | `asm_goto_label_addr_mix_compiles_and_runs`: 同一 CU 内 asm goto 与 computed goto 共存 |
 | 嵌套 asm `.macro` / `.rept` 块 | `asm_nested_macro_rept_compiles_and_runs`: 多层 `.rept`/`.irp` 嵌套展开验证 |
 | memory clobber + 优化器重排 | `asm_memory_clobber_optimizer_compiles_and_runs`: `-O2` 下 memory clobber 编译器屏障端到端验证 |
+| 逐指令 asm 调试信息 | `asm_per_insn_debug_insn_entries`: `-g -c` 下多指令 asm 块生成独立 `.debug_line` 条目，`.debug_line` 节包含 `DW_LNE_set_discriminator`; 运行时结果验证 |
 
 ## 杂项
 
