@@ -522,7 +522,7 @@ fn recompute_section_vaddrs(layout: &mut crate::link::layout::Layout) {
 
 /// 为可执行文件合成 _start 桩 (仅当 _start 不存在且 entry=_start 时).
 /// _start 调用 main(argc=0, argv=NULL, envp=NULL) 然后 exit(return).
-/// 支持 x86_64, aarch64, riscv64, arm 架构 (MIPS 暂未实现).
+/// 支持 x86_64, aarch64, riscv64, arm, mips/mips64 架构.
 fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
     use crate::codegen::elf::{STB_GLOBAL, STT_FUNC};
     use crate::link::layout::{OutputSectionKind, OutputSymbol};
@@ -620,8 +620,27 @@ fn ensure_start_stub(layout: &mut crate::link::layout::Layout) {
             code
         }
         ArchKind::Mips | ArchKind::Mips64 => {
-            // MIPS _start 暂未实现 (需要 ABI 确认延迟槽/GP 寄存器)
-            return;
+            // MIPS _start: addiu $a0-$a2, $zero, 0; jal main; nop;
+            //              move $a0, $v0; addiu $v0, $zero, 4001; syscall
+            // MIPS 大端字节序, JAL 目标 = (PC+4)/4 低 26 位
+            let mut code = vec![
+                0x24, 0x04, 0x00, 0x00, // addiu $a0, $zero, 0
+                0x24, 0x05, 0x00, 0x00, // addiu $a1, $zero, 0
+                0x24, 0x06, 0x00, 0x00, // addiu $a2, $zero, 0
+                0x0c, 0x00, 0x00, 0x00, // jal main (placeholder)
+                0x00, 0x00, 0x00, 0x00, // nop (delay slot)
+                0x00, 0x40, 0x20, 0x25, // move $a0, $v0
+                0x24, 0x02, 0x0f, 0xa1, // addiu $v0, $zero, 4001
+                0x00, 0x00, 0x00, 0x0c, // syscall
+            ];
+            // JAL at offset 12, 4 bytes (big-endian)
+            // JAL target = (PC+4)/4, PC = start_vaddr + 12
+            let pc_plus_4 = start_vaddr + 12 + 4;
+            let target = (main_vaddr / 4) as u32;
+            let jal_insn = 0x0C000000u32 | (target & 0x03FFFFFF);
+            code[12..16].copy_from_slice(&jal_insn.to_be_bytes());
+            let _ = pc_plus_4;
+            code
         }
         ArchKind::Arm => {
             // mov r0,#0; mov r1,#0; mov r2,#0; bl main;
