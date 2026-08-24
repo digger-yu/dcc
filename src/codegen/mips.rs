@@ -56,6 +56,12 @@ pub struct MipsCodegen {
     entry: u64,
     /// exec 模式 _start 中 JAL main 的指令位置
     start_call_pos: Option<u64>,
+    /// 当前函数是否为 variadic
+    is_current_func_variadic: bool,
+    /// va_save 区在 stack_bytes 中的起始偏移 (plan_locals 阶段预留)
+    va_save_base_off: i32,
+    /// 下一个 GP va_arg 槽位索引 (0..3, 对应 $a0..$a3)
+    va_gp_offs: i32,
     _target: Target,
 }
 
@@ -92,6 +98,9 @@ impl MipsCodegen {
             asm_text_mode: false,
             entry: if relocatable { 0 } else { 0x400000 + 52 + 32 },
             start_call_pos: None,
+            is_current_func_variadic: false,
+            va_save_base_off: 0,
+            va_gp_offs: 0,
             _target: target,
         }
     }
@@ -339,6 +348,17 @@ impl MipsCodegen {
         self.current_return_ty = Some(func.return_type.clone());
         self.emitted_return = false;
 
+        // 变参函数: 在局部变量之后预留 $a0-$a3 保存区 (4×4 = 16 字节)
+        let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
+        self.is_current_func_variadic = is_variadic;
+        self.va_gp_offs = 0;
+        if is_variadic {
+            self.va_save_base_off = self.stack_bytes;
+            self.stack_bytes += 16;
+        } else {
+            self.va_save_base_off = 0;
+        }
+
         let func_start = self.code.len() as u64;
         self.labels.insert(func.name.clone(), func_start);
 
@@ -367,6 +387,15 @@ impl MipsCodegen {
                         }
                     }
                 }
+            }
+        }
+
+        // 变参函数: 函数序言后立即保存 $a0-$a3 到 va_save 区
+        // va_save 槽位相对于 $fp 的偏移: -(frame_bytes - 8 - va_save_base_off - i*4)
+        if is_variadic {
+            for i in 0..4u8 {
+                let fp_off = -(self.frame_bytes as i16 - 8 - self.va_save_base_off as i16 - (i as i16) * 4);
+                self.emit_sw(4 + i, 30, fp_off); // sw $a{i}, fp_off($fp)
             }
         }
 
@@ -431,6 +460,25 @@ impl MipsCodegen {
         self.emit_jr(31); // jr $ra
         self.emit_nop(); // delay slot
         self.emitted_return = true;
+    }
+
+    // M25: MIPS va_arg 整数路径 — 从保存区顺序读 $v0
+    // O32 ABI: $a0-$a3 在函数入口保存到 va_save 区,
+    // va_arg 依次读取, 超出 4 个则从 caller 栈读.
+    fn gen_va_arg_int(&mut self, _ap_name: &str) {
+        if self.va_gp_offs < 4 {
+            let fp_off = -(self.frame_bytes as i16
+                - 8
+                - self.va_save_base_off as i16
+                - (self.va_gp_offs as i16) * 4);
+            self.emit_lw(2, 30, fp_off); // lw $v0, fp_off($fp)
+            self.va_gp_offs += 1;
+        } else {
+            // 从 caller 栈读取: 栈参数位于 caller 帧中 $fp+16 起
+            let stack_off = self.frame_bytes + (self.va_gp_offs - 4) * 4;
+            self.emit_lw(2, 29, stack_off as i16); // lw $v0, stack_off($sp)
+            self.va_gp_offs += 1;
+        }
     }
 
     // ===== Block item / stmt / expr =====
@@ -772,6 +820,17 @@ impl MipsCodegen {
                     &span.file,
                     span.line,
                 );
+            }
+            // M25: __builtin_va_arg(ap, T) — 从保存区顺序读取变参
+            Expr::VaArg { ap, ty, .. } => {
+                let is_float = matches!(ty, crate::ast::Type::Float | crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                if is_float {
+                    // 浮点变参: O32 ABI 无独立浮点变参保存区, 回退整数路径
+                    self.gen_va_arg_int("ap");
+                } else {
+                    self.gen_va_arg_int("ap");
+                }
+                let _ = ap;
             }
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
@@ -1336,5 +1395,42 @@ mod tests {
         cg.gen_function(&func, None);
         assert!(cg.code.len() > 16);
         assert!(cg.labels.contains_key("f"));
+    }
+
+    // M25: MIPS va_arg 整数路径单元测试
+    // 验证 gen_va_arg_int 从保存区顺序读 $v0
+    #[test]
+    fn mips_va_arg_int_reads_sequentially_from_save_area() {
+        let mut cg = MipsCodegen::new(
+            Target::resolve(&crate::cli::TargetTriple::parse("mips-linux-gnu").unwrap()),
+            true,
+        );
+        cg.is_current_func_variadic = true;
+        cg.va_save_base_off = 0;
+        cg.va_gp_offs = 0;
+        cg.frame_bytes = 24; // 8 (fp+ra) + 16 (va_save)
+        // 读 3 个变参
+        cg.gen_va_arg_int("ap");
+        cg.gen_va_arg_int("ap");
+        cg.gen_va_arg_int("ap");
+        // 验证: 3 条 lw $v0, offset($fp) 指令
+        // MIPS LW: opcode=100011 (0x23), base=$fp(30), rt=$v0(2)
+        let lw_count = cg
+            .code
+            .windows(4)
+            .filter(|w| {
+                let inst = u32::from_be_bytes([w[0], w[1], w[2], w[3]]);
+                let opcode = inst >> 26;
+                let rt = (inst >> 16) & 0x1f;
+                let rs = (inst >> 21) & 0x1f;
+                opcode == 0b100011 && rt == 2 && rs == 30
+            })
+            .count();
+        assert_eq!(
+            lw_count, 3,
+            "expected 3 lw $v0, offset($fp) instructions, got {lw_count}"
+        );
+        // 验证 va_gp_offs 推进
+        assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
     }
 }
