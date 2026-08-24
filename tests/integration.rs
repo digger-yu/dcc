@@ -4438,6 +4438,19 @@ fn asm_extended_forms_compiles_without_nop_fallback() {
     );
 }
 
+/// 符号操作数形式: rdrand/rdseed Sym / retf/lret Sym / ljmp Sym / AVX-imm SymDisp / MMX pshufw SymDisp / vextractps SymDisp
+#[test]
+fn asm_sym_operand_forms_compiles_without_nop_fallback() {
+    let source = include_str!("fixtures/c/asm_sym_operand_forms.c");
+    let (output, _obj) = run_object_test("asm-sym-operand-forms", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected mini-asm nop fallback: {stderr}"
+    );
+}
+
 /// asm 模板修饰符完整支持: %a (地址形式) / %P (原始符号名) / %l (标签)
 /// 包含: 立即数/寄存器/命名操作数修饰符 + 多位索引边界 + 立即数优先级
 #[test]
