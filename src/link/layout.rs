@@ -180,6 +180,8 @@ pub struct LayoutBuilder {
     pub needed: Vec<String>,
     /// 自定义动态链接器路径
     pub dynamic_linker: Option<String>,
+    /// 链接器脚本路径
+    pub linker_script: Option<std::path::PathBuf>,
 }
 
 impl LayoutBuilder {
@@ -198,6 +200,7 @@ impl LayoutBuilder {
             gc_sections_root: Vec::new(),
             needed: Vec::new(),
             dynamic_linker: None,
+            linker_script: None,
         }
     }
 
@@ -207,6 +210,11 @@ impl LayoutBuilder {
         bundle: &InputBundle,
         resolved: &[ResolvedSymbol],
     ) -> Result<Layout, String> {
+        // 如果提供了链接器脚本，使用它来驱动布局
+        if let Some(ref script_path) = self.linker_script {
+            return self.build_with_linker脚本(script_path, bundle, resolved);
+        }
+
         let mut sections: Vec<OutputSection> = Vec::new();
         let mut section_index_by_kind: HashMap<OutputSectionKind, u32> = HashMap::new();
         let mut custom_section_indices: HashMap<String, u32> = HashMap::new();
@@ -384,6 +392,144 @@ impl LayoutBuilder {
             });
 
         // 转换重定位到输出节/输出符号空间
+        let output_relas = self.translate_relocations(bundle, resolved, &sections, &symbols);
+
+        // 计算 n_locals
+        let n_locals = symbols.iter().filter(|s| s.bind == STB_LOCAL).count() as u32;
+
+        Ok(Layout {
+            is_pie: self.is_pie,
+            is_shared: self.is_shared,
+            arch: self.arch,
+            base_addr: self.base_addr,
+            file_base,
+            sections,
+            segments,
+            symbols,
+            entry,
+            has_symtab: true,
+            has_dynamic: self.emit_dynamic,
+            n_locals,
+            output_relas,
+            needed: self.needed.clone(),
+            dynamic_linker: self.dynamic_linker.clone(),
+        })
+    }
+
+    /// 使用链接器脚本驱动布局
+    fn build_with_linker脚本(
+        &self,
+        script_path: &std::path::Path,
+        bundle: &InputBundle,
+        resolved: &[ResolvedSymbol],
+    ) -> Result<Layout, String> {
+        // 1. 读取并解析链接器脚本
+        let script_text = std::fs::read_to_string(script_path)
+            .map_err(|e| format!("failed to read linker script: {}", e))?;
+        let script = super::linker_script::LinkerScript::parse(&script_text)?;
+
+        // 2. 执行脚本，获取布局结果
+        let script_result = super::linker_script::execute_script(&script, bundle, resolved)?;
+
+        // 3. 检查断言失败
+        if !script_result.assert_failures.is_empty() {
+            return Err(format!(
+                "linker script assertions failed: {}",
+                script_result.assert_failures.join(", ")
+            ));
+        }
+
+        // 4. 将 ScriptLayoutResult 转换为 Layout
+        self.convert_script_result_to_layout(script_result, bundle, resolved)
+    }
+
+    /// 将脚本布局结果转换为内部 Layout 结构
+    fn convert_script_result_to_layout(
+        &self,
+        script_result: super::linker_script::ScriptLayoutResult,
+        bundle: &InputBundle,
+        resolved: &[ResolvedSymbol],
+    ) -> Result<Layout, String> {
+        let mut sections: Vec<OutputSection> = Vec::new();
+
+        // 转换脚本定义的输出节
+        for script_sec in &script_result.sections {
+            if script_sec.is_discard || script_sec.is_info {
+                continue;
+            }
+
+            let out_sec = OutputSection {
+                kind: OutputSectionKind::Named(script_sec.name.clone()),
+                name: script_sec.name.clone(),
+                sh_name_off: 0,
+                ty: script_sec.ty,
+                flags: script_sec.flags,
+                align: script_sec.align,
+                data: script_sec.data.clone(),
+                size: script_sec.size,
+                entsize: 0,
+                output_index: sections.len() as u32,
+                load_segment: 0, // TODO: 从 script_sec.phdrs 确定
+                vaddr: script_sec.vma,
+                file_off: 0, // TODO: 计算文件偏移
+                input_offsets: Vec::new(),
+                input_sections: script_sec
+                    .input_sections
+                    .iter()
+                    .map(|m| m.input_index)
+                    .collect(),
+            };
+            sections.push(out_sec);
+        }
+
+        // 填充数据并计算 input_offsets
+        self.fill_section_data(&mut sections, bundle);
+
+        // 计算文件偏移
+        let file_base = if self.is_relocatable {
+            0
+        } else {
+            let nphdr_max = if self.emit_dynamic { 7 } else { 5 };
+            (64 + nphdr_max * 56 + 15) & !15
+        };
+        self.assign_addresses(&mut sections, file_base);
+
+        // 构建输出符号表
+        let mut symbols = self.build_symbols(bundle, resolved, &sections);
+
+        // 添加脚本定义的符号
+        for script_sym in &script_result.symbols {
+            symbols.push(OutputSymbol {
+                name: script_sym.name.clone(),
+                value: script_sym.value,
+                vaddr: script_sym.value,
+                size: 0,
+                bind: 0, // STB_LOCAL
+                ty: 0,   // STT_NOTYPE
+                kind: 0,
+                visibility: 0,
+                section: 0,
+                shndx_if_section: 0,
+            });
+        }
+
+        // 段映射
+        let segments = self.build_segments(&sections);
+
+        // 入口地址
+        let entry = script_result
+            .entry
+            .unwrap_or_else(|| {
+                symbols
+                    .iter()
+                    .find(|s| s.name == self.entry_name)
+                    .map(|s| s.value)
+                    .unwrap_or_else(|| {
+                        sections.first().map(|s| s.vaddr).unwrap_or(self.base_addr)
+                    })
+            });
+
+        // 转换重定位
         let output_relas = self.translate_relocations(bundle, resolved, &sections, &symbols);
 
         // 计算 n_locals

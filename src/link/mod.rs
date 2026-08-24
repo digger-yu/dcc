@@ -260,6 +260,7 @@ pub fn link_from_bundle(
     builder.gc_sections_root = cfg.gc_sections_root.clone();
     builder.dynamic_linker = cfg.dynamic_linker.clone();
     builder.needed = cfg.needed.clone();
+    builder.linker_script = cfg.linker_script.clone();
     let mut layout = builder
         .build(bundle, &resolved)
         .map_err(|e| diag("E0303", e))?;
