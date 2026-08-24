@@ -298,6 +298,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `gc_sections_root` 自动选根 | 无显式根时自动选所有 STB_GLOBAL/STB_WEAK 符号 |
 | object reader 输入边界 | 接受 ELF64 little-endian (x86_64/AArch64/RISC-V) 和 ELF32 (MIPS big-endian/ARM little-endian) ET_REL；支持 SHT_REL 和 SHT_RELA 重定位；ELF32 符号表 16 字节/条目，ELF64 24 字节/条目；同时接受 COFF/PE AMD64 目标文件 (machine 0x8664)，自动检测格式 |
 | Windows COFF codegen | `--target x86_64-pc-windows-msvc` 生成 COFF/PE AMD64 可重定位目标文件；`src/codegen/coff.rs` 实现 COFF 文件头、节头、符号表、重定位表和字符串表；节名映射 (.text/.rdata/.data/.bss/.rdata$T/.bss$T)；COFF 重定位类型 (ADDR64/ADDR32/ADDR32NB/REL32)；符号存储类映射；object reader 可解析 COFF 输入 |
+| Windows PE executable link | `--target x86_64-pc-windows-msvc` 可链接生成 PE32+ (64-bit) 可执行文件；`src/link/pe.rs` 实现 DOS 头、PE 签名、COFF 文件头、PE32+ 可选头和节表；节映射 (.text/.rdata/.data/.bss)；默认 ImageBase 0x140000000；SectionAlignment 4KB；FileAlignment 512B；Subsystem Console；`OutputFormat::Pe` 在 `LinkConfig` 中按目标 OS 自动选择 |
 | relocation 支持边界 | 按当前架构白名单分发 relocation；未枚举或错架构命名空间的 relocation 返回 `UnsupportedType` |
 | `.gnu.hash` TIE 压缩 | ELF 64-bit GNU hash（bloom filter + buckets + chain） |
 | `.eh_frame_hdr` 搜索表 | 二分搜索表（按 initial_location 排序） |
