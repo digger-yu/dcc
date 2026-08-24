@@ -164,7 +164,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm `.intel_syntax`/`.att_syntax` 语法切换 | 识别并透传至 `-S` 输出; `AsmDirectiveExpander::intel_syntax` 状态跟踪 |
 | asm `.altmacro`/`.noaltmacro` 交替宏模式 | 识别并透传; `AsmDirectiveExpander::alt_macro` 状态跟踪 |
 | `asm_output` 属性 (GCC15) | `__attribute__((asm_output("...")))` 解析并存储到 `FuncDecl::asm_output_template`; 属性合并逻辑支持 |
-| 非 x86_64 后端 inline asm | aarch64/riscv64/mips/mips64/arm 后端完整处理 `Decl::GlobalAsm` / `Stmt::AsmGoto` / `Expr::AsmExpr`; 共享约束解析模块 `asm_constraints.rs` 解析 `=r`/`r`/`+r`/`m`/`i`/matched/memory/cc 约束并从架构调用者保存寄存器池分配; `-S` 模式输出带架构实际寄存器名的汇编文本 (AArch64 w0-w15 / RISC-V a0-a7,t0-t6 / MIPS $v0-$t9 / ARM r0-r3,r12); 增强版模板替换 `%N`→寄存器名 / `%[name]`→名称查找 / `%lN`→标签 / `%wN`/`%xN`→AArch64 宽度修饰; memory clobber 发射架构屏障指令 (AArch64 DMB ISH / RISC-V FENCE / MIPS SYNC / ARM DMB ISH); `-c` 模式发出警告 (无 mini-assembler，不编码机器码) |
+| 非 x86_64 后端 inline asm | aarch64/riscv64/mips/mips64/arm 后端完整处理 `Decl::GlobalAsm` / `Stmt::AsmGoto` / `Expr::AsmExpr`; 共享约束解析模块 `asm_constraints.rs` 解析 `=r`/`r`/`+r`/`m`/`i`/matched/memory/cc 约束并从架构调用者保存寄存器池分配; `-S` 模式输出带架构实际寄存器名的汇编文本 (AArch64 w0-w15 / RISC-V a0-a7,t0-t6 / MIPS $v0-$t9 / ARM r0-r3,r12); 增强版模板替换 `%N`→寄存器名 / `%[name]`→名称查找 / `%lN`→标签 / `%wN`/`%xN`→AArch64 宽度修饰; memory clobber 发射架构屏障指令 (AArch64 DMB ISH / RISC-V FENCE / MIPS SYNC / ARM DMB ISH); `-c` 模式 mini-assembler 编码机器码 (`mini_asm.rs` 支持 nop/dmb/dsb/isb/ret/mov/add/sub/br/blr/svc/fence/sync 等常见指令, 未识别指令 warning + nop 占位) |
 
 ## x86_64 codegen
 
