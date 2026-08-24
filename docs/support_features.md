@@ -154,7 +154,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg`/`cmpxchg8b` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`iret`/`iretl`/`iretq`/`sysenter`/`sysexit` / `pushf`/`pushfl`/`pushfq`/`popf`/`popfl`/`popfq` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`) |
 | SSE mov / SSE arith | xmm-xmm, mem-xmm, xmm-mem, SegMem 变体完整支持 |
 | mini-asm SIMD 扩展 | VEX/EVEX 前缀 + AVX/AVX2/AVX-512 + SSE3–4.2 + AES-NI/SHA + FMA/F16C + TSX + AMX + AVX-VNNI；`pinsr*` / `pextr*` GPR + `tmm` / `ymm` / `zmm` / `k` 寄存器 |
-| mini-asm 扩展操作数形式 | `rdrand`/`rdseed` 内存操作数；`ljmp`/`lcall` 间接内存 + `$off,$seg` 反序；`xbegin` rel32 + `xabort` 符号；AES-NI/SHA/pshuf*/palignr/pblendw/insertps/pshufw 内存源；`vextractps`/`vextractpd` 内存目标 |
+| mini-asm 扩展操作数形式 | `rdrand`/`rdseed` 内存+符号操作数 (RIP-relative)；`ljmp`/`lcall` 间接内存 + `$off,$seg` 反序 + 符号偏移；`retf`/`lret` 符号立即数；`xbegin` rel32 + `xabort` 符号；AES-NI/SHA/pshuf*/palignr/pblendw/insertps/pshufw 内存源+符号源 (RIP-relative)；`pinsr*`/`pextr*`/`extractps` 符号源/目标；`vpinsr*`/`vpextr*`/`vextractps`/`vextractpd`/`vcvtps2ph` 符号源/目标 |
 | mini-asm 未知指令诊断 | 未识别 mnemonic 或已识别指令的不合法操作数在 `-c` 编码路径产生 `E0311` hard error，不再 warning 后发 `nop` |
 | asm `.rept`/`.endr` 重复块 | `AsmDirectiveExpander::parse_rept` 解析重复次数, 递归展开体内指令 |
 | asm `.irp`/`.irpc` 迭代块 | `.irp sym, v1, v2, ...` 按值列表迭代 / `.irpc sym, chars` 按字符迭代; 体内 `\sym` 替换为当前值 |
