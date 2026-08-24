@@ -973,45 +973,28 @@ impl Riscv64Codegen {
             }
             Expr::AsmExpr {
                 asm_str,
-                outputs: _,
+                outputs,
                 output_names,
                 output_constraints,
-                inputs: _,
+                inputs,
                 input_names,
                 input_constraints,
                 clobbers,
                 span,
                 ..
             } => {
-                let resolved = Self::resolve_asm_template_enhanced(
+                self.emit_inline_asm(
                     asm_str,
-                    output_constraints,
-                    input_constraints,
+                    outputs,
                     output_names,
+                    output_constraints,
+                    inputs,
                     input_names,
-                    &[],
+                    input_constraints,
+                    clobbers,
+                    &span.file,
+                    span.line,
                 );
-                if self.asm_text_mode {
-                    eprintln!(
-                        "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
-                        span.file, span.line
-                    );
-                    let lines: Vec<String> = resolved
-                        .split('\n')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    self.raw_func_asm_lines
-                        .push((format!("__inline_{}", self.label_serial), lines));
-                    self.label_serial += 1;
-                } else {
-                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
-                }
-                // memory clobber: 发射 FENCE 编译器屏障
-                if clobbers.iter().any(|c| c == "memory") {
-                    self.emit_fence();
-                }
-                self.li_a0(0);
             }
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
@@ -1169,6 +1152,122 @@ impl Riscv64Codegen {
     fn mv_a_reg(&mut self, idx: u8) {
         let rd = 10 + idx;
         self.emit_addi(rd, 10, 0);
+    }
+
+    /// Load a local variable from stack into an arbitrary GP register (32-bit LW)
+    fn asm_load_var_to_reg(&mut self, var_name: &str, reg_x86: u8) {
+        // reg_x86 is the x-register index (e.g. 10 for a0, 5 for t0)
+        if let Some(&off) = self.locals.get(var_name) {
+            self.emit_lw(reg_x86, 2, off);
+        }
+    }
+
+    /// Store a GP register value back to a local variable on stack (32-bit SW)
+    fn asm_store_reg_to_var(&mut self, var_name: &str, reg_x86: u8) {
+        if let Some(&off) = self.locals.get(var_name) {
+            self.emit_sw(reg_x86, 2, off);
+        }
+    }
+
+    /// 发射内联汇编: 加载输入 → 发射 asm → 写回输出 → 设置表达式结果
+    fn emit_inline_asm(
+        &mut self,
+        asm_str: &str,
+        outputs: &[Expr],
+        output_names: &[Option<String>],
+        output_constraints: &[String],
+        inputs: &[Expr],
+        input_names: &[Option<String>],
+        input_constraints: &[String],
+        clobbers: &[String],
+        span_file: &str,
+        span_line: u32,
+    ) {
+        let pool = asm_constraints::riscv64_reg_pool();
+        let resolved_operands = resolve_asm_operands(
+            output_constraints,
+            input_constraints,
+            output_names,
+            input_names,
+            &pool,
+        );
+
+        // --- 加载 inout 输入值到分配的寄存器 ---
+        for (i, op) in resolved_operands.iter().enumerate() {
+            if op.is_input && op.is_output {
+                if let Some(ref alloc) = op.reg {
+                    if i < outputs.len() {
+                        if let Expr::Ident { name, .. } = &outputs[i] {
+                            self.asm_load_var_to_reg(&name.name, alloc.idx);
+                        }
+                    }
+                }
+            }
+        }
+        // --- 加载纯输入值到分配的寄存器 ---
+        for (j, op) in resolved_operands.iter().enumerate() {
+            if op.is_input && !op.is_output {
+                if let Some(ref alloc) = op.reg {
+                    let input_idx = j - output_constraints.len();
+                    if input_idx < inputs.len() {
+                        if let Expr::Ident { name, .. } = &inputs[input_idx] {
+                            self.asm_load_var_to_reg(&name.name, alloc.idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- 解析模板并发射 asm ---
+        let resolved = Self::resolve_asm_template_enhanced(
+            asm_str,
+            output_constraints,
+            input_constraints,
+            output_names,
+            input_names,
+            &[],
+        );
+        if self.asm_text_mode {
+            let lines: Vec<String> = resolved
+                .split('\n')
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            self.raw_func_asm_lines
+                .push((format!("__inline_{}", self.label_serial), lines));
+            self.label_serial += 1;
+        } else {
+            self.encode_and_emit_asm(&resolved, span_file, span_line);
+        }
+
+        // --- 写回输出寄存器到 C 变量 ---
+        let mut first_output_reg: Option<u8> = None;
+        for (i, op) in resolved_operands.iter().enumerate() {
+            if op.is_output && i < outputs.len() {
+                if let Some(ref alloc) = op.reg {
+                    if first_output_reg.is_none() {
+                        first_output_reg = Some(alloc.idx);
+                    }
+                    if let Expr::Ident { name, .. } = &outputs[i] {
+                        self.asm_store_reg_to_var(&name.name, alloc.idx);
+                    }
+                }
+            }
+        }
+
+        // --- memory clobber: FENCE 编译器屏障 ---
+        if clobbers.iter().any(|c| c == "memory") {
+            self.emit_fence();
+        }
+
+        // --- 表达式结果: 第一个输出寄存器 → a0 (x10) ---
+        if let Some(reg) = first_output_reg {
+            if reg != 10 {
+                self.emit_addi(10, reg, 0); // mv a0, reg
+            }
+        } else {
+            self.li_a0(0);
+        }
     }
 
     fn mv_fa_reg(&mut self, idx: u8, bits: u16) {
