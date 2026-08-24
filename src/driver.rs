@@ -264,6 +264,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         &cfg.force_includes,
         cfg.freestanding,
         &cfg.pch_opts,
+        cfg.kernel_code_model,
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
@@ -730,6 +731,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // codegen
     let mut target = Target::resolve(&cfg.target);
     target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
+    target.kernel_code_model = cfg.kernel_code_model;
     target.set_stack_protector(cfg.stack_protector);
     target.unwind_tables = cfg.unwind_tables;
     target.function_return_thunk_extern = cfg.function_return_thunk_extern;
@@ -969,6 +971,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
                 &cfg.force_includes,
                 cfg.freestanding,
                 &cfg.pch_opts,
+                cfg.kernel_code_model,
             );
             (pp_out.text, pp_out.deps, pp_out.diags)
         };
@@ -1179,6 +1182,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             &cfg.force_includes,
             cfg.freestanding,
             &cfg.pch_opts,
+            cfg.kernel_code_model,
         );
         let mut pp_diags = pp_out.diags;
         enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
@@ -1243,6 +1247,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         &cfg.force_includes,
         cfg.freestanding,
         &cfg.pch_opts,
+        cfg.kernel_code_model,
     );
     let mut pp_diags = pp_out.diags;
     enrich_diags(&mut pp_diags, &src, &file_name, input.parent());

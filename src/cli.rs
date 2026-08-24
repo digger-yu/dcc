@@ -47,6 +47,7 @@ pub struct Config {
     pub red_zone: bool,
     pub frame_pointer: bool,
     pub sse: bool,
+    pub kernel_code_model: bool,
     pub stack_protector: bool, // -fstack-protector / -fstack-protector-all
     pub unwind_tables: bool,   // -fno-asynchronous-unwind-tables / -fno-unwind-tables
     pub function_return_thunk_extern: bool,
@@ -400,6 +401,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut red_zone = true;
     let mut frame_pointer = false;
     let mut sse = true;
+    let mut kernel_code_model = false;
     let mut stack_protector = false;
     let mut unwind_tables = true;
     let mut function_return_thunk_extern = false;
@@ -1168,6 +1170,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-fomit-frame-pointer" => frame_pointer = false,
             "-mno-sse" | "-mno-sse2" => sse = false,
             "-msse" | "-msse2" => sse = true,
+            "-mcmodel=kernel" => kernel_code_model = true,
             "-fstack-protector" | "-fstack-protector-all" | "-fstack-protector-strong" => {
                 stack_protector = true
             }
@@ -1195,7 +1198,6 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-no-pie"
             | "-pg"
             | "-pthread"
-            | "-mcmodel=kernel"
             | "-mrecord-mcount"
             | "-mpreferred-stack-boundary=2"
             | "-fno-plt"
@@ -1577,6 +1579,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             red_zone,
             frame_pointer,
             sse,
+            kernel_code_model,
             stack_protector,
             unwind_tables,
             function_return_thunk_extern,
@@ -1663,6 +1666,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             red_zone,
             frame_pointer,
             sse,
+            kernel_code_model,
             stack_protector,
             unwind_tables,
             function_return_thunk_extern,

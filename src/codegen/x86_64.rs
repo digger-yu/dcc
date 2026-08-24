@@ -14219,7 +14219,8 @@ impl Codegen {
     /// 发射函数地址加载.
     /// - ET_EXEC: LEA dst, [RIP+disp32] + label_addr_refs (直接修补)
     /// - ET_REL 内部函数: LEA dst, [RIP+disp32] + pending_func_rels (PC32/PLT32)
-    /// - ET_REL 外部函数: MOV dst, [RIP+disp32] + pending_func_addr_rels (GOTPCREL)
+    /// - ET_REL 外部函数 (small model): MOV dst, [RIP+disp32] + GOTPCREL
+    /// - ET_REL 外部函数 (kernel model): LEA dst, [RIP+disp32] + PC32/PLT32
     fn emit_func_addr(&mut self, dst: u8, name: &str) {
         let rex_base = 0x48u8 | if dst >= 8 { 0x44 } else { 0 };
         let modrm = 0x05 | ((dst & 7) << 3);
@@ -14228,13 +14229,14 @@ impl Codegen {
             self.emit(&[rex_base, 0x8D, modrm, 0, 0, 0, 0]);
             let disp32_pos = self.pos() - 4;
             self.label_addr_refs.push((disp32_pos, name.to_string()));
-        } else if self.defined_funcs.contains(name) {
-            // 内部函数: LEA dst, [RIP+disp32] → 直接地址
+        } else if self.defined_funcs.contains(name) || self.target.kernel_code_model {
+            // 内部函数或内核代码模型: LEA dst, [RIP+disp32] → 直接地址
+            // 内核不使用 GOT, 所有符号在链接时直接解析
             self.emit(&[rex_base, 0x8D, modrm, 0, 0, 0, 0]);
             let disp32_pos = self.pos() - 4;
             self.pending_func_rels.push((disp32_pos, name.to_string()));
         } else {
-            // 外部/未定义函数: MOV dst, [RIP+disp32] → GOT 间接
+            // 外部/未定义函数 (small model): MOV dst, [RIP+disp32] → GOT 间接
             self.emit(&[rex_base, 0x8B, modrm, 0, 0, 0, 0]);
             let disp32_pos = self.pos() - 4;
             self.pending_func_addr_rels
