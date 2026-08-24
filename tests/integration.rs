@@ -7845,6 +7845,45 @@ fn asm_debug_info_compiles_with_g() {
     }
 }
 
+/// asm 逐指令调试信息: -g -c 下多指令 asm 块应为每条指令生成独立 .debug_line 条目
+/// 使 GDB 能单步进入 asm 块内部 (类似 GCC .debug_insn 效果)
+#[test]
+fn asm_per_insn_debug_insn_entries() {
+    let source = include_str!("fixtures/c/asm_debug_insn.c");
+    // -g -c: 生成带调试信息的 .o 文件
+    let (output, _obj) = run_compile_and_run_flags("asm-debug-insn", source, &["-g", "-c"]);
+    assert!(
+        output.status.success(),
+        "asm per-insn debug compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    #[cfg(unix)]
+    {
+        // 验证 .o 文件包含 .debug_line 节
+        let obj_path = _obj.to_str().unwrap();
+        let sections = std::process::Command::new("readelf")
+            .args(["-S", obj_path])
+            .output();
+        if let Ok(out) = sections {
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                text.contains(".debug_line"),
+                "asm per-insn debug: .debug_line section missing from {}",
+                obj_path
+            );
+        }
+        // 验证可执行文件能正确运行
+        let (output, exe) = run_compile_and_run_flags("asm-debug-insn-run", source, &["-g"]);
+        assert!(
+            output.status.success(),
+            "asm per-insn debug run compile failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "asm per-insn debug runtime result incorrect");
+    }
+}
+
 // ====== M26: C23 预处理全家族端到端 ======
 // #elifdef / #elifndef 分支选择
 #[test]
