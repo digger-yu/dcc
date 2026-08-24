@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-22 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
+> 最后更新：2026-08-24 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -164,7 +164,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm `.intel_syntax`/`.att_syntax` 语法切换 | 识别并透传至 `-S` 输出; `AsmDirectiveExpander::intel_syntax` 状态跟踪 |
 | asm `.altmacro`/`.noaltmacro` 交替宏模式 | 识别并透传; `AsmDirectiveExpander::alt_macro` 状态跟踪 |
 | `asm_output` 属性 (GCC15) | `__attribute__((asm_output("...")))` 解析并存储到 `FuncDecl::asm_output_template`; 属性合并逻辑支持 |
-| 非 x86_64 后端 inline asm | aarch64/riscv64/mips/mips64/arm 后端完整处理 `Decl::GlobalAsm` / `Stmt::AsmGoto` / `Expr::AsmExpr`; `-S` 模式输出原始汇编文本到 `.text`; `-c` 模式发出警告 (无 mini-assembler，不编码机器码); 简化版模板占位符替换 `%N` / `%[name]` / `%%`; asm goto `%lN` / `%l[name]` 标签替换 |
+| 非 x86_64 后端 inline asm | aarch64/riscv64/mips/mips64/arm 后端完整处理 `Decl::GlobalAsm` / `Stmt::AsmGoto` / `Expr::AsmExpr`; 共享约束解析模块 `asm_constraints.rs` 解析 `=r`/`r`/`+r`/`m`/`i`/matched/memory/cc 约束并从架构调用者保存寄存器池分配; `-S` 模式输出带架构实际寄存器名的汇编文本 (AArch64 w0-w15 / RISC-V a0-a7,t0-t6 / MIPS $v0-$t9 / ARM r0-r3,r12); 增强版模板替换 `%N`→寄存器名 / `%[name]`→名称查找 / `%lN`→标签 / `%wN`/`%xN`→AArch64 宽度修饰; memory clobber 发射架构屏障指令 (AArch64 DMB ISH / RISC-V FENCE / MIPS SYNC / ARM DMB ISH); `-c` 模式发出警告 (无 mini-assembler，不编码机器码) |
 
 ## x86_64 codegen
 
@@ -405,7 +405,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | AArch64 vector 表达式 | 支持 16B vector 局部槽位、aggregate initializer、local load/store、call/return 参数、assignment、cast、conditional、lane index 和二元算术/按位路径；覆盖非二元表达式不再落到零值 fallback |
 | non-x86 QEMU runtime matrix | `non_x86_qemu_runtime_matrix_runs_when_available` + 四个扩展测试（`non_x86_qemu_runtime_hello/control_flow/aggregate_abi/va_arg`）在 `qemu-aarch64`、`qemu-riscv64`、`qemu-mips`、`qemu-mips64`、`qemu-arm` 存在时运行 hello、control-flow、aggregate ABI、va_arg 语义门禁，缺少 qemu-user 时显式 skip |
 | AArch64/RISC-V HFA ABI | AArch64 HFA 1–8 元素 + >8 sret fallback（`aarch64_hfa_abi_compile_and_elf_structure` / `aarch64_hfa_asm_output_has_all_functions`）；RISC-V HFA 1–4 + >4 sret fallback（`riscv64_hfa_abi_compile_and_elf_structure` / `riscv64_hfa_asm_output_has_all_functions`）；ELF machine/type 验证 |
-| non-x86 inline asm 测试 | `-S` 全局 asm 文本保留验证五架构（`non_x86_asm_minus_s_preserves_global_asm_text`）；`-c` asm goto 警告验证（`non_x86_asm_minus_c_warns_on_asm_goto`）；arm/mips/mips64 asm 表达式警告（`non_x86_asm_arm_mips_warn_on_inline_asm_expr`） |
+| non-x86 inline asm 测试 | `-S` 全局 asm 文本保留验证五架构（`non_x86_asm_minus_s_preserves_global_asm_text`）；`-c` asm goto 警告验证（`non_x86_asm_minus_c_warns_on_asm_goto`）；arm/mips/mips64 asm 表达式警告（`non_x86_asm_arm_mips_warn_on_inline_asm_expr`）；约束解析寄存器名替换验证四架构（`non_x86_asm_constraint_resolution_minus_s`）；memory clobber 屏障五架构（`non_x86_asm_memory_clobber_barrier`） |
 | unsupported target 负向测试 | 6 个未知架构 (wasm32/avr/msp430/xtensa/powerpc64/loongarch64) `unknown arch` 错误验证（`unsupported_target_arch_rejected`）；Windows MSVC/Darwin triple 解析接受但 ELF 输出验证（`windows_darwin_triple_accepted_but_outputs_elf`），锁定当前非 COFF/Mach-O 平台边界 |
 | atexit / `__cxa_atexit` | `FiniArrayBuilder` 按 priority 排序 |
 | `printf` / `scanf` format string | 完整 flag/width/precision/length/type 匹配 + 指针类型验证 |
