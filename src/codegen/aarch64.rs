@@ -1183,6 +1183,28 @@ impl Aarch64Codegen {
                 self.gen_call(expr);
                 return true;
             }
+            // M25: 浮点局部变量从栈加载到 s0 (避免回退 0.0)
+            ExprKind::Local(ref name) => {
+                if let Some(&off) = self.locals.get(name) {
+                    self.ldr_s0_sp(off);
+                    return true;
+                }
+            }
+            // M25: 浮点条件表达式: cond ? true_val : false_val
+            // 用分支实现, 避免 fcsel 寄存器约束
+            ExprKind::Conditional if expr.children.len() >= 3 => {
+                let lbl_false = self.fresh_label(".Lflt_cond_f");
+                let lbl_end = self.fresh_label(".Lflt_cond_end");
+                self.gen_expr(&expr.children[0]);
+                self.cmp_w0_zero();
+                self.cbz_w0(&lbl_false);
+                self.gen_float_expr(&expr.children[1]);
+                self.b(&lbl_end);
+                self.label(&lbl_false);
+                self.gen_float_expr(&expr.children[2]);
+                self.label(&lbl_end);
+                return true;
+            }
             _ => {
                 // 已经是 float/vector 走到这里, 不能再回 gen_expr (死循环).
                 // 整数/复合字面量进 gen_float_expr 是为了 int→float 转换, 但
@@ -1194,6 +1216,7 @@ impl Aarch64Codegen {
                 }
             }
         }
+        // 无法处理的浮点表达式: 加载 0.0 作为 fallback
         self.load_float_s0(0.0);
         false
     }
@@ -3744,5 +3767,35 @@ mod tests {
             cg.tag_frame_size, 0,
             "tag_frame_size should stay 0 without MTE"
         );
+    }
+
+    // M25: gen_float_expr 处理 Local float 变量时
+    // 应从栈加载到 s0 而非回退 0.0
+    #[test]
+    fn aarch64_gen_float_expr_local_loads_from_stack() {
+        let mut cg = Aarch64Codegen::new(
+            crate::target::Target::resolve(
+                &crate::cli::TargetTriple::parse("aarch64-linux-gnu").unwrap(),
+            ),
+            true,
+        );
+        cg.locals.insert("x".to_string(), 16);
+        let expr = TypedExpr {
+            kind: ExprKind::Local("x".to_string()),
+            ty: ValueType::Float { bits: 32 },
+            literal: None,
+            children: vec![],
+            span: crate::diagnostics::Span::point("t.c", 1, 1),
+        };
+        let ok = cg.gen_float_expr(&expr);
+        assert!(ok, "gen_float_expr should succeed for Local float");
+        // 验证发射了 ldr s0, [sp, #16] 指令
+        // LDR S (32-bit): 0xBD400000 | (imm12/4)<<10 | Rn=sp(31) | Rt=s0(0)
+        let ldr_s0 = 0xBD400000u32 | ((16u32 / 4) << 10) | (31 << 5) | 0;
+        let found = cg
+            .code
+            .windows(4)
+            .any(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) == ldr_s0);
+        assert!(found, "expected ldr s0, [sp, #16] instruction");
     }
 }
