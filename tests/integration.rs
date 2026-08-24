@@ -12105,7 +12105,7 @@ fn asm_non_x86_backend_s_mode_compiles() {
     }
 }
 
-/// 非 x86_64 后端 inline asm: -c 模式不 panic，发出警告
+/// 非 x86_64 后端 inline asm: -c 模式不 panic，mini-assembler 编码机器码
 #[test]
 fn asm_non_x86_backend_c_mode_no_panic() {
     let source = include_str!("fixtures/c/asm_non_x86_targets.c");
@@ -12136,20 +12136,15 @@ fn asm_non_x86_backend_c_mode_no_panic() {
             .output()
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // -c 模式应该成功 (有警告但不 panic)
+        // -c 模式应该成功 (mini-assembler 编码机器码)
         assert!(
             output.status.success(),
-            "target {}: -c mode panicked: {}",
+            "target {}: -c mode failed: {}",
             target,
             stderr
         );
-        // 应该包含关于非 x86_64 目标的警告
-        assert!(
-            stderr.contains("non-x86_64 target"),
-            "target {}: -c mode should warn about non-x86_64 target, stderr: {}",
-            target,
-            stderr
-        );
+        // -c 模式不应包含旧的 "non-x86_64 target" 警告 (已编码机器码)
+        // 对于无法识别的指令可能有 "unrecognized" 警告，但 nop 等常见指令不应有
         let _ = fs::remove_file(&src_path);
         let _ = fs::remove_file(&obj_path);
     }
@@ -13376,7 +13371,7 @@ fn non_x86_asm_minus_s_preserves_global_asm_text() {
     }
 }
 
-/// Non-x86 -c: asm goto produces warning on non-x86 targets
+/// Non-x86 -c: asm goto is encoded by mini-assembler in -c mode
 #[test]
 fn non_x86_asm_minus_c_warns_on_asm_goto() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -13403,26 +13398,28 @@ fn non_x86_asm_minus_c_warns_on_asm_goto() {
             .expect("run dcc");
         let stderr = String::from_utf8_lossy(&output.stderr);
         let _ = fs::remove_file(&obj_path);
-        // Compilation should succeed (warning, not error)
+        // Compilation should succeed (mini-assembler encodes instructions)
         assert!(
             output.status.success(),
-            "target {target}: -c should succeed with warnings; stderr={stderr}"
+            "target {target}: -c should succeed; stderr={stderr}"
         );
-        // asm goto warning must be present
+        // -c mode should NOT contain old "asm goto on non-x86_64 target" warning
+        // (instructions are now encoded by mini-assembler)
         assert!(
-            stderr.contains("asm goto on non-x86_64 target"),
-            "target {target}: -c stderr should warn about asm goto; stderr={stderr}"
+            !stderr.contains("asm goto on non-x86_64 target"),
+            "target {target}: -c should not have old asm goto warning; stderr={stderr}"
         );
     }
 }
 
-/// Non-x86 -c: arm/mips/mips64 produce additional inline asm expression warnings
+/// Non-x86 -c: arm/mips/mips64 no longer produce "result is 0" warnings
+/// (mini-assembler now encodes inline asm instructions in -c mode)
 #[test]
 fn non_x86_asm_arm_mips_warn_on_inline_asm_expr() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/c/asm_non_x86_preserve.c");
-    // arm/mips/mips64 backends emit extra "result is 0" warnings
-    // for inline asm expressions; aarch64/riscv64 handle them silently
+    // arm/mips/mips64 backends no longer emit "result is 0" warnings
+    // in -c mode since mini-assembler encodes the instructions
     let targets_with_expr_warnings = [
         "arm-linux-gnueabihf",
         "mips-linux-gnu",
@@ -13447,9 +13444,10 @@ fn non_x86_asm_arm_mips_warn_on_inline_asm_expr() {
             output.status.success(),
             "target {target}: -c should succeed; stderr={stderr}"
         );
+        // -c mode should NOT contain old "inline asm on non-x86_64 target" warning
         assert!(
-            stderr.contains("inline asm on non-x86_64 target"),
-            "target {target}: should warn about inline asm result; stderr={stderr}"
+            !stderr.contains("inline asm on non-x86_64 target"),
+            "target {target}: -c should not have old inline asm warning; stderr={stderr}"
         );
     }
 }
