@@ -1,13 +1,18 @@
-// src/link/object.rs - ELF ET_REL 目标文件读取器
+// src/link/object.rs - ELF/COFF 目标文件读取器
 //
 // 解析 dcc / gcc 生成的 .o 文件,提取节、符号表、重定位表。
 // 完整支持 ELF64 x86-64 / aarch64 / riscv64 和 ELF32 mips / arm ET_REL 文件。
 // 支持 little-endian 和 big-endian (MIPS) 两种字节序。
+// 同时支持 COFF/PE AMD64 目标文件 (Windows MSVC codegen 输出)。
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 
+use crate::codegen::coff::{
+    IMAGE_SCN_CNT_CODE, IMAGE_SCN_CNT_INITIALIZED_DATA, IMAGE_SCN_CNT_UNINITIALIZED_DATA,
+    IMAGE_SCN_MEM_WRITE,
+};
 use crate::codegen::elf::{
     ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFMAG, EM_AARCH64, EM_ARM, EM_MIPS,
     EM_RISCV, EM_X86_64, SHN_UNDEF, SHT_NOBITS, SHT_NULL, SHT_PROGBITS, SHT_REL, SHT_RELA,
@@ -95,8 +100,297 @@ impl std::fmt::Display for ObjectError {
 
 impl std::error::Error for ObjectError {}
 
-/// 解析一个 ET_REL 目标文件。
+/// 解析一个 ET_REL 目标文件 (ELF 或 COFF)。
+///
+/// 自动检测文件格式: ELF (magic 0x7f 'E' 'L' 'F') 或 COFF
+/// (machine type 0x8664 for AMD64)。两种格式均解析为统一的
+/// `InputObject` 结构，供后续链接使用。
 pub fn parse_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError> {
+    // Detect format by magic bytes
+    if data.len() >= 4 && data[0..4] == ELFMAG {
+        parse_elf_object(data, name)
+    } else if data.len() >= 20 {
+        // COFF: first 2 bytes are machine type
+        let machine = u16::from_le_bytes([data[0], data[1]]);
+        if machine == 0x8664 {
+            // AMD64 COFF
+            parse_coff_object(data, name)
+        } else {
+            Err(ObjectError {
+                msg: format!(
+                    "{}: unknown object format (not ELF, not COFF AMD64)",
+                    name
+                ),
+            })
+        }
+    } else {
+        Err(ObjectError {
+            msg: format!("{}: too short for object header", name),
+        })
+    }
+}
+
+/// 解析 COFF (PE/COFF) AMD64 目标文件。
+///
+/// COFF 文件头 20 字节, 后跟节头表 (每节 40 字节),
+/// 节数据, 重定位, 符号表 (每符号 18 字节), 字符串表。
+fn parse_coff_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError> {
+    if data.len() < 20 {
+        return Err(ObjectError {
+            msg: format!("{}: COFF header truncated", name),
+        });
+    }
+    let ru16 = |o: usize| -> u16 {
+        u16::from_le_bytes(data[o..o + 2].try_into().unwrap())
+    };
+    let ru32 = |o: usize| -> u32 {
+        u32::from_le_bytes(data[o..o + 4].try_into().unwrap())
+    };
+
+    let machine_raw = ru16(0);
+    let num_sections = ru16(2) as usize;
+    let _timestamp = ru32(4);
+    let symtab_ptr = ru32(8) as usize;
+    let num_symbols = ru32(12) as usize;
+    let opt_hdr_size = ru16(16) as usize;
+
+    if machine_raw != 0x8664 {
+        return Err(ObjectError {
+            msg: format!("{}: unsupported COFF machine={}", name, machine_raw),
+        });
+    }
+
+    let section_headers_off = 20 + opt_hdr_size;
+    if data.len() < section_headers_off + num_sections * 40 {
+        return Err(ObjectError {
+            msg: format!("{}: COFF section headers truncated", name),
+        });
+    }
+
+    // Parse section headers
+    let mut sections = Vec::with_capacity(num_sections);
+    for i in 0..num_sections {
+        let off = section_headers_off + i * 40;
+        // Name (8 bytes)
+        let name_raw = &data[off..off + 8];
+        let sec_name = if name_raw[0] == b'/' {
+            // Long name: "/" + decimal offset into string table
+            let s = std::str::from_utf8(&name_raw[1..8]).unwrap_or("");
+            let end = s.find('\0').unwrap_or(s.len());
+            let strtab_off: usize = s[..end].parse().unwrap_or(0);
+            // Will resolve after string table is available
+            format!("__coff_long_name_{}", strtab_off)
+        } else {
+            let end = name_raw.iter().position(|&b| b == 0).unwrap_or(8);
+            std::str::from_utf8(&name_raw[..end]).unwrap_or("").to_string()
+        };
+
+        let _virtual_size = ru32(off + 8);
+        let _virtual_addr = ru32(off + 12);
+        let raw_data_size = ru32(off + 16) as usize;
+        let raw_data_ptr = ru32(off + 20) as usize;
+        let reloc_ptr = ru32(off + 24) as usize;
+        let _linenum_ptr = ru32(off + 28);
+        let num_relocs = ru16(off + 32) as usize;
+        let _num_linenums = ru16(off + 34);
+        let characteristics = ru32(off + 36);
+
+        let mut sec_data = Vec::new();
+        if raw_data_size > 0 && raw_data_ptr + raw_data_size <= data.len() {
+            sec_data.extend_from_slice(&data[raw_data_ptr..raw_data_ptr + raw_data_size]);
+        }
+
+        // Map COFF characteristics to ELF-like flags
+        let (elf_ty, elf_flags) = coff_chars_to_elf(characteristics);
+
+        sections.push(InputSection {
+            name: sec_name,
+            ty: elf_ty,
+            flags: elf_flags,
+            align: 4,
+            size: raw_data_size as u64,
+            data: sec_data,
+            input_index: 0,
+            orig_index: i as u32,
+        });
+
+        // Parse relocations for this section
+        let _ = reloc_ptr;
+        let _ = num_relocs;
+    }
+
+    // Parse symbol table
+    let strtab_ptr = symtab_ptr + num_symbols * 18;
+    let mut symbols = Vec::with_capacity(num_symbols);
+    if symtab_ptr + num_symbols * 18 <= data.len() {
+        for i in 0..num_symbols {
+            let base = symtab_ptr + i * 18;
+            if base + 18 > data.len() {
+                break;
+            }
+            // Name (8 bytes)
+            let name_bytes = &data[base..base + 8];
+            let sym_name = if u32::from_le_bytes(name_bytes[0..4].try_into().unwrap()) == 0 {
+                // Long name: offset in string table
+                let strtab_off =
+                    u32::from_le_bytes(name_bytes[4..8].try_into().unwrap()) as usize;
+                if strtab_ptr + strtab_off < data.len() {
+                    read_cstr(data, strtab_ptr + strtab_off)
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(8);
+                std::str::from_utf8(&name_bytes[..end]).unwrap_or("").to_string()
+            };
+
+            let value = ru32(base + 8) as u64;
+            let section_number = i16::from_le_bytes([data[base + 12], data[base + 13]]);
+            let coff_type = ru16(base + 14);
+            let storage_class = data[base + 16];
+            let _num_aux = data[base + 17];
+
+            // Map COFF storage class to ELF bind/type
+            let (bind, ty) = coff_storage_to_elf(storage_class, coff_type);
+
+            let elf_section = if section_number <= 0 {
+                0u16 // undefined or special
+            } else {
+                section_number as u16
+            };
+
+            symbols.push(InputSymbol {
+                name: sym_name,
+                value,
+                size: 0,
+                bind,
+                ty,
+                visibility: 0,
+                section: elf_section,
+                input_obj: 0,
+                orig_index: i as u32,
+            });
+        }
+    }
+
+    // Parse relocations from all sections
+    let mut relocations = Vec::new();
+    for i in 0..num_sections {
+        let off = section_headers_off + i * 40;
+        let reloc_ptr = ru32(off + 24) as usize;
+        let num_relocs = ru16(off + 32) as usize;
+        let target_sec = i as u32;
+
+        for j in 0..num_relocs {
+            let base = reloc_ptr + j * 10;
+            if base + 10 > data.len() {
+                break;
+            }
+            let r_offset = ru32(base) as u64;
+            let r_sym = ru32(base + 4);
+            let r_type = ru16(base + 8);
+
+            // Map COFF relocation type to ELF relocation type
+            let elf_rel_type = coff_reloc_to_elf(r_type);
+
+            relocations.push(InputRela {
+                offset: r_offset,
+                sym: r_sym,
+                rel_type: elf_rel_type,
+                addend: -4, // COFF REL32 has implicit addend of -4 for PC-relative
+                section: target_sec,
+                input_obj: 0,
+            });
+        }
+    }
+
+    // Resolve long section names from string table
+    if strtab_ptr < data.len() {
+        let strtab_len = ru32(strtab_ptr) as usize;
+        let strtab_end = (strtab_ptr + strtab_len).min(data.len());
+        for sec in &mut sections {
+            if sec.name.starts_with("__coff_long_name_") {
+                let off_str = &sec.name["__coff_long_name_".len()..];
+                if let Ok(strtab_off) = off_str.parse::<usize>() {
+                    let abs_off = strtab_ptr + strtab_off;
+                    if abs_off < strtab_end {
+                        sec.name = read_cstr(data, abs_off).unwrap_or("").to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(InputObject {
+        machine: 62, // EM_X86_64 — normalize to ELF machine number
+        sections,
+        symbols,
+        relocations,
+        name: name.to_string(),
+    })
+}
+
+/// Map COFF section characteristics to ELF-like type and flags.
+fn coff_chars_to_elf(chars: u32) -> (u32, u32) {
+    use crate::codegen::elf::*;
+    let mut flags = 0u32;
+    let mut ty = SHT_PROGBITS;
+
+    if chars & IMAGE_SCN_CNT_CODE != 0 {
+        flags |= SHF_ALLOC | SHF_EXECINSTR;
+    } else if chars & IMAGE_SCN_CNT_INITIALIZED_DATA != 0 {
+        flags |= SHF_ALLOC;
+        if chars & IMAGE_SCN_MEM_WRITE != 0 {
+            flags |= SHF_WRITE;
+        }
+    } else if chars & IMAGE_SCN_CNT_UNINITIALIZED_DATA != 0 {
+        flags |= SHF_ALLOC;
+        if chars & IMAGE_SCN_MEM_WRITE != 0 {
+            flags |= SHF_WRITE;
+        }
+        ty = SHT_NOBITS;
+    }
+
+    (ty, flags)
+}
+
+/// Map COFF storage class to ELF bind/type.
+fn coff_storage_to_elf(storage_class: u8, coff_type: u16) -> (u8, u8) {
+    use crate::codegen::elf::*;
+    let bind = match storage_class {
+        2 => STB_GLOBAL, // IMAGE_SYM_CLASS_EXTERNAL
+        3 => STB_LOCAL,  // IMAGE_SYM_CLASS_STATIC
+        _ => STB_GLOBAL,
+    };
+    let ty = if coff_type == 0x0020 {
+        STT_FUNC
+    } else {
+        STT_NOTYPE
+    };
+    (bind, ty)
+}
+
+/// Map COFF AMD64 relocation type to ELF x86_64 relocation type.
+fn coff_reloc_to_elf(coff_type: u16) -> u32 {
+    use crate::codegen::elf::*;
+    match coff_type {
+        0x0001 => R_X86_64_64,       // IMAGE_REL_AMD64_ADDR64
+        0x0002 => R_X86_64_32,       // IMAGE_REL_AMD64_ADDR32
+        0x0003 => R_X86_64_32S,      // IMAGE_REL_AMD64_ADDR32NB
+        0x0004 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32
+        0x0005 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_1
+        0x0006 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_2
+        0x0007 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_3
+        0x0008 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_4
+        0x0009 => R_X86_64_PC32,     // IMAGE_REL_AMD64_REL32_5
+        _ => R_X86_64_NONE,
+    }
+}
+
+/// 解析 ELF ET_REL 目标文件。
+fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError> {
     if data.len() < 52 {
         return Err(ObjectError {
             msg: format!("{}: too short for ELF header", name),
