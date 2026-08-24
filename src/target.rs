@@ -2,7 +2,7 @@
 // 第一性原理: 后端是"数据驱动"——不同架构共享一套 IR,只换指令编码表。
 // suckless 准则: 不为每种架构写一个 codegen.rs;而是 codegen 跑在 target 描述之上。
 
-use crate::cli::{Arch, Os, TargetTriple};
+use crate::cli::{Arch, Os, StackGuardReg, TargetTriple};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endian {
@@ -40,6 +40,20 @@ pub struct Target {
     pub function_return_thunk_extern: bool,
     pub indirect_branch_thunk_extern: bool,
     pub patchable_function_entry: Option<(usize, usize)>,
+    /// ftrace instrumentation mode
+    pub ftrace_mode: crate::cli::FtraceMode,
+    /// Stack protector guard register
+    pub stack_protector_guard_reg: StackGuardReg,
+    /// -fstack-clash-protection
+    pub stack_clash_protection: bool,
+    /// -fno-strict-aliasing
+    pub strict_aliasing: bool,
+    /// -fno-strict-overflow
+    pub strict_overflow: bool,
+    /// -fshort-wchar
+    pub short_wchar: bool,
+    /// -fno-common
+    pub no_common: bool,
 }
 
 impl Target {
@@ -74,6 +88,13 @@ impl Target {
             function_return_thunk_extern: false,
             indirect_branch_thunk_extern: false,
             patchable_function_entry: None,
+            ftrace_mode: crate::cli::FtraceMode::None,
+            stack_protector_guard_reg: StackGuardReg::Fs,
+            stack_clash_protection: false,
+            strict_aliasing: true,
+            strict_overflow: true,
+            short_wchar: false,
+            no_common: false,
         }
     }
 

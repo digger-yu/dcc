@@ -61,6 +61,7 @@ pub fn compile_cpp(
         false,                                  /* freestanding */
         &crate::preproc::PchOptions::default(), /* PCH */
         false,                                  /* kernel_code_model */
+        false,                                  /* short_wchar */
     );
     if !pp_out.diags.is_empty() {
         let mut out = Vec::new();

@@ -441,6 +441,7 @@ pub fn preprocess(
     freestanding: bool,
     pch_opts: &PchOptions,
     kernel_code_model: bool,
+    short_wchar: bool,
 ) -> PreprocessOutput {
     let text = match std::str::from_utf8(src) {
         Ok(text) => text,
@@ -562,8 +563,15 @@ pub fn preprocess(
     pp.define_builtin("__UINT128_TYPE__", "__uint128_t");
     pp.define_builtin("__SIZE_TYPE__", "long unsigned int");
     pp.define_builtin("__PTRDIFF_TYPE__", "long int");
-    pp.define_builtin("__WCHAR_TYPE__", "int");
+    pp.define_builtin("__WCHAR_TYPE__", if short_wchar { "short unsigned int" } else { "int" });
     pp.define_builtin("__WINT_TYPE__", "unsigned int");
+    if short_wchar {
+        pp.define_builtin("__WCHAR_MAX__", "65535");
+        pp.define_builtin("__WCHAR_MIN__", "0");
+    } else {
+        pp.define_builtin("__WCHAR_MAX__", "2147483647");
+        pp.define_builtin("__WCHAR_MIN__", "(-2147483647 - 1)");
+    }
     pp.define_builtin("__INTMAX_TYPE__", "long int");
     pp.define_builtin("__UINTMAX_TYPE__", "long unsigned int");
     pp.define_builtin("__INT64_TYPE__", "long int");
@@ -5210,6 +5218,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let _ = fs::remove_file(hdr);
         let output = out.text;
@@ -5235,6 +5244,7 @@ mod tests {
             &force_includes,
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5264,6 +5274,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5295,6 +5306,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5317,6 +5329,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5337,6 +5350,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let diags = out.diags;
@@ -5364,6 +5378,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5383,6 +5398,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5406,6 +5422,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5436,6 +5453,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5475,6 +5493,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5496,6 +5515,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5520,6 +5540,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5553,6 +5574,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5579,6 +5601,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5608,6 +5631,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5636,6 +5660,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5660,6 +5685,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5691,6 +5717,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5720,6 +5747,7 @@ mod tests {
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5748,6 +5776,7 @@ mod tests {
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5779,6 +5808,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5808,6 +5838,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -5831,6 +5862,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -5856,6 +5888,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         assert!(
             out_off.diags.is_empty(),
@@ -5873,6 +5906,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         assert!(
@@ -5892,6 +5926,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         assert!(
             out_def.diags.is_empty(),
@@ -5909,6 +5944,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         assert!(
@@ -5949,6 +5985,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         // 至少一个 W0001 警告
         assert!(
@@ -5983,6 +6020,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         assert!(
             on.diags.is_empty(),
@@ -6004,6 +6042,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         assert!(
@@ -6057,6 +6096,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         // 运行 2: -D_FORTIFY_SOURCE=0
         let out2 = preprocess(
@@ -6069,6 +6109,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let _ = fs::remove_dir_all(&dir);
@@ -6099,6 +6140,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         assert_eq!(out.charset, "UTF-8");
 
@@ -6114,6 +6156,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         assert_eq!(out.charset, "ASCII");
 
@@ -6128,6 +6171,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         assert_eq!(out.charset, "UTF-8");
@@ -6265,6 +6309,7 @@ n\
             false,
             &create_opts,
             false,
+            false,
         );
         assert!(
             out_create.diags.is_empty(),
@@ -6292,6 +6337,7 @@ n\
             &[],
             false,
             &include_opts,
+            false,
             false,
         );
         assert!(
@@ -6322,6 +6368,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         // 两条路径都应展开 FROM_COMMON=42 / SQUARE(3)=((3)*(3))
@@ -6374,6 +6421,7 @@ n\
             false,
             &create_opts,
             false,
+            false,
         );
         assert!(pch_path.exists());
 
@@ -6393,6 +6441,7 @@ n\
             &[],
             false,
             &include_opts,
+            false,
             false,
         );
         // 应有 warning (W0400) 但不致命
@@ -6421,6 +6470,7 @@ n\
             &[],
             false,
             &include_opts,
+            false,
             false,
         );
         assert!(
@@ -6461,6 +6511,7 @@ n\
             false,
             &include_opts,
             false,
+            false,
         );
         assert!(
             out.diags.iter().any(|d| d.code == "W0401"),
@@ -6498,6 +6549,7 @@ n\
             &[],
             false,
             &opts,
+            false,
             false,
         );
         assert!(
@@ -6538,6 +6590,7 @@ n\
             false,
             &opts,
             false,
+            false,
         );
         assert!(
             out.diags.iter().any(|d| d.code == "E0203"),
@@ -6572,6 +6625,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         assert!(
             !pch_path.exists(),
@@ -6605,6 +6659,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let err = out
@@ -6653,6 +6708,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let err = out
             .diags
@@ -6685,6 +6741,7 @@ n\
                 &[],
                 false,
                 &PchOptions::default(),
+                false,
                 false,
             );
             assert!(
@@ -6724,6 +6781,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         assert!(out1.text.contains("(42 + 10)"), "run 1: {}", out1.text);
         // 修改嵌套头文件 B.h, 父条目 A.h 的 DEPS 校验必须使其失效
@@ -6738,6 +6796,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         assert!(
@@ -6771,6 +6830,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -6800,6 +6860,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -6825,6 +6886,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -6855,6 +6917,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -6883,6 +6946,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         assert!(
@@ -6917,6 +6981,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -6945,6 +7010,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -6971,6 +7037,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -6995,6 +7062,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -7027,6 +7095,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7058,6 +7127,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let _ = fs::remove_dir_all(&dir);
@@ -7092,6 +7162,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7123,6 +7194,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let _ = fs::remove_dir_all(&dir);
@@ -7160,6 +7232,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7185,6 +7258,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -7221,6 +7295,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7247,6 +7322,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -7271,6 +7347,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -7304,6 +7381,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7330,6 +7408,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -7355,6 +7434,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let output = out.text;
         let diags = out.diags;
@@ -7379,6 +7459,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;
@@ -7408,6 +7489,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         let _ = fs::remove_dir_all(&dir);
         let output = out.text;
@@ -7435,6 +7517,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         assert!(
@@ -7464,6 +7547,7 @@ n\
             false,
             &PchOptions::default(),
             false,
+            false,
         );
         assert!(out.diags.is_empty(), "{:?}", out.diags);
     }
@@ -7481,6 +7565,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         assert!(
@@ -7520,6 +7605,7 @@ n\
             &[],
             false,
             &PchOptions::default(),
+            false,
             false,
         );
         let output = out.text;

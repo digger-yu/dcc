@@ -16,6 +16,32 @@ pub enum InputLang {
     AssemblerWithCpp,
 }
 
+/// ftrace instrumentation mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FtraceMode {
+    #[default]
+    None,
+    /// -pg: call mcount after prologue
+    MCount,
+    /// -mfentry: call __fentry__ before prologue
+    FEntry,
+    /// -mrecord-mcount: call __fentry__ + record in __mcount_loc
+    RecordMCount,
+}
+
+/// Stack protector guard register
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackGuardReg {
+    Fs, // default: %fs:0x28
+    Gs, // per-CPU: %gs:0x28
+}
+
+impl Default for StackGuardReg {
+    fn default() -> Self {
+        StackGuardReg::Fs
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub inputs: Vec<PathBuf>,
@@ -125,6 +151,20 @@ pub struct Config {
     pub vdso: Option<PathBuf>,
     /// -T <script>: 链接器脚本路径
     pub linker_script: Option<PathBuf>,
+    /// ftrace 插桩模式 (-pg/-mfentry/-mrecord-mcount)
+    pub ftrace_mode: FtraceMode,
+    /// 栈保护 guard 寄存器 (-mstack-protector-guard-reg=)
+    pub stack_protector_guard_reg: StackGuardReg,
+    /// -fstack-clash-protection: 大块栈分配逐页探测
+    pub stack_clash_protection: bool,
+    /// -fno-strict-aliasing: 关闭类型双关优化假设 (默认 true)
+    pub strict_aliasing: bool,
+    /// -fno-strict-overflow: 关闭有符号溢出优化假设 (默认 true)
+    pub strict_overflow: bool,
+    /// -fshort-wchar: wchar_t 2 字节模式
+    pub short_wchar: bool,
+    /// -fno-common: 公共符号处理
+    pub no_common: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -453,6 +493,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut sysroot: Option<PathBuf> = None;
     let mut vdso: Option<PathBuf> = None;
     let mut linker_script: Option<PathBuf> = None;
+    let mut ftrace_mode = FtraceMode::None;
+    let mut stack_protector_guard_reg = StackGuardReg::Fs;
+    let mut stack_clash_protection = false;
+    let mut strict_aliasing = true;
+    let mut strict_overflow = true;
+    let mut short_wchar = false;
+    let mut no_common = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -1182,10 +1229,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             // Linux 内核编译常用的 GCC flags - 忽略但接受
             "-fno-pic"
-            | "-fno-strict-aliasing"
-            | "-fno-common"
             | "-fno-delete-null-pointer-checks"
-            | "-fno-strict-overflow"
             | "-fno-merge-all-constants"
             | "-mno-mmx"
             | "-mno-80387"
@@ -1199,15 +1243,31 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-shared"
             | "-pie"
             | "-no-pie"
-            | "-pg"
             | "-pthread"
-            | "-mrecord-mcount"
             | "-mpreferred-stack-boundary=2"
             | "-fno-plt"
-            | "-fno-strict-overflow"
             | "-falign-jumps=1"
-            | "-falign-loops=1"
-            | "-fshort-wchar" => {}
+            | "-falign-loops=1" => {}
+            // ftrace instrumentation flags
+            "-pg" => ftrace_mode = FtraceMode::MCount,
+            "-mfentry" => ftrace_mode = FtraceMode::FEntry,
+            "-mrecord-mcount" => ftrace_mode = FtraceMode::RecordMCount,
+            // Stack protector guard register
+            "-mstack-protector-guard-reg=gs" => {
+                stack_protector_guard_reg = StackGuardReg::Gs;
+            }
+            "-mstack-protector-guard-reg=fs" => {
+                stack_protector_guard_reg = StackGuardReg::Fs;
+            }
+            // Stack clash protection
+            "-fstack-clash-protection" => stack_clash_protection = true,
+            // Optimizer semantics flags
+            "-fno-strict-aliasing" => strict_aliasing = false,
+            "-fno-strict-overflow" => strict_overflow = false,
+            // wchar_t size
+            "-fshort-wchar" => short_wchar = true,
+            // Common symbol handling
+            "-fno-common" => no_common = true,
             "-fno-asynchronous-unwind-tables" | "-fno-unwind-tables" => {
                 unwind_tables = false;
             }
@@ -1627,6 +1687,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sysroot: sysroot.clone(),
             vdso: vdso.clone(),
             linker_script: linker_script.clone(),
+            ftrace_mode,
+            stack_protector_guard_reg,
+            stack_clash_protection,
+            strict_aliasing,
+            strict_overflow,
+            short_wchar,
+            no_common,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -1715,6 +1782,13 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             sysroot,
             vdso,
             linker_script,
+            ftrace_mode,
+            stack_protector_guard_reg,
+            stack_clash_protection,
+            strict_aliasing,
+            strict_overflow,
+            short_wchar,
+            no_common,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

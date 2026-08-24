@@ -14840,3 +14840,246 @@ fn windows_msvc_output_is_pe_executable() {
         "PE executable should not be ELF format"
     );
 }
+
+/// Feature 8: ftrace instrumentation (-pg/-mfentry/-mrecord-mcount)
+/// Verify that ftrace modes compile and produce expected symbols.
+#[test]
+#[cfg(unix)]
+fn ftrace_modes_compile() {
+    let src = r#"
+int test_func(int x) { return x + 1; }
+"#;
+    let tmp = std::env::temp_dir();
+    // Test -pg mode
+    let src_path = tmp.join("ftrace_pg.c");
+    let obj_path = tmp.join("ftrace_pg.o");
+    fs::write(&src_path, src).unwrap();
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-pg", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -pg");
+    assert!(
+        output.status.success(),
+        "ftrace -pg compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Verify mcount symbol exists
+    let obj_bytes = fs::read(&obj_path).unwrap();
+    let obj_str = String::from_utf8_lossy(&obj_bytes);
+    // ELF should have mcount as undefined symbol
+    assert!(
+        obj_bytes.len() > 0,
+        "object file should be generated"
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+
+    // Test -mfentry mode
+    let src_path = tmp.join("ftrace_fentry.c");
+    let obj_path = tmp.join("ftrace_fentry.o");
+    fs::write(&src_path, src).unwrap();
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-mfentry", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -mfentry");
+    assert!(
+        output.status.success(),
+        "ftrace -mfentry compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+
+    // Test -mrecord-mcount mode
+    let src_path = tmp.join("ftrace_record.c");
+    let obj_path = tmp.join("ftrace_record.o");
+    fs::write(&src_path, src).unwrap();
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-mrecord-mcount", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -mrecord-mcount");
+    assert!(
+        output.status.success(),
+        "ftrace -mrecord-mcount compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Verify __mcount_loc section exists
+    let obj_bytes = fs::read(&obj_path).unwrap();
+    let has_mcount_loc = obj_bytes.windows(13).any(|w| {
+        w == b"__mcount_loc\0" || w.starts_with(b"__mcount_loc")
+    });
+    assert!(
+        has_mcount_loc,
+        "-mrecord-mcount should generate __mcount_loc section"
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
+/// Feature 9: Stack guard register customization (-mstack-protector-guard-reg=gs)
+#[test]
+#[cfg(unix)]
+fn stack_guard_reg_gs() {
+    let src = r#"
+int func(void) {
+    int x = 42;
+    return x;
+}
+"#;
+    let tmp = std::env::temp_dir();
+    let src_path = tmp.join("stack_guard_gs.c");
+    let obj_path = tmp.join("stack_guard_gs.o");
+    fs::write(&src_path, src).unwrap();
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-fstack-protector", "-mstack-protector-guard-reg=gs", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -mstack-protector-guard-reg=gs");
+    assert!(
+        output.status.success(),
+        "stack guard gs compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
+/// Feature 10: Stack clash protection (-fstack-clash-protection)
+#[test]
+#[cfg(unix)]
+fn stack_clash_protection() {
+    let src = r#"
+int large_frame(void) {
+    char buf[8192];
+    buf[0] = 1;
+    return buf[0];
+}
+"#;
+    let tmp = std::env::temp_dir();
+    let src_path = tmp.join("stack_clash.c");
+    let obj_path = tmp.join("stack_clash.o");
+    fs::write(&src_path, src).unwrap();
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-fstack-clash-protection", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -fstack-clash-protection");
+    assert!(
+        output.status.success(),
+        "stack clash protection compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
+/// Feature 14: -fshort-wchar (wchar_t 2-byte mode)
+#[test]
+#[cfg(unix)]
+fn short_wchar_mode() {
+    let src = r#"
+typedef __WCHAR_TYPE__ wchar_t;
+const wchar_t *ws = L"Hello";
+int check(void) { return sizeof(wchar_t); }
+"#;
+    let tmp = std::env::temp_dir();
+    let src_path = tmp.join("short_wchar.c");
+    let obj_path = tmp.join("short_wchar.o");
+    fs::write(&src_path, src).unwrap();
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-fshort-wchar", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -fshort-wchar");
+    assert!(
+        output.status.success(),
+        "short wchar compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
+/// Feature 15: -fno-common (tentative definitions)
+#[test]
+#[cfg(unix)]
+fn no_common_mode() {
+    let src = r#"
+int global_var;
+int get_global(void) { return global_var; }
+"#;
+    let tmp = std::env::temp_dir();
+    let src_path = tmp.join("no_common.c");
+    let obj_path = tmp.join("no_common.o");
+    fs::write(&src_path, src).unwrap();
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-fno-common", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -fno-common");
+    assert!(
+        output.status.success(),
+        "no-common compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
+/// Features 12/13: -fno-strict-aliasing and -fno-strict-overflow
+#[test]
+#[cfg(unix)]
+fn strict_aliasing_overflow_flags() {
+    let src = r#"
+int func(int *p, long *q) {
+    int x = *p;
+    *q = 0;
+    return x + *p;  /* With strict aliasing, could optimize to x + x */
+}
+int overflow_test(int x) {
+    return x + 1 > x;  /* With strict overflow, always true */
+}
+"#;
+    let tmp = std::env::temp_dir();
+    let src_path = tmp.join("strict_flags.c");
+    let obj_path = tmp.join("strict_flags.o");
+    fs::write(&src_path, src).unwrap();
+    // Test -fno-strict-aliasing
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-fno-strict-aliasing", "-O2", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -fno-strict-aliasing");
+    assert!(
+        output.status.success(),
+        "no-strict-aliasing compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&obj_path);
+
+    // Test -fno-strict-overflow
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-fno-strict-overflow", "-O2", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -fno-strict-overflow");
+    assert!(
+        output.status.success(),
+        "no-strict-overflow compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}

@@ -98,6 +98,8 @@ pub struct ParseOptions {
     pub fp_contract: bool,
     /// #pragma STDC CX_LIMITED_RANGE 状态: ON 为 true.
     pub cx_limited_range: bool,
+    /// `-fshort-wchar`: wchar_t 为 2 字节 (UTF-16LE), 而非默认 4 字节 (UTF-32LE)
+    pub short_wchar: bool,
 }
 
 impl ParsedAttrs {
@@ -7650,17 +7652,19 @@ impl<'a> Parser<'a> {
                 })
             }
             TokKind::WideStringLit => {
-                let mut data = parse_wide_str(&self.cur.text);
+                let short_wchar = self.opts.short_wchar;
+                let mut data = parse_wide_str(&self.cur.text, short_wchar);
                 self.advance();
                 while self.cur.kind == TokKind::WideStringLit {
-                    data.extend(parse_wide_str(&self.cur.text));
+                    data.extend(parse_wide_str(&self.cur.text, short_wchar));
                     self.advance();
                 }
-                // wchar_t = int (4 bytes) on Linux, pointer to wchar_t
+                // wchar_t = int (4 bytes) on Linux, or short (2 bytes) with -fshort-wchar
+                let wchar_ty = if short_wchar { Type::Short } else { Type::Int };
                 Some(Expr::String {
                     data,
                     span: sp,
-                    ty: Type::Ptr(Box::new(Type::Int)),
+                    ty: Type::Ptr(Box::new(wchar_ty)),
                 })
             }
             // u"..." char16_t string literal
@@ -7703,22 +7707,34 @@ impl<'a> Parser<'a> {
                 })
             }
             // L'x' / L'\u00e9' 宽字符字面量: 编码为 UTF-32LE (wchar_t 在 Linux
-            // 为 4 字节 int), 数值上与 L"..." 字符串中单字符语义一致.
+            // 为 4 字节 int) 或 UTF-16LE (-fshort-wchar 时为 2 字节).
             // 注: Expr::Char.v 为 u8, 此处截断低位; 实际工程里 wchar_t 超出
             // ASCII 范围时, 用户通常用 L"..." 字符串而非单字符字面量.
             TokKind::WideCharLit => {
+                let short_wchar = self.opts.short_wchar;
                 let wide_text = &self.cur.text;
-                let bytes = parse_wide_str(wide_text);
-                let v = if bytes.len() >= 4 {
-                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u8
+                let bytes = parse_wide_str(wide_text, short_wchar);
+                let v = if short_wchar {
+                    // UTF-16LE: 2 bytes per char
+                    if bytes.len() >= 2 {
+                        u16::from_le_bytes([bytes[0], bytes[1]]) as u8
+                    } else {
+                        0
+                    }
                 } else {
-                    0
+                    // UTF-32LE: 4 bytes per char
+                    if bytes.len() >= 4 {
+                        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u8
+                    } else {
+                        0
+                    }
                 };
                 self.advance();
+                let wchar_ty = if short_wchar { Type::Short } else { Type::Int };
                 Some(Expr::Char {
                     v,
                     span: sp,
-                    ty: Type::Int,
+                    ty: wchar_ty,
                 })
             }
             // u'x' char16_t character literal
@@ -8158,7 +8174,8 @@ fn parse_str(raw: &str) -> Vec<u8> {
 }
 
 /// Parse wide string literal L"..." to UTF-32LE bytes (4 bytes per wchar_t)
-fn parse_wide_str(raw: &str) -> Vec<u8> {
+/// or UTF-16LE bytes (2 bytes per wchar_t) when short_wchar is true.
+fn parse_wide_str(raw: &str, short_wchar: bool) -> Vec<u8> {
     // Strip L prefix and quotes: L"..." -> ...
     let inner = if raw.starts_with("L\"") || raw.starts_with("L'") {
         &raw[2..raw.len() - 1]
@@ -8240,10 +8257,31 @@ fn parse_wide_str(raw: &str) -> Vec<u8> {
         } else {
             c as u32
         };
-        d.extend_from_slice(&cp.to_le_bytes());
+        if short_wchar {
+            // UTF-16LE: 2 bytes per code unit
+            // For BMP (U+0000 to U+FFFF), encode directly
+            // For supplementary characters, use surrogate pairs
+            if cp <= 0xFFFF {
+                d.extend_from_slice(&(cp as u16).to_le_bytes());
+            } else {
+                // Surrogate pair
+                let cp = cp - 0x10000;
+                let high = 0xD800 + (cp >> 10);
+                let low = 0xDC00 + (cp & 0x3FF);
+                d.extend_from_slice(&(high as u16).to_le_bytes());
+                d.extend_from_slice(&(low as u16).to_le_bytes());
+            }
+        } else {
+            // UTF-32LE: 4 bytes per code point
+            d.extend_from_slice(&cp.to_le_bytes());
+        }
     }
-    // null terminator (4 bytes of zero)
-    d.extend_from_slice(&0u32.to_le_bytes());
+    // null terminator: 2 bytes for short_wchar, 4 bytes otherwise
+    if short_wchar {
+        d.extend_from_slice(&0u16.to_le_bytes());
+    } else {
+        d.extend_from_slice(&0u32.to_le_bytes());
+    }
     d
 }
 
@@ -8440,28 +8478,28 @@ mod tests {
     #[test]
     fn wide_str_ascii() {
         // L"a" -> 'a' 编码为 UTF-32LE 0x61 + 4 字节 null terminator
-        let bytes = parse_wide_str(r#"L"a""#);
+        let bytes = parse_wide_str(r#"L"a""#, false);
         assert_eq!(bytes, vec![0x61, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
     fn wide_str_escape() {
         // L"\n" -> '\n' 编码为 0x0a + null terminator
-        let bytes = parse_wide_str(r#"L"\n""#);
+        let bytes = parse_wide_str(r#"L"\n""#, false);
         assert_eq!(bytes, vec![0x0a, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
     fn wide_str_unicode() {
         // L"\u{e9}" -> U+00E9 (UTF-32LE: e9 00 00 00) + null
-        let bytes = parse_wide_str(r#"L"\u{e9}""#);
+        let bytes = parse_wide_str(r#"L"\u{e9}""#, false);
         assert_eq!(bytes, vec![0xe9, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
     fn wide_str_multiple_chars() {
         // L"abc" -> 3 字符, 各 4 字节, + null terminator
-        let bytes = parse_wide_str(r#"L"abc""#);
+        let bytes = parse_wide_str(r#"L"abc""#, false);
         assert_eq!(bytes.len(), 16);
         assert_eq!(&bytes[0..4], &[0x61, 0, 0, 0]);
         assert_eq!(&bytes[4..8], &[0x62, 0, 0, 0]);

@@ -265,6 +265,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         cfg.freestanding,
         &cfg.pch_opts,
         cfg.kernel_code_model,
+        cfg.short_wchar,
     );
     let mut pp_diags = pp_out.diags;
     let preprocessed = pp_out.text;
@@ -407,6 +408,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             fenv_access,
             fp_contract,
             cx_limited_range,
+            short_wchar: cfg.short_wchar,
         },
     );
     drop(preprocessed);
@@ -738,6 +740,13 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.function_return_thunk_extern = cfg.function_return_thunk_extern;
     target.indirect_branch_thunk_extern = cfg.indirect_branch_thunk_extern;
     target.patchable_function_entry = cfg.patchable_function_entry;
+    target.ftrace_mode = cfg.ftrace_mode;
+    target.stack_protector_guard_reg = cfg.stack_protector_guard_reg;
+    target.stack_clash_protection = cfg.stack_clash_protection;
+    target.strict_aliasing = cfg.strict_aliasing;
+    target.strict_overflow = cfg.strict_overflow;
+    target.short_wchar = cfg.short_wchar;
+    target.no_common = cfg.no_common;
     if !target.sse {
         // 精确检测 IR 中是否真的使用浮点类型/字面量, 避免把含
         // double_xxx 标识符(如内核 double_rq_lock)的 Debug 串误判为浮点
@@ -973,6 +982,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
                 cfg.freestanding,
                 &cfg.pch_opts,
                 cfg.kernel_code_model,
+                cfg.short_wchar,
             );
             (pp_out.text, pp_out.deps, pp_out.diags)
         };
@@ -1184,6 +1194,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             cfg.freestanding,
             &cfg.pch_opts,
             cfg.kernel_code_model,
+            cfg.short_wchar,
         );
         let mut pp_diags = pp_out.diags;
         enrich_diags(&mut pp_diags, &src, &file_name, input.parent());
@@ -1249,6 +1260,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         cfg.freestanding,
         &cfg.pch_opts,
         cfg.kernel_code_model,
+        cfg.short_wchar,
     );
     let mut pp_diags = pp_out.diags;
     enrich_diags(&mut pp_diags, &src, &file_name, input.parent());

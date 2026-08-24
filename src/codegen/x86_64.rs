@@ -225,6 +225,8 @@ pub struct Codegen {
     rodata_string_slots: Vec<u64>,
     /// data 节引用 rodata 字符串的重定位: (data_off, string_rodata_off, custom_sec)
     pending_data_rodata_rels: Vec<(u64, u64, Option<usize>)>,
+    /// -mrecord-mcount: call site addresses for __mcount_loc section
+    mcount_loc_entries: Vec<u64>,
 }
 
 /// Per-function layout captured after resolve (for -S disassembly).
@@ -1383,6 +1385,7 @@ impl Codegen {
             rodata_string_init_globals: vec![],
             rodata_string_slots: vec![],
             pending_data_rodata_rels: vec![],
+            mcount_loc_entries: vec![],
         }
     }
 
@@ -3641,6 +3644,70 @@ impl Codegen {
             });
         }
 
+        // ftrace: add mcount/__fentry__ undefined symbols
+        match self.target.ftrace_mode {
+            crate::cli::FtraceMode::MCount => {
+                global_syms.push(ElfSym {
+                    name: "mcount".to_string(),
+                    section: SHN_UNDEF,
+                    value: 0,
+                    size: 0,
+                    bind: STB_GLOBAL,
+                    ty: STT_FUNC,
+                    visibility: STV_DEFAULT,
+                });
+            }
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                global_syms.push(ElfSym {
+                    name: "__fentry__".to_string(),
+                    section: SHN_UNDEF,
+                    value: 0,
+                    size: 0,
+                    bind: STB_GLOBAL,
+                    ty: STT_FUNC,
+                    visibility: STV_DEFAULT,
+                });
+            }
+            crate::cli::FtraceMode::None => {}
+        }
+
+        // -mrecord-mcount: generate __mcount_loc section
+        if matches!(self.target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
+            && !self.mcount_loc_entries.is_empty()
+        {
+            let mut mcount_data = Vec::with_capacity(self.mcount_loc_entries.len() * 8);
+            for &call_pc in &self.mcount_loc_entries {
+                mcount_data.extend_from_slice(&0u64.to_le_bytes()); // placeholder
+                let _ = call_pc; // addend set below via relocations
+            }
+            let sec_idx = self.extra_sections.len();
+            self.extra_sections.push(elf::ElfSection {
+                name: "__mcount_loc".to_string(),
+                data: mcount_data,
+                ty: elf::SHT_PROGBITS,
+                flags: elf::SHF_ALLOC,
+                align: 8,
+            });
+            // Create relocations: each entry is R_X86_64_64 relative to .text section
+            // .text section symbol will be at sym_index 1 (after null symbol)
+            // We use symbol name ".text" which will be resolved later
+            let mut mcount_relas = Vec::new();
+            for (i, &call_pc) in self.mcount_loc_entries.iter().enumerate() {
+                mcount_relas.push(ElfRela {
+                    offset: (i * 8) as u64,
+                    sym_index: 0, // .text section sym, patched below
+                    rel_type: elf::R_X86_64_64,
+                    addend: call_pc as i64,
+                });
+            }
+            // Store for later processing; target_sec_index = 7 + sec_idx
+            self.extra_rela_sections.push(elf::ExtraRelaSection {
+                name: ".rela__mcount_loc".to_string(),
+                relocations: mcount_relas,
+                target_sec_index: 7 + sec_idx as u32,
+            });
+        }
+
         // 函数定义符号 (包括嵌套函数)
         let asm_func_names: std::collections::BTreeSet<String> = self
             .asm_func_symbols
@@ -4010,6 +4077,16 @@ impl Codegen {
         // Phase 3: 构建重定位 (使用正确的符号索引)
         // 查找 .rodata section 符号索引
         let rodata_sym_idx = self.sym_index.get(".rodata").copied();
+
+        // Patch __mcount_loc relocations with .text section symbol index
+        let text_sym_idx = self.sym_index.get(".text").copied().unwrap_or(1);
+        for rela_sec in &mut self.extra_rela_sections {
+            if rela_sec.name == ".rela__mcount_loc" {
+                for rel in &mut rela_sec.relocations {
+                    rel.sym_index = text_sym_idx;
+                }
+            }
+        }
 
         for (code_pos, data) in self.string_refs.drain(..) {
             let str_off = self.string_pool[&data] as i64;
@@ -4860,6 +4937,18 @@ impl Codegen {
             self.label(&f.name.name);
             func_start
         };
+        // ftrace: -mfentry/-mrecord-mcount insert call __fentry__ before prologue
+        if matches!(
+            self.target.ftrace_mode,
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount
+        ) {
+            let call_pos = self.pos();
+            self.call_label("__fentry__");
+            // -mrecord-mcount: record call site address in __mcount_loc section
+            if matches!(self.target.ftrace_mode, crate::cli::FtraceMode::RecordMCount) {
+                self.emit_mcount_loc_entry(call_pos, &f.name.name);
+            }
+        }
         if self.target.frame_pointer {
             self.emit(&[0x55]); // push rbp
         }
@@ -5047,8 +5136,14 @@ impl Codegen {
             self.frame_size = ((raw + 15) / 16) * 16; // 16 字节对齐
             self.vec_temp_off = -self.frame_size + va_slots + sc_slot + 8;
             if self.frame_size > 0 {
-                self.emit(&[0x48, 0x81, 0xec]);
-                self.emit(&self.frame_size.to_le_bytes());
+                if self.target.stack_clash_protection && self.frame_size > 4096 {
+                    // -fstack-clash-protection: probe each page to trigger
+                    // guard page fault before the kernel maps it.
+                    self.emit_stack_clash_probes(self.frame_size as u32);
+                } else {
+                    self.emit(&[0x48, 0x81, 0xec]);
+                    self.emit(&self.frame_size.to_le_bytes());
+                }
             }
             // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
             if self.target.auto_var_init_zero && self.frame_size > 0 {
@@ -5056,8 +5151,13 @@ impl Codegen {
             }
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
             if self.target.stack_protector && self.frame_size >= 8 {
-                // mov rax, fs:[0x28]  → 加载 canary
-                self.emit(&[0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]);
+                // mov rax, seg:[0x28]  → 加载 canary
+                // seg = fs (0x64) or gs (0x65) based on guard register
+                let seg_prefix = match self.target.stack_protector_guard_reg {
+                    crate::cli::StackGuardReg::Gs => 0x65u8,
+                    _ => 0x64u8, // Fs is default
+                };
+                self.emit(&[seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]);
                 // mov [r13 - 8], rax  → 存储在帧顶部
                 self.emit(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]);
             }
@@ -5095,6 +5195,10 @@ impl Codegen {
                 // mov [r13 + static_chain_offset], r10
                 self.emit(&[0x49, 0x89, 0x95]);
                 self.emit(&self.static_chain_offset.to_le_bytes());
+            }
+            // ftrace: -pg inserts call mcount after prologue
+            if matches!(self.target.ftrace_mode, crate::cli::FtraceMode::MCount) {
+                self.call_label("mcount");
             }
             // Phase 2: 帧已建立 (r13 已设置), 现在存储参数到栈槽
             for (reg, off) in param_stores {
@@ -5141,8 +5245,13 @@ impl Codegen {
             }
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
             if self.target.stack_protector && self.frame_size >= 8 {
-                // mov rax, fs:[0x28]  → 加载 canary
-                self.emit(&[0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]);
+                // mov rax, seg:[0x28]  → 加载 canary
+                // seg = fs (0x64) or gs (0x65) based on guard register
+                let seg_prefix = match self.target.stack_protector_guard_reg {
+                    crate::cli::StackGuardReg::Gs => 0x65u8,
+                    _ => 0x64u8, // Fs is default
+                };
+                self.emit(&[seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]);
                 // mov [r13 - 8], rax  → 存储在帧顶部
                 self.emit(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]);
             }
@@ -5276,6 +5385,14 @@ impl Codegen {
                 is_push_imm: false,
             });
         }
+    }
+
+    /// Record a call site address for -mrecord-mcount __mcount_loc section.
+    /// The entry will be filled with a relocation pointing to the call instruction.
+    fn emit_mcount_loc_entry(&mut self, call_pc: u64, _func_name: &str) {
+        // Record the position; actual section data and relocation
+        // are emitted during ELF finalization.
+        self.mcount_loc_entries.push(call_pc);
     }
 
     fn jmp_external(&mut self, l: &str) {
@@ -12139,6 +12256,42 @@ impl Codegen {
         }
     }
 
+    /// -fstack-clash-protection: emit page-sized probes when allocating a
+    /// large stack frame.  Each probe writes a zero byte at [rsp - page*N]
+    /// to trigger a fault on the guard page before the kernel maps it.
+    fn emit_stack_clash_probes(&mut self, frame_size: u32) {
+        let page: u32 = 4096;
+        let remaining = frame_size % page;
+        let pages = frame_size / page;
+        // First: sub rsp, remaining (if any)
+        if remaining > 0 {
+            if remaining < 128 {
+                self.emit(&[0x48, 0x83, 0xEC, remaining as u8]);
+            } else {
+                self.emit(&[0x48, 0x81, 0xEC]);
+                self.emit(&remaining.to_le_bytes());
+            }
+        }
+        if pages > 0 {
+            // Probe loop: each iteration subtracts a page and probes it.
+            // mov ecx, pages
+            self.emit(&[0xB9]);
+            self.emit(&pages.to_le_bytes());
+            // .probe_loop:
+            let loop_start = self.pos();
+            // sub rsp, 4096
+            self.emit(&[0x48, 0x81, 0xEC, 0x00, 0x10, 0x00, 0x00]);
+            // mov byte ptr [rsp], 0   (probe)
+            self.emit(&[0xC6, 0x04, 0x24, 0x00]);
+            // dec ecx
+            self.emit(&[0xFF, 0xC9]);
+            // jnz .probe_loop
+            let loop_end = self.pos();
+            let disp = loop_start as i64 - loop_end as i64 - 2;
+            self.emit(&[0x75, disp as u8]);
+        }
+    }
+
     // VLA 运行时分配: 动态栈分配
     // 策略: 计算大小 → 对齐 → sub rsp → 保存基址到变量槽
     fn gen_vla_alloc(&mut self, v: &VarDecl) {
@@ -12183,8 +12336,13 @@ impl Codegen {
         if self.target.stack_protector && self.frame_size >= 8 {
             // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器
             self.emit(&[0x4d, 0x8b, 0x9d, 0xf8, 0xff, 0xff, 0xff]);
-            // xor r11, fs:[0x28]  → 与原始 canary 比较
-            self.emit(&[0x64, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00]);
+            // xor r11, seg:[0x28]  → 与原始 canary 比较
+            // seg = fs (0x64) or gs (0x65) based on guard register
+            let seg_prefix = match self.target.stack_protector_guard_reg {
+                crate::cli::StackGuardReg::Gs => 0x65u8,
+                _ => 0x64u8, // Fs is default
+            };
+            self.emit(&[seg_prefix, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00]);
             // Always call __stack_chk_fail on canary mismatch.
             // Both ET_REL and ET_EXEC use the same path:
             // __stack_chk_fail is emitted as an undefined global
