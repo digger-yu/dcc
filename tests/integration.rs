@@ -13571,6 +13571,81 @@ fn non_x86_asm_memory_clobber_barrier() {
 }
 
 // ============================================================================
+// Non-x86 inline asm — operand I/O (input loading, output writeback)
+// ============================================================================
+
+/// Non-x86 -S: no "result is 0" warning since backends now handle operands
+#[test]
+fn non_x86_asm_no_result_zero_warning_in_s_mode() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/asm_non_x86_preserve.c");
+    let targets = [
+        "aarch64-linux-gnu",
+        "riscv64-linux-gnu",
+        "arm-linux-gnueabihf",
+        "mips-linux-gnu",
+        "mips64-linux-gnuabi64",
+    ];
+    for target in targets {
+        let dir = std::env::temp_dir();
+        let asm_path = dir.join(format!(
+            "dcc-nonx86-no-warn-{}-{}.s",
+            target.replace('-', "_"),
+            std::process::id()
+        ));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-S", "-o"])
+            .arg(&asm_path)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = fs::remove_file(&asm_path);
+        assert!(
+            output.status.success(),
+            "target {target}: -S should succeed; stderr={stderr}"
+        );
+        assert!(
+            !stderr.contains("result is 0"),
+            "target {target}: -S should not emit 'result is 0' warning; stderr={stderr}"
+        );
+    }
+}
+
+/// Non-x86 -S: constraint resolution produces real register names in asm output
+#[test]
+fn non_x86_asm_operand_resolution_produces_register_names() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/asm_non_x86_constraints.c");
+    let targets_and_reg_prefixes = [
+        ("aarch64-linux-gnu", "w"),     // AArch64 uses w0-w15
+        ("riscv64-linux-gnu", "a"),     // RISC-V uses a0-a7
+        ("arm-linux-gnueabihf", "r"),   // ARM uses r0-r3
+        ("mips-linux-gnu", "$"),        // MIPS uses $v0, $t0, etc.
+    ];
+    for (target, reg_prefix) in targets_and_reg_prefixes {
+        let dir = std::env::temp_dir();
+        let asm_path = dir.join(format!(
+            "dcc-nonx86-operand-{}-{}.s",
+            target.replace('-', "_"),
+            std::process::id()
+        ));
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-S", "-o"])
+            .arg(&asm_path)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "target {target}: -S should succeed; stderr={stderr}"
+        );
+        let _ = fs::remove_file(&asm_path);
+    }
+}
+
+// ============================================================================
 // Unsupported target architectures — negative tests
 // ============================================================================
 
