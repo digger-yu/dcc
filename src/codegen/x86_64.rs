@@ -12185,18 +12185,12 @@ impl Codegen {
             self.emit(&[0x4d, 0x8b, 0x9d, 0xf8, 0xff, 0xff, 0xff]);
             // xor r11, fs:[0x28]  → 与原始 canary 比较
             self.emit(&[0x64, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00]);
-            if self.relocatable {
-                // ET_REL: call __stack_chk_fail (由 host libc 提供)
-                self.emit(&[0x74, 0x05]); // je .+5 (canary 匹配则跳过失败处理)
-                self.call_label("__stack_chk_fail");
-            } else {
-                // ET_EXEC: 内联 exit(255) syscall (无 libc 可用)
-                self.emit(&[0x74, 0x07]); // je .+7 (canary 匹配则跳过 inline exit)
-                                          // mov edi, 255 (exit code)
-                self.emit(&[0xbf, 0xff, 0x00, 0x00, 0x00]);
-                // mov eax, 60 (exit syscall) + syscall
-                self.emit(&[0xb8, 0x3c, 0x00, 0x00, 0x00, 0x0f, 0x05]);
-            }
+            // Always call __stack_chk_fail on canary mismatch.
+            // Both ET_REL and ET_EXEC use the same path:
+            // __stack_chk_fail is emitted as an undefined global
+            // symbol (provided by libc / kernel runtime).
+            self.emit(&[0x74, 0x05]); // je .+5 (canary OK → skip)
+            self.call_label("__stack_chk_fail");
         }
         // mov rsp, r13: 恢复栈指针
         self.emit(&[0x49, 0x8b, 0xe5]);
