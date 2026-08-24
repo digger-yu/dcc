@@ -56,6 +56,12 @@ pub struct ArmCodegen {
     entry: u64,
     /// exec 模式 _start 中 BL main 的指令位置
     start_call_pos: Option<u64>,
+    /// 当前函数是否为 variadic
+    is_current_func_variadic: bool,
+    /// va_save 区在 stack_bytes 中的起始偏移 (plan_locals 阶段预留)
+    va_save_base_off: i32,
+    /// 下一个 GP va_arg 槽位索引 (0..3, 对应 r0..r3)
+    va_gp_offs: i32,
     _target: Target,
 }
 
@@ -91,6 +97,9 @@ impl ArmCodegen {
             asm_text_mode: false,
             entry: if relocatable { 0 } else { 0x400000 + 52 + 32 },
             start_call_pos: None,
+            is_current_func_variadic: false,
+            va_save_base_off: 0,
+            va_gp_offs: 0,
             _target: target,
         }
     }
@@ -316,6 +325,17 @@ impl ArmCodegen {
         self.current_return_ty = Some(func.return_type.clone());
         self.emitted_return = false;
 
+        // 变参函数: 在局部变量之后预留 r0-r3 保存区 (4×4 = 16 字节)
+        let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
+        self.is_current_func_variadic = is_variadic;
+        self.va_gp_offs = 0;
+        if is_variadic {
+            self.va_save_base_off = self.stack_bytes;
+            self.stack_bytes += 16;
+        } else {
+            self.va_save_base_off = 0;
+        }
+
         let func_start = self.code.len() as u64;
         self.labels.insert(func.name.clone(), func_start);
 
@@ -327,6 +347,15 @@ impl ArmCodegen {
         self.frame_bytes = (self.stack_bytes + 7) & !7; // 8 字节对齐
         if self.frame_bytes > 0 {
             self.emit_sub_imm(13, 13, self.frame_bytes as u32); // sub sp, sp, #frame
+        }
+
+        // 变参函数: 帧建立后立即保存 r0-r3 到 va_save 区
+        // ARM 局部变量在 fp+off (正偏移), va_save 区同理
+        if is_variadic {
+            for i in 0..4u8 {
+                let off = self.va_save_base_off + (i as i32) * 4;
+                self.emit_str_fp_off(4 + i, off); // str r{i}, [fp, #off]
+            }
         }
 
         // 处理函数体
@@ -385,6 +414,45 @@ impl ArmCodegen {
         self.emit_mov_reg(13, 11); // mov sp, fp
         self.emit_pop(vec![11, 15]); // pop {fp, pc}
         self.emitted_return = true;
+    }
+
+    // STR rd, [fp, #off] — 任意寄存器, 正偏移
+    fn emit_str_fp_off(&mut self, rd: u8, off: i32) {
+        if off >= 0 {
+            let inst = 0xE58B0000 | ((rd as u32) << 12) | (off as u32 & 0xFFF);
+            self.code.extend_from_slice(&inst.to_le_bytes());
+        } else {
+            let inst = 0xE50B0000 | ((rd as u32) << 12) | ((-off) as u32 & 0xFFF);
+            self.code.extend_from_slice(&inst.to_le_bytes());
+        }
+    }
+
+    // LDR rd, [fp, #off] — 任意寄存器, 正偏移
+    fn emit_ldr_fp_off(&mut self, rd: u8, off: i32) {
+        if off >= 0 {
+            let inst = 0xE59B0000 | ((rd as u32) << 12) | (off as u32 & 0xFFF);
+            self.code.extend_from_slice(&inst.to_le_bytes());
+        } else {
+            let inst = 0xE51B0000 | ((rd as u32) << 12) | ((-off) as u32 & 0xFFF);
+            self.code.extend_from_slice(&inst.to_le_bytes());
+        }
+    }
+
+    // M25: ARM va_arg 整数路径 — 从保存区顺序读 r0
+    // AAPCS ABI: r0-r3 在函数入口保存到 va_save 区,
+    // va_arg 依次读取, 超出 4 个则从 caller 栈读.
+    fn gen_va_arg_int(&mut self, _ap_name: &str) {
+        if self.va_gp_offs < 4 {
+            let off = self.va_save_base_off + self.va_gp_offs * 4;
+            self.emit_ldr_fp_off(0, off); // ldr r0, [fp, #off]
+            self.va_gp_offs += 1;
+        } else {
+            // 从 caller 栈读取
+            let stack_off = self.frame_bytes + (self.va_gp_offs - 4) * 4;
+            // ldr r0, [fp, #stack_off] (fp 上方即 caller 帧)
+            self.emit_ldr_fp_off(0, stack_off);
+            self.va_gp_offs += 1;
+        }
     }
 
     // ===== Block item / stmt / expr =====
@@ -705,6 +773,17 @@ impl ArmCodegen {
                     &span.file,
                     span.line,
                 );
+            }
+            // M25: __builtin_va_arg(ap, T) — 从保存区顺序读取变参
+            Expr::VaArg { ap, ty, .. } => {
+                let is_float = matches!(ty, crate::ast::Type::Float | crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                if is_float {
+                    // 浮点变参: AAPCS 无独立浮点变参保存区, 回退整数路径
+                    self.gen_va_arg_int("ap");
+                } else {
+                    self.gen_va_arg_int("ap");
+                }
+                let _ = ap;
             }
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
@@ -1342,5 +1421,42 @@ mod tests {
         // Should emit prologue + mov r0, #0 + epilogue
         assert!(cg.code.len() > 12);
         assert!(cg.labels.contains_key("f"));
+    }
+
+    // M25: ARM va_arg 整数路径单元测试
+    // 验证 gen_va_arg_int 从保存区顺序读 r0
+    #[test]
+    fn arm_va_arg_int_reads_sequentially_from_save_area() {
+        let mut cg = ArmCodegen::new(
+            Target::resolve(
+                &crate::cli::TargetTriple::parse("arm-linux-gnueabihf").unwrap(),
+            ),
+            true,
+        );
+        cg.is_current_func_variadic = true;
+        cg.va_save_base_off = 0;
+        cg.va_gp_offs = 0;
+        cg.frame_bytes = 16;
+        // 读 3 个变参
+        cg.gen_va_arg_int("ap");
+        cg.gen_va_arg_int("ap");
+        cg.gen_va_arg_int("ap");
+        // 验证: 3 条 ldr r0, [fp, #off] 指令
+        // ARM LDR rd=r0, [fp=r11, #imm12]: E59B 0000 | imm12
+        let ldr_count = cg
+            .code
+            .windows(4)
+            .filter(|w| {
+                let inst = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                // 匹配高 20 位: cond=E, P=1,U=1,B=0,W=0,L=1, Rn=fp(11), Rd=r0(0)
+                (inst & 0xFFFFF000) == 0xE59B0000
+            })
+            .count();
+        assert_eq!(
+            ldr_count, 3,
+            "expected 3 ldr r0, [fp, #off] instructions, got {ldr_count}"
+        );
+        // 验证 va_gp_offs 推进
+        assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
     }
 }
