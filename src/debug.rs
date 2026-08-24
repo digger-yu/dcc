@@ -1550,6 +1550,10 @@ fn write_line_entry(
     };
     let line_incr = line_advance - line_base as i64;
     let adjusted = op_advance * line_range as i64 + line_incr;
+    // ── discriminator 变化需在任一输出路径前发射 ──────────────────
+    // DW_LNE_set_discriminator 是扩展操作码, 不推进 PC 也不产生行,
+    // 仅设置状态机的 discriminator 字段, 后续 copy/special 将其带入行矩阵.
+    let disc_changed = e.discriminator as u32 != state.discriminator;
     if line_advance >= line_base as i64
         && line_advance <= max_line_incr
         && pc_advance <= min_insn as u64
@@ -1559,6 +1563,16 @@ fn write_line_entry(
     {
         let opcode = opcode_base as i64 + adjusted;
         if opcode >= opcode_base as i64 && opcode <= 255 {
+            if disc_changed {
+                // 先发射 DW_LNE_set_discriminator, 再发 special opcode
+                out.push(DW_LNS_extended_op);
+                let disc_len_pos = out.len();
+                out.push(0); // placeholder for length
+                out.push(DW_LNE_set_discriminator);
+                write_uleb128(out, e.discriminator as u64);
+                let disc_bytes = (out.len() - disc_len_pos - 1) as u8;
+                out[disc_len_pos] = disc_bytes;
+            }
             out.push(opcode as u8);
             state.address = e.pc;
             state.line = e.line as i64;
@@ -1616,6 +1630,15 @@ fn write_line_entry(
         out.push(DW_LNS_set_basic_block);
         state.basic_block = true;
     }
+    if disc_changed {
+        out.push(DW_LNS_extended_op);
+        let disc_len_pos = out.len();
+        out.push(0); // placeholder for length
+        out.push(DW_LNE_set_discriminator);
+        write_uleb128(out, e.discriminator as u64);
+        let disc_bytes = (out.len() - disc_len_pos - 1) as u8;
+        out[disc_len_pos] = disc_bytes;
+    }
     if line_advance != 0 {
         out.push(DW_LNS_advance_line);
         write_sleb128(out, line_advance);
@@ -1627,6 +1650,7 @@ fn write_line_entry(
     out.push(DW_LNS_copy);
     state.address = e.pc;
     state.line = e.line as i64;
+    state.discriminator = e.discriminator as u32;
 }
 
 // ============================================================================
@@ -3011,6 +3035,52 @@ mod tests {
             sec.line.len() < 70,
             "matrix opt should keep .debug_line compact, got {} bytes",
             sec.line.len()
+        );
+    }
+
+    /// discriminator 变化应发射 DW_LNE_set_discriminator 扩展操作码
+    #[test]
+    fn dwarf_line_emits_discriminator() {
+        let entries = vec![
+            LineEntry {
+                pc: 0x100,
+                line: 10,
+                column: 1,
+                file_idx: 0,
+                discriminator: 0,
+                is_stmt: true,
+                basic_block: false,
+            },
+            LineEntry {
+                pc: 0x104,
+                line: 10,
+                column: 1,
+                file_idx: 0,
+                discriminator: 1, // 同一行但不同指令 (asm 块内逐指令条目)
+                is_stmt: false,
+                basic_block: false,
+            },
+            LineEntry {
+                pc: 0x108,
+                line: 10,
+                column: 1,
+                file_idx: 0,
+                discriminator: 2, // 第三条指令
+                is_stmt: false,
+                basic_block: false,
+            },
+        ];
+        let cu = make_line_cu(entries);
+        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        // 验证 .debug_line 包含 DW_LNE_set_discriminator (0x04)
+        // DW_LNE_set_discriminator 编码: 0x00 (extended_op), len, 0x04, ULEB128(value)
+        let has_discriminator = sec
+            .line
+            .windows(3)
+            .any(|w| w[0] == 0x00 && w[2] == DW_LNE_set_discriminator);
+        assert!(
+            has_discriminator,
+            ".debug_line should contain DW_LNE_set_discriminator opcode for per-insn asm entries"
         );
     }
 }
