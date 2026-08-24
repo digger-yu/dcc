@@ -11,7 +11,7 @@
 
 | 限制 | 说明 |
 |------|------|
-| 非 x86 mini-assembler | `-S` 路径已支持约束解析 + 架构寄存器名替换 + memory clobber 屏障；`-c` 路径无完整 mini-assembler 机器码编码，inline asm 文本不生成目标机器码 |
+| 非 x86 `-c` 路径 mini-assembler | `-S` 路径已完整支持（详见 `support_features.md` 非 x86_64 后端 inline asm 条目）；`-c` 路径无完整 mini-assembler 机器码编码，inline asm 文本不生成目标机器码，仅发出警告 |
 
 ## 链接器 / 对象文件限制
 
