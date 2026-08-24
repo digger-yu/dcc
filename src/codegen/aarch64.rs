@@ -1332,47 +1332,28 @@ impl Aarch64Codegen {
             }
             Expr::AsmExpr {
                 asm_str,
-                outputs: _,
+                outputs,
                 output_names,
                 output_constraints,
-                inputs: _,
+                inputs,
                 input_names,
                 input_constraints,
                 clobbers,
                 span,
                 ..
             } => {
-                let resolved = Self::resolve_asm_template_enhanced(
+                self.emit_inline_asm(
                     asm_str,
-                    output_constraints,
-                    input_constraints,
+                    outputs,
                     output_names,
+                    output_constraints,
+                    inputs,
                     input_names,
-                    &[],
+                    input_constraints,
+                    clobbers,
+                    &span.file,
+                    span.line,
                 );
-                if self.asm_text_mode {
-                    // -S 模式: 保留 asm 文本输出
-                    eprintln!(
-                        "{}:{}: warning: inline asm on non-x86_64 target: result is 0",
-                        span.file, span.line
-                    );
-                    let lines: Vec<String> = resolved
-                        .split('\n')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    self.raw_func_asm_lines
-                        .push((format!("__inline_{}", self.label_serial), lines));
-                    self.label_serial += 1;
-                } else {
-                    // -c 模式: mini-assembler 编码机器码
-                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
-                }
-                // memory clobber: 发射 DMB 编译器屏障
-                if clobbers.iter().any(|c| c == "memory") {
-                    self.emit_dmb_ish();
-                }
-                self.mov_w0_imm(0);
             }
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
@@ -1700,13 +1681,13 @@ impl Aarch64Codegen {
 
     fn str_wt_sp(&mut self, reg: u8, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
-        let insn = 0xb900_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 7);
+        let insn = 0xb900_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
     fn ldr_wt_sp(&mut self, reg: u8, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
-        let insn = 0xb940_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 7);
+        let insn = 0xb940_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 0x1f);
         self.emit(&insn.to_le_bytes());
     }
 
@@ -1781,8 +1762,132 @@ impl Aarch64Codegen {
     }
 
     fn mov_w_reg_w0(&mut self, reg: u8) {
-        let insn = 0x2a0003e0u32 | ((reg as u32 & 7) << 16) | ((reg as u32 & 7) << 5);
+        let insn = 0x2a0003e0u32 | ((reg as u32 & 0x1f) << 16) | ((reg as u32 & 0x1f) << 5);
         self.emit(&insn.to_le_bytes());
+    }
+
+    /// MOV Wd, Ws — general 32-bit register-to-register move
+    fn mov_w_rd_rs(&mut self, rd: u8, rs: u8) {
+        let insn = 0x2a0003e0u32
+            | ((rs as u32 & 0x1f) << 16)
+            | ((rd as u32 & 0x1f) << 0);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// Load a local variable from stack into an arbitrary GP register (32-bit W)
+    fn asm_load_var_to_reg(&mut self, var_name: &str, reg_idx: u8) {
+        if let Some(&off) = self.locals.get(var_name) {
+            self.ldr_wt_sp(reg_idx, off);
+        }
+    }
+
+    /// Store a GP register value back to a local variable on stack (32-bit W)
+    fn asm_store_reg_to_var(&mut self, var_name: &str, reg_idx: u8) {
+        if let Some(&off) = self.locals.get(var_name) {
+            self.str_wt_sp(reg_idx, off);
+        }
+    }
+
+    /// 发射内联汇编: 加载输入 → 发射 asm → 写回输出 → 设置表达式结果
+    fn emit_inline_asm(
+        &mut self,
+        asm_str: &str,
+        outputs: &[Expr],
+        output_names: &[Option<String>],
+        output_constraints: &[String],
+        inputs: &[Expr],
+        input_names: &[Option<String>],
+        input_constraints: &[String],
+        clobbers: &[String],
+        span_file: &str,
+        span_line: u32,
+    ) {
+        let pool = asm_constraints::aarch64_reg_pool();
+        let resolved_operands = resolve_asm_operands(
+            output_constraints,
+            input_constraints,
+            output_names,
+            input_names,
+            &pool,
+        );
+
+        // --- 加载 inout 输入值到分配的寄存器 ---
+        for (i, op) in resolved_operands.iter().enumerate() {
+            if op.is_input && op.is_output {
+                // InOutReg: 加载变量当前值到寄存器
+                if let Some(ref alloc) = op.reg {
+                    if i < outputs.len() {
+                        if let Expr::Ident { name, .. } = &outputs[i] {
+                            self.asm_load_var_to_reg(&name.name, alloc.idx);
+                        }
+                    }
+                }
+            }
+        }
+        // --- 加载纯输入值到分配的寄存器 ---
+        for (j, op) in resolved_operands.iter().enumerate() {
+            if op.is_input && !op.is_output {
+                if let Some(ref alloc) = op.reg {
+                    let input_idx = j - output_constraints.len();
+                    if input_idx < inputs.len() {
+                        if let Expr::Ident { name, .. } = &inputs[input_idx] {
+                            self.asm_load_var_to_reg(&name.name, alloc.idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- 解析模板并发射 asm ---
+        let resolved = Self::resolve_asm_template_enhanced(
+            asm_str,
+            output_constraints,
+            input_constraints,
+            output_names,
+            input_names,
+            &[],
+        );
+        if self.asm_text_mode {
+            let lines: Vec<String> = resolved
+                .split('\n')
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            self.raw_func_asm_lines
+                .push((format!("__inline_{}", self.label_serial), lines));
+            self.label_serial += 1;
+        } else {
+            self.encode_and_emit_asm(&resolved, span_file, span_line);
+        }
+
+        // --- 写回输出寄存器到 C 变量 ---
+        let mut first_output_reg: Option<u8> = None;
+        for (i, op) in resolved_operands.iter().enumerate() {
+            if op.is_output && i < outputs.len() {
+                if let Some(ref alloc) = op.reg {
+                    if first_output_reg.is_none() {
+                        first_output_reg = Some(alloc.idx);
+                    }
+                    if let Expr::Ident { name, .. } = &outputs[i] {
+                        self.asm_store_reg_to_var(&name.name, alloc.idx);
+                    }
+                }
+            }
+        }
+
+        // --- memory clobber: DMB ISH 编译器屏障 ---
+        if clobbers.iter().any(|c| c == "memory") {
+            self.emit_dmb_ish();
+        }
+
+        // --- 表达式结果: 第一个输出寄存器 → w0 ---
+        if let Some(reg) = first_output_reg {
+            if reg != 0 {
+                self.mov_w_rd_rs(0, reg);
+            }
+        } else {
+            self.mov_w0_imm(0);
+        }
     }
 
     fn mov_v_reg_s0(&mut self, reg: u8) {
