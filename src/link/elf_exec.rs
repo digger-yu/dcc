@@ -47,11 +47,12 @@ pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
         // section 是 0-based 内部索引。ELF 节 0 是 NULL 节，所以 st_shndx = section + 1。
         // i==0 的符号条目总是 UNDEF（st_shndx=0）。
         let st_shndx = if i == 0 { 0 } else { sym.section + 1 };
+        // 对于 ET_EXEC（可执行文件），st_value 是绝对虚拟地址
         symtab.extend_from_slice(&st_name.to_le_bytes());
         symtab.push(st_info);
         symtab.push(st_other);
         symtab.extend_from_slice(&st_shndx.to_le_bytes());
-        symtab.extend_from_slice(&sym.value.to_le_bytes());
+        symtab.extend_from_slice(&sym.vaddr.to_le_bytes());
         symtab.extend_from_slice(&sym.size.to_le_bytes());
     }
 

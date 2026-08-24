@@ -2248,7 +2248,7 @@ pub fn execute_script(
     // 用绝对地址更新输入符号
     for sym in resolved {
         if sym.section > 0 && !sym.name.is_empty() {
-            if let Some(&sec_vma) = sec_vma_map.get(&(sym.section - 1)) {
+            if let Some(&sec_vma) = sec_vma_map.get(&sym.section) {
                 let abs_addr = sec_vma.wrapping_add(sym.value);
                 ctx.symbols.insert(sym.name.clone(), abs_addr);
             }
@@ -2261,6 +2261,19 @@ pub fn execute_script(
         ctx.symbols.insert(assign.name.clone(), value);
         if i < result.symbols.len() {
             result.symbols[i].value = value;
+        }
+    }
+
+    // 3.7 重新求值 SECTIONS 块内的符号赋值（用绝对地址）
+    let mut sym_idx = script.top_assignments.len();
+    for cmd in &script.sections {
+        if let SectionCommand::SymbolAssign(assign) = cmd {
+            let value = ctx.eval(&assign.expr).unwrap_or(0);
+            ctx.symbols.insert(assign.name.clone(), value);
+            if sym_idx < result.symbols.len() {
+                result.symbols[sym_idx].value = value;
+            }
+            sym_idx += 1;
         }
     }
 
