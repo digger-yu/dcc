@@ -796,9 +796,15 @@ fn relocation_patch_width(arch: ArchKind, rel_type: u32) -> usize {
 
 fn apply_one(sec: &mut OutputSection, r: OutputRela, layout: &Layout) -> Result<(), RelocError> {
     let sym = &layout.symbols[r.sym as usize];
-    let s_vaddr = if sym.section != 0 {
-        let s_sec = &layout.sections[sym.section as usize];
-        s_sec.vaddr.wrapping_add(sym.value)
+    // u16::MAX 是未定义符号的哨兵值 (SHN_UNDEF)
+    let s_vaddr = if sym.section != 0 && sym.section != u16::MAX {
+        let sec_idx = sym.section as usize;
+        if sec_idx < layout.sections.len() {
+            let s_sec = &layout.sections[sec_idx];
+            s_sec.vaddr.wrapping_add(sym.value)
+        } else {
+            0
+        }
     } else {
         0
     };

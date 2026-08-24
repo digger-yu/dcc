@@ -46,7 +46,12 @@ pub fn write_elf_exec(layout: &Layout, machine: u16) -> Vec<u8> {
         let st_other = sym.visibility;
         // section 是 0-based 内部索引。ELF 节 0 是 NULL 节，所以 st_shndx = section + 1。
         // i==0 的符号条目总是 UNDEF（st_shndx=0）。
-        let st_shndx = if i == 0 { 0 } else { sym.section + 1 };
+        // 未定义符号使用 u16::MAX 作为哨兵值，映射到 SHN_UNDEF (0)。
+        let st_shndx = if i == 0 || sym.section == u16::MAX {
+            0 // SHN_UNDEF
+        } else {
+            sym.section + 1
+        };
         // 对于 ET_EXEC（可执行文件），st_value 是绝对虚拟地址
         symtab.extend_from_slice(&st_name.to_le_bytes());
         symtab.push(st_info);

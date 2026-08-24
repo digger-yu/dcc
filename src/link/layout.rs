@@ -1037,10 +1037,24 @@ impl LayoutBuilder {
         // 注意: r.section 是 bundle 内的 flat section 索引, 需要映射到输出节
         // r.value 是输入节内的偏移, 需要加上输入节在输出节内的偏移
         for r in resolved {
-            if r.section == 0 {
-                continue;
-            } // undefined 已合并到 ResolvedSymbol 但不出现在 .symtab
             if r.bind == STB_LOCAL {
+                continue;
+            }
+            // 未定义符号 (section==0): 加入 .symtab 以便 nm 显示为 U
+            // 使用 u16::MAX 作为未定义符号的 section 哨兵值
+            if r.section == 0 {
+                out.push(OutputSymbol {
+                    name: r.name.clone(),
+                    value: 0,
+                    vaddr: 0,
+                    size: r.size,
+                    bind: r.bind,
+                    ty: r.ty,
+                    kind: r.ty,
+                    visibility: r.visibility,
+                    section: u16::MAX, // SHN_UNDEF 哨兵
+                    shndx_if_section: 0,
+                });
                 continue;
             }
             let in_offset = find_input_offset(sections, r.section, 0).unwrap_or(0);

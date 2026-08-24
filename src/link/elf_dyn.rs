@@ -110,7 +110,8 @@ fn build_symtab(layout: &Layout, name_offsets: &[u32]) -> Vec<u8> {
         let st_name = name_offsets[i];
         let st_info = (sym.bind << 4) | sym.ty;
         let st_other = sym.visibility;
-        let st_shndx = sym.section;
+        // 未定义符号使用 u16::MAX 哨兵，映射到 SHN_UNDEF (0)
+        let st_shndx = if sym.section == u16::MAX { 0 } else { sym.section };
         symtab.extend_from_slice(&st_name.to_le_bytes());
         symtab.push(st_info);
         symtab.push(st_other);
