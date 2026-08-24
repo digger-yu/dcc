@@ -2082,6 +2082,71 @@ mod tests {
         println!("  - {} top assignments", script.top_assignments.len());
         println!("  - {} trailing commands", script.trailing_commands.len());
     }
+
+    #[test]
+    fn parse_discard_section() {
+        // 测试 /DISCARD/ 节的解析
+        let text = r#"
+            SECTIONS {
+                /DISCARD/ : {
+                    *(.note.GNU-stack)
+                    *(.note.gnu.property)
+                }
+                .text : { *(.text) }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let discard_sec = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::OutputSection(def) = cmd {
+                if def.name == "/DISCARD/" { Some(def) } else { None }
+            } else { None }
+        }).expect("should have /DISCARD/ output section");
+        assert!(discard_sec.is_discard);
+    }
+
+    #[test]
+    fn parse_sections_block_symbol_assign() {
+        // 测试 SECTIONS 块内的符号赋值（如 phys_startup_64）
+        let text = r#"
+            SECTIONS {
+                . = 0xffffffff81000000;
+                phys_startup_64 = ABSOLUTE(startup_64 - 0xffffffff80000000);
+                .text : { *(.text) }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        // 找到 SECTIONS 块内的 SymbolAssign
+        let sym_assign = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::SymbolAssign(assign) = cmd {
+                if assign.name == "phys_startup_64" { Some(assign) } else { None }
+            } else { None }
+        }).expect("should have phys_startup_64 assignment in SECTIONS");
+        assert_eq!(sym_assign.name, "phys_startup_64");
+    }
+
+    #[test]
+    fn extract_defined_symbols_from_script() {
+        // 测试从链接脚本提取定义的符号名
+        let text = r#"
+            jiffies = jiffies_64;
+            SECTIONS {
+                phys_startup_64 = ABSOLUTE(startup_64 - 0xffffffff80000000);
+                .text : {
+                    _text = .;
+                    *(.text)
+                    _etext = .;
+                }
+            }
+            PROVIDE(__hidden = 0);
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let syms = script.extract_defined_symbols();
+        assert!(syms.contains(&"jiffies".to_string()));
+        assert!(syms.contains(&"phys_startup_64".to_string()));
+        assert!(syms.contains(&"_text".to_string()));
+        assert!(syms.contains(&"_etext".to_string()));
+        assert!(syms.contains(&"__hidden".to_string()));
+    }
 }
 
 // ─── Linker Script Executor ─────────────────────────────────────────────────
