@@ -482,17 +482,24 @@ impl LayoutBuilder {
             sections.push(out_sec);
         }
 
-        // 填充数据并计算 input_offsets
-        self.fill_section_data(&mut sections, bundle);
-
-        // 计算文件偏移
+        // 脚本已经填充了数据，不需要再调用 fill_section_data
+        // 脚本已经计算了地址，不需要再调用 assign_addresses
+        // 只需计算文件偏移
         let file_base = if self.is_relocatable {
             0
         } else {
             let nphdr_max = if self.emit_dynamic { 7 } else { 5 };
             (64 + nphdr_max * 56 + 15) & !15
         };
-        self.assign_addresses(&mut sections, file_base);
+        let mut current_file_off = file_base;
+        for sec in sections.iter_mut() {
+            let align = sec.align.max(1);
+            current_file_off = (current_file_off + align - 1) & !(align - 1);
+            sec.file_off = current_file_off;
+            if sec.ty != SHT_NOBITS {
+                current_file_off += sec.data.len() as u64;
+            }
+        }
 
         // 构建输出符号表
         let mut symbols = self.build_symbols(bundle, resolved, &sections);
@@ -523,7 +530,7 @@ impl LayoutBuilder {
                 symbols
                     .iter()
                     .find(|s| s.name == self.entry_name)
-                    .map(|s| s.value)
+                    .map(|s| s.vaddr)
                     .unwrap_or_else(|| {
                         sections.first().map(|s| s.vaddr).unwrap_or(self.base_addr)
                     })

@@ -310,7 +310,25 @@ impl Lexer {
                     Token::Minus
                 }
             }
-            '/' => Token::Slash,
+            '/' => {
+                // Check for /DISCARD/
+                let saved = self.pos;
+                let discard = "DISCARD/";
+                let mut matches = true;
+                for expected in discard.chars() {
+                    if self.peek_char() != Some(expected) {
+                        matches = false;
+                        break;
+                    }
+                    self.next_char();
+                }
+                if matches {
+                    Token::Discard
+                } else {
+                    self.pos = saved;
+                    Token::Slash
+                }
+            }
             '%' => Token::Percent,
             '&' => {
                 if self.peek_char() == Some('&') {
@@ -391,6 +409,11 @@ impl Lexer {
                     if c2.is_ascii_alphanumeric() || c2 == '_' {
                         return Token::Ident(self.read_ident('.'));
                     }
+                    // Handle .. in section names like .text..__x86
+                    // The first . is consumed, then read_ident picks up .__x86
+                    if c2 == '.' {
+                        return Token::Ident(self.read_ident('.'));
+                    }
                 }
                 Token::Dot
             }
@@ -451,6 +474,43 @@ pub struct LinkerScript {
     pub top_assignments: Vec<SymbolAssignment>,
     /// SECTIONS 之后的 ASSERT/PROVIDE
     pub trailing_commands: Vec<TrailingCommand>,
+}
+
+impl LinkerScript {
+    /// 提取链接脚本中定义的所有符号名（用于符号解析前预注册）
+    pub fn extract_defined_symbols(&self) -> Vec<String> {
+        let mut syms = Vec::new();
+        // 顶层赋值
+        for a in &self.top_assignments {
+            syms.push(a.name.clone());
+        }
+        // SECTIONS 块内的符号
+        for cmd in &self.sections {
+            match cmd {
+                SectionCommand::SymbolAssign(a) => {
+                    syms.push(a.name.clone());
+                }
+                SectionCommand::ProvideCmd(name, _) => {
+                    syms.push(name.clone());
+                }
+                SectionCommand::OutputSection(def) => {
+                    for item in &def.body {
+                        if let SectionBodyItem::SymbolAssign(a) = item {
+                            syms.push(a.name.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // 尾部 PROVIDE
+        for cmd in &self.trailing_commands {
+            if let TrailingCommand::Provide(name, _) = cmd {
+                syms.push(name.clone());
+            }
+        }
+        syms
+    }
 }
 
 /// PHDRS 块中的段定义
@@ -970,10 +1030,22 @@ impl Parser {
     fn try_parse_output_section(&mut self) -> Result<Option<OutputSectionDef>, String> {
         let saved = self.pos;
 
-        // 节名
+        // 节名（可能由多个 token 组成，如 .data..percpu = Ident(".data") + Ident("..percpu")）
         let (name, is_discard) = match self.next() {
             Token::Ident(s) if s == "/DISCARD/" => (s.clone(), true),
-            Token::Ident(s) => (s, false),
+            Token::Ident(s) => {
+                let mut full_name = s;
+                // 合并以 .. 开头的续接 token
+                while let Token::Ident(ref cont) = self.peek().clone() {
+                    if cont.starts_with("..") {
+                        full_name.push_str(cont);
+                        self.next();
+                    } else {
+                        break;
+                    }
+                }
+                (full_name, false)
+            }
             Token::Discard => ("/DISCARD/".to_string(), true),
             _ => {
                 self.pos = saved;
@@ -1203,14 +1275,42 @@ impl Parser {
     }
 
     fn parse_section_pattern(&mut self) -> Result<Option<SectionPattern>, String> {
-        // 节名模式通常是一个单独的 Ident 令牌（如 .text 或 .text.*）
-        // 或者由多个令牌组成（如 .text + * 等）
+        // 节名模式由多个 token 组成（如 .text.asan.* 或 .text..__x86.rethunk_untrain）
+        // 当遇到一个新的以 . 开头的 Ident 且前面已经有内容时，表示新模式的开始
         let mut pattern = String::new();
         
         loop {
             match self.peek().clone() {
                 Token::RParen | Token::Comma | Token::Eof => break,
                 Token::Ident(s) => {
+                    if !pattern.is_empty() && s.starts_with('.') {
+                        let last_char = pattern.chars().last().unwrap_or(' ');
+                        // Ident 以 .. 开头一定是节名续接（如 ..__x86）
+                        if !s.starts_with("..") {
+                            // Case 1: pattern 以字母/数字/]/_ 等结尾
+                            // 新的 .xxx 一定是新模式
+                            if last_char != '.' && last_char != '*' {
+                                break;
+                            }
+                            // Case 2: pattern 以 * 结尾
+                            // 如果新 Ident 以 .字母/数字/_ 开头，则是新模式
+                            // 例如 .text.asan.* 后接 .text.tsan → 两个独立模式
+                            if last_char == '*' {
+                                let second = s.chars().nth(1);
+                                if second.map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+                                    break;
+                                }
+                            }
+                            // Case 3: pattern 以 . 结尾，新 Ident 以 .字母 开头
+                            // 比如 .text. + .data → 新模式
+                            if last_char == '.' {
+                                let second = s.chars().nth(1);
+                                if second.map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     self.next();
                     pattern.push_str(&s);
                 }
@@ -1235,7 +1335,6 @@ impl Parser {
                     pattern.push_str(&n.to_string());
                 }
                 _ => {
-                    // 其他令牌不是模式的一部分
                     break;
                 }
             }
@@ -1489,6 +1588,16 @@ impl Parser {
             }
             Token::Ident(name) => {
                 self.next();
+                // 合并以 .. 开头的续接 token（如 .data..percpu）
+                let mut full_name = name;
+                while let Token::Ident(ref cont) = self.peek().clone() {
+                    if cont.starts_with("..") {
+                        full_name.push_str(cont);
+                        self.next();
+                    } else {
+                        break;
+                    }
+                }
                 // 检查是否是函数调用
                 if self.eat(&Token::LParen) {
                     let mut args = Vec::new();
@@ -1499,9 +1608,9 @@ impl Parser {
                         }
                     }
                     self.expect(&Token::RParen)?;
-                    Ok(Expr::Call(name, args))
+                    Ok(Expr::Call(full_name, args))
                 } else {
-                    Ok(Expr::Symbol(name))
+                    Ok(Expr::Symbol(full_name))
                 }
             }
             Token::Str(s) => {
@@ -1618,9 +1727,8 @@ impl EvalContext {
                             return Err("SIZEOF() requires 1 argument".into());
                         }
                         if let Expr::Symbol(sec_name) = &args[0] {
-                            self.section_sizes.get(sec_name).copied().ok_or_else(|| {
-                                format!("SIZEOF: section '{}' not found", sec_name)
-                            })
+                            // GNU ld: SIZEOF of non-existent section returns 0
+                            Ok(self.section_sizes.get(sec_name).copied().unwrap_or(0))
                         } else {
                             Err("SIZEOF() requires section name".into())
                         }
@@ -1633,7 +1741,7 @@ impl EvalContext {
                         if align == 0 {
                             return Ok(self.location_counter);
                         }
-                        Ok((self.location_counter + align - 1) & !(align - 1))
+                        Ok(self.location_counter.wrapping_add(align - 1) & !(align - 1))
                     }
                     "MAX" => {
                         if args.len() < 2 {
@@ -1844,6 +1952,69 @@ mod tests {
     }
 
     #[test]
+    fn parse_section_pattern_splitting() {
+        // 验证空格分隔的多个模式被正确拆分
+        let text = r#"
+            SECTIONS {
+                .text : {
+                    *(.text.asan.* .text.tsan.*)
+                    *(.text..__x86.rethunk_untrain)
+                    *(.text .text.[_0-9A-Za-df-rt-z]* .text.s[_0-9A-Za-su-z]*)
+                    *(.text.hot .text.hot.*)
+                    *(.text.unlikely .text.unlikely.*)
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        // 找到 .text 输出节
+        let text_sec = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::OutputSection(def) = cmd {
+                if def.name == ".text" { Some(def) } else { None }
+            } else { None }
+        }).expect("should have .text output section");
+        // 收集所有 InputSectionSpec
+        let specs: Vec<&InputSectionSpec> = text_sec.body.iter().filter_map(|item| {
+            if let SectionBodyItem::InputSection(spec) = item { Some(spec) } else { None }
+        }).collect();
+        assert_eq!(specs.len(), 5, "expected 5 input section specs");
+        // .text.asan.* .text.tsan.* → 2 patterns
+        assert_eq!(specs[0].section_patterns.len(), 2,
+            "asan/tsan should be 2 patterns: {:?}",
+            specs[0].section_patterns.iter().map(|p| &p.pattern).collect::<Vec<_>>());
+        assert_eq!(specs[0].section_patterns[0].pattern, ".text.asan.*");
+        assert_eq!(specs[0].section_patterns[1].pattern, ".text.tsan.*");
+        // .text..__x86.rethunk_untrain → 1 pattern
+        assert_eq!(specs[1].section_patterns.len(), 1);
+        assert_eq!(specs[1].section_patterns[0].pattern, ".text..__x86.rethunk_untrain");
+        // .text .text.[...]  .text.s[...] → 3 patterns
+        assert_eq!(specs[2].section_patterns.len(), 3,
+            "complex pattern should be 3: {:?}",
+            specs[2].section_patterns.iter().map(|p| &p.pattern).collect::<Vec<_>>());
+        assert_eq!(specs[2].section_patterns[0].pattern, ".text");
+        // .text.hot .text.hot.* → 2 patterns
+        assert_eq!(specs[3].section_patterns.len(), 2);
+        assert_eq!(specs[3].section_patterns[0].pattern, ".text.hot");
+        assert_eq!(specs[3].section_patterns[1].pattern, ".text.hot.*");
+        // .text.unlikely .text.unlikely.* → 2 patterns
+        assert_eq!(specs[4].section_patterns.len(), 2);
+    }
+
+    #[test]
+    fn parse_data_percpu_pattern() {
+        let text = r#"
+            SECTIONS {
+                .data..percpu : {
+                    *(.data..percpu..page_aligned)
+                    *(.data..percpu..hot.*)
+                    *(.data..percpu)
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert!(!script.sections.is_empty());
+    }
+
+    #[test]
     fn parse_location_counter_with_complex_expr() {
         // 测试位置计数器赋值与复杂表达式
         let text = r#"
@@ -1966,7 +2137,7 @@ pub struct ScriptSymbol {
 pub fn execute_script(
     script: &LinkerScript,
     bundle: &InputBundle,
-    _resolved: &[ResolvedSymbol],
+    resolved: &[ResolvedSymbol],
 ) -> Result<ScriptLayoutResult, String> {
     let mut ctx = EvalContext::new();
     let mut result = ScriptLayoutResult {
@@ -1975,8 +2146,17 @@ pub fn execute_script(
         entry: None,
         assert_failures: Vec::new(),
     };
+    // 跟踪已匹配的输入节，避免重复匹配
+    let mut used_sections: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
-    // 1. 处理顶层符号赋值
+    // 0. 将已解析的输入符号加入 ctx.symbols（值为节内偏移，稍后会更新）
+    for sym in resolved {
+        if !sym.name.is_empty() && sym.section > 0 {
+            ctx.symbols.insert(sym.name.clone(), sym.value);
+        }
+    }
+
+    // 1. 处理顶层符号赋值（第一遍：用节相对值）
     for assign in &script.top_assignments {
         let value = ctx.eval(&assign.expr).unwrap_or(0);
         ctx.symbols.insert(assign.name.clone(), value);
@@ -2003,11 +2183,11 @@ pub fn execute_script(
                 });
             }
             SectionCommand::OutputSection(sec_def) => {
-                let out_sec = execute_output_section(sec_def, bundle, &mut ctx)?;
+                let out_sec = execute_output_section(sec_def, bundle, &mut ctx, &mut used_sections)?;
                 if !out_sec.is_discard {
                     ctx.section_addrs.insert(out_sec.name.clone(), out_sec.vma);
                     ctx.section_sizes.insert(out_sec.name.clone(), out_sec.size);
-                    ctx.location_counter = out_sec.vma + out_sec.size;
+                    ctx.location_counter = out_sec.vma.wrapping_add(out_sec.size);
                     result.sections.push(out_sec);
                 }
             }
@@ -2057,6 +2237,33 @@ pub fn execute_script(
         }
     }
 
+    // 3.5 更新输入符号为绝对地址
+    // 构建 flat section index → (output VMA + offset within output) 的映射
+    let mut sec_vma_map: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    for out_sec in &result.sections {
+        for m in &out_sec.input_sections {
+            sec_vma_map.insert(m.input_index, out_sec.vma.wrapping_add(m.offset));
+        }
+    }
+    // 用绝对地址更新输入符号
+    for sym in resolved {
+        if sym.section > 0 && !sym.name.is_empty() {
+            if let Some(&sec_vma) = sec_vma_map.get(&(sym.section - 1)) {
+                let abs_addr = sec_vma.wrapping_add(sym.value);
+                ctx.symbols.insert(sym.name.clone(), abs_addr);
+            }
+        }
+    }
+
+    // 3.6 重新求值顶层符号赋值（用绝对地址）
+    for (i, assign) in script.top_assignments.iter().enumerate() {
+        let value = ctx.eval(&assign.expr).unwrap_or(0);
+        ctx.symbols.insert(assign.name.clone(), value);
+        if i < result.symbols.len() {
+            result.symbols[i].value = value;
+        }
+    }
+
     // 4. 设置入口地址
     if let Some(ref entry_name) = script.entry {
         if let Some(&addr) = ctx.symbols.get(entry_name) {
@@ -2072,6 +2279,7 @@ fn execute_output_section(
     sec_def: &OutputSectionDef,
     bundle: &InputBundle,
     ctx: &mut EvalContext,
+    used_sections: &mut std::collections::HashSet<u32>,
 ) -> Result<ScriptOutputSection, String> {
     let mut out_sec = ScriptOutputSection {
         name: sec_def.name.clone(),
@@ -2105,7 +2313,7 @@ fn execute_output_section(
 
     // 对齐位置计数器
     if out_sec.align > 1 {
-        ctx.location_counter = (ctx.location_counter + out_sec.align - 1) & !(out_sec.align - 1);
+        ctx.location_counter = ctx.location_counter.wrapping_add(out_sec.align - 1) & !(out_sec.align - 1);
         out_sec.vma = ctx.location_counter;
     }
 
@@ -2115,8 +2323,19 @@ fn execute_output_section(
         match item {
             SectionBodyItem::LocationAssign(expr) => {
                 let val = ctx.eval(expr).unwrap_or(0);
-                ctx.location_counter = out_sec.vma + val;
-                current_offset = val;
+                // val 可能是绝对地址（如 ALIGN 返回的）或相对偏移
+                // 如果 val >= out_sec.vma，视为绝对地址
+                let new_offset = if val >= out_sec.vma {
+                    ctx.location_counter = val;
+                    val.wrapping_sub(out_sec.vma)
+                } else {
+                    // 相对偏移
+                    ctx.location_counter = out_sec.vma.wrapping_add(val);
+                    val
+                };
+                // current_offset 不能回退到已有数据之前
+                // 因为 . = ALIGN(...) 可能计算出比当前数据长度小的偏移
+                current_offset = new_offset.max(out_sec.data.len() as u64);
             }
             SectionBodyItem::SymbolAssign(assign) => {
                 let val = ctx.eval(&assign.expr).unwrap_or(0);
@@ -2124,8 +2343,10 @@ fn execute_output_section(
             }
             SectionBodyItem::InputSection(spec) => {
                 // 匹配输入节
-                let matches = match_input_sections(spec, bundle, ctx);
+                let matches = match_input_sections(spec, bundle, ctx, used_sections);
                 for m in matches {
+                    // 标记为已使用
+                    used_sections.insert(m.input_index);
                     let in_sec = &bundle.sections[m.input_index as usize];
                     // 更新节标志
                     out_sec.flags |= in_sec.flags;
@@ -2137,7 +2358,9 @@ fn execute_output_section(
                     let aligned = (current_offset + align - 1) & !(align - 1);
                     if aligned > current_offset && out_sec.ty != SHT_NOBITS {
                         let pad = aligned - current_offset;
-                        out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                        if pad < 0x10000000 {
+                            out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                        }
                     }
                     current_offset = aligned;
                     // 添加数据
@@ -2170,9 +2393,11 @@ fn execute_output_section(
         }
     }
 
-    out_sec.size = current_offset;
-    ctx.location_counter = out_sec.vma + out_sec.size;
-
+    // size 应该是 current_offset 和实际数据长度的最大值
+    // 因为 . = ALIGN(...) 等位置赋值可能重置 current_offset，
+    // 但之前累积的数据仍然在 out_sec.data 中
+    out_sec.size = current_offset.max(out_sec.data.len() as u64);
+    ctx.location_counter = out_sec.vma.wrapping_add(out_sec.size);
     Ok(out_sec)
 }
 
@@ -2181,6 +2406,7 @@ fn match_input_sections(
     spec: &InputSectionSpec,
     bundle: &InputBundle,
     _ctx: &EvalContext,
+    used_sections: &std::collections::HashSet<u32>,
 ) -> Vec<InputSectionMatch> {
     let mut matches = Vec::new();
 
@@ -2190,7 +2416,14 @@ fn match_input_sections(
             || in_sec.name == ".symtab"
             || in_sec.name == ".strtab"
             || in_sec.name == ".shstrtab"
+            || in_sec.name.starts_with(".rela")
+            || in_sec.name.starts_with(".rel")
         {
+            continue;
+        }
+
+        // 跳过已被之前模式匹配的节
+        if used_sections.contains(&(i as u32)) {
             continue;
         }
 
@@ -2210,43 +2443,108 @@ fn match_input_sections(
     matches
 }
 
-/// 检查节名是否匹配模式（支持通配符 * 和 ?）
+/// 检查节名是否匹配模式（支持通配符 * ? 和字符类 [...]）
 fn section_name_matches(name: &str, pattern: &str) -> bool {
     if pattern == "*" {
         return true;
     }
-    if !pattern.contains('*') && !pattern.contains('?') {
+    if !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[') {
         return name == pattern;
     }
 
-    // 简单的通配符匹配
-    let mut ni = 0;
-    let mut pi = 0;
     let name_chars: Vec<char> = name.chars().collect();
     let pattern_chars: Vec<char> = pattern.chars().collect();
-    let mut star_idx = None;
-    let mut match_idx = 0;
+    glob_match(&name_chars, &pattern_chars)
+}
 
-    while ni < name_chars.len() {
-        if pi < pattern_chars.len() && (pattern_chars[pi] == '?' || pattern_chars[pi] == name_chars[ni]) {
+/// 递归通配符匹配，支持 * ? [...]
+fn glob_match(name: &[char], pattern: &[char]) -> bool {
+    let mut ni = 0;
+    let mut pi = 0;
+    let mut star_pi: Option<usize> = None;
+    let mut star_ni: usize = 0;
+
+    while ni < name.len() {
+        if pi < pattern.len() && pattern[pi] == '?' {
             ni += 1;
             pi += 1;
-        } else if pi < pattern_chars.len() && pattern_chars[pi] == '*' {
-            star_idx = Some(pi);
-            match_idx = ni;
+        } else if pi < pattern.len() && pattern[pi] == '[' {
+            // 字符类匹配
+            if let Some((matched, end_pi)) = match_char_class(&name[ni], &pattern[pi..]) {
+                if matched {
+                    ni += 1;
+                    pi = end_pi;
+                } else if let Some(si) = star_pi {
+                    pi = si + 1;
+                    star_ni += 1;
+                    ni = star_ni;
+                } else {
+                    return false;
+                }
+            } else if let Some(si) = star_pi {
+                pi = si + 1;
+                star_ni += 1;
+                ni = star_ni;
+            } else {
+                return false;
+            }
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star_pi = Some(pi);
+            star_ni = ni;
             pi += 1;
-        } else if let Some(si) = star_idx {
+        } else if pi < pattern.len() && pattern[pi] == name[ni] {
+            ni += 1;
+            pi += 1;
+        } else if let Some(si) = star_pi {
             pi = si + 1;
-            match_idx += 1;
-            ni = match_idx;
+            star_ni += 1;
+            ni = star_ni;
         } else {
             return false;
         }
     }
 
-    while pi < pattern_chars.len() && pattern_chars[pi] == '*' {
+    while pi < pattern.len() && pattern[pi] == '*' {
         pi += 1;
     }
 
-    pi == pattern_chars.len()
+    pi == pattern.len()
 }
+
+/// 匹配字符类 [...]，返回 (是否匹配, 结束位置)
+fn match_char_class(c: &char, pattern: &[char]) -> Option<(bool, usize)> {
+    // pattern[0] == '['
+    let mut i = 1;
+    let negate = if i < pattern.len() && (pattern[i] == '!' || pattern[i] == '^') {
+        i += 1;
+        true
+    } else {
+        false
+    };
+
+    let mut matched = false;
+    while i < pattern.len() && pattern[i] != ']' {
+        let start = pattern[i];
+        // 检查范围 a-z
+        if i + 2 < pattern.len() && pattern[i + 1] == '-' && pattern[i + 2] != ']' {
+            let end = pattern[i + 2];
+            if *c >= start && *c <= end {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if *c == start {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+
+    if i < pattern.len() && pattern[i] == ']' {
+        let result = if negate { !matched } else { matched };
+        Some((result, i + 1))
+    } else {
+        None // 未找到 ']'
+    }
+}
+

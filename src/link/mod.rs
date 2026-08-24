@@ -232,8 +232,29 @@ pub fn link_from_bundle(
     let mut cfg_owned = cfg.clone();
     collect_link_directives(bundle, &mut cfg_owned);
     let cfg = &cfg_owned;
+    // 0.5 预扫描链接脚本，提取脚本定义的符号名加入允许未定义列表
+    let linker_script_symbols: Vec<String> = if let Some(ref script_path) = cfg.linker_script {
+        match std::fs::read_to_string(script_path) {
+            Ok(text) => match linker_script::LinkerScript::parse(&text) {
+                Ok(script) => script.extract_defined_symbols(),
+                Err(e) => {
+                    return Err(diag("E0310", format!("linker script parse error: {}", e)));
+                }
+            },
+            Err(e) => {
+                return Err(diag(
+                    "E0311",
+                    format!("failed to read linker script: {}", e),
+                ));
+            }
+        }
+    } else {
+        Vec::new()
+    };
     // 1. 符号解析
-    let undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
+    let mut undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
+    let linker_script_undef: Vec<&str> = linker_script_symbols.iter().map(|s| s.as_str()).collect();
+    undef.extend(linker_script_undef);
     let (resolved, resolve_errors) = resolve::resolve_with_config(bundle, &undef, cfg);
     if !resolve_errors.is_empty() {
         let errs: Vec<Diagnostic> = resolve_errors
