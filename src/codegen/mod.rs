@@ -3,6 +3,7 @@
 
 pub mod aarch64;
 pub mod arm;
+pub mod asm_constraints;
 pub mod disasm;
 pub mod elf;
 pub mod mips;
