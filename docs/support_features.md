@@ -101,7 +101,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | Builtin | 实现 |
 |---------|------|
 | `__builtin_constant_p` / inline 属性 | `tests/fixtures/c/constp.c`、`tests/fixtures/c/inline.c` |
-| 未知 `__builtin_*` 降级 | 表达式/语句上下文均按返回类型处理：`void` → `ud2`，其余 → ABI 正确零值 + warning；覆盖整数、浮点、vector 与 sret 返回，`tests/fixtures/c/unk_builtin.c` + `unknown_builtin_warning_zero_and_ud2` 固化契约 |
+| 未知 `__builtin_*` 降级 | 未知 builtin 产生 `E0018` hard error，不再静默返回 0/ud2；`is_known_builtin()` 覆盖 100+ 已知 builtin；`kernel_builtin_coverage_runtime` 测试验证新增 builtin 运行时正确性 |
 | `__builtin_va_start/end/copy/arg` | SysV va_list 结构（r13 帧链 + 24 字节槽） |
 | `__builtin_strcasecmp` / `strncasecmp` | 转发到 libc |
 | `__builtin_fma` / `fmaf` / `fmal` | 调 libm 对应函数 |
@@ -121,6 +121,16 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__builtin_isnan` / `isinf` / `finite` / `signbit` / `fpclassify` | 正确处理 NaN/Inf 位模式 |
 | `__builtin_call_with_static_chain` | SysV ABI r10 + GP/XMM 寄存器约定 |
 | `__builtin_alloca` | sub rsp + 16 字节对齐 |
+| `__builtin_ffs/ffsl/ffsll` | bsf + setnz + add（运行时）；const_eval 编译期折叠 |
+| `__builtin_isdigit` | sub '0' + cmp 9 + setbe |
+| `__builtin_dynamic_object_size` | 同 __builtin_object_size |
+| `__builtin_extract_return_addr` | x86_64 透传 |
+| `__builtin_preserve_access_index` | BPF CO-RE 透传 |
+| `__builtin_btf_type_id` / `has_attribute` | 返回 0 |
+| `__builtin_counted_by_ref` | 透传指针 |
+| `__builtin_alloca_uninitialized` | 同 alloca |
+| `__builtin_strcat` | 转发到 libc strcat |
+| `__builtin_warning` | 返回 0 |
 | `__builtin_unreachable` | ud2 + 标记不可达路径 |
 | `__builtin_trap` | ud2 |
 | `__builtin_debugtrap` | int3 (0xCC) |
@@ -151,7 +161,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm 模板修饰符 `%a` / `%P` / `%l` | `%aN`/`%a[name]`: 地址形式 (寄存器同名, 立即数/内存去前缀); `%PN`/`%P[name]`: 原始符号名 (去 % / $ 前缀); `%lN`/`%l[name]`: asm goto 标签名 (边界安全多位索引，索引越界走 W0004 warning); 立即数含运算符时自动加括号保护优先级 |
 | Mini x86 asm 局部/C 标签 | `N:` / `N:insn` / `found:` |
 | Mini x86 asm Linux legacy aliases | `cmpxchg8b` / `pushfl` / `popfl` / `iret` / `iretl` / 全条件码 `cmov*`（含宽度后缀别名）/ 裸 `in`/`out` / memory-indirect port / `shldw` / `shrdw` / 裸段前缀已覆盖；`asm_*_has_opcode_and_disassembly` 测试校验 `.text` 字节和 objdump 反汇编，固化不再降级为 nop |
-| Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg`/`cmpxchg8b` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`iret`/`iretl`/`iretq`/`sysenter`/`sysexit` / `pushf`/`pushfl`/`pushfq`/`popf`/`popfl`/`popfq` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`) |
+| Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg`/`cmpxchg8b` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`iret`/`iretl`/`iretq`/`sysenter`/`sysexit` / `pushf`/`pushfl`/`pushfq`/`popf`/`popfl`/`popfq` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` / `vmxon`/`vmread`/`vmwrite`/`vmptrld`/`vmptrst`/`vmclear` / `wrussq` (CET) / `lar` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`)；`kernel_asm_instr_coverage_runtime` 测试验证内核 arch/x86/ 使用的全部指令编码正确 |
 | SSE mov / SSE arith | xmm-xmm, mem-xmm, xmm-mem, SegMem 变体完整支持 |
 | mini-asm SIMD 扩展 | VEX/EVEX 前缀 + AVX/AVX2/AVX-512 + SSE3–4.2 + AES-NI/SHA + FMA/F16C + TSX + AMX + AVX-VNNI；`pinsr*` / `pextr*` GPR + `tmm` / `ymm` / `zmm` / `k` 寄存器 |
 | mini-asm 扩展操作数形式 | `rdrand`/`rdseed` 内存+符号操作数 (RIP-relative)；`ljmp`/`lcall` 间接内存 + `$off,$seg` 反序 + 符号偏移；`retf`/`lret` 符号立即数；`xbegin` rel32 + `xabort` 符号；AES-NI/SHA/pshuf*/palignr/pblendw/insertps/pshufw 内存源+符号源 (RIP-relative)；`pinsr*`/`pextr*`/`extractps` 符号源/目标；`vpinsr*`/`vpextr*`/`vextractps`/`vextractpd`/`vcvtps2ph` 符号源/目标 |
@@ -186,6 +196,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `-mno-sse` x87 FPU 回退 | 内核中断上下文禁用 XMM 寄存器，浮点运算使用 x87 FPU 指令 (fld/fstp/faddp/fsubrp/fmulp/fdivrp/fucomip)；降级为 W0300 警告而非硬错误 |
 | `-mcmodel=kernel` 代码模型 | 内核运行在 -2GB 高地址空间，定义 `__code_model_kernel__` 宏；外部函数地址使用直接 PC-relative 而非 GOT 间接寻址 |
 | `-ftrivial-auto-var-init=zero` | 安全特性，CONFIG_INIT_STACK_ALL_ZERO 依赖；使用 rep stosq 零初始化整个栈帧 |
+| 栈保护非可重定位路径 | canary 失败始终调用 `__stack_chk_fail`（STB_GLOBAL/STT_FUNC 未定义符号），不再对 ET_EXEC 走 exit(255) syscall；`m3_10_stack_canary` 测试验证 |
 
 ## 多架构支持
 
@@ -365,7 +376,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 
 | 特性 | 说明 |
 |------|------|
-| 诊断 snapshot 格式锁定 | E0001-E0017 / E0100-E0102 / E0200-E0209 / E0300 / E1001-E1010 / W0001 / W0004-W0005 / W0007-W0008 / W0200 |
+| 诊断 snapshot 格式锁定 | E0001-E0018 / E0100-E0102 / E0200-E0209 / E0300 / E1001-E1010 / W0001 / W0004-W0005 / W0007-W0008 / W0200 |
 | `-fdiagnostics-color` | `always` / `never` / `auto` |
 | `-fdiagnostics-format` | `github` / `clang` / `msvc` / `vi` / `sarif` |
 | `-fdiagnostics-show-template-tree` | 模板树显示 |

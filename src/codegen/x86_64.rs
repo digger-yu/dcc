@@ -18355,6 +18355,22 @@ impl Codegen {
             "ltr" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 3),
             "verr" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 4),
             "verw" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 5),
+            // lar reg, r/m: 0F 02 /r
+            "lar" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(d, _), AsmOperand::Reg(s, _)) = (&ops[0], &ops[1]) {
+                    self.emit(&[
+                        Self::rex(false, *d, 0, *s),
+                        0x0F, 0x02,
+                        Self::modrm_reg_reg(*d, *s),
+                    ]);
+                } else if let (AsmOperand::Reg(d, _), AsmOperand::Mem { disp, base, index, scale }) = (&ops[0], &ops[1]) {
+                    self.emit(&[Self::rex(false, *d, index.unwrap_or(0), *base), 0x0F, 0x02]);
+                    self.emit_asm_modrm_mem_only(*d & 7, *disp, *base, *index, *scale);
+                } else {
+                    self.asm_warn("lar needs reg, reg/mem operands, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
             // 描述符表: str (0F 00 /1) 与 sgdt/sidt/lgdt/lidt (0F 01 /0-/3)
             "str" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 1),
             "sldt" if ops.len() == 1 => self.emit_asm_desc(&ops[0], 0),
@@ -18510,6 +18526,26 @@ impl Codegen {
             "vmclear" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x04),
             "vmread" if ops.len() == 2 => self.emit_asm_vmread(&ops[0], &ops[1]),
             "vmwrite" if ops.len() == 2 => self.emit_asm_vmwrite(&ops[0], &ops[1]),
+            // vmxon: F3 0F C7 /6 (memory operand)
+            "vmxon" if ops.len() == 1 => {
+                if let AsmOperand::Mem { disp, base, index, scale } = &ops[0] {
+                    self.emit(&[0xF3, Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0xC7]);
+                    self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
+                } else {
+                    self.asm_warn("vmxon needs memory operand, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
+            // wrussq: 0F 38 F5 /r (reg, mem) — CET user shadow stack write
+            "wrussq" if ops.len() == 2 => {
+                if let (AsmOperand::Reg(s, _), AsmOperand::Mem { disp, base, index, scale }) = (&ops[0], &ops[1]) {
+                    self.emit(&[Self::rex(true, *s, index.unwrap_or(0), *base), 0x0F, 0x38, 0xF5]);
+                    self.emit_asm_modrm_mem_only(*s & 7, *disp, *base, *index, *scale);
+                } else {
+                    self.asm_warn("wrussq needs reg, mem operands, emitted as nop");
+                    self.emit(&[0x90]);
+                }
+            }
             "ud2" => self.emit(&[0x0F, 0x0B]),
             "hlt" => self.emit(&[0xF4]),
             "cli" => self.emit(&[0xFA]),

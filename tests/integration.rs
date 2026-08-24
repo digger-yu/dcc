@@ -4768,6 +4768,26 @@ fn kernel_builtin_coverage_runtime() {
     assert_eq!(rc, 0, "kernel builtin coverage runtime check failed");
 }
 
+/// P0-5: kernel asm instruction coverage — verify that inline
+/// assembly instructions used in Linux arch/x86/ are properly
+/// encoded by dcc's mini-assembler and produce correct results.
+/// Tests: ALU, cmpxchg, xchg, bt, bsf/bsr, inc/dec, nop/pause,
+/// push/pop, cmovz, setcc, mul, shrd, lar, rdpkru, clflush.
+#[test]
+#[cfg(unix)]
+fn kernel_asm_instr_coverage_runtime() {
+    let src = include_str!("fixtures/c/asm_kernel_instr_coverage.c");
+    let (out, exe) = run_compile_and_run("kernel-asm-cov", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "kernel asm coverage compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "kernel asm coverage runtime check failed");
+}
+
 /// 通用工具：编译一个 C 源文件并返回 output + 可执行路径
 #[allow(dead_code)]
 fn run_compile_o(
