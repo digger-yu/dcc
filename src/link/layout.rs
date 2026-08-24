@@ -469,9 +469,9 @@ impl LayoutBuilder {
                 size: script_sec.size,
                 entsize: 0,
                 output_index: sections.len() as u32,
-                load_segment: 0, // TODO: 从 script_sec.phdrs 确定
+                load_segment: if script_sec.flags & SHF_WRITE != 0 { 1 } else { 0 },
                 vaddr: script_sec.vma,
-                file_off: 0, // TODO: 计算文件偏移
+                file_off: 0, // computed below
                 input_offsets: Vec::new(),
                 input_sections: script_sec
                     .input_sections
