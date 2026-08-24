@@ -1535,6 +1535,11 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         vdso: cfg.vdso.clone(),
         dso_cache: link::dso_cache::DsoCache::new(),
         linker_script: cfg.linker_script.clone(),
+        output_format: if cfg.target.os == crate::cli::Os::Windows {
+            link::OutputFormat::Pe
+        } else {
+            link::OutputFormat::Elf
+        },
     };
     // 解析 .symver 指令: 从 raw_args 提取 __asm__(".symver ...") 模式
     // 实际项目中由 codegen 阶段把 .symver 写入 .symver 节, 此处给个兜底:

@@ -34,6 +34,7 @@ pub mod link_opts;
 pub mod linker_script;
 pub mod lto_bitcode;
 pub mod object;
+pub mod pe;
 pub mod plt_got;
 pub mod relocate;
 pub mod resolve;
@@ -60,7 +61,18 @@ pub use layout::LayoutBuilder;
 pub use legacy::link_relocatable;
 pub use lto_bitcode::{deserialize_module, run_cross_tu_lto, serialize_module, BitcodeModule};
 pub use object::InputBundle;
+pub use pe::write_pe_exec_x86_64;
 pub use relocate::{apply_relocations, collect_pie_dynamic_relas};
+
+/// 输出文件格式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// ELF (Linux, BSD, etc.)
+    #[default]
+    Elf,
+    /// PE/COFF (Windows)
+    Pe,
+}
 
 /// 链接配置
 #[derive(Debug, Clone)]
@@ -117,6 +129,8 @@ pub struct LinkConfig {
     pub dso_cache: dso_cache::DsoCache,
     /// 链接器脚本路径 (-T script.lds)
     pub linker_script: Option<PathBuf>,
+    /// 输出文件格式 (ELF / PE)
+    pub output_format: OutputFormat,
 }
 
 /// build-id 风格
@@ -175,6 +189,7 @@ impl Default for LinkConfig {
             vdso: None,
             dso_cache: dso_cache::DsoCache::new(),
             linker_script: None,
+            output_format: OutputFormat::Elf,
         }
     }
 }
@@ -350,36 +365,42 @@ pub fn link_from_bundle(
     }
     // 4. 应用重定位
     let _dyn = apply_relocations(&mut layout).map_err(|e| diag("E0304", e.to_string()))?;
-    // 5. 输出 ELF (按架构分发)
-    let bytes = match (cfg.output_kind, cfg.arch) {
-        (OutputKind::Executable, ArchKind::X86_64) => write_elf_exec_x86_64(&layout),
-        (OutputKind::Executable, ArchKind::AArch64) => write_elf_exec_aarch64(&layout),
-        (OutputKind::Executable, ArchKind::RiscV64) => write_elf_exec_riscv64(&layout),
-        (OutputKind::Executable, ArchKind::Mips64) => write_elf_exec_mips64(&layout),
-        (OutputKind::Executable, ArchKind::Mips) => write_elf_exec_mips64(&layout),
-        (OutputKind::Executable, ArchKind::Arm) => write_elf_exec_arm(&layout),
-        (OutputKind::PIE, ArchKind::X86_64) => write_elf_pie_x86_64(&layout),
-        (OutputKind::PIE, ArchKind::AArch64) => write_elf_pie_aarch64(&layout),
-        (OutputKind::PIE, ArchKind::RiscV64) => write_elf_pie_riscv64(&layout),
-        (OutputKind::PIE, ArchKind::Mips64) => write_elf_pie_mips64(&layout),
-        (OutputKind::PIE, ArchKind::Mips) => write_elf_pie_mips64(&layout),
-        (OutputKind::PIE, ArchKind::Arm) => write_elf_pie_arm(&layout),
-        (OutputKind::Shared, ArchKind::X86_64) => write_elf_shared_x86_64(&layout),
-        (OutputKind::Shared, ArchKind::AArch64) => write_elf_shared_aarch64(&layout),
-        (OutputKind::Shared, ArchKind::RiscV64) => write_elf_shared_riscv64(&layout),
-        (OutputKind::Shared, ArchKind::Mips64) => write_elf_shared_mips64(&layout),
-        (OutputKind::Shared, ArchKind::Mips) => write_elf_shared_mips64(&layout),
-        (OutputKind::Shared, ArchKind::Arm) => write_elf_shared_arm(&layout),
-        (OutputKind::Relocatable, ArchKind::X86_64) => write_elf_relocatable_x86_64(&layout),
-        (OutputKind::Relocatable, ArchKind::AArch64) => write_elf_relocatable_aarch64(&layout),
-        (OutputKind::Relocatable, ArchKind::RiscV64) => write_elf_relocatable_riscv64(&layout),
-        (OutputKind::Relocatable, ArchKind::Mips64) => write_elf_relocatable_mips64(&layout),
-        (OutputKind::Relocatable, ArchKind::Mips) => write_elf_relocatable_mips64(&layout),
-        (OutputKind::Relocatable, ArchKind::Arm) => write_elf_relocatable_arm(&layout),
-        (OutputKind::Executable, _) => write_elf_exec_x86_64(&layout),
-        (OutputKind::PIE, _) => write_elf_pie_x86_64(&layout),
-        (OutputKind::Shared, _) => write_elf_shared_x86_64(&layout),
-        (OutputKind::Relocatable, _) => write_elf_relocatable_x86_64(&layout),
+    // 5. 输出 (按格式和架构分发)
+    let bytes = if cfg.output_format == OutputFormat::Pe {
+        // PE output (Windows)
+        write_pe_exec_x86_64(&layout)
+    } else {
+        // ELF output (按架构分发)
+        match (cfg.output_kind, cfg.arch) {
+            (OutputKind::Executable, ArchKind::X86_64) => write_elf_exec_x86_64(&layout),
+            (OutputKind::Executable, ArchKind::AArch64) => write_elf_exec_aarch64(&layout),
+            (OutputKind::Executable, ArchKind::RiscV64) => write_elf_exec_riscv64(&layout),
+            (OutputKind::Executable, ArchKind::Mips64) => write_elf_exec_mips64(&layout),
+            (OutputKind::Executable, ArchKind::Mips) => write_elf_exec_mips64(&layout),
+            (OutputKind::Executable, ArchKind::Arm) => write_elf_exec_arm(&layout),
+            (OutputKind::PIE, ArchKind::X86_64) => write_elf_pie_x86_64(&layout),
+            (OutputKind::PIE, ArchKind::AArch64) => write_elf_pie_aarch64(&layout),
+            (OutputKind::PIE, ArchKind::RiscV64) => write_elf_pie_riscv64(&layout),
+            (OutputKind::PIE, ArchKind::Mips64) => write_elf_pie_mips64(&layout),
+            (OutputKind::PIE, ArchKind::Mips) => write_elf_pie_mips64(&layout),
+            (OutputKind::PIE, ArchKind::Arm) => write_elf_pie_arm(&layout),
+            (OutputKind::Shared, ArchKind::X86_64) => write_elf_shared_x86_64(&layout),
+            (OutputKind::Shared, ArchKind::AArch64) => write_elf_shared_aarch64(&layout),
+            (OutputKind::Shared, ArchKind::RiscV64) => write_elf_shared_riscv64(&layout),
+            (OutputKind::Shared, ArchKind::Mips64) => write_elf_shared_mips64(&layout),
+            (OutputKind::Shared, ArchKind::Mips) => write_elf_shared_mips64(&layout),
+            (OutputKind::Shared, ArchKind::Arm) => write_elf_shared_arm(&layout),
+            (OutputKind::Relocatable, ArchKind::X86_64) => write_elf_relocatable_x86_64(&layout),
+            (OutputKind::Relocatable, ArchKind::AArch64) => write_elf_relocatable_aarch64(&layout),
+            (OutputKind::Relocatable, ArchKind::RiscV64) => write_elf_relocatable_riscv64(&layout),
+            (OutputKind::Relocatable, ArchKind::Mips64) => write_elf_relocatable_mips64(&layout),
+            (OutputKind::Relocatable, ArchKind::Mips) => write_elf_relocatable_mips64(&layout),
+            (OutputKind::Relocatable, ArchKind::Arm) => write_elf_relocatable_arm(&layout),
+            (OutputKind::Executable, _) => write_elf_exec_x86_64(&layout),
+            (OutputKind::PIE, _) => write_elf_pie_x86_64(&layout),
+            (OutputKind::Shared, _) => write_elf_shared_x86_64(&layout),
+            (OutputKind::Relocatable, _) => write_elf_relocatable_x86_64(&layout),
+        }
     };
     if cfg.verbose {
         eprintln!(
