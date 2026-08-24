@@ -102,7 +102,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 |---------|------|
 | `__builtin_constant_p` / inline 属性 | `tests/fixtures/c/constp.c`、`tests/fixtures/c/inline.c` |
 | 未知 `__builtin_*` 降级 | 未知 builtin 产生 `E0018` hard error，不再静默返回 0/ud2；`is_known_builtin()` 覆盖 100+ 已知 builtin；`kernel_builtin_coverage_runtime` 测试验证新增 builtin 运行时正确性 |
-| `__builtin_va_start/end/copy/arg` | SysV va_list 结构（r13 帧链 + 24 字节槽） |
+| `__builtin_va_start/end/copy/arg` | SysV va_list 结构（r13 帧链 + 24 字节槽）；MIPS O32 ($a0-$a3 保存区)；ARM AAPCS (r0-r3 保存区) |
 | `__builtin_strcasecmp` / `strncasecmp` | 转发到 libc |
 | `__builtin_fma` / `fmaf` / `fmal` | 调 libm 对应函数 |
 | `__builtin_rotateleft/right{8,16,32,64}` | ROL/ROR + cl |
@@ -231,6 +231,9 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | aarch64/riscv64 移位 | aarch64 `lslv` / `lsrv`；riscv64 `sll` / `srl` / `sra` |
 | aarch64 va_arg GP + float + 栈溢出 | x0..x7 + v0..v7 保存区 + 顺序读；>8 个变参从 caller 栈读取 |
 | riscv64 va_arg GP + float + 栈溢出 | a0..a7 + fa0..fa7 保存区 + 顺序读；>8 个变参从 caller 栈读取 |
+| mips va_arg GP | $a0-$a3 保存区 + 顺序读；超出 4 个从 caller 栈读取；O32 ABI |
+| arm va_arg GP | r0-r3 保存区 + 顺序读；超出 4 个从 caller 栈读取；AAPCS ABI |
+| aarch64 gen_float_expr Local/Conditional | 浮点局部变量从栈加载到 s0；浮点条件表达式用分支实现；避免未处理表达式静默返回 0.0 |
 
 ## C++ 前端
 
@@ -346,7 +349,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 共享库 PLT (lazy/CET/BIND_NOW) | `plt_got.rs` .plt (lazy) / .plt.sec (CET/IBT) / .plt.got (BIND_NOW) 生成；`-z ibt` 启用 endbr64 安全 PLT + `.gnu.property` CET 标记；`-z now` 启用 GOT-resolved PLT 无 lazy stub |
 | 自定义 dynamic linker 路径 | `PT_INTERP` 程序头 + `.interp` 节；生成的 PIE/动态 ELF 依赖 host `ld.so`，dcc 自身可用 musl 静态链接 |
 | vDSO 集成 | `--vdso=<path>` 解析 vDSO ELF，嵌入 `.text.vdso` + `.note.GNU-vdso` + 符号表 |
-| PIE/Shared 输出 | 多架构 `_start` 入口桩 |
+| PIE/Shared 输出 | 多架构 `_start` 入口桩 (x86_64/aarch64/riscv64/arm/mips/mips64) |
 | AArch64/RISC-V/MIPS/ARM ELF 输出 | `elf_exec.rs` 多架构包装函数 |
 | AArch64 重定位（33 种） | `ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_*` / `MOVW_UABS_*` / `TLSDESC_*` (8 种) / `TLSIE_*` (2 种) / `TLSLE_*` (2 种) |
 | RISC-V 重定位（15 种） | `64` / `32` / `CALL` / `PCREL_*` / `HI20` / `LO12_*` / `TPOFF*` 等 |
