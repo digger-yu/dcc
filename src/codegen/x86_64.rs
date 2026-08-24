@@ -212,8 +212,12 @@ pub struct Codegen {
     pub source_name: String,
     pub parallel_codegen: bool,
     /// asm 块 DWARF 行号记录: (pc_start, pc_end, src_line)
-    /// 用于在 -g 下生成精确的 .debug_line 条目
+    /// 用于在 -g 下生精确的 .debug_line 条目
     pub asm_line_entries: Vec<(u64, u64, u32)>,
+    /// asm 块内逐指令 DWARF 调试记录: (pc, src_line, discriminator)
+    /// 用于在 -g 下生成 per-instruction .debug_line 条目,
+    /// 使 GDB 能单步进入 asm 块内部每条指令 (类似 GCC .debug_insn 效果)
+    pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
     /// rodata 中被字符串初始化指针占位的变量名列表 (resolve 阶段修补绝对地址)
     rodata_string_init_globals: Vec<String>,
     /// rodata 中字符串初始化指针槽的偏移列表 (compile_exec/ET_EXEC 路径的
@@ -1369,6 +1373,7 @@ impl Codegen {
             asm_last_text_label: None,
             func_asm_layout: HashMap::new(),
             asm_line_entries: Vec::new(),
+            asm_insn_debug_entries: Vec::new(),
             current_asm_line: 0,
             current_asm_src_line: 0,
             diagnostics: Vec::new(),
@@ -17476,9 +17481,18 @@ impl Codegen {
         if self.emit_asm_directive(&line) {
             return;
         }
+        // 非 directive: 记录指令起始 PC (用于逐指令 DWARF 行号表)
+        let debug_pc = self.code.len() as u64;
+        let debug_src_line = self.current_asm_src_line;
         if Self::asm_has_unresolved_operand(&line) {
             self.warn_unresolved_asm_operand(&line, self.current_asm_line);
             self.emit(&[0x90]);
+            // 未解析操作数 fallback: 记录 nop 的调试信息
+            if self.debug_level > 0 && debug_src_line > 0 {
+                let disc = self.asm_insn_debug_entries.len() as u16;
+                self.asm_insn_debug_entries
+                    .push((debug_pc, debug_src_line, disc));
+            }
             return;
         }
         // 处理前缀: lock, rep, repz, repnz, 段前缀 (ds/cs/ss/es/fs/gs)
@@ -17546,6 +17560,15 @@ impl Codegen {
             self.emit(&[pfx]);
         }
         self.emit_asm_instr(mnemonic, &ops);
+        // 记录逐指令调试信息 (用于 DWARF .debug_line per-instruction 条目)
+        if self.debug_level > 0 && debug_src_line > 0 {
+            let pc_end = self.code.len() as u64;
+            if pc_end > debug_pc {
+                let disc = self.asm_insn_debug_entries.len() as u16;
+                self.asm_insn_debug_entries
+                    .push((debug_pc, debug_src_line, disc));
+            }
+        }
     }
 
     /// 编码单条指令

@@ -674,10 +674,13 @@ pub fn emit(
                     .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
                     .collect();
                 // 将 asm 块行号记录转换为 DWARF LineEntry
-                let asm_line_entries: Vec<debug::LineEntry> = cg
-                    .asm_line_entries
-                    .iter()
-                    .map(|&(pc_start, _pc_end, src_line)| debug::LineEntry {
+                // 组合块级条目 (is_stmt=true) 和逐指令条目 (is_stmt=false, discriminator>0)
+                // 块级条目: GDB 在 asm 块起始行设置语句边界
+                // 逐指令条目: GDB 单步进入 asm 块内部每条指令 (类似 GCC .debug_insn)
+                let mut combined_line_entries: Vec<debug::LineEntry> = Vec::new();
+                // 块级条目: asm 块起始 PC, is_stmt=true
+                for &(pc_start, _pc_end, src_line) in cg.asm_line_entries.iter() {
+                    combined_line_entries.push(debug::LineEntry {
                         pc: pc_start,
                         line: src_line,
                         column: 1,
@@ -685,11 +688,34 @@ pub fn emit(
                         discriminator: 0,
                         is_stmt: true,
                         basic_block: false,
-                    })
-                    .collect();
+                    });
+                }
+                // 逐指令条目: 每条 asm 指令一个条目, is_stmt=false
+                // 同一 asm 块内用 discriminator 区分不同指令
+                let mut last_block_pc = u64::MAX;
+                for &(pc, src_line, disc) in cg.asm_insn_debug_entries.iter() {
+                    let is_first_in_block = pc != last_block_pc;
+                    last_block_pc = pc;
+                    combined_line_entries.push(debug::LineEntry {
+                        pc,
+                        line: src_line,
+                        column: 1,
+                        file_idx: 0,
+                        discriminator: if is_first_in_block { 0 } else { disc },
+                        is_stmt: is_first_in_block,
+                        basic_block: false,
+                    });
+                }
+                // 按 PC 排序, 同 PC 时 is_stmt=true 优先
+                combined_line_entries.sort_by(|a, b| {
+                    a.pc.cmp(&b.pc)
+                        .then_with(|| b.is_stmt.cmp(&a.is_stmt))
+                        .then_with(|| a.discriminator.cmp(&b.discriminator))
+                });
+                let has_asm_entries = !combined_line_entries.is_empty();
                 let mut dbg = debug::build_dwarf(source_name, &funcs);
                 // 如果有 asm 行号条目, 重新生成带行号的 DWARF
-                if !asm_line_entries.is_empty() {
+                if has_asm_entries {
                     let cu = debug::CompileUnit {
                         source_name: source_name.to_string(),
                         comp_dir: None,
@@ -717,11 +743,11 @@ pub fn emit(
                             .collect(),
                         globals: vec![],
                         types: vec![],
-                        line_entries: asm_line_entries,
+                        low_pc: combined_line_entries.first().map(|e| e.pc).unwrap_or(0),
+                        high_pc: combined_line_entries.last().map(|e| e.pc + 1).unwrap_or(0),
+                        line_entries: combined_line_entries,
                         line_files: vec![source_name.to_string()],
                         line_dirs: vec![".".to_string()],
-                        low_pc: cg.asm_line_entries.first().map(|e| e.0).unwrap_or(0),
-                        high_pc: cg.asm_line_entries.last().map(|e| e.1).unwrap_or(0),
                         func_ranges: funcs
                             .iter()
                             .map(|(name, pc)| {
