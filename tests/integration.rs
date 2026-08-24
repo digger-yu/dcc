@@ -4714,7 +4714,7 @@ fn inline_attrs_o1_run_returns_zero() {
 /// 未知 __builtin_*：warning + 零值；void 变体发射 ud2
 #[test]
 #[cfg(unix)]
-fn unknown_builtin_warning_zero_and_ud2() {
+fn unknown_builtin_is_hard_error_e0018() {
     let source = include_str!("fixtures/c/unk_builtin.c");
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-unknown-builtin-{}.c", std::process::id()));
@@ -4728,40 +4728,44 @@ fn unknown_builtin_warning_zero_and_ud2() {
         .expect("run dcc");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let _ = fs::remove_file(source_path);
-    assert!(output.status.success(), "stderr: {stderr}");
+    // Unknown builtins are now hard errors (E0018), not warnings.
+    // This prevents silent zero/ud2 fallback that could cause
+    // subtle runtime bugs in kernel code.
     assert!(
-        stderr.contains("unsupported __builtin_") && stderr.contains("emitted as zero"),
-        "expected zero fallback warning for unknown non-void builtin: {stderr}"
+        !output.status.success(),
+        "unknown builtin should fail compilation: {stderr}"
     );
     assert!(
-        stderr.contains("unsupported __builtin_") && stderr.contains("emitted as ud2"),
-        "expected ud2 fallback warning for unknown void builtin: {stderr}"
+        stderr.contains("E0018"),
+        "expected E0018 error code: {stderr}"
     );
-    let disasm = Command::new("objdump")
-        .args(["-d", object_path.to_str().unwrap()])
-        .output()
-        .expect("objdump");
-    let text = String::from_utf8_lossy(&disasm.stdout);
-    let ud2_count = text.matches("ud2").count();
-    assert_eq!(
-        ud2_count, 1,
-        "only void unknown __builtin_ should emit ud2, disasm:\n{text}"
+    assert!(
+        stderr.contains("unsupported __builtin_"),
+        "expected unsupported builtin message: {stderr}"
     );
-    let _ = fs::remove_file(object_path);
+    assert!(
+        !object_path.exists(),
+        "object file should not be written on E0018"
+    );
+}
 
-    let (run_output, exe) = run_compile_and_run("unknown-builtin-runtime", source);
-    let run_stderr = String::from_utf8_lossy(&run_output.stderr);
+/// P0-6: kernel builtin coverage — verify newly added builtins
+/// (__builtin_ffs, __builtin_isdigit, __builtin_dynamic_object_size,
+/// __builtin_extract_return_addr, __builtin_preserve_access_index)
+/// compile and produce correct results at runtime.
+#[test]
+#[cfg(unix)]
+fn kernel_builtin_coverage_runtime() {
+    let src = include_str!("fixtures/c/builtin_kernel_coverage.c");
+    let (out, exe) = run_compile_and_run("kernel-builtin-cov", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        run_output.status.success(),
-        "runtime compile stderr: {run_stderr}"
-    );
-    assert!(
-        run_stderr.contains("unsupported __builtin_") && run_stderr.contains("emitted as zero"),
-        "runtime compile should warn about zero fallback: {run_stderr}"
+        out.status.success(),
+        "kernel builtin coverage compile failed: {stderr}"
     );
     let rc = run_exe(&exe);
-    assert_eq!(rc, 0, "unknown non-void builtins should return zero");
-    let _ = fs::remove_file(exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "kernel builtin coverage runtime check failed");
 }
 
 /// 通用工具：编译一个 C 源文件并返回 output + 可执行路径

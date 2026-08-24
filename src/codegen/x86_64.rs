@@ -12579,11 +12579,23 @@ impl Codegen {
         dst: u8,
         sret_off: Option<i32>,
     ) {
-        eprintln!(
-            "warning: unsupported __builtin_ function '{}', emitted as {}",
-            name,
-            if matches!(ty, Type::Void) { "ud2" } else { "zero" }
+        // Unknown __builtin_* is a hard error (E0018).
+        // Silent zero/ud2 fallback is too dangerous for kernel code:
+        // a missing builtin could silently change semantics.
+        let msg = format!(
+            "unsupported __builtin_ function '{}' (E0018)",
+            name
         );
+        let span = Span::point(&self.source_name, 0, 1);
+        let mut diag = Diagnostic::err("E0018", msg, span);
+        diag.hint = Some(
+            "implement this builtin in gen_builtin() \
+             or add it to the known-builtin list"
+                .to_string(),
+        );
+        self.diagnostics.push(diag);
+        // Still emit fallback code so codegen can continue
+        // for diagnostics of other functions.
         if matches!(ty, Type::Void) {
             self.emit(&[0x0F, 0x0B]); // ud2
             return;
@@ -13966,6 +13978,172 @@ impl Codegen {
             // __builtin_classify_type fallback
             "__builtin_classify_type" => {
                 self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_ffs/ffsl/ffsll: find first set bit.
+            // Semantics: ffs(x) = (x == 0) ? 0 : ctz(x) + 1.
+            // Implementation: evaluate into rax, save to rcx,
+            //   xor dst,dst; bsf dst,rcx; test rcx,rcx;
+            //   setnz cl; movzx ecx,cl; add dst,rcx.
+            "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // gen_expr always returns result in rax (reg 0).
+                self.gen_expr(&args[0], 0);
+                // xor dst,dst: dst in both reg and r/m → REX.R+REX.B
+                let rex_xor = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                // add dst,rcx: dst in r/m only → REX.B
+                let rex_add = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                // push rcx
+                self.emit(&[0x51]);
+                // mov rcx, rax  (save original input; rcx = rax)
+                // REX.W 89 C1
+                self.emit(&[0x48, 0x89, 0xC1]);
+                // xor dst, dst  (zero dst for input==0 case)
+                self.emit(&[
+                    rex_xor, 0x31,
+                    0xC0 | ((dst & 7) << 3) | (dst & 7),
+                ]);
+                // bsf dst, rcx  (dst in reg → REX.R)
+                let rex_bsf = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                self.emit(&[
+                    rex_bsf, 0x0F, 0xBC,
+                    0xC0 | ((dst & 7) << 3) | 1,
+                ]);
+                // test rcx, rcx  (48 85 C9)
+                self.emit(&[0x48, 0x85, 0xC9]);
+                // setnz cl  (0F 95 C1)
+                self.emit(&[0x0F, 0x95, 0xC1]);
+                // movzx ecx, cl  (0F B6 C9)
+                self.emit(&[0x0F, 0xB6, 0xC9]);
+                // add dst, rcx  (reg=rcx=001, r/m=dst)
+                self.emit(&[
+                    rex_add, 0x01,
+                    0xC8 | (dst & 7),
+                ]);
+                // pop rcx
+                self.emit(&[0x59]);
+                true
+            }
+            // __builtin_dynamic_object_size: dynamic variant of object_size.
+            // At compile time, falls back to the same compile-time analysis.
+            "__builtin_dynamic_object_size" => {
+                let type_arg = args
+                    .get(1)
+                    .and_then(|e| const_eval::eval(e).ok())
+                    .unwrap_or(0);
+                let size = args
+                    .first()
+                    .and_then(|p| const_eval::object_size(p, type_arg))
+                    .unwrap_or(-1);
+                self.mov_imm(dst, size);
+                true
+            }
+            // __builtin_extract_return_addr: mask implementation-defined
+            // bits from a return address. On x86_64, the address is
+            // already canonical, so this is a no-op (pass-through).
+            "__builtin_extract_return_addr" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], dst);
+                true
+            }
+            // __builtin_preserve_access_index: BPF CO-RE helper.
+            // In non-BPF context, just evaluate the pointer expression.
+            "__builtin_preserve_access_index" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], dst);
+                true
+            }
+            // __builtin_btf_type_id: BPF CO-RE type ID query.
+            // Not meaningful outside BPF; return 0.
+            "__builtin_btf_type_id" => {
+                self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_has_attribute: check if object/type has
+            // a given attribute. Conservative: return 0 (unknown).
+            "__builtin_has_attribute" => {
+                self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_isdigit: check if value is a digit (0-9).
+            // Equivalent to ((unsigned)(x - '0')) < 10.
+            "__builtin_isdigit" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], dst);
+                // sub dst, '0' (0x30)
+                let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                self.emit(&[rex, 0x81, 0xE8 | (dst & 7)]);
+                self.emit(&0x30u32.to_le_bytes());
+                // cmp dst, 9
+                self.emit(&[rex, 0x83, 0xF8 | (dst & 7), 9]);
+                // setbe al (unsigned <= 9)
+                self.emit(&[0x0F, 0x96, 0xC0]);
+                // movzx eax, al
+                self.emit(&[0x0F, 0xB6, 0xC0]);
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            }
+            // __builtin_warning: compiler diagnostic hint, no codegen.
+            "__builtin_warning" => {
+                self.mov_imm(dst, 0);
+                true
+            }
+            // __builtin_counted_by_ref: C23 counted_by attribute helper.
+            // Returns a pointer to the count field. In non-annotated
+            // context, evaluate the first argument (pass-through).
+            "__builtin_counted_by_ref" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], dst);
+                true
+            }
+            // __builtin_alloca_uninitialized: like alloca but skip
+            // zero-initialization. Same codegen as __builtin_alloca
+            // since dcc alloca does not initialize either.
+            "__builtin_alloca_uninitialized" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                self.gen_expr(&args[0], 2); // rcx = size
+                self.emit(&[0x48, 0x83, 0xc1, 0x0f]); // add rcx, 15
+                self.emit(&[0x48, 0x83, 0xe1, 0xf0]); // and rcx, ~15
+                self.emit(&[0x48, 0x29, 0xcc]); // sub rsp, rcx
+                if dst != 4 && dst != 12 {
+                    let rex = if dst >= 8 { 0x49 } else { 0x48 };
+                    self.emit(&[rex, 0x89, 0xe0 | (dst & 7)]); // mov dst, rsp
+                }
+                true
+            }
+            // __builtin_strcat: forward to libc strcat.
+            "__builtin_strcat" => {
+                let ar = [7u8, 6, 2, 1, 8, 9];
+                for (i, a) in args.iter().enumerate() {
+                    if i >= 6 { break; }
+                    self.gen_expr(a, ar[i]);
+                }
+                self.emit(&[0x54]); // push rsp
+                self.call_label("strcat");
+                self.emit(&[0x5c]); // pop rsp
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
                 true
             }
             // fenv.h 运行时调用 (C11 7.6): fegetround / fesetround 等
