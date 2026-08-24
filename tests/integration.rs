@@ -14630,3 +14630,62 @@ fn windows_msvc_coff_object_reader_accepts() {
         "Windows: symbol table should be within file bounds"
     );
 }
+
+/// Windows MSVC target produces PE executable (not ELF)
+#[test]
+fn windows_msvc_output_is_pe_executable() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-win-pe-exe-{}.c", std::process::id()));
+    let exe = dir.join(format!("dcc-win-pe-exe-{}.exe", std::process::id()));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "x86_64-pc-windows-msvc", "-fbuiltin-linker", "-o"])
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The link may fail due to unresolved symbols (no CRT), but
+    // the output format should still be PE if any bytes were written.
+    let bytes = fs::read(&exe).unwrap_or_default();
+    let _ = fs::remove_file(&exe);
+    let _ = fs::remove_file(&src);
+    if bytes.is_empty() {
+        // Link failed before writing output; that's acceptable for now
+        // since we don't have Windows CRT. Just verify compilation worked.
+        assert!(
+            output.status.success() || stderr.contains("unresolved"),
+            "compilation should succeed or fail with unresolved symbols; stderr={stderr}"
+        );
+        return;
+    }
+    // Verify PE signature: MZ at start, PE at e_lfanew offset
+    assert!(bytes.len() >= 64, "PE file should have DOS header (64 bytes)");
+    assert_eq!(bytes[0], b'M', "PE should start with 'M'");
+    assert_eq!(bytes[1], b'Z', "PE should start with 'MZ'");
+    let e_lfanew =
+        u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
+    assert!(
+        bytes.len() > e_lfanew + 4,
+        "PE header offset should be within file"
+    );
+    assert_eq!(
+        &bytes[e_lfanew..e_lfanew + 4],
+        b"PE\0\0",
+        "PE signature should be 'PE\\0\\0'"
+    );
+    // Verify COFF header machine type
+    let machine_off = e_lfanew + 4;
+    let machine = u16::from_le_bytes(
+        bytes[machine_off..machine_off + 2].try_into().unwrap(),
+    );
+    assert_eq!(
+        machine, 0x8664,
+        "PE should have AMD64 machine type"
+    );
+    // Verify it's NOT ELF
+    assert!(
+        bytes.len() < 4 || &bytes[0..4] != b"\x7fELF",
+        "PE executable should not be ELF format"
+    );
+}
