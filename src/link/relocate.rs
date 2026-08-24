@@ -181,7 +181,7 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                 let sec_idx = sym.section as usize;
                 if sec_idx < layout.sections.len() {
                     let sym_sec = &layout.sections[sec_idx];
-                    sym_sec.vaddr + sym.value
+                    sym_sec.vaddr.wrapping_add(sym.value)
                 } else {
                     0
                 }
@@ -798,7 +798,7 @@ fn apply_one(sec: &mut OutputSection, r: OutputRela, layout: &Layout) -> Result<
     let sym = &layout.symbols[r.sym as usize];
     let s_vaddr = if sym.section != 0 {
         let s_sec = &layout.sections[sym.section as usize];
-        s_sec.vaddr + sym.value
+        s_sec.vaddr.wrapping_add(sym.value)
     } else {
         0
     };

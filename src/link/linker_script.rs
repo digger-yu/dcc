@@ -2333,8 +2333,16 @@ fn execute_output_section(
                     ctx.location_counter = out_sec.vma.wrapping_add(val);
                     val
                 };
+                // 如果 new_offset 超出当前数据长度，添加填充字节
+                // 这样 ALIGN 等指令产生的空隙会被填零
+                if new_offset > out_sec.data.len() as u64 {
+                    let pad = new_offset - out_sec.data.len() as u64;
+                    if pad < 0x10000000 {
+                        // 限制最大填充为 256MB，防止错误
+                        out_sec.data.extend(std::iter::repeat_n(0, pad as usize));
+                    }
+                }
                 // current_offset 不能回退到已有数据之前
-                // 因为 . = ALIGN(...) 可能计算出比当前数据长度小的偏移
                 current_offset = new_offset.max(out_sec.data.len() as u64);
             }
             SectionBodyItem::SymbolAssign(assign) => {

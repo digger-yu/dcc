@@ -472,7 +472,11 @@ impl LayoutBuilder {
                 load_segment: if script_sec.flags & SHF_WRITE != 0 { 1 } else { 0 },
                 vaddr: script_sec.vma,
                 file_off: 0, // computed below
-                input_offsets: Vec::new(),
+                input_offsets: script_sec
+                    .input_sections
+                    .iter()
+                    .map(|m| m.offset)
+                    .collect(),
                 input_sections: script_sec
                     .input_sections
                     .iter()
@@ -1049,7 +1053,7 @@ impl LayoutBuilder {
             out.push(OutputSymbol {
                 name: r.name.clone(),
                 value: val,
-                vaddr: sec.vaddr + val,
+                vaddr: sec.vaddr.wrapping_add(val),
                 size: r.size,
                 bind: r.bind,
                 ty: r.ty,
@@ -1081,7 +1085,7 @@ impl LayoutBuilder {
             out.push(OutputSymbol {
                 name: sym.name.clone(),
                 value: val,
-                vaddr: sec.vaddr + val,
+                vaddr: sec.vaddr.wrapping_add(val),
                 size: sym.size,
                 bind: sym.bind,
                 ty: sym.ty,
