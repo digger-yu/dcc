@@ -177,6 +177,11 @@ impl MipsCodegen {
             .collect()
     }
 
+    /// 获取函数大小表
+    pub fn func_sizes(&self) -> &HashMap<String, u64> {
+        &self.func_sizes
+    }
+
     pub fn compile(&mut self, module: &Module) {
         let prog = module.source();
         self.emit_globals(module);
