@@ -390,6 +390,10 @@ impl MipsCodegen {
         self.emit_sw(31, 29, (self.frame_bytes - 4) as i16); // sw $ra, frame-4($sp)
         self.emit_sw(30, 29, (self.frame_bytes - 8) as i16); // sw $fp, frame-8($sp)
         self.emit_addiu(30, 29, (self.frame_bytes - 8) as i16); // addiu $fp, $sp, frame-8
+        // -fstack-clash-protection: probe each page for large frames
+        if self._target.stack_clash_protection && self.frame_bytes > 4096 {
+            self.emit_stack_clash_probes(self.frame_bytes as u32);
+        }
 
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
@@ -1009,6 +1013,56 @@ impl MipsCodegen {
         let inst =
             (0b001001 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | (imm as u16 as u32);
         self.code.extend_from_slice(&inst.to_be_bytes());
+    }
+
+    /// SB rt, offset(base): store byte
+    fn emit_sb(&mut self, rt: u8, base: u8, offset: i16) {
+        let inst = (0b101000 << 26)
+            | ((base as u32) << 21)
+            | ((rt as u32) << 16)
+            | (offset as u16 as u32);
+        self.code.extend_from_slice(&inst.to_be_bytes());
+    }
+
+    /// LUI rt, imm: load upper immediate
+    fn emit_lui(&mut self, rt: u8, imm: u16) {
+        let inst = (0b001111 << 26) | ((rt as u32) << 16) | (imm as u32);
+        self.code.extend_from_slice(&inst.to_be_bytes());
+    }
+
+    /// -fstack-clash-protection: emit page-sized probes when allocating a
+    /// large stack frame.  Each probe stores a zero byte at [sp] to trigger
+    /// a fault on the guard page before the kernel maps it.
+    fn emit_stack_clash_probes(&mut self, frame_size: u32) {
+        let page: u32 = 4096;
+        let remainder = frame_size % page;
+        let pages = frame_size / page;
+        // First: addiu $sp, $sp, -remainder (if any, fits in 16-bit signed)
+        if remainder > 0 {
+            self.emit_addiu(29, 29, -(remainder as i16));
+        }
+        if pages > 0 {
+            // Probe loop using $t0 ($8) as counter, $t1 ($9) = 4096
+            // lui $t1, 1  => $t1 = 4096
+            self.emit_lui(9, 1);
+            // li $t0, pages
+            self.emit_load_imm(8, pages as i32);
+            // .probe_loop:
+            let loop_start = self.code.len() as u64;
+            // subu $sp, $sp, $t1
+            self.emit_subu(29, 29, 9);
+            // sb $zero, 0($sp)  — probe the page
+            self.emit_sb(0, 29, 0);
+            // addiu $t0, $t0, -1
+            self.emit_addiu(8, 8, -1);
+            // bne $t0, $zero, .probe_loop
+            let loop_end = self.code.len() as u64;
+            let offset = (loop_start as i64 - loop_end as i64 - 4) / 4;
+            let bne = (0b000101 << 26) | (8u32 << 21) | (offset as u16 as u32);
+            self.code.extend_from_slice(&bne.to_be_bytes());
+            // delay slot
+            self.emit_nop();
+        }
     }
 
     fn emit_sw(&mut self, rt: u8, base: u8, offset: i16) {
