@@ -3837,6 +3837,44 @@ fn asm_pushsection_exec_code_lands_in_custom_section() {
     }
 }
 
+/// 'q' inline assembly constraint: maps to GP registers (rax/rbx/rcx/rdx/rsi/rdi/rbp/r8-r15)
+#[test]
+fn asm_q_constraint_compiles_and_runs() {
+    let source = include_str!("fixtures/c/asm_q_constraint.c");
+    let (output, _obj) = run_object_test("asm-q-constraint", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("unsupported constraint"),
+        "q constraint should be supported: {stderr}"
+    );
+}
+
+/// Nested .pushsection/.popsection: kernel exception table with nested .fixup
+#[test]
+fn asm_nested_pushsection_compiles_with_sections() {
+    let source = include_str!("fixtures/c/asm_nested_pushsection.c");
+    let (output, obj_path) = run_object_test("asm-nested-pushsection", source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("emitted as nop"),
+        "unexpected nop fallback: {stderr}"
+    );
+    let obj = std::fs::read(&obj_path).expect("read object file");
+    let _ = std::fs::remove_file(&obj_path);
+    let secs = elf64_sections(&obj);
+    // __ex_table should have 3 .long entries (12 bytes) per exception table entry
+    let (ty, _, size) = secs.get("__ex_table").copied().expect("missing __ex_table section");
+    assert_eq!(ty, 1, "__ex_table must be SHT_PROGBITS");
+    assert!(size >= 12, "__ex_table too small (size {size}), expected at least 12 bytes");
+    assert_eq!(size % 12, 0, "__ex_table size {size} not a multiple of 12");
+    // .fixup should be executable
+    let (_, flags, size) = secs.get(".fixup").copied().expect("missing .fixup section");
+    assert!(flags & 0x4 != 0, ".fixup must have SHF_EXECINSTR (got flags {flags:#x})");
+    assert!(size >= 5, ".fixup code dropped (size {size})");
+}
+
 #[test]
 fn asm_numeric_labels_are_scoped_per_block() {
     let source = r#"
