@@ -67,14 +67,15 @@ fn trace_inline_decision(callee: &str, decision: &str, reason: &str) {
 /// 内联策略:
 /// - `-O0`: 仅内联 `always_inline` / `flatten` 标记的函数 (内核正确性
 ///   依赖, 如 percpu 宏). 不受尺寸限制.
-/// - `-O1+`: 额外内联符合成本模型的 `static inline` 函数.
-/// - `-O3`: 额外启发式内联小型 `static` 零参函数 (≤4 items).
+/// - `-O1-O2`: 仅 `always_inline` / `flatten` (未来计划加入成本模型
+///   驱动的 `static inline` 内联).
+/// - `-O3`: 额外启发式内联小型 `static` 零参函数 (cost ≤ 20 AST nodes).
 /// - `noinline` 属性始终被尊重 (除非与 `always_inline` 冲突, 此时
 ///   `always_inline` 优先, 与 GCC 行为一致).
 /// -  speculative 内联深度上限 `INLINE_MAX_DEPTH` (8). 递归函数
 ///   通过 callee-name 检测阻止直接递归内联.
 pub fn optimize(module: &mut Module, level: u8) {
-    // 内联: O0 仅 always_inline; O1+ 完整策略
+    // 内联: O0-O2 仅 always_inline/flatten; O3 额外启发式
     function_inline(module, level);
     if level == 0 {
         return;
@@ -853,8 +854,8 @@ fn dce_block_in_stmt(s: &mut Stmt) {
 ///
 /// `level` 控制内联激进程度:
 ///   - O0: 仅 `always_inline` / `flatten`
-///   - O1-O2: 成本模型驱动的 `static inline`
-///   - O3: 额外启发式小型 static 零参函数
+///   - O1-O2: 同 O0 (未来计划加入成本模型驱动)
+///   - O3: 额外启发式小型 static 零参函数 (cost ≤ 20 AST nodes)
 fn function_inline(module: &mut Module, level: u8) {
     let prog = module.source_mut();
     let fenv_access = prog.fenv_access;
@@ -1945,6 +1946,163 @@ mod tests {
                 _ => false,
             });
             assert!(has_label, "label in dead if branch must survive -O2 fold");
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Inline policy tests (parser-driven for conciseness)
+    // -------------------------------------------------------------------
+
+    /// Helper: parse source, lower, optimize at given level, return Program.
+    fn optimize_src(src: &[u8], level: u8) -> Program {
+        let (prog, diags) = crate::parser::parse(src, "inline-test.c");
+        assert!(diags.iter().all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
+            "parse errors: {:?}", diags);
+        let (mut module, _) = ir::lower(prog).expect("lower");
+        optimize(&mut module, level);
+        module.source().clone()
+    }
+
+    /// Check if main() body contains a Call expression (i.e. not inlined).
+    fn main_has_call(prog: &Program) -> bool {
+        for d in &prog.decls {
+            if let Decl::Func(f) = d {
+                if f.name.name == "main" {
+                    if let Some(b) = &f.body {
+                        return block_has_call(b);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn block_has_call(b: &Block) -> bool {
+        b.items.iter().any(|it| match it {
+            BlockItem::Stmt(s) => stmt_has_call(s),
+            _ => false,
+        })
+    }
+
+    fn stmt_has_call(s: &Stmt) -> bool {
+        match s {
+            Stmt::Return { val: Some(e), .. } | Stmt::Expr { e, .. } => expr_has_call(e),
+            Stmt::Block { b, .. } => block_has_call(b),
+            Stmt::If { cond, then_, else_, .. } => {
+                expr_has_call(cond) || stmt_has_call(then_)
+                    || else_.as_ref().is_some_and(|e| stmt_has_call(e))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_has_call(e: &Expr) -> bool {
+        match e {
+            Expr::Call { .. } => true,
+            Expr::Binop { l, r, .. } => expr_has_call(l) || expr_has_call(r),
+            Expr::Unary { e, .. } | Expr::Cast { e, .. } => expr_has_call(e),
+            Expr::Cond { cond, then_, else_, .. } => {
+                expr_has_call(cond) || expr_has_call(then_) || expr_has_call(else_)
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn noinline_is_respected_at_o1() {
+        // noinline function must NOT be inlined even if small
+        let prog = optimize_src(
+            b"__attribute__((noinline)) static int f(int x) { return x + 1; }\n\
+              int main(void) { return f(5); }\n",
+            1,
+        );
+        assert!(main_has_call(&prog), "noinline function should not be inlined");
+    }
+
+    #[test]
+    fn always_inline_large_body_inlined_at_o0() {
+        // always_inline with body > 8 items must still be inlined at O0
+        let prog = optimize_src(
+            b"__attribute__((always_inline)) static inline int big(int x) {\n\
+              int a = x+1; int b = a+2; int c = b+3; int d = c+4;\n\
+              int e = d+5; int f = e+6; int g = f+7; int h = g+8;\n\
+              int i = h+9; return i;\n\
+              }\n\
+              int main(void) { return big(0); }\n",
+            0,
+        );
+        assert!(!main_has_call(&prog),
+            "always_inline must be inlined at O0 regardless of body size");
+    }
+
+    #[test]
+    fn always_inline_plus_noinline_always_inline_wins() {
+        // When both always_inline and noinline are set, always_inline wins (GCC)
+        let prog = optimize_src(
+            b"__attribute__((always_inline, noinline)) static inline int f(int x) {\n\
+              return x * 2;\n\
+              }\n\
+              int main(void) { return f(3); }\n",
+            1,
+        );
+        assert!(!main_has_call(&prog),
+            "always_inline should win over noinline");
+    }
+
+    #[test]
+    fn o0_does_not_inline_regular_static_inline() {
+        // Regular static inline must NOT be inlined at O0
+        let prog = optimize_src(
+            b"static inline int f(int x) { return x + 1; }\n\
+              int main(void) { return f(5); }\n",
+            0,
+        );
+        assert!(main_has_call(&prog),
+            "regular static inline should not be inlined at O0");
+    }
+
+    #[test]
+    fn expr_node_count_simple() {
+        // 5 + 3 => Binop(5, 3) = 3 nodes
+        let e = Expr::Binop {
+            op: BinOp::Add,
+            l: Box::new(Expr::Int { v: 5, span: Span::point("t", 1, 1), ty: int_ty() }),
+            r: Box::new(Expr::Int { v: 3, span: Span::point("t", 1, 1), ty: int_ty() }),
+            span: Span::point("t", 1, 1),
+            ty: int_ty(),
+        };
+        assert_eq!(expr_node_count(&e), 3);
+    }
+
+    #[test]
+    fn expr_node_count_ident() {
+        let e = Expr::Ident {
+            name: Ident { name: "x".into(), span: Span::point("t", 1, 1) },
+            span: Span::point("t", 1, 1),
+            ty: int_ty(),
+        };
+        assert_eq!(expr_node_count(&e), 1);
+    }
+
+    #[test]
+    fn estimate_inline_cost_small_func() {
+        // A simple return x+1 function should have low cost
+        let (prog, _) = crate::parser::parse(
+            b"static int f(int x) { return x + 1; }\n",
+            "cost-test.c",
+        );
+        if let Decl::Func(f) = &prog.decls[0] {
+            let body = f.body.as_ref().unwrap();
+            let args = vec![Expr::Int {
+                v: 5,
+                span: Span::point("t", 1, 1),
+                ty: int_ty(),
+            }];
+            let cost = estimate_inline_cost(f, body, &args);
+            assert!(cost <= INLINE_COST_THRESHOLD,
+                "small function cost {} should be <= {}", cost, INLINE_COST_THRESHOLD);
+        } else {
+            panic!("expected FuncDecl");
         }
     }
 }
