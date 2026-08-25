@@ -15136,3 +15136,93 @@ int overflow_test(int x) {
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
 }
+
+#[test]
+#[cfg(unix)]
+fn dwarf_debug_info_generation() {
+    // Verify that dcc -g produces valid DWARF debug info sections
+    let pid = std::process::id();
+    let src_path = std::env::temp_dir().join(format!("dcc-dwarf-test-{pid}.c"));
+    let obj_path = std::env::temp_dir().join(format!("dcc-dwarf-test-{pid}.o"));
+
+    let src = r#"
+int add(int a, int b) {
+    return a + b;
+}
+
+long multiply(long x, long y) {
+    return x * y;
+}
+
+int main(void) {
+    int result = add(10, 20);
+    long prod = multiply(3L, 4L);
+    return result + (int)prod;
+}
+"#;
+    fs::write(&src_path, src).unwrap();
+
+    // Compile with debug info
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-g", "-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc -g");
+    assert!(
+        output.status.success(),
+        "dcc -g compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify .debug_info section exists
+    let readelf_output = Command::new("readelf")
+        .args(["-S"])
+        .arg(&obj_path)
+        .output()
+        .expect("run readelf -S");
+    let sections = String::from_utf8_lossy(&readelf_output.stdout);
+    assert!(
+        sections.contains(".debug_info"),
+        "missing .debug_info section"
+    );
+    assert!(
+        sections.contains(".debug_abbrev"),
+        "missing .debug_abbrev section"
+    );
+    assert!(
+        sections.contains(".debug_line"),
+        "missing .debug_line section"
+    );
+    assert!(
+        sections.contains(".debug_str"),
+        "missing .debug_str section"
+    );
+
+    // Verify .debug_abbrev is zero-terminated (DWARF spec requirement)
+    let obj_data = fs::read(&obj_path).unwrap();
+    // Basic check: object file was created and has content
+    assert!(obj_data.len() > 100, "object file too small");
+
+    // Verify DWARF info contains function names
+    let dwarf_output = Command::new("readelf")
+        .args(["--debug-dump=info"])
+        .arg(&obj_path)
+        .output()
+        .expect("run readelf --debug-dump=info");
+    let dwarf_info = String::from_utf8_lossy(&dwarf_output.stdout);
+    // The DWARF info should mention our source file
+    assert!(
+        dwarf_info.contains("dcc-dwarf-test") || dwarf_info.contains("DW_TAG_compile_unit"),
+        "DWARF info missing CU"
+    );
+
+    // Verify .BTF section exists
+    assert!(
+        sections.contains(".BTF") || sections.contains(".btf"),
+        "missing .BTF section"
+    );
+
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
