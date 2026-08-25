@@ -1053,6 +1053,39 @@ impl Aarch64Codegen {
                 self.mov_w0_imm(0);
             }
             ExprKind::Binary(op) if expr.children.len() >= 2 => {
+                // Float comparison: children are float, result is integer
+                if is_float_ty(&expr.children[0].ty)
+                    && is_float_ty(&expr.children[1].ty)
+                    && matches!(
+                        op,
+                        BinOp::EqEq
+                            | BinOp::Ne
+                            | BinOp::Lt
+                            | BinOp::Le
+                            | BinOp::Gt
+                            | BinOp::Ge
+                    )
+                {
+                    // Evaluate left float -> s0
+                    self.gen_float_expr(&expr.children[0]);
+                    self.mov_s1_s0(); // save left to s1
+                    // Evaluate right float -> s0
+                    self.gen_float_expr(&expr.children[1]);
+                    // Now s0 = right, s1 = left
+                    // fcmp s1, s0 and set w0 from condition
+                    self.fcmp_s0_s1();
+                    self.fset_w0_from_fcmp(*op);
+                    return true;
+                }
+                // Float binary arithmetic: children are float, result is float
+                // This case is reached when expr.ty is float but gen_expr was
+                // called (e.g., from a cast context). Dispatch to gen_float_expr.
+                if is_float_ty(&expr.children[0].ty)
+                    && is_float_ty(&expr.children[1].ty)
+                    && is_float_ty(&expr.ty)
+                {
+                    return self.gen_float_expr(expr);
+                }
                 self.gen_expr(&expr.children[0]);
                 self.mov_w14_w0();
                 self.gen_expr(&expr.children[1]);
