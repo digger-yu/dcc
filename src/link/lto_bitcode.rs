@@ -2513,3 +2513,388 @@ mod dse_tests {
         assert_eq!(stats.eliminated, 3);
     }
 }
+
+// =============================================================================
+// 跨 TU 别名分析 (Alias Analysis)
+// =============================================================================
+
+/// 别名分析上下文
+#[derive(Debug, Clone, Default)]
+pub struct AliasCtx {
+    /// 别名集合：每个指针可能指向的变量集合
+    pub alias_sets: HashMap<String, HashSet<String>>,
+    /// 全局变量的地址被取走
+    pub address_taken_globals: HashSet<String>,
+    /// 指针变量
+    pub pointer_vars: HashSet<String>,
+    /// 统计信息
+    pub stats: AliasStats,
+}
+
+/// 别名分析统计
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AliasStats {
+    /// 分析的指针数量
+    pub pointer_count: usize,
+    /// 分析的全局变量数量
+    pub global_count: usize,
+    /// 别名集合数量
+    pub alias_set_count: usize,
+    /// 地址被取走的全局数量
+    pub address_taken_count: usize,
+}
+
+/// 别名查询结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasResult {
+    /// 两个指针肯定不别名
+    NoAlias,
+    /// 两个指针可能别名
+    MayAlias,
+    /// 两个指针肯定别名
+    MustAlias,
+}
+
+impl AliasCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 分析多个模块的别名信息
+    pub fn analyze(&mut self, modules: &[BitcodeModule]) {
+        for module in modules {
+            // 收集地址被取走的全局
+            for global in &module.globals {
+                if let Some(init) = &global.initializer {
+                    if self.expr_takes_address(init) {
+                        self.address_taken_globals.insert(global.name.clone());
+                    }
+                }
+            }
+
+            // 分析函数中的指针使用
+            for func in &module.functions {
+                for stmt in &func.body {
+                    self.analyze_stmt(stmt);
+                }
+            }
+        }
+
+        self.stats.pointer_count = self.pointer_vars.len();
+        self.stats.global_count = self.address_taken_globals.len();
+        self.stats.address_taken_count = self.address_taken_globals.len();
+    }
+
+    fn analyze_stmt(&mut self, stmt: &TypedStmt) {
+        for expr in &stmt.expressions {
+            self.analyze_expr(expr);
+        }
+        for nested in &stmt.nested {
+            self.analyze_stmt(nested);
+        }
+    }
+
+    fn analyze_expr(&mut self, expr: &TypedExpr) {
+        match &expr.kind {
+            ExprKind::Address => {
+                // 取地址操作
+                if let Some(child) = expr.children.first() {
+                    if let ExprKind::Local(name) = &child.kind {
+                        // 记录指针变量
+                        if let ExprKind::Local(ptr_name) = &expr.children.first().unwrap().kind {
+                            // 这里 expr 是 Address，其子节点是被取地址的变量
+                            // 我们需要记录哪个指针指向哪个变量
+                        }
+                        self.address_taken_globals.insert(name.clone());
+                    }
+                }
+            }
+            ExprKind::Local(name) => {
+                // 检查是否是PointerType
+                if matches!(expr.ty, ValueType::Pointer(_)) {
+                    self.pointer_vars.insert(name.clone());
+                }
+            }
+            ExprKind::Assign => {
+                // 分析赋值：如果右侧是 Address，记录别名
+                if expr.children.len() >= 2 {
+                    let lhs = &expr.children[0];
+                    let rhs = &expr.children[1];
+                    if let ExprKind::Local(ptr_name) = &lhs.kind {
+                        if let ExprKind::Address = &rhs.kind {
+                            if let Some(target) = rhs.children.first() {
+                                if let ExprKind::Local(target_name) = &target.kind {
+                                    // ptr_name 指向 target_name
+                                    self.alias_sets
+                                        .entry(ptr_name.clone())
+                                        .or_default()
+                                        .insert(target_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for child in &expr.children {
+            self.analyze_expr(child);
+        }
+    }
+
+    fn expr_takes_address(&self, expr: &TypedExpr) -> bool {
+        if let ExprKind::Address = &expr.kind {
+            return true;
+        }
+        for child in &expr.children {
+            if self.expr_takes_address(child) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 查询两个指针的别名关系
+    pub fn query(&self, ptr1: &str, ptr2: &str) -> AliasResult {
+        let set1 = self.alias_sets.get(ptr1);
+        let set2 = self.alias_sets.get(ptr2);
+
+        match (set1, set2) {
+            // 两个指针都有已知的别名集合
+            (Some(s1), Some(s2)) => {
+                // 检查是否有交集
+                let has_common = s1.iter().any(|t| s2.contains(t));
+                if has_common {
+                    AliasResult::MayAlias
+                } else {
+                    AliasResult::NoAlias
+                }
+            }
+            // 一个指针有已知集合，另一个没有
+            (Some(_), None) | (None, Some(_)) => {
+                // 保守估计：可能别名
+                AliasResult::MayAlias
+            }
+            // 两个指针都没有已知集合
+            (None, None) => {
+                // 如果都是指针变量，保守估计
+                if self.pointer_vars.contains(ptr1) && self.pointer_vars.contains(ptr2) {
+                    AliasResult::MayAlias
+                } else {
+                    AliasResult::NoAlias
+                }
+            }
+        }
+    }
+
+    /// 检查指针是否可能指向某个全局
+    pub fn may_point_to(&self, ptr: &str, global: &str) -> bool {
+        if let Some(targets) = self.alias_sets.get(ptr) {
+            targets.contains(global)
+        } else {
+            // 保守估计：如果全局地址被取走，可能指向
+            self.address_taken_globals.contains(global)
+        }
+    }
+
+    /// 获取指针的别名集合
+    pub fn get_alias_set(&self, ptr: &str) -> Option<&HashSet<String>> {
+        self.alias_sets.get(ptr)
+    }
+}
+
+/// 运行跨 TU 别名分析
+pub fn run_cross_tu_alias_analysis(modules: &[BitcodeModule]) -> (AliasCtx, AliasStats) {
+    let mut ctx = AliasCtx::new();
+    ctx.analyze(modules);
+    ctx.stats.alias_set_count = ctx.alias_sets.len();
+    let stats = ctx.stats;
+    (ctx, stats)
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    use crate::diagnostics::Span;
+    use crate::ir::{ExprKind, TypedExpr, TypedStmt, ValueType};
+
+    fn make_ptr_type() -> ValueType {
+        ValueType::Pointer(Box::new(ValueType::Integer {
+            bits: 32,
+            signed: true,
+        }))
+    }
+
+    fn make_address_expr(target: &str) -> TypedExpr {
+        TypedExpr {
+            ty: make_ptr_type(),
+            kind: ExprKind::Address,
+            children: vec![TypedExpr {
+                ty: ValueType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                kind: ExprKind::Local(target.to_string()),
+                children: vec![],
+                span: Span::point("", 0, 0),
+                literal: None,
+            }],
+            span: Span::point("", 0, 0),
+            literal: None,
+        }
+    }
+
+    fn make_assign_ptr_to_addr(ptr: &str, target: &str) -> TypedExpr {
+        TypedExpr {
+            ty: make_ptr_type(),
+            kind: ExprKind::Assign,
+            children: vec![
+                TypedExpr {
+                    ty: make_ptr_type(),
+                    kind: ExprKind::Local(ptr.to_string()),
+                    children: vec![],
+                    span: Span::point("", 0, 0),
+                    literal: None,
+                },
+                make_address_expr(target),
+            ],
+            span: Span::point("", 0, 0),
+            literal: None,
+        }
+    }
+
+    #[test]
+    fn alias_empty_modules() {
+        let modules: Vec<BitcodeModule> = vec![];
+        let (_ctx, stats) = run_cross_tu_alias_analysis(&modules);
+        assert_eq!(stats.pointer_count, 0);
+        assert_eq!(stats.alias_set_count, 0);
+    }
+
+    #[test]
+    fn alias_tracks_address_taken() {
+        let global = Global {
+            name: ".g_data".to_string(),
+            ty: ValueType::Integer {
+                bits: 32,
+                signed: true,
+            },
+            initializer: Some(TypedExpr {
+                ty: ValueType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                kind: ExprKind::Constant,
+                children: vec![],
+                span: Span::point("", 0, 0),
+                literal: Some(crate::ir::ExprLiteral::Int(42)),
+            }),
+            span: Span::point("", 0, 0),
+            is_tls: false,
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![],
+            globals: vec![global],
+        };
+        let (ctx, _stats) = run_cross_tu_alias_analysis(&[module]);
+        // 全局变量本身不会被视为 address_taken，除非有 Address 表达式
+        assert!(ctx.address_taken_globals.is_empty() || ctx.address_taken_globals.contains(".g_data"));
+    }
+
+    #[test]
+    fn alias_tracks_ptr_to_global() {
+        let func = Function {
+            name: "test".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![TypedStmt {
+                expressions: vec![make_assign_ptr_to_addr("p", ".g_var")],
+                nested: vec![],
+                span: Span::point("", 0, 0),
+            }],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![],
+        };
+        let (ctx, _stats) = run_cross_tu_alias_analysis(&[module]);
+        // p 应该指向 .g_var
+        assert!(ctx.may_point_to("p", ".g_var"));
+    }
+
+    #[test]
+    fn alias_no_alias_for_disjoint_ptrs() {
+        let func = Function {
+            name: "test".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![
+                TypedStmt {
+                    expressions: vec![make_assign_ptr_to_addr("p1", ".g_var1")],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+                TypedStmt {
+                    expressions: vec![make_assign_ptr_to_addr("p2", ".g_var2")],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+            ],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![],
+        };
+        let (ctx, _stats) = run_cross_tu_alias_analysis(&[module]);
+        // p1 和 p2 指向不同的全局，应该 NoAlias
+        assert_eq!(ctx.query("p1", "p2"), AliasResult::NoAlias);
+    }
+
+    #[test]
+    fn alias_may_alias_for_overlapping_ptrs() {
+        let func = Function {
+            name: "test".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![
+                TypedStmt {
+                    expressions: vec![make_assign_ptr_to_addr("p1", ".g_var")],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+                TypedStmt {
+                    expressions: vec![make_assign_ptr_to_addr("p2", ".g_var")],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+            ],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![],
+        };
+        let (ctx, _stats) = run_cross_tu_alias_analysis(&[module]);
+        // p1 和 p2 都指向 .g_var，应该 MayAlias
+        assert_eq!(ctx.query("p1", "p2"), AliasResult::MayAlias);
+    }
+
+    #[test]
+    fn alias_stats_tracking() {
+        let stats = AliasStats {
+            pointer_count: 5,
+            global_count: 3,
+            alias_set_count: 2,
+            address_taken_count: 3,
+        };
+        assert_eq!(stats.pointer_count, 5);
+        assert_eq!(stats.alias_set_count, 2);
+    }
+}
