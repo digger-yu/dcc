@@ -1915,10 +1915,18 @@ impl Codegen {
             }
             ".int" | ".long" | ".4byte" => {
                 for expr in Self::split_asm_args(args_str) {
-                    let (val, sym, _deferred) =
+                    let (val, sym, deferred) =
                         Self::parse_asm_data_expr(expr.trim(), &self.labels, locals, line_idx, numeric_label_map);
-                    // .long sym-sym deferred: should not happen for 4-byte (use PC32 instead)
-                    if let Some((sym_name, rel_type, addend)) = sym {
+                    if let Some((left_label, right_label)) = deferred {
+                        let data_offset = self.extra_sections[sec_idx].data.len();
+                        self.deferred_pushsection_fixups.push(DeferredPushsectionFixup {
+                            sec_idx,
+                            data_offset,
+                            left_label,
+                            right_label,
+                            byte_size: 4,
+                        });
+                    } else if let Some((sym_name, rel_type, addend)) = sym {
                         let off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pending_custom_sec_rels.push(CustomSecRel {
                             sec_idx,
@@ -16947,6 +16955,45 @@ impl Codegen {
                 let sec_idx = *self.pushsection_stack.last().unwrap();
                 let is_exec = self.extra_sections[sec_idx].flags & elf::SHF_EXECINSTR != 0;
                 if is_exec {
+                    // Handle nested .pushsection/.popsection inside exec pushsection
+                    if trimmed.starts_with(".pushsection") {
+                        let second_token = trimmed.split_whitespace().nth(1).unwrap_or("");
+                        let sec_name = second_token.split(',').next().unwrap_or("").trim();
+                        if !sec_name.starts_with(".text") && !sec_name.is_empty() {
+                            let (is_w, is_e) = Self::parse_pushsection_flags(trimmed);
+                            let nested_idx = self.ensure_custom_section(sec_name, is_e, is_w);
+                            if is_e {
+                                self.pushsection_exec_stack.push((nested_idx, self.code.len() as u64));
+                            }
+                            self.pushsection_stack.push(nested_idx);
+                            continue;
+                        }
+                    }
+                    if trimmed.starts_with(".popsection") {
+                        let top_is_exec = self.pushsection_stack.last()
+                            .map(|&idx| self.extra_sections[idx].flags & elf::SHF_EXECINSTR != 0)
+                            .unwrap_or(false);
+                        if top_is_exec {
+                            if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
+                                let size = self.code.len() as u64 - start;
+                                if size > 0 {
+                                    let align = self.extra_sections[sec_idx].align.max(16);
+                                    let len = self.extra_sections[sec_idx].data.len();
+                                    let aligned = (len + align as usize - 1) & !(align as usize - 1);
+                                    self.pad_custom_section_to(sec_idx, aligned);
+                                    let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                                    self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
+                                    self.pushsection_code_ranges.push((start, size, sec_idx, sec_off));
+                                }
+                            }
+                            self.pushsection_stack.pop();
+                        } else if !self.pushsection_stack.is_empty() {
+                            self.pushsection_stack.pop();
+                        } else {
+                            skip_depth = skip_depth.saturating_sub(1);
+                        }
+                        continue;
+                    }
                     // 可执行 pushsection: 指令/数据全部发射到 self.code,
                     // 标签与跳转在 .text 坐标解析, 退出时整体搬迁.
                     if trimmed.starts_with(".globl ") || trimmed.starts_with(".global ") {
@@ -17083,6 +17130,11 @@ impl Codegen {
                     2 => {
                         let bytes = (diff as u16).to_le_bytes();
                         data[fixup.data_offset..fixup.data_offset + 2]
+                            .copy_from_slice(&bytes);
+                    }
+                    4 => {
+                        let bytes = (diff as u32).to_le_bytes();
+                        data[fixup.data_offset..fixup.data_offset + 4]
                             .copy_from_slice(&bytes);
                     }
                     _ => {}
