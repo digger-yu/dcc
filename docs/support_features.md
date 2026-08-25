@@ -16,7 +16,7 @@
 | __int128 / register asm / 全局符号 | `examples/test_p1_features.c` |
 | 预处理 forced-include 注释安全 | `tests/fixtures/c/comment.h` |
 | mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
-| DWARF + BTF（含 struct） | `-g` 生成 `.debug_*` + `.BTF`（含 `dcc_probe` STRUCT 类型） |
+| DWARF + BTF（完整类型信息） | `-g` 生成 `.debug_*` + `.BTF`（含编译单元中所有类型的完整 BTF 信息，支持 pahole -J 直接解析） |
 | objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`；`-mfunction-return=thunk-extern` 下函数尾声、空 global asm 函数和 mini-asm `ret` 均跳转 `__x86_return_thunk`，避免 MITIGATION_RETHUNK 裸 `ret` |
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
 | QEMU bzImage boot 门禁 | `scripts/qemu_boot_matrix.sh` 在 bzImage 存在时默认硬门禁，缺 QEMU 或缺 boot log 关键字符串均失败；`kernel_full_check.sh` strict 模式导出 `REQUIRE_QEMU_BOOT=1`；`strict_qemu_boot_*` 集成测试固化契约 |
@@ -392,7 +392,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 特性 | 说明 |
 |------|------|
 | DWARF v4 | x86_64 / AArch64 / RISC-V / MIPS / MIPS64 / ARM 全部架构 |
-| `.BTF` | x86_64（struct dcc_probe）/ AArch64 / RISC-V |
+| `.BTF` | x86_64 / AArch64 / RISC-V（完整类型转储：int/struct/union/enum/ptr/typedef/array/func 等） |
 | `.eh_frame` | CIE + FDE；setjmp CFI 寄存器保存表 |
 | `.orc_unwind_ip` / `.orc_unwind` | 由 objtool 统一生成，dcc 不输出（避免 "file already has .orc_unwind section" 冲突） |
 | DWARF line table | `-g1` 下自动去重; `DW_LNE_set_discriminator` 支持同 PC 多行条目 (asm 逐指令调试) |
