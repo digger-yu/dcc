@@ -436,6 +436,12 @@ pub struct DebugSections {
     pub skeleton_type: Vec<u8>,
     // BTF
     pub btf: Vec<u8>,
+    // .debug_info relocations: (offset_in_section, symbol_name)
+    pub debug_info_relocs: Vec<(u64, String)>,
+    // .debug_line relocations: (offset_in_section, symbol_name)
+    pub debug_line_relocs: Vec<(u64, String)>,
+    // .debug_aranges relocations: (offset_in_section, symbol_name)
+    pub debug_aranges_relocs: Vec<(u64, String)>,
 }
 
 impl DebugSections {
@@ -896,15 +902,20 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
     sec.str = strl_section(&mut strs, cu, opts);
 
     // 2) .debug_abbrev + .debug_info
-    let (abbrev, info) = build_abbrev_and_info(cu, opts, &mut strs, &mut abb);
+    let (abbrev, info, relocs) = build_abbrev_and_info(cu, opts, &mut strs, &mut abb);
     sec.abbrev = abbrev;
     sec.info = info;
+    sec.debug_info_relocs = relocs;
 
     // 3) .debug_line
-    sec.line = build_line_program(cu, opts);
+    let (line, line_relocs) = build_line_program(cu, opts);
+    sec.line = line;
+    sec.debug_line_relocs = line_relocs;
 
     // 4) .debug_aranges
-    sec.aranges = build_aranges(cu, opts);
+    let (aranges, aranges_relocs) = build_aranges(cu, opts);
+    sec.aranges = aranges;
+    sec.debug_aranges_relocs = aranges_relocs;
 
     // 5) .debug_frame
     sec.frame = build_debug_frame(cu, opts);
@@ -1012,13 +1023,83 @@ fn intern_type(strs: &mut StringTable, ty: &DwarfType) {
     }
 }
 
+/// Recursively collect a type and all nested types into the ordered list.
+fn collect_all_types_from(ty: &DwarfType, out: &mut Vec<DwarfType>) {
+    if out.iter().any(|t: &DwarfType| t.name == ty.name) {
+        return;
+    }
+    out.push(ty.clone());
+    match &ty.kind {
+        DwarfTypeKind::Pointer(inner)
+        | DwarfTypeKind::Const(inner)
+        | DwarfTypeKind::Volatile(inner)
+        | DwarfTypeKind::Restrict(inner) => {
+            collect_all_types_from(inner, out);
+        }
+        DwarfTypeKind::Array { element, .. } => {
+            collect_all_types_from(element, out);
+        }
+        DwarfTypeKind::Struct { members } | DwarfTypeKind::Union { members } => {
+            for m in members {
+                collect_all_types_from(&m.ty, out);
+            }
+        }
+        DwarfTypeKind::Enum { underlying, .. } => {
+            collect_all_types_from(underlying, out);
+        }
+        DwarfTypeKind::Func { ret, params } => {
+            collect_all_types_from(ret, out);
+            for p in params {
+                collect_all_types_from(p, out);
+            }
+        }
+        DwarfTypeKind::Typedef { target, .. } => {
+            collect_all_types_from(target, out);
+        }
+        _ => {}
+    }
+}
+
+/// Collect all types referenced in the CU (from functions, globals, etc.)
+/// in dependency order so that base types appear before derived types.
+fn collect_all_cu_types(cu: &CompileUnit) -> Vec<DwarfType> {
+    let mut types = Vec::new();
+    for f in &cu.functions {
+        collect_types_ordered(&f.return_type, &mut types);
+        for (_, pty) in &f.params {
+            collect_types_ordered(pty, &mut types);
+        }
+        for v in &f.local_vars {
+            collect_types_ordered(&v.ty, &mut types);
+        }
+        for block in &f.lexical_blocks {
+            for v in &block.variables {
+                collect_types_ordered(&v.ty, &mut types);
+            }
+        }
+    }
+    for g in &cu.globals {
+        collect_types_ordered(&g.ty, &mut types);
+    }
+    for t in &cu.types {
+        collect_types_ordered(t, &mut types);
+    }
+    types
+}
+
+/// Collect a type and its nested types into the ordered list.
+fn collect_types_ordered(ty: &DwarfType, out: &mut Vec<DwarfType>) {
+    collect_all_types_from(ty, out);
+}
+
 fn build_abbrev_and_info(
     cu: &CompileUnit,
     opts: &DebugOptions,
     strs: &mut StringTable,
     abb: &mut AbbrevBuilder,
-) -> (Vec<u8>, Vec<u8>) {
+) -> (Vec<u8>, Vec<u8>, Vec<(u64, String)>) {
     let mut type_offsets: std::collections::HashMap<String, u32> = Default::default();
+    let mut relocs: Vec<(u64, String)> = Vec::new();
 
     // info header: unit_length(4) + version(2) + debug_abbrev_offset(4) + address_size(1)
     let mut info = Vec::new();
@@ -1046,23 +1127,30 @@ fn build_abbrev_and_info(
     info.extend_from_slice(&cu.language.to_le_bytes());
     // name
     write_attr_strp(&mut info, strs.intern(&cu.source_name));
-    // comp_dir
-    if let Some(cd) = &cu.comp_dir {
-        write_attr_strp(&mut info, strs.intern(cd));
-    }
-    // low_pc
+    // comp_dir (always write to match abbrev table)
+    write_attr_strp(&mut info, strs.intern(
+        cu.comp_dir.as_deref().unwrap_or("")
+    ));
+    // low_pc (relocated to first function address)
+    let cu_low_pc_off = info.len() as u64;
     info.extend_from_slice(&cu.low_pc.to_le_bytes());
+    if let Some(first_func) = cu.functions.first() {
+        relocs.push((cu_low_pc_off, first_func.name.clone()));
+    }
     // high_pc (DWARF 4: can be constant offset)
     let high_pc_val = cu.high_pc.saturating_sub(cu.low_pc);
     info.extend_from_slice(&high_pc_val.to_le_bytes());
     // stmt_list: 占位, .debug_line 偏移 = 0（GDB 接受 0 表示无行号程序）
     info.extend_from_slice(&0u32.to_le_bytes());
 
-    // type DIEs（顶级类型）
-    for t in &cu.types {
+    // Pre-collect all types from functions/globals to avoid inline
+    // type DIE writes during function attribute encoding.
+    let all_types = collect_all_cu_types(cu);
+    // type DIEs（顶级类型 — written before function/global DIEs）
+    for t in &all_types {
         let off = info.len() as u32;
         type_offsets.insert(t.name.clone(), off);
-        write_type_die(&mut info, abb, strs, t);
+        write_type_die(&mut info, abb, strs, &mut type_offsets, t);
     }
 
     // function DIEs
@@ -1104,16 +1192,13 @@ fn build_abbrev_and_info(
             write_attr_strp(&mut info, strs.intern(ln));
         }
         // type (return type)
-        let ret_off = ensure_type_die(cu, &mut info, abb, strs, &mut type_offsets, &f.return_type);
+        let ret_off = ensure_type_die(&mut info, abb, strs, &mut type_offsets, &f.return_type);
         info.extend_from_slice(&ret_off.to_le_bytes());
-        // external
-        if f.is_external {
-            info.push(1);
-        } else {
-            info.push(0);
-        }
-        // low_pc / high_pc (high_pc as offset for DWARF 4)
+        // DW_FORM_flag_present: zero-length form, no bytes written
+        // low_pc (relocated to function address) / high_pc (size, no reloc)
+        let func_low_pc_off = info.len() as u64;
         info.extend_from_slice(&f.low_pc.to_le_bytes());
+        relocs.push((func_low_pc_off, f.name.clone()));
         info.extend_from_slice(&(f.high_pc - f.low_pc).to_le_bytes());
         // decl_file + decl_line (source location for GDB backtrace)
         if has_decl_line {
@@ -1132,7 +1217,7 @@ fn build_abbrev_and_info(
             let pcode = abb.get_or_create(DW_TAG_formal_parameter, DW_CHILDREN_no, &param_attrs);
             write_uleb128(&mut info, pcode as u64);
             write_attr_strp(&mut info, strs.intern(pname));
-            let pty_off = ensure_type_die(cu, &mut info, abb, strs, &mut type_offsets, pty);
+            let pty_off = ensure_type_die(&mut info, abb, strs, &mut type_offsets, pty);
             info.extend_from_slice(&pty_off.to_le_bytes());
             if has_location {
                 let loc = &f.param_locations[idx];
@@ -1190,13 +1275,9 @@ fn build_abbrev_and_info(
         if let Some(ln) = &g.linkage_name {
             write_attr_strp(&mut info, strs.intern(ln));
         }
-        let ty_off = ensure_type_die(cu, &mut info, abb, strs, &mut type_offsets, &g.ty);
+        let ty_off = ensure_type_die(&mut info, abb, strs, &mut type_offsets, &g.ty);
         info.extend_from_slice(&ty_off.to_le_bytes());
-        if g.is_external {
-            info.push(1);
-        } else {
-            info.push(0);
-        }
+        // DW_FORM_flag_present: zero-length form, no bytes written
     }
 
     // CU DIE 终止
@@ -1206,7 +1287,7 @@ fn build_abbrev_and_info(
     let unit_len = (info.len() - 4) as u32;
     info[0..4].copy_from_slice(&unit_len.to_le_bytes());
 
-    (abb.clone().into_bytes(), info)
+    (abb.clone().into_bytes(), info, relocs)
 }
 
 fn write_attr_strp(info: &mut Vec<u8>, off: u32) {
@@ -1218,7 +1299,7 @@ fn emit_local_var_die(
     info: &mut Vec<u8>,
     abb: &mut AbbrevBuilder,
     strs: &mut StringTable,
-    cu: &CompileUnit,
+    _cu: &CompileUnit,
     type_offsets: &mut std::collections::HashMap<String, u32>,
     var: &DwarfLocalVar,
 ) {
@@ -1230,7 +1311,7 @@ fn emit_local_var_die(
     let vcode = abb.get_or_create(DW_TAG_variable, DW_CHILDREN_no, &var_attrs);
     write_uleb128(info, vcode as u64);
     write_attr_strp(info, strs.intern(&var.name));
-    let ty_off = ensure_type_die(cu, info, abb, strs, type_offsets, &var.ty);
+    let ty_off = ensure_type_die(info, abb, strs, type_offsets, &var.ty);
     info.extend_from_slice(&ty_off.to_le_bytes());
     // location expression: DW_OP_fbreg <offset>
     info.push(var.location.op);
@@ -1238,7 +1319,6 @@ fn emit_local_var_die(
 }
 
 fn ensure_type_die(
-    _cu: &CompileUnit,
     info: &mut Vec<u8>,
     abb: &mut AbbrevBuilder,
     strs: &mut StringTable,
@@ -1250,7 +1330,7 @@ fn ensure_type_die(
     }
     let off = info.len() as u32;
     type_offsets.insert(ty.name.clone(), off);
-    write_type_die(info, abb, strs, ty);
+    write_type_die(info, abb, strs, type_offsets, ty);
     off
 }
 
@@ -1258,6 +1338,7 @@ fn write_type_die(
     info: &mut Vec<u8>,
     abb: &mut AbbrevBuilder,
     strs: &mut StringTable,
+    type_offsets: &mut std::collections::HashMap<String, u32>,
     ty: &DwarfType,
 ) {
     match &ty.kind {
@@ -1279,28 +1360,24 @@ fn write_type_die(
             let code = abb.get_or_create(DW_TAG_pointer_type, DW_CHILDREN_no, &attrs);
             write_uleb128(info, code as u64);
             info.push(ty.byte_size as u8);
-            let target_name = format!("{}*", inner.name);
-            let mut inner_offsets = std::collections::HashMap::new();
             let inner_off =
-                ensure_type_die_self(info, abb, strs, &mut inner_offsets, inner, &target_name);
+                ensure_type_die(info, abb, strs, type_offsets, inner);
             info.extend_from_slice(&inner_off.to_le_bytes());
         }
         DwarfTypeKind::Struct { members } => {
-            write_aggregate_die(info, abb, strs, ty, members, false);
+            write_aggregate_die(info, abb, strs, type_offsets, ty, members, false);
         }
         DwarfTypeKind::Union { members } => {
-            write_aggregate_die(info, abb, strs, ty, members, true);
+            write_aggregate_die(info, abb, strs, type_offsets, ty, members, true);
         }
         DwarfTypeKind::Array { element, count } => {
             let attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_type, DW_FORM_ref4), (DW_AT_count, DW_FORM_data4)];
             let code = abb.get_or_create(DW_TAG_array_type, DW_CHILDREN_yes, &attrs);
             write_uleb128(info, code as u64);
-            let target_name = format!("{}[]", element.name);
-            let mut inner_offsets = std::collections::HashMap::new();
-            let inner_off =
-                ensure_type_die_self(info, abb, strs, &mut inner_offsets, element, &target_name);
-            info.extend_from_slice(&inner_off.to_le_bytes());
+            let elem_off =
+                ensure_type_die(info, abb, strs, type_offsets, element);
+            info.extend_from_slice(&elem_off.to_le_bytes());
             info.extend_from_slice(&(*count as u32).to_le_bytes());
             // subrange child
             let sub_attrs: Vec<(u16, u16)> = vec![(DW_AT_upper_bound, DW_FORM_data4)];
@@ -1310,13 +1387,13 @@ fn write_type_die(
             info.push(0); // array_type children 终止
         }
         DwarfTypeKind::Const(inner) => {
-            write_qualifier_die(info, abb, strs, ty, inner, DW_TAG_const_type);
+            write_qualifier_die(info, abb, strs, type_offsets, ty, inner, DW_TAG_const_type);
         }
         DwarfTypeKind::Volatile(inner) => {
-            write_qualifier_die(info, abb, strs, ty, inner, DW_TAG_volatile_type);
+            write_qualifier_die(info, abb, strs, type_offsets, ty, inner, DW_TAG_volatile_type);
         }
         DwarfTypeKind::Restrict(inner) => {
-            write_qualifier_die(info, abb, strs, ty, inner, DW_TAG_restrict_type);
+            write_qualifier_die(info, abb, strs, type_offsets, ty, inner, DW_TAG_restrict_type);
         }
         DwarfTypeKind::Enum {
             members,
@@ -1331,15 +1408,8 @@ fn write_type_die(
             write_uleb128(info, code as u64);
             write_attr_strp(info, strs.intern(&ty.name));
             info.push(ty.byte_size as u8);
-            let target_name = format!("enum-{}", ty.name);
-            let mut inner_offsets = std::collections::HashMap::new();
-            let u_off = ensure_type_die_self(
-                info,
-                abb,
-                strs,
-                &mut inner_offsets,
-                underlying,
-                &target_name,
+            let u_off = ensure_type_die(
+                info, abb, strs, type_offsets, underlying,
             );
             info.extend_from_slice(&u_off.to_le_bytes());
             for (name, val) in members {
@@ -1358,14 +1428,11 @@ fn write_type_die(
             let attrs: Vec<(u16, u16)> = vec![(DW_AT_type, DW_FORM_ref4)];
             let code = abb.get_or_create(DW_TAG_subroutine_type, DW_CHILDREN_yes, &attrs);
             write_uleb128(info, code as u64);
-            let target_name = format!("{}-ret", ty.name);
-            let mut inner_offsets = std::collections::HashMap::new();
             let ret_off =
-                ensure_type_die_self(info, abb, strs, &mut inner_offsets, ret, &target_name);
+                ensure_type_die(info, abb, strs, type_offsets, ret);
             info.extend_from_slice(&ret_off.to_le_bytes());
             for p in params {
-                let ptarget = format!("{}-p", ty.name);
-                let p_off = ensure_type_die_self(info, abb, strs, &mut inner_offsets, p, &ptarget);
+                let p_off = ensure_type_die(info, abb, strs, type_offsets, p);
                 let param_attrs: Vec<(u16, u16)> = vec![(DW_AT_type, DW_FORM_ref4)];
                 let pcode =
                     abb.get_or_create(DW_TAG_formal_parameter, DW_CHILDREN_no, &param_attrs);
@@ -1380,10 +1447,8 @@ fn write_type_die(
             let code = abb.get_or_create(DW_TAG_typedef, DW_CHILDREN_no, &attrs);
             write_uleb128(info, code as u64);
             write_attr_strp(info, strs.intern(alias));
-            let target_name = format!("td-{}", alias);
-            let mut inner_offsets = std::collections::HashMap::new();
             let t_off =
-                ensure_type_die_self(info, abb, strs, &mut inner_offsets, target, &target_name);
+                ensure_type_die(info, abb, strs, type_offsets, target);
             info.extend_from_slice(&t_off.to_le_bytes());
         }
         DwarfTypeKind::Void => {
@@ -1406,7 +1471,8 @@ fn write_qualifier_die(
     info: &mut Vec<u8>,
     abb: &mut AbbrevBuilder,
     strs: &mut StringTable,
-    ty: &DwarfType,
+    type_offsets: &mut std::collections::HashMap<String, u32>,
+    _ty: &DwarfType,
     inner: &DwarfType,
     tag: u16,
 ) {
@@ -1414,9 +1480,7 @@ fn write_qualifier_die(
     let attrs: Vec<(u16, u16)> = vec![(DW_AT_type, DW_FORM_ref4)];
     let code = abb.get_or_create(tag, DW_CHILDREN_no, &attrs);
     write_uleb128(info, code as u64);
-    let target_name = format!("q-{}", ty.name);
-    let mut inner_offsets = std::collections::HashMap::new();
-    let inner_off = ensure_type_die_self(info, abb, strs, &mut inner_offsets, inner, &target_name);
+    let inner_off = ensure_type_die(info, abb, strs, type_offsets, inner);
     info.extend_from_slice(&inner_off.to_le_bytes());
 }
 
@@ -1433,7 +1497,7 @@ fn ensure_type_die_self(
     }
     let off = info.len() as u32;
     offsets.insert(key.to_string(), off);
-    write_type_die(info, abb, strs, ty);
+    write_type_die(info, abb, strs, offsets, ty);
     off
 }
 
@@ -1441,6 +1505,7 @@ fn write_aggregate_die(
     info: &mut Vec<u8>,
     abb: &mut AbbrevBuilder,
     strs: &mut StringTable,
+    type_offsets: &mut std::collections::HashMap<String, u32>,
     ty: &DwarfType,
     members: &[DwarfMember],
     is_union: bool,
@@ -1491,9 +1556,7 @@ fn write_aggregate_die(
             let bit_in_byte = (m.offset_bits % 8) as u8;
             info.push(bit_in_byte);
         }
-        let target_name = format!("{}.{}", ty.name, m.name);
-        let mut inner_offsets = std::collections::HashMap::new();
-        let t_off = ensure_type_die_self(info, abb, strs, &mut inner_offsets, &m.ty, &target_name);
+        let t_off = ensure_type_die(info, abb, strs, type_offsets, &m.ty);
         info.extend_from_slice(&t_off.to_le_bytes());
     }
     if has_members {
@@ -1505,8 +1568,9 @@ fn write_aggregate_die(
 // .debug_line (DWARF v4)
 // ============================================================================
 
-fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
+fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u64, String)>) {
     let mut out = Vec::new();
+    let mut relocs: Vec<(u64, String)> = Vec::new();
     let hdr_start = out.len();
     out.extend_from_slice(&[0u8; 4]); // unit_length
     out.extend_from_slice(&4u16.to_le_bytes()); // version = 4
@@ -1540,35 +1604,24 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
     }
     let _ = opcode_base; // 仅用于语义核对
 
-    // directory_entry_format
-    out.push(1); // directory_entry_format_count
-    out.push(DW_LNCT_path as u8);
-    out.push(DW_FORM_string as u8);
-    // directories_count
-    write_uleb128(&mut out, cu.line_dirs.len() as u64);
+    // DWARF v4: directory table is simple null-terminated strings
+    // followed by a single null byte terminator
     for d in &cu.line_dirs {
         out.extend_from_slice(d.as_bytes());
         out.push(0);
     }
+    out.push(0); // directory table terminator
 
-    // file_name_entry_format: 4 项
-    out.push(4);
-    out.push(DW_LNCT_path as u8);
-    out.push(DW_FORM_string as u8);
-    out.push(DW_LNCT_directory_index as u8);
-    out.push(DW_FORM_data1 as u8);
-    out.push(DW_LNCT_timestamp as u8);
-    out.push(DW_FORM_data1 as u8);
-    out.push(DW_LNCT_size as u8);
-    out.push(DW_FORM_data1 as u8);
-    write_uleb128(&mut out, cu.line_files.len() as u64);
+    // DWARF v4: file name table entries: (name, dir_idx, time, size)
+    // followed by a single null byte terminator
     for f in &cu.line_files {
         out.extend_from_slice(f.as_bytes());
-        out.push(0);
-        out.push(0); // directory_index
-        out.push(0); // timestamp
-        out.push(0); // size
+        out.push(0); // null-terminated name
+        write_uleb128(&mut out, 0); // directory_index (0 = first dir)
+        write_uleb128(&mut out, 0); // timestamp
+        write_uleb128(&mut out, 0); // size
     }
+    out.push(0); // file name table terminator
 
     // 回填 header_length
     let header_length = (out.len() - header_length_pos - 4) as u32;
@@ -1583,25 +1636,26 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
         ..LineState::default()
     };
 
+    // Generate function-level line entries when no detailed line info available
     let entries: Vec<LineEntry> = if cu.line_entries.is_empty() {
-        vec![LineEntry {
-            pc: cu.low_pc,
-            line: 1,
-            column: 1,
-            file_idx: 0,
-            discriminator: 0,
-            is_stmt: true,
-            basic_block: false,
-        }]
+        // Create one entry per function at its start address
+        cu.functions
+            .iter()
+            .map(|f| LineEntry {
+                pc: f.low_pc,
+                line: if f.decl_line > 0 { f.decl_line } else { 1 },
+                column: 1,
+                file_idx: 0,
+                discriminator: 0,
+                is_stmt: true,
+                basic_block: false,
+            })
+            .collect()
     } else {
         cu.line_entries.clone()
     };
 
-    // M24: 去重相邻的同源同行的 line entry (常见于 for/while 紧致循环).
-    // 保留每行第一条, 丢弃后续同 (file, line, column, is_stmt, discriminator)
-    // 的条目. pc 推进仍正确 (write_line_entry 用 last_pc 算差值), 唯一
-    // 损失是丢了一些 pc→line 映射精度. 在 -g1 (low debug) 默认场景下
-    // 是净收益, -g3 (full debug) 时关闭.
+    // M24: dedup adjacent same-source same-line entries
     let entries: Vec<LineEntry> = if opts.level <= 1 {
         let mut deduped: Vec<LineEntry> = Vec::with_capacity(entries.len());
         for e in entries {
@@ -1622,8 +1676,34 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
         entries
     };
 
+    // Emit line program with DW_LNE_set_address for absolute addresses
     let mut last_pc: u64 = 0;
+    let mut first_entry = true;
     for (i, e) in entries.iter().enumerate() {
+        // Use DW_LNE_set_address at function boundaries or for first entry
+        let need_set_addr = first_entry
+            || (cu.line_entries.is_empty() && i > 0);
+        if need_set_addr {
+            // DW_LNE_set_address: extended opcode 0x02 with 8-byte address
+            out.push(DW_LNS_extended_op);
+            out.push(9); // length: 1 (opcode) + 8 (address)
+            out.push(DW_LNE_set_address);
+            let addr_offset = out.len() as u64;
+            out.extend_from_slice(&e.pc.to_le_bytes());
+            // Track relocation for this address
+            if cu.line_entries.is_empty() {
+                // Find which function this entry belongs to
+                for f in &cu.functions {
+                    if f.low_pc == e.pc {
+                        relocs.push((addr_offset, f.name.clone()));
+                        break;
+                    }
+                }
+            }
+            state.address = e.pc;
+            last_pc = e.pc;
+            first_entry = false;
+        }
         write_line_entry(&mut out, &mut state, e, last_pc, opts);
         last_pc = e.pc;
         if i == entries.len() - 1 {
@@ -1637,7 +1717,7 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
     let unit_len = (out.len() - hdr_start - 4) as u32;
     out[hdr_start..hdr_start + 4].copy_from_slice(&unit_len.to_le_bytes());
 
-    out
+    (out, relocs)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1808,8 +1888,9 @@ fn write_line_entry(
 // .debug_aranges
 // ============================================================================
 
-fn build_aranges(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
+fn build_aranges(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u64, String)>) {
     let mut out = Vec::new();
+    let mut relocs: Vec<(u64, String)> = Vec::new();
     let hdr_start = out.len();
     out.extend_from_slice(&[0u8; 4]); // unit_length
     out.extend_from_slice(&2u16.to_le_bytes()); // version = 2
@@ -1824,8 +1905,13 @@ fn build_aranges(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
         out.extend_from_slice(&0u64.to_le_bytes());
         out.extend_from_slice(&0u64.to_le_bytes());
     } else {
-        for &(lo, hi) in &cu.func_ranges {
+        for (idx, &(lo, hi)) in cu.func_ranges.iter().enumerate() {
+            let addr_offset = out.len() as u64;
             out.extend_from_slice(&lo.to_le_bytes());
+            // Track relocation for this address
+            if idx < cu.functions.len() {
+                relocs.push((addr_offset, cu.functions[idx].name.clone()));
+            }
             out.extend_from_slice(&(hi - lo).to_le_bytes());
         }
         out.extend_from_slice(&0u64.to_le_bytes());
@@ -1833,7 +1919,7 @@ fn build_aranges(cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
     }
     let unit_len = (out.len() - hdr_start - 4) as u32;
     out[hdr_start..hdr_start + 4].copy_from_slice(&unit_len.to_le_bytes());
-    out
+    (out, relocs)
 }
 
 // ============================================================================
@@ -2054,7 +2140,7 @@ fn build_split_dwarf(cu: &CompileUnit, opts: &DebugOptions) -> SplitDwarfOutput 
     // 简化 abbrev: 1 个空 CU 缩写
     let abbrev = vec![1, DW_TAG_compile_unit as u8, DW_CHILDREN_no, 0, 0, 0];
     let str_dwo = cu.source_name.as_bytes().to_vec();
-    let line_dwo = build_line_program(cu, opts);
+    let (line_dwo, _line_dwo_relocs) = build_line_program(cu, opts);
     let macro_dwo = build_debug_macro(cu, opts);
 
     // Skeleton CU

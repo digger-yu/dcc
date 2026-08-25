@@ -916,6 +916,93 @@ pub fn emit(
                 };
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
+                // Build .rela.debug_info for function address relocations
+                if !dbg.debug_info_relocs.is_empty() {
+                    let debug_info_sec_idx = cg
+                        .extra_sections
+                        .iter()
+                        .position(|s| s.name == ".debug_info")
+                        .map(|i| 7 + i as u32)
+                        .unwrap_or(8);
+                    let debug_relocs: Vec<elf::ElfRela> = dbg
+                        .debug_info_relocs
+                        .iter()
+                        .filter_map(|(off, sym_name)| {
+                            let sym_idx = cg.sym_index.get(sym_name).copied()?;
+                            Some(elf::ElfRela {
+                                offset: *off,
+                                sym_index: sym_idx,
+                                rel_type: elf::R_X86_64_64,
+                                addend: 0,
+                            })
+                        })
+                        .collect();
+                    if !debug_relocs.is_empty() {
+                        cg.extra_rela_sections.push(elf::ExtraRelaSection {
+                            name: ".rela.debug_info".to_string(),
+                            relocations: debug_relocs,
+                            target_sec_index: debug_info_sec_idx,
+                        });
+                    }
+                }
+                // Build .rela.debug_line for line program address relocations
+                if !dbg.debug_line_relocs.is_empty() {
+                    let debug_line_sec_idx = cg
+                        .extra_sections
+                        .iter()
+                        .position(|s| s.name == ".debug_line")
+                        .map(|i| 7 + i as u32)
+                        .unwrap_or(10);
+                    let line_relocs: Vec<elf::ElfRela> = dbg
+                        .debug_line_relocs
+                        .iter()
+                        .filter_map(|(off, sym_name)| {
+                            let sym_idx = cg.sym_index.get(sym_name).copied()?;
+                            Some(elf::ElfRela {
+                                offset: *off,
+                                sym_index: sym_idx,
+                                rel_type: elf::R_X86_64_64,
+                                addend: 0,
+                            })
+                        })
+                        .collect();
+                    if !line_relocs.is_empty() {
+                        cg.extra_rela_sections.push(elf::ExtraRelaSection {
+                            name: ".rela.debug_line".to_string(),
+                            relocations: line_relocs,
+                            target_sec_index: debug_line_sec_idx,
+                        });
+                    }
+                }
+                // Build .rela.debug_aranges for aranges address relocations
+                if !dbg.debug_aranges_relocs.is_empty() {
+                    let debug_aranges_sec_idx = cg
+                        .extra_sections
+                        .iter()
+                        .position(|s| s.name == ".debug_aranges")
+                        .map(|i| 7 + i as u32)
+                        .unwrap_or(9);
+                    let aranges_relocs: Vec<elf::ElfRela> = dbg
+                        .debug_aranges_relocs
+                        .iter()
+                        .filter_map(|(off, sym_name)| {
+                            let sym_idx = cg.sym_index.get(sym_name).copied()?;
+                            Some(elf::ElfRela {
+                                offset: *off,
+                                sym_index: sym_idx,
+                                rel_type: elf::R_X86_64_64,
+                                addend: 0,
+                            })
+                        })
+                        .collect();
+                    if !aranges_relocs.is_empty() {
+                        cg.extra_rela_sections.push(elf::ExtraRelaSection {
+                            name: ".rela.debug_aranges".to_string(),
+                            relocations: aranges_relocs,
+                            target_sec_index: debug_aranges_sec_idx,
+                        });
+                    }
+                }
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".BTF".to_string(),
                     data: debug::build_btf_probe(),

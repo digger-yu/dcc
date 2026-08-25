@@ -391,6 +391,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | DWARF 参数位置信息 | `DW_AT_location` (`DW_OP_fbreg`) 发射到 `DW_TAG_formal_parameter` DIE，GDB 可检查函数参数值 |
 | DWARF 词法块 + 局部变量 | `DW_TAG_lexical_block` 支持嵌套作用域；`DW_TAG_variable` 发射局部变量名、类型、栈位置 |
 | IR→DWARF 富信息传递 | `build_dwarf_cu()` 从 IR module + AST source 提取函数声明行号、返回类型、参数名/类型，所有 6 个架构后端统一使用 |
+| GDB 函数级调试 | `.rela.debug_info` / `.rela.debug_line` / `.rela.debug_aranges` 重定位确保链接后地址正确；`DW_LNE_set_address` 设置函数绝对地址；GDB 可在函数上设置断点、运行、单步执行 |
 
 ## 诊断
 

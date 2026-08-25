@@ -122,7 +122,7 @@ pub struct Codegen {
     pub function_sections: bool, // -ffunction-sections：每函数独立 .text.<name> 节
     patchable_function_entry: Option<(usize, usize)>,
     pub symbols: Vec<ElfSym>,
-    sym_index: HashMap<String, u32>,
+    pub sym_index: HashMap<String, u32>,
     pub relocations: Vec<ElfRela>,
     pending_func_rels: Vec<(u64, String)>, // (code_offset, func_name) - 延迟到符号表构建后解析
     pending_code_rels: Vec<PendingCodeRel>, // asm 数据伪指令/外部跳转: 通用 code relocation
@@ -176,6 +176,8 @@ pub struct Codegen {
     cleanup_vars: Vec<(String, String)>,
     // 额外 .rela 节 (用于 .init_array/.fini_array 等)
     pub extra_rela_sections: Vec<elf::ExtraRelaSection>,
+    // .debug_info relocations: (offset_in_section, symbol_name)
+    pub pending_debug_info_relocs: Vec<(u64, String)>,
     // .pushsection 非文本节数据收集
     pushsection_stack: Vec<usize>,
     pending_custom_sec_rels: Vec<CustomSecRel>,
@@ -1352,6 +1354,7 @@ impl Codegen {
             data_relocations: vec![],
             cleanup_vars: vec![],
             extra_rela_sections: vec![],
+            pending_debug_info_relocs: vec![],
             pushsection_stack: vec![],
             pending_custom_sec_rels: vec![],
             pushsection_exec_stack: vec![],
@@ -4085,6 +4088,36 @@ impl Codegen {
                 for rel in &mut rela_sec.relocations {
                     rel.sym_index = text_sym_idx;
                 }
+            }
+        }
+
+        // Build .rela.debug_info for function address relocations
+        if !self.pending_debug_info_relocs.is_empty() {
+            let debug_info_sec_idx = self
+                .extra_sections
+                .iter()
+                .position(|s| s.name == ".debug_info")
+                .map(|i| 7 + i as u32)
+                .unwrap_or(8);
+            let debug_relocs: Vec<elf::ElfRela> = self
+                .pending_debug_info_relocs
+                .iter()
+                .filter_map(|(off, sym_name)| {
+                    let sym_idx = self.sym_index.get(sym_name).copied()?;
+                    Some(elf::ElfRela {
+                        offset: *off,
+                        sym_index: sym_idx,
+                        rel_type: elf::R_X86_64_64,
+                        addend: 0,
+                    })
+                })
+                .collect();
+            if !debug_relocs.is_empty() {
+                self.extra_rela_sections.push(elf::ExtraRelaSection {
+                    name: ".rela.debug_info".to_string(),
+                    relocations: debug_relocs,
+                    target_sec_index: debug_info_sec_idx,
+                });
             }
         }
 
