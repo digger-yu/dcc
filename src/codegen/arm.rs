@@ -364,6 +364,10 @@ impl ArmCodegen {
         if self.frame_bytes > 0 {
             self.emit_sub_imm(13, 13, self.frame_bytes as u32); // sub sp, sp, #frame
         }
+        // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
+        if self._target.auto_var_init_zero && self.frame_bytes > 0 {
+            self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
 
         // 变参函数: 帧建立后立即保存 r0-r3 到 va_save 区
         // ARM 局部变量在 fp+off (正偏移), va_save 区同理
@@ -430,6 +434,24 @@ impl ArmCodegen {
         self.emit_mov_reg(13, 11); // mov sp, fp
         self.emit_pop(vec![11, 15]); // pop {fp, pc}
         self.emitted_return = true;
+    }
+
+    /// -ftrivial-auto-var-init=zero: 零初始化栈帧
+    /// 使用 str r0, [fp, #off] 每次清零 4 字节 (r0 = 0)
+    /// ARM 局部变量在 fp 正偏移方向
+    fn emit_zero_init_frame(&mut self, frame_size: usize) {
+        if frame_size == 0 {
+            return;
+        }
+        // 先保存 r0, 然后用于零初始化, 最后恢复
+        self.emit_push(vec![0]); // push r0
+        self.emit_mov_imm(0, 0); // mov r0, #0
+        let words = frame_size / 4;
+        for i in 0..words {
+            let off = (i as i32) * 4;
+            self.emit_str_fp_off(0, off); // str r0, [fp, #off]
+        }
+        self.emit_pop(vec![0]); // pop r0
     }
 
     // STR rd, [fp, #off] — 任意寄存器, 正偏移
@@ -1474,5 +1496,32 @@ mod tests {
         );
         // 验证 va_gp_offs 推进
         assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
+    }
+
+    // -ftrivial-auto-var-init=zero: 验证 ARM 后端发射 str r0, [fp, #off] 指令
+    #[test]
+    fn arm_auto_var_init_zero_emits_str() {
+        let mut target =
+            Target::resolve(&crate::cli::TargetTriple::parse("arm-linux-gnueabihf").unwrap());
+        target.auto_var_init_zero = true;
+        let mut cg = ArmCodegen::new(target, true);
+        // 直接测试 emit_zero_init_frame: 16 字节帧 = 4 个 str (4 字节每个)
+        cg.emit_zero_init_frame(16);
+        // 验证: push r0 + mov r0, #0 + 4x str r0, [fp, #off] + pop r0
+        // STR rd=r0, [fp=r11, #imm12]: E58B 0000 | imm12
+        let str_count = cg
+            .code
+            .windows(4)
+            .filter(|w| {
+                let inst = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                // 匹配 STR r0, [fp, #imm12]: cond=E, P=1, U=1, B=0, W=0, L=0
+                // Rn=fp(11), Rd=r0(0)
+                (inst & 0xFFFFF000) == 0xE58B0000
+            })
+            .count();
+        assert_eq!(
+            str_count, 4,
+            "expected 4 str r0, [fp, #off] instructions for 16-byte frame, got {str_count}"
+        );
     }
 }
