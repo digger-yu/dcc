@@ -194,7 +194,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | prefetch | `__builtin_prefetch` no-op |
 | unknown expression fallback | unsupported expression / 非标量 InitList rvalue 输出带源位置 warning，并发射 `ud2` 后清零目标寄存器，避免静默返回 0 |
 | `-mno-sse` x87 FPU 回退 | 内核中断上下文禁用 XMM 寄存器，浮点运算使用 x87 FPU 指令 (fld/fstp/faddp/fsubrp/fmulp/fdivrp/fucomip)；降级为 W0300 警告而非硬错误 |
-| `-mcmodel=kernel` 代码模型 | 内核运行在 -2GB 高地址空间，定义 `__code_model_kernel__` 宏；外部函数地址使用直接 PC-relative 而非 GOT 间接寻址 |
+| `-mcmodel=kernel` 代码模型 | 内核运行在 -2GB 高地址空间，定义 `__code_model_kernel__` 宏；函数和数据符号地址均使用直接 PC-relative (R_X86_64_PC32/PLT32) 而非 GOT 间接寻址；全局变量 load/store/取地址均走 RIP-relative 路径，不经过 GOT |
 | `-ftrivial-auto-var-init=zero` | 安全特性，CONFIG_INIT_STACK_ALL_ZERO 依赖；零初始化整个栈帧：x86_64 使用 rep stosq，AArch64 使用 stp xzr/xzr，RISC-V64 使用 sd zero/sp，ARM 使用 str r0/[fp,#off]，MIPS 使用 sw zero/fp_off(fp) |
 | 栈保护非可重定位路径 | canary 失败始终调用 `__stack_chk_fail`（STB_GLOBAL/STT_FUNC 未定义符号），不再对 ET_EXEC 走 exit(255) syscall；`m3_10_stack_canary` 测试验证 |
 | ftrace 插桩 | `-pg` 在函数 prologue 后插入 `call mcount`；`-mfentry` 在函数标签后立即（prologue 前）插入 `call __fentry__`；`-mrecord-mcount` 同时生成 `__mcount_loc` 段记录所有 call site 地址（带 R_X86_64_64 重定位指向 .text）；三种模式均添加对应未定义符号到 ELF 符号表 |
