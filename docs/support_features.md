@@ -351,10 +351,12 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | vDSO 集成 | `--vdso=<path>` 解析 vDSO ELF，嵌入 `.text.vdso` + `.note.GNU-vdso` + 符号表 |
 | PIE/Shared 输出 | 多架构 `_start` 入口桩 (x86_64/aarch64/riscv64/arm/mips/mips64) |
 | AArch64/RISC-V/MIPS/ARM ELF 输出 | `elf_exec.rs` 多架构包装函数 |
-| AArch64 重定位（33 种） | `ABS64` / `PREL64` / `CALL26` / `JUMP26` / `ADR_PREL_*` / `MOVW_UABS_*` / `TLSDESC_*` (8 种) / `TLSIE_*` (2 种) / `TLSLE_*` (2 种) |
-| RISC-V 重定位（15 种） | `64` / `32` / `CALL` / `PCREL_*` / `HI20` / `LO12_*` / `TPOFF*` 等 |
-| GOT64 大条目 | `R_X86_64_GOT64` / `R_X86_64_GOTOFF64` |
-| TLS 重定位 | `R_X86_64_TPOFF64` / `R_X86_64_TPOFF32` |
+| x86-64 重定位（35 种） | `NONE` / `64` / `PC32` / `PLT32` / `GLOB_DAT` / `JUMP_SLOT` / `RELATIVE` / `GOTPCREL` / `32` / `32S` / `16` / `PC16` / `8` / `PC8` / `PC64` / `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOT64` / `GOTOFF64` / `GOTPC32` / `GOTPC64` / `GOTPCREL64` / `GOTPLT64` / `PLTOFF64` / `SIZE32` / `SIZE64` / `GOTPC32_TLSDESC` / `IRELATIVE` |
+| AArch64 重定位（46 种） | `ABS64` / `ABS32` / `ABS16` / `PREL64` / `PREL32` / `PREL16` / `CALL26` / `JUMP26` / `ADR_PREL_LO21` / `ADR_PREL_PG_HI21` / `ADR_PREL_PG_HI21_NC` / `ADD_ABS_LO12_NC` / `LDST{8,16,32,64,128}_ABS_LO12_NC` / `MOVW_UABS_G0..G3` / `MOVW_SABS_G0..G2` / `TLSDESC_*` (8 种) / `TLSIE_*` (2 种) / `TLSLE_MOVW_TPREL_G2/G1/G1_NC/G0/G0_NC` / `TLSLE_ADD_TPREL_HI12/LO12/LO12_NC` |
+| RISC-V 重定位（29 种） | `64` / `32` / `32_PCREL` / `JAL` / `BRANCH` / `CALL` / `CALL_PLT` / `PCREL_HI20` / `PCREL_LO12_{I,S}` / `HI20` / `LO12_{I,S}` / `TPREL64` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_{I,S}` / `ALIGN` / `RELAX` / `RVC_BRANCH` / `RVC_JUMP` / `SET{6,8,16,32}` / `SUB{6,8,16,32}` |
+| MIPS 重定位（24 种） | `NONE` / `16` / `26` / `HI16` / `LO16` / `32` / `64` / `REL32` / `GPREL16` / `GPREL32` / `GOT16` / `GOT_HI16` / `GOT_LO16` / `CALL16` / `CALL_HI16` / `CALL_LO16` / `PC16` / `HIGHER` / `HIGHEST` / `TLS_GD` / `TLS_LDM` / `TLS_DTPREL_HI16` / `TLS_DTPREL_LO16` / `TLS_GOTTPREL` |
+| ARM 重定位（18 种） | `NONE` / `ABS32` / `ABS16` / `ABS8` / `PREL32` / `PC24` / `CALL` / `JUMP24` / `THM_CALL` / `THM_JUMP24` / `THM_JUMP19` / `MOVW_ABS_NC` / `MOVT_ABS` / `MOVW_PREL_NC` / `MOVT_PREL` / `THM_MOVW_ABS_NC` / `THM_MOVT_ABS` / `THM_MOVW_PREL_NC` / `THM_MOVT_PREL` |
+| TLS 重定位 | x86-64: `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOTPC32_TLSDESC`; AArch64: TLSDESC/TLSIE/TLSLE 全序列 |
 | TLS codegen | `_Thread_local` → `.tdata` / `.tbss`、`STT_TLS`；AArch64 TLSDESC 经典序列 (3 重定位) + 优化序列 (5 重定位: OFF_G1/OFF_G0_NC/LDR/ADD/CALL) + IE/LE 序列；linker 全类型解析 |
 | ET_EXEC symtab | `build_elf_exec_x86_64` 输出 `.symtab` / `.strtab` |
 | wchar_t libc 转发 | wcs*/wmem* 11 个入口在 link implicit undef 白名单 |
