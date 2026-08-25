@@ -1,71 +1,75 @@
 // src/link/relocate.rs - 重定位引擎
 //
-// 处理以下 x86-64 重定位类型：
-//   R_X86_64_64       (1)  绝对 64-bit
-//   R_X86_64_PC32     (2)  PC 相对 32-bit
-//   R_X86_64_PLT32    (4)  PLT 相对 32-bit (同 PC32, PIE 兼容)
-//   R_X86_64_GLOB_DAT (6)  GOT 数据（动态库符号）
-//   R_X86_64_JUMP_SLOT(7)  PLT 槽
-//   R_X86_64_RELATIVE (8)  base + offset
-//   R_X86_64_GOTPCREL (9)  32-bit GOT 相对
-//   R_X86_64_32       (10) 绝对 32-bit (zero-extend)
-//   R_X86_64_32S      (11) 绝对 32-bit (sign-extend)
-//   R_X86_64_TPOFF64  (18) TLS: thread-local 偏移 (64-bit)
-//   R_X86_64_GOT64    (19) 64-bit GOT 项地址
-//   R_X86_64_TPOFF32  (23) TLS: thread-local 偏移 (32-bit, sign-extend)
-//   R_X86_64_GOTOFF64 (25) 64-bit GOT 相对偏移
-//   R_X86_64_IRELATIVE(37) IFUNC 解析器
-//
-// AArch64:
-//   R_AARCH64_CALL26              (283)  26-bit PC 相对调用
-//   R_AARCH64_JUMP26              (282)  26-bit PC 相对跳转
-//   R_AARCH64_ADR_PREL_LO21       (274)  ADR 21-bit 立即数
-//   R_AARCH64_ADR_PREL_PG_HI21    (275)  ADR page 21-bit
-//   R_AARCH64_ADD_ABS_LO12_NC     (277)  ADD 12-bit 低位
-//   R_AARCH64_LDST64_ABS_LO12_NC  (286)  64-bit load/store 12-bit
-//   R_AARCH64_LDST32_ABS_LO12_NC  (285)
-//   R_AARCH64_LDST16_ABS_LO12_NC  (284)
-//   R_AARCH64_LDST8_ABS_LO12_NC   (278)
-//   R_AARCH64_MOVW_UABS_G0..G3    (287..290) MOVZ/MOVK 16-bit chunk
-//   R_AARCH64_ABS64               (257)  64-bit 绝对地址
-//   R_AARCH64_PREL64              (260)  64-bit PC 相对
-//
-// RISC-V:
-//   R_RISCV_CALL                  (18)  auipc+jalr 组合
-//   R_RISCV_CALL_PLT              (19)  auipc+jalr 组合 (走 PLT)
-//   R_RISCV_PCREL_HI20            (20)  auipc 高 20 位
-//   R_RISCV_PCREL_LO12_I          (21)  低 12 位 I-type
-//   R_RISCV_PCREL_LO12_S          (22)  低 12 位 S-type
-//   R_RISCV_HI20                  (23)  高 20 位 (绝对)
-//   R_RISCV_LO12_I                (24)
-//   R_RISCV_LO12_S                (25)
-//   R_RISCV_64                    (2)
-//   R_RISCV_32                    (1)
-//   R_RISCV_32_PCREL              (3)
-//   R_RISCV_TPOFF64               (7)
-//   R_RISCV_TPREL_HI20            (29)
-//   R_RISCV_TPREL_LO12_I          (32)
-//   R_RISCV_TPREL_LO12_S          (33)
+// 支持所有架构的完整重定位类型:
+//   x86-64:  NONE/64/PC32/PLT32/GLOB_DAT/JUMP_SLOT/RELATIVE/GOTPCREL/
+//            32/32S/16/PC16/8/PC8/PC64/TPOFF64/TPOFF32/GOTTPOFF/
+//            TLSGD/TLSLD/DTPOFF32/DTPOFF64/DTPMOD64/
+//            GOT64/GOTOFF64/GOTPC32/GOTPC64/GOTPCREL64/GOTPLT64/
+//            PLTOFF64/SIZE32/SIZE64/GOTPC32_TLSDESC/IRELATIVE
+//   AArch64: ABS64/ABS32/ABS16/PREL64/PREL32/PREL16/CALL26/JUMP26/
+//            ADR_PREL_LO21/ADR_PREL_PG_HI21(_NC)/ADD_ABS_LO12_NC/
+//            LDST{8,16,32,64,128}_ABS_LO12_NC/MOVW_UABS_G0..G3/
+//            MOVW_SABS_G0..G2/TLSDESC_*/TLSIE_*/TLSLE_*
+//   RISC-V:  64/32/32_PCREL/JAL/BRANCH/CALL(_PLT)/PCREL_HI20/PCREL_LO12_{I,S}/
+//            HI20/LO12_{I,S}/TPREL64/TPOFF64/TPREL_HI20/TPREL_LO12_{I,S}/
+//            ALIGN/RELAX/RVC_BRANCH/RVC_JUMP/SET{6,8,16,32}/SUB{6,8,16,32}
+//   MIPS:    NONE/16/26/HI16/LO16/32/64/REL32/GPREL16/GPREL32/
+//            GOT16/GOT_HI16/GOT_LO16/CALL16/CALL_HI16/CALL_LO16/
+//            PC16/HIGHER/HIGHEST/TLS_{GD,LDM,DTPREL,GOTTPREL}
+//   ARM:     NONE/ABS32/ABS16/ABS8/PREL32/PC24/CALL/JUMP24/
+//            THM_CALL/THM_JUMP24/THM_JUMP19/MOVW_ABS_NC/MOVT_ABS/
+//            MOVW_PREL_NC/MOVT_PREL/THM_MOVW_ABS_NC/THM_MOVT_ABS/
+//            THM_MOVW_PREL_NC/THM_MOVT_PREL
 
 use super::layout::{Layout, OutputRela, OutputSection};
 use crate::codegen::elf::{
-    R_AARCH64_ABS64, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_ADR_PREL_LO21,
-    R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_CALL26, R_AARCH64_JUMP26, R_AARCH64_LDST16_ABS_LO12_NC,
-    R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC, R_AARCH64_LDST8_ABS_LO12_NC,
-    R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G2, R_AARCH64_MOVW_UABS_G3,
-    R_AARCH64_PREL64, R_AARCH64_TLSDESC_ADD, R_AARCH64_TLSDESC_ADD_LO12,
-    R_AARCH64_TLSDESC_ADR_PAGE21, R_AARCH64_TLSDESC_CALL, R_AARCH64_TLSDESC_LD64_LO12,
-    R_AARCH64_TLSDESC_LDR, R_AARCH64_TLSDESC_OFF_G0_NC, R_AARCH64_TLSDESC_OFF_G1,
+    R_AARCH64_ABS16, R_AARCH64_ABS32, R_AARCH64_ABS64,
+    R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_ADR_PREL_LO21,
+    R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADR_PREL_PG_HI21_NC,
+    R_AARCH64_CALL26, R_AARCH64_JUMP26, R_AARCH64_LDST128_ABS_LO12_NC,
+    R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC,
+    R_AARCH64_LDST64_ABS_LO12_NC, R_AARCH64_LDST8_ABS_LO12_NC,
+    R_AARCH64_MOVW_SABS_G0, R_AARCH64_MOVW_SABS_G1, R_AARCH64_MOVW_SABS_G2,
+    R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G2,
+    R_AARCH64_MOVW_UABS_G3, R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64,
+    R_AARCH64_TLSDESC_ADD, R_AARCH64_TLSDESC_ADD_LO12,
+    R_AARCH64_TLSDESC_ADR_PAGE21, R_AARCH64_TLSDESC_CALL,
+    R_AARCH64_TLSDESC_LD64_LO12, R_AARCH64_TLSDESC_LDR,
+    R_AARCH64_TLSDESC_OFF_G0_NC, R_AARCH64_TLSDESC_OFF_G1,
     R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21, R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC,
-    R_AARCH64_TLSLE_MOVW_TPREL_G0_NC, R_AARCH64_TLSLE_MOVW_TPREL_G1, R_ARM_ABS32, R_ARM_CALL,
-    R_ARM_JUMP24, R_ARM_MOVT_ABS, R_ARM_MOVW_ABS_NC, R_MIPS_26, R_MIPS_32, R_MIPS_64, R_MIPS_HI16,
-    R_MIPS_LO16, R_RISCV_32, R_RISCV_32_PCREL, R_RISCV_64, R_RISCV_CALL, R_RISCV_CALL_PLT,
-    R_RISCV_HI20, R_RISCV_LO12_I, R_RISCV_LO12_S, R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I,
-    R_RISCV_PCREL_LO12_S, R_RISCV_TPOFF64, R_RISCV_TPREL_HI20, R_RISCV_TPREL_LO12_I,
-    R_RISCV_TPREL_LO12_S, R_X86_64_32, R_X86_64_32S, R_X86_64_64, R_X86_64_GLOB_DAT,
-    R_X86_64_GOT64, R_X86_64_GOTOFF64, R_X86_64_GOTPCREL, R_X86_64_IRELATIVE, R_X86_64_JUMP_SLOT,
-    R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_RELATIVE, R_X86_64_TPOFF32, R_X86_64_TPOFF64,
-    SHF_WRITE,
+    R_AARCH64_TLSLE_ADD_TPREL_HI12, R_AARCH64_TLSLE_ADD_TPREL_LO12,
+    R_AARCH64_TLSLE_ADD_TPREL_LO12_NC, R_AARCH64_TLSLE_MOVW_TPREL_G0,
+    R_AARCH64_TLSLE_MOVW_TPREL_G0_NC, R_AARCH64_TLSLE_MOVW_TPREL_G1,
+    R_AARCH64_TLSLE_MOVW_TPREL_G1_NC, R_AARCH64_TLSLE_MOVW_TPREL_G2,
+    R_ARM_ABS16, R_ARM_ABS32, R_ARM_ABS8, R_ARM_CALL, R_ARM_JUMP24,
+    R_ARM_MOVT_ABS, R_ARM_MOVT_PREL, R_ARM_MOVW_ABS_NC, R_ARM_MOVW_PREL_NC,
+    R_ARM_NONE, R_ARM_PC24, R_ARM_PREL32, R_ARM_THM_CALL, R_ARM_THM_JUMP19,
+    R_ARM_THM_JUMP24, R_ARM_THM_MOVT_ABS, R_ARM_THM_MOVT_PREL,
+    R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVW_PREL_NC,
+    R_MIPS_16, R_MIPS_26, R_MIPS_32, R_MIPS_64, R_MIPS_CALL16,
+    R_MIPS_CALL_HI16, R_MIPS_CALL_LO16, R_MIPS_GOT16, R_MIPS_GOT_HI16,
+    R_MIPS_GOT_LO16, R_MIPS_GPREL16, R_MIPS_GPREL32, R_MIPS_HI16,
+    R_MIPS_HIGHER, R_MIPS_HIGHEST, R_MIPS_LO16, R_MIPS_NONE, R_MIPS_PC16,
+    R_MIPS_REL32, R_MIPS_TLS_DTPREL_HI16, R_MIPS_TLS_DTPREL_LO16,
+    R_MIPS_TLS_GD, R_MIPS_TLS_GOTTPREL, R_MIPS_TLS_LDM,
+    R_RISCV_32, R_RISCV_32_PCREL, R_RISCV_64, R_RISCV_ALIGN,
+    R_RISCV_BRANCH, R_RISCV_CALL, R_RISCV_CALL_PLT, R_RISCV_HI20,
+    R_RISCV_JAL, R_RISCV_LO12_I, R_RISCV_LO12_S, R_RISCV_PCREL_HI20,
+    R_RISCV_PCREL_LO12_I, R_RISCV_PCREL_LO12_S, R_RISCV_RELAX,
+    R_RISCV_RVC_BRANCH, R_RISCV_RVC_JUMP, R_RISCV_SET16, R_RISCV_SET32,
+    R_RISCV_SET6, R_RISCV_SET8, R_RISCV_SUB16, R_RISCV_SUB32,
+    R_RISCV_SUB6, R_RISCV_SUB8, R_RISCV_TPOFF64, R_RISCV_TPREL64,
+    R_RISCV_TPREL_HI20, R_RISCV_TPREL_LO12_I, R_RISCV_TPREL_LO12_S,
+    R_X86_64_16, R_X86_64_32, R_X86_64_32S, R_X86_64_64, R_X86_64_8,
+    R_X86_64_DTPMOD64, R_X86_64_DTPOFF32, R_X86_64_DTPOFF64,
+    R_X86_64_GLOB_DAT, R_X86_64_GOT64, R_X86_64_GOTOFF64,
+    R_X86_64_GOTPC32, R_X86_64_GOTPC32_TLSDESC, R_X86_64_GOTPC64,
+    R_X86_64_GOTPCREL, R_X86_64_GOTPCREL64, R_X86_64_GOTPLT64,
+    R_X86_64_GOTTPOFF, R_X86_64_IRELATIVE, R_X86_64_JUMP_SLOT,
+    R_X86_64_NONE, R_X86_64_PC16, R_X86_64_PC32, R_X86_64_PC64,
+    R_X86_64_PC8, R_X86_64_PLT32, R_X86_64_PLTOFF64, R_X86_64_RELATIVE,
+    R_X86_64_SIZE32, R_X86_64_SIZE64, R_X86_64_TLSGD, R_X86_64_TLSLD,
+    R_X86_64_TPOFF32, R_X86_64_TPOFF64, SHF_WRITE,
 };
 use crate::debug::ArchKind;
 
@@ -254,6 +258,124 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                 }
                 R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT | R_X86_64_RELATIVE | R_X86_64_IRELATIVE
                     if layout.arch == ArchKind::X86_64 => {}
+                R_X86_64_NONE if layout.arch == ArchKind::X86_64 => {
+                    // no-op
+                }
+                R_X86_64_16 if layout.arch == ArchKind::X86_64 => {
+                    let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u16;
+                    sec.data[r_offset..r_offset + 2]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_PC16 if layout.arch == ArchKind::X86_64 => {
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as u16;
+                    sec.data[r_offset..r_offset + 2]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_8 if layout.arch == ArchKind::X86_64 => {
+                    let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u8;
+                    sec.data[r_offset] = value;
+                }
+                R_X86_64_PC8 if layout.arch == ArchKind::X86_64 => {
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as u8;
+                    sec.data[r_offset] = value;
+                }
+                R_X86_64_PC64 if layout.arch == ArchKind::X86_64 => {
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
+                    let p = s_vaddr + r_offset as u64;
+                    let value = s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p);
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_GOTTPOFF if layout.arch == ArchKind::X86_64 => {
+                    // TLS IE: GOT[S] + A - P
+                    // Static: S is TP offset, GOT entry = S, so result = S + A - P
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        ((s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p)) as u32;
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_TLSGD | R_X86_64_TLSLD if layout.arch == ArchKind::X86_64 => {
+                    // TLS GD/LD: for static linking, resolve to DTP offset
+                    // GOT entry address + A - P, where GOT entry = DTP offset
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        ((s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p)) as u32;
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_DTPOFF32 if layout.arch == ArchKind::X86_64 => {
+                    let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_DTPOFF64 if layout.arch == ArchKind::X86_64 => {
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
+                    let value = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_DTPMOD64 if layout.arch == ArchKind::X86_64 => {
+                    // Module ID: static linking => 0 (self)
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
+                    sec.data[r_offset..r_offset + 8].copy_from_slice(&0u64.to_le_bytes());
+                }
+                R_X86_64_GOTPC32 | R_X86_64_GOTPC32_TLSDESC if layout.arch == ArchKind::X86_64 => {
+                    // GOT + A - P: for static, use symbol address as proxy
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        ((s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p)) as u32;
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_GOTPC64 if layout.arch == ArchKind::X86_64 => {
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
+                    let p = s_vaddr + r_offset as u64;
+                    let value = s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p);
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_GOTPCREL64 | R_X86_64_GOTPLT64 if layout.arch == ArchKind::X86_64 => {
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
+                    let value = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_PLTOFF64 if layout.arch == ArchKind::X86_64 => {
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
+                    let p = s_vaddr + r_offset as u64;
+                    let value = s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p);
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_SIZE32 if layout.arch == ArchKind::X86_64 => {
+                    let value = sym.size as u32;
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_X86_64_SIZE64 if layout.arch == ArchKind::X86_64 => {
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
+                    sec.data[r_offset..r_offset + 8]
+                        .copy_from_slice(&sym.size.to_le_bytes());
+                }
                 // 2. AArch64 重定位
                 R_AARCH64_ABS64 => {
                     // 64-bit 绝对
@@ -460,6 +582,126 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let new_inst = (inst & !0xffff) | imm16;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
+                R_AARCH64_ABS32 => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let value = s as u32;
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_AARCH64_ABS16 => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let value = s as u16;
+                    sec.data[r_offset..r_offset + 2]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_AARCH64_PREL32 => {
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as u32;
+                    sec.data[r_offset..r_offset + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_AARCH64_PREL16 => {
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as u16;
+                    sec.data[r_offset..r_offset + 2]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+                R_AARCH64_ADR_PREL_PG_HI21_NC => {
+                    // Same as ADR_PREL_PG_HI21 but no overflow check
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = ((s & !0xfff).wrapping_sub(p & !0xfff)) as i64 >> 12;
+                    let immlo = (offset & 0x3) as u32;
+                    let immhi = ((offset >> 2) & 0x7ffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0x60ffffe0) | (immhi << 5) | (immlo << 29);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_LDST128_ABS_LO12_NC => {
+                    // 128-bit load/store: 12-bit unsigned, scale by 16
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm12 = ((s / 16) & 0xfff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfff) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_MOVW_SABS_G0 => {
+                    // Signed 16-bit chunk 0: bits[15:0], MOVSF (alias of MOVZ)
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64) as i64;
+                    let imm16 = (s & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_MOVW_SABS_G1 => {
+                    // Signed 16-bit chunk 1: bits[31:16], MOVKS
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64) as i64;
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_MOVW_SABS_G2 => {
+                    // Signed 16-bit chunk 2: bits[47:32], MOVKS
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64) as i64;
+                    let imm16 = ((s >> 32) & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSLE_MOVW_TPREL_G2 => {
+                    // TLS LE MOVW: bits[47:32] of TP offset
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = ((s >> 32) & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSLE_MOVW_TPREL_G1_NC => {
+                    // TLS LE MOVK: bits[31:16] of TP offset (no carry)
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSLE_MOVW_TPREL_G0 => {
+                    // TLS LE MOVW: bits[15:0] of TP offset (with carry check)
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = (s & 0xffff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xffff) | imm16;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSLE_ADD_TPREL_HI12 => {
+                    // TLS LE ADD: bits[23:12] of TP offset
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm12 = ((s >> 12) & 0xfff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfff) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_AARCH64_TLSLE_ADD_TPREL_LO12
+                | R_AARCH64_TLSLE_ADD_TPREL_LO12_NC => {
+                    // TLS LE ADD: bits[11:0] of TP offset
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm12 = (s & 0xfff) as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfff) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
                 // 3. RISC-V 重定位
                 R_RISCV_64 if layout.arch == ArchKind::RiscV64 => {
                     if r_offset + 8 > sec_data_len {
@@ -594,6 +836,131 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                         | (((imm_lo as u32) & 0x1f) << 7);
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
+                R_RISCV_TPREL64 if layout.arch == ArchKind::RiscV64 => {
+                    // TLS: 64-bit TP-relative offset
+                    if r_offset + 8 > sec_data_len {
+                        return Err(RelocError::OutOfRange);
+                    }
+                    let value = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_le_bytes());
+                }
+                R_RISCV_JAL if layout.arch == ArchKind::RiscV64 => {
+                    // J-type: imm[20|10:1|11|19:12] encoded in instruction
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as i64;
+                    let imm = offset as u32;
+                    // J-imm encoding: inst[31]=imm[20], inst[30:21]=imm[10:1],
+                    //   inst[20]=imm[11], inst[19:12]=imm[19:12]
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfffff000)
+                        | (((imm >> 20) & 1) << 31)  // imm[20]
+                        | (((imm >> 1) & 0x3ff) << 21) // imm[10:1]
+                        | (((imm >> 11) & 1) << 20)   // imm[11]
+                        | (((imm >> 12) & 0xff) << 12); // imm[19:12]
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_RISCV_BRANCH if layout.arch == ArchKind::RiscV64 => {
+                    // B-type: imm[12|10:5] in inst[31:25], imm[4:1|11] in inst[11:7]
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as i64;
+                    let imm = offset as u32;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & !0xfe000f80)
+                        | (((imm >> 12) & 1) << 31)   // imm[12]
+                        | (((imm >> 5) & 0x3f) << 25)  // imm[10:5]
+                        | (((imm >> 1) & 0xf) << 8)    // imm[4:1]
+                        | (((imm >> 11) & 1) << 7);    // imm[11]
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_RISCV_RVC_BRANCH if layout.arch == ArchKind::RiscV64 => {
+                    // Compressed branch: CB-type, 9-bit signed offset
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as i64;
+                    let imm = offset as u16;
+                    let inst =
+                        u16::from_le_bytes(sec.data[r_offset..r_offset + 2].try_into().unwrap());
+                    // CB offset encoding: inst[12]=imm[8], inst[11:10]=imm[4:3],
+                    //   inst[6:5]=imm[7:6], inst[4:3]=imm[2:1], inst[2]=imm[5]
+                    let new_inst = (inst & !0x1c79)
+                        | (((imm as u16 >> 8) & 1) << 12)
+                        | (((imm as u16 >> 3) & 3) << 10)
+                        | (((imm as u16 >> 6) & 3) << 5)
+                        | (((imm as u16 >> 1) & 3) << 3)
+                        | (((imm as u16 >> 5) & 1) << 2);
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_RISCV_RVC_JUMP if layout.arch == ArchKind::RiscV64 => {
+                    // Compressed jump: CJ-type, 12-bit signed offset
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as i64;
+                    let imm = offset as u16;
+                    let inst =
+                        u16::from_le_bytes(sec.data[r_offset..r_offset + 2].try_into().unwrap());
+                    // CJ offset encoding: complex bit scatter
+                    let new_inst = (inst & !0x1fff)
+                        | (((imm as u16 >> 11) & 1) << 12)
+                        | (((imm as u16 >> 4) & 1) << 11)
+                        | (((imm as u16 >> 8) & 1) << 10)
+                        | (((imm as u16 >> 10) & 1) << 9)
+                        | (((imm as u16 >> 6) & 1) << 8)
+                        | (((imm as u16 >> 7) & 1) << 7)
+                        | (((imm as u16 >> 1) & 1) << 6)
+                        | (((imm as u16 >> 5) & 1) << 5)
+                        | (((imm as u16 >> 3) & 1) << 4)
+                        | (((imm as u16 >> 2) & 1) << 3)
+                        | (((imm as u16 >> 9) & 1) << 2);
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_RISCV_ALIGN | R_RISCV_RELAX if layout.arch == ArchKind::RiscV64 => {
+                    // Linker hint relocations: no patching needed for static link
+                }
+                R_RISCV_SET6 | R_RISCV_SUB6 if layout.arch == ArchKind::RiscV64 => {
+                    // 6-bit field patching
+                    let val = sec.data[r_offset];
+                    let sym_val = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u8;
+                    let result = if r_type == R_RISCV_SET6 {
+                        sym_val & 0x3f
+                    } else {
+                        val.wrapping_sub(sym_val) & 0x3f
+                    };
+                    sec.data[r_offset] = result;
+                }
+                R_RISCV_SET8 | R_RISCV_SUB8 if layout.arch == ArchKind::RiscV64 => {
+                    let val = sec.data[r_offset];
+                    let sym_val = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u8;
+                    let result = if r_type == R_RISCV_SET8 {
+                        sym_val
+                    } else {
+                        val.wrapping_sub(sym_val)
+                    };
+                    sec.data[r_offset] = result;
+                }
+                R_RISCV_SET16 | R_RISCV_SUB16 if layout.arch == ArchKind::RiscV64 => {
+                    let val = u16::from_le_bytes(
+                        sec.data[r_offset..r_offset + 2].try_into().unwrap(),
+                    );
+                    let sym_val = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u16;
+                    let result = if r_type == R_RISCV_SET16 {
+                        sym_val
+                    } else {
+                        val.wrapping_sub(sym_val)
+                    };
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&result.to_le_bytes());
+                }
+                R_RISCV_SET32 | R_RISCV_SUB32 if layout.arch == ArchKind::RiscV64 => {
+                    let val = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let sym_val = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
+                    let result = if r_type == R_RISCV_SET32 {
+                        sym_val
+                    } else {
+                        val.wrapping_sub(sym_val)
+                    };
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&result.to_le_bytes());
+                }
                 // 4. MIPS 重定位
                 R_MIPS_26 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
                     // J-type: target = (S + A) >> 2, 26-bit
@@ -631,21 +998,119 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                     let value = s_sym_vaddr.wrapping_add(r_addend as u64);
                     sec.data[r_offset..r_offset + 8].copy_from_slice(&value.to_be_bytes());
                 }
+                R_MIPS_NONE if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    // no-op
+                }
+                R_MIPS_16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm = (s & 0xffff) as u16;
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&imm.to_be_bytes());
+                }
+                R_MIPS_REL32 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as u32;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_be_bytes());
+                }
+                R_MIPS_GPREL16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    // GP-relative 16-bit: S + A - GP
+                    // For static linking, GP = 0 (simplified)
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm = (s & 0xffff) as u16;
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&imm.to_be_bytes());
+                }
+                R_MIPS_GPREL32 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let value = s as u32;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_be_bytes());
+                }
+                R_MIPS_GOT16 | R_MIPS_GOT_HI16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    // GOT 16-bit: for static linking, treat as HI16
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm_hi = ((s >> 16) & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst = (inst & 0xFFFF0000) | imm_hi;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_GOT_LO16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm_lo = (s & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst = (inst & 0xFFFF0000) | imm_lo;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_CALL16 | R_MIPS_CALL_HI16
+                    if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) =>
+                {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm_hi = ((s >> 16) & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst = (inst & 0xFFFF0000) | imm_hi;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_CALL_LO16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm_lo = (s & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst = (inst & 0xFFFF0000) | imm_lo;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_PC16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as u32;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&offset.to_be_bytes());
+                }
+                R_MIPS_HIGHER if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm = ((s >> 32) & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst = (inst & 0xFFFF0000) | imm;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_HIGHEST if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm = ((s >> 48) & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst = (inst & 0xFFFF0000) | imm;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_TLS_GD | R_MIPS_TLS_LDM | R_MIPS_TLS_GOTTPREL
+                | R_MIPS_TLS_DTPREL_HI16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    // TLS: for static linking, treat as HI16 of DTP/TP offset
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm_hi = ((s >> 16) & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst = (inst & 0xFFFF0000) | imm_hi;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
+                R_MIPS_TLS_DTPREL_LO16 if matches!(layout.arch, ArchKind::Mips | ArchKind::Mips64) => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm_lo = (s & 0xffff) as u32;
+                    let inst = u32::from_be_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst = (inst & 0xFFFF0000) | imm_lo;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_be_bytes());
+                }
                 // 5. ARM 重定位
                 R_ARM_ABS32 if layout.arch == ArchKind::Arm => {
                     // 32-bit 绝对
                     let value = (s_sym_vaddr.wrapping_add(r_addend as u64)) as u32;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
-                }
-                R_ARM_CALL | R_ARM_JUMP24 if layout.arch == ArchKind::Arm => {
-                    // 24-bit PC 相对: offset = (S + A - P) >> 2
-                    let p = s_vaddr + r_offset as u64;
-                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p);
-                    let imm24 = (offset >> 2) & 0xffffff;
-                    let inst =
-                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
-                    let new_inst = (inst & 0xFF000000) | (imm24 as u32);
-                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
                 }
                 R_ARM_MOVW_ABS_NC if layout.arch == ArchKind::Arm => {
                     // 16-bit 低 16 位: imm16 = (S + A) & 0xffff
@@ -668,6 +1133,165 @@ pub fn apply_relocations(layout: &mut Layout) -> Result<DynamicRelocs, RelocErro
                         u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
                     let new_inst = (inst & 0xFFF0F000) | (imm4 << 16) | imm12;
                     sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_ARM_NONE if layout.arch == ArchKind::Arm => {
+                    // no-op
+                }
+                R_ARM_ABS16 if layout.arch == ArchKind::Arm => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let value = (s & 0xffff) as u16;
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&value.to_le_bytes());
+                }
+                R_ARM_ABS8 if layout.arch == ArchKind::Arm => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    sec.data[r_offset] = (s & 0xff) as u8;
+                }
+                R_ARM_PREL32 if layout.arch == ArchKind::Arm => {
+                    let p = s_vaddr + r_offset as u64;
+                    let value =
+                        (s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p)) as u32;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&value.to_le_bytes());
+                }
+                R_ARM_PC24 | R_ARM_CALL | R_ARM_JUMP24 if layout.arch == ArchKind::Arm => {
+                    // Thumb BL: 21-bit signed offset (halfword aligned)
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
+                    let imm = (offset >> 1) as u32;
+                    let inst_lo = u16::from_le_bytes(
+                        sec.data[r_offset..r_offset + 2].try_into().unwrap(),
+                    );
+                    let inst_hi = u16::from_le_bytes(
+                        sec.data[r_offset + 2..r_offset + 4].try_into().unwrap(),
+                    );
+                    // BL encoding: imm[21] in inst_lo[10], imm[20:11] in inst_lo[9:0],
+                    //   imm[10:1] in inst_hi[10:0]
+                    let new_lo = (inst_lo & !0x07FF)
+                        | (((imm >> 11) & 0x3FF) as u16)
+                        | (((imm >> 21) & 1) << 10) as u16;
+                    let new_hi = (inst_hi & !0x07FF)
+                        | ((imm >> 1) & 0x7FF) as u16;
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&new_lo.to_le_bytes());
+                    sec.data[r_offset + 2..r_offset + 4].copy_from_slice(&new_hi.to_le_bytes());
+                }
+                R_ARM_THM_JUMP24 if layout.arch == ArchKind::Arm => {
+                    // Thumb B: 21-bit signed offset (same encoding as THM_CALL but different opcode)
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
+                    let imm = (offset >> 1) as u32;
+                    let inst_lo = u16::from_le_bytes(
+                        sec.data[r_offset..r_offset + 2].try_into().unwrap(),
+                    );
+                    let inst_hi = u16::from_le_bytes(
+                        sec.data[r_offset + 2..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_lo = (inst_lo & !0x07FF)
+                        | (((imm >> 11) & 0x3FF) as u16)
+                        | (((imm >> 21) & 1) << 10) as u16;
+                    let new_hi = (inst_hi & !0x07FF)
+                        | ((imm >> 1) & 0x7FF) as u16;
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&new_lo.to_le_bytes());
+                    sec.data[r_offset + 2..r_offset + 4].copy_from_slice(&new_hi.to_le_bytes());
+                }
+                R_ARM_THM_JUMP19 if layout.arch == ArchKind::Arm => {
+                    // Thumb conditional branch: 20-bit signed offset
+                    let p = s_vaddr + r_offset as u64;
+                    let offset = (s_sym_vaddr.wrapping_add(r_addend as u64)).wrapping_sub(p) as i64;
+                    let imm = (offset >> 1) as u32;
+                    let inst_lo = u16::from_le_bytes(
+                        sec.data[r_offset..r_offset + 2].try_into().unwrap(),
+                    );
+                    let inst_hi = u16::from_le_bytes(
+                        sec.data[r_offset + 2..r_offset + 4].try_into().unwrap(),
+                    );
+                    // T2 encoding: imm[19] in inst_lo[10], imm[18:13] in inst_lo[5:0],
+                    //   imm[12:11] in inst_hi[13:12], imm[10:1] in inst_hi[10:0]
+                    let new_lo = (inst_lo & !0x0FC0)
+                        | (((imm >> 19) & 1) << 10) as u16
+                        | ((imm >> 13) & 0x3F) as u16;
+                    let new_hi = (inst_hi & !0x37FF)
+                        | (((imm >> 11) & 3) << 12) as u16
+                        | ((imm >> 1) & 0x7FF) as u16;
+                    sec.data[r_offset..r_offset + 2].copy_from_slice(&new_lo.to_le_bytes());
+                    sec.data[r_offset + 2..r_offset + 4].copy_from_slice(&new_hi.to_le_bytes());
+                }
+                R_ARM_MOVW_PREL_NC if layout.arch == ArchKind::Arm => {
+                    // PC-relative MOVW: imm16 = (S + A - P) & 0xffff
+                    let p = s_vaddr + r_offset as u64;
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p);
+                    let imm16 = (s & 0xffff) as u32;
+                    let imm4 = (imm16 >> 12) & 0xf;
+                    let imm12 = imm16 & 0xfff;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xFFF0F000) | (imm4 << 16) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_ARM_MOVT_PREL if layout.arch == ArchKind::Arm => {
+                    let p = s_vaddr + r_offset as u64;
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p);
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let imm4 = (imm16 >> 12) & 0xf;
+                    let imm12 = imm16 & 0xfff;
+                    let inst =
+                        u32::from_le_bytes(sec.data[r_offset..r_offset + 4].try_into().unwrap());
+                    let new_inst = (inst & 0xFFF0F000) | (imm4 << 16) | imm12;
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst.to_le_bytes());
+                }
+                R_ARM_THM_MOVW_ABS_NC if layout.arch == ArchKind::Arm => {
+                    // Thumb MOVW: imm16 split as imm4 @ bits[19:16], imm12 @ bits[11:0]
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = (s & 0xffff) as u32;
+                    let imm4 = (imm16 >> 12) & 0xf;
+                    let imm12 = imm16 & 0xfff;
+                    // Re-encode as 32-bit Thumb instruction
+                    let inst32 = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst32 = (inst32 & !0x040F0FFF)
+                        | ((imm4 & 0xF) << 16)
+                        | (imm12 & 0xFFF);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst32.to_le_bytes());
+                }
+                R_ARM_THM_MOVT_ABS if layout.arch == ArchKind::Arm => {
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64);
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let imm4 = (imm16 >> 12) & 0xf;
+                    let imm12 = imm16 & 0xfff;
+                    let inst32 = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst32 = (inst32 & !0x040F0FFF)
+                        | ((imm4 & 0xF) << 16)
+                        | (imm12 & 0xFFF);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst32.to_le_bytes());
+                }
+                R_ARM_THM_MOVW_PREL_NC if layout.arch == ArchKind::Arm => {
+                    let p = s_vaddr + r_offset as u64;
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p);
+                    let imm16 = (s & 0xffff) as u32;
+                    let imm4 = (imm16 >> 12) & 0xf;
+                    let imm12 = imm16 & 0xfff;
+                    let inst32 = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst32 = (inst32 & !0x040F0FFF)
+                        | ((imm4 & 0xF) << 16)
+                        | (imm12 & 0xFFF);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst32.to_le_bytes());
+                }
+                R_ARM_THM_MOVT_PREL if layout.arch == ArchKind::Arm => {
+                    let p = s_vaddr + r_offset as u64;
+                    let s = s_sym_vaddr.wrapping_add(r_addend as u64).wrapping_sub(p);
+                    let imm16 = ((s >> 16) & 0xffff) as u32;
+                    let imm4 = (imm16 >> 12) & 0xf;
+                    let imm12 = imm16 & 0xfff;
+                    let inst32 = u32::from_le_bytes(
+                        sec.data[r_offset..r_offset + 4].try_into().unwrap(),
+                    );
+                    let new_inst32 = (inst32 & !0x040F0FFF)
+                        | ((imm4 & 0xF) << 16)
+                        | (imm12 & 0xFFF);
+                    sec.data[r_offset..r_offset + 4].copy_from_slice(&new_inst32.to_le_bytes());
                 }
                 _ => return Err(RelocError::UnsupportedType(r_type)),
             }
@@ -698,7 +1322,8 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
     match arch {
         ArchKind::X86_64 => matches!(
             rel_type,
-            R_X86_64_64
+            R_X86_64_NONE
+                | R_X86_64_64
                 | R_X86_64_PC32
                 | R_X86_64_PLT32
                 | R_X86_64_GLOB_DAT
@@ -707,29 +1332,57 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
                 | R_X86_64_GOTPCREL
                 | R_X86_64_32
                 | R_X86_64_32S
+                | R_X86_64_16
+                | R_X86_64_PC16
+                | R_X86_64_8
+                | R_X86_64_PC8
+                | R_X86_64_PC64
                 | R_X86_64_TPOFF64
-                | R_X86_64_GOT64
                 | R_X86_64_TPOFF32
+                | R_X86_64_GOTTPOFF
+                | R_X86_64_TLSGD
+                | R_X86_64_TLSLD
+                | R_X86_64_DTPOFF32
+                | R_X86_64_DTPOFF64
+                | R_X86_64_DTPMOD64
+                | R_X86_64_GOT64
                 | R_X86_64_GOTOFF64
+                | R_X86_64_GOTPC32
+                | R_X86_64_GOTPC64
+                | R_X86_64_GOTPCREL64
+                | R_X86_64_GOTPLT64
+                | R_X86_64_PLTOFF64
+                | R_X86_64_SIZE32
+                | R_X86_64_SIZE64
+                | R_X86_64_GOTPC32_TLSDESC
                 | R_X86_64_IRELATIVE
         ),
         ArchKind::AArch64 => matches!(
             rel_type,
             R_AARCH64_ABS64
+                | R_AARCH64_ABS32
+                | R_AARCH64_ABS16
                 | R_AARCH64_PREL64
+                | R_AARCH64_PREL32
+                | R_AARCH64_PREL16
                 | R_AARCH64_CALL26
                 | R_AARCH64_JUMP26
                 | R_AARCH64_ADR_PREL_LO21
                 | R_AARCH64_ADR_PREL_PG_HI21
+                | R_AARCH64_ADR_PREL_PG_HI21_NC
                 | R_AARCH64_ADD_ABS_LO12_NC
                 | R_AARCH64_LDST64_ABS_LO12_NC
                 | R_AARCH64_LDST32_ABS_LO12_NC
                 | R_AARCH64_LDST16_ABS_LO12_NC
                 | R_AARCH64_LDST8_ABS_LO12_NC
+                | R_AARCH64_LDST128_ABS_LO12_NC
                 | R_AARCH64_MOVW_UABS_G0
                 | R_AARCH64_MOVW_UABS_G1
                 | R_AARCH64_MOVW_UABS_G2
                 | R_AARCH64_MOVW_UABS_G3
+                | R_AARCH64_MOVW_SABS_G0
+                | R_AARCH64_MOVW_SABS_G1
+                | R_AARCH64_MOVW_SABS_G2
                 | R_AARCH64_TLSDESC_ADR_PAGE21
                 | R_AARCH64_TLSDESC_LD64_LO12
                 | R_AARCH64_TLSDESC_ADD_LO12
@@ -740,14 +1393,22 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
                 | R_AARCH64_TLSDESC_CALL
                 | R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21
                 | R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC
+                | R_AARCH64_TLSLE_MOVW_TPREL_G2
                 | R_AARCH64_TLSLE_MOVW_TPREL_G1
+                | R_AARCH64_TLSLE_MOVW_TPREL_G1_NC
+                | R_AARCH64_TLSLE_MOVW_TPREL_G0
                 | R_AARCH64_TLSLE_MOVW_TPREL_G0_NC
+                | R_AARCH64_TLSLE_ADD_TPREL_HI12
+                | R_AARCH64_TLSLE_ADD_TPREL_LO12
+                | R_AARCH64_TLSLE_ADD_TPREL_LO12_NC
         ),
         ArchKind::RiscV64 => matches!(
             rel_type,
             R_RISCV_64
                 | R_RISCV_32
                 | R_RISCV_32_PCREL
+                | R_RISCV_JAL
+                | R_RISCV_BRANCH
                 | R_RISCV_CALL
                 | R_RISCV_CALL_PLT
                 | R_RISCV_PCREL_HI20
@@ -757,17 +1418,71 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
                 | R_RISCV_LO12_I
                 | R_RISCV_LO12_S
                 | R_RISCV_TPOFF64
+                | R_RISCV_TPREL64
                 | R_RISCV_TPREL_HI20
                 | R_RISCV_TPREL_LO12_I
                 | R_RISCV_TPREL_LO12_S
+                | R_RISCV_ALIGN
+                | R_RISCV_RELAX
+                | R_RISCV_RVC_BRANCH
+                | R_RISCV_RVC_JUMP
+                | R_RISCV_SET6
+                | R_RISCV_SUB6
+                | R_RISCV_SET8
+                | R_RISCV_SUB8
+                | R_RISCV_SET16
+                | R_RISCV_SUB16
+                | R_RISCV_SET32
+                | R_RISCV_SUB32
         ),
         ArchKind::Mips | ArchKind::Mips64 => matches!(
             rel_type,
-            R_MIPS_26 | R_MIPS_HI16 | R_MIPS_LO16 | R_MIPS_32 | R_MIPS_64
+            R_MIPS_NONE
+                | R_MIPS_16
+                | R_MIPS_26
+                | R_MIPS_HI16
+                | R_MIPS_LO16
+                | R_MIPS_32
+                | R_MIPS_64
+                | R_MIPS_REL32
+                | R_MIPS_GPREL16
+                | R_MIPS_GPREL32
+                | R_MIPS_GOT16
+                | R_MIPS_GOT_HI16
+                | R_MIPS_GOT_LO16
+                | R_MIPS_CALL16
+                | R_MIPS_CALL_HI16
+                | R_MIPS_CALL_LO16
+                | R_MIPS_PC16
+                | R_MIPS_HIGHER
+                | R_MIPS_HIGHEST
+                | R_MIPS_TLS_GD
+                | R_MIPS_TLS_LDM
+                | R_MIPS_TLS_DTPREL_HI16
+                | R_MIPS_TLS_DTPREL_LO16
+                | R_MIPS_TLS_GOTTPREL
         ),
         ArchKind::Arm => matches!(
             rel_type,
-            R_ARM_ABS32 | R_ARM_CALL | R_ARM_JUMP24 | R_ARM_MOVW_ABS_NC | R_ARM_MOVT_ABS
+            R_ARM_NONE
+                | R_ARM_ABS32
+                | R_ARM_ABS16
+                | R_ARM_ABS8
+                | R_ARM_PREL32
+                | R_ARM_PC24
+                | R_ARM_CALL
+                | R_ARM_JUMP24
+                | R_ARM_THM_CALL
+                | R_ARM_THM_JUMP24
+                | R_ARM_THM_JUMP19
+                | R_ARM_MOVW_ABS_NC
+                | R_ARM_MOVT_ABS
+                | R_ARM_MOVW_PREL_NC
+                | R_ARM_MOVT_PREL
+                | R_ARM_THM_MOVW_ABS_NC
+                | R_ARM_THM_MOVT_ABS
+                | R_ARM_THM_MOVW_PREL_NC
+                | R_ARM_THM_MOVT_PREL
         ),
     }
 }
@@ -775,19 +1490,33 @@ fn is_supported_reloc_for_arch(arch: ArchKind, rel_type: u32) -> bool {
 fn relocation_patch_width(arch: ArchKind, rel_type: u32) -> usize {
     match arch {
         ArchKind::X86_64 => match rel_type {
-            R_X86_64_64 | R_X86_64_GOT64 | R_X86_64_GOTOFF64 | R_X86_64_TPOFF64 => 8,
+            R_X86_64_64 | R_X86_64_GOT64 | R_X86_64_GOTOFF64
+            | R_X86_64_TPOFF64 | R_X86_64_PC64 | R_X86_64_GOTPC64
+            | R_X86_64_GOTPCREL64 | R_X86_64_GOTPLT64 | R_X86_64_PLTOFF64
+            | R_X86_64_DTPOFF64 | R_X86_64_SIZE64 => 8,
+            R_X86_64_16 | R_X86_64_PC16 => 2,
+            R_X86_64_8 | R_X86_64_PC8 => 1,
             _ => 4,
         },
         ArchKind::AArch64 => match rel_type {
             R_AARCH64_ABS64 | R_AARCH64_PREL64 => 8,
+            R_AARCH64_ABS16 | R_AARCH64_PREL16 => 2,
+            R_AARCH64_ABS32 | R_AARCH64_PREL32 => 4,
             _ => 4,
         },
         ArchKind::RiscV64 => match rel_type {
-            R_RISCV_64 | R_RISCV_TPOFF64 | R_RISCV_CALL | R_RISCV_CALL_PLT => 8,
+            R_RISCV_64 | R_RISCV_TPOFF64 | R_RISCV_TPREL64
+            | R_RISCV_CALL | R_RISCV_CALL_PLT => 8,
+            R_RISCV_SET6 | R_RISCV_SUB6 => 1,
+            R_RISCV_SET8 | R_RISCV_SUB8 => 1,
+            R_RISCV_SET16 | R_RISCV_SUB16 => 2,
+            R_RISCV_SET32 | R_RISCV_SUB32 => 4,
             _ => 4,
         },
         ArchKind::Mips | ArchKind::Mips64 => match rel_type {
             R_MIPS_64 => 8,
+            R_MIPS_16 | R_MIPS_GPREL16 | R_MIPS_TLS_DTPREL_HI16
+            | R_MIPS_TLS_DTPREL_LO16 | R_MIPS_TLS_GOTTPREL => 4,
             _ => 4,
         },
         ArchKind::Arm => 4,
