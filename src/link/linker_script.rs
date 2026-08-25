@@ -3203,6 +3203,100 @@ mod tests {
         // .bss 大小应包含 COMMON 符号的 32 字节
         assert!(bss_sec.size >= 32);
     }
+
+    #[test]
+    fn parse_none_phdr() {
+        // 测试 :NONE 解析为特殊 PHDR 标记
+        let text = r#"
+            PHDRS {
+                text PT_LOAD FLAGS(5);
+            }
+            SECTIONS {
+                .text : { *(.text) } :text
+                .debug_info : { *(.debug_info) } :NONE
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        // 找到 .debug_info 输出节
+        let debug_sec = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::OutputSection(def) = cmd {
+                if def.name == ".debug_info" { Some(def) } else { None }
+            } else { None }
+        }).expect("should have .debug_info section");
+        // :NONE 应被解析为 phdrs 列表中的 "NONE"
+        assert!(debug_sec.phdrs.contains(&"NONE".to_string()),
+            "phdrs should contain NONE: {:?}", debug_sec.phdrs);
+    }
+
+    #[test]
+    fn execute_none_phdr_excludes_from_load() {
+        // 测试 :NONE 节在执行后标记为 is_none_phdr
+        use super::super::object::{FlatSection, InputObject};
+        use super::super::resolve::ResolvedSymbol;
+
+        let bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![
+                FlatSection {
+                    name: ".text".to_string(),
+                    ty: SHT_PROGBITS,
+                    flags: 0x6,
+                    align: 1,
+                    data: vec![0xc3; 8],
+                    size: 8,
+                    input_obj: 0,
+                    orig_index: 0,
+                },
+                FlatSection {
+                    name: ".debug_info".to_string(),
+                    ty: SHT_PROGBITS,
+                    flags: 0,
+                    align: 1,
+                    data: vec![0; 32],
+                    size: 32,
+                    input_obj: 0,
+                    orig_index: 1,
+                },
+            ],
+            machine: 62,
+        };
+
+        let resolved: Vec<ResolvedSymbol> = vec![];
+
+        let text = r#"
+            PHDRS {
+                text PT_LOAD FLAGS(5);
+            }
+            SECTIONS {
+                . = 0x1000;
+                .text : { *(.text) } :text
+                .debug_info : { *(.debug_info) } :NONE
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let result = execute_script(&script, &bundle, &resolved).unwrap();
+
+        // .text 节不应是 :NONE
+        let text_sec = result.sections.iter()
+            .find(|s| s.name == ".text")
+            .expect("should have .text");
+        assert!(!text_sec.is_none_phdr, ".text should not be :NONE");
+
+        // .debug_info 节应标记为 :NONE
+        let debug_sec = result.sections.iter()
+            .find(|s| s.name == ".debug_info")
+            .expect("should have .debug_info");
+        assert!(debug_sec.is_none_phdr,
+            ".debug_info should be :NONE");
+    }
 }
 
 // ─── Linker Script Executor ─────────────────────────────────────────────────
@@ -3240,6 +3334,8 @@ pub struct ScriptOutputSection {
     pub input_sections: Vec<InputSectionMatch>,
     pub is_discard: bool,
     pub is_info: bool,
+    /// 是否为 :NONE（不属于任何程序头/LOAD 段）
+    pub is_none_phdr: bool,
 }
 
 /// 输入节匹配结果
@@ -3464,6 +3560,7 @@ fn execute_output_section(
         input_sections: Vec::new(),
         is_discard: sec_def.is_discard,
         is_info: sec_def.is_info,
+        is_none_phdr: sec_def.phdrs.iter().any(|p| p == "NONE"),
     };
 
     // 计算地址

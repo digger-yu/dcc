@@ -469,7 +469,13 @@ impl LayoutBuilder {
                 size: script_sec.size,
                 entsize: 0,
                 output_index: sections.len() as u32,
-                load_segment: if script_sec.flags & SHF_WRITE != 0 { 1 } else { 0 },
+                load_segment: if script_sec.is_none_phdr {
+                    u8::MAX // :NONE — 不属于任何 LOAD 段
+                } else if script_sec.flags & SHF_WRITE != 0 {
+                    1
+                } else {
+                    0
+                },
                 vaddr: script_sec.vma,
                 file_off: 0, // computed below
                 input_offsets: script_sec
@@ -1152,6 +1158,10 @@ impl LayoutBuilder {
         let mut seg0: Option<OutputSegment> = None;
         let mut seg1: Option<OutputSegment> = None;
         for sec in sections {
+            // :NONE 标记的节不属于任何 LOAD 段
+            if sec.load_segment == u8::MAX {
+                continue;
+            }
             let flags = if sec.flags & SHF_EXECINSTR != 0 {
                 5
             }
@@ -1283,9 +1293,9 @@ pub fn assign_section_addrs(sections: &mut [OutputSection], base_addr: u64, file
     let mut v1 = align_up_to(v0, 0x1000) + 0x1000;
     let mut f1 = align_up_to(f0, 0x1000) + 0x1000;
 
-    // 其余段
+    // 其余段（排除 :NONE 节，它们不属于任何 LOAD 段）
     for sec in sections.iter_mut() {
-        if sec.load_segment == 0 {
+        if sec.load_segment == 0 || sec.load_segment == u8::MAX {
             continue;
         }
         let a = sec.align.max(1);
