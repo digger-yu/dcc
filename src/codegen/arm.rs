@@ -362,7 +362,11 @@ impl ArmCodegen {
         // 分配局部变量空间
         self.frame_bytes = (self.stack_bytes + 7) & !7; // 8 字节对齐
         if self.frame_bytes > 0 {
-            self.emit_sub_imm(13, 13, self.frame_bytes as u32); // sub sp, sp, #frame
+            if self._target.stack_clash_protection && self.frame_bytes > 4096 {
+                self.emit_stack_clash_probes(self.frame_bytes as u32);
+            } else {
+                self.emit_sub_imm(13, 13, self.frame_bytes as u32);
+            }
         }
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
@@ -1024,6 +1028,39 @@ impl ArmCodegen {
     fn emit_sub_imm(&mut self, rd: u8, rn: u8, imm: u32) {
         let inst = 0xE2400000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (imm & 0xFF);
         self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// -fstack-clash-protection: emit page-sized probes when allocating a
+    /// large stack frame.  Each probe stores a zero byte at [sp] to trigger
+    /// a fault on the guard page before the kernel maps it.
+    fn emit_stack_clash_probes(&mut self, frame_size: u32) {
+        let page: u32 = 4096;
+        let remainder = frame_size % page;
+        let pages = frame_size / page;
+        // First: sub sp, sp, #remainder (if any)
+        if remainder > 0 {
+            self.emit_sub_imm(13, 13, remainder);
+        }
+        if pages > 0 {
+            // Probe loop using R12 (IP, ABI scratch) as counter
+            // mov r12, #pages
+            self.emit_mov_imm(12, pages as u8);
+            // .probe_loop:
+            let loop_start = self.code.len() as u64;
+            // sub sp, sp, #4096  (0x10 rotated right by 20 = 4096)
+            self.emit_sub_imm(13, 13, 0x10);
+            // strb r0, [sp]  — probe the page (r0 as scratch)
+            let strb = 0xE5CD0000u32;
+            self.code.extend_from_slice(&strb.to_le_bytes());
+            // subs r12, r12, #1  (subtract and set flags)
+            let subs = 0xE25CC001u32;
+            self.code.extend_from_slice(&subs.to_le_bytes());
+            // bne .probe_loop
+            let loop_end = self.code.len() as u64;
+            let offset = ((loop_start as i64 - loop_end as i64 - 8) / 4) as u32;
+            let bne = 0x1A000000u32 | (offset & 0x00FFFFFF);
+            self.code.extend_from_slice(&bne.to_le_bytes());
+        }
     }
 
     fn emit_add_imm(&mut self, rd: u8, rn: u8, imm: u32) {
