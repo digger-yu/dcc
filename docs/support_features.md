@@ -378,7 +378,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 链接器脚本 EXCLUDE_FILE | `*(EXCLUDE_FILE(file_pattern) section_patterns)` 排除特定文件的输入节；内核按文件过滤节广泛使用 |
 | 链接器脚本 SORT_BY_NAME/SORT_BY_ALIGNMENT 执行 | `SORT(pattern)` / `SORT_BY_NAME(pattern)` 按节名升序排序匹配的输入节；`SORT_BY_ALIGNMENT(pattern)` 按对齐值降序排序；每个模式独立排序后按模式顺序追加，未包裹 SORT 的模式保持文件出现顺序 |
 | 链接器脚本浮点表达式 | 表达式求值器支持浮点字面量 (`3.14`/`1e3`/`2.5E-2`) 和浮点算术运算；整数与浮点混合运算时自动提升为浮点；最终结果截断为 `u64`；位运算在混合类型时回退为整数操作 |
-| 链接器脚本 COMMON 符号 | `*(COMMON)` 特殊处理 COMMON 符号（tentative definitions）；正确匹配和放置 COMMON 符号到输出节 |
+| 链接器脚本 COMMON 符号 | `*(COMMON)` 特殊处理 COMMON 符号（`SHN_COMMON` tentative definitions）；识别 `st_shndx == 0xfff2` 的 COMMON 符号，跨 TU 合并取最大 size，在输出节中分配 NOBITS 空间并更新符号地址 |
 | 链接器脚本 INPUT()/GROUP() | `INPUT(file1, file2, ...)` / `GROUP(lib1, lib2, ...)` 指定输入文件和库 |
 | 链接器脚本 NOCROSSREFS | `NOCROSSREFS(section1, section2, ...)` 禁止跨节引用检查；用于内核节隔离 |
 | 链接器脚本 INSERT 命令 | `INSERT AFTER section` / `INSERT BEFORE section` 插入额外节规则；动态修改脚本 |
