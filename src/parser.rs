@@ -5032,8 +5032,29 @@ impl<'a> Parser<'a> {
                 let bw = if self.cur.kind == TokKind::Colon {
                     self.advance();
                     // 位域宽度必须是单个表达式，不能含逗号（同类型多个位域: a:8, b:4）
-                    if let Some(Expr::Int { v, .. }) = self.parse_expr_bp(2) {
-                        Some(v as u32)
+                    // 使用 const_eval::eval 求值常量表达式 (如 `1 << 3`,
+                    // `sizeof(int)`, `(8 + 4)` 等), 而非仅匹配字面量整数.
+                    if let Some(e) = self.parse_expr_bp(2) {
+                        match crate::const_eval::eval(&e) {
+                            Ok(v) if v >= 0 => Some(v as u32),
+                            Ok(_) => {
+                                self.err_here(
+                                    "E0012",
+                                    "negative bit-field width",
+                                    Some("bit-field width must be non-negative"),
+                                );
+                                None
+                            }
+                            Err(_) => {
+                                // 非整型常量: 尝试浮点截断 (GCC 兼容)
+                                match crate::const_eval::eval_full(&e) {
+                                    Ok(crate::const_eval::ConstValue::Float(f)) if f >= 0.0 => {
+                                        Some(f as u32)
+                                    }
+                                    _ => None,
+                                }
+                            }
+                        }
                     } else {
                         None
                     }
