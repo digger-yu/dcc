@@ -36,6 +36,8 @@ pub struct ResolvedSymbol {
     pub vaddr: u64,
     /// 是否为已定义符号
     pub defined: bool,
+    /// 是否为 COMMON 符号 (st_shndx == SHN_COMMON)
+    pub is_common: bool,
     /// 是否需要 PLT（动态库函数）
     pub needs_plt: bool,
     /// 是否需要 GOT 引用（数据访问）
@@ -217,6 +219,7 @@ pub fn resolve_with_config(
                     section: 0,
                     vaddr: 0,
                     defined: false,
+                    is_common: false,
                     needs_plt: false,
                     needs_got: false,
                     source_lib: None,
@@ -239,6 +242,7 @@ pub fn resolve_with_config(
                     section: 0,
                     vaddr: 0,
                     defined: false,
+                    is_common: false,
                     needs_plt: false,
                     needs_got: false,
                     source_lib: None,
@@ -281,6 +285,7 @@ pub fn resolve_with_config(
             section: sym.section, // 暂保留，待 layout 后再设为合并节索引
             vaddr: 0,
             defined: true,
+            is_common: sym.is_common,
             needs_plt: false,
             needs_got: false,
             source_lib: if is_excluded { Some(source_lib) } else { None },
@@ -307,6 +312,7 @@ pub fn resolve_with_config(
             section: sym.section,
             vaddr: 0,
             defined: true,
+            is_common: false,
             needs_plt: false,
             needs_got: false,
             source_lib: None,
@@ -646,6 +652,58 @@ mod tests {
             "real duplicate definitions should error"
         );
         assert!(errs[0].msg.contains("multiple definition"));
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
+    fn common_symbols_resolve_as_strong() {
+        // COMMON 符号 (SHN_COMMON) 应作为强定义处理，多个 COMMON 合并取最大 size
+        use crate::codegen::elf::{STT_OBJECT, SHN_COMMON};
+        let dir = std::env::temp_dir();
+        let p1 = dir.join("dcc-resolve-test8-common-a.o");
+        let p2 = dir.join("dcc-resolve-test8-common-b.o");
+        // TU1: int buf[4]; (COMMON, size=16)
+        let a = build_minimal_obj(
+            "a",
+            &[ElfSym {
+                name: "buf".into(),
+                section: SHN_COMMON,
+                value: 0,
+                size: 16,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            }],
+            &[],
+        );
+        // TU2: int buf[8]; (COMMON, size=32)
+        let b = build_minimal_obj(
+            "b",
+            &[ElfSym {
+                name: "buf".into(),
+                section: SHN_COMMON,
+                value: 0,
+                size: 32,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            }],
+            &[],
+        );
+        std::fs::write(&p1, &a).unwrap();
+        std::fs::write(&p2, &b).unwrap();
+        let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
+        let (resolved, errs) = resolve(&bundle, &[]);
+        assert!(
+            errs.is_empty(),
+            "COMMON symbols should merge without error: {:?}",
+            errs
+        );
+        let buf = resolved.iter().find(|r| r.name == "buf").expect("buf");
+        assert!(buf.defined, "COMMON should be defined");
+        assert!(buf.is_common, "COMMON flag should be set");
+        assert_eq!(buf.size, 32, "should take max size among COMMONs");
         let _ = std::fs::remove_file(p1);
         let _ = std::fs::remove_file(p2);
     }

@@ -374,7 +374,7 @@ impl LayoutBuilder {
         self.assign_custom_sections(&mut sections);
 
         // 构建输出符号表
-        let symbols = self.build_symbols(bundle, resolved, &sections);
+        let symbols = self.build_symbols(bundle, resolved, &sections, &[]);
 
         // 段映射
         let segments = self.build_segments(&sections);
@@ -506,7 +506,9 @@ impl LayoutBuilder {
         }
 
         // 构建输出符号表
-        let mut symbols = self.build_symbols(bundle, resolved, &sections);
+        let mut symbols = self.build_symbols(
+            bundle, resolved, &sections, &script_result.common_placements,
+        );
 
         // 添加脚本定义的符号
         for script_sym in &script_result.symbols {
@@ -998,7 +1000,20 @@ impl LayoutBuilder {
         bundle: &InputBundle,
         resolved: &[ResolvedSymbol],
         sections: &[OutputSection],
+        common_placements: &[super::linker_script::CommonPlacement],
     ) -> Vec<OutputSymbol> {
+        // 构建 COMMON 符号放置映射: resolved_idx -> (output_sec_idx, offset)
+        let mut common_map: std::collections::HashMap<usize, (usize, u64)> =
+            std::collections::HashMap::new();
+        for cp in common_placements {
+            // 查找包含此 COMMON 符号的输出节
+            for (sec_idx, sec) in sections.iter().enumerate() {
+                if sec.vaddr == cp.output_vma {
+                    common_map.insert(cp.resolved_idx, (sec_idx, cp.offset));
+                    break;
+                }
+            }
+        }
         let mut out: Vec<OutputSymbol> = Vec::new();
         // 第一个 LOCAL 槽位固定为空
         out.push(OutputSymbol {
@@ -1036,8 +1051,28 @@ impl LayoutBuilder {
         // 跨 TU 解析后的 GLOBAL/WEAK 符号
         // 注意: r.section 是 bundle 内的 flat section 索引, 需要映射到输出节
         // r.value 是输入节内的偏移, 需要加上输入节在输出节内的偏移
-        for r in resolved {
+        for (r_idx, r) in resolved.iter().enumerate() {
             if r.bind == STB_LOCAL {
+                continue;
+            }
+            // COMMON 符号: 使用 *(COMMON) 放置信息
+            if r.is_common {
+                if let Some(&(sec_idx, offset)) = common_map.get(&r_idx) {
+                    let sec = &sections[sec_idx];
+                    out.push(OutputSymbol {
+                        name: r.name.clone(),
+                        value: offset,
+                        vaddr: sec.vaddr.wrapping_add(offset),
+                        size: r.size,
+                        bind: r.bind,
+                        ty: r.ty,
+                        kind: r.ty,
+                        visibility: r.visibility,
+                        section: sec.output_index as u16,
+                        shndx_if_section: 0,
+                    });
+                }
+                // 若未被放置（无 *(COMMON) 模式），跳过
                 continue;
             }
             // 未定义符号 (section==0): 加入 .symtab 以便 nm 显示为 U

@@ -3106,13 +3106,110 @@ mod tests {
         let tok = lexer.next_token();
         assert_eq!(tok, Token::Int(0x1A));
     }
+
+    #[test]
+    fn execute_common_symbol_placement() {
+        // 测试 *(COMMON) 执行时正确放置 COMMON 符号
+        use super::super::object::{FlatSection, InputObject};
+        use super::super::resolve::ResolvedSymbol;
+        use crate::codegen::elf::{STB_GLOBAL, STT_OBJECT};
+
+        let bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![
+                FlatSection {
+                    name: ".text".to_string(),
+                    ty: SHT_PROGBITS,
+                    flags: 0x6, // SHF_ALLOC | SHF_EXECINSTR
+                    align: 1,
+                    data: vec![0x90; 16],
+                    size: 16,
+                    input_obj: 0,
+                    orig_index: 0,
+                },
+            ],
+            machine: 62,
+        };
+
+        // 创建已解析符号：一个 COMMON 符号和一个普通符号
+        let resolved = vec![
+            ResolvedSymbol {
+                name: "common_var".to_string(),
+                value: 0,
+                size: 32,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: 0,
+                section: 0,
+                vaddr: 0,
+                defined: true,
+                is_common: true,
+                needs_plt: false,
+                needs_got: false,
+                source_lib: None,
+            },
+            ResolvedSymbol {
+                name: "normal_var".to_string(),
+                value: 0,
+                size: 8,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: 0,
+                section: 1, // .text
+                vaddr: 0,
+                defined: true,
+                is_common: false,
+                needs_plt: false,
+                needs_got: false,
+                source_lib: None,
+            },
+        ];
+
+        // 解析包含 *(COMMON) 的链接脚本
+        let text = r#"
+            SECTIONS {
+                . = 0x1000;
+                .text : { *(.text) }
+                .bss : {
+                    *(COMMON)
+                    *(.bss)
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let result = execute_script(&script, &bundle, &resolved).unwrap();
+
+        // 验证 COMMON 符号被放置
+        assert_eq!(result.common_placements.len(), 1);
+        let cp = &result.common_placements[0];
+        assert_eq!(cp.resolved_idx, 0); // common_var 是 resolved[0]
+        assert_eq!(cp.offset, 0); // 第一个 COMMON 符号偏移为 0
+
+        // 验证 .bss 输出节存在且类型为 NOBITS
+        let bss_sec = result.sections.iter()
+            .find(|s| s.name == ".bss")
+            .expect("should have .bss section");
+        assert_eq!(bss_sec.ty, SHT_NOBITS);
+        assert!(bss_sec.flags & SHF_WRITE != 0);
+        assert!(bss_sec.flags & SHF_ALLOC != 0);
+        // .bss 大小应包含 COMMON 符号的 32 字节
+        assert!(bss_sec.size >= 32);
+    }
 }
 
 // ─── Linker Script Executor ─────────────────────────────────────────────────
 
 use super::object::InputBundle;
 use super::resolve::ResolvedSymbol;
-use crate::codegen::elf::{SHT_NOBITS, SHT_PROGBITS};
+use crate::codegen::elf::{SHT_NOBITS, SHT_PROGBITS, SHF_ALLOC, SHF_WRITE};
 
 /// 链接脚本执行结果
 pub struct ScriptLayoutResult {
@@ -3124,6 +3221,8 @@ pub struct ScriptLayoutResult {
     pub entry: Option<u64>,
     /// 断言失败消息
     pub assert_failures: Vec<String>,
+    /// COMMON 符号放置信息（*(COMMON) 模式处理结果）
+    pub common_placements: Vec<CommonPlacement>,
 }
 
 /// 脚本定义的输出节
@@ -3157,6 +3256,19 @@ pub struct ScriptSymbol {
     pub is_provide: bool,
 }
 
+/// COMMON 符号放置信息
+///
+/// COMMON 符号没有对应的输入节，它们在 *(COMMON) 模式处理时
+/// 被直接分配到输出节中（类似 .bss 的 NOBITS 空间）。
+pub struct CommonPlacement {
+    /// 符号在 resolved 数组中的索引
+    pub resolved_idx: usize,
+    /// 输出节的 VMA
+    pub output_vma: u64,
+    /// 符号在输出节内的偏移
+    pub offset: u64,
+}
+
 /// 执行链接脚本，生成布局结果
 pub fn execute_script(
     script: &LinkerScript,
@@ -3169,6 +3281,7 @@ pub fn execute_script(
         symbols: Vec::new(),
         entry: None,
         assert_failures: Vec::new(),
+        common_placements: Vec::new(),
     };
     // 跟踪已匹配的输入节，避免重复匹配
     let mut used_sections: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -3214,7 +3327,10 @@ pub fn execute_script(
                 });
             }
             SectionCommand::OutputSection(sec_def) => {
-                let out_sec = execute_output_section(sec_def, bundle, &mut ctx, &mut used_sections)?;
+                let out_sec = execute_output_section(
+                    sec_def, bundle, &mut ctx, &mut used_sections, resolved,
+                    &mut result.common_placements,
+                )?;
                 if !out_sec.is_discard {
                     ctx.section_addrs.insert(out_sec.name.clone(), out_sec.vma);
                     ctx.section_sizes.insert(out_sec.name.clone(), out_sec.size);
@@ -3240,6 +3356,13 @@ pub fn execute_script(
                 }
             }
         }
+    }
+
+    // 2.5 将 COMMON 符号加入 ctx.symbols（*(COMMON) 处理后已有放置信息）
+    for cp in &result.common_placements {
+        let sym = &resolved[cp.resolved_idx];
+        let abs_addr = cp.output_vma.wrapping_add(cp.offset);
+        ctx.symbols.insert(sym.name.clone(), abs_addr);
     }
 
     // 3. 处理顶层 ASSERT/PROVIDE
@@ -3324,6 +3447,8 @@ fn execute_output_section(
     bundle: &InputBundle,
     ctx: &mut EvalContext,
     used_sections: &mut std::collections::HashSet<u32>,
+    resolved: &[ResolvedSymbol],
+    common_placements: &mut Vec<CommonPlacement>,
 ) -> Result<ScriptOutputSection, String> {
     let mut out_sec = ScriptOutputSection {
         name: sec_def.name.clone(),
@@ -3426,6 +3551,26 @@ fn execute_output_section(
                         pattern: m.pattern,
                         offset: aligned,
                     });
+                }
+
+                // *(COMMON) 特殊处理: 收集 COMMON 符号并分配 NOBITS 空间
+                // COMMON 符号没有对应的输入节，它们直接来自符号表
+                if spec.is_common {
+                    out_sec.ty = SHT_NOBITS;
+                    out_sec.flags |= SHF_WRITE | SHF_ALLOC;
+                    for (idx, sym) in resolved.iter().enumerate() {
+                        if !sym.is_common || sym.name.is_empty() {
+                            continue;
+                        }
+                        let align = sym.size.max(1);
+                        let aligned = (current_offset + align - 1) & !(align - 1);
+                        current_offset = aligned + sym.size;
+                        common_placements.push(CommonPlacement {
+                            resolved_idx: idx,
+                            output_vma: out_sec.vma,
+                            offset: aligned,
+                        });
+                    }
                 }
             }
             SectionBodyItem::Constructors => {
