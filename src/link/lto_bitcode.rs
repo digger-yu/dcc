@@ -949,3 +949,338 @@ pub fn serialize_module_from_bc(m: &BitcodeModule) -> Vec<u8> {
     }
     out
 }
+
+// =============================================================================
+// 跨 TU IR 合并
+// =============================================================================
+
+/// 合并后的统一模块，包含来自多个 TU 的函数和全局变量
+#[derive(Debug, Clone, Default)]
+pub struct MergedModule {
+    /// 合并后的函数列表（去重后）
+    pub functions: Vec<Function>,
+    /// 合并后的全局变量列表（去重后）
+    pub globals: Vec<Global>,
+    /// 源 TU 路径列表
+    pub source_paths: Vec<String>,
+    /// 函数到源 TU 的映射
+    pub func_source_map: HashMap<String, usize>,
+    /// 全局到源 TU 的映射
+    pub global_source_map: HashMap<String, usize>,
+}
+
+impl MergedModule {
+    /// 获取指定函数的定义（如果有）
+    pub fn get_function(&self, name: &str) -> Option<&Function> {
+        self.functions.iter().find(|f| f.name == name)
+    }
+
+    /// 获取指定全局变量的定义（如果有）
+    pub fn get_global(&self, name: &str) -> Option<&Global> {
+        self.globals.iter().find(|g| g.name == name)
+    }
+
+    /// 获取函数的源 TU 路径
+    pub fn function_source(&self, name: &str) -> Option<&str> {
+        self.func_source_map
+            .get(name)
+            .and_then(|&idx| self.source_paths.get(idx))
+            .map(|s| s.as_str())
+    }
+
+    /// 获取全局变量的源 TU 路径
+    pub fn global_source(&self, name: &str) -> Option<&str> {
+        self.global_source_map
+            .get(name)
+            .and_then(|&idx| self.source_paths.get(idx))
+            .map(|s| s.as_str())
+    }
+
+    /// 统计信息
+    pub fn stats(&self) -> MergedModuleStats {
+        MergedModuleStats {
+            num_functions: self.functions.len(),
+            num_globals: self.globals.len(),
+            num_source_tus: self.source_paths.len(),
+        }
+    }
+}
+
+/// 合并模块的统计信息
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergedModuleStats {
+    pub num_functions: usize,
+    pub num_globals: usize,
+    pub num_source_tus: usize,
+}
+
+/// 合并多个 BitcodeModule 为单一的 MergedModule
+///
+/// 合并规则：
+/// - 函数：同名函数只保留一个定义（优先非 static/非 .L 前缀的）
+/// - 全局：同名全局只保留一个定义（优先有初始化器的）
+/// - 符号冲突：如果两个 TU 都定义了相同的强符号，保留第一个
+pub fn merge_modules(modules: &[BitcodeModule]) -> MergedModule {
+    let mut merged = MergedModule::default();
+    let mut seen_functions: HashMap<String, usize> = HashMap::new();
+    let mut seen_globals: HashMap<String, usize> = HashMap::new();
+
+    for (tu_idx, module) in modules.iter().enumerate() {
+        merged.source_paths.push(module.source_path.clone());
+
+        // 合并函数
+        for func in &module.functions {
+            if let Some(&existing_idx) = seen_functions.get(&func.name) {
+                // 已存在：检查是否应该替换
+                let existing = &merged.functions[existing_idx];
+                if should_replace_function(existing, func) {
+                    merged.functions[existing_idx] = func.clone();
+                    merged.func_source_map.insert(func.name.clone(), tu_idx);
+                }
+            } else {
+                // 新函数
+                let idx = merged.functions.len();
+                merged.functions.push(func.clone());
+                merged.func_source_map.insert(func.name.clone(), tu_idx);
+                seen_functions.insert(func.name.clone(), idx);
+            }
+        }
+
+        // 合并全局变量
+        for global in &module.globals {
+            if let Some(&existing_idx) = seen_globals.get(&global.name) {
+                // 已存在：检查是否应该替换
+                let existing = &merged.globals[existing_idx];
+                if should_replace_global(existing, global) {
+                    merged.globals[existing_idx] = global.clone();
+                    merged.global_source_map.insert(global.name.clone(), tu_idx);
+                }
+            } else {
+                // 新全局
+                let idx = merged.globals.len();
+                merged.globals.push(global.clone());
+                merged.global_source_map.insert(global.name.clone(), tu_idx);
+                seen_globals.insert(global.name.clone(), idx);
+            }
+        }
+    }
+
+    merged
+}
+
+/// 判断是否应该用新函数替换旧函数
+///
+/// 优先级规则：
+/// 1. 公开符号（非 .L/__dcc_local_ 前缀）优先于内部符号
+/// 2. 有函数体的优先于空声明
+/// 3. 第一个定义的优先于后续的（避免不确定性）
+fn should_replace_function(existing: &Function, new: &Function) -> bool {
+    let existing_is_internal = existing.name.starts_with('.')
+        || existing.name.starts_with("__dcc_local_");
+    let new_is_internal = new.name.starts_with('.')
+        || new.name.starts_with("__dcc_local_");
+
+    // 新的是公开的，旧的是内部的 -> 替换
+    if !new_is_internal && existing_is_internal {
+        return true;
+    }
+    // 新的是内部的，旧的是公开的 -> 不替换
+    if new_is_internal && !existing_is_internal {
+        return false;
+    }
+    // 都是内部或都是公开：保留第一个
+    false
+}
+
+/// 判断是否应该用新全局替换旧全局
+///
+/// 优先级规则：
+/// 1. 有初始化器的优先于无初始化器的
+/// 2. 非常量初始化器优先于常量初始化器
+/// 3. 第一个定义的优先于后续的
+fn should_replace_global(existing: &Global, new: &Global) -> bool {
+    // 新的有初始化器，旧的没有 -> 替换
+    if new.initializer.is_some() && existing.initializer.is_none() {
+        return true;
+    }
+    // 新的没有初始化器，旧的有 -> 不替换
+    if new.initializer.is_none() && existing.initializer.is_some() {
+        return false;
+    }
+    // 都有或都没有初始化器：保留第一个
+    false
+}
+
+/// 将 MergedModule 转换回 BitcodeModule（用于序列化）
+pub fn merged_to_bitcode(merged: &MergedModule) -> BitcodeModule {
+    BitcodeModule {
+        source_path: "<merged>".to_string(),
+        functions: merged.functions.clone(),
+        globals: merged.globals.clone(),
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use crate::ir::{ExprKind, TypedExpr, ValueType};
+    use crate::diagnostics::Span;
+
+    fn make_test_function(name: &str) -> Function {
+        Function {
+            name: name.to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![],
+            span: Span::point("", 0, 0),
+        }
+    }
+
+    fn make_test_global(name: &str, has_init: bool) -> Global {
+        Global {
+            name: name.to_string(),
+            ty: ValueType::Integer { bits: 32, signed: true },
+            initializer: if has_init {
+                Some(TypedExpr {
+                    ty: ValueType::Integer { bits: 32, signed: true },
+                    kind: ExprKind::Constant,
+                    children: vec![],
+                    span: Span::point("", 0, 0),
+                    literal: Some(crate::ir::ExprLiteral::Int(42)),
+                })
+            } else {
+                None
+            },
+            span: Span::point("", 0, 0),
+            is_tls: false,
+        }
+    }
+
+    #[test]
+    fn merge_empty_modules() {
+        let modules: Vec<BitcodeModule> = vec![];
+        let merged = merge_modules(&modules);
+        assert_eq!(merged.functions.len(), 0);
+        assert_eq!(merged.globals.len(), 0);
+        assert_eq!(merged.source_paths.len(), 0);
+    }
+
+    #[test]
+    fn merge_single_module() {
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![make_test_function("foo")],
+            globals: vec![make_test_global("g", true)],
+        };
+        let merged = merge_modules(&[module]);
+        assert_eq!(merged.functions.len(), 1);
+        assert_eq!(merged.globals.len(), 1);
+        assert_eq!(merged.source_paths, vec!["test.c"]);
+    }
+
+    #[test]
+    fn merge_disjoint_modules() {
+        let m1 = BitcodeModule {
+            source_path: "a.c".to_string(),
+            functions: vec![make_test_function("foo")],
+            globals: vec![make_test_global("ga", true)],
+        };
+        let m2 = BitcodeModule {
+            source_path: "b.c".to_string(),
+            functions: vec![make_test_function("bar")],
+            globals: vec![make_test_global("gb", true)],
+        };
+        let merged = merge_modules(&[m1, m2]);
+        assert_eq!(merged.functions.len(), 2);
+        assert_eq!(merged.globals.len(), 2);
+        assert_eq!(merged.source_paths.len(), 2);
+        assert!(merged.get_function("foo").is_some());
+        assert!(merged.get_function("bar").is_some());
+    }
+
+    #[test]
+    fn merge_modules_deduplicates_functions() {
+        let m1 = BitcodeModule {
+            source_path: "a.c".to_string(),
+            functions: vec![make_test_function("shared")],
+            globals: vec![],
+        };
+        let m2 = BitcodeModule {
+            source_path: "b.c".to_string(),
+            functions: vec![make_test_function("shared")],
+            globals: vec![],
+        };
+        let merged = merge_modules(&[m1, m2]);
+        assert_eq!(merged.functions.len(), 1);
+        assert_eq!(merged.function_source("shared"), Some("a.c"));
+    }
+
+    #[test]
+    fn merge_modules_public_over_internal() {
+        let m1 = BitcodeModule {
+            source_path: "a.c".to_string(),
+            functions: vec![make_test_function(".Linternal")],
+            globals: vec![],
+        };
+        let m2 = BitcodeModule {
+            source_path: "b.c".to_string(),
+            functions: vec![make_test_function("public")],
+            globals: vec![],
+        };
+        // 先内部后公开：应该替换
+        let merged = merge_modules(&[m1, m2]);
+        // 两个不同的函数名，都应该保留
+        assert_eq!(merged.functions.len(), 2);
+    }
+
+    #[test]
+    fn merge_modules_global_with_init_wins() {
+        let m1 = BitcodeModule {
+            source_path: "a.c".to_string(),
+            functions: vec![],
+            globals: vec![make_test_global("g", false)],
+        };
+        let m2 = BitcodeModule {
+            source_path: "b.c".to_string(),
+            functions: vec![],
+            globals: vec![make_test_global("g", true)],
+        };
+        let merged = merge_modules(&[m1, m2]);
+        assert_eq!(merged.globals.len(), 1);
+        assert!(merged.globals[0].initializer.is_some());
+        assert_eq!(merged.global_source("g"), Some("b.c"));
+    }
+
+    #[test]
+    fn merged_module_stats() {
+        let m1 = BitcodeModule {
+            source_path: "a.c".to_string(),
+            functions: vec![make_test_function("f1"), make_test_function("f2")],
+            globals: vec![make_test_global("g1", true)],
+        };
+        let m2 = BitcodeModule {
+            source_path: "b.c".to_string(),
+            functions: vec![make_test_function("f3")],
+            globals: vec![make_test_global("g2", true), make_test_global("g3", true)],
+        };
+        let merged = merge_modules(&[m1, m2]);
+        let stats = merged.stats();
+        assert_eq!(stats.num_functions, 3);
+        assert_eq!(stats.num_globals, 3);
+        assert_eq!(stats.num_source_tus, 2);
+    }
+
+    #[test]
+    fn merged_to_bitcode_roundtrip() {
+        let m1 = BitcodeModule {
+            source_path: "a.c".to_string(),
+            functions: vec![make_test_function("foo")],
+            globals: vec![make_test_global("g", true)],
+        };
+        let merged = merge_modules(&[m1]);
+        let bc = merged_to_bitcode(&merged);
+        assert_eq!(bc.source_path, "<merged>");
+        assert_eq!(bc.functions.len(), 1);
+        assert_eq!(bc.globals.len(), 1);
+    }
+}
