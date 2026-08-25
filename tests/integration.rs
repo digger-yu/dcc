@@ -15319,6 +15319,105 @@ int overflow_test(int x) {
     let _ = fs::remove_file(&obj_path);
 }
 
+/// Unknown -m*/-f* flags should emit warnings via stderr
+#[test]
+#[cfg(unix)]
+fn unknown_flags_emit_warnings() {
+    let src = "int main(void) { return 0; }\n";
+    let tmp = std::env::temp_dir();
+    let src_path = tmp.join("unknown_flags.c");
+    let obj_path = tmp.join("unknown_flags.o");
+    fs::write(&src_path, src).unwrap();
+
+    // Unknown -m* flag should emit warning
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-munknown-future-flag", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc with unknown -m flag");
+    assert!(output.status.success(), "compile should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ignoring unknown option '-munknown-future-flag'"),
+        "should warn about unknown -m flag, stderr: {}",
+        stderr
+    );
+    let _ = fs::remove_file(&obj_path);
+
+    // Unknown -f* flag should emit warning
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args(["-c", "-funknown-future-flag", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc with unknown -f flag");
+    assert!(output.status.success(), "compile should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ignoring unknown option '-funknown-future-flag'"),
+        "should warn about unknown -f flag, stderr: {}",
+        stderr
+    );
+    let _ = fs::remove_file(&obj_path);
+
+    // Known no-op flags should NOT emit warnings
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args([
+            "-c",
+            "-fno-plt",
+            "-falign-jumps=1",
+            "-falign-loops=1",
+            "-mpreferred-stack-boundary=2",
+            "-o",
+        ])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc with known no-op flags");
+    assert!(output.status.success(), "compile should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("ignoring unknown option"),
+        "known no-op flags should not warn, stderr: {}",
+        stderr
+    );
+    let _ = fs::remove_file(&obj_path);
+
+    // Non-default values should emit warnings
+    let output = std::process::Command::new("./target/debug/dcc")
+        .args([
+            "-c",
+            "-mpreferred-stack-boundary=4",
+            "-falign-jumps=16",
+            "-falign-loops=8",
+            "-o",
+        ])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc with non-default alignment values");
+    assert!(output.status.success(), "compile should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DCC does not adjust stack alignment"),
+        "should warn about non-default stack boundary, stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("DCC does not perform jump alignment"),
+        "should warn about non-default jump alignment, stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("DCC does not perform loop alignment"),
+        "should warn about non-default loop alignment, stderr: {}",
+        stderr
+    );
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
 #[test]
 #[cfg(unix)]
 fn dwarf_debug_info_generation() {
