@@ -855,4 +855,49 @@ mod tests {
         assert_eq!(strip_asm_quotes("hello"), "hello");
         assert_eq!(strip_asm_quotes("\"\""), "");
     }
+
+    #[test]
+    fn validate_constraint_supported() {
+        // Common supported constraints
+        assert!(validate_constraint("r").is_none());
+        assert!(validate_constraint("m").is_none());
+        assert!(validate_constraint("i").is_none());
+        assert!(validate_constraint("g").is_none());
+        assert!(validate_constraint("n").is_none());
+        assert!(validate_constraint("=r").is_none());
+        assert!(validate_constraint("=m").is_none());
+        assert!(validate_constraint("+r").is_none());
+        assert!(validate_constraint("+m").is_none());
+        assert!(validate_constraint("memory").is_none());
+        assert!(validate_constraint("cc").is_none());
+        assert!(validate_constraint("0").is_none());
+        assert!(validate_constraint("3").is_none());
+        assert!(validate_constraint("rm").is_none());
+    }
+
+    #[test]
+    fn validate_constraint_unsupported() {
+        // Unsupported constraint letters
+        assert!(validate_constraint("Z").is_some());
+        assert!(validate_constraint("J").is_some());
+        assert!(validate_constraint("K").is_some());
+        assert!(validate_constraint("L").is_some());
+        assert!(validate_constraint("M").is_some());
+        assert!(validate_constraint("N").is_some());
+        assert!(validate_constraint("O").is_some());
+        assert!(validate_constraint("P").is_some());
+        assert!(validate_constraint("").is_some());
+    }
+
+    #[test]
+    fn validate_asm_constraints_batch() {
+        let errors = validate_asm_constraints(
+            &["=r".to_string(), "ZH".to_string()],
+            &["r".to_string(), "WL".to_string()],
+        );
+        // ZH and WL contain no known constraint letters
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("ZH"));
+        assert!(errors[1].contains("WL"));
+    }
 }

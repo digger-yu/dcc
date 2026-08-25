@@ -1014,4 +1014,50 @@ mod tests {
         assert_eq!(parse_instruction(".globl foo"), None);
         assert_eq!(parse_instruction("label:"), None);
     }
+
+    #[test]
+    fn test_encode_asm_lines_ok() {
+        let lines = vec!["nop".to_string(), "nop".to_string()];
+        let result = encode_asm_lines_for_arch(&lines, "aarch64", false);
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        // Two AArch64 NOPs = 8 bytes
+        assert_eq!(bytes.len(), 8);
+    }
+
+    #[test]
+    fn test_encode_asm_lines_unrecognized_is_error() {
+        // P0-5: unrecognized instructions must produce Err, not NOP
+        let lines = vec![
+            "nop".to_string(),
+            "xyzzy_invalid".to_string(),
+            "nop".to_string(),
+        ];
+        let result = encode_asm_lines_for_arch(&lines, "aarch64", false);
+        assert!(result.is_err());
+        let unrecognized = result.unwrap_err();
+        assert_eq!(unrecognized.len(), 1);
+        assert!(unrecognized[0].starts_with("xyzzy_invalid"));
+    }
+
+    #[test]
+    fn test_encode_asm_lines_riscv_unrecognized() {
+        let lines = vec!["unknown_riscv_insn".to_string()];
+        let result = encode_asm_lines_for_arch(&lines, "riscv64", true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encode_asm_lines_arm_unrecognized() {
+        let lines = vec!["bad_arm_insn".to_string()];
+        let result = encode_asm_lines_for_arch(&lines, "arm", false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encode_asm_lines_mips_unrecognized() {
+        let lines = vec!["bad_mips_insn".to_string()];
+        let result = encode_asm_lines_for_arch(&lines, "mips", false);
+        assert!(result.is_err());
+    }
 }

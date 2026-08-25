@@ -236,6 +236,14 @@ const CASES: &[ErrorCase] = &[
         fixture_ext: "c",
     },
     ErrorCase {
+        name: "e0311_unsupported_asm",
+        code: "E0311",
+        mode: Mode::CompileObject,
+        custom_output: None,
+        extra_args: &[],
+        fixture_ext: "c",
+    },
+    ErrorCase {
         name: "e1001",
         code: "E1001",
         mode: Mode::CompileObject,

@@ -1,0 +1,3 @@
+error[E0311]: unsupported inline asm instruction 'xyzzy_invalid_insn' (asm line 1)
+  --> <file>:5:1
+  hint: fix the mini-asm mnemonic or operand pattern
