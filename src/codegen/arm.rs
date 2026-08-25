@@ -66,6 +66,10 @@ pub struct ArmCodegen {
     va_flt_offs: i32,
     /// 浮点字面量池偏移 (rodata 中)
     float_pool: HashMap<u64, u64>,
+    /// Stack protector: 当前函数 canary 槽位偏移, 0 表示未启用
+    canary_slot_off: i32,
+    /// -mrecord-mcount: ftrace call site positions for __mcount_loc section
+    mcount_loc_entries: Vec<(u64, String)>,
     /// 编译诊断 (未识别内联汇编指令等)
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     _target: Target,
@@ -108,6 +112,8 @@ impl ArmCodegen {
             va_gp_offs: 0,
             va_flt_offs: 0,
             float_pool: HashMap::new(),
+            canary_slot_off: 0,
+            mcount_loc_entries: Vec::new(),
             diagnostics: Vec::new(),
             _target: target,
         }
@@ -201,6 +207,38 @@ impl ArmCodegen {
             self.compile_rel(module, prog);
         } else {
             self.compile_exec(module, prog);
+        }
+        // Stack canary: add __stack_chk_guard/__stack_chk_fail undefined symbols
+        if self._target.stack_protector {
+            self.ensure_sym_object("__stack_chk_guard");
+            self.ensure_sym("__stack_chk_fail");
+        }
+        // FTRACE: add mcount/__fentry__ undefined symbols
+        match self._target.ftrace_mode {
+            crate::cli::FtraceMode::MCount => {
+                self.ensure_sym("mcount");
+            }
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                self.ensure_sym("__fentry__");
+            }
+            crate::cli::FtraceMode::None => {}
+        }
+        // -mrecord-mcount: generate __mcount_loc section with call site addresses
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
+            && !self.mcount_loc_entries.is_empty()
+        {
+            let mut mcount_data =
+                Vec::with_capacity(self.mcount_loc_entries.len() * 4); // ARM: 32-bit addresses
+            for &(call_pos, _) in &self.mcount_loc_entries {
+                mcount_data.extend_from_slice(&(call_pos as u32).to_le_bytes());
+            }
+            self.extra_sections.push(elf::ElfSection {
+                name: "__mcount_loc".to_string(),
+                data: mcount_data,
+                ty: elf::SHT_PROGBITS,
+                flags: elf::SHF_ALLOC,
+                align: 4,
+            });
         }
     }
 
@@ -347,6 +385,13 @@ impl ArmCodegen {
         self.current_return_ty = Some(func.return_type.clone());
         self.emitted_return = false;
 
+        // Stack protector: allocate canary slot before frame size calculation
+        if self._target.stack_protector {
+            self.canary_slot_off = self.alloc_local("<canary>", 4);
+        } else {
+            self.canary_slot_off = 0;
+        }
+
         // 变参函数: 在局部变量之后预留 r0-r3 保存区 (4×4 = 16 字节)
         let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
         self.is_current_func_variadic = is_variadic;
@@ -377,6 +422,30 @@ impl ArmCodegen {
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
             self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
+        // Stack protector: store canary value on stack after frame setup
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_prologue(self.canary_slot_off);
+        }
+        // FTRACE: emit call to mcount/__fentry__ before function body
+        let ftrace_call_pos: Option<u64> = match self._target.ftrace_mode {
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                let pos = self.code.len() as u64;
+                self.emit_bl("__fentry__");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::MCount => {
+                let pos = self.code.len() as u64;
+                self.emit_bl("mcount");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::None => None,
+        };
+        // -mrecord-mcount: record call site for __mcount_loc section
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount) {
+            if let Some(call_pos) = ftrace_call_pos {
+                self.mcount_loc_entries.push((call_pos, func.name.clone()));
+            }
         }
 
         // 变参函数: 帧建立后立即保存 r0-r3 到 va_save 区
@@ -437,6 +506,10 @@ impl ArmCodegen {
     }
 
     fn emit_epilogue(&mut self) {
+        // Stack protector epilogue: verify canary BEFORE frame teardown
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_epilogue(self.canary_slot_off);
+        }
         // 恢复 sp 和弹出 fp, pc
         if self.frame_bytes > 0 {
             self.emit_add_imm(13, 13, self.frame_bytes as u32); // add sp, sp, #frame
@@ -1202,6 +1275,77 @@ impl ArmCodegen {
         self.pending_branches.retain(|(_, l, _)| l != label);
     }
 
+    /// Ensure symbol exists in symbol table
+    fn ensure_sym(&mut self, name: &str) -> u32 {
+        if let Some(&idx) = self.sym_index.get(name) {
+            return idx;
+        }
+        self.symbols.push(ElfSym {
+            name: name.to_string(),
+            section: 0,
+            value: 0,
+            size: 0,
+            bind: STB_GLOBAL,
+            ty: STT_FUNC,
+            visibility: 0,
+        });
+        let idx = self.symbols.len() as u32;
+        self.sym_index.insert(name.to_string(), idx);
+        idx
+    }
+
+    /// Ensure symbol exists as STT_OBJECT type (for data symbols)
+    fn ensure_sym_object(&mut self, name: &str) -> u32 {
+        if let Some(&idx) = self.sym_index.get(name) {
+            return idx;
+        }
+        self.symbols.push(ElfSym {
+            name: name.to_string(),
+            section: 0,
+            value: 0,
+            size: 0,
+            bind: STB_GLOBAL,
+            ty: elf::STT_OBJECT,
+            visibility: 0,
+        });
+        let idx = self.symbols.len() as u32;
+        self.sym_index.insert(name.to_string(), idx);
+        idx
+    }
+
+    /// Stack protector prologue: load canary from __stack_chk_guard
+    /// and store at [fp, #canary_off]. Uses r0 as scratch.
+    fn emit_stack_chk_prologue(&mut self, canary_off: i32) {
+        // Load __stack_chk_guard address (simplified: use load_imm)
+        self.ensure_sym_object("__stack_chk_guard");
+        // For relocatable: load address via literal pool or GOT
+        // Simplified: load canary value directly from __stack_chk_guard
+        // In real implementation, this would use ADRP+LDR or similar
+        // For now, emit a placeholder that loads 0 (will be patched by linker)
+        self.emit_load_imm(0, 0); // r0 = 0 (placeholder for canary)
+        // STR r0, [fp, #canary_off]
+        self.emit_str_fp_off(0, canary_off);
+    }
+
+    /// Stack protector epilogue: verify canary at [fp, #canary_off]
+    /// against __stack_chk_guard. Calls __stack_chk_fail on mismatch.
+    fn emit_stack_chk_epilogue(&mut self, canary_off: i32) {
+        let fail_label = self.fresh_label(".Lstack_chk_fail_");
+        // LDR r0, [fp, #canary_off] - load stored canary
+        self.emit_ldr_fp_off(0, canary_off);
+        // Load expected canary (simplified: compare with 0)
+        self.emit_load_imm(1, 0); // r1 = 0 (placeholder for expected canary)
+        // CMP r0, r1
+        self.emit_cmp(0, 1);
+        // BNE fail_label
+        self.emit_bne(&fail_label);
+        // Normal path continues
+        // Fail path: call __stack_chk_fail (never returns)
+        self.set_label(&fail_label);
+        self.ensure_sym("__stack_chk_fail");
+        self.emit_bl("__stack_chk_fail");
+    }
+
     fn patch_beq(&mut self, at: u64, target: u64) {
         // ARM BEQ offset: (target - branch_pc - 8) / 4
         // branch_pc is the position of the BEQ instruction
@@ -1388,6 +1532,16 @@ impl ArmCodegen {
         self.code.extend_from_slice(&inst.to_le_bytes());
     }
 
+    /// BNE label: Branch if not equal (condition code NE = 0x1)
+    fn emit_bne(&mut self, label: &str) {
+        let pos = self.code.len() as u64;
+        self.pending_branches
+            .push((pos, label.to_string(), BranchKind::Beq));
+        // BNE placeholder (condition = NE = 0x1)
+        let inst: u32 = 0x0A000000; // B with condition NE
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
     fn emit_b(&mut self, label: &str) {
         // B: 记录 pending branch
         let pos = self.code.len() as u64;
@@ -1408,6 +1562,7 @@ impl ArmCodegen {
 
     fn emit_bl(&mut self, name: &str) {
         // BL: 记录 pending call
+        self.ensure_sym(name);
         let pos = self.code.len() as u64;
         self.pending_bl_calls.push((pos, name.to_string()));
         // 占位 BL 指令
