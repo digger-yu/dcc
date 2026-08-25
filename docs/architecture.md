@@ -472,7 +472,7 @@ Mini x86 汇编器（`codegen/x86_64.rs`）要点：
   `lock`/`rep` 前缀；`cmp`/`test`/shift/imul/unary 内存操作数、
   `rol`/`ror`、`prefetcht0/t1/t2/nta`、`movss`/`movsd`/`addss`/`addsd`、
   `xorps`/`xorpd`、`swapgs`/`invlpg`/`int3` 等；
-  未识别指令 warning + nop 占位。
+  未识别指令产生 E0311 hard error (P0-5: 不再 warning + nop 占位)。
 详见 `docs/support_features.md` 汇编与 SIMD 指令列表。
 - **C 前端补洞**：`#pragma pack/weak/STDC/diagnostic` 全家族、`_Pragma` 操作符、
   `__attribute__((packed/weak/returns_nonnull/target_clones/cleanup/no_sanitize/copy/...))` 全族、

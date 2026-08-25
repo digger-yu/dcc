@@ -403,7 +403,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `-fdiagnostics-show-template-tree` | 模板树显示 |
 | format 属性 | `format_check.rs`：`-Wformat` / `W0003` arity 检查 |
 | asm goto 标签验证 | `W0004`：asm 模板中引用的标签不在 goto label 列表中 |
-| asm 语义校验 | `E0014`: 输出约束缺少 `=`/`+` 前缀; `W0005`: 约束与表达式类型不匹配 (如 `r` 约束绑浮点); `W0007`: 命名/位置操作数混用; `W0008`: 模板占位符索引越界、命名操作数不存在、matching constraint 数字无效、重复操作数名等非法 asm 操作数均 warning 后由 mini-asm 发 `nop` fallback |
+| asm 语义校验 | `E0014`: 输出约束缺少 `=`/`+` 前缀; `W0005`: 约束与表达式类型不匹配 (如 `r` 约束绑浮点); `W0007`: 命名/位置操作数混用; `W0008`: 模板占位符索引越界、命名操作数不存在、matching constraint 数字无效、重复操作数名等非法 asm 操作数均 warning; P0-5: 未识别 mnemonic 或不合法操作数模式产生 `E0311` hard error，不再 warning 后发 `nop`; `asm_constraints.rs` 早期验证约束字母合法性 |
 | 严格类型 / permissive | 默认未知 typedef → `E0009`；`-fpermissive` → `W0002` + int；C99/GNU99+ 未声明用户函数调用默认 `E0017`，`-fpermissive` 或 C89/GNU89 → `W1000` + int；`__builtin_*` / `__atomic_*` / `__sync_*` 仍按编译器内建处理 |
 
 ## 内联 asm 优化器集成

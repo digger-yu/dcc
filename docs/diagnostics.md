@@ -107,8 +107,8 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | **E0012** | `expected string literal in _Static_assert` | 断言消息非字符串 | `_Static_assert(1, 123)` | `the second argument must be a diagnostic string` | `e0012.c` |
 | **E0013** | `__builtin_choose_expr condition is not constant` | 选择表达式非常量 | 非常量条件传给 `__builtin_choose_expr` | — | `e0013.c` |
 | **E0014** | `output operand N constraint '…' missing '=' or '+' prefix` | 输出约束缺前缀 | asm 输出操作数约束未以 `=` 或 `+` 开头 | `add '=' for write-only or '+' for read-write output` | `e0014.c` |
-| **E0015** | — | 预留：旧 asm 操作数 hard error 已降级 | asm 模板缺失/越界操作数与 matching constraint 数字问题现在按 **W0008** warning 处理，并由 mini-asm 发 `nop` fallback | — | — |
-| **E0016** | — | 预留：旧重复 asm 操作数名 hard error 已降级 | 重复 `[name]` 现在按 **W0008** warning 处理，并由 mini-asm 发 `nop` fallback | — | — |
+| **E0015** | — | 预留：旧 asm 操作数 hard error 已降级 | asm 模板缺失/越界操作数与 matching constraint 数字问题现在按 **W0008** warning 处理；P0-5: 未识别 mnemonic 产生 `E0311` hard error | — | — |
+| **E0016** | — | 预留：旧重复 asm 操作数名 hard error 已降级 | 重复 `[name]` 现在按 **W0008** warning 处理；P0-5: 不合法操作数模式产生 `E0311` hard error | — | — |
 | **E0017** | `implicit declaration of function '…'` | 严格标准下的隐式函数声明 | C99+ / GNU99+ 模式中调用未声明函数，且未启用 `-fpermissive` | `declare the function before use or pass -fpermissive` | — |
 
 ### Parser 警告：`W0001`、`W0005`、`W0007`、`W0008`
