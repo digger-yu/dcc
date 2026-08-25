@@ -391,6 +391,11 @@ impl MipsCodegen {
         self.emit_sw(30, 29, (self.frame_bytes - 8) as i16); // sw $fp, frame-8($sp)
         self.emit_addiu(30, 29, (self.frame_bytes - 8) as i16); // addiu $fp, $sp, frame-8
 
+        // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
+        if self._target.auto_var_init_zero && self.frame_bytes > 0 {
+            self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
+
         // 参数传递: $a0-$a3 -> 局部变量槽
         if let Some(ast_f) = ast {
             for (i, p) in ast_f.params.iter().enumerate() {
@@ -464,6 +469,22 @@ impl MipsCodegen {
                 align: 1,
             };
             self.extra_sections.push(sec);
+        }
+    }
+
+    /// -ftrivial-auto-var-init=zero: 零初始化栈帧
+    /// 使用 sw zero, offset(fp) 每次清零 4 字节
+    /// MIPS 局部变量在 fp 负偏移方向
+    fn emit_zero_init_frame(&mut self, frame_size: usize) {
+        if frame_size == 0 {
+            return;
+        }
+        // $at ($1) 是汇编器保留的暂存器, 用于零初始化
+        // 从帧底向帧顶写入, 相对于 $fp 的负偏移
+        let words = frame_size / 4;
+        for i in 0..words {
+            let fp_off = -((frame_size - (i as usize) * 4) as i16);
+            self.emit_sw(0, 30, fp_off); // sw $zero, fp_off($fp)
         }
     }
 
@@ -1452,5 +1473,33 @@ mod tests {
         );
         // 验证 va_gp_offs 推进
         assert_eq!(cg.va_gp_offs, 3, "va_gp_offs should be 3 after 3 reads");
+    }
+
+    // -ftrivial-auto-var-init=zero: 验证 MIPS 后端发射 sw zero, offset(fp) 指令
+    #[test]
+    fn mips_auto_var_init_zero_emits_sw() {
+        let mut target =
+            Target::resolve(&crate::cli::TargetTriple::parse("mips-linux-gnu").unwrap());
+        target.auto_var_init_zero = true;
+        let mut cg = MipsCodegen::new(target, true);
+        // 直接测试 emit_zero_init_frame: 16 字节帧 = 4 个 sw (4 字节每个)
+        cg.emit_zero_init_frame(16);
+        // 验证: 4 条 sw $zero, offset($fp) 指令
+        // MIPS SW: opcode=101011 (0x2B), base=$fp(30), rt=$zero(0)
+        let sw_count = cg
+            .code
+            .windows(4)
+            .filter(|w| {
+                let inst = u32::from_be_bytes([w[0], w[1], w[2], w[3]]);
+                let opcode = inst >> 26;
+                let rt = (inst >> 16) & 0x1f;
+                let rs = (inst >> 21) & 0x1f;
+                opcode == 0b101011 && rt == 0 && rs == 30
+            })
+            .count();
+        assert_eq!(
+            sw_count, 4,
+            "expected 4 sw $zero, offset($fp) instructions for 16-byte frame, got {sw_count}"
+        );
     }
 }
