@@ -1573,13 +1573,14 @@ impl Aarch64Codegen {
     }
 
     fn load_global_addr_w0(&mut self, name: &str) {
-        // TLS 全局变量: 分发 TLSDESC 访问序列 (获取 TLS 变量地址到 x0)
+        // TLS 全局变量: 分发 TLS 访问序列 (获取 TLS 变量地址到 x0)
         if self.tls_globals.contains_key(name) {
-            if self.relocatable {
-                // 可重定位模式: 发出经典 TLSDESC 4 指令序列 + 3 重定位
+            if self.relocatable && !self._target.kernel_code_model {
+                // 可重定位模式 (非内核): 发出经典 TLSDESC 4 指令序列 + 3 重定位
                 self.emit_tlsdesc_access(name);
             } else {
-                // ET_EXEC 模式: 使用 Local Exec 序列 (直接 TP + offset)
+                // ET_EXEC 模式或内核代码模型: 使用 Local Exec 序列 (直接 TP + offset)
+                // 内核不使用动态 TLS, 即使 ET_REL 也直接用 LE
                 self.emit_tls_le_access(name);
             }
             return;
