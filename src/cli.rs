@@ -165,6 +165,8 @@ pub struct Config {
     pub short_wchar: bool,
     /// -fno-common: 公共符号处理
     pub no_common: bool,
+    /// CLI 解析期间收集的警告 (未知/忽略的标志等)
+    pub cli_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -500,6 +502,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut strict_overflow = true;
     let mut short_wchar = false;
     let mut no_common = false;
+    let mut cli_warnings: Vec<String> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -1335,7 +1338,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-W") => {}
             // -m* 机器选项
             "-m32" => m32 = true,
-            a if a.starts_with("-m") => {} // 其余 -m* 忽略
+            // 其余 -m* 忽略, 收集警告以便用户知晓
+            a if a.starts_with("-m") => {
+                cli_warnings.push(format!("ignoring unknown option '{}'", a));
+            }
             // -fipa-sra: 启用/禁用跨过程标量替换
             "-fipa-sra" => ipa_sra.enabled = true,
             "-fno-ipa-sra" => ipa_sra.enabled = false,
@@ -1358,8 +1364,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 emit_module_file =
                     Some(PathBuf::from(a["--emit-module-file=".len()..].to_string()));
             }
-            // -f* 其他选项 - 忽略
-            a if a.starts_with("-f") => {}
+            // -f* 其他选项 - 忽略, 收集警告以便用户知晓
+            a if a.starts_with("-f") => {
+                cli_warnings.push(format!("ignoring unknown option '{}'", a));
+            }
             // -std=* 已经处理过了
             // -include, -isystem 等
             "-include" => {
@@ -1694,6 +1702,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             strict_overflow,
             short_wchar,
             no_common,
+            cli_warnings,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;
@@ -1789,6 +1798,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             strict_overflow,
             short_wchar,
             no_common,
+            cli_warnings,
             ipa_sra: {
                 let mut c = ipa_sra;
                 c.opt_level = opt;

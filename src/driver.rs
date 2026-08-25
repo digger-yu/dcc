@@ -167,6 +167,11 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // 预处理器 / 链接器都看到正确路径.
     let cfg = apply_sysroot(cfg);
 
+    // 输出 CLI 解析期间收集的警告 (未知/忽略的标志)
+    for w in &cfg.cli_warnings {
+        eprintln!("dcc: warning: {}", w);
+    }
+
     // -r 多 .o 可重定位链接（host ld -r 兼容路径）
     if cfg.link_mode && !cfg.built_link {
         let lto_enabled = cfg.lto_enabled || lto::is_lto_enabled(&cfg.raw_args);
