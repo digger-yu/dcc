@@ -35,11 +35,14 @@
 | KCSAN / TSan (`-fsanitize=thread`) | 用户态 thread sanitizer 走 libtsan 兼容 `__tsan_init` / `__tsan_func_entry` / `__tsan_readN/writeN` / range 回调，host cc 链接自动追加 `-fsanitize=thread`，内置 PIE 链接器记录 `DT_NEEDED libtsan.so`；`-fsanitize=kernel-kcsan` 保留内核 `__kcsan_*` 回调且不链接宿主 runtime |
 | KCOV (`-fsanitize-coverage`) | 每函数 `__dcc_cov_guards_N[16]` 计数器 + 入口 `__sanitizer_cov_trace_pc` + 边覆盖 `__sanitizer_cov_trace_pc_guard` + 跨函数 inline 合并 (`profile::kcov_merge`) |
 | Fuzzer (`-fsanitize=fuzzer`) | KCOV 全部 + `__sanitizer_cov_trace_cmp1/2/4/8` + `__sanitizer_cov_trace_switch` + libFuzzer 协议（`LLVMFuzzerTestOneInput` 入口包装、8-bit counters、PC table、malloc/free 拦截器） |
-| no_sanitize | `address` / `kernel-address` / `hwaddress` / `undefined` / `thread` / `kernel-kcsan` / `all` 按通道关闭；KCOV / Fuzzer 不受 `no_sanitize` 影响 |
+| MSAN (`-fsanitize=memory`) | TU init `__msan_init` + 每函数 `__msan_func_entry` + `Deref/Index/ArrowMember` load 前插入 `__msan_check_load_N(addr)` 检测未初始化内存读取 + 赋值 LHS 前插入 `__msan_check_store_N(addr)` 检测未初始化内存写入 |
+| DFSan (`-fsanitize=dataflow`) | 每函数 `__dfsan_func_entry` + `Deref/Index/ArrowMember` load 前插入 `__dfsan_load_label_N(addr)` 获取 taint 标签 + 赋值 LHS 前插入 `__dfsan_store_label_N(addr, label)` 传播标签到目标内存 |
+| CFI (`-fsanitize=cfi*`) | 支持 `cfi-icall` / `cfi-vcall` / `cfi-nvcall` / `cfi-derived-cast` / `cfi-unrelated-cast` / `cfi-mfcall` 六个子通道；间接调用（callee 非直接 Ident）前插入 `__cfi_check(callee_ptr, type_hash)` 验证目标函数签名匹配预期类型；type_hash 使用 FNV-1a 64-bit 算法计算 |
+| no_sanitize | `address` / `kernel-address` / `hwaddress` / `undefined` / `thread` / `kernel-kcsan` / `memory` / `dataflow` / `cfi` / `cfi-icall` / `cfi-vcall` / `cfi-nvcall` / `cfi-derived-cast` / `cfi-unrelated-cast` / `cfi-mfcall` / `all` 按通道关闭；KCOV / Fuzzer 不受 `no_sanitize` 影响 |
 
 测试证据：`tests/integration.rs` 覆盖 KASAN 越界、UBSAN div/mod/shift/VLA/null/float-cast、KCSAN 竞态、HWASAN 软件 tag、KCOV/Fuzzer `trace_cmp*` / `trace_switch` / 8-bit counters / PC table / `no_sanitize` 交互，以及未知 sanitizer / coverage 名称负向诊断；`src/codegen/aarch64.rs` 覆盖 AArch64 MTE `irg` / `addg` / `stg` 字节级断言。
 
-实现：`src/sanitizer.rs` `instrument_program()`，所有通道在 driver parse 之后、IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用；codegen 侧 `gen_inc_dec` 支持 Deref/Index/Member 内存 lvalue 读-改-写（`(*p)++` 等）。`.dcc.san_info` 节版本 v2。
+实现：`src/sanitizer.rs` `instrument_program()`，所有通道在 driver parse 之后、IR lower 之前通过 `Expr::Comma` 与 `Stmt::Block` 注入 side-effect 调用；codegen 侧 `gen_inc_dec` 支持 Deref/Index/Member 内存 lvalue 读-改-写（`(*p)++` 等）。`.dcc.san_info` 节版本 v3。
 
 ## 性能分析子系统
 

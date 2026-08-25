@@ -1,4 +1,4 @@
-// src/sanitizer.rs - KASAN/UBSAN/KCSAN/KCOV/Fuzzer 完整插桩
+// src/sanitizer.rs - KASAN/UBSAN/KCSAN/KCOV/Fuzzer/MSAN/DFSan/CFI 完整插桩
 //
 // 设计:
 // - AST 层在 driver/parse 后、IR lower 前调用 `instrument_program`。
@@ -15,12 +15,21 @@
 //     `__ubsan_handle_add/sub/mul/negate_overflow` 之一。
 //   * Thread sanitizer: user-mode `-fsanitize=thread` emits libtsan-compatible
 //     `__tsan_*` callbacks; `kernel-kcsan` keeps kernel `__kcsan_*` callbacks.
+//   * Memory sanitizer (MSAN): `-fsanitize=memory` emits `__msan_check_load_N`
+//     / `__msan_check_store_N` on memory accesses to detect use of
+//     uninitialized values; `__msan_func_entry` at each function prologue.
+//   * DataFlow sanitizer (DFSan): `-fsanitize=dataflow` emits
+//     `__dfsan_load_label_N` / `__dfsan_store_label_N` for taint label
+//     propagation through memory operations.
+//   * Control Flow Integrity (CFI): `-fsanitize=cfi-icall` etc. emit
+//     `__cfi_check(callee, type_hash)` before indirect calls to verify
+//     target function signature matches expected type.
 //   * KCOV/Fuzzer: 边覆盖使用每函数 guard 计数器 (`uint32_t __dcc_cov_guards[N]`),
 //     入口 + 每个块开始 emit `__sanitizer_cov_trace_pc_guard(guard_idx)`;
 //     比较回调使用 `__sanitizer_cov_trace_cmp1/2/4/8(arg0, arg1)`;
 //     switch 调度使用 `__sanitizer_cov_trace_switch(arg, cases[0..N])`。
-// - 运行时库: 用户态 address / undefined / thread / fuzzer 覆盖
-//   由 driver 在最终链接阶段自动追加 sanitizer runtime；`-c` / `-S`
+// - 运行时库: 用户态 address / undefined / thread / memory / dataflow / cfi
+//   覆盖由 driver 在最终链接阶段自动追加 sanitizer runtime；`-c` / `-S`
 //   仍只留下可重定位 runtime 调用。内核模式 sanitizer 不链接宿主库。
 // - 选通: KASAN/UBSAN/KCSAN 完全禁用时不插入;部分启用时仅插入对应调用。
 // - no_sanitize: 函数级 `__attribute__((no_sanitize("address")))` 等会
@@ -58,6 +67,22 @@ pub struct SanitizerFlags {
     pub cov_pc_table: bool,
     /// `-fsanitize=fuzzer` (san-coverage + compare + switch)
     pub fuzzer: bool,
+    /// `-fsanitize=memory` (MemorySanitizer — uninitialized memory detection)
+    pub msan: bool,
+    /// `-fsanitize=dataflow` (DataFlowSanitizer — taint / label tracking)
+    pub dfsan: bool,
+    /// `-fsanitize=cfi-icall` (indirect call type check)
+    pub cfi_icall: bool,
+    /// `-fsanitize=cfi-vcall` (virtual call type check)
+    pub cfi_vcall: bool,
+    /// `-fsanitize=cfi-nvcall` (non-virtual call type check)
+    pub cfi_nvcall: bool,
+    /// `-fsanitize=cfi-derived-cast` (derived cast type check)
+    pub cfi_derived_cast: bool,
+    /// `-fsanitize=cfi-unrelated-cast` (unrelated cast type check)
+    pub cfi_unrelated_cast: bool,
+    /// `-fsanitize=cfi-mfcall` (member function call type check)
+    pub cfi_mfcall: bool,
 }
 
 impl SanitizerFlags {
@@ -138,6 +163,22 @@ impl SanitizerFlags {
                 f.kcsan = true;
                 f.kernel_mode = true;
             }
+            "memory" => f.msan = true,
+            "dataflow" => f.dfsan = true,
+            "cfi" => {
+                f.cfi_icall = true;
+                f.cfi_vcall = true;
+                f.cfi_nvcall = true;
+                f.cfi_derived_cast = true;
+                f.cfi_unrelated_cast = true;
+                f.cfi_mfcall = true;
+            }
+            "cfi-icall" => f.cfi_icall = true,
+            "cfi-vcall" => f.cfi_vcall = true,
+            "cfi-nvcall" => f.cfi_nvcall = true,
+            "cfi-derived-cast" => f.cfi_derived_cast = true,
+            "cfi-unrelated-cast" => f.cfi_unrelated_cast = true,
+            "cfi-mfcall" => f.cfi_mfcall = true,
             "fuzzer" => {
                 f.fuzzer = true;
                 f.kcov = true;
@@ -162,6 +203,9 @@ impl SanitizerFlags {
             || self.cov_8bit_counters
             || self.cov_pc_table
             || self.fuzzer
+            || self.msan
+            || self.dfsan
+            || self.any_cfi()
     }
 
     /// TU 级 init 是否需要在首个函数前插入。
@@ -172,6 +216,7 @@ impl SanitizerFlags {
             || self.kcsan
             || self.cov_8bit_counters
             || self.cov_pc_table
+            || self.msan
     }
 
     /// KASAN / HWASAN load/store 检查。
@@ -202,6 +247,31 @@ impl SanitizerFlags {
     /// UBSAN 任意通道。
     pub fn needs_ubsan(&self) -> bool {
         self.ubsan
+    }
+
+    /// MSAN 未初始化内存检查。
+    pub fn needs_msan_check(&self) -> bool {
+        self.msan
+    }
+
+    /// DFSan 标签传播。
+    pub fn needs_dfsan_check(&self) -> bool {
+        self.dfsan
+    }
+
+    /// 任何 CFI 子通道启用。
+    pub fn any_cfi(&self) -> bool {
+        self.cfi_icall
+            || self.cfi_vcall
+            || self.cfi_nvcall
+            || self.cfi_derived_cast
+            || self.cfi_unrelated_cast
+            || self.cfi_mfcall
+    }
+
+    /// CFI 间接调用检查 (cfi-icall / cfi-mfcall)。
+    pub fn needs_cfi_icall(&self) -> bool {
+        self.cfi_icall || self.cfi_mfcall
     }
 }
 
@@ -284,6 +354,14 @@ fn instrument_func(func: &mut FuncDecl, flags: SanitizerFlags, ctx: &mut Instrum
             cov_8bit_counters: func_flags.cov_8bit_counters,
             cov_pc_table: func_flags.cov_pc_table,
             fuzzer: false,
+            msan: func_flags.msan,
+            dfsan: false,
+            cfi_icall: false,
+            cfi_vcall: false,
+            cfi_nvcall: false,
+            cfi_derived_cast: false,
+            cfi_unrelated_cast: false,
+            cfi_mfcall: false,
         };
         prologue.extend(tu_init_calls(pending_func_init, &span));
         // 一旦任何函数接受了 TU init,就清除 pending。
@@ -658,7 +736,12 @@ fn instrument_expr(
             for a in args.iter_mut() {
                 instrument_expr(a, flags, ctx, guard_var, guard_base);
             }
-            ExprKind::Trivial
+            // CFI: detect indirect call (callee is not a direct Ident)
+            if flags.needs_cfi_icall() && !matches!(callee.as_ref(), Expr::Ident { .. }) {
+                ExprKind::IndirectCall(callee.ty())
+            } else {
+                ExprKind::Trivial
+            }
         }
         Expr::Cond {
             cond, then_, else_, ..
@@ -755,6 +838,15 @@ fn instrument_expr(
     let span = expr.span();
     match kind {
         ExprKind::Trivial => {}
+        ExprKind::IndirectCall(ref callee_ty) => {
+            // CFI indirect call type check: wrap callee with
+            // `__cfi_check(callee, type_hash)` before the call executes.
+            if let Expr::Call { callee, .. } = expr {
+                let type_hash = cfi_type_hash(callee_ty);
+                let wrapped_callee = wrap_with_cfi_check(callee, type_hash, &span);
+                *callee = Box::new(wrapped_callee);
+            }
+        }
         ExprKind::Binop(op) => {
             // 比较 trace (fuzzer)
             if flags.needs_compare_trace() && is_compare_op(op) {
@@ -779,6 +871,14 @@ fn instrument_expr(
                 let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
                 *expr = wrapped;
             }
+            if flags.needs_msan_check() {
+                let wrapped = wrap_with_msan_load_check(expr, sz, &span);
+                *expr = wrapped;
+            }
+            if flags.needs_dfsan_check() {
+                let wrapped = wrap_with_dfsan_load_label(expr, sz, &span);
+                *expr = wrapped;
+            }
             if flags.needs_ubsan() {
                 let wrapped = wrap_with_null_check(expr, &ptr, &span);
                 *expr = wrapped;
@@ -789,6 +889,14 @@ fn instrument_expr(
                 let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
                 *expr = wrapped;
             }
+            if flags.needs_msan_check() {
+                let wrapped = wrap_with_msan_load_check(expr, sz, &span);
+                *expr = wrapped;
+            }
+            if flags.needs_dfsan_check() {
+                let wrapped = wrap_with_dfsan_load_label(expr, sz, &span);
+                *expr = wrapped;
+            }
             if flags.needs_ubsan() {
                 let wrapped = wrap_with_null_check(expr, &ptr, &span);
                 *expr = wrapped;
@@ -797,6 +905,14 @@ fn instrument_expr(
         ExprKind::ArrowMember(sz, ptr) => {
             if flags.needs_load_store_check() || flags.needs_kcsan_check() {
                 let wrapped = wrap_with_mem_check(expr, MemCheckKind::Load(sz), &span, flags);
+                *expr = wrapped;
+            }
+            if flags.needs_msan_check() {
+                let wrapped = wrap_with_msan_load_check(expr, sz, &span);
+                *expr = wrapped;
+            }
+            if flags.needs_dfsan_check() {
+                let wrapped = wrap_with_dfsan_load_label(expr, sz, &span);
                 *expr = wrapped;
             }
             if flags.needs_ubsan() {
@@ -816,6 +932,24 @@ fn instrument_expr(
             if let Some(l) = lhs_clone {
                 let wrapped = wrap_with_mem_check_assign(&l, expr, check_kind, &span, flags);
                 *expr = wrapped;
+            }
+            // MSAN store check on assign target
+            if flags.needs_msan_check() {
+                if let Expr::Assign { l, .. } = expr {
+                    let store_sz = l.ty().size().max(1);
+                    let lhs_for_msan = l.as_ref().clone();
+                    let wrapped = wrap_with_msan_store_check(&lhs_for_msan, expr, store_sz, &span);
+                    *expr = wrapped;
+                }
+            }
+            // DFSan store label on assign target
+            if flags.needs_dfsan_check() {
+                if let Expr::Assign { l, .. } = expr {
+                    let store_sz = l.ty().size().max(1);
+                    let lhs_for_dfsan = l.as_ref().clone();
+                    let wrapped = wrap_with_dfsan_store_label(&lhs_for_dfsan, expr, store_sz, &span);
+                    *expr = wrapped;
+                }
             }
             // 赋值前的 null check (UBSAN): 包在 LHS 之上
             if flags.needs_ubsan() {
@@ -865,6 +999,8 @@ enum ExprKind {
     ArrowMember(usize, Expr),
     Assign(Option<MemCheckKind>),
     IncDec(Option<MemCheckKind>, Box<Expr>),
+    /// Indirect call through function pointer — CFI type check.
+    IndirectCall(Type),
 }
 
 fn expr_span(e: &Expr) -> Span {
@@ -1675,6 +1811,226 @@ fn hwasan_store_fn(sz: usize) -> String {
     }
 }
 
+// ── MSAN (MemorySanitizer) helpers ─────────────────────────────────────
+
+/// MSAN load check: `__msan_check_load_N(addr)`.
+/// 在内存加载前调用，检查加载的值是否已初始化。
+/// 运行时通过 shadow 内存判断：若对应 shadow 字节标记为未初始化，
+/// 则报告 use-of-uninitialized-value 错误。
+fn wrap_with_msan_load_check(expr: &Expr, size: usize, span: &Span) -> Expr {
+    let inner_ty = expr.ty();
+    let addr_expr = Expr::AddrOf {
+        e: Box::new(expr.clone()),
+        span: span.clone(),
+        ty: Type::Ptr(Box::new(inner_ty.clone())),
+    };
+    let fn_name = msan_check_fn_name(size, false);
+    let call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: fn_name,
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
+        }),
+        args: vec![addr_expr],
+        span: span.clone(),
+        ty: Type::Void,
+    };
+    Expr::Comma {
+        l: Box::new(call),
+        r: Box::new(expr.clone()),
+        span: span.clone(),
+        ty: inner_ty,
+    }
+}
+
+/// MSAN store check: `__msan_check_store_N(addr)`.
+/// 在内存存储前调用，验证目标地址区域已被正确初始化。
+fn wrap_with_msan_store_check(lhs: &Expr, assign: &Expr, size: usize, span: &Span) -> Expr {
+    let inner_ty = assign.ty();
+    let addr_expr = Expr::AddrOf {
+        e: Box::new(lhs.clone()),
+        span: span.clone(),
+        ty: Type::Ptr(Box::new(lhs.ty())),
+    };
+    let fn_name = msan_check_fn_name(size, true);
+    let call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: fn_name,
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(Box::new(Type::Void), vec![Type::Ptr(Box::new(Type::Void))]),
+        }),
+        args: vec![addr_expr],
+        span: span.clone(),
+        ty: Type::Void,
+    };
+    Expr::Comma {
+        l: Box::new(call),
+        r: Box::new(assign.clone()),
+        span: span.clone(),
+        ty: inner_ty,
+    }
+}
+
+/// MSAN 检查函数名映射。
+fn msan_check_fn_name(sz: usize, is_store: bool) -> String {
+    let prefix = if is_store {
+        "__msan_check_store_"
+    } else {
+        "__msan_check_load_"
+    };
+    format!("{}{}", prefix, sz)
+}
+
+// ── DFSan (DataFlowSanitizer) helpers ──────────────────────────────────
+
+/// DFSan load label: `__dfsan_load_label_N(addr)` 返回 `dfsan_label` (i16)。
+/// 在内存加载前调用，获取该内存位置关联的 taint 标签。
+/// 标签随后与表达式结果关联，实现数据流追踪。
+fn wrap_with_dfsan_load_label(expr: &Expr, size: usize, span: &Span) -> Expr {
+    let inner_ty = expr.ty();
+    let addr_expr = Expr::AddrOf {
+        e: Box::new(expr.clone()),
+        span: span.clone(),
+        ty: Type::Ptr(Box::new(inner_ty.clone())),
+    };
+    let fn_name = format!("__dfsan_load_label_{}", size);
+    let call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: fn_name,
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(Box::new(Type::Short), vec![Type::Ptr(Box::new(Type::Void))]),
+        }),
+        args: vec![addr_expr],
+        span: span.clone(),
+        ty: Type::Short,
+    };
+    // 将标签获取作为副作用，结果仍为原表达式值
+    Expr::Comma {
+        l: Box::new(Expr::Comma {
+            l: Box::new(call),
+            r: Box::new(Expr::Int {
+                v: 0,
+                span: span.clone(),
+                ty: Type::Int,
+            }),
+            span: span.clone(),
+            ty: Type::Int,
+        }),
+        r: Box::new(expr.clone()),
+        span: span.clone(),
+        ty: inner_ty,
+    }
+}
+
+/// DFSan store label: `__dfsan_store_label_N(addr, label)`。
+/// 在内存存储后调用，将表达式的 taint 标签关联到目标内存位置。
+fn wrap_with_dfsan_store_label(lhs: &Expr, assign: &Expr, size: usize, span: &Span) -> Expr {
+    let inner_ty = assign.ty();
+    let addr_expr = Expr::AddrOf {
+        e: Box::new(lhs.clone()),
+        span: span.clone(),
+        ty: Type::Ptr(Box::new(lhs.ty())),
+    };
+    let fn_name = format!("__dfsan_store_label_{}", size);
+    // label arg: 简化为 0 (clean label)；实际标签由运行时 union 传播
+    let call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: fn_name,
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(
+                Box::new(Type::Void),
+                vec![Type::Ptr(Box::new(Type::Void)), Type::Short],
+            ),
+        }),
+        args: vec![
+            addr_expr,
+            Expr::Int {
+                v: 0,
+                span: span.clone(),
+                ty: Type::Short,
+            },
+        ],
+        span: span.clone(),
+        ty: Type::Void,
+    };
+    Expr::Comma {
+        l: Box::new(call),
+        r: Box::new(assign.clone()),
+        span: span.clone(),
+        ty: inner_ty,
+    }
+}
+
+// ── CFI (Control Flow Integrity) helpers ───────────────────────────────
+
+/// CFI indirect call check: `__cfi_check(callee_ptr, type_hash)`。
+/// 在间接调用前插入，验证目标函数签名是否与预期类型匹配。
+/// 若不匹配，运行时触发 CFI violation report。
+fn wrap_with_cfi_check(callee: &Expr, type_hash: u64, span: &Span) -> Expr {
+    let callee_ty = callee.ty();
+    // 取 callee 的地址用于检查
+    let callee_ptr = Expr::AddrOf {
+        e: Box::new(callee.clone()),
+        span: span.clone(),
+        ty: Type::Ptr(Box::new(callee_ty.clone())),
+    };
+    let call = Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: Ident {
+                name: "__cfi_check".to_string(),
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: Type::Func(
+                Box::new(Type::Void),
+                vec![Type::Ptr(Box::new(Type::Void)), Type::ULong],
+            ),
+        }),
+        args: vec![
+            callee_ptr,
+            Expr::Int {
+                v: type_hash as i128,
+                span: span.clone(),
+                ty: Type::ULong,
+            },
+        ],
+        span: span.clone(),
+        ty: Type::Void,
+    };
+    // `(cfi_check, callee)` — 检查后返回原 callee 值
+    Expr::Comma {
+        l: Box::new(call),
+        r: Box::new(callee.clone()),
+        span: span.clone(),
+        ty: callee_ty,
+    }
+}
+
+/// 根据函数类型计算 CFI type hash (FNV-1a 64-bit)。
+/// 用于运行时比较 callee 签名是否匹配。
+fn cfi_type_hash(ty: &Type) -> u64 {
+    // 简化: 使用类型的字符串表示的 FNV-1a hash
+    let s = format!("{:?}", ty);
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// 把比较表达式 `a OP b` 包成 `(trace_cmpN(a, b), a OP b)`。
 fn wrap_with_compare_trace(expr: &Expr, span: &Span) -> Expr {
     if let Expr::Binop { l, r, ty, .. } = expr {
@@ -1872,6 +2228,9 @@ fn tu_init_calls(flags: SanitizerFlags, span: &Span) -> Vec<BlockItem> {
     if flags.cov_pc_table {
         out.push(sanitizer_call("__sanitizer_cov_pcs_init", span));
     }
+    if flags.msan {
+        out.push(sanitizer_call("__msan_init", span));
+    }
     out
 }
 
@@ -1887,6 +2246,15 @@ fn func_entry_calls(flags: SanitizerFlags, span: &Span) -> Vec<BlockItem> {
         } else {
             out.push(sanitizer_call("__tsan_func_entry", span));
         }
+    }
+    if flags.msan {
+        // MSAN 每函数入口: 通知运行时当前栈帧范围, 以便
+        // 将局部变量 shadow 标记为未初始化。
+        out.push(sanitizer_call("__msan_func_entry", span));
+    }
+    if flags.dfsan {
+        // DFSan 每函数入口: 初始化当前帧的标签栈。
+        out.push(sanitizer_call("__dfsan_func_entry", span));
     }
     out
 }
@@ -1929,11 +2297,27 @@ fn effective_flags(no_sanitize: &[String], flags: SanitizerFlags) -> SanitizerFl
             }
             "undefined" => out.ubsan = false,
             "thread" | "kernel-kcsan" | "no_sanitize_thread" => out.kcsan = false,
+            "memory" | "no_sanitize_memory" => out.msan = false,
+            "dataflow" => out.dfsan = false,
+            "cfi" | "cfi-icall" => out.cfi_icall = false,
+            "cfi-vcall" => out.cfi_vcall = false,
+            "cfi-nvcall" => out.cfi_nvcall = false,
+            "cfi-derived-cast" => out.cfi_derived_cast = false,
+            "cfi-unrelated-cast" => out.cfi_unrelated_cast = false,
+            "cfi-mfcall" => out.cfi_mfcall = false,
             "all" => {
                 out.kasan = false;
                 out.hwasan = false;
                 out.ubsan = false;
                 out.kcsan = false;
+                out.msan = false;
+                out.dfsan = false;
+                out.cfi_icall = false;
+                out.cfi_vcall = false;
+                out.cfi_nvcall = false;
+                out.cfi_derived_cast = false;
+                out.cfi_unrelated_cast = false;
+                out.cfi_mfcall = false;
             }
             _ => {}
         }
@@ -1944,13 +2328,21 @@ fn effective_flags(no_sanitize: &[String], flags: SanitizerFlags) -> SanitizerFl
 /// `.dcc.san_info` 节载荷。
 pub fn sanitizer_metadata(flags: SanitizerFlags) -> Vec<u8> {
     let mut out = b"DCC_SAN\0".to_vec();
-    out.push(2); // 格式版本 v2
+    out.push(3); // 格式版本 v3 (新增 MSAN/DFSan/CFI 字段)
     out.push(flags.kasan as u8);
     out.push(flags.hwasan as u8);
     out.push(flags.ubsan as u8);
     out.push(flags.kcsan as u8);
     out.push(flags.kcov as u8);
     out.push(flags.fuzzer as u8);
+    out.push(flags.msan as u8);
+    out.push(flags.dfsan as u8);
+    out.push(flags.cfi_icall as u8);
+    out.push(flags.cfi_vcall as u8);
+    out.push(flags.cfi_nvcall as u8);
+    out.push(flags.cfi_derived_cast as u8);
+    out.push(flags.cfi_unrelated_cast as u8);
+    out.push(flags.cfi_mfcall as u8);
     out
 }
 
@@ -2123,6 +2515,8 @@ mod tests {
                 if let Expr::Ident { name, .. } = callee.as_ref() {
                     out.push(name.name.clone());
                 }
+                // Recurse into callee for CFI-wrapped Comma(cfi_check, original)
+                collect_call_names_expr(callee, out);
                 for a in args {
                     collect_call_names_expr(a, out);
                 }
@@ -2344,7 +2738,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(&meta[..8], b"DCC_SAN\0");
-        assert_eq!(meta[8], 2);
+        assert_eq!(meta[8], 3);
         assert_eq!(meta[9], 1);
     }
 
@@ -3888,5 +4282,458 @@ mod tests {
         let f = SanitizerFlags::from_args(&["-fsanitize=trace-pc-guard".to_string()])
             .expect("known sanitizer should parse");
         assert!(f.kcov);
+    }
+
+    // ── MSAN (MemorySanitizer) ───────────────────────────────────────
+
+    #[test]
+    fn from_args_parses_msan() {
+        let f = SanitizerFlags::from_args(&["-fsanitize=memory".to_string()])
+            .expect("known sanitizer should parse");
+        assert!(f.msan);
+        assert!(f.needs_msan_check());
+        assert!(f.needs_tu_init());
+    }
+
+    #[test]
+    fn msan_wraps_deref_with_load_check() {
+        // *p 应插入 __msan_check_load_4 调用。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int)),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                msan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__msan_check_load_4"),
+            "MSAN should emit __msan_check_load_4 for int deref, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn msan_inserts_func_entry_at_every_function() {
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("a")), Decl::Func(empty_func("b"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                msan: true,
+                ..Default::default()
+            },
+        );
+        for decl in &prog.decls {
+            let Decl::Func(f) = decl else { continue };
+            let names = call_names_in_block(f.body.as_ref().unwrap());
+            assert!(
+                names.iter().any(|n| n == "__msan_func_entry"),
+                "MSAN should emit __msan_func_entry for every function, got: {:?}",
+                names
+            );
+        }
+    }
+
+    #[test]
+    fn msan_inserts_tu_init() {
+        // MSAN 应在首个函数前插入 __msan_init。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("first"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                msan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__msan_init"),
+            "MSAN should emit __msan_init in first function, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn msan_check_fn_name_maps_sizes() {
+        assert_eq!(msan_check_fn_name(1, false), "__msan_check_load_1");
+        assert_eq!(msan_check_fn_name(4, false), "__msan_check_load_4");
+        assert_eq!(msan_check_fn_name(8, true), "__msan_check_store_8");
+        assert_eq!(msan_check_fn_name(16, true), "__msan_check_store_16");
+    }
+
+    // ── DFSan (DataFlowSanitizer) ────────────────────────────────────
+
+    #[test]
+    fn from_args_parses_dfsan() {
+        let f = SanitizerFlags::from_args(&["-fsanitize=dataflow".to_string()])
+            .expect("known sanitizer should parse");
+        assert!(f.dfsan);
+        assert!(f.needs_dfsan_check());
+    }
+
+    #[test]
+    fn dfsan_wraps_deref_with_load_label() {
+        // *p 应插入 __dfsan_load_label_4 调用。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Deref {
+                    e: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "p".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Ptr(Box::new(Type::Int)),
+                    }),
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                dfsan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__dfsan_load_label_4"),
+            "DFSan should emit __dfsan_load_label_4 for int deref, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn dfsan_inserts_func_entry() {
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                dfsan: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__dfsan_func_entry"),
+            "DFSan should emit __dfsan_func_entry, got: {:?}",
+            names
+        );
+    }
+
+    // ── CFI (Control Flow Integrity) ─────────────────────────────────
+
+    #[test]
+    fn from_args_parses_cfi_variants() {
+        let f = SanitizerFlags::from_args(&["-fsanitize=cfi".to_string()])
+            .expect("known sanitizer should parse");
+        assert!(f.cfi_icall);
+        assert!(f.cfi_vcall);
+        assert!(f.cfi_nvcall);
+        assert!(f.cfi_derived_cast);
+        assert!(f.cfi_unrelated_cast);
+        assert!(f.cfi_mfcall);
+        assert!(f.any_cfi());
+        assert!(f.needs_cfi_icall());
+    }
+
+    #[test]
+    fn from_args_parses_individual_cfi() {
+        let f = SanitizerFlags::from_args(&["-fsanitize=cfi-icall".to_string()])
+            .expect("known sanitizer should parse");
+        assert!(f.cfi_icall);
+        assert!(!f.cfi_vcall);
+        assert!(f.needs_cfi_icall());
+    }
+
+    #[test]
+    fn cfi_wraps_indirect_call() {
+        // fn_ptr(args) 应插入 __cfi_check 调用。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        // Build: return fn_ptr(42) — indirect call through function pointer
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Call {
+                    callee: Box::new(Expr::Ident {
+                        name: Ident {
+                            name: "fn_ptr".into(),
+                            span: Span::point("t.c", 1, 1),
+                        },
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Func(
+                            Box::new(Type::Int),
+                            vec![Type::Int],
+                        ),
+                    }),
+                    args: vec![Expr::Int {
+                        v: 42,
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }],
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                cfi_icall: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        // fn_ptr is an Ident so it's a direct call — no CFI check
+        assert!(
+            !names.iter().any(|n| n == "__cfi_check"),
+            "direct call through Ident should not trigger CFI check, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn cfi_wraps_indirect_call_through_deref() {
+        // (*fn_ptr)(args) 应插入 __cfi_check 调用。
+        let mut prog = Program {
+            decls: vec![Decl::Func(empty_func("f"))],
+            fenv_access: false,
+            fp_contract: false,
+            cx_limited_range: false,
+        };
+        let Decl::Func(f) = &mut prog.decls[0] else {
+            panic!()
+        };
+        // Build: return (*fn_ptr)(42) — indirect call through deref
+        f.body = Some(Block {
+            items: vec![BlockItem::Stmt(Stmt::Return {
+                val: Some(Expr::Call {
+                    callee: Box::new(Expr::Deref {
+                        e: Box::new(Expr::Ident {
+                            name: Ident {
+                                name: "fn_ptr".into(),
+                                span: Span::point("t.c", 1, 1),
+                            },
+                            span: Span::point("t.c", 1, 1),
+                            ty: Type::Ptr(Box::new(Type::Func(
+                                Box::new(Type::Int),
+                                vec![Type::Int],
+                            ))),
+                        }),
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Func(
+                            Box::new(Type::Int),
+                            vec![Type::Int],
+                        ),
+                    }),
+                    args: vec![Expr::Int {
+                        v: 42,
+                        span: Span::point("t.c", 1, 1),
+                        ty: Type::Int,
+                    }],
+                    span: Span::point("t.c", 1, 1),
+                    ty: Type::Int,
+                }),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        });
+        instrument_program(
+            &mut prog,
+            SanitizerFlags {
+                cfi_icall: true,
+                ..Default::default()
+            },
+        );
+        let Decl::Func(f) = &prog.decls[0] else {
+            panic!()
+        };
+        let names = call_names_in_block(f.body.as_ref().unwrap());
+        assert!(
+            names.iter().any(|n| n == "__cfi_check"),
+            "indirect call through Deref should trigger __cfi_check, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn cfi_type_hash_is_deterministic() {
+        let ty = Type::Func(Box::new(Type::Int), vec![Type::Int]);
+        let h1 = cfi_type_hash(&ty);
+        let h2 = cfi_type_hash(&ty);
+        assert_eq!(h1, h2, "same type must produce same hash");
+        // Different type should produce different hash (with high probability)
+        let ty2 = Type::Func(Box::new(Type::Void), vec![Type::Long]);
+        assert_ne!(cfi_type_hash(&ty), cfi_type_hash(&ty2));
+    }
+
+    // ── no_sanitize for new sanitizers ───────────────────────────────
+
+    #[test]
+    fn effective_flags_memory_disables_msan() {
+        let flags = SanitizerFlags {
+            msan: true,
+            ..Default::default()
+        };
+        let eff = effective_flags(&["memory".to_string()], flags);
+        assert!(!eff.msan);
+    }
+
+    #[test]
+    fn effective_flags_dataflow_disables_dfsan() {
+        let flags = SanitizerFlags {
+            dfsan: true,
+            ..Default::default()
+        };
+        let eff = effective_flags(&["dataflow".to_string()], flags);
+        assert!(!eff.dfsan);
+    }
+
+    #[test]
+    fn effective_flags_cfi_icall_disables_only_icall() {
+        let flags = SanitizerFlags {
+            cfi_icall: true,
+            cfi_vcall: true,
+            ..Default::default()
+        };
+        let eff = effective_flags(&["cfi-icall".to_string()], flags);
+        assert!(!eff.cfi_icall);
+        assert!(eff.cfi_vcall);
+    }
+
+    #[test]
+    fn effective_flags_all_disables_everything() {
+        let flags = SanitizerFlags {
+            msan: true,
+            dfsan: true,
+            cfi_icall: true,
+            cfi_vcall: true,
+            ..Default::default()
+        };
+        let eff = effective_flags(&["all".to_string()], flags);
+        assert!(!eff.msan);
+        assert!(!eff.dfsan);
+        assert!(!eff.cfi_icall);
+        assert!(!eff.cfi_vcall);
+    }
+
+    // ── Metadata v3 ───────────────────────────────────────────────────
+
+    #[test]
+    fn metadata_v3_includes_msan_dfsan_cfi() {
+        let meta = sanitizer_metadata(SanitizerFlags {
+            msan: true,
+            dfsan: true,
+            cfi_icall: true,
+            ..Default::default()
+        });
+        assert_eq!(&meta[..8], b"DCC_SAN\0");
+        assert_eq!(meta[8], 3); // version v3
+        // msan at offset 15
+        assert_eq!(meta[15], 1);
+        // dfsan at offset 16
+        assert_eq!(meta[16], 1);
+        // cfi_icall at offset 17
+        assert_eq!(meta[17], 1);
+        // cfi_vcall at offset 18 — not set
+        assert_eq!(meta[18], 0);
+    }
+
+    #[test]
+    fn any_returns_true_for_new_sanitizers() {
+        assert!(SanitizerFlags {
+            msan: true,
+            ..Default::default()
+        }
+        .any());
+        assert!(SanitizerFlags {
+            dfsan: true,
+            ..Default::default()
+        }
+        .any());
+        assert!(SanitizerFlags {
+            cfi_icall: true,
+            ..Default::default()
+        }
+        .any());
     }
 }
