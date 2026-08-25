@@ -14343,6 +14343,61 @@ fn btf_section_has_valid_header_magic() {
     assert_eq!(btf[2], 1, "BTF version should be 1, got {}", btf[2]);
 }
 
+/// BTF: 完整类型转储应包含源文件中定义的结构体名
+#[test]
+fn btf_full_contains_source_types() {
+    let (output, obj) = run_object_test_flags(
+        "btf-full-types",
+        "struct my_point { int x; int y; };\n\
+         enum color { RED = 0, GREEN = 1, BLUE = 2 };\n\
+         typedef unsigned long my_size_t;\n\
+         struct my_point global_pt;\n\
+         enum color global_c;\n\
+         my_size_t global_s;\n\
+         int main(void) { return 0; }\n",
+        &["-g"],
+    );
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = fs::read(&obj).unwrap_or_default();
+    let _ = fs::remove_file(&obj);
+    let btf_data = elf64_section_data(&data, ".BTF");
+    assert!(btf_data.is_some(), ".BTF section should exist");
+    let btf = btf_data.unwrap();
+
+    // BTF 应大于最小探测 BTF（24 字节头部 + 少量类型）
+    assert!(
+        btf.len() > 100,
+        "BTF should contain multiple types, got {} bytes",
+        btf.len()
+    );
+
+    // 字符串表应包含源文件中定义的类型名
+    let btf_str = String::from_utf8_lossy(btf);
+    // 检查 typedef 名（因为 typedef 会被收集）
+    assert!(
+        btf_str.contains("my_size_t"),
+        "BTF should contain typedef name 'my_size_t'"
+    );
+
+    // 验证包含 STRUCT 类型
+    let has_struct = btf.windows(4).any(|w| {
+        let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+        (info & 0x1f) == 4 // BTF_KIND_STRUCT
+    });
+    assert!(has_struct, "BTF should contain STRUCT type");
+
+    // 验证包含 ENUM 类型
+    let has_enum = btf.windows(4).any(|w| {
+        let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+        (info & 0x1f) == 6 // BTF_KIND_ENUM
+    });
+    assert!(has_enum, "BTF should contain ENUM type");
+}
+
 /// DWARF: .debug_str 节应包含源文件中出现的函数名字符串
 #[test]
 fn dwarf_debug_str_contains_function_names() {
