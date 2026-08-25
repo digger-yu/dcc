@@ -16,6 +16,7 @@ use std::sync::Arc;
 enum BranchKind {
     Jal,
     Beqz,
+    Bne,
 }
 
 /// RVV 向量配置参数
@@ -76,6 +77,10 @@ pub struct Riscv64Codegen {
     asm_text_mode: bool,
     /// 编译诊断 (未识别内联汇编指令等)
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    /// Stack protector: 当前函数 canary 槽位偏移, 0 表示未启用
+    canary_slot_off: i32,
+    /// -mrecord-mcount: ftrace call site positions for __mcount_loc section
+    mcount_loc_entries: Vec<(u64, String)>,
     _target: Target,
 }
 
@@ -113,6 +118,8 @@ impl Riscv64Codegen {
             raw_func_asm_lines: Vec::new(),
             asm_text_mode: false,
             diagnostics: Vec::new(),
+            canary_slot_off: 0,
+            mcount_loc_entries: Vec::new(),
             _target: target,
         }
     }
@@ -181,6 +188,39 @@ impl Riscv64Codegen {
         } else {
             self.compile_exec(module, prog);
             self.finalize_exec();
+        }
+        // Stack canary: add __stack_chk_guard/__stack_chk_fail undefined symbols
+        if self._target.stack_protector {
+            self.ensure_sym_object("__stack_chk_guard");
+            self.ensure_sym("__stack_chk_fail");
+        }
+        // FTRACE: add mcount/__fentry__ undefined symbols
+        match self._target.ftrace_mode {
+            crate::cli::FtraceMode::MCount => {
+                self.ensure_sym("mcount");
+            }
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                self.ensure_sym("__fentry__");
+            }
+            crate::cli::FtraceMode::None => {}
+        }
+        // -mrecord-mcount: generate __mcount_loc section with call site addresses
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
+            && !self.mcount_loc_entries.is_empty()
+        {
+            let mut mcount_data =
+                Vec::with_capacity(self.mcount_loc_entries.len() * 8);
+            for &(call_pos, _) in &self.mcount_loc_entries {
+                // Each entry is a 64-bit address
+                mcount_data.extend_from_slice(&call_pos.to_le_bytes());
+            }
+            self.extra_sections.push(elf::ElfSection {
+                name: "__mcount_loc".to_string(),
+                data: mcount_data,
+                ty: elf::SHT_PROGBITS,
+                flags: elf::SHF_ALLOC,
+                align: 8,
+            });
         }
     }
 
@@ -386,6 +426,13 @@ impl Riscv64Codegen {
                 match kind {
                     BranchKind::Jal => self.patch_jal(at, target),
                     BranchKind::Beqz => self.patch_beqz(at, target),
+                    BranchKind::Bne => {
+                        let bytes = &self.code[at as usize..at as usize + 4];
+                        let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                        let rs1 = ((insn >> 15) & 0x1f) as u8;
+                        let rs2 = ((insn >> 20) & 0x1f) as u8;
+                        self.patch_bne(at, rs1, rs2, target);
+                    }
                 }
             }
         }
@@ -479,6 +526,12 @@ impl Riscv64Codegen {
         self.plan_locals(ast);
         // 记录当前函数返回类型 (sret/HFA 判定)
         self.current_return_ty = Some(func.return_type.clone());
+        // Stack protector: allocate canary slot before frame size calculation
+        if self._target.stack_protector {
+            self.canary_slot_off = self.alloc_local("<canary>", 8);
+        } else {
+            self.canary_slot_off = 0;
+        }
         // 变参函数需要在 frame 顶部预留寄存器保存区:
         // a0..a7 (64 字节) + fa0..fa7 (64 字节) = 128 字节.
         let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
@@ -502,6 +555,30 @@ impl Riscv64Codegen {
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
             self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
+        // Stack protector: store canary value on stack after frame setup
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_prologue(self.canary_slot_off);
+        }
+        // FTRACE: emit call to mcount/__fentry__ before function body
+        let ftrace_call_pos: Option<u64> = match self._target.ftrace_mode {
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                let pos = self.pos();
+                self.emit_jal_to("__fentry__");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::MCount => {
+                let pos = self.pos();
+                self.emit_jal_to("mcount");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::None => None,
+        };
+        // -mrecord-mcount: record call site for __mcount_loc section
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount) {
+            if let Some(call_pos) = ftrace_call_pos {
+                self.mcount_loc_entries.push((call_pos, func.name.clone()));
+            }
         }
         // 进入变参函数立即把 a0..a7 和 fa0..fa7 写入保存区
         if is_variadic {
@@ -1553,6 +1630,14 @@ impl Riscv64Codegen {
             match kind {
                 BranchKind::Jal => self.patch_jal(at, pos),
                 BranchKind::Beqz => self.patch_beqz(at, pos),
+                BranchKind::Bne => {
+                    // For BNE, we need to read the instruction to get rs1/rs2
+                    let bytes = &self.code[at as usize..at as usize + 4];
+                    let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                    let rs1 = ((insn >> 15) & 0x1f) as u8;
+                    let rs2 = ((insn >> 20) & 0x1f) as u8;
+                    self.patch_bne(at, rs1, rs2, pos);
+                }
             }
         }
         self.pending_branches.retain(|(_, l, _)| l != name);
@@ -1814,6 +1899,10 @@ impl Riscv64Codegen {
     }
 
     fn ret(&mut self) {
+        // Stack protector epilogue: verify canary BEFORE frame teardown
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_epilogue(self.canary_slot_off);
+        }
         if self.frame_bytes > 0 {
             self.addi_sp(self.frame_bytes);
         }
@@ -1893,6 +1982,89 @@ impl Riscv64Codegen {
         let idx = self.symbols.len() as u32;
         self.sym_index.insert(name.to_string(), idx);
         idx
+    }
+
+    /// Ensure symbol exists as STT_OBJECT type (for data symbols)
+    fn ensure_sym_object(&mut self, name: &str) -> u32 {
+        if let Some(&idx) = self.sym_index.get(name) {
+            return idx;
+        }
+        self.symbols.push(ElfSym {
+            name: name.to_string(),
+            section: 0,
+            value: 0,
+            size: 0,
+            bind: STB_GLOBAL,
+            ty: STT_OBJECT,
+            visibility: elf::STV_DEFAULT,
+        });
+        let idx = self.symbols.len() as u32;
+        self.sym_index.insert(name.to_string(), idx);
+        idx
+    }
+
+    /// Stack protector prologue: load canary from __stack_chk_guard
+    /// and store at [sp, #canary_off]. Uses t0/t1 as scratch.
+    fn emit_stack_chk_prologue(&mut self, canary_off: i32) {
+        // Load __stack_chk_guard address using AUIPC + LD
+        self.ensure_sym_object("__stack_chk_guard");
+        let sym_idx = self.sym_index["__stack_chk_guard"];
+        let pos = self.pos();
+        // AUIPC t0, %hi(__stack_chk_guard)
+        self.emit_auipc(5, 0); // t0 = x5
+        self.relocations.push(ElfRela {
+            offset: pos,
+            sym_index: sym_idx,
+            rel_type: elf::R_RISCV_PCREL_HI20,
+            addend: 0,
+        });
+        let pos2 = self.pos();
+        // LD t0, %lo(__stack_chk_guard)(t0)
+        self.emit_ld(5, 5, 0);
+        self.rodata_relocations.push(ElfRela {
+            offset: pos2,
+            sym_index: sym_idx,
+            rel_type: elf::R_RISCV_PCREL_LO12_I,
+            addend: 0,
+        });
+        // SD t0, canary_off(sp)
+        self.emit_sd(5, 2, canary_off);
+    }
+
+    /// Stack protector epilogue: verify canary at [sp, #canary_off]
+    /// against __stack_chk_guard. Calls __stack_chk_fail on mismatch.
+    fn emit_stack_chk_epilogue(&mut self, canary_off: i32) {
+        let fail_label = self.fresh_label(".Lstack_chk_fail_");
+        // LD t0, canary_off(sp) - load stored canary
+        self.emit_ld(5, 2, canary_off);
+        // Load expected canary from __stack_chk_guard
+        self.ensure_sym_object("__stack_chk_guard");
+        let sym_idx = self.sym_index["__stack_chk_guard"];
+        let pos = self.pos();
+        // AUIPC t1, %hi(__stack_chk_guard)
+        self.emit_auipc(6, 0); // t1 = x6
+        self.relocations.push(ElfRela {
+            offset: pos,
+            sym_index: sym_idx,
+            rel_type: elf::R_RISCV_PCREL_HI20,
+            addend: 0,
+        });
+        let pos2 = self.pos();
+        // LD t1, %lo(__stack_chk_guard)(t1)
+        self.emit_ld(6, 6, 0);
+        self.rodata_relocations.push(ElfRela {
+            offset: pos2,
+            sym_index: sym_idx,
+            rel_type: elf::R_RISCV_PCREL_LO12_I,
+            addend: 0,
+        });
+        // BNE t0, t1, fail_label
+        self.emit_bne(5, 6, &fail_label);
+        // Normal path continues
+        // Fail path: call __stack_chk_fail (never returns)
+        self.label(&fail_label);
+        self.ensure_sym("__stack_chk_fail");
+        self.emit_jal_to("__stack_chk_fail");
     }
 
     // ===== RISC-V 指令编码 =====
@@ -2116,6 +2288,45 @@ impl Riscv64Codegen {
     fn emit_beq(&mut self, rs1: u8, rs2: u8, _offset: i32) {
         let insn = ((rs2 as u32) << 20 | (rs1 as u32) << 15) | 0x63;
         self.emit(&insn.to_le_bytes());
+    }
+
+    /// AUIPC rd, imm: rd = PC + imm << 12
+    fn emit_auipc(&mut self, rd: u8, imm: i32) {
+        let imm = (imm as u32 & 0xfffff) << 12;
+        let insn = imm | (rd as u32) << 7 | 0x17;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// BNE rs1, rs2, label: Branch if not equal
+    fn emit_bne(&mut self, rs1: u8, rs2: u8, label: &str) {
+        let pos = self.pos();
+        // BNE: funct3=001, opcode=1100011
+        let insn = (1u32 << 12) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
+        self.emit(&insn.to_le_bytes());
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_bne(pos, rs1, rs2, target);
+        } else {
+            self.pending_branches
+                .push((pos, label.to_string(), BranchKind::Bne));
+        }
+    }
+
+    /// Patch BNE instruction at given position
+    fn patch_bne(&mut self, at: u64, rs1: u8, rs2: u8, target: u64) {
+        let pc = at;
+        let offset = (target as i64 - pc as i64) as i32;
+        let imm = offset as u32;
+        // B-type: imm[12|10:5] | rs2 | rs1 | funct3 | imm[4:1|11] | opcode
+        let insn = ((imm >> 12) & 1) << 31
+            | ((imm >> 5) & 0x3f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | (1u32 << 12) // funct3 = 001 (BNE)
+            | ((imm >> 1) & 0xf) << 8
+            | ((imm >> 11) & 1) << 7
+            | 0x63;
+        let pos = at as usize;
+        self.code[pos..pos + 4].copy_from_slice(&insn.to_le_bytes());
     }
 
     fn emit_auipc_a0(&mut self, imm: i32) {
