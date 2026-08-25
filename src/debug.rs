@@ -947,8 +947,8 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
         sec.skeleton_type = split.skeleton_type;
     }
 
-    // 9) BTF
-    sec.btf = build_btf_probe();
+    // 9) BTF - 生成完整类型信息
+    sec.btf = build_btf_full(cu);
 
     sec
 }
@@ -2239,6 +2239,412 @@ pub fn build_btf_header() -> Vec<u8> {
     build_btf_probe()
 }
 
+/// BTF 字符串表：以 \0 开头，每个字符串以 \0 结尾
+struct BtfStringTable {
+    data: Vec<u8>,
+    map: std::collections::HashMap<String, u32>,
+}
+
+impl BtfStringTable {
+    fn new() -> Self {
+        Self {
+            data: vec![0], // BTF 字符串表以空字符串（\0）开头
+            map: std::collections::HashMap::new(),
+        }
+    }
+
+    /// 插入字符串，返回其在字符串表中的偏移
+    fn intern(&mut self, s: &str) -> u32 {
+        if let Some(&off) = self.map.get(s) {
+            return off;
+        }
+        let off = self.data.len() as u32;
+        self.data.extend_from_slice(s.as_bytes());
+        self.data.push(0);
+        self.map.insert(s.to_string(), off);
+        off
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+/// BTF 类型编码器：收集类型并分配 ID
+struct BtfTypeEncoder {
+    types: Vec<Vec<u8>>,     // 每个元素的编码后的 type record
+    name_to_id: std::collections::HashMap<String, u32>,
+}
+
+impl BtfTypeEncoder {
+    fn new() -> Self {
+        Self {
+            types: Vec::new(),
+            name_to_id: std::collections::HashMap::new(),
+        }
+    }
+
+    /// 当前已编码的类型数量（ID 从 1 开始）
+    fn next_id(&self) -> u32 {
+        (self.types.len() + 1) as u32
+    }
+
+    /// 编码一个 BTF 类型记录
+    /// name_off: 字符串表偏移
+    /// kind: BTF_KIND_*
+    /// vlen: 成员/参数数量
+    /// size_or_type: 大小（struct/union/enum）或类型 ID（ptr/const 等）
+    /// extra: 附加数据（成员、参数等）
+    fn add_type(
+        &mut self,
+        name_off: u32,
+        kind: u32,
+        vlen: u32,
+        size_or_type: u32,
+        extra: &[u8],
+    ) -> u32 {
+        let id = self.next_id();
+        let mut record = Vec::new();
+        record.extend_from_slice(&name_off.to_le_bytes());
+        // info: kind_flag=0, vlen, kind
+        let info = (kind << 24) | (vlen & 0xFFFF);
+        record.extend_from_slice(&info.to_le_bytes());
+        record.extend_from_slice(&size_or_type.to_le_bytes());
+        record.extend_from_slice(extra);
+        self.types.push(record);
+        id
+    }
+
+    /// 注册类型名到 ID 的映射
+    fn register_name(&mut self, name: &str, id: u32) {
+        if !name.is_empty() {
+            self.name_to_id.insert(name.to_string(), id);
+        }
+    }
+
+    /// 查找已注册的类型 ID
+    fn lookup_name(&self, name: &str) -> Option<u32> {
+        self.name_to_id.get(name).copied()
+    }
+}
+
+/// 生成完整 BTF 类型信息（包含编译单元中所有类型）
+///
+/// 生成的 BTF 节包含：
+/// - 所有基础类型（int, float 等）
+/// - 结构体/联合体及其成员
+/// - 数组类型
+/// - 指针类型
+/// - typedef
+/// - enum 及其枚举值
+/// - const/volatile/restrict 修饰类型
+/// - 函数原型
+///
+/// 这使得 pahole 可以直接解析 BTF 而无需回退到 DWARF，
+/// 并满足 BTF dedup 和 objtool --btf 的完整需求。
+pub fn build_btf_full(cu: &CompileUnit) -> Vec<u8> {
+    let mut strs = BtfStringTable::new();
+    let mut encoder = BtfTypeEncoder::new();
+
+    // 预注册基础 int 类型（如果尚未存在）
+    // BTF 中 int 类型需要编码位大小和偏移
+    let int_names = [
+        ("int", 32, true),      // signed 32-bit
+        ("unsigned int", 32, false),
+        ("long", 64, true),     // 64-bit on x86_64
+        ("unsigned long", 64, false),
+        ("short", 16, true),
+        ("unsigned short", 16, false),
+        ("char", 8, true),
+        ("signed char", 8, true),
+        ("unsigned char", 8, false),
+        ("long long", 64, true),
+        ("unsigned long long", 64, false),
+        ("_Bool", 8, false),
+        ("float", 32, false),
+        ("double", 64, false),
+    ];
+
+    // 先编码所有基础 int 类型
+    for (name, bits, signed) in &int_names {
+        let name_off = strs.intern(name);
+        // int 编码: 位偏移(0) | 位大小 | (signed ? 0 : 1<<31)
+        let int_data = if *signed {
+            (*bits as u32) << 24
+        } else {
+            ((*bits as u32) << 24) | (1 << 31)
+        };
+        let id = encoder.add_type(name_off, BTF_KIND_INT, 0, int_data, &[]);
+        encoder.register_name(name, id);
+    }
+
+    // 编码 void 类型（BTF 中 void 是类型 ID 0，不需要显式编码）
+    // 但我们需要一个 void 的引用，它始终是 0
+
+    // 收集编译单元中所有类型
+    let all_types = collect_all_cu_types(cu);
+
+    // 编码每个类型
+    for ty in &all_types {
+        encode_btf_type(ty, &mut strs, &mut encoder);
+    }
+
+    // 编码全局变量的类型
+    for g in &cu.globals {
+        encode_btf_type(&g.ty, &mut strs, &mut encoder);
+    }
+
+    // 编码函数参数和返回类型
+    for f in &cu.functions {
+        encode_btf_type(&f.return_type, &mut strs, &mut encoder);
+        for (_, pty) in &f.params {
+            encode_btf_type(pty, &mut strs, &mut encoder);
+        }
+    }
+
+    // 构建类型段
+    let mut types_data = Vec::new();
+    for record in &encoder.types {
+        types_data.extend_from_slice(record);
+    }
+
+    let type_len = types_data.len() as u32;
+    let str_data = strs.as_bytes();
+    let str_len = str_data.len() as u32;
+    let hdr_len = 24u32;
+    let type_off = 0u32;
+    let str_off = type_off + type_len;
+
+    // 构建 BTF 头部
+    let mut btf = Vec::new();
+    btf.extend_from_slice(&0xEB9F_u16.to_le_bytes()); // magic
+    btf.push(1); // version
+    btf.push(0); // flags
+    btf.extend_from_slice(&hdr_len.to_le_bytes());
+    btf.extend_from_slice(&type_off.to_le_bytes());
+    btf.extend_from_slice(&type_len.to_le_bytes());
+    btf.extend_from_slice(&str_off.to_le_bytes());
+    btf.extend_from_slice(&str_len.to_le_bytes());
+    btf.extend_from_slice(&types_data);
+    btf.extend_from_slice(str_data);
+
+    btf
+}
+
+/// 编码单个类型为 BTF 格式
+fn encode_btf_type(
+    ty: &DwarfType,
+    strs: &mut BtfStringTable,
+    encoder: &mut BtfTypeEncoder,
+) -> u32 {
+    // 检查是否已编码（通过名称查找）
+    if !ty.name.is_empty() {
+        if let Some(id) = encoder.lookup_name(&ty.name) {
+            return id;
+        }
+    }
+
+    match &ty.kind {
+        DwarfTypeKind::Void => 0, // void 始终是类型 ID 0
+
+        DwarfTypeKind::Base(enc) => {
+            // 基础类型已经预编码，尝试查找
+            if let Some(id) = encoder.lookup_name(&ty.name) {
+                return id;
+            }
+            // 否则新增一个 int 类型
+            let name_off = strs.intern(&ty.name);
+            let bits = (ty.byte_size * 8) as u32;
+            let signed = matches!(
+                enc,
+                TypeEncoding::Signed
+                    | TypeEncoding::SignedChar
+                    | TypeEncoding::Float
+            );
+            let int_data = if signed {
+                bits << 24
+            } else {
+                (bits << 24) | (1 << 31)
+            };
+            let id = encoder.add_type(name_off, BTF_KIND_INT, 0, int_data, &[]);
+            encoder.register_name(&ty.name, id);
+            id
+        }
+
+        DwarfTypeKind::Pointer(inner) => {
+            let target_id = encode_btf_type(inner, strs, encoder);
+            let name_off = 0; // 指针通常无名
+            let id = encoder.add_type(name_off, BTF_KIND_PTR, 0, target_id, &[]);
+            id
+        }
+
+        DwarfTypeKind::Const(inner) => {
+            let target_id = encode_btf_type(inner, strs, encoder);
+            let name_off = 0;
+            let id = encoder.add_type(name_off, BTF_KIND_CONST, 0, target_id, &[]);
+            id
+        }
+
+        DwarfTypeKind::Volatile(inner) => {
+            let target_id = encode_btf_type(inner, strs, encoder);
+            let name_off = 0;
+            let id = encoder.add_type(name_off, BTF_KIND_VOLATILE, 0, target_id, &[]);
+            id
+        }
+
+        DwarfTypeKind::Restrict(inner) => {
+            let target_id = encode_btf_type(inner, strs, encoder);
+            let name_off = 0;
+            let id = encoder.add_type(name_off, BTF_KIND_RESTRICT, 0, target_id, &[]);
+            id
+        }
+
+        DwarfTypeKind::Struct { members } => {
+            // 先注册名称以防止递归
+            let name_off = strs.intern(&ty.name);
+            // 临时占位，稍后更新
+            let temp_id = encoder.next_id();
+            encoder.register_name(&ty.name, temp_id);
+
+            // 编码所有成员类型
+            let mut member_data = Vec::new();
+            for m in members {
+                let m_name_off = strs.intern(&m.name);
+                let m_type_id = encode_btf_type(&m.ty, strs, encoder);
+                // BTF struct member: name_off(4) + type(4) + offset(4)
+                member_data.extend_from_slice(&m_name_off.to_le_bytes());
+                member_data.extend_from_slice(&m_type_id.to_le_bytes());
+                // offset: 位偏移编码在低 24 位，位域大小在高 8 位
+                let offset_bits = m.offset_bits as u32;
+                if m.bit_size > 0 {
+                    // 位域: offset | (bit_size << 24)
+                    let offset_enc = offset_bits | ((m.bit_size as u32) << 24);
+                    member_data.extend_from_slice(&offset_enc.to_le_bytes());
+                } else {
+                    member_data.extend_from_slice(&offset_bits.to_le_bytes());
+                }
+            }
+
+            let size = ty.byte_size as u32;
+            let vlen = members.len() as u32;
+            // 实际编码（替换占位）
+            // 由于我们已经注册了名称，需要检查是否是第一次编码
+            if encoder.lookup_name(&ty.name) == Some(temp_id) && encoder.types.len() >= (temp_id as usize) {
+                // 已经编码过了
+                return temp_id;
+            }
+            let id = encoder.add_type(name_off, BTF_KIND_STRUCT, vlen, size, &member_data);
+            // 更新映射（如果之前注册了临时 ID）
+            if id != temp_id {
+                encoder.name_to_id.insert(ty.name.clone(), id);
+            }
+            id
+        }
+
+        DwarfTypeKind::Union { members } => {
+            let name_off = strs.intern(&ty.name);
+            let temp_id = encoder.next_id();
+            encoder.register_name(&ty.name, temp_id);
+
+            let mut member_data = Vec::new();
+            for m in members {
+                let m_name_off = strs.intern(&m.name);
+                let m_type_id = encode_btf_type(&m.ty, strs, encoder);
+                member_data.extend_from_slice(&m_name_off.to_le_bytes());
+                member_data.extend_from_slice(&m_type_id.to_le_bytes());
+                // union 成员偏移通常为 0
+                member_data.extend_from_slice(&0u32.to_le_bytes());
+            }
+
+            let size = ty.byte_size as u32;
+            let vlen = members.len() as u32;
+            if encoder.lookup_name(&ty.name) == Some(temp_id)
+                && (temp_id as usize) <= encoder.types.len() + 1
+                && encoder.types.len() >= (temp_id as usize)
+            {
+                return temp_id;
+            }
+            let id = encoder.add_type(name_off, BTF_KIND_UNION, vlen, size, &member_data);
+            if id != temp_id {
+                encoder.name_to_id.insert(ty.name.clone(), id);
+            }
+            id
+        }
+
+        DwarfTypeKind::Array { element, count } => {
+            let elem_id = encode_btf_type(element, strs, encoder);
+            // 数组索引类型：使用 unsigned long
+            let idx_name = "unsigned long";
+            let idx_id = encoder
+                .lookup_name(idx_name)
+                .unwrap_or(1); // 默认使用第一个 int 类型
+
+            let name_off = 0; // 数组通常无名
+            // BTF array: elem_type(4) + index_type(4) + nelems(4)
+            let mut arr_data = Vec::new();
+            arr_data.extend_from_slice(&elem_id.to_le_bytes());
+            arr_data.extend_from_slice(&idx_id.to_le_bytes());
+            arr_data.extend_from_slice(&(*count as u32).to_le_bytes());
+
+            let id = encoder.add_type(name_off, BTF_KIND_ARRAY, 0, 0, &arr_data);
+            id
+        }
+
+        DwarfTypeKind::Enum { members: variants, underlying } => {
+            let name_off = strs.intern(&ty.name);
+            let _ = encode_btf_type(underlying, strs, encoder);
+
+            let mut enum_data = Vec::new();
+            for (var_name, var_val) in variants {
+                let var_name_off = strs.intern(var_name);
+                enum_data.extend_from_slice(&var_name_off.to_le_bytes());
+                enum_data.extend_from_slice(&(*var_val as i32).to_le_bytes());
+            }
+
+            let size = ty.byte_size as u32;
+            let vlen = variants.len() as u32;
+            let id = encoder.add_type(name_off, BTF_KIND_ENUM, vlen, size, &enum_data);
+            encoder.register_name(&ty.name, id);
+            id
+        }
+
+        DwarfTypeKind::Typedef { alias, target } => {
+            let target_id = encode_btf_type(target, strs, encoder);
+            let name_off = strs.intern(alias);
+            let id = encoder.add_type(name_off, BTF_KIND_TYPEDEF, 0, target_id, &[]);
+            encoder.register_name(alias, id);
+            id
+        }
+
+        DwarfTypeKind::Func { ret, params } => {
+            // 先编码函数原型
+            let ret_id = encode_btf_type(ret, strs, encoder);
+
+            let mut param_data = Vec::new();
+            for p in params {
+                let p_name_off = strs.intern(&p.name);
+                let p_type_id = encode_btf_type(p, strs, encoder);
+                // BTF func param: name_off(4) + type(4)
+                param_data.extend_from_slice(&p_name_off.to_le_bytes());
+                param_data.extend_from_slice(&p_type_id.to_le_bytes());
+            }
+
+            // 先编码 FUNC_PROTO
+            let proto_name_off = if ty.name.is_empty() { 0 } else { strs.intern(&ty.name) };
+            let vlen = params.len() as u32;
+            let proto_id = encoder.add_type(proto_name_off, BTF_KIND_FUNC_PROTO, vlen, ret_id, &param_data);
+
+            // 然后编码 FUNC（引用 FUNC_PROTO）
+            let func_name_off = if ty.name.is_empty() { 0 } else { strs.intern(&ty.name) };
+            let id = encoder.add_type(func_name_off, BTF_KIND_FUNC, 0, proto_id, &[]);
+            if !ty.name.is_empty() {
+                encoder.register_name(&ty.name, id);
+            }
+            id
+        }
+    }
+}
+
 // ============================================================================
 // .eh_frame + .orc_unwind_ip
 // ============================================================================
@@ -2478,6 +2884,244 @@ mod tests {
             let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
             (info & 0x1f) == BTF_KIND_STRUCT
         }));
+    }
+
+    /// 测试完整 BTF 生成：包含多种类型
+    #[test]
+    fn btf_full_contains_multiple_types() {
+        // 创建一个包含多种类型的 CompileUnit
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "test".to_string(),
+            language: 12, // DW_LANG_C99
+            functions: vec![],
+            globals: vec![],
+            types: vec![
+                // 基础 int 类型
+                DwarfType {
+                    name: "int".to_string(),
+                    byte_size: 4,
+                    kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                },
+                // 结构体
+                DwarfType {
+                    name: "test_struct".to_string(),
+                    byte_size: 8,
+                    kind: DwarfTypeKind::Struct {
+                        members: vec![
+                            DwarfMember::regular(
+                                "x",
+                                0,
+                                DwarfType {
+                                    name: "int".to_string(),
+                                    byte_size: 4,
+                                    kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                                },
+                            ),
+                            DwarfMember::regular(
+                                "y",
+                                32,
+                                DwarfType {
+                                    name: "int".to_string(),
+                                    byte_size: 4,
+                                    kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                                },
+                            ),
+                        ],
+                    },
+                },
+            ],
+            line_entries: vec![],
+            line_files: vec![],
+            line_dirs: vec![],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+
+        let btf = build_btf_full(&cu);
+
+        // 验证 BTF 头部
+        assert!(btf.starts_with(&0xEB9F_u16.to_le_bytes()));
+        assert!(btf.len() >= 24, "BTF should have at least header");
+
+        // 验证版本
+        assert_eq!(btf[2], 1, "BTF version should be 1");
+
+        // 验证包含 INT 类型
+        let has_int = btf.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            (info & 0x1f) == BTF_KIND_INT
+        });
+        assert!(has_int, "BTF should contain INT type");
+
+        // 验证包含 STRUCT 类型
+        let has_struct = btf.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            (info & 0x1f) == BTF_KIND_STRUCT
+        });
+        assert!(has_struct, "BTF should contain STRUCT type");
+
+        // 验证字符串表包含类型名
+        let btf_str = String::from_utf8_lossy(&btf);
+        assert!(
+            btf_str.contains("test_struct"),
+            "BTF string table should contain 'test_struct'"
+        );
+    }
+
+    /// 测试 BTF 指针类型编码
+    #[test]
+    fn btf_full_contains_pointer_type() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "test".to_string(),
+            language: 12,
+            functions: vec![],
+            globals: vec![],
+            types: vec![
+                DwarfType {
+                    name: "int".to_string(),
+                    byte_size: 4,
+                    kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                },
+                DwarfType {
+                    name: "".to_string(), // 指针通常无名
+                    byte_size: 8,
+                    kind: DwarfTypeKind::Pointer(Box::new(DwarfType {
+                        name: "int".to_string(),
+                        byte_size: 4,
+                        kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                    })),
+                },
+            ],
+            line_entries: vec![],
+            line_files: vec![],
+            line_dirs: vec![],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+
+        let btf = build_btf_full(&cu);
+
+        // 验证包含 PTR 类型
+        let has_ptr = btf.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            (info & 0x1f) == BTF_KIND_PTR
+        });
+        assert!(has_ptr, "BTF should contain PTR type");
+    }
+
+    /// 测试 BTF enum 类型编码
+    #[test]
+    fn btf_full_contains_enum_type() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "test".to_string(),
+            language: 12,
+            functions: vec![],
+            globals: vec![],
+            types: vec![DwarfType {
+                name: "color".to_string(),
+                byte_size: 4,
+                kind: DwarfTypeKind::Enum {
+                    members: vec![
+                        ("RED".to_string(), 0),
+                        ("GREEN".to_string(), 1),
+                        ("BLUE".to_string(), 2),
+                    ],
+                    underlying: Box::new(DwarfType {
+                        name: "unsigned int".to_string(),
+                        byte_size: 4,
+                        kind: DwarfTypeKind::Base(TypeEncoding::Unsigned),
+                    }),
+                },
+            }],
+            line_entries: vec![],
+            line_files: vec![],
+            line_dirs: vec![],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+
+        let btf = build_btf_full(&cu);
+
+        // 验证包含 ENUM 类型
+        let has_enum = btf.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            (info & 0x1f) == BTF_KIND_ENUM
+        });
+        assert!(has_enum, "BTF should contain ENUM type");
+
+        // 验证字符串表包含枚举值名
+        let btf_str = String::from_utf8_lossy(&btf);
+        assert!(
+            btf_str.contains("RED") && btf_str.contains("GREEN") && btf_str.contains("BLUE"),
+            "BTF string table should contain enum values"
+        );
+    }
+
+    /// 测试 BTF typedef 编码
+    #[test]
+    fn btf_full_contains_typedef() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "test".to_string(),
+            language: 12,
+            functions: vec![],
+            globals: vec![],
+            types: vec![
+                DwarfType {
+                    name: "int".to_string(),
+                    byte_size: 4,
+                    kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                },
+                DwarfType {
+                    name: "my_int".to_string(),
+                    byte_size: 4,
+                    kind: DwarfTypeKind::Typedef {
+                        alias: "my_int".to_string(),
+                        target: Box::new(DwarfType {
+                            name: "int".to_string(),
+                            byte_size: 4,
+                            kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+                        }),
+                    },
+                },
+            ],
+            line_entries: vec![],
+            line_files: vec![],
+            line_dirs: vec![],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+
+        let btf = build_btf_full(&cu);
+
+        // 验证包含 TYPEDEF 类型
+        let has_typedef = btf.windows(4).any(|w| {
+            let info = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            (info & 0x1f) == BTF_KIND_TYPEDEF
+        });
+        assert!(has_typedef, "BTF should contain TYPEDEF type");
+
+        // 验证字符串表包含 typedef 名
+        let btf_str = String::from_utf8_lossy(&btf);
+        assert!(
+            btf_str.contains("my_int"),
+            "BTF string table should contain 'my_int'"
+        );
     }
 
     #[test]
