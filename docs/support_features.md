@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-24 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
+> 最后更新：2026-08-25 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -380,13 +380,17 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 
 | 特性 | 说明 |
 |------|------|
-| DWARF v4 | x86_64 / AArch64 / RISC-V 全部架构 |
+| DWARF v4 | x86_64 / AArch64 / RISC-V / MIPS / MIPS64 / ARM 全部架构 |
 | `.BTF` | x86_64（struct dcc_probe）/ AArch64 / RISC-V |
 | `.eh_frame` | CIE + FDE；setjmp CFI 寄存器保存表 |
 | `.orc_unwind_ip` / `.orc_unwind` | 由 objtool 统一生成，dcc 不输出（避免 "file already has .orc_unwind section" 冲突） |
 | DWARF line table | `-g1` 下自动去重; `DW_LNE_set_discriminator` 支持同 PC 多行条目 (asm 逐指令调试) |
-| DWARF type info | 位域成员 `DW_AT_bit_size` + `DW_AT_bit_offset` |
+| DWARF type info | 位域成员 `DW_AT_bit_size` + `DW_AT_bit_offset`；完整基类型/指针/数组/聚合体/枚举/函数类型 DIE |
 | `-gsplit-dwarf` / `-gpubnames` | `.dwo` 文件生成 |
+| DWARF subprogram 源位置 | `DW_AT_decl_file` + `DW_AT_decl_line` 发射到每个 `DW_TAG_subprogram` DIE，GDB  backtrace 显示正确源位置 |
+| DWARF 参数位置信息 | `DW_AT_location` (`DW_OP_fbreg`) 发射到 `DW_TAG_formal_parameter` DIE，GDB 可检查函数参数值 |
+| DWARF 词法块 + 局部变量 | `DW_TAG_lexical_block` 支持嵌套作用域；`DW_TAG_variable` 发射局部变量名、类型、栈位置 |
+| IR→DWARF 富信息传递 | `build_dwarf_cu()` 从 IR module + AST source 提取函数声明行号、返回类型、参数名/类型，所有 6 个架构后端统一使用 |
 
 ## 诊断
 
