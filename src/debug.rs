@@ -1891,9 +1891,18 @@ fn write_line_entry(
     // DW_LNE_set_discriminator 是扩展操作码, 不推进 PC 也不产生行,
     // 仅设置状态机的 discriminator 字段, 后续 copy/special 将其带入行矩阵.
     let disc_changed = e.discriminator as u32 != state.discriminator;
+    let is_stmt_changed = e.is_stmt != state.is_stmt;
+    let basic_block_changed = e.basic_block && !state.basic_block;
+    // Special opcode 仅编码 (address, line) 推进; 若 file/column/is_stmt/
+    // basic_block 也发生变化, 必须走标准路径发射对应 DW_LNS 操作码,
+    // 否则 DWARF 消费者无法感知这些状态变化.
     if line_advance >= line_base as i64
         && line_advance <= max_line_incr
         && pc_advance <= min_insn as u64
+        && file_advance == 0
+        && column_advance == 0
+        && !is_stmt_changed
+        && !basic_block_changed
         && adjusted >= 0
         && adjusted < line_range as i64 * 2
     // sanity: fits in reasonable range
@@ -4037,12 +4046,96 @@ mod tests {
     }
 
     /// 统计 opcode 区中 DW_LNS_advance_pc (0x02) 出现次数.
-    fn count_advance_pc(line_bytes: &[u8]) -> usize {
+    /// 需正确解析操作码流: 跳过扩展操作码序列 (0x00 + ULEB128 长度 + 数据),
+    /// 避免将 DW_LNE_set_address (0x02) 等扩展操作码误计为 DW_LNS_advance_pc.
+    fn count_advance_pc(line_bytes: &[u8], opcode_base: u8) -> usize {
         let op_start = skip_line_header(line_bytes);
-        line_bytes[op_start..]
-            .iter()
-            .filter(|&&b| b == DW_LNS_advance_pc)
-            .count()
+        let ops = &line_bytes[op_start..];
+        let mut count = 0;
+        let mut i = 0;
+        while i < ops.len() {
+            let byte = ops[i];
+            if byte == DW_LNS_extended_op {
+                // 扩展操作码: 0x00 + ULEB128 长度 + 数据
+                i += 1;
+                if i >= ops.len() {
+                    break;
+                }
+                let (len, bytes_read) = read_uleb128_from_slice(&ops[i..]);
+                i += bytes_read + len as usize;
+            } else if byte == 0x00 {
+                // DW_LNE_end_sequence 或其他以 0x00 开头的序列
+                i += 1;
+            } else if byte >= opcode_base {
+                // Special opcode: 单字节, 无参数, 不计数
+                i += 1;
+            } else {
+                // 标准操作码: 检查是否为 DW_LNS_advance_pc
+                if byte == DW_LNS_advance_pc {
+                    count += 1;
+                }
+                i += 1;
+                // 根据操作码类型跳过参数
+                match byte {
+                    // ULEB128 参数: advance_pc, set_file, set_column, set_isa
+                    0x02 | 0x04 | 0x05 | 0x0c => {
+                        let (_, bytes_read) = read_uleb128_from_slice(&ops[i..]);
+                        i += bytes_read;
+                    }
+                    // SLEB128 参数: advance_line
+                    0x03 => {
+                        let (_, bytes_read) = read_sleb128_from_slice(&ops[i..]);
+                        i += bytes_read;
+                    }
+                    // 固定 2 字节参数: fixed_advance_pc
+                    0x09 => {
+                        i += 2;
+                    }
+                    // 无参数: copy, negate_stmt, set_basic_block, const_add_pc,
+                    //         set_prologue_end, set_epilogue_begin
+                    _ => {}
+                }
+            }
+        }
+        count
+    }
+
+    /// 从字节切片读取 ULEB128 编码值, 返回 (值, 消耗字节数).
+    fn read_uleb128_from_slice(bytes: &[u8]) -> (u64, usize) {
+        let mut result: u64 = 0;
+        let mut shift: u32 = 0;
+        let mut count = 0;
+        for &b in bytes {
+            result |= ((b & 0x7f) as u64) << shift;
+            count += 1;
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        (result, count)
+    }
+
+    /// 从字节切片读取 SLEB128 编码值, 返回 (值, 消耗字节数).
+    fn read_sleb128_from_slice(bytes: &[u8]) -> (i64, usize) {
+        let mut result: i64 = 0;
+        let mut shift: u32 = 0;
+        let mut count = 0;
+        let mut byte;
+        for &b in bytes {
+            byte = b;
+            result |= ((b & 0x7f) as i64) << shift;
+            shift += 7;
+            count += 1;
+            if b & 0x80 == 0 {
+                // 符号扩展
+                if shift < 64 && (byte & 0x40) != 0 {
+                    result |= !0i64 << shift;
+                }
+                break;
+            }
+        }
+        (result, count)
     }
 
     /// 解析 .debug_line header 长度, 返回 opcode 区起始偏移.
@@ -4094,7 +4187,7 @@ mod tests {
         );
         // 不应有 DW_LNS_advance_pc (初始 pc=0, 无需推进)
         assert_eq!(
-            count_advance_pc(&sec.line),
+            count_advance_pc(&sec.line, opts.opcode_base),
             0,
             "pc_advance=0 should not need DW_LNS_advance_pc"
         );
@@ -4135,7 +4228,7 @@ mod tests {
         );
         // 不应有 DW_LNS_advance_pc (1 字节 special op 已覆盖)
         assert_eq!(
-            count_advance_pc(&sec.line),
+            count_advance_pc(&sec.line, opts.opcode_base),
             0,
             "pc_advance=min_insn should not need DW_LNS_advance_pc"
         );
@@ -4169,7 +4262,7 @@ mod tests {
         let sec = build_dwarf_full(&cu, &opts);
         // 应使用 DW_LNS_advance_line + DW_LNS_advance_pc + DW_LNS_copy
         assert!(
-            count_advance_pc(&sec.line) >= 1,
+            count_advance_pc(&sec.line, opts.opcode_base) >= 1,
             "large line_advance should fall back to standard sequence"
         );
     }
