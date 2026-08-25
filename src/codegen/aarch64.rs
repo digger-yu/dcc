@@ -606,6 +606,10 @@ impl Aarch64Codegen {
         if self.frame_bytes > 0 {
             self.sub_sp_imm(self.frame_bytes as u32);
         }
+        // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
+        if self._target.auto_var_init_zero && self.frame_bytes > 0 {
+            self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
         // MTE (HWASAN 硬件 tag): prologue tag 栈帧 + 指针 tag 流程。
         //   1) irg  x16, sp          : 随机 tag 写入 x16 (地址不变)
         //   2) addg sp, x16, #0, #0  : sp 携带本帧随机 tag, 由 sp 派生的所有
@@ -1734,6 +1738,32 @@ impl Aarch64Codegen {
     // str Xt, [sp, #imm] imm 需 8 字节对齐, 范围 [0, 32760]
     // 编码 bits[31:22] = 11_111_0_01_0_L (opc=11, 111, V=0, 01, 0, L)
     // STR X (L=0) => 0xF900_0000, LDR X (L=1) => 0xF940_0000
+    /// -ftrivial-auto-var-init=zero: 零初始化栈帧
+    /// 使用 stp xzr, xzr, [sp, #off] 每次清零 16 字节 (frame 已 16 字节对齐)
+    /// 使用 signed-offset 寻址模式, imm7 范围 [-64,63]×8 = [-512,504]
+    fn emit_zero_init_frame(&mut self, frame_size: usize) {
+        if frame_size == 0 {
+            return;
+        }
+        let pairs = frame_size / 16;
+        for i in 0..pairs {
+            let off = (i as i32) * 16 - (frame_size as i32);
+            // stp xzr, xzr, [sp, #off] (signed offset mode)
+            let imm7 = ((off / 8) as u32) & 0x7f;
+            let insn = 0xa900_0000u32 | (imm7 << 15) | (31u32 << 10) | (31u32 << 5) | 31;
+            self.emit(&insn.to_le_bytes());
+        }
+        // 处理剩余 8 字节 (当 frame 非 16 字节对齐时)
+        let rem = frame_size % 16;
+        if rem >= 8 {
+            let off = (pairs * 16) as i32 - (frame_size as i32);
+            // str xzr, [sp, #off] (unsigned offset mode)
+            let imm12 = ((off / 8) as u32) & 0xfff;
+            let insn = 0xf900_0000u32 | (imm12 << 10) | (31u32 << 5) | 31;
+            self.emit(&insn.to_le_bytes());
+        }
+    }
+
     fn str_xt_sp(&mut self, reg: u8, off: i32) {
         debug_assert!(
             off >= 0 && off % 8 == 0 && off <= 32760,
@@ -3813,5 +3843,32 @@ mod tests {
             .windows(4)
             .any(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) == ldr_s0);
         assert!(found, "expected ldr s0, [sp, #16] instruction");
+    }
+
+    // -ftrivial-auto-var-init=zero: 验证 AArch64 后端发射 stp xzr, xzr 指令
+    #[test]
+    fn aarch64_auto_var_init_zero_emits_stp_xzr() {
+        let triple = crate::cli::TargetTriple::parse("aarch64-linux-gnu").expect("triple");
+        let mut target = crate::target::Target::resolve(&triple);
+        target.auto_var_init_zero = true;
+        let mut cg = Aarch64Codegen::new(target, true);
+        // 直接测试 emit_zero_init_frame: 32 字节帧 = 2 个 stp
+        cg.emit_zero_init_frame(32);
+        let stp_count = cg
+            .code
+            .windows(4)
+            .filter(|w| {
+                let inst = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                // STP XZR, XZR, [SP, #off] (signed offset mode)
+                // Fixed fields: opc[31:30]=10, 101[29:27], V=0[26], mode=010[25:23], L=0[22]
+                // Check top 10 bits [31:22] = 10_101_0_010_0 = 0xA9 (with bit 22=0)
+                let top10 = (inst >> 22) & 0x3ff;
+                let rt2 = (inst >> 10) & 0x1f;
+                let rn = (inst >> 5) & 0x1f;
+                let rt = inst & 0x1f;
+                top10 == 0x2a4 && rt2 == 31 && rn == 31 && rt == 31
+            })
+            .count();
+        assert_eq!(stp_count, 2, "expected 2 stp xzr, xzr instructions for 32-byte frame, got {stp_count}");
     }
 }
