@@ -4200,6 +4200,9 @@ impl Codegen {
         }
 
         // 解析全局变量重定位 (使用最终符号表)
+        // 数据符号统一使用 R_X86_64_PC32 (RIP-relative), 不经过 GOT.
+        // 内核代码模型 (-mcmodel=kernel) 下同样: 全局变量 load/store/取地址
+        // 均走 RIP-relative 路径, 与函数符号行为一致, 无需额外分支.
         for (disp32_pos, var_name) in self.pending_data_rels.drain(..) {
             let sym_idx = self.sym_index.get(&var_name).copied().unwrap_or(0);
             self.relocations.push(ElfRela {
@@ -10723,6 +10726,9 @@ impl Codegen {
 
     /// 全局变量 RIP-relative 取地址: reg = &global_var
     /// 编码: REX.W 8D 05|reg<<3 disp32 (LEA)
+    /// ET_REL 生成 R_X86_64_PC32 重定位 (RIP-relative, 不经过 GOT).
+    /// 内核代码模型 (-mcmodel=kernel) 下行为一致: 数据符号与函数符号
+    /// 均使用直接 PC-relative 寻址, 不使用 GOT 间接寻址.
     fn emit_global_addr(&mut self, reg: u8, name: &str) {
         let disp32_pos = self.pos() + 3;
         let rex = if reg >= 8 { 0x4C } else { 0x48 };
