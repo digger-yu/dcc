@@ -1602,19 +1602,30 @@ fn write_aggregate_die(
 }
 
 // ============================================================================
-// .debug_line (DWARF v4)
+// .debug_line (DWARF v4/v5)
 // ============================================================================
 
 fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u64, String)>) {
     let mut out = Vec::new();
     let mut relocs: Vec<(u64, String)> = Vec::new();
     let hdr_start = out.len();
+    let dwarf_ver = opts.dwarf_version;
     out.extend_from_slice(&[0u8; 4]); // unit_length
-    out.extend_from_slice(&4u16.to_le_bytes()); // version = 4
+    out.extend_from_slice(&(dwarf_ver as u16).to_le_bytes()); // version
+    if dwarf_ver >= 5 {
+        // DWARF v5: add address_size and segment_selector_size
+        out.push(opts.arch.address_size());
+        out.push(0); // segment_selector_size
+    }
     let header_length_pos = out.len();
     out.extend_from_slice(&[0u8; 4]); // header_length (回填)
     out.push(opts.min_insn_len);
-    out.push(opts.max_ops_per_insn); // DWARF 4 必须为 1
+    if dwarf_ver >= 5 {
+        // DWARF v5: maximum_operations_per_instruction removed
+        // (always 1 for non-VLIW architectures)
+    } else {
+        out.push(opts.max_ops_per_insn); // DWARF 4 必须为 1
+    }
     out.push(opts.default_is_stmt);
     out.push(opts.line_base as u8);
     out.push(opts.line_range);
@@ -1641,24 +1652,54 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u
     }
     let _ = opcode_base; // 仅用于语义核对
 
-    // DWARF v4: directory table is simple null-terminated strings
-    // followed by a single null byte terminator
-    for d in &cu.line_dirs {
-        out.extend_from_slice(d.as_bytes());
-        out.push(0);
-    }
-    out.push(0); // directory table terminator
+    if dwarf_ver >= 5 {
+        // DWARF v5: directory table with entry format
+        // 1 entry format: (DW_LNCT_path, DW_FORM_string)
+        out.push(1); // directory_entry_format_count
+        write_uleb128(&mut out, DW_LNCT_path as u64);
+        write_uleb128(&mut out, DW_FORM_string as u64);
+        // directories count
+        write_uleb128(&mut out, cu.line_dirs.len() as u64);
+        for d in &cu.line_dirs {
+            out.extend_from_slice(d.as_bytes());
+            out.push(0); // null-terminated string
+        }
 
-    // DWARF v4: file name table entries: (name, dir_idx, time, size)
-    // followed by a single null byte terminator
-    for f in &cu.line_files {
-        out.extend_from_slice(f.as_bytes());
-        out.push(0); // null-terminated name
-        write_uleb128(&mut out, 0); // directory_index (0 = first dir)
-        write_uleb128(&mut out, 0); // timestamp
-        write_uleb128(&mut out, 0); // size
+        // DWARF v5: file name table with entry format
+        // 2 entry formats: (DW_LNCT_path, DW_FORM_string),
+        //                  (DW_LNCT_directory_index, DW_FORM_udata)
+        out.push(2); // file_name_entry_format_count
+        write_uleb128(&mut out, DW_LNCT_path as u64);
+        write_uleb128(&mut out, DW_FORM_string as u64);
+        write_uleb128(&mut out, DW_LNCT_directory_index as u64);
+        write_uleb128(&mut out, DW_FORM_data1 as u64);
+        // file_names count
+        write_uleb128(&mut out, cu.line_files.len() as u64);
+        for f in &cu.line_files {
+            out.extend_from_slice(f.as_bytes());
+            out.push(0); // null-terminated name
+            out.push(0); // directory_index = 0 (first dir)
+        }
+    } else {
+        // DWARF v4: directory table is simple null-terminated strings
+        // followed by a single null byte terminator
+        for d in &cu.line_dirs {
+            out.extend_from_slice(d.as_bytes());
+            out.push(0);
+        }
+        out.push(0); // directory table terminator
+
+        // DWARF v4: file name table entries: (name, dir_idx, time, size)
+        // followed by a single null byte terminator
+        for f in &cu.line_files {
+            out.extend_from_slice(f.as_bytes());
+            out.push(0); // null-terminated name
+            write_uleb128(&mut out, 0); // directory_index (0 = first dir)
+            write_uleb128(&mut out, 0); // timestamp
+            write_uleb128(&mut out, 0); // size
+        }
+        out.push(0); // file name table terminator
     }
-    out.push(0); // file name table terminator
 
     // 回填 header_length
     let header_length = (out.len() - header_length_pos - 4) as u32;
