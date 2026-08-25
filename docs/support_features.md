@@ -201,10 +201,14 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 栈保护 guard 寄存器自定义 | `-mstack-protector-guard-reg=gs` 支持内核 per-CPU canary（`%gs:0x28`）；prologue canary 加载和 epilogue canary 校验均使用可配置段前缀（fs: 0x64 / gs: 0x65）；默认 `%fs:0x28` 用于用户态 |
 | `-fstack-clash-protection` | 全架构 (x86_64/aarch64/riscv64/mips/mips64/arm) 大块栈分配（> 4096 字节）时逐页探测 guard page；发射探测循环：先减剩余字节，再循环每页探测（x86_64: `sub rsp,4096` + `mov byte [rsp],0`；aarch64: `sub sp,sp,#4096` + `strb wzr,[sp]`；riscv64: 双 `addi sp,sp,-2048` + `sb zero,0(sp)`；mips: `subu $sp,$sp,$t1` + `sb $zero,0($sp)`；arm: `sub sp,sp,#4096` + `strb r0,[sp]`）触发缺页异常；小帧保持普通分配 |
 | Retpoline 完整验证 | `-mfunction-return=thunk-extern` 与内核侧 `__x86_return_thunk` 符号兼容；objtool ORC 帧信息正确生成；`-mindirect-branch=thunk-extern` 已实现（见 objtool / ORC 行） |
-| `-fno-strict-aliasing` | 优化器不做类型双关假设（type-based alias analysis）；常量折叠使用 `checked_add/sub/mul` 不假设无符号溢出；当前优化器已保守处理，标志被接受并存储 |
-| `-fno-strict-overflow` | 优化器不假设有符号溢出为未定义行为；常量折叠在溢出时返回 `None` 不折叠；循环优化不做基于无溢出的范围推断 |
+| `-fno-strict-aliasing` | 优化器不做类型双关假设（type-based alias analysis）；P4 别名分析为 Steensgaard 风格（类型不敏感），不区分不同指针类型的别名关系；常量折叠使用 wrapping 算术；当前优化器已保守处理，标志存储于 Target 供未来优化 pass 参考 |
+| `-fno-strict-overflow` | 优化器不假设有符号溢出为未定义行为；常量折叠使用 wrapping 算术（与 C 标准整数模语义一致）；循环优化不做基于无溢出的范围推断；标志存储于 Target 供未来优化 pass 参考 |
 | `-fshort-wchar` | `wchar_t` 为 2 字节（UTF-16LE）模式；预处理器定义 `__WCHAR_TYPE__` 为 `short unsigned int`、`__WCHAR_MAX__` 为 65535；parser 宽字符串/字符字面量编码为 UTF-16LE（含代理对处理）；null 终止符为 2 字节 |
-| `-fno-common` | 公共符号（tentative definition）直接放入 `.bss` 而非合并到 common 段；当前 codegen 已默认按此行为处理未初始化全局变量 |
+| `-fno-common` | 公共符号（tentative definition）直接放入 `.bss` 而非合并到 common 段；当前 codegen 已默认按此行为处理未初始化全局变量；链接器 resolve.rs 处理跨 TU tentative definition 合并 |
+| `-fno-plt` | 接受但无操作；内核不使用 PLT，DCC codegen 不生成 PLT 入口 |
+| `-falign-jumps=N` / `-falign-loops=N` | `=1` 接受但无操作（等价于不对齐）；其他值发出警告（DCC 不执行代码对齐） |
+| `-mpreferred-stack-boundary=N` | `=2`（4 字节对齐）接受但无操作（内核默认）；其他值发出警告（DCC 不调整栈对齐） |
+| 未知 `-m*`/`-f*` 标志警告 | 未显式列出的 `-m*` 和 `-f*` 标志不再静默接受，而是收集到 `cli_warnings` 并在编译开始时通过 stderr 输出 `dcc: warning: ignoring unknown option '...'`；已知无操作标志（`-fno-pic`、`-fno-delete-null-pointer-checks`、`-mno-mmx` 等）显式列出，不触发警告 |
 
 ## 多架构支持
 

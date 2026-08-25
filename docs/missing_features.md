@@ -9,6 +9,13 @@
 
 > 非 x86 后端 mini-assembler 已支持常见指令 (-c 路径编码机器码), 详见 `support_features.md`
 
+| 限制 | 说明 |
+|------|------|
+| `-falign-jumps=N` / `-falign-loops=N` (N>1) | DCC 不执行代码段对齐；`=1` 等价于不对齐，静默接受；其他值发出警告 |
+| `-mpreferred-stack-boundary=N` (N≠2) | DCC 不调整栈对齐；`=2` 为内核默认，静默接受；其他值发出警告 |
+| `-fno-plt` | 接受但无操作；内核不使用 PLT，DCC codegen 不生成 PLT 入口 |
+| 优化器 `-fno-strict-aliasing` / `-fno-strict-overflow` | 当前优化器已保守处理（不做 TBAA、不假设有符号溢出 UB），但未显式检查 target 标志；未来添加激进优化时需实现标志检查 |
+
 ## 链接器 / 对象文件限制
 
 | 限制 | 说明 |
