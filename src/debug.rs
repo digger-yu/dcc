@@ -313,6 +313,28 @@ impl DwarfParamLocation {
     }
 }
 
+/// 局部变量描述 (函数或词法块内的变量)
+#[derive(Debug, Clone)]
+pub struct DwarfLocalVar {
+    pub name: String,
+    pub ty: DwarfType,
+    /// DWARF 位置表达式 (DW_OP_fbreg offset 等)
+    pub location: DwarfParamLocation,
+    pub decl_line: u32,
+}
+
+/// 词法块描述 (C 语言 {} 作用域)
+/// GDB 用 DW_TAG_lexical_block 识别局部变量可见范围
+#[derive(Debug, Clone)]
+pub struct DwarfLexicalBlock {
+    /// 块起始 PC
+    pub low_pc: u64,
+    /// 块结束 PC
+    pub high_pc: u64,
+    /// 块内局部变量
+    pub variables: Vec<DwarfLocalVar>,
+}
+
 /// 函数作用域信息（用于 DWARF DIEs + GDB index）
 #[derive(Debug, Clone)]
 pub struct DwarfFuncInfo {
@@ -326,6 +348,10 @@ pub struct DwarfFuncInfo {
     pub params: Vec<(String, DwarfType)>,
     /// 参数位置信息 (与 params 对应, 为空时不生成 DW_AT_location)
     pub param_locations: Vec<DwarfParamLocation>,
+    /// 函数直接作用域内的局部变量 (不在任何嵌套词法块内)
+    pub local_vars: Vec<DwarfLocalVar>,
+    /// 嵌套词法块 (if/for/while {} 等)
+    pub lexical_blocks: Vec<DwarfLexicalBlock>,
     pub is_external: bool,
     pub is_inline: bool,
     pub is_declaration: bool,
@@ -776,6 +802,8 @@ pub fn build_dwarf(source: &str, functions: &[(&str, u64)]) -> DebugSections {
             },
             params: vec![],
             param_locations: vec![],
+            local_vars: vec![],
+            lexical_blocks: vec![],
             is_external: true,
             is_inline: false,
             is_declaration: false,
@@ -823,6 +851,8 @@ pub fn build_dwarf_arch(source: &str, functions: &[(&str, u64)], arch: ArchKind)
             },
             params: vec![],
             param_locations: vec![],
+            local_vars: vec![],
+            lexical_blocks: vec![],
             is_external: true,
             is_inline: false,
             is_declaration: false,
@@ -1036,6 +1066,9 @@ fn build_abbrev_and_info(
     // function DIEs
     for f in &cu.functions {
         let has_params = !f.params.is_empty();
+        let has_local_vars = !f.local_vars.is_empty();
+        let has_lexical_blocks = !f.lexical_blocks.is_empty();
+        let has_children = has_params || has_local_vars || has_lexical_blocks;
         let has_linkage = f.linkage_name.is_some();
         let has_decl_line = f.decl_line > 0;
         // Build attribute list conditionally:
@@ -1057,7 +1090,7 @@ fn build_abbrev_and_info(
         }
         let code = abb.get_or_create(
             DW_TAG_subprogram,
-            if has_params { DW_CHILDREN_yes } else { DW_CHILDREN_no },
+            if has_children { DW_CHILDREN_yes } else { DW_CHILDREN_no },
             &sub_attrs,
         );
         write_uleb128(&mut info, code as u64);
@@ -1106,8 +1139,37 @@ fn build_abbrev_and_info(
                 write_sleb128(&mut info, loc.offset);
             }
         }
+
+        // local variables in function scope (DW_TAG_variable)
+        for var in &f.local_vars {
+            emit_local_var_die(&mut info, abb, strs, cu, &mut type_offsets, var);
+        }
+
+        // lexical blocks (DW_TAG_lexical_block) with nested variables
+        for block in &f.lexical_blocks {
+            let block_has_vars = !block.variables.is_empty();
+            let block_attrs: Vec<(u16, u16)> = vec![
+                (DW_AT_low_pc, DW_FORM_addr),
+                (DW_AT_high_pc, DW_FORM_addr),
+            ];
+            let bcode = abb.get_or_create(
+                DW_TAG_lexical_block,
+                if block_has_vars { DW_CHILDREN_yes } else { DW_CHILDREN_no },
+                &block_attrs,
+            );
+            write_uleb128(&mut info, bcode as u64);
+            info.extend_from_slice(&block.low_pc.to_le_bytes());
+            info.extend_from_slice(&(block.high_pc - block.low_pc).to_le_bytes());
+            for var in &block.variables {
+                emit_local_var_die(&mut info, abb, strs, cu, &mut type_offsets, var);
+            }
+            if block_has_vars {
+                info.push(0); // terminate lexical_block children
+            }
+        }
+
         // subprogram 终止
-        if has_params {
+        if has_children {
             info.push(0);
         }
     }
@@ -1147,6 +1209,30 @@ fn build_abbrev_and_info(
 
 fn write_attr_strp(info: &mut Vec<u8>, off: u32) {
     info.extend_from_slice(&off.to_le_bytes());
+}
+
+/// Emit a DW_TAG_variable DIE for a local variable with location
+fn emit_local_var_die(
+    info: &mut Vec<u8>,
+    abb: &mut AbbrevBuilder,
+    strs: &mut StringTable,
+    cu: &CompileUnit,
+    type_offsets: &mut std::collections::HashMap<String, u32>,
+    var: &DwarfLocalVar,
+) {
+    let var_attrs: Vec<(u16, u16)> = vec![
+        (DW_AT_name, DW_FORM_strp),
+        (DW_AT_type, DW_FORM_ref4),
+        (DW_AT_location, DW_FORM_exprloc),
+    ];
+    let vcode = abb.get_or_create(DW_TAG_variable, DW_CHILDREN_no, &var_attrs);
+    write_uleb128(info, vcode as u64);
+    write_attr_strp(info, strs.intern(&var.name));
+    let ty_off = ensure_type_die(cu, info, abb, strs, type_offsets, &var.ty);
+    info.extend_from_slice(&ty_off.to_le_bytes());
+    // location expression: DW_OP_fbreg <offset>
+    info.push(var.location.op);
+    write_sleb128(info, var.location.offset);
 }
 
 fn ensure_type_die(
@@ -2514,6 +2600,8 @@ mod tests {
                 },
                 params: vec![],
                 param_locations: vec![],
+                local_vars: vec![],
+                lexical_blocks: vec![],
                 is_external: true,
                 is_inline: false,
                 is_declaration: false,
