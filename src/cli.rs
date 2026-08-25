@@ -81,6 +81,7 @@ pub struct Config {
     pub indirect_branch_thunk_extern: bool,
     pub patchable_function_entry: Option<(usize, usize)>,
     pub debug_level: u8, // 0=off (g0), 1=g1, 2=g2, 3=g3
+    pub dwarf_version: u8, // DWARF version: 4 or 5 (default 4)
     pub lto_enabled: bool,
     pub function_sections: bool, // -ffunction-sections（-flto 时默认开启）
     pub sanitizers: SanitizerFlags,
@@ -452,6 +453,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut indirect_branch_thunk_extern = false;
     let mut patchable_function_entry = None;
     let mut debug_level: u8 = 0;
+    let mut dwarf_version: u8 = 4;
     let mut lto_enabled = false;
     let mut function_sections = false;
     let mut no_function_sections = false;
@@ -857,6 +859,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-g1" => debug_level = 1,
             "-g2" => debug_level = 2,
             "-g3" => debug_level = 3,
+            "-gdwarf-4" => { debug_level = 2; dwarf_version = 4; }
+            "-gdwarf-5" => { debug_level = 2; dwarf_version = 5; }
             "-flto" => lto_enabled = true,
             a if a.starts_with("-flto=") => lto_enabled = true,
             "-ffunction-sections" => function_sections = true,
@@ -1686,6 +1690,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             indirect_branch_thunk_extern,
             patchable_function_entry,
             debug_level,
+            dwarf_version,
             lto_enabled,
             function_sections,
             sanitizers: SanitizerFlags::from_args(args)?,
@@ -1782,6 +1787,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             indirect_branch_thunk_extern,
             patchable_function_entry,
             debug_level,
+            dwarf_version,
             lto_enabled,
             function_sections,
             sanitizers: SanitizerFlags::from_args(args)?,

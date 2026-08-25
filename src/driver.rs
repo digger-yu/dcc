@@ -809,6 +809,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         cfg.emit_asm,
         &file_name,
         cfg.debug_level,
+        cfg.dwarf_version,
         cfg.sanitizers,
         lto_enabled,
         function_sections,

@@ -1148,6 +1148,7 @@ pub fn emit(
     emit_asm: bool,
     source_name: &str,
     debug_level: u8,
+    dwarf_version: u8,
     sanitizers: SanitizerFlags,
     lto_enabled: bool,
     function_sections: bool,
@@ -1233,6 +1234,7 @@ pub fn emit(
                 let cu = build_dwarf_cu(module, source_name, &func_pcs, combined_line_entries);
                 let opts = debug::DebugOptions {
                     level: debug_level,
+                    dwarf_version,
                     source_name: source_name.to_string(),
                     ..Default::default()
                 };
@@ -1515,6 +1517,7 @@ pub fn emit(
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
+                    dwarf_version,
                     source_name: source_name.to_string(),
                     arch: debug::ArchKind::AArch64,
                     ..debug::DebugOptions::default()
@@ -1602,6 +1605,7 @@ pub fn emit(
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
+                    dwarf_version,
                     source_name: source_name.to_string(),
                     arch: debug::ArchKind::RiscV64,
                     ..debug::DebugOptions::default()
@@ -1689,6 +1693,7 @@ pub fn emit(
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
+                    dwarf_version,
                     source_name: source_name.to_string(),
                     arch: debug::ArchKind::Mips,
                     ..debug::DebugOptions::default()
@@ -1766,6 +1771,7 @@ pub fn emit(
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
+                    dwarf_version,
                     source_name: source_name.to_string(),
                     arch: debug::ArchKind::Mips64,
                     ..debug::DebugOptions::default()
@@ -1843,6 +1849,7 @@ pub fn emit(
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
+                    dwarf_version,
                     source_name: source_name.to_string(),
                     arch: debug::ArchKind::Arm,
                     ..debug::DebugOptions::default()
