@@ -970,7 +970,14 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
         sec.macro_ = build_debug_macro(cu, opts);
     }
 
-    // 8) -gsplit-dwarf: dwo + skeleton
+    // 8) DWARF v5: .debug_str_offsets + .debug_addr + .debug_line_str
+    if opts.dwarf_version >= 5 {
+        sec.str_offsets = build_str_offsets(cu, opts);
+        sec.addr = build_addr(cu, opts);
+        sec.line_str = build_line_str(cu, opts);
+    }
+
+    // 9) -gsplit-dwarf: dwo + skeleton
     if opts.split_dwarf {
         let split = build_split_dwarf(cu, opts);
         sec.info_dwo = split.info_dwo;
@@ -984,7 +991,7 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
         sec.skeleton_type = split.skeleton_type;
     }
 
-    // 9) BTF - 生成完整类型信息
+    // 10) BTF - 生成完整类型信息
     sec.btf = build_btf_full(cu);
 
     sec
@@ -2207,6 +2214,62 @@ fn build_debug_macro(cu: &CompileUnit, _opts: &DebugOptions) -> Vec<u8> {
 }
 
 // ============================================================================
+// DWARF v5 新增节: .debug_str_offsets / .debug_addr / .debug_line_str
+// ============================================================================
+
+/// Build .debug_str_offsets section (DWARF v5 section 6.1.1.2)
+/// Contains a header followed by an array of offsets into .debug_str.
+/// Each offset references a string used via DW_FORM_strx* forms.
+/// Currently emits a minimal valid section (header + empty offset table)
+/// since we still use DW_FORM_strp for string references.
+fn build_str_offsets(_cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
+    if opts.dwarf_version < 5 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // Section header: unit_length(4) + version(2) + padding(2) = 8 bytes
+    out.extend_from_slice(&[0u8; 4]); // unit_length placeholder
+    out.extend_from_slice(&5u16.to_le_bytes()); // version = 5
+    out.extend_from_slice(&0u16.to_le_bytes()); // padding
+    // No offset entries (we use DW_FORM_strp, not DW_FORM_strx*)
+    let unit_len = (out.len() - 4) as u32;
+    out[0..4].copy_from_slice(&unit_len.to_le_bytes());
+    out
+}
+
+/// Build .debug_addr section (DWARF v5 section 6.1.1.3)
+/// Contains a header followed by address table entries.
+/// Currently emits a minimal valid section since we still use
+/// DW_FORM_addr for address references.
+fn build_addr(_cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
+    if opts.dwarf_version < 5 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // Section header: unit_length(4) + version(2) + address_size(1) + padding(1) = 8 bytes
+    out.extend_from_slice(&[0u8; 4]); // unit_length placeholder
+    out.extend_from_slice(&5u16.to_le_bytes()); // version = 5
+    out.push(opts.arch.address_size()); // address_size
+    out.push(0); // padding
+    // No address entries (we use DW_FORM_addr, not DW_FORM_addrx*)
+    let unit_len = (out.len() - 4) as u32;
+    out[0..4].copy_from_slice(&unit_len.to_le_bytes());
+    out
+}
+
+/// Build .debug_line_str section (DWARF v5 section 6.2.4)
+/// Contains strings referenced by the line program via DW_FORM_line_strp.
+/// Currently the line program uses DW_FORM_string (inline), so this
+/// section is empty. Reserved for future indexed line string support.
+fn build_line_str(_cu: &CompileUnit, opts: &DebugOptions) -> Vec<u8> {
+    if opts.dwarf_version < 5 {
+        return Vec::new();
+    }
+    // Empty section - line program uses DW_FORM_string inline
+    Vec::new()
+}
+
+// ============================================================================
 // Split-dwarf
 // ============================================================================
 
@@ -2223,12 +2286,21 @@ struct SplitDwarfOutput {
 }
 
 fn build_split_dwarf(cu: &CompileUnit, opts: &DebugOptions) -> SplitDwarfOutput {
+    let dwarf_ver = opts.dwarf_version;
     // DWO info: 写一个 skeleton CU 头
     let mut info = Vec::new();
     info.extend_from_slice(&[0u8; 4]); // unit_length
-    info.extend_from_slice(&4u16.to_le_bytes());
-    info.extend_from_slice(&0u32.to_le_bytes()); // abbrev offset
-    info.push(opts.arch.address_size());
+    info.extend_from_slice(&(dwarf_ver as u16).to_le_bytes()); // version
+    if dwarf_ver >= 5 {
+        // DWARF v5: unit_type(1) + address_size(1) + abbrev_offset(4)
+        info.push(DW_UT_compile);
+        info.push(opts.arch.address_size());
+        info.extend_from_slice(&0u32.to_le_bytes()); // abbrev offset
+    } else {
+        // DWARF v4: abbrev_offset(4) + address_size(1)
+        info.extend_from_slice(&0u32.to_le_bytes()); // abbrev offset
+        info.push(opts.arch.address_size());
+    }
     // dwo_id (placeholder)
     info.extend_from_slice(&0u64.to_le_bytes());
     // empty children
@@ -2245,9 +2317,17 @@ fn build_split_dwarf(cu: &CompileUnit, opts: &DebugOptions) -> SplitDwarfOutput 
     // Skeleton CU
     let mut skeleton = Vec::new();
     skeleton.extend_from_slice(&[0u8; 4]);
-    skeleton.extend_from_slice(&4u16.to_le_bytes());
-    skeleton.extend_from_slice(&0u32.to_le_bytes());
-    skeleton.push(opts.arch.address_size());
+    skeleton.extend_from_slice(&(dwarf_ver as u16).to_le_bytes()); // version
+    if dwarf_ver >= 5 {
+        // DWARF v5: unit_type(1) + address_size(1) + abbrev_offset(4)
+        skeleton.push(DW_UT_compile);
+        skeleton.push(opts.arch.address_size());
+        skeleton.extend_from_slice(&0u32.to_le_bytes()); // abbrev offset
+    } else {
+        // DWARF v4: abbrev_offset(4) + address_size(1)
+        skeleton.extend_from_slice(&0u32.to_le_bytes()); // abbrev offset
+        skeleton.push(opts.arch.address_size());
+    }
     let sk_attrs: Vec<(u16, u16)> = vec![
         (DW_AT_name, DW_FORM_strp),
         (DW_AT_comp_dir, DW_FORM_strp),
