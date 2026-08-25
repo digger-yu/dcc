@@ -6911,6 +6911,22 @@ fn m15_builtin_fold() {
     let _ = fs::remove_file(&exe);
 }
 
+/// const_eval 增强: 位域宽度常量表达式 + sizeof/alignof + 三元 + 类型转换 + 枚举
+#[test]
+#[cfg(unix)]
+fn const_eval_comprehensive_bitfield_sizeof_ternary() {
+    let src = include_str!("fixtures/c/const_eval_comprehensive.c");
+    let (out, exe) = run_compile_and_run("const-eval-comprehensive", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "runtime exit code should be 0");
+    let _ = fs::remove_file(&exe);
+}
+
 /// 严格类型检查: 隐式指针/整数转换 warning (不阻塞)
 #[test]
 fn m15_strict_warning_compile() {
