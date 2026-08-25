@@ -22,10 +22,6 @@ use crate::ir::Module;
 /// `always_inline` / `flatten` bypass this limit.
 const INLINE_MAX_DEPTH: u32 = 8;
 
-/// Item-count threshold for O3 heuristic inlining of small `static` functions
-/// with zero parameters.
-const INLINE_O3_SMALL_BODY_ITEMS: usize = 4;
-
 /// 按 -O 级别运行 IR 优化。
 ///
 /// 优化语义约束:
@@ -855,8 +851,164 @@ fn function_inline(module: &mut Module, level: u8) {
     }
 }
 
-fn count_block_items(b: &Block) -> usize {
-    b.items.len()
+
+// ---------------------------------------------------------------------------
+// Inline cost model
+//
+// Estimates the code-size impact of inlining a function call.
+// Used by the O3 heuristic path and reserved for future O1/O2 cost-driven
+// inlining.
+//
+// The model is intentionally simple (AST node counting) since dcc operates
+// on the pre-lowering AST, not a CFG/SSA.  The goal is to prevent
+// code-size blow-up from inlining large or complex callees while still
+// capturing the common kernel pattern of small accessor/macro functions.
+// ---------------------------------------------------------------------------
+
+/// Maximum cost threshold for speculative inlining at O3.
+/// Computed as: body_expr_nodes + param_count * avg_arg_nodes.
+const INLINE_COST_THRESHOLD: usize = 20;
+
+/// Count AST nodes in an expression (recursive).
+fn expr_node_count(e: &Expr) -> usize {
+    match e {
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Char { .. }
+        | Expr::String { .. }
+        | Expr::Ident { .. }
+        | Expr::SizeofTy { .. }
+        | Expr::SizeofExpr { .. }
+        | Expr::AlignofTy { .. }
+        | Expr::AlignofExpr { .. }
+        | Expr::Offsetof { .. }
+        | Expr::ComplexLit { .. }
+        | Expr::LabelAddr { .. } => 1,
+        Expr::Unary { e, .. }
+        | Expr::Cast { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. }
+        | Expr::Deref { e, .. }
+        | Expr::AddrOf { e, .. }
+        | Expr::PostInc { e, .. }
+        | Expr::PostDec { e, .. }
+        | Expr::PreInc { e, .. }
+        | Expr::PreDec { e, .. } => 1 + expr_node_count(e),
+        Expr::Binop { l, r, .. }
+        | Expr::Assign { l, r, .. }
+        | Expr::Index { arr: l, idx: r, .. }
+        | Expr::Comma { l, r, .. } => {
+            1 + expr_node_count(l) + expr_node_count(r)
+        }
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => 1 + expr_node_count(cond) + expr_node_count(then_) + expr_node_count(else_),
+        Expr::Call { callee, args, .. } => {
+            1 + expr_node_count(callee)
+                + args.iter().map(expr_node_count).sum::<usize>()
+        }
+        Expr::Member { expr, .. } => 1 + expr_node_count(expr),
+        Expr::VaArg { ap, .. } => 1 + expr_node_count(ap),
+        Expr::StmtExpr { block, .. } => {
+            1 + block.items.iter().map(item_node_count).sum::<usize>()
+        }
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            1 + inits.iter().map(init_node_count).sum::<usize>()
+        }
+        Expr::AsmExpr {
+            outputs,
+            inputs,
+            ..
+        } => {
+            1 + outputs.iter().chain(inputs.iter()).map(expr_node_count).sum::<usize>()
+        }
+    }
+}
+
+fn item_node_count(item: &BlockItem) -> usize {
+    match item {
+        BlockItem::Stmt(s) => stmt_node_count(s),
+        BlockItem::Decl(Decl::Var(v)) => {
+            1 + v.init.as_ref().map_or(0, expr_node_count)
+        }
+        BlockItem::Decl(Decl::Func(f)) => {
+            1 + f.body.as_ref().map_or(0, |b| {
+                b.items.iter().map(item_node_count).sum::<usize>()
+            })
+        }
+        _ => 1,
+    }
+}
+
+fn stmt_node_count(s: &Stmt) -> usize {
+    match s {
+        Stmt::Return { val, .. } => {
+            1 + val.as_ref().map_or(0, expr_node_count)
+        }
+        Stmt::Expr { e, .. } => 1 + expr_node_count(e),
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            1 + expr_node_count(cond) + stmt_node_count(then_)
+                + else_.as_ref().map_or(0, |e| stmt_node_count(e))
+        }
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            1 + expr_node_count(cond) + stmt_node_count(body)
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
+            1 + init.as_ref().map_or(0, |s| stmt_node_count(s))
+                + cond.as_ref().map_or(0, expr_node_count)
+                + step.as_ref().map_or(0, expr_node_count)
+                + stmt_node_count(body)
+        }
+        Stmt::Block { b, .. } => {
+            1 + b.items.iter().map(item_node_count).sum::<usize>()
+        }
+        Stmt::Switch { expr, cases, .. } => {
+            1 + expr_node_count(expr)
+                + cases
+                    .iter()
+                    .map(|c| {
+                        c.body
+                            .items
+                            .iter()
+                            .map(item_node_count)
+                            .sum::<usize>()
+                    })
+                    .sum::<usize>()
+        }
+        _ => 1,
+    }
+}
+
+fn init_node_count(init: &crate::ast::InitItem) -> usize {
+    match init {
+        crate::ast::InitItem::Expr(e) => expr_node_count(e),
+        crate::ast::InitItem::Designated { value, .. } => expr_node_count(value),
+    }
+}
+
+/// Estimate the cost of inlining function `f` called with `args`.
+///
+/// Returns the estimated node count of the inlined result.
+/// Lower is better; values above `INLINE_COST_THRESHOLD` indicate
+/// the inlining would likely increase code size.
+fn estimate_inline_cost(f: &FuncDecl, body: &Block, args: &[Expr]) -> usize {
+    // Base cost: all nodes in the function body
+    let body_cost: usize = body.items.iter().map(item_node_count).sum();
+    // Argument duplication cost: each argument is substituted for every
+    // reference to the corresponding parameter in the body.
+    // We approximate by counting arg nodes * param references (bounded
+    // by body_cost as an upper heuristic).
+    let arg_cost: usize = args.iter().map(|a| expr_node_count(a)).sum::<usize>();
+    // Total: body + arg duplication (arg cost scaled by param usage ratio)
+    body_cost.saturating_add(arg_cost)
 }
 
 fn inline_calls_in_block(
@@ -1082,10 +1234,10 @@ fn try_inline_call(
         return None;
     }
 
-    // --- O3 启发式: 小型 static 零参函数 ---
-    let item_count = count_block_items(body);
+    // --- O3 启发式: 小型 static 零参函数, 使用成本模型 ---
+    let cost = estimate_inline_cost(f, body, args);
     if !(f.is_static && f.params.is_empty() && level >= 3
-        && item_count <= INLINE_O3_SMALL_BODY_ITEMS)
+        && cost <= INLINE_COST_THRESHOLD)
     {
         return None;
     }
