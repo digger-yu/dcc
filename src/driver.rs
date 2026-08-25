@@ -748,9 +748,15 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     target.ftrace_mode = cfg.ftrace_mode;
     target.stack_protector_guard_reg = cfg.stack_protector_guard_reg;
     target.stack_clash_protection = cfg.stack_clash_protection;
+    // -fno-strict-aliasing: 优化器当前不做类型双关假设 (TBAA), 标志
+    // 存储于 target 供未来优化 pass 参考.
     target.strict_aliasing = cfg.strict_aliasing;
+    // -fno-strict-overflow: 优化器当前不假设有符号溢出为 UB, 常量折叠
+    // 使用 wrapping 算术. 标志存储于 target 供未来优化 pass 参考.
     target.strict_overflow = cfg.strict_overflow;
     target.short_wchar = cfg.short_wchar;
+    // -fno-common: codegen 已将未初始化全局变量直接放入 .bss (而非
+    // COMMON 段). 链接器 resolve.rs 处理跨 TU tentative definition 合并.
     target.no_common = cfg.no_common;
     if !target.sse {
         // 精确检测 IR 中是否真的使用浮点类型/字面量, 避免把含

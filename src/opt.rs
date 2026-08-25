@@ -9,6 +9,16 @@ use crate::diagnostics::Span;
 use crate::ir::Module;
 
 /// 按 -O 级别运行 IR 优化。
+///
+/// 优化语义约束:
+/// - `-fno-strict-aliasing` (默认): 不做类型双关假设 (TBAA). 当前别名分析
+///   (P4 Steensgaard) 是类型不敏感的, 不区分不同指针类型的别名关系, 已
+///   保守处理. 未来若添加 TBAA 需检查 target.strict_aliasing.
+/// - `-fno-strict-overflow` (默认): 不假设有符号溢出为未定义行为. 常量折
+///   叠使用 wrapping 算术, 循环优化不做基于无溢出的范围推断. 未来若添
+///   加基于有符号溢出 UB 的优化需检查 target.strict_overflow.
+/// - 常量折叠 (fold_constants): 编译期常量使用 wrapping_add/sub/mul,
+///   与 C 标准整数语义一致 (模算术).
 pub fn optimize(module: &mut Module, level: u8) {
     if level == 0 {
         function_inline(module, 0);
