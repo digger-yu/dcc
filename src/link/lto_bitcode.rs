@@ -2138,3 +2138,378 @@ mod inline_tests {
         assert_eq!(stats.candidate_count, 10);
     }
 }
+
+// =============================================================================
+// 跨 TU 死存储消除 (Dead Store Elimination)
+// =============================================================================
+
+/// 死存储消除上下文
+#[derive(Debug, Clone, Default)]
+pub struct DeadStoreCtx {
+    /// 全局变量的存储位置 (name -> store count)
+    pub store_counts: HashMap<String, usize>,
+    /// 全局变量的读取位置 (name -> read count)
+    pub read_counts: HashMap<String, usize>,
+    /// 死存储列表 (函数名 -> 死存储索引)
+    pub dead_stores: HashMap<String, Vec<DeadStore>>,
+    /// 统计信息
+    pub stats: DeadStoreStats,
+}
+
+/// 死存储信息
+#[derive(Debug, Clone)]
+pub struct DeadStore {
+    /// 存储的目标变量
+    pub target: String,
+    /// 存储所在的函数
+    pub function: String,
+    /// 存储所在的语句索引
+    pub stmt_index: usize,
+}
+
+/// 死存储消除统计
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeadStoreStats {
+    /// 分析的存储总数
+    pub total_stores: usize,
+    /// 分析的读取总数
+    pub total_reads: usize,
+    /// 识别的死存储数量
+    pub dead_stores: usize,
+    /// 消除的死存储数量
+    pub eliminated: usize,
+}
+
+impl DeadStoreCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 分析多个模块的存储和读取
+    pub fn analyze(&mut self, modules: &[BitcodeModule]) {
+        for module in modules {
+            for func in &module.functions {
+                for (idx, stmt) in func.body.iter().enumerate() {
+                    self.analyze_stmt(stmt, &func.name, idx);
+                }
+            }
+        }
+    }
+
+    fn analyze_stmt(&mut self, stmt: &TypedStmt, func_name: &str, stmt_idx: usize) {
+        for expr in &stmt.expressions {
+            self.analyze_expr(expr, func_name, stmt_idx);
+        }
+        for nested in &stmt.nested {
+            self.analyze_stmt(nested, func_name, stmt_idx);
+        }
+    }
+
+    fn analyze_expr(&mut self, expr: &TypedExpr, func_name: &str, stmt_idx: usize) {
+        match &expr.kind {
+            ExprKind::Assign => {
+                // 左侧是存储目标
+                if let Some(lhs) = expr.children.first() {
+                    if let Some(target) = self.extract_store_target(lhs) {
+                        *self.store_counts.entry(target.clone()).or_insert(0) += 1;
+                        self.stats.total_stores += 1;
+                    }
+                }
+                // 只递归处理右侧（值），不处理左侧（目标）
+                if expr.children.len() > 1 {
+                    for child in expr.children.iter().skip(1) {
+                        self.analyze_expr(child, func_name, stmt_idx);
+                    }
+                }
+                return;
+            }
+            ExprKind::Local(name) => {
+                // 读取全局变量
+                if self.is_global_name(name) {
+                    *self.read_counts.entry(name.clone()).or_insert(0) += 1;
+                    self.stats.total_reads += 1;
+                }
+            }
+            _ => {}
+        }
+
+        for child in &expr.children {
+            self.analyze_expr(child, func_name, stmt_idx);
+        }
+    }
+
+    /// 提取存储目标名称
+    fn extract_store_target(&self, expr: &TypedExpr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Local(name) => Some(name.clone()),
+            ExprKind::Member(name) => Some(name.clone()),
+            ExprKind::Dereference => {
+                // 指针解引用的存储，目标不明确
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// 判断是否是全局变量名
+    fn is_global_name(&self, name: &str) -> bool {
+        // DCC 约定：. 开头的名字是内部全局变量
+        name.starts_with('.') || name.starts_with("__dcc_")
+    }
+
+    /// 识别死存储
+    pub fn identify_dead_stores(&mut self) {
+        // 死存储：存储到从未被读取的变量
+        for (target, store_count) in &self.store_counts {
+            let read_count = self.read_counts.get(target).copied().unwrap_or(0);
+            if read_count == 0 && *store_count > 0 {
+                // 这个变量的所有存储都是死的
+                self.stats.dead_stores += store_count;
+            }
+        }
+    }
+
+    /// 在模块上运行死存储消除
+    pub fn eliminate(&mut self, modules: &mut [BitcodeModule]) {
+        self.identify_dead_stores();
+
+        // 收集要删除的变量
+        let dead_targets: HashSet<String> = self
+            .store_counts
+            .keys()
+            .filter(|target| {
+                let reads = self.read_counts.get(*target).copied().unwrap_or(0);
+                reads == 0
+            })
+            .cloned()
+            .collect();
+
+        if dead_targets.is_empty() {
+            return;
+        }
+
+        // 删除死存储
+        for module in modules {
+            for func in &mut module.functions {
+                for stmt in &mut func.body {
+                    self.eliminate_in_stmt(stmt, &dead_targets);
+                }
+            }
+        }
+
+        self.stats.eliminated = self.stats.dead_stores;
+    }
+
+    fn eliminate_in_stmt(&self, stmt: &mut TypedStmt, dead_targets: &HashSet<String>) {
+        // 过滤掉死存储表达式
+        stmt.expressions.retain(|expr| {
+            if let ExprKind::Assign = &expr.kind {
+                if let Some(lhs) = expr.children.first() {
+                    if let Some(target) = self.extract_store_target(lhs) {
+                        if dead_targets.contains(&target) {
+                            return false; // 删除这个存储
+                        }
+                    }
+                }
+            }
+            true
+        });
+
+        for nested in &mut stmt.nested {
+            self.eliminate_in_stmt(nested, dead_targets);
+        }
+    }
+}
+
+/// 运行跨 TU 死存储消除
+pub fn run_cross_tu_dse(modules: &mut [BitcodeModule]) -> DeadStoreStats {
+    let mut ctx = DeadStoreCtx::new();
+    ctx.analyze(modules);
+    ctx.eliminate(modules);
+    ctx.stats
+}
+
+#[cfg(test)]
+mod dse_tests {
+    use super::*;
+    use crate::diagnostics::Span;
+    use crate::ir::{ExprKind, ExprLiteral, TypedExpr, TypedStmt, ValueType};
+
+    fn make_assign_expr(target: &str, value: i128) -> TypedExpr {
+        TypedExpr {
+            ty: ValueType::Integer { bits: 32, signed: true },
+            kind: ExprKind::Assign,
+            children: vec![
+                TypedExpr {
+                    ty: ValueType::Integer { bits: 32, signed: true },
+                    kind: ExprKind::Local(target.to_string()),
+                    children: vec![],
+                    span: Span::point("", 0, 0),
+                    literal: None,
+                },
+                TypedExpr {
+                    ty: ValueType::Integer { bits: 32, signed: true },
+                    kind: ExprKind::Constant,
+                    children: vec![],
+                    span: Span::point("", 0, 0),
+                    literal: Some(ExprLiteral::Int(value)),
+                },
+            ],
+            span: Span::point("", 0, 0),
+            literal: None,
+        }
+    }
+
+    fn make_read_expr(name: &str) -> TypedExpr {
+        TypedExpr {
+            ty: ValueType::Integer { bits: 32, signed: true },
+            kind: ExprKind::Local(name.to_string()),
+            children: vec![],
+            span: Span::point("", 0, 0),
+            literal: None,
+        }
+    }
+
+    #[test]
+    fn dse_empty_modules() {
+        let mut modules: Vec<BitcodeModule> = vec![];
+        let stats = run_cross_tu_dse(&mut modules);
+        assert_eq!(stats.total_stores, 0);
+        assert_eq!(stats.dead_stores, 0);
+    }
+
+    #[test]
+    fn dse_analyze_stores() {
+        let func = Function {
+            name: "test".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![TypedStmt {
+                expressions: vec![make_assign_expr(".g_var", 42)],
+                nested: vec![],
+                span: Span::point("", 0, 0),
+            }],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![],
+        };
+        let mut ctx = DeadStoreCtx::new();
+        ctx.analyze(&[module]);
+        assert_eq!(ctx.store_counts.get(".g_var"), Some(&1));
+        assert_eq!(ctx.stats.total_stores, 1);
+    }
+
+    #[test]
+    fn dse_analyze_reads() {
+        let func = Function {
+            name: "test".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![TypedStmt {
+                expressions: vec![make_read_expr(".g_var")],
+                nested: vec![],
+                span: Span::point("", 0, 0),
+            }],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![],
+        };
+        let mut ctx = DeadStoreCtx::new();
+        ctx.analyze(&[module]);
+        assert_eq!(ctx.read_counts.get(".g_var"), Some(&1));
+        assert_eq!(ctx.stats.total_reads, 1);
+    }
+
+    #[test]
+    fn dse_identifies_dead_stores() {
+        let func = Function {
+            name: "test".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![
+                TypedStmt {
+                    expressions: vec![make_assign_expr(".dead_var", 42)],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+                TypedStmt {
+                    expressions: vec![make_assign_expr(".live_var", 100)],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+                TypedStmt {
+                    expressions: vec![make_read_expr(".live_var")],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+            ],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![],
+        };
+        let mut ctx = DeadStoreCtx::new();
+        ctx.analyze(&[module]);
+        ctx.identify_dead_stores();
+        // .dead_var 存储了但从未读取
+        assert_eq!(ctx.stats.dead_stores, 1);
+    }
+
+    #[test]
+    fn dse_eliminates_dead_stores() {
+        let func = Function {
+            name: "test".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![
+                TypedStmt {
+                    expressions: vec![
+                        make_assign_expr(".dead_var", 42),
+                        make_assign_expr(".live_var", 100),
+                    ],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+                TypedStmt {
+                    expressions: vec![make_read_expr(".live_var")],
+                    nested: vec![],
+                    span: Span::point("", 0, 0),
+                },
+            ],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![],
+        };
+        let mut modules = vec![module];
+        let stats = run_cross_tu_dse(&mut modules);
+        assert_eq!(stats.dead_stores, 1);
+        assert_eq!(stats.eliminated, 1);
+        // 验证死存储被删除
+        let remaining = &modules[0].functions[0].body[0].expressions;
+        assert_eq!(remaining.len(), 1); // 只剩 .live_var 的存储
+    }
+
+    #[test]
+    fn dse_stats_tracking() {
+        let stats = DeadStoreStats {
+            total_stores: 10,
+            total_reads: 5,
+            dead_stores: 3,
+            eliminated: 3,
+        };
+        assert_eq!(stats.total_stores, 10);
+        assert_eq!(stats.dead_stores, 3);
+        assert_eq!(stats.eliminated, 3);
+    }
+}
