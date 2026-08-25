@@ -8,6 +8,24 @@ use crate::const_eval;
 use crate::diagnostics::Span;
 use crate::ir::Module;
 
+// ---------------------------------------------------------------------------
+// Inline policy constants
+//
+// These govern the inliner's behaviour at each optimisation level.
+// The Linux kernel relies on `__always_inline` / `__attribute__((always_inline))`
+// being honoured unconditionally, and on `__attribute__((noinline))` preventing
+// inlining.  Getting these wrong can cause functional correctness issues
+// (e.g. percpu access macros, bit-op inline functions).
+// ---------------------------------------------------------------------------
+
+/// Maximum call-chain depth for speculative (non-forced) inlining.
+/// `always_inline` / `flatten` bypass this limit.
+const INLINE_MAX_DEPTH: u32 = 8;
+
+/// Item-count threshold for O3 heuristic inlining of small `static` functions
+/// with zero parameters.
+const INLINE_O3_SMALL_BODY_ITEMS: usize = 4;
+
 /// 按 -O 级别运行 IR 优化。
 ///
 /// 优化语义约束:
@@ -19,13 +37,23 @@ use crate::ir::Module;
 ///   加基于有符号溢出 UB 的优化需检查 target.strict_overflow.
 /// - 常量折叠 (fold_constants): 编译期常量使用 wrapping_add/sub/mul,
 ///   与 C 标准整数语义一致 (模算术).
+///
+/// 内联策略:
+/// - `-O0`: 仅内联 `always_inline` / `flatten` 标记的函数 (内核正确性
+///   依赖, 如 percpu 宏). 不受尺寸限制.
+/// - `-O1+`: 额外内联符合成本模型的 `static inline` 函数.
+/// - `-O3`: 额外启发式内联小型 `static` 零参函数 (≤4 items).
+/// - `noinline` 属性始终被尊重 (除非与 `always_inline` 冲突, 此时
+///   `always_inline` 优先, 与 GCC 行为一致).
+/// -  speculative 内联深度上限 `INLINE_MAX_DEPTH` (8). 递归函数
+///   通过 callee-name 检测阻止直接递归内联.
 pub fn optimize(module: &mut Module, level: u8) {
+    // 内联: O0 仅 always_inline; O1+ 完整策略
+    function_inline(module, level);
     if level == 0 {
-        function_inline(module, 0);
         return;
     }
     fold_constants(module);
-    function_inline(module, level);
     if level >= 2 {
         prune_dead_stores(module);
         // Note: dead asm elimination is intentionally NOT performed.
@@ -795,8 +823,12 @@ fn dce_block_in_stmt(s: &mut Stmt) {
     }
 }
 
-/// -O1+: `always_inline` 函数内联；-O3 额外内联小型 static 零参函数。
-/// `flatten` 属性: 函数体内所有调用均视为 always_inline。
+/// 内联入口: 收集模块内所有函数定义, 然后逐函数内联.
+///
+/// `level` 控制内联激进程度:
+///   - O0: 仅 `always_inline` / `flatten`
+///   - O1-O2: 成本模型驱动的 `static inline`
+///   - O3: 额外启发式小型 static 零参函数
 fn function_inline(module: &mut Module, level: u8) {
     let prog = module.source_mut();
     let fenv_access = prog.fenv_access;
@@ -815,7 +847,9 @@ fn function_inline(module: &mut Module, level: u8) {
         if let Decl::Func(f) = decl {
             let caller_flatten = f.is_flatten;
             if let Some(body) = &mut f.body {
-                inline_calls_in_block(body, &funcs, level, caller_flatten, fenv_access);
+                inline_calls_in_block(
+                    body, &funcs, level, caller_flatten, fenv_access, 0,
+                );
             }
         }
     }
@@ -831,15 +865,18 @@ fn inline_calls_in_block(
     level: u8,
     caller_flatten: bool,
     fenv_access: bool,
+    depth: u32,
 ) {
     for item in &mut body.items {
         match item {
-            BlockItem::Stmt(s) => {
-                inline_calls_in_stmt(s, funcs, level, caller_flatten, fenv_access)
-            }
+            BlockItem::Stmt(s) => inline_calls_in_stmt(
+                s, funcs, level, caller_flatten, fenv_access, depth,
+            ),
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &mut f.body {
-                    inline_calls_in_block(b, funcs, level, caller_flatten, fenv_access);
+                    inline_calls_in_block(
+                        b, funcs, level, caller_flatten, fenv_access, depth,
+                    );
                 }
             }
             _ => {}
@@ -853,28 +890,29 @@ fn inline_calls_in_stmt(
     level: u8,
     caller_flatten: bool,
     fenv_access: bool,
+    depth: u32,
 ) {
     match s {
         Stmt::Return { val: Some(e), .. } => {
-            *e = inline_expr(e.clone(), funcs, level, caller_flatten, fenv_access);
+            *e = inline_expr(e.clone(), funcs, level, caller_flatten, fenv_access, depth);
         }
         Stmt::Expr { e, .. } => {
-            *e = inline_expr(e.clone(), funcs, level, caller_flatten, fenv_access)
+            *e = inline_expr(e.clone(), funcs, level, caller_flatten, fenv_access, depth)
         }
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            *cond = inline_expr(cond.clone(), funcs, level, caller_flatten, fenv_access);
-            inline_calls_in_stmt(then_, funcs, level, caller_flatten, fenv_access);
+            *cond = inline_expr(cond.clone(), funcs, level, caller_flatten, fenv_access, depth);
+            inline_calls_in_stmt(then_, funcs, level, caller_flatten, fenv_access, depth);
             if let Some(e) = else_ {
-                inline_calls_in_stmt(e, funcs, level, caller_flatten, fenv_access);
+                inline_calls_in_stmt(e, funcs, level, caller_flatten, fenv_access, depth);
             }
         }
         Stmt::Block { b, .. } => {
-            inline_calls_in_block(b, funcs, level, caller_flatten, fenv_access)
+            inline_calls_in_block(b, funcs, level, caller_flatten, fenv_access, depth)
         }
         Stmt::While { body, .. } | Stmt::Do { body, .. } => {
-            inline_calls_in_stmt(body, funcs, level, caller_flatten, fenv_access)
+            inline_calls_in_stmt(body, funcs, level, caller_flatten, fenv_access, depth)
         }
         Stmt::For {
             init,
@@ -884,15 +922,15 @@ fn inline_calls_in_stmt(
             ..
         } => {
             if let Some(c) = cond {
-                *c = inline_expr(c.clone(), funcs, level, caller_flatten, fenv_access);
+                *c = inline_expr(c.clone(), funcs, level, caller_flatten, fenv_access, depth);
             }
             if let Some(st) = step {
-                *st = inline_expr(st.clone(), funcs, level, caller_flatten, fenv_access);
+                *st = inline_expr(st.clone(), funcs, level, caller_flatten, fenv_access, depth);
             }
             if let Some(i) = init {
-                inline_calls_in_stmt(i, funcs, level, caller_flatten, fenv_access);
+                inline_calls_in_stmt(i, funcs, level, caller_flatten, fenv_access, depth);
             }
-            inline_calls_in_stmt(body, funcs, level, caller_flatten, fenv_access);
+            inline_calls_in_stmt(body, funcs, level, caller_flatten, fenv_access, depth);
         }
         _ => {}
     }
@@ -992,37 +1030,75 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
     }
 }
 
+/// 内联决策: 判断函数 `name` 是否可被内联, 并返回替换后的表达式.
+///
+/// 决策规则 (按优先级):
+///   1. `noinline` 且非 `always_inline`: 拒绝 (noinline 被尊重)
+///   2. `always_inline` 与 `noinline` 同时存在: `always_inline` 优先 (GCC 兼容)
+///   3. `always_inline` / `flatten`: 无条件接受 (不受尺寸/深度限制)
+///   4. O0 级别: 拒绝所有非强制内联
+///   5. 深度超限: 拒绝
+///   6. 直接递归: 拒绝 (callee 名与函数名相同)
+///   7. O3 启发式: static + 零参 + body ≤ 4 items
+///   8. 其他: 拒绝
 fn try_inline_call(
     name: &str,
     args: &[Expr],
     funcs: &HashMap<String, FuncDecl>,
     level: u8,
     caller_flatten: bool,
+    depth: u32,
 ) -> Option<Expr> {
     let f = funcs.get(name)?;
-    if f.is_noinline {
-        return None;
-    }
     let body = f.body.as_ref()?;
     if f.is_variadic || args.len() != f.params.len() {
         return None;
     }
-    let item_count = count_block_items(body);
-    // attribute((flatten)): 调用者标记 flatten 时, 所有被调用函数均视为 always_inline
-    let allowed = if f.is_always_inline || caller_flatten {
-        item_count <= 8
-    } else if f.is_static && f.params.is_empty() && level >= 3 {
-        item_count <= 4
-    } else {
-        return None;
-    };
-    if !allowed {
+
+    // --- 属性优先级: noinline vs always_inline ---
+    // GCC 行为: 两者同时标记时 always_inline 优先.
+    if f.is_noinline && !f.is_always_inline {
         return None;
     }
+
+    // --- 强制内联: always_inline / flatten ---
+    // 不受尺寸限制, 不受深度限制. 内核 __always_inline 依赖此行为.
+    let forced = f.is_always_inline || caller_flatten;
+    if forced {
+        let ret = extract_inline_return(body)?;
+        if expr_calls_name(ret, name) {
+            return None; // 直接递归保护
+        }
+        return Some(substitute_call(f, ret, args));
+    }
+
+    // --- O0: 非强制内联一律拒绝 ---
+    if level == 0 {
+        return None;
+    }
+
+    // --- 深度限制: 防止嵌套内联爆炸 ---
+    if depth >= INLINE_MAX_DEPTH {
+        return None;
+    }
+
+    // --- O3 启发式: 小型 static 零参函数 ---
+    let item_count = count_block_items(body);
+    if !(f.is_static && f.params.is_empty() && level >= 3
+        && item_count <= INLINE_O3_SMALL_BODY_ITEMS)
+    {
+        return None;
+    }
+
     let ret = extract_inline_return(body)?;
     if expr_calls_name(ret, name) {
-        return None;
+        return None; // 直接递归保护
     }
+    Some(substitute_call(f, ret, args))
+}
+
+/// 参数替换: 将函数体返回表达式中的形参替换为实参.
+fn substitute_call(f: &FuncDecl, ret: &Expr, args: &[Expr]) -> Expr {
     let bindings: Vec<(String, Expr)> = f
         .params
         .iter()
@@ -1030,9 +1106,9 @@ fn try_inline_call(
         .filter_map(|(p, a)| p.name.as_ref().map(|id| (id.name.clone(), a.clone())))
         .collect();
     if bindings.len() != f.params.len() {
-        return None;
+        return ret.clone();
     }
-    Some(substitute_params(ret.clone(), &bindings))
+    substitute_params(ret.clone(), &bindings)
 }
 
 fn inline_expr(
@@ -1041,6 +1117,7 @@ fn inline_expr(
     level: u8,
     caller_flatten: bool,
     fenv_access: bool,
+    depth: u32,
 ) -> Expr {
     let e = match e {
         Expr::Call {
@@ -1050,23 +1127,25 @@ fn inline_expr(
             ty,
         } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
-                if let Some(inlined) =
-                    try_inline_call(&name.name, &args, funcs, level, caller_flatten)
-                {
-                    return inline_expr(inlined, funcs, level, caller_flatten, fenv_access);
+                if let Some(inlined) = try_inline_call(
+                    &name.name, &args, funcs, level, caller_flatten, depth,
+                ) {
+                    // 内联后继续递归内联替换结果中的嵌套调用
+                    return inline_expr(
+                        inlined, funcs, level, caller_flatten, fenv_access,
+                        depth + 1,
+                    );
                 }
             }
             Expr::Call {
                 callee: Box::new(inline_expr(
-                    *callee,
-                    funcs,
-                    level,
-                    caller_flatten,
-                    fenv_access,
+                    *callee, funcs, level, caller_flatten, fenv_access, depth,
                 )),
                 args: args
                     .into_iter()
-                    .map(|a| inline_expr(a, funcs, level, caller_flatten, fenv_access))
+                    .map(|a| {
+                        inline_expr(a, funcs, level, caller_flatten, fenv_access, depth)
+                    })
                     .collect(),
                 span,
                 ty,
@@ -1074,14 +1153,14 @@ fn inline_expr(
         }
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op,
-            l: Box::new(inline_expr(*l, funcs, level, caller_flatten, fenv_access)),
-            r: Box::new(inline_expr(*r, funcs, level, caller_flatten, fenv_access)),
+            l: Box::new(inline_expr(*l, funcs, level, caller_flatten, fenv_access, depth)),
+            r: Box::new(inline_expr(*r, funcs, level, caller_flatten, fenv_access, depth)),
             span,
             ty,
         },
         Expr::Unary { op, e, span, ty } => Expr::Unary {
             op,
-            e: Box::new(inline_expr(*e, funcs, level, caller_flatten, fenv_access)),
+            e: Box::new(inline_expr(*e, funcs, level, caller_flatten, fenv_access, depth)),
             span,
             ty,
         },
@@ -1093,25 +1172,13 @@ fn inline_expr(
             ty,
         } => Expr::Cond {
             cond: Box::new(inline_expr(
-                *cond,
-                funcs,
-                level,
-                caller_flatten,
-                fenv_access,
+                *cond, funcs, level, caller_flatten, fenv_access, depth,
             )),
             then_: Box::new(inline_expr(
-                *then_,
-                funcs,
-                level,
-                caller_flatten,
-                fenv_access,
+                *then_, funcs, level, caller_flatten, fenv_access, depth,
             )),
             else_: Box::new(inline_expr(
-                *else_,
-                funcs,
-                level,
-                caller_flatten,
-                fenv_access,
+                *else_, funcs, level, caller_flatten, fenv_access, depth,
             )),
             span,
             ty,
