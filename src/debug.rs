@@ -3426,6 +3426,116 @@ mod tests {
     }
 
     #[test]
+    fn dwarf_v5_info_has_version_5_and_unit_type() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "dcc".to_string(),
+            language: DW_LANG_C99,
+            functions: vec![],
+            globals: vec![],
+            types: vec![],
+            line_entries: vec![],
+            line_files: vec!["test.c".to_string()],
+            line_dirs: vec![".".to_string()],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let opts = DebugOptions {
+            level: 2,
+            dwarf_version: 5,
+            ..Default::default()
+        };
+        let sec = build_dwarf_full(&cu, &opts);
+        // .debug_info header: unit_length(4) + version(2) = offset 4,5
+        assert!(sec.info.len() > 6);
+        assert_eq!(sec.info[4], 5); // version = 5
+        assert_eq!(sec.info[5], 0);
+        // DWARF v5: unit_type at offset 6
+        assert_eq!(sec.info[6], DW_UT_compile);
+        // DWARF v5: address_size at offset 7
+        assert_eq!(sec.info[7], 8); // x86_64 = 8 bytes
+    }
+
+    #[test]
+    fn dwarf_v5_line_has_version_5_header() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "dcc".to_string(),
+            language: DW_LANG_C99,
+            functions: vec![],
+            globals: vec![],
+            types: vec![],
+            line_entries: vec![],
+            line_files: vec!["test.c".to_string()],
+            line_dirs: vec![".".to_string()],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let opts = DebugOptions {
+            level: 2,
+            dwarf_version: 5,
+            ..Default::default()
+        };
+        let sec = build_dwarf_full(&cu, &opts);
+        // .debug_line header: unit_length(4) + version(2) = offset 4,5
+        assert!(sec.line.len() > 6);
+        assert_eq!(sec.line[4], 5); // version = 5
+        assert_eq!(sec.line[5], 0);
+        // DWARF v5: address_size at offset 6
+        assert_eq!(sec.line[6], 8); // x86_64
+        // DWARF v5: segment_selector_size at offset 7
+        assert_eq!(sec.line[7], 0);
+    }
+
+    #[test]
+    fn dwarf_v5_emits_str_offsets_and_addr_sections() {
+        let cu = CompileUnit {
+            source_name: "test.c".to_string(),
+            comp_dir: None,
+            producer: "dcc".to_string(),
+            language: DW_LANG_C99,
+            functions: vec![],
+            globals: vec![],
+            types: vec![],
+            line_entries: vec![],
+            line_files: vec!["test.c".to_string()],
+            line_dirs: vec![".".to_string()],
+            low_pc: 0,
+            high_pc: 0,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let opts = DebugOptions {
+            level: 2,
+            dwarf_version: 5,
+            ..Default::default()
+        };
+        let sec = build_dwarf_full(&cu, &opts);
+        // .debug_str_offsets should be present with v5 header
+        assert!(!sec.str_offsets.is_empty());
+        // Version = 5 at offset 4
+        assert_eq!(sec.str_offsets[4], 5);
+        // .debug_addr should be present with v5 header
+        assert!(!sec.addr.is_empty());
+        assert_eq!(sec.addr[4], 5);
+    }
+
+    #[test]
+    fn dwarf_v4_no_str_offsets_or_addr() {
+        let dbg = build_dwarf("test.c", &[("main", 0x100)]);
+        // v4 should not emit these sections
+        assert!(dbg.str_offsets.is_empty());
+        assert!(dbg.addr.is_empty());
+        assert!(dbg.line_str.is_empty());
+    }
+
+    #[test]
     fn dwarf_aranges_present() {
         let dbg = build_dwarf("test.c", &[("main", 0x100)]);
         assert!(!dbg.aranges.is_empty());
