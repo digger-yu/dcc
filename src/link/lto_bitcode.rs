@@ -876,6 +876,279 @@ fn extract_const_literal(expr: &TypedExpr) -> Option<ExprLiteral> {
     None
 }
 
+// =============================================================================
+// 增强的跨 TU 常量传播
+// =============================================================================
+
+/// 常量传播上下文，跟踪跨 TU 的已知常量
+#[derive(Debug, Clone, Default)]
+pub struct ConstPropagationCtx {
+    /// 已知的全局常量值 (name -> value)
+    pub known_constants: HashMap<String, ExprLiteral>,
+    /// 地址被取走的常量（不能传播）
+    pub address_taken: HashSet<String>,
+    /// 传播统计
+    pub stats: ConstPropagationStats,
+}
+
+/// 常量传播统计信息
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConstPropagationStats {
+    /// 传播的常量数量
+    pub propagated: usize,
+    /// 折叠的二元表达式数量
+    pub folded_binary: usize,
+    /// 折叠的一元表达式数量
+    pub folded_unary: usize,
+    /// 跳过的地址被取走的常量
+    pub skipped_address_taken: usize,
+}
+
+impl ConstPropagationCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 从多个模块收集已知常量
+    pub fn collect_from_modules(&mut self, modules: &[BitcodeModule]) {
+        for module in modules {
+            for global in &module.globals {
+                // 只收集有初始化器的全局
+                if let Some(init) = &global.initializer {
+                    if let Some(lit) = extract_const_literal(init) {
+                        // 检查是否是常量（名字以 .const 或 .rodata 开头，或全大写）
+                        if is_likely_const_name(&global.name) {
+                            self.known_constants.insert(global.name.clone(), lit);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 收集地址被取走的常量（不能传播）
+    pub fn collect_address_taken(&mut self, modules: &[BitcodeModule]) {
+        for module in modules {
+            for func in &module.functions {
+                for stmt in &func.body {
+                    self.collect_address_taken_in_stmt(stmt);
+                }
+            }
+        }
+    }
+
+    fn collect_address_taken_in_stmt(&mut self, stmt: &TypedStmt) {
+        for expr in &stmt.expressions {
+            self.collect_address_taken_in_expr(expr);
+        }
+        for nested in &stmt.nested {
+            self.collect_address_taken_in_stmt(nested);
+        }
+    }
+
+    fn collect_address_taken_in_expr(&mut self, expr: &TypedExpr) {
+        // Address 操作符：标记为地址被取走
+        if let ExprKind::Address = &expr.kind {
+            if let Some(child) = expr.children.first() {
+                if let ExprKind::Local(name) = &child.kind {
+                    self.address_taken.insert(name.clone());
+                }
+            }
+        }
+        for child in &expr.children {
+            self.collect_address_taken_in_expr(child);
+        }
+    }
+
+    /// 在模块上运行常量传播
+    pub fn propagate(&mut self, modules: &mut [BitcodeModule]) {
+        for module in modules {
+            for func in &mut module.functions {
+                for stmt in &mut func.body {
+                    self.propagate_in_stmt(stmt);
+                }
+            }
+        }
+    }
+
+    fn propagate_in_stmt(&mut self, stmt: &mut TypedStmt) {
+        for expr in &mut stmt.expressions {
+            self.propagate_in_expr(expr);
+        }
+        for nested in &mut stmt.nested {
+            self.propagate_in_stmt(nested);
+        }
+    }
+
+    fn propagate_in_expr(&mut self, expr: &mut TypedExpr) {
+        // 先递归处理子节点
+        for child in &mut expr.children {
+            self.propagate_in_expr(child);
+        }
+
+        // 尝试替换 Local 引用为常量
+        if let ExprKind::Local(name) = &expr.kind {
+            // 检查是否是已知常量且地址未被取走
+            if self.address_taken.contains(name) {
+                self.stats.skipped_address_taken += 1;
+                return;
+            }
+            if let Some(&lit) = self.known_constants.get(name) {
+                expr.kind = ExprKind::Constant;
+                expr.literal = Some(lit);
+                self.stats.propagated += 1;
+                return;
+            }
+        }
+
+        // 尝试折叠常量表达式
+        if let Some(folded) = self.try_fold_expr(expr) {
+            *expr = folded;
+        }
+    }
+
+    /// 尝试折叠常量表达式
+    fn try_fold_expr(&self, expr: &TypedExpr) -> Option<TypedExpr> {
+        match &expr.kind {
+            ExprKind::Binary(op) => {
+                if expr.children.len() == 2 {
+                    let lhs = &expr.children[0];
+                    let rhs = &expr.children[1];
+                    if let (Some(l), Some(r)) = (lhs.literal, rhs.literal) {
+                        if let Some(result) = fold_binary_op(*op, l, r) {
+                            let mut folded = expr.clone();
+                            folded.kind = ExprKind::Constant;
+                            folded.literal = Some(result);
+                            folded.children.clear();
+                            return Some(folded);
+                        }
+                    }
+                }
+            }
+            ExprKind::Unary(op) => {
+                if expr.children.len() == 1 {
+                    let operand = &expr.children[0];
+                    if let Some(val) = operand.literal {
+                        if let Some(result) = fold_unary_op(*op, val) {
+                            let mut folded = expr.clone();
+                            folded.kind = ExprKind::Constant;
+                            folded.literal = Some(result);
+                            folded.children.clear();
+                            return Some(folded);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+/// 判断名字是否看起来像常量
+fn is_likely_const_name(name: &str) -> bool {
+    // DCC 内部约定：.const 或 .rodata 段
+    if name.starts_with(".const") || name.starts_with(".rodata") {
+        return true;
+    }
+    // 全大写字母（C 宏常量约定）
+    if name.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+        return !name.is_empty() && name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+    }
+    // 以 const_ 开头
+    if name.starts_with("const_") || name.contains("_const_") {
+        return true;
+    }
+    false
+}
+
+/// 折叠二元运算
+fn fold_binary_op(op: crate::ast::BinOp, lhs: ExprLiteral, rhs: ExprLiteral) -> Option<ExprLiteral> {
+    use crate::ast::BinOp;
+    match (lhs, rhs) {
+        (ExprLiteral::Int(l), ExprLiteral::Int(r)) => {
+            let result = match op {
+                BinOp::Add => l.checked_add(r)?,
+                BinOp::Sub => l.checked_sub(r)?,
+                BinOp::Mul => l.checked_mul(r)?,
+                BinOp::Div => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.checked_div(r)?
+                }
+                BinOp::Mod => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.checked_rem(r)?
+                }
+                BinOp::And => l & r,
+                BinOp::Or => l | r,
+                BinOp::Xor => l ^ r,
+                BinOp::Shl => l.checked_shl(r as u32)?,
+                BinOp::Shr => l.checked_shr(r as u32)?,
+                BinOp::EqEq => (l == r) as i128,
+                BinOp::Ne => (l != r) as i128,
+                BinOp::Lt => (l < r) as i128,
+                BinOp::Le => (l <= r) as i128,
+                BinOp::Gt => (l > r) as i128,
+                BinOp::Ge => (l >= r) as i128,
+                _ => return None,
+            };
+            Some(ExprLiteral::Int(result))
+        }
+        (ExprLiteral::Float(l), ExprLiteral::Float(r)) => {
+            // Handle arithmetic operations
+            let arith_result = match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => Some(l / r),
+                BinOp::Mod => Some(l % r),
+                _ => None,
+            };
+            if let Some(v) = arith_result {
+                return Some(ExprLiteral::Float(v));
+            }
+            // Handle comparison operations
+            let cmp_result = match op {
+                BinOp::EqEq => (l == r) as i128,
+                BinOp::Ne => (l != r) as i128,
+                BinOp::Lt => (l < r) as i128,
+                BinOp::Le => (l <= r) as i128,
+                BinOp::Gt => (l > r) as i128,
+                BinOp::Ge => (l >= r) as i128,
+                _ => return None,
+            };
+            Some(ExprLiteral::Int(cmp_result))
+        }
+        _ => None,
+    }
+}
+
+/// 折叠一元运算
+fn fold_unary_op(op: crate::ast::UnOp, val: ExprLiteral) -> Option<ExprLiteral> {
+    use crate::ast::UnOp;
+    match (op, val) {
+        (UnOp::Neg, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(v.checked_neg()?)),
+        (UnOp::Neg, ExprLiteral::Float(v)) => Some(ExprLiteral::Float(-v)),
+        (UnOp::Not, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(if v == 0 { 1 } else { 0 })),
+        (UnOp::BitNot, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(!v)),
+        (UnOp::Plus, lit) => Some(lit),
+        _ => None,
+    }
+}
+
+/// 运行增强的跨 TU 常量传播
+pub fn run_cross_tu_const_propagation(modules: &mut [BitcodeModule]) -> ConstPropagationStats {
+    let mut ctx = ConstPropagationCtx::new();
+    ctx.collect_from_modules(modules);
+    ctx.collect_address_taken(modules);
+    ctx.propagate(modules);
+    ctx.stats
+}
+
 use std::collections::HashSet;
 
 fn collect_refs_in_stmt(stmt: &TypedStmt, refs: &mut HashSet<String>) {
@@ -1282,5 +1555,211 @@ mod merge_tests {
         assert_eq!(bc.source_path, "<merged>");
         assert_eq!(bc.functions.len(), 1);
         assert_eq!(bc.globals.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod const_prop_tests {
+    use super::*;
+    use crate::ast::BinOp;
+    use crate::diagnostics::Span;
+    use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
+
+    fn make_const_expr(val: i128) -> TypedExpr {
+        TypedExpr {
+            ty: ValueType::Integer { bits: 32, signed: true },
+            kind: ExprKind::Constant,
+            children: vec![],
+            span: Span::point("", 0, 0),
+            literal: Some(ExprLiteral::Int(val)),
+        }
+    }
+
+    fn make_local_expr(name: &str) -> TypedExpr {
+        TypedExpr {
+            ty: ValueType::Integer { bits: 32, signed: true },
+            kind: ExprKind::Local(name.to_string()),
+            children: vec![],
+            span: Span::point("", 0, 0),
+            literal: None,
+        }
+    }
+
+    fn make_binary_expr(op: BinOp, lhs: TypedExpr, rhs: TypedExpr) -> TypedExpr {
+        TypedExpr {
+            ty: ValueType::Integer { bits: 32, signed: true },
+            kind: ExprKind::Binary(op),
+            children: vec![lhs, rhs],
+            span: Span::point("", 0, 0),
+            literal: None,
+        }
+    }
+
+    #[test]
+    fn const_prop_empty_modules() {
+        let mut modules: Vec<BitcodeModule> = vec![];
+        let stats = run_cross_tu_const_propagation(&mut modules);
+        assert_eq!(stats.propagated, 0);
+    }
+
+    #[test]
+    fn const_prop_collects_known_constants() {
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![],
+            globals: vec![Global {
+                name: ".const.MAX_SIZE".to_string(),
+                ty: ValueType::Integer { bits: 32, signed: true },
+                initializer: Some(make_const_expr(1024)),
+                span: Span::point("", 0, 0),
+                is_tls: false,
+            }],
+        };
+        let mut ctx = ConstPropagationCtx::new();
+        ctx.collect_from_modules(&[module]);
+        assert_eq!(ctx.known_constants.len(), 1);
+        assert_eq!(
+            ctx.known_constants.get(".const.MAX_SIZE"),
+            Some(&ExprLiteral::Int(1024))
+        );
+    }
+
+    #[test]
+    fn const_prop_skips_non_const_names() {
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![],
+            globals: vec![Global {
+                name: "mutable_var".to_string(),
+                ty: ValueType::Integer { bits: 32, signed: true },
+                initializer: Some(make_const_expr(42)),
+                span: Span::point("", 0, 0),
+                is_tls: false,
+            }],
+        };
+        let mut ctx = ConstPropagationCtx::new();
+        ctx.collect_from_modules(&[module]);
+        // mutable_var 不应该被收集
+        assert_eq!(ctx.known_constants.len(), 0);
+    }
+
+    #[test]
+    fn const_prop_propagates_to_local_refs() {
+        let func = Function {
+            name: "test_func".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![TypedStmt {
+                expressions: vec![make_local_expr(".const.SIZE")],
+                nested: vec![],
+                span: Span::point("", 0, 0),
+            }],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![Global {
+                name: ".const.SIZE".to_string(),
+                ty: ValueType::Integer { bits: 32, signed: true },
+                initializer: Some(make_const_expr(256)),
+                span: Span::point("", 0, 0),
+                is_tls: false,
+            }],
+        };
+        let mut modules = vec![module];
+        let stats = run_cross_tu_const_propagation(&mut modules);
+        assert_eq!(stats.propagated, 1);
+        // 验证 Local 被替换为 Constant
+        let expr = &modules[0].functions[0].body[0].expressions[0];
+        assert!(matches!(expr.kind, ExprKind::Constant));
+        assert_eq!(expr.literal, Some(ExprLiteral::Int(256)));
+    }
+
+    #[test]
+    fn const_prop_skips_address_taken() {
+        let addr_expr = TypedExpr {
+            ty: ValueType::Pointer(Box::new(ValueType::Integer { bits: 32, signed: true })),
+            kind: ExprKind::Address,
+            children: vec![make_local_expr(".const.FLAG")],
+            span: Span::point("", 0, 0),
+            literal: None,
+        };
+        let func = Function {
+            name: "test_func".to_string(),
+            return_type: ValueType::Void,
+            params: vec![],
+            body: vec![TypedStmt {
+                expressions: vec![addr_expr, make_local_expr(".const.FLAG")],
+                nested: vec![],
+                span: Span::point("", 0, 0),
+            }],
+            span: Span::point("", 0, 0),
+        };
+        let module = BitcodeModule {
+            source_path: "test.c".to_string(),
+            functions: vec![func],
+            globals: vec![Global {
+                name: ".const.FLAG".to_string(),
+                ty: ValueType::Integer { bits: 32, signed: true },
+                initializer: Some(make_const_expr(1)),
+                span: Span::point("", 0, 0),
+                is_tls: false,
+            }],
+        };
+        let mut modules = vec![module];
+        let stats = run_cross_tu_const_propagation(&mut modules);
+        // 地址被取走后，后续的 Local 引用应该被跳过
+        assert!(stats.skipped_address_taken >= 1);
+        // 由于地址被取走，不应传播
+        assert_eq!(stats.propagated, 0);
+    }
+
+    #[test]
+    fn const_prop_folds_binary_add() {
+        let result = fold_binary_op(BinOp::Add, ExprLiteral::Int(10), ExprLiteral::Int(20));
+        assert_eq!(result, Some(ExprLiteral::Int(30)));
+    }
+
+    #[test]
+    fn const_prop_folds_binary_mul() {
+        let result = fold_binary_op(BinOp::Mul, ExprLiteral::Int(6), ExprLiteral::Int(7));
+        assert_eq!(result, Some(ExprLiteral::Int(42)));
+    }
+
+    #[test]
+    fn const_prop_folds_comparison() {
+        let result = fold_binary_op(BinOp::Lt, ExprLiteral::Int(5), ExprLiteral::Int(10));
+        assert_eq!(result, Some(ExprLiteral::Int(1)));
+    }
+
+    #[test]
+    fn const_prop_div_by_zero_returns_none() {
+        let result = fold_binary_op(BinOp::Div, ExprLiteral::Int(10), ExprLiteral::Int(0));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn const_prop_folds_unary_neg() {
+        let result = fold_unary_op(crate::ast::UnOp::Neg, ExprLiteral::Int(42));
+        assert_eq!(result, Some(ExprLiteral::Int(-42)));
+    }
+
+    #[test]
+    fn const_prop_folds_unary_bitnot() {
+        let result = fold_unary_op(crate::ast::UnOp::BitNot, ExprLiteral::Int(0));
+        assert_eq!(result, Some(ExprLiteral::Int(-1)));
+    }
+
+    #[test]
+    fn is_likely_const_name_variants() {
+        assert!(is_likely_const_name(".const.SIZE"));
+        assert!(is_likely_const_name(".rodata.DATA"));
+        assert!(is_likely_const_name("MAX_SIZE"));
+        assert!(is_likely_const_name("BUFFER_LEN"));
+        assert!(is_likely_const_name("const_value"));
+        assert!(is_likely_const_name("my_const_x"));
+        assert!(!is_likely_const_name("mutable_var"));
+        assert!(!is_likely_const_name("counter"));
     }
 }
