@@ -495,6 +495,10 @@ impl Riscv64Codegen {
         if self.frame_bytes > 0 {
             self.addi_sp(-self.frame_bytes);
         }
+        // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
+        if self._target.auto_var_init_zero && self.frame_bytes > 0 {
+            self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
         // 进入变参函数立即把 a0..a7 和 fa0..fa7 写入保存区
         if is_variadic {
             for i in 0..8u8 {
@@ -2600,6 +2604,26 @@ impl Riscv64Codegen {
         self.emit(&insn.to_le_bytes());
     }
 
+    /// -ftrivial-auto-var-init=zero: 零初始化栈帧
+    /// 使用 sd zero, offset(sp) 每次清零 8 字节 (frame 已 16 字节对齐)
+    fn emit_zero_init_frame(&mut self, frame_size: usize) {
+        if frame_size == 0 {
+            return;
+        }
+        // 从帧底向帧顶写入, offset 相对于 sp
+        let words = frame_size / 8;
+        for i in 0..words {
+            let off = (i as i32) * 8 - (frame_size as i32);
+            self.emit_sd(0, 2, off); // sd zero, off(sp)
+        }
+        // 处理剩余 4 字节
+        let rem = frame_size % 8;
+        if rem >= 4 {
+            let off = (words * 8) as i32 - (frame_size as i32) + (rem - 4) as i32;
+            self.emit_sw(0, 2, off); // sw zero, off(sp)
+        }
+    }
+
     /// SD rs2, offset(rs1): 64-bit 整数存储
     fn emit_sd(&mut self, rs2: u8, rs1: u8, off: i32) {
         // 压缩指令自动选择: C.SD (RV64)
@@ -3241,5 +3265,30 @@ mod tests {
             4,
             "LW with rd not in x8-x15 should not compress (4 bytes)"
         );
+    }
+
+    // -ftrivial-auto-var-init=zero: 验证 RISC-V64 后端发射 sd zero, offset(sp) 指令
+    #[test]
+    fn riscv64_auto_var_init_zero_emits_sd() {
+        let triple = crate::cli::TargetTriple::parse("riscv64-linux-gnu").expect("triple");
+        let mut target = crate::target::Target::resolve(&triple);
+        target.auto_var_init_zero = true;
+        let mut cg = Riscv64Codegen::new(target, true);
+        // 直接测试 emit_zero_init_frame: 32 字节帧 = 4 个 sd
+        cg.emit_zero_init_frame(32);
+        let sd_count = cg
+            .code
+            .windows(4)
+            .filter(|w| {
+                let inst = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                // SD: opcode=011, funct3=011 => S-type with funct3=011
+                let opcode = inst & 0x7f;
+                let funct3 = (inst >> 12) & 0x7;
+                let rs2 = (inst >> 20) & 0x1f;
+                let rs1 = (inst >> 15) & 0x1f;
+                opcode == 0x23 && funct3 == 3 && rs2 == 0 && rs1 == 2
+            })
+            .count();
+        assert_eq!(sd_count, 4, "expected 4 sd zero, offset(sp) instructions for 32-byte frame, got {sd_count}");
     }
 }
