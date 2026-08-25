@@ -285,6 +285,81 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
     }
 }
 
+/// Check if a constraint string is supported by the compiler.
+/// Returns None if supported, or Some(reason) if unsupported.
+/// P0-5: early validation rejects unsupported operand patterns
+/// before codegen, producing clear error messages.
+pub fn validate_constraint(c: &str) -> Option<String> {
+    let c = c.trim();
+    if c.is_empty() {
+        return Some("empty constraint".to_string());
+    }
+    // Supported clobbers
+    if c == "memory" || c == "cc" {
+        return None;
+    }
+    // Matched constraints: pure digits
+    if c.chars().all(|ch| ch.is_ascii_digit()) && !c.is_empty() {
+        return None;
+    }
+    let first = c.chars().next().unwrap();
+    match first {
+        '=' => {
+            let rest = &c[1..];
+            match rest.chars().next() {
+                Some('r') | Some('m') | Some('Q') | Some('R') | Some('S')
+                | Some('T') | Some('U') | Some('a') | Some('b') | Some('c')
+                | Some('d') | Some('S') | Some('D') => None,
+                Some(ch) if ch.is_ascii_alphanumeric() => None,
+                _ => None, // default to output reg
+            }
+        }
+        '+' => {
+            let rest = &c[1..];
+            match rest.chars().next() {
+                Some('r') | Some('m') => None,
+                Some(ch) if ch.is_ascii_alphanumeric() => None,
+                _ => None, // default to inout reg
+            }
+        }
+        // Supported single-letter constraints
+        'r' | 'm' | 'i' | 'g' | 'n' | 'X' | 'o' | 'V' | 'p' | 's' |
+        'E' | 'F' | 'w' | 'x' | 'y' | 't' | 'u' |
+        'a' | 'b' | 'c' | 'd' | 'S' | 'D' => None,
+        // Multi-character constraints
+        _ if c.len() > 1 => {
+            // Check if any known constraint letter is present
+            let known = "rmignXoVpsEtwxytabcdSUQ";
+            if c.chars().any(|ch| known.contains(ch)) {
+                None
+            } else {
+                Some(format!("unsupported constraint '{}'", c))
+            }
+        }
+        _ => Some(format!("unsupported constraint '{}'", c)),
+    }
+}
+
+/// Validate all output and input constraints for an inline asm statement.
+/// Returns a list of error messages for unsupported constraints.
+pub fn validate_asm_constraints(
+    output_constraints: &[String],
+    input_constraints: &[String],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for c in output_constraints {
+        if let Some(reason) = validate_constraint(c) {
+            errors.push(format!("output constraint '{}': {}", c, reason));
+        }
+    }
+    for c in input_constraints {
+        if let Some(reason) = validate_constraint(c) {
+            errors.push(format!("input constraint '{}': {}", c, reason));
+        }
+    }
+    errors
+}
+
 /// 解析全部操作数约束, 分配寄存器
 pub fn resolve_asm_operands(
     output_constraints: &[String],

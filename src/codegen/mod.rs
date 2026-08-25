@@ -384,6 +384,18 @@ fn validate_inline_asm_operands(
         .unwrap_or(constraint);
         validate_inline_asm_operand(expr, effective, false, span, diags);
     }
+
+    // 4. P0-5: 早期约束模式验证 — 拒绝不支持的约束字母
+    let constraint_errors = asm_constraints::validate_asm_constraints(
+        output_constraints,
+        input_constraints,
+    );
+    for err_msg in &constraint_errors {
+        diags.push(
+            Diagnostic::err("E0311", err_msg.clone(), span.clone())
+                .with_hint("use supported constraints: r, m, i, g, n, =r, =m, +r, +m, memory, cc"),
+        );
+    }
 }
 
 fn push_asm_type_mismatch_warning(
