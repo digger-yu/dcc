@@ -3,7 +3,7 @@
 //! parser、typed IR 验证和后端必须共享同一套规则，避免某个阶段把
 //! “无法求值”误当成数值 0。
 
-use crate::ast::{find_field, ArraySize, BinOp, Expr, Type, UnOp};
+use crate::ast::{find_field, ArraySize, BinOp, Block, BlockItem, Expr, Stmt, Type, UnOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstEvalError {
@@ -316,6 +316,7 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
         Expr::Offsetof { ty, member, .. } => {
             Ok(ConstValue::Int(offsetof_member(ty, member) as i128))
         }
+        Expr::StmtExpr { block, .. } => eval_stmt_expr_block(block),
         // 编译期可求值的 GCC/LLVM 内建函数: 参数是常量时返回常量结果。
         // 这些函数通常用 __builtin_constant_p 包裹, dcc 直接展开即可。
         Expr::Call { callee, args, .. } => {
@@ -387,6 +388,35 @@ fn eval_intrinsic(name: &str, args: &[Expr]) -> Result<Option<i128>, ConstEvalEr
             Ok(Some((v as u64).swap_bytes() as i128))
         }
         _ => Ok(None),
+    }
+}
+
+/// 语句表达式 `({ ... })` 编译期求值.
+/// 仅当块内所有语句都是常量表达式或声明, 且最后一个语句是
+/// 常量表达式时, 才能作为常量返回.
+fn eval_stmt_expr_block(block: &Block) -> Result<ConstValue, ConstEvalError> {
+    let items = &block.items;
+    if items.is_empty() {
+        return Ok(ConstValue::Int(0));
+    }
+    // 求值所有非末尾语句 (必须是可折叠的常量表达式或无副作用声明)
+    for item in &items[..items.len() - 1] {
+        match item {
+            BlockItem::Stmt(Stmt::Expr { e, .. }) => {
+                // 中间语句: 必须是可求值的常量表达式 (结果丢弃)
+                eval(e)?;
+            }
+            BlockItem::Decl(_) => {
+                // 声明: 常量上下文中允许 (如 const int x = 5;)
+                // 暂不跟踪变量绑定, 仅接受不影响后续求值
+            }
+            _ => return Err(ConstEvalError::NotConstant),
+        }
+    }
+    // 最后一个语句的值即为语句表达式的值
+    match items.last().unwrap() {
+        BlockItem::Stmt(Stmt::Expr { e, .. }) => eval_full(e),
+        _ => Err(ConstEvalError::NotConstant),
     }
 }
 
@@ -1064,5 +1094,62 @@ mod tests {
             ty: Type::Int,
         };
         assert_eq!(eval_full(&im), Ok(ConstValue::Int(0)));
+    }
+
+    #[test]
+    fn stmt_expr_single_expr() {
+        // ({ 42; }) == 42
+        let block = Block {
+            items: vec![BlockItem::Stmt(Stmt::Expr {
+                e: int(42),
+                span: Span::point("t.c", 1, 1),
+            })],
+            span: Span::point("t.c", 1, 1),
+        };
+        let se = Expr::StmtExpr {
+            block: Box::new(block),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Int,
+        };
+        assert_eq!(eval_full(&se), Ok(ConstValue::Int(42)));
+    }
+
+    #[test]
+    fn stmt_expr_multi_stmt() {
+        // ({ 1 + 2; 3 * 4; }) == 12 (最后一个表达式的值)
+        let block = Block {
+            items: vec![
+                BlockItem::Stmt(Stmt::Expr {
+                    e: bin(BinOp::Add, 1, 2),
+                    span: Span::point("t.c", 1, 1),
+                }),
+                BlockItem::Stmt(Stmt::Expr {
+                    e: bin(BinOp::Mul, 3, 4),
+                    span: Span::point("t.c", 1, 1),
+                }),
+            ],
+            span: Span::point("t.c", 1, 1),
+        };
+        let se = Expr::StmtExpr {
+            block: Box::new(block),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Int,
+        };
+        assert_eq!(eval_full(&se), Ok(ConstValue::Int(12)));
+    }
+
+    #[test]
+    fn stmt_expr_empty() {
+        // ({}) == 0 (GCC 扩展: 空语句表达式结果为 0)
+        let block = Block {
+            items: vec![],
+            span: Span::point("t.c", 1, 1),
+        };
+        let se = Expr::StmtExpr {
+            block: Box::new(block),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Void,
+        };
+        assert_eq!(eval_full(&se), Ok(ConstValue::Int(0)));
     }
 }
