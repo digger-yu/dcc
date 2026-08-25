@@ -15133,6 +15133,10 @@ int large_frame(void) {
     buf[0] = 1;
     return buf[0];
 }
+int small_frame(void) {
+    int x = 42;
+    return x;
+}
 "#;
     let tmp = std::env::temp_dir();
     let src_path = tmp.join("stack_clash.c");
@@ -15149,8 +15153,67 @@ int large_frame(void) {
         "stack clash protection compile failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Verify ELF object was produced with non-trivial .text
+    let obj = fs::read(&obj_path).expect("read obj");
+    assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F']);
+    assert!(obj.len() > 100, "object too small, probe loop missing?");
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
+}
+
+/// Stack clash protection: non-x86 backends accept the flag and produce
+/// valid ELF objects for large-frame functions.
+#[test]
+#[cfg(unix)]
+fn stack_clash_protection_non_x86() {
+    let src = r#"
+int large_frame(void) {
+    char buf[8192];
+    buf[0] = 1;
+    buf[8191] = 2;
+    return buf[0] + buf[8191];
+}
+"#;
+    let targets = [
+        // (target_triple, expected_e_machine, is_big_endian)
+        ("aarch64-linux-gnu", 183u16, false),
+        ("riscv64-linux-gnu", 243u16, false),
+        ("mips-linux-gnu", 8u16, false),
+        ("mips64-linux-gnuabi64", 8u16, true), // ELF64 writer uses LE for hdr fields
+        ("arm-linux-gnueabi", 40u16, false),
+    ];
+    let tmp = std::env::temp_dir();
+    let src_path = tmp.join("stack_clash_multi.c");
+    fs::write(&src_path, src).unwrap();
+    for (triple, expected_machine, elf64_le_hdr) in &targets {
+        let obj_path = tmp.join(format!("stack_clash_{}.o", triple.split('-').next().unwrap()));
+        let output = std::process::Command::new("./target/debug/dcc")
+            .args(["--target", triple, "-c", "-fstack-clash-protection", "-o"])
+            .arg(&obj_path)
+            .arg(&src_path)
+            .output()
+            .unwrap_or_else(|_| panic!("run dcc --target {triple} -fstack-clash-protection"));
+        assert!(
+            output.status.success(),
+            "stack clash {triple} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let obj = fs::read(&obj_path).expect("read obj");
+        assert_eq!(&obj[0..4], &[0x7f, b'E', b'L', b'F']);
+        // Verify ELF e_machine matches the target architecture
+        // ELF64 writer always uses LE for header fields; ELF32 respects EI_DATA
+        let machine = if *elf64_le_hdr || obj[5] == 1 {
+            u16::from_le_bytes([obj[18], obj[19]])
+        } else {
+            u16::from_be_bytes([obj[18], obj[19]])
+        };
+        assert_eq!(
+            machine, *expected_machine,
+            "e_machine mismatch for {triple}"
+        );
+        let _ = fs::remove_file(&obj_path);
+    }
+    let _ = fs::remove_file(&src_path);
 }
 
 /// Feature 14: -fshort-wchar (wchar_t 2-byte mode)
