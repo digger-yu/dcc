@@ -393,7 +393,7 @@ fn validate_inline_asm_operands(
     for err_msg in &constraint_errors {
         diags.push(
             Diagnostic::err("E0311", err_msg.clone(), span.clone())
-                .with_hint("use supported constraints: r, m, i, g, n, =r, =m, +r, +m, memory, cc"),
+                .with_hint("use supported constraints: r, m, i, g, n, q, =r, =m, +r, +m, memory, cc"),
         );
     }
 }

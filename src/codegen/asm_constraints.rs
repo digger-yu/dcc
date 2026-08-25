@@ -263,6 +263,7 @@ pub fn parse_single_constraint(c: &str) -> ConstraintKind {
             }
         }
         'r' => ConstraintKind::InputReg,
+        'q' => ConstraintKind::InputReg, // x86: a/b/c/d registers
         'm' => ConstraintKind::InputMem,
         'i' => ConstraintKind::Immediate,
         'g' => ConstraintKind::InputReg, // "g" 通用 → 按寄存器处理
@@ -324,12 +325,12 @@ pub fn validate_constraint(c: &str) -> Option<String> {
         }
         // Supported single-letter constraints
         'r' | 'm' | 'i' | 'g' | 'n' | 'X' | 'o' | 'V' | 'p' | 's' |
-        'E' | 'F' | 'w' | 'x' | 'y' | 't' | 'u' |
+        'E' | 'F' | 'w' | 'x' | 'y' | 't' | 'u' | 'q' |
         'a' | 'b' | 'c' | 'd' | 'S' | 'D' => None,
         // Multi-character constraints
         _ if c.len() > 1 => {
             // Check if any known constraint letter is present
-            let known = "rmignXoVpsEtwxytabcdSUQ";
+            let known = "rmignXoVpsEtwxytabcdSUQq";
             if c.chars().any(|ch| known.contains(ch)) {
                 None
             } else {
