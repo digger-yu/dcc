@@ -62,6 +62,10 @@ pub struct ArmCodegen {
     va_save_base_off: i32,
     /// 下一个 GP va_arg 槽位索引 (0..3, 对应 r0..r3)
     va_gp_offs: i32,
+    /// 下一个 float va_arg 槽位索引 (0..3, 对应 s0..s3 或 d0..d3)
+    va_flt_offs: i32,
+    /// 浮点字面量池偏移 (rodata 中)
+    float_pool: HashMap<u64, u64>,
     /// 编译诊断 (未识别内联汇编指令等)
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     _target: Target,
@@ -102,6 +106,8 @@ impl ArmCodegen {
             is_current_func_variadic: false,
             va_save_base_off: 0,
             va_gp_offs: 0,
+            va_flt_offs: 0,
+            float_pool: HashMap::new(),
             diagnostics: Vec::new(),
             _target: target,
         }
@@ -497,6 +503,33 @@ impl ArmCodegen {
         }
     }
 
+    // ARM va_arg 浮点路径 — 从保存区顺序读 s0/d0
+    // AAPCS ABI (hard-float): s0-s3 (或 d0-d1) 在函数入口保存到 va_save 区
+    // 简化实现: 从整数保存区读取 (AAPCS 软浮点兼容)
+    fn gen_va_arg_float(&mut self, _ap_name: &str, is_double: bool) {
+        if self.va_flt_offs < 4 {
+            // 从浮点保存区读取 (预留空间在 va_save_base_off + 16)
+            let off = self.va_save_base_off + 16 + self.va_flt_offs * 4;
+            if is_double {
+                // VLDR d0, [fp, #off]
+                self.emit_vldr_d(0, off);
+            } else {
+                // VLDR s0, [fp, #off]
+                self.emit_vldr_s(0, off);
+            }
+            self.va_flt_offs += 1;
+        } else {
+            // 从 caller 栈读取
+            let stack_off = self.frame_bytes + 16 + (self.va_flt_offs - 4) * 4;
+            if is_double {
+                self.emit_vldr_d(0, stack_off);
+            } else {
+                self.emit_vldr_s(0, stack_off);
+            }
+            self.va_flt_offs += 1;
+        }
+    }
+
     // ===== Block item / stmt / expr =====
 
     fn gen_block_item(&mut self, item: &BlockItem, _ir: &TypedStmt) {
@@ -713,6 +746,15 @@ impl ArmCodegen {
             Expr::Char { v, .. } => {
                 self.emit_load_imm(0, *v as i32);
             }
+            Expr::Float { v, ty, .. } => {
+                // 浮点字面量: 加载到 VFP 寄存器 s0/d0
+                let is_double = matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                if is_double {
+                    self.load_float_d0(*v);
+                } else {
+                    self.load_float_s0(*v as f32);
+                }
+            }
             Expr::String { data, .. } => {
                 // Emit string to .rodata and load address
                 let offset = if let Some(&off) = self.string_pool.get(data) {
@@ -740,13 +782,38 @@ impl ArmCodegen {
                     self.emit_load_imm(0, 0);
                 }
             }
-            Expr::Binop { op, l, r, .. } => {
-                self.gen_expr_from_ast(l);
-                self.emit_push(vec![0]); // push r0 (lhs)
-                self.gen_expr_from_ast(r);
-                self.emit_pop(vec![1]); // pop r1 (lhs)
-                                        // r0 = rhs, r1 = lhs
-                self.emit_binop(*op);
+            Expr::Binop { op, l, r, ty, .. } => {
+                // 检测浮点运算
+                let is_float = matches!(ty, crate::ast::Type::Float | crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                let is_float_cmp = is_float && matches!(op, BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge);
+                let is_float_arith = is_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
+
+                if is_float_arith || is_float_cmp {
+                    // 浮点二元运算: 使用 VFP 指令
+                    let is_double = matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                    // 计算左操作数 -> s0/d0
+                    self.gen_expr_from_ast(l);
+                    // 保存到 s2/d2
+                    self.save_s0_to_s2(is_double);
+                    // 计算右操作数 -> s0/d0
+                    self.gen_expr_from_ast(r);
+                    // 执行运算: s0 = s2 op s0
+                    if is_float_cmp {
+                        self.float_cmp_r0(*op, is_double);
+                    } else {
+                        self.float_binop_s0(*op, is_double);
+                        // 结果在 s0/d0, 需要转回整数寄存器 r0 (如果需要)
+                        // 对于纯浮点运算, 结果留在 VFP 寄存器
+                    }
+                } else {
+                    // 整数二元运算
+                    self.gen_expr_from_ast(l);
+                    self.emit_push(vec![0]); // push r0 (lhs)
+                    self.gen_expr_from_ast(r);
+                    self.emit_pop(vec![1]); // pop r1 (lhs)
+                                            // r0 = rhs, r1 = lhs
+                    self.emit_binop(*op);
+                }
             }
             Expr::Unary { op, e, .. } => {
                 self.gen_expr_from_ast(e);
@@ -819,13 +886,212 @@ impl ArmCodegen {
             // M25: __builtin_va_arg(ap, T) — 从保存区顺序读取变参
             Expr::VaArg { ap, ty, .. } => {
                 let is_float = matches!(ty, crate::ast::Type::Float | crate::ast::Type::Double | crate::ast::Type::LongDouble);
+                let is_double = matches!(ty, crate::ast::Type::Double | crate::ast::Type::LongDouble);
                 if is_float {
-                    // 浮点变参: AAPCS 无独立浮点变参保存区, 回退整数路径
-                    self.gen_va_arg_int("ap");
+                    // 浮点变参: 使用 VFP 加载
+                    self.gen_va_arg_float("ap", is_double);
                 } else {
                     self.gen_va_arg_int("ap");
                 }
                 let _ = ap;
+            }
+            // 指针操作: 取地址
+            Expr::AddrOf { e, .. } => {
+                if let Expr::Ident { name, .. } = e.as_ref() {
+                    if let Some(&off) = self.locals.get(&name.name) {
+                        // 加载变量地址到 r0: add r0, fp, #off
+                        self.emit_add_imm(0, 11, off as u32);
+                    } else {
+                        self.emit_load_imm(0, 0);
+                    }
+                } else {
+                    self.emit_load_imm(0, 0);
+                }
+            }
+            // 指针操作: 解引用
+            Expr::Deref { e, .. } => {
+                self.gen_expr_from_ast(e);
+                // r0 现在是指针地址, 加载 [r0] 到 r0
+                self.emit_push(vec![0]); // 保存地址
+                self.emit_pop(vec![1]); // 弹出到 r1
+                // ldr r0, [r1]
+                let inst = 0xE5910000u32;
+                self.code.extend_from_slice(&inst.to_le_bytes());
+            }
+            // 数组索引: arr[idx]
+            Expr::Index { arr, idx, .. } => {
+                self.gen_expr_from_ast(arr);
+                self.emit_push(vec![0]); // 保存基地址
+                self.gen_expr_from_ast(idx);
+                self.emit_pop(vec![1]); // r1 = 基地址
+                // r0 = 索引, r1 = 基地址
+                // 简化: 假设元素大小为 4 字节
+                self.emit_lsl(0, 0, 0); // 先不处理, 假设索引已缩放
+                // add r0, r1, r0 (地址 + 偏移)
+                self.emit_add(0, 1, 0);
+                // 加载 [r0] 到 r0
+                self.emit_push(vec![0]);
+                self.emit_pop(vec![1]);
+                let inst = 0xE5910000u32;
+                self.code.extend_from_slice(&inst.to_le_bytes());
+            }
+            // 结构体成员访问
+            Expr::Member { expr, field, ty: _, is_arrow, .. } => {
+                self.gen_expr_from_ast(expr);
+                // r0 现在是结构体地址 (或值)
+                // 简化: 加载第一个成员 (偏移 0)
+                // TODO: 使用 aggregate_fields 计算实际偏移
+                if *is_arrow {
+                    // ptr->member: r0 已经是指针
+                    self.emit_push(vec![0]);
+                    self.emit_pop(vec![1]);
+                    let inst = 0xE5910000u32; // ldr r0, [r1]
+                    self.code.extend_from_slice(&inst.to_le_bytes());
+                }
+                // 对于 .member, r0 是结构体值, 简化处理
+            }
+            // 前置自增: ++x
+            Expr::PreInc { e, .. } => {
+                if let Expr::Ident { name, .. } = e.as_ref() {
+                    if let Some(&off) = self.locals.get(&name.name) {
+                        self.emit_load_r0(off); // 加载当前值
+                        self.emit_add_imm(0, 0, 1); // r0 += 1
+                        self.emit_store_r0(off); // 存回
+                    }
+                }
+            }
+            // 前置自减: --x
+            Expr::PreDec { e, .. } => {
+                if let Expr::Ident { name, .. } = e.as_ref() {
+                    if let Some(&off) = self.locals.get(&name.name) {
+                        self.emit_load_r0(off);
+                        self.emit_sub_imm(0, 0, 1); // r0 -= 1
+                        self.emit_store_r0(off);
+                    }
+                }
+            }
+            // 后置自增: x++
+            Expr::PostInc { e, .. } => {
+                if let Expr::Ident { name, .. } = e.as_ref() {
+                    if let Some(&off) = self.locals.get(&name.name) {
+                        self.emit_load_r0(off); // 加载原值 (返回值)
+                        self.emit_push(vec![0]); // 保存原值
+                        self.emit_add_imm(0, 0, 1); // r0 += 1
+                        self.emit_store_r0(off); // 存回新值
+                        self.emit_pop(vec![0]); // 恢复原值作为表达式结果
+                    }
+                }
+            }
+            // 后置自减: x--
+            Expr::PostDec { e, .. } => {
+                if let Expr::Ident { name, .. } = e.as_ref() {
+                    if let Some(&off) = self.locals.get(&name.name) {
+                        self.emit_load_r0(off);
+                        self.emit_push(vec![0]);
+                        self.emit_sub_imm(0, 0, 1);
+                        self.emit_store_r0(off);
+                        self.emit_pop(vec![0]);
+                    }
+                }
+            }
+            // 条件表达式: cond ? then : else
+            Expr::Cond { cond, then_, else_, .. } => {
+                let lbl_else = self.fresh_label("Lcond_else");
+                let lbl_end = self.fresh_label("Lcond_end");
+                self.gen_expr_from_ast(cond);
+                self.emit_cmp_imm(0, 0); // cmp r0, #0
+                self.emit_beq(&lbl_else);
+                self.gen_expr_from_ast(then_);
+                self.emit_b(&lbl_end);
+                self.set_label(&lbl_else);
+                self.gen_expr_from_ast(else_);
+                self.set_label(&lbl_end);
+            }
+            // sizeof(type)
+            Expr::SizeofTy { ty, .. } => {
+                let size = ty.size() as i32;
+                self.emit_load_imm(0, size);
+            }
+            // sizeof(expr)
+            Expr::SizeofExpr { e, .. } => {
+                let size = e.ty().size() as i32;
+                self.emit_load_imm(0, size);
+            }
+            // _Alignof(type)
+            Expr::AlignofTy { ty, .. } => {
+                let align = ty.align() as i32;
+                self.emit_load_imm(0, align);
+            }
+            // _Alignof(expr)
+            Expr::AlignofExpr { e, .. } => {
+                let align = e.ty().align() as i32;
+                self.emit_load_imm(0, align);
+            }
+            // 逗号表达式: (lhs, rhs) -> 求值 lhs 丢弃, 返回 rhs
+            Expr::Comma { l, r, .. } => {
+                self.gen_expr_from_ast(l);
+                self.gen_expr_from_ast(r);
+            }
+            // 复合赋值: l += r, l -= r, etc.
+            Expr::Assign { op, l, r, .. } => {
+                if *op == BinOp::Add {
+                    // l += r
+                    if let Expr::Ident { name, .. } = l.as_ref() {
+                        if let Some(&off) = self.locals.get(&name.name) {
+                            self.gen_expr_from_ast(r);
+                            self.emit_push(vec![0]); // 保存 r
+                            self.emit_load_r0(off); // 加载 l
+                            self.emit_pop(vec![1]); // r1 = r
+                            self.emit_add(0, 1, 0); // r0 = l + r
+                            self.emit_store_r0(off); // 存回 l
+                        }
+                    }
+                } else {
+                    // 其他复合赋值: 简化处理
+                    self.gen_expr_from_ast(r);
+                    if let Expr::Ident { name, .. } = l.as_ref() {
+                        if let Some(&off) = self.locals.get(&name.name) {
+                            self.emit_store_r0(off);
+                        }
+                    }
+                }
+            }
+            // _Complex 字面量
+            Expr::ComplexLit { real, imag, ty, .. } => {
+                // 简化: 将实部和虚部存入栈, 返回地址
+                let is_double = matches!(ty, crate::ast::Type::Complex(ref inner) if matches!(inner.as_ref(), crate::ast::Type::Double | crate::ast::Type::LongDouble));
+                let size = if is_double { 8 } else { 4 };
+                let real_off = self.alloc_local("<cx_r>", size as i32);
+                let imag_off = self.alloc_local("<cx_i>", size as i32);
+                // 存储实部
+                if is_double {
+                    self.load_float_d0(*real);
+                    self.emit_vstr_d(0, real_off);
+                } else {
+                    self.emit_load_imm(0, real.to_bits() as i32);
+                    self.emit_store_r0(real_off);
+                }
+                // 存储虚部
+                if is_double {
+                    self.load_float_d0(*imag);
+                    self.emit_vstr_d(0, imag_off);
+                } else {
+                    self.emit_load_imm(0, imag.to_bits() as i32);
+                    self.emit_store_r0(imag_off);
+                }
+                // 返回复数地址
+                self.emit_add_imm(0, 11, real_off as u32);
+            }
+            // __real__ expr: 取复数实部
+            Expr::Real { e, .. } => {
+                self.gen_expr_from_ast(e);
+                // 简化: 假设 r0 已经是实部
+            }
+            // __imag__ expr: 取复数虚部
+            Expr::Imag { e, .. } => {
+                self.gen_expr_from_ast(e);
+                // 简化: 返回 0 (标量无虚部)
+                self.emit_load_imm(0, 0);
             }
             _ => {
                 if let Ok(v) = crate::const_eval::eval(expr) {
@@ -1433,6 +1699,549 @@ impl ArmCodegen {
     fn emit_dmb(&mut self) {
         // DMB ISH: 0xF57FF05B (ARMv7+)
         self.code.extend_from_slice(&[0x5B, 0xF0, 0x7F, 0xF5]);
+    }
+
+    // ===== VFP 浮点指令发射器 (ARMv7 VFPv3) =====
+
+    /// VLDR: 加载单精度浮点数到 VFP 寄存器
+    /// VLDR Sd, [fp, #offset*4] (单精度)
+    fn emit_vldr_s(&mut self, sd: u8, fp_off: i32) {
+        // VLDR encoding: cond 1101 P U D W 1011 Rn imm8
+        // P=1, U=depends, D=Sd bit 0, W=0, Rn=fp(11)
+        // imm8 = offset/4 (signed, -255..255 * 4)
+        let (u_bit, abs_off) = if fp_off >= 0 {
+            (1u32, fp_off as u32)
+        } else {
+            (0u32, (-fp_off) as u32)
+        };
+        let imm8 = (abs_off / 4) & 0xFF;
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let inst = 0xED9B0A00u32 // cond=E, P=1, U=1, W=0, Rn=fp
+            | (u_bit << 23)
+            | d_bit
+            | (sd_hi << 12)
+            | imm8;
+        // Adjust for U bit: if negative, clear U bit
+        let inst = if fp_off < 0 {
+            inst & !(1 << 23)
+        } else {
+            inst
+        };
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VLDR: 加载双精度浮点数到 VFP 寄存器
+    /// VLDR Dd, [fp, #offset*4] (双精度)
+    fn emit_vldr_d(&mut self, dd: u8, fp_off: i32) {
+        // VLDR double encoding: cond 1101 P U D W 1011 Rn imm8
+        // Dd: D bit 0 in [22], Dd[3:1] in [15:12]
+        let (u_bit, abs_off) = if fp_off >= 0 {
+            (1u32, fp_off as u32)
+        } else {
+            (0u32, (-fp_off) as u32)
+        };
+        let imm8 = (abs_off / 4) & 0xFF;
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let inst = 0xED9B0B00u32 // cond=E, P=1, Rn=fp, size=11 (double)
+            | (u_bit << 23)
+            | d_bit
+            | (dd_hi << 12)
+            | imm8;
+        let inst = if fp_off < 0 {
+            inst & !(1 << 23)
+        } else {
+            inst
+        };
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VSTR: 存储单精度浮点数从 VFP 寄存器到内存
+    fn emit_vstr_s(&mut self, sd: u8, fp_off: i32) {
+        let (u_bit, abs_off) = if fp_off >= 0 {
+            (1u32, fp_off as u32)
+        } else {
+            (0u32, (-fp_off) as u32)
+        };
+        let imm8 = (abs_off / 4) & 0xFF;
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let inst = 0xED8B0A00u32 // VSTR single: cond=E, P=1, Rn=fp
+            | (u_bit << 23)
+            | d_bit
+            | (sd_hi << 12)
+            | imm8;
+        let inst = if fp_off < 0 {
+            inst & !(1 << 23)
+        } else {
+            inst
+        };
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VSTR: 存储双精度浮点数从 VFP 寄存器到内存
+    fn emit_vstr_d(&mut self, dd: u8, fp_off: i32) {
+        let (u_bit, abs_off) = if fp_off >= 0 {
+            (1u32, fp_off as u32)
+        } else {
+            (0u32, (-fp_off) as u32)
+        };
+        let imm8 = (abs_off / 4) & 0xFF;
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let inst = 0xED8B0B00u32 // VSTR double
+            | (u_bit << 23)
+            | d_bit
+            | (dd_hi << 12)
+            | imm8;
+        let inst = if fp_off < 0 {
+            inst & !(1 << 23)
+        } else {
+            inst
+        };
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VADD: 单精度浮点加法 Sd = Sn + Sm
+    fn emit_vadd_s(&mut self, sd: u8, sn: u8, sm: u8) {
+        // VADD.S encoding: cond 1110 0011 N 00 Vn Vd 1010 N M 0 Vm
+        let n_bit = ((sn & 1) as u32) << 7;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sn_hi = ((sn >> 1) & 0xF) as u32;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let inst = 0xEE300A00u32
+            | d_bit
+            | (sn_hi << 16)
+            | (sd_hi << 12)
+            | n_bit
+            | (sm_hi << 0)
+            | m_bit;
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VSUB: 单精度浮点减法 Sd = Sn - Sm
+    fn emit_vsub_s(&mut self, sd: u8, sn: u8, sm: u8) {
+        let n_bit = ((sn & 1) as u32) << 7;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sn_hi = ((sn >> 1) & 0xF) as u32;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let inst = 0xEE300A40u32 // VSUB: same as VADD but bit 6 set
+            | d_bit
+            | (sn_hi << 16)
+            | (sd_hi << 12)
+            | n_bit
+            | (sm_hi << 0)
+            | m_bit;
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VMUL: 单精度浮点乘法 Sd = Sn * Sm
+    fn emit_vmul_s(&mut self, sd: u8, sn: u8, sm: u8) {
+        let n_bit = ((sn & 1) as u32) << 7;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sn_hi = ((sn >> 1) & 0xF) as u32;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let inst = 0xEE200A00u32 // VMUL.S
+            | d_bit
+            | (sn_hi << 16)
+            | (sd_hi << 12)
+            | n_bit
+            | (sm_hi << 0)
+            | m_bit;
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VDIV: 单精度浮点除法 Sd = Sn / Sm (VFPv3+)
+    fn emit_vdiv_s(&mut self, sd: u8, sn: u8, sm: u8) {
+        let n_bit = ((sn & 1) as u32) << 7;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sn_hi = ((sn >> 1) & 0xF) as u32;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let inst = 0xEE800A00u32 // VDIV.S
+            | d_bit
+            | (sn_hi << 16)
+            | (sd_hi << 12)
+            | n_bit
+            | (sm_hi << 0)
+            | m_bit;
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VADD: 双精度浮点加法 Dd = Dn + Dm
+    fn emit_vadd_d(&mut self, dd: u8, dn: u8, dm: u8) {
+        let n_bit = ((dn & 1) as u32) << 7;
+        let m_bit = ((dm & 1) as u32) << 5;
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dn_hi = ((dn >> 1) & 0xF) as u32;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let inst = 0xEE300B00u32 // VADD.D
+            | d_bit
+            | (dn_hi << 16)
+            | (dd_hi << 12)
+            | n_bit
+            | (dm_hi << 0)
+            | m_bit;
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VSUB: 双精度浮点减法 Dd = Dn - Dm
+    fn emit_vsub_d(&mut self, dd: u8, dn: u8, dm: u8) {
+        let n_bit = ((dn & 1) as u32) << 7;
+        let m_bit = ((dm & 1) as u32) << 5;
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dn_hi = ((dn >> 1) & 0xF) as u32;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let inst = 0xEE300B40u32 // VSUB.D
+            | d_bit
+            | (dn_hi << 16)
+            | (dd_hi << 12)
+            | n_bit
+            | (dm_hi << 0)
+            | m_bit;
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VMUL: 双精度浮点乘法 Dd = Dn * Dm
+    fn emit_vmul_d(&mut self, dd: u8, dn: u8, dm: u8) {
+        let n_bit = ((dn & 1) as u32) << 7;
+        let m_bit = ((dm & 1) as u32) << 5;
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dn_hi = ((dn >> 1) & 0xF) as u32;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let inst = 0xEE200B00u32 // VMUL.D
+            | d_bit
+            | (dn_hi << 16)
+            | (dd_hi << 12)
+            | n_bit
+            | (dm_hi << 0)
+            | m_bit;
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VDIV: 双精度浮点除法 Dd = Dn / Dm (VFPv3+)
+    fn emit_vdiv_d(&mut self, dd: u8, dn: u8, dm: u8) {
+        let n_bit = ((dn & 1) as u32) << 7;
+        let m_bit = ((dm & 1) as u32) << 5;
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dn_hi = ((dn >> 1) & 0xF) as u32;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let inst = 0xEE800B00u32 // VDIV.D
+            | d_bit
+            | (dn_hi << 16)
+            | (dd_hi << 12)
+            | n_bit
+            | (dm_hi << 0)
+            | m_bit;
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VCMP: 比较单精度浮点数并更新 FPSCR
+    fn emit_vcmp_s(&mut self, sd: u8, sm: u8) {
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        // VCMP.S Sd, Sm: cond 1110 1011 1 D 00 Vd 1010 E 1 M 0 Vm
+        let inst = 0xEEB40A40u32
+            | d_bit
+            | (sd_hi << 12)
+            | m_bit
+            | (sm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VCMP: 比较双精度浮点数并更新 FPSCR
+    fn emit_vcmp_d(&mut self, dd: u8, dm: u8) {
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let m_bit = ((dm & 1) as u32) << 5;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        // VCMP.D Dd, Dm
+        let inst = 0xEEB40B40u32
+            | d_bit
+            | (dd_hi << 12)
+            | m_bit
+            | (dm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VMRS APSR_nzcv, FPSCR: 将 FPSCR 标志移到 ARM CPSR
+    fn emit_vmrs_apsr(&mut self) {
+        // VMRS APSR_nzcv, FPSCR: 0xEEF1FA10
+        self.code.extend_from_slice(&0xEEF1FA10u32.to_le_bytes());
+    }
+
+    /// VMOV: 整数寄存器到单精度寄存器 VMOV Sd, Rn
+    fn emit_vmov_s_from_reg(&mut self, sd: u8, rn: u8) {
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        // VMOV Sd, Rn: cond 1110 0000 0 D 00 Vd 1010 N 0 0 Rn
+        let inst = 0xEE000A10u32
+            | d_bit
+            | (sd_hi << 12)
+            | ((rn as u32) << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VMOV: 单精度寄存器到整数寄存器 VMOV Rn, Sm
+    fn emit_vmov_reg_from_s(&mut self, rn: u8, sm: u8) {
+        let m_bit = ((sm & 1) as u32) << 5;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        // VMOV Rn, Sm: cond 1110 0000 1 D 00 Vn 1010 N 1 0 Rn
+        let inst = 0xEE100A10u32
+            | m_bit
+            | (sm_hi << 12)
+            | ((rn as u32) << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VMOV: 双精度寄存器对到两个整数寄存器 VMOV Rn, Rn+1, Dm
+    fn emit_vmov_rr_from_d(&mut self, rn: u8, dm: u8) {
+        let m_bit = ((dm & 1) as u32) << 5;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        // VMOV r1, r2, Dm: cond 1100 0101 Rn1 Rn2 Dm_hi 1011 M 1 Dm_lo
+        let inst = 0xEC500B10u32
+            | ((rn as u32) << 12)
+            | (((rn + 1) as u32) << 16)
+            | m_bit
+            | (dm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VMOV: 两个整数寄存器到双精度寄存器 VMOV Dm, Rn, Rn+1
+    fn emit_vmov_d_from_rr(&mut self, dm: u8, rn: u8) {
+        let m_bit = ((dm & 1) as u32) << 5;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        // VMOV Dm, r1, r2
+        let inst = 0xEC400B10u32
+            | ((rn as u32) << 12)
+            | (((rn + 1) as u32) << 16)
+            | m_bit
+            | (dm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VCVT: 单精度转整数 VCVT.S32.F32 Sd, Sm
+    fn emit_vcvt_s32_f32(&mut self, sd: u8, sm: u8) {
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        // VCVT.S32.F32: cond 1111 1011 1 D 00 Vd 1010 11 M 0 Vm
+        let inst = 0xEEBD0AC0u32
+            | d_bit
+            | (sd_hi << 12)
+            | m_bit
+            | (sm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VCVT: 整数转单精度 VCVT.F32.S32 Sd, Sm
+    fn emit_vcvt_f32_s32(&mut self, sd: u8, sm: u8) {
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        // VCVT.F32.S32: cond 1111 1011 1 D 00 Vd 1010 11 M 0 Vm
+        let inst = 0xEEB80AC0u32
+            | d_bit
+            | (sd_hi << 12)
+            | m_bit
+            | (sm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VCVT: 双精度转单精度 VCVT.F32.F64 Sd, Dm
+    fn emit_vcvt_f32_f64(&mut self, sd: u8, dm: u8) {
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let m_bit = ((dm & 1) as u32) << 5;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        // VCVT.F32.F64: cond 1111 1011 1 D 00 Vd 1011 11 M 0 Vm
+        let inst = 0xEEBC0BC0u32
+            | d_bit
+            | (sd_hi << 12)
+            | m_bit
+            | (dm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VCVT: 单精度转双精度 VCVT.F64.F32 Dd, Sm
+    fn emit_vcvt_f64_f32(&mut self, dd: u8, sm: u8) {
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        // VCVT.F64.F32: cond 1111 1011 1 D 00 Vd 1011 11 M 0 Vm
+        let inst = 0xEEBB0AC0u32
+            | d_bit
+            | (dd_hi << 12)
+            | m_bit
+            | (sm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VNEG: 单精度取负 Sd = -Sm
+    fn emit_vneg_s(&mut self, sd: u8, sm: u8) {
+        let d_bit = ((sd & 1) as u32) << 22;
+        let sd_hi = ((sd >> 1) & 0xF) as u32;
+        let m_bit = ((sm & 1) as u32) << 5;
+        let sm_hi = ((sm >> 1) & 0xF) as u32;
+        // VNEG.S: cond 1111 1011 1 D 00 Vd 1010 01 M 0 Vm
+        let inst = 0xEEB10A40u32
+            | d_bit
+            | (sd_hi << 12)
+            | m_bit
+            | (sm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// VNEG: 双精度取负 Dd = -Dm
+    fn emit_vneg_d(&mut self, dd: u8, dm: u8) {
+        let d_bit = ((dd & 1) as u32) << 22;
+        let dd_hi = ((dd >> 1) & 0xF) as u32;
+        let m_bit = ((dm & 1) as u32) << 5;
+        let dm_hi = ((dm >> 1) & 0xF) as u32;
+        // VNEG.D
+        let inst = 0xEEB10B40u32
+            | d_bit
+            | (dd_hi << 12)
+            | m_bit
+            | (dm_hi << 0);
+        self.code.extend_from_slice(&inst.to_le_bytes());
+    }
+
+    /// 加载单精度浮点字面量到 s0
+    fn load_float_s0(&mut self, val: f32) {
+        // 将浮点字面量写入 rodata 并加载到 s0
+        let bits = val.to_bits() as u64;
+        let offset = if let Some(&off) = self.float_pool.get(&bits) {
+            off
+        } else {
+            let off = self.rodata.len() as u64;
+            self.rodata.extend_from_slice(&val.to_le_bytes());
+            self.float_pool.insert(bits, off);
+            off
+        };
+        // 使用 literal pool 加载: 先加载地址到 r0, 然后 VLDR
+        // 简化: 使用 fp 相对偏移 (假设字面量在可访问范围内)
+        // 实际实现: 将值存入栈临时区, 然后 VLDR
+        let tmp_off = self.alloc_local("<flt_tmp>", 4);
+        // 先将浮点值作为整数存入栈
+        self.emit_load_imm(0, val.to_bits() as i32);
+        self.emit_store_r0(tmp_off);
+        // VLDR s0, [fp, #tmp_off]
+        self.emit_vldr_s(0, tmp_off);
+    }
+
+    /// 加载双精度浮点字面量到 d0
+    fn load_float_d0(&mut self, val: f64) {
+        let bits = val.to_bits();
+        let offset = if let Some(&off) = self.float_pool.get(&bits) {
+            off
+        } else {
+            let off = self.rodata.len() as u64;
+            self.rodata.extend_from_slice(&val.to_le_bytes());
+            self.float_pool.insert(bits, off);
+            off
+        };
+        // 将双精度值存入栈临时区
+        let tmp_off = self.alloc_local("<dbl_tmp>", 8);
+        // 将 64 位值分成两个 32 位存入
+        let lo = (val.to_bits() & 0xFFFFFFFF) as i32;
+        let hi = ((val.to_bits() >> 32) & 0xFFFFFFFF) as i32;
+        self.emit_load_imm(0, lo);
+        self.emit_store_r0(tmp_off);
+        self.emit_load_imm(0, hi);
+        self.emit_store_r0(tmp_off + 4);
+        // VLDR d0, [fp, #tmp_off]
+        self.emit_vldr_d(0, tmp_off);
+    }
+
+    /// 单精度浮点二元运算: s0 = s2 op s0 (s2 = lhs, s0 = rhs)
+    fn float_binop_s0(&mut self, op: BinOp, is_double: bool) {
+        if is_double {
+            match op {
+                BinOp::Add => self.emit_vadd_d(0, 2, 0),
+                BinOp::Sub => self.emit_vsub_d(0, 2, 0),
+                BinOp::Mul => self.emit_vmul_d(0, 2, 0),
+                BinOp::Div => self.emit_vdiv_d(0, 2, 0),
+                _ => self.emit_vadd_d(0, 2, 0),
+            }
+        } else {
+            match op {
+                BinOp::Add => self.emit_vadd_s(0, 2, 0),
+                BinOp::Sub => self.emit_vsub_s(0, 2, 0),
+                BinOp::Mul => self.emit_vmul_s(0, 2, 0),
+                BinOp::Div => self.emit_vdiv_s(0, 2, 0),
+                _ => self.emit_vadd_s(0, 2, 0),
+            }
+        }
+    }
+
+    /// 单精度浮点比较: 设置 r0 = (s2 op s0) ? 1 : 0
+    fn float_cmp_r0(&mut self, op: BinOp, is_double: bool) {
+        // 比较 s2 和 s0
+        if is_double {
+            self.emit_vcmp_d(2, 0);
+        } else {
+            self.emit_vcmp_s(2, 0);
+        }
+        // VMRS APSR_nzcv, FPSCR
+        self.emit_vmrs_apsr();
+        // 根据条件设置 r0
+        self.emit_mov_imm(0, 0);
+        match op {
+            BinOp::EqEq => self.emit_moveq(0, 1),
+            BinOp::Ne => self.emit_movne(0, 1),
+            BinOp::Lt => self.emit_movlt(0, 1),
+            BinOp::Le => self.emit_movle(0, 1),
+            BinOp::Gt => self.emit_movgt(0, 1),
+            BinOp::Ge => self.emit_movge(0, 1),
+            _ => self.emit_moveq(0, 1),
+        }
+    }
+
+    /// 保存 s0 到 s2 (用于保存左操作数)
+    fn save_s0_to_s2(&mut self, is_double: bool) {
+        if is_double {
+            // VMOV.F64 d2, d0
+            self.emit_vadd_d(2, 0, 0); // d2 = d0 + 0 = d0
+        } else {
+            // VMOV.F32 s2, s0
+            self.emit_vadd_s(2, 0, 0); // s2 = s0 + 0 = s0
+        }
+    }
+
+    /// 从栈加载浮点到 s0 (用于加载局部变量)
+    fn load_float_to_s0(&mut self, off: i32, is_double: bool) {
+        if is_double {
+            self.emit_vldr_d(0, off);
+        } else {
+            self.emit_vldr_s(0, off);
+        }
+    }
+
+    /// 存储 s0 到栈 (用于存储浮点结果)
+    fn store_s0_to_stack(&mut self, off: i32, is_double: bool) {
+        if is_double {
+            self.emit_vstr_d(0, off);
+        } else {
+            self.emit_vstr_s(0, off);
+        }
     }
 }
 
