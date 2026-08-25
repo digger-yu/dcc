@@ -629,6 +629,195 @@ fn asm_type_is_integer_like(ty: &Type) -> bool {
     ty.is_int() || matches!(ty, Type::Ptr(_) | Type::Array(_, _) | Type::Enum(_, _, _))
 }
 
+/// Convert IR ValueType to DWARF type for debug info generation
+fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
+    use crate::ir::ValueType;
+    match vt {
+        ValueType::Void => debug::DwarfType {
+            name: "void".to_string(),
+            byte_size: 0,
+            kind: debug::DwarfTypeKind::Void,
+        },
+        ValueType::Integer { bits, signed } => {
+            let name = match (*bits, *signed) {
+                (8, true) => "signed char",
+                (8, false) => "unsigned char",
+                (16, true) => "short",
+                (16, false) => "unsigned short",
+                (32, true) => "int",
+                (32, false) => "unsigned int",
+                (64, true) => "long int",
+                (64, false) => "long unsigned int",
+                (128, true) => "__int128",
+                (128, false) => "unsigned __int128",
+                _ => if *signed { "int" } else { "unsigned int" },
+            };
+            debug::DwarfType {
+                name: name.to_string(),
+                byte_size: (*bits as u64 + 7) / 8,
+                kind: debug::DwarfTypeKind::Base(if *signed {
+                    debug::TypeEncoding::Signed
+                } else {
+                    debug::TypeEncoding::Unsigned
+                }),
+            }
+        }
+        ValueType::Float { bits } => {
+            let name = match *bits {
+                32 => "float",
+                64 => "double",
+                128 => "long double",
+                _ => "double",
+            };
+            debug::DwarfType {
+                name: name.to_string(),
+                byte_size: (*bits as u64 + 7) / 8,
+                kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+            }
+        }
+        ValueType::Pointer(inner) => debug::DwarfType {
+            name: format!("{}*", value_type_to_dwarf(inner).name),
+            byte_size: 8,
+            kind: debug::DwarfTypeKind::Pointer(Box::new(value_type_to_dwarf(inner))),
+        },
+        ValueType::Array(elem, Some(count)) => debug::DwarfType {
+            name: format!("{}[{}]", value_type_to_dwarf(elem).name, count),
+            byte_size: value_type_to_dwarf(elem).byte_size * (*count as u64),
+            kind: debug::DwarfTypeKind::Array {
+                element: Box::new(value_type_to_dwarf(elem)),
+                count: *count as u64,
+            },
+        },
+        ValueType::Array(elem, None) => debug::DwarfType {
+            name: format!("{}[]", value_type_to_dwarf(elem).name),
+            byte_size: 0,
+            kind: debug::DwarfTypeKind::Pointer(Box::new(value_type_to_dwarf(elem))),
+        },
+        ValueType::Aggregate { name, size, is_union } => {
+            if *is_union {
+                debug::DwarfType {
+                    name: name.clone(),
+                    byte_size: *size as u64,
+                    kind: debug::DwarfTypeKind::Union { members: vec![] },
+                }
+            } else {
+                debug::DwarfType {
+                    name: name.clone(),
+                    byte_size: *size as u64,
+                    kind: debug::DwarfTypeKind::Struct { members: vec![] },
+                }
+            }
+        }
+        ValueType::Function { ret, params } => debug::DwarfType {
+            name: "function".to_string(),
+            byte_size: 0,
+            kind: debug::DwarfTypeKind::Func {
+                ret: Box::new(value_type_to_dwarf(ret)),
+                params: params.iter().map(|p| value_type_to_dwarf(p)).collect(),
+            },
+        },
+        ValueType::Vector(elem, count) => debug::DwarfType {
+            name: format!("vector({},{})", value_type_to_dwarf(elem).name, count),
+            byte_size: value_type_to_dwarf(elem).byte_size * (*count as u64),
+            kind: debug::DwarfTypeKind::Array {
+                element: Box::new(value_type_to_dwarf(elem)),
+                count: *count as u64,
+            },
+        },
+        ValueType::Complex(inner) => debug::DwarfType {
+            name: format!("_Complex {}", value_type_to_dwarf(inner).name),
+            byte_size: value_type_to_dwarf(inner).byte_size * 2,
+            kind: debug::DwarfTypeKind::Struct { members: vec![] },
+        },
+    }
+}
+
+/// Build a CompileUnit from IR module + AST source with rich type/line info.
+/// `func_pcs` entries: (name, low_pc, high_pc).
+fn build_dwarf_cu(
+    module: &Module,
+    source_name: &str,
+    func_pcs: &[(&str, u64, u64)],
+    line_entries: Vec<debug::LineEntry>,
+) -> debug::CompileUnit {
+    // Build AST lookup: function name → param names
+    let ast_param_names: std::collections::HashMap<&str, Vec<Option<String>>> = module
+        .source()
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            crate::ast::Decl::Func(fd) => {
+                let names: Vec<Option<String>> = fd
+                    .params
+                    .iter()
+                    .map(|p| p.name.as_ref().map(|id| id.name.clone()))
+                    .collect();
+                Some((fd.name.name.as_str(), names))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let functions: Vec<debug::DwarfFuncInfo> = func_pcs
+        .iter()
+        .filter_map(|(name, low_pc, high_pc)| {
+            let ir_func = module.functions.iter().find(|f| f.name == *name)?;
+            let ret_ty = value_type_to_dwarf(&ir_func.return_type);
+            let param_names = ast_param_names.get(*name);
+            let params: Vec<(String, debug::DwarfType)> = ir_func
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, vt)| {
+                    let p_name = param_names
+                        .and_then(|ns| ns.get(i))
+                        .and_then(|n| n.clone())
+                        .unwrap_or_else(|| format!("arg{}", i));
+                    (p_name, value_type_to_dwarf(vt))
+                })
+                .collect();
+            Some(debug::DwarfFuncInfo {
+                name: name.to_string(),
+                linkage_name: None,
+                low_pc: *low_pc,
+                high_pc: *high_pc,
+                decl_line: ir_func.span.line,
+                decl_file_idx: 0,
+                return_type: ret_ty,
+                params,
+                param_locations: vec![],
+                local_vars: vec![],
+                lexical_blocks: vec![],
+                is_external: *name == "main",
+                is_inline: false,
+                is_declaration: false,
+            })
+        })
+        .collect();
+
+    let low_pc = functions.first().map(|f| f.low_pc).unwrap_or(0);
+    let high_pc = functions.last().map(|f| f.high_pc).unwrap_or(0);
+    let func_ranges: Vec<(u64, u64)> =
+        functions.iter().map(|f| (f.low_pc, f.high_pc)).collect();
+
+    debug::CompileUnit {
+        source_name: source_name.to_string(),
+        comp_dir: None,
+        producer: format!("dcc {}", env!("CARGO_PKG_VERSION")),
+        language: 0x000C, // DW_LANG_C99
+        functions,
+        globals: vec![],
+        types: vec![],
+        low_pc,
+        high_pc,
+        line_entries,
+        line_files: vec![source_name.to_string()],
+        line_dirs: vec![".".to_string()],
+        func_ranges,
+        cfi_rows: vec![],
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn emit(
     module: &Module,
@@ -668,10 +857,16 @@ pub fn emit(
                 return Ok(cg.build_asm_output(module.source()).into_bytes());
             }
             if debug_level > 0 && relocatable {
-                let funcs: Vec<(&str, u64)> = module
+                // Build func_pcs with actual sizes from codegen
+                let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
-                    .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .filter_map(|f| {
+                        cg.labels.get(&f.name).map(|&pc| {
+                            let sz = cg.func_sizes.get(&f.name).copied().unwrap_or(16);
+                            (f.name.as_str(), pc, pc + sz)
+                        })
+                    })
                     .collect();
                 // 将 asm 块行号记录转换为 DWARF LineEntry
                 // 组合块级条目 (is_stmt=true) 和逐指令条目 (is_stmt=false, discriminator>0)
@@ -712,60 +907,14 @@ pub fn emit(
                         .then_with(|| b.is_stmt.cmp(&a.is_stmt))
                         .then_with(|| a.discriminator.cmp(&b.discriminator))
                 });
-                let has_asm_entries = !combined_line_entries.is_empty();
-                let mut dbg = debug::build_dwarf(source_name, &funcs);
-                // 如果有 asm 行号条目, 重新生成带行号的 DWARF
-                if has_asm_entries {
-                    let cu = debug::CompileUnit {
-                        source_name: source_name.to_string(),
-                        comp_dir: None,
-                        producer: format!("dcc {}", env!("CARGO_PKG_VERSION")),
-                        language: 0x000C, // DW_LANG_C99
-                        functions: funcs
-                            .iter()
-                            .map(|(name, pc)| debug::DwarfFuncInfo {
-                                name: name.to_string(),
-                                linkage_name: None,
-                                low_pc: *pc,
-                                high_pc: *pc + cg.func_sizes.get(*name).copied().unwrap_or(16),
-                                decl_line: 0,
-                                decl_file_idx: 0,
-                                return_type: debug::DwarfType {
-                                    name: "void".to_string(),
-                                    byte_size: 0,
-                                    kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
-                                },
-                                params: vec![],
-                                param_locations: vec![],
-                                local_vars: vec![],
-                                lexical_blocks: vec![],
-                                is_external: true,
-                                is_inline: false,
-                                is_declaration: false,
-                            })
-                            .collect(),
-                        globals: vec![],
-                        types: vec![],
-                        low_pc: combined_line_entries.first().map(|e| e.pc).unwrap_or(0),
-                        high_pc: combined_line_entries.last().map(|e| e.pc + 1).unwrap_or(0),
-                        line_entries: combined_line_entries,
-                        line_files: vec![source_name.to_string()],
-                        line_dirs: vec![".".to_string()],
-                        func_ranges: funcs
-                            .iter()
-                            .map(|(name, pc)| {
-                                (*pc, *pc + cg.func_sizes.get(*name).copied().unwrap_or(16))
-                            })
-                            .collect(),
-                        cfi_rows: vec![],
-                    };
-                    let opts = debug::DebugOptions {
-                        level: debug_level,
-                        source_name: source_name.to_string(),
-                        ..Default::default()
-                    };
-                    dbg = debug::build_dwarf_full(&cu, &opts);
-                }
+                // Always use build_dwarf_cu with rich IR info
+                let cu = build_dwarf_cu(module, source_name, &func_pcs, combined_line_entries);
+                let opts = debug::DebugOptions {
+                    level: debug_level,
+                    source_name: source_name.to_string(),
+                    ..Default::default()
+                };
+                let dbg = debug::build_dwarf_full(&cu, &opts);
                 cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".BTF".to_string(),
@@ -939,10 +1088,12 @@ pub fn emit(
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
-                let funcs: Vec<(&str, u64)> = module
+                let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
-                    .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .filter_map(|f| {
+                        cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc, pc + 64))
+                    })
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
@@ -950,44 +1101,7 @@ pub fn emit(
                     arch: debug::ArchKind::AArch64,
                     ..debug::DebugOptions::default()
                 };
-                let cu = debug::CompileUnit {
-                    source_name: source_name.to_string(),
-                    comp_dir: None,
-                    producer: "dcc".to_string(),
-                    language: 12, // DW_LANG_C99
-                    functions: funcs
-                        .iter()
-                        .map(|(n, pc)| debug::DwarfFuncInfo {
-                            name: n.to_string(),
-                            linkage_name: None,
-                            low_pc: *pc,
-                            high_pc: *pc + 64,
-                            decl_line: 0,
-                            decl_file_idx: 0,
-                            return_type: debug::DwarfType {
-                                name: "void".to_string(),
-                                byte_size: 0,
-                                kind: debug::DwarfTypeKind::Void,
-                            },
-                            params: Vec::new(),
-                            param_locations: Vec::new(),
-                            local_vars: Vec::new(),
-                            lexical_blocks: Vec::new(),
-                            is_external: *n == "main",
-                            is_inline: false,
-                            is_declaration: false,
-                        })
-                        .collect(),
-                    globals: Vec::new(),
-                    types: Vec::new(),
-                    line_entries: Vec::new(),
-                    line_files: vec![source_name.to_string()],
-                    line_dirs: Vec::new(),
-                    low_pc: funcs.first().map(|(_, pc)| *pc).unwrap_or(0),
-                    high_pc: funcs.last().map(|(_, pc)| *pc + 64).unwrap_or(0),
-                    func_ranges: funcs.iter().map(|(_, pc)| (*pc, 64)).collect(),
-                    cfi_rows: Vec::new(),
-                };
+                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1052,10 +1166,12 @@ pub fn emit(
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
-                let funcs: Vec<(&str, u64)> = module
+                let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
-                    .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .filter_map(|f| {
+                        cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc, pc + 64))
+                    })
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
@@ -1063,44 +1179,7 @@ pub fn emit(
                     arch: debug::ArchKind::RiscV64,
                     ..debug::DebugOptions::default()
                 };
-                let cu = debug::CompileUnit {
-                    source_name: source_name.to_string(),
-                    comp_dir: None,
-                    producer: "dcc".to_string(),
-                    language: 12, // DW_LANG_C99
-                    functions: funcs
-                        .iter()
-                        .map(|(n, pc)| debug::DwarfFuncInfo {
-                            name: n.to_string(),
-                            linkage_name: None,
-                            low_pc: *pc,
-                            high_pc: *pc + 64,
-                            decl_line: 0,
-                            decl_file_idx: 0,
-                            return_type: debug::DwarfType {
-                                name: "void".to_string(),
-                                byte_size: 0,
-                                kind: debug::DwarfTypeKind::Void,
-                            },
-                            params: Vec::new(),
-                            param_locations: Vec::new(),
-                            local_vars: Vec::new(),
-                            lexical_blocks: Vec::new(),
-                            is_external: *n == "main",
-                            is_inline: false,
-                            is_declaration: false,
-                        })
-                        .collect(),
-                    globals: Vec::new(),
-                    types: Vec::new(),
-                    line_entries: Vec::new(),
-                    line_files: vec![source_name.to_string()],
-                    line_dirs: Vec::new(),
-                    low_pc: funcs.first().map(|(_, pc)| *pc).unwrap_or(0),
-                    high_pc: funcs.last().map(|(_, pc)| *pc + 64).unwrap_or(0),
-                    func_ranges: funcs.iter().map(|(_, pc)| (*pc, 64)).collect(),
-                    cfi_rows: Vec::new(),
-                };
+                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1165,10 +1244,12 @@ pub fn emit(
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
-                let funcs: Vec<(&str, u64)> = module
+                let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
-                    .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .filter_map(|f| {
+                        cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc, pc + 64))
+                    })
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
@@ -1176,44 +1257,7 @@ pub fn emit(
                     arch: debug::ArchKind::Mips,
                     ..debug::DebugOptions::default()
                 };
-                let cu = debug::CompileUnit {
-                    source_name: source_name.to_string(),
-                    comp_dir: None,
-                    producer: "dcc".to_string(),
-                    language: 12,
-                    functions: funcs
-                        .iter()
-                        .map(|(n, pc)| debug::DwarfFuncInfo {
-                            name: n.to_string(),
-                            linkage_name: None,
-                            low_pc: *pc,
-                            high_pc: *pc + 64,
-                            decl_line: 0,
-                            decl_file_idx: 0,
-                            return_type: debug::DwarfType {
-                                name: "void".to_string(),
-                                byte_size: 0,
-                                kind: debug::DwarfTypeKind::Void,
-                            },
-                            params: Vec::new(),
-                            param_locations: Vec::new(),
-                            local_vars: Vec::new(),
-                            lexical_blocks: Vec::new(),
-                            is_external: *n == "main",
-                            is_inline: false,
-                            is_declaration: false,
-                        })
-                        .collect(),
-                    globals: Vec::new(),
-                    types: Vec::new(),
-                    line_entries: Vec::new(),
-                    line_files: vec![source_name.to_string()],
-                    line_dirs: Vec::new(),
-                    low_pc: funcs.first().map(|(_, pc)| *pc).unwrap_or(0),
-                    high_pc: funcs.last().map(|(_, pc)| *pc + 64).unwrap_or(0),
-                    func_ranges: funcs.iter().map(|(_, pc)| (*pc, 64)).collect(),
-                    cfi_rows: Vec::new(),
-                };
+                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1271,10 +1315,12 @@ pub fn emit(
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
-                let funcs: Vec<(&str, u64)> = module
+                let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
-                    .filter_map(|f| cg.labels().get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .filter_map(|f| {
+                        cg.labels().get(&f.name).map(|&pc| (f.name.as_str(), pc, pc + 64))
+                    })
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
@@ -1282,44 +1328,7 @@ pub fn emit(
                     arch: debug::ArchKind::Mips64,
                     ..debug::DebugOptions::default()
                 };
-                let cu = debug::CompileUnit {
-                    source_name: source_name.to_string(),
-                    comp_dir: None,
-                    producer: "dcc".to_string(),
-                    language: 12,
-                    functions: funcs
-                        .iter()
-                        .map(|(n, pc)| debug::DwarfFuncInfo {
-                            name: n.to_string(),
-                            linkage_name: None,
-                            low_pc: *pc,
-                            high_pc: *pc + 64,
-                            decl_line: 0,
-                            decl_file_idx: 0,
-                            return_type: debug::DwarfType {
-                                name: "void".to_string(),
-                                byte_size: 0,
-                                kind: debug::DwarfTypeKind::Void,
-                            },
-                            params: Vec::new(),
-                            param_locations: Vec::new(),
-                            local_vars: Vec::new(),
-                            lexical_blocks: Vec::new(),
-                            is_external: *n == "main",
-                            is_inline: false,
-                            is_declaration: false,
-                        })
-                        .collect(),
-                    globals: Vec::new(),
-                    types: Vec::new(),
-                    line_entries: Vec::new(),
-                    line_files: vec![source_name.to_string()],
-                    line_dirs: Vec::new(),
-                    low_pc: funcs.first().map(|(_, pc)| *pc).unwrap_or(0),
-                    high_pc: funcs.last().map(|(_, pc)| *pc + 64).unwrap_or(0),
-                    func_ranges: funcs.iter().map(|(_, pc)| (*pc, 64)).collect(),
-                    cfi_rows: Vec::new(),
-                };
+                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {
@@ -1377,10 +1386,12 @@ pub fn emit(
             }
             cg.compile(module);
             if debug_level > 0 && relocatable {
-                let funcs: Vec<(&str, u64)> = module
+                let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
                     .iter()
-                    .filter_map(|f| cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc)))
+                    .filter_map(|f| {
+                        cg.labels.get(&f.name).map(|&pc| (f.name.as_str(), pc, pc + 64))
+                    })
                     .collect();
                 let opts = debug::DebugOptions {
                     level: debug_level,
@@ -1388,44 +1399,7 @@ pub fn emit(
                     arch: debug::ArchKind::Arm,
                     ..debug::DebugOptions::default()
                 };
-                let cu = debug::CompileUnit {
-                    source_name: source_name.to_string(),
-                    comp_dir: None,
-                    producer: "dcc".to_string(),
-                    language: 12,
-                    functions: funcs
-                        .iter()
-                        .map(|(n, pc)| debug::DwarfFuncInfo {
-                            name: n.to_string(),
-                            linkage_name: None,
-                            low_pc: *pc,
-                            high_pc: *pc + 64,
-                            decl_line: 0,
-                            decl_file_idx: 0,
-                            return_type: debug::DwarfType {
-                                name: "void".to_string(),
-                                byte_size: 0,
-                                kind: debug::DwarfTypeKind::Void,
-                            },
-                            params: Vec::new(),
-                            param_locations: Vec::new(),
-                            local_vars: Vec::new(),
-                            lexical_blocks: Vec::new(),
-                            is_external: *n == "main",
-                            is_inline: false,
-                            is_declaration: false,
-                        })
-                        .collect(),
-                    globals: Vec::new(),
-                    types: Vec::new(),
-                    line_entries: Vec::new(),
-                    line_files: vec![source_name.to_string()],
-                    line_dirs: Vec::new(),
-                    low_pc: funcs.first().map(|(_, pc)| *pc).unwrap_or(0),
-                    high_pc: funcs.last().map(|(_, pc)| *pc + 64).unwrap_or(0),
-                    func_ranges: funcs.iter().map(|(_, pc)| (*pc, 64)).collect(),
-                    cfi_rows: Vec::new(),
-                };
+                let cu = build_dwarf_cu(module, source_name, &func_pcs, vec![]);
                 let dbg = debug::build_dwarf_full(&cu, &opts);
                 let extra_secs = debug::dwarf_elf_sections(&dbg);
                 cg.push_extra_section(elf::ElfSection {

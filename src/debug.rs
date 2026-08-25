@@ -774,7 +774,9 @@ impl AbbrevBuilder {
         }
         v
     }
-    fn into_bytes(self) -> Vec<u8> {
+    fn into_bytes(mut self) -> Vec<u8> {
+        // DWARF spec: abbreviation table must end with a 0x00 byte
+        self.data.push(0x00);
         self.data
     }
 }
