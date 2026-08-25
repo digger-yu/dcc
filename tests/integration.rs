@@ -4600,6 +4600,54 @@ fn asm_warning_location_stable_across_header_cache_replay() {
     let _ = fs::remove_dir_all(home_dir);
 }
 
+/// Unsupported inline asm instructions must produce hard errors (E0311),
+/// not silently fall back to NOP bytes.
+#[test]
+fn asm_unsupported_instructions_error_not_nop() {
+    let dir = std::env::temp_dir();
+    let tag = format!("dcc-asm-unsupported-{}", std::process::id());
+    let hdr_path = dir.join(format!("{tag}.h"));
+    let src_path = dir.join(format!("{tag}.c"));
+    let hdr = include_str!("fixtures/c/asm_unsupported_error.h");
+    fs::write(&hdr_path, hdr).expect("write header fixture");
+    fs::write(
+        &src_path,
+        format!(
+            "#include \"{}\"\nint main(void) {{ return 0; }}\n",
+            hdr_path.display()
+        ),
+    )
+    .expect("write C fixture");
+    let obj_path = dir.join(format!("{tag}.o"));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // All unsupported asm patterns must produce E0311 errors
+    assert!(!output.status.success(), "should fail with E0311 errors");
+    // Check for multiple E0311 errors (one for each unsupported pattern)
+    let e0311_count = stderr.matches("E0311").count();
+    assert!(
+        e0311_count >= 3,
+        "expected at least 3 E0311 errors (unrecognized instr, unsupported operand patterns), got {e0311_count}: {stderr}"
+    );
+    // Verify specific error messages
+    assert!(
+        stderr.contains("foobar") || stderr.contains("unsupported inline asm instruction"),
+        "should report unrecognized instruction: {stderr}"
+    );
+    assert!(
+        stderr.contains("sha1rnds4") || stderr.contains("pshufd"),
+        "should report unsupported operand pattern: {stderr}"
+    );
+    let _ = fs::remove_file(hdr_path);
+    let _ = fs::remove_file(src_path);
+    let _ = fs::remove_file(obj_path);
+}
+
 /// __builtin_constant_p：编译期常量判定（含 __int128 表达式）
 #[test]
 fn builtin_constant_p_full_run_returns_zero() {
