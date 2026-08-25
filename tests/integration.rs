@@ -15594,3 +15594,52 @@ int compute(int n) { return square(n); }
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
 }
+
+/// Verify that `-mcmodel=kernel` bypasses GOT for ALL symbol references.
+/// Data symbols (global, extern, static) must use R_X86_64_PC32 (RIP-relative),
+/// function symbols must use R_X86_64_PLT32 (direct).  No GOTPCREL allowed.
+#[test]
+#[cfg(unix)]
+fn kernel_code_model_data_symbols_bypass_got() {
+    let src = include_str!("fixtures/c/kernel_code_model_data.c");
+    let (out, obj) = run_object_test_flags(
+        "kernel-cmodel-data",
+        src,
+        &["-mcmodel=kernel"],
+    );
+    assert!(
+        out.status.success(),
+        "kernel_code_model compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let relocs = readelf_relocations(&obj);
+    let _ = fs::remove_file(&obj);
+
+    // Must NOT contain any GOTPCREL relocations
+    assert!(
+        !relocs.contains("GOTPCREL"),
+        "kernel code model must not use GOT for any symbol: {relocs}"
+    );
+
+    // Data symbols (load/store/addr-of) must use R_X86_64_PC32
+    assert!(
+        relocs.contains("PC32") && relocs.contains("k_global_var"),
+        "data symbols should use R_X86_64_PC32: {relocs}"
+    );
+    assert!(
+        relocs.contains("k_ext_var"),
+        "extern data symbols should appear in relocations: {relocs}"
+    );
+
+    // Function address-taking should use PLT32 (or PC32), not GOTPCREL
+    assert!(
+        (relocs.contains("PLT32") || relocs.contains("PC32"))
+            && relocs.contains("k_internal_func"),
+        "internal function address should use direct relocation: {relocs}"
+    );
+    assert!(
+        relocs.contains("k_ext_func"),
+        "external function address should appear in relocations: {relocs}"
+    );
+}
