@@ -1425,7 +1425,6 @@ impl Codegen {
             eprintln!("{}: warning: {}", file, msg);
         }
     }
-
     fn expr_warn(&self, e: &Expr, msg: &str) {
         eprintln!("{}", self.expr_warning(e, msg));
     }
@@ -16651,7 +16650,6 @@ impl Codegen {
         self.asm_warn(&format!(
             "unsupported {context} operand pattern, emitted as nop"
         ));
-        self.emit(&[0x90]);
     }
 
     fn warn_unresolved_asm_operand(&mut self, line: &str, asm_line: usize) {
@@ -16990,7 +16988,6 @@ impl Codegen {
                     self.current_asm_line = i + 1;
                     if Self::asm_has_unresolved_operand(&subbed) {
                         self.warn_unresolved_asm_operand(&subbed, i + 1);
-                        self.emit(&[0x90]);
                     } else if subbed.trim().starts_with('.') {
                         self.emit_asm_directive(&subbed);
                     } else {
@@ -18135,8 +18132,8 @@ impl Codegen {
         let debug_src_line = self.current_asm_src_line;
         if Self::asm_has_unresolved_operand(&line) {
             self.warn_unresolved_asm_operand(&line, self.current_asm_line);
-            self.emit(&[0x90]);
-            // 未解析操作数 fallback: 记录 nop 的调试信息
+            // 未解析操作数: 错误已由 warn_unresolved_asm_operand 报告,
+            // 不再发射 NOP 占位 (P0-5: 硬错误而非静默回退)
             if self.debug_level > 0 && debug_src_line > 0 {
                 let disc = self.asm_insn_debug_entries.len() as u16;
                 self.asm_insn_debug_entries
@@ -18451,7 +18448,6 @@ impl Codegen {
                         "unsupported cmov condition '{}', emitted as nop",
                         cond
                     ));
-                    self.emit(&[0x90]);
                 }
             }
 
@@ -18559,7 +18555,6 @@ impl Codegen {
                     self.emit_asm_modrm_mem_only(*d & 7, *disp, *base, *index, *scale);
                 } else {
                     self.asm_warn("lar needs reg, reg/mem operands, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             }
             // 描述符表: str (0F 00 /1) 与 sgdt/sidt/lgdt/lidt (0F 01 /0-/3)
@@ -18645,7 +18640,6 @@ impl Codegen {
                 }
                 _ => {
                     self.asm_warn("rdrand needs register or memory operand, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             },
             "rdseed" if ops.len() == 1 => match &ops[0] {
@@ -18689,7 +18683,6 @@ impl Codegen {
                 }
                 _ => {
                     self.asm_warn("rdseed needs register or memory operand, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             },
             "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
@@ -18724,7 +18717,6 @@ impl Codegen {
                     self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
                 } else {
                     self.asm_warn("vmxon needs memory operand, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             }
             // wrussq: 0F 38 F5 /r (reg, mem) — CET user shadow stack write
@@ -18734,7 +18726,6 @@ impl Codegen {
                     self.emit_asm_modrm_mem_only(*s & 7, *disp, *base, *index, *scale);
                 } else {
                     self.asm_warn("wrussq needs reg, mem operands, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             }
             "ud2" => self.emit(&[0x0F, 0x0B]),
@@ -18964,7 +18955,6 @@ impl Codegen {
                     }
                     _ => {
                         self.asm_warn("retf needs imm16, emitted as nop");
-                        self.emit(&[0x90]);
                     }
                 }
             }
@@ -18983,7 +18973,6 @@ impl Codegen {
                     }
                     _ => {
                         self.asm_warn("lret needs imm16, emitted as nop");
-                        self.emit(&[0x90]);
                     }
                 }
             }
@@ -19004,7 +18993,6 @@ impl Codegen {
                     }
                     _ => {
                         self.asm_warn("ljmpw needs $seg, $off, emitted as nop");
-                        self.emit(&[0x90]);
                     }
                 }
             }
@@ -19025,7 +19013,6 @@ impl Codegen {
                     }
                     _ => {
                         self.asm_warn("ljmpl needs $seg, $off, emitted as nop");
-                        self.emit(&[0x90]);
                     }
                 }
             }
@@ -19053,7 +19040,6 @@ impl Codegen {
                     }
                     _ => {
                         self.asm_warn("lcallw needs $seg, $off, emitted as nop");
-                        self.emit(&[0x90]);
                     }
                 }
             }
@@ -19074,7 +19060,6 @@ impl Codegen {
                     }
                     _ => {
                         self.asm_warn("lcalll needs $seg, $off, emitted as nop");
-                        self.emit(&[0x90]);
                     }
                 }
             }
@@ -19165,7 +19150,6 @@ impl Codegen {
                     });
                 } else {
                     self.asm_warn("xbegin needs label or imm, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             }
             "xend" => self.emit(&[0x0F, 0x01, 0xD5]),
@@ -19178,7 +19162,6 @@ impl Codegen {
                     self.emit(&[0xC6, 0xF8, 0x00]);
                 } else {
                     self.asm_warn("xabort needs imm8, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             }
             "xtest" => self.emit(&[0x0F, 0x01, 0xD6]),
@@ -19213,11 +19196,9 @@ impl Codegen {
                         self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 1, 0xDF, *imm);
                     } else {
                         self.asm_warn("aeskeygenassist dst must be xmm, emitted as nop");
-                        self.emit(&[0x90]);
                     }
                 } else {
                     self.asm_warn("aeskeygenassist needs imm, reg/mem, reg, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             }
 
@@ -21258,21 +21239,18 @@ impl Codegen {
                         ]);
                     } else {
                         self.asm_warn("adox needs GPR operands, emitted as nop");
-                        self.emit(&[0x90]);
                     }
                 } else {
                     self.asm_warn("adox needs reg, reg, emitted as nop");
-                    self.emit(&[0x90]);
                 }
             }
 
-            // 未识别指令: 警告 + nop 占位
+            // 未识别指令: 硬错误 (P0-5: 不再静默替换为 NOP)
             _ => {
                 self.asm_warn(&format!(
                     "unsupported inline asm instruction '{}' (asm line {}), emitted as nop",
                     mnemonic, self.current_asm_line,
                 ));
-                self.emit(&[0x90]);
             }
         }
     }
