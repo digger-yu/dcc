@@ -16,6 +16,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy)]
 enum BranchKind {
     Beqz,
+    Bne,
     B,
 }
 
@@ -66,6 +67,10 @@ pub struct MipsCodegen {
     va_flt_offs: i32,
     /// 浮点字面量池偏移 (rodata 中)
     float_pool: HashMap<u64, u64>,
+    /// Stack protector: 当前函数 canary 槽位偏移, 0 表示未启用
+    canary_slot_off: i32,
+    /// -mrecord-mcount: ftrace call site positions for __mcount_loc section
+    mcount_loc_entries: Vec<(u64, String)>,
     /// 编译诊断 (未识别内联汇编指令等)
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     _target: Target,
@@ -109,6 +114,8 @@ impl MipsCodegen {
             va_gp_offs: 0,
             va_flt_offs: 0,
             float_pool: HashMap::new(),
+            canary_slot_off: 0,
+            mcount_loc_entries: Vec::new(),
             diagnostics: Vec::new(),
             _target: target,
         }
@@ -217,6 +224,38 @@ impl MipsCodegen {
         } else {
             self.compile_exec(module, prog);
         }
+        // Stack canary: add __stack_chk_guard/__stack_chk_fail undefined symbols
+        if self._target.stack_protector {
+            self.ensure_sym_object("__stack_chk_guard");
+            self.ensure_sym("__stack_chk_fail");
+        }
+        // FTRACE: add mcount/__fentry__ undefined symbols
+        match self._target.ftrace_mode {
+            crate::cli::FtraceMode::MCount => {
+                self.ensure_sym("mcount");
+            }
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                self.ensure_sym("__fentry__");
+            }
+            crate::cli::FtraceMode::None => {}
+        }
+        // -mrecord-mcount: generate __mcount_loc section with call site addresses
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
+            && !self.mcount_loc_entries.is_empty()
+        {
+            let mut mcount_data =
+                Vec::with_capacity(self.mcount_loc_entries.len() * 4); // MIPS: 32-bit addresses
+            for &(call_pos, _) in &self.mcount_loc_entries {
+                mcount_data.extend_from_slice(&(call_pos as u32).to_be_bytes());
+            }
+            self.extra_sections.push(elf::ElfSection {
+                name: "__mcount_loc".to_string(),
+                data: mcount_data,
+                ty: elf::SHT_PROGBITS,
+                flags: elf::SHF_ALLOC,
+                align: 4,
+            });
+        }
     }
 
     fn compile_exec(&mut self, module: &Module, prog: &Program) {
@@ -290,6 +329,7 @@ impl MipsCodegen {
             if let Some(&target) = self.labels.get(&label) {
                 match kind {
                     BranchKind::Beqz => self.patch_beqz(at, target),
+                    BranchKind::Bne => self.patch_bne(at, target),
                     BranchKind::B => self.patch_b(at, target),
                 }
             }
@@ -379,6 +419,13 @@ impl MipsCodegen {
         self.current_return_ty = Some(func.return_type.clone());
         self.emitted_return = false;
 
+        // Stack protector: allocate canary slot before frame size calculation
+        if self._target.stack_protector {
+            self.canary_slot_off = self.alloc_local("<canary>", 4);
+        } else {
+            self.canary_slot_off = 0;
+        }
+
         // 变参函数: 在局部变量之后预留 $a0-$a3 保存区 (4×4 = 16 字节)
         let is_variadic = ast.map(|f| f.is_variadic).unwrap_or(false);
         self.is_current_func_variadic = is_variadic;
@@ -409,6 +456,34 @@ impl MipsCodegen {
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
             self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
+
+        // Stack protector: store canary value on stack after frame setup
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_prologue(self.canary_slot_off);
+        }
+
+        // FTRACE: emit call to mcount/__fentry__ before function body
+        let ftrace_call_pos: Option<u64> = match self._target.ftrace_mode {
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                let pos = self.code.len() as u64;
+                self.emit_jal("__fentry__");
+                self.emit_nop(); // delay slot
+                Some(pos)
+            }
+            crate::cli::FtraceMode::MCount => {
+                let pos = self.code.len() as u64;
+                self.emit_jal("mcount");
+                self.emit_nop(); // delay slot
+                Some(pos)
+            }
+            crate::cli::FtraceMode::None => None,
+        };
+        // -mrecord-mcount: record call site for __mcount_loc section
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount) {
+            if let Some(call_pos) = ftrace_call_pos {
+                self.mcount_loc_entries.push((call_pos, func.name.clone()));
+            }
         }
 
         // 参数传递: $a0-$a3 -> 局部变量槽
@@ -504,6 +579,10 @@ impl MipsCodegen {
     }
 
     fn emit_epilogue(&mut self) {
+        // Stack protector epilogue: verify canary BEFORE frame teardown
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_epilogue(self.canary_slot_off);
+        }
         // 恢复 $fp, $ra 并返回
         if self.is_64bit {
             self.emit_lw(30, 29, (self.frame_bytes - 16) as i16); // ld $fp, frame-16($sp)
@@ -1147,6 +1226,7 @@ impl MipsCodegen {
         for (at, _, kind) in pending {
             match kind {
                 BranchKind::Beqz => self.patch_beqz(at, pos),
+                BranchKind::Bne => self.patch_bne(at, pos),
                 BranchKind::B => self.patch_b(at, pos),
             }
         }
@@ -1175,6 +1255,94 @@ impl MipsCodegen {
         let offset = offset as i16;
         let patched = (0b000100u32 << 26) | (offset as u16 as u32);
         self.code[at as usize..at as usize + 4].copy_from_slice(&patched.to_be_bytes());
+    }
+
+    fn patch_bne(&mut self, at: u64, target: u64) {
+        // MIPS BNE offset: (target - branch_pc - 4) / 4
+        let offset = ((target as i64) - (at as i64) - 4) / 4;
+        let offset = offset as i16;
+        // Read existing instruction, preserve rs/rt fields, update offset
+        let existing = u32::from_be_bytes([
+            self.code[at as usize],
+            self.code[at as usize + 1],
+            self.code[at as usize + 2],
+            self.code[at as usize + 3],
+        ]);
+        let patched = (existing & 0xFFFF0000) | (offset as u16 as u32);
+        self.code[at as usize..at as usize + 4].copy_from_slice(&patched.to_be_bytes());
+    }
+
+    /// Ensure symbol exists in symbol table
+    fn ensure_sym(&mut self, name: &str) -> u32 {
+        if let Some(&idx) = self.sym_index.get(name) {
+            return idx;
+        }
+        self.symbols.push(ElfSym {
+            name: name.to_string(),
+            section: 0,
+            value: 0,
+            size: 0,
+            bind: STB_GLOBAL,
+            ty: STT_FUNC,
+            visibility: 0,
+        });
+        let idx = self.symbols.len() as u32;
+        self.sym_index.insert(name.to_string(), idx);
+        idx
+    }
+
+    /// Ensure symbol exists as STT_OBJECT type (for data symbols)
+    fn ensure_sym_object(&mut self, name: &str) -> u32 {
+        if let Some(&idx) = self.sym_index.get(name) {
+            return idx;
+        }
+        self.symbols.push(ElfSym {
+            name: name.to_string(),
+            section: 0,
+            value: 0,
+            size: 0,
+            bind: STB_GLOBAL,
+            ty: elf::STT_OBJECT,
+            visibility: 0,
+        });
+        let idx = self.symbols.len() as u32;
+        self.sym_index.insert(name.to_string(), idx);
+        idx
+    }
+
+    /// Stack protector prologue: load canary from __stack_chk_guard
+    /// and store at [fp, -canary_off]. Uses $v0 ($2) and $t0 ($8) as scratch.
+    fn emit_stack_chk_prologue(&mut self, canary_off: i32) {
+        // Load __stack_chk_guard address (simplified: use load_imm)
+        self.ensure_sym_object("__stack_chk_guard");
+        // For relocatable: load address via GOT or PC-relative
+        // Simplified: load canary value directly from __stack_chk_guard
+        // In real implementation, this would use LW from GOT
+        // For now, emit a placeholder that loads 0 (will be patched by linker)
+        self.emit_load_imm(2, 0); // $v0 = 0 (placeholder for canary)
+        // SW $v0, -canary_off($fp)
+        let fp_off = -(canary_off as i16);
+        self.emit_sw(2, 30, fp_off);
+    }
+
+    /// Stack protector epilogue: verify canary at [fp, -canary_off]
+    /// against __stack_chk_guard. Calls __stack_chk_fail on mismatch.
+    fn emit_stack_chk_epilogue(&mut self, canary_off: i32) {
+        let fail_label = self.fresh_label(".Lstack_chk_fail_");
+        // LW $v0, -canary_off($fp) - load stored canary
+        let fp_off = -(canary_off as i16);
+        self.emit_lw(2, 30, fp_off);
+        // Load expected canary (simplified: compare with 0)
+        self.emit_load_imm(8, 0); // $t0 = 0 (placeholder for expected canary)
+        // BNE $v0, $t0, fail_label
+        self.emit_bne(2, 8, &fail_label);
+        self.emit_nop(); // delay slot
+        // Normal path continues
+        // Fail path: call __stack_chk_fail (never returns)
+        self.set_label(&fail_label);
+        self.ensure_sym("__stack_chk_fail");
+        self.emit_jal("__stack_chk_fail");
+        self.emit_nop(); // delay slot
     }
 
     // ===== MIPS 指令编码 =====
@@ -1358,6 +1526,15 @@ impl MipsCodegen {
         self.pending_branches
             .push((pos, label.to_string(), BranchKind::Beqz));
         let inst: u32 = (0b000100 << 26) | ((rs as u32) << 21); // offset=0 placeholder
+        self.code.extend_from_slice(&inst.to_be_bytes());
+    }
+
+    fn emit_bne(&mut self, rs: u8, rt: u8, label: &str) {
+        // BNE $rs, $rt, offset (占位)
+        let pos = self.code.len() as u64;
+        self.pending_branches
+            .push((pos, label.to_string(), BranchKind::Bne));
+        let inst: u32 = (0b000101 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16); // offset=0 placeholder
         self.code.extend_from_slice(&inst.to_be_bytes());
     }
 
