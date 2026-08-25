@@ -1137,26 +1137,47 @@ fn build_abbrev_and_info(
 ) -> (Vec<u8>, Vec<u8>, Vec<(u64, String)>) {
     let mut type_offsets: std::collections::HashMap<String, u32> = Default::default();
     let mut relocs: Vec<(u64, String)> = Vec::new();
+    let dwarf_ver = opts.dwarf_version;
 
-    // info header: unit_length(4) + version(2) + debug_abbrev_offset(4) + address_size(1)
+    // info header
     let mut info = Vec::new();
     info.extend_from_slice(&[0u8; 4]); // unit_length 占位
-    info.extend_from_slice(&4u16.to_le_bytes()); // version = 4
-    info.extend_from_slice(&0u32.to_le_bytes()); // debug_abbrev_offset
-    info.push(opts.arch.address_size());
+    info.extend_from_slice(&(dwarf_ver as u16).to_le_bytes()); // version
+    if dwarf_ver >= 5 {
+        // DWARF v5: unit_type(1) + address_size(1) + debug_abbrev_offset(4)
+        info.push(DW_UT_compile);
+        info.push(opts.arch.address_size());
+        info.extend_from_slice(&0u32.to_le_bytes()); // debug_abbrev_offset
+    } else {
+        // DWARF v4: debug_abbrev_offset(4) + address_size(1)
+        info.extend_from_slice(&0u32.to_le_bytes()); // debug_abbrev_offset
+        info.push(opts.arch.address_size());
+    }
 
     // CU DIE
-    let cu_attrs: Vec<(u16, u16)> = vec![
-        (DW_AT_producer, DW_FORM_strp),
-        (DW_AT_language, DW_FORM_data2),
-        (DW_AT_name, DW_FORM_strp),
-        (DW_AT_comp_dir, DW_FORM_strp),
-        (DW_AT_low_pc, DW_FORM_addr),
-        (DW_AT_high_pc, DW_FORM_data8),  // constant offset, not address
-        (DW_AT_stmt_list, DW_FORM_sec_offset),
-    ];
+    let mut cu_attrs: Vec<(u16, u16)> = Vec::new();
+    if dwarf_ver >= 5 {
+        // DWARF v5: base attributes must appear first in CU DIE
+        cu_attrs.push((DW_AT_str_offsets_base, DW_FORM_sec_offset));
+        cu_attrs.push((DW_AT_addr_base, DW_FORM_sec_offset));
+    }
+    cu_attrs.push((DW_AT_producer, DW_FORM_strp));
+    cu_attrs.push((DW_AT_language, DW_FORM_data2));
+    cu_attrs.push((DW_AT_name, DW_FORM_strp));
+    cu_attrs.push((DW_AT_comp_dir, DW_FORM_strp));
+    cu_attrs.push((DW_AT_low_pc, DW_FORM_addr));
+    cu_attrs.push((DW_AT_high_pc, DW_FORM_data8));  // constant offset, not address
+    cu_attrs.push((DW_AT_stmt_list, DW_FORM_sec_offset));
     let cu_code = abb.get_or_create(DW_TAG_compile_unit, DW_CHILDREN_yes, &cu_attrs);
     write_uleb128(&mut info, cu_code as u64);
+
+    // DWARF v5: base attribute values (placeholder offsets = 0)
+    if dwarf_ver >= 5 {
+        // str_offsets_base: offset to .debug_str_offsets (0 = not yet populated)
+        info.extend_from_slice(&0u32.to_le_bytes());
+        // addr_base: offset to .debug_addr (0 = not yet populated)
+        info.extend_from_slice(&0u32.to_le_bytes());
+    }
 
     // producer
     write_attr_strp(&mut info, strs.intern(&opts.producer));
