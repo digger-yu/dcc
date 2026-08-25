@@ -2,6 +2,7 @@
 // 第一性原理: 优化在 IR 层做数据流/常量传播，后端只负责指令选择。
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::ast::{BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Program, Stmt};
 use crate::const_eval;
@@ -21,6 +22,35 @@ use crate::ir::Module;
 /// Maximum call-chain depth for speculative (non-forced) inlining.
 /// `always_inline` / `flatten` bypass this limit.
 const INLINE_MAX_DEPTH: u32 = 8;
+
+// ---------------------------------------------------------------------------
+// Inline decision tracing
+//
+// Set DCC_INLINE_TRACE=1 in the environment to emit one line per inline
+// decision to stderr.  Useful for debugging kernel builds where
+// __always_inline / noinline correctness is critical.
+// ---------------------------------------------------------------------------
+
+static INLINE_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn inline_trace_enabled() -> bool {
+    *INLINE_TRACE_ENABLED.get_or_init(|| {
+        std::env::var("DCC_INLINE_TRACE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Emit a single trace line for an inline decision.
+/// Format: `dcc-inline: <decision> <callee> [reason]`
+fn trace_inline_decision(callee: &str, decision: &str, reason: &str) {
+    if inline_trace_enabled() {
+        eprintln!(
+            "dcc-inline: {} {} ({})",
+            decision, callee, reason,
+        );
+    }
+}
 
 /// 按 -O 级别运行 IR 优化。
 ///
@@ -1191,8 +1221,10 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
 ///   4. O0 级别: 拒绝所有非强制内联
 ///   5. 深度超限: 拒绝
 ///   6. 直接递归: 拒绝 (callee 名与函数名相同)
-///   7. O3 启发式: static + 零参 + body ≤ 4 items
+///   7. O3 启发式: static + 零参 + cost ≤ INLINE_COST_THRESHOLD
 ///   8. 其他: 拒绝
+///
+/// 当 DCC_INLINE_TRACE=1 时, 每个决策均输出到 stderr.
 fn try_inline_call(
     name: &str,
     args: &[Expr],
@@ -1204,12 +1236,14 @@ fn try_inline_call(
     let f = funcs.get(name)?;
     let body = f.body.as_ref()?;
     if f.is_variadic || args.len() != f.params.len() {
+        trace_inline_decision(name, "SKIP", "variadic/arity mismatch");
         return None;
     }
 
     // --- 属性优先级: noinline vs always_inline ---
     // GCC 行为: 两者同时标记时 always_inline 优先.
     if f.is_noinline && !f.is_always_inline {
+        trace_inline_decision(name, "REJECT", "noinline attribute");
         return None;
     }
 
@@ -1219,18 +1253,30 @@ fn try_inline_call(
     if forced {
         let ret = extract_inline_return(body)?;
         if expr_calls_name(ret, name) {
+            trace_inline_decision(name, "REJECT", "forced but direct recursion");
             return None; // 直接递归保护
         }
+        let reason = if f.is_always_inline {
+            "always_inline"
+        } else {
+            "caller flatten"
+        };
+        trace_inline_decision(name, "INLINE", reason);
         return Some(substitute_call(f, ret, args));
     }
 
     // --- O0: 非强制内联一律拒绝 ---
     if level == 0 {
+        trace_inline_decision(name, "REJECT", "O0 non-forced");
         return None;
     }
 
     // --- 深度限制: 防止嵌套内联爆炸 ---
     if depth >= INLINE_MAX_DEPTH {
+        trace_inline_decision(
+            name, "REJECT",
+            &format!("depth {} >= {}", depth, INLINE_MAX_DEPTH),
+        );
         return None;
     }
 
@@ -1239,13 +1285,22 @@ fn try_inline_call(
     if !(f.is_static && f.params.is_empty() && level >= 3
         && cost <= INLINE_COST_THRESHOLD)
     {
+        trace_inline_decision(
+            name, "REJECT",
+            &format!("cost {} > {} or not O3-static", cost, INLINE_COST_THRESHOLD),
+        );
         return None;
     }
 
     let ret = extract_inline_return(body)?;
     if expr_calls_name(ret, name) {
+        trace_inline_decision(name, "REJECT", "O3 heuristic but direct recursion");
         return None; // 直接递归保护
     }
+    trace_inline_decision(
+        name, "INLINE",
+        &format!("O3 heuristic, cost={}", cost),
+    );
     Some(substitute_call(f, ret, args))
 }
 
