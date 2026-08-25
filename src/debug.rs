@@ -286,6 +286,33 @@ impl DwarfMember {
     }
 }
 
+/// 参数位置描述 (DWARF DW_AT_location 表达式)
+/// GDB 用此信息在调试时定位函数参数在栈帧中的位置
+#[derive(Debug, Clone, Copy)]
+pub struct DwarfParamLocation {
+    /// DWARF 表达式操作码: DW_OP_fbreg (0x91) 或 DW_OP_call_frame_cfa (0x9c)
+    pub op: u8,
+    /// 偏移量 (sleb128 编码): 相对帧基址或 CFA 的字节偏移
+    pub offset: i64,
+}
+
+impl DwarfParamLocation {
+    /// 构造 DW_OP_fbreg 位置 (相对帧基址)
+    pub fn fbreg(offset: i64) -> Self {
+        Self {
+            op: DW_OP_fbreg,
+            offset,
+        }
+    }
+    /// 构造 DW_OP_call_frame_cfa + offset 位置
+    pub fn cfa(offset: i64) -> Self {
+        Self {
+            op: DW_OP_call_frame_cfa,
+            offset,
+        }
+    }
+}
+
 /// 函数作用域信息（用于 DWARF DIEs + GDB index）
 #[derive(Debug, Clone)]
 pub struct DwarfFuncInfo {
@@ -297,6 +324,8 @@ pub struct DwarfFuncInfo {
     pub decl_file_idx: u16,
     pub return_type: DwarfType,
     pub params: Vec<(String, DwarfType)>,
+    /// 参数位置信息 (与 params 对应, 为空时不生成 DW_AT_location)
+    pub param_locations: Vec<DwarfParamLocation>,
     pub is_external: bool,
     pub is_inline: bool,
     pub is_declaration: bool,
@@ -482,6 +511,7 @@ const DW_AT_bit_offset: u16 = 0x0e;
 const DW_AT_call_file: u16 = 0x57;
 const DW_AT_call_line: u16 = 0x58;
 const DW_AT_linkage_name: u16 = 0x6e;
+const DW_AT_location: u16 = 0x02;
 const DW_AT_const_value: u16 = 0x1c;
 const DW_AT_decl_file: u16 = 0x3a;
 const DW_AT_decl_line: u16 = 0x3b;
@@ -504,6 +534,11 @@ const DW_FORM_exprloc: u16 = 0x18;
 const DW_FORM_ref8: u16 = 0x14;
 const DW_FORM_ref1: u16 = 0x11;
 const DW_FORM_ref_udata: u16 = 0x0f;
+
+// DWARF expression opcodes (DW_OP_*)
+const DW_OP_fbreg: u8 = 0x91;
+const DW_OP_call_frame_cfa: u8 = 0x9c;
+const DW_OP_plus_uconst: u8 = 0x23;
 
 const DW_LNS_extended_op: u8 = 0x00;
 const DW_LNS_copy: u8 = 0x01;
@@ -740,6 +775,7 @@ pub fn build_dwarf(source: &str, functions: &[(&str, u64)]) -> DebugSections {
                 kind: DwarfTypeKind::Base(TypeEncoding::Signed),
             },
             params: vec![],
+            param_locations: vec![],
             is_external: true,
             is_inline: false,
             is_declaration: false,
@@ -786,6 +822,7 @@ pub fn build_dwarf_arch(source: &str, functions: &[(&str, u64)], arch: ArchKind)
                 kind: DwarfTypeKind::Base(TypeEncoding::Signed),
             },
             params: vec![],
+            param_locations: vec![],
             is_external: true,
             is_inline: false,
             is_declaration: false,
@@ -999,14 +1036,25 @@ fn build_abbrev_and_info(
     // function DIEs
     for f in &cu.functions {
         let has_params = !f.params.is_empty();
-        let sub_attrs: Vec<(u16, u16)> = vec![
+        let has_linkage = f.linkage_name.is_some();
+        let has_decl_line = f.decl_line > 0;
+        // Build attribute list conditionally:
+        // - DW_AT_linkage_name only when C++ mangled name exists
+        // - DW_AT_decl_file + DW_AT_decl_line always (source location)
+        let mut sub_attrs: Vec<(u16, u16)> = vec![
             (DW_AT_name, DW_FORM_strp),
-            (DW_AT_linkage_name, DW_FORM_strp),
             (DW_AT_type, DW_FORM_ref4),
             (DW_AT_external, DW_FORM_flag_present),
             (DW_AT_low_pc, DW_FORM_addr),
             (DW_AT_high_pc, DW_FORM_addr),
         ];
+        if has_linkage {
+            sub_attrs.insert(1, (DW_AT_linkage_name, DW_FORM_strp));
+        }
+        if has_decl_line {
+            sub_attrs.push((DW_AT_decl_file, DW_FORM_data1));
+            sub_attrs.push((DW_AT_decl_line, DW_FORM_data4));
+        }
         let code = abb.get_or_create(
             DW_TAG_subprogram,
             if has_params { DW_CHILDREN_yes } else { DW_CHILDREN_no },
@@ -1016,7 +1064,7 @@ fn build_abbrev_and_info(
 
         // name
         write_attr_strp(&mut info, strs.intern(&f.name));
-        // linkage_name (optional)
+        // linkage_name (only when present)
         if let Some(ln) = &f.linkage_name {
             write_attr_strp(&mut info, strs.intern(ln));
         }
@@ -1032,16 +1080,31 @@ fn build_abbrev_and_info(
         // low_pc / high_pc (high_pc as offset for DWARF 4)
         info.extend_from_slice(&f.low_pc.to_le_bytes());
         info.extend_from_slice(&(f.high_pc - f.low_pc).to_le_bytes());
+        // decl_file + decl_line (source location for GDB backtrace)
+        if has_decl_line {
+            info.push(f.decl_file_idx as u8 + 1); // 1-based file index
+            info.extend_from_slice(&(f.decl_line).to_le_bytes());
+        }
 
-        // formal parameters
-        for (pname, pty) in &f.params {
-            let param_attrs: Vec<(u16, u16)> =
+        // formal parameters (with DW_AT_location for GDB variable inspection)
+        for (idx, (pname, pty)) in f.params.iter().enumerate() {
+            let has_location = f.param_locations.len() > idx;
+            let mut param_attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_name, DW_FORM_strp), (DW_AT_type, DW_FORM_ref4)];
+            if has_location {
+                param_attrs.push((DW_AT_location, DW_FORM_exprloc));
+            }
             let pcode = abb.get_or_create(DW_TAG_formal_parameter, DW_CHILDREN_no, &param_attrs);
             write_uleb128(&mut info, pcode as u64);
             write_attr_strp(&mut info, strs.intern(pname));
             let pty_off = ensure_type_die(cu, &mut info, abb, strs, &mut type_offsets, pty);
             info.extend_from_slice(&pty_off.to_le_bytes());
+            if has_location {
+                let loc = &f.param_locations[idx];
+                // DW_OP_fbreg <fb_offset> or DW_OP_call_frame_cfa + offset
+                info.push(loc.op);
+                write_sleb128(&mut info, loc.offset);
+            }
         }
         // subprogram 终止
         if has_params {
@@ -2450,6 +2513,7 @@ mod tests {
                     kind: DwarfTypeKind::Base(TypeEncoding::Signed),
                 },
                 params: vec![],
+                param_locations: vec![],
                 is_external: true,
                 is_inline: false,
                 is_declaration: false,
