@@ -1115,7 +1115,7 @@ fn build_abbrev_and_info(
         (DW_AT_name, DW_FORM_strp),
         (DW_AT_comp_dir, DW_FORM_strp),
         (DW_AT_low_pc, DW_FORM_addr),
-        (DW_AT_high_pc, DW_FORM_addr),
+        (DW_AT_high_pc, DW_FORM_data8),  // constant offset, not address
         (DW_AT_stmt_list, DW_FORM_sec_offset),
     ];
     let cu_code = abb.get_or_create(DW_TAG_compile_unit, DW_CHILDREN_yes, &cu_attrs);
@@ -1169,7 +1169,7 @@ fn build_abbrev_and_info(
             (DW_AT_type, DW_FORM_ref4),
             (DW_AT_external, DW_FORM_flag_present),
             (DW_AT_low_pc, DW_FORM_addr),
-            (DW_AT_high_pc, DW_FORM_addr),
+            (DW_AT_high_pc, DW_FORM_data8),  // constant offset, not address
         ];
         if has_linkage {
             sub_attrs.insert(1, (DW_AT_linkage_name, DW_FORM_strp));
