@@ -372,7 +372,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 链接器脚本 ORIGIN()/ORG()/LENGTH() | `ORIGIN(region)` / `ORG(region)` 获取内存区域起始地址；`LENGTH(region)` 获取内存区域长度；用于节起始地址计算和断言检查 |
 | 链接器脚本 NEXT()/LOG2CEIL() | `NEXT(expr)` 对齐到下一个空闲地址；`LOG2CEIL(x)` 向上取整 log2，用于计算对齐粒度 |
 | 链接器脚本 EXCLUDE_FILE | `*(EXCLUDE_FILE(file_pattern) section_patterns)` 排除特定文件的输入节；内核按文件过滤节广泛使用 |
-| 链接器脚本 SORT_BY_NAME/SORT_BY_ALIGNMENT 执行 | 解析的排序模式实际影响输入节排列顺序；`SORT_BY_NAME` 按节名排序，`SORT_BY_ALIGNMENT` 按对齐值降序排序 |
+| 链接器脚本 SORT_BY_NAME/SORT_BY_ALIGNMENT 执行 | `SORT(pattern)` / `SORT_BY_NAME(pattern)` 按节名升序排序匹配的输入节；`SORT_BY_ALIGNMENT(pattern)` 按对齐值降序排序；每个模式独立排序后按模式顺序追加，未包裹 SORT 的模式保持文件出现顺序 |
 | 链接器脚本 COMMON 符号 | `*(COMMON)` 特殊处理 COMMON 符号（tentative definitions）；正确匹配和放置 COMMON 符号到输出节 |
 | 链接器脚本 INPUT()/GROUP() | `INPUT(file1, file2, ...)` / `GROUP(lib1, lib2, ...)` 指定输入文件和库 |
 | 链接器脚本 NOCROSSREFS | `NOCROSSREFS(section1, section2, ...)` 禁止跨节引用检查；用于内核节隔离 |
