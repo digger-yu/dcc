@@ -1917,7 +1917,7 @@ impl<'a> Parser<'a> {
                     self.diags.push(Diagnostic::warn(
                         "W0008",
                         format!(
-                            "matching constraint references invalid operand number '{}' for input operand {}; emitted as nop if used",
+                            "matching constraint references invalid operand number '{}' for input operand {}",
                             n, input_idx
                         ),
                         sp.clone(),
@@ -1936,7 +1936,7 @@ impl<'a> Parser<'a> {
                     self.diags.push(Diagnostic::warn(
                         "W0008",
                         format!(
-                            "matching constraint references operand {} but only {} operand(s) provided; emitted as nop if used",
+                            "matching constraint references operand {} but only {} operand(s) provided",
                             n, total_ops
                         ),
                         sp.clone(),
@@ -1953,7 +1953,7 @@ impl<'a> Parser<'a> {
                 self.diags.push(Diagnostic::warn(
                     "W0008",
                     format!(
-                        "matching constraint digit '{}' not allowed in output operand {} constraint; emitted as nop if used",
+                        "matching constraint digit '{}' not allowed in output operand {} constraint",
                         n, output_idx
                     ),
                     sp.clone(),
@@ -1988,7 +1988,7 @@ impl<'a> Parser<'a> {
                     Diagnostic::warn(
                         "W0008",
                         format!(
-                            "duplicate asm operand name '{}'; emitted as nop if used",
+                            "duplicate asm operand name '{}'",
                             name
                         ),
                         sp.clone(),
