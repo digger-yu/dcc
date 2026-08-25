@@ -744,6 +744,232 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
     }
 }
 
+/// Convert AST Type to DWARF type for BTF generation
+fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
+    use crate::ast::Type;
+    match ty {
+        Type::Void => debug::DwarfType {
+            name: "void".to_string(),
+            byte_size: 0,
+            kind: debug::DwarfTypeKind::Void,
+        },
+        Type::Char => debug::DwarfType {
+            name: "char".to_string(),
+            byte_size: 1,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::SignedChar),
+        },
+        Type::SChar => debug::DwarfType {
+            name: "signed char".to_string(),
+            byte_size: 1,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::SignedChar),
+        },
+        Type::UChar => debug::DwarfType {
+            name: "unsigned char".to_string(),
+            byte_size: 1,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::UnsignedChar),
+        },
+        Type::Char16 => debug::DwarfType {
+            name: "char16_t".to_string(),
+            byte_size: 2,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+        },
+        Type::Char32 => debug::DwarfType {
+            name: "char32_t".to_string(),
+            byte_size: 4,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+        },
+        Type::Short => debug::DwarfType {
+            name: "short".to_string(),
+            byte_size: 2,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Signed),
+        },
+        Type::UShort => debug::DwarfType {
+            name: "unsigned short".to_string(),
+            byte_size: 2,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+        },
+        Type::Int => debug::DwarfType {
+            name: "int".to_string(),
+            byte_size: 4,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Signed),
+        },
+        Type::UInt => debug::DwarfType {
+            name: "unsigned int".to_string(),
+            byte_size: 4,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+        },
+        Type::Long => debug::DwarfType {
+            name: "long".to_string(),
+            byte_size: 8,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Signed),
+        },
+        Type::ULong => debug::DwarfType {
+            name: "unsigned long".to_string(),
+            byte_size: 8,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+        },
+        Type::LongLong => debug::DwarfType {
+            name: "long long".to_string(),
+            byte_size: 8,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Signed),
+        },
+        Type::ULongLong => debug::DwarfType {
+            name: "unsigned long long".to_string(),
+            byte_size: 8,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+        },
+        Type::Int128 => debug::DwarfType {
+            name: "__int128".to_string(),
+            byte_size: 16,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Signed),
+        },
+        Type::UInt128 => debug::DwarfType {
+            name: "unsigned __int128".to_string(),
+            byte_size: 16,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+        },
+        Type::Float => debug::DwarfType {
+            name: "float".to_string(),
+            byte_size: 4,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+        },
+        Type::Double => debug::DwarfType {
+            name: "double".to_string(),
+            byte_size: 8,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+        },
+        Type::LongDouble => debug::DwarfType {
+            name: "long double".to_string(),
+            byte_size: 16,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+        },
+        Type::Bool => debug::DwarfType {
+            name: "_Bool".to_string(),
+            byte_size: 1,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Boolean),
+        },
+        Type::Ptr(inner) => {
+            let inner_dw = ast_type_to_dwarf(inner);
+            debug::DwarfType {
+                name: format!("{}*", inner_dw.name),
+                byte_size: 8,
+                kind: debug::DwarfTypeKind::Pointer(Box::new(inner_dw)),
+            }
+        }
+        Type::Array(elem, count) => {
+            let elem_dw = ast_type_to_dwarf(elem);
+            let cnt = match count {
+                crate::ast::ArraySize::Const(n) => *n as u64,
+                crate::ast::ArraySize::Var(_) => 0,
+            };
+            debug::DwarfType {
+                name: format!("{}[{}]", elem_dw.name, cnt),
+                byte_size: elem_dw.byte_size * cnt,
+                kind: debug::DwarfTypeKind::Array {
+                    element: Box::new(elem_dw),
+                    count: cnt,
+                },
+            }
+        }
+        Type::Named(name) => debug::DwarfType {
+            name: name.clone(),
+            byte_size: 0, // 未知大小，稍后解析
+            kind: debug::DwarfTypeKind::Void, // 占位
+        },
+        Type::Struct(name, fields, size) => {
+            let members: Vec<debug::DwarfMember> = fields
+                .iter()
+                .map(|f| {
+                    let field_ty = ast_type_to_dwarf(&f.ty);
+                    let offset_bits = (f.offset as u64) * 8;
+                    if let Some(bit_width) = f.bit_width {
+                        debug::DwarfMember::bitfield(
+                            &f.name,
+                            offset_bits + f.bit_offset as u64,
+                            bit_width,
+                            field_ty,
+                        )
+                    } else {
+                        debug::DwarfMember::regular(&f.name, offset_bits, field_ty)
+                    }
+                })
+                .collect();
+            debug::DwarfType {
+                name: format!("struct {}", name),
+                byte_size: *size as u64,
+                kind: debug::DwarfTypeKind::Struct { members },
+            }
+        }
+        Type::Union(name, fields, size) => {
+            let members: Vec<debug::DwarfMember> = fields
+                .iter()
+                .map(|f| {
+                    let field_ty = ast_type_to_dwarf(&f.ty);
+                    debug::DwarfMember::regular(&f.name, 0, field_ty)
+                })
+                .collect();
+            debug::DwarfType {
+                name: format!("union {}", name),
+                byte_size: *size as u64,
+                kind: debug::DwarfTypeKind::Union { members },
+            }
+        }
+        Type::Enum(name, variants, _underlying) => {
+            let members: Vec<(String, i128)> = variants
+                .iter()
+                .map(|(n, v)| (n.clone(), *v as i128))
+                .collect();
+            debug::DwarfType {
+                name: format!("enum {}", name),
+                byte_size: 4,
+                kind: debug::DwarfTypeKind::Enum {
+                    members,
+                    underlying: Box::new(debug::DwarfType {
+                        name: "unsigned int".to_string(),
+                        byte_size: 4,
+                        kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+                    }),
+                },
+            }
+        }
+        Type::Func(ret, params) => debug::DwarfType {
+            name: "function".to_string(),
+            byte_size: 0,
+            kind: debug::DwarfTypeKind::Func {
+                ret: Box::new(ast_type_to_dwarf(ret)),
+                params: params.iter().map(|p| ast_type_to_dwarf(p)).collect(),
+            },
+        },
+        Type::Complex(inner) => debug::DwarfType {
+            name: format!("_Complex {}", ast_type_to_dwarf(inner).name),
+            byte_size: ast_type_to_dwarf(inner).byte_size * 2,
+            kind: debug::DwarfTypeKind::Struct { members: vec![] },
+        },
+        Type::Atomic(inner) => ast_type_to_dwarf(inner),
+        Type::Fract => debug::DwarfType {
+            name: "_Fract".to_string(),
+            byte_size: 4,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+        },
+        Type::Accum => debug::DwarfType {
+            name: "_Accum".to_string(),
+            byte_size: 8,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+        },
+        Type::Vector(elem, count) => {
+            let elem_dw = ast_type_to_dwarf(elem);
+            debug::DwarfType {
+                name: format!("vector({},{})", elem_dw.name, count),
+                byte_size: elem_dw.byte_size * (*count as u64),
+                kind: debug::DwarfTypeKind::Array {
+                    element: Box::new(elem_dw),
+                    count: *count as u64,
+                },
+            }
+        }
+    }
+}
+
 /// Build a CompileUnit from IR module + AST source with rich type/line info.
 /// `func_pcs` entries: (name, low_pc, high_pc).
 fn build_dwarf_cu(
@@ -812,6 +1038,90 @@ fn build_dwarf_cu(
     let func_ranges: Vec<(u64, u64)> =
         functions.iter().map(|f| (f.low_pc, f.high_pc)).collect();
 
+    // 从 AST 声明中收集类型信息（struct/union/enum/typedef）
+    let mut types: Vec<debug::DwarfType> = Vec::new();
+    for decl in &module.source().decls {
+        match decl {
+            crate::ast::Decl::StructDef(sd) => {
+                let members: Vec<debug::DwarfMember> = sd
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let field_ty = ast_type_to_dwarf(&f.ty);
+                        let offset_bits = (f.offset as u64) * 8;
+                        if let Some(bit_width) = f.bit_width {
+                            debug::DwarfMember::bitfield(
+                                &f.name,
+                                offset_bits + f.bit_offset as u64,
+                                bit_width,
+                                field_ty,
+                            )
+                        } else {
+                            debug::DwarfMember::regular(&f.name, offset_bits, field_ty)
+                        }
+                    })
+                    .collect();
+                let size = sd.fields.last().map(|f| {
+                    f.offset + f.ty.size()
+                }).unwrap_or(0);
+                types.push(debug::DwarfType {
+                    name: format!("struct {}", sd.name.name),
+                    byte_size: size as u64,
+                    kind: debug::DwarfTypeKind::Struct { members },
+                });
+            }
+            crate::ast::Decl::UnionDef(sd) => {
+                let members: Vec<debug::DwarfMember> = sd
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let field_ty = ast_type_to_dwarf(&f.ty);
+                        debug::DwarfMember::regular(&f.name, 0, field_ty)
+                    })
+                    .collect();
+                let size = sd.fields.iter().map(|f| f.ty.size()).max().unwrap_or(0);
+                types.push(debug::DwarfType {
+                    name: format!("union {}", sd.name.name),
+                    byte_size: size as u64,
+                    kind: debug::DwarfTypeKind::Union { members },
+                });
+            }
+            crate::ast::Decl::EnumDef(ed) => {
+                let mut variants: Vec<(String, i128)> = Vec::new();
+                let mut next_val: i128 = 0;
+                for (ident, val) in &ed.variants {
+                    let v = val.map(|v| v as i128).unwrap_or(next_val);
+                    variants.push((ident.name.clone(), v));
+                    next_val = v + 1;
+                }
+                types.push(debug::DwarfType {
+                    name: format!("enum {}", ed.name.name),
+                    byte_size: 4,
+                    kind: debug::DwarfTypeKind::Enum {
+                        members: variants,
+                        underlying: Box::new(debug::DwarfType {
+                            name: "unsigned int".to_string(),
+                            byte_size: 4,
+                            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Unsigned),
+                        }),
+                    },
+                });
+            }
+            crate::ast::Decl::Typedef { name, ty, .. } => {
+                let target = ast_type_to_dwarf(ty);
+                types.push(debug::DwarfType {
+                    name: name.name.clone(),
+                    byte_size: target.byte_size,
+                    kind: debug::DwarfTypeKind::Typedef {
+                        alias: name.name.clone(),
+                        target: Box::new(target),
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+
     debug::CompileUnit {
         source_name: source_name.to_string(),
         comp_dir: None,
@@ -819,7 +1129,7 @@ fn build_dwarf_cu(
         language: 0x000C, // DW_LANG_C99
         functions,
         globals: vec![],
-        types: vec![],
+        types,
         low_pc,
         high_pc,
         line_entries,
@@ -1015,13 +1325,16 @@ pub fn emit(
                         });
                     }
                 }
-                cg.extra_sections.push(elf::ElfSection {
-                    name: ".BTF".to_string(),
-                    data: debug::build_btf_probe(),
-                    ty: elf::SHT_PROGBITS,
-                    flags: 0,
-                    align: 4,
-                });
+                // BTF 已在 build_dwarf_full 中生成，使用 dbg.btf
+                if !dbg.btf.is_empty() {
+                    cg.extra_sections.push(elf::ElfSection {
+                        name: ".BTF".to_string(),
+                        data: dbg.btf,
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 4,
+                    });
+                }
             }
             if cg.emit_cfi && relocatable && target.unwind_tables {
                 // dcc 输出 .eh_frame FDE 需带 .rela.eh_frame relocations 才能在 ld 链接时
@@ -1219,13 +1532,16 @@ pub fn emit(
                 for sec in extra_secs {
                     cg.push_extra_section(sec);
                 }
-                cg.push_extra_section(elf::ElfSection {
-                    name: ".BTF".to_string(),
-                    data: debug::build_btf_probe(),
-                    ty: elf::SHT_PROGBITS,
-                    flags: 0,
-                    align: 4,
-                });
+                // BTF 已在 build_dwarf_full 中生成
+                if !dbg.btf.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".BTF".to_string(),
+                        data: dbg.btf,
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 4,
+                    });
+                }
             }
             if relocatable && target.unwind_tables {
                 let frames = cg.func_frames(module);
@@ -1303,13 +1619,16 @@ pub fn emit(
                 for sec in extra_secs {
                     cg.push_extra_section(sec);
                 }
-                cg.push_extra_section(elf::ElfSection {
-                    name: ".BTF".to_string(),
-                    data: debug::build_btf_probe(),
-                    ty: elf::SHT_PROGBITS,
-                    flags: 0,
-                    align: 4,
-                });
+                // BTF 已在 build_dwarf_full 中生成
+                if !dbg.btf.is_empty() {
+                    cg.push_extra_section(elf::ElfSection {
+                        name: ".BTF".to_string(),
+                        data: dbg.btf,
+                        ty: elf::SHT_PROGBITS,
+                        flags: 0,
+                        align: 4,
+                    });
+                }
             }
             if relocatable && target.unwind_tables {
                 let frames = cg.func_frames(module);
