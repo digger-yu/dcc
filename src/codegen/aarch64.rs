@@ -980,7 +980,24 @@ impl Aarch64Codegen {
                 self.extract_vector_lane_w0(idx);
                 return true;
             }
-            _ => self.mov_w0_imm(0),
+            _ => {
+                // Unhandled IR expression: emit diagnostic instead of
+                // silently producing wrong code (mov w0, #0).
+                let span = expr.span.clone();
+                let mut diag = crate::diagnostics::Diagnostic::err(
+                    "E0312",
+                    format!(
+                        "unsupported IR expression on aarch64: {:?}",
+                        expr.kind
+                    ),
+                    span,
+                );
+                diag.hint = Some(
+                    "add handling in gen_expr or lower in SSA pass".to_string(),
+                );
+                self.diagnostics.push(diag);
+                self.mov_w0_imm(0);
+            }
         }
         false
     }
@@ -1240,7 +1257,20 @@ impl Aarch64Codegen {
                 }
             }
         }
-        // 无法处理的浮点表达式: 加载 0.0 作为 fallback
+        // 无法处理的浮点表达式: 加载 0.0 作为 fallback 并报告诊断
+        let span = expr.span.clone();
+        let mut diag = crate::diagnostics::Diagnostic::err(
+            "E0314",
+            format!(
+                "unsupported float IR expression on aarch64: {:?}",
+                expr.kind
+            ),
+            span,
+        );
+        diag.hint = Some(
+            "add handling in gen_float_expr".to_string(),
+        );
+        self.diagnostics.push(diag);
         self.load_float_s0(0.0);
         false
     }
@@ -1406,6 +1436,16 @@ impl Aarch64Codegen {
                 if let Ok(v) = crate::const_eval::eval(expr) {
                     self.mov_w0_imm(trunc_i32(v));
                 } else {
+                    let span = Self::ast_expr_span(expr);
+                    let mut diag = crate::diagnostics::Diagnostic::err(
+                        "E0313",
+                        "unsupported AST expression on aarch64",
+                        span,
+                    );
+                    diag.hint = Some(
+                        "add handling in gen_expr_from_ast".to_string(),
+                    );
+                    self.diagnostics.push(diag);
                     self.mov_w0_imm(0);
                 }
             }
@@ -1563,6 +1603,44 @@ impl Aarch64Codegen {
             BinOp::Sub => self.emit(&[0x20, 0x14, 0x41, 0x4e]),
             BinOp::Mul => self.emit(&[0x20, 0x94, 0x81, 0x4e]),
             _ => self.emit(&[0x20, 0x14, 0x21, 0x4e]),
+        }
+    }
+
+    /// Extract source span from any AST Expr variant (for diagnostics).
+    fn ast_expr_span(e: &Expr) -> crate::diagnostics::Span {
+        match e {
+            Expr::Int { span, .. }
+            | Expr::Float { span, .. }
+            | Expr::String { span, .. }
+            | Expr::Char { span, .. }
+            | Expr::Ident { span, .. }
+            | Expr::Binop { span, .. }
+            | Expr::Unary { span, .. }
+            | Expr::Call { span, .. }
+            | Expr::Assign { span, .. }
+            | Expr::Cond { span, .. }
+            | Expr::Cast { span, .. }
+            | Expr::SizeofTy { span, .. }
+            | Expr::SizeofExpr { span, .. }
+            | Expr::Index { span, .. }
+            | Expr::Member { span, .. }
+            | Expr::AddrOf { span, .. }
+            | Expr::Deref { span, .. }
+            | Expr::PostInc { span, .. }
+            | Expr::PostDec { span, .. }
+            | Expr::PreInc { span, .. }
+            | Expr::PreDec { span, .. }
+            | Expr::CompoundLit { span, .. }
+            | Expr::InitList { span, .. }
+            | Expr::AlignofTy { span, .. }
+            | Expr::AlignofExpr { span, .. }
+            | Expr::StmtExpr { span, .. }
+            | Expr::Comma { span, .. }
+            | Expr::AsmExpr { span, .. }
+            | Expr::LabelAddr { span, .. }
+            | Expr::VaArg { span, .. }
+            | Expr::Offsetof { span, .. } => span.clone(),
+            _ => crate::diagnostics::Span::point("", 0, 0),
         }
     }
 
