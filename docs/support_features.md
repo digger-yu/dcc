@@ -20,6 +20,7 @@
 | objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`；`-mfunction-return=thunk-extern` 下函数尾声、空 global asm 函数和 mini-asm `ret` 均跳转 `__x86_return_thunk`，避免 MITIGATION_RETHUNK 裸 `ret` |
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
 | QEMU bzImage boot 门禁 | `scripts/qemu_boot_matrix.sh` 在 bzImage 存在时默认硬门禁，缺 QEMU 或缺 boot log 关键字符串均失败；`kernel_full_check.sh` strict 模式导出 `REQUIRE_QEMU_BOOT=1`；`strict_qemu_boot_*` 集成测试固化契约 |
+| Linux vmlinux 完整 ELF 内核映像 | dcc 编译 Linux 7.1 全树生成 16MB vmlinux (ET_EXEC x86-64)；零 objtool 错误；`__ex_table` 异常表、`.fixup` 修复代码、嵌套 `.pushsection`/`.popsection` 完整支持；vdso64.so.dbg 正确生成 |
 | Linux kernel object corpus | 固化真实 Linux `.o` 样本：`tests/fixtures/corpus/arch/x86/kernel/io_delay.o`、`kernel/sched/fair.o`、`lib/clz_ctz.o`；`kernel_object_corpus_*` 测试校验 ELF64/ET_REL/ORC 节和代表性函数符号 |
 | CI/examples 路径防回归 | `.github/workflows/kernel-bench.yml` 与 `scripts/bench_phase_e.sh` 使用当前 `examples/*/*` 路径；`scripts/check_fixtures.sh` 扫描 workflows/scripts 中的 examples 引用并要求文件存在 |
 
@@ -146,7 +147,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 内联 asm 约束 | `"r"` / `"m"` / `"=r"` / `+m` / `memory` clobber |
 | 内联 asm 优化器集成 | SSA pipeline 跳过含 asm 的函数 (避免 SSA 重建丢失副作用); 指令调度将 asm memory clobber 及任何 `__dcc_asm_*` 符号引用视为调度屏障 (Bin/Un/Load/Cast 操作数防御性检查); 寄存器分配器统计 asm 标记寄存器压力 (`asm_reg_pressure` 计入 `__dcc_asm_*` Store 数); DCE 保留所有 asm (GCC 兼容) |
 | 内联 asm clobber 完整支持 | `"cc"` 条件码 (x86 静默接受) / `"memory"` 编译器屏障 (mfence) / `"st"`/`"st(N)"` x87 FPU 栈寄存器 / `"xmm0"`..`"xmm15"` 从 XMM 池排除 / GP 寄存器名 (如 `"rax"`/`"rbx"`/`"eax"` 等) 从 GP 池排除；`parse_clobber_registers` 解析并返回排除集合 |
-| 内联 asm 约束扩展 | `"i"` 立即数 / `"p"` 内存地址 / `"g"` 通用 / `"X"` 常量 / `"0..9"` 复用 / `"&"` early-clobber / 多重约束 `"rm"` / XMM `"x"` / `"Y"` / 数字标签 `"%"` / `offsetof` 约束 |
+| 内联 asm 约束扩展 | `"i"` 立即数 / `"p"` 内存地址 / `"g"` 通用 / `"X"` 常量 / `"0..9"` 复用 / `"&"` early-clobber / 多重约束 `"rm"` / XMM `"x"` / `"Y"` / 数字标签 `"%"` / `offsetof` 约束 / `"q"` GP 寄存器 (rax/rbx/rcx/rdx/rsi/rdi/rbp/r8-r15) |
 | 内联 asm 约束类型校验 | codegen 统一检查 matched constraint、多重约束、显式寄存器和 x87/MMX/XMM 分类；约束与表达式类型不匹配时发 `W0005` warning 且不阻断编译（如 `"r"`/`"rm"` 绑定浮点），GCC 对同类输入通常报 `impossible constraint` error |
 | asm `x` 约束 XMM | 独立 `input_xmm_set` + `prepare_asm_xmm_binding` + `writeback_asm_operand` xmm8–15；early-clobber `xmm_pool` |
 | asm 段寄存器约束 `={gs}`/`={fs}` | `mov %seg, [r13+off]` (0x8C) 写回；`prepare_asm_seg_binding` 加载段寄存器值到内存 |
