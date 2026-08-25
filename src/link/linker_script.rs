@@ -2610,6 +2610,206 @@ mod tests {
         let script = LinkerScript::parse(text).unwrap();
         assert!(!script.sections.is_empty());
     }
+
+    #[test]
+    fn test_sort_by_name_execution() {
+        // 测试 SORT_BY_NAME 执行时按节名排序
+        use super::super::object::{FlatSection, InputObject};
+        
+        // 创建测试数据：多个 .text.* 节，名称乱序
+        let mut bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62, // EM_X86_64
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![],
+            machine: 62, // EM_X86_64
+        };
+        
+        // 添加乱序的 .text.* 节
+        for name in &[".text.zzz", ".text.aaa", ".text.mmm", ".text.bbb"] {
+            bundle.sections.push(FlatSection {
+                name: name.to_string(),
+                ty: SHT_PROGBITS,
+                flags: 0x6, // SHF_ALLOC | SHF_EXECINSTR
+                align: 1,
+                data: vec![0x90; 16], // NOP sled
+                size: 16,
+                input_obj: 0,
+                orig_index: 0,
+            });
+        }
+        
+        // 创建带 SORT 的 spec
+        let spec = InputSectionSpec {
+            file_pattern: "*".to_string(),
+            section_patterns: vec![
+                SectionPattern {
+                    pattern: ".text.*".to_string(),
+                    sort: SortMode::ByName,
+                },
+            ],
+            keep: false,
+            exclude_files: vec![],
+            is_common: false,
+        };
+        
+        let used = std::collections::HashSet::new();
+        let ctx = EvalContext::new();
+        let matches = match_input_sections(&spec, &bundle, &ctx, &used);
+        
+        // 验证按名称排序
+        assert_eq!(matches.len(), 4);
+        let names: Vec<&str> = matches.iter()
+            .map(|m| bundle.sections[m.input_index as usize].name.as_str())
+            .collect();
+        assert_eq!(names, vec![".text.aaa", ".text.bbb", ".text.mmm", ".text.zzz"]);
+    }
+
+    #[test]
+    fn test_sort_by_alignment_execution() {
+        // 测试 SORT_BY_ALIGNMENT 执行时按对齐值降序排序
+        use super::super::object::{FlatSection, InputObject};
+        
+        let mut bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![],
+            machine: 62,
+        };
+        
+        // 添加不同对齐值的节
+        let test_data = vec![
+            (".data.1", 1u64),
+            (".data.2", 16u64),
+            (".data.3", 4u64),
+            (".data.4", 8u64),
+        ];
+        
+        for (name, align) in test_data {
+            bundle.sections.push(FlatSection {
+                name: name.to_string(),
+                ty: SHT_PROGBITS,
+                flags: 0x3, // SHF_ALLOC | SHF_WRITE
+                align,
+                data: vec![0; 32],
+                size: 32,
+                input_obj: 0,
+                orig_index: 0,
+            });
+        }
+        
+        let spec = InputSectionSpec {
+            file_pattern: "*".to_string(),
+            section_patterns: vec![
+                SectionPattern {
+                    pattern: ".data.*".to_string(),
+                    sort: SortMode::ByAlignment,
+                },
+            ],
+            keep: false,
+            exclude_files: vec![],
+            is_common: false,
+        };
+        
+        let used = std::collections::HashSet::new();
+        let ctx = EvalContext::new();
+        let matches = match_input_sections(&spec, &bundle, &ctx, &used);
+        
+        // 验证按对齐值降序排序
+        assert_eq!(matches.len(), 4);
+        let aligns: Vec<u64> = matches.iter()
+            .map(|m| bundle.sections[m.input_index as usize].align)
+            .collect();
+        assert_eq!(aligns, vec![16, 8, 4, 1]);
+    }
+
+    #[test]
+    fn test_mixed_sort_and_nonsort_patterns() {
+        // 测试混合模式：SORT 包裹的模式排序，未包裹的保持文件顺序
+        use super::super::object::{FlatSection, InputObject};
+        
+        let mut bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![],
+            machine: 62,
+        };
+        
+        // 添加节：.text.* 应该排序，.data.* 保持文件顺序
+        let test_sections = vec![
+            (".text.zzz", 1u64),
+            (".data.first", 1u64),
+            (".text.aaa", 1u64),
+            (".data.second", 1u64),
+            (".text.mmm", 1u64),
+        ];
+        
+        for (name, align) in test_sections {
+            bundle.sections.push(FlatSection {
+                name: name.to_string(),
+                ty: SHT_PROGBITS,
+                flags: 0x6,
+                align,
+                data: vec![0; 16],
+                size: 16,
+                input_obj: 0,
+                orig_index: 0,
+            });
+        }
+        
+        // 第一个模式 SORT(.text.*)，第二个模式 .data.*（无 SORT）
+        let spec = InputSectionSpec {
+            file_pattern: "*".to_string(),
+            section_patterns: vec![
+                SectionPattern {
+                    pattern: ".text.*".to_string(),
+                    sort: SortMode::ByName,
+                },
+                SectionPattern {
+                    pattern: ".data.*".to_string(),
+                    sort: SortMode::None,
+                },
+            ],
+            keep: false,
+            exclude_files: vec![],
+            is_common: false,
+        };
+        
+        let used = std::collections::HashSet::new();
+        let ctx = EvalContext::new();
+        let matches = match_input_sections(&spec, &bundle, &ctx, &used);
+        
+        // 验证：.text.* 按名称排序，.data.* 保持文件顺序
+        assert_eq!(matches.len(), 5);
+        let names: Vec<&str> = matches.iter()
+            .map(|m| bundle.sections[m.input_index as usize].name.as_str())
+            .collect();
+        
+        // .text.* 应该排序在前
+        assert_eq!(&names[0..3], &[".text.aaa", ".text.mmm", ".text.zzz"]);
+        // .data.* 保持文件顺序
+        assert_eq!(&names[3..5], &[".data.first", ".data.second"]);
+    }
 }
 
 // ─── Linker Script Executor ─────────────────────────────────────────────────
@@ -2958,6 +3158,10 @@ fn execute_output_section(
 }
 
 /// 匹配输入节到输出节规范
+///
+/// 按模式顺序匹配输入节，每个模式独立排序后追加到结果中。
+/// 这确保 SORT() 包裹的模式其匹配节按指定方式排序，
+/// 而未包裹的节保持文件出现顺序。
 fn match_input_sections(
     spec: &InputSectionSpec,
     bundle: &InputBundle,
@@ -2965,66 +3169,75 @@ fn match_input_sections(
     used_sections: &std::collections::HashSet<u32>,
 ) -> Vec<InputSectionMatch> {
     let mut matches = Vec::new();
+    // 跟踪本次调用中已匹配的节（跨模式去重）
+    let mut locally_used: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
-    for (i, in_sec) in bundle.sections.iter().enumerate() {
-        // 跳过空节名和特殊节
-        if in_sec.name.is_empty()
-            || in_sec.name == ".symtab"
-            || in_sec.name == ".strtab"
-            || in_sec.name == ".shstrtab"
-            || in_sec.name.starts_with(".rela")
-            || in_sec.name.starts_with(".rel")
-        {
-            continue;
-        }
+    // 按模式顺序处理：每个模式独立匹配、排序、追加
+    for pat in &spec.section_patterns {
+        let mut pat_matches = Vec::new();
 
-        // 跳过已被之前模式匹配的节
-        if used_sections.contains(&(i as u32)) {
-            continue;
-        }
+        for (i, in_sec) in bundle.sections.iter().enumerate() {
+            // 跳过空节名和特殊节
+            if in_sec.name.is_empty()
+                || in_sec.name == ".symtab"
+                || in_sec.name == ".strtab"
+                || in_sec.name == ".shstrtab"
+                || in_sec.name.starts_with(".rela")
+                || in_sec.name.starts_with(".rel")
+            {
+                continue;
+            }
 
-        // 检查是否被 EXCLUDE_FILE 排除
-        let file_name = &bundle.objects[in_sec.input_obj].name;
-        let excluded = spec.exclude_files.iter().any(|ex| {
-            section_name_matches(file_name, ex)
-        });
-        if excluded {
-            continue;
-        }
+            // 跳过已被之前模式或之前 spec 匹配的节
+            if used_sections.contains(&(i as u32)) || locally_used.contains(&(i as u32)) {
+                continue;
+            }
 
-        // 检查是否匹配任何模式
-        for pat in &spec.section_patterns {
+            // 检查是否被 EXCLUDE_FILE 排除
+            let file_name = &bundle.objects[in_sec.input_obj].name;
+            let excluded = spec.exclude_files.iter().any(|ex| {
+                section_name_matches(file_name, ex)
+            });
+            if excluded {
+                continue;
+            }
+
+            // 检查是否匹配当前模式
             if section_name_matches(&in_sec.name, &pat.pattern) {
-                matches.push(InputSectionMatch {
+                pat_matches.push(InputSectionMatch {
                     input_index: i as u32,
                     pattern: pat.pattern.clone(),
                     offset: 0,
                 });
-                break;
             }
         }
-    }
 
-    // 应用排序
-    if !spec.section_patterns.is_empty() {
-        let sort_mode = spec.section_patterns[0].sort;
-        match sort_mode {
+        // 根据当前模式的 sort mode 排序
+        match pat.sort {
             SortMode::ByName => {
-                matches.sort_by(|a, b| {
+                pat_matches.sort_by(|a, b| {
                     let name_a = &bundle.sections[a.input_index as usize].name;
                     let name_b = &bundle.sections[b.input_index as usize].name;
                     name_a.cmp(name_b)
                 });
             }
             SortMode::ByAlignment => {
-                matches.sort_by(|a, b| {
+                pat_matches.sort_by(|a, b| {
                     let align_a = bundle.sections[a.input_index as usize].align;
                     let align_b = bundle.sections[b.input_index as usize].align;
                     align_b.cmp(&align_a) // 降序，对齐值大的在前
                 });
             }
-            SortMode::None => {}
+            SortMode::None => {
+                // 保持文件出现顺序（已是遍历顺序）
+            }
         }
+
+        // 标记为已匹配并追加到结果
+        for m in &pat_matches {
+            locally_used.insert(m.input_index);
+        }
+        matches.extend(pat_matches);
     }
 
     matches
