@@ -62,6 +62,8 @@ pub struct MipsCodegen {
     va_save_base_off: i32,
     /// 下一个 GP va_arg 槽位索引 (0..3, 对应 $a0..$a3)
     va_gp_offs: i32,
+    /// 编译诊断 (未识别内联汇编指令等)
+    pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     _target: Target,
 }
 
@@ -101,6 +103,7 @@ impl MipsCodegen {
             is_current_func_variadic: false,
             va_save_base_off: 0,
             va_gp_offs: 0,
+            diagnostics: Vec::new(),
             _target: target,
         }
     }
@@ -114,19 +117,36 @@ impl MipsCodegen {
     }
 
     /// Encode resolved asm text into machine code and emit to code buffer.
+    /// P0-5: unrecognized instructions produce hard errors, not NOPs.
     fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
         let arch = if self.is_64bit { "mips64" } else { "mips" };
         let lines = crate::codegen::mini_asm::parse_asm_lines(resolved);
-        let (bytes, had_unrecognized) =
-            crate::codegen::mini_asm::encode_asm_lines_for_arch(&lines, arch, self.is_64bit);
-        if had_unrecognized {
-            eprintln!(
-                "{}:{}: warning: unrecognized inline asm instruction on {} target, \
-                 encoded nop placeholder",
-                span_file, span_line, arch
-            );
+        match crate::codegen::mini_asm::encode_asm_lines_for_arch(
+            &lines,
+            arch,
+            self.is_64bit,
+        ) {
+            Ok(bytes) => {
+                self.code.extend_from_slice(&bytes);
+            }
+            Err(unrecognized) => {
+                for mnem in &unrecognized {
+                    let span = crate::diagnostics::Span::point(span_file, span_line, 1);
+                    let mut diag = crate::diagnostics::Diagnostic::err(
+                        "E0311",
+                        format!(
+                            "unsupported inline asm instruction '{}' on {} target",
+                            mnem, arch
+                        ),
+                        span,
+                    );
+                    diag.hint = Some(
+                        "add encoding support or use asm text mode (-S)".to_string(),
+                    );
+                    self.diagnostics.push(diag);
+                }
+            }
         }
-        self.code.extend_from_slice(&bytes);
     }
 
     pub fn set_64bit(&mut self) {

@@ -77,6 +77,8 @@ pub struct Aarch64Codegen {
     raw_func_asm_lines: Vec<(String, Vec<String>)>,
     /// -S 模式标志: true 时保留 asm 文本输出, false 时编码机器码
     asm_text_mode: bool,
+    /// 编译诊断 (未识别内联汇编指令等)
+    pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     _target: Target,
 }
 
@@ -136,6 +138,7 @@ impl Aarch64Codegen {
             raw_global_asm_lines: Vec::new(),
             raw_func_asm_lines: Vec::new(),
             asm_text_mode: false,
+            diagnostics: Vec::new(),
             _target: target,
         }
     }
@@ -150,18 +153,31 @@ impl Aarch64Codegen {
 
     /// Encode resolved asm text into machine code and emit to code buffer.
     /// Used in -c mode to produce actual machine code for inline asm.
+    /// P0-5: unrecognized instructions produce hard errors, not NOPs.
     fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
         let lines = crate::codegen::mini_asm::parse_asm_lines(resolved);
-        let (bytes, had_unrecognized) =
-            crate::codegen::mini_asm::encode_asm_lines_for_arch(&lines, "aarch64", false);
-        if had_unrecognized {
-            eprintln!(
-                "{}:{}: warning: unrecognized inline asm instruction on aarch64 target, \
-                 encoded nop placeholder",
-                span_file, span_line
-            );
+        match crate::codegen::mini_asm::encode_asm_lines_for_arch(&lines, "aarch64", false) {
+            Ok(bytes) => {
+                self.code.extend_from_slice(&bytes);
+            }
+            Err(unrecognized) => {
+                for mnem in &unrecognized {
+                    let span = crate::diagnostics::Span::point(span_file, span_line, 1);
+                    let mut diag = crate::diagnostics::Diagnostic::err(
+                        "E0311",
+                        format!(
+                            "unsupported inline asm instruction '{}' on aarch64 target",
+                            mnem
+                        ),
+                        span,
+                    );
+                    diag.hint = Some(
+                        "add encoding support or use asm text mode (-S)".to_string(),
+                    );
+                    self.diagnostics.push(diag);
+                }
+            }
         }
-        self.code.extend_from_slice(&bytes);
     }
 
     /// 启用/禁用 AArch64 MTE 硬件 tag (HWASAN 栈帧 tag 模式)。

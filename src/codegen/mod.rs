@@ -1171,9 +1171,15 @@ pub fn emit(
             cg.set_mte_enabled(sanitizers.hwasan);
             if emit_asm {
                 cg.compile(module);
+                if !cg.diagnostics.is_empty() {
+                    return Err(cg.diagnostics.clone());
+                }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
+            if !cg.diagnostics.is_empty() {
+                return Err(cg.diagnostics.clone());
+            }
             if debug_level > 0 && relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
@@ -1249,9 +1255,15 @@ pub fn emit(
             cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
+                if !cg.diagnostics.is_empty() {
+                    return Err(cg.diagnostics.clone());
+                }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
+            if !cg.diagnostics.is_empty() {
+                return Err(cg.diagnostics.clone());
+            }
             if debug_level > 0 && relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
@@ -1327,9 +1339,15 @@ pub fn emit(
             cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
+                if !cg.diagnostics.is_empty() {
+                    return Err(cg.diagnostics.clone());
+                }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
+            if !cg.diagnostics.is_empty() {
+                return Err(cg.diagnostics.clone());
+            }
             if debug_level > 0 && relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
@@ -1398,9 +1416,15 @@ pub fn emit(
             cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
+                if !cg.diagnostics().is_empty() {
+                    return Err(cg.diagnostics().to_vec());
+                }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
+            if !cg.diagnostics().is_empty() {
+                return Err(cg.diagnostics().to_vec());
+            }
             if debug_level > 0 && relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions
@@ -1469,9 +1493,15 @@ pub fn emit(
             cg.set_asm_text_mode(emit_asm);
             if emit_asm {
                 cg.compile(module);
+                if !cg.diagnostics.is_empty() {
+                    return Err(cg.diagnostics.clone());
+                }
                 return Ok(cg.build_asm_output(module).into_bytes());
             }
             cg.compile(module);
+            if !cg.diagnostics.is_empty() {
+                return Err(cg.diagnostics.clone());
+            }
             if debug_level > 0 && relocatable {
                 let func_pcs: Vec<(&str, u64, u64)> = module
                     .functions

@@ -865,14 +865,16 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
 }
 
 /// Encode a list of resolved asm lines into machine code bytes
-/// for the given architecture. Returns (encoded_bytes, had_unrecognized).
+/// for the given architecture. Returns Ok(encoded_bytes) on success,
+/// or Err(unrecognized_mnemonics) if any instruction is not supported.
+/// P0-5: unrecognized instructions are hard errors, not NOP fallbacks.
 pub fn encode_asm_lines_for_arch(
     lines: &[String],
     arch: &str,
     is_64bit: bool,
-) -> (Vec<u8>, bool) {
+) -> Result<Vec<u8>, Vec<String>> {
     let mut bytes = Vec::new();
-    let mut had_unrecognized = false;
+    let mut unrecognized = Vec::new();
 
     for line in lines {
         if let Some((mnemonic, operands)) = parse_instruction(line) {
@@ -886,22 +888,26 @@ pub fn encode_asm_lines_for_arch(
             match encoded {
                 Some(mut b) => bytes.append(&mut b),
                 None => {
-                    had_unrecognized = true;
-                    // Emit NOP equivalent for the architecture
-                    match arch {
-                        "aarch64" => bytes.extend_from_slice(&encode_aarch64_nop()),
-                        "riscv64" => bytes.extend_from_slice(&0x00000013u32.to_le_bytes()),
-                        "arm" => bytes.extend_from_slice(&0xe1a00000u32.to_le_bytes()),
-                        "mips" | "mips64" => bytes.extend_from_slice(&[0u8; 4]),
-                        _ => {}
-                    }
+                    unrecognized.push(format!(
+                        "{}:{}",
+                        mnemonic,
+                        if operands.is_empty() {
+                            String::new()
+                        } else {
+                            operands.join(", ")
+                        }
+                    ));
                 }
             }
         }
         // Directives and labels are silently skipped
     }
 
-    (bytes, had_unrecognized)
+    if unrecognized.is_empty() {
+        Ok(bytes)
+    } else {
+        Err(unrecognized)
+    }
 }
 
 #[cfg(test)]

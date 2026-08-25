@@ -52,4 +52,8 @@ impl Mips64Codegen {
     pub fn func_sizes(&self) -> &std::collections::HashMap<String, u64> {
         &self.inner.func_sizes
     }
+
+    pub fn diagnostics(&self) -> &[crate::diagnostics::Diagnostic] {
+        &self.inner.diagnostics
+    }
 }
