@@ -512,6 +512,16 @@ impl Aarch64Codegen {
                 align: 8,
             });
         }
+        // Retpoline/thunk extern: add undefined symbols for Spectre mitigations
+        // Note: These are primarily x86 options, but we emit the symbols for
+        // build compatibility if they're accidentally enabled on AArch64.
+        if self._target.function_return_thunk_extern {
+            self.ensure_sym("__x86_return_thunk");
+        }
+        if self._target.indirect_branch_thunk_extern {
+            self.ensure_sym("__x86_indirect_call_thunk_r11");
+            self.ensure_sym("__x86_indirect_jump_thunk_r11");
+        }
     }
 
     fn finalize_exec(&mut self) {
