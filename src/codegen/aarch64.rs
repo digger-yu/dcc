@@ -1023,6 +1023,12 @@ impl Aarch64Codegen {
         if is_float_ty(&expr.ty) {
             return self.gen_float_expr(expr);
         }
+        // Complex type: dispatch to gen_complex_expr
+        // Complex values are stored as pairs (real, imag) in consecutive
+        // stack slots or register pairs (v0, v1).
+        if is_complex_ty(&expr.ty) {
+            return self.gen_complex_expr(expr);
+        }
         match &expr.kind {
             ExprKind::Constant => {
                 if let Some(ExprLiteral::Int(v)) = expr.literal {
@@ -1474,6 +1480,147 @@ impl Aarch64Codegen {
                 self.zero_v0();
             }
         }
+        false
+    }
+
+    /// Generate code for complex type expressions.
+    /// Complex values are stored as (real, imag) pairs:
+    /// - Function return: v0 = real, v1 = imag
+    /// - Local variable: [sp, #off] = real, [sp, #off+inner_size] = imag
+    /// - Memory layout: real at lower address, imag at higher address
+    fn gen_complex_expr(&mut self, expr: &TypedExpr) -> bool {
+        let inner_size = match &expr.ty {
+            ValueType::Complex(inner) => value_type_size(inner),
+            _ => return false,
+        };
+        match &expr.kind {
+            // Complex local variable: load both parts into v0, v1
+            ExprKind::Local(ref name) => {
+                if let Some(&off) = self.locals.get(name) {
+                    // Load real part into v0
+                    self.ldr_s0_sp(off);
+                    // Load imag part into v1
+                    self.ldr_s1_sp(off + inner_size as i32);
+                    return true;
+                }
+                // Unknown local: zero both parts
+                self.zero_v0();
+                self.zero_v1();
+                return true;
+            }
+            // Complex constant: real = literal, imag = 0
+            ExprKind::Constant => {
+                if let Some(ExprLiteral::Float(v)) = expr.literal {
+                    self.load_float_s0(v as f32);
+                    self.zero_v1();
+                    return true;
+                }
+                if let Some(ExprLiteral::Int(v)) = expr.literal {
+                    self.mov_w0_imm(trunc_i32(v));
+                    // int to float: scvtf s0, w0
+                    self.emit(&[0x00, 0x00, 0x18, 0x1e]);
+                    self.zero_v1();
+                    return true;
+                }
+                self.zero_v0();
+                self.zero_v1();
+                return true;
+            }
+            // Complex binary ops: component-wise add/sub
+            ExprKind::Binary(op) if expr.children.len() >= 2 => {
+                // Evaluate left -> (v0, v1)
+                self.gen_complex_expr(&expr.children[0]);
+                // Save left real to stack temp
+                let tmp_real = self.alloc_local("<cxr>", inner_size as i32);
+                let tmp_imag = self.alloc_local("<cxi>", inner_size as i32);
+                self.str_s0_sp(tmp_real);
+                self.str_s1_sp(tmp_imag);
+                // Evaluate right -> (v0, v1)
+                self.gen_complex_expr(&expr.children[1]);
+                // Load left back into v2, v3 (use s2, s3 as temp)
+                self.ldr_s2_sp(tmp_real);
+                self.ldr_s3_sp(tmp_imag);
+                // Now: v0,v1 = right; v2,v3 = left
+                // Component-wise operation
+                match op {
+                    BinOp::Add => {
+                        // real: v0 = v2 + v0
+                        self.emit_fadd_s0_v2_v0();
+                        // imag: v1 = v3 + v1
+                        self.emit_fadd_s1_v3_v1();
+                    }
+                    BinOp::Sub => {
+                        // real: v0 = v2 - v0
+                        self.emit_fsub_s0_v2_v0();
+                        // imag: v1 = v3 - v1
+                        self.emit_fsub_s1_v3_v1();
+                    }
+                    _ => {
+                        // Unsupported complex binop: zero result
+                        self.zero_v0();
+                        self.zero_v1();
+                    }
+                }
+                return true;
+            }
+            // Complex cast: component-wise cast
+            ExprKind::Cast if !expr.children.is_empty() => {
+                let child = &expr.children[0];
+                if is_complex_ty(&child.ty) {
+                    // Complex -> Complex: load both parts, possibly convert
+                    self.gen_complex_expr(child);
+                    // TODO: handle different inner types (float->double, etc.)
+                } else {
+                    // Scalar -> Complex: real = scalar, imag = 0
+                    self.gen_expr(child);
+                    // Convert int/float in w0/s0 to complex
+                    if is_float_ty(&child.ty) {
+                        // s0 already has the value, copy to v0
+                        // (gen_expr for float puts result in s0)
+                    } else {
+                        // int in w0 -> float in s0
+                        self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
+                    }
+                    self.zero_v1();
+                }
+                return true;
+            }
+            // Complex call: result in (v0, v1)
+            ExprKind::Call => {
+                self.gen_call(expr);
+                // gen_call should leave result in v0, v1 for complex returns
+                return true;
+            }
+            // Complex conditional: branch-based
+            ExprKind::Conditional if expr.children.len() >= 3 => {
+                let lbl_false = self.fresh_label(".Lcx_cond_f");
+                let lbl_end = self.fresh_label(".Lcx_cond_end");
+                self.gen_expr(&expr.children[0]);
+                self.cmp_w0_zero();
+                self.cbz_w0(&lbl_false);
+                self.gen_complex_expr(&expr.children[1]);
+                self.b(&lbl_end);
+                self.label(&lbl_false);
+                self.gen_complex_expr(&expr.children[2]);
+                self.label(&lbl_end);
+                return true;
+            }
+            _ => {}
+        }
+        // Fallback: zero both parts
+        let span = expr.span.clone();
+        let mut diag = crate::diagnostics::Diagnostic::err(
+            "E0315",
+            format!(
+                "unsupported complex IR expression on aarch64: {:?}",
+                expr.kind
+            ),
+            span,
+        );
+        diag.hint = Some("add handling in gen_complex_expr".to_string());
+        self.diagnostics.push(diag);
+        self.zero_v0();
+        self.zero_v1();
         false
     }
 
@@ -2203,6 +2350,79 @@ impl Aarch64Codegen {
 
     fn zero_v0(&mut self) {
         self.emit(&[0x00, 0x00, 0x80, 0x4e]); // movi v0.4s, #0
+    }
+
+    fn zero_v1(&mut self) {
+        self.emit(&[0x01, 0x00, 0x80, 0x4e]); // movi v1.4s, #0
+    }
+
+    /// `str st, [sp, #imm12]` — store single-precision float to stack.
+    /// Generic version for any register.
+    fn str_st_sp(&mut self, reg: u8, off: i32) {
+        let imm12 = (off / 4) as u32 & 0xfff;
+        let insn = 0xbd000000u32 | imm12 << 10 | 31u32 << 5 | (reg as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// `ldr st, [sp, #imm12]` — load single-precision float from stack.
+    /// Generic version for any register.
+    fn ldr_st_sp(&mut self, reg: u8, off: i32) {
+        let imm12 = (off / 4) as u32 & 0xfff;
+        let insn = 0xbd400000u32 | imm12 << 10 | 31u32 << 5 | (reg as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    fn str_s1_sp(&mut self, off: i32) {
+        self.str_st_sp(1, off);
+    }
+
+    fn ldr_s1_sp(&mut self, off: i32) {
+        self.ldr_st_sp(1, off);
+    }
+
+    fn ldr_s2_sp(&mut self, off: i32) {
+        self.ldr_st_sp(2, off);
+    }
+
+    fn ldr_s3_sp(&mut self, off: i32) {
+        self.ldr_st_sp(3, off);
+    }
+
+    /// FADD Sd, Sn, Sm — single-precision floating-point add
+    fn emit_fadd(&mut self, rd: u8, rn: u8, rm: u8) {
+        // FADD (scalar): 0x1E202800 | Rm<<16 | Rn<<5 | Rd
+        let insn = 0x1e202800u32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | (rd as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// FSUB Sd, Sn, Sm — single-precision floating-point subtract
+    fn emit_fsub(&mut self, rd: u8, rn: u8, rm: u8) {
+        // FSUB (scalar): 0x1E203800 | Rm<<16 | Rn<<5 | Rd
+        let insn = 0x1e203800u32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | (rd as u32 & 0x1f);
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// Complex add helpers: component-wise
+    fn emit_fadd_s0_v2_v0(&mut self) {
+        self.emit_fadd(0, 2, 0); // fadd s0, s2, s0
+    }
+
+    fn emit_fadd_s1_v3_v1(&mut self) {
+        self.emit_fadd(1, 3, 1); // fadd s1, s3, s1
+    }
+
+    fn emit_fsub_s0_v2_v0(&mut self) {
+        self.emit_fsub(0, 2, 0); // fsub s0, s2, s0
+    }
+
+    fn emit_fsub_s1_v3_v1(&mut self) {
+        self.emit_fsub(1, 3, 1); // fsub s1, s3, s1
     }
 
     fn sub_sp_imm(&mut self, bytes: u32) {
@@ -3481,6 +3701,10 @@ fn is_float_ty(ty: &ValueType) -> bool {
 
 fn is_vector_ty(ty: &ValueType) -> bool {
     matches!(ty, ValueType::Vector(_, _))
+}
+
+fn is_complex_ty(ty: &ValueType) -> bool {
+    matches!(ty, ValueType::Complex(_))
 }
 
 // M7 修复: 聚合类型判定 (struct/union/array of known size)
