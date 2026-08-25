@@ -3,10 +3,13 @@
 // 支持 GNU ld 链接器脚本的核心子集，面向 Linux 内核 vmlinux.lds.S 预处理输出：
 //   - OUTPUT_FORMAT / OUTPUT_ARCH / ENTRY
 //   - PHDRS { ... }
+//   - MEMORY { ... } 含 ORIGIN/LENGTH/ORG
 //   - SECTIONS { ... } 含 AT() / ALIGN() / fill / :phdr
 //   - 符号赋值 (sym = expr) / PROVIDE(sym = expr)
 //   - 输入节通配 *(.text ...) / KEEP / SORT / SORT_BY_ALIGNMENT / SORT_BY_NAME
+//   - EXCLUDE_FILE 排除特定文件的输入节
 //   - ASSERT / SIZEOF / ADDR / ABSOLUTE / ALIGN / ADDR
+//   - NEXT / LOG2CEIL / ORIGIN / ORG / LENGTH 函数
 //   - /DISCARD/ 与 (INFO) 虚拟节
 //   - 表达式：算术、位运算、三元、比较
 //
@@ -26,6 +29,7 @@ enum Token {
     Entry,
     Phdrs,
     Sections,
+    Memory,
     Keep,
     Sort,
     SortByAlignment,
@@ -41,9 +45,20 @@ enum Token {
     Min,
     Defined,
     Length,
+    Origin,
+    Next,
+    Log2Ceil,
     Constructors,
     Discard,
     Info,
+    ExcludeFile,
+    Input,
+    Group,
+    RegionAlias,
+    NoCrossRefs,
+    Insert,
+    Version,
+    Common,
     // 段类型
     PtLoad,
     PtDynamic,
@@ -426,6 +441,7 @@ impl Lexer {
                     "ENTRY" => Token::Entry,
                     "PHDRS" => Token::Phdrs,
                     "SECTIONS" => Token::Sections,
+                    "MEMORY" => Token::Memory,
                     "KEEP" => Token::Keep,
                     "SORT" | "SORT_BY_NAME" => Token::Sort,
                     "SORT_BY_ALIGNMENT" => Token::SortByAlignment,
@@ -440,7 +456,18 @@ impl Lexer {
                     "MIN" => Token::Min,
                     "DEFINED" => Token::Defined,
                     "LENGTH" => Token::Length,
+                    "ORIGIN" | "ORG" => Token::Origin,
+                    "NEXT" => Token::Next,
+                    "LOG2CEIL" => Token::Log2Ceil,
                     "CONSTRUCTORS" => Token::Constructors,
+                    "EXCLUDE_FILE" => Token::ExcludeFile,
+                    "INPUT" => Token::Input,
+                    "GROUP" => Token::Group,
+                    "REGION_ALIAS" => Token::RegionAlias,
+                    "NOCROSSREFS" => Token::NoCrossRefs,
+                    "INSERT" => Token::Insert,
+                    "VERSION" => Token::Version,
+                    "COMMON" => Token::Common,
                     "PT_LOAD" => Token::PtLoad,
                     "PT_DYNAMIC" => Token::PtDynamic,
                     "PT_INTERP" => Token::PtInterp,
@@ -469,11 +496,35 @@ pub struct LinkerScript {
     pub output_arch: Option<String>,
     pub entry: Option<String>,
     pub phdrs: Vec<PhdrDef>,
+    pub memory_regions: Vec<MemoryRegion>,
     pub sections: Vec<SectionCommand>,
     /// 顶层符号赋值 (SECTIONS 之外)
     pub top_assignments: Vec<SymbolAssignment>,
     /// SECTIONS 之后的 ASSERT/PROVIDE
     pub trailing_commands: Vec<TrailingCommand>,
+    /// INPUT/GROUP 指定的输入文件
+    pub input_files: Vec<String>,
+    /// NOCROSSREFS 检查的节列表
+    pub no_cross_refs: Vec<Vec<String>>,
+    /// INSERT 命令
+    pub insert_commands: Vec<InsertCommand>,
+}
+
+/// MEMORY 块中的内存区域定义
+#[derive(Debug, Clone)]
+pub struct MemoryRegion {
+    pub name: String,
+    pub origin: Expr,
+    pub length: Expr,
+    pub attributes: String,
+}
+
+/// INSERT 命令
+#[derive(Debug, Clone)]
+pub struct InsertCommand {
+    pub after: Option<String>,
+    pub before: Option<String>,
+    pub section_name: String,
 }
 
 impl LinkerScript {
@@ -605,6 +656,10 @@ pub struct InputSectionSpec {
     pub file_pattern: String,
     pub section_patterns: Vec<SectionPattern>,
     pub keep: bool,
+    /// EXCLUDE_FILE 排除的文件模式列表
+    pub exclude_files: Vec<String>,
+    /// 是否为 COMMON 符号 (*(COMMON))
+    pub is_common: bool,
 }
 
 /// 节模式（含排序方式）
@@ -734,9 +789,13 @@ impl Parser {
             output_arch: None,
             entry: None,
             phdrs: Vec::new(),
+            memory_regions: Vec::new(),
             sections: Vec::new(),
             top_assignments: Vec::new(),
             trailing_commands: Vec::new(),
+            input_files: Vec::new(),
+            no_cross_refs: Vec::new(),
+            insert_commands: Vec::new(),
         };
 
         // 解析顶层命令
@@ -792,8 +851,102 @@ impl Parser {
                 Token::Phdrs => {
                     script.phdrs = self.parse_phdrs()?;
                 }
+                Token::Memory => {
+                    script.memory_regions = self.parse_memory()?;
+                }
                 Token::Sections => {
                     script.sections = self.parse_sections()?;
+                }
+                Token::Input | Token::Group => {
+                    // INPUT(file1, file2, ...) or GROUP(file1, file2, ...)
+                    self.next();
+                    self.expect(&Token::LParen)?;
+                    while !self.eat(&Token::RParen) {
+                        match self.peek().clone() {
+                            Token::Str(s) => {
+                                self.next();
+                                script.input_files.push(s);
+                            }
+                            Token::Ident(s) => {
+                                self.next();
+                                script.input_files.push(s);
+                            }
+                            Token::Comma => {
+                                self.next();
+                            }
+                            Token::Eof => break,
+                            _ => {
+                                self.next(); // skip unknown
+                            }
+                        }
+                    }
+                }
+                Token::NoCrossRefs => {
+                    // NOCROSSREFS(section1, section2, ...)
+                    self.next();
+                    self.expect(&Token::LParen)?;
+                    let mut sections = Vec::new();
+                    while !self.eat(&Token::RParen) {
+                        match self.peek().clone() {
+                            Token::Ident(s) => {
+                                self.next();
+                                sections.push(s);
+                            }
+                            Token::Comma => {
+                                self.next();
+                            }
+                            Token::Eof => break,
+                            _ => {
+                                self.next(); // skip unknown
+                            }
+                        }
+                    }
+                    script.no_cross_refs.push(sections);
+                }
+                Token::Insert => {
+                    // INSERT AFTER section_name or INSERT BEFORE section_name
+                    self.next();
+                    let mut after = None;
+                    let mut before = None;
+                    if let Token::Ident(ref s) = self.peek().clone() {
+                        if s == "AFTER" {
+                            self.next();
+                            if let Token::Ident(name) = self.next() {
+                                after = Some(name);
+                            }
+                        } else if s == "BEFORE" {
+                            self.next();
+                            if let Token::Ident(name) = self.next() {
+                                before = Some(name);
+                            }
+                        }
+                    }
+                    // The section name to insert
+                    let section_name = if let Token::Ident(s) = self.next() {
+                        s
+                    } else {
+                        String::new()
+                    };
+                    script.insert_commands.push(InsertCommand {
+                        after,
+                        before,
+                        section_name,
+                    });
+                    self.eat(&Token::Semicolon);
+                }
+                Token::Version => {
+                    // VERSION { ... } - skip for now, just parse and ignore
+                    self.next();
+                    self.expect(&Token::LBrace)?;
+                    let mut depth = 1;
+                    while depth > 0 {
+                        match self.next() {
+                            Token::LBrace => depth += 1,
+                            Token::RBrace => depth -= 1,
+                            Token::Eof => break,
+                            _ => {}
+                        }
+                    }
                 }
                 Token::Ident(_) => {
                     // 可能是符号赋值: sym = expr
@@ -877,6 +1030,65 @@ impl Parser {
             phdrs.push(PhdrDef { name, ty, flags });
         }
         Ok(phdrs)
+    }
+
+    fn parse_memory(&mut self) -> Result<Vec<MemoryRegion>, String> {
+        self.next(); // consume MEMORY
+        self.expect(&Token::LBrace)?;
+        let mut regions = Vec::new();
+        while !self.eat(&Token::RBrace) {
+            // Parse: name [(attr)] : ORIGIN = expr, LENGTH = expr
+            let name = if let Token::Ident(s) = self.next() {
+                s
+            } else {
+                return Err("expected memory region name".into());
+            };
+            
+            // Optional attributes in parentheses
+            let mut attributes = String::new();
+            if self.eat(&Token::LParen) {
+                while !self.eat(&Token::RParen) {
+                    match self.peek().clone() {
+                        Token::Ident(s) => {
+                            self.next();
+                            attributes.push_str(&s);
+                        }
+                        Token::Comma => {
+                            self.next();
+                        }
+                        Token::Eof => break,
+                        _ => {
+                            self.next(); // skip unknown
+                        }
+                    }
+                }
+            }
+            
+            self.expect(&Token::Colon)?;
+            
+            // Parse ORIGIN = expr, LENGTH = expr
+            let mut origin = Expr::Int(0);
+            let mut length = Expr::Int(0);
+            
+            // ORIGIN = expr
+            if let Token::Origin = self.peek().clone() {
+                self.next();
+                self.expect(&Token::Assign)?;
+                origin = self.parse_expr()?;
+            }
+            self.eat(&Token::Comma);
+            
+            // LENGTH = expr
+            if let Token::Length = self.peek().clone() {
+                self.next();
+                self.expect(&Token::Assign)?;
+                length = self.parse_expr()?;
+            }
+            
+            self.eat(&Token::Semicolon);
+            regions.push(MemoryRegion { name, origin, length, attributes });
+        }
+        Ok(regions)
     }
 
     fn parse_sections(&mut self) -> Result<Vec<SectionCommand>, String> {
@@ -1221,10 +1433,15 @@ impl Parser {
                 file_pattern: "*".to_string(),
                 section_patterns: Vec::new(),
                 keep,
+                exclude_files: Vec::new(),
+                is_common: false,
             });
         }
 
         let mut patterns = Vec::new();
+        let mut exclude_files = Vec::new();
+        let mut is_common = false;
+        
         while !self.eat(&Token::RParen) {
             match self.peek().clone() {
                 Token::Eof => break,
@@ -1258,6 +1475,40 @@ impl Parser {
                         }
                     }
                 }
+                Token::ExcludeFile => {
+                    // EXCLUDE_FILE(file1, file2, ...)
+                    self.next();
+                    self.expect(&Token::LParen)?;
+                    while !self.eat(&Token::RParen) {
+                        match self.peek().clone() {
+                            Token::Ident(s) => {
+                                self.next();
+                                exclude_files.push(s);
+                            }
+                            Token::Str(s) => {
+                                self.next();
+                                exclude_files.push(s);
+                            }
+                            Token::Comma => {
+                                self.next();
+                            }
+                            Token::Eof => break,
+                            _ => {
+                                self.next(); // skip unknown
+                            }
+                        }
+                    }
+                }
+                Token::Common => {
+                    // *(COMMON) - special handling for COMMON symbols
+                    self.next();
+                    is_common = true;
+                    // Add COMMON as a section pattern
+                    patterns.push(SectionPattern {
+                        pattern: "COMMON".to_string(),
+                        sort: SortMode::None,
+                    });
+                }
                 Token::RParen => break,
                 _ => {
                     if let Some(pat) = self.parse_section_pattern()? {
@@ -1271,6 +1522,8 @@ impl Parser {
             file_pattern: "*".to_string(),
             section_patterns: patterns,
             keep,
+            exclude_files,
+            is_common,
         })
     }
 
@@ -1637,6 +1890,8 @@ pub struct EvalContext {
     pub section_addrs: HashMap<String, u64>,
     /// 节大小表 (section name -> size)
     pub section_sizes: HashMap<String, u64>,
+    /// 内存区域表 (region name -> (origin, length))
+    pub memory_regions: HashMap<String, (u64, u64)>,
 }
 
 impl EvalContext {
@@ -1646,6 +1901,7 @@ impl EvalContext {
             symbols: HashMap::new(),
             section_addrs: HashMap::new(),
             section_sizes: HashMap::new(),
+            memory_regions: HashMap::new(),
         }
     }
 
@@ -1767,6 +2023,71 @@ impl EvalContext {
                             Ok(if self.symbols.contains_key(name) { 1 } else { 0 })
                         } else {
                             Ok(0)
+                        }
+                    }
+                    "ORIGIN" | "ORG" => {
+                        if args.is_empty() {
+                            return Err("ORIGIN() requires 1 argument".into());
+                        }
+                        if let Expr::Symbol(region_name) = &args[0] {
+                            self.memory_regions.get(region_name).map(|(o, _)| *o).ok_or_else(|| {
+                                format!("ORIGIN: memory region '{}' not found", region_name)
+                            })
+                        } else {
+                            Err("ORIGIN() requires memory region name".into())
+                        }
+                    }
+                    "LENGTH" => {
+                        if args.is_empty() {
+                            return Err("LENGTH() requires 1 argument".into());
+                        }
+                        if let Expr::Symbol(region_name) = &args[0] {
+                            self.memory_regions.get(region_name).map(|(_, l)| *l).ok_or_else(|| {
+                                format!("LENGTH: memory region '{}' not found", region_name)
+                            })
+                        } else {
+                            Err("LENGTH() requires memory region name".into())
+                        }
+                    }
+                    "NEXT" => {
+                        // NEXT(expr) aligns to the next free address above expr
+                        // For simplicity, we treat it as ALIGN with the given expression
+                        if args.is_empty() {
+                            return Err("NEXT() requires 1 argument".into());
+                        }
+                        let val = self.eval(&args[0])?;
+                        // Align to next 8-byte boundary (common default)
+                        Ok((val.wrapping_add(7)) & !7)
+                    }
+                    "LOG2CEIL" => {
+                        // LOG2CEIL(x) returns ceil(log2(x))
+                        if args.is_empty() {
+                            return Err("LOG2CEIL() requires 1 argument".into());
+                        }
+                        let val = self.eval(&args[0])?;
+                        if val == 0 {
+                            return Ok(0);
+                        }
+                        // Calculate ceil(log2(val))
+                        let mut result = 0u64;
+                        let mut v = val - 1;
+                        while v > 0 {
+                            result += 1;
+                            v >>= 1;
+                        }
+                        Ok(result)
+                    }
+                    "REGION_ALIAS" => {
+                        // REGION_ALIAS(alias, region) - returns origin of aliased region
+                        if args.len() < 2 {
+                            return Err("REGION_ALIAS() requires 2 arguments".into());
+                        }
+                        if let Expr::Symbol(region_name) = &args[1] {
+                            self.memory_regions.get(region_name).map(|(o, _)| *o).ok_or_else(|| {
+                                format!("REGION_ALIAS: memory region '{}' not found", region_name)
+                            })
+                        } else {
+                            Err("REGION_ALIAS() requires memory region name as second argument".into())
                         }
                     }
                     other => Err(format!("unknown function '{}' in linker script", other)),
@@ -2147,6 +2468,148 @@ mod tests {
         assert!(syms.contains(&"_etext".to_string()));
         assert!(syms.contains(&"__hidden".to_string()));
     }
+
+    #[test]
+    fn parse_memory_block() {
+        let text = r#"
+            MEMORY {
+                rom (rx) : ORIGIN = 0x00000000, LENGTH = 256K
+                ram (rwx) : ORIGIN = 0x20000000, LENGTH = 64K
+            }
+            SECTIONS {
+                .text : { *(.text) }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert_eq!(script.memory_regions.len(), 2);
+        assert_eq!(script.memory_regions[0].name, "rom");
+        assert_eq!(script.memory_regions[1].name, "ram");
+    }
+
+    #[test]
+    fn eval_origin_length() {
+        let mut ctx = EvalContext::new();
+        ctx.memory_regions.insert("rom".to_string(), (0x1000, 0x2000));
+        
+        let origin_expr = Expr::Call("ORIGIN".into(), vec![Expr::Symbol("rom".into())]);
+        assert_eq!(ctx.eval(&origin_expr).unwrap(), 0x1000);
+        
+        let length_expr = Expr::Call("LENGTH".into(), vec![Expr::Symbol("rom".into())]);
+        assert_eq!(ctx.eval(&length_expr).unwrap(), 0x2000);
+    }
+
+    #[test]
+    fn eval_log2ceil() {
+        let ctx = EvalContext::new();
+        
+        let expr1 = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(1)]);
+        assert_eq!(ctx.eval(&expr1).unwrap(), 0);
+        
+        let expr2 = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(2)]);
+        assert_eq!(ctx.eval(&expr2).unwrap(), 1);
+        
+        let expr3 = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(5)]);
+        assert_eq!(ctx.eval(&expr3).unwrap(), 3);
+        
+        let expr4 = Expr::Call("LOG2CEIL".into(), vec![Expr::Int(1024)]);
+        assert_eq!(ctx.eval(&expr4).unwrap(), 10);
+    }
+
+    #[test]
+    fn parse_exclude_file() {
+        let text = r#"
+            SECTIONS {
+                .text : {
+                    *(EXCLUDE_FILE("*special.o") .text .text.*)
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let text_sec = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::OutputSection(def) = cmd {
+                if def.name == ".text" { Some(def) } else { None }
+            } else { None }
+        }).expect("should have .text output section");
+        
+        let spec = text_sec.body.iter().find_map(|item| {
+            if let SectionBodyItem::InputSection(spec) = item { Some(spec) } else { None }
+        }).expect("should have input section spec");
+        
+        assert_eq!(spec.exclude_files.len(), 1);
+        assert_eq!(spec.exclude_files[0], "*special.o");
+    }
+
+    #[test]
+    fn parse_common_section() {
+        let text = r#"
+            SECTIONS {
+                .bss : {
+                    *(COMMON)
+                    *(.bss)
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let bss_sec = script.sections.iter().find_map(|cmd| {
+            if let SectionCommand::OutputSection(def) = cmd {
+                if def.name == ".bss" { Some(def) } else { None }
+            } else { None }
+        }).expect("should have .bss output section");
+        
+        let spec = bss_sec.body.iter().find_map(|item| {
+            if let SectionBodyItem::InputSection(spec) = item { Some(spec) } else { None }
+        }).expect("should have input section spec");
+        
+        assert!(spec.is_common);
+        assert!(spec.section_patterns.iter().any(|p| p.pattern == "COMMON"));
+    }
+
+    #[test]
+    fn parse_input_group() {
+        let text = r#"
+            INPUT(file1.o, file2.o)
+            GROUP(lib1.a, lib2.a)
+            SECTIONS {
+                .text : { *(.text) }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert_eq!(script.input_files.len(), 4);
+        assert!(script.input_files.contains(&"file1.o".to_string()));
+        assert!(script.input_files.contains(&"lib2.a".to_string()));
+    }
+
+    #[test]
+    fn parse_nocrossrefs() {
+        let text = r#"
+            NOCROSSREFS(.text, .data)
+            SECTIONS {
+                .text : { *(.text) }
+                .data : { *(.data) }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert_eq!(script.no_cross_refs.len(), 1);
+        assert_eq!(script.no_cross_refs[0].len(), 2);
+    }
+
+    #[test]
+    fn parse_version_block() {
+        let text = r#"
+            VERSION {
+                GCC_3.0 {
+                    global:
+                        some_symbol;
+                };
+            }
+            SECTIONS {
+                .text : { *(.text) }
+            }
+        "#;
+        // VERSION block should be parsed and ignored
+        let script = LinkerScript::parse(text).unwrap();
+        assert!(!script.sections.is_empty());
+    }
 }
 
 // ─── Linker Script Executor ─────────────────────────────────────────────────
@@ -2213,6 +2676,13 @@ pub fn execute_script(
     };
     // 跟踪已匹配的输入节，避免重复匹配
     let mut used_sections: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    // 0. 初始化内存区域
+    for region in &script.memory_regions {
+        let origin = ctx.eval(&region.origin).unwrap_or(0);
+        let length = ctx.eval(&region.length).unwrap_or(0);
+        ctx.memory_regions.insert(region.name.clone(), (origin, length));
+    }
 
     // 0. 将已解析的输入符号加入 ctx.symbols（值为节内偏移，稍后会更新）
     for sym in resolved {
@@ -2513,6 +2983,15 @@ fn match_input_sections(
             continue;
         }
 
+        // 检查是否被 EXCLUDE_FILE 排除
+        let file_name = &bundle.objects[in_sec.input_obj].name;
+        let excluded = spec.exclude_files.iter().any(|ex| {
+            section_name_matches(file_name, ex)
+        });
+        if excluded {
+            continue;
+        }
+
         // 检查是否匹配任何模式
         for pat in &spec.section_patterns {
             if section_name_matches(&in_sec.name, &pat.pattern) {
@@ -2523,6 +3002,28 @@ fn match_input_sections(
                 });
                 break;
             }
+        }
+    }
+
+    // 应用排序
+    if !spec.section_patterns.is_empty() {
+        let sort_mode = spec.section_patterns[0].sort;
+        match sort_mode {
+            SortMode::ByName => {
+                matches.sort_by(|a, b| {
+                    let name_a = &bundle.sections[a.input_index as usize].name;
+                    let name_b = &bundle.sections[b.input_index as usize].name;
+                    name_a.cmp(name_b)
+                });
+            }
+            SortMode::ByAlignment => {
+                matches.sort_by(|a, b| {
+                    let align_a = bundle.sections[a.input_index as usize].align;
+                    let align_b = bundle.sections[b.input_index as usize].align;
+                    align_b.cmp(&align_a) // 降序，对齐值大的在前
+                });
+            }
+            SortMode::None => {}
         }
     }
 

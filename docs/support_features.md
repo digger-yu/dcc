@@ -365,6 +365,17 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 符号解析: 强/弱/未定义 | `resolve.rs` 实现完整符号解析规则：强 vs 强 → 错误；强 vs 弱 → 强胜；弱 vs 弱 → size 最大者胜；弱未定义 → 解析为 0 (NULL)；强未定义 → 报错 (允许列表除外)；`nm` 可见未定义符号 (U) 和弱符号 (W) |
 | Tentative definition 合并 | 跨 TU 的未初始化全局变量 (`int x;`) 多个强定义自动合并 (取最大 size)，与 GCC common symbol 行为一致；仅适用于 `STT_OBJECT`/`STT_NOTYPE`，函数重复定义仍报错 |
 | 未定义符号输出 .symtab | 允许列表中的未定义符号和弱未定义符号均写入输出 `.symtab`，`nm` 显示为 `U` (undefined)；ELF `st_shndx = SHN_UNDEF (0)` |
+| 链接器脚本 MEMORY 块 | `MEMORY { name [(attr)] : ORIGIN = expr, LENGTH = expr }` 定义内存区域及属性；支持内核 vmlinux.lds 物理内存区域映射 |
+| 链接器脚本 ORIGIN()/ORG()/LENGTH() | `ORIGIN(region)` / `ORG(region)` 获取内存区域起始地址；`LENGTH(region)` 获取内存区域长度；用于节起始地址计算和断言检查 |
+| 链接器脚本 NEXT()/LOG2CEIL() | `NEXT(expr)` 对齐到下一个空闲地址；`LOG2CEIL(x)` 向上取整 log2，用于计算对齐粒度 |
+| 链接器脚本 EXCLUDE_FILE | `*(EXCLUDE_FILE(file_pattern) section_patterns)` 排除特定文件的输入节；内核按文件过滤节广泛使用 |
+| 链接器脚本 SORT_BY_NAME/SORT_BY_ALIGNMENT 执行 | 解析的排序模式实际影响输入节排列顺序；`SORT_BY_NAME` 按节名排序，`SORT_BY_ALIGNMENT` 按对齐值降序排序 |
+| 链接器脚本 COMMON 符号 | `*(COMMON)` 特殊处理 COMMON 符号（tentative definitions）；正确匹配和放置 COMMON 符号到输出节 |
+| 链接器脚本 INPUT()/GROUP() | `INPUT(file1, file2, ...)` / `GROUP(lib1, lib2, ...)` 指定输入文件和库 |
+| 链接器脚本 NOCROSSREFS | `NOCROSSREFS(section1, section2, ...)` 禁止跨节引用检查；用于内核节隔离 |
+| 链接器脚本 INSERT 命令 | `INSERT AFTER section` / `INSERT BEFORE section` 插入额外节规则；动态修改脚本 |
+| 链接器脚本 VERSION 块 | `VERSION { ... }` 符号版本控制信息解析（解析并忽略，兼容 GNU ld） |
+| 链接器脚本 REGION_ALIAS | `REGION_ALIAS(alias, region)` 内存区域别名；架构特定脚本中使用 |
 
 ## IR 优化
 
