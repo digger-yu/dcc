@@ -363,7 +363,20 @@ impl Aarch64Codegen {
             {
                 continue;
             }
-            self.label(&func.name);
+            // -fpatchable-function-entry=(N,M): emit NOPs around function entry
+            if let Some((n, m)) = self._target.patchable_function_entry {
+                let prefix_len = m.min(n);
+                let suffix_len = n.saturating_sub(prefix_len);
+                for _ in 0..prefix_len {
+                    self.emit(&0xd503201fu32.to_le_bytes());
+                }
+                self.label(&func.name);
+                for _ in 0..suffix_len {
+                    self.emit(&0xd503201fu32.to_le_bytes());
+                }
+            } else {
+                self.label(&func.name);
+            }
             let start = self.pos();
             self.gen_function(func, find_func(prog, &func.name));
             self.func_sizes
@@ -410,7 +423,22 @@ impl Aarch64Codegen {
             {
                 continue;
             }
-            self.label(&func.name);
+            // -fpatchable-function-entry=(N,M): emit NOPs around function entry
+            // M NOPs before the label, (N-M) NOPs after
+            if let Some((n, m)) = self._target.patchable_function_entry {
+                let prefix_len = m.min(n);
+                let suffix_len = n.saturating_sub(prefix_len);
+                for _ in 0..prefix_len {
+                    // AArch64 NOP: 0xD503201F
+                    self.emit(&0xd503201fu32.to_le_bytes());
+                }
+                self.label(&func.name);
+                for _ in 0..suffix_len {
+                    self.emit(&0xd503201fu32.to_le_bytes());
+                }
+            } else {
+                self.label(&func.name);
+            }
             let start = self.pos();
             self.gen_function(func, find_func(prog, &func.name));
             let size = self.pos() - start;
@@ -570,7 +598,28 @@ impl Aarch64Codegen {
         for func in &module.functions {
             out.push_str(&format!("\t.globl {}\n", func.name));
             out.push_str(&format!("\t.type {}, %function\n", func.name));
-            out.push_str(&format!("{}:\n", func.name));
+            // -fpatchable-function-entry: emit NOPs in asm output
+            if let Some((n, m)) = self._target.patchable_function_entry {
+                let prefix_len = m.min(n);
+                let suffix_len = n.saturating_sub(prefix_len);
+                if n > 0 {
+                    out.push_str(&format!(
+                        "\t.section .patchable_function_entry,\"aw\",@progbits\n"
+                    ));
+                }
+                for _ in 0..prefix_len {
+                    out.push_str("\tnop\n");
+                }
+                out.push_str(&format!("{}:\n", func.name));
+                for _ in 0..suffix_len {
+                    out.push_str("\tnop\n");
+                }
+                if n > 0 {
+                    out.push_str("\t.text\n");
+                }
+            } else {
+                out.push_str(&format!("{}:\n", func.name));
+            }
             // 发射函数级内联 asm 原始文本
             for (fname, lines) in &self.raw_func_asm_lines {
                 if fname == &func.name || fname.starts_with("__inline_") {
