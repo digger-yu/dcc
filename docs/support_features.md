@@ -199,7 +199,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 栈保护非可重定位路径 | canary 失败始终调用 `__stack_chk_fail`（STB_GLOBAL/STT_FUNC 未定义符号），不再对 ET_EXEC 走 exit(255) syscall；`m3_10_stack_canary` 测试验证 |
 | ftrace 插桩 | `-pg` 在函数 prologue 后插入 `call mcount`；`-mfentry` 在函数标签后立即（prologue 前）插入 `call __fentry__`；`-mrecord-mcount` 同时生成 `__mcount_loc` 段记录所有 call site 地址（带 R_X86_64_64 重定位指向 .text）；三种模式均添加对应未定义符号到 ELF 符号表 |
 | 栈保护 guard 寄存器自定义 | `-mstack-protector-guard-reg=gs` 支持内核 per-CPU canary（`%gs:0x28`）；prologue canary 加载和 epilogue canary 校验均使用可配置段前缀（fs: 0x64 / gs: 0x65）；默认 `%fs:0x28` 用于用户态 |
-| `-fstack-clash-protection` | 大块栈分配（> 4096 字节）时逐页探测 guard page；发射探测循环：先减剩余字节，再循环每页 `sub rsp, 4096` + `mov byte [rsp], 0` 触发缺页异常；小帧保持普通 `sub rsp, imm32` |
+| `-fstack-clash-protection` | 全架构 (x86_64/aarch64/riscv64/mips/mips64/arm) 大块栈分配（> 4096 字节）时逐页探测 guard page；发射探测循环：先减剩余字节，再循环每页探测（x86_64: `sub rsp,4096` + `mov byte [rsp],0`；aarch64: `sub sp,sp,#4096` + `strb wzr,[sp]`；riscv64: 双 `addi sp,sp,-2048` + `sb zero,0(sp)`；mips: `subu $sp,$sp,$t1` + `sb $zero,0($sp)`；arm: `sub sp,sp,#4096` + `strb r0,[sp]`）触发缺页异常；小帧保持普通分配 |
 | Retpoline 完整验证 | `-mfunction-return=thunk-extern` 与内核侧 `__x86_return_thunk` 符号兼容；objtool ORC 帧信息正确生成；`-mindirect-branch=thunk-extern` 已实现（见 objtool / ORC 行） |
 | `-fno-strict-aliasing` | 优化器不做类型双关假设（type-based alias analysis）；常量折叠使用 `checked_add/sub/mul` 不假设无符号溢出；当前优化器已保守处理，标志被接受并存储 |
 | `-fno-strict-overflow` | 优化器不假设有符号溢出为未定义行为；常量折叠在溢出时返回 `None` 不折叠；循环优化不做基于无溢出的范围推断 |
