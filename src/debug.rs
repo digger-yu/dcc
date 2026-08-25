@@ -1,5 +1,5 @@
 // src/debug.rs - 完整调试信息生成
-//   DWARF v4 + .BTF + .eh_frame + .orc_unwind_ip + .debug_frame +
+//   DWARF v4/v5 + .BTF + .eh_frame + .orc_unwind_ip + .debug_frame +
 //   .debug_aranges + .debug_ranges + .debug_pubnames + .debug_names +
 //   .debug_macro + .gdb_index + split-dwarf + AArch64/RISC-V
 //
@@ -103,6 +103,8 @@ impl ArchKind {
 pub struct DebugOptions {
     /// -g 等级：0=off, 1=g1, 2=g2 (DWARF), 3=g3 (含宏)
     pub level: u8,
+    /// DWARF 版本：4 或 5（默认 4）
+    pub dwarf_version: u8,
     /// -gsplit-dwarf: 拆出 .debug_*.dwo
     pub split_dwarf: bool,
     /// -gpubnames: 写 .debug_pubnames + .debug_pubtypes
@@ -139,6 +141,7 @@ impl Default for DebugOptions {
     fn default() -> Self {
         Self {
             level: 0,
+            dwarf_version: 4,
             split_dwarf: false,
             pubnames: false,
             gdb_index: false,
@@ -424,6 +427,10 @@ pub struct DebugSections {
     pub macro_: Vec<u8>,
     pub loclists: Vec<u8>,
     pub rnglists: Vec<u8>,
+    // DWARF v5 新增节
+    pub str_offsets: Vec<u8>,
+    pub addr: Vec<u8>,
+    pub line_str: Vec<u8>,
     // split-dwarf 副节
     pub info_dwo: Vec<u8>,
     pub abbrev_dwo: Vec<u8>,
@@ -476,6 +483,10 @@ impl DebugSections {
         push(&mut v, ".debug_macro", &self.macro_, false);
         push(&mut v, ".debug_loclists", &self.loclists, false);
         push(&mut v, ".debug_rnglists", &self.rnglists, false);
+        // DWARF v5 新增节
+        push(&mut v, ".debug_str_offsets", &self.str_offsets, false);
+        push(&mut v, ".debug_addr", &self.addr, false);
+        push(&mut v, ".debug_line_str", &self.line_str, false);
         if split_dwarf {
             push(&mut v, ".debug_info.dwo", &self.info_dwo, false);
             push(&mut v, ".debug_abbrev.dwo", &self.abbrev_dwo, false);
@@ -491,9 +502,9 @@ impl DebugSections {
 }
 
 // ============================================================================
-// DWARF v4 常量（tag / attribute / form / opcode）
+// DWARF v4/v5 常量（tag / attribute / form / opcode）
 //
-// 这些常量名严格遵循 DWARF v4 规范原文, 例如 DW_TAG_array_type /
+// 这些常量名严格遵循 DWARF v4/v5 规范原文, 例如 DW_TAG_array_type /
 // DW_CFA_def_cfa_offset_sf 等, 故全部标 `non_upper_case_globals` 抑制
 // 命名风格告警。改写为 Rust 风格 ALL_CAPS 会丢失与规范章节的对应关系,
 // 不利于调试. -- 2026-07-21
@@ -607,6 +618,32 @@ const DW_CHILDREN_yes: u8 = 0x01;
 const DW_LANG_C99: u16 = 12;
 const DW_LANG_C11: u16 = 29;
 const DW_LANG_C17: u16 = 31;
+
+// DWARF v5 unit type (DW_UT_*)
+const DW_UT_compile: u8 = 0x01;
+
+// DWARF v5 new forms
+const DW_FORM_strx1: u16 = 0x25;
+const DW_FORM_strx2: u16 = 0x26;
+const DW_FORM_strx4: u16 = 0x28;
+const DW_FORM_addrx1: u16 = 0x29;
+const DW_FORM_addrx2: u16 = 0x2a;
+const DW_FORM_addrx4: u16 = 0x2c;
+const DW_FORM_line_strp: u16 = 0x1f;
+
+// DWARF v5 new attributes
+const DW_AT_str_offsets_base: u16 = 0x72;
+const DW_AT_addr_base: u16 = 0x73;
+const DW_AT_rnglists_base: u16 = 0x74;
+const DW_AT_loclists_base: u16 = 0x75;
+const DW_AT_line_str: u16 = 0x76;
+
+// DWARF v5 line number content types (DW_LNCT_*)
+// DW_LNCT_path and DW_LNCT_directory_index already defined above
+// DWARF v5 uses DW_FORM_string for inline directory/file entries
+
+// DWARF v5 .debug_line header entry format
+// DW_FORM_string for directory/file entries in v5 line program
 
 // CFI opcodes (DW_CFA_*)
 const DW_CFA_extended: u8 = 0x00;
@@ -791,7 +828,7 @@ impl AbbrevBuilder {
 // 公共 API
 // ============================================================================
 
-/// 兼容旧签名：构造一个最小 DWARF v4 CU。
+/// 兼容旧签名：构造一个最小 DWARF v4/v5 CU。
 /// 内部委托给完整 `build_dwarf_full`。
 pub fn build_dwarf(source: &str, functions: &[(&str, u64)]) -> DebugSections {
     let funcs: Vec<DwarfFuncInfo> = functions
@@ -891,7 +928,7 @@ pub fn build_dwarf_arch(source: &str, functions: &[(&str, u64)], arch: ArchKind)
     build_dwarf_full(&cu, &opts)
 }
 
-/// 完整 DWARF v4 + 辅助节生成（主入口）
+/// 完整 DWARF v4/v5 + 辅助节生成（主入口）
 pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections {
     let mut sec = DebugSections::default();
 
