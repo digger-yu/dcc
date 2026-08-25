@@ -437,8 +437,24 @@ impl MipsCodegen {
             self.va_save_base_off = 0;
         }
 
-        let func_start = self.code.len() as u64;
-        self.labels.insert(func.name.clone(), func_start);
+        // -fpatchable-function-entry: emit NOPs before and after label
+        let func_start: u64;
+        if let Some((n, m)) = self._target.patchable_function_entry {
+            let prefix_len = m.min(n);
+            let suffix_len = n.saturating_sub(prefix_len);
+            for _ in 0..prefix_len {
+                // MIPS NOP: SLL $zero, $zero, 0 = 0x00000000
+                self.code.extend_from_slice(&0x00000000u32.to_be_bytes());
+            }
+            func_start = self.code.len() as u64;
+            self.labels.insert(func.name.clone(), func_start);
+            for _ in 0..suffix_len {
+                self.code.extend_from_slice(&0x00000000u32.to_be_bytes());
+            }
+        } else {
+            func_start = self.code.len() as u64;
+            self.labels.insert(func.name.clone(), func_start);
+        }
 
         // 函数序言: 分配帧空间 (至少保存 $ra, $fp + 局部变量)
         // O32/N64 ABI: 帧大小必须为 8 字节对齐

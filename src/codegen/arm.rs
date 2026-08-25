@@ -403,8 +403,24 @@ impl ArmCodegen {
             self.va_save_base_off = 0;
         }
 
-        let func_start = self.code.len() as u64;
-        self.labels.insert(func.name.clone(), func_start);
+        // -fpatchable-function-entry: emit NOPs before and after label
+        let func_start: u64;
+        if let Some((n, m)) = self._target.patchable_function_entry {
+            let prefix_len = m.min(n);
+            let suffix_len = n.saturating_sub(prefix_len);
+            for _ in 0..prefix_len {
+                // ARM NOP: 0xE320F000
+                self.code.extend_from_slice(&0xE320F000u32.to_le_bytes());
+            }
+            func_start = self.code.len() as u64;
+            self.labels.insert(func.name.clone(), func_start);
+            for _ in 0..suffix_len {
+                self.code.extend_from_slice(&0xE320F000u32.to_le_bytes());
+            }
+        } else {
+            func_start = self.code.len() as u64;
+            self.labels.insert(func.name.clone(), func_start);
+        }
 
         // 函数序言：保存 fp, lr 并设置帧指针
         self.emit_push(vec![11, 14]); // push {fp, lr}

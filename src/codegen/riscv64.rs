@@ -343,7 +343,21 @@ impl Riscv64Codegen {
             {
                 continue;
             }
-            self.label(&func.name);
+            // -fpatchable-function-entry: emit NOPs before and after label
+            if let Some((n, m)) = self._target.patchable_function_entry {
+                let prefix_len = m.min(n);
+                let suffix_len = n.saturating_sub(prefix_len);
+                for _ in 0..prefix_len {
+                    // RISC-V NOP: ADDI x0, x0, 0 = 0x00000013
+                    self.code.extend_from_slice(&0x00000013u32.to_le_bytes());
+                }
+                self.label(&func.name);
+                for _ in 0..suffix_len {
+                    self.code.extend_from_slice(&0x00000013u32.to_le_bytes());
+                }
+            } else {
+                self.label(&func.name);
+            }
             let start = self.pos();
             self.gen_function(func, find_func(prog, &func.name));
             self.func_sizes
@@ -390,7 +404,21 @@ impl Riscv64Codegen {
             {
                 continue;
             }
-            self.label(&func.name);
+            // -fpatchable-function-entry: emit NOPs before and after label
+            if let Some((n, m)) = self._target.patchable_function_entry {
+                let prefix_len = m.min(n);
+                let suffix_len = n.saturating_sub(prefix_len);
+                for _ in 0..prefix_len {
+                    // RISC-V NOP: ADDI x0, x0, 0 = 0x00000013
+                    self.code.extend_from_slice(&0x00000013u32.to_le_bytes());
+                }
+                self.label(&func.name);
+                for _ in 0..suffix_len {
+                    self.code.extend_from_slice(&0x00000013u32.to_le_bytes());
+                }
+            } else {
+                self.label(&func.name);
+            }
             let start = self.pos();
             self.gen_function(func, find_func(prog, &func.name));
             let size = self.pos() - start;
