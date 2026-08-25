@@ -316,9 +316,12 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 跨 TU LTO | `-flto` 生成 `.llvm.lto`；`-r` 多 `.o` 经内置路径合并 |
 | `.llvm.lto` 摘要版本 | `.llvm.lto` 使用 `DCC_LTO\0` + version 1，解析器拒绝非当前版本 |
 | LTO dead symbol 剔除 | `-ffunction-sections` + `ld --gc-sections` + objcopy strip |
-| LTO 跨函数内联 | cost model：≤4 语句 / 4 表达式 / 无递归 |
-| LTO 跨 TU 常量传播 | 跨 TU `global constant` 初始化值合并 |
+| LTO 跨函数内联 | cost model：≤8 语句 / 16 表达式 / 无递归；`InlineCtx` 跟踪内联决策；内部函数 (.L/__dcc_local_) 优先；`InlineStats` 统计内联指标 |
+| LTO 跨 TU 常量传播 | `ConstPropagationCtx` 跨 TU 收集 const 全局；常量折叠支持整数/浮点二元运算和一元运算；地址被取走的常量不传播；`ConstPropagationStats` 统计传播指标 |
 | LTO 跨 TU 全局优化 | DCE + DAE |
+| LTO 跨 TU IR 合并 | `MergedModule` 合并多个 `BitcodeModule` 为单一模块；符号去重规则：公开符号优先于内部符号，有初始化器的全局优先；`MergedModuleStats` 统计合并结果 |
+| LTO 跨 TU 死存储消除 | `DeadStoreCtx` 分析全局存储/读取；识别写入但从未读取的变量；`DeadStoreStats` 统计消除结果；`run_cross_tu_dse()` 入口 |
+| LTO 跨 TU 别名分析 | `AliasCtx` 跟踪指针别名关系；`AliasResult` 三态查询 (NoAlias/MayAlias/MustAlias)；`AliasStats` 统计别名集合；`run_cross_tu_alias_analysis()` 入口 |
 | LTO 4 pass 增强 | `LtoConfig` 配置化 + Pass 7 no_semantic_interposition |
 | LTO IPA-SRA / PGO 集成 | `src/ipa_sra.rs` + `src/profile/pgo_integration.rs` |
 | `gc_sections_root` 自动选根 | 无显式根时自动选所有 STB_GLOBAL/STB_WEAK 符号 |
