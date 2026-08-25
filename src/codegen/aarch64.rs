@@ -69,6 +69,8 @@ pub struct Aarch64Codegen {
     mte_save_off: i32,
     /// 嵌套 sret: 保存的入参 sret 指针栈偏移 (函数返回 >16B 聚合时有效)
     saved_sret_ptr: Option<i32>,
+    /// Stack protector: 当前函数 canary 槽位偏移, 0 表示未启用
+    canary_slot_off: i32,
     /// TLS 全局全局变量集合 (名称 -> 偏移), 用于 load_global_addr_w0 分发 TLS 访问序列
     tls_globals: HashMap<String, u64>,
     /// 文件级 asm 原始文本行 (GlobalAsm)
@@ -134,6 +136,7 @@ impl Aarch64Codegen {
             tag_frame_size: 0,
             mte_save_off: 0,
             saved_sret_ptr: None,
+            canary_slot_off: 0,
             tls_globals: HashMap::new(),
             raw_global_asm_lines: Vec::new(),
             raw_func_asm_lines: Vec::new(),
@@ -444,6 +447,11 @@ impl Aarch64Codegen {
             }
             text_off += size;
         }
+        // Stack protector: add undefined symbols for canary and fail handler
+        if self._target.stack_protector {
+            self.ensure_sym_object("__stack_chk_guard");
+            self.ensure_sym("__stack_chk_fail");
+        }
     }
 
     fn finalize_exec(&mut self) {
@@ -602,6 +610,12 @@ impl Aarch64Codegen {
         } else {
             self.mte_save_off = 0;
         }
+        // Stack protector: allocate canary slot before frame size calculation
+        if self._target.stack_protector {
+            self.canary_slot_off = self.alloc_local("<canary>", 8);
+        } else {
+            self.canary_slot_off = 0;
+        }
         self.frame_bytes = (self.stack_bytes + 15) & !15;
         if self.frame_bytes > 0 {
             if self._target.stack_clash_protection && self.frame_bytes > 4096 {
@@ -613,6 +627,10 @@ impl Aarch64Codegen {
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
             self.emit_zero_init_frame(self.frame_bytes as usize);
+        }
+        // Stack protector: store canary value on stack after frame setup
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_prologue(self.canary_slot_off);
         }
         // MTE (HWASAN 硬件 tag): prologue tag 栈帧 + 指针 tag 流程。
         //   1) irg  x16, sp          : 随机 tag 写入 x16 (地址不变)
@@ -2189,6 +2207,10 @@ impl Aarch64Codegen {
     }
 
     fn ret(&mut self) {
+        // Stack protector epilogue: verify canary BEFORE frame teardown
+        if self._target.stack_protector && self.canary_slot_off > 0 {
+            self.emit_stack_chk_epilogue(self.canary_slot_off);
+        }
         if self.mte_active() {
             // MTE 收尾: 恢复入参 x19, 清除 sp 的 tag, 再释放帧。
             // 返回时 sp 为 untagged, 调用方 (MTE 函数) 会通过其 x19 恢复自身 tag,
@@ -2262,6 +2284,118 @@ impl Aarch64Codegen {
         let idx = self.symbols.len() as u32;
         self.sym_index.insert(name.to_string(), idx);
         idx
+    }
+
+    /// Like ensure_sym but creates an STT_OBJECT symbol (for data references).
+    fn ensure_sym_object(&mut self, name: &str) -> u32 {
+        if let Some(&idx) = self.sym_index.get(name) {
+            return idx;
+        }
+        self.symbols.push(ElfSym {
+            name: name.to_string(),
+            section: 0,
+            value: 0,
+            size: 0,
+            bind: STB_GLOBAL,
+            ty: STT_OBJECT,
+            visibility: elf::STV_DEFAULT,
+        });
+        let idx = self.symbols.len() as u32;
+        self.sym_index.insert(name.to_string(), idx);
+        idx
+    }
+
+    /// Emit ADRP Xd, __stack_chk_guard with proper relocation.
+    /// Used by stack protector prologue/epilogue.
+    fn emit_adrp_stack_chk_guard(&mut self, rd: u8) {
+        let pos = self.pos();
+        // ADRP Xd, #0 (placeholder, patched by linker via relocation)
+        // Encoding: 1 immlo 10000 immhi Rd
+        // immlo=00, immhi=0000000000000000000
+        let adrp = 0x90000000u32 | ((rd as u32 & 0x1f) << 0);
+        self.emit(&adrp.to_le_bytes());
+        if self.relocatable {
+            let idx = self.ensure_sym("__stack_chk_guard");
+            self.relocations.push(ElfRela {
+                offset: pos,
+                sym_index: idx,
+                rel_type: elf::R_AARCH64_ADR_PREL_PG_HI21,
+                addend: 0,
+            });
+        }
+    }
+
+    /// Emit LDR Xt, [Xd, :lo12:__stack_chk_guard] with proper relocation.
+    /// Loads the 64-bit canary value from the global.
+    fn emit_ldr_stack_chk_guard(&mut self, rt: u8, rn: u8) {
+        let pos = self.pos();
+        // LDR Xt, [Xn, #imm] (unsigned offset, 64-bit)
+        // imm12 = 0 (placeholder, patched by linker)
+        let ldr = 0xf9400000u32
+            | ((rt as u32 & 0x1f) << 0)
+            | ((rn as u32 & 0x1f) << 5);
+        self.emit(&ldr.to_le_bytes());
+        if self.relocatable {
+            let idx = self.ensure_sym("__stack_chk_guard");
+            self.relocations.push(ElfRela {
+                offset: pos,
+                sym_index: idx,
+                rel_type: elf::R_AARCH64_LDST64_ABS_LO12_NC,
+                addend: 0,
+            });
+        }
+    }
+
+    /// Emit CMP Xn, Xm (alias of SUBS XZR, Xn, Xm)
+    fn emit_cmp_x_reg(&mut self, rn: u8, rm: u8) {
+        // SUBS XZR, Xn, Xm => 0xEB000000 | Rm<<16 | Rn<<5 | 31
+        let subs = 0xeb000000u32
+            | ((rm as u32 & 0x1f) << 16)
+            | ((rn as u32 & 0x1f) << 5)
+            | 31;
+        self.emit(&subs.to_le_bytes());
+    }
+
+    /// Emit B.NE label (branch if not equal, condition code 0x1)
+    fn emit_bne(&mut self, label: &str) {
+        let pos = self.pos();
+        // B.cond: 0x54000000 | imm19<<5 | cond
+        // cond=0001 (NE)
+        let bne = 0x54000001u32;
+        self.emit(&bne.to_le_bytes());
+        if let Some(&target) = self.labels.get(label) {
+            self.patch_bcond(pos, target, 0x1);
+        } else {
+            self.pending_bcond.push((pos, label.to_string(), 0x1));
+        }
+    }
+
+    /// Stack protector prologue: load canary from __stack_chk_guard
+    /// and store at [sp, #canary_off]. Uses x16 as scratch.
+    fn emit_stack_chk_prologue(&mut self, canary_off: i32) {
+        self.emit_adrp_stack_chk_guard(16); // adrp x16, __stack_chk_guard
+        self.emit_ldr_stack_chk_guard(16, 16); // ldr x16, [x16, :lo12:]
+        self.str_xt_sp(16, canary_off); // str x16, [sp, #canary_off]
+    }
+
+    /// Stack protector epilogue: verify canary at [sp, #canary_off]
+    /// against __stack_chk_guard. Calls __stack_chk_fail on mismatch.
+    /// Uses x16, x17 as scratch. Must be called BEFORE frame teardown.
+    fn emit_stack_chk_epilogue(&mut self, canary_off: i32) {
+        let fail_label = self.fresh_label(".Lstack_chk_fail_");
+        // Load stored canary
+        self.ldr_xt_sp(16, canary_off); // ldr x16, [sp, #canary_off]
+        // Load expected canary
+        self.emit_adrp_stack_chk_guard(17); // adrp x17, __stack_chk_guard
+        self.emit_ldr_stack_chk_guard(17, 17); // ldr x17, [x17, :lo12:]
+        // Compare
+        self.emit_cmp_x_reg(16, 17); // cmp x16, x17
+        // Branch to fail if mismatch
+        self.emit_bne(&fail_label);
+        // Normal path continues (caller will do frame teardown + ret)
+        // Fail path: call __stack_chk_fail (never returns)
+        self.label(&fail_label);
+        self.emit_bl_to("__stack_chk_fail");
     }
 
     fn patch_bl(&mut self, at: u64, target: u64) {
