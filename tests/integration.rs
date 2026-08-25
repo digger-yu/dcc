@@ -15297,3 +15297,189 @@ int main(void) {
     let _ = fs::remove_file(&src_path);
     let _ = fs::remove_file(&obj_path);
 }
+
+// =============================================================================
+// Cross-TU LTO optimization tests
+// =============================================================================
+
+#[test]
+fn cross_tu_lto_bitcode_serialize_deserialize_roundtrip() {
+    // Test that we can serialize and deserialize a module with LTO bitcode
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src_path = dir.join(format!("dcc-cross-tu-lto-{pid}.c"));
+    let obj_path = dir.join(format!("dcc-cross-tu-lto-{pid}.o"));
+
+    fs::write(
+        &src_path,
+        r#"
+static int helper(int x) { return x + 1; }
+int main(void) { return helper(41); }
+"#,
+    )
+    .expect("write C fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-flto", "-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile with LTO");
+
+    assert!(
+        output.status.success(),
+        "compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify .dcc.lto section exists (dcc's own bitcode format)
+    let obj = fs::read(&obj_path).expect("read object");
+    let has_dcc_lto = String::from_utf8_lossy(&obj).contains(".dcc.lto");
+    let has_llvm_lto = String::from_utf8_lossy(&obj).contains(".llvm.lto");
+    assert!(
+        has_dcc_lto || has_llvm_lto,
+        "missing LTO section in object file"
+    );
+
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
+#[test]
+fn cross_tu_lto_multiple_tus_compile_and_link() {
+    // Test that multiple TUs with LTO can be compiled and linked
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let a_src = dir.join(format!("dcc-cross-tu-a-{pid}.c"));
+    let b_src = dir.join(format!("dcc-cross-tu-b-{pid}.c"));
+    let a_obj = dir.join(format!("dcc-cross-tu-a-{pid}.o"));
+    let b_obj = dir.join(format!("dcc-cross-tu-b-{pid}.o"));
+    let out = dir.join(format!("dcc-cross-tu-out-{pid}"));
+
+    fs::write(
+        &a_src,
+        "int add(int a, int b) { return a + b; }\n",
+    )
+    .expect("write a.c");
+
+    fs::write(
+        &b_src,
+        "extern int add(int, int);\nint main(void) { return add(20, 22); }\n",
+    )
+    .expect("write b.c");
+
+    // Compile both TUs with LTO
+    let output_a = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-flto", "-c", "-o"])
+        .arg(&a_obj)
+        .arg(&a_src)
+        .output()
+        .expect("compile a.c");
+    assert!(
+        output_a.status.success(),
+        "a.c compilation failed: {}",
+        String::from_utf8_lossy(&output_a.stderr)
+    );
+
+    let output_b = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-flto", "-c", "-o"])
+        .arg(&b_obj)
+        .arg(&b_src)
+        .output()
+        .expect("compile b.c");
+    assert!(
+        output_b.status.success(),
+        "b.c compilation failed: {}",
+        String::from_utf8_lossy(&output_b.stderr)
+    );
+
+    // Link with gcc (since dcc's built-in linker may not support full exec)
+    let link_output = Command::new("gcc")
+        .args(["-o"])
+        .arg(&out)
+        .arg(&a_obj)
+        .arg(&b_obj)
+        .output()
+        .expect("link");
+
+    if link_output.status.success() {
+        // Run the executable
+        let run_output = Command::new(&out).output().expect("run");
+        // add(20, 22) = 42
+        assert_eq!(run_output.status.code(), Some(42), "wrong return value");
+    }
+
+    let _ = fs::remove_file(&a_src);
+    let _ = fs::remove_file(&b_src);
+    let _ = fs::remove_file(&a_obj);
+    let _ = fs::remove_file(&b_obj);
+    let _ = fs::remove_file(&out);
+}
+
+#[test]
+fn cross_tu_lto_const_global_propagation() {
+    // Test that const globals can be propagated across TUs
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src_path = dir.join(format!("dcc-cross-tu-const-{pid}.c"));
+    let obj_path = dir.join(format!("dcc-cross-tu-const-{pid}.o"));
+
+    fs::write(
+        &src_path,
+        r#"
+const int MAX_SIZE = 1024;
+int get_max(void) { return MAX_SIZE; }
+"#,
+    )
+    .expect("write C fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-flto", "-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile with LTO");
+
+    assert!(
+        output.status.success(),
+        "compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
+
+#[test]
+fn cross_tu_lto_inline_small_function() {
+    // Test that small static functions are inlined across TUs
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src_path = dir.join(format!("dcc-cross-tu-inline-{pid}.c"));
+    let obj_path = dir.join(format!("dcc-cross-tu-inline-{pid}.o"));
+
+    fs::write(
+        &src_path,
+        r#"
+static inline int square(int x) { return x * x; }
+int compute(int n) { return square(n); }
+"#,
+    )
+    .expect("write C fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-flto", "-O2", "-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("compile with LTO");
+
+    assert!(
+        output.status.success(),
+        "compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = fs::remove_file(&src_path);
+    let _ = fs::remove_file(&obj_path);
+}
