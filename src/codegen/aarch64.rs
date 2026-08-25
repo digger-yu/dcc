@@ -604,7 +604,11 @@ impl Aarch64Codegen {
         }
         self.frame_bytes = (self.stack_bytes + 15) & !15;
         if self.frame_bytes > 0 {
-            self.sub_sp_imm(self.frame_bytes as u32);
+            if self._target.stack_clash_protection && self.frame_bytes > 4096 {
+                self.emit_stack_clash_probes(self.frame_bytes as u32);
+            } else {
+                self.sub_sp_imm(self.frame_bytes as u32);
+            }
         }
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
@@ -1999,6 +2003,41 @@ impl Aarch64Codegen {
         if bytes <= 0xfff {
             let insn = 0xd100_0000u32 | ((bytes & 0xfff) << 10) | (31 << 5) | 31;
             self.emit(&insn.to_le_bytes());
+        }
+    }
+
+    /// -fstack-clash-protection: emit page-sized probes when allocating a
+    /// large stack frame.  Each probe stores a zero byte at [sp] to trigger
+    /// a fault on the guard page before the kernel maps it.
+    fn emit_stack_clash_probes(&mut self, frame_size: u32) {
+        let page: u32 = 4096;
+        let remainder = frame_size % page;
+        let pages = frame_size / page;
+        // First: sub sp, sp, #remainder (if any)
+        if remainder > 0 {
+            self.sub_sp_imm(remainder);
+        }
+        if pages > 0 {
+            // Probe loop using x16 (ip0, ABI scratch) as counter
+            // movz x16, #pages
+            let movz = 0x52800010u32 | ((pages as u32 & 0xffff) << 5);
+            self.emit(&movz.to_le_bytes());
+            // .probe_loop:
+            let loop_start = self.pos();
+            // sub sp, sp, #4096  (1 << 12, using shift encoding)
+            let sub_insn = 0xd1000000u32 | (1u32 << 22) | (1u32 << 10) | (31u32 << 5) | 31;
+            self.emit(&sub_insn.to_le_bytes());
+            // strb wzr, [sp]  — probe the page
+            let strb = 0x3900001fu32;
+            self.emit(&strb.to_le_bytes());
+            // sub x16, x16, #1
+            let sub_cnt = 0xd1000010u32 | (1u32 << 10);
+            self.emit(&sub_cnt.to_le_bytes());
+            // cbnz x16, .probe_loop
+            let loop_end = self.pos();
+            let offset = (loop_start as i64 - loop_end as i64) as i32;
+            let cbnz = 0xb5000010u32 | (((offset as u32 >> 2) & 0x7ffff) << 5);
+            self.emit(&cbnz.to_le_bytes());
         }
     }
 
