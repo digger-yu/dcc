@@ -744,6 +744,10 @@ pub struct FlatSymbol {
     pub input_obj: usize,
     pub orig_index: u32,
     pub defined: bool, // 在某个节中定义（section != 0）
+    /// 是否为 COMMON 符号 (st_shndx == SHN_COMMON).
+    /// COMMON 符号是未初始化的 tentative definition,
+    /// 链接时合并到 .bss 并取最大 size.
+    pub is_common: bool,
 }
 
 /// 跨多个 .o 的重定位条目。
@@ -819,7 +823,8 @@ impl InputBundle {
         }
         for (oi, obj) in objects.iter().enumerate() {
             for sym in &obj.symbols {
-                let section = if sym.section == 0 {
+                let is_common = sym.section == crate::codegen::elf::SHN_COMMON;
+                let section = if sym.section == 0 || is_common {
                     0u32
                 } else {
                     // 把 (input_obj, orig_index) 映射到扁平 sections 索引
@@ -837,7 +842,11 @@ impl InputBundle {
                     section,
                     input_obj: oi,
                     orig_index: sym.orig_index,
-                    defined: sym.section != 0 && sym.section != 0xffff,
+                    // COMMON 符号不在真实节中, 链接时合并到 .bss
+                    defined: sym.section != 0
+                        && sym.section != 0xffff
+                        && !is_common,
+                    is_common,
                 });
             }
         }

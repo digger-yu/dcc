@@ -83,6 +83,8 @@ pub const STT_TLS: u8 = 6;
 
 // 特殊节索引
 pub const SHN_UNDEF: u16 = 0;
+pub const SHN_COMMON: u16 = 0xfff2;
+pub const SHN_ABS: u16 = 0xfff1;
 
 // x86-64 重定位类型
 pub const R_X86_64_NONE: u32 = 0;

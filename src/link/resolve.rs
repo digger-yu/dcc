@@ -102,7 +102,7 @@ pub fn resolve_with_config(
         // 收集所有未定义的 name@ver 引用
         let mut undef_refs: Vec<String> = Vec::new();
         for sym in bundle.symbols.iter() {
-            if sym.section == 0 && sym.name.contains('@') {
+            if sym.section == 0 && !sym.is_common && sym.name.contains('@') {
                 undef_refs.push(sym.name.clone());
             }
         }
@@ -128,8 +128,8 @@ pub fn resolve_with_config(
         let cand = candidates
             .entry(sym.name.clone())
             .or_insert_with(Candidate::new);
-        if sym.section == 0 {
-            // 未定义: 区分强未定义和弱未定义
+        if sym.section == 0 && !sym.is_common {
+            // 未定义 (非 COMMON): 区分强未定义和弱未定义
             if sym.bind == STB_WEAK {
                 cand.weak_undef.push(i);
             } else {
@@ -138,6 +138,8 @@ pub fn resolve_with_config(
         } else if sym.bind == STB_WEAK {
             cand.weak.push(i);
         } else {
+            // COMMON 符号作为强定义 (tentative definition),
+            // 多个 COMMON 或 COMMON + tentative 合并取最大 size
             cand.strong.push(i);
         }
     }
@@ -163,8 +165,9 @@ pub fn resolve_with_config(
                 use crate::codegen::elf::{STT_NOTYPE, STT_OBJECT};
                 let all_tentative = cand.strong.iter().all(|&i| {
                     let s = &bundle.symbols[i];
-                    s.value == 0
-                        && (s.ty == STT_OBJECT || s.ty == STT_NOTYPE)
+                    s.is_common
+                        || (s.value == 0
+                            && (s.ty == STT_OBJECT || s.ty == STT_NOTYPE))
                 });
                 if all_tentative {
                     // 所有强定义都是未初始化的 tentative definition
