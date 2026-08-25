@@ -69,6 +69,7 @@ enum Token {
     PtPhdr,
     // 字面量
     Int(u64),
+    Float(f64),
     Str(String),
     Ident(String),
     // 符号
@@ -208,7 +209,7 @@ impl Lexer {
         s
     }
 
-    fn read_number(&mut self, first: char) -> u64 {
+    fn read_number(&mut self, first: char) -> Token {
         if first == '0' {
             match self.peek_char() {
                 Some('x') | Some('X') => {
@@ -222,44 +223,77 @@ impl Lexer {
                             break;
                         }
                     }
-                    u64::from_str_radix(&hex, 16).unwrap_or(0)
+                    return Token::Int(u64::from_str_radix(&hex, 16).unwrap_or(0));
                 }
-                Some(c) if c.is_ascii_digit() => {
-                    // could be octal, but in linker scripts leading 0 is just decimal
-                    let mut num = String::from("0");
-                    while let Some(c) = self.peek_char() {
-                        if c.is_ascii_digit() {
-                            num.push(c);
-                            self.next_char();
-                        } else {
-                            break;
-                        }
+                _ => {}
+            }
+        }
+        // 读取整数部分
+        let mut num = String::from(first);
+        while let Some(c) = self.peek_char() {
+            if c.is_ascii_digit() {
+                num.push(c);
+                self.next_char();
+            } else {
+                break;
+            }
+        }
+        // 检测浮点: 小数点或指数
+        let mut is_float = false;
+        if self.peek_char() == Some('.') {
+            // 确保后面不是标识符字符（避免将 0x1234.abcd 误判为浮点）
+            // 链接器脚本中浮点数的小数点后应是数字
+            let next_pos = self.pos + 1;
+            if next_pos < self.chars.len() && self.chars[next_pos].is_ascii_digit() {
+                is_float = true;
+                num.push('.');
+                self.next_char(); // consume '.'
+                while let Some(c) = self.peek_char() {
+                    if c.is_ascii_digit() {
+                        num.push(c);
+                        self.next_char();
+                    } else {
+                        break;
                     }
-                    num.parse().unwrap_or(0)
                 }
-                _ => 0,
             }
+        }
+        // 检测指数部分 (e/E +/- digits)
+        if let Some(c) = self.peek_char() {
+            if c == 'e' || c == 'E' {
+                is_float = true;
+                num.push(c);
+                self.next_char();
+                if let Some(sign) = self.peek_char() {
+                    if sign == '+' || sign == '-' {
+                        num.push(sign);
+                        self.next_char();
+                    }
+                }
+                while let Some(c) = self.peek_char() {
+                    if c.is_ascii_digit() {
+                        num.push(c);
+                        self.next_char();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        if is_float {
+            Token::Float(num.parse::<f64>().unwrap_or(0.0))
         } else {
-            let mut num = String::from(first);
-            while let Some(c) = self.peek_char() {
-                if c.is_ascii_digit() {
-                    num.push(c);
-                    self.next_char();
-                } else {
-                    break;
-                }
-            }
             // handle K/M suffixes
             match self.peek_char() {
                 Some('K') | Some('k') => {
                     self.next_char();
-                    num.parse::<u64>().unwrap_or(0) * 1024
+                    Token::Int(num.parse::<u64>().unwrap_or(0) * 1024)
                 }
                 Some('M') | Some('m') => {
                     self.next_char();
-                    num.parse::<u64>().unwrap_or(0) * 1024 * 1024
+                    Token::Int(num.parse::<u64>().unwrap_or(0) * 1024 * 1024)
                 }
-                _ => num.parse().unwrap_or(0),
+                _ => Token::Int(num.parse().unwrap_or(0)),
             }
         }
     }
@@ -432,7 +466,7 @@ impl Lexer {
                 }
                 Token::Dot
             }
-            c if c.is_ascii_digit() => Token::Int(self.read_number(c)),
+            c if c.is_ascii_digit() => self.read_number(c),
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let ident = self.read_ident(c);
                 match ident.as_str() {
@@ -681,6 +715,7 @@ pub enum SortMode {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(u64),
+    Float(f64),
     Symbol(String),
     Dot,
     BinaryOp(Box<Expr>, BinOp, Box<Expr>),
@@ -1797,6 +1832,10 @@ impl Parser {
                 self.next();
                 Ok(Expr::Int(n))
             }
+            Token::Float(f) => {
+                self.next();
+                Ok(Expr::Float(f))
+            }
             Token::Dot => {
                 self.next();
                 // check for .name (section name)
@@ -1880,6 +1919,31 @@ impl Parser {
 
 // ─── Expression Evaluator ───────────────────────────────────────────────────
 
+/// 表达式求值内部值类型，支持整数和浮点混合运算
+#[derive(Debug, Clone, Copy)]
+enum Value {
+    I(u64),
+    F(f64),
+}
+
+impl Value {
+    fn as_u64(self) -> u64 {
+        match self {
+            Value::I(n) => n,
+            Value::F(f) => f as u64,
+        }
+    }
+    fn as_f64(self) -> f64 {
+        match self {
+            Value::I(n) => n as f64,
+            Value::F(f) => f,
+        }
+    }
+    fn is_float(self) -> bool {
+        matches!(self, Value::F(_))
+    }
+}
+
 /// 表达式求值上下文
 pub struct EvalContext {
     /// 位置计数器 (.)
@@ -1906,56 +1970,110 @@ impl EvalContext {
     }
 
     pub fn eval(&self, expr: &Expr) -> Result<u64, String> {
+        let val = self.eval_value(expr)?;
+        Ok(val.as_u64())
+    }
+
+    /// 求值并返回 Value（支持 int/float 混合运算）
+    fn eval_value(&self, expr: &Expr) -> Result<Value, String> {
         match expr {
-            Expr::Int(n) => Ok(*n),
+            Expr::Int(n) => Ok(Value::I(*n)),
+            Expr::Float(f) => Ok(Value::F(*f)),
             Expr::Symbol(name) => {
-                self.symbols.get(name).copied().ok_or_else(|| {
+                self.symbols.get(name).map(|&v| Value::I(v)).ok_or_else(|| {
                     format!("undefined symbol '{}' in linker script expression", name)
                 })
             }
-            Expr::Dot => Ok(self.location_counter),
+            Expr::Dot => Ok(Value::I(self.location_counter)),
             Expr::BinaryOp(left, op, right) => {
-                let l = self.eval(left)?;
-                let r = self.eval(right)?;
-                Ok(match op {
-                    BinOp::Add => l.wrapping_add(r),
-                    BinOp::Sub => l.wrapping_sub(r),
-                    BinOp::Mul => l.wrapping_mul(r),
-                    BinOp::Div => {
-                        if r == 0 { 0 } else { l / r }
-                    }
-                    BinOp::Mod => {
-                        if r == 0 { 0 } else { l % r }
-                    }
-                    BinOp::BitAnd => l & r,
-                    BinOp::BitOr => l | r,
-                    BinOp::BitXor => l ^ r,
-                    BinOp::LShift => l << r,
-                    BinOp::RShift => l >> r,
-                    BinOp::Eq => if l == r { 1 } else { 0 },
-                    BinOp::Ne => if l != r { 1 } else { 0 },
-                    BinOp::Lt => if l < r { 1 } else { 0 },
-                    BinOp::Gt => if l > r { 1 } else { 0 },
-                    BinOp::Le => if l <= r { 1 } else { 0 },
-                    BinOp::Ge => if l >= r { 1 } else { 0 },
-                    BinOp::LogAnd => if l != 0 && r != 0 { 1 } else { 0 },
-                    BinOp::LogOr => if l != 0 || r != 0 { 1 } else { 0 },
-                })
+                let l = self.eval_value(left)?;
+                let r = self.eval_value(right)?;
+                // 如果任一操作数为浮点，则提升为浮点运算
+                if l.is_float() || r.is_float() {
+                    let lf = l.as_f64();
+                    let rf = r.as_f64();
+                    Ok(Value::F(match op {
+                        BinOp::Add => lf + rf,
+                        BinOp::Sub => lf - rf,
+                        BinOp::Mul => lf * rf,
+                        BinOp::Div => {
+                            if rf == 0.0 { 0.0 } else { lf / rf }
+                        }
+                        BinOp::Mod => {
+                            if rf == 0.0 { 0.0 } else { lf % rf }
+                        }
+                        BinOp::Eq => if lf == rf { 1.0 } else { 0.0 },
+                        BinOp::Ne => if lf != rf { 1.0 } else { 0.0 },
+                        BinOp::Lt => if lf < rf { 1.0 } else { 0.0 },
+                        BinOp::Gt => if lf > rf { 1.0 } else { 0.0 },
+                        BinOp::Le => if lf <= rf { 1.0 } else { 0.0 },
+                        BinOp::Ge => if lf >= rf { 1.0 } else { 0.0 },
+                        // 位运算不适用于浮点，回退为整数
+                        BinOp::BitAnd => Value::I(l.as_u64() & r.as_u64()).as_f64(),
+                        BinOp::BitOr => Value::I(l.as_u64() | r.as_u64()).as_f64(),
+                        BinOp::BitXor => Value::I(l.as_u64() ^ r.as_u64()).as_f64(),
+                        BinOp::LShift => Value::I(l.as_u64() << r.as_u64()).as_f64(),
+                        BinOp::RShift => Value::I(l.as_u64() >> r.as_u64()).as_f64(),
+                        BinOp::LogAnd => {
+                            if lf != 0.0 && rf != 0.0 { 1.0 } else { 0.0 }
+                        }
+                        BinOp::LogOr => {
+                            if lf != 0.0 || rf != 0.0 { 1.0 } else { 0.0 }
+                        }
+                    }))
+                } else {
+                    let li = l.as_u64();
+                    let ri = r.as_u64();
+                    Ok(Value::I(match op {
+                        BinOp::Add => li.wrapping_add(ri),
+                        BinOp::Sub => li.wrapping_sub(ri),
+                        BinOp::Mul => li.wrapping_mul(ri),
+                        BinOp::Div => {
+                            if ri == 0 { 0 } else { li / ri }
+                        }
+                        BinOp::Mod => {
+                            if ri == 0 { 0 } else { li % ri }
+                        }
+                        BinOp::BitAnd => li & ri,
+                        BinOp::BitOr => li | ri,
+                        BinOp::BitXor => li ^ ri,
+                        BinOp::LShift => li << ri,
+                        BinOp::RShift => li >> ri,
+                        BinOp::Eq => if li == ri { 1 } else { 0 },
+                        BinOp::Ne => if li != ri { 1 } else { 0 },
+                        BinOp::Lt => if li < ri { 1 } else { 0 },
+                        BinOp::Gt => if li > ri { 1 } else { 0 },
+                        BinOp::Le => if li <= ri { 1 } else { 0 },
+                        BinOp::Ge => if li >= ri { 1 } else { 0 },
+                        BinOp::LogAnd => if li != 0 && ri != 0 { 1 } else { 0 },
+                        BinOp::LogOr => if li != 0 || ri != 0 { 1 } else { 0 },
+                    }))
+                }
             }
             Expr::UnaryOp(op, expr) => {
-                let v = self.eval(expr)?;
-                Ok(match op {
-                    UnaryOp::Neg => v.wrapping_neg(),
-                    UnaryOp::Not => if v == 0 { 1 } else { 0 },
-                    UnaryOp::BitNot => !v,
-                })
+                let v = self.eval_value(expr)?;
+                if v.is_float() {
+                    let f = v.as_f64();
+                    Ok(Value::F(match op {
+                        UnaryOp::Neg => -f,
+                        UnaryOp::Not => if f == 0.0 { 1.0 } else { 0.0 },
+                        UnaryOp::BitNot => (!(f as u64)) as f64,
+                    }))
+                } else {
+                    let i = v.as_u64();
+                    Ok(Value::I(match op {
+                        UnaryOp::Neg => i.wrapping_neg(),
+                        UnaryOp::Not => if i == 0 { 1 } else { 0 },
+                        UnaryOp::BitNot => !i,
+                    }))
+                }
             }
             Expr::Ternary(cond, then_e, else_e) => {
-                let c = self.eval(cond)?;
-                if c != 0 {
-                    self.eval(then_e)
+                let c = self.eval_value(cond)?;
+                if c.as_u64() != 0 {
+                    self.eval_value(then_e)
                 } else {
-                    self.eval(else_e)
+                    self.eval_value(else_e)
                 }
             }
             Expr::Call(name, args) => {
@@ -1964,14 +2082,14 @@ impl EvalContext {
                         if args.is_empty() {
                             return Err("ABSOLUTE() requires 1 argument".into());
                         }
-                        self.eval(&args[0])
+                        self.eval_value(&args[0])
                     }
                     "ADDR" => {
                         if args.is_empty() {
                             return Err("ADDR() requires 1 argument".into());
                         }
                         if let Expr::Symbol(sec_name) = &args[0] {
-                            self.section_addrs.get(sec_name).copied().ok_or_else(|| {
+                            self.section_addrs.get(sec_name).map(|&v| Value::I(v)).ok_or_else(|| {
                                 format!("ADDR: section '{}' not found", sec_name)
                             })
                         } else {
@@ -1983,8 +2101,9 @@ impl EvalContext {
                             return Err("SIZEOF() requires 1 argument".into());
                         }
                         if let Expr::Symbol(sec_name) = &args[0] {
-                            // GNU ld: SIZEOF of non-existent section returns 0
-                            Ok(self.section_sizes.get(sec_name).copied().unwrap_or(0))
+                            Ok(Value::I(
+                                self.section_sizes.get(sec_name).copied().unwrap_or(0)
+                            ))
                         } else {
                             Err("SIZEOF() requires section name".into())
                         }
@@ -1993,36 +2112,48 @@ impl EvalContext {
                         if args.is_empty() {
                             return Err("ALIGN() requires 1 argument".into());
                         }
-                        let align = self.eval(&args[0])?;
+                        let align = self.eval_value(&args[0])?.as_u64();
                         if align == 0 {
-                            return Ok(self.location_counter);
+                            return Ok(Value::I(self.location_counter));
                         }
-                        Ok(self.location_counter.wrapping_add(align - 1) & !(align - 1))
+                        Ok(Value::I(
+                            self.location_counter.wrapping_add(align - 1) & !(align - 1)
+                        ))
                     }
                     "MAX" => {
                         if args.len() < 2 {
                             return Err("MAX() requires 2 arguments".into());
                         }
-                        let a = self.eval(&args[0])?;
-                        let b = self.eval(&args[1])?;
-                        Ok(a.max(b))
+                        let a = self.eval_value(&args[0])?;
+                        let b = self.eval_value(&args[1])?;
+                        if a.is_float() || b.is_float() {
+                            Ok(Value::F(a.as_f64().max(b.as_f64())))
+                        } else {
+                            Ok(Value::I(a.as_u64().max(b.as_u64())))
+                        }
                     }
                     "MIN" => {
                         if args.len() < 2 {
                             return Err("MIN() requires 2 arguments".into());
                         }
-                        let a = self.eval(&args[0])?;
-                        let b = self.eval(&args[1])?;
-                        Ok(a.min(b))
+                        let a = self.eval_value(&args[0])?;
+                        let b = self.eval_value(&args[1])?;
+                        if a.is_float() || b.is_float() {
+                            Ok(Value::F(a.as_f64().min(b.as_f64())))
+                        } else {
+                            Ok(Value::I(a.as_u64().min(b.as_u64())))
+                        }
                     }
                     "DEFINED" => {
                         if args.is_empty() {
                             return Err("DEFINED() requires 1 argument".into());
                         }
                         if let Expr::Symbol(name) = &args[0] {
-                            Ok(if self.symbols.contains_key(name) { 1 } else { 0 })
+                            Ok(Value::I(
+                                if self.symbols.contains_key(name) { 1 } else { 0 }
+                            ))
                         } else {
-                            Ok(0)
+                            Ok(Value::I(0))
                         }
                     }
                     "ORIGIN" | "ORG" => {
@@ -2030,9 +2161,14 @@ impl EvalContext {
                             return Err("ORIGIN() requires 1 argument".into());
                         }
                         if let Expr::Symbol(region_name) = &args[0] {
-                            self.memory_regions.get(region_name).map(|(o, _)| *o).ok_or_else(|| {
-                                format!("ORIGIN: memory region '{}' not found", region_name)
-                            })
+                            self.memory_regions.get(region_name)
+                                .map(|(o, _)| Value::I(*o))
+                                .ok_or_else(|| {
+                                    format!(
+                                        "ORIGIN: memory region '{}' not found",
+                                        region_name
+                                    )
+                                })
                         } else {
                             Err("ORIGIN() requires memory region name".into())
                         }
@@ -2042,55 +2178,64 @@ impl EvalContext {
                             return Err("LENGTH() requires 1 argument".into());
                         }
                         if let Expr::Symbol(region_name) = &args[0] {
-                            self.memory_regions.get(region_name).map(|(_, l)| *l).ok_or_else(|| {
-                                format!("LENGTH: memory region '{}' not found", region_name)
-                            })
+                            self.memory_regions.get(region_name)
+                                .map(|(_, l)| Value::I(*l))
+                                .ok_or_else(|| {
+                                    format!(
+                                        "LENGTH: memory region '{}' not found",
+                                        region_name
+                                    )
+                                })
                         } else {
                             Err("LENGTH() requires memory region name".into())
                         }
                     }
                     "NEXT" => {
-                        // NEXT(expr) aligns to the next free address above expr
-                        // For simplicity, we treat it as ALIGN with the given expression
                         if args.is_empty() {
                             return Err("NEXT() requires 1 argument".into());
                         }
-                        let val = self.eval(&args[0])?;
-                        // Align to next 8-byte boundary (common default)
-                        Ok((val.wrapping_add(7)) & !7)
+                        let val = self.eval_value(&args[0])?.as_u64();
+                        Ok(Value::I((val.wrapping_add(7)) & !7))
                     }
                     "LOG2CEIL" => {
-                        // LOG2CEIL(x) returns ceil(log2(x))
                         if args.is_empty() {
                             return Err("LOG2CEIL() requires 1 argument".into());
                         }
-                        let val = self.eval(&args[0])?;
+                        let val = self.eval_value(&args[0])?.as_u64();
                         if val == 0 {
-                            return Ok(0);
+                            return Ok(Value::I(0));
                         }
-                        // Calculate ceil(log2(val))
                         let mut result = 0u64;
                         let mut v = val - 1;
                         while v > 0 {
                             result += 1;
                             v >>= 1;
                         }
-                        Ok(result)
+                        Ok(Value::I(result))
                     }
                     "REGION_ALIAS" => {
-                        // REGION_ALIAS(alias, region) - returns origin of aliased region
                         if args.len() < 2 {
                             return Err("REGION_ALIAS() requires 2 arguments".into());
                         }
                         if let Expr::Symbol(region_name) = &args[1] {
-                            self.memory_regions.get(region_name).map(|(o, _)| *o).ok_or_else(|| {
-                                format!("REGION_ALIAS: memory region '{}' not found", region_name)
-                            })
+                            self.memory_regions.get(region_name)
+                                .map(|(o, _)| Value::I(*o))
+                                .ok_or_else(|| {
+                                    format!(
+                                        "REGION_ALIAS: memory region '{}' not found",
+                                        region_name
+                                    )
+                                })
                         } else {
-                            Err("REGION_ALIAS() requires memory region name as second argument".into())
+                            Err(
+                                "REGION_ALIAS() requires memory region name \
+                                 as second argument".into()
+                            )
                         }
                     }
-                    other => Err(format!("unknown function '{}' in linker script", other)),
+                    other => Err(format!(
+                        "unknown function '{}' in linker script", other
+                    )),
                 }
             }
         }
@@ -2809,6 +2954,157 @@ mod tests {
         assert_eq!(&names[0..3], &[".text.aaa", ".text.mmm", ".text.zzz"]);
         // .data.* 保持文件顺序
         assert_eq!(&names[3..5], &[".data.first", ".data.second"]);
+    }
+
+    #[test]
+    fn eval_float_literal() {
+        // 测试浮点字面量解析和求值
+        let ctx = EvalContext::new();
+        // 简单浮点字面量
+        let expr = Expr::Float(3.14);
+        assert_eq!(ctx.eval(&expr).unwrap(), 3);
+
+        let expr = Expr::Float(0.5);
+        assert_eq!(ctx.eval(&expr).unwrap(), 0);
+
+        let expr = Expr::Float(100.0);
+        assert_eq!(ctx.eval(&expr).unwrap(), 100);
+    }
+
+    #[test]
+    fn eval_float_arithmetic() {
+        // 测试浮点算术运算
+        let ctx = EvalContext::new();
+
+        // 浮点加法: 1.5 + 2.5 = 4.0 -> 4
+        let expr = Expr::BinaryOp(
+            Box::new(Expr::Float(1.5)),
+            BinOp::Add,
+            Box::new(Expr::Float(2.5)),
+        );
+        assert_eq!(ctx.eval(&expr).unwrap(), 4);
+
+        // 浮点乘法: 3.0 * 2.0 = 6.0 -> 6
+        let expr = Expr::BinaryOp(
+            Box::new(Expr::Float(3.0)),
+            BinOp::Mul,
+            Box::new(Expr::Float(2.0)),
+        );
+        assert_eq!(ctx.eval(&expr).unwrap(), 6);
+
+        // 浮点除法: 7.0 / 2.0 = 3.5 -> 3
+        let expr = Expr::BinaryOp(
+            Box::new(Expr::Float(7.0)),
+            BinOp::Div,
+            Box::new(Expr::Float(2.0)),
+        );
+        assert_eq!(ctx.eval(&expr).unwrap(), 3);
+    }
+
+    #[test]
+    fn eval_mixed_int_float() {
+        // 测试整数和浮点混合运算
+        let ctx = EvalContext::new();
+
+        // int + float: 10 + 0.5 = 10.5 -> 10
+        let expr = Expr::BinaryOp(
+            Box::new(Expr::Int(10)),
+            BinOp::Add,
+            Box::new(Expr::Float(0.5)),
+        );
+        assert_eq!(ctx.eval(&expr).unwrap(), 10);
+
+        // float * int: 2.5 * 4 = 10.0 -> 10
+        let expr = Expr::BinaryOp(
+            Box::new(Expr::Float(2.5)),
+            BinOp::Mul,
+            Box::new(Expr::Int(4)),
+        );
+        assert_eq!(ctx.eval(&expr).unwrap(), 10);
+
+        // int / float: 10 / 3.0 = 3.333 -> 3
+        let expr = Expr::BinaryOp(
+            Box::new(Expr::Int(10)),
+            BinOp::Div,
+            Box::new(Expr::Float(3.0)),
+        );
+        assert_eq!(ctx.eval(&expr).unwrap(), 3);
+    }
+
+    #[test]
+    fn parse_float_in_script() {
+        // 测试链接器脚本中浮点表达式的解析和求值
+        let text = r#"
+            SECTIONS {
+                . = 0x1000 + 1.5 * 2;
+                .text : { *(.text) }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert!(!script.sections.is_empty());
+    }
+
+    #[test]
+    fn lex_float_with_exponent() {
+        // 测试指数形式的浮点字面量
+        let text = "1e3";
+        let mut lexer = Lexer::new(text);
+        let tok = lexer.next_token();
+        match tok {
+            Token::Float(f) => assert!((f - 1000.0).abs() < 1e-10),
+            _ => panic!("expected Float token, got {:?}", tok),
+        }
+
+        let text = "2.5e2";
+        let mut lexer = Lexer::new(text);
+        let tok = lexer.next_token();
+        match tok {
+            Token::Float(f) => assert!((f - 250.0).abs() < 1e-10),
+            _ => panic!("expected Float token, got {:?}", tok),
+        }
+
+        let text = "1.0E-3";
+        let mut lexer = Lexer::new(text);
+        let tok = lexer.next_token();
+        match tok {
+            Token::Float(f) => assert!((f - 0.001).abs() < 1e-10),
+            _ => panic!("expected Float token, got {:?}", tok),
+        }
+    }
+
+    #[test]
+    fn lex_float_decimal() {
+        // 测试小数形式的浮点字面量
+        let text = "3.14";
+        let mut lexer = Lexer::new(text);
+        let tok = lexer.next_token();
+        match tok {
+            Token::Float(f) => assert!((f - 3.14).abs() < 1e-10),
+            _ => panic!("expected Float token, got {:?}", tok),
+        }
+
+        let text = "0.5";
+        let mut lexer = Lexer::new(text);
+        let tok = lexer.next_token();
+        match tok {
+            Token::Float(f) => assert!((f - 0.5).abs() < 1e-10),
+            _ => panic!("expected Float token, got {:?}", tok),
+        }
+    }
+
+    #[test]
+    fn lex_int_not_float() {
+        // 确保整数不被误解析为浮点
+        let text = "42";
+        let mut lexer = Lexer::new(text);
+        let tok = lexer.next_token();
+        assert_eq!(tok, Token::Int(42));
+
+        // 十六进制不被误解析为浮点
+        let text = "0x1A";
+        let mut lexer = Lexer::new(text);
+        let tok = lexer.next_token();
+        assert_eq!(tok, Token::Int(0x1A));
     }
 }
 
