@@ -493,7 +493,11 @@ impl Riscv64Codegen {
         }
         self.frame_bytes = (self.stack_bytes + 15) & !15;
         if self.frame_bytes > 0 {
-            self.addi_sp(-self.frame_bytes);
+            if self._target.stack_clash_protection && self.frame_bytes > 4096 {
+                self.emit_stack_clash_probes(self.frame_bytes as u32);
+            } else {
+                self.addi_sp(-self.frame_bytes);
+            }
         }
         // -ftrivial-auto-var-init=zero: 零初始化整个栈帧
         if self._target.auto_var_init_zero && self.frame_bytes > 0 {
@@ -1331,6 +1335,50 @@ impl Riscv64Codegen {
 
     fn addi_sp(&mut self, delta: i32) {
         self.emit_addi(2, 2, delta);
+    }
+
+    /// -fstack-clash-protection: emit page-sized probes when allocating a
+    /// large stack frame.  Each probe stores a zero byte at [sp] to trigger
+    /// a fault on the guard page before the kernel maps it.
+    fn emit_stack_clash_probes(&mut self, frame_size: u32) {
+        let page: u32 = 4096;
+        let remainder = frame_size % page;
+        let pages = frame_size / page;
+        // First: addi sp, sp, -remainder (if any, must fit in 12-bit signed)
+        if remainder > 0 {
+            self.addi_sp(-(remainder as i32));
+        }
+        if pages > 0 {
+            // Probe loop using t0 (x5, scratch) as counter
+            // li t0, pages  (via LUI + ADDI or C.LI)
+            self.emit_lui(5, (pages as i32 + 0x800) >> 12);
+            let lower = (pages as i32) - (((pages as i32 + 0x800) >> 12) << 12);
+            if lower != 0 {
+                self.emit_addi(5, 5, lower);
+            }
+            // .probe_loop:
+            let loop_start = self.pos();
+            // addi sp, sp, -2048  (two instructions for 4096)
+            self.emit_addi(2, 2, -2048);
+            self.emit_addi(2, 2, -2048);
+            // sb zero, 0(sp)  — probe the page
+            self.emit_sb(0, 2, 0);
+            // addi t0, t0, -1
+            self.emit_addi(5, 5, -1);
+            // bne t0, zero, .probe_loop
+            let loop_end = self.pos();
+            let offset = loop_start as i64 - loop_end as i64;
+            let off = offset as u32;
+            let bne = (((off >> 12) & 1) << 31
+                | ((off >> 5) & 0x3f) << 25
+                | (0u32) << 20
+                | (5u32) << 15
+                | ((off >> 1) & 0xf) << 8
+                | ((off >> 11) & 1) << 7
+                | (1u32) << 12
+                | 0x63);
+            self.emit(&bne.to_le_bytes());
+        }
     }
 
     fn ret(&mut self) {
