@@ -81,6 +81,8 @@ pub struct Aarch64Codegen {
     asm_text_mode: bool,
     /// 编译诊断 (未识别内联汇编指令等)
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    /// -mrecord-mcount: ftrace call site positions for __mcount_loc section
+    mcount_loc_entries: Vec<(u64, String)>,
     _target: Target,
 }
 
@@ -142,6 +144,7 @@ impl Aarch64Codegen {
             raw_func_asm_lines: Vec::new(),
             asm_text_mode: false,
             diagnostics: Vec::new(),
+            mcount_loc_entries: Vec::new(),
             _target: target,
         }
     }
@@ -452,6 +455,35 @@ impl Aarch64Codegen {
             self.ensure_sym_object("__stack_chk_guard");
             self.ensure_sym("__stack_chk_fail");
         }
+        // ftrace: add undefined symbols for tracing
+        match self._target.ftrace_mode {
+            crate::cli::FtraceMode::MCount => {
+                self.ensure_sym("mcount");
+            }
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                self.ensure_sym("__fentry__");
+            }
+            crate::cli::FtraceMode::None => {}
+        }
+        // -mrecord-mcount: generate __mcount_loc section with call site addresses
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount)
+            && !self.mcount_loc_entries.is_empty()
+        {
+            let mut mcount_data =
+                Vec::with_capacity(self.mcount_loc_entries.len() * 8);
+            for &(call_pos, _) in &self.mcount_loc_entries {
+                // Each entry is a 64-bit address (placeholder, patched by
+                // linker via R_AARCH64_ABS64 relocation or direct address)
+                mcount_data.extend_from_slice(&call_pos.to_le_bytes());
+            }
+            self.extra_sections.push(elf::ElfSection {
+                name: "__mcount_loc".to_string(),
+                data: mcount_data,
+                ty: elf::SHT_PROGBITS,
+                flags: elf::SHF_ALLOC,
+                align: 8,
+            });
+        }
     }
 
     fn finalize_exec(&mut self) {
@@ -585,6 +617,27 @@ impl Aarch64Codegen {
     }
 
     fn gen_function(&mut self, func: &Function, ast: Option<&FuncDecl>) {
+        // ftrace: emit call to __fentry__/mcount before prologue
+        // The kernel patches these call sites at runtime for tracing.
+        let ftrace_call_pos: Option<u64> = match self._target.ftrace_mode {
+            crate::cli::FtraceMode::FEntry | crate::cli::FtraceMode::RecordMCount => {
+                let pos = self.pos();
+                self.emit_bl_to("__fentry__");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::MCount => {
+                let pos = self.pos();
+                self.emit_bl_to("mcount");
+                Some(pos)
+            }
+            crate::cli::FtraceMode::None => None,
+        };
+        // -mrecord-mcount: record call site for __mcount_loc section
+        if matches!(self._target.ftrace_mode, crate::cli::FtraceMode::RecordMCount) {
+            if let Some(call_pos) = ftrace_call_pos {
+                self.mcount_loc_entries.push((call_pos, func.name.clone()));
+            }
+        }
         self.plan_locals(ast);
         self.current_return_ty = Some(func.return_type.clone());
         self.saved_sret_ptr = None;
