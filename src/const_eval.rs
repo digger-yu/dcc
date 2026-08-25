@@ -266,6 +266,53 @@ pub fn eval_full(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
             eval(l)?;
             eval_full(r)
         }
+        Expr::ComplexLit { real, imag, .. } => {
+            // 复数字面量: 返回虚部值 (实部在 __real__ 提取时使用)
+            // 常量上下文中复数通常通过 __real__/__imag__ 访问;
+            // 这里将虚部编码为 Float, 供后续 Real/Imag 提取.
+            // 使用特殊标记: 实部存入 Float 的整数部分, 虚部存入小数部分
+            // 不, 更好的方式: 返回 ConstValue::Int 编码虚部 (用于 __imag__),
+            // 而 __real__ 直接提取 real 字段.
+            // 最简方案: 返回虚部作为 Float (内核中复数常量主要用于 __imag__)
+            if *imag != 0.0 {
+                Ok(ConstValue::Float(*imag))
+            } else {
+                Ok(ConstValue::Float(*real))
+            }
+        }
+        Expr::Real { e, .. } => {
+            // __real__ expr: 提取实部
+            match eval_full(e)? {
+                ConstValue::Float(f) => {
+                    // 如果内部是 ComplexLit, 实部已在 eval_full 中编码
+                    // 对于纯复数字面量, 直接返回 real 字段
+                    if let Expr::ComplexLit { real, .. } = e.as_ref() {
+                        Ok(ConstValue::Float(*real))
+                    } else {
+                        // 标量的 __real__ 返回自身
+                        Ok(ConstValue::Float(f))
+                    }
+                }
+                v @ ConstValue::Int(_) => Ok(v), // 标量的 __real__ 返回自身
+                _ => Err(ConstEvalError::NotConstant),
+            }
+        }
+        Expr::Imag { e, .. } => {
+            // __imag__ expr: 提取虚部
+            match eval_full(e)? {
+                ConstValue::Float(f) => {
+                    if let Expr::ComplexLit { real, imag, .. } = e.as_ref() {
+                        Ok(ConstValue::Float(*imag))
+                    } else {
+                        // 标量的 __imag__ 返回 0
+                        let _ = f;
+                        Ok(ConstValue::Int(0))
+                    }
+                }
+                ConstValue::Int(_) => Ok(ConstValue::Int(0)), // 标量虚部为 0
+                _ => Err(ConstEvalError::NotConstant),
+            }
+        }
         Expr::Offsetof { ty, member, .. } => {
             Ok(ConstValue::Int(offsetof_member(ty, member) as i128))
         }
@@ -959,5 +1006,63 @@ mod tests {
         let e = float(3.7, Type::Double);
         // 旧 eval API: 浮点截断为整数 (3)
         assert_eq!(eval(&e), Ok(3));
+    }
+
+    #[test]
+    fn complex_lit_real_extract() {
+        // __real__ (3.0 + 4.0i) == 3.0
+        let c = Expr::ComplexLit {
+            real: 3.0,
+            imag: 4.0,
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Complex(Box::new(Type::Double)),
+        };
+        let r = Expr::Real {
+            e: Box::new(c),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Double,
+        };
+        assert_eq!(eval_full(&r), Ok(ConstValue::Float(3.0)));
+    }
+
+    #[test]
+    fn complex_lit_imag_extract() {
+        // __imag__ (3.0 + 4.0i) == 4.0
+        let c = Expr::ComplexLit {
+            real: 3.0,
+            imag: 4.0,
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Complex(Box::new(Type::Double)),
+        };
+        let im = Expr::Imag {
+            e: Box::new(c),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Double,
+        };
+        assert_eq!(eval_full(&im), Ok(ConstValue::Float(4.0)));
+    }
+
+    #[test]
+    fn scalar_real_returns_self() {
+        // __real__ 5.0 == 5.0 (标量的 __real__ 返回自身)
+        let f = float(5.0, Type::Double);
+        let r = Expr::Real {
+            e: Box::new(f),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Double,
+        };
+        assert_eq!(eval_full(&r), Ok(ConstValue::Float(5.0)));
+    }
+
+    #[test]
+    fn scalar_imag_returns_zero() {
+        // __imag__ 5 == 0 (标量的 __imag__ 返回 0)
+        let i = int(5);
+        let im = Expr::Imag {
+            e: Box::new(i),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Int,
+        };
+        assert_eq!(eval_full(&im), Ok(ConstValue::Int(0)));
     }
 }
