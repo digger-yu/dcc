@@ -1246,11 +1246,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-shared"
             | "-pie"
             | "-no-pie"
-            | "-pthread"
-            | "-mpreferred-stack-boundary=2"
-            | "-fno-plt"
-            | "-falign-jumps=1"
-            | "-falign-loops=1" => {}
+            | "-pthread" => {}
             // ftrace instrumentation flags
             "-pg" => ftrace_mode = FtraceMode::MCount,
             "-mfentry" => ftrace_mode = FtraceMode::FEntry,
@@ -1338,6 +1334,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("-W") => {}
             // -m* 机器选项
             "-m32" => m32 = true,
+            // -mpreferred-stack-boundary=N: 接受任意值, =2 (4 字节) 为
+            // 内核默认, 其他值 DCC 不调整栈对齐, 发警告
+            a if a.starts_with("-mpreferred-stack-boundary=") => {
+                let val = &a["-mpreferred-stack-boundary=".len()..];
+                if val != "2" {
+                    cli_warnings.push(format!(
+                        "ignoring '{}': DCC does not adjust stack alignment",
+                        a
+                    ));
+                }
+            }
             // 其余 -m* 忽略, 收集警告以便用户知晓
             a if a.starts_with("-m") => {
                 cli_warnings.push(format!("ignoring unknown option '{}'", a));
@@ -1363,6 +1370,28 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             a if a.starts_with("--emit-module-file=") => {
                 emit_module_file =
                     Some(PathBuf::from(a["--emit-module-file=".len()..].to_string()));
+            }
+            // -fno-plt: 内核不使用 PLT, 接受但无操作
+            "-fno-plt" => {}
+            // -falign-jumps=N / -falign-loops=N: =1 等价于不对齐,
+            // 其他值 DCC 不执行对齐, 发警告
+            a if a.starts_with("-falign-jumps=") => {
+                let val = &a["-falign-jumps=".len()..];
+                if val != "1" {
+                    cli_warnings.push(format!(
+                        "ignoring '{}': DCC does not perform jump alignment",
+                        a
+                    ));
+                }
+            }
+            a if a.starts_with("-falign-loops=") => {
+                let val = &a["-falign-loops=".len()..];
+                if val != "1" {
+                    cli_warnings.push(format!(
+                        "ignoring '{}': DCC does not perform loop alignment",
+                        a
+                    ));
+                }
             }
             // -f* 其他选项 - 忽略, 收集警告以便用户知晓
             a if a.starts_with("-f") => {
