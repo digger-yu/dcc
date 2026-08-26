@@ -3415,6 +3415,21 @@ fn attr_ptr_func_decl_compiles() {
     );
 }
 
+/// __attribute__ propagation: function-pointer, enum, struct, typedef positions
+#[test]
+fn attr_propagation_compiles_and_runs() {
+    let src = include_str!("fixtures/c/attr_propagation.c");
+    let (out, exe) = run_compile_and_run("attr-propagation", src);
+    assert!(
+        out.status.success(),
+        "attr_propagation compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "all attribute propagation checks pass");
+    let _ = fs::remove_file(exe);
+}
+
 /// 语句表达式内 typeof 局部声明
 #[test]
 fn vfs_pressure_stmt_expr_compiles() {
