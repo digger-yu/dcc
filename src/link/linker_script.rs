@@ -762,12 +762,37 @@ pub struct SectionPattern {
     pub sort: SortMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// 单个排序条件
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKind {
+    ByName,
+    ByAlignment,
+}
+
+/// 排序模式：支持单条件和组合条件（如 SORT_BY_NAME(SORT_BY_ALIGNMENT(...))）
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SortMode {
     #[default]
     None,
-    ByName,
-    ByAlignment,
+    /// 单一排序条件
+    Single(SortKind),
+    /// 组合排序条件链（内层在前，外层在后）
+    /// 执行时从后往前依次应用稳定排序
+    Combined(Vec<SortKind>),
+}
+
+impl SortMode {
+    /// 向排序链追加一个条件
+    fn push(&mut self, kind: SortKind) {
+        match self {
+            SortMode::None => *self = SortMode::Single(kind),
+            SortMode::Single(existing) => {
+                let e = *existing;
+                *self = SortMode::Combined(vec![e, kind]);
+            }
+            SortMode::Combined(chain) => chain.push(kind),
+        }
+    }
 }
 
 /// 表达式 AST
@@ -1646,7 +1671,7 @@ impl Parser {
         Ok(items)
     }
 
-    fn parse_input_section_spec(&mut self, keep: bool) -> Result<InputSectionSpec, String> {
+    fn parse_input_section_spec(&mut self, mut keep: bool) -> Result<InputSectionSpec, String> {
         self.expect(&Token::Star)?; // consume *
         if !self.eat(&Token::LParen) {
             return Ok(InputSectionSpec {
@@ -1666,21 +1691,27 @@ impl Parser {
             match self.peek().clone() {
                 Token::Eof => break,
                 Token::Keep => {
-                    // KEEP inside input section
+                    // KEEP inside input section: *(... KEEP(...) ...)
                     self.next();
                     self.expect(&Token::LParen)?;
                     while !self.eat(&Token::RParen) {
-                        if let Some(pat) = self.parse_section_pattern()? {
+                        let mut sort = SortMode::default();
+                        if let Some(mut pat) = self.parse_sort_chain(&mut sort)? {
+                            pat.sort = sort;
                             patterns.push(pat);
                         }
                     }
+                    // 内层 KEEP 确保 spec 标记为 keep
+                    keep = true;
                 }
                 Token::Sort => {
                     self.next();
                     self.expect(&Token::LParen)?;
                     while !self.eat(&Token::RParen) {
-                        if let Some(mut pat) = self.parse_section_pattern()? {
-                            pat.sort = SortMode::ByName;
+                        let mut sort = SortMode::default();
+                        sort.push(SortKind::ByName);
+                        if let Some(mut pat) = self.parse_sort_chain(&mut sort)? {
+                            pat.sort = sort;
                             patterns.push(pat);
                         }
                     }
@@ -1689,8 +1720,10 @@ impl Parser {
                     self.next();
                     self.expect(&Token::LParen)?;
                     while !self.eat(&Token::RParen) {
-                        if let Some(mut pat) = self.parse_section_pattern()? {
-                            pat.sort = SortMode::ByAlignment;
+                        let mut sort = SortMode::default();
+                        sort.push(SortKind::ByAlignment);
+                        if let Some(mut pat) = self.parse_sort_chain(&mut sort)? {
+                            pat.sort = sort;
                             patterns.push(pat);
                         }
                     }
@@ -1821,6 +1854,40 @@ impl Parser {
             pattern,
             sort: SortMode::None,
         }))
+    }
+
+    /// 递归解析嵌套的 SORT/SORT_BY_NAME/SORT_BY_ALIGNMENT，构建排序链
+    ///
+    /// GNU ld 支持以下组合：
+    ///   - SORT(SORT_BY_ALIGNMENT(.text.*))       → 先按对齐排序，再按名称排序
+    ///   - SORT_BY_NAME(SORT_BY_ALIGNMENT(.x.*))  → 先按对齐排序，再按名称排序
+    ///   - SORT(SORT(.text.*))                    → 等效于单层 SORT
+    ///
+    /// 排序链中内层在前、外层在后；执行时从后往前依次应用稳定排序。
+    /// 在基线情况下解析节模式并返回，确保括号从内到外正确匹配。
+    fn parse_sort_chain(&mut self, sort: &mut SortMode) -> Result<Option<SectionPattern>, String> {
+        match self.peek().clone() {
+            Token::Sort => {
+                self.next();
+                self.expect(&Token::LParen)?;
+                sort.push(SortKind::ByName);
+                let pat = self.parse_sort_chain(sort)?;
+                self.expect(&Token::RParen)?;
+                Ok(pat)
+            }
+            Token::SortByAlignment => {
+                self.next();
+                self.expect(&Token::LParen)?;
+                sort.push(SortKind::ByAlignment);
+                let pat = self.parse_sort_chain(sort)?;
+                self.expect(&Token::RParen)?;
+                Ok(pat)
+            }
+            _ => {
+                // 基线情况：没有更多嵌套 SORT，解析节模式
+                self.parse_section_pattern()
+            }
+        }
     }
 
     fn try_parse_fill(&mut self) -> Option<u64> {
@@ -3146,11 +3213,14 @@ mod tests {
                 sections: vec![],
                 symbols: vec![],
                 relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
             }],
             symbols: vec![],
             relocations: vec![],
             sections: vec![],
             machine: 62, // EM_X86_64
+            comdat_groups: vec![],
         };
         
         // 添加乱序的 .text.* 节
@@ -3164,6 +3234,7 @@ mod tests {
                 size: 16,
                 input_obj: 0,
                 orig_index: 0,
+                comdat_signature: None,
             });
         }
         
@@ -3173,7 +3244,7 @@ mod tests {
             section_patterns: vec![
                 SectionPattern {
                     pattern: ".text.*".to_string(),
-                    sort: SortMode::ByName,
+                    sort: SortMode::Single(SortKind::ByName),
                 },
             ],
             keep: false,
@@ -3205,11 +3276,14 @@ mod tests {
                 sections: vec![],
                 symbols: vec![],
                 relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
             }],
             symbols: vec![],
             relocations: vec![],
             sections: vec![],
             machine: 62,
+            comdat_groups: vec![],
         };
         
         // 添加不同对齐值的节
@@ -3230,6 +3304,7 @@ mod tests {
                 size: 32,
                 input_obj: 0,
                 orig_index: 0,
+                comdat_signature: None,
             });
         }
         
@@ -3238,7 +3313,7 @@ mod tests {
             section_patterns: vec![
                 SectionPattern {
                     pattern: ".data.*".to_string(),
-                    sort: SortMode::ByAlignment,
+                    sort: SortMode::Single(SortKind::ByAlignment),
                 },
             ],
             keep: false,
@@ -3270,11 +3345,14 @@ mod tests {
                 sections: vec![],
                 symbols: vec![],
                 relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
             }],
             symbols: vec![],
             relocations: vec![],
             sections: vec![],
             machine: 62,
+            comdat_groups: vec![],
         };
         
         // 添加节：.text.* 应该排序，.data.* 保持文件顺序
@@ -3296,6 +3374,7 @@ mod tests {
                 size: 16,
                 input_obj: 0,
                 orig_index: 0,
+                comdat_signature: None,
             });
         }
         
@@ -3305,7 +3384,7 @@ mod tests {
             section_patterns: vec![
                 SectionPattern {
                     pattern: ".text.*".to_string(),
-                    sort: SortMode::ByName,
+                    sort: SortMode::Single(SortKind::ByName),
                 },
                 SectionPattern {
                     pattern: ".data.*".to_string(),
@@ -3498,6 +3577,8 @@ mod tests {
                 sections: vec![],
                 symbols: vec![],
                 relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
             }],
             symbols: vec![],
             relocations: vec![],
@@ -3511,9 +3592,11 @@ mod tests {
                     size: 16,
                     input_obj: 0,
                     orig_index: 0,
+                    comdat_signature: None,
                 },
             ],
             machine: 62,
+            comdat_groups: vec![],
         };
 
         // 创建已解析符号：一个 COMMON 符号和一个普通符号
@@ -3618,6 +3701,8 @@ mod tests {
                 sections: vec![],
                 symbols: vec![],
                 relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
             }],
             symbols: vec![],
             relocations: vec![],
@@ -3631,6 +3716,7 @@ mod tests {
                     size: 8,
                     input_obj: 0,
                     orig_index: 0,
+                    comdat_signature: None,
                 },
                 FlatSection {
                     name: ".debug_info".to_string(),
@@ -3641,9 +3727,11 @@ mod tests {
                     size: 32,
                     input_obj: 0,
                     orig_index: 1,
+                    comdat_signature: None,
                 },
             ],
             machine: 62,
+            comdat_groups: vec![],
         };
 
         let resolved: Vec<ResolvedSymbol> = vec![];
@@ -3673,6 +3761,482 @@ mod tests {
             .expect("should have .debug_info");
         assert!(debug_sec.is_none_phdr,
             ".debug_info should be :NONE");
+    }
+
+    // ─── SORT 组合/嵌套/KEEP 交互测试 ─────────────────────────────────────
+
+    #[test]
+    fn parse_nested_sort_by_name_sort_by_alignment() {
+        // SORT_BY_NAME(SORT_BY_ALIGNMENT(.text.*)) 应解析为组合排序链
+        let text = r#"
+            SECTIONS {
+                .text : {
+                    *(SORT_BY_NAME(SORT_BY_ALIGNMENT(.text.*)))
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let sec = match &script.sections[0] {
+            SectionCommand::OutputSection(def) => def,
+            _ => panic!("expected OutputSection"),
+        };
+        let spec = match &sec.body[0] {
+            SectionBodyItem::InputSection(s) => s,
+            _ => panic!("expected InputSection"),
+        };
+        assert_eq!(spec.section_patterns.len(), 1);
+        let pat = &spec.section_patterns[0];
+        assert_eq!(pat.pattern, ".text.*");
+        // 排序链应为 [ByName, ByAlignment]：内层 ByAlignment 在前，外层 ByName 在后
+        match &pat.sort {
+            SortMode::Combined(chain) => {
+                assert_eq!(chain.len(), 2);
+                assert_eq!(chain[0], SortKind::ByName);
+                assert_eq!(chain[1], SortKind::ByAlignment);
+            }
+            _ => panic!("expected Combined sort, got {:?}", pat.sort),
+        }
+    }
+
+    #[test]
+    fn parse_nested_sort_sort_by_alignment() {
+        // SORT(SORT_BY_ALIGNMENT(.data.*)) 同样应解析为组合排序链
+        let text = r#"
+            SECTIONS {
+                .data : {
+                    *(SORT(SORT_BY_ALIGNMENT(.data.*)))
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let sec = match &script.sections[0] {
+            SectionCommand::OutputSection(def) => def,
+            _ => panic!("expected OutputSection"),
+        };
+        let spec = match &sec.body[0] {
+            SectionBodyItem::InputSection(s) => s,
+            _ => panic!("expected InputSection"),
+        };
+        let pat = &spec.section_patterns[0];
+        assert_eq!(pat.pattern, ".data.*");
+        match &pat.sort {
+            SortMode::Combined(chain) => {
+                assert_eq!(chain.len(), 2);
+                assert_eq!(chain[0], SortKind::ByName); // SORT = SORT_BY_NAME
+                assert_eq!(chain[1], SortKind::ByAlignment);
+            }
+            _ => panic!("expected Combined sort, got {:?}", pat.sort),
+        }
+    }
+
+    #[test]
+    fn parse_triple_nested_sort() {
+        // SORT(SORT_BY_NAME(SORT_BY_ALIGNMENT(.x.*))) 三层嵌套
+        let text = r#"
+            SECTIONS {
+                .text : {
+                    *(SORT(SORT_BY_NAME(SORT_BY_ALIGNMENT(.x.*))))
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let sec = match &script.sections[0] {
+            SectionCommand::OutputSection(def) => def,
+            _ => panic!("expected OutputSection"),
+        };
+        let spec = match &sec.body[0] {
+            SectionBodyItem::InputSection(s) => s,
+            _ => panic!("expected InputSection"),
+        };
+        let pat = &spec.section_patterns[0];
+        match &pat.sort {
+            SortMode::Combined(chain) => {
+                assert_eq!(chain.len(), 3);
+                assert_eq!(chain[0], SortKind::ByName);   // outermost SORT
+                assert_eq!(chain[1], SortKind::ByName);   // middle SORT_BY_NAME
+                assert_eq!(chain[2], SortKind::ByAlignment); // innermost
+            }
+            _ => panic!("expected Combined sort, got {:?}", pat.sort),
+        }
+    }
+
+    #[test]
+    fn parse_keep_with_sort_inside_input_section() {
+        // *(KEEP(SORT(.text.*))) 应解析为 keep=true 且排序为 ByName
+        let text = r#"
+            SECTIONS {
+                .text : {
+                    *(KEEP(SORT(.text.*)))
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let sec = match &script.sections[0] {
+            SectionCommand::OutputSection(def) => def,
+            _ => panic!("expected OutputSection"),
+        };
+        let spec = match &sec.body[0] {
+            SectionBodyItem::InputSection(s) => s,
+            _ => panic!("expected InputSection"),
+        };
+        // 内层 KEEP 应设置 spec.keep = true
+        assert!(spec.keep, "inline KEEP should set spec.keep = true");
+        assert_eq!(spec.section_patterns.len(), 1);
+        let pat = &spec.section_patterns[0];
+        assert_eq!(pat.pattern, ".text.*");
+        // SORT 应解析为 ByName
+        match &pat.sort {
+            SortMode::Single(SortKind::ByName) => {}
+            _ => panic!("expected Single(ByName), got {:?}", pat.sort),
+        }
+    }
+
+    #[test]
+    fn parse_keep_sort_by_alignment_combined() {
+        // *(KEEP(SORT_BY_NAME(SORT_BY_ALIGNMENT(.x.*)))) 组合
+        let text = r#"
+            SECTIONS {
+                .init : {
+                    *(KEEP(SORT_BY_NAME(SORT_BY_ALIGNMENT(.init.*))))
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let sec = match &script.sections[0] {
+            SectionCommand::OutputSection(def) => def,
+            _ => panic!("expected OutputSection"),
+        };
+        let spec = match &sec.body[0] {
+            SectionBodyItem::InputSection(s) => s,
+            _ => panic!("expected InputSection"),
+        };
+        assert!(spec.keep, "inline KEEP should set spec.keep");
+        let pat = &spec.section_patterns[0];
+        match &pat.sort {
+            SortMode::Combined(chain) => {
+                assert_eq!(chain.len(), 2);
+                assert_eq!(chain[0], SortKind::ByName);
+                assert_eq!(chain[1], SortKind::ByAlignment);
+            }
+            _ => panic!("expected Combined sort, got {:?}", pat.sort),
+        }
+    }
+
+    #[test]
+    fn parse_outer_keep_with_sort() {
+        // KEEP(*(SORT(___ksymtab+*))) 外层 KEEP + SORT
+        let text = r#"
+            SECTIONS {
+                __ksymtab : {
+                    KEEP(*(SORT(___ksymtab+*)))
+                }
+            }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let sec = match &script.sections[0] {
+            SectionCommand::OutputSection(def) => def,
+            _ => panic!("expected OutputSection"),
+        };
+        let spec = match &sec.body[0] {
+            SectionBodyItem::InputSection(s) => s,
+            _ => panic!("expected InputSection"),
+        };
+        // 外层 KEEP 应设置 spec.keep = true
+        assert!(spec.keep, "outer KEEP should set spec.keep");
+        let pat = &spec.section_patterns[0];
+        assert_eq!(pat.pattern, "___ksymtab+*");
+        match &pat.sort {
+            SortMode::Single(SortKind::ByName) => {}
+            _ => panic!("expected Single(ByName), got {:?}", pat.sort),
+        }
+    }
+
+    #[test]
+    fn execute_combined_sort_by_name_then_alignment() {
+        // SORT_BY_NAME(SORT_BY_ALIGNMENT(.text.*)) 的执行验证
+        // 链为 [ByName, ByAlignment]
+        // 执行时反向应用：先 ByAlignment(降序)，再 ByName(升序)
+        // 最终效果：主排序按名称，同名称时按对齐值降序
+        use super::super::object::{FlatSection, InputObject};
+
+        let mut bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![],
+            machine: 62,
+            comdat_groups: vec![],
+        };
+
+        // 创建测试节：不同名称、不同对齐值
+        let test_data = vec![
+            (".text.zzz", 4u64),
+            (".text.aaa", 16u64),
+            (".text.aaa", 4u64),  // 同名但不同对齐
+            (".text.mmm", 8u64),
+            (".text.mmm", 16u64), // 同名但不同对齐
+        ];
+
+        for (name, align) in test_data {
+            bundle.sections.push(FlatSection {
+                name: name.to_string(),
+                ty: SHT_PROGBITS,
+                flags: 0x6,
+                align,
+                data: vec![0x90; 16],
+                size: 16,
+                input_obj: 0,
+                orig_index: 0,
+                comdat_signature: None,
+            });
+        }
+
+        // 组合排序: [ByName, ByAlignment]
+        let spec = InputSectionSpec {
+            file_pattern: "*".to_string(),
+            section_patterns: vec![
+                SectionPattern {
+                    pattern: ".text.*".to_string(),
+                    sort: SortMode::Combined(vec![SortKind::ByName, SortKind::ByAlignment]),
+                },
+            ],
+            keep: false,
+            exclude_files: vec![],
+            is_common: false,
+        };
+
+        let used = std::collections::HashSet::new();
+        let ctx = EvalContext::new();
+        let matches = match_input_sections(&spec, &bundle, &ctx, &used);
+
+        assert_eq!(matches.len(), 5);
+        let result: Vec<(&str, u64)> = matches.iter()
+            .map(|m| {
+                let s = &bundle.sections[m.input_index as usize];
+                (s.name.as_str(), s.align)
+            })
+            .collect();
+
+        // 主排序按名称升序，同名称按对齐值降序
+        assert_eq!(result[0], (".text.aaa", 16));
+        assert_eq!(result[1], (".text.aaa", 4));
+        assert_eq!(result[2], (".text.mmm", 16));
+        assert_eq!(result[3], (".text.mmm", 8));
+        assert_eq!(result[4], (".text.zzz", 4));
+    }
+
+    #[test]
+    fn execute_initcall_level_ordering() {
+        // 验证 initcall 节通过脚本定义顺序正确排序
+        // 内核使用 KEEP(*(.initcall1.init)) KEEP(*(.initcall2.init)) ...
+        // 节按脚本中的出现顺序排列，而非按名称排序
+        use super::super::object::{FlatSection, InputObject};
+
+        let mut bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![],
+            machine: 62,
+            comdat_groups: vec![],
+        };
+
+        // 模拟 initcall 节（乱序添加）
+        for level in &["5", "1", "early", "3", "0"] {
+            let name = format!(".initcall{}.init", level);
+            bundle.sections.push(FlatSection {
+                name,
+                ty: SHT_PROGBITS,
+                flags: 0x6,
+                align: 8,
+                data: vec![0; 8],
+                size: 8,
+                input_obj: 0,
+                orig_index: 0,
+                comdat_signature: None,
+            });
+        }
+
+        // 每个 initcall 节是独立的模式，无排序（保持脚本顺序）
+        let levels = vec!["early", "0", "1", "3", "5"];
+        let spec = InputSectionSpec {
+            file_pattern: "*".to_string(),
+            section_patterns: levels.iter().map(|l| {
+                SectionPattern {
+                    pattern: format!(".initcall{}.init", l),
+                    sort: SortMode::None,
+                }
+            }).collect(),
+            keep: true,
+            exclude_files: vec![],
+            is_common: false,
+        };
+
+        let used = std::collections::HashSet::new();
+        let ctx = EvalContext::new();
+        let matches = match_input_sections(&spec, &bundle, &ctx, &used);
+
+        assert_eq!(matches.len(), 5);
+        let names: Vec<&str> = matches.iter()
+            .map(|m| bundle.sections[m.input_index as usize].name.as_str())
+            .collect();
+        // 应按脚本定义顺序：early, 0, 1, 3, 5
+        assert_eq!(names, vec![
+            ".initcallearly.init",
+            ".initcall0.init",
+            ".initcall1.init",
+            ".initcall3.init",
+            ".initcall5.init",
+        ]);
+    }
+
+    #[test]
+    fn execute_keep_sort_ksymtab_pattern() {
+        // 验证内核 ___ksymtab+* 模式的 KEEP+SORT 执行
+        use super::super::object::{FlatSection, InputObject};
+
+        let mut bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![],
+            machine: 62,
+            comdat_groups: vec![],
+        };
+
+        // 乱序的 ___ksymtab+* 节
+        for name in &["___ksymtab+zebra", "___ksymtab+alpha", "___ksymtab+middle"] {
+            bundle.sections.push(FlatSection {
+                name: name.to_string(),
+                ty: SHT_PROGBITS,
+                flags: 0x2, // SHF_ALLOC
+                align: 8,
+                data: vec![0; 16],
+                size: 16,
+                input_obj: 0,
+                orig_index: 0,
+                comdat_signature: None,
+            });
+        }
+
+        let spec = InputSectionSpec {
+            file_pattern: "*".to_string(),
+            section_patterns: vec![
+                SectionPattern {
+                    pattern: "___ksymtab+*".to_string(),
+                    sort: SortMode::Single(SortKind::ByName),
+                },
+            ],
+            keep: true,
+            exclude_files: vec![],
+            is_common: false,
+        };
+
+        let used = std::collections::HashSet::new();
+        let ctx = EvalContext::new();
+        let matches = match_input_sections(&spec, &bundle, &ctx, &used);
+
+        assert_eq!(matches.len(), 3);
+        let names: Vec<&str> = matches.iter()
+            .map(|m| bundle.sections[m.input_index as usize].name.as_str())
+            .collect();
+        // 按名称排序
+        assert_eq!(names, vec![
+            "___ksymtab+alpha",
+            "___ksymtab+middle",
+            "___ksymtab+zebra",
+        ]);
+    }
+
+    #[test]
+    fn execute_sort_by_alignment_single() {
+        // 验证单条件 SORT_BY_ALIGNMENT 在新 SortMode::Single 下正确执行
+        use super::super::object::{FlatSection, InputObject};
+
+        let mut bundle = InputBundle {
+            objects: vec![InputObject {
+                name: "test.o".to_string(),
+                machine: 62,
+                sections: vec![],
+                symbols: vec![],
+                relocations: vec![],
+                comdat_groups: vec![],
+                section_to_group: vec![],
+            }],
+            symbols: vec![],
+            relocations: vec![],
+            sections: vec![],
+            machine: 62,
+            comdat_groups: vec![],
+        };
+
+        let test_data = vec![
+            (".data.a", 1u64),
+            (".data.b", 32u64),
+            (".data.c", 4u64),
+            (".data.d", 16u64),
+        ];
+
+        for (name, align) in test_data {
+            bundle.sections.push(FlatSection {
+                name: name.to_string(),
+                ty: SHT_PROGBITS,
+                flags: 0x3,
+                align,
+                data: vec![0; 16],
+                size: 16,
+                input_obj: 0,
+                orig_index: 0,
+                comdat_signature: None,
+            });
+        }
+
+        let spec = InputSectionSpec {
+            file_pattern: "*".to_string(),
+            section_patterns: vec![
+                SectionPattern {
+                    pattern: ".data.*".to_string(),
+                    sort: SortMode::Single(SortKind::ByAlignment),
+                },
+            ],
+            keep: false,
+            exclude_files: vec![],
+            is_common: false,
+        };
+
+        let used = std::collections::HashSet::new();
+        let ctx = EvalContext::new();
+        let matches = match_input_sections(&spec, &bundle, &ctx, &used);
+
+        let aligns: Vec<u64> = matches.iter()
+            .map(|m| bundle.sections[m.input_index as usize].align)
+            .collect();
+        // 降序：32, 16, 4, 1
+        assert_eq!(aligns, vec![32, 16, 4, 1]);
     }
 }
 
@@ -4072,6 +4636,35 @@ fn execute_output_section(
     Ok(out_sec)
 }
 
+/// 应用单个排序条件到匹配列表
+///
+/// - ByName: 按节名升序排序
+/// - ByAlignment: 按对齐值降序排序（对齐值大的在前）
+///
+/// Rust 的 sort_by 是稳定排序，组合排序时从最后一个条件反向应用即可实现多级排序。
+fn apply_sort_criterion(
+    matches: &mut Vec<InputSectionMatch>,
+    bundle: &InputBundle,
+    kind: SortKind,
+) {
+    match kind {
+        SortKind::ByName => {
+            matches.sort_by(|a, b| {
+                let na = &bundle.sections[a.input_index as usize].name;
+                let nb = &bundle.sections[b.input_index as usize].name;
+                na.cmp(nb)
+            });
+        }
+        SortKind::ByAlignment => {
+            matches.sort_by(|a, b| {
+                let aa = bundle.sections[a.input_index as usize].align;
+                let ab = bundle.sections[b.input_index as usize].align;
+                ab.cmp(&aa) // 降序，对齐值大的在前
+            });
+        }
+    }
+}
+
 /// 匹配输入节到输出节规范
 ///
 /// 按模式顺序匹配输入节，每个模式独立排序后追加到结果中。
@@ -4128,23 +4721,21 @@ fn match_input_sections(
         }
 
         // 根据当前模式的 sort mode 排序
-        match pat.sort {
-            SortMode::ByName => {
-                pat_matches.sort_by(|a, b| {
-                    let name_a = &bundle.sections[a.input_index as usize].name;
-                    let name_b = &bundle.sections[b.input_index as usize].name;
-                    name_a.cmp(name_b)
-                });
-            }
-            SortMode::ByAlignment => {
-                pat_matches.sort_by(|a, b| {
-                    let align_a = bundle.sections[a.input_index as usize].align;
-                    let align_b = bundle.sections[b.input_index as usize].align;
-                    align_b.cmp(&align_a) // 降序，对齐值大的在前
-                });
-            }
+        // 对于组合排序，从最后一个条件开始反向依次应用稳定排序
+        // 例如 SORT_BY_NAME(SORT_BY_ALIGNMENT(.x.*)) 的链为 [ByName, ByAlignment]
+        // 先按 ByAlignment 稳定排序，再按 ByName 稳定排序
+        // 最终效果：主排序按名称，同名称时按对齐值
+        match &pat.sort {
             SortMode::None => {
                 // 保持文件出现顺序（已是遍历顺序）
+            }
+            SortMode::Single(kind) => {
+                apply_sort_criterion(&mut pat_matches, bundle, *kind);
+            }
+            SortMode::Combined(chain) => {
+                for kind in chain.iter().rev() {
+                    apply_sort_criterion(&mut pat_matches, bundle, *kind);
+                }
             }
         }
 
