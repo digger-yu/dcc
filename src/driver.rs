@@ -76,7 +76,38 @@ fn diag_cfg(cfg: &Config) -> DiagnosticsConfig {
 /// 规则: 若 cfg.sysroot == Some(p), 则:
 ///   - include_paths 前面加 <p>/include, <p>/usr/include
 ///   - link_libs 不动 (-L 由 host linker 自动处理)
+///
+/// 交叉编译时, 若未显式指定 --sysroot, 自动搜索常见 sysroot 路径:
+///   - /usr/<target-triple>  (如 /usr/aarch64-linux-gnu)
+///   - /usr/local/<target-triple>
 fn apply_sysroot(mut cfg: Config) -> Config {
+    // Auto-discover sysroot for cross-compilation when not explicitly set
+    if cfg.sysroot.is_none() {
+        let host = crate::cli::TargetTriple::host();
+        let is_cross = cfg.target.arch != host.arch
+            || cfg.target.os != host.os;
+        if is_cross {
+            let triple_str = cfg.target.as_str();
+            let candidates = [
+                format!("/usr/{}", triple_str),
+                format!("/usr/local/{}", triple_str),
+            ];
+            for candidate in &candidates {
+                let p = std::path::Path::new(candidate);
+                if p.is_dir() {
+                    if cfg.verbose {
+                        eprintln!(
+                            "dcc: auto sysroot = {}",
+                            p.display()
+                        );
+                    }
+                    cfg.sysroot = Some(p.to_path_buf());
+                    break;
+                }
+            }
+        }
+    }
+
     let Some(sr) = cfg.sysroot.clone() else {
         return cfg;
     };
@@ -238,7 +269,17 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
 
     if cfg.verbose {
         eprintln!("dcc: input  = {}", input.display());
-        eprintln!("dcc: target = {}", cfg.target.as_str());
+        let host = crate::cli::TargetTriple::host();
+        let is_cross = cfg.target.arch != host.arch
+            || cfg.target.os != host.os;
+        if is_cross {
+            eprintln!(
+                "dcc: target = {} (cross)",
+                cfg.target.as_str()
+            );
+        } else {
+            eprintln!("dcc: target = {}", cfg.target.as_str());
+        }
         eprintln!("dcc: std    = {}", cfg.std.as_str());
         eprintln!("dcc: -O{}", cfg.opt);
         if cfg.debug_level > 0 {

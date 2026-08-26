@@ -1345,6 +1345,10 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 )
                 .map_err(|e| CliError::new(&e))?;
             }
+            a if a.starts_with("--target=") => {
+                target = TargetTriple::parse(&a["--target=".len()..])
+                    .map_err(|e| CliError::new(&e))?;
+            }
             "-std=c89" => std = StdMode::C89,
             "-std=c90" => std = StdMode::C89, // c90 = c89 别名
             "-std=iso9899:1990" => std = StdMode::C89,
