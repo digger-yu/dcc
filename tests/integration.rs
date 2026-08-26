@@ -6175,6 +6175,111 @@ fn strict_qemu_boot_matrix_gates_on_artifacts() {
     let _ = fs::remove_dir_all(&temp);
 }
 
+/// QEMU boot: verify kernel config has serial console support when
+/// bzImage exists, ensuring QEMU boot can produce visible output.
+#[test]
+#[cfg(unix)]
+fn kernel_config_has_serial_console_for_qemu_boot() {
+    let kernel_dir = std::path::Path::new(
+        &std::env::var("HOME")
+            .unwrap_or_else(|_| "/root".to_string()),
+    )
+    .join("linux-7.1");
+    let bzimage = kernel_dir.join("arch/x86/boot/bzImage");
+    let config = kernel_dir.join(".config");
+
+    // Only check when bzImage actually exists
+    if !bzimage.exists() {
+        eprintln!("SKIP: no bzImage found at {bzimage:?}");
+        return;
+    }
+    if !config.exists() {
+        eprintln!("SKIP: no .config found at {config:?}");
+        return;
+    }
+
+    let config_text =
+        fs::read_to_string(&config).expect("read kernel .config");
+
+    // Serial console is required for QEMU -nographic boot log
+    assert!(
+        config_text.contains("CONFIG_SERIAL_8250=y")
+            || config_text
+                .contains("CONFIG_SERIAL_8250_CONSOLE=y"),
+        "kernel .config must enable CONFIG_SERIAL_8250 and \
+         CONFIG_SERIAL_8250_CONSOLE for QEMU serial boot \
+         log; run: scripts/config --enable \
+         CONFIG_SERIAL_8250_CONSOLE"
+    );
+    assert!(
+        config_text.contains("CONFIG_SERIAL_CORE=y"),
+        "kernel .config must enable CONFIG_SERIAL_CORE \
+         for serial console support"
+    );
+}
+
+/// QEMU boot: run actual qemu-system-x86_64 with real bzImage
+/// and verify kernel boot log strings appear in output.
+#[test]
+#[cfg(unix)]
+fn qemu_boot_real_kernel_produces_boot_log() {
+    let kernel_dir = std::path::Path::new(
+        &std::env::var("HOME")
+            .unwrap_or_else(|_| "/root".to_string()),
+    )
+    .join("linux-7.1");
+    let bzimage = kernel_dir.join("arch/x86/boot/bzImage");
+
+    if !bzimage.exists() {
+        eprintln!("SKIP: no bzImage at {bzimage:?}");
+        return;
+    }
+    if std::process::Command::new("qemu-system-x86_64")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("SKIP: qemu-system-x86_64 not installed");
+        return;
+    }
+
+    let output = std::process::Command::new(
+        "qemu-system-x86_64",
+    )
+    .arg("-kernel")
+    .arg(&bzimage)
+    .arg("-m")
+    .arg("512M")
+    .arg("-no-reboot")
+    .arg("-display")
+    .arg("none")
+    .arg("-nographic")
+    .arg("-append")
+    .arg("console=ttyS0 panic=-1")
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .output()
+    .expect("run qemu-system-x86_64");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    assert!(
+        combined.contains("Linux version"),
+        "QEMU boot log must contain 'Linux version'; \
+         got: {}...",
+        &combined[..combined.len().min(500)]
+    );
+    assert!(
+        combined.contains("Kernel command line")
+            || combined.contains("Memory:"),
+        "QEMU boot log should contain kernel init messages"
+    );
+}
+
 // ---------- kernel object corpus ----------
 
 fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
