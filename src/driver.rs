@@ -183,10 +183,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return run_builtin_linker(&cfg);
     }
 
-    // Multi-file parallel compilation: -c/-S/-E/-fsyntax-only with
+    // Multi-file parallel compilation: -c/-S/-E/-M/-MM/-fsyntax-only with
     // multiple inputs compiles each file independently in parallel.
     if cfg.inputs.len() > 1
-        && (cfg.relocatable || cfg.emit_asm || cfg.preprocess_only || cfg.syntax_only)
+        && (cfg.relocatable
+            || cfg.emit_asm
+            || cfg.preprocess_only
+            || cfg.dep_no_compile
+            || cfg.syntax_only)
     {
         return compile_multiple_files(&cfg);
     }
@@ -358,6 +362,13 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 .dep_target
                 .as_deref()
                 .unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+            let target_owned;
+            let target_ref = if cfg.dep_quote_target {
+                target_owned = quote_make_target(target);
+                &target_owned
+            } else {
+                target
+            };
             let deps: Vec<String> = if cfg.dep_mmd_only {
                 filter_user_deps(include_deps, &cfg.system_paths)
             } else {
@@ -378,7 +389,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 })?;
                 write_dep_file(
                     &mut dep_out,
-                    target,
+                    target_ref,
                     &input.display().to_string(),
                     &deps,
                     cfg.dep_phony,
@@ -392,6 +403,67 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
                 })?;
             }
         }
+        return Ok(());
+    }
+
+    // -M/-MM 模式: 仅生成依赖文件, 不编译 (不进入 -E 预处理输出路径)
+    if cfg.dep_no_compile {
+        // -M/-MM 默认输出到 stdout, 除非 -MF 显式指定文件
+        let mut dep_out: Box<dyn Write> = match cfg.dep_file.as_ref() {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                }
+                Box::new(fs::File::create(path).map_err(|e| {
+                    vec![Diagnostic::err(
+                        "E0101",
+                        format!("cannot write {}: {}", path.display(), e),
+                        crate::diagnostics::Span::point(
+                            &path.display().to_string(),
+                            0,
+                            0,
+                        ),
+                    )]
+                })?)
+            }
+            None => Box::new(io::stdout()),
+        };
+        let default_target = input
+            .file_stem()
+            .map(|s| format!("{}.o", s.to_string_lossy()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let target = cfg
+            .dep_target
+            .as_deref()
+            .unwrap_or(&default_target);
+        let target_owned;
+        let target_ref = if cfg.dep_quote_target {
+            target_owned = quote_make_target(target);
+            &target_owned
+        } else {
+            target
+        };
+        let deps: Vec<String> = if cfg.dep_mmd_only {
+            filter_user_deps(include_deps, &cfg.system_paths)
+        } else {
+            include_deps
+        };
+        write_dep_file(
+            dep_out.as_mut(),
+            target_ref,
+            &input.display().to_string(),
+            &deps,
+            cfg.dep_phony,
+        )
+        .map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("cannot write dep file: {}", e),
+                crate::diagnostics::Span::point("", 0, 0),
+            )]
+        })?;
         return Ok(());
     }
 
@@ -666,6 +738,13 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             .dep_target
             .as_deref()
             .unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+        let target_owned;
+        let target_ref = if cfg.dep_quote_target {
+            target_owned = quote_make_target(target);
+            &target_owned
+        } else {
+            target
+        };
         let deps: Vec<String> = if cfg.dep_mmd_only {
             filter_user_deps(include_deps, &cfg.system_paths)
         } else {
@@ -689,7 +768,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         };
         write_dep_file(
             dep_out.as_mut(),
-            target,
+            target_ref,
             &input.display().to_string(),
             &deps,
             cfg.dep_phony,
@@ -916,8 +995,8 @@ fn compile_multiple_files(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             } else if cfg.relocatable {
                 c.output = PathBuf::from(format!("{}.o", stem));
             }
-            // Per-file dep file
-            if cfg.gen_dep {
+            // Per-file dep file (only for -MD/-MMD, not -M/-MM)
+            if cfg.gen_dep && !cfg.dep_no_compile {
                 c.dep_file = Some(PathBuf::from(format!("{}.d", stem)));
                 c.dep_target = Some(c.output.display().to_string());
             }
@@ -958,7 +1037,7 @@ fn compile_multiple_files(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
                     } else if cfg.relocatable {
                         c.output = PathBuf::from(format!("{}.o", stem));
                     }
-                    if cfg.gen_dep {
+                    if cfg.gen_dep && !cfg.dep_no_compile {
                         c.dep_file =
                             Some(PathBuf::from(format!("{}.d", stem)));
                         c.dep_target =
@@ -1011,6 +1090,23 @@ fn escape_dep_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len() + 8);
     for ch in path.chars() {
         match ch {
+            ' ' | '\t' | '#' | ':' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// -MQ 目标名转义: 将 `$` 转义为 `$$`, 防止 Make 将其解释为变量引用.
+/// GCC 的 -MQ 对目标名中的 `$`, `:`, ` ` 等 Make 特殊字符进行转义.
+fn quote_make_target(target: &str) -> String {
+    let mut out = String::with_capacity(target.len() + 8);
+    for ch in target.chars() {
+        match ch {
+            '$' => out.push_str("$$"),
             ' ' | '\t' | '#' | ':' => {
                 out.push('\\');
                 out.push(ch);
@@ -1170,6 +1266,13 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
                 .dep_target
                 .as_deref()
                 .unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+            let target_owned;
+            let target_ref = if cfg.dep_quote_target {
+                target_owned = quote_make_target(target);
+                &target_owned
+            } else {
+                target
+            };
             let deps: Vec<String> = if cfg.dep_mmd_only {
                 filter_user_deps(include_deps, &cfg.system_paths)
             } else {
@@ -1190,7 +1293,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
                 })?;
                 write_dep_file(
                     &mut dep_out,
-                    target,
+                    target_ref,
                     &input.display().to_string(),
                     &deps,
                     cfg.dep_phony,
@@ -1264,6 +1367,13 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
             .dep_target
             .as_deref()
             .unwrap_or_else(|| cfg.output.to_str().unwrap_or("unknown"));
+        let target_owned;
+        let target_ref = if cfg.dep_quote_target {
+            target_owned = quote_make_target(target);
+            &target_owned
+        } else {
+            target
+        };
         let deps: Vec<String> = if cfg.dep_mmd_only {
             filter_user_deps(include_deps, &cfg.system_paths)
         } else {
@@ -1284,7 +1394,7 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
             })?;
             write_dep_file(
                 &mut dep_out,
-                target,
+                target_ref,
                 &input.display().to_string(),
                 &deps,
                 cfg.dep_phony,
@@ -1872,6 +1982,9 @@ fn needs_host_cc_link(cfg: &Config) -> bool {
     if cfg.preprocess_only {
         return false;
     } // -E
+    if cfg.dep_no_compile {
+        return false;
+    } // -M/-MM
     if cfg.syntax_only {
         return false;
     } // -fsyntax-only
@@ -2572,5 +2685,30 @@ mod tests {
                 "non-final line should end with \\: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn quote_make_target_dollar_sign() {
+        // -MQ: $ 应转义为 $$
+        assert_eq!(quote_make_target("foo$bar.o"), "foo$$bar.o");
+    }
+
+    #[test]
+    fn quote_make_target_no_special() {
+        // 无特殊字符时保持不变
+        assert_eq!(quote_make_target("foo.o"), "foo.o");
+    }
+
+    #[test]
+    fn quote_make_target_space_and_colon() {
+        // 空格和冒号用 \ 转义
+        assert_eq!(quote_make_target("my obj.o"), "my\\ obj.o");
+        assert_eq!(quote_make_target("a:b.o"), "a\\:b.o");
+    }
+
+    #[test]
+    fn quote_make_target_multiple_dollars() {
+        // 多个 $ 各自转义
+        assert_eq!(quote_make_target("$a$b$"), "$$a$$b$$");
     }
 }
