@@ -59,6 +59,8 @@ enum Token {
     Insert,
     Version,
     Common,
+    Global,
+    Local,
     // 段类型
     PtLoad,
     PtDynamic,
@@ -502,6 +504,8 @@ impl Lexer {
                     "INSERT" => Token::Insert,
                     "VERSION" => Token::Version,
                     "COMMON" => Token::Common,
+                    "global" => Token::Global,
+                    "local" => Token::Local,
                     "PT_LOAD" => Token::PtLoad,
                     "PT_DYNAMIC" => Token::PtDynamic,
                     "PT_INTERP" => Token::PtInterp,
@@ -542,6 +546,8 @@ pub struct LinkerScript {
     pub no_cross_refs: Vec<Vec<String>>,
     /// INSERT 命令
     pub insert_commands: Vec<InsertCommand>,
+    /// VERSION 块中的版本定义节点
+    pub version_nodes: Vec<VersionNode>,
 }
 
 /// MEMORY 块中的内存区域定义
@@ -559,6 +565,33 @@ pub struct InsertCommand {
     pub after: Option<String>,
     pub before: Option<String>,
     pub section_name: String,
+}
+
+/// VERSION 块中的版本定义节点
+///
+/// GNU ld 语法:
+/// ```text
+/// VERSION {
+///     version_id [(@parent_id)] {
+///         global:
+///             symbol1;
+///             symbol2;
+///         local:
+///             symbol3;
+///             *;
+///     };
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct VersionNode {
+    /// 版本标识符 (e.g. "GCC_3.0", "GLIBC_2.14")
+    pub version_id: String,
+    /// 父版本 (e.g. Some("GCC_2.0") 表示 "@GCC_2.0")
+    pub parent: Option<String>,
+    /// global: 列表中的符号 (支持通配符 "*")
+    pub global_symbols: Vec<String>,
+    /// local: 列表中的符号 (支持通配符 "*")
+    pub local_symbols: Vec<String>,
 }
 
 impl LinkerScript {
@@ -831,6 +864,7 @@ impl Parser {
             input_files: Vec::new(),
             no_cross_refs: Vec::new(),
             insert_commands: Vec::new(),
+            version_nodes: Vec::new(),
         };
 
         // 解析顶层命令
@@ -970,18 +1004,7 @@ impl Parser {
                     self.eat(&Token::Semicolon);
                 }
                 Token::Version => {
-                    // VERSION { ... } - skip for now, just parse and ignore
-                    self.next();
-                    self.expect(&Token::LBrace)?;
-                    let mut depth = 1;
-                    while depth > 0 {
-                        match self.next() {
-                            Token::LBrace => depth += 1,
-                            Token::RBrace => depth -= 1,
-                            Token::Eof => break,
-                            _ => {}
-                        }
-                    }
+                    script.version_nodes = self.parse_version()?;
                 }
                 Token::Ident(_) => {
                     // 可能是符号赋值: sym = expr
@@ -1124,6 +1147,141 @@ impl Parser {
             regions.push(MemoryRegion { name, origin, length, attributes });
         }
         Ok(regions)
+    }
+
+    /// 解析 VERSION { ... } 块
+    ///
+    /// 语法:
+    /// ```text
+    /// VERSION {
+    ///     version_id [(@parent_id)] {
+    ///         global:
+    ///             symbol;
+    ///         local:
+    ///             symbol;
+    ///     };
+    /// }
+    /// ```
+    fn parse_version(&mut self) -> Result<Vec<VersionNode>, String> {
+        self.next(); // consume VERSION
+        self.expect(&Token::LBrace)?;
+        let mut nodes = Vec::new();
+
+        while !self.eat(&Token::RBrace) {
+            if self.peek() == &Token::Eof {
+                return Err("unexpected EOF in VERSION block".into());
+            }
+
+            // 解析 version_id (可以是标识符，也可能包含 '.' 如 "GCC_3.0")
+            let version_id = match self.peek().clone() {
+                Token::Ident(s) => {
+                    self.next();
+                    s
+                }
+                _ => {
+                    return Err(format!(
+                        "expected version identifier, found {:?}",
+                        self.peek()
+                    ));
+                }
+            };
+
+            // 可选的父版本: (@parent_id)
+            let parent = if self.eat(&Token::LParen) {
+                self.expect(&Token::Assign)?;
+                let parent_id = if let Token::Ident(s) = self.next() {
+                    s
+                } else {
+                    return Err("expected parent version identifier".into());
+                };
+                self.expect(&Token::RParen)?;
+                Some(parent_id)
+            } else {
+                None
+            };
+
+            // 版本体 { global: ...; local: ...; }
+            self.expect(&Token::LBrace)?;
+            let mut global_symbols = Vec::new();
+            let mut local_symbols = Vec::new();
+
+            while !self.eat(&Token::RBrace) {
+                if self.peek() == &Token::Eof {
+                    return Err("unexpected EOF in version node".into());
+                }
+
+                if self.peek() == &Token::Global {
+                    self.next(); // consume 'global'
+                    self.expect(&Token::Colon)?;
+                    // 读取符号直到 '}' 或 'local:'
+                    loop {
+                        match self.peek().clone() {
+                            Token::RBrace | Token::Eof => break,
+                            Token::Local => break,
+                            Token::Star => {
+                                self.next();
+                                global_symbols.push("*".to_string());
+                                self.eat(&Token::Semicolon);
+                            }
+                            Token::Ident(s) => {
+                                self.next();
+                                global_symbols.push(s);
+                                self.eat(&Token::Semicolon);
+                            }
+                            _ => {
+                                self.next(); // skip unknown
+                            }
+                        }
+                    }
+                } else if self.peek() == &Token::Local {
+                    self.next(); // consume 'local'
+                    self.expect(&Token::Colon)?;
+                    // 读取符号直到 '}'
+                    loop {
+                        match self.peek().clone() {
+                            Token::RBrace | Token::Eof => break,
+                            Token::Star => {
+                                self.next();
+                                local_symbols.push("*".to_string());
+                                self.eat(&Token::Semicolon);
+                            }
+                            Token::Ident(s) => {
+                                self.next();
+                                local_symbols.push(s);
+                                self.eat(&Token::Semicolon);
+                            }
+                            _ => {
+                                self.next(); // skip unknown
+                            }
+                        }
+                    }
+                } else {
+                    // 没有 global:/local: 前缀的符号，默认归入 global
+                    if let Token::Ident(s) = self.peek().clone() {
+                        self.next();
+                        global_symbols.push(s);
+                        self.eat(&Token::Semicolon);
+                    } else if self.peek() == &Token::Star {
+                        self.next();
+                        global_symbols.push("*".to_string());
+                        self.eat(&Token::Semicolon);
+                    } else {
+                        self.next(); // skip unknown
+                    }
+                }
+            }
+
+            self.eat(&Token::Semicolon);
+
+            nodes.push(VersionNode {
+                version_id,
+                parent,
+                global_symbols,
+                local_symbols,
+            });
+        }
+
+        Ok(nodes)
     }
 
     fn parse_sections(&mut self) -> Result<Vec<SectionCommand>, String> {
