@@ -3812,6 +3812,26 @@ impl<'a> Parser<'a> {
                 {
                     self.advance();
                 }
+                // __seg_fs / __seg_gs / __seg_cs / __seg_ds / __seg_es / __seg_ss:
+                // x86 段寄存器地址空间限定符 (per-cpu 变量访问需要).
+                // 仅解析不处理: 不存入类型系统, 不影响代码生成.
+                // 与 skip_ptr_qualifiers 中的同名关键字配合,
+                // 确保在 decl-specifier / 类型与 * 之间 / * 与标识符之间
+                // 等所有位置都被正确跳过. 真正的 %fs:/%gs: 段前缀需要
+                // 进一步 codegen 支持, 详见 docs/missing_features.md.
+                TokKind::Ident
+                    if matches!(
+                        self.cur.text.as_str(),
+                        "__seg_fs"
+                            | "__seg_gs"
+                            | "__seg_cs"
+                            | "__seg_ds"
+                            | "__seg_es"
+                            | "__seg_ss"
+                    ) =>
+                {
+                    self.advance();
+                }
                 // CUDA/HIP 函数限定符: __global__ / __device__ / __host__
                 // 仅 -fcuda / -fhip 时解析为限定符 (否则是普通标识符,
                 // 由后续语义阶段报 undeclared, 位置精确到标识符)
