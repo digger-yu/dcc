@@ -1,6 +1,6 @@
 # DCC 已支持特性清单
 
-> 最后更新：2026-08-25 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
+> 最后更新：2026-08-26 — 基于 Linux 7.1 全树编译 (零 dcc 编译器错误) + `cargo test` 全量通过
 >
 > 缺失特性与已知限制详见 `docs/missing_features.md`
 
@@ -169,7 +169,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | asm 模板修饰符 `%a` / `%P` / `%l` | `%aN`/`%a[name]`: 地址形式 (寄存器同名, 立即数/内存去前缀); `%PN`/`%P[name]`: 原始符号名 (去 % / $ 前缀); `%lN`/`%l[name]`: asm goto 标签名 (边界安全多位索引，索引越界走 W0004 warning); 立即数含运算符时自动加括号保护优先级 |
 | Mini x86 asm 局部/C 标签 | `N:` / `N:insn` / `found:` |
 | Mini x86 asm Linux legacy aliases | `cmpxchg8b` / `pushfl` / `popfl` / `iret` / `iretl` / 全条件码 `cmov*`（含宽度后缀别名）/ 裸 `in`/`out` / memory-indirect port / `shldw` / `shrdw` / 裸段前缀已覆盖；`asm_*_has_opcode_and_disassembly` 测试校验 `.text` 字节和 objdump 反汇编，固化不再降级为 nop |
-| Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg`/`cmpxchg8b` / `xadd` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `popcnt` / `movnt*` / `prefetch` / `int`/`iret`/`iretl`/`iretq`/`sysenter`/`sysexit` / `pushf`/`pushfl`/`pushfq`/`popf`/`popfl`/`popfq` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc` / `ud2` / `vmxon`/`vmread`/`vmwrite`/`vmptrld`/`vmptrst`/`vmclear` / `wrussq` (CET) / `lar` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`)；`kernel_asm_instr_coverage_runtime` 测试验证内核 arch/x86/ 使用的全部指令编码正确 |
+| Mini x86 asm 全指令覆盖 | `mov`（含段寄存器 / MMX `movq`/`movd`）/ `push`/`pop` / `lea` / ALU / `test` / 移位 / `imul2`/`imul3` / `cmpxchg`/`cmpxchg8b`/`cmpxchg16b` / `xadd` / `xchg` / `jmp`/`jcc`/`call` / `setcc` / `movzx`/`movsx` / `bsf`/`bsr` / `bt`/`bts`/`btr`/`btc` / `popcnt` / `crc32` / `movbe` / `bswap` / `movnt*` / `prefetch`/`prefetchnta`/`prefetcht0`/`prefetcht1`/`prefetcht2` / `clflush` / `lfence`/`mfence`/`sfence` / `int`/`iret`/`iretl`/`iretq`/`sysenter`/`sysexit` / `pushf`/`pushfl`/`pushfq`/`popf`/`popfl`/`popfq` / `swapgs`/`invlpg`/`wbinvd`/`cpuid`/`rdtsc`/`rdtscp` / `ud2` / `vmxon`/`vmread`/`vmwrite`/`vmptrld`/`vmptrst`/`vmclear` / `wrussq` (CET) / `lar` / MMX 逻辑 (`por`/`pand`/`pxor`) / MMX 算术 (`paddb/w/d`/`psubb/w/d`) / MMX 比较 (`pcmpeq*`/`pcmpgt*`)；`lock` 前缀 (0xF0) 通用处理覆盖 `lock add/sub/and/or/xor/inc/dec/cmpxchg/xadd`；`kernel_asm_instr_coverage_runtime` 测试验证内核 arch/x86/ 使用的全部指令编码正确 |
 | SSE mov / SSE arith | xmm-xmm, mem-xmm, xmm-mem, SegMem 变体完整支持 |
 | mini-asm SIMD 扩展 | VEX/EVEX 前缀 + AVX/AVX2/AVX-512 + SSE3–4.2 + AES-NI/SHA + FMA/F16C + TSX + AMX + AVX-VNNI；`pinsr*` / `pextr*` GPR + `tmm` / `ymm` / `zmm` / `k` 寄存器 |
 | mini-asm 扩展操作数形式 | `rdrand`/`rdseed` 内存+符号操作数 (RIP-relative)；`ljmp`/`lcall` 间接内存 + `$off,$seg` 反序 + 符号偏移；`retf`/`lret` 符号立即数；`xbegin` rel32 + `xabort` 符号；AES-NI/SHA/pshuf*/palignr/pblendw/insertps/pshufw 内存源+符号源 (RIP-relative)；`pinsr*`/`pextr*`/`extractps` 符号源/目标；`vpinsr*`/`vpextr*`/`vextractps`/`vextractpd`/`vcvtps2ph` 符号源/目标 |

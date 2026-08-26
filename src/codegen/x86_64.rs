@@ -21391,6 +21391,12 @@ impl Codegen {
             "crc32l" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 0, 0xF1, 0), // F2 0F 38 F1
             "crc32q" if ops.len() == 2 => self.emit_asm_vex_2op(&ops[0], &ops[1], 0, 0, 0, 0xF1, 1), // F2 0F 38 F1 + REX.W
 
+            // movbe: 0F 38 F0 (load) / 0F 38 F1 (store)
+            // AT&T: movbe mem, reg (load, byte-swap) / movbe reg, mem (store)
+            "movbe" | "movbeq" if ops.len() == 2 => self.emit_asm_movbe(&ops[0], &ops[1], 64),
+            "movbew" if ops.len() == 2 => self.emit_asm_movbe(&ops[0], &ops[1], 16),
+            "movbel" if ops.len() == 2 => self.emit_asm_movbe(&ops[0], &ops[1], 32),
+
             // === MMX 指令 ===
             "emms" => self.emit(&[0x0F, 0x77]),
             "packsswb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x63),
@@ -25351,6 +25357,121 @@ impl Codegen {
             }
             _ => {
                 self.asm_warn("unsupported popcnt operand pattern");
+            }
+        }
+    }
+
+    /// movbe: 0F 38 F0 (load: mem→reg with byte-swap) / 0F 38 F1 (store: reg→mem)
+    /// AT&T: movbe src, dst
+    ///   load:  src=mem, dst=reg  → [66] REX.W 0F 38 F0 /r
+    ///   store: src=reg, dst=mem  → [66] REX.W 0F 38 F1 /r
+    fn emit_asm_movbe(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
+        let w = bits == 64;
+        let is16 = bits == 16;
+        match (src, dst) {
+            // Load: mem → reg
+            (
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+                AsmOperand::Reg(d, _),
+            ) => {
+                if is16 {
+                    self.emit(&[0x66]);
+                }
+                let r = Self::rex(w, *d, index.unwrap_or(0), *base);
+                if r != 0x40 {
+                    self.emit(&[r]);
+                }
+                self.emit(&[0x0F, 0x38, 0xF0]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            // Store: reg → mem
+            (
+                AsmOperand::Reg(s, _),
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+            ) => {
+                if is16 {
+                    self.emit(&[0x66]);
+                }
+                let r = Self::rex(w, *s, index.unwrap_or(0), *base);
+                if r != 0x40 {
+                    self.emit(&[r]);
+                }
+                self.emit(&[0x0F, 0x38, 0xF1]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            // Load: SegMem → reg
+            (
+                AsmOperand::SegMem {
+                    seg,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+                AsmOperand::Reg(d, _),
+            ) => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx]);
+                if is16 {
+                    self.emit(&[0x66]);
+                }
+                self.emit(&[
+                    Self::rex(w, *d, index.unwrap_or(0), *base),
+                    0x0F,
+                    0x38,
+                    0xF0,
+                ]);
+                self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
+            }
+            // Store: reg → SegMem
+            (
+                AsmOperand::Reg(s, _),
+                AsmOperand::SegMem {
+                    seg,
+                    disp,
+                    base,
+                    index,
+                    scale,
+                },
+            ) => {
+                let (_code, pfx) = Self::seg_meta(*seg);
+                self.emit(&[pfx]);
+                if is16 {
+                    self.emit(&[0x66]);
+                }
+                self.emit(&[
+                    Self::rex(w, *s, index.unwrap_or(0), *base),
+                    0x0F,
+                    0x38,
+                    0xF1,
+                ]);
+                self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
+            }
+            // Load: SymDisp → reg (RIP-relative)
+            (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, _)) => {
+                if is16 {
+                    self.emit(&[0x66]);
+                }
+                let r = Self::rex(w, *d, 0, 0);
+                if r != 0x40 {
+                    self.emit(&[r]);
+                }
+                self.emit(&[0x0F, 0x38, 0xF0, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
+            }
+            _ => {
+                self.asm_warn("unsupported movbe operand pattern");
             }
         }
     }

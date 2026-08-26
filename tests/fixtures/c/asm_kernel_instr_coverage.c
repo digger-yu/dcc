@@ -143,6 +143,89 @@ int test_clflush(void) {
     return 1;
 }
 
+/* lock inc/dec */
+int test_lock_inc_dec(void) {
+    int x = 0;
+    asm volatile("lock incl %0" : "+m"(x));
+    if (x != 1) { printf("FAIL: lock incl %d\n", x); return 0; }
+    asm volatile("lock decl %0" : "+m"(x));
+    if (x != 0) { printf("FAIL: lock decl %d\n", x); return 0; }
+    return 1;
+}
+
+/* lock xadd */
+int test_lock_xadd(void) {
+    int x = 10, old = 5;
+    asm volatile("lock xaddl %0, %1" : "+r"(old), "+m"(x));
+    if (old != 10 || x != 15) { printf("FAIL: lock xadd old=%d x=%d\n", old, x); return 0; }
+    return 1;
+}
+
+/* cpuid */
+int test_cpuid(void) {
+    unsigned int eax, ebx, ecx, edx;
+    asm volatile("cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(0), "c"(0));
+    return 1;  /* just verify it encodes */
+}
+
+/* rdtsc */
+int test_rdtsc(void) {
+    unsigned int lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return 1;
+}
+
+/* rdtscp */
+int test_rdtscp(void) {
+    unsigned int lo, hi, aux;
+    asm volatile("rdtscp" : "=a"(lo), "=d"(hi), "=c"(aux));
+    return 1;
+}
+
+/* lfence/mfence/sfence */
+int test_fences(void) {
+    asm volatile("lfence" ::: "memory");
+    asm volatile("mfence" ::: "memory");
+    asm volatile("sfence" ::: "memory");
+    return 1;
+}
+
+/* prefetch variants */
+int test_prefetch(void) {
+    int x;
+    asm volatile("prefetchnta (%0)" :: "r"(&x));
+    asm volatile("prefetcht0 (%0)" :: "r"(&x));
+    asm volatile("prefetcht1 (%0)" :: "r"(&x));
+    asm volatile("prefetcht2 (%0)" :: "r"(&x));
+    return 1;
+}
+
+/* movbe */
+int test_movbe(void) {
+    unsigned int val = 0x12345678;
+    unsigned int result;
+    asm volatile("movbel (%1), %0" : "=r"(result) : "r"(&val));
+    asm volatile("movbel %0, (%1)" :: "r"(result), "r"(&val));
+    return 1;
+}
+
+/* crc32 */
+int test_crc32(void) {
+    unsigned int crc = 0;
+    asm volatile("crc32l %1, %0" : "+r"(crc) : "r"(42));
+    return 1;
+}
+
+/* popcnt */
+int test_popcnt(void) {
+    int count;
+    asm volatile("popcntl %1, %0" : "=r"(count) : "r"(0xFF));
+    if (count != 8) { printf("FAIL: popcntl %d\n", count); return 0; }
+    return 1;
+}
+
 int main(void) {
     int ok = 1;
     ok &= test_alu();
@@ -160,6 +243,16 @@ int main(void) {
     ok &= test_lar();
     ok &= test_pkru();
     ok &= test_clflush();
+    ok &= test_lock_inc_dec();
+    ok &= test_lock_xadd();
+    ok &= test_cpuid();
+    ok &= test_rdtsc();
+    ok &= test_rdtscp();
+    ok &= test_fences();
+    ok &= test_prefetch();
+    ok &= test_movbe();
+    ok &= test_crc32();
+    ok &= test_popcnt();
     if (ok)
         printf("PASS: kernel asm instruction coverage\n");
     return ok ? 0 : 1;

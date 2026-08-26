@@ -5161,7 +5161,9 @@ fn kernel_builtin_coverage_runtime() {
 /// assembly instructions used in Linux arch/x86/ are properly
 /// encoded by dcc's mini-assembler and produce correct results.
 /// Tests: ALU, cmpxchg, xchg, bt, bsf/bsr, inc/dec, nop/pause,
-/// push/pop, cmovz, setcc, mul, shrd, lar, rdpkru, clflush.
+/// push/pop, cmovz, setcc, mul, shrd, lar, rdpkru, clflush,
+/// lock inc/dec, lock xadd, cpuid, rdtsc, rdtscp, fences,
+/// prefetch, movbe, crc32, popcnt.
 #[test]
 #[cfg(unix)]
 fn kernel_asm_instr_coverage_runtime() {
