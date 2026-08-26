@@ -746,4 +746,123 @@ mod tests {
         let _ = std::fs::remove_file(p1);
         let _ = std::fs::remove_file(p2);
     }
+
+    #[test]
+    fn comdat_dedup_no_groups() {
+        // No COMDAT groups -> nothing discarded
+        let dir = std::env::temp_dir();
+        let p = dir.join("dcc-comdat-test-no-grp.o");
+        let obj = build_minimal_obj(
+            "a",
+            &[ElfSym {
+                name: "foo".into(),
+                section: 1,
+                value: 0,
+                size: 4,
+                bind: STB_GLOBAL,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3],
+        );
+        std::fs::write(&p, &obj).unwrap();
+        let bundle = InputBundle::from_files(std::slice::from_ref(&p)).unwrap();
+        let discarded = super::resolve_comdat_groups(&bundle);
+        assert!(discarded.is_empty(), "no groups -> nothing discarded");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn comdat_dedup_unique_signatures() {
+        // Multiple groups with unique signatures -> nothing discarded
+        use super::super::object::{FlatComdatGroup, InputBundle};
+        let dir = std::env::temp_dir();
+        let p = dir.join("dcc-comdat-test-unique.o");
+        let obj = build_minimal_obj("a", &[], &[]);
+        std::fs::write(&p, &obj).unwrap();
+        let mut bundle = InputBundle::from_files(std::slice::from_ref(&p)).unwrap();
+        // Manually add two groups with different signatures
+        bundle.comdat_groups.push(FlatComdatGroup {
+            signature: "sig_a".into(),
+            flags: 1,
+            member_indices: vec![0],
+            input_obj: 0,
+        });
+        bundle.comdat_groups.push(FlatComdatGroup {
+            signature: "sig_b".into(),
+            flags: 1,
+            member_indices: vec![1],
+            input_obj: 0,
+        });
+        let discarded = super::resolve_comdat_groups(&bundle);
+        assert!(
+            discarded.is_empty(),
+            "unique signatures -> nothing discarded"
+        );
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn comdat_dedup_duplicate_signatures() {
+        // Two groups with same signature -> second one discarded
+        use super::super::object::{FlatComdatGroup, InputBundle};
+        let dir = std::env::temp_dir();
+        let p = dir.join("dcc-comdat-test-dup.o");
+        let obj = build_minimal_obj("a", &[], &[]);
+        std::fs::write(&p, &obj).unwrap();
+        let mut bundle = InputBundle::from_files(std::slice::from_ref(&p)).unwrap();
+        // Add two groups with the same signature but different members
+        bundle.comdat_groups.push(FlatComdatGroup {
+            signature: "same_sig".into(),
+            flags: 1,
+            member_indices: vec![0, 1],
+            input_obj: 0,
+        });
+        bundle.comdat_groups.push(FlatComdatGroup {
+            signature: "same_sig".into(),
+            flags: 1,
+            member_indices: vec![2, 3],
+            input_obj: 0,
+        });
+        let discarded = super::resolve_comdat_groups(&bundle);
+        assert_eq!(
+            discarded.len(),
+            2,
+            "second group's 2 members should be discarded"
+        );
+        assert!(discarded.contains(&2), "section 2 should be discarded");
+        assert!(discarded.contains(&3), "section 3 should be discarded");
+        assert!(!discarded.contains(&0), "section 0 should be kept");
+        assert!(!discarded.contains(&1), "section 1 should be kept");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn comdat_dedup_three_copies_keep_first() {
+        // Three groups with same signature -> keep first, discard rest
+        use super::super::object::{FlatComdatGroup, InputBundle};
+        let dir = std::env::temp_dir();
+        let p = dir.join("dcc-comdat-test-triple.o");
+        let obj = build_minimal_obj("a", &[], &[]);
+        std::fs::write(&p, &obj).unwrap();
+        let mut bundle = InputBundle::from_files(std::slice::from_ref(&p)).unwrap();
+        for i in 0..3u32 {
+            bundle.comdat_groups.push(FlatComdatGroup {
+                signature: "triple".into(),
+                flags: 1,
+                member_indices: vec![i * 2, i * 2 + 1],
+                input_obj: i as usize,
+            });
+        }
+        let discarded = super::resolve_comdat_groups(&bundle);
+        // First group (sections 0,1) kept, second (2,3) and third (4,5) discarded
+        assert_eq!(discarded.len(), 4);
+        assert!(!discarded.contains(&0));
+        assert!(!discarded.contains(&1));
+        assert!(discarded.contains(&2));
+        assert!(discarded.contains(&3));
+        assert!(discarded.contains(&4));
+        assert!(discarded.contains(&5));
+        let _ = std::fs::remove_file(p);
+    }
 }
