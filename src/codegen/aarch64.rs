@@ -1309,7 +1309,6 @@ impl Aarch64Codegen {
         if callee.starts_with("__atomic_") && self.gen_atomic_builtin(&callee, args) {
             return;
         }
-        let args = &expr.children[1..];
 
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 x0 = sret slot)
         // 限制: 仅当 caller 有显式 local sret 时使用; 简化版只在调用方分配
@@ -3783,11 +3782,7 @@ impl Aarch64Codegen {
                 // x0 = val
                 self.gen_expr(&args[1]);
                 self.mov_x_reg(1, 0); // x1 = val
-                // ldaxr x0, [x2] (Load-Acquire Exclusive, 旧值→x0)
-                self.emit_ldaxr(sz, 0, 2);
-                // stlxr w3, x1, [x2] (Store-Release Exclusive)
-                self.emit_stlxr(sz, 3, 1, 2);
-                // cbnz w3, retry (如果 store 失败则重试)
+                // CAS loop: ldaxr/stlxr retry loop
                 let l_retry = self.fresh_label("atomic_xchg");
                 let l_done = self.fresh_label("atomic_xchg_done");
                 self.label(&l_retry);

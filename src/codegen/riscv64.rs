@@ -1108,7 +1108,6 @@ impl Riscv64Codegen {
         if callee.starts_with("__atomic_") && self.gen_atomic_builtin(&callee, args) {
             return;
         }
-        let args = &expr.children[1..];
 
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 a0 = sret slot)
         // 限制: 仅 caller 分配 <sret> local, callee 写到 [a0]
@@ -1757,6 +1756,8 @@ impl Riscv64Codegen {
                 self.mv_a_reg(11);
                 self.gen_expr(&args[1]);
                 self.mv_a_reg(12);
+                // fence rw, rw for SEQ_CST before AMO
+                self.emit_fence();
                 // amoadd [a1], a2 -> a0 (old value)
                 self.emit_amoadd(sz, 10, 12, 11);
                 true
@@ -1772,6 +1773,8 @@ impl Riscv64Codegen {
                 // negate a0 (a0 = -val)
                 self.emit_neg(10, 10);
                 self.mv_a_reg(12);
+                // fence rw, rw for SEQ_CST before AMO
+                self.emit_fence();
                 // amoadd [a1], a2 -> a0 (old value, adding negative)
                 self.emit_amoadd(sz, 10, 12, 11);
                 true
@@ -1785,6 +1788,8 @@ impl Riscv64Codegen {
                 self.mv_a_reg(11);
                 self.gen_expr(&args[1]);
                 self.mv_a_reg(12);
+                // fence rw, rw for SEQ_CST before AMO
+                self.emit_fence();
                 // amoand [a1], a2 -> a0
                 self.emit_amoand(sz, 10, 12, 11);
                 true
@@ -1798,6 +1803,8 @@ impl Riscv64Codegen {
                 self.mv_a_reg(11);
                 self.gen_expr(&args[1]);
                 self.mv_a_reg(12);
+                // fence rw, rw for SEQ_CST before AMO
+                self.emit_fence();
                 // amoor [a1], a2 -> a0
                 self.emit_amoor(sz, 10, 12, 11);
                 true
@@ -1811,6 +1818,8 @@ impl Riscv64Codegen {
                 self.mv_a_reg(11);
                 self.gen_expr(&args[1]);
                 self.mv_a_reg(12);
+                // fence rw, rw for SEQ_CST before AMO
+                self.emit_fence();
                 // amoxor [a1], a2 -> a0
                 self.emit_amoxor(sz, 10, 12, 11);
                 true
@@ -1832,6 +1841,8 @@ impl Riscv64Codegen {
                 // a0 = desired
                 self.gen_expr(&args[2]);
                 self.mv_a_reg(14); // a4 = desired
+                // fence rw, rw for SEQ_CST before LR/SC
+                self.emit_fence();
                 // LR/SC CAS loop
                 let l_retry = self.fresh_label("atomic_cas");
                 let l_fail = self.fresh_label("atomic_cas_fail");
