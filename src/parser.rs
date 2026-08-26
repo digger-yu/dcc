@@ -3133,7 +3133,7 @@ impl<'a> Parser<'a> {
     fn parse_func_ptr_inner(
         &mut self,
         ty: Type,
-        _leading_attrs: ParsedAttrs,
+        leading_attrs: ParsedAttrs,
         storage: StorageClass,
     ) -> Option<Vec<Decl>> {
         // 可选的 const/volatile/restrict 限定符
@@ -3144,7 +3144,7 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         // 处理 * 和名字之间的属性: 如 void (*__attribute__((...)) fp)();
-        self.skip_attributes();
+        let mut attrs = Self::merge_attrs(leading_attrs, self.parse_attributes());
         let name = self.parse_ident()?;
         // (*name(params)): 返回指针的函数
         // (*name(params1))(params2): 返回函数指针的函数
@@ -3175,7 +3175,7 @@ impl<'a> Parser<'a> {
                     Box::new(ptr_ty),
                     outer_params.iter().map(|p| p.ty.clone()).collect(),
                 );
-                self.skip_attributes();
+                attrs.merge(self.parse_attributes());
                 self.skip_asm_label();
                 self.locals = self.globals.clone();
                 self.in_function = true;
@@ -3198,7 +3198,7 @@ impl<'a> Parser<'a> {
                     }
                     None
                 };
-                self.skip_attributes();
+                attrs.merge(self.parse_attributes());
                 self.locals = self.globals.clone();
                 self.in_function = false;
                 self.current_function = saved_func;
@@ -3211,42 +3211,42 @@ impl<'a> Parser<'a> {
                     span: sp,
                     is_extern: storage.is_extern,
                     is_static: storage.is_static,
-                    section: None,
-                    alignment: None,
-                    is_weak: false,
-                    visibility: None,
-                    is_unused: false,
-                    is_cold: false,
-                    is_hot: false,
-                    is_noinline: false,
-                    is_always_inline: false,
+                    section: attrs.section,
+                    alignment: attrs.alignment,
+                    is_weak: attrs.is_weak,
+                    visibility: attrs.visibility,
+                    is_unused: attrs.is_unused,
+                    is_cold: attrs.is_cold,
+                    is_hot: attrs.is_hot,
+                    is_noinline: attrs.is_noinline,
+                    is_always_inline: attrs.is_always_inline,
                     is_variadic: self.last_variadic,
-                    is_constructor: false,
-                    is_destructor: false,
-                    alias_name: None,
+                    is_constructor: attrs.is_constructor,
+                    is_destructor: attrs.is_destructor,
+                    alias_name: attrs.alias_name.clone().or(attrs.copy_fn.clone()),
                     is_nested: false,
                     upvars: vec![],
                     is_old_style: false,
-                    format_kind: None,
-                    format_string_idx: None,
-                    format_first_arg: None,
-                    no_sanitize: vec![],
-                    target_clones: vec![],
-                    returns_nonnull: false,
-                    ctor_priority: None,
-                    dtor_priority: None,
-                    is_retain: false,
-                    is_used_attr: false,
-                    is_flatten: false,
-                    error_msg: None,
-                    warning_msg: None,
-                    deprecated_msg: None,
-                    ifunc_resolver: None,
-                    asm_output_template: None,
-                    is_global: false,
-                    is_device: false,
-                    is_host: false,
-                    is_naked: false,
+                    format_kind: attrs.format_kind,
+                    format_string_idx: attrs.format_string_idx,
+                    format_first_arg: attrs.format_first_arg,
+                    no_sanitize: attrs.no_sanitize.clone(),
+                    target_clones: attrs.target_clones.clone(),
+                    returns_nonnull: attrs.returns_nonnull,
+                    ctor_priority: attrs.ctor_priority,
+                    dtor_priority: attrs.dtor_priority,
+                    is_retain: attrs.is_retain,
+                    is_used_attr: attrs.is_used,
+                    is_flatten: attrs.is_flatten,
+                    error_msg: attrs.error_msg.clone(),
+                    warning_msg: attrs.warning_msg.clone(),
+                    deprecated_msg: attrs.deprecated_msg.clone(),
+                    ifunc_resolver: attrs.ifunc_resolver.clone(),
+                    asm_output_template: attrs.asm_output_template.clone(),
+                    is_global: attrs.is_global,
+                    is_device: attrs.is_device,
+                    is_host: attrs.is_host,
+                    is_naked: attrs.is_naked,
                 })])
             }
             // (*name(params)) — 返回指针的函数，无外层参数表
@@ -3255,7 +3255,7 @@ impl<'a> Parser<'a> {
                 Box::new(ptr_ty.clone()),
                 inner_params.iter().map(|p| p.ty.clone()).collect(),
             );
-            self.skip_attributes();
+            attrs.merge(self.parse_attributes());
             self.skip_asm_label();
             if !self.in_function {
                 self.globals.insert(name.name.clone(), func_ty.clone());
@@ -3293,42 +3293,42 @@ impl<'a> Parser<'a> {
                 span: sp,
                 is_extern: storage.is_extern,
                 is_static: storage.is_static,
-                section: None,
-                alignment: None,
-                is_weak: false,
-                visibility: None,
-                is_unused: false,
-                is_cold: false,
-                is_hot: false,
-                is_noinline: false,
-                is_always_inline: false,
+                section: attrs.section,
+                alignment: attrs.alignment,
+                is_weak: attrs.is_weak,
+                visibility: attrs.visibility,
+                is_unused: attrs.is_unused,
+                is_cold: attrs.is_cold,
+                is_hot: attrs.is_hot,
+                is_noinline: attrs.is_noinline,
+                is_always_inline: attrs.is_always_inline,
                 is_variadic: self.last_variadic,
-                is_constructor: false,
-                is_destructor: false,
-                alias_name: None,
+                is_constructor: attrs.is_constructor,
+                is_destructor: attrs.is_destructor,
+                alias_name: attrs.alias_name.clone().or(attrs.copy_fn.clone()),
                 is_nested: false,
                 upvars: vec![],
                 is_old_style: false,
-                format_kind: None,
-                format_string_idx: None,
-                format_first_arg: None,
-                no_sanitize: vec![],
-                target_clones: vec![],
-                returns_nonnull: false,
-                ctor_priority: None,
-                dtor_priority: None,
-                is_retain: false,
-                is_used_attr: false,
-                is_flatten: false,
-                error_msg: None,
-                warning_msg: None,
-                deprecated_msg: None,
-                ifunc_resolver: None,
-                asm_output_template: None,
-                is_global: false,
-                is_device: false,
-                is_host: false,
-                is_naked: false,
+                format_kind: attrs.format_kind,
+                format_string_idx: attrs.format_string_idx,
+                format_first_arg: attrs.format_first_arg,
+                no_sanitize: attrs.no_sanitize.clone(),
+                target_clones: attrs.target_clones.clone(),
+                returns_nonnull: attrs.returns_nonnull,
+                ctor_priority: attrs.ctor_priority,
+                dtor_priority: attrs.dtor_priority,
+                is_retain: attrs.is_retain,
+                is_used_attr: attrs.is_used,
+                is_flatten: attrs.is_flatten,
+                error_msg: attrs.error_msg.clone(),
+                warning_msg: attrs.warning_msg.clone(),
+                deprecated_msg: attrs.deprecated_msg.clone(),
+                ifunc_resolver: attrs.ifunc_resolver.clone(),
+                asm_output_template: attrs.asm_output_template.clone(),
+                is_global: attrs.is_global,
+                is_device: attrs.is_device,
+                is_host: attrs.is_host,
+                is_naked: attrs.is_naked,
             })])
         }
         // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
@@ -3400,7 +3400,7 @@ impl<'a> Parser<'a> {
             for sz in array_sizes.into_iter().rev() {
                 ptr_ty = Type::Array(Box::new(ptr_ty), sz);
             }
-            self.skip_attributes();
+            attrs.merge(self.parse_attributes());
             self.skip_asm_label();
             self.locals.insert(name.name.clone(), ptr_ty.clone());
             if !self.in_function {
@@ -3423,23 +3423,23 @@ impl<'a> Parser<'a> {
                 span: sp,
                 is_extern: storage.is_extern,
                 is_static: storage.is_static,
-                section: None,
-                alignment: None,
-                is_weak: false,
-                visibility: None,
-                is_unused: false,
-                register_name: None,
-                cleanup_fn: None,
+                section: attrs.section,
+                alignment: attrs.alignment,
+                is_weak: attrs.is_weak,
+                visibility: attrs.visibility,
+                is_unused: attrs.is_unused,
+                register_name: attrs.register_name,
+                cleanup_fn: attrs.cleanup_fn,
                 is_thread_local: storage.is_thread_local,
-                no_sanitize: vec![],
-                copy_fn: None,
-                is_retain: false,
-                is_used_attr: false,
+                no_sanitize: attrs.no_sanitize.clone(),
+                copy_fn: attrs.copy_fn.clone(),
+                is_retain: attrs.is_retain,
+                is_used_attr: attrs.is_used,
             })]);
         }
         // 不是函数指针, 只是带括号的指针变量 (罕见)
         // 处理 `(*name)[N]` 形式: 指向数组的指针
-        self.skip_attributes();
+        attrs.merge(self.parse_attributes());
         self.skip_asm_label();
         let ptr_ty = if !outer_array_sizes.is_empty() {
             // 先构造内层数组类型: Array(ty, N1, N2, ...)
@@ -3469,18 +3469,18 @@ impl<'a> Parser<'a> {
             span: sp,
             is_extern: storage.is_extern,
             is_static: storage.is_static,
-            section: None,
-            alignment: None,
-            is_weak: false,
-            visibility: None,
-            is_unused: false,
-            register_name: None,
-            cleanup_fn: None,
+            section: attrs.section,
+            alignment: attrs.alignment,
+            is_weak: attrs.is_weak,
+            visibility: attrs.visibility,
+            is_unused: attrs.is_unused,
+            register_name: attrs.register_name,
+            cleanup_fn: attrs.cleanup_fn,
             is_thread_local: storage.is_thread_local,
-            no_sanitize: vec![],
-            copy_fn: None,
-            is_retain: false,
-            is_used_attr: false,
+            no_sanitize: attrs.no_sanitize.clone(),
+            copy_fn: attrs.copy_fn.clone(),
+            is_retain: attrs.is_retain,
+            is_used_attr: attrs.is_used,
         })])
     }
 
