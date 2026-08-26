@@ -5179,6 +5179,25 @@ fn kernel_asm_instr_coverage_runtime() {
     assert_eq!(rc, 0, "kernel asm coverage runtime check failed");
 }
 
+/// Segment register prefix (%gs:/%fs:) in inline asm for per-cpu
+/// access + asm operand modifiers (%b/%w/%k/%q/%h).
+/// Verifies: mov/ALU/lock/cmpxchg with segment prefix,
+/// and %h high-byte register modifier runtime correctness.
+#[test]
+#[cfg(unix)]
+fn asm_seg_prefix_and_modifiers_runtime() {
+    let src = include_str!("fixtures/c/asm_seg_prefix_percpu.c");
+    let (out, exe) = run_compile_and_run("asm-seg-prefix", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "seg prefix + modifiers compile failed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "seg prefix + modifiers runtime check failed");
+}
+
 /// 通用工具：编译一个 C 源文件并返回 output + 可执行路径
 #[allow(dead_code)]
 fn run_compile_o(

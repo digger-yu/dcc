@@ -18801,6 +18801,25 @@ impl Codegen {
         {
             return;
         }
+        // 剥离操作数中的内联段前缀 (%gs:/%fs:/%ds: 等)
+        // 内核 per-cpu 模式: "add %%gs:%1, %0" → 替换后 "add %gs:gs_val(%rip), %rax"
+        // 剥离段前缀字节并在指令前发射, 操作数按无前缀形式解析
+        let mut inline_seg_prefix: Option<u8> = None;
+        let operands_str = {
+            let seg_patterns = [
+                ("%gs:", 0x65u8), ("%fs:", 0x64), ("%ds:", 0x3E),
+                ("%cs:", 0x2E), ("%ss:", 0x36), ("%es:", 0x26),
+            ];
+            let mut os: String = operands_str.to_string();
+            for &(pat, code) in &seg_patterns {
+                if os.contains(pat) {
+                    inline_seg_prefix = Some(code);
+                    os = os.replacen(pat, "", 1);
+                    break;
+                }
+            }
+            os
+        };
         let operands: Vec<&str> = if operands_str.is_empty() {
             vec![]
         } else {
@@ -18812,6 +18831,9 @@ impl Codegen {
             .collect();
         if let Some(pfx) = prefix {
             self.emit(&[pfx]);
+        }
+        if let Some(seg_pfx) = inline_seg_prefix {
+            self.emit(&[seg_pfx]);
         }
         self.emit_asm_instr(mnemonic, &ops);
         // 记录逐指令调试信息 (用于 DWARF .debug_line per-instruction 条目)
@@ -22795,7 +22817,42 @@ impl Codegen {
                 }
             }
             _ => {
-                self.asm_warn("unsupported ALU operand pattern");
+                // SymDisp (symbolic RIP-relative) handling
+                if let (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, _)) = (src, dst) {
+                    if bits == 16 {
+                        self.emit(&[0x66]);
+                    }
+                    self.emit(&[Self::rex(w, *d, 0, 0), 0x03 + op * 8]);
+                    self.emit_asm_modrm_mem_only(*d, 0, ASM_BASE_RIP, None, 1);
+                    let pos = self.pos() - 4;
+                    self.pending_data_rels.push((pos, sym.clone()));
+                } else if let (AsmOperand::Reg(s, _), AsmOperand::SymDisp(sym, _)) = (src, dst) {
+                    if bits == 16 {
+                        self.emit(&[0x66]);
+                    }
+                    self.emit(&[Self::rex(w, *s, 0, 0), 0x01 + op * 8]);
+                    self.emit_asm_modrm_mem_only(*s, 0, ASM_BASE_RIP, None, 1);
+                    let pos = self.pos() - 4;
+                    self.pending_data_rels.push((pos, sym.clone()));
+                } else if let (AsmOperand::Imm(v), AsmOperand::SymDisp(sym, _)) = (src, dst) {
+                    if bits == 16 {
+                        self.emit(&[0x66]);
+                    }
+                    self.emit(&[Self::rex(w, 0, 0, 0)]);
+                    if *v >= -128 && *v <= 127 {
+                        self.emit(&[0x83]);
+                        self.emit_asm_modrm_mem_only(op, 0, ASM_BASE_RIP, None, 1);
+                        self.emit(&[*v as u8]);
+                    } else {
+                        self.emit(&[0x81]);
+                        self.emit_asm_modrm_mem_only(op, 0, ASM_BASE_RIP, None, 1);
+                        self.emit(&(*v as i32).to_le_bytes());
+                    }
+                    let pos = self.pos() - 4 - if *v >= -128 && *v <= 127 { 1 } else { 4 };
+                    self.pending_data_rels.push((pos, sym.clone()));
+                } else {
+                    self.asm_warn("unsupported ALU operand pattern");
+                }
             }
         }
     }
@@ -24469,6 +24526,16 @@ impl Codegen {
                 }
                 self.emit(&[Self::rex(w, 0, index.unwrap_or(0), *base), opcode]);
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
+            }
+            AsmOperand::SymDisp(sym, _) => {
+                // Symbolic RIP-relative: inc/dec/not/neg sym(%rip)
+                if bits == 16 {
+                    self.emit(&[0x66]);
+                }
+                self.emit(&[Self::rex(w, 0, 0, 0), opcode]);
+                self.emit_asm_modrm_mem_only(ext, 0, ASM_BASE_RIP, None, 1);
+                let pos = self.pos() - 4;
+                self.pending_data_rels.push((pos, sym.clone()));
             }
             _ => {
                 self.asm_warn("unsupported unary operand pattern");
