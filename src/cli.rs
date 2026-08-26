@@ -1569,22 +1569,31 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     }
 
     if !link_mode && inputs.len() > 1 {
-        let all_sources = inputs.iter().all(|p| {
+        let is_source = |p: &PathBuf| -> bool {
             matches!(
                 p.extension().and_then(|e| e.to_str()),
                 Some("c") | Some("C") | Some("S") | Some("s")
+                    | Some("cpp") | Some("cc") | Some("cxx") | Some("CPP") | Some("CXX")
             )
-        });
+        };
+        let all_sources = inputs.iter().all(is_source);
         let all_objects = inputs
             .iter()
             .all(|p| p.extension().and_then(|e| e.to_str()) == Some("o"));
-        if all_sources {
+        if all_sources && (relocatable || emit_asm || preprocess_only || syntax_only) {
+            // Multi-file -c/-S/-E/-fsyntax-only: allowed, each file
+            // compiled independently. -o is forbidden with multiple inputs.
+            if output_explicit {
+                return Err(CliError::new(
+                    "cannot specify -o with multiple input files",
+                ));
+            }
+        } else if all_sources {
             return Err(CliError::new(
                 "multiple source files cannot produce a single executable; \
-                 compile each with -c, then link with gcc(1) or dcc -r to merge .o files",
+                 compile each with -c, then link with gcc(1) or dcc -r",
             ));
-        }
-        if all_objects {
+        } else if all_objects {
             // 所有输入是 .o 文件, 自动启用内置链接器
             built_link = true;
             if cfg!(debug_assertions) && verbose {
@@ -1619,7 +1628,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             .cloned()
             .unwrap_or_else(|| PathBuf::from("-"));
         // -c / -S 模式默认输出扩展名（单 TU 编译）
-        if !link_mode && output == *"a.out" {
+        // Multi-file: output stays "a.out"; driver computes per-file names.
+        if !link_mode && output == *"a.out" && inputs.len() == 1 {
             let stem = first.file_stem().unwrap_or_default().to_string_lossy();
             if emit_asm {
                 output = PathBuf::from(format!("{}.s", stem));
@@ -1628,8 +1638,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
         }
         // 如果未指定 dep_file 但启用了 dep, 用输出文件名替换扩展名为 .o 后加 .d
+        // Multi-file: dep_file left for driver to compute per-file.
         let dep_file = dep_file.or_else(|| {
-            if gen_dep && !link_mode && (relocatable || emit_asm) {
+            if gen_dep && !link_mode && (relocatable || emit_asm) && inputs.len() == 1 {
                 let stem = first.file_stem().unwrap_or_default().to_string_lossy();
                 Some(PathBuf::from(format!("{}.d", stem)))
             } else {
