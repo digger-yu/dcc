@@ -15795,3 +15795,212 @@ fn kernel_code_model_data_symbols_bypass_got() {
         "external function address should appear in relocations: {relocs}"
     );
 }
+
+// ── Multi-file parallel compilation ──────────────────────────────
+
+/// Multi-file -c with -j4: compile 4 source files in parallel,
+/// verify all .o files are produced and are valid ELF.
+#[test]
+fn multi_file_parallel_compile() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work = dir.join(format!("dcc-mfpar-{pid}"));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).expect("mkdir");
+
+    // Create 4 source files
+    for (i, name) in ["a", "b", "c", "d"].iter().enumerate() {
+        let path = work.join(format!("{name}.c"));
+        fs::write(&path, format!("int func_{i}(void) {{ return {i}; }}\n"))
+            .expect("write source");
+    }
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.args([
+        "-c",
+        "-j4",
+        "-o",
+        "/dev/null", // will be rejected; we use per-file output
+    ]);
+    // Actually, multi-file doesn't allow -o. Just pass the files.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-c").arg("-j4").current_dir(&work);
+    for name in &["a", "b", "c", "d"] {
+        cmd.arg(format!("{name}.c"));
+    }
+    let out = cmd.output().expect("run dcc");
+    assert!(
+        out.status.success(),
+        "multi-file parallel compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Verify all .o files exist and are valid ELF
+    for name in &["a", "b", "c", "d"] {
+        let obj = work.join(format!("{name}.o"));
+        assert!(obj.exists(), "{name}.o not produced");
+        let bytes = fs::read(&obj).expect("read .o");
+        assert!(
+            bytes.len() > 4 && &bytes[0..4] == &[0x7f, b'E', b'L', b'F'],
+            "{name}.o is not valid ELF"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&work);
+}
+
+/// Parallel (-j4) vs sequential (-j1) produce byte-identical .o files.
+#[test]
+fn multi_file_parallel_byte_identical() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work_par = dir.join(format!("dcc-mfpar-par-{pid}"));
+    let work_seq = dir.join(format!("dcc-mfpar-seq-{pid}"));
+    let _ = fs::remove_dir_all(&work_par);
+    let _ = fs::remove_dir_all(&work_seq);
+    fs::create_dir_all(&work_par).expect("mkdir par");
+    fs::create_dir_all(&work_seq).expect("mkdir seq");
+
+    // Create identical source files in both dirs
+    for work in &[&work_par, &work_seq] {
+        for (i, name) in ["x", "y", "z"].iter().enumerate() {
+            let path = work.join(format!("{name}.c"));
+            fs::write(
+                &path,
+                format!(
+                    "int helper_{i}(int a) {{ return a + {i}; }}\n\
+                     int func_{i}(void) {{ return helper_{i}({i}); }}\n"
+                ),
+            )
+            .expect("write source");
+        }
+    }
+
+    let compile = |work: &std::path::Path, jobs: &str| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+        cmd.arg("-c")
+            .arg(format!("-j{jobs}"))
+            .current_dir(work);
+        for name in &["x", "y", "z"] {
+            cmd.arg(format!("{name}.c"));
+        }
+        let out = cmd.output().expect("run dcc");
+        assert!(
+            out.status.success(),
+            "compile -j{jobs} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    compile(&work_par, "4");
+    compile(&work_seq, "1");
+
+    // Compare byte-for-byte
+    for name in &["x", "y", "z"] {
+        let par = fs::read(work_par.join(format!("{name}.o"))).expect("read par");
+        let seq = fs::read(work_seq.join(format!("{name}.o"))).expect("read seq");
+        assert_eq!(
+            par, seq,
+            "{name}.o: parallel and sequential differ"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&work_par);
+    let _ = fs::remove_dir_all(&work_seq);
+}
+
+/// -j flag parsing: -j0 is rejected, -j1/-j4/--jobs=2 are accepted.
+#[test]
+fn jobs_flag_parsing() {
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-jobs-{pid}.c"));
+    fs::write(&src, "int f(void) { return 0; }\n").expect("write");
+
+    // -j0 must be rejected
+    let out = Command::new(dcc)
+        .args(["-j0", "-c", src.to_str().unwrap()])
+        .output()
+        .expect("run dcc");
+    assert!(
+        !out.status.success(),
+        "-j0 should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("-j must be >= 1"),
+        "expected -j error, got: {stderr}"
+    );
+
+    // -j1 must succeed (sequential)
+    let out = Command::new(dcc)
+        .args(["-j1", "-c", "-o", "/dev/null", src.to_str().unwrap()])
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "-j1 should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // -j4 must succeed
+    let out = Command::new(dcc)
+        .args(["-j4", "-c", "-o", "/dev/null", src.to_str().unwrap()])
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "-j4 should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // --jobs=2 must succeed
+    let out = Command::new(dcc)
+        .args(["--jobs=2", "-c", "-o", "/dev/null", src.to_str().unwrap()])
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "--jobs=2 should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let _ = fs::remove_file(&src);
+}
+
+/// -o with multiple inputs is rejected (GCC behavior).
+#[test]
+fn multi_file_rejects_output_flag() {
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work = dir.join(format!("dcc-mfout-{pid}"));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).expect("mkdir");
+    fs::write(work.join("a.c"), "int a(void){return 0;}\n").expect("write a");
+    fs::write(work.join("b.c"), "int b(void){return 0;}\n").expect("write b");
+
+    let out = Command::new(dcc)
+        .args([
+            "-c",
+            "-o",
+            "combined.o",
+            "a.c",
+            "b.c",
+        ])
+        .current_dir(&work)
+        .output()
+        .expect("run dcc");
+    assert!(
+        !out.status.success(),
+        "-o with multiple inputs should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot specify -o with multiple input files"),
+        "expected -o error, got: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&work);
+}
