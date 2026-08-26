@@ -1151,6 +1151,106 @@ impl Preprocessor {
         (date.to_string(), time.to_string())
     }
 
+    /// 获取当前源文件的最后修改时间戳 (用于 __TIMESTAMP__)
+    /// 格式: "Day Mon DD HH:MM:SS YYYY" (如 "Tue Jul  9 10:30:45 2026")
+    /// 若无法获取文件时间, 回退到 __DATE__ 和 __TIME__ 的组合
+    fn file_timestamp(&self) -> String {
+        use std::fs;
+        // 尝试获取源文件的完整路径
+        let file_path = if Path::new(&self.file).is_absolute() {
+            PathBuf::from(&self.file)
+        } else {
+            self.base_dir.join(&self.file)
+        };
+        // 尝试读取文件修改时间
+        if let Ok(meta) = fs::metadata(&file_path) {
+            if let Ok(modified) = meta.modified() {
+                return Self::format_system_time(modified);
+            }
+        }
+        // 回退: 使用编译日期/时间
+        format!("{} {}", self.compile_date, self.compile_time)
+    }
+
+    /// 格式化 SystemTime 为 __TIMESTAMP__ 格式
+    /// 格式: "Day Mon DD HH:MM:SS YYYY"
+    fn format_system_time(time: std::time::SystemTime) -> String {
+        use std::time::UNIX_EPOCH;
+        // 计算自 Unix epoch 以来的秒数
+        let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+        let secs = duration.as_secs() as i64;
+        // 简单的日期/时间计算 (不依赖 chrono)
+        // 使用 RFC 2822 / C time format 格式
+        Self::format_unix_timestamp(secs)
+    }
+
+    /// 将 Unix 时间戳格式化为 __TIMESTAMP__ 格式
+    /// 格式: "Day Mon DD HH:MM:SS YYYY"
+    fn format_unix_timestamp(secs: i64) -> String {
+        // 简化的时间计算 (忽略闰秒)
+        let days = secs / 86400;
+        let day_secs = secs % 86400;
+        let hours = day_secs / 3600;
+        let minutes = (day_secs % 3600) / 60;
+        let seconds = day_secs % 60;
+
+        // 计算年月日 (从 1970-01-01 开始)
+        let mut year = 1970i64;
+        let mut remaining_days = days;
+
+        // 年份计算
+        loop {
+            let days_in_year = if Self::is_leap_year(year) { 366 } else { 365 };
+            if remaining_days < days_in_year {
+                break;
+            }
+            remaining_days -= days_in_year;
+            year += 1;
+        }
+
+        // 月份计算
+        let is_leap = Self::is_leap_year(year);
+        let month_days = [
+            31,
+            if is_leap { 29 } else { 28 },
+            31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        ];
+        let mut month = 0;
+        for (i, &days_in_month) in month_days.iter().enumerate() {
+            if remaining_days < days_in_month {
+                month = i;
+                break;
+            }
+            remaining_days -= days_in_month;
+        }
+        let day = remaining_days + 1;
+
+        // 星期计算 (1970-01-01 是星期四)
+        let weekday = ((days + 4) % 7 + 7) % 7;
+
+        // 格式化输出
+        let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        let months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+
+        format!(
+            "{} {} {:2} {:02}:{:02}:{:02} {}",
+            weekdays[weekday as usize],
+            months[month],
+            day,
+            hours,
+            minutes,
+            seconds,
+            year
+        )
+    }
+
+    /// 判断是否为闰年
+    fn is_leap_year(year: i64) -> bool {
+        (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    }
+
     /// 向输出写入文本并同步更新 out_lines 计数器
     fn push_out(&mut self, s: &str) {
         self.out_lines += s.bytes().filter(|&b| b == b'\n').count() as u32;
@@ -3113,6 +3213,13 @@ impl Preprocessor {
                 }
                 if ident == "__TIME__" {
                     out.push_str(&format!("\"{}\"", self.compile_time));
+                    continue;
+                }
+                // __TIMESTAMP__: 当前源文件的最后修改时间
+                // 格式: "Day Mon DD HH:MM:SS YYYY" (如 "Tue Jul  9 10:30:45 2026")
+                if ident == "__TIMESTAMP__" {
+                    let ts = self.file_timestamp();
+                    out.push_str(&format!("\"{}\"", ts));
                     continue;
                 }
                 // __COUNTER__: 每次访问自增, 共享 preproc 实例
@@ -8249,5 +8356,54 @@ int ok = 1;\n";
             "expected __has_include_next to find header.h in -isystem path, output: {}",
             out.text
         );
+    }
+
+    /// __TIMESTAMP__: 应展开为源文件的最后修改时间
+    #[test]
+    fn timestamp_macro_expands_to_file_mtime() {
+        use std::fs;
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("dcc_timestamp_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("test.c");
+        let mut f = fs::File::create(&src).unwrap();
+        writeln!(f, "const char* ts = __TIMESTAMP__;").unwrap();
+        drop(f);
+        let out = preprocess(
+            &fs::read(&src).unwrap(),
+            src.to_str().unwrap(),
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let diags = &out.diags;
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(d.sev, crate::diagnostics::Severity::Error)
+            })
+            .collect();
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        // __TIMESTAMP__ 应展开为带引号的字符串, 格式: "Day Mon DD HH:MM:SS YYYY"
+        assert!(
+            out.text.contains("const char* ts = \""),
+            "expected __TIMESTAMP__ to expand to a string literal, output: {}",
+            out.text
+        );
+        // 检查格式包含月份缩写和数字年份
+        let has_month = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ]
+        .iter()
+        .any(|m| out.text.contains(m));
+        assert!(has_month, "expected month abbreviation in timestamp, output: {}", out.text);
     }
 }

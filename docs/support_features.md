@@ -85,7 +85,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `#pragma STDC FP_CONTRACT` | ON/OFF/DEFAULT 三态；ON 时 x86_64 后端把 `a*b+c` / `a*b-c` 收缩为 `fma` / `fmaf` / `fmal` 调用，OFF/DEFAULT 保持独立乘加 |
 | `#pragma STDC CX_LIMITED_RANGE` | ON/OFF/DEFAULT 三态；ON 时 x86_64 complex 乘除法使用内联有限范围公式，OFF/DEFAULT 使用 `__mulsc3` / `__muldc3` / `__divsc3` / `__divdc3` range-safe helper |
 | 字符集 / locale (C23) | `default`/`reset`/`"POSIX"`/`"UTF-8"`/`"ISO-8859-1"` 字符集切换 |
-| 预定义宏 | `__linux__` / `__x86_64__` / `__GNUC__` / `__clang__` / `__clang_major__` / `__clang_minor__` / `__clang_patchlevel__` / `__amd64` / `__PIC__` / `__PIE__` 等完整集合；整型极限值宏全覆盖 (`__INT{8,16,32,64}_MAX__` / `__INT{8,16,32,64}_MIN__` / `__UINT{8,16,32,64}_MAX__` / `__INTMAX_{MAX,MIN}__` / `__UINTMAX_MAX__` / `__INTPTR_{MAX,MIN}__` / `__UINTPTR_MAX__` / `__WINT_{MAX,MIN}__` / `__INT_{LEAST,FAST}{8,16,32,64}_{MAX,MIN}__` / `__UINT_{LEAST,FAST}{8,16,32,64}_MAX__`) |
+| 预定义宏 | `__linux__` / `__x86_64__` / `__GNUC__` / `__clang__` / `__clang_major__` / `__clang_minor__` / `__clang_patchlevel__` / `__amd64` / `__PIC__` / `__PIE__` 等完整集合；整型极限值宏全覆盖 (`__INT{8,16,32,64}_MAX__` / `__INT{8,16,32,64}_MIN__` / `__UINT{8,16,32,64}_MAX__` / `__INTMAX_{MAX,MIN}__` / `__UINTMAX_MAX__` / `__INTPTR_{MAX,MIN}__` / `__UINTPTR_MAX__` / `__WINT_{MAX,MIN}__` / `__INT_{LEAST,FAST}{8,16,32,64}_{MAX,MIN}__` / `__UINT_{LEAST,FAST}{8,16,32,64}_MAX__`)；时间宏 `__DATE__` / `__TIME__` / `__TIMESTAMP__` (源文件修改时间) |
 | `__has_include` / `__has_include_next` / `__has_attribute` / `__has_builtin` / `__has_c_attribute` / `__has_embed` | 编译期求值；`__has_include_next` 跳过 base_dir 搜索后续路径 |
 | `__STDC_ENDIAN_*` (C23) | 仅 C23 模式预定义，NATIVE==LITTLE |
 | 数字分隔符 | `1'000'000` |
