@@ -5859,6 +5859,63 @@ fn attr_copy_returns_nonnull_compile_and_run() {
     let _ = fs::remove_file(exe);
 }
 
+/// __attribute__((visibility(...))) — ELF symbol visibility
+#[test]
+#[cfg(unix)]
+fn visibility_attr_elf_symbols() {
+    let source = include_str!("fixtures/c/visibility_attr.c");
+    let (output, obj) = run_object_test_flags("vis-attr", source, &[]);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sym = Command::new("readelf")
+        .args(["-s"])
+        .arg(&obj)
+        .output()
+        .expect("readelf -s");
+    assert!(sym.status.success(), "readelf -s failed");
+    let symtab = String::from_utf8_lossy(&sym.stdout);
+    // default_func: DEFAULT visibility
+    let default_line = symtab
+        .lines()
+        .find(|l| l.contains("default_func"))
+        .unwrap_or_else(|| panic!("missing default_func: {symtab}"));
+    assert!(
+        default_line.contains("DEFAULT"),
+        "default_func should be DEFAULT: {default_line}"
+    );
+    // hidden_func: HIDDEN visibility
+    let hidden_line = symtab
+        .lines()
+        .find(|l| l.contains("hidden_func"))
+        .unwrap_or_else(|| panic!("missing hidden_func: {symtab}"));
+    assert!(
+        hidden_line.contains("HIDDEN"),
+        "hidden_func should be HIDDEN: {hidden_line}"
+    );
+    // protected_func: PROTECTED visibility
+    let prot_line = symtab
+        .lines()
+        .find(|l| l.contains("protected_func"))
+        .unwrap_or_else(|| panic!("missing protected_func: {symtab}"));
+    assert!(
+        prot_line.contains("PROTECTED"),
+        "protected_func should be PROTECTED: {prot_line}"
+    );
+    // hidden_var: HIDDEN visibility for variable
+    let hidden_var_line = symtab
+        .lines()
+        .find(|l| l.contains("hidden_var"))
+        .unwrap_or_else(|| panic!("missing hidden_var: {symtab}"));
+    assert!(
+        hidden_var_line.contains("HIDDEN"),
+        "hidden_var should be HIDDEN: {hidden_var_line}"
+    );
+    let _ = fs::remove_file(&obj);
+}
+
 /// #pragma pack / weak / STDC FENV_ACCESS / GCC diagnostic
 #[test]
 #[cfg(unix)]
