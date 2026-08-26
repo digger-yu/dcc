@@ -131,6 +131,8 @@ pub struct Preprocessor {
     pub visibility_history: Vec<(u32, String)>,
     /// __BASE_FILE__: 主源文件名 (不随 #include 变化)
     base_file: String,
+    /// __INCLUDE_LEVEL__: 当前 include 嵌套深度 (0 = 主文件)
+    include_level: u32,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -516,6 +518,7 @@ pub fn preprocess(
         visibility_stack: vec!["default".to_string()],
         visibility_history: Vec::new(),
         base_file: file.to_string(),
+        include_level: 0,
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -2328,7 +2331,10 @@ impl Preprocessor {
                 // 记录依赖闭包起点, 用于提取本次处理期间的传递依赖
                 let deps_before = self.dep_hashes.len();
                 self.base_dir = full_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+                // __INCLUDE_LEVEL__: 进入 include 时自增, 退出时自减
+                self.include_level += 1;
                 self.process_text(&text, &full_path.to_string_lossy());
+                self.include_level -= 1;
                 if let Some(def) = saved_false {
                     self.macros.insert("false".to_string(), def);
                 }
@@ -3237,6 +3243,12 @@ impl Preprocessor {
                 // GCC 兼容: 展开为带引号的字符串字面量
                 if ident == "__BASE_FILE__" {
                     out.push_str(&format!("\"{}\"", self.base_file));
+                    continue;
+                }
+                // __INCLUDE_LEVEL__: 当前 include 嵌套深度
+                // 主文件为 0, 第一层 include 为 1, 以此类推
+                if ident == "__INCLUDE_LEVEL__" {
+                    out.push_str(&self.include_level.to_string());
                     continue;
                 }
 
@@ -5264,11 +5276,17 @@ impl Preprocessor {
         let mut names: Vec<&String> = self.macros.keys().collect();
         names.sort();
         // 预处理语义变更时须 bump 此版本，避免复用过期 include 缓存
+        // V13: 将 include_level 纳入缓存键, 使同一头文件在不同嵌套
+        //     深度被 include 时拥有独立的缓存条目, 避免
+        //     __INCLUDE_LEVEL__ 值被固化错误。
         // V12: 缓存条目保存完整宏变更集 (新增 + 重新定义 + #undef 删除),
         //     命中时先删后插回放; 旧版只回放新增宏, 丢失对已存在宏的
         //     覆盖 (如 stddef.h 重新定义内置 NULL), 导致冷/热缓存运行
         //     输出不一致。
-        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V12");
+        let mut hash = Self::hash_content("DCC_PREPROCESSOR_CACHE_V13");
+        // __INCLUDE_LEVEL__: 不同嵌套深度必须独立缓存
+        hash ^= self.include_level as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
         for name in names {
             let def = &self.macros[name];
             hash ^= Self::hash_content(name);
@@ -8460,6 +8478,107 @@ int ok = 1;\n";
             out.text.contains("main.c"),
             "expected __BASE_FILE__ to contain 'main.c', output: {}",
             out.text
+        );
+    }
+
+    /// __INCLUDE_LEVEL__: 主文件为 0, 第一层 include 为 1, 以此类推
+    #[test]
+    fn include_level_macro_tracks_nesting_depth() {
+        use std::fs;
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("dcc_inclevel_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 创建第二层头文件 (include level 2)
+        let hdr2 = dir.join("level2.h");
+        fs::write(&hdr2, "int l2 = __INCLUDE_LEVEL__;\n").unwrap();
+        // 创建第一层头文件 (include level 1)
+        let hdr1 = dir.join("level1.h");
+        let mut f = fs::File::create(&hdr1).unwrap();
+        writeln!(f, "int l1 = __INCLUDE_LEVEL__;").unwrap();
+        writeln!(f, "#include \"level2.h\"").unwrap();
+        drop(f);
+        // 创建主源文件 (include level 0)
+        let src = dir.join("main.c");
+        let mut f = fs::File::create(&src).unwrap();
+        writeln!(f, "int l0 = __INCLUDE_LEVEL__;").unwrap();
+        writeln!(f, "#include \"level1.h\"").unwrap();
+        drop(f);
+        let out = preprocess(
+            &fs::read(&src).unwrap(),
+            src.to_str().unwrap(),
+            &[dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let diags = &out.diags;
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(d.sev, crate::diagnostics::Severity::Error)
+            })
+            .collect();
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        // 检查各层的 __INCLUDE_LEVEL__ 值
+        assert!(
+            out.text.contains("int l0 = 0;"),
+            "expected main file level 0, output: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("int l1 = 1;"),
+            "expected level1.h level 1, output: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("int l2 = 2;"),
+            "expected level2.h level 2, output: {}",
+            out.text
+        );
+    }
+
+    /// __INT_MAX__ / __INT64_MAX__ / __INTMAX_MAX__: 整型极限值宏
+    #[test]
+    fn int_max_macros_defined_correctly() {
+        let out = preprocess(
+            b"int a = __INT_MAX__;\n\
+              long b = __INT64_MAX__;\n\
+              long c = __INTMAX_MAX__;\n",
+            "int-macros.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let output = out.text;
+        let diags = out.diags;
+        assert!(diags.is_empty(), "{diags:?}");
+        // __INT_MAX__ = 2147483647 (2^31 - 1)
+        assert!(
+            output.contains("int a = 2147483647;"),
+            "expected __INT_MAX__ = 2147483647, output: {output}"
+        );
+        // __INT64_MAX__ = 9223372036854775807L (2^63 - 1)
+        assert!(
+            output.contains("long b = 9223372036854775807L;"),
+            "expected __INT64_MAX__ = 9223372036854775807L, output: {output}"
+        );
+        // __INTMAX_MAX__ = 9223372036854775807L (x86_64 LP64: long int)
+        assert!(
+            output.contains("long c = 9223372036854775807L;"),
+            "expected __INTMAX_MAX__ = 9223372036854775807L, output: {output}"
         );
     }
 }
