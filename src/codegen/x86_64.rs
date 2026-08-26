@@ -4972,6 +4972,13 @@ impl Codegen {
             self.label(&f.name.name);
             func_start
         };
+        // __attribute__((naked)): 不生成 prologue/epilogue，
+        // 函数体完全由内联汇编组成，直接发射 asm 指令后返回。
+        // 必须在 ftrace/prologue 之前检查，避免插入编译器生成的代码。
+        if f.is_naked {
+            self.compile_naked_func(f, prog, func_start);
+            return;
+        }
         // ftrace: -mfentry/-mrecord-mcount insert call __fentry__ before prologue
         if matches!(
             self.target.ftrace_mode,
@@ -5403,6 +5410,107 @@ impl Codegen {
                 }
                 self.compile_func(&nf_decl, prog);
             }
+        }
+    }
+
+    /// __attribute__((naked)) 函数: 不生成 prologue/epilogue，
+    /// 函数体完全由内联汇编组成。仅处理 asm 语句，跳过所有其他语句。
+    fn compile_naked_func(&mut self, f: &FuncDecl, _prog: &Program, func_start: u64) {
+        self.expr_depth = 0;
+        self.temp_slots = 0;
+        if let Some(body) = &f.body {
+            for item in &body.items {
+                match item {
+                    BlockItem::Stmt(Stmt::Expr { e, .. }) => {
+                        self.gen_naked_asm_expr(e);
+                    }
+                    BlockItem::Stmt(Stmt::AsmGoto {
+                        asm_str,
+                        outputs,
+                        output_names,
+                        output_constraints,
+                        inputs,
+                        input_names,
+                        input_constraints,
+                        clobbers,
+                        goto_labels,
+                        span,
+                    }) => {
+                        self.current_asm_src_line = span.line;
+                        let mut resolved_asm = asm_str.clone();
+                        let label_base = outputs.len() + inputs.len();
+                        for (i, label) in goto_labels.iter().enumerate().rev() {
+                            resolved_asm =
+                                Self::asm_replace_label_idx(&resolved_asm, i, &label.name);
+                            resolved_asm = Self::asm_replace_label_idx(
+                                &resolved_asm,
+                                label_base + i,
+                                &label.name,
+                            );
+                            resolved_asm = resolved_asm
+                                .replace(&format!("%l[{}]", label.name), &label.name);
+                        }
+                        self.emit_asm_text_lines(&resolved_asm, span);
+                    }
+                    _ => {} // naked 函数忽略非 asm 语句
+                }
+            }
+        }
+        // 记录函数大小
+        let func_end = self.pos();
+        self.func_sizes
+            .insert(f.name.name.clone(), func_end - func_start);
+    }
+
+    /// 在 naked 函数中处理表达式: 仅处理 AsmExpr，其他忽略
+    fn gen_naked_asm_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::AsmExpr {
+                asm_str,
+                outputs,
+                output_names,
+                output_constraints,
+                inputs,
+                input_names,
+                input_constraints,
+                clobbers,
+                span,
+                ..
+            } => {
+                self.current_asm_src_line = span.line;
+                self.emit_inline_asm(
+                    asm_str,
+                    outputs,
+                    output_names,
+                    output_constraints,
+                    inputs,
+                    input_names,
+                    input_constraints,
+                    clobbers,
+                );
+            }
+            // 语句表达式 ({...}) 可能包含 asm: 递归处理
+            Expr::StmtExpr { block, .. } => {
+                for item in &block.items {
+                    if let BlockItem::Stmt(Stmt::Expr { e: inner, .. }) = item {
+                        self.gen_naked_asm_expr(inner);
+                    }
+                }
+            }
+            _ => {} // 忽略非 asm 表达式
+        }
+    }
+
+    /// 将 asm 文本行发射到代码流中 (naked 函数 asm goto 用)
+    fn emit_asm_text_lines(&mut self, resolved_asm: &str, span: &crate::diagnostics::Span) {
+        let lines: Vec<String> = resolved_asm
+            .split('\n')
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        for line in &lines {
+            self.current_asm_src_line = span.line;
+            self.emit_asm_line(line);
         }
     }
 
