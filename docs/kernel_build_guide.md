@@ -2,7 +2,7 @@
 
 > 目标版本：**Linux 7.1 / x86_64**。本地验收目录：`./`。
 
-## 当前进度（2026-08-26）
+## 当前进度（2026-08-27）
 
 | 阶段 | 状态 |
 |------|------|
@@ -16,7 +16,7 @@
 | modpost `file2alias.c` 单 TU | ✅ |
 | LTO 链接 `-r` 多 `.o` + dead symbol gc | ✅ `ld -r --gc-sections` + `.llvm.lto` |
 | `scripts/modpost_link.sh` | ✅ Rust fixdep + dcc 三 TU（modpost/file2alias/sumversion） |
-| 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ✅ **vmlinux 已生成**（16MB ELF x86-64，零 objtool 错误） |
+| 全树 `make CC=dcc` / vmlinux / bzImage / QEMU | ✅ **vmlinux + QEMU boot 验证通过**（16MB ELF，串口启动日志正常） |
 
 ### 本地一键验证
 
@@ -84,6 +84,39 @@ dcc 宿主 C 尚未覆盖。请用 `scripts/prepare0_full.sh` 验收等价窄目
 
 **全树 smoke**：`make CC=dcc HOSTCC=gcc bzImage` 为当前推荐混合模式（内核 TU 用 dcc，
 kconfig/fixdep 等宿主工具用 gcc 或 Rust fixdep）。步骤 7/10 需先产出 vmlinux/bzImage。
+
+**QEMU 启动验证**：`scripts/qemu_boot_matrix.sh` 使用 `qemu-system-x86_64` 加载
+bzImage 并检测启动日志。内核必须启用串口控制台支持：
+
+```bash
+# 内核配置必须启用以下选项（defconfig 默认未启用）
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_CORE=y
+CONFIG_SERIAL_CORE_CONSOLE=y
+```
+
+可通过 `scripts/config` 启用：
+
+```bash
+cd /path/to/linux-7.1
+scripts/config --enable CONFIG_SERIAL_8250
+scripts/config --enable CONFIG_SERIAL_8250_CONSOLE
+make olddefconfig
+```
+
+启动命令：
+
+```bash
+qemu-system-x86_64 \
+    -kernel arch/x86/boot/bzImage \
+    -m 512M -no-reboot -display none -nographic \
+    -append "console=ttyS0 panic=-1"
+```
+
+预期输出包含 `Linux version 7.1.0` 等启动日志。
+无 initramfs 时最终会因无法挂载根文件系统而 panic，这是预期行为，
+`qemu_boot_matrix.sh` 会将此情况视为 boot smoke 通过。
 
 ### asm-offsets 验收（prepare0 步骤 4–5）
 
@@ -348,7 +381,7 @@ make CC=dcc kernel/
 
 ### 5.4 已知限制
 
-DCC 已成功编译完整 Linux 7.1 内核并生成 vmlinux，但仍有以下注意事项：
+DCC 已成功编译完整 Linux 7.1 内核并生成 vmlinux，且 QEMU 启动验证通过，但仍有以下注意事项：
 
 | 问题 | 原因 | 状态 |
 |------|------|------|
@@ -356,6 +389,7 @@ DCC 已成功编译完整 Linux 7.1 内核并生成 vmlinux，但仍有以下注
 | 语义/类型检查 | percpu、thread_info 等内联宏展开类型不完整 | asm-offsets **已通过**（2026-07-17） |
 | codegen 不完整 | 部分 x86_64 指令尚未实现 | 持续改进中 |
 | vmlinux 生成 | 完整内核链接 | ✅ **已完成**（2026-08-25，16MB ELF，零 objtool 错误） |
+| QEMU 启动 | bzImage 串口启动日志 | ✅ **已验证**（2026-08-27，需启用 CONFIG_SERIAL_8250_CONSOLE） |
 
 ## 6. 调试技巧
 
