@@ -70,6 +70,8 @@ struct ParsedAttrs {
     /// 禁用基于类型的别名分析 (TBAA)。内核中 __bitwise 类型（如 __le32、__be32）
     /// 依赖此属性进行安全的类型双关。
     may_alias: bool,
+    /// __attribute__((packed/__packed__))
+    is_packed: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -217,6 +219,9 @@ impl ParsedAttrs {
         }
         if other.may_alias {
             self.may_alias = true;
+        }
+        if other.is_packed {
+            self.is_packed = true;
         }
     }
 }
@@ -600,36 +605,6 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
         }
-    }
-    /// 跳过 __attribute__((...)) 并报告是否含 packed/__packed__
-    /// (enum 的 packed 布局需要该标志: `enum __attribute__((packed)) E { ... }`)
-    fn skip_attributes_packed(&mut self) -> bool {
-        let mut packed = false;
-        while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-            self.advance(); // __attribute__
-            if self.cur.kind == TokKind::LParen {
-                self.advance();
-            } // (
-            if self.cur.kind == TokKind::LParen {
-                self.advance();
-            } // (
-            let mut depth = 2i32;
-            while depth > 0 && self.cur.kind != TokKind::Eof {
-                if depth == 2
-                    && self.cur.kind == TokKind::Ident
-                    && (self.cur.text == "packed" || self.cur.text == "__packed__")
-                {
-                    packed = true;
-                }
-                if self.cur.kind == TokKind::LParen {
-                    depth += 1;
-                } else if self.cur.kind == TokKind::RParen {
-                    depth -= 1;
-                }
-                self.advance();
-            }
-        }
-        packed
     }
 
     /// Parse a constant expression inside `__attribute__((aligned(...)))`.
@@ -1297,6 +1272,11 @@ impl<'a> Parser<'a> {
                     // __attribute__((may_alias)): 类型属性，禁用 TBAA
                     "may_alias" => {
                         attrs.may_alias = true;
+                        self.advance();
+                    }
+                    // __attribute__((packed/__packed__))
+                    "packed" => {
+                        attrs.is_packed = true;
                         self.advance();
                     }
                     // CUDA/HIP 属性拼写 (__attribute__((global)) 等形式):
@@ -4359,8 +4339,11 @@ impl<'a> Parser<'a> {
         }
         if self.cur.kind == TokKind::KwEnum {
             self.advance();
-            // 检测并跳过 enum 名前的属性: `enum __attribute__((packed)) E`
-            let mut enum_packed = self.skip_attributes_packed();
+            // 检测 enum 名前的属性: `enum __attribute__((packed)) E`
+            let pre_enum_attrs = self.parse_attributes();
+            let mut enum_packed = pre_enum_attrs.is_packed;
+            // 非类型属性 (section, used 等) 存入 decl_attrs 供后续声明使用
+            self.decl_attrs.merge(pre_enum_attrs);
             let nm = if self.cur.kind == TokKind::Ident {
                 let n = self.cur.text.clone();
                 self.advance();
@@ -4463,8 +4446,11 @@ impl<'a> Parser<'a> {
                     .map(|(id, v)| (id.name.clone(), v.unwrap_or(0)))
                     .collect();
                 let vals_rc = Arc::new(vals);
-                // 检查 enum 体后的 __attribute__((packed/__packed__))
-                enum_packed |= self.skip_attributes_packed();
+                // 检查 enum 体后的 __attribute__((packed/used/section/...))
+                let post_enum_attrs = self.parse_attributes();
+                enum_packed |= post_enum_attrs.is_packed;
+                // 非类型属性存入 decl_attrs 供后续变量声明使用
+                self.decl_attrs.merge(post_enum_attrs);
                 // packed 属性优先: 编码为 1 字节有符号 (与旧行为一致)
                 let under = if enum_packed {
                     Some(Box::new(Type::SChar))
