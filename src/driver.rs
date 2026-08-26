@@ -183,6 +183,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return run_builtin_linker(&cfg);
     }
 
+    // Multi-file parallel compilation: -c/-S/-E/-fsyntax-only with
+    // multiple inputs compiles each file independently in parallel.
+    if cfg.inputs.len() > 1
+        && (cfg.relocatable || cfg.emit_asm || cfg.preprocess_only || cfg.syntax_only)
+    {
+        return compile_multiple_files(&cfg);
+    }
+
     let input = cfg.inputs.first().ok_or_else(|| {
         vec![Diagnostic::err(
             "E0100",
@@ -859,6 +867,130 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     Ok(())
+}
+
+/// Multi-file parallel compilation: compile each input file independently.
+///
+/// Uses `std::thread::scope` (consistent with existing function-level
+/// parallel codegen in `codegen/x86_64.rs`). Worker count is controlled
+/// by `-j`/`--jobs`; defaults to `available_parallelism()`.
+///
+/// Each worker derives per-file output/dep names from the input stem,
+/// clones the `Config`, and calls `run()` for the single file.
+fn compile_multiple_files(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
+    let n = cfg.inputs.len();
+    let force_single = cfg.jobs == Some(1);
+    let degree = if force_single {
+        1
+    } else {
+        let max_workers = cfg
+            .jobs
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(4)
+            });
+        max_workers.min(n)
+    };
+
+    if cfg.verbose {
+        eprintln!(
+            "dcc: compiling {} files with {} worker(s)",
+            n, degree
+        );
+    }
+
+    // Sequential fallback for -j1 or single effective worker
+    if degree <= 1 {
+        let mut all_diags: Vec<Diagnostic> = Vec::new();
+        for input in &cfg.inputs {
+            let mut c = cfg.clone();
+            c.inputs = vec![input.clone()];
+            let stem = input
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if cfg.emit_asm {
+                c.output = PathBuf::from(format!("{}.s", stem));
+            } else if cfg.relocatable {
+                c.output = PathBuf::from(format!("{}.o", stem));
+            }
+            // Per-file dep file
+            if cfg.gen_dep {
+                c.dep_file = Some(PathBuf::from(format!("{}.d", stem)));
+                c.dep_target = Some(c.output.display().to_string());
+            }
+            if let Err(diags) = run(c) {
+                all_diags.extend(diags);
+            }
+        }
+        if all_diags.is_empty() {
+            return Ok(());
+        } else {
+            return Err(all_diags);
+        }
+    }
+
+    // Parallel compilation using std::thread::scope
+    let next_job = std::sync::atomic::AtomicUsize::new(0);
+    let slots = std::sync::Mutex::new(vec![None; n]);
+    std::thread::scope(|scope| {
+        for _ in 0..degree {
+            scope.spawn(|| {
+                loop {
+                    let idx =
+                        next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= n {
+                        break;
+                    }
+                    let input = &cfg.inputs[idx];
+                    let mut c = cfg.clone();
+                    c.inputs = vec![input.clone()];
+
+                    let stem = input
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if cfg.emit_asm {
+                        c.output = PathBuf::from(format!("{}.s", stem));
+                    } else if cfg.relocatable {
+                        c.output = PathBuf::from(format!("{}.o", stem));
+                    }
+                    if cfg.gen_dep {
+                        c.dep_file =
+                            Some(PathBuf::from(format!("{}.d", stem)));
+                        c.dep_target =
+                            Some(c.output.display().to_string());
+                    }
+
+                    let result = run(c);
+                    slots.lock().unwrap()[idx] = Some(result);
+                }
+            });
+        }
+    });
+
+    let results: Vec<Result<(), Vec<Diagnostic>>> = slots
+        .into_inner()
+        .expect("parallel compilation mutex poisoned")
+        .into_iter()
+        .map(|r| r.expect("parallel compilation dropped a file"))
+        .collect();
+
+    // Collect results in input order; merge all diagnostics
+    let mut all_diags: Vec<Diagnostic> = Vec::new();
+    for result in results {
+        if let Err(diags) = result {
+            all_diags.extend(diags);
+        }
+    }
+    if all_diags.is_empty() {
+        Ok(())
+    } else {
+        Err(all_diags)
+    }
 }
 
 /// 过滤 -MMD 模式下的系统头文件依赖。
