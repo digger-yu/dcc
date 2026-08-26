@@ -339,6 +339,23 @@ C++ 前端将 C++ 特性降级为 C 代码供后端消费。已实装：
   `Program`。
 - **回归**：`parallel_codegen_o2_multi_function` 断言并行/串行 `.o` 字节一致。
 
+## 多文件并行编译（`driver.rs`）
+
+- **触发**：`dcc -c a.c b.c ...`（或 `-S`/`-E`/`-fsyntax-only`）多源文件输入；
+  内置链接器路径 `dcc a.c b.c -pie` 多源文件输入。
+- **CLI**：`-j<N>`/`--jobs=<N>` 控制 worker 数；`None`（默认）= 
+  `available_parallelism()`；`Some(1)` 强制串行。
+- **机制**：`compile_multiple_files()` 使用 `std::thread::scope` + 原子 job 索引
+  work-stealing；每个 worker clone `Config`、设单文件输入 + 派生输出名、
+  调用 `run()` 完成完整单文件编译流程。
+- **输出命名**：每个输入文件独立派生（`foo.c` → `foo.o`、`-S` 时 `foo.s`）；
+  `-o` 与多输入互斥（GCC 行为）。
+- **内置链接器**：`run_builtin_linker()` 中多源文件同样并行编译为临时 `.o`
+  后再进入链接阶段。
+- **确定性**：并行与串行模式产出字节一致的 `.o` 文件。
+- **回归**：`multi_file_parallel_compile` / `multi_file_parallel_byte_identical`
+  验证多文件并行正确性。
+
 ## GNU 控制流扩展
 
 Parser 直接表示 `&&label`、`goto *expr` 和 `asm goto`。标签地址使用

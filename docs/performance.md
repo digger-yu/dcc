@@ -22,6 +22,7 @@ T_dcc = T_gcc / (S_macro * S_header * S_type * S_opt * S_dbg * S_codegen * S_io)
 | S_opt | 按需优化 | 2-3x | 只跑已知收益高的 pass,跳过 LLVM 风格的多 pass |
 | S_dbg | 调试信息直出 | 1.5-2x | AST 留类型,直接 emit DWARF |
 | S_codegen | 并行代码生成 | 2x | `-O2+` 函数级 `std::thread` worker 池；`DCC_NO_PARALLEL=1` 可关 |
+| S_multifile | 多文件并行编译 | N/core | `dcc -c a.c b.c ... -j<N>` work-stealing；内置链接器多源并行编译 |
 | S_io | mmap 输入 | 1.2-1.5x | `src/mmap_io.rs` 零拷贝读源（ADR-006） |
 | S_pp | 预处理输出精简 | 3.4x | 阶段3移除注释+跳过空行, 343K→100K 行 |
 

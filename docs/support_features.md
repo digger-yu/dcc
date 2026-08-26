@@ -482,5 +482,5 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | per-function section | `-ffunction-sections` / `-flto` 默认 `.text.<name>` |
 | jump_label 静态 key 声明 | `_DECLARE_STATIC_KEY_0/1` |
 | rela 引用标记 | `elf::referenced_symbol_names` → `lto::mark_references_from_objects` |
-| CLI 多输入 | `-r a.o [b.o…] -o merged.o` 链接模式 |
+| CLI 多输入 | `-r a.o [b.o…] -o merged.o` 链接模式；`-c a.c b.c ...` 多源文件并行编译 (`-j<N>` 控制 worker 数) |
 | Bootstrap 回归对比 | `src/bootstrap.rs`：字节级 / 语义级三层对比 |
