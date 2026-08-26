@@ -129,6 +129,8 @@ pub struct Preprocessor {
     /// #pragma GCC visibility 变更历史: (行号, 可见性).
     /// 供 codegen 按位置查询符号可见性设置
     pub visibility_history: Vec<(u32, String)>,
+    /// __BASE_FILE__: 主源文件名 (不随 #include 变化)
+    base_file: String,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -513,6 +515,7 @@ pub fn preprocess(
         system_header: false,
         visibility_stack: vec!["default".to_string()],
         visibility_history: Vec::new(),
+        base_file: file.to_string(),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -3228,6 +3231,12 @@ impl Preprocessor {
                     let v = self.counter;
                     self.counter = self.counter.wrapping_add(1);
                     out.push_str(&v.to_string());
+                    continue;
+                }
+                // __BASE_FILE__: 主源文件名 (不随 #include 变化)
+                // GCC 兼容: 展开为带引号的字符串字面量
+                if ident == "__BASE_FILE__" {
+                    out.push_str(&format!("\"{}\"", self.base_file));
                     continue;
                 }
 
@@ -8405,5 +8414,52 @@ int ok = 1;\n";
         .iter()
         .any(|m| out.text.contains(m));
         assert!(has_month, "expected month abbreviation in timestamp, output: {}", out.text);
+    }
+
+    /// __BASE_FILE__: 应展开为主源文件名 (不随 #include 变化)
+    #[test]
+    fn base_file_macro_expands_to_main_source() {
+        use std::fs;
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("dcc_basefile_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 创建头文件
+        let hdr = dir.join("header.h");
+        fs::write(&hdr, "const char* h = __BASE_FILE__;\n").unwrap();
+        // 创建主源文件
+        let src = dir.join("main.c");
+        let mut f = fs::File::create(&src).unwrap();
+        writeln!(f, "#include \"header.h\"").unwrap();
+        writeln!(f, "const char* m = __BASE_FILE__;").unwrap();
+        drop(f);
+        let out = preprocess(
+            &fs::read(&src).unwrap(),
+            src.to_str().unwrap(),
+            &[dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let diags = &out.diags;
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(d.sev, crate::diagnostics::Severity::Error)
+            })
+            .collect();
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        // __BASE_FILE__ 在主文件和头文件中都应展开为主文件名
+        assert!(
+            out.text.contains("main.c"),
+            "expected __BASE_FILE__ to contain 'main.c', output: {}",
+            out.text
+        );
     }
 }
