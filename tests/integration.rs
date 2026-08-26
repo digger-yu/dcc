@@ -17723,3 +17723,72 @@ int main(void) {
         "asm should contain tls_var declaration and main function"
     );
 }
+
+// ---------------------------------------------------------------------------
+// QualType qualifier tests
+// ---------------------------------------------------------------------------
+
+/// QualType: const/volatile/restrict qualifiers compile and run correctly
+#[test]
+fn qual_type_compiles_and_runs() {
+    let source = include_str!("fixtures/c/qual_type.c");
+    let (output, exe) = run_compile_and_run("qual-type", source);
+    assert!(
+        output.status.success(),
+        "qual_type compile+run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "qual_type main() should return 0, got {rc}");
+    let _ = fs::remove_file(&exe);
+}
+
+/// QualType: const/volatile/restrict qualifiers produce valid object code
+#[test]
+fn qual_type_object_code() {
+    let source = include_str!("fixtures/c/qual_type.c");
+    let (output, obj) = run_object_test("qual-type-obj", source);
+    let _ = fs::remove_file(obj);
+    assert!(
+        output.status.success(),
+        "qual_type object compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// QualType: volatile variable survives optimization at -O2
+#[test]
+fn qual_type_volatile_survives_o2() {
+    let source = "\
+volatile int flag = 0;
+int main(void) {
+    flag = 1;
+    return flag - 1;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("qual-volatile-o2", source, &["-O2"]);
+    assert!(
+        output.status.success(),
+        "volatile O2 compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "volatile write/read must survive -O2, got rc={rc}");
+    let _ = fs::remove_file(&exe);
+}
+
+/// QualType: syntax-only test for multi-level pointer qualifiers
+#[test]
+fn qual_type_multi_level_ptr_syntax() {
+    let source = "\
+const int *volatile *restrict p;
+volatile const int **q;
+int main(void) { return 0; }
+";
+    let output = run_syntax_test("qual-multi-ptr", source);
+    assert!(
+        output.status.success(),
+        "multi-level pointer qualifiers failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
