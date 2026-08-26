@@ -387,7 +387,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | 链接器脚本 INPUT()/GROUP() | `INPUT(file1, file2, ...)` / `GROUP(lib1, lib2, ...)` 指定输入文件和库 |
 | 链接器脚本 NOCROSSREFS | `NOCROSSREFS(section1, section2, ...)` 禁止跨节引用检查；用于内核节隔离 |
 | 链接器脚本 INSERT 命令 | `INSERT AFTER section` / `INSERT BEFORE section` 插入额外节规则；动态修改脚本 |
-| 链接器脚本 VERSION 块 | `VERSION { ... }` 符号版本控制信息解析（解析并忽略，兼容 GNU ld） |
+| 链接器脚本 VERSION 块 | `VERSION { version_id [(@parent)] { global: sym; local: sym; }; }` 完整解析符号版本控制块；支持多版本节点、父版本继承、global/local 符号列表、通配符 `*`；解析结果导入 VersionTable 与 `.symver` 指令统一生成 `.gnu.version` / `.gnu.version_d` 节 |
 | 链接器脚本 REGION_ALIAS | `REGION_ALIAS(alias, region)` 内存区域别名；架构特定脚本中使用 |
 
 ## IR 优化

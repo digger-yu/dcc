@@ -11,6 +11,7 @@
 //   - ASSERT / SIZEOF / ADDR / ABSOLUTE / ALIGN / ADDR
 //   - NEXT / LOG2CEIL / ORIGIN / ORG / LENGTH 函数
 //   - /DISCARD/ 与 (INFO) 虚拟节
+//   - VERSION { ... } 符号版本控制块 (global/local/parent)
 //   - 表达式：算术、位运算、三元、比较
 //
 // 用法：
