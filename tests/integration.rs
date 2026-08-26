@@ -17792,3 +17792,306 @@ int main(void) { return 0; }
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ===== Cross-compile predefined macro tests =====
+
+/// Verify that --target=aarch64 defines __aarch64__ and NOT __x86_64__.
+#[test]
+fn cross_compile_aarch64_predefined_macros() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-cross-a64-macros-{}.c", std::process::id()));
+    fs::write(
+        &src,
+        "\
+#ifdef __aarch64__
+int has_aarch64 = 1;
+#endif
+#ifdef __x86_64__
+int has_x86_64 = 1;
+#endif
+#ifdef __LP64__
+int has_lp64 = 1;
+#endif
+int main(void) { return 0; }
+",
+    )
+    .expect("write");
+    let out = dir.join(format!("dcc-cross-a64-macros-{}.out", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-E", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src);
+    assert!(
+        output.status.success(),
+        "aarch64 preprocess failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = fs::read_to_string(&out).expect("read output");
+    let _ = fs::remove_file(&out);
+    assert!(
+        text.contains("has_aarch64"),
+        "aarch64 target must define __aarch64__"
+    );
+    assert!(
+        !text.contains("has_x86_64"),
+        "aarch64 target must NOT define __x86_64__"
+    );
+    assert!(
+        text.contains("has_lp64"),
+        "aarch64 target must define __LP64__"
+    );
+}
+
+/// Verify that --target=arm-linux-gnueabihf defines __arm__ and NOT __LP64__.
+#[test]
+fn cross_compile_arm_predefined_macros() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-cross-arm-macros-{}.c", std::process::id()));
+    fs::write(
+        &src,
+        "\
+#ifdef __arm__
+int has_arm = 1;
+#endif
+#ifdef __x86_64__
+int has_x86_64 = 1;
+#endif
+#ifdef __LP64__
+int has_lp64 = 1;
+#endif
+#ifdef __ILP32__
+int has_ilp32 = 1;
+#endif
+int main(void) { return 0; }
+",
+    )
+    .expect("write");
+    let out = dir.join(format!("dcc-cross-arm-macros-{}.out", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "arm-linux-gnueabihf", "-E", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src);
+    assert!(
+        output.status.success(),
+        "arm preprocess failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = fs::read_to_string(&out).expect("read output");
+    let _ = fs::remove_file(&out);
+    assert!(
+        text.contains("has_arm"),
+        "arm target must define __arm__"
+    );
+    assert!(
+        !text.contains("has_x86_64"),
+        "arm target must NOT define __x86_64__"
+    );
+    assert!(
+        !text.contains("has_lp64"),
+        "arm target must NOT define __LP64__"
+    );
+    assert!(
+        text.contains("has_ilp32"),
+        "arm target must define __ILP32__"
+    );
+}
+
+/// Verify that --target=mips-linux-gnu defines __mips__ and big-endian macros.
+#[test]
+fn cross_compile_mips_predefined_macros() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-cross-mips-macros-{}.c", std::process::id()));
+    fs::write(
+        &src,
+        "\
+#ifdef __mips__
+int has_mips = 1;
+#endif
+#ifdef __x86_64__
+int has_x86_64 = 1;
+#endif
+#ifdef __MIPSEB__
+int has_mipseb = 1;
+#endif
+#ifdef __ORDER_BIG_ENDIAN__
+int order_big = __ORDER_BIG_ENDIAN__;
+#endif
+int main(void) { return 0; }
+",
+    )
+    .expect("write");
+    let out = dir.join(format!("dcc-cross-mips-macros-{}.out", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "mips-linux-gnu", "-E", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src);
+    assert!(
+        output.status.success(),
+        "mips preprocess failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = fs::read_to_string(&out).expect("read output");
+    let _ = fs::remove_file(&out);
+    assert!(
+        text.contains("has_mips"),
+        "mips target must define __mips__"
+    );
+    assert!(
+        !text.contains("has_x86_64"),
+        "mips target must NOT define __x86_64__"
+    );
+    assert!(
+        text.contains("has_mipseb"),
+        "mips target must define __MIPSEB__ (big-endian)"
+    );
+}
+
+/// Verify that --target=riscv64 defines __riscv and __riscv_xlen=64.
+#[test]
+fn cross_compile_riscv64_predefined_macros() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-cross-rv-macros-{}.c", std::process::id()));
+    fs::write(
+        &src,
+        "\
+#ifdef __riscv
+int has_riscv = 1;
+#endif
+#if __riscv_xlen == 64
+int xlen_is_64 = 1;
+#endif
+#ifdef __x86_64__
+int has_x86_64 = 1;
+#endif
+int main(void) { return 0; }
+",
+    )
+    .expect("write");
+    let out = dir.join(format!("dcc-cross-rv-macros-{}.out", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "riscv64-linux-gnu", "-E", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src);
+    assert!(
+        output.status.success(),
+        "riscv64 preprocess failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = fs::read_to_string(&out).expect("read output");
+    let _ = fs::remove_file(&out);
+    assert!(
+        text.contains("has_riscv"),
+        "riscv64 target must define __riscv"
+    );
+    assert!(
+        text.contains("xlen_is_64"),
+        "riscv64 target must have __riscv_xlen == 64"
+    );
+    assert!(
+        !text.contains("has_x86_64"),
+        "riscv64 target must NOT define __x86_64__"
+    );
+}
+
+/// Verify that x86-specific macros (__SSE2__, __MMX__) are NOT defined
+/// on non-x86 targets.
+#[test]
+fn cross_compile_no_x86_macros_on_arm() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-cross-no-sse-{}.c", std::process::id()));
+    fs::write(
+        &src,
+        "\
+#ifdef __SSE2__
+int has_sse2 = 1;
+#endif
+#ifdef __MMX__
+int has_mmx = 1;
+#endif
+#ifdef __SEG_FS
+int has_seg_fs = 1;
+#endif
+int main(void) { return 0; }
+",
+    )
+    .expect("write");
+    let out = dir.join(format!("dcc-cross-no-sse-{}.out", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-E", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&src);
+    assert!(output.status.success());
+    let text = fs::read_to_string(&out).expect("read output");
+    let _ = fs::remove_file(&out);
+    assert!(
+        !text.contains("has_sse2"),
+        "aarch64 must NOT define __SSE2__"
+    );
+    assert!(
+        !text.contains("has_mmx"),
+        "aarch64 must NOT define __MMX__"
+    );
+    assert!(
+        !text.contains("has_seg_fs"),
+        "aarch64 must NOT define __SEG_FS"
+    );
+}
+
+/// Verify ELF e_machine header for cross-compiled objects.
+#[test]
+fn cross_compile_elf_machine_headers() {
+    let targets = [
+        ("aarch64-linux-gnu", 183u16), // EM_AARCH64
+        ("riscv64-linux-gnu", 243u16), // EM_RISCV
+        ("mips-linux-gnu", 8u16),      // EM_MIPS
+        ("arm-linux-gnueabihf", 40u16), // EM_ARM
+    ];
+    for (target, expected_machine) in targets {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("dcc-elf-{}-{}.c", target, std::process::id()));
+        let obj = dir.join(format!("dcc-elf-{}-{}.o", target, std::process::id()));
+        fs::write(&src, "int main(void) { return 0; }\n").expect("write");
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(
+            output.status.success(),
+            "target {target}: compile failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = fs::read(&obj).expect("read object");
+        let _ = fs::remove_file(&src);
+        let _ = fs::remove_file(&obj);
+        // ELF magic
+        assert_eq!(&bytes[0..4], &[0x7f, b'E', b'L', b'F']);
+        // e_machine is at offset 18, 2 bytes
+        // For little-endian targets use from_le, for big-endian (mips) use from_be
+        let machine = if target.starts_with("mips") {
+            u16::from_be_bytes([bytes[18], bytes[19]])
+        } else {
+            u16::from_le_bytes([bytes[18], bytes[19]])
+        };
+        assert_eq!(
+            machine, expected_machine,
+            "target {target}: expected e_machine={expected_machine}, got {machine}"
+        );
+    }
+}
