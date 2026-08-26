@@ -356,6 +356,27 @@ C++ 前端将 C++ 特性降级为 C 代码供后端消费。已实装：
 - **回归**：`multi_file_parallel_compile` / `multi_file_parallel_byte_identical`
   验证多文件并行正确性。
 
+## 增量编译（`incremental.rs` + `driver.rs`）
+
+- **触发**：`-fcached` / `--incremental` 标志启用。
+- **原理**：编译是纯函数（源 + 标志 → 目标）。若输入未变，输出无需重算。
+- **指纹计算**：对 (源文件内容 + 影响输出的编译标志) 计算 SipHash 指纹。
+  影响输出的标志包括：`-O`、`-std`、`--target`、`-g`、`-c`/`-S`、
+  `-mcmodel=kernel`、`-mno-sse`、`-fsanitize=*`、`-D` 宏定义、`-I` 路径等。
+- **缓存存储**：`.dcc-cache/` 目录，每个源文件对应一个条目，
+  文件名 = 源路径的哈希，内容 = 当前编译指纹。
+- **判定逻辑**：
+  1. 输出文件不存在 → 必须编译
+  2. 缓存条目不存在 → 首次编译
+  3. 缓存指纹与当前不同 → 源或标志变了，重编译
+  4. 指纹一致 → 跳过编译（cache hit）
+- **适用范围**：仅 `-c`/`-S` 等产出目标文件的模式；
+  `-E`/`-M`/`-MM`/`-fsyntax-only`/stdin/管道输出 不参与增量缓存。
+- **与多文件并行的关系**：`-fcached` 与 `-j<N>` 正交，
+  多文件并行编译中每个文件独立走增量检查。
+- **回归**：`incremental_second_compile_skipped` /
+  `incremental_source_change_triggers_recompile` 等集成测试验证。
+
 ## GNU 控制流扩展
 
 Parser 直接表示 `&&label`、`goto *expr` 和 `asm goto`。标签地址使用
