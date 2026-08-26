@@ -4044,50 +4044,12 @@ impl<'a> Parser<'a> {
             let mut align_n: Option<usize> = None;
             let mut may_alias = false;
             while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                self.advance(); // __attribute__
-                if self.cur.kind == TokKind::LParen {
-                    self.advance();
-                }
-                if self.cur.kind == TokKind::LParen {
-                    self.advance();
-                }
-                let mut depth = 2i32;
-                while depth > 0 && self.cur.kind != TokKind::Eof {
-                    if depth == 2 && self.cur.kind == TokKind::Ident {
-                        let aname = self.cur.text.trim_matches('_').to_string();
-                        if aname == "packed" {
-                            pack = true;
-                        }
-                        if aname == "may_alias" {
-                            may_alias = true;
-                        }
-                        if aname == "aligned" && align_n.is_none() {
-                            // Mark that we need to capture the aligned value
-                            // The value will be captured when we encounter Number at depth==3
-                        }
-                    }
-                    // Capture aligned(N) value: after 'aligned', '(' bumps depth to 3,
-                    // then the Number at depth 3 is the alignment value
-                    if depth == 3 && self.cur.kind == TokKind::Number && align_n.is_none() {
-                        let v = parse_int_lit(&self.cur.text);
-                        if v > 0 {
-                            align_n = Some(v as usize);
-                        }
-                    }
-                    if self.cur.kind == TokKind::LParen {
-                        depth += 1;
-                    }
-                    if self.cur.kind == TokKind::RParen {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    self.advance();
-                }
-                if self.cur.kind == TokKind::RParen {
-                    self.advance();
-                }
+                let pre_attrs = self.parse_attributes();
+                if pre_attrs.is_packed { pack = true; }
+                if pre_attrs.alignment.is_some() { align_n = pre_attrs.alignment; }
+                if pre_attrs.may_alias { may_alias = true; }
+                // 非类型属性存入 decl_attrs 供后续声明使用
+                self.decl_attrs.merge(pre_attrs);
             }
             let nm = if self.cur.kind == TokKind::Ident {
                 let n = self.cur.text.clone();
@@ -4105,71 +4067,11 @@ impl<'a> Parser<'a> {
             // in the name position.
             let nm = if nm == "__attribute__" {
                 // Parse post-body __attribute__((...)) blocks
-                while self.cur.kind == TokKind::LParen {
-                    self.advance(); // (
-                    if self.cur.kind == TokKind::LParen {
-                        self.advance(); // (
-                    }
-                    let mut depth = 2i32;
-                    while depth > 0 && self.cur.kind != TokKind::Eof {
-                        if depth == 2 && self.cur.kind == TokKind::Ident {
-                            let aname =
-                                self.cur.text.trim_matches('_').to_string();
-                            if aname == "packed" {
-                                pack = true;
-                            }
-                            if aname == "may_alias" {
-                                may_alias = true;
-                            }
-                            if aname == "aligned" {
-                                self.advance();
-                                if self.cur.kind == TokKind::LParen {
-                                    self.advance();
-                                    let mut ad = 0i32;
-                                    align_n = self
-                                        .parse_aligned_expr(&mut ad);
-                                    // Skip remaining tokens inside
-                                    // aligned(...)
-                                    while ad > 0
-                                        && self.cur.kind != TokKind::Eof
-                                    {
-                                        if self.cur.kind
-                                            == TokKind::LParen
-                                        {
-                                            ad += 1;
-                                        } else if self.cur.kind
-                                            == TokKind::RParen
-                                        {
-                                            ad -= 1;
-                                            if ad == 0 { break; }
-                                        }
-                                        self.advance();
-                                    }
-                                    // Consume ')' closing aligned(...)
-                                    if self.cur.kind == TokKind::RParen {
-                                        self.advance();
-                                    }
-                                    continue;
-                                } else if align_n.is_none() {
-                                    align_n = Some(16);
-                                }
-                            }
-                        }
-                        if self.cur.kind == TokKind::LParen {
-                            depth += 1;
-                        }
-                        if self.cur.kind == TokKind::RParen {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        self.advance();
-                    }
-                    if self.cur.kind == TokKind::RParen {
-                        self.advance();
-                    }
-                }
+                let post_attrs = self.parse_attributes();
+                if post_attrs.is_packed { pack = true; }
+                if post_attrs.alignment.is_some() { align_n = post_attrs.alignment; }
+                if post_attrs.may_alias { may_alias = true; }
+                self.decl_attrs.merge(post_attrs);
                 // After attributes, check for actual struct name
                 if self.cur.kind == TokKind::Ident
                     && self.cur.text != "__attribute__"
@@ -4190,72 +4092,14 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let mut fields = fields;
-                // 检查 struct 后的 __attribute__((packed/aligned(N)/may_alias))
-                // 注意: 使用 skip_attributes 正确处理嵌套括号, 如 section(".init.text")
-                // pack/align_n already captured from pre-body attributes
+                // 检查 struct 后的 __attribute__((packed/aligned(N)/may_alias/...))
                 if self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                    // 先跳过所有 __attribute__((...))，用深度计数支持嵌套括号
-                    while self.cur.kind == TokKind::Ident && self.cur.text == "__attribute__" {
-                        self.advance(); // __attribute__
-                        if self.cur.kind == TokKind::LParen {
-                            self.advance();
-                        } // (
-                        if self.cur.kind == TokKind::LParen {
-                            self.advance();
-                        } // (
-                        let mut depth = 2i32;
-                        while depth > 0 && self.cur.kind != TokKind::Eof {
-                            // 识别属性名 (仅在 depth==2 时, 否则在嵌套括号内部)
-                            if depth == 2 && self.cur.kind == TokKind::Ident {
-                                let aname = self.cur.text.trim_matches('_').to_string();
-                                if aname == "packed" {
-                                    pack = true;
-                                }
-                                if aname == "may_alias" {
-                                    may_alias = true;
-                                }
-                                if aname == "aligned" {
-                                    self.advance();
-                                    if self.cur.kind == TokKind::LParen {
-                                        self.advance();
-                                        let mut ad = 0i32;
-                                        align_n = self.parse_aligned_expr(&mut ad);
-                                        // Skip remaining tokens inside aligned(...)
-                                        while ad > 0 && self.cur.kind != TokKind::Eof {
-                                            if self.cur.kind == TokKind::LParen {
-                                                ad += 1;
-                                            } else if self.cur.kind == TokKind::RParen {
-                                                ad -= 1;
-                                                if ad == 0 { break; }
-                                            }
-                                            self.advance();
-                                        }
-                                        // Consume ')' closing aligned(...)
-                                        // so outer depth-tracking is not confused
-                                        if self.cur.kind == TokKind::RParen {
-                                            self.advance();
-                                        }
-                                        continue; // skip outer depth-tracking
-                                    } else if align_n.is_none() {
-                                        align_n = Some(16);
-                                    }
-                                }
-                            }
-                            if self.cur.kind == TokKind::LParen {
-                                depth += 1;
-                            }
-                            if self.cur.kind == TokKind::RParen {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            self.advance();
-                        }
-                        if self.cur.kind == TokKind::RParen {
-                            self.advance();
-                        } // 消耗外层的 )
-                    }
+                    let post_attrs = self.parse_attributes();
+                    if post_attrs.is_packed { pack = true; }
+                    if post_attrs.alignment.is_some() { align_n = post_attrs.alignment; }
+                    if post_attrs.may_alias { may_alias = true; }
+                    // 非类型属性存入 decl_attrs 供后续声明使用
+                    self.decl_attrs.merge(post_attrs);
                 }
                 if pack {
                     Type::layout_struct_packed(&mut fields, is_u);
