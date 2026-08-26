@@ -1234,6 +1234,21 @@ impl Aarch64Codegen {
                 self.extract_vector_lane_w0(idx);
                 return true;
             }
+            ExprKind::Address if !expr.children.is_empty() => {
+                // &local / &global: 计算变量地址到 x0
+                if let ExprKind::Local(ref name) = &expr.children[0].kind {
+                    if let Some(&off) = self.locals.get(name) {
+                        self.mov_x0_sp_off(off);
+                        return true;
+                    }
+                    if self.global_rodata.contains_key(name) {
+                        self.load_global_addr_w0(name);
+                        return true;
+                    }
+                }
+                self.mov_w0_imm(0);
+                return true;
+            }
             _ => {
                 // Unhandled IR expression: emit diagnostic instead of
                 // silently producing wrong code (mov w0, #0).

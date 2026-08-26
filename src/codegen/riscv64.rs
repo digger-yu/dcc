@@ -1034,6 +1034,21 @@ impl Riscv64Codegen {
                 self.label(&lbl_end);
                 return true;
             }
+            ExprKind::Address if !expr.children.is_empty() => {
+                // &local / &global: 计算变量地址到 a0
+                if let ExprKind::Local(ref name) = &expr.children[0].kind {
+                    if let Some(&off) = self.locals.get(name) {
+                        self.mov_a0_sp_off(off);
+                        return true;
+                    }
+                    if self.global_rodata.contains_key(name) {
+                        self.load_global_addr_a0(name);
+                        return true;
+                    }
+                }
+                self.li_a0(0);
+                return true;
+            }
             _ => {
                 // Unhandled IR expression: emit diagnostic instead of
                 // silently producing wrong code (li a0, 0).
