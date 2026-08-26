@@ -1325,7 +1325,7 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     let mut func = Function::new(f.name.name.clone(), f.ret_ty.clone(), f.span.clone());
     func.is_cold = f.is_cold;
     func.is_hot = f.is_hot;
-    func.is_noreturn = false;
+    func.is_noreturn = f.is_noreturn;
     // Collect original local variable names for rebuild_block
     collect_local_decls(&body.items, &mut func.original_locals);
     let mut builder = Builder::new(func);
