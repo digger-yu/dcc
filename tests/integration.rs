@@ -5875,6 +5875,22 @@ fn attr_copy_full_symbol_alias() {
     let _ = fs::remove_file(exe);
 }
 
+/// __attribute__((returns_nonnull)): 验证运行时检查 (返回 NULL 触发 UD2)
+#[test]
+#[cfg(unix)]
+fn attr_returns_nonnull_runtime_check() {
+    let src = include_str!("fixtures/c/attr_returns_nonnull.c");
+    let (output, exe) = run_compile_and_run("attr-returns-nonnull", src);
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "returns_nonnull should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 /// __attribute__((visibility(...))) — ELF symbol visibility
 #[test]
 #[cfg(unix)]
