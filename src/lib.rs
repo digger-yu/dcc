@@ -13,6 +13,7 @@ pub mod cli;
 pub mod codegen;
 pub mod const_eval;
 pub mod cpp;
+pub mod cpuid;
 pub mod debug;
 pub mod diagnostics;
 pub mod driver;
