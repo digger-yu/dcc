@@ -764,6 +764,260 @@ mod tests {
     }
 
     #[test]
+    fn common_overrides_weak() {
+        // COMMON (treated as strong) should override weak definition
+        use crate::codegen::elf::{STT_OBJECT, SHN_COMMON};
+        let dir = std::env::temp_dir();
+        let p1 = dir.join("dcc-resolve-test9-common-weak-a.o");
+        let p2 = dir.join("dcc-resolve-test9-common-weak-b.o");
+        // TU1: weak definition of 'val'
+        let weak_obj = build_minimal_obj(
+            "a",
+            &[ElfSym {
+                name: "val".into(),
+                section: 1,
+                value: 0,
+                size: 4,
+                bind: STB_WEAK,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            }],
+            &[42, 0, 0, 0],
+        );
+        // TU2: COMMON 'val' (size=8)
+        let common_obj = build_minimal_obj(
+            "b",
+            &[ElfSym {
+                name: "val".into(),
+                section: SHN_COMMON,
+                value: 0,
+                size: 8,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            }],
+            &[],
+        );
+        std::fs::write(&p1, &weak_obj).unwrap();
+        std::fs::write(&p2, &common_obj).unwrap();
+        let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
+        let (resolved, errs) = resolve(&bundle, &[]);
+        assert!(errs.is_empty(), "{:?}", errs);
+        let v = resolved.iter().find(|r| r.name == "val").expect("val");
+        assert!(v.defined, "COMMON should define the symbol");
+        assert_eq!(v.size, 8, "COMMON size should win");
+        assert_eq!(v.bind, STB_GLOBAL, "COMMON is treated as GLOBAL");
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
+    fn multiple_weak_largest_wins() {
+        // Multiple weak definitions: largest size wins
+        let dir = std::env::temp_dir();
+        let p1 = dir.join("dcc-resolve-test10-weak-size-a.o");
+        let p2 = dir.join("dcc-resolve-test10-weak-size-b.o");
+        let p3 = dir.join("dcc-resolve-test10-weak-size-c.o");
+        let small = build_minimal_obj(
+            "a",
+            &[ElfSym {
+                name: "w".into(),
+                section: 1,
+                value: 0,
+                size: 4,
+                bind: STB_WEAK,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3],
+        );
+        let large = build_minimal_obj(
+            "b",
+            &[ElfSym {
+                name: "w".into(),
+                section: 1,
+                value: 0,
+                size: 16,
+                bind: STB_WEAK,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3; 16],
+        );
+        let medium = build_minimal_obj(
+            "c",
+            &[ElfSym {
+                name: "w".into(),
+                section: 1,
+                value: 0,
+                size: 8,
+                bind: STB_WEAK,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3; 8],
+        );
+        std::fs::write(&p1, &small).unwrap();
+        std::fs::write(&p2, &large).unwrap();
+        std::fs::write(&p3, &medium).unwrap();
+        let bundle =
+            InputBundle::from_files(&[p1.clone(), p2.clone(), p3.clone()]).unwrap();
+        let (resolved, errs) = resolve(&bundle, &[]);
+        assert!(errs.is_empty(), "weak defs should not error: {:?}", errs);
+        let w = resolved.iter().find(|r| r.name == "w").expect("w");
+        assert_eq!(w.size, 16, "largest weak def should win");
+        assert_eq!(w.bind, STB_WEAK);
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+        let _ = std::fs::remove_file(p3);
+    }
+
+    #[test]
+    fn weak_def_plus_weak_undef_resolves_to_def() {
+        // Weak definition + weak undefined reference → definition wins
+        let dir = std::env::temp_dir();
+        let p1 = dir.join("dcc-resolve-test11-wdef-wundef-a.o");
+        let p2 = dir.join("dcc-resolve-test11-wdef-wundef-b.o");
+        let def_obj = build_minimal_obj(
+            "a",
+            &[ElfSym {
+                name: "hook".into(),
+                section: 1,
+                value: 0,
+                size: 4,
+                bind: STB_WEAK,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3, 0xc3, 0xc3, 0xc3],
+        );
+        let undef_obj = build_minimal_obj(
+            "b",
+            &[ElfSym {
+                name: "hook".into(),
+                section: 0, // undefined
+                value: 0,
+                size: 0,
+                bind: STB_WEAK,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            }],
+            &[0xc3],
+        );
+        std::fs::write(&p1, &def_obj).unwrap();
+        std::fs::write(&p2, &undef_obj).unwrap();
+        let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
+        let (resolved, errs) = resolve(&bundle, &[]);
+        assert!(errs.is_empty(), "{:?}", errs);
+        let h = resolved.iter().find(|r| r.name == "hook").expect("hook");
+        assert!(h.defined, "weak def should provide the definition");
+        assert_eq!(h.size, 4);
+        assert_eq!(h.bind, STB_WEAK);
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
+    fn common_plus_tentative_merge_max_size() {
+        // COMMON + tentative (value=0, OBJECT) → merge, take max size
+        use crate::codegen::elf::{STT_OBJECT, SHN_COMMON};
+        let dir = std::env::temp_dir();
+        let p1 = dir.join("dcc-resolve-test12-com-tent-a.o");
+        let p2 = dir.join("dcc-resolve-test12-com-tent-b.o");
+        // TU1: COMMON, size=16
+        let a = build_minimal_obj(
+            "a",
+            &[ElfSym {
+                name: "arr".into(),
+                section: SHN_COMMON,
+                value: 0,
+                size: 16,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            }],
+            &[],
+        );
+        // TU2: tentative in .bss (value=0, OBJECT, section=1)
+        let b = build_minimal_obj(
+            "b",
+            &[ElfSym {
+                name: "arr".into(),
+                section: 1,
+                value: 0,
+                size: 32,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            }],
+            &[],
+        );
+        std::fs::write(&p1, &a).unwrap();
+        std::fs::write(&p2, &b).unwrap();
+        let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
+        let (resolved, errs) = resolve(&bundle, &[]);
+        assert!(
+            errs.is_empty(),
+            "COMMON + tentative should merge: {:?}",
+            errs
+        );
+        let arr = resolved.iter().find(|r| r.name == "arr").expect("arr");
+        assert!(arr.defined);
+        assert_eq!(arr.size, 32, "should take max size");
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
+    fn strong_def_overrides_common() {
+        // Strong definition (value > 0) should override COMMON
+        use crate::codegen::elf::{STT_OBJECT, SHN_COMMON};
+        let dir = std::env::temp_dir();
+        let p1 = dir.join("dcc-resolve-test13-strong-common-a.o");
+        let p2 = dir.join("dcc-resolve-test13-strong-common-b.o");
+        // TU1: COMMON, size=64
+        let common_obj = build_minimal_obj(
+            "a",
+            &[ElfSym {
+                name: "buf".into(),
+                section: SHN_COMMON,
+                value: 0,
+                size: 64,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            }],
+            &[],
+        );
+        // TU2: strong definition at offset 0 with data
+        let strong_obj = build_minimal_obj(
+            "b",
+            &[ElfSym {
+                name: "buf".into(),
+                section: 1,
+                value: 0,
+                size: 4,
+                bind: STB_GLOBAL,
+                ty: STT_OBJECT,
+                visibility: STV_DEFAULT,
+            }],
+            &[1, 2, 3, 4],
+        );
+        std::fs::write(&p1, &common_obj).unwrap();
+        std::fs::write(&p2, &strong_obj).unwrap();
+        let bundle = InputBundle::from_files(&[p1.clone(), p2.clone()]).unwrap();
+        let (resolved, errs) = resolve(&bundle, &[]);
+        // Both are "tentative" (COMMON + value=0 OBJECT), so they merge
+        // without error, taking max size
+        assert!(errs.is_empty(), "{:?}", errs);
+        let b = resolved.iter().find(|r| r.name == "buf").expect("buf");
+        assert!(b.defined);
+        assert_eq!(b.size, 64, "should take max size among tentative");
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
     fn comdat_dedup_no_groups() {
         // No COMDAT groups -> nothing discarded
         let dir = std::env::temp_dir();

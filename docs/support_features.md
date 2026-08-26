@@ -394,7 +394,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | wchar_t libc 转发 | wcs*/wmem* 11 个入口在 link implicit undef 白名单 |
 | signal libc 转发 | `sigaction` / `sigaltstack` / `signal` 白名单 |
 | 复杂数学 libm 转发 | `cproj` / `cabs` / `carg` 白名单 |
-| 符号解析: 强/弱/未定义 | `resolve.rs` 实现完整符号解析规则：强 vs 强 → 错误；强 vs 弱 → 强胜；弱 vs 弱 → size 最大者胜；弱未定义 → 解析为 0 (NULL)；强未定义 → 报错 (允许列表除外)；`nm` 可见未定义符号 (U) 和弱符号 (W)；10 个单元测试覆盖全部解析路径 |
+| 符号解析: 强/弱/未定义 | `resolve.rs` 实现完整符号解析规则：强 vs 强 → 错误；强 vs 弱 → 强胜；弱 vs 弱 → size 最大者胜；弱未定义 → 解析为 0 (NULL)；强未定义 → 报错 (允许列表除外)；`nm` 可见未定义符号 (U) 和弱符号 (W)；17 个单元测试覆盖全部解析路径（含 COMMON/weak/tentative 边界场景） |
 | COMMON 符号合并 | `SHN_COMMON` 符号作为强定义 (tentative definition) 处理；多个 COMMON 或 COMMON + tentative 自动合并取最大 size；与 GNU ld `-fno-common` 行为一致；`-fno-common` 标志下 codegen 直接放入 `.bss` 跳过 COMMON |
 | Tentative definition 合并 | 跨 TU 的未初始化全局变量 (`int x;`) 多个强定义自动合并 (取最大 size)，与 GCC common symbol 行为一致；仅适用于 `STT_OBJECT`/`STT_NOTYPE`，函数重复定义仍报错 |
 | 未定义符号输出 .symtab | 允许列表中的未定义符号和弱未定义符号均写入输出 `.symtab`，`nm` 显示为 `U` (undefined)；ELF `st_shndx = SHN_UNDEF (0)` |
