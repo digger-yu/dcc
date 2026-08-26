@@ -16665,3 +16665,91 @@ fn incremental_cli_flag_parsing() {
     let cfg = dcc::cli::parse(&args).expect("default should parse");
     assert!(!cfg.incremental);
 }
+
+// ----- CPU feature detection (-mavx/-mavx2/-mavx512f etc.) tests -----
+
+#[test]
+fn cpu_feature_cli_mavx() {
+    let args = vec!["-mavx".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-mavx should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
+}
+
+#[test]
+fn cpu_feature_cli_mno_avx() {
+    let args = vec!["-mno-avx".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-mno-avx should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, Some(false));
+}
+
+#[test]
+fn cpu_feature_cli_mavx2_implies_avx() {
+    let args = vec!["-mavx2".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-mavx2 should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.avx2, Some(true));
+}
+
+#[test]
+fn cpu_feature_cli_mavx512f_implies_avx() {
+    let args = vec!["-mavx512f".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-mavx512f should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.avx512f, Some(true));
+}
+
+#[test]
+fn cpu_feature_cli_mfma_implies_avx() {
+    let args = vec!["-mfma".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-mfma should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, Some(true));
+    assert_eq!(cfg.cpu_feature_overrides.fma, Some(true));
+}
+
+#[test]
+fn cpu_feature_cli_cet() {
+    let args = vec!["-mcet".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-mcet should parse");
+    assert_eq!(cfg.cpu_feature_overrides.cet_ss, Some(true));
+
+    let args = vec!["-mcet-ibt".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-mcet-ibt should parse");
+    assert_eq!(cfg.cpu_feature_overrides.cet_ibt, Some(true));
+}
+
+#[test]
+fn cpu_feature_cli_default_none() {
+    let args = vec!["-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("default should parse");
+    assert_eq!(cfg.cpu_feature_overrides.avx, None);
+    assert_eq!(cfg.cpu_feature_overrides.avx2, None);
+    assert_eq!(cfg.cpu_feature_overrides.avx512f, None);
+    assert_eq!(cfg.cpu_feature_overrides.cet_ss, None);
+}
+
+#[test]
+fn cpu_feature_verbose_output_shows_features() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-cpuid-{pid}.c"));
+    let obj = dir.join(format!("dcc-cpuid-{pid}.o"));
+    fs::write(&src, "int x(void) { return 0; }\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-v", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // On x86_64, verbose should show detected CPU features
+    assert!(
+        stderr.contains("cpu features:"),
+        "verbose mode should show CPU features, stderr: {stderr}"
+    );
+
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+}
