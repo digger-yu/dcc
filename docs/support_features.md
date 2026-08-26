@@ -332,6 +332,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | LTO 跨 TU 别名分析 | `AliasCtx` 跟踪指针别名关系；`AliasResult` 三态查询 (NoAlias/MayAlias/MustAlias)；`AliasStats` 统计别名集合；`run_cross_tu_alias_analysis()` 入口 |
 | LTO 4 pass 增强 | `LtoConfig` 配置化 + Pass 7 no_semantic_interposition |
 | LTO IPA-SRA / PGO 集成 | `src/ipa_sra.rs` + `src/profile/pgo_integration.rs` |
+| LTO bitcode verbose 追踪 | `-v -flto` 输出 `.dcc.lto` 位码大小/函数数/全局数及 `.llvm.lto` 摘要大小/函数数，便于诊断 LTO 信息嵌入 |
 | `gc_sections_root` 自动选根 | 无显式根时自动选所有 STB_GLOBAL/STB_WEAK 符号 |
 | object reader 输入边界 | 接受 ELF64 little-endian (x86_64/AArch64/RISC-V) 和 ELF32 (MIPS big-endian/ARM little-endian) ET_REL；支持 SHT_REL 和 SHT_RELA 重定位；ELF32 符号表 16 字节/条目，ELF64 24 字节/条目；同时接受 COFF/PE AMD64 目标文件 (machine 0x8664)，自动检测格式 |
 | Windows COFF codegen | `--target x86_64-pc-windows-msvc` 生成 COFF/PE AMD64 可重定位目标文件；`src/codegen/coff.rs` 实现 COFF 文件头、节头、符号表、重定位表和字符串表；节名映射 (.text/.rdata/.data/.bss/.rdata$T/.bss$T)；COFF 重定位类型 (ADDR64/ADDR32/ADDR32NB/REL32)；符号存储类映射；object reader 可解析 COFF 输入 |
