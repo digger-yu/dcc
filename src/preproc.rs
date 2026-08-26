@@ -120,6 +120,8 @@ pub struct Preprocessor {
     /// include-once 守卫快路径: canonical path -> (content_hash, guard 宏名)。
     /// 守卫宏已定义时整个文件可跳过处理 (等价于 #ifndef 为假)。
     once_guard: HashMap<String, (u64, Option<String>)>,
+    /// 宏展开深度上限是否已发出警告 (每 TU 仅警告一次, 避免刷屏)
+    depth_limit_warned: RefCell<bool>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -497,6 +499,7 @@ pub fn preprocess(
         openmp_pragmas: Vec::new(),
         dep_hashes: Vec::new(),
         once_guard: HashMap::new(),
+        depth_limit_warned: RefCell::new(false),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -2849,14 +2852,31 @@ impl Preprocessor {
         map: LineMap,
     ) -> String {
         // 递归深度保护：宏互相引用时避免栈溢出
+        // 128 层在 debug 模式下约消耗 ~1MB 栈空间, 安全落在默认 2MB
+        // 线程栈内; GCC 使用 200, 但 GCC 的栈帧在 release 模式下更小。
         let depth = EXPAND_DEPTH.with(|d| {
             let v = d.get();
             d.set(v + 1);
             v
         });
-        if depth > 256 {
+        if depth > 128 {
             EXPAND_DEPTH.with(|d| d.set(depth));
-            if std::env::var("DCC_PP_DEBUG").is_ok() && text.contains("asm_inline") {
+            // 每 TU 仅发一条 W0201 警告, 避免递归链中重复刷屏
+            if !*self.depth_limit_warned.borrow() {
+                *self.depth_limit_warned.borrow_mut() = true;
+                let line = map.line(0);
+                let hdr = &text[..text.len().min(60)];
+                self.diags.push(self.warn_at(
+                    "W0201",
+                    format!(
+                        "macro expansion depth limit (128) reached; \
+                         expansion of '{}' left unexpanded",
+                        hdr
+                    ),
+                    line,
+                ));
+            }
+            if std::env::var("DCC_PP_DEBUG").is_ok() {
                 eprintln!(
                     "[pp-debug] DEPTH_LIMIT depth={} text={:?}",
                     depth,
@@ -7613,5 +7633,45 @@ n\
         let _ = fs::remove_dir_all(&dir);
         assert!(diags.is_empty(), "{diags:?}");
         assert!(output.contains("int y = 99;"), "output: {output}");
+    }
+
+    /// 宏展开深度上限: 宏链超过 128 层时发出 W0201 警告
+    #[test]
+    fn macro_depth_limit_emits_w0201() {
+        // 构造 200 个不同 object-like 宏的线性链:
+        // M0 -> M1 -> M2 -> ... -> M199
+        // 每层展开一个新宏, disabled 集不含后续宏, 因此递归深度
+        // 达到 128 时触发 W0201。
+        let mut src = String::new();
+        for i in 0..200 {
+            if i < 199 {
+                src.push_str(&format!("#define M{} M{}\n", i, i + 1));
+            } else {
+                src.push_str(&format!("#define M{} 42\n", i));
+            }
+        }
+        src.push_str("int x = M0;\n");
+        let out = preprocess(
+            src.as_bytes(),
+            "depth-limit.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let has_w0201 = out
+            .diags
+            .iter()
+            .any(|d| d.code == "W0201");
+        assert!(
+            has_w0201,
+            "expected W0201 depth-limit warning, got: {:?}",
+            out.diags
+        );
     }
 }

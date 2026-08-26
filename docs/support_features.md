@@ -72,7 +72,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `#embed` (C23) | 字节数组嵌入；`limit(N)` 截断；`prefix`/`suffix` 包裹；`if_empty` 替代 |
 | `#warning` / `#error` | `#error` 走 fatal 诊断；`#warning` 走 stderr 提示 |
 | `_Static_assert` 字符串化 | C23 单参/双参全部支持；失败消息附加 `evaluates to: <ExprDebug 文本>` |
-| 宏展开涂蓝 / 防栈溢出 | `nested_function_macro_*`；缓存 V7；深度上限 |
+| 宏展开涂蓝 / 防栈溢出 | `nested_function_macro_*`；缓存 V7；深度上限 128 层；超限发 W0201 警告 (每 TU 一次) |
 | `_Generic` + 三元控制表达式 | `tests/fixtures/c/generic_tern.c` |
 | `_Generic` 指针精确匹配 | `tests/fixtures/c/generic_ptr.c`；按 pointee 匹配 |
 | 宏 `#` / `##` 字符串化 | `preproc` 单测 `stringify_collapses_*`；条件 token 拼接；`#` 操作符只转义 `"` 不转义 `\` (与 GCC 一致，内核 `__stringify(\reg)` 正确展开) |
@@ -90,7 +90,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `__STDC_ENDIAN_*` (C23) | 仅 C23 模式预定义，NATIVE==LITTLE |
 | 数字分隔符 | `1'000'000` |
 | 模块化 include guards | C23 `#pragma once`；重复 include 去重 |
-| 宏递归展开防护 | V7 include cache |
+| 宏递归展开防护 | V7 include cache；128 层深度硬限 + W0201 警告 |
 | 依赖文件 -MD / -MMD / -MP | GCC 兼容格式 (`\` 续行 + 路径转义 + `-MP` phony 目标)；fixdep 支持转义路径反转义 |
 | `-Wp,*` 子选项白名单 | CLI 与 `dcc-host-wrapper.sh` 仅白名单支持预处理器子选项，未知项报 unsupported |
 | x86 kernel wrapper flags | `arch_x86_compile.sh` 透传 `-fstack-clash-protection`、`-mrecord-mcount`、`-mfentry`、`-pg`、`-falign-loops=*`、`-falign-jumps=*` 等常见内核编译 flags；`-mno-sse`/`-mcmodel=kernel`/`-ftrivial-auto-var-init=zero` 已完整实现 |
