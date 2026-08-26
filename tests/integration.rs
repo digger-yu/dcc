@@ -5980,6 +5980,33 @@ fn pragma_operator_compile_and_run() {
     let _ = fs::remove_file(exe);
 }
 
+/// #pragma GCC system_header: 抑制后续警告, 不影响代码生成
+#[test]
+#[cfg(unix)]
+fn gcc_system_header_compile_and_run() {
+    let source = include_str!("fixtures/c/system_header.c");
+    let (output, exe) = run_compile_and_run("gcc-system-header", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 只有 pragma 前的 #warning 应出现在 stderr,
+    // pragma 后的 #warning 应被 system_header 抑制
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("before system_header"),
+        "expected warning before system_header in stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("after system_header - should be suppressed"),
+        "warning after system_header should be suppressed: {stderr}"
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "system_header test should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 /// #warning: 编译时输出警告, 不中断
 #[test]
 fn user_warning_does_not_break_compile() {

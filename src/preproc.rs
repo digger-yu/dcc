@@ -2314,6 +2314,12 @@ impl Preprocessor {
                 self.push_out(&format!("/* #include \"{}\" */\n", path));
                 let saved_base = self.base_dir.clone();
                 let saved_out_len = self.out.len();
+                // 保存父文件的 system_header 状态, 进入 include 时按路径自动检测;
+                // 退出时恢复父文件状态, 防止 system_header 标记泄漏到父文件
+                let saved_system_header = self.system_header;
+                if self.is_system_path(&full_path) {
+                    self.system_header = true;
+                }
                 // 记录处理前的 line_map / 输出行数, 用于收集本头文件产生的子区间
                 let line_map_before = self.line_map.len();
                 let out_lines_before = self.out_lines;
@@ -2342,6 +2348,8 @@ impl Preprocessor {
                     self.macros.insert("true".to_string(), def);
                 }
                 self.base_dir = saved_base;
+                // 恢复父文件的 system_header 状态
+                self.system_header = saved_system_header;
 
                 // 保存到缓存 (仅保存该头文件新增的宏, 避免冗余和状态污染);
                 // 产生诊断的头文件不落缓存, 下次运行重新处理并重新报诊断
@@ -2407,6 +2415,44 @@ impl Preprocessor {
                 ));
             }
         }
+    }
+
+    /// 检查给定路径是否位于系统搜索路径 (-isystem) 或标准系统目录下.
+    /// 用于自动将来自系统路径的头文件标记为 system header, 抑制警告.
+    fn is_system_path(&self, file_path: &Path) -> bool {
+        let canonical = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.to_path_buf());
+        // 检查 -isystem 路径
+        for dir in &self.system_paths {
+            let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if canonical.starts_with(&dir_canon) {
+                return true;
+            }
+        }
+        // 检查标准系统目录
+        let system_dirs = [
+            "/usr/local/include",
+            "/usr/include",
+            "/usr/include/x86_64-linux-gnu",
+            "/usr/include/aarch64-linux-gnu",
+        ];
+        for dir in &system_dirs {
+            let dir_path = Path::new(dir);
+            if let Ok(dir_canon) = dir_path.canonicalize() {
+                if canonical.starts_with(&dir_canon) {
+                    return true;
+                }
+            }
+        }
+        // 检查 GCC 内置 include 路径
+        for dir in host_gcc_include_dirs() {
+            let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if canonical.starts_with(&dir_canon) {
+                return true;
+            }
+        }
+        false
     }
 
     /// 构造与 `find_include` 一致的搜索目录序列。
@@ -8294,6 +8340,251 @@ int ok = 1;\n";
             w0200_count, 1,
             "expected 1 W0200 (before system_header), got {}: {:?}",
             w0200_count, out.diags
+        );
+    }
+
+    /// #pragma GCC system_header 不泄漏到包含它的父文件:
+    /// 头文件中设置 system_header, 返回父文件后警告应恢复
+    #[test]
+    fn gcc_system_header_does_not_leak_to_parent() {
+        use std::fs;
+        let dir = std::env::temp_dir();
+        let hdr = dir.join(format!("dcc-syshdr-leak-{}.h", std::process::id()));
+        let src_path = dir.join(format!("dcc-syshdr-leak-{}.c", std::process::id()));
+        // 头文件: 设置 system_header 并发警告 (被抑制)
+        fs::write(
+            &hdr,
+            "#pragma GCC system_header\n\
+             #warning should be suppressed\n",
+        )
+        .expect("write hdr");
+        // 主源文件: include 头文件后发警告 (应不被抑制)
+        fs::write(
+            &src_path,
+            "#include \"".to_string()
+                + &hdr.to_string_lossy()
+                + "\"\n\
+                 #warning parent warning after system_header include\n\
+                 int x;\n",
+        )
+        .expect("write src");
+        let src_text = fs::read_to_string(&src_path).unwrap();
+        let out = preprocess(
+            src_text.as_bytes(),
+            &src_path.to_string_lossy(),
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let _ = fs::remove_file(hdr);
+        let _ = fs::remove_file(&src_path);
+        // 头文件中的 #warning 被 system_header 抑制,
+        // 父文件中的 #warning 应正常发出
+        let w0200s: Vec<&str> = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .map(|d| d.msg.as_str())
+            .collect();
+        assert_eq!(
+            w0200s.len(),
+            1,
+            "expected 1 W0200 from parent, got {}: {:?}",
+            w0200s.len(),
+            out.diags
+        );
+        assert!(
+            w0200s[0].contains("parent warning"),
+            "expected parent warning, got: {}",
+            w0200s[0]
+        );
+    }
+
+    /// -isystem 路径下的头文件自动标记为 system header,
+    /// 其中 #warning 应被抑制
+    #[test]
+    fn isystem_path_auto_marks_system_header() {
+        use std::fs;
+        let dir = std::env::temp_dir();
+        let sys_dir = dir.join(format!("dcc-isystem-auto-{}", std::process::id()));
+        fs::create_dir_all(&sys_dir).expect("mkdir");
+        let hdr = sys_dir.join("auto_sys.h");
+        // 头文件在 -isystem 路径下, 含 #warning
+        fs::write(&hdr, "#warning from isystem header\nint auto_sys_var;\n")
+            .expect("write hdr");
+        let out = preprocess(
+            b"#include <auto_sys.h>\nint main(void) { return auto_sys_var; }\n",
+            "main.c",
+            &[],
+            &[sys_dir.clone()],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let _ = fs::remove_file(&hdr);
+        let _ = fs::remove_dir_all(&sys_dir);
+        // 来自 -isystem 路径的头文件应自动抑制警告
+        let w0200_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .count();
+        assert_eq!(
+            w0200_count, 0,
+            "expected 0 W0200 from -isystem header, got {}: {:?}",
+            w0200_count, out.diags
+        );
+        // 但头文件内容应正常展开
+        assert!(
+            out.text.contains("auto_sys_var"),
+            "header content should be expanded: {}",
+            out.text
+        );
+    }
+
+    /// 非系统路径的 #include 不自动标记为 system header,
+    /// 其中 #warning 应正常发出
+    #[test]
+    fn non_system_include_does_not_suppress_warnings() {
+        use std::fs;
+        let dir = std::env::temp_dir();
+        let user_dir = dir.join(format!("dcc-user-inc-{}", std::process::id()));
+        fs::create_dir_all(&user_dir).expect("mkdir");
+        let hdr = user_dir.join("user_header.h");
+        // 头文件在 -I 路径下 (非系统), 含 #warning
+        fs::write(&hdr, "#warning from user header\nint user_var;\n")
+            .expect("write hdr");
+        let out = preprocess(
+            b"#include <user_header.h>\nint main(void) { return user_var; }\n",
+            "main.c",
+            &[user_dir.clone()],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let _ = fs::remove_file(&hdr);
+        let _ = fs::remove_dir_all(&user_dir);
+        // -I 路径不是系统路径, #warning 应正常发出
+        let w0200_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .count();
+        assert_eq!(
+            w0200_count, 1,
+            "expected 1 W0200 from -I header, got {}: {:?}",
+            w0200_count, out.diags
+        );
+    }
+
+    /// _Pragma("GCC system_header") 与 #pragma GCC system_header 行为一致
+    #[test]
+    fn pragma_operator_system_header() {
+        let out = preprocess(
+            b"#warning before\n\
+             _Pragma(\"GCC system_header\")\n\
+             #warning after\n\
+             int x;\n",
+            "pragma-op-sys.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let w0200_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .count();
+        assert_eq!(
+            w0200_count, 1,
+            "expected 1 W0200 (before _Pragma system_header), got {}: {:?}",
+            w0200_count, out.diags
+        );
+    }
+
+    /// system_header 状态在嵌套 include 中正确保存/恢复:
+    /// 外层 → 中层 (system_header) → 内层 → 中层 → 外层
+    #[test]
+    fn system_header_save_restore_nested() {
+        use std::fs;
+        let dir = std::env::temp_dir();
+        let sys_dir = dir.join(format!("dcc-nested-sys-{}", std::process::id()));
+        let user_dir = dir.join(format!("dcc-nested-user-{}", std::process::id()));
+        fs::create_dir_all(&sys_dir).expect("mkdir");
+        fs::create_dir_all(&user_dir).expect("mkdir");
+        // 内层头文件: 在系统路径下, 含 #warning
+        let inner_hdr = sys_dir.join("inner.h");
+        fs::write(&inner_hdr, "#warning inner system warning\nint inner_var;\n")
+            .expect("write inner");
+        // 中层头文件: 在用户路径下, include 内层, 自身也有 #warning
+        let mid_hdr = user_dir.join("mid.h");
+        fs::write(
+            &mid_hdr,
+            "#warning mid user warning\n\
+             #include <inner.h>\n\
+             #warning mid user warning after inner\n\
+             int mid_var;\n",
+        )
+        .expect("write mid");
+        let out = preprocess(
+            b"#include \"mid.h\"\n\
+             #warning outer user warning\n\
+             int main(void) { return mid_var + inner_var; }\n",
+            "main.c",
+            &[user_dir.clone()],
+            &[sys_dir.clone()],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let _ = fs::remove_file(&inner_hdr);
+        let _ = fs::remove_file(&mid_hdr);
+        let _ = fs::remove_dir_all(&sys_dir);
+        let _ = fs::remove_dir_all(&user_dir);
+        let w0200s: Vec<&str> = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .map(|d| d.msg.as_str())
+            .collect();
+        // 中层头文件 (用户路径): 2 个 #warning 应正常发出
+        // 内层头文件 (系统路径): 1 个 #warning 被抑制
+        // 外层主文件: 1 个 #warning 应正常发出
+        assert_eq!(
+            w0200s.len(), 3,
+            "expected 3 W0200 (mid x2 + outer x1), got {}: {:?}",
+            w0200s.len(),
+            out.diags
+        );
+        assert!(
+            w0200s.iter().all(|m| !m.contains("inner system")),
+            "inner system header warning should be suppressed: {:?}",
+            w0200s
         );
     }
 
