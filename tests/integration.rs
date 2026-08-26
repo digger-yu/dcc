@@ -6007,6 +6007,22 @@ fn gcc_system_header_compile_and_run() {
     let _ = fs::remove_file(exe);
 }
 
+/// #pragma GCC poison: 编译时不触发错误 (未使用被 poison 的标识符)
+#[test]
+#[cfg(unix)]
+fn gcc_poison_compile_and_run() {
+    let source = include_str!("fixtures/c/gcc_poison.c");
+    let (output, exe) = run_compile_and_run("gcc-poison", source);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "gcc_poison test should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 /// #warning: 编译时输出警告, 不中断
 #[test]
 fn user_warning_does_not_break_compile() {

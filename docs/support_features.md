@@ -76,11 +76,13 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `_Generic` + 三元控制表达式 | `tests/fixtures/c/generic_tern.c` |
 | `_Generic` 指针精确匹配 | `tests/fixtures/c/generic_ptr.c`；按 pointee 匹配 |
 | 宏 `#` / `##` 字符串化 | `preproc` 单测 `stringify_collapses_*`；条件 token 拼接；`#` 操作符只转义 `"` 不转义 `\` (与 GCC 一致，内核 `__stringify(\reg)` 正确展开) |
-| `__VA_OPT__` (C++20 / C23) | 空参整段移除，非空展开 content，嵌套按内→外顺序消解 |
+| `__VA_OPT__` (C++20 / C23) | 空参整段移除，非空展开 content，嵌套按内→外顺序消解；`, ## __VA_ARGS__` GCC 扩展兼容；非可变参宏中保留为字面 token；测试: preproc 单测 `va_opt_*` |
 | `__COUNTER__` | 单调递增，跨宏嵌套共享 preproc 状态；在 `#if` 中可被求值 |
-| `_Pragma` 操作符 | C99 `_Pragma("string")` 与 `#pragma` 共享同一条 `process_directive` 通路；`_Pragma(expr)` 支持宏展开后为字符串字面量 |
-| `#pragma` 全家族 | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS` / `STDC FP_CONTRACT` / `STDC CX_LIMITED_RANGE` / `GCC diagnostic` / `GCC system_header` / `GCC visibility push/pop/set(...)` / `once` / `comment` / `locale` |
+| `_Pragma` 操作符 | C99 `_Pragma("string")` 与 `#pragma` 共享同一条 `process_directive` 通路；`_Pragma(expr)` 支持宏展开后为字符串字面量；所有 `#pragma` 类型均可通过 `_Pragma` 生效 (GCC diagnostic/poison/visibility/STDC/pack/weak/once 等)；测试: preproc 单测 `pragma_operator_*` |
+| `#pragma` 全家族 | `pack(n)` / `pack(push,n)` / `pack(pop)` / `weak name` / `STDC FENV_ACCESS` / `STDC FP_CONTRACT` / `STDC CX_LIMITED_RANGE` / `GCC diagnostic` / `GCC system_header` / `GCC poison` / `GCC visibility push/pop/set(...)` / `once` / `comment` / `locale` |
+| `#pragma GCC diagnostic` 完整语义 | push/pop 栈式管理诊断状态; `ignored "-Wxxx"` 抑制指定警告; `error "-Wxxx"` 将警告升级为错误; `warning "-Wxxx"` 恢复正常; 内部警告代码映射到 GCC `-W` 名称 (W0200→warning, W0001→pragma-warning 等); 系统头文件中同样生效; 测试: preproc 单测 `gcc_diagnostic_*` |
 | `#pragma GCC system_header` | 标记后续文件内容为系统头文件, 抑制警告 (不影响错误); `_Pragma("GCC system_header")` 等价; `-isystem` 路径及标准系统目录 (`/usr/include` 等) 下的头文件自动标记为 system header; 进入/退出 `#include` 时保存/恢复父文件状态, 防止标记泄漏; 测试: `tests/fixtures/c/system_header.c` + preproc 单测 (gcc_system_header_*) |
+| `#pragma GCC poison` | 标记标识符为禁用, 后续预处理中遇到被 poison 的标识符时发出 E0210 错误; 系统头文件中豁免 (与 GCC 行为一致); 支持多个标识符空格分隔; `_Pragma("GCC poison ...")` 等价; poison 前已出现的不报错; 测试: preproc 单测 `gcc_poison_*` |
 | `#pragma pack` 影响 struct 布局 | `preproc.pack_history` 携带行号；`Parser::pack_at_line(line)` 二分查找；`layout_struct_with_pack(max_align)` cap 到 `min(nat, n)` |
 | `#pragma STDC FENV_ACCESS` | ON/OFF/DEFAULT 三态；ON 时 opt 禁用浮点常量折叠/GVN-CSE（舍入模式可被运行时修改） |
 | `#pragma STDC FP_CONTRACT` | ON/OFF/DEFAULT 三态；ON 时 x86_64 后端把 `a*b+c` / `a*b-c` 收缩为 `fma` / `fmaf` / `fmal` 调用，OFF/DEFAULT 保持独立乘加 |
@@ -440,7 +442,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 
 | 特性 | 说明 |
 |------|------|
-| 诊断 snapshot 格式锁定 | E0001-E0018 / E0100-E0102 / E0200-E0209 / E0300 / E1001-E1010 / W0001 / W0004-W0005 / W0007-W0008 / W0200 |
+| 诊断 snapshot 格式锁定 | E0001-E0018 / E0100-E0102 / E0200-E0210 / E0300 / E1001-E1010 / W0001 / W0004-W0005 / W0007-W0008 / W0200-W0201 |
 | `-fdiagnostics-color` | `always` / `never` / `auto` |
 | `-fdiagnostics-format` | `github` / `clang` / `msvc` / `vi` / `sarif` |
 | `-fdiagnostics-show-template-tree` | 模板树显示 |

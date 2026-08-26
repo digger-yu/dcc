@@ -133,6 +133,9 @@ pub struct Preprocessor {
     base_file: String,
     /// __INCLUDE_LEVEL__: 当前 include 嵌套深度 (0 = 主文件)
     include_level: u32,
+    /// #pragma GCC poison: 被禁用的标识符集合.
+    /// 后续预处理中遇到这些标识符时发出错误 (系统头文件中豁免).
+    poisoned_ids: HashSet<String>,
 }
 
 /// 诊断状态: 控制特定警告的开关
@@ -519,6 +522,7 @@ pub fn preprocess(
         visibility_history: Vec::new(),
         base_file: file.to_string(),
         include_level: 0,
+        poisoned_ids: HashSet::new(),
     };
     // 预定义宏
     pp.define_builtin("__DCC__", "1");
@@ -1432,12 +1436,57 @@ impl Preprocessor {
         d
     }
 
-    /// 添加一条警告诊断, 但如果当前处于 system_header 模式则抑制。
-    /// GCC #pragma GCC system_header 语义: 剩余文件视为系统头文件,
-    /// 抑制警告但不抑制错误。
+    /// 添加一条警告诊断, 但根据以下条件过滤或升级:
+    /// 1. system_header 模式下抑制所有警告
+    /// 2. diag_state.ignored 包含该警告的 GCC 名称或代码时抑制
+    /// 3. diag_state.as_error 包含该警告的 GCC 名称或代码时升级为错误
     fn push_warning(&mut self, diag: Diagnostic) {
-        if !self.system_header {
-            self.diags.push(diag);
+        // system_header 抑制所有警告
+        if self.system_header {
+            return;
+        }
+        // 检查 diag_state: ignored / as_error
+        let gcc_names = Self::warning_code_to_gcc_names(diag.code);
+        let is_ignored = self.diag_state.ignored.contains(diag.code)
+            || gcc_names
+                .iter()
+                .any(|n| self.diag_state.ignored.contains(*n));
+        if is_ignored {
+            return;
+        }
+        let is_error = self.diag_state.as_error.contains(diag.code)
+            || gcc_names
+                .iter()
+                .any(|n| self.diag_state.as_error.contains(*n));
+        if is_error {
+            // 升级为错误
+            let mut err = Diagnostic::err(diag.code, diag.msg, diag.span);
+            if let Some(src) = &diag.source_line {
+                err = err.with_source(src.clone());
+            }
+            if let Some(h) = &diag.hint {
+                err = err.with_hint(h.clone());
+            }
+            self.diags.push(err);
+            return;
+        }
+        self.diags.push(diag);
+    }
+
+    /// 将内部警告代码映射到 GCC -W 名称列表.
+    /// 用于 #pragma GCC diagnostic ignored/error "-Wxxx" 匹配.
+    fn warning_code_to_gcc_names(code: &str) -> Vec<&'static str> {
+        match code {
+            "W0001" => vec!["pragma-warning"],
+            "W0200" => vec!["warning"],
+            "W0201" => vec!["macro-depth"],
+            "W0002" => vec!["implicit-int"],
+            "W0003" => vec!["format"],
+            "W0004" => vec!["asm-goto-label"],
+            "W0005" => vec!["asm-operand"],
+            "W0007" => vec!["asm-operand"],
+            "W0008" => vec!["asm-operand"],
+            _ => vec![],
         }
     }
 
@@ -1917,6 +1966,11 @@ impl Preprocessor {
                 // #pragma GCC visibility pop
                 // #pragma GCC visibility set(default|hidden|protected|internal)
                 self.handle_gcc_visibility(rest.trim(), line_no);
+            } else if let Some(rest) = pragma_text.strip_prefix("GCC poison") {
+                // #pragma GCC poison ident1 ident2 ...
+                // 标记标识符为禁用, 后续遇到这些标识符时发出错误.
+                // 系统头文件中豁免 (与 GCC 行为一致).
+                self.handle_gcc_poison(rest.trim(), line_no);
             } else if let Some(rest) = pragma_text.strip_prefix("pack") {
                 // #pragma pack() / pack(1) / pack(2) / pack(4) / pack(8) / pack(16)
                 // #pragma pack(push[, n]) / #pragma pack(pop[, n])
@@ -2903,14 +2957,14 @@ impl Preprocessor {
                 "ON" | "DEFAULT" => self.fenv_access = true,
                 "OFF" => self.fenv_access = false,
                 _ => {
-                    self.diags.push(Diagnostic::warn(
+                    self.push_warning(self.warn_at(
                         "W0001",
                         format!(
                             "unknown STDC FENV_ACCESS state `{}`; \
                                  expected ON, OFF, or DEFAULT",
                             state_raw
                         ),
-                        Span::point(&self.file, line, 1),
+                        line,
                     ));
                 }
             }
@@ -2919,14 +2973,14 @@ impl Preprocessor {
                 "ON" => self.fp_contract = true,
                 "OFF" | "DEFAULT" => self.fp_contract = false,
                 _ => {
-                    self.diags.push(Diagnostic::warn(
+                    self.push_warning(self.warn_at(
                         "W0001",
                         format!(
                             "unknown STDC FP_CONTRACT state `{}`; \
                                  expected ON, OFF, or DEFAULT",
                             state_raw
                         ),
-                        Span::point(&self.file, line, 1),
+                        line,
                     ));
                 }
             }
@@ -2935,14 +2989,14 @@ impl Preprocessor {
                 "ON" => self.cx_limited_range = true,
                 "OFF" | "DEFAULT" => self.cx_limited_range = false,
                 _ => {
-                    self.diags.push(Diagnostic::warn(
+                    self.push_warning(self.warn_at(
                         "W0001",
                         format!(
                             "unknown STDC CX_LIMITED_RANGE state `{}`; \
                                  expected ON, OFF, or DEFAULT",
                             state_raw
                         ),
-                        Span::point(&self.file, line, 1),
+                        line,
                     ));
                 }
             }
@@ -2975,6 +3029,23 @@ impl Preprocessor {
             if !diag_name.is_empty() {
                 self.diag_state.ignored.remove(diag_name);
                 self.diag_state.as_error.insert(diag_name.to_string());
+            }
+        }
+    }
+
+    /// 处理 #pragma GCC poison ident1 ident2 ...
+    /// 将指定标识符加入禁用集合, 后续预处理中遇到这些标识符时
+    /// 发出编译错误 (系统头文件中豁免, 与 GCC 行为一致).
+    fn handle_gcc_poison(&mut self, text: &str, _line_no: u32) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        // 支持空格分隔的多个标识符
+        for ident in text.split_whitespace() {
+            let ident = ident.trim();
+            if !ident.is_empty() {
+                self.poisoned_ids.insert(ident.to_string());
             }
         }
     }
@@ -3454,6 +3525,20 @@ impl Preprocessor {
                         i = j;
                         continue;
                     }
+                }
+
+                // #pragma GCC poison: 检查标识符是否被禁用
+                // 系统头文件中豁免 (与 GCC 行为一致)
+                if self.poisoned_ids.contains(&ident) && !self.system_header {
+                    let line = map.line(nl);
+                    self.diags.push(self.err_at(
+                        "E0210",
+                        format!(
+                            "attempt to use poisoned \"{}\"",
+                            ident
+                        ),
+                        line,
+                    ));
                 }
 
                 // 检查是否在禁用集中 (paint blue)
@@ -8871,6 +8956,406 @@ int ok = 1;\n";
         assert!(
             output.contains("long c = 9223372036854775807L;"),
             "expected __INTMAX_MAX__ = 9223372036854775807L, output: {output}"
+        );
+    }
+
+    // ===== #pragma GCC poison 测试 =====
+
+    /// #pragma GCC poison: 后续使用被禁用标识符时发出错误
+    #[test]
+    fn gcc_poison_basic() {
+        let out = preprocess(
+            b"#pragma GCC poison printf\n\
+             int x = printf(\"hello\");\n",
+            "poison-test.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let e0210_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "E0210")
+            .count();
+        assert_eq!(
+            e0210_count, 1,
+            "expected 1 E0210 for poisoned printf, got {}: {:?}",
+            e0210_count, out.diags
+        );
+    }
+
+    /// #pragma GCC poison: 多个标识符同时禁用
+    #[test]
+    fn gcc_poison_multiple() {
+        let out = preprocess(
+            b"#pragma GCC poison foo bar baz\n\
+             int a = foo;\n\
+             int b = bar;\n\
+             int c = baz;\n",
+            "poison-multi.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let e0210_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "E0210")
+            .count();
+        assert_eq!(
+            e0210_count, 3,
+            "expected 3 E0210 for foo/bar/baz, got {}: {:?}",
+            e0210_count, out.diags
+        );
+    }
+
+    /// #pragma GCC poison: 系统头文件中豁免
+    #[test]
+    fn gcc_poison_system_header_exempt() {
+        let out = preprocess(
+            b"#pragma GCC poison myfunc\n\
+             #pragma GCC system_header\n\
+             int x = myfunc();\n",
+            "poison-syshdr.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let e0210_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "E0210")
+            .count();
+        assert_eq!(
+            e0210_count, 0,
+            "poison should be exempt in system_header, got {}: {:?}",
+            e0210_count, out.diags
+        );
+    }
+
+    /// #pragma GCC poison: pragma 前使用不报错
+    #[test]
+    fn gcc_poison_before_use_ok() {
+        let out = preprocess(
+            b"int x = printf(\"ok\");\n\
+             #pragma GCC poison printf\n",
+            "poison-order.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let e0210_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "E0210")
+            .count();
+        assert_eq!(
+            e0210_count, 0,
+            "use before poison should be ok, got {}: {:?}",
+            e0210_count, out.diags
+        );
+    }
+
+    // ===== #pragma GCC diagnostic push/pop 完整语义测试 =====
+
+    /// diagnostic ignored: 按 GCC 名称抑制警告
+    #[test]
+    fn gcc_diagnostic_ignored_by_gcc_name() {
+        let out = preprocess(
+            b"#pragma GCC diagnostic ignored \"-Wwarning\"\n\
+             #warning this should be suppressed\n",
+            "diag-ign.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let w0200_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .count();
+        assert_eq!(
+            w0200_count, 0,
+            "W0200 should be suppressed by -Wwarning, got {}: {:?}",
+            w0200_count, out.diags
+        );
+    }
+
+    /// diagnostic push/pop: 状态正确保存和恢复
+    #[test]
+    fn gcc_diagnostic_push_pop_restores() {
+        let out = preprocess(
+            b"#warning before push\n\
+             #pragma GCC diagnostic push\n\
+             #pragma GCC diagnostic ignored \"-Wwarning\"\n\
+             #warning inside push\n\
+             #pragma GCC diagnostic pop\n\
+             #warning after pop\n",
+            "diag-pushpop.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let w0200_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .count();
+        // before push: 1, inside push: 0 (suppressed), after pop: 1
+        assert_eq!(
+            w0200_count, 2,
+            "expected 2 W0200 (before push + after pop), got {}: {:?}",
+            w0200_count, out.diags
+        );
+    }
+
+    /// diagnostic error: 将警告升级为错误
+    #[test]
+    fn gcc_diagnostic_error_promotes() {
+        let out = preprocess(
+            b"#pragma GCC diagnostic error \"-Wwarning\"\n\
+             #warning this should be error\n",
+            "diag-error.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        // 应该被升级为错误 (Severity::Error)
+        let promoted = out
+            .diags
+            .iter()
+            .any(|d| d.code == "W0200" && matches!(d.sev, crate::diagnostics::Severity::Error));
+        assert!(
+            promoted,
+            "W0200 should be promoted to error, got: {:?}",
+            out.diags
+        );
+    }
+
+    // ===== _Pragma 操作符完整语义测试 =====
+
+    /// _Pragma: 支持 GCC diagnostic
+    #[test]
+    fn pragma_operator_gcc_diagnostic() {
+        let out = preprocess(
+            b"_Pragma(\"GCC diagnostic push\")\n\
+             _Pragma(\"GCC diagnostic ignored \\\"-Wwarning\\\"\")\n\
+             #warning suppressed via _Pragma\n\
+             _Pragma(\"GCC diagnostic pop\")\n\
+             #warning not suppressed\n",
+            "pragma-op-diag.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let w0200_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "W0200")
+            .count();
+        assert_eq!(
+            w0200_count, 1,
+            "expected 1 W0200 (after pop), got {}: {:?}",
+            w0200_count, out.diags
+        );
+    }
+
+    /// _Pragma: 支持 GCC poison
+    #[test]
+    fn pragma_operator_gcc_poison() {
+        let out = preprocess(
+            b"_Pragma(\"GCC poison myident\")\n\
+             int x = myident;\n",
+            "pragma-op-poison.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let e0210_count = out
+            .diags
+            .iter()
+            .filter(|d| d.code == "E0210")
+            .count();
+        assert_eq!(
+            e0210_count, 1,
+            "expected 1 E0210 via _Pragma poison, got {}: {:?}",
+            e0210_count, out.diags
+        );
+    }
+
+    /// _Pragma: 支持 STDC FENV_ACCESS
+    #[test]
+    fn pragma_operator_stdc_fenv() {
+        let out = preprocess(
+            b"_Pragma(\"STDC FENV_ACCESS ON\")\n\
+             double x = 1.0;\n",
+            "pragma-op-stdc.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        assert!(out.fenv_access, "fenv_access should be ON via _Pragma");
+        assert!(
+            !out.diags.iter().any(|d| d.code == "W0001"),
+            "should not warn for valid STDC pragma: {:?}",
+            out.diags
+        );
+    }
+
+    /// _Pragma: 支持 weak
+    #[test]
+    fn pragma_operator_weak() {
+        let out = preprocess(
+            b"_Pragma(\"weak my_weak_sym\")\n\
+             int my_weak_sym = 42;\n",
+            "pragma-op-weak.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        assert!(
+            out.weak_symbols.contains("my_weak_sym"),
+            "weak symbol should be recorded via _Pragma"
+        );
+    }
+
+    // ===== __VA_OPT__ 完整语义测试 =====
+
+    /// __VA_OPT__: 空参时内容删除
+    #[test]
+    fn va_opt_empty_args() {
+        let out = preprocess(
+            b"#define F(...) f(0 __VA_OPT__(, __VA_ARGS__))\n\
+             F();\n",
+            "vaopt-empty.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        assert!(
+            out.text.contains("f(0)"),
+            "empty __VA_OPT__ should be removed, output: {}",
+            out.text
+        );
+    }
+
+    /// __VA_OPT__: 非空参时内容保留
+    #[test]
+    fn va_opt_nonempty_args() {
+        let out = preprocess(
+            b"#define F(...) f(0 __VA_OPT__(, __VA_ARGS__))\n\
+             F(1, 2);\n",
+            "vaopt-nonempty.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        assert!(
+            out.text.contains("f(0 , 1, 2)") || out.text.contains("f(0, 1, 2)"),
+            "non-empty __VA_OPT__ should expand, output: {}",
+            out.text
+        );
+    }
+
+    /// __VA_OPT__: 嵌套可变参数宏
+    #[test]
+    fn va_opt_nested_macro() {
+        let out = preprocess(
+            b"#define MACRO(A, B, ...) A B __VA_OPT__(+ __VA_ARGS__)\n\
+             int x = MACRO(1, 2, 3, 4);\n",
+            "vaopt-nested.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu23,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        assert!(
+            out.text.contains("1 2 + 3, 4") || out.text.contains("1 2 +"),
+            "nested __VA_OPT__ should expand, output: {}",
+            out.text
         );
     }
 }
