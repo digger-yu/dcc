@@ -159,6 +159,9 @@ pub struct Codegen {
     current_func_is_nested: bool, // 当前编译的函数是否是嵌套函数
     /// 当前函数标了 __attribute__((returns_nonnull)): 返回时需检查 rax 非空
     current_returns_nonnull: bool,
+    /// 当前函数标了 __attribute__((noreturn)) / _Noreturn:
+    /// 函数末尾插入 trap 指令 (ud2), 防止执行流落入后续代码
+    current_is_noreturn: bool,
     static_chain_offset: i32,            // 静态链在当前帧中的偏移
     upvar_offsets: HashMap<String, i32>, // upvar 名称 → 在父帧中的偏移
     // &&label 地址引用: (disp32_pos, label_name)
@@ -1345,6 +1348,7 @@ impl Codegen {
             func_param_types: HashMap::new(),
             current_func_is_nested: false,
             current_returns_nonnull: false,
+            current_is_noreturn: false,
             static_chain_offset: 0,
             upvar_offsets: HashMap::new(),
             label_addr_refs: vec![],
@@ -4939,6 +4943,8 @@ impl Codegen {
         // 设置嵌套函数状态
         self.current_func_is_nested = f.is_nested;
         self.current_returns_nonnull = f.returns_nonnull;
+        // noreturn: 函数末尾插入 trap 指令
+        self.current_is_noreturn = f.is_noreturn;
         self.upvar_offsets.clear();
         if f.is_nested {
             for (name, off) in &f.upvars {
@@ -12781,6 +12787,12 @@ impl Codegen {
         self.emit(&[0x41, 0x5d]); // pop r13
         if self.target.frame_pointer {
             self.emit(&[0x5D]); // pop rbp
+        }
+        // noreturn: 在 ret 前插入 trap 指令 (ud2)
+        // 防止函数未正常返回时 (如 panic/abort/longjmp)
+        // 执行流落入调用者后续代码
+        if self.current_is_noreturn {
+            self.emit(&[0x0F, 0x0B]); // ud2 - undefined instruction trap
         }
         self.emit_return_tail();
     }
