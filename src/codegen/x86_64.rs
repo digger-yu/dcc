@@ -16017,6 +16017,38 @@ impl Codegen {
         let (clobber_gp, clobber_xmm, _x87_count) = Self::parse_clobber_registers(clobbers);
         let mut planner = AsmRegisterPlanner::new(&clobber_gp, &clobber_xmm);
 
+        // 预扫描输出约束: 预留固定寄存器 (a/b/c/d/S/D),
+        // 避免 =r 等通用分配抢占后续 =a 等固定约束所需的寄存器。
+        for oc in output_constraints.iter() {
+            let core = oc.trim_start_matches(['=', '+', '&', '%']);
+            if core.contains('{') || core.starts_with("@cc") {
+                continue;
+            }
+            let letters: Vec<char> =
+                core.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+            if letters.iter().any(|c| matches!(c, 'r' | 'R' | 'g')) {
+                continue;
+            }
+            let fixed: Option<u8> = if letters.contains(&'a') {
+                Some(0)
+            } else if letters.contains(&'b') {
+                Some(3)
+            } else if letters.contains(&'c') {
+                Some(1)
+            } else if letters.contains(&'d') {
+                Some(2)
+            } else if letters.contains(&'S') {
+                Some(6)
+            } else if letters.contains(&'D') {
+                Some(7)
+            } else {
+                None
+            };
+            if let Some(reg) = fixed {
+                planner.reserve_gp(reg, AsmRegUse::Output);
+            }
+        }
+
         // ===== 处理 outputs =====
         for (op_idx, op) in outputs.iter().enumerate() {
             let raw = output_constraints
