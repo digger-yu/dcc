@@ -8799,6 +8799,21 @@ fn complex_literal_run_returns_zero() {
     assert_eq!(rc, 0, "complex_literal should return 0, got {rc}");
 }
 
+/// _Imaginary 类型基本测试 (C99 6.2.5)
+/// 覆盖: sizeof、__imag__/__real__ 提取、imag±imag 算术、一元取负
+#[test]
+fn imaginary_basic_run_returns_zero() {
+    let source = include_str!("fixtures/c/imaginary_basic.c");
+    let (output, exe) = run_compile_and_run("imaginary-basic", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "imaginary_basic should return 0, got {rc}");
+}
+
 /// L'x' 宽字符字面量 (Section 11)
 /// M26: 新增 TokKind::WideCharLit, lexer 在 `L` 标识符后看到
 /// `'` 时走宽字符路径; 解析层复用 parse_wide_str 输出 UTF-32LE.
