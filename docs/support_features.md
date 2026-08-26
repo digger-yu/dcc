@@ -210,6 +210,15 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `-fshort-wchar` | `wchar_t` 为 2 字节（UTF-16LE）模式；预处理器定义 `__WCHAR_TYPE__` 为 `short unsigned int`、`__WCHAR_MAX__` 为 65535；parser 宽字符串/字符字面量编码为 UTF-16LE（含代理对处理）；null 终止符为 2 字节 |
 | `-fno-common` | 公共符号（tentative definition）直接放入 `.bss` 而非合并到 common 段；当前 codegen 已默认按此行为处理未初始化全局变量；链接器 resolve.rs 处理跨 TU tentative definition 合并 |
 | `-fcached` / `--incremental` | 增量编译：基于源文件内容 + 编译标志的哈希指纹跳过未变更文件的编译；缓存目录 `.dcc-cache/`；与 `-j<N>` 正交 |
+| `-mavx` / `-mno-avx` | 显式启用/禁用 AVX 指令集；默认由 CPUID 动态检测；禁用 AVX 同时禁用 AVX2/FMA |
+| `-mavx2` / `-mno-avx2` | 显式启用/禁用 AVX2；`-mavx2` 隐含 `-mavx` |
+| `-mavx512f` / `-mno-avx512f` | 显式启用/禁用 AVX-512 Foundation；`-mavx512f` 隐含 `-mavx`；需要 OS 启用 XCR0 AVX-512 状态 |
+| `-mavx512bw` / `-mavx512vl` / `-mavx512dq` | AVX-512 子特性；均隐含 `-mavx512f` |
+| `-mfma` / `-mno-fma` | Fused Multiply-Add；隐含 AVX |
+| `-mbmi` / `-mbmi2` | Bit Manipulation Instructions 1/2 |
+| `-mcet` / `-mcet-ss` / `-mno-cet` | Control-flow Enforcement Technology - Shadow Stack |
+| `-mcet-ibt` / `-mno-cet-ibt` | CET Indirect Branch Tracking |
+| `-v` CPU 特性输出 | verbose 模式下输出 `dcc: cpu features: sse3,ssse3,sse4.1,sse4.2,avx,avx2,...` 显示当前检测到的 CPU 特性列表 |
 | `-fno-plt` | 接受但无操作；内核不使用 PLT，DCC codegen 不生成 PLT 入口 |
 | `-falign-jumps=N` / `-falign-loops=N` | `=1` 接受但无操作（等价于不对齐）；其他值发出警告（DCC 不执行代码对齐） |
 | `-mpreferred-stack-boundary=N` | `=2`（4 字节对齐）接受但无操作（内核默认）；其他值发出警告（DCC 不调整栈对齐） |

@@ -377,6 +377,27 @@ C++ 前端将 C++ 特性降级为 C 代码供后端消费。已实装：
 - **回归**：`incremental_second_compile_skipped` /
   `incremental_source_change_triggers_recompile` 等集成测试验证。
 
+## CPU 指令集特性动态检测（`cpuid.rs` + `target.rs`）
+
+- **原理**：x86_64 平台通过 CPUID 指令在运行时检测 CPU 支持的指令集特性，
+  替代硬编码默认值。非 x86 平台返回空特性集。
+- **检测范围**：
+  - CPUID leaf 1 ECX: SSE3, SSSE3, SSE4.1/4.2, AVX, FMA, AES, POPCNT 等
+  - CPUID leaf 7 EBX: AVX2, BMI1/2, ERMS, AVX-512F/DQ/CD/BW/VL 等
+  - CPUID leaf 7 ECX: CET-SS, AVX-512 VBMI/VBMI2/VNNI/BITALG 等
+  - CPUID leaf 7 EDX: CET-IBT, AVX-512 4VNNIW/4FMAPS
+- **OS 状态检查**：AVX/AVX-512 特性不仅需 CPU 支持，还需 OS 通过
+  XCR0 寄存器启用相应状态保存 (XGETBV 检测)。
+- **CLI 覆盖**：用户可通过 `-mavx`/`-mno-avx`、`-mavx2`/`-mno-avx2`、
+  `-mavx512f`/`-mno-avx512f`、`-mfma`、`-mcet` 等标志显式覆盖检测结果。
+  高级特性隐含低级依赖 (如 `-mavx2` 隐含 `-mavx`)。
+- **Target 集成**：`Target::resolve()` 对 x86_64 目标调用
+  `CpuFeatures::detect()` 填充 `cpu_features` 字段；
+  `apply_cpu_feature_overrides()` 在 driver 中应用 CLI 覆盖。
+- **Verbose 输出**：`-v` 模式下输出 `dcc: cpu features: sse3,...` 列表。
+- **与增量编译的关系**：CPU 特性覆盖参与增量编译指纹计算，
+  改变 `-mavx` 等标志会触发重编译。
+
 ## GNU 控制流扩展
 
 Parser 直接表示 `&&label`、`goto *expr` 和 `asm goto`。标签地址使用
