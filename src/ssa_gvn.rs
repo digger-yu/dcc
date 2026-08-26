@@ -339,6 +339,10 @@ fn propagate_copies_expr(e: &mut Expr, copies: &HashMap<String, String>) {
 }
 
 fn gvn_key_string(e: &Expr, fenv_access: bool) -> Option<String> {
+    // Volatile expressions must not be CSE'd
+    if crate::ast::type_has_volatile(&e.ty()) {
+        return None;
+    }
     match e {
         Expr::Int { v, .. } => Some(format!("i:{v}")),
         Expr::Ident { name, .. } => Some(format!("v:{}", name.name)),

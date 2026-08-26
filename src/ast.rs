@@ -1343,3 +1343,20 @@ impl Expr {
         }
     }
 }
+
+/// Returns true if the type or any nested QualType carries volatile qualifier.
+/// Used by optimization passes to protect volatile accesses from elimination.
+pub fn type_has_volatile(ty: &Type) -> bool {
+    match ty {
+        Type::Ptr(inner) | Type::Array(inner, _) | Type::Atomic(inner)
+        | Type::Complex(inner) | Type::Imaginary(inner) | Type::Vector(inner, _) => {
+            inner.quals.is_volatile() || type_has_volatile(&inner.base)
+        }
+        Type::Func(ret, params) => {
+            ret.quals.is_volatile() || type_has_volatile(&ret.base)
+                || params.iter().any(|p| p.quals.is_volatile() || type_has_volatile(&p.base))
+        }
+        Type::Enum(_, _, Some(inner)) => inner.quals.is_volatile() || type_has_volatile(&inner.base),
+        _ => false,
+    }
+}

@@ -1411,6 +1411,10 @@ fn inline_expr(
 }
 
 fn is_side_effect_free(e: &Expr) -> bool {
+    // Volatile-typed expressions always have observable side effects
+    if crate::ast::type_has_volatile(&e.ty()) {
+        return false;
+    }
     matches!(
         e,
         Expr::Int { .. }
