@@ -4960,6 +4960,7 @@ mod tests {
             literal: None,
             children: vec![],
             span: crate::diagnostics::Span::point("t.c", 1, 1),
+            quals: crate::ast::QualifierFlags::NONE,
         };
         let ok = cg.gen_float_expr(&expr);
         assert!(ok, "gen_float_expr should succeed for Local float");

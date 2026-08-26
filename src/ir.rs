@@ -3,7 +3,7 @@
 //! 该层保留 AST 作为后端迁移期间的语义载荷，同时建立独立、可验证的
 //! 类型化函数/表达式图。后端入口只接受通过验证的 `Module`。
 
-use crate::ast::{self, BinOp, BlockItem, Decl, Expr, InitItem, Stmt, Type, UnOp};
+use crate::ast::{self, BinOp, BlockItem, Decl, Expr, InitItem, QualifierFlags, Stmt, Type, UnOp};
 use crate::const_eval;
 use crate::diagnostics::{Diagnostic, Severity, Span};
 
@@ -74,6 +74,9 @@ pub struct TypedExpr {
     pub span: Span,
     /// `ExprKind::Constant` 等节点的字面量值
     pub literal: Option<ExprLiteral>,
+    /// Type qualifiers (const/volatile/restrict) from the AST level.
+    /// Propagated from QualType nodes during lowering.
+    pub quals: QualifierFlags,
 }
 
 #[derive(Debug, Clone)]
@@ -921,6 +924,7 @@ impl Lowering {
             children,
             span,
             literal,
+            quals: QualifierFlags::NONE,
         }
     }
 }

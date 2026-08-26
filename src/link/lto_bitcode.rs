@@ -474,6 +474,7 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
         children,
         span: Span::point("", 0, 0),
         literal,
+        quals: crate::ast::QualifierFlags::NONE,
     })
 }
 
@@ -1649,6 +1650,7 @@ mod merge_tests {
                     children: vec![],
                     span: Span::point("", 0, 0),
                     literal: Some(crate::ir::ExprLiteral::Int(42)),
+                    quals: crate::ast::QualifierFlags::NONE,
                 })
             } else {
                 None
@@ -1801,6 +1803,7 @@ mod const_prop_tests {
             children: vec![],
             span: Span::point("", 0, 0),
             literal: Some(ExprLiteral::Int(val)),
+            quals: crate::ast::QualifierFlags::NONE,
         }
     }
 
@@ -1811,6 +1814,7 @@ mod const_prop_tests {
             children: vec![],
             span: Span::point("", 0, 0),
             literal: None,
+            quals: crate::ast::QualifierFlags::NONE,
         }
     }
 
@@ -1821,6 +1825,7 @@ mod const_prop_tests {
             children: vec![lhs, rhs],
             span: Span::point("", 0, 0),
             literal: None,
+            quals: crate::ast::QualifierFlags::NONE,
         }
     }
 
@@ -1913,6 +1918,7 @@ mod const_prop_tests {
             children: vec![make_local_expr(".const.FLAG")],
             span: Span::point("", 0, 0),
             literal: None,
+            quals: crate::ast::QualifierFlags::NONE,
         };
         let func = Function {
             name: "test_func".to_string(),
@@ -2028,9 +2034,11 @@ mod inline_tests {
                 children: vec![],
                 span: Span::point("", 0, 0),
                 literal: None,
+                quals: crate::ast::QualifierFlags::NONE,
             }],
             span: Span::point("", 0, 0),
             literal: None,
+            quals: crate::ast::QualifierFlags::NONE,
         }
     }
 
@@ -2354,6 +2362,7 @@ mod dse_tests {
                     children: vec![],
                     span: Span::point("", 0, 0),
                     literal: None,
+                    quals: crate::ast::QualifierFlags::NONE,
                 },
                 TypedExpr {
                     ty: ValueType::Integer { bits: 32, signed: true },
@@ -2361,10 +2370,12 @@ mod dse_tests {
                     children: vec![],
                     span: Span::point("", 0, 0),
                     literal: Some(ExprLiteral::Int(value)),
+                    quals: crate::ast::QualifierFlags::NONE,
                 },
             ],
             span: Span::point("", 0, 0),
             literal: None,
+            quals: crate::ast::QualifierFlags::NONE,
         }
     }
 
