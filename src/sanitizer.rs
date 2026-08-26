@@ -2127,6 +2127,7 @@ fn guard_array_decl(name: &str, span: &Span) -> BlockItem {
         copy_fn: None,
         is_retain: false,
         is_used_attr: false,
+        quals: crate::ast::QualifierFlags::NONE,
     }))
 }
 
@@ -3092,6 +3093,7 @@ mod tests {
             copy_fn: None,
             is_retain: false,
             is_used_attr: false,
+            quals: crate::ast::QualifierFlags::NONE,
         };
         f.body = Some(Block {
             items: vec![

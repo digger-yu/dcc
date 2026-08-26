@@ -77,6 +77,9 @@ pub struct VarDecl {
     pub is_retain: bool,
     /// __attribute__((used)): 防止 gc-sections 移除
     pub is_used_attr: bool,
+    /// ISO C 限定符 (const/volatile/restrict) 附着在该变量声明上.
+    /// 用于优化 pass 检测 volatile 变量，防止其读写被消除.
+    pub quals: QualifierFlags,
 }
 
 #[derive(Debug, Clone)]

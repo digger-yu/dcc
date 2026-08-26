@@ -1409,6 +1409,7 @@ pub fn rebuild_block(func: &Function) -> Block {
             copy_fn: None,
             is_retain: false,
             is_used_attr: false,
+            quals: crate::ast::QualifierFlags::NONE,
         })));
     }
 
@@ -2314,6 +2315,7 @@ mod tests {
                         copy_fn: None,
                         is_retain: false,
                         is_used_attr: false,
+                        quals: crate::ast::QualifierFlags::NONE,
                     })),
                     BlockItem::Stmt(Stmt::Return {
                         val: Some(Expr::Ident {

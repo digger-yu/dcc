@@ -462,6 +462,7 @@ mod tests {
                             copy_fn: None,
                             is_retain: false,
                             is_used_attr: false,
+                            quals: crate::ast::QualifierFlags::NONE,
                         })),
                         BlockItem::Decl(Decl::Var(crate::ast::VarDecl {
                             ty: int_ty(),
@@ -486,6 +487,7 @@ mod tests {
                             copy_fn: None,
                             is_retain: false,
                             is_used_attr: false,
+                            quals: crate::ast::QualifierFlags::NONE,
                         })),
                     ],
                     span: sp.clone(),

@@ -2632,6 +2632,7 @@ impl<'a> Parser<'a> {
             copy_fn: None,
             is_retain: false,
             is_used_attr: false,
+            quals: QualifierFlags::NONE,
         })])
     }
 
@@ -3014,6 +3015,7 @@ impl<'a> Parser<'a> {
                 copy_fn: arr_attrs.copy_fn.clone(),
                 is_retain: arr_attrs.is_retain,
                 is_used_attr: arr_attrs.is_used,
+                quals: self.spec_quals.iso_c(),
             })])
         } else {
             // extern 变量可以是 void 类型: 内核使用 `extern const void __nosave_begin, __nosave_end;`
@@ -3084,6 +3086,7 @@ impl<'a> Parser<'a> {
                     copy_fn: attrs.copy_fn.clone(),
                     is_retain: attrs.is_retain,
                     is_used_attr: attrs.is_used,
+                    quals: self.spec_quals.iso_c(),
                 })])
             } else if self.cur.kind == TokKind::Semi {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
@@ -3112,6 +3115,7 @@ impl<'a> Parser<'a> {
                     copy_fn: attrs.copy_fn.clone(),
                     is_retain: attrs.is_retain,
                     is_used_attr: attrs.is_used,
+                    quals: self.spec_quals.iso_c(),
                 })])
             } else if self.cur.kind == TokKind::Comma {
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
@@ -3139,6 +3143,7 @@ impl<'a> Parser<'a> {
                     copy_fn: attrs.copy_fn.clone(),
                     is_retain: attrs.is_retain,
                     is_used_attr: attrs.is_used,
+                    quals: self.spec_quals.iso_c(),
                 })])
             } else {
                 self.err_here(
@@ -3458,6 +3463,7 @@ impl<'a> Parser<'a> {
                 copy_fn: attrs.copy_fn.clone(),
                 is_retain: attrs.is_retain,
                 is_used_attr: attrs.is_used,
+                quals: self.spec_quals.iso_c(),
             })]);
         }
         // 不是函数指针, 只是带括号的指针变量 (罕见)
@@ -3505,6 +3511,7 @@ impl<'a> Parser<'a> {
             copy_fn: attrs.copy_fn.clone(),
             is_retain: attrs.is_retain,
             is_used_attr: attrs.is_used,
+            quals: self.spec_quals.iso_c(),
         })])
     }
 

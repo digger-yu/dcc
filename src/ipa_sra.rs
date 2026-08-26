@@ -702,6 +702,7 @@ fn inject_scalar_locals(
         copy_fn: None,
         is_retain: false,
         is_used_attr: false,
+        quals: QualifierFlags::NONE,
     });
 
     // 从标量参数组装字段赋值: `param.field = field_scalar;`

@@ -106,6 +106,16 @@ pub fn optimize(module: &mut Module, level: u8) {
 /// 循环变量版本无法在回边合并。
 fn run_ssa_passes(module: &mut Module, level: u8) {
     let prog = module.source_mut();
+    // Collect volatile global variable names - SSA passes must not
+    // propagate constants through volatile accesses.
+    let volatile_globals: std::collections::HashSet<String> = prog
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Var(v) if v.quals.is_volatile() => Some(v.name.name.clone()),
+            _ => None,
+        })
+        .collect();
     let mut modified = false;
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
@@ -118,6 +128,11 @@ fn run_ssa_passes(module: &mut Module, level: u8) {
             if func_has_unsafe_ssa_pattern(f) {
                 continue;
             }
+            // Skip functions that access volatile globals - SSA constant
+            // propagation would incorrectly fold volatile loads.
+            if !volatile_globals.is_empty() && func_refs_volatile(f, &volatile_globals) {
+                continue;
+            }
             if let Some(mut ssa) = crate::ssa::build_from_func(f) {
                 crate::ssa_passes::run(&mut ssa, level);
                 *f.body.as_mut().unwrap() = crate::ssa::rebuild_block(&ssa);
@@ -126,6 +141,102 @@ fn run_ssa_passes(module: &mut Module, level: u8) {
         }
     }
     let _ = modified;
+}
+
+/// Returns true if the function references any volatile global variable.
+fn func_refs_volatile(
+    f: &FuncDecl,
+    volatile_globals: &std::collections::HashSet<String>,
+) -> bool {
+    if let Some(body) = &f.body {
+        for item in &body.items {
+            if block_item_refs_volatile(item, volatile_globals) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn block_item_refs_volatile(
+    item: &BlockItem,
+    vol: &std::collections::HashSet<String>,
+) -> bool {
+    match item {
+        BlockItem::Stmt(s) => stmt_refs_volatile(s, vol),
+        BlockItem::Decl(Decl::Var(v)) => {
+            if let Some(init) = &v.init {
+                expr_refs_volatile(init, vol)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn stmt_refs_volatile(s: &Stmt, vol: &std::collections::HashSet<String>) -> bool {
+    match s {
+        Stmt::Return { val: Some(e), .. }
+        | Stmt::Expr { e, .. } => expr_refs_volatile(e, vol),
+        Stmt::If { cond, then_, else_, .. } => {
+            expr_refs_volatile(cond, vol)
+                || stmt_refs_volatile(then_, vol)
+                || else_.as_ref().map_or(false, |e| stmt_refs_volatile(e, vol))
+        }
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            expr_refs_volatile(cond, vol) || stmt_refs_volatile(body, vol)
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            init.as_ref().map_or(false, |i| stmt_refs_volatile(i, vol))
+                || cond.as_ref().map_or(false, |c| expr_refs_volatile(c, vol))
+                || step.as_ref().map_or(false, |s| expr_refs_volatile(s, vol))
+                || stmt_refs_volatile(body, vol)
+        }
+        Stmt::Block { b, .. } => b.items.iter().any(|i| block_item_refs_volatile(i, vol)),
+        Stmt::Switch { expr, cases, .. } => {
+            expr_refs_volatile(expr, vol)
+                || cases.iter().any(|c| c.body.items.iter().any(|i| block_item_refs_volatile(i, vol)))
+        }
+        _ => false,
+    }
+}
+
+fn expr_refs_volatile(e: &Expr, vol: &std::collections::HashSet<String>) -> bool {
+    match e {
+        Expr::Ident { name, .. } => vol.contains(&name.name),
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+            expr_refs_volatile(l, vol) || expr_refs_volatile(r, vol)
+        }
+        Expr::Unary { e, .. } | Expr::Cast { e, .. } | Expr::AddrOf { e, .. }
+        | Expr::Deref { e, .. } | Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+            expr_refs_volatile(e, vol)
+        }
+        Expr::Call { callee, args, .. } => {
+            expr_refs_volatile(callee, vol) || args.iter().any(|a| expr_refs_volatile(a, vol))
+        }
+        Expr::Index { arr, idx, .. } => {
+            expr_refs_volatile(arr, vol) || expr_refs_volatile(idx, vol)
+        }
+        Expr::Member { expr, .. } => expr_refs_volatile(expr, vol),
+        Expr::Cond { cond, then_, else_, .. } => {
+            expr_refs_volatile(cond, vol)
+                || expr_refs_volatile(then_, vol)
+                || expr_refs_volatile(else_, vol)
+        }
+        Expr::PostInc { e, .. } | Expr::PostDec { e, .. } | Expr::PreInc { e, .. }
+        | Expr::PreDec { e, .. } => expr_refs_volatile(e, vol),
+        Expr::StmtExpr { block, .. } => {
+            block.items.iter().any(|i| block_item_refs_volatile(i, vol))
+        }
+        Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
+            inits.iter().any(|init| match init {
+                crate::ast::InitItem::Expr(e) => expr_refs_volatile(e, vol),
+                crate::ast::InitItem::Designated { value, .. } => expr_refs_volatile(value, vol),
+            })
+        }
+        _ => false,
+    }
 }
 
 /// 检测函数体是否包含循环 (while/for/do-while)。
