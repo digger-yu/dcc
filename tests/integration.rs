@@ -9018,6 +9018,56 @@ fn m27_attr_alias_target_missing_compiles() {
     let _ = fs::remove_file(obj);
 }
 
+/// __attribute__((alias)): 变量别名运行时验证
+#[test]
+#[cfg(unix)]
+fn m27_attr_alias_var_runtime() {
+    let src = include_str!("fixtures/c/m27_attr_alias_var.c");
+    let (out, exe) = run_compile_and_run("m27-attr-alias-var", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "variable alias test failed");
+    let _ = fs::remove_file(exe);
+}
+
+/// __attribute__((alias)): 变量别名符号存在于对象文件
+#[test]
+#[cfg(unix)]
+fn m27_attr_alias_var_symbol_exists() {
+    let src = include_str!("fixtures/c/m27_attr_alias_var.c");
+    let (out, obj) = run_object_test("m27-attr-alias-var-obj", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let obj_data = std::fs::read(&obj).expect("read object file");
+    let obj_str = String::from_utf8_lossy(&obj_data);
+    assert!(obj_str.contains("alias_var"), "missing alias_var symbol");
+    assert!(obj_str.contains("real_var"), "missing real_var symbol");
+    let _ = fs::remove_file(obj);
+}
+
+/// __attribute__((alias)) + __weak: 内核模式弱符号别名
+#[test]
+#[cfg(unix)]
+fn m27_attr_alias_weak_runtime() {
+    let src = include_str!("fixtures/c/m27_attr_alias_weak.c");
+    let (out, exe) = run_compile_and_run("m27-attr-alias-weak", src);
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "weak + alias test failed");
+    let _ = fs::remove_file(exe);
+}
+
 /// __attribute__((retain)): 验证对象文件中保留符号存在
 #[test]
 #[cfg(unix)]
