@@ -1512,6 +1512,7 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
+            is_naked: false,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -1655,6 +1656,7 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
+            is_naked: false,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -1753,6 +1755,7 @@ mod tests {
             is_global: false,
             is_device: false,
             is_host: false,
+            is_naked: false,
         });
         let main_fn = Decl::Func(FuncDecl {
             ret_ty: int.clone(),
@@ -1822,6 +1825,7 @@ mod tests {
             is_global: false,
             is_device: false,
             is_host: false,
+            is_naked: false,
         });
         let prog = Program {
             decls: vec![sq, main_fn],
@@ -1928,6 +1932,7 @@ mod tests {
             is_global: false,
             is_device: false,
             is_host: false,
+            is_naked: false,
         });
         let prog = Program {
             decls: vec![func],

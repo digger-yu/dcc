@@ -140,6 +140,8 @@ pub struct FuncDecl {
     pub is_device: bool,
     /// CUDA/HIP: __host__ 函数 (仅 host 侧可见)
     pub is_host: bool,
+    /// __attribute__((naked)): 不生成 prologue/epilogue，函数体完全由内联汇编组成
+    pub is_naked: bool,
 }
 
 #[derive(Debug, Clone)]

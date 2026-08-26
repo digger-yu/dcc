@@ -2404,6 +2404,7 @@ mod tests {
             is_global: false,
             is_device: false,
             is_host: false,
+            is_naked: false,
         }
     }
 
@@ -2712,6 +2713,7 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
+            is_naked: false,
             })],
             fenv_access: false,
             fp_contract: false,
@@ -2801,6 +2803,7 @@ mod tests {
                 is_global: false,
                 is_device: false,
                 is_host: false,
+            is_naked: false,
             })],
             fenv_access: false,
             fp_contract: false,

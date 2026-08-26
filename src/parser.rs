@@ -64,6 +64,8 @@ struct ParsedAttrs {
     is_global: bool,
     is_device: bool,
     is_host: bool,
+    /// __attribute__((naked)): 不生成 prologue/epilogue
+    is_naked: bool,
 }
 
 /// 解析选项（Driver 传入）
@@ -205,6 +207,9 @@ impl ParsedAttrs {
         }
         if other.vector_size.is_some() {
             self.vector_size = other.vector_size;
+        }
+        if other.is_naked {
+            self.is_naked = true;
         }
     }
 }
@@ -1276,6 +1281,11 @@ impl<'a> Parser<'a> {
                                 self.advance();
                             } // )
                         }
+                    }
+                    // __attribute__((naked)): 不生成 prologue/epilogue
+                    "naked" => {
+                        attrs.is_naked = true;
+                        self.advance();
                     }
                     // CUDA/HIP 属性拼写 (__attribute__((global)) 等形式):
                     // 只在 -fcuda / -fhip 时生效, 否则按未知属性跳过
@@ -2841,6 +2851,7 @@ impl<'a> Parser<'a> {
                     is_global: attrs.is_global,
                     is_device: attrs.is_device,
                     is_host: attrs.is_host,
+                    is_naked: attrs.is_naked,
                 })])
             } else {
                 // 非嵌套函数: 用 retain 移除函数体内新增的局部条目, 避免 O(n) 克隆 globals
@@ -2892,6 +2903,7 @@ impl<'a> Parser<'a> {
                     is_global: attrs.is_global,
                     is_device: attrs.is_device,
                     is_host: attrs.is_host,
+                    is_naked: attrs.is_naked,
                 })])
             }
         } else if self.cur.kind == TokKind::LBracket {
@@ -3222,7 +3234,8 @@ impl<'a> Parser<'a> {
                     is_global: false,
                     is_device: false,
                     is_host: false,
-                })]);
+                    is_naked: false,
+                })])
             }
             // (*name(params)) — 返回指针的函数，无外层参数表
             let ptr_ty = Type::Ptr(Box::new(ty));
@@ -3303,7 +3316,8 @@ impl<'a> Parser<'a> {
                 is_global: false,
                 is_device: false,
                 is_host: false,
-            })]);
+                is_naked: false,
+            })])
         }
         // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
         let array_sizes = {

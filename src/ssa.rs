@@ -2365,6 +2365,7 @@ mod tests {
             is_global: false,
             is_device: false,
             is_host: false,
+            is_naked: false,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("entry"));
@@ -2446,6 +2447,7 @@ mod tests {
             is_global: false,
             is_device: false,
             is_host: false,
+            is_naked: false,
         };
         let func = build_from_func(&f).expect("structured");
         assert!(func.blocks.contains_key("if.then"));
@@ -2511,6 +2513,7 @@ mod tests {
             is_global: false,
             is_device: false,
             is_host: false,
+            is_naked: false,
         };
         assert!(build_from_func(&f).is_none());
     }

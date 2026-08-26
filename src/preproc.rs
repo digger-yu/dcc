@@ -5097,6 +5097,7 @@ impl Preprocessor {
                 | "unsequenced"
                 | "returns_nonnull"
                 | "assume"
+                | "naked"
         )
     }
 
