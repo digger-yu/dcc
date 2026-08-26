@@ -71,6 +71,44 @@
   保证 `__COUNTER__` / `__FILE__` / `__LINE__` 等特殊 token
   始终进入展开路径
 
+## QualType 类型限定符系统
+
+仿照 Clang QualType 模式，dcc 在 AST 层引入 `QualType` 包装:
+
+```rust
+pub struct QualType {
+    pub base: Type,           // 底层扁平类型
+    pub quals: QualifierFlags, // const/volatile/restrict 位标志
+}
+```
+
+**设计要点:**
+
+- `Type` 枚举递归变体 (`Ptr`/`Array`/`Func`/`Complex`/`Imaginary`/
+  `Vector`/`Atomic`/`Enum`) 使用 `Box<QualType>` 而非 `Box<Type>`,
+  实现多级指针限定符自然传播 (`const int * volatile *`)
+- `QualifierFlags` 为 `u8` 位标志: `CONST(0x01)` / `VOLATILE(0x02)` /
+  `RESTRICT(0x04)` / `ATOMIC(0x08)` / `NODEREF(0x10)`
+- 公共 API 接受 `&QualType`，内部 `match &qt.base` 仍对扁平 `Type`
+  进行，限定符在 codegen/BTF/DWARF 阶段按需读取
+- IR 层 `TypedExpr` 携带 `quals: QualifierFlags` 字段，限定符信息
+  从 AST 传播到后端
+
+**Volatile 语义保护:**
+
+- `opt.rs`: `is_side_effect_free()` 对 volatile 类型表达式返回 `false`,
+  防止死存储消除
+- `ssa_gvn.rs`: `gvn_key_string()` 对 volatile 表达式返回 `None`,
+  防止公共子表达式消除
+- `ast::type_has_volatile()` 递归检测类型树中的 volatile 限定符
+
+**BTF/DWARF 输出:**
+
+- `qual_type_to_dwarf()` 在 DWARF 类型链中插入
+  `DW_TAG_const_type`/`volatile_type`/`restrict_type` 节点
+- BTF 输出 `BTF_KIND_CONST`/`VOLATILE`/`RESTRICT`，满足 pahole
+  和 BPF CO-RE 校验需求
+
 ## 错误诊断
 
 所有 `Diagnostic` 携带:

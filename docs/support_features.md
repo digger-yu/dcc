@@ -332,6 +332,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | const_eval 完整化 | `ConstValue` 枚举；浮点算术；字符串字面量 FNV-1a；`&ident` / `&arr[i]` / `&&label`；`#embed` 字节数；`sizeof`/`alignof`/`offsetof` 常量折叠；二元算术/位运算/比较折叠；三元条件求值；类型转换截断/符号扩展；一元运算 (Neg/Not/BitNot/Plus)；语句表达式 `({...})` 求值；`__real__`/`__imag__` 复数常量提取；`ComplexLit` 常量求值；内建函数折叠 (`__builtin_clz/ctz/popcount/ffs/bswap`) |
 | 运行时检查 | `-fbounds-check` 数组下标边界检查；`-ftrapv` 有符号算术溢出 trap |
 | 严格类型检查 | `-Wint-truncation` / `-Wint-conversion`；仅 warning 不阻塞 |
+| QualType 限定符系统 | Clang 式 `QualType { base: Type, quals: QualifierFlags }` 包装；`Type` 递归变体 (`Ptr`/`Array`/`Func`/`Complex`/`Imaginary`/`Vector`/`Atomic`/`Enum`) 使用 `Box<QualType>` 实现多级指针限定符传播；`QualifierFlags` 位标志 (`CONST`/`VOLATILE`/`RESTRICT`/`ATOMIC`/`NODEREF`)；IR 层 `TypedExpr.quals` 传播到后端；volatile 表达式受 `is_side_effect_free`/`gvn_key_string` 保护不被优化消除；BTF/DWARF 输出 `BTF_KIND_CONST`/`VOLATILE`/`RESTRICT` 节点。测试：`tests/fixtures/c/qual_type.c` |
 | GNU 扩展 | 嵌套函数 / computed goto 跨函数 / `Expr::Unary` 浮点取负 / `AddrOf` REX.R 编码 / `_Complex` 字面量 / `__real__`/`__imag__` |
 | 嵌套块重声明 (C99 6.2.1) | 函数体内遮蔽允许 (不同类型不报 E0007)；文件作用域类型不匹配仍报 E0007 |
 | K&R 函数 | 解析自动检测 + `is_old_style` |
