@@ -1719,6 +1719,172 @@ fn md_dependency_file_lists_includes() {
 }
 
 #[test]
+fn m_flag_outputs_deps_to_stdout_includes_system_headers() {
+    let dir = std::env::temp_dir();
+    let inc = dir.join(format!("dcc-m-inc-{}", std::process::id()));
+    let src = dir.join(format!("dcc-m-{}.c", std::process::id()));
+    fs::create_dir_all(&inc).expect("mkdir inc");
+    fs::write(inc.join("sys.h"), "#define SYS_X 1\n").expect("write sys.h");
+    fs::write(
+        &src,
+        "#include <sys.h>\nint main(void) { return SYS_X; }\n",
+    )
+    .expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-M")
+        .arg("-isystem")
+        .arg(&inc)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let _ = fs::remove_dir_all(&inc);
+    let _ = fs::remove_file(&src);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // -M 应包含系统头文件
+    assert!(
+        stdout.contains("sys.h"),
+        "-M should include system headers: {stdout}"
+    );
+    // 输出应包含目标名 (默认 stem.o)
+    let stem = src.file_stem().unwrap().to_str().unwrap();
+    assert!(
+        stdout.contains(&format!("{stem}.o:")),
+        "-M output should contain target: {stdout}"
+    );
+}
+
+#[test]
+fn mm_flag_outputs_deps_excludes_system_headers() {
+    let dir = std::env::temp_dir();
+    let inc = dir.join(format!("dcc-mm-inc-{}", std::process::id()));
+    let src = dir.join(format!("dcc-mm-{}.c", std::process::id()));
+    fs::create_dir_all(&inc).expect("mkdir inc");
+    fs::write(inc.join("sys.h"), "#define SYS_X 1\n").expect("write sys.h");
+    fs::write(
+        &src,
+        "#include <sys.h>\nint main(void) { return SYS_X; }\n",
+    )
+    .expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-MM")
+        .arg("-isystem")
+        .arg(&inc)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let _ = fs::remove_dir_all(&inc);
+    let _ = fs::remove_file(&src);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // -MM 应排除系统头文件
+    assert!(
+        !stdout.contains("sys.h"),
+        "-MM should exclude system headers: {stdout}"
+    );
+}
+
+#[test]
+fn mq_flag_quotes_dollar_in_target() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-mq-{}.c", std::process::id()));
+    let dep = dir.join(format!("dcc-mq-{}.d", std::process::id()));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    // -MQ 应转义 $ 为 $$: 传入 foo$bar.o, dep 文件中应为 foo$$bar.o
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-MD", "-MQ", "foo$bar.o", "-MF"])
+        .arg(&dep)
+        .args(["-c", "-o"])
+        .arg(dir.join(format!("dcc-mq-{}.o", std::process::id())))
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let dep_text = fs::read_to_string(&dep).unwrap_or_default();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&dep);
+    let _ = fs::remove_file(dir.join(format!("dcc-mq-{}.o", std::process::id())));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // -MQ: $ 应被转义为 $$, Make 读取时还原为 $
+    assert!(
+        dep_text.contains("foo$$bar.o:"),
+        "-MQ should escape $ to $$: {dep_text}"
+    );
+}
+
+#[test]
+fn mt_flag_uses_literal_target() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-mt-{}.c", std::process::id()));
+    let dep = dir.join(format!("dcc-mt-{}.d", std::process::id()));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-MD", "-MT", "custom_target.o", "-MF"])
+        .arg(&dep)
+        .args(["-c", "-o"])
+        .arg(dir.join(format!("dcc-mt-{}.o", std::process::id())))
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let dep_text = fs::read_to_string(&dep).unwrap_or_default();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&dep);
+    let _ = fs::remove_file(dir.join(format!("dcc-mt-{}.o", std::process::id())));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dep_text.contains("custom_target.o:"),
+        "-MT target should appear literally: {dep_text}"
+    );
+}
+
+#[test]
+fn m_flag_with_mf_writes_to_file() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-m-mf-{}.c", std::process::id()));
+    let dep = dir.join(format!("dcc-m-mf-{}.d", std::process::id()));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-M", "-MF"])
+        .arg(&dep)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let dep_text = fs::read_to_string(&dep).unwrap_or_default();
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&dep);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // -M 加 -MF 应写入文件而非 stdout
+    assert!(
+        !dep_text.is_empty(),
+        "-M -MF should write deps to file"
+    );
+    let stem = src.file_stem().unwrap().to_str().unwrap();
+    assert!(
+        dep_text.contains(&format!("{stem}.o:")),
+        "dep file should contain target: {dep_text}"
+    );
+}
+
+#[test]
 fn dep_file_uses_backslash_continuations() {
     let dir = std::env::temp_dir();
     let hdr = format!("dcc-depcont-hdr-{}.h", std::process::id());
