@@ -30,6 +30,16 @@ pub struct Target {
     pub llong_size: u8, // long long 字节
     pub endian: Endian,
     pub callee_save: CalleeSave,
+    /// 默认对齐表 (字节)
+    ///
+    /// 每个架构的 ABI 规定了基本类型的自然对齐要求。
+    /// 这些值用于 struct/union 布局计算和 `__alignof__` 求值。
+    pub ptr_align: u8,       // 指针类型对齐
+    pub int_align: u8,       // int 对齐 (通常 = int_size)
+    pub long_align: u8,      // long 对齐
+    pub llong_align: u8,     // long long 对齐
+    pub double_align: u8,    // double 对齐
+    pub long_double_align: u8, // long double 对齐
     pub is_linux: bool,
     pub red_zone: bool,
     pub frame_pointer: bool,
@@ -69,6 +79,27 @@ impl Target {
             Arch::Mips => (4, 4, 4, 8, Endian::Big, CalleeSave::AAPCS),
             Arch::Arm => (4, 4, 4, 8, Endian::Little, CalleeSave::AAPCS),
         };
+        // 默认对齐表: 根据架构 ABI 确定各基本类型的自然对齐
+        //
+        // LP64 (x86_64/aarch64/riscv64/mips64 N64):
+        //   - long/pointer/double: 8 字节对齐
+        //   - long long: 8 字节对齐
+        //   - long double: 16 字节对齐 (x86_64 80-bit 扩展精度)
+        //
+        // ILP32 (mips O32/arm AAPCS):
+        //   - long/pointer: 4 字节对齐 (= size)
+        //   - long long: 8 字节对齐 (ABI 要求 even-register 对齐)
+        //   - double: 8 字节对齐 (ABI 要求 even-register 对齐)
+        //   - long double: 8 字节对齐 (= double 大小)
+        let (ptr_align, int_align, long_align, llong_align, double_align, long_double_align) =
+            match t.arch {
+                Arch::X86_64 => (8, 4, 8, 8, 8, 16),
+                Arch::AArch64 => (8, 4, 8, 8, 8, 16),
+                Arch::RiscV64 => (8, 4, 8, 8, 8, 16),
+                Arch::Mips64 => (8, 4, 8, 8, 8, 16),
+                Arch::Mips => (4, 4, 4, 8, 8, 8),
+                Arch::Arm => (4, 4, 4, 8, 8, 8),
+            };
         // 第一性原理: Target::resolve() 只负责"几何"参数 (指针/字节序/调用约定),
         // 不管 codegen 后端是否实现。是否真的能 emit 是 codegen::emit() 关心的事。
         Self {
@@ -80,6 +111,12 @@ impl Target {
             llong_size,
             endian,
             callee_save,
+            ptr_align,
+            int_align,
+            long_align,
+            llong_align,
+            double_align,
+            long_double_align,
             is_linux: matches!(t.os, Os::Linux | Os::Freestanding),
             red_zone: true,
             frame_pointer: false,
@@ -166,6 +203,40 @@ impl Target {
             self.cpu_features.avx512bw = false;
             self.cpu_features.avx512vl = false;
         }
+    }
+
+    /// 返回基本类型的默认对齐 (字节)。
+    ///
+    /// 根据目标架构 ABI 返回各基本类型的自然对齐要求。
+    /// 用于 struct/union 布局计算和 `__alignof__` 求值。
+    ///
+    /// 参数 `type_kind` 标识类型类别:
+    /// - "ptr": 指针类型
+    /// - "int": int 类型
+    /// - "long": long 类型
+    /// - "llong": long long 类型
+    /// - "double": double 类型
+    /// - "longdouble": long double 类型
+    /// - "int128": __int128 类型
+    pub fn base_type_align(&self, type_kind: &str) -> usize {
+        match type_kind {
+            "ptr" => self.ptr_align as usize,
+            "int" => self.int_align as usize,
+            "long" => self.long_align as usize,
+            "llong" => self.llong_align as usize,
+            "double" => self.double_align as usize,
+            "longdouble" => self.long_double_align as usize,
+            "int128" => 16,
+            _ => 1,
+        }
+    }
+
+    /// 返回目标架构的最大对齐要求 (字节)。
+    ///
+    /// 用于确定 struct 的最大自然对齐上界。
+    /// 通常是 long double 的对齐 (LP64: 16, ILP32: 8)。
+    pub fn max_align(&self) -> usize {
+        self.long_double_align as usize
     }
 }
 
@@ -323,5 +394,109 @@ mod tests {
         t.apply_cpu_feature_overrides(&overrides);
         assert!(t.cpu_features.cet_ss);
         assert!(t.cpu_features.cet_ibt);
+    }
+
+    // === 默认对齐表测试 ===
+
+    #[test]
+    fn x86_64_lp64_alignment_table() {
+        let t = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        // LP64: long/ptr/double = 8, long long = 8, long double = 16
+        assert_eq!(t.ptr_align, 8);
+        assert_eq!(t.int_align, 4);
+        assert_eq!(t.long_align, 8);
+        assert_eq!(t.llong_align, 8);
+        assert_eq!(t.double_align, 8);
+        assert_eq!(t.long_double_align, 16);
+        assert_eq!(t.max_align(), 16);
+    }
+
+    #[test]
+    fn aarch64_lp64_alignment_table() {
+        let t = Target::resolve(&trip(Arch::AArch64, Os::Linux, Abi::Gnu));
+        assert_eq!(t.ptr_align, 8);
+        assert_eq!(t.int_align, 4);
+        assert_eq!(t.long_align, 8);
+        assert_eq!(t.llong_align, 8);
+        assert_eq!(t.double_align, 8);
+        assert_eq!(t.long_double_align, 16);
+        assert_eq!(t.max_align(), 16);
+    }
+
+    #[test]
+    fn riscv64_lp64_alignment_table() {
+        let t = Target::resolve(&trip(Arch::RiscV64, Os::Linux, Abi::Gnu));
+        assert_eq!(t.ptr_align, 8);
+        assert_eq!(t.long_align, 8);
+        assert_eq!(t.llong_align, 8);
+        assert_eq!(t.double_align, 8);
+        assert_eq!(t.long_double_align, 16);
+    }
+
+    #[test]
+    fn mips64_lp64_alignment_table() {
+        let t = Target::resolve(&trip(Arch::Mips64, Os::Linux, Abi::Gnu));
+        assert_eq!(t.ptr_align, 8);
+        assert_eq!(t.long_align, 8);
+        assert_eq!(t.llong_align, 8);
+        assert_eq!(t.double_align, 8);
+        assert_eq!(t.long_double_align, 16);
+    }
+
+    #[test]
+    fn mips_ilp32_alignment_table() {
+        let t = Target::resolve(&trip(Arch::Mips, Os::Linux, Abi::Gnu));
+        // ILP32: long/ptr = 4, long long/double = 8, long double = 8
+        assert_eq!(t.ptr_align, 4);
+        assert_eq!(t.int_align, 4);
+        assert_eq!(t.long_align, 4);
+        assert_eq!(t.llong_align, 8);
+        assert_eq!(t.double_align, 8);
+        assert_eq!(t.long_double_align, 8);
+        assert_eq!(t.max_align(), 8);
+    }
+
+    #[test]
+    fn arm_ilp32_alignment_table() {
+        let t = Target::resolve(&trip(Arch::Arm, Os::Linux, Abi::Eabihf));
+        // AAPCS: long/ptr = 4, long long/double = 8, long double = 8
+        assert_eq!(t.ptr_align, 4);
+        assert_eq!(t.int_align, 4);
+        assert_eq!(t.long_align, 4);
+        assert_eq!(t.llong_align, 8);
+        assert_eq!(t.double_align, 8);
+        assert_eq!(t.long_double_align, 8);
+        assert_eq!(t.max_align(), 8);
+    }
+
+    #[test]
+    fn base_type_align_query() {
+        let t = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        assert_eq!(t.base_type_align("ptr"), 8);
+        assert_eq!(t.base_type_align("int"), 4);
+        assert_eq!(t.base_type_align("long"), 8);
+        assert_eq!(t.base_type_align("llong"), 8);
+        assert_eq!(t.base_type_align("double"), 8);
+        assert_eq!(t.base_type_align("longdouble"), 16);
+        assert_eq!(t.base_type_align("int128"), 16);
+        assert_eq!(t.base_type_align("unknown"), 1);
+    }
+
+    #[test]
+    fn ilp32_lp64_alignment_divergence() {
+        // 验证 ILP32 和 LP64 对齐差异
+        let lp64 = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        let ilp32 = Target::resolve(&trip(Arch::Arm, Os::Linux, Abi::Eabihf));
+        // ptr/long 在 ILP32 是 4, LP64 是 8
+        assert_eq!(lp64.ptr_align, 8);
+        assert_eq!(ilp32.ptr_align, 4);
+        assert_eq!(lp64.long_align, 8);
+        assert_eq!(ilp32.long_align, 4);
+        // long long/double 在两种模型下都是 8
+        assert_eq!(lp64.llong_align, ilp32.llong_align);
+        assert_eq!(lp64.double_align, ilp32.double_align);
+        // long double 在 LP64 是 16, ILP32 是 8
+        assert_eq!(lp64.long_double_align, 16);
+        assert_eq!(ilp32.long_double_align, 8);
     }
 }
