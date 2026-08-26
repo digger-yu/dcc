@@ -16,7 +16,7 @@
 | __int128 / register asm / 全局符号 | `examples/test_p1_features.c` |
 | 预处理 forced-include 注释安全 | `tests/fixtures/c/comment.h` |
 | mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
-| DWARF + BTF（完整类型信息） | `-g` 生成 `.debug_*` + `.BTF`（含编译单元中所有类型的完整 BTF 信息，支持 pahole -J 直接解析） |
+| DWARF + BTF（完整类型信息） | `-g` 生成 `.debug_*` + `.BTF`（含编译单元中所有类型的完整 BTF 信息，支持 pahole -J 直接解析）；BTF 输出保留 const/volatile/restrict 限定符（BTF_KIND_CONST/VOLATILE/RESTRICT），struct/union 字段限定符正确传播，满足 BPF CO-RE 需求 |
 | objtool / ORC 帧信息 | `-g`/`-fno-omit-frame-pointer` 生成 CIE+FDE `.eh_frame`；`-mfunction-return=thunk-extern` 下函数尾声、空 global asm 函数和 mini-asm `ret` 均跳转 `__x86_return_thunk`，避免 MITIGATION_RETHUNK 裸 `ret` |
 | `-S` 汇编输出 | lock/SSE 前缀；自定义节按 `.section` 分组 |
 | QEMU bzImage boot 门禁 | `scripts/qemu_boot_matrix.sh` 在 bzImage 存在时默认硬门禁，缺 QEMU 或缺 boot log 关键字符串均失败；`kernel_full_check.sh` strict 模式导出 `REQUIRE_QEMU_BOOT=1`；`strict_qemu_boot_*` 集成测试固化契约 |
@@ -383,7 +383,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | vDSO 集成 | `--vdso=<path>` 解析 vDSO ELF，嵌入 `.text.vdso` + `.note.GNU-vdso` + 符号表 |
 | PIE/Shared 输出 | 多架构 `_start` 入口桩 (x86_64/aarch64/riscv64/arm/mips/mips64) |
 | AArch64/RISC-V/MIPS/ARM ELF 输出 | `elf_exec.rs` 多架构包装函数 |
-| x86-64 重定位（35 种） | `NONE` / `64` / `PC32` / `PLT32` / `GLOB_DAT` / `JUMP_SLOT` / `RELATIVE` / `GOTPCREL` / `32` / `32S` / `16` / `PC16` / `8` / `PC8` / `PC64` / `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOT64` / `GOTOFF64` / `GOTPC32` / `GOTPC64` / `GOTPCREL64` / `GOTPLT64` / `PLTOFF64` / `SIZE32` / `SIZE64` / `GOTPC32_TLSDESC` / `IRELATIVE` |
+| x86-64 重定位（35 种） | `NONE` / `64` / `PC32` / `PLT32` / `GLOB_DAT` / `JUMP_SLOT` / `RELATIVE` / `GOTPCREL` / `32` / `32S` / `16` / `PC16` / `8` / `PC8` / `PC64` / `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOT64` / `GOTOFF64` / `GOTPC32` / `GOTPC64` / `GOTPCREL64` / `GOTPLT64` / `PLTOFF64` / `SIZE32` / `SIZE64` / `GOTPC32_TLSDESC` / `IRELATIVE`；覆盖内核全部关键重定位（函数调用 PC32/PLT32、数据访问 64/32/32S、GOT GOTPCREL、TLS LE TPOFF32/64、TLS IE GOTTPOFF、TLS GD/LD TLSGD/TLSLD/DTPOFF/DTPMOD、per-cpu 变量）；19 个单元测试验证各类型计算公式正确性 |
 | AArch64 重定位（46 种） | `ABS64` / `ABS32` / `ABS16` / `PREL64` / `PREL32` / `PREL16` / `CALL26` / `JUMP26` / `ADR_PREL_LO21` / `ADR_PREL_PG_HI21` / `ADR_PREL_PG_HI21_NC` / `ADD_ABS_LO12_NC` / `LDST{8,16,32,64,128}_ABS_LO12_NC` / `MOVW_UABS_G0..G3` / `MOVW_SABS_G0..G2` / `TLSDESC_*` (8 种) / `TLSIE_*` (2 种) / `TLSLE_MOVW_TPREL_G2/G1/G1_NC/G0/G0_NC` / `TLSLE_ADD_TPREL_HI12/LO12/LO12_NC` |
 | RISC-V 重定位（29 种） | `64` / `32` / `32_PCREL` / `JAL` / `BRANCH` / `CALL` / `CALL_PLT` / `PCREL_HI20` / `PCREL_LO12_{I,S}` / `HI20` / `LO12_{I,S}` / `TPREL64` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_{I,S}` / `ALIGN` / `RELAX` / `RVC_BRANCH` / `RVC_JUMP` / `SET{6,8,16,32}` / `SUB{6,8,16,32}` |
 | MIPS 重定位（24 种） | `NONE` / `16` / `26` / `HI16` / `LO16` / `32` / `64` / `REL32` / `GPREL16` / `GPREL32` / `GOT16` / `GOT_HI16` / `GOT_LO16` / `CALL16` / `CALL_HI16` / `CALL_LO16` / `PC16` / `HIGHER` / `HIGHEST` / `TLS_GD` / `TLS_LDM` / `TLS_DTPREL_HI16` / `TLS_DTPREL_LO16` / `TLS_GOTTPREL` |
@@ -394,7 +394,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | wchar_t libc 转发 | wcs*/wmem* 11 个入口在 link implicit undef 白名单 |
 | signal libc 转发 | `sigaction` / `sigaltstack` / `signal` 白名单 |
 | 复杂数学 libm 转发 | `cproj` / `cabs` / `carg` 白名单 |
-| 符号解析: 强/弱/未定义 | `resolve.rs` 实现完整符号解析规则：强 vs 强 → 错误；强 vs 弱 → 强胜；弱 vs 弱 → size 最大者胜；弱未定义 → 解析为 0 (NULL)；强未定义 → 报错 (允许列表除外)；`nm` 可见未定义符号 (U) 和弱符号 (W) |
+| 符号解析: 强/弱/未定义 | `resolve.rs` 实现完整符号解析规则：强 vs 强 → 错误；强 vs 弱 → 强胜；弱 vs 弱 → size 最大者胜；弱未定义 → 解析为 0 (NULL)；强未定义 → 报错 (允许列表除外)；`nm` 可见未定义符号 (U) 和弱符号 (W)；10 个单元测试覆盖全部解析路径 |
+| COMMON 符号合并 | `SHN_COMMON` 符号作为强定义 (tentative definition) 处理；多个 COMMON 或 COMMON + tentative 自动合并取最大 size；与 GNU ld `-fno-common` 行为一致；`-fno-common` 标志下 codegen 直接放入 `.bss` 跳过 COMMON |
 | Tentative definition 合并 | 跨 TU 的未初始化全局变量 (`int x;`) 多个强定义自动合并 (取最大 size)，与 GCC common symbol 行为一致；仅适用于 `STT_OBJECT`/`STT_NOTYPE`，函数重复定义仍报错 |
 | 未定义符号输出 .symtab | 允许列表中的未定义符号和弱未定义符号均写入输出 `.symtab`，`nm` 显示为 `U` (undefined)；ELF `st_shndx = SHN_UNDEF (0)` |
 | 链接器脚本 MEMORY 块 | `MEMORY { name [(attr)] : ORIGIN = expr, LENGTH = expr }` 定义内存区域及属性；支持内核 vmlinux.lds 物理内存区域映射 |

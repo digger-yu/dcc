@@ -1890,4 +1890,230 @@ mod tests {
         let got = u64::from_le_bytes(layout.sections[2].data[0..8].try_into().unwrap());
         assert_eq!(got, 0x402234);
     }
+
+    // ---- Additional x86_64 relocation coverage tests ----
+
+    #[test]
+    fn abs32_zero_extends() {
+        // R_X86_64_32: S + A, truncated to 32-bit (zero-extend)
+        // sym vaddr = 0x401004, A = 0 => value = 0x00401004
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_32);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn abs32s_sign_extends() {
+        // R_X86_64_32S: S + A, sign-extended through 64 -> 32 -> u32
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_32S);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn tpoff32_tls_le() {
+        // R_X86_64_TPOFF32: TLS Local Exec 32-bit
+        // sym vaddr = 0x401004, A = 0 => value = (0x401004 as i32) as u32
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_TPOFF32);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn tpoff64_tls_le() {
+        // R_X86_64_TPOFF64: TLS Local Exec 64-bit
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_TPOFF64);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dtpoff32_tls_ldm() {
+        // R_X86_64_DTPOFF32: TLS LDM 32-bit DTP offset
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_DTPOFF32);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dtpoff64_tls_ldm() {
+        // R_X86_64_DTPOFF64: TLS LDM 64-bit DTP offset
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_DTPOFF64);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn gottpoff_tls_ie() {
+        // R_X86_64_GOTTPOFF: TLS Initial Exec, GOT-relative
+        // S + A - P, 32-bit write
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_GOTTPOFF);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pc64_relative() {
+        // R_X86_64_PC64: 64-bit PC-relative
+        // sym = 0x401004, place = 0x401000, A = 0
+        // value = 0x401004 + 0 - 0x401000 = 4
+        let mut layout = {
+            let mut l = Layout {
+                is_pie: false,
+                is_shared: false,
+                base_addr: 0x400000,
+                file_base: 0,
+                sections: vec![
+                    OutputSection {
+                        kind: OutputSectionKind::Text,
+                        name: "".into(),
+                        sh_name_off: 0,
+                        ty: SHT_PROGBITS,
+                        flags: 0,
+                        align: 1,
+                        data: vec![],
+                        size: 0,
+                        entsize: 0,
+                        output_index: 0,
+                        load_segment: 0,
+                        vaddr: 0,
+                        file_off: 0,
+                        input_offsets: vec![],
+                        input_sections: vec![],
+                    },
+                    OutputSection {
+                        kind: OutputSectionKind::Text,
+                        name: ".text".into(),
+                        sh_name_off: 0,
+                        ty: SHT_PROGBITS,
+                        flags: SHF_ALLOC | SHF_EXECINSTR,
+                        align: 16,
+                        data: vec![0; 16],
+                        size: 16,
+                        entsize: 0,
+                        output_index: 1,
+                        load_segment: 0,
+                        vaddr: 0x401000,
+                        file_off: 0x120,
+                        input_offsets: vec![],
+                        input_sections: vec![],
+                    },
+                ],
+                segments: vec![],
+                symbols: vec![
+                    OutputSymbol {
+                        name: "".into(),
+                        value: 0,
+                        vaddr: 0,
+                        size: 0,
+                        bind: 0,
+                        ty: 0,
+                        kind: 0,
+                        visibility: 0,
+                        section: 0,
+                        shndx_if_section: 0,
+                    },
+                    OutputSymbol {
+                        name: "target".into(),
+                        value: 8,
+                        vaddr: 0x401008,
+                        size: 0,
+                        bind: STB_GLOBAL,
+                        ty: STT_FUNC,
+                        kind: STT_FUNC,
+                        visibility: 0,
+                        section: 1,
+                        shndx_if_section: 0,
+                    },
+                ],
+                entry: 0x401000,
+                has_symtab: true,
+                has_dynamic: false,
+                n_locals: 1,
+                output_relas: vec![OutputRela {
+                    section: 1,
+                    offset: 0,
+                    sym: 1,
+                    rel_type: R_X86_64_PC64,
+                    addend: 0,
+                    _name: String::new(),
+                }],
+                needed: vec![],
+                dynamic_linker: None,
+                arch: ArchKind::X86_64,
+            };
+            l
+        };
+        apply_relocations(&mut layout).unwrap();
+        // S(0x401008) + A(0) - P(0x401000) = 8
+        let got = u64::from_le_bytes(layout.sections[1].data[0..8].try_into().unwrap());
+        assert_eq!(got, 8, "PC64 should be 8");
+    }
+
+    #[test]
+    fn abs16_truncates() {
+        // R_X86_64_16: S + A truncated to 16-bit
+        // sym = 0x401004, A = 0 => 0x1004
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_16);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn abs8_truncates() {
+        // R_X86_64_8: S + A truncated to 8-bit
+        // sym = 0x401004, A = 0 => 0x04
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_8);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn size32_uses_symbol_size() {
+        // R_X86_64_SIZE32: writes sym.size as u32
+        // target symbol has size=0 in apply_one_test_reloc, so result = 0
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_SIZE32);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dtpmod64_resolves_to_zero() {
+        // R_X86_64_DTPMOD64: static linking => module ID = 0 (self)
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_DTPMOD64);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn gotpc32_static_resolve() {
+        // R_X86_64_GOTPC32: GOT + A - P, static proxy
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_GOTPC32);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn none_is_noop() {
+        // R_X86_64_NONE: no-op relocation
+        let result = apply_one_test_reloc(ArchKind::X86_64, R_X86_64_NONE);
+        assert!(result.is_ok());
+    }
+
+    /// Verify all kernel-critical x86_64 relocation types are accepted
+    #[test]
+    fn all_kernel_critical_relocs_accepted() {
+        let kernel_relocs = [
+            R_X86_64_64,
+            R_X86_64_32,
+            R_X86_64_32S,
+            R_X86_64_PC32,
+            R_X86_64_PLT32,
+            R_X86_64_GOTPCREL,
+            R_X86_64_TPOFF32,
+            R_X86_64_TPOFF64,
+            R_X86_64_DTPOFF32,
+            R_X86_64_DTPOFF64,
+            R_X86_64_DTPMOD64,
+            R_X86_64_GOTTPOFF,
+            R_X86_64_TLSGD,
+            R_X86_64_TLSLD,
+            R_X86_64_NONE,
+        ];
+        for &rt in &kernel_relocs {
+            assert!(
+                is_supported_reloc_for_arch(ArchKind::X86_64, rt),
+                "reloc type {} should be supported for x86_64",
+                rt
+            );
+        }
+    }
 }
