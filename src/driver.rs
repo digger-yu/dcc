@@ -841,6 +841,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // codegen
     let mut target = Target::resolve(&cfg.target);
     target.apply_codegen_options(cfg.red_zone, cfg.frame_pointer, cfg.sse);
+    // CPU 指令集特性: 应用 CLI 显式覆盖 (在 CPUID 动态检测基础上)
+    target.apply_cpu_feature_overrides(&cfg.cpu_feature_overrides);
+    if cfg.verbose && cfg.target.arch == crate::cli::Arch::X86_64 {
+        let feats = target.cpu_features.to_feature_strings();
+        if !feats.is_empty() {
+            eprintln!("dcc: cpu features: {}", feats.join(", "));
+        }
+    }
     target.kernel_code_model = cfg.kernel_code_model;
     target.auto_var_init_zero = cfg.auto_var_init_zero;
     target.set_stack_protector(cfg.stack_protector);

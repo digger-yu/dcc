@@ -171,6 +171,8 @@ pub struct Config {
     pub no_common: bool,
     /// -fcached: 增量编译 (基于源文件哈希跳过未变更文件的编译)
     pub incremental: bool,
+    /// CPU 特性显式覆盖 (-mavx / -mno-avx 等)
+    pub cpu_feature_overrides: crate::cpuid::CpuFeatureOverrides,
     /// CLI 解析期间收集的警告 (未知/忽略的标志等)
     pub cli_warnings: Vec<String>,
 }
@@ -663,6 +665,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut short_wchar = false;
     let mut no_common = false;
     let mut incremental = false;
+    let mut cpu_feature_overrides = crate::cpuid::CpuFeatureOverrides::default();
     let mut cli_warnings: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -1422,6 +1425,50 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-fomit-frame-pointer" => frame_pointer = false,
             "-mno-sse" | "-mno-sse2" => sse = false,
             "-msse" | "-msse2" => sse = true,
+            // CPU 指令集特性显式控制
+            "-mavx" => cpu_feature_overrides.avx = Some(true),
+            "-mno-avx" => cpu_feature_overrides.avx = Some(false),
+            "-mavx2" => {
+                cpu_feature_overrides.avx = Some(true);
+                cpu_feature_overrides.avx2 = Some(true);
+            }
+            "-mno-avx2" => cpu_feature_overrides.avx2 = Some(false),
+            "-mavx512f" => {
+                cpu_feature_overrides.avx = Some(true);
+                cpu_feature_overrides.avx512f = Some(true);
+            }
+            "-mno-avx512f" => cpu_feature_overrides.avx512f = Some(false),
+            "-mavx512bw" => {
+                cpu_feature_overrides.avx = Some(true);
+                cpu_feature_overrides.avx512f = Some(true);
+                cpu_feature_overrides.avx512bw = Some(true);
+            }
+            "-mno-avx512bw" => cpu_feature_overrides.avx512bw = Some(false),
+            "-mavx512vl" => {
+                cpu_feature_overrides.avx = Some(true);
+                cpu_feature_overrides.avx512f = Some(true);
+                cpu_feature_overrides.avx512vl = Some(true);
+            }
+            "-mno-avx512vl" => cpu_feature_overrides.avx512vl = Some(false),
+            "-mavx512dq" => {
+                cpu_feature_overrides.avx = Some(true);
+                cpu_feature_overrides.avx512f = Some(true);
+                cpu_feature_overrides.avx512dq = Some(true);
+            }
+            "-mno-avx512dq" => cpu_feature_overrides.avx512dq = Some(false),
+            "-mfma" => {
+                cpu_feature_overrides.avx = Some(true);
+                cpu_feature_overrides.fma = Some(true);
+            }
+            "-mno-fma" => cpu_feature_overrides.fma = Some(false),
+            "-mbmi" => cpu_feature_overrides.bmi1 = Some(true),
+            "-mno-bmi" => cpu_feature_overrides.bmi1 = Some(false),
+            "-mbmi2" => cpu_feature_overrides.bmi2 = Some(true),
+            "-mno-bmi2" => cpu_feature_overrides.bmi2 = Some(false),
+            "-mcet" | "-mcet-ss" => cpu_feature_overrides.cet_ss = Some(true),
+            "-mno-cet" | "-mno-cet-ss" => cpu_feature_overrides.cet_ss = Some(false),
+            "-mcet-ibt" => cpu_feature_overrides.cet_ibt = Some(true),
+            "-mno-cet-ibt" => cpu_feature_overrides.cet_ibt = Some(false),
             "-mcmodel=kernel" => kernel_code_model = true,
             "-ftrivial-auto-var-init=zero" => auto_var_init_zero = true,
             "-fstack-protector" | "-fstack-protector-all" | "-fstack-protector-strong" => {
@@ -1979,6 +2026,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             short_wchar,
             no_common,
             incremental,
+            cpu_feature_overrides,
             cli_warnings,
             ipa_sra: {
                 let mut c = ipa_sra;
@@ -2080,6 +2128,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             short_wchar,
             no_common,
             incremental,
+            cpu_feature_overrides,
             cli_warnings,
             ipa_sra: {
                 let mut c = ipa_sra;

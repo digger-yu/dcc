@@ -227,6 +227,18 @@ impl IncrementalCache {
         cfg.function_return_thunk_extern.hash(&mut hasher);
         // Indirect branch thunk extern
         cfg.indirect_branch_thunk_extern.hash(&mut hasher);
+        // CPU feature overrides (affect codegen)
+        cfg.cpu_feature_overrides.avx.hash(&mut hasher);
+        cfg.cpu_feature_overrides.avx2.hash(&mut hasher);
+        cfg.cpu_feature_overrides.avx512f.hash(&mut hasher);
+        cfg.cpu_feature_overrides.avx512bw.hash(&mut hasher);
+        cfg.cpu_feature_overrides.avx512vl.hash(&mut hasher);
+        cfg.cpu_feature_overrides.avx512dq.hash(&mut hasher);
+        cfg.cpu_feature_overrides.fma.hash(&mut hasher);
+        cfg.cpu_feature_overrides.bmi1.hash(&mut hasher);
+        cfg.cpu_feature_overrides.bmi2.hash(&mut hasher);
+        cfg.cpu_feature_overrides.cet_ss.hash(&mut hasher);
+        cfg.cpu_feature_overrides.cet_ibt.hash(&mut hasher);
 
         // 3. 预处理器定义 (-D)
         for (name, value) in &cfg.defines {
@@ -379,6 +391,7 @@ mod tests {
             no_common: false,
             cli_warnings: vec![],
             incremental: true,
+            cpu_feature_overrides: crate::cpuid::CpuFeatureOverrides::default(),
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),
         };
