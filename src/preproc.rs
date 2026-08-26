@@ -539,6 +539,11 @@ pub fn preprocess(
     pp.define_builtin("__GNUC_MINOR__", "2");
     pp.define_builtin("__GNUC_PATCHLEVEL__", "0");
     pp.define_builtin("__GNUC_STDC_INLINE__", "1");
+    // Clang 兼容宏: 许多代码用 #ifdef __clang__ 区分 GCC/Clang 路径
+    pp.define_builtin("__clang__", "1");
+    pp.define_builtin("__clang_major__", "18");
+    pp.define_builtin("__clang_minor__", "1");
+    pp.define_builtin("__clang_patchlevel__", "0");
     pp.define_builtin("__GXX_ABI_VERSION", "1017");
     pp.define_builtin("__CHAR_BIT__", "8");
     pp.define_builtin("__SCHAR_MAX__", "127");
@@ -7882,6 +7887,51 @@ int ok = 1;\n";
             "some #error triggered: {:?}",
             errors
         );
+        assert!(
+            out.text.contains("int ok = 1;"),
+            "output: {}",
+            out.text
+        );
+    }
+
+    /// __clang__ / __clang_major__ / __clang_minor__ /
+    /// __clang_patchlevel__ 预定义宏验证
+    #[test]
+    fn clang_compat_macros_defined() {
+        let out = preprocess(
+            b"#if defined(__clang__) && __clang__ == 1 \
+\
+                 && defined(__clang_major__) \
+\
+                 && defined(__clang_minor__) \
+\
+                 && defined(__clang_patchlevel__)\n\
+             int ok = 1;\n\
+             #else\n\
+             int ok = 0;\n\
+             #endif\n",
+            "clang-macros.c",
+            &[],
+            &[],
+            &[],
+            StdMode::Gnu11,
+            &[],
+            false,
+            &PchOptions::default(),
+            false,
+            false,
+        );
+        let diags = &out.diags;
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.sev,
+                    crate::diagnostics::Severity::Error
+                )
+            })
+            .collect();
+        assert!(errors.is_empty(), "errors: {:?}", errors);
         assert!(
             out.text.contains("int ok = 1;"),
             "output: {}",
