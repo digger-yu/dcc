@@ -3567,6 +3567,10 @@ impl Codegen {
                 if v.register_name.is_some() {
                     continue;
                 }
+                // __attribute__((alias)): 变量别名由 alias 路径处理
+                if v.alias_name.is_some() {
+                    continue;
+                }
                 if v.is_extern && v.init.is_none() && var_has_definition(&v.name.name) {
                     continue;
                 }
@@ -3875,6 +3879,32 @@ impl Codegen {
                             size: target_sym.size,
                             bind: STB_GLOBAL,
                             ty: STT_FUNC,
+                            visibility: STV_DEFAULT,
+                        };
+                        global_syms.push(alias_sym);
+                    }
+                }
+            }
+        }
+
+        // __attribute__((alias)): 变量别名符号
+        // int alias_var __attribute__((alias("real_var")));
+        // v.name.name = "alias_var", v.alias_name = Some("real_var")
+        for decl in &prog.decls {
+            if let Decl::Var(v) = decl {
+                if let Some(ref alias_target) = v.alias_name {
+                    if let Some(target_sym) = global_syms
+                        .iter()
+                        .find(|s| s.name == *alias_target)
+                        .or_else(|| local_syms.iter().find(|s| s.name == *alias_target))
+                    {
+                        let alias_sym = ElfSym {
+                            name: v.name.name.clone(),
+                            section: target_sym.section,
+                            value: target_sym.value,
+                            size: target_sym.size,
+                            bind: STB_GLOBAL,
+                            ty: STT_OBJECT,
                             visibility: STV_DEFAULT,
                         };
                         global_syms.push(alias_sym);
@@ -16905,6 +16935,25 @@ impl Codegen {
                     out.push_str("\t.cfi_endproc\n");
                 }
                 out.push_str(&format!("\t.size {name}, .-{name}\n"));
+            }
+        }
+
+        // __attribute__((alias)): emit .set directives for alias symbols
+        for decl in &prog.decls {
+            match decl {
+                Decl::Func(f) => {
+                    if let Some(ref alias_target) = f.alias_name {
+                        out.push_str(&format!("\t.globl {}\n", f.name.name));
+                        out.push_str(&format!("\t.set {}, {}\n", f.name.name, alias_target));
+                    }
+                }
+                Decl::Var(v) => {
+                    if let Some(ref alias_target) = v.alias_name {
+                        out.push_str(&format!("\t.globl {}\n", v.name.name));
+                        out.push_str(&format!("\t.set {}, {}\n", v.name.name, alias_target));
+                    }
+                }
+                _ => {}
             }
         }
         out
