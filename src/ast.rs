@@ -69,6 +69,8 @@ pub struct VarDecl {
     pub is_thread_local: bool,         // _Thread_local / __thread
     /// __attribute__((no_sanitize("address"|"undefined"|"thread"|"kernel-address")))
     pub no_sanitize: Vec<String>,
+    /// __attribute__((alias("target"))): 变量符号别名
+    pub alias_name: Option<String>,
     /// __attribute__((copy("fn"))): 函数符号别名
     pub copy_fn: Option<String>,
     /// __attribute__((retain)): 标记节 SHF_GNU_RETAIN
