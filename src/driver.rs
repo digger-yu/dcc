@@ -911,24 +911,35 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     }
 
     let out = &cfg.output;
-    let mut f = fs::File::create(out).map_err(|e| {
-        vec![Diagnostic::err(
-            "E0101",
-            format!("cannot write {}: {}", out.display(), e),
-            crate::diagnostics::Span::point(&out.display().to_string(), 0, 0),
-        )]
-    })?;
-    f.write_all(&bytes).unwrap();
-    if !cfg.relocatable && !cfg.emit_asm {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut p = f.metadata().unwrap().permissions();
-            p.set_mode(0o755);
-            f.set_permissions(p).unwrap();
+    // -o -: 写 stdout (管道输出), 与 GCC 行为一致
+    if out.to_str() == Some("-") {
+        io::stdout().write_all(&bytes).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("write error (stdout): {}", e),
+                crate::diagnostics::Span::point("", 0, 0),
+            )]
+        })?;
+    } else {
+        let mut f = fs::File::create(out).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("cannot write {}: {}", out.display(), e),
+                crate::diagnostics::Span::point(&out.display().to_string(), 0, 0),
+            )]
+        })?;
+        f.write_all(&bytes).unwrap();
+        if !cfg.relocatable && !cfg.emit_asm {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut p = f.metadata().unwrap().permissions();
+                p.set_mode(0o755);
+                f.set_permissions(p).unwrap();
+            }
         }
+        eprintln!("dcc: wrote {}", out.display());
     }
-    eprintln!("dcc: wrote {}", out.display());
 
     // 自举回归对比: -c/--bootstrap-compare=<ref.o> 模式.
     // 编译结束后, 把当前 .o 与 ref.o 做三层对比 (byte / struct /
@@ -1333,6 +1344,8 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
         }
     }
     cmd.arg("-o").arg(&cfg.output).arg(&asm_path);
+    // -o -: as 原生支持 -o - 输出到 stdout, 需要捕获 stdout 并转发
+    let is_stdout = cfg.output.to_str() == Some("-");
     let output = cmd.output().map_err(|e| {
         vec![Diagnostic::err(
             "E0102",
@@ -1358,7 +1371,18 @@ fn run_assembler_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec
             crate::diagnostics::Span::point(&file_name, 0, 0),
         )]);
     }
-    eprintln!("dcc: wrote {}", cfg.output.display());
+    // -o -: 把 as 的 stdout 转发到 dcc 的 stdout
+    if is_stdout {
+        io::stdout().write_all(&output.stdout).map_err(|e| {
+            vec![Diagnostic::err(
+                "E0101",
+                format!("write error (stdout): {}", e),
+                crate::diagnostics::Span::point("", 0, 0),
+            )]
+        })?;
+    } else {
+        eprintln!("dcc: wrote {}", cfg.output.display());
+    }
 
     // .S 文件也需要生成依赖文件 (-MMD / -MD)
     if cfg.gen_dep {

@@ -1,5 +1,5 @@
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[test]
 #[cfg(unix)]
@@ -16228,4 +16228,135 @@ fn response_file_with_comments_and_quotes() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn pipe_input_e_mode_stdin_to_stdout() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-E", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"int main(void) { return 0; }\n")
+                .ok();
+            child.wait_with_output()
+        })
+        .expect("run dcc -E -");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("int main"),
+        "preprocessed output should contain source"
+    );
+}
+
+#[test]
+fn pipe_input_c_mode_stdin_to_stdout() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o", "-", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"int main(void) { return 0; }\n")
+                .ok();
+            child.wait_with_output()
+        })
+        .expect("run dcc -c -o - -");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Verify output is ELF (starts with 0x7f 'E' 'L' 'F')
+    let out = &output.stdout;
+    assert!(
+        out.len() > 4 && out[0] == 0x7f && out[1] == b'E' && out[2] == b'L' && out[3] == b'F',
+        "output should be ELF binary, got {} bytes",
+        out.len()
+    );
+}
+
+#[test]
+fn pipe_input_s_mode_stdin_to_stdout() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "-o", "-", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"int main(void) { return 0; }\n")
+                .ok();
+            child.wait_with_output()
+        })
+        .expect("run dcc -S -o - -");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(".text") && stdout.contains("main"),
+        "output should be assembly with .text and main"
+    );
+}
+
+#[test]
+fn pipe_input_default_output_name_is_a_o() {
+    let dir = std::env::temp_dir();
+    let work = dir.join(format!("dcc-pipe-default-{}", std::process::id()));
+    fs::create_dir_all(&work).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-"])
+        .current_dir(&work)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"int main(void) { return 0; }\n")
+                .ok();
+            child.wait_with_output()
+        })
+        .expect("run dcc -c -");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // GCC: `dcc -c -` produces `a.o` in the current directory
+    assert!(
+        work.join("a.o").exists(),
+        "default output should be a.o"
+    );
+    let _ = fs::remove_dir_all(&work);
 }

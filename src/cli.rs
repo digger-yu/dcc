@@ -1816,7 +1816,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         // -c / -S 模式默认输出扩展名（单 TU 编译）
         // Multi-file: output stays "a.out"; driver computes per-file names.
         if !link_mode && output == *"a.out" && inputs.len() == 1 {
-            let stem = first.file_stem().unwrap_or_default().to_string_lossy();
+            // GCC: `dcc -c -` -> `a.o`; `dcc -S -` -> `a.s`
+            let stem = if first.as_os_str() == "-" {
+                "a".to_string()
+            } else {
+                first.file_stem().unwrap_or_default().to_string_lossy().to_string()
+            };
             if emit_asm {
                 output = PathBuf::from(format!("{}.s", stem));
             } else if relocatable {
@@ -1827,7 +1832,11 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         // Multi-file: dep_file left for driver to compute per-file.
         let dep_file = dep_file.or_else(|| {
             if gen_dep && !link_mode && (relocatable || emit_asm) && inputs.len() == 1 {
-                let stem = first.file_stem().unwrap_or_default().to_string_lossy();
+                let stem = if first.as_os_str() == "-" {
+                    "a".to_string()
+                } else {
+                    first.file_stem().unwrap_or_default().to_string_lossy().to_string()
+                };
                 Some(PathBuf::from(format!("{}.d", stem)))
             } else {
                 None
@@ -2746,5 +2755,42 @@ mod tests {
         assert_eq!(cfg.inputs, vec![src.clone()]);
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&rsp);
+    }
+
+    // --- Pipe input/output (@file) tests ---
+
+    #[test]
+    fn dash_input_is_accepted() {
+        let args = vec!["-c".to_string(), "-".to_string()];
+        let cfg = parse(&args).expect("- c - should parse");
+        assert_eq!(cfg.inputs, vec![PathBuf::from("-")]);
+        assert!(cfg.relocatable);
+    }
+
+    #[test]
+    fn dash_input_default_output_is_a_o() {
+        let args = vec!["-c".to_string(), "-".to_string()];
+        let cfg = parse(&args).expect("-c - should parse");
+        assert_eq!(cfg.output, PathBuf::from("a.o"));
+    }
+
+    #[test]
+    fn dash_input_asm_default_output_is_a_s() {
+        let args = vec!["-S".to_string(), "-".to_string()];
+        let cfg = parse(&args).expect("-S - should parse");
+        assert_eq!(cfg.output, PathBuf::from("a.s"));
+    }
+
+    #[test]
+    fn output_dash_is_accepted() {
+        let args = vec![
+            "-c".to_string(),
+            "-o".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ];
+        let cfg = parse(&args).expect("-c -o - - should parse");
+        assert_eq!(cfg.output, PathBuf::from("-"));
+        assert!(cfg.output_explicit);
     }
 }
