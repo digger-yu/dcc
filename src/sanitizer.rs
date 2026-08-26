@@ -2960,7 +2960,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Int)),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
                     }),
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
@@ -3062,7 +3062,7 @@ mod tests {
         };
         let vla_decl = VarDecl {
             ty: Type::Array(
-                Box::new(Type::Int),
+                Box::new(Type::Int.into()),
                 ArraySize::Var(Box::new(Expr::Ident {
                     name: Ident {
                         name: "n".into(),
@@ -3146,7 +3146,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Int)),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
                     }),
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
@@ -3245,7 +3245,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Int)),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
                     }),
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
@@ -3344,7 +3344,7 @@ mod tests {
                 span: Span::point("t.c", 1, 1),
             },
             span: Span::point("t.c", 1, 1),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(Type::Void.into())),
         };
         let call = make_mem_check_calls(
             addr,
@@ -3380,7 +3380,7 @@ mod tests {
                 span: Span::point("t.c", 1, 1),
             },
             span: Span::point("t.c", 1, 1),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(Type::Void.into())),
         };
         for &sz in &[1usize, 2, 4, 8, 16] {
             let call = make_mem_check_calls(
@@ -3429,7 +3429,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Int)),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
                     }),
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
@@ -3486,7 +3486,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Double)),
+                        ty: Type::Ptr(Box::new(Type::Double.into())),
                     }),
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Double,
@@ -3537,7 +3537,7 @@ mod tests {
                                 span: Span::point("t.c", 1, 1),
                             },
                             span: Span::point("t.c", 1, 1),
-                            ty: Type::Ptr(Box::new(Type::Int)),
+                            ty: Type::Ptr(Box::new(Type::Int.into())),
                         }),
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
@@ -3641,7 +3641,7 @@ mod tests {
                                     span: Span::point("t.c", 1, 1),
                                 },
                                 span: Span::point("t.c", 1, 1),
-                                ty: Type::Ptr(Box::new(Type::Int)),
+                                ty: Type::Ptr(Box::new(Type::Int.into())),
                             }),
                             span: Span::point("t.c", 1, 1),
                             ty: Type::Int,
@@ -3664,7 +3664,7 @@ mod tests {
                                 span: Span::point("t.c", 1, 1),
                             },
                             span: Span::point("t.c", 1, 1),
-                            ty: Type::Ptr(Box::new(Type::Int)),
+                            ty: Type::Ptr(Box::new(Type::Int.into())),
                         }),
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
@@ -3739,7 +3739,7 @@ mod tests {
                 span: Span::point("t.c", 1, 1),
             },
             span: Span::point("t.c", 1, 1),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(Type::Void.into())),
         };
         let call = make_mem_check_calls(
             addr,
@@ -3785,7 +3785,7 @@ mod tests {
                 span: Span::point("t.c", 1, 1),
             },
             span: Span::point("t.c", 1, 1),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(Type::Void.into())),
         };
         let call = make_mem_check_calls(
             addr,
@@ -3834,7 +3834,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Int)),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
                     }),
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
@@ -3890,7 +3890,7 @@ mod tests {
                                 span: Span::point("t.c", 1, 1),
                             },
                             span: Span::point("t.c", 1, 1),
-                            ty: Type::Ptr(Box::new(Type::Int)),
+                            ty: Type::Ptr(Box::new(Type::Int.into())),
                         }),
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
@@ -3947,7 +3947,7 @@ mod tests {
                                 span: Span::point("t.c", 1, 1),
                             },
                             span: Span::point("t.c", 1, 1),
-                            ty: Type::Ptr(Box::new(Type::Int)),
+                            ty: Type::Ptr(Box::new(Type::Int.into())),
                         }),
                         idx: Box::new(Expr::Int {
                             v: 0,
@@ -4170,7 +4170,7 @@ mod tests {
                                 span: Span::point("t.c", 1, 1),
                             },
                             span: Span::point("t.c", 1, 1),
-                            ty: Type::Ptr(Box::new(Type::Int)),
+                            ty: Type::Ptr(Box::new(Type::Int.into())),
                         }),
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Int,
@@ -4231,7 +4231,7 @@ mod tests {
                                 span: Span::point("t.c", 1, 1),
                             },
                             span: Span::point("t.c", 1, 1),
-                            ty: Type::Ptr(Box::new(Type::Int)),
+                            ty: Type::Ptr(Box::new(Type::Int.into())),
                         }),
                         idx: Box::new(Expr::Int {
                             v: 0,
@@ -4326,7 +4326,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Int)),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
                     }),
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
@@ -4445,7 +4445,7 @@ mod tests {
                             span: Span::point("t.c", 1, 1),
                         },
                         span: Span::point("t.c", 1, 1),
-                        ty: Type::Ptr(Box::new(Type::Int)),
+                        ty: Type::Ptr(Box::new(Type::Int.into())),
                     }),
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
@@ -4546,8 +4546,8 @@ mod tests {
                         },
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Func(
-                            Box::new(Type::Int),
-                            vec![Type::Int],
+                            Box::new(Type::Int.into()),
+                            vec![Type::Int.into()],
                         ),
                     }),
                     args: vec![Expr::Int {
@@ -4605,14 +4605,14 @@ mod tests {
                             },
                             span: Span::point("t.c", 1, 1),
                             ty: Type::Ptr(Box::new(Type::Func(
-                                Box::new(Type::Int),
-                                vec![Type::Int],
-                            ))),
+                                Box::new(Type::Int.into()),
+                                vec![Type::Int.into()],
+                            ).into())),
                         }),
                         span: Span::point("t.c", 1, 1),
                         ty: Type::Func(
-                            Box::new(Type::Int),
-                            vec![Type::Int],
+                            Box::new(Type::Int.into()),
+                            vec![Type::Int.into()],
                         ),
                     }),
                     args: vec![Expr::Int {
@@ -4647,12 +4647,12 @@ mod tests {
 
     #[test]
     fn cfi_type_hash_is_deterministic() {
-        let ty = Type::Func(Box::new(Type::Int), vec![Type::Int]);
+        let ty = Type::Func(Box::new(Type::Int.into()), vec![Type::Int.into()]);
         let h1 = cfi_type_hash(&ty);
         let h2 = cfi_type_hash(&ty);
         assert_eq!(h1, h2, "same type must produce same hash");
         // Different type should produce different hash (with high probability)
-        let ty2 = Type::Func(Box::new(Type::Void), vec![Type::Long]);
+        let ty2 = Type::Func(Box::new(Type::Void.into()), vec![Type::Long.into()]);
         assert_ne!(cfi_type_hash(&ty), cfi_type_hash(&ty2));
     }
 

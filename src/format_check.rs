@@ -568,7 +568,7 @@ mod tests {
         let span = Span::point("t.c", 1, 1);
         check_format_type(
             &spec,
-            Some(&Type::Ptr(Box::new(Type::Int))),
+            Some(&Type::Ptr(Box::new(Type::Int.into()))),
             true,
             &span,
             "scan",
@@ -591,7 +591,7 @@ mod tests {
         let span = Span::point("t.c", 1, 1);
         check_format_type(
             &spec,
-            Some(&Type::Ptr(Box::new(Type::Char))),
+            Some(&Type::Ptr(Box::new(Type::Char.into()))),
             false,
             &span,
             "log",
@@ -634,7 +634,7 @@ mod tests {
                     span: Span::point("t.c", 1, 1),
                 },
                 params: vec![Param {
-                    ty: Type::Ptr(Box::new(Type::Char)),
+                    ty: Type::Ptr(Box::new(Type::Char.into())),
                     name: Some(Ident {
                         name: "fmt".to_string(),
                         span: Span::point("t.c", 1, 1),
@@ -656,7 +656,7 @@ mod tests {
                                 Expr::String {
                                     data: b"value=%d".to_vec(),
                                     span: Span::point("t.c", 2, 5),
-                                    ty: Type::Ptr(Box::new(Type::Char)),
+                                    ty: Type::Ptr(Box::new(Type::Char.into())),
                                 },
                                 Expr::Int {
                                     v: 42,
@@ -731,7 +731,7 @@ mod tests {
                     span: Span::point("t.c", 1, 1),
                 },
                 params: vec![Param {
-                    ty: Type::Ptr(Box::new(Type::Char)),
+                    ty: Type::Ptr(Box::new(Type::Char.into())),
                     name: Some(Ident {
                         name: "fmt".to_string(),
                         span: Span::point("t.c", 1, 1),
@@ -752,7 +752,7 @@ mod tests {
                             args: vec![Expr::String {
                                 data: b"%d %s".to_vec(),
                                 span: Span::point("t.c", 2, 5),
-                                ty: Type::Ptr(Box::new(Type::Char)),
+                                ty: Type::Ptr(Box::new(Type::Char.into())),
                             }],
                             span: Span::point("t.c", 2, 5),
                             ty: Type::Void,

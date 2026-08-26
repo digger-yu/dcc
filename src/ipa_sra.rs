@@ -1227,7 +1227,7 @@ mod tests {
                             ty: int_ty(),
                         }),
                         span: span_zero(),
-                        ty: Type::Ptr(Box::new(int_ty())),
+                        ty: Type::Ptr(Box::new(int_ty().into())),
                     },
                     span: span_zero(),
                 })],
@@ -1508,7 +1508,7 @@ mod tests {
                                 span: span_zero(),
                             },
                             span: span_zero(),
-                            ty: Type::Func(Box::new(int_ty()), vec![struct_ty.clone()]),
+                            ty: Type::Func(Box::new(int_ty().into()), vec![struct_ty.clone().into()]),
                         }),
                         args: vec![Expr::CompoundLit {
                             ty: struct_ty.clone(),

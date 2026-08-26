@@ -16,7 +16,7 @@ fn struct_size_rounds_up_to_alignment() {
         },
         Field {
             name: "p".into(),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(Type::Void.into())),
             offset: 8,
             bit_width: None,
             bit_offset: 0,
@@ -41,7 +41,7 @@ fn union_size_rounds_up_to_alignment() {
     let fields = vec![
         Field {
             name: "wide".into(),
-            ty: Type::Ptr(Box::new(Type::Void)),
+            ty: Type::Ptr(Box::new(Type::Void.into())),
             offset: 0,
             bit_width: None,
             bit_offset: 0,
@@ -50,7 +50,7 @@ fn union_size_rounds_up_to_alignment() {
         },
         Field {
             name: "bytes".into(),
-            ty: Type::Array(Box::new(Type::Char), crate::ast::ArraySize::Const(9)),
+            ty: Type::Array(Box::new(Type::Char.into()), crate::ast::ArraySize::Const(9)),
             offset: 0,
             bit_width: None,
             bit_offset: 0,
@@ -200,7 +200,7 @@ fn qualtype_size_align_forward_to_base() {
     assert_eq!(qt.size(), 8);
     assert_eq!(qt.align(), 8);
     let pqt = QualType::with_quals(
-        Type::Ptr(Box::new(Type::Void)),
+        Type::Ptr(Box::new(Type::Void.into())),
         QualifierFlags::CONST | QualifierFlags::VOLATILE,
     );
     assert_eq!(pqt.size(), 8);
@@ -214,7 +214,7 @@ fn qualtype_predicates_forward_to_base() {
     assert!(int_qt.is_arith());
     assert!(!int_qt.is_ptr());
 
-    let ptr_qt = QualType::new(Type::Ptr(Box::new(Type::Int)));
+    let ptr_qt = QualType::new(Type::Ptr(Box::new(Type::Int.into())));
     assert!(ptr_qt.is_ptr());
     assert!(!ptr_qt.is_int());
     assert!(!ptr_qt.is_arith());
@@ -258,7 +258,7 @@ fn qualtype_display_prefixes_quals() {
     let qt2 = QualType::with_quals(Type::Int, QualifierFlags::CONST | QualifierFlags::VOLATILE);
     assert_eq!(format!("{}", qt2), "const volatile int");
     let qt3 = QualType::with_quals(
-        Type::Ptr(Box::new(Type::Int)),
+        Type::Ptr(Box::new(Type::Int.into())),
         QualifierFlags::CONST,
     );
     assert_eq!(format!("{}", qt3), "const int*");

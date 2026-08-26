@@ -2386,6 +2386,7 @@ mod dse_tests {
             children: vec![],
             span: Span::point("", 0, 0),
             literal: None,
+            quals: crate::ast::QualifierFlags::NONE,
         }
     }
 
@@ -2758,9 +2759,11 @@ mod alias_tests {
                 children: vec![],
                 span: Span::point("", 0, 0),
                 literal: None,
+                quals: crate::ast::QualifierFlags::NONE,
             }],
             span: Span::point("", 0, 0),
             literal: None,
+            quals: crate::ast::QualifierFlags::NONE,
         }
     }
 
@@ -2775,11 +2778,13 @@ mod alias_tests {
                     children: vec![],
                     span: Span::point("", 0, 0),
                     literal: None,
+                    quals: crate::ast::QualifierFlags::NONE,
                 },
                 make_address_expr(target),
             ],
             span: Span::point("", 0, 0),
             literal: None,
+            quals: crate::ast::QualifierFlags::NONE,
         }
     }
 
@@ -2808,6 +2813,7 @@ mod alias_tests {
                 children: vec![],
                 span: Span::point("", 0, 0),
                 literal: Some(crate::ir::ExprLiteral::Int(42)),
+                quals: crate::ast::QualifierFlags::NONE,
             }),
             span: Span::point("", 0, 0),
             is_tls: false,

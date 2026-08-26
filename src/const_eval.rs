@@ -870,7 +870,7 @@ mod tests {
         let addr = Expr::AddrOf {
             e: Box::new(x),
             span: Span::point("t.c", 1, 1),
-            ty: Type::Ptr(Box::new(Type::Int)),
+            ty: Type::Ptr(Box::new(Type::Int.into())),
         };
         assert_eq!(object_size(&addr, 0), Some(4));
     }
@@ -883,7 +883,7 @@ mod tests {
                 span: Span::point("t.c", 1, 1),
             },
             span: Span::point("t.c", 1, 1),
-            ty: Type::Array(Box::new(Type::Char), ArraySize::Const(16)),
+            ty: Type::Array(Box::new(Type::Char.into()), ArraySize::Const(16)),
         };
         assert_eq!(object_size(&buf, 0), Some(16));
         assert_eq!(object_size(&buf, 1), Some(1));
@@ -946,7 +946,7 @@ mod tests {
         let s = Expr::String {
             data: b"hello\0".to_vec(),
             span: Span::point("t.c", 1, 1),
-            ty: Type::Ptr(Box::new(Type::Char)),
+            ty: Type::Ptr(Box::new(Type::Char.into())),
         };
         match eval_full(&s) {
             Ok(ConstValue::Str { data, label }) => {
@@ -965,12 +965,12 @@ mod tests {
                 span: Span::point("t.c", 1, 1),
             },
             span: Span::point("t.c", 1, 1),
-            ty: Type::Array(Box::new(Type::Int), ArraySize::Const(8)),
+            ty: Type::Array(Box::new(Type::Int.into()), ArraySize::Const(8)),
         };
         let addr = Expr::AddrOf {
             e: Box::new(id),
             span: Span::point("t.c", 1, 1),
-            ty: Type::Ptr(Box::new(Type::Int)),
+            ty: Type::Ptr(Box::new(Type::Int.into())),
         };
         match eval_full(&addr) {
             Ok(ConstValue::Addr { name, offset }) => {
@@ -989,7 +989,7 @@ mod tests {
                 span: Span::point("t.c", 1, 1),
             },
             span: Span::point("t.c", 1, 1),
-            ty: Type::Array(Box::new(Type::Char), ArraySize::Const(16)),
+            ty: Type::Array(Box::new(Type::Char.into()), ArraySize::Const(16)),
         };
         let idx = int(4);
         let indexed = Expr::Index {
@@ -1001,7 +1001,7 @@ mod tests {
         let addr = Expr::AddrOf {
             e: Box::new(indexed),
             span: Span::point("t.c", 1, 1),
-            ty: Type::Ptr(Box::new(Type::Char)),
+            ty: Type::Ptr(Box::new(Type::Char.into())),
         };
         match eval_full(&addr) {
             Ok(ConstValue::Addr { name, offset }) => {
@@ -1045,7 +1045,7 @@ mod tests {
             real: 3.0,
             imag: 4.0,
             span: Span::point("t.c", 1, 1),
-            ty: Type::Complex(Box::new(Type::Double)),
+            ty: Type::Complex(Box::new(Type::Double.into())),
         };
         let r = Expr::Real {
             e: Box::new(c),
@@ -1062,7 +1062,7 @@ mod tests {
             real: 3.0,
             imag: 4.0,
             span: Span::point("t.c", 1, 1),
-            ty: Type::Complex(Box::new(Type::Double)),
+            ty: Type::Complex(Box::new(Type::Double.into())),
         };
         let im = Expr::Imag {
             e: Box::new(c),

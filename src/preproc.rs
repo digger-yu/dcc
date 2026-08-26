@@ -7489,6 +7489,7 @@ n\
                 &PchOptions::default(),
                 false,
                 false,
+                &crate::cli::TargetTriple::host(),
             );
             assert!(
                 out.diags.iter().any(|d| d.code == "E0203"),
