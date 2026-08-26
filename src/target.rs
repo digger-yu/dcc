@@ -3,6 +3,7 @@
 // suckless 准则: 不为每种架构写一个 codegen.rs;而是 codegen 跑在 target 描述之上。
 
 use crate::cli::{Arch, Os, StackGuardReg, TargetTriple};
+use crate::cpuid::{CpuFeatureOverrides, CpuFeatures};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endian {
@@ -54,6 +55,8 @@ pub struct Target {
     pub short_wchar: bool,
     /// -fno-common
     pub no_common: bool,
+    /// CPU 指令集特性 (运行时检测)
+    pub cpu_features: CpuFeatures,
 }
 
 impl Target {
@@ -95,6 +98,11 @@ impl Target {
             strict_overflow: true,
             short_wchar: false,
             no_common: false,
+            cpu_features: if t.arch == Arch::X86_64 {
+                CpuFeatures::detect()
+            } else {
+                CpuFeatures::default()
+            },
         }
     }
 
@@ -106,6 +114,58 @@ impl Target {
 
     pub fn set_stack_protector(&mut self, enable: bool) {
         self.stack_protector = enable;
+    }
+
+    /// 应用 CLI 显式指定的 CPU 特性覆盖.
+    ///
+    /// 用户通过 -mavx / -mno-avx 等标志显式控制,
+    /// 覆盖 CPUID 动态检测的结果.
+    pub fn apply_cpu_feature_overrides(&mut self, overrides: &CpuFeatureOverrides) {
+        if let Some(v) = overrides.avx {
+            self.cpu_features.avx = v;
+        }
+        if let Some(v) = overrides.avx2 {
+            self.cpu_features.avx2 = v;
+        }
+        if let Some(v) = overrides.avx512f {
+            self.cpu_features.avx512f = v;
+        }
+        if let Some(v) = overrides.avx512bw {
+            self.cpu_features.avx512bw = v;
+        }
+        if let Some(v) = overrides.avx512vl {
+            self.cpu_features.avx512vl = v;
+        }
+        if let Some(v) = overrides.avx512dq {
+            self.cpu_features.avx512dq = v;
+        }
+        if let Some(v) = overrides.fma {
+            self.cpu_features.fma = v;
+        }
+        if let Some(v) = overrides.bmi1 {
+            self.cpu_features.bmi1 = v;
+        }
+        if let Some(v) = overrides.bmi2 {
+            self.cpu_features.bmi2 = v;
+        }
+        if let Some(v) = overrides.cet_ss {
+            self.cpu_features.cet_ss = v;
+        }
+        if let Some(v) = overrides.cet_ibt {
+            self.cpu_features.cet_ibt = v;
+        }
+        // AVX2 依赖 AVX: 若 AVX 被禁用, AVX2 也必须禁用
+        if !self.cpu_features.avx {
+            self.cpu_features.avx2 = false;
+            self.cpu_features.fma = false;
+        }
+        // AVX-512 依赖 AVX: 若 AVX 被禁用, AVX-512 也必须禁用
+        if !self.cpu_features.avx {
+            self.cpu_features.avx512f = false;
+            self.cpu_features.avx512dq = false;
+            self.cpu_features.avx512bw = false;
+            self.cpu_features.avx512vl = false;
+        }
     }
 }
 
@@ -200,5 +260,68 @@ mod tests {
         assert!(!t.red_zone);
         assert!(t.frame_pointer);
         assert!(!t.sse);
+    }
+
+    #[test]
+    fn x86_64_target_has_cpu_features_detected() {
+        let t = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        // x86_64 should have SSE (always available)
+        assert!(t.cpu_features.has_sse());
+        // Other features depend on the actual CPU
+        let _ = t.cpu_features.has_avx();
+        let _ = t.cpu_features.has_avx2();
+        let _ = t.cpu_features.has_avx512f();
+    }
+
+    #[test]
+    fn non_x86_target_has_empty_cpu_features() {
+        let t = Target::resolve(&trip(Arch::AArch64, Os::Linux, Abi::Gnu));
+        // Non-x86 targets should have all features as default (false)
+        assert!(!t.cpu_features.avx);
+        assert!(!t.cpu_features.avx2);
+        assert!(!t.cpu_features.avx512f);
+        assert!(!t.cpu_features.cet_ss);
+    }
+
+    #[test]
+    fn cpu_feature_override_avx_disable() {
+        let mut t = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        // Simulate -mno-avx
+        let overrides = CpuFeatureOverrides {
+            avx: Some(false),
+            ..Default::default()
+        };
+        t.apply_cpu_feature_overrides(&overrides);
+        assert!(!t.cpu_features.avx);
+        // AVX2 and FMA depend on AVX, should also be disabled
+        assert!(!t.cpu_features.avx2);
+        assert!(!t.cpu_features.fma);
+    }
+
+    #[test]
+    fn cpu_feature_override_avx2_enable() {
+        let mut t = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        // Simulate -mavx2
+        let overrides = CpuFeatureOverrides {
+            avx: Some(true),
+            avx2: Some(true),
+            ..Default::default()
+        };
+        t.apply_cpu_feature_overrides(&overrides);
+        assert!(t.cpu_features.avx);
+        assert!(t.cpu_features.avx2);
+    }
+
+    #[test]
+    fn cpu_feature_override_cet() {
+        let mut t = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        let overrides = CpuFeatureOverrides {
+            cet_ss: Some(true),
+            cet_ibt: Some(true),
+            ..Default::default()
+        };
+        t.apply_cpu_feature_overrides(&overrides);
+        assert!(t.cpu_features.cet_ss);
+        assert!(t.cpu_features.cet_ibt);
     }
 }
