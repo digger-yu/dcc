@@ -5859,6 +5859,22 @@ fn attr_copy_returns_nonnull_compile_and_run() {
     let _ = fs::remove_file(exe);
 }
 
+/// __attribute__((copy("fn")))): 验证符号别名创建和运行时行为
+#[test]
+#[cfg(unix)]
+fn attr_copy_full_symbol_alias() {
+    let src = include_str!("fixtures/c/attr_copy_full.c");
+    let (output, exe) = run_compile_and_run("attr-copy-full", src);
+    assert!(
+        output.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "attr_copy_full should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 /// __attribute__((visibility(...))) — ELF symbol visibility
 #[test]
 #[cfg(unix)]
