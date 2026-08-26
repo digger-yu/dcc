@@ -11,6 +11,8 @@ fn struct_size_rounds_up_to_alignment() {
             offset: 0,
             bit_width: None,
             bit_offset: 0,
+            quals: QualifierFlags::NONE,
+            ptr_quals: vec![],
         },
         Field {
             name: "p".into(),
@@ -18,6 +20,8 @@ fn struct_size_rounds_up_to_alignment() {
             offset: 8,
             bit_width: None,
             bit_offset: 0,
+            quals: QualifierFlags::NONE,
+            ptr_quals: vec![],
         },
         Field {
             name: "tail".into(),
@@ -25,6 +29,8 @@ fn struct_size_rounds_up_to_alignment() {
             offset: 16,
             bit_width: None,
             bit_offset: 0,
+            quals: QualifierFlags::NONE,
+            ptr_quals: vec![],
         },
     ];
     assert_eq!(Type::Struct("s".into(), Arc::new(fields), 8).size(), 24);
@@ -39,6 +45,8 @@ fn union_size_rounds_up_to_alignment() {
             offset: 0,
             bit_width: None,
             bit_offset: 0,
+            quals: QualifierFlags::NONE,
+            ptr_quals: vec![],
         },
         Field {
             name: "bytes".into(),
@@ -46,6 +54,8 @@ fn union_size_rounds_up_to_alignment() {
             offset: 0,
             bit_width: None,
             bit_offset: 0,
+            quals: QualifierFlags::NONE,
+            ptr_quals: vec![],
         },
     ];
     assert_eq!(Type::Union("u".into(), Arc::new(fields), 8).size(), 16);
@@ -60,6 +70,8 @@ fn packed_struct_size_uses_observed_alignment() {
             offset: 0,
             bit_width: None,
             bit_offset: 0,
+            quals: QualifierFlags::NONE,
+            ptr_quals: vec![],
         },
         Field {
             name: "i".into(),
@@ -67,6 +79,8 @@ fn packed_struct_size_uses_observed_alignment() {
             offset: 1,
             bit_width: None,
             bit_offset: 0,
+            quals: QualifierFlags::NONE,
+            ptr_quals: vec![],
         },
     ];
     let ty = Type::Struct("packed".into(), Arc::new(fields), 1);

@@ -4349,4 +4349,85 @@ mod tests {
             ".debug_line should contain DW_LNE_set_discriminator opcode for per-insn asm entries"
         );
     }
+
+    /// Test: BTF output includes const/volatile/restrict qualifier nodes
+    /// for struct/union fields with qualifiers.
+    #[test]
+    fn btf_qualifier_nodes_present() {
+        // Verify that DwarfTypeKind::Const/Volatile/Restrict produce
+        // BTF_KIND_CONST/VOLATILE/RESTRICT records in BTF output.
+        let mut strs = BtfStringTable::new();
+        let mut encoder = BtfTypeEncoder::new();
+
+        // Encode a base int type first
+        let int_name = strs.intern("int");
+        let int_data = (32u32) << 24; // signed 32-bit
+        let int_id = encoder.add_type(int_name, BTF_KIND_INT, 0, int_data, &[]);
+        encoder.register_name("int", int_id);
+
+        // Encode const int
+        let const_int = DwarfType {
+            name: "const int".to_string(),
+            byte_size: 4,
+            kind: DwarfTypeKind::Const(Box::new(DwarfType {
+                name: "int".to_string(),
+                byte_size: 4,
+                kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+            })),
+        };
+        let const_id = encode_btf_type(&const_int, &mut strs, &mut encoder);
+
+        // Encode volatile int
+        let vol_int = DwarfType {
+            name: "volatile int".to_string(),
+            byte_size: 4,
+            kind: DwarfTypeKind::Volatile(Box::new(DwarfType {
+                name: "int".to_string(),
+                byte_size: 4,
+                kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+            })),
+        };
+        let vol_id = encode_btf_type(&vol_int, &mut strs, &mut encoder);
+
+        // Encode restrict int
+        let rest_int = DwarfType {
+            name: "restrict int".to_string(),
+            byte_size: 4,
+            kind: DwarfTypeKind::Restrict(Box::new(DwarfType {
+                name: "int".to_string(),
+                byte_size: 4,
+                kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+            })),
+        };
+        let rest_id = encode_btf_type(&rest_int, &mut strs, &mut encoder);
+
+        // Verify the encoded types have the correct BTF kinds
+        assert!(const_id > 0, "const int should have a valid BTF type ID");
+        assert!(vol_id > 0, "volatile int should have a valid BTF type ID");
+        assert!(rest_id > 0, "restrict int should have a valid BTF type ID");
+
+        // Check that the encoded records contain the right kind values
+        // BTF info field: kind is in bits 24-31, vlen in bits 0-15
+        let has_const = encoder.types.iter().any(|rec| {
+            rec.len() >= 8 && {
+                let info = u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]);
+                ((info >> 24) & 0x1f) == BTF_KIND_CONST
+            }
+        });
+        let has_volatile = encoder.types.iter().any(|rec| {
+            rec.len() >= 8 && {
+                let info = u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]);
+                ((info >> 24) & 0x1f) == BTF_KIND_VOLATILE
+            }
+        });
+        let has_restrict = encoder.types.iter().any(|rec| {
+            rec.len() >= 8 && {
+                let info = u32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]);
+                ((info >> 24) & 0x1f) == BTF_KIND_RESTRICT
+            }
+        });
+        assert!(has_const, "BTF should contain a CONST qualifier record");
+        assert!(has_volatile, "BTF should contain a VOLATILE qualifier record");
+        assert!(has_restrict, "BTF should contain a RESTRICT qualifier record");
+    }
 }

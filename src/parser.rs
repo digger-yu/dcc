@@ -260,6 +260,7 @@ pub struct Parser<'a> {
     decl_attrs: ParsedAttrs,                   // 类型说明符之间出现的 GNU 属性
     decl_auto_type: bool,                      // __auto_type：类型由初始化表达式推导
     allow_named_type: bool,                    // typeof 等上下文允许 Type::Named
+    spec_quals: QualifierFlags,                // 当前声明说明符中捕获的限定符
     opts: ParseOptions,
     shadow_counter: i32, // 嵌套块遮蔽重命名计数器
 }
@@ -297,6 +298,7 @@ impl<'a> Parser<'a> {
             decl_attrs: ParsedAttrs::default(),
             decl_auto_type: false,
             allow_named_type: false,
+            spec_quals: QualifierFlags::NONE,
             opts,
             shadow_counter: 0,
         };
@@ -3670,6 +3672,8 @@ impl<'a> Parser<'a> {
         let mut is_long = 0u8;
         let mut is_short = false;
         let mut base: Option<Type> = None;
+        // 重置当前声明说明符的限定符 (每次新的类型解析开始时清空)
+        self.spec_quals = QualifierFlags::NONE;
         // 跳过存储类/const/volatile/_Atomic/__extension__/__attribute__
         loop {
             // C23 [[attributes]]: 在类型限定符之间出现，在 match 之前检查
@@ -3690,10 +3694,19 @@ impl<'a> Parser<'a> {
                     self.decl_storage.is_register = true;
                     self.advance();
                 }
-                TokKind::KwConst
-                | TokKind::KwVolatile
-                | TokKind::KwInline
-                | TokKind::KwRestrict => {
+                TokKind::KwConst => {
+                    self.spec_quals |= QualifierFlags::CONST;
+                    self.advance();
+                }
+                TokKind::KwVolatile => {
+                    self.spec_quals |= QualifierFlags::VOLATILE;
+                    self.advance();
+                }
+                TokKind::KwRestrict => {
+                    self.spec_quals |= QualifierFlags::RESTRICT;
+                    self.advance();
+                }
+                TokKind::KwInline => {
                     self.advance();
                 }
                 // constexpr: C23 编译期常量函数, 等价 inline + always_inline
@@ -3995,6 +4008,8 @@ impl<'a> Parser<'a> {
                                 offset: 0,
                                 bit_width: None,
                                 bit_offset: 0,
+                                quals: QualifierFlags::NONE,
+                                ptr_quals: vec![],
                             },
                             Field {
                                 name: "fp_offset".into(),
@@ -4002,6 +4017,8 @@ impl<'a> Parser<'a> {
                                 offset: 4,
                                 bit_width: None,
                                 bit_offset: 0,
+                                quals: QualifierFlags::NONE,
+                                ptr_quals: vec![],
                             },
                             Field {
                                 name: "overflow_arg_area".into(),
@@ -4009,6 +4026,8 @@ impl<'a> Parser<'a> {
                                 offset: 8,
                                 bit_width: None,
                                 bit_offset: 0,
+                                quals: QualifierFlags::NONE,
+                                ptr_quals: vec![],
                             },
                             Field {
                                 name: "reg_save_area".into(),
@@ -4016,6 +4035,8 @@ impl<'a> Parser<'a> {
                                 offset: 16,
                                 bit_width: None,
                                 bit_offset: 0,
+                                quals: QualifierFlags::NONE,
+                                ptr_quals: vec![],
                             },
                         ]),
                         8, // va_list align: max field = ptr (8)
@@ -4214,6 +4235,8 @@ impl<'a> Parser<'a> {
                             offset: 0,
                             bit_width: Some(0),
                             bit_offset: 0,
+                            quals: QualifierFlags::NONE,
+                            ptr_quals: vec![],
                         });
                     }
                 } else {
@@ -5104,6 +5127,8 @@ impl<'a> Parser<'a> {
                         offset: 0,
                         bit_width: bw,
                         bit_offset: 0,
+                        quals: self.spec_quals.iso_c(),
+                        ptr_quals: vec![],
                     });
                 }
                 if self.cur.kind == TokKind::Comma {

@@ -872,6 +872,13 @@ pub struct Field {
     pub offset: usize,          // 字节偏移 (位域: 存储单元起始字节)
     pub bit_width: Option<u32>, // 位域宽度 (None = 普通字段)
     pub bit_offset: u32,        // 位域: 存储单元内位偏移 (非位域=0)
+    /// ISO C 限定符 (const/volatile/restrict) 附着在该字段类型上.
+    /// BTF/DWARF 输出时据此生成 BTF_KIND_CONST/VOLATILE/RESTRICT 节点.
+    pub quals: QualifierFlags,
+    /// 指针层级限定符: 每个元素对应一层指针的限定符.
+    /// 例如 `int * const * volatile p` → ptr_quals = [CONST, VOLATILE].
+    /// BTF 输出时据此在指针链中插入限定符节点.
+    pub ptr_quals: Vec<QualifierFlags>,
 }
 
 #[derive(Debug, Clone)]

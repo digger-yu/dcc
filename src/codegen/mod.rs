@@ -749,6 +749,46 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
     }
 }
 
+/// Convert AST Type with qualifier flags to DWARF type for BTF generation.
+/// Wraps the base type with Const/Volatile/Restrict qualifier nodes as needed.
+/// This ensures BTF output contains complete qualifier information for
+/// pahole and BPF CO-RE compatibility.
+pub fn qual_type_to_dwarf(
+    ty: &crate::ast::Type,
+    quals: crate::ast::QualifierFlags,
+) -> debug::DwarfType {
+    let base = ast_type_to_dwarf(ty);
+    let iso = quals.iso_c();
+    if iso.is_empty() {
+        return base;
+    }
+    // Apply qualifiers from innermost to outermost:
+    // restrict -> volatile -> const (matching DWARF/BTF convention)
+    let mut result = base;
+    if iso.is_restrict() {
+        result = debug::DwarfType {
+            name: format!("restrict {}", result.name),
+            byte_size: result.byte_size,
+            kind: debug::DwarfTypeKind::Restrict(Box::new(result)),
+        };
+    }
+    if iso.is_volatile() {
+        result = debug::DwarfType {
+            name: format!("volatile {}", result.name),
+            byte_size: result.byte_size,
+            kind: debug::DwarfTypeKind::Volatile(Box::new(result)),
+        };
+    }
+    if iso.is_const() {
+        result = debug::DwarfType {
+            name: format!("const {}", result.name),
+            byte_size: result.byte_size,
+            kind: debug::DwarfTypeKind::Const(Box::new(result)),
+        };
+    }
+    result
+}
+
 /// Convert AST Type to DWARF type for BTF generation
 fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
     use crate::ast::Type;
@@ -885,7 +925,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             let members: Vec<debug::DwarfMember> = fields
                 .iter()
                 .map(|f| {
-                    let field_ty = ast_type_to_dwarf(&f.ty);
+                    let field_ty = qual_type_to_dwarf(&f.ty, f.quals);
                     let offset_bits = (f.offset as u64) * 8;
                     if let Some(bit_width) = f.bit_width {
                         debug::DwarfMember::bitfield(
@@ -909,7 +949,7 @@ fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             let members: Vec<debug::DwarfMember> = fields
                 .iter()
                 .map(|f| {
-                    let field_ty = ast_type_to_dwarf(&f.ty);
+                    let field_ty = qual_type_to_dwarf(&f.ty, f.quals);
                     debug::DwarfMember::regular(&f.name, 0, field_ty)
                 })
                 .collect();
@@ -1057,7 +1097,7 @@ fn build_dwarf_cu(
                     .fields
                     .iter()
                     .map(|f| {
-                        let field_ty = ast_type_to_dwarf(&f.ty);
+                        let field_ty = qual_type_to_dwarf(&f.ty, f.quals);
                         let offset_bits = (f.offset as u64) * 8;
                         if let Some(bit_width) = f.bit_width {
                             debug::DwarfMember::bitfield(
@@ -1085,7 +1125,7 @@ fn build_dwarf_cu(
                     .fields
                     .iter()
                     .map(|f| {
-                        let field_ty = ast_type_to_dwarf(&f.ty);
+                        let field_ty = qual_type_to_dwarf(&f.ty, f.quals);
                         debug::DwarfMember::regular(&f.name, 0, field_ty)
                     })
                     .collect();

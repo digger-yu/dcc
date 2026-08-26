@@ -26422,6 +26422,8 @@ mod tests {
                 offset: 0,
                 bit_width: None,
                 bit_offset: 0,
+                quals: QualifierFlags::NONE,
+                ptr_quals: vec![],
             }]),
             4, // align: Int = 4
         );

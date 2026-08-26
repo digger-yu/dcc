@@ -20,7 +20,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, Param, Program, Stmt, Type,
+    BinOp, Block, BlockItem, Decl, Expr, Field, FuncDecl, Ident, Param, Program, QualifierFlags,
+    Stmt, Type,
 };
 use crate::diagnostics::Span;
 
@@ -1092,6 +1093,8 @@ mod tests {
                 offset: i * 4,
                 bit_width: None,
                 bit_offset: 0,
+                quals: QualifierFlags::NONE,
+                ptr_quals: vec![],
             })
             .collect();
         let align = field_vec.iter().map(|f| f.ty.align()).max().unwrap_or(1);
