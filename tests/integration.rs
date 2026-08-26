@@ -8744,6 +8744,45 @@ fn m23_attr_flatten_compiles_and_runs() {
     let _ = fs::remove_file(exe);
 }
 
+// __attribute__((flatten)): comprehensive test at multiple -O levels
+#[test]
+#[cfg(unix)]
+fn attr_flatten_comprehensive_at_all_opt_levels() {
+    let src = include_str!("fixtures/c/attr_flatten_full.c");
+    for opt in &["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) =
+            run_compile_and_run_flags("flatten-full", src, &[opt]);
+        assert!(
+            out.status.success(),
+            "compile {opt}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "flatten_full should return 0 at {opt}, got {rc}");
+        let _ = fs::remove_file(exe);
+    }
+}
+
+// __attribute__((flatten)): asm output should not contain call to inlined funcs
+#[test]
+fn attr_flatten_asm_no_call_to_inlined() {
+    let src = "static int inner(int x) { return x + 1; }\n\
+               __attribute__((flatten)) int outer(int x) { return inner(x); }\n\
+               int main(void) { return outer(41); }\n";
+    let (output, asm) = run_asm_output_test("flatten-asm", src);
+    assert!(
+        output.status.success(),
+        "asm output failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The outer function body should not contain 'call inner'
+    // since inner should be inlined due to flatten
+    assert!(
+        !asm.contains("call inner"),
+        "flatten should inline inner(): {asm}"
+    );
+}
+
 // __attribute__((deprecated("msg"))): 仅声明, 解析/编译不应报错
 #[test]
 #[cfg(unix)]

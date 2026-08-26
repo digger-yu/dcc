@@ -1209,6 +1209,20 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
             span,
             ty,
         },
+        Expr::Call {
+            callee,
+            args,
+            span,
+            ty,
+        } => Expr::Call {
+            callee: Box::new(substitute_params(*callee, params)),
+            args: args
+                .into_iter()
+                .map(|a| substitute_params(a, params))
+                .collect(),
+            span,
+            ty,
+        },
         other => other,
     }
 }
