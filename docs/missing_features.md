@@ -15,7 +15,7 @@
 | `-mpreferred-stack-boundary=N` (N≠2) | DCC 不调整栈对齐；`=2` 为内核默认，静默接受；其他值发出警告 |
 | `-fno-plt` | 接受但无操作；内核不使用 PLT，DCC codegen 不生成 PLT 入口 |
 | 优化器 `-fno-strict-aliasing` / `-fno-strict-overflow` | 当前优化器已保守处理（不做 TBAA、不假设有符号溢出 UB），但未显式检查 target 标志；未来添加激进优化时需实现标志检查 |
-| `__seg_fs` / `__seg_gs` 段寄存器地址空间限定符 | 解析器接受（在 decl-specifier / 类型与 `*` 之间 / `*` 与标识符之间 / cast / typedef / typeof / struct 字段等所有合法位置跳过这些关键字，见 `support_features.md`），但不存储在类型系统中，也不在汇编输出生成 `%fs:` / `%gs:` 段前缀。因此 Linux 内核 per-cpu 变量访问会落到默认数据段，运行时读到错误的地址。完整段寄存器 codegen 需要：(1) 在 `Type`/`Pointer` 中携带 address space 标识；(2) `x86_64.rs` / `aarch64.rs` 等后端在加载/存储指令中插入段前缀或选择 `gs:`/`fs:` 寻址模式。当前实现只满足让内核 per-cpu 声明可编译，运行时会出错 |
+| `__seg_fs` / `__seg_gs` 段寄存器地址空间限定符 | 解析器接受（在 decl-specifier / 类型与 `*` 之间 / `*` 与标识符之间 / cast / typedef / typeof / struct 字段 / 函数指针声明符 / 函数指针返回类型 / 函数指针字段声明符 / sizeof / _Alignof 等所有合法位置跳过这些关键字，见 `support_features.md`），但不存储在类型系统中，也不在汇编输出生成 `%fs:` / `%gs:` 段前缀。因此 Linux 内核 per-cpu 变量访问会落到默认数据段，运行时读到错误的地址。完整段寄存器 codegen 需要：(1) 在 `Type`/`Pointer` 中携带 address space 标识；(2) `x86_64.rs` / `aarch64.rs` 等后端在加载/存储指令中插入段前缀或选择 `gs:`/`fs:` 寻址模式。当前实现只满足让内核 per-cpu 声明可编译，运行时会出错 |
 
 
 ## 链接器 / 对象文件限制

@@ -108,7 +108,10 @@ DCC 默认 `-std=gnu23`（与 GCC 15 的默认方言一致）。下列条目描�
 - `address_space(N)` sparse 注解 (静默跳过)
 - `__seg_fs` / `__seg_gs` / `__seg_cs` / `__seg_ds` / `__seg_es` / `__seg_ss`
   x86 段寄存器地址空间限定符 (仅解析不处理: 解析器跳过这些关键字,
-  不存入类型系统, 也不影响代码生成. 详见 `docs/missing_features.md`
+  不存入类型系统, 也不影响代码生成. 接受 decl-specifier / 类型与
+  `*` 之间 / `*` 与标识符之间 / cast / typedef / typeof / struct
+  字段 / 函数指针声明符 / 函数指针返回类型 / 函数指针字段声明符
+  / sizeof / _Alignof 等所有位置. 详见 `docs/missing_features.md`
   中段寄存器 codegen 限制. 测试: `tests/fixtures/c/seg_qualifier.c`)
 - `__attribute__((format))` printf/scanf 完整格式检查（M23: flag/width/precision/length/type 匹配）
 - `&&label` 标签地址 (GNU 扩展, 通过 RIP-relative LEA 实现)
