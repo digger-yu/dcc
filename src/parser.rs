@@ -4672,6 +4672,14 @@ impl<'a> Parser<'a> {
             let ty = if is_complex {
                 Type::Complex(Box::new(ty))
             } else if is_imaginary {
+                // C99 6.2.5p11: _Imaginary 仅可与浮点类型组合
+                if !matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                    self.err_here(
+                        "E0003",
+                        "_Imaginary requires a floating-point type".to_string(),
+                        Some("use _Imaginary float, _Imaginary double, or _Imaginary long double"),
+                    );
+                }
                 Type::Imaginary(Box::new(ty))
             } else {
                 ty

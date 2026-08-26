@@ -11813,16 +11813,20 @@ impl Codegen {
     fn gen_imaginary_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) {
         let l_imag = matches!(l.ty(), Type::Imaginary(_));
         let r_imag = matches!(r.ty(), Type::Imaginary(_));
-        // 确定内型 (取较宽的)
-        let inner_ty = if l_imag {
+        // 确定内型: 取两个操作数中较宽的浮点类型
+        let inner_a = if l_imag {
             if let Type::Imaginary(ref i) = l.ty() { i.as_ref().clone() }
             else { Type::Double }
-        } else if r_imag {
+        } else {
+            l.ty()
+        };
+        let inner_b = if r_imag {
             if let Type::Imaginary(ref i) = r.ty() { i.as_ref().clone() }
             else { Type::Double }
         } else {
-            Type::Double
+            r.ty()
         };
+        let inner_ty = if inner_a.size() >= inner_b.size() { inner_a } else { inner_b };
         let is_float_inner = matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble);
         let pfx = if matches!(inner_ty, Type::Float) { 0xF3u8 } else { 0xF2u8 };
 
@@ -11937,7 +11941,8 @@ impl Codegen {
                     // 加载实部到 xmm0 供后续使用
                     self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
                     // 将 (real, imag) 对拷贝到帧临时区供后续 complex 操作使用
-                    self.store_complex_pair_from_rsp(result_off, inner_sz, true);
+                    let is_float_store = matches!(inner_ty, Type::Float);
+                    self.store_complex_pair_from_rsp(result_off, inner_sz, is_float_store);
                     self.emit(&[0x48, 0x83, 0xC4, save_sz as u8]);
                 }
                 BinOp::Mul => {
