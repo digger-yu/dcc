@@ -16360,3 +16360,83 @@ fn pipe_input_default_output_name_is_a_o() {
     );
     let _ = fs::remove_dir_all(&work);
 }
+
+#[test]
+fn lto_bitcode_verbose_output_shows_section_sizes() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-lto-v-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-lto-v-{}.o", std::process::id()));
+    fs::write(&src, "static int helper(void) { return 42; }\nint main(void) { return helper(); }\n")
+        .expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-flto", "-v", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run dcc -flto -v");
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(".dcc.lto") && stderr.contains("bytes"),
+        "verbose should show .dcc.lto section size, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains(".llvm.lto") && stderr.contains("bytes"),
+        "verbose should show .llvm.lto section size, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("funcs"),
+        "verbose should show function count, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn lto_bitcode_section_present_in_object() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-lto-sec-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-lto-sec-{}.o", std::process::id()));
+    fs::write(&src, "int main(void) { return 0; }\n").expect("write src");
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-flto", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc -flto");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Verify .dcc.lto section exists in the object file
+    let obj_bytes = fs::read(&obj).expect("read obj");
+    let obj_str = String::from_utf8_lossy(&obj_bytes);
+    // ELF sections names are stored as strings in the section header string table
+    // We can check if ".dcc.lto" appears in the raw bytes
+    let has_dcc_lto = obj_bytes
+        .windows(8)
+        .any(|w| w == b".dcc.lto\0" || w == b".dcc.lto");
+    let has_llvm_lto = obj_bytes
+        .windows(10)
+        .any(|w| w == b".llvm.lto\0" || w == b".llvm.lto");
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+    assert!(
+        has_dcc_lto,
+        "object should contain .dcc.lto section"
+    );
+    assert!(
+        has_llvm_lto,
+        "object should contain .llvm.lto section"
+    );
+}

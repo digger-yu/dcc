@@ -1167,6 +1167,7 @@ pub fn emit(
     trapv: bool,
     offload: Option<&crate::profile::offload::OffloadSection>,
     line_map: &[LineSpan],
+    verbose: bool,
 ) -> Result<Vec<u8>, Vec<Diagnostic>> {
     Ok(match target.arch {
         crate::cli::Arch::X86_64 => {
@@ -1419,6 +1420,14 @@ pub fn emit(
             if lto_enabled {
                 // 嵌入 dcc 自有 IR 位码（供 src/link 多 TU LTO 使用）
                 let bc = crate::link::lto_bitcode::serialize_module(module, source_name);
+                if verbose {
+                    eprintln!(
+                        "dcc: lto    = .dcc.lto {} bytes ({} funcs, {} globals)",
+                        bc.len(),
+                        module.functions.len(),
+                        module.globals.len()
+                    );
+                }
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".dcc.lto".to_string(),
                     data: bc,
@@ -1439,9 +1448,17 @@ pub fn emit(
                     })
                     .collect();
                 let summary_unit = crate::lto::build_unit(source_name, &funcs);
+                let summary_data = crate::lto::serialize_summary(&summary_unit);
+                if verbose {
+                    eprintln!(
+                        "dcc: lto    = .llvm.lto {} bytes ({} funcs)",
+                        summary_data.len(),
+                        funcs.len()
+                    );
+                }
                 cg.extra_sections.push(elf::ElfSection {
                     name: ".llvm.lto".to_string(),
-                    data: crate::lto::serialize_summary(&summary_unit),
+                    data: summary_data,
                     ty: elf::SHT_PROGBITS,
                     flags: 0,
                     align: 1,

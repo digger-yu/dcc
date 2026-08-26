@@ -905,6 +905,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         cfg.trapv,
         offload_section.as_ref(),
         &line_map,
+        cfg.verbose,
     )?;
     if cfg.verbose {
         eprintln!("dcc: size   = {} bytes", bytes.len());
