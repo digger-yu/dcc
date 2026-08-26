@@ -214,6 +214,48 @@ impl VersionTable {
         verdef.extend_from_slice(&strtab);
         verdef
     }
+
+    /// 从链接器脚本 VERSION 块导入版本定义
+    ///
+    /// 参数:
+    ///   - version_id: 版本标识符 (e.g. "GLIBC_2.14")
+    ///   - symbols: 该版本下的符号列表
+    ///   - hidden: 是否为 local (hidden) 符号
+    ///
+    /// 每个 (symbol, version_id) 对会创建 VersionDef 并注册到查找表中。
+    pub fn add_version_defs(&mut self, symbols: &[String], version_id: &str, hidden: bool) {
+        // 收集版本字符串 (如果尚未存在)
+        if !version_id.is_empty() && !self.version_strings.contains(&version_id.to_string()) {
+            self.version_strings.push(version_id.to_string());
+        }
+        for sym in symbols {
+            // 跳过通配符
+            if sym == "*" {
+                continue;
+            }
+            let def = VersionDef {
+                base_name: sym.clone(),
+                version: version_id.to_string(),
+                hidden,
+            };
+            let key = if hidden {
+                format!("{}@@{}", sym, version_id)
+            } else {
+                format!("{}@{}", sym, version_id)
+            };
+            if hidden {
+                self.hidden_lookup.insert(key, sym.clone());
+            } else {
+                self.symver_lookup.insert(key, sym.clone());
+            }
+            self.defs.push(def);
+        }
+    }
+
+    /// 获取所有已注册的版本定义字符串 (用于 .gnu.version_d)
+    pub fn version_strings_sorted(&self) -> &[String] {
+        &self.version_strings
+    }
 }
 
 #[cfg(test)]

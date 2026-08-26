@@ -627,7 +627,32 @@ impl LinkerScript {
                 syms.push(name.clone());
             }
         }
+        // VERSION 块中 global: 列的符号 (这些符号需要被定义)
+        for node in &self.version_nodes {
+            for sym in &node.global_symbols {
+                if sym != "*" {
+                    syms.push(sym.clone());
+                }
+            }
+        }
         syms
+    }
+
+    /// 提取 VERSION 块中的版本定义信息
+    ///
+    /// 返回 (version_id, global_symbols, local_symbols) 元组的列表，
+    /// 用于调用方将版本信息导入 VersionTable。
+    pub fn extract_version_info(&self) -> Vec<(&str, &[String], &[String])> {
+        self.version_nodes
+            .iter()
+            .map(|n| {
+                (
+                    n.version_id.as_str(),
+                    n.global_symbols.as_slice(),
+                    n.local_symbols.as_slice(),
+                )
+            })
+            .collect()
     }
 }
 

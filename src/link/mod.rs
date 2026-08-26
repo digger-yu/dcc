@@ -246,12 +246,23 @@ pub fn link_from_bundle(
     // 0. 收集 input bundle 中的 .symver / target_clones / destructor 信息
     let mut cfg_owned = cfg.clone();
     collect_link_directives(bundle, &mut cfg_owned);
-    let cfg = &cfg_owned;
     // 0.5 预扫描链接脚本，提取脚本定义的符号名加入允许未定义列表
-    let linker_script_symbols: Vec<String> = if let Some(ref script_path) = cfg.linker_script {
+    // 同时从 VERSION 块导入版本定义到 VersionTable
+    let linker_script_symbols: Vec<String> = if let Some(ref script_path) = cfg_owned.linker_script {
         match std::fs::read_to_string(script_path) {
             Ok(text) => match linker_script::LinkerScript::parse(&text) {
-                Ok(script) => script.extract_defined_symbols(),
+                Ok(script) => {
+                    // 从 VERSION 块导入版本定义到 VersionTable
+                    for (ver_id, globals, locals) in script.extract_version_info() {
+                        cfg_owned.version_table.add_version_defs(
+                            globals, ver_id, false,
+                        );
+                        cfg_owned.version_table.add_version_defs(
+                            locals, ver_id, true,
+                        );
+                    }
+                    script.extract_defined_symbols()
+                }
                 Err(e) => {
                     return Err(diag("E0310", format!("linker script parse error: {}", e)));
                 }
@@ -266,6 +277,7 @@ pub fn link_from_bundle(
     } else {
         Vec::new()
     };
+    let cfg = &cfg_owned;
     // 1. 符号解析
     let mut undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
     let linker_script_undef: Vec<&str> = linker_script_symbols.iter().map(|s| s.as_str()).collect();
