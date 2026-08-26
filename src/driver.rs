@@ -1614,22 +1614,114 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     }
     // 源文件输入 (.c/.i/.S 等): 先编译为临时 .o 再交给内置链接器,
     // 否则链接器会把 C 源码当 ELF 解析 (bad ELF magic)。
+    // Multiple source files are compiled in parallel when jobs != Some(1).
     let mut tmp_guard = TmpObjCleanup(Vec::new());
     let mut inputs: Vec<std::path::PathBuf> = Vec::new();
-    for (i, inp) in cfg.inputs.iter().enumerate() {
-        let is_obj = inp.extension().map(|e| e == "o").unwrap_or(false);
-        if is_obj {
-            inputs.push(inp.clone());
-        } else {
-            let tmp_o =
-                std::env::temp_dir().join(format!("dcc-builtlink-{}-{}.o", std::process::id(), i));
-            let mut c = cfg.clone();
-            c.output = tmp_o.clone();
-            c.relocatable = true;
-            c.built_link = false; // 编译子任务: 递归 run 不能再进内置链接器
+
+    // Collect source files needing compilation with their original indices
+    let source_tasks: Vec<(usize, &std::path::PathBuf)> = cfg
+        .inputs
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.extension().map(|e| e == "o").unwrap_or(false))
+        .collect();
+    let n_sources = source_tasks.len();
+    let force_single = cfg.jobs == Some(1);
+    let parallel_sources = n_sources >= 2 && !force_single;
+
+    if parallel_sources {
+        // Pre-allocate temp .o paths and cleanup guard
+        let tmp_objs: Vec<PathBuf> = source_tasks
+            .iter()
+            .map(|(i, _)| {
+                std::env::temp_dir().join(format!(
+                    "dcc-builtlink-{}-{}.o",
+                    std::process::id(),
+                    i
+                ))
+            })
+            .collect();
+        for tmp_o in &tmp_objs {
             tmp_guard.0.push(tmp_o.clone());
-            run(c)?;
-            inputs.push(tmp_o);
+        }
+
+        // Parallel source compilation using std::thread::scope
+        let degree = cfg
+            .jobs
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(4)
+            })
+            .min(n_sources);
+        if cfg.verbose {
+            eprintln!(
+                "dcc: built-in linker: compiling {} sources with {} worker(s)",
+                n_sources, degree
+            );
+        }
+        let next_job = std::sync::atomic::AtomicUsize::new(0);
+        let results = std::sync::Mutex::new(vec![
+            None; n_sources
+        ]);
+        std::thread::scope(|scope| {
+            for _ in 0..degree {
+                scope.spawn(|| loop {
+                    let j = next_job
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if j >= n_sources {
+                        break;
+                    }
+                    let (_, inp) = source_tasks[j];
+                    let mut c = cfg.clone();
+                    c.output = tmp_objs[j].clone();
+                    c.relocatable = true;
+                    c.built_link = false;
+                    results.lock().unwrap()[j] = Some(run(c));
+                });
+            }
+        });
+        // Process results in order; first error aborts (matches prior
+        // sequential `run(c)?` behavior)
+        for result in results
+            .into_inner()
+            .expect("built-link parallel compile mutex poisoned")
+        {
+            result.expect("built-link parallel compile dropped a file")?;
+        }
+        // Merge .o inputs and temp .o paths in original order
+        let mut src_idx = 0;
+        for (i, inp) in cfg.inputs.iter().enumerate() {
+            let is_obj =
+                inp.extension().map(|e| e == "o").unwrap_or(false);
+            if is_obj {
+                inputs.push(inp.clone());
+            } else {
+                inputs.push(tmp_objs[src_idx].clone());
+                src_idx += 1;
+            }
+        }
+    } else {
+        // Sequential fallback: single source or -j1
+        for (i, inp) in cfg.inputs.iter().enumerate() {
+            let is_obj =
+                inp.extension().map(|e| e == "o").unwrap_or(false);
+            if is_obj {
+                inputs.push(inp.clone());
+            } else {
+                let tmp_o = std::env::temp_dir().join(format!(
+                    "dcc-builtlink-{}-{}.o",
+                    std::process::id(),
+                    i
+                ));
+                let mut c = cfg.clone();
+                c.output = tmp_o.clone();
+                c.relocatable = true;
+                c.built_link = false;
+                tmp_guard.0.push(tmp_o.clone());
+                run(c)?;
+                inputs.push(tmp_o);
+            }
         }
     }
     let output_kind = match cfg.output_kind {
