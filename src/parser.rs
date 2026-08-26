@@ -21,6 +21,7 @@ struct ParsedAttrs {
     is_hot: bool,
     is_noinline: bool,
     is_always_inline: bool,
+    is_noreturn: bool,
     register_name: Option<String>,
     cleanup_fn: Option<String>,
     is_constructor: bool,
@@ -135,6 +136,9 @@ impl ParsedAttrs {
         }
         if other.is_always_inline {
             self.is_always_inline = true;
+        }
+        if other.is_noreturn {
+            self.is_noreturn = true;
         }
         if other.register_name.is_some() {
             self.register_name = other.register_name;
@@ -983,6 +987,13 @@ impl<'a> Parser<'a> {
                     }
                     "always_inline" => {
                         attrs.is_always_inline = true;
+                        self.advance();
+                    }
+                    "noreturn" | "Noreturn" => {
+                        // noreturn / __noreturn__ 接受 trim 后的形式
+                        // _Noreturn 在 trim 后变成 Noreturn (单下划线不匹配)
+                        // 因为 stdnoreturn.h 的 noreturn 宏会被预处理器展开为 _Noreturn
+                        attrs.is_noreturn = true;
                         self.advance();
                     }
                     "cleanup" => {
@@ -2844,6 +2855,7 @@ impl<'a> Parser<'a> {
                     is_device: attrs.is_device,
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
+                    is_noreturn: attrs.is_noreturn,
                 })])
             } else {
                 // 非嵌套函数: 用 retain 移除函数体内新增的局部条目, 避免 O(n) 克隆 globals
@@ -2896,6 +2908,7 @@ impl<'a> Parser<'a> {
                     is_device: attrs.is_device,
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
+                    is_noreturn: attrs.is_noreturn,
                 })])
             }
         } else if self.cur.kind == TokKind::LBracket {
@@ -3227,6 +3240,7 @@ impl<'a> Parser<'a> {
                     is_device: attrs.is_device,
                     is_host: attrs.is_host,
                     is_naked: attrs.is_naked,
+                    is_noreturn: attrs.is_noreturn,
                 })])
             }
             // (*name(params)) — 返回指针的函数，无外层参数表
@@ -3309,6 +3323,7 @@ impl<'a> Parser<'a> {
                 is_device: attrs.is_device,
                 is_host: attrs.is_host,
                 is_naked: attrs.is_naked,
+                is_noreturn: attrs.is_noreturn,
             })])
         }
         // 标准函数指针变量: type (*name)(params) 或 type (*name[N])(params)
@@ -3709,8 +3724,11 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                // _Noreturn: C11 函数限定符, 不影响代码生成, 静默跳过
+                // _Noreturn: C11 函数限定符, 标记函数不返回
+                // codegen 在函数末尾插入 trap 指令 (ud2 / brk)
+                // 防止执行流落入后续代码
                 TokKind::Ident if self.cur.text == "_Noreturn" => {
+                    self.decl_attrs.is_noreturn = true;
                     self.advance();
                 }
                 // _Thread_local / __thread：线程局部存储
@@ -3829,10 +3847,14 @@ impl<'a> Parser<'a> {
                                 if kw == "thread" {
                                     // __declspec(thread) ≡ __thread (TLS 变量)
                                     self.decl_storage.is_thread_local = true;
-                                } else if kw == "noreturn" {
-                                    // __declspec(noreturn) 标记函数不返回, 用 cold + noinline 提示
+                                } else if kw == "noreturn" || kw == "_Noreturn" {
+                                    // __declspec(noreturn) 标记函数不返回:
+                                    // 加 cold + noinline 提示, 同时设 is_noreturn
+                                    // 让 codegen 在函数末尾插入 trap 指令
+                                    // 同时接受 _Noreturn (预处理器展开 stdnoreturn.h 的 noreturn 宏后)
                                     self.decl_attrs.is_cold = true;
                                     self.decl_attrs.is_noinline = true;
+                                    self.decl_attrs.is_noreturn = true;
                                 } else if kw == "align" {
                                     // __declspec(align(N)): 设置对齐
                                     if self.cur.kind == TokKind::LParen {
