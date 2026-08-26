@@ -740,7 +740,8 @@ fn parse_elf_object(data: &[u8], name: &str) -> Result<InputObject, ObjectError>
         let grp_offset = raw.4 as usize;
         let grp_size = raw.5 as usize;
         let sh_info = raw.8; // signature symbol index in symtab
-        let _sh_link = raw.4; // we use the already-found symtab/strtab
+        // raw.3 = sh_link for SHT_GROUP (points to associated symtab),
+        // but we use the already-found symtab_idx/strtab_idx instead.
 
         if grp_offset + grp_size > data.len() || grp_size < 4 {
             continue; // truncated or empty group

@@ -290,7 +290,8 @@ pub fn link_from_bundle(
     let mut undef: Vec<&str> = cfg.allowed_undef.iter().map(|s| s.as_str()).collect();
     let linker_script_undef: Vec<&str> = linker_script_symbols.iter().map(|s| s.as_str()).collect();
     undef.extend(linker_script_undef);
-    let (resolved, resolve_errors) = resolve::resolve_with_config(bundle, &undef, cfg);
+    let (resolved, resolve_errors) =
+        resolve::resolve_with_config(bundle, &undef, cfg, &comdat_discarded);
     if !resolve_errors.is_empty() {
         let errs: Vec<Diagnostic> = resolve_errors
             .iter()

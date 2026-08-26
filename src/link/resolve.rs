@@ -121,19 +121,29 @@ impl Candidate {
 /// 解析跨 TU 符号引用。返回 (resolved, errors)。
 /// `extra_undef_allowed`: 允许的额外未定义符号集合（如动态库符号、运行时入口）。
 ///
-/// 旧接口，等价于 resolve_with_config(bundle, &[], &LinkConfig::default())
+/// 旧接口，等价于 resolve_with_config(bundle, &[], &LinkConfig::default(), &HashSet::new())
 pub fn resolve(
     bundle: &InputBundle,
     extra_undef_allowed: &[&str],
 ) -> (Vec<ResolvedSymbol>, Vec<ResolveError>) {
-    resolve_with_config(bundle, extra_undef_allowed, &LinkConfig::default())
+    resolve_with_config(
+        bundle,
+        extra_undef_allowed,
+        &LinkConfig::default(),
+        &HashSet::new(),
+    )
 }
 
-/// 带 LinkConfig 的解析：实现 --exclude-libs 和 --no-undefined-version 检查
+/// 带 LinkConfig 和 COMDAT 丢弃集合的解析。
+///
+/// `comdat_discarded`: 被 COMDAT 去重丢弃的 FlatSection 索引集合。
+/// 定义在这些节中的符号不参与符号解析 (视为不存在),
+/// 避免重复 COMDAT 组中的强符号触发 "multiple definition" 错误。
 pub fn resolve_with_config(
     bundle: &InputBundle,
     extra_undef_allowed: &[&str],
     cfg: &LinkConfig,
+    comdat_discarded: &HashSet<u32>,
 ) -> (Vec<ResolvedSymbol>, Vec<ResolveError>) {
     let mut candidates: HashMap<String, Candidate> = HashMap::new();
     let mut errors = Vec::new();
@@ -164,6 +174,12 @@ pub fn resolve_with_config(
         }
         if sym.bind == STB_LOCAL {
             // LOCAL 符号不参与跨 TU 解析，保持独立
+            continue;
+        }
+        // 跳过定义在被 COMDAT 去重丢弃的节中的符号
+        if sym.section != 0 && !sym.is_common
+            && comdat_discarded.contains(&sym.section)
+        {
             continue;
         }
         let cand = candidates
