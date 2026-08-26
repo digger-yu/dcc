@@ -102,6 +102,9 @@ impl Target {
             };
         // 第一性原理: Target::resolve() 只负责"几何"参数 (指针/字节序/调用约定),
         // 不管 codegen 后端是否实现。是否真的能 emit 是 codegen::emit() 关心的事。
+        //
+        // 交叉编译: red_zone / sse 仅在 x86_64 上有意义, 其余架构默认关闭.
+        let is_x86_64 = t.arch == Arch::X86_64;
         Self {
             triple: t.clone(),
             arch: t.arch,
@@ -118,9 +121,9 @@ impl Target {
             double_align,
             long_double_align,
             is_linux: matches!(t.os, Os::Linux | Os::Freestanding),
-            red_zone: true,
+            red_zone: is_x86_64,
             frame_pointer: false,
-            sse: true,
+            sse: is_x86_64,
             kernel_code_model: false,
             auto_var_init_zero: false,
             stack_protector: false,
@@ -135,7 +138,7 @@ impl Target {
             strict_overflow: true,
             short_wchar: false,
             no_common: false,
-            cpu_features: if t.arch == Arch::X86_64 {
+            cpu_features: if is_x86_64 {
                 CpuFeatures::detect()
             } else {
                 CpuFeatures::default()
@@ -237,6 +240,27 @@ impl Target {
     /// 通常是 long double 的对齐 (LP64: 16, ILP32: 8)。
     pub fn max_align(&self) -> usize {
         self.long_double_align as usize
+    }
+
+    /// 是否为 LP64 数据模型 (64-bit long + 64-bit pointer).
+    ///
+    /// x86_64 / aarch64 / riscv64 / mips64 N64 均为 LP64.
+    pub fn is_lp64(&self) -> bool {
+        self.ptr_size == 8 && self.long_size == 8
+    }
+
+    /// 是否为 ILP32 数据模型 (32-bit int + 32-bit long + 32-bit pointer).
+    ///
+    /// mips O32 / arm AAPCS 均为 ILP32.
+    pub fn is_ilp32(&self) -> bool {
+        self.ptr_size == 4 && self.int_size == 4 && self.long_size == 4
+    }
+
+    /// 是否为大端架构.
+    ///
+    /// mips / mips64 默认大端; 其余为小端.
+    pub fn is_big_endian(&self) -> bool {
+        matches!(self.endian, Endian::Big)
     }
 }
 
@@ -498,5 +522,63 @@ mod tests {
         // long double 在 LP64 是 16, ILP32 是 8
         assert_eq!(lp64.long_double_align, 16);
         assert_eq!(ilp32.long_double_align, 8);
+    }
+
+    // === 数据模型辅助方法测试 ===
+
+    #[test]
+    fn lp64_architectures() {
+        for arch in [Arch::X86_64, Arch::AArch64, Arch::RiscV64, Arch::Mips64] {
+            let t = Target::resolve(&trip(arch, Os::Linux, Abi::Gnu));
+            assert!(t.is_lp64(), "{:?} should be LP64", arch);
+            assert!(!t.is_ilp32(), "{:?} should not be ILP32", arch);
+        }
+    }
+
+    #[test]
+    fn ilp32_architectures() {
+        for arch in [Arch::Mips, Arch::Arm] {
+            let t = Target::resolve(&trip(arch, Os::Linux, Abi::Gnu));
+            assert!(t.is_ilp32(), "{:?} should be ILP32", arch);
+            assert!(!t.is_lp64(), "{:?} should not be LP64", arch);
+        }
+    }
+
+    #[test]
+    fn endian_detection() {
+        let x86 = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        assert!(!x86.is_big_endian());
+        let aarch64 = Target::resolve(&trip(Arch::AArch64, Os::Linux, Abi::Gnu));
+        assert!(!aarch64.is_big_endian());
+        let mips = Target::resolve(&trip(Arch::Mips, Os::Linux, Abi::Gnu));
+        assert!(mips.is_big_endian());
+        let mips64 = Target::resolve(&trip(Arch::Mips64, Os::Linux, Abi::Gnu));
+        assert!(mips64.is_big_endian());
+        let arm = Target::resolve(&trip(Arch::Arm, Os::Linux, Abi::Eabihf));
+        assert!(!arm.is_big_endian());
+    }
+
+    // === 交叉编译默认值测试 ===
+
+    #[test]
+    fn red_zone_only_x86_64() {
+        let x86 = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        assert!(x86.red_zone, "x86_64 should have red_zone by default");
+        let aarch64 = Target::resolve(&trip(Arch::AArch64, Os::Linux, Abi::Gnu));
+        assert!(!aarch64.red_zone, "aarch64 should not have red_zone");
+        let riscv = Target::resolve(&trip(Arch::RiscV64, Os::Linux, Abi::Gnu));
+        assert!(!riscv.red_zone, "riscv64 should not have red_zone");
+        let arm = Target::resolve(&trip(Arch::Arm, Os::Linux, Abi::Eabihf));
+        assert!(!arm.red_zone, "arm should not have red_zone");
+    }
+
+    #[test]
+    fn sse_only_x86_64() {
+        let x86 = Target::resolve(&trip(Arch::X86_64, Os::Linux, Abi::Gnu));
+        assert!(x86.sse, "x86_64 should have SSE by default");
+        let aarch64 = Target::resolve(&trip(Arch::AArch64, Os::Linux, Abi::Gnu));
+        assert!(!aarch64.sse, "aarch64 should not have SSE");
+        let mips = Target::resolve(&trip(Arch::Mips, Os::Linux, Abi::Gnu));
+        assert!(!mips.sse, "mips should not have SSE");
     }
 }
