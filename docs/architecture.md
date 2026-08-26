@@ -117,7 +117,7 @@ error[E0001]: expected ';', got '{'
 第一性原理:
 - `Arch::has_backend()` (src/cli.rs) 是单一真相点,所有调用者通过它判定
   是否能 emit。
-- `Target::resolve()` 不管后端实现 — 它只负责 "几何" (指针/字节序/调用约定),
+- `Target::resolve()` 不管后端实现 — 它只负责 "几何" (指针/字节序/调用约定/默认对齐),
   所有架构都正确填字段,这样上层预处理、宏展开、IR
   lowering 等阶段可以无差别地基于 target 做选择,无需 `match arch`。
 - `codegen::emit()` 的兜底分支直接 panic,文本来自 `backend_missing_msg()`。
@@ -132,6 +132,17 @@ error[E0001]: expected ';', got '{'
 | MIPS | 4 | 4 | Big | O32 (AAPCS) | ELF32 |
 | MIPS64 | 8 | 8 | Big | N64 (AAPCS) | ELF64 |
 | ARM | 4 | 4 | Little | AAPCS | ELF32 |
+
+架构默认对齐 (字节, `Target::base_type_align()`):
+
+| 架构 | ptr | int | long | long long | double | long double | max_align |
+|------|-----|-----|------|-----------|--------|-------------|----------|
+| x86_64 | 8 | 4 | 8 | 8 | 8 | 16 | 16 |
+| AArch64 | 8 | 4 | 8 | 8 | 8 | 16 | 16 |
+| RISC-V 64 | 8 | 4 | 8 | 8 | 8 | 16 | 16 |
+| MIPS | 4 | 4 | 4 | 8 | 8 | 8 | 8 |
+| MIPS64 | 8 | 4 | 8 | 8 | 8 | 16 | 16 |
+| ARM | 4 | 4 | 4 | 8 | 8 | 8 | 8 |
 
 ## x86-64 可重定位代码生成
 
