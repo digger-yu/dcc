@@ -16440,3 +16440,228 @@ fn lto_bitcode_section_present_in_object() {
         "object should contain .llvm.lto section"
     );
 }
+
+// ----- Incremental compilation (-fcached) tests -----
+
+#[test]
+fn incremental_first_compile_produces_object() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work = dir.join(format!("dcc-incr-integ-{pid}"));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+
+    let src = work.join("test.c");
+    let obj = work.join("test.o");
+    fs::write(&src, "int foo(void) { return 42; }\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fcached", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+
+    assert!(
+        output.status.success(),
+        "dcc -fcached first compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(obj.exists(), "output .o should exist after first compile");
+
+    let _ = fs::remove_dir_all(&work);
+}
+
+#[test]
+fn incremental_second_compile_skipped() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work = dir.join(format!("dcc-incr-skip-{pid}"));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+
+    let src = work.join("test.c");
+    let obj = work.join("test.o");
+    fs::write(&src, "int bar(void) { return 7; }\n").unwrap();
+
+    // First compile
+    let output1 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fcached", "-v", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc first");
+    assert!(output1.status.success());
+
+    // Record object mtime
+    let mtime1 = fs::metadata(&obj).unwrap().modified().unwrap();
+
+    // Small delay to ensure mtime would differ if rewritten
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Second compile (should be skipped - cache hit)
+    let output2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fcached", "-v", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc second");
+    assert!(output2.status.success());
+
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    // Verbose output should show "up to date" or "skipped"
+    assert!(
+        stderr2.contains("up to date") || stderr2.contains("skipped"),
+        "second compile should be skipped (cache hit), stderr: {stderr2}"
+    );
+
+    // Object should NOT have been rewritten
+    let mtime2 = fs::metadata(&obj).unwrap().modified().unwrap();
+    assert_eq!(mtime1, mtime2, "object file should not be rewritten on cache hit");
+
+    let _ = fs::remove_dir_all(&work);
+}
+
+#[test]
+fn incremental_source_change_triggers_recompile() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work = dir.join(format!("dcc-incr-chg-{pid}"));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+
+    let src = work.join("test.c");
+    let obj = work.join("test.o");
+    fs::write(&src, "int v1(void) { return 1; }\n").unwrap();
+
+    // First compile
+    let output1 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fcached", "-v", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc first");
+    assert!(output1.status.success());
+
+    // Modify source
+    fs::write(&src, "int v2(void) { return 2; }\n").unwrap();
+
+    // Second compile (should recompile - source changed)
+    let output2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fcached", "-v", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc second");
+    assert!(output2.status.success());
+
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(
+        stderr2.contains("fingerprint changed") || stderr2.contains("recompiling"),
+        "should recompile after source change, stderr: {stderr2}"
+    );
+
+    let _ = fs::remove_dir_all(&work);
+}
+
+#[test]
+fn incremental_flag_change_triggers_recompile() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work = dir.join(format!("dcc-incr-flag-{pid}"));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+
+    let src = work.join("test.c");
+    let obj = work.join("test.o");
+    fs::write(&src, "int x(void) { return 0; }\n").unwrap();
+
+    // First compile with -O0
+    let output1 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fcached", "-v", "-O0", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc first");
+    assert!(output1.status.success());
+
+    // Second compile with -O2 (flag changed)
+    let output2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-fcached", "-v", "-O2", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc second");
+    assert!(output2.status.success());
+
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(
+        stderr2.contains("fingerprint changed") || stderr2.contains("recompiling"),
+        "should recompile after flag change, stderr: {stderr2}"
+    );
+
+    let _ = fs::remove_dir_all(&work);
+}
+
+#[test]
+fn incremental_without_flag_always_compiles() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work = dir.join(format!("dcc-incr-noflag-{pid}"));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+
+    let src = work.join("test.c");
+    let obj = work.join("test.o");
+    fs::write(&src, "int y(void) { return 3; }\n").unwrap();
+
+    // First compile without -fcached
+    let output1 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-v", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc first");
+    assert!(output1.status.success());
+    let stderr1 = String::from_utf8_lossy(&output1.stderr);
+    assert!(stderr1.contains("wrote"), "should write output, stderr: {stderr1}");
+
+    // Second compile without -fcached (should always compile)
+    let output2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-v", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc second");
+    assert!(output2.status.success());
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(
+        stderr2.contains("wrote"),
+        "without -fcached should always compile, stderr: {stderr2}"
+    );
+
+    let _ = fs::remove_dir_all(&work);
+}
+
+#[test]
+fn incremental_cli_flag_parsing() {
+    // Test -fcached flag
+    let args = vec!["-fcached".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-fcached should parse");
+    assert!(cfg.incremental);
+
+    // Test --incremental flag
+    let args = vec!["--incremental".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("--incremental should parse");
+    assert!(cfg.incremental);
+
+    // Test -fno-cached flag
+    let args = vec!["-fcached".to_string(), "-fno-cached".to_string(), "-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("-fno-cached should parse");
+    assert!(!cfg.incremental);
+
+    // Test default (no flag)
+    let args = vec!["-c".to_string(), "input.c".to_string()];
+    let cfg = dcc::cli::parse(&args).expect("default should parse");
+    assert!(!cfg.incremental);
+}
