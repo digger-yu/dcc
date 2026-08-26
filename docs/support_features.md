@@ -235,8 +235,8 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | 架构 | 状态 | 说明 |
 |------|------|------|
 | x86_64 | ✅ 完整 | 主后端 |
-| aarch64 | ✅ 完整（compile/ELF 层） | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 + 嵌套 sret (>16B 多层调用链) |
-| riscv64 | ✅ 完整（compile/ELF 层） | 压缩指令 C 扩展 (自动 4→2 字节压缩优化: C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.LW/C.SW/C.LD/C.SD) + FP D 扩展双精度 + RVV 完整向量指令集 (宽化/窄化/掩码/浮点向量) + 特权指令/CSR + JAL 范围校验 + HFA 分类 |
+| aarch64 | ✅ 完整（compile/ELF 层） | 谓词指令 (CCMP/CSEL/CSINC/CSNEG) + 双精度浮点比较 + 后置/前置索引寻址 + 扩展寄存器寻址 + 缓存维护 (dc/ic/dsb/isb) + BL/ADR/LDR 范围校验 + HFA store + TLSDESC 序列 + 嵌套 sret (>16B 多层调用链) + `__atomic_*` 内建函数 (LDAR/STLR/LDAXR/STLXR 原子指令) |
+| riscv64 | ✅ 完整（compile/ELF 层） | 压缩指令 C 扩展 (自动 4→2 字节压缩优化: C.ADDI/C.LI/C.LUI/C.MV/C.ADD/C.LW/C.SW/C.LD/C.SD) + FP D 扩展双精度 + RVV 完整向量指令集 (宽化/窄化/掩码/浮点向量) + 特权指令/CSR + JAL 范围校验 + HFA 分类 + `__atomic_*` 内建函数 (AMO/LR/SC 原子指令) + TLS Local Exec 支持 (tp 寄存器) |
 | mips | ✅ 完整 | ELF32, big-endian, MIPS32 O32 ABI; ET_EXEC 可执行 + ET_REL 可重定位; 分支回填 + 全局变量初始化 + 字符串字面量 (.rodata) + switch/do-while/break/continue |
 | mips64 | ✅ 完整 | ELF64, big-endian, MIPS64 N64 ABI; ET_EXEC 可执行 + ET_REL 可重定位; 64-bit LD/SD 指令 + 帧布局适配 |
 | arm | ✅ 完整 | ELF32, little-endian, ARM AAPCS; ET_EXEC 可执行 + ET_REL 可重定位; 分支回填 + 全局变量初始化 + 字符串字面量 (.rodata) + switch/do-while/break/continue |
@@ -390,8 +390,8 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | RISC-V 重定位（29 种） | `64` / `32` / `32_PCREL` / `JAL` / `BRANCH` / `CALL` / `CALL_PLT` / `PCREL_HI20` / `PCREL_LO12_{I,S}` / `HI20` / `LO12_{I,S}` / `TPREL64` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_{I,S}` / `ALIGN` / `RELAX` / `RVC_BRANCH` / `RVC_JUMP` / `SET{6,8,16,32}` / `SUB{6,8,16,32}` |
 | MIPS 重定位（24 种） | `NONE` / `16` / `26` / `HI16` / `LO16` / `32` / `64` / `REL32` / `GPREL16` / `GPREL32` / `GOT16` / `GOT_HI16` / `GOT_LO16` / `CALL16` / `CALL_HI16` / `CALL_LO16` / `PC16` / `HIGHER` / `HIGHEST` / `TLS_GD` / `TLS_LDM` / `TLS_DTPREL_HI16` / `TLS_DTPREL_LO16` / `TLS_GOTTPREL` |
 | ARM 重定位（18 种） | `NONE` / `ABS32` / `ABS16` / `ABS8` / `PREL32` / `PC24` / `CALL` / `JUMP24` / `THM_CALL` / `THM_JUMP24` / `THM_JUMP19` / `MOVW_ABS_NC` / `MOVT_ABS` / `MOVW_PREL_NC` / `MOVT_PREL` / `THM_MOVW_ABS_NC` / `THM_MOVT_ABS` / `THM_MOVW_PREL_NC` / `THM_MOVT_PREL` |
-| TLS 重定位 | x86-64: `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOTPC32_TLSDESC`; AArch64: TLSDESC/TLSIE/TLSLE 全序列 |
-| TLS codegen | `_Thread_local` → `.tdata` / `.tbss`、`STT_TLS`；AArch64 TLSDESC 经典序列 (3 重定位) + 优化序列 (5 重定位: OFF_G1/OFF_G0_NC/LDR/ADD/CALL) + IE/LE 序列；linker 全类型解析 |
+| TLS 重定位 | x86-64: `TPOFF64` / `TPOFF32` / `GOTTPOFF` / `TLSGD` / `TLSLD` / `DTPOFF32` / `DTPOFF64` / `DTPMOD64` / `GOTPC32_TLSDESC`; AArch64: TLSDESC/TLSIE/TLSLE 全序列; RISC-V: `TPREL64` / `TPOFF64` / `TPREL_HI20` / `TPREL_LO12_I` / `TPREL_LO12_S` |
+| TLS codegen | `_Thread_local` → `.tdata` / `.tbss`、`STT_TLS`；AArch64 TLSDESC 经典序列 (3 重定位) + 优化序列 (5 重定位: OFF_G1/OFF_G0_NC/LDR/ADD/CALL) + IE/LE 序列；RISC-V TLS Local Exec 序列 (tp 寄存器 + TPREL_HI20/LO12_I 重定位)；linker 全类型解析 |
 | ET_EXEC symtab | `build_elf_exec_x86_64` 输出 `.symtab` / `.strtab` |
 | wchar_t libc 转发 | wcs*/wmem* 11 个入口在 link implicit undef 白名单 |
 | signal libc 转发 | `sigaction` / `sigaltstack` / `signal` 白名单 |
@@ -489,7 +489,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `setjmp` / `longjmp` | libc + DWARF CFI 兼容寄存器保存表 |
 | `alloca` | `__builtin_alloca` codegen: sub rsp + 16 字节对齐 |
 | 信号 | `sigaction` / `sigaltstack` / `signal` 运行时验证通过 |
-| TLS dtv / TLS 描述符 | AArch64 TLSDESC 经典 4 指令序列 + 3 重定位 + 优化 MOVW 对 5 重定位；IE/LE 路径；linker 全类型支持 |
+| TLS dtv / TLS 描述符 | AArch64 TLSDESC 经典 4 指令序列 + 3 重定位 + 优化 MOVW 对 5 重定位；IE/LE 路径；RISC-V TLS Local Exec (tp 寄存器 + addi/lui 序列)；linker 全类型支持 |
 | AArch64 vector 表达式 | 支持 16B vector 局部槽位、aggregate initializer、local load/store、call/return 参数、assignment、cast、conditional、lane index 和二元算术/按位路径；覆盖非二元表达式不再落到零值 fallback |
 | non-x86 QEMU runtime matrix | `non_x86_qemu_runtime_matrix_runs_when_available` + 四个扩展测试（`non_x86_qemu_runtime_hello/control_flow/aggregate_abi/va_arg`）在 `qemu-aarch64`、`qemu-riscv64`、`qemu-mips`、`qemu-mips64`、`qemu-arm` 存在时运行 hello、control-flow、aggregate ABI、va_arg 语义门禁，缺少 qemu-user 时显式 skip |
 | AArch64/RISC-V HFA ABI | AArch64 HFA 1–8 元素 + >8 sret fallback（`aarch64_hfa_abi_compile_and_elf_structure` / `aarch64_hfa_asm_output_has_all_functions`）；RISC-V HFA 1–4 + >4 sret fallback（`riscv64_hfa_abi_compile_and_elf_structure` / `riscv64_hfa_asm_output_has_all_functions`）；ELF machine/type 验证 |
@@ -499,7 +499,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `printf` / `scanf` format string | 完整 flag/width/precision/length/type 匹配 + 指针类型验证 |
 | `wchar_t` / 宽字符字面量 `L"..."` | wcs*/wmem* libc 转发 |
 | `char16_t` / `char32_t` (C11/C++11) | uint16/uint32 + u""/U"" 字符串 |
-| 原子混合大小 | `__atomic_*` 1/2 字节变体（lock xadd/xchg/cmpxchg 8/16 位） |
+| 原子混合大小 | `__atomic_*` 1/2 字节变体（lock xadd/xchg/cmpxchg 8/16 位）；AArch64 全尺寸 (1/2/4/8B LDAR/STLR/LDAXR/STLXR)；RISC-V 全尺寸 (1/2/4/8B AMO/LR/SC) |
 | `stdatomic.h` 全部 | `atomic_flag` / `atomic_signal_fence` / `atomic_thread_fence` |
 | 浮点环境 (`fenv.h`) | `fegetround`/`fesetround`/`feclearexcept`/`feraiseexcept`/`fetestexcept`/`fegetexceptflag`/`fesetexceptflag`/`fetestexceptflag`/`fegetenv`/`fesetenv`/`feholdexcept`/`feupdateenv` 内联为 MXCSR/x87 指令 (不依赖 libm)；`pragma STDC FENV_ACCESS` ON/OFF/DEFAULT 驱动 opt 阶段浮点折叠开关 |
 | 复杂数学函数 | `cproj` / `cabs` / `carg` 走 libm |
