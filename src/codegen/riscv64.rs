@@ -1080,6 +1080,11 @@ impl Riscv64Codegen {
             self.li_a0(0);
             return;
         }
+        // __atomic_* 内建函数特殊处理 (生成 RISC-V 原子指令)
+        let args = &expr.children[1..];
+        if callee.starts_with("__atomic_") && self.gen_atomic_builtin(&callee, args) {
+            return;
+        }
         let args = &expr.children[1..];
 
         // M7 修复: 聚合类型返回 > 16 字节, 走 sret (隐藏 a0 = sret slot)
@@ -1647,6 +1652,318 @@ impl Riscv64Codegen {
             let addr = self.entry + align_up_u64(self.code.len() as u64, 8) + off;
             self.li_a0(addr as i32);
         }
+    }
+
+    // ========================================================================
+    // 原子操作内建函数 (__atomic_* 系列)
+    // ========================================================================
+
+    /// 获取指针参数所指元素的大小
+    fn atomic_elem_size(&self, args: &[TypedExpr], idx: usize) -> usize {
+        if idx >= args.len() {
+            return 8;
+        }
+        match &args[idx].ty {
+            ValueType::Pointer(inner) => value_type_size(inner),
+            ValueType::Array(inner, _) => value_type_size(inner),
+            _ => 8,
+        }
+    }
+
+    /// 原子内建函数 codegen: 返回 true 表示已处理
+    /// 参数约定: args[0]=ptr (a0), args[1]=val (a0)
+    /// 结果返回在 a0
+    fn gen_atomic_builtin(&mut self, name: &str, args: &[TypedExpr]) -> bool {
+        match name {
+            "__atomic_load_n" => {
+                if args.len() < 2 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr (save)
+                // fence rw, rw (memory ordering)
+                self.emit_fence();
+                // load from [a1] to a0
+                self.emit_load_sz(10, 11, 0, sz);
+                true
+            }
+            "__atomic_store_n" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                // a0 = val
+                self.gen_expr(&args[1]);
+                // store a0 to [a1]
+                self.emit_store_sz(10, 11, 0, sz);
+                // fence rw, rw
+                self.emit_fence();
+                true
+            }
+            "__atomic_exchange_n" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                // a0 = val
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12); // a2 = val
+                // amoswap [a1], a2 -> a0 (old value)
+                self.emit_amoswap(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_add" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12);
+                // amoadd [a1], a2 -> a0 (old value)
+                self.emit_amoadd(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_sub" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                // negate a0 (a0 = -val)
+                self.emit_neg(10, 10);
+                self.mv_a_reg(12);
+                // amoadd [a1], a2 -> a0 (old value, adding negative)
+                self.emit_amoadd(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_and" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12);
+                // amoand [a1], a2 -> a0
+                self.emit_amoand(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_or" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12);
+                // amoor [a1], a2 -> a0
+                self.emit_amoor(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_fetch_xor" => {
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11);
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(12);
+                // amoxor [a1], a2 -> a0
+                self.emit_amoxor(sz, 10, 12, 11);
+                true
+            }
+            "__atomic_compare_exchange_n" => {
+                // args: (ptr, expected, desired, weak, success_order, failure_order)
+                if args.len() < 3 {
+                    return false;
+                }
+                let sz = self.atomic_elem_size(args, 0);
+                // a0 = ptr
+                self.gen_expr(&args[0]);
+                self.mv_a_reg(11); // a1 = ptr
+                // a0 = *expected (dereference expected pointer)
+                self.gen_expr(&args[1]);
+                self.mv_a_reg(13); // a3 = expected_ptr
+                // load *expected_ptr to a2
+                self.emit_load_sz(12, 13, 0, sz); // a2 = *expected
+                // a0 = desired
+                self.gen_expr(&args[2]);
+                self.mv_a_reg(14); // a4 = desired
+                // LR/SC CAS loop
+                let l_retry = self.fresh_label("atomic_cas");
+                let l_fail = self.fresh_label("atomic_cas_fail");
+                let l_done = self.fresh_label("atomic_cas_done");
+                self.label(&l_retry);
+                // lr.w/d a0, [a1] (load current value)
+                self.emit_lr(sz, 10, 11);
+                // bne a0, a2, fail (compare current with expected)
+                self.emit_bne(10, 12, &l_fail);
+                // sc.w/d a5, a4, [a1] (store desired)
+                self.emit_sc(sz, 15, 14, 11);
+                // bnez a5, retry (if store failed, retry)
+                self.emit_bnez(15, &l_retry);
+                // success: a0 = 1
+                self.li_a0(1);
+                self.j(&l_done);
+                // failure: store current to *expected, a0 = 0
+                self.label(&l_fail);
+                self.emit_store_sz(10, 13, 0, sz); // *expected = current
+                self.li_a0(0);
+                self.label(&l_done);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    // ===== 原子操作辅助指令 =====
+
+    /// AMOSWAP - 原子交换
+    fn emit_amoswap(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
+        let insn = match sz {
+            4 => 0x0800202fu32 // amoswap.w.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+            _ => 0x0800302fu32 // amoswap.d.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// AMOADD - 原子加
+    fn emit_amoadd(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
+        let insn = match sz {
+            4 => 0x0000202fu32 // amoadd.w.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+            _ => 0x0000302fu32 // amoadd.d.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// AMOAND - 原子与
+    fn emit_amoand(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
+        let insn = match sz {
+            4 => 0x6000202fu32 // amoand.w.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+            _ => 0x6000302fu32 // amoand.d.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// AMOOR - 原子或
+    fn emit_amoor(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
+        let insn = match sz {
+            4 => 0x4000202fu32 // amoor.w.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+            _ => 0x4000302fu32 // amoor.d.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// AMOXOR - 原子异或
+    fn emit_amoxor(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
+        let insn = match sz {
+            4 => 0x2000202fu32 // amoxor.w.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+            _ => 0x2000302fu32 // amoxor.d.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LR (Load Reserved) - 原子加载
+    fn emit_lr(&mut self, sz: usize, rd: u8, rs1: u8) {
+        let insn = match sz {
+            4 => 0x1000202fu32 // lr.w.aq
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+            _ => 0x1000302fu32 // lr.d.aq
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SC (Store Conditional) - 条件存储
+    fn emit_sc(&mut self, sz: usize, rd: u8, rs2: u8, rs1: u8) {
+        let insn = match sz {
+            4 => 0x1800202fu32 // sc.w.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+            _ => 0x1800302fu32 // sc.d.aq
+                | ((rs2 as u32 & 0x1f) << 20)
+                | ((rs1 as u32 & 0x1f) << 15)
+                | ((rd as u32 & 0x1f) << 7),
+        };
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// 按尺寸加载 (用于原子操作)
+    fn emit_load_sz(&mut self, rd: u8, rs1: u8, imm: i32, sz: usize) {
+        match sz {
+            1 => self.emit_lb(rd, rs1, imm),
+            2 => self.emit_lh(rd, rs1, imm),
+            4 => self.emit_lw(rd, rs1, imm),
+            _ => self.emit_ld(rd, rs1, imm),
+        }
+    }
+
+    /// 按尺寸存储 (用于原子操作)
+    fn emit_store_sz(&mut self, rs2: u8, rs1: u8, imm: i32, sz: usize) {
+        match sz {
+            1 => self.emit_sb(rs2, rs1, imm),
+            2 => self.emit_sh(rs2, rs1, imm),
+            4 => self.emit_sw(rs2, rs1, imm),
+            _ => self.emit_sd(rs2, rs1, imm),
+        }
+    }
+
+    /// NEG - 取反 (sub rd, x0, rs)
+    fn emit_neg(&mut self, rd: u8, rs: u8) {
+        self.emit_sub(rd, 0, rs);
+    }
+
+    /// BNEZ - 分支非零
+    fn emit_bnez(&mut self, rs: u8, label: &str) {
+        self.emit_bne(rs, 0, label);
     }
 
     fn alloc_local(&mut self, name: &str, bytes: i32) -> i32 {
@@ -2377,6 +2694,32 @@ impl Riscv64Codegen {
             | (rs2 as u32) << 20
             | (rs1 as u32) << 15
             | 0b010 << 12
+            | (imm & 0x1f) << 7
+            | 0x23;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LB - 加载字节 (有符号扩展)
+    fn emit_lb(&mut self, rd: u8, rs1: u8, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b000 << 12 | (rd as u32) << 7 | 0x03;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// LH - 加载半字 (有符号扩展)
+    fn emit_lh(&mut self, rd: u8, rs1: u8, off: i32) {
+        let imm = off as u32 & 0xfff;
+        let insn = imm << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x03;
+        self.emit(&insn.to_le_bytes());
+    }
+
+    /// SH - 存储半字
+    fn emit_sh(&mut self, rs2: u8, rs1: u8, off: i32) {
+        let imm = off as u32;
+        let insn = ((imm >> 5) & 0x7f) << 25
+            | (rs2 as u32) << 20
+            | (rs1 as u32) << 15
+            | 0b001 << 12
             | (imm & 0x1f) << 7
             | 0x23;
         self.emit(&insn.to_le_bytes());
