@@ -357,6 +357,13 @@ impl Aarch64Codegen {
         self.mov_x8_imm(93);
         self.svc_zero();
         for func in &module.functions {
+            // __attribute__((alias/copy)): 别名函数无函数体, 跳过代码生成
+            if find_func(prog, &func.name)
+                .and_then(|f| f.alias_name.as_ref())
+                .is_some()
+            {
+                continue;
+            }
             if find_func(prog, &func.name)
                 .and_then(|f| f.body.as_ref())
                 .is_none()
@@ -417,6 +424,13 @@ impl Aarch64Codegen {
         }
         let mut text_off = 0u64;
         for func in &module.functions {
+            // __attribute__((alias/copy)): 别名函数无函数体, 跳过代码生成
+            if find_func(prog, &func.name)
+                .and_then(|f| f.alias_name.as_ref())
+                .is_some()
+            {
+                continue;
+            }
             if find_func(prog, &func.name)
                 .and_then(|f| f.body.as_ref())
                 .is_none()
@@ -478,6 +492,29 @@ impl Aarch64Codegen {
             }
             text_off += size;
         }
+
+        // __attribute__((alias)): 创建函数别名符号
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if let Some(ref alias_target) = f.alias_name {
+                    if let Some(&target_idx) = self.sym_index.get(alias_target) {
+                        let target_sym = &self.symbols[target_idx as usize];
+                        let alias_sym = ElfSym {
+                            name: f.name.name.clone(),
+                            section: target_sym.section,
+                            value: target_sym.value,
+                            size: target_sym.size,
+                            bind: STB_GLOBAL,
+                            ty: STT_FUNC,
+                            visibility: elf::STV_DEFAULT,
+                        };
+                        self.sym_index.insert(f.name.name.clone(), self.symbols.len() as u32);
+                        self.symbols.push(alias_sym);
+                    }
+                }
+            }
+        }
+
         // Stack protector: add undefined symbols for canary and fail handler
         if self._target.stack_protector {
             self.ensure_sym_object("__stack_chk_guard");

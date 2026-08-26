@@ -208,6 +208,27 @@ impl ArmCodegen {
         } else {
             self.compile_exec(module, prog);
         }
+        // __attribute__((alias)): 创建函数别名符号
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if let Some(ref alias_target) = f.alias_name {
+                    if let Some(&target_idx) = self.sym_index.get(alias_target) {
+                        let target_sym = &self.symbols[target_idx as usize];
+                        let alias_sym = ElfSym {
+                            name: f.name.name.clone(),
+                            section: target_sym.section,
+                            value: target_sym.value,
+                            size: target_sym.size,
+                            bind: STB_GLOBAL,
+                            ty: STT_FUNC,
+                            visibility: 0,
+                        };
+                        self.sym_index.insert(f.name.name.clone(), self.symbols.len() as u32);
+                        self.symbols.push(alias_sym);
+                    }
+                }
+            }
+        }
         // Stack canary: add __stack_chk_guard/__stack_chk_fail undefined symbols
         if self._target.stack_protector {
             self.ensure_sym_object("__stack_chk_guard");
@@ -345,8 +366,12 @@ impl ArmCodegen {
         }
     }
 
-    fn compile_rel(&mut self, module: &Module, _prog: &Program) {
+    fn compile_rel(&mut self, module: &Module, prog: &Program) {
         for func in &module.functions {
+            // __attribute__((alias/copy)): 别名函数无函数体, 跳过代码生成
+            if prog.decls.iter().any(|d| matches!(d, Decl::Func(f) if f.name.name == func.name && f.alias_name.is_some())) {
+                continue;
+            }
             let ast = module.source().decls.iter().find_map(|d| match d {
                 Decl::Func(f) if f.name.name == func.name => Some(f),
                 _ => None,
