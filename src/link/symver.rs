@@ -323,4 +323,59 @@ mod tests {
         // 至少 16 字节 Verdef 头 + 16*N Verdaux + strtab
         assert!(v.len() >= 16);
     }
+
+    #[test]
+    fn add_version_defs_global() {
+        let mut t = VersionTable::new();
+        let syms = vec!["printf".to_string(), "malloc".to_string()];
+        t.add_version_defs(&syms, "GLIBC_2.0", false);
+        assert_eq!(t.defs.len(), 2);
+        assert_eq!(t.defs[0].base_name, "printf");
+        assert_eq!(t.defs[0].version, "GLIBC_2.0");
+        assert!(!t.defs[0].hidden);
+        assert_eq!(t.defs[1].base_name, "malloc");
+        // Version string should be collected
+        assert!(t.version_strings.contains(&"GLIBC_2.0".to_string()));
+        // Lookup should work
+        assert_eq!(t.resolve("printf@GLIBC_2.0"), Some("printf"));
+        assert_eq!(t.resolve("malloc@GLIBC_2.0"), Some("malloc"));
+    }
+
+    #[test]
+    fn add_version_defs_hidden() {
+        let mut t = VersionTable::new();
+        let syms = vec!["internal".to_string()];
+        t.add_version_defs(&syms, "MYLIB_1.0", true);
+        assert_eq!(t.defs.len(), 1);
+        assert!(t.defs[0].hidden);
+        // Hidden lookup uses @@
+        assert_eq!(
+            t.resolve("internal@@MYLIB_1.0"),
+            Some("internal")
+        );
+    }
+
+    #[test]
+    fn add_version_defs_skip_wildcard() {
+        let mut t = VersionTable::new();
+        let syms = vec!["*".to_string(), "real_sym".to_string()];
+        t.add_version_defs(&syms, "V1", false);
+        // Wildcard should be skipped
+        assert_eq!(t.defs.len(), 1);
+        assert_eq!(t.defs[0].base_name, "real_sym");
+    }
+
+    #[test]
+    fn add_version_defs_combined_with_symver() {
+        let mut t = VersionTable::new();
+        // .symver directive
+        t.add_symver(".symver foo,foo@V1");
+        // VERSION block defs
+        let syms = vec!["bar".to_string()];
+        t.add_version_defs(&syms, "V2", false);
+        // Both should be resolvable
+        assert_eq!(t.resolve("foo@V1"), Some("foo"));
+        assert_eq!(t.resolve("bar@V2"), Some("bar"));
+        assert_eq!(t.defs.len(), 2);
+    }
 }

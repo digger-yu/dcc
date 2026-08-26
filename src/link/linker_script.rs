@@ -1211,9 +1211,9 @@ impl Parser {
                 }
             };
 
-            // 可选的父版本: (@parent_id)
+            // 可选的父版本: (@parent_id) 或 (parent_id)
+            // GNU ld 语法用 @ 前缀表示父版本，但 lexer 会跳过 @ 字符
             let parent = if self.eat(&Token::LParen) {
-                self.expect(&Token::Assign)?;
                 let parent_id = if let Token::Ident(s) = self.next() {
                     s
                 } else {
@@ -2934,9 +2934,175 @@ mod tests {
                 .text : { *(.text) }
             }
         "#;
-        // VERSION block should be parsed and ignored
         let script = LinkerScript::parse(text).unwrap();
         assert!(!script.sections.is_empty());
+        assert_eq!(script.version_nodes.len(), 1);
+        assert_eq!(script.version_nodes[0].version_id, "GCC_3.0");
+        assert!(script.version_nodes[0].parent.is_none());
+        assert_eq!(
+            script.version_nodes[0].global_symbols,
+            vec!["some_symbol"]
+        );
+        assert!(script.version_nodes[0].local_symbols.is_empty());
+    }
+
+    #[test]
+    fn parse_version_multiple_nodes() {
+        let text = r#"
+            VERSION {
+                GLIBC_2.0 {
+                    global:
+                        printf;
+                        malloc;
+                };
+                GLIBC_2.1 {
+                    global:
+                        memcpy;
+                    local:
+                        internal_func;
+                };
+            }
+            SECTIONS { .text : { *(.text) } }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert_eq!(script.version_nodes.len(), 2);
+        assert_eq!(script.version_nodes[0].version_id, "GLIBC_2.0");
+        assert_eq!(
+            script.version_nodes[0].global_symbols,
+            vec!["printf", "malloc"]
+        );
+        assert_eq!(script.version_nodes[1].version_id, "GLIBC_2.1");
+        assert_eq!(
+            script.version_nodes[1].global_symbols,
+            vec!["memcpy"]
+        );
+        assert_eq!(
+            script.version_nodes[1].local_symbols,
+            vec!["internal_func"]
+        );
+    }
+
+    #[test]
+    fn parse_version_with_parent() {
+        let text = r#"
+            VERSION {
+                BASE {
+                    global: foo;
+                };
+                EXTENDED (@BASE) {
+                    global: bar;
+                };
+            }
+            SECTIONS { .text : { *(.text) } }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert_eq!(script.version_nodes.len(), 2);
+        assert!(script.version_nodes[0].parent.is_none());
+        assert_eq!(
+            script.version_nodes[1].parent.as_deref(),
+            Some("BASE")
+        );
+    }
+
+    #[test]
+    fn parse_version_wildcard() {
+        let text = r#"
+            VERSION {
+                MYLIB_1.0 {
+                    global:
+                        public_api;
+                    local:
+                        *;
+                };
+            }
+            SECTIONS { .text : { *(.text) } }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert_eq!(script.version_nodes.len(), 1);
+        assert_eq!(
+            script.version_nodes[0].global_symbols,
+            vec!["public_api"]
+        );
+        assert_eq!(
+            script.version_nodes[0].local_symbols,
+            vec!["*"]
+        );
+    }
+
+    #[test]
+    fn parse_version_empty_block() {
+        let text = r#"
+            VERSION {
+            }
+            SECTIONS { .text : { *(.text) } }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert!(script.version_nodes.is_empty());
+    }
+
+    #[test]
+    fn parse_version_no_labels() {
+        // Symbols without global:/local: prefix default to global
+        let text = r#"
+            VERSION {
+                MYLIB_1.0 {
+                    sym_a;
+                    sym_b;
+                };
+            }
+            SECTIONS { .text : { *(.text) } }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        assert_eq!(script.version_nodes.len(), 1);
+        assert_eq!(
+            script.version_nodes[0].global_symbols,
+            vec!["sym_a", "sym_b"]
+        );
+        assert!(script.version_nodes[0].local_symbols.is_empty());
+    }
+
+    #[test]
+    fn version_extract_version_info() {
+        let text = r#"
+            VERSION {
+                V1 {
+                    global: foo; bar;
+                    local: *;
+                };
+                V2 {
+                    global: baz;
+                };
+            }
+            SECTIONS { .text : { *(.text) } }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let info = script.extract_version_info();
+        assert_eq!(info.len(), 2);
+        assert_eq!(info[0].0, "V1");
+        assert_eq!(info[0].1, &["foo", "bar"]);
+        assert_eq!(info[0].2, &["*"]);
+        assert_eq!(info[1].0, "V2");
+        assert_eq!(info[1].1, &["baz"]);
+        assert!(info[1].2.is_empty());
+    }
+
+    #[test]
+    fn version_symbols_in_extract_defined() {
+        let text = r#"
+            VERSION {
+                V1 {
+                    global: exported_sym;
+                    local: hidden_sym;
+                };
+            }
+            SECTIONS { .text : { *(.text) } }
+        "#;
+        let script = LinkerScript::parse(text).unwrap();
+        let syms = script.extract_defined_symbols();
+        // global symbols should be in the defined set
+        assert!(syms.contains(&"exported_sym".to_string()));
+        // local symbols should NOT be in the defined set
+        assert!(!syms.contains(&"hidden_sym".to_string()));
     }
 
     #[test]
